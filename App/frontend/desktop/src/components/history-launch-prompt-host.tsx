@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { requestComputerHistoryLaunchEnable } from "../app/computer-history-launch-intent.js";
 import { isComputerHistorySupported } from "../app/computer-history-platform.js";
 import { isWorkspacePromptSessionReady, isWorkspacePromptSurfaceReady } from "../app/workspace-prompt-readiness.js";
-import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
 import {
   deferOtherPromptsForHistoryLaunch,
   markHistoryLaunchPromptActioned,
@@ -29,7 +28,6 @@ export function HistoryLaunchPromptHost() {
   const offeredRef = useRef(false);
   const previousPathRef = useRef<string | null>(null);
   const triggerTimerRef = useRef<number | null>(null);
-  const preview = isDesktopPromptPreview("history");
   const guidanceDone = useGuidanceDone(state.bootstrap?.onboarding?.completed === true);
   const surfaceReady = state.navigation.windowVisible !== false && isWorkspacePromptSurfaceReady({
     startupStatus: state.startup.status,
@@ -52,12 +50,6 @@ export function HistoryLaunchPromptHost() {
       triggerTimerRef.current = null;
     }
     if (open || offeredRef.current) return;
-    if (preview) {
-      offeredRef.current = true;
-      setHistoryLaunchPromptOpen(true);
-      setOpen(true);
-      return;
-    }
     // Do not interrupt startup. The opportunity is a deliberate transition into
     // Memory from another workspace page, after the page has settled briefly.
     if (!surfaceReady || !sessionReady || !isComputerHistorySupported()
@@ -85,18 +77,18 @@ export function HistoryLaunchPromptHost() {
         triggerTimerRef.current = null;
       }
     };
-  }, [open, preview, sessionReady, state.navigation.currentPath, surfaceReady]);
+  }, [open, sessionReady, state.navigation.currentPath, surfaceReady]);
 
   if (!open) return null;
 
   return <HistoryLaunchPrompt
     onDismiss={() => {
-      if (!preview) markHistoryLaunchPromptDismissed(localStorage());
+      markHistoryLaunchPromptDismissed(localStorage());
       setOpen(false);
       setHistoryLaunchPromptOpen(false);
     }}
     onEnable={() => {
-      if (!preview) markHistoryLaunchPromptActioned(localStorage());
+      markHistoryLaunchPromptActioned(localStorage());
       deferOtherPromptsForHistoryLaunch(typeof window === "undefined" ? undefined : window.sessionStorage);
       setOpen(false);
       setHistoryLaunchPromptOpen(false);

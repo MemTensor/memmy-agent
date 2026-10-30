@@ -404,34 +404,6 @@
   .plugin-marketplace-grid:not(.connection-catalog-grid) { grid-template-columns: minmax(0, 1fr); }
 }
 
-.plugin-marketplace-preview {
-  margin: 0 0 20px;
-  color: color-mix(in srgb, var(--color-text-ink) 56%, transparent);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.plugin-marketplace-preview summary {
-  width: fit-content;
-  padding: 4px 0;
-  cursor: pointer;
-}
-
-.plugin-marketplace-preview-controls {
-  margin-top: 10px;
-  padding: 12px 14px;
-  border: 1px solid var(--border-content-panel);
-  border-radius: var(--radius-card-lg);
-  background: var(--color-background-paper);
-}
-
-.plugin-marketplace-preview-reset {
-  border: 1px solid var(--border-content-panel);
-  background: var(--color-background-paper);
-}
-
-.plugin-marketplace-preview input { accent-color: var(--color-action-sky-hover); }
-
 @media (prefers-reduced-motion: reduce) {
   .plugin-marketplace-row,
   .plugin-marketplace-installed-check,

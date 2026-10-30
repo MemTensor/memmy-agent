@@ -1,7 +1,7 @@
 import "./plugin-tools-layout.css";
 import { usePluginUpdateAvailable, PluginUpdateDot } from "./plugin-update-indicator.js";
 /** Tools page module. */
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link2, MessageCircle, Puzzle } from "lucide-react";
 import { useApiClients } from "../app/providers.js";
 import { PRODUCT_TOUR_TOOLS_CONTENT_ANCHOR } from "../app/product-tour-layout.js";
@@ -19,10 +19,6 @@ import { AppFrame } from "./app-frame.js";
 import { PluginMarketplace } from "./plugin-marketplace.js";
 import { ConnectionCatalogSection } from "./connection-catalog-section.js";
 import "./plugin-marketplace.css";
-
-const MarketplacePreview = import.meta.env.DEV
-  ? lazy(() => import("./plugin-marketplace-preview.js"))
-  : null;
 
 export type ToolsSection = "connections" | "channels" | "plugins";
 export type ConnectionCatalogFilter = "all" | "connected";
@@ -60,8 +56,6 @@ export function ToolsPage() {
   const [filterBySection, setFilterBySection] = useState<Record<"connections" | "channels", ConnectionCatalogFilter>>({ connections: "all", channels: "all" });
   const [activeCategory, setActiveCategory] = useState<IntegrationCategoryTab>("All");
   const [section, setSection] = useState<ToolsSection>("connections");
-  const preview = MarketplacePreview && typeof window !== "undefined"
-    && new URLSearchParams(window.location.search).get("plugin-market-preview") === "1";
 
   useEffect(() => {
     if (section === "plugins" || !clients || !shouldLoadConnectionsForPage(state.tools.status)) {
@@ -108,10 +102,6 @@ export function ToolsPage() {
   const changeCatalogFilter = useCallback((value: ConnectionCatalogFilter, target: "connections" | "channels" = "connections") => {
     setFilterBySection((current) => ({ ...current, [target]: value }));
   }, []);
-  const marketplace = useMemo(() => preview && MarketplacePreview
-    ? <Suspense fallback={<p className="text-sm text-text-ink/50">Loading…</p>}><MarketplacePreview /></Suspense>
-    : <PluginMarketplace />, [preview]);
-
   return (
     <ToolsPageView
       pluginUpdatesAvailable={pluginUpdatesAvailable}
@@ -130,7 +120,7 @@ export function ToolsPage() {
       }}
       connectionFilter={section === "plugins" ? "all" : filterBySection[section]}
       onConnectionFilterChange={changeCatalogFilter}
-      marketplace={marketplace}
+      marketplace={<PluginMarketplace />}
       onSearchChange={changeCatalogSearch}
       onCategoryChange={setActiveCategory}
       onOpenIntegration={openIntegration}
