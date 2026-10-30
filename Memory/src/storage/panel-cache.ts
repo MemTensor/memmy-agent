@@ -213,14 +213,15 @@ export function panelVisibleMemoryIds(db: Database.Database, ids: readonly strin
 }
 export function* panelMemoryStats(db: Database.Database): IterableIterator<MemoryStatsRow> {
   ensurePanelCache(db, ["memories"]);
-  for (const row of db.prepare(`SELECT memory_layer,status,created_at,updated_at,source FROM panel_memory_facts f WHERE ${visibleFactSql("f")}`).iterate() as IterableIterator<{
+  for (const row of db.prepare(`SELECT id,memory_layer,status,created_at,updated_at,source FROM panel_memory_facts f WHERE ${visibleFactSql("f")}`).iterate() as IterableIterator<{
+    id: string;
     memory_layer: MemoryStatsRow["memoryLayer"];
     status: MemoryStatsRow["status"];
     created_at: string;
     updated_at: string;
     source: string;
   }>) {
-    yield { memoryLayer: row.memory_layer, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, infoSource: row.source };
+    yield { id: row.id, memoryLayer: row.memory_layer, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, infoSource: row.source };
   }
 }
 export function panelAnalysisLogs(db: Database.Database) {

@@ -56,8 +56,25 @@ describe("browser update fallback", () => {
       currentVersion: "1.4.2",
       latestVersion: "1.4.2"
     });
-    expect(compareUpdateVersions("1.10.0", "1.9.9")).toBeGreaterThan(0);
+    expect(compareUpdateVersions("1.10.0", "1.9.9")).toBeLessThan(0);
     expect(() => parseBrowserUpdateManifest({ code: 500, data: {} }, "1.4.2"))
       .toThrow("update manifest response code is not ok");
+  });
+
+  it.each([
+    ["1.2.4", "1.2.401"],
+    ["1.2.401", "1.2.402"],
+    ["1.2.402", "1.2.5"],
+    ["1.2.5", "1.2.6"],
+    ["1.2.6", "1.3.0"],
+    ["1.2.10", "1.2.9"],
+  ])("offers %s to %s without offering the reverse update", (current, latest) => {
+    expect(parseBrowserUpdateManifest({ code: 0, data: { version: latest } }, current).status).toBe("available");
+    expect(parseBrowserUpdateManifest({ code: 0, data: { version: current } }, latest).status).toBe("latest");
+  });
+
+  it("uses character ordering for the minimum supported version", () => {
+    expect(parseBrowserUpdateManifest({ code: 0, data: { version: "1.2.6", minSupportedVersion: "1.2.5" } }, "1.2.401"))
+      .toMatchObject({ status: "available", force: true });
   });
 });

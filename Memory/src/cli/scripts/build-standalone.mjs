@@ -12,10 +12,9 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-// `pkg` ships prebuilt Node binaries; these two constants must describe the same
-// release, because better-sqlite3 prebuilds are keyed by Node's ABI version.
-const PKG_NODE_RANGE = "node22";
-const PKG_NODE_VERSION = "22.23.2";
+// Pin the patched runtime: a major-only range can select an older binary
+// from pkg-fetch's release table.
+const PKG_NODE_RANGE = "node24.22.1";
 
 const require = createRequire(import.meta.url);
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -57,24 +56,41 @@ try {
   await rm(temporaryRoot, { recursive: true, force: true });
 }
 
-// better-sqlite3 links against Node's V8 ABI, and the bundle carries whichever
-// prebuild matched the build host. Swap it for the one `pkg`'s Node can load.
-// onnxruntime-node and sharp use N-API, so only their platform slice matters.
+// better-sqlite3 13 ships N-API prebuilds inside the package, one file per platform and
+// architecture, so nothing has to be fetched for the runtime's ABI; drop the other slices.
+// onnxruntime-node and sharp use N-API too, so only their platform slice matters.
 async function alignNativeModulesToPkgRuntime(root) {
-  const betterSqlite3 = join(root, "node_modules", "better-sqlite3");
-  await rm(join(betterSqlite3, "build", "Release"), { recursive: true, force: true });
-  run("node", [require.resolve("prebuild-install/bin.js", { paths: [betterSqlite3] }), "--runtime=node", `--target=${PKG_NODE_VERSION}`, `--platform=${npmPlatform(platform)}`, `--arch=${arch}`], betterSqlite3);
-  if (!existsSync(join(betterSqlite3, "build", "Release", "better_sqlite3.node"))) {
-    throw new Error(`better-sqlite3 has no Node ${PKG_NODE_VERSION} prebuild for ${target}`);
+  const prebuilds = join(root, "node_modules", "better-sqlite3", "prebuilds");
+  // better-sqlite3 resolves its binary at runtime and decides between the glibc and musl
+  // build from process.report, which a `pkg` binary does not always populate. Keep both
+  // Linux variants so a wrong guess still finds a file instead of falling through to the
+  // node-gyp path, which 13.x no longer produces.
+  const wanted = npmPlatform(platform) === "linux"
+    ? [`linux-${arch}.node`, `linuxmusl-${arch}.node`]
+    : [`${npmPlatform(platform)}-${arch}.node`];
+  for (const name of wanted) {
+    if (!existsSync(join(prebuilds, name))) {
+      throw new Error(`better-sqlite3 has no ${name} prebuild for ${target}`);
+    }
   }
+  await Promise.all(
+    (await readdir(prebuilds))
+      .filter((entry) => !wanted.includes(entry))
+      .map((entry) => rm(join(prebuilds, entry), { force: true })),
+  );
 
   const onnxBin = join(root, "node_modules", "onnxruntime-node", "bin", "napi-v3");
-  for (const entry of await readdir(onnxBin)) {
-    if (entry !== npmPlatform(platform)) await rm(join(onnxBin, entry), { recursive: true, force: true });
-  }
-  for (const entry of await readdir(join(onnxBin, npmPlatform(platform)))) {
-    if (entry !== arch) await rm(join(onnxBin, npmPlatform(platform), entry), { recursive: true, force: true });
-  }
+  await Promise.all(
+    (await readdir(onnxBin))
+      .filter((entry) => entry !== npmPlatform(platform))
+      .map((entry) => rm(join(onnxBin, entry), { recursive: true, force: true })),
+  );
+  const platformBin = join(onnxBin, npmPlatform(platform));
+  await Promise.all(
+    (await readdir(platformBin))
+      .filter((entry) => entry !== arch)
+      .map((entry) => rm(join(platformBin, entry), { recursive: true, force: true })),
+  );
 }
 
 // `scripts` are parsed and snapshotted as code; `assets` are copied verbatim.

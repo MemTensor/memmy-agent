@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { setImmediate as yieldToIO, setTimeout as waitForIO } from "node:timers/promises";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createAgentSourceExecutor,
@@ -1169,7 +1170,9 @@ async function waitForAutomaticScanCompletion(
   executor: ReturnType<typeof createAgentSourceExecutor>,
   previousJobId: string | null
 ): Promise<void> {
+  const deadline = performance.now() + 2_000;
   for (;;) {
+    if (performance.now() >= deadline) throw new Error("automatic scan did not complete before the I/O deadline");
     const status = executor.scanStatus();
     if (status.jobId !== previousJobId && status.completedAt !== null && !status.running) {
       expect(status.error).toBeNull();

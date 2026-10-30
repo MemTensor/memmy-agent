@@ -151,10 +151,12 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
               </button>
             ))}
           </div>
-          <MemoryPagination
-            data={state.data}
-            onPageChange={(nextPage) => { closeDetail(); setPage(nextPage); }}
-          />
+          {state.data.items.length > 0 ? (
+            <MemoryPagination
+              data={state.data}
+              onPageChange={(nextPage) => { closeDetail(); setPage(nextPage); }}
+            />
+          ) : null}
         </>
       ) : null}
 

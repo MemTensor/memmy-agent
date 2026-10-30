@@ -79,22 +79,26 @@ function harness(processJob: WorkerRunnerDeps["jobHandlers"]["processJob"] = asy
     }
   };
   const runner = new WorkerRunner(deps);
+  const insertMemory = db.db.prepare(`INSERT INTO memories
+    (id, timeline, user_id, memory_value, memory_layer, tags_json, created_at, updated_at)
+    VALUES (?, ?, 'baseline-user', ?, 'L1', ?, ?, ?)`);
   function memory(id: string, createdAt = new Date(epoch).toISOString(), imported = true): void {
-    db.db.prepare(`INSERT INTO memories
-      (id, timeline, user_id, memory_value, memory_layer, tags_json, created_at, updated_at)
-      VALUES (?, ?, 'baseline-user', ?, 'L1', ?, ?, ?)`)
-      .run(id, createdAt, `synthetic memory ${id}`, imported ? '["agent-source"]' : '[]', createdAt, createdAt);
+    insertMemory.run(id, createdAt, `synthetic memory ${id}`, imported ? '["agent-source"]' : '[]', createdAt, createdAt);
   }
   function job(id: string, jobType: EvolutionJobRecord["jobType"], options: {
     target?: string; source?: string; createdAt?: string; runAfter?: string;
   } = {}): void {
     const at = options.createdAt ?? new Date(epoch).toISOString();
-    repos.runtime.enqueueJob({
+    const input: Parameters<typeof repos.runtime.enqueueJob>[0] = {
       id, jobType, status: "queued", userId: "baseline-user", targetMemoryId: options.target,
       payload: { ...(options.source ? { source: options.source } : {}),
         ...(options.runAfter ? { runAfter: options.runAfter } : {}) },
       attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at
-    });
+    };
+    // Bulk fixtures already own the transaction; retain the same enqueue logic
+    // without opening a savepoint for every synthetic job.
+    if (db.db.inTransaction) repos.runtime.enqueueJobInTransaction(input);
+    else repos.runtime.enqueueJob(input);
   }
   function retry(id: string, target: string): void {
     repos.runtime.enqueueEmbeddingRetry({
@@ -137,7 +141,8 @@ afterAll(() => {
 });
 
 describe("legacy selection diagnostics and current execution safety", () => {
-  // These cases seed 10,000 real SQLite rows; keep all assertions under parallel suite load.
+  // The legacy diagnostic includes a 10,000-row fixture and 50 complete worker
+  // rounds. Its watchdog is separate from the scheduling assertions below.
   it("leaves runnable reflection and embedding retry untouched across 50 full import rounds", async () => {
     const h = harness();
     h.db.db.transaction(() => {
@@ -177,7 +182,7 @@ describe("legacy selection diagnostics and current execution safety", () => {
       reflectionDirectClaimControl: true,
       nativeTaskControl: "starts first, then fills remaining execution opportunities", elapsedMs: Math.round(performance.now() - start)
     });
-  }, 20_000);
+  }, 30_000);
 
   it("runs a due embedding retry with free capacity (control)", async () => {
     const h = harness();
@@ -190,10 +195,12 @@ describe("legacy selection diagnostics and current execution safety", () => {
 
   it("already places startup repair after reflection in the current target branch (control)", () => {
     const h = harness();
-    for (let i = 0; i < 10_000; i++) h.job(`startup-${i}`, "import_summary", {
-      source: "startup.placeholder_summary_repair"
+    h.repos.transaction(() => {
+      for (let i = 0; i < 10_000; i++) h.job(`startup-${i}`, "import_summary", {
+        source: "startup.placeholder_summary_repair"
+      });
+      h.job("normal-reflection", "reflection");
     });
-    h.job("normal-reflection", "reflection");
     const leased = h.repos.runtime.leaseQueuedJobs(4, 60, undefined, true);
     expect(leased.map((j) => j.id)).toEqual(["normal-reflection"]);
     record("startup_repair_priority_control", { startupBacklog: 10_000, firstClaim: "reflection", leased: 1 });
