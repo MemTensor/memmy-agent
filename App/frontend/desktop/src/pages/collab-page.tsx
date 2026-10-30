@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import {
   createHttpCollabClient,
   type CollabClient,
+  type CollabInstructionsHandover,
   type CollabKnowledgeView,
   type CollabLinks,
   type CollabProject,
@@ -1862,14 +1863,17 @@ function ProjectBoardSettingsDialog(props: {
     setBusy(true);
     setAction("stopping");
     try {
+      let instructions: CollabInstructionsHandover = "none";
       try {
-        await props.collab.deleteProject(sharedId);
+        instructions = (await props.collab.deleteProject(sharedId))?.instructions ?? "none";
       } catch (cause) {
         // Already gone from the cloud: the switch is off either way, so the local record follows.
         if (!(cause instanceof ApiRequestError && cause.status === 404)) throw cause;
       }
       removeCollabProject(sharedId);
       props.onUnshared();
+      // 背景与规范留在创建者的本机项目里：以云端为准覆盖本机旧内容。
+      if (instructions === "saved") props.onNotice(t("collab.settings.instructionsKept"));
     } catch (cause) {
       props.onFailed(messageOf(cause) || t("collab.settings.unshareFailed"));
     } finally {

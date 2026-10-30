@@ -196,7 +196,9 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       localSessions: createLocalSessionReader({ registry: createBuiltinAgentSourceRegistry() }),
       ...(process.env.MEMMY_SESSION_LINK_BASE_URL?.trim() ? { linkBaseUrl: process.env.MEMMY_SESSION_LINK_BASE_URL.trim() } : {}),
       // 协作项目的指令存在协作侧自己的文件里，与本机项目的项目指令互不影响。
-      collabInstructions: services.collabInstructions
+      collabInstructions: services.collabInstructions,
+      // 只在一个方向上写：停止共享时把背景与规范写回创建者的本机项目。
+      projectInstructions: services.projectInstructions
     });
     // Groups associated with an online project pick up new sessions, and associated sessions their new turns.
     collabSyncTimer = setInterval(() => {

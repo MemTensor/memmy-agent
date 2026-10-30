@@ -173,6 +173,12 @@ const JoinResultSchema = z.object({
 });
 
 export type CollabProject = z.infer<typeof ProjectSchema>;
+
+/**
+ * 停止共享时背景与规范的落点：`saved` 已写成本机项目的背景与规范（以云端为准，覆盖本机旧内容），
+ * `none` 没有可写回的内容或目录。
+ */
+export type CollabInstructionsHandover = "saved" | "none";
 /** 已提交、还在等审核的加入申请。还不是本机项目，侧边栏只展示名称和状态。 */
 export interface CollabApplication {
   projectId: string;
@@ -221,8 +227,11 @@ export interface CollabClient {
   createProject(name: string, directory?: string): Promise<{ project: CollabProject; localDirectory?: string }>;
   /** Records which local Memmy project runs this online project's tasks. */
   bindLocalProject(projectId: string, localProjectId: string): Promise<void>;
-  /** Deletes the shared project and keeps the local project, so its tasks stay on this computer. */
-  deleteProject(projectId: string): Promise<void>;
+  /**
+   * Deletes the shared project and keeps the local project, so its tasks stay on this computer.
+   * `instructions` 说背景与规范去了哪里：`saved` 已写成本机项目的，`none` 没有可写回的内容。
+   */
+  deleteProject(projectId: string): Promise<{ instructions: CollabInstructionsHandover }>;
   /** Renames the project for every member; only the owner may do it, and the cloud enforces that. */
   renameProject(projectId: string, name: string): Promise<CollabProject>;
   /**
@@ -350,12 +359,14 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
     },
 
     async deleteProject(projectId) {
-      await requestJson({
+      const result = await requestJson({
         config,
         path: `/api/collab/projects/${encodeURIComponent(projectId)}`,
-        schema: OkResponseSchema,
+        // 旧版本后端不带这个字段：当成没有写回处理，界面就不提这件事。
+        schema: z.object({ ok: z.literal(true), instructions: z.enum(["saved", "none"]).optional() }),
         init: { method: "DELETE" }
       });
+      return { instructions: result.instructions ?? "none" };
     },
 
     async bindLocalProject(projectId, localProjectId) {

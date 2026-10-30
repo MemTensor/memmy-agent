@@ -59,6 +59,7 @@ function setup(routes: Record<string, (call: Call) => unknown>) {
     projectsDir,
     agentSessionsDir: join(root, "sessions"),
     collabInstructions,
+    projectInstructions,
     fetcher,
     now: () => new Date("2026-10-24T12:00:00.000Z")
   });
@@ -140,21 +141,45 @@ describe("collab project instructions", () => {
     expect(calls.some((call) => call.method === "PATCH")).toBe(false);
   });
 
-  it("drops the cache when the cloud project is deleted", async () => {
-    const { svc, collabInstructions } = setup({
+  it("keeps the shared instructions as the local project's own when sharing stops", async () => {
+    const { svc, collabInstructions, projectInstructions } = setup({
       "POST /api/collab/projects": () => ({ project }),
       "PUT /api/collab/projects/p-1/binding": () => ({ ok: true }),
       "DELETE /api/collab/projects/p-1": () => ({ ok: true })
     });
-    await boundProject(svc, "p-1");
+    const directory = await boundProject(svc, "p-1");
     await collabInstructions.remember({
       projectId: "p-1",
-      scopes: [{ sourceId: "memmy", groupId: "/tmp/project" }],
+      scopes: [{ sourceId: "memmy", groupId: directory }],
       text: project.instructions
     });
 
-    await svc.deleteProject("p-1");
-    // 指令属于云端项目，项目没了就跟着消失；不写回本机项目指令。
+    const result = await svc.deleteProject("p-1");
+    // 云端项目没了，但这份内容还是这个文件夹的规矩：写回创建者的本机项目。
+    expect(result.instructions).toBe("saved");
+    await expect(projectInstructions.read(directory)).resolves.toMatchObject({ text: project.instructions, origin: "local" });
+    // 协作侧的缓存跟着云端项目清掉，避免同一段文字被两个钩子各注入一次。
+    await expect(collabInstructions.read("p-1")).resolves.toBeNull();
+  });
+
+  it("overwrites older local instructions with the shared ones", async () => {
+    const { svc, collabInstructions, projectInstructions } = setup({
+      "POST /api/collab/projects": () => ({ project }),
+      "PUT /api/collab/projects/p-1/binding": () => ({ ok: true }),
+      "DELETE /api/collab/projects/p-1": () => ({ ok: true })
+    });
+    const directory = await boundProject(svc, "p-1");
+    await projectInstructions.saveLocal(directory, "共享之前定下的旧规矩。");
+    await collabInstructions.remember({
+      projectId: "p-1",
+      scopes: [{ sourceId: "memmy", groupId: directory }],
+      text: project.instructions
+    });
+
+    const result = await svc.deleteProject("p-1");
+    // 共享期间这一项只在云端维护，本机那份是旧内容：以云端为准覆盖，项目本身是与时俱进的。
+    expect(result.instructions).toBe("saved");
+    await expect(projectInstructions.read(directory)).resolves.toMatchObject({ text: project.instructions, origin: "local" });
     await expect(collabInstructions.read("p-1")).resolves.toBeNull();
   });
 

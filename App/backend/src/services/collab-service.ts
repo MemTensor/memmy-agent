@@ -27,6 +27,7 @@ import { ensureDirectory, uniqueProjectDirectory } from "./project-directory.js"
 import { MAX_COLLAB_INSTRUCTIONS_CHARS, collabInstructionsDirectoryKey, type CollabInstructionScope } from "@memmy/local-api-contracts";
 import { instructionScopesFrom } from "./collab-instruction-scopes.js";
 import type { CollabInstructionsService } from "./collab-instructions-service.js";
+import type { ProjectInstructionsService } from "./project-instructions-service.js";
 
 const CLOUD_TIMEOUT_MS = 20_000;
 /** A delete slower than this is worth a log line: the cloud call and the links write are the only things in it. */
@@ -128,7 +129,17 @@ export interface CollabServiceOptions {
    * <p>它不读也不写本机项目的项目指令文件：那套按文件夹归属，与协作项目没有关系。</p>
    */
   collabInstructions?: CollabInstructionsService;
+  /**
+   * 本机项目的项目指令。只在一个方向上有写入：项目所有者停止共享（删除云端项目）时，
+   * 协作项目那份背景与规范写回这个文件夹，成为创建者本机项目的背景与规范；未提供时不写回。
+   */
+  projectInstructions?: ProjectInstructionsService;
 }
+
+/**
+ * 停止共享时背景与规范的落点：`saved` 已写成本机项目的背景与规范，`none` 没有可写回的内容或目录。
+ */
+export type CollabInstructionsHandover = "saved" | "none";
 
 export interface CollabProject {
   id: string;
@@ -469,8 +480,10 @@ export interface CollabService {
   /**
    * Deletes the project in the cloud and drops this computer's binding. The local project is kept, so the tasks
    * that ran in it stay on this computer.
+   *
+   * <p>`instructions` 告诉界面背景与规范去了哪里：`saved` 已写成本机项目的背景与规范，`none` 没有可写回的内容或目录。</p>
    */
-  deleteProject(projectId: string): Promise<{ ok: true }>;
+  deleteProject(projectId: string): Promise<{ ok: true; instructions: CollabInstructionsHandover }>;
   /** Uploads sessions that appeared in associated groups or changed since their last upload. Never removes any. */
   syncLinkedSessions(): Promise<CollabSyncResult>;
   /**
@@ -1137,8 +1150,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
   }
 
   /**
-   * Leaving or deleting a project drops the copy: the instructions belong to the cloud project, so there is
-   * nothing left here to keep. Keeping them as local instructions would tie the two stores together again.
+   * Leaving a project drops the cache: the instructions belong to that cloud project and the person was not its
+   * owner, so there is nothing of theirs to keep here. 停止共享走的是 `handOverInstructions`，不在这里。
    */
   async function forgetInstructions(projectId: string): Promise<void> {
     if (!options.collabInstructions) return;
@@ -1146,6 +1159,25 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       await options.collabInstructions.forget(projectId);
     } catch (error) {
       console.warn(`Project instructions not cleared for ${projectId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * 停止共享（删除云端项目）时，把背景与规范交接给创建者的本机项目：
+   * 云端项目没了，但这仍是这个文件夹的规矩，任务还要继续按它跑。
+   *
+   * <p>以云端那份为准直接覆盖：共享期间这一项只在看板（云端）维护，本机那份是共享之前留下的旧内容，
+   * 项目本身就是与时俱进的，保留旧版本没有意义（2026-10-29 用户明确要求）。</p>
+   */
+  async function handOverInstructions(directory: string | null, text: string): Promise<CollabInstructionsHandover> {
+    const value = text.trim();
+    if (!value || !directory || !options.projectInstructions) return "none";
+    try {
+      await options.projectInstructions.saveLocal(directory, value);
+      return "saved";
+    } catch (error) {
+      console.warn(`Project instructions not kept locally for ${directory}: ${error instanceof Error ? error.message : String(error)}`);
+      return "none";
     }
   }
 
@@ -1552,17 +1584,21 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     async deleteProject(projectId) {
       const account = requireAccount();
       const startedAt = now().getTime();
+      // 删云端之前先把要带走的读出来：缓存会跟着项目一起清掉，links 也会在解绑时改掉。
+      const stored = await readLinks(projectId, account.accountId);
+      const sharedInstructions = (await options.collabInstructions?.read(projectId).catch(() => null))?.text ?? "";
       await cloud(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
       const cloudDoneAt = now().getTime();
       syncProgress.delete(projectId);
       await releaseBinding(projectId, account.accountId, "delete");
-      // 指令属于云端项目，项目没了就跟着消失：不降级成本机指令，那会把两套存储重新绑在一起。
+      // 背景与规范属于这个文件夹，项目停止共享后写回创建者的本机项目；缓存随后清掉。
+      const instructions = await handOverInstructions(stored.workingDirectory, sharedInstructions);
       await forgetInstructions(projectId);
       const finishedAt = now().getTime();
       if (finishedAt - startedAt > SLOW_DELETE_MS) {
         console.warn(`Deleting project ${projectId} took ${finishedAt - startedAt}ms (cloud ${cloudDoneAt - startedAt}ms, links ${finishedAt - cloudDoneAt}ms)`);
       }
-      return { ok: true };
+      return { ok: true as const, instructions };
     },
 
     async leaveProject(projectId) {

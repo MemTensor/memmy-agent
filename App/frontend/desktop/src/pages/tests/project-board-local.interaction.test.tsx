@@ -106,7 +106,7 @@ describe("project board", () => {
     mocks.syncSessions.mockResolvedValue({ uploaded: 0, removed: 0, failed: 0 });
     mocks.createProject.mockResolvedValue({ project: { ...CLOUD_PROJECT, localProjectId: null } });
     mocks.bindLocalProject.mockResolvedValue(undefined);
-    mocks.deleteProject.mockResolvedValue(undefined);
+    mocks.deleteProject.mockResolvedValue({ instructions: "none" });
     mocks.listLocalSessions.mockResolvedValue({ sessions: [], refreshing: false });
     mocks.getLinks.mockResolvedValue({ groups: [], sessions: [] });
     mocks.listProjectTasks.mockResolvedValue([
