@@ -190,7 +190,7 @@ export function AgentWorkflowQuestionCard(props: {
   const [submittedResponse, setSubmittedResponse] = useState<AgentQuestionResponse | null>(null);
   const persistedResponse = props.response?.requestId === props.card.requestId ? props.response : null;
   const completedResponse = persistedResponse ?? submittedResponse;
-  const answered = completedResponse != null;
+  const answered = Boolean(completedResponse);
   const canSubmit = useMemo(
     () => props.card.questions.every((question) => {
       const answer = draft[question.id];
@@ -265,7 +265,7 @@ export function AgentWorkflowQuestionCard(props: {
     }
   };
 
-  if (Boolean(completedResponse)) return (
+  if (answered) return (
     <details className="agent-question-summary" data-workflow={props.card.context?.workflow}>
       <summary>{props.card.title ?? t("home.question.title")} · {t(completedResponse?.cancelled ? "home.question.cancelled" : "home.question.answered")}</summary>
       <div className="agent-question-summary__body">{completedResponse?.cancelled ? <p>{t("home.question.cancelled")}</p> : props.card.questions.map((question) => (

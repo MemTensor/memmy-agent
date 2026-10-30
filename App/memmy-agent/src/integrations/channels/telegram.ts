@@ -851,7 +851,7 @@ export class TelegramChannel extends BaseChannel {
     return this.processForwardCommand(update, context);
   }
 
-  async processForwardCommand(update: any, context: any): Promise<void> {
+  async processForwardCommand(update: any, _context: any): Promise<void> {
     const message = update.message;
     const user = update.effective_user ?? update.effectiveUser;
     if (!message || !user) return;
@@ -878,7 +878,7 @@ export class TelegramChannel extends BaseChannel {
     return this.processMessageUpdate(update, context);
   }
 
-  async processMessageUpdate(update: any, context: any): Promise<void> {
+  async processMessageUpdate(update: any, _context: any): Promise<void> {
     const message = update.message;
     const user = update.effective_user ?? update.effectiveUser;
     if (!message || !user) return;
@@ -1066,7 +1066,7 @@ export class TelegramChannel extends BaseChannel {
       .join("\n");
   }
 
-  async onCallbackQuery(update: any, context: any): Promise<void> {
+  async onCallbackQuery(update: any, _context: any): Promise<void> {
     const query = update.callback_query ?? update.callbackQuery;
     const user = update.effective_user ?? update.effectiveUser;
     const chatId = query?.message?.chat_id ?? query?.message?.chatId;
