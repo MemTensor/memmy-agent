@@ -138,7 +138,7 @@ export interface MemoryRuntimeClient {
 }
 
 export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRuntimeClient {
-  const panelQueue = new PanelRequestQueue(2);
+  const panelQueue = new PanelRequestQueue(2, true);
   const browse = new PanelBrowseClient((input, signal) => panelQueue.request(
     `browse:${JSON.stringify(input)}`,
     sharedSignal => requestJson({config,path:"/api/v1/panel/browse",schema:PanelBrowseOutputSchema,body:input,init:{signal:sharedSignal}}),

@@ -115,11 +115,34 @@ describe("panel request queue", () => {
 
 });
 
-describe("panel transport does not stack retries", () => {
-  it.each([401,403,404,409,500,502,503,504])("returns status %s without retrying", async status => {
-    const queue = new PanelRequestQueue(2), error = new ApiRequestError("failed", status);
-    const run = vi.fn().mockRejectedValue(error);
-    await expect(queue.request("read", run)).rejects.toBe(error);
+describe("transient panel transport recovery", () => {
+  it("shares one recovery for all subscribers, including before any view exists", async () => {
+    vi.useFakeTimers();
+    const queue = new PanelRequestQueue(2, true);
+    const run = vi.fn().mockRejectedValueOnce(new ApiRequestError("starting",503)).mockRejectedValueOnce(new TypeError("network unavailable")).mockResolvedValue("ready");
+    const a = queue.request("create",run), b = queue.request("create",run);
+    await vi.advanceTimersByTimeAsync(249); expect(run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1); expect(run).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(await Promise.all([a,b])).toEqual(["ready","ready"]);
+    expect(run).toHaveBeenCalledTimes(3); expect(queue.idle).toBe(true);
+  });
+  it.each([401,403,404,409,500])("never retries invalidation or permanent status %s", async status => {
+    const queue=new PanelRequestQueue(2,true), error=new ApiRequestError("failed",status);
+    const run=vi.fn().mockRejectedValue(error);
+    await expect(queue.request("read",run)).rejects.toBe(error);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+  it("bounds retries and cancels backoff when its last subscriber leaves", async()=>{
+    vi.useFakeTimers();
+    const queue=new PanelRequestQueue(2,true), run=vi.fn().mockRejectedValue(new ApiRequestError("busy",503));
+    const result=queue.request("read",run).catch(e=>e);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect((await result).status).toBe(503);expect(run).toHaveBeenCalledTimes(4);
+    const controller=new AbortController();
+    const cancelled=queue.request("next",run,controller.signal).catch(e=>e);
+    await vi.advanceTimersByTimeAsync(0);controller.abort();
+    expect((await cancelled).name).toBe("AbortError");
+    await vi.advanceTimersByTimeAsync(10_000);expect(run).toHaveBeenCalledTimes(5);
   });
 });

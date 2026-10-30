@@ -134,9 +134,15 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   usePanelPoll(Boolean(props.client) && !props.client?.checkPanelView, () => refresh(page, sourceAgent, { useCache: false }));
   const detailRequestIdRef = useRef(0);
   const detailAbortRef = useRef<AbortController | null>(null);
-  useEffect(() => () => {
-    detailRequestIdRef.current++;
-    detailAbortRef.current?.abort();
+  useEffect(() => {
+    // Hidden subpages stay mounted. Discard their body and revalidate the still
+    // selected memory on return, including deletion/redaction while away.
+    if (!visible) setDetail(null);
+    else if (selectedMemoryId) openDetailById(selectedMemoryId, false);
+    return () => {
+      detailRequestIdRef.current++;
+      detailAbortRef.current?.abort();
+    };
   }, [props.client, visible]);
   const retryRequestIdRef = useRef(0);
   const retryResetTimerRef = useRef<number | null>(null);
@@ -243,13 +249,17 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     setPage(normalizedPage);
   }
 
-  function openDetailById(id: string) {
+  function openDetailById(id: string, trackOpen = true) {
     const requestId = ++detailRequestIdRef.current;
     detailAbortRef.current?.abort();
     const controller = new AbortController();
     detailAbortRef.current = controller;
     setSelectedMemoryId(id);
-    track(buildMemoryUiDetailOpenedEvent({
+    if (!canRead()) {
+      setDetail(null);
+      return;
+    }
+    if (trackOpen) track(buildMemoryUiDetailOpenedEvent({
       subPage: "memories",
       filterLayer: memoriesFilterLayer(sourceAgent)
     }));
