@@ -53,6 +53,52 @@ async function drain(bus: MessageBus): Promise<any[]> {
   return messages;
 }
 
+async function successfulArtifactDelivery(answer: string, phaseAware: boolean) {
+  const loop = makeLoop();
+  const report = path.join(loop.workspace, "review.pdf");
+  fs.writeFileSync(report, "report");
+  const messageTool = loop.tools.get("message") as MessageTool;
+  messageTool.markPendingPluginFiles();
+  const streamed: string[] = [];
+  const streamedAtSend: string[][] = [];
+  const events: string[] = [];
+  const execute = messageTool.execute.bind(messageTool);
+  vi.spyOn(messageTool, "execute").mockImplementation(async (...args) => {
+    streamedAtSend.push([...streamed]);
+    events.push("send");
+    const result = await execute(...args);
+    events.push("accepted");
+    return result;
+  });
+  (loop.provider as any).supportsProgressDeltas = true;
+  const responses = [
+    new LLMResponse({ content: answer, toolCalls: [] }),
+    new LLMResponse({ content: null, toolCalls: [new ToolCallRequest({
+      id: "send", name: "message", arguments: { media: [report] },
+    })] }),
+  ];
+  const chat = vi.fn(async (args: any) => {
+    const response = responses.shift();
+    if (!response) throw new Error("unexpected model request after attachment");
+    if (typeof response.content === "string") await args.onContentDelta(response.content);
+    return response;
+  });
+  (loop.provider as any).chatStreamWithRetry = chat;
+  const [finalContent] = await loop.runAgentLoop([
+    { role: "user", content: "生成报告" },
+    { role: "tool", name: "mcp_plugins_plugin_review_render_12345678", tool_call_id: "render",
+      content: [{ type: "text", text: JSON.stringify({ publishedFiles: [
+        { name: "review.pdf", path: report },
+      ] }) }] },
+  ], {
+    onStream: async (delta: string) => { streamed.push(delta); events.push("answer"); },
+    ...(phaseAware ? { onStreamEnd: async (options: { resuming?: boolean }) => {
+      events.push(options.resuming ? "resume" : "finish");
+    } } : {}),
+  });
+  return { finalContent, streamed, streamedAtSend, events, report, messageTool, chat, outbound: await drain(loop.bus) };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -86,6 +132,139 @@ describe("progress events and tool hints", () => {
     expect(finalContent).toBe("当前无法发送文件。");
     expect(streamed).toEqual(["当前无法发送文件。"]);
   });
+  it.each([false, true])("does not finalize a mixed attachment batch, including a later read: %s", async (followWithRead) => {
+    const loop = makeLoop();
+    const first = path.join(loop.workspace, "first.pdf");
+    const second = path.join(loop.workspace, "second.pdf");
+    const note = path.join(loop.workspace, "status.txt");
+    fs.writeFileSync(first, "first report");
+    fs.writeFileSync(second, "second report");
+    fs.writeFileSync(note, "diagnostic state");
+    const messageTool = loop.tools.get("message") as MessageTool;
+    messageTool.markPendingPluginFiles();
+    messageTool.setSendCallback(async (message) => {
+      if ((message.media ?? []).some((file) => path.basename(file) === "second.pdf")) {
+        throw new Error("second attachment rejected");
+      }
+      await loop.bus.publishOutbound(message);
+    });
+    (loop.provider as any).supportsProgressDeltas = true;
+    const failure = "第一份已发送，第二份发送失败。";
+    const responses = [
+      new LLMResponse({ content: "全部产物已交付。", toolCalls: [] }),
+      new LLMResponse({ content: null, toolCalls: [
+        new ToolCallRequest({ id: "send-first", name: "message", arguments: { media: [first] } }),
+        new ToolCallRequest({ id: "send-second", name: "message", arguments: { media: [second] } }),
+      ] }),
+      ...(followWithRead ? [new LLMResponse({ content: null, toolCalls: [
+        new ToolCallRequest({ id: "read-status", name: "read_file", arguments: { path: note } }),
+      ] })] : []),
+      new LLMResponse({ content: failure, toolCalls: [] }),
+    ];
+    const requests: Array<Record<string, any>[]> = [];
+    const chat = vi.fn(async (args: any) => {
+      requests.push(args.messages.map((message: Record<string, any>) => ({ ...message })));
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected model request after partial delivery");
+      if (typeof response.content === "string") await args.onContentDelta(response.content);
+      return response;
+    });
+    (loop.provider as any).chatStreamWithRetry = chat;
+    const streamed: string[] = [];
+    const toolEvents: any[] = [];
+    const [finalContent] = await loop.runAgentLoop([
+      { role: "user", content: "生成并发送两份报告" },
+      { role: "tool", name: "mcp_plugins_plugin_review_render_12345678", tool_call_id: "render",
+        content: [{ type: "text", text: JSON.stringify({ publishedFiles: [
+          { name: "first.pdf", path: first }, { name: "second.pdf", path: second },
+        ] }) }] },
+    ], {
+      onStream: async (delta: string) => { streamed.push(delta); },
+      onProgress: withProgressCapabilities(async (_content: unknown, options: any) => {
+        toolEvents.push(...(options?.toolEvents ?? []));
+      }, { toolEvents: true }),
+    });
+    expect(messageTool.turnDeliveredMediaPaths()).toEqual([first]);
+    const outbound = await drain(loop.bus);
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0].media).toEqual([first]);
+    expect(toolEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: "end", name: "message", call_id: "send-first" }),
+      expect.objectContaining({ phase: "error", name: "message", call_id: "send-second" }),
+    ]));
+    expect(finalContent).toBe(failure);
+    expect(streamed).toEqual([failure]);
+    expect(chat).toHaveBeenCalledTimes(followWithRead ? 4 : 3);
+    expect(requests[2]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "tool", tool_call_id: "send-second",
+        content: expect.stringContaining("Error sending message: second attachment rejected") }),
+    ]));
+    if (followWithRead) {
+      expect(toolEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ phase: "end", name: "read_file", call_id: "read-status" }),
+      ]));
+    }
+  });
+
+  it("writes the answer before attaching its card for resumption-aware streams", async () => {
+    const answer = "报告已经生成，正文保留在这条答复中。";
+    const result = await successfulArtifactDelivery(answer, true);
+    expect(result.finalContent).toBe(answer);
+    expect(result.streamed).toEqual([answer]);
+    expect(result.streamedAtSend).toEqual([[answer]]);
+    expect(result.events.indexOf("answer")).toBeLessThan(result.events.indexOf("resume"));
+    expect(result.events.indexOf("resume")).toBeLessThan(result.events.indexOf("send"));
+    expect(result.outbound).toHaveLength(1);
+    expect(result.outbound[0]).toMatchObject({ content: "", media: [result.report] });
+    expect(result.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a failed attachment final truthful after a provisional generated answer", async () => {
+    const loop = makeLoop();
+    const report = path.join(loop.workspace, "review.pdf");
+    fs.writeFileSync(report, "report");
+    const messageTool = loop.tools.get("message") as MessageTool;
+    messageTool.markPendingPluginFiles();
+    (loop.provider as any).supportsProgressDeltas = true;
+    const answer = "报告已经生成，正在准备附件。";
+    const failure = "当前无法发送文件。";
+    const responses = [new LLMResponse({ content: answer }), new LLMResponse({ content: failure })];
+    (loop.provider as any).chatStreamWithRetry = vi.fn(async (args: any) => {
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected model request");
+      await args.onContentDelta(response.content);
+      return response;
+    });
+    const streamed: string[] = [];
+    const ends: Array<{ resuming?: boolean }> = [];
+    const [finalContent] = await loop.runAgentLoop([
+      { role: "user", content: "生成报告" },
+      { role: "tool", name: "mcp_plugins_plugin_review_render_12345678", tool_call_id: "render",
+        content: [{ type: "text", text: JSON.stringify({ publishedFiles: [{ name: "review.pdf", path: report }] }) }] },
+    ], {
+      onStream: async (delta: string) => { streamed.push(delta); },
+      onStreamEnd: async (options: { resuming?: boolean }) => { ends.push(options); },
+    });
+    expect(finalContent).toBe(failure);
+    expect(streamed).toEqual([answer, failure]);
+    expect(ends[0]).toMatchObject({ resuming: true });
+    expect(ends.at(-1)).toMatchObject({ resuming: false });
+    expect(messageTool.turnDeliveredMediaPaths()).toEqual([]);
+    expect(await drain(loop.bus)).toEqual([]);
+  });
+
+  it.each(["报告已经生成，正文保留在这里。", "全部产物已交付。"])(
+    "releases a legacy answer only after media succeeds: %s", async (answer) => {
+      const result = await successfulArtifactDelivery(answer, false);
+      expect(result.finalContent).toBe(answer);
+      expect(result.streamedAtSend).toEqual([[]]);
+      expect(result.streamed).toEqual([answer]);
+      expect(result.events.indexOf("accepted")).toBeLessThan(result.events.indexOf("answer"));
+      expect(result.messageTool.turnDeliveredMediaPaths()).toEqual([result.report]);
+      expect(result.outbound).toHaveLength(1);
+      expect(result.chat).toHaveBeenCalledTimes(2);
+    },
+  );
   it("formats concise tool hints and collapses adjacent duplicates", () => {
     const hint = formatToolHints(
       [

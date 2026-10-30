@@ -16,7 +16,7 @@ import {
 import { CommandContext, CommandRouter } from "../../command/router.js";
 import { registerBuiltinCommands } from "../../command/builtin.js";
 import { Config, ModelPresetConfig } from "../../config/schema.js";
-import { getWorkspacePath } from "../../config/paths.js";
+import { getWorkspacePath, getWorkspaceStatePath } from "../../config/paths.js";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { CronService } from "../../cron/service.js";
 import { makeProvider } from "../../providers/factory.js";
@@ -930,8 +930,9 @@ export class AgentLoop {
     const rawPresets = init.modelPresets ?? this.config.modelPresets;
     this.modelPresets = Object.fromEntries(Object.entries(rawPresets).map(([name, preset]) => [name, preset instanceof ModelPresetConfig ? preset : new ModelPresetConfig(preset)]));
     this.unifiedSession = init.unifiedSession ?? defaults.unifiedSession;
+    const stateWorkspace = getWorkspaceStatePath(this.workspace);
     this.sessions = init.sessionManager ?? new SessionManager(
-      init.sessionDir ?? path.join(this.workspace, "sessions"),
+      init.sessionDir ?? path.join(stateWorkspace, "sessions"),
       { legacyWebuiWorkspaceCwd: this.workspace },
     );
     this.goalRuntime = new GoalRuntime({
@@ -949,7 +950,7 @@ export class AgentLoop {
       ?? path.join(this.workspace, "sessions");
     this.terminalTurnLock = new TerminalSessionTurnLock(terminalControlRoot);
     this.terminalRunControl = new TerminalRunControl(terminalControlRoot);
-    this.cronService = init.cronService ?? new CronService(path.join(this.workspace, "cron", "jobs.json"));
+    this.cronService = init.cronService ?? new CronService(path.join(stateWorkspace, "cron", "jobs.json"));
     this.sessionDagQueue = init.sessionDagQueue ?? this.createSessionDagQueue();
     this.execSessionManager = new ExecSessionManager();
     this.fileStateStore = new FileStateStore();
@@ -1171,7 +1172,7 @@ export class AgentLoop {
   }
 
   private projectReadonlySkillRoots(): readonly string[] {
-    const roots = [path.join(this.workspace, "skills"), BUILTIN_SKILLS_DIR]
+    const roots = [path.join(getWorkspaceStatePath(this.workspace), "skills"), BUILTIN_SKILLS_DIR]
       .flatMap((root) => {
         try {
           return fs.statSync(root).isDirectory() ? [fs.realpathSync(root)] : [];
@@ -3842,22 +3843,33 @@ export class AgentLoop {
     const activeTools = tools ?? this.tools;
     const deliveryMessageTool = activeTools.get("message");
     let heldDeliveryStream = "";
+    const deferredLegacyAnswers = new Set<string>();
+    let legacyPublishedText = "";
+    const publishStream = async (delta: string) => {
+      await onStream?.(delta);
+      if (!onStreamEnd) legacyPublishedText += delta;
+    };
     const deliveryAwareStream = onStream ? async (delta: string) => {
       if (deliveryMessageTool instanceof MessageTool && deliveryMessageTool.hasPendingPluginFiles()) {
         heldDeliveryStream += delta;
       } else {
         if (heldDeliveryStream) {
-          await onStream(heldDeliveryStream);
+          await publishStream(heldDeliveryStream);
           heldDeliveryStream = "";
         }
-        await onStream(delta);
+        await publishStream(delta);
       }
     } : null;
     const deliveryAwareStreamEnd = onStream || onStreamEnd ? async (options: { resuming?: boolean } = {}) => {
-      // Release held text even when the turn continues to attach files. The
-      // attachment omits its own text and hangs on this answer.
+      // Resumption-aware clients can anchor attachments to the answer already
+      // written. Legacy text-only clients cannot distinguish that draft from a
+      // final delivery claim, so keep it deferred until an actual send succeeds.
       if (heldDeliveryStream) {
-        await onStream?.(heldDeliveryStream);
+        if (options.resuming && !onStreamEnd) {
+          deferredLegacyAnswers.add(heldDeliveryStream.trim());
+        } else {
+          await publishStream(heldDeliveryStream);
+        }
         heldDeliveryStream = "";
       }
       await onStreamEnd?.(options);
@@ -3953,6 +3965,16 @@ export class AgentLoop {
           : null,
       }),
     );
+    const selectedAnswer = result.finalContent ?? result.content;
+    if (onStream && !onStreamEnd && !abortSignal?.aborted
+      && typeof selectedAnswer === "string"
+      && deferredLegacyAnswers.has(selectedAnswer.trim())
+      && !legacyPublishedText.trimEnd().endsWith(selectedAnswer.trim())
+      && deliveryMessageTool instanceof MessageTool
+      && deliveryMessageTool.turnDeliveredMediaPaths().length > 0) {
+      await publishStream(selectedAnswer);
+      result.finalContentStreamed = true;
+    }
     const rawUsage = result.usage ?? result.response?.usage;
     const usage = normalizeUsageRecord(rawUsage);
     if (activeSessionKey) {

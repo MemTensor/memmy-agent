@@ -1,3 +1,4 @@
+import { executeManagedTool, emitManagedToolEvent, managedExecutionRequired, ManagedExecutionError } from "./managed-execution.js";
 import { requestTiming } from "../../utils/request-timing.js";
 import { collectPrivateSkillRefs, normalizePrivateSkillRefs, projectPrivateSkillInstructions } from "./private-plugin-skills.js";
 import type { PluginSkillRef } from "@memmy/local-api-contracts";
@@ -1093,6 +1094,8 @@ export class AgentRunner {
         }
       }
     }
+    for (const item of out) emitManagedToolEvent({ type: "tool_result", callId: item.call.id, name: item.call.name,
+      output: item.result, ok: item.event.status !== "error", ...(item.event.executionError ? { error: item.event.executionError } : {}) });
     return out;
   }
 
@@ -1106,6 +1109,17 @@ export class AgentRunner {
     if (spec.abortSignal?.aborted) {
       const event = { name: call.name, status: "error", detail: "task cancelled" };
       return { call, result: "Error: task cancelled", event, error: spec.failOnToolError ? createAbortError() : null };
+    }
+    if (managedExecutionRequired()) {
+      try {
+        const authorized = await executeManagedTool(call.name, call.arguments, spec.abortSignal, call.id);
+        return { call, result: authorized.result, event: { name: call.name, status: "ok" } };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Managed runtime execution failed";
+        return { call, result: `Error: ${message}`, event: { name: call.name, status: "error", detail: message,
+          ...(error instanceof ManagedExecutionError ? { executionError: error.detail } : {}) },
+          error: spec.failOnToolError ? error : null };
+      }
     }
     const repeatedLookup = repeatedExternalLookupError(call.name, call.arguments, externalLookupCounts);
     if (repeatedLookup) {
@@ -1779,6 +1793,10 @@ export class AgentRunner {
         }
         const executed = await withToolExecutionRequestContext(context,
           () => this.executeTools(spec, response.toolCalls, externalLookupCounts, workspaceViolationCounts));
+        // Drain per-batch attachment state even on failure. Nonfatal tool errors
+        // are carried by event.status while the optional item.error stays empty.
+        const attachedWithoutNewText = messageTool instanceof MessageTool
+          && messageTool.consumeAttachedWithoutNewText();
         const completed: Record<string, any>[] = [];
         for (const item of executed) {
           item.call.arguments = redactBrowserAuthArguments(item.call.name, item.call.arguments);
@@ -1857,7 +1875,7 @@ export class AgentRunner {
         });
         emptyContentRetries = 0;
         lengthRecoveries = 0;
-        if (messageTool instanceof MessageTool && messageTool.consumeAttachedWithoutNewText()) {
+        if (attachedWithoutNewText && executed.every((item) => item.event.status !== "error")) {
           const answer = assistantAnswerBeforeDelivery(messages);
           if (answer) {
             finalContent = answer;

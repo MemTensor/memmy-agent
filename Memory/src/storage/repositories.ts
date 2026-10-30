@@ -844,7 +844,8 @@ export class MemoryRepository {
   listStats(): MemoryStatsRow[] {
     const rows = this.db
       .prepare(
-        `SELECT conversation_id,
+        `SELECT id,
+                conversation_id,
                 session_id,
                 agent_id,
                 app_id,
@@ -858,6 +859,7 @@ export class MemoryRepository {
          WHERE deleted_at IS NULL`
       )
       .all() as Array<{
+        id: string;
         conversation_id: string | null;
         session_id: string | null;
         agent_id: string | null;
@@ -870,6 +872,7 @@ export class MemoryRepository {
         internal_source: unknown;
       }>;
     return rows.map((row) => ({
+      id: row.id,
       conversationId: row.conversation_id ?? undefined,
       sessionId: row.session_id ?? undefined,
       agentId: row.agent_id ?? undefined,
@@ -3087,6 +3090,28 @@ export class RuntimeRepository {
         event.createdAt
       );
     return event;
+  }
+
+  listRecallEvents(input: {
+    userId?: string;
+    limit?: number;
+  } = {}): RecallEventRecord[] {
+    const clauses = ["1=1"];
+    const params: SqlValue[] = [];
+    if (input.userId) {
+      clauses.push("user_id = ?");
+      params.push(input.userId);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM recall_events
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(...params, input.limit ?? 10_000) as SqlRecallEventRow[];
+    return rows.map(recallEventFromSql);
   }
 
   getRecallEvent(id: string): RecallEventRecord | undefined {

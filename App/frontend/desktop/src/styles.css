@@ -5142,7 +5142,10 @@ button.agent-message-content__file-link {
   background: transparent;
   box-shadow: none;
   color: var(--color-action-sky);
-  font: inherit;
+  font-family: inherit;
+  font-style: inherit;
+  font-variant: inherit;
+  font-stretch: inherit;
   font-size: inherit;
   font-weight: 600;
   line-height: inherit;

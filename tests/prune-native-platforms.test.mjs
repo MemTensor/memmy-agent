@@ -94,8 +94,13 @@ describe("packaged node-pty target selection", () => {
     expect(JSON.parse(result.stdout).removedPackages).toHaveLength(15);
     for (const path of ["../scripts/internal/mac/build-dmg.sh", "../scripts/internal/win/build-nsis.sh"]) {
       const source = readFileSync(new URL(path, import.meta.url), "utf8");
+      // Windows invokes the signing wrapper from the main packaging flow;
+      // the npx command inside its earlier declaration is not execution order.
+      const signingWrapperCall = source.lastIndexOf('\nrun_electron_builder_with_signing_recovery "$@"');
+      const packageCall = signingWrapperCall >= 0 ? signingWrapperCall : source.lastIndexOf("npx electron-builder");
       expect(source.indexOf("prune-native-platforms.mjs")).toBeGreaterThan(-1);
-      expect(source.indexOf("prune-native-platforms.mjs")).toBeLessThan(source.lastIndexOf("npx electron-builder"));
+      expect(packageCall).toBeGreaterThan(-1);
+      expect(source.indexOf("prune-native-platforms.mjs")).toBeLessThan(packageCall);
     }
   });
 

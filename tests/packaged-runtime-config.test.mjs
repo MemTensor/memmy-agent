@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { finished } from "node:stream/promises";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -28,7 +29,8 @@ afterEach(() => {
   while (roots.length) rmSync(roots.pop(), { recursive: true, force: true });
 });
 
-describe("packaged desktop runtime configuration", () => {
+// These cases stage ASAR fixtures and launch independent verification processes.
+describe("packaged desktop runtime configuration", { timeout: 20_000 }, () => {
   it("writes exactly the public allowlist and never serializes env decoys", async () => {
     const root = fixtureRoot();
     const envFile = join(root, ".env");
@@ -659,7 +661,7 @@ await import(pathToFileURL(process.argv[1]).href);
       buildScript.indexOf('RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"'),
     );
     expect(buildScript).toContain(
-      'local packaged_memory_runtime="$DESKTOP_DIR/release/win-unpacked/resources/memory-runtime"',
+      'local packaged_memory_runtime="$UNPACKED_DIR/resources/memory-runtime"',
     );
     expect(buildScript).toContain(
       'require_packaged_runtime_file "$packaged_agent_source_core/package.json"',
@@ -808,7 +810,8 @@ async function createAsarFixture(
     writeFileSync(targetPath, contents);
   }
   if (includeEnv) writeFileSync(join(source, ".env.production"), "TOKEN=decoy\n");
-  await createPackageWithOptions(source, asar, { unpackDir: "dist/renderer", unpack: "**/*.{node,exe}" });
+  const output = await createPackageWithOptions(source, asar, { unpackDir: "dist/renderer", unpack: "**/*.{node,exe}" });
+  await finished(output);
   return asar;
 }
 

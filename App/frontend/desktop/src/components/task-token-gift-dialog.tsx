@@ -97,7 +97,7 @@ export function TaskTokenGiftDialog(props: TaskTokenGiftDialogProps) {
           <img src={image} alt="" />
         </div>
       </div>
-      <nav className="task-gift-dialog__nav" aria-label={language === "en-US" ? "Announcement pages" : "弹窗页码"}>
+      <nav className="task-gift-dialog__nav" aria-label={t("launchGift.announcementPages")}>
         <span className="task-gift-dialog__count">{index + 1} / {slides.length}</span>
         <div className="task-gift-dialog__dots" aria-hidden="true">{slides.map((item, step) => <span key={item} className={step === index ? "active" : ""} />)}</div>
         <div className="task-gift-dialog__page-buttons">
