@@ -1,5 +1,6 @@
 import { l2SupportRelation, revisedL2Memory } from "./l2-content-revision.js";
 import { embeddingTextForMemory, updateMemoryVectorField } from "../embedding/embedding-pipeline.js";
+import { l2EmbeddingSpace, l2VectorCacheKey, readL2VectorCache } from "../embedding/l2-vector-cache.js";
 import { createHash, randomUUID } from "node:crypto";
 import { languageSteeringLine, packL2TraceContext, policyMetaFromMemory, steeredPromptLanguage, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
@@ -221,25 +222,27 @@ export class UnifiedL2ExtractionPipeline {
   private async vectors(texts: string[], role: "query" | "document", heartbeat: () => void = () => {}): Promise<number[][]> {
     const config = this.deps.embedder.config;
     // Endpoint and role are part of identity: equal dimensions do not imply compatible models.
-    const space = digest({ provider: config.provider, mode: config.mode, endpoint: config.endpoint,
-      model: config.model, sourceProvider: config.sourceProvider, actualModelContext: config.actualModelContext,
-      extraBody: config.extraBody, normalize: config.normalize });
+    const space = l2EmbeddingSpace(config);
     if (this.vectorSpace && this.vectorSpace !== space) throw new Error("l2 extraction: embedding model changed; retry snapshot");
     this.vectorSpace = space;
-    const modelKey = digest({ space, role });
     const expectedIdentity = embeddingIdentity(config);
     const output: number[][] = new Array(texts.length);
-    const missing: Array<{ index: number; key: string; text: string }> = [];
+    const missingByKey = new Map<string, { indices: number[]; key: string; text: string }>();
     for (const [index, text] of texts.entries()) {
-      const key = `l2.extract.vector.v1:${modelKey}:${digest(text)}`;
-      const cached = this.deps.repos.runtime.getKv(key)?.value;
-      if (Array.isArray(cached) && cached.length > 0 && cached.every((n) => typeof n === "number" && Number.isFinite(n))) {
-        output[index] = cached as number[]; continue;
+      const key = l2VectorCacheKey(config, role, text);
+      const pending = missingByKey.get(key);
+      if (pending) {
+        pending.indices.push(index); continue;
+      }
+      const cached = readL2VectorCache(this.deps.repos.runtime, key, config);
+      if (cached) {
+        output[index] = cached; continue;
       }
       // The existing embedder owns provider input guards/retries; no fallback to a different
       // model or shortened title vector is allowed when the requested full text fails.
-      missing.push({ index, key, text });
+      missingByKey.set(key, { indices: [index], key, text });
     }
+    const missing = [...missingByKey.values()];
     const batchSize = Math.max(1, Math.min(128, config.batchSize));
     for (let offset = 0; offset < missing.length; offset += batchSize) {
       heartbeat();
@@ -254,7 +257,7 @@ export class UnifiedL2ExtractionPipeline {
         cosineSimilarity(vector, vector);
         const item = batch[index]!;
         this.deps.repos.runtime.setKv(item.key, vector, this.now());
-        output[item.index] = vector;
+        for (const outputIndex of item.indices) output[outputIndex] = vector;
       });
     }
     return output;

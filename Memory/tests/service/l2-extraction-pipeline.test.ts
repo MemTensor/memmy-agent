@@ -6,7 +6,7 @@ import { Repositories, type EvolutionJobRecord } from "../../src/storage/reposit
 import type { MemoryRow } from "../../src/types.js";
 import { listL2Candidates, upsertL2Candidate } from "../../src/service/evolution/l2-candidate-service.js";
 import { L2_EXTRACTION_SYSTEM_PROMPT, validateL2ExtractionResult } from "../../src/service/evolution/l2-extraction-contract.js";
-import { UnifiedL2ExtractionPipeline, l2ComparisonText } from "../../src/service/evolution/l2-extraction-pipeline.js";
+import { UnifiedL2ExtractionPipeline, l2ComparisonText, cosineSimilarity } from "../../src/service/evolution/l2-extraction-pipeline.js";
 
 const AT = "2026-10-28T00:00:00.000Z";
 const lesson = { type: "check", title: "Check totals", applicability: "Before export", content: "Compare unrounded totals.", verification: "Recompute the sum.", exclusions: "" };
@@ -78,6 +78,51 @@ describe("unified L2 extraction persistence", () => {
     config.algorithm.capture.embedAfterCapture = false;
   });
   afterEach(() => db?.close());
+
+  it("deduplicates identical documents without dropping candidates and reuses vectors after model failure", async () => {
+    admit();
+    for (const id of ["old-a", "old-b", "old-c"]) repos.memories.insert(row(id, "L2"));
+    respond.mockRejectedValueOnce(new Error("temporary model failure"));
+    await expect(pipeline().induce(job())).rejects.toThrow("temporary model failure");
+    const firstInput = JSON.parse(respond.mock.calls[0]![0][2].content);
+    expect(firstInput.HISTORICAL_L2_CANDIDATES.map((item: { id: string }) => item.id).sort())
+      .toEqual(["old-a", "old-b", "old-c"]);
+    const docs = embed.mock.calls.filter(call => call[1] === "document").flatMap(call => call[0]);
+    expect(docs).toEqual([l2ComparisonText(row("old-a", "L2"))]);
+    const calls = embed.mock.calls.length;
+    respond.mockResolvedValue({ operations: [{ operation: "ignore", l1_ids: ["l1"] }] });
+    await pipeline().induce(job());
+    expect(embed).toHaveBeenCalledTimes(calls);
+    expect(JSON.parse(respond.mock.calls[1]![0][2].content)).toEqual(firstInput);
+  });
+
+  it("preserves threshold, tie order and top-K with interleaved duplicate documents", async () => {
+    admit();
+    const cases = [
+      ["a", "high", [1, 0]], ["b", "low", [0, 1]], ["c", "high", [1, 0]],
+      ["d", "middle", [0.8, 0.6]], ["e", "edge", [0.6, 0.8]],
+      ["f", "middle", [0.8, 0.6]], ["g", "negative", [-1, 0]]
+    ] as const;
+    config.algorithm.l2Induction.recallTopK = 3;
+    config.algorithm.l2Induction.recallCosine = 0.6;
+    const byTitle = new Map(cases.map(([, title, vector]) => [title as string, [...vector]]));
+    for (const [id, title] of cases) {
+      const memory = row(id, "L2");
+      (memory.properties.internal_info.policy as Record<string, unknown>).title = title;
+      repos.memories.insert(memory);
+    }
+    embed.mockImplementation(async (texts: string[], role: string) => texts.map(text =>
+      role === "query" ? [1, 0] : byTitle.get(JSON.parse(text).title)!));
+    respond.mockResolvedValue({ operations: [{ operation: "ignore", l1_ids: ["l1"] }] });
+    await pipeline().induce(job());
+    // Baseline: independently embed every record, including duplicates, then rank.
+    const baseline = cases.map(([id, , vector]) => ({ id, score: cosineSimilarity([1, 0], [...vector]) }))
+      .filter(item => item.score >= config.algorithm.l2Induction.recallCosine)
+      .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, config.algorithm.l2Induction.recallTopK);
+    const actual = JSON.parse(respond.mock.calls[0]![0][2].content).HISTORICAL_L2_CANDIDATES;
+    expect(actual.map((item: { id: string }) => item.id)).toEqual(baseline.map(item => item.id));
+    expect(embed.mock.calls.filter(call => call[1] === "document").flatMap(call => call[0])).toHaveLength(5);
+  });
 
   it("models an empty recall set, admits negative-value L1, and commits only once", async () => {
     admit(); await pipeline().induce(job());
