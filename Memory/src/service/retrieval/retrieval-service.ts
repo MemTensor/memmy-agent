@@ -1817,6 +1817,7 @@ export function emptyInjectedContext(): InjectedContext {
 
 interface RetrievalDependencies {
   repos: Repositories;
+  writeTransaction?: <T>(operation: () => T) => Promise<T>;
   readonly config: MemmyConfig;
   readonly llm: LlmClient;
   readonly skillLlm: LlmClient;
@@ -2103,7 +2104,7 @@ export class RetrievalService {
           ...(hit.members ? { members } : {})
         }];
       });
-      this.deps.repos.runtime.insertRecallEvent({
+      const persistRecall = () => this.deps.repos.runtime.insertRecallEvent({
         id: recallEventId,
         namespaceId: this.deps.namespaceIdFromContext(context.namespace),
         sessionId: request.sessionId,
@@ -2133,6 +2134,8 @@ export class RetrievalService {
         },
         createdAt: nowIso()
       });
+      if (this.deps.writeTransaction) await this.deps.writeTransaction(persistRecall);
+      else persistRecall();
     }
 
     const response = {

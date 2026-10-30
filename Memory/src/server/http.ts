@@ -838,7 +838,8 @@ async function routeRequest(
       () =>
         service.completeTurn(
           turnId,
-          publicRequest as TurnCompleteRequest & Record<string, unknown>
+          publicRequest as TurnCompleteRequest & Record<string, unknown>,
+          signal
         )
     );
     scheduleAutoWorkerForEvolution(result, autoWorker);

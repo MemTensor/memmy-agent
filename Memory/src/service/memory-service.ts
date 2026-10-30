@@ -825,6 +825,7 @@ export class MemoryService {
     const retrievalOwner = this;
     this.retrieval = new RetrievalService({
       repos: this.repos,
+      writeTransaction: this.writeCaptureTransaction.bind(this),
       get config() { return retrievalOwner.config; },
       get llm() { return retrievalOwner.llm; },
       get skillLlm() { return retrievalOwner.skillLlm; },
@@ -844,6 +845,7 @@ export class MemoryService {
     const sessionTurnOwner = this;
     this.sessionTurns = new SessionTurnService({
       repos: this.repos,
+      writeTransaction: this.writeCaptureTransaction.bind(this),
       get config() { return sessionTurnOwner.config; },
       get llm() { return sessionTurnOwner.llm; },
       get skillLlm() { return sessionTurnOwner.skillLlm; },
@@ -1673,6 +1675,11 @@ export class MemoryService {
     return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
   }
 
+  private writeCaptureTransaction<T>(operation: () => T, signal?: AbortSignal): Promise<T> {
+    return this.panelWrites.run(async () => this.repos.transaction(operation),
+      signal ? AbortSignal.any([signal, this.budgetAbort.signal]) : this.budgetAbort.signal);
+  }
+
   private async acceptCapture<T>(execute: () => Promise<T>): Promise<T> {
     const result = await execute();
     this.capturePendingListener?.();
@@ -1682,7 +1689,7 @@ export class MemoryService {
   async completeSourceTurn(request: SourceTurnCompleteRequest, signal?: AbortSignal): Promise<SourceTurnCompleteResponse> {
     // Native scans have no Hook envelope. Use the configured owner only when
     // the request (including authenticated scope) did not provide one.
-    const response = await this.panelWrites.run(() => this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
+    const response = await this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.query, turnId: request.sourceTurn?.turnId },
       () => this.sessionTurns.completeSourceTurn(this.withTimeZone({
         ...request,
@@ -1693,8 +1700,8 @@ export class MemoryService {
           ...request.namespace,
           userId: request.namespace?.userId ?? this.config.userId
         }
-      }))
-    ))), signal ? AbortSignal.any([signal,this.budgetAbort.signal]) : this.budgetAbort.signal);
+      })), signal
+    )));
     serviceLogger.info("source_turn.complete", {
       source: request.sourceTurn?.source,
       profileId: request.sourceTurn?.profileId,
@@ -1711,10 +1718,10 @@ export class MemoryService {
     return response;
   }
 
-  async completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): Promise<CompleteTurnResponse> {
+  async completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>, signal?: AbortSignal): Promise<CompleteTurnResponse> {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.query, turnId },
-      () => this.sessionTurns.completeTurn(turnId, this.withTimeZone(request))
+      () => this.sessionTurns.completeTurn(turnId, this.withTimeZone(request)), signal
     )));
   }
 
