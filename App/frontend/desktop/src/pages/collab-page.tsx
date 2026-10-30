@@ -57,6 +57,7 @@ import type { MessageKey, MessageValues } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { AgentMessageContent, isLikelyExpensiveAgentMarkdown } from "./agent-message-content.js";
+import { memberNamesLabel, readableSummary } from "./collab-board-text.js";
 import { agentSourceDisplayName, agentSourceLogoUrl } from "./agent-source-logos.js";
 import { AppFrame } from "./app-frame.js";
 import { memberColor } from "./collab-member-color.js";
@@ -428,7 +429,7 @@ const CollabBoard = memo(function CollabBoard(props: {
 }) {
   const { dispatch, projects, tasks, onContinueTask } = props;
   const { clients } = useApiClients();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   const collab = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
   const snapshot = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
   const [page, setPage] = useState<CollabSessionPage | null>(null);
@@ -998,8 +999,11 @@ const CollabBoard = memo(function CollabBoard(props: {
     { value: "others", label: t("collab.filter.others") }
   ];
 
-  // 成员任务数：提示只在有他人的任务时出现，数字也给同一批数据，不加一次请求。
-  const otherSessionCount = (sessions ?? []).filter((session) => !session.mine).length;
+  // 提示条只在有他人的任务时出现，数字与成员名都取自同一批数据，不加一次请求。
+  const otherSessions = (sessions ?? []).filter((session) => !session.mine);
+  const otherSessionCount = otherSessions.length;
+  const otherMemberNames = otherSessions.map((session) => session.memberName);
+  const memberLabel = memberNamesLabel(otherMemberNames, language);
   const showContextTip = project !== null
     && otherSessionCount > 0
     && !contextTipSeen.includes(project.id);
@@ -1230,7 +1234,12 @@ const CollabBoard = memo(function CollabBoard(props: {
                       <div className={styles.contextTip} role="status">
                         <span className={styles.contextTipIcon} aria-hidden="true"><AtSign size={13} /></span>
                         <span className={styles.contextTipText}>
-                          {t("collab.contextTip.text", { count: String(otherSessionCount) })}
+                          {t(
+                            memberLabel ? "collab.contextTip.text" : "collab.contextTip.textAnon",
+                            memberLabel
+                              ? { who: memberLabel, count: String(otherSessionCount) }
+                              : { count: String(otherSessionCount) }
+                          )}
                         </span>
                         <button
                           type="button"
@@ -1286,6 +1295,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                         {sessions.map((session) => {
                           // Members see this person's nickname in their own Memmy, so the avatar keeps the nickname.
                           const name = session.memberName || (session.mine ? t("collab.session.you") : "");
+                          // 旧记录里的摘要可能停在 Agent 的完成通知上，读不出内容就不显示。
+                          const summary = readableSummary(session.lastQuestion);
                           // 本人的任务也写昵称：自己看到的与成员看到的一致，只有昵称缺失时才退回「你」。
                           const menuOpen = openMenuId === session.id;
                           return (
@@ -1321,7 +1332,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                               </span>
                               <div className={styles.rowText}>
                                 <span className={styles.rowTitle}>{session.title}</span>
-                                {session.lastQuestion ? <span className={styles.rowSummary}>{session.lastQuestion}</span> : null}
+                                {summary ? <span className={styles.rowSummary}>{summary}</span> : null}
                               </div>
                               <span className={styles.meta}>
                                 {[name, stampLabel(taskStamp(session.lastActiveAt), t)].filter(Boolean).join(" · ")}
@@ -1794,7 +1805,9 @@ function ProjectTaskPickerDialog(props: {
             <span>{t("collab.tasks.selectAll")}</span>
           </label>
           <ul className={styles.tasksList}>
-            {tasks.map((task) => (
+            {tasks.map((task) => {
+              const summary = readableSummary(task.lastQuestion);
+              return (
               <li
                 key={task.conversationId}
                 className={`${styles.row} ${styles.rowOpenable}`}
@@ -1810,11 +1823,12 @@ function ProjectTaskPickerDialog(props: {
                 />
                 <div className={styles.rowText}>
                   <span className={styles.rowTitle}>{task.title}</span>
-                  {task.lastQuestion ? <span className={styles.rowSummary}>{task.lastQuestion}</span> : null}
+                  {summary ? <span className={styles.rowSummary}>{summary}</span> : null}
                 </div>
                 <span className={styles.meta}>{formatSessionTime(task.updatedAt)}</span>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       )}
@@ -2558,10 +2572,11 @@ export function AssociateSessionsModal(props: {
   function sessionRow(session: LocalAgentSession, nested: boolean) {
     const checked = isSessionChecked(links, session);
     const excluded = !checked && Boolean(session.group && findGroupLink(links, session.sourceId, session.group.id));
+    const summary = readableSummary(session.lastQuestion);
     return (
       <label key={localSessionKey(session)} className={`${styles.pickRow} ${nested ? styles.pickRowNested : ""}`}>
         <input type="checkbox" checked={checked} onChange={() => setLinks((current) => toggleSessionLink(current, session))} />
-        <span className={`${styles.pickTitle} ${excluded ? styles.pickTitleExcluded : ""}`} title={session.lastQuestion || session.title}>{session.title}</span>
+        <span className={`${styles.pickTitle} ${excluded ? styles.pickTitleExcluded : ""}`} title={summary || session.title}>{session.title}</span>
         <span className={styles.meta}>{excluded ? t("collab.pick.excluded") : formatSessionTime(session.updatedAt)}</span>
       </label>
     );

@@ -162,6 +162,22 @@ describe("collab task list", () => {
     expect(document.body.textContent).toMatch(/陈墨 · \d{1,2}月\d{1,2}日/);
   });
 
+  it("hides a summary that stopped on an agent's task notification", async () => {
+    // Cursor 把 shell 完成通知写成了一轮，旧记录里摘要就停在这串标签上；任务行只留标题。
+    const notified = session(9, {
+      title: "Codex login record removal",
+      lastQuestion: "<timestamp>Friday, Oct 30, 2026, 12:08 PM (UTC+8)</timestamp> <system_notification> The following task has finished.",
+      mine: true,
+      lastActiveAt: daysBack(0, 12, 8)
+    });
+    mocks.listSessions.mockResolvedValue({ project: CLOUD_PROJECT, sessions: [notified], total: 1 });
+    await renderBoard();
+
+    expect(container.textContent).toContain("Codex login record removal");
+    expect(container.textContent).not.toContain("<timestamp>");
+    expect(container.textContent).not.toContain("system_notification");
+  });
+
   it("shows the join requests waiting on the invite button, without opening the dialog", async () => {
     mocks.listMembers.mockResolvedValue({
       project: CLOUD_PROJECT,

@@ -137,12 +137,13 @@ describe("collab board guidance", () => {
   });
 
   it("tells a member once that the synced tasks can be referenced with @", async () => {
-    expect(document.body.textContent).toContain("成员已在这里留下 1 条对话");
+    // 提示条点名留下任务的成员，不再笼统说「成员」，免得和自己刚上传的任务混起来。
+    expect(document.body.textContent).toContain("李四已在这里留下 1 条对话");
 
     await act(async () => buttonByText("知道了")!.click());
     await flush();
 
-    expect(document.body.textContent).not.toContain("成员已在这里留下 1 条对话");
+    expect(document.body.textContent).not.toContain("已在这里留下");
     // 按本机项目记住：云端记录重建（停止共享后再共享）时不会重新提示一遍。
     expect(window.localStorage.getItem("memmy.collab.contextTipSeen")).toContain("local-1");
   });

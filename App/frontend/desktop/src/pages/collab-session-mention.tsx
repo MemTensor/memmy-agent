@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CollabClient, CollabProjectSession } from "../api/collab-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { memberColor } from "./collab-member-color.js";
+import { readableSummary } from "./collab-board-text.js";
 
 /** How many sessions the menu lists before the person types anything. */
 export const MENTION_DEFAULT_LIMIT = 5;
@@ -105,7 +106,8 @@ export function mentionEmptyLabelKey(
  * menu only ever offers sessions of the project the task already belongs to, so it would repeat on every row.
  */
 export function mentionSessionLine(input: { memberName: string; lastQuestion: string }): string {
-  return [input.memberName, input.lastQuestion].filter(Boolean).join(" · ");
+  // 摘要停在 Agent 的通知轮上时整段跳过，这一行只剩成员名字，比露出标签可读。
+  return [input.memberName, readableSummary(input.lastQuestion)].filter(Boolean).join(" · ");
 }
 
 /** The @ menu itself: one row per session, keyboard selection included. */

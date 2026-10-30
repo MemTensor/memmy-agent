@@ -39,6 +39,12 @@ describe("what a row tells the person", () => {
   it("leaves the project out, since every offer is already in the task's project", () => {
     expect(mentionSessionLine({ memberName: "快乐团子", lastQuestion: "" })).toBe("快乐团子");
   });
+
+  it("skips a summary that stopped on an agent's task notification", () => {
+    // 旧记录把 Cursor 的完成通知当成最后一问，这一行只留成员名字，不把标签带到 @ 菜单里。
+    expect(mentionSessionLine({ memberName: "快乐团子", lastQuestion: "<system_notification>任务已完成</system_notification>" }))
+      .toBe("快乐团子");
+  });
 });
 
 describe("applying a mention", () => {
