@@ -785,7 +785,7 @@ async function routeRequest(
       toolCalls: request.toolCalls, toolResults: request.toolResults, artifacts: request.artifacts,
       sourceMemoryIds: request.sourceMemoryIds, usage: request.usage, status: request.status,
       tags: request.tags, userMemoryCorrection: request.userMemoryCorrection
-    });
+    }, signal);
     const result = request.channel === "hook"
       ? await trackStoredExternalSourceTurnCapture(
         pluginRuntimeAnalytics,

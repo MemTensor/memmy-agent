@@ -133,6 +133,11 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     invalidate: () => { requestIdRef.current++; requestAbortRef.current?.abort(); } });
   usePanelPoll(Boolean(props.client) && !props.client?.checkPanelView, () => refresh(page, sourceAgent, { useCache: false }));
   const detailRequestIdRef = useRef(0);
+  const detailAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    detailRequestIdRef.current++;
+    detailAbortRef.current?.abort();
+  }, [props.client, visible]);
   const retryRequestIdRef = useRef(0);
   const retryResetTimerRef = useRef<number | null>(null);
   useEffect(() => {
@@ -142,7 +147,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     retryResetTimerRef.current = null;
   }, [props.client, visible]);
 
-  const viewStatus=usePanelViewStatus(props.client,"L1",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); detailRequestIdRef.current++; setDetail(null); setSelectedMemoryId(null); setState({status:"loading"});},()=>refresh());
+  const viewStatus=usePanelViewStatus(props.client,"L1",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); detailRequestIdRef.current++; detailAbortRef.current?.abort(); setDetail(null); setSelectedMemoryId(null); setState({status:"loading"});},()=>refresh());
   function refresh(nextPage = page, nextSourceAgent = sourceAgent, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<PanelItemsOutput | undefined> {
     if (!canRead()) return Promise.resolve(undefined);
     if (!props.client) {
@@ -189,6 +194,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
   function changeQuery(value: string) {
     detailRequestIdRef.current += 1;
+    detailAbortRef.current?.abort();
     setQuery(value);
     setDetail(null);
     setSelectedMemoryId(null);
@@ -197,6 +203,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
   function runSearch() {
     detailRequestIdRef.current += 1;
+    detailAbortRef.current?.abort();
     setDetail(null);
     setSelectedMemoryId(null);
     setPage(1);
@@ -216,6 +223,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
   function changeSourceAgent(value: string) {
     detailRequestIdRef.current += 1;
+    detailAbortRef.current?.abort();
     setSourceAgent(value);
     setDetail(null);
     setSelectedMemoryId(null);
@@ -229,6 +237,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
 
     detailRequestIdRef.current += 1;
+    detailAbortRef.current?.abort();
     setDetail(null);
     setSelectedMemoryId(null);
     setPage(normalizedPage);
@@ -236,6 +245,9 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
   function openDetailById(id: string) {
     const requestId = ++detailRequestIdRef.current;
+    detailAbortRef.current?.abort();
+    const controller = new AbortController();
+    detailAbortRef.current = controller;
     setSelectedMemoryId(id);
     track(buildMemoryUiDetailOpenedEvent({
       subPage: "memories",
@@ -248,14 +260,14 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
 
     setDetail({ status: "loading" });
-    void readMemoryPanelDetail(props.client,id)
+    void readMemoryPanelDetail(props.client,id,controller.signal)
       .then((data) => {
-        if (requestId === detailRequestIdRef.current) {
+        if (requestId === detailRequestIdRef.current && canRead() && !controller.signal.aborted) {
           setDetail({ status: "ready", data });
         }
       })
       .catch((error) => {
-        if (requestId === detailRequestIdRef.current) {
+        if (requestId === detailRequestIdRef.current && canRead() && !controller.signal.aborted) {
           setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) });
         }
       });
@@ -276,6 +288,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       filterLayer: memoriesFilterLayer(sourceAgent)
     }));
     detailRequestIdRef.current += 1;
+    detailAbortRef.current?.abort();
     clearMemoryPanelCache();
     setDetail(null);
     setSelectedMemoryId(null);
@@ -467,6 +480,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       retryFeedback={retryFeedback}
       onCloseDetail={() => {
         detailRequestIdRef.current += 1;
+        detailAbortRef.current?.abort();
         setDetail(null);
         setSelectedMemoryId(null);
       }}

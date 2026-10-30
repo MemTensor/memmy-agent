@@ -155,9 +155,13 @@ function fillNativeFacts(db: Database.Database, part: "memories" | "metrics" | "
     }
     else if (part === "memories") {
       const displayed = memoryDisplayedSourceSql("CASE WHEN json_type(info_json,'$.source')='text' THEN json_extract(info_json,'$.source') END");
-      db.prepare(`INSERT OR REPLACE INTO panel_memory_facts SELECT m.id,m.memory_layer,m.status,m.created_at,m.updated_at,
+      db.prepare(`WITH projected AS MATERIALIZED (
+      SELECT id,memory_layer,status,created_at,updated_at,session_id,conversation_id,agent_id,app_id,
+        jsonb(info_json) AS info_json,jsonb(properties_json) AS properties_json
+      FROM memories WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL
+    ) INSERT OR REPLACE INTO panel_memory_facts SELECT m.id,m.memory_layer,m.status,m.created_at,m.updated_at,
     panel_source(${displayed},CASE WHEN json_type(properties_json,'$.internal_info.source')='text' THEN json_extract(properties_json,'$.internal_info.source') END,session_id,conversation_id,agent_id,app_id),${RAW_SOURCE_SQL},m.session_id
-    FROM memories m WHERE m.rowid IN (SELECT rowid FROM memories WHERE id IN (SELECT value FROM json_each(?))) AND m.deleted_at IS NULL`).run(keys);
+    FROM projected m`).run(keys);
     }
     else {
       db.prepare(`INSERT OR REPLACE INTO panel_log_metrics SELECT id,tool_name,source_agent,called_at,duration_ms,success,
@@ -211,8 +215,8 @@ export function panelVisibleMemoryIds(db: Database.Database, ids: readonly strin
   return new Set(db.prepare(`SELECT f.id FROM panel_memory_facts f WHERE f.id IN(SELECT value FROM json_each(?)) AND ${visibleFactSql("f")}`)
     .pluck().all(JSON.stringify(ids)) as string[]);
 }
-export function* panelMemoryStats(db: Database.Database): IterableIterator<MemoryStatsRow> {
-  ensurePanelCache(db, ["memories"]);
+export function* panelMemoryStats(db: Database.Database, prepared = false): IterableIterator<MemoryStatsRow> {
+  if (!prepared) ensurePanelCache(db, ["memories"]);
   for (const row of db.prepare(`SELECT memory_layer,status,created_at,updated_at,source FROM panel_memory_facts f WHERE ${visibleFactSql("f")}`).iterate() as IterableIterator<{
     memory_layer: MemoryStatsRow["memoryLayer"];
     status: MemoryStatsRow["status"];
@@ -223,9 +227,9 @@ export function* panelMemoryStats(db: Database.Database): IterableIterator<Memor
     yield { memoryLayer: row.memory_layer, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at, infoSource: row.source };
   }
 }
-export function panelAnalysisLogs(db: Database.Database) {
-  ensurePanelCache(db, ["metrics"]);
-  return (db.prepare("SELECT id,tool_name AS toolName,source_agent AS sourceAgent,called_at AS calledAt,duration_ms AS durationMs,success,recall_score FROM panel_log_metrics WHERE tool_name IN ('memory_add','memory_search') ORDER BY called_at DESC,id DESC LIMIT 10000").all() as Array<{
+export function panelAnalysisLogs(db: Database.Database, prepared = false) {
+  if (!prepared) ensurePanelCache(db, ["metrics"]);
+  return (db.prepare("SELECT id,tool_name AS toolName,source_agent AS sourceAgent,called_at AS calledAt,duration_ms AS durationMs,success,recall_score FROM panel_log_metrics WHERE id IN (SELECT id FROM api_logs WHERE tool_name IN ('memory_add','memory_search') ORDER BY called_at DESC,id DESC LIMIT 10000) ORDER BY called_at DESC,id DESC LIMIT 10000").all() as Array<{
     id: number;
     toolName: "memory_add" | "memory_search";
     sourceAgent: string | null;
@@ -276,4 +280,13 @@ function logFact(row: CacheRow): Fact {
       row.projected_input, row.projected_output, skill == null ? null : String(scalar(skill)).split("::").at(-1)!],
     refs: [...new Set(refs.filter(ref => ref != null).map(ref => String(scalar(ref)).split("::").at(-1)!.trim()))]
   };
+}
+
+/** Freeze the work set for one statistics generation. Ordinary additions are
+ * picked up by the next generation rather than keeping the first one waiting. */
+export function panelStatisticsDirtyIds(db: Database.Database, part: "memories" | "metrics"): Array<string | number> {
+  return db.prepare(part === "memories" ? "SELECT id FROM panel_memory_dirty ORDER BY rowid" :
+    `SELECT d.id FROM panel_metric_dirty d WHERE d.id IN (
+       SELECT id FROM api_logs WHERE tool_name IN ('memory_add','memory_search') ORDER BY called_at DESC,id DESC LIMIT 10000
+     ) OR NOT EXISTS(SELECT 1 FROM api_logs a WHERE a.id=d.id)`).pluck().all() as Array<string | number>;
 }

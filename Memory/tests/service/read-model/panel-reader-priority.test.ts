@@ -13,7 +13,7 @@ vi.mock("node:worker_threads", () => ({
     constructor() { super(); workers.instances.push(this); }
     ref() {}
     unref() {}
-    postMessage(message: { id: number; method: string }) { this.messages.push(message); }
+    postMessage(message: { id: number; method: string; stop?:boolean }) { if(message.stop) {this.finishTermination=()=>this.emit("exit",0);return;} this.messages.push(message); }
     terminate() { return new Promise<number>((resolve) => { this.finishTermination = () => resolve(0); }); }
   }
 }));
@@ -95,7 +95,7 @@ describe("foreground reads during background statistics", () => {
   });
 });
 
-it("pauses committed preparation batches for busy producers and resumes without restarting the worker",async()=>{
+it("resumes committed statistics while a background model remains busy",async()=>{
   vi.useFakeTimers();
   let busy=true;
   const reader=new PanelReader("synthetic.sqlite",1000,()=>busy);
@@ -103,12 +103,26 @@ it("pauses committed preparation batches for busy producers and resumes without 
   const worker=workers.instances[0]!,id=worker.messages[0]!.id;
   try{
     worker.emit("message",{id,yield:true});
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(worker.messages).toHaveLength(1);
-    busy=false;await vi.advanceTimersByTimeAsync(25);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(busy).toBe(true);
     expect(worker.messages[1]).toEqual({resume:id});
     worker.emit("message",{id,result:{safety:"safe",data:"finished"}});
     await expect(stats).resolves.toEqual({safety:"safe",data:"finished"});
     expect(workers.instances).toHaveLength(1);
   }finally{const stop=reader.stop();worker.finishTermination();await stop;vi.useRealTimers();}
+});
+
+
+it("counts write admission and queued time in the total deadline", async () => {
+  vi.useFakeTimers();
+  const reader = new PanelReader("synthetic.sqlite",100);
+  const first = reader.run("items",[{}]).catch(error=>error);
+  const second = reader.run("items",[{}]).catch(error=>error);
+  const worker=workers.instances[0]!;
+  try {
+    await vi.advanceTimersByTimeAsync(100);
+    expect((await first).message).toContain("time budget");
+    expect((await second).message).toContain("time budget");
+    expect(worker.messages).toHaveLength(1);
+  } finally { const stopped=reader.stop();worker.finishTermination();await stopped;vi.useRealTimers(); }
 });

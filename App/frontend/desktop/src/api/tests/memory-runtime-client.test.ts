@@ -104,7 +104,7 @@ describe("memory runtime client", () => {
     for (const [status,code,message] of [[401,"unauthorized","expired"],[403,"forbidden","denied"],[404,"not_found","Task not found"],[503,"memory_layer_unavailable","timeout"]] as const) {
       const fetchMock=vi.fn(async()=>new Response(JSON.stringify({error:{code,message,requestId:"test"}}),{status})); vi.stubGlobal("fetch",fetchMock);
       await expect(createHttpMemoryRuntimeClient(runtimeConfig).listPanelTaskSummaries!({})).rejects.toThrow(message);
-      expect(fetchMock).toHaveBeenCalledTimes(status === 503 ? 4 : 1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     }
   });
 

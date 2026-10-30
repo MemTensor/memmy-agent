@@ -1,3 +1,5 @@
+import { statsStore } from "./panel/stats-store.js";
+import { PanelWriteCoordinator } from "./panel/write-coordinator.js";
 import {localPanelRequest} from "./panel/local-read.js";
 import { panelCacheRevision } from "../storage/panel-cache.js";
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
@@ -308,8 +310,10 @@ export class MemoryService {
   private readonly projectEnvironment: ProjectEnvironmentService;
   private readonly panelReadModel: PanelReadModel;
   private panelReader?: PanelReader;
+  private readonly panelWrites = new PanelWriteCoordinator();
   private panelBrowse?: PanelBrowse;
   private panelStats?: PanelStats;
+  private panelOverviewStats?: PanelStats<ReturnType<PanelReadModel["panelOverviewSummary"]>>;
   private panelWarmupTimer?: ReturnType<typeof setTimeout>;
   /** Local statistics describe the device; authenticated cloud scopes stay distinct. */
   private panelStatsInput(input: RequestEnvelope, local: boolean) {
@@ -320,7 +324,7 @@ export class MemoryService {
     if (this.mode === "cloud" || this.closing || this.panelWarmupTimer) return;
     this.panelWarmupTimer = setTimeout(() => {
       this.panelWarmupTimer = undefined;
-      if (!this.closing) this.panelStatsSnapshot({}, true);
+      if (!this.closing) { this.panelOverviewStatsSnapshot({}, true); this.panelStatsSnapshot({}, true); }
     }, 0);
     this.panelWarmupTimer.unref();
   }
@@ -328,15 +332,15 @@ export class MemoryService {
     return localPanelRequest(this.withTimeZone(input),local);
   }
   private sharedPanelStats() {
-    this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db));
+    this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db),statsStore(this.repos.db.name,"full"));
     return this.panelStats;
   }
   panelStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
     return this.sharedPanelStats().get(this.panelStatsInput(input,local));
   }
   panelOverviewStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
-    const snapshot=this.sharedPanelStats().get(this.panelStatsInput(input,local));
-    return {...snapshot,data:snapshot.data?.overview};
+    this.panelOverviewStats ??= new PanelStats(input => this.readPanel("overviewStats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db),statsStore(this.repos.db.name,"overview"));
+    return this.panelOverviewStats.get(this.panelStatsInput(input,local));
   }
 
   async readPanel<T>(method:string,args:unknown[],signal?:AbortSignal):Promise<{safety:string;data:T}> {
@@ -345,7 +349,7 @@ export class MemoryService {
       this.panelReader ??= new PanelReader(this.repos.db.name, 30_000, () => {
         const activity = this.concurrency.snapshot();
         return activity.activeJobs > 0 || activity.embeddingRequests > 0 || Object.values(activity.resources).some(value => value > 0);
-      });
+      }, this.panelWrites);
       const result=await this.panelReader.run<T>(method,args,method === "stats" || method === "overviewStats" ? 1 : 0,signal);
       if(result.safety !== panelSafetyToken(this.repos.db)) throw new MemoryServiceError("conflict","Panel changed during read; refresh");
       return result;
@@ -914,6 +918,8 @@ export class MemoryService {
     const requestsStopped = this.concurrency.close();
     this.panelBrowse?.clear();
     this.panelStats?.stop();
+    this.panelOverviewStats?.stop();
+    this.panelWrites.close();
     clearTimeout(this.panelWarmupTimer);
     const readerStopped = this.panelReader?.stop();
     this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped]).then(() => {
@@ -1662,10 +1668,10 @@ export class MemoryService {
     return result;
   }
 
-  async completeSourceTurn(request: SourceTurnCompleteRequest): Promise<SourceTurnCompleteResponse> {
+  async completeSourceTurn(request: SourceTurnCompleteRequest, signal?: AbortSignal): Promise<SourceTurnCompleteResponse> {
     // Native scans have no Hook envelope. Use the configured owner only when
     // the request (including authenticated scope) did not provide one.
-    const response = await this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
+    const response = await this.panelWrites.run(() => this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.query, turnId: request.sourceTurn?.turnId },
       () => this.sessionTurns.completeSourceTurn(this.withTimeZone({
         ...request,
@@ -1677,7 +1683,7 @@ export class MemoryService {
           userId: request.namespace?.userId ?? this.config.userId
         }
       }))
-    )));
+    ))), signal ? AbortSignal.any([signal,this.budgetAbort.signal]) : this.budgetAbort.signal);
     serviceLogger.info("source_turn.complete", {
       source: request.sourceTurn?.source,
       profileId: request.sourceTurn?.profileId,

@@ -85,15 +85,16 @@ describe("background panel stats", () => {
   });
 });
 
-it("refreshes on ordinary write revisions without blanking a safe snapshot",async()=>{
-  let revision="1",count=1;
+it("coalesces ordinary write revisions without blanking a safe snapshot",async()=>{
+  vi.useFakeTimers();
+  let revision="2:1",count=1;
   const read=vi.fn(async()=>({safety:"safe",data:{overview:{count},analysis:{}} as never}));
   const stats=new PanelStats<PanelStatsData>(read,()=>"safe",()=>revision);
   try{
     stats.get({});await tick();expect(stats.get({}).data?.overview).toEqual({count:1});
-    revision="2";count=2;
+    revision="2:2";count=2;
     expect(stats.get({})).toMatchObject({status:"ready",data:{overview:{count:1}}});
-    await tick();expect(stats.get({}).data?.overview).toEqual({count:2});
+    await vi.advanceTimersByTimeAsync(1000);await tick();expect(stats.get({}).data?.overview).toEqual({count:2});
     expect(read).toHaveBeenCalledTimes(2);
-  }finally{stats.stop();}
+  }finally{stats.stop();vi.useRealTimers();}
 });

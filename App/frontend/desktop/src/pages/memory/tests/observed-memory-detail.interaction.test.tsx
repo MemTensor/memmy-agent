@@ -121,7 +121,7 @@ describe("open observation processing", () => {
     const client = createMemoryRuntimeClientStub({ getMemory, listPanelItems: vi.fn(async () => panelItemsOutput([aggregate.item])) });
     await act(async () => root.render(<AppStateProvider><I18nProvider language="zh-CN"><MemoriesSubPage client={client} openRequest={{ id: aggregate.item.id, requestId: 1 }} /></I18nProvider></AppStateProvider>));
     await act(async () => container.querySelector<HTMLButtonElement>(".memory-policy-id--link")?.click());
-    expect(getMemory).toHaveBeenLastCalledWith("observation_parent");
+    expect(getMemory).toHaveBeenLastCalledWith("observation_parent", expect.any(AbortSignal));
     expect(container.querySelector(".memory-drawer")?.textContent).toContain("这是一段对应的来源记忆。");
   });
 

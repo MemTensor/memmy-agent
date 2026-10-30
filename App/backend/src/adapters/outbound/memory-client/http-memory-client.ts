@@ -143,6 +143,7 @@ export function createHttpMemoryClient(
       },
       {
         maxRetries: requestOptions.maxRetries ?? config.maxRetries,
+        signal: requestOptions.signal ?? requestOptions.context?.signal,
         baseDelayMs: 100,
         factor: 3,
         jitter: 0.2,
@@ -300,7 +301,7 @@ export function createHttpMemoryClient(
     },
 
     async panelMemory(id,context){
-      return request("GET","panelMemory",GetMemoryOutputSchema,{params:{memoryId:id},context,maxRetries:0});
+      return request("GET","panelMemory",GetMemoryOutputSchema,{params:{memoryId:id},context});
     },
 
     async panelOverview(context) {

@@ -1,6 +1,6 @@
 /** Http memory client tests. */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHttpMemoryClient } from "../http-memory-client.js";
 import { buildMemoryLayerUrl, MEMORY_LAYER_PATHS } from "../memory-layer-endpoints.js";
 import { MemoryLayerError, MemoryLayerNetworkError } from "../errors.js";
@@ -12,6 +12,42 @@ afterEach(async () => {
 });
 
 describe("HttpMemoryClient", () => {
+  it.each(["recover", "exhaust", "cancel", 401, 403, 404, 409] as const)("restores bounded panel detail recovery without retrying invalidation (%s)", async scenario => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const controller = new AbortController();
+    const client = createHttpMemoryClient({baseUrl:"http://synthetic.invalid",timeoutMs:500,maxRetries:2}, {
+      fetchImpl: (async () => {
+        calls++;
+        if (scenario === "recover" && calls === 2) return new Response(JSON.stringify(getMemoryOutput()));
+        return new Response("{}", {status:typeof scenario === "number" ? scenario : 503});
+      }) as typeof fetch
+    });
+    try {
+      const result = client.panelMemory!("memory-1", {signal:controller.signal}).catch(error => error);
+      await vi.advanceTimersByTimeAsync(1);
+      if (scenario === "cancel") controller.abort();
+      await vi.advanceTimersByTimeAsync(2000);
+      const value = await result;
+      if (scenario === "recover") { expect(value.item.id).toBe("memory-1"); expect(calls).toBe(2); }
+      else { expect(value).toBeInstanceOf(Error); expect(calls).toBe(scenario === "exhaust" ? 3 : 1); }
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("retries one panel detail timeout and returns the recovered body", async () => {
+    let calls = 0;
+    const client = createHttpMemoryClient({baseUrl:"http://synthetic.invalid",timeoutMs:10,maxRetries:2}, {
+      fetchImpl: (async (_url, init) => {
+        calls++;
+        if (calls === 1) throw new DOMException("timed out", "TimeoutError");
+        expect(init?.signal?.aborted).toBe(false);
+        return new Response(JSON.stringify(getMemoryOutput()));
+      }) as typeof fetch
+    });
+    expect((await client.panelMemory!("memory-1")).item.id).toBe("memory-1");
+    expect(calls).toBe(2);
+  });
+
   it("recognizes a healthy older service without desktop scan endpoints and does not retry its 404", async () => {
     const calls: string[] = [];
     const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture", timeoutMs: 500, maxRetries: 2 }, {

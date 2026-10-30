@@ -401,8 +401,8 @@ export class PanelReadModel {
     };
   }
 
-  panelStatistics(input:RequestEnvelope, rows=Array.from(panelMemoryStats(this.deps.repos.db))) {
-    return {overview:this.panelOverviewSummary(input,rows),analysis:this.panelAnalysis(input,rows)};
+  panelStatistics(input:RequestEnvelope, rows=Array.from(panelMemoryStats(this.deps.repos.db)), prepared = false) {
+    return {overview:this.panelOverviewSummary(input,rows),analysis:this.panelAnalysis(input,rows,prepared)};
   }
 
   panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}, rows?: ReturnType<Repositories["memories"]["listStats"]>): {
@@ -427,7 +427,7 @@ export class PanelReadModel {
     };
   }
 
-  panelAnalysis(input: RequestEnvelope & { userId?: string } = {}, rows?: ReturnType<Repositories["memories"]["listStats"]>): {
+  panelAnalysis(input: RequestEnvelope & { userId?: string } = {}, rows?: ReturnType<Repositories["memories"]["listStats"]>, prepared = false): {
     metrics: {
       avgRecallScore: number;
       recallEvents: number;
@@ -447,7 +447,7 @@ export class PanelReadModel {
     const dates = panelLastSevenDateKeys(this.now(), timeZone);
     const memories = rows ?? Array.from(panelMemoryStats(this.deps.repos.db));
     const skillMemories = memories.filter((memory) => memory.memoryLayer === "Skill");
-    const logs = panelAnalysisLogs(this.deps.repos.db)
+    const logs = panelAnalysisLogs(this.deps.repos.db, prepared)
       .filter((log) => dates.includes(panelDateKey(log.calledAt, timeZone)));
     const recallScores = logs
       .filter((log) => log.toolName === "memory_search")

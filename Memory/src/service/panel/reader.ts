@@ -1,3 +1,4 @@
+import { PanelWriteCoordinator } from "./write-coordinator.js";
 import { Worker } from "node:worker_threads";
 import { MemoryServiceError } from "../../utils/error.js";
 type Result<T> = { safety: string; data: T };
@@ -19,14 +20,16 @@ export class PanelReader {
   private pending: Pending[] = [];
   private active?: Pending;
   private nextId = 0;
-  private timer?: ReturnType<typeof setTimeout>;
   private stopping?: Promise<number>;
   private closed = false;
   private resumeTimer?: ReturnType<typeof setTimeout>;
+  private writeRelease?: () => void;
+  private writeAbort?: AbortController;
   constructor(
     private readonly path: string,
     private readonly timeoutMs = 30_000,
-    private readonly backgroundBusy: () => boolean = () => false
+    private readonly backgroundBusy: () => boolean = () => false,
+    private readonly writes = new PanelWriteCoordinator()
   ) {}
   run<T>(method: string, args: unknown[], priority = 0, signal?: AbortSignal): Promise<Result<T>> {
     if (this.closed) return Promise.reject(new Error("Panel reader stopped"));
@@ -35,6 +38,16 @@ export class PanelReader {
     if (this.pending.length + (interruptStats ? 1 : 0) >= 32)
       return Promise.reject(new MemoryServiceError("rate_limited", "Panel reader is busy"));
     return new Promise<Result<unknown>>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const error = new Error("Panel read exceeded time budget");
+        if (this.active === itemToQueue) this.fail(error);
+        else {
+          this.pending = this.pending.filter(item => item !== itemToQueue);
+          itemToQueue.detach();
+          reject(error);
+        }
+      }, this.timeoutMs);
+      timeout.unref();
       const abort = () => {
         if (this.active === itemToQueue) {
           this.fail(abortError());
@@ -51,7 +64,7 @@ export class PanelReader {
         resolve,
         reject,
         priority,
-        detach: () => signal?.removeEventListener("abort", abort)
+        detach: () => { clearTimeout(timeout); signal?.removeEventListener("abort", abort); }
       };
       signal?.addEventListener("abort", abort, { once: true });
       this.pending.push(itemToQueue);
@@ -67,13 +80,14 @@ export class PanelReader {
     const active = this.active;
     const worker = this.worker;
     if (!active || !isStatisticsMethod(active.method) || !worker) return;
-    clearTimeout(this.timer);
     clearTimeout(this.resumeTimer);
     this.active = undefined;
     this.worker = undefined;
     this.pending.push(active);
     this.pending.sort((a, b) => a.priority - b.priority);
-    this.stopping = worker.terminate();
+    this.writeAbort?.abort();
+    const releaseWrite = this.writeRelease; this.writeRelease = undefined;
+    this.stopping = this.retire(worker).finally(() => releaseWrite?.());
     void this.stopping.finally(() => {
       this.stopping = undefined;
       this.dispatch();
@@ -95,20 +109,27 @@ export class PanelReader {
         if (this.worker !== worker) return;
         const active = this.active;
         if (!active || active.id !== message.id) return;
-        clearTimeout(this.timer);
+        if (message.write === "acquire") {
+          const controller = new AbortController();
+          this.writeAbort = controller;
+          void this.writes.acquire(controller.signal).then(release => {
+            if (this.worker !== worker || this.active !== active) { release(); return; }
+            this.writeRelease = release;
+            worker.postMessage({ writeGranted: active.id });
+          }).catch(() => undefined);
+          return;
+        }
+        if (message.write === "release") {
+          this.writeRelease?.(); this.writeRelease = undefined;
+          return;
+        }
         if (message.yield && isStatisticsMethod(active.method)) {
-          const resume = () => {
-            if (this.closed || this.worker !== worker || this.active !== active) return;
-            if (this.backgroundBusy()) {
-              this.resumeTimer = setTimeout(resume, 25);
-              this.resumeTimer.unref();
-              return;
-            }
-            this.timer = setTimeout(() => this.fail(new Error("Panel read exceeded time budget")), this.timeoutMs);
-            this.timer.unref();
-            worker.postMessage({ resume: active.id });
-          };
-          resume();
+          // Model wait is not a database writer. Give foreground work one turn,
+          // but never suspend statistics until all background jobs have ended.
+          this.resumeTimer = setTimeout(() => {
+            if (this.worker === worker && this.active === active)
+              worker.postMessage({ resume: active.id });
+          }, this.backgroundBusy() ? 10 : 0);
           return;
         }
         active.detach();
@@ -128,12 +149,16 @@ export class PanelReader {
     }
     this.worker.ref();
     this.active = this.pending.shift()!;
-    this.timer = setTimeout(() => this.fail(new Error("Panel read exceeded time budget")), this.timeoutMs);
-    this.timer.unref();
     this.worker.postMessage({ id: this.active.id, method: this.active.method, args: this.active.args });
   }
+  private retire(worker: Worker): Promise<number> {
+    return new Promise(resolve => {
+      const timer = setTimeout(() => { void worker.terminate().then(resolve); }, 2000);
+      worker.once("exit", code => { clearTimeout(timer); resolve(code); });
+      worker.postMessage({stop:true});
+    });
+  }
   private fail(error: Error) {
-    clearTimeout(this.timer);
     clearTimeout(this.resumeTimer);
     this.active?.detach();
     this.active?.reject(error);
@@ -141,7 +166,9 @@ export class PanelReader {
     const worker = this.worker;
     this.worker = undefined;
     if (worker) {
-      this.stopping = worker.terminate();
+      this.writeAbort?.abort();
+      const releaseWrite = this.writeRelease; this.writeRelease = undefined;
+      this.stopping = this.retire(worker).finally(() => releaseWrite?.());
       void this.stopping.finally(() => {
         this.stopping = undefined;
         this.dispatch();

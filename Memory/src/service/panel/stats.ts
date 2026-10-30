@@ -1,3 +1,4 @@
+import type { StatsStore } from "./stats-store.js";
 import type { PanelReadModel } from "../read-model/panel-read.js";
 import { resolveTimeZone } from "../../utils/time.js";
 import { panelDateKey } from "../read-model/model-costs.js";
@@ -27,7 +28,8 @@ export class PanelStats<TData = PanelStatsData> {
   constructor(
     private readonly read: (input: StatsInput) => Promise<{ safety: string; data: TData }>,
     private readonly safety: () => string,
-    private readonly revision: () => string = () => "0"
+    private readonly revision: () => string = () => "0",
+    private readonly store?: StatsStore<TData>
   ) {}
   get(input: StatsInput) {
     const timeZone = resolveTimeZone(input.timeZone);
@@ -43,6 +45,13 @@ export class PanelStats<TData = PanelStatsData> {
         disposed: false,
         generation: 0
       };
+      const saved = this.store?.load(key);
+      if (saved && saved.safety === entry.safety && saved.day === entry.day && saved.revision.split(":")[0] === entry.revision.split(":")[0]) {
+        entry.data = saved.data;
+        entry.generatedAt = saved.generatedAt;
+        entry.revision = saved.revision;
+        if (saved.revision === this.revision()) entry.lastAttempt = Date.now();
+      }
       this.entries.set(key, entry);
       if (this.entries.size > 16) {
         const oldKey = this.entries.keys().next().value!;
@@ -51,7 +60,11 @@ export class PanelStats<TData = PanelStatsData> {
       }
     }
     this.validate(entry);
-    if (entry.revision !== this.revision()) entry.lastAttempt = undefined;
+    if (entry.revision !== this.revision() && !entry.running) {
+      const remaining = 1000 - (Date.now() - (entry.lastAttempt ?? 0));
+      if (remaining <= 0) entry.lastAttempt = undefined;
+      else { clearTimeout(entry.timer); entry.timer = setTimeout(() => this.generate(entry), remaining); entry.timer.unref(); }
+    }
     if (
       !entry.running &&
       (entry.lastAttempt === undefined || Date.now() - entry.lastAttempt >= (entry.error ? 60_000 : 5 * 60_000))
@@ -72,7 +85,7 @@ export class PanelStats<TData = PanelStatsData> {
     const safety = this.safety();
     const day = this.day(entry.input.timeZone);
     const revision = this.revision();
-    if (entry.safety !== safety || entry.day !== day) {
+    if (entry.safety !== safety || entry.day !== day || entry.revision.split(":")[0] !== revision.split(":")[0]) {
       entry.generation++;
       entry.data = undefined;
       entry.generatedAt = undefined;
@@ -98,6 +111,9 @@ export class PanelStats<TData = PanelStatsData> {
         entry.data = result.data;
         entry.generatedAt = new Date().toISOString();
         entry.error = undefined;
+        const key = JSON.stringify([entry.input.namespace ?? {}, entry.input.userId ?? null, resolveTimeZone(entry.input.timeZone)]);
+        try { this.store?.save(key, {data:entry.data,generatedAt:entry.generatedAt,safety:entry.safety,revision:entry.revision,day:entry.day}); }
+        catch { /* Persistence failure must not discard valid in-memory statistics. */ }
       })
       .catch((error) => {
         this.validate(entry);
@@ -108,7 +124,8 @@ export class PanelStats<TData = PanelStatsData> {
         entry.running = false;
         if (!this.stopped && !entry.disposed) {
           // A result spanning midnight/reset cannot be published; retry with fresh scope.
-          const delay = generation !== entry.generation ? 0 : entry.error ? 60_000 : 5 * 60_000;
+          const delay = generation !== entry.generation ? 0 : entry.error ? 60_000
+            : entry.revision !== this.revision() ? 1000 : 5 * 60_000;
           entry.timer = setTimeout(() => this.generate(entry), delay);
           entry.timer.unref();
         }

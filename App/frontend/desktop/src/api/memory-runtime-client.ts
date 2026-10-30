@@ -120,8 +120,8 @@ export interface MemoryRuntimeClient {
   completeTurn(turnId: string, input: CompleteTurnInput): Promise<CompleteTurnOutput>;
   search(input: SearchInput): Promise<SearchOutput>;
   addMemory(input: AddMemoryInput): Promise<AddMemoryOutput>;
-  getMemory(id: string): Promise<GetMemoryOutput>;
-  getPanelMemory?(id:string):Promise<GetMemoryOutput>;
+  getMemory(id: string, signal?:AbortSignal): Promise<GetMemoryOutput>;
+  getPanelMemory?(id:string, signal?:AbortSignal):Promise<GetMemoryOutput>;
   deleteMemory(id: string): Promise<DeleteMemoryOutput>;
   approveObservedSkill?(id: string): Promise<{ id: string; status: "activated"; serverTime: string }>;
   updateObservedSkill?(id: string, input: { body: string; expectedVersion: number }): Promise<{ id: string; status: "activated"; version: number; serverTime: string }>;
@@ -138,7 +138,7 @@ export interface MemoryRuntimeClient {
 }
 
 export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRuntimeClient {
-  const panelQueue = new PanelRequestQueue(2, true);
+  const panelQueue = new PanelRequestQueue(2);
   const browse = new PanelBrowseClient((input, signal) => panelQueue.request(
     `browse:${JSON.stringify(input)}`,
     sharedSignal => requestJson({config,path:"/api/v1/panel/browse",schema:PanelBrowseOutputSchema,body:input,init:{signal:sharedSignal}}),
@@ -220,13 +220,14 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
       return requestJson({ config, path: "/api/v1/memory/add", schema: AddMemoryOutputSchema, body: AddMemoryInputSchema.parse(input) });
     },
 
-    async getPanelMemory(id) {
-      try{return await requestJson({config,path:`/api/v1/panel/memory/${encodeURIComponent(id)}`,schema:GetMemoryOutputSchema});}
-      catch(error){if(!isUnsupportedPanelRoute(error))throw error;return this.getMemory(id);}
+    async getPanelMemory(id, signal) {
+      const path = `/api/v1/panel/memory/${encodeURIComponent(id)}`;
+      try{return await requestJson({config,path,schema:GetMemoryOutputSchema,init:{signal}});}
+      catch(error){if(!isUnsupportedPanelRoute(error))throw error;return this.getMemory(id,signal);}
     },
 
-    async getMemory(id) {
-      return requestJson({ config, path: `/api/v1/memory/${encodeURIComponent(id)}`, schema: GetMemoryOutputSchema });
+    async getMemory(id,signal) {
+      return requestJson({ config, path: `/api/v1/memory/${encodeURIComponent(id)}`, schema: GetMemoryOutputSchema, init:{signal} });
     },
 
     async deleteMemory(id) {
@@ -453,6 +454,6 @@ export function isUnsupportedPanelRoute(error: unknown): boolean {
 }
 
 /** Management-only detail reads; older runtimes retain their existing authorization. */
-export function readMemoryPanelDetail(client:MemoryRuntimeClient,id:string):Promise<GetMemoryOutput> {
-  return client.getPanelMemory ? client.getPanelMemory(id) : client.getMemory(id);
+export function readMemoryPanelDetail(client:MemoryRuntimeClient,id:string,signal?:AbortSignal):Promise<GetMemoryOutput> {
+  return client.getPanelMemory ? client.getPanelMemory(id,signal) : signal ? client.getMemory(id,signal) : client.getMemory(id);
 }

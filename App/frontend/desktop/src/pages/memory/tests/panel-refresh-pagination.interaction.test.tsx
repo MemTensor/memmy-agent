@@ -51,8 +51,9 @@ describe.each(Object.entries({ PoliciesSubPage, WorldModelSubPage, SkillsSubPage
           fail = true;
           await act(async () => refresh());
           expect(current()).toBe(2);
-          await act(async () => vi.advanceTimersByTimeAsync(250));
-          expect(current()).toBe(1);
+          await act(async () => vi.advanceTimersByTimeAsync(5000));
+          expect(current()).toBe(2);
+          expect(requests.filter(request => request.op === "create")).toHaveLength(2);
         }
         await act(async () => refresh());
         expect(current()).toBe(1);

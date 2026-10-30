@@ -1,5 +1,6 @@
+import { isSqliteBusy } from "./write-coordinator.js";
 import Database from "better-sqlite3";
-import { fillPanelCacheBatch, ensurePanelLogIds, panelLogIdsPending, panelCachePending, panelMemoryStats, type PanelCachePart } from "../../storage/panel-cache.js";
+import { panelStatisticsDirtyIds, fillPanelCacheBatch, ensurePanelLogIds, panelLogIdsPending, panelCachePending, panelMemoryStats, type PanelCachePart } from "../../storage/panel-cache.js";
 import { parentPort, workerData } from "node:worker_threads";
 import { MemoryDb } from "../../storage/db.js";
 import { createPanelReaderModel } from "./reader-model.js";
@@ -13,9 +14,9 @@ cacheWriter.pragma("busy_timeout = 1000");
 cacheWriter.pragma("synchronous = NORMAL");
 const model = createPanelReaderModel(db);
 function partsFor(method: string,args: unknown[]): PanelCachePart[] {
-  if (["stats", "overviewStats", "analysis"].includes(method))
+  if (["stats", "analysis"].includes(method))
     return ["memories", "metrics"];
-  if (method === "overview")
+  if (["overview", "overviewStats"].includes(method))
     return ["memories"];
   if (["items","members","page"].includes(method)) {
     const input=args[method==="page"?1:0] as {section?:string;layer?:string} | undefined;
@@ -26,11 +27,40 @@ function partsFor(method: string,args: unknown[]): PanelCachePart[] {
   }
   return [];
 }
+let stopping = false;
+let running = false;
+function checkStopped() { if (stopping) throw new Error("Panel reader stopped"); }
+function closeWorker() {
+  if (db.db.inTransaction) db.db.exec("ROLLBACK");
+  cacheWriter.close(); db.db.close(); parentPort!.close();
+}
+let writeGranted: (() => void) | undefined;
+async function writeBatch<T>(id: number, operation: () => T): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    await new Promise<void>(resolve => { writeGranted = resolve; parentPort!.postMessage({id,write:"acquire"}); });
+    try { checkStopped(); return operation(); }
+    catch (error) { if (attempt >= 3 || !isSqliteBusy(error)) throw error; }
+    finally { parentPort!.postMessage({id,write:"release"}); }
+    await new Promise(resolve => setTimeout(resolve,25 * 2 ** attempt));
+  }
+}
 let resumePreparation: (() => void) | undefined;
-async function prepare(parts: PanelCachePart[], backgroundId?: number) {
+async function prepare(parts: PanelCachePart[], id: number, backgroundId?: number) {
   let batches = 0;
+  if (backgroundId !== undefined) {
+    for (const part of parts) {
+      if (part !== "memories" && part !== "metrics") continue;
+      const ids = panelStatisticsDirtyIds(cacheWriter, part);
+      for (let offset = 0; offset < ids.length; offset += 128) {
+        checkStopped();
+        await writeBatch(id, () => fillPanelCacheBatch(cacheWriter,part,128,ids.slice(offset,offset+128)));
+        await setImmediate();
+      }
+    }
+    return;
+  }
   for (const part of parts)
-    while (fillPanelCacheBatch(cacheWriter, part, part === "logs" ? 64 : 128)) {
+    while (await writeBatch(id, () => fillPanelCacheBatch(cacheWriter, part, part === "logs" ? 64 : 128))) {
       // Release SQLite's writer after every small batch. Check producer
       // activity initially and every four batches, avoiding an IPC round trip
       // for each transaction when the service is idle.
@@ -44,39 +74,48 @@ async function prepare(parts: PanelCachePart[], backgroundId?: number) {
 async function statistics(method: "stats" | "overviewStats", input: Parameters<PanelReadModel["panelStatistics"]>[0]) {
   const safety = panelSafetyToken(db.db);
   const rows = [];
-  for (const row of panelMemoryStats(db.db)) {
+  for (const row of panelMemoryStats(db.db,true)) {
     rows.push(row);
     // Worker termination cannot interrupt a single large native .all().
     // Keep one read snapshot, but allow cancellation every bounded batch.
-    if (rows.length % 256 === 0)
-      await setImmediate();
+    if (rows.length % 256 === 0) {
+      await setImmediate(); checkStopped();
+    }
   }
   const data = method === "overviewStats"
     ? model.panelOverviewSummary(input, rows)
-    : model.panelStatistics(input, rows);
+    : model.panelStatistics(input, rows,true);
   return { safety, data };
 }
-parentPort!.on("message", async ({ id, method, args, resume }) => {
+parentPort!.on("message", async ({ id, method, args, resume, writeGranted: granted, stop }) => {
+  if (stop) { stopping = true; resumePreparation?.(); writeGranted?.(); if (!running) closeWorker(); return; }
+  if (granted !== undefined) { const resolve = writeGranted; writeGranted = undefined; resolve?.(); return; }
   if (resume !== undefined) {
     const continuePreparation = resumePreparation;
     resumePreparation = undefined;
     continuePreparation?.();
     return;
   }
+  running = true;
   try {
+    checkStopped();
     const parts = partsFor(method,args);
+    const stats = method === "stats" || method === "overviewStats";
+    const initialSafety = panelSafetyToken(db.db);
     // A source write racing preparation is retried before entering the read snapshot.
     let attempts = 0;
     while (true) {
-      if (method === "logDetail") ensurePanelLogIds(cacheWriter,[args[0]]);
-      await prepare(parts, method === "stats" || method === "overviewStats" ? id : undefined);
+      if (method === "logDetail") await writeBatch(id, () => ensurePanelLogIds(cacheWriter,[args[0]]));
+      await prepare(parts, id, method === "stats" || method === "overviewStats" ? id : undefined);
       db.db.exec("BEGIN");
-      if (!(method === "logDetail" ? panelLogIdsPending(db.db,[args[0]]) : panelCachePending(db.db, parts)))
+      if (stats || !(method === "logDetail" ? panelLogIdsPending(db.db,[args[0]]) : panelCachePending(db.db, parts)))
         break;
       db.db.exec("ROLLBACK");
       if (++attempts >= 8)
         throw new MemoryServiceError("conflict", "Panel changed during preparation; retry");
     }
+    checkStopped();
+    if (stats && panelSafetyToken(db.db) !== initialSafety) throw new MemoryServiceError("conflict", "Panel visibility changed during preparation");
     const result = method === "stats" || method === "overviewStats"
       ? await statistics(method, args[0])
       : (() => {
@@ -125,4 +164,5 @@ parentPort!.on("message", async ({ id, method, args, resume }) => {
       }
     });
   }
+  finally { running = false; if (stopping) closeWorker(); }
 });
