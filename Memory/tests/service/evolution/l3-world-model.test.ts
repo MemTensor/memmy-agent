@@ -390,8 +390,11 @@ describe("L3 World Model trace field pipeline", () => {
         userId: `stale-${changedBase}`,
         projectId: opened.projectId,
         targetField: "project_environment_profile",
-        value: "profile-v1"
+        value: "profile-v1",
+        projectEnvironmentAppliedScanId: "profile-scan"
       });
+      db.db.prepare("UPDATE l3_world_model_project_environment_state SET applied_scan_id='profile-scan' WHERE project_id=?")
+        .run(opened.projectId);
       if (changedBase === "owner field") {
         repos.l3WorldModels.upsertField({
           userId: `stale-${changedBase}`,

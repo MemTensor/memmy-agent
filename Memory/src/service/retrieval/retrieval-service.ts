@@ -2424,6 +2424,7 @@ export class RetrievalService {
         } catch { diagnostic.stopReason = "error"; break; }
         diagnostic.rounds++;
         if (!window) hasMore = batch.length > take;
+        else if (batch.length >= take && window.length > take) hasMore = true;
         // A full ranked batch can leave lower scoring hits inside this same window.
         // Only discard the entire window after all of its positive hits were returned.
         const scanned = window && batch.length < take ? window : batch.slice(0, take).map(hit => hit.id);

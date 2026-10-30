@@ -24,6 +24,7 @@ function legacyWorld(repos: Repositories, owner: string, value: string, projectI
     .run(owner, l3WorldModelMemoryKey(owner, projectId), memory.id);
   repos.db.prepare("UPDATE l3_world_model_scopes SET user_id = ?, scope_key = ? WHERE memory_id = ?")
     .run(owner, l3WorldModelScopeKey(owner, projectId), memory.id);
+  repos.db.prepare("DELETE FROM runtime_kv WHERE key LIKE 'l3_field_override_v1:%'").run();
   return memory.id;
 }
 
@@ -64,7 +65,7 @@ describe("device memory / UID decoupling", () => {
     const reopened = createTestMemoryService({ db: reopenedDb });
     const reloaded = reopened.l3WorldModelContext(opened.sessionId, { requestId: crypto.randomUUID(), adapterId: "test", namespace: namespace("account-b") });
     expect(reloaded.renderedContext).toContain("New device rule");
-    expect(reloaded.renderedContext).toContain("Keep historical rule A");
+    expect(reloaded.renderedContext).not.toContain("Keep historical rule A");
     expect(historicalRows(new Repositories(reopenedDb.db))).toEqual(before);
   });
 
@@ -107,9 +108,10 @@ describe("device memory / UID decoupling", () => {
     const workspaceUri = "file:///tmp/same-project" as const;
     const workspaceHostId = deriveWorkspaceHostId("host");
     const old = service.openSession({ ...v2("account-a", "legacy-project-session"), workspaceUri, workspaceHostId });
-    // Restore historical UID-derived project identity without asking production code to rewrite it.
-    db.db.prepare("UPDATE sessions SET user_id = 'account-a', project_id = 'legacy-project' WHERE id = ?").run(old.sessionId);
-    legacyWorld(repos, "account-a", "Legacy project contract", "legacy-project");
+    // Restore a verifiable historical UID-derived project identity.
+    const legacyProject = `ws_${sha256Hex(`account-a\0local\0${workspaceHostId}\0${workspaceUri}`)}`;
+    db.db.prepare("UPDATE sessions SET user_id = 'account-a', project_id = ? WHERE id = ?").run(legacyProject, old.sessionId);
+    legacyWorld(repos, "account-a", "Legacy project contract", legacyProject);
     const unrelated = service.openSession({ ...v2("account-b", "other-host"), workspaceUri, workspaceHostId: deriveWorkspaceHostId("other-host") });
     legacyWorld(repos, "account-b", "Other host secret", unrelated.projectId!);
     const fresh = service.openSession({ ...v2("account-c", "fresh-project-session"), workspaceUri, workspaceHostId });

@@ -76,10 +76,8 @@ export class ProjectEnvironmentProfilePipeline {
     const state = this.deps.repos.projectEnvironments.getState(payload.userId, payload.projectId);
     if (!state || state.currentScanId !== payload.scanId) return;
 
-    const currentProfile = this.deps.repos.l3WorldModels.fields(
-      payload.userId,
-      payload.projectId
-    ).projectEnvironmentProfile;
+    const snapshot = this.deps.repos.l3WorldModels.effectiveFields(payload.projectId);
+    const currentProfile = snapshot.fields.projectEnvironmentProfile;
     const evidenceSupportsProfile = projectEnvironmentEvidenceSupportsProfile(derived);
     const basePrompt = derived.projectKind === "code" ? CODE_PROFILE_PROMPT : FOLDER_PROFILE_PROMPT;
     const language = currentProfile?.trim()
@@ -125,6 +123,7 @@ export class ProjectEnvironmentProfilePipeline {
       projectKind: derived.projectKind,
       fingerprint: derived.fingerprint,
       expectedCurrentProfile: currentProfile,
+      expectedCurrentRevision: snapshot.revisions.projectEnvironmentProfile,
       operation: output.op,
       profile: output.profile
     });

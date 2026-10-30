@@ -75,7 +75,13 @@ export class L3WorldModelTraceFieldPipeline {
       throw new L3WorldModelTerminalEvidenceError("L3 World Model batch payload hash mismatch");
     }
 
-    const fields = this.deps.repos.l3WorldModels.fields(batch.userId, batch.projectId);
+    const snapshot = this.deps.repos.l3WorldModels.effectiveFields(batch.projectId ?? null);
+    const fields = snapshot.fields;
+    const fieldProperty = payload.targetField === "general_rules_and_safety_constraints" ? "generalRulesAndSafetyConstraints"
+      : payload.targetField === "project_contract" ? "projectContract" : "domainKnowledge";
+    const expectedFieldRevision = snapshot.revisions[fieldProperty];
+    const expectedProfileRevision = payload.targetField === "general_rules_and_safety_constraints"
+      ? undefined : snapshot.revisions.projectEnvironmentProfile;
     const currentField = fieldValue(fields, payload.targetField) ?? "";
     const profile = fields.projectEnvironmentProfile ?? "";
     const expectedFieldHash = sha256Hex(currentField);
@@ -94,6 +100,8 @@ export class L3WorldModelTraceFieldPipeline {
         operation: "noop",
         value: "",
         expectedFieldHash,
+        expectedFieldRevision,
+        expectedProfileRevision,
         expectedProfileHash,
         eligibleL1MemoryIds: evidence.eligibleL1MemoryIds
       });
@@ -124,6 +132,8 @@ export class L3WorldModelTraceFieldPipeline {
       operation: output.op,
       value: output.value,
       expectedFieldHash,
+      expectedFieldRevision,
+      expectedProfileRevision,
       expectedProfileHash,
       eligibleL1MemoryIds: evidence.eligibleL1MemoryIds
     });

@@ -139,6 +139,12 @@ function fixture(
   const repos = {
     projectEnvironments: { getState, applyProfile },
     l3WorldModels: {
+      effectiveFields: vi.fn().mockReturnValue({fields: {
+        generalRulesAndSafetyConstraints: null,
+        projectEnvironmentProfile: currentProfile,
+        projectContract: null,
+        domainKnowledge: null
+      }, revisions: {projectEnvironmentProfile:"profile-revision"}, memories: []}),
       fields: vi.fn().mockReturnValue({
         generalRulesAndSafetyConstraints: null,
         projectEnvironmentProfile: currentProfile,

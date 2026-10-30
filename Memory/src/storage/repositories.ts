@@ -1,4 +1,4 @@
-import { sharedProjectIds } from "../service/namespace/shared-project.js";
+import { sharedProjectIds, sharedProjectIdentity } from "../service/namespace/shared-project.js";
 import { DEVICE_MEMORY_OWNER } from "../service/namespace/memory-owner.js";
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
@@ -1622,8 +1622,9 @@ export class UserMemoryRepository {
   }
 
   private activeWhere(userId: string, options: UserMemoryRecallOptions = {}) {
-    const clauses = ["user_memories.user_id = ?", "user_memories.status = 'active'", "user_memories.deleted_at IS NULL"];
-    const params: SqlValue[] = [userId];
+    void userId; // Historical owner is provenance, not a device read boundary.
+    const clauses = ["user_memories.status = 'active'", "user_memories.deleted_at IS NULL"];
+    const params: SqlValue[] = [];
     if (options.excludedIds?.length) {
       clauses.push("user_memories.id NOT IN (SELECT value FROM json_each(?))");
       params.push(toJson(options.excludedIds));
@@ -5656,6 +5657,12 @@ export class L3WorldModelScopeWorkspaceConflictError extends Error {
   }
 }
 
+function l3FieldStateKey(projectId: string | null, field: L3WorldModelFieldName): string {
+  return `l3_field_override_v1:${JSON.stringify([projectId, field])}`;
+}
+
+const L3_FIELD_NAMES: L3WorldModelFieldName[] = ["general_rules_and_safety_constraints", "project_environment_profile", "project_contract", "domain_knowledge"];
+
 export class L3WorldModelRepository {
   constructor(
     private readonly db: Database.Database,
@@ -5882,20 +5889,76 @@ export class L3WorldModelRepository {
   sharedMemories(projectId: string | null): MemoryRow[] {
     const projects = sharedProjectIds(this.db, projectId);
     const rows = this.db.prepare(`
-      SELECT memory_id FROM l3_world_model_scopes
+      SELECT memory_id, user_id, project_id FROM l3_world_model_scopes
       WHERE ${projectId === null ? "project_id IS NULL" : `project_id IN (${projects.map(() => "?").join(",")})`}
       AND memory_id IS NOT NULL ORDER BY scope_key
-    `).all(...(projectId === null ? [] : projects)) as Array<{ memory_id: string }>;
+    `).all(...(projectId === null ? [] : projects)) as Array<{ memory_id: string; user_id: string; project_id: string | null }>;
     return rows.flatMap(row => {
       const memory = this.memories.get(row.memory_id);
-      return memory && memory.status === "activated" && !memory.deletedAt && isL3WorldModelV2Memory(memory)
-        ? [memory] : [];
+      if (!memory || memory.status !== "activated" || memory.deletedAt || !isL3WorldModelV2Memory(memory)) return [];
+      validateL3WorldModelMemory(memory, row.user_id, row.project_id);
+      return [memory];
     });
   }
 
+  /** One effective-field rule for model input, context injection and commit checks. */
+  effectiveFields(projectId: string | null): {fields: L3WorldModelFields; memories: MemoryRow[]; revisions: Record<keyof L3WorldModelFields, string>} {
+    const memories = this.sharedMemories(projectId);
+    const canonicalProject = sharedProjectIdentity(this.db, projectId).deviceProjectId;
+    const fields = emptyL3WorldModelFields();
+    const revisions = {} as Record<keyof L3WorldModelFields, string>;
+    const used = new Map<string, MemoryRow>();
+    for (const target of L3_FIELD_NAMES) {
+      const property = l3WorldModelFieldProperty(target);
+      const marker = this.db.prepare("SELECT value_json FROM runtime_kv WHERE key = ?")
+        .get(l3FieldStateKey(canonicalProject, target)) as {value_json:string} | undefined;
+      let candidates: MemoryRow[];
+      if (marker) {
+        const state = parseJson<{memoryId?: string; cleared: boolean; revision: string} | undefined>(marker.value_json, undefined);
+        if (!state || typeof state.cleared !== "boolean" || typeof state.revision !== "string") throw new Error("corrupt L3 field override");
+        const memory = state.memoryId ? this.memories.get(state.memoryId) : undefined;
+        candidates = state.cleared ? [] : memories.filter(row => row.id === memory?.id && row.userId === DEVICE_MEMORY_OWNER);
+        // An explicit clear never falls back to historical content.
+        revisions[property] = state.revision;
+      } else {
+        const device = memories.filter(row => row.userId === DEVICE_MEMORY_OWNER && fieldsFromL3WorldModelMemory(row)[property] !== null);
+        candidates = device.length ? device.slice(0, 1) : memories.filter(row => row.userId !== DEVICE_MEMORY_OWNER);
+        revisions[property] = "unwritten";
+      }
+      const values: string[] = [];
+      for (const memory of candidates) {
+        const value = fieldsFromL3WorldModelMemory(memory)[property];
+        if (value === null) continue;
+        if (target === "project_environment_profile") {
+          const storedProject = memory.info.project_id;
+          const scanId = memory.info.project_environment_applied_scan_id;
+          if (typeof storedProject !== "string" || typeof scanId !== "string" || !scanId) continue;
+          const applied = this.db.prepare(`SELECT applied_scan_id FROM l3_world_model_project_environment_state
+            WHERE user_id = ? AND project_id = ?`).get(memory.userId, storedProject) as {applied_scan_id:string | null} | undefined;
+          if (applied?.applied_scan_id !== scanId) continue;
+        }
+        values.push(value); used.set(memory.id, memory);
+      }
+      fields[property] = values.length ? values.join("\n\n") : null;
+      revisions[property] = sha256Hex(canonicalJson([revisions[property]!, fields[property]]));
+    }
+    return {fields, memories: [...used.values()], revisions};
+  }
+
   fields(userId: string, projectId?: string | null): L3WorldModelFields {
-    const memory = this.getMemory(userId, projectId);
-    return memory ? fieldsFromL3WorldModelMemory(memory) : emptyL3WorldModelFields();
+    void userId;
+    return this.effectiveFields(projectId ?? null).fields;
+  }
+
+  private fieldStateKey(projectId: string | null, field: L3WorldModelFieldName): string {
+    const canonical = sharedProjectIdentity(this.db, projectId).deviceProjectId;
+    return l3FieldStateKey(canonical, field);
+  }
+
+  private recordFieldState(projectId: string | null, field: L3WorldModelFieldName, cleared: boolean, at: string, memoryId?: string): void {
+    this.db.prepare(`INSERT INTO runtime_kv (key,value_json,updated_at) VALUES (?,?,?)
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+      .run(this.fieldStateKey(projectId, field), toJson({cleared, memoryId, revision:newId("l3revision")}), at);
   }
 
   upsertField(input: {
@@ -5918,6 +5981,8 @@ export class L3WorldModelRepository {
     value: string;
     expectedFieldHash: string;
     expectedProfileHash?: string;
+    expectedFieldRevision?: string;
+    expectedProfileRevision?: string;
     eligibleL1MemoryIds: string[];
     at?: string;
   }): ApplyL3WorldModelTraceTargetResult {
@@ -5946,7 +6011,12 @@ export class L3WorldModelRepository {
       }
       assertL3WorldModelFieldOwnership(batch.projectId ?? null, input.targetField);
 
-      const fields = this.fields(batch.userId, batch.projectId);
+      const snapshot = this.effectiveFields(batch.projectId ?? null);
+      const fields = snapshot.fields;
+      if ((input.expectedFieldRevision !== undefined && snapshot.revisions[l3WorldModelFieldProperty(input.targetField)] !== input.expectedFieldRevision) ||
+          (input.expectedProfileRevision !== undefined && snapshot.revisions.projectEnvironmentProfile !== input.expectedProfileRevision)) {
+        throw new Error("stale_l3_base");
+      }
       const currentField = fields[l3WorldModelFieldProperty(input.targetField)];
       if (sha256Hex(currentField ?? "") !== input.expectedFieldHash) {
         throw new Error("stale_l3_base");
@@ -6008,6 +6078,11 @@ export class L3WorldModelRepository {
       const before = this.memories.get(memoryId);
       if (!before) throw new Error(`corrupt L3 World Model scope memory: ${memoryId}`);
       validateL3WorldModelMemory(before, scope.userId, scope.projectId);
+      for (const field of L3_FIELD_NAMES) {
+        if ((scope.projectId == null) === (field === "general_rules_and_safety_constraints")) {
+          this.recordFieldState(scope.projectId ?? null, field, true, at);
+        }
+      }
       const deleted = this.memories.softDelete(memoryId, at);
       if (!deleted) throw new Error(`failed to delete L3 World Model memory: ${memoryId}`);
       this.db.prepare(
@@ -6285,7 +6360,10 @@ export class L3WorldModelRepository {
     const property = l3WorldModelFieldProperty(input.targetField);
     fields[property] = normalizeL3WorldModelFieldValue(input.value);
     const memoryValue = renderL3WorldModelFields(fields);
-    if (!existing && !memoryValue) return undefined;
+    if (!existing && !memoryValue) {
+      this.recordFieldState(projectId, input.targetField, true, at);
+      return undefined;
+    }
 
     const existingSourceMemoryIds = l3WorldModelSourceMemoryIds(existing);
     const sourceMemoryIds = input.eligibleL1MemoryIds === undefined
@@ -6353,6 +6431,7 @@ export class L3WorldModelRepository {
       deletedAt: null
     };
     const saved = existing ? this.memories.update(memory) : this.memories.insert(memory);
+    this.recordFieldState(projectId, input.targetField, fields[property] === null, at, saved.id);
     this.db.prepare(
       `UPDATE l3_world_model_scopes SET memory_id = ?, updated_at = ? WHERE scope_key = ?`
     ).run(saved.id, at, scope.scopeKey);
@@ -6549,6 +6628,7 @@ export class ProjectEnvironmentRepository {
     projectKind: Exclude<ProjectEnvironmentKind, "unknown">;
     fingerprint: string;
     expectedCurrentProfile: string | null;
+    expectedCurrentRevision?: string;
     operation: "noop" | "create" | "update";
     profile: string;
     at?: string;
@@ -6557,8 +6637,9 @@ export class ProjectEnvironmentRepository {
       const at = input.at ?? nowIso();
       const state = this.getState(input.userId, input.projectId);
       if (!state || state.currentScanId !== input.scanId) return { stale: true };
-      const currentProfile = this.l3WorldModels.fields(input.userId, input.projectId).projectEnvironmentProfile;
-      if (currentProfile !== input.expectedCurrentProfile) {
+      const snapshot = this.l3WorldModels.effectiveFields(input.projectId);
+      const currentProfile = snapshot.fields.projectEnvironmentProfile;
+      if (currentProfile !== input.expectedCurrentProfile || (input.expectedCurrentRevision !== undefined && snapshot.revisions.projectEnvironmentProfile !== input.expectedCurrentRevision)) {
         throw new Error("project_environment_profile_concurrent_update");
       }
       const typeChanged = state.projectKind !== "unknown" && state.projectKind !== input.projectKind;
@@ -6583,7 +6664,8 @@ export class ProjectEnvironmentRepository {
 
       const emptyNoop = input.operation === "noop" && nextProfile === null;
       const existingMemory = this.l3WorldModels.getMemory(input.userId, input.projectId);
-      if (!emptyNoop && (nextProfile !== null || existingMemory)) {
+      if (input.operation !== "noop" || (!emptyNoop && existingMemory &&
+          fieldsFromL3WorldModelMemory(existingMemory).projectEnvironmentProfile !== null)) {
         this.l3WorldModels.upsertField({
           userId: input.userId,
           projectId: input.projectId,
