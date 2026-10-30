@@ -736,6 +736,29 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
+  /** Read maintenance source fields without materializing vector blobs. */
+  getWithoutVectors(id: string): MemoryRow | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL`)
+      .get(id) as MemorySqlRow | undefined;
+    return row ? memoryFromSql(row) : undefined;
+  }
+
+  /** Batch variant for target progress checks; memory vectors live in a separate table. */
+  getManyWithoutVectors(ids: readonly string[]): MemoryRow[] {
+    if (ids.length === 0) return [];
+    const statement = this.db.prepare(`
+      SELECT * FROM memories
+      WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) AND deleted_at IS NULL
+    `);
+    const rows: MemorySqlRow[] = [];
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      rows.push(...statement.all(toJson(ids.slice(offset, offset + 500))) as MemorySqlRow[]);
+    }
+    const byId = new Map(rows.map(row => [row.id, memoryFromSql(row)]));
+    return ids.map(id => byId.get(id)).filter((item): item is MemoryRow => Boolean(item));
+  }
+
   getIncludingDeleted(id: string): MemoryRow | undefined {
     const row = this.db
       .prepare(`SELECT * FROM memories WHERE id = ?`)
@@ -1734,12 +1757,56 @@ export class UserMemoryRepository {
   }
 
   embeddingMaintenanceEntries(userId: string): EmbeddingMaintenanceEntry[] {
-    return this.db.prepare(`
+    const statement = this.db.prepare(`
       SELECT id, 'user_memory' AS kind, COALESCE(json_array_length(embedding_json), 0) AS dimension,
              embedding_model AS embeddingModel, embedding_provider AS embeddingProvider
-      FROM user_memories WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+      FROM user_memories
+      WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL AND id > ?
+      ORDER BY id LIMIT ?
+    `);
+    const entries: EmbeddingMaintenanceEntry[] = [];
+    let afterId = "";
+    const pageSize = 500;
+    while (true) {
+      const page = statement.all(userId, afterId, pageSize) as EmbeddingMaintenanceEntry[];
+      entries.push(...page);
+      if (page.length < pageSize) break;
+      afterId = page[page.length - 1]!.id;
+    }
+    return entries;
+  }
+
+  embeddingMaintenanceEntriesByIds(userId: string, ids: readonly string[]): EmbeddingMaintenanceEntry[] {
+    if (ids.length === 0) return [];
+    const statement = this.db.prepare(`
+      SELECT id, 'user_memory' AS kind, COALESCE(json_array_length(embedding_json), 0) AS dimension,
+             embedding_model AS embeddingModel, embedding_provider AS embeddingProvider
+      FROM user_memories
+      WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+        AND id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
       ORDER BY id
-    `).all(userId) as EmbeddingMaintenanceEntry[];
+    `);
+    const entries: EmbeddingMaintenanceEntry[] = [];
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      entries.push(...statement.all(userId, JSON.stringify(ids.slice(offset, offset + 500))) as EmbeddingMaintenanceEntry[]);
+    }
+    return entries.sort((left, right) => left.id === right.id ? 0 : left.id < right.id ? -1 : 1);
+  }
+
+  embeddingMaintenanceSourcesByIds(ids: readonly string[]): Array<{ id: string; content: string; status: string }> {
+    if (ids.length === 0) return [];
+    const statement = this.db.prepare(`
+      SELECT id, content, status FROM user_memories
+      WHERE status = 'active' AND deleted_at IS NULL
+        AND id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+    `);
+    const sources: Array<{ id: string; content: string; status: string }> = [];
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      sources.push(...statement.all(toJson(ids.slice(offset, offset + 500))) as Array<{
+        id: string; content: string; status: string
+      }>);
+    }
+    return sources;
   }
 
   embeddingDimensionCounts(userId: string): {
@@ -3988,6 +4055,19 @@ export class RuntimeRepository {
     return row ? jobFromSql(row) : undefined;
   }
 
+  getJobs(ids: readonly string[]): EvolutionJobRecord[] {
+    if (ids.length === 0) return [];
+    const statement = this.db.prepare(`
+      SELECT * FROM evolution_jobs
+      WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+    `);
+    const rows: SqlJobRow[] = [];
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      rows.push(...statement.all(toJson(ids.slice(offset, offset + 500))) as SqlJobRow[]);
+    }
+    return rows.map(jobFromSql);
+  }
+
   getActiveJobByDedupeKey(dedupeKey: string): EvolutionJobRecord | undefined {
     const row = this.db
       .prepare(
@@ -4556,6 +4636,19 @@ export class RuntimeRepository {
     return row ? embeddingRetryFromSql(row) : undefined;
   }
 
+  getEmbeddingRetries(ids: readonly string[]): EmbeddingRetryRecord[] {
+    if (ids.length === 0) return [];
+    const statement = this.db.prepare(`
+      SELECT * FROM embedding_retry_queue
+      WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+    `);
+    const rows: SqlEmbeddingRetryRow[] = [];
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      rows.push(...statement.all(toJson(ids.slice(offset, offset + 500))) as SqlEmbeddingRetryRow[]);
+    }
+    return rows.map(embeddingRetryFromSql);
+  }
+
   getEmbeddingRetryByTarget(
     targetKind: EmbeddingRetryTargetKind,
     targetId: string,
@@ -4629,31 +4722,101 @@ export class RuntimeRepository {
     return row;
   }
 
-  embeddingMaintenanceQueueStats(
-    userId: string,
-    now = Date.now(),
-    isCurrentWork: (task: EmbeddingMaintenanceTask) => boolean = () => true
-  ): {
-    pending: number;
-    active: number;
-    stale: number;
-    failed: number;
-  } {
+  /** Every unresolved embedding queue row, across all users. Global statistics only. */
+  embeddingMaintenanceTasks(userId: string, now = Date.now()): EmbeddingMaintenanceTask[] {
     const at = new Date(now).toISOString();
-    const retries = this.db.prepare(
+    const pageSize = 500;
+    const retries: Array<Pick<SqlEmbeddingRetryRow,
+      "target_id" | "vector_field" | "source_text" | "status" | "claimed_by" | "lease_until" | "updated_at">> = [];
+    const retryPage = this.db.prepare(
+      `SELECT id, target_id, vector_field, source_text, status, claimed_by, lease_until, updated_at
+       FROM embedding_retry_queue
+       WHERE status != 'succeeded' AND id > ? ORDER BY id LIMIT ?`
+    );
+    let afterId = "";
+    while (true) {
+      const page = retryPage.all(afterId, pageSize) as Array<Pick<SqlEmbeddingRetryRow,
+        "id" | "target_id" | "vector_field" | "source_text" | "status" | "claimed_by" | "lease_until" | "updated_at">>;
+      retries.push(...page);
+      if (page.length < pageSize) break;
+      afterId = page[page.length - 1]!.id;
+    }
+
+    const jobs: Array<Pick<SqlJobRow,
+      "target_memory_id" | "job_type" | "payload_json" | "status" | "leased_until" | "updated_at"> & { memory_layer: string | null }> = [];
+    const jobPage = this.db.prepare(
+      `SELECT j.id, j.target_memory_id, j.job_type, j.payload_json, j.status, j.leased_until, j.updated_at,
+         m.memory_layer
+       FROM evolution_jobs j LEFT JOIN memories m ON m.id = j.target_memory_id
+       WHERE j.id > ? AND j.status != 'succeeded' AND (
+         j.job_type = 'embedding' OR (j.job_type = 'user_memory_embedding' AND j.user_id = ?))
+       ORDER BY j.id LIMIT ?`
+    );
+    afterId = "";
+    while (true) {
+      const page = jobPage.all(afterId, userId, pageSize) as Array<Pick<SqlJobRow,
+        "id" | "target_memory_id" | "job_type" | "payload_json" | "status" | "leased_until" | "updated_at"> & { memory_layer: string | null }>;
+      jobs.push(...page);
+      if (page.length < pageSize) break;
+      afterId = page[page.length - 1]!.id;
+    }
+    return this.embeddingTasksFromRows(retries, jobs, now, at);
+  }
+
+  /**
+   * Unresolved queue rows for a fixed target set. Target progress must not pay
+   * for unrelated retry history, so this never reads rows outside `ids`.
+   */
+  embeddingMaintenanceTasksForTargets(input: {
+    memoryIds: readonly string[];
+    userMemoryIds: readonly string[];
+    now?: number;
+  }): EmbeddingMaintenanceTask[] {
+    const memoryIds = [...new Set(input.memoryIds)];
+    const userMemoryIds = [...new Set(input.userMemoryIds)];
+    if (memoryIds.length === 0 && userMemoryIds.length === 0) return [];
+    const now = input.now ?? Date.now();
+    const at = new Date(now).toISOString();
+    const retries: Array<Pick<SqlEmbeddingRetryRow,
+      "target_id" | "vector_field" | "source_text" | "status" | "claimed_by" | "lease_until" | "updated_at">> = [];
+    const retryStatement = this.db.prepare(
       `SELECT target_id, vector_field, source_text, status, claimed_by, lease_until, updated_at
-       FROM embedding_retry_queue WHERE status != 'succeeded'`
-    ).all() as Array<Pick<SqlEmbeddingRetryRow,
-      "target_id" | "vector_field" | "source_text" | "status" | "claimed_by" | "lease_until" | "updated_at">>;
-    const jobs = this.db.prepare(
+       FROM embedding_retry_queue
+       WHERE status != 'succeeded'
+         AND target_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))`
+    );
+    for (let offset = 0; offset < memoryIds.length; offset += 500) {
+      retries.push(...retryStatement.all(toJson(memoryIds.slice(offset, offset + 500))) as Array<Pick<SqlEmbeddingRetryRow,
+        "target_id" | "vector_field" | "source_text" | "status" | "claimed_by" | "lease_until" | "updated_at">>);
+    }
+
+    const jobs: Array<Pick<SqlJobRow,
+      "target_memory_id" | "job_type" | "payload_json" | "status" | "leased_until" | "updated_at"> & { memory_layer: string | null }> = [];
+    const jobStatement = this.db.prepare(
       `SELECT j.target_memory_id, j.job_type, j.payload_json, j.status, j.leased_until, j.updated_at,
          m.memory_layer
        FROM evolution_jobs j LEFT JOIN memories m ON m.id = j.target_memory_id
-       WHERE j.status != 'succeeded' AND (
-         j.job_type = 'embedding' OR (j.job_type = 'user_memory_embedding' AND j.user_id = ?))`
-    ).all(userId) as Array<Pick<SqlJobRow,
-      "target_memory_id" | "job_type" | "payload_json" | "status" | "leased_until" | "updated_at"> & { memory_layer: string | null }>;
-    const tasks: EmbeddingMaintenanceTask[] = [
+       WHERE j.status != 'succeeded' AND j.job_type = ?
+         AND j.target_memory_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))`
+    );
+    for (const [jobType, ids] of [["embedding", memoryIds], ["user_memory_embedding", userMemoryIds]] as const) {
+      for (let offset = 0; offset < ids.length; offset += 500) {
+        jobs.push(...jobStatement.all(jobType, toJson(ids.slice(offset, offset + 500))) as Array<Pick<SqlJobRow,
+          "target_memory_id" | "job_type" | "payload_json" | "status" | "leased_until" | "updated_at"> & { memory_layer: string | null }>);
+      }
+    }
+    return this.embeddingTasksFromRows(retries, jobs, now, at);
+  }
+
+  private embeddingTasksFromRows(
+    retries: ReadonlyArray<Pick<SqlEmbeddingRetryRow,
+      "target_id" | "vector_field" | "source_text" | "status" | "claimed_by" | "lease_until" | "updated_at">>,
+    jobs: ReadonlyArray<Pick<SqlJobRow,
+      "target_memory_id" | "job_type" | "payload_json" | "status" | "leased_until" | "updated_at"> & { memory_layer: string | null }>,
+    now: number,
+    at: string
+  ): EmbeddingMaintenanceTask[] {
+    return [
       ...retries.map(row => ({
         targetId: row.target_id, userMemory: false, vectorField: row.vector_field,
         sourceText: row.source_text, updatedAt: new Date(row.updated_at).toISOString(),
@@ -4673,17 +4836,19 @@ export class RuntimeRepository {
         }];
       })
     ];
-    const counts = { pending: 0, active: 0, stale: 0, failed: 0 };
-    const failures = new Set<string>();
-    for (const task of tasks) {
-      if (!isCurrentWork(task)) continue;
-      if (task.status === "failed") {
-        // History can contain multiple failures for the same still-unresolved target.
-        failures.add(`${task.userMemory ? "user" : "memory"}:${task.targetId}:${task.vectorField ?? "default"}`);
-      } else counts[task.status]++;
-    }
-    counts.failed = failures.size;
-    return counts;
+  }
+
+  embeddingMaintenanceQueueStats(
+    userId: string,
+    now = Date.now(),
+    isCurrentWork: (task: EmbeddingMaintenanceTask) => boolean = () => true
+  ): {
+    pending: number;
+    active: number;
+    stale: number;
+    failed: number;
+  } {
+    return countEmbeddingMaintenanceTasks(this.embeddingMaintenanceTasks(userId, now), isCurrentWork);
   }
 
   hasSuccessfulEmbeddingWork(input: {
@@ -8353,6 +8518,28 @@ interface SqlAuditLogRow {
   after_json: string | null;
   meta_json: string;
   created_at: string;
+}
+
+/**
+ * Fold embedding maintenance queue rows into the four counters the panel shows.
+ * Shared by the global statistics and the fixed-target progress read so both
+ * describe queue occupancy the same way.
+ */
+function countEmbeddingMaintenanceTasks(
+  tasks: readonly EmbeddingMaintenanceTask[],
+  isCurrentWork: (task: EmbeddingMaintenanceTask) => boolean = () => true
+): { pending: number; active: number; stale: number; failed: number } {
+  const counts = { pending: 0, active: 0, stale: 0, failed: 0 };
+  const failures = new Set<string>();
+  for (const task of tasks) {
+    if (!isCurrentWork(task)) continue;
+    if (task.status === "failed") {
+      // History can contain multiple failures for the same still-unresolved target.
+      failures.add(`${task.userMemory ? "user" : "memory"}:${task.targetId}:${task.vectorField ?? "default"}`);
+    } else counts[task.status]++;
+  }
+  counts.failed = failures.size;
+  return counts;
 }
 
 function jobFromSql(row: SqlJobRow): EvolutionJobRecord {

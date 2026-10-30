@@ -157,7 +157,7 @@ export interface WorkerRunnerDeps {
   configurationFingerprint?: () => string;
   beforeRun?: (request?: { targetMemoryIds?: readonly string[] }) => Promise<void>;
   maintenanceNextRunAtMs?: () => number | undefined;
-  afterRun?: () => void;
+  afterRun?: () => void | Promise<void>;
   scheduling?: WorkerSchedulingOptions;
   leases?: WorkerLeaseOptions;
   concurrency?: WorkerConcurrencyController;
@@ -489,7 +489,7 @@ export class WorkerRunner {
     return withoutJobLeaseGuard(() => this.scheduler.run(async () => {
       if (this.deps.beforeRun) await this.deps.beforeRun(request);
       const result = await execute();
-      this.deps.afterRun?.();
+      await this.deps.afterRun?.();
       return result;
     }));
   }

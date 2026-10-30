@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, type Embedder, type MemoryRow } from "../src/index.js";
 import { Repositories } from "../src/storage/repositories.js";
+import { SqliteVecStore } from "../src/storage/sqlite-vec-store.js";
 import { attachMemoryVector } from "../src/storage/memory-vector-state.js";
 import { rememberEmbeddingIdentity } from "../src/model/embedding-identity.js";
 import { buildUserMemory } from "../src/service/user-memory/user-memory.js";
@@ -8,7 +9,7 @@ import { createMemoryServiceFixture } from "./fixtures/memory-service-fixture.js
 import { adaptViewerResponse } from "../viewer/src/api/memmy-adapter.js";
 
 const fixture = createMemoryServiceFixture();
-afterEach(() => fixture.cleanup());
+afterEach(() => { vi.restoreAllMocks(); fixture.cleanup(); });
 const at = "2026-10-01T00:00:00.000Z";
 const identity = { provider: "openai_compatible", model: "current-model" } as const;
 const vector = (dimension = 3) => Array.from({ length: dimension }, (_, i) => i === 0 ? 1 : 0);
@@ -48,14 +49,29 @@ describe("embedding maintenance regressions (MEMMY-709–711)", () => {
     expect(adaptViewerResponse("POST", "/api/v1/embeddings/rebuild", {}, run)).toEqual(run);
     expect((await service.rebuildEmbeddings("repair")).runId).toBe(run.runId);
     await service.runWorkerOnce(200);
-    expect(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 1, failed: 0, pending: 0, done: true });
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 1, failed: 0, pending: 0, done: true });
     expect(inputs).toHaveLength(1);
     expect(repos.vectors.exportRows().filter(row => row.memory_id !== "m-0")).toEqual(before);
     const rebuild = await service.rebuildEmbeddings("rebuild");
     expect(rebuild.enqueued).toBe(55);
     await service.runWorkerOnce(200);
-    expect(service.embeddingMaintenanceProgress(rebuild.runId)).toMatchObject({ updated: 55, failed: 0, done: true });
+    expect(await service.embeddingMaintenanceProgress(rebuild.runId)).toMatchObject({ updated: 55, failed: 0, done: true });
     expect(inputs).toHaveLength(56);
+  });
+
+  it("shares a single fixed run when repair is started concurrently", async () => {
+    const { repos, service } = setup();
+    repos.memories.insert(memory("concurrent-repair"));
+
+    const runs = await Promise.all([
+      service.rebuildEmbeddings("repair"),
+      service.rebuildEmbeddings("repair"),
+      service.rebuildEmbeddings("repair")
+    ]);
+
+    expect(new Set(runs.map(run => run.runId)).size).toBe(1);
+    expect(runs.every(run => run.enqueued === 1 && run.pending === 1)).toBe(true);
+    expect(repos.runtime.listEmbeddingRetries()).toHaveLength(1);
   });
 
   it("rejects same-dimension old and unknown models in health and vector retrieval", async () => {
@@ -69,10 +85,25 @@ describe("embedding maintenance regressions (MEMMY-709–711)", () => {
     const query = rememberEmbeddingIdentity(vector(1024), identity);
     expect(repos.memories.searchVectorIds(query, "vec").map(hit => hit.id)).toEqual(["current"]);
     const run = await service.rebuildEmbeddings("repair");
-    expect(run.enqueued).toBe(4);
+    expect(run).toMatchObject({
+      enqueued: 4,
+      pending: 4,
+      statsAfter: { totalSlots: 4, needsRepair: 4, retryQueue: { pending: 4 } }
+    });
     await service.runWorkerOnce(200);
-    expect(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 4, done: true, statsAfter: { ready: 5, needsRepair: 0 } });
+    // `statsAfter` scopes to this run's own targets; machine-wide health comes
+    // from the separate statistics endpoint.
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 4, done: true, statsAfter: { totalSlots: 4, ready: 4, needsRepair: 0 } });
+    expect(await service.embeddingMaintenanceStats()).toMatchObject({ totalSlots: 5, ready: 5, needsRepair: 0 });
     expect(repos.memories.searchVectorIds(query, "vec")).toHaveLength(5);
+  });
+
+  it("serves the last complete global snapshot while the statistics worker is unavailable", async () => {
+    const { service } = setup();
+    const complete = await service.embeddingMaintenanceStats();
+    vi.spyOn(SqliteVecStore.prototype, "maintenanceEntries")
+      .mockImplementation(() => { throw new Error("synthetic statistics timeout"); });
+    await expect(service.embeddingMaintenanceStats()).resolves.toEqual(complete);
   });
 
   it("counts an existing L1 action independently from its missing summary vector", async () => {
@@ -95,14 +126,14 @@ describe("embedding maintenance regressions (MEMMY-709–711)", () => {
     const run = await service.rebuildEmbeddings("repair");
     expect(run).toMatchObject({ enqueued: 301, updated: 0, done: false });
     await service.runWorkerOnce(200);
-    const middle = service.embeddingMaintenanceProgress(run.runId)!;
+    const middle = (await service.embeddingMaintenanceProgress(run.runId))!;
     expect(middle.updated).toBeGreaterThan(0);
     expect(middle.updated).toBeLessThan(301);
     expect(middle.pending).toBe(301 - middle.updated);
     const reopened = fixture.createTestMemoryService({ db, embedder });
-    expect(reopened.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: middle.updated, pending: middle.pending });
-    for (let i = 0; i < 5 && !reopened.embeddingMaintenanceProgress(run.runId)!.done; i++) await reopened.runWorkerOnce(200);
-    expect(reopened.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 301, failed: 0, done: true });
+    expect(await reopened.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: middle.updated, pending: middle.pending });
+    for (let i = 0; i < 5 && !(await reopened.embeddingMaintenanceProgress(run.runId))!.done; i++) await reopened.runWorkerOnce(200);
+    expect(await reopened.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 301, failed: 0, done: true });
     expect(inputs).toHaveLength(301);
   });
 
@@ -118,9 +149,9 @@ describe("embedding maintenance regressions (MEMMY-709–711)", () => {
     const run = await service.rebuildEmbeddings("repair");
     const worker = service.runWorkerOnce(200);
     await started;
-    expect(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 0, pending: 1, done: false });
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 0, pending: 1, done: false });
     release(); await worker;
-    expect(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 1, pending: 0, done: true });
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 1, pending: 0, done: true });
   });
 
   it("reports retry waiting and terminal failures without inventing successful writes", async () => {
@@ -130,10 +161,10 @@ describe("embedding maintenance regressions (MEMMY-709–711)", () => {
     repos.memories.insert(memory("failure"));
     const run = await service.rebuildEmbeddings("repair");
     await service.runWorkerOnce(200);
-    expect(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 0, failed: 0, pending: 1, retrying: 1, done: false });
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 0, failed: 0, pending: 1, retrying: 1, done: false });
     db.db.prepare("UPDATE embedding_retry_queue SET max_attempts = 2, next_attempt_at = 0").run();
     await service.runWorkerOnce(200);
-    expect(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 0, failed: 1, pending: 0, done: true });
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 0, failed: 1, pending: 0, done: true });
     expect(repos.vectors.exportRows()).toHaveLength(0);
   });
 
@@ -147,7 +178,7 @@ describe("embedding maintenance regressions (MEMMY-709–711)", () => {
     expect(repos.userMemories.searchVectorIds("local-user", rememberEmbeddingIdentity(vector(), identity), 10).map(hit => hit.id)).toEqual(["healthy"]);
     const run = await service.rebuildEmbeddings("repair");
     await service.runWorkerOnce(200);
-    expect(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ enqueued: 1, updated: 1, failed: 0, done: true });
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ enqueued: 1, updated: 1, failed: 0, done: true });
     expect(repos.userMemories.get("foreign")!.embeddingModel).toBe("old-model");
   });
 
@@ -166,6 +197,6 @@ describe("embedding maintenance regressions (MEMMY-709–711)", () => {
     embedder.config.model = "new-model";
     release(); await worker;
     expect(repos.vectors.exportRows()[0]!.embedding_model).toBe(identity.model);
-    expect(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 0, done: true, error: expect.stringContaining("model changed"), statsAfter: { modelMismatch: 1 } });
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 0, done: true, error: expect.stringContaining("model changed"), statsAfter: { modelMismatch: 1 } });
   });
 });

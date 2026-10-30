@@ -5,13 +5,18 @@ const { cleanup, createTestService } = createMemoryServiceFixture();
 afterEach(cleanup);
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 describe("MemoryService model business shutdown", () => {
-  it("waits for both the panel reader and foreground business before stopping", async () => {
+  it("cancels display scans immediately and drains both readers and foreground business before stopping", async () => {
     const { db, service } = createTestService();
-    let releaseReader!:()=>void, releaseBusiness!:()=>void;
+    let releaseReader!:()=>void, releaseBusiness!:()=>void, releaseMaintenance!:()=>void;
     const readerGate = new Promise<void>(resolve=>{releaseReader=resolve;});
     const businessGate = new Promise<void>(resolve=>{releaseBusiness=resolve;});
+    const maintenanceGate = new Promise<void>(resolve=>{releaseMaintenance=resolve;});
     const readerStop = vi.fn(()=>readerGate);
+    const maintenanceStop = vi.fn(()=>maintenanceGate);
+    const cancelDisplay = vi.fn();
     (service as unknown as {panelReader:{stop:()=>Promise<void>}}).panelReader={stop:readerStop};
+    (service as unknown as {embeddingMaintenanceReader:{stop:()=>Promise<void>;cancelDiscardableStats:()=>void}})
+      .embeddingMaintenanceReader={stop:maintenanceStop,cancelDiscardableStats:cancelDisplay};
     const tasks = (service as unknown as {modelTasks:MemoryModelTaskRouter}).modelTasks;
     const business = tasks.run(async()=>{await businessGate;db.db.prepare("SELECT 1").get();});
     await tick();
@@ -19,9 +24,14 @@ describe("MemoryService model business shutdown", () => {
     const stop=service.stop().then(()=>{completed=true;});
     try {
       expect(readerStop).toHaveBeenCalledTimes(1);
+      expect(cancelDisplay).toHaveBeenCalledTimes(1);
+      expect(maintenanceStop).not.toHaveBeenCalled();
       releaseBusiness();await business;await tick();expect(completed).toBe(false);
-      releaseReader();await stop;expect(completed).toBe(true);
-    } finally { releaseBusiness();releaseReader();await Promise.all([business,stop]); }
+      expect(maintenanceStop).not.toHaveBeenCalled();
+      releaseReader();await tick();expect(completed).toBe(false);
+      expect(maintenanceStop).toHaveBeenCalledTimes(1);
+      releaseMaintenance();await stop;expect(completed).toBe(true);
+    } finally { releaseBusiness();releaseReader();releaseMaintenance();await Promise.all([business,stop]); }
   });
 
   it("rejects foreground shutdown reentry without stopping the service", async () => {

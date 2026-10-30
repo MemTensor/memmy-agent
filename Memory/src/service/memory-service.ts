@@ -3,6 +3,7 @@ import { PanelWriteCoordinator } from "./panel/write-coordinator.js";
 import {localPanelRequest} from "./panel/local-read.js";
 import { panelCacheRevision } from "../storage/panel-cache.js";
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
+import { EmbeddingMaintenanceReader } from "./embedding/embedding-maintenance-reader.js";
 import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
 import {PanelStats} from "./panel/stats.js";
 import { PanelReader } from "./panel/reader.js";
@@ -72,13 +73,10 @@ import {
   type ChangeLogRecord,
   type EpisodeRecord,
   type EvolutionJobRecord,
-  type EmbeddingMaintenanceTask,
   type RawTurnRecord,
   type SessionRecord
 } from "../storage/repositories.js";
 import type { SerializedMemoryVector } from "../storage/sqlite-vec-store.js";
-import { memoryVectorEntries } from "../storage/memory-vector-state.js";
-import { embeddingTextForMemory, traceSummaryEmbeddingText, traceActionEmbeddingText } from "./embedding/embedding-pipeline.js";
 import type {
   FeedbackRequest,
   HealthResponse,
@@ -196,7 +194,7 @@ import {
   repairEvidenceValueDiff as sessionRepairEvidenceValueDiff
 } from "./session/session-turn-service.js";
 import { SkillTrialResolver } from "./trials/skill-trial-resolver.js";
-import { WorkMemoryPipeline, canonicalWorkMemoryText } from "./work-memory/work-memory-pipeline.js";
+import { WorkMemoryPipeline } from "./work-memory/work-memory-pipeline.js";
 import { ObservationMemoryPipeline } from "./evidence/observation-memory-pipeline.js";
 import { lookupExternalEvidence, lookupExternalEvidenceSkill, externalEvidenceSourceMatchesMemory, externalEvidenceNamespaceForMemory } from "./external-evidence-source.js";
 import { observationMemoryState, isObservationMemoryProcessed, OBSERVATION_SUMMARY_MODEL_UNCONFIGURED } from "./observation-memory-state.js";
@@ -389,6 +387,7 @@ export class MemoryService {
   private readonly workMemory: WorkMemoryPipeline;
   private readonly observationMemory: ObservationMemoryPipeline;
   private readonly repos: Repositories;
+  private readonly embeddingMaintenanceReader: EmbeddingMaintenanceReader;
   private readonly startedAt = Date.now();
   private readonly mode: "local" | "cloud" | "dev";
   private config: MemmyConfig;
@@ -432,6 +431,12 @@ export class MemoryService {
     this.concurrency = options.concurrency ?? new WorkerConcurrencyController();
     this.viewerEndpoint = options.viewerEndpoint;
     this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
+    // Match the repositories' own connection: a pre-built backend owns the file,
+    // and production servers are wired that way rather than with a raw `db`.
+    this.embeddingMaintenanceReader = new EmbeddingMaintenanceReader({
+      repos: this.repos,
+      sqlitePath: options.backend?.sqlitePath ?? options.db?.path
+    });
     this.workerMetrics = options.observability ?? new WorkerObservability({
       queueSnapshot: (at) => readWorkerQueueMetrics(this.repos.db, at)
     });
@@ -704,8 +709,8 @@ export class MemoryService {
       },
       maintenanceNextRunAtMs: () => this.config.algorithm.enableMemoryAdd && !this.shouldDeferBudgetedEmbedding()
         ? this.embeddingMaintenance().nextUpgradeAttemptAt() : undefined,
-      afterRun: () => {
-        if (this.config.algorithm.enableMemoryAdd) this.embeddingMaintenance().upgradeProgress();
+      afterRun: async () => {
+        if (this.config.algorithm.enableMemoryAdd) await this.embeddingMaintenance().upgradeProgress();
         this.reconcileAutomaticHistorySkills(nowIso());
       },
       nowIso,
@@ -922,7 +927,13 @@ export class MemoryService {
     this.panelWrites.close();
     clearTimeout(this.panelWarmupTimer);
     const readerStopped = this.panelReader?.stop();
-    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped]).then(() => {
+    // A display-only scan is safe to recompute and must not keep running while
+    // other accepted work drains during shutdown.
+    this.embeddingMaintenanceReader.cancelDiscardableStats();
+    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped]).then(async () => {
+      // Reads that a maintenance run depends on get a bounded grace period before
+      // the worker is terminated, so shutdown cannot hang on a stuck scan.
+      await this.embeddingMaintenanceReader.stop();
       this.stopConcurrencyMetrics();
       this.workerMetrics.stop();
     });
@@ -3390,9 +3401,9 @@ export class MemoryService {
   private embeddingMaintenance(): EmbeddingMaintenance {
     return new EmbeddingMaintenance({
       repos: this.repos,
+      reader: this.embeddingMaintenanceReader,
       embedder: this.embedder,
       userId: this.config.userId?.trim() || "local-user",
-      currentWork: dimension => this.currentEmbeddingMaintenanceState(this.config.userId?.trim() || "local-user", dimension),
       enqueueMemory: (memory, text, at, vectorField = embeddingRetryVectorFieldForMemory(memory)) => {
         const existing = this.repos.runtime.getEmbeddingRetryByTarget(
           embeddingRetryTargetKindForMemory(memory), memory.id, vectorField
@@ -3423,79 +3434,14 @@ export class MemoryService {
 
   embeddingMaintenanceStats() {
     return this.withModelTaskContext(async () => {
+      let dimension: number;
       try {
-        return this.embeddingMaintenance().stats(await this.currentEmbeddingDimension());
+        dimension = await this.currentEmbeddingDimension();
       } catch (error) {
-        return { ...this.embeddingMaintenance().stats(0), dimensionError: error instanceof Error ? error.message : String(error) };
+        return { ...await this.embeddingMaintenance().stats(0), dimensionError: error instanceof Error ? error.message : String(error) };
       }
+      return this.embeddingMaintenance().stats(dimension);
     });
-  }
-
-  private currentEmbeddingMaintenanceState(userId: string, dimension: number) {
-    // Key by target and vector field so upstream action-vector maintenance also
-    // uses the same current-content checks as the panel and repair enqueueing.
-    const outdatedVectors = new Set<string>();
-    const memories = new Map<string, ReturnType<typeof this.repos.memories.get>>();
-    const userMemories = new Map<string, ReturnType<typeof this.repos.userMemories.get>>();
-    const model = this.embedder.config;
-    const isCurrentWork = (task: EmbeddingMaintenanceTask): boolean => {
-      const id = task.targetId;
-      // Pending, active and stale rows describe actual queue occupancy, even if
-      // their target was edited or deleted. Only historical failures are filtered.
-      const retainQueueRow = task.status !== "failed";
-      let vector: number[] | undefined;
-      let provider: string | null | undefined;
-      let embeddingModel: string | null | undefined;
-      let contentHash: string;
-      let sourceTexts: string[];
-      let vectorField = task.vectorField;
-      if (task.userMemory) {
-        if (!userMemories.has(id)) userMemories.set(id, this.repos.userMemories.get(id));
-        const memory = userMemories.get(id);
-        if (!memory || memory.status !== "active" || memory.deletedAt) return retainQueueRow;
-        contentHash = stableHash(memory.content);
-        vector = memory.embedding;
-        provider = memory.embeddingProvider;
-        embeddingModel = memory.embeddingModel;
-        sourceTexts = [memory.content];
-        vectorField = "vec";
-      } else {
-        if (!memories.has(id)) memories.set(id, this.repos.memories.get(id));
-        const memory = memories.get(id);
-        if (!memory || memory.status === "deleted" || memory.deletedAt) return retainQueueRow;
-        contentHash = memory.contentHash ?? stableHash(memory.memoryValue);
-        const primaryField = memory.memoryLayer === "L1" ? "vec_summary" : "vec";
-        vectorField ??= primaryField;
-        const entry = memoryVectorEntries(memory).find(value => value.vectorField === vectorField);
-        vector = entry?.vector;
-        provider = entry?.embeddingProvider;
-        embeddingModel = entry?.embeddingModel;
-        sourceTexts = (vectorField === "vec_action" ? [traceActionEmbeddingText(memory)]
-          : [memory.memoryValue, embeddingTextForMemory(memory), traceSummaryEmbeddingText(memory)])
-          .filter((text): text is string => text !== undefined);
-        if (kindFromMemory(memory) === "work_memory") {
-          const internal = memory.properties.internal_info;
-          sourceTexts.push(canonicalWorkMemoryText(
-            typeof internal.work_topic === "string" ? internal.work_topic : "Work requirements",
-            typeof internal.requirement === "string" ? internal.requirement : "",
-            typeof internal.reason === "string" ? internal.reason : ""
-          ));
-        }
-        if (task.sourceText && !sourceTexts.includes(task.sourceText)) return retainQueueRow;
-      }
-      if (task.contentHash && task.contentHash !== contentHash) return retainQueueRow;
-      // Merely retaining a vector does not prove current content was embedded.
-      if (dimension === 0 || vector?.length !== dimension ||
-          provider !== model.provider || embeddingModel !== (model.model ?? model.provider)) return true;
-      const completed = this.repos.runtime.hasSuccessfulEmbeddingWork({
-        targetId: id, userMemory: task.userMemory, vectorField,
-        contentHash, sourceTexts, since: task.updatedAt
-      });
-      if (!completed) outdatedVectors.add(`${task.userMemory ? "user_memory" : "memory"}:${id}:${vectorField}`);
-      return retainQueueRow || !completed;
-    };
-    const retryQueue = this.repos.runtime.embeddingMaintenanceQueueStats(userId, Date.now(), isCurrentWork);
-    return { retryQueue, outdatedVectors };
   }
 
   private currentEmbeddingDimension(): Promise<number> {
