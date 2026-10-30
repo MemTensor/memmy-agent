@@ -175,6 +175,7 @@ export interface MemoryRow {
 
 /** Narrow projection used by aggregate read models without loading memory payloads or vectors. */
 export interface MemoryStatsRow {
+  id: string;
   conversationId?: string;
   sessionId?: string;
   agentId?: string;

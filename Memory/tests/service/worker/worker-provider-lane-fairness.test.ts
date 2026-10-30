@@ -72,8 +72,11 @@ async function runSharedProvider(options: {
         maintenanceCompleted++;
         wakeMaintenance();
         if (!abort.signal.aborted) {
-          enqueueMaintenance();
-          if (options.blockedInteractive || options.blockedInteractiveScope) enqueueBlockedInteractive();
+          // Both synchronous refills are visible before model continuations run.
+          repos.transaction(() => {
+            enqueueMaintenance();
+            if (options.blockedInteractive || options.blockedInteractiveScope) enqueueBlockedInteractive();
+          });
         }
         return;
       }

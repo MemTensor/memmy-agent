@@ -1028,8 +1028,7 @@ async function stopOlderBundledMemoryRuntime(
   const bundledVersion = parseMemoryVersion(bundled.version);
   const installedVersion = parseMemoryVersion(installed.version);
   if (!bundledVersion || !installedVersion) return false;
-  // SemVer precedence keeps prerelease test builds ordered; an identical
-  // version is replaced only when the bundled build identity changed.
+  // Match the installer's character ordering; identical versions require a changed build.
   const difference = compareVersionSegments(bundledVersion, installedVersion);
   const changedBuild = typeof bundled.buildId === "string" && /^[a-f0-9]{64}$/.test(bundled.buildId)
     && bundled.buildId !== installed.buildId;

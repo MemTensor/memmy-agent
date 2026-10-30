@@ -31,7 +31,7 @@ describe("persistent panel projections", () => {
       expect(panelCachePending(db.db, ["memories"])).toBe(false);
       expect(db.db.prepare("SELECT count(*) FROM memories").pluck().get()).toBe(150);
       db.db.prepare("UPDATE memories SET memory_layer='Skill',info_json='{\"source\":\"cursor-agent\"}' WHERE id='memory-0'").run();
-      expect([...panelMemoryStats(db.db)].filter(row => row.memoryLayer === "Skill")).toMatchObject([{ infoSource: "cursor" }]);
+      expect([...panelMemoryStats(db.db)].filter(row => row.memoryLayer === "Skill")).toMatchObject([{ id: "memory-0", infoSource: "cursor" }]);
       db.db.prepare("DELETE FROM memories WHERE id='memory-0'").run();
       expect([...panelMemoryStats(db.db)]).toHaveLength(149);
     }

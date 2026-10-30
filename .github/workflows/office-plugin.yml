@@ -78,7 +78,7 @@ jobs:
       - name: Verify runtime and permission boundaries
         run: |
           npm --prefix plugins/office run build
-          npm exec -- tsc -p App/backend/tsconfig.json --noEmit
+          npm run typecheck -w @memmy/backend
           if [ "$RUNNER_OS" = macOS ]; then npm --prefix plugins/office test; fi
       - name: Cold install and run four-format end-to-end validation
         env:
