@@ -1664,10 +1664,11 @@ export class WebSocketChannel extends BaseChannel {
       const body = this.parseProjectBody(request);
       const keys = Object.keys(body);
       if (
-        keys.some((key) => !["mode", "path", "name"].includes(key))
+        keys.some((key) => !["mode", "path", "name", "allowShared"].includes(key))
         || typeof body.path !== "string"
         || (body.mode !== "blank" && body.mode !== "existing")
         || (body.name != null && typeof body.name !== "string")
+        || (body.allowShared != null && typeof body.allowShared !== "boolean")
       ) {
         throw new WebuiProjectError("project_request_invalid", 400);
       }
@@ -1680,7 +1681,9 @@ export class WebSocketChannel extends BaseChannel {
           return false;
         }
       });
-      const project = this.requireProjectStore().add(body.path, body.mode, body.name);
+      const project = this.requireProjectStore().add(body.path, body.mode, body.name, {
+        allowShared: body.allowShared === true
+      });
       return httpJsonResponse(
         { project, snapshot: this.webuiSessionSnapshot() },
         { status: existing ? 200 : 201 },
@@ -2445,6 +2448,51 @@ export class WebSocketChannel extends BaseChannel {
       .sort();
   }
 
+  /**
+   * Moves every session of one project to another project that runs in the same folder. Used when a shared
+   * project is deleted: its sessions become ordinary local tasks of the local project already using that folder.
+   */
+  async handleSessionReassignProject(request: HttpRequestLike): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    try {
+      const body = this.parseProjectBody(request);
+      const keys = Object.keys(body);
+      if (
+        keys.some((key) => !["fromProjectId", "toProjectId"].includes(key))
+        || typeof body.fromProjectId !== "string"
+        || typeof body.toProjectId !== "string"
+        || body.fromProjectId === body.toProjectId
+      ) {
+        throw new WebuiProjectError("project_request_invalid", 400);
+      }
+      const store = this.requireProjectStore();
+      const from = store.getActive(body.fromProjectId);
+      const to = store.getActive(body.toProjectId);
+      if (!from || !to) throw new WebuiProjectError("project_not_found", 404);
+      // A session records the folder it ran in, so it can only move to a project on the same folder.
+      if (from.rootPath !== to.rootPath) throw new WebuiProjectError("project_request_invalid", 400);
+      if (!this.sessionManager) return httpError(503, "session services unavailable");
+
+      const moved: string[] = [];
+      for (const key of this.projectSessionKeys(from.id)) {
+        const session = this.sessionManager.get(key) as Session | null;
+        if (!session) continue;
+        session.metadata = { ...session.metadata, webuiProjectId: to.id, webuiWorkspaceCwd: to.rootPath };
+        this.sessionManager.save(session, { fsync: true });
+        try {
+          this.queueGlobalSessionUpdated(toGuiChatId(key), "metadata");
+        } catch {
+          // A key the GUI cannot project is still moved on disk.
+        }
+        moved.push(key);
+      }
+      return httpJsonResponse({ moved: moved.length, project: to });
+    } catch (error) {
+      return this.projectErrorResponse(error);
+    }
+  }
+
   private async removeProjectSessions(projectId: string): Promise<string[]> {
     if (!this.sessionDeletionServices) {
       throw new WebuiProjectError(
@@ -2919,6 +2967,7 @@ export class WebSocketChannel extends BaseChannel {
     channelAdminMatch = got.match(/^\/api\/channels\/feishu\/login\/([^/]+)$/);
     if (channelAdminMatch) return this.handleChannelAdmin(request, "feishu-login-poll", decodeURIComponent(channelAdminMatch[1]));
     if (got === "/api/sessions") return this.handleSessionsList(request);
+    if (got === "/api/sessions/reassign-project") return this.handleSessionReassignProject(request);
     if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
@@ -2993,7 +3042,7 @@ export class WebSocketChannel extends BaseChannel {
       }
     }
     match = got.match(/^\/api\/media\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
-    if (match) return this.handleMediaFetch(match[1], match[2]);
+    if (match) return this.handleMediaFetch(match[1], match[2], request);
     if (got === this.expectedPath() && isWebsocketUpgrade(request)) {
       const clientId = (queryFirst(query, "client_id") ?? "").slice(0, 128);
       if (!this.isAllowed(clientId)) return connectionRespond(connection, 403, "Forbidden");
@@ -4352,7 +4401,7 @@ export class WebSocketChannel extends BaseChannel {
     };
   }
 
-  handleMediaFetch(sig: string, payload: string): HttpLikeResponse {
+  handleMediaFetch(sig: string, payload: string, request?: Pick<HttpRequestLike, "headers">): HttpLikeResponse {
     const expected = crypto.createHmac("sha256", this.mediaSecret).update(payload).digest().subarray(0, 16);
     let provided: Buffer;
     try {
@@ -4374,6 +4423,29 @@ export class WebSocketChannel extends BaseChannel {
     if (!pathIsInside(candidate, mediaRoot)) return httpError(404, "not found");
     if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) return httpError(404, "not found");
     const mime = String(lookupMime(candidate) || "application/octet-stream");
+    const size = fs.statSync(candidate).size;
+    const range = getHeader(request?.headers, "range");
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      const suffix = match && !match[1];
+      const start = match ? (suffix ? Math.max(0, size - Number(match[2])) : Number(match[1])) : NaN;
+      const requestedEnd = match ? (suffix || !match[2] ? size - 1 : Number(match[2])) : NaN;
+      if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd)
+        || start < 0 || start >= size || requestedEnd < start) {
+        return { status: 416, headers: { "content-range": `bytes */${size}` }, body: Buffer.alloc(0) };
+      }
+      const end = Math.min(size - 1, requestedEnd, start + 2 * 1024 * 1024 - 1);
+      const body = Buffer.alloc(end - start + 1);
+      const descriptor = fs.openSync(candidate, "r");
+      try { fs.readSync(descriptor, body, 0, body.length, start); }
+      finally { fs.closeSync(descriptor); }
+      return { status: 206, headers: {
+        "content-type": DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) ? mime : "application/octet-stream",
+        "accept-ranges": "bytes", "content-range": `bytes ${start}-${end}/${size}`,
+        "cache-control": "private, no-store", "x-content-type-options": "nosniff",
+      }, body };
+    }
+
     return {
       status: 200,
       headers: {
@@ -5341,6 +5413,7 @@ function corsHeadersForRequest(config: WebSocketConfig, request: { headers?: htt
       "x-memmy-agent-auth",
       MCP_VALUES_HEADER,
     ].join(", "),
+    "access-control-expose-headers": "Content-Range, Accept-Ranges",
     "access-control-max-age": "600",
   };
 }

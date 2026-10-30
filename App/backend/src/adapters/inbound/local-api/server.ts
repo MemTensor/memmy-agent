@@ -2,11 +2,14 @@
 import { SseEventSchema, type SseEvent } from "@memmy/local-api-contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
-import type { ManagedKnowledgeOptions } from "@memmy/knowledge";
+import { KnowledgeError, ManagedKnowledgeClient, parseEvidence, type ManagedKnowledgeOptions } from "@memmy/knowledge";
 import { registerKnowledgeRoutes } from "@memmy/knowledge/routes";
 import type { PermissionManager } from "../../../permission/index.js";
 import type { BackendServices } from "../../../services/index.js";
+import type { CollabService } from "../../../services/collab-service.js";
+import type { ProjectDirectoryService } from "../../../services/project-directory-service.js";
 import { registerAccountRoutes } from "./routes/account.js";
+import { registerCollabRoutes } from "./routes/collab.js";
 import { registerTokenQuotaRoutes } from "./routes/token-quota.js";
 import { registerAppConfigRoutes } from "./routes/app-config.js";
 import { registerAgentSourceRoutes } from "./routes/agent-sources.js";
@@ -18,6 +21,7 @@ import { registerComposioMcpRoutes } from "./routes/composio-mcp.js";
 import { registerIntegrationRoutes } from "./routes/integrations.js";
 import { registerLocalDataRoutes } from "./routes/local-data.js";
 import { registerOnboardingInsightRoutes } from "./routes/onboarding-insight.js";
+import { registerProjectRoutes } from "./routes/projects.js";
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 const LOCAL_API_SERVICE_NAME = "memmy-local-api";
@@ -30,6 +34,10 @@ const FILE_ORIGIN = "file://";
 
 export interface CreateLocalApiServerOptions {
   knowledge?: ManagedKnowledgeOptions;
+  /** Online projects; absent in tests that do not exercise them. */
+  collab?: CollabService;
+  /** The managed folder a project created by name alone runs its tasks in. */
+  projectDirectory?: ProjectDirectoryService;
   permissionManager: PermissionManager;
   services: BackendServices;
   /** Configured agent timezone. Renderer headers are used only when absent. */
@@ -56,7 +64,13 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   const authenticateRuntimeToken = createRuntimeTokenPreHandler(options.permissionManager);
 
   if (options.knowledge) {
-    registerKnowledgeRoutes(app, { ...options.knowledge, authenticate: authenticateRuntimeToken });
+    registerKnowledgeRoutes(app, {
+      ...options.knowledge,
+      authenticate: authenticateRuntimeToken,
+      // 会话目录属于某个协作项目时，项目关联的知识库与该成员自己的库一起检索。
+      projectForWorkspace: async (workspace) =>
+        (await options.collab?.cloudProjectForDirectory(workspace)) ?? null,
+    });
   }
 
   app.addHook("onRequest", async (request, reply) => {
@@ -127,6 +141,21 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     localData: options.services.localData,
     authenticateRuntimeToken
   });
+  if (options.collab) {
+    const knowledge = options.knowledge ? new ManagedKnowledgeClient(options.knowledge) : null;
+    registerCollabRoutes(app, {
+      collab: options.collab, authenticateRuntimeToken,
+      ...(knowledge ? { recallProjectKnowledge: (query: string, projectId: string) => recallProjectBases(knowledge, query, projectId) } : {})
+    });
+  }
+  // 项目指令与托管目录都是项目自己的接口，任一需要时都注册：指令不依赖托管目录。
+  if (options.projectDirectory || options.services.projectInstructions) {
+    registerProjectRoutes(app, {
+      projectDirectory: options.projectDirectory,
+      projectInstructions: options.services.projectInstructions,
+      authenticateRuntimeToken
+    });
+  }
   registerByokTokenUsageRoutes(app, {
     byokTokenUsage: options.services.byokTokenUsage,
     authenticateRuntimeToken
@@ -172,6 +201,29 @@ function createRuntimeTokenPreHandler(permissionManager: PermissionManager) {
 async function isAuthorized(request: FastifyRequest, permissionManager: PermissionManager): Promise<boolean> {
   const token = getSingleHeaderValue(request.headers[RUNTIME_TOKEN_HEADER]);
   return typeof token === "string" && (await permissionManager.verifyRuntimeToken(token));
+}
+
+/**
+ * 项目知识库检索：只要项目关联的知识库，不把个人知识库的个人资料混进项目资料里。
+ * 云端还不认识 `projectOnly` 时（HTTP 400 参数无效）退回按项目检索的旧范围，并在结果里标明范围更宽，
+ * 让调用方、进而让 Agent 知道自己拿到的可能不全是项目资料。
+ */
+async function recallProjectBases(
+  knowledge: ManagedKnowledgeClient,
+  query: string,
+  projectId: string
+): Promise<{ enabled: boolean; evidence: unknown[]; projectOnly: boolean }> {
+  const read = (data: unknown) => {
+    const result = data && typeof data === "object" ? data as Record<string, unknown> : {};
+    return { enabled: result.enabled === true, evidence: parseEvidence(result.evidence) };
+  };
+  try {
+    return { ...read(await knowledge.request("/recall", "POST", { query, projectId, projectOnly: true })), projectOnly: true };
+  } catch (error) {
+    // Only a rejected parameter means an older cloud; auth, timeout and service errors must reach the caller.
+    if (!(error instanceof KnowledgeError) || !error.message.startsWith("[HTTP 400]")) throw error;
+    return { ...read(await knowledge.request("/recall", "POST", { query, projectId })), projectOnly: false };
+  }
 }
 
 function applyCorsHeaders(

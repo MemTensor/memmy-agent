@@ -30,6 +30,11 @@ export interface CursorVscdbSource {
   mainComposerIds(): Iterable<string>;
   /** Parsed `cursorDiskKV` row `composerData:{composerId}`. */
   composerData(composerId: string): unknown;
+  /**
+   * The chat's header list when the store keeps it outside `composerData`: newer Cursor versions write it to
+   * `composerConvHeaders:{composerId}:{chunk}` rows and leave `fullConversationHeadersOnly` empty.
+   */
+  conversationHeaders?(composerId: string): readonly unknown[] | undefined;
   /** Parsed `cursorDiskKV` row `bubbleId:{composerId}:{bubbleId}`. */
   bubble(composerId: string, bubbleId: string): unknown;
 }
@@ -59,7 +64,7 @@ export async function* readCursorComposer(
   signal?.throwIfAborted();
   const data = source.composerData(composerId);
   if (!isRecord(data) || isRecord(data.subagentInfo)) return;
-  const headers = Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+  const headers = conversationHeaders(source, composerId, data);
   const composerStatus = text(data.status);
 
   let current: CursorBubble[] = [];
@@ -135,7 +140,7 @@ export function resolveCursorTurnId(
   if (!requestId) return undefined;
   const data = source.composerData(composerId);
   if (!isRecord(data)) return undefined;
-  const headers = Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+  const headers = conversationHeaders(source, composerId, data);
   for (const header of headers) {
     if (!isRecord(header) || header.type !== USER_BUBBLE) continue;
     const bubble = readBubble(source, composerId, header);
@@ -153,6 +158,17 @@ export async function readCursorSourceTurn(
     || (expected.requestId ? resolveCursorTurnId(source, expected.conversationId, expected.requestId) : undefined);
   if (!turnId) return { turn: null, reason: "identity_unresolved" };
   return selectSourceTurn(readCursorComposer(source, expected.conversationId), { conversationId: expected.conversationId, turnId });
+}
+
+/**
+ * The chat's ordered header list. Cursor kept it in `composerData` until the 3.x store started writing it to
+ * `composerConvHeaders` rows, which leave the inline list empty on the chats they own.
+ */
+function conversationHeaders(source: CursorVscdbSource, composerId: string, data: unknown): readonly unknown[] {
+  const inline = isRecord(data) && Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+  if (inline.length > 0) return inline;
+  const stored = source.conversationHeaders?.(composerId);
+  return Array.isArray(stored) ? stored : inline;
 }
 
 function readBubble(source: CursorVscdbSource, composerId: string, header: Record<string, unknown>): CursorBubble | undefined {

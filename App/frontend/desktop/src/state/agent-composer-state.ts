@@ -45,6 +45,27 @@ export function agentChatScopeKey(currentChatId: string | null, newChatRequestId
   return currentChatId ?? `draft-${newChatRequestId}`;
 }
 
+/** 新建任务时决定要不要开一张空白草稿：没有未发送内容、也没有待发附件时，直接复用它。 */
+export interface NewAgentDraftState {
+  blankDraftActive: boolean;
+  newChatRequestId: number;
+  composerDraftsByScope: Record<string, unknown>;
+  composerPendingAttachmentsByScope: Record<string, unknown[] | undefined>;
+}
+
+/**
+ * 侧栏「新任务」与看板「继续任务」共用同一判断：有未发送内容就另开一张草稿，
+ * 否则复用当前空白草稿，免得每点一次都多出一张空草稿。
+ */
+export function shouldCreateNewAgentDraft(agent: NewAgentDraftState): boolean {
+  if (agent.blankDraftActive) {
+    return false;
+  }
+  const draftScopeKey = agentChatScopeKey(null, agent.newChatRequestId);
+  return !agent.composerDraftsByScope[draftScopeKey]
+    && !(agent.composerPendingAttachmentsByScope[draftScopeKey]?.length);
+}
+
 export function updateComposerDraftForScope(
   drafts: Record<string, string>,
   scopeKey: string,

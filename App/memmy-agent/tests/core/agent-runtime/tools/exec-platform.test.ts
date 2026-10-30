@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import path from "node:path";
 import iconv from "iconv-lite";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RequestContext } from "../../../../src/core/agent-runtime/tools/context.js";
 import { ExecTool, setIsWindowsForTest } from "../../../../src/core/agent-runtime/tools/shell.js";
 
 const WINDOWS_COMMAND_NOT_FOUND = "'node' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。\r\n";
@@ -150,6 +151,19 @@ describe("ExecTool platform-specific command preparation", () => {
     const result = await prepared(new ExecTool({ pathAppend: "C:\\tools\\bin" }).prepareCommand("dir"));
 
     expect(result.env.PATH).toMatch(/;C:\\tools\\bin$/);
+  });
+
+  it("tells the child process which Memmy task it runs in", async () => {
+    setIsWindowsForTest(false);
+
+    const tool = new ExecTool();
+    tool.setContext(new RequestContext({ channel: "websocket", chatId: "chat-1", sessionKey: "websocket:chat-1" }));
+    expect((await prepared(tool.prepareCommand("ls"))).env.MEMMY_TASK_ID).toBe("chat-1");
+
+    // 其他入口（CLI、其他 Agent 的会话）没有 Memmy 任务，子进程也拿不到这个变量。
+    const cli = new ExecTool();
+    cli.setContext(new RequestContext({ channel: "cli", chatId: "cli-1", sessionKey: "cli:cli-1" }));
+    expect((await prepared(cli.prepareCommand("ls"))).env.MEMMY_TASK_ID).toBeUndefined();
   });
 
   it("skips bwrap on Windows", async () => {

@@ -24,6 +24,11 @@ import {
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, type BootstrapScenario } from "./services/index.js";
+import { migrateLegacyCollabInstructions } from "./services/collab-instructions-service.js";
+import { createCollabCloudRequest, createCollabService } from "./services/collab-service.js";
+import { createLocalSessionReader } from "./adapters/outbound/agent-source/session-reference/local-session-reader.js";
+import { createBuiltinAgentSourceRegistry } from "./services/builtin-agent-source-registry.js";
+import { createProjectDirectoryService } from "./services/project-directory-service.js";
 import { resolveCloudClientConfig, type CloudClientConfig } from "./config/service-urls.js";
 import { resetAccountRuntimeForDesktopInstallChange } from "./services/desktop-install-state-service.js";
 import {
@@ -40,6 +45,8 @@ export { trackAnalyticsEvent } from "./analytics/analytics-transport.js";
 export { createHttpMemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
+/** New sessions of associated groups reach the project within about a minute. */
+const COLLAB_SYNC_INTERVAL_MS = 60_000;
 
 export interface CreateLocalBackendOptions {
   databasePath: string;
@@ -84,6 +91,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   }
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
+  let collabSyncTimer: ReturnType<typeof setInterval> | undefined;
 
   try {
     if (options.desktopInstallFingerprint) {
@@ -154,16 +162,58 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     const localToken = await permissionManager.getRuntimeToken();
     const composioMcpToken = `mmt_${randomBytes(32).toString("base64url")}`;
     await removeLegacyKnowledgeCredentials(memmyConfigPath);
+    // 老版本把协作项目的云端指令镜像在本机项目指令文件里。搬到协作侧自己的文件后从老文件删掉，
+    // 否则同一段指令会被两个钩子各注入一次。
+    const legacyInstructions = await services.projectInstructions.snapshot();
+    const legacyCloudEntries = Object.entries(legacyInstructions.projects)
+      .filter(([, entry]) => entry.origin === "cloud" && Boolean(entry.cloudProjectId))
+      .map(([directory, entry]) => ({ directory, text: entry.text, cloudProjectId: entry.cloudProjectId }));
+    if (legacyCloudEntries.length) {
+      const moved = await migrateLegacyCollabInstructions({
+        collabInstructions: services.collabInstructions,
+        legacyEntries: legacyCloudEntries,
+        forgetLegacy: (directory) => services.projectInstructions.forget(directory)
+      });
+      if (moved) console.log(`Moved ${moved} cloud project instruction(s) out of the local project instructions file`);
+    }
+    // Knowledge bases and online projects both act as the signed-in Memmy account.
+    const getCloudAccount = () => {
+      const account = appStateStore.repositories.accountSession;
+      const session = account.get();
+      const credential = account.getCloudUuid();
+      if (!session.authenticated || !credential) return null;
+      return {
+        accountId: session.profile.userId,
+        credential,
+        // Shown on the person's own sessions, so members see the same name everywhere.
+        memberName: session.profile.nickname
+      };
+    };
+    const collab = createCollabService({
+      cloudBaseUrl: cloudConfig.baseUrl,
+      getAccount: getCloudAccount,
+      // The backend reads this machine's agent sessions itself, so association works without the Memory service.
+      localSessions: createLocalSessionReader({ registry: createBuiltinAgentSourceRegistry() }),
+      ...(process.env.MEMMY_SESSION_LINK_BASE_URL?.trim() ? { linkBaseUrl: process.env.MEMMY_SESSION_LINK_BASE_URL.trim() } : {}),
+      // 协作项目的指令存在协作侧自己的文件里，与本机项目的项目指令互不影响。
+      collabInstructions: services.collabInstructions,
+      // 只在一个方向上写：停止共享时把背景与规范写回创建者的本机项目。
+      projectInstructions: services.projectInstructions
+    });
+    // Groups associated with an online project pick up new sessions, and associated sessions their new turns.
+    collabSyncTimer = setInterval(() => {
+      void collab.syncLinkedSessions().catch((error: unknown) => {
+        console.warn(`Online project sync did not complete: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, COLLAB_SYNC_INTERVAL_MS);
+    collabSyncTimer.unref();
     server = createLocalApiServer({
       knowledge: {
         baseUrl: cloudConfig.baseUrl,
-        getSession: () => {
-          const account = appStateStore.repositories.accountSession;
-          const session = account.get();
-          const credential = account.getCloudUuid();
-          return session.authenticated && credential ? { accountId: session.profile.userId, credential } : null;
-        }
+        getSession: getCloudAccount
       },
+      collab,
+      projectDirectory: createProjectDirectoryService(),
       permissionManager,
       services,
       composioMcpToken,
@@ -205,6 +255,16 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memory: options.memoryBaseUrl ? { baseUrl: options.memoryBaseUrl } : undefined
     });
     await writeRuntimeConfigFile(runtimeConfig, options.runtimeConfigPath ?? resolveDefaultRuntimeConfigPath());
+    // Agents connected before this build keep their old skill unless it is rewritten; do it in the background
+    // so the first window is not delayed.
+    void Promise.resolve()
+      .then(() => services.agentSources.refreshInstalledSkills())
+      .then((refreshed) => {
+        if (refreshed.length) console.info(`Memmy skill refreshed for: ${refreshed.join(", ")}`);
+      })
+      .catch((error: unknown) => {
+        console.warn(`Memmy skill refresh did not complete: ${error instanceof Error ? error.message : String(error)}`);
+      });
     const boundServer = server;
     return {
       runtimeConfig,
@@ -215,11 +275,13 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         return appStateStore.repositories.bootstrap.recordLastLaunchMode(mode);
       },
       async close() {
+        clearInterval(collabSyncTimer);
         await boundServer.close();
         appStateStore.close();
       }
     };
   } catch (error) {
+    clearInterval(collabSyncTimer);
     await server?.close().catch(() => undefined);
     appStateStore.close();
     throw error;

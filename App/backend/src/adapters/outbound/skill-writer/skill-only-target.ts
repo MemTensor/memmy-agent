@@ -2,8 +2,10 @@ import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   removeMemmyResumeSkillDirectory,
+  removeMemmyProjectSkillDirectory,
   removeMemmySkillDirectory,
   replaceMemmyResumeSkillDirectory,
+  replaceMemmyProjectSkillDirectory,
   replaceMemmySkillDirectory
 } from "./skill-directory.js";
 import type { SkillTarget } from "./types.js";
@@ -30,6 +32,7 @@ export function createSkillOnlyTarget(input: {
         throw new Error(`${input.displayName} is not installed or its directory is unavailable`);
       }
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
       await replaceMemmyResumeSkillDirectory(root, input.targetId);
     },
     async uninstall() {
@@ -37,6 +40,7 @@ export function createSkillOnlyTarget(input: {
       if (root) {
         await removeMemmyResumeSkillDirectory(root);
         await removeMemmySkillDirectory(root);
+        await removeMemmyProjectSkillDirectory(root);
       }
     },
     async isInstalled() {

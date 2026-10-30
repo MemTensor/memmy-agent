@@ -1,5 +1,5 @@
-import { BookOpen } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { BookOpen, LayoutPanelLeft } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   productTourIncludesLogs,
@@ -19,8 +19,28 @@ import {
   type SidebarIntent
 } from "../app/agent-runtime-bridge.js";
 import { useOptionalApiClients } from "../app/providers.js";
+import { createHttpCollabClient } from "../api/collab-client.js";
+import type { CollabApplicationDecision } from "../api/collab-client.js";
+import { openAgentTaskInChat } from "../app/open-agent-task.js";
+import {
+  addCollabProject,
+  addPendingApplication,
+  consumeCreateProjectRequest,
+  getCollabProjectsSnapshot,
+  loadCollabProjects,
+  markCollabProjectBound,
+  removeCollabProject,
+  replaceCollabProject,
+  requestCreateProject,
+  selectCollabProject,
+  sharedProjectFor,
+  showCollabNotice,
+  subscribeCollabProjects
+} from "../app/collab-projects-store.js";
+import { ApiRequestError } from "../api/http.js";
 import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
+import { useOptionalNotificationCenter } from "../components/notification-center.js";
 import { MemoryTokenBudgetBanner } from "../components/memory-token-budget-banner.js";
 import { Tooltip } from "../components/tooltip.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
@@ -32,7 +52,7 @@ import { useTaskBus } from "../lib/task-bus.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
 import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
-import { agentChatScopeKey } from "../state/agent-composer-state.js";
+import { agentChatScopeKey, shouldCreateNewAgentDraft } from "../state/agent-composer-state.js";
 import type { AgentTaskView } from "../state/agent-chat-slice.js";
 import { decideTaskDoneNotification } from "../state/task-done-notification.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
@@ -41,6 +61,9 @@ import { openExternalUrl } from "../utils/open-url.js";
 import { isWindowsDesktopPlatform } from "../utils/window-fullscreen.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
+import { CollabCreateProjectDialog } from "./collab-create-project-dialog.js";
+import { CollabJoinProjectDialog } from "./collab-join-project-dialog.js";
+import { COLLAB_TOUR_ANCHORS } from "./collab-tour.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
 import { writeMemorySubPage } from "./memory-sub-page-storage.js";
 import { SearchPalette } from "../components/search-palette.js";
@@ -68,7 +91,7 @@ import {
 } from "./memory/memory-prototype-icons.js";
 import { AppContentTopbar } from "./app-content-topbar.js";
 import { SETTINGS_BROWSER_EXTENSION_EVENT, SETTINGS_EXCEL_CONNECTION_EVENT, SETTINGS_NAV_ITEMS, writeSettingsMemoryBudgetFocus, type SettingsTabId } from "./settings-nav.js";
-import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, MousePointer2, Plus, RotateCcw } from "lucide-react";
+import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, CloudOff, Folder, FolderOpen, FolderPlus, ListFilter, LogOut, MoreHorizontal, MousePointer2, Pencil, Plus, RotateCcw, UserPlus, Users } from "lucide-react";
 
 export interface SettingsSidebarNav {
   activeTab: SettingsTabId;
@@ -108,6 +131,8 @@ interface TaskGroups {
 export interface ProjectSidebarNode {
   project: MemmyAgentProject;
   tasks: AgentTaskView[];
+  /** Whether this project's sessions are shared with members through a cloud project. */
+  shared?: boolean;
 }
 
 export interface ProjectSidebarTree {
@@ -171,7 +196,6 @@ interface SidebarContextMenuPlacement {
 }
 
 type AgentTaskSort = AppState["agent"]["sidebarState"]["view"]["sort"];
-type NewAgentDraftState = Pick<AppState["agent"], "blankDraftActive" | "newChatRequestId" | "composerDraftsByScope" | "composerPendingAttachmentsByScope">;
 
 export interface SidebarAccountLabels {
   brandName: string;
@@ -242,8 +266,60 @@ const projectCreateMenuSize: SidebarMenuSize = {
 };
 const sidebarMenuOverlayZIndex = 9999;
 const SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH = 10;
+/** Project names are shown in a narrow row, so they follow what the create dialog accepts. */
+const MAX_PROJECT_NAME_CHARS = 20;
 const SIDEBAR_PROFILE_META_MAX_VISUAL_WIDTH = 12;
 const ACCOUNT_DISPLAY_ELLIPSIS = "…";
+/** How often an open window rereads online projects: on focus, on becoming visible, and while a join request is pending. */
+const COLLAB_FOCUS_REFRESH_MS = 30_000;
+/**
+ * 有待审核的申请时读得快一些：审批落在云端，本机没有推送通道，几秒内读到就不需要人自己刷新。
+ * 与邀请人那一侧（`MEMBER_REQUESTS_POLL_MS`）同一节奏。
+ */
+const COLLAB_APPLICATION_POLL_MS = 4_000;
+/** 「申请中」那一行被鼠标划过时的重查节流：同一个动作几秒内只查一次。 */
+const COLLAB_RECHECK_THROTTLE_MS = 3_000;
+/** 已经提示过的审核结果，按「项目 + 审核时间」记在本机，重启后不再重复弹。 */
+const SEEN_DECISIONS_STORAGE_KEY = "memmy.collab.decisions";
+const SEEN_DECISIONS_LIMIT = 50;
+
+function decisionKey(decision: CollabApplicationDecision): string {
+  return `${decision.projectId}|${decision.decidedAt ?? ""}`;
+}
+
+/**
+ * 该给哪些审核结果提示：还没提示过的、并且真的成立的那条——未通过的总是提示，
+ * 已通过的只在项目确实出现在列表里时才提示，免得被移出项目后又收到一条「已加入」。
+ */
+export function freshDecisionAnnouncements(
+  decisions: readonly CollabApplicationDecision[],
+  projectIds: readonly string[],
+  seen: readonly string[]
+): CollabApplicationDecision[] {
+  const joined = new Set(projectIds);
+  return decisions.filter((decision) => (
+    !seen.includes(decisionKey(decision))
+    && (decision.status === "rejected" || joined.has(decision.projectId))
+  ));
+}
+
+function readSeenDecisions(): string[] {
+  try {
+    const raw = window.localStorage.getItem(SEEN_DECISIONS_STORAGE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSeenDecisions(keys: readonly string[]): void {
+  try {
+    window.localStorage.setItem(SEEN_DECISIONS_STORAGE_KEY, JSON.stringify(keys.slice(-SEEN_DECISIONS_LIMIT)));
+  } catch {
+    // 存不下就算了：顶多下次启动再提示一遍。
+  }
+}
 const standaloneRenderTaskStateCoordinator: AgentTaskStateCoordinator = {
   refreshTaskState: () => undefined,
   focusTask: () => undefined,
@@ -260,14 +336,8 @@ function resolveProductTourNavAnchor(path: AppRoutePath): string | undefined {
   return undefined;
 }
 
-export function shouldCreateNewAgentDraft(agent: NewAgentDraftState): boolean {
-  if (agent.blankDraftActive) {
-    return false;
-  }
-  const draftScopeKey = agentChatScopeKey(null, agent.newChatRequestId);
-  return !agent.composerDraftsByScope[draftScopeKey]
-    && !(agent.composerPendingAttachmentsByScope[draftScopeKey]?.length);
-}
+/* 判断放在 state 里：看板的「继续任务」也要用，但不该为此从页面模块互相引用 */
+export { shouldCreateNewAgentDraft };
 
 /** Sidebar workspace highlight: only when a blank new-task draft targets a project. */
 export function resolveSelectedSidebarProjectId(
@@ -290,7 +360,167 @@ export function AppFrame(props: AppFrameProps) {
   const taskStateCoordinator = useOptionalAgentRuntimeBridge()?.taskStateCoordinator
     ?? standaloneRenderTaskStateCoordinator;
   const taskBus = useTaskBus();
+  const collabClient = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
+  const collabSnapshot = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
+  const collabLoadedForAccount = useRef<string | null>(null);
+  useEffect(() => {
+    // Online projects need a signed-in account; loading once per account keeps the sidebar and the board in step.
+    if (!collabClient || !state.account.userId) return;
+    if (collabLoadedForAccount.current === state.account.userId) return;
+    collabLoadedForAccount.current = state.account.userId;
+    void loadCollabProjects(collabClient);
+  }, [collabClient, state.account.userId]);
+  // An online project created before binding existed, whose local project went missing, or that the person just
+  // joined (at once, or once their request was approved) gets one here so its row can hold tasks. A failed attempt
+  // is not retried until the next launch.
+  /** The project whose name is being edited in the sidebar row. */
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
+  const [projectRenameDraft, setProjectRenameDraft] = useState("");
+  const collabBindAttempts = useRef<Set<string>>(new Set());
+  /** A project joined from the join dialog: its board opens once its local project exists. */
+  const openBoardWhenBound = useRef<string | null>(null);
+  useEffect(() => {
+    if (!collabClient) return;
+    const pending = (collabSnapshot.projects ?? []).filter((project) => (
+      !project.localProjectId && !collabBindAttempts.current.has(project.id)
+    ));
+    if (!pending.length) return;
+    void (async () => {
+      for (const project of pending) {
+        collabBindAttempts.current.add(project.id);
+        try {
+          const directory = await collabClient.ensureWorkingDirectory(project.id, project.name);
+          const outcome = await taskStateCoordinator.mutateProject({
+            kind: "create",
+            // A folder the person chose when joining may hold their own files and projects: the shared project
+            // gets a record of its own there, so it never adopts a local project and uploads its tasks.
+            input: directory.chosen
+              ? { mode: "existing", path: directory.localDirectory, name: project.name, allowShared: true }
+              : { mode: "blank", path: directory.localDirectory, name: project.name }
+          });
+          const localProjectId = outcome.status === "committed" ? outcome.project?.id : undefined;
+          if (!localProjectId) continue;
+          await collabClient.bindLocalProject(project.id, localProjectId);
+          markCollabProjectBound(project.id, localProjectId);
+          if (openBoardWhenBound.current === project.id) {
+            openBoardWhenBound.current = null;
+            openProjectBoard(localProjectId);
+          }
+        } catch {
+          // The row still opens the board; tasks are the only thing missing.
+        }
+      }
+    })();
+  }, [collabClient, collabSnapshot.projects, taskStateCoordinator]);
+
+  // Coming back to the window picks up an approval that happened while Memmy was in the background.
+  const collabRefreshedAt = useRef(0);
+  const collabRecheckedAt = useRef(0);
+  const refreshCollabProjects = useCallback((throttleMs: number) => {
+    if (!collabClient || !state.account.userId) return;
+    const now = Date.now();
+    if (now - collabRefreshedAt.current < throttleMs) return;
+    collabRefreshedAt.current = now;
+    void loadCollabProjects(collabClient);
+  }, [collabClient, state.account.userId]);
+
+  useEffect(() => {
+    if (!collabClient || !state.account.userId) return;
+    collabRefreshedAt.current = Date.now();
+    const refresh = () => refreshCollabProjects(COLLAB_FOCUS_REFRESH_MS);
+    // 从别的应用切回来也立即读一次：人回来的第一眼就该是新的。
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refreshCollabProjects(COLLAB_RECHECK_THROTTLE_MS);
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [collabClient, state.account.userId, refreshCollabProjects]);
+
+  // While a join request is still pending, reread the same list so approval shows up without leaving the window.
+  // The timer stops once the list is empty, so a person with no request pays nothing.
+  const pendingApplicationCount = collabSnapshot.applications.length;
+  useEffect(() => {
+    if (!collabClient || !state.account.userId || pendingApplicationCount === 0) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadCollabProjects(collabClient);
+    }, COLLAB_APPLICATION_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [collabClient, pendingApplicationCount, state.account.userId]);
+
+  /**
+   * 「申请中」那一行没有按钮也没有菜单：鼠标划到它、或者点它一下，就在背后重查一次。
+   * 没有变化时界面完全不动，有结果时由轮询那套逻辑统一处理，所以不需要额外的反馈。
+   */
+  const recheckPendingApplication = useCallback((force = false) => {
+    if (!collabClient || !state.account.userId) return;
+    const now = Date.now();
+    if (!force && now - collabRecheckedAt.current < COLLAB_RECHECK_THROTTLE_MS) return;
+    collabRecheckedAt.current = now;
+    void loadCollabProjects(collabClient);
+  }, [collabClient, state.account.userId]);
+
+  // 审核结果只提示一次：通过就告诉人已经加入，未通过就说清还能再申请。
+  const notifications = useOptionalNotificationCenter();
+  const collabDecisions = collabSnapshot.decisions;
+  const collabProjectIds = collabSnapshot.projects;
+  useEffect(() => {
+    if (!notifications || collabDecisions.length === 0) return;
+    const seen = readSeenDecisions();
+    const announced = freshDecisionAnnouncements(collabDecisions, (collabProjectIds ?? []).map((project) => project.id), seen);
+    if (announced.length === 0) return;
+    writeSeenDecisions([...seen, ...announced.map(decisionKey)]);
+    for (const decision of announced) {
+      if (decision.status === "approved") {
+        notifications.notify({
+          variant: "success",
+          title: t("collab.application.approved", { name: decision.projectName })
+        });
+      } else {
+        notifications.notify({
+          variant: "warning",
+          title: t("collab.application.rejected", { name: decision.projectName }),
+          body: t("collab.application.rejectedHint")
+        });
+      }
+    }
+  }, [notifications, collabDecisions, collabProjectIds, t]);
+
+  /**
+   * A rename by the owner changes what every member reads. Their local project keeps the name on their own
+   * computer, so it follows the cloud's name whenever the two differ and nobody is editing this row.
+   */
+  const renamedProjects = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!state.agent.projects.length) return;
+    for (const shared of collabSnapshot.projects ?? []) {
+      if (!shared.localProjectId) continue;
+      if (renamedProjects.current.has(`${shared.id}:${shared.name}`)) continue;
+      const local = state.agent.projects.find((project) => project.id === shared.localProjectId);
+      if (!local || local.name === shared.name) continue;
+      if (renamingProjectId === local.id) continue;
+      renamedProjects.current.add(`${shared.id}:${shared.name}`);
+      void updateProject(local.id, { name: shared.name });
+    }
+  }, [collabSnapshot.projects, state.agent.projects, renamingProjectId]);
+
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
+  const [joinProjectOpen, setJoinProjectOpen] = useState(false);
+  /** The online project the person is about to leave, while the confirmation is open. */
+  const [leaveOnlineProjectId, setLeaveOnlineProjectId] = useState<string | null>(null);
+  const [leavingOnlineProject, setLeavingOnlineProject] = useState(false);
+  // The sidebar, the board's empty state and the board header all ask for this dialog through one flag.
+  const createPending = collabSnapshot.createPending;
+  useEffect(() => {
+    if (!createPending) return;
+    setCreateProjectOpen(true);
+    consumeCreateProjectRequest();
+  }, [createPending]);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
@@ -299,6 +529,9 @@ export function AppFrame(props: AppFrameProps) {
   const [inlineRename, setInlineRename] = useState<SidebarInlineRename | null>(null);
   const [inlineRenameDraft, setInlineRenameDraft] = useState("");
   const [removeProjectId, setRemoveProjectId] = useState<string | null>(null);
+  /** The shared project awaiting delete confirmation. */
+  const [deleteOnlineProjectId, setDeleteOnlineProjectId] = useState<string | null>(null);
+  const [deletingOnlineProject, setDeletingOnlineProject] = useState(false);
   const [archiveProjectId, setArchiveProjectId] = useState<string | null>(null);
   const [projectMutationId, setProjectMutationId] = useState<string | null>(null);
   const [archiveConfirmSessionKey, setArchiveConfirmSessionKey] = useState<string | null>(null);
@@ -348,6 +581,16 @@ export function AppFrame(props: AppFrameProps) {
     [projectTree, showingArchived]
   );
   const highlightedSessionKey = state.navigation.currentPath === "/main" ? state.agent.currentSessionKey : null;
+  // Sharing is a property of a project, not a second kind of project: one set decides the row's cloud badge.
+  const sharedLocalProjectIds = useMemo(() => new Set(
+    (collabSnapshot.projects ?? [])
+      .map((project) => project.localProjectId)
+      .filter((id): id is string => Boolean(id))
+  ), [collabSnapshot.projects]);
+
+  /** The project whose board is open, named by its local project id. */
+  const boardProjectId = state.navigation.currentPath === "/collab" ? collabSnapshot.selectedId : null;
+
   const selectedSidebarProjectId = resolveSelectedSidebarProjectId(state.agent, state.navigation.currentPath);
 
   const removeProject = state.agent.projects.find((project) => project.id === removeProjectId) ?? null;
@@ -617,29 +860,8 @@ export function AppFrame(props: AppFrameProps) {
 
   async function openAgentTask(task: AgentTaskView) {
     handleFirstSidebarInteraction();
-    if (!clients?.memmyAgent) {
-      dispatch(appActions.navigate("/main"));
-      return;
-    }
-
-    const chatId = clients.memmyAgent.sessionKeyToChatId(task.sessionKey);
-    const requestId = nextAgentHistoryRequestId(chatId);
     track({ name: "task_opened", params: { page_path: state.navigation.currentPath }, consentTier: "basic" });
-    dispatch(agentActions.historyLoading(task.sessionKey, chatId, requestId));
-    dispatch(appActions.navigate("/main"));
-    try {
-      dispatch(agentActions.historyLoaded(await clients.memmyAgent.readWebuiThread(task.sessionKey), requestId));
-    } catch (error) {
-      if (error instanceof MemmyAgentRequestError && error.status === 404) {
-        dispatch(agentActions.historyOpenMissing(task.sessionKey, chatId, requestId));
-        return;
-      }
-      dispatch(agentActions.historyOpenFailed(chatId, requestId, createAgentOperationError({
-        source: "history",
-        message: error instanceof Error ? error.message : String(error),
-        chatId
-      })));
-    }
+    await openAgentTaskInChat({ memmyAgent: clients?.memmyAgent, dispatch, task });
   }
 
   async function saveSidebarStateForTask(task: AgentTaskView, patch: SidebarTaskPatch) {
@@ -713,35 +935,80 @@ export function AppFrame(props: AppFrameProps) {
     openNewAgent({ kind: "project", projectId });
   }
 
-  async function registerProject(mode: "blank" | "existing") {
+  /** Opens a project's board. The board is the project, so this is one click on the row's name. */
+  function openProjectBoard(projectId: string) {
     setProjectCreateMenuAnchor(null);
-    if (!clients?.memmyAgent || !window.memmy || projectMutationId) return;
-    const operationId = `project-create-${crypto.randomUUID()}`;
-    setProjectMutationId(operationId);
+    setProjectContextMenu(null);
+    handleFirstSidebarInteraction();
+    selectCollabProject(projectId);
+    dispatch(appActions.navigate("/collab"));
+  }
+
+  /**
+   * Turns sharing off: the cloud record is deleted and the project stays on this computer with its sessions.
+   * Members lose what they could read there; nothing local is touched.
+   */
+  async function unshareProject(projectId: string) {
+    if (!projectId || !collabClient || deletingOnlineProject) return;
+    setDeletingOnlineProject(true);
     try {
-      const selected = mode === "blank"
-        ? await window.memmy.selectEmptyProjectDirectory()
-        : await window.memmy.selectProjectDirectory();
-      if (selected.canceled) return;
-      const result = await taskStateCoordinator.mutateProject({
-        kind: "create",
-        input: { mode, path: selected.path }
-      });
-      if (result.status !== "committed") {
-        showProjectOperationError(result.status === "rejected" ? result.code : "network_unavailable");
-        return;
+      try {
+        await collabClient.deleteProject(projectId);
+      } catch (error) {
+        // Already gone from the cloud: the state the person asked for already holds, so drop the local row too.
+        if (!(error instanceof ApiRequestError && error.status === 404)) throw error;
       }
-      if (result.project) {
-        openNewAgent({ kind: "project", projectId: result.project.id });
-      } else {
-        openNewAgent({ kind: "standalone" });
-      }
+      removeCollabProject(projectId);
+      setDeleteOnlineProjectId(null);
+      await loadCollabProjects(collabClient);
+      void refreshAgentTasks();
     } catch (error) {
       showProjectOperationError(error);
-      void refreshAgentTasks();
+      setDeleteOnlineProjectId(null);
     } finally {
-      setProjectMutationId((current) => current === operationId ? null : current);
+      setDeletingOnlineProject(false);
     }
+  }
+
+  /**
+   * Leaves a project someone else owns. The local project stays with this person's tasks, as after the owner stops
+   * sharing; sessions already shared stay in the project for the others.
+   */
+  async function leaveOnlineProject(projectId: string) {
+    if (!projectId || !collabClient || leavingOnlineProject) return;
+    setLeavingOnlineProject(true);
+    try {
+      try {
+        await collabClient.leaveProject(projectId);
+      } catch (error) {
+        // No longer in it: what the person asked for already holds.
+        if (!(error instanceof ApiRequestError && error.status === 404)) throw error;
+      }
+      removeCollabProject(projectId);
+      setLeaveOnlineProjectId(null);
+      await loadCollabProjects(collabClient);
+    } catch (error) {
+      showProjectOperationError(error);
+      setLeaveOnlineProjectId(null);
+    } finally {
+      setLeavingOnlineProject(false);
+    }
+  }
+
+  function joinProject() {
+    setProjectCreateMenuAnchor(null);
+    handleFirstSidebarInteraction();
+    setJoinProjectOpen(true);
+  }
+
+  /**
+   * Opens the new-project dialog over the current page. Creating must not first switch the window to a board:
+   * the background the person sees would change before they have decided anything.
+   */
+  function newProject() {
+    setProjectCreateMenuAnchor(null);
+    handleFirstSidebarInteraction();
+    requestCreateProject();
   }
 
   async function updateProject(
@@ -873,7 +1140,7 @@ export function AppFrame(props: AppFrameProps) {
     })));
   }
 
-  function openProjectMenu(event: MouseEvent, projectId: string) {
+  function openProjectMenu(event: MouseEvent, projectId: string, onlineProjectId?: string) {
     event.preventDefault();
     event.stopPropagation();
     setTaskListMenuAnchor(null);
@@ -889,6 +1156,7 @@ export function AppFrame(props: AppFrameProps) {
       const buttonRect = target.getBoundingClientRect();
       setProjectContextMenu({
         projectId,
+        ...(onlineProjectId ? { onlineProjectId } : {}),
         placement: {
           kind: "anchor",
           // Left edge lines up with the … button.
@@ -903,6 +1171,7 @@ export function AppFrame(props: AppFrameProps) {
     }
     setProjectContextMenu({
       projectId,
+      ...(onlineProjectId ? { onlineProjectId } : {}),
       placement: { kind: "point", x: event.clientX, y: event.clientY }
     });
   }
@@ -917,6 +1186,51 @@ export function AppFrame(props: AppFrameProps) {
     setArchiveConfirmSessionKey(null);
     setInlineRename({ sessionKey: task.sessionKey, original: task.title });
     setInlineRenameDraft(task.title);
+  }
+
+  function beginProjectRename(project: MemmyAgentProject) {
+    setProjectContextMenu(null);
+    setTaskContextMenu(null);
+    setTaskListMenuAnchor(null);
+    cancelInlineRename();
+    setRenamingProjectId(project.id);
+    setProjectRenameDraft(project.name);
+  }
+
+  function cancelProjectRename() {
+    setRenamingProjectId(null);
+    setProjectRenameDraft("");
+  }
+
+  function commitProjectRename() {
+    const projectId = renamingProjectId;
+    const next = projectRenameDraft.trim();
+    const project = state.agent.projects.find((item) => item.id === projectId);
+    cancelProjectRename();
+    if (!project || !next || next === project.name) return;
+    // A shared project's name is what every member reads, so the cloud is renamed first; the local record follows.
+    const shared = sharedProjectFor(collabSnapshot.projects, project.id);
+    if (shared) {
+      void renameSharedProject(shared, project, next);
+      return;
+    }
+    void updateProject(project.id, { name: next });
+  }
+
+  async function renameSharedProject(
+    shared: { id: string },
+    project: MemmyAgentProject,
+    name: string
+  ) {
+    if (!collabClient) return;
+    try {
+      const renamed = await collabClient.renameProject(shared.id, name);
+      replaceCollabProject(renamed);
+      // The board and the sidebar read the local record, so it takes the same name the cloud now holds.
+      await updateProject(project.id, { name });
+    } catch (error) {
+      showProjectOperationError(error);
+    }
   }
 
   function cancelInlineRename() {
@@ -1241,6 +1555,13 @@ export function AppFrame(props: AppFrameProps) {
                 tasks={visibleProjectTree.pinnedTasks}
                 currentSessionKey={highlightedSessionKey}
                 selectedProjectId={selectedSidebarProjectId}
+                openBoardProjectId={boardProjectId}
+                onOpenProjectBoard={openProjectBoard}
+                renamingProjectId={renamingProjectId}
+                projectRenameDraft={projectRenameDraft}
+                onProjectRenameDraftChange={setProjectRenameDraft}
+                onProjectRenameCommit={commitProjectRename}
+                onProjectRenameCancel={cancelProjectRename}
                 showPreviews={state.agent.sidebarState.view.show_previews}
                 projectRegistryState={state.agent.projectRegistryState}
                 onToggleGroup={toggleSidebarGroup}
@@ -1271,6 +1592,15 @@ export function AppFrame(props: AppFrameProps) {
               groupKey="projects"
               collapsedGroups={state.agent.sidebarState.collapsed_groups}
               projects={visibleProjectTree.projects}
+              applications={collabSnapshot.applications}
+              onRecheckPendingApplication={recheckPendingApplication}
+              openBoardProjectId={boardProjectId}
+              onOpenProjectBoard={openProjectBoard}
+              renamingProjectId={renamingProjectId}
+              projectRenameDraft={projectRenameDraft}
+              onProjectRenameDraftChange={setProjectRenameDraft}
+              onProjectRenameCommit={commitProjectRename}
+              onProjectRenameCancel={cancelProjectRename}
               tasks={[]}
               currentSessionKey={highlightedSessionKey}
               selectedProjectId={selectedSidebarProjectId}
@@ -1322,7 +1652,7 @@ export function AppFrame(props: AppFrameProps) {
                       projects={state.agent.projects}
                       registryState={state.agent.projectRegistryState}
                       onSelectProject={selectSidebarWorkspace}
-                      onOpenLocalFolder={() => void registerProject("existing")}
+                      onNewProject={newProject}
                     />
                   ) : null}
                 </div>
@@ -1396,6 +1726,25 @@ export function AppFrame(props: AppFrameProps) {
             <ProjectContextMenu
               menu={projectContextMenu}
               project={state.agent.projects.find((project) => project.id === projectContextMenu.projectId) ?? null}
+              sharedProjectId={sharedProjectFor(collabSnapshot.projects, projectContextMenu.projectId)?.id ?? null}
+              sharedRole={sharedProjectFor(collabSnapshot.projects, projectContextMenu.projectId)?.role ?? null}
+              onLeaveProject={(onlineProjectId) => {
+                setProjectContextMenu(null);
+                setLeaveOnlineProjectId(onlineProjectId);
+              }}
+              // Removing a shared project locally would leave its cloud record without a home, so it stops
+              // sharing first; the menu only offers removal once it is local again.
+              canRemove={!sharedLocalProjectIds.has(projectContextMenu.projectId)}
+              // A shared project's name belongs to its owner; a local one is always this person's.
+              canRename={(() => {
+                const shared = sharedProjectFor(collabSnapshot.projects, projectContextMenu.projectId);
+                return !shared || shared.role === "owner";
+              })()}
+              onRename={(project) => beginProjectRename(project)}
+              onUnshareProject={(onlineProjectId) => {
+                setProjectContextMenu(null);
+                setDeleteOnlineProjectId(onlineProjectId);
+              }}
               archiveTaskCount={countProjectTasksToArchive(state.agent.tasks, projectContextMenu.projectId)}
               onClose={() => setProjectContextMenu(null)}
               onPin={(project) => {
@@ -1571,7 +1920,7 @@ export function AppFrame(props: AppFrameProps) {
         )}
         <div
           data-tour-anchor={PRODUCT_TOUR_CHAT_CONTENT_ANCHOR}
-          className={`min-h-0 h-full flex-1 overflow-hidden${
+          className={`min-h-0 min-w-0 h-full flex-1 overflow-hidden${
             sidebarHidden && !props.topBarBorder ? " app-frame-content-body--sidebar-hidden" : ""
           }`}
           style={topBarInset ? { paddingTop: "calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px))" } : undefined}
@@ -1581,6 +1930,35 @@ export function AppFrame(props: AppFrameProps) {
         {props.sidePanel}
       </main>
       </div>
+      <ConfirmDialog
+        open={deleteOnlineProjectId != null}
+        title={t("appFrame.project.stopSharingTitle")}
+        message={t("appFrame.project.stopSharingMessage", {
+          name: collabSnapshot.projects?.find((project) => project.id === deleteOnlineProjectId)?.name ?? ""
+        })}
+        cancelLabel={t("common.cancel")}
+        confirmLabel={deletingOnlineProject ? t("appFrame.project.stopping") : t("appFrame.project.stopSharing")}
+        confirmVariant="danger"
+        // The cloud deletes in one request; disabling keeps a second click from queueing another.
+        confirmDisabled={deletingOnlineProject}
+        icon={null}
+        onCancel={() => setDeleteOnlineProjectId(null)}
+        onConfirm={() => void unshareProject(deleteOnlineProjectId ?? "")}
+      />
+      <ConfirmDialog
+        open={leaveOnlineProjectId != null}
+        title={t("collab.leave.title")}
+        message={t("collab.leave.message", {
+          name: collabSnapshot.projects?.find((project) => project.id === leaveOnlineProjectId)?.name ?? ""
+        })}
+        cancelLabel={t("collab.cancel")}
+        confirmLabel={t("appFrame.project.leave")}
+        confirmVariant="danger"
+        confirmDisabled={leavingOnlineProject}
+        icon={null}
+        onCancel={() => setLeaveOnlineProjectId(null)}
+        onConfirm={() => void leaveOnlineProject(leaveOnlineProjectId ?? "")}
+      />
       <ConfirmDialog
         open={removeProject != null}
         title={t("appFrame.project.remove")}
@@ -1626,6 +2004,72 @@ export function AppFrame(props: AppFrameProps) {
         onCancel={() => setDeleteConfirmTask(null)}
         onConfirm={() => void confirmDeleteArchivedTask()}
       />
+      <CollabJoinProjectDialog
+        open={joinProjectOpen}
+        onCreateProject={() => {
+          setJoinProjectOpen(false);
+          setCreateProjectOpen(true);
+        }}
+        onClose={() => setJoinProjectOpen(false)}
+        onApplied={(application) => {
+          addPendingApplication(application);
+          if (collabClient) void loadCollabProjects(collabClient);
+        }}
+        onJoined={(project) => {
+          if (project.localProjectId) {
+            // Already a member with a project on this computer: just open it.
+            openProjectBoard(project.localProjectId);
+            return;
+          }
+          // A project left earlier in this run gets another binding attempt now that the person is back in.
+          collabBindAttempts.current.delete(project.id);
+          openBoardWhenBound.current = project.id;
+          addCollabProject(project);
+        }}
+      />
+      <CollabCreateProjectDialog
+        open={createProjectOpen}
+        onClose={() => setCreateProjectOpen(false)}
+        onCreated={(localProjectId) => {
+          setCreateProjectOpen(false);
+          // Only now, once the project exists, does the window move to its board.
+          openProjectBoard(localProjectId);
+        }}
+        onShared={(project) => addCollabProject(project)}
+        onJoinProject={() => {
+          // 同一个弹窗的另一种模式：关掉新建、打开加入，位置与尺寸都不变。
+          setCreateProjectOpen(false);
+          setJoinProjectOpen(true);
+        }}
+        onShareFailed={(reason) => {
+          // The project is usable on this computer; only sharing needs another try from its settings.
+          console.warn(`Project created without sharing: ${reason}`);
+          // 看板顶部提示：协作项目服务暂不可用，等它恢复后可在项目配置里重试。
+          showCollabNotice(t("collab.notice.shareUnavailable"));
+          dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
+            source: "sidebar",
+            message: "collab.create.shareFailed"
+          })));
+        }}
+        onShareLimitReached={(limit) => {
+          // 额度用完不是故障：项目照建在本机，提示要说清上限是多少、怎么腾出额度。
+          console.warn(`Project created without sharing: owned project limit ${limit} reached`);
+          showCollabNotice(t("collab.notice.shareQuotaExceeded", { limit }));
+          dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
+            source: "sidebar",
+            message: "collab.create.shareQuotaExceeded"
+          })));
+        }}
+        onBound={(projectId, localProjectId) => markCollabProjectBound(projectId, localProjectId)}
+        onBindFailed={(reason) => {
+          // The project exists; only its local record is missing, so the reason is logged rather than shown raw.
+          console.warn(`Project created without its local record: ${reason}`);
+          dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
+            source: "sidebar",
+            message: "collab.create.bindFailed"
+          })));
+        }}
+      />
       {deferredGuidanceStep === "improvement" && state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset" && guidanceWorkspaceReady && (
         <ImprovementProgramModal
           onChoice={chooseDeferredImprovementProgram}
@@ -1660,13 +2104,7 @@ export function AppFrame(props: AppFrameProps) {
   );
 }
 
-let agentHistoryRequestCounter = 0;
 let agentSidebarMutationCounter = 0;
-
-function nextAgentHistoryRequestId(chatId: string): string {
-  agentHistoryRequestCounter += 1;
-  return `${chatId}-${agentHistoryRequestCounter}`;
-}
 
 function nextAgentSidebarMutationId(): string {
   agentSidebarMutationCounter += 1;
@@ -1937,6 +2375,19 @@ function ProjectTreeSection(props: {
   groupKey: string;
   collapsedGroups: Record<string, boolean>;
   projects: ProjectSidebarNode[];
+  /** 已提交、还在等审核的加入申请。只有项目分组展示。 */
+  applications?: Array<{ projectId: string; projectName: string }>;
+  /** 「申请中」那一行被鼠标划到或点一下时静默重查一次（force 表示点击）。 */
+  onRecheckPendingApplication?: (force?: boolean) => void;
+  /** The project whose board is open, so its row is highlighted. */
+  openBoardProjectId?: string | null;
+  /** The project being renamed in place, with its draft and the three handlers the row needs. */
+  renamingProjectId?: string | null;
+  projectRenameDraft?: string;
+  onProjectRenameDraftChange?: (value: string) => void;
+  onProjectRenameCommit?: () => void;
+  onProjectRenameCancel?: () => void;
+  onOpenProjectBoard?: (projectId: string) => void;
   tasks: AgentTaskView[];
   currentSessionKey: string | null;
   selectedProjectId: string | null;
@@ -2036,6 +2487,13 @@ function ProjectTreeSection(props: {
         <div className="app-frame-collapsible__inner">
           <div className="app-frame-task-section-body">
             {props.tasks.map((task) => renderTask(task))}
+            {(props.applications ?? []).map((application) => (
+              <PendingApplicationRow
+                key={application.projectId}
+                name={application.projectName}
+                onRecheck={props.onRecheckPendingApplication}
+              />
+            ))}
             {props.projects.map((node) => {
               const projectKey = `project:${node.project.id}`;
               const projectCollapsed = Boolean(props.collapsedGroups[projectKey]);
@@ -2049,10 +2507,20 @@ function ProjectTreeSection(props: {
                   <ProjectRow
                     project={node.project}
                     collapsed={projectCollapsed}
-                    selected={props.selectedProjectId === node.project.id}
+                    selected={
+                      props.selectedProjectId === node.project.id
+                      || props.openBoardProjectId === node.project.id
+                    }
+                    renaming={props.renamingProjectId === node.project.id}
+                    renameDraft={props.projectRenameDraft ?? ""}
+                    onRenameDraftChange={(value) => props.onProjectRenameDraftChange?.(value)}
+                    onCommitRename={() => props.onProjectRenameCommit?.()}
+                    onCancelRename={() => props.onProjectRenameCancel?.()}
                     onToggle={() => props.onToggleProject(projectKey)}
+                    onOpenBoard={() => props.onOpenProjectBoard?.(node.project.id)}
                     onContextMenu={(event) => props.onProjectContextMenu(event, node.project.id)}
                     onNewTask={() => props.onNewProjectTask(node.project.id)}
+                    boardOpen={props.openBoardProjectId === node.project.id}
                   />
                   <div
                     className={`app-frame-collapsible${projectCollapsed ? " is-collapsed" : ""}`}
@@ -2093,7 +2561,7 @@ function ProjectTreeSection(props: {
                 </div>
               );
             })}
-            {!props.tasks.length && !props.projects.length && props.emptyText ? (
+            {!props.tasks.length && !props.projects.length && !(props.applications?.length) && props.emptyText ? (
               <div className="app-frame-task-empty">{props.emptyText}</div>
             ) : null}
           </div>
@@ -2207,13 +2675,50 @@ function SidebarInlineRenameInput(props: {
   );
 }
 
+/** 还没加入的项目：显示名称和「申请中」，不能展开任务也打不开看板；鼠标划过或点一下会静默重查一次。 */
+function PendingApplicationRow(props: { name: string; onRecheck?: (force?: boolean) => void }) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      className="app-frame-project-row app-frame-project-row--pending"
+      title={t("collab.application.pendingHint")}
+      onClick={() => props.onRecheck?.(true)}
+      onMouseEnter={() => props.onRecheck?.(false)}
+      onFocus={() => props.onRecheck?.(false)}
+    >
+      <span className="app-frame-project-row__mark" aria-hidden="true">
+        <Folder size={16} />
+      </span>
+      <span className="app-frame-project-row__main app-frame-project-row__main--static">
+        <SidebarMarqueeText text={props.name} className="app-frame-project-title" />
+        <span className="app-frame-project-pending">{t("collab.application.pending")}</span>
+      </span>
+    </button>
+  );
+}
+
+/**
+ * A project's sidebar row. It has two hit areas: the icon on the left expands or collapses the project's
+ * sessions, and the rest of the row opens the project board. Sharing only changes a badge, not the row.
+ */
 function ProjectRow(props: {
   project: MemmyAgentProject;
   collapsed: boolean;
+  /** The board of this project is open, or a blank new task targets it. */
   selected: boolean;
+  /** This row is being renamed in place, so the name is an input instead of text. */
+  renaming: boolean;
+  renameDraft: string;
+  onRenameDraftChange: (value: string) => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
   onToggle: () => void;
+  onOpenBoard: () => void;
   onContextMenu: (event: MouseEvent) => void;
   onNewTask: () => void;
+  /** 看板正停在这个项目上：协作引导的最后一步指向这一行的「＋」。 */
+  boardOpen?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -2223,10 +2728,12 @@ function ProjectRow(props: {
     >
       <button
         type="button"
-        className="app-frame-project-row__main"
+        className="app-frame-project-row__toggle"
         aria-expanded={!props.collapsed}
         aria-label={props.collapsed ? t("appFrame.project.expand") : t("appFrame.project.collapse")}
         onClick={(event) => {
+          // Only this hit area expands: the rest of the row opens the board.
+          event.stopPropagation();
           props.onToggle();
           // Avoid sticky :focus-within fill after mouse expand/collapse.
           event.currentTarget.blur();
@@ -2251,10 +2758,36 @@ function ProjectRow(props: {
             className={`app-frame-project-row__chevron${!props.collapsed ? " is-active" : ""}`}
           />
         </span>
-        <SidebarMarqueeText text={props.project.name} className="app-frame-project-title" />
+      </button>
+      <button
+        type="button"
+        className="app-frame-project-row__main"
+        onClick={(event) => {
+          props.onOpenBoard();
+          event.currentTarget.blur();
+        }}
+        onContextMenu={props.onContextMenu}
+      >
+        {props.renaming ? (
+          <SidebarInlineRenameInput
+            value={props.renameDraft}
+            maxLength={MAX_PROJECT_NAME_CHARS}
+            ariaLabel={t("appFrame.project.rename")}
+            onChange={props.onRenameDraftChange}
+            onCommit={props.onCommitRename}
+            onCancel={props.onCancelRename}
+          />
+        ) : (
+          <SidebarMarqueeText text={props.project.name} className="app-frame-project-title" />
+        )}
       </button>
       <div className="app-frame-project-row__actions">
-        <TaskIconButton label={t("appFrame.project.newTask")} tooltip={false} onClick={props.onNewTask}>
+        <TaskIconButton
+          label={t("appFrame.project.newTask")}
+          tooltip={false}
+          tourAnchor={props.boardOpen ? COLLAB_TOUR_ANCHORS.sidebarNewTask : undefined}
+          onClick={props.onNewTask}
+        >
           <MessageSquarePlus size={14} />
         </TaskIconButton>
         <TaskIconButton
@@ -2543,6 +3076,8 @@ function TaskIconButton(props: {
   danger?: boolean;
   /** Floating tooltip; keep false for self-evident icons revealed on row hover. */
   tooltip?: boolean;
+  /** 产品引导的锚点：带引导时用来定位这个按钮，平常不传。 */
+  tourAnchor?: string;
   children: ReactNode;
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
@@ -2556,6 +3091,7 @@ function TaskIconButton(props: {
     <button
       type="button"
       aria-label={props.label}
+      data-tour-anchor={props.tourAnchor}
       onClick={(event) => {
         event.stopPropagation();
         props.onClick(event);
@@ -2593,6 +3129,12 @@ function InlineConfirmButton(props: {
   );
 }
 
+/** Whether two workspace paths point at the same folder, ignoring a trailing separator or a symlinked home. */
+export function sameWorkspacePath(left: string, right: string): boolean {
+  const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/u, "");
+  return normalize(left) === normalize(right);
+}
+
 function formatSidebarWorkspacePath(rootPath: string): string {
   return rootPath
     .replace(/\\/g, "/")
@@ -2627,7 +3169,8 @@ function SidebarWorkspacePickerMenu(props: {
   projects: MemmyAgentProject[];
   registryState: "ready" | "corrupt";
   onSelectProject: (projectId: string) => void;
-  onOpenLocalFolder: () => void;
+  /** Opens the one project dialog, which also switches to joining a shared project inside itself. */
+  onNewProject: () => void;
 }) {
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
@@ -2702,10 +3245,10 @@ function SidebarWorkspacePickerMenu(props: {
                 role="option"
                 aria-selected="false"
                 className="home-project-picker__option home-project-picker__option--action"
-                onClick={props.onOpenLocalFolder}
+                onClick={props.onNewProject}
               >
                 <Plus size={13} strokeWidth={1.75} className="shrink-0 home-project-picker__action-icon" aria-hidden="true" />
-                <span>{t("home.project.new")}</span>
+                <span>{t("appFrame.project.new")}</span>
               </button>
             </div>
           </>
@@ -2852,6 +3395,19 @@ function TaskContextMenu(props: {
 function ProjectContextMenu(props: {
   menu: ProjectContextMenuState;
   project: MemmyAgentProject | null;
+  /** The cloud project when this project is shared; the menu can then stop sharing. */
+  sharedProjectId?: string | null;
+  /** Deletes the shared record in the cloud; the local project stays with its sessions. */
+  onUnshareProject?: (onlineProjectId: string) => void;
+  /** The person's role in the shared project: only its owner stops sharing, everyone else leaves. */
+  sharedRole?: string | null;
+  onProjectMembers?: (localProjectId: string) => void;
+  onLeaveProject?: (onlineProjectId: string) => void;
+  /** False while the project is shared: its cloud record would outlive a local removal. */
+  canRemove?: boolean;
+  /** False for a shared project the person does not own: its name is the owner's to change. */
+  canRename?: boolean;
+  onRename?: (project: MemmyAgentProject) => void;
   archiveTaskCount: number;
   onPin: (project: MemmyAgentProject) => void;
   onReveal: (project: MemmyAgentProject) => void;
@@ -2862,6 +3418,18 @@ function ProjectContextMenu(props: {
 }) {
   const { t } = useTranslation();
   const project = props.project;
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [menuSize, setMenuSize] = useState<SidebarMenuSize>(projectContextMenuSize);
+  useLayoutEffect(() => {
+    const element = menuRef.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    // Width and height are only used for the math, never applied, so the measured size is stable.
+    if (Math.abs(rect.height - menuSize.height) > 0.5 || Math.abs(rect.width - menuSize.width) > 0.5) {
+      setMenuSize({ ...menuSize, width: rect.width, height: rect.height });
+    }
+  });
   if (!project) return null;
   const run = (action: () => void) => {
     action();
@@ -2870,17 +3438,32 @@ function ProjectContextMenu(props: {
   if (typeof document === "undefined" || typeof window === "undefined") {
     return null;
   }
-  const overlayStyle = resolveSidebarContextMenuOverlayStyle(
-    props.menu.placement,
-    { width: window.innerWidth, height: window.innerHeight },
-    projectContextMenuSize
-  );
+  // The menu grows with its items — a shared project has two more than a local one — so the clamp must use the
+  // size that was actually rendered. The estimate alone let the last item land outside the window.
+  const overlayStyle = {
+    ...resolveSidebarContextMenuOverlayStyle(
+      props.menu.placement,
+      { width: window.innerWidth, height: window.innerHeight },
+      menuSize
+    ),
+    // A menu taller than the window scrolls instead of being cut off.
+    maxHeight: Math.max(0, window.innerHeight - projectContextMenuSize.margin * 2),
+    overflowY: "auto" as const
+  };
   const menu = (
     <div
+      ref={menuRef}
       className="app-frame-sidebar-menu app-frame-sidebar-menu--project"
       style={overlayStyle}
       onClick={(event) => event.stopPropagation()}
     >
+      {props.canRename === false ? null : (
+        <MenuButton
+          icon={<Pencil size={13} />}
+          label={t("appFrame.project.rename")}
+          onClick={() => run(() => props.onRename?.(project))}
+        />
+      )}
       <MenuButton
         icon={<Pin size={13} />}
         label={project.pinned ? t("appFrame.project.unpin") : t("appFrame.project.pin")}
@@ -2902,12 +3485,33 @@ function ProjectContextMenu(props: {
         disabled={props.archiveTaskCount === 0}
         onClick={() => run(() => props.onArchive(project))}
       />
-      <MenuButton
-        icon={<Trash2 size={13} />}
-        label={t("appFrame.project.remove")}
-        danger
-        onClick={() => run(() => props.onRemove(project))}
-      />
+      {props.sharedProjectId && props.sharedRole && props.sharedRole !== "owner" && props.onLeaveProject ? (
+        <>
+          <div className="app-frame-sidebar-menu__divider" role="separator" />
+          <MenuButton
+            icon={<LogOut size={13} />}
+            label={t("appFrame.project.leave")}
+            onClick={() => run(() => props.onLeaveProject!(props.sharedProjectId!))}
+          />
+        </>
+      ) : props.sharedProjectId && props.onUnshareProject ? (
+        <>
+          <div className="app-frame-sidebar-menu__divider" role="separator" />
+          <MenuButton
+            icon={<CloudOff size={13} />}
+            label={t("appFrame.project.stopSharing")}
+            onClick={() => run(() => props.onUnshareProject!(props.sharedProjectId!))}
+          />
+        </>
+      ) : null}
+      {props.canRemove === false ? null : (
+        <MenuButton
+          icon={<Trash2 size={13} />}
+          label={t("appFrame.project.remove")}
+          danger
+          onClick={() => run(() => props.onRemove(project))}
+        />
+      )}
     </div>
   );
   return createPortal(menu, document.body);

@@ -57,6 +57,25 @@ describe("cursor source adapter", () => {
     await expect(collect(readCursorVscdb(globalState.stateDbPath))).resolves.toEqual([]);
   });
 
+  it("reads a chat whose header list Cursor keeps in composerConvHeaders rows", async () => {
+    const globalState = createCursorGlobalStateFixture({ chunkedHeaders: 2 });
+
+    const messages = await collect(readCursorVscdb(globalState.stateDbPath));
+    const turn = sourceTurnFromMessages(messages.filter((message) => message.rawMeta.sourceTurnId === "bubble-user-1"));
+
+    expect(turn).toMatchObject({
+      source: "cursor",
+      conversationId: "composer-1",
+      turnId: "bubble-user-1",
+      answer: "I can help with the Cursor global storage format.",
+      status: "succeeded"
+    });
+    // The tool bubble travels with the turn it was run in, whichever chunk carried its header.
+    expect(turn?.toolCalls).toEqual([
+      expect.objectContaining({ id: "call-read-1", name: "read_file_v2", output: "file body" })
+    ]);
+  });
+
   it("treats a workspace database without chat tables as an empty history", async () => {
     const workspace = createCursorWorkspaceFixture();
 
@@ -161,7 +180,9 @@ function createCursorWorkspaceFixture(): {
 }
 
 /** Mirrors Cursor globalStorage: a composerHeaders row plus composerData and bubble rows. */
-function createCursorGlobalStateFixture(options: { closingAssistantText?: string; isSubagent?: boolean } = {}): {
+function createCursorGlobalStateFixture(
+  options: { closingAssistantText?: string; isSubagent?: boolean; chunkedHeaders?: number } = {}
+): {
   storageRoot: string;
   stateDbPath: string;
 } {
@@ -213,13 +234,26 @@ function createCursorGlobalStateFixture(options: { closingAssistantText?: string
       "composerData:composer-1",
       JSON.stringify({
         composerId: "composer-1",
-        fullConversationHeadersOnly: bubbles.map((bubble) => ({
-          bubbleId: bubble.bubbleId,
-          type: bubble.type,
-          createdAt: bubble.createdAt
-        }))
+        // Newer Cursor versions leave the inline list empty and write composerConvHeaders rows instead.
+        fullConversationHeadersOnly: options.chunkedHeaders
+          ? []
+          : bubbles.map((bubble) => ({
+            bubbleId: bubble.bubbleId,
+            type: bubble.type,
+            createdAt: bubble.createdAt
+          }))
       })
     );
+    if (options.chunkedHeaders) {
+      const headers = bubbles.map((bubble) => ({ bubbleId: bubble.bubbleId, type: bubble.type, createdAt: bubble.createdAt }));
+      const size = Math.ceil(headers.length / options.chunkedHeaders);
+      for (let index = 0; index < options.chunkedHeaders; index += 1) {
+        db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+          `composerConvHeaders:composer-1:${String(index).padStart(6, "0")}`,
+          JSON.stringify(headers.slice(index * size, (index + 1) * size))
+        );
+      }
+    }
     for (const bubble of bubbles) {
       db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
         `bubbleId:composer-1:${bubble.bubbleId}`,

@@ -8,11 +8,14 @@ export interface RawPiMessage {
   content: string;
   createdAt: string;
   workspacePath: string | null;
+  /** The title Pi wrote on the session record, when it keeps one. */
+  sessionTitle?: string;
 }
 
 export async function* readPiHistory(filePath: string, signal?: AbortSignal): AsyncIterable<RawPiMessage> {
   let conversationId = basename(filePath, ".jsonl");
   let workspacePath: string | null = null;
+  let sessionTitle = "";
   let lineNumber = 0;
 
   for await (const record of readJsonlObjects(filePath, signal)) {
@@ -20,12 +23,13 @@ export async function* readPiHistory(filePath: string, signal?: AbortSignal): As
     if (record.type === "session") {
       conversationId = stringValue(record.id) ?? conversationId;
       workspacePath = stringValue(record.cwd);
+      sessionTitle = stringValue(record.title)?.replace(/\s+/gu, " ").trim() ?? sessionTitle;
       continue;
     }
 
     const message = extractPiMessage(record, conversationId, lineNumber, workspacePath);
     if (message) {
-      yield message;
+      yield sessionTitle ? { ...message, sessionTitle } : message;
     }
   }
 }

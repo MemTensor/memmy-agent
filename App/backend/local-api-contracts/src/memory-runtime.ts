@@ -976,7 +976,8 @@ export const ApiErrorCodeSchema = z.enum([
   "toolkit_unsupported",
   "model_config_changed",
   "config_write_busy",
-  "account_model_preset_conflict"
+  "account_model_preset_conflict",
+  "collab_quota_exceeded"
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 

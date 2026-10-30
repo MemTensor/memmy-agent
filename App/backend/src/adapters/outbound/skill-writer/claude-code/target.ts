@@ -5,7 +5,12 @@ import { basename, dirname, join } from "node:path";
 import { createNodeHookCommand } from "../hook-command.js";
 import { isInstalledMemmyHookCurrent, memmyHookRevisionField } from "../hook-revision.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
-import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import {
+  removeMemmyProjectSkillDirectory,
+  removeMemmySkillDirectory,
+  replaceMemmyProjectSkillDirectory,
+  replaceMemmySkillDirectory
+} from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
@@ -62,6 +67,7 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       const existing = removeLegacyMarkerBlock(await readTextFile(filePath));
       await writeFileAtomically(filePath, upsertMarkerBlock(existing, renderMemmySkillBootstrapManifest(manifest)));
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
     },
 
     async uninstall(_targetId) {
@@ -75,6 +81,7 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       await writeFileAtomically(filePath, removeMarkerBlock(removeLegacyMarkerBlock(existing)));
       await removeLegacyAgentInstructions(root);
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
     },
 
     async isInstalled(_targetId) {
@@ -134,6 +141,7 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
         upsertMarkerBlock(await readTextFile(filePath), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
       await writeFileAtomically(
         hookConfigPath,
         `${JSON.stringify({ ...hookConfig, ...(await memmyHookRevisionField(CLAUDE_CODE_TARGET_ID, "claude-code")) }, null, 2)}\n`
@@ -156,6 +164,7 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       await writeFileAtomically(filePath, removeMarkerBlock(removeLegacyMarkerBlock(await readTextFile(filePath))));
       await removeLegacyAgentInstructions(root);
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
     }
   };
 }
@@ -273,7 +282,28 @@ async function upsertClaudeCodeHookSettings(filePath: string, hookScriptPath: st
   hooks.PostCompact = claudeHookEntries(hooks.PostCompact, hookScriptPath);
   hooks.SessionEnd = claudeHookEntries(hooks.SessionEnd, hookScriptPath);
   config.hooks = hooks;
+  const permissions = toMutableRecord(config.permissions);
+  permissions.allow = [...withoutProjectCliRules(permissions.allow), ...PROJECT_CLI_PERMISSION_RULES];
+  config.permissions = permissions;
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+/** Scope permissions to the operations the CLI currently supports. */
+const PROJECT_CLI_PATHS = [
+  "memmy-project",
+  "~/.local/bin/memmy-project",
+  "/Applications/Memmy.app/Contents/Resources/cli/memmy-project",
+  "~/Applications/Memmy.app/Contents/Resources/cli/memmy-project",
+  "%LOCALAPPDATA%\\Programs\\Memmy\\resources\\cli\\memmy-project.cmd",
+  "%ProgramFiles%\\Memmy\\resources\\cli\\memmy-project.cmd"
+];
+const PROJECT_CLI_PERMISSION_RULES = PROJECT_CLI_PATHS.flatMap((path) =>
+  ["list", "knowledge search", "session read", "session search", "session add"].map((action) => `Bash(${path} ${action}:*)`)
+);
+const MANAGED_PROJECT_CLI_RULES = new Set(PROJECT_CLI_PERMISSION_RULES);
+
+function withoutProjectCliRules(value: unknown): unknown[] {
+  return Array.isArray(value) ? value.filter((rule) => !MANAGED_PROJECT_CLI_RULES.has(rule as string)) : [];
 }
 
 async function removeClaudeCodeHookSettings(filePath: string): Promise<void> {
@@ -306,6 +336,15 @@ async function removeClaudeCodeHookSettings(filePath: string): Promise<void> {
     config.hooks = hooks;
   } else {
     delete config.hooks;
+  }
+
+  if (config.permissions !== undefined) {
+    const permissions = toMutableRecord(config.permissions);
+    const allow = withoutProjectCliRules(permissions.allow);
+    if (allow.length > 0) permissions.allow = allow;
+    else delete permissions.allow;
+    if (Object.keys(permissions).length > 0) config.permissions = permissions;
+    else delete config.permissions;
   }
 
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);

@@ -99,6 +99,7 @@ describe("desktop route table", () => {
       "/tools",
       "/memory",
       "/knowledge",
+      "/collab",
       "/memory-sources",
       "/settings"
     ]);

@@ -2,7 +2,15 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
+import {
+  isMemmyProjectSkillDirectoryCurrent,
+  isMemmySkillDirectoryCurrent,
+  readInstalledSkillKind,
+  replaceMemmyProjectSkillDirectory,
+  replaceMemmySkillDirectory
+} from "../adapters/outbound/skill-writer/skill-directory.js";
 import { renderMemmyDefaultSkillManifest } from "../adapters/outbound/skill-writer/templates/memmy-default.js";
+import { renderMemmyPluginSkillManifest } from "../adapters/outbound/skill-writer/templates/memmy-plugin.js";
 import type { MemoryPluginConflict } from "../adapters/outbound/skill-writer/types.js";
 import type { SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
 import { AgentSourceUnavailableError } from "./runtime-errors.js";
@@ -27,6 +35,18 @@ export interface SkillDistributionService {
   uninstallPlugin(sourceId: string): Promise<void>;
   isInstalledHookCurrent?(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts?(): Promise<MemoryPluginConflict[]>;
+  /**
+   * Rewrites the Memmy skill an agent already has when this build ships different instructions. The installed
+   * file decides which variant to keep, so an agent whose connection status was lost is still refreshed.
+   * Returns whether anything was written.
+   */
+  refreshInstalledSkill(sourceId: string, mode?: "skill" | "plugin"): Promise<boolean>;
+  /**
+   * Writes the `memmy-project` skill into every agent home that already exists. A new install has no
+   * memory skill yet, and auto-inject is off unless the person turns it on, so this is what puts the
+   * project skill on disk after the app is installed.
+   */
+  ensureProjectSkills(): Promise<string[]>;
 }
 
 /** Contract for create skill distribution service options. */
@@ -117,6 +137,46 @@ export function createSkillDistributionService(
         }
       }
       return conflicts;
+    },
+
+    async refreshInstalledSkill(sourceId, mode) {
+      const target = options.targetRegistry.get(sourceId);
+      if (!target) return false;
+      const root = await target.resolveRootDirectory();
+      if (!root) return false;
+
+      // A skill on disk is what Memmy installed before; only its variant is inferred from its own text.
+      const installed = await readInstalledSkillKind(root);
+      if (!installed) return false;
+      const kind = mode ?? installed;
+      if (kind === "plugin" && !target.installPlugin) return false;
+
+      const manifest = kind === "plugin"
+        ? renderMemmyPluginSkillManifest(sourceId)
+        : renderMemmyDefaultSkillManifest(sourceId);
+      const memoryCurrent = await isMemmySkillDirectoryCurrent(root, manifest);
+      if (memoryCurrent && await isMemmyProjectSkillDirectoryCurrent(root, sourceId)) return false;
+
+      if (!memoryCurrent) {
+        if (kind === "plugin") await target.installPlugin!(sourceId);
+        // Skill-only agents get the skill directory alone: their instructions file must not gain memory guidance.
+        else await replaceMemmySkillDirectory(root, manifest);
+      }
+      // The project skill is installed with the memory skill; an agent connected before it existed gets it here.
+      if (!(await isMemmyProjectSkillDirectoryCurrent(root, sourceId))) await replaceMemmyProjectSkillDirectory(root, sourceId);
+      return true;
+    },
+
+    async ensureProjectSkills() {
+      const written: string[] = [];
+      for (const target of options.targetRegistry.list()) {
+        const root = await target.resolveRootDirectory();
+        if (!root || !(await directoryExists(root))) continue;
+        if (await isMemmyProjectSkillDirectoryCurrent(root, target.targetId)) continue;
+        await replaceMemmyProjectSkillDirectory(root, target.targetId);
+        written.push(target.targetId);
+      }
+      return written;
     }
   };
 }
@@ -160,6 +220,15 @@ function frontmatterValue(content: string, key: string): string | undefined {
   if (end < 0) return undefined;
   const match = content.slice(3, end).match(new RegExp(`^${key}:\\s*["']?([^\\n"']+)["']?\\s*$`, "im"));
   return match?.[1]?.trim();
+}
+
+async function directoryExists(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

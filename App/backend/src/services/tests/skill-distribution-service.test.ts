@@ -1,9 +1,11 @@
 /** Skill distribution service tests. */
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createSkillTargetRegistry } from "../../adapters/outbound/skill-writer/target-registry.js";
+import { replaceMemmySkillDirectory } from "../../adapters/outbound/skill-writer/skill-directory.js";
+import { renderMemmyDefaultSkillManifest } from "../../adapters/outbound/skill-writer/templates/memmy-default.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../../adapters/outbound/skill-writer/types.js";
 import { createSkillDistributionService } from "../skill-distribution-service.js";
 
@@ -236,6 +238,115 @@ describe("skill distribution service", () => {
         installedPluginId: "other-memory"
       }
     ]);
+  });
+
+  it("rewrites a stale skill-only agent's skill in place, leaving its instructions file alone", async () => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-agent-skill-refresh-"));
+    try {
+      await replaceMemmySkillDirectory(rootDirectory, { targetId: "cursor", content: "## Agent Loop\nold", marker: "m" });
+      let installed = 0;
+      const service = createSkillDistributionService({
+        targetRegistry: createSkillTargetRegistry([
+          createFakeTarget({ resolveRootDirectory: () => rootDirectory, install: () => { installed += 1; } })
+        ])
+      });
+
+      await expect(service.refreshInstalledSkill("cursor")).resolves.toBe(true);
+      // The skill directory is rewritten directly; install() would also add memory guidance to AGENTS.md.
+      expect(installed).toBe(0);
+      const content = readFileSync(join(rootDirectory, "skills", "memmy-memory", "SKILL.md"), "utf8");
+      expect(content).toContain("## Agent Loop");
+      // Project sessions are a skill of their own, next to the memory skill.
+      expect(content).not.toContain("memmy-project");
+      expect(readFileSync(join(rootDirectory, "skills", "memmy-project", "SKILL.md"), "utf8")).toContain("name: memmy-project");
+    } finally {
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("installs the session skill into an existing agent home that never had Memmy", async () => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-agent-session-only-"));
+    const missing = join(rootDirectory, "missing-agent");
+    try {
+      const present = join(rootDirectory, "cursor-home");
+      mkdirSync(present);
+      const service = createSkillDistributionService({
+        targetRegistry: createSkillTargetRegistry([
+          createFakeTarget({ resolveRootDirectory: () => present }),
+          { ...createFakeTarget({ resolveRootDirectory: () => missing }), targetId: "codex", displayName: "Codex" }
+        ])
+      });
+
+      await expect(service.ensureProjectSkills()).resolves.toEqual(["cursor"]);
+      expect(readFileSync(join(present, "skills", "memmy-project", "SKILL.md"), "utf8")).toContain("name: memmy-project");
+      await expect(service.ensureProjectSkills()).resolves.toEqual([]);
+    } finally {
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves an agent with no Memmy skill alone", async () => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-agent-no-skill-"));
+    try {
+      let installed = 0;
+      const service = createSkillDistributionService({
+        targetRegistry: createSkillTargetRegistry([
+          createFakeTarget({ resolveRootDirectory: () => rootDirectory, install: () => { installed += 1; } })
+        ])
+      });
+
+      await expect(service.refreshInstalledSkill("cursor")).resolves.toBe(false);
+      expect(installed).toBe(0);
+    } finally {
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a connected agent alone when its skill already matches this build", async () => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-agent-skill-current-"));
+    try {
+      await replaceMemmySkillDirectory(rootDirectory, renderMemmyDefaultSkillManifest("cursor"));
+      let installed = 0;
+      const service = createSkillDistributionService({
+        targetRegistry: createSkillTargetRegistry([
+          createFakeTarget({ resolveRootDirectory: () => rootDirectory, install: () => { installed += 1; } })
+        ])
+      });
+
+      // Connected before the session skill existed: only the session skill is added.
+      await expect(service.refreshInstalledSkill("cursor", "skill")).resolves.toBe(true);
+      expect(readFileSync(join(rootDirectory, "skills", "memmy-project", "SKILL.md"), "utf8")).toContain("name: memmy-project");
+      await expect(service.refreshInstalledSkill("cursor", "skill")).resolves.toBe(false);
+      expect(installed).toBe(0);
+    } finally {
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("reinstalls the plugin for a hook agent so its skill carries the new section", async () => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-agent-plugin-refresh-"));
+    try {
+      await replaceMemmySkillDirectory(rootDirectory, { targetId: "cursor", content: "## Automatic Memory\nold", marker: "m" });
+      let reinstalled = 0;
+      const service = createSkillDistributionService({
+        targetRegistry: createSkillTargetRegistry([
+          createFakeTarget({ resolveRootDirectory: () => rootDirectory, installPlugin: () => { reinstalled += 1; } })
+        ])
+      });
+
+      await expect(service.refreshInstalledSkill("cursor", "plugin")).resolves.toBe(true);
+      expect(reinstalled).toBe(1);
+    } finally {
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("skips providers that are not installed on this computer", async () => {
+    const service = createSkillDistributionService({
+      targetRegistry: createSkillTargetRegistry([createFakeTarget({ resolveRootDirectory: () => null })])
+    });
+
+    await expect(service.refreshInstalledSkill("cursor", "skill")).resolves.toBe(false);
   });
 });
 

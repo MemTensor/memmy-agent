@@ -1,0 +1,334 @@
+/*
+ * 协作项目的首次引导（teach mode）：遮罩挖出目标区域，气泡跟随目标移动。
+ * 视觉沿用记忆管理的产品引导（圆角 12、半透明黑遮罩、带 Memmy 形象与步骤数），
+ * 配色跟随看板的薄荷绿，不从别处引入品牌色。
+ */
+.layer {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  --tour-accent: var(--color-action-sky, #5cbfae);
+  --tour-accent-deep: var(--color-action-sky-hover, #3aa893);
+  --tour-ink: var(--color-text-ink, #111d1c);
+  --tour-line: color-mix(in srgb, var(--color-border-stone, #d6dfdc) 40%, transparent);
+}
+
+.mask {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* 引导期间只有气泡可点：这一层吃掉全屏点击，并在被点时让气泡轻晃，提示下一步在这里。 */
+.block {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: default;
+}
+
+.bubble {
+  position: absolute;
+  width: 288px;
+  padding: 20px;
+  border: 1px solid var(--tour-line);
+  border-radius: 12px;
+  background: var(--color-background-paper, #fff);
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  color: var(--tour-ink);
+  animation: tourEnter 0.24s ease-out;
+}
+
+.bubbleWide {
+  width: 344px;
+}
+
+.bubbleNudge {
+  animation: tourNudge 0.36s ease-in-out;
+}
+
+.pet {
+  position: absolute;
+  top: -34px;
+  right: -6px;
+  pointer-events: none;
+}
+
+/* 气泡靠右对齐时目标在右上方：形象翻到左边，不压住正在指的那个控件 */
+.petLeft {
+  right: auto;
+  left: -8px;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.count {
+  padding: 0 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tour-accent) 12%, transparent);
+  color: var(--tour-accent-deep);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+}
+
+.headIcon {
+  display: inline-flex;
+  color: var(--tour-accent-deep);
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.body {
+  margin: 0;
+  color: color-mix(in srgb, var(--tour-ink) 70%, transparent);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+/* 对话示意：说明「在 Agent 里说一句」就能把这个任务共享过来 */
+.chat {
+  margin-top: 10px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--tour-line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-canvas-oat, #f4f7f6) 60%, transparent);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.chatHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: color-mix(in srgb, var(--tour-ink) 55%, transparent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.chatAsk {
+  width: fit-content;
+  max-width: 88%;
+  margin-left: auto;
+  padding: 5px 9px;
+  border-radius: 9px 9px 2px 9px;
+  background: color-mix(in srgb, var(--tour-accent) 16%, transparent);
+  color: var(--tour-accent-deep);
+  font-weight: 600;
+  animation: tourEnter 0.3s 0.25s both;
+}
+
+.chatAnswer {
+  max-width: 94%;
+  margin-top: 6px;
+  color: color-mix(in srgb, var(--tour-ink) 78%, transparent);
+  animation: tourEnter 0.3s 0.9s both;
+}
+
+/* 输入框示意：新任务带上被继续任务的引用，底部是所属项目，与实现一致 */
+.compose {
+  margin-top: 10px;
+  border: 1px solid var(--tour-line);
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  overflow: hidden;
+}
+
+.composeBody {
+  padding: 9px 10px 14px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.composeChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--tour-accent) 16%, transparent);
+  color: var(--tour-accent-deep);
+  font-weight: 700;
+  vertical-align: 1px;
+}
+
+.composeCaret {
+  display: inline-block;
+  width: 1px;
+  height: 13px;
+  margin-left: 1px;
+  background: var(--tour-ink);
+  vertical-align: -2px;
+  animation: tourCaret 1s steps(1) infinite;
+}
+
+.composeFoot {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--tour-line);
+  background: color-mix(in srgb, var(--color-canvas-oat, #f4f7f6) 60%, transparent);
+  color: color-mix(in srgb, var(--tour-ink) 72%, transparent);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--tour-line);
+}
+
+/* 上一步与下一步靠在一起：第一步没有上一步，下一步独占右侧 */
+.footerButtons {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.back {
+  padding: 6px 12px;
+  border: 1px solid var(--tour-line);
+  border-radius: 8px;
+  background: none;
+  color: color-mix(in srgb, var(--tour-ink) 68%, transparent);
+  cursor: pointer;
+  font-size: 12px;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.back:hover {
+  border-color: color-mix(in srgb, var(--tour-accent) 45%, transparent);
+  color: var(--tour-ink);
+}
+
+.skip {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: color-mix(in srgb, var(--tour-ink) 45%, transparent);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.skip:hover {
+  color: color-mix(in srgb, var(--tour-ink) 65%, transparent);
+}
+
+.next {
+  padding: 6px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--tour-accent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.15s;
+}
+
+.next:hover {
+  background: var(--tour-accent-deep);
+}
+
+.arrow {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--color-background-paper, #fff);
+}
+
+/* 气泡在目标下方时箭头朝上；在上方时朝下；在右侧时朝左 */
+.arrowTop {
+  top: -6px;
+  border-top: 1px solid var(--tour-line);
+  border-left: 1px solid var(--tour-line);
+  transform: rotate(45deg);
+}
+
+.arrowBottom {
+  bottom: -6px;
+  border-right: 1px solid var(--tour-line);
+  border-bottom: 1px solid var(--tour-line);
+  transform: rotate(45deg);
+}
+
+.arrowLeft {
+  left: -6px;
+  border-bottom: 1px solid var(--tour-line);
+  border-left: 1px solid var(--tour-line);
+  transform: rotate(45deg);
+}
+
+/*
+ * 示例任务行：只在引导期间出现，用来演示「通过对话共享」与「继续任务」，
+ * 因此不可点、不显示悬停态，结束引导后随组件一起消失。
+ */
+.samples {
+  pointer-events: none;
+}
+
+.samples .row,
+.samples .row:hover {
+  background: none;
+}
+
+.samples .moreButton {
+  visibility: visible;
+  opacity: 1;
+}
+
+@keyframes tourEnter {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes tourNudge {
+  25% {
+    transform: translateX(-4px);
+  }
+
+  75% {
+    transform: translateX(4px);
+  }
+}
+
+@keyframes tourCaret {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble,
+  .bubbleNudge,
+  .chatAsk,
+  .chatAnswer,
+  .composeCaret {
+    animation: none;
+  }
+}

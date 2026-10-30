@@ -83,6 +83,21 @@ describe("SkillsLoader listSkills", () => {
     expect(fs.readdirSync(path.dirname(entry!.path))).toEqual(["SKILL.md"]);
   });
 
+  it("ships memmy-project as a builtin skill so Memmy's own agent can find shared tasks", () => {
+    const loader = new SkillsLoader(tmpDir());
+    const entry = loader.listSkills(false).find((skill) => skill.name === "memmy-project");
+    const content = loader.loadSkill("memmy-project");
+    const summary = loader.buildSkillsSummary();
+
+    expect(entry).toMatchObject({ name: "memmy-project", source: "builtin" });
+    // 摘要里只有名称与描述，正文按需加载：名称必须出现在清单里，命令细节留在正文。
+    expect(summary).toContain("memmy-project");
+    expect(summary).not.toContain("memmy-project session search");
+    expect(content).toContain("memmy-project session search");
+    expect(content).toContain("memmy-project session add");
+    expect(content).toContain("你运行在 Memmy 内部");
+  });
+
   it("keeps the product memory skill removed while preserving user skills named memory", () => {
     const workspace = tmpDir();
     const loader = new SkillsLoader(workspace);

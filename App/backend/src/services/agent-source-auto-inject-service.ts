@@ -141,5 +141,7 @@ function isUpdatableInstalledHook(source: AgentSourceView): boolean {
   return UPDATABLE_HOOK_AGENT_SOURCE_IDS.has(source.sourceId)
     && source.builtin
     && source.available
-    && source.status === "plugin_installed";
+    // skill_installed 表示只装了技能、没装钩子（Codex 曾长期停在这个状态）：也要补装，
+    // 否则它既不算「已装可更新」，也不算「未连接可新装」，永远拿不到注入。
+    && (source.status === "plugin_installed" || source.status === "skill_installed");
 }
