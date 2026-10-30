@@ -1,6 +1,7 @@
 import { Cloud, Folder, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createHttpCollabClient, type CollabClient, type CollabProject } from "../api/collab-client.js";
+import { requestCollabTour } from "../app/collab-projects-store.js";
 import { prepareProjectDirectory } from "../api/projects-client.js";
 import { useOptionalAgentRuntimeBridge } from "../app/agent-runtime-bridge.js";
 import { useOptionalApiClients } from "../app/providers.js";
@@ -114,9 +115,12 @@ export function CreateProjectModal(props: {
     }
 
     const createdLocalProjectId = localProjectId;
+    /** 只有云端记录真的建成了才开始引导：建失败时项目只是本机项目，那些与成员相关的步骤没有对象。 */
+    let sharingStarted = false;
     try {
       // The cloud record points at the folder the project already runs in, so both keep the same directory.
       const created = await props.collab.createProject(trimmed, workingDirectory);
+      sharingStarted = true;
       props.onShared(created.project);
       try {
         await props.collab.bindLocalProject(created.project.id, createdLocalProjectId);
@@ -131,6 +135,8 @@ export function CreateProjectModal(props: {
     } finally {
       setBusy(false);
     }
+    // 刚建立协作：看板打开后走一遍首次引导（本机已看过则不再出现）。
+    if (sharingStarted) requestCollabTour(createdLocalProjectId);
     props.onCreated(createdLocalProjectId);
   }
 

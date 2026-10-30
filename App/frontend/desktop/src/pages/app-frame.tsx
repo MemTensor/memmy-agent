@@ -63,6 +63,7 @@ import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { CollabCreateProjectDialog } from "./collab-create-project-dialog.js";
 import { CollabJoinProjectDialog } from "./collab-join-project-dialog.js";
+import { COLLAB_TOUR_ANCHORS } from "./collab-tour.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
 import { writeMemorySubPage } from "./memory-sub-page-storage.js";
 import { SearchPalette } from "../components/search-palette.js";
@@ -2510,6 +2511,7 @@ function ProjectTreeSection(props: {
                     onOpenBoard={() => props.onOpenProjectBoard?.(node.project.id)}
                     onContextMenu={(event) => props.onProjectContextMenu(event, node.project.id)}
                     onNewTask={() => props.onNewProjectTask(node.project.id)}
+                    boardOpen={props.openBoardProjectId === node.project.id}
                   />
                   <div
                     className={`app-frame-collapsible${projectCollapsed ? " is-collapsed" : ""}`}
@@ -2706,6 +2708,8 @@ function ProjectRow(props: {
   onOpenBoard: () => void;
   onContextMenu: (event: MouseEvent) => void;
   onNewTask: () => void;
+  /** 看板正停在这个项目上：协作引导的最后一步指向这一行的「＋」。 */
+  boardOpen?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -2769,7 +2773,12 @@ function ProjectRow(props: {
         )}
       </button>
       <div className="app-frame-project-row__actions">
-        <TaskIconButton label={t("appFrame.project.newTask")} tooltip={false} onClick={props.onNewTask}>
+        <TaskIconButton
+          label={t("appFrame.project.newTask")}
+          tooltip={false}
+          tourAnchor={props.boardOpen ? COLLAB_TOUR_ANCHORS.sidebarNewTask : undefined}
+          onClick={props.onNewTask}
+        >
           <MessageSquarePlus size={14} />
         </TaskIconButton>
         <TaskIconButton
@@ -3058,6 +3067,8 @@ function TaskIconButton(props: {
   danger?: boolean;
   /** Floating tooltip; keep false for self-evident icons revealed on row hover. */
   tooltip?: boolean;
+  /** 产品引导的锚点：带引导时用来定位这个按钮，平常不传。 */
+  tourAnchor?: string;
   children: ReactNode;
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
@@ -3071,6 +3082,7 @@ function TaskIconButton(props: {
     <button
       type="button"
       aria-label={props.label}
+      data-tour-anchor={props.tourAnchor}
       onClick={(event) => {
         event.stopPropagation();
         props.onClick(event);

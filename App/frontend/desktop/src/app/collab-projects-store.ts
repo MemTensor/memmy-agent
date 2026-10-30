@@ -24,6 +24,11 @@ export interface CollabProjectsSnapshot {
    */
   taskPickerFor: string | null;
   /**
+   * 刚创建并开启协作、或刚在项目设置里开启协作的项目：看板据此走一遍首次引导，读完即清掉。
+   * 只在「刚建立协作」这一个时机触发，打开其他协作项目不再弹引导。
+   */
+  tourFor: string | null;
+  /**
    * 看板顶部的一次性提示文案（已本地化）：例如新建项目时勾了共享但云端不可用。看板显示几秒后自行清除。
    */
   notice: string | null;
@@ -38,6 +43,7 @@ let snapshot: CollabProjectsSnapshot = {
   error: null,
   createPending: false,
   taskPickerFor: null,
+  tourFor: null,
   notice: null
 };
 const listeners = new Set<() => void>();
@@ -202,6 +208,20 @@ export function consumeTaskPickerRequest(): void {
   if (snapshot.taskPickerFor) update({ taskPickerFor: null });
 }
 
+/**
+ * 让看板在一个刚建立协作的项目上走一遍首次引导。
+ *
+ * @param localProjectId 本机项目 id：协作项目只是本机项目加上云端记录，看板按本机 id 找项目。
+ */
+export function requestCollabTour(localProjectId: string): void {
+  update({ tourFor: localProjectId });
+}
+
+/** Clears the tour request the board just acted on. */
+export function consumeCollabTourRequest(): void {
+  if (snapshot.tourFor) update({ tourFor: null });
+}
+
 /** Test seam: drops every listener and returns the store to its first state. */
 export function resetCollabProjectsStore(): void {
   inFlight = null;
@@ -214,6 +234,7 @@ export function resetCollabProjectsStore(): void {
     error: null,
     createPending: false,
     taskPickerFor: null,
+    tourFor: null,
     notice: null
   };
   listeners.clear();
