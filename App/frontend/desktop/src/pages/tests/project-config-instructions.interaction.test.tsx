@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 /**
- * 看板右侧的项目配置：指令卡片显示当前指令，所有者与管理员可以编辑，成员只读。
+ * 看板右侧的项目配置：背景与规范卡片显示当前内容，所有者与管理员可以编辑，成员只读。
  * 仅在本机的项目写本机，协作项目写云端并同步回本机。
  */
 import { act } from "react";
@@ -157,7 +157,7 @@ describe("project board configuration", () => {
   it("shows the instruction card of a project that is only on this computer", async () => {
     await renderBoard();
     expect(document.body.textContent).toContain("项目配置");
-    expect(document.body.textContent).toContain("指令");
+    expect(document.body.textContent).toContain("背景与规范");
     // 未设定时给出说明，而不是空白卡片。
     expect(document.body.textContent).toContain("设定项目的背景与规范");
     expect(instructionMocks.readProjectInstructions).toHaveBeenCalledWith(
@@ -168,7 +168,7 @@ describe("project board configuration", () => {
 
   it("saves a local project's instructions and shows them on the card", async () => {
     await renderBoard();
-    await act(async () => iconButton("编辑项目指令").click());
+    await act(async () => iconButton("编辑背景与规范").click());
 
     const editor = document.querySelector<HTMLTextAreaElement>("textarea");
     expect(editor).toBeTruthy();
@@ -197,7 +197,7 @@ describe("project board configuration", () => {
       instructions: "对外文案使用书面语。"
     });
     await renderBoard(CLOUD_PROJECT);
-    await act(async () => iconButton("编辑项目指令").click());
+    await act(async () => iconButton("编辑背景与规范").click());
     const editor = document.querySelector<HTMLTextAreaElement>("textarea")!;
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
@@ -217,7 +217,7 @@ describe("project board configuration", () => {
   it("shows a member the instructions read only", async () => {
     await renderBoard({ ...CLOUD_PROJECT, role: "member", instructions: "前端代码遵循《前端代码规范》。" });
     // 成员看不到编辑按钮。
-    expect(document.querySelector('button[aria-label="编辑项目指令"]')).toBeNull();
+    expect(document.querySelector('button[aria-label="编辑背景与规范"]')).toBeNull();
 
     // 点指令卡片本身打开只读弹窗（aside 的第一个按钮是收起）。
     const card = Array.from(document.querySelectorAll<HTMLElement>("aside button"))

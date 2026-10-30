@@ -45,7 +45,7 @@ export function registerProjectRoutes(app: FastifyInstance, options: RegisterPro
   app.put("/api/projects/instructions", { preHandler: options.authenticateRuntimeToken }, withErrorEnvelope(async (request, reply) => {
     const input = SaveInstructionsSchema.parse(request.body ?? {});
     if ([...input.text.trim()].length > MAX_PROJECT_INSTRUCTIONS_CHARS) {
-      return reply.status(400).send({ error: { code: "invalid_argument", message: `项目指令不超过 ${MAX_PROJECT_INSTRUCTIONS_CHARS} 字` } });
+      return reply.status(400).send({ error: { code: "invalid_argument", message: `背景与规范不超过 ${MAX_PROJECT_INSTRUCTIONS_CHARS} 字` } });
     }
     return reply.send(await options.projectInstructions!.saveLocal(input.directory, input.text));
   }));

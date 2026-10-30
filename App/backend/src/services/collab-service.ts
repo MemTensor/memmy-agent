@@ -1618,7 +1618,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     async updateInstructions(projectId, text, directory) {
       const instructions = text.trim();
       if ([...instructions].length > MAX_COLLAB_INSTRUCTIONS_CHARS) {
-        throw new CollabError("invalid_argument", `项目指令不超过 ${MAX_COLLAB_INSTRUCTIONS_CHARS} 字`);
+        throw new CollabError("invalid_argument", `背景与规范不超过 ${MAX_COLLAB_INSTRUCTIONS_CHARS} 字`);
       }
       const data = await cloud(`/projects/${encodeURIComponent(projectId)}`, { method: "PATCH", body: { instructions } });
       const account = requireAccount();

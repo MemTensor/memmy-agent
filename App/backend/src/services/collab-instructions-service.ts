@@ -127,7 +127,7 @@ export function createCollabInstructionsService(
       if (!projectId) return;
       const value = input.text.trim();
       if ([...value].length > MAX_COLLAB_INSTRUCTIONS_CHARS) {
-        throw new Error(`项目指令不超过 ${MAX_COLLAB_INSTRUCTIONS_CHARS} 字`);
+        throw new Error(`背景与规范不超过 ${MAX_COLLAB_INSTRUCTIONS_CHARS} 字`);
       }
       const scopes = normalizeScopes(input.scopes);
       await enqueue(async () => {

@@ -121,7 +121,7 @@ export function createProjectInstructionsService(options: ProjectInstructionsSer
     if (!key) throw new Error("项目目录无效");
     const value = text.trim();
     if ([...value].length > MAX_PROJECT_INSTRUCTIONS_CHARS) {
-      throw new Error(`项目指令不超过 ${MAX_PROJECT_INSTRUCTIONS_CHARS} 字`);
+      throw new Error(`背景与规范不超过 ${MAX_PROJECT_INSTRUCTIONS_CHARS} 字`);
     }
     return enqueue(async () => {
       const file = await load();
