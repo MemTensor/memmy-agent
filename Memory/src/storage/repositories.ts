@@ -59,8 +59,16 @@ import {
   type VectorSearchCandidate
 } from "./sqlite-vec-store.js";
 import { QueueSchedulingStore, type SchedulingMetadata } from "./queue-scheduling-store.js";
-import { mainQueueEligibility, retryQueueEligibility, type QueueEligibilityOptions } from "./queue-eligibility.js";
+import {
+  l3ProfileHeldSql,
+  mainQueueEligibility,
+  retryQueueEligibility,
+  scopedJobReadySql,
+  type QueueEligibilityOptions
+} from "./queue-eligibility.js";
 import { compactHistoryChangePayload, compactHistoryChangeRow } from "./history-change-snapshot.js";
+import { L3FieldRepository } from "./l3-field-repository.js";
+import { isL3FieldSnapshotMemory } from "../service/l3-field/snapshot-memory.js";
 
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
@@ -86,6 +94,10 @@ const BUNDLE_TABLES = [
   "api_logs",
   "memory_change_log",
   "l3_world_model_project_environment_state",
+  "l3_units",
+  "l3_unit_batches",
+  "l3_items",
+  "l3_user_projects",
   "evolution_jobs",
   "embedding_retry_queue",
   "memory_processing_state",
@@ -353,7 +365,11 @@ export type L3WorldModelBatchTrigger =
   | "token_compaction"
   | "token_compaction_attempt"
   | "session_close"
-  | "episode_idle_close";
+  | "episode_idle_close"
+  /** A finished agent-source scan pass; new L3 only (scans stay out of the old pipeline). */
+  | "scan_pass"
+  /** A Session that went quiet without a close (its idle flush); new L3 only. */
+  | "session_idle";
 
 export type L3WorldModelTargetField = Exclude<L3WorldModelFieldName, "project_environment_profile">;
 
@@ -1377,7 +1393,7 @@ export class MemoryRepository {
   reindexFts(memory: MemoryRow): void {
     try {
       this.db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(memory.id);
-      if (!memory.deletedAt && memory.status !== "deleted") {
+      if (!memory.deletedAt && memory.status !== "deleted" && !isL3FieldSnapshotMemory(memory)) {
         this.db
           .prepare(`INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`)
           .run(memory.id, memory.id, retrievalDocumentForMemory(memory), memory.tags.join(" "));
@@ -2758,6 +2774,18 @@ export class RuntimeRepository {
       .all(rawTurnId, rawTurnId) as Array<{ id: string }>).map(r => r.id);
   }
 
+  /** An L1 of a new-L3 batch whose summary is still being written (the batch waits for it), if any. */
+  unsummarizedL3BatchL1(batchId: string): string | undefined {
+    return this.db.prepare(
+      `SELECT batch_l1.value FROM l3_unit_batches AS unit_batch, json_each(unit_batch.l1_memory_ids_json) AS batch_l1
+       JOIN memory_processing_state AS l1_state ON l1_state.memory_id = batch_l1.value
+       JOIN memories AS batch_memory ON batch_memory.id = l1_state.memory_id
+       WHERE unit_batch.id = ? AND l1_state.state IN ('summary_pending', 'summarizing')
+         AND batch_memory.deleted_at IS NULL AND batch_memory.status != 'deleted'
+       LIMIT 1`
+    ).pluck().get(batchId) as string | undefined;
+  }
+
   hasUnassignedTurns(sessionId: string): boolean {
     return Boolean(this.db.prepare(`SELECT 1 FROM raw_turns WHERE session_id = ? AND deleted_at IS NULL AND redacted_at IS NULL
       AND (episode_id IS NULL OR json_extract(message_payload_json, '$.episode_assignment.status') IN ('pending', 'selected', 'applying')) LIMIT 1`).get(sessionId));
@@ -3751,8 +3779,9 @@ export class RuntimeRepository {
         : `AND job_type IN (${jobTypes.map(() => "?").join(", ")})`
       : "";
     const excluded = options?.excludedJobTypes?.length ? options.excludedJobTypes : undefined;
+    // Same rule as leasing: excluding an L3's update jobs also keeps its profile jobs out.
     const excludeFilter = excluded
-      ? `AND job_type NOT IN (${excluded.map(() => "?").join(", ")})`
+      ? `AND job_type NOT IN (${excluded.map(() => "?").join(", ")}) ${l3ProfileHeldSql(excluded)}`
       : "";
     const jobTypeParams = [
       ...(jobTypes && jobTypes.length > 0 ? jobTypes : []),
@@ -3764,17 +3793,18 @@ export class RuntimeRepository {
     const retryTargetFilter = targets ? `AND target_id IN (${targets.map(() => "?").join(", ")})` : "";
     const future = options?.futureAfterMs;
     const futureIso = future === undefined ? undefined : new Date(future).toISOString();
-    const mainParams = [...jobTypeParams, ...(targets ?? []), ...(futureIso ? [futureIso] : [])];
+    // A job its scope still holds back is not a reason to wake, neither by its runAfter nor by its lease running out.
+    const mainParams = [nowIso(), ...jobTypeParams, ...(targets ?? []), ...(futureIso ? [futureIso] : [])];
     const queuedJob = this.db
       .prepare(`SELECT ${MAIN_DEADLINE} AS run_after
         FROM evolution_jobs INDEXED BY worker_main_deadline
-        WHERE ${MAIN_TIMED} ${jobTypeFilter} ${excludeFilter} ${targetFilter}
+        WHERE ${MAIN_TIMED} AND ${scopedJobReadySql()} ${jobTypeFilter} ${excludeFilter} ${targetFilter}
           ${futureIso ? `AND ${MAIN_DEADLINE} > ?` : ""}
         ORDER BY ${MAIN_DEADLINE} ASC LIMIT 1`)
       .get(...mainParams) as { run_after: string } | undefined;
     const leasedJob = this.db
       .prepare(`SELECT leased_until FROM evolution_jobs INDEXED BY worker_main_lease_deadline
-        WHERE ${MAIN_LEASED} ${jobTypeFilter} ${excludeFilter} ${targetFilter}
+        WHERE ${MAIN_LEASED} AND ${scopedJobReadySql()} ${jobTypeFilter} ${excludeFilter} ${targetFilter}
           ${futureIso ? "AND leased_until > ?" : ""}
         ORDER BY leased_until ASC LIMIT 1`)
       .get(...mainParams) as { leased_until: string } | undefined;
@@ -4057,6 +4087,33 @@ export class RuntimeRepository {
     return result.changes > 0 ? this.getJob(id) : undefined;
   }
 
+  /**
+   * Puts a failed job this run still holds back in the queue to run after `runAfter`. A refunded
+   * attempt means the run did not count as a failure (waiting for a configuration fix);
+   * `minMaxAttempts` raises the failure limit. Returns undefined when the run lost its lease.
+   */
+  rescheduleFailedJob(id: string, input: {
+    runAfter: string;
+    error: string;
+    refundAttempt?: boolean;
+    minMaxAttempts?: number;
+    at?: string;
+  }, claim?: EvolutionJobRecord): EvolutionJobRecord | undefined {
+    const at = input.at ?? nowIso();
+    const where = this.jobClaimWhere(claim, at);
+    const result = this.db.prepare(`UPDATE evolution_jobs SET status = 'queued', leased_until = NULL,
+      lease_owner = NULL, lease_token = NULL, available_at = ?, blocked_reason = NULL, last_error = ?,
+      failure_count = failure_count + CASE WHEN ? THEN 0 ELSE 1 END,
+      attempts = CASE WHEN ? THEN MAX(0, attempts - 1) ELSE attempts END,
+      max_attempts = MAX(max_attempts, ?), updated_at = ?,
+      payload_json = json_set(payload_json, '$.runAfter', ?)
+      WHERE id = ? AND ${where.sql}`).run(
+      input.runAfter, input.error, input.refundAttempt ? 1 : 0, input.refundAttempt ? 1 : 0,
+      input.minMaxAttempts ?? 0, at, input.runAfter, id, ...where.params
+    );
+    return result.changes > 0 ? this.getJob(id) : undefined;
+  }
+
   /** Waiting for a dependency is not a model failure and does not consume an attempt. */
   deferProcessingJob(id: string, runAfter: string, at = nowIso(), claim?: EvolutionJobRecord): EvolutionJobRecord | undefined {
     const where = this.jobClaimWhere(claim, at);
@@ -4291,6 +4348,14 @@ export class RuntimeRepository {
              WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
           ).run(at, batchId, targetField);
           updateL3WorldModelBatchTerminalOutcome(this.db, batchId, at);
+        }
+      }
+      if (status === "dead_letter" && row.job_type === "l3_unit_update") {
+        const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+        if (typeof payload.batchId === "string") {
+          this.db.prepare(
+            `UPDATE l3_unit_batches SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'queued'`
+          ).run(at, payload.batchId);
         }
       }
       if (status === "dead_letter" && row.job_type === "project_environment_profile") {
@@ -5394,6 +5459,10 @@ export class RuntimeRepository {
       }>
     };
     this.db.transaction(() => {
+      const keptL3Units = this.existingL3Units(tables, conflictStrategy);
+      // Unfinished work of a kept unit that this database does not have: its Sessions' traces must be
+      // frozen again here, so their cursors are moved back below the first trace no batch here covers.
+      const droppedL3Work: Array<{ sessionId: string; startTraceSeq: number }> = [];
       const hadRuntimeData = Boolean(this.db.prepare(`SELECT EXISTS(
         SELECT 1 FROM memories UNION ALL SELECT 1 FROM sessions UNION ALL
         SELECT 1 FROM raw_turns UNION ALL SELECT 1 FROM source_turn_captures
@@ -5403,6 +5472,21 @@ export class RuntimeRepository {
         for (const row of rows) {
           const defaults = applyBundleDefaults(table, deserializeBundleRow(row));
           const normalized = table === "memory_change_log" ? compactHistoryChangeRow(defaults) : defaults;
+          const l3UnitKey = keptL3Units.size > 0 ? bundleRowL3UnitKey(table, normalized) : null;
+          if (l3UnitKey && keptL3Units.has(l3UnitKey)) {
+            if (table === "l3_unit_batches" && normalized.status !== "applied" && typeof normalized.id === "string" &&
+                !this.rowExists("l3_unit_batches", ["id"], [normalized.id]) &&
+                typeof normalized.session_id === "string" && typeof normalized.start_trace_seq === "number" &&
+                typeof normalized.end_trace_seq === "number") {
+              const unfrozen = this.firstUnfrozenL3Trace(normalized.session_id, normalized.start_trace_seq, normalized.end_trace_seq);
+              if (unfrozen !== null) droppedL3Work.push({ sessionId: normalized.session_id, startTraceSeq: unfrozen });
+            }
+            if (table === "l3_units") {
+              result.conflicts.push({ table, primaryKey: "unit_key", sourceId: l3UnitKey, targetId: l3UnitKey, action: "skipped" });
+            }
+            result.skipped[table] = (result.skipped[table] ?? 0) + 1;
+            continue;
+          }
           const identity = bundleIdentity(table, normalized);
           if (identity) {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
@@ -5460,10 +5544,33 @@ export class RuntimeRepository {
           }
         }
       }
+      const rewind = this.db.prepare(
+        `UPDATE l3_world_model_session_cursors SET last_scheduled_seq = MIN(last_scheduled_seq, ?) WHERE session_id = ?`
+      );
+      for (const work of droppedL3Work) rewind.run(work.startTraceSeq - 1, work.sessionId);
     })();
     this.scheduleLogTablesPrune();
     this.scheduleHistoryLogCompaction(true);
     return result;
+  }
+
+  /**
+   * Row-by-row conflict handling cannot keep an L3 unit consistent (an old item could stay active
+   * next to its imported successor), so a unit that already exists here is kept whole: the bundle's
+   * rows for it (unit, items, batches, jobs, snapshot) are all skipped, as re-importing one's own
+   * backup skips every other existing row. With conflictStrategy "error" the import fails instead.
+   */
+  private existingL3Units(tables: Record<string, unknown>, conflictStrategy: "skip" | "replace" | "error"): Set<string> {
+    const rows = Array.isArray(tables.l3_units) ? tables.l3_units as Array<Record<string, unknown>> : [];
+    const exists = this.db.prepare(`SELECT 1 FROM l3_units WHERE unit_key = ?`).pluck();
+    const kept = new Set<string>();
+    for (const row of rows) {
+      const unitKey = deserializeBundleRow(row).unit_key;
+      if (typeof unitKey !== "string" || !exists.get(unitKey)) continue;
+      if (conflictStrategy === "error") throw new Error(`import conflict: l3 unit already exists: ${unitKey}`);
+      kept.add(unitKey);
+    }
+    return kept;
   }
 
   private mergeSourceTurnActivation(
@@ -5490,6 +5597,28 @@ export class RuntimeRepository {
     return existing ? "replaced" : "inserted";
   }
 
+
+  /**
+   * The first trace in [start, end] that no batch of this database froze, or null when all were
+   * (an earlier import of the same bundle refroze them). A batch counts only if it froze the turn now
+   * at that position: a replace import can put another turn there, which a batch reading its frozen
+   * ids would leave out.
+   */
+  private firstUnfrozenL3Trace(sessionId: string, start: number, end: number): number | null {
+    const covered = this.db.prepare(
+      `SELECT EXISTS(
+         SELECT 1 FROM l3_world_model_input_traces t JOIN l3_unit_batches b
+           ON b.session_id = t.session_id AND b.start_trace_seq <= t.trace_seq AND b.end_trace_seq >= t.trace_seq
+         WHERE t.session_id = ? AND t.trace_seq = ?
+           AND EXISTS(SELECT 1 FROM json_each(b.l1_memory_ids_json) WHERE value = t.l1_memory_id)
+           AND EXISTS(SELECT 1 FROM json_each(b.raw_turn_ids_json) WHERE value = t.raw_turn_id)
+       )`
+    ).pluck();
+    for (let seq = start; seq <= end; seq += 1) {
+      if (!covered.get(sessionId, seq)) return seq;
+    }
+    return null;
+  }
   private rowExists(table: BundleTableName, columns: string[], values: Array<string | number>): boolean {
     const tableColumns = this.tableColumns(table);
     if (columns.length === 0 || columns.some((column) => !tableColumns.includes(column))) {
@@ -5592,10 +5721,44 @@ export class L3WorldModelScopeWorkspaceConflictError extends Error {
 }
 
 export class L3WorldModelRepository {
+  /** When it returns a machine id, frozen batches go to the new L3 (field cognition) instead. */
+  private fieldCognitionMachineId?: () => string | null;
+
   constructor(
     private readonly db: Database.Database,
-    private readonly memories: MemoryRepository
+    private readonly memories: MemoryRepository,
+    private readonly l3Field?: L3FieldRepository
   ) {}
+
+  routeBatchesToFieldCognition(machineId: () => string | null): void {
+    this.fieldCognitionMachineId = machineId;
+  }
+
+  /** v2 Sessions holding captured turns that were never frozen into a batch, with their last activity. */
+  sessionsWithUnfrozenTurns(): Array<{ sessionId: string; open: boolean; lastActivityAt: string }> {
+    return (this.db.prepare(
+      `SELECT s.id AS sessionId, s.status = 'open' AS open, t.last_at AS lastActivityAt FROM sessions AS s
+       JOIN (SELECT session_id, MAX(trace_seq) AS last_seq, MAX(created_at) AS last_at
+             FROM l3_world_model_input_traces GROUP BY session_id) AS t
+         ON t.session_id = s.id
+       LEFT JOIN l3_world_model_session_cursors AS c ON c.session_id = s.id
+       WHERE json_extract(s.meta_json, '$.l3_world_model_protocol_version') = 2
+         AND t.last_seq > COALESCE(c.last_scheduled_seq, 0)`
+    ).all() as Array<{ sessionId: string; open: number; lastActivityAt: string }>)
+      .map((row) => ({ ...row, open: row.open === 1 }));
+  }
+
+  /**
+   * New L3 only: hand a closed task's turns to L3. Called wherever a task closes, so a conversation that
+   * simply stops (idle, or the user ended the topic) still reaches L3; what is already frozen is skipped.
+   * With the switch off nothing changes.
+   */
+  freezeClosedTask(input: { sessionId: string; episodeId: string; trigger: L3WorldModelBatchTrigger; at?: string }): void {
+    if (!this.l3Field || !this.fieldCognitionMachineId?.()) return;
+    const row = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(input.sessionId) as SqlSessionRow | undefined;
+    if (!row || sessionFromSql(row).meta.l3_world_model_protocol_version !== 2) return;
+    this.freezeBatches({ sessionId: input.sessionId, trigger: input.trigger, episodeId: input.episodeId, at: input.at });
+  }
 
   getScope(userId: string, projectId?: string | null): L3WorldModelScopeRecord | undefined {
     const row = this.db.prepare(
@@ -5981,13 +6144,20 @@ export class L3WorldModelRepository {
   }
 
   insertImmutableJob(job: EvolutionJobRecord): EvolutionJobRecord {
-    if (job.jobType !== "l3_world_model_update" && job.jobType !== "project_environment_profile") {
+    if (
+      job.jobType !== "l3_world_model_update" &&
+      job.jobType !== "project_environment_profile" &&
+      job.jobType !== "l3_unit_update"
+    ) {
       throw new TypeError("immutable L3 job must use an L3 World Model job type");
     }
     if (!job.dedupeKey) {
       throw new TypeError("immutable L3 job requires dedupeKey");
     }
-    if (job.jobType === "l3_world_model_update" && (!job.scopeKey || job.scopeSeq === undefined)) {
+    if (
+      (job.jobType === "l3_world_model_update" || job.jobType === "l3_unit_update") &&
+      (!job.scopeKey || job.scopeSeq === undefined)
+    ) {
       throw new TypeError("L3 field update job requires scopeKey and scopeSeq");
     }
     if (job.jobType === "project_environment_profile" && (job.scopeKey || job.scopeSeq !== undefined)) {
@@ -6020,6 +6190,43 @@ export class L3WorldModelRepository {
     return job;
   }
 
+  /** One new-L3 batch per chunk, run in order per machine through the l3_unit_update FIFO. */
+  private freezeL3UnitBatch(
+    session: SessionRecord,
+    machineId: string,
+    trigger: L3WorldModelBatchTrigger,
+    chunk: readonly L3WorldModelInputTraceRecord[],
+    at: string
+  ): string {
+    const batch = this.l3Field!.freezeUnitBatch({
+      userId: session.userId,
+      machineId,
+      sessionId: session.id,
+      trigger,
+      startTraceSeq: chunk[0]!.traceSeq,
+      endTraceSeq: chunk.at(-1)!.traceSeq,
+      l1MemoryIds: chunk.map((trace) => trace.l1MemoryId),
+      rawTurnIds: [...new Set(chunk.map((trace) => trace.rawTurnId))],
+      at
+    });
+    this.insertImmutableJob({
+      id: newId("job"),
+      jobType: "l3_unit_update",
+      status: "queued",
+      dedupeKey: `l3_unit_update:${batch.id}`,
+      userId: session.userId,
+      sessionId: session.id,
+      scopeKey: batch.machineUnitKey,
+      scopeSeq: batch.scopeSeq,
+      payload: { batchId: batch.id },
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+    return batch.id;
+  }
+
   private freezeBatchesInTransaction(input: {
     sessionId: string;
     trigger: L3WorldModelBatchTrigger;
@@ -6028,6 +6235,11 @@ export class L3WorldModelRepository {
     at?: string;
   }): FreezeL3WorldModelBatchesResult {
     const session = this.requireV2Session(input.sessionId);
+    // Scanned history only ever goes to the new L3. While it is off (switched off after the scan), the
+    // turns wait without moving the cursor, so they reach the new L3 once it is on again.
+    if (session.meta.work_memory_disabled === true && !(this.l3Field && this.fieldCognitionMachineId?.())) {
+      return { scheduled: false, batchIds: [], targetCount: 0 };
+    }
     const at = input.at ?? nowIso();
     this.db.prepare(
       `INSERT INTO l3_world_model_session_cursors (session_id, last_scheduled_seq, updated_at)
@@ -6084,6 +6296,21 @@ export class L3WorldModelRepository {
     }
 
     const chunks = splitL3TracesByRawTurn(traces, 20);
+    const fieldMachineId = this.l3Field ? this.fieldCognitionMachineId?.() ?? null : null;
+    if (fieldMachineId) {
+      const batchIds = chunks.map((chunk) => this.freezeL3UnitBatch(session, fieldMachineId, input.trigger, chunk, at));
+      this.db.prepare(
+        `UPDATE l3_world_model_session_cursors
+         SET last_scheduled_seq = ?, updated_at = ? WHERE session_id = ?`
+      ).run(endTraceSeq, at, session.id);
+      return {
+        scheduled: true,
+        throughL1MemoryId: traces.at(-1)?.l1MemoryId,
+        throughTraceSeq: endTraceSeq,
+        batchIds,
+        targetCount: batchIds.length
+      };
+    }
     const scope = this.ensureScope(session.userId, session.projectId, at);
     const batchIds: string[] = [];
     let targetCount = 0;
@@ -6556,6 +6783,7 @@ export class Repositories {
   readonly processing: MemoryProcessingRepository;
   readonly runtime: RuntimeRepository;
   readonly l3WorldModels: L3WorldModelRepository;
+  readonly l3Field: L3FieldRepository;
   readonly projectEnvironments: ProjectEnvironmentRepository;
   readonly vectors: SqliteVecStore;
 
@@ -6566,7 +6794,8 @@ export class Repositories {
     this.userMemories = new UserMemoryRepository(db);
     this.processing = new MemoryProcessingRepository(db);
     this.runtime = new RuntimeRepository(db);
-    this.l3WorldModels = new L3WorldModelRepository(db, this.memories);
+    this.l3Field = new L3FieldRepository(db, this.memories);
+    this.l3WorldModels = new L3WorldModelRepository(db, this.memories, this.l3Field);
     this.projectEnvironments = new ProjectEnvironmentRepository(db, this.l3WorldModels, this.runtime);
   }
 
@@ -8486,6 +8715,31 @@ interface BundleIdentity {
   values: Array<string | number>;
 }
 
+/** The new-L3 unit a bundle row belongs to, for the tables that hold one unit's state. */
+function bundleRowL3UnitKey(table: string, row: Record<string, unknown>): string | null {
+  const record = (value: unknown): Record<string, unknown> => {
+    const parsed = typeof value === "string" ? parseJson<unknown>(value, {}) : value;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  };
+  const text = (value: unknown) => (typeof value === "string" && value ? value : null);
+  switch (table) {
+    case "l3_units":
+    case "l3_items":
+      return text(row.unit_key);
+    case "l3_unit_batches":
+      return text(row.machine_unit_key);
+    case "evolution_jobs": {
+      if (row.job_type === "l3_unit_update") return text(row.scope_key);
+      const payload = record(row.payload_json);
+      return row.job_type === "project_environment_profile" && payload.mode === "l3_field" ? text(payload.unitKey) : null;
+    }
+    case "memories":
+      return text(record(record(record(row.properties_json).internal_info).l3_field).unit_key);
+    default:
+      return null;
+  }
+}
+
 function bundleIdentity(
   table: BundleTableName,
   row: Record<string, unknown>
@@ -8499,7 +8753,9 @@ function bundleIdentity(
     l3_world_model_input_traces: ["session_id", "trace_seq"],
     l3_world_model_evidence_batches: ["id"],
     l3_world_model_batch_targets: ["batch_id", "target_field"],
-    l3_world_model_project_environment_state: ["user_id", "project_id"]
+    l3_world_model_project_environment_state: ["user_id", "project_id"],
+    l3_units: ["unit_key"],
+    l3_user_projects: ["user_id", "root_path"]
   };
   const newColumns = newTableIdentityColumns[table];
   if (newColumns) {
@@ -8592,9 +8848,15 @@ function normalizeRedactedL3WorldModelBundle(
     .filter((row) => terminalBatchIds.has(String(row.batch_id)));
   tables.evolution_jobs = (tables.evolution_jobs ?? []).filter((row) => {
     const jobType = row.job_type;
-    if (jobType !== "l3_world_model_update" && jobType !== "project_environment_profile") return true;
+    if (
+      jobType !== "l3_world_model_update" &&
+      jobType !== "project_environment_profile" &&
+      jobType !== "l3_unit_update"
+    ) return true;
     return row.status === "succeeded" || row.status === "dead_letter";
   });
+  // Unfinished unit batches depend on raw text that a redacted bundle no longer carries.
+  tables.l3_unit_batches = (tables.l3_unit_batches ?? []).filter((row) => row.status === "applied");
   tables.l3_world_model_project_environment_state = (
     tables.l3_world_model_project_environment_state ?? []
   ).map((row) => ({
@@ -8652,6 +8914,13 @@ function deserializeBundleRow(row: Record<string, unknown>): Record<string, unkn
 }
 
 function applyBundleDefaults(table: BundleTableName, row: Record<string, unknown>): Record<string, unknown> {
+  if (table === "evolution_jobs" || table === "embedding_retry_queue") {
+    // A queue position belongs to the database it was taken in: an imported row is numbered on
+    // insert, after what is already queued here, instead of colliding with (or, on replace,
+    // displacing) a local row that holds the same number.
+    const { enqueue_seq: _sourcePosition, ...rest } = row;
+    return rest;
+  }
   if (table === "sessions" && row.last_seen_at === undefined) {
     return {
       ...row,
@@ -8783,7 +9052,7 @@ function evolutionJobPrioritySql(): string {
              WHEN job_type = 'l2_association' THEN 40
              WHEN job_type = 'l2_induction' THEN 50
              WHEN job_type = 'project_environment_profile' THEN 55
-             WHEN job_type IN ('l3_abstraction', 'l3_world_model_update') THEN 60
+             WHEN job_type IN ('l3_abstraction', 'l3_world_model_update', 'l3_unit_update') THEN 60
              WHEN job_type = 'skill_crystallization' THEN 70
              WHEN job_type = 'skill_cluster_assign' THEN 72
              WHEN job_type = 'skill_batch_evolve' THEN 73

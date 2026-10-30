@@ -607,6 +607,9 @@ const statements = [
     ON evolution_jobs (dedupe_key)
     WHERE dedupe_key IS NOT NULL
       AND job_type IN ('l3_world_model_update', 'project_environment_profile')`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_l3_unit_dedupe
+    ON evolution_jobs (dedupe_key)
+    WHERE dedupe_key IS NOT NULL AND job_type = 'l3_unit_update'`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_scope_seq
     ON evolution_jobs (scope_key, scope_seq)
     WHERE scope_key IS NOT NULL`,
@@ -701,6 +704,76 @@ const statements = [
     sequence INTEGER PRIMARY KEY,
     event_id TEXT NOT NULL UNIQUE,
     payload_json TEXT NOT NULL CHECK (json_valid(payload_json))
+  )`,
+
+  // L3 field cognition (itemized machine/project units). These tables are added
+  // without bumping SCHEMA_VERSION: they are new, empty and ignored by older builds.
+  `CREATE TABLE IF NOT EXISTS l3_units (
+    unit_key TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('machine', 'project')),
+    project_identity TEXT,
+    display_name TEXT,
+    identity_source TEXT CHECK (identity_source IS NULL OR identity_source IN ('user_selected', 'git', 'folder')),
+    checkout_root TEXT,
+    profile_text TEXT,
+    profile_fingerprint TEXT,
+    snapshot_memory_id TEXT,
+    deleted_at TEXT,
+    next_seq INTEGER NOT NULL DEFAULT 1 CHECK (next_seq >= 1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK ((kind = 'machine') = (project_identity IS NULL))
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_l3_units_user_machine
+    ON l3_units (user_id, machine_id, kind)`,
+  `CREATE TABLE IF NOT EXISTS l3_items (
+    id TEXT PRIMARY KEY,
+    unit_key TEXT NOT NULL REFERENCES l3_units(unit_key) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('env_fact', 'project_constraint')),
+    content TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(evidence_json)),
+    evidence_at TEXT NOT NULL,
+    last_confirmed_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+    replaced_by TEXT,
+    removed_evidence_at TEXT,
+    inactive_at TEXT,
+    batch_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK ((status = 'inactive') = (inactive_at IS NOT NULL))
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_l3_items_unit_status_kind
+    ON l3_items (unit_key, status, kind)`,
+  `CREATE INDEX IF NOT EXISTS idx_l3_items_inactive
+    ON l3_items (inactive_at)
+    WHERE status = 'inactive'`,
+  `CREATE TABLE IF NOT EXISTS l3_unit_batches (
+    id TEXT PRIMARY KEY,
+    machine_unit_key TEXT NOT NULL,
+    scope_seq INTEGER NOT NULL CHECK (scope_seq >= 1),
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    start_trace_seq INTEGER NOT NULL,
+    end_trace_seq INTEGER NOT NULL,
+    l1_memory_ids_json TEXT NOT NULL CHECK (json_valid(l1_memory_ids_json)),
+    raw_turn_ids_json TEXT NOT NULL CHECK (json_valid(raw_turn_ids_json)),
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'applied', 'failed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (machine_unit_key, scope_seq)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_l3_unit_batches_session
+    ON l3_unit_batches (session_id, end_trace_seq)`,
+  `CREATE TABLE IF NOT EXISTS l3_user_projects (
+    user_id TEXT NOT NULL,
+    root_path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, root_path)
   )`
 ];
 
@@ -784,6 +857,8 @@ export function migrate(db: Database.Database): void {
       for (const statement of statements) {
         db.prepare(statement).run();
       }
+      // l3_items created by an earlier build of the new L3 lacks this column.
+      addColumnIfMissing(db, "l3_items", "removed_evidence_at", "TEXT");
       if (version > 0 && version < 5) {
         addColumnIfMissing(db, "recall_events", "query_id", "TEXT");
         addColumnIfMissing(db, "recall_events", "user_memory_candidate_ids_json", "TEXT NOT NULL DEFAULT '[]'");

@@ -12,8 +12,10 @@ import type { ActualModelContext } from "../../src/contracts/index.js";
 
 // Suites for legacy capture/retrieval behavior keep that mode explicit as the
 // production default changes. Enabled/default-on suites use production config.
+// That includes the old L3 World Model: the new L3 replaces it when on.
 export const LEGACY_TEST_CONFIG = { ...DEFAULT_MEMMY_CONFIG, algorithm: { ...DEFAULT_MEMMY_CONFIG.algorithm,
-  session: { ...DEFAULT_MEMMY_CONFIG.algorithm.session, turnJudge: false } } };
+  session: { ...DEFAULT_MEMMY_CONFIG.algorithm.session, turnJudge: false },
+  l3FieldCognition: { ...DEFAULT_MEMMY_CONFIG.algorithm.l3FieldCognition, enabled: false } } };
 
 export function createMemoryServiceFixture(): {
   cleanup: () => Promise<void>;
@@ -57,6 +59,12 @@ export function createMemoryServiceFixture(): {
       // Legacy fixture suites opt out explicitly; turn-judge suites pass their
       // enabled configuration, and default-on coverage passes DEFAULT_MEMMY_CONFIG.
       config: options.config ?? LEGACY_TEST_CONFIG,
+      // The new L3 must not probe the real computer or read its installation id from tests;
+      // the probe never settles, so it starts no process and writes nothing.
+      l3FieldEnvironment: options.l3FieldEnvironment ?? (() => ({
+        machineId: "f".repeat(64), homeDir: createTestRoot("memmy-l3-home-"), tempRoots: []
+      })),
+      l3MachineProbe: options.l3MachineProbe ?? (() => new Promise(() => undefined)),
       fetchAppMemoryBudget: options.fetchAppMemoryBudget ?? (async () => null),
       skillLlm: options.skillLlm ?? options.llm,
       embedder: options.embedder ?? createCapturingEmbedder([])

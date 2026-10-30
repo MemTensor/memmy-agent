@@ -18,6 +18,8 @@ export interface StrictJsonCompletionInput<T> {
   dynamicInput: JsonValue;
   expectedSchema: JsonValue;
   validate(value: unknown): T;
+  /** Output budget; defaults to L3_WORLD_MODEL_MAX_OUTPUT_TOKENS. */
+  maxTokens?: number;
 }
 
 /** Runs one strict JSON completion and at most one model-based schema repair. */
@@ -26,7 +28,7 @@ export async function completeStrictJson<T>(input: StrictJsonCompletionInput<T>)
     { role: "system", content: input.systemPrompt },
     { role: "user", content: canonicalJson(input.dynamicInput) }
   ];
-  const candidate = await input.llm.complete(messages, completionOptions(input.operation));
+  const candidate = await input.llm.complete(messages, completionOptions(input.operation, input.maxTokens));
   try {
     return parseAndValidate(candidate, input.validate);
   } catch (error) {
@@ -41,16 +43,16 @@ export async function completeStrictJson<T>(input: StrictJsonCompletionInput<T>)
           validation_error: validationErrorMessage(error)
         })
       }
-    ], completionOptions(`${input.operation}.repair`));
+    ], completionOptions(`${input.operation}.repair`, input.maxTokens));
     return parseAndValidate(repaired, input.validate);
   }
 }
 
-function completionOptions(operation: string) {
+function completionOptions(operation: string, maxTokens = L3_WORLD_MODEL_MAX_OUTPUT_TOKENS) {
   return {
     operation,
     temperature: 0,
-    maxTokens: L3_WORLD_MODEL_MAX_OUTPUT_TOKENS,
+    maxTokens,
     jsonMode: true
   } as const;
 }

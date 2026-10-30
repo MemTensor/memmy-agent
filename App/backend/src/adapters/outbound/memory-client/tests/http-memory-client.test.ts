@@ -45,6 +45,20 @@ describe("HttpMemoryClient", () => {
     expect(JSON.parse(String(calls[0]?.init?.body))).toEqual(input);
     expect(new Headers(calls[0]?.init?.headers).get("x-memmy-user-id")).toBe("fixture-user");
   });
+  it("hands scanned Sessions to L3 inside a full request envelope for their source", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture-token", timeoutMs: 500, maxRetries: 0 }, {
+      fetchImpl: (async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify({ batches: 2, serverTime: "2099-01-01T00:00:00.000Z" }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch
+    });
+    expect(await client.freezeScanSessions("codex", ["s-1", "s-2"])).toEqual({ batches: 2, serverTime: "2099-01-01T00:00:00.000Z" });
+    expect(calls[0]?.url).toBe("http://memory.test/api/v1/l3/scan-sessions/freeze");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      requestId: expect.stringMatching(/^[0-9a-f-]{36}$/), adapterId: "agent-source:codex", source: "codex", sessionIds: ["s-1", "s-2"]
+    });
+  });
   it("only defines path templates for the final memory HTTP APIs", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
       "/api/v1/agent-sources",
@@ -63,6 +77,7 @@ describe("HttpMemoryClient", () => {
       "/api/v1/turns/start",
       "/api/v1/turns/:turnId/complete",
       "/api/v1/source-turns/complete",
+      "/api/v1/l3/scan-sessions/freeze",
       "/api/v1/memory/search",
       "/api/v1/models/embedding/infer",
       "/api/v1/memory/add",

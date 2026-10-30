@@ -80,31 +80,9 @@ export class ProjectEnvironmentProfilePipeline {
       payload.userId,
       payload.projectId
     ).projectEnvironmentProfile;
-    const evidenceSupportsProfile = projectEnvironmentEvidenceSupportsProfile(derived);
-    const basePrompt = derived.projectKind === "code" ? CODE_PROFILE_PROMPT : FOLDER_PROFILE_PROMPT;
-    const language = currentProfile?.trim()
-      ? undefined
-      : steeredPromptLanguage(this.deps.language, [derived.compactFileTree]);
-    const systemPrompt = language ? `${basePrompt}\n\n${languageSteeringLine(language)}` : basePrompt;
     let output: ReturnType<typeof validateProjectEnvironmentProfileOutput>;
     try {
-      output = await completeStrictJson({
-        llm: this.deps.llm,
-        operation: derived.projectKind === "code"
-          ? "project_environment_code_profile"
-          : "project_environment_folder_profile",
-        systemPrompt,
-        dynamicInput: profileDynamicInput(derived, currentProfile),
-        expectedSchema: {
-          op: "noop | create | update",
-          profile: "complete final profile; empty only for noop or update-clear"
-        },
-        validate: (value) => validateProjectEnvironmentProfileOutput(
-          value,
-          currentProfile,
-          evidenceSupportsProfile
-        )
-      });
+      output = await summarizeProjectProfile(this.deps, derived, currentProfile);
     } catch (error) {
       const latest = this.deps.repos.projectEnvironments.getState(payload.userId, payload.projectId);
       const latestProfile = this.deps.repos.l3WorldModels.fields(
@@ -129,6 +107,37 @@ export class ProjectEnvironmentProfilePipeline {
       profile: output.profile
     });
   }
+}
+
+/** One model call that turns scan evidence into the project environment profile (shared by old and new L3). */
+export async function summarizeProjectProfile(
+  deps: { llm: LlmClient; language?: MemoryLanguage },
+  derived: ProjectEnvironmentDerivedEvidence,
+  currentProfile: string | null
+): Promise<{ op: "noop" | "create" | "update"; profile: string }> {
+  const evidenceSupportsProfile = projectEnvironmentEvidenceSupportsProfile(derived);
+  const basePrompt = derived.projectKind === "code" ? CODE_PROFILE_PROMPT : FOLDER_PROFILE_PROMPT;
+  const language = currentProfile?.trim()
+    ? undefined
+    : steeredPromptLanguage(deps.language, [derived.compactFileTree]);
+  const systemPrompt = language ? `${basePrompt}\n\n${languageSteeringLine(language)}` : basePrompt;
+  return completeStrictJson({
+    llm: deps.llm,
+    operation: derived.projectKind === "code"
+      ? "project_environment_code_profile"
+      : "project_environment_folder_profile",
+    systemPrompt,
+    dynamicInput: profileDynamicInput(derived, currentProfile),
+    expectedSchema: {
+      op: "noop | create | update",
+      profile: "complete final profile; empty only for noop or update-clear"
+    },
+    validate: (value) => validateProjectEnvironmentProfileOutput(
+      value,
+      currentProfile,
+      evidenceSupportsProfile
+    )
+  });
 }
 
 export function projectEnvironmentProfileJobPayload(value: Record<string, unknown>): {

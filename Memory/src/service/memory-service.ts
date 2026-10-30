@@ -1,11 +1,27 @@
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
 import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
+import { homedir } from "node:os";
 import {
   assertJsonValue,
   canonicalJson,
+  deriveWorkspaceHostId,
   isLocalWorkspaceUri,
-  sha256Hex
+  sha256Hex,
+  type L3FailedBatchesRetryRequest,
+  type L3FailedBatchesRetryResponse,
+  type L3ScanSessionsFreezeRequest,
+  type L3ScanSessionsFreezeResponse,
+  type L3UserProjectsReplaceRequest,
+  type L3UserProjectsReplaceResponse
 } from "../contracts/index.js";
+import { getOrCreateInstallationId } from "../cli/analytics.js";
+import { isL3FieldCognitionActive } from "./l3-field/flag.js";
+import { loadL3FieldContext } from "./l3-field/l3-field-context.js";
+import type { L3FieldEnvironment } from "./l3-field/session-units.js";
+import { l3FieldSnapshotUnitKey } from "./l3-field/snapshot-memory.js";
+import { resolveSessionUnits } from "./l3-field/session-units.js";
+import { machineProfileFingerprint, probeMachine, renderMachineProfile, type MachineProbe } from "./l3-field/machine-profile.js";
+import { L3UnitUpdatePipeline } from "./l3-field/unit-update-pipeline.js";
 import {
   languageSteeringLine,
   skillOutputLanguageFor,
@@ -232,6 +248,10 @@ export interface MemoryServiceOptions {
   db?: MemoryDb;
   backend?: StorageBackend;
   mode?: "local" | "cloud" | "dev";
+  /** Machine identity and home folder for the new L3; defaults to this installation. Tests override it. */
+  l3FieldEnvironment?: () => L3FieldEnvironment;
+  /** Probes this computer for the new L3 machine profile; tests override it. */
+  l3MachineProbe?: () => Promise<MachineProbe>;
   configPath?: string;
   configLoader?: (configPath?: string) => {
     config: MemmyConfig;
@@ -299,6 +319,8 @@ export class MemoryService {
   private readonly importJobs: ImportJobProcessor;
   private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
   private readonly projectEnvironment: ProjectEnvironmentService;
+  private readonly l3UnitUpdate: L3UnitUpdatePipeline;
+  private readonly l3MachineProfileRefreshedAt = new Map<string, number>();
   private readonly panelReadModel: PanelReadModel;
   private readonly retrieval: RetrievalService;
   private readonly sessionTurns: SessionTurnService;
@@ -391,7 +413,8 @@ export class MemoryService {
       get llm() { return serviceOwner.llm; },
       get embedder() { return serviceOwner.embedder; },
       get embedAfterCapture() { return serviceOwner.config.algorithm.capture.embedAfterCapture; },
-      nowIso
+      nowIso,
+      l3FieldActive: () => serviceOwner.l3FieldActive()
     });
     const projectEnvironmentOwner = this;
     this.projectEnvironment = new ProjectEnvironmentService({
@@ -399,6 +422,15 @@ export class MemoryService {
       get llm() { return projectEnvironmentOwner.skillLlm; },
       get language() { return projectEnvironmentOwner.config.language; }
     });
+    this.l3UnitUpdate = new L3UnitUpdatePipeline({
+      repos: this.repos,
+      get llm() { return projectEnvironmentOwner.skillLlm; },
+      get language() { return projectEnvironmentOwner.config.language; },
+      environment: () => projectEnvironmentOwner.l3FieldEnvironment()
+    });
+    this.repos.l3WorldModels.routeBatchesToFieldCognition(
+      () => projectEnvironmentOwner.l3FieldActive() ? projectEnvironmentOwner.l3FieldEnvironment().machineId : null
+    );
     const episodeTitleOwner = this;
     this.episodeTitle = new EpisodeTitleService({
       repos: this.repos,
@@ -429,6 +461,7 @@ export class MemoryService {
           abstractL3: (job) => this.evolutionJobs.abstractL3(job),
           updateL3WorldModel: (job) => this.evolutionJobs.updateL3WorldModel(job),
           updateProjectEnvironment: (job) => this.projectEnvironment.processProfileJob(job),
+          updateL3Unit: (job) => this.l3UnitUpdate.process(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
           assignSkillCluster: (job) => this.evolutionJobs.assignSkillCluster(job),
           evolveSkillCluster: (job) => this.evolutionJobs.evolveSkillCluster(job),
@@ -633,6 +666,13 @@ export class MemoryService {
       runWorkerNoWrite: this.runWorkerNoWrite.bind(this),
       restartFailedProcessing: this.restartFailedProcessing.bind(this),
       enqueueObservationBackfill: (limit, at) => this.observationMemory.backfill(limit, at),
+      l3FieldActive: () => this.l3FieldActive(),
+      requeueL3DeadLettersOnce: (at) => this.requeueL3DeadLettersOnce(at),
+      armPendingL3Flushes: () => this.armPendingL3Flushes(),
+      evolutionModelConfigured: () => workerRunnerOwner.skillLlm.isConfigured(),
+      purgeL3InactiveItems: (at) => this.repos.l3Field.purgeInactive(
+        new Date(Date.parse(at) - this.config.algorithm.l3FieldCognition.inactiveRetentionDays * 86_400_000).toISOString()
+      ),
       previewPolicyEvidenceReconciliation: this.evolutionJobs.previewPolicyEvidenceReconciliation.bind(this.evolutionJobs),
       reconcileOrphanedPolicies: this.evolutionJobs.reconcileOrphanedPolicies.bind(this.evolutionJobs),
       enqueueJob: this.workerHandlers.enqueueJob,
@@ -775,6 +815,7 @@ export class MemoryService {
       maybeCreateDecisionRepair: this.feedbackExperience.maybeCreateDecisionRepair.bind(this.feedbackExperience),
       memoryAddEnabled: this.memoryAddEnabled.bind(this),
       memorySearchEnabled: this.memorySearchEnabled.bind(this),
+      l3FieldActive: () => this.l3FieldActive(),
       observeToolNoWrite: this.observeToolNoWrite.bind(this),
       openSessionNoWrite: this.openSessionNoWrite.bind(this),
       pendingTrialsForFeedback: this.skillTrials.pendingTrialsForFeedback.bind(this.skillTrials),
@@ -1103,6 +1144,58 @@ export class MemoryService {
       this.storageCapabilities().backendId === "sqlite-local";
   }
 
+  private l3FieldActive(): boolean {
+    return isL3FieldCognitionActive(this.config, this.storageCapabilities(), this.mode);
+  }
+
+  private l3FieldEnvironmentCache?: L3FieldEnvironment;
+
+  /** New L3 profiles at session start and compaction: rescan the session's project, re-probe the machine. */
+  private requestL3FieldProfiles(session: SessionRecord): void {
+    if (!this.memoryAddEnabled()) return;
+    const units = resolveSessionUnits(this.repos, this.l3FieldEnvironment(), session);
+    if (units.project?.unit.checkoutRoot) {
+      this.projectEnvironment.requestL3UnitProfile({
+        userId: session.userId,
+        unitKey: units.project.unit.unitKey,
+        checkoutRoot: units.project.unit.checkoutRoot
+      });
+    }
+    void this.refreshL3MachineProfile(units.machine.unitKey);
+  }
+
+  /** At most once per ten minutes per machine; the profile is rewritten only when the probe changed. */
+  private async refreshL3MachineProfile(unitKey: string): Promise<void> {
+    const now = Date.now();
+    if (now - (this.l3MachineProfileRefreshedAt.get(unitKey) ?? 0) < 10 * 60_000) return;
+    this.l3MachineProfileRefreshedAt.set(unitKey, now);
+    try {
+      // A reset (snapshot deleted) while probing makes this probe stale; it must not bring the profile back.
+      const resetBefore = this.repos.l3Field.getUnit(unitKey)?.deletedAt;
+      const probe = await (this.options.l3MachineProbe ?? probeMachine)();
+      // The service may have stopped, or memory writes been turned off, while the probe ran.
+      if (this.closing || !this.memoryAddEnabled()) return;
+      const fingerprint = machineProfileFingerprint(probe);
+      this.repos.transaction(() => {
+        const unit = this.repos.l3Field.getUnit(unitKey);
+        if (!unit || unit.deletedAt !== resetBefore || unit.profileFingerprint === fingerprint) return;
+        this.repos.l3Field.setProfile(unitKey, { text: renderMachineProfile(probe), fingerprint });
+        this.repos.l3Field.refreshSnapshot(unitKey);
+      });
+    } catch {
+      // A failed probe leaves the old profile; the next session start tries again.
+      this.l3MachineProfileRefreshedAt.delete(unitKey);
+    }
+  }
+
+  private l3FieldEnvironment(): L3FieldEnvironment {
+    this.l3FieldEnvironmentCache ??= this.options.l3FieldEnvironment?.() ?? {
+      machineId: deriveWorkspaceHostId(getOrCreateInstallationId({ env: process.env })),
+      homeDir: homedir()
+    };
+    return this.l3FieldEnvironmentCache;
+  }
+
   private memorySearchEnabled(): boolean {
     return this.config.algorithm.enableMemorySearch;
   }
@@ -1249,6 +1342,7 @@ export class MemoryService {
     const changed = stableStringify(previousConfig) !== stableStringify(nextConfig);
     const requiresRestart = stableStringify(previousConfig.storage) !== stableStringify(nextConfig.storage);
     const reloadedAt = nowIso();
+    const l3FieldWasActive = this.l3FieldActive();
 
     this.config = nextConfig;
     this.tokenBudgetLedger.setLimits(this.config.tokenBudget);
@@ -1261,6 +1355,8 @@ export class MemoryService {
       for (const { before, after } of this.repos.runtime.requeueFailedEpisodeAssignments(reloadedAt)) this.workerHandlers.appendJobChange(after, "queued", before);
       this.capturePendingListener?.();
     }
+    // Turned on without a restart: flushes that ran while it was off did not freeze, so hand those turns over now.
+    if (!l3FieldWasActive) this.armPendingL3Flushes();
     this.workerRunner.notifyWorkAvailable();
     serviceLogger.info("config.reloaded", {
       changed,
@@ -1433,7 +1529,10 @@ export class MemoryService {
     serverTime: string;
   } {
     const response = this.sessionTurns.openSession(this.withTimeZone(request));
-    if (this.projectEnvironmentScanEnabled() && response.projectId) {
+    if (this.l3FieldActive()) {
+      // With memory writes off the session is not stored, and profiles are writes anyway.
+      if (this.memoryAddEnabled()) this.requestL3FieldProfiles(this.requireSession(response.sessionId));
+    } else if (this.projectEnvironmentScanEnabled() && response.projectId) {
       const session = this.requireSession(response.sessionId);
       const scope = this.repos.l3WorldModels.getScope(session.userId, response.projectId);
       if (scope?.workspaceUri && isLocalWorkspaceUri(scope.workspaceUri)) {
@@ -1476,6 +1575,94 @@ export class MemoryService {
     return this.repos.l3WorldModels.traceHead(sessionId);
   }
 
+  /** Stores the desktop app's selected project folders; kept regardless of the L3 field cognition flag. */
+  replaceL3UserProjects(request: L3UserProjectsReplaceRequest): L3UserProjectsReplaceResponse {
+    const userId = normalizeNamespace(request.namespace).userId;
+    const at = nowIso();
+    this.repos.transaction(() => {
+      this.repos.l3Field.replaceUserProjects(userId, request.projects, at);
+      this.repos.l3Field.setStandaloneRoots(userId, request.standaloneRoots ?? [], at);
+    });
+    return { count: request.projects.length, serverTime: at };
+  }
+
+  /**
+   * End of an agent-source scan pass: freeze what the pass added to each touched Session into new-L3
+   * batches, through the same entry Hook Session boundaries use. Only database rows are written (no
+   * model call), so the scan never waits on L3; a pass with nothing new freezes nothing. With the new
+   * L3 off, scans stay out of L3 as before.
+   */
+  freezeScannedL3Sessions(sessionIds: readonly string[]): number {
+    if (!this.memoryAddEnabled() || !this.l3FieldActive()) return 0;
+    let batches = 0;
+    for (const sessionId of new Set(sessionIds)) {
+      const session = this.repos.runtime.getSession(sessionId);
+      if (!session || session.meta.l3_world_model_protocol_version !== 2) continue;
+      batches += this.repos.l3WorldModels.freezeBatches({ sessionId, trigger: "scan_pass" }).batchIds.length;
+    }
+    return batches;
+  }
+
+  /**
+   * A scan or hosted import finished: freeze the scanned Sessions it touched. Capturing a scanned turn
+   * keeps the conversation's earlier owner even after an account switch, so the same rule applies
+   * here: the caller's own Sessions, and scanned Sessions of the caller's source.
+   */
+  freezeScanSessions(request: L3ScanSessionsFreezeRequest): L3ScanSessionsFreezeResponse {
+    const namespace = normalizeNamespace(request.namespace);
+    const owned = request.sessionIds.filter((id) => {
+      const session = this.repos.runtime.getSession(id);
+      if (!session) return false;
+      return session.userId === namespace.userId ||
+        (session.meta.work_memory_disabled === true && session.source === namespace.source);
+    });
+    return { batches: this.freezeScannedL3Sessions(owned), serverTime: nowIso() };
+  }
+
+  /** Rerun entry for the new L3 only; dead letters of the old pipeline are not rerun. */
+  retryFailedL3Batches(request: L3FailedBatchesRetryRequest): L3FailedBatchesRetryResponse {
+    this.assertMemoryAddEnabled();
+    const userId = normalizeNamespace(request.namespace).userId;
+    const at = nowIso();
+    const before = new Map(this.repos.runtime.listJobs("dead_letter", 10_000, userId).map((job) => [job.id, job]));
+    const requeued = this.repos.l3Field.requeueDeadLetterBatches(userId, at);
+    for (const id of requeued) {
+      const after = this.repos.runtime.getJob(id);
+      if (after) this.workerHandlers.appendJobChange(after, "queued", before.get(id));
+    }
+    return { requeued: requeued.length, serverTime: at };
+  }
+
+  /**
+   * Worker startup (and after an import): turns not yet handed to the new L3 get someone responsible
+   * for them, also when the process stopped before a scan's hand-off or the data came from a backup.
+   * An open Session gets its idle flush armed; a closed one, which will not close again, is frozen
+   * now. Nothing while the new L3 is off.
+   */
+  armPendingL3Flushes(): number {
+    if (!this.l3FieldActive() || !this.memoryAddEnabled()) return 0;
+    const pending = this.repos.l3WorldModels.sessionsWithUnfrozenTurns();
+    this.repos.transaction(() => {
+      for (const { sessionId, open, lastActivityAt } of pending) {
+        if (open) this.workMemory.armIdleFlush(sessionId, lastActivityAt);
+        else this.repos.l3WorldModels.freezeBatches({ sessionId, trigger: "session_close" });
+      }
+    });
+    return pending.length;
+  }
+
+  /** Worker startup: one automatic rerun for each dead-lettered new-L3 batch; nothing while the new L3 is off. */
+  private requeueL3DeadLettersOnce(at: string): number {
+    if (!this.l3FieldActive()) return 0;
+    const before = new Map(this.repos.runtime.listJobs("dead_letter", 10_000).map((job) => [job.id, job]));
+    const requeued = this.repos.l3Field.requeueDeadLetterBatchesOnce(at);
+    for (const id of requeued) {
+      const after = this.repos.runtime.getJob(id);
+      if (after) this.workerHandlers.appendJobChange(after, "queued", before.get(id));
+    }
+    return requeued.length;
+  }
+
   l3WorldModelBoundary(
     sessionId: string,
     request: L3WorldModelBoundaryRequest
@@ -1498,7 +1685,9 @@ export class MemoryService {
     if (!result.throughTraceSeq) {
       throw new MemoryServiceError("conflict", "through L1 memory was not registered");
     }
-    if (
+    if (request.trigger === "token_compaction" && this.l3FieldActive()) {
+      this.requestL3FieldProfiles(session);
+    } else if (
       request.trigger === "token_compaction" &&
       this.projectEnvironmentScanEnabled() &&
       session.projectId
@@ -1527,6 +1716,9 @@ export class MemoryService {
     this.assertL3WorldModelSessionScope(session, request.namespace);
     if (session.status !== "open") {
       throw new MemoryServiceError("conflict", "l3_world_model_session_not_open");
+    }
+    if (this.l3FieldActive()) {
+      return loadL3FieldContext(this.repos, this.l3FieldEnvironment(), session, { readOnly: !this.memoryAddEnabled() });
     }
     return this.l3WorldModelContextReadModel.load(session);
   }
@@ -2596,6 +2788,9 @@ export class MemoryService {
       conflictStrategy: request.conflictStrategy ?? "skip"
     });
     this.sessionTurns.migrateLegacyCaptures();
+    // Imported Sessions with turns not yet handed to the new L3 (including work the import had to
+    // drop for a unit kept here) get their idle flush armed.
+    this.armPendingL3Flushes();
     const importedVectors = importedMemoryVectors(request.bundle.tables.memory_vectors);
     this.repos.vectors.importRows(importedVectors);
     result.inserted.memory_vectors = importedVectors.length;
@@ -2652,7 +2847,14 @@ export class MemoryService {
     this.assertMemoryInScope(memory, request.namespace);
     const kind = kindFromMemory(memory);
     const at = nowIso();
-    const archived = this.repos.memories.archive(memory.id, at);
+    const archived = this.repos.transaction(() => {
+      const row = this.repos.memories.archive(memory.id, at);
+      // A project's session context includes the machine, so archiving the machine's new-L3
+      // snapshot moves the project versions too, or clients keep using their cached context.
+      const l3Unit = row ? l3FieldSnapshotUnitKey(memory) : null;
+      if (l3Unit) this.repos.l3Field.refreshProjectContexts(l3Unit, at);
+      return row;
+    });
     if (!archived) {
       throw new MemoryServiceError("not_found", `memory not found: ${id}`);
     }
@@ -2777,9 +2979,16 @@ export class MemoryService {
     }
     const kind = kindFromMemory(memory);
     const at = nowIso();
-    const deleted = strictV2WorldModel
-      ? this.repos.l3WorldModels.deleteScopeMemory(memory.id, at)?.deleted
-      : this.repos.memories.softDelete(memory.id, at);
+    const deletedL3Unit = l3FieldSnapshotUnitKey(memory);
+    const deleted = this.repos.transaction(() => {
+      const removed = strictV2WorldModel
+        ? this.repos.l3WorldModels.deleteScopeMemory(memory.id, at)?.deleted
+        : this.repos.memories.softDelete(memory.id, at);
+      // Deleting a new-L3 snapshot resets its unit: what it knew goes, later sessions start it afresh.
+      // Same transaction, so a failure never leaves the unit's items behind a deleted snapshot.
+      if (removed && deletedL3Unit) this.repos.l3Field.markUnitDeleted(deletedL3Unit, at);
+      return removed;
+    });
     if (!deleted) {
       throw new MemoryServiceError("not_found", `memory not found: ${id}`);
     }

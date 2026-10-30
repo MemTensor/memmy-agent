@@ -83,6 +83,51 @@ export const L3WorldModelBoundaryResponseSchema = z.object({
 }).strict();
 export type L3WorldModelBoundaryResponse = z.infer<typeof L3WorldModelBoundaryResponseSchema>;
 
+const AbsolutePathSchema = z.string().min(1).max(4096)
+  .refine((value) => value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value), "path must be absolute");
+
+/** Full list of folders the user picked in the desktop app; each push replaces the previous one. */
+export const L3UserProjectsReplaceRequestSchema = z.object({
+  ...L3WorldModelRequestEnvelopeShape,
+  projects: z.array(z.object({
+    rootPath: AbsolutePathSchema,
+    name: z.string().min(1).max(512)
+  }).strict()).max(500),
+  standaloneRoots: z.array(AbsolutePathSchema).max(20).default([])
+}).strict().superRefine(assertEnvelopeSourceConsistency);
+export type L3UserProjectsReplaceRequest = z.input<typeof L3UserProjectsReplaceRequestSchema>;
+
+export const L3UserProjectsReplaceResponseSchema = z.object({
+  count: z.number().int().nonnegative(),
+  serverTime: z.string().datetime()
+}).strict();
+export type L3UserProjectsReplaceResponse = z.infer<typeof L3UserProjectsReplaceResponseSchema>;
+
+/** Puts the user's new-L3 batches that ended in dead letter back in the queue. */
+export const L3FailedBatchesRetryRequestSchema = z.object({
+  ...L3WorldModelRequestEnvelopeShape
+}).strict().superRefine(assertEnvelopeSourceConsistency);
+export type L3FailedBatchesRetryRequest = z.input<typeof L3FailedBatchesRetryRequestSchema>;
+
+export const L3FailedBatchesRetryResponseSchema = z.object({
+  requeued: z.number().int().nonnegative(),
+  serverTime: z.string().datetime()
+}).strict();
+export type L3FailedBatchesRetryResponse = z.infer<typeof L3FailedBatchesRetryResponseSchema>;
+
+/** End of a hosted import: freeze what it added to these scanned Sessions into L3 batches. */
+export const L3ScanSessionsFreezeRequestSchema = z.object({
+  ...L3WorldModelRequestEnvelopeShape,
+  sessionIds: z.array(NonEmptyStringSchema).max(10_000)
+}).strict().superRefine(assertEnvelopeSourceConsistency);
+export type L3ScanSessionsFreezeRequest = z.input<typeof L3ScanSessionsFreezeRequestSchema>;
+
+export const L3ScanSessionsFreezeResponseSchema = z.object({
+  batches: z.number().int().nonnegative(),
+  serverTime: z.string().datetime()
+}).strict();
+export type L3ScanSessionsFreezeResponse = z.infer<typeof L3ScanSessionsFreezeResponseSchema>;
+
 export const SessionL3WorldModelContextResponseSchema = z.object({
   schemaVersion: z.literal(2),
   projectId: NonEmptyStringSchema.nullable(),

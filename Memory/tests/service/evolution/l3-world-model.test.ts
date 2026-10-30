@@ -165,6 +165,20 @@ describe("L3 World Model trace field pipeline", () => {
     db.close();
   });
 
+  it("accepts a job that the queue rescheduled with runAfter", async () => {
+    const llm = fieldLlm();
+    const { db, service } = createTestService({ skillLlm: llm });
+    const opened = openProject(service, "l3-run-after-user", "l3-run-after-session");
+    await service.completeTurn("l3-run-after-turn", {
+      sessionId: opened.sessionId, query: "这个项目必须先运行测试", answer: "好", status: "succeeded"
+    });
+    service.closeSession(opened.sessionId);
+    const repos = new Repositories(db.db);
+    const job = repos.runtime.listJobs("queued", 100).find((candidate) => candidate.jobType === "l3_world_model_update")!;
+    await expect(new L3WorldModelTraceFieldPipeline({ repos, skillLlm: llm })
+      .updateField({ ...job, payload: { ...job.payload, runAfter: "2026-10-24T00:00:00.000Z" } })).resolves.toBeUndefined();
+  });
+
   it("removes reasoning from no-project generation and repair input", async () => {
     const complete = vi.fn<LlmClient["complete"]>()
       .mockResolvedValueOnce("{}")

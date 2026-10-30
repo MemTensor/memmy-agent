@@ -13,6 +13,7 @@ import { stableHash } from "../utils/id.js";
 import { matchToolResultIndices } from "../utils/tool-call-pairing.js";
 import { formatZonedTime } from "../utils/time.js";
 import { isObservationMemory, isObservationMemoryProcessed } from "../service/observation-memory-state.js";
+import { isL3FieldSnapshotMemory, l3FieldSnapshotLegacyFields } from "../service/l3-field/snapshot-memory.js";
 import {
   renderL3WorldModelFields,
   type L3WorldModelFields
@@ -3442,6 +3443,31 @@ export function skillMetaFromMemory(memory: MemoryRow): SkillMemoryMeta | null {
 
 export function worldModelMetaFromMemory(memory: MemoryRow): WorldModelMemoryMeta | null {
   if (memory.memoryLayer !== "L3") return null;
+  const snapshotFields = l3FieldSnapshotLegacyFields(memory);
+  if (snapshotFields) {
+    // New L3 snapshots are shown on the world model page in the schema-2 shape; they are injected
+    // at session start only and never enter retrieval.
+    const internal = memory.properties.internal_info as Record<string, unknown>;
+    const field = internal.l3_field as Record<string, unknown>;
+    const project = field.kind === "project";
+    return {
+      id: memory.id,
+      memory,
+      title: stringField(internal, "title") ?? (project ? "项目场域认知" : "本机场域认知"),
+      domainKey: `l3_field:${field.unit_key as string}`,
+      domainTags: [project ? "project" : "machine"],
+      policyIds: [],
+      confidence: 0,
+      cohesion: 1,
+      admission: "strict",
+      structure: { environment: [], inference: [], constraints: [] },
+      summary: renderL3WorldModelFields(snapshotFields),
+      body: memory.memoryValue,
+      vec: memoryVector(memory, "vec"),
+      schemaVersion: 2,
+      fields: snapshotFields
+    };
+  }
   const wm = getInternal<Record<string, unknown>>(memory, "world_model");
   if (!wm) return null;
   const v2Fields = l3WorldModelV2Fields(memory, wm);
@@ -5232,6 +5258,7 @@ function candidateFromMemory(
   }
 ): RankedMemoryCandidate | null {
   if (memory.status === "deleted" || memory.status === "archived") return null;
+  if (isL3FieldSnapshotMemory(memory)) return null;
   const trace = memory.memoryLayer === "L1" ? traceMetaFromMemory(memory) : null;
   const policy = memory.memoryLayer === "L2" ? policyMetaFromMemory(memory) : null;
   const skill = memory.memoryLayer === "Skill" ? skillMetaFromMemory(memory) : null;

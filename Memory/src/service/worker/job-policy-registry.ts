@@ -85,6 +85,8 @@ const DEFINITIONS: Readonly<Record<PolicyJobType, PolicyDefinition>> = Object.fr
   l3_abstraction: definition("evolution", "database", 60, [], "user_project"),
   l3_world_model_update: definition("evolution", "evolution_llm", 60, ["evolution"], "user_project"),
   project_environment_profile: definition("maintenance", "evolution_llm", 55, ["evolution"], "user_project"),
+  // A new-L3 batch runs in order per machine unit through its own scope_key, not per project.
+  l3_unit_update: definition("evolution", "evolution_llm", 60, ["evolution"], "none"),
   skill_crystallization: definition("evolution", "evolution_llm", 70, ["evolution"]),
   skill_cluster_assign: definition("evolution", "evolution_llm", 72, ["embedding", "evolution"], "user_project"),
   skill_batch_evolve: definition("evolution", "evolution_llm", 73, ["evolution"], "user_project"),

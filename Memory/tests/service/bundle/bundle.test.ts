@@ -79,6 +79,29 @@ describe("MemoryService / bundle", () => {
     ).get(opened.sessionId)).toEqual({ last_scheduled_seq: 2 });
   });
 
+  it("imports queued jobs into a database that already has its own, keeping every local job", async () => {
+    const turn = async (service: ReturnType<typeof createTestService>["service"], key: string) => {
+      const opened = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: key, userId: "u1" } });
+      await service.completeTurn(`${key}-turn`, { sessionId: opened.sessionId, query: "hello", answer: "hi", status: "succeeded" });
+    };
+    const source = createTestService();
+    await turn(source.service, "source");
+    const bundle = source.service.exportBundle({ includeRawText: true });
+    const imported = (bundle.tables.evolution_jobs as Array<Record<string, unknown>>).map((row) => row.id);
+    expect(imported.length).toBeGreaterThan(0);
+
+    for (const conflictStrategy of ["skip", "replace"] as const) {
+      const target = createTestService();
+      await turn(target.service, `target-${conflictStrategy}`);
+      const jobs = () => target.db.db.prepare(`SELECT id, enqueue_seq FROM evolution_jobs`).all() as Array<{ id: string; enqueue_seq: number }>;
+      const local = jobs().map((job) => job.id);
+      expect(target.service.importBundle({ bundle, conflictStrategy }).ok).toBe(true);
+      const after = jobs();
+      expect(after.map((job) => job.id).sort()).toEqual([...local, ...imported].sort());
+      expect(new Set(after.map((job) => job.enqueue_seq)).size).toBe(after.length);
+    }
+  });
+
   it("exports bundles across namespaces", async () => {
     const { db, service } = createTestService();
     const namespaceA = {

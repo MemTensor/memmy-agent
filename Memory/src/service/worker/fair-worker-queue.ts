@@ -64,12 +64,20 @@ export function releaseFairWorkerResources(scan: FairWorkerScan, resources: read
   if (lanes.has("interactive")) scan.continuation.interactiveDenied = false;
 }
 
-function dependencyKey(job: EvolutionJobRecord): string | undefined {
+/** Job types that run one at a time, in order, per scope_key (see scopedJobReadySql). */
+const SCOPE_ORDERED_JOB_TYPES = ["l3_world_model_update", "l3_unit_update", "work_memory_extract"];
+
+function dependencyKey(job: EvolutionJobRecord, repos: Pick<Repositories, "runtime">): string | undefined {
   if (job.sessionId && (["episode_assignment", "episode_finalize", "feedback_experience"].includes(job.jobType) ||
     (job.jobType === "trace_summary" && job.payload.turnJudge === true))) {
     return JSON.stringify(["dependency", "session", job.sessionId]);
   }
-  if (["l3_world_model_update", "work_memory_extract"].includes(job.jobType) && job.scopeKey) {
+  // A new-L3 batch waits for its L1 summaries first: their completion releases it, then its scope order.
+  if (job.jobType === "l3_unit_update" && typeof job.payload.batchId === "string") {
+    const l1MemoryId = repos.runtime.unsummarizedL3BatchL1(job.payload.batchId);
+    if (l1MemoryId) return JSON.stringify(["dependency", "memory", l1MemoryId]);
+  }
+  if (SCOPE_ORDERED_JOB_TYPES.includes(job.jobType) && job.scopeKey) {
     return JSON.stringify(["dependency", "scope", job.jobType, job.scopeKey]);
   }
   if (job.jobType === "reward" && typeof job.payload.l1MemoryId === "string") {
@@ -82,8 +90,8 @@ function dependencyKey(job: EvolutionJobRecord): string | undefined {
 export function releaseFairWorkerDependencies(scan: FairWorkerScan, work: FairClaimedWork): void {
   const keys: string[] = [];
   if (work.queue === "main") {
-    if (["l3_world_model_update", "work_memory_extract"].includes(work.job.jobType)) {
-      const key = dependencyKey(work.job); if (key) keys.push(key);
+    if (SCOPE_ORDERED_JOB_TYPES.includes(work.job.jobType) && work.job.scopeKey) {
+      keys.push(JSON.stringify(["dependency", "scope", work.job.jobType, work.job.scopeKey]));
     }
     if (work.job.sessionId) keys.push(JSON.stringify(["dependency", "session", work.job.sessionId]));
     if (work.job.targetMemoryId) keys.push(JSON.stringify(["dependency", "memory", work.job.targetMemoryId]));
@@ -346,7 +354,7 @@ function claimAdmittedWorkerBatch(
         const eligible = !blocked && repos.runtime.scheduling.isEligibleCandidate(chosen, input.at, request);
         if (!blocked && !eligible && scan && chosen.queue === "main") {
           const job = repos.runtime.getJob(chosen.id);
-          const key = job && dependencyKey(job);
+          const key = job && dependencyKey(job, repos);
           if (key && repos.runtime.scheduling.isPendingCandidate(chosen)) {
             scan.waiting.park(chosen, key); admissionBlocked = true;
           }

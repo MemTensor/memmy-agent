@@ -1919,7 +1919,11 @@ export class SessionTurnService {
       const mapped = this.deps.repos.runtime.getSession(mappedSessionId);
       if (!mapped) return { status: "pending", reason: "source_session_missing" };
       if (!inScope(mapped)) throw new MemoryServiceError("forbidden", "source_session_scope_conflict");
-      if (mapped.status === "open") return mapped;
+      if (mapped.status === "open") {
+        const live = this.hookTakeoverOfScannedSession(request, mapped, inScope);
+        if (live) return live;
+        return mapped;
+      }
       if (!canStartAfter(mapped)) return { status: "pending", reason: "source_session_closed" };
     }
     if (request.sessionId) {
@@ -1946,7 +1950,35 @@ export class SessionTurnService {
       meta: { conversationId: identity.conversationId, source_namespace_key: scope.namespaceKey },
       timeZone: request.timeZone
     }, { createNew: true, at: identity.startedAt });
+    if (request.channel === "agent_source_scan" && this.deps.l3FieldActive()) {
+      // With the new L3 on, a newly scanned conversation feeds it like a Hook Session, but without
+      // Work Memory: a scan replays finished history, so there is no live task to extract working
+      // requirements from. With it off, scans stay out of L3 as before. Sessions opened earlier
+      // keep their protocol.
+      this.deps.repos.runtime.updateSessionMeta(opened.sessionId, {
+        l3_world_model_protocol_version: 2,
+        work_memory_disabled: true
+      }, identity.startedAt);
+    }
     return this.deps.repos.runtime.getSession(opened.sessionId)!;
+  }
+
+  /**
+   * A conversation first seen by a scan, then continued live under a Hook: the Hook's own Session
+   * takes over, so its turns, compaction, close and Work Memory all act on one Session. The scan's
+   * Session is closed, which freezes what it still holds into L3.
+   */
+  private hookTakeoverOfScannedSession(
+    request: SourceTurnCompleteRequest,
+    mapped: SessionRecord,
+    inScope: (candidate: SessionRecord) => boolean
+  ): SessionRecord | undefined {
+    if (request.channel !== "hook" || !request.sessionId || request.sessionId === mapped.id) return undefined;
+    if (mapped.meta.work_memory_disabled !== true) return undefined;
+    const live = this.deps.repos.runtime.getSession(request.sessionId);
+    if (!live || live.status !== "open" || !inScope(live)) return undefined;
+    this.closeSession(mapped.id);
+    return live;
   }
 
   completeTurn(

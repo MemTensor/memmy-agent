@@ -10,7 +10,10 @@ import { MemmyMemoryClient } from "./client.js";
 import { resolveMemmyMemoryConfig } from "./config.js";
 import { discoverMemmyMemoryConnection } from "./discovery.js";
 import { MemmyMemoryHook } from "./hook.js";
+import { L3UserProjectSync } from "./l3-user-project-sync.js";
 import type { MemmyMemoryInstallOptions } from "./types.js";
+import { getStandaloneTaskWorkspacesDir } from "../config/paths.js";
+import type { WebuiProjectRegistrySnapshot } from "../entrypoints/frontend-bridge/projects.js";
 
 export type MemmyMemoryIntegration = {
   enabled: boolean;
@@ -18,6 +21,8 @@ export type MemmyMemoryIntegration = {
   hook?: MemmyMemoryHook;
   dispose?: () => Promise<void>;
   closeSession?: (sessionKey: string, reason?: string) => Promise<void>;
+  /** Starts pushing the desktop project registry to Memory for L3 project recognition. */
+  startL3UserProjectSync?: (readProjects: () => WebuiProjectRegistrySnapshot) => void;
 };
 
 export {
@@ -53,11 +58,33 @@ export function createMemmyMemoryIntegration(
   void hook.initialize().catch((error) => {
     hook.lastError = error instanceof Error ? error.message : String(error);
   });
+  let projectSync: L3UserProjectSync | null = null;
   return {
     enabled: true,
     client,
     hook,
-    dispose: () => hook.dispose(),
+    dispose: async () => {
+      projectSync?.stop();
+      await hook.dispose();
+    },
+    startL3UserProjectSync: (readProjects) => {
+      if (projectSync) return;
+      projectSync = new L3UserProjectSync({
+        client,
+        envelope: {
+          adapterId: "memmy-agent",
+          source: "memmy-agent",
+          namespace: {
+            source: "memmy-agent",
+            profileId: "default",
+            ...(resolved.userId ? { userId: resolved.userId } : {}),
+          },
+        },
+        readProjects,
+        standaloneRoots: () => [getStandaloneTaskWorkspacesDir()],
+      });
+      projectSync.start();
+    },
     closeSession: (sessionKey, reason = "deleted") => hook.sessionEnd(new AgentHookContext({
       sessionKey,
       reason,

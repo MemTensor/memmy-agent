@@ -251,6 +251,11 @@ export interface AlgorithmConfig {
     // saw). Off: after a successful judgment only the small fields stay.
     turnJudgeKeepInput: boolean;
   };
+  /** Itemized machine/project L3; on by default (local SQLite only, see isL3FieldCognitionActive). */
+  l3FieldCognition: {
+    enabled: boolean;
+    inactiveRetentionDays: number;
+  };
   retrieval: {
     tier1TopK: number;
     tier2TopK: number;
@@ -513,6 +518,10 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       turnJudge: true,
       turnJudgeKeepInput: false
     },
+    l3FieldCognition: {
+      enabled: true,
+      inactiveRetentionDays: 15
+    },
     retrieval: {
       tier1TopK: 3,
       tier2TopK: 5,
@@ -659,6 +668,9 @@ function configFromEnv(): Record<string, unknown> {
         skillInjectionMode: process.env.MEMMY_SKILL_INJECTION_MODE,
         skillSummaryChars: numberEnv("MEMMY_SKILL_SUMMARY_CHARS"),
         skillFullMaxChars: numberEnv("MEMMY_SKILL_FULL_MAX_CHARS")
+      }),
+      l3FieldCognition: compactRecord({
+        enabled: booleanEnv("MEMMY_L3_FIELD_COGNITION")
       })
     })
   });
@@ -1167,6 +1179,7 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
   const l3 = asRecord(input.l3Abstraction);
   const skill = asRecord(input.skill);
   const session = asRecord(input.session);
+  const l3FieldCognition = asRecord(input.l3FieldCognition);
   const retrieval = asRecord(input.retrieval);
   return {
     enableMemoryAdd: booleanValue(input.enableMemoryAdd, DEFAULT_MEMMY_CONFIG.algorithm.enableMemoryAdd),
@@ -1325,6 +1338,13 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       mergeMaxGapMs: numberValue(session.mergeMaxGapMs, DEFAULT_MEMMY_CONFIG.algorithm.session.mergeMaxGapMs),
       turnJudge: booleanValue(session.turnJudge, DEFAULT_MEMMY_CONFIG.algorithm.session.turnJudge),
       turnJudgeKeepInput: booleanValue(session.turnJudgeKeepInput, DEFAULT_MEMMY_CONFIG.algorithm.session.turnJudgeKeepInput)
+    },
+    l3FieldCognition: {
+      enabled: booleanValue(l3FieldCognition.enabled, DEFAULT_MEMMY_CONFIG.algorithm.l3FieldCognition.enabled),
+      inactiveRetentionDays: numberValue(
+        l3FieldCognition.inactiveRetentionDays,
+        DEFAULT_MEMMY_CONFIG.algorithm.l3FieldCognition.inactiveRetentionDays
+      )
     },
     retrieval: {
       tier1TopK: numberValue(retrieval.tier1TopK, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.tier1TopK),

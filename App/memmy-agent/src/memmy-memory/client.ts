@@ -1,11 +1,14 @@
 import type { MemmyMemoryConnection, MemmyMemoryRequestEnvelope, JsonRecord } from "./types.js";
 import { normalizeTimeZoneOffset } from "../utils/time-zone.js";
 import {
+  L3UserProjectsReplaceResponseSchema,
   L3WorldModelBoundaryResponseSchema,
   L3WorldModelTraceHeadResponseSchema,
   MemoryHealthSnapshotSchema,
   SessionL3WorldModelContextResponseSchema,
   l3WorldModelGetTransport,
+  type L3UserProjectsReplaceRequest,
+  type L3UserProjectsReplaceResponse,
   type L3WorldModelBoundaryRequest,
   type L3WorldModelBoundaryResponse,
   type L3WorldModelRequestEnvelope,
@@ -177,6 +180,13 @@ export class MemmyMemoryClient {
       { ...options, query: transport.query, headers: transport.headers }
     );
     return SessionL3WorldModelContextResponseSchema.parse(value);
+  }
+
+  async replaceL3UserProjects(
+    request: L3UserProjectsReplaceRequest,
+    options: MemoryRequestOptions = {}
+  ): Promise<L3UserProjectsReplaceResponse> {
+    return L3UserProjectsReplaceResponseSchema.parse(await this.post("/api/v1/l3/user-projects", request, options));
   }
 
 }
