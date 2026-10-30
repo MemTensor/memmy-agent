@@ -1,6 +1,6 @@
-export type DesktopPromptPreviewKind = "tokenCredit";
+export type DesktopPromptPreviewKind = "tokenCredit" | "history";
 
-/** Dev-only query `?previewPrompt=tokenCredit|all` to force-show desktop prompts. */
+/** Dev-only query `?previewPrompt=tokenCredit|history|all` to force-show desktop prompts. */
 export function isDesktopPromptPreview(kind: DesktopPromptPreviewKind): boolean {
   if (typeof window === "undefined" || !import.meta.env.DEV) {
     return false;
