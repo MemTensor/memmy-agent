@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { collectThirdPartyNotices } from "../scripts/third-party-notices.mjs";
 
 const root = resolve(import.meta.dirname, "..");
@@ -95,4 +96,37 @@ test("supplement file paths cannot escape their checked source root", async t =>
   registry.supplements[0].files[0].path = "../outside.txt";
   await writeFile(file, JSON.stringify(registry));
   await assert.rejects(collectThirdPartyNotices(target), /Invalid notice source path/);
+});
+
+test("autocrlf checkout preserves pinned notice bytes and collector verification", async t => {
+  const repository = await mkdtemp(join(tmpdir(), "office-notice-checkout-"));
+  t.after(() => rm(repository, { recursive: true, force: true }));
+  const office = join(repository, "plugins/office");
+  await mkdir(office, { recursive: true });
+  await cp(resolve(root, "licenses"), join(office, "licenses"), { recursive: true });
+  const lock = JSON.parse(await readFile(resolve(root, "package-lock.json"), "utf8"));
+  await writeFile(join(office, "package-lock.json"), JSON.stringify({ packages: { "node_modules/fontkit": lock.packages["node_modules/fontkit"] } }));
+  const attributes = await readFile(resolve(root, "../../.gitattributes")).catch(error => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (attributes) await writeFile(join(repository, ".gitattributes"), attributes);
+  const git = (...args) => execFileSync("git", ["-C", repository, ...args], { stdio: "pipe", timeout: 10000 });
+  git("init", "--quiet");
+  git("config", "--local", "core.autocrlf", "false");
+  git("add", ".");
+  git("-c", "user.name=Office notice checkout fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Owned notice checkout fixture");
+  // Removing only the owned source fixture forces a real working-tree checkout.
+  await rm(join(repository, "plugins"), { recursive: true });
+  git("config", "--local", "core.autocrlf", "true");
+  git("checkout", "HEAD", "--", "plugins/office");
+  // npm tarballs retain publisher bytes independently of Git's text conversion.
+  const installed = join(office, "node_modules/fontkit");
+  await mkdir(installed, { recursive: true });
+  for (const file of ["package.json", "README.md"]) await cp(resolve(root, "node_modules/fontkit", file), join(installed, file));
+  assert.match(await collectThirdPartyNotices(office), /SPDX MIT standard terms reference/);
+  const registry = JSON.parse(await readFile(resolve(root, "licenses/supplements.json"), "utf8"));
+  for (const file of registry.supplements[0].files) {
+    assert.deepEqual(await readFile(join(office, "licenses", file.path)), await readFile(resolve(root, "licenses", file.path)));
+  }
 });
