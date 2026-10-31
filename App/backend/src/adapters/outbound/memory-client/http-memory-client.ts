@@ -313,7 +313,8 @@ export function createHttpMemoryClient(
     },
 
     async panelItems(input, context) {
-      return request("GET", "panelItems", PanelItemsOutputSchema, { query: input, context });
+      // Compatibility reads still run through the renderer's shared retry queue.
+      return request("GET", "panelItems", PanelItemsOutputSchema, { query: input, context, maxRetries: 0 });
     },
 
     async panelLogs(input,context) {return request("POST","panelLogs",PanelLogsOutputSchema,{body:input,context,maxRetries:0});},
@@ -324,7 +325,7 @@ export function createHttpMemoryClient(
       return request("POST","panelBrowse",PanelBrowseOutputSchema,{body:input,context,maxRetries:0});
     },
     async panelTaskSummaries(input, context) {
-      return request("GET", "panelTaskSummaries", PanelTaskSummariesOutputSchema, {query: input, context});
+      return request("GET", "panelTaskSummaries", PanelTaskSummariesOutputSchema, {query: input, context, maxRetries: 0});
     },
     async panelTaskCheck(id, context) {
       return request("GET", "panelTaskCheck", PanelTaskCheckOutputSchema, {params: {id}, context, maxRetries: 0});
@@ -336,7 +337,8 @@ export function createHttpMemoryClient(
       return request("GET", "panelTaskField", PanelTaskFieldOutputSchema, {params: {id, turnId}, query: input, context});
     },
     async panelTasks(input, context) {
-      return request("GET", "panelTasks", PanelTasksOutputSchema, { query: input, context });
+      // Task details and legacy task lists share frontend-owned retries.
+      return request("GET", "panelTasks", PanelTasksOutputSchema, { query: input, context, maxRetries: 0 });
     },
 
     async deletePanelTask(taskId, context) {
