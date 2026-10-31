@@ -21,3 +21,16 @@ export function usePanelReadGuard(client: unknown) {
   }, [client, visible]);
   return () => current.current.client === client && current.current.visible && !document.hidden;
 }
+
+/** A page owns its subscription and resumes only its still-selected read. */
+export function usePanelVisibilityLifecycle(owner: unknown, suspend: () => void, resume: () => void) {
+  const visible = usePanelVisible();
+  const previous = useRef({visible, owner});
+  const callbacks = useRef({ suspend, resume });
+  callbacks.current = { suspend, resume };
+  useLayoutEffect(() => {
+    if (!visible || previous.current.owner !== owner) callbacks.current.suspend();
+    else if (!previous.current.visible) callbacks.current.resume();
+    previous.current = {visible, owner};
+  }, [visible, owner]);
+}

@@ -2981,7 +2981,9 @@ export class SessionTurnService {
     const llmDraft = deferDecisionRepair
       ? undefined
       : await this.maybeSynthesizeFailureBurstDecisionRepair(burst, reason, evidence);
-    return this.persistFailureBurstRepair(input, evidence, valueDiff, llmDraft, deferDecisionRepair);
+    // The observation transaction has already committed. Re-enter admission for
+    // this post-model write, keeping the repair, episode link and jobs atomic.
+    return this.writeTransaction(() => this.persistFailureBurstRepair(input, evidence, valueDiff, llmDraft, deferDecisionRepair));
   }
 
   private persistFailureBurstRepair(

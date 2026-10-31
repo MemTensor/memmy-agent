@@ -12,50 +12,21 @@ afterEach(async () => {
 });
 
 describe("HttpMemoryClient", () => {
-  it.each(["timeout", "503"])("recovers a transient log detail %s without a frontend retry", async failure => {
+  it.each(["memory", "log"].flatMap(kind => ["timeout",503,401,403,404,409].map(failure => ({kind,failure}))))("leaves panel $kind retries to the frontend ($failure)", async ({kind,failure}) => {
+    let calls = 0;
+    const client = createHttpMemoryClient({baseUrl:"http://synthetic.invalid",timeoutMs:500,maxRetries:3}, {
+      fetchImpl: (async () => { calls++; if(failure === "timeout")throw new DOMException("timed out","TimeoutError"); return new Response("{}", {status:failure as number}); }) as typeof fetch
+    });
+    await expect(kind === "memory" ? client.panelMemory!("memory-1") : client.panelLogDetail!(1)).rejects.toMatchObject({status:failure === "timeout" ? 503 : failure});
+    expect(calls).toBe(1);
+  });
+
+  it("retains legacy getMemory backend retry for the compatibility path", async () => {
     let calls=0;
-    const output={log:{id:1,toolName:"memory_search",inputJson:"{}",outputJson:"{}",durationMs:1,success:true,calledAt:"2026-10-30T00:00:00Z"},serverTime:"2026-10-30T00:00:00Z"};
-    const client=createHttpMemoryClient({baseUrl:"http://synthetic.invalid",timeoutMs:500,maxRetries:2},{fetchImpl:(async()=>{
-      if(++calls===1){if(failure==="timeout")throw new DOMException("timed out","TimeoutError");return new Response("{}",{status:503});}
-      return new Response(JSON.stringify(output));
-    }) as typeof fetch});
-    expect(await client.panelLogDetail!(1)).toEqual(output);expect(calls).toBe(2);
-  });
-
-  it.each(["recover", "exhaust", "cancel", 401, 403, 404, 409] as const)("restores bounded panel detail recovery without retrying invalidation (%s)", async scenario => {
-    vi.useFakeTimers();
-    let calls = 0;
-    const controller = new AbortController();
-    const client = createHttpMemoryClient({baseUrl:"http://synthetic.invalid",timeoutMs:500,maxRetries:2}, {
-      fetchImpl: (async () => {
-        calls++;
-        if (scenario === "recover" && calls === 2) return new Response(JSON.stringify(getMemoryOutput()));
-        return new Response("{}", {status:typeof scenario === "number" ? scenario : 503});
-      }) as typeof fetch
+    const client=createHttpMemoryClient({baseUrl:"http://synthetic.invalid",timeoutMs:10,maxRetries:2}, {
+      fetchImpl:(async()=>{if(++calls===1)throw new DOMException("timed out","TimeoutError");return new Response(JSON.stringify(getMemoryOutput()));}) as typeof fetch
     });
-    try {
-      const result = client.panelMemory!("memory-1", {signal:controller.signal}).catch(error => error);
-      await vi.advanceTimersByTimeAsync(1);
-      if (scenario === "cancel") controller.abort();
-      await vi.advanceTimersByTimeAsync(2000);
-      const value = await result;
-      if (scenario === "recover") { expect(value.item.id).toBe("memory-1"); expect(calls).toBe(2); }
-      else { expect(value).toBeInstanceOf(Error); expect(calls).toBe(scenario === "exhaust" ? 3 : 1); }
-    } finally { vi.useRealTimers(); }
-  });
-
-  it("retries one panel detail timeout and returns the recovered body", async () => {
-    let calls = 0;
-    const client = createHttpMemoryClient({baseUrl:"http://synthetic.invalid",timeoutMs:10,maxRetries:2}, {
-      fetchImpl: (async (_url, init) => {
-        calls++;
-        if (calls === 1) throw new DOMException("timed out", "TimeoutError");
-        expect(init?.signal?.aborted).toBe(false);
-        return new Response(JSON.stringify(getMemoryOutput()));
-      }) as typeof fetch
-    });
-    expect((await client.panelMemory!("memory-1")).item.id).toBe("memory-1");
-    expect(calls).toBe(2);
+    expect((await client.getMemory({memoryId:"memory-1"})).item.id).toBe("memory-1");expect(calls).toBe(2);
   });
 
   it("recognizes a healthy older service without desktop scan endpoints and does not retry its 404", async () => {

@@ -1,11 +1,13 @@
+import { usePanelVisible } from "./panel-visibility.js";
 import { useEffect } from "react";
 import { isUnsupportedPanelRoute } from "../../api/memory-runtime-client.js";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 
 /** Warm one lightweight first page at a time, only after visible work is idle. */
 export function usePanelPrefetch(client: MemoryRuntimeClient | null, current: string) {
+  const visible = usePanelVisible();
   useEffect(() => {
-    if (!client?.prefetchPanel) return;
+    if (!client?.prefetchPanel || !visible) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
@@ -27,8 +29,8 @@ export function usePanelPrefetch(client: MemoryRuntimeClient | null, current: st
       while (stats.length) {
         try {
           const snapshot = stats[0] === "analysis"
-            ? await client!.getPanelStats!()
-            : await client!.getPanelOverviewStats!();
+            ? await client!.getPanelStats!(controller.signal)
+            : await client!.getPanelOverviewStats!(controller.signal);
           if (stopped || document.hidden) return;
           if (snapshot.status === "preparing") {
             timer = setTimeout(next, 500);
@@ -61,5 +63,5 @@ export function usePanelPrefetch(client: MemoryRuntimeClient | null, current: st
       clearTimeout(timer);
       document.removeEventListener("visibilitychange", visibility);
     };
-  }, [client, current]);
+  }, [client, current, visible]);
 }

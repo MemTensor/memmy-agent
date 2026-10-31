@@ -10,7 +10,7 @@ import {I18nProvider} from "../../../i18n/i18n-provider.js";
 import {memoryDetailFixture,panelItemsOutput} from "./fixtures.js";
 import {clearMemoryPanelCache} from "../memory-panel-cache.js";
 afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals();vi.restoreAllMocks();clearMemoryPanelCache();});
-it.each(["failure","close","late","hidden"])("detail cancellation and no stacked frontend retries: %s",async scenario=>{
+it.each(["failure","close","late","hidden"])("detail cancellation and bounded frontend retries: %s",async scenario=>{
  vi.useFakeTimers();vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT",true);
  const hidden=vi.spyOn(document,"hidden","get").mockReturnValue(false);
  const detail={...memoryDetailFixture,item:{...memoryDetailFixture.item,body:"unique recovered detail",summary:"unique recovered detail"}};
@@ -30,7 +30,7 @@ it.each(["failure","close","late","hidden"])("detail cancellation and no stacked
   if(scenario==="hidden") await act(async()=>{hidden.mockReturnValue(true);document.dispatchEvent(new Event("visibilitychange"));});
   if(finish) await act(async()=>finish!(new Response(JSON.stringify(detail))));
   await act(async()=>vi.advanceTimersByTimeAsync(5000));
-  if(scenario==="failure") {expect(count).toBe(1);expect(container.textContent).toContain("503");}
+  if(scenario==="failure") {expect(count).toBe(4);expect(container.textContent).toContain("503");}
   else {expect(count).toBe(1);expect(container.textContent).not.toContain("unique recovered detail");}
  }finally{await act(async()=>root.unmount());}
 });

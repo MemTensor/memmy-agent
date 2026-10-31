@@ -54,6 +54,18 @@ describe("History Skill post-editing", () => {
     });
   }
 
+  it("preserves an unsaved editor draft while hiding and revalidating the same skill", async () => {
+    const original = historySkill();
+    const client = createMemoryRuntimeClientStub({getPanelMemory:async()=>original,
+      listPanelItems:async()=>panelItemsOutput([original.item]),listPanelLogs:async()=>({logs:[],serverTime:original.serverTime})});
+    const render = async (visible:boolean) => act(async()=>root.render(<AppStateProvider><I18nProvider language="zh-CN"><PanelVisibilityContext.Provider value={visible}>
+      <SkillsSubPage client={client} openRequest={{id:original.item.id,requestId:1}}/>
+    </PanelVisibilityContext.Provider></I18nProvider></AppStateProvider>));
+    await render(true);await act(async()=>button("修改").click());await replaceBody("# 未保存的修改");
+    await render(false);await render(true);
+    expect(container.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("# 未保存的修改");
+  });
+
   it("does not read detail or list when an in-flight edit finishes after the page is hidden", async () => {
     const original = historySkill();
     let finishUpdate!: () => void;

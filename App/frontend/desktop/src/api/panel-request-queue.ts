@@ -85,27 +85,21 @@ export class PanelRequestQueue {
 
   private async run(task: Pending<unknown>): Promise<unknown> {
     const signal = task.controller.signal;
-    const hidden = () => { if (document.hidden) task.controller.abort(); };
-    if (this.retryTransient && typeof document !== "undefined") { document.addEventListener("visibilitychange", hidden); hidden(); }
-    try {
-      const delays = this.retryTransient ? [250, 750, 1500] : [];
-      for (let attempt = 0; ; attempt++) {
+    const delays = this.retryTransient ? [250, 750, 1500] : [];
+    for (let attempt = 0; ; attempt++) {
+      signal.throwIfAborted();
+      try { return await task.run(signal); }
+      catch (error) {
         signal.throwIfAborted();
-        try { return await task.run(signal); }
-        catch (error) {
-          signal.throwIfAborted();
-          const transient = error instanceof TypeError || error instanceof ApiRequestError && [502, 503, 504].includes(error.status);
-          if (!transient || attempt >= delays.length) throw error;
-          await new Promise<void>((resolve, reject) => {
-            const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(abortError()); };
-            const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, delays[attempt]);
-            signal.addEventListener("abort", abort, { once: true });
-            if (signal.aborted) abort();
-          });
-        }
+        const transient = error instanceof TypeError || error instanceof ApiRequestError && [502, 503, 504].includes(error.status);
+        if (!transient || attempt >= delays.length) throw error;
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(abortError()); };
+          const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, delays[attempt]);
+          signal.addEventListener("abort", abort, { once: true });
+          if (signal.aborted) abort();
+        });
       }
-    } finally {
-      if (this.retryTransient && typeof document !== "undefined") document.removeEventListener("visibilitychange", hidden);
     }
   }
 

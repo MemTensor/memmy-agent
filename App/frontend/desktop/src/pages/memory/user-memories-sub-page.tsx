@@ -1,5 +1,5 @@
 import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
-import { usePanelReadGuard } from "./panel-visibility.js";
+import { usePanelReadGuard, usePanelVisibilityLifecycle } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import { usePanelViewStatus } from "./panel-view-status.js";
 import { usePanelLoad } from "./use-panel-load.js";
@@ -39,19 +39,25 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
   const detailGeneration = useRef(0);
   const detailAbort = useRef<AbortController | null>(null);
   useEffect(() => () => { detailGeneration.current++; detailAbort.current?.abort(); }, [props.client]);
+  usePanelVisibilityLifecycle(props.client, () => {
+    detailGeneration.current++; detailAbort.current?.abort();
+    setSelected(item => item ? {...item, summary: "", body: undefined} : null);
+    setDetailStatus({status: "loading"});
+  }, () => { if (selected) void openDetail(selected, true); });
   function closeDetail() { detailGeneration.current++; detailAbort.current?.abort(); setSelected(null); setDetailStatus(null); }
-  async function openDetail(item: MemoryListItem) {
+  async function openDetail(item: MemoryListItem, revalidate = false) {
+    if (!canRead()) return;
     const generation = ++detailGeneration.current;
     detailAbort.current?.abort();
     const controller = new AbortController(); detailAbort.current = controller;
     setSelected(item); setDetailStatus(null);
-    if (!item.metadata?.fullContentAvailable || !props.client) return;
+    if ((!revalidate && !item.metadata?.fullContentAvailable) || !props.client) return;
     setDetailStatus({status: "loading"});
     try {
       const result = await readMemoryPanelDetail(props.client,item.id,controller.signal);
-      if (generation !== detailGeneration.current) return;
+      if (generation !== detailGeneration.current || controller.signal.aborted || !canRead()) return;
       setSelected({...result.item, summary: result.item.body}); setDetailStatus(null);
-    } catch (error) { if (generation === detailGeneration.current) setDetailStatus({status: "error", message: toErrorMessage(error)}); }
+    } catch (error) { if (generation === detailGeneration.current && !controller.signal.aborted && canRead()) setDetailStatus({status: "error", message: toErrorMessage(error)}); }
   }
   const requestIdRef = useRef(0);
   const requestAbortRef = useRef<AbortController | null>(null);

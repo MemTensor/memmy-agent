@@ -14,11 +14,14 @@ export function usePanelStats<T>(
   const [state, setState] = useState<RemoteData<T>>({ status: "loading" });
   const [snapshot, setSnapshot] = useState<PanelStatsOutput | PanelOverviewStatsOutput>();
   const generation = useRef(0);
+  const abort = useRef<AbortController | null>(null);
   const oldService = useRef(false);
   const overviewStatsUnsupported = useRef(false);
   const visible = usePanelVisible();
   async function load() {
-    const current = generation.current;
+    abort.current?.abort();
+    const controller = new AbortController(); abort.current = controller;
+    const current = ++generation.current;
     try {
       if (!oldService.current) {
         try {
@@ -26,7 +29,7 @@ export function usePanelStats<T>(
           let selectedData: unknown;
           if (section === "overview" && client?.getPanelOverviewStats && !overviewStatsUnsupported.current) {
             try {
-              result = await client.getPanelOverviewStats();
+              result = await client.getPanelOverviewStats(controller.signal);
               selectedData = result.data;
             } catch (error) {
               if (!isUnsupportedPanelRoute(error)) throw error;
@@ -35,7 +38,7 @@ export function usePanelStats<T>(
           }
           if (!result && client?.getPanelStats) {
             try {
-              result = await client.getPanelStats();
+              result = await client.getPanelStats(controller.signal);
               selectedData = result.data?.[section];
             } catch (error) {
               if (!isUnsupportedPanelRoute(error)) throw error;
@@ -80,11 +83,13 @@ export function usePanelStats<T>(
     setSnapshot(undefined);
     if (visible) void load().catch(() => undefined);
     return () => {
+      abort.current?.abort();
       generation.current++;
     };
   }, [client, section, visible]);
   useEffect(() => {
     const clear = () => {
+      abort.current?.abort();
       generation.current++;
       setState({ status: "loading" });
       setSnapshot(undefined);

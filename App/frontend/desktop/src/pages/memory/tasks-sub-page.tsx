@@ -1,4 +1,4 @@
-import { usePanelReadGuard } from "./panel-visibility.js";
+import { usePanelReadGuard, usePanelVisibilityLifecycle } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import { usePanelViewStatus } from "./panel-view-status.js";
 import { useEffect, useRef, useState } from "react";
@@ -145,12 +145,17 @@ export function TasksSubPage(props: TasksSubPageProps) {
   const [page, setPage] = useState(1);
   const [state, setState] = useState<TasksState>({ status: "loading" });
   const [selectedTask, setSelectedTask] = useState<MemoryTask | null>(null);
+  const requestedTaskId = useRef<string | null>(null);
   const detailGeneration = useRef(0);
   const detailAbortRef = useRef<AbortController | null>(null);
   useEffect(() => () => { detailGeneration.current++; detailAbortRef.current?.abort(); }, [props.client]);
-  function closeTask() { detailGeneration.current++; detailAbortRef.current?.abort(); setSelectedTask(null); }
+  usePanelVisibilityLifecycle(props.client, () => {
+    detailGeneration.current++; detailAbortRef.current?.abort(); setSelectedTask(null);
+  }, () => { if (requestedTaskId.current) void openTaskDetail(requestedTaskId.current); });
+  function closeTask() { requestedTaskId.current = null; detailGeneration.current++; detailAbortRef.current?.abort(); setSelectedTask(null); }
   async function openTaskDetail(id: string) {
     if (!props.client || !canRead()) return;
+    requestedTaskId.current = id;
     const generation = ++detailGeneration.current;
     detailAbortRef.current?.abort();
     const controller = new AbortController();
@@ -247,7 +252,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
       filterLayer: tasksFilterLayer
     }));
     if (task.summaryOnly) void openTaskDetail(task.id);
-    else { closeTask(); setSelectedTask(task); }
+    else { closeTask(); requestedTaskId.current = task.id; setSelectedTask(task); }
   }
 
   function openTaskById(id: string) {

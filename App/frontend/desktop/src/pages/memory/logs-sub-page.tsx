@@ -1,3 +1,4 @@
+import { usePanelVisible } from "./panel-visibility.js";
 import { usePanelReadGuard } from "./panel-visibility.js";
 import {usePanelLoad} from "./use-panel-load.js";
 import {isUnsupportedPanelRoute} from "../../api/memory-runtime-client.js";
@@ -56,7 +57,8 @@ export async function loadLogsData(
   page = 1,
   tool: "" | MemoryApiLogToolName = "",
   sourceAgent = "",
-  query = ""
+  query = "",
+  signal?: AbortSignal
 ): Promise<MemoryApiLogsOutput> {
   const normalizedPage = normalizePage(page);
   const sourceAgentFilter = sourceAgent === OTHER_LOG_SOURCE_AGENT
@@ -66,7 +68,7 @@ export async function loadLogsData(
       : {};
   try {
     if(client.listPanelLogs) {
-      try {return await client.listPanelLogs({tools:tool?[tool]:VISIBLE_TOOLS,...sourceAgentFilter,limit:LOGS_PAGE_SIZE,offset:(normalizedPage-1)*LOGS_PAGE_SIZE,q:query||undefined});}
+      try {return await client.listPanelLogs({tools:tool?[tool]:VISIBLE_TOOLS,...sourceAgentFilter,limit:LOGS_PAGE_SIZE,offset:(normalizedPage-1)*LOGS_PAGE_SIZE,q:query||undefined},signal);}
       catch(error) {if(!isUnsupportedPanelRoute(error))throw error;}
     }
     return await client.listMemoryLogs({
@@ -74,7 +76,7 @@ export async function loadLogsData(
       ...sourceAgentFilter,
       limit: LOGS_PAGE_SIZE,
       offset: (normalizedPage - 1) * LOGS_PAGE_SIZE
-    });
+    }, signal);
   } catch (error) {
     if (isMissingLogsRoute(error)) {
       return emptyLogsOutput((normalizedPage - 1) * LOGS_PAGE_SIZE);
@@ -97,6 +99,7 @@ export function LogsSubPage(props: LogsSubPageProps) {
   const [page, setPage] = useState(1);
   const [state, setState] = useState<RemoteData<MemoryApiLogsOutput>>({ status: "loading" });
   const generation=useRef(0);
+  const requestAbort = useRef<AbortController | null>(null);
   const [query,setQuery]=useState("");
   const logsFilterLayer = () => buildLogsFilterLayer(tool, sourceAgent);
 
@@ -108,11 +111,13 @@ export function LogsSubPage(props: LogsSubPageProps) {
       return Promise.reject(new Error(message));
     }
 
+    requestAbort.current?.abort();
+    const controller = new AbortController(); requestAbort.current = controller;
     const requestId=++generation.current;
     const cacheKeys = logsCacheKeys(nextPage, nextTool, nextSourceAgent);
     const cached = (options.useCache ?? true) && !props.client.resetPanelView ? readMemoryPanelCacheFirst<MemoryApiLogsOutput>(cacheKeys) : null;
     setState((current) => cached ? { status: "ready", data: cached } : current.status === "ready" ? current : { status: "loading" });
-    return loadLogsData(props.client, nextPage, nextTool, nextSourceAgent,query)
+    return loadLogsData(props.client, nextPage, nextTool, nextSourceAgent,query,controller.signal)
       .then((data) => {
         if(requestId!==generation.current)return undefined;
         if(!props.client?.resetPanelView)writeMemoryPanelCaches(cacheKeys, data);
@@ -126,9 +131,9 @@ export function LogsSubPage(props: LogsSubPageProps) {
       });
   }
 
-  usePanelLoad({query,identity:[props.client,page,sourceAgent,tool,t],load:()=>refresh(),invalidate:()=>{generation.current++;}});
+  usePanelLoad({query,identity:[props.client,page,sourceAgent,tool,t],load:()=>refresh(),invalidate:()=>{generation.current++;requestAbort.current?.abort();}});
   useEffect(()=>{
-    const invalidate=()=>{generation.current++;setState({status:"loading"});void refresh().catch(()=>undefined);};
+    const invalidate=()=>{generation.current++;requestAbort.current?.abort();setState({status:"loading"});void refresh().catch(()=>undefined);};
     window.addEventListener("memmy-panel-invalidated",invalidate);
     return()=>window.removeEventListener("memmy-panel-invalidated",invalidate);
   },[props.client]);
@@ -397,13 +402,14 @@ interface AddDetail {
 }
 
 function ExpandedLog(props:{client?:MemoryRuntimeClient|null;log:MemoryApiLog}) {
+  const visible = usePanelVisible();
   const [data,setData]=useState(props.log.detailAvailable ? undefined : props.log);
   const [error,setError]=useState<string>();const {t}=useTranslation();
   useEffect(()=>{let active=true;const controller=new AbortController();
     setError(undefined);setData(props.log.detailAvailable ? undefined : props.log);
-    if(props.log.detailAvailable&&props.client?.getPanelLogDetail) void props.client.getPanelLogDetail(props.log.id,controller.signal).then(result=>{if(active)setData(result.log);}).catch(error=>{if(active)setError(toErrorMessage(error));});
+    if(visible&&props.log.detailAvailable&&props.client?.getPanelLogDetail) void props.client.getPanelLogDetail(props.log.id,controller.signal).then(result=>{if(active)setData(result.log);}).catch(error=>{if(active)setError(toErrorMessage(error));});
     return()=>{active=false;controller.abort();};
-  },[props.client,props.log.id]);
+  },[props.client,props.log.id,visible]);
   if(error)return <div role="alert">{error}</div>;
   return data?<LogDetail log={data} input={parseJson(data.inputJson)} output={parseJson(data.outputJson)} />:<StateBox message={t("common.loading")} />;
 }

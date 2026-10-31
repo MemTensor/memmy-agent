@@ -1,3 +1,4 @@
+import {PanelVisibilityContext} from "../panel-visibility.js";
 // @vitest-environment happy-dom
 import {act} from "react";
 import {createRoot} from "react-dom/client";
@@ -59,5 +60,22 @@ it("keeps timeline pagination styled inside its card through loading, failure, r
   expect(card.querySelectorAll(".memory-skill-timeline__item")).toHaveLength(21);
   expect(button()).toBeUndefined();expect(card.querySelector('[role="alert"]')).toBeNull();
   expect(card.nextElementSibling?.textContent).toContain("SKILL.md");
+ }finally{await act(async()=>root.unmount());}
+});
+
+it("cancels a timeline page while hidden and revalidates on return",async()=>{
+ const container=document.createElement("div"),root=createRoot(container),detail=skillPanelDetailFixture;
+ const logs=Array.from({length:20},(_,i)=>({...log,id:i+1,outputJson:JSON.stringify({skillId:detail.item.id,kind:"crystallized",summary:`entry ${i}`})}));
+ const read=vi.fn().mockResolvedValueOnce({logs,nextCursor:"next",serverTime:at})
+   .mockImplementationOnce((_input,signal:AbortSignal)=>new Promise((_resolve,reject)=>signal.addEventListener("abort",()=>reject(new DOMException("cancelled","AbortError")))))
+   .mockResolvedValue({logs:[],serverTime:at});
+ const client=createMemoryRuntimeClientStub({listPanelLogs:read});
+ const render=(visible:boolean)=>root.render(<I18nProvider language="zh-CN"><PanelVisibilityContext.Provider value={visible}><SkillsSubPageView client={client} state={{status:"ready",data:panelItemsOutput([detail.item])}} detail={{status:"ready",data:{detail,timeline:[]}}} query="" onQueryChange={()=>{}} onSearch={()=>{}} onPageChange={()=>{}} onRefresh={()=>{}} onOpenSkill={()=>{}} onDeleteSkill={async()=>{}} onCloseSkill={()=>{}} onOpenMemoryReference={()=>{}}/></PanelVisibilityContext.Provider></I18nProvider>);
+ try{
+  await act(async()=>render(true));
+  await act(async()=>Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent==="继续读取内容")!.click());
+  await act(async()=>render(false));expect(read.mock.calls[1]![1].aborted).toBe(true);
+  await act(async()=>render(true));expect(read.mock.calls.map(call=>call[0].cursor)).toEqual([undefined,"next",undefined]);
+  expect(container.querySelectorAll(".memory-skill-timeline__item")).toHaveLength(0);expect(container.querySelector('[role="alert"]')).toBeNull();
  }finally{await act(async()=>root.unmount());}
 });

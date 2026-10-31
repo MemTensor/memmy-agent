@@ -1,5 +1,5 @@
 import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
-import { usePanelReadGuard } from "./panel-visibility.js";
+import { usePanelReadGuard, usePanelVisibilityLifecycle } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import { usePanelViewStatus } from "./panel-view-status.js";
 import { usePanelLoad } from "./use-panel-load.js";
@@ -93,8 +93,8 @@ export function loadWorldModelDataPage(client: MemoryRuntimeClient, query: strin
 }
 
 /** Reads load world model detail. */
-export function loadWorldModelDetail(client: MemoryRuntimeClient, worldModelId: string): Promise<GetMemoryOutput> {
-  return readMemoryPanelDetail(client,worldModelId);
+export function loadWorldModelDetail(client: MemoryRuntimeClient, worldModelId: string, signal?: AbortSignal): Promise<GetMemoryOutput> {
+  return readMemoryPanelDetail(client,worldModelId,signal);
 }
 
 function worldModelCacheKeys(query: string, page: number): string[] {
@@ -113,7 +113,8 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const detailGeneration = useRef(0);
-  useEffect(() => () => { detailGeneration.current++; }, [props.client]);
+  const detailAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => { detailGeneration.current++; detailAbort.current?.abort(); }, [props.client]);
   const requestIdRef = useRef(0);
   const requestAbortRef = useRef<AbortController | null>(null);
   const submitSearch = usePanelLoad({ query, identity: [props.client, page, t], load: () => search(),
@@ -160,10 +161,17 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
       });
   }
 
-  function openWorldModelById(id: string) {
+  usePanelVisibilityLifecycle(props.client, () => {
+    detailGeneration.current++; detailAbort.current?.abort(); setDetail(null);
+  }, () => { if (selectedWorldModelId) openWorldModelById(selectedWorldModelId, false); });
+
+  function openWorldModelById(id: string, trackOpen = true) {
+    if (!canRead()) return;
+    detailAbort.current?.abort();
+    const controller = new AbortController(); detailAbort.current = controller;
     const generation = ++detailGeneration.current;
     setSelectedWorldModelId(id);
-    track(buildMemoryUiDetailOpenedEvent({
+    if (trackOpen) track(buildMemoryUiDetailOpenedEvent({
       subPage: "world-model",
       filterLayer: worldModelFilterLayer
     }));
@@ -173,9 +181,9 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
     }
 
     setDetail({ status: "loading" });
-    void loadWorldModelDetail(props.client, id)
-      .then((data) => { if (generation === detailGeneration.current) setDetail({ status: "ready", data }); })
-      .catch((error) => { if (generation === detailGeneration.current) setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }); });
+    void loadWorldModelDetail(props.client, id, controller.signal)
+      .then((data) => { if (generation === detailGeneration.current && !controller.signal.aborted && canRead()) setDetail({ status: "ready", data }); })
+      .catch((error) => { if (generation === detailGeneration.current && !controller.signal.aborted && canRead()) setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }); });
   }
 
   function openWorldModel(item: MemoryListItem) {
@@ -183,6 +191,7 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
   }
 
   function closeWorldModel() {
+    detailAbort.current?.abort();
     detailGeneration.current++;
     setDetail(null);
     setSelectedWorldModelId(null);

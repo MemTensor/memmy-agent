@@ -146,3 +146,10 @@ describe("transient panel transport recovery", () => {
     await vi.advanceTimersByTimeAsync(10_000);expect(run).toHaveBeenCalledTimes(5);
   });
 });
+
+it("does not cancel another subscriber merely because the document is hidden",async()=>{
+ const events=new EventTarget();
+ vi.stubGlobal("document",Object.assign(events,{hidden:true}));
+ try {const queue=new PanelRequestQueue(2,true);expect(await queue.request("needed",async signal=>{expect(signal.aborted).toBe(false);return "ready";})).toBe("ready");}
+ finally {vi.unstubAllGlobals();}
+});

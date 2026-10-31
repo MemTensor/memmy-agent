@@ -1,5 +1,5 @@
 import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
-import { usePanelReadGuard, usePanelVisible } from "./panel-visibility.js";
+import { usePanelReadGuard, usePanelVisible, usePanelVisibilityLifecycle } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import { usePanelViewStatus } from "./panel-view-status.js";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -134,16 +134,15 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   usePanelPoll(Boolean(props.client) && !props.client?.checkPanelView, () => refresh(page, sourceAgent, { useCache: false }));
   const detailRequestIdRef = useRef(0);
   const detailAbortRef = useRef<AbortController | null>(null);
-  useEffect(() => {
-    // Hidden subpages stay mounted. Discard their body and revalidate the still
-    // selected memory on return, including deletion/redaction while away.
-    if (!visible) setDetail(null);
-    else if (selectedMemoryId) openDetailById(selectedMemoryId, false);
-    return () => {
-      detailRequestIdRef.current++;
-      detailAbortRef.current?.abort();
-    };
-  }, [props.client, visible]);
+  useEffect(() => () => {
+    detailRequestIdRef.current++;
+    detailAbortRef.current?.abort();
+  }, [props.client]);
+  usePanelVisibilityLifecycle(props.client, () => {
+    detailRequestIdRef.current++;
+    detailAbortRef.current?.abort();
+    setDetail(null);
+  }, () => { if (selectedMemoryId) openDetailById(selectedMemoryId, false); });
   const retryRequestIdRef = useRef(0);
   const retryResetTimerRef = useRef<number | null>(null);
   useEffect(() => {

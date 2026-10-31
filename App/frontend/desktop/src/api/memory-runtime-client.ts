@@ -105,10 +105,10 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
 
 export interface MemoryRuntimeClient {
   prefetchPanel?(section:string,signal:AbortSignal):Promise<boolean | void>;
-  listPanelLogs?(input:PanelLogsInput):Promise<PanelLogsOutput>;
+  listPanelLogs?(input:PanelLogsInput,signal?:AbortSignal):Promise<PanelLogsOutput>;
   getPanelLogDetail?(id:number,signal?:AbortSignal):Promise<PanelLogDetailOutput>;
-  getPanelStats?():Promise<PanelStatsOutput>;
-  getPanelOverviewStats?():Promise<PanelOverviewStatsOutput>;
+  getPanelStats?(signal?:AbortSignal):Promise<PanelStatsOutput>;
+  getPanelOverviewStats?(signal?:AbortSignal):Promise<PanelOverviewStatsOutput>;
   resetPanelView?(section?:string):void;
   refreshPanelView?(section:string):void;
   checkPanelView?(section:string):Promise<{updated:boolean}>;
@@ -128,7 +128,7 @@ export interface MemoryRuntimeClient {
   recallEvidence(queryId: string): Promise<RecallEvidenceOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
   retryMemoryProcessing(id: string): Promise<RetryMemoryProcessingOutput>;
-  listMemoryLogs(input: MemoryApiLogsInput): Promise<MemoryApiLogsOutput>;
+  listMemoryLogs(input: MemoryApiLogsInput, signal?: AbortSignal): Promise<MemoryApiLogsOutput>;
   getPanelOverview(): Promise<PanelOverviewOutput>;
   getPanelAnalysis(): Promise<PanelAnalysisOutput>;
   listPanelItems(input: PanelItemsInput, signal?: AbortSignal): Promise<PanelItemsOutput>;
@@ -161,10 +161,10 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
       await browse.list(section,input,signal);
       return true;
     },
-    listPanelLogs:input=>panelQueue.request(`panel:logs:${JSON.stringify(input)}`,signal=>requestJson({config,path:"/api/v1/panel/logs",schema:PanelLogsOutputSchema,body:input,init:{signal}})),
+    listPanelLogs:(input,callerSignal)=>panelQueue.request(`panel:logs:${JSON.stringify(input)}`,signal=>requestJson({config,path:"/api/v1/panel/logs",schema:PanelLogsOutputSchema,body:input,init:{signal}}),callerSignal),
     getPanelLogDetail:(id,callerSignal)=>panelQueue.request(`panel:log:${id}`,signal=>requestJson({config,path:`/api/v1/panel/logs/${id}`,schema:PanelLogDetailOutputSchema,init:{signal}}),callerSignal),
-    getPanelStats:()=>panelQueue.request("panel:stats",signal=>requestJson({config,path:"/api/v1/panel/stats",schema:PanelStatsOutputSchema,init:{signal}})),
-    getPanelOverviewStats:()=>panelQueue.request("panel:overview-stats",signal=>requestJson({config,path:"/api/v1/panel/overview-stats",schema:PanelOverviewStatsOutputSchema,init:{signal}})),
+    getPanelStats:callerSignal=>panelQueue.request("panel:stats",signal=>requestJson({config,path:"/api/v1/panel/stats",schema:PanelStatsOutputSchema,init:{signal}}),callerSignal),
+    getPanelOverviewStats:callerSignal=>panelQueue.request("panel:overview-stats",signal=>requestJson({config,path:"/api/v1/panel/overview-stats",schema:PanelOverviewStatsOutputSchema,init:{signal}}),callerSignal),
     resetPanelView: section => { if (!section) panelQueue.clear(); browse.reset(section); },
     refreshPanelView: section => browse.refresh(section),
     checkPanelView: section => browse.check(section),
@@ -222,8 +222,9 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
 
     async getPanelMemory(id, signal) {
       const path = `/api/v1/panel/memory/${encodeURIComponent(id)}`;
-      try{return await requestJson({config,path,schema:GetMemoryOutputSchema,init:{signal}});}
-      catch(error){if(!isUnsupportedPanelRoute(error))throw error;return this.getMemory(id,signal);}
+      try{return await panelQueue.request(`panel:memory:${id}`, sharedSignal => requestJson({config,path,schema:GetMemoryOutputSchema,init:{signal:sharedSignal}}), signal);}
+      // Older backends own getMemory retries; do not wrap this fallback in frontend retries.
+      catch(error){if(!isUnsupportedPanelRoute(error))throw error;signal?.throwIfAborted();return this.getMemory(id,signal);}
     },
 
     async getMemory(id,signal) {
@@ -281,10 +282,11 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
       });
     },
 
-    async listMemoryLogs(input) {
+    async listMemoryLogs(input, signal) {
       return requestJson({
         config,
         path: withQuery("/api/v1/memory/logs", MemoryApiLogsInputSchema.parse(input)),
+        init: {signal},
         schema: MemoryApiLogsOutputSchema
       });
     },

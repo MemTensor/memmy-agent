@@ -1,5 +1,5 @@
 import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
-import { usePanelReadGuard } from "./panel-visibility.js";
+import { usePanelReadGuard, usePanelVisibilityLifecycle, usePanelVisible } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import {isUnsupportedPanelRoute} from "../../api/memory-runtime-client.js";
 import { usePanelViewStatus } from "./panel-view-status.js";
@@ -105,16 +105,16 @@ export function loadSkillsDataPage(client: MemoryRuntimeClient, query = "", page
   );
 }
 
-export function loadSkillDetail(client: MemoryRuntimeClient, skillId: string): Promise<GetMemoryOutput> {
-  return readMemoryPanelDetail(client,skillId);
+export function loadSkillDetail(client: MemoryRuntimeClient, skillId: string, signal?: AbortSignal): Promise<GetMemoryOutput> {
+  return readMemoryPanelDetail(client,skillId,signal);
 }
 
-export async function loadSkillTimeline(client: MemoryRuntimeClient, skillId: string): Promise<SkillTimelineEntry[]> {
+export async function loadSkillTimeline(client: MemoryRuntimeClient, skillId: string, signal?: AbortSignal): Promise<SkillTimelineEntry[]> {
   const output = await client.listMemoryLogs({
     tools: SKILL_TIMELINE_TOOLS,
     limit: 500,
     offset: 0
-  });
+  }, signal);
 
   return skillTimelineFromLogs(output.logs, skillId);
 }
@@ -135,7 +135,8 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const detailGeneration = useRef(0);
-  useEffect(() => () => { detailGeneration.current++; }, [props.client]);
+  const detailAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => { detailGeneration.current++; detailAbort.current?.abort(); }, [props.client]);
   const requestIdRef = useRef(0);
   const requestAbortRef = useRef<AbortController | null>(null);
   const submitSearch = usePanelLoad({ query, identity: [props.client, page, t, demoEnabled], load: () => refresh(),
@@ -146,10 +147,17 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
   const selectedSkillIdRef = useRef(selectedSkillId);
   selectedSkillIdRef.current = selectedSkillId;
 
-  function openSkill(skillId: string) {
+  usePanelVisibilityLifecycle(props.client, () => {
+    detailGeneration.current++; detailAbort.current?.abort(); setDetail(null);
+  }, () => { if (selectedSkillId) openSkill(selectedSkillId, false); });
+
+  function openSkill(skillId: string, trackOpen = true) {
+    if (!canRead()) return;
+    detailAbort.current?.abort();
+    const controller = new AbortController(); detailAbort.current = controller;
     const generation = ++detailGeneration.current;
     setSelectedSkillId(skillId);
-    track(buildMemoryUiDetailOpenedEvent({
+    if (trackOpen) track(buildMemoryUiDetailOpenedEvent({
       subPage: "skills",
       filterLayer: skillsFilterLayer
     }));
@@ -171,11 +179,11 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
 
     setDetail({ status: "loading" });
     void Promise.all([
-      loadSkillDetail(props.client, skillId),
-      props.client.listPanelLogs ? Promise.resolve([]) : loadSkillTimeline(props.client, skillId)
+      loadSkillDetail(props.client, skillId, controller.signal),
+      props.client.listPanelLogs ? Promise.resolve([]) : loadSkillTimeline(props.client, skillId, controller.signal)
     ])
-      .then(([skillDetail, timeline]) => { if (generation === detailGeneration.current) setDetail({ status: "ready", data: { detail: skillDetail, timeline } }); })
-      .catch((error) => { if (generation === detailGeneration.current) setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }); });
+      .then(([skillDetail, timeline]) => { if (generation === detailGeneration.current && !controller.signal.aborted && canRead()) setDetail({ status: "ready", data: { detail: skillDetail, timeline } }); })
+      .catch((error) => { if (generation === detailGeneration.current && !controller.signal.aborted && canRead()) setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }); });
   }
 
   const viewStatus=usePanelViewStatus(props.client,"Skill",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); closeSkill(); setState({status:"loading"});},()=>refresh());
@@ -265,6 +273,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
   }
 
   function closeSkill() {
+    detailAbort.current?.abort();
     detailGeneration.current++;
     setDetail(null);
     setSelectedSkillId(null);
@@ -441,6 +450,7 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
         </>
       )}
       <SkillDrawer
+        selectedId={props.selectedSkillId}
         client={props.client}
         detail={props.detail ?? ("detail" in props.state ? props.state.detail : null)}
         onClose={props.onCloseSkill}
@@ -461,6 +471,7 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
  * @returns The skill detail node.
  */
 function SkillDrawer(props: {
+  selectedId?: string | null;
   client?:MemoryRuntimeClient|null;
   detail: SkillDetailState;
   onClose: () => void;
@@ -478,7 +489,7 @@ function SkillDrawer(props: {
   const [saving, setSaving] = useState(false);
   const [openingEditor, setOpeningEditor] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const detailId = props.detail?.status === "ready" ? props.detail.data.detail.item.id : undefined;
+  const detailId = props.selectedId ?? (props.detail?.status === "ready" ? props.detail.data.detail.item.id : undefined);
   const currentDetailId = useRef(detailId);
   currentDetailId.current = detailId;
   const saveRequestEpoch = useRef(0);
@@ -789,17 +800,22 @@ function LinkedIdsSection(props: {
 }
 
 function PagedSkillTimeline(props:{client:MemoryRuntimeClient;skillId:string}) {
+  const visible = usePanelVisible();
+  const abort = useRef<AbortController | null>(null);
   const {t}=useTranslation();const [logs,setLogs]=useState<MemoryApiLog[]>([]);const [legacy,setLegacy]=useState<SkillTimelineEntry[]>();
   const [cursor,setCursor]=useState<string>();const [busy,setBusy]=useState(true);const [error,setError]=useState<string>();
   const generation=useRef(0);
   async function load(next?:string) {
-    const epoch = generation.current;
-    const isCurrent = () => epoch === generation.current;
+    if (!visible || document.hidden) return;
+    abort.current?.abort();
+    const controller = new AbortController(); abort.current = controller;
+    const epoch = ++generation.current;
+    const isCurrent = () => epoch === generation.current && !controller.signal.aborted;
     setBusy(true);setError(undefined);
     try {
       let result;
-      try {result=await props.client.listPanelLogs!({skillId:props.skillId,cursor:next,limit:20});}
-      catch(error) {if(!isUnsupportedPanelRoute(error))throw error;const entries=await loadSkillTimeline(props.client,props.skillId);if(isCurrent())setLegacy(entries);return;}
+      try {result=await props.client.listPanelLogs!({skillId:props.skillId,cursor:next,limit:20},controller.signal);}
+      catch(error) {if(!isUnsupportedPanelRoute(error))throw error;const entries=await loadSkillTimeline(props.client,props.skillId,controller.signal);if(isCurrent())setLegacy(entries);return;}
       if(isCurrent()){setLogs(current=>next?[...current,...result.logs.filter(log=>!current.some(old=>old.id===log.id))]:result.logs);setCursor(result.nextCursor);}
     } catch(error){if(isCurrent())setError(toErrorMessage(error));}
     finally {if(isCurrent())setBusy(false);}
@@ -807,9 +823,9 @@ function PagedSkillTimeline(props:{client:MemoryRuntimeClient;skillId:string}) {
   useEffect(() => {
     generation.current++;
     setLogs([]); setLegacy(undefined); setCursor(undefined);
-    void load();
-    return () => { generation.current++; };
-  }, [props.client,props.skillId]);
+    if (visible) void load();
+    return () => { generation.current++; abort.current?.abort(); };
+  }, [props.client,props.skillId,visible]);
   return <SkillTimelineSection entries={legacy??skillTimelineFromLogs(logs,props.skillId)} showEmpty={!busy&&!error}
     footer={<>
       {busy&&<MemoryStateBox message={t("common.loading")} />}
