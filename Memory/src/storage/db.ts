@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { panelSourceForStatsRow } from "../utils/panel-source.js";
+import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -43,11 +44,12 @@ export class MemoryDb {
       options.onStartupStage?.(snapshot);
     };
     this.path = options.path ?? defaultDatabasePath();
-    mkdirSync(dirname(this.path), { recursive: true });
+    if (!options.readonly) mkdirSync(dirname(this.path), { recursive: true });
     stage("database.opening");
     const nativeBinding = packagedNativeBindingPath();
     this.db = new Database(this.path, {
       readonly: options.readonly ?? false,
+      fileMustExist: options.readonly ?? false,
       ...(nativeBinding ? { nativeBinding } : {})
     });
     stage("database.opened");
@@ -61,7 +63,14 @@ export class MemoryDb {
       throw new Error(`sqlite-vec version mismatch: expected v${SQLITE_VEC_VERSION}, got ${loadedVersion}`);
     }
     try {
-      this.configure();
+      this.db.function("panel_source", { deterministic: true }, (infoSource, internalSource, sessionId, conversationId, agentId, appId) => panelSourceForStatsRow({
+        infoSource, internalSource,
+        sessionId: typeof sessionId === "string" ? sessionId : undefined,
+        conversationId: typeof conversationId === "string" ? conversationId : undefined,
+        agentId: typeof agentId === "string" ? agentId : undefined,
+        appId: typeof appId === "string" ? appId : undefined
+      }));
+      this.configure(options.readonly ?? false);
       stage("database.configured");
       if (!options.readonly) {
         const currentSchemaVersion = this.currentSchemaVersion();
@@ -99,10 +108,14 @@ export class MemoryDb {
     return getSchemaVersion(this.db);
   }
 
-  private configure(): void {
+  private configure(readonly: boolean): void {
     this.db.pragma("foreign_keys = ON");
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    if (!readonly) {
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
+    } else {
+      this.db.pragma("query_only = ON");
+    }
     this.db.pragma("busy_timeout = 5000");
   }
 
@@ -118,9 +131,24 @@ export class MemoryDb {
     if (this.path === ":memory:" || !existsSync(this.path)) return;
     if (version <= 0 || version >= SCHEMA_VERSION) return;
     const backupPath = `${this.path}.pre-v${SCHEMA_VERSION}.bak`;
-    if (existsSync(backupPath)) return;
-    this.db.pragma("wal_checkpoint(FULL)");
-    this.db.prepare("VACUUM INTO ?").run(backupPath);
+    if (existsSync(backupPath)) {
+      const backup = new Database(backupPath, {readonly:true,fileMustExist:true});
+      try {
+        if (backup.pragma("quick_check", {simple:true}) !== "ok" || getSchemaVersion(backup).version !== version) {
+          throw new Error(`Invalid migration backup: ${backupPath}; preserve it and choose a new backup location`);
+        }
+      } finally { backup.close(); }
+      return;
+    }
+    const partial = `${backupPath}.${process.pid}.partial`;
+    try {
+      this.db.pragma("wal_checkpoint(FULL)");
+      this.db.prepare("VACUUM INTO ?").run(partial);
+      renameSync(partial, backupPath);
+    } catch (error) {
+      rmSync(partial, {force:true});
+      throw error;
+    }
   }
 }
 

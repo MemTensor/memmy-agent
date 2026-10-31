@@ -80,6 +80,15 @@ export async function runCommand(context: CommandContext): Promise<unknown> {
     throw new Error("service requires start, stop, status, or repair-launcher");
   }
 
+  if (words[0] === "db" && words[1] === "repair-relations") {
+    const path = requireValue("db", optionString(options, "db"));
+    const {MemoryDb} = await import("../storage/db.js");
+    const {repairMemoryRelations} = await import("../storage/memory-relations.js");
+    const db = new MemoryDb({path});
+    try { return {ok:true, path, ...repairMemoryRelations(db.db, optionString(options,"after") ?? "", 100)}; }
+    finally { db.close(); }
+  }
+
   if (words[0] === "raw") {
     return runRaw(words.slice(1), parsed, requestOptions(parsed, context.fetch));
   }
@@ -602,6 +611,7 @@ function helpText(): string {
     "  install [--service-only]     Install and start the standalone Memory service",
     "  upgrade [--version <ver>]    Upgrade Memory and installed agent adapters",
     "  stop                         Stop the background Memory service",
+    "  db repair-relations --db PATH [--after ID]  Repair one batch of declared historical relations",
     "  service start|stop|status    Control the installed user service",
     "  service repair-launcher     Repair a legacy Windows task without starting it",
     "  serve                        Explain how to connect to an external Memory service",

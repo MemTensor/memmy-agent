@@ -1,9 +1,11 @@
+import { installPanelCache } from "./panel-cache.js";
+import { installPanelSafetyTriggers } from "./panel-security.js";
 import type Database from "better-sqlite3";
 import { installQueueSchedulingSchema } from "./queue-scheduling-schema.js";
 import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 
-export const SCHEMA_VERSION = 13;
-export const SCHEMA_MIGRATION_ID = "013_embedding_retry_lease_counters";
+export const SCHEMA_VERSION = 14;
+export const SCHEMA_MIGRATION_ID = "014_panel_read_indexes";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -62,6 +64,19 @@ const statements = [
     ON memories (content_hash, memory_layer)`,
   `CREATE INDEX IF NOT EXISTS idx_memories_key_layer
     ON memories (memory_key, memory_layer)`,
+  `CREATE INDEX IF NOT EXISTS idx_memories_panel_created
+    ON memories (memory_layer, created_at DESC, updated_at DESC, id DESC)
+    WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_memories_panel_status_created
+    ON memories (memory_layer, status, created_at DESC, updated_at DESC, id DESC)
+    WHERE deleted_at IS NULL`,
+
+  `CREATE INDEX IF NOT EXISTS idx_memories_panel_observation_pending
+    ON memories (json_extract(properties_json, '$.internal_info.memory_kind'), created_at DESC, id DESC)
+    WHERE deleted_at IS NULL AND status = 'activated' AND memory_layer = 'L1'
+      AND json_extract(properties_json, '$.internal_info.memory_kind') = 'observed_activity'
+      AND json_type(properties_json, '$.internal_info.external_evidence') = 'object'
+      AND COALESCE(json_extract(properties_json, '$.internal_info.observation_memory.schema_version'), 0) < 1`,
 
   `CREATE TABLE IF NOT EXISTS l3_world_model_scopes (
     scope_key TEXT PRIMARY KEY,
@@ -104,6 +119,10 @@ const statements = [
     ON user_memories (user_id, status, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_user_memories_source_turn
     ON user_memories (source_turn_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_user_memories_panel_updated
+    ON user_memories (user_id, updated_at DESC, id DESC) WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_user_memories_panel_status_updated
+    ON user_memories (user_id, status, updated_at DESC, id DESC) WHERE deleted_at IS NULL`,
   `CREATE INDEX IF NOT EXISTS idx_user_memories_exact_text
     ON user_memories (user_id, normalized_user_text_hash, status, updated_at DESC)`,
   `CREATE VIRTUAL TABLE IF NOT EXISTS user_memories_fts USING fts5 (
@@ -200,6 +219,10 @@ const statements = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_episodes_session_updated
     ON episodes (session_id, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_episodes_panel_opened
+    ON episodes (opened_at DESC, updated_at DESC, id DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_episodes_panel_user_opened
+    ON episodes (user_id, opened_at DESC, updated_at DESC, id DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_episodes_project_updated
     ON episodes (project_id, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_episodes_pipeline
@@ -711,7 +734,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12 && version !== 13) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
@@ -784,6 +807,8 @@ export function migrate(db: Database.Database): void {
       for (const statement of statements) {
         db.prepare(statement).run();
       }
+      installPanelSafetyTriggers(db);
+      installPanelCache(db);
       if (version > 0 && version < 5) {
         addColumnIfMissing(db, "recall_events", "query_id", "TEXT");
         addColumnIfMissing(db, "recall_events", "user_memory_candidate_ids_json", "TEXT NOT NULL DEFAULT '[]'");

@@ -89,7 +89,7 @@ describe("SkillsSubPage", () => {
 
     expect(client.listPanelItems).toHaveBeenCalledWith({ layer: "Skill", q: "中文", page: 1 });
     expect(client.getMemory).toHaveBeenCalledWith("skill-memory-1");
-    expect(client.listMemoryLogs).toHaveBeenCalledWith({ tools: ["skill_generate", "skill_evolve"], limit: 500, offset: 0 });
+    expect(client.listMemoryLogs).toHaveBeenCalledWith({ tools: ["skill_generate", "skill_evolve"], limit: 500, offset: 0 }, undefined);
   });
 
   it("渲染 loading/error/empty/ready 和详情内容", () => {

@@ -1,6 +1,15 @@
+import { statsStore } from "./panel/stats-store.js";
+import { PanelWriteCoordinator } from "./panel/write-coordinator.js";
+import {localPanelRequest} from "./panel/local-read.js";
+import { panelCacheRevision } from "../storage/panel-cache.js";
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
 import { EmbeddingMaintenanceReader } from "./embedding/embedding-maintenance-reader.js";
 import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
+import {PanelStats} from "./panel/stats.js";
+import { PanelReader } from "./panel/reader.js";
+import { PanelBrowse } from "./panel/browse.js";
+import { panelSafetyToken } from "../storage/panel-security.js";
+import { userMemoryPanelItem } from "./read-model/panel-read.js";
 import {
   assertJsonValue,
   canonicalJson,
@@ -298,6 +307,78 @@ export class MemoryService {
   private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
   private readonly projectEnvironment: ProjectEnvironmentService;
   private readonly panelReadModel: PanelReadModel;
+  private panelReader?: PanelReader;
+  private readonly panelWrites = new PanelWriteCoordinator();
+  private panelBrowse?: PanelBrowse;
+  private panelStats?: PanelStats;
+  private panelOverviewStats?: PanelStats<ReturnType<PanelReadModel["panelOverviewSummary"]>>;
+  private panelWarmupTimer?: ReturnType<typeof setTimeout>;
+  /** Local statistics describe the device; authenticated cloud scopes stay distinct. */
+  private panelStatsInput(input: RequestEnvelope, local: boolean) {
+    const scoped = this.panelInput(input, local);
+    return local && !scoped.namespace?.tenantId ? { ...scoped, namespace: undefined } : scoped;
+  }
+  startPanelWarmup(): void {
+    if (this.mode === "cloud" || this.closing || this.panelWarmupTimer) return;
+    this.panelWarmupTimer = setTimeout(() => {
+      this.panelWarmupTimer = undefined;
+      if (!this.closing) { this.panelOverviewStatsSnapshot({}, true); this.panelStatsSnapshot({}, true); }
+    }, 0);
+    this.panelWarmupTimer.unref();
+  }
+  private panelInput<T extends RequestEnvelope>(input:T,local=this.mode!=="cloud"):T {
+    return localPanelRequest(this.withTimeZone(input),local);
+  }
+  private sharedPanelStats() {
+    this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db),statsStore(this.repos.db.name,"full"));
+    return this.panelStats;
+  }
+  panelStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
+    return this.sharedPanelStats().get(this.panelStatsInput(input,local));
+  }
+  panelOverviewStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
+    this.panelOverviewStats ??= new PanelStats(input => this.readPanel("overviewStats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db),statsStore(this.repos.db.name,"overview"));
+    return this.panelOverviewStats.get(this.panelStatsInput(input,local));
+  }
+
+  async readPanel<T>(method:string,args:unknown[],signal?:AbortSignal):Promise<{safety:string;data:T}> {
+    if(this.closing)throw new MemoryServiceError("conflict","Memory service is stopping");
+    if(this.repos.db.name !== ":memory:") {
+      this.panelReader ??= new PanelReader(this.repos.db.name, 30_000, () => {
+        const activity = this.concurrency.snapshot();
+        return activity.activeJobs > 0 || activity.embeddingRequests > 0 || Object.values(activity.resources).some(value => value > 0);
+      }, this.panelWrites);
+      const result=await this.panelReader.run<T>(method,args,method === "stats" || method === "overviewStats" ? 1 : 0,signal);
+      if(result.safety !== panelSafetyToken(this.repos.db)) throw new MemoryServiceError("conflict","Panel changed during read; refresh");
+      return result;
+    }
+    const model=this.panelReadModel;
+    const data=method === "members" ? model.panelMembers(args[0] as Parameters<PanelReadModel["panelMembers"]>[0])
+      : method === "page" ? model.panelPageByIds(args[0] as string[],args[1] as Parameters<PanelReadModel["panelMembers"]>[0])
+      : method === "items" ? model.panelItems(args[0] as Parameters<PanelReadModel["panelItems"]>[0])
+      : method === "tasks" ? model.panelTaskSummaries(args[0] as Parameters<PanelReadModel["panelTaskSummaries"]>[0])
+      : method === "taskCheck" ? model.panelTaskCheck(args[0] as string,args[1] as RequestEnvelope)
+      : method === "detail" ? model.panelTaskDetail(args[0] as string,args[1] as Parameters<PanelReadModel["panelTaskDetail"]>[1])
+      : method === "field" ? model.panelTaskField(args[0] as string,args[1] as string,args[2] as Parameters<PanelReadModel["panelTaskField"]>[2],args[3] as Parameters<PanelReadModel["panelTaskField"]>[3])
+      : method === "logs" ? model.panelLogs(args[0] as Parameters<PanelReadModel["panelLogs"]>[0],args[1] as RequestEnvelope)
+      : method === "logDetail" ? model.panelLogDetail(args[0] as number,args[1] as RequestEnvelope)
+      : method === "overview" ? model.panelOverviewSummary(args[0] as RequestEnvelope)
+      : method === "analysis" ? model.panelAnalysis(args[0] as RequestEnvelope)
+      : method === "legacyTasks" ? model.panelTasks(args[0] as Parameters<PanelReadModel["panelTasks"]>[0])
+      : method === "overviewStats" ? model.panelOverviewSummary(args[0] as RequestEnvelope)
+      : method === "stats" ? model.panelStatistics(args[0] as RequestEnvelope) : undefined;
+    return {safety:panelSafetyToken(this.repos.db),data:data as T};
+  }
+
+  browsePanel(input: {op:"create"|"page"|"check"|"release";viewId?:string;page?:number;filter?:Parameters<PanelReadModel["panelMembers"]>[0]}, request:RequestEnvelope,signal?:AbortSignal,local=this.mode!=="cloud") {
+    this.panelBrowse ??= new PanelBrowse({read:this.readPanel.bind(this),safety:()=>panelSafetyToken(this.repos.db),change:()=>`${this.repos.runtime.latestChangeSeq()}:${this.repos.db.prepare("SELECT total_changes()").pluck().get()}:${this.repos.db.pragma("data_version",{simple:true})}`});
+    const filter=this.panelInput({...input.filter,...request},local);
+    if(input.op==="create") return this.panelBrowse.create(filter,signal);
+    if(!input.viewId) throw new MemoryServiceError("invalid_argument","Missing panel view id");
+    if(input.op==="page") return this.panelBrowse.page(input.viewId,input.page??1,filter,signal);
+    if(input.op==="check") return this.panelBrowse.check(input.viewId,filter);
+    return this.panelBrowse.release(input.viewId,filter);
+  }
   private readonly retrieval: RetrievalService;
   private readonly sessionTurns: SessionTurnService;
   private readonly skillReadModel: SkillReadModel;
@@ -664,6 +745,8 @@ export class MemoryService {
       assertSessionInScope: this.assertSessionInScope.bind(this),
       assertEpisodeInScope: this.assertEpisodeInScope.bind(this),
       assertMemoryInScope: this.assertMemoryInScope.bind(this),
+      assertPanelMemoryInScope: this.assertMemoryTenantScope.bind(this),
+      assertPanelEpisodeInScope: this.assertPanelEpisodeInScope.bind(this),
       namespaceForSession,
       readableMemoryIdKind,
       invalidArgument: (message) => new MemoryServiceError("invalid_argument", message),
@@ -742,6 +825,7 @@ export class MemoryService {
     const retrievalOwner = this;
     this.retrieval = new RetrievalService({
       repos: this.repos,
+      writeTransaction: this.writeCaptureTransaction.bind(this),
       get config() { return retrievalOwner.config; },
       get llm() { return retrievalOwner.llm; },
       get skillLlm() { return retrievalOwner.skillLlm; },
@@ -761,6 +845,7 @@ export class MemoryService {
     const sessionTurnOwner = this;
     this.sessionTurns = new SessionTurnService({
       repos: this.repos,
+      writeTransaction: this.writeCaptureTransaction.bind(this),
       get config() { return sessionTurnOwner.config; },
       get llm() { return sessionTurnOwner.llm; },
       get skillLlm() { return sessionTurnOwner.skillLlm; },
@@ -838,10 +923,16 @@ export class MemoryService {
     // slots, then keep storage alive through complete foreground business work.
     const modelsStopped = this.modelTasks.stop();
     const requestsStopped = this.concurrency.close();
+    this.panelBrowse?.clear();
+    this.panelStats?.stop();
+    this.panelOverviewStats?.stop();
+    this.panelWrites.close();
+    clearTimeout(this.panelWarmupTimer);
+    const readerStopped = this.panelReader?.stop();
     // A display-only scan is safe to recompute and must not keep running while
     // other accepted work drains during shutdown.
     this.embeddingMaintenanceReader.cancelDiscardableStats();
-    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped]).then(async () => {
+    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped]).then(async () => {
       // Reads that a maintenance run depends on get a bounded grace period before
       // the worker is terminated, so shutdown cannot hang on a stuck scan.
       await this.embeddingMaintenanceReader.stop();
@@ -1584,13 +1675,18 @@ export class MemoryService {
     return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
   }
 
+  private writeCaptureTransaction<T>(operation: () => T, signal?: AbortSignal): Promise<T> {
+    return this.panelWrites.run(async () => this.repos.transaction(operation),
+      signal ? AbortSignal.any([signal, this.budgetAbort.signal]) : this.budgetAbort.signal);
+  }
+
   private async acceptCapture<T>(execute: () => Promise<T>): Promise<T> {
     const result = await execute();
     this.capturePendingListener?.();
     return result;
   }
 
-  async completeSourceTurn(request: SourceTurnCompleteRequest): Promise<SourceTurnCompleteResponse> {
+  async completeSourceTurn(request: SourceTurnCompleteRequest, signal?: AbortSignal): Promise<SourceTurnCompleteResponse> {
     // Native scans have no Hook envelope. Use the configured owner only when
     // the request (including authenticated scope) did not provide one.
     const response = await this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
@@ -1604,7 +1700,7 @@ export class MemoryService {
           ...request.namespace,
           userId: request.namespace?.userId ?? this.config.userId
         }
-      }))
+      })), signal
     )));
     serviceLogger.info("source_turn.complete", {
       source: request.sourceTurn?.source,
@@ -1622,10 +1718,10 @@ export class MemoryService {
     return response;
   }
 
-  async completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): Promise<CompleteTurnResponse> {
+  async completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>, signal?: AbortSignal): Promise<CompleteTurnResponse> {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.query, turnId },
-      () => this.sessionTurns.completeTurn(turnId, this.withTimeZone(request))
+      () => this.sessionTurns.completeTurn(turnId, this.withTimeZone(request)), signal
     )));
   }
 
@@ -2386,7 +2482,30 @@ export class MemoryService {
     return this.episodeReadModel.timeline(this.withTimeZone(input));
   }
 
+  getPanelMemory(id:string,request:RequestEnvelope={},local=this.mode!=="cloud"):MemoryGetResponse {
+    if(!local)return this.getMemory(id,request);
+    this.assertMemorySearchEnabled();
+    const userMemory=this.repos.userMemories.getForDisplay(id);
+    if(userMemory){
+      const item=userMemoryPanelItem(userMemory);
+      const detail={...item,memoryLayer:"UserMemory" as const,body:userMemory.content,sourceMemoryIds:[],metadata:item.metadata??{}};
+      return {...detail,item:detail,refs:{},etag:`user-memory-${userMemory.updatedAt}`};
+    }
+    const memory=this.repos.memories.getForDisplay(id);
+    if(memory && (memory.status==="deleted" || !this.repos.memories.visibleEvidenceIds([id],true).has(id)))
+      throw new MemoryServiceError("not_found","Memory is unavailable");
+    return this.episodeReadModel.getMemory(id,this.withTimeZone(request),true);
+  }
+
   getMemory(id: string, request: RequestEnvelope = {}): MemoryGetResponse {
+    this.assertMemorySearchEnabled();
+    const userMemory = this.repos.userMemories.getForDisplay(id);
+    if (userMemory) {
+      if (!request.namespace?.userId || request.namespace.userId !== userMemory.userId) throw new MemoryServiceError("not_found", "Memory is unavailable");
+      const item = userMemoryPanelItem(userMemory);
+      const detail = {...item, memoryLayer: "UserMemory" as const, body: userMemory.content, sourceMemoryIds: [], metadata: item.metadata ?? {}};
+      return {...detail, item: detail, refs: {}, etag: `user-memory-${userMemory.updatedAt}`};
+    }
     return this.episodeReadModel.getMemory(id, this.withTimeZone(request));
   }
 
@@ -2925,7 +3044,8 @@ export class MemoryService {
         this.deleteMemory(spanId, request);
         deletedMemoryIds.push(spanId);
       }
-      for (const memoryId of episode.l1MemoryIds) {
+      const currentL1Ids = this.repos.memories.ownedEpisodeL1Ids(episode);
+      for (const memoryId of currentL1Ids) {
         if (!this.repos.memories.get(memoryId)) continue;
         this.deleteMemory(memoryId, request);
         deletedMemoryIds.push(memoryId);
@@ -3062,7 +3182,7 @@ export class MemoryService {
     excludedSourceAgents?: string[];
     limit?: number;
     offset?: number;
-  } = {}): {
+  } = {},local=this.mode!=="cloud"): {
     logs: ReturnType<Repositories["runtime"]["listApiLogs"]>["logs"];
     total: number;
     limit: number;
@@ -3070,7 +3190,7 @@ export class MemoryService {
     nextOffset?: number;
     serverTime: string;
   } {
-    return this.panelReadModel.apiLogs(input);
+    return this.panelReadModel.apiLogs(input,local);
   }
 
   serviceMetrics(input: RequestEnvelope & { userId?: string } = {}): {
@@ -3124,7 +3244,7 @@ export class MemoryService {
     etag: string;
     serverTime: string;
   } {
-    return this.panelReadModel.panelOverview(this.withTimeZone(input));
+    return this.panelReadModel.panelOverview(this.panelInput(input));
   }
 
   panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
@@ -3142,7 +3262,7 @@ export class MemoryService {
     }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
-    return this.panelReadModel.panelOverviewSummary(this.withTimeZone(input));
+    return this.panelReadModel.panelOverviewSummary(this.panelInput(input));
   }
 
   panelAnalysis(input: RequestEnvelope & { userId?: string } = {}): {
@@ -3161,11 +3281,12 @@ export class MemoryService {
       series: Array<{ name: string; points: Array<{ date: string; avgMs: number }> }>;
     };
   } {
-    return this.panelReadModel.panelAnalysis(this.withTimeZone(input));
+    return this.panelReadModel.panelAnalysis(this.panelInput(input));
   }
 
   panelItems(input: RequestEnvelope & {
     userId?: string;
+    userSummary?: boolean;
     layer?: RecallMemoryLayer;
     status?: "activated" | "resolving" | "archived" | "deleted";
     q?: string;
@@ -3187,7 +3308,7 @@ export class MemoryService {
     nextCursor?: string;
     serverTime: string;
   } {
-    return this.panelReadModel.panelItems(this.withTimeZone(input));
+    return this.panelReadModel.panelItems(this.panelInput(input));
   }
 
   panelTasks(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }): {
@@ -3206,7 +3327,19 @@ export class MemoryService {
     hasPrev: boolean;
     serverTime: string;
   } {
-    return this.panelReadModel.panelTasks(this.withTimeZone(input));
+    return this.panelReadModel.panelTasks(this.panelInput(input));
+  }
+
+  panelTaskSummaries(input: Parameters<PanelReadModel["panelTaskSummaries"]>[0]) {
+    return this.panelReadModel.panelTaskSummaries(this.panelInput(input));
+  }
+
+  panelTaskDetail(id: string, input: Parameters<PanelReadModel["panelTaskDetail"]>[1]) {
+    return this.panelReadModel.panelTaskDetail(id, this.panelInput(input));
+  }
+
+  panelTaskField(id: string, turnId: string, field: Parameters<PanelReadModel["panelTaskField"]>[2], input: Parameters<PanelReadModel["panelTaskField"]>[3]) {
+    return this.panelReadModel.panelTaskField(id, turnId, field, this.panelInput(input));
   }
 
   panelChanges(input: RequestEnvelope & {
@@ -3767,6 +3900,16 @@ export class MemoryService {
   }
 
   private assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {
+    this.assertMemoryTenantScope(memory,namespace);
+  }
+
+  private assertPanelEpisodeInScope(episode:EpisodeRecord,namespace?:RuntimeNamespace):void {
+    const session=this.requireSession(episode.sessionId);
+    const tenant=session.meta.tenant_id ?? session.meta.tenantId ?? null;
+    if(tenant!==(namespace?.tenantId??null))throw new MemoryServiceError("forbidden","task belongs to a different tenant");
+  }
+
+  private assertMemoryTenantScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {
     const internal = memory.properties.internal_info;
     // The local panel is shared across source/user/profile settings. History
     // keeps its original user ID across config changes; preserve panel deletion

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Repositories } from "../../../src/storage/repositories.js";
+import { createPanelReaderModel } from "../../../src/service/panel/reader-model.js";
 import {
   insertActiveSkillMemoryForTest,
   setSkillLifecycleForTest
@@ -72,6 +73,11 @@ describe("MemoryService / read model / panel analysis", () => {
 
     expect(analysis.metrics.activeSkills).toBe(2);
     expect(analysis.metrics.recentlyUsedSkills).toBe(2);
+
+    // The combined overview/analysis path receives the cached projection as rows.
+    const stats = createPanelReaderModel(db).panelStatistics({ timeZone: "+00:00" });
+    expect(stats.analysis.metrics.activeSkills).toBe(2);
+    expect(stats.analysis.metrics.recentlyUsedSkills).toBe(2);
   });
 });
 

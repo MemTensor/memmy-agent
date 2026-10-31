@@ -1,5 +1,8 @@
+import { usePanelReadGuard, usePanelVisibilityLifecycle } from "./panel-visibility.js";
+import { canPreservePanelResult } from "./panel-view-status.js";
+import { usePanelViewStatus } from "./panel-view-status.js";
 import { useEffect, useRef, useState } from "react";
-import type { PanelTaskItem } from "@memmy/local-api-contracts";
+import type { PanelTaskItem, PanelTaskSummary } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { formatUserDateTime, formatUserTime } from "../../lib/user-time-zone.js";
 import {
@@ -25,6 +28,8 @@ import type { MemoryReferenceOpenRequest } from "./memory-reference-tags.js";
 import { MemoryRefreshButton } from "./memory-refresh-button.js";
 import { MemoryStateBox } from "./memory-state-box.js";
 import { type RemoteData, toErrorMessage } from "./remote-state.js";
+import { usePanelLoad } from "./use-panel-load.js";
+import { usePanelPoll } from "./use-panel-poll.js";
 
 export interface TasksSubPageProps {
   client: MemoryRuntimeClient | null;
@@ -55,6 +60,7 @@ export interface MemoryTask {
   titleGenerated?: boolean;
   titlePending?: boolean;
   chat: TaskChatMessage[];
+  summaryOnly?: boolean;
 }
 
 type TaskStatus = "active" | "completed" | "skipped" | "failed" | string;
@@ -108,10 +114,10 @@ type TasksState = RemoteData<MemoryTasksOutput>;
 type Translate = (key: MessageKey, values?: MessageValues) => string;
 const defaultTranslate: Translate = (key, values) => formatMessage(zhCNMessages[key], values);
 const TASKS_CACHE_SECTION = "tasks";
-const TASKS_REFRESH_INTERVAL_MS = 5_000;
 
-export async function loadTasksData(client: MemoryRuntimeClient, query = "", page = 1, t: Translate = defaultTranslate): Promise<MemoryTasksOutput> {
-  const list = await client.listPanelTasks({ q: query.trim() || undefined, page: normalizePage(page) });
+export async function loadTasksData(client: MemoryRuntimeClient, query = "", page = 1, t: Translate = defaultTranslate, signal?: AbortSignal): Promise<MemoryTasksOutput> {
+  const input = { q: query.trim() || undefined, page: normalizePage(page) };
+  const list = await (client.listPanelTaskSummaries ? client.listPanelTaskSummaries(input, signal) : signal ? client.listPanelTasks(input, signal) : client.listPanelTasks(input));
 
   return {
     tasks: list.tasks.map((task) => taskFromPanelItem(task, t)),
@@ -131,6 +137,7 @@ function tasksCacheKeys(query: string, page: number, language: ResolvedLanguage 
 }
 
 export function TasksSubPage(props: TasksSubPageProps) {
+  const canRead = usePanelReadGuard(props.client);
   const { t, language } = useTranslation();
   const { track } = useAnalytics();
   const tasksFilterLayer = "tasks";
@@ -138,9 +145,43 @@ export function TasksSubPage(props: TasksSubPageProps) {
   const [page, setPage] = useState(1);
   const [state, setState] = useState<TasksState>({ status: "loading" });
   const [selectedTask, setSelectedTask] = useState<MemoryTask | null>(null);
+  const requestedTaskId = useRef<string | null>(null);
+  const detailGeneration = useRef(0);
+  const detailAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => { detailGeneration.current++; detailAbortRef.current?.abort(); }, [props.client]);
+  usePanelVisibilityLifecycle(props.client, () => {
+    detailGeneration.current++; detailAbortRef.current?.abort(); setSelectedTask(null);
+  }, () => { if (requestedTaskId.current) void openTaskDetail(requestedTaskId.current); });
+  function closeTask() { requestedTaskId.current = null; detailGeneration.current++; detailAbortRef.current?.abort(); setSelectedTask(null); }
+  async function openTaskDetail(id: string) {
+    if (!props.client || !canRead()) return;
+    requestedTaskId.current = id;
+    const generation = ++detailGeneration.current;
+    detailAbortRef.current?.abort();
+    const controller = new AbortController();
+    detailAbortRef.current = controller;
+    try {
+      const localId = id.split("::").at(-1);
+      const list = await props.client.listPanelTasks({ q: localId, page: 1 }, controller.signal);
+      if (generation !== detailGeneration.current || !canRead()) return;
+      const item = list.tasks.find(task => task.id === id || task.id.split("::").at(-1) === localId);
+      if (!item) throw new Error(t("memory.detailUnavailable"));
+      setSelectedTask(taskFromPanelItem(item, t));
+    } catch (error) {
+      if (generation === detailGeneration.current && !controller.signal.aborted && canRead()) {
+        setState({ status: "error", message: toErrorMessage(error) });
+      }
+    }
+  }
   const requestIdRef = useRef(0);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const submitSearch = usePanelLoad({ query, identity: [props.client, page, t, language], load: () => refresh(),
+    invalidate: () => { requestIdRef.current++; requestAbortRef.current?.abort(); } });
+  usePanelPoll(Boolean(props.client) && !props.client?.checkPanelView, () => refresh(page, { useCache: false }));
 
-  function refresh(nextPage = page, options: { useCache?: boolean } = {}): Promise<MemoryTasksOutput | undefined> {
+  const viewStatus=usePanelViewStatus(props.client,"tasks",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); closeTask(); setState({status:"loading"});},()=>refresh());
+  function refresh(nextPage = page, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<MemoryTasksOutput | undefined> {
+    if (!canRead()) return Promise.resolve(undefined);
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -148,21 +189,25 @@ export function TasksSubPage(props: TasksSubPageProps) {
     }
 
     const normalizedPage = normalizePage(nextPage);
+    requestAbortRef.current?.abort();
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
     const requestId = ++requestIdRef.current;
     const cacheKeys = tasksCacheKeys(query, normalizedPage, language);
-    const cached = (options.useCache ?? true) ? readMemoryPanelCacheFirst<MemoryTasksOutput>(cacheKeys) : null;
+    const cached = (options.useCache ?? true) && !props.client.resetPanelView ? readMemoryPanelCacheFirst<MemoryTasksOutput>(cacheKeys) : null;
     if (cached) {
       setState({ status: "ready", data: cached });
     } else {
       setState((current) => current.status === "ready" ? current : { status: "loading" });
     }
 
-    return loadTasksData(props.client, query, normalizedPage, t)
+    return loadTasksData(props.client, query, normalizedPage, t, controller.signal)
       .then((data) => {
-        writeMemoryPanelCaches(cacheKeys, data);
         if (requestId !== requestIdRef.current) {
           return undefined;
         }
+        if (!props.client?.resetPanelView) writeMemoryPanelCaches(cacheKeys, data);
+        viewStatus.clear();
         setState({ status: "ready", data });
         if (data.page !== normalizedPage) {
           setPage(data.page);
@@ -173,21 +218,21 @@ export function TasksSubPage(props: TasksSubPageProps) {
         if (requestId !== requestIdRef.current) {
           return undefined;
         }
-        setState({ status: "error", message: toErrorMessage(error) });
+        setState(current => options.preserve && canPreservePanelResult(error) && current.status === "ready" ? current : { status: "error", message: toErrorMessage(error) });
         throw error;
       });
   }
 
   function changeQuery(value: string) {
     setQuery(value);
-    setSelectedTask(null);
+    closeTask();
     setPage(1);
   }
 
   function runSearch() {
-    setSelectedTask(null);
+    closeTask();
     setPage(1);
-    void refresh(1)
+    void submitSearch(() => refresh(1), [props.client, 1, t, language])
       .then((data) => {
         if (!data) {
           return;
@@ -206,7 +251,8 @@ export function TasksSubPage(props: TasksSubPageProps) {
       subPage: "tasks",
       filterLayer: tasksFilterLayer
     }));
-    setSelectedTask(task);
+    if (task.summaryOnly) void openTaskDetail(task.id);
+    else { closeTask(); requestedTaskId.current = task.id; setSelectedTask(task); }
   }
 
   function openTaskById(id: string) {
@@ -215,21 +261,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
       return;
     }
 
-    const localId = id.split("::").at(-1) ?? id;
-    void loadTasksData(props.client, localId, 1, t)
-      .then((data) => {
-        const task = data.tasks.find((item) => item.id === id || item.id.split("::").at(-1) === localId);
-        if (!task) {
-          setState({ status: "error", message: t("memory.detailUnavailable") });
-          return;
-        }
-
-        setQuery(localId);
-        setPage(1);
-        setState({ status: "ready", data });
-        openTask(task);
-      })
-      .catch((error) => setState({ status: "error", message: toErrorMessage(error) }));
+    void openTaskDetail(id);
   }
 
   function changePage(nextPage: number) {
@@ -238,7 +270,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
       return;
     }
 
-    setSelectedTask(null);
+    closeTask();
     setPage(normalizedPage);
   }
 
@@ -253,31 +285,15 @@ export function TasksSubPage(props: TasksSubPageProps) {
       filterLayer: tasksFilterLayer
     }));
     clearMemoryPanelCache();
-    setSelectedTask(null);
-    void refresh(page, { useCache: false }).catch(() => undefined);
+    closeTask();
+    void viewStatus.reloadCurrent().catch(() => undefined);
   }
-
-  useEffect(() => {
-    const timeout = window.setTimeout(() => void refresh().catch(() => undefined), 180);
-    return () => window.clearTimeout(timeout);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.client, query, page, t, language]);
 
   useEffect(() => {
     if (props.openRequest) {
       openTaskById(props.openRequest.id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.openRequest?.requestId]);
-
-  useEffect(() => {
-    if (!props.client) {
-      return undefined;
-    }
-    const interval = window.setInterval(() => void refresh(page, { useCache: false }).catch(() => undefined), TASKS_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.client, query, page, t, language]);
 
   return (
     <TasksSubPageView
@@ -288,7 +304,8 @@ export function TasksSubPage(props: TasksSubPageProps) {
       onSearch={runSearch}
       onPageChange={changePage}
       onRefresh={async () => {
-        const data = await refresh(page, { useCache: false });
+        props.client?.refreshPanelView?.("tasks");
+        const data = await refresh(page, { useCache: false, preserve:true });
         if (data) {
           track(buildMemoryUiPanelRefreshedEvent({
             subPage: "tasks",
@@ -299,7 +316,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
       }}
       onOpenTask={openTask}
       onDeleteTask={deleteTask}
-      onCloseTask={() => setSelectedTask(null)}
+      onCloseTask={closeTask}
     />
   );
 }
@@ -545,9 +562,10 @@ function MemoryMetric(props: { label: string; value: string }) {
   );
 }
 
-function taskFromPanelItem(item: PanelTaskItem, t: Translate): MemoryTask {
+function taskFromPanelItem(item: PanelTaskItem | PanelTaskSummary, t: Translate): MemoryTask {
+  const summaryOnly = !("turns" in item);
   const episode = item.episode;
-  const turns: TaskTurn[] = item.turns.map((turn) => ({
+  const turns: TaskTurn[] = ("turns" in item ? item.turns : []).map((turn) => ({
     id: turn.rawTurnId,
     turnId: turn.turnId,
     createdAt: turn.createdAt,
@@ -563,11 +581,11 @@ function taskFromPanelItem(item: PanelTaskItem, t: Translate): MemoryTask {
   const titlePending = episode.titlePending === true;
   const waiting = titlePending && !titleGenerated;
   const title = waiting
-    ? truncate(firstString(firstChatText(chat, "user"), episode.id), 100)
-    : truncate(firstString(episode.title, episode.summary, firstChatText(chat, "user"), episode.id), 100);
+    ? truncate(firstString(summaryOnly ? item.firstUserText : firstChatText(chat, "user"), episode.id), 100)
+    : truncate(firstString(episode.title, episode.summary, summaryOnly ? item.firstUserText : firstChatText(chat, "user"), episode.id), 100);
   const summary = waiting
     ? ""
-    : truncate(firstString(episode.summary, firstChatText(chat, "assistant"), titleGenerated ? undefined : title), 180);
+    : truncate(firstString(episode.summary, summaryOnly ? item.firstAssistantText : firstChatText(chat, "assistant"), titleGenerated ? undefined : title), 180);
 
   return {
     id: item.id,
@@ -581,13 +599,14 @@ function taskFromPanelItem(item: PanelTaskItem, t: Translate): MemoryTask {
     updatedAt: item.updatedAt,
     turnCount: episode.turnCount ?? uniqueChatUserTurns(chat),
     memoryCount: item.memoryIds.length,
-    toolCallCount: chat.filter((message) => message.role === "tool").length,
+    toolCallCount: summaryOnly ? item.toolCallCount : chat.filter((message) => message.role === "tool").length,
     rTask: episode.rTask,
     skillStatus: deriveTaskSkillStatus(episode),
     skillReason: firstOptionalString(episode.skillReason, episode.pipelineError),
     statusReason: taskStatusReason(episode, status, t),
     titleGenerated,
     titlePending,
+    summaryOnly,
     chat
   };
 }

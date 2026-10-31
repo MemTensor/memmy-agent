@@ -1,10 +1,10 @@
+import {usePanelStats} from "./use-panel-stats.js";
 import { useEffect, useRef, useState } from "react";
 import type { PanelAnalysisOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { BarChart3 } from "./memory-prototype-icons.js";
-import { memoryPanelCacheKey, readMemoryPanelCache, writeMemoryPanelCache } from "./memory-panel-cache.js";
-import { type RemoteData, toErrorMessage } from "./remote-state.js";
+import { type RemoteData } from "./remote-state.js";
 
 interface DailyPoint {
   date: string;
@@ -46,31 +46,7 @@ export function loadAnalyticsData(client: MemoryRuntimeClient): Promise<PanelAna
 
 export function AnalyticsSubPage(props: AnalyticsSubPageProps) {
   const { t } = useTranslation();
-  const [state, setState] = useState<RemoteData<PanelAnalysisOutput>>({ status: "loading" });
-
-  useEffect(() => {
-    if (!props.client) {
-      setState({ status: "error", message: t("memory.clientNotReady") });
-      return;
-    }
-
-    let active = true;
-    const cacheKey = memoryPanelCacheKey("analytics");
-    const cached = readMemoryPanelCache<PanelAnalysisOutput>(cacheKey);
-    setState((current) => cached ? { status: "ready", data: cached } : current.status === "ready" ? current : { status: "loading" });
-    void loadAnalyticsData(props.client)
-      .then((data) => {
-        writeMemoryPanelCache(cacheKey, data);
-        if (active) setState({ status: "ready", data });
-      })
-      .catch((error) => {
-        if (active) setState({ status: "error", message: toErrorMessage(error) });
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [props.client, t]);
+  const {state}=usePanelStats<PanelAnalysisOutput>(props.client,"analysis",()=>{if(!props.client)throw new Error(t("memory.clientNotReady"));return loadAnalyticsData(props.client);});
 
   return <AnalyticsSubPageView state={state} />;
 }

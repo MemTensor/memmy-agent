@@ -1,6 +1,10 @@
+import { memoryDisplayedSourceSql } from "./panel-source-sql.js";
+import { panelVisibleMemorySql } from "./panel-cache.js";
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
+import { effectiveEpisodeMemoryIds, maintainMemoryRelations, ownedEpisodeMemoryIds, ownedTaskSpanIds, RAW_SOURCE_SQL } from "./memory-relations.js";
+import { invalidatePanelViews } from "./panel-security.js";
 import type Database from "better-sqlite3";
 import {
   canonicalJson,
@@ -61,6 +65,7 @@ import {
 import { QueueSchedulingStore, type SchedulingMetadata } from "./queue-scheduling-store.js";
 import { mainQueueEligibility, retryQueueEligibility, type QueueEligibilityOptions } from "./queue-eligibility.js";
 import { compactHistoryChangePayload, compactHistoryChangeRow } from "./history-change-snapshot.js";
+import { DISPLAY_MEMORY_COLUMNS, DISPLAY_USER_MEMORY_COLUMNS, PANEL_MEMORY_COLUMNS } from "./panel-projection.js";
 
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
@@ -589,6 +594,10 @@ export class MemoryRepository {
   ) {}
 
   insert(memory: MemoryRow): MemoryRow {
+    return this.db.transaction(() => this.insertRow(memory))();
+  }
+
+  private insertRow(memory: MemoryRow): MemoryRow {
     const prepared = prepareMemoryForStorage(memory);
     this.db
       .prepare(
@@ -607,15 +616,16 @@ export class MemoryRepository {
       .run(memoryToSql(prepared.memory));
     this.vectors.replace(prepared.memory.id, prepared.vectors, prepared.memory.updatedAt);
     this.reindexFts(prepared.memory);
+    maintainMemoryRelations(this.db, prepared.memory.id, false);
     return attachMemoryVectors(prepared.memory, prepared.vectors);
   }
 
   update(memory: MemoryRow): MemoryRow {
-    return this.updateRow(memory, true);
+    return this.db.transaction(() => this.updateRow(memory, true))();
   }
 
   updateMaintenance(memory: MemoryRow): MemoryRow {
-    return this.updateRow(memory, false);
+    return this.db.transaction(() => this.updateRow(memory, false))();
   }
 
   private updateRow(memory: MemoryRow, bumpVersion: boolean): MemoryRow {
@@ -665,6 +675,14 @@ export class MemoryRepository {
       }
     }
     this.reindexFts(updated);
+    maintainMemoryRelations(this.db, updated.id);
+    const provenance = (value: MemoryRow) => {
+      const internal = value.properties.internal_info;
+      return JSON.stringify([internal.source_raw_turn_id,internal.raw_turn_id,
+        isRecordLike(internal.trace) ? internal.trace.episode_id : undefined,
+        internal.source_trace_ids,isRecordLike(internal.policy) ? internal.policy.source_trace_ids : undefined]);
+    };
+    if (provenance(existing) !== provenance(updated)) invalidatePanelViews(this.db);
     return attachMemoryVectors(updated, updated.deletedAt || updated.status === "deleted" ? [] : mergedVectors);
   }
 
@@ -748,20 +766,74 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
-  listTaskSpanIds(userId: string, episodeId: string, sourceTraceIds: string[]): string[] {
-    // Parent traces may already be soft-deleted, and their span_ids only describe
-    // the latest split. Use the spans' own ownership links for task deletion.
+  /** Read-only display data; do not use as input to storage updates. */
+  getForDisplay(id: string): MemoryRow | undefined {
+    return this.getManyForDisplay([id])[0];
+  }
+
+  getManyForDisplay(ids: readonly string[]): MemoryRow[] {
+    return this.readDisplayIds(ids, DISPLAY_MEMORY_COLUMNS);
+  }
+
+  getManyForPanel(ids: readonly string[]): MemoryRow[] {
+    return this.readDisplayIds(ids, PANEL_MEMORY_COLUMNS);
+  }
+
+  private readDisplayIds(ids: readonly string[], columns: string): MemoryRow[] {
+    if (ids.length === 0) return [];
     const rows = this.db.prepare(
-      `SELECT id FROM memories
-       WHERE user_id = ? AND memory_layer = 'L1'
-         AND deleted_at IS NULL AND status != 'deleted'
-         AND json_extract(properties_json, '$.internal_info.memory_kind') = 'span'
-         AND json_extract(properties_json, '$.internal_info.span.episode_id') = ?
-         AND json_extract(properties_json, '$.internal_info.span.source_trace_id')
-           IN (SELECT value FROM json_each(?))
-       ORDER BY id`
-    ).all(userId, episodeId, JSON.stringify(sourceTraceIds)) as Array<{ id: string }>;
-    return rows.map((row) => row.id);
+      `SELECT ${columns} FROM memories
+       WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?)) AND deleted_at IS NULL`
+    ).all(toJson(ids)) as MemorySqlRow[];
+    const byId = new Map(rows.map((row) => [row.id, memoryFromSql(row)]));
+    return ids.flatMap((id) => byId.has(id) ? [byId.get(id)!] : []);
+  }
+
+  listForPanel(filter: MemoryFilter = {}, limit = 50, offset = 0): MemoryRow[] {
+    return this.listDisplayRows(filter, limit, offset, PANEL_MEMORY_COLUMNS);
+  }
+
+  listForDisplay(filter: MemoryFilter = {}, limit = 50, offset = 0): MemoryRow[] {
+    return this.listDisplayRows(filter, limit, offset, DISPLAY_MEMORY_COLUMNS);
+  }
+
+  private listDisplayRows(filter: MemoryFilter, limit: number, offset: number, columns: string): MemoryRow[] {
+    const built = buildMemoryWhere(filter);
+    return (this.db.prepare(
+      `SELECT ${columns} FROM memories WHERE ${built.where}
+       ORDER BY created_at DESC, updated_at DESC, id DESC LIMIT ? OFFSET ?`
+    ).all(...built.params, limit, offset) as MemorySqlRow[]).map(memoryFromSql);
+  }
+
+  /** Validate evidence endpoints without hydrating their dialogue or vectors. */
+  visibleEvidenceIds(ids: readonly string[],local=false): Set<string> {
+    if (!ids.length) return new Set();
+    return new Set(this.db.prepare(`SELECT m.id FROM memories m
+      LEFT JOIN raw_turns r ON r.id=${RAW_SOURCE_SQL}
+      WHERE m.id IN (SELECT value FROM json_each(?)) AND m.deleted_at IS NULL AND m.status!='deleted'
+      AND (${RAW_SOURCE_SQL} IS NULL OR (r.id IS NOT NULL AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND ${local?'(m.session_id IS NULL OR m.session_id=r.session_id)':'r.user_id=m.user_id'}))`
+    ).pluck().all(toJson(ids)) as string[]);
+  }
+
+  effectiveEpisodeL1Ids(episodes: Array<{id: string; userId?: string; sessionId?:string; l1MemoryIds: string[]}>,local=false): Map<string, Set<string>> {
+    return effectiveEpisodeMemoryIds(this.db, episodes,local);
+  }
+
+  ownedEpisodeL1Ids(episode: { id: string; userId: string; l1MemoryIds: string[] }): string[] {
+    return ownedEpisodeMemoryIds(this.db, episode);
+  }
+
+  /** Historical references remain stored; only live endpoints count in the UI. */
+  existingIds(ids: readonly string[]): Set<string> {
+    if (ids.length === 0) return new Set();
+    return new Set((this.db.prepare(
+      `SELECT id FROM memories WHERE id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+       AND deleted_at IS NULL AND status != 'deleted'`
+    ).all(toJson(ids)) as Array<{ id: string }>).map((row) => row.id));
+  }
+
+  listTaskSpanIds(userId: string, episodeId: string, sourceTraceIds: string[]): string[] {
+    return ownedTaskSpanIds(this.db, userId, episodeId, sourceTraceIds);
   }
 
   getByKey(memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
@@ -919,6 +991,12 @@ export class MemoryRepository {
   }
 
   listStats(): MemoryStatsRow[] {
+    return Array.from(this.iterateStats());
+  }
+
+  /** A bounded consumer can yield between rows without materializing a large
+   * native SQLite result in one uninterruptible call. */
+  *iterateStats(): IterableIterator<MemoryStatsRow> {
     const rows = this.db
       .prepare(
         `SELECT id,
@@ -930,12 +1008,13 @@ export class MemoryRepository {
                 memory_layer,
                 created_at,
                 updated_at,
-                ${memoryDisplayedSourceSql("json_extract(info_json, '$.source')")} AS info_source,
-                json_extract(properties_json, '$.internal_info.source') AS internal_source
+                ${memoryDisplayedSourceSql("CASE WHEN json_type(info_json, '$.source')='text' THEN json_extract(info_json, '$.source') END")} AS info_source,
+                CASE WHEN json_type(properties_json, '$.internal_info.source')='text'
+                  THEN json_extract(properties_json, '$.internal_info.source') END AS internal_source
          FROM memories
          WHERE deleted_at IS NULL`
       )
-      .all() as Array<{
+      .iterate() as IterableIterator<{
         id: string;
         conversation_id: string | null;
         session_id: string | null;
@@ -948,7 +1027,7 @@ export class MemoryRepository {
         info_source: unknown;
         internal_source: unknown;
       }>;
-    return rows.map((row) => ({
+    for (const row of rows) yield {
       id: row.id,
       conversationId: row.conversation_id ?? undefined,
       sessionId: row.session_id ?? undefined,
@@ -960,7 +1039,7 @@ export class MemoryRepository {
       updatedAt: row.updated_at,
       infoSource: row.info_source,
       internalSource: row.internal_source
-    }));
+    };
   }
 
   listPendingAgentSourceImportSummaries(limit = 10000, targetMemoryIds?: readonly string[]): MemoryRow[] {
@@ -1159,6 +1238,14 @@ export class MemoryRepository {
       updatedAt: memory.updatedAt,
       source: memory.memoryLayer === "Skill" ? "skill" : "search"
     }));
+  }
+
+  panelMemberIds(filter: MemoryFilter = {}, query?: string): string[] {
+    const built = buildMemoryWhere(query?.trim() ? {...filter, status: filter.status ?? ["activated", "resolving"]} : filter);
+    const search = query?.trim() ? buildMemorySearchWhere(query, true) : undefined;
+    return this.db.prepare(`SELECT id FROM memories WHERE ${built.where} ${search?.where ? `AND (${search.where})` : ""}
+      ORDER BY ${search ? "updated_at DESC, id DESC" : "created_at DESC, updated_at DESC, id DESC"}`)
+      .pluck().all(...built.params, ...(search?.params ?? [])) as string[];
   }
 
   searchPanelIds(query: string, filter: MemoryFilter = {}, limit = 20, offset = 0): MemorySearchIdHit[] {
@@ -1598,6 +1685,11 @@ export class UserMemoryRepository {
     return row ? userMemoryFromSql(row) : undefined;
   }
 
+  getForDisplay(id: string): UserMemoryRecord | undefined {
+    const row = this.db.prepare(`SELECT ${DISPLAY_USER_MEMORY_COLUMNS} FROM user_memories WHERE id=? AND deleted_at IS NULL AND status != 'deleted'`).get(id) as UserMemorySqlRow | undefined;
+    return row ? userMemoryFromSql(row) : undefined;
+  }
+
   getIncludingDeleted(id: string): UserMemoryRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM user_memories WHERE id = ?`)
       .get(id) as UserMemorySqlRow | undefined;
@@ -1623,24 +1715,37 @@ export class UserMemoryRepository {
   }
 
   listForPanel(input: {
-    userId: string;
+    userId?: string;
     status?: UserMemoryStatus;
     query?: string;
     sourceAgent?: string;
     limit: number;
     offset: number;
+    summaryOnly?: boolean;
   }): UserMemoryRecord[] {
     const { where, params } = userMemoryPanelFilter(input);
     return (this.db.prepare(
-      `SELECT * FROM user_memories
+      `SELECT ${input.summaryOnly ? DISPLAY_USER_MEMORY_COLUMNS.replace(" content,", " substr(content,1,180) AS content,") : DISPLAY_USER_MEMORY_COLUMNS} FROM user_memories
        WHERE ${where}
        ORDER BY updated_at DESC, id DESC
        LIMIT ? OFFSET ?`
     ).all(...params, input.limit, input.offset) as UserMemorySqlRow[]).map(userMemoryFromSql);
   }
 
+  panelMemberIds(input: {userId?: string; status?: UserMemoryStatus; query?: string; sourceAgent?: string}): string[] {
+    const {where,params} = userMemoryPanelFilter(input);
+    return this.db.prepare(`SELECT id FROM user_memories WHERE ${where} ORDER BY updated_at DESC,id DESC`).pluck().all(...params) as string[];
+  }
+
+  getManyForPanel(ids: string[], userId?: string): UserMemoryRecord[] {
+    const columns = DISPLAY_USER_MEMORY_COLUMNS.replace(" content,", " substr(content,1,180) AS content,");
+    const rows = this.db.prepare(`SELECT ${columns} FROM user_memories WHERE ${userId===undefined?"1=1":"user_id=?"} AND deleted_at IS NULL AND status!='deleted' AND id IN (SELECT value FROM json_each(?))`).all(...(userId===undefined?[]:[userId]),JSON.stringify(ids)) as UserMemorySqlRow[];
+    const byId = new Map(rows.map(row => [row.id, userMemoryFromSql(row)]));
+    return ids.flatMap(id => byId.has(id) ? [byId.get(id)!] : []);
+  }
+
   countForPanel(input: {
-    userId: string;
+    userId?: string;
     status?: UserMemoryStatus;
     query?: string;
     sourceAgent?: string;
@@ -2421,6 +2526,17 @@ export class RuntimeRepository {
     return counts;
   }
 
+  panelEpisodeIds(userId?: string, query?: string, sourceAgent?: string): string[] {
+    const built = buildEpisodeWhere(userId, query, sourceAgent);
+    return this.db.prepare(`SELECT id FROM episodes WHERE ${built.where} ORDER BY opened_at DESC, updated_at DESC, id DESC`).pluck().all(...built.params) as string[];
+  }
+
+  getEpisodesForPanel(ids: string[]): EpisodeRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM episodes WHERE id IN (SELECT value FROM json_each(?))`).all(JSON.stringify(ids)) as SqlEpisodeRow[];
+    const byId = new Map(rows.map(row => [row.id, episodeFromSql(row)]));
+    return ids.flatMap(id => byId.has(id) ? [byId.get(id)!] : []);
+  }
+
   countEpisodes(userId?: string, query?: string, sourceAgent?: string): number {
     const built = buildEpisodeWhere(userId, query, sourceAgent);
     const row = this.db
@@ -2715,23 +2831,48 @@ export class RuntimeRepository {
     at = nowIso()
   ): void {
     if (fromEpisodeId === toEpisodeId) return;
-    const fromEpisode = this.getEpisode(fromEpisodeId);
-    if (!fromEpisode || !this.getEpisode(toEpisodeId)) {
-      throw new Error("cannot rebind a raw turn to a missing episode");
-    }
-    const remainingRawTurnIds = fromEpisode.rawTurnIds.filter((id) => id !== rawTurnId);
-    this.db
-      .prepare(
-        `UPDATE episodes
-         SET raw_turn_ids_json = ?,
-             turn_count = ?,
-             updated_at = ?
-         WHERE id = ?`
-      )
-      .run(toJson(remainingRawTurnIds), remainingRawTurnIds.length, at, fromEpisodeId);
-    this.db.prepare("UPDATE raw_turns SET episode_id = ? WHERE id = ?").run(toEpisodeId, rawTurnId);
-    this.db.prepare("UPDATE artifacts SET episode_id = ? WHERE raw_turn_id = ?").run(toEpisodeId, rawTurnId);
-    this.appendEpisodeRawTurn(toEpisodeId, rawTurnId, at);
+    this.db.transaction(() => {
+      const fromEpisode = this.getEpisode(fromEpisodeId);
+      const toEpisode = this.getEpisode(toEpisodeId);
+      if (!fromEpisode || !toEpisode || fromEpisode.userId !== toEpisode.userId) {
+        throw new Error("cannot rebind a raw turn to a missing episode");
+      }
+      const currentRaw = this.db.prepare("SELECT episode_id,user_id FROM raw_turns WHERE id=? AND deleted_at IS NULL AND redacted_at IS NULL").get(rawTurnId) as {episode_id:string;user_id:string}|undefined;
+      if (!currentRaw || currentRaw.episode_id !== fromEpisodeId || currentRaw.user_id !== fromEpisode.userId) throw new Error("raw turn ownership changed before rebind");
+      const remainingRawTurnIds = fromEpisode.rawTurnIds.filter((id) => id !== rawTurnId);
+      this.db
+        .prepare(
+          `UPDATE episodes
+           SET raw_turn_ids_json = ?,
+               turn_count = ?,
+               updated_at = ?
+           WHERE id = ?`
+        )
+        .run(toJson(remainingRawTurnIds), remainingRawTurnIds.length, at, fromEpisodeId);
+      this.db.prepare("UPDATE raw_turns SET episode_id = ? WHERE id = ?").run(toEpisodeId, rawTurnId);
+      this.db.prepare("UPDATE artifacts SET episode_id = ? WHERE raw_turn_id = ?").run(toEpisodeId, rawTurnId);
+      this.appendEpisodeRawTurn(toEpisodeId, rawTurnId, at);
+      const spanRaw = `coalesce(${RAW_SOURCE_SQL},json_extract(m.properties_json,'$.internal_info.span.raw_turn_id'))`;
+      const parentRaw = RAW_SOURCE_SQL.replaceAll("m.", "t.");
+      const ids = this.db.prepare(`SELECT m.id FROM memories m
+        LEFT JOIN memories t ON t.id=CASE WHEN json_extract(m.properties_json,'$.internal_info.memory_kind')='span'
+          THEN json_extract(m.properties_json,'$.internal_info.span.source_trace_id') END
+        WHERE m.memory_layer='L1' AND m.user_id=?
+          AND (t.id IS NULL OR (t.user_id=m.user_id AND t.memory_layer='L1'))
+          AND (${spanRaw}=? OR (${spanRaw} IS NULL AND ${parentRaw}=?))
+        ORDER BY m.id`).pluck().all(fromEpisode.userId,rawTurnId,rawTurnId) as string[];
+      for (const id of ids) {
+        this.db.prepare(`UPDATE memories SET
+          info_json=json_set(info_json,'$.episode_id',?),
+          properties_json=CASE WHEN json_extract(properties_json,'$.internal_info.memory_kind')='span'
+            THEN json_set(properties_json,'$.internal_info.trace.episode_id',?,'$.internal_info.span.episode_id',?)
+            ELSE json_set(properties_json,'$.internal_info.trace.episode_id',?) END,
+          updated_at=?,version=version+1 WHERE id=?`).run(toEpisodeId,toEpisodeId,toEpisodeId,toEpisodeId,at,id);
+        maintainMemoryRelations(this.db,id);
+        const policies=this.db.prepare("SELECT DISTINCT l2_memory_id FROM trace_policy_links WHERE l1_memory_id=?").pluck().all(id) as string[];
+        for (const policyId of policies) maintainMemoryRelations(this.db,policyId);
+      }
+    })();
   }
 
   appendEpisodeFeedback(episodeId: string, feedbackId: string, at = nowIso()): EpisodeRecord | undefined {
@@ -2820,6 +2961,27 @@ export class RuntimeRepository {
   }
 
   l1MemoryIdsForRawTurn(rawTurnId: string): string[] {
+    return this.memoryIdsForRawTurn(rawTurnId, true);
+  }
+
+  private memoryIdsForRawTurn(rawTurnId: string, l1Only: boolean, knownRaw?: RawTurnRecord): string[] {
+    const raw = knownRaw ?? this.getRawTurn(rawTurnId);
+    const layer = l1Only ? "memory_layer = 'L1' AND " : "";
+    const reference = l1Only
+      ? "(json_extract(info_json, '$.raw_turn_id') = @raw OR json_extract(properties_json, '$.internal_info.trace.raw_turn_id') = @raw)"
+      : "json_extract(info_json, '$.raw_turn_id') = @raw";
+    // raw_turns.id and memories.id already have primary-key indexes. Only new
+    // captures opt in to write-maintained IDs; historical rows retain a full lookup.
+    const ids = raw?.messagePayload?.captured_memory_ids;
+    if (Array.isArray(ids) && ids.every(id => typeof id === "string")) {
+      const lookup = this.db.prepare(`SELECT id FROM memories WHERE id = @id AND ${layer}${reference}`);
+      return uniq(ids).flatMap(id => {
+        const row = lookup.get({ raw: rawTurnId, id }) as { id: string } | undefined;
+        return row ? [row.id] : [];
+      });
+    }
+    if (!l1Only) return (this.db.prepare(`SELECT id FROM memories WHERE ${reference}`)
+      .all({ raw: rawTurnId }) as Array<{ id: string }>).map(row => row.id);
     return (this.db.prepare(`SELECT id FROM memories WHERE memory_layer = 'L1' AND
       (json_extract(info_json, '$.raw_turn_id') = ? OR json_extract(properties_json, '$.internal_info.trace.raw_turn_id') = ?)`)
       .all(rawTurnId, rawTurnId) as Array<{ id: string }>).map(r => r.id);
@@ -2841,7 +3003,7 @@ export class RuntimeRepository {
     const raw = this.getRawTurn(rawTurnId);
     const episode = this.getEpisode(episodeId);
     if (!raw || !episode || raw.sessionId !== episode.sessionId) throw new Error("invalid first episode binding");
-    const l1Ids = this.l1MemoryIdsForRawTurn(rawTurnId);
+    const l1Ids = this.memoryIdsForRawTurn(rawTurnId, true, raw);
     if (raw.episodeId && raw.episodeId !== episodeId) {
       this.moveTurnLinks({ rawTurnId, l1MemoryIds: l1Ids, fromEpisodeId: raw.episodeId, toEpisodeId: episodeId, at });
     }
@@ -2856,9 +3018,12 @@ export class RuntimeRepository {
     for (const table of ['artifacts', 'feedback', 'decision_repairs', 'l3_world_model_input_traces', 'source_turn_captures', 'skill_trials']) {
       this.db.prepare(`UPDATE ${table} SET episode_id = ? WHERE raw_turn_id = ?`).run(episodeId, rawTurnId);
     }
+    const targetIds = this.memoryIdsForRawTurn(rawTurnId, false, raw);
+    // Resolve provenance once through primary keys (or the legacy
+    // compatibility path), rather than nesting a memories scan inside an UPDATE.
     this.db.prepare(`UPDATE evolution_jobs SET episode_id = ? WHERE json_extract(payload_json, '$.rawTurnId') = ?
-      OR target_memory_id IN (SELECT id FROM memories WHERE json_extract(info_json, '$.raw_turn_id') = ?)`)
-      .run(episodeId, rawTurnId, rawTurnId);
+      OR target_memory_id IN (SELECT value FROM json_each(?))`)
+      .run(episodeId, rawTurnId, toJson(targetIds));
     for (const row of this.db.prepare("SELECT id FROM feedback WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ id: string }>) this.appendEpisodeFeedback(episodeId, row.id, at);
     for (const row of this.db.prepare("SELECT id FROM decision_repairs WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ id: string }>) this.appendEpisodeDecisionRepair(episodeId, row.id, at);
     for (const row of this.db.prepare("SELECT skill_memory_id FROM skill_trials WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ skill_memory_id: string }>) this.appendEpisodeDerivedMemory(episodeId, "Skill", row.skill_memory_id, at);
@@ -2910,7 +3075,9 @@ export class RuntimeRepository {
              tool_results_json = @toolResultsJson,
              source_memory_ids_json = @sourceMemoryIdsJson,
              usage_json = @usageJson,
-             message_payload_json = @messagePayloadJson,
+             message_payload_json = CASE WHEN json_type(message_payload_json,'$.captured_memory_ids')='array'
+               THEN json_set(@messagePayloadJson,'$.captured_memory_ids',json_extract(message_payload_json,'$.captured_memory_ids'))
+               ELSE @messagePayloadJson END,
              status = @status,
              redacted_at = @redactedAt,
              deleted_at = @deletedAt
@@ -4034,6 +4201,15 @@ export class RuntimeRepository {
       ORDER BY ${embeddingRetryOrderSql()} LIMIT ? OFFSET ?`)
       .all(...eligibility.params, ...(input.excludedIds?.length ? [JSON.stringify(input.excludedIds)] : []),
         Math.min(200, Math.floor(input.limit)), Math.max(0, Math.floor(input.offset ?? 0))) as SqlEmbeddingRetryRow[]).map(embeddingRetryFromSql);
+  }
+
+  episodesWithJob(episodeIds: readonly string[], jobType: JobType, statuses: JobStatus[]): Set<string> {
+    if (episodeIds.length === 0 || statuses.length === 0) return new Set();
+    return new Set((this.db.prepare(
+      `SELECT DISTINCT episode_id FROM evolution_jobs
+       WHERE episode_id IN (SELECT CAST(value AS TEXT) FROM json_each(?))
+       AND job_type = ? AND status IN (SELECT CAST(value AS TEXT) FROM json_each(?))`
+    ).all(toJson(episodeIds), jobType, toJson(statuses)) as Array<{ episode_id: string }>).map((row) => row.episode_id));
   }
 
   leaseQueuedJobs(
@@ -5566,8 +5742,19 @@ export class RuntimeRepository {
       for (const table of BUNDLE_TABLES) {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
+          // Runtime panel tokens belong to this database instance, never to an export.
+          if (table === "runtime_kv" && row.key === "panel_safety_token") continue;
           const defaults = applyBundleDefaults(table, deserializeBundleRow(row));
           const normalized = table === "memory_change_log" ? compactHistoryChangeRow(defaults) : defaults;
+          // A partial/older bundle can replace a raw turn while retaining newer
+          // target memories. Its captured IDs cannot certify the target database.
+          if (table === "raw_turns" && typeof normalized.message_payload_json === "string") {
+            const payload = parseJson<unknown>(normalized.message_payload_json, undefined);
+            if (isRecord(payload) && "captured_memory_ids" in payload) {
+              delete payload.captured_memory_ids;
+              normalized.message_payload_json = toJson(payload);
+            }
+          }
           const identity = bundleIdentity(table, normalized);
           if (identity) {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
@@ -5625,6 +5812,10 @@ export class RuntimeRepository {
           }
         }
       }
+      for (const row of Array.isArray(tables.memories) ? tables.memories : []) {
+        if (row && typeof row.id === "string") maintainMemoryRelations(this.db,row.id,false);
+      }
+      invalidatePanelViews(this.db);
     })();
     this.scheduleLogTablesPrune();
     this.scheduleHistoryLogCompaction(true);
@@ -6770,6 +6961,7 @@ export class Repositories {
               .run(...sequenceTables);
           }
         }
+        invalidatePanelViews(this.db);
         return cleared;
       })();
     } finally {
@@ -7119,13 +7311,13 @@ function userMemoryFromSql(row: UserMemorySqlRow): UserMemoryRecord {
 }
 
 function userMemoryPanelFilter(input: {
-  userId: string;
+  userId?: string;
   status?: UserMemoryStatus;
   query?: string;
   sourceAgent?: string;
 }): { where: string; params: Array<string> } {
-  const clauses = ["user_id = ?"];
-  const params = [input.userId];
+  const clauses = input.userId===undefined ? ["1=1"] : ["user_id = ?"];
+  const params:string[] = input.userId===undefined ? [] : [input.userId];
   if (input.status) {
     clauses.push("status = ?");
     params.push(input.status);
@@ -7552,35 +7744,12 @@ function normalizedAgentIdSql(column: string): string {
   return `lower(replace(replace(TRIM(${column}), '-', '_'), ' ', '_'))`;
 }
 
-/** Keep the narrow stats projection and panel filters aligned with panelSourceForMemory. */
-function memoryDisplayedSourceSql(fallback: string): string {
-  const candidate = "$.internal_info.external_evidence_candidate";
-  // SQLite GLOB is case-sensitive and anchored unless a wildcard is present,
-  // matching the canonical History ID shape used by the legacy source helper.
-  const historyPrefix = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9]";
-  const historyId = ["10min", "6h"].flatMap((window) => ["", "Z"].map((zone) =>
-    `history_source.value GLOB '${historyPrefix}${zone}-${window}-summary'`)).join(" OR ");
-  return `CASE
-    WHEN (json_extract(properties_json, '$.internal_info.memory_kind') = 'observed_activity'
-      AND (json_extract(properties_json, '$.internal_info.external_evidence.source') = 'computer_history'
-        OR json_type(properties_json, '$.internal_info.external_evidence.provenance.historyId') = 'text'))
-      OR (memory_layer = 'Skill' AND (
-        json_extract(properties_json, '${candidate}.source') = 'computer_history'
-        OR (agent_id = 'memmy' AND json_extract(properties_json, '${candidate}.source') = 'memmy'
-          AND json_type(properties_json, '${candidate}.sourceRecordIds') = 'array'
-          AND (SELECT COUNT(DISTINCT value) FROM json_each(properties_json, '${candidate}.sourceRecordIds')) >= 2
-          AND NOT EXISTS (SELECT 1 FROM json_each(properties_json, '${candidate}.sourceRecordIds') AS history_source
-            WHERE history_source.type <> 'text' OR NOT (${historyId})))
-      ))
-    THEN 'computer_history' ELSE ${fallback} END`;
-}
-
 /**
  * Matches one Agent filter value against a source column. Known Agents also match the
  * ids derived from them ("memmy-onboarding" under "memmy-agent"), because the panel
  * shows all of them as the same Agent.
  */
-function agentIdMatchClause(column: string, value: string): { sql: string; params: string[] } {
+export function agentIdMatchClause(column: string, value: string): { sql: string; params: string[] } {
   const normalizedColumn = normalizedAgentIdSql(column);
   const roots = agentSourceFamilyRoots(value);
   if (roots.length === 0) {
@@ -7593,7 +7762,7 @@ function agentIdMatchClause(column: string, value: string): { sql: string; param
 }
 
 /** True when the column matches none of the excluded Agents (the "other Agents" filter). */
-function agentIdExclusionClause(column: string, values: readonly string[]): { sql: string; params: string[] } | undefined {
+export function agentIdExclusionClause(column: string, values: readonly string[]): { sql: string; params: string[] } | undefined {
   const matches = Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
     .map((value) => agentIdMatchClause(column, value));
   if (matches.length === 0) {
@@ -7625,6 +7794,7 @@ function layerWeight(layer: MemoryLayer): number {
 function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlValue[] } {
   const clauses = ["deleted_at IS NULL"];
   const params: SqlValue[] = [];
+  if (filter.panelVisible) clauses.push(panelVisibleMemorySql());
 
   addValueClause("user_id", filter.userId);
   addValueClause("session_id", filter.sessionId);
@@ -7662,7 +7832,9 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   function addAgentIdClause(value: string | undefined, excludedValues: string[] | undefined): void {
     // The namespace owner remains Memmy; the panel filters by the producer it
     // displays, including History records written by the old HTTP envelope.
-    const displayedSource = memoryDisplayedSourceSql("agent_id");
+    const displayedSource = memoryDisplayedSourceSql(filter.panelSource
+      ? "panel_source(CASE WHEN json_type(info_json, '$.source')='text' THEN json_extract(info_json, '$.source') END, CASE WHEN json_type(properties_json, '$.internal_info.source')='text' THEN json_extract(properties_json, '$.internal_info.source') END, session_id, conversation_id, agent_id, app_id)"
+      : "agent_id");
     if (value?.trim()) {
       const match = agentIdMatchClause(displayedSource, value);
       clauses.push(match.sql);
