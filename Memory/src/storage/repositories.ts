@@ -5647,12 +5647,10 @@ export class RuntimeRepository {
         .all() as Array<{project_id: string}> : [];
       for (const row of existingProjects) ensureProjectEnvironmentScanBoundary(this.db, row.project_id, nowIso());
       const importedScanProjects = new Set<string>();
-      const importedTraceTargets: Array<{batchId: string; field: L3WorldModelTargetField}> = [];
-      if ((Array.isArray(tables.l3_world_model_batch_targets) && tables.l3_world_model_batch_targets.length) ||
-          (Array.isArray(tables.evolution_jobs) && tables.evolution_jobs.some(row =>
-            isRecordLike(row) && row.job_type === "l3_world_model_update"))) {
-        preserveExistingL3FieldDeletions(this.db, nowIso());
-      }
+      const importedTraceTargets: Array<{batchId: string; field: L3WorldModelTargetField; scopeKey?: string}> = [];
+      // Metadata-only bundles can arrive before their tasks and overwrite old
+      // cleared markers. Preserve local intent before any imported rows change.
+      preserveExistingL3FieldDeletions(this.db, nowIso());
       for (const table of BUNDLE_TABLES) {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
@@ -5719,7 +5717,8 @@ export class RuntimeRepository {
           if (table === "evolution_jobs" && normalized.job_type === "l3_world_model_update") {
             const payload = parseJson<Record<string, unknown>>(String(normalized.payload_json), {});
             if (typeof payload.batchId === "string" && isL3WorldModelTargetField(payload.targetField)) {
-              importedTraceTargets.push({batchId: payload.batchId, field: payload.targetField});
+              importedTraceTargets.push({batchId: payload.batchId, field: payload.targetField,
+                scopeKey: typeof normalized.scope_key === "string" ? normalized.scope_key : undefined});
             }
           }
           if (existed) {
@@ -5744,11 +5743,15 @@ export class RuntimeRepository {
         }
       }
       for (const target of importedTraceTargets) {
-        const batch = this.db.prepare(`SELECT batch.project_id,target.status
-          FROM l3_world_model_evidence_batches AS batch JOIN l3_world_model_batch_targets AS target
-            ON target.batch_id=batch.id WHERE batch.id=? AND target.target_field=?`)
-          .get(target.batchId, target.field) as {project_id: string | null; status: string} | undefined;
-        if (batch?.status === "queued" && hasL3FieldDeletion(this.db, batch.project_id, target.field)) {
+        const batch = this.db.prepare("SELECT project_id FROM l3_world_model_evidence_batches WHERE id=?")
+          .get(target.batchId) as {project_id: string | null} | undefined;
+        // Jobs can arrive before their batch. An exact existing field scope
+        // still proves the local range; absent evidence never expands it.
+        const scope = !batch && target.scopeKey ? this.db.prepare(
+          "SELECT project_id FROM l3_world_model_scopes WHERE scope_key || ':' || ? = ?"
+        ).get(target.field, target.scopeKey) as {project_id: string | null} | undefined : undefined;
+        const range = batch ?? scope;
+        if (range && hasL3FieldDeletion(this.db, range.project_id, target.field)) {
           cancelL3WorldModelTraceTarget(this.db, target.batchId, target.field, nowIso());
         }
       }
@@ -9184,10 +9187,14 @@ function cancelL3WorldModelTraceTarget(db: Database.Database, batchId: string, f
   db.prepare(`UPDATE l3_world_model_batch_targets
     SET status='applied',no_change=1,applied_at=?,updated_at=?
     WHERE batch_id=? AND target_field=? AND status='queued'`).run(at, at, batchId, field);
-  db.prepare(`UPDATE evolution_jobs SET status='succeeded',leased_until=NULL,updated_at=?
+  const targetStatus = db.prepare("SELECT status FROM l3_world_model_batch_targets WHERE batch_id=? AND target_field=?")
+    .pluck().get(batchId, field);
+  const jobStatus = targetStatus === "dead_letter" ? "dead_letter" : "succeeded";
+  db.prepare(`UPDATE evolution_jobs SET status=?,leased_until=NULL,lease_owner=NULL,lease_token=NULL,
+      available_at=NULL,blocked_reason=NULL,last_error=NULL,updated_at=?
     WHERE job_type='l3_world_model_update'
       AND json_extract(payload_json,'$.batchId')=? AND json_extract(payload_json,'$.targetField')=?
-      AND status IN ('queued','leased','failed')`).run(at, batchId, field);
+      AND status IN ('queued','leased','failed')`).run(jobStatus, at, batchId, field);
   updateL3WorldModelBatchTerminalOutcome(db, batchId, at);
 }
 

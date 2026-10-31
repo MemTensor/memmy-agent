@@ -204,3 +204,61 @@ it('protects an existing pre-fix clear when only the missing job is imported lat
   await x.runner.updateField(x.repos.runtime.getJob(source.job.id)!);
   expect(source.model.complete).not.toHaveBeenCalled();expect(x.read()).toBeNull();
 });
+
+it.each(fields.flatMap(field=>['applied','dead_letter','missing-target','missing-batch'].map(terminal=>({field,terminal}))))('a late failed $field job cannot block a new task ($terminal)',async ({field,terminal})=>{
+  const x=await setup(field,false);x.service.reconcileWorkerStartup(10);
+  const claim=x.repos.runtime.claimQueuedJob(x.job.id)!;
+  expect(claim).toBeDefined();
+  x.repos.runtime.failJob(x.job.id,'model configuration missing',new Date().toISOString(),false,claim,
+    {availableAt:null,blockedReason:'configuration',countFailure:false});
+  const backup=backupFor(x);const old=backup.tables.evolution_jobs!.find(row=>row.id===x.job.id)!;
+  const targetRow=backup.tables.l3_world_model_batch_targets!.find(row=>row.batch_id===x.job.payload.batchId&&row.target_field===field)!;
+  if(terminal==='dead_letter'){
+    x.repos.runtime.resumeConfigurationBlockedJobs(new Date().toISOString(),[x.job.id]);
+    const retry=x.repos.runtime.claimQueuedJob(x.job.id)!;expect(retry).toBeDefined();
+    x.repos.runtime.failJob(x.job.id,'permanent evidence failure',new Date().toISOString(),true,retry);
+  }
+  if(terminal==='missing-target')x.db.db.prepare('DELETE FROM l3_world_model_batch_targets WHERE batch_id=? AND target_field=?').run(x.job.payload.batchId,field);
+  if(terminal==='missing-batch')x.db.db.prepare('DELETE FROM l3_world_model_evidence_batches WHERE id=?').run(x.job.payload.batchId);
+  // Model a targets-only delivery; its independently delivered failed job is
+  // valid and retains the same identity, payload and scope sequence.
+  x.db.db.prepare('DELETE FROM evolution_jobs WHERE id=?').run(x.job.id);
+  x.service.deleteMemory(x.memory.id);
+  x.service.importBundle({bundle:{...backup,tables:{evolution_jobs:[old]}},conflictStrategy:'skip'});
+  expect(x.repos.runtime.getJob(x.job.id)).toMatchObject({status:terminal==='dead_letter'?'dead_letter':'succeeded',blockedReason:null,availableAt:null});
+  if(terminal==='missing-target')x.repos.runtime.importBundleTables({l3_world_model_batch_targets:[targetRow]});
+  if(terminal==='missing-batch')x.repos.runtime.importBundleTables({
+    l3_world_model_evidence_batches:backup.tables.l3_world_model_evidence_batches!.filter(row=>row.id===x.job.payload.batchId),
+    l3_world_model_batch_targets:[targetRow]
+  });
+  expect(x.repos.l3WorldModels.getTarget(String(x.job.payload.batchId),field)).toMatchObject(
+    terminal==='dead_letter'?{status:'dead_letter',noChange:false}:{status:'applied',noChange:true});
+  const fresh=await newTarget(x,field);
+  // Isolate actual worker scheduling from unrelated fixture capture jobs.
+  x.db.db.prepare("UPDATE evolution_jobs SET status='succeeded' WHERE id NOT IN (?,?)").run(x.job.id,fresh.id);
+  x.model.complete.mockResolvedValue(output(field,'create','Genuine new value'));
+  await x.service.runWorkerOnce(10);
+  expect(x.repos.runtime.getJob(fresh.id)?.status).toBe('succeeded');expect(x.read()).toBe('Genuine new value');
+  await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
+  const service=f.createTestMemoryService({db,skillLlm:x.model});const repos=new Repositories(db.db);
+  const replay=new L3WorldModelTraceFieldPipeline({repos,skillLlm:x.model}).updateField(repos.runtime.getJob(x.job.id)!);
+  if(terminal==='dead_letter')await expect(replay).rejects.toThrow('already dead letter');else await replay;
+  expect(x.read(service)).toBe('Genuine new value');
+});
+
+it.each(fields)('preserves a pre-fix %s clear before metadata-only import',async field=>{
+  const source=await setup(field);const backup=backupFor(source);const x=targetFor(source,field);
+  x.service.deleteMemory(x.memory.id);
+  x.db.db.prepare("DELETE FROM runtime_kv WHERE key GLOB 'l3_field_deletion_v1:*'").run();
+  const key='l3_field_override_v1:'+JSON.stringify([x.viewer.projectId??null,field]);
+  const marker=backup.tables.runtime_kv!.find(row=>row.key===key)!;expect(marker).toBeDefined();
+  x.service.importBundle({bundle:{...backup,tables:{runtime_kv:[marker]}},conflictStrategy:'replace'});
+  expect(x.read()).toBeNull();
+  x.service.importBundle({bundle:backup,conflictStrategy:'skip'});expect(x.read()).toBeNull();
+  source.model.complete.mockResolvedValue(output(field,'create','Old evidence through split metadata'));
+  expect(x.repos.runtime.getJob(source.job.id)?.status).toBe('succeeded');
+  await x.runner.updateField(x.repos.runtime.getJob(source.job.id)!);
+  expect(source.model.complete).not.toHaveBeenCalled();expect(x.read()).toBeNull();
+  await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
+  const service=f.createTestMemoryService({db,skillLlm:source.model});expect(x.read(service)).toBeNull();
+});
