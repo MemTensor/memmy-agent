@@ -3,12 +3,34 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryDb } from "../../src/storage/db.js";
-import { ensurePanelCache } from "../../src/storage/panel-cache.js";
+import { ensurePanelCache, fillPanelCacheBatch } from "../../src/storage/panel-cache.js";
 import { Repositories } from "../../src/storage/repositories.js";
 import { panelSourceForStatsRow } from "../../src/utils/panel-source.js";
 import type { MemoryFilter } from "../../src/types.js";
 
 describe("panel member projection", () => {
+  it("builds indexes after a restartable cold backfill, including selected batches", () => {
+    const root = mkdtempSync(join(tmpdir(), "panel-member-backfill-"));
+    const path = join(root, "memory.sqlite");
+    let db = new MemoryDb({path});
+    const indexes = () => db.db.prepare("SELECT name FROM sqlite_master WHERE name IN ('idx_panel_memory_source','idx_panel_memory_order')").all();
+    try {
+      db.db.exec(`INSERT INTO memories(id,user_id,timeline,memory_value,memory_layer,created_at,updated_at,info_json)
+        VALUES('a','owner','now','body','L1','2026-10-30','2026-10-31','{"source":"cursor"}'),
+        ('b','owner','now','body','L1','2026-10-30','2026-10-31','{"source":"codex"}');
+        DROP INDEX idx_panel_memory_source; DROP INDEX idx_panel_memory_order;`);
+      db.close(); db = new MemoryDb({path});
+      expect(indexes()).toHaveLength(0);
+      expect(fillPanelCacheBatch(db.db,"memories",1,["a"])).toBe(1);
+      expect(fillPanelCacheBatch(db.db,"memories",1,["a"])).toBe(0);
+      expect(indexes()).toHaveLength(0);
+      db.close(); db = new MemoryDb({path});
+      expect(indexes()).toHaveLength(0);
+      expect(fillPanelCacheBatch(db.db,"memories",1)).toBe(1);
+      expect(indexes()).toHaveLength(2);
+      expect(new Repositories(db.db).memories.panelMemberIds({panelSource:true,panelVisible:true,agentId:"cursor"})).toEqual(["a"]);
+    } finally { if(db.db.open)db.close(); rmSync(root,{recursive:true,force:true}); }
+  });
   it("preserves legacy IDs and order while avoiding source parsing on every fresh view", () => {
     const db = new MemoryDb({path: ":memory:"});
     try {
