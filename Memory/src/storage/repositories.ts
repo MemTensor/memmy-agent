@@ -1,6 +1,10 @@
 import { sharedProjectIds, sharedProjectIdentity } from "../service/namespace/shared-project.js";
 import { DEVICE_MEMORY_OWNER } from "../service/namespace/memory-owner.js";
 import {
+  hasL3FieldDeletion, isL3FieldDeletionBoundaryKey,
+  preserveExistingL3FieldDeletions, recordL3FieldDeletion
+} from "./l3-field-deletion-boundary.js";
+import {
   ensureProjectEnvironmentScanBoundary, isProjectEnvironmentScanBoundaryKey,
   readProjectEnvironmentScanBoundary, recordProjectEnvironmentScanRequest,
   revokeProjectEnvironmentScans
@@ -5643,6 +5647,12 @@ export class RuntimeRepository {
         .all() as Array<{project_id: string}> : [];
       for (const row of existingProjects) ensureProjectEnvironmentScanBoundary(this.db, row.project_id, nowIso());
       const importedScanProjects = new Set<string>();
+      const importedTraceTargets: Array<{batchId: string; field: L3WorldModelTargetField}> = [];
+      if ((Array.isArray(tables.l3_world_model_batch_targets) && tables.l3_world_model_batch_targets.length) ||
+          (Array.isArray(tables.evolution_jobs) && tables.evolution_jobs.some(row =>
+            isRecordLike(row) && row.job_type === "l3_world_model_update"))) {
+        preserveExistingL3FieldDeletions(this.db, nowIso());
+      }
       for (const table of BUNDLE_TABLES) {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
@@ -5653,8 +5663,9 @@ export class RuntimeRepository {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
           }
           const existed = identity !== undefined && this.rowExists(table, identity.columns, identity.values);
-          if (table === "runtime_kv" && isProjectEnvironmentScanBoundaryKey(normalized.key)) {
-            // Queue publication rights belong to this installation, not a bundle.
+          if (table === "runtime_kv" && (isProjectEnvironmentScanBoundaryKey(normalized.key) ||
+              isL3FieldDeletionBoundaryKey(normalized.key))) {
+            // Local publication and deletion metadata cannot come from a bundle.
             result.skipped[table] = (result.skipped[table] ?? 0) + 1;
             continue;
           }
@@ -5701,6 +5712,16 @@ export class RuntimeRepository {
             const payload = parseJson<Record<string, unknown>>(String(normalized.payload_json), {});
             if (typeof payload.projectId === "string") importedScanProjects.add(payload.projectId);
           }
+          if (table === "l3_world_model_batch_targets" &&
+              typeof normalized.batch_id === "string" && isL3WorldModelTargetField(normalized.target_field)) {
+            importedTraceTargets.push({batchId: normalized.batch_id, field: normalized.target_field});
+          }
+          if (table === "evolution_jobs" && normalized.job_type === "l3_world_model_update") {
+            const payload = parseJson<Record<string, unknown>>(String(normalized.payload_json), {});
+            if (typeof payload.batchId === "string" && isL3WorldModelTargetField(payload.targetField)) {
+              importedTraceTargets.push({batchId: payload.batchId, field: payload.targetField});
+            }
+          }
           if (existed) {
             result.conflicts.push({
               table,
@@ -5720,6 +5741,15 @@ export class RuntimeRepository {
           // Imported pending work has no local publication grant. An explicit
           // new scan can acquire one without rewriting the imported task.
           revokeProjectEnvironmentScans(this.db, projectId, nowIso());
+        }
+      }
+      for (const target of importedTraceTargets) {
+        const batch = this.db.prepare(`SELECT batch.project_id,target.status
+          FROM l3_world_model_evidence_batches AS batch JOIN l3_world_model_batch_targets AS target
+            ON target.batch_id=batch.id WHERE batch.id=? AND target.target_field=?`)
+          .get(target.batchId, target.field) as {project_id: string | null; status: string} | undefined;
+        if (batch?.status === "queued" && hasL3FieldDeletion(this.db, batch.project_id, target.field)) {
+          cancelL3WorldModelTraceTarget(this.db, target.batchId, target.field, nowIso());
         }
       }
     })();
@@ -6288,9 +6318,10 @@ export class L3WorldModelRepository {
       if (!before) throw new Error(`corrupt L3 World Model scope memory: ${memoryId}`);
       validateL3WorldModelMemory(before, scope.userId, scope.projectId);
       const snapshot = this.effectiveFields(scope.projectId ?? null);
+      const deletesProfile = snapshot.sources.projectEnvironmentProfile.includes(memoryId);
       if (scope.projectId) {
         ensureProjectEnvironmentScanBoundary(this.db, scope.projectId, at);
-        if (snapshot.sources.projectEnvironmentProfile.includes(memoryId)) {
+        if (deletesProfile) {
           revokeProjectEnvironmentScans(this.db, scope.projectId, at);
         }
       }
@@ -6314,6 +6345,9 @@ export class L3WorldModelRepository {
       // queued work, in-flight commits and retries all observe the same result.
       const revokedFields = L3_FIELD_NAMES.filter(field =>
         snapshot.sources[l3WorldModelFieldProperty(field)].includes(memoryId));
+      for (const field of revokedFields) {
+        if (isL3WorldModelTargetField(field)) recordL3FieldDeletion(this.db, scope.projectId ?? null, field, at);
+      }
       const projects = this.sharedProjectIds(scope.projectId ?? null);
       const pendingTargets = this.db.prepare(
         `SELECT target.batch_id, target.target_field
@@ -6324,32 +6358,11 @@ export class L3WorldModelRepository {
            AND target.status = 'queued'`
       ).all({ ...(scope.projectId == null ? {} : {projects: toJson(projects)}), fields: toJson(revokedFields) }) as
         Array<{ batch_id: string; target_field: L3WorldModelTargetField }>;
-      const affectedBatchIds = new Set<string>();
       for (const target of pendingTargets) {
-        const job = this.db.prepare(
-          `SELECT id FROM evolution_jobs
-           WHERE job_type = 'l3_world_model_update'
-             AND json_extract(payload_json, '$.batchId') = ?
-             AND json_extract(payload_json, '$.targetField') = ?
-             AND status IN ('queued', 'leased', 'failed')`
-        ).get(target.batch_id, target.target_field) as { id: string } | undefined;
-        if (!job) continue;
-        this.db.prepare(
-          `UPDATE l3_world_model_batch_targets
-           SET status = 'applied', no_change = 1, applied_at = ?, updated_at = ?
-           WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
-        ).run(at, at, target.batch_id, target.target_field);
-        this.db.prepare(
-          `UPDATE evolution_jobs
-           SET status = 'succeeded', leased_until = NULL, updated_at = ? WHERE id = ?`
-        ).run(at, job.id);
-        affectedBatchIds.add(target.batch_id);
-      }
-      for (const batchId of affectedBatchIds) {
-        updateL3WorldModelBatchTerminalOutcome(this.db, batchId, at);
+        cancelL3WorldModelTraceTarget(this.db, target.batch_id, target.target_field, at);
       }
 
-      if (scope.projectId) {
+      if (scope.projectId && deletesProfile) {
         this.db.prepare(
           `UPDATE evolution_jobs
            SET status = 'succeeded', leased_until = NULL, last_error = NULL, updated_at = ?
@@ -9164,6 +9177,18 @@ function updateL3WorldModelBatchTerminalOutcome(
      SET terminal_outcome = ?, completed_at = ?, updated_at = ?
      WHERE id = ?`
   ).run(terminalOutcome, at, at, batchId);
+}
+
+/** Persist revocation even when a partial bundle has not supplied its job yet. */
+function cancelL3WorldModelTraceTarget(db: Database.Database, batchId: string, field: L3WorldModelTargetField, at: string): void {
+  db.prepare(`UPDATE l3_world_model_batch_targets
+    SET status='applied',no_change=1,applied_at=?,updated_at=?
+    WHERE batch_id=? AND target_field=? AND status='queued'`).run(at, at, batchId, field);
+  db.prepare(`UPDATE evolution_jobs SET status='succeeded',leased_until=NULL,updated_at=?
+    WHERE job_type='l3_world_model_update'
+      AND json_extract(payload_json,'$.batchId')=? AND json_extract(payload_json,'$.targetField')=?
+      AND status IN ('queued','leased','failed')`).run(at, batchId, field);
+  updateL3WorldModelBatchTerminalOutcome(db, batchId, at);
 }
 
 function isSerializedBuffer(value: unknown): value is { __memmy_type: "buffer"; base64: string } {
