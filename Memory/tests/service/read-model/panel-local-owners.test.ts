@@ -14,6 +14,30 @@ function sources(db:MemoryDb){
   return Object.fromEntries(["sessions","episodes","raw_turns","memories","user_memories","evolution_jobs","trace_policy_links"].map(table=>[table,db.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
 }
 describe("local management reads every stored owner",()=>{
+  it("keeps cloud task browse pages owner-scoped while local views span historical owners",async()=>{
+    const {service,repos,turns}=await setup();
+    const first=repos.runtime.getEpisode(turns[0]!.episodeId!)!;
+    const expected=[first.id];
+    for(let i=0;i<21;i++){
+      const id=`cloud-page-a-${i}`;expected.push(id);
+      repos.runtime.createEpisode({...first,id,l1MemoryIds:[],rawTurnIds:[],turnCount:0});
+    }
+    const request={namespace:ns("a")};
+    const list=await service.readPanel<{total:number}>("tasks",[request]);expect(list.data.total).toBe(22);
+    const view=await service.browsePanel({op:"create",filter:{section:"tasks"}},request,undefined,false);
+    if(!("viewId" in view)||!("tasks" in view)||!Array.isArray(view.tasks))throw new Error("Expected cloud task view");
+    expect(view.total).toBe(22);expect(view.totalPages).toBe(2);expect(view.tasks).toHaveLength(20);
+    const page=await service.browsePanel({op:"page",viewId:view.viewId,page:2},request,undefined,false);
+    if(!("tasks" in page)||!Array.isArray(page.tasks))throw new Error("Expected cloud task page");
+    expect(page.tasks).toHaveLength(2);
+    expect([...view.tasks,...page.tasks].map(task=>task.id).sort()).toEqual(expected.sort());
+    await expect(service.browsePanel({op:"page",viewId:view.viewId,page:1},{namespace:ns("b")},undefined,false)).rejects.toThrow("expired");
+    const local=await service.browsePanel({op:"create",filter:{section:"tasks"}},request);
+    if(!("viewId" in local)||!("total" in local))throw new Error("Expected local view");
+    expect(local.total).toBe(24);
+    const switched=await service.browsePanel({op:"page",viewId:local.viewId,page:2},{namespace:ns("b")});
+    expect(switched).toMatchObject({viewId:local.viewId,total:24});
+  });
   it("shows and searches old A/B and NULL records with identical counts, preserving every source row",async()=>{
     const {db,service,turns}=await setup(),before=sources(db);
     for(const userId of ["a","b","unrelated"]){

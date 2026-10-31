@@ -1,8 +1,8 @@
 import { sharedProjectIds, sharedProjectIdentity } from "../service/namespace/shared-project.js";
 import { DEVICE_MEMORY_OWNER } from "../service/namespace/memory-owner.js";
 import {
-  hasL3FieldDeletion, isL3FieldDeletionBoundaryKey,
-  preserveExistingL3FieldDeletions, recordL3FieldDeletion
+  hasL3FieldDeletion, isL3FieldDeletionBoundaryKey, l3FieldOverrideIdentity,
+  preserveExistingL3FieldDeletions, protectedL3FieldOverrideKeys, recordL3FieldDeletion
 } from "./l3-field-deletion-boundary.js";
 import {
   ensureProjectEnvironmentScanBoundary, isProjectEnvironmentScanBoundaryKey,
@@ -2610,7 +2610,7 @@ export class RuntimeRepository {
   }
 
   panelEpisodeIds(userId?: string, query?: string, sourceAgent?: string): string[] {
-    const built = buildEpisodeWhere(userId, query, sourceAgent);
+    const built = buildEpisodeWhere(userId, query, sourceAgent, true);
     return this.db.prepare(`SELECT id FROM episodes WHERE ${built.where} ORDER BY opened_at DESC, updated_at DESC, id DESC`).pluck().all(...built.params) as string[];
   }
 
@@ -5827,6 +5827,13 @@ export class RuntimeRepository {
       // Metadata-only bundles can arrive before their tasks and overwrite old
       // cleared markers. Preserve local intent before any imported rows change.
       preserveExistingL3FieldDeletions(this.db, nowIso());
+      const replacingL3Data = conflictStrategy === "replace" &&
+        ((Array.isArray(tables.l3_world_model_scopes) && tables.l3_world_model_scopes.length > 0) ||
+         (Array.isArray(tables.memories) && tables.memories.some(row => isRecordLike(row) && row.memory_layer === "L3")));
+      const protectedFieldOverrides = protectedL3FieldOverrideKeys(this.db,
+        Array.isArray(tables.runtime_kv) ? tables.runtime_kv.filter(isRecordLike).map(row => row.key) : [], replacingL3Data);
+      const acceptedL3Scopes = new Set<string>();
+      const acceptedL3Memories = new Set<string>();
       for (const table of BUNDLE_TABLES) {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
@@ -5860,7 +5867,19 @@ export class RuntimeRepository {
             counts[table] = (counts[table] ?? 0) + 1;
             continue;
           }
-          if (existed && conflictStrategy === "skip") {
+          // Old override metadata must not redirect a locally deleted/rebound
+          // field. Unprotected fields still follow the requested strategy.
+          const protectedOverride = table === "runtime_kv" && typeof normalized.key === "string" &&
+            protectedFieldOverrides.has(normalized.key);
+          const currentOverride = protectedOverride ? this.db.prepare("SELECT value_json FROM runtime_kv WHERE key=?")
+            .get(normalized.key) as {value_json: string} | undefined : undefined;
+          // Full replace may already have accepted a different scope/memory.
+          // Keep a usable local binding, but let paired valid metadata repair
+          // an orphaned binding instead of permanently hiding the restored row.
+          const keepOverride = protectedOverride &&
+            (usableL3FieldOverride(this.db, String(normalized.key), currentOverride?.value_json) ||
+             !usableL3FieldOverride(this.db, String(normalized.key), normalized.value_json));
+          if (existed && (conflictStrategy === "skip" || (conflictStrategy === "replace" && keepOverride))) {
             result.conflicts.push({
               table,
               primaryKey: identity!.primaryKey,
@@ -5892,6 +5911,8 @@ export class RuntimeRepository {
           this.db
             .prepare(`${verb} INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`)
             .run(...values);
+          if (table === "l3_world_model_scopes" && typeof normalized.scope_key === "string") acceptedL3Scopes.add(normalized.scope_key);
+          if (table === "memories" && normalized.memory_layer === "L3" && typeof normalized.id === "string") acceptedL3Memories.add(normalized.id);
           if (table === "evolution_jobs" && normalized.job_type === "project_environment_profile" &&
               ["queued", "leased", "failed"].includes(String(normalized.status))) {
             const payload = parseJson<Record<string, unknown>>(String(normalized.payload_json), {});
@@ -5922,6 +5943,7 @@ export class RuntimeRepository {
           }
         }
       }
+      if (replacingL3Data) repairRestoredL3FieldOverrides(this.db, protectedFieldOverrides, acceptedL3Scopes, acceptedL3Memories);
       for (const projectId of importedScanProjects) {
         if (!readProjectEnvironmentScanBoundary(this.db, projectId)) {
           // Imported pending work has no local publication grant. An explicit
@@ -6079,6 +6101,60 @@ export class L3WorldModelScopeWorkspaceConflictError extends Error {
 
 function l3FieldStateKey(projectId: string | null, field: L3WorldModelFieldName): string {
   return `l3_field_override_v1:${JSON.stringify([projectId, field])}`;
+}
+
+function usableL3FieldOverride(db: Database.Database, key: string, valueJson: unknown): boolean {
+  const identity = l3FieldOverrideIdentity(key);
+  if (!identity || typeof valueJson !== "string") return false;
+  const state = parseJson<{cleared?: unknown; revision?: unknown; memoryId?: unknown} | undefined>(valueJson, undefined);
+  if (!state || typeof state.cleared !== "boolean" || typeof state.revision !== "string") return false;
+  if (state.cleared) return true;
+  if (typeof state.memoryId !== "string") return false;
+  const [projectId, field] = identity;
+  const memory = boundL3FieldMemory(db, projectId, state.memoryId);
+  return !!memory && fieldsFromL3WorldModelMemory(memory)[l3WorldModelFieldProperty(field)] !== null;
+}
+
+function boundL3FieldMemory(db: Database.Database, projectId: string | null, memoryId: string): MemoryRow | undefined {
+  const projects = sharedProjectIds(db, projectId);
+  const row = db.prepare(`SELECT m.*,s.project_id AS scope_project_id FROM memories m
+    JOIN l3_world_model_scopes s ON s.memory_id=m.id AND s.user_id=m.user_id
+    WHERE m.id=? AND m.user_id=? AND m.memory_layer='L3' AND m.status='activated' AND m.deleted_at IS NULL
+      AND ${projectId === null ? "s.project_id IS NULL" : "s.project_id IN (SELECT value FROM json_each(?))"}`)
+    .get(memoryId, DEVICE_MEMORY_OWNER, ...(projectId === null ? [] : [JSON.stringify(projects)])) as
+      (MemorySqlRow & {scope_project_id: string | null}) | undefined;
+  if (!row) return undefined;
+  const memory = memoryFromSql(row);
+  try { validateL3WorldModelMemory(memory, DEVICE_MEMORY_OWNER, row.scope_project_id); }
+  catch { return undefined; }
+  return memory;
+}
+
+/** Data-only replace must also reconcile the binding retained by an earlier
+ * metadata-only import. Only actually accepted, validated scopes/rows qualify. */
+function repairRestoredL3FieldOverrides(db: Database.Database, keys: Set<string>, scopes: Set<string>, memories: Set<string>): void {
+  if (!scopes.size && !memories.size) return;
+  for (const key of keys) {
+    const current = db.prepare("SELECT value_json FROM runtime_kv WHERE key=?").get(key) as {value_json: string} | undefined;
+    if (!current || usableL3FieldOverride(db, key, current.value_json)) continue;
+    const identity = l3FieldOverrideIdentity(key);
+    if (!identity) continue;
+    const [projectId, field] = identity;
+    const rows = db.prepare(`SELECT scope_key,project_id,memory_id FROM l3_world_model_scopes
+      WHERE user_id=? AND (scope_key IN (SELECT value FROM json_each(?)) OR memory_id IN (SELECT value FROM json_each(?)))
+        AND project_id IS ? ORDER BY scope_key`)
+      .all(DEVICE_MEMORY_OWNER, JSON.stringify([...scopes]), JSON.stringify([...memories]), projectId) as
+        Array<{scope_key: string; project_id: string | null; memory_id: string | null}>;
+    for (const scope of rows) {
+      const memory = scope.memory_id ? boundL3FieldMemory(db, projectId, scope.memory_id) : undefined;
+      // Only positive restored field evidence can repair a value binding.
+      // Partial/alias/empty scope data is not an explicit field deletion.
+      if (!memory || fieldsFromL3WorldModelMemory(memory)[l3WorldModelFieldProperty(field)] === null) continue;
+      db.prepare("UPDATE runtime_kv SET value_json=?,updated_at=? WHERE key=?")
+        .run(toJson({cleared: false, memoryId: memory.id, revision: newId("l3revision")}), nowIso(), key);
+      break;
+    }
+  }
 }
 
 const L3_FIELD_NAMES: L3WorldModelFieldName[] = ["general_rules_and_safety_constraints", "project_environment_profile", "project_contract", "domain_knowledge"];

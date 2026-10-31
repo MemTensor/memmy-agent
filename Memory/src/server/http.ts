@@ -1506,7 +1506,7 @@ function authenticate(
     return {
       kind: "cloud",
       tokenId: stableTokenId(candidate!),
-      namespace: mergeNamespaces(cloudNamespace, namespaceFromRequest(request, url)),
+      namespace: mergeNamespaces(namespaceFromRequest(request, url), cloudNamespace),
       authenticatedNamespace: cloudNamespace,
       scopes: ["*"]
     };
@@ -1519,7 +1519,7 @@ function authenticate(
     return {
       kind: "scoped",
       tokenId: stableTokenId(candidate!),
-      namespace: mergeNamespaces(scoped.namespace, namespaceFromRequest(request, url)),
+      namespace: mergeNamespaces(namespaceFromRequest(request, url), scoped.namespace),
       authenticatedNamespace: scoped.namespace,
       scopes: scoped.scopes ?? ["memory:read", "memory:write"]
     };

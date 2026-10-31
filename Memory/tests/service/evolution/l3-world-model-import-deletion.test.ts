@@ -262,3 +262,160 @@ it.each(fields)('preserves a pre-fix %s clear before metadata-only import',async
   await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
   const service=f.createTestMemoryService({db,skillLlm:source.model});expect(x.read(service)).toBeNull();
 });
+
+it.each(fields)('preserves the current %s binding when old metadata precedes a split task import',async field=>{
+  const source=await setup(field);const backup=backupFor(source);const x=targetFor(source,field);
+  x.service.deleteMemory(x.memory.id);
+  const fresh=x.repos.l3WorldModels.upsertField({userId:device,projectId:x.viewer.projectId,targetField:field,value:'New local value after deletion'})!;
+  const key='l3_field_override_v1:'+JSON.stringify([x.viewer.projectId??null,field]);
+  const before=x.repos.runtime.getKv(key);
+  const tables={...backup.tables};const jobs=tables.evolution_jobs;const batches=tables.l3_world_model_evidence_batches;const targets=tables.l3_world_model_batch_targets;
+  delete tables.evolution_jobs;delete tables.l3_world_model_evidence_batches;delete tables.l3_world_model_batch_targets;
+  x.repos.runtime.importBundleTables({evolution_jobs:jobs},{conflictStrategy:'skip'});
+  const metadata=x.repos.runtime.importBundleTables({runtime_kv:tables.runtime_kv},{conflictStrategy:'replace'});
+  expect(x.read()).toBe('New local value after deletion');expect(x.repos.runtime.getKv(key)).toEqual(before);
+  expect(metadata.conflicts).toContainEqual(expect.objectContaining({table:'runtime_kv',sourceId:key,action:'skipped'}));
+  x.repos.runtime.importBundleTables(tables,{conflictStrategy:'skip'});
+  x.repos.runtime.importBundleTables({l3_world_model_evidence_batches:batches},{conflictStrategy:'skip'});
+  x.repos.runtime.importBundleTables({l3_world_model_batch_targets:targets},{conflictStrategy:'skip'});
+  await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
+  const service=f.createTestMemoryService({db,skillLlm:source.model});const repos=new Repositories(db.db);
+  source.model.complete.mockResolvedValue(output(field,'update','Old imported value'));
+  await new L3WorldModelTraceFieldPipeline({repos,skillLlm:source.model}).updateField(repos.runtime.getJob(source.job.id)!);
+  expect(source.model.complete).not.toHaveBeenCalled();expect(x.read(service)).toBe('New local value after deletion');
+  expect(repos.memories.get(fresh.id)?.userId).toBe(device);
+});
+
+it.each(fields)('preserves an explicit %s clear and its revision during metadata replacement',async field=>{
+  const source=await setup(field);const backup=backupFor(source);const x=targetFor(source,field);
+  x.service.deleteMemory(x.memory.id);
+  const key='l3_field_override_v1:'+JSON.stringify([x.viewer.projectId??null,field]);
+  const before=x.repos.runtime.getKv(key);
+  x.service.importBundle({bundle:{...backup,tables:{runtime_kv:backup.tables.runtime_kv}},conflictStrategy:'replace'});
+  expect(x.read()).toBeNull();expect(x.repos.runtime.getKv(key)).toEqual(before);
+});
+
+it.each(fields)('keeps normal replace import working for an undeleted %s field',async field=>{
+  const source=await setup(field);const x=targetFor(source,field);
+  x.service.importBundle({bundle:backupFor(source),conflictStrategy:'replace'});
+  expect(x.read()).toBe('Latest device content');
+  expect(x.repos.runtime.getJob(source.job.id)?.userId).toBe('account-a');
+  await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
+  const service=f.createTestMemoryService({db,skillLlm:source.model});expect(x.read(service)).toBe('Latest device content');
+});
+
+it.each(fields.flatMap(field=>['skip','replace'].map(strategy=>({field,strategy:strategy as 'skip'|'replace'}))))('restores $field into an empty database using $strategy',async({field,strategy})=>{
+  const source=await setup(field);const x=f.createTestService({skillLlm:source.model});
+  x.service.importBundle({bundle:backupFor(source),conflictStrategy:strategy});
+  expect(source.read(x.service)).toBe('Latest device content');
+  expect(new Repositories(x.db.db).runtime.getJob(source.job.id)?.userId).toBe('account-a');
+  await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
+  const service=f.createTestMemoryService({db,skillLlm:source.model});expect(source.read(service)).toBe('Latest device content');
+});
+
+it('rolls back an error import without changing the post-deletion field binding',async()=>{
+  const source=await setup('project_contract');const x=targetFor(source,'project_contract');
+  x.service.deleteMemory(x.memory.id);
+  x.repos.l3WorldModels.upsertField({userId:device,projectId:x.viewer.projectId,targetField:'project_contract',value:'Keep local binding'});
+  const before=x.db.db.prepare('SELECT * FROM runtime_kv ORDER BY key').all();
+  expect(()=>x.service.importBundle({bundle:{...backupFor(source),tables:{runtime_kv:backupFor(source).tables.runtime_kv}},conflictStrategy:'error'})).toThrow('import conflict');
+  expect(x.db.db.prepare('SELECT * FROM runtime_kv ORDER BY key').all()).toEqual(before);
+  expect(x.read()).toBe('Keep local binding');
+});
+
+it.each(fields.flatMap(field=>['atomic','data-first','metadata-first','scope-first','memory-first'].map(order=>({field,order}))))('keeps $field readable after a complete replace restore ($order)',async({field,order})=>{
+  const source=await setup(field);const backup=backupFor(source);const x=targetFor(source,field);
+  x.service.deleteMemory(x.memory.id);
+  x.repos.l3WorldModels.upsertField({userId:device,projectId:x.viewer.projectId,targetField:field,value:'New local binding'});
+  if(order==='atomic')x.service.importBundle({bundle:backup,conflictStrategy:'replace'});
+  else if(order==='data-first'){
+    const tables={...backup.tables};delete tables.runtime_kv;
+    x.service.importBundle({bundle:{...backup,tables},conflictStrategy:'replace'});
+    x.service.importBundle({bundle:{...backup,tables:{runtime_kv:backup.tables.runtime_kv}},conflictStrategy:'replace'});
+  }else{
+    x.service.importBundle({bundle:{...backup,tables:{runtime_kv:backup.tables.runtime_kv}},conflictStrategy:'replace'});
+    const tables={...backup.tables};delete tables.runtime_kv;
+    if(order==='scope-first'||order==='memory-first'){
+      const first=order==='scope-first'?'l3_world_model_scopes':'memories';
+      if(order==='scope-first'){
+        // A scope referencing a not-yet-restored memory must fail atomically;
+        // retry it with its prerequisite rows rather than bypassing the FK.
+        const before=x.db.db.prepare('SELECT * FROM runtime_kv ORDER BY key').all();
+        expect(()=>x.service.importBundle({bundle:{...backup,tables:{[first]:tables[first]}},conflictStrategy:'replace'})).toThrow('FOREIGN KEY');
+        expect(x.db.db.prepare('SELECT * FROM runtime_kv ORDER BY key').all()).toEqual(before);
+        expect(x.read()).toBe('New local binding');
+      }else{
+        x.service.importBundle({bundle:{...backup,tables:{[first]:tables[first]}},conflictStrategy:'replace'});
+        delete tables[first];
+      }
+    }
+    x.service.importBundle({bundle:{...backup,tables},conflictStrategy:'replace'});
+  }
+  expect(x.read()).toBe('Latest device content');
+  source.model.complete.mockResolvedValue(output(field,'update','Obsolete task overwrite'));
+  await x.runner.updateField(x.repos.runtime.getJob(source.job.id)!);
+  expect(source.model.complete).not.toHaveBeenCalled();expect(x.read()).toBe('Latest device content');
+  await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
+  const service=f.createTestMemoryService({db,skillLlm:source.model});expect(x.read(service)).toBe('Latest device content');
+});
+
+it.each(['missing','number','numeric-clear'] as const)('repairs a legacy clear with %s control metadata without reviving content',async mode=>{
+  const source=await setup('project_contract');const x=targetFor(source,'project_contract');
+  x.service.deleteMemory(x.memory.id);
+  const key='l3_field_override_v1:'+JSON.stringify([x.viewer.projectId??null,'project_contract']);
+  const state=x.repos.runtime.getKv(key)!.value as Record<string,unknown>;
+  if(mode==='missing')delete state.revision;else if(mode==='number')state.revision=42;else state.cleared=1;
+  x.repos.runtime.setKv(key,state);
+  x.service.importBundle({bundle:backupFor(source),conflictStrategy:'replace'});
+  expect(x.read()).toBeNull();expect(x.repos.runtime.getKv(key)?.value).toEqual({cleared:true,revision:expect.any(String)});
+  await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
+  const service=f.createTestMemoryService({db,skillLlm:source.model});expect(x.read(service)).toBeNull();
+});
+
+it.each(['missing','number'] as const)('restores a valid binding over a non-clear marker with a %s revision',async mode=>{
+  const source=await setup('project_contract');const x=targetFor(source,'project_contract');
+  x.service.deleteMemory(x.memory.id);
+  x.repos.l3WorldModels.upsertField({userId:device,projectId:x.viewer.projectId,targetField:'project_contract',value:'Current value'});
+  const key='l3_field_override_v1:'+JSON.stringify([x.viewer.projectId??null,'project_contract']);
+  const state=x.repos.runtime.getKv(key)!.value as Record<string,unknown>;
+  if(mode==='missing')delete state.revision;else state.revision=42;
+  x.repos.runtime.setKv(key,state);
+  x.service.importBundle({bundle:backupFor(source),conflictStrategy:'replace'});
+  expect(x.read()).toBe('Latest device content');
+  await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
+  const service=f.createTestMemoryService({db,skillLlm:source.model});expect(x.read(service)).toBe('Latest device content');
+});
+
+it.each(['project_contract','domain_knowledge'] as const)('does not turn an alias missing %s into an explicit clear',async field=>{
+  const x=await setup(field);x.service.deleteMemory(x.memory.id);
+  x.repos.l3WorldModels.upsertField({userId:device,projectId:x.current.projectId,targetField:field,value:'Restored canonical field'});
+  const legacy=x.repos.runtime.getSession(x.job.sessionId!)!;
+  const other=field==='project_contract'?'domain_knowledge':'project_contract';
+  const alias=x.repos.l3WorldModels.upsertField({userId:device,projectId:legacy.projectId,targetField:other,value:'Independent alias field'})!;
+  const backup=backupFor(x);
+  const key='l3_field_override_v1:'+JSON.stringify([x.current.projectId,field]);
+  const scopes=backup.tables.l3_world_model_scopes!.filter(row=>row.memory_id===alias.id);
+  expect(scopes).toHaveLength(1);
+  x.service.importBundle({bundle:{...backup,tables:{memories:backup.tables.memories,l3_world_model_scopes:scopes}},conflictStrategy:'replace'});
+  expect(x.repos.runtime.getKv(key)?.value).toMatchObject({cleared:false});
+  x.service.importBundle({bundle:backup,conflictStrategy:'replace'});
+  x.service.importBundle({bundle:backup,conflictStrategy:'replace'});
+  expect(x.read()).toBe('Restored canonical field');
+  await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
+  const service=f.createTestMemoryService({db,skillLlm:x.model});expect(x.read(service)).toBe('Restored canonical field');
+});
+
+it.each(fields)('does not infer an explicit %s clear from a scope-only placeholder',async field=>{
+  const x=await setup(field);x.service.deleteMemory(x.memory.id);
+  x.repos.l3WorldModels.upsertField({userId:device,projectId:x.current.projectId,targetField:field,value:'Canonical content to restore'});
+  const backup=backupFor(x);
+  const scope=backup.tables.l3_world_model_scopes!.find(row=>row.user_id===device&&row.project_id===(x.current.projectId??null))!;
+  expect(scope).toBeDefined();
+  const key='l3_field_override_v1:'+JSON.stringify([x.current.projectId??null,field]);
+  x.service.importBundle({bundle:{...backup,tables:{l3_world_model_scopes:[{...scope,memory_id:null}]}},conflictStrategy:'replace'});
+  expect(x.repos.runtime.getKv(key)?.value).toMatchObject({cleared:false});
+  x.service.importBundle({bundle:backup,conflictStrategy:'replace'});
+  expect(x.read()).toBe('Canonical content to restore');
+  await x.service.stop();x.db.close();const db=new MemoryDb({path:join(x.root,'memory.sqlite')});
+  const service=f.createTestMemoryService({db,skillLlm:x.model});expect(x.read(service)).toBe('Canonical content to restore');
+});
