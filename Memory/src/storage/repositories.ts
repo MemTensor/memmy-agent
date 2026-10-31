@@ -6308,12 +6308,22 @@ export class L3WorldModelRepository {
         `UPDATE l3_world_model_scopes SET memory_id = NULL, updated_at = ? WHERE scope_key = ?`
       ).run(at, scope.scopeKey);
 
+      // A device record may contain the effective fields for historical owners
+      // and verified project aliases. Revoke only the fields it actually
+      // supplied, using the existing persistent target terminal state so that
+      // queued work, in-flight commits and retries all observe the same result.
+      const revokedFields = L3_FIELD_NAMES.filter(field =>
+        snapshot.sources[l3WorldModelFieldProperty(field)].includes(memoryId));
+      const projects = this.sharedProjectIds(scope.projectId ?? null);
       const pendingTargets = this.db.prepare(
         `SELECT target.batch_id, target.target_field
          FROM l3_world_model_batch_targets AS target
          JOIN l3_world_model_evidence_batches AS batch ON batch.id = target.batch_id
-         WHERE batch.scope_key = ? AND target.status = 'queued'`
-      ).all(scope.scopeKey) as Array<{ batch_id: string; target_field: L3WorldModelTargetField }>;
+         WHERE ${scope.projectId == null ? "batch.project_id IS NULL" : "batch.project_id IN (SELECT value FROM json_each(@projects))"}
+           AND target.target_field IN (SELECT value FROM json_each(@fields))
+           AND target.status = 'queued'`
+      ).all({ ...(scope.projectId == null ? {} : {projects: toJson(projects)}), fields: toJson(revokedFields) }) as
+        Array<{ batch_id: string; target_field: L3WorldModelTargetField }>;
       const affectedBatchIds = new Set<string>();
       for (const target of pendingTargets) {
         const job = this.db.prepare(
