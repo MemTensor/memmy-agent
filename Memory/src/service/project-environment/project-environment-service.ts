@@ -71,7 +71,7 @@ export class ProjectEnvironmentService {
       const session = job.sessionId ? this.deps.repos.runtime.getSession(job.sessionId) : undefined;
       if (!stored || stored.userId !== job.userId || stored.sessionId !== job.sessionId ||
           JSON.stringify(stored.payload) !== JSON.stringify(job.payload) ||
-          !session || session.userId !== payload.userId || session.projectId !== payload.projectId) {
+          !session || session.projectId !== payload.projectId) {
         throw new Error("project_environment_job_scope_mismatch");
       }
       const scope = this.deps.repos.l3WorldModels.getOwnedScope(payload.userId, payload.projectId);

@@ -81,6 +81,77 @@ function oldJobFixture() {
     x.db.db.prepare('UPDATE l3_world_model_scopes SET user_id=?,scope_key=? WHERE project_id=?').run('account-a', l3WorldModelScopeKey('account-a', projectId), projectId);
     return { ...x, repos, model, opened: { ...opened, projectId }, job: req.job, uri };
 }
+it.each(['session_start', 'token_compaction'] as const)('a resumed legacy session can publish a new device %s scan across restart', async trigger => {
+    const x = oldJobFixture();
+    // Preserve an actual old-owner L3 row as well as the old session and scope.
+    const historical = x.repos.l3WorldModels.upsertField({
+        userId: device, projectId: x.opened.projectId,
+        targetField: 'project_contract', value: 'Keep the historical contract'
+    })!;
+    x.db.db.prepare('UPDATE memories SET user_id=?,memory_key=? WHERE id=?')
+        .run('account-a', l3WorldModelMemoryKey('account-a', x.opened.projectId), historical.id);
+    x.db.db.prepare('DELETE FROM l3_world_model_scopes WHERE user_id=? AND project_id=? AND memory_id IS NULL')
+        .run('account-a', x.opened.projectId);
+    x.db.db.prepare('UPDATE l3_world_model_scopes SET user_id=?,scope_key=?,workspace_uri=? WHERE memory_id=?')
+        .run('account-a', l3WorldModelScopeKey('account-a', x.opened.projectId), x.uri, historical.id);
+    x.db.db.prepare("DELETE FROM runtime_kv WHERE key LIKE 'l3_field_override_v1:%'").run();
+    const memoryBefore = x.repos.memories.get(historical.id);
+    const scopeBefore = x.repos.l3WorldModels.getOwnedScope('account-a', x.opened.projectId);
+    const sessionBefore = x.repos.runtime.getSession(x.opened.sessionId)!;
+
+    const resumed = x.service.openSession({
+        sessionId: x.opened.sessionId,
+        namespace: ns('account-b', 'old-scan'),
+        workspaceUri: x.uri, workspaceHostId: deriveWorkspaceHostId('review-machine'),
+        l3WorldModelProtocolVersion: 2, l3WorldModelTransition: 'resume_only'
+    });
+    expect(resumed.resumed).toBe(true);
+    expect(resumed.sessionId).toBe(sessionBefore.id);
+    if (trigger === 'token_compaction') {
+        const completed = await x.service.completeTurn('legacy-session-compaction', {
+            sessionId: resumed.sessionId, query: 'Continue the existing project',
+            answer: 'Continuing with its historical contract', status: 'succeeded'
+        });
+        if (!completed.l1MemoryId) throw new Error('expected registered L1 memory');
+        x.service.l3WorldModelBoundary(resumed.sessionId, {
+            requestId: 'legacy-compaction', adapterId: 'test',
+            namespace: { ...ns('account-b', 'old-scan'), projectId: x.opened.projectId },
+            trigger: 'token_compaction', throughL1MemoryId: completed.l1MemoryId
+        });
+    }
+    const job = x.repos.runtime.listJobs('queued', 100).find(candidate =>
+        candidate.jobType === 'project_environment_profile' && candidate.userId === device &&
+        candidate.sessionId === resumed.sessionId && candidate.payload.projectId === x.opened.projectId &&
+        candidate.payload.trigger === trigger);
+    expect(job).toBeDefined();
+    expect(job!.payload.userId).toBe(device);
+    await new ProjectEnvironmentService({ repos: x.repos, llm: x.model }).processProfileJob(job!);
+    const published = x.repos.l3WorldModels.getMemory(device, x.opened.projectId)!;
+    expect(published.userId).toBe(device);
+    expect(published.info.project_environment_applied_scan_id).toBe(job!.payload.scanId);
+    expect(x.repos.projectEnvironments.getState(device, x.opened.projectId)).toMatchObject({
+        status: 'clean', appliedScanId: job!.payload.scanId
+    });
+    expect(read(x.service, x.opened, 'account-b')).toMatchObject({
+        projectEnvironmentProfile: 'TypeScript project', projectContract: 'Keep the historical contract'
+    });
+    expect(x.repos.memories.get(historical.id)).toEqual(memoryBefore);
+    expect(x.repos.l3WorldModels.getOwnedScope('account-a', x.opened.projectId)).toEqual(scopeBefore);
+    expect(x.repos.runtime.getSession(resumed.sessionId)).toMatchObject({
+        userId: sessionBefore.userId, projectId: sessionBefore.projectId, meta: sessionBefore.meta
+    });
+    await x.service.stop();
+    x.db.close();
+    const reopenedDb = new MemoryDb({ path: join(x.root, 'memory.sqlite') });
+    const reopened = f.createTestMemoryService({ db: reopenedDb, skillLlm: x.model });
+    const repos = new Repositories(reopenedDb.db);
+    expect(read(reopened, x.opened, 'account-c')).toMatchObject({
+        projectEnvironmentProfile: 'TypeScript project', projectContract: 'Keep the historical contract'
+    });
+    expect(repos.memories.get(historical.id)).toEqual(memoryBefore);
+    expect(repos.l3WorldModels.getOwnedScope('account-a', x.opened.projectId)).toEqual(scopeBefore);
+    expect(repos.runtime.getSession(resumed.sessionId)?.userId).toBe('account-a');
+});
 it('restores a v9 queued scan and publishes readable device provenance without rewriting its old scope', async () => {
     const x = oldJobFixture();
     const saved = x.db.db.prepare('SELECT * FROM l3_world_model_scopes WHERE user_id=? AND project_id=?').get('account-a', x.opened.projectId);
@@ -148,10 +219,10 @@ it('deleting one of multiple historical contributors retains the remaining effec
     x.service.deleteMemory(b.id);
     expect(read(x.service, x.opened, 'account-a').projectContract).toBeNull();
 });
-it.each(['session-owner', 'session-project', 'workspace', 'scope-key', 'job-payload'] as const)('rejects a persisted old scan with mismatched %s evidence', async (mismatch) => {
+it.each(['job-owner', 'session-project', 'workspace', 'scope-key', 'job-payload'] as const)('rejects a persisted old scan with mismatched %s evidence', async (mismatch) => {
     const x = oldJobFixture();
-    if (mismatch === 'session-owner')
-        x.db.db.prepare("UPDATE sessions SET user_id='different-owner' WHERE id=?").run(x.opened.sessionId);
+    if (mismatch === 'job-owner')
+        x.job.userId = 'different-owner';
     if (mismatch === 'session-project')
         x.db.db.prepare("UPDATE sessions SET project_id='different-project' WHERE id=?").run(x.opened.sessionId);
     if (mismatch === 'workspace')
