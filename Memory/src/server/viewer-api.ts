@@ -138,27 +138,27 @@ export async function routeViewerRequest(
     return {
       body: {
         ...context.service.panelOverview({ ...envelope, userId }),
-        summary: context.service.panelOverviewSummary({ ...envelope, userId })
+        summary: (await context.service.readPanel("overview",[{ ...envelope, userId }])).data
       }
     };
   }
   if (method === "GET" && path === "/api/v1/analytics") {
-    return { body: context.service.panelAnalysis(envelope) };
+    return { body: (await context.service.readPanel("analysis",[envelope])).data };
   }
   if (method === "GET" && path === "/api/v1/episodes") {
     return {
-      body: context.service.panelTasks({
+      body: (await context.service.readPanel("legacyTasks",[{
         ...envelope,
         q: query(url, "q"),
         sourceAgent: query(url, "sourceAgent"),
         page: numberQuery(url, "page")
-      })
+      }])).data
     };
   }
   const layer = layerForViewerPath(path);
   if (method === "GET" && layer) {
     return {
-      body: context.service.panelItems({
+      body: (await context.service.readPanel("items",[{
         ...envelope,
         ...(layer === "UserMemory" ? { userId: viewerUserId(context) } : {}),
         layer,
@@ -167,7 +167,7 @@ export async function routeViewerRequest(
         sourceAgent: query(url, "sourceAgent"),
         page: numberQuery(url, "page"),
         limit: numberQuery(url, "limit")
-      })
+      }])).data
     };
   }
   if (method === "GET" && path === "/api/v1/api-logs") {

@@ -87,6 +87,29 @@ it("packages the Agent serve entry and its dynamic tools without the standalone 
   await expect(readFile(path.join(destination, pkg, "node_modules/unused-gateway/index.js"))).rejects.toThrow();
 });
 
+it("runs the Memory panel worker and its dependencies after relocating without staging", async () => {
+  const { root, source, destination, put } = await fixture();
+  await put("package/package.json", JSON.stringify({ type: "module", dependencies: { ignore: "synthetic" } }));
+  await put("package/dist/src/server/index.js", `import { Worker } from 'node:worker_threads';
+    const worker = new Worker(new URL('../service/panel/reader-worker.js', import.meta.url), { workerData: 42 });
+    try { console.log(JSON.stringify(await new Promise((resolve, reject) => {
+      worker.once('message', resolve); worker.once('error', reject);
+    }))); } finally { await worker.terminate(); }`);
+  await put("package/dist/src/service/panel/reader-worker.js", `import { parentPort, workerData } from 'node:worker_threads';
+    import { readFileSync } from 'node:fs'; import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.url); const value = require('ignore');
+    parentPort.postMessage([value, workerData, readFileSync(new URL('./worker-note%20%23.txt', import.meta.url), 'utf8')]);`);
+  await put("package/dist/src/service/panel/worker-note #.txt", "worker asset");
+  await put("package/node_modules/ignore/package.json", JSON.stringify({ name: "ignore", main: "index.cjs" }));
+  await put("package/node_modules/ignore/index.cjs", "module.exports = 'worker dependency';");
+  await bundleRuntime({ source, destination, packageDirectory: "package", kind: "memory" });
+  const relocated = path.join(root, "relocated worker #");
+  await rename(destination, relocated);
+  await rm(source, { recursive: true });
+  const output = execFileSync(process.execPath, [path.join(relocated, "package/dist/src/server/index.js")], { encoding: "utf8" });
+  expect(JSON.parse(output)).toEqual(["worker dependency", 42, "worker asset"]);
+});
+
 it("fails packaging when an external package's required dependency is missing", async () => {
   const { source, destination, put } = await fixture();
   await put("package/package.json", JSON.stringify({ type: "module" }));
