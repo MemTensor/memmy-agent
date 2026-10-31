@@ -18,6 +18,8 @@ export function installPanelCache(db: Database.Database): void {
   CREATE TABLE IF NOT EXISTS panel_log_dirty(id INTEGER PRIMARY KEY, revision INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS panel_metric_dirty(id INTEGER PRIMARY KEY, revision INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS panel_memory_facts(id TEXT PRIMARY KEY, memory_layer TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, source TEXT NOT NULL,raw_id TEXT,session_id TEXT);
+  CREATE INDEX IF NOT EXISTS idx_panel_memory_order ON panel_memory_facts(memory_layer,created_at DESC,updated_at DESC,id DESC);
+  CREATE INDEX IF NOT EXISTS idx_panel_memory_source ON panel_memory_facts(source,memory_layer,created_at DESC,updated_at DESC,id DESC);
   CREATE TABLE IF NOT EXISTS panel_memory_visibility(id TEXT PRIMARY KEY,raw_id TEXT);
   CREATE INDEX IF NOT EXISTS idx_panel_memory_raw ON panel_memory_visibility(raw_id,id);
   CREATE TABLE IF NOT EXISTS panel_visibility_dirty(id TEXT PRIMARY KEY,revision INTEGER NOT NULL);
@@ -201,7 +203,7 @@ export function panelLogIdsPending(db: Database.Database, ids: readonly number[]
 }
 /** Shared management predicate. Source state is read live through its primary key;
  * only the declared source pointer is cached, so raw privacy changes need no JSON scan. */
-function visibleFactSql(fact: string): string {
+export function visibleFactSql(fact: string): string {
   return `${fact}.status!='deleted' AND (${fact}.raw_id IS NULL OR EXISTS(
     SELECT 1 FROM raw_turns r WHERE r.id=${fact}.raw_id AND r.deleted_at IS NULL AND r.redacted_at IS NULL
       AND (${fact}.session_id IS NULL OR ${fact}.session_id=r.session_id)))`;
