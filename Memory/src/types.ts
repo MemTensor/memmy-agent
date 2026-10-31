@@ -189,6 +189,8 @@ export interface MemoryStatsRow {
 }
 
 export interface MemoryFilter {
+  /** Request-local exclusions; applied before candidate windows and LIMIT. */
+  excludedIds?: readonly string[];
   userId?: string;
   sessionId?: string;
   conversationId?: string;

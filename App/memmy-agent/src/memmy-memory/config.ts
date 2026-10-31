@@ -7,7 +7,7 @@ export function resolveMemmyMemoryConfig(config: Config | Record<string, any> | 
   const raw = (config as any)?.memmyMemory ?? {};
   return {
     enabled: Boolean(raw?.enabled ?? raw?.enable ?? true),
-    userId: stringOrUndefined(raw?.userId) ?? "local-user",
+    userId: "__memmy_device_memory__",
     retrievalLayers: memoryLayersOrUndefined(raw?.retrievalLayers),
   };
 }

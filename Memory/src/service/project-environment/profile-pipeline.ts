@@ -74,12 +74,11 @@ export class ProjectEnvironmentProfilePipeline {
     const payload = projectEnvironmentProfileJobPayload(job.payload);
     if (job.userId !== payload.userId) throw new Error("project_environment_job_owner_mismatch");
     const state = this.deps.repos.projectEnvironments.getState(payload.userId, payload.projectId);
-    if (!state || state.currentScanId !== payload.scanId) return;
+    if (!state || state.currentScanId !== payload.scanId ||
+        !this.deps.repos.projectEnvironments.isCurrentScan(payload.userId, payload.projectId, payload.scanId)) return;
 
-    const currentProfile = this.deps.repos.l3WorldModels.fields(
-      payload.userId,
-      payload.projectId
-    ).projectEnvironmentProfile;
+    const snapshot = this.deps.repos.l3WorldModels.effectiveFields(payload.projectId);
+    const currentProfile = snapshot.fields.projectEnvironmentProfile;
     const evidenceSupportsProfile = projectEnvironmentEvidenceSupportsProfile(derived);
     const basePrompt = derived.projectKind === "code" ? CODE_PROFILE_PROMPT : FOLDER_PROFILE_PROMPT;
     const language = currentProfile?.trim()
@@ -114,6 +113,7 @@ export class ProjectEnvironmentProfilePipeline {
       if (
         !latest ||
         latest.currentScanId !== payload.scanId ||
+        !this.deps.repos.projectEnvironments.isCurrentScan(payload.userId, payload.projectId, payload.scanId) ||
         latestProfile !== currentProfile
       ) return;
       throw error;
@@ -125,6 +125,7 @@ export class ProjectEnvironmentProfilePipeline {
       projectKind: derived.projectKind,
       fingerprint: derived.fingerprint,
       expectedCurrentProfile: currentProfile,
+      expectedCurrentRevision: snapshot.revisions.projectEnvironmentProfile,
       operation: output.op,
       profile: output.profile
     });

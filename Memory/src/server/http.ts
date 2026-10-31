@@ -1580,7 +1580,6 @@ function strictEnvelopeWithPrincipal(
     : undefined;
   const principalNamespace = principal.namespace;
   const fields: Array<keyof RuntimeNamespace> = [
-    "userId",
     "tenantId",
     "projectId",
     "workspaceId",

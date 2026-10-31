@@ -243,7 +243,7 @@ describe("automatic History Skill lifecycle", () => {
     const original = repos.memories.get(result.id!)!;
     const body = '---\nname: review_release_revised\ndescription: >\n  Human revised release review\n  with a verification step.\n---\n\n# Revised release review\n\n### When to use\nWhen the current release is ready for review\n\n### Procedure\n1. Review the draft.\n2. Verify the current result.';
     expect(() => service.updateExternalEvidenceSkill(original.id, { body, expectedVersion: original.version },
-      { namespace: { ...namespace, userId: "other-user" } })).toThrow(/not found/u);
+      { namespace: { ...namespace, tenantId: "other-tenant" } })).toThrow(/not found/u);
     const saved = service.updateExternalEvidenceSkill(original.id, { body, expectedVersion: original.version }, { namespace });
     expect(saved).toMatchObject({ status: "activated", version: original.version + 1 });
     expect(() => service.updateExternalEvidenceSkill(original.id, { body: "Stale write", expectedVersion: original.version }, { namespace }))

@@ -437,7 +437,6 @@ function namespaceIdFromMemory(
   const namespace = namespaceForMemory(memory);
   return [
     namespace.tenantId,
-    namespace.userId,
     namespace.projectId ?? namespace.workspaceId,
     namespace.source,
     namespace.profileId
