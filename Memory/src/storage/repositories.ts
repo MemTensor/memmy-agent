@@ -1,5 +1,10 @@
 import { sharedProjectIds, sharedProjectIdentity } from "../service/namespace/shared-project.js";
 import { DEVICE_MEMORY_OWNER } from "../service/namespace/memory-owner.js";
+import {
+  ensureProjectEnvironmentScanBoundary, isProjectEnvironmentScanBoundaryKey,
+  readProjectEnvironmentScanBoundary, recordProjectEnvironmentScanRequest,
+  revokeProjectEnvironmentScans
+} from "./project-environment-scan-boundary.js";
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
@@ -5629,6 +5634,15 @@ export class RuntimeRepository {
         SELECT 1 FROM memories UNION ALL SELECT 1 FROM sessions UNION ALL
         SELECT 1 FROM raw_turns UNION ALL SELECT 1 FROM source_turn_captures
       )`).pluck().get());
+      // Freeze target-local publication permission before imported rows can alter
+      // current_scan_id or receive new local queue positions.
+      const importsProfileJobs = Array.isArray(tables.evolution_jobs) &&
+        tables.evolution_jobs.some(row => isRecordLike(row) && row.job_type === "project_environment_profile");
+      const existingProjects = importsProfileJobs ? this.db.prepare(`SELECT project_id FROM l3_world_model_scopes
+        WHERE project_id IS NOT NULL UNION SELECT project_id FROM l3_world_model_project_environment_state`)
+        .all() as Array<{project_id: string}> : [];
+      for (const row of existingProjects) ensureProjectEnvironmentScanBoundary(this.db, row.project_id, nowIso());
+      const importedScanProjects = new Set<string>();
       for (const table of BUNDLE_TABLES) {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
@@ -5639,6 +5653,11 @@ export class RuntimeRepository {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
           }
           const existed = identity !== undefined && this.rowExists(table, identity.columns, identity.values);
+          if (table === "runtime_kv" && isProjectEnvironmentScanBoundaryKey(normalized.key)) {
+            // Queue publication rights belong to this installation, not a bundle.
+            result.skipped[table] = (result.skipped[table] ?? 0) + 1;
+            continue;
+          }
           if (table === "runtime_kv" && normalized.key === "source_turn_capture_activated_at") {
             const outcome = this.mergeSourceTurnActivation(normalized, hadRuntimeData);
             const counts = result[outcome];
@@ -5677,6 +5696,11 @@ export class RuntimeRepository {
           this.db
             .prepare(`${verb} INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`)
             .run(...values);
+          if (table === "evolution_jobs" && normalized.job_type === "project_environment_profile" &&
+              ["queued", "leased", "failed"].includes(String(normalized.status))) {
+            const payload = parseJson<Record<string, unknown>>(String(normalized.payload_json), {});
+            if (typeof payload.projectId === "string") importedScanProjects.add(payload.projectId);
+          }
           if (existed) {
             result.conflicts.push({
               table,
@@ -5689,6 +5713,13 @@ export class RuntimeRepository {
           } else {
             result.inserted[table] = (result.inserted[table] ?? 0) + 1;
           }
+        }
+      }
+      for (const projectId of importedScanProjects) {
+        if (!readProjectEnvironmentScanBoundary(this.db, projectId)) {
+          // Imported pending work has no local publication grant. An explicit
+          // new scan can acquire one without rewriting the imported task.
+          revokeProjectEnvironmentScans(this.db, projectId, nowIso());
         }
       }
     })();
@@ -6257,6 +6288,12 @@ export class L3WorldModelRepository {
       if (!before) throw new Error(`corrupt L3 World Model scope memory: ${memoryId}`);
       validateL3WorldModelMemory(before, scope.userId, scope.projectId);
       const snapshot = this.effectiveFields(scope.projectId ?? null);
+      if (scope.projectId) {
+        ensureProjectEnvironmentScanBoundary(this.db, scope.projectId, at);
+        if (snapshot.sources.projectEnvironmentProfile.includes(memoryId)) {
+          revokeProjectEnvironmentScans(this.db, scope.projectId, at);
+        }
+      }
       for (const field of L3_FIELD_NAMES) {
         const sources = snapshot.sources[l3WorldModelFieldProperty(field)];
         // Other records and explicit overrides keep their own field state.
@@ -6535,12 +6572,16 @@ export class L3WorldModelRepository {
     assertL3WorldModelFieldOwnership(projectId, input.targetField);
     const at = input.at ?? nowIso();
     const scope = this.ensureScope(input.userId, projectId, at);
+    const value = normalizeL3WorldModelFieldValue(input.value);
+    if (projectId && input.targetField === "project_environment_profile" && value === null) {
+      revokeProjectEnvironmentScans(this.db, projectId, at);
+    }
     const existing = scope.memoryId ? this.memories.get(scope.memoryId) : undefined;
     if (scope.memoryId && !existing) throw new Error(`corrupt L3 World Model scope memory: ${scope.memoryId}`);
     if (existing) validateL3WorldModelMemory(existing, input.userId, projectId);
     const fields = existing ? fieldsFromL3WorldModelMemory(existing) : emptyL3WorldModelFields();
     const property = l3WorldModelFieldProperty(input.targetField);
-    fields[property] = normalizeL3WorldModelFieldValue(input.value);
+    fields[property] = value;
     const memoryValue = renderL3WorldModelFields(fields);
     if (!existing && !memoryValue) {
       this.recordFieldState(projectId, input.targetField, true, at);
@@ -6717,22 +6758,15 @@ export class ProjectEnvironmentRepository {
     return row ? projectEnvironmentStateFromSql(row) : undefined;
   }
 
-  /** Keep the original job identity; order scans across verified project aliases. */
+  /** Keep original job identity; imported queue positions never grant publication. */
   isCurrentScan(userId: string, projectId: string, scanId: string): boolean {
     if (this.getState(userId, projectId)?.currentScanId !== scanId) return false;
-    const projects = this.l3WorldModels.sharedProjectIds(projectId);
-    const latest = this.db.prepare(`
-      SELECT job.user_id, state.project_id, state.current_scan_id
-      FROM l3_world_model_project_environment_state AS state
-      JOIN evolution_jobs AS job ON job.job_type = 'project_environment_profile'
-        AND job.user_id = state.user_id
-        AND json_extract(job.payload_json, '$.userId') = state.user_id
-        AND json_extract(job.payload_json, '$.projectId') = state.project_id
-        AND json_extract(job.payload_json, '$.scanId') = state.current_scan_id
-      WHERE state.project_id IN (SELECT value FROM json_each(?))
-      ORDER BY job.enqueue_seq DESC, job.created_at DESC, job.id DESC LIMIT 1
-    `).get(toJson(projects)) as {user_id: string; project_id: string; current_scan_id: string} | undefined;
-    return latest?.user_id === userId && latest.project_id === projectId && latest.current_scan_id === scanId;
+    const job = this.db.prepare(`SELECT id FROM evolution_jobs
+      WHERE job_type='project_environment_profile' AND user_id=?
+        AND json_extract(payload_json,'$.userId')=?
+        AND json_extract(payload_json,'$.projectId')=?
+        AND json_extract(payload_json,'$.scanId')=?`).get(userId, userId, projectId, scanId) as {id: string} | undefined;
+    return !!job && ensureProjectEnvironmentScanBoundary(this.db, projectId, nowIso()).jobId === job.id;
   }
 
   requestScan(input: {
@@ -6777,6 +6811,7 @@ export class ProjectEnvironmentRepository {
         updatedAt: at
       };
       this.l3WorldModels.insertImmutableJob(job);
+      recordProjectEnvironmentScanRequest(this.db, input.projectId, job.id, at);
       return { job, enqueued: true };
     })();
   }

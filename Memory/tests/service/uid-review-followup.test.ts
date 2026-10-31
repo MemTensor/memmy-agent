@@ -278,6 +278,7 @@ it('a legacy noop retains its historical applied scan and source row', async () 
 });
 /** Same legacy queue reconstruction used by worker-lease-schema.test.ts. */
 function restoreV9Queue(db: MemoryDb): void {
+    db.db.prepare("DELETE FROM runtime_kv WHERE key LIKE 'project_environment_scan_boundary_v1:%'").run();
     for (const table of ['evolution_jobs', 'embedding_retry_queue'])
         for (const suffix of ['deadline_insert', 'deadline_update'])
             db.db.exec(`DROP TRIGGER ${table}_${suffix}`);
