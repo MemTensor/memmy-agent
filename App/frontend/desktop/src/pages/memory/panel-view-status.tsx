@@ -17,17 +17,23 @@ export function usePanelViewStatus(
   const latest = useRef({ invalidate, reload });
   latest.current = { invalidate, reload };
   const generation = useRef(0);
+  const requestAbort = useRef<AbortController | null>(null);
+  useLayoutEffect(() => () => { requestAbort.current?.abort(); }, [scope]);
   async function check() {
+    if (!visible || document.hidden || scope !== currentScope.current) return;
+    requestAbort.current?.abort();
+    const controller = new AbortController();
+    requestAbort.current = controller;
     const id = generation.current;
     const checkingScope = scope;
     try {
-      await client!.checkPanelView!(section);
-      if (id === generation.current && checkingScope === currentScope.current) {
+      await client!.checkPanelView!(section, controller.signal);
+      if (!controller.signal.aborted && id === generation.current && checkingScope === currentScope.current) {
         setExpired(false);
         if (expired) void latest.current.reload?.().catch(() => undefined);
       }
     } catch (error) {
-      if (id !== generation.current || checkingScope !== currentScope.current) throw error;
+      if (controller.signal.aborted || id !== generation.current || checkingScope !== currentScope.current) throw error;
       if (id === generation.current && error instanceof ApiRequestError && [401, 403, 404, 409].includes(error.status)) {
         setExpired(true);
         latest.current.invalidate();
@@ -37,6 +43,8 @@ export function usePanelViewStatus(
         }
       }
       throw error;
+    } finally {
+      if (requestAbort.current === controller) requestAbort.current = null;
     }
   }
   usePanelPoll(Boolean(client?.checkPanelView), check, 60_000, true);

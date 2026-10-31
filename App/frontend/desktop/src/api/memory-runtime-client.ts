@@ -111,7 +111,7 @@ export interface MemoryRuntimeClient {
   getPanelOverviewStats?(signal?:AbortSignal):Promise<PanelOverviewStatsOutput>;
   resetPanelView?(section?:string):void;
   refreshPanelView?(section:string):void;
-  checkPanelView?(section:string):Promise<{updated:boolean}>;
+  checkPanelView?(section:string,signal?:AbortSignal):Promise<{updated:boolean}>;
   health(signal?: AbortSignal): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
   openSession(input: OpenSessionInput): Promise<OpenSessionOutput>;
@@ -167,7 +167,7 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
     getPanelOverviewStats:callerSignal=>panelQueue.request("panel:overview-stats",signal=>requestJson({config,path:"/api/v1/panel/overview-stats",schema:PanelOverviewStatsOutputSchema,init:{signal}}),callerSignal),
     resetPanelView: section => { if (!section) panelQueue.clear(); browse.reset(section); },
     refreshPanelView: section => browse.refresh(section),
-    checkPanelView: section => browse.check(section),
+    checkPanelView: (section, signal) => browse.check(section, signal),
     async health(signal) {
       return requestJson({ config, path: "/api/v1/health", schema: MemoryHealthSnapshotSchema, init: { signal } });
     },

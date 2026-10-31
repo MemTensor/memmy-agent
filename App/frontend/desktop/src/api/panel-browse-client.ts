@@ -126,12 +126,14 @@ export class PanelBrowseClient {
     );
   }
 
-  async check(section: string) {
+  async check(section: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const view = this.views.get(section);
     if (!view) return { updated: false };
     const checked = PanelBrowseCheckSchema.parse(
-      await this.request({ op: "check", viewId: view.identity.viewId, filter: view.filter })
+      await this.request({ op: "check", viewId: view.identity.viewId, filter: view.filter }, signal)
     );
+    signal?.throwIfAborted();
     if (this.views.get(section) !== view) throw abortError();
     return checked;
   }
