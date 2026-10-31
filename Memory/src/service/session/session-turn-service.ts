@@ -108,6 +108,7 @@ interface ToolFailureBurst extends ToolFailureState { contextHash: string; failu
 interface DecisionRepairSummary { repairId?: string; contextHash?: string; skipped?: boolean; reason?: string; attachedPolicyIds?: string[]; }
 type SessionTurnDependencies = {
   repos: Repositories;
+  writeTransaction?: <T>(operation: () => T, signal?: AbortSignal) => Promise<T>;
   readonly config: MemmyConfig;
   readonly llm: LlmClient;
   readonly skillLlm: LlmClient;
@@ -509,22 +510,29 @@ export class SessionTurnService {
 
   private selectionScope?: { context: EpisodeSelectionContext; results: Map<string, EpisodeSelectionResult>; selectedEpisodeId?: string };
 
-  // Acceptance never waits for a model. The original rows and work commit together.
-  async withEpisodeSelection<T>(context: EpisodeSelectionContext, operation: () => T): Promise<T> {
+  private async writeTransaction<T>(operation: () => T, signal?: AbortSignal): Promise<T> {
+    if (this.deps.writeTransaction) return this.deps.writeTransaction(operation, signal);
+    signal?.throwIfAborted();
+    return this.deps.repos.transaction(operation);
+  }
+
+  // Admission and busy backoff happen outside the complete synchronous transaction.
+  async withEpisodeSelection<T>(context: EpisodeSelectionContext, operation: () => T, signal?: AbortSignal): Promise<T> {
     const raw = context.rawTurnId ? this.deps.repos.runtime.getRawTurn(context.rawTurnId) : undefined;
-    if (!raw || raw.messagePayload?.episode_assignment) return this.deps.repos.transaction(operation);
-    // Existing pre-upgrade raw records already have durable input. Finish their
-    // legacy judgment without converting it into a new capture request.
+    if (!raw || raw.messagePayload?.episode_assignment) return this.writeTransaction(operation, signal);
     const results = new Map<string, EpisodeSelectionResult>();
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        this.selectionScope = { context, results };
-        return this.deps.repos.transaction(operation);
+        return await this.writeTransaction(() => {
+          this.selectionScope = { context, results };
+          try { return operation(); }
+          finally { this.selectionScope = undefined; }
+        }, signal);
       } catch (error) {
         if (!(error instanceof EpisodeSelectionRequired)) throw error;
-        this.selectionScope = undefined;
+        // Never retain the write lease while waiting for a model.
         results.set(error.key, await selectEpisode(this.deps.llm, error.input));
-      } finally { this.selectionScope = undefined; }
+      }
     }
     throw new Error("episode candidates kept changing");
   }
@@ -1272,6 +1280,7 @@ export class SessionTurnService {
       sourceMemoryIds,
       usage: {},
       messagePayload: {
+        captured_memory_ids: [],
         time_zone: request.timeZone ?? stringFromMaybeRecord(session.meta, "time_zone"),
         compact: {
           contextPacketId,
@@ -1491,14 +1500,16 @@ export class SessionTurnService {
       turnIntentDecision: intentDecision
     });
     const [routeProposal, search] = await Promise.all([routeProposalPromise, searchPromise]);
-    this.persistTurnStartRouteProposal(search.searchEventId, routeProposal);
+    await this.writeTransaction(() => {
+      this.persistTurnStartRouteProposal(search.searchEventId, routeProposal);
+      this.deps.repos.runtime.touchSession(session.id, nowIso());
+    });
     const contextPacketId = turnContextPacketId(
       session.id,
       routeProposal.baseEpisodeId,
       turnId,
       search.searchEventId
     );
-    this.deps.repos.runtime.touchSession(session.id, nowIso());
 
     return {
       contextPacketId,
@@ -2219,6 +2230,7 @@ export class SessionTurnService {
           sourceMemoryIds,
           usage: isRecord(request.usage) ? request.usage : {},
           messagePayload: {
+            captured_memory_ids: [],
             ...(sourceTurn ? { source_turn: sourceTurn } : {}),
             turn_start: turnStartPayload,
             turn_complete: {
@@ -2719,6 +2731,7 @@ export class SessionTurnService {
         sourceMemoryIds: [],
         usage: {},
         messagePayload: {
+          captured_memory_ids: [],
           observe: {
             requestId: input.requestId,
             adapterId: input.adapterId
@@ -2961,7 +2974,9 @@ export class SessionTurnService {
     const llmDraft = deferDecisionRepair
       ? undefined
       : await this.maybeSynthesizeFailureBurstDecisionRepair(burst, reason, evidence);
-    return this.persistFailureBurstRepair(input, evidence, valueDiff, llmDraft, deferDecisionRepair);
+    // The observation transaction has already committed. Re-enter admission for
+    // this post-model write, keeping the repair, episode link and jobs atomic.
+    return this.writeTransaction(() => this.persistFailureBurstRepair(input, evidence, valueDiff, llmDraft, deferDecisionRepair));
   }
 
   private persistFailureBurstRepair(
@@ -3189,6 +3204,7 @@ export class SessionTurnService {
       sourceMemoryIds: [],
       usage: {},
       messagePayload: {
+        captured_memory_ids: [],
         subagentStart: {
           subagentId,
           task: input.task,

@@ -134,40 +134,38 @@ export async function routeViewerRequest(
     return { body: { ok: true } };
   }
   if (method === "GET" && path === "/api/v1/overview") {
-    const userId = viewerUserId(context);
     return {
       body: {
-        ...context.service.panelOverview({ ...envelope, userId }),
-        summary: context.service.panelOverviewSummary({ ...envelope, userId })
+        ...context.service.panelOverview(envelope),
+        summary: (await context.service.readPanel("overview",[envelope])).data
       }
     };
   }
   if (method === "GET" && path === "/api/v1/analytics") {
-    return { body: context.service.panelAnalysis(envelope) };
+    return { body: (await context.service.readPanel("analysis",[envelope])).data };
   }
   if (method === "GET" && path === "/api/v1/episodes") {
     return {
-      body: context.service.panelTasks({
+      body: (await context.service.readPanel("legacyTasks",[{
         ...envelope,
         q: query(url, "q"),
         sourceAgent: query(url, "sourceAgent"),
         page: numberQuery(url, "page")
-      })
+      }])).data
     };
   }
   const layer = layerForViewerPath(path);
   if (method === "GET" && layer) {
     return {
-      body: context.service.panelItems({
+      body: (await context.service.readPanel("items",[{
         ...envelope,
-        ...(layer === "UserMemory" ? { userId: viewerUserId(context) } : {}),
         layer,
         q: query(url, "q"),
         status: statusQuery(url),
         sourceAgent: query(url, "sourceAgent"),
         page: numberQuery(url, "page"),
         limit: numberQuery(url, "limit")
-      })
+      }])).data
     };
   }
   if (method === "GET" && path === "/api/v1/api-logs") {
@@ -418,11 +416,6 @@ function layerForViewerPath(path: string): RecallMemoryLayer | undefined {
   if (path === "/api/v1/world-models") return "L3";
   if (path === "/api/v1/skills") return "Skill";
   return undefined;
-}
-
-function viewerUserId(context: ViewerApiContext): string {
-  const userId = context.service.configStatus().config.userId?.trim();
-  return userId || "local-user";
 }
 
 function statusQuery(url: URL): "activated" | "resolving" | "archived" | "deleted" | undefined {

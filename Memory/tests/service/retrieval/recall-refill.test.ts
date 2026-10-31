@@ -398,7 +398,8 @@ describe("recall source groups and quota refill", () => {
     expect(result.hits).toEqual([]);
     expect(result.status).toContain("recall_refill:concurrent_change");
     expect(JSON.stringify(result.injectedContext)).not.toContain("python specialterm");
-    const log=service.apiLogs({tools:["memory_search"],limit:1}).logs[0];
+    // Panel logs hide removed evidence; inspect the internal retrieval receipt.
+    const log=repos.runtime.listApiLogs({toolNames:["memory_search"],limit:1}).logs[0];
     const stats=JSON.parse(log!.outputJson).stats;
     expect(stats.concurrentChangeDropped).toBe(1);
     expect(stats.llmFilter.dropped).toBe(0);

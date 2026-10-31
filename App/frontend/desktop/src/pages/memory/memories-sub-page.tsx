@@ -1,4 +1,10 @@
+import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
+import { usePanelReadGuard, usePanelVisible, usePanelVisibilityLifecycle } from "./panel-visibility.js";
+import { canPreservePanelResult } from "./panel-view-status.js";
+import { usePanelViewStatus } from "./panel-view-status.js";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { usePanelLoad } from "./use-panel-load.js";
+import { usePanelPoll } from "./use-panel-poll.js";
 import type { GetMemoryOutput, MemoryProcessingRecord, PanelItemsInput, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { formatUserDateTime } from "../../lib/user-time-zone.js";
@@ -58,7 +64,6 @@ const IMPORT_PROCESSING_SUMMARY_LABELS: Record<string, MemoryProcessingStatus> =
   "\u53CD\u601D\u751F\u6210\u4E2D": "reflection"
 };
 const PROCESSING_REFRESH_INTERVAL_MS = 2_000;
-const MEMORIES_REFRESH_INTERVAL_MS = 5_000;
 
 export interface MemoriesSubPageProps {
   client: MemoryRuntimeClient | null;
@@ -95,12 +100,12 @@ export function buildPanelItemsInput(filters: MemorySearchFilters): PanelItemsIn
   return input;
 }
 
-export function loadMemoriesData(client: MemoryRuntimeClient, input: PanelItemsInput): Promise<PanelItemsOutput> {
-  return client.listPanelItems(input);
+export function loadMemoriesData(client: MemoryRuntimeClient, input: PanelItemsInput, signal?: AbortSignal): Promise<PanelItemsOutput> {
+  return signal ? client.listPanelItems(input, signal) : client.listPanelItems(input);
 }
 
 export function loadMemoryDetail(client: MemoryRuntimeClient, item: PanelItemsOutput["items"][number]): Promise<MemoryDetailOutput> {
-  return client.getMemory(item.id);
+  return readMemoryPanelDetail(client,item.id);
 }
 
 function memoriesCacheKeys(query: string, sourceAgent: string, page: number): string[] {
@@ -110,6 +115,8 @@ function memoriesCacheKeys(query: string, sourceAgent: string, page: number): st
 }
 
 export function MemoriesSubPage(props: MemoriesSubPageProps) {
+  const canRead = usePanelReadGuard(props.client);
+  const visible = usePanelVisible();
   const { t } = useTranslation();
   const { track } = useAnalytics();
   const memoriesFilterLayer = (sourceAgent = "") => buildMemoryUiFilterLayer("L1", sourceAgent || undefined);
@@ -121,11 +128,33 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [retryFeedback, setRetryFeedback] = useState<ProcessingRetryFeedback>(null);
   const requestIdRef = useRef(0);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const submitSearch = usePanelLoad({ query, identity: [props.client, sourceAgent, page, t], load: () => refresh(),
+    invalidate: () => { requestIdRef.current++; requestAbortRef.current?.abort(); } });
+  usePanelPoll(Boolean(props.client) && !props.client?.checkPanelView, () => refresh(page, sourceAgent, { useCache: false }));
   const detailRequestIdRef = useRef(0);
+  const detailAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    detailRequestIdRef.current++;
+    detailAbortRef.current?.abort();
+  }, [props.client]);
+  usePanelVisibilityLifecycle(props.client, () => {
+    detailRequestIdRef.current++;
+    detailAbortRef.current?.abort();
+    setDetail(null);
+  }, () => { if (selectedMemoryId) openDetailById(selectedMemoryId, false); });
   const retryRequestIdRef = useRef(0);
   const retryResetTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    retryRequestIdRef.current++;
+    setRetryFeedback(null);
+    if (retryResetTimerRef.current !== null) window.clearTimeout(retryResetTimerRef.current);
+    retryResetTimerRef.current = null;
+  }, [props.client, visible]);
 
-  function refresh(nextPage = page, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<PanelItemsOutput | undefined> {
+  const viewStatus=usePanelViewStatus(props.client,"L1",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); detailRequestIdRef.current++; detailAbortRef.current?.abort(); setDetail(null); setSelectedMemoryId(null); setState({status:"loading"});},()=>refresh());
+  function refresh(nextPage = page, nextSourceAgent = sourceAgent, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<PanelItemsOutput | undefined> {
+    if (!canRead()) return Promise.resolve(undefined);
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -133,22 +162,26 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
 
     const normalizedPage = normalizePage(nextPage);
+    requestAbortRef.current?.abort();
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
     const requestId = ++requestIdRef.current;
     const cacheKeys = memoriesCacheKeys(query, nextSourceAgent, normalizedPage);
     const useCache = options.useCache ?? true;
-    const cached = useCache ? readMemoryPanelCacheFirst<PanelItemsOutput>(cacheKeys) : null;
+    const cached = useCache && !props.client.resetPanelView ? readMemoryPanelCacheFirst<PanelItemsOutput>(cacheKeys) : null;
     if (cached) {
       setState({ status: "ready", data: cached });
     } else {
       setState((current) => current.status === "ready" ? current : { status: "loading" });
     }
 
-    return loadMemoriesData(props.client, buildPanelItemsInput({ query, sourceAgent: nextSourceAgent, page: normalizedPage }))
+    return loadMemoriesData(props.client, buildPanelItemsInput({ query, sourceAgent: nextSourceAgent, page: normalizedPage }), controller.signal)
       .then((data) => {
-        writeMemoryPanelCaches(cacheKeys, data);
         if (requestId !== requestIdRef.current) {
           return undefined;
         }
+        if (!props.client?.resetPanelView) writeMemoryPanelCaches(cacheKeys, data);
+        viewStatus.clear();
         setState({ status: "ready", data });
         if (data.page !== normalizedPage) {
           setPage(data.page);
@@ -159,13 +192,14 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
         if (requestId !== requestIdRef.current) {
           return undefined;
         }
-        setState({ status: "error", message: toErrorMessage(error) });
+        setState(current => options.preserve && canPreservePanelResult(error) && current.status === "ready" ? current : { status: "error", message: toErrorMessage(error) });
         throw error;
       });
   }
 
   function changeQuery(value: string) {
     detailRequestIdRef.current += 1;
+    detailAbortRef.current?.abort();
     setQuery(value);
     setDetail(null);
     setSelectedMemoryId(null);
@@ -174,10 +208,11 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
   function runSearch() {
     detailRequestIdRef.current += 1;
+    detailAbortRef.current?.abort();
     setDetail(null);
     setSelectedMemoryId(null);
     setPage(1);
-    void refresh(1)
+    void submitSearch(() => refresh(1), [props.client, sourceAgent, 1, t])
       .then((data) => {
         if (!data) {
           return;
@@ -193,6 +228,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
   function changeSourceAgent(value: string) {
     detailRequestIdRef.current += 1;
+    detailAbortRef.current?.abort();
     setSourceAgent(value);
     setDetail(null);
     setSelectedMemoryId(null);
@@ -206,15 +242,23 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
 
     detailRequestIdRef.current += 1;
+    detailAbortRef.current?.abort();
     setDetail(null);
     setSelectedMemoryId(null);
     setPage(normalizedPage);
   }
 
-  function openDetailById(id: string) {
+  function openDetailById(id: string, trackOpen = true) {
     const requestId = ++detailRequestIdRef.current;
+    detailAbortRef.current?.abort();
+    const controller = new AbortController();
+    detailAbortRef.current = controller;
     setSelectedMemoryId(id);
-    track(buildMemoryUiDetailOpenedEvent({
+    if (!canRead()) {
+      setDetail(null);
+      return;
+    }
+    if (trackOpen) track(buildMemoryUiDetailOpenedEvent({
       subPage: "memories",
       filterLayer: memoriesFilterLayer(sourceAgent)
     }));
@@ -225,14 +269,14 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
 
     setDetail({ status: "loading" });
-    void props.client.getMemory(id)
+    void readMemoryPanelDetail(props.client,id,controller.signal)
       .then((data) => {
-        if (requestId === detailRequestIdRef.current) {
+        if (requestId === detailRequestIdRef.current && canRead() && !controller.signal.aborted) {
           setDetail({ status: "ready", data });
         }
       })
       .catch((error) => {
-        if (requestId === detailRequestIdRef.current) {
+        if (requestId === detailRequestIdRef.current && canRead() && !controller.signal.aborted) {
           setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) });
         }
       });
@@ -253,10 +297,11 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       filterLayer: memoriesFilterLayer(sourceAgent)
     }));
     detailRequestIdRef.current += 1;
+    detailAbortRef.current?.abort();
     clearMemoryPanelCache();
     setDetail(null);
     setSelectedMemoryId(null);
-    void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined);
+    void viewStatus.reloadCurrent().catch(() => undefined);
   }
 
   function updateOpenDetailProcessing(memoryId: string, processing: MemoryProcessingRecord) {
@@ -272,6 +317,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   }
 
   async function retryMemoryProcessing(memoryId: string) {
+    if (!canRead()) return;
     if (!props.client) {
       setRetryFeedback({
         memoryId,
@@ -289,11 +335,13 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     setRetryFeedback({ memoryId, status: "running" });
     try {
       const retry = await props.client.retryMemoryProcessing(memoryId);
+      if (requestId !== retryRequestIdRef.current || !canRead()) return;
       updateOpenDetailProcessing(memoryId, retry.processing);
       const deadline = Date.now() + 10 * 60_000;
       while (Date.now() < deadline) {
+        if (requestId !== retryRequestIdRef.current || !canRead()) return;
         const status = await props.client.getMemoryProcessingStatus([memoryId]);
-        if (requestId !== retryRequestIdRef.current) return;
+        if (requestId !== retryRequestIdRef.current || !canRead()) return;
         const processing = status.items.find((item) => item.memoryId === memoryId);
         if (!processing) throw new Error(t("memory.memories.processing.missing"));
         updateOpenDetailProcessing(memoryId, processing);
@@ -303,10 +351,10 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
         if (processing.state === "ready" || processing.state === "ready_text_only") {
           clearMemoryPanelCache();
           const [detailData] = await Promise.all([
-            props.client.getMemory(memoryId),
-            refresh(page, sourceAgent, { useCache: false })
+            readMemoryPanelDetail(props.client,memoryId),
+            viewStatus.reloadCurrent()
           ]);
-          if (requestId !== retryRequestIdRef.current) return;
+          if (requestId !== retryRequestIdRef.current || !canRead()) return;
           setDetail((current) => current?.status === "ready" && current.data.item.id === memoryId
             ? { status: "ready", data: detailData }
             : current);
@@ -321,7 +369,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       }
       throw new Error(t("memory.memories.processing.retryTimeout"));
     } catch (error) {
-      if (requestId !== retryRequestIdRef.current) return;
+      if (requestId !== retryRequestIdRef.current || !canRead()) return;
       setRetryFeedback({
         memoryId,
         status: "error",
@@ -329,8 +377,8 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
         failedAt: new Date().toISOString()
       });
       clearMemoryPanelCache();
-      void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined);
-      void props.client.getMemory(memoryId).then((data) => {
+      void viewStatus.reloadCurrent().catch(() => undefined);
+      void readMemoryPanelDetail(props.client,memoryId).then((data) => {
         if (requestId !== retryRequestIdRef.current) return;
         setDetail((current) => current?.status === "ready" && current.data.item.id === memoryId
           ? { status: "ready", data }
@@ -345,54 +393,50 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   }, []);
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => void refresh().catch(() => undefined), 180);
-    return () => window.clearTimeout(timeout);
-  }, [props.client, query, sourceAgent, page, t]);
-
-  useEffect(() => {
     if (props.openRequest) {
       openDetailById(props.openRequest.id);
     }
 
   }, [props.openRequest?.requestId]);
 
-  useEffect(() => {
-    if (state.status !== "ready" || !state.data.items.some(memoryProcessingStatus)) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined), PROCESSING_REFRESH_INTERVAL_MS);
-    return () => window.clearTimeout(timeout);
-  }, [state, props.client, query, sourceAgent, page, t]);
-
-  useEffect(() => {
-    if (!props.client) {
-      return undefined;
-    }
-    const interval = window.setInterval(() => void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined), MEMORIES_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-  }, [props.client, query, sourceAgent, page, t]);
-
-  useEffect(() => {
-    if (!props.client || detail?.status !== "ready") return;
-    const item = detail.data.item;
+  const processingIds = state.status === "ready" ? state.data.items.filter((item) => {
     const processing = item.processing;
-    const processingActive = processing && processing.state !== "ready" && processing.state !== "ready_text_only"
+    return processing && processing.state !== "ready" && processing.state !== "ready_text_only"
       && (processing.state !== "failed" || processing.autoRetryScheduled);
-    const pendingObservation = item.kind === "observed_activity" && observationDisplayMetadata(item).state === "pending"
-      && processing?.state !== "failed";
-    if (!processingActive && !pendingObservation) return;
+  }).map((item) => item.id) : [];
+  usePanelPoll(Boolean(props.client) && processingIds.length > 0, async () => {
+    const generation = requestIdRef.current;
+    const result = await props.client!.getMemoryProcessingStatus(processingIds);
+    if (generation !== requestIdRef.current) return;
+    const byId = new Map(result.items.map((item) => [item.memoryId, item]));
+    setState((current) => current.status !== "ready" ? current : { status: "ready", data: {
+      ...current.data, items: current.data.items.map((item) => byId.has(item.id) ? { ...item, processing: byId.get(item.id)! } : item)
+    } });
+  }, PROCESSING_REFRESH_INTERVAL_MS);
+
+  const openItem = detail?.status === "ready" ? detail.data.item : undefined;
+  const openProcessing = openItem?.processing;
+  const openProcessingActive = Boolean(openProcessing && openProcessing.state !== "ready" && openProcessing.state !== "ready_text_only"
+    && (openProcessing.state !== "failed" || openProcessing.autoRetryScheduled));
+  const pendingObservation = Boolean(openItem?.kind === "observed_activity" && observationDisplayMetadata(openItem).state === "pending"
+    && openProcessing?.state !== "failed");
+  usePanelPoll(Boolean(props.client) && (openProcessingActive || pendingObservation), async () => {
     const requestId = detailRequestIdRef.current;
-    let inFlight = false;
-    const interval = window.setInterval(() => {
-      if (inFlight) return;
-      inFlight = true;
-      void props.client!.getMemory(item.id).then((data) => {
-        if (requestId === detailRequestIdRef.current) setDetail({ status: "ready", data });
-      }).catch(() => undefined).finally(() => { inFlight = false; });
-    }, PROCESSING_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-  }, [props.client, detail]);
+    const data = await readMemoryPanelDetail(props.client!,openItem!.id);
+    if (requestId === detailRequestIdRef.current) setDetail({ status: "ready", data });
+  }, PROCESSING_REFRESH_INTERVAL_MS);
+
+  // A failed drawer can be retried elsewhere. Check its small processing record,
+  // then reload the full detail only when that record actually changes.
+  usePanelPoll(Boolean(props.client) && openProcessing?.state === "failed", async () => {
+    const requestId = detailRequestIdRef.current;
+    const result = await props.client!.getMemoryProcessingStatus([openItem!.id]);
+    if (requestId !== detailRequestIdRef.current) return;
+    const updated = result.items.find((record) => record.memoryId === openItem!.id);
+    if (!updated || JSON.stringify(updated) === JSON.stringify(openProcessing)) return;
+    const data = await readMemoryPanelDetail(props.client!,openItem!.id);
+    if (requestId === detailRequestIdRef.current) setDetail({ status: "ready", data });
+  }, 5_000);
 
   useEffect(() => {
     if (!props.client || state.status !== "ready" || detail?.status !== "ready") return;
@@ -409,7 +453,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     if (!newer) return;
     const requestId = detailRequestIdRef.current;
     let active = true;
-    void props.client.getMemory(current.id).then((data) => {
+    void readMemoryPanelDetail(props.client,current.id).then((data) => {
       if (active && requestId === detailRequestIdRef.current) setDetail({ status: "ready", data });
     }).catch(() => undefined);
     return () => { active = false; };
@@ -426,7 +470,8 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       onSearch={runSearch}
       onPageChange={changePage}
       onRefresh={async () => {
-        const data = await refresh(page, sourceAgent, { useCache: false });
+        props.client?.refreshPanelView?.("L1");
+        const data = await refresh(page, sourceAgent, { useCache: false, preserve:true });
         if (data) {
           track(buildMemoryUiPanelRefreshedEvent({
             subPage: "memories",
@@ -444,6 +489,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       retryFeedback={retryFeedback}
       onCloseDetail={() => {
         detailRequestIdRef.current += 1;
+        detailAbortRef.current?.abort();
         setDetail(null);
         setSelectedMemoryId(null);
       }}

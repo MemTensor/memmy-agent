@@ -121,6 +121,7 @@ export interface CreateBackendServicesOptions {
   cloudClient: CloudClient;
   permissionManager: PermissionManager;
   bootstrapScenario?: BootstrapScenario;
+  timeZone?: string;
   sourceRegistry?: SourceRegistry;
   ingestionService?: IngestionService;
   skillDistributionService?: SkillDistributionService;
@@ -331,6 +332,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     agentAdapterRegistry: options.agentAdapterRegistry,
     bootstrap: createBootstrapService({
       ...options,
+      getMemoryUserId: resolveMemoryUserId,
       scanPreferencesStore: options.scanPreferencesStore
     }),
     appConfig: createAppConfigService({
@@ -414,6 +416,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       memoryClient: options.memoryClient
     }),
     memoryDetail: createMemoryDetailService({
+      getUserId: resolveMemoryUserId,
       memoryClient: options.memoryClient
     }),
     panel: createPanelService({

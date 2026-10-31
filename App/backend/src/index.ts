@@ -173,6 +173,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       cloudClient,
       permissionManager,
       bootstrapScenario: options.bootstrapScenario,
+      timeZone: configuredTimeZone,
       memmyConfigWriter,
       memmyConfigPath,
       scanPreferencesStore,

@@ -1,0 +1,209 @@
+import { randomUUID } from "node:crypto";
+import { MemoryServiceError } from "../../utils/error.js";
+import type { PanelReadModel } from "../read-model/panel-read.js";
+type Input = Parameters<PanelReadModel["panelMembers"]>[0];
+type PageData = ReturnType<PanelReadModel["panelPageByIds"]>;
+interface PageRead {
+  controller: AbortController;
+  subscribers: Set<object>;
+  promise: Promise<PageData>;
+  settled: boolean;
+}
+interface View {
+  id: string;
+  scope: string;
+  input: Input;
+  ids: string[];
+  safety: string;
+  change: string;
+  createdAt: string;
+  touched: number;
+  bytes: number;
+  pages: Map<number, PageData>;
+  building: Map<number, PageRead>;
+}
+export class PanelBrowse {
+  readonly instanceId = randomUUID();
+  private views = new Map<string, View>();
+  constructor(
+    private readonly deps: {
+      read: <T>(method: string, args: unknown[], signal?: AbortSignal) => Promise<{ safety: string; data: T }>;
+      safety: () => string;
+      change: () => string | number;
+      budget?: number;
+      idleMs?: number;
+    }
+  ) {}
+  private scope(input: Input) {
+    return JSON.stringify(input.namespace ?? {});
+  }
+  private get(id: string, input: Input): View {
+    const view = this.views.get(id);
+    if (!view || view.scope !== this.scope(input))
+      throw new MemoryServiceError("conflict", "Panel view expired; refresh");
+    if (view.safety !== this.deps.safety() || Date.now() - view.touched > (this.deps.idleMs ?? 30 * 60_000)) {
+      const error = new MemoryServiceError("conflict", "Panel view expired; refresh");
+      this.dispose(view, error);
+      throw error;
+    }
+    view.touched = Date.now();
+    return view;
+  }
+  async create(input: Input, signal?: AbortSignal) {
+    if (signal?.aborted) throw cancellation(signal);
+    const change = String(this.deps.change());
+    const result = await this.deps.read<string[]>("members", [input], signal);
+    if (signal?.aborted) throw new DOMException("Panel view cancelled", "AbortError");
+    if (result.safety !== this.deps.safety())
+      throw new MemoryServiceError("conflict", "Panel changed while preparing; refresh");
+    const view: View = {
+      id: randomUUID(),
+      scope: this.scope(input),
+      input,
+      ids: result.data,
+      safety: result.safety,
+      change,
+      createdAt: new Date().toISOString(),
+      touched: Date.now(),
+      bytes: Buffer.byteLength(JSON.stringify(result.data)),
+      pages: new Map(),
+      building: new Map()
+    };
+    this.views.set(view.id, view);
+    try {
+      this.limit(view);
+      const page = await this.page(view.id, 1, input, signal);
+      if (signal?.aborted) throw new DOMException("Panel view cancelled", "AbortError");
+      return page;
+    } catch (error) {
+      this.dispose(view);
+      throw error;
+    }
+  }
+  async page(id: string, page: number, input: Input, signal?: AbortSignal) {
+    if (signal?.aborted) throw cancellation(signal);
+    const view = this.get(id, input);
+    const total = view.ids.length;
+    const totalPages = Math.max(1, Math.ceil(total / 20));
+    if (!Number.isSafeInteger(page) || page < 1 || page > totalPages)
+      throw new MemoryServiceError("invalid_argument", "Invalid panel page");
+    let data = view.pages.get(page);
+    if (!data) {
+      const building = view.building.get(page) ?? this.readPage(view, page, input);
+      data = await this.subscribe(view, page, building, signal);
+    }
+    if (signal?.aborted) throw cancellation(signal);
+    this.get(id, input);
+    return {
+      viewId: id,
+      instanceId: this.instanceId,
+      safety: view.safety,
+      createdAt: view.createdAt,
+      page,
+      pageSize: 20 as const,
+      total,
+      totalPages,
+      hasNext: page < totalPages,
+      hasPrev: page > 1,
+      ...data,
+      serverTime: new Date().toISOString()
+    };
+  }
+  private readPage(view: View, page: number, input: Input): PageRead {
+    const controller = new AbortController();
+    let building: PageRead;
+    const promise = Promise.resolve().then(async () => {
+      if (controller.signal.aborted) throw cancellation(controller.signal);
+      const result = await this.deps.read<PageData>("page", [
+        view.ids.slice((page - 1) * 20, page * 20), view.input
+      ], controller.signal);
+      if (controller.signal.aborted) throw cancellation(controller.signal);
+      this.get(view.id, input);
+      if (result.safety !== view.safety) {
+        const error = new MemoryServiceError("conflict", "Panel view expired; refresh");
+        this.dispose(view, error);
+        throw error;
+      }
+      view.bytes += Buffer.byteLength(JSON.stringify(result.data));
+      this.limit(view);
+      view.pages.set(page, result.data);
+      return result.data;
+    }).finally(() => {
+      building.settled = true;
+      if (view.building.get(page) === building) view.building.delete(page);
+    });
+    building = { controller, subscribers: new Set(), promise, settled: false };
+    view.building.set(page, building);
+    return building;
+  }
+  private subscribe(view: View, page: number, building: PageRead, signal?: AbortSignal): Promise<PageData> {
+    const combined = signal ? AbortSignal.any([signal, building.controller.signal]) : building.controller.signal;
+    return new Promise((resolve, reject) => {
+      const subscriber = {};
+      let done = false;
+      const finish = () => {
+        if (done) return false;
+        done = true;
+        building.subscribers.delete(subscriber);
+        combined.removeEventListener("abort", abort);
+        return true;
+      };
+      const abort = () => {
+        if (!finish()) return;
+        reject(cancellation(combined));
+        if (!building.settled && !building.subscribers.size) {
+          if (view.building.get(page) === building) view.building.delete(page);
+          building.controller.abort();
+        }
+      };
+      building.subscribers.add(subscriber);
+      combined.addEventListener("abort", abort, { once: true });
+      building.promise.then(value => { if (finish()) resolve(value); }, error => { if (finish()) reject(error); });
+      if (combined.aborted) abort();
+    });
+  }
+  private dispose(view: View, reason: Error = cancellation()): void {
+    this.views.delete(view.id);
+    for (const building of view.building.values()) building.controller.abort(reason);
+    view.building.clear();
+    view.pages.clear();
+  }
+  check(id: string, input: Input) {
+    const view = this.get(id, input);
+    return {
+      viewId: id,
+      instanceId: this.instanceId,
+      safety: view.safety,
+      updated: view.change !== String(this.deps.change()),
+      serverTime: new Date().toISOString()
+    };
+  }
+  release(id: string, input: Input) {
+    const view = this.views.get(id);
+    if (view && view.scope === this.scope(input)) this.dispose(view);
+    return { ok: true };
+  }
+  clear() {
+    for (const view of this.views.values())
+      this.dispose(view, new MemoryServiceError("conflict", "Panel view expired; refresh"));
+  }
+  private limit(current: View) {
+    const budget = this.deps.budget ?? 64 * 1024 * 1024;
+    let total = [...this.views.values()].reduce((sum, view) => sum + view.bytes, 0);
+    for (const view of [...this.views.values()].sort((a, b) => a.touched - b.touched)) {
+      if (total <= budget) return;
+      if (view === current) continue;
+      this.dispose(view, new MemoryServiceError("conflict", "Panel view expired; refresh"));
+      total -= view.bytes;
+    }
+    if (total > budget) {
+      const error = new MemoryServiceError("conflict", "Panel view exceeds memory budget; narrow the filter");
+      this.dispose(current, error);
+      throw error;
+    }
+  }
+}
+
+function cancellation(signal?: AbortSignal): Error {
+  return signal?.reason instanceof Error ? signal.reason : new DOMException("Panel request cancelled", "AbortError");
+}

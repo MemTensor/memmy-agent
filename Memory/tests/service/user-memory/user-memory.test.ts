@@ -939,7 +939,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("lists shared User Memory in its own panel layer with search", async () => {
+  it("lists and searches the same local User Memory layer across login UIDs", async () => {
     const { db, service } = createTestService();
     const session = open(service, "panel-user");
     (await service.completeTurn("turn-panel-user-memory", {
@@ -961,10 +961,12 @@ describe("User Memory", () => {
       summary: "我最喜欢的水果是苹果",
       tags: ["User Preference"]
     });
-    expect(service.panelItems({
+    const switched = service.panelItems({
       namespace: { source: "codex", profileId: "default", userId: "another-user" },
-      layer: "UserMemory"
-    }).items).toHaveLength(1);
+      layer: "UserMemory", q: "苹果"
+    });
+    expect(switched.total).toBe(1);
+    expect(switched.items).toEqual(panel.items);
     expect(service.panelOverviewSummary({
       namespace: { source: "codex", profileId: "default", userId: "panel-user" }
     }).counts.userMemories).toBe(1);

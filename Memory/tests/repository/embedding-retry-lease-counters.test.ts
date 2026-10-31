@@ -138,8 +138,8 @@ describe("Embedding retry counter schema upgrade", () => {
       }
       if (version === 12) db.db.prepare("UPDATE embedding_retry_queue SET lease_token='old-token' WHERE id='in_progress'").run();
       db.close(); db = new MemoryDb({ path });
-      expect(db.schemaVersion().version).toBe(13);
-      expect(SCHEMA_VERSION).toBe(13);
+      expect(db.schemaVersion().version).toBe(SCHEMA_VERSION);
+      expect(SCHEMA_VERSION).toBe(14);
       const repos = new Repositories(db.db);
       // Failures prove prior claims; an active/succeeded row proves one more.
       // Historical lease losses are unknowable, so recovery starts at zero.
@@ -154,7 +154,7 @@ describe("Embedding retry counter schema upgrade", () => {
       expect(recovered).toMatchObject({ attempts: 3, leaseCount: 5, leaseRecoveryCount: 1, leaseToken: expect.any(String) });
       expect(repos.runtime.markEmbeddingRetrySucceededClaimed("in_progress", { workerId: "old-worker",
         leaseUntil: now + 1000, leaseToken: "old-token", now: now + 1002 })).toBeUndefined();
-      const backupPath = `${path}.pre-v13.bak`;
+      const backupPath = `${path}.pre-v${SCHEMA_VERSION}.bak`;
       expect(existsSync(backupPath)).toBe(true);
       const originalBackup = readFileSync(backupPath);
       backup = new Database(backupPath, { readonly: true });
@@ -182,10 +182,10 @@ describe("Embedding retry counter schema upgrade", () => {
         VALUES ('retained','trace','retained','vec_summary','unchanged','in_progress',2,6,?,
           'old-owner',?,'old-token',?,?)`).run(now, now + 9000, now, now);
       db.db.exec(`CREATE TRIGGER refuse_counter_upgrade BEFORE INSERT ON schema_migrations
-        WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'reject counter upgrade'); END`);
+        WHEN NEW.version=${SCHEMA_VERSION} BEGIN SELECT RAISE(ABORT,'reject counter upgrade'); END`);
       db.close(); db = undefined;
       expect(() => { db = new MemoryDb({ path }); }).toThrow("reject counter upgrade");
-      const backupPath = `${path}.pre-v13.bak`, originalBackup = readFileSync(backupPath);
+      const backupPath = `${path}.pre-v${SCHEMA_VERSION}.bak`, originalBackup = readFileSync(backupPath);
       raw = new Database(path);
       const columns = (raw.prepare("PRAGMA table_info(embedding_retry_queue)").all() as Array<{ name: string }>).map(row => row.name);
       for (const column of counters) expect(columns).not.toContain(column);
@@ -193,7 +193,7 @@ describe("Embedding retry counter schema upgrade", () => {
       expect(raw.prepare("SELECT status,attempts,claimed_by,lease_token,source_text FROM embedding_retry_queue WHERE id='retained'").get())
         .toEqual({ status: "in_progress", attempts: 2, claimed_by: "old-owner", lease_token: "old-token", source_text: "unchanged" });
       raw.exec("DROP TRIGGER refuse_counter_upgrade"); raw.close(); raw = undefined;
-      db = new MemoryDb({ path }); expect(db.schemaVersion().version).toBe(13);
+      db = new MemoryDb({ path }); expect(db.schemaVersion().version).toBe(SCHEMA_VERSION);
       expect(new Repositories(db.db).runtime.getEmbeddingRetry("retained")).toMatchObject({ status: "in_progress",
         attempts: 2, claimedBy: "old-owner", leaseToken: "old-token", leaseCount: 3, leaseRecoveryCount: 0 });
       expect(readFileSync(backupPath)).toEqual(originalBackup);
