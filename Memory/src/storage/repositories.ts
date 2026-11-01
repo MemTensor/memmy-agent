@@ -10,7 +10,7 @@ import {
   revokeProjectEnvironmentScans
 } from "./project-environment-scan-boundary.js";
 import { memoryDisplayedSourceSql } from "./panel-source-sql.js";
-import { panelVisibleMemorySql } from "./panel-cache.js";
+import { ensurePanelCache, panelVisibleMemorySql, visibleFactSql } from "./panel-cache.js";
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
@@ -1268,6 +1268,44 @@ export class MemoryRepository {
   }
 
   panelMemberIds(filter: MemoryFilter = {}, query?: string): string[] {
+    // Only management reads can use the displayed-source projection. Ownership
+    // and other repository filters retain their existing source-table semantics.
+    const cachedKeys = new Set(["panelSource", "panelVisible", "memoryLayer", "status", "agentId", "excludedAgentIds", "tags"]);
+    if (filter.panelSource && filter.panelVisible &&
+        Object.entries(filter).every(([key, value]) => value === undefined || cachedKeys.has(key))) {
+      ensurePanelCache(this.db, ["memories"]);
+      const clauses = [visibleFactSql("f")];
+      const params: SqlValue[] = [];
+      const search = query?.trim() ? buildMemorySearchWhere(query, true) : undefined;
+      for (const [column, value] of [
+        ["memory_layer", filter.memoryLayer],
+        ["status", filter.status ?? (search ? ["activated", "resolving"] : undefined)]
+      ] as const) {
+        const values = value === undefined ? [] : Array.isArray(value) ? value : [value];
+        if (values.length) {
+          clauses.push(`f.${column} IN (${values.map(() => "?").join(",")})`);
+          params.push(...values);
+        }
+      }
+      const source = filter.agentId?.trim()
+        ? agentIdMatchClause("sources.source", filter.agentId)
+        : agentIdExclusionClause("sources.source", filter.excludedAgentIds ?? []);
+      if (source) {
+        // Match aliases once per distinct producer, then use the source index.
+        clauses.push(`f.source IN (WITH sources AS MATERIALIZED (SELECT DISTINCT source FROM panel_memory_facts)
+          SELECT sources.source FROM sources WHERE ${source.sql})`);
+        params.push(...source.params);
+      }
+      // Body/metadata search and tags are evaluated only for candidate facts.
+      if (search || filter.tags?.some(tag => tag.trim())) {
+        const tags = this.memoryWhere({tags: filter.tags});
+        clauses.push(`EXISTS(SELECT 1 FROM memories WHERE memories.id=f.id AND ${tags.where}${search?.where ? ` AND (${search.where})` : ""})`);
+        params.push(...tags.params, ...(search?.params ?? []));
+      }
+      return this.db.prepare(`SELECT f.id FROM panel_memory_facts f WHERE ${clauses.join(" AND ")}
+        ORDER BY ${search ? "f.updated_at DESC,f.id DESC" : "f.created_at DESC,f.updated_at DESC,f.id DESC"}`)
+        .pluck().all(...params) as string[];
+    }
     const built = this.memoryWhere(query?.trim() ? {...filter, status: filter.status ?? ["activated", "resolving"]} : filter);
     const search = query?.trim() ? buildMemorySearchWhere(query, true) : undefined;
     return this.db.prepare(`SELECT id FROM memories WHERE ${built.where} ${search?.where ? `AND (${search.where})` : ""}

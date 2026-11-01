@@ -51,6 +51,7 @@ export function installPanelCache(db: Database.Database): void {
    INSERT INTO panel_log_dirty SELECT id,1 FROM api_logs;
    INSERT INTO panel_metric_dirty SELECT id,1 FROM api_logs;`);
   }
+  installMemoryIndexesWhenReady(db);
   const bump = "UPDATE panel_cache_meta SET revision=revision+1 WHERE singleton=1;";
   for (const [table, dirty] of Object.entries(TABLES)) {
     for (const event of ["INSERT", "UPDATE", "DELETE"] as const) {
@@ -78,6 +79,16 @@ export function installPanelCache(db: Database.Database): void {
    UPDATE panel_cache_meta SET log_revision=log_revision+1 WHERE EXISTS(SELECT 1 FROM panel_memory_visibility f JOIN panel_log_refs r ON r.ref_id=f.id WHERE f.raw_id=${row}.id${event === "UPDATE" ? " OR f.raw_id=OLD.id" : ""}); END;`);
   }
 }
+function installMemoryIndexesWhenReady(db: Database.Database): void {
+  // Bulk backfill builds these once after the final batch. Maintaining both
+  // B-trees in every small transaction makes a cold cache substantially slower.
+  // Existing indexes stay in place for ordinary incremental updates.
+  if (db.prepare("SELECT 1 FROM panel_memory_dirty LIMIT 1").get()) return;
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_panel_memory_order ON panel_memory_facts(memory_layer,created_at DESC,updated_at DESC,id DESC);
+    CREATE INDEX IF NOT EXISTS idx_panel_memory_source ON panel_memory_facts(source,memory_layer,created_at DESC,updated_at DESC,id DESC);
+  `);
+}
 export function panelCacheRevision(db: Database.Database): string {
   const row = db.prepare("SELECT version,revision FROM panel_cache_meta WHERE singleton=1").get() as {
     version: number;
@@ -100,8 +111,11 @@ function dirtyTable(part: PanelCachePart) {
 }
 /** Commit one bounded batch. A changed dirty revision prevents publishing an older projection. */
 export function fillPanelCacheBatch(db: Database.Database, part: PanelCachePart, limit = 64, ids?: readonly (string | number)[]): number {
-  if (part !== "logs")
-    return fillNativeFacts(db, part, limit, ids);
+  if (part !== "logs") {
+    const filled = fillNativeFacts(db, part, limit, ids);
+    if (part === "memories") installMemoryIndexesWhenReady(db);
+    return filled;
+  }
   const dirty = dirtyTable(part);
   const source = "api_logs";
   const columns = `s.id,s.tool_name,s.source_agent,s.called_at,s.duration_ms,s.success,s.input_json,s.output_json,${projectPanelLogSql("s.input_json")} AS projected_input,${projectPanelLogSql("s.output_json")} AS projected_output`;
@@ -201,7 +215,7 @@ export function panelLogIdsPending(db: Database.Database, ids: readonly number[]
 }
 /** Shared management predicate. Source state is read live through its primary key;
  * only the declared source pointer is cached, so raw privacy changes need no JSON scan. */
-function visibleFactSql(fact: string): string {
+export function visibleFactSql(fact: string): string {
   return `${fact}.status!='deleted' AND (${fact}.raw_id IS NULL OR EXISTS(
     SELECT 1 FROM raw_turns r WHERE r.id=${fact}.raw_id AND r.deleted_at IS NULL AND r.redacted_at IS NULL
       AND (${fact}.session_id IS NULL OR ${fact}.session_id=r.session_id)))`;
