@@ -11,6 +11,7 @@ const grammyMock = vi.hoisted(() => {
       this.handlers.set(event, handler);
       return this;
     });
+    this.init = vi.fn(async () => undefined);
     this.start = vi.fn(async () => undefined);
     this.stop = vi.fn(async () => undefined);
     this.api = {
@@ -88,6 +89,29 @@ describe("Telegram channel", () => {
     expect(grammyMock.instances[0].stop).toHaveBeenCalled();
   });
 
+  it("fails channel start when Telegram init rejects, without leaving an unhandled rejection", async () => {
+    function FailingBot(this: any) {
+      this.on = vi.fn();
+      this.init = vi.fn(async () => {
+        throw new Error("Call to 'getMe' failed! (404: Not Found)");
+      });
+      this.start = vi.fn(async () => undefined);
+      this.stop = vi.fn(async () => undefined);
+      this.api = {
+        getMe: vi.fn(),
+        setMyCommands: vi.fn(),
+      };
+      grammyMock.instances.push(this);
+    }
+    grammyMock.Bot.mockImplementation(FailingBot);
+    const channel = new TelegramChannel({ token: "bad-token", allowFrom: ["*"] }, new MessageBus());
+
+    await expect(channel.start()).rejects.toThrow(/getMe/);
+    expect(grammyMock.instances[0].init).toHaveBeenCalled();
+    expect(grammyMock.instances[0].start).not.toHaveBeenCalled();
+    expect(channel.botUserId).toBeNull();
+  });
+
   it("renders markdown for Telegram HTML output", () => {
     expect(markdownToTelegramHtml("# Title")).toBe("<b>Title</b>");
     expect(markdownToTelegramHtml("# A < B & C > D")).toBe("<b>A &lt; B &amp; C &gt; D</b>");
@@ -142,7 +166,7 @@ describe("Telegram channel", () => {
   });
 
   it("sends text with HTML rendering and button fallback", async () => {
-    const bot = { send_message: vi.fn(async (args: any) => ({ message_id: 1 })) };
+    const bot = { send_message: vi.fn(async (_args: any) => ({ message_id: 1 })) };
     const channel = new TelegramChannel({ app: { bot } });
 
     await channel.send(new OutboundMessage({
@@ -162,8 +186,8 @@ describe("Telegram channel", () => {
 
   it("streams by sending a preview then final HTML edit", async () => {
     const bot = {
-      send_message: vi.fn(async (args: any) => ({ message_id: 10 })),
-      edit_message_text: vi.fn(async (args: any) => undefined),
+      send_message: vi.fn(async (_args: any) => ({ message_id: 10 })),
+      edit_message_text: vi.fn(async (_args: any) => undefined),
     };
     const channel = new TelegramChannel({ app: { bot }, streamEditInterval: 999 });
 

@@ -2,13 +2,16 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, relative } from "node:path";
 import { describe, expect, it } from "vitest";
+import ts from "typescript";
 
 const srcDir = resolve(__dirname, "..", "..");
 
 const allowedSourceFiles = new Set([
   "i18n/error-notice-messages.ts",
   "i18n/messages.ts",
-  "i18n/error-notice-messages.ts",
+  // These two legacy plugin renderers explicitly select English or Chinese; locale behavior is covered separately.
+  "app/plugin-interaction-waiting-label.ts",
+  "pages/literature-review-source-card.tsx",
   "lib/nickname.ts",
   "pages/memory/skill-demo-data.ts",
   // Provider aliases are identifiers used for logo matching, not visible UI copy.
@@ -27,6 +30,23 @@ describe("English UI coverage", () => {
     });
 
     expect(failures).toEqual([]);
+  });
+
+  it("ignores Han characters used only by a regular-expression literal", () => {
+    const source = String.raw`const recording = /^录音-\d{4}\.webm$/u;`;
+    expect(collectChineseLines("fixture.ts", source)).toEqual([]);
+  });
+
+  it.each([
+    'const label = "开始录音";',
+    'const label = `开始录音`;',
+    'const label = <button>开始录音</button>;',
+    'const label = <button title="开始录音" />;',
+    String.raw`const recording = /^录音-\d{4}\.webm$/u; const label = "开始录音";`,
+  ])("still detects untranslated UI text in %s", (source) => {
+    const failures = collectChineseLines("fixture.tsx", source);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("开始录音");
   });
 });
 
@@ -54,9 +74,23 @@ function stripComments(source: string): string {
 }
 
 function collectChineseLines(file: string, source: string): string[] {
-  return source
+  return maskRegularExpressionLiterals(file, source)
     .split("\n")
     .map((line, index) => ({ line, number: index + 1 }))
     .filter(({ line }) => /\p{Script=Han}/u.test(line))
     .map(({ line, number }) => `${file}:${number}: ${line.trim()}`);
+}
+
+function maskRegularExpressionLiterals(file: string, source: string): string {
+  const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  const ranges: Array<[number, number]> = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isRegularExpressionLiteral(node)) ranges.push([node.getStart(parsed), node.end]);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  for (const [start, end] of ranges.sort((left, right) => right[0] - left[0])) {
+    source = source.slice(0, start) + source.slice(start, end).replace(/[^\r\n]/g, " ") + source.slice(end);
+  }
+  return source;
 }

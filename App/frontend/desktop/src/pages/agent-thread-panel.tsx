@@ -1,3 +1,5 @@
+import { RecordingEntryPage, type RecordingEntrySession } from "./recording-entry.js";
+import { InterviewRecordingPanel, type RecordingPanelSession } from "./interview-recording-panel.js";
 import {
   useCallback,
   useEffect,
@@ -11,7 +13,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
-import { Copy, Globe2, Maximize2, Minimize2, PanelRight, Pin, PinOff, Plus, X } from "lucide-react";
+import { AudioLines, LockKeyhole, Copy, Globe2, Maximize2, Minimize2, PanelRight, Pin, PinOff, Plus, X } from "lucide-react";
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { ThreadFileIcon } from "./agent-thread-file-icon.js";
@@ -25,6 +27,7 @@ import {
   openThreadTab,
   threadPanelContentWidth,
   threadPanelOffset,
+  threadPanelUsesOverlay,
   threadTabForArtifact,
   threadTabForChange,
   threadTabForPath,
@@ -49,6 +52,7 @@ import {
 export const THREAD_PANEL_WIDTH_STORAGE_KEY = "memmy.threadPanel.width.v1";
 export const THREAD_PANEL_CLOSE_MS = 150;
 export const THREAD_PANEL_FULLSCREEN_BODY_CLASS = "memmy-thread-panel-fullscreen";
+export const PLUGIN_RECORDING_TAB_ID = "recording:plugin";
 const POPOVER_CLOSE_DELAY_MS = 160;
 const POPOVER_WIDTH = 320;
 const POPOVER_HEIGHT = 560;
@@ -167,12 +171,13 @@ export function useAgentThreadPanel(options: { scopeKey: string; containerRef: R
   }, [resizing, widths]);
 
   const hasContent = tabState.tabs.length > 0;
-  const liveWidth = hasContent
+  const overlay = threadPanelUsesOverlay(containerWidth);
+  const liveWidth = overlay ? containerWidth : hasContent
     ? clampThreadPanelWidth(widths.content ?? threadPanelContentWidth(containerWidth), containerWidth)
     : clampThreadPanelWidth(widths.sidebar, containerWidth);
   const width = phase === "closing" && session.closingWidth != null ? session.closingWidth : liveWidth;
   const visible = options.enabled && phase !== "closed";
-  const offset = options.enabled && phase === "open" ? threadPanelOffset(width, containerWidth) : 0;
+  const offset = options.enabled && phase === "open" && !overlay ? threadPanelOffset(width, containerWidth) : 0;
   const motion: ThreadPanelMotion = resizing ? "resizing" : phase === "closing" ? "closing" : "open";
   const liveWidthRef = useRef(liveWidth);
   liveWidthRef.current = liveWidth;
@@ -259,6 +264,7 @@ export function useAgentThreadPanel(options: { scopeKey: string; containerRef: R
     motion,
     width,
     offset,
+    overlay,
     fullscreen,
     view,
     tabState,
@@ -299,8 +305,18 @@ const EMPTY_BROWSER_SESSION: BrowserSession = {
 export function AgentThreadPanel(props: {
   controller: AgentThreadPanelController;
   messages: AgentChatMessage[];
+  conversationId?: string | null;
   workspaceRoot: string | null;
   previewContext: ThreadPreviewContext;
+  recordingSession?: RecordingEntrySession;
+  pluginRecordingSession?: RecordingPanelSession | null;
+  recordingAuthenticated?: boolean;
+  onRecordingSignIn?: () => void;
+  onOpenRecording?: () => void;
+  onCloseRecording?: () => void;
+  onClosePluginRecording?: () => void;
+  recordingRevealRequestId?: number;
+  onRecordingVisibleChange?: (visible: boolean) => void;
 }) {
   const { t } = useTranslation();
   const panel = props.controller;
@@ -330,6 +346,8 @@ export function AgentThreadPanel(props: {
   const browserSession = browserSessions.get(ownerKey) ?? EMPTY_BROWSER_SESSION;
   const { open: browserOpen, mounted: browserMounted, tabs: browserTabs,
     activeId: activeBrowserTabId, copiedId: copiedBrowserTabId } = browserSession;
+  const recordingVisible = panel.visible && panel.phase === "open" && !browserOpen && activeTab?.id === "recording:main";
+  useEffect(() => props.onRecordingVisibleChange?.(recordingVisible), [props.onRecordingVisibleChange, recordingVisible]);
   // The overview list is hidden behind either a file preview or a browser tab.
   // A pinned list is also hidden while the browser surface is selected.
   const pinnedListVisible = panel.pinned && panel.hasContent && !browserOpen;
@@ -346,6 +364,13 @@ export function AgentThreadPanel(props: {
     });
   }, []);
   const setBrowserOpen = (open: boolean) => updateBrowser(ownerKey, state => ({ ...state, open }));
+  const lastRecordingRevealRequest = useRef(0);
+  useEffect(() => {
+    const requestId = props.recordingRevealRequestId ?? 0;
+    if (!requestId || requestId <= lastRecordingRevealRequest.current) return;
+    lastRecordingRevealRequest.current = requestId;
+    updateBrowser(ownerKey, state => state.open ? { ...state, open: false } : state);
+  }, [props.recordingRevealRequestId, ownerKey, updateBrowser]);
   const setActiveBrowserTabId = (activeId: number) => updateBrowser(ownerKey, state => ({ ...state, activeId }));
   const addBrowserTab = useCallback((url?: string, owner = ownerKey, fromPagePopup = false) => {
     const id = nextBrowserTabId.current++;
@@ -592,6 +617,7 @@ export function AgentThreadPanel(props: {
     panel.hasContent ? "thread-panel--content" : "thread-panel--sidebar",
     listVisible ? "thread-panel--list-visible" : "",
     fullscreen ? "thread-panel--fullscreen" : "",
+    panel.overlay ? "thread-panel--overlay" : "",
   ].filter(Boolean).join(" ");
 
   return (
@@ -601,7 +627,7 @@ export function AgentThreadPanel(props: {
         height: 600, opacity: 0, pointerEvents: 'none',
       } : { display: 'none' }) : fullscreen ? undefined : { width: panel.width }}
       aria-label={t("home.threadPanel.label")}>
-      {fullscreen ? null : (
+      {fullscreen || panel.overlay ? null : (
         <div
           className={`thread-panel__sash${panel.resizing ? " thread-panel__sash--active" : ""}`}
           role="separator"
@@ -648,7 +674,11 @@ export function AgentThreadPanel(props: {
                 setBrowserOpen(false);
                 panel.activateTab(id);
               }}
-              onClose={panel.closeTab}
+              onClose={(id) => {
+                if (id === PLUGIN_RECORDING_TAB_ID) props.onClosePluginRecording?.();
+                else if (panel.tabState.tabs.find((tab) => tab.id === id)?.type === "recording") props.onCloseRecording?.();
+                panel.closeTab(id);
+              }}
               browserTabs={browserMounted ? browserTabs : []}
               activeBrowserTabId={activeBrowserTabId}
               onActivateBrowser={(id) => {
@@ -662,6 +692,12 @@ export function AgentThreadPanel(props: {
           ) : null}
         </div>
         <div className="thread-panel__header-actions">
+          {props.onOpenRecording && !panel.tabState.tabs.some((tab) => tab.type === "recording") ? (
+            <button type="button" className="thread-panel__icon-button" aria-label={t("recording.page.title")}
+              title={t("recording.page.title")} onClick={() => { setBrowserOpen(false); props.onOpenRecording?.(); }}>
+              <AudioLines size={16} aria-hidden="true" />
+            </button>
+          ) : null}
           {(panel.hasContent || browserMounted) ? (
             <button
               type="button"
@@ -752,7 +788,15 @@ export function AgentThreadPanel(props: {
         ) : null}
         {!browserOpen && activeTab ? (
           <div className="thread-panel__main">
-            <ThreadTabPreview key={activeTab.id} tab={activeTab} context={props.previewContext} />
+            {activeTab.type === "recording"
+              ? activeTab.id === PLUGIN_RECORDING_TAB_ID
+                ? props.pluginRecordingSession
+                  ? <InterviewRecordingPanel embedded session={props.pluginRecordingSession} onClose={props.onClosePluginRecording} /> : null
+                : props.recordingAuthenticated || (props.recordingSession && props.recordingSession.status !== "idle")
+                  ? props.recordingSession ? <RecordingEntryPage session={props.recordingSession} /> : null
+                  : <div className="recording-sign-in"><LockKeyhole size={24} /><p>{t("recording.page.signInTitle")}</p>
+                    <button type="button" onClick={props.onRecordingSignIn}>{t("recording.page.signIn")}</button></div>
+              : <ThreadTabPreview key={activeTab.id} tab={activeTab} context={props.previewContext} />}
           </div>
         ) : null}
       </div>
@@ -921,7 +965,7 @@ function ThreadTabs(props: {
               data-thread-tab-id={tab.id}
               data-thread-tab-index={index}
               className={`thread-tab${active ? " thread-tab--active" : ""}`}
-              title={tab.type === "change" ? tab.absolutePath ?? tab.path : tab.path ?? tab.name}
+              title={tab.type === "change" ? tab.absolutePath ?? tab.path : tab.type === "file" ? tab.path ?? tab.name : tab.name}
               onClick={() => props.onActivate(tab.id)}
               onAuxClick={(event) => {
                 if (event.button !== 1) return;
@@ -931,7 +975,7 @@ function ThreadTabs(props: {
               onKeyDown={(event) => handleKeyDown(event, index)}
             >
               <span className="thread-tab__icon">
-                <ThreadFileIcon name={tab.name} />
+                {tab.type === "recording" ? <AudioLines size={16} /> : <ThreadFileIcon name={tab.name} />}
               </span>
               <span className="thread-tab__title">{tab.name}</span>
               <button

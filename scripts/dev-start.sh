@@ -28,6 +28,7 @@ WAIT_ON_BIN="$ROOT_DIR/node_modules/.bin/wait-on"
 LOG_DIR="$ROOT_DIR/.tmp/dev-stack"
 
 export MEMMY_CONFIG="$MEMMY_CONFIG_PATH"
+export MEMMY_BUNDLED_PLUGINS_DIR="${MEMMY_BUNDLED_PLUGINS_DIR:-$DESKTOP_DIR/dist/bundled-plugins}"
 export MEMMY_MEMORY_URL="${MEMMY_MEMORY_URL:-$MEMMY_MEMORY_ENDPOINT}"
 export MEMMY_MEMORY_LAYER_URL="${MEMMY_MEMORY_LAYER_URL:-$MEMMY_MEMORY_ENDPOINT}"
 if [[ -n "$MEMMY_MEMORY_TOKEN_VALUE" ]]; then
@@ -536,7 +537,9 @@ try {
 }
 
 const defaults = config.agents?.defaults ?? {};
-const presetName = defaults.modelPreset;
+const presetName = defaults.modelPreset
+  ?? config.modelAssignments?.account?.agent?.default
+  ?? config.modelAssignments?.byok?.agent?.default;
 const preset = presetName ? config.modelPresets?.[presetName] : null;
 const providerName = preset?.provider;
 const endpointName = preset?.endpoint;
@@ -637,6 +640,13 @@ run_main() {
   "$MEMMY_RUNTIME_NODE_PATH" --eval \
     'const Database = require("better-sqlite3"); const db = new Database(":memory:"); db.close();'
 
+  # The agent is installed separately from the root workspace and can resolve
+  # its own native addon. Rebuild and check it with the same runtime as serve.
+  cd "$MEMMY_AGENT_DIR"
+  npm rebuild better-sqlite3
+  "$MEMMY_RUNTIME_NODE_PATH" --eval \
+    'const Database = require("better-sqlite3"); const db = new Database(":memory:"); db.close();'
+
   unset MEMMY_MIGRATIONS_READY_CONFIG MEMMY_MIGRATIONS_READY_WORKSPACE MEMMY_MIGRATIONS_READY_SESSION_DAG MEMMY_MIGRATIONS_READY_APP_DATABASE
   log "running startup migrations"
   cd "$MEMMY_AGENT_DIR"
@@ -676,6 +686,30 @@ NODE
   export MEMMY_MIGRATIONS_READY_SESSION_DAG="${MEMMY_AGENT_SESSION_DAG_DIR:-$(dirname "$MEMMY_WORKSPACE_DIR")/session-dag}"
   export MEMMY_APP_DATABASE="$MEMMY_APP_DATABASE_FILE"
   export MEMMY_MIGRATIONS_READY_APP_DATABASE="$MEMMY_APP_DATABASE_FILE"
+  if [[ -z "${VITE_MEMMY_AGENT_WEBUI_URL:-}" ]]; then
+    VITE_MEMMY_AGENT_WEBUI_URL="$("$MEMMY_RUNTIME_NODE_PATH" - "$MEMMY_CONFIG_PATH" <<'NODE'
+const fs = require("node:fs");
+const YAML = require("yaml");
+// build_and_install_memory_cli is what creates config.yaml, and it runs after
+// this, so on a first run the file is simply not there yet.  The defaults
+// below already cover that case; only a malformed config is worth failing on.
+let config = {};
+try {
+  config = YAML.parse(fs.readFileSync(process.argv[2], "utf8")) || {};
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
+const websocket = config?.channels?.websocket || {};
+const configuredHost = typeof websocket.host === "string" && websocket.host.trim()
+  ? websocket.host.trim()
+  : "127.0.0.1";
+const host = configuredHost === "0.0.0.0" || configuredHost === "::" ? "127.0.0.1" : configuredHost;
+const port = Number.isInteger(websocket.port) && websocket.port > 0 ? websocket.port : 18980;
+process.stdout.write(`http://${host}:${port}`);
+NODE
+)"
+    export VITE_MEMMY_AGENT_WEBUI_URL
+  fi
 
   build_and_install_memory_cli
 
@@ -687,8 +721,12 @@ NODE
   "$(user_cli_path "memmy")" --version >/dev/null
   log "memmy command is ready in $MEMMY_BIN_DIR"
 
-  log "refreshing non-interactive memmy-agent onboard state"
-  node dist/main.js onboard --defaults </dev/null
+  if config_has_agent_model; then
+    log "preserving existing model catalog; non-interactive onboard refresh is not required"
+  else
+    log "refreshing non-interactive memmy-agent onboard state"
+    node dist/main.js onboard --defaults </dev/null
+  fi
 
   log "starting agent API, frontend, and desktop backend; Electron manages Memory and supervises gateway"
   cd "$ROOT_DIR"

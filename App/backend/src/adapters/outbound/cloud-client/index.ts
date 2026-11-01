@@ -1,6 +1,7 @@
 export { createHttpCloudClient, type CreateHttpCloudClientOptions } from "./http-cloud-client.js";
 export type {
   AckLotteryRewardInput,
+  AckTaskTokenGiftInput,
   CheckReleaseInput,
   CloudAsrTranscriptionInput,
   CloudAsrTranscriptionResult,
@@ -31,6 +32,7 @@ export type {
   SendPhoneCodeInput,
   SendTelemetryInput,
   TokenUsageSnapshot,
+  TaskTokenGiftInput,
   UpdateAccountGuideInput,
   UpdateCloudAccountProfileInput
 } from "./types.js";

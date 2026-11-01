@@ -47,6 +47,8 @@ import type {
   DesktopMemoryServiceRestartResult,
   DesktopProjectDirectorySelection,
   DesktopRuntimeConfig,
+  DesktopSystemFileIconResult,
+  DesktopSystemFolderIconKind,
   DesktopWorkspaceDirectoryResult,
   DesktopUpdateCheckResult,
   DesktopUpdateDownloadProgress,
@@ -62,7 +64,7 @@ import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   fullWindowOptions,
   parsePetWindowLayout,
@@ -1357,6 +1359,8 @@ async function startLocalApi(services: ManagedRuntimeServices | null): Promise<D
         })
       : undefined,
     memmyConfigPath: process.env.MEMMY_CONFIG,
+    bundledPluginDirectory: process.env.MEMMY_BUNDLED_PLUGINS_DIR
+      ?? (app.isPackaged ? join(process.resourcesPath, "bundled-plugins") : undefined),
     memoryBaseUrl: memoryControl.baseUrl,
     memoryReady: services?.memory.ready,
     skipAgentMcpReload: Boolean(services),
@@ -1412,6 +1416,32 @@ async function restartMemoryService(): Promise<DesktopMemoryServiceRestartResult
       memoryServiceRestart = null;
     }
   }
+}
+
+function resolveShowItemInFolderPath(filePath: string): string | null {
+  const trimmed = filePath.trim();
+  if (!trimmed) return null;
+  const target = isAbsolute(trimmed)
+    ? resolve(trimmed)
+    : (() => {
+        const [rootName, ...relativeParts] = trimmed.split(/[\\/]+/).filter(Boolean);
+        const root = rootName === "文稿" || rootName === "Documents"
+          ? app.getPath("documents")
+          : rootName === "下载" || rootName === "Downloads"
+            ? app.getPath("downloads")
+            : rootName === "桌面" || rootName === "Desktop"
+              ? app.getPath("desktop")
+              : join(homedir(), rootName ?? "");
+        return join(root, ...relativeParts);
+      })();
+
+  let existingTarget = target;
+  while (!existsSync(existingTarget)) {
+    const parent = dirname(existingTarget);
+    if (parent === existingTarget) return null;
+    existingTarget = parent;
+  }
+  return existingTarget;
 }
 
 /**
@@ -1678,6 +1708,44 @@ function registerIpcHandlers(): void {
   ipcMain.handle("memmy:save-image", async (event, request: DesktopImageActionRequest) => (
     saveDesktopImage(request, event.sender.getURL(), BrowserWindow.fromWebContents(event.sender))
   ));
+
+  ipcMain.handle("memmy:get-system-file-icon", async (_event, filePath: string): Promise<DesktopSystemFileIconResult> => {
+    if (typeof filePath !== "string" || !isAbsolute(filePath) || !existsSync(filePath)) {
+      return null;
+    }
+    try {
+      const icon = await app.getFileIcon(filePath, { size: "large" });
+      return icon.isEmpty() ? null : icon.toDataURL();
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("memmy:get-system-folder-icon", async (_event, kind: DesktopSystemFolderIconKind): Promise<DesktopSystemFileIconResult> => {
+    // Generic "folder" used to call getFileIcon(temp) and could SIGTRAP under load; skip it.
+    const pathName = kind === "documents"
+      ? "documents"
+      : kind === "downloads"
+        ? "downloads"
+        : kind === "desktop"
+          ? "desktop"
+          : null;
+    if (!pathName) return null;
+    try {
+      const folderPath = app.getPath(pathName);
+      if (!existsSync(folderPath)) return null;
+      const icon = await app.getFileIcon(folderPath, { size: "normal" });
+      return icon.isEmpty() ? null : icon.toDataURL();
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("memmy:show-item-in-folder", async (_event, filePath: string): Promise<void> => {
+    if (typeof filePath !== "string") return;
+    const target = resolveShowItemInFolderPath(filePath);
+    if (target) shell.showItemInFolder(target);
+  });
 
   ipcMain.handle("memmy:save-file", async (event, request: DesktopImageActionRequest) => (
     saveDesktopFile(request, event.sender.getURL(), BrowserWindow.fromWebContents(event.sender))
@@ -5573,7 +5641,7 @@ function parseRendererRouteTarget(value: unknown): RendererRouteTarget | null {
   }
 
   const record = value as Record<string, unknown>;
-  const route = typeof record.route === "string" && ["/welcome", "/token-detail", "/login", "/api-key", "/api-key-models", "/api-key-optional", "/onboarding", "/main", "/tools", "/memory", "/memory-sources", "/settings"].includes(record.route) ? record.route : null;
+  const route = typeof record.route === "string" && ["/welcome", "/token-detail", "/login", "/api-key", "/api-key-models", "/api-key-optional", "/onboarding", "/main", "/tools", "/memory", "/memory-sources", "/literature-review", "/settings"].includes(record.route) ? record.route : null;
   const hash = typeof record.hash === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(record.hash) ? record.hash : null;
   const agentChatId = route === "/main" && typeof record.agentChatId === "string" && /^[A-Za-z0-9_:-]{1,128}$/.test(record.agentChatId) ? record.agentChatId : null;
   const petIntent = record.petIntent === "user" ? "user" : null;
@@ -6131,6 +6199,9 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:openMailto");
   ipcMain.removeHandler("memmy:copy-image-to-clipboard");
   ipcMain.removeHandler("memmy:save-image");
+  ipcMain.removeHandler("memmy:get-system-file-icon");
+  ipcMain.removeHandler("memmy:get-system-folder-icon");
+  ipcMain.removeHandler("memmy:show-item-in-folder");
   ipcMain.removeHandler("memmy:save-file");
   ipcMain.removeHandler("memmy:export-memory-database");
   ipcMain.removeHandler("memmy:install-cli-tools");

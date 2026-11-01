@@ -28,6 +28,8 @@ describe("standalone scan HTTP responsiveness", () => {
     const root = tempRoot();
     let requestDuringScan!: () => Promise<void>;
     let check!: Promise<void>;
+    let phaseActionsStarted!: () => void;
+    const phaseActionsReady = new Promise<void>((resolve) => { phaseActionsStarted = resolve; });
     let closeObserved = false;
     const originalOpen = scanStore.openMemoryAgentSourceScanStore;
     vi.spyOn(scanStore, "openMemoryAgentSourceScanStore").mockImplementation(async (...args) => {
@@ -43,6 +45,7 @@ describe("standalone scan HTTP responsiveness", () => {
           });
           // Attach a handler while the scan continues to avoid an unhandled rejection.
           void check.catch(() => undefined);
+          phaseActionsStarted();
         }
       };
       const close = store.close;
@@ -85,7 +88,7 @@ describe("standalone scan HTTP responsiveness", () => {
     };
     try {
       const { jobId } = await executor.startScan({ sourceId: "codex", mode: "full" });
-      await vi.waitFor(() => expect(check).toBeDefined());
+      await phaseActionsReady;
       await check;
       await executor.dispose();
       expect(completeSourceTurn.mock.calls.length).toBeLessThan(TURN_COUNT);
@@ -94,6 +97,7 @@ describe("standalone scan HTTP responsiveness", () => {
       expect(closeObserved).toBe(true);
       expect(existsSync(join(root, "scans", `${jobId}.sqlite`))).toBe(false);
     } finally {
+      await executor.dispose();
       await closeMemoryHttpServer(server);
     }
   });
@@ -104,6 +108,8 @@ describe("standalone scan HTTP responsiveness", () => {
     mkdirSync(join(skillRoot, "skills", "synthetic"), { recursive: true });
     writeFileSync(join(skillRoot, "skills", "synthetic", "SKILL.md"), "Synthetic fixture skill");
     let replacement!: Promise<{ accepted: true; jobId: string }>;
+    let replacementStarted!: () => void;
+    const replacementReady = new Promise<void>((resolve) => { replacementStarted = resolve; });
     let firstJob = true;
     const addMemory = vi.fn(() => ({ id: "synthetic-skill" }));
     const executor = createAgentSourceExecutor({
@@ -120,12 +126,14 @@ describe("standalone scan HTTP responsiveness", () => {
         firstJob = false;
         void executor.cancelScan();
         replacement = executor.startScan({ sourceId: "codex", mode: "full" });
+        void replacement.catch(() => undefined);
+        replacementStarted();
         return skillRoot;
       },
     });
     try {
       const first = await executor.startScan({ sourceId: "codex", mode: "full" });
-      await vi.waitFor(() => expect(replacement).toBeDefined());
+      await replacementReady;
       const second = await replacement;
       expect(second.jobId).not.toBe(first.jobId);
       await vi.waitFor(() => expect(executor.scanStatus()).toMatchObject({ jobId: second.jobId, running: false, error: null }));
@@ -140,6 +148,8 @@ describe("standalone scan HTTP responsiveness", () => {
   it("preserves a shutdown checkpoint and resumes the same initial subset job", async () => {
     const root = tempRoot();
     let stopping!: Promise<void>;
+    let stopStarted!: () => void;
+    const stopReady = new Promise<void>((resolve) => { stopStarted = resolve; });
     let first!: ReturnType<typeof createAgentSourceExecutor>;
     let stopAtPrepare = true;
     const originalOpen = scanStore.openMemoryAgentSourceScanStore;
@@ -151,6 +161,8 @@ describe("standalone scan HTTP responsiveness", () => {
         if (meta.phase === "prepare" && stopAtPrepare) {
           stopAtPrepare = false;
           stopping = Promise.resolve(first.dispose());
+          void stopping.catch(() => undefined);
+          stopStarted();
         }
       };
       return store;
@@ -167,7 +179,7 @@ describe("standalone scan HTTP responsiveness", () => {
     let resumed: ReturnType<typeof createAgentSourceExecutor> | undefined;
     try {
       const initial = await first.startScan({ sourceId: "codex", mode: "initial_subset" });
-      await vi.waitFor(() => expect(stopping).toBeDefined());
+      await stopReady;
       await stopping;
       expect(completeSourceTurn).not.toHaveBeenCalled();
       expect(existsSync(join(root, "scans", `${initial.jobId}.sqlite`))).toBe(true);

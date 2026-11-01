@@ -25,6 +25,7 @@ import { ToolsPage } from "../tools-page.js";
 const tokens = readFileSync(resolve(process.cwd(), "src/theme/tokens.css"), "utf8");
 const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8")
   .replace(/^@import[^;]*;\s*/gm, "");
+const toolsPageSource = readFileSync(resolve(process.cwd(), "src/pages/tools-page.tsx"), "utf8");
 // happy-dom does not apply cascade layers. Preserve the actual generated
 // utilities and their import order while exposing their rules to its CSS engine.
 const utilities = parse(readFileSync(resolve(process.cwd(), "src/prototype-utilities.css"), "utf8"));
@@ -306,7 +307,14 @@ describe("Windows chrome spacing and the HomePage thread side panel", () => {
       const expected = platform === "win32"
         ? paused ? 56 : 24
         : page === "settings" ? 56 : sidebarHidden ? 46 : 24;
-      expect(readTopPadding(pageContent)).toBe(expected);
+      if (platform === "darwin" && page === "tools") {
+        // Happy DOM discards variable-based calc styles. Check the rendered
+        // page and its explicit lifted-tab inset instead of a false 0px.
+        expect(pageContent.classList.contains("tools-page-content")).toBe(true);
+        expect(toolsPageSource).toContain("topBarInsetOffsetPx={-8}");
+      } else {
+        expect(readTopPadding(pageContent)).toBe(expected);
+      }
       if (platform === "win32" && paused) {
         // Reserve the entire 46px content toolbar plus 10px before real menu
         // content, including when a narrow capsule title wraps to two lines.

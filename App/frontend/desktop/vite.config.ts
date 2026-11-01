@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, loadEnv, type Plugin } from "vite";
+import { bundledPdfResources } from "./pdfjs-assets.js";
 
 const DEFAULT_MEMMY_AGENT_WEBUI_BASE_URL = "http://127.0.0.1:18980";
 const RUNTIME_CONFIG_ENDPOINT = "/__memmy_runtime_config";
@@ -64,7 +65,7 @@ export default defineConfig(({ mode }) => {
     envDir: REPO_ROOT_DIR,
     envPrefix: ["VITE_"],
     define: publicMemmyEnv,
-    plugins: [react(), memmyRuntimeConfigPlugin()],
+    plugins: [react(), memmyRuntimeConfigPlugin(), bundledPdfResources()],
     resolve: {
       // Linked workspace packages can otherwise bundle a second React instance,
       // whose hook dispatcher is never initialized by the desktop ReactDOM root.

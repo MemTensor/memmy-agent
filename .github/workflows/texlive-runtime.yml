@@ -1,0 +1,104 @@
+name: Managed XeLaTeX runtimes
+on:
+  push:
+    branches: [codex/managed-texlive-runtime-v1.2.5]
+    paths: ['.github/workflows/texlive-runtime.yml', 'scripts/texlive/**', 'App/backend/src/adapters/outbound/plugin-runtime/**', 'plugins/office/scripts/package-runtime.mjs']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: win32-x64
+          - runner: ubuntu-24.04
+            target: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+          - runner: macos-26
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install validation dependencies
+        run: |
+          npm ci --ignore-scripts
+          python -m pip install pymupdf==1.26.5
+      - name: Test fixture verification and download pinned OSS bundle
+        run: |
+          node --test scripts/texlive/fetch-fixtures.test.mjs
+          node scripts/texlive/fetch-fixtures.mjs "$RUNNER_TEMP/texlive-brand-fixtures" > "$RUNNER_TEMP/texlive-fixtures-verification.json"
+      - name: Verify and extract pinned official TinyTeX input
+        run: node scripts/texlive/provision-runtime.mjs "$RUNNER_TEMP/texlive-input"
+      - name: Provision review packages (Unix release builder only)
+        if: runner.os != 'Windows'
+        run: |
+          TL="$TEXLIVE_BUILD_SOURCE/$TEXLIVE_BUILD_BIN"
+          export PATH="$TL:$PATH"
+          "$TL/tlmgr" option repository https://ctan.math.illinois.edu/systems/texlive/tlnet
+          "$TL/tlmgr" update --self
+          "$TL/tlmgr" --no-execute-actions update --all
+          "$TL/tlmgr" --no-execute-actions install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
+          "$TL/mktexlsr"
+          printf 'y\n' | "$TL/updmap-sys" --syncwithtrees --force
+          "$TL/fmtutil-sys" --byfmt xelatex
+      - name: Provision review packages (Windows release builder only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = Join-Path $env:TEXLIVE_BUILD_SOURCE $env:TEXLIVE_BUILD_BIN
+          $tlmgr = Join-Path $bin 'tlmgr.bat'
+          $env:PATH = "$bin;$env:PATH"
+          & $tlmgr option repository https://ctan.math.illinois.edu/systems/texlive/tlnet
+          if ($LASTEXITCODE -ne 0) { throw 'tlmgr repository failed' }
+          & $tlmgr update --self
+          if ($LASTEXITCODE -ne 0) { throw 'tlmgr update failed' }
+          & $tlmgr --no-execute-actions update --all
+          if ($LASTEXITCODE -ne 0) { throw 'TeX baseline update failed' }
+          & $tlmgr --no-execute-actions install xetex ctex fandol fontspec natbib microtype booktabs tools float hyperref geometry xcolor fancyhdr caption colortbl environ trimspaces psnfss lm tex-gyre
+          if ($LASTEXITCODE -ne 0) { throw 'tlmgr package installation failed' }
+          & (Join-Path $bin 'mktexlsr.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'TeX index generation failed' }
+          'y' | & (Join-Path $bin 'updmap-sys.exe') --syncwithtrees --force
+          if ($LASTEXITCODE -ne 0) { throw 'TeX font map generation failed' }
+          & (Join-Path $bin 'fmtutil-sys.exe') --byfmt xelatex
+          if ($LASTEXITCODE -ne 0) { throw 'XeLaTeX format generation failed' }
+          & (Join-Path $bin 'mktexlsr.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'TeX index generation failed' }
+      - name: Prepare relocatable distribution and verified archive
+        run: |
+          node scripts/texlive/prepare-runtime.mjs --source "$TEXLIVE_BUILD_SOURCE" --destination "$RUNNER_TEMP/texlive-portable" --bin "$TEXLIVE_BUILD_BIN"
+          node scripts/texlive/package-runtime.mjs --root "$RUNNER_TEMP/texlive-portable" --destination "$RUNNER_TEMP/texlive-release" --target "${{ matrix.target }}" --version 2026.10.28-2 --tools "$RUNNER_TEMP/texlive-portable/tools.json" --set-default
+      - name: Hide release source and validate managed cold install and offline reuse
+        run: |
+          node --input-type=module -e 'import {rename} from "node:fs/promises"; await rename(process.env.TEXLIVE_BUILD_SOURCE,process.env.TEXLIVE_BUILD_SOURCE+"-disabled");'
+          node --import tsx scripts/texlive/smoke-install.ts "$RUNNER_TEMP/texlive-release" "$RUNNER_TEMP/texlive-installed" "$RUNNER_TEMP/texlive-env.json" "$RUNNER_TEMP/texlive-brand-fixtures"
+      - name: Verify PDF brand, Chinese text and render every page
+        run: python scripts/texlive/verify-pdfs.py "$RUNNER_TEMP/texlive-env.json.qa"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: texlive-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/texlive-release/
+            ${{ runner.temp }}/texlive-env.json.qa/
+            ${{ runner.temp }}/texlive-input/provenance.json
+            ${{ runner.temp }}/texlive-fixtures-verification.json
+          retention-days: 14

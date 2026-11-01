@@ -2938,6 +2938,8 @@ describe("agent chat slice", () => {
           { url: "/api/media/sig/deck", name: "deck.pptx" },
           { url: "/api/media/sig/image", name: "result.png" },
           { url: "/api/media/sig/clip", name: "clip.mp4" },
+          { url: "/api/media/sig/audio", name: "interview.mp3", kind: "audio" },
+          { url: "/api/media/sig/old-recording", name: "录音-2026-10-27T10-13-53-172Z.webm", kind: "video" },
           { url: "/api/media/sig/explicit", name: "archive.bin", kind: "file", path: "/Users/yuan/archive.bin" }
         ]
       }
@@ -2949,6 +2951,8 @@ describe("agent chat slice", () => {
         { kind: "file", url: "/api/media/sig/deck", name: "deck.pptx" },
         { kind: "image", url: "/api/media/sig/image", name: "result.png" },
         { kind: "video", url: "/api/media/sig/clip", name: "clip.mp4" },
+        { kind: "audio", url: "/api/media/sig/audio", name: "interview.mp3" },
+        { kind: "audio", url: "/api/media/sig/old-recording", name: "录音-2026-10-27T10-13-53-172Z.webm" },
         { kind: "file", url: "/api/media/sig/explicit", name: "archive.bin", path: "/Users/yuan/archive.bin" }
       ]
     });

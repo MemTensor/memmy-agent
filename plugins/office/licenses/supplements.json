@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "supplements": [
+    {
+      "name": "fontkit",
+      "version": "2.0.4",
+      "license": "MIT",
+      "integrity": "sha512-syetQadaUEDNdxdugga9CpEYVaQIxOwk7GlwZWWZ19//qW4zE5bknOKeMBDYAASwnpaSHKJITRLMF9m1fp3s6g==",
+      "installedFiles": {
+        "package.json": "49c60605b92316a5d5fe57b9a3bca8950ad9a8beab1cb633d6f29862d1bd163d",
+        "README.md": "8a1cf12d8ae7277f047c3000af7677927f2da9243627223ba5715d40df4979d6"
+      },
+      "files": [
+        {
+          "path": "fontkit-2.0.4/NOTICE-SUPPLEMENT.txt",
+          "sha256": "23a5805941be68d09fa437e796496496a02f9dcbb6c52c09e7e35068ca4b3d14",
+          "includeInNotices": true
+        },
+        {
+          "path": "fontkit-2.0.4/SPDX-MIT-template.txt",
+          "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+          "includeInNotices": false
+        },
+        {
+          "path": "fontkit-2.0.4/SPDX-MIT.json",
+          "sha256": "3288d46f6e397df6c8859b675a5156cdd97016dbeb981b493bbb654859458c60",
+          "includeInNotices": false
+        },
+        {
+          "path": "fontkit-2.0.4/upstream-README.md",
+          "sha256": "8a1cf12d8ae7277f047c3000af7677927f2da9243627223ba5715d40df4979d6",
+          "includeInNotices": false
+        },
+        {
+          "path": "fontkit-2.0.4/upstream-npm-metadata.json",
+          "sha256": "0ae678b1e43a68bed91ea768f1b74d59551708103b9a5d36749ba106e491ce3e",
+          "includeInNotices": false
+        },
+        {
+          "path": "fontkit-2.0.4/upstream-package.json",
+          "sha256": "49c60605b92316a5d5fe57b9a3bca8950ad9a8beab1cb633d6f29862d1bd163d",
+          "includeInNotices": false
+        }
+      ]
+    }
+  ]
+}

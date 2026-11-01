@@ -38,6 +38,7 @@ async function createServer(directory: string, independent = true) {
     memmyConfigWriter: writer,
     modelConfigTester: { test: probe }
   });
+  const persistModelConfig = service.setModelConfig.bind(service);
   const write = vi.spyOn(service, "setModelConfig");
   vi.stubGlobal("fetch", vi.fn(async (url: URL, init: RequestInit) => {
     const path = new URL(url).pathname;
@@ -77,7 +78,7 @@ async function createServer(directory: string, independent = true) {
   write.mockClear();
   const saveCatalog = vi.spyOn(client, "saveModelCatalog");
   return {
-    client, probe, write, writer, saveCatalog,
+    client, probe, write, writer, saveCatalog, persistModelConfig,
     read: () => client.getModelConfig(),
     async key(capability: ModelCapability) {
       const config = await client.getModelConfig();
@@ -129,6 +130,21 @@ describe("BYOK displayed, tested and saved credentials", () => {
 
   async function render(page: ReactNode) { await act(async () => root.render(page)); }
   async function click(button: HTMLButtonElement) { await act(async () => button.click()); }
+  function navigationCount() {
+    return mocks.dispatch.mock.calls.filter(([action]) => action?.type === "navigation/changed").length;
+  }
+  async function saveAndWaitForCatalog(button: HTMLButtonElement) {
+    const previousSaves = server.saveCatalog.mock.calls.length;
+    const previousWrites = server.write.mock.calls.length;
+    await click(button);
+    await vi.waitFor(() => expect(server.saveCatalog.mock.calls.length).toBeGreaterThan(previousSaves));
+    // A new preset is created before its assignment is published. A server write
+    // starting is not proof that the complete client save has finished.
+    await act(async () => {
+      await Promise.all(server.saveCatalog.mock.results.slice(previousSaves).map((result) => result.value));
+    });
+    expect(server.write.mock.calls.length).toBeGreaterThan(previousWrites);
+  }
   function next() { return [...container.querySelectorAll("button")].find((button) => button.textContent === "apiKey.next")!; }
   function test(index: number) { return [...container.querySelectorAll("button")].filter((button) => button.textContent?.startsWith("apiKey.test"))[index]!; }
   function field(label: string, index = 0) {
@@ -141,15 +157,8 @@ describe("BYOK displayed, tested and saved credentials", () => {
     });
   }
   async function saveAndWait(button: HTMLButtonElement, navigates = false) {
-    const saveIndex = server.saveCatalog.mock.results.length;
-    const writes = server.write.mock.calls.length;
     const dispatchIndex = mocks.dispatch.mock.calls.length;
-    await click(button);
-    await vi.waitFor(() => expect(server.saveCatalog.mock.results.length).toBeGreaterThan(saveIndex));
-    // A new preset is created before its assignment is saved. Wait for this
-    // complete catalog mutation, rather than the first backend write or an old navigation.
-    await act(async () => { await server.saveCatalog.mock.results[saveIndex]!.value; });
-    expect(server.write.mock.calls.length).toBeGreaterThan(writes);
+    await saveAndWaitForCatalog(button);
     if (navigates) {
       await vi.waitFor(() => expect(mocks.dispatch.mock.calls.slice(dispatchIndex).map(([action]) => action))
         .toContainEqual(expect.objectContaining({ type: "navigation/changed" })));
@@ -166,6 +175,42 @@ describe("BYOK displayed, tested and saved credentials", () => {
     expect(await server.key(scenario.role)).toBe(tested.apiKey);
     return tested;
   }
+
+  it.each(scenarios.slice(0, 4))("onboarding $role: waits for assignment publication before leaving", async (scenario) => {
+    const persist = server.persistModelConfig;
+    let releaseAssignment!: () => void;
+    let assignmentStarted!: () => void;
+    const assignmentGate = new Promise<void>((resolve) => { releaseAssignment = resolve; });
+    const started = new Promise<void>((resolve) => { assignmentStarted = resolve; });
+    server.write.mockImplementationOnce(persist).mockImplementationOnce(async (input) => {
+      assignmentStarted();
+      await assignmentGate;
+      return persist(input);
+    });
+    try {
+      await render(scenario.page());
+      await change(field(scenario.key), "sk-new-onboarding-9999");
+      await click(test(scenario.index));
+      await vi.waitFor(() => expect(test(scenario.index).textContent).toBe("apiKey.testSuccess"));
+      const button = next();
+      const previousNavigations = navigationCount();
+      await click(button);
+      await started;
+      const saving = server.saveCatalog.mock.results.at(-1)!.value;
+      // The old write-start observation is already true while publication is pending.
+      expect(server.write).toHaveBeenCalled();
+      expect(button.disabled).toBe(true);
+      expect(navigationCount()).toBe(previousNavigations);
+      await act(async () => {
+        releaseAssignment();
+        await saving;
+      });
+      await vi.waitFor(() => expect(navigationCount()).toBeGreaterThan(previousNavigations));
+      expect(await server.key(scenario.role)).toBe("sk-new-onboarding-9999");
+    } finally {
+      releaseAssignment();
+    }
+  });
 
   it.each(scenarios)("$role: unchanged masked credential resolves and persists the same real key", async (scenario) => {
     await render(scenario.page());
@@ -354,7 +399,7 @@ describe("BYOK displayed, tested and saved credentials", () => {
     await change(field("apiKey.key"), "sk-retry-1111");
     await click(test(0));
     await vi.waitFor(() => expect(test(0).textContent).toBe("apiKey.testSuccess"));
-    const persist = server.write.getMockImplementation()!;
+    const persist = server.persistModelConfig;
     server.write.mockImplementationOnce(persist).mockRejectedValueOnce(new Error("assignment-write-failed"));
     await click(next());
     await vi.waitFor(() => expect(container.textContent).toContain("assignment-write-failed"));

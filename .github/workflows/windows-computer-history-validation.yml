@@ -5,7 +5,9 @@ on:
     paths:
       - ".github/workflows/windows-computer-history-validation.yml"
       - "tests/windows-memory-workflow.test.ts"
+      - "tests/windows-provider-receipt-workflow.test.ts"
       - "App/native-computer-history/**"
+      - "App/native-computer-use/**"
       - "App/memmy-agent/src/tools/computer-history/**"
       - "App/memmy-agent/tests/tools/computer-history/**"
       - "App/memmy-agent/scripts/copy-build-assets.mjs"
@@ -49,6 +51,8 @@ jobs:
           INPUT_SOURCE_REPOSITORY: ${{ inputs.source_repository || '' }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           CONTROLLER_WORKFLOW_REF: ${{ github.workflow_ref }}
           CONTROLLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
@@ -63,6 +67,8 @@ jobs:
           ]);
           let candidate;
           let mode;
+          let repository;
+          let receiptAllowed = true;
           const directWorkflow = `${env.SOURCE_REPOSITORY}/.github/workflows/windows-computer-history-validation.yml@`;
           if (env.INPUT_SOURCE_SHA || !env.CONTROLLER_WORKFLOW_REF?.startsWith(directWorkflow)) {
             if (env.SOURCE_REPOSITORY !== 'MemTensor/memmy-agent' ||
@@ -72,18 +78,25 @@ jobs:
             }
             candidate = env.INPUT_SOURCE_SHA;
             mode = 'workflow_call';
+            repository = env.INPUT_SOURCE_REPOSITORY || env.SOURCE_REPOSITORY;
           } else {
             if (!['pull_request', 'workflow_dispatch'].includes(env.EVENT_NAME)) {
               throw new Error('An exact source_sha is required for reusable validation');
             }
-            // Preserve PR merge-ref and manual selected-ref validation semantics.
-            candidate = env.EVENT_SHA;
             mode = env.EVENT_NAME;
+            if (mode === 'pull_request') {
+              candidate = env.PR_HEAD_SHA;
+              repository = env.PR_HEAD_REPOSITORY;
+              if (!repository) throw new Error('Missing PR head repository');
+              receiptAllowed = repository.toLowerCase() === env.SOURCE_REPOSITORY.toLowerCase();
+            } else {
+              candidate = env.EVENT_SHA;
+              repository = env.SOURCE_REPOSITORY;
+            }
           }
           if (!isSha(candidate)) throw new Error('Expected a full 40-hex source SHA');
-          const repository = mode === 'workflow_call' ? (env.INPUT_SOURCE_REPOSITORY || env.SOURCE_REPOSITORY) : env.SOURCE_REPOSITORY;
           if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Invalid candidate repository');
-          fs.appendFileSync(env.GITHUB_OUTPUT, `sha=${candidate.toLowerCase()}\nmode=${mode}\nrepository=${repository}\n`);
+          fs.appendFileSync(env.GITHUB_OUTPUT, `sha=${candidate.toLowerCase()}\nmode=${mode}\nrepository=${repository}\nreceipt_allowed=${receiptAllowed}\n`);
       - uses: actions/checkout@v4
         with:
           repository: ${{ steps.source.outputs.repository }}
@@ -106,7 +119,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22.12"
-          cache-dependency-path: App/native-computer-history/apps/OpenComputerHistoryWindows/go.mod
+          cache-dependency-path: |
+            App/native-computer-history/apps/OpenComputerHistoryWindows/go.mod
+            App/native-computer-use/apps/OpenComputerUseWindows/go.mod
       - name: Require Windows 11
         id: windows-os
         run: |
@@ -218,7 +233,7 @@ jobs:
         id: history-contracts
         run: |
           $ErrorActionPreference = 'Stop'
-          node node_modules/vitest/vitest.mjs run tests/windows-memory-workflow.test.ts
+          node node_modules/vitest/vitest.mjs run tests/windows-memory-workflow.test.ts tests/windows-provider-receipt-workflow.test.ts
           if ($LASTEXITCODE -ne 0) { throw 'Windows workflow and receipt contract regressions failed' }
           $tests = @(
             'App/memmy-agent/tests/tools/computer-history/win/application-icon.test.ts'
@@ -251,11 +266,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Installer History boundary failed' }
       - name: Produce Windows provider receipt after complete validation
         id: provider-receipt
-        if: ${{ success() }}
+        if: ${{ success() && steps.source.outputs.receipt_allowed == 'true' }}
         shell: node {0}
         env:
           EXPECTED_HEAD_SHA: ${{ steps.source.outputs.sha }}
           SOURCE_MODE: ${{ steps.source.outputs.mode }}
+          RECEIPT_ALLOWED: ${{ steps.source.outputs.receipt_allowed }}
           CANDIDATE_REPOSITORY: ${{ steps.source.outputs.repository }}
           VALIDATION_STEPS: ${{ toJSON(steps) }}
           SOURCE_REPOSITORY: ${{ github.repository }}
@@ -269,6 +285,7 @@ jobs:
           const os = require('node:os');
           const { execFileSync } = require('node:child_process');
           const env = process.env;
+          if (env.RECEIPT_ALLOWED !== 'true') throw new Error('A direct fork PR cannot issue a trusted receipt');
           const required = [
             'source', 'exact-head', 'windows-os', 'workspace-dependencies',
             'agent-dependencies', 'native-go', 'computer-use-go', 'source-build', 'app-icons',
@@ -318,7 +335,22 @@ jobs:
           const directory = path.join(env.RUNNER_TEMP, artifactName);
           fs.mkdirSync(directory, { recursive: true });
           fs.writeFileSync(path.join(directory, 'windows-provider-receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
-          fs.appendFileSync(env.GITHUB_OUTPUT, `path=${directory}\nartifact_name=${artifactName}\n`);
+          const legacy = {
+            schemaVersion: 1, provider: 'windows', status: 'passed', headSha,
+            repository: env.SOURCE_REPOSITORY, workflowRef: env.CONTROLLER_WORKFLOW_REF,
+            workflowSha: env.CONTROLLER_WORKFLOW_SHA, runId: env.PROVIDER_RUN_ID,
+            runAttempt: Number(env.PROVIDER_RUN_ATTEMPT), runnerOS: 'Windows',
+            runnerArch: env.RUNNER_ARCH || os.arch().toUpperCase(), windowsBuild: build,
+            generatedAt: new Date().toISOString(),
+            nativeModules: ['App/native-computer-history/apps/OpenComputerHistoryWindows',
+              'App/native-computer-use/apps/OpenComputerUseWindows'],
+            liveCaptureValidated: false, signedInstallerValidated: false,
+          };
+          const legacyName = `windows-provider-receipt-legacy-${headSha}-${env.PROVIDER_RUN_ATTEMPT}`;
+          const legacyDirectory = path.join(env.RUNNER_TEMP, legacyName);
+          fs.mkdirSync(legacyDirectory, { recursive: true });
+          fs.writeFileSync(path.join(legacyDirectory, 'windows-provider-receipt.json'), JSON.stringify(legacy, null, 2) + '\n');
+          fs.appendFileSync(env.GITHUB_OUTPUT, `path=${directory}\nartifact_name=${artifactName}\nlegacy_path=${legacyDirectory}\nlegacy_artifact_name=${legacyName}\n`);
       - name: Upload Windows provider receipt
         if: ${{ success() && steps.provider-receipt.outcome == 'success' }}
         uses: actions/upload-artifact@v4
@@ -327,10 +359,19 @@ jobs:
           path: ${{ steps.provider-receipt.outputs.path }}/windows-provider-receipt.json
           if-no-files-found: error
           retention-days: 30
+      - name: Upload legacy-format Windows provider receipt
+        if: ${{ success() && steps.provider-receipt.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.provider-receipt.outputs.legacy_artifact_name }}
+          path: ${{ steps.provider-receipt.outputs.legacy_path }}/windows-provider-receipt.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Record validation scope
         if: ${{ always() }}
         run: |
           @'
           Validates source-built Windows History recorder identity, PE architecture, exact embedded worker source, pure recorder state/lifecycle self-tests, UTF-8 app catalog output, runtime asset copy, and packaging rules. This does not start live recording or prove real UI Automation/hook behavior.
+          Both native Windows Go modules are tested. The provider receipt is limited to the checks in this job; it does not prove live capture or signed-installer acceptance.
           A signed NSIS installer and a representative real-app capture matrix still require installation testing on a Windows 11 machine.
           '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

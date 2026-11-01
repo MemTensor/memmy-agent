@@ -126,7 +126,18 @@ export class WebuiTitleService {
       this.recordTitleUsage(pending, response?.usage);
 
       const title = cleanGeneratedTitle(response?.content);
-      if (!title || title.toLowerCase().startsWith("error")) return false;
+      if (!title || title.toLowerCase().startsWith("error")) {
+        console.warn("WebUI title generation returned no usable title", {
+          finishReason: response?.finishReason ?? null,
+          errorStatusCode: response?.errorStatusCode ?? null,
+          errorKind: response?.errorKind ?? null,
+          errorCategory: response?.errorCategory ?? null,
+          errorCode: response?.errorCode ?? null,
+          completionTokens: response?.usage?.completion_tokens ?? null,
+          reasoningTokens: response?.usage?.completion_tokens_details?.reasoning_tokens ?? null,
+        });
+        return false;
+      }
 
       const latest = this.sessions.loadSession(pending.sessionKey);
       if (!this.canWriteModelTitle(latest)) return false;
@@ -148,7 +159,10 @@ export class WebuiTitleService {
         },
       }));
       return true;
-    } catch {
+    } catch (error) {
+      console.warn("WebUI title generation failed", {
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
       return false;
     } finally {
       this.inFlightSessionKeys.delete(pending.sessionKey);

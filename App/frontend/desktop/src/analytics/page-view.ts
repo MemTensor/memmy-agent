@@ -17,6 +17,7 @@ const ROUTE_PAGE_TITLES: Record<AppRoutePath, string> = {
   "/memory": "Memory",
   "/knowledge": "Knowledge",
   "/memory-sources": "Memory Sources",
+  "/plugin": "Plugin Surface",
   "/settings": "Settings"
 };
 

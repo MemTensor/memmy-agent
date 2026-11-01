@@ -129,10 +129,11 @@ function executeHistoryStep(id: string, overrides: Record<string, string> = {}, 
   const writes = new Map<string, string>();
   const env = {
     INPUT_SOURCE_SHA: candidateSha, EVENT_NAME: "workflow_dispatch", EVENT_SHA: callerSha,
+    PR_HEAD_SHA: candidateSha, PR_HEAD_REPOSITORY: "MemTensor/memmy-agent",
     SOURCE_REPOSITORY: "MemTensor/memmy-agent", CANDIDATE_REPOSITORY: "MemTensor/memmy-agent",
     CONTROLLER_WORKFLOW_REF: "MemTensor/memmy-agent/.github/workflows/main-sync.yml@refs/heads/main",
     CONTROLLER_WORKFLOW_SHA: callerSha, GITHUB_OUTPUT: "/output", RUNNER_TEMP: "/runner-temp",
-    EXPECTED_HEAD_SHA: candidateSha, SOURCE_MODE: "workflow_call", PROVIDER_RUN_ID: "12345", PROVIDER_RUN_ATTEMPT: "2",
+    EXPECTED_HEAD_SHA: candidateSha, SOURCE_MODE: "workflow_call", RECEIPT_ALLOWED: "true", PROVIDER_RUN_ID: "12345", PROVIDER_RUN_ATTEMPT: "2",
     VALIDATION_STEPS: JSON.stringify(passedWindowsSteps()), ...overrides,
   };
   const modules: Record<string, unknown> = {
@@ -156,7 +157,9 @@ function executeHistoryStep(id: string, overrides: Record<string, string> = {}, 
 }
 
 const receipts = (result: ReturnType<typeof executeHistoryStep>) => [...result.writes.entries()]
-  .filter(([file]) => file.endsWith("windows-provider-receipt.json"));
+  .filter(([file]) => file.includes(`/windows-provider-receipt-${candidateSha}-`) && file.endsWith("windows-provider-receipt.json"));
+const legacyReceipts = (result: ReturnType<typeof executeHistoryStep>) => [...result.writes.entries()]
+  .filter(([file]) => file.includes(`/windows-provider-receipt-legacy-${candidateSha}-`) && file.endsWith("windows-provider-receipt.json"));
 
 describe("Windows History reusable provider source contract", () => {
   it("keeps PR/manual entry points and adds a required exact-SHA reusable input", () => {
@@ -175,13 +178,14 @@ describe("Windows History reusable provider source contract", () => {
   it.each(["github-draft-release-v2.yml", "main-sync.yml", "main-sync-validation.yml"])("binds nested reusable %s to input SHA instead of caller github.sha", caller => {
     const result = executeHistoryStep("source", { CONTROLLER_WORKFLOW_REF: `MemTensor/memmy-agent/.github/workflows/${caller}@refs/heads/main` });
     expect(result.error).toBeUndefined();
-    expect(result.writes.get("/output")).toBe(`sha=${candidateSha}\nmode=workflow_call\nrepository=MemTensor/memmy-agent\n`);
+    expect(result.writes.get("/output")).toBe(`sha=${candidateSha}\nmode=workflow_call\nrepository=MemTensor/memmy-agent\nreceipt_allowed=true\n`);
   });
 
-  it.each(["pull_request", "workflow_dispatch"])("preserves %s selected/merge SHA with no reusable input", event => {
+  it.each(["pull_request", "workflow_dispatch"])("binds the %s source SHA without reusable input", event => {
     const result = executeHistoryStep("source", { INPUT_SOURCE_SHA: "", EVENT_NAME: event, CONTROLLER_WORKFLOW_REF: "MemTensor/memmy-agent/.github/workflows/windows-computer-history-validation.yml@refs/heads/main" });
     expect(result.error).toBeUndefined();
-    expect(result.writes.get("/output")).toBe(`sha=${callerSha}\nmode=${event}\nrepository=MemTensor/memmy-agent\n`);
+    const expected = event === "pull_request" ? candidateSha : callerSha;
+    expect(result.writes.get("/output")).toBe(`sha=${expected}\nmode=${event}\nrepository=MemTensor/memmy-agent\nreceipt_allowed=true\n`);
   });
 
   it.each(["a".repeat(39), "g".repeat(40), "refs/heads/main", candidateSha + "\n", "$(echo attack)"])("rejects invalid candidate %j before checkout", value => {
@@ -210,8 +214,17 @@ describe("Windows History reusable provider source contract", () => {
     const result = executeHistoryStep("source", { INPUT_SOURCE_REPOSITORY: "Fixture/memmy-agent" });
     expect(result.error).toBeUndefined();
     expect(result.writes.get("/output")).toContain("repository=Fixture/memmy-agent\n");
+    expect(result.writes.get("/output")).toContain("receipt_allowed=true\n");
     expect(historySteps.find(step => step.uses?.startsWith("actions/checkout@"))?.with?.repository)
       .toBe("${{ steps.source.outputs.repository }}");
+  });
+  it("validates a direct fork PR without issuing a trusted receipt", () => {
+    const result = executeHistoryStep("source", { INPUT_SOURCE_SHA: "", EVENT_NAME: "pull_request",
+      PR_HEAD_REPOSITORY: "Fixture/memmy-agent",
+      CONTROLLER_WORKFLOW_REF: "MemTensor/memmy-agent/.github/workflows/windows-computer-history-validation.yml@refs/heads/main" });
+    expect(result.error).toBeUndefined();
+    expect(result.writes.get("/output")).toContain(`sha=${candidateSha}\nmode=pull_request\nrepository=Fixture/memmy-agent\nreceipt_allowed=false\n`);
+    expect(historyStep("provider-receipt").if).toBe("${{ success() && steps.source.outputs.receipt_allowed == 'true' }}");
   });
 });
 
@@ -235,7 +248,7 @@ describe("Windows History provider completion contract", () => {
     expect(historyStep("native-runtime").run).toContain("$probe.pureSelfTest");
     expect(historyStep("native-runtime").run).toContain("$probe.desktopAccess -ne $false");
     expect(historyStep("provider-receipt").shell).toBe("node {0}");
-    expect(historyStep("provider-receipt").if).toBe("${{ success() }}");
+    expect(historyStep("provider-receipt").if).toContain("steps.source.outputs.receipt_allowed == 'true'");
     const upload = historySteps.find(step => step.uses?.startsWith("actions/upload-artifact@"))!;
     expect(upload.if).toContain("steps.provider-receipt.outcome == 'success'");
     expect(upload.with?.["if-no-files-found"]).toBe("error");
@@ -256,6 +269,19 @@ describe("Windows History provider completion contract", () => {
       nativeModules: { windowsHistory: { goTests: "passed", goVet: "passed", workerSelfTest: "passed" } },
       liveCaptureValidated: false, signedInstallerValidated: false });
     expect(result.writes.get("/output")).toContain(`artifact_name=windows-provider-receipt-${candidateSha}-2`);
+    expect(legacyReceipts(result)).toHaveLength(1);
+    const legacy = JSON.parse(legacyReceipts(result)[0]![1]);
+    expect(legacy).toMatchObject({ provider: "windows", status: "passed", headSha: candidateSha,
+      workflowRef: "MemTensor/memmy-agent/.github/workflows/main-sync.yml@refs/heads/main",
+      workflowSha: callerSha, runId: "12345", runAttempt: 2, runnerOS: "Windows",
+      runnerArch: "X64", windowsBuild: 26100, liveCaptureValidated: false, signedInstallerValidated: false,
+      nativeModules: ["App/native-computer-history/apps/OpenComputerHistoryWindows", "App/native-computer-use/apps/OpenComputerUseWindows"] });
+    expect(result.writes.get("/output")).toContain(`legacy_artifact_name=windows-provider-receipt-legacy-${candidateSha}-2`);
+  });
+  it("never writes either receipt when the source does not authorize it", () => {
+    const result = executeHistoryStep("provider-receipt", { RECEIPT_ALLOWED: "false" });
+    expect(result.error).toBeDefined();
+    expect(result.writes.size).toBe(0);
   });
 
   it.each(requiredWindowsSteps)("does not emit passed receipt when %s is missing, skipped or failed", id => {

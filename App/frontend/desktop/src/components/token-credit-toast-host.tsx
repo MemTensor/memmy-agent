@@ -1,6 +1,5 @@
 /** Enqueues the token-credit notification after a campaign reward is granted. */
 import { useCallback, useEffect, useRef } from "react";
-import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
 import { useOptionalApiClients } from "../app/providers.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { formatTokenGiftAmount } from "../pages/token-gift.js";
@@ -8,15 +7,12 @@ import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
 import { useNotificationCenter } from "./notification-center.js";
 
-const PREVIEW_TOKEN_AMOUNT = 500_000;
-
 /** Pushes a manual-close notice for the latest unacknowledged campaign reward. */
 export function TokenCreditToastHost() {
   const { state, dispatch } = useAppState();
   const { clients } = useOptionalApiClients();
   const { t } = useTranslation();
   const { notify } = useNotificationCenter();
-  const notifiedRef = useRef(false);
   const activeAccountUserIdRef = useRef<string | null>(null);
   const rewardRequestRef = useRef<{
     accountUserId: string;
@@ -44,14 +40,6 @@ export function TokenCreditToastHost() {
       onClose
     });
   }, [notify, refreshBalance, t]);
-
-  useEffect(() => {
-    if (notifiedRef.current || !isDesktopPromptPreview("tokenCredit")) {
-      return;
-    }
-    notifiedRef.current = true;
-    showTokenCredit(PREVIEW_TOKEN_AMOUNT);
-  }, [showTokenCredit]);
 
   useEffect(() => {
     const accountUserId = state.account.userId;

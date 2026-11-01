@@ -43,6 +43,14 @@ describe("RuntimeApp bootstrap loading", () => {
     expect(source).toContain("formatAgentSourceScanRequestError(error, undefined, translationRef.current)");
   });
 
+  it("routes validated plugin capability events into the plugin UI host", () => {
+    const source = readFileSync(resolve(__dirname, "../..", "app.tsx"), "utf8");
+
+    expect(source).toContain('events.addEventListener("plugin.capability_event"');
+    expect(source).toContain('parsed?.type === "plugin.capability_event"');
+    expect(source).toContain("receivePluginEvent(parsed.payload)");
+  });
+
   it("reconciles scan status on heartbeat only while a scan is showing as active", () => {
     const source = readFileSync(resolve(__dirname, "../..", "app.tsx"), "utf8");
 

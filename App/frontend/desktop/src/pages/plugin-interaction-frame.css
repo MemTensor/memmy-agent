@@ -1,0 +1,3 @@
+.review-interaction-shell { border: 1px solid color-mix(in srgb, var(--color-border-stone) 50%, transparent); border-radius: var(--radius-card-lg, 10px); background: var(--color-background-paper, #fff); overflow: hidden; box-shadow: 0 12px 32px rgba(17,29,28,.08); }
+.review-interaction-shell iframe { display: block; border-radius: 0; }
+.review-interaction-shell--native { padding: 14px 16px; }

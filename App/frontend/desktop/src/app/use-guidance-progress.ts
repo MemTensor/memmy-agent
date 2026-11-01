@@ -1,6 +1,6 @@
 /** React subscribers observe local guide completion without waiting for a profile request. */
 import { useSyncExternalStore } from "react";
-import { isGuidanceDone } from "./campaign-prompt-state.js";
+import { isGuidanceDone } from "./workspace-prompt-readiness.js";
 import {
   GUIDANCE_PROGRESS_EVENT,
   GUIDANCE_PROGRESS_STORAGE_KEY,

@@ -23,7 +23,7 @@ const commands: SlashCommandPaletteItem[] = [
 ];
 
 describe("AgentCommandPalette", () => {
-  it("detects slash query mode only for a leading command token", () => {
+  it("detects a trailing slash query after arbitrary draft text", () => {
     expect(slashQueryFromInput("/")).toBe("");
     expect(slashQueryFromInput("/his")).toBe("his");
     expect(slashQueryFromInput("/history 5")).toBe("history 5");

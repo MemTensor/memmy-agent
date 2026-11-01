@@ -1,0 +1,965 @@
+/** Sandboxed local command plugin runtime adapter. */
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { constants as fsConstants } from "node:fs";
+import { access, lstat, mkdir, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep, win32 } from "node:path";
+import { createInterface } from "node:readline";
+import {
+  CapabilityEventSchema,
+  PluginHostServiceRequestSchema,
+  type CapabilityCall,
+  type CapabilityEvent,
+  type PluginHostServiceRequest,
+  type PluginHostServiceResponse,
+  type PluginRuntime
+} from "@memmy/local-api-contracts";
+import { z } from "zod";
+import { callTimeoutMs, isCapabilityEvent } from "./shared.js";
+import type { PluginAdapter, PluginHostServiceInvoker, PluginRuntimeContext, PluginSession } from "./types.js";
+import { createOfficeRuntimeInstaller, type OfficeRuntimeInstaller } from "./office-installer.js";
+import { createTexliveRuntimeInstaller, resolveTexliveRuntime, type TexliveRuntimeInstaller } from "./texlive-installer.js";
+import { resolvePluginRegistryBaseUrl } from "../../../config/service-urls.js";
+
+const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
+const MAX_STDERR_BYTES = 64 * 1024;
+const MAX_HOST_SERVICE_REQUESTS_PER_CALL = 16;
+const MAX_OFFICE_CJK_FONTS = 16;
+const MAX_OFFICE_CJK_FONT_BYTES = 256 * 1024 * 1024;
+const CommandRuntimeDependencySchema = z.enum(["texlive", "office"]);
+
+const CommandRuntimeConfigSchema = z.object({
+  command: z.string().trim().min(1),
+  interpreter: z.enum(["direct", "node"]).default("direct"),
+  args: z.array(z.string()).default([]),
+  cwd: z.string().default("."),
+  inputMode: z.enum(["stdin-json", "argument-json"]).default("stdin-json"),
+  outputMode: z.enum(["json", "ndjson"]).default("json"),
+  interactive: z.boolean().default(false),
+  runtimeDependencies: z.array(CommandRuntimeDependencySchema).max(8).default([]),
+  env: z.record(z.string(), z.string()).default({}),
+  secretEnv: z.record(z.string(), z.string().min(1)).default({}),
+  timeoutMs: z.number().int().positive().max(3_600_000).default(300_000),
+  maxOutputBytes: z.number().int().positive().max(MAX_OUTPUT_BYTES).default(10 * 1024 * 1024),
+  /**
+   * Requests an unsandboxed child process.  Only honoured for plugins whose
+   * manifest declares a `requiredEntitlement` the account actually holds, so a
+   * third-party plugin cannot exempt itself by editing its own runtime config.
+   */
+  sandbox: z.enum(["required", "none"]).default("required")
+});
+export type CommandRuntimeConfig = z.infer<typeof CommandRuntimeConfigSchema>;
+
+export interface SandboxLaunch {
+  windowsAppContainer?: boolean;
+  command: string;
+  args: string[];
+  cwd: string;
+}
+
+interface CommandPluginSession extends PluginSession {
+  launch: SandboxLaunch;
+  config: CommandRuntimeConfig;
+  pluginConfig: Readonly<Record<string, unknown>>;
+  env: Record<string, string>;
+  children: Map<string, ChildProcessWithoutNullStreams>;
+  hostServiceControllers: Map<string, Set<AbortController>>;
+  approvedHostServices: Set<string>;
+}
+
+export interface CreateCommandPluginAdapterOptions {
+  platform?: NodeJS.Platform;
+  spawnFn?: typeof spawn;
+  buildLaunch?: (
+    context: PluginRuntimeContext,
+    config: CommandRuntimeConfig,
+    networkEnabled: boolean,
+    runtimeDependencies: ResolvedCommandRuntimeDependencies
+  ) => Promise<SandboxLaunch>;
+  /** Exact DNS hosts local command plugins may request in their manifest. */
+  allowedNetworkHosts?: readonly string[];
+  /** Host-owned upload roots made readable only to plugins approved for the file-input host service. */
+  fileInputRoots?: readonly string[];
+  /** Host-owned parent directory containing one writable data directory per plugin. */
+  pluginDataRoot?: string;
+  /** Host-created dependency installer; null disables downloading (offline deployments/tests). */
+  officeRuntimeInstaller?: OfficeRuntimeInstaller | null;
+  texliveRuntimeInstaller?: TexliveRuntimeInstaller | null;
+  /** Host-owned services callable over the private command runtime protocol. */
+  hostServices?: PluginHostServiceInvoker;
+  /** Resolves whether the signed-in account holds a manifest-declared entitlement. */
+  isEntitlementGranted?: (entitlement: string) => boolean;
+}
+
+/**
+ * An unsandboxed child process is only granted to plugins the Host distributes
+ * itself.  A manifest-declared entitlement is that signal: entitlements are
+ * issued by the cloud, so a third-party plugin can declare one but no account
+ * will ever hold it, and the sandbox stays on.
+ */
+function sandboxExempt(
+  config: CommandRuntimeConfig,
+  context: PluginRuntimeContext,
+  isEntitlementGranted: (entitlement: string) => boolean
+): boolean {
+  if (config.sandbox !== "none") return false;
+  const entitlement = context.plugin.manifest.requiredEntitlement;
+  return Boolean(entitlement && isEntitlementGranted(entitlement));
+}
+
+export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOptions = {}): PluginAdapter {
+  const platform = options.platform ?? process.platform;
+  const spawnFn = options.spawnFn ?? spawn;
+  const isEntitlementGranted = options.isEntitlementGranted ?? (() => false);
+  const buildLaunch = options.buildLaunch ?? ((context, config, networkEnabled, runtimeDependencies) => (
+    sandboxExempt(config, context, isEntitlementGranted)
+      ? buildDirectLaunch(context, config)
+      : buildPluginSandboxLaunch(
+        context,
+        config,
+        platform,
+        networkEnabled,
+        options.fileInputRoots ?? [],
+        options.pluginDataRoot,
+        runtimeDependencies.readRoots,
+        runtimeDependencies.executableRoots,
+        runtimeDependencies.environment.MEMMY_TEX_CACHE_ROOT,
+        runtimeDependencies.officeRendererResolved === true
+      )
+  ));
+  const allowedNetworkHosts = new Set((options.allowedNetworkHosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean));
+
+  return {
+    id: "command",
+
+    validate(runtime, rootPath) {
+      validateCommandConfig(runtime, rootPath, platform);
+    },
+
+    async activate(context) {
+      const config = validateCommandConfig(context.plugin.manifest.runtime, context.rootPath, platform);
+      if (config.sandbox === "none" && !sandboxExempt(config, context, isEntitlementGranted) && !isSandboxablePlatform(platform)) {
+        throw new Error(`Sandboxed command plugins are unsupported on ${platform}`);
+      }
+      const requestedNetworkHosts = context.plugin.manifest.permissions
+        .filter((permission) => permission.type === "network")
+        .flatMap((permission) => permission.hosts);
+      const deniedHost = requestedNetworkHosts.find((host) => !allowedNetworkHosts.has(host));
+      if (deniedHost) throw Object.assign(new Error(`Command plugin network host is not in the host allowlist: ${deniedHost}`), {
+        code: "plugin_permission_denied"
+      });
+      const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies, platform,
+        options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller ?? defaultOfficeInstaller(options.pluginDataRoot),
+        options.texliveRuntimeInstaller === null ? undefined : options.texliveRuntimeInstaller ?? defaultTexliveInstaller(options.pluginDataRoot));
+      const env = resolvePluginEnvironment(
+        config.env,
+        config.secretEnv,
+        context.secrets,
+        runtimeDependencies.pathEntries,
+        runtimeDependencies.environment
+      );
+      // In packaged and Electron-hosted development builds, process.execPath is
+      // the Electron executable.  `interpreter: "node"` intentionally reuses
+      // that trusted Host runtime, so the child must opt into Electron's Node
+      // compatibility mode.  The variable is harmless when process.execPath is
+      // already a standalone Node binary.
+      if (config.interpreter === "node") env.ELECTRON_RUN_AS_NODE = "1";
+      if (process.env.MEMMY_PLUGIN_SANDBOX_TRACE === "1") env.MEMMY_OFFICE_TRACE = "1";
+      const pluginDataPath = await resolvePluginDataPath(context, options.pluginDataRoot);
+      if (pluginDataPath) {
+        env.MEMMY_PLUGIN_DATA_DIR = pluginDataPath;
+        if (platform === "win32") {
+          const temporary = resolve(pluginDataPath, "tmp"); await mkdir(temporary, { recursive: true });
+          env.TEMP = temporary; env.TMP = temporary;
+        }
+      }
+      if (platform === "win32") env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
+        ? await Promise.all((options.fileInputRoots ?? []).map(root => realpath(root))) : []);
+      return {
+        pluginId: context.plugin.id,
+        launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies),
+        config,
+        pluginConfig: context.config,
+        env,
+        children: new Map(),
+        hostServiceControllers: new Map(),
+        approvedHostServices: new Set(context.plugin.approvedPermissions
+          .filter((permission) => permission.type === "host-service")
+          .flatMap((permission) => permission.services))
+      } satisfies CommandPluginSession;
+    },
+
+    async *invoke(rawSession, call) {
+      const session = asCommandSession(rawSession);
+      const request = JSON.stringify({
+        callId: call.callId,
+        pluginId: call.pluginId,
+        capabilityId: call.capabilityId,
+        conversationId: call.conversationId,
+        input: call.input,
+        deadline: call.deadline,
+        config: session.pluginConfig,
+        hostServiceBudget: { maxRequests: MAX_HOST_SERVICE_REQUESTS_PER_CALL }
+      });
+      const args = session.launch.args.map((arg) => applyPlaceholders(arg, call));
+      if (session.config.inputMode === "argument-json") args.push(request);
+      const child = spawnFn(session.launch.command, args, {
+        cwd: session.launch.cwd,
+        env: session.launch.windowsAppContainer ? windowsLauncherEnvironment(session.env) : session.env,
+        shell: false,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+      session.children.set(call.callId, child);
+      // A write callback does not consume the stream's separate error event.
+      // Cancellation or an early plugin exit can close stdin during a reply.
+      let inputError: Error | undefined;
+      child.stdin.on("error", (error: Error) => {
+        inputError = error;
+        terminate(child);
+      });
+      child.once("close", () => abortHostServices(session, call.callId));
+      if (session.config.inputMode === "stdin-json") child.stdin.write(`${request}\n`);
+      if (!session.config.interactive) child.stdin.end();
+
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => {
+        if (stderr.length < MAX_STDERR_BYTES) {
+          const diagnostic = chunk.toString("utf8", 0, MAX_STDERR_BYTES - stderr.length);
+          stderr += diagnostic;
+          if (process.env.MEMMY_PLUGIN_SANDBOX_TRACE === "1") console.info(`Plugin sandbox stderr: ${JSON.stringify(diagnostic)}`);
+        }
+      });
+      const exit = processExit(child);
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+        timedOut = true;
+        terminate(child);
+      }, callTimeoutMs(session.config.timeoutMs, call.deadline));
+      try {
+        let terminal: CapabilityEvent | null = null;
+        let jsonOutput: Buffer | null = null;
+        if (session.config.outputMode === "ndjson") {
+          let bytes = 0;
+          let hostServiceRequests = 0;
+          // Host-service requests are dispatched as they arrive rather than one
+          // at a time. A plugin whose capability fans out — the legal
+          // diagnosis judges sections in parallel — would otherwise queue
+          // behind itself and get nothing from the concurrency it asked for.
+          // Each is bounded by the per-call request cap below, and the plugin
+          // decides how many to have in flight.
+          const inFlight = new Set<Promise<void>>();
+          const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+          for await (const line of lines) {
+            bytes += Buffer.byteLength(line) + 1;
+            if (bytes > session.config.maxOutputBytes) {
+              terminate(child);
+              throw new Error("Plugin command output exceeded size limit");
+            }
+            if (line.trim()) {
+              const raw = JSON.parse(line);
+              const hostRequest = PluginHostServiceRequestSchema.safeParse(raw);
+              if (hostRequest.success) {
+                // Counted synchronously, so concurrent requests cannot share a
+                // slot and slip past the cap.
+                hostServiceRequests += 1;
+                const dispatched = respondToHostServiceRequest(child, session, call, hostRequest.data, options.hostServices, hostServiceRequests)
+                  .catch(() => undefined)
+                  .finally(() => inFlight.delete(dispatched));
+                inFlight.add(dispatched);
+                continue;
+              }
+              const event = CapabilityEventSchema.parse(raw);
+              if (event.type === "result" || event.type === "error") {
+                if (terminal) throw new Error("Plugin command emitted multiple terminal events");
+                terminal = event;
+              } else {
+                // Once an interactive card is visible, user think time must not
+                // consume the command execution budget. Explicit cancellation,
+                // app shutdown, and the outer Agent request still stop the run.
+                if (event.type === "interaction" && timer) {
+                  clearTimeout(timer);
+                  timer = undefined;
+                }
+                yield event;
+              }
+            }
+          }
+          // Everything the plugin asked for while the stream was open must be
+          // answered before the call is treated as finished, or a request still
+          // in flight would find its response written to a closed pipe.
+          await Promise.all(inFlight);
+        } else {
+          const chunks: Buffer[] = [];
+          let bytes = 0;
+          for await (const chunk of child.stdout) {
+            const buffer = Buffer.from(chunk);
+            bytes += buffer.byteLength;
+            if (bytes > session.config.maxOutputBytes) {
+              terminate(child);
+              throw new Error("Plugin command output exceeded size limit");
+            }
+            chunks.push(buffer);
+          }
+          jsonOutput = Buffer.concat(chunks, bytes);
+        }
+        const { code, signal } = await exit;
+        if (timedOut) throw Object.assign(new Error("Plugin command timed out"), { code: "plugin_timeout" });
+        if (inputError) throw inputError;
+        if (code !== 0) throw new Error(`Plugin command exited with ${code ?? signal}: ${stderr.trim() || "no stderr"}`);
+        if (jsonOutput) {
+          const output = JSON.parse(jsonOutput.toString("utf8"));
+          if (isCapabilityEvent(output)) terminal = CapabilityEventSchema.parse(output);
+          else if (Array.isArray(output?.events)) {
+            for (const rawEvent of output.events) {
+              const event = CapabilityEventSchema.parse(rawEvent);
+              if (event.type === "result" || event.type === "error") {
+                if (terminal) throw new Error("Plugin command emitted multiple terminal events");
+                terminal = event;
+              } else {
+                yield event;
+              }
+            }
+          } else terminal = { type: "result", output };
+        }
+        if (terminal) yield terminal;
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+        session.children.delete(call.callId);
+      }
+    },
+
+    async respond(rawSession, callId, interactionId, response) {
+      const session = asCommandSession(rawSession);
+      const child = session.children.get(callId);
+      if (!session.config.interactive || !child || child.stdin.destroyed) {
+        throw new Error("Plugin command interaction is not available");
+      }
+      await new Promise<void>((resolve, reject) => {
+        child.stdin.write(`${JSON.stringify({ type: "interaction-response", callId, interactionId, response })}\n`, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    },
+
+    async cancel(rawSession, callId) {
+      const session = asCommandSession(rawSession);
+      abortHostServices(session, callId);
+      const child = session.children.get(callId);
+      if (child) {
+        terminate(child);
+        await waitForTermination(child);
+      }
+    },
+
+    async deactivate(rawSession) {
+      const session = asCommandSession(rawSession);
+      const children = [...session.children.values()];
+      for (const callId of session.children.keys()) abortHostServices(session, callId);
+      for (const child of children) terminate(child);
+      await Promise.all(children.map(waitForTermination));
+      session.children.clear();
+    }
+  };
+}
+
+async function respondToHostServiceRequest(
+  child: ChildProcessWithoutNullStreams,
+  session: CommandPluginSession,
+  call: CapabilityCall,
+  request: PluginHostServiceRequest,
+  invoker: PluginHostServiceInvoker | undefined,
+  requestNumber: number
+): Promise<void> {
+  let message: PluginHostServiceResponse;
+  if (requestNumber > MAX_HOST_SERVICE_REQUESTS_PER_CALL) {
+    message = hostServiceError(call.callId, request.requestId, "host_service_limit_exceeded", `A plugin call may make at most ${MAX_HOST_SERVICE_REQUESTS_PER_CALL} Host-service requests`, false);
+  } else if (!session.config.interactive) {
+    message = hostServiceError(call.callId, request.requestId, "plugin_runtime_error", "Host services require an interactive command runtime", false);
+  } else if (!session.approvedHostServices.has(request.service)) {
+    message = hostServiceError(call.callId, request.requestId, "plugin_permission_denied", `Host service permission was not approved: ${request.service}`, false);
+  } else if (!invoker) {
+    message = hostServiceError(call.callId, request.requestId, "host_service_unavailable", `Host service is unavailable: ${request.service}`, true);
+  } else {
+    const controller = new AbortController();
+    const controllers = session.hostServiceControllers.get(call.callId) ?? new Set<AbortController>();
+    controllers.add(controller);
+    session.hostServiceControllers.set(call.callId, controllers);
+    try {
+      const response = await invoker.invoke({
+        pluginId: session.pluginId,
+        callId: call.callId,
+        conversationId: call.conversationId,
+        modelPreset: call.modelPreset,
+        service: request.service,
+        input: request.input,
+        deadline: call.deadline,
+        signal: controller.signal
+      });
+      message = { type: "host-service-response", callId: call.callId, requestId: request.requestId, response };
+    } catch (error) {
+      const details = error as { code?: unknown; retryable?: unknown; message?: unknown };
+      message = hostServiceError(
+        call.callId,
+        request.requestId,
+        typeof details.code === "string" ? details.code : "host_service_error",
+        typeof details.message === "string" ? details.message : "Host service request failed",
+        details.retryable === true
+      );
+    } finally {
+      controllers.delete(controller);
+      if (controllers.size === 0) session.hostServiceControllers.delete(call.callId);
+    }
+  }
+  await writeChildMessage(child, message);
+}
+
+function abortHostServices(session: CommandPluginSession, callId: string): void {
+  const controllers = session.hostServiceControllers.get(callId);
+  if (!controllers) return;
+  session.hostServiceControllers.delete(callId);
+  for (const controller of controllers) controller.abort(new Error("plugin_call_cancelled"));
+}
+
+function hostServiceError(callId: string, requestId: string, code: string, message: string, retryable: boolean): PluginHostServiceResponse {
+  return { type: "host-service-response", callId, requestId, error: { code, message, retryable } };
+}
+
+async function writeChildMessage(child: ChildProcessWithoutNullStreams, message: PluginHostServiceResponse): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    child.stdin.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve());
+  });
+}
+
+function isSandboxablePlatform(platform: NodeJS.Platform): boolean {
+  return platform === "darwin" || platform === "linux" || platform === "win32";
+}
+
+function validateCommandConfig(runtime: PluginRuntime, rootPath: string | null, platform: NodeJS.Platform): CommandRuntimeConfig {
+  if (runtime.adapter !== "command") throw new Error(`Expected command runtime, got ${runtime.adapter}`);
+  if (!rootPath) throw new Error("Command plugin requires an installed artifact");
+  const config = CommandRuntimeConfigSchema.parse(runtime.config ?? {});
+  if (config.sandbox === "required" && !isSandboxablePlatform(platform)) {
+    throw new Error(`Sandboxed command plugins are unsupported on ${platform}`);
+  }
+  if (isAbsolute(config.command) || config.command.split(/[\\/]/).includes("..")) {
+    throw new Error("Plugin command must be relative to its artifact root");
+  }
+  return config;
+}
+
+/** Resolves the child process entrypoint without any sandbox wrapper. */
+async function resolveCommandEntrypoint(
+  context: PluginRuntimeContext,
+  config: Pick<CommandRuntimeConfig, "command" | "args" | "cwd"> & Partial<Pick<CommandRuntimeConfig, "interpreter">>
+): Promise<{ root: string; runtimeCommand: string; runtimeArgs: string[]; cwd: string; interpreter: "direct" | "node" }> {
+  const root = await realpath(context.rootPath!);
+  const command = await canonicalDescendant(root, resolve(root, config.command));
+  const info = await lstat(command);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error("Plugin command must be a regular file");
+  const interpreter = config.interpreter ?? "direct";
+  if (interpreter === "direct") await access(command, fsConstants.X_OK);
+  const runtimeCommand = interpreter === "node" ? await realpath(process.execPath) : command;
+  const runtimeArgs = interpreter === "node" ? [command, ...config.args] : config.args;
+  const cwd = await canonicalDescendant(root, resolve(root, config.cwd), true);
+  if (!(await lstat(cwd)).isDirectory()) throw new Error("Plugin command cwd must be a directory");
+  return { root, runtimeCommand, runtimeArgs, cwd, interpreter };
+}
+
+/**
+ * Launches a Host-distributed plugin directly.  The artifact path checks are
+ * kept because they guard against a tampered package pointing outside its own
+ * root; only the OS sandbox wrapper is dropped.  Environment scrubbing, secret
+ * injection and the network permission check all live in `activate` and still
+ * apply.
+ */
+export async function buildDirectLaunch(
+  context: PluginRuntimeContext,
+  config: Pick<CommandRuntimeConfig, "command" | "args" | "cwd"> & Partial<Pick<CommandRuntimeConfig, "interpreter">>
+): Promise<SandboxLaunch> {
+  const { runtimeCommand, runtimeArgs, cwd } = await resolveCommandEntrypoint(context, config);
+  return { command: runtimeCommand, args: runtimeArgs, cwd };
+}
+
+export async function buildPluginSandboxLaunch(
+  context: PluginRuntimeContext,
+  config: Pick<CommandRuntimeConfig, "command" | "args" | "cwd"> & Partial<Pick<CommandRuntimeConfig, "interpreter">>,
+  platform: NodeJS.Platform = process.platform,
+  networkEnabled = false,
+  fileInputRoots: readonly string[] = [],
+  pluginDataRoot?: string,
+  runtimeReadRoots: readonly string[] = [],
+  runtimeExecutableRoots: readonly string[] = [],
+  runtimeWritableRoot?: string,
+  officeRendererResolved = false
+): Promise<SandboxLaunch> {
+  const { root, runtimeCommand, runtimeArgs, cwd, interpreter } = await resolveCommandEntrypoint(context, config);
+  const runtimeRoot = interpreter === "node" ? (platform === "win32" ? dirname(runtimeCommand) : resolve(dirname(runtimeCommand), "..")) : null;
+  const filesystem = await filesystemRules(context, fileInputRoots, pluginDataRoot);
+  if (runtimeWritableRoot) filesystem.push({ path: await realpath(runtimeWritableRoot), writable: true });
+
+  if (platform === "win32") {
+    if (networkEnabled) throw new Error("Windows AppContainer plugins currently require no network capability");
+    let script = fileURLToPath(new URL("./windows/launch.ps1", import.meta.url));
+    script = script.replace(/([\\/])app\.asar([\\/])/, "$1app.asar.unpacked$2");
+    await access(script, fsConstants.R_OK);
+    await access(resolve(dirname(script), "Sandbox.cs"), fsConstants.R_OK);
+    const plan = {
+      profile: `memmy.plugin.${createHash("sha256").update(`${context.plugin.id}\0${root}`).digest("hex").slice(0, 32)}`,
+      // The Host has already canonicalized the entrypoint. Node's default CJS
+      // resolver otherwise lstats every ancestor up to C:\, outside the grant.
+      command: runtimeCommand, args: interpreter === "node" ? ["--preserve-symlinks", "--preserve-symlinks-main", ...runtimeArgs] : runtimeArgs, cwd,
+      readRoots: [...new Set([root, ...(runtimeRoot ? [runtimeRoot] : []), ...runtimeReadRoots,
+        ...filesystem.filter(rule => !rule.writable).map(rule => rule.path)])],
+      writeRoots: [...new Set(filesystem.filter(rule => rule.writable).map(rule => rule.path))]
+    };
+    return {
+      command: win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      windowsAppContainer: true,
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
+        "-Plan", Buffer.from(JSON.stringify(plan)).toString("base64")], cwd
+    };
+  }
+
+  if (platform === "darwin") {
+    const ipcRoot = await resolvePluginDataPath(context, pluginDataRoot);
+    return {
+      command: "/usr/bin/sandbox-exec",
+      args: ["-p", seatbeltProfile(root, filesystem, networkEnabled, runtimeRoot, runtimeReadRoots, runtimeExecutableRoots, ipcRoot, context.plugin.id, officeRendererResolved), "--", runtimeCommand, ...runtimeArgs],
+      cwd
+    };
+  }
+
+  const bwrap = await firstExecutable(["/usr/bin/bwrap", "/bin/bwrap"]);
+  if (!bwrap) throw new Error("Command plugins require bubblewrap on Linux");
+  return { command: bwrap, args: bwrapArgs(root, cwd, runtimeCommand, runtimeArgs, filesystem, networkEnabled, runtimeRoot, runtimeReadRoots), cwd };
+}
+
+export interface ResolvedCommandRuntimeDependencies {
+  pathEntries: string[];
+  readRoots: string[];
+  executableRoots: string[];
+  environment: Record<string, string>;
+  /** Host-only proof of an executable renderer inside an approved Office root. */
+  officeRendererResolved?: boolean;
+}
+
+/** Resolve only Host-approved runtimes; plugin manifests cannot inject arbitrary executable roots. */
+export async function resolveCommandRuntimeDependencies(
+  dependencies: readonly z.infer<typeof CommandRuntimeDependencySchema>[],
+  platform: NodeJS.Platform = process.platform,
+  officeInstaller?: OfficeRuntimeInstaller,
+  texliveInstaller?: TexliveRuntimeInstaller
+): Promise<ResolvedCommandRuntimeDependencies> {
+  const resolved: ResolvedCommandRuntimeDependencies = { pathEntries: [], readRoots: [], executableRoots: [], environment: {} };
+  if (dependencies.includes("office")) {
+    const office = await resolveOfficeRuntime(platform, officeInstaller);
+    resolved.pathEntries.push(...office.pathEntries);
+    resolved.readRoots.push(...office.readRoots);
+    resolved.executableRoots.push(...office.executableRoots);
+    Object.assign(resolved.environment, office.environment);
+    if (office.officeRendererResolved === true) resolved.officeRendererResolved = true;
+  }
+  if (dependencies.includes("texlive")) {
+    const tex = await resolveTexliveRuntime(platform, texliveInstaller);
+    resolved.pathEntries.push(...tex.pathEntries);
+    resolved.readRoots.push(...tex.readRoots);
+    resolved.executableRoots.push(...tex.executableRoots);
+    Object.assign(resolved.environment, tex.environment);
+  }
+  return resolved;
+}
+
+/** Office is an optional Host dependency, never copied back into the App bundle.
+ * Only the Host environment or known installation roots can grant executable
+ * access. A plugin's manifest env/config cannot add roots to the OS sandbox.
+ */
+export async function resolveOfficeRuntime(platform: NodeJS.Platform = process.platform, installer?: OfficeRuntimeInstaller): Promise<ResolvedCommandRuntimeDependencies> {
+  const result: ResolvedCommandRuntimeDependencies = { pathEntries: [], readRoots: [], executableRoots: [], environment: {} };
+  const fontSources = officeSystemFontSources(platform);
+  const override = process.env.MEMMY_PLUGIN_OFFICE_ROOT;
+  if (override && !isAbsolute(override)) throw new Error("MEMMY_PLUGIN_OFFICE_ROOT must be absolute");
+  const defaults = platform === "darwin"
+    ? ["/Applications/LibreOffice.app", "/opt/homebrew", "/usr/local"]
+    : platform === "linux" ? ["/usr", "/opt/libreoffice"]
+      : platform === "win32" ? [win32.join(process.env.ProgramFiles ?? "C:\\Program Files", "LibreOffice")] : [];
+  const roots = process.env.MEMMY_OFFICE_RUNTIME_PREFER_MANAGED === "1" && installer ? [] : [...(override ? [override] : []), ...defaults];
+  const tools: Record<string, string> = {};
+  for (const configured of roots) {
+    const root = await realpath(configured).catch(() => null);
+    if (!root) continue;
+    for (const name of ["soffice", "pdfinfo", "pdftoppm", "pdftotext"]) {
+      if (tools[name]) continue;
+      // Desktop soffice uses global named pipes that AppContainer rejects.
+      // Windows requires the headless LibreOfficeKit bridge in our runtime.
+      const binaryName = platform === "win32" ? name === "soffice" ? "memmy-office-convert.exe" : `${name}.exe` : name;
+      const candidates = [...(configured === override && name === "soffice"
+        ? [resolve(root, "native", "libreoffice-headless", "libreoffice", "LibreOfficeDev.app", "Contents", "MacOS", binaryName)] : []),
+        resolve(root, "bin", binaryName), resolve(root, "MacOS", binaryName), resolve(root, "Contents", "MacOS", binaryName), resolve(root, "program", binaryName),
+        resolve(root, "libreoffice", "program", binaryName), resolve(root, "poppler", "Library", "bin", binaryName),
+        resolve(root, "bin", "override", binaryName), resolve(root, "native", "poppler", "bin", binaryName)];
+      if (configured === override) candidates.push(resolve(root, "native", "poppler", "poppler", "bin", binaryName));
+      const binary = await firstExecutable(candidates);
+      if (!binary) continue;
+      const canonical = await realpath(binary);
+      tools[name] = canonical;
+      if (platform === "darwin" && name === "soffice") {
+        result.officeRendererResolved = await verifiedOfficeRenderer(root, canonical);
+      }
+      // Homebrew's bin symlinks resolve inside Cellar. The Host-approved root
+      // includes associated dylibs, fonts and shared resources as well.
+      result.readRoots.push(root);
+      result.executableRoots.push(root);
+      result.pathEntries.push(dirname(canonical));
+    }
+  }
+  if (["soffice", "pdfinfo", "pdftoppm", "pdftotext"].some(name => !tools[name]) && installer) {
+    const installed = await installer.ensure(platform, process.arch);
+    Object.assign(tools, installed.tools);
+    result.readRoots.push(installed.root); result.executableRoots.push(installed.root);
+    result.pathEntries.push(...Object.values(installed.tools).map(file => dirname(file)));
+    if (platform === "darwin" && installed.tools.soffice) {
+      result.officeRendererResolved = await verifiedOfficeRenderer(installed.root, installed.tools.soffice);
+    }
+    fontSources.push({ root: installed.root, candidates: officeManagedFontCandidates() });
+  }
+  result.readRoots = [...new Set(result.readRoots)];
+  result.executableRoots = [...new Set(result.executableRoots)];
+  result.pathEntries = [...new Set(result.pathEntries)];
+  result.environment.MEMMY_OFFICE_TOOLS = JSON.stringify(tools);
+  result.environment.MEMMY_OFFICE_CJK_FONTS = JSON.stringify(await selectOfficeCjkFontFiles(fontSources));
+  return result;
+}
+
+interface OfficeCjkFontSource {
+  root: string;
+  candidates: readonly string[];
+}
+
+const OFFICE_CJK_FONT_NAMES = [
+  "NotoSansCJKsc-Regular.otf", "NotoSansCJK-Regular.ttc", "NotoSansSC-Regular.otf", "NotoSansSC-Regular.ttf",
+  "NotoSerifCJKsc-Regular.otf", "NotoSerifCJK-Regular.ttc", "SourceHanSansSC-Regular.otf", "SourceHanSerifSC-Regular.otf"
+];
+
+function officeSystemFontSources(platform: NodeJS.Platform): OfficeCjkFontSource[] {
+  if (platform === "darwin") return [
+    { root: "/System/Library/Fonts", candidates: ["Supplemental/Arial Unicode.ttf", "Hiragino Sans GB.ttc", "STHeiti Medium.ttc", "STHeiti Light.ttc", "PingFang.ttc"] },
+    { root: "/Library/Fonts", candidates: ["Arial Unicode.ttf", ...OFFICE_CJK_FONT_NAMES] }
+  ];
+  if (platform === "win32") return [{
+    root: win32.join(process.env.SystemRoot ?? "C:\\Windows", "Fonts"),
+    candidates: ["msyh.ttc", "msyhbd.ttc", "simsun.ttc", "simhei.ttf", "mingliu.ttc", "arialuni.ttf", "meiryo.ttc", "malgun.ttf", ...OFFICE_CJK_FONT_NAMES]
+  }];
+  if (platform === "linux") return [
+    { root: "/usr/share/fonts", candidates: [
+      ...["opentype/noto", "truetype/noto", "opentype/source-han-sans", "truetype"].flatMap(directory => OFFICE_CJK_FONT_NAMES.map(name => `${directory}/${name}`)),
+      "truetype/wqy/wqy-zenhei.ttc", "truetype/wqy/wqy-microhei.ttc", "truetype/droid/DroidSansFallbackFull.ttf"
+    ] },
+    { root: "/usr/local/share/fonts", candidates: OFFICE_CJK_FONT_NAMES }
+  ];
+  return [];
+}
+
+function officeManagedFontCandidates(): string[] {
+  return ["fonts", "share/fonts", "share/fonts/truetype", "share/fonts/opentype", "share/fonts/opentype/noto",
+    "LibreOffice/share/fonts/truetype", "LibreOffice/share/fonts/opentype", "LibreOffice.app/Contents/Resources/fonts/truetype"]
+    .flatMap(directory => OFFICE_CJK_FONT_NAMES.map(name => `${directory}/${name}`));
+}
+
+/** Host-internal filesystem selection, exported for owned boundary fixtures; never accepts plugin configuration. */
+export async function selectOfficeCjkFontFiles(sources: readonly OfficeCjkFontSource[]): Promise<string[]> {
+  const fonts = new Set<string>();
+  for (const source of sources) {
+    if (!isAbsolute(source.root)) continue;
+    const root = await realpath(source.root).catch(() => null);
+    // A source root must not redirect the approved grant to a different tree.
+    if (!root || root !== resolve(source.root)) continue;
+    for (const candidate of source.candidates) {
+      if (fonts.size >= MAX_OFFICE_CJK_FONTS) return [...fonts];
+      try {
+        const font = await canonicalDescendant(root, resolve(root, candidate));
+        if (!/\.(?:ttf|ttc|otf)$/i.test(font)) continue;
+        const info = await lstat(font);
+        if (!info.isFile() || info.size === 0 || info.size > MAX_OFFICE_CJK_FONT_BYTES) continue;
+        await access(font, fsConstants.R_OK);
+        fonts.add(font);
+      } catch { /* Missing, unreadable and escaping candidates are not grants. */ }
+    }
+  }
+  return [...fonts];
+}
+
+async function verifiedOfficeRenderer(root: string, renderer: string): Promise<boolean> {
+  try {
+    const binary = await canonicalDescendant(await realpath(root), renderer);
+    if (!(await lstat(binary)).isFile()) return false;
+    await access(binary, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function defaultOfficeInstaller(pluginDataRoot?: string): OfficeRuntimeInstaller | undefined {
+  if (!pluginDataRoot) return undefined;
+  const registry = resolvePluginRegistryBaseUrl(process.env);
+  const catalogUrl = process.env.MEMMY_OFFICE_RUNTIME_CATALOG_URL
+    ?? (registry ? new URL("/api/v1/plugins/office/runtimes/{target}", registry).href : undefined);
+  if (!catalogUrl) return undefined;
+  return createOfficeRuntimeInstaller({ cacheRoot: process.env.MEMMY_OFFICE_RUNTIME_CACHE ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "office"), catalogUrl });
+}
+
+function defaultTexliveInstaller(pluginDataRoot?: string): TexliveRuntimeInstaller | undefined {
+  if (!pluginDataRoot) return undefined;
+  const registry = resolvePluginRegistryBaseUrl(process.env);
+  const catalogUrl = process.env.MEMMY_TEXLIVE_RUNTIME_CATALOG_URL
+    ?? (registry ? new URL("/api/v1/plugins/literature-review/runtimes/{target}", registry).href : undefined);
+  if (!catalogUrl) return undefined;
+  return createTexliveRuntimeInstaller({ cacheRoot: process.env.MEMMY_TEXLIVE_RUNTIME_CACHE
+    ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "texlive"), catalogUrl });
+}
+
+interface FilesystemRule {
+  path: string;
+  writable: boolean;
+}
+
+async function filesystemRules(
+  context: PluginRuntimeContext,
+  fileInputRoots: readonly string[],
+  pluginDataRoot?: string
+): Promise<FilesystemRule[]> {
+  const rules: FilesystemRule[] = [];
+  for (const permission of context.plugin.approvedPermissions) {
+    if (permission.type !== "filesystem") continue;
+    for (const configured of permission.paths) {
+      if (!isAbsolute(configured)) throw new Error(`Filesystem permission path must be absolute: ${configured}`);
+      const path = await realpath(configured);
+      rules.push({ path, writable: permission.access !== "read" });
+    }
+  }
+  if (approvedHostService(context, "file-input")) {
+    for (const configured of fileInputRoots) {
+      if (!isAbsolute(configured)) throw new Error(`File-input root must be absolute: ${configured}`);
+      const path = await realpath(configured).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (path) rules.push({ path, writable: false });
+    }
+  }
+  const pluginDataPath = await resolvePluginDataPath(context, pluginDataRoot);
+  if (pluginDataPath) {
+    rules.push({ path: pluginDataPath, writable: true });
+  }
+  return rules;
+}
+
+function approvedHostService(context: PluginRuntimeContext, service: string): boolean {
+  return context.plugin.approvedPermissions.some((permission) => permission.type === "host-service" && permission.services.includes(service));
+}
+
+async function resolvePluginDataPath(context: PluginRuntimeContext, configuredRoot: string | undefined): Promise<string | null> {
+  if (!approvedHostService(context, "plugin-data")) return null;
+  if (!configuredRoot || !isAbsolute(configuredRoot)) {
+    throw new Error("plugin-data host service requires a Host-owned absolute data root");
+  }
+  await mkdir(configuredRoot, { recursive: true });
+  const root = await realpath(configuredRoot);
+  const target = resolve(root, context.plugin.id);
+  const child = relative(root, target);
+  if (!child || child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) {
+    throw new Error("Plugin data path escapes the Host-owned data root");
+  }
+  await mkdir(target, { recursive: true });
+  return realpath(target);
+}
+
+function seatbeltProfile(
+  root: string,
+  filesystem: FilesystemRule[],
+  networkEnabled: boolean,
+  runtimeRoot: string | null,
+  runtimeReadRoots: readonly string[],
+  runtimeExecutableRoots: readonly string[],
+  ipcRoot: string | null,
+  pluginId: string,
+  officeRendererResolved: boolean
+): string {
+  const readPaths = [
+    root,
+    "/System",
+    "/System/Volumes/Preboot/Cryptexes/OS",
+    "/Library/Apple",
+    "/Library/Fonts",
+    "/usr/lib",
+    "/usr/libexec",
+    "/usr/share",
+    "/bin",
+    "/usr/bin",
+    ...filesystem.map((rule) => rule.path),
+    ...(runtimeRoot ? [runtimeRoot] : []),
+    ...runtimeReadRoots
+  ];
+  const writePaths = filesystem.filter((rule) => rule.writable).map((rule) => rule.path);
+  const clauses = [
+    "(version 1)",
+    "(deny default)",
+    "(import \"system.sb\")",
+    "(allow process-exec process-fork)",
+    "(allow signal process-info* (target same-sandbox))",
+    `(allow file-read-metadata file-test-existence ${readPaths.map(seatbeltAncestors).join(" ")})`,
+    `(allow file-map-executable (subpath "/System") (subpath "/System/Volumes/Preboot/Cryptexes/OS") (subpath "/usr/lib") (subpath "/Library/Apple") ${seatbeltSubpath(root)}${runtimeRoot ? ` ${seatbeltSubpath(runtimeRoot)}` : ""}${runtimeExecutableRoots.map((path) => ` ${seatbeltSubpath(path)}`).join("")})`,
+    `(allow file-read* ${readPaths.map(seatbeltSubpath).join(" ")})`
+  ];
+  // Aqua initializes these services even for headless conversion. The grant
+  // applies only to Office's sandbox after the Host verifies its renderer.
+  if (pluginId === "office" && officeRendererResolved === true) clauses.push(
+    '(allow mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.windowserver.active"))'
+  );
+  if (writePaths.length) clauses.push(`(allow file-write* ${writePaths.map(seatbeltSubpath).join(" ")})`);
+  if (ipcRoot) clauses.push(
+    "(allow system-socket (socket-domain AF_UNIX))",
+    `(allow network-bind network-inbound (local unix-socket ${seatbeltSubpath(ipcRoot)}))`,
+    `(allow network-outbound (remote unix-socket ${seatbeltSubpath(ipcRoot)}))`
+  );
+  if (networkEnabled) clauses.push("(allow network-outbound)");
+  return clauses.join("\n");
+}
+
+function seatbeltSubpath(path: string): string {
+  return `(subpath ${JSON.stringify(path)})`;
+}
+
+function seatbeltAncestors(path: string): string {
+  return `(path-ancestors ${JSON.stringify(path)})`;
+}
+
+function bwrapArgs(
+  root: string,
+  cwd: string,
+  command: string,
+  commandArgs: string[],
+  filesystem: FilesystemRule[],
+  networkEnabled: boolean,
+  runtimeRoot: string | null,
+  runtimeReadRoots: readonly string[]
+): string[] {
+  const args = ["--die-with-parent", "--new-session", "--unshare-all", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"];
+  if (networkEnabled) args.push("--share-net");
+  const bindTargets = [root, ...filesystem.map((rule) => rule.path), ...(runtimeRoot ? [runtimeRoot] : []), ...runtimeReadRoots];
+  for (const directory of new Set(bindTargets.flatMap(parentDirectories))) args.push("--dir", directory);
+  for (const path of ["/usr", "/bin", "/lib", "/lib64"]) args.push("--ro-bind-try", path, path);
+  args.push("--ro-bind", root, root);
+  if (runtimeRoot && !["/usr", "/bin", "/lib", "/lib64"].includes(runtimeRoot)) args.push("--ro-bind", runtimeRoot, runtimeRoot);
+  for (const path of runtimeReadRoots) args.push("--ro-bind", path, path);
+  for (const rule of filesystem) args.push(rule.writable ? "--bind" : "--ro-bind", rule.path, rule.path);
+  args.push("--chdir", cwd, "--", command, ...commandArgs);
+  return args;
+}
+
+function parentDirectories(path: string): string[] {
+  const parts = resolve(path).split(sep).filter(Boolean);
+  const directories: string[] = [];
+  let current: string = sep;
+  for (const part of parts.slice(0, -1)) {
+    current = resolve(current, part);
+    if (!["/usr", "/bin", "/lib", "/lib64"].includes(current)) directories.push(current);
+  }
+  return directories;
+}
+
+async function canonicalDescendant(root: string, path: string, allowRoot = false): Promise<string> {
+  const canonical = await realpath(path);
+  const child = relative(root, canonical);
+  if ((!allowRoot && !child) || child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) {
+    throw new Error("Plugin command path escapes its artifact root");
+  }
+  return canonical;
+}
+
+async function firstExecutable(paths: string[]): Promise<string | null> {
+  for (const path of paths) {
+    try {
+      await access(path, fsConstants.X_OK);
+      return path;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+export function resolvePluginEnvironment(
+  configured: Readonly<Record<string, string>>,
+  secretEnv: Readonly<Record<string, string>>,
+  secrets: Readonly<Record<string, string>>,
+  runtimePathEntries: readonly string[] = [],
+  runtimeEnvironment: Readonly<Record<string, string>> = {}
+): Record<string, string> {
+  const windowsRoot = process.env.SystemRoot ?? "C:\\Windows";
+  const hostPath = [...new Set([...runtimePathEntries, ...(process.platform === "win32" ? [win32.join(windowsRoot, "System32"), windowsRoot] : ["/usr/bin", "/bin"])])].join(process.platform === "win32" ? ";" : ":");
+  const env: Record<string, string> = { PATH: hostPath, LANG: "C.UTF-8",
+    ...(process.platform === "win32" ? { SystemRoot: windowsRoot, WINDIR: windowsRoot, ComSpec: win32.join(windowsRoot, "System32", "cmd.exe") } : {}),
+    ...configured, ...runtimeEnvironment };
+  for (const [name, key] of Object.entries(secretEnv)) {
+    const value = secrets[key];
+    if (!value) throw new Error(`Missing plugin secret for environment variable ${name}`);
+    env[name] = value;
+  }
+  // Neither manifest env nor secret aliases may replace Host-approved font paths.
+  env.MEMMY_OFFICE_CJK_FONTS = runtimeEnvironment.MEMMY_OFFICE_CJK_FONTS ?? "[]";
+  return env;
+}
+
+/** Never let plugin-supplied CLR/PowerShell variables affect the privileged launcher. */
+function windowsLauncherEnvironment(childEnvironment: Record<string, string>): Record<string, string> {
+  const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+  return { SystemRoot: systemRoot, WINDIR: systemRoot,
+    PATH: win32.join(systemRoot, "System32"),
+    PSModulePath: win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "Modules"),
+    ...(process.env.MEMMY_PLUGIN_SANDBOX_TRACE === "1" ? { MEMMY_SANDBOX_TRACE: "1" } : {}),
+    MEMMY_SANDBOX_CHILD_ENV: Buffer.from(JSON.stringify(childEnvironment)).toString("base64") };
+}
+
+function applyPlaceholders(value: string, call: CapabilityCall): string {
+  return value
+    .replaceAll("{capabilityId}", call.capabilityId)
+    .replaceAll("{callId}", call.callId)
+    .replaceAll("{conversationId}", call.conversationId);
+}
+
+function processExit(child: ChildProcessWithoutNullStreams): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+}
+
+function terminate(child: ChildProcessWithoutNullStreams): void {
+  if (child.exitCode !== null || child.killed) return;
+  child.kill("SIGTERM");
+  const timer = setTimeout(() => {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }, 5_000);
+  timer.unref();
+}
+
+function waitForTermination(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 5_500);
+    timer.unref();
+    child.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+function asCommandSession(session: PluginSession): CommandPluginSession {
+  if (!("children" in session)) throw new Error("Invalid command plugin session");
+  return session as CommandPluginSession;
+}

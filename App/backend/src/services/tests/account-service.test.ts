@@ -28,6 +28,37 @@ function createAccountService(options: TestAccountServiceOptions) {
 }
 
 describe("AccountService", () => {
+  it("keeps cloud grants across nickname edits but removes them on authoritative cloud refresh", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-account-grants-"));
+    const store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
+    let grants = ["plugin:legal-labor"];
+    const profile = cloudProfile();
+    store.repositories.accountSession.upsert({
+      uuid: "test-account", cloudUuid: "test-credential", profile
+    });
+    const service = createAccountService({
+      accountSessionRepository: store.repositories.accountSession,
+      cloudClient: {
+        ...createCloudClientStub(),
+        async getAccountInfo() {
+          return { ...profile, rawProfile: { ...profile.rawProfile, entitlements: grants } };
+        }
+      }
+    });
+    try {
+      await service.getSession();
+      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor"]);
+      await service.updateProfile({ nickname: "Legal Test" });
+      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor"]);
+      expect(store.repositories.accountSession.get()).toMatchObject({ profile: { nickname: "Legal Test" } });
+      grants = [];
+      await service.getSession();
+      expect(store.repositories.accountSession.getEntitlements()).toEqual([]);
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it("treats a logged-out lottery reward lookup as no reward", async () => {
     let cloudCalls = 0;
     const service = createAccountService({
@@ -75,6 +106,34 @@ describe("AccountService", () => {
     expect(calls).toEqual([
       { get: { uuid: "cloud.login.uuid" } },
       { ack: { uuid: "cloud.login.uuid", drawId: "1" } }
+    ]);
+  });
+
+  it("ensures and acknowledges the automatic one-time task Token gift with the current cloud account", async () => {
+    const calls: unknown[] = [];
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async ensureTaskTokenGift(input) {
+          calls.push({ ensure: input });
+          return { hasGift: true as const, grantId: "launch-gift-20m", audience: "existing" as const,
+            tokenAmount: 20_000_000, totalTokens: 22_000_000 };
+        },
+        async ackTaskTokenGift(input) { calls.push({ ack: input }); }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        getCloudUuid() { return "cloud.login.uuid"; }
+      }
+    });
+
+    await expect(service.ensureTaskTokenGift()).resolves.toMatchObject({
+      hasGift: true, audience: "existing", tokenAmount: 20_000_000
+    });
+    await expect(service.ackTaskTokenGift({ grantId: "launch-gift-20m" })).resolves.toEqual({ ok: true });
+    expect(calls).toEqual([
+      { ensure: { uuid: "cloud.login.uuid" } },
+      { ack: { uuid: "cloud.login.uuid", grantId: "launch-gift-20m" } }
     ]);
   });
 

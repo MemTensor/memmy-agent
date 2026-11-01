@@ -1,3 +1,4 @@
+import { agentTaskActivity } from "./task-activity.js";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
@@ -360,7 +361,11 @@ export class SubagentManager {
     return `Subagent [${displayLabel}] started (id: ${taskId}). I'll notify you when it completes.`;
   }
 
-  async runSubagent(
+  async runSubagent(...args: Parameters<SubagentManager["runSubagentTask"]>): Promise<void> {
+    return agentTaskActivity.run(() => this.runSubagentTask(...args));
+  }
+
+  private async runSubagentTask(
     taskId: string,
     task: string,
     label: string,

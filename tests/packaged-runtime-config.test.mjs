@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { finished } from "node:stream/promises";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -809,7 +810,8 @@ async function createAsarFixture(
     writeFileSync(targetPath, contents);
   }
   if (includeEnv) writeFileSync(join(source, ".env.production"), "TOKEN=decoy\n");
-  await createPackageWithOptions(source, asar, { unpackDir: "dist/renderer", unpack: "**/*.{node,exe}" });
+  const output = await createPackageWithOptions(source, asar, { unpackDir: "dist/renderer", unpack: "**/*.{node,exe}" });
+  await finished(output);
   return asar;
 }
 

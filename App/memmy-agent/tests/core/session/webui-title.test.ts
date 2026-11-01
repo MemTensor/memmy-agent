@@ -101,6 +101,7 @@ describe("WebuiTitleService", () => {
     expect(saved?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("UI 标题生成改造");
     expect(provider.chatWithRetry).toHaveBeenCalledTimes(1);
     const request = provider.chatWithRetry.mock.calls[0]?.[0];
+    expect(request.maxTokens).toBeGreaterThanOrEqual(256);
     expect(request.messages[1].content).toContain("请帮我拆解 UI 53 的标题生成改造");
     expect(request.messages[1].content).not.toContain("这里是长回答");
     expect(recorder.recordAgentChatUsage).toHaveBeenCalledWith(expect.objectContaining({

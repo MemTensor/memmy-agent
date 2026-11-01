@@ -28,6 +28,36 @@ function toolNames(definitions: Array<Record<string, any>>): string[] {
 }
 
 describe("ToolRegistry", () => {
+  it("executes a unique plugin name without its hash and retains canonical definitions", async () => {
+    const registry = new ToolRegistry();
+    const name = "mcp_plugins_plugin_review_generate_sections";
+    const tool = new FakeTool(`${name}_658bb030`);
+    registry.register(tool);
+    expect(registry.get(name)).toBe(tool);
+    expect(registry.has(name)).toBe(true);
+    expect(registry.prepareCall(name, ["invalid"] as any)[2]).toContain("parameters must be an object");
+    expect(await registry.execute(name, { taskId: "review-1" })).toEqual({ taskId: "review-1" });
+    expect(toolNames(registry.getDefinitions())).toEqual([tool.name]);
+    registry.unregister(tool.name);
+    expect(registry.has(name)).toBe(false);
+  });
+
+  it("rejects ambiguous aliases, incorrect hashes and other servers; exact names win", async () => {
+    const registry = new ToolRegistry();
+    const name = "mcp_plugins_plugin_review_generate_sections";
+    registry.register(new FakeTool(`${name}_658bb030`));
+    registry.register(new FakeTool(`${name}_1234abcd`));
+    expect(registry.prepareCall(name, {})[2]).toContain("not found");
+    expect(registry.has(`${name}_deadbeef`)).toBe(false);
+    expect(registry.has("mcp_plugins_plugin_review_generate_section")).toBe(false);
+    registry.register(new FakeTool("mcp_external_search_1234abcd"));
+    expect(registry.has("mcp_external_search")).toBe(false);
+    const exact = new FakeTool(name);
+    registry.register(exact);
+    expect(registry.get(name)).toBe(exact);
+    expect(registry.has(`${name}_658bb030`)).toBe(true);
+  });
+
   it("orders builtins before MCP tools", () => {
     const registry = new ToolRegistry();
     registry.register(new FakeTool("mcp_git_status"));

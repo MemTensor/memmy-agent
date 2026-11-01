@@ -1,0 +1,31 @@
+{
+  "name": "@memmy/office-plugin",
+  "version": "0.2.5",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "package:mpp": "npm run build && node scripts/package.mjs",
+    "publish:registry": "node scripts/publish.mjs",
+    "dev:registry": "node scripts/serve.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "prepare:runtime": "node scripts/prepare-runtime.mjs",
+    "package:runtime": "node scripts/package-runtime.mjs"
+  },
+  "dependencies": {
+    "@xmldom/xmldom": "0.9.12",
+    "ajv": "8.20.0",
+    "docx": "9.5.1",
+    "exceljs": "4.4.0",
+    "fontkit": "2.0.4",
+    "jszip": "3.10.1",
+    "pdf-lib": "1.17.1",
+    "pptxgenjs": "4.0.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.4"
+  }
+}

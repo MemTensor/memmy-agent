@@ -1,8 +1,11 @@
 /** Queued WebUI message list displayed above the chat composer. */
-import { useEffect, useRef, type ReactNode } from "react";
-import { Monitor, SquareTerminal } from "lucide-react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
+import { CornerUpRight, FileImage, GripVertical, Monitor, Pencil, SquareTerminal, Trash2 } from "lucide-react";
+import { FileTypeIcon } from "../components/file-type-icon.js";
+import "./agent-queued-message-list.css";
 import { OverflowTooltipText } from "../components/overflow-tooltip-text.js";
 import { Tooltip } from "../components/tooltip.js";
+import { useTranslation } from "../i18n/use-translation.js";
 import {
   AgentQueueChannelIcon,
   agentChannelDisplay,
@@ -26,6 +29,7 @@ export interface AgentQueuedMessageListProps {
   onRemove: (clientRequestId: string) => void;
   onEdit: (clientRequestId: string) => void;
   onSteer: (clientRequestId: string) => void;
+  onReorder?: (orderedIds: string[]) => void;
 }
 
 export type QueuedComposerEditDecision = "restore" | "blocked" | "ignore";
@@ -34,9 +38,17 @@ export function canEditQueuedMessage(
   item: Pick<AgentQueuedMessage, "source" | "media" | "content">
 ): boolean {
   return item.source.kind === "gui"
-    && item.media.length === 0
-    && item.content.trim().length > 0
-    && !item.content.trimStart().startsWith("/");
+    && (item.content.trim().length > 0 || item.media.length > 0)
+    && !item.content.trimStart().startsWith("/")
+    && item.media.every((media) => Boolean(media.path));
+}
+
+export function reorderQueuedMessageIds(ids: readonly string[], sourceId: string, targetId: string, after: boolean): string[] | null {
+  if (sourceId === targetId || !ids.includes(sourceId) || !ids.includes(targetId)) return null;
+  const next = ids.filter((id) => id !== sourceId);
+  const target = next.indexOf(targetId);
+  next.splice(target + (after ? 1 : 0), 0, sourceId);
+  return next.every((id, index) => id === ids[index]) ? null : next;
 }
 
 export function queuedComposerEditDecision(input: {
@@ -87,8 +99,26 @@ function queuedMessageLabel(
 }
 
 export function AgentQueuedMessageList(props: AgentQueuedMessageListProps) {
+  const { t } = useTranslation();
   const listRef = useRef<HTMLOListElement | null>(null);
   const previousCountRef = useRef(props.items.length);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ id: string; after: boolean } | null>(null);
+  const canReorder = Boolean(props.onReorder) && props.items.length > 1
+    && props.items.every((item) => item.status === "queued");
+
+  const reorder = (sourceId: string, targetId: string, after: boolean) => {
+    const next = reorderQueuedMessageIds(props.items.map((item) => item.clientRequestId), sourceId, targetId, after);
+    if (next) props.onReorder?.(next);
+  };
+
+  const onDragOver = (event: DragEvent<HTMLLIElement>, id: string) => {
+    if (!canReorder || !draggedId || draggedId === id) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const rect = event.currentTarget.getBoundingClientRect();
+    setDropTarget({ id, after: event.clientY > rect.top + rect.height / 2 });
+  };
 
   useEffect(() => {
     if (props.items.length > previousCountRef.current) {
@@ -113,7 +143,34 @@ export function AgentQueuedMessageList(props: AgentQueuedMessageListProps) {
           const showSource = item.source.kind !== "gui";
           const sourceLabel = queueSourceLabel(item, props.sourceLabels);
           return (
-            <li className="agent-queue-item" key={item.clientRequestId}>
+            <li className={`agent-queue-item${draggedId === item.clientRequestId ? " agent-queue-item--dragging" : ""}${dropTarget?.id === item.clientRequestId ? ` agent-queue-item--drop-${dropTarget.after ? "after" : "before"}` : ""}`}
+              key={item.clientRequestId}
+              draggable={canReorder}
+              onDragStart={(event) => {
+                if (!canReorder) { event.preventDefault(); return; }
+                setDraggedId(item.clientRequestId);
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", item.clientRequestId);
+              }}
+              onDragOver={(event) => onDragOver(event, item.clientRequestId)}
+              onDrop={(event) => {
+                if (!canReorder || !draggedId || !dropTarget) return;
+                event.preventDefault();
+                reorder(draggedId, dropTarget.id, dropTarget.after);
+                setDraggedId(null);
+                setDropTarget(null);
+              }}
+              onDragEnd={() => { setDraggedId(null); setDropTarget(null); }}>
+              {canReorder ? <button type="button" className="agent-queue-item__handle"
+                aria-label={t("home.queue.reorder", { text })}
+                onKeyDown={(event) => {
+                  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                  event.preventDefault();
+                  const index = props.items.findIndex((candidate) => candidate.clientRequestId === item.clientRequestId);
+                  const target = props.items[index + (event.key === "ArrowUp" ? -1 : 1)];
+                  if (target) reorder(item.clientRequestId, target.clientRequestId, event.key === "ArrowDown");
+                }}><GripVertical size={14} aria-hidden="true" /></button>
+                : <span className="agent-queue-item__handle agent-queue-item__handle--static" aria-hidden="true"><GripVertical size={14} /></span>}
               {showSource ? (
                 <Tooltip content={sourceLabel}>
                   <span
@@ -125,6 +182,7 @@ export function AgentQueuedMessageList(props: AgentQueuedMessageListProps) {
                   </span>
                 </Tooltip>
               ) : null}
+              {item.media.length ? <QueueMediaPreview item={item} label={props.attachmentOnlyLabel(item.media.length)} /> : null}
               <OverflowTooltipText className="agent-queue-item__text" text={text} />
               <div className="agent-queue-item__actions">
                 {showSteer ? (
@@ -136,7 +194,7 @@ export function AgentQueuedMessageList(props: AgentQueuedMessageListProps) {
                       disabled={controlPending || !props.canSteer}
                       onClick={() => props.onSteer(item.clientRequestId)}
                     >
-                      <QueueSteerIcon />
+                      <CornerUpRight data-icon="queue-steer" size={16} strokeWidth={2} aria-hidden="true" />
                     </button>
                   </Tooltip>
                 ) : null}
@@ -149,7 +207,7 @@ export function AgentQueuedMessageList(props: AgentQueuedMessageListProps) {
                       disabled={controlPending}
                       onClick={() => props.onEdit(item.clientRequestId)}
                     >
-                      <QueueEditIcon />
+                      <Pencil data-icon="queue-edit" size={14} strokeWidth={1.8} aria-hidden="true" />
                     </button>
                   </Tooltip>
                 ) : null}
@@ -161,7 +219,7 @@ export function AgentQueuedMessageList(props: AgentQueuedMessageListProps) {
                     disabled={controlPending}
                     onClick={() => props.onRemove(item.clientRequestId)}
                   >
-                    <QueueRemoveIcon />
+                    <Trash2 data-icon="queue-remove" size={16} strokeWidth={2} aria-hidden="true" />
                   </button>
                 </Tooltip>
               </div>
@@ -173,53 +231,13 @@ export function AgentQueuedMessageList(props: AgentQueuedMessageListProps) {
   );
 }
 
-function QueueIcon(props: { name: string; children: ReactNode }) {
-  return (
-    <svg
-      data-icon={props.name}
-      width={15}
-      height={15}
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden="true"
-    >
-      {props.children}
-    </svg>
-  );
-}
-
-function QueueSteerIcon() {
-  return (
-    <QueueIcon name="queue-steer">
-      <path
-        fill="currentColor"
-        fillRule="evenodd"
-        d="M9.2 3.45h5.85c2.5 0 4.3 1.72 4.3 4.05v3.05c0 2.32-1.8 4.05-4.3 4.05H11.7l-3.45 3.05c-.3.26-.78.05-.78-.34v-2.71h-.42c-2.28 0-3.95-1.73-3.95-4.05V7.5c0-2.33 1.67-4.05 3.95-4.05H9.2Zm1.22 3.95h1.62v1.48h1.48v1.62h-1.48v1.48h-1.62v-1.48H8.94V8.88h1.48V7.4Z"
-      />
-    </QueueIcon>
-  );
-}
-
-function QueueEditIcon() {
-  return (
-    <QueueIcon name="queue-edit">
-      <g fill="currentColor" transform="rotate(-42 12 12)">
-        <path d="M7.35 10.05 2.55 12 7.35 13.95Z" />
-        <rect x="6.85" y="9.95" width="8.2" height="4.1" rx="0.75" />
-        <rect x="16.55" y="9.65" width="3.7" height="4.7" rx="2.35" />
-      </g>
-    </QueueIcon>
-  );
-}
-
-function QueueRemoveIcon() {
-  return (
-    <QueueIcon name="queue-remove">
-      <g fill="currentColor">
-        <rect x="10.2" y="3.85" width="3.6" height="1.7" rx="0.85" />
-        <rect x="4.15" y="5.3" width="15.7" height="2.1" rx="1.05" />
-        <path d="M6.85 7.95h10.3V14.7c0 2.15-1.7 3.9-3.85 3.9h-2.6c-2.15 0-3.85-1.75-3.85-3.9V7.95Z" />
-      </g>
-    </QueueIcon>
-  );
+function QueueMediaPreview({ item, label }: { item: AgentQueuedMessage; label: string }) {
+  const first = item.media.find((media) => media.kind === "image") ?? item.media[0]!;
+  return <span className="agent-queue-item__media" aria-label={label}>
+    {first.kind === "image" && first.url
+      ? <img src={first.url} alt="" />
+      : first.kind === "image" ? <FileImage size={18} aria-hidden="true" />
+        : <FileTypeIcon name={first.name || first.path || "attachment"} surface="card" />}
+    {item.media.length > 1 ? <span className="agent-queue-item__media-count">+{item.media.length - 1}</span> : null}
+  </span>;
 }

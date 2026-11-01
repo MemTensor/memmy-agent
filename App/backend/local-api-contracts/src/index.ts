@@ -1,6 +1,7 @@
 /** Memmy local API contract. */
 import { z } from "zod";
 import { ModelThinkingConfigSchema } from "./model-thinking-levels.js";
+import { PluginCapabilityEventPayloadSchema } from "./plugin.js";
 import { normalizeOutputLanguage } from "./output-language.js";
 
 export { normalizeOutputLanguage } from "./output-language.js";
@@ -15,6 +16,7 @@ export * from "./memory-l3-world-model.js";
 export * from "./endpoints.js";
 export * from "./cloud-service.js";
 export * from "./desktop-runtime-manifest.js";
+export * from "./plugin.js";
 export * from "./computer-use-surface.js";
 export * from "./browser-profile-control.js";
 export * from "./embedded-browser-control.js";
@@ -667,6 +669,22 @@ export const LotteryRewardAckInputSchema = z.object({
 });
 export type LotteryRewardAckInput = z.infer<typeof LotteryRewardAckInputSchema>;
 
+/** Already-granted task Token benefit awaiting acknowledgement. */
+export const TaskTokenGiftNoticeSchema = z.discriminatedUnion("hasGift", [
+    z.object({ hasGift: z.literal(false), audience: z.enum(["new", "existing"]).optional() }),
+    z.object({
+        hasGift: z.literal(true),
+        grantId: z.string().min(1),
+        audience: z.enum(["new", "existing"]),
+        tokenAmount: z.number().int().positive(),
+        totalTokens: z.number().int().nonnegative()
+    })
+]);
+export type TaskTokenGiftNotice = z.infer<typeof TaskTokenGiftNoticeSchema>;
+
+export const TaskTokenGiftAckInputSchema = z.object({ grantId: z.string().min(1) });
+export type TaskTokenGiftAckInput = z.infer<typeof TaskTokenGiftAckInputSchema>;
+
 export const AppBootstrapResponseSchema = z.object({
     app: AppSettingsDtoSchema,
     onboarding: OnboardingStateDtoSchema,
@@ -1180,12 +1198,41 @@ export const ModelConfigViewSchema = z.object({
 export type ModelConfigView = z.infer<typeof ModelConfigViewSchema>;
 
 /** Schema for asr transcription input. */
+/**
+ * Largest audio payload a single transcription may carry, in decoded bytes.
+ *
+ * The upstream file-transcription API caps one inline audio item at 20 MiB of
+ * base64, which leaves roughly this much actual audio. An hours-long interview
+ * therefore has to be recorded at a bitrate that fits, because splitting it
+ * restarts speaker numbering and destroys the diarization.
+ */
+export const ASR_MAX_AUDIO_BYTES = 15 * 1024 * 1024;
+
+/** Base64 inflates by 4/3; the route needs headroom for that plus the JSON envelope. */
+export const ASR_MAX_REQUEST_BYTES = Math.ceil(ASR_MAX_AUDIO_BYTES * 4 / 3) + 64 * 1024;
+
 export const AsrTranscriptionInputSchema = z.object({
-    audioBase64: z.string().min(1),
+    audioBase64: z.string().min(1).max(Math.ceil(ASR_MAX_AUDIO_BYTES * 4 / 3)),
     mimeType: z.string().min(1),
-    durationMs: z.number().int().nonnegative().optional()
+    durationMs: z.number().int().nonnegative().optional(),
+    /** Requests speaker separation. Honoured only by upstream models that support it. */
+    diarization: z.boolean().optional()
 });
 export type AsrTranscriptionInput = z.infer<typeof AsrTranscriptionInputSchema>;
+
+/**
+ * One diarized utterance.
+ *
+ * `speakerId` is scoped to a single transcription: the same index in two
+ * transcriptions does not denote the same person.
+ */
+export const AsrTranscriptSegmentSchema = z.object({
+    text: z.string(),
+    speakerId: z.number().int().nonnegative().optional(),
+    startMs: z.number().int().nonnegative().optional(),
+    endMs: z.number().int().nonnegative().optional()
+});
+export type AsrTranscriptSegment = z.infer<typeof AsrTranscriptSegmentSchema>;
 
 /** Schema for asr transcription response. */
 export const AsrTranscriptionResponseSchema = z.object({
@@ -1193,9 +1240,41 @@ export const AsrTranscriptionResponseSchema = z.object({
     modelId: z.string().trim().min(1),
     provider: CatalogProviderIdSchema,
     source: z.enum(["account", "byok"]),
-    transcribedAt: z.string().datetime()
+    transcribedAt: z.string().datetime(),
+    /** Present only when diarization was requested and the upstream model returned it. */
+    segments: z.array(AsrTranscriptSegmentSchema).optional()
 });
 export type AsrTranscriptionResponse = z.infer<typeof AsrTranscriptionResponseSchema>;
+
+/**
+ * Events on the live ASR stream (`/api/asr/stream`).
+ *
+ * The renderer pushes raw 16 kHz mono PCM as binary frames and receives these
+ * JSON text frames back. `partial` is a provisional reading of the sentence
+ * being spoken; a later frame with the same `sentenceId` replaces it, and
+ * `sentence` is the final text for that id. Speaker attribution is never
+ * present here: the realtime model does not separate speakers, so labels come
+ * only from the diarized pass over the finished recording.
+ */
+export const AsrStreamEventSchema = z.discriminatedUnion("type", [
+    z.object({
+        type: z.enum(["partial", "sentence"]),
+        sentenceId: z.number().int().nonnegative(),
+        text: z.string(),
+        beginMs: z.number().int().nonnegative(),
+        endMs: z.number().int().nonnegative().optional()
+    }),
+    z.object({ type: z.literal("finished") }),
+    z.object({ type: z.literal("error"), message: z.string() })
+]);
+export type AsrStreamEvent = z.infer<typeof AsrStreamEventSchema>;
+
+/** Control frames the renderer sends on the live ASR stream. */
+export const AsrStreamControlSchema = z.discriminatedUnion("type", [
+    z.object({ type: z.literal("start"), sampleRate: z.number().int().positive().optional() }),
+    z.object({ type: z.literal("finish") })
+]);
+export type AsrStreamControl = z.infer<typeof AsrStreamControlSchema>;
 
 export const AccountChannelSchema = z.enum(["email", "phone"]);
 export type AccountChannel = z.infer<typeof AccountChannelSchema>;
@@ -1674,11 +1753,29 @@ export const ScanCompletedSseEventSchema = z.object({
     })
 });
 
+export const PluginCapabilitySseEventSchema = z.object({
+    id: z.string(),
+    type: z.literal("plugin.capability_event"),
+    timestamp: z.string().datetime(),
+    payload: PluginCapabilityEventPayloadSchema
+});
+
+export const PluginCapabilitySnapshotSseEventSchema = z.object({
+    id: z.string(),
+    type: z.literal("plugin.capability_snapshot"),
+    timestamp: z.string().datetime(),
+    payload: z.object({
+        calls: z.array(PluginCapabilityEventPayloadSchema.pick({ pluginId: true, capabilityId: true, callId: true, conversationId: true }))
+    })
+});
+
 export const SseEventSchema = z.discriminatedUnion("type", [
     ConnectedSseEventSchema,
     HeartbeatSseEventSchema,
     ScanProgressSseEventSchema,
-    ScanCompletedSseEventSchema
+    ScanCompletedSseEventSchema,
+    PluginCapabilitySseEventSchema,
+    PluginCapabilitySnapshotSseEventSchema
 ]);
 export type SseEvent = z.infer<typeof SseEventSchema>;
 

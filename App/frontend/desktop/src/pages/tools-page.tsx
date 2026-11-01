@@ -1,21 +1,27 @@
+import "./plugin-tools-layout.css";
+import { usePluginUpdateAvailable, PluginUpdateDot } from "./plugin-update-indicator.js";
 /** Tools page module. */
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Link2, MessageCircle, Puzzle } from "lucide-react";
 import { useApiClients } from "../app/providers.js";
 import { PRODUCT_TOUR_TOOLS_CONTENT_ANCHOR } from "../app/product-tour-layout.js";
 import type { ChannelsClient } from "../api/channels-client.js";
 import type { IntegrationsClient } from "../api/integrations-client.js";
-import { Banner } from "../components/banner.js";
 import { ConnectChannelModal } from "../components/connect-channel-modal.js";
 import { ConnectIntegrationModal } from "../components/connect-integration-modal.js";
-import { IntegrationCard } from "../components/integration-card.js";
-import { Memmy } from "../components/mascot/memmy.js";
-import { CATEGORY_TABS, getAllIntegrationMeta, type IntegrationCategoryTab, type IntegrationMeta } from "../integrations/integration-meta.js";
+import { getAllIntegrationMeta, type IntegrationCategoryTab, type IntegrationMeta } from "../integrations/integration-meta.js";
+import { deriveIntegrationState } from "../integrations/connection-state.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions, loadToolConnectionRecords, toolsActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
 import { selectConnectionForIntegration, selectStatusPrioritizedIntegrations, selectVisibleIntegrations, type ToolsState } from "../state/tools-slice.js";
 import { AppFrame } from "./app-frame.js";
+import { PluginMarketplace } from "./plugin-marketplace.js";
+import { ConnectionCatalogSection } from "./connection-catalog-section.js";
+import "./plugin-marketplace.css";
+
+export type ToolsSection = "connections" | "channels" | "plugins";
+export type ConnectionCatalogFilter = "all" | "connected";
 
 const CONNECTION_REFRESH_INTERVAL_MS = 5_000;
 
@@ -25,8 +31,16 @@ export interface ToolsPageViewProps {
   client?: IntegrationsClient;
   channelsClient?: ChannelsClient;
   search?: string;
+  searchBySection?: Record<"connections" | "channels", string>;
+  filterBySection?: Record<"connections" | "channels", ConnectionCatalogFilter>;
   activeCategory?: IntegrationCategoryTab;
-  onSearchChange: (value: string) => void;
+  section?: ToolsSection;
+  connectionFilter?: ConnectionCatalogFilter;
+  onConnectionFilterChange?: (filter: ConnectionCatalogFilter, section?: "connections" | "channels") => void;
+  marketplace?: ReactNode;
+  pluginUpdatesAvailable?: boolean;
+  onSectionChange?: (section: ToolsSection) => void;
+  onSearchChange: (value: string, section?: "connections" | "channels") => void;
   onCategoryChange: (category: IntegrationCategoryTab) => void;
   onOpenIntegration: (integration: IntegrationMeta) => void;
   onModalClose: () => void;
@@ -37,19 +51,22 @@ export interface ToolsPageViewProps {
 export function ToolsPage() {
   const { state, dispatch } = useAppState();
   const { clients } = useApiClients();
-  const [search, setSearch] = useState("");
+  const pluginUpdatesAvailable = usePluginUpdateAvailable(clients?.plugins, state.account.userId);
+  const [searchBySection, setSearchBySection] = useState({ connections: "", channels: "" });
+  const [filterBySection, setFilterBySection] = useState<Record<"connections" | "channels", ConnectionCatalogFilter>>({ connections: "all", channels: "all" });
   const [activeCategory, setActiveCategory] = useState<IntegrationCategoryTab>("All");
+  const [section, setSection] = useState<ToolsSection>("connections");
 
   useEffect(() => {
-    if (!clients || !shouldLoadConnectionsForPage(state.tools.status)) {
+    if (section === "plugins" || !clients || !shouldLoadConnectionsForPage(state.tools.status)) {
       return;
     }
 
     void toolsActions.loadConnections(clients.integrations, clients.channels, dispatch);
-  }, [clients, dispatch, state.tools.status]);
+  }, [clients, dispatch, section, state.tools.status]);
 
   useEffect(() => {
-    if (!clients || state.tools.status !== "ready") {
+    if (section === "plugins" || !clients || state.tools.status !== "ready") {
       return undefined;
     }
 
@@ -58,7 +75,7 @@ export function ToolsPage() {
     }, CONNECTION_REFRESH_INTERVAL_MS);
 
     return () => window.clearInterval(interval);
-  }, [clients, dispatch, state.tools.status]);
+  }, [clients, dispatch, section, state.tools.status]);
 
   const openIntegration = useCallback(
     (integration: IntegrationMeta) => {
@@ -79,14 +96,32 @@ export function ToolsPage() {
     void toolsActions.refreshConnections(clients.integrations, clients.channels, dispatch);
   }, [clients, dispatch]);
 
+  const changeCatalogSearch = useCallback((value: string, target: "connections" | "channels" = "connections") => {
+    setSearchBySection((current) => ({ ...current, [target]: value }));
+  }, []);
+  const changeCatalogFilter = useCallback((value: ConnectionCatalogFilter, target: "connections" | "channels" = "connections") => {
+    setFilterBySection((current) => ({ ...current, [target]: value }));
+  }, []);
   return (
     <ToolsPageView
+      pluginUpdatesAvailable={pluginUpdatesAvailable}
       tools={state.tools}
       client={clients?.integrations}
       channelsClient={clients?.channels}
-      search={search}
+      search={section === "plugins" ? "" : searchBySection[section]}
+      searchBySection={searchBySection}
+      filterBySection={filterBySection}
       activeCategory={activeCategory}
-      onSearchChange={setSearch}
+      section={section}
+      onSectionChange={(next) => {
+        if (next === section) return;
+        if (state.tools.modal.kind !== "closed") dispatch(appActions.closeToolModal());
+        setSection(next);
+      }}
+      connectionFilter={section === "plugins" ? "all" : filterBySection[section]}
+      onConnectionFilterChange={changeCatalogFilter}
+      marketplace={<PluginMarketplace />}
+      onSearchChange={changeCatalogSearch}
       onCategoryChange={setActiveCategory}
       onOpenIntegration={openIntegration}
       onModalClose={closeModal}
@@ -110,6 +145,12 @@ export function ToolsPageView(props: ToolsPageViewProps) {
   const { t } = useTranslation();
   const search = props.search ?? "";
   const activeCategory = props.activeCategory ?? "All";
+  const section = props.section ?? "connections";
+  // Mount each catalog on its first visit, then retain its DOM and local state.
+  const [visitedSections, setVisitedSections] = useState<Set<ToolsSection>>(() => new Set([section]));
+  useEffect(() => {
+    setVisitedSections((current) => current.has(section) ? current : new Set([...current, section]));
+  }, [section]);
   const allIntegrations = useMemo(() => getAllIntegrationMeta(), []);
   const unavailableIntegrationsClient = useMemo(
     () => createUnavailableIntegrationsClient(t("tools.error.initializing")),
@@ -119,97 +160,68 @@ export function ToolsPageView(props: ToolsPageViewProps) {
     () => createUnavailableChannelsClient(t("tools.error.initializing")),
     [t]
   );
-  const channels = selectStatusPrioritizedIntegrations(
-    allIntegrations.filter((item) => item.isChannel),
-    props.tools
-  );
-  const integrations = allIntegrations.filter((item) => !item.isChannel);
-  const filtered = selectStatusPrioritizedIntegrations(
-    selectVisibleIntegrations(integrations, search, activeCategory),
-    props.tools
-  );
+  const connectionFilter = props.connectionFilter ?? "all";
+  const toolsSearch = props.searchBySection?.connections ?? search;
+  const channelsSearch = props.searchBySection?.channels ?? search;
+  const toolsFilter = props.filterBySection?.connections ?? connectionFilter;
+  const channelsFilter = props.filterBySection?.channels ?? connectionFilter;
+  // Reuse the catalog React nodes as well as their DOM when only the active tab changes.
+  const connectionPanels = useMemo(() => {
+    const isConnected = (item: IntegrationMeta) => deriveIntegrationState(selectConnectionForIntegration(props.tools, item)) === "connected";
+    return Object.fromEntries((["connections", "channels"] as const).map((panel) => {
+      const catalog = allIntegrations.filter((item) => panel === "channels" ? item.isChannel : !item.isChannel);
+      const panelSearch = panel === "channels" ? channelsSearch : toolsSearch;
+      const panelFilter = panel === "channels" ? channelsFilter : toolsFilter;
+      const filtered = selectStatusPrioritizedIntegrations(
+        selectVisibleIntegrations(catalog, panelSearch, panel === "channels" ? "All" : activeCategory)
+          .filter((item) => panelFilter !== "connected" || isConnected(item)), props.tools
+      );
+      return [panel, <ConnectionCatalogSection
+        kind={panel === "channels" ? "channels" : "tools"}
+        items={filtered} tools={props.tools} loading={props.tools.status === "loading"} error={props.tools.loadError}
+        search={panelSearch} onSearchChange={(value) => props.onSearchChange(value, panel)}
+        filter={panelFilter} onFilterChange={(value) => props.onConnectionFilterChange?.(value, panel)}
+        connectedCount={catalog.filter(isConnected).length}
+        onOpenIntegration={props.onOpenIntegration} onRefresh={props.onConnectionsChanged}
+        activeCategory={activeCategory} onCategoryChange={panel === "connections" ? props.onCategoryChange : undefined}
+      />];
+    }));
+  }, [allIntegrations, props.tools, toolsSearch, channelsSearch, toolsFilter, channelsFilter, activeCategory,
+    props.onSearchChange, props.onConnectionFilterChange, props.onOpenIntegration, props.onConnectionsChanged, props.onCategoryChange]);
   const modalIntegration = getModalIntegration(props.tools, allIntegrations);
   const modalConnection = modalIntegration ? selectConnectionForIntegration(props.tools, modalIntegration) : undefined;
 
   return (
-    <AppFrame title={t("tools.title")}>
-      <div className="app-frame-page-content h-full overflow-y-auto py-6 tools-page-content">
-        <div className="mb-6 flex items-center gap-3 border-b border-border-stone/30 pb-4">
-          <Memmy pose="connect" size={56} />
-          <div>
-            <h1 className="text-lg font-bold text-text-ink">{t("tools.title")}</h1>
-            <p className="text-xs text-text-ink/65">{t("tools.subtitle")}</p>
-          </div>
+    <AppFrame title={t("tools.hubTitle")} topBarInset={true} topBarInsetOffsetPx={-8}>
+      <div
+        className="app-frame-page-content h-full overflow-y-auto tools-page-content"
+        style={{ paddingBottom: 24 }}
+      >
+        <div role="tablist" aria-label={t("tools.hubTitle")} className="plugin-marketplace-tabs" data-window-drag-exclusion="tools-tabs">
+          {(["connections", "channels", "plugins"] as const).map((item) => (
+            <button key={item} type="button" role="tab" id={`tools-tab-${item}`}
+              aria-selected={section === item} aria-controls={`tools-panel-${item}`}
+              onClick={() => props.onSectionChange?.(item)}
+              className="plugin-marketplace-section-button">
+              {item === "connections"
+                ? <Link2 size={17} strokeWidth={1.8} aria-hidden="true" />
+                : item === "channels"
+                  ? <MessageCircle size={17} strokeWidth={1.8} aria-hidden="true" />
+                  : <Puzzle size={17} strokeWidth={1.8} aria-hidden="true" />}
+              {t(item === "plugins" ? "tools.pluginsTab" : item === "channels" ? "tools.channelsTab" : "tools.connectionsTab")}
+              {item === "plugins" && props.pluginUpdatesAvailable ? <PluginUpdateDot /> : null}
+            </button>
+          ))}
         </div>
-
-        <div data-tour-anchor={PRODUCT_TOUR_TOOLS_CONTENT_ANCHOR}>
-          {props.tools.loadError && <Banner tone="danger">{props.tools.loadError}</Banner>}
-
-          <section className="mb-8">
-            <div className="mb-4 flex items-center gap-2.5">
-              <span className="text-base font-semibold text-text-ink">{t("tools.channels")}</span>
-            </div>
-            <div className="tools-icon-grid">
-              {channels.map((channel) => (
-                <IntegrationCard
-                  key={channel.identity}
-                  meta={channel}
-                  connection={selectConnectionForIntegration(props.tools, channel)}
-                  onClick={props.onOpenIntegration}
-                />
-              ))}
-            </div>
-          </section>
-
-          <section>
-            <div className="mb-4 flex items-center gap-2.5">
-              <span className="text-base font-semibold text-text-ink">{t("tools.integrations")}</span>
-            </div>
-
-            <div className="relative mb-4">
-              <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-text-ink/45" aria-hidden="true" />
-              <input
-                type="text"
-                placeholder={t("tools.search")}
-                value={search}
-                onChange={(event) => props.onSearchChange(event.target.value)}
-                className="w-full rounded-input border-content-panel bg-background-paper py-2.5 pl-10 pr-4 text-sm placeholder:text-text-ink/40 focus:outline-none"
-              />
-            </div>
-
-            <div className="mb-5 flex flex-wrap gap-2">
-              {CATEGORY_TABS.map((category) => (
-                <button
-                  key={category}
-                  type="button"
-                  onClick={() => props.onCategoryChange(category)}
-                  className={`rounded-btn border px-4 py-2 text-xs transition-all ${
-                    activeCategory === category
-                      ? "border-action-sky/30 bg-action-sky/10 font-semibold text-action-sky"
-                      : "border-content-panel bg-background-paper text-text-ink/65 hover:bg-canvas-oat/40"
-                  }`}
-                >
-                  {category}
-                </button>
-              ))}
-            </div>
-
-            {props.tools.status === "loading" && <p className="text-sm text-text-ink/55">{t("common.loading")}</p>}
-            {filtered.length === 0 && props.tools.status !== "loading" && (
-              <p className="rounded-card border-content-panel bg-background-paper p-4 text-sm text-text-ink/55">{t("tools.list.empty")}</p>
-            )}
-            <div className="tools-icon-grid">
-              {filtered.map((integration) => (
-                <IntegrationCard
-                  key={integration.identity}
-                  meta={integration}
-                  connection={selectConnectionForIntegration(props.tools, integration)}
-                  onClick={props.onOpenIntegration}
-                />
-              ))}
-            </div>
-          </section>
-        </div>
+        {(["connections", "channels", "plugins"] as const).map((panel) => {
+          if (panel !== section && !visitedSections.has(panel)) return null;
+          return <div key={panel} className="extension-catalog-content"
+            hidden={panel !== section}
+            data-tour-anchor={panel === section ? PRODUCT_TOUR_TOOLS_CONTENT_ANCHOR : undefined} role="tabpanel"
+            id={`tools-panel-${panel}`} aria-labelledby={`tools-tab-${panel}`}>
+            {panel === "plugins" ? props.marketplace : connectionPanels[panel]}
+          </div>;
+        })}
       </div>
 
       {props.tools.modal.kind !== "closed" &&

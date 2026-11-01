@@ -7,6 +7,7 @@ import {
   collectConversationPrompts,
   collectThreadArtifacts,
   collectThreadFileChanges,
+  completedFileEditRevision,
   joinThreadPath,
   normalizeThreadPath,
   openThreadTab,
@@ -15,6 +16,7 @@ import {
   threadFileKind,
   threadPanelContentWidth,
   threadPanelOffset,
+  threadPanelUsesOverlay,
   threadPreviewKind,
   threadTabForInAppPreview,
   threadTabForPath,
@@ -38,10 +40,12 @@ describe("thread panel model", () => {
     expect(threadPreviewKind("sheet.csv")).toBe("csv");
     expect(threadPreviewKind("config.yaml")).toBe("code");
     expect(threadPreviewKind("notes.md")).toBe("markdown");
-    expect(threadPreviewKind("brief.docx")).toBe("unsupported");
+    expect(threadPreviewKind("brief.docx")).toBe("document");
+    expect(threadPreviewKind("sheet.XLSX")).toBe("document");
+    for (const extension of ["tex", "bib", "sty"]) expect(threadPreviewKind(`review.${extension}`)).toBe("code");
   });
 
-  it("opens markdown in the thread panel and leaves other files to the system app", () => {
+  it("opens supported and unsupported files in the thread panel", () => {
     expect(threadTabForInAppPreview({
       name: "示例公司00000_年报测试.md",
       path: "/work/示例公司00000_年报测试.md",
@@ -53,29 +57,46 @@ describe("thread panel model", () => {
       url: "http://127.0.0.1/api/media/report",
     });
     expect(threadTabForInAppPreview({ name: "notes.md", url: "http://127.0.0.1/api/media/notes" })?.id).toBe("file:http://127.0.0.1/api/media/notes");
-    expect(threadTabForInAppPreview({ name: "交付物.xlsx", path: "/work/交付物.xlsx" })).toBeNull();
-    expect(threadTabForInAppPreview({ name: "report.pdf", path: "/work/report.pdf" })).toBeNull();
+    expect(threadTabForInAppPreview({ name: "交付物.xlsx", path: "/work/交付物.xlsx" })).toMatchObject({ name: "交付物.xlsx", type: "file" });
+    expect(threadTabForInAppPreview({ name: "report.pdf", path: "/work/report.pdf" })).toMatchObject({ name: "report.pdf", type: "file" });
+    expect(threadTabForInAppPreview({ name: "archive.zip", path: "/work/archive.zip" })).toMatchObject({ name: "archive.zip", type: "file" });
   });
 
-  it("collects assistant artifacts once, in conversation order", () => {
+  it("collects delivered assistant files, not files merely linked or edited", () => {
     const artifacts = collectThreadArtifacts([
       message({ role: "user", content: "[mine](/tmp/user-upload.pdf)" }),
       message({
-        content: "See [report](/work/out/report.pdf), ![chart](/work/out/chart.png) and [site](https://example.com/about).",
-        media: [{ kind: "file", path: "/work/out/data.xlsx", name: "data.xlsx" }],
+        content: "See [source](/work/src/app.ts) and [report](/work/out/report.pdf).",
+        fileEdits: [{ call_id: "edit", tool: "edit", path: "src/app.ts", status: "done", added: 2, deleted: 1 }],
+        media: [
+          { kind: "file", path: "/work/out/data.xlsx", name: "data.xlsx" },
+          { kind: "file", path: "/work/out/script.py", name: "script.py" },
+        ],
       }),
-      message({ content: "Again [the report](</work/out/report.pdf>) and [folder](/work/out)" }),
+      message({
+        content: "The existing report was revised.",
+        media: [
+          { kind: "file", path: "/work/out/report.pdf", name: "report.pdf" },
+          { kind: "file", path: "/work/out/data.xlsx", name: "data.xlsx" },
+        ],
+      }),
       message({ kind: "trace", content: "[trace](/work/out/trace.log)" }),
     ]);
 
-    expect(artifacts.map((artifact) => artifact.name)).toEqual(["data.xlsx", "report.pdf"]);
-    expect(artifacts[1]).toMatchObject({ key: "/work/out/report.pdf", path: "/work/out/report.pdf" });
+    expect(artifacts.map((artifact) => artifact.name)).toEqual(["data.xlsx", "script.py", "report.pdf"]);
+    expect(artifacts[2]).toMatchObject({ key: "/work/out/report.pdf", path: "/work/out/report.pdf" });
   });
 
-  it("keeps Windows drive paths from file URLs usable", () => {
-    const [artifact] = collectThreadArtifacts([message({ content: "[report](file:///C:/Users/A/report.pdf)" })]);
+  it("waits until the assistant finishes before offering a new artifact", () => {
+    const attachment = { kind: "file", path: "/repo/report.md", name: "report.md" };
+    expect(collectThreadArtifacts([message({ media: [attachment], isStreaming: true })])).toEqual([]);
+    expect(collectThreadArtifacts([message({ media: [attachment], isStreaming: false })])).toHaveLength(1);
+  });
 
-    expect(artifact).toMatchObject({ key: "C:/Users/A/report.pdf", path: "C:/Users/A/report.pdf", name: "report.pdf" });
+  it("keeps delivered Windows drive paths usable", () => {
+    const [artifact] = collectThreadArtifacts([message({ media: [{ kind: "file", path: "C:\\Users\\A\\report.pdf", name: "report.pdf" }] })]);
+
+    expect(artifact).toMatchObject({ key: "C:/Users/A/report.pdf", path: "C:\\Users\\A\\report.pdf", name: "report.pdf" });
     expect(threadTabForPath("file:///C:/Users/A/report.pdf").id).toBe("file:C:/Users/A/report.pdf");
     expect(threadTabForPath("C:\\Users\\A\\report.pdf").id).toBe("file:C:/Users/A/report.pdf");
   });
@@ -101,6 +122,18 @@ describe("thread panel model", () => {
       { key: "/repo/src/a.ts", path: "src/a.ts", absolutePath: "/repo/src/a.ts", name: "a.ts", added: 12, deleted: 4 },
     ]);
     expect(sumThreadFileChanges(changes)).toEqual({ added: 12, deleted: 4 });
+  });
+
+  it("refreshes only the preview whose completed write changed", () => {
+    const tab = threadTabForPath("/repo/report.md");
+    const pending = message({ fileEdits: [{ call_id: "write-1", tool: "write_file", path: "report.md", status: "editing" }] });
+    const done = message({ fileEdits: [{ call_id: "write-1", tool: "write_file", path: "report.md", status: "done", added: 3 }] });
+    const other = message({ fileEdits: [{ call_id: "write-2", tool: "write_file", path: "other.md", status: "done" }] });
+
+    expect(collectThreadFileChanges([pending])).toEqual([]);
+    expect(completedFileEditRevision(tab, [pending], "/repo")).toBe("");
+    expect(completedFileEditRevision(tab, [done], "/repo")).toBe("write-1:3:0");
+    expect(completedFileEditRevision(tab, [done, other], "/repo")).toBe("write-1:3:0");
   });
 
   it("lists user prompts as single-line history entries", () => {
@@ -154,6 +187,8 @@ describe("thread panel model", () => {
     expect(threadPanelContentWidth(800)).toBe(360);
     expect(threadPanelOffset(624, 1248)).toBe(624);
     expect(threadPanelOffset(360, 600)).toBe(280);
+    expect(threadPanelUsesOverlay(620)).toBe(true);
+    expect(threadPanelUsesOverlay(680)).toBe(false);
     expect(clampThreadListWidth(100, 624)).toBe(200);
     expect(clampThreadListWidth(500, 624)).toBe(344);
   });
