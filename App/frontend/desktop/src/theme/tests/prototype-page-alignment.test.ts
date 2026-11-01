@@ -46,7 +46,8 @@ describe("prototype page structure alignment", () => {
     expect(source("styles.css")).toContain(".home-empty-composer");
     expect(source("styles.css")).toContain(".agent-composer-shell");
     expect(source("pages/home-page.tsx")).toContain("relative home-empty-composer agent-composer-shell rounded-card-lg");
-    expect(source("pages/home-page.tsx")).toContain("w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40");
+    // 输入框换成内联富文本后仍沿用同一套外层尺寸与圆角，只是去掉 textarea 专属的 resize/placeholder 类。
+    expect(source("pages/home-page.tsx")).toContain("w-full px-5 pt-4 pb-12 text-sm rounded-card-lg bg-background-paper");
     expect(source("pages/home-page.tsx")).toContain("composer-actions absolute bottom-3 right-4 z-50");
     expect(source("pages/home-page.tsx")).not.toContain("home.suggestion.");
     expect(source("pages/home-page.tsx")).toContain("agent-conversation-panel flex flex-col h-full");
@@ -54,7 +55,7 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/home-page.tsx")).toContain("agent-conversation-column space-y-3");
     expect(source("pages/home-page.tsx")).toContain("relative agent-composer-shell");
     expect(source("pages/home-page.tsx")).not.toContain("relative overflow-hidden agent-composer-shell rounded-card-lg");
-    expect(source("pages/home-page.tsx")).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source("pages/home-page.tsx")).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm rounded-card-lg bg-background-paper');
     expect(source("pages/home-page.tsx")).not.toContain("agent-composer-input--command-selected");
     expect(source("pages/home-page.tsx")).toContain('<div className="agent-conversation-content agent-conversation-content--composer agent-conversation-column">');
     expect(source("pages/home-page.tsx")).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');

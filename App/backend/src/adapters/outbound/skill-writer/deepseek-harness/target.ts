@@ -4,8 +4,10 @@ import { basename, dirname, join } from "node:path";
 import { resolveDeepseekHarnessHomeDirectory } from "../../agent-paths.js";
 import {
   removeMemmyResumeSkillDirectory,
+  removeMemmyProjectSkillDirectory,
   removeMemmySkillDirectory,
   replaceMemmyResumeSkillDirectory,
+  replaceMemmyProjectSkillDirectory,
   replaceMemmySkillDirectory
 } from "../skill-directory.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
@@ -50,12 +52,14 @@ export function createDeepseekHarnessSkillTarget(
         throw new Error("DeepSeek Harness is not installed or its directory is unavailable");
       }
       await replaceMemmySkillDirectory(rootDirectory, manifest);
+      await replaceMemmyProjectSkillDirectory(rootDirectory);
       await replaceMemmyResumeSkillDirectory(rootDirectory, TARGET_ID);
     },
 
     async uninstall() {
       await removeMemmyResumeSkillDirectory(rootDirectory);
       await removeMemmySkillDirectory(rootDirectory);
+      await removeMemmyProjectSkillDirectory(rootDirectory);
     },
 
     async isInstalled() {
@@ -93,6 +97,7 @@ export function createDeepseekHarnessSkillTarget(
       );
       await upsertPatch(patchPath, renderPluginPatch(memmyConfigPath));
       await replaceMemmySkillDirectory(rootDirectory, renderMemmyPluginSkillManifest(TARGET_ID));
+      await replaceMemmyProjectSkillDirectory(rootDirectory);
       await replaceMemmyResumeSkillDirectory(rootDirectory, TARGET_ID);
     },
 
@@ -102,6 +107,7 @@ export function createDeepseekHarnessSkillTarget(
       await rm(pluginDirectory, { recursive: true, force: true });
       await removeMemmyResumeSkillDirectory(rootDirectory);
       await removeMemmySkillDirectory(rootDirectory);
+      await removeMemmyProjectSkillDirectory(rootDirectory);
     }
   };
 }

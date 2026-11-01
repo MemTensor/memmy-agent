@@ -2082,7 +2082,7 @@ function buildGoogleRequestBody(input: OnboardingInsightGenerationInput, maxToke
   };
 }
 
-function openAiCompatibleThinkingControlFields(
+export function openAiCompatibleThinkingControlFields(
   options: Pick<OpenAiCompatibleOnboardingInsightGeneratorOptions, "providerName" | "baseUrl" | "model">
 ): Record<string, unknown> {
   const model = options.model.toLowerCase();
@@ -2113,7 +2113,7 @@ function openAiCompatibleThinkingControlFields(
   return {};
 }
 
-function openAiCompatibleTemperatureFields(
+export function openAiCompatibleTemperatureFields(
   options: Pick<OpenAiCompatibleOnboardingInsightGeneratorOptions, "providerName" | "baseUrl" | "model">,
   temperature: number
 ): Record<string, number> {
@@ -2403,7 +2403,7 @@ function isActionCopyParagraph(paragraph: string): boolean {
     /^(好，帮我整合|继续这个任务|整理技术决策|找回并合并这项任务|继续最近未完成的任务|找回之前的关键决策|复盘上次怎么解决)\s*[:：-]?\s*$/.test(normalized);
 }
 
-function chatCompletionsUrl(baseUrl: string): string {
+export function chatCompletionsUrl(baseUrl: string): string {
   const normalized = baseUrl.replace(/\/+$/g, "");
   return normalized.endsWith("/chat/completions") ? normalized : versionedEndpoint(normalized, "/v1/chat/completions");
 }
@@ -2413,7 +2413,7 @@ function responsesUrl(baseUrl: string): string {
   return normalized.endsWith("/responses") ? normalized : versionedEndpoint(normalized, "/v1/responses");
 }
 
-function anthropicMessagesUrl(baseUrl: string): string {
+export function anthropicMessagesUrl(baseUrl: string): string {
   return versionedEndpoint(baseUrl, "/v1/messages");
 }
 

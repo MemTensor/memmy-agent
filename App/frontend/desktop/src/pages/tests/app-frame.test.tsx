@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { AppProviders } from "../../app/providers.js";
+import { addPendingApplication, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
 import type { UpdateCoordinatorValue } from "../../app/update-coordinator.js";
 import type { MemmyAgentProject } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
@@ -12,7 +13,7 @@ import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
 import type { AgentTaskView } from "../../state/agent-chat-slice.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
-import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, deriveSidebarPlacement, deriveVisibleSidebarPlacement, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveSidebarUpdateAction, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
+import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, deriveSidebarPlacement, deriveVisibleSidebarPlacement, freshDecisionAnnouncements, sameWorkspacePath, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveSidebarUpdateAction, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
 
 describe("AppFrame", () => {
   it("使用原型 MainLayout 的侧栏图标与导航文案", () => {
@@ -377,11 +378,12 @@ describe("AppFrame", () => {
   });
 
   it("treats thread 404 as a history-open miss without a sidebar alert", () => {
-    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    // Opening a task moved to one module both the sidebar and a project board call.
+    const source = readFileSync(resolve(__dirname, "..", "..", "app", "open-agent-task.ts"), "utf8");
     const removedOpenErrorSetter = "setTaskOpen" + "ErrorKey";
     const removedOpenErrorState = "taskOpen" + "ErrorKey";
 
-    expect(source).toContain('import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";');
+    expect(source).toContain('MemmyAgentRequestError');
     expect(source).toContain("error instanceof MemmyAgentRequestError && error.status === 404");
     expect(source).toContain("dispatch(agentActions.historyOpenMissing(task.sessionKey, chatId, requestId));");
     expect(source).not.toContain("dispatch(agentActions.transientSendFailed(chatId));");
@@ -771,6 +773,34 @@ describe("AppFrame", () => {
     )).toEqual({ left: 1096, top: 560 });
   });
 
+  it("opens the new-project dialog without changing the page behind it", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const createBlock = source.slice(
+      source.indexOf("function newProject()"),
+      source.indexOf("async function updateProject(")
+    );
+    // Creating a project used to jump to the board first, so the window behind the dialog belonged to some
+    // other project. The dialog is a dialog; it must not move the page.
+    expect(createBlock).toContain("requestCreateProject()");
+    expect(createBlock).not.toContain("navigate(");
+    expect(createBlock).not.toContain("/collab");
+  });
+
+  it("keeps a taller project menu inside the window as well", () => {
+    // A shared project's menu has two more items than a local one, so it is taller than the size the clamp
+    // was written for; the placement must still keep the last item reachable.
+    const short = { width: 240, height: 196, margin: 8, gap: 4 };
+    const tall = { ...short, height: 292 };
+    const viewport = { width: 1280, height: 700 };
+    const point = { x: 120, y: 640 };
+
+    // With the estimate the menu's bottom would sit below the window.
+    expect(resolveSidebarContextMenuPlacement(point, viewport, short).top).toBe(496);
+    // With its real height it moves up so the whole menu stays visible.
+    expect(resolveSidebarContextMenuPlacement(point, viewport, tall).top).toBe(400);
+    expect(400 + tall.height + tall.margin).toBeLessThanOrEqual(viewport.height);
+  });
+
   it("keeps project mutations pending until the backend commits", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
     const updateBlock = source.slice(
@@ -1077,6 +1107,76 @@ describe("AppFrame", () => {
     expect(stylesSource).toContain("padding-left: var(--sidebar-title-inset);");
   });
 
+  it("finds the local project that takes over a deleted shared project's sessions", () => {
+    // Deleting a shared project must keep its sessions as local tasks. When another local project already runs
+    // in the same folder, those sessions belong there; otherwise the carrier itself stays as the local project.
+    const carrier = { id: "carrier", name: "MemOS产品", rootPath: "/Users/me/MemOS-WorkSpace", pinned: false, createdAt: "2026-01-01T00:00:00.000Z" };
+    const neighbour = { id: "local", name: "MemOS-WorkSpace", rootPath: "/Users/me/MemOS-WorkSpace/", pinned: false, createdAt: "2026-02-01T00:00:00.000Z" };
+    const elsewhere = { id: "other", name: "other", rootPath: "/Users/me/elsewhere", pinned: false, createdAt: "2026-03-01T00:00:00.000Z" };
+    const pick = (projects: typeof carrier[]) => projects.find((project) => (
+      project.id !== carrier.id && sameWorkspacePath(project.rootPath, carrier.rootPath)
+    )) ?? null;
+
+    expect(pick([carrier, neighbour, elsewhere])?.id).toBe("local");
+    // Same folder, so a trailing separator must not hide it.
+    expect(pick([carrier])).toBeNull();
+    expect(pick([carrier, elsewhere])).toBeNull();
+  });
+
+  it("keeps a shared project's removal behind stopping the share", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+
+    // The board opens by clicking the row, so the menu only carries project actions.
+    expect(source).not.toContain("appFrame.project.openBoard");
+    // Stopping sharing is the only way out of a shared project: removing it locally would orphan the cloud record.
+    expect(source).toContain('label={t("appFrame.project.stopSharing")}');
+    expect(source).toContain("canRemove={!sharedLocalProjectIds.has(projectContextMenu.projectId)}");
+  });
+
+  it("lets members leave a shared project instead of stopping the owner's share", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const menu = source.slice(source.indexOf("function ProjectContextMenu"), source.indexOf("function MenuButton"));
+
+    // Members live in the board's invite dialog, not the project menu; only the owner stops sharing,
+    // everyone else leaves the project.
+    expect(menu).not.toContain('appFrame.project.members');
+    expect(menu).toContain('props.sharedRole !== "owner"');
+    expect(menu.indexOf('t("appFrame.project.leave")')).toBeGreaterThan(-1);
+    expect(menu.indexOf('t("appFrame.project.leave")')).toBeLessThan(menu.indexOf('t("appFrame.project.stopSharing")'));
+    // A folder chosen when joining gets a project record of its own, so no local project and its tasks are adopted.
+    expect(source).toContain('{ mode: "existing", path: directory.localDirectory, name: project.name, allowShared: true }');
+  });
+
+  it("renames a project from its menu, and only the owner renames a shared one", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const menu = source.slice(source.indexOf("function ProjectContextMenu"), source.indexOf("function MenuButton"));
+
+    expect(menu).toContain('label={t("appFrame.project.rename")}');
+    // A member reads the owner's name; a local project is always this person's to rename.
+    expect(source).toContain("return !shared || shared.role === \"owner\";");
+    // A shared project renames the cloud first, so every member reads the new name, then the local record follows.
+    expect(source).toContain("await collabClient.renameProject(shared.id, name)");
+    expect(source).toContain("await updateProject(project.id, { name });");
+  });
+
+  it("keeps one project row with separate expand and open hit areas", () => {
+    const appFrameSource = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    // Sharing is a property of a project, not a second kind of row: the cloud row is gone.
+    expect(appFrameSource).not.toContain("OnlineProjectRow");
+    const rowBlock = appFrameSource.slice(
+      appFrameSource.indexOf("function ProjectRow(props: {"),
+      appFrameSource.indexOf("function TaskSection(props: {")
+    );
+
+    // The arrow expands the project's sessions, and only the rest of the row opens the board.
+    expect(rowBlock).toContain("app-frame-project-row__toggle");
+    expect(rowBlock).toContain("props.onToggle()");
+    expect(rowBlock).toContain("props.onOpenBoard()");
+    expect(rowBlock).toContain("app-frame-project-row__main");
+    // Sharing is not a row badge: the row carries no extra mark, only the project and its actions.
+    expect(rowBlock).not.toContain("app-frame-project-row__shared");
+  });
+
   it("uses one font size and hover-only top-level disclosure icons", () => {
     const stylesSource = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
     const typographyBlock = stylesSource.slice(
@@ -1207,6 +1307,57 @@ describe("AppFrame", () => {
       text: "悠然麦穗",
       truncated: false
     });
+  });
+
+  it("rereads projects while a join request is pending, and stops when none remain", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const poll = source.slice(
+      source.indexOf("pendingApplicationCount"),
+      source.indexOf("const recheckPendingApplication")
+    );
+
+    expect(poll).toContain("if (!collabClient || !collabEnabled || !state.account.userId || pendingApplicationCount === 0) return;");
+    expect(poll).toContain("document.visibilityState === \"hidden\"");
+    expect(poll).toContain("void loadCollabProjects(collabClient)");
+    // 审批落在云端，本机没有推送：有几秒的节奏就不再需要人自己刷新。
+    expect(source).toContain("const COLLAB_APPLICATION_POLL_MS = 4_000;");
+    expect(poll).toContain("COLLAB_APPLICATION_POLL_MS");
+    expect(poll).toContain("window.clearInterval(timer)");
+    // 从别的应用切回来时也立刻读一次，而不是等下一个 30 秒。
+    expect(source).toContain('document.addEventListener("visibilitychange", onVisibilityChange)');
+  });
+
+  it("announces a reviewed application once, and only while it still holds", () => {
+    const approved = { projectId: "cloud-1", projectName: "Memmy 开发", status: "approved" as const, decidedAt: "2026-10-29T02:00:00.000Z" };
+    const rejected = { projectId: "cloud-2", projectName: "旧项目", status: "rejected" as const, decidedAt: "2026-10-29T03:00:00.000Z" };
+    const decisions = [approved, rejected];
+
+    // 通过且项目已在列表里、未通过：两条都提示。
+    expect(freshDecisionAnnouncements(decisions, ["cloud-1"], [])).toEqual([approved, rejected]);
+    // 已提示过的按「项目 + 审核时间」去重。
+    expect(freshDecisionAnnouncements(decisions, ["cloud-1"], ["cloud-1|2026-10-29T02:00:00.000Z"])).toEqual([rejected]);
+    // 通过但项目不在列表里（例如随后被移出）：不提示「已加入」。
+    expect(freshDecisionAnnouncements([approved], [], [])).toEqual([]);
+  });
+
+  it("renders a pending application as a row one can click to recheck", () => {
+    addPendingApplication({ projectId: "cloud-9", projectName: "灵动栗子的项目" });
+    try {
+      const html = renderToString(
+        <AppProviders>
+          <AppFrame title="测试页面">
+            <div>工作区</div>
+          </AppFrame>
+        </AppProviders>
+      );
+      // 行本身是按钮：点一下与鼠标划过都会静默重查，不再只靠等。
+      expect(html).toContain("app-frame-project-row app-frame-project-row--pending");
+      expect(html).toContain("灵动栗子的项目");
+      expect(html).toContain("申请中");
+      expect(html).toContain("点一下可立即检查");
+    } finally {
+      resetCollabProjectsStore();
+    }
   });
 });
 

@@ -1,0 +1,2196 @@
+/* Dialogs and the toast mount on the body, outside .page, so they declare the palette too. */
+.page,
+.createModal,
+.pickModal,
+.membersModal,
+.backdrop,
+.toast {
+  --collab-ink: var(--color-text-ink, #111d1c);
+  --collab-ink-2: #2a3a37;
+  --collab-muted: #5f716c;
+  --collab-ter: #8a9a96;
+  --collab-line: color-mix(in srgb, var(--color-border-stone, #d6dfdc) 80%, transparent);
+  --collab-line-soft: color-mix(in srgb, var(--color-border-stone, #d6dfdc) 45%, transparent);
+  --collab-surface: color-mix(in srgb, var(--color-canvas-oat, #f4f7f6) 60%, transparent);
+  --collab-active: var(--color-nav-active-bg, #e3f4f1);
+  --collab-accent: var(--color-accent-mint, #5cbfae);
+  --collab-accent-deep: var(--color-accent-deep, #2f8f7f);
+}
+
+.page {
+  display: flex;
+  /* 看板与会话列表并排：左侧会话列表滚动，右侧项目配置留在原位 */
+  position: relative;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  /* 断点跟看板实际宽度走，不跟整个窗口：侧边栏已经占掉一块 */
+  container: collab-board / inline-size;
+  color: var(--collab-ink);
+  font-family: var(--font-sans);
+  /* 看板以白色为主：底下不用主题的浅青 canvas，行与分隔线自己负责层次 */
+  background: var(--color-background-paper, #fff);
+  /* 悬停、胶囊底这类中性浅底也换成中性灰，不再带青 */
+  --collab-surface: color-mix(in srgb, var(--color-text-ink, #111d1c) 4%, var(--color-background-paper, #fff));
+}
+
+.scroller {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 没有项目时的加载与空态：横向容器里仍占满整行，居中由各自的对齐负责 */
+.page > .loading,
+.page > .empty {
+  flex: 1;
+}
+
+.wrap {
+  max-width: 920px;
+  min-width: 0;
+  margin: 0 auto;
+  padding: 18px 40px 40px;
+}
+
+.boardHeader {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding-top: 6px;
+}
+
+.boardIcon {
+  display: grid;
+  flex: 0 0 46px;
+  place-items: center;
+  height: 46px;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #e9f6f2, #d8efe8);
+  color: var(--collab-accent-deep);
+  box-shadow: inset 0 0 0 1px rgba(47, 125, 105, 0.12);
+}
+
+.boardName {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The project's sharing state, said once in the header: members, or only this computer. */
+.boardScope {
+  flex-shrink: 0;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(47, 125, 105, 0.08);
+  color: var(--collab-accent-deep);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 18px;
+}
+
+/* 按成员筛选：原型里的三段胶囊，选中的一段白底浮起 */
+.seg {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--collab-line-soft);
+  border-radius: 10px;
+  background: var(--collab-surface);
+}
+
+.segItem {
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--collab-ink-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.segItem:hover:not(.segItemOn) {
+  color: var(--collab-ink);
+}
+
+.segItemOn {
+  background: var(--color-background-paper, #fff);
+  color: var(--collab-ink);
+  font-weight: 650;
+  box-shadow: 0 1px 2px rgba(17, 29, 28, 0.08), 0 0 0 0.5px var(--collab-line);
+}
+
+.segItem:focus-visible {
+  outline: 2px solid var(--collab-accent-deep);
+  outline-offset: 1px;
+}
+
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+
+/* 关联会话的进度条：后台同步时显示，会话随上传进度逐条出现 */
+.syncStrip {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--collab-line);
+  border-radius: 12px;
+  background: var(--collab-active);
+}
+
+.syncText {
+  color: var(--collab-accent-deep);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.syncBar {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--collab-accent-deep) 18%, transparent);
+  overflow: hidden;
+}
+
+.syncBarFill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--collab-accent-deep);
+  transition: width 320ms ease;
+}
+
+/* 超出额度后的真实上传未结束：进度已到满格，用缓慢呼吸表示仍在处理 */
+.syncBarFillPending {
+  animation: collabSyncPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes collabSyncPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* 会话行出现时的淡入，让后台同步来的会话自然进入列表 */
+@keyframes collabRowIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.list {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--collab-line);
+  border-radius: 14px;
+  background: var(--color-background-paper, #fff);
+  overflow: visible;
+}
+
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 15px 20px;
+  animation: collabRowIn 220ms ease-out;
+}
+
+.row + .row {
+  border-top: 1px solid var(--collab-line-soft);
+}
+
+.row:first-child {
+  border-radius: 13px 13px 0 0;
+}
+
+.row:last-child {
+  border-radius: 0 0 13px 13px;
+}
+
+/* 多选：行内勾选框与选中态 */
+.rowCheck {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--collab-accent-deep);
+  cursor: pointer;
+}
+
+.rowSelected {
+  background: var(--collab-active);
+}
+
+/* 多选里的删除：保留警示色，用文字按钮，避免整块红底压住工具条 */
+.dangerGhost {
+  color: var(--color-status-error, #c4413b);
+}
+
+.dangerGhost:hover:not(:disabled) {
+  color: var(--color-status-error, #c4413b);
+  background: color-mix(in srgb, var(--color-status-error) 10%, transparent);
+}
+
+/* 选择模式下的已选条数，跟右侧按钮对齐 */
+.selectCount {
+  color: var(--collab-muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+/* 选择态的操作组：整组不换行也不压缩，否则最后一个「删除」会被挤到下一行单挂 */
+.selectActions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.row:only-child {
+  border-radius: 13px;
+}
+
+.avatar {
+  display: inline-grid;
+  flex: 0 0 30px;
+  place-items: center;
+  height: 30px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.rowText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rowTitle,
+.rowSummary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowTitle {
+  color: var(--collab-ink);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.rowSummary {
+  color: var(--collab-muted);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.meta {
+  flex: none;
+  color: var(--collab-ter);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.moreButton {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin: -4px -8px -4px -6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--collab-ter);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.row:hover .moreButton,
+.row:focus-within .moreButton,
+.rowMenuOpen .moreButton {
+  opacity: 1;
+}
+
+.moreButton:hover {
+  background: color-mix(in srgb, var(--collab-ink) 6%, transparent);
+  color: var(--collab-ink);
+}
+
+.groupToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  padding: 2px 6px 2px 2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.groupToggle:hover {
+  color: var(--collab-ink-2);
+}
+
+/* 任务列表使用无边框行，保持当前页的连续阅读顺序。 */
+.stream {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.flatStream {
+  margin-top: 18px;
+}
+
+.stream .row {
+  gap: 14px;
+  margin: 0 -14px;
+  padding: 11px 14px;
+  border-radius: 12px;
+}
+
+.stream .row + .row {
+  border-top: 0;
+}
+
+.stream .row:first-child,
+.stream .row:last-child,
+.stream .row:only-child {
+  border-radius: 12px;
+}
+
+/* 选择模式用连续的浅色列表，避免相邻行的圆角形成锯齿。 */
+.stream .row.rowSelecting {
+  border-radius: 0;
+}
+
+.stream .row.rowSelected {
+  background: color-mix(in srgb, var(--collab-active) 55%, var(--color-background-paper, #fff));
+}
+
+.stream .rowSelected + .rowSelected {
+  box-shadow: inset 0 1px var(--collab-line-soft);
+}
+
+.stream .rowOpenable:hover {
+  background: var(--color-background-paper, #fff);
+  box-shadow: 0 0 0 1px var(--collab-line-soft), 0 10px 24px -16px rgba(17, 29, 28, 0.16);
+}
+
+.stream .avatarSoft {
+  flex: 0 0 32px;
+  height: 32px;
+  background: color-mix(in srgb, var(--member) 14%, var(--color-background-paper, #fff));
+  color: var(--member);
+  font-size: 12.5px;
+}
+
+.stream .rowTitle {
+  font-size: 14.5px;
+  font-weight: 650;
+}
+
+.stream .rowSummary {
+  font-size: 13px;
+}
+
+.stream .meta {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  transition: opacity 120ms ease;
+}
+
+/* 「更多」浮在行右侧，悬停时替换掉时间，行宽不跟着跳 */
+.stream .moreButton {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  margin: 0;
+  translate: 0 -50%;
+}
+
+.stream .row:hover .meta,
+.stream .rowMenuOpen .meta {
+  opacity: 0;
+}
+
+/* 选择模式没有「更多」，时间就一直显示 */
+.stream .rowSelecting .meta {
+  opacity: 1;
+}
+
+.menuScrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  border: 0;
+  background: transparent;
+  cursor: default;
+}
+
+.menu {
+  position: absolute;
+  z-index: 21;
+  min-width: 148px;
+  padding: 5px;
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  box-shadow: 0 14px 34px rgba(15, 26, 25, 0.16), 0 0 0 1px var(--collab-line);
+}
+
+.menu {
+  top: 44px;
+  right: 14px;
+}
+
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--collab-ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menuItem:hover {
+  background: var(--collab-surface);
+}
+
+.menuItemDanger {
+  color: #c4433a;
+}
+
+.menuSeparator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--collab-line-soft);
+}
+
+.pickerWrap {
+  position: relative;
+}
+
+/* 空项目：说明这个标签页收集什么、能做什么 */
+.guide {
+  margin-top: 14px;
+  padding: 24px 26px 20px;
+  border: 1px solid var(--collab-line);
+  border-radius: 14px;
+  background: var(--color-background-paper, #fff);
+}
+
+.guideTitle {
+  display: block;
+  color: var(--collab-ink);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.guideLead {
+  margin: 8px 0 0;
+  max-width: 640px;
+  color: var(--collab-muted);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.guideList {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.guideItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+}
+
+.guideIcon {
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--collab-active);
+  color: var(--collab-accent-deep);
+}
+
+.guideText {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.guideText b {
+  color: var(--collab-ink-2);
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.guideText span {
+  color: var(--collab-muted);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+/* 成员首次进入时的单行提示：浅底内联，不遮列表，也不抢标题 */
+.contextTip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--collab-accent) 30%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--collab-active) 55%, var(--color-background-paper, #fff));
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.contextTipIcon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--collab-accent-deep);
+}
+
+.contextTipText {
+  flex: 1;
+  min-width: 0;
+  color: var(--collab-ink-2);
+}
+
+.contextTipAction {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--collab-muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.contextTipAction:hover {
+  background: color-mix(in srgb, var(--collab-accent) 16%, transparent);
+  color: var(--collab-ink-2);
+}
+
+.configKnowledgeList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.configKnowledgeRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--collab-ink);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.configKnowledgeName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.configKnowledgeCount {
+  margin-left: 7px;
+  color: var(--collab-ter);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.configKnowledgeAction,
+.configKnowledgeMore {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--collab-accent-deep);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.configKnowledgeMore {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 10px;
+}
+
+.configKnowledgeAction:hover,
+.configKnowledgeMore:hover { text-decoration: underline; }
+
+.searchBox {
+  display: flex;
+  flex: 0 1 260px;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  min-width: 140px;
+  max-width: 420px;
+  padding: 0 10px;
+  border: 1px solid var(--collab-line-soft);
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  color: var(--collab-ter);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.searchBox:focus-within {
+  border-color: color-mix(in srgb, var(--collab-accent-deep) 45%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--collab-accent-deep) 12%, transparent);
+}
+
+.searchIcon {
+  flex: none;
+}
+
+.searchBox input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  color: var(--collab-ink);
+  font: inherit;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  outline: none;
+}
+
+.iconAction {
+  gap: 4px;
+}
+
+.searchGo {
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 3px 8px;
+  background: var(--collab-active);
+  color: var(--collab-accent-deep);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.pagerInfo {
+  margin: 8px 0 0;
+  color: var(--collab-ter);
+  font-size: 12px;
+}
+
+.rowOpenable {
+  cursor: pointer;
+}
+
+.rowOpenable:hover {
+  background: var(--collab-surface);
+}
+
+/*
+ * 读取他人任务的会话记录：右侧浮起的面板，不是抽屉也不是居中弹窗。
+ * 看板保持可读（只盖一层几乎看不出的薄雾），面板自己用阴影和圆角浮起来。
+ * 面板挂到 body 上，所以这里自己声明一遍调色板。
+ */
+.readerLayer {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  --collab-ink: var(--color-text-ink, #111d1c);
+  --collab-ink-2: #2a3a37;
+  --collab-muted: #5f716c;
+  --collab-ter: #8a9a96;
+  --collab-line: color-mix(in srgb, var(--color-border-stone, #d6dfdc) 80%, transparent);
+  --collab-line-soft: color-mix(in srgb, var(--color-border-stone, #d6dfdc) 45%, transparent);
+  --collab-surface: color-mix(in srgb, var(--color-text-ink, #111d1c) 4%, var(--color-background-paper, #fff));
+  --collab-active: var(--color-nav-active-bg, #e3f4f1);
+  --collab-accent: var(--color-accent-mint, #5cbfae);
+  --collab-accent-deep: var(--color-accent-deep, #2f8f7f);
+}
+
+/* 点击面板外关闭。薄雾只有 6%：看得出有一层在上，又不会把看板压成灰底 */
+.readerScrim {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: color-mix(in srgb, var(--collab-ink) 8%, transparent);
+  cursor: default;
+}
+
+.readerPanel {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  bottom: 24px;
+  display: flex;
+  width: min(520px, calc(100vw - 48px));
+  flex-direction: column;
+  border-radius: 22px;
+  background: var(--color-background-paper, #fff);
+  /* 四周留白 + 大范围柔和投影：看起来是一张浮在看板上的卡片，而不是贴边的抽屉 */
+  box-shadow:
+    0 40px 90px -34px rgba(17, 29, 28, 0.5),
+    0 10px 28px -14px rgba(17, 29, 28, 0.18),
+    0 0 0 1px color-mix(in srgb, var(--collab-ink) 8%, transparent);
+  overflow: hidden;
+  animation: readerPanelIn 220ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.readerPanel:focus {
+  outline: none;
+}
+
+@keyframes readerPanelIn {
+  from {
+    opacity: 0;
+    transform: translateX(14px) scale(0.994);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .readerPanel {
+    animation: none;
+  }
+}
+
+/* 窄窗口：面板退到几乎占满，但仍保留圆角与四周留白，保持"浮起"的观感 */
+@media (max-width: 720px) {
+  .readerPanel {
+    top: 10px;
+    right: 10px;
+    bottom: 10px;
+    width: auto;
+    left: 10px;
+  }
+}
+
+.readerHead {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 18px 15px 20px;
+  border-bottom: 1px solid var(--collab-line-soft);
+}
+
+/* 面板挂在 body 上，用不到列表里 .stream 下的头像配色，这里自己按成员色画 */
+.readerHeadAvatar {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  margin-top: 2px;
+  background: color-mix(in srgb, var(--member) 14%, var(--color-background-paper, #fff));
+  color: var(--member);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.readerHeadText {
+  flex: 1;
+  min-width: 0;
+}
+
+.readerTitle {
+  margin: 0;
+  overflow: hidden;
+  color: var(--collab-ink);
+  font-size: 15.5px;
+  font-weight: 700;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.readerHeadMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  color: var(--collab-ter);
+  font-size: 12.5px;
+}
+
+/* 「仅供查看」：说明这是别人的任务，只是提示，不用警示色 */
+.readerBadge {
+  padding: 1px 8px;
+  border: 1px solid var(--collab-line-soft);
+  border-radius: 999px;
+  color: var(--collab-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.readerActions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  margin: -2px -4px 0 0;
+}
+
+.readerAction {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--collab-ter);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.readerAction:hover {
+  background: var(--collab-surface);
+  color: var(--collab-ink);
+}
+
+.readerBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 24px;
+  min-height: 0;
+  padding: 18px 22px 20px;
+  overflow-y: auto;
+  font-family: var(--font-chat, var(--font-sans));
+}
+
+/* 单会话超出容量上限时的提示：与轮次内容区分，但不抢注意力 */
+.readerTrimmed {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, #d6dfdc 70%, transparent);
+  border-radius: 8px;
+  background: #f7f9f8;
+  color: #5f716c;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.readerTurn {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* 轮次标号：居中的细字，不加胶囊底 */
+.readerTurnIndex {
+  align-self: center;
+  color: var(--collab-ter);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.readerUser {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.readerUserBubble {
+  max-width: min(86%, 520px);
+  margin: 0;
+  padding: 9px 14px;
+  border-radius: 14px 14px 4px 14px;
+  background: color-mix(in srgb, var(--collab-accent) 11%, var(--color-background-paper, #fff));
+  color: var(--collab-ink);
+  font-size: 14.5px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.readerAgent {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.readerAgentHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--collab-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.readerAgentLogo {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+
+.readerAgentMark {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: #e7f3f0;
+  color: var(--collab-accent-deep);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+/* 底部提示：说明记录只读、文件不可打开，安静地贴在面板底边 */
+.readerFoot {
+  flex: none;
+  padding: 10px 22px 12px;
+  border-top: 1px solid var(--collab-line-soft);
+  color: var(--collab-ter);
+  font-size: 12px;
+}
+
+.noMatch {
+  padding: 40px 0;
+  color: var(--collab-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 72px 24px;
+  text-align: center;
+}
+
+.empty b {
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.empty p {
+  margin: 0 0 8px;
+  max-width: 440px;
+  color: var(--collab-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.loading {
+  margin: 24px 0;
+  color: var(--collab-muted);
+  font-size: 13px;
+}
+
+/*
+ * One dialog over the main window, so the window background stays the reference: a light scrim and no blur.
+ * The default .modal-backdrop blurs 8px and dims 32%, which reads as a separate page rather than the current one.
+ *
+ * 选择器要带上 .modal-backdrop 才稳定胜过默认样式：两者都是单个类时由样式表顺序决定，
+ * 而元素同时带 `modal-backdrop` 与这里的类，顺序又不是我们能控制的。
+ * 这条写紧了，一条全窗口的 8px 模糊就不会在弹窗打开时每帧重新栅格化。
+ */
+:global(.modal-backdrop).backdrop {
+  background: rgba(17, 29, 28, 0.12);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+:global(.modal).createModal {
+  width: min(540px, calc(100vw - 32px));
+}
+
+:global(.modal).pickModal {
+  width: min(880px, calc(100vw - 32px));
+}
+
+:global(.modal).membersModal {
+  width: min(460px, calc(100vw - 32px));
+}
+
+.footerButtons {
+  display: flex;
+  gap: 8px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 18px;
+}
+
+.field > span {
+  color: var(--collab-ink-2);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.field input {
+  min-height: 42px;
+  padding: 8px 12px;
+  border: 1px solid var(--collab-line);
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  color: inherit;
+  font: inherit;
+  font-size: 13.5px;
+}
+
+.fieldHint {
+  color: var(--collab-ter);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+
+.dirField {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 4px 4px 4px 12px;
+  border: 1px solid var(--collab-line);
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  font-size: 13.5px;
+}
+
+.dirIcon {
+  flex: none;
+  color: var(--collab-muted);
+}
+
+.dirPath {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dirPlaceholder {
+  color: var(--collab-ter);
+}
+
+.error {
+  margin: 8px 0 0;
+  color: var(--color-status-error, #c4413b);
+  font-size: 12.5px;
+}
+
+/* 选中的会话超过云端额度时的提示：用次级文字色，不当成警告刷屏 */
+.pickLimit {
+  color: var(--collab-ter, #8a9a96);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* 云端不可用的提示：项目在本机，不影响本地看板的使用 */
+.cloudNotice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--collab-line, #e2e2e2);
+  border-radius: 8px;
+  background: var(--collab-surface-2, #fafafa);
+  color: var(--collab-sec, #666);
+  font-size: 12.5px;
+}
+
+.cloudNotice span {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 关联其他 Agent 的会话 */
+.pickBody {
+  display: flex;
+  height: min(460px, 58vh);
+  border: 1px solid var(--collab-line);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.agentList {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  min-height: 0;
+  background: transparent;
+  overflow-y: auto;
+}
+
+.agentColumn {
+  flex: 0 0 206px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--collab-line);
+  background: var(--collab-surface);
+}
+
+/* 关联其他 Agent：列表底部的入口，与上面的 Agent 行区分开，不抢它们的位置 */
+.addAgent {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  padding: 11px 12px;
+  border: 0;
+  border-top: 1px solid var(--collab-line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--collab-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.addAgent:hover {
+  background: color-mix(in srgb, var(--collab-ink) 4%, transparent);
+}
+
+/* 入口用一小块薄荷底托住图标：它是这一列里唯一的动作，看得见但不像一个 Agent 行 */
+.addAgentMark {
+  display: grid;
+  flex: 0 0 26px;
+  place-items: center;
+  height: 26px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--collab-accent) 16%, transparent);
+  color: var(--collab-accent-deep);
+}
+
+.addAgent:hover .addAgentMark {
+  background: color-mix(in srgb, var(--collab-accent) 26%, transparent);
+}
+
+.addAgentText {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.addAgentLabel {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.addAgentHint {
+  color: var(--collab-ter);
+  font-size: 11px;
+}
+
+
+.agentMark {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--collab-ink) 8%, transparent);
+  color: var(--collab-ink);
+  font-size: 12px;
+}
+
+.agentItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agentItem:hover {
+  background: color-mix(in srgb, var(--collab-ink) 4%, transparent);
+}
+
+.agentItemActive,
+.agentItemActive:hover {
+  background: var(--color-background-paper, #fff);
+  box-shadow: 0 1px 3px rgba(15, 26, 25, 0.08), 0 0 0 1px var(--collab-line);
+}
+
+.agentText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.agentName {
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.agentHint {
+  color: var(--collab-ter);
+  font-size: 11.5px;
+}
+
+.agentDot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--collab-accent);
+}
+
+.agentLogo {
+  display: grid;
+  flex: 0 0 30px;
+  place-items: center;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--color-background-paper, #fff);
+  box-shadow: inset 0 0 0 1px var(--collab-line);
+}
+
+.agentLogo img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.pickMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 18px 0;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--collab-line-soft);
+  color: var(--collab-ter);
+}
+
+.search input {
+  flex: 1;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--collab-ink);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.pickList {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0 12px;
+}
+
+.pickSection {
+  margin: 16px 2px 4px;
+  color: var(--collab-ter);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.groupBlock {
+  border-bottom: 1px solid var(--collab-line-soft);
+}
+
+.groupRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 2px;
+}
+
+.groupToggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--collab-ter);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.groupIcon {
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--collab-surface);
+  color: var(--collab-muted);
+  box-shadow: inset 0 0 0 1px var(--collab-line);
+}
+
+.groupText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.groupName {
+  overflow: hidden;
+  color: var(--collab-ink);
+  font-size: 14px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.groupHint {
+  color: var(--collab-accent-deep);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pickRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 2px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.pickRow:hover {
+  background: var(--collab-surface);
+}
+
+.pickRowNested {
+  padding-left: 41px;
+}
+
+.pickTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pickTitleExcluded {
+  color: var(--collab-ter);
+  text-decoration: line-through;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  top: 24px;
+  z-index: 60;
+  transform: translateX(-50%);
+  padding: 9px 16px;
+  border-radius: 10px;
+  background: var(--collab-ink);
+  color: #fff;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+/* 项目看板：未共享时的本机会话，与配置弹窗 */
+.localIcon {
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  height: 28px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--collab-ink-2) 8%, transparent);
+  color: var(--collab-muted);
+}
+
+/* 新建 / 加入项目：同一个弹窗的两种模式，顶部用一组分段标签切换 */
+.projectTabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 3px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--collab-ter) 14%, transparent);
+}
+
+.projectTab {
+  flex: 1;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--collab-muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.projectTabOn {
+  background: var(--color-background-paper, #fff);
+  color: var(--collab-ink-2);
+  box-shadow: 0 1px 2px rgba(17, 29, 28, 0.08);
+}
+
+/* 标签下面紧跟字段时，字段自己那 18px 上边距会显得空，收掉 */
+.projectTabs + .field {
+  margin-top: 0;
+}
+
+/* 项目配置：行式列表，左侧标题与说明、右侧控件，行间细线（与设置页同一套排布） */
+.settingsRows {
+  margin-top: 2px;
+}
+
+.settingsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 15px 2px;
+  border-bottom: 1px solid var(--collab-line-soft);
+}
+
+.settingsRow:first-child {
+  border-top: 1px solid var(--collab-line);
+}
+
+/* 末行不再画线，避免页脚上方出现一条像空行的分隔 */
+.settingsRow:last-child {
+  border-bottom: 0;
+}
+
+.settingsRowText {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settingsRowTitle {
+  color: var(--collab-ink-2);
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.settingsRowDesc {
+  color: var(--collab-ter);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 额度提示：这次仍会建成本机项目，只是共享不会开始，用次级文字色，不当成错误 */
+.settingsRowQuota {
+  color: var(--collab-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 本机目录这类路径用等宽字，长短一眼可比 */
+.settingsRowPath {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.settingsRowControl {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 行内的输入框：与右侧按钮同高，不把行撑开 */
+.settingsRowInput {
+  width: 220px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--collab-line);
+  border-radius: 9px;
+  background: var(--color-background-paper, #fff);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.settingsRowInput::placeholder {
+  color: var(--collab-ter);
+}
+
+.settingsRowInput:focus {
+  outline: none;
+  border-color: var(--collab-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--collab-accent) 18%, transparent);
+}
+
+/* 开关：36×20 的圆角滑块，和设置页一致 */
+.settingsSwitch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--collab-ter) 42%, transparent);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) ease;
+}
+
+.settingsSwitch::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(17, 29, 28, 0.24);
+  content: "";
+  transition: transform var(--duration-fast) ease;
+}
+
+.settingsSwitchOn {
+  background: var(--collab-accent-deep);
+}
+
+.settingsSwitchOn::after {
+  transform: translateX(16px);
+}
+
+.settingsSwitch:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.settingsSwitch:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--collab-accent) 60%, transparent);
+  outline-offset: 2px;
+}
+
+/* A slow cloud should look like work happening, not a dead switch. */
+.settingsBusy {
+  margin: 10px 0 0;
+  color: var(--collab-muted);
+  font-size: 12.5px;
+}
+
+.stopSharing {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid rgba(196, 65, 59, 0.28);
+  border-radius: 12px;
+  background: rgba(196, 65, 59, 0.06);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.stopSharing b {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--collab-ink-1);
+  font-size: 13px;
+}
+
+.stopSharing p {
+  margin: 0 0 10px;
+  color: var(--collab-ink-2);
+}
+
+.localEmpty {
+  margin: 26px 0;
+  color: var(--collab-ter);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* 选择要同步的会话：项目自己的 Memmy 会话，可单选可全选 */
+/* One card for the select-all row and the sessions, so every box sits on the same left edge. */
+.tasksCard {
+  margin-top: 14px;
+  border: 1px solid var(--collab-line);
+  border-radius: 14px;
+  background: var(--color-background-paper, #fff);
+  overflow: hidden;
+}
+
+.tasksAll {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  /* Same inset as a session row, so the boxes line up. */
+  padding: 11px 20px;
+  border-bottom: 1px solid var(--collab-line-soft);
+  color: var(--collab-ink-2);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tasksAll input,
+.tasksCheck {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--color-action-sky, #2f81f7);
+  cursor: pointer;
+}
+
+.tasksList {
+  max-height: min(420px, 52vh);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.tasksCount {
+  color: var(--collab-ter);
+  font-size: 12.5px;
+}
+
+/* 项目成员：复制邀请链接、获得链接者、加入申请与成员行 */
+.inviteButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 42px;
+}
+
+.joinModeRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: -4px;
+  color: var(--collab-muted);
+  font-size: 13px;
+}
+
+.inlinePicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 2px 4px 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--collab-ink-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.inlinePicker:hover:not(:disabled) {
+  background: var(--collab-surface);
+}
+
+.inlinePicker:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.inlineMenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 21;
+  min-width: 132px;
+  padding: 5px;
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  box-shadow: 0 14px 34px rgba(15, 26, 25, 0.16), 0 0 0 1px var(--collab-line);
+}
+
+/* The modal body is a 14px-gap grid with 16px sides; the line runs edge to edge like the prototype's. */
+.membersDivider {
+  height: 1px;
+  margin: 0 -16px;
+  background: var(--collab-line-soft);
+}
+
+.membersEmpty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--collab-muted);
+  font-size: 13px;
+}
+
+.membersEmpty p {
+  margin: 0;
+}
+
+.memberSection + .memberSection {
+  padding-top: 6px;
+  border-top: 1px solid var(--collab-line-soft);
+}
+
+.memberSectionTitle {
+  margin: 8px 0 2px;
+  color: var(--collab-muted);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.memberRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+}
+
+.memberText {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.memberName,
+.memberHint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memberName {
+  color: var(--collab-ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.memberHint {
+  color: var(--collab-ter);
+  font-size: 12px;
+}
+
+.roleTag {
+  flex: none;
+  padding: 3px 9px;
+  border: 1px solid var(--collab-line);
+  border-radius: 7px;
+  background: var(--collab-surface);
+  color: var(--collab-ink-2);
+  font-size: 12.5px;
+}
+
+/* 「邀请」入口上的待审核数：小圆角数字，提示有人等着审核，不抢标题的位置 */
+.requestBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--collab-accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.roleText {
+  flex: none;
+  color: var(--collab-muted);
+  font-size: 13px;
+}
+
+/* 加入项目 */
+.joinCard {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--collab-line);
+  border-radius: 14px;
+  background: var(--collab-surface);
+}
+
+.joinCardIcon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--collab-line);
+  border-radius: 11px;
+  background: var(--color-background-paper, #fff);
+  color: var(--collab-accent-deep);
+}
+
+.joinCardName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--collab-ink);
+  font-size: 16px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.avatarStack {
+  display: flex;
+  flex: none;
+}
+
+.avatarStack .avatar {
+  border: 2px solid var(--color-background-paper, #fff);
+}
+
+.avatarStack .avatar + .avatar {
+  margin-left: -8px;
+}
+
+.joinNotes {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.joinNote {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--collab-muted);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.joinNoteIcon {
+  flex: none;
+  margin-top: 3px;
+  color: var(--collab-accent-deep);
+}
+
+/* 项目配置：卡片式列表，宽 300px，可收起（PRD 3.8） */
+.config {
+  display: flex;
+  flex: 0 0 300px;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 18px 16px 24px;
+  /* 与主窗口同一底色，只靠一条中性细线分区：面板不再铺一层 oat 底色，避免看起来像另一个窗口 */
+  border-left: 1px solid rgba(0, 0, 0, 0.07);
+  overflow-y: auto;
+  background: transparent;
+}
+
+.configHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.configTitle {
+  color: var(--collab-ink);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.configCards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.configCard {
+  min-width: 0;
+  border: 1px solid var(--collab-line);
+  border-radius: 12px;
+  background: var(--color-background-paper, #fff);
+  /* 面板与卡片同为白底，靠这条极轻的投影把卡片托起来，不靠色差 */
+  box-shadow: 0 1px 2px rgba(17, 29, 28, 0.04);
+}
+
+.configCardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+
+.configCardTitle {
+  color: var(--collab-ink-2);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.configIcon {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--collab-ter);
+  cursor: pointer;
+}
+
+.configIcon:hover {
+  background: var(--collab-active);
+  color: var(--collab-accent-deep);
+}
+
+.configCardBody {
+  display: block;
+  width: 100%;
+  padding: 6px 12px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--collab-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* 指令卡片只露前三行，全文在「项目指令」里看 */
+.configText {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--collab-ink-2);
+  font-size: 12.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.configEmpty {
+  color: var(--collab-ter);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.dialogHint {
+  margin: 0 0 12px;
+  color: var(--collab-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 指令输入框：高度留出一屏可读的行数，长指令不必边写边滚 */
+.instructionsInput {
+  width: 100%;
+  min-height: 148px;
+  padding: 11px 12px;
+  border: 1px solid var(--collab-line);
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  color: var(--collab-ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.7;
+  resize: vertical;
+}
+
+.instructionsInput:focus {
+  border-color: var(--collab-accent);
+  outline: none;
+}
+
+.instructionsMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  color: var(--collab-ter);
+  font-size: 12px;
+}
+
+.instructionsOver,
+.instructionsError {
+  color: var(--color-danger, #c0392b);
+}
+
+
+.instructionsReadonly {
+  max-height: 46vh;
+  padding: 12px 14px;
+  border: 1px solid var(--collab-line-soft);
+  border-radius: 10px;
+  overflow-y: auto;
+  color: var(--collab-ink-2);
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+
+/* 窄看板仍渲染，但默认不占位；用户再打开时盖在任务列表上，不把列表挤出窗口。 */
+.configScrim {
+  display: none;
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  border: 0;
+  padding: 0;
+  background: rgba(17, 29, 28, 0.18);
+  cursor: default;
+}
+
+/* 与 NARROW_BOARD_PX（860）一致：再窄则配置改为浮层。 */
+@container collab-board (max-width: 859px) {
+  .configScrim {
+    display: block;
+  }
+
+  .config {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 6;
+    width: min(300px, 100%);
+    flex-basis: auto;
+    background: var(--color-content-bg, #fff);
+    box-shadow: -12px 0 32px rgba(17, 29, 28, 0.12);
+  }
+}
+
+@container collab-board (max-width: 999px) {
+  .wrap {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .searchBox {
+    flex: 1 1 160px;
+    min-width: min(120px, 100%);
+  }
+
+  /* 刷新、多选让出文字，筛选、搜索和关联任务留着。 */
+  .actionLabel {
+    display: none;
+  }
+}

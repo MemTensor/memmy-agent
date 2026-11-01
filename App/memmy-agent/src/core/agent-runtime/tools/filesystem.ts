@@ -10,6 +10,11 @@ import { isPathInside, resolveWorkspacePath, workspaceRelative } from "./path-ut
 import { extractText } from "../../../utils/document.js";
 import { getMediaDir } from "../../../config/paths.js";
 import { BUILTIN_SKILLS_DIR } from "../skills.js";
+import {
+  EXTERNAL_CONTENT_BANNER,
+  boundedHeadTail,
+  readPersistedToolResultMetadata,
+} from "../../../utils/helpers.js";
 
 const IGNORED_DIRS = new Set([".git", "node_modules"]);
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
@@ -595,7 +600,7 @@ export class ReadFileTool extends Tool {
       "Images return visual content for analysis. Supports PDF, DOCX, XLSX, PPTX documents. " +
       "Use find_files/list_dir first when the path is uncertain. " +
       "Read the relevant range before editing so replacements or patches are based on current content. " +
-      "Use offset and limit for text file lines. For documents use pages for PDF page ranges, " +
+      "Use offset and limit for text file lines, or char_offset/char_limit for oversized single lines. For documents use pages for PDF page ranges, " +
       "and char_offset/char_limit to read extracted text in chunks (also within a large PDF page). " +
       "Follow the returned char_offset with the same path/pages until the required content is read; " +
       "an excerpt is not the full document. Use force=true to re-read text even if unchanged."
@@ -610,8 +615,8 @@ export class ReadFileTool extends Tool {
         offset: { type: "integer", minimum: 1 },
         limit: { type: "integer", minimum: 1 },
         pages: { type: "string", description: "PDF page or inclusive page range, e.g. 15 or 15-20." },
-        char_offset: { type: "integer", minimum: 0, description: "Documents only: zero-based UTF-16 offset in extracted text after PDF page selection. Use the returned continuation offset." },
-        char_limit: { type: "integer", minimum: 1, description: "Documents only: requested chunk size in UTF-16 units (default 32000; capped to the output budget)." },
+        char_offset: { type: "integer", minimum: 0, description: "Text files and documents: zero-based UTF-16 offset (after PDF page selection). Use the returned continuation offset." },
+        char_limit: { type: "integer", minimum: 1, description: "Text files and documents: requested raw chunk size in UTF-16 units (default 32000; capped to the output budget)." },
         force: { type: "boolean" },
       },
       required: ["path"],
@@ -630,7 +635,7 @@ export class ReadFileTool extends Tool {
     return resolveFileStates(this.fileStateOwner, this.fallbackFileStates, this.requestContext);
   }
 
-  async execute(params: { path?: string; offset?: number; limit?: number; pages?: string; force?: boolean } & DocumentReadOptions = {}): Promise<any> {
+  async execute(params: { path?: string; offset?: number; limit?: number; pages?: string; force?: boolean } & DocumentReadOptions = {}, context?: ToolExecutionContext): Promise<any> {
     const requested = params.path;
     if (!requested) return "Error reading file: Unknown path";
     if (isBlockedDevicePath(requested)) {
@@ -662,6 +667,31 @@ export class ReadFileTool extends Tool {
       }
       const content = await fs.readFile(target, "utf8");
       if (!content) return "Empty file";
+      const metadata = readPersistedToolResultMetadata(target);
+      const provenance = metadata?.untrusted
+        ? `${EXTERNAL_CONTENT_BANNER}\nSource tool: ${metadata.sourceTool ?? "external"}\n\n` : "";
+      const budget = Math.max(1, Math.min(ReadFileTool.MAX_CHARS, context?.maxResultChars ?? ReadFileTool.MAX_CHARS));
+      if (params.char_offset !== undefined || params.char_limit !== undefined) {
+        const offset = params.char_offset ?? 0;
+        const limit = params.char_limit ?? 32000;
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > content.length || !Number.isSafeInteger(limit) || limit < 1)
+          return "Error reading file: char_offset/char_limit must be valid UTF-16 character positions and a positive limit.";
+        const budgetError = () => "Error: read_file budget too small; increase the result budget.".slice(0, budget);
+        if (offset > 0 && /[\uDC00-\uDFFF]/.test(content[offset]!) && /[\uD800-\uDBFF]/.test(content[offset - 1]!))
+          return "Error: char_offset splits a UTF-16 surrogate pair; use the returned continuation offset.".slice(0, budget);
+        const footerFor = (end: number) => `\n[Raw fragment chars ${offset}-${end} of ${content.length}; not standalone JSON. ${end < content.length ? `Continue with char_offset=${end}.` : "End of file"}]`;
+        // Reserve the actual footer size. A fixed reservation can prevent every read
+        // from advancing when the model has a small per-tool result budget.
+        const requestedSize = limit === 1 && /[\uD800-\uDBFF]/.test(content[offset]!) && /[\uDC00-\uDFFF]/.test(content[offset + 1]!) ? 2 : limit;
+        let end = Math.min(content.length, offset + Math.min(requestedSize, Math.max(0, budget - provenance.length)));
+        while (provenance.length + end - offset + footerFor(end).length > budget && end > offset) {
+          end = Math.max(offset, end - (provenance.length + end - offset + footerFor(end).length - budget));
+        }
+        if (end < content.length && /[\uD800-\uDBFF]/.test(content[end - 1]!) && /[\uDC00-\uDFFF]/.test(content[end]!)) end -= 1;
+        if (end === offset && offset < content.length) return budgetError();
+        if (provenance.length + footerFor(end).length > budget) return budgetError();
+        return provenance + content.slice(offset, end) + footerFor(end);
+      }
       const lines = splitFileLines(content);
       const offset = params.offset ?? 1;
       if (offset > lines.length) return `Error reading file: offset ${offset} beyond end (${lines.length} lines)`;
@@ -672,7 +702,7 @@ export class ReadFileTool extends Tool {
       let selected = lines.slice(offset - 1, params.limit ? offset - 1 + params.limit : undefined);
       let body = lineNumbered(selected, offset);
       let nextOffset = offset + selected.length;
-      while (body.length > ReadFileTool.MAX_CHARS && selected.length > 1) {
+      while (body.length > Math.max(0, budget - provenance.length - 300) && selected.length > 1) {
         selected = selected.slice(0, Math.max(1, Math.floor(selected.length * 0.8)));
         body = lineNumbered(selected, offset);
         nextOffset = offset + selected.length;
@@ -682,7 +712,11 @@ export class ReadFileTool extends Tool {
           ? `\n\nUse offset=${nextOffset} to continue.`
           : "\n\nEnd of file";
       this.fileStates().recordRead(target, offset, limit);
-      return body + footer;
+      if (provenance.length + body.length + footer.length > budget) {
+        const hint = `${provenance}Long line: use read_file char_offset/char_limit for raw fragments. ${context?.availableTools?.includes("exec") ? "Use exec with an integer-safe parser for specific fields/records; narrow oversized queries." : "Fragments are not standalone JSON; do not infer missing fields."}\n`;
+        return hint.slice(0, budget) + boundedHeadTail(body, Math.max(0, Math.min(4000, budget) - hint.length));
+      }
+      return provenance + body + footer;
     } catch (error) {
       const msg = (error as NodeJS.ErrnoException).code === "ENOENT" ? "not found" : (error as Error).message;
       return `Error reading file: ${msg}`;

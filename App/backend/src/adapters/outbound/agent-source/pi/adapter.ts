@@ -77,6 +77,7 @@ export function createPiSourceAdapter(deps: CreatePiSourceAdapterDeps = {}): Sou
             createdAt: rawMessage.createdAt,
             workspacePath: rawMessage.workspacePath,
             gitRoot: rawMessage.workspacePath ? findGitRoot(rawMessage.workspacePath) : null,
+            ...(rawMessage.sessionTitle ? { sessionTitle: rawMessage.sessionTitle } : {}),
             rawMeta: Object.freeze({})
           } satisfies ConversationMessage;
         }

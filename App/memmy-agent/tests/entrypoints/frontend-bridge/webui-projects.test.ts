@@ -27,6 +27,84 @@ afterEach(() => {
 });
 
 describe("ProjectStore", () => {
+  it("gives a shared project its own record over a directory a local project already uses", () => {
+    const root = tempRoot();
+    const store = storeAt(root);
+    const shared = path.join(root, "workspace");
+    fs.mkdirSync(shared, { recursive: true });
+    fs.writeFileSync(path.join(shared, "file.txt"), "x", "utf8");
+
+    const local = store.add(shared, "existing", "本地项目");
+    // Without the flag the folder resolves to the project that already owns it, which is what merges sessions.
+    expect(store.add(shared, "existing", "协作项目")).toMatchObject({ id: local.id });
+
+    const separate = store.add(shared, "existing", "协作项目", { allowShared: true });
+    expect(separate.id).not.toBe(local.id);
+    expect(separate.rootPath).toBe(local.rootPath);
+    expect(separate.name).toBe("协作项目");
+    // Both records survive, so each keeps its own sessions.
+    expect(store.snapshot().projects.map((project) => project.id).sort()).toEqual([local.id, separate.id].sort());
+  });
+
+  it("loads a registry written by an earlier version without touching its projects", () => {
+    const root = tempRoot();
+    const filePath = path.join(root, "webui", "projects.json");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    // The shape an earlier build wrote: one project per folder, every field present.
+    const legacy = {
+      projects: [
+        { id: "11111111-1111-4111-8111-111111111111", name: "work", root_path: path.join(root, "work"), pinned: false, state: "active", created_at: "2026-01-01T00:00:00.000Z" },
+        { id: "22222222-2222-4222-8222-222222222222", name: "notes", root_path: path.join(root, "notes"), pinned: true, state: "active", created_at: "2026-02-01T00:00:00.000Z" }
+      ]
+    };
+    fs.writeFileSync(filePath, JSON.stringify(legacy), "utf8");
+
+    const snapshot = new ProjectStore({ filePath }).snapshot();
+
+    expect(snapshot.state).toBe("ready");
+    // Nothing is dropped, renamed or re-pathed: an upgrade must not disturb existing projects.
+    expect(snapshot.projects.map((project) => [project.id, project.name, project.rootPath, project.pinned])).toEqual([
+      ["22222222-2222-4222-8222-222222222222", "notes", path.join(root, "notes"), true],
+      ["11111111-1111-4111-8111-111111111111", "work", path.join(root, "work"), false]
+    ]);
+    expect(fs.readFileSync(filePath, "utf8")).toBe(JSON.stringify(legacy));
+  });
+
+  it("opens a registry that already repeats a folder instead of declaring it corrupt", () => {
+    const root = tempRoot();
+    const filePath = path.join(root, "webui", "projects.json");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const shared = path.join(root, "work");
+    // An earlier build treated this as corruption and hid every project; it now loads, which only adds
+    // tolerance: no existing project loses its sessions.
+    fs.writeFileSync(filePath, JSON.stringify({
+      projects: [
+        { id: "33333333-3333-4333-8333-333333333333", name: "work", root_path: shared, pinned: false, state: "active", created_at: "2026-01-01T00:00:00.000Z" },
+        { id: "44444444-4444-4444-8444-444444444444", name: "shared work", root_path: shared, pinned: false, state: "active", created_at: "2026-02-01T00:00:00.000Z" }
+      ]
+    }), "utf8");
+
+    const snapshot = new ProjectStore({ filePath }).snapshot();
+
+    expect(snapshot.state).toBe("ready");
+    expect(snapshot.projects).toHaveLength(2);
+  });
+
+  it("resolves a shared folder to the project that already owned it, not the shared one", () => {
+    const root = tempRoot();
+    const store = storeAt(root);
+    const shared = path.join(root, "workspace");
+    fs.mkdirSync(shared, { recursive: true });
+
+    const local = store.add(shared, "existing", "本地项目");
+    store.add(shared, "existing", "协作项目", { allowShared: true });
+
+    // Path-based callers (the CLI's --project, a folder opened by hand) must land on the local project: the
+    // shared project owns only the sessions that were started from it.
+    const resolved = store.resolveOrRegisterExisting(shared, (project) => project);
+    expect(resolved.id).toBe(local.id);
+  });
+
   it("registers existing directories and rejects non-empty blank directories", () => {
     const root = tempRoot();
     const existing = path.join(root, "existing");

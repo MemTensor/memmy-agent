@@ -59,7 +59,8 @@ export interface AgentTaskStateCoordinator {
 export type ProjectMutationOperation =
   | {
       kind: "create";
-      input: { mode: "blank" | "existing"; path: string; name?: string };
+      /** `allowShared` gives a directory another project already uses its own record, so sessions stay apart. */
+      input: { mode: "blank" | "existing"; path: string; name?: string; allowShared?: boolean };
     }
   | {
       kind: "update";

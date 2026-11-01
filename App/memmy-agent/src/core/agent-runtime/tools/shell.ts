@@ -21,6 +21,7 @@ import {
 } from "./exec-session.js";
 import { isPathInside } from "./path-utils.js";
 import { wrapCommand } from "./sandbox.js";
+import type { RequestContext } from "./context.js";
 
 let isWindows = process.platform === "win32";
 
@@ -175,6 +176,11 @@ export class ExecTool extends Tool {
   allowedEnvKeys: string[];
   sessionManager: ExecSessionManager;
   readonlySkillRoots: readonly string[];
+  /**
+   * 当前会话：`websocket:<会话 id>`。子进程需要知道自己在哪条 Memmy 任务里跑，
+   * `memmy-project session share` 靠它把这条任务共享出去。
+   */
+  private sessionKey: string | null = null;
   private readonly commandOutputDecoderOptions: CommandOutputDecoderOptions;
 
   constructor({
@@ -234,6 +240,18 @@ export class ExecTool extends Tool {
 
   static configCls(): typeof ExecToolConfig {
     return ExecToolConfig;
+  }
+
+  setContext(context: RequestContext): void {
+    this.sessionKey = context.sessionKey ?? null;
+  }
+
+  /** 子进程看到的环境变量：只有 Memmy 自己的任务才带会话 id，CLI 与其它 Agent 都一样。 */
+  private contextEnv(): Record<string, string> {
+    const key = this.sessionKey ?? "";
+    if (!key.startsWith("websocket:")) return {};
+    const taskId = key.slice("websocket:".length).trim();
+    return taskId ? { MEMMY_TASK_ID: taskId } : {};
   }
 
   static enabled(ctx: any): boolean {
@@ -473,6 +491,7 @@ export class ExecTool extends Tool {
     }
 
     const env = this.buildEnv();
+    Object.assign(env, this.contextEnv());
     if (this.pathAppend) {
       if (isWindows) {
         env.PATH = `${env.PATH ?? ""};${this.pathAppend}`;

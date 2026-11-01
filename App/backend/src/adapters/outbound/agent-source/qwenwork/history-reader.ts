@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { readJsonlObjects } from "../jsonl-lines.js";
+import { createJsonlTitleTracker } from "../jsonl-session-title.js";
 
 export interface RawQwenworkMessage {
   messageId: string;
@@ -8,6 +9,8 @@ export interface RawQwenworkMessage {
   content: string;
   createdAt: string;
   workspacePath: string | null;
+  /** The title QwenWork generated for the conversation, once it has written one. */
+  sessionTitle?: string;
 }
 
 export async function* readQwenworkHistory(
@@ -16,11 +19,17 @@ export async function* readQwenworkHistory(
 ): AsyncIterable<RawQwenworkMessage> {
   const fallbackConversationId = basename(filePath, ".jsonl");
   let lineNumber = 0;
+  const titles = createJsonlTitleTracker();
   for await (const record of readJsonlObjects(filePath, signal)) {
     lineNumber += 1;
+    // A title row is not a turn; keep it for the messages that follow and move on.
+    if (titles.observe(record)) {
+      continue;
+    }
     const message = extractQwenworkMessage(record, fallbackConversationId, lineNumber);
     if (message) {
-      yield message;
+      const sessionTitle = titles.current();
+      yield sessionTitle ? { ...message, sessionTitle } : message;
     }
   }
 }

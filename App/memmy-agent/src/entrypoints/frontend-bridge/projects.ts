@@ -204,8 +204,9 @@ export class ProjectStore {
       if (projects.some((project) => project == null)) throw new Error("invalid projects file");
       const typed = projects as StoredWebuiProject[];
       const ids = new Set(typed.map((project) => project.id));
-      const roots = new Set(typed.map((project) => project.root_path));
-      if (ids.size !== typed.length || roots.size !== typed.length) throw new Error("invalid projects file");
+      // Ids must be unique; folders need not be. A shared project and a local project can work in one folder
+      // while keeping their sessions apart, because a session belongs to a project id, not to a path.
+      if (ids.size !== typed.length) throw new Error("invalid projects file");
       this.projects = typed;
       this.state = "ready";
     } catch {
@@ -310,7 +311,17 @@ export class ProjectStore {
     return this.projects.some((project) => project.id === id && project.state === "deleting");
   }
 
-  add(rawPath: string, mode: WebuiProjectRegistrationMode, name?: string): WebuiProject {
+  /**
+   * Registers a project for a directory. `allowShared` gives a directory that another project already uses its own
+   * record: a shared project runs its tasks in the same folder as a local project while keeping its sessions
+   * apart, so the two are different projects over one directory.
+   */
+  add(
+    rawPath: string,
+    mode: WebuiProjectRegistrationMode,
+    name?: string,
+    options: { allowShared?: boolean } = {}
+  ): WebuiProject {
     return this.runMutation(() => {
       if (mode !== "blank" && mode !== "existing") {
         throw new WebuiProjectError("project_request_invalid", 400);
@@ -320,11 +331,10 @@ export class ProjectStore {
       if (existing?.state === "deleting") {
         throw new WebuiProjectError("project_deleting", 409);
       }
-      if (existing) return publicProject(existing);
-      if (this.projects.length >= MAX_PROJECTS) {
-        throw new WebuiProjectError("project_limit_reached", 409);
-      }
-      if (mode === "blank" && fs.readdirSync(rootPath).length > 0) {
+      if (existing && !options.allowShared) return publicProject(existing);
+      // A directory can only have one "new empty project" at a time, but a shared project reuses the folder
+      // the person already works in, so the emptiness rule only applies to the first project on it.
+      if (mode === "blank" && !existing && fs.readdirSync(rootPath).length > 0) {
         throw new WebuiProjectError("project_directory_not_empty", 409);
       }
       const projectName = name == null ? normalizeName(path.basename(rootPath)) : normalizeName(name);
@@ -352,6 +362,8 @@ export class ProjectStore {
   ): T {
     return this.runMutation(() => {
       const rootPath = canonicalDirectory(rawPath, { rejectRoot: true });
+      // A folder can belong to more than one project when a shared project reuses a local project's folder.
+      // The oldest record wins, so callers that only know a path (the CLI's --project) stay on the local project.
       const existing = this.projects.find((project) => project.root_path === rootPath);
       if (existing?.state === "deleting") {
         throw new WebuiProjectError("project_deleting", 409);

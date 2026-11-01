@@ -123,6 +123,7 @@ function toConversationMessage(
     createdAt: rawMessage.createdAt,
     workspacePath: rawMessage.workspacePath ?? discoveredWorkspacePath,
     gitRoot,
+    ...(rawMessage.sessionTitle ? { sessionTitle: rawMessage.sessionTitle } : {}),
     rawMeta: Object.freeze({ eventType: rawMessage.eventType, ...(rawMessage.toolName ? { toolName: rawMessage.toolName } : {}) })
   };
 }
