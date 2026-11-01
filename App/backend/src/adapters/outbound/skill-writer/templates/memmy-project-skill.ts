@@ -21,10 +21,13 @@ const CODEX_SANDBOX_NOTE = "- 在 Codex 中：`memmy-project` 要连接本机的
  * 谁在装这份技能。
  * - `source`：内置 Agent 的来源 id，只有 Codex 沙箱需要额外说明。
  * - `agentName`：用户添加的 Agent 的名称。Memmy 读不到它的本地记录，所以「把当前任务加入项目」由它自己整理并提交。
+ * - `dataDirectory`：该 Agent 的配置目录（`~/.proma`，由 `configDirectoryFor(skillDirectory)` 推出）。技能里只写这个
+ *   路径，任务名称由 Agent 自己去里面找：Memmy 不替它读，也不猜它的存储格式。
  */
 export interface MemmyProjectSkillOptions {
   source?: string;
   agentName?: string;
+  dataDirectory?: string;
 }
 
 /**
@@ -33,7 +36,8 @@ export interface MemmyProjectSkillOptions {
  * records Memmy can read, so its「把当前任务加入项目」一节改成由它自己提交全部轮次。
  */
 export function renderMemmyProjectSkillFile(options: MemmyProjectSkillOptions = {}): string {
-  const { source, agentName } = options;
+  const { source, agentName, dataDirectory } = options;
+  const agentDataDirectory = dataDirectory?.trim();
   return [
     "---",
     "name: memmy-project",
@@ -122,7 +126,14 @@ export function renderMemmyProjectSkillFile(options: MemmyProjectSkillOptions = 
       '{"title": "<任务标题>", "turns": [{"question": "<用户原话>", "reply": "<回复正文>", "at": "<该轮开始时间，ISO 8601，不知道可省略>"}]}',
       "```",
       "",
-      "- `title` 写这条任务在这个 Agent 里显示的标题（会话标题），不要自己另起一个：用户之后要在项目里认出它。没有标题时才用第一句提问概括。",
+      `- \`title\` 填这条任务的名称，一字不改，不自行拟定、不概括。名称指这条任务在「${agentName}」的对话列表（历史记录或侧栏）里显示的那一行文字。按以下顺序确定，前一步得到名称就停止：`,
+      "  1. 当前上下文中有这个名称时，直接使用。",
+      `  2. 「${agentName}」有列出对话的命令或工具时，用它查找；那个对话的第一条用户消息与本文件第一轮 \`question\` 相同，才是这一条。`,
+      `  3. 读取「${agentName}」的数据目录${agentDataDirectory ? ` \`${agentDataDirectory}\`` : ""}，只读，不复制、不修改：`,
+      "     - 记录文件：用第一轮 `question` 中最长的一行在数据目录里搜索；第一条用户消息包含这一行的文件，就是这条任务的记录文件。",
+      "     - 名称：在数据目录里搜索记录文件名中的 id，或记录文件的完整路径；某个 JSON 条目的字段值与之相等，且该条目有 `title`、`name` 等名称字段时，该字段的值就是名称。",
+      "  4. 以上都没得到名称时，填第一轮 `question` 的原文。",
+      "- 有些 Agent 不能运行命令，也读不了本机文件，第 2、3 步做不了，会直接落到第 4 步，用提问原文当标题。",
       "- `question` 写用户的原话，不改写、不总结。系统附加的内容不写，包括附件清单、引用内容、技能正文。",
       "- `reply` 写你回复的正文。不写思考过程、工具调用及其原始输出。",
       "- 工具返回的内容不算一轮。",

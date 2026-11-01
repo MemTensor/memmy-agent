@@ -8,6 +8,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { renderMemmyProjectSkillFile } from "../adapters/outbound/skill-writer/templates/memmy-project-skill.js";
+import { configDirectoryFor } from "./collab-record-file.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
 
 export interface CollabAddedAgent {
@@ -80,6 +81,14 @@ function sameAgentName(left: string, right: string): boolean {
 }
 
 /**
+ * 写进这个 Agent 技能目录的 SKILL.md。数据目录由它的技能目录推出（`~/.proma/default-skills` → `~/.proma`），
+ * 所以技能里能直接给出一个路径：Memmy 只告诉它去哪里找任务名称，找由它自己完成。
+ */
+export function renderAddedAgentSkill(name: string, skillDirectory: string): string {
+  return renderMemmyProjectSkillFile({ agentName: name, dataDirectory: configDirectoryFor(skillDirectory) });
+}
+
+/**
  * 添加一个用户自己的 Agent。只做一件事：把 `memmy-project` 装进它的技能目录。
  * 技能目录必须已经存在——新建一个空目录不能说明任何 Agent 会读它。
  */
@@ -100,7 +109,7 @@ export async function connectCollabAgent(input: ConnectCollabAgentInput): Promis
   const target = join(skillDirectory, "memmy-project");
   const skillPath = join(target, "SKILL.md");
   await mkdir(target, { recursive: true });
-  await writeFile(skillPath, renderMemmyProjectSkillFile({ agentName: name }), "utf8");
+  await writeFile(skillPath, renderAddedAgentSkill(name, skillDirectory), "utf8");
   const agent: CollabAddedAgent = {
     sourceId: collabSourceId(name),
     displayName: name,
@@ -146,7 +155,7 @@ export async function refreshCollabAgentSkills(options: { homeDirectory?: string
     const skillPath = join(target, "SKILL.md");
     const directory = await stat(agent.skillDirectory).catch(() => null);
     if (!directory?.isDirectory()) continue;
-    const expected = renderMemmyProjectSkillFile({ agentName: agent.displayName });
+    const expected = renderAddedAgentSkill(agent.displayName, agent.skillDirectory);
     const actual = await readFile(skillPath, "utf8").catch(() => null);
     if (actual === expected) continue;
     await mkdir(target, { recursive: true });

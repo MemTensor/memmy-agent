@@ -8,9 +8,9 @@ import {
   connectCollabAgent,
   loadCollabAgents,
   refreshCollabAgentSkills,
-  removeCollabAgent
+  removeCollabAgent,
+  renderAddedAgentSkill
 } from "../collab-added-agents.js";
-import { renderMemmyProjectSkillFile } from "../../adapters/outbound/skill-writer/templates/memmy-project-skill.js";
 
 const roots: string[] = [];
 
@@ -41,6 +41,10 @@ describe("adding an agent", () => {
     expect(skill).toContain('memmy-project session add --agent "Kimi Code"');
     expect(skill).toContain("Memmy 读不到「Kimi Code」的任务记录");
     expect(skill).not.toContain("--submit");
+    // 标题由它自己确定：技能给出四步顺序，并写明去哪里找（数据目录由技能目录推出）。
+    expect(skill).toContain("按以下顺序确定，前一步得到名称就停止");
+    expect(skill).toContain(`读取「Kimi Code」的数据目录 \`${root}\``);
+    expect(skill).toContain("填第一轮 `question` 的原文");
     // 技能里提到 memmy-memory 只是为了划清边界，不会让 Agent 去装它。
     expect(skill).not.toContain("安装 memmy-memory");
 
@@ -113,7 +117,7 @@ describe("refreshing added agents' skills", () => {
     // 旧版本装的是另一份内容：启动时要换成当前版本。
     await writeFile(skillPath, "# 旧版本\n", "utf8");
     expect(await refreshCollabAgentSkills({ homeDirectory: home })).toBe(1);
-    expect(await readFile(skillPath, "utf8")).toBe(renderMemmyProjectSkillFile({ agentName: "Kimi Code" }));
+    expect(await readFile(skillPath, "utf8")).toBe(renderAddedAgentSkill("Kimi Code", skills));
   });
 
   it("skips an agent whose skills folder is gone, without recreating it", async () => {
