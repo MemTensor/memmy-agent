@@ -1,8 +1,9 @@
-import { AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Layers, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plus, RefreshCw, Search, Settings, Trash2, UserPlus, X } from "lucide-react";
+import { AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Layers, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plug, RefreshCw, Search, Settings, Trash2, UserPlus, X } from "lucide-react";
 import { memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
   createHttpCollabClient,
+  type AddedAgent,
   type CollabClient,
   type CollabInstructionsHandover,
   type CollabKnowledgeView,
@@ -59,6 +60,10 @@ import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { AgentMessageContent, isLikelyExpensiveAgentMarkdown } from "./agent-message-content.js";
 import { memberNamesLabel, readableSummary } from "./collab-board-text.js";
 import { agentSourceDisplayName, agentSourceLogoUrl } from "./agent-source-logos.js";
+import { collabEnabledFor } from "../app/collab-mode.js";
+import { CollabAgentConnectDialog } from "./collab-agent-connect-dialog.js";
+import { buildCollabAgentConnectPrompt, resolveCollabConnectProjectId } from "./collab-agent-connect-prompt.js";
+import { writePendingFirstEncounterTaskLaunch } from "./first-encounter-task-launch.js";
 import { AppFrame } from "./app-frame.js";
 import { memberColor } from "./collab-member-color.js";
 import { MEMBER_REQUESTS_POLL_MS, ProjectMembersDialog } from "./collab-members-dialog.js";
@@ -123,6 +128,14 @@ export function groupingKind(sourceId: string): GroupingKind {
   if (sourceId === "cursor") return "workspace";
   if (sourceId === "workbuddy") return "workbuddy";
   return "directory";
+}
+
+/** The name the person typed. Built-in agents keep their product name; an internal id is never shown. */
+export function pickerAgentName(agent: { sourceId: string; name: string }): string {
+  const typed = agent.name.trim();
+  const known = agentSourceDisplayName(agent.sourceId);
+  if (typed && known === agent.sourceId.trim()) return typed;
+  return known || typed;
 }
 
 /** A group in the picker with the sessions of it that match the search. */
@@ -364,6 +377,8 @@ function writeContextTipSeen(seen: string[]): void {
 /** 空值常量：wrapper 每次都要读一遍全局状态，不能每次现造空数组把 memo 冲掉。 */
 const NO_PROJECTS: MemmyAgentProject[] = [];
 const NO_TASKS: AgentTaskView[] = [];
+/** 还没关联任何其他 Agent 时的空列表：常量的空数组，不会把看板的 memo 冲掉。 */
+const NO_ADDED_AGENTS: AddedAgent[] = [];
 
 /**
  * The page entry: reads the two lists from app state and hands them to the board.
@@ -376,6 +391,8 @@ export function CollabPage() {
   const appState = useOptionalAppState();
   const projects = appState?.state.agent.projects ?? NO_PROJECTS;
   const tasks = appState?.state.agent.tasks ?? NO_TASKS;
+  /** API Key 模式没有云端账号：看板只显示本机项目与任务，不读共享列表、不出现成员与共享入口。 */
+  const collabEnabled = collabEnabledFor(appState?.state.bootstrap?.app.userMode);
   // dispatch 的引用是稳定的，当作 prop 传下去不会把 memo 冲掉。
   const dispatch = appState?.dispatch ?? null;
   // 读最新的 agent 状态靠 ref：把它写进依赖会让回调每次都换新，看板就会跟着后台每条流式输出重画。
@@ -411,6 +428,7 @@ export function CollabPage() {
       dispatch={dispatch}
       projects={projects}
       tasks={tasks}
+      collabEnabled={collabEnabled}
       onContinueTask={onContinueTask}
     />
   );
@@ -424,10 +442,12 @@ const CollabBoard = memo(function CollabBoard(props: {
   dispatch: AppStateContextValue["dispatch"] | null;
   projects: MemmyAgentProject[];
   tasks: AgentTaskView[];
+  /** API Key 模式为 false：这一台机器上没有协作项目，看板按纯本机项目工作。 */
+  collabEnabled: boolean;
   /** 在项目下开一条新任务并带上引用；引用为空时就是普通的「在此项目新建任务」。 */
   onContinueTask: (projectId: string, mention: ComposerMention | null) => void;
 }) {
-  const { dispatch, projects, tasks, onContinueTask } = props;
+  const { dispatch, projects, tasks, collabEnabled, onContinueTask } = props;
   const { clients } = useApiClients();
   const { t, language } = useTranslation();
   const collab = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
@@ -483,6 +503,34 @@ const CollabBoard = memo(function CollabBoard(props: {
   const syncedProjectRef = useRef<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * 已关联的 Agent：云端只存生成出来的 source id（added-qoder-…），名字要回本机文件拿。
+   * 任务记录里没有名字可读，所以读别人的任务时用它把「谁的任务」写成人名而不是编号。
+   */
+  const [addedAgents, setAddedAgents] = useState<AddedAgent[]>(NO_ADDED_AGENTS);
+  useEffect(() => {
+    if (!collab || !collabEnabled) {
+      setAddedAgents(NO_ADDED_AGENTS);
+      return;
+    }
+    let cancelled = false;
+    void collab.listAddedAgents()
+      .then((agents) => {
+        if (!cancelled) setAddedAgents(agents.length ? agents : NO_ADDED_AGENTS);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [collab, collabEnabled]);
+  const addedAgentNames = useMemo(
+    () => new Map(addedAgents.map((agent) => [agent.sourceId, agent.name])),
+    [addedAgents]
+  );
+  const resolveAgentName = useCallback(
+    (sourceId: string) => addedAgentNames.get(sourceId) ?? agentSourceDisplayName(sourceId),
+    [addedAgentNames]
+  );
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -500,8 +548,8 @@ const CollabBoard = memo(function CollabBoard(props: {
   }, []);
 
   useEffect(() => {
-    if (collab) void loadCollabProjects(collab);
-  }, [collab]);
+    if (collab && collabEnabled) void loadCollabProjects(collab);
+  }, [collab, collabEnabled]);
 
   // 一次性提示（如新建时云端不可用）停留几秒后自动消失，不需要用户手动关闭。
   const notice = snapshot.notice;
@@ -519,7 +567,8 @@ const CollabBoard = memo(function CollabBoard(props: {
     // A reload, or a project opened from a link, has no selection yet: the first project keeps the board usable.
     if (project && snapshot.selectedId !== project.id) selectCollabProject(project.id);
   }, [project, snapshot.selectedId]);
-  const shared = sharedProjectFor(snapshot.projects, project?.id);
+  // 本机模式下共享列表不加载：即便上一次登录的记录还在内存里，这里也不认它。
+  const shared = collabEnabled ? sharedProjectFor(snapshot.projects, project?.id) : null;
   const sharedId = shared?.id ?? null;
   const projectId = project?.id ?? null;
 
@@ -1503,6 +1552,7 @@ const CollabBoard = memo(function CollabBoard(props: {
           project={project}
           shared={shared}
           collab={collab}
+          shareAvailable={collabEnabled}
           onClose={() => setSettingsOpen(false)}
           onShared={() => {
             // The board re-reads its own list once sharing exists.
@@ -1587,6 +1637,7 @@ const CollabBoard = memo(function CollabBoard(props: {
       <SessionReaderPanel
         session={reading}
         loading={readingId !== null}
+        resolveAgentName={resolveAgentName}
         onClose={() => setReading(null)}
         onCopy={(session) => void copyLink(session)}
       />
@@ -2050,6 +2101,8 @@ function ProjectBoardSettingsDialog(props: {
   project: MemmyAgentProject;
   shared: CollabProject | null;
   collab: CollabClient | null;
+  /** API Key 模式没有云端账号：共享这一行只说清原因，不给开关。 */
+  shareAvailable: boolean;
   onClose: () => void;
   onShared: () => void;
   onUnshared: () => void;
@@ -2196,25 +2249,29 @@ function ProjectBoardSettingsDialog(props: {
           <div className={styles.settingsRowText}>
             <div className={styles.settingsRowTitle}>{t("collab.create.share")}</div>
             <div className={styles.settingsRowDesc}>
-              {ownedByOther
-                ? t("collab.settings.memberHint")
-                : sharedId ? t("collab.settings.shareOnHint") : t("collab.settings.shareOffHint")}
+              {!props.shareAvailable
+                ? t("collab.settings.shareByokHint")
+                : ownedByOther
+                  ? t("collab.settings.memberHint")
+                  : sharedId ? t("collab.settings.shareOnHint") : t("collab.settings.shareOffHint")}
             </div>
           </div>
           <div className={styles.settingsRowControl}>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={Boolean(sharedId)}
-              aria-label={t("collab.create.share")}
-              // Turning sharing off deletes the cloud project, which only its owner may do.
-              disabled={busy || ownedByOther || (!sharedId && !props.collab)}
-              onClick={() => {
-                if (sharedId) setConfirmStop(true);
-                else void startSharing();
-              }}
-              className={`${styles.settingsSwitch}${sharedId ? ` ${styles.settingsSwitchOn}` : ""}`}
-            />
+            {props.shareAvailable ? (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={Boolean(sharedId)}
+                aria-label={t("collab.create.share")}
+                // Turning sharing off deletes the cloud project, which only its owner may do.
+                disabled={busy || ownedByOther || (!sharedId && !props.collab)}
+                onClick={() => {
+                  if (sharedId) setConfirmStop(true);
+                  else void startSharing();
+                }}
+                className={`${styles.settingsSwitch}${sharedId ? ` ${styles.settingsSwitchOn}` : ""}`}
+              />
+            ) : null}
           </div>
         </div>
 
@@ -2286,6 +2343,8 @@ function ProjectBoardSettingsDialog(props: {
 function SessionReaderPanel(props: {
   session: { session: CollabProjectSession; turns: CollabSessionTurn[] } | null;
   loading: boolean;
+  /** 已关联的 Agent 用本机的名字；内置 Agent 用产品名。 */
+  resolveAgentName: (sourceId: string) => string;
   onClose: () => void;
   onCopy: (session: CollabProjectSession) => void;
 }) {
@@ -2295,7 +2354,7 @@ function SessionReaderPanel(props: {
   const data = props.session;
   const open = data !== null;
   const name = data ? data.session.memberName || (data.session.mine ? t("collab.session.you") : "") : "";
-  const agentName = data ? agentSourceDisplayName(data.session.source) || "Agent" : "";
+  const agentName = data ? props.resolveAgentName(data.session.source) || "Agent" : "";
   const agentLogo = data ? agentSourceLogoUrl(data.session.source) : undefined;
 
   // Esc closes the panel and focus moves into it while it is open, so a reader who never touches the mouse still
@@ -2440,7 +2499,27 @@ export function visibleQuestion(text: string): string {
   const queries = [...text.matchAll(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/giu)]
     .map((match) => match[1]?.trim() ?? "")
     .filter((query) => query.length > 0);
-  return withoutCursorTaskFollowup(stripHostEnvelope(queries.length > 0 ? queries.join("\n\n") : text));
+  return withoutInterruptionMarkers(
+    withoutSkillDump(withoutCursorTaskFollowup(stripHostEnvelope(queries.length > 0 ? queries.join("\n\n") : text)))
+  );
+}
+
+/**
+ * 有些 Agent 把「加载技能」也写成一条用户消息，整段技能正文跟着进来（`Base directory for this skill:` 开头）。
+ * 那是 Agent 的内部上下文，不是谁问的问题：从这一行起全部去掉，前面还有真问题时保留。
+ * 读取规则已经在写入时剔掉这类记录，这里兜住升级前已经上传的任务。
+ */
+function withoutSkillDump(text: string): string {
+  const marker = text.search(/base directory for this skill:/iu);
+  return marker < 0 ? text : text.slice(0, marker).trim();
+}
+
+/**
+ * Qoder、Claude Code 把「用户打断」也写成一条用户消息（`[Request interrupted by user…]`）。
+ * 那不是提问，留着只会多出一轮空的对话。
+ */
+function withoutInterruptionMarkers(text: string): string {
+  return text.replace(/\[Request interrupted by user[^\]]*\]/giu, "").trim();
 }
 
 /** Drops a host envelope that leaked into an answer. The answer itself stays. */
@@ -2470,6 +2549,7 @@ export function AssociateSessionsModal(props: {
   onLinked: (result: CollabSyncResult) => void | Promise<void>;
 }) {
   const { t } = useTranslation();
+  const appState = useOptionalAppState();
   const [sessions, setSessions] = useState<LocalAgentSession[] | null>(null);
   const [saved, setSaved] = useState<CollabLinks>(EMPTY_LINKS);
   const [links, setLinks] = useState<CollabLinks>(EMPTY_LINKS);
@@ -2479,7 +2559,20 @@ export function AssociateSessionsModal(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmUnlinkGroup, setConfirmUnlinkGroup] = useState(false);
+  const [addAgentOpen, setAddAgentOpen] = useState(false);
+  /** 已添加的 Agent：只用于添加弹窗里的清单，用户添加的 Agent 不进左侧列表。 */
+  const [addedAgents, setAddedAgents] = useState<AddedAgent[]>([]);
   const { collab, open, project } = props;
+  /** 添加弹窗打开时读一次已添加清单，移除后重读；用户添加的 Agent 不进左侧列表。 */
+  const reloadAddedAgents = useCallback(async () => {
+    if (!collab) return;
+    const agents = await collab.listAddedAgents().catch(() => null);
+    if (agents) setAddedAgents(agents);
+  }, [collab]);
+  useEffect(() => {
+    if (!open || !addAgentOpen) return;
+    void reloadAddedAgents();
+  }, [addAgentOpen, open, reloadAddedAgents]);
 
   useEffect(() => {
     if (!open) return;
@@ -2514,11 +2607,16 @@ export function AssociateSessionsModal(props: {
     };
   }, [collab, open, project.id]);
 
+  /**
+   * 左侧只列 Memmy 自己能读到任务的 Agent。用户添加的 Agent 不出现：Memmy 不读它们的记录，
+   * 它们的任务要由那个 Agent 自己提交进项目，没有可勾选的历史。
+   */
   const agents = useMemo(() => {
     const seen = new Map<string, string>();
     for (const session of sessions ?? []) if (!seen.has(session.sourceId)) seen.set(session.sourceId, session.agentName);
     return [...seen.entries()].map(([sourceId, name]) => ({ sourceId, name }));
   }, [sessions]);
+
   /**
    * 列表用的 Agent 比导航栏慢一帧：点一下立刻看到选中态，列表的内容跟着补上。
    * 两者在稳定后始终一致，只是渲染优先级不同。
@@ -2576,7 +2674,10 @@ export function AssociateSessionsModal(props: {
     return (
       <label key={localSessionKey(session)} className={`${styles.pickRow} ${nested ? styles.pickRowNested : ""}`}>
         <input type="checkbox" checked={checked} onChange={() => setLinks((current) => toggleSessionLink(current, session))} />
-        <span className={`${styles.pickTitle} ${excluded ? styles.pickTitleExcluded : ""}`} title={summary || session.title}>{session.title}</span>
+        {/* 已关联 Agent 的标题来自它自己的索引，索引没跟上时退回最近一句提问，不显示空行 */}
+        <span className={`${styles.pickTitle} ${excluded ? styles.pickTitleExcluded : ""}`} title={summary || session.title}>
+          {session.title || summary || t("appFrame.search.untitled")}
+        </span>
         <span className={styles.meta}>{excluded ? t("collab.pick.excluded") : formatSessionTime(session.updatedAt)}</span>
       </label>
     );
@@ -2664,6 +2765,7 @@ export function AssociateSessionsModal(props: {
       )}
     >
       <div className={styles.pickBody}>
+        <div className={styles.agentColumn}>
         <nav className={styles.agentList} aria-label="Agent">
           {agents.map((agent) => {
             const logo = agentSourceLogoUrl(agent.sourceId);
@@ -2679,9 +2781,10 @@ export function AssociateSessionsModal(props: {
                   setQuery("");
                 }}
               >
-                <span className={styles.agentLogo}>{logo ? <img src={logo} alt="" /> : null}</span>
+                <span className={styles.agentLogo}>{logo ? <img src={logo} alt="" /> : <span className={styles.agentMark}>{Array.from(agent.name)[0] ?? "A"}</span>}</span>
                 <span className={styles.agentText}>
-                  <span className={styles.agentName}>{agentSourceDisplayName(agent.sourceId) || agent.name}</span>
+                  <span className={styles.agentName}>{pickerAgentName(agent)}</span>
+                  {/* 第二行只说它按什么分组；是否关联了任务由右侧绿点表示 */}
                   <span className={styles.agentHint}>{t(`collab.pick.groupBy.${groupingKind(agent.sourceId)}` as MessageKey)}</span>
                 </span>
                 {agentHasLinks(links, agent.sourceId) ? <span className={styles.agentDot} aria-hidden="true" /> : null}
@@ -2689,12 +2792,20 @@ export function AssociateSessionsModal(props: {
             );
           })}
         </nav>
+          <button type="button" className={styles.addAgent} onClick={() => { setAddAgentOpen(true); }}>
+            <span className={styles.addAgentMark} aria-hidden="true"><Plug size={14} /></span>
+            <span className={styles.addAgentText}>
+              <span className={styles.addAgentLabel}>{t("collab.pick.addAgent")}</span>
+              <span className={styles.addAgentHint}>{t("collab.pick.addAgentHint")}</span>
+            </span>
+          </button>
+        </div>
         <section className={styles.pickMain}>
           <label className={styles.search}>
             <Search size={14} aria-hidden="true" />
             <input
               value={query}
-              placeholder={activeAgent ? t("collab.pick.searchIn", { agent: agentSourceDisplayName(activeAgent.sourceId) || activeAgent.name }) : t("collab.pick.search")}
+              placeholder={activeAgent ? t("collab.pick.searchIn", { agent: pickerAgentName(activeAgent) }) : t("collab.pick.search")}
               aria-label={t("collab.pick.search")}
               onChange={(event) => setQuery(event.target.value)}
             />
@@ -2715,6 +2826,28 @@ export function AssociateSessionsModal(props: {
       onConfirm={() => {
         setConfirmUnlinkGroup(false);
         void confirm();
+      }}
+    />
+    <CollabAgentConnectDialog
+      open={props.open && addAgentOpen}
+      projectName={props.project.name}
+      added={addedAgents}
+      collab={collab}
+      onRemoved={() => void reloadAddedAgents()}
+      onClose={() => setAddAgentOpen(false)}
+      onStart={(name, skillDirectory) => {
+        // 这一步只建本机任务：技能由那条任务装进目标 Agent，装好之后在那个 Agent 里就能用协作项目。
+        if (!appState) return;
+        const projectId = resolveCollabConnectProjectId(props.project, appState.state.agent.projects);
+        writePendingFirstEncounterTaskLaunch(
+          typeof window === "undefined" ? undefined : window.sessionStorage,
+          buildCollabAgentConnectPrompt(name, skillDirectory),
+          projectId ? { projectId } : {}
+        );
+        appState.dispatch(agentActions.newChatRequested());
+        appState.dispatch(appActions.navigate("/main"));
+        setAddAgentOpen(false);
+        props.onClose();
       }}
     />
     </>

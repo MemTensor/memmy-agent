@@ -75,7 +75,7 @@ export async function removeMemmyResumeSkillDirectory(rootDirectory: string): Pr
 /** Installs the `memmy-project` skill next to `memmy-memory`, as a skill of its own. */
 export async function replaceMemmyProjectSkillDirectory(rootDirectory: string, source?: string): Promise<void> {
   const targetPath = join(rootDirectory, "skills", MEMMY_PROJECT_SKILL_DIRECTORY_NAME);
-  await replaceDirectory(targetPath, [{ relativePath: "SKILL.md", content: renderMemmyProjectSkillFile(source) }]);
+  await replaceDirectory(targetPath, [{ relativePath: "SKILL.md", content: renderMemmyProjectSkillFile({ ...(source ? { source } : {}) }) }]);
 }
 
 export async function removeMemmyProjectSkillDirectory(rootDirectory: string): Promise<void> {
@@ -85,7 +85,7 @@ export async function removeMemmyProjectSkillDirectory(rootDirectory: string): P
 /** Whether the installed `memmy-project` skill matches this build; a missing one does not. */
 export async function isMemmyProjectSkillDirectoryCurrent(rootDirectory: string, source?: string): Promise<boolean> {
   const actual = await readFile(join(rootDirectory, "skills", MEMMY_PROJECT_SKILL_DIRECTORY_NAME, "SKILL.md"), "utf8").catch(() => null);
-  return actual === renderMemmyProjectSkillFile(source);
+  return actual === renderMemmyProjectSkillFile({ ...(source ? { source } : {}) });
 }
 
 function temporarySiblingPath(path: string): string {

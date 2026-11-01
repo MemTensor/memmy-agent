@@ -18,10 +18,22 @@ export const MEMMY_PROJECT_SKILL_DIRECTORY_NAME = "memmy-project";
 const CODEX_SANDBOX_NOTE = "- 在 Codex 中：`memmy-project` 要连接本机的 Memmy（127.0.0.1），沙箱关闭网络访问时会被拦截。提示被沙箱拦截时，用 escalated permissions（沙箱外权限）重新运行同一条命令，不要请用户打开 Memmy。";
 
 /**
- * The skill's whole SKILL.md. Every agent reads sessions through the same command; only Codex, whose sandbox blocks
- * the command's connection to Memmy, gets a note on running it outside the sandbox.
+ * 谁在装这份技能。
+ * - `source`：内置 Agent 的来源 id，只有 Codex 沙箱需要额外说明。
+ * - `agentName`：用户添加的 Agent 的名称。Memmy 读不到它的本地记录，所以「把当前任务加入项目」由它自己整理并提交。
  */
-export function renderMemmyProjectSkillFile(source?: string): string {
+export interface MemmyProjectSkillOptions {
+  source?: string;
+  agentName?: string;
+}
+
+/**
+ * The skill's whole SKILL.md. Every agent reads sessions through the same command; only Codex, whose sandbox blocks
+ * the command's connection to Memmy, gets a note on running it outside the sandbox. An agent the person added has no
+ * records Memmy can read, so its「把当前任务加入项目」一节改成由它自己提交全部轮次。
+ */
+export function renderMemmyProjectSkillFile(options: MemmyProjectSkillOptions = {}): string {
+  const { source, agentName } = options;
   return [
     "---",
     "name: memmy-project",
@@ -73,10 +85,18 @@ export function renderMemmyProjectSkillFile(source?: string): string {
     "memmy-project session read <任务 ID> --find \"<一句原话>\"  # 这句话所在的轮次，忽略标点和空白",
     "memmy-project session read <任务 ID> --all                # 全部轮次，确实需要时才用",
     "",
-    "# 把正在进行的这一整条任务加入一个协作项目。命令自己认出当前会话；名称不准确时先不加入",
-    "memmy-project session add",
-    "memmy-project session add --project \"<项目名称>\"",
-    "```",
+    ...(agentName
+      ? [
+          "# 把当前这一整条任务加入一个协作项目。内容先写成 JSON 文件，命令上传后删除它",
+          `memmy-project session add --agent "${agentName}" --project "<项目名称>" --file "<JSON 文件路径>"`,
+          "```"
+        ]
+      : [
+          "# 把正在进行的这一整条任务加入一个协作项目。命令自己认出当前会话；名称不准确时先不加入",
+          "memmy-project session add",
+          "memmy-project session add --project \"<项目名称>\"",
+          "```"
+        ]),
     "",
     "- `--turns`、`--around`、`--find`、`--all` 一次只能用一个，轮次从 1 开始。",
     "- `任务ID#轮次` 与 `--turns` 等价，只读那一轮；同时再带范围参数会被拒绝，因为两处说法会打架。",
@@ -93,21 +113,49 @@ export function renderMemmyProjectSkillFile(source?: string): string {
     "",
     "## 把当前任务加入项目",
     "",
-    "用户要把**正在进行的这一整条任务**放进某个 Memmy 协作项目时用。用户会说「会话」，在 Memmy 里这就是一条任务，例如「帮我把这个会话添加到 Memmy 的协作项目」「把当前这个对话关联到项目里」。",
-    "",
-    "关联的是这一整条，从开头到目前的全部轮次，不是其中一句，也不是整个工作区。命令在当前对话里运行，自己认出这一条；不要另找一条任务来加，也不要改已经关联好的其他任务。",
-    "",
-    "在当前工作目录运行，不要先 cd。",
-    "",
-    "- 先运行 `memmy-project session add`。它认出当前会话。用户已经说出与列表完全一致的项目名称时，直接加上 `--project`。",
-    "- 只有命令说认不出是哪一条时，才加 `--hint`，写这个对话里已经出现过的连续原话。",
-    "- 没说项目、名称对不上、或有多个相近项目时，命令不会加入。把命令指出的项目问用户，用户确认后，原样运行输出里的那一条命令。不要自己挑一个项目，也不要改成关联整个工作区。",
-    "- 输出「当前目录下有多条任务」或「这句原话对应多条任务」时，按列出的任务问用户是哪一条，换一句只在那条里出现过的原话再运行。不要选最近的一条。",
-    "- 输出「但这句原话不在其中」时，先问用户是不是它列出的那一条。用户确认后，才按输出运行去掉 `--hint` 的命令。",
-    "- 输出「已把当前任务…加入」后，用其中的任务标题和项目名称告诉用户：关联的是这一整条任务的全部轮次，没有关联整个工作区。",
-    "- 输出「已经在协作项目…中」就不要再加一次。",
-    "- 输出「无法把当前任务加进去」或「找不到当前这条任务」时，按它说的告诉用户，不要改去关联整个工作区。",
-    "",
+    ...(agentName ? [
+      `Memmy 读不到「${agentName}」的任务记录。用户说「把这个任务加入项目」「更新到项目」时，由你把当前这一整条任务交给 Memmy。`,
+      "",
+      "1. 把这条任务从第一轮到现在的全部轮次写成一个 JSON 文件，放在系统临时目录：",
+      "",
+      "```json",
+      '{"title": "<任务标题>", "turns": [{"question": "<用户原话>", "reply": "<回复正文>", "at": "<该轮开始时间，ISO 8601，不知道可省略>"}]}',
+      "```",
+      "",
+      "- `title` 写这条任务在这个 Agent 里显示的标题（会话标题），不要自己另起一个：用户之后要在项目里认出它。没有标题时才用第一句提问概括。",
+      "- `question` 写用户的原话，不改写、不总结。系统附加的内容不写，包括附件清单、引用内容、技能正文。",
+      "- `reply` 写你回复的正文。不写思考过程、工具调用及其原始输出。",
+      "- 工具返回的内容不算一轮。",
+      `- 当前对话上下文不完整时（例如被压缩过），读取「${agentName}」保存的原始记录补齐。只读取，不复制到其他位置。`,
+      "",
+      `2. 运行：\`memmy-project session add --agent "${agentName}" --project "<项目名称>" --file "<文件路径>"\``,
+      "",
+      "- 命令上传成功后会删除这个文件。",
+      `- 已经知道这条任务的记录文件在哪里时，加上 \`--source "<记录文件路径>"\`。不知道时不用去找，Memmy 会自己找。`,
+      "",
+      "输出说项目名称不准确或有多条相近项目时，问用户是哪一个，再原样运行输出里的那一条命令。",
+      "",
+      `3. 用输出中的任务标题、轮数和项目名称告诉用户结果。输出说明之后会自动同步时，告诉用户这一点；否则说明之后要更新，在这里说「更新到项目」。`,
+      "",
+      "输出说明无法自动同步、用户之后说「更新到项目」「同步到项目」时，重新整理全部轮次再运行同一条命令：项目中的这一条任务会被覆盖，不会新增一条。",
+      "",
+    ] : [
+      "用户要把**正在进行的这一整条任务**放进某个 Memmy 协作项目时用。用户会说「会话」，在 Memmy 里这就是一条任务，例如「帮我把这个会话添加到 Memmy 的协作项目」「把当前这个对话关联到项目里」。",
+      "",
+      "关联的是这一整条，从开头到目前的全部轮次，不是其中一句，也不是整个工作区。命令在当前对话里运行，自己认出这一条；不要另找一条任务来加，也不要改已经关联好的其他任务。",
+      "",
+      "在当前工作目录运行，不要先 cd。",
+      "",
+      "- 先运行 `memmy-project session add`。它认出当前会话。用户已经说出与列表完全一致的项目名称时，直接加上 `--project`。",
+      "- 只有命令说认不出是哪一条时，才加 `--hint`，写这个对话里已经出现过的连续原话。",
+      "- 没说项目、名称对不上、或有多个相近项目时，命令不会加入。把命令指出的项目问用户，用户确认后，原样运行输出里的那一条命令。不要自己挑一个项目，也不要改成关联整个工作区。",
+      "- 输出「当前目录下有多条任务」或「这句原话对应多条任务」时，按列出的任务问用户是哪一条，换一句只在那条里出现过的原话再运行。不要选最近的一条。",
+      "- 输出「但这句原话不在其中」时，先问用户是不是它列出的那一条。用户确认后，才按输出运行去掉 `--hint` 的命令。",
+      "- 输出「已把当前任务…加入」后，用其中的任务标题和项目名称告诉用户：关联的是这一整条任务的全部轮次，没有关联整个工作区。",
+      "- 输出「已经在协作项目…中」就不要再加一次。",
+      "- 输出「无法把当前任务加进去」或「找不到当前这条任务」时，按它说的告诉用户，不要改去关联整个工作区。",
+      "",
+    ]),
     "## 先判断要不要查",
     "",
     "要把当前对话加入协作项目时，不要检索，按「把当前任务加入项目」做。",

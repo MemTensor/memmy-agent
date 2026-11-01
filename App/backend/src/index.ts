@@ -28,6 +28,7 @@ import { migrateLegacyCollabInstructions } from "./services/collab-instructions-
 import { createCollabCloudRequest, createCollabService } from "./services/collab-service.js";
 import { createLocalSessionReader } from "./adapters/outbound/agent-source/session-reference/local-session-reader.js";
 import { createBuiltinAgentSourceRegistry } from "./services/builtin-agent-source-registry.js";
+import { defaultCollabHome, refreshCollabAgentSkills } from "./services/collab-added-agents.js";
 import { createProjectDirectoryService } from "./services/project-directory-service.js";
 import { resolveCloudClientConfig, type CloudClientConfig } from "./config/service-urls.js";
 import { resetAccountRuntimeForDesktopInstallChange } from "./services/desktop-install-state-service.js";
@@ -189,9 +190,27 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         memberName: session.profile.nickname
       };
     };
+    /** Reads the login mode on every call: switching between account and API Key takes effect without a restart. */
+    const userMode = () => appStateStore.repositories.bootstrap.getAppSettings().userMode;
+    /**
+     * 协作项目只在账号模式可用。API Key 模式（byok）不连接云端，但上一次登录留下的凭据还在这台机器上，
+     * 不在这里挡住的话，项目与成员会在纯本地环境里出现。知识库不按这条处理：它有自己的账号会话语义。
+     */
+    const getCollabAccount = () => (userMode() === "byok" ? null : getCloudAccount());
+    /**
+     * 用户添加的 Agent 只装 memmy-project，Memmy 不读它们的任务记录，所以这里只用内置来源；
+     * 启动时顺手把它们的技能刷到当前版本。
+     */
+    const collabHome = defaultCollabHome();
+    void refreshCollabAgentSkills({ homeDirectory: collabHome }).then((updated) => {
+      if (updated > 0) console.log(`Refreshed the memmy-project skill of ${updated} added agent(s)`);
+    }).catch((error: unknown) => {
+      console.warn(`Refreshing added agents' skills did not complete: ${error instanceof Error ? error.message : String(error)}`);
+    });
     const collab = createCollabService({
       cloudBaseUrl: cloudConfig.baseUrl,
-      getAccount: getCloudAccount,
+      getAccount: getCollabAccount,
+      userMode,
       // The backend reads this machine's agent sessions itself, so association works without the Memory service.
       localSessions: createLocalSessionReader({ registry: createBuiltinAgentSourceRegistry() }),
       ...(process.env.MEMMY_SESSION_LINK_BASE_URL?.trim() ? { linkBaseUrl: process.env.MEMMY_SESSION_LINK_BASE_URL.trim() } : {}),
@@ -202,6 +221,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     // Groups associated with an online project pick up new sessions, and associated sessions their new turns.
     collabSyncTimer = setInterval(() => {
+      // API Key 模式不连接云端：没有账号就没有可同步的协作项目，定时任务也就不必去试。
+      if (userMode() === "byok") return;
       void collab.syncLinkedSessions().catch((error: unknown) => {
         console.warn(`Online project sync did not complete: ${error instanceof Error ? error.message : String(error)}`);
       });

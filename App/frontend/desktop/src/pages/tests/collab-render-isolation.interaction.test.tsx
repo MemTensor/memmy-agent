@@ -35,6 +35,8 @@ const frameRenders = vi.hoisted(() => ({ count: 0 }));
 
 const mocks = vi.hoisted(() => ({
   listProjects: vi.fn(),
+  // 已关联的其他 Agent：这些用例不涉及，空列表即可。
+  listAddedAgents: vi.fn().mockResolvedValue([]),
   listSessions: vi.fn(),
   getSyncProgress: vi.fn(),
   syncSessions: vi.fn(),

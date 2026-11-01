@@ -1316,7 +1316,7 @@ describe("AppFrame", () => {
       source.indexOf("const recheckPendingApplication")
     );
 
-    expect(poll).toContain("if (!collabClient || !state.account.userId || pendingApplicationCount === 0) return;");
+    expect(poll).toContain("if (!collabClient || !collabEnabled || !state.account.userId || pendingApplicationCount === 0) return;");
     expect(poll).toContain("document.visibilityState === \"hidden\"");
     expect(poll).toContain("void loadCollabProjects(collabClient)");
     // 审批落在云端，本机没有推送：有几秒的节奏就不再需要人自己刷新。

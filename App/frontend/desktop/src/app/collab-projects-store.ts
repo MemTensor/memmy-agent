@@ -231,7 +231,27 @@ export function consumeCollabTourRequest(): void {
   if (snapshot.tourFor) update({ tourFor: null });
 }
 
-/** Test seam: drops every listener and returns the store to its first state. */
+/**
+ * 切换到 API Key 模式（或遇到未登录状态）时把共享列表清空：云端项目不再属于当前环境，
+ * 侧栏的「已共享」标记与看板的任务都该随之消失，本机项目与任务不受影响。
+ */
+export function clearCollabProjects(): void {
+  inFlight = null;
+  update({
+    projects: null,
+    applications: [],
+    decisions: [],
+    selectedId: null,
+    loading: false,
+    error: null,
+    createPending: false,
+    taskPickerFor: null,
+    tourFor: null,
+    notice: null,
+    maxOwnedProjects: null
+  });
+}
+
 export function resetCollabProjectsStore(): void {
   inFlight = null;
   snapshot = {

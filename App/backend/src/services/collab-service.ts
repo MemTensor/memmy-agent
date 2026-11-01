@@ -5,9 +5,11 @@
  *
  * 协作任务只在云端保存，本机不保留正文副本：读取、引用、检索都现查云端，离线时不可用。
  */
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { loadCollabAgents, submittedConversationId } from "./collab-added-agents.js";
+import { locateRecordFile, readRecordFile, type RecordBinding } from "./collab-record-file.js";
 import type { ApiErrorCode } from "./error-envelope.js";
 import { LocalSessionReadError, type LocalSessionReader } from "../adapters/outbound/agent-source/session-reference/local-session-reader.js";
 import {
@@ -44,6 +46,23 @@ export const SESSION_PAGE_SIZE = 10;
  * sessions take seconds — so a bounded pool keeps a bulk association from taking minutes.
  */
 const UPLOAD_CONCURRENCY = 4;
+/** 定位记录文件最多等这么久；等不到就不绑定，后台继续找。 */
+const RECORD_LOCATE_TIMEOUT_MS = 5_000;
+
+/** 定位记录文件，最多等 `RECORD_LOCATE_TIMEOUT_MS`；超时返回 null，搜索在后台继续。 */
+async function locateWithinDeadline(input: Parameters<typeof locateRecordFile>[0]): Promise<RecordBinding | null> {
+  if (!input.skillDirectory.trim() && !input.sourcePath) return null;
+  const work = locateRecordFile(input).catch(() => null);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), RECORD_LOCATE_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  const located = await Promise.race([work, deadline]);
+  if (timer) clearTimeout(timer);
+  return located;
+}
+
 /**
  * Sessions of one agent read together. An agent's store is read whole whichever session is asked for, so one batch
  * costs about what one session did; the cap bounds how many sessions one pass holds at once.
@@ -134,6 +153,11 @@ export interface CollabServiceOptions {
    * 协作项目那份背景与规范写回这个文件夹，成为创建者本机项目的背景与规范；未提供时不写回。
    */
   projectInstructions?: ProjectInstructionsService;
+  /**
+   * 当前登录模式。API Key 模式（byok）不连接云端，协作项目在这台机器上不可用：
+   * 账号会话可能还留着上次登录的凭据，但项目、成员与共享一律按未登录处理。
+   */
+  userMode?: () => string;
 }
 
 /**
@@ -351,6 +375,11 @@ interface SyncedSession {
   updatedAt: string;
   groupId: string | null;
   /**
+   * 用户添加的 Agent 提交任务时绑定的本机记录文件。有它时内容以文件为准：
+   * 文件修改后按绑定的读取方式重读并上传；文件不在了就停止同步，项目里的内容保留。
+   */
+  source?: RecordBinding;
+  /**
    * The title the listing reported when this session was uploaded. Absent on records written before titles came
    * from the agent itself, which is what makes the next sync refresh them.
    */
@@ -430,6 +459,15 @@ export interface CollabApplicationDecision {
   decidedAt: string | null;
 }
 
+/** 用户添加的 Agent 交上来的一条任务：标题 + 全部轮次。 */
+export interface SubmittedTask {
+  agentName: string;
+  title: string;
+  turns: Array<{ question: string; reply: string; at?: string }>;
+  /** Agent 明确给出的记录文件；没有时由 Memmy 在该 Agent 的配置目录里按原文搜索。 */
+  sourcePath?: string;
+}
+
 export interface CollabService {
   listProjects(): Promise<{
     projects: CollabProject[];
@@ -471,8 +509,16 @@ export interface CollabService {
    * before typing.
    */
   candidateSessions(projectId: string, input?: { query?: string; limit?: number }): Promise<{ sessions: CollabProjectSession[] }>;
-  listLocalSessions(input: { query?: string; sourceIds?: string[]; limit?: number; fresh?: boolean }): Promise<{ sessions: LocalAgentSession[]; refreshing: boolean }>;
+  listLocalSessions(input: { query?: string; sourceIds?: string[]; limit?: number; fresh?: boolean }): Promise<{
+    sessions: LocalAgentSession[];
+    refreshing: boolean;
+  }>;
   getLinks(projectId: string): Promise<CollabLinks>;
+  /**
+   * Agents added on this computer: the name the person typed and the skills folder they were added with.
+   * The add dialog lists them so they can be removed; no other surface reads this list.
+   */
+  listAddedAgents(): Promise<Array<{ sourceId: string; name: string; skillDirectory: string }>>;
   /**
    * Saves what this computer associates and queues the new sessions. It returns before the upload finishes so the
    * person can keep working; `getSyncProgress` reports the rest.
@@ -536,7 +582,12 @@ export interface CollabService {
     /** The conversation this command is running inside, when the agent exposes it. */
     sourceId?: string;
     conversationId?: string;
-  }): Promise<{ text: string }>;
+    /**
+     * 用户添加的 Agent 自己交上来的任务内容：Memmy 读不到它的本地记录，所以由它整理全部轮次。
+     * 同一个 Agent、第一轮提问相同，就覆盖同一条任务，不新增。
+     */
+    submission?: SubmittedTask;
+  }): Promise<{ text: string; ok?: true }>;
   /** Who is in the project and how people join it; owners and admins also get the requests waiting for them. */
   listMembers(projectId: string): Promise<CollabMembers>;
   /** The person's own invite link to the project; any member may invite. */
@@ -669,14 +720,24 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+/**
+ * What to tell someone who cannot use a shared project. API Key 模式 has no cloud account to share through,
+ * so asking them to "log in" would only send them looking for a switch that is already off.
+ */
+function accountRequiredMessage(options: Pick<CollabServiceOptions, "userMode">): string {
+  return options.userMode?.() === "byok"
+    ? "协作项目需要登录 Memmy 账号；当前是 API Key 模式，项目与任务只保存本机。"
+    : "请先登录 Memmy 后使用协作项目";
+}
+
 export function createCollabCloudRequest(
-  options: Pick<CollabServiceOptions, "cloudBaseUrl" | "getAccount" | "fetcher">
+  options: Pick<CollabServiceOptions, "cloudBaseUrl" | "getAccount" | "fetcher" | "userMode">
 ): CollabCloudRequest {
   const fetcher = options.fetcher ?? globalThis.fetch;
   return async (path, init = {}) => {
     const account = options.getAccount();
     if (!account) {
-      throw new CollabError("unauthorized", "请先登录 Memmy 后使用协作项目");
+      throw new CollabError("unauthorized", accountRequiredMessage(options));
     }
     let response: Response;
     try {
@@ -733,7 +794,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
   function requireAccount(): CollabAccount {
     const account = options.getAccount();
     if (!account) {
-      throw new CollabError("unauthorized", "请先登录 Memmy 后使用协作项目");
+      throw new CollabError("unauthorized", accountRequiredMessage(options));
     }
     return account;
   }
@@ -748,6 +809,15 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       project: { ...toProject(data.project), localProjectId: stored.localProjectId },
       ...pageOf(list(data.sessions).map((raw) => withLocalConversation(stored, withLink(raw))), options)
     };
+  }
+
+  async function addedCollabAgents(): Promise<Array<{ sourceId: string; name: string; skillDirectory: string }>> {
+    const agents = await loadCollabAgents();
+    return agents.map((agent) => ({
+      sourceId: agent.sourceId,
+      name: agent.displayName,
+      skillDirectory: agent.skillDirectory
+    }));
   }
 
   async function listLocalSessions(input: { query?: string; sourceIds?: string[]; limit?: number; fresh?: boolean }) {
@@ -1457,6 +1527,187 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     return { kind: "many", sessions: matched, reason: "ambiguous" };
   }
 
+  /**
+   * 用户添加的 Agent 交上来的任务：全部轮次一起上传；第一轮提问相同即覆盖同一条。
+   * 上传之后按提交的原文去找这条任务在本机的记录文件：找到就绑定，之后按文件自动同步；
+   * 找不到（或 5 秒内还没找到）就说清楚之后要在那个 Agent 里说「更新到项目」。
+   */
+  async function addSubmittedTask(
+    projects: Awaited<ReturnType<CollabService["listProjects"]>>["projects"],
+    project: string,
+    submission: SubmittedTask
+  ): Promise<{ text: string; ok?: true }> {
+    const title = submission.title.trim();
+    const turns = submission.turns.filter((turn) => turn.question.trim() || turn.reply.trim());
+    if (!project) {
+      return { text: "已收到任务内容，还没有加入。请带上项目名称和同样的 --file 再运行。" };
+    }
+    if (!turns.length) return { text: "任务内容里没有可加入的轮次，请整理后重试。" };
+    const matched = matchProjectName(projects, project);
+    if (matched.kind !== "exact") return { text: formatProjectProblem(matched, project, turns[0]!.question) };
+    const known = (await loadCollabAgents()).find((agent) => agent.displayName === submission.agentName.trim());
+    const sourceId = known?.sourceId ?? "submitted";
+    const conversationId = submittedConversationId(submission.agentName, turns[0]!.question);
+    const updatedAt = new Date().toISOString();
+    const cloudSessionId = await putCloudSession(
+      matched.project.id,
+      sourceId,
+      conversationId,
+      title,
+      updatedAt,
+      turns.map((turn) => toUploadTurn({
+        question: turn.question,
+        reply: turn.reply,
+        steps: [],
+        startedAt: turn.at?.trim() || updatedAt
+      }))
+    );
+    const account = requireAccount();
+    const key = sessionKey({ sourceId, conversationId });
+    let replaced = false;
+    await exclusive(async () => {
+      const stored = await readLinks(matched.project.id, account.accountId);
+      if (!stored.sessions.some((link) => sessionKey(link) === key)) {
+        stored.sessions.push({ sourceId, conversationId });
+      } else {
+        replaced = true;
+      }
+      stored.synced[key] = { cloudSessionId, updatedAt, groupId: null, title };
+      await writeLinks(stored);
+    });
+
+    // 定位最多等 5 秒：搜索可能很慢，但用户不该为它一直等。没等到的继续在后台找，找到后再绑定。
+    const located = known
+      ? await locateWithinDeadline({
+        skillDirectory: known.skillDirectory,
+        submitted: turns,
+        ...(submission.sourcePath?.trim() ? { sourcePath: submission.sourcePath.trim() } : {})
+      })
+      : null;
+    const bound = located ? await bindRecordFile(matched.project.id, account.accountId, key, located, title) : false;
+    if (!located) {
+      void locateWithinDeadline({
+        skillDirectory: known?.skillDirectory ?? "",
+        submitted: turns,
+        ...(submission.sourcePath?.trim() ? { sourcePath: submission.sourcePath.trim() } : {})
+      }).then(async (late) => {
+        if (!late) return;
+        await bindRecordFile(matched.project.id, account.accountId, key, late, title).catch(() => undefined);
+      }).catch(() => undefined);
+    }
+    const count = String(turns.length);
+    if (bound) {
+      return {
+        ok: true,
+        text: [
+          replaced
+            ? `已更新项目「${matched.project.name}」中的任务「${title}」，共 ${count} 轮。`
+            : `已把任务「${title}」加入「${matched.project.name}」，共 ${count} 轮。`,
+          "之后这条任务的新内容会自动同步到项目。"
+        ].join("\n")
+      };
+    }
+    return {
+      ok: true,
+      text: replaced
+        ? `已更新项目「${matched.project.name}」中的任务「${title}」，共 ${count} 轮。`
+        : [
+            `已把任务「${title}」加入「${matched.project.name}」，共 ${count} 轮。`,
+            "Memmy 读不到这条任务的本地记录，之后要更新，在这里说「更新到项目」。"
+          ].join("\n")
+    };
+  }
+
+  /** 绑定记录文件：先按文件内容替换一次（标题保留 Agent 提交的那个），再把绑定写进关联记录。 */
+  async function bindRecordFile(
+    projectId: string,
+    accountId: string,
+    key: string,
+    binding: RecordBinding,
+    title: string
+  ): Promise<boolean> {
+    const fileTurns = await readRecordFile(binding.path, binding.reader).catch(() => []);
+    if (!fileTurns.length) return false;
+    const { sourceId, conversationId } = parseSessionKey(key);
+    try {
+      const cloudSessionId = await putCloudSession(
+        projectId,
+        sourceId,
+        conversationId,
+        title,
+        new Date().toISOString(),
+        fileTurns.map((turn) => toUploadTurn({
+          question: turn.question,
+          reply: turn.reply,
+          steps: [],
+          startedAt: turn.at ?? new Date().toISOString()
+        }))
+      );
+      await exclusive(async () => {
+        const stored = await readLinks(projectId, accountId);
+        const entry = stored.synced[key];
+        // 这条任务可能已经被删掉了：那时不再绑定，避免留下指向已删任务的记录。
+        if (!entry) return;
+        entry.cloudSessionId = cloudSessionId;
+        entry.updatedAt = new Date().toISOString();
+        entry.source = binding;
+        await writeLinks(stored);
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 有绑定记录的任务：文件改了就用绑定的读取方式重读并上传；文件不在了就停止同步，项目里的内容保留。
+   * 标题沿用提交时的那个，不因文件里的标题变化而改。
+   */
+  async function syncBoundRecords(projectId: string, accountId: string): Promise<{ uploaded: number; failed: number }> {
+    const stored = await readLinks(projectId, accountId);
+    if (!Object.values(stored.synced).some((entry) => entry.source)) return { uploaded: 0, failed: 0 };
+    let uploaded = 0;
+    let failed = 0;
+    let changed = false;
+    for (const [key, synced] of Object.entries(stored.synced)) {
+      const binding = synced.source;
+      if (!binding) continue;
+      const info = await stat(binding.path).catch(() => null);
+      if (!info?.isFile()) {
+        delete synced.source;
+        changed = true;
+        continue;
+      }
+      if (info.mtimeMs === binding.mtimeMs) continue;
+      const turns = await readRecordFile(binding.path, binding.reader).catch(() => []);
+      if (!turns.length) continue;
+      const { sourceId, conversationId } = parseSessionKey(key);
+      try {
+        synced.cloudSessionId = await putCloudSession(
+          stored.projectId,
+          sourceId,
+          conversationId,
+          synced.title ?? turns[0]?.question ?? "",
+          new Date().toISOString(),
+          turns.map((turn) => toUploadTurn({
+            question: turn.question,
+            reply: turn.reply,
+            steps: [],
+            startedAt: turn.at ?? new Date().toISOString()
+          }))
+        );
+        synced.updatedAt = new Date().toISOString();
+        binding.mtimeMs = info.mtimeMs;
+        uploaded += 1;
+        changed = true;
+      } catch {
+        failed += 1;
+      }
+    }
+    if (changed) await exclusive(() => writeLinks(stored));
+    return { uploaded, failed };
+  }
+
   return {
     async listProjects() {
       const account = requireAccount();
@@ -1570,6 +1821,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
 
 
     listLocalSessions,
+
+    listAddedAgents: addedCollabAgents,
 
     async getLinks(projectId) {
       const account = requireAccount();
@@ -1892,10 +2145,12 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
           .then((listing) => listing.sessions)
           .catch(() => []);
         for (const stored of projects) {
+          // 用户添加的 Agent 的任务以本机记录文件为准：文件改了先按文件更新，再走常规上传。
+          const bound = await syncBoundRecords(stored.projectId, account.accountId);
           const { result, synced } = await uploadPending(stored, [...local, ...await projectTaskSessions(stored)]);
           await recordUploaded(stored.projectId, account.accountId, synced);
-          total.uploaded += result.uploaded;
-          total.failed += result.failed;
+          total.uploaded += result.uploaded + bound.uploaded;
+          total.failed += result.failed + bound.failed;
         }
         return total;
       });
@@ -1972,6 +2227,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       if (!projects.length) return { text: formatNoProjects() };
       const hint = input.hint?.trim() ?? "";
       const project = input.project?.trim() ?? "";
+      // 用户添加的 Agent 交上来的任务：内容由它整理好，不再去本机记录里找这一条。
+      if (input.submission) return addSubmittedTask(projects, project, input.submission);
       const sourceId = input.sourceId?.trim() ?? "";
       const conversationId = input.conversationId?.trim() ?? "";
       // The running conversation, when the agent names it. That whole task is added; a different one is not.
@@ -2400,11 +2657,23 @@ function parseStoredLinks(content: string): StoredLinks | null {
   for (const [key, value] of Object.entries(record(raw.synced))) {
     const entry = record(value);
     if (text(entry.cloudSessionId)) {
+      const source = record(entry.source);
+      const sourcePath = text(source.path);
       synced[key] = {
         cloudSessionId: text(entry.cloudSessionId),
         updatedAt: text(entry.updatedAt),
         groupId: nullableText(entry.groupId),
-        ...(nullableText(entry.title) === null ? {} : { title: text(entry.title) })
+        ...(nullableText(entry.title) === null ? {} : { title: text(entry.title) }),
+        // 绑定到本机记录文件的任务：读回时不能丢，否则下一次同步就不再跟随文件了。
+        ...(sourcePath && text(source.reader)
+          ? {
+            source: {
+              path: sourcePath,
+              reader: text(source.reader) as RecordBinding["reader"],
+              mtimeMs: typeof source.mtimeMs === "number" ? source.mtimeMs : 0
+            }
+          }
+          : {})
       };
     }
   }

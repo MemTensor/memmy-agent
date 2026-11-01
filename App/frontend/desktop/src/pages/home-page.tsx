@@ -1547,7 +1547,9 @@ export function HomePage() {
 
     void submitAgentComposerMessage({
       chatId: null,
-      target: { kind: "standalone" },
+      target: pendingLaunch.projectId
+        ? { kind: "project", projectId: pendingLaunch.projectId }
+        : { kind: "standalone" },
       connection,
       ensureChatSubscription,
       content: pendingLaunch.prompt,

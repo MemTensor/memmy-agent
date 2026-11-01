@@ -25,6 +25,7 @@ import { openAgentTaskInChat } from "../app/open-agent-task.js";
 import {
   addCollabProject,
   addPendingApplication,
+  clearCollabProjects,
   consumeCreateProjectRequest,
   getCollabProjectsSnapshot,
   loadCollabProjects,
@@ -37,6 +38,7 @@ import {
   showCollabNotice,
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
+import { collabEnabledFor } from "../app/collab-mode.js";
 import { ApiRequestError } from "../api/http.js";
 import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
@@ -362,14 +364,22 @@ export function AppFrame(props: AppFrameProps) {
   const taskBus = useTaskBus();
   const collabClient = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
   const collabSnapshot = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
+  /** 协作项目只存在于账号模式：API Key 模式是纯本机环境，上一次登录的凭据不算数。 */
+  const collabEnabled = collabEnabledFor(state.bootstrap?.app.userMode);
   const collabLoadedForAccount = useRef<string | null>(null);
   useEffect(() => {
     // Online projects need a signed-in account; loading once per account keeps the sidebar and the board in step.
-    if (!collabClient || !state.account.userId) return;
+    if (!collabClient || !collabEnabled || !state.account.userId) return;
     if (collabLoadedForAccount.current === state.account.userId) return;
     collabLoadedForAccount.current = state.account.userId;
     void loadCollabProjects(collabClient);
-  }, [collabClient, state.account.userId]);
+  }, [collabClient, collabEnabled, state.account.userId]);
+  useEffect(() => {
+    if (collabEnabled) return;
+    // 切到 API Key 模式：云端项目、成员与「已共享」标记全部撤回，本机项目与任务不受影响。
+    collabLoadedForAccount.current = null;
+    clearCollabProjects();
+  }, [collabEnabled]);
   // An online project created before binding existed, whose local project went missing, or that the person just
   // joined (at once, or once their request was approved) gets one here so its row can hold tasks. A failed attempt
   // is not retried until the next launch.
@@ -380,7 +390,7 @@ export function AppFrame(props: AppFrameProps) {
   /** A project joined from the join dialog: its board opens once its local project exists. */
   const openBoardWhenBound = useRef<string | null>(null);
   useEffect(() => {
-    if (!collabClient) return;
+    if (!collabClient || !collabEnabled) return;
     const pending = (collabSnapshot.projects ?? []).filter((project) => (
       !project.localProjectId && !collabBindAttempts.current.has(project.id)
     ));
@@ -411,21 +421,21 @@ export function AppFrame(props: AppFrameProps) {
         }
       }
     })();
-  }, [collabClient, collabSnapshot.projects, taskStateCoordinator]);
+  }, [collabClient, collabEnabled, collabSnapshot.projects, taskStateCoordinator]);
 
   // Coming back to the window picks up an approval that happened while Memmy was in the background.
   const collabRefreshedAt = useRef(0);
   const collabRecheckedAt = useRef(0);
   const refreshCollabProjects = useCallback((throttleMs: number) => {
-    if (!collabClient || !state.account.userId) return;
+    if (!collabClient || !collabEnabled || !state.account.userId) return;
     const now = Date.now();
     if (now - collabRefreshedAt.current < throttleMs) return;
     collabRefreshedAt.current = now;
     void loadCollabProjects(collabClient);
-  }, [collabClient, state.account.userId]);
+  }, [collabClient, collabEnabled, state.account.userId]);
 
   useEffect(() => {
-    if (!collabClient || !state.account.userId) return;
+    if (!collabClient || !collabEnabled || !state.account.userId) return;
     collabRefreshedAt.current = Date.now();
     const refresh = () => refreshCollabProjects(COLLAB_FOCUS_REFRESH_MS);
     // 从别的应用切回来也立即读一次：人回来的第一眼就该是新的。
@@ -438,31 +448,31 @@ export function AppFrame(props: AppFrameProps) {
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [collabClient, state.account.userId, refreshCollabProjects]);
+  }, [collabClient, collabEnabled, state.account.userId, refreshCollabProjects]);
 
   // While a join request is still pending, reread the same list so approval shows up without leaving the window.
   // The timer stops once the list is empty, so a person with no request pays nothing.
   const pendingApplicationCount = collabSnapshot.applications.length;
   useEffect(() => {
-    if (!collabClient || !state.account.userId || pendingApplicationCount === 0) return;
+    if (!collabClient || !collabEnabled || !state.account.userId || pendingApplicationCount === 0) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
       void loadCollabProjects(collabClient);
     }, COLLAB_APPLICATION_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [collabClient, pendingApplicationCount, state.account.userId]);
+  }, [collabClient, collabEnabled, pendingApplicationCount, state.account.userId]);
 
   /**
    * 「申请中」那一行没有按钮也没有菜单：鼠标划到它、或者点它一下，就在背后重查一次。
    * 没有变化时界面完全不动，有结果时由轮询那套逻辑统一处理，所以不需要额外的反馈。
    */
   const recheckPendingApplication = useCallback((force = false) => {
-    if (!collabClient || !state.account.userId) return;
+    if (!collabClient || !collabEnabled || !state.account.userId) return;
     const now = Date.now();
     if (!force && now - collabRecheckedAt.current < COLLAB_RECHECK_THROTTLE_MS) return;
     collabRecheckedAt.current = now;
     void loadCollabProjects(collabClient);
-  }, [collabClient, state.account.userId]);
+  }, [collabClient, collabEnabled, state.account.userId]);
 
   // 审核结果只提示一次：通过就告诉人已经加入，未通过就说清还能再申请。
   const notifications = useOptionalNotificationCenter();
@@ -2029,6 +2039,8 @@ export function AppFrame(props: AppFrameProps) {
       />
       <CollabCreateProjectDialog
         open={createProjectOpen}
+        // API Key 模式不连接云端：新建弹窗里不出现「与成员共享」，项目就只建在本机。
+        shareAvailable={collabEnabled}
         onClose={() => setCreateProjectOpen(false)}
         onCreated={(localProjectId) => {
           setCreateProjectOpen(false);

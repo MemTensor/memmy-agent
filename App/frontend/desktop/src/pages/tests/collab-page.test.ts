@@ -6,6 +6,7 @@ import {
   groupAgentSessions,
   groupCheckState,
   groupingKind,
+  pickerAgentName,
   isSessionChecked,
   localSessionKey,
   taskDayGroup,
@@ -33,6 +34,11 @@ function session(sourceId: string, conversationId: string, title: string, groupI
 const none: CollabLinks = { groups: [], sessions: [] };
 
 describe("collab page helpers", () => {
+  it("shows the name the person entered for an added agent", () => {
+    expect(pickerAgentName({ sourceId: "added-qoder-82ef827e", name: "Qoder" })).toBe("Qoder");
+    expect(pickerAgentName({ sourceId: "cursor", name: "Cursor" })).toBe("Cursor");
+  });
+
   const sessions = [
     session("claude_code", "a", "Memmy 中转 Claude Code 会话", "/w/memmy-agent", "2026-10-21T10:00:00.000Z"),
     session("claude_code", "b", "分享弹窗", "/w/memmy-agent", "2026-10-21T12:00:00.000Z"),
@@ -114,6 +120,27 @@ describe("collab page helpers", () => {
       "Briefly inform the user about the task result and perform any follow-up actions (if needed). If there's no follow-ups needed, don't explicitly say that.",
       "</user_query>"
     ].join("\n"))).toBe("");
+  });
+
+  it("drops a skill body an agent wrote into a user record", () => {
+    // Qoder 之类的 Agent 把「加载技能」也写成一条用户消息：整段技能正文不是谁问的问题。
+    const skill = [
+      "Base directory for this skill: /Users/sunq/.qoder/skills/memmy-project",
+      "",
+      "# Memmy 协作项目",
+      "",
+      "你负责在用户所在的 Memmy 协作项目里找到成员的任务并读取。"
+    ].join("\n");
+    expect(visibleQuestion(skill)).toBe("");
+    // 前面还有真问题时保留那一句，技能正文从标记处截掉。
+    expect(visibleQuestion(`帮我看下部署\n\n${skill}`)).toBe("帮我看下部署");
+  });
+
+  it("does not turn an interruption marker into a question", () => {
+    // 打断是 Qoder 写进记录的一条用户消息，不是谁问的问题。
+    expect(visibleQuestion("[Request interrupted by user]")).toBe("");
+    expect(visibleQuestion("[Request interrupted by user for tool use]")).toBe("");
+    expect(visibleQuestion("继续\n[Request interrupted by user]")).toBe("继续");
   });
 });
 

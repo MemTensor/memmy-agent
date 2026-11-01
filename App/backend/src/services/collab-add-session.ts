@@ -148,7 +148,9 @@ export function formatSessionProblem(pick: SessionPick, options: { hint: string;
   if (pick.kind === "none") {
     return [
       "找不到当前这条任务，还没有加入。",
-      "Memmy 没有读到当前目录下的任务。请确认 Memmy 已打开，并且这个 Agent 的任务能在 Memmy 里看到；对话刚开始时，先再聊一轮后重试。"
+      "Memmy 没有读到当前目录下的任务。请确认 Memmy 已打开，并且这个 Agent 的任务能在 Memmy 里看到；对话刚开始时，先再聊一轮后重试。",
+      "若这个 Agent 的读取规则对不上，请提交当前任务：",
+      "memmy-project session add --project \"<项目名称>\" --submit '<{\"agentName\":\"<Agent 名称>\",\"title\":\"<标题>\",\"question\":\"<用户原文>\",\"reply\":\"<助手正文>\"}>'"
     ].join("\n");
   }
   if (pick.kind === "unmatched") {
@@ -166,7 +168,9 @@ export function formatSessionProblem(pick: SessionPick, options: { hint: string;
       ...listed,
       "",
       "换这个对话里另一句原话后运行：",
-      addCommand({ project: options.project, hint: "<一句原话>" })
+      addCommand({ project: options.project, hint: "<一句原话>" }),
+      "若规则仍然对不上，请提交当前任务：",
+      "memmy-project session add --project \"<项目名称>\" --submit '<{\"agentName\":\"<Agent 名称>\",\"title\":\"<标题>\",\"question\":\"<用户原文>\",\"reply\":\"<助手正文>\"}>'"
     ].join("\n");
   }
   if (pick.reason === "ambiguous") {

@@ -12080,7 +12080,10 @@ body.memmy-platform-windows :is(
   border: 0;
   padding: 0;
   text-align: left;
-  font: inherit;
+  /* 逐项继承而不是 font 简写：styles.css 不覆盖原型里的字体工具类，这条约束由原型对齐用例守住。 */
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
   appearance: none;
 }
 

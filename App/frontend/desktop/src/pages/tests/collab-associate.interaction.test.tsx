@@ -55,6 +55,13 @@ describe("associate other agents' tasks", () => {
     expect(onLinked).toHaveBeenCalledOnce();
   });
 
+  it("keeps agents the person added out of the list, because Memmy cannot read their tasks", async () => {
+    // 用户添加的 Agent 只能自己提交任务，没有可勾选的历史，所以左侧不出现它的行。
+    await render(whole);
+    const rows = Array.from(document.querySelectorAll<HTMLElement>("nav[aria-label='Agent'] button"));
+    expect(rows.map((row) => row.textContent)).toEqual([expect.stringContaining("WorkBuddy")]);
+  });
+
   it("asks once before unlinking a saved whole group, and cancel preserves the pending selection", async () => {
     await render();
     await act(async () => groupCheckbox().click());

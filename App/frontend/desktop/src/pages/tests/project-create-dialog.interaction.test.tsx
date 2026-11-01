@@ -234,6 +234,43 @@ describe("new project dialog", () => {
     expect(onShareFailed).not.toHaveBeenCalled();
   });
 
+  it("hides both cloud entries in API Key mode", async () => {
+    // 另起一个根：默认弹窗已经挂在原来的根上，同一个根不能先卸再画。
+    await act(async () => root.unmount());
+    const bareRoot = createRoot(container);
+    await act(async () => {
+      bareRoot.render(
+        <I18nProvider language="zh-CN">
+          <CreateProjectModal
+            open
+            // API Key 模式没有云端账号：共享开关与「加入项目」都不出现，只建本机项目。
+            shareAvailable={false}
+            collab={collab()}
+            onClose={vi.fn()}
+            onCreated={onCreated}
+            onShared={vi.fn()}
+            onBound={vi.fn()}
+            onBindFailed={vi.fn()}
+            onShareFailed={onShareFailed}
+            onShareLimitReached={onShareLimitReached}
+          />
+        </I18nProvider>
+      );
+    });
+    await flush();
+
+    expect(document.querySelector(".modal-body [role='switch']")).toBeNull();
+    expect(document.body.textContent).not.toContain("与成员共享");
+    expect(document.body.textContent).not.toContain("加入项目");
+
+    await act(async () => type(nameInput(), "demo"));
+    await act(async () => submitButton().click());
+    await flush();
+    expect(mocks.createProject).not.toHaveBeenCalled();
+    expect(onCreated).toHaveBeenCalledWith("local-1");
+    await act(async () => bareRoot.unmount());
+  });
+
   it("leaves other sharing failures to the generic notice", async () => {
     mocks.createProject.mockRejectedValueOnce(new ApiRequestError("暂时无法连接 Memmy 云端，请稍后重试。", 503));
     await act(async () => type(nameInput(), "demo"));

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createSourceRegistry } from "../../source-registry.js";
 import type { ConversationMessage, SourceAdapter } from "../../types.js";
-import { cleanQuestion, createLocalSessionReader } from "../local-session-reader.js";
+import { cleanQuestion, createLocalSessionReader, isInternalUserMessage } from "../local-session-reader.js";
 
 describe("local session reader", () => {
   it("lists each session once with its first question as title", async () => {
@@ -157,6 +157,27 @@ describe("local session reader", () => {
     // 任务之间互相引用时留下的注释与引用前缀，不该出现在标题里
     expect(cleanQuestion("<!-- reply 2 --> > conversation_id 写入项目记忆时还是必填？ <!-- reply --> > 否"))
       .toBe("conversation_id 写入项目记忆时还是必填？ 否");
+  });
+
+  it("does not turn harness notes into questions or titles", async () => {
+    // Qoder 把打断标记、工作区说明与技能正文都写进用户消息；它们不是谁问的话。
+    expect(isInternalUserMessage("[Request interrupted by user for tool use]")).toBe(true);
+    expect(isInternalUserMessage("Base directory for this skill: ~/.qoder/skills/memmy-project")).toBe(true);
+    expect(isInternalUserMessage("Repository: MemOS-WorkSpace 聚合工作区\nBranch: local\n\n== Root-level Directory Tree (depth 2) ==\n.")).toBe(true);
+    expect(isInternalUserMessage("Module: memmy/app\nSlug: app\nForm: leaf\n\nDirectory tree for this module's scope:")).toBe(true);
+    expect(isInternalUserMessage("Do not call any more tools. Follow the original output format and provide the final answer now.")).toBe(true);
+    expect(isInternalUserMessage("帮我看下部署")).toBe(false);
+
+    const reader = readerWith([fakeAdapter("qoder", "Qoder", [
+      message("qoder", "q-1", "user", "[Request interrupted by user]", "2026-10-21T07:00:00.000Z", "/repo"),
+      message("qoder", "q-1", "user", "去看看决策冲突处理方案", "2026-10-21T07:00:10.000Z", "/repo"),
+      message("qoder", "q-1", "assistant", "读完了。", "2026-10-21T07:00:20.000Z", "/repo"),
+      message("qoder", "q-1", "user", "Base directory for this skill: ~/.qoder/skills/memmy-project\n\n# Memmy 协作项目", "2026-10-21T07:00:30.000Z", "/repo")
+    ])]);
+    const listed = (await reader.available({})).sessions;
+    expect(listed[0]?.title).toBe("去看看决策冲突处理方案");
+    expect(listed[0]?.lastQuestion).toBe("去看看决策冲突处理方案");
+    expect(listed[0]?.turnCount).toBe(1);
   });
 
   it("uses the title the agent generated, not the first sentence the person typed", async () => {

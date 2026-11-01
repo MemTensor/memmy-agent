@@ -110,7 +110,20 @@ const SessionTurnSchema = z.object({
   startedAt: z.string()
 });
 const SessionDetailResponseSchema = z.object({ session: ProjectSessionSchema, turns: z.array(SessionTurnSchema) });
-const LocalSessionsResponseSchema = z.object({ sessions: z.array(LocalAgentSessionSchema), refreshing: z.boolean() });
+const LocalSessionsResponseSchema = z.object({
+  sessions: z.array(LocalAgentSessionSchema),
+  refreshing: z.boolean()
+});
+const AddedAgentSchema = z.object({
+  sourceId: z.string(),
+  name: z.string(),
+  /** 添加时装进技能的那个目录，界面上用来确认是不是同一个 Agent。 */
+  skillDirectory: z.string()
+});
+/** An agent the person added: Memmy installs memmy-project for it and never reads its task records. */
+export type AddedAgent = z.infer<typeof AddedAgentSchema>;
+const AddedAgentsResponseSchema = z.object({ agents: z.array(AddedAgentSchema) });
+const RemoveAgentResponseSchema = z.object({ text: z.string() });
 const SyncResponseSchema = z.object({
   uploaded: z.number(),
   removed: z.number(),
@@ -273,8 +286,18 @@ export interface CollabClient {
   /** Downloads one session and returns the text a message carries so an agent reads it. */
   readReference(reference: string): Promise<{ session: CollabProjectSession; text: string }>;
   /** Answers from the last scan at once; `refreshing` means asking again with `fresh` returns a newer list. */
-  listLocalSessions(input: { query?: string; sourceIds?: string[]; limit?: number; fresh?: boolean }): Promise<{ sessions: LocalAgentSession[]; refreshing: boolean }>;
+  listLocalSessions(input: { query?: string; sourceIds?: string[]; limit?: number; fresh?: boolean }): Promise<{
+    sessions: LocalAgentSession[];
+    refreshing: boolean;
+  }>;
   getLinks(projectId: string): Promise<CollabLinks>;
+  /**
+   * Agents the person added: their name and the skills folder memmy-project was installed into.
+   * The add dialog lists them so one can be removed again.
+   */
+  listAddedAgents(): Promise<AddedAgent[]>;
+  /** Removes the agent's memmy-project skill and forgets it; tasks it already joined stay in the project. */
+  removeAddedAgent(name: string): Promise<{ text: string }>;
   /** Saves the selection and queues the upload; it returns before the sessions arrive. */
   saveLinks(projectId: string, links: CollabLinks): Promise<CollabSyncResult>;
   /** The Memmy sessions of the project's local folder, each saying whether the project includes it. */
@@ -455,6 +478,15 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
 
     async getLinks(projectId) {
       return requestJson({ config, path: `/api/collab/projects/${encodeURIComponent(projectId)}/links`, schema: LinksSchema });
+    },
+
+    async listAddedAgents() {
+      const result = await requestJson({ config, path: "/api/collab/agents", schema: AddedAgentsResponseSchema });
+      return result.agents;
+    },
+
+    async removeAddedAgent(name) {
+      return requestJson({ config, path: "/api/collab/agents/remove", schema: RemoveAgentResponseSchema, body: { name } });
     },
 
     async saveLinks(projectId, links) {

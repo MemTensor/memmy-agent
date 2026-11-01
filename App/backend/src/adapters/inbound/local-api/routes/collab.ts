@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { MAX_COLLAB_INSTRUCTIONS_CHARS } from "@memmy/local-api-contracts";
 import { CollabError, sinceWindowMs, type CollabService } from "../../../../services/collab-service.js";
+import { connectCollabAgent, removeCollabAgent } from "../../../../services/collab-added-agents.js";
 import { withErrorEnvelope } from "../../../../services/error-envelope.js";
 
 export interface RegisterCollabRoutesOptions {
@@ -75,6 +76,12 @@ const ReadViewSchema = z.object({
   all: z.boolean().optional()
 }).strict().refine((view) => Object.keys(view).length <= 1, "只能指定一种读取范围");
 const ReadSchema = z.object({ reference: z.string().trim().min(1).max(2_000), view: ReadViewSchema.optional() }).strict();
+const ConnectAgentSchema = z.object({
+  name: z.string().trim().min(1).max(40),
+  /** 用户填的技能目录；留空时由添加任务自己去查找，不在这里猜。 */
+  skillDirectory: z.string().trim().min(1).max(4_000)
+}).strict();
+const RemoveAgentSchema = z.object({ name: z.string().trim().min(1).max(40) }).strict();
 /** Adds the current local task. The project name is optional so a partial name can be answered with the next command. */
 const AddSessionSchema = z.object({
   project: z.string().trim().min(1).max(100).optional(),
@@ -82,7 +89,19 @@ const AddSessionSchema = z.object({
   hint: z.string().trim().min(1).max(500).optional(),
   /** Set together: the conversation the command is running inside. */
   sourceId: SourceIdSchema.optional(),
-  conversationId: ConversationIdSchema.optional()
+  conversationId: ConversationIdSchema.optional(),
+  /** 用户添加的 Agent 交上来的任务：全部轮次，附带来源 Agent 的名称与标题。 */
+  submission: z.object({
+    agentName: z.string().trim().min(1).max(40),
+    title: z.string().trim().min(1).max(200),
+    turns: z.array(z.object({
+      question: z.string().trim().min(1).max(8_000),
+      reply: z.string().trim().min(1).max(20_000),
+      at: z.string().trim().min(1).max(40).optional()
+    }).strict()).min(1).max(500),
+    /** Agent 明确给出的记录文件；不给时由 Memmy 在该 Agent 的配置目录里按原文搜索。 */
+    sourcePath: z.string().trim().min(1).max(4_000).optional()
+  }).strict().optional()
 }).strict();
 const SearchKnowledgeSchema = z.object({
   query: z.string().trim().min(1).max(8000),
@@ -134,6 +153,11 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
 
   app.get("/api/collab/projects", guard, withErrorEnvelope(async (_request, reply) =>
     reply.send(await options.collab.listProjects())));
+
+  // Agents added on this computer, read from its own file: the board names their tasks with these names,
+  // and the cloud only knows the generated source id.
+  app.get("/api/collab/agents", guard, withErrorEnvelope(async (_request, reply) =>
+    reply.send({ agents: await options.collab.listAddedAgents() })));
 
   app.post("/api/collab/projects", guard, withErrorEnvelope(async (request, reply) => {
     const input = CreateProjectSchema.parse(request.body ?? {});
@@ -349,7 +373,26 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
     return reply.send({ project: { id: project.id, name: project.name }, ...result });
   }));
 
-  // One local task joins a project. The reply is the text `memmy-project session add` prints, including what to run next.
+  // 添加一个用户自己的 Agent：只把 memmy-project 装进它的技能目录，回复就是 `memmy-project agent connect` 打印的文字。
+  app.post("/api/collab/agents/connect", guard, withErrorEnvelope(async (request, reply) => {
+    const input = ConnectAgentSchema.parse(request.body ?? {});
+    try {
+      const result = await connectCollabAgent({
+        name: input.name,
+        skillDirectory: input.skillDirectory
+      });
+      return reply.send({ text: result.text, sourceId: result.sourceId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "没有添加这个 Agent。";
+      return reply.send({ text: message });
+    }
+  }));
+
+  app.post("/api/collab/agents/remove", guard, withErrorEnvelope(async (request, reply) => {
+    const input = RemoveAgentSchema.parse(request.body ?? {});
+    return reply.send({ text: await removeCollabAgent(input.name) });
+  }));
+
   app.post("/api/collab/sessions/add", guard, withErrorEnvelope(async (request, reply) => {
     const input = AddSessionSchema.parse(request.body ?? {});
     return reply.send(await options.collab.addCurrentSession({
@@ -357,7 +400,8 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(input.hint === undefined ? {} : { hint: input.hint }),
       ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
-      ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId })
+      ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
+      ...(input.submission === undefined ? {} : { submission: input.submission })
     }));
   }));
 

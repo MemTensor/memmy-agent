@@ -102,6 +102,8 @@ export class LocalSessionReadError extends Error {
 
 export interface CreateLocalSessionReaderDeps {
   registry: SourceRegistry;
+  /** When set, each scan reads this list instead of `registry.list()`, so added agents can be loaded from disk. */
+  adapters?: () => Promise<readonly SourceAdapter[]>;
   sessionsPerSource?: number;
   snapshotTtlMs?: number;
   now?: () => number;
@@ -116,8 +118,12 @@ export function createLocalSessionReader(deps: CreateLocalSessionReaderDeps): Lo
   let loading: Promise<LocalSession[]> | null = null;
 
   /** One live read of the agents' stores at a time, shared by every caller waiting on it. */
+  async function adapters(): Promise<readonly SourceAdapter[]> {
+    return deps.adapters ? deps.adapters() : deps.registry.list();
+  }
+
   function scan(): Promise<LocalSession[]> {
-    loading ??= Promise.all(deps.registry.list().map((adapter) => readRecentSessions(adapter, sessionsPerSource)))
+    loading ??= adapters().then((list) => Promise.all(list.map((adapter) => readRecentSessions(adapter, sessionsPerSource))))
       .then((perSource) => {
         const sessions = perSource.flat();
         snapshot = { loadedAt: now(), sessions };
@@ -159,7 +165,7 @@ export function createLocalSessionReader(deps: CreateLocalSessionReaderDeps): Lo
     },
 
     async read(input) {
-      const adapter = deps.registry.get(input.sourceId);
+      const adapter = (await adapters()).find((item) => item.descriptor.sourceId === input.sourceId);
       if (!adapter) {
         throw new LocalSessionReadError("not_found", `Unknown agent source: ${input.sourceId}`);
       }
@@ -171,7 +177,7 @@ export function createLocalSessionReader(deps: CreateLocalSessionReaderDeps): Lo
     },
 
     async readMany(input) {
-      const adapter = deps.registry.get(input.sourceId);
+      const adapter = (await adapters()).find((item) => item.descriptor.sourceId === input.sourceId);
       if (!adapter) {
         throw new LocalSessionReadError("not_found", `Unknown agent source: ${input.sourceId}`);
       }
@@ -279,6 +285,8 @@ function appendMessage(builder: SessionBuilder, message: ConversationMessage): v
     return;
   }
   if (message.role === "user") {
+    // 宿主与 Agent 自己写进用户消息的东西不算一问：打断标记、工作区说明、技能正文。
+    if (isInternalUserMessage(message.content)) return;
     builder.turns.push({ question: stripInjectedContext(message.content), reply: "", steps: [], startedAt: message.createdAt });
     return;
   }
@@ -346,6 +354,24 @@ export function cleanQuestion(text: string): string {
     })
     .join(" ");
   return collapse(lines);
+}
+
+/**
+ * 有些内容写在用户消息里，但没有人说过：
+ * - `[Request interrupted by user for tool use]`：按停止键时宿主补的一条；
+ * - `Repository: … / Branch: …` 加一整棵目录树：宿主在开头塞的工作区说明；
+ * - `Base directory for this skill:`：Agent 加载技能时把技能正文写了进来。
+ * 它们不该成为一问，也不该被拿来当任务标题。
+ */
+export function isInternalUserMessage(text: string): boolean {
+  const trimmed = text.trim();
+  // 按停止键时宿主补的一句：先写打断标记，有时只写这句指令
+  if (/^\[Request interrupted by user[^\]]*\]/iu.test(trimmed)) return true;
+  if (/^Do not call any more tools\./iu.test(trimmed)) return true;
+  if (/^Base directory for this skill:/iu.test(trimmed)) return true;
+  // 工作区与模块说明：一段标签加一整棵目录树
+  if (/^Repository:[^\n]*\nBranch:[^\n]*/iu.test(trimmed) && /==\s*Root-level Directory Tree/iu.test(trimmed)) return true;
+  return /^Module: [^\n]*\nSlug:/iu.test(trimmed) && /Directory tree for this module/iu.test(trimmed);
 }
 
 /** 判断一段用户消息像不像人真的问的问题，而不是宿主或自动化塞进来的模板。 */

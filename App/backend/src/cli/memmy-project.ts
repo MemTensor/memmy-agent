@@ -6,7 +6,7 @@
  *
  * Only Node built-ins are imported: the desktop build copies this one file next to its launcher.
  */
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -29,6 +29,9 @@ const USAGE = [
   "  memmy-project session search <keywords> [--member <name>] [--project <project name>] [--since 30d] [--limit <n>]",
   "  memmy-project session read <link|id|id#turn> [--turns <from>-<to> | --around <turn> | --find \"<sentence>\" | --all]",
   "  memmy-project session add [--project <project name>] [--hint \"<sentence>\"]",
+  "  memmy-project session add --agent <agent name> --project <project name> --file <task.json> [--source <record file>]",
+  "  memmy-project agent connect --name <agent name> --skill-dir <directory>",
+  "  memmy-project agent remove --name <agent name>",
   "  memmy-project session share [--project <project name>] [--off]",
   "",
   "Finds and reads sessions of your shared Memmy projects, and shares the current one to a project. Memmy must be running."
@@ -110,6 +113,22 @@ export async function runMemmyProject(argv: readonly string[], deps: MemmyProjec
       ...evidence.map((item) => `\n【${text(item.title) || "知识库资料"}】\n${text(item.content)}`)
     ].join("\n");
   }
+  if (resource === "agent") {
+    if (action === "connect") {
+      const name = optionString(parsed, "name")?.trim();
+      const skillDirectory = optionString(parsed, "skill-dir")?.trim();
+      if (!name || !skillDirectory) throw new Error("agent connect 需要 --name 和 --skill-dir");
+      const result = await localApi(deps, "POST", "/api/collab/agents/connect", { name, skillDirectory });
+      return typeof result.text === "string" ? result.text : "";
+    }
+    if (action === "remove") {
+      const name = optionString(parsed, "name")?.trim();
+      if (!name) throw new Error("agent remove 需要 --name");
+      const result = await localApi(deps, "POST", "/api/collab/agents/remove", { name });
+      return typeof result.text === "string" ? result.text : "";
+    }
+    throw new Error(`未知命令：agent ${action ?? ""}\n\n${USAGE}`);
+  }
   if (resource !== "session") throw new Error(`未知命令：${resource}\n\n${USAGE}`);
   if (action === "read") {
     const raw = rest.join(" ").trim();
@@ -132,6 +151,22 @@ export async function runMemmyProject(argv: readonly string[], deps: MemmyProjec
     if (rest.length) throw new Error("session add 用 --project 指定项目名称");
     const project = optionString(parsed, "project")?.trim();
     const hint = optionString(parsed, "hint")?.trim();
+    const agentName = optionString(parsed, "agent")?.trim();
+    const file = optionString(parsed, "file")?.trim();
+    if (Boolean(agentName) !== Boolean(file)) {
+      throw new Error("session add 的 --agent 与 --file 要一起用");
+    }
+    if (agentName && file) {
+      // 用户添加的 Agent：内容由它自己整理成 JSON，上传成功后删掉这个文件。
+      const source = optionString(parsed, "source")?.trim();
+      const submission = await readSubmission(file, agentName, source);
+      const result = await localApi(deps, "POST", "/api/collab/sessions/add", {
+        ...(project ? { project } : {}),
+        submission
+      });
+      if (result.ok === true) await rm(file, { force: true });
+      return typeof result.text === "string" ? result.text : "";
+    }
     const running = runningConversation(deps.env ?? process.env);
     const result = await localApi(deps, "POST", "/api/collab/sessions/add", {
       cwd: deps.cwd ?? process.cwd(),
@@ -377,6 +412,48 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function text(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+/**
+ * 读取用户添加的 Agent 交上来的任务文件：`{ title, turns: [{ question, reply, at? }] }`。
+ * 内容由那个 Agent 整理，这里只做形状校验，不做改写。
+ */
+async function readSubmission(
+  file: string,
+  agentName: string,
+  sourcePath?: string
+): Promise<{
+  agentName: string;
+  title: string;
+  turns: Array<{ question: string; reply: string; at?: string }>;
+  sourcePath?: string;
+}> {
+  const raw = await readFile(file, "utf8").catch(() => null);
+  if (raw === null) throw new Error(`找不到任务文件：${file}`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("任务文件需要是 JSON：{ \"title\": \"…\", \"turns\": [{ \"question\": \"…\", \"reply\": \"…\" }] }");
+  }
+  if (!isRecord(parsed)) throw new Error("任务文件需要是 JSON 对象");
+  const title = text(parsed.title).trim();
+  const turns = Array.isArray(parsed.turns) ? parsed.turns : [];
+  const cleaned = turns.flatMap((turn) => {
+    if (!isRecord(turn)) return [];
+    const question = text(turn.question).trim();
+    const reply = text(turn.reply).trim();
+    if (!question || !reply) return [];
+    const at = text(turn.at).trim();
+    return [{ question, reply, ...(at ? { at } : {}) }];
+  });
+  if (!cleaned.length) throw new Error("任务文件的 turns 里没有完整的问答轮次");
+  return {
+    agentName,
+    ...(title ? { title } : { title: cleaned[0]!.question.slice(0, 60) }),
+    turns: cleaned,
+    ...(sourcePath ? { sourcePath } : {})
+  };
 }
 
 async function main(): Promise<void> {

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -237,6 +237,107 @@ describe("memmy-project", () => {
     expect(body).toEqual({ cwd: "/repo", project: "Memmy 开发", sourceId: "cursor", conversationId: "composer-current" });
     await expect(run(["session", "add", "Memmy 开发"], { runtimeConfigPath })).rejects.toThrow(/--project/);
     expect(await run(["help"], { runtimeConfigPath })).toContain("memmy-project session add");
+  });
+
+  it("uploads a task file an added agent wrote, then deletes it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-project-task-"));
+    roots.push(root);
+    const file = join(root, "task.json");
+    writeFileSync(file, JSON.stringify({
+      title: "分享接口的重试策略",
+      turns: [
+        { question: "重试几次？", reply: "两次。" },
+        { question: "超时呢？", reply: "30 秒。", at: "2026-11-01T02:00:00.000Z" }
+      ]
+    }));
+
+    let body: unknown;
+    const fetcher = (async (_input: string | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ text: "已把任务「分享接口的重试策略」加入「Memmy 开发」，共 2 轮。", ok: true }));
+    }) as typeof fetch;
+    const runtimeConfigPath = runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" });
+
+    const output = await run(["session", "add", "--agent", "Kimi Code", "--project", "Memmy 开发", "--file", file], { fetch: fetcher, runtimeConfigPath });
+    expect(output).toContain("已把任务「分享接口的重试策略」加入");
+    expect(body).toEqual({
+      project: "Memmy 开发",
+      submission: {
+        agentName: "Kimi Code",
+        title: "分享接口的重试策略",
+        turns: [
+          { question: "重试几次？", reply: "两次。" },
+          { question: "超时呢？", reply: "30 秒。", at: "2026-11-01T02:00:00.000Z" }
+        ]
+      }
+    });
+    // 上传成功后文件被删掉；没有它，下次会重复整理同一份内容。
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("passes the record file the agent already knows with --source", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-project-task-"));
+    roots.push(root);
+    const file = join(root, "task.json");
+    writeFileSync(file, JSON.stringify({ title: "重试策略", turns: [{ question: "问", reply: "答" }] }));
+    let body: unknown;
+    const fetcher = (async (_input: string | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ text: "已把任务「重试策略」加入「Memmy 开发」，共 1 轮。\n之后这条任务的新内容会自动同步到项目。", ok: true }));
+    }) as typeof fetch;
+    const runtimeConfigPath = runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" });
+
+    const output = await run([
+      "session", "add",
+      "--agent", "Kimi Code",
+      "--project", "Memmy 开发",
+      "--file", file,
+      "--source", join(root, "session.jsonl")
+    ], { fetch: fetcher, runtimeConfigPath });
+    expect(output).toContain("会自动同步");
+    expect((body as { submission: { sourcePath?: string } }).submission.sourcePath).toBe(join(root, "session.jsonl"));
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("keeps the task file when the upload did not add it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-project-task-"));
+    roots.push(root);
+    const file = join(root, "task.json");
+    writeFileSync(file, JSON.stringify({ title: "标题", turns: [{ question: "问", reply: "答" }] }));
+    const fetcher = (async () => new Response(JSON.stringify({ text: "项目名称不唯一，请指定完整名称。" }))) as typeof fetch;
+    const runtimeConfigPath = runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" });
+
+    expect(await run(["session", "add", "--agent", "Kimi Code", "--file", file], { fetch: fetcher, runtimeConfigPath }))
+      .toContain("项目名称不唯一");
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it("requires --agent and --file together, and refuses a file without turns", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-project-task-"));
+    roots.push(root);
+    const file = join(root, "task.json");
+    writeFileSync(file, JSON.stringify({ title: "空" }));
+    const runtimeConfigPath = runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" });
+
+    await expect(run(["session", "add", "--agent", "Kimi Code"], { runtimeConfigPath })).rejects.toThrow(/要一起用/u);
+    await expect(run(["session", "add", "--project", "Memmy 开发", "--file", file], { runtimeConfigPath })).rejects.toThrow(/要一起用/u);
+    await expect(run(["session", "add", "--agent", "Kimi Code", "--project", "Memmy 开发", "--file", file], { runtimeConfigPath }))
+      .rejects.toThrow(/没有完整的问答轮次/u);
+  });
+
+  it("adds an agent with only a name and a skills folder", async () => {
+    let body: unknown;
+    const fetcher = (async (_input: string | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ text: "已添加 Kimi Code。", sourceId: "added-kimi-code-1a2b3c4d" }));
+    }) as typeof fetch;
+    const runtimeConfigPath = runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" });
+
+    expect(await run(["agent", "connect", "--name", "Kimi Code", "--skill-dir", "~/.kimi/skills"], { fetch: fetcher, runtimeConfigPath }))
+      .toBe("已添加 Kimi Code。");
+    // 不再需要规则文件：解读记录格式已经不在这一版的能力里。
+    expect(body).toEqual({ name: "Kimi Code", skillDirectory: "~/.kimi/skills" });
+    await expect(run(["agent", "connect", "--name", "Kimi Code"], { runtimeConfigPath })).rejects.toThrow(/--skill-dir/u);
   });
 
   it("shares the running Memmy task from the inside, and refuses outside Memmy", async () => {

@@ -1390,6 +1390,127 @@ describe("collab service", () => {
     });
   });
 
+  it("adds a task an agent submitted, and overwrites the same one on a second submission", async () => {
+    // 已添加的 Agent 记录在 ~/.memmy/collab-agents.json：这里指到临时目录，避免读到真实用户的数据。
+    const home = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(home);
+    writeFileSync(join(home, "collab-agents.json"), JSON.stringify({
+      agents: [{ sourceId: "added-kimi-code-62d20b3a", displayName: "Kimi Code", skillDirectory: "/tmp/kimi", updatedAt: "2026-11-01T00:00:00.000Z" }]
+    }));
+    const previousHome = process.env.MEMMY_HOME;
+    process.env.MEMMY_HOME = home;
+    try {
+    const { fetcher, calls } = fakeFetch({
+      "GET /api/collab/projects": () => ({
+        code: 0,
+        data: { projects: [{ id: "p-1", name: "Memmy 开发", role: "owner", memberCount: 5, sessionCount: 0, createdAt: null }] }
+      }),
+      "PUT /api/collab/projects/p-1/sessions": (call) => {
+        const body = call.body as { sessions: Array<{ title: string; turns: unknown[] }> };
+        return { code: 0, data: { sessions: [{ id: `cloud-${body.sessions.length}-${body.sessions[0]!.turns.length}` }] } };
+      }
+    });
+    const svc = service(fetcher);
+    const turns = [
+      { question: "重试几次？", reply: "两次。" },
+      { question: "超时呢？", reply: "30 秒。" }
+    ];
+
+    const first = await svc.addCurrentSession({
+      project: "Memmy 开发",
+      submission: { agentName: "Kimi Code", title: "分享接口的重试策略", turns }
+    });
+    expect(first.ok).toBe(true);
+    expect(first.text).toBe("已把任务「分享接口的重试策略」加入「Memmy 开发」，共 2 轮。\nMemmy 读不到这条任务的本地记录，之后要更新，在这里说「更新到项目」。");
+    const uploaded = calls.find((call) => call.method === "PUT")!.body as { sessions: Array<{ source: string; turns: Array<{ question: string }> }> };
+    // 全部轮次一起上传，来源是添加时生成的 added- 前缀。
+    expect(uploaded.sessions[0]!.turns.map((turn) => turn.question)).toEqual(["重试几次？", "超时呢？"]);
+    expect(uploaded.sessions[0]!.source).toBe("added-kimi-code-62d20b3a");
+
+    const again = await svc.addCurrentSession({
+      project: "Memmy 开发",
+      submission: { agentName: "Kimi Code", title: "分享接口的重试策略", turns: [...turns, { question: "还有吗？", reply: "没了。" }] }
+    });
+    // 第一轮提问相同即同一条任务：第二次是更新，不新增。
+    expect(again.text).toBe("已更新项目「Memmy 开发」中的任务「分享接口的重试策略」，共 3 轮。");
+    expect((await svc.getLinks("p-1")).sessions).toHaveLength(1);
+    } finally {
+      if (previousHome === undefined) delete process.env.MEMMY_HOME;
+      else process.env.MEMMY_HOME = previousHome;
+    }
+  });
+
+  it("binds a submitted task to its record file, then syncs the file's new turns", async () => {
+    // 已添加的 Agent 与它的记录文件：提交时给出 --source，绑定后按文件同步。
+    const home = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(home);
+    const skills = join(home, "skills");
+    mkdirSync(skills, { recursive: true });
+    const record = join(home, "session.jsonl");
+    const piRecord = (turns: Array<{ question: string; reply: string }>) => [
+      JSON.stringify({ type: "session", version: 3, id: "s-1", timestamp: "2026-11-01T02:00:00.000Z", cwd: "/repo" }),
+      ...turns.flatMap((turn, index) => [
+        JSON.stringify({ type: "message", id: `q${index}`, timestamp: "2026-11-01T02:00:00.000Z", message: { role: "user", content: [{ type: "text", text: turn.question }] } }),
+        JSON.stringify({ type: "message", id: `a${index}`, timestamp: "2026-11-01T02:00:00.000Z", message: { role: "assistant", content: [{ type: "text", text: turn.reply }] } })
+      ])
+    ].join("\n");
+    writeFileSync(record, piRecord([{ question: "重试几次", reply: "两次" }]));
+    writeFileSync(join(home, "collab-agents.json"), JSON.stringify({
+      agents: [{ sourceId: "added-kimi-1a2b3c4d", displayName: "Kimi Code", skillDirectory: skills, updatedAt: "2026-11-01T00:00:00.000Z" }]
+    }));
+    const previousHome = process.env.MEMMY_HOME;
+    process.env.MEMMY_HOME = home;
+    try {
+      const { fetcher, calls } = fakeFetch({
+        "GET /api/collab/projects": () => ({
+          code: 0,
+          data: { projects: [{ id: "p-1", name: "Memmy 开发", role: "owner", memberCount: 1, sessionCount: 0, createdAt: null }] }
+        }),
+        "PUT /api/collab/projects/p-1/sessions": (call) => {
+          const body = call.body as { sessions: Array<{ turns: unknown[] }> };
+          return { code: 0, data: { sessions: [{ id: `cloud-${body.sessions[0]!.turns.length}` }] } };
+        }
+      });
+      const projectsDir = join(home, "projects");
+      mkdirSync(projectsDir, { recursive: true });
+      const svc = service(fetcher, { projectsDir });
+
+      const added = await svc.addCurrentSession({
+        project: "Memmy 开发",
+        submission: {
+          agentName: "Kimi Code",
+          title: "重试策略",
+          turns: [{ question: "重试几次", reply: "两次" }],
+          sourcePath: record
+        }
+      });
+      // 找到记录文件就说明之后会自动同步。
+      expect(added.text).toContain("会自动同步到项目");
+      const links = JSON.parse(readFileSync(join(projectsDir, "p-1", "links.json"), "utf8"));
+      expect(Object.values(links.synced)).toEqual([expect.objectContaining({ source: expect.objectContaining({ path: record, reader: "pi" }) })]);
+
+      // 文件里多了一轮：下一次同步把它补上，标题仍是提交时的那个。
+      writeFileSync(record, piRecord([{ question: "重试几次", reply: "两次" }, { question: "超时呢", reply: "30 秒" }]));
+      calls.length = 0;
+      const syncResult = await svc.syncLinkedSessions();
+      expect(syncResult.uploaded).toBeGreaterThan(0);
+      const uploaded = calls.filter((call) => call.method === "PUT").map((call) => call.body as { sessions: Array<{ title: string; turns: Array<{ question: string }> }> });
+      expect(uploaded.at(-1)?.sessions[0]?.title).toBe("重试策略");
+      expect(uploaded.at(-1)?.sessions[0]?.turns.map((turn) => turn.question)).toEqual(["重试几次", "超时呢"]);
+
+      // 记录文件被移走：停止跟随，项目里的内容保留，绑定也随之清掉。
+      rmSync(record);
+      calls.length = 0;
+      await svc.syncLinkedSessions();
+      expect(calls.filter((call) => call.method === "PUT")).toEqual([]);
+      const afterRemoval = JSON.parse(readFileSync(join(projectsDir, "p-1", "links.json"), "utf8"));
+      expect(Object.values(afterRemoval.synced)).toEqual([expect.not.objectContaining({ source: expect.anything() })]);
+    } finally {
+      if (previousHome === undefined) delete process.env.MEMMY_HOME;
+      else process.env.MEMMY_HOME = previousHome;
+    }
+  });
+
   it("stops when the person is in no project, or the directory has no task", async () => {
     const empty = fakeFetch({
       "GET /api/collab/projects": () => ({ code: 0, data: { projects: [] } })

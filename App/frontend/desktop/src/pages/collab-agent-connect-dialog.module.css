@@ -1,0 +1,210 @@
+/*
+ * 关联其他 Agent：一个短表单加一句说明。
+ * 弹窗挂在 body 上，和看板的其它弹窗一样在这里自己声明一遍调色板。
+ */
+.dialog,
+.backdrop {
+  --collab-ink: var(--color-text-ink, #111d1c);
+  --collab-ink-2: #2a3a37;
+  --collab-muted: #5f716c;
+  --collab-ter: #8a9a96;
+  --collab-line: color-mix(in srgb, var(--color-border-stone, #d6dfdc) 80%, transparent);
+  --collab-line-soft: color-mix(in srgb, var(--color-border-stone, #d6dfdc) 45%, transparent);
+  --collab-surface: color-mix(in srgb, var(--color-text-ink, #111d1c) 4%, var(--color-background-paper, #fff));
+  --collab-accent: var(--color-accent-mint, #5cbfae);
+  --collab-accent-deep: var(--color-accent-deep, #2f8f7f);
+}
+
+.dialog {
+  width: min(460px, 92vw);
+  font-family: var(--font-sans);
+  color: var(--collab-ink);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fieldLabel {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--collab-ink-2);
+}
+
+.input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border: 1px solid var(--collab-line);
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  color: var(--collab-ink);
+  font: inherit;
+  font-size: 14px;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.input::placeholder {
+  color: var(--collab-ter);
+}
+
+.input:focus {
+  border-color: var(--collab-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--collab-accent) 22%, transparent);
+  outline: none;
+}
+
+/* 说明块：一句话讲清点下去会发生什么，免得项目里凭空多出一条任务 */
+.note {
+  display: flex;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 1px solid var(--collab-line-soft);
+  border-radius: 10px;
+  background: var(--collab-surface);
+  color: var(--collab-muted);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.noteIcon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--collab-accent-deep);
+}
+
+.noteText {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.note p {
+  margin: 0;
+}
+
+/* 示例单独一行、颜色略浅：它是参考说法，不是必须照念的话 */
+.noteExample {
+  color: var(--collab-ink-2);
+}
+
+/* 弹窗底栏是 space-between，单独一个动作组要靠外边距推到右侧 */
+.footer {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* 可选标签：技能目录留空也说得通，用一个小标签说明，不要用必填的语气 */
+.optional {
+  margin-left: 6px;
+  color: var(--collab-ter);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.fieldHint {
+  color: var(--collab-ter);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 技能目录：一个只读的路径框 + 选择按钮，路径长了就省略，悬停看全 */
+.pathRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pathValue {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--collab-line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--collab-ink) 3%, var(--color-background-paper, #fff));
+  color: var(--collab-ink);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pathEmpty {
+  color: var(--collab-ter);
+}
+
+/* 已添加的 Agent：一行一个名字，右侧移除；不显示任务数，Memmy 不读它们的记录 */
+.added {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.addedTitle {
+  color: var(--collab-ink-2);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.addedList {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--collab-line-soft);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.addedRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+}
+
+.addedRow + .addedRow {
+  border-top: 1px solid var(--collab-line-soft);
+}
+
+.addedName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--collab-ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.addedRemove {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--collab-ter);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.addedRemove:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--color-status-error, #c4413b) 78%, var(--color-text-ink, #111d1c));
+}
+
+.addedRemove:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.error {
+  margin: 0;
+  color: color-mix(in srgb, var(--color-status-error, #c4413b) 82%, var(--color-text-ink, #111d1c));
+  font-size: 12.5px;
+}

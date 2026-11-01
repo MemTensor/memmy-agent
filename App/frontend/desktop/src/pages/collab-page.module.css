@@ -1200,14 +1200,88 @@
 }
 
 .agentList {
-  flex: 0 0 206px;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 10px;
+  min-height: 0;
+  background: transparent;
+  overflow-y: auto;
+}
+
+.agentColumn {
+  flex: 0 0 206px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   border-right: 1px solid var(--collab-line);
   background: var(--collab-surface);
-  overflow-y: auto;
+}
+
+/* 关联其他 Agent：列表底部的入口，与上面的 Agent 行区分开，不抢它们的位置 */
+.addAgent {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  padding: 11px 12px;
+  border: 0;
+  border-top: 1px solid var(--collab-line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--collab-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.addAgent:hover {
+  background: color-mix(in srgb, var(--collab-ink) 4%, transparent);
+}
+
+/* 入口用一小块薄荷底托住图标：它是这一列里唯一的动作，看得见但不像一个 Agent 行 */
+.addAgentMark {
+  display: grid;
+  flex: 0 0 26px;
+  place-items: center;
+  height: 26px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--collab-accent) 16%, transparent);
+  color: var(--collab-accent-deep);
+}
+
+.addAgent:hover .addAgentMark {
+  background: color-mix(in srgb, var(--collab-accent) 26%, transparent);
+}
+
+.addAgentText {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.addAgentLabel {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.addAgentHint {
+  color: var(--collab-ter);
+  font-size: 11px;
+}
+
+
+.agentMark {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--collab-ink) 8%, transparent);
+  color: var(--collab-ink);
+  font-size: 12px;
 }
 
 .agentItem {

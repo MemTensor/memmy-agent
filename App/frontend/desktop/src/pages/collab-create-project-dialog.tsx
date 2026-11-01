@@ -21,6 +21,11 @@ const MAX_PROJECT_NAME_CHARS = 20;
 /** One dialog for the whole app, so creating a project never needs to change the page behind it. */
 export function CollabCreateProjectDialog(props: {
   open: boolean;
+  /**
+   * 协作项目只在账号模式可用。API Key 模式传 false：弹窗里不出现「与成员共享」，
+   * 也就不出现「加入项目」——两者都需要云端账号。
+   */
+  shareAvailable?: boolean;
   onClose: () => void;
   /** The project exists on this computer; the caller opens its board. */
   onCreated: (localProjectId: string) => void;
@@ -50,6 +55,7 @@ export function CollabCreateProjectDialog(props: {
 
 export function CreateProjectModal(props: {
   open: boolean;
+  shareAvailable?: boolean;
   collab: CollabClient;
   onClose: () => void;
   onCreated: (localProjectId: string) => void;
@@ -70,6 +76,8 @@ export function CreateProjectModal(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  /** API Key 模式没有云端账号可共享：整个共享入口（含加入项目）都不出现。 */
+  const shareAvailable = props.shareAvailable !== false;
   const trimmed = name.trim();
   const valid = trimmed.length > 0 && Array.from(trimmed).length <= MAX_PROJECT_NAME_CHARS;
   /**
@@ -190,15 +198,17 @@ export function CreateProjectModal(props: {
         <button type="button" role="tab" aria-selected="true" className={`${styles.projectTab} ${styles.projectTabOn}`}>
           {t("collab.create.title")}
         </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected="false"
-          className={styles.projectTab}
-          onClick={props.onJoinProject}
-        >
-          {t("collab.join.pasteTitle")}
-        </button>
+        {shareAvailable ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected="false"
+            className={styles.projectTab}
+            onClick={props.onJoinProject}
+          >
+            {t("collab.join.pasteTitle")}
+          </button>
+        ) : null}
       </div>
       {/* 与项目配置同一套行式排布：左侧标题与说明，右侧输入框 / 按钮 / 开关 */}
       <div className={styles.settingsRows}>
@@ -239,6 +249,7 @@ export function CreateProjectModal(props: {
           </div>
         </div>
 
+        {shareAvailable ? (
         <div className={styles.settingsRow}>
           <div className={styles.settingsRowText}>
             <div className={styles.settingsRowTitle}>{t("collab.create.share")}</div>
@@ -261,6 +272,7 @@ export function CreateProjectModal(props: {
             />
           </div>
         </div>
+        ) : null}
       </div>
       {error ? <p className={styles.error} role="alert">{error}</p> : null}
     </Modal>

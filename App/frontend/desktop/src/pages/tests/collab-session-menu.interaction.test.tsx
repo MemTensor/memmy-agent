@@ -14,6 +14,8 @@ import { CollabPage } from "../collab-page.js";
 
 const mocks = vi.hoisted(() => ({
   listProjects: vi.fn(),
+  // 已关联的其他 Agent：这些用例不涉及，空列表即可。
+  listAddedAgents: vi.fn().mockResolvedValue([]),
   // 项目配置会读关联的知识库；这一层不关心内容，给空列表即可。
   knowledge: vi.fn(),
   listSessions: vi.fn(),
