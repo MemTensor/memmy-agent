@@ -36,6 +36,10 @@ describe("management source visibility before counting and pagination",()=>{
     const refreshed=await service.browsePanel({op:"create",filter:{section:"items",layer:"L1"}},owner);
     if(!("viewId" in refreshed) || !("total" in refreshed))throw new Error("Missing fresh view");
     expect(refreshed.total).toBe(52);
+    const filtered=await service.browsePanel({op:"create",filter:{section:"items",layer:"L1",sourceAgent:"codex"}},owner);
+    if(!("items" in filtered))throw new Error("Missing filtered page");
+    expect(filtered.total).toBe(52);
+    expect(filtered.items?.map(item=>item.id)).not.toContain(turn.l1MemoryId);
     const fixed=[];
     for(let page=1;page<=3;page++){
       const result=await service.browsePanel({op:"page",viewId:refreshed.viewId,page},owner);
