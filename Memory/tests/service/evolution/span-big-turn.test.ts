@@ -418,7 +418,13 @@ describe("MemoryService / evolution / span big turn", () => {
       expect(latestIds.every((id) => !originalSpans.includes(id))).toBe(true);
     }
     const targetIds = spanIds(assignedEpisodeId(service, task));
-    expect(targetIds).toHaveLength(splitAgain ? 5 : 3);
+    expect(targetIds).toHaveLength(splitAgain ? 2 : 3);
+    if (splitAgain) {
+      for (const id of originalSpans) {
+        expect(db.db.prepare("SELECT status FROM memories WHERE id = ?").get(id)).toEqual({ status: "deleted" });
+        expect(db.db.prepare("SELECT COUNT(*) n FROM memory_vector_entries WHERE memory_id = ?").get(id)).toEqual({ n: 0 });
+      }
+    }
     const control = await createTask("cascade-control");
     await reward(control);
     const controlIds = spanIds(assignedEpisodeId(service, control));

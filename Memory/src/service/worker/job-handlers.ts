@@ -1,3 +1,4 @@
+import { jobEpisodeRevision, jobRevisionIsCurrent } from "../evolution/episode-revision.js";
 import { EmbeddingInputLimitError } from "../../model/openai-embedding-inputs.js";
 /**
  * Worker job routing and durable write-back helpers.
@@ -207,7 +208,13 @@ export function enqueueJob(
   input: EnqueueJobInput
 ): EvolutionJobRecord {
   const at = input.createdAt ?? deps.nowIso();
+  const revision = jobEpisodeRevision(deps.repos, input);
   const payload = { ...input.payload };
+  if (revision) {
+    payload.episodeRevision = revision;
+    payload.episodeGeneration = input.episodeId
+      ? deps.repos.runtime.getEpisode(input.episodeId)?.meta.processingGeneration ?? 0 : 0;
+  }
   if (input.jobType === "episode_title") {
     // Title jobs have no target memory. Only a wholly historical episode can
     // inherit the historical lane; mixed or incomplete episodes stay interactive.
@@ -217,11 +224,17 @@ export function enqueueJob(
       payload.captureOrigin = "agent_source_scan";
     }
   }
+  // Reflection may update evidence while a reward is queued. That job reads the
+  // latest evidence at execution, so coalesce within one lifecycle generation.
+  // A reopened generation must never merge into an already leased old reward.
+  const dedupeRevision = revision && input.jobType === "reward" && input.payload?.afterRewardRepair !== true
+    ? `generation:${payload.episodeGeneration}` : revision;
   const job = deps.repos.runtime.enqueueJob({
     id: newId("job"),
     jobType: input.jobType,
     status: "queued",
-    dedupeKey: input.dedupeKey ?? evolutionJobDedupeKey(input),
+    dedupeKey: dedupeRevision ? `${input.dedupeKey ?? evolutionJobDedupeKey(input)}:${dedupeRevision}`
+      : input.dedupeKey ?? evolutionJobDedupeKey(input),
     userId: input.userId,
     sessionId: input.sessionId,
     episodeId: input.episodeId,
@@ -241,6 +254,7 @@ export async function processJob(
   deps: WorkerJobHandlerDeps,
   job: EvolutionJobRecord
 ): Promise<void> {
+  if (!jobRevisionIsCurrent(deps.repos, job)) return;
   switch (job.jobType) {
     case "episode_idle_close":
       closeIdleEpisodesForMemoryWrite(deps, job);
@@ -428,7 +442,7 @@ export function enqueueEpisodeRewardAfterReflection(
     episodeHasRewardForReflection(deps, episode) ||
     episodeRewardWasSkipped(episode) ||
     (
-      deps.repos.runtime.hasEpisodeJob(episode.id, "reward", ["queued", "leased", "failed"])
+      deps.repos.runtime.getActiveJobByDedupeKey(`reward:${episode.id}:generation:${episode.meta.processingGeneration ?? 0}`)
       && !episode.meta.rewardDirty
     )
   ) return [];
@@ -735,7 +749,9 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
       return input.episodeId ? `skill_cluster_assign:${input.episodeId}` : undefined;
     case "skill_batch_evolve": {
       const clusterId = payloadString("clusterId");
-      return clusterId ? `skill_batch_evolve:${clusterId}` : input.episodeId ? `skill_batch_evolve:${input.episodeId}` : undefined;
+      const targetId = clusterId ?? input.episodeId;
+      const revision = typeof input.payload?.clusterRevision === "string" ? input.payload.clusterRevision : undefined;
+      return targetId ? `skill_batch_evolve:${targetId}${revision ? `:${revision}` : ""}` : undefined;
     }
     case "skill_trial_resolve": {
       const trial = payloadString("trialId") ?? target;

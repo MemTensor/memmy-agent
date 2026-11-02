@@ -1,3 +1,4 @@
+import { episodeInputRevision } from "./episode-revision.js";
 import {
   policyMetaFromMemory,
   skillMetaFromMemory,
@@ -118,6 +119,7 @@ export class EvolutionJobProcessor {
     this.policy = new PolicyInductionEngine({
       get config() { return owner.deps.config; },
       repos: deps.repos,
+      episodeRevision: id => episodeInputRevision(deps.repos, id, true),
       nowIso,
       get skillLlm() { return owner.deps.skillLlm; },
       traceMeta: deps.traceMeta,
