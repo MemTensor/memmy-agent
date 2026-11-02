@@ -1,3 +1,4 @@
+import { followEmbeddingMaintenance, type EmbeddingMaintenanceStats, type EmbeddingMaintenanceRunResult } from "../api/embedding-maintenance";
 /**
  * Settings view.
  *
@@ -12,6 +13,7 @@
  * background. Successful writes stay silent; failures are surfaced and the
  * server remains responsible for hot-reloading the canonical config.
  */
+import { acceptsScanUpdate, compareScanVersions, scanExecutionKey, type ScanVersion, type ScanLifecycle, type ScanControlInput } from "@memmy/agent-source-core/scan-state";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api } from "../api/client";
 import { classifyModelTestFailure } from "../model-test-error";
@@ -74,13 +76,16 @@ interface MemoryServiceHealth {
 }
 
 interface AgentSourceScanState {
+  version?: ScanVersion;
+  status?: ScanLifecycle;
   running: boolean;
   jobId: string | null;
+  attemptId?: string;
   sourceId: string | null;
   mode: "initial_subset" | "incremental" | "full" | null;
   progress: {
     sourceId: string;
-    phase: "discover" | "read" | "redact" | "emit" | "scan" | "add" | "summarize" | "done" | "stopped";
+    phase: "discover" | "read" | "redact" | "emit" | "scan" | "prepare" | "add" | "summarize" | "done" | "stopped";
     current: number;
     total: number;
     message?: string;
@@ -114,28 +119,6 @@ interface ResolvedConfig {
   };
   telemetry?: { enabled?: boolean };
   agentAccess?: AgentAccessBlock;
-}
-
-interface EmbeddingMaintenanceStats {
-  dimension: number;
-  available: boolean;
-  totalSlots: number;
-  ready: number;
-  missing: number;
-  dimMismatch: number;
-  needsRepair: number;
-}
-
-interface EmbeddingMaintenanceRunResult {
-  mode: "repair" | "rebuild";
-  processed: number;
-  updated: number;
-  failed: number;
-  offset: number;
-  nextOffset: number;
-  done: boolean;
-  statsAfter: EmbeddingMaintenanceStats;
-  error?: string;
 }
 
 const SECRET_MASKED = (s: string | undefined | null): boolean =>
@@ -755,7 +738,7 @@ function modelProviderLabel(
   return provider;
 }
 
-function EmbeddingMaintenancePanel() {
+export function EmbeddingMaintenancePanel() {
   const [stats, setStats] = useState<EmbeddingMaintenanceStats | null>(null);
   const [running, setRunning] = useState<"repair" | "rebuild" | null>(null);
   const [status, setStatus] = useState<{ kind: "ok" | "error" | "muted"; text: string } | null>(null);
@@ -768,60 +751,62 @@ function EmbeddingMaintenancePanel() {
     }
   };
 
+  const controller = useRef<AbortController | null>(null);
+  const showProgress = (r: EmbeddingMaintenanceRunResult) => {
+    setStats(r.statsAfter);
+    setStatus({
+      kind: r.error || r.failed > 0 ? "error" : r.done ? "ok" : "muted",
+      text: r.error || t(r.done ? "settings.embedding.rebuild.done" : "settings.embedding.rebuild.progress", {
+        updated: r.updated, failed: r.failed, remaining: r.pending, retrying: r.retrying,
+      }),
+    });
+  };
+  const follow = async (initial: EmbeddingMaintenanceRunResult, signal: AbortSignal) => {
+    setRunning(initial.mode);
+    try {
+      await followEmbeddingMaintenance(initial, showProgress, signal);
+    } catch (err) {
+      if (!signal.aborted) setStatus({ kind: "error", text: (err as Error).message });
+    } finally {
+      if (!signal.aborted) { setRunning(null); void refresh(); }
+    }
+  };
+
   useEffect(() => {
+    const next = new AbortController();
+    controller.current = next;
     void refresh();
+    void api.get<EmbeddingMaintenanceRunResult | null>("/api/v1/embeddings/rebuild", { signal: next.signal })
+      .then((result) => { if (result && !next.signal.aborted) return follow(result, next.signal); })
+      .catch((err) => { if (!next.signal.aborted) setStatus({ kind: "error", text: (err as Error).message }); });
+    const timer = window.setInterval(() => void refresh(), 5000);
+    return () => { window.clearInterval(timer); controller.current?.abort(); };
   }, []);
 
   const run = async (mode: "repair" | "rebuild") => {
+    controller.current?.abort();
+    const next = new AbortController();
+    controller.current = next;
     setRunning(mode);
     setStatus({ kind: "muted", text: t("settings.embedding.rebuild.running") });
-    let offset = 0;
-    let updated = 0;
-    let failed = 0;
     try {
-      for (;;) {
-        const r = await api.post<EmbeddingMaintenanceRunResult>(
-          "/api/v1/embeddings/rebuild",
-          { mode, offset },
-        );
-        updated += r.updated;
-        failed += r.failed;
-        offset = r.nextOffset;
-        setStats(r.statsAfter);
-        setStatus({
-          kind: "muted",
-          text: t("settings.embedding.rebuild.progress", {
-            updated,
-            failed,
-            remaining: r.statsAfter.needsRepair,
-          }),
-        });
-        if (r.error) {
-          setStatus({ kind: "error", text: r.error });
-          break;
-        }
-        if (r.done) {
-          setStatus({
-            kind: failed > 0 ? "error" : "ok",
-            text: t("settings.embedding.rebuild.done", { updated, failed }),
-          });
-          break;
-        }
-      }
+      const initial = await api.post<EmbeddingMaintenanceRunResult>("/api/v1/embeddings/rebuild", { mode }, { signal: next.signal });
+      if (!next.signal.aborted) await follow(initial, next.signal);
     } catch (err) {
-      setStatus({ kind: "error", text: (err as Error).message });
-    } finally {
-      setRunning(null);
-      void refresh();
+      if (!next.signal.aborted) { setStatus({ kind: "error", text: (err as Error).message }); setRunning(null); }
     }
   };
 
   const healthText = stats
-    ? t("settings.embedding.maintenance.stats", {
+    ? stats.dimensionError
+      ? t("settings.embedding.maintenance.dimensionError", { error: stats.dimensionError })
+      : t("settings.embedding.maintenance.stats", {
         ready: stats.ready,
         total: stats.totalSlots,
         missing: stats.missing,
         mismatch: stats.dimMismatch,
+        modelMismatch: stats.modelMismatch,
+        contentMismatch: stats.contentMismatch ?? 0,
         dim: stats.dimension,
       })
     : t("common.loading");
@@ -839,6 +824,14 @@ function EmbeddingMaintenancePanel() {
           <div class="muted" style="font-size:var(--fs-xs);margin-top:2px">
             {healthText}
           </div>
+          {stats?.retryQueue && <div class="muted" style="font-size:var(--fs-xs);margin-top:2px">
+            {t("settings.embedding.maintenance.queue", {
+              pending: stats.retryQueue.pending,
+              active: stats.retryQueue.active,
+              stale: stats.retryQueue.stale,
+              failed: stats.retryQueue.failed,
+            })}
+          </div>}
         </div>
         <div class="hstack" style="gap:var(--sp-2);flex-wrap:wrap">
           <button class="btn btn--sm" onClick={() => void refresh()} disabled={!!running}>
@@ -1032,7 +1025,64 @@ function HubTab({
 
 // ─── Cross-Agent access tab ──────────────────────────────────────────
 
-function AgentAccessTab({
+// Settings tabs unmount on navigation; consuming a completion belongs to the
+// Viewer session, not to one mount of the Agent tab.
+const completedScanExecutions = new Set<string>();
+const RESTART_REQUEST_TIMEOUT_MS = 5_000;
+const RESTART_FLOW_TIMEOUT_MS = 30_000;
+
+function withTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  message: string,
+  parentSignal?: AbortSignal
+): Promise<T> {
+  const controller = new AbortController();
+  if (parentSignal?.aborted) {
+    const reason = parentSignal.reason instanceof Error ? parentSignal.reason : new Error(message);
+    controller.abort(reason);
+    return Promise.reject(reason);
+  }
+  let timeoutId = 0;
+  let rejectTimeout!: (error: Error) => void;
+  const timeout = new Promise<never>((_resolve, reject) => { rejectTimeout = reject; });
+  const abort = (error: Error) => {
+    if (controller.signal.aborted) return;
+    controller.abort(error);
+    rejectTimeout(error);
+  };
+  const parentAbort = () => abort(parentSignal?.reason instanceof Error ? parentSignal.reason : new Error(message));
+  parentSignal?.addEventListener("abort", parentAbort, { once: true });
+  timeoutId = window.setTimeout(() => abort(new Error(message)), timeoutMs);
+  let request: Promise<T>;
+  try {
+    request = operation(controller.signal);
+  } catch (error) {
+    request = Promise.reject(error);
+  }
+  return Promise.race([request, timeout]).finally(() => {
+    window.clearTimeout(timeoutId);
+    parentSignal?.removeEventListener("abort", parentAbort);
+    if (!controller.signal.aborted) controller.abort();
+  });
+}
+
+function delayWithSignal(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error("Memory service restart timed out"));
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, milliseconds);
+    const abort = () => {
+      window.clearTimeout(timeoutId);
+      reject(signal.reason instanceof Error ? signal.reason : new Error("Memory service restart timed out"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+export function AgentAccessTab({
   agentAccess,
   onPatch,
 }: {
@@ -1048,6 +1098,7 @@ function AgentAccessTab({
   const [cliStatusFailed, setCliStatusFailed] = useState(false);
   const [cliBusy, setCliBusy] = useState(false);
   const [serviceBusy, setServiceBusy] = useState(false);
+  const [scanStateSyncRequired, setScanStateSyncRequired] = useState(false);
   const [scanStatus, setScanStatus] = useState<AgentSourceScanState | null>(null);
   const [scanControlBusy, setScanControlBusy] = useState<"pause" | "resume" | "cancel" | null>(null);
   const [scanCompletion, setScanCompletion] = useState<string | null>(null);
@@ -1058,7 +1109,22 @@ function AgentAccessTab({
   const [serviceFeedback, setServiceFeedback] = useState<InfrastructureFeedback | null>(null);
   const [automationBusy, setAutomationBusy] = useState(false);
   const [automationError, setAutomationError] = useState<string | null>(null);
-  const activeScanJob = useRef<string | null>(null);
+  const latestScan = useRef<AgentSourceScanState | null>(null);
+  const operationGeneration = useRef(0);
+  const pendingControl = useRef<string | null>(null);
+  const scanQuerySequence = useRef(0);
+  const acceptedScanQuery = useRef(0);
+  const restartSyncConfirmed = useRef(false);
+  const restartSyncQueryFloor = useRef(Number.POSITIVE_INFINITY);
+  const scanReadsPaused = useRef(false);
+  const scanPollAborts = useRef(new Set<AbortController>());
+  const scanOperationsBlocked = serviceBusy || scanStateSyncRequired;
+  const scanViewActive = useRef(true);
+  const completionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    scanViewActive.current = true;
+    return () => { scanViewActive.current = false; clearTimeout(completionTimer.current); };
+  }, []);
   const scannableSources = visibleAgentSources(sources);
   const scanPaused = scanStatus?.progress?.phase === "stopped";
   const scanSessionActive = scanStatus?.running === true || scanPaused;
@@ -1086,6 +1152,64 @@ function AgentAccessTab({
     }
   };
 
+  const receiveScan = (next: AgentSourceScanState, requestGeneration?: number, querySequence?: number) => {
+    if (!scanViewActive.current) return false;
+    const stamp = (value: AgentSourceScanState | null) => value ? { ...value, attemptStartedAt: value.startedAt ?? undefined } : null;
+    if (!acceptsScanUpdate(stamp(latestScan.current), stamp(next)!)) return false;
+    if (!next.version && requestGeneration !== undefined && requestGeneration !== operationGeneration.current) return false;
+    if (!next.version && querySequence !== undefined && querySequence < acceptedScanQuery.current) return false;
+    if (querySequence !== undefined) acceptedScanQuery.current = Math.max(acceptedScanQuery.current, querySequence);
+    latestScan.current = next;
+    if (!next.completedAt && (next.running || next.progress?.phase === "stopped")) {
+      setScanStatus(next);
+      setBusySource(next.running ? next.sourceId ?? next.progress?.sourceId ?? "all" : null);
+      return true;
+    }
+    pendingControl.current = null;
+    setScanControlBusy(null);
+    setScanStatus(null);
+    setBusySource(null);
+    if (next.status === "cancelled" || !next.completedAt || !next.jobId) return true;
+    const key = scanExecutionKey(next);
+    if (completedScanExecutions.has(key)) return true;
+    completedScanExecutions.add(key);
+    if (completedScanExecutions.size > 100) completedScanExecutions.delete(completedScanExecutions.values().next().value!);
+    if (next.error) setMessage(next.error);
+    else setScanCompletion(t("settings.agents.scanCompletedNotice", { agent: sourceDisplayName(next.sourceId ?? "all", sourcesRef.current) }));
+    clearTimeout(completionTimer.current);
+    completionTimer.current = setTimeout(() => setScanCompletion(null), 5_000);
+    void loadSources();
+    return true;
+  };
+
+  const readScan = async (signal?: AbortSignal) => {
+    const generation = operationGeneration.current;
+    const sequence = ++scanQuerySequence.current;
+    const next = signal
+      ? await withTimeout(
+        (requestSignal) => api.get<AgentSourceScanState>("/api/v1/agent-sources/scan/status", { signal: requestSignal }),
+        RESTART_REQUEST_TIMEOUT_MS,
+        t("settings.agents.serviceRestartFailed"),
+        signal
+      )
+      : await withTimeout(
+        (requestSignal) => api.get<AgentSourceScanState>("/api/v1/agent-sources/scan/status", { signal: requestSignal }),
+        RESTART_REQUEST_TIMEOUT_MS,
+        t("settings.agents.serviceRestartFailed")
+      );
+    if (signal?.aborted) return false;
+    const accepted = receiveScan(next, generation, sequence);
+    const sameCurrentVersion = Boolean(latestScan.current?.version && next.version &&
+      compareScanVersions(next.version, latestScan.current.version!) === 0);
+    if ((accepted || sameCurrentVersion) && restartSyncConfirmed.current && sequence >= restartSyncQueryFloor.current) {
+      restartSyncConfirmed.current = false;
+      restartSyncQueryFloor.current = Number.POSITIVE_INFINITY;
+      scanReadsPaused.current = false;
+      setScanStateSyncRequired(false);
+    }
+    return accepted || sameCurrentVersion;
+  };
+
   useEffect(() => {
     void loadSources();
     void api
@@ -1100,41 +1224,72 @@ function AgentAccessTab({
       });
     let active = true;
     const refreshScan = async () => {
+      if (!active || scanReadsPaused.current) return;
+      const generation = operationGeneration.current;
+      const sequence = ++scanQuerySequence.current;
+      const controller = new AbortController();
+      scanPollAborts.current.add(controller);
       try {
-        const next = await api.get<AgentSourceScanState>("/api/v1/agent-sources/scan/status");
-        if (!active) return;
-        const paused = next.progress?.phase === "stopped";
-        if (next.running || paused) {
-          activeScanJob.current = next.jobId;
-          setScanStatus(next);
-          setBusySource(next.running ? next.sourceId ?? next.progress?.sourceId ?? "all" : null);
-          return;
-        }
-        if (activeScanJob.current && next.jobId === activeScanJob.current) {
-          const completedSourceId = next.sourceId ?? next.progress?.sourceId ?? "all";
-          activeScanJob.current = null;
-          setScanStatus(null);
-          setBusySource(null);
-          if (next.error) {
-            setMessage(next.error);
-          } else {
-            setScanCompletion(t("settings.agents.scanCompletedNotice", {
-              agent: sourceDisplayName(completedSourceId, sourcesRef.current),
-            }));
+        const next = await withTimeout(
+          (signal) => api.get<AgentSourceScanState>("/api/v1/agent-sources/scan/status", { signal }),
+          RESTART_REQUEST_TIMEOUT_MS,
+          t("settings.agents.serviceRestartFailed"),
+          controller.signal
+        );
+        if (active && !controller.signal.aborted) {
+          const accepted = receiveScan(next, generation, sequence);
+          const sameCurrentVersion = Boolean(latestScan.current?.version && next.version &&
+            compareScanVersions(next.version, latestScan.current.version!) === 0);
+          if ((accepted || sameCurrentVersion) && restartSyncConfirmed.current && sequence >= restartSyncQueryFloor.current) {
+            restartSyncConfirmed.current = false;
+            restartSyncQueryFloor.current = Number.POSITIVE_INFINITY;
+            setScanStateSyncRequired(false);
           }
-          await loadSources();
         }
-      } catch {
-        // Other infrastructure status remains usable while scan polling is unavailable.
+      } catch { /* next poll reconciles transport failures */ }
+      finally {
+        scanPollAborts.current.delete(controller);
       }
     };
     void refreshScan();
     const timer = window.setInterval(() => void refreshScan(), 500);
     return () => {
       active = false;
+      for (const controller of scanPollAborts.current) controller.abort();
+      scanPollAborts.current.clear();
       window.clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    if (!scanStateSyncRequired || serviceBusy) return;
+    let active = true;
+    let pending = false;
+    const reconcile = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const service = await withTimeout(
+          (signal) => api.get<MemoryServiceHealth>("/api/v1/health", { signal }),
+          RESTART_REQUEST_TIMEOUT_MS,
+          t("settings.agents.serviceRestartFailed")
+        );
+        if (!active || service.ok === false) return;
+        restartSyncConfirmed.current = true;
+        restartSyncQueryFloor.current = scanQuerySequence.current + 1;
+        await readScan();
+      } catch {
+        // Keep scan actions locked until a fresh, complete status is available.
+      } finally {
+        pending = false;
+      }
+    };
+    const timer = window.setInterval(() => void reconcile(), 1_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [scanStateSyncRequired, serviceBusy]);
 
   const installCli = async () => {
     setCliBusy(true);
@@ -1163,15 +1318,39 @@ function AgentAccessTab({
   };
 
   const restartService = async () => {
+    if (serviceBusy) return;
+    ++operationGeneration.current;
     setServiceBusy(true);
+    setScanStateSyncRequired(true);
+    restartSyncConfirmed.current = false;
+    restartSyncQueryFloor.current = Number.POSITIVE_INFINITY;
+    scanReadsPaused.current = true;
+    for (const controller of scanPollAborts.current) controller.abort(new Error(t("settings.agents.serviceRestartFailed")));
+    scanPollAborts.current.clear();
     setServiceFeedback(null);
     try {
-      const before = await api.get<MemoryServiceHealth>("/api/v1/health");
-      const requestedAt = Date.now();
-      await api.post("/api/v1/system/restart", {});
-      const running = await waitForMemoryService(before.uptimeMs, requestedAt);
-      if (!running) throw new Error(t("settings.agents.serviceRestartFailed"));
-      setServiceFeedback({ kind: "ok", text: t("settings.agents.serviceRestarted") });
+      await withTimeout(async (signal) => {
+        const before = await withTimeout(
+          (requestSignal) => api.get<MemoryServiceHealth>("/api/v1/health", { signal: requestSignal }),
+          RESTART_REQUEST_TIMEOUT_MS,
+          t("settings.agents.serviceRestartFailed"),
+          signal
+        );
+        const requestedAt = Date.now();
+        await withTimeout(
+          (requestSignal) => api.post("/api/v1/system/restart", {}, { signal: requestSignal }),
+          RESTART_REQUEST_TIMEOUT_MS,
+          t("settings.agents.serviceRestartFailed"),
+          signal
+        );
+        const running = await waitForMemoryService(before.uptimeMs, requestedAt, Date.now() + RESTART_FLOW_TIMEOUT_MS, signal);
+        if (!running || signal.aborted) throw new Error(t("settings.agents.serviceRestartFailed"));
+        restartSyncConfirmed.current = true;
+        restartSyncQueryFloor.current = scanQuerySequence.current + 1;
+        const synchronized = await readScan(signal);
+        if (!synchronized || signal.aborted) throw new Error(t("settings.agents.serviceRestartFailed"));
+        setServiceFeedback({ kind: "ok", text: t("settings.agents.serviceRestarted") });
+      }, RESTART_FLOW_TIMEOUT_MS, t("settings.agents.serviceRestartFailed"));
     } catch (error) {
       setServiceFeedback({
         kind: "error",
@@ -1183,77 +1362,56 @@ function AgentAccessTab({
   };
 
   const scan = async (sourceId: string, mode?: "full") => {
+    if (scanOperationsBlocked) return;
+    const generation = ++operationGeneration.current;
     setBusySource(sourceId);
     setMessage(null);
     setScanCompletion(null);
+    const previous = latestScan.current;
+    const expected: ScanControlInput = previous?.progress?.phase === "stopped" && previous.jobId
+      ? { expectedExecution: { jobId: previous.jobId, attemptId: previous.attemptId } }
+      : { expectedVersion: previous?.version };
     try {
-      const result = await api.post<{ accepted: true; jobId: string }>(
-        "/api/v1/agent-sources/scan",
-        { sourceId, ...(mode ? { mode } : {}) },
-      );
-      activeScanJob.current = result.jobId;
-      setScanStatus({
-        running: true,
-        jobId: result.jobId,
-        sourceId,
-        mode: mode ?? null,
-        progress: {
-          sourceId,
-          phase: "scan",
-          current: 0,
-          total: 0,
-        },
-        startedAt: new Date().toISOString(),
-        completedAt: null,
-        error: null,
-      });
+      await api.post("/api/v1/agent-sources/scan", { sourceId, ...(mode ? { mode } : {}), ...expected });
+      await readScan();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
-      setBusySource(null);
+      try { await readScan(); } catch { /* next poll */ }
+      if (operationGeneration.current === generation && !latestScan.current?.running) setBusySource(null);
     }
   };
 
-  const pauseScan = async () => {
-    if (!scanStatus?.running) return;
-    setScanControlBusy("pause");
+  const controlScan = async (kind: "pause" | "cancel") => {
+    const previous = latestScan.current;
+    if (scanOperationsBlocked || !previous?.jobId || pendingControl.current) return;
+    const generation = ++operationGeneration.current;
+    const token = `${generation}:${kind}`;
+    pendingControl.current = token;
+    setScanControlBusy(kind);
     setMessage(null);
     try {
-      await api.post("/api/v1/agent-sources/scan/stop", {});
-      const next = await api.get<AgentSourceScanState>("/api/v1/agent-sources/scan/status");
-      setScanStatus(next);
-      setBusySource(null);
+      const result = await api.post<{ snapshot?: AgentSourceScanState }>(`/api/v1/agent-sources/scan/${kind === "pause" ? "stop" : "cancel"}`, {
+        expectedExecution: { jobId: previous.jobId, attemptId: previous.attemptId }
+      });
+      if (result.snapshot) receiveScan(result.snapshot, generation);
+      else await readScan();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
+      try { await readScan(); } catch { /* next poll */ }
     } finally {
-      setScanControlBusy(null);
+      if (pendingControl.current === token) { pendingControl.current = null; setScanControlBusy(null); }
     }
   };
-
+  const pauseScan = async () => { if (scanStatus?.running) await controlScan("pause"); };
+  const cancelScan = async () => { if (scanSessionActive) await controlScan("cancel"); };
   const resumeScan = async () => {
     const sourceId = scanStatus?.sourceId ?? scanStatus?.progress?.sourceId;
-    if (!scanPaused || !sourceId) return;
+    if (scanOperationsBlocked || !scanPaused || !sourceId || pendingControl.current) return;
+    const token = `${++operationGeneration.current}:resume`;
+    pendingControl.current = token;
     setScanControlBusy("resume");
-    try {
-      await scan(sourceId, scanStatus?.mode === "full" ? "full" : undefined);
-    } finally {
-      setScanControlBusy(null);
-    }
-  };
-
-  const cancelScan = async () => {
-    if (!scanSessionActive) return;
-    setScanControlBusy("cancel");
-    setMessage(null);
-    try {
-      await api.post("/api/v1/agent-sources/scan/cancel", {});
-      activeScanJob.current = null;
-      setScanStatus(null);
-      setBusySource(null);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setScanControlBusy(null);
-    }
+    try { await scan(sourceId, scanStatus?.mode === "full" ? "full" : undefined); }
+    finally { if (pendingControl.current === token) { pendingControl.current = null; setScanControlBusy(null); } }
   };
 
   const openFullScanConfirm = () => {
@@ -1400,7 +1558,7 @@ function AgentAccessTab({
             </div>
             <button
               class="btn btn--ghost btn--sm"
-              disabled={scanControlBusy !== null}
+              disabled={scanOperationsBlocked || scanControlBusy !== null}
               onClick={() => void (scanPaused ? resumeScan() : pauseScan())}
             >
               <Icon
@@ -1412,7 +1570,7 @@ function AgentAccessTab({
             </button>
             <button
               class="btn btn--danger btn--sm"
-              disabled={scanControlBusy !== null}
+              disabled={scanOperationsBlocked || scanControlBusy !== null}
               onClick={() => void cancelScan()}
             >
               <Icon name={scanControlBusy === "cancel" ? "loader-2" : "x"} size={13} class={scanControlBusy === "cancel" ? "spin" : ""} />
@@ -1436,7 +1594,7 @@ function AgentAccessTab({
           </div>
           <button
             class="btn btn--primary btn--sm"
-            disabled={scanSessionActive || busySource !== null}
+            disabled={scanOperationsBlocked || scanSessionActive || busySource !== null}
             onClick={() => void scan("all")}
           >
             <Icon name={busySource === "all" ? "loader-2" : "refresh-cw"} size={14} class={busySource === "all" ? "spin" : ""} />
@@ -1476,7 +1634,7 @@ function AgentAccessTab({
                   <div class="hstack" style="gap:var(--sp-2);flex-shrink:0">
                     <button
                       class={`btn btn--sm ${connected ? "btn--danger" : "btn--primary"}`}
-                      disabled={!source.available || scanSessionActive || busySource !== null}
+                      disabled={scanOperationsBlocked || !source.available || scanSessionActive || busySource !== null}
                       onClick={() => void toggleConnection(source)}
                     >
                       <Icon name={busy ? "loader-2" : agentActionIcon(action)} size={13} class={busy ? "spin" : ""} />
@@ -1484,7 +1642,7 @@ function AgentAccessTab({
                     </button>
                     <button
                       class="btn btn--ghost btn--sm"
-                      disabled={!source.available || scanSessionActive || busySource !== null}
+                      disabled={scanOperationsBlocked || !source.available || scanSessionActive || busySource !== null}
                       onClick={() => void scan(source.sourceId)}
                     >
                       <Icon name={busy ? "loader-2" : "refresh-cw"} size={13} class={busy ? "spin" : ""} />
@@ -1517,7 +1675,7 @@ function AgentAccessTab({
                 </div>
                 <button
                   class="btn btn--danger btn--sm"
-                  disabled={scanSessionActive || busySource !== null}
+                  disabled={scanOperationsBlocked || scanSessionActive || busySource !== null}
                   onClick={openFullScanConfirm}
                 >
                   <Icon name="history" size={13} />
@@ -1627,7 +1785,7 @@ function AgentAccessTab({
               </button>
               <button
                 class="btn btn--danger btn--sm"
-                disabled={!fullScanTargetSourceId || scanSessionActive || busySource !== null}
+                disabled={scanOperationsBlocked || !fullScanTargetSourceId || scanSessionActive || busySource !== null}
                 onClick={startFullScan}
               >
                 <Icon name="history" size={13} />
@@ -1801,6 +1959,7 @@ function scanProgressPhaseKey(phase: AgentSourceScanPhase):
     redact: "settings.agents.scanProgress.phase.redact",
     emit: "settings.agents.scanProgress.phase.emit",
     scan: "settings.agents.scanProgress.phase.scan",
+    prepare: "settings.agents.scanProgress.phase.scan",
     add: "settings.agents.scanProgress.phase.add",
     summarize: "settings.agents.scanProgress.phase.summarize",
     done: "settings.agents.scanProgress.phase.done",
@@ -1886,12 +2045,20 @@ function formatProfilePaths(paths: string[]): string {
 async function waitForMemoryService(
   previousUptimeMs: number | undefined,
   requestedAt: number,
+  deadline: number,
+  signal: AbortSignal,
 ): Promise<boolean> {
   let observedDown = false;
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    await new Promise((resolve) => window.setTimeout(resolve, 250));
+  while (Date.now() < deadline && !signal.aborted) {
+    await delayWithSignal(Math.min(250, Math.max(0, deadline - Date.now())), signal);
     try {
-      const result = await api.get<MemoryServiceHealth>("/api/v1/health");
+      const timeoutMs = Math.min(RESTART_REQUEST_TIMEOUT_MS, Math.max(1, deadline - Date.now()));
+      const result = await withTimeout(
+        (requestSignal) => api.get<MemoryServiceHealth>("/api/v1/health", { signal: requestSignal }),
+        timeoutMs,
+        "Memory service restart timed out",
+        signal
+      );
       const expectedPreviousUptime = previousUptimeMs === undefined
         ? undefined
         : previousUptimeMs + Date.now() - requestedAt;
@@ -1907,6 +2074,7 @@ async function waitForMemoryService(
         )
       ) return true;
     } catch {
+      if (signal.aborted) return false;
       observedDown = true;
     }
   }

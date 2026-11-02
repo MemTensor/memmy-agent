@@ -1,0 +1,176 @@
+.agent-queue-panel {
+  max-height: min(240px, 36dvh);
+  overflow: hidden;
+  padding: 4px 10px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--color-border-stone) 16%, var(--color-background-paper));
+}
+
+.agent-composer-flow > .agent-queue-panel { margin-bottom: 8px; }
+
+.agent-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-height: min(240px, 36dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.agent-queue-item {
+  position: relative;
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 35%, transparent);
+  background: transparent;
+}
+
+.agent-queue-item:last-child { border-bottom: 0; }
+.agent-queue-item[draggable="true"] { cursor: grab; }
+.agent-queue-item--dragging { opacity: 0.45; }
+.agent-queue-item--drop-before::before,
+.agent-queue-item--drop-after::after {
+  content: "";
+  position: absolute;
+  right: 4px;
+  left: 4px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--color-action-sky);
+}
+.agent-queue-item--drop-before::before { top: -4px; }
+.agent-queue-item--drop-after::after { bottom: -4px; }
+.agent-queue-item__handle {
+  display: inline-flex;
+  width: 20px;
+  height: 28px;
+  flex: 0 0 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
+  cursor: grab;
+}
+.agent-queue-item__handle--static { cursor: default; }
+.agent-queue-item__handle:focus-visible { outline: 2px solid var(--color-action-sky); }
+.agent-queue-item__media {
+  position: relative;
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+  border-radius: 6px;
+  background: var(--color-background-paper);
+  color: color-mix(in srgb, var(--color-text-ink) 75%, transparent);
+}
+.agent-queue-item__media img { width: 100%; height: 100%; object-fit: cover; }
+.agent-queue-item__media .file-type-icon.file-type-icon--card { --file-icon-card-size: 22px; }
+.agent-queue-item__media-count {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  background: rgb(26 39 31 / 0.83);
+  color: white;
+  font-size: 8px;
+  line-height: 10px;
+}
+
+.agent-queue-item__source {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
+}
+
+.agent-queue-item__source-mark {
+  display: block;
+  width: 18px;
+  height: 18px;
+  max-width: 18px;
+  max-height: 18px;
+  flex: 0 0 18px;
+  object-fit: contain;
+}
+
+.agent-queue-item__source-image {
+  border-radius: 3px;
+}
+
+.agent-queue-item__text {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
+  font-size: 14px;
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-queue-item__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.agent-queue-item__remove,
+.agent-queue-item__steer,
+.agent-queue-item__edit {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  flex: 0 0 26px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 42%, transparent);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, opacity 140ms ease;
+}
+
+.agent-queue-item__steer:hover:not(:disabled),
+.agent-queue-item__edit:hover:not(:disabled),
+.agent-queue-item__remove:hover:not(:disabled) {
+  background: var(--color-canvas-oat);
+}
+
+.agent-queue-item__remove:hover:not(:disabled) {
+  color: var(--color-status-error);
+}
+
+.agent-queue-item__remove:focus-visible,
+.agent-queue-item__steer:focus-visible,
+.agent-queue-item__edit:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-action-sky) 32%, transparent);
+}
+
+.agent-queue-item__remove:disabled,
+.agent-queue-item__steer:disabled,
+.agent-queue-item__edit:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}

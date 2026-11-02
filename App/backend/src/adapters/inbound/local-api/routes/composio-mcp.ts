@@ -134,6 +134,14 @@ async function dispatchComposioTool(
  * @param options Route dependencies.
  */
 export function registerComposioMcpRoutes(app: FastifyInstance, options: RegisterComposioMcpRoutesOptions): void {
+  const notificationStreams = new Set<StreamableHTTPServerTransport>();
+  let closing = false;
+  app.addHook("preClose", async () => {
+    closing = true;
+    // GET holds an idle notification stream. Tool POSTs may still be writing
+    // external data, so leave those requests to finish normally.
+    await Promise.all([...notificationStreams].map(transport => transport.close()));
+  });
   const handler = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const token = singleHeader(request.headers[MCP_TOKEN_HEADER]);
     if (!token || token !== options.mcpToken) {
@@ -147,11 +155,20 @@ export function registerComposioMcpRoutes(app: FastifyInstance, options: Registe
 
     reply.hijack();
     reply.raw.on("close", () => {
+      notificationStreams.delete(transport);
       void transport.close();
       void server.close();
     });
 
     await server.connect(transport);
+    if (request.method === "GET") {
+      if (closing) {
+        await transport.close();
+        reply.raw.end();
+        return;
+      }
+      notificationStreams.add(transport);
+    }
     await transport.handleRequest(request.raw, reply.raw, request.body);
   };
 

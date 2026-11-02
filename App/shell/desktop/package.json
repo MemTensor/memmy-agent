@@ -14,10 +14,11 @@
     "build": "npm run build -w @memmy/frontend-desktop && npm run build:main && node -e \"require('node:fs').cpSync('../../frontend/desktop/dist', 'dist/renderer', { recursive: true })\"",
     "build:main": "npm run build -w @memmy/desktop-interface && npm run build -w @memmy/backend && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node stage-main-assets.mjs && node native-pip/build.mjs",
     "build:runtime": "npm --prefix ../../.. run memory:build && npm --prefix ../../memmy-agent run build",
-    "dev": "npm run build:runtime && npm run build:main && electron dist/main/main.js",
+    "prepare:plugin-migration-state": "node ../../../scripts/internal/shared/prepare-plugin-migration-state.mjs dist/bundled-plugins",
+    "dev": "npm run build:runtime && npm run build:main && npm run prepare:plugin-migration-state && electron dist/main/main.js",
     "dist:mac": "bash ../../../scripts/internal/mac/build-dmg.sh",
     "dist:mac:unsigned": "MEMMY_SKIP_CODESIGN=1 bash ../../../scripts/internal/mac/build-dmg.sh",
-    "test": "vitest run tests",
+    "test": "vitest run --reporter=dot --silent=true tests",
     "typecheck": "npm run build -w @memmy/desktop-interface && npm run build -w @memmy/backend && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -30,7 +31,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "electron": "38.4.0",
+    "electron": "43.8.1",
     "electron-builder": "^26.0.12"
   }
 }

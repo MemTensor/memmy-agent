@@ -361,6 +361,69 @@ describe("agent chat slice", () => {
     });
   });
 
+  it("keeps generated assistant text visible when a queued steer interrupts the draft", () => {
+    const item = {
+      ...queuedWire("queue-steer-visible", "调整主题", "2026-08-10T12:00:00.000Z"),
+      queue_surface: "chat_composer" as const
+    };
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-1" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "run_status",
+        chat_id: "chat-1",
+        status: "running",
+        started_at: 1_780_732_800,
+        turn_id: "turn-visible"
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "user", chat_id: "chat-1", turn_id: "turn-visible", text: "开始" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", turn_id: "turn-visible", text: "更早的过程说明" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "stream_end", chat_id: "chat-1", turn_id: "turn-visible", text: "更早的过程说明", resuming: true }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-1", turn_id: "turn-visible", text: "已经生成的内容" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "stream_end", chat_id: "chat-1", turn_id: "turn-visible", text: "已经生成的内容", resuming: true }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-1", client_request_id: "queue-steer-visible", item }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_dequeued",
+        chat_id: "chat-1",
+        client_request_id: "queue-steer-visible",
+        turn_admission: "steer",
+        turn_id: "turn-visible",
+        item: { ...item, turn_admission: "steer", turn_id: "turn-visible" }
+      }
+    });
+
+    expect(state.messages.find((message) => message.content === "已经生成的内容")).toMatchObject({
+      role: "assistant",
+      isStreaming: false
+    });
+    expect(state.messages.find((message) => message.content === "已经生成的内容")?.kind).toBeUndefined();
+    expect(state.messages.find((message) => message.content === "更早的过程说明")?.kind).toBe("narration");
+  });
+
   it("tracks active Turn source without guessing GUI for legacy snapshots", () => {
     let state = agentReducer(initialAgentState, {
       type: "agent/wsEvent",
@@ -2938,6 +3001,8 @@ describe("agent chat slice", () => {
           { url: "/api/media/sig/deck", name: "deck.pptx" },
           { url: "/api/media/sig/image", name: "result.png" },
           { url: "/api/media/sig/clip", name: "clip.mp4" },
+          { url: "/api/media/sig/audio", name: "interview.mp3", kind: "audio" },
+          { url: "/api/media/sig/old-recording", name: "录音-2026-10-27T10-13-53-172Z.webm", kind: "video" },
           { url: "/api/media/sig/explicit", name: "archive.bin", kind: "file", path: "/Users/yuan/archive.bin" }
         ]
       }
@@ -2949,6 +3014,8 @@ describe("agent chat slice", () => {
         { kind: "file", url: "/api/media/sig/deck", name: "deck.pptx" },
         { kind: "image", url: "/api/media/sig/image", name: "result.png" },
         { kind: "video", url: "/api/media/sig/clip", name: "clip.mp4" },
+        { kind: "audio", url: "/api/media/sig/audio", name: "interview.mp3" },
+        { kind: "audio", url: "/api/media/sig/old-recording", name: "录音-2026-10-27T10-13-53-172Z.webm" },
         { kind: "file", url: "/api/media/sig/explicit", name: "archive.bin", path: "/Users/yuan/archive.bin" }
       ]
     });

@@ -15,6 +15,32 @@ afterEach(() => {
 });
 
 describe("account session repository", () => {
+  it("isolates grants by account identity even when nicknames match or change", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-account-identity-"));
+    const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
+    const repo = store.repositories.accountSession;
+    const profile = (userId: string, nickname: string, grants?: string[]) => ({
+      userId, nickname, email: null, phoneNumber: null, avatarUrl: null,
+      planType: "free", hasFinishedGuide: true, region: null, registeredAt: null,
+      rawProfile: { id: userId, userName: nickname, ...(grants ? { entitlements: grants } : {}) }
+    });
+    try {
+      repo.upsert({ uuid: "account-a", cloudUuid: "credential-a", profile: profile("user-a", "Same Name", ["plugin:legal-labor"]) });
+      repo.upsert({ profile: profile("user-a", "Changed Name"), rawProfileMode: "merge" });
+      expect(repo.getEntitlements()).toEqual(["plugin:legal-labor"]);
+
+      repo.upsert({ uuid: "account-b", cloudUuid: "credential-b", profile: profile("user-b", "Changed Name"), rawProfileMode: "merge" });
+      expect(repo.getEntitlements()).toEqual([]);
+      expect(repo.activateByCloudUuid("credential-a")).toBe(true);
+      expect(repo.getEntitlements()).toEqual(["plugin:legal-labor"]);
+
+      // Even a reused local row must not merge grants across different cloud user IDs.
+      repo.upsert({ uuid: "account-a", profile: profile("user-c", "Changed Name"), rawProfileMode: "merge" });
+      expect(repo.getEntitlements()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
   it("tracks send-code timestamps by hashed identifier before login", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-account-session-"));
     const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });

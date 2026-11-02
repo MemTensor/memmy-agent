@@ -3,11 +3,10 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access, lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { createRequire } from "node:module";
 import { delimiter, isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { Ignore } from "ignore";
+import ignore, { type Ignore } from "ignore";
 import {
   canonicalJson,
   isLocalWorkspaceUri,
@@ -30,7 +29,7 @@ import type {
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
-const createIgnore = createRequire(import.meta.url)("ignore") as () => Ignore;
+const createIgnore: () => Ignore = ignore;
 
 const FIXED_EXCLUDES = new Set([
   ".git", "node_modules", "vendor", ".venv", "venv", "env", "dist", "build", "out",

@@ -1,3 +1,4 @@
+import { managedExecutionRequired, managedToolDefinitions } from "../managed-execution.js";
 import { Tool, type ToolExecutionContext } from "./base.js";
 
 const HINT = "\n\n[Analyze the error above and try a different approach.]";
@@ -17,11 +18,19 @@ export class ToolRegistry {
   }
 
   get(name: string): Tool | undefined {
-    return this.tools.get(name);
+    const exact = this.tools.get(name);
+    if (exact) return exact;
+    // Only Memmy plugin capability names have this compatibility alias. Never
+    // fuzzy-match other MCP servers, misspellings, or a stale/wrong hash.
+    if (!name.startsWith("mcp_plugins_plugin_") || /_[a-f0-9]{8}$/u.test(name)) return undefined;
+    const matches = [...this.tools.values()].filter((tool) =>
+      /_[a-f0-9]{8}$/u.test(tool.name) && tool.name.slice(0, -9) === name
+    );
+    return matches.length === 1 ? matches[0] : undefined;
   }
 
   has(name: string): boolean {
-    return this.tools.has(name);
+    return this.get(name) !== undefined;
   }
 
   private static schemaName(schema: Record<string, any>): string {
@@ -29,6 +38,7 @@ export class ToolRegistry {
   }
 
   getDefinitions(): Record<string, any>[] {
+    if (managedExecutionRequired()) return managedToolDefinitions();
     if (this.cachedDefinitions) return this.cachedDefinitions;
     const definitions = [...this.tools.values()].map((tool) => tool.toSchema());
     const builtins = definitions.filter((schema) => !ToolRegistry.schemaName(schema).startsWith("mcp_"));
@@ -47,7 +57,7 @@ export class ToolRegistry {
         `Error: Tool '${name}' parameters must be a JSON object, got ${Array.isArray(params) ? "array" : typeof params}. Use named parameters: tool_name(param1="value1", param2="value2")`,
       ];
     }
-    const tool = this.tools.get(name);
+    const tool = this.get(name);
     if (!tool) return [null, params, `Error: Tool '${name}' not found. Available: ${this.toolNames.join(", ")}`];
     const cast = tool.castParams(params ?? {});
     const errors = tool.validateParams(cast);

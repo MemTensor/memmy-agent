@@ -279,3 +279,21 @@ function createFakeTarget(overrides: {
     isInstalledHookCurrent: overrides.isInstalledHookCurrent
   };
 }
+
+it.each(["skill", "plugin"])("checks revocation after asynchronous root resolution before writing %s", async kind => {
+  let release!: (root: string) => void;
+  const held = new Promise<string>(resolve => { release = resolve; });
+  let allowed = true;
+  let installed = false;
+  const target = {
+    ...createFakeTarget({ installPlugin() { installed = true; }, install() { installed = true; } }),
+    resolveRootDirectory: () => held
+  };
+  const service = createSkillDistributionService({ targetRegistry: createSkillTargetRegistry([target]) });
+  const guard = () => { if (!allowed) throw new Error("revoked"); };
+  const pending = kind === "skill" ? service.install("cursor", guard) : service.installPlugin("cursor", guard);
+  allowed = false;
+  release("/synthetic");
+  await expect(pending).rejects.toThrow("revoked");
+  expect(installed).toBe(false);
+});

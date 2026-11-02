@@ -424,7 +424,15 @@ export class TelegramChannel extends BaseChannel {
     return {
       bot: apiBot,
       start: async () => {
-        void bot.start();
+        if (typeof bot.init === "function") {
+          await bot.init();
+        }
+        void bot.start().catch((error: unknown) => {
+          this.running = false;
+          console.warn(
+            `[telegram] polling failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       },
       stop: async () => bot.stop(),
       shutdown: async () => undefined,

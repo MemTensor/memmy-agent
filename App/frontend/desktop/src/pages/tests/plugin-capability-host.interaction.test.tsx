@@ -1,0 +1,1802 @@
+// @vitest-environment happy-dom
+
+import { Window as TestWindow } from "happy-dom";
+import { act, useState } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { InstalledPluginSchema, type PluginCapabilityEventPayload } from "@memmy/local-api-contracts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { UploadedAgentMedia, UploadAgentMediaInput } from "../../api/memmy-agent-client.js";
+import { I18nProvider } from "../../i18n/i18n-provider.js";
+import { PluginUiProvider, usePluginUi, reducePluginUiCalls, type PluginUiCall } from "../../app/plugin-ui-context.js";
+import { pressPinnedPluginCommand } from "../home-page.js";
+import { buildRendererDocument, FileInputCard, isBarePresentation, isStatusOnlyPresentation, occludeUserRaisedCalls, PluginCapabilityHost, readQuestions, resolveRendererInteractionStates, resolveSafeArtifactUri, reviewPresentationEvents, selectCurrentPluginCalls, selectRegionPluginCalls, selectVisiblePluginCalls, summarizeAcceptedFormats } from "../plugin-capability-host.js";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const plugin = InstalledPluginSchema.parse({
+  id: "com.example.review",
+  version: "1.0.0",
+  manifest: {
+    apiVersion: "memmy/v1",
+    id: "com.example.review",
+    name: "Review",
+    version: "1.0.0",
+    runtime: { adapter: "http" },
+    capabilities: [{
+      id: "run",
+      name: "Run",
+      description: "Run",
+      inputSchema: {},
+      outputSchema: {},
+      execution: "job"
+    }],
+    permissions: []
+  },
+  state: "active",
+  approvedPermissions: [],
+  config: {},
+  lastError: null,
+  createdAt: "2026-08-31T00:00:00.000Z",
+  updatedAt: "2026-08-31T00:00:00.000Z"
+});
+describe("PluginCapabilityHost", () => {
+  it.each([true, undefined])("renders the user-opened guide without flow buttons even with readOnly=%s", async (readOnly) => {
+    const legal = InstalledPluginSchema.parse({ ...plugin, id: "legal-labor", manifest: {
+      ...plugin.manifest, id: "legal-labor", capabilities: [{ ...plugin.manifest.capabilities[0], id: "guide-open" }]
+    } });
+    const call: PluginUiCall = { pluginId: legal.id, capabilityId: "guide-open", callId: "old-guide",
+      conversationId: "chat-1", origin: "user", events: [
+        { type: "artifact", artifact: { id: "setup", name: "template.xlsx", role: "setup", uri: "plugin-artifact://setup", mediaType: "application/vnd.ms-excel" } },
+        { type: "interaction", request: { interactionId: "guide", type: "question", payload: { title: "诊断指引", readOnly,
+          options: [{ label: "我在现场，要录音", value: "record" }, { label: "已完成调研，上传资料", value: "upload" }] } } }
+      ] };
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="zh-CN"><PluginCapabilityHost
+      region="pinned" calls={[call]} plugins={[legal]} client={{ getUi: vi.fn(), respond: vi.fn(), cancel: vi.fn() }} />
+    </I18nProvider></PluginUiProvider>));
+    expect(container.querySelector(".diagnostic-guidance-card")).not.toBeNull();
+    expect(container.textContent).toContain("template.xlsx");
+    expect(container.querySelector(".diagnostic-guidance-card__footer")).toBeNull();
+  });
+
+  it("renders the model-opened guide with recording and upload choices", async () => {
+    const legal = InstalledPluginSchema.parse({ ...plugin, id: "legal-labor", manifest: {
+      ...plugin.manifest, id: "legal-labor", capabilities: [{ ...plugin.manifest.capabilities[0], id: "session-start" }]
+    } });
+    const respond = vi.fn(async () => undefined);
+    const call: PluginUiCall = { pluginId: legal.id, capabilityId: "session-start", callId: "model-guide",
+      conversationId: "chat-1", origin: "agent", events: [
+        { type: "artifact", artifact: { id: "template", name: "诊断表.xlsx", role: "setup", uri: "plugin-artifact://template", mediaType: "application/vnd.ms-excel" } },
+        { type: "interaction", request: { interactionId: "choice", type: "question", payload: { title: "诊断指引", options: [
+          { label: "我在现场，要录音", value: "record" }, { label: "已完成调研，上传资料", value: "upload" }
+        ] } } }
+      ] };
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="zh-CN"><PluginCapabilityHost
+      region="pinned" calls={[call]} plugins={[legal]} client={{ getUi: vi.fn(), respond, cancel: vi.fn() }} />
+    </I18nProvider></PluginUiProvider>));
+    const footer = container.querySelector(".diagnostic-guidance-card__footer");
+    expect(footer?.querySelectorAll("button")).toHaveLength(2);
+    await act(async () => footer?.querySelectorAll("button")[1]?.click());
+    expect(respond).toHaveBeenCalledWith("legal-labor", "model-guide", "choice", "upload");
+  });
+
+  it.each(["responded", "cancelled", "paused"] as const)("does not expose setup files as legacy attachments when the guide is %s", async (state) => {
+    const call: PluginUiCall = { pluginId: "legal-labor", capabilityId: "session-start", callId: "guide-close", origin: "agent", events: [
+      { type: "artifact", artifact: { id: "template", name: "准备清单.xlsx", role: "setup", uri: "plugin-artifact://template", mediaType: "application/vnd.ms-excel" } },
+      { type: "interaction", request: { interactionId: "choice", type: "question", payload: { title: "诊断指引",
+        options: [{ label: "录音", value: "record" }, { label: "上传", value: "upload" }] } } },
+      ...(state === "cancelled" ? [{ type: "error" as const, code: "interaction_cancelled", message: "用户关闭了卡片", retryable: false }]
+        : state === "paused" ? [{ type: "result" as const, output: { sessionId: "saved-id", paused: true } }] : [])
+    ] };
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="zh-CN">
+      {(["flow", "pinned"] as const).map(region => <PluginCapabilityHost key={region} region={region}
+        calls={[call]} plugins={[]} client={{ getUi: vi.fn(), respond: vi.fn(), cancel: vi.fn() }}
+        answeredInteractions={new Set(["legal-labor:guide-close:choice"])} />)}
+    </I18nProvider></PluginUiProvider>));
+    expect(container.querySelector(".diagnostic-guidance-card, .plugin-artifact-row")).toBeNull();
+    expect(container.textContent).not.toContain("准备清单.xlsx");
+    expect(container.textContent).not.toContain("加入对话");
+  });
+
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.replaceChildren();
+    vi.restoreAllMocks();
+  });
+
+  it("lets review users select a folder and uploads only supported files inside it", async () => {
+    const upload = vi.fn(async (files: UploadAgentMediaInput[]) => files.map((file) => ({
+      name: file.name, path: `/staged/${file.name}`, kind: file.kind, mime: file.mime, bytes: file.blob.size, url: "http://localhost/staged"
+    })));
+    const respond = vi.fn(async () => undefined);
+    const request = { interactionId: "review-sources", type: "file-input" as const, payload: {
+      cardType: "source-import", accept: [".pdf", ".docx", ".txt", ".md", ".doc"], multiple: true,
+      fileRules: [{ extensions: [".doc"], disposition: "blocked", message: "旧版 DOC 请转换" }]
+    } };
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="zh-CN"><FileInputCard
+      pluginId="literature-review" request={request} title="添加本地参考文献" description="请先访问 https://example.test/papers 下载 9 篇文献，再全部上传。"
+      disabled={false} status="idle" onStatus={vi.fn()} onRespond={respond} onUploadFiles={upload} />
+    </I18nProvider></PluginUiProvider>));
+    expect(container.querySelector(".litrev-source-card__policy")?.textContent).toContain("支持 PDF、DOCX、TXT、MD");
+    expect(container.querySelector(".litrev-source-card__policy")?.textContent).not.toContain("https://");
+    expect(container.textContent).not.toContain("example.test/papers");
+    expect(container.querySelector(".litrev-source-card__details")).toBeNull();
+    const folder = container.querySelector<HTMLInputElement>('input[webkitdirectory]')!;
+    expect(folder).not.toBeNull();
+    expect(container.querySelector(".litrev-source-card__empty")).not.toBeNull();
+    const pdf = new File(["pdf"], "研究.pdf", { type: "application/pdf" });
+    const markdown = new File(["notes"], "笔记.md", { type: "text/markdown" });
+    const oldDoc = new File(["doc"], "旧论文.doc", { type: "application/msword" });
+    for (const file of [pdf, markdown, oldDoc]) Object.defineProperty(file, "webkitRelativePath", { value: `资料夹/${file.name}` });
+    await act(async () => {
+      Object.defineProperty(folder, "files", { configurable: true, value: [pdf, markdown, oldDoc] });
+      folder.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(container.querySelectorAll(".litrev-source-list__row")).toHaveLength(2);
+    expect(container.textContent).toContain("已忽略文件夹中 1 个");
+    expect(container.textContent).not.toContain("旧论文.doc");
+    await act(async () => container.querySelector<HTMLButtonElement>(".review-card-footer .button-primary")!.click());
+    expect(upload.mock.calls[0]?.[0].map((file) => file.name)).toEqual(["研究.pdf", "笔记.md"]);
+    expect(respond).toHaveBeenCalledWith("review-sources", { files: expect.any(Array) });
+  });
+
+  it("keeps review full-text upload instructions concise", async () => {
+    const request = { interactionId: "review-fulltext", type: "file-input" as const, payload: {
+      cardType: "source-import", targetPaperId: "paper-1", accept: [".pdf"]
+    } };
+    await act(async () => root.render(<I18nProvider language="zh-CN"><FileInputCard
+      pluginId="literature-review" request={request} title="补充全文" description="请先访问 https://example.test/very-long-download-list 下载文件。"
+      disabled={false} status="idle" onStatus={vi.fn()} onRespond={vi.fn(async () => undefined)} />
+    </I18nProvider>));
+    expect(container.querySelector(".review-card-hint")?.textContent).toBe("上传这篇文献的全文文件。");
+    expect(container.textContent).not.toContain("example.test/very-long-download-list");
+    expect(container.querySelector(".review-card-details")).toBeNull();
+  });
+
+  it("waits for assistant media delivery instead of duplicating a review plugin artifact", async () => {
+    const review = InstalledPluginSchema.parse({ ...plugin, id: "literature-review", manifest: { ...plugin.manifest, id: "literature-review" } });
+    const artifact = { id: "review-docx", name: "文献综述.docx", role: "deliverable" as const,
+      uri: "plugin-artifact://literature-review/document", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" };
+    const call: PluginUiCall = { pluginId: review.id, capabilityId: "run", callId: "delivery", conversationId: "chat-1", origin: "agent",
+      events: [{ type: "artifact", artifact }, { type: "result", output: {} }] };
+    const onOpenArtifact = vi.fn();
+    const onAddArtifact = vi.fn();
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="zh-CN"><PluginCapabilityHost
+      region="flow" calls={[call]} plugins={[review]} client={null}
+      onOpenArtifact={onOpenArtifact} onAddArtifact={onAddArtifact} /></I18nProvider></PluginUiProvider>));
+    expect(container.querySelector(".agent-delivered-files, .plugin-artifact-row, .review-interaction-shell")).toBeNull();
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+    expect(onAddArtifact).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { origin: "user", terminal: "result", expected: 1 },
+    { origin: "agent", terminal: "result", expected: 0 },
+    { origin: "user", terminal: "error", expected: 0 }
+  ] as const)("collects legal $origin selections locally and requests a report only after $terminal commits", async ({ origin, terminal, expected }) => {
+    const legal = InstalledPluginSchema.parse({ ...plugin, id: "legal-labor", manifest: {
+      ...plugin.manifest, id: "legal-labor", capabilities: [{ ...plugin.manifest.capabilities[0], id: "session-start" }],
+      commands: [{ command: "/legal-guide", name: "诊断指引", description: "Guide", capabilityId: "session-start", pinned: true }]
+    } });
+    const respond = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => undefined);
+    const generate = vi.fn(async () => undefined);
+    if (origin === "user" && terminal === "result") generate.mockRejectedValueOnce(new Error("offline"));
+    const upload = vi.fn(async (files: UploadAgentMediaInput[]) => files.map((file) => ({ name: file.name, path: `/staged/${file.name}`, kind: file.kind, mime: file.mime, bytes: file.blob.size, url: "http://localhost/staged" })));
+    const hide = vi.fn();
+    const call: PluginUiCall = { pluginId: legal.id, capabilityId: "session-start", callId: "upload-guide", origin, events: [
+      { type: "artifact", artifact: { id: "setup", role: "setup", name: "template.xlsx", uri: "plugin-artifact://template", mediaType: "application/vnd.ms-excel" } },
+      { type: "interaction", request: { interactionId: "upload", type: "file-input", payload: {
+        title: "补充诊断材料", description: "上传企业资料与现场记录。", accept: ".pdf,.xlsx", multiple: true, allowDirectory: true, maxFiles: 2
+      } } }
+    ] };
+    const mount = (calls: PluginUiCall[]) => root.render(<PluginUiProvider><I18nProvider language="zh-CN"><PluginCapabilityHost
+      region="pinned" calls={calls} plugins={[legal]} client={{ getUi: vi.fn(), respond, cancel }} uploadFiles={upload}
+      onCallHidden={hide} onRequestDiagnosis={generate} /></I18nProvider></PluginUiProvider>);
+    await act(async () => mount([call]));
+    expect(container.querySelectorAll(".diagnostic-upload-card")).toHaveLength(1);
+    expect(container.querySelector(".diagnostic-guidance-card")).toBeNull();
+    expect(container.textContent).not.toContain("template.xlsx");
+    const submit = container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__footer button")!;
+    expect(submit.textContent).toBe("生成 AI 诊断报告");
+    expect(submit.disabled).toBe(true);
+    const choose = async (input: HTMLInputElement, files: File[]) => act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: files });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const picker = container.querySelector<HTMLInputElement>('input[aria-label="上传文件"]')!;
+    const folder = container.querySelector<HTMLInputElement>('input[webkitdirectory]')!;
+    const pdf = new File(["pdf"], "现场记录.pdf", { type: "application/pdf" });
+    const sheet = new File([new Uint8Array(2048)], "诊断.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    await choose(picker, [pdf]);
+    await choose(folder, [pdf, sheet]);
+    expect(container.querySelectorAll(".diagnostic-upload-card__file")).toHaveLength(2);
+    expect(container.textContent).toContain("2 个文件");
+    expect(container.textContent).toContain("2.0 KB");
+    expect(upload).not.toHaveBeenCalled();
+    expect(respond).not.toHaveBeenCalled();
+    expect(hide).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+    await choose(picker, [new File(["third"], "第三份.pdf", { type: "application/pdf" })]);
+    expect(submit.disabled).toBe(true);
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="移除文件 第三份.pdf"]')!.click());
+    expect(submit.disabled).toBe(false);
+    const closeWhileUploading = container.querySelector<HTMLButtonElement>('[aria-label="关闭卡片"]')!;
+    const hideCount = hide.mock.calls.length;
+    await act(async () => { submit.click(); submit.click(); closeWhileUploading.click(); });
+    expect(hide).toHaveBeenCalledTimes(hideCount);
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(upload.mock.calls[0]?.[0].map((file) => file.name)).toEqual([pdf.name, sheet.name]);
+    expect(respond).toHaveBeenCalledWith(legal.id, call.callId, "upload", { files: expect.any(Array) });
+    expect(generate).not.toHaveBeenCalled();
+    const done: PluginUiCall = { ...call, events: [...call.events, terminal === "result"
+      ? { type: "result", output: { totalMaterials: 2 } }
+      : { type: "error", code: "collection_failed", message: "Collection failed", retryable: true }] };
+    await act(async () => mount([done]));
+    await act(async () => mount([done]));
+    expect(generate).toHaveBeenCalledTimes(expected);
+    if (expected) {
+      expect(container.textContent).toContain("诊断材料已保存");
+      await act(async () => container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__footer button")!.click());
+      expect(generate).toHaveBeenCalledTimes(2);
+      expect(upload).toHaveBeenCalledTimes(1);
+      expect(container.textContent).not.toContain("诊断材料已保存");
+    }
+  });
+
+  it("closes a card the user raised without answering the model", async () => {
+    const respond = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => undefined);
+    const client = { getUi: vi.fn(), cancel, respond };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "pinned", conversationId: "websocket:chat-1", origin: "user", events: [
+      { type: "interaction", request: { interactionId: "guide", type: "question", payload: { title: "Guidance" } } }
+    ] };
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="pinned" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+
+    const close = container.querySelector<HTMLButtonElement>('button[aria-label="Close card"]');
+    expect(close).not.toBeNull();
+    await act(async () => close!.click());
+
+    // The plugin is told to stop waiting, but no answer is posted: the user
+    // dismissed a card they opened themselves, which is not a turn.
+    expect(cancel).toHaveBeenCalledWith(plugin.id, "pinned");
+    expect(respond).not.toHaveBeenCalled();
+    // And the card goes away rather than being replaced by a cancellation error.
+    expect(container.textContent).not.toContain("Guidance");
+  });
+
+  it.each(["agent", "user"] as const)("hides and restores a %s guidance call without cancelling, restarting, or uploading", async (origin) => {
+    const pinnedPlugin = InstalledPluginSchema.parse({ ...plugin, manifest: { ...plugin.manifest,
+      commands: [{ command: "/guide", name: "Guidance", description: "Guidance", capabilityId: "run", pinned: true }]
+    } });
+    const client = { getUi: vi.fn(), cancel: vi.fn(async () => undefined), respond: vi.fn(async () => undefined) };
+    const open = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn(async (): Promise<UploadedAgentMedia[]> => [{ path: "/staged/selected.pdf", name: "selected.pdf", kind: "file", mime: "application/pdf", bytes: 4, url: "http://localhost/file" }]);
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "waiting-session", conversationId: "websocket:chat-1", origin, events: [
+      { type: "interaction", request: { interactionId: "upload-materials", type: "file-input", payload: { title: "Guidance", accept: [".pdf"] } } }
+    ] };
+    function Page() {
+      const [hidden, setHidden] = useState(new Set<string>());
+      const hide = (id: string) => setHidden((current) => new Set(current).add(id));
+      return <><button data-testid="toggle" onClick={() => void pressPinnedPluginCommand({
+        calls: [call], pluginId: plugin.id, capabilityId: "run", pinnedCapabilities: new Set([`${plugin.id}:run`]), open,
+        toggleVisibility: (id) => setHidden((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; })
+      })}>Guidance toggle</button><PluginCapabilityHost region="pinned" calls={[call]} plugins={[pinnedPlugin]} client={client}
+        hiddenCallIds={hidden} onCallHidden={hide} uploadFiles={uploadFiles} /></>;
+    }
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><Page /></I18nProvider></PluginUiProvider>));
+    const picker = container.querySelector('input[type="file"]')!;
+    Object.defineProperty(picker, "files", { value: [new File(["test"], "selected.pdf", { type: "application/pdf" })] });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="toggle"]')!;
+    await act(async () => toggle.click());
+    expect(container.querySelector<HTMLElement>("section")!.style.display).toBe("none");
+    await act(async () => toggle.click());
+    expect(container.querySelector<HTMLElement>("section")!.style.display).toBe("");
+    expect(container.querySelector('input[type="file"]')).toBe(picker);
+    expect(container.textContent).toContain("selected.pdf");
+    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Close card"]')!.click());
+    expect(container.querySelector<HTMLElement>("section")!.style.display).toBe("none");
+    await act(async () => toggle.click());
+    expect(client.cancel).not.toHaveBeenCalled();
+    expect(client.respond).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    expect(uploadFiles).not.toHaveBeenCalled();
+    await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Upload")!.click());
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(client.respond).toHaveBeenCalledTimes(1);
+    expect(client.respond).toHaveBeenCalledWith(plugin.id, "waiting-session", "upload-materials", expect.objectContaining({ files: expect.arrayContaining([expect.objectContaining({ name: "selected.pdf" })]) }));
+    expect(client.cancel).not.toHaveBeenCalled();
+  });
+
+  it("renders a live user-raised card above the composer and not in the transcript", async () => {
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "pinned", conversationId: "websocket:chat-1", origin: "user", events: [
+      { type: "interaction", request: { interactionId: "guide", type: "question", payload: { title: "Guidance" } } }
+    ] };
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="flow" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).not.toContain("Guidance");
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="pinned" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).toContain("Guidance");
+  });
+
+  it("moves a finished user-raised card into the transcript so its deliverables stay in history", async () => {
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "done", conversationId: "websocket:chat-1", origin: "user", events: [
+      { type: "artifact", artifact: { id: "a1", name: "报告.docx", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", uri: "memmy-plugin://demo/a1" } },
+      { type: "result", result: {} }
+    ] };
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="pinned" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).not.toContain("报告.docx");
+
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="flow" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    expect(container.textContent).toContain("报告.docx");
+  });
+
+  it("offers no close button on a card the Agent raised", async () => {
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "asked", conversationId: "websocket:chat-1", origin: "agent", events: [
+      { type: "interaction", request: { interactionId: "upload", type: "question", payload: { title: "Which company?" } } }
+    ] };
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
+
+    // Closing this one outright would leave the Agent's turn waiting forever,
+    // so it keeps only the skip path that answers.
+    expect(container.querySelector('button[aria-label="Close card"]')).toBeNull();
+  });
+
+  it("routes accepted chat feedback only to its live card and retires the old interaction", async () => {
+    const customPlugin = InstalledPluginSchema.parse({ ...plugin, manifest: { ...plugin.manifest, ui: { renderer: { entry: "ui/index.html", height: 680 } } } });
+    const respond = vi.fn(async () => undefined);
+    const client = { getUi: vi.fn(async () => "<main>Outline</main>"), cancel: vi.fn(), respond };
+    let ui: ReturnType<typeof usePluginUi>;
+    function Sender() { ui = usePluginUi(); return null; }
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "outline-feedback", conversationId: "websocket:chat-1", events: [
+      { type: "interaction", request: { interactionId: "outline-1", type: "custom", payload: { chatFeedback: true } } }
+    ] };
+    await act(async () => root.render(<PluginUiProvider><Sender /><I18nProvider language="en-US"><PluginCapabilityHost calls={[call]} plugins={[customPlugin]} client={client} /></I18nProvider></PluginUiProvider>));
+    const iframe = container.querySelector("iframe")!;
+    const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+    expect(ui!.routeChatFeedback("chat-2", { message: "Unrelated", clientRequestId: "other" })).toBe(false);
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(ui!.routeChatFeedback("chat-1", { message: "Revise outline", clientRequestId: "feedback" })).toBe(true);
+    expect(postMessage).toHaveBeenCalledWith({ type: "memmy.plugin.chat-feedback", version: 1, interactionId: "outline-1", message: "Revise outline", clientRequestId: "feedback" }, "*");
+    const response = { action: "chat-feedback", message: "Revise outline", values: { outline: [{ title: "User edit" }] } };
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: { type: "memmy.plugin.interaction-response", version: 1, interactionId: "outline-1", response } })));
+    expect(respond).toHaveBeenCalledWith(plugin.id, call.callId, "outline-1", response);
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(ui!.routeChatFeedback("chat-1", { message: "Another change", clientRequestId: "next" })).toBe(false);
+    expect(respond).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains unuploaded file selections across chat feedback without importing them", async () => {
+    let ui: ReturnType<typeof usePluginUi>;
+    function Sender() { ui = usePluginUi(); return null; }
+    const respond = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn();
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond };
+    const makeCall = (id: string): PluginUiCall => ({ pluginId: plugin.id, capabilityId: "run", callId: id, conversationId: "websocket:chat-1", events: [
+      { type: "interaction", request: { interactionId: id, type: "file-input", payload: { chatFeedback: true, taskId: "task-1", cardType: "source-import", accept: [".pdf"] } } }
+    ] });
+    const mount = (id: string) => root.render(<PluginUiProvider><Sender /><I18nProvider language="en-US"><PluginCapabilityHost calls={[makeCall(id)]} plugins={[plugin]} client={client} uploadFiles={uploadFiles} /></I18nProvider></PluginUiProvider>);
+    await act(async () => mount("files-1"));
+    const picker = container.querySelector('input[type="file"]')!;
+    Object.defineProperty(picker, "files", { value: [new File(["test"], "selected.pdf", { type: "application/pdf" })] });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(ui!.routeChatFeedback("chat-1", { message: "Is this format supported?", clientRequestId: "feedback" })).toBe(true);
+    expect(uploadFiles).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(plugin.id, "files-1", "files-1", expect.objectContaining({ action: "chat-feedback", files: [], values: { selectedFileNames: ["selected.pdf"] } }));
+    await act(async () => mount("files-2"));
+    expect(container.textContent).toContain("selected.pdf");
+    let finishUpload!: (files: UploadedAgentMedia[]) => void;
+    uploadFiles.mockImplementation(() => new Promise<UploadedAgentMedia[]>((resolve) => { finishUpload = resolve; }));
+    await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Upload")?.click());
+    expect(ui!.routeChatFeedback("chat-1", { message: "Wait, check this file", clientRequestId: "during-file-upload" })).toBe(true);
+    expect(respond).toHaveBeenCalledTimes(1);
+    await act(async () => finishUpload([{ path: "/staged/selected.pdf", name: "selected.pdf", kind: "file", mime: "application/pdf", bytes: 4, url: "http://localhost/file" }]));
+    expect(respond).toHaveBeenLastCalledWith(plugin.id, "files-2", "files-2", expect.objectContaining({ action: "chat-feedback", files: [], message: "Wait, check this file" }));
+    await act(async () => mount("files-3"));
+    expect(container.textContent).toContain("selected.pdf");
+  });
+
+  it("keeps a single-file card to one file, so a second pick replaces the first", async () => {
+    const respond = vi.fn(async () => undefined);
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond };
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "single-file",
+      conversationId: "websocket:chat-1",
+      events: [{
+        type: "interaction",
+        request: {
+          interactionId: "single-file",
+          type: "file-input",
+          payload: { cardType: "material-collect", accept: [".pdf"], multiple: false }
+        }
+      }]
+    };
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={client} uploadFiles={vi.fn()} />
+      </I18nProvider>
+    ));
+    const picker = container.querySelector('input[type="file"]')!;
+
+    // Appending is only right when the card asked for several files. On a
+    // single-file card the second pick is a new choice, and accumulating would
+    // leave two files where the plugin promised to accept one.
+    Object.defineProperty(picker, "files", { value: [new File(["a"], "first.pdf", { type: "application/pdf" })], configurable: true });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    Object.defineProperty(picker, "files", { value: [new File(["b"], "second.pdf", { type: "application/pdf" })], configurable: true });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+
+    expect(container.textContent).toContain("second.pdf");
+    expect(container.textContent).not.toContain("first.pdf");
+  });
+
+  it("allows selected source files to be removed before upload", async () => {
+    const respond = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn();
+    const client = { getUi: vi.fn(), cancel: vi.fn(), respond };
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "removable-files",
+      conversationId: "websocket:chat-1",
+      events: [{
+        type: "interaction",
+        request: {
+          interactionId: "removable-files",
+          type: "file-input",
+          payload: { cardType: "source-import", accept: [".pdf"], multiple: true }
+        }
+      }]
+    };
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={client} uploadFiles={uploadFiles} />
+      </I18nProvider>
+    ));
+    const picker = container.querySelector('input[type="file"]')!;
+    Object.defineProperty(picker, "files", {
+      configurable: true,
+      value: [new File(["first"], "first.pdf", { type: "application/pdf" })]
+    });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    const secondPdf = () => new File(["second"], "second.pdf", {
+      type: "application/pdf",
+      lastModified: Date.UTC(2026, 8, 16, 3, 0, 0)
+    });
+    Object.defineProperty(picker, "files", { configurable: true, value: [secondPdf()] });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.textContent).toContain("first.pdf");
+    expect(container.textContent).toContain("second.pdf");
+
+    // Re-picking a document already in the list must not queue it twice. The
+    // picker hands back a new object each time with the same stamp, which is the
+    // case identity has to cover.
+    Object.defineProperty(picker, "files", { configurable: true, value: [secondPdf()] });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.textContent?.match(/second\.pdf/g)?.length).toBe(1);
+
+    await act(async () => (
+      container.querySelector('button[aria-label="Remove file first.pdf"]') as HTMLButtonElement
+    ).click());
+    expect(container.textContent).not.toContain("first.pdf");
+    expect(container.textContent).toContain("second.pdf");
+
+    await act(async () => (
+      container.querySelector('button[aria-label="Remove file second.pdf"]') as HTMLButtonElement
+    ).click());
+    expect(container.textContent).toContain("No files selected");
+    expect(Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Upload"))
+      .toHaveProperty("disabled", true);
+    expect(uploadFiles).not.toHaveBeenCalled();
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(!process.env.LITERATURE_REVIEW_PLUGIN_ROOT)("renders the exact 7/20 proposal and returns in-card edits with chat feedback", async () => {
+    const window = new TestWindow({ settings: { enableJavaScriptEvaluation: true } });
+    try {
+      const outgoing: any[] = [];
+      vi.spyOn(window, "postMessage").mockImplementation((message) => { outgoing.push(message); });
+      const html = readFileSync(path.join(process.env.LITERATURE_REVIEW_PLUGIN_ROOT!, "ui/bundles/review-cards/index.html"), "utf8");
+      window.document.write(html.replace(/<script>[\s\S]*?<\/script>/, ""));
+      window.eval(html.match(/<script>([\s\S]*?)<\/script>/)![1]!);
+      const send = (data: any) => window.eval(`window.dispatchEvent(new MessageEvent("message", { source: parent, data: ${JSON.stringify(data)} }))`);
+      const original = Array.from({ length: 6 }, (_, i) => ({ id: `old-${i}`, title: `Old ${i}`, children: [] }));
+      const proposal = Array.from({ length: 7 }, (_, i) => ({ id: `new-${i}`, title: `New ${i}`, children: Array.from({ length: i === 0 ? 2 : 3 }, (_, j) => ({ id: `new-${i}-${j}`, title: `Child ${i}-${j}` })) }));
+      send({ type: "memmy.plugin.render", version: 1, events: [{ type: "interaction", request: { interactionId: "outline-1", type: "custom", payload: { cardType: "outline", chatFeedback: true, data: { outline: original }, draftValues: { outline: proposal } } } }] });
+      const titles = Array.from(window.document.querySelectorAll('input')).map((input: any) => input.value);
+      expect(titles.filter((value) => value.startsWith("New "))).toHaveLength(7);
+      expect(titles.filter((value) => value.startsWith("Child "))).toHaveLength(20);
+      expect(titles.some((value) => value.startsWith("Old "))).toBe(false);
+      const first = window.document.querySelector("input")!;
+      first.value = "Edited by the user";
+      first.dispatchEvent(new window.Event("input"));
+      send({ type: "memmy.plugin.chat-feedback", version: 1, interactionId: "wrong-card", message: "wrong" });
+      expect(outgoing.filter((message) => message.type === "memmy.plugin.interaction-response")).toHaveLength(0);
+      send({ type: "memmy.plugin.chat-feedback", version: 1, interactionId: "outline-1", message: "Please explain", clientRequestId: "message-1" });
+      const response = outgoing.find((message) => message.type === "memmy.plugin.interaction-response").response;
+      expect(response.action).toBe("chat-feedback");
+      expect(response.values.outline[0].title).toBe("Edited by the user");
+      expect(response.values.outline).toHaveLength(7);
+    } finally { await window.happyDOM.close(); }
+  });
+
+  it("renders generic task, question, and artifact cards and submits a choice", async () => {
+    const respond = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => undefined);
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "call-1",
+      conversationId: "chat-1",
+      events: [
+        { type: "task-list", tasks: [{ id: "search", title: "Search papers", status: "running" }] },
+        { type: "interaction", request: { interactionId: "q-1", type: "question", payload: { title: "Scope", options: ["Broad", "Focused"] } } },
+        { type: "artifact", artifact: { id: "report", name: "report.md", mediaType: "text/markdown", uri: "https://example.test/report.md" } }
+      ]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel, respond }} />
+      </I18nProvider>
+    ));
+
+    expect(container.textContent).toContain("Search papers");
+    expect(container.textContent).toContain("Scope");
+    expect(container.textContent).toContain("report.md");
+    await act(async () => container.querySelectorAll("button")[0]?.click());
+    expect(respond).toHaveBeenCalledWith(plugin.id, "call-1", "q-1", "Broad");
+    expect(container.textContent).not.toContain("Scope");
+    expect(container.textContent).toContain("report.md");
+  });
+
+  it("does not put review question descriptions on the card", async () => {
+    const review = InstalledPluginSchema.parse({ ...plugin, id: "literature-review", manifest: { ...plugin.manifest, id: "literature-review" } });
+    const call: PluginUiCall = { pluginId: review.id, capabilityId: "run", callId: "question-notes", conversationId: "chat-1", events: [
+      { type: "interaction", request: { interactionId: "scope-question", type: "question", payload: {
+        title: "选择综述范围", description: "请先阅读 https://example.test/long-background 再决定。", options: ["宽泛", "聚焦"]
+      } } }
+    ] };
+    await act(async () => root.render(<I18nProvider language="zh-CN"><PluginCapabilityHost
+      calls={[call]} plugins={[review]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
+    </I18nProvider>));
+    expect(container.querySelector(".review-card-details")).toBeNull();
+    expect(container.textContent).not.toContain("example.test/long-background");
+    expect(container.querySelector(".review-native-card > div > div > p")?.textContent).toBe("选择综述范围");
+  });
+
+  it("omits review descriptions from renderer messages without changing source events", () => {
+    const events = [{ type: "interaction" as const, request: { interactionId: "card", type: "custom" as const, payload: {
+      cardType: "keywords", description: "raw notes", detail: "raw detail", hint: "raw hint", data: { keywords: [] }
+    } } }];
+    const [rendered] = reviewPresentationEvents(events);
+    expect(rendered?.type).toBe("interaction");
+    if (rendered?.type !== "interaction") return;
+    expect(rendered.request.payload).toEqual({ cardType: "keywords", data: { keywords: [] } });
+    expect(events[0]?.request.payload.description).toBe("raw notes");
+  });
+
+  it("keeps job progress in the chat as text instead of a progress card", async () => {
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "status-only",
+      conversationId: "chat-1",
+      events: [
+        { type: "task-list", tasks: [{ id: "collect", title: "Collect materials", status: "running" }] },
+        { type: "progress", current: 1, total: 4, message: "Reading materials" }
+      ]
+    };
+
+    expect(isStatusOnlyPresentation(call)).toBe(true);
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
+      </I18nProvider>
+    ));
+
+    expect(container.textContent).toContain("Collect materials");
+    expect(container.textContent).toContain("Reading materials");
+    expect(container.querySelector('[role="progressbar"]')).toBeNull();
+    expect(container.querySelector(".rounded-card")).toBeNull();
+  });
+
+  it("asks every question on one card and reports only the ones answered", async () => {
+    const respond = vi.fn(async () => undefined);
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "gaps",
+      conversationId: "chat-1",
+      events: [
+        { type: "interaction", request: {
+          interactionId: "gap-round", type: "question",
+          payload: {
+            title: "Fill in what is missing",
+            questions: [
+              { id: "company", label: "Registered company name", type: "text", required: false },
+              { id: "region", label: "Where are contributions paid?", type: "text", required: false },
+              { id: "signed", label: "Are written contracts signed?", type: "text", required: false, options: ["Yes", "No"] }
+            ]
+          }
+        } }
+      ]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(async () => undefined), respond }} />
+      </I18nProvider>
+    ));
+
+    // Every question is on screen: a card that shows only its title leaves the
+    // user with nothing to answer.
+    expect(container.textContent).toContain("Registered company name");
+    expect(container.textContent).toContain("Where are contributions paid?");
+    expect(container.textContent).toContain("0 of 3 answered");
+    const inputs = container.querySelectorAll<HTMLInputElement>("input");
+    expect(inputs).toHaveLength(2);
+    // A question carrying options is answered by picking one, not by typing it.
+    expect(container.querySelectorAll("select")).toHaveLength(1);
+
+    const answer = (field: HTMLInputElement | HTMLSelectElement, value: string) => act(() => {
+      const isSelect = field instanceof HTMLSelectElement;
+      const prototype = isSelect ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, "value")?.set?.call(field, value);
+      field.dispatchEvent(new Event(isSelect ? "change" : "input", { bubbles: true }));
+    });
+    await answer(inputs[0]!, "  Example Ltd  ");
+    await answer(container.querySelector<HTMLSelectElement>("select")!, "No");
+    expect(container.textContent).toContain("2 of 3 answered");
+
+    await act(async () => container.querySelector<HTMLFormElement>("form")?.requestSubmit());
+    // The skipped question is absent rather than empty: the plugin marks what
+    // the user passed over as unverified, and "" is not that.
+    expect(respond).toHaveBeenCalledWith(plugin.id, "gaps", "gap-round", {
+      answers: { company: "Example Ltd", signed: "No" }
+    });
+  });
+
+  it("holds the answer back until every required question has one", async () => {
+    const respond = vi.fn(async () => undefined);
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "required",
+      conversationId: "chat-1",
+      events: [
+        { type: "interaction", request: {
+          interactionId: "one-required", type: "question",
+          payload: { title: "Confirm", questions: [{ id: "headcount", label: "Headcount", required: true }] }
+        } }
+      ]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(async () => undefined), respond }} />
+      </I18nProvider>
+    ));
+
+    // A lone asterisk was the old cue and nobody read it; the badge is what
+    // says, in words, that this one blocks submit.
+    expect(container.textContent).toContain("Headcount");
+    expect(container.textContent).toContain("Required");
+    expect(container.textContent).not.toContain("Headcount *");
+    const submit = container.querySelector<HTMLButtonElement>("form button");
+    expect(submit?.disabled).toBe(true);
+    await act(() => {
+      const field = container.querySelector<HTMLInputElement>("input")!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(field, "320");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.querySelector<HTMLButtonElement>("form button")?.disabled).toBe(false);
+    await act(async () => container.querySelector<HTMLFormElement>("form")?.requestSubmit());
+    expect(respond).toHaveBeenCalledWith(plugin.id, "required", "one-required", { answers: { headcount: "320" } });
+  });
+
+  it("keeps active progress above a collapsed multi-file delivery", async () => {
+    const delivery: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "render",
+      callId: "delivery",
+      conversationId: "chat-1",
+      events: [
+        ...["review.md", "references.bib", "review.pdf", "review.docx"].map((name, index) => ({
+          type: "artifact" as const,
+          artifact: { id: `artifact-${index}`, name, mediaType: "application/octet-stream", uri: `https://example.test/${name}` }
+        })),
+        { type: "result" as const, output: {} }
+      ]
+    };
+    const active: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "build-tables",
+      callId: "active",
+      conversationId: "chat-1",
+      events: [{ type: "progress", current: 0, total: 1, message: "Building tables" }]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[delivery, active]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
+      </I18nProvider>
+    ));
+
+    expect(container.textContent!.indexOf("Building tables")).toBeLessThan(container.textContent!.indexOf("4 delivery files"));
+    expect(container.textContent).not.toContain("review.md");
+    const toggle = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("4 delivery files"))!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => toggle.click());
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).toContain("review.md");
+    expect(container.textContent).toContain("review.docx");
+  });
+
+  it("loads a declared renderer into a script-only sandbox", async () => {
+    const getUi = vi.fn(async () => "<main>Custom renderer</main>");
+    const cancel = vi.fn(async () => undefined);
+    const respond = vi.fn(async () => undefined);
+    const customPlugin = InstalledPluginSchema.parse({
+      ...plugin,
+      manifest: { ...plugin.manifest, ui: { renderer: { entry: "ui/index.html", height: 240 } } }
+    });
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "call-2",
+      conversationId: "chat-1",
+      events: [{ type: "interaction", request: { interactionId: "custom-1", type: "custom", payload: {} } }]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[customPlugin]} client={{ getUi, cancel, respond }} />
+      </I18nProvider>
+    ));
+    await act(async () => Promise.resolve());
+
+    const iframe = container.querySelector("iframe")!;
+    expect(getUi).toHaveBeenCalledWith(plugin.id, "renderer");
+    expect(iframe.getAttribute("sandbox")).toBe("allow-scripts");
+    expect(iframe.getAttribute("srcdoc")).toContain("Content-Security-Policy");
+    expect(iframe.style.height).toBe("240px");
+    await act(async () => window.dispatchEvent(new MessageEvent("message", {
+      source: iframe.contentWindow,
+      data: { type: "memmy.plugin.interaction-response", version: 1, interactionId: "custom-1", response: { choice: "yes" } }
+    })));
+    expect(respond).toHaveBeenCalledWith(plugin.id, "call-2", "custom-1", { choice: "yes" });
+  });
+
+  it("uploads files inside a permitted custom card and keeps it mounted between row updates", async () => {
+    const permission = { type: "host-service", services: ["file-input"] };
+    const customPlugin = InstalledPluginSchema.parse({ ...plugin,
+      approvedPermissions: [permission], manifest: { ...plugin.manifest, permissions: [permission], ui: { renderer: { entry: "ui/index.html", height: 680 } } }
+    });
+    const respond = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn(async (_files: UploadAgentMediaInput[]) => [{ path: "/staged/paper.pdf", name: "paper.pdf", kind: "file", mime: "application/pdf" }] as UploadedAgentMedia[]);
+    const client = { getUi: vi.fn(async () => "<main>Recovery</main>"), cancel: vi.fn(), respond };
+    const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "recovery", conversationId: "chat-1",
+      events: [{ type: "interaction", request: { interactionId: "row-1", type: "custom", payload: {
+        fileUpload: { accept: [".pdf"], maxFiles: 1, maxBytes: 1024 }
+      } } }] };
+    await act(async () => root.render(<I18nProvider language="en-US"><PluginCapabilityHost calls={[call]} plugins={[customPlugin]} client={client} uploadFiles={uploadFiles} /></I18nProvider>));
+    const iframe = container.querySelector("iframe")!;
+    const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+    const file = new File(["synthetic pdf"], "paper.pdf", { type: "application/pdf" });
+    const upload = { type: "memmy.plugin.upload-files", version: 1, interactionId: "row-1", requestId: "file-1", files: [file] };
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: window, data: upload })));
+    expect(uploadFiles).not.toHaveBeenCalled();
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: upload })));
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    const staged = uploadFiles.mock.calls[0]![0][0]!;
+    expect(staged.blob).not.toBe(file);
+    expect(staged.blob).not.toBeInstanceOf(File);
+    expect(staged.name).toBe("paper.pdf");
+    expect(staged.mime).toBe("application/pdf");
+    expect(await staged.blob.text()).toBe("synthetic pdf");
+    expect(respond).not.toHaveBeenCalled();
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memmy.plugin.upload-result", ok: true, requestId: "file-1" }), "*");
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: {
+      ...upload, requestId: "bad-file", files: [new File(["x"], "bad.exe")]
+    } })));
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memmy.plugin.upload-result", ok: false, requestId: "bad-file" }), "*");
+    const unreadable = new File(["gone"], "missing.pdf", { type: "application/pdf" });
+    vi.spyOn(unreadable, "arrayBuffer").mockRejectedValue(new DOMException("File disappeared", "NotReadableError"));
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: {
+      ...upload, requestId: "unreadable", files: [unreadable]
+    } })));
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memmy.plugin.upload-result", ok: false, requestId: "unreadable" }), "*");
+    expect(respond).not.toHaveBeenCalled();
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: { ...upload, requestId: "retry-readable" } })));
+    expect(uploadFiles).toHaveBeenCalledTimes(2);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memmy.plugin.upload-result", ok: true, requestId: "retry-readable" }), "*");
+    uploadFiles.mockClear();
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: {
+      type: "memmy.plugin.interaction-response", version: 1, interactionId: "row-1",
+      response: { action: "refresh", values: { intent: "import-fulltext", paperId: "p1", files: [{ path: "/staged/paper.pdf" }] } }
+    } })));
+    expect(respond).toHaveBeenCalledTimes(1);
+    expect(container.querySelector("iframe")).toBe(iframe);
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: upload })));
+    expect(uploadFiles).not.toHaveBeenCalled(); // Old interaction cannot upload again.
+    const nextCall: PluginUiCall = { ...call, events: [...call.events, { type: "interaction", request: {
+      interactionId: "row-2", type: "custom", payload: { fileUpload: { accept: [".pdf"], maxFiles: 1, maxBytes: 1024 } }
+    } }] };
+    await act(async () => root.render(<I18nProvider language="en-US"><PluginCapabilityHost calls={[nextCall]} plugins={[customPlugin]} client={client} uploadFiles={uploadFiles} /></I18nProvider>));
+    expect(container.querySelector("iframe")).toBe(iframe);
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: { ...upload, interactionId: "row-2", requestId: "file-2" } })));
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    const unpermitted = InstalledPluginSchema.parse({ ...customPlugin, approvedPermissions: [] });
+    await act(async () => root.render(<I18nProvider language="en-US"><PluginCapabilityHost calls={[nextCall]} plugins={[unpermitted]} client={client} uploadFiles={uploadFiles} /></I18nProvider>));
+    await act(async () => window.dispatchEvent(new MessageEvent("message", { source: iframe.contentWindow, data: { ...upload, interactionId: "row-2", requestId: "file-3" } })));
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "memmy.plugin.upload-result", ok: false, requestId: "file-3" }), "*");
+  });
+
+  it("resizes a custom renderer to its content without exceeding the declared maximum", async () => {
+    const customPlugin = InstalledPluginSchema.parse({
+      ...plugin,
+      manifest: { ...plugin.manifest, ui: { renderer: { entry: "ui/index.html", height: 680 } } }
+    });
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "call-resize",
+      conversationId: "chat-1",
+      events: [{ type: "interaction", request: { interactionId: "custom-resize", type: "custom", payload: {} } }]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost
+          calls={[call]}
+          plugins={[customPlugin]}
+          client={{ getUi: vi.fn(async () => "<main>Custom renderer</main>"), cancel: vi.fn(), respond: vi.fn() }}
+        />
+      </I18nProvider>
+    ));
+    await act(async () => Promise.resolve());
+
+    const iframe = container.querySelector("iframe")!;
+    expect(iframe.style.height).toBe("320px");
+    await act(async () => window.dispatchEvent(new MessageEvent("message", {
+      source: iframe.contentWindow,
+      data: { type: "memmy.plugin.resize", version: 1, height: 472.2 }
+    })));
+    expect(iframe.style.height).toBe("473px");
+
+    await act(async () => window.dispatchEvent(new MessageEvent("message", {
+      source: iframe.contentWindow,
+      data: { type: "memmy.plugin.resize", version: 1, height: 900 }
+    })));
+    expect(iframe.style.height).toBe("680px");
+  });
+
+  it("blocks stale submissions and allows the renderer to request a refresh", async () => {
+    const getUi = vi.fn(async () => "<main>Custom renderer</main>");
+    const cancel = vi.fn(async () => undefined);
+    const respond = vi.fn(async () => undefined);
+    const customPlugin = InstalledPluginSchema.parse({
+      ...plugin,
+      manifest: { ...plugin.manifest, ui: { renderer: { entry: "ui/index.html", height: 240 } } }
+    });
+    const calls: PluginUiCall[] = [
+      {
+        pluginId: plugin.id,
+        capabilityId: "run",
+        callId: "stale-call",
+        conversationId: "chat-1",
+        events: [{
+          type: "interaction",
+          request: {
+            interactionId: "stale-1",
+            type: "custom",
+            payload: {
+              taskId: "review-1",
+              baseArtifact: { id: "outline-old", kind: "outline", contentHash: "sha256:outline" },
+              artifactSnapshot: [{ kind: "review-spec", contentHash: "sha256:old" }]
+            }
+          }
+        }]
+      },
+      {
+        pluginId: plugin.id,
+        capabilityId: "run",
+        callId: "update-call",
+        conversationId: "chat-1",
+        events: [{
+          type: "result",
+          output: {
+            taskId: "review-1",
+            artifacts: [{ id: "spec-new", kind: "review-spec", contentHash: "sha256:new", stale: false }]
+          }
+        }]
+      }
+    ];
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={calls} plugins={[customPlugin]} client={{ getUi, cancel, respond }} />
+      </I18nProvider>
+    ));
+    await act(async () => Promise.resolve());
+
+    const iframe = container.querySelectorAll("iframe")[0]!;
+    const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+    await act(async () => window.dispatchEvent(new MessageEvent("message", {
+      source: iframe.contentWindow,
+      data: {
+        type: "memmy.plugin.interaction-response",
+        version: 1,
+        interactionId: "stale-1",
+        response: { action: "submit", baseArtifactHash: "sha256:old", values: {} }
+      }
+    })));
+    expect(respond).not.toHaveBeenCalled();
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: "memmy.plugin.response-result",
+      ok: false,
+      error: expect.objectContaining({ code: "stale_card", latestContentHash: "sha256:new" })
+    }), "*");
+
+    await act(async () => window.dispatchEvent(new MessageEvent("message", {
+      source: iframe.contentWindow,
+      data: {
+        type: "memmy.plugin.interaction-response",
+        version: 1,
+        interactionId: "stale-1",
+        response: { action: "refresh", baseArtifactHash: "sha256:old", values: { outline: [] } }
+      }
+    })));
+    expect(respond).toHaveBeenCalledWith(plugin.id, "stale-call", "stale-1", expect.objectContaining({ action: "refresh" }));
+  });
+
+  it("supports cancellation, multiple choice, file upload, and artifact reuse", async () => {
+    const cancel = vi.fn(async () => undefined);
+    const respond = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn(async () => [{
+      path: "/media/source.pdf",
+      url: "http://agent.test/source.pdf",
+      name: "source.pdf",
+      kind: "file" as const,
+      mime: "application/pdf" as const,
+      bytes: 3
+    }]);
+    const onAddArtifact = vi.fn();
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "call-3",
+      conversationId: "chat-1",
+      events: [
+        { type: "progress", current: 1, total: 2, cancellable: true },
+        { type: "interaction", request: { interactionId: "q-2", type: "question", payload: { title: "Sources", multiple: true, options: ["PubMed", "Crossref"] } } },
+        {
+          type: "interaction",
+          request: {
+            interactionId: "files-1",
+            type: "file-input",
+            payload: {
+              title: "Sources",
+              accept: [".pdf", ".doc"],
+              maxFiles: 2,
+              multiple: true,
+              fileRules: [{
+                extensions: [".doc"],
+                disposition: "blocked",
+                code: "legacy_doc_requires_conversion",
+                message: "Save this legacy .doc file as .docx before importing."
+              }]
+            }
+          }
+        },
+        { type: "artifact", artifact: { id: "report", name: "report.md", mediaType: "text/markdown", uri: "https://example.test/report.md" } }
+      ]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost
+          calls={[call]}
+          plugins={[plugin]}
+          client={{ getUi: vi.fn(), cancel, respond }}
+          uploadFiles={uploadFiles}
+          onAddArtifact={onAddArtifact}
+        />
+      </I18nProvider>
+    ));
+
+    const buttons = () => Array.from(container.querySelectorAll("button"));
+    await act(async () => buttons().find((button) => button.textContent === "Cancel")?.click());
+    expect(cancel).toHaveBeenCalledWith(plugin.id, "call-3");
+
+    const choices = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    await act(async () => choices[0]?.click());
+    await act(async () => buttons().find((button) => button.textContent === "Submit")?.click());
+    expect(respond).toHaveBeenCalledWith(plugin.id, "call-3", "q-2", ["PubMed"]);
+
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(fileInput, "files", { value: [
+      new File(["pdf"], "source.pdf", { type: "application/pdf" }),
+      new File(["doc"], "legacy.doc", { type: "application/msword" })
+    ] });
+    await act(async () => fileInput.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.textContent).toContain("source.pdf");
+    expect(container.textContent).toContain("legacy.doc");
+    expect(container.textContent).toContain("1 ready to import, 1 need attention");
+    expect(container.textContent).toContain("Save this legacy .doc file as .docx before importing.");
+    await act(async () => buttons().find((button) => button.textContent === "Upload")?.click());
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(uploadFiles.mock.calls[0]?.[0]).toHaveLength(1);
+    expect(uploadFiles.mock.calls[0]?.[0]?.[0]?.name).toBe("source.pdf");
+    expect(respond).toHaveBeenCalledWith(plugin.id, "call-3", "files-1", { files: expect.any(Array) });
+
+    await act(async () => buttons().find((button) => button.textContent === "Add to chat")?.click());
+    expect(onAddArtifact).toHaveBeenCalledWith(call.events[3]!.type === "artifact" ? call.events[3]!.artifact : null);
+  });
+
+  it("allows an optional file-input interaction to be skipped without uploading", async () => {
+    const respond = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn(async () => []);
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "optional-files",
+      conversationId: "chat-optional-files",
+      events: [{
+        type: "interaction",
+        request: {
+          interactionId: "optional-files-interaction",
+          type: "file-input",
+          payload: { title: "Optional sources", multiple: true }
+        }
+      }]
+    };
+
+    await act(async () => root.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost
+          calls={[call]}
+          plugins={[plugin]}
+          client={{ getUi: vi.fn(), cancel: vi.fn(), respond }}
+          uploadFiles={uploadFiles}
+        />
+      </I18nProvider>
+    ));
+
+    await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Skip")?.click());
+    expect(uploadFiles).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(plugin.id, "optional-files", "optional-files-interaction", { files: [] });
+  });
+
+  it.skipIf(!process.env.LITERATURE_REVIEW_PLUGIN_ROOT)("keeps the real recovery bundle open through selection, upload, retry and the next paper", async () => {
+    const window = new TestWindow({ settings: { enableJavaScriptEvaluation: true } });
+    try {
+      const outgoing: any[] = [];
+      vi.spyOn(window, "postMessage").mockImplementation((message) => { outgoing.push(message); });
+      const html = readFileSync(path.join(process.env.LITERATURE_REVIEW_PLUGIN_ROOT!, "ui/bundles/review-cards/index.html"), "utf8");
+      const script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
+      window.document.write(html.replace(/<script>[\s\S]*?<\/script>/, ""));
+      window.eval(script);
+      const items = Array.from({ length: 10 }, (_, index) => ({ paperId: `p${index}`, title: `Paper ${index}`, status: "failed", url: `https://example.test/${index}.pdf`, uploaded: false }));
+      const send = (data: any) => window.eval(`window.dispatchEvent(new MessageEvent("message", { source: parent, data: ${JSON.stringify(data)} }))`);
+      const render = (id: string, rows: any[]) => send({ type: "memmy.plugin.render", version: 1, events: [{ type: "interaction", request: { interactionId: id, type: "custom", payload: {
+        cardType: "fulltext-recovery", chatFeedback: true, data: { items: rows }, fileUpload: { accept: [".pdf"], maxFiles: 1, maxBytes: 1024 }, baseArtifact: { contentHash: "sha256:test" }
+      } } }] });
+      render("r1", items);
+      const doc = window.document;
+      expect(doc.querySelectorAll(".recovery-row")).toHaveLength(10);
+      const picker = doc.querySelector('input[type="file"]')! as any;
+      const click = vi.spyOn(picker, "click");
+      (Array.from(doc.querySelectorAll("button")).find((button) => button.textContent === "已下载：选择文件") as any).click();
+      expect(click).toHaveBeenCalledTimes(1);
+      expect(outgoing.filter((message) => message.type === "memmy.plugin.interaction-response")).toHaveLength(0);
+      picker.dispatchEvent(new window.Event("change")); // Cancelled chooser: no file.
+      expect(doc.querySelectorAll(".recovery-row")).toHaveLength(10);
+      Object.defineProperty(picker, "files", { value: [new window.File(["test"], "paper.pdf", { type: "application/pdf" })], configurable: true });
+      picker.dispatchEvent(new window.Event("change"));
+      const upload = outgoing.find((message) => message.type === "memmy.plugin.upload-files");
+      expect(upload.interactionId).toBe("r1");
+      expect(doc.body.textContent).toContain("上传中");
+      send({ type: "memmy.plugin.upload-result", version: 1, interactionId: "r1", requestId: upload.requestId, ok: false, error: { message: "Temporary upload failure" } });
+      expect(doc.body.textContent).toContain("Temporary upload failure");
+      expect(doc.querySelectorAll(".recovery-row")).toHaveLength(10);
+      const retry = doc.querySelector('input[type="file"]')!;
+      Object.defineProperty(retry, "files", { value: [new window.File(["test"], "paper.pdf", { type: "application/pdf" })] });
+      retry.dispatchEvent(new window.Event("change"));
+      const retried = outgoing.filter((message) => message.type === "memmy.plugin.upload-files").at(-1);
+      send({ type: "memmy.plugin.upload-result", version: 1, interactionId: "r1", requestId: retried.requestId, ok: true, files: [{ name: "paper.pdf", path: "/staged/paper.pdf" }] });
+      const response = outgoing.find((message) => message.type === "memmy.plugin.interaction-response");
+      expect(response.response).toMatchObject({ action: "refresh", values: { intent: "import-fulltext", paperId: "p0" } });
+      send({ type: "memmy.plugin.response-result", version: 1, interactionId: "r1", ok: true });
+      expect(doc.querySelectorAll(".recovery-row")).toHaveLength(10);
+      render("r2", items.map((item, i) => i === 0 ? { ...item, uploaded: true, fileName: "paper.pdf" } : item));
+      expect(doc.querySelector("#app")!.classList.contains("busy")).toBe(false);
+      expect(doc.body.textContent).toContain("已上传 1 / 10 篇");
+      expect(doc.querySelectorAll('input[type="file"]')).toHaveLength(10);
+      expect(doc.body.textContent).toContain("跳过剩余 9 篇并继续");
+      const replacePicker = doc.querySelector('[data-paper-id="p0"] input')! as any;
+      const replaceClick = vi.spyOn(replacePicker, "click");
+      (Array.from(doc.querySelectorAll("button")).find((button) => button.textContent === "重新上传") as any).click();
+      expect(replaceClick).toHaveBeenCalledTimes(1);
+      replacePicker.dispatchEvent(new window.Event("change"));
+      expect(doc.body.textContent).toContain("已上传：paper.pdf");
+      Object.defineProperty(replacePicker, "files", { value: [new window.File(["replacement"], "corrected.pdf")] });
+      replacePicker.dispatchEvent(new window.Event("change"));
+      expect(doc.body.textContent).toContain("替换中…");
+      expect(doc.body.textContent).toContain("已上传：paper.pdf");
+      const replacing = outgoing.filter((message) => message.type === "memmy.plugin.upload-files").at(-1);
+      send({ type: "memmy.plugin.upload-result", version: 1, interactionId: "r2", requestId: replacing.requestId, ok: false, error: { message: "Replacement failed" } });
+      expect(doc.body.textContent).toContain("Replacement failed");
+      expect(doc.body.textContent).toContain("已上传：paper.pdf");
+      const replacementRetry = doc.querySelector('[data-paper-id="p0"] input')!;
+      Object.defineProperty(replacementRetry, "files", { value: [new window.File(["replacement"], "corrected.pdf")] });
+      replacementRetry.dispatchEvent(new window.Event("change"));
+      const replacementUpload = outgoing.filter((message) => message.type === "memmy.plugin.upload-files").at(-1);
+      send({ type: "memmy.plugin.upload-result", version: 1, interactionId: "r2", requestId: replacementUpload.requestId, ok: true, files: [{ name: "corrected.pdf", path: "/staged/corrected.pdf" }] });
+      expect(outgoing.filter((message) => message.type === "memmy.plugin.interaction-response").at(-1).response.values).toMatchObject({ paperId: "p0", intent: "import-fulltext" });
+      render("r3", items.map((item, i) => i === 0 ? { ...item, uploaded: true, fileName: "corrected.pdf" } : item));
+      expect(doc.body.textContent).toContain("已上传：corrected.pdf");
+      expect(doc.body.textContent).not.toContain("已上传：paper.pdf");
+      const nextPicker = doc.querySelector('[data-paper-id="p1"] input')!;
+      Object.defineProperty(nextPicker, "files", { value: [new window.File(["next paper"], "next.pdf")] });
+      nextPicker.dispatchEvent(new window.Event("change"));
+      const nextUpload = outgoing.filter((message) => message.type === "memmy.plugin.upload-files").at(-1);
+      send({ type: "memmy.plugin.chat-feedback", version: 1, interactionId: "r3", message: "Please explain", clientRequestId: "during-upload" });
+      expect(outgoing.filter((message) => message.response?.action === "chat-feedback")).toHaveLength(0);
+      send({ type: "memmy.plugin.upload-result", version: 1, interactionId: "r3", requestId: nextUpload.requestId, ok: true, files: [{ name: "next.pdf", path: "/staged/next.pdf" }] });
+      send({ type: "memmy.plugin.response-result", version: 1, interactionId: "r3", ok: true });
+      render("r4", items.map((item, i) => i < 2 ? { ...item, uploaded: true, fileName: i ? "next.pdf" : "corrected.pdf" } : item));
+      const chatResponse = outgoing.filter((message) => message.response?.action === "chat-feedback").at(-1);
+      expect(chatResponse.interactionId).toBe("r4");
+      expect(chatResponse.response.values.items.filter((item: any) => item.uploaded)).toHaveLength(2);
+      expect(chatResponse.response.values.acknowledgedPaperIds).toBeUndefined();
+      expect(doc.body.textContent).toContain("已上传 2 / 10 篇");
+      expect(doc.querySelectorAll(".recovery-row")).toHaveLength(10);
+    } finally { await window.happyDOM.close(); }
+  });
+
+  it.skipIf(!process.env.LITERATURE_REVIEW_PLUGIN_ROOT)("mounts every literature-review card through the real plugin UI bundle", async () => {
+    const pluginRoot = process.env.LITERATURE_REVIEW_PLUGIN_ROOT!;
+    const rendererHtml = readFileSync(path.join(pluginRoot, "ui/bundles/review-cards/index.html"), "utf8");
+    const getUi = vi.fn(async () => rendererHtml);
+    const cancel = vi.fn(async () => undefined);
+    const respond = vi.fn(async () => undefined);
+    const uploadFiles = vi.fn(async () => [{
+      path: "/media/local-source.pdf",
+      url: "http://agent.test/local-source.pdf",
+      name: "local-source.pdf",
+      kind: "file" as const,
+      mime: "application/pdf" as const,
+      bytes: 3
+    }]);
+    const literatureReviewPlugin = InstalledPluginSchema.parse({
+      ...plugin,
+      id: "literature-review",
+      manifest: {
+        ...plugin.manifest,
+        id: "literature-review",
+        ui: { renderer: { entry: "ui/bundles/review-cards/index.html", height: 680 } }
+      }
+    });
+    const customCardTypes = ["keywords", "outline", "paper-selection", "fulltext-recovery"];
+    const calls: PluginUiCall[] = customCardTypes.map((cardType, index) => ({
+      pluginId: literatureReviewPlugin.id,
+      capabilityId: "review_request_interaction",
+      callId: `custom-${index}`,
+      conversationId: "chat-card-flow",
+      events: [{
+        type: "interaction",
+        request: {
+          interactionId: `interaction-${index}`,
+          type: "custom",
+          payload: { cardType, taskId: "review-card-flow", title: cardType, data: {} }
+        }
+      }]
+    }));
+    calls.push({
+      pluginId: literatureReviewPlugin.id,
+      capabilityId: "review_request_interaction",
+      callId: "source-import",
+      conversationId: "chat-card-flow",
+      events: [{
+        type: "interaction",
+        request: {
+          interactionId: "source-import-interaction",
+          type: "file-input",
+          payload: {
+            title: "添加本地参考文献",
+            accept: [".pdf", ".docx", ".txt", ".md", ".doc"],
+            multiple: true,
+            fileRules: [{
+              extensions: [".doc"],
+              disposition: "blocked",
+              code: "legacy_doc_requires_conversion",
+              message: "暂不支持旧版 .doc，请另存为 .docx 后重新选择。"
+            }]
+          }
+        }
+      }]
+    });
+
+    const client = { getUi, cancel, respond };
+    const renderCall = async (call: PluginUiCall) => {
+      await act(async () => root.render(
+        <I18nProvider language="zh-CN"><PluginCapabilityHost calls={[call]} plugins={[literatureReviewPlugin]} client={client} uploadFiles={uploadFiles} /></I18nProvider>
+      ));
+      await act(async () => Promise.resolve());
+    };
+    // Cards are sequential: the current-call selector intentionally hides superseded editors.
+    for (const [index, cardType] of customCardTypes.entries()) {
+      await renderCall(calls[index]!);
+      const iframe = container.querySelector("iframe")!;
+      expect(iframe).not.toBeNull();
+      expect(iframe.getAttribute("sandbox")).toBe("allow-scripts");
+      expect(iframe.getAttribute("srcdoc")).toContain("CARD_NAMES");
+      expect(iframe.getAttribute("srcdoc")).toContain("Content-Security-Policy");
+      await act(async () => window.dispatchEvent(new MessageEvent("message", {
+        source: iframe.contentWindow,
+        data: { type: "memmy.plugin.interaction-response", version: 1, interactionId: `interaction-${index}`, response: { action: "submit", values: { cardType } } }
+      })));
+      expect(container.querySelector("iframe")).toBeNull();
+    }
+    expect(getUi).toHaveBeenCalledTimes(customCardTypes.length);
+    expect(respond).toHaveBeenCalledTimes(customCardTypes.length);
+    await renderCall(calls.at(-1)!);
+
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(fileInput, "files", { value: [new File(["pdf"], "local-source.pdf", { type: "application/pdf" })] });
+    await act(async () => fileInput.dispatchEvent(new Event("change", { bubbles: true })));
+    await act(async () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "确认资料并继续")?.click());
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(respond).toHaveBeenCalledWith(
+      literatureReviewPlugin.id,
+      "source-import",
+      "source-import-interaction",
+      { files: expect.any(Array) }
+    );
+  });
+
+  it("shrinks the review scope iframe while folded and ignores stale uncollapsed resize events", async () => {
+    const review = InstalledPluginSchema.parse({ ...plugin, id: "literature-review", manifest: {
+      ...plugin.manifest, id: "literature-review", ui: { renderer: { entry: "ui/bundles/review-cards/index.html", height: 680 } }
+    } });
+    const call: PluginUiCall = { pluginId: review.id, capabilityId: "review_request_interaction", callId: "scope-fold",
+      conversationId: "scope-fold-chat", events: [{ type: "interaction", request: { interactionId: "scope-1", type: "custom",
+        payload: { cardType: "review-spec", taskId: "review-task" } } }] };
+    await act(async () => root.render(<I18nProvider language="zh-CN"><PluginCapabilityHost
+      calls={[call]} plugins={[review]} client={{ getUi: vi.fn(async () => "<html><body><div id=app></div></body></html>"),
+        cancel: vi.fn(async () => undefined), respond: vi.fn(async () => undefined) }} /></I18nProvider>));
+    await act(async () => Promise.resolve());
+    const iframe = container.querySelector<HTMLIFrameElement>("iframe")!;
+    expect(iframe).not.toBeNull();
+    const resize = async (height: number, collapsed?: boolean) => act(async () => window.dispatchEvent(new MessageEvent("message", {
+      source: iframe.contentWindow, data: { type: "memmy.plugin.resize", version: 1, height, ...(collapsed === undefined ? {} : { collapsed }) }
+    })));
+    await resize(66, true);
+    expect(iframe.style.height).toBe("66px");
+    await resize(500);
+    expect(iframe.style.height).toBe("66px");
+    await resize(393, false);
+    expect(iframe.style.height).toBe("393px");
+  });
+});
+
+describe("plugin UI event reduction", () => {
+  it("marks an interaction stale when a newer task artifact is observed", () => {
+    const calls: PluginUiCall[] = [
+      {
+        pluginId: plugin.id,
+        capabilityId: "review_request_interaction",
+        callId: "card-call",
+        conversationId: "chat-1",
+        events: [{
+          type: "interaction",
+          request: {
+            interactionId: "outline-card",
+            type: "custom",
+            payload: {
+              taskId: "review-1",
+              baseArtifact: { id: "outline-old", kind: "outline", contentHash: "sha256:old" }
+            }
+          }
+        }]
+      },
+      {
+        pluginId: plugin.id,
+        capabilityId: "review_update_outline",
+        callId: "update-call",
+        conversationId: "chat-1",
+        events: [{
+          type: "result",
+          output: {
+            taskId: "review-1",
+            artifacts: [{ id: "outline-new", kind: "outline", contentHash: "sha256:new", stale: false }]
+          }
+        }]
+      }
+    ];
+
+    expect(resolveRendererInteractionStates(calls).get(plugin.id + ":card-call")).toEqual([{
+      interactionId: "outline-card",
+      status: "stale",
+      error: {
+        code: "stale_card",
+        message: expect.any(String),
+        latestContentHash: "sha256:new"
+      }
+    }]);
+  });
+
+  it("does not treat a legacy missing-dependency sentinel as a stale artifact version", () => {
+    const calls: PluginUiCall[] = [
+      {
+        pluginId: plugin.id,
+        capabilityId: "review_generate_keywords",
+        callId: "keywords-call",
+        conversationId: "chat-1",
+        events: [{
+          type: "result",
+          output: {
+            taskId: "review-1",
+            artifacts: [{ id: "keywords-old", kind: "keywords", contentHash: "sha256:keywords-old", stale: false }]
+          }
+        }]
+      },
+      {
+        pluginId: plugin.id,
+        capabilityId: "review_search_papers",
+        callId: "search-call",
+        conversationId: "chat-1",
+        events: [{
+          type: "result",
+          output: {
+            taskId: "review-1",
+            artifacts: [{ id: "search-current", kind: "search-results", contentHash: "sha256:search-current", stale: false }]
+          }
+        }]
+      },
+      {
+        pluginId: plugin.id,
+        capabilityId: "review_request_interaction",
+        callId: "selection-card",
+        conversationId: "chat-1",
+        events: [{
+          type: "interaction",
+          request: {
+            interactionId: "selection-1",
+            type: "custom",
+            payload: {
+              taskId: "review-1",
+              baseArtifact: { id: "search-current", kind: "search-results", contentHash: "sha256:search-current" },
+              artifactSnapshot: [
+                { kind: "keywords", contentHash: "__missing__" },
+                { kind: "search-results", contentHash: "sha256:search-current" }
+              ]
+            }
+          }
+        }]
+      }
+    ];
+
+    expect(resolveRendererInteractionStates(calls).has(plugin.id + ":selection-card")).toBe(false);
+  });
+
+  it("resolves Host-managed relative artifact URIs and rejects local file URIs", () => {
+    expect(resolveSafeArtifactUri("/api/v1/plugins/review/artifacts/token/preview")).toBe(
+      `${window.location.origin}/api/v1/plugins/review/artifacts/token/preview`
+    );
+    expect(resolveSafeArtifactUri("file:///tmp/review.pdf")).toBeNull();
+  });
+
+  it("replaces transient events and keeps distinct cards", () => {
+    const base = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "call-1",
+      conversationId: "chat-1"
+    };
+    const receive = (calls: PluginUiCall[], event: PluginCapabilityEventPayload["event"]) => (
+      reducePluginUiCalls(calls, { ...base, event })
+    );
+    let calls = receive([], { type: "progress", current: 1, total: 2 });
+    calls = receive(calls, { type: "progress", current: 2, total: 2 });
+    calls = receive(calls, { type: "artifact", artifact: { id: "report", name: "report.md", mediaType: "text/markdown", uri: "file:///report.md" } });
+
+    expect(calls[0]?.events).toEqual([
+      { type: "progress", current: 2, total: 2 },
+      { type: "artifact", artifact: { id: "report", name: "report.md", mediaType: "text/markdown", uri: "file:///report.md" } }
+    ]);
+  });
+
+  it("keeps actionable calls, unrecovered errors, and delivery artifacts while hiding recovered retry errors", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const calls: PluginUiCall[] = [
+      { ...base, callId: "done", events: [{ type: "progress", current: 1, total: 1 }, { type: "result", output: {} }] },
+      { ...base, capabilityId: "update-spec", callId: "recovered-error", events: [{ type: "error", code: "invalid_input", message: "invalid", retryable: false }] },
+      { ...base, capabilityId: "update-spec", callId: "recovery", events: [{ type: "result", output: {} }] },
+      { ...base, callId: "old-active", events: [{ type: "progress", current: 1, total: 2 }] },
+      { ...base, callId: "artifact", events: [{ type: "artifact", artifact: { id: "pdf", name: "review.pdf", mediaType: "application/pdf", uri: "/api/v1/plugins/review/artifacts/token/preview" } }, { type: "result", output: {} }] },
+      { ...base, callId: "latest-active", events: [{ type: "interaction", request: { interactionId: "outline", type: "custom", payload: {} } }] },
+      { ...base, callId: "failed", events: [{ type: "error", code: "failed", message: "failed", retryable: true }] }
+    ];
+
+    expect(selectVisiblePluginCalls(calls).map((call) => call.callId)).toEqual(["artifact", "latest-active", "failed"]);
+    expect(selectVisiblePluginCalls(calls.slice(0, -1)).map((call) => call.callId)).toEqual(["artifact", "latest-active"]);
+    expect(selectVisiblePluginCalls(calls.slice(0, -1), new Set([`${plugin.id}:latest-active:outline`])).map((call) => call.callId)).toEqual(["artifact"]);
+  });
+
+  it("hides a card the user raised while the Agent waits on one of its own", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const pinned = { ...base, callId: "pinned", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "guide", type: "custom" as const, payload: {} } }] };
+    const asked = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }] };
+
+    // Two live cards competing for one answer is ambiguous, and the Agent's is
+    // the one blocking progress.
+    expect(occludeUserRaisedCalls([pinned, asked]).map((call) => call.callId)).toEqual(["asked"]);
+  });
+
+  it("gives every legal workflow card priority over the pinned read-only guide", () => {
+    const reference = { pluginId: "legal-labor", capabilityId: "guide-open", callId: "reference", origin: "user" as const,
+      events: [{ type: "interaction" as const, request: { interactionId: "guide", type: "question" as const,
+        payload: { title: "诊断指引", readOnly: true } } }] };
+    for (const [capabilityId, type] of [["session-start", "question"], ["material-collect", "file-input"], ["gap-resolve", "question"], ["material-collect", "audio-record"]] as const) {
+      const flow = { pluginId: "legal-labor", capabilityId, callId: `flow-${type}`, origin: "agent" as const,
+        events: [{ type: "interaction" as const, request: { interactionId: "step", type, payload: {} } }] };
+      expect(occludeUserRaisedCalls([reference, flow], new Set(["legal-labor:guide-open"]))
+        .map((call) => call.callId)).toEqual([flow.callId]);
+    }
+  });
+
+  it("never hides the recorder while the Agent waits for its own answer", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const recorder = { ...base, callId: "recorder", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "rec", type: "audio-record" as const, payload: {} } }] };
+    const guide = { ...base, callId: "guide", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "g", type: "custom" as const, payload: {} } }] };
+    const asked = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }] };
+
+    // Hiding the recorder would unmount the card holding the microphone, and a
+    // recording in progress cannot be taken again. It also is not competing for
+    // the same answer, so the Agent's card loses nothing by leaving it up.
+    expect(occludeUserRaisedCalls([recorder, guide, asked]).map((call) => call.callId)).toEqual(["recorder", "asked"]);
+  });
+
+  it("brings the user's card back once the Agent's card is no longer waiting", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const pinned = { ...base, callId: "pinned", origin: "user" as const, events: [{ type: "interaction" as const, request: { interactionId: "guide", type: "custom" as const, payload: {} } }] };
+    const answered = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }, { type: "result" as const, output: {} }] };
+
+    // Occlusion is presentation only; nothing was cancelled on the way in.
+    expect(occludeUserRaisedCalls([pinned, answered]).map((call) => call.callId)).toEqual(["pinned", "asked"]);
+  });
+
+  it("leaves the user's non-interactive cards visible while the Agent waits", () => {
+    const base = { pluginId: plugin.id, capabilityId: "run", conversationId: "chat-1" };
+    const delivered = { ...base, callId: "delivered", origin: "user" as const, events: [{ type: "artifact" as const, artifact: { id: "docx", name: "report.docx", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", uri: "/api/v1/plugins/review/artifacts/token/preview" } }] };
+    const asked = { ...base, callId: "asked", origin: "agent" as const, events: [{ type: "interaction" as const, request: { interactionId: "upload", type: "file-input" as const, payload: {} } }] };
+
+    // Only cards asking for input can be confused with each other; a delivered
+    // file is not competing for an answer.
+    expect(occludeUserRaisedCalls([delivered, asked]).map((call) => call.callId)).toEqual(["delivered", "asked"]);
+  });
+
+  it("does not spin a progress indicator that has reached 100 percent", async () => {
+    const progressContainer = document.createElement("div");
+    document.body.append(progressContainer);
+    const progressRoot = createRoot(progressContainer);
+    const call: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "run",
+      callId: "progress-complete",
+      conversationId: "chat-1",
+      events: [{ type: "progress", current: 1, total: 1, message: "Complete" }]
+    };
+    await act(async () => progressRoot.render(
+      <I18nProvider language="en-US">
+        <PluginCapabilityHost calls={[call]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
+      </I18nProvider>
+    ));
+
+    expect(progressContainer.textContent).toContain("100%");
+    expect(progressContainer.querySelector(".animate-spin")).toBeNull();
+    await act(async () => progressRoot.unmount());
+    progressContainer.remove();
+  });
+
+  it("injects a restrictive CSP into renderer HTML", () => {
+    const document = buildRendererDocument("<html><head><title>x</title></head><body>x</body></html>");
+    expect(document).toContain("default-src 'none'");
+    expect(document).toContain("form-action 'none'");
+  });
+
+  it("labels the templates as templates and the products as deliverables", async () => {
+    const guideContainer = document.createElement("div");
+    document.body.append(guideContainer);
+    const guideRoot = createRoot(guideContainer);
+    const guide: PluginUiCall = {
+      pluginId: plugin.id,
+      capabilityId: "guide",
+      callId: "guide",
+      conversationId: "chat-1",
+      origin: "user",
+      events: [
+        { type: "artifact", artifact: { id: "a", name: "调研前准备清单.xlsx", mediaType: "application/vnd.ms-excel", uri: "https://example.test/a", role: "setup" } },
+        { type: "artifact", artifact: { id: "b", name: "诊断表.xlsx", mediaType: "application/vnd.ms-excel", uri: "https://example.test/b", role: "setup" } },
+        { type: "artifact", artifact: { id: "c", name: "诊断报告.docx", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", uri: "https://example.test/c", role: "deliverable" } },
+        { type: "result", output: {} }
+      ]
+    };
+
+    await act(async () => guideRoot.render(
+      <I18nProvider language="zh-CN">
+        <PluginCapabilityHost calls={[guide]} plugins={[plugin]} client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
+      </I18nProvider>
+    ));
+
+    // Two blank templates are not this session's delivery files, and a card
+    // that hides the files it was opened to hand over wastes the click that
+    // opened it.
+    expect(guideContainer.textContent).not.toContain("2 个交付文件");
+    expect(guideContainer.textContent).toContain("调研前准备清单.xlsx");
+    expect(guideContainer.textContent).toContain("诊断表.xlsx");
+    expect(guideContainer.textContent).toContain("诊断报告.docx");
+    await act(async () => guideRoot.unmount());
+    guideContainer.remove();
+  });
+});
+
+describe("readQuestions", () => {
+  it("drops entries that cannot be asked or answered, and keeps the rest in order", () => {
+    expect(readQuestions([
+      { id: "a", label: "First" },
+      // No id: its answer would have nowhere to go.
+      { label: "Nowhere to put this" },
+      // No label: it would render as a blank row.
+      { id: "b" },
+      // A repeat id would overwrite the earlier answer.
+      { id: "a", label: "First again" },
+      { id: "c", prompt: "Pick one", options: [{ label: "Yes", value: true }, "No"], required: true }
+    ])).toEqual([
+      { id: "a", label: "First", options: [], required: false },
+      // Options are read as labels, because answers are strings on the wire.
+      { id: "c", label: "Pick one", options: ["Yes", "No"], required: true }
+    ]);
+  });
+
+  it("treats a card with no questions as the single-answer card it has always been", () => {
+    expect(readQuestions(undefined)).toEqual([]);
+    expect(readQuestions("not a list")).toEqual([]);
+  });
+});
+describe("summarizeAcceptedFormats", () => {
+  const t = ((key: string) => ({
+    "plugin.ui.format.image": "图片",
+    "plugin.ui.format.media": "音视频",
+    "plugin.ui.format.separator": "、"
+  } as Record<string, string>)[key] ?? key) as never;
+
+  it("groups extensions into the file kinds a person recognises", () => {
+    expect(summarizeAcceptedFormats(".pdf,.docx,.xlsx,.txt,.md,.png,.m4a", t))
+      .toBe("PDF、Word、Excel、TXT/MD、图片、音视频");
+  });
+
+  it("lists an extension it has no family for rather than dropping it", () => {
+    expect(summarizeAcceptedFormats(".pdf,.eml", t)).toBe("PDF、.eml");
+  });
+
+  it("names a family once however many of its extensions are accepted", () => {
+    expect(summarizeAcceptedFormats(".doc,.docx", t)).toBe("Word");
+  });
+});
+describe("isBarePresentation", () => {
+  const call = (events: PluginUiCall["events"]): PluginUiCall => ({
+    pluginId: "demo", capabilityId: "run", callId: "c", conversationId: "websocket:chat-1", origin: "user", events
+  });
+
+  it("treats a recording interaction as drawing its own chrome", () => {
+    expect(isBarePresentation(call([
+      { type: "interaction", request: { interactionId: "r", type: "audio-record", payload: {} } }
+    ]))).toBe(true);
+  });
+
+  it("boxes a recording card that also reports progress", () => {
+    expect(isBarePresentation(call([
+      { type: "progress", message: "准备中" },
+      { type: "interaction", request: { interactionId: "r", type: "audio-record", payload: {} } }
+    ]))).toBe(false);
+  });
+
+  it("boxes every other interaction", () => {
+    expect(isBarePresentation(call([
+      { type: "interaction", request: { interactionId: "q", type: "question", payload: {} } }
+    ]))).toBe(false);
+  });
+});
+describe("selectRegionPluginCalls", () => {
+  it("docks pending Agent confirmations in chat while retaining results in the transcript", () => {
+    const waiting: PluginUiCall = { pluginId: "literature-review", capabilityId: "review_request_interaction", callId: "waiting", conversationId: "chat", origin: "agent",
+      events: [{ type: "interaction", request: { interactionId: "card", type: "custom", payload: { cardType: "keywords" } } }] };
+    const done: PluginUiCall = { ...waiting, callId: "done", events: [...waiting.events, { type: "result", output: { ok: true } }] };
+    expect(selectRegionPluginCalls([waiting, done], "pinned", new Set(), true).map((call) => call.callId)).toEqual(["waiting"]);
+    expect(selectRegionPluginCalls([waiting, done], "flow", new Set(), true).map((call) => call.callId)).toEqual(["done"]);
+    expect(selectRegionPluginCalls([waiting, done], "panel", new Set(), true)).toEqual([]);
+  });
+  const call = (origin: "user" | "agent", callId: string, events: PluginUiCall["events"]): PluginUiCall => ({
+    pluginId: "demo", capabilityId: "run", callId, conversationId: "websocket:chat-1", origin, events
+  });
+  const live: PluginUiCall["events"] = [{ type: "interaction", request: { interactionId: "i", type: "question", payload: {} } }];
+  const finished: PluginUiCall["events"] = [{ type: "result", result: {} }];
+
+  it("keeps only live user-raised calls above the composer", () => {
+    const calls = [
+      call("user", "live-user", live),
+      call("user", "done-user", finished),
+      call("agent", "live-agent", live)
+    ];
+    expect(selectRegionPluginCalls(calls, "pinned").map((item) => item.callId)).toEqual(["live-user"]);
+    expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["done-user", "live-agent"]);
+  });
+
+  it("promotes a live Agent call when its capability has a pinned command", () => {
+    const calls = [call("agent", "diagnosis", live)];
+    const pinned = new Set(["demo:run"]);
+    expect(selectRegionPluginCalls(calls, "pinned", pinned).map((item) => item.callId)).toEqual(["diagnosis"]);
+    expect(selectRegionPluginCalls(calls, "flow", pinned)).toEqual([]);
+  });
+
+  it("sends the interview recorder to the side column, not over the conversation", () => {
+    const recorder: PluginUiCall["events"] = [
+      { type: "interaction", request: { interactionId: "rec", type: "audio-record", payload: {} } }
+    ];
+    const calls = [
+      call("user", "recorder", recorder),
+      call("user", "guide", live),
+      call("agent", "asked", live)
+    ];
+
+    // The recorder draws its own bar and runs for as long as the interview, so
+    // it belongs in the column beside the transcript it feeds.
+    expect(selectRegionPluginCalls(calls, "panel").map((item) => item.callId)).toEqual(["recorder"]);
+    // Everything else the user raised keeps its place over the composer, and
+    // the recorder does not appear in both regions at once.
+    expect(selectRegionPluginCalls(calls, "pinned").map((item) => item.callId)).toEqual(["guide"]);
+    expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["asked"]);
+  });
+
+  it("leaves a finished recorder in the transcript with its deliverables", () => {
+    const delivered: PluginUiCall["events"] = [
+      { type: "interaction", request: { interactionId: "rec", type: "audio-record", payload: {} } },
+      { type: "result", output: {} }
+    ];
+    const calls = [call("user", "done-recorder", delivered)];
+
+    // Once the recording is answered there is nothing left to record, so the
+    // column closes and the files it produced stay in the history.
+    expect(selectRegionPluginCalls(calls, "panel")).toEqual([]);
+    expect(selectRegionPluginCalls(calls, "flow").map((item) => item.callId)).toEqual(["done-recorder"]);
+  });
+
+  it("keeps one card per capability instead of one per press", () => {
+    // Four presses of the guidance button used to leave four near-identical
+    // cards in the transcript, each listing the same two templates.
+    const presses: PluginUiCall[] = [1, 2, 3, 4].map((index) => ({
+      pluginId: plugin.id,
+      capabilityId: "guide",
+      callId: `press-${index}`,
+      conversationId: "chat-1",
+      origin: "user",
+      events: [
+        { type: "artifact", artifact: { id: `checklist-${index}`, name: "checklist.xlsx", mediaType: "application/vnd.ms-excel", uri: "https://example.test/a", role: "setup" } },
+        { type: "artifact", artifact: { id: `table-${index}`, name: "table.xlsx", mediaType: "application/vnd.ms-excel", uri: "https://example.test/b", role: "setup" } },
+        { type: "result", output: {} }
+      ]
+    }));
+
+    expect(selectCurrentPluginCalls(presses).map((item) => item.callId)).toEqual(["press-4"]);
+  });
+
+  it("keeps the run still going and the last run that produced something, per capability", () => {
+    const calls: PluginUiCall[] = [
+      { pluginId: plugin.id, capabilityId: "assess", callId: "old", conversationId: "chat-1", origin: "agent", events: [{ type: "result", output: {} }] },
+      { pluginId: plugin.id, capabilityId: "assess", callId: "delivered", conversationId: "chat-1", origin: "agent", events: [
+        { type: "artifact", artifact: { id: "wb", name: "workbook.xlsx", mediaType: "application/vnd.ms-excel", uri: "https://example.test/wb", role: "deliverable" } },
+        { type: "result", output: {} }
+      ] },
+      { pluginId: plugin.id, capabilityId: "assess", callId: "again", conversationId: "chat-1", origin: "agent", events: [{ type: "progress", current: 1, total: 3 }] },
+      { pluginId: plugin.id, capabilityId: "judge", callId: "failed", conversationId: "chat-1", origin: "agent", events: [{ type: "error", code: "model_inference_failed", message: "HTTP 504", retryable: true }] }
+    ];
+
+    // Retrying a capability keeps the files it already delivered.
+    expect(selectCurrentPluginCalls(calls).map((item) => item.callId)).toEqual(["delivered", "again"]);
+  });
+
+  function delivery(callId: string, names: string[], options: { conversationId?: string; prefix?: string } = {}): PluginUiCall {
+    return {
+      pluginId: "office", capabilityId: "office_deliver", callId,
+      conversationId: options.conversationId ?? "chat-office", origin: "agent",
+      events: [
+        ...names.map((name) => ({ type: "artifact" as const, artifact: {
+          id: `${callId}:${name}`, name, mediaType: "application/octet-stream", role: "deliverable" as const,
+          uri: `https://example.test/${callId}/${name}`, path: `${options.prefix ?? "/workspace/outputs"}/${name}`
+        } })),
+        { type: "result", output: { delivered: true } }
+      ]
+    };
+  }
+
+  it("retains all four Agent Office deliveries without duplicating them above the composer", async () => {
+    const office = InstalledPluginSchema.parse({ ...plugin, id: "office", manifest: {
+      ...plugin.manifest, id: "office", name: "Office", capabilities: [{ ...plugin.manifest.capabilities[0], id: "office_deliver" }]
+    } });
+    const calls = [delivery("word", ["report.docx"]), delivery("ppt", ["slides.pptx"]), delivery("pdf", ["report.pdf"]), delivery("excel", ["budget.xlsx"])];
+    const open = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<I18nProvider language="zh-CN"><PluginCapabilityHost calls={calls} plugins={[office]}
+        client={{ getUi: vi.fn(), respond: vi.fn(), cancel: vi.fn() }} onOpenArtifact={open} /></I18nProvider>));
+      expect(selectCurrentPluginCalls(calls).map((item) => item.callId)).toEqual(["word", "ppt", "pdf", "excel"]);
+      expect(container.querySelector(".plugin-capability-region")).toBeNull();
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  it.each(["pending", "failed"])("keeps earlier deliveries when the next delivery is %s", (state) => {
+    const delivered = delivery("word", ["report.docx"]);
+    const next: PluginUiCall = { ...delivery("next", []), events: state === "failed"
+      ? [{ type: "error", code: "recalculation_required", message: "Recalculate first", retryable: false }]
+      : [{ type: "progress", current: 1, total: 2 }] };
+    expect(selectCurrentPluginCalls([delivered, next]).map((call) => call.callId)).toContain("word");
+  });
+
+  it("updates repeated files without removing other files from an earlier delivery", () => {
+    const calls = [delivery("batch", ["report.docx", "slides.pptx"]), delivery("retry", ["report.docx"])];
+    const selected = selectCurrentPluginCalls(calls);
+    const artifacts = selected.flatMap((call) => call.events.filter((event) => event.type === "artifact"));
+    expect(artifacts.map((event) => event.artifact.name)).toEqual(["slides.pptx", "report.docx"]);
+    expect(artifacts[1]!.artifact.id).toBe("retry:report.docx");
+    expect(calls[0]!.events).toHaveLength(3);
+  });
+
+  it("keeps same-named files from different tasks and scopes deduplication to the conversation", () => {
+    const calls = [delivery("one", ["report.docx"], { prefix: "/outputs/task-1" }),
+      delivery("two", ["report.docx"], { prefix: "/outputs/task-2" }),
+      delivery("other-chat", ["report.docx"], { prefix: "/outputs/task-1", conversationId: "chat-other" })];
+    expect(selectCurrentPluginCalls(calls).map((call) => call.callId)).toEqual(["one", "two", "other-chat"]);
+  });
+
+  it("deduplicates artifacts without workspace paths by artifact ID", () => {
+    const first = delivery("one", ["report.pdf"]);
+    const second = delivery("two", ["report.pdf"]);
+    for (const call of [first, second]) {
+      const event = call.events[0]!;
+      if (event.type === "artifact") { delete event.artifact.path; event.artifact.id = "shared-file"; }
+    }
+    expect(selectCurrentPluginCalls([first, second]).map((call) => call.callId)).toEqual(["two"]);
+  });
+
+});

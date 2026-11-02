@@ -14,7 +14,7 @@ it('clears only selected data types from the in-app partition and indexes', asyn
   await clearInAppBrowserData(browserSession as any, history as any, downloads as any,
     ['siteData', 'cache', 'downloadHistory', 'browsingHistory']);
   expect(browserSession.clearStorageData).toHaveBeenCalledWith({ storages: [
-    'filesystem', 'indexdb', 'localstorage', 'websql', 'serviceworkers', 'cachestorage',
+    'filesystem', 'indexdb', 'localstorage', 'serviceworkers', 'cachestorage',
   ] });
   expect(browserSession.clearCache).toHaveBeenCalledOnce();
   expect(history.clear).toHaveBeenCalledOnce();

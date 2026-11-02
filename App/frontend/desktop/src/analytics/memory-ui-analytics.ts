@@ -1,3 +1,4 @@
+import { agentSourceScanExecutionKey } from "@memmy/local-api-contracts";
 import type { AgentSourceScanMode, MemoryApiLogToolName } from "@memmy/local-api-contracts";
 import type {
   MemoryUiAnalyticsEvent,
@@ -139,12 +140,13 @@ export function normalizeScanMode(mode?: AgentSourceScanMode): AgentSourceScanMo
 }
 
 export function recordScanStarted(jobId: string, input: {
+  attemptId?: string;
   sourceId: string;
   scanMode?: AgentSourceScanMode;
   pagePath: string;
   subPage: MemoryUiSubPage;
 }): void {
-  scanContextByJobId.set(jobId, {
+  scanContextByJobId.set(agentSourceScanExecutionKey({ jobId, attemptId: input.attemptId }), {
     sourceId: input.sourceId,
     scanMode: normalizeScanMode(input.scanMode),
     pagePath: input.pagePath,
@@ -199,10 +201,11 @@ export function buildMemorySourceScanStartedEvent(input: {
 
 export function buildMemorySourceScanCompletedEvent(input: {
   jobId: string;
+  attemptId?: string;
   sourceId: string;
   durationMs?: number;
 }): MemoryUiSourceScanCompletedEvent {
-  const context = resolveScanAnalyticsContext(input.jobId);
+  const context = resolveScanAnalyticsContext(agentSourceScanExecutionKey({ jobId: input.jobId, attemptId: input.attemptId }));
   return {
     name: MEMORY_UI_ANALYTICS_EVENTS.sourceScanCompleted,
     params: buildScanEventParams({
@@ -218,13 +221,14 @@ export function buildMemorySourceScanCompletedEvent(input: {
 
 export function buildMemorySourceScanFailedEvent(input: {
   jobId?: string;
+  attemptId?: string;
   pagePath?: string;
   subPage?: MemoryUiSubPage;
   sourceId: string;
   scanMode?: AgentSourceScanMode;
   durationMs?: number;
 }): MemoryUiSourceScanFailedEvent {
-  const context = input.jobId ? resolveScanAnalyticsContext(input.jobId) : undefined;
+  const context = input.jobId ? resolveScanAnalyticsContext(agentSourceScanExecutionKey({ jobId: input.jobId, attemptId: input.attemptId })) : undefined;
   return {
     name: MEMORY_UI_ANALYTICS_EVENTS.sourceScanFailed,
     params: buildScanEventParams({
@@ -247,10 +251,11 @@ export function trackMemoryUiEvent(event: MemoryUiAnalyticsEvent): void {
 
 export function trackAgentSourceScanOutcome(input: {
   jobId: string;
+  attemptId?: string;
   sourceId: string;
   succeeded: boolean;
 }): void {
-  const jobId = input.jobId.trim();
+  const jobId = agentSourceScanExecutionKey(input);
   if (!jobId || trackedScanOutcomeJobIds.has(jobId)) {
     return;
   }
@@ -262,6 +267,7 @@ export function trackAgentSourceScanOutcome(input: {
   }
   trackMemoryUiEvent(buildMemorySourceScanFailedEvent({
     jobId: input.jobId,
+    attemptId: input.attemptId,
     sourceId: input.sourceId
   }));
 }

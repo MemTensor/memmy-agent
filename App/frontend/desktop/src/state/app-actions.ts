@@ -1,6 +1,7 @@
 /** App actions module. */
 import type {
   AgentSourceView,
+  AgentSourceScanUnavailable,
   AppBootstrapResponse,
   AppSettingsDto,
   OnboardingStateDto,
@@ -30,12 +31,19 @@ import type {
 } from "./agent-chat-slice.js";
 import type { ToolsAction } from "./tools-slice.js";
 
+import type { ScanStamp as importScanStamp, ScanVersion, AgentSourceScanStatusResponse } from "@memmy/local-api-contracts";
+
 /** Type definition for event connection status. */
 export type EventConnectionStatus = "pending" | "connecting" | "connected" | "heartbeat" | "reconnecting";
+export type RecordingSidebarStatus = "idle" | "starting" | "recording" | "paused" | "transcribing" | "ready" | "failed";
 
 /** Contract for agent source scan progress. */
-export interface AgentSourceScanProgress {
+export interface AgentSourceScanProgress extends importScanStamp {
+  requestedSourceId?: string;
+  mode?: import("@memmy/local-api-contracts").AgentSourceScanMode;
   jobId: string;
+  attemptId?: string;
+  attemptStartedAt?: string;
   sourceId: string;
   phase: ScanPhase;
   current: number;
@@ -43,8 +51,12 @@ export interface AgentSourceScanProgress {
   message?: string;
 }
 
-export interface AgentSourceScanCompletion {
+export interface AgentSourceScanCompletion extends importScanStamp {
+  results?: import("@memmy/local-api-contracts").ScanResult[];
+  succeeded?: boolean;
   jobId: string;
+  attemptId?: string;
+  attemptStartedAt?: string;
   sourceId: string;
 }
 
@@ -84,6 +96,11 @@ export type AppAction =
   | { type: "bootstrap/loaded"; bootstrap: AppBootstrapResponse; initialPath: AppRoutePath }
   | { type: "events/statusChanged"; status: EventConnectionStatus }
   | { type: "navigation/changed"; path: AppRoutePath }
+  | { type: "recording/openRequested" }
+  | { type: "recording/controlRequested" }
+  | { type: "recording/finishRequested" }
+  | { type: "recording/requestHandled"; requestId: number }
+  | { type: "recording/statusChanged"; status: RecordingSidebarStatus }
   | { type: "window/visibilityChanged"; visible: boolean }
   | { type: "invitationToast/shown"; id: number; kind: InvitationToastKind }
   | { type: "invitationToast/cleared"; id: number }
@@ -95,12 +112,21 @@ export type AppAction =
   | { type: "agentSources/loaded"; sources: AgentSourceView[] }
   | { type: "agentSources/refreshed"; sources: AgentSourceView[] }
   | { type: "agentSources/error"; message: string }
+  | { type: "agentSources/scanAvailability"; unavailable: AgentSourceScanUnavailable | null }
+  | { type: "agentSources/restartStarted"; baseGeneration: number | null }
+  | { type: "agentSources/restartFinished" }
+  | { type: "agentSources/clearStarted"; baseVersion: ScanVersion | null }
+  | { type: "agentSources/clearFinished"; succeeded: boolean }
+  | { type: "agentSources/scanStateSynchronized"; generation: number; status: AgentSourceScanStatusResponse; sources?: AgentSourceView[] }
+  | { type: "agentSources/scanResumeAcknowledged"; token: string; jobId: string; attemptId?: string }
   | { type: "agentSources/scanStarted"; sourceId: string }
+  | { type: "agentSources/scanStatus"; status: AgentSourceScanStatusResponse; requestGeneration?: number; cancelledExecution?: { token: string; jobId: string; attemptId?: string } }
+  | { type: "agentSources/scanControl"; control: "start" | "pause" | "resume" | "cancel" | null; token: string }
   | { type: "agentSources/scanProgress"; progress: AgentSourceScanProgress }
   | { type: "agentSources/scanCancelRequested"; jobId: string }
   | { type: "agentSources/scanCancelFailed"; message: string }
   | { type: "agentSources/scanCompleted"; scan?: AgentSourceScanFinished }
-  | { type: "agentSources/scanCompletionExpired"; jobId: string }
+  | { type: "agentSources/scanCompletionExpired"; jobId: string; attemptId?: string }
   | { type: "scanPreferences/updated"; preferences: Partial<ScanPreferences> }
   | { type: "preferredMode/updated"; preferredMode: PreferredMode }
   | { type: "account/updated"; userId?: string; email?: string; phoneNumber?: string | null; nickname?: string; registeredAt?: string | null }
@@ -133,6 +159,26 @@ export const appActions = {
   /** Handles navigate. */
   navigate(path: AppRoutePath): AppAction {
     return { type: "navigation/changed", path };
+  },
+
+  requestRecordingOpen(): AppAction {
+    return { type: "recording/openRequested" };
+  },
+
+  requestRecordingControl(): AppAction {
+    return { type: "recording/controlRequested" };
+  },
+
+  requestRecordingFinish(): AppAction {
+    return { type: "recording/finishRequested" };
+  },
+
+  recordingRequestHandled(requestId: number): AppAction {
+    return { type: "recording/requestHandled", requestId };
+  },
+
+  recordingStatusChanged(status: RecordingSidebarStatus): AppAction {
+    return { type: "recording/statusChanged", status };
   },
 
   windowVisibilityChanged(visible: boolean): AppAction {
@@ -182,6 +228,30 @@ export const appActions = {
     return { type: "agentSources/refreshed", sources };
   },
 
+  agentSourceScanAvailability(unavailable: AgentSourceScanUnavailable | null): AppAction {
+    return { type: "agentSources/scanAvailability", unavailable };
+  },
+
+  agentSourceRestartStarted(baseGeneration: number | null): AppAction {
+    return { type: "agentSources/restartStarted", baseGeneration };
+  },
+
+  agentSourceRestartFinished(): AppAction {
+    return { type: "agentSources/restartFinished" };
+  },
+
+  agentSourceClearStarted(baseVersion: ScanVersion | null): AppAction {
+    return { type: "agentSources/clearStarted", baseVersion };
+  },
+
+  agentSourceClearFinished(succeeded: boolean): AppAction {
+    return { type: "agentSources/clearFinished", succeeded };
+  },
+
+  agentSourceScanStateSynchronized(generation: number, status: AgentSourceScanStatusResponse, sources?: AgentSourceView[]): AppAction {
+    return { type: "agentSources/scanStateSynchronized", generation, status, sources };
+  },
+
   /** Handles agent sources failed. */
   agentSourcesFailed(message: string): AppAction {
     return { type: "agentSources/error", message };
@@ -208,12 +278,17 @@ export const appActions = {
   },
 
   /** Handles agent source scan completed. */
+  agentSourceScanResumeAcknowledged(token: string, jobId: string, attemptId?: string): AppAction {
+    return { type: "agentSources/scanResumeAcknowledged", token, jobId, attemptId };
+  },
+  agentSourceScanStatusReceived(status: AgentSourceScanStatusResponse, requestGeneration?: number, cancelledExecution?: { token: string; jobId: string; attemptId?: string }): AppAction { return { type: "agentSources/scanStatus", status, requestGeneration, cancelledExecution }; },
+  agentSourceScanControl(control: "start" | "pause" | "resume" | "cancel" | null, token: string): AppAction { return { type: "agentSources/scanControl", control, token }; },
   agentSourceScanCompleted(scan?: AgentSourceScanFinished): AppAction {
     return { type: "agentSources/scanCompleted", scan };
   },
 
-  agentSourceScanCompletionExpired(jobId: string): AppAction {
-    return { type: "agentSources/scanCompletionExpired", jobId };
+  agentSourceScanCompletionExpired(jobId: string, attemptId?: string): AppAction {
+    return { type: "agentSources/scanCompletionExpired", jobId, attemptId };
   },
 
   /** Handles scan preferences updated. */

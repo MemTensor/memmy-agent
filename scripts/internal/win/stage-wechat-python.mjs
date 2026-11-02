@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { verifyWindowsComputerUseRuntime } from './verify-computer-use-runtime.mjs';
@@ -20,6 +21,24 @@ const REQUIRED_FILES = [
   'libcrypto-3.dll', 'libffi-8.dll', 'vcruntime140.dll', 'vcruntime140_1.dll',
 ];
 const IMMUTABLE_FILES = ['python313.zip', 'python313._pth', 'LICENSE.txt'];
+const WINDOWS_DIRECTORY_REPLACE_RETRIES = 5;
+
+async function replaceDirectoryWithRetry(staging, destination) {
+  let lastError;
+  for (let attempt = 1; attempt <= WINDOWS_DIRECTORY_REPLACE_RETRIES; attempt += 1) {
+    try {
+      await rm(destination, { recursive: true, force: true });
+      await rename(staging, destination);
+      return;
+    } catch (error) {
+      lastError = error;
+      const retryable = ['EACCES', 'EBUSY', 'EPERM'].includes(error?.code);
+      if (!retryable || attempt === WINDOWS_DIRECTORY_REPLACE_RETRIES) throw error;
+      await sleep(attempt * 500);
+    }
+  }
+  throw lastError;
+}
 
 export function verifyPinnedWindowsPythonArchive(bytes) {
   if (createHash('sha256').update(bytes).digest('hex') !== WINDOWS_WECHAT_PYTHON_SHA256) {
@@ -96,8 +115,7 @@ export async function stageWindowsWeChatPython({ destination, archivePath,
         createHash('sha256').update(readFileSync(join(staging, name))).digest('hex')])),
     }, null, 2)}\n`);
     verifyWindowsWeChatPythonDirectory(staging);
-    await rm(destination, { recursive: true, force: true });
-    await rename(staging, destination);
+    await replaceDirectoryWithRetry(staging, destination);
   } finally { await rm(staging, { recursive: true, force: true }); }
 }
 

@@ -32,7 +32,7 @@ function context(turnId = "turn-1", sessionKey = "websocket:deadline") {
 
 function expectUnavailable(ctx: AgentHookContext) {
   expect(ctx.messages?.[0].content).toEqual(expect.arrayContaining([
-    expect.objectContaining({ text: expect.stringContaining('<memmy_memory_status status="unavailable">') }),
+    expect.objectContaining({ text: expect.stringContaining(`<memmy_memory_status status="unavailable" turn_id="${ctx.spec?.turnId}">`) }),
   ]));
 }
 
@@ -90,7 +90,7 @@ describe("interactive memory deadline", () => {
       await vi.advanceTimersByTimeAsync(INTERACTIVE_MEMORY_TIMEOUT_MS + 1);
       await expect(run).resolves.toBeUndefined();
       expect(messages[0].content).toEqual(expect.arrayContaining([
-        expect.objectContaining({ text: expect.stringContaining("<memmy_memory_status status=\"unavailable\">") }),
+        expect.objectContaining({ text: expect.stringContaining('<memmy_memory_status status="unavailable" turn_id="') }),
       ]));
     } finally {
       vi.useRealTimers();
@@ -141,7 +141,7 @@ describe("interactive memory deadline", () => {
     }
   });
 
-  it("shares the prompt L3 budget with turn retrieval rather than granting another eight seconds", async () => {
+  it("starts a full recall budget after prompt preparation and a long DAG wait", async () => {
     vi.useFakeTimers();
     try {
       const client = {
@@ -157,22 +157,26 @@ describe("interactive memory deadline", () => {
       const prompt = hook.beforeBuildSystemPrompt(ctx);
       await vi.advanceTimersByTimeAsync(6_000);
       await prompt;
+      // The loop may await DAG compaction between these two hooks.
+      await vi.advanceTimersByTimeAsync(30_000);
       let completed = false;
       const run = hook.beforeRun(ctx).then(() => { completed = true; });
 
-      await vi.advanceTimersByTimeAsync(1_999);
+      await vi.advanceTimersByTimeAsync(INTERACTIVE_MEMORY_TIMEOUT_MS - 1);
       expect(completed).toBe(false);
+      expect(client.startTurn).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(2);
       await run;
 
       expectUnavailable(ctx);
       expect(client.startTurn).toHaveBeenCalledOnce();
+      expect(hook.lastError).toContain("memory did not answer within");
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("skips retrieval after L3 uses the budget and gives a different turn its own budget", async () => {
+  it("can recall after L3 times out and gives a different turn its own budget", async () => {
     vi.useFakeTimers();
     try {
       const client = {
@@ -185,12 +189,14 @@ describe("interactive memory deadline", () => {
       const prompt = hook.beforeBuildSystemPrompt(ctx);
       await vi.advanceTimersByTimeAsync(INTERACTIVE_MEMORY_TIMEOUT_MS + 1);
       await prompt;
+      expect(hook.lastError).toContain("memory did not answer within");
       const afterPrompt = Date.now();
       await hook.beforeRun(ctx);
 
       expect(Date.now()).toBe(afterPrompt);
-      expectUnavailable(ctx);
-      expect(client.startTurn).not.toHaveBeenCalled();
+      expect(client.startTurn).toHaveBeenCalledOnce();
+      expect(JSON.stringify(ctx.messages)).toContain("current memory");
+      expect(hook.lastError).toBeNull();
 
       // An expired prompt from another turn cannot exhaust a new turn's
       // independent budget, even if it is delivered out of order.
@@ -198,8 +204,50 @@ describe("interactive memory deadline", () => {
       await vi.advanceTimersByTimeAsync(INTERACTIVE_MEMORY_TIMEOUT_MS + 1);
       await stalePrompt;
       await hook.beforeRun(context("turn-2"));
-      expect(client.startTurn).toHaveBeenCalledOnce();
+      expect(client.startTurn).toHaveBeenCalledTimes(2);
       expect(hook.lastError).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retrieves memory after a DAG wait longer than the original deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = memoryClient();
+      const hook = new MemmyMemoryHook(client as any);
+      const ctx = context();
+      await hook.beforeBuildSystemPrompt(ctx);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await hook.beforeRun(ctx);
+
+      expect(client.startTurn).toHaveBeenCalledOnce();
+      expect(JSON.stringify(ctx.messages)).toContain("current memory");
+      expect(hook.lastError).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not revive an aborted turn when starting the recall budget", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = memoryClient();
+      const hook = new MemmyMemoryHook(client as any);
+      const controller = new AbortController();
+      const ctx = new AgentHookContext({
+        spec: { ...context().spec, abortSignal: controller.signal },
+        messages: context().messages,
+      });
+      await hook.beforeBuildSystemPrompt(ctx);
+      await vi.advanceTimersByTimeAsync(30_000);
+      controller.abort(new Error("user cancelled during DAG compaction"));
+
+      await hook.beforeRun(ctx);
+
+      expect(client.startTurn).not.toHaveBeenCalled();
+      expect(JSON.stringify(ctx.messages)).not.toContain("current memory");
     } finally {
       vi.useRealTimers();
     }

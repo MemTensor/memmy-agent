@@ -15,6 +15,7 @@ const POPOVER_OFFSET = 4;
 type AgentThreadToolbarProps = {
   title: string;
   titleTrailing?: ReactNode;
+  actions?: ReactNode;
   messages: AgentChatMessage[];
   panelOpen: boolean;
   onOpenPanel: () => void;
@@ -154,6 +155,7 @@ export function AgentThreadToolbar(props: AgentThreadToolbarProps) {
             <Search size={16} aria-hidden="true" />
           </ToolbarButton>
         )}
+        {props.actions}
         {prompts.length ? (
           <ToolbarButton
             buttonRef={historyButtonRef}

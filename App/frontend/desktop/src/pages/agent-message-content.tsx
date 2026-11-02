@@ -10,6 +10,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import type { MemmyAgentClient, ResolvedAgentArtifact } from "../api/memmy-agent-client.js";
+import { FileTypeIcon } from "../components/file-type-icon.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { normalizeBrowserAddress, readBrowserPreferences, requestBrowserOpen } from "./browser-panel.js";
 import { writeSettingsBrowserExtensionFocus, writeSettingsExcelConnectionFocus } from "./settings-nav.js";
@@ -18,10 +19,19 @@ export type AgentArtifactClient = {
   resolveArtifact(path: string): ReturnType<MemmyAgentClient["resolveArtifact"]>;
   revealArtifact(path: string): Promise<void>;
   openArtifact(path: string): Promise<void>;
+  /**
+   * Prefer in-app workspace preview when the path belongs to the active
+   * workspace. Returns true when the preview panel handled the open.
+   */
+  previewArtifact?: (path: string) => Promise<boolean>;
 };
 export type AttachmentActionStatus = "opened" | "revealed" | "downloaded" | "failed";
 export type AttachmentCopyTarget = "path" | "url";
 export type AttachmentDownloadStarter = (url: string, name: string) => boolean;
+export type AttachmentSaveResult =
+  | { status: "saved"; path: string }
+  | { status: "cancelled" | "started" }
+  | { status: "failed"; error: string };
 export type InAppFilePreview = {
   name: string;
   path?: string;
@@ -34,6 +44,7 @@ interface AgentMessageContentProps {
   isStreaming?: boolean;
   artifactClient?: AgentArtifactClient | null;
   onPreviewFile?: InAppFilePreviewHandler;
+  deliveredFiles?: ReadonlyArray<{ kind: string; name?: string; path?: string }>;
   deferRender?: boolean;
   deferredRevealDelayMs?: number;
   className?: string;
@@ -41,8 +52,68 @@ interface AgentMessageContentProps {
 }
 
 const TRAILING_PUNCTUATION_RE = /[.,;:!?，。；：！？)）\]]+$/;
+// Match through adjacent punctuation, then split it back out before rendering the file chip.
+// Bare prose stays absolute-only because relative paths are ambiguous outside inline code.
+const BARE_LOCAL_PATH_RE = /(^|[\s([{（【:：])((?:~\/|\/|[A-Za-z]:[\\/])[^\s<>"'`]+)/gu;
+const APP_RELATIVE_URL_PATH_RE = /^\/(?:api|assets|static)(?:\/|$)/i;
 const LONG_TEXT_WRAP_CLASS = "break-words [overflow-wrap:anywhere]";
 const LIST_ITEM_BLOCK_TAGS = new Set(["p", "pre", "blockquote", "table", "ul", "ol", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "div"]);
+
+function linkDeliveredFileMentions(
+  children: ReactNode,
+  deliveredFiles: AgentMessageContentProps["deliveredFiles"],
+  artifactClient: AgentArtifactClient | null | undefined,
+  onPreviewFile: InAppFilePreviewHandler | undefined,
+  isStreaming: boolean | undefined,
+): ReactNode {
+  if (!artifactClient) return children;
+  const files = (deliveredFiles ?? []).flatMap((file) => {
+    const path = file.path?.trim();
+    if (file.kind !== "file" || !path || !isLikelyLocalPath(path)) return [];
+    const name = basename(file.name?.trim() || path);
+    return name ? [{ name, path }] : [];
+  }).sort((left, right) => right.name.length - left.name.length);
+  if (!files.length) return children;
+
+  let key = 0;
+  return Children.toArray(children).flatMap((child) => {
+    if (typeof child !== "string") return [child];
+    const parts: ReactNode[] = [];
+    let cursor = 0;
+    while (cursor < child.length) {
+      let match: { name: string; path: string; index: number } | null = null;
+      for (const file of files) {
+        let index = child.indexOf(file.name, cursor);
+        while (index >= 0 && (
+          /[\w.-]/u.test(child[index - 1] ?? "") || /[\w.-]/u.test(child[index + file.name.length] ?? "")
+        )) index = child.indexOf(file.name, index + 1);
+        if (index >= 0 && (!match || index < match.index || index === match.index && file.name.length > match.name.length)) {
+          match = { ...file, index };
+        }
+      }
+      if (!match) break;
+      if (match.index > cursor) parts.push(child.slice(cursor, match.index));
+      parts.push(<FileReferenceChip key={`delivered-file-${key++}`} path={match.path} label={match.name} variant="link" isStreaming={isStreaming} artifactClient={artifactClient} onPreviewFile={onPreviewFile} />);
+      cursor = match.index + match.name.length;
+    }
+    if (!parts.length) return [child];
+    if (cursor < child.length) parts.push(child.slice(cursor));
+    return parts;
+  });
+}
+
+function findDeliveredFileForInlineCode(
+  code: string,
+  deliveredFiles: AgentMessageContentProps["deliveredFiles"],
+): { path: string } | null {
+  for (const file of deliveredFiles ?? []) {
+    const path = file.path?.trim();
+    if (file.kind !== "file" || !path || !isLikelyLocalPath(path)) continue;
+    const name = basename(file.name?.trim() || path);
+    if (code === name || code === basename(path) || code === path) return { path };
+  }
+  return null;
+}
 
 function listItemElementTag(node: ReactNode): string | null {
   if (!isValidElement(node)) {
@@ -130,7 +201,7 @@ const AGENT_CODE_THEME = {
 
 export const AgentMessageContent = memo(function AgentMessageContent(props: AgentMessageContentProps) {
   const source = useMemo(
-    () => unwrapSingleMarkdownResult(stripLeakedInternalTags(props.content, Boolean(props.isStreaming))),
+    () => normalizeLatexMathDelimiters(unwrapSingleMarkdownResult(stripLeakedInternalTags(props.content, Boolean(props.isStreaming)))),
     [props.content, props.isStreaming]
   );
   const deferred = useDeferredMarkdownRender(source, Boolean(props.deferRender), Boolean(props.isStreaming), props.deferredRevealDelayMs);
@@ -138,7 +209,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     a({ href, children }) {
       const localPath = localArtifactPathFromHref(href);
       if (localPath) {
-        return <FileReferenceChip path={localPath} label={children} isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
+        return <FileReferenceChip path={localPath} label={children} variant="link" isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
       }
       if (isMailtoHref(href)) {
         return <MailtoLink href={href?.trim() ?? ""}>{children}</MailtoLink>;
@@ -197,15 +268,25 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
       const language = /language-([A-Za-z0-9_+-]+)/.exec(className ?? "")?.[1] ?? null;
       const isInline = !language && !raw.includes("\n");
       if (isInline) {
+        const deliveredFile = props.artifactClient ? findDeliveredFileForInlineCode(code, props.deliveredFiles) : null;
+        if (deliveredFile) {
+          return <FileReferenceChip path={deliveredFile.path} label={code} variant="link" isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
+        }
+        const localPath = cleanPathToken(code);
+        if (isLikelyLocalFilePath(localPath)) {
+          return <FileReferenceChip path={localPath} label={localPath} variant="link" verifiedOnly={Boolean(props.artifactClient)} isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
+        }
         return <code className={`agent-message-content__inline-code ${INLINE_CODE_WRAP_CLASS}`}>{code}</code>;
       }
       return <CodeBlock code={code} language={language} highlight={!props.isStreaming} />;
     },
     p({ children }) {
-      return <p className={`agent-message-content__p ${LONG_TEXT_WRAP_CLASS}`}>{children}</p>;
+      return <p className={`agent-message-content__p ${LONG_TEXT_WRAP_CLASS}`}>
+        {linkDeliveredFileMentions(withBareLocalFileReferences(children, props), props.deliveredFiles, props.artifactClient, props.onPreviewFile, props.isStreaming)}
+      </p>;
     },
     li({ children, className }) {
-      return <li className={className}>{withListItemLead(children)}</li>;
+      return <li className={className}>{withListItemLead(withBareLocalFileReferences(children, props))}</li>;
     },
     ul({ children }) {
       return <ul className={`agent-message-content__list agent-message-content__list--unordered ${LONG_TEXT_WRAP_CLASS}`}>{children}</ul>;
@@ -229,12 +310,12 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
       );
     },
     th({ children, style }) {
-      return <th className={`agent-message-content__th ${LONG_TEXT_WRAP_CLASS}`} style={style}>{children}</th>;
+      return <th className={`agent-message-content__th ${LONG_TEXT_WRAP_CLASS}`} style={style}>{withBareLocalFileReferences(children, props)}</th>;
     },
     td({ children, style }) {
-      return <td className={`agent-message-content__td ${LONG_TEXT_WRAP_CLASS}`} style={style}>{children}</td>;
+      return <td className={`agent-message-content__td ${LONG_TEXT_WRAP_CLASS}`} style={style}>{withBareLocalFileReferences(children, props)}</td>;
     }
-  }), [props.artifactClient, props.isStreaming, props.onPreviewFile]);
+  }), [props.artifactClient, props.deliveredFiles, props.isStreaming, props.onPreviewFile]);
 
   if (!deferred.ready) {
     return <DeferredMarkdownPlaceholder content={source} containerRef={deferred.containerRef} className={props.className} style={props.style} />;
@@ -263,11 +344,215 @@ function agentMessageUrlTransform(value: string): string {
     ? value : defaultUrlTransform(value);
 }
 
+export function normalizeLatexMathDelimiters(content: string): string {
+  if (!content.includes("\\(") && !content.includes("\\[")) {
+    return content;
+  }
+
+  const output: string[] = [];
+  let index = 0;
+  let lineStart = true;
+  let fenceCharacter: "`" | "~" | null = null;
+  let fenceLength = 0;
+  let fenceQuoteDepth = 0;
+  let indentedCodeQuoteDepth: number | null = null;
+  let inlineCodeTicks = 0;
+  let mathCloser: ")" | "]" | null = null;
+  let mathOpenerIndex = -1;
+  let mathOpeningDelimiter = "";
+  let mathCanConvert = true;
+  let precedingBackslashes = 0;
+
+  while (index < content.length) {
+    if (lineStart && inlineCodeTicks === 0 && mathCloser === null) {
+      const newlineIndex = content.indexOf("\n", index);
+      const lineEnd = newlineIndex === -1 ? content.length : newlineIndex;
+      const line = content.slice(index, lineEnd);
+      const { quoteDepth, body } = splitBlockquotePrefix(line);
+      const fencePattern = /^(?: {0,3})(`{3,}|~{3,})/;
+      const fenceBody = fenceCharacter === null
+        ? body.replace(/^(?: {0,3})(?:[-+*]|\d{1,9}[.)])[ \t]+/, "")
+        : body;
+      const fenceMatch = fencePattern.exec(fenceBody);
+
+      if (fenceCharacter !== null) {
+        if (quoteDepth < fenceQuoteDepth) {
+          fenceCharacter = null;
+          fenceLength = 0;
+          fenceQuoteDepth = 0;
+        } else {
+          output.push(content.slice(index, newlineIndex === -1 ? lineEnd : lineEnd + 1));
+          if (quoteDepth === fenceQuoteDepth
+            && fenceMatch?.[1]?.[0] === fenceCharacter
+            && fenceMatch[1].length >= fenceLength
+            && fenceBody.slice(fenceMatch[0].length).trim() === "") {
+            fenceCharacter = null;
+            fenceLength = 0;
+            fenceQuoteDepth = 0;
+          }
+          index = newlineIndex === -1 ? lineEnd : lineEnd + 1;
+          lineStart = true;
+          precedingBackslashes = 0;
+          continue;
+        }
+      }
+
+      if (fenceMatch?.[1]) {
+        fenceCharacter = fenceMatch[1][0] as "`" | "~";
+        fenceLength = fenceMatch[1].length;
+        fenceQuoteDepth = quoteDepth;
+        indentedCodeQuoteDepth = null;
+        output.push(content.slice(index, newlineIndex === -1 ? lineEnd : lineEnd + 1));
+        index = newlineIndex === -1 ? lineEnd : lineEnd + 1;
+        lineStart = true;
+        precedingBackslashes = 0;
+        continue;
+      }
+
+      const isIndentedCodeLine = /^(?: {4}|\t)/.test(body);
+      if (indentedCodeQuoteDepth !== null) {
+        if (quoteDepth === indentedCodeQuoteDepth && (isIndentedCodeLine || body.trim() === "")) {
+          output.push(content.slice(index, newlineIndex === -1 ? lineEnd : lineEnd + 1));
+          index = newlineIndex === -1 ? lineEnd : lineEnd + 1;
+          lineStart = true;
+          precedingBackslashes = 0;
+          continue;
+        }
+        indentedCodeQuoteDepth = null;
+      }
+
+      if (isIndentedCodeLine && canStartIndentedCode(content, index, quoteDepth)) {
+        indentedCodeQuoteDepth = quoteDepth;
+        output.push(content.slice(index, newlineIndex === -1 ? lineEnd : lineEnd + 1));
+        index = newlineIndex === -1 ? lineEnd : lineEnd + 1;
+        lineStart = true;
+        precedingBackslashes = 0;
+        continue;
+      }
+    }
+
+    const character = content[index]!;
+    const isEscaped = precedingBackslashes % 2 === 1;
+    if (mathCloser !== null) {
+      if (character === "\\" && content[index + 1] === mathCloser && !isEscaped) {
+        if (mathCanConvert) {
+          const isDisplayMath = mathCloser === "]";
+          output[mathOpenerIndex] = mathOpeningDelimiter;
+          output.push(isDisplayMath
+            ? `${content[index - 1] === "\n" ? "" : "\n"}$$${content[index + 2] === "\n" || index + 2 === content.length ? "" : "\n"}`
+            : "$");
+        } else {
+          output.push(character, mathCloser);
+        }
+        mathCloser = null;
+        mathOpenerIndex = -1;
+        mathOpeningDelimiter = "";
+        mathCanConvert = true;
+        index += 2;
+        lineStart = false;
+        precedingBackslashes = 0;
+        continue;
+      }
+      if (character === "\\" && (content[index + 1] === "(" || content[index + 1] === "[") && !isEscaped) {
+        mathCanConvert = false;
+      }
+      output.push(character);
+      lineStart = character === "\n";
+      precedingBackslashes = character === "\\" ? precedingBackslashes + 1 : 0;
+      index += 1;
+      continue;
+    }
+
+    if (character === "`" && (inlineCodeTicks !== 0 || !isEscaped)) {
+      let runLength = 1;
+      while (content[index + runLength] === "`") runLength += 1;
+      if (inlineCodeTicks === 0 && hasInlineCodeCloser(content, index + runLength, runLength)) inlineCodeTicks = runLength;
+      else if (inlineCodeTicks === runLength) inlineCodeTicks = 0;
+      output.push(content.slice(index, index + runLength));
+      index += runLength;
+      lineStart = false;
+      precedingBackslashes = 0;
+      continue;
+    }
+
+    if (inlineCodeTicks === 0 && character === "\\" && !isEscaped) {
+      const opener = content[index + 1];
+      if (opener === "(" || opener === "[") {
+        output.push(content.slice(index, index + 2));
+        mathOpenerIndex = output.length - 1;
+        mathCloser = opener === "[" ? "]" : ")";
+        mathCanConvert = true;
+        mathOpeningDelimiter = opener === "["
+          ? `${index === 0 || content[index - 1] === "\n" ? "" : "\n"}$$${content[index + 2] === "\n" ? "" : "\n"}`
+          : "$";
+        index += 2;
+        lineStart = false;
+        precedingBackslashes = 0;
+        continue;
+      }
+    }
+
+    output.push(character);
+    lineStart = character === "\n";
+    precedingBackslashes = character === "\\" ? precedingBackslashes + 1 : 0;
+    index += 1;
+  }
+
+  return output.join("");
+}
+
+function splitBlockquotePrefix(line: string): { quoteDepth: number; body: string } {
+  let offset = 0;
+  let quoteDepth = 0;
+  while (true) {
+    const match = /^(?: {0,3})>[ \t]?/.exec(line.slice(offset));
+    if (!match) break;
+    offset += match[0].length;
+    quoteDepth += 1;
+  }
+  return { quoteDepth, body: line.slice(offset) };
+}
+
+function canStartIndentedCode(content: string, lineStart: number, quoteDepth: number): boolean {
+  if (lineStart === 0) return true;
+  const previousLineEnd = lineStart - 1;
+  const previousLineStart = content.lastIndexOf("\n", previousLineEnd - 1) + 1;
+  const previousLine = splitBlockquotePrefix(content.slice(previousLineStart, previousLineEnd));
+  return previousLine.quoteDepth !== quoteDepth || previousLine.body.trim() === "";
+}
+
+function hasInlineCodeCloser(content: string, startIndex: number, runLength: number): boolean {
+  const openerLineStart = content.lastIndexOf("\n", startIndex - runLength - 1) + 1;
+  const openerQuoteDepth = splitBlockquotePrefix(content.slice(openerLineStart, startIndex)).quoteDepth;
+  let index = startIndex;
+  while (index < content.length) {
+    if (content[index] === "\n") {
+      const nextLineEnd = content.indexOf("\n", index + 1);
+      const nextLine = content.slice(index + 1, nextLineEnd === -1 ? content.length : nextLineEnd);
+      if (nextLine.trim() === "") return false;
+      const { quoteDepth, body } = splitBlockquotePrefix(nextLine);
+      if (quoteDepth !== openerQuoteDepth
+        || /^(?: {0,3})(?:`{3,}|~{3,}|#{1,6}(?:[ \t]+|$)|(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$))/.test(body)
+        || /^(?: {0,3})(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})$/.test(body)) return false;
+    }
+    if (content[index] === "`") {
+      let candidateLength = 1;
+      while (content[index + candidateLength] === "`") candidateLength += 1;
+      if (candidateLength === runLength) return true;
+      index += candidateLength;
+      continue;
+    }
+    index += 1;
+  }
+  return false;
+}
+
 function areAgentMessageContentPropsEqual(previous: AgentMessageContentProps, next: AgentMessageContentProps): boolean {
   return previous.content === next.content
     && previous.isStreaming === next.isStreaming
     && previous.artifactClient === next.artifactClient
     && previous.onPreviewFile === next.onPreviewFile
+    && previous.deliveredFiles === next.deliveredFiles
     && previous.deferRender === next.deferRender
     && previous.deferredRevealDelayMs === next.deferredRevealDelayMs
     && previous.className === next.className
@@ -487,12 +772,13 @@ function FileReferenceChip(props: {
   artifactClient?: AgentArtifactClient | null;
   onPreviewFile?: InAppFilePreviewHandler;
   preferPreview?: boolean;
+  variant?: "chip" | "link";
+  verifiedOnly?: boolean;
 }) {
   const [resolved, setResolved] = useState<ResolvedAgentArtifact | null>(null);
   const [failed, setFailed] = useState(false);
   const [actionState, setActionState] = useState<"idle" | "working" | "error">("idle");
   const [copiedTarget, setCopiedTarget] = useState<AttachmentCopyTarget | null>(null);
-  const { t } = useTranslation();
   const cleanPath = cleanPathToken(props.path);
 
   useEffect(() => {
@@ -504,6 +790,7 @@ function FileReferenceChip(props: {
         cancelled = true;
       };
     }
+    setResolved(null);
     setFailed(false);
     void props.artifactClient.resolveArtifact(cleanPath)
       .then((artifact) => {
@@ -523,7 +810,7 @@ function FileReferenceChip(props: {
   }, [cleanPath, props.artifactClient, props.isStreaming]);
 
   const handleAttachmentAction = async () => {
-    if (actionState === "working") return;
+    if (props.isStreaming || actionState === "working") return;
     setActionState("working");
     setCopiedTarget(null);
     if (!resolved) {
@@ -552,11 +839,11 @@ function FileReferenceChip(props: {
         <button
           type="button"
           onClick={() => void handleAttachmentAction()}
-          disabled={actionState === "working"}
+        disabled={props.isStreaming || actionState === "working"}
           className="block max-w-full cursor-pointer text-left disabled:cursor-wait disabled:opacity-70"
         >
           <img src={resolved.media_url} alt={resolved.name} className="agent-message-content__preview-image" />
-          <span className="mt-1 inline-flex items-center gap-1 text-xs text-text-ink/45"><ImageIcon size={12} />{actionState === "working" ? t("agent.attachment.opening") : resolved.name}</span>
+          <span className="mt-1 inline-flex items-center gap-1 text-xs text-text-ink/45"><ImageIcon size={12} />{resolved.name}</span>
         </button>
         {actionState === "error" ? (
           <AttachmentActionError path={resolved.path} url={resolved.media_url} copiedTarget={copiedTarget} onCopy={(target, value) => void handleCopy(target, value)} />
@@ -569,18 +856,27 @@ function FileReferenceChip(props: {
     return <video src={resolved.media_url} controls className="my-3 max-h-80 max-w-full rounded-card border border-border-stone/30" />;
   }
 
+  if (props.verifiedOnly && !resolved) {
+    return <code className={`agent-message-content__inline-code ${INLINE_CODE_WRAP_CLASS}`}>{props.label ?? cleanPath}</code>;
+  }
+
   const label = props.label ?? resolved?.name ?? basename(cleanPath);
+  const displayLabel = props.variant === "link" && typeof label === "string" && isLikelyLocalPath(label)
+    ? basename(label)
+    : label;
   return (
     <>
       <button
         type="button"
         title={cleanPath}
         onClick={() => void handleAttachmentAction()}
-        disabled={actionState === "working" || (!resolved && !failed)}
-        className={`agent-message-content__file-chip inline-flex max-w-full min-w-0 items-center gap-1.5 overflow-hidden rounded-tag border px-2 py-1 align-baseline text-xs disabled:cursor-wait disabled:opacity-70 ${failed || actionState === "error" ? "border-status-error/30 bg-status-error/5 text-status-error" : "border-border-stone/40 bg-canvas-oat/70 text-text-ink/65 hover:text-action-sky"}`}
+        disabled={props.isStreaming || actionState === "working" || (!resolved && !failed)}
+        className={props.variant === "link"
+          ? `agent-message-content__file-chip agent-message-content__file-link${failed || actionState === "error" ? " agent-message-content__file-link--error" : ""}`
+          : `agent-message-content__file-chip inline-flex max-w-full min-w-0 items-center gap-1.5 overflow-hidden rounded-tag border px-2 py-1 align-baseline text-xs disabled:cursor-wait disabled:opacity-70 ${failed || actionState === "error" ? "border-status-error/30 bg-status-error/5 text-status-error" : "border-border-stone/40 bg-canvas-oat/70 text-text-ink/65 hover:text-action-sky"}`}
       >
-        <FileText size={12} className="shrink-0" />
-        <span className="min-w-0 truncate">{actionState === "working" ? t("agent.attachment.opening") : label}</span>
+        {props.variant === "link" ? null : <FileTypeIcon name={resolved?.name ?? cleanPath} surface="inline" />}
+        <span className={props.variant === "link" ? LONG_TEXT_WRAP_CLASS : "min-w-0 truncate"}>{displayLabel}</span>
       </button>
       {actionState === "error" ? (
         <AttachmentActionError path={resolved?.path ?? cleanPath} url={resolved?.media_url} copiedTarget={copiedTarget} onCopy={(target, value) => void handleCopy(target, value)} />
@@ -621,6 +917,15 @@ export async function runAttachmentAction(input: {
     });
     if (handled) return "opened";
   }
+  if (actionPath && input.artifactClient?.previewArtifact) {
+    try {
+      if (await input.artifactClient.previewArtifact(actionPath)) {
+        return "opened";
+      }
+    } catch {
+      // Continue to system open / reveal / download fallbacks.
+    }
+  }
 
   if (actionPath && input.artifactClient) {
     try {
@@ -658,6 +963,22 @@ export function startBrowserDownload(url: string, name: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Uses the native save flow when available; browser fallback only confirms dispatch. */
+export async function saveAttachmentFile(url: string, name: string): Promise<AttachmentSaveResult> {
+  const saveFile = typeof window === "undefined" ? undefined : window.memmy?.saveFile;
+  if (saveFile) {
+    try {
+      const result = await saveFile({ url, name });
+      return result.canceled ? { status: "cancelled" } : { status: "saved", path: result.filePath };
+    } catch (cause) {
+      return { status: "failed", error: cause instanceof Error ? cause.message : String(cause) };
+    }
+  }
+  return startBrowserDownload(url, name)
+    ? { status: "started" }
+    : { status: "failed", error: "Attachment download could not be started" };
 }
 
 export async function writeClipboardText(value: string): Promise<boolean> {
@@ -832,14 +1153,62 @@ export function localArtifactPathFromHref(href: string | undefined): string | nu
       return null;
     }
   }
-  return isLikelyLocalPath(value) ? cleanPathToken(value) : null;
+  const decoded = decodeUriComponentSafely(value);
+  return isLikelyLocalPath(decoded) ? cleanPathToken(decoded) : null;
 }
 
 function isLikelyLocalPath(value: string): boolean {
-  if (!value || isDirectMediaUrl(value) || /^[a-z][a-z0-9+.-]*:/i.test(value)) {
-    return false;
+  if (!value || isDirectMediaUrl(value) || APP_RELATIVE_URL_PATH_RE.test(value)) return false;
+  if (/^[a-z]:[\\/]/i.test(value) || value.startsWith("\\\\")) {
+    return true;
   }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
   return value.includes("/") && (value.startsWith("/") || value.startsWith("~/") || /^[A-Za-z0-9_.@+-]+\//.test(value));
+}
+
+function parseLocalFileToken(rawPath: string): { path: string; suffix: string } | null {
+  const path = cleanPathToken(rawPath);
+  if (!isLikelyLocalFilePath(path)) return null;
+  return { path, suffix: rawPath.slice(path.length) };
+}
+
+function withBareLocalFileReferences(children: ReactNode, props: AgentMessageContentProps): ReactNode {
+  return Children.map(children, (child, childIndex) => {
+    if (typeof child !== "string") return child;
+    const nodes: ReactNode[] = [];
+    let cursor = 0;
+    let pathIndex = 0;
+    for (const match of child.matchAll(BARE_LOCAL_PATH_RE)) {
+      const rawPath = match[2] ?? "";
+      const parsed = parseLocalFileToken(rawPath);
+      if (!parsed) continue;
+      const start = (match.index ?? 0) + (match[1]?.length ?? 0);
+      if (start > cursor) nodes.push(child.slice(cursor, start));
+      nodes.push(
+        <FileReferenceChip
+          key={`bare-local-file-${childIndex}-${pathIndex}`}
+          path={parsed.path}
+          label={parsed.path}
+          isStreaming={props.isStreaming}
+          artifactClient={props.artifactClient}
+          onPreviewFile={props.onPreviewFile}
+        />
+      );
+      pathIndex += 1;
+      const matchEnd = start + rawPath.length;
+      if (parsed.suffix) nodes.push(parsed.suffix);
+      cursor = matchEnd;
+    }
+    if (cursor === 0) return child;
+    if (cursor < child.length) nodes.push(child.slice(cursor));
+    return nodes;
+  });
+}
+
+function isLikelyLocalFilePath(value: string): boolean {
+  // Requiring an extension avoids turning directories and shell commands into file chips.
+  const name = basename(value);
+  return isLikelyLocalPath(value) && name.includes(".") && !name.endsWith(".");
 }
 
 function basename(value: string): string {

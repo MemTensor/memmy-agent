@@ -260,7 +260,7 @@ describe("Goal continuation scheduling", () => {
     for (const message of internalMessages) {
       expect(message).toMatchObject({ role: "user", internal_context: "goal_continuation" });
       expect(message).not.toHaveProperty("hidden");
-      expect(message).not.toHaveProperty("turn_id");
+      expect(seen.map((item) => item.turnId)).toContain(message.turn_id);
       expect(message).not.toHaveProperty("goalId");
       expect(message).not.toHaveProperty("goalUpdatedAt");
     }

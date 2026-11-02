@@ -1,3 +1,4 @@
+import { usePluginUpdateAvailable, PluginUpdateDot } from "./plugin-update-indicator.js";
 import { BookOpen } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -68,7 +69,7 @@ import {
 } from "./memory/memory-prototype-icons.js";
 import { AppContentTopbar } from "./app-content-topbar.js";
 import { SETTINGS_BROWSER_EXTENSION_EVENT, SETTINGS_EXCEL_CONNECTION_EVENT, SETTINGS_NAV_ITEMS, writeSettingsMemoryBudgetFocus, type SettingsTabId } from "./settings-nav.js";
-import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, MousePointer2, Plus, RotateCcw } from "lucide-react";
+import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, Mic, MoreHorizontal, MousePointer2, Play, Plus, RotateCcw } from "lucide-react";
 
 export interface SettingsSidebarNav {
   activeTab: SettingsTabId;
@@ -82,11 +83,16 @@ export interface AppFrameProps {
   topBarEnd?: ReactNode;
   topBarBorder?: boolean;
   topBarInset?: boolean;
+  /** Move a page's inset boundary without translating content outside its scroll area. */
+  topBarInsetOffsetPx?: number;
   topBarClassName?: string;
   topBarStyle?: CSSProperties;
   /** Full-height panel docked to the right edge of the main area, stacked above the top bar. */
   sidePanel?: ReactNode;
   windowsTitlebarSafe?: boolean;
+  recordingActive?: boolean;
+  /** The current finished recording has already been opened for reading. */
+  recordingViewed?: boolean;
   /** When set, replaces the main app sidebar with settings section navigation. */
   settingsNav?: SettingsSidebarNav;
   children: ReactNode;
@@ -95,7 +101,7 @@ export interface AppFrameProps {
 interface NavItem {
   path?: AppRoutePath;
   icon: ReactNode;
-  action?: "search";
+  action?: "search" | "record";
   labelKey?: string;
 }
 
@@ -208,8 +214,18 @@ const navItems: NavItem[] = [
   { action: "search", icon: <Search size={16} />, labelKey: "appFrame.search" },
   { path: "/tools", icon: <Link2 size={16} /> },
   { path: "/memory", icon: <BrainCircuit size={16} /> },
-  { path: "/knowledge", icon: <BookOpen size={16} /> }
+  { path: "/knowledge", icon: <BookOpen size={16} /> },
+  { action: "record", icon: <Mic size={16} />, labelKey: "recording.page.title" }
 ];
+
+export function shouldShowRecordingView(status: AppState["navigation"]["recordingStatus"], recordingActive: boolean, recordingViewed = false): boolean {
+  return (status === "ready" || status === "failed") && !recordingActive && !recordingViewed;
+}
+
+function SidebarRecordingWave(props: { live?: boolean }) {
+  return <span className={`app-frame-recording-wave${props.live ? " app-frame-recording-wave--live" : ""}`}
+    aria-hidden="true">{Array.from({ length: 5 }, (_, index) => <span key={index} />)}</span>;
+}
 
 const taskSortOptions = [
   { value: "updated_desc", labelKey: "appFrame.sort.updatedDesc" },
@@ -284,6 +300,7 @@ export function resolveSelectedSidebarProjectId(
 export function AppFrame(props: AppFrameProps) {
   const { state, dispatch } = useAppState();
   const { clients } = useOptionalApiClients();
+  const pluginUpdatesAvailable = usePluginUpdateAvailable(clients?.plugins, state.account.userId);
   const { t, language } = useTranslation();
   const update = useOptionalUpdateCoordinator();
   const { track } = useAnalytics();
@@ -1130,8 +1147,9 @@ export function AppFrame(props: AppFrameProps) {
         <nav className="space-y-0.5">
           {navItems.map((item) => {
             const key = item.path ?? item.action ?? "unknown";
-            const active = item.path
-              ? state.navigation.currentPath === item.path && (item.path !== "/main" || !state.agent.currentSessionKey)
+            const active = item.action === "record" ? props.recordingActive === true : item.path
+              ? state.navigation.currentPath === item.path && (item.path !== "/main"
+                || (!state.agent.currentSessionKey && !props.recordingActive))
               : false;
 
             const label = item.path
@@ -1142,6 +1160,8 @@ export function AppFrame(props: AppFrameProps) {
               handleFirstSidebarInteraction();
               if (item.action === "search") {
                 setSearchPaletteOpen(true);
+              } else if (item.action === "record") {
+                dispatch(appActions.requestRecordingOpen());
               } else if (item.path) {
                 openSidebarRoute(item.path);
               }
@@ -1160,14 +1180,55 @@ export function AppFrame(props: AppFrameProps) {
               >
                 <span className="shrink-0">{item.icon}</span>
                 <span className="flex-1 text-left">{label}</span>
+                {item.path === "/tools" && pluginUpdatesAvailable ? <PluginUpdateDot /> : null}
               </button>
             );
 
-            return (
-              <div key={key}>
+            if (item.action === "record") {
+              const status = state.navigation.recordingStatus;
+              return <div key={key} className={`app-frame-recording-nav${status === "recording" || status === "paused" ? " app-frame-recording-nav--recording" : ""}`}>
                 {navButton}
-              </div>
-            );
+                {status === "transcribing" ? <span className="app-frame-recording-nav__post-status" role="status">
+                  {t("recording.page.transcribingShort")}
+                </span> : null}
+                {shouldShowRecordingView(status, props.recordingActive === true, props.recordingViewed === true) ? <button type="button"
+                  className="app-frame-recording-nav__post-status app-frame-recording-nav__post-status--view"
+                  onClick={() => {
+                    handleFirstSidebarInteraction();
+                    dispatch(appActions.requestRecordingOpen());
+                  }}>{t("recording.page.view")}</button> : null}
+                {status !== "transcribing" && status !== "ready" && status !== "failed" ? <span className="app-frame-recording-nav__controls">
+                  {status === "recording" || status === "paused" ? <span className="app-frame-recording-nav__signal"
+                    role="status" aria-label={t(status === "paused" ? "plugin.ui.audio.paused" : "plugin.ui.audio.recording")}
+                  ><SidebarRecordingWave live={status === "recording"} /></span>
+                    : <button type="button" className="app-frame-recording-nav__control app-frame-recording-nav__control--record"
+                      aria-label={t("plugin.ui.audio.start")}
+                      disabled={status === "starting"}
+                      onClick={() => {
+                        handleFirstSidebarInteraction();
+                        dispatch(appActions.requestRecordingControl());
+                      }}><SidebarRecordingWave />
+                      <span>{t("recording.page.startShort")}</span>
+                    </button>}
+                  {status === "recording" || status === "paused" ? <button type="button" className="app-frame-recording-nav__control"
+                    aria-label={t(status === "paused" ? "plugin.ui.audio.resume" : "plugin.ui.audio.pause")}
+                    onClick={() => {
+                      handleFirstSidebarInteraction();
+                      dispatch(appActions.requestRecordingControl());
+                    }}>{status === "paused" ? <Play size={16} fill="currentColor" strokeWidth={0} aria-hidden="true" />
+                      : <span className="app-frame-recording-pause-glyph" aria-hidden="true"><span /><span /></span>}</button> : null}
+                  {status === "recording" || status === "paused" ? <button type="button"
+                    className="app-frame-recording-nav__control app-frame-recording-nav__control--stop" aria-label={t("plugin.ui.audio.stop")}
+                    onClick={() => {
+                      handleFirstSidebarInteraction();
+                      dispatch(appActions.requestRecordingFinish());
+                    }}>
+                    <span className="app-frame-recording-stop-glyph" aria-hidden="true" />
+                  </button> : null}
+                </span> : null}
+              </div>;
+            }
+            return <div key={key}>{navButton}</div>;
           })}
         </nav>
         )}
@@ -1574,7 +1635,7 @@ export function AppFrame(props: AppFrameProps) {
           className={`min-h-0 h-full flex-1 overflow-hidden${
             sidebarHidden && !props.topBarBorder ? " app-frame-content-body--sidebar-hidden" : ""
           }`}
-          style={topBarInset ? { paddingTop: "calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px))" } : undefined}
+          style={topBarInset ? { paddingTop: `calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px) + ${props.topBarInsetOffsetPx ?? 0}px)` } : undefined}
         >
           {props.children}
         </div>

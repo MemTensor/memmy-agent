@@ -38,6 +38,7 @@ async function createServer(directory: string, independent = true) {
     memmyConfigWriter: writer,
     modelConfigTester: { test: probe }
   });
+  const persistModelConfig = service.setModelConfig.bind(service);
   const write = vi.spyOn(service, "setModelConfig");
   vi.stubGlobal("fetch", vi.fn(async (url: URL, init: RequestInit) => {
     const path = new URL(url).pathname;
@@ -77,7 +78,7 @@ async function createServer(directory: string, independent = true) {
   write.mockClear();
   const saveCatalog = vi.spyOn(client, "saveModelCatalog");
   return {
-    client, probe, write, writer, saveCatalog,
+    client, probe, write, writer, saveCatalog, persistModelConfig,
     read: () => client.getModelConfig(),
     async key(capability: ModelCapability) {
       const config = await client.getModelConfig();
@@ -129,6 +130,9 @@ describe("BYOK displayed, tested and saved credentials", () => {
 
   async function render(page: ReactNode) { await act(async () => root.render(page)); }
   async function click(button: HTMLButtonElement) { await act(async () => button.click()); }
+  function navigationCount() {
+    return mocks.dispatch.mock.calls.filter(([action]) => action?.type === "navigation/changed").length;
+  }
   function next() { return [...container.querySelectorAll("button")].find((button) => button.textContent === "apiKey.next")!; }
   function test(index: number) { return [...container.querySelectorAll("button")].filter((button) => button.textContent?.startsWith("apiKey.test"))[index]!; }
   function field(label: string, index = 0) {
@@ -140,19 +144,68 @@ describe("BYOK displayed, tested and saved credentials", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
   }
+  async function saveAndWait(button: HTMLButtonElement, navigates = false) {
+    const saveIndex = server.saveCatalog.mock.results.length;
+    const writes = server.write.mock.calls.length;
+    const dispatchIndex = mocks.dispatch.mock.calls.length;
+    await click(button);
+    await vi.waitFor(() => expect(server.saveCatalog.mock.results.length).toBeGreaterThan(saveIndex));
+    // A new preset is created before its assignment is saved. Wait for this
+    // complete catalog mutation, rather than the first backend write or an old navigation.
+    await act(async () => { await Promise.all(server.saveCatalog.mock.results.slice(saveIndex).map((result) => result.value)); });
+    expect(server.write.mock.calls.length).toBeGreaterThan(writes);
+    if (navigates) {
+      await vi.waitFor(() => expect(mocks.dispatch.mock.calls.slice(dispatchIndex).map(([action]) => action))
+        .toContainEqual(expect.objectContaining({ type: "navigation/changed" })));
+    }
+  }
+  async function saveOnboarding() { await saveAndWait(next(), true); }
   async function testAndSave(scenario: Scenario) {
     const count = server.probe.mock.calls.length;
     await click(test(scenario.index));
     await vi.waitFor(() => expect(server.probe).toHaveBeenCalledTimes(count + 1));
     await vi.waitFor(() => expect(test(scenario.index).textContent).toBe("apiKey.testSuccess"));
     const tested = server.probe.mock.calls.at(-1)![0];
-    const writes = server.write.mock.calls.length;
-    await click(next());
-    await vi.waitFor(() => expect(server.write.mock.calls.length).toBeGreaterThan(writes));
-    await vi.waitFor(() => expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "navigation/changed" })));
+    await saveOnboarding();
     expect(await server.key(scenario.role)).toBe(tested.apiKey);
     return tested;
   }
+
+  it.each(scenarios.slice(0, 4))("onboarding $role: waits for assignment publication before leaving", async (scenario) => {
+    const persist = server.persistModelConfig;
+    let releaseAssignment!: () => void;
+    let assignmentStarted!: () => void;
+    const assignmentGate = new Promise<void>((resolve) => { releaseAssignment = resolve; });
+    const started = new Promise<void>((resolve) => { assignmentStarted = resolve; });
+    server.write.mockImplementationOnce(persist).mockImplementationOnce(async (input) => {
+      assignmentStarted();
+      await assignmentGate;
+      return persist(input);
+    });
+    try {
+      await render(scenario.page());
+      await change(field(scenario.key), "sk-new-onboarding-9999");
+      await click(test(scenario.index));
+      await vi.waitFor(() => expect(test(scenario.index).textContent).toBe("apiKey.testSuccess"));
+      const button = next();
+      const previousNavigations = navigationCount();
+      await click(button);
+      await started;
+      const saving = server.saveCatalog.mock.results.at(-1)!.value;
+      // The old write-start observation is already true while publication is pending.
+      expect(server.write).toHaveBeenCalled();
+      expect(button.disabled).toBe(true);
+      expect(navigationCount()).toBe(previousNavigations);
+      await act(async () => {
+        releaseAssignment();
+        await saving;
+      });
+      await vi.waitFor(() => expect(navigationCount()).toBeGreaterThan(previousNavigations));
+      expect(await server.key(scenario.role)).toBe("sk-new-onboarding-9999");
+    } finally {
+      releaseAssignment();
+    }
+  });
 
   it.each(scenarios)("$role: unchanged masked credential resolves and persists the same real key", async (scenario) => {
     await render(scenario.page());
@@ -250,8 +303,7 @@ describe("BYOK displayed, tested and saved credentials", () => {
   it.each([0, 1])("role %i: enabling reuse saves the inherited credential instead of the independent credential", async (index) => {
     await render(<ModelPage />);
     await click([...container.querySelectorAll<HTMLButtonElement>('button[role="checkbox"]')][index]!);
-    await click(next());
-    await vi.waitFor(() => expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "navigation/changed" })));
+    await saveOnboarding();
     expect(await server.key(index === 0 ? "memory_summary" : "memory_evolution")).toBe(index === 0 ? "sk-team-1111" : "sk-personal-1111");
   });
 
@@ -342,14 +394,13 @@ describe("BYOK displayed, tested and saved credentials", () => {
     await change(field("apiKey.key"), "sk-retry-1111");
     await click(test(0));
     await vi.waitFor(() => expect(test(0).textContent).toBe("apiKey.testSuccess"));
-    const persist = server.write.getMockImplementation()!;
+    const persist = server.persistModelConfig;
     server.write.mockImplementationOnce(persist).mockRejectedValueOnce(new Error("assignment-write-failed"));
     await click(next());
     await vi.waitFor(() => expect(container.textContent).toContain("assignment-write-failed"));
     expect(mocks.dispatch).not.toHaveBeenCalled();
     const endpointsAfterCreate = (await server.read()).catalog!.providers.flatMap((provider) => provider.endpoints).length;
-    await click(next());
-    await vi.waitFor(() => expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "navigation/changed" })));
+    await saveOnboarding();
     expect(await server.key("agent")).toBe("sk-retry-1111");
     expect((await server.read()).catalog!.providers.flatMap((provider) => provider.endpoints)).toHaveLength(endpointsAfterCreate);
   });
@@ -396,8 +447,7 @@ describe("BYOK displayed, tested and saved credentials", () => {
     await vi.waitFor(() => expect(document.body.textContent).toContain("settings.modelWorkspace.testSuccess"));
     expect(server.probe.mock.calls.at(-1)![0]).toMatchObject({ apiKey: scenario.expected, apiBase: "https://changed.example/v2" });
     expect(settingsSave().disabled).toBe(false);
-    await click(settingsSave());
-    await vi.waitFor(() => expect(server.write).toHaveBeenCalled());
+    await saveAndWait(settingsSave());
     await vi.waitFor(async () => {
       const config = await server.read();
       expect(config.catalog!.providers.flatMap((p) => p.endpoints).find((e) => e.endpointId === oldId)?.apiBase).toBe("https://changed.example/v2");
@@ -429,8 +479,7 @@ describe("BYOK displayed, tested and saved credentials", () => {
     await vi.waitFor(() => expect(server.probe.mock.calls.length).toBeGreaterThan(beforeTest4));
     await vi.waitFor(() => expect(document.body.textContent).toContain("settings.modelWorkspace.testSuccess"));
     expect(server.probe.mock.calls.at(-1)![0]).toMatchObject({ apiKey: "sk-personal-1111", modelId: "changed-model", apiBase: "https://provider.example/v1" });
-    await click(settingsSave());
-    await vi.waitFor(() => expect(server.write).toHaveBeenCalled());
+    await saveAndWait(settingsSave());
     expect(await server.key("agent")).toBe("sk-personal-1111");
   });
 
@@ -534,9 +583,7 @@ describe("BYOK displayed, tested and saved credentials", () => {
     expect(test(scenario.index).textContent).toBe("apiKey.testSuccess");
     expect(next().disabled).toBe(false);
     expect(server.write).not.toHaveBeenCalled();
-    await click(next());
-    await vi.waitFor(() => expect(server.write).toHaveBeenCalled());
-    await vi.waitFor(() => expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "navigation/changed" })));
+    await saveOnboarding();
     expect(await server.key(scenario.role)).toBe("sk-after-reentry-9999");
   });
 
@@ -557,8 +604,7 @@ describe("BYOK displayed, tested and saved credentials", () => {
     expect(test(scenario.index).textContent).toBe("apiKey.testSuccess");
     await finishOld(false);
     expect(test(scenario.index).textContent).toBe("apiKey.testSuccess");
-    await click(next());
-    await vi.waitFor(() => expect(server.write).toHaveBeenCalled());
+    await saveOnboarding();
     expect(await server.key(scenario.role)).toBe("sk-new-onboarding-9999");
   });
 
@@ -599,8 +645,7 @@ describe("BYOK displayed, tested and saved credentials", () => {
       await testAndSave(scenario);
     } else {
       expect(test(scenario.index).textContent).toBe("apiKey.testSuccess");
-      await click(next());
-      await vi.waitFor(() => expect(server.write).toHaveBeenCalled());
+      await saveOnboarding();
     }
     expect(await server.key(scenario.role)).toBe(order === "return-to-original" ? scenario.expected : "sk-new-onboarding-9999");
   });
@@ -701,8 +746,7 @@ describe("BYOK displayed, tested and saved credentials", () => {
     await finish();
     expect(test(index).textContent).toBe("apiKey.testSuccess");
     expect(next().disabled).toBe(false);
-    await click(next());
-    await vi.waitFor(() => expect(server.write).toHaveBeenCalled());
+    await saveOnboarding();
   });
 
   it.each([0, 1])("role %i: editing the other independent card leaves this request valid", async (index) => {
@@ -740,8 +784,7 @@ describe("BYOK displayed, tested and saved credentials", () => {
     }
     expect(test(1).textContent).toBe("apiKey.testSuccess");
     expect(next().disabled).toBe(false);
-    await click(next());
-    await vi.waitFor(() => expect(server.write).toHaveBeenCalled());
+    await saveOnboarding();
     expect(await server.key("memory_evolution")).toBe("sk-team-1111");
   });
 
@@ -764,8 +807,7 @@ describe("BYOK displayed, tested and saved credentials", () => {
     await render(<ModelPage />);
     await click(container.querySelectorAll<HTMLButtonElement>('button[role="checkbox"]')[0]!);
     await click(container.querySelectorAll<HTMLButtonElement>('button[role="checkbox"]')[1]!);
-    await click(next());
-    await vi.waitFor(() => expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "navigation/changed" })));
+    await saveOnboarding();
     expect(await server.key("memory_evolution")).toBe("sk-personal-1111");
     expect(await server.key("memory_summary")).toBe("sk-personal-1111");
     await render(null);

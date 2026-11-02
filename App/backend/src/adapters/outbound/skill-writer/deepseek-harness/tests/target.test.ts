@@ -50,7 +50,7 @@ describe("DeepSeek Harness skill target", () => {
         ".": "./index.mjs",
         "./client": "./client.js"
       },
-      dsh: { client: { platform: "web", inject: ["@deepseek-ai/dsh-client-ui-conversation"] } }
+      dsh: { client: { platform: "web" } }
     });
     expect(readFileSync(skillPath, "utf8")).toContain('memmy-memory search "query text" --source deepseek_harness');
     expect(readFileSync(resumeSkillPath, "utf8")).toContain("--source deepseek_harness");
@@ -131,7 +131,7 @@ describe("DeepSeek Harness skill target", () => {
 
     let definition: Record<string, any> | undefined;
     const client = handoff?.factory();
-    expect(client?.inject).toEqual(["uiConversation"]);
+    expect(client?.inject).toEqual([]);
     client?.apply({
       uiConversation: {
         events: { register: (value: Record<string, any>) => { definition = value; } }
@@ -215,7 +215,7 @@ describe("DeepSeek Harness skill target", () => {
 
     let definition: Record<string, any> | undefined;
     const client = handoff?.factory();
-    expect(client?.inject).toEqual(["uiConversation"]);
+    expect(client?.inject).toEqual([]);
     client?.apply({
       get(name: string) {
         return name === "conversationEvents"
@@ -250,7 +250,7 @@ describe("DeepSeek Harness skill target", () => {
     expect(registered).toBe(1);
   });
 
-  it("fails clearly when neither conversation event API is available", async () => {
+  it("does not fail web boot when the optional UI service is unavailable", async () => {
     const rootDirectory = createRoot();
     const target = createDeepseekHarnessSkillTarget({ rootDirectory });
     await target.installPlugin?.("deepseek_harness");
@@ -261,9 +261,10 @@ describe("DeepSeek Harness skill target", () => {
     });
 
     const client = handoff?.factory();
-    expect(() => client?.apply({ get: () => undefined })).toThrow(
-      "memmy-memory requires uiConversation.events or conversationEvents"
-    );
+    expect(() => client?.apply({ get: () => undefined })).not.toThrow();
+    expect(() => client?.apply({
+      uiConversation: { events: { register: () => { throw new Error("unsupported registration"); } } }
+    })).not.toThrow();
   });
 
   it("replaces legacy versioned patch markers", async () => {

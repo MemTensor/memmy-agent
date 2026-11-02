@@ -30,9 +30,11 @@ import type { BootstrapRepository } from "../infrastructure/app-state-store/repo
 import type { MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 import type { ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
-import { createHttpModelConfigTester, type ModelConfigTester } from "./model-config-tester.js";
+import { createHttpModelConfigTester, type ModelConfigTester, type ResolvedModelConfigTestInput } from "./model-config-tester.js";
 
 export interface AppConfigService {
+  setScanPermissionReconciler?(reconcile: () => Promise<void>): void;
+  isScanAllowed?(): boolean;
   updateSettings(input: PatchAppSettingsInput): Promise<AppSettingsDto>;
   updatePrivacy(input: PatchPrivacyInput): Promise<PrivacySettingsDto>;
   getScanPreferences(): Promise<ScanPreferences>;
@@ -89,15 +91,24 @@ const BUILT_IN_AVATARS = AvatarOptionSchema.array().parse([
     kind: "video"
   }
 ]);
-/** Type definition for normalized model config input. */
-/** Type definition for resolved model config test input. */
-type ResolvedModelConfigTestInput = ModelConfigTestInput & { apiKey: string };
-
 /** Creates create app config service. */
 export function createAppConfigService(options: CreateAppConfigServiceOptions): AppConfigService {
   const modelConfigTester = options.modelConfigTester ?? createHttpModelConfigTester();
+  let scanSettingsWrite = Promise.resolve();
+  let reconcileBackendPermission: (() => Promise<void>) | undefined;
+  function serializeScanSettings<T>(operation: () => Promise<T>): Promise<T> {
+    const result = scanSettingsWrite.then(operation);
+    scanSettingsWrite = result.then(() => undefined, () => undefined);
+    return result;
+  }
 
   return {
+    setScanPermissionReconciler(reconcile) { reconcileBackendPermission = reconcile; },
+    isScanAllowed() {
+      const permission = options.scanPreferencesStore?.getScanPermission()
+        ?? options.bootstrapRepository.getOnboardingState().scanPermission;
+      return permission === "scan_only" || permission === "scan_and_write_skill";
+    },
     async updateSettings(input) {
       const previousOnboarding = input.userMode === "byok" ? options.bootstrapRepository.getOnboardingState() : null;
       if (input.userMode) {
@@ -137,13 +148,24 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
     },
 
     async updateScanPreferences(input) {
-      return options.scanPreferencesStore
+      return serializeScanSettings(async () => options.scanPreferencesStore
         ? options.scanPreferencesStore.updateScanPreferences(input)
-        : options.bootstrapRepository.updateScanPreferences(input);
+        : options.bootstrapRepository.updateScanPreferences(input));
     },
 
     async updateOnboarding(input) {
-      return options.bootstrapRepository.updateOnboarding(input);
+      return serializeScanSettings(async () => {
+        // Publish the authorization and automation switches together before advancing
+        // the guide. A later failure leaves the durable refusal in place for restart.
+        if (input.scanPermission !== undefined) {
+          await options.scanPreferencesStore?.setScanPermission(input.scanPermission, input.currentStep === "scan_permission_required");
+          if (input.scanPermission === "none" || input.scanPermission === "unset") {
+            await reconcileBackendPermission?.();
+          }
+          await options.memoryClient?.reloadConfig({ reason: "scan_permission_saved" });
+        }
+        return options.bootstrapRepository.updateOnboarding(input);
+      });
     },
 
     async setImprovementProgram(input) {
@@ -264,21 +286,23 @@ async function resolveModelConfigTestInput(
   configWriter: MemmyConfigWriter | undefined
 ): Promise<ResolvedModelConfigTestInput> {
   const directApiKey = input.apiKey?.trim();
-  if (directApiKey) {
-    return { ...input, apiKey: directApiKey };
-  }
-
   const provider = canonicalCatalogProviderId(input.provider);
   if (!provider || !input.endpointId) {
+    if (directApiKey) return { ...input, apiKey: directApiKey };
     throw Object.assign(new Error("Model config test requires a Provider endpoint"), { code: "invalid_argument" as const });
   }
 
-  const storedApiKey = await configWriter?.readEndpointApiKey?.(provider, input.endpointId);
-  if (!storedApiKey) {
+  const endpoint = await configWriter?.readEndpointRequestOptions?.(provider, input.endpointId);
+  const independent = endpoint?.inheritProviderDefaults === false
+    && endpoint.protocol === input.protocol
+    && endpoint.apiBase.replace(/\/+$/u, "") === input.apiBase.replace(/\/+$/u, "");
+  const storedApiKey = directApiKey ?? endpoint?.apiKey ?? await configWriter?.readEndpointApiKey?.(provider, input.endpointId);
+  if (!storedApiKey && !independent) {
     throw Object.assign(new Error("Model config API Key is not configured"), { code: "invalid_argument" as const });
   }
 
-  return { ...input, apiKey: storedApiKey };
+  return { ...input, apiKey: storedApiKey ?? "",
+    ...(independent && endpoint.extraHeaders ? { extraHeaders: endpoint.extraHeaders } : {}) };
 }
 
 /** Reads get authenticated cloud account. */

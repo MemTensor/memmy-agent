@@ -12,6 +12,21 @@ afterEach(async () => {
 });
 
 describe("HttpMemoryClient", () => {
+  it("recognizes a healthy older service without desktop scan endpoints and does not retry its 404", async () => {
+    const calls: string[] = [];
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture", timeoutMs: 500, maxRetries: 2 }, {
+      fetchImpl: (async (url) => {
+        calls.push(String(url));
+        return new Response(JSON.stringify({ error: { code: "not_found", message: "route is not registered", requestId: "old-memory" } }), { status: 404 });
+      }) as typeof fetch
+    });
+    await expect(client.agentSources!.status()).rejects.toMatchObject({ code: "memory_scan_upgrade_required", status: 503 });
+    expect(calls).toHaveLength(1);
+    await expect(client.agentSources!.list()).rejects.toMatchObject({ code: "memory_scan_upgrade_required" });
+    expect(calls).toHaveLength(2);
+    // A missing memory record is not a scanner compatibility failure.
+    await expect(client.getMemory({ memoryId: "missing" })).rejects.not.toMatchObject({ code: "memory_scan_upgrade_required" });
+  });
   it("posts a native turn without a Runtime Session and preserves pending reasons", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture-token", timeoutMs: 500, maxRetries: 0 }, {
@@ -32,6 +47,12 @@ describe("HttpMemoryClient", () => {
   });
   it("only defines path templates for the final memory HTTP APIs", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
+      "/api/v1/agent-sources",
+      "/api/v1/agent-sources/scan",
+      "/api/v1/agent-sources/scan/status",
+      "/api/v1/agent-sources/scan/jobs/:jobId/results",
+      "/api/v1/agent-sources/scan/stop",
+      "/api/v1/agent-sources/scan/cancel",
       "/api/v1/health",
       "/api/v1/admin/reload-config",
       "/api/v1/admin/memory-token-budget",
@@ -43,6 +64,7 @@ describe("HttpMemoryClient", () => {
       "/api/v1/turns/:turnId/complete",
       "/api/v1/source-turns/complete",
       "/api/v1/memory/search",
+      "/api/v1/models/embedding/infer",
       "/api/v1/memory/add",
       "/api/v1/memory/:id",
       "/api/v1/memory/:id",
@@ -155,6 +177,10 @@ describe("HttpMemoryClient", () => {
     await expect(client.completeTurn(completeTurnInput())).resolves.toMatchObject({ scheduledEvolution: false });
     await expect(client.search(searchInput())).resolves.toEqual({ injectedContext: "" });
     await expect(client.search({ ...searchInput(), verbose: true })).resolves.toMatchObject({ debug: { hits: [] } });
+    await expect(client.embeddingInference?.({ texts: ["query", "document"], role: "document" })).resolves.toEqual({
+      embeddings: [[1, 0], [0, 1]],
+      model: { provider: "local", model: "test-embedding", mode: "local", dimension: 2 }
+    });
     await expect(client.addMemory(addMemoryInput())).resolves.toMatchObject({ id: "memory-1" });
     await expect(client.getMemory({ memoryId: "memory-1" })).resolves.toMatchObject({ item: { id: "memory-1" } });
     await expect(client.deleteMemory({ memoryId: "memory-1", source: "codex" })).resolves.toMatchObject({ status: "deleted" });
@@ -188,6 +214,7 @@ describe("HttpMemoryClient", () => {
       "POST /api/v1/turns/turn-1/complete",
       "POST /api/v1/memory/search",
       "POST /api/v1/memory/search",
+      "POST /api/v1/models/embedding/infer",
       "POST /api/v1/memory/add",
       "GET /api/v1/memory/memory-1",
       "DELETE /api/v1/memory/memory-1",
@@ -517,6 +544,12 @@ function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "POST" && path === "/api/v1/turns/start") return startTurnOutput(body);
   if (method === "POST" && path === "/api/v1/turns/turn-1/complete") return completeTurnOutput();
   if (method === "POST" && path === "/api/v1/memory/search") return searchOutput(body);
+  if (method === "POST" && path === "/api/v1/models/embedding/infer") {
+    return {
+      embeddings: [[1, 0], [0, 1]],
+      model: { provider: "local", model: "test-embedding", mode: "local", dimension: 2 }
+    };
+  }
   if (method === "POST" && path === "/api/v1/memory/add") return addMemoryOutput(body);
   if (method === "GET" && path === "/api/v1/memory/memory-1") return getMemoryOutput();
   if (method === "DELETE" && path === "/api/v1/memory/memory-1") return deleteMemoryOutput();

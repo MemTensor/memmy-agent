@@ -200,19 +200,19 @@ function messageForEvent(component: string, event: string, fields: MemoryLogFiel
     case "json.failed":
       return `Model JSON parsing failed${details(fields, ["attempt", "maxTokens", "finishReason", "errorMessage"])}`;
     case "job.started":
-      return `Job started${details(fields, ["jobId", "attempt", "maxAttempts", "sessionId", "episodeId", "targetMemoryId"])}`;
+      return `Job started${details(fields, ["jobId", "queueLane", "enqueueSeq", "attempt", "maxAttempts", "sessionId", "episodeId", "targetMemoryId"])}`;
     case "job.succeeded":
-      return `Job succeeded${details(fields, ["jobId", "attempt", "maxAttempts", "targetMemoryId"])}`;
+      return `Job succeeded${details(fields, ["jobId", "queueLane", "enqueueSeq", "attempt", "maxAttempts", "targetMemoryId"])}`;
     case "job.failed":
-      return `Job failed${details(fields, ["jobId", "attempt", "maxAttempts", "terminal", "targetMemoryId", "errorMessage"])}`;
+      return `Job failed${details(fields, ["jobId", "queueLane", "enqueueSeq", "attempt", "maxAttempts", "terminal", "targetMemoryId", "errorMessage"])}`;
     case "embedding_retry.succeeded":
-      return `Embedding retry succeeded${details(fields, ["retryId", "targetMemoryId", "vectorField", "attempt", "maxAttempts"])}`;
+      return `Embedding retry succeeded${details(fields, ["retryId", "queueLane", "enqueueSeq", "targetMemoryId", "vectorField", "attempt", "maxAttempts"])}`;
     case "embedding_retry.retry_scheduled":
-      return `Embedding generation failed; retry scheduled${details(fields, ["retryId", "targetMemoryId", "vectorField", "attempt", "maxAttempts", "nextAttemptAt", "errorMessage"])}`;
+      return `Embedding generation failed; retry scheduled${details(fields, ["retryId", "queueLane", "enqueueSeq", "targetMemoryId", "vectorField", "attempt", "maxAttempts", "nextAttemptAt", "errorMessage"])}`;
     case "embedding_retry.failed":
-      return `Embedding retry failed after the final attempt${details(fields, ["retryId", "targetMemoryId", "vectorField", "attempt", "maxAttempts", "errorMessage"])}`;
+      return `Embedding retry failed after the final attempt${details(fields, ["retryId", "queueLane", "enqueueSeq", "targetMemoryId", "vectorField", "attempt", "maxAttempts", "errorMessage"])}`;
     case "drain.completed":
-      return `Worker drain completed${details(fields, ["leased", "succeeded", "failed", "embeddingRetriesLeased", "embeddingRetriesSucceeded", "embeddingRetriesFailed"])}`;
+      return `Worker drain completed${details(fields, ["algorithm", "laneWeights", "leased", "succeeded", "failed", "embeddingRetriesLeased", "embeddingRetriesSucceeded", "embeddingRetriesFailed"])}`;
     case "drain.failed":
       return `Worker drain failed${details(fields, ["errorMessage"])}`;
     case "startup.reconciliation_failed":
@@ -237,8 +237,12 @@ function messageForEvent(component: string, event: string, fields: MemoryLogFiel
       return `Configuration reloaded${details(fields, ["changed", "requiresRestart", "restartFailedProcessing"])}${configDetails(fields)}`;
     case "service.starting":
       return `Memory service starting${details(fields, ["host", "port", "mode", "storageBackend", "sqlitePath", "configPath"])}`;
+    case "service.startup_stage":
+      return `Memory service startup stage${details(fields, ["phase", "elapsedMs"])}`;
     case "service.listening":
       return `Memory service listening${details(fields, ["url", "mode", "storageBackend"])}`;
+    case "storage.startup_stage":
+      return `Memory storage startup stage${details(fields, ["phase", "elapsedMs", "currentSchemaVersion", "targetSchemaVersion"])}`;
     case "service.fatal":
       return `Memory service encountered a fatal error${details(fields, ["errorMessage"])}`;
     case "config.endpoint_write_failed":

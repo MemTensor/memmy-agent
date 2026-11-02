@@ -21,9 +21,9 @@ export interface ScannedAgentSkill {
 /** Contract for skill distribution service. */
 export interface SkillDistributionService {
   listSkills?(sourceId: string): Promise<ScannedAgentSkill[]>;
-  install(sourceId: string): Promise<void>;
+  install(sourceId: string, beforeInstall?: () => void): Promise<void>;
   uninstall(sourceId: string): Promise<void>;
-  installPlugin(sourceId: string): Promise<void>;
+  installPlugin(sourceId: string, beforeInstall?: () => void): Promise<void>;
   uninstallPlugin(sourceId: string): Promise<void>;
   isInstalledHookCurrent?(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts?(): Promise<MemoryPluginConflict[]>;
@@ -66,12 +66,13 @@ export function createSkillDistributionService(
       }));
     },
 
-    async install(sourceId) {
+    async install(sourceId, beforeInstall) {
       const target = options.targetRegistry.require(sourceId);
       if (!(await target.resolveRootDirectory())) {
         throw new AgentSourceUnavailableError(target.displayName);
       }
 
+      beforeInstall?.();
       await target.install(renderMemmyDefaultSkillManifest(sourceId));
     },
 
@@ -80,7 +81,7 @@ export function createSkillDistributionService(
       await target.uninstall(sourceId);
     },
 
-    async installPlugin(sourceId) {
+    async installPlugin(sourceId, beforeInstall) {
       const target = options.targetRegistry.require(sourceId);
       if (!target.installPlugin) {
         throw new Error(`Native plugin installation is not supported for ${target.displayName}`);
@@ -89,6 +90,7 @@ export function createSkillDistributionService(
         throw new AgentSourceUnavailableError(target.displayName);
       }
 
+      beforeInstall?.();
       await target.installPlugin(sourceId);
     },
 

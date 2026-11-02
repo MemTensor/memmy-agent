@@ -7,6 +7,7 @@
  */
 import type {
   EpisodeRecord,
+  RawTurnRecord,
   SessionRecord,
   SkillTrialRecord
 } from "../../storage/repositories.js";
@@ -120,11 +121,12 @@ export interface SkillReadModelDeps {
   requireOpenSession(sessionId: string): SessionRecord;
 
   /** Session and trial-evidence policy stays owned by the composing service. */
-  ensureEpisode(session: SessionRecord, episodeId?: string): EpisodeRecord;
+  ensureEpisode(session: SessionRecord, episodeId?: string): EpisodeRecord | undefined;
+  persistSkillEvent(session: SessionRecord, skillId: string, request: SkillUseRequest): RawTurnRecord;
   resolveSkillTrialEvidence(
     request: SkillUseRequest,
     session: SessionRecord,
-    episode: EpisodeRecord
+    episode: EpisodeRecord | undefined
   ): { l1MemoryId?: string; rawTurnId?: string };
 
   /** Cursor encoding is externally owned to keep sync compatibility stable. */
@@ -321,10 +323,15 @@ export class SkillReadModel {
     this.deps.assertMemoryInScope(skill, request.namespace);
     const episode = this.deps.ensureEpisode(session, request.episodeId);
     const trialEvidence = this.deps.resolveSkillTrialEvidence(request, session, episode);
+    if (!episode && !trialEvidence.rawTurnId) {
+      trialEvidence.rawTurnId = this.deps.persistSkillEvent(session, skillId, request).id;
+    }
     const existingPendingTrial = this.deps.repositories.runtime.listSkillTrials({
       userId: session.userId,
       skillMemoryId: skill.id,
-      episodeId: episode.id,
+      sessionId: session.id,
+      rawTurnId: trialEvidence.rawTurnId,
+      episodeId: episode?.id,
       status: "pending",
       limit: 1
     })[0];
@@ -353,7 +360,7 @@ export class SkillReadModel {
       projectId: session.projectId,
       skillMemoryId: skill.id,
       sessionId: session.id,
-      episodeId: episode.id,
+      episodeId: episode?.id,
       l1MemoryId: trialEvidence.l1MemoryId,
       rawTurnId: request.rawTurnId ?? trialEvidence.rawTurnId,
       turnId: request.turnId,
@@ -362,7 +369,7 @@ export class SkillReadModel {
       outcome: "unknown",
       createdAt: this.deps.nowIso()
     });
-    this.deps.repositories.runtime.appendEpisodeDerivedMemory(episode.id, "Skill", skill.id, trial.createdAt);
+    if (episode) this.deps.repositories.runtime.appendEpisodeDerivedMemory(episode.id, "Skill", skill.id, trial.createdAt);
     const changeSeq = this.deps.repositories.runtime.appendChange({
       memoryId: skill.id,
       namespaceId: namespaceIdFromMemory(skill, this.deps.namespaceForMemory),

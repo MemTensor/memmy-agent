@@ -1,3 +1,5 @@
+import { embeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../../model/embedding-identity.js";
+import { updateMemoryVectorField } from "../embedding/embedding-pipeline.js";
 import type {
   FeedbackTextClassification,
   FeedbackTextShape,
@@ -233,6 +235,7 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
       episodeId: request.episodeId ?? attribution.episodeId,
       sessionId: request.sessionId ?? attribution.sessionId
     };
+    const attributionPending = this.deps.repos.runtime.isRawTurnAttributionPending(attributedRequest.rawTurnId);
     const recallOutcome = recallOutcomeFromFeedback(request);
     let recallEvent: RecallEventRecord | undefined;
     if (request.recallEventId) {
@@ -271,9 +274,12 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
         feedback,
         feedbackContextHash
       );
-    const isRevisionFeedback = isRecord(request.rawPayload)
-      && request.rawPayload.source === "relation_classifier"
-      && request.rawPayload.relation === "revision";
+    // Model-judged negatives (old revision, turn.judge.v1 negative) get a repair
+    // only from a model draft, never one filled in by rules.
+    const isRevisionFeedback = isRecord(request.rawPayload) && (
+      (request.rawPayload.source === "relation_classifier" && request.rawPayload.relation === "revision") ||
+      (request.rawPayload.source === "turn_judge" && request.rawPayload.feedback === "negative")
+    );
     const repair = isRevisionFeedback && !repairDraft
       ? undefined
       : this.maybeCreateDecisionRepair(
@@ -320,7 +326,14 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
       }));
     }
     if (feedback.polarity !== "negative") {
-      const queued = deferDecisionRepair
+      const queued = attributionPending
+        ? this.deps.enqueueJob({
+          jobType: "feedback_experience", userId: context.userId,
+          sessionId: attributedRequest.sessionId, targetMemoryId: attributedRequest.l1MemoryId,
+          dedupeKey: `feedback_experience:${feedback.id}`,
+          payload: { feedbackId: feedback.id, rawTurnId: attributedRequest.rawTurnId }
+        })
+        : deferDecisionRepair
         ? this.enqueueDeferredFeedbackExperience({
           userId: context.userId,
           sessionId: attributedRequest.sessionId,
@@ -339,7 +352,8 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
     const rewardEpisode = attributedRequest.episodeId
       ? this.deps.repos.runtime.getEpisode(attributedRequest.episodeId)
       : undefined;
-    if ((attributedRequest.l1MemoryId || attributedRequest.episodeId) && rewardEpisode?.status !== "open") {
+    if ((attributedRequest.l1MemoryId || attributedRequest.episodeId) && rewardEpisode?.status !== "open"
+      && !attributionPending) {
       jobs.push(
         this.deps.enqueueJob({
           jobType: "reward",
@@ -676,6 +690,10 @@ maybeCreateDecisionRepair(
     if (!feedback || feedback.polarity === "negative") {
       return;
     }
+    if (feedback.rawTurnId) {
+      const raw = this.deps.repos.runtime.getRawTurn(feedback.rawTurnId);
+      if (!raw || raw.deletedAt || raw.redactedAt) return;
+    }
     const request: FeedbackRequest = {
       sessionId: feedback.sessionId,
       episodeId: feedback.episodeId,
@@ -774,12 +792,14 @@ async maybeCreateFeedbackExperience(
       episode,
       trace
     });
+    const requestedIdentity = embeddingIdentity(this.deps.embedder.config);
     const vector = await this.deps.embedder.embedOne(draft.vectorText, "query");
+    const identity = vectorEmbeddingIdentity(vector) ?? requestedIdentity;
     const existing = this.findSimilarFeedbackExperience(draft, vector);
     const at = feedback.createdAt;
     const saved = existing
-      ? this.mergeFeedbackExperiencePolicy(existing, draft, vector, at)
-      : this.insertFeedbackExperiencePolicy(request, feedback, context, draft, vector, at);
+      ? this.mergeFeedbackExperiencePolicy(existing, draft, vector, at, identity)
+      : this.insertFeedbackExperiencePolicy(request, feedback, context, draft, vector, at, identity);
     for (const episodeId of draft.sourceEpisodeIds) {
       this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "L2", saved.id, at);
     }
@@ -1111,7 +1131,8 @@ insertFeedbackExperiencePolicy(
     context: ResolvedContext,
     draft: FeedbackExperienceDraft,
     vector: number[],
-    at: string
+    at: string,
+    identity: EmbeddingIdentity
   ): MemoryRow {
     const key = `feedback:${stableHash(`${draft.type}:${draft.title}:${draft.trigger}`).slice(0, 16)}`;
     const l2 = this.deps.buildMemory({
@@ -1179,13 +1200,14 @@ insertFeedbackExperiencePolicy(
           decision_guidance: policyDecisionGuidanceForStorage(draft.decisionGuidance),
           verifier_meta: draft.verifierMeta,
           skill_eligible: draft.skillEligible,
-          signature: `feedback|${draft.type}|${draft.polarity}`,
-          vec: vector
+          signature: `feedback|${draft.type}|${draft.polarity}`
         }
       },
       createdAt: at
     });
-    const upsert = this.deps.repos.memories.upsertByKey(l2);
+    const upsert = this.deps.repos.memories.upsertByKey(
+      updateMemoryVectorField(l2, "vec", vector, { ...identity, updatedAt: at })
+    );
     this.deps.repos.runtime.appendChange({
       memoryId: upsert.memory.id,
       namespaceId: namespaceIdFromMemory(upsert.memory),
@@ -1206,7 +1228,8 @@ mergeFeedbackExperiencePolicy(
     memory: MemoryRow,
     draft: FeedbackExperienceDraft,
     vector: number[],
-    at: string
+    at: string,
+    identity: EmbeddingIdentity
   ): MemoryRow {
     const previous = memory;
     const policy = policyMetaFromMemory(memory);
@@ -1259,8 +1282,7 @@ mergeFeedbackExperiencePolicy(
       source_feedback_ids: sourceFeedbackIds,
       decision_guidance: policyDecisionGuidanceForStorage(decisionGuidance),
       verifier_meta: internalPolicy.verifier_meta ?? draft.verifierMeta,
-      skill_eligible: skillEligible,
-      vec: vector
+      skill_eligible: skillEligible
     };
     const mergedDraft = {
       ...draft,
@@ -1326,7 +1348,9 @@ mergeFeedbackExperiencePolicy(
       updatedAt: at,
       contentHash: stableHash(renderFeedbackExperienceBody(mergedDraft))
     };
-    const saved = this.deps.repos.memories.update(next);
+    const saved = this.deps.repos.memories.update(
+      updateMemoryVectorField(next, "vec", vector, { ...identity, updatedAt: at })
+    );
     this.deps.repos.runtime.appendChange({
       memoryId: saved.id,
       namespaceId: namespaceIdFromMemory(saved),

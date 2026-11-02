@@ -842,6 +842,52 @@ describe("AgentLoop Turn admission", () => {
     await running;
   });
 
+  it("reorders queued composer Turns in the runtime execution order", async () => {
+    const loop = makeLoop();
+    const started: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+      started.push(message.content);
+      if (message.content === "running") await firstGate;
+      if (message.metadata?.client_request_id) await loop.publishWebuiMessageAccepted(message, options.slot);
+      return null;
+    }) as any;
+    const sessionKey = "websocket:reorder-queue";
+    const ids = [
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+    ];
+    const running = loop.run();
+    try {
+      await loop.bus.publishInbound(new InboundMessage({
+        channel: "websocket", chatId: "reorder-queue", senderId: "user", content: "running",
+      }));
+      await waitUntil(() => started.length === 1);
+      for (const [index, id] of ids.entries()) {
+        await loop.bus.publishInbound(new InboundMessage({
+          channel: "websocket", chatId: "reorder-queue", senderId: "user", content: `queued-${index}`,
+          metadata: { webui: true, client_request_id: id, webui_queue_surface: "chat_composer" },
+        }));
+      }
+      await waitUntil(async () => (await loop.getWebuiQueueSnapshot(sessionKey)).items.length === 3);
+      expect(await loop.reorderQueuedWebuiMessages(sessionKey, [ids[2]!, ids[0]!, ids[1]!], 3))
+        .toMatchObject({ outcome: "reordered", revision: 4 });
+      expect((await loop.getWebuiQueueSnapshot(sessionKey)).items.map((item) => item.clientRequestId))
+        .toEqual([ids[2], ids[0], ids[1]]);
+      expect(await loop.reorderQueuedWebuiMessages(sessionKey, ids, 3))
+        .toMatchObject({ outcome: "stale", revision: 4 });
+      releaseFirst();
+      await waitUntil(() => started.length === 4);
+      expect(started).toEqual(["running", "queued-2", "queued-0", "queued-1"]);
+    } finally {
+      releaseFirst();
+      loop.stop();
+      await running;
+    }
+  });
+
   it("cancels a visible queued Turn while its queue announcement is still publishing", async () => {
     const loop = makeLoop();
     const started: string[] = [];
