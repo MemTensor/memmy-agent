@@ -39,11 +39,17 @@ async function fixture() {
     endpoint,
     async addTask(userId: string, label: string) {
       const session = service.openSession({ namespace: namespace(userId) });
-      return (await service.completeTurn(`turn-${label}`, {
+      const turn = await service.completeTurn(`turn-${label}`, {
         sessionId: session.sessionId,
         query: `issue 409 ${label}`,
         answer: `Completed ${label}`
-      })).episodeId;
+      });
+      // Represent pre-decoupling rows; new writes intentionally use the device owner.
+      for (const [table, id] of [["sessions", turn.sessionId], ["episodes", turn.episodeId],
+        ["raw_turns", turn.rawTurnId], ["memories", turn.l1MemoryId]]) {
+        if (id) db.db.prepare(`UPDATE ${table} SET user_id=? WHERE id=?`).run(userId, id);
+      }
+      return turn.episodeId;
     },
     panel(token: string, getUserId: () => string) {
       return createPanelService({

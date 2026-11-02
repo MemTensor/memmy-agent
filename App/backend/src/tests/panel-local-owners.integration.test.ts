@@ -9,8 +9,9 @@ import type {AgentRuntimeRouteDeps} from "../adapters/inbound/local-api/routes/a
 import {createPanelService} from "../services/panel-service.js";
 const fixture=createMemoryServiceFixture();afterEach(fixture.cleanup);
 it("reads all stored owners through the authenticated desktop Backend and Memory chain",async()=>{
-  const {service}=await createLocalOwnerFixture(fixture);
-  const memory=createMemoryHttpServer({service,configPath:"/private/tmp/panel-backend-local-synthetic.json",auth:{localServiceToken:"memory-local-test"},workerStartupFallbackMs:3600000,workerPostHealthDelayMs:3600000,workerIdlePollMs:3600000,startAgentSourceAutomation:false});
+  const {service,repos}=await createLocalOwnerFixture(fixture);
+  const scope={userId:"a",source:"codex",profileId:"default"};
+  const memory=createMemoryHttpServer({service,configPath:"/private/tmp/panel-backend-local-synthetic.json",auth:{localServiceToken:"memory-local-test",cloudAccessTokens:{"cloud-owner-a":scope},scopedApiKeys:{"scoped-owner-a":{namespace:scope,scopes:["memory:read","memory:write"]}}},workerStartupFallbackMs:3600000,workerPostHealthDelayMs:3600000,workerIdlePollMs:3600000,startAgentSourceAutomation:false});
   const app=Fastify();
   try{
     await new Promise<void>((resolve,reject)=>{memory.once("error",reject);memory.listen(0,"127.0.0.1",resolve);});
@@ -29,7 +30,13 @@ it("reads all stored owners through the authenticated desktop Backend and Memory
       expect((await call("/api/v1/panel/tasks")).json().total).toBe(3);
     }
     await vi.waitFor(async()=>expect((await call("/api/v1/panel/overview-stats")).json()).toMatchObject({status:"ready",data:{counts:{userMemories:3}}}));
-    await expect(client.getMemory({memoryId:"user-b"},{userId:"a"})).rejects.toMatchObject({status:404});
-    await expect(client.deleteMemory({memoryId:"user-b"},{userId:"a"})).rejects.toMatchObject({status:403});
+    for(const token of ["cloud-owner-a","scoped-owner-a"]){
+      const scoped=createHttpMemoryClient({baseUrl:`http://127.0.0.1:${address.port}`,token,timeoutMs:5000,maxRetries:0});
+      await expect(scoped.getMemory({memoryId:"user-b"},{userId:"a"})).rejects.toMatchObject({status:404});
+      await expect(scoped.deleteMemory({memoryId:"user-b"},{userId:"a"})).rejects.toMatchObject({status:403});
+      expect(repos.userMemories.get("user-b")?.status).toBe("active");
+    }
+    await expect(client.getMemory({memoryId:"user-b"},{userId:"a"})).resolves.toMatchObject({item:{id:"user-b"}});
+    await expect(client.deleteMemory({memoryId:"user-b"},{userId:"a"})).resolves.toMatchObject({status:"deleted"});
   }finally{await app.close();await closeMemoryHttpServer(memory);}
 });
