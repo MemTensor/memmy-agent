@@ -4286,8 +4286,7 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
 }
 
 /* Decorate each wrapped fragment so long paths stay part of the paragraph. */
-.agent-message-content.agent-message-content--reasoning .agent-message-content__inline-code,
-.agent-message-content.agent-message-content--reasoning .agent-message-content__file-chip > span:not(.file-type-icon) {
+.agent-message-content.agent-message-content--reasoning .agent-message-content__inline-code {
   font-family: var(--font-mono);
   font-size: 0.92em;
   font-weight: 400;
@@ -4302,27 +4301,6 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
   overflow-wrap: anywhere;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
-}
-
-/* Keep the button action, but let its text wrap across paragraph lines. */
-.agent-message-content.agent-message-content--reasoning .agent-message-content__file-chip {
-  display: contents;
-  font-size: inherit;
-  color: inherit;
-}
-
-.agent-message-content--reasoning .agent-message-content__file-chip > .file-type-icon {
-  display: none;
-}
-
-.agent-message-content--reasoning .agent-message-content__file-chip > span:not(.file-type-icon) {
-  overflow: visible;
-  text-overflow: clip;
-}
-
-.agent-message-content--reasoning .agent-message-content__file-chip:focus-visible > span:not(.file-type-icon) {
-  outline: 2px solid var(--color-action-sky);
-  outline-offset: 2px;
 }
 
 .agent-message-content.agent-message-content--reasoning :where(h1, h2, h3, h4, h5, h6) {

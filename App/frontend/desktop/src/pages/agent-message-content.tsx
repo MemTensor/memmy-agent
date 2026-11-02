@@ -40,6 +40,7 @@ export type InAppFilePreview = {
 export type InAppFilePreviewHandler = (file: InAppFilePreview) => boolean;
 
 interface AgentMessageContentProps {
+  displayOnlyFiles?: boolean;
   content: string;
   isStreaming?: boolean;
   artifactClient?: AgentArtifactClient | null;
@@ -209,6 +210,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     a({ href, children }) {
       const localPath = localArtifactPathFromHref(href);
       if (localPath) {
+        if (props.displayOnlyFiles) return <code className="agent-message-content__inline-code">{localPath}</code>;
         return <FileReferenceChip path={localPath} label={children} variant="link" isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
       }
       if (isMailtoHref(href)) {
@@ -268,6 +270,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
       const language = /language-([A-Za-z0-9_+-]+)/.exec(className ?? "")?.[1] ?? null;
       const isInline = !language && !raw.includes("\n");
       if (isInline) {
+        if (props.displayOnlyFiles) return <code className={`agent-message-content__inline-code ${INLINE_CODE_WRAP_CLASS}`}>{code}</code>;
         const deliveredFile = props.artifactClient ? findDeliveredFileForInlineCode(code, props.deliveredFiles) : null;
         if (deliveredFile) {
           return <FileReferenceChip path={deliveredFile.path} label={code} variant="link" isStreaming={props.isStreaming} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />;
@@ -315,7 +318,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
     td({ children, style }) {
       return <td className={`agent-message-content__td ${LONG_TEXT_WRAP_CLASS}`} style={style}>{withBareLocalFileReferences(children, props)}</td>;
     }
-  }), [props.artifactClient, props.deliveredFiles, props.isStreaming, props.onPreviewFile]);
+  }), [props.artifactClient, props.deliveredFiles, props.isStreaming, props.onPreviewFile, props.displayOnlyFiles]);
 
   if (!deferred.ready) {
     return <DeferredMarkdownPlaceholder content={source} containerRef={deferred.containerRef} className={props.className} style={props.style} />;
@@ -548,7 +551,8 @@ function hasInlineCodeCloser(content: string, startIndex: number, runLength: num
 }
 
 function areAgentMessageContentPropsEqual(previous: AgentMessageContentProps, next: AgentMessageContentProps): boolean {
-  return previous.content === next.content
+  return previous.displayOnlyFiles === next.displayOnlyFiles
+    && previous.content === next.content
     && previous.isStreaming === next.isStreaming
     && previous.artifactClient === next.artifactClient
     && previous.onPreviewFile === next.onPreviewFile
@@ -1185,7 +1189,7 @@ function withBareLocalFileReferences(children: ReactNode, props: AgentMessageCon
       const start = (match.index ?? 0) + (match[1]?.length ?? 0);
       if (start > cursor) nodes.push(child.slice(cursor, start));
       nodes.push(
-        <FileReferenceChip
+        props.displayOnlyFiles ? <code key={`bare-local-file-${childIndex}-${pathIndex}`} className="agent-message-content__inline-code">{parsed.path}</code> : <FileReferenceChip
           key={`bare-local-file-${childIndex}-${pathIndex}`}
           path={parsed.path}
           label={parsed.path}
