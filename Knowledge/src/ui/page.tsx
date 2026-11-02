@@ -1024,6 +1024,8 @@ export function KnowledgePage({
   const quotaReached = ownedBases.length >= maxBases;
   const activeCanEdit = canEditKnowledgeBase(active);
   const isReadOnlyShared = active?.shared === true && !activeCanEdit;
+  /** 知识库列表只在可用时出现：未登录或服务不可用时整块不渲染，避免空目录栏占位。 */
+  const listVisible = Boolean(settings?.serviceAvailable);
 
   /* ---------- 目录导航与操作 ---------- */
   const folderById = useMemo(
@@ -1316,46 +1318,44 @@ export function KnowledgePage({
     <section className="memmy-knowledge">
       <style>{styles}</style>
 
-      {/* ============ 二级侧边栏 ============ */}
-      <aside className="mk-side" style={listWidth.sideStyle}>
-        <div className="mk-side-head">
-          <h2>{t("知识库", "Knowledge")}</h2>
-          <button
-            type="button"
-            className="mk-new-btn"
-            data-window-drag-exclusion="knowledge-create"
-            disabled={!settings || !settings.serviceAvailable || quotaReached}
-            aria-label={
-              quotaReached
-                ? t(`已达可创建上限（${ownedBases.length}/${maxBases}）`, `Limit reached (${ownedBases.length}/${maxBases})`)
-                : t("新建知识库", "New knowledge base")
-            }
-            title={
-              quotaReached
-                ? t(`已达可创建上限（${ownedBases.length}/${maxBases}）`, `Limit reached (${ownedBases.length}/${maxBases})`)
-                : t("新建知识库", "New knowledge base")
-            }
-            onClick={() => setCreateOpen(true)}
-          >
-            <I d={IC.plus} size={16} />
-          </button>
-        </div>
-        {settings && settings.bases.length > 3 && (
-          <div className="mk-side-search">
-            <I d={IC.search} size={13} />
-            <input
-              value={kbQuery}
-              onChange={(event) => setKbQuery(event.target.value)}
-              placeholder={t("搜索知识库", "Search bases")}
-              aria-label={t("搜索知识库", "Search knowledge bases")}
-            />
-          </div>
-        )}
-        <div className="mk-side-scroll">
-          {!settings ? (
-            <p className="mk-side-loading" aria-live="polite">{t("加载中…", "Loading…")}</p>
-          ) : settings.serviceAvailable ? (
-            <>
+      {/* ============ 二级侧边栏（仅知识库可用时出现） ============ */}
+      {listVisible && (
+        <>
+          <aside className="mk-side" style={listWidth.sideStyle}>
+            <div className="mk-side-head">
+              <h2>{t("知识库", "Knowledge")}</h2>
+              <button
+                type="button"
+                className="mk-new-btn"
+                data-window-drag-exclusion="knowledge-create"
+                disabled={quotaReached}
+                aria-label={
+                  quotaReached
+                    ? t(`已达可创建上限（${ownedBases.length}/${maxBases}）`, `Limit reached (${ownedBases.length}/${maxBases})`)
+                    : t("新建知识库", "New knowledge base")
+                }
+                title={
+                  quotaReached
+                    ? t(`已达可创建上限（${ownedBases.length}/${maxBases}）`, `Limit reached (${ownedBases.length}/${maxBases})`)
+                    : t("新建知识库", "New knowledge base")
+                }
+                onClick={() => setCreateOpen(true)}
+              >
+                <I d={IC.plus} size={16} />
+              </button>
+            </div>
+            {settings && settings.bases.length > 3 && (
+              <div className="mk-side-search">
+                <I d={IC.search} size={13} />
+                <input
+                  value={kbQuery}
+                  onChange={(event) => setKbQuery(event.target.value)}
+                  placeholder={t("搜索知识库", "Search bases")}
+                  aria-label={t("搜索知识库", "Search knowledge bases")}
+                />
+              </div>
+            )}
+            <div className="mk-side-scroll">
               <div className="mk-group">
                 <div className="mk-group-title">
                   {t(`个人 (${ownedBases.length})`, `Personal (${ownedBases.length})`)}
@@ -1373,33 +1373,31 @@ export function KnowledgePage({
                   {visibleShared.map(kbItem)}
                 </div>
               )}
-            </>
-          ) : null}
-        </div>
-        {settings && settings.serviceAvailable && (
-          <footer className="mk-side-foot">
-            <span className="mk-quota">
-              {t(`可创建的知识库：${ownedBases.length}/${maxBases}`, `Knowledge bases: ${ownedBases.length}/${maxBases}`)}
-            </span>
-          </footer>
-        )}
-      </aside>
-      <div
-        role="separator"
-        aria-label={t("调整知识库列表宽度", "Resize knowledge list")}
-        aria-orientation="vertical"
-        aria-valuemin={KNOWLEDGE_LIST_MIN_WIDTH}
-        aria-valuemax={KNOWLEDGE_LIST_MAX_WIDTH}
-        aria-valuenow={listWidth.width}
-        tabIndex={0}
-        className={`mk-resize${listWidth.isResizing ? " mk-resize-active" : ""}`}
-        onPointerDown={listWidth.beginResize}
-        onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => {
-          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-          event.preventDefault();
-          listWidth.resizeBy(event.key === "ArrowRight" ? 16 : -16);
-        }}
-      />
+            </div>
+            <footer className="mk-side-foot">
+              <span className="mk-quota">
+                {t(`可创建的知识库：${ownedBases.length}/${maxBases}`, `Knowledge bases: ${ownedBases.length}/${maxBases}`)}
+              </span>
+            </footer>
+          </aside>
+          <div
+            role="separator"
+            aria-label={t("调整知识库列表宽度", "Resize knowledge list")}
+            aria-orientation="vertical"
+            aria-valuemin={KNOWLEDGE_LIST_MIN_WIDTH}
+            aria-valuemax={KNOWLEDGE_LIST_MAX_WIDTH}
+            aria-valuenow={listWidth.width}
+            tabIndex={0}
+            className={`mk-resize${listWidth.isResizing ? " mk-resize-active" : ""}`}
+            onPointerDown={listWidth.beginResize}
+            onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              listWidth.resizeBy(event.key === "ArrowRight" ? 16 : -16);
+            }}
+          />
+        </>
+      )}
 
       {/* ============ 主内容区 ============ */}
       <main className="mk-main">
@@ -2392,7 +2390,6 @@ const styles = `
 .mk-side-search input{border:0;padding:2px 0;font-size:12px;background:transparent}
 .mk-side-search input:focus-visible{outline:none;box-shadow:none;border:0}
 .mk-side-scroll{flex:1;overflow-y:auto;padding:0 12px 12px;min-height:0}
-.mk-side-loading{padding:20px 8px;font-size:12px;color:var(--mk-ter)}
 .mk-group{display:flex;flex-direction:column;gap:2px;margin-top:6px}
 .mk-group + .mk-group{margin-top:36px}
 .mk-group-title{display:flex;align-items:center;gap:6px;margin:0 0 2px;padding:4px 8px;font-size:12px;font-weight:500;line-height:20px;color:var(--mk-ter)}
