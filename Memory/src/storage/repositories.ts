@@ -14,7 +14,7 @@ import { ensurePanelCache, panelVisibleMemorySql, visibleFactSql } from "./panel
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
-import { effectiveEpisodeMemoryIds, maintainMemoryRelations, ownedEpisodeMemoryIds, ownedTaskSpanIds, RAW_SOURCE_SQL, turnMigrationMemoryIds } from "./memory-relations.js";
+import { effectiveEpisodeMemoryIds, maintainMemoryRelations, ownedEpisodeMemoryIds, ownedTaskSpanIds, RAW_SOURCE_SQL, resolveL1Source, turnMigrationMemoryIds } from "./memory-relations.js";
 import { invalidatePanelViews } from "./panel-security.js";
 import type Database from "better-sqlite3";
 import {
@@ -3238,6 +3238,10 @@ export class RuntimeRepository {
       .prepare(`SELECT * FROM raw_turns WHERE id = ?`)
       .get(id) as SqlRawTurnRow | undefined;
     return row ? rawTurnFromSql(row) : undefined;
+  }
+
+  resolveL1Source(id: string): { episodeId?: string; rawTurnId?: string } | undefined {
+    return resolveL1Source(this.db, id);
   }
 
   episodeHasLaterRawTurn(episodeId: string, turnId: string, startedAt: string): boolean {

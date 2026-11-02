@@ -56,6 +56,55 @@ export function turnMigrationMemoryIds(db: Database.Database, raw: TurnSource, c
   }).map(row => row.id);
 }
 
+/** Validate a live L1's declared provenance, without treating historical UID as
+ * a local ownership boundary. Each policy source is checked independently. */
+export function resolveL1Source(db: Database.Database, id: string): { episodeId?: string; rawTurnId?: string } | undefined {
+  const parentRaw = RAW_SOURCE_SQL.replaceAll("m.", "t.");
+  const row = db.prepare(`SELECT m.user_id AS owner,m.session_id AS session, m.info_json AS info,m.properties_json AS properties,
+    coalesce(nullif(${RAW_SOURCE_SQL},''),nullif(json_extract(m.properties_json,'$.internal_info.span.raw_turn_id'),''),nullif(${parentRaw},'')) AS raw,
+    coalesce(${EPISODE_SOURCE_SQL},json_extract(m.properties_json,'$.internal_info.span.episode_id')) AS episode,
+    json_extract(m.properties_json,'$.internal_info.span.source_trace_id') AS parent,
+    t.id AS parentId,t.deleted_at AS parentDeleted,t.status AS parentStatus
+    FROM memories m LEFT JOIN memories t ON t.id=CASE
+      WHEN json_extract(m.properties_json,'$.internal_info.memory_kind')='span'
+      THEN json_extract(m.properties_json,'$.internal_info.span.source_trace_id') END
+    WHERE m.id=? AND m.memory_layer='L1' AND m.deleted_at IS NULL AND m.status!='deleted'`).get(id) as {
+      owner: string; session: string | null; info: string; properties: string;
+      raw: unknown; episode: unknown; parent: unknown; parentId: string | null;
+      parentDeleted: string | null; parentStatus: string | null;
+    } | undefined;
+  if (!row) return undefined;
+  if (row.parent != null && row.parent !== "" &&
+      (row.parent !== row.parentId || row.parentDeleted || row.parentStatus === "deleted")) return undefined;
+  if (row.raw != null && row.raw !== "") {
+    if (typeof row.raw !== "string") return undefined;
+    const raw = db.prepare(`SELECT r.id,r.session_id AS sessionId,r.episode_id AS episodeId
+      FROM raw_turns r JOIN sessions s ON s.id=r.session_id LEFT JOIN episodes e ON e.id=r.episode_id
+      WHERE r.id=? AND r.deleted_at IS NULL AND r.redacted_at IS NULL
+        AND (r.episode_id IS NULL OR e.session_id=r.session_id)`).get(row.raw) as TurnSource | undefined;
+    if (!raw) return undefined;
+    const source = { ...raw, episodeId: raw.episodeId ?? undefined };
+    return turnMigrationMemoryIds(db, source, [id]).includes(id) ? { episodeId: source.episodeId, rawTurnId:source.id } : undefined;
+  }
+  // A declared parent cannot silently fall back to an unrelated task when its
+  // turn is unavailable. Source-free legacy/manual L1s retain their old path.
+  if (row.parent != null && row.parent !== "") return undefined;
+  if (row.episode == null || row.episode === "") return {};
+  if (typeof row.episode !== "string") return undefined;
+  const episode = db.prepare("SELECT id,session_id AS session,user_id AS owner FROM episodes WHERE id=?")
+    .get(row.episode) as { id: string; session: string; owner: string } | undefined;
+  if (!episode || (row.session !== null ? row.session !== episode.session : row.owner !== episode.owner)) return undefined;
+  const info = parseJson<unknown>(row.info, {});
+  const properties = parseJson<unknown>(row.properties, {});
+  if (!isRecord(info) || !isRecord(properties)) return undefined;
+  const internal = isRecord(properties.internal_info) ? properties.internal_info : {};
+  const trace = isRecord(internal.trace) ? internal.trace : {};
+  const span = isRecord(internal.span) ? internal.span : {};
+  const nested = isRecord(properties.info) ? properties.info : {};
+  return [info.episode_id,nested.episode_id,internal.episode_id,trace.episode_id,span.episode_id]
+    .every(value => value == null || value === "" || value === episode.id) ? {episodeId:episode.id} : undefined;
+}
+
 /** Internal proof from a migration validated in the current transaction. */
 export interface TurnMigrationRelations extends TurnSource { memoryIds: ReadonlySet<string> }
 
@@ -129,34 +178,27 @@ export function maintainMemoryRelations(db: Database.Database, id: string, inval
     return;
   }
   if (memory.layer === "L1") {
-    const episode = memory.rawId
-      ? db
-          .prepare(
-            `SELECT e.id FROM raw_turns r JOIN episodes e ON e.id=r.episode_id
-          WHERE r.id=? AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND e.user_id=r.user_id AND r.user_id=?`
-          )
-          .get(memory.rawId, memory.userId)
-      : db.prepare("SELECT id FROM episodes WHERE id=? AND user_id=?").get(memory.episodeId, memory.userId);
-    if (episode) append((episode as { id: string }).id, "l1_memory_ids_json", id);
+    const source = resolveL1Source(db, id);
+    if (source?.episodeId) append(source.episodeId, "l1_memory_ids_json", id);
   }
   if (memory.layer === "L2" && memory.sources) {
     const traces = db
       .prepare(
-        `SELECT DISTINCT m.id,coalesce(r.episode_id,${EPISODE_SOURCE_SQL}) AS episodeId
-      FROM memories m LEFT JOIN raw_turns r ON r.id=${RAW_SOURCE_SQL}
-      WHERE m.id IN(SELECT value FROM json_each(?)) AND m.user_id=? AND m.memory_layer='L1' AND m.deleted_at IS NULL AND m.status!='deleted'
-      AND (${RAW_SOURCE_SQL} IS NULL OR (r.id IS NOT NULL AND r.deleted_at IS NULL AND r.redacted_at IS NULL AND r.user_id=m.user_id))`
+        `SELECT DISTINCT m.id FROM memories m
+      WHERE m.id IN(SELECT value FROM json_each(?)) AND m.memory_layer='L1' AND m.deleted_at IS NULL AND m.status!='deleted'`
       )
-      .all(memory.sources, memory.userId) as Array<{ id: string; episodeId: string | null }>;
+      .all(memory.sources) as Array<{ id: string }>;
     const insert =
       db.prepare(`INSERT OR IGNORE INTO trace_policy_links(id,user_id,l1_memory_id,l2_memory_id,relation,strength,created_at)
       VALUES(lower(hex(randomblob(16))),?,?,?,'supports',1,?)`);
     for (const trace of traces) {
+      const source = resolveL1Source(db, trace.id);
+      if (!source) continue;
       const exists = db
         .prepare("SELECT 1 FROM trace_policy_links WHERE l1_memory_id=? AND l2_memory_id=?")
         .get(trace.id, id);
       if (!exists) changed = insert.run(memory.userId, trace.id, id, memory.at).changes > 0 || changed;
-      if (trace.episodeId) append(trace.episodeId, "l2_policy_ids_json", id);
+      if (source.episodeId) append(source.episodeId, "l2_policy_ids_json", id);
     }
   }
   if (changed && invalidate) invalidatePanelViews(db);

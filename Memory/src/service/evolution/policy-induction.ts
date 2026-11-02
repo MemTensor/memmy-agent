@@ -14,7 +14,7 @@ import {
 } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
-import type { EvolutionJobRecord, RawTurnRecord } from "../../storage/repositories.js";
+import type { EvolutionJobRecord } from "../../storage/repositories.js";
 import { kindFromMemory } from "../../storage/repositories.js";
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
@@ -69,7 +69,7 @@ type ReposPort = {
     update(memory: MemoryRow): MemoryRow;
   };
   runtime: {
-    getRawTurn(id: string): RawTurnRecord | undefined;
+    resolveL1Source(id: string): { episodeId?: string; rawTurnId?: string } | undefined;
     pruneCandidatePool(now: string): number;
     listPendingCandidatePool(input: {
       userId?: string;
@@ -838,10 +838,11 @@ export class PolicyInductionEngine {
   isTraceEligibleForL2(trace: TraceMeta): boolean {
     const internal = trace.memory.properties.internal_info;
     const metadata = isRecord(internal.trace) ? internal.trace : {};
-    const rawId = internal.source_raw_turn_id ?? internal.raw_turn_id ?? metadata.raw_turn_id ?? trace.memory.info.raw_turn_id;
-    if (typeof rawId === "string" && rawId) {
-      const raw = this.deps.repos.runtime.getRawTurn(rawId);
-      if (!raw || raw.deletedAt || raw.redactedAt || raw.userId !== trace.userId || raw.episodeId !== trace.episodeId) return false;
+    const rawId = [internal.source_raw_turn_id, internal.raw_turn_id, metadata.raw_turn_id, trace.memory.info.raw_turn_id]
+      .find(value => value != null && value !== "");
+    if (rawId !== undefined) {
+      const source = this.deps.repos.runtime.resolveL1Source(trace.id);
+      if (!source || source.rawTurnId !== rawId || source.episodeId !== trace.episodeId) return false;
     }
     return trace.memory.properties.internal_info.policy_eligible !== false &&
       trace.memory.properties.internal_info.evidence_status !== "provisional" &&
