@@ -21,17 +21,77 @@ export function composerFolderReferenceFromFiles(
 ): ComposerContextReference | null {
   const first = files[0];
   if (!first) return null;
-  const relativePath = first.webkitRelativePath.replace(/\\/g, "/");
+  const relativePath = (first.webkitRelativePath || "").replace(/\\/g, "/");
   const rootName = relativePath.split("/")[0] || first.name;
   const fullPath = (resolvePath?.(first) || first.name).replace(/\\/g, "/");
   const rootPath = relativePath && fullPath.endsWith(relativePath)
     ? `${fullPath.slice(0, -relativePath.length)}${rootName}`
-    : rootName;
+    : relativePath ? rootName : fullPath;
   return {
     kind: "path",
     id: rootPath,
     label: `${rootName}/`
   };
+}
+
+export type ComposerDropItem = Pick<DataTransferItem, "kind" | "getAsFile"> & {
+  webkitGetAsEntry?: () => Pick<FileSystemEntry, "isDirectory"> | null;
+};
+
+export interface ComposerDropSource {
+  items?: ArrayLike<ComposerDropItem> | Iterable<ComposerDropItem>;
+  files?: ArrayLike<File> | Iterable<File>;
+}
+
+export interface ComposerDropEntry {
+  kind: "file" | "folder";
+  file: File;
+}
+
+/** Read the drag store synchronously, before the drop event finishes. */
+export function composerDropEntriesFromDataTransfer(source: ComposerDropSource | null | undefined): ComposerDropEntry[] {
+  const entries: ComposerDropEntry[] = [];
+  const transferredFiles = Array.from(source?.files ?? []);
+  const seen = new Set<File>();
+  let fileIndex = 0;
+  for (const item of Array.from(source?.items ?? [])) {
+    if (item.kind !== "file") continue;
+    const directory = item.webkitGetAsEntry?.()?.isDirectory === true;
+    const file = item.getAsFile() ?? transferredFiles[fileIndex];
+    fileIndex += 1;
+    if (!file) {
+      if (directory) throw new Error("home.media.error.sendReadFailed");
+      continue;
+    }
+    if (seen.has(file)) continue;
+    seen.add(file);
+    entries.push({ kind: directory ? "folder" : "file", file });
+  }
+  // FileList is also used by older drag sources that do not expose items.
+  for (const file of transferredFiles.slice(fileIndex)) {
+    if (!seen.has(file)) {
+      seen.add(file);
+      entries.push({ kind: "file", file });
+    }
+  }
+  return entries;
+}
+
+export function partitionComposerDropFiles(source: ComposerDropSource | null | undefined): {
+  files: File[];
+  folders: File[];
+} {
+  const entries = composerDropEntriesFromDataTransfer(source);
+  return {
+    files: entries.filter((entry) => entry.kind === "file").map((entry) => entry.file),
+    folders: entries.filter((entry) => entry.kind === "folder").map((entry) => entry.file)
+  };
+}
+
+export function appendComposerContextReferences(content: string, references: ComposerContextReference[]): string {
+  if (!references.length) return content;
+  return [content.trimEnd(), ...references.map((reference) => JSON.stringify(reference.id))]
+    .filter(Boolean).join("\n\n");
 }
 
 export function writeComposerReferenceDrag(

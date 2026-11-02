@@ -11,10 +11,19 @@ import type { MemmyAgentMediaAttachment, UploadedAgentMedia } from "../api/memmy
 
 export type ComposerDraftValue = string | ((currentValue: string) => string);
 
+let composerItemOrder = 0;
+
+/** Reserve before async validation so files and directory references share one order. */
+export function reserveComposerItemOrder(minimum = 0): number {
+  composerItemOrder = Math.max(composerItemOrder, minimum) + 1;
+  return composerItemOrder;
+}
+
 export interface ComposerContextReference {
   kind: "path";
   id: string;
   label: string;
+  addedOrder?: number;
   fileCount?: number;
   totalBytes?: number;
 }
@@ -26,6 +35,7 @@ export interface PendingAttachmentBase {
   kind: "image" | "file";
   status: "encoding" | "ready" | "error";
   originalBytes: number;
+  addedOrder?: number;
   errorKey?: MessageKey;
   /** The queued file already exists in the gateway media store. */
   reusedMedia?: MemmyAgentMediaAttachment & { path: string };

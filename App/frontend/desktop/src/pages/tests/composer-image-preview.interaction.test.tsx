@@ -4,6 +4,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PendingAttachment, PendingImage } from "../../state/agent-composer-state.js";
+import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { ComposerMediaPreviewStrip } from "../home-page.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -53,6 +54,27 @@ describe("composer image preview interactions", () => {
     act(() => getButton("移除: preview-two.png").click());
     expect(document.querySelector('button[aria-label="preview-two.png"]')).toBeNull();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("orders image cards and lightbox navigation by addition order around folder references", () => {
+    act(() => root.render(
+      <I18nProvider language="zh-CN">
+        <ComposerMediaPreviewStrip
+          items={[
+            { ...pendingImage("later", "later.png", "data:image/png;base64,BBBB"), addedOrder: 3 },
+            { ...pendingImage("earlier", "earlier.png", "data:image/png;base64,AAAA"), addedOrder: 1 }
+          ]}
+          references={[{ kind: "path", id: "/tmp/Folder", label: "Folder/", addedOrder: 2 }]}
+          onRemove={() => undefined}
+        />
+      </I18nProvider>
+    ));
+    expect(Array.from(document.querySelectorAll<HTMLElement>(".composer-media-preview-strip .agent-attachment-card"), (card) => card.title))
+      .toEqual(["earlier.png", "/tmp/Folder", "later.png"]);
+    act(() => getButton("earlier.png").click());
+    expect(currentLightboxImageName()).toBe("earlier.png");
+    act(() => getButton("Next image").click());
+    expect(currentLightboxImageName()).toBe("later.png");
   });
 });
 

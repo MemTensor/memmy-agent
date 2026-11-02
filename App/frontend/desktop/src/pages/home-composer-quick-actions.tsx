@@ -17,8 +17,8 @@ import {
   type ReactNode,
   type Ref
 } from "react";
-import { Plus, SquareSlash } from "lucide-react";
-import { FileTypeIcon, FolderTypeIcon } from "../components/file-type-icon.js";
+import { Folder, Plus, SquareSlash } from "lucide-react";
+import { FileTypeIcon } from "../components/file-type-icon.js";
 import { Tooltip } from "../components/tooltip.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import type { ComposerContextReference } from "../state/agent-composer-state.js";
@@ -273,35 +273,38 @@ export function HomeContextChips(props: {
   chips: ComposerContextChip[];
   onRemove?: (chip: ComposerContextChip) => void;
 }) {
-  const { t } = useTranslation();
   if (!props.chips.length) return null;
   return (
-    <div className="home-context-chips">
-      {props.chips.map((chip) => {
-        const folder = chip.kind === "path" && chip.label.endsWith("/");
-        const kindLabel = folder
-          ? t("home.quick.kind.folder")
-          : t("home.quick.kind.file");
-        return (
-          <AgentAttachmentCard
-            key={`${chip.kind}:${chip.id}`}
-            kind="file"
-            name={chip.label}
-            subline={kindLabel}
-            title={chip.label}
-            removable={Boolean(props.onRemove)}
-            removeLabel={props.onRemove ? t("common.remove") : undefined}
-            onRemove={props.onRemove ? () => props.onRemove?.(chip) : undefined}
-            leading={(
-              folder ? (
-                <FolderTypeIcon surface="card" />
-              ) : (
-                <FileTypeIcon name={chip.label} surface="card" />
-              )
-            )}
-          />
-        );
-      })}
+    <div className="home-context-chips composer-media-preview-strip">
+      {props.chips.map((chip) => (
+        <ComposerContextReferenceChip key={`${chip.kind}:${chip.id}`} chip={chip} onRemove={props.onRemove} />
+      ))}
     </div>
+  );
+}
+
+export function ComposerContextReferenceChip(props: {
+  chip: ComposerContextChip;
+  onRemove?: (chip: ComposerContextChip) => void;
+}) {
+  const { t } = useTranslation();
+  const { chip } = props;
+  const folder = chip.kind === "path" && chip.label.endsWith("/");
+  return (
+    <AgentAttachmentCard
+      className="composer-context-reference"
+      kind="file"
+      name={chip.label}
+      subline={t(folder ? "home.quick.kind.folder" : "home.quick.kind.file")}
+      title={chip.id}
+      removable={Boolean(props.onRemove)}
+      removeLabel={props.onRemove ? t("common.remove") : undefined}
+      onRemove={props.onRemove ? () => props.onRemove?.(chip) : undefined}
+      leading={folder ? (
+        <Folder size={32} strokeWidth={1.5} className="shrink-0 text-text-ink/60" aria-hidden="true" />
+      ) : (
+        <FileTypeIcon name={chip.label} surface="card" />
+      )}
+    />
   );
 }

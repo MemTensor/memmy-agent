@@ -17,6 +17,7 @@ export interface AgentAttachmentNameParts {
 }
 
 export interface AgentAttachmentCardProps {
+  className?: string;
   kind: "image" | "file";
   name: string;
   mime?: string;
@@ -115,6 +116,7 @@ export function AgentAttachmentCard(props: AgentAttachmentCardProps) {
   const subline = props.subline ?? nameParts.extensionLabel;
   const baseClassName = [
     "agent-attachment-card",
+    props.className ?? "",
     props.align === "right" ? "agent-attachment-card--right" : "",
     props.error ? "agent-attachment-card--error" : "",
     props.onClick ? "agent-attachment-card--interactive" : "",

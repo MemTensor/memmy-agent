@@ -4620,14 +4620,19 @@ describe("agent chat slice", () => {
     let state = agentReducer(initialAgentState, { type: "agent/composerDraftUpdated", scopeKey: "chat-a", value: "A 草稿" });
     state = agentReducer(state, { type: "agent/composerDraftUpdated", scopeKey: "chat-b", value: "B 草稿" });
     state = agentReducer(state, { type: "agent/composerPendingAttachmentsUpdated", scopeKey: "chat-a", attachments: [attachment] });
+    const folder = { kind: "path" as const, id: "/tmp/Papers", label: "Papers/" };
+    state = agentReducer(state, { type: "agent/composerContextReferencesUpdated", scopeKey: "chat-a", references: [folder] });
+    state = agentReducer(state, { type: "agent/composerContextReferencesUpdated", scopeKey: "chat-b", references: [folder] });
 
     expect(state.composerDraftsByScope).toEqual({ "chat-a": "A 草稿", "chat-b": "B 草稿" });
     expect(state.composerPendingAttachmentsByScope["chat-a"]).toEqual([attachment]);
+    expect(state.composerContextReferencesByScope).toEqual({ "chat-a": [folder], "chat-b": [folder] });
 
     state = agentReducer(state, { type: "agent/composerScopeCleared", scopeKey: "chat-a" });
 
     expect(state.composerDraftsByScope).toEqual({ "chat-b": "B 草稿" });
     expect(state.composerPendingAttachmentsByScope["chat-a"]).toBeUndefined();
+    expect(state.composerContextReferencesByScope).toEqual({ "chat-b": [folder] });
   });
 
   it("newChatRequested does not clear composer scopes", () => {

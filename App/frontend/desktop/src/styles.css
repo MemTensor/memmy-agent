@@ -5086,24 +5086,21 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
 
 .agent-message-content__table-scroll,
 .agent-message-content__code-scroll,
-.agent-message-content__pre,
-.composer-media-preview-strip {
+.agent-message-content__pre {
   scrollbar-width: thin;
   scrollbar-color: var(--codex-scrollbar-thumb) transparent;
 }
 
 .agent-message-content__table-scroll::-webkit-scrollbar,
 .agent-message-content__code-scroll::-webkit-scrollbar,
-.agent-message-content__pre::-webkit-scrollbar,
-.composer-media-preview-strip::-webkit-scrollbar {
+.agent-message-content__pre::-webkit-scrollbar {
   display: block;
   height: var(--codex-scrollbar-size);
 }
 
 .agent-message-content__table-scroll::-webkit-scrollbar-thumb,
 .agent-message-content__code-scroll::-webkit-scrollbar-thumb,
-.agent-message-content__pre::-webkit-scrollbar-thumb,
-.composer-media-preview-strip::-webkit-scrollbar-thumb {
+.agent-message-content__pre::-webkit-scrollbar-thumb {
   background: var(--codex-scrollbar-thumb);
 }
 
@@ -5179,7 +5176,12 @@ button {
   gap: 10px;
   overflow-x: auto;
   overflow-y: hidden;
+  scrollbar-width: none;
   padding: 12px 16px 4px;
+}
+
+.composer-media-preview-strip::-webkit-scrollbar {
+  display: none;
 }
 
 .composer-media-preview-strip > .agent-attachment-card {

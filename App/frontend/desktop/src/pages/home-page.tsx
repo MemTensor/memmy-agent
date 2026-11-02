@@ -46,6 +46,14 @@ import {
 } from "../lib/agent-attachment.js";
 import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode.js";
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
+import {
+  appendComposerContextReferences,
+  composerDropEntriesFromDataTransfer,
+  composerFolderReferenceFromFiles,
+  mergeComposerContextReferences,
+  partitionComposerDropFiles,
+  type ComposerDropItem
+} from "../lib/composer-file-reference.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
@@ -55,7 +63,9 @@ import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
   agentChatScopeKey,
+  reserveComposerItemOrder,
   updateComposerDraftForScope,
+  type ComposerContextReference,
   type PendingAttachment,
   type PendingAttachmentBase,
   type PendingFileAttachment,
@@ -106,6 +116,7 @@ import {
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { HomeStarterActions } from "./home-starter-actions.js";
+import { ComposerContextReferenceChip } from "./home-composer-quick-actions.js";
 import { LlmProviderLogo } from "./llm-provider-logo.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
@@ -388,17 +399,23 @@ export function shouldAcceptAgentStatusResult(input: {
 export function ComposerMediaPreviewStrip(props: {
   items: PendingAttachment[];
   onRemove: (id: string) => void;
+  references?: ComposerContextReference[];
+  onRemoveReference?: (reference: ComposerContextReference) => void;
   removeLabel?: string;
   selectedLabel?: string;
   t?: HomeTranslate;
 }) {
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
-  const previewImages = props.items.filter((item): item is PendingImage => item.kind === "image");
+  const orderedItems = [
+    ...props.items.map((item) => ({ kind: "attachment" as const, item })),
+    ...(props.references ?? []).map((item) => ({ kind: "reference" as const, item }))
+  ].sort((left, right) => (left.item.addedOrder ?? 0) - (right.item.addedOrder ?? 0));
+  const previewImages = orderedItems.flatMap((entry) => entry.kind === "attachment" && entry.item.kind === "image" ? [entry.item] : []);
   const previewImageIndex = previewImageId == null
     ? -1
     : previewImages.findIndex((item) => item.id === previewImageId);
 
-  if (!props.items.length) {
+  if (!orderedItems.length) {
     return null;
   }
   const removeLabel = props.removeLabel ?? "Remove";
@@ -407,10 +424,16 @@ export function ComposerMediaPreviewStrip(props: {
   return (
     <>
       <div className="composer-media-preview-strip" aria-label={props.selectedLabel ?? "Selected media"}>
-        {props.items.map((item) => (
-          item.kind === "image" ? (
+        {orderedItems.map(({ kind, item }) => (
+          kind === "reference" ? (
+            <ComposerContextReferenceChip
+              key={`reference:${item.kind}:${item.id}`}
+              chip={item}
+              onRemove={props.onRemoveReference}
+            />
+          ) : item.kind === "image" ? (
             <ComposerImageAttachmentChip
-              key={item.id}
+              key={`attachment:${item.id}`}
               item={item}
               onPreview={setPreviewImageId}
               onRemove={props.onRemove}
@@ -419,7 +442,7 @@ export function ComposerMediaPreviewStrip(props: {
             />
           ) : (
             <ComposerFileAttachmentChip
-              key={item.id}
+              key={`attachment:${item.id}`}
               item={item}
               onRemove={props.onRemove}
               removeLabel={removeLabel}
@@ -943,6 +966,7 @@ export function HomePage() {
   const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
   const composerDrafts = state.agent.composerDraftsByScope;
   const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
+  const contextReferencesByScope = state.agent.composerContextReferencesByScope;
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -964,6 +988,7 @@ export function HomePage() {
   const initialFocusedChatLoadedRef = useRef(false);
   const composerDraftsRef = useRef<Record<string, string>>(composerDrafts);
   const pendingAttachmentsRef = useRef<Record<string, PendingAttachment[]>>(pendingAttachmentsByScope);
+  const contextReferencesRef = useRef(contextReferencesByScope);
   const stopRequestLocksRef = useRef<Set<string>>(new Set());
   const goalMutationLocksRef = useRef<Set<string>>(new Set());
   const messageSendLocksRef = useRef<Set<string>>(new Set());
@@ -1021,6 +1046,7 @@ export function HomePage() {
   const selectedComposerCommand = composerCommandDraft.command;
   const composerInput = composerCommandDraft.text;
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
+  const contextReferences = contextReferencesByScope[chatScopeKey] ?? [];
   const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
@@ -1795,8 +1821,8 @@ export function HomePage() {
   const isAccountMode = state.bootstrap?.app.userMode === "account";
   const sanitizePlatformApiErrors = isAccountMode;
   const hasBlockedPendingMedia = pendingAttachments.some((item) => item.status !== "ready");
-  const hasComposerPayload = Boolean(input.trim() || pendingAttachments.some((item) => item.status === "ready"));
-  const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);
+  const hasComposerPayload = Boolean(input.trim() || contextReferences.length || pendingAttachments.some((item) => item.status === "ready"));
+  const hasComposerIntent = Boolean(input.trim() || contextReferences.length || pendingAttachments.length > 0);
   const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
   const composerSendDisabled = !hasComposerPayload
     || hasBlockedPendingMedia
@@ -1844,6 +1870,10 @@ export function HomePage() {
   useEffect(() => {
     pendingAttachmentsRef.current = pendingAttachmentsByScope;
   }, [pendingAttachmentsByScope]);
+
+  useEffect(() => {
+    contextReferencesRef.current = contextReferencesByScope;
+  }, [contextReferencesByScope]);
 
   // Layout effect (not a regular effect) so the scroll adjustment commits
   // synchronously in the same browser frame as the new message content —
@@ -1907,6 +1937,7 @@ export function HomePage() {
     agentError,
     chatScopeKey,
     composerInput,
+    contextReferences.length,
     currentGoal,
     currentQueuedMessages.length,
     currentSessionProjectBlocked,
@@ -1972,6 +2003,7 @@ export function HomePage() {
     const clientRequestId = crypto.randomUUID();
     const submittedDraft = input;
     const submittedAttachments = [...pendingAttachments];
+    const submittedReferences = [...contextReferences];
     const submittedCommand = selectedComposerCommand;
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
@@ -1989,8 +2021,10 @@ export function HomePage() {
         clientRequestId,
         connection,
         ensureChatSubscription,
-        content: features.agentPrompt(input) ?? input,
-        displayContent: features.agentPrompt(input) ? input : selectedComposerCommand ? composerInput : undefined,
+        content: appendComposerContextReferences(features.agentPrompt(input) ?? input, submittedReferences),
+        displayContent: features.agentPrompt(input)
+          ? appendComposerContextReferences(input, submittedReferences)
+          : selectedComposerCommand ? appendComposerContextReferences(composerInput, submittedReferences) : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
@@ -2003,7 +2037,8 @@ export function HomePage() {
           sendScopeKey,
           submittedDraft,
           submittedAttachments,
-          submittedCommand
+          submittedCommand,
+          submittedReferences
         ),
         settleComposer: () => settleComposerAfterSend(sendScopeKey, submittedAttachments),
         chatSelectionEpoch: state.agent.chatSelectionEpoch,
@@ -2231,9 +2266,9 @@ export function HomePage() {
   }
 
   function runExactLocalSlashCommand(command: string): boolean {
-    if (!pendingAttachments.length && features.runCommand(command)) { setCurrentComposerDraft(""); return true; }
+    if (!pendingAttachments.length && !contextReferences.length && features.runCommand(command)) { setCurrentComposerDraft(""); return true; }
     const normalized = command.trim().toLowerCase();
-    if (pendingAttachments.length > 0) return false;
+    if (pendingAttachments.length > 0 || contextReferences.length > 0) return false;
     if (normalized === "/last-compaction") {
       rememberSlashCommand("/last-compaction");
       setCurrentComposerDraft("");
@@ -2362,13 +2397,24 @@ export function HomePage() {
     });
   }
 
+  function allocateComposerItemOrder(scopeKey: string): number {
+    const items = [
+      ...(pendingAttachmentsRef.current[scopeKey] ?? []),
+      ...(contextReferencesRef.current[scopeKey] ?? [])
+    ];
+    return reserveComposerItemOrder(items.reduce((latest, item) => Math.max(latest, item.addedOrder ?? 0), 0));
+  }
+
   function setPendingAttachmentsForScope(scopeKey: string, value: SetStateAction<PendingAttachment[]>) {
     const currentMap = pendingAttachmentsRef.current;
     const currentValue = currentMap[scopeKey] ?? [];
-    const nextValue = typeof value === "function" ? value(currentValue) : value;
-    if (currentValue === nextValue) {
+    const updated = typeof value === "function" ? value(currentValue) : value;
+    if (currentValue === updated) {
       return;
     }
+    const nextValue = updated.map((item) => item.addedOrder === undefined
+      ? { ...item, addedOrder: allocateComposerItemOrder(scopeKey) }
+      : item).sort((left, right) => (left.addedOrder ?? 0) - (right.addedOrder ?? 0));
 
     const nextMap = { ...currentMap };
     if (nextValue.length) {
@@ -2382,6 +2428,23 @@ export function HomePage() {
 
   function setCurrentPendingAttachments(value: SetStateAction<PendingAttachment[]>) {
     setPendingAttachmentsForScope(chatScopeKey, value);
+  }
+
+  function setContextReferencesForScope(scopeKey: string, value: SetStateAction<ComposerContextReference[]>) {
+    const current = contextReferencesRef.current[scopeKey] ?? [];
+    const references = (typeof value === "function" ? value(current) : value).map((item) => item.addedOrder === undefined
+      ? { ...item, addedOrder: allocateComposerItemOrder(scopeKey) }
+      : item).sort((left, right) => (left.addedOrder ?? 0) - (right.addedOrder ?? 0));
+    const next = { ...contextReferencesRef.current };
+    if (references.length) next[scopeKey] = references;
+    else delete next[scopeKey];
+    contextReferencesRef.current = next;
+    dispatch(agentActions.composerContextReferencesUpdated(scopeKey, references));
+  }
+
+  function removeContextReference(reference: ComposerContextReference) {
+    setContextReferencesForScope(chatScopeKey, (current) => current.filter((item) => item.id !== reference.id));
+    inputRef.current?.focus();
   }
 
   function setComposerMediaErrorForScope(scopeKey: string, message: string | null) {
@@ -2477,6 +2540,7 @@ export function HomePage() {
     setSelectedComposerCommandForScope(scopeKey, null);
     setComposerDraftForScope(scopeKey, "");
     setPendingAttachmentsForScope(scopeKey, []);
+    setContextReferencesForScope(scopeKey, []);
     resetTransientConversationUi();
     resetComposerHeight();
   }
@@ -2485,7 +2549,8 @@ export function HomePage() {
     scopeKey: string,
     draft: string,
     attachments: PendingAttachment[],
-    command: typeof COMPOSER_GOAL_COMMAND | null
+    command: typeof COMPOSER_GOAL_COMMAND | null,
+    references: ComposerContextReference[]
   ) {
     const currentDraft = composerDraftsRef.current[scopeKey] ?? "";
     const currentAttachments = pendingAttachmentsRef.current[scopeKey] ?? [];
@@ -2499,6 +2564,7 @@ export function HomePage() {
     }
     setComposerDraftForScope(scopeKey, currentDraft ? `${draft}\n\n${currentDraft}` : draft);
     setPendingAttachmentsForScope(scopeKey, restoredAttachments);
+    setContextReferencesForScope(scopeKey, (current) => mergeComposerContextReferences(references, current));
     window.requestAnimationFrame(() => {
       if (scopeKey === chatScopeKey && inputRef.current) {
         resizeComposerInput(inputRef.current);
@@ -2514,6 +2580,7 @@ export function HomePage() {
     if (
       !(scopeKey in composerDraftsRef.current)
       && !(scopeKey in pendingAttachmentsRef.current)
+      && !(scopeKey in contextReferencesRef.current)
     ) {
       dispatch(agentActions.composerScopeCleared(scopeKey));
     }
@@ -2887,19 +2954,39 @@ export function HomePage() {
     }
 
     event.preventDefault();
-    const files = attachmentFilesFromDataTransfer(event.dataTransfer);
-    if (!files.length) {
-      return;
-    }
-
-    void attachMediaFilesToScope(chatScopeKey, files).then(() => {
+    try {
+      const entries = composerDropEntriesFromDataTransfer(event.dataTransfer).map((entry) => ({
+        ...entry, addedOrder: allocateComposerItemOrder(chatScopeKey)
+      }));
+      const fileEntries = entries.filter((entry) => entry.kind === "file");
+      const files = fileEntries.map((entry) => entry.file);
+      const fileOrders = new Map(fileEntries.map((entry) => [entry.file, entry.addedOrder]));
+      const references = entries.filter((entry) => entry.kind === "folder").map(({ file, addedOrder }) => {
+        const path = window.memmy?.getPathForFile(file);
+        if (!path) throw new Error("home.media.error.sendReadFailed");
+        return { ...composerFolderReferenceFromFiles([file], () => path)!, addedOrder };
+      });
+      if (references.length) {
+        setContextReferencesForScope(chatScopeKey, (current) => mergeComposerContextReferences(current, references));
+      }
+      if (files.length) {
+        void attachMediaFilesToScope(chatScopeKey, files, fileOrders).then(() => inputRef.current?.focus());
+      } else if (references.length) {
+        inputRef.current?.focus();
+      }
+    } catch (error) {
+      setComposerMediaErrorForScope(chatScopeKey, error instanceof Error ? error.message : String(error));
       inputRef.current?.focus();
-    });
+    }
   }
 
-  async function attachMediaFilesToScope(scopeKey: string, files: File[]): Promise<boolean> {
+  async function attachMediaFilesToScope(scopeKey: string, files: File[], fileOrders?: ReadonlyMap<File, number>): Promise<boolean> {
     if (!files.length) {
       return false;
+    }
+    const addedOrders = new Map(fileOrders);
+    for (const file of files) {
+      if (!addedOrders.has(file)) addedOrders.set(file, allocateComposerItemOrder(scopeKey));
     }
     try {
       const validation = await validateAgentMediaFiles(files, t, pendingAttachmentsRef.current[scopeKey] ?? []);
@@ -2907,7 +2994,10 @@ export function HomePage() {
       if (!validFiles.length) {
         return false;
       }
-      const nextPending = validFiles.map((item) => fileToPendingAttachment(item.file, item.sourceKey, item.classification));
+      const nextPending = validFiles.map((item) => ({
+        ...fileToPendingAttachment(item.file, item.sourceKey, item.classification),
+        addedOrder: addedOrders.get(item.file)!
+      }));
       setPendingAttachmentsForScope(scopeKey, (current) => [...current, ...nextPending]);
       setComposerMediaErrorForScope(scopeKey, null);
       for (const [index, pending] of nextPending.entries()) {
@@ -2962,6 +3052,7 @@ export function HomePage() {
   }
 
   function clearPendingAttachments() {
+    setContextReferencesForScope(chatScopeKey, []);
     setCurrentPendingAttachments((current) => {
       for (const item of current) {
         revokePendingAttachment(item);
@@ -3105,6 +3196,8 @@ export function HomePage() {
                 <ComposerMediaPreviewStrip
                   items={pendingAttachments}
                   onRemove={removePendingMedia}
+                  references={contextReferences}
+                  onRemoveReference={removeContextReference}
                   removeLabel={t("common.remove")}
                   selectedLabel={t("home.media.addPhotoFile")}
                   t={t}
@@ -3353,6 +3446,8 @@ export function HomePage() {
                     <ComposerMediaPreviewStrip
                       items={pendingAttachments}
                       onRemove={removePendingMedia}
+                      references={contextReferences}
+                      onRemoveReference={removeContextReference}
                       removeLabel={t("common.remove")}
                       selectedLabel={t("home.media.addPhotoFile")}
                       t={t}
@@ -4110,7 +4205,7 @@ export interface AgentMediaValidationResult {
 }
 
 type ClipboardFileItem = Pick<DataTransferItem, "kind" | "getAsFile">;
-type DragFileItem = Pick<DataTransferItem, "kind" | "getAsFile">;
+type DragFileItem = ComposerDropItem;
 
 export interface ClipboardAttachmentSource {
   items?: ArrayLike<ClipboardFileItem> | Iterable<ClipboardFileItem>;
@@ -4150,26 +4245,7 @@ export function clipboardAttachmentFilesFromDataTransfer(source: ClipboardAttach
 }
 
 export function attachmentFilesFromDataTransfer(source: AttachmentDropSource | null | undefined): File[] {
-  const files: File[] = [];
-  const seen = new Set<File>();
-  const addFile = (file: File | null | undefined) => {
-    if (!file || seen.has(file)) {
-      return;
-    }
-    seen.add(file);
-    files.push(file);
-  };
-
-  for (const item of arrayLikeToArray<DragFileItem>(source?.items)) {
-    if (item.kind === "file") {
-      addFile(item.getAsFile());
-    }
-  }
-  for (const file of arrayLikeToArray<File>(source?.files)) {
-    addFile(file);
-  }
-
-  return files;
+  return partitionComposerDropFiles(source).files;
 }
 
 export function dataTransferHasAttachmentFiles(source: AttachmentDropSource | null | undefined): boolean {

@@ -552,7 +552,7 @@ describe("HomePage", () => {
 
     expect(sendBlock).toContain("if (runExactLocalSlashCommand(input))");
     expect(sendBlock.indexOf("runExactLocalSlashCommand(input)")).toBeLessThan(sendBlock.indexOf("submitAgentComposerMessage({"));
-    expect(localSlashBlock).toContain("if (pendingAttachments.length > 0) return false;");
+    expect(localSlashBlock).toContain("if (pendingAttachments.length > 0 || contextReferences.length > 0) return false;");
     expect(localSlashBlock).toContain('normalized === "/last-compaction"');
     expect(localSlashBlock).toContain("requestLastCompactionPanel();");
     expect(localSlashBlock).toContain('normalized === "/history-dag"');
@@ -881,7 +881,7 @@ describe("HomePage", () => {
     expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: true })).toBe("send");
     expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: false, hasIntent: true })).toBe("send");
     expect(agentComposerPrimaryAction({ isRunning: false, isGoalActive: false, hasIntent: false })).toBe("send");
-    expect(source).toContain("const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);");
+    expect(source).toContain("const hasComposerIntent = Boolean(input.trim() || contextReferences.length || pendingAttachments.length > 0);");
     expect(conversationComposer.match(/<ComposerSubmitButton/g)).toHaveLength(1);
     expect(source).toContain('isSending={composerPrimaryAction === "stop"}');
     expect(source).toContain('onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}');
@@ -2012,8 +2012,8 @@ describe("HomePage", () => {
     expect(source).toContain("function handleComposerDrop(event: DragEvent<HTMLElement>)");
     expect(source).toContain("dataTransferHasAttachmentFiles(event.dataTransfer)");
     expect(source).toContain('event.dataTransfer.dropEffect = "copy";');
-    expect(source).toContain("attachmentFilesFromDataTransfer(event.dataTransfer)");
-    expect(source).toContain("void attachMediaFilesToScope(chatScopeKey, files).then");
+    expect(source).toContain("composerDropEntriesFromDataTransfer(event.dataTransfer)");
+    expect(source).toContain("void attachMediaFilesToScope(chatScopeKey, files, fileOrders).then");
     expect(source.match(/onDragOver=\{handleComposerDragOver\}/g)).toHaveLength(2);
     expect(source.match(/onDrop=\{handleComposerDrop\}/g)).toHaveLength(2);
   });

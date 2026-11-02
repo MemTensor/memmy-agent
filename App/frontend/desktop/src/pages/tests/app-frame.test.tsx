@@ -460,6 +460,7 @@ describe("AppFrame", () => {
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ blankDraftActive: true }))).toBe(false);
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerDraftsByScope: { "draft-3": "未发送" } }))).toBe(false);
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerPendingAttachmentsByScope: { "draft-3": [{} as never] } }))).toBe(false);
+    expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerContextReferencesByScope: { "draft-3": [{ kind: "path", id: "/tmp/Papers", label: "Papers/" }] } }))).toBe(false);
     expect(source).toContain("function openNewAgent(target?: WebuiSessionTarget)");
     expect(source).toContain("clearFocusedAgentTarget(");
     expect(source).toContain("if (shouldCreateNewAgentDraft(state.agent))");
@@ -1292,6 +1293,7 @@ function newAgentDraftState(overrides: Partial<NewAgentDraftTestState> = {}): Ne
     newChatRequestId: 3,
     composerDraftsByScope: {},
     composerPendingAttachmentsByScope: {},
+    composerContextReferencesByScope: {},
     ...overrides
   };
 }
