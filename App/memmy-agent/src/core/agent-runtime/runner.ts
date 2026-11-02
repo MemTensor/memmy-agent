@@ -448,6 +448,10 @@ export class AgentRunner {
       retryMode: spec.providerRetryMode,
       onRetryWait: spec.retryWaitCallback,
     };
+    if (spec.actualModelContext?.source === "account" && spec.model === "agent_chat"
+      && spec.privateSkillRefs.some(ref => ref.pluginId === "literature-review" && ref.skillId === "literature-review")) {
+      args.taskType = "literature-review";
+    }
     if (spec.temperature != null) args.temperature = spec.temperature;
     if (spec.maxTokens != null) args.maxTokens = spec.maxTokens;
     if (spec.reasoningEffort != null) args.reasoningEffort = spec.reasoningEffort;

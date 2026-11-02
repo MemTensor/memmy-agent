@@ -122,11 +122,9 @@ describe("conversation feature integration", () => {
     expect(features.pluginRecordingSession?.status).toBe("idle");
   });
 
-  it("does not keep the recording shortcut active for a completed interview", () => {
-    expect(recordingShortcutOpen(false, { status: "recording" }, false)).toBe(true);
-    expect(recordingShortcutOpen(false, { status: "done" }, false)).toBe(false);
-    expect(recordingShortcutOpen(false, { status: "recording" }, true)).toBe(false);
-    expect(recordingShortcutOpen(true, { status: "done" }, false)).toBe(true);
+  it("highlights the composer recording shortcut only for its own card", () => {
+    expect(recordingShortcutOpen(false)).toBe(false);
+    expect(recordingShortcutOpen(true)).toBe(true);
   });
 
   it("overlays a standalone artifact preview when both columns cannot fit", () => {

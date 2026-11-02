@@ -411,6 +411,30 @@ describe("PluginCapabilityHost", () => {
     expect(container.textContent).toContain("selected.pdf");
   });
 
+  it("restores an upload card's selected documents after switching conversations", async () => {
+    const request = { interactionId: "materials", type: "file-input" as const,
+      payload: { title: "补充诊断材料", multiple: true, accept: [".docx"] } };
+    const render = (chat: string) => root.render(<PluginUiProvider><I18nProvider language="zh-CN">
+      <FileInputCard key={chat} conversationId={chat} pluginId="legal-labor" request={request}
+        diagnosticUpload title="补充诊断材料" description={null} disabled={false} status="idle"
+        onStatus={vi.fn()} onRespond={vi.fn(async () => undefined)} onUploadFiles={vi.fn()} />
+    </I18nProvider></PluginUiProvider>);
+    await act(async () => render("chat-1"));
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(picker, "files", { value: [new File(["doc"], "materials.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })] });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.querySelector(".diagnostic-upload-card__file")?.textContent).toContain("materials.docx");
+    await act(async () => render("chat-2"));
+    expect(container.querySelector(".diagnostic-upload-card__file")).toBeNull();
+    await act(async () => render("chat-1"));
+    expect(container.querySelector(".diagnostic-upload-card__file")?.textContent).toContain("materials.docx");
+    await act(async () => container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__remove")!.click());
+    await act(async () => render("chat-2"));
+    await act(async () => render("chat-1"));
+    expect(container.querySelector(".diagnostic-upload-card__file")).toBeNull();
+  });
+
   it("keeps a single-file card to one file, so a second pick replaces the first", async () => {
     const respond = vi.fn(async () => undefined);
     const client = { getUi: vi.fn(), cancel: vi.fn(), respond };

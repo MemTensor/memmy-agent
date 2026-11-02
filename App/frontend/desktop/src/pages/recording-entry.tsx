@@ -712,6 +712,9 @@ export function RecordingEntryCard(props: {
   const session = props.session;
   const recording = session.status === "recording" || session.status === "paused";
   const busy = session.status === "starting" || session.status === "transcribing";
+  // The failed recording keeps its own status and retry in the recording list.
+  // A newly opened idle composer card must not repeat that old ASR error.
+  const previousTranscriptionFailed = session.status === "idle" && session.live?.status === "failed";
   const levels = session.levels ?? [];
   return <div className={`recording-bar recording-bar--interview recording-entry-card${recording ? " recording-bar--live" : ""}`}>
     <span className="recording-bar__icon" aria-hidden="true"><Mic size={18} /></span>
@@ -732,7 +735,8 @@ export function RecordingEntryCard(props: {
       <button type="button" className="recording-bar__close" aria-label={t("plugin.ui.dismissCard")} onClick={props.onClose}><X size={16} /></button>
     </div>
     {session.status === "transcribing" ? <span className="recording-bar__note" role="status">{t("plugin.ui.audio.transcribing")}</span> : null}
-    {session.error ? <span className="recording-bar__note recording-bar__note--warning" role="alert">{session.error}</span> : null}
+    {session.error && !previousTranscriptionFailed
+      ? <span className="recording-bar__note recording-bar__note--warning" role="alert">{session.error}</span> : null}
   </div>;
 }
 

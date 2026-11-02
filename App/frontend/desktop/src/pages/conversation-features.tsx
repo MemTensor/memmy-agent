@@ -32,11 +32,10 @@ export function conversationFeaturePanelOverlays(width: number | null | undefine
   return width != null && width > 0 && width < SHARED_ROW_PRIMARY_RESERVE + SHARED_ROW_MIN_PANE_WIDTH;
 }
 
-export function recordingShortcutOpen(compactOpen: boolean,
-  pluginRecording: Pick<RecordingPanelSession, "status"> | null | undefined, pluginRecordingHidden: boolean): boolean {
-  // A completed interview may remain in the right panel, but this shortcut
-  // has already switched back to controlling the independent recording card.
-  return compactOpen || Boolean(pluginRecording && pluginRecording.status !== "done" && !pluginRecordingHidden);
+export function recordingShortcutOpen(compactOpen: boolean): boolean {
+  // The composer shortcut owns only the independent card. The plugin recorder
+  // keeps its own controls in the recording panel throughout the workflow.
+  return compactOpen;
 }
 
 function PersistentPluginRecorder(props: {
@@ -187,16 +186,6 @@ export function useConversationFeatures(options: {
     setError(null);
     if (legalQuestionOwnsComposer) return;
     if (!recordingAuthenticated) { dispatch(appActions.navigate("/welcome")); return; }
-    const owner = normalizePluginConversationId(conversationId)!;
-    const pluginRecorder = pluginRecordings.get(owner);
-    if (pluginRecorder && pluginRecorder.status !== "done") {
-      setHiddenRecordings((current) => {
-        const next = new Set(current);
-        if (next.has(owner)) next.delete(owner); else next.add(owner);
-        return next;
-      });
-      return;
-    }
     recording.toggleCompact();
   };
   const invoke = async (plugin: InstalledPlugin, command: PluginCommandContribution, args = "") => {
@@ -289,7 +278,7 @@ export function useConversationFeatures(options: {
     ? selectPinnedCommandsForLegalWorkflow(selectConversationPinnedCommands(targets, calls), legalQuestionOwnsComposer)
     : [];
   const shortcuts = <PinnedPluginCommandBar targets={pinnedTargets} disabled={!clients}
-    recordingOpen={recordingShortcutOpen(recording.compactOpen, pluginRecording, hiddenRecordings.has(recordingOwner))}
+    recordingOpen={recordingShortcutOpen(recording.compactOpen)}
     active={selectOpenPinnedCapabilities(prepared, ui?.dismissedCallIds, pinnedCapabilities, ui?.hiddenCallIds)}
     onRecordingPress={toggleCompactRecording} onPress={({ plugin, command }) => void invoke(plugin, command)} />;
   const artifactPanel = preview && clients?.plugins ? <PluginArtifactPreviewPanel artifact={preview}

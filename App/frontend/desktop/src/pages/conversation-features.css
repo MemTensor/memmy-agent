@@ -2564,7 +2564,9 @@
 
 .diagnostic-upload-card__file-info .diagnostic-upload-card__transcription { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 2px 0 0; white-space: normal; font-size: 12px; line-height: 1.5; color: color-mix(in srgb, var(--color-text-ink) 55%, transparent); }
 
-.diagnostic-upload-card__transcription--failed { color: var(--color-status-error); }
+.diagnostic-upload-card__file-info .diagnostic-upload-card__transcription--failed { color: var(--color-status-error); }
+
+.diagnostic-upload-card__file-info .diagnostic-upload-card__transcription--blocked { color: var(--color-status-error); }
 
 .diagnostic-upload-card__transcription button { padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--color-action-sky-hover); font-size: 12px; cursor: pointer; }
 

@@ -104,7 +104,7 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
             deadlineTimeout(call, options.timeoutMs ?? attemptInput.timeoutMs ?? DEFAULT_TIMEOUT_MS),
             attemptInput.timeoutMs ?? DEFAULT_TIMEOUT_MS
           );
-          return await infer(resolved, attemptInput, input.responseFormat, fetchImpl, timeoutMs, call.signal);
+          return await infer(resolved, attemptInput, input.responseFormat, fetchImpl, timeoutMs, call.signal, call.pluginId === "literature-review");
         } catch (error) {
           lastError = error;
           // Some OpenAI-compatible gateways occasionally return an empty choice
@@ -141,7 +141,8 @@ async function infer(
   requestedFormat: z.output<typeof ModelInferenceInputSchema>["responseFormat"],
   fetchImpl: typeof fetch,
   timeoutMs: number,
-  callerSignal?: AbortSignal
+  callerSignal?: AbortSignal,
+  literatureReview = false
 ): Promise<PluginModelInferenceResult> {
   const protocol = resolved.context.protocol;
   const maxTokens = input.maxOutputTokens ?? DEFAULT_OUTPUT_TOKENS;
@@ -151,7 +152,7 @@ async function infer(
   callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
   try {
     throwIfCallerAborted(callerSignal);
-    const request = requestForProtocol(resolved, input, maxTokens, controller.signal);
+    const request = requestForProtocol(resolved, input, maxTokens, controller.signal, literatureReview);
     const response = await fetchImpl(request.url, request.init);
     if (!response.ok) {
       const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
@@ -196,7 +197,8 @@ async function infer(
       );
     }
     if (!parsed.content.trim()) throw serviceError("model_empty_response", "Current user model returned no content", true);
-    return { ...parsed, model: { provider: resolved.context.provider, model: resolved.context.model } };
+    return { ...parsed, model: { provider: resolved.context.provider, model: protocol === "memmy-account" && typeof record(body).model === "string"
+      ? String(record(body).model) : resolved.context.model } };
   } catch (error) {
     if (callerSignal?.aborted) throw cancelledError();
     if (controller.signal.aborted) throw serviceError("model_inference_timeout", "Current user model request timed out", true);
@@ -245,10 +247,13 @@ function requestForProtocol(
   resolved: Extract<ModelSelectionResolution, { ok: true }>,
   input: z.output<typeof ModelInferenceInputSchema>,
   maxTokens: number,
-  signal: AbortSignal
+  signal: AbortSignal,
+  literatureReview = false
 ): { url: string; init: RequestInit } {
   const { context, provider } = resolved;
-  const headers = { "content-type": "application/json", ...(provider.extraHeaders ?? {}) };
+  const headers = { "content-type": "application/json", ...(provider.extraHeaders ?? {}),
+    ...(literatureReview && context.protocol === "memmy-account" && context.model === "agent_chat"
+      ? { "X-Agent-Task": "literature-review" } : {}) };
   const common = { method: "POST", signal };
   const disableThinking = input.thinkingMode === "disabled";
   const thinkingStrategy = disableThinking ? thinkingStrategyFor(resolved) : "inherit";
