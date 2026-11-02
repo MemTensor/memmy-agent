@@ -149,8 +149,8 @@ describe("external evidence producer identity over HTTP", () => {
       expect(repos.memories.get(other.id)?.info.source).toBe("browser_bookmark");
       const status = await post("evidence/status", { source: "computer_history", sourceRecordIds: [record.sourceRecordId], namespace });
       expect(await status.json()).toMatchObject({ evidence: [{ id: saved.id, status: "activated" }] });
-      const forbidden = await post("evidence/sync", { ...record, namespace: { ...namespace, userId: "another-user" } });
-      expect(forbidden.status).toBe(403);
+      const switchedAccount = await post("evidence/sync", { ...record, namespace: { ...namespace, userId: "another-user" } });
+      expect(switchedAccount.status).toBe(200);
     });
   });
 
@@ -267,7 +267,7 @@ describe("external evidence producer identity over HTTP", () => {
     expect(repos.memories.get(sourceB.id)?.status).toBe("activated");
     const tombstone = service.syncExternalEvidence({ action: "delete", source: "computer_history", namespace: scopeA,
       sourceRecordId: "2026-09-27T11-00-00Z-10min-summary", revision: record.revision });
-    expect(externalEvidenceNamespaceForMemory(repos.memories.getIncludingDeleted(tombstone.id)!)).toMatchObject(scopeA);
+    expect(externalEvidenceNamespaceForMemory(repos.memories.getIncludingDeleted(tombstone.id)!)).toMatchObject({ ...scopeA, userId: "__memmy_device_memory__" });
   });
 
   it("keeps Skill review and status in the source tenant", async () => {

@@ -5,7 +5,7 @@ import {createLocalOwnerFixture} from "../fixtures/panel-local-owners.js";
 const fixture=createMemoryServiceFixture();afterEach(fixture.cleanup);
 it("limits owner-independent reads to authenticated local management routes",async()=>{
   const {service,turns}=await createLocalOwnerFixture(fixture);
-  const server=createMemoryHttpServer({service,configPath:"/private/tmp/panel-local-synthetic-config.json",auth:{localServiceToken:"local-panel",cloudAccessTokens:{"cloud-a":{userId:"a",source:"codex",profileId:"default"}},scopedApiKeys:{"write-only":{namespace:{userId:"a",source:"codex",profileId:"default"},scopes:["memory:write"]}}},workerStartupFallbackMs:3600000,workerPostHealthDelayMs:3600000,workerIdlePollMs:3600000,startAgentSourceAutomation:false});
+  const server=createMemoryHttpServer({service,configPath:"/private/tmp/panel-local-synthetic-config.json",auth:{localServiceToken:"local-panel",cloudAccessTokens:{"cloud-a":{userId:"a",source:"codex",profileId:"default"}},scopedApiKeys:{"write-only":{namespace:{userId:"a",source:"codex",profileId:"default"},scopes:["memory:write"]},"panel-a":{namespace:{userId:"a",source:"codex",profileId:"default"},scopes:["panel:read"]}}},workerStartupFallbackMs:3600000,workerPostHealthDelayMs:3600000,workerIdlePollMs:3600000,startAgentSourceAutomation:false});
   try{
     await new Promise<void>((resolve,reject)=>{server.once("error",reject);server.listen(0,"127.0.0.1",resolve);});
     const address=server.address();if(!address||typeof address==="string")throw new Error("No listener");
@@ -30,10 +30,30 @@ it("limits owner-independent reads to authenticated local management routes",asy
     await vi.waitFor(async()=>{
       expect((await call("panel/overview-stats","local-panel","b")).data).toMatchObject({status:"ready",data:{counts:{userMemories:3}}});
     });
-    expect((await call("memory/user-b","local-panel","a")).status).toBe(404);
-    expect((await call("memory/user-b","local-panel","a",undefined,"DELETE")).status).toBe(403);
+    expect((await call("memory/user-b","local-panel","a")).status).toBe(200);
     expect((await call("panel/items?layer=UserMemory","cloud-a")).data.items.map((row:{id:string})=>row.id)).toEqual(["user-a"]);
     expect((await call("panel/task-summaries","cloud-a")).data.total).toBe(1);
+    const cloudView=await call("panel/browse","cloud-a",undefined,{op:"create",filter:{section:"tasks"}});
+    expect(cloudView.status).toBe(200);
+    expect(cloudView.data.total).toBe(1);
+    expect(cloudView.data.tasks.map((task:{id:string})=>task.id)).toEqual([turns[0]!.episodeId]);
+    const cloudPage=await call("panel/browse","cloud-a",undefined,{op:"page",viewId:cloudView.data.viewId,page:1});
+    expect(cloudPage.status).toBe(200);
+    expect(cloudPage.data.tasks.map((task:{id:string})=>task.id)).toEqual([turns[0]!.episodeId]);
+    expect((await call(`panel/task-details/${turns[1]!.episodeId}`,"cloud-a")).status).toBe(404);
+    for(const token of ["cloud-a","panel-a"]){
+      for(const [suffix,owner] of [["?source=codex",undefined],["","b"],["?source=codex","b"]] as const){
+        const scoped=await call("panel/browse"+suffix,token,owner,{op:"create",filter:{section:"tasks"}});
+        expect(scoped.status).toBe(200);expect(scoped.data.total).toBe(1);
+        expect(scoped.data.tasks.map((task:{id:string})=>task.id)).toEqual([turns[0]!.episodeId]);
+      }
+    }
+    const localTasks=await call("panel/browse","local-panel","a",{op:"create",filter:{section:"tasks"}});
+    expect(localTasks.status).toBe(200);
+    expect(localTasks.data.total).toBe(3);
     expect((await call("panel/memory/user-b","cloud-a")).status).toBe(404);
+    expect((await call("memory/user-b","invalid","a",undefined,"DELETE")).status).toBe(401);
+    expect((await call("memory/user-b","local-panel","a",undefined,"DELETE")).status).toBe(200);
+    expect((await call("panel/items?layer=UserMemory","local-panel","a")).data.total).toBe(2);
   }finally{await closeMemoryHttpServer(server);}
 });

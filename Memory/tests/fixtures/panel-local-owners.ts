@@ -23,6 +23,9 @@ export async function createLocalOwnerFixture(fixture:ReturnType<typeof createMe
     const turn=await service.completeTurn("turn-"+owner,{namespace:ns(owner),sessionId:session.sessionId,query:owner+" task question",answer:owner+" task answer"});
     turns.push({...turn,owner});
     repos.userMemories.insert({id:"user-"+owner,sourceTurnId:turn.rawTurnId,userId:owner,memoryTypes:["User Preference"],content:owner+" preference "+"x".repeat(400)+" "+owner+"-tail-needle",normalizedUserTextHash:owner,sourceTurnRefs:[turn.rawTurnId],status:"active",createdAt:"2026-10-29T00:00:00Z",updatedAt:"2026-10-29T00:00:00Z"});
+    // Simulate pre-decoupling rows; current insert APIs pin the device owner.
+    if(owner!=="new")for(const [table,id] of [["sessions",turn.sessionId],["episodes",turn.episodeId],["raw_turns",turn.rawTurnId],["memories",turn.l1MemoryId],["user_memories","user-"+owner]])
+      db.db.prepare(`UPDATE ${table} SET user_id=? WHERE id=?`).run(owner,id);
   }
   const newest=turns[2]!;
   for(const [table,id] of [["sessions",newest.sessionId],["episodes",newest.episodeId],["raw_turns",newest.rawTurnId],["memories",newest.l1MemoryId],["user_memories","user-new"]])

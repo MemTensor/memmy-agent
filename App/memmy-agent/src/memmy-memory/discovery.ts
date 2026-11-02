@@ -106,11 +106,8 @@ export function discoverMemmyMemoryConnection(options: MemmyMemoryDiscoveryOptio
 
 /** Keep passive History evidence in the same Memory user scope as the agent hook. */
 export function discoverMemmyMemoryUserId(options: MemmyMemoryDiscoveryOptions = {}): string {
-  const env = options.env ?? process.env;
-  const homeDir = options.homeDir ?? os.homedir();
-  const configPath = memmyMemoryConfigPaths({ env, homeDir }).find((candidate) => fs.existsSync(candidate));
-  const value = configPath ? parseConfigFile(configPath).memmyMemory?.userId : undefined;
-  return typeof value === "string" && value.trim() ? value.trim() : "local-user";
+  void options;
+  return "__memmy_device_memory__";
 }
 
 /** The desktop writes its resolved display language here, including the system/account default. */

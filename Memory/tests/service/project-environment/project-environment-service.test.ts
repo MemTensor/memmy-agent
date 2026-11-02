@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,21 +17,21 @@ describe("project environment repository", () => {
     const { db } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const first = repos.projectEnvironments.requestScan({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       sessionId: "session-1",
       trigger: "session_start",
       dedupeKey: "profile:session-1"
     });
     const duplicate = repos.projectEnvironments.requestScan({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       sessionId: "session-1",
       trigger: "session_start",
       dedupeKey: "profile:session-1"
     });
     const second = repos.projectEnvironments.requestScan({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       sessionId: "session-1",
       trigger: "token_compaction",
@@ -41,10 +42,10 @@ describe("project environment repository", () => {
     expect(duplicate.enqueued).toBe(false);
     expect(duplicate.job.id).toBe(first.job.id);
     expect(second.enqueued).toBe(true);
-    expect(repos.projectEnvironments.getState("user-1", "project-1")?.currentScanId)
+    expect(repos.projectEnvironments.getState(DEVICE_MEMORY_OWNER, "project-1")?.currentScanId)
       .toBe(second.job.payload.scanId);
     expect(repos.projectEnvironments.beginScan(
-      "user-1",
+      DEVICE_MEMORY_OWNER,
       "project-1",
       String(first.job.payload.scanId)
     )).toBe(false);
@@ -54,24 +55,27 @@ describe("project environment repository", () => {
     const { db } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const request = repos.projectEnvironments.requestScan({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       sessionId: "session-1",
       trigger: "session_start",
       dedupeKey: "profile:session-1"
     });
     const scanId = String(request.job.payload.scanId);
-    expect(repos.projectEnvironments.beginScan("user-1", "project-1", scanId)).toBe(true);
-    expect(repos.projectEnvironments.markSummarizing("user-1", "project-1", scanId)).toBe(true);
+    expect(repos.projectEnvironments.beginScan(DEVICE_MEMORY_OWNER, "project-1", scanId)).toBe(true);
+    expect(repos.projectEnvironments.markSummarizing(DEVICE_MEMORY_OWNER, "project-1", scanId)).toBe(true);
 
     repos.l3WorldModels.upsertField({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       targetField: "project_environment_profile",
-      value: "Concurrent profile"
+      value: "Concurrent profile",
+      projectEnvironmentAppliedScanId: scanId
     });
+    db.db.prepare("UPDATE l3_world_model_project_environment_state SET applied_scan_id=? WHERE project_id='project-1'")
+      .run(scanId);
     expect(() => repos.projectEnvironments.applyProfile({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       scanId,
       projectKind: "code",
@@ -82,7 +86,7 @@ describe("project environment repository", () => {
     })).toThrow("concurrent_update");
 
     expect(repos.projectEnvironments.applyProfile({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       scanId: "stale-scan",
       projectKind: "code",
@@ -97,16 +101,16 @@ describe("project environment repository", () => {
     const { db } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const first = repos.projectEnvironments.requestScan({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       sessionId: "session-1",
       trigger: "session_start",
       dedupeKey: "profile:first"
     });
     const firstScan = String(first.job.payload.scanId);
-    repos.projectEnvironments.beginScan("user-1", "project-1", firstScan);
+    repos.projectEnvironments.beginScan(DEVICE_MEMORY_OWNER, "project-1", firstScan);
     repos.projectEnvironments.applyProfile({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       scanId: firstScan,
       projectKind: "folder",
@@ -116,16 +120,16 @@ describe("project environment repository", () => {
       profile: "Folder profile"
     });
     const second = repos.projectEnvironments.requestScan({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       sessionId: "session-1",
       trigger: "token_compaction",
       dedupeKey: "profile:second"
     });
     const secondScan = String(second.job.payload.scanId);
-    repos.projectEnvironments.beginScan("user-1", "project-1", secondScan);
+    repos.projectEnvironments.beginScan(DEVICE_MEMORY_OWNER, "project-1", secondScan);
     expect(() => repos.projectEnvironments.applyProfile({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       scanId: secondScan,
       projectKind: "code",
@@ -140,18 +144,18 @@ describe("project environment repository", () => {
     const { db } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const request = repos.projectEnvironments.requestScan({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       sessionId: "session-1",
       trigger: "session_start",
       dedupeKey: "profile:empty-noop"
     });
     const scanId = String(request.job.payload.scanId);
-    repos.projectEnvironments.beginScan("user-1", "project-1", scanId);
-    repos.projectEnvironments.markSummarizing("user-1", "project-1", scanId);
+    repos.projectEnvironments.beginScan(DEVICE_MEMORY_OWNER, "project-1", scanId);
+    repos.projectEnvironments.markSummarizing(DEVICE_MEMORY_OWNER, "project-1", scanId);
 
     expect(repos.projectEnvironments.applyProfile({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       scanId,
       projectKind: "folder",
@@ -161,14 +165,14 @@ describe("project environment repository", () => {
       profile: ""
     })).toEqual({ stale: false });
 
-    expect(repos.projectEnvironments.getState("user-1", "project-1")).toMatchObject({
+    expect(repos.projectEnvironments.getState(DEVICE_MEMORY_OWNER, "project-1")).toMatchObject({
       status: "clean",
       currentScanId: scanId,
       appliedScanId: undefined,
       fingerprint: undefined
     });
-    expect(repos.l3WorldModels.getScope("user-1", "project-1")?.memoryId).toBeUndefined();
-    expect(repos.l3WorldModels.getMemory("user-1", "project-1")).toBeUndefined();
+    expect(repos.l3WorldModels.getScope(DEVICE_MEMORY_OWNER, "project-1")?.memoryId).toBeUndefined();
+    expect(repos.l3WorldModels.getMemory(DEVICE_MEMORY_OWNER, "project-1")).toBeUndefined();
   });
 
   it("rescans a matching legacy fingerprint when no profile Memory exists", async () => {
@@ -231,16 +235,16 @@ describe("project environment repository", () => {
     const { db } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const first = repos.projectEnvironments.requestScan({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       sessionId: "session-1",
       trigger: "session_start",
       dedupeKey: "profile:first"
     });
     const firstScanId = String(first.job.payload.scanId);
-    repos.projectEnvironments.beginScan("user-1", "project-1", firstScanId);
+    repos.projectEnvironments.beginScan(DEVICE_MEMORY_OWNER, "project-1", firstScanId);
     repos.projectEnvironments.applyProfile({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       scanId: firstScanId,
       projectKind: "code",
@@ -249,31 +253,31 @@ describe("project environment repository", () => {
       operation: "create",
       profile: "Stable profile"
     });
-    const before = repos.l3WorldModels.getMemory("user-1", "project-1")!;
+    const before = repos.l3WorldModels.getMemory(DEVICE_MEMORY_OWNER, "project-1")!;
 
     const second = repos.projectEnvironments.requestScan({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       sessionId: "session-2",
       trigger: "session_start",
       dedupeKey: "profile:second"
     });
     const secondScanId = String(second.job.payload.scanId);
-    repos.projectEnvironments.beginScan("user-1", "project-1", secondScanId);
+    repos.projectEnvironments.beginScan(DEVICE_MEMORY_OWNER, "project-1", secondScanId);
     expect(repos.projectEnvironments.markCleanWithoutModel({
-      userId: "user-1",
+      userId: DEVICE_MEMORY_OWNER,
       projectId: "project-1",
       scanId: secondScanId,
       projectKind: "code"
     })).toBe(true);
 
-    expect(repos.projectEnvironments.getState("user-1", "project-1")).toMatchObject({
+    expect(repos.projectEnvironments.getState(DEVICE_MEMORY_OWNER, "project-1")).toMatchObject({
       status: "clean",
       currentScanId: secondScanId,
       appliedScanId: firstScanId,
       fingerprint: "same-fingerprint"
     });
-    expect(repos.l3WorldModels.getMemory("user-1", "project-1")).toMatchObject({
+    expect(repos.l3WorldModels.getMemory(DEVICE_MEMORY_OWNER, "project-1")).toMatchObject({
       version: before.version,
       info: expect.objectContaining({ project_environment_applied_scan_id: firstScanId })
     });

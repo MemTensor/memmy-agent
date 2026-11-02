@@ -198,7 +198,7 @@ describe("AgentLoop memmy memory integration", () => {
       l3WorldModelProtocolVersion: 2,
       workspaceUri: expect.stringMatching(/^file:\/\//u),
       workspaceHostId: expect.stringMatching(/^[a-f0-9]{64}$/u),
-      namespace: { sessionKey: "websocket:memory-project", userId: "loop-user" },
+      namespace: { sessionKey: "websocket:memory-project", userId: "__memmy_device_memory__" },
     });
     expect(JSON.stringify(opened.body)).not.toContain(project.id);
     expect(requests.filter((request) => request.path === "/api/v1/sessions/open")).toHaveLength(1);

@@ -41,11 +41,20 @@ describe("user memory summary and authenticated detail", () => {
       archiveReason: "user_correction"
     });
     expect(JSON.stringify(result)).not.toContain("embedding");
-    expect(() => service.getMemory("user_detail")).toThrow("unavailable");
-    expect(() => service.getMemory("user_detail", { namespace: { ...namespace, userId: "other" } })).toThrow(
-      "unavailable"
-    );
+    expect(service.getMemory("user_detail").item.body).toBe(content);
+    expect(service.getMemory("user_detail", { namespace: { ...namespace, userId: "other" } }).item.body).toBe(content);
     repos.userMemories.softDelete("user_detail");
     expect(() => service.getMemory("user_detail", { namespace })).toThrow();
+  });
+
+  it("retains the owner check for cloud User Memory detail", () => {
+    const {service,db}=createTestService({mode:"cloud"});
+    const repos=new Repositories(db.db),at="2026-10-27T00:00:00.000Z";
+    repos.userMemories.insert({id:"cloud-detail",sourceTurnId:"first",userId:"owner",content:"cloud preference",
+      normalizedUserTextHash:"hash",sourceTurnRefs:["first"],memoryTypes:["User Preference"],status:"active",createdAt:at,updatedAt:at});
+    db.db.prepare("UPDATE user_memories SET user_id='owner' WHERE id='cloud-detail'").run();
+    expect(service.getMemory("cloud-detail",{namespace:{userId:"owner",source:"codex",profileId:"default"}}).item.body).toBe("cloud preference");
+    expect(()=>service.getMemory("cloud-detail",{namespace:{userId:"other",source:"codex",profileId:"default"}})).toThrow("unavailable");
+    expect(()=>service.getMemory("cloud-detail")).toThrow("unavailable");
   });
 });

@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { deriveWorkspaceHostId } from "../../../src/contracts/index.js";
@@ -253,7 +254,7 @@ describe("MemoryService / session / lifecycle", () => {
       injected_memory_ids_json: string;
       outcome: string;
     } | undefined;
-    expect(recallRow?.namespace_id).toContain("user-1");
+    expect(recallRow?.namespace_id).not.toContain("user-1");
     expect(recallRow?.query_hash).toBeTruthy();
     expect(JSON.parse(recallRow!.candidate_memory_ids_json)).toEqual(recall.candidateMemoryIds);
     expect(JSON.parse(recallRow!.injected_memory_ids_json)).toEqual(recall.sourceMemoryIds);
@@ -444,7 +445,7 @@ describe("MemoryService / session / lifecycle", () => {
       `SELECT user_id, project_id, workspace_uri
        FROM l3_world_model_scopes WHERE project_id = ?`
     ).get(opened.projectId)).toEqual({
-      user_id: "v2-user",
+      user_id: DEVICE_MEMORY_OWNER,
       project_id: opened.projectId,
       workspace_uri: base.workspaceUri
     });
@@ -515,7 +516,7 @@ describe("MemoryService / session / lifecycle", () => {
     db.db.prepare(
       `UPDATE l3_world_model_scopes SET workspace_uri = 'file:///workspace/conflict'
        WHERE user_id = ? AND project_id = ?`
-    ).run(request.namespace.userId, opened.projectId);
+    ).run(DEVICE_MEMORY_OWNER, opened.projectId);
     expect(() => service.openSession({
       ...request,
       sessionId: opened.sessionId,
@@ -528,7 +529,7 @@ describe("MemoryService / session / lifecycle", () => {
 
     db.db.prepare(
       `UPDATE l3_world_model_scopes SET workspace_uri = ? WHERE user_id = ? AND project_id = ?`
-    ).run(request.workspaceUri, request.namespace.userId, opened.projectId);
+    ).run(request.workspaceUri, DEVICE_MEMORY_OWNER, opened.projectId);
     db.db.prepare(
       `UPDATE sessions SET meta_json = json_remove(meta_json, '$.workspace_uri') WHERE id = ?`
     ).run(opened.sessionId);
@@ -625,7 +626,7 @@ describe("MemoryService / session / lifecycle", () => {
       session_id: session.sessionId,
       episode_id: assignedEpisodeId(service, complete),
       raw_turn_id: complete.rawTurnId,
-      user_id: namespace.userId,
+      user_id: DEVICE_MEMORY_OWNER,
       kind: "file",
       uri: "file:///tmp/memmy-report.txt"
     });
@@ -775,7 +776,7 @@ describe("L3 World Model trace boundaries", () => {
       requestId: "e4880aaa-e635-4c60-a58f-eec7c21677af",
       adapterId: "codex-memory",
       source: "codex",
-      namespace: { ...namespace, userId: "other-user" }
+      namespace: { ...namespace, profileId: "other-profile" }
     })).toThrow("l3_world_model_session_scope_conflict");
     expect(() => service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "9c7e85f5-5fb3-44b5-a91e-6c92d3ae5239",

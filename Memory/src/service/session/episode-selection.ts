@@ -49,7 +49,7 @@ export function selectionInput(repos: Repositories, session: SessionRecord, cont
 export function selectionKey(session: SessionRecord, input: EpisodeSelectionInput): string {
   // Session creation may roll back during preparation. Candidate IDs still bind
   // a match to the exact session; an empty candidate list can only create a task.
-  return stableHash({ userId: session.userId, conversationId: session.conversationId, input });
+  return stableHash({ conversationId: session.conversationId, input });
 }
 
 export async function selectEpisode(llm: LlmClient, input: EpisodeSelectionInput): Promise<EpisodeSelectionResult> {

@@ -64,6 +64,11 @@ const statements = [
     ON memories (content_hash, memory_layer)`,
   `CREATE INDEX IF NOT EXISTS idx_memories_key_layer
     ON memories (memory_key, memory_layer)`,
+  // Read-only recall grouping needs the original turn, never a historical row rewrite.
+  `CREATE INDEX IF NOT EXISTS idx_memories_recall_turn
+    ON memories (COALESCE(json_extract(info_json,'$.turn_id'),
+      json_extract(properties_json,'$.internal_info.trace.turn_id')), id)
+    WHERE deleted_at IS NULL`,
   `CREATE INDEX IF NOT EXISTS idx_memories_panel_created
     ON memories (memory_layer, created_at DESC, updated_at DESC, id DESC)
     WHERE deleted_at IS NULL`,
@@ -555,6 +560,8 @@ const statements = [
     ON source_turn_captures (user_id, source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_native_turn
     ON source_turn_captures (source, profile_id, namespace_key, conversation_id, turn_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_recall_turn
+    ON source_turn_captures (turn_id)`,
   `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_native_conversation
     ON source_turn_captures (source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_source_sessions_native_conversation

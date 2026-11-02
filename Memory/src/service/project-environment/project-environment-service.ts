@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
 import type { MemoryLanguage } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
 import type {
@@ -27,14 +28,14 @@ export class ProjectEnvironmentService {
 
   requestSessionScan(session: SessionRecord): { job: EvolutionJobRecord; enqueued: boolean } | null {
     if (!session.projectId) return null;
-    const scope = this.deps.repos.l3WorldModels.getScope(session.userId, session.projectId);
+    const scope = this.deps.repos.l3WorldModels.getScope(DEVICE_MEMORY_OWNER, session.projectId);
     if (!scope?.workspaceUri) return null;
     return this.deps.repos.projectEnvironments.requestScan({
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       projectId: session.projectId,
       sessionId: session.id,
       trigger: "session_start",
-      dedupeKey: ["project_environment_profile", session.userId, session.projectId, "session", session.id].join(":")
+      dedupeKey: ["project_environment_profile", DEVICE_MEMORY_OWNER, session.projectId, "session", session.id].join(":")
     });
   }
 
@@ -43,16 +44,16 @@ export class ProjectEnvironmentService {
     throughTraceSeq: number
   ): { job: EvolutionJobRecord; enqueued: boolean } | null {
     if (!session.projectId) return null;
-    const scope = this.deps.repos.l3WorldModels.getScope(session.userId, session.projectId);
+    const scope = this.deps.repos.l3WorldModels.getScope(DEVICE_MEMORY_OWNER, session.projectId);
     if (!scope?.workspaceUri) return null;
     return this.deps.repos.projectEnvironments.requestScan({
-      userId: session.userId,
+      userId: DEVICE_MEMORY_OWNER,
       projectId: session.projectId,
       sessionId: session.id,
       trigger: "token_compaction",
       dedupeKey: [
         "project_environment_profile",
-        session.userId,
+        DEVICE_MEMORY_OWNER,
         session.projectId,
         "compaction",
         session.id,
@@ -66,8 +67,18 @@ export class ProjectEnvironmentService {
     if (job.userId !== payload.userId) throw new Error("project_environment_job_owner_mismatch");
     if (!this.deps.repos.projectEnvironments.beginScan(payload.userId, payload.projectId, payload.scanId)) return;
     try {
-      const scope = this.deps.repos.l3WorldModels.getScope(payload.userId, payload.projectId);
+      const stored = this.deps.repos.runtime.getJob(job.id);
+      const session = job.sessionId ? this.deps.repos.runtime.getSession(job.sessionId) : undefined;
+      if (!stored || stored.userId !== job.userId || stored.sessionId !== job.sessionId ||
+          JSON.stringify(stored.payload) !== JSON.stringify(job.payload) ||
+          !session || session.projectId !== payload.projectId) {
+        throw new Error("project_environment_job_scope_mismatch");
+      }
+      const scope = this.deps.repos.l3WorldModels.getOwnedScope(payload.userId, payload.projectId);
       if (!scope?.workspaceUri) throw new Error("project_environment_workspace_uri_missing");
+      if (scope.workspaceUri !== session.meta.workspace_uri) {
+        throw new Error("project_environment_workspace_uri_mismatch");
+      }
       const scan = await scanLocalProject(scope.workspaceUri);
       const classification = classifyProjectInventory(scan.entries);
       const facts = parseDeterministicProjectFacts({

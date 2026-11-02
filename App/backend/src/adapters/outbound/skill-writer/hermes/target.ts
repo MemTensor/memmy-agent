@@ -1338,7 +1338,7 @@ def _load_runtime() -> Dict[str, str]:
     return {
         "baseUrl": base_url,
         "token": token,
-        "userId": _clean_text(app.get("userId")) or _clean_text(memory.get("userId")) or _clean_text(plugin_config.get("userId")) or "local-user",
+        "userId": "__memmy_device_memory__",
         "workspaceHostId": _clean_text(plugin_config.get("workspaceHostId")),
     }
 
@@ -1449,7 +1449,7 @@ def _runtime_envelope(runtime: Dict[str, Any], session_key: str, project_id: Opt
     namespace = {
         "source": "hermes",
         "profileId": "default",
-        "userId": _clean_text(runtime.get("userId")) or "local-user",
+        "userId": "__memmy_device_memory__",
         "sessionKey": session_key,
     }
     if project_id:

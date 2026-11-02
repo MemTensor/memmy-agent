@@ -533,7 +533,7 @@ describe("local Viewer API", () => {
     });
   });
 
-  it("lists Memmy user memories for the configured local user", async () => {
+  it("lists historical Memmy user memories regardless of the configured local user", async () => {
     const fixture = await startFixture();
     const session = fixture.service.openSession({
       namespace: { source: "memmy", profileId: "default", userId: "local-user" }
@@ -544,6 +544,8 @@ describe("local Viewer API", () => {
       answer: "好的，我会记住。"
     }));
     expect(completed.userMemoryIds).toHaveLength(1);
+
+    fixture.db.db.prepare("UPDATE user_memories SET user_id='historical-viewer-account' WHERE id=?").run(completed.userMemoryIds[0]);
 
     const response = await viewerFetch(fixture.baseUrl, "/api/v1/memories?q=简洁&limit=20&page=1");
     expect(response.status).toBe(200);

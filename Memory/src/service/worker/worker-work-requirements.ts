@@ -26,7 +26,7 @@ export function workerWorkRequirements(
   const scopeKeys = targetId ? [JSON.stringify(["target", targetId])] : [];
   if (policy.concurrency.scope === "episode") {
     const episode = job?.episodeId ?? text(payload.episodeId) ?? text(payload.episode_id);
-    if (episode) scopeKeys.push(JSON.stringify(["episode", job?.userId, episode]));
+    if (episode) scopeKeys.push(JSON.stringify(["episode", episode]));
   }
   if (policy.concurrency.scope === "user_project") {
     // Production L3 payloads contain only batchId/targetField; Work Memory
@@ -48,7 +48,9 @@ export function workerWorkRequirements(
       : skillEpisode ? skillEpisode.projectId ?? null : session ? session.projectId ?? null
       : text(payload.projectId) ?? text(payload.project_id) ?? text(internal?.project_id)
         ?? text(internal?.projectId) ?? job?.scopeKey ?? null;
-    scopeKeys.push(JSON.stringify(["user_project", job?.userId ?? memory?.userId, project]));
+    const sharedProject = typeof project === "string"
+      ? repos.l3WorldModels?.sharedProjectIds(project).slice().sort()[0] ?? project : project;
+    scopeKeys.push(JSON.stringify(["user_project", sharedProject]));
   }
   return { queueLane: work.queue === "main" ? work.job.queueLane ?? undefined : work.retry.queueLane ?? undefined,
     resourceClass: policy.resourceClass, providers: execution?.providers ?? [], scopeKeys,
