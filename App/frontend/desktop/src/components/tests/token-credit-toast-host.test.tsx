@@ -3,6 +3,7 @@
 import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LotteryRewardSchema } from "@memmy/local-api-contracts";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { NotificationCenterProvider } from "../notification-center.js";
 import { TokenCreditToastHost } from "../token-credit-toast-host.js";
@@ -113,13 +114,13 @@ describe("TokenCreditToastHost", () => {
     mocks.getLotteryReward.mockResolvedValue({
       hasReward: true,
       drawId: "1",
-      tokenAmount: 500_000
+      creditAmount: 200
     });
 
     await renderHost(root);
 
-    expect(document.body.textContent).toContain("🎁 弹幕抽奖 Token 已到账");
-    expect(document.body.textContent).toContain("+500,000");
+    expect(document.body.textContent).toContain("🎁 活动奖励已到账");
+    expect(document.body.textContent).toContain("+200 积分");
     expect(mocks.ackLotteryReward).not.toHaveBeenCalled();
 
     await act(async () => {
@@ -137,11 +138,41 @@ describe("TokenCreditToastHost", () => {
     expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "tokenUsage/updated" }));
   });
 
+  it("renders an explicit credit amount in English", async () => {
+    mocks.getLotteryReward.mockResolvedValue({ hasReward: true, drawId: "en-1", creditAmount: 200 });
+    await renderHost(root, "en-US");
+    expect(document.body.textContent).toContain("Activity reward received");
+    expect(document.body.textContent).toContain("+200 credits");
+    expect(document.body.textContent).not.toMatch(/token/i);
+  });
+
+  it("preserves the legacy token amount when the server has not migrated rewards", async () => {
+    mocks.getLotteryReward.mockResolvedValue({ hasReward: true, drawId: "legacy-1", tokenAmount: 500_000 });
+    await renderHost(root);
+    expect(document.body.textContent).toContain("弹幕抽奖 Token 已到账");
+    expect(document.body.textContent).toContain("+500,000");
+    expect(document.body.textContent).not.toContain("积分");
+  });
+
+  it("uses the credit amount when both old and new fields are returned", async () => {
+    mocks.getLotteryReward.mockResolvedValue({ hasReward: true, drawId: "both-1", tokenAmount: 500_000, creditAmount: 200.5 });
+    await renderHost(root);
+    expect(document.body.textContent).toContain("+200.5 积分");
+    expect(document.body.textContent).not.toContain("500,000");
+  });
+
+  it("accepts credit-only and legacy responses but rejects rewards without an amount", () => {
+    expect(LotteryRewardSchema.parse({ hasReward: true, creditAmount: 200 })).toEqual({ hasReward: true, creditAmount: 200 });
+    expect(LotteryRewardSchema.parse({ hasReward: true, tokenAmount: 500_000 })).toEqual({ hasReward: true, tokenAmount: 500_000 });
+    expect(LotteryRewardSchema.safeParse({ hasReward: true }).success).toBe(false);
+    expect(LotteryRewardSchema.safeParse({ hasReward: true, creditAmount: 0 }).success).toBe(false);
+  });
+
   it("still shows the startup reward after StrictMode replays effects", async () => {
     mocks.getLotteryReward.mockResolvedValue({
       hasReward: true,
       drawId: "strict-1",
-      tokenAmount: 500_000
+      creditAmount: 200
     });
 
     await act(async () => {
@@ -156,15 +187,15 @@ describe("TokenCreditToastHost", () => {
       );
     });
 
-    expect(document.body.textContent).toContain("+500,000");
+    expect(document.body.textContent).toContain("+200 积分");
     expect(mocks.getLotteryReward).toHaveBeenCalledTimes(1);
   });
 });
 
-async function renderHost(root: Root): Promise<void> {
+async function renderHost(root: Root, language: "zh-CN" | "en-US" = "zh-CN"): Promise<void> {
   await act(async () => {
     root.render(
-      <I18nProvider language="zh-CN">
+      <I18nProvider language={language}>
         <NotificationCenterProvider>
           <TokenCreditToastHost />
         </NotificationCenterProvider>

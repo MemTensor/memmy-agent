@@ -1,0 +1,50 @@
+/* Reuse the app's existing error surface. */
+.notice:global(.agent-model-error-notice) {
+  display: grid;
+  grid-template-columns: var(--codex-icon-xs) minmax(0, 1fr);
+  gap: var(--space-3);
+  max-width: none;
+  margin: 0 0 var(--space-4);
+  padding: var(--space-4);
+  border-radius: var(--radius-card);
+}
+.noticeBody { min-width: 0; }
+.notice .description {
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  line-height: var(--codex-leading-base);
+  color: var(--color-ink-muted);
+}
+.composerDock { flex: 0 0 auto; padding: 0 var(--codex-content-padding-x) var(--space-3); }
+.overlay { position:fixed; inset:0; z-index:100; background:#0003; display:grid; place-items:center; padding:24px; }
+.detail { max-width:560px; padding:24px; background:var(--color-background-paper); border-radius:var(--radius-card); white-space:pre-line; font-size:var(--codex-text-base); line-height:1.7; }.detail p { margin-bottom:20px; }
+
+.notice h2:global(.agent-model-error-notice__title) {
+  margin: 0;
+  font-size: var(--codex-text-base);
+  font-weight: 500;
+  line-height: 22px;
+}
+
+/* Quota limits are neutral, contextual status lines. */
+.limitLine {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-block: var(--space-2);
+  color: var(--color-ink-muted);
+  font-size: var(--codex-text-sm);
+  line-height: var(--codex-leading-base);
+}
+.limitLine::before,
+.limitLine::after {
+  content: "";
+  height: 1px;
+  min-width: var(--space-4);
+  flex: 1;
+  background: var(--color-line);
+}
+.limitMessage { flex: 0 1 auto; min-width: 0; text-align: center; }
+.limitMessage > svg { display: inline; margin-right: var(--space-2); vertical-align: -3px; }
+.failedUpload { align-items: flex-start; }

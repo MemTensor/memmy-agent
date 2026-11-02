@@ -14,6 +14,7 @@ import type {
 } from "../../api/memmy-agent-client.js";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { useTranslation } from "../../i18n/use-translation.js";
+import { isCreditsPreviewMode } from "../../app/credits-preview-mode.js";
 import { MemoryMarkdown } from "./memory-markdown.js";
 import { AppIcon } from "./app-icon.js";
 import { BrainCircuit, Trash2, Wand2 } from "./memory-prototype-icons.js";
@@ -197,6 +198,7 @@ function Prose(props: { text: string }) {
 
 export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
   const { t } = useTranslation();
+  const creditsPreview = isCreditsPreviewMode();
   const [snapshot, setSnapshot] = useState<ComputerHistorySnapshot | null>(null);
   const [pendingRecordingAction, setPendingRecordingAction] = useState<"start" | "resume" | null>(null);
   const [sourceSetupMode, setSourceSetupMode] = useState<"start" | "edit" | null>(null);
@@ -688,7 +690,7 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
         </div>
       </div>}
 
-      {quotaExhausted ? <p className="ch__quota-description">{t("computerHistory.tokensExhaustedDescription")}</p> : null}
+      {quotaExhausted ? <p className="ch__quota-description">{t(creditsPreview ? "credits.memory.paused" : "computerHistory.tokensExhaustedDescription")}</p> : null}
 
       {skillsOpen && linkedSkills.length ? (
         <section className="ch__skill-list" aria-label={t("computerHistory.memorySkills")}>

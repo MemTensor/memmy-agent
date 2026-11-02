@@ -51,11 +51,11 @@ describe("2026-06-04 prototype modals", () => {
     expect(messagesSource).toContain('"tokenExhausted.applyMore": "获取更多赠送 Token"');
     expect(messagesSource).toContain('"tokenExhausted.switchApiKey": "使用自定义 API Key"');
     expect(messagesSource).toContain('"tokenExhausted.later": "稍后再说"');
-    expect(modalSource).toContain('import { Gift } from "lucide-react"');
+    expect(modalSource).toContain('import { Coins, Gift } from "lucide-react"');
     expect(modalSource).toContain('pose="sad"');
-    expect(modalSource).toContain('t("tokenExhausted.title")');
-    expect(modalSource).toContain('t("tokenExhausted.applyMore")');
-    expect(modalSource).toContain('t("tokenExhausted.switchApiKey")');
+    expect(modalSource).toContain('"tokenExhausted.title"');
+    expect(modalSource).toContain('"tokenExhausted.applyMore"');
+    expect(modalSource).toContain('"tokenExhausted.switchApiKey"');
     expect(routerSource).not.toContain("TokenExhaustedModal");
     expect(routerSource).not.toContain("shouldShowTokenExhaustedModal");
     expect(routerSource).not.toContain("writeTokenExhaustedApplyMoreRequest");

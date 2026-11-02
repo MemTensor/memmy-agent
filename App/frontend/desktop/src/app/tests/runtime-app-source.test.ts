@@ -9,8 +9,9 @@ describe("RuntimeApp bootstrap loading", () => {
     const source = readFileSync(resolve(__dirname, "../..", "app.tsx"), "utf8");
     const calls = [...source.matchAll(/bootstrapLoaded\(([^)]*)\)/gu)].map((match) => match[1]);
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("effectiveBootstrap");
+    expect(calls).toHaveLength(2);
+    expect(calls).toContain("effectiveBootstrap, initialPath");
+    expect(calls).toContain("creditErrorPreviewBootstrap(");
     expect(source).not.toContain("bootstrapLoaded(bootstrap");
   });
 

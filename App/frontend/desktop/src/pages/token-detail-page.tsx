@@ -3,6 +3,7 @@ import type { AccountLoginResultView, OnboardingStateDto, SocialLoginProvider } 
 import { Check, ChevronLeft } from "lucide-react";
 import { useEffect, useState } from "react";
 import { resolveDesktopAccountChannel } from "../app/account-channel.js";
+import { isCreditsPreviewMode } from "../app/credits-preview-mode.js";
 import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
 import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
@@ -38,6 +39,7 @@ export function TokenDetailPage() {
   const channel = resolveDesktopAccountChannel();
   const invitationEnabled = state.bootstrap?.promotions?.invitation?.enabled === true;
   const agentChatTokenTotal = state.bootstrap?.promotions?.agentChatTokenTotal;
+  const creditsPreview = isCreditsPreviewMode();
 
   useEffect(() => {
     setIdentifier("");
@@ -180,15 +182,21 @@ export function TokenDetailPage() {
             <div className="absolute top-3 right-4 w-16 h-16 bg-white/10 rounded-full" />
             <div className="absolute bottom-2 left-4 w-12 h-12 bg-white/5 rounded-full" />
             <div className="text-3xl font-extrabold tracking-tight">
-              {formatTokenGiftAmount(agentChatTokenTotal)}
+              {creditsPreview ? t("credits.welcome.detail.title") : formatTokenGiftAmount(agentChatTokenTotal)}
             </div>
-            <div className="text-sm text-white/70 mt-1">{t("welcome.gift.detail.subtitle")}</div>
+            <div className="text-sm text-white/70 mt-1">{t(creditsPreview ? "credits.welcome.detail.subtitle" : "welcome.gift.detail.subtitle")}</div>
             <div
               className={`mt-5 space-y-2 text-left mx-auto ${language === "en-US" ? "w-full" : "max-w-xs"}`}
             >
-              <TokenGiftBenefit text={t("welcome.gift.detail.bullet.conversations")} />
-              <TokenGiftBenefit text={t("welcome.gift.detail.bullet.memories")} />
-              <TokenGiftBenefit text={t("welcome.gift.detail.bullet.features")} />
+              {creditsPreview ? <>
+                <TokenGiftBenefit text={t("credits.welcome.detail.economy")} />
+                <TokenGiftBenefit text={t("credits.welcome.detail.byok")} />
+                <TokenGiftBenefit text={t("credits.welcome.detail.usage")} />
+              </> : <>
+                <TokenGiftBenefit text={t("welcome.gift.detail.bullet.conversations")} />
+                <TokenGiftBenefit text={t("welcome.gift.detail.bullet.memories")} />
+                <TokenGiftBenefit text={t("welcome.gift.detail.bullet.features")} />
+              </>}
             </div>
           </div>
 

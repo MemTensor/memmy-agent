@@ -85,6 +85,12 @@ describe("account-client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves an explicit credit reward amount", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ hasReward: true, drawId: "credit-1", creditAmount: 200 })));
+    const client = createHttpAccountClient(config);
+    await expect(client.getLotteryReward()).resolves.toEqual({ hasReward: true, drawId: "credit-1", creditAmount: 200 });
+  });
+
   it("读取并确认到账 Token 奖励", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input.toString();

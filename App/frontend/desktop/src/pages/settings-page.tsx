@@ -3,7 +3,10 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Disp
 import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Gauge, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy, Users} from "lucide-react";
 import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, MemoryTokenBudgetDto, ModelConfigView, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
+import { modelUsagePreview, saveModelUsagePreviewLimits } from "../app/model-usage-preview.js";
+import { isCreditsPreviewMode } from "../app/credits-preview-mode.js";
 import { copyInvitationCode } from "../app/invitation-analytics.js";
+import { requestAccountInvitation } from "../app/account-invitation-request.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
 import { useUpdateCoordinator, type UpdateCoordinatorValue, type UpdatePhase } from "../app/update-coordinator.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
@@ -30,12 +33,14 @@ import { useAppState } from "../state/app-state.js";
 import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ComputerUseSettings } from "./computer-use-settings.js";
+import { CreditsSettingsPanel } from "./credits-in-app.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
   MEMORY_TOKEN_BUDGET_SECTION_ID,
   SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
   SETTINGS_BROWSER_EXTENSION_EVENT,
   SETTINGS_EXCEL_CONNECTION_EVENT,
+  SETTINGS_ADD_MODEL_EVENT,
   SETTINGS_MEMORY_BUDGET_EVENT,
   readInitialSettingsTab,
   readSettingsAddModelReturnRoute,
@@ -52,6 +57,7 @@ import { formatTokenGiftAmount } from "./token-gift.js";
 import usageStyles from "./settings-token-usage.module.css";
 
 export { resolveSettingsTabFromHash, shouldFocusMemoryBudgetFromHash, type SettingsTabId } from "./settings-nav.js";
+export { requestAccountInvitation } from "../app/account-invitation-request.js";
 import {
   OptionalModelMissingWarningModal,
   resolveOptionalModelMissingWarning,
@@ -187,35 +193,6 @@ const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
 // Display order for both panels. Platform Cloud scenes omit embedding; BYOK
 // kinds already include it in the contract — no backend TokenUsageScene change.
 const TOKEN_USAGE_SCENES = ["agent_chat", "memory_summary", "memory_evolution", "embedding"] as const satisfies readonly ByokTokenUsageKind[];
-
-let activeInvitationRequest: {
-  client: Pick<AccountClient, "getInvitation">;
-  accountKey: string;
-  promise: Promise<AccountInvitationView>;
-} | null = null;
-
-/** Coalesces React remount/re-render requests while the idempotent PUT is in flight. */
-export function requestAccountInvitation(
-  client: Pick<AccountClient, "getInvitation">,
-  accountKey: string
-): Promise<AccountInvitationView> {
-  if (
-    activeInvitationRequest?.client === client
-    && activeInvitationRequest.accountKey === accountKey
-  ) {
-    return activeInvitationRequest.promise;
-  }
-
-  const promise = client.getInvitation();
-  activeInvitationRequest = { client, accountKey, promise };
-  const clear = () => {
-    if (activeInvitationRequest?.promise === promise) {
-      activeInvitationRequest = null;
-    }
-  };
-  void promise.then(clear, clear);
-  return promise;
-}
 
 /**
  * The default analytics-tracking function for the pure view.
@@ -365,6 +342,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   } = props;
   const { t, language } = useTranslation();
   const bootstrap = state.bootstrap;
+  const creditsPreview = isCreditsPreviewMode();
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const launchAtLoginRequestVersion = useRef(0);
   const [closeAction, setCloseAction] = useState<CloseMainWindowAction>(() => {
@@ -390,6 +368,25 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     typeof window !== "undefined" && shouldFocusBrowserExtensionFromHash(window.location.hash) ? 1 : 0);
   const [excelConnectionFocusNonce, setExcelConnectionFocusNonce] = useState(() =>
     typeof window !== "undefined" && shouldFocusExcelConnectionFromHash(window.location.hash) ? 1 : 0);
+  const [modelTab, setModelTab] = useState<"manage" | "usage">(() => typeof window !== "undefined" && (window.location.hash === "#model-usage" || shouldFocusMemoryBudgetFromHash(window.location.hash)) ? "usage" : "manage");
+  function selectModelTab(tab: "manage" | "usage") {
+    setModelTab(tab);
+    if (typeof window !== "undefined") window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}${tab === "usage" ? "#model-usage" : "#model-config"}`);
+  }
+  useEffect(() => {
+    const openManagement = () => setModelTab("manage");
+    const syncModelTab = () => {
+      if (window.location.hash === "#model-usage" || shouldFocusMemoryBudgetFromHash(window.location.hash)) setModelTab("usage");
+      else if (window.location.hash === "#model-config" || window.location.hash === "#model-config-add") setModelTab("manage");
+    };
+    window.addEventListener("hashchange", syncModelTab);
+    window.addEventListener(SETTINGS_ADD_MODEL_EVENT, openManagement);
+    return () => {
+      window.removeEventListener("hashchange", syncModelTab);
+      window.removeEventListener(SETTINGS_ADD_MODEL_EVENT, openManagement);
+    };
+  }, []);
+
   const activeTab = activeTabProp ?? activeTabState;
 
   function setActiveTab(tab: SettingsTabId) {
@@ -719,15 +716,17 @@ export function SettingsPageView(props: SettingsPageViewProps) {
 
   useEffect(() => {
     let cancelled = false;
+    if (activeTab !== "model" || modelTab !== "usage") return;
+    if (creditsPreview) {
+      const preview = modelUsagePreview();
+      setByokUsage(preview.usage);
+      setByokUsageStatus("ready");
+      applyMemoryBudget(preview.budget, true);
+      return;
+    }
     if (!byokTokenUsageClient) {
       setByokUsage(EMPTY_BYOK_TOKEN_USAGE);
       setByokUsageStatus("idle");
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    if (activeTab !== "tokens") {
       return () => {
         cancelled = true;
       };
@@ -772,7 +771,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       window.removeEventListener("focus", onWindowFocus);
       window.removeEventListener("memmy:memory-token-budget-updated", onBudgetUpdated);
     };
-  }, [activeTab, byokTokenUsageClient]);
+  }, [activeTab, modelTab, creditsPreview, byokTokenUsageClient]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -809,7 +808,8 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
 
     const requestMemoryBudgetFocus = () => {
-      setActiveTab("tokens");
+      setActiveTab("model");
+      setModelTab("usage");
       setMemoryBudgetFocusNonce((current) => current + 1);
     };
 
@@ -846,7 +846,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   }, []);
 
   useEffect(() => {
-    if (memoryBudgetFocusNonce === 0 || activeTab !== "tokens" || typeof document === "undefined") {
+    if (memoryBudgetFocusNonce === 0 || activeTab !== "model" || modelTab !== "usage" || typeof document === "undefined") {
       return undefined;
     }
 
@@ -866,7 +866,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       alignCard();
       window.requestAnimationFrame(alignCard);
     });
-    const panel = document.getElementById("settings-panel-tokens");
+    const panel = document.getElementById("model-panel-usage");
     const observer = typeof ResizeObserver !== "undefined" && panel
       ? new ResizeObserver(alignCard)
       : null;
@@ -883,7 +883,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       window.clearTimeout(timer);
       card.classList.remove(flashClass);
     };
-  }, [memoryBudgetFocusNonce, activeTab]);
+  }, [memoryBudgetFocusNonce, activeTab, modelTab]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !canApplyMoreByPromotion || quotaApplicationBlocked) {
@@ -989,6 +989,13 @@ export function SettingsPageView(props: SettingsPageViewProps) {
    */
   function persistSettings(patch: Partial<AppSettingsDto>) {
     const savingBudget = patch.memoryByokDailyLimitM !== undefined || patch.memoryByokTotalLimitM !== undefined;
+    if (creditsPreview && savingBudget) {
+      const current = modelUsagePreview().budget;
+      saveModelUsagePreviewLimits(patch.memoryByokDailyLimitM ?? current.dailyLimitM, patch.memoryByokTotalLimitM ?? current.totalLimitM);
+      applyMemoryBudget(modelUsagePreview().budget, true);
+      setBudgetSaveError(null);
+      return;
+    }
     const pending = (configClient?.updateSettings(patch) ?? Promise.resolve(patch)).then((savedSettings) => {
       dispatch(appActions.settingsUpdated(savedSettings));
       if (savingBudget) {
@@ -1446,6 +1453,91 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
   }
 
+  const invitationCard = isAccountMode && showGiftQuota && showInvitationBanner ? (
+    <div
+      className={`${usageStyles.invitationCard} border ${
+        inviteDailyLimitReached
+          ? "bg-text-ink/[0.05] border-border-stone/50"
+          : "bg-action-sky/6 border-action-sky/15"
+      }`}
+      style={creditsPreview ? { marginBottom: 24 } : undefined}
+    >
+      <span
+        className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center ${
+          inviteDailyLimitReached ? "bg-text-ink/10 text-text-ink/40" : "bg-action-sky/12 text-action-sky"
+        }`}
+      >
+        <Gift size={15} strokeWidth={2.1} aria-hidden="true" />
+      </span>
+      <div className="min-w-0">
+        <p className="text-sm text-text-ink/80 leading-5">{t(creditsPreview ? "credits.invite.title" : "settings.token.invite.title")}</p>
+        <p
+          className={`mt-0.5 text-xs leading-4 ${
+            inviteDailyLimitReached ? "text-text-ink/50" : "text-text-ink/45"
+          }`}
+        >
+          {invitationLoadStatus === "error"
+            ? t("settings.token.invite.loadFailed")
+            : invitationLoadStatus === "loading" || invitationLoadStatus === "idle"
+              ? t("settings.token.invite.loading")
+              : inviteDailyLimitReached
+                ? t("settings.token.invite.dailyLimit")
+                : creditsPreview ? t("credits.invite.body") : invitationRewardBody}
+        </p>
+      </div>
+      {displayInviteCode ? (
+        <div className={usageStyles.invitationActions}>
+          <code
+            className={`px-2.5 py-1.5 text-xs font-semibold tracking-wide bg-background-paper rounded-input border ${
+              inviteDailyLimitReached
+                ? "text-text-ink/35 border-border-stone/50"
+                : "text-text-ink border-action-sky/20"
+            }`}
+          >
+            {displayInviteCode}
+          </code>
+          <button
+            type="button"
+            className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-btn border transition-colors cursor-pointer ${
+              inviteDailyLimitReached
+                ? "text-text-ink/35 border-border-stone/50 hover:bg-text-ink/[0.03]"
+                : "text-action-sky border-action-sky/30 hover:bg-action-sky/8"
+            }`}
+            onClick={() => {
+              void (async () => {
+                try {
+                  if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") {
+                    throw new Error("Clipboard API is unavailable");
+                  }
+                  await copyInvitationCode({
+                    invitationCode: displayInviteCode,
+                    clipboard: navigator.clipboard,
+                    track
+                  });
+                  setInviteCopied(true);
+                  window.setTimeout(() => setInviteCopied(false), 2000);
+                } catch (error) {
+                  console.warn("copy invite code failed", error);
+                }
+              })();
+            }}
+          >
+            <Copy size={12} strokeWidth={2.2} />
+            {inviteCopied ? t("settings.token.invite.copied") : t("settings.token.invite.copy")}
+          </button>
+        </div>
+      ) : invitationLoadStatus === "error" ? (
+        <button
+          type="button"
+          className="shrink-0 px-2.5 py-1.5 text-xs rounded-btn border text-action-sky border-action-sky/30 hover:bg-action-sky/8 cursor-pointer"
+          onClick={() => setInvitationReloadVersion((current) => current + 1)}
+        >
+          {t("settings.token.invite.retry")}
+        </button>
+      ) : null}
+    </div>
+  ) : null;
+
   const confirmDialog = confirm ? resolveAccountConfirmDialog(t) : null;
   return (
     <div
@@ -1612,7 +1704,17 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           aria-labelledby="settings-tab-model"
           hidden={activeTab !== "model"}
         >
-        <div id="model-config">
+        <div id="model-config" className={usageStyles.detailContent}>
+          <div className={usageStyles.modelUsageTabs} role="tablist" aria-label={t("settings.model")}>
+            {(["manage", "usage"] as const).map(tab => <button key={tab} type="button" role="tab" id={`model-tab-${tab}`} aria-selected={modelTab === tab} aria-controls={`model-panel-${tab}`} tabIndex={modelTab === tab ? 0 : -1} onClick={() => selectModelTab(tab)} onKeyDown={event => {
+              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+              event.preventDefault();
+              const next = event.key === "Home" ? "manage" : event.key === "End" ? "usage" : tab === "manage" ? "usage" : "manage";
+              selectModelTab(next);
+              document.getElementById(`model-tab-${next}`)?.focus();
+            }}>{t(tab === "manage" ? "settings.model.managementTab" : "settings.model.usageTab")}</button>)}
+          </div>
+          <div id="model-panel-manage" role="tabpanel" aria-labelledby="model-tab-manage" hidden={modelTab !== "manage"}>
           <ModelWorkspaceSection
             mode={workspaceMode}
             seedConfig={state.modelConfig}
@@ -1631,6 +1733,23 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               setupReturnRoute === "/main"
             }
           />
+          </div>
+          <div id="model-panel-usage" role="tabpanel" aria-labelledby="model-tab-usage" hidden={modelTab !== "usage"}>
+            <div className={usageStyles.modelUsageUpdated}><UsageStatusLabel status={byokUsageStatus} updatedAt={byokUsage.updatedAt} /></div>
+            <UsageDetails showPlatform={false} platformUsage={tokenUsage} byokUsage={byokUsage} byokUsageStatus={byokUsageStatus} modelCatalog={state.modelConfig.catalog} />
+          <MemoryTokenBudgetCard
+            dailyLimitDraft={dailyLimitDraft}
+            totalLimitDraft={totalLimitDraft}
+            budget={memoryBudget}
+            fallbackDailyLimitM={appSettings?.memoryByokDailyLimitM ?? 10}
+            fallbackTotalLimitM={appSettings?.memoryByokTotalLimitM ?? 500}
+            saveError={budgetSaveError}
+            onDailyDraftChange={setDailyLimitDraft}
+            onTotalDraftChange={setTotalLimitDraft}
+            onCommitDaily={(value) => persistSettings({ memoryByokDailyLimitM: value })}
+            onCommitTotal={(value) => persistSettings({ memoryByokTotalLimitM: value })}
+          />
+          </div>
         </div>
         </div>
 
@@ -1639,14 +1758,15 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           role="tabpanel"
           aria-labelledby="settings-tab-tokens"
           hidden={activeTab !== "tokens"}
+          className={creditsPreview ? "flex flex-col" : undefined}
         >
-        <div id="token-usage" className="mb-6">
+        {creditsPreview && <CreditsSettingsPanel invitationContent={invitationCard} />}
+        <div id="token-usage" className="mb-6" hidden={creditsPreview}>
           <div className="flex items-center justify-between gap-4 mb-3">
             <div className="flex items-center gap-2">
               <Zap size={16} className="text-text-ink/60" />
               <h2 className="text-sm font-semibold text-text-ink">{t("settings.tokens")}</h2>
             </div>
-            <UsageStatusLabel status={byokUsageStatus} updatedAt={byokUsage.updatedAt} />
           </div>
 
           {(isTokenLow || quotaEligibilityText) && showGiftQuota && (
@@ -1676,109 +1796,17 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           )}
 
           <UsageDetails
+            showByok={false}
             showPlatform={showGiftQuota}
             platformUsage={tokenUsage}
             byokUsage={byokUsage}
             byokUsageStatus={byokUsageStatus}
             modelCatalog={state.modelConfig.catalog}
           />
-          <MemoryTokenBudgetCard
-            dailyLimitDraft={dailyLimitDraft}
-            totalLimitDraft={totalLimitDraft}
-            budget={memoryBudget}
-            fallbackDailyLimitM={appSettings?.memoryByokDailyLimitM ?? 10}
-            fallbackTotalLimitM={appSettings?.memoryByokTotalLimitM ?? 500}
-            saveError={budgetSaveError}
-            onDailyDraftChange={setDailyLimitDraft}
-            onTotalDraftChange={setTotalLimitDraft}
-            onCommitDaily={(value) => persistSettings({ memoryByokDailyLimitM: value })}
-            onCommitTotal={(value) => persistSettings({ memoryByokTotalLimitM: value })}
-          />
+
         </div>
 
-        {isAccountMode && showGiftQuota && showInvitationBanner ? (
-          <div
-            className={`${usageStyles.invitationCard} border ${
-              inviteDailyLimitReached
-                ? "bg-text-ink/[0.05] border-border-stone/50"
-                : "bg-action-sky/6 border-action-sky/15"
-            }`}
-          >
-            <span
-              className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center ${
-                inviteDailyLimitReached ? "bg-text-ink/10 text-text-ink/40" : "bg-action-sky/12 text-action-sky"
-              }`}
-            >
-              <Gift size={15} strokeWidth={2.1} aria-hidden="true" />
-            </span>
-            <div className="min-w-0">
-              <p className="text-sm text-text-ink/80 leading-5">{t("settings.token.invite.title")}</p>
-              <p
-                className={`mt-0.5 text-xs leading-4 ${
-                  inviteDailyLimitReached ? "text-text-ink/50" : "text-text-ink/45"
-                }`}
-              >
-                {invitationLoadStatus === "error"
-                  ? t("settings.token.invite.loadFailed")
-                  : invitationLoadStatus === "loading" || invitationLoadStatus === "idle"
-                    ? t("settings.token.invite.loading")
-                    : inviteDailyLimitReached
-                      ? t("settings.token.invite.dailyLimit")
-                      : invitationRewardBody}
-              </p>
-            </div>
-            {displayInviteCode ? (
-              <div className={usageStyles.invitationActions}>
-                <code
-                  className={`px-2.5 py-1.5 text-xs font-semibold tracking-wide bg-background-paper rounded-input border ${
-                    inviteDailyLimitReached
-                      ? "text-text-ink/35 border-border-stone/50"
-                      : "text-text-ink border-action-sky/20"
-                  }`}
-                >
-                  {displayInviteCode}
-                </code>
-                <button
-                  type="button"
-                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-btn border transition-colors cursor-pointer ${
-                    inviteDailyLimitReached
-                      ? "text-text-ink/35 border-border-stone/50 hover:bg-text-ink/[0.03]"
-                      : "text-action-sky border-action-sky/30 hover:bg-action-sky/8"
-                  }`}
-                  onClick={() => {
-                    void (async () => {
-                      try {
-                        if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") {
-                          throw new Error("Clipboard API is unavailable");
-                        }
-                        await copyInvitationCode({
-                          invitationCode: displayInviteCode,
-                          clipboard: navigator.clipboard,
-                          track
-                        });
-                        setInviteCopied(true);
-                        window.setTimeout(() => setInviteCopied(false), 2000);
-                      } catch (error) {
-                        console.warn("copy invite code failed", error);
-                      }
-                    })();
-                  }}
-                >
-                  <Copy size={12} strokeWidth={2.2} />
-                  {inviteCopied ? t("settings.token.invite.copied") : t("settings.token.invite.copy")}
-                </button>
-              </div>
-            ) : invitationLoadStatus === "error" ? (
-              <button
-                type="button"
-                className="shrink-0 px-2.5 py-1.5 text-xs rounded-btn border text-action-sky border-action-sky/30 hover:bg-action-sky/8 cursor-pointer"
-                onClick={() => setInvitationReloadVersion((current) => current + 1)}
-              >
-                {t("settings.token.invite.retry")}
-              </button>
-            ) : null}
-          </div>
-        ) : null}
+        {!creditsPreview && invitationCard}
         </div>
 
         <div
@@ -2269,6 +2297,7 @@ export function MemoryTokenBudgetRow(props: {
 }
 
 export interface UsageDetailsProps {
+  showByok?: boolean;
   showPlatform: boolean;
   platformUsage: TokenUsageDto;
   byokUsage: ByokTokenUsageSummary;
@@ -2381,7 +2410,7 @@ export function UsageDetails(props: UsageDetailsProps) {
           </section>
         )}
 
-        <section className={usageStyles.usageSection}>
+        {props.showByok !== false && <section className={usageStyles.usageSection}>
           <UsageSectionHead
             icon={<KeyRound size={16} className="text-text-ink/60" />}
             title={t("settings.token.apiKeyConsumption")}
@@ -2456,7 +2485,7 @@ export function UsageDetails(props: UsageDetailsProps) {
               </div>
             </div>
           )}
-        </section>
+        </section>}
     </div>
   );
 }
