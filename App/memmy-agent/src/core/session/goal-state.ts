@@ -32,6 +32,7 @@ export type GoalRoute = {
   channel: string;
   chatId: string;
   source?: TurnSource;
+  // Host-written evidence of an accepted user request; continuations have their own per-turn identity.
   computerUseMessageId?: string;
 };
 
@@ -126,9 +127,10 @@ export function parseGoalRoute(value: unknown): GoalRoute | null {
   const messageId = value.computerUseMessageId;
   if (Object.hasOwn(value, "computerUseMessageId")
     && (typeof messageId !== "string" || !messageId.trim() || messageId.length > 512
-      || source.channel !== value.channel || ['system', 'cron'].includes(value.channel))) return null;
+      || source.channel !== value.channel || ['system', 'cron'].includes(value.channel)
+      || (value.channel === 'websocket' ? !['gui', 'tui'].includes(source.kind) : source.kind !== 'im'))) return null;
   return { channel: value.channel, chatId: value.chatId, source,
-    ...(typeof messageId === "string" ? { computerUseMessageId: messageId } : {}) };
+    ...(typeof messageId === "string" ? { computerUseMessageId: messageId.trim() } : {}) };
 }
 
 export function readGoalRoute(metadata?: Record<string, unknown> | null): GoalRoute | null {

@@ -489,8 +489,8 @@ export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage> {
       objective,
       route: { channel: ctx.msg.channel, chatId: ctx.msg.chatId,
         ...(ctx.msg.turnSource ? { source: ctx.msg.turnSource } : {}),
-        ...(ctx.msg.turnSource && request.metadata.computerUseInteractive === true
-          ? { computerUseMessageId: request.messageId! } : {}),
+        ...(ctx.msg.turnSource && request.messageId && request.metadata.computerUseInteractive === true
+          ? { computerUseMessageId: request.messageId } : {}),
       },
       turnId,
     });

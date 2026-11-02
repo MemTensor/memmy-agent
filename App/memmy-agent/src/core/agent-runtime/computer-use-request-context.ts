@@ -10,7 +10,7 @@ export function computerUseRequestContext(message: InboundMessage, turnId?: stri
   const route = internal && runtime?.route(sessionKey);
   // Only a reserved continuation of this active Goal may inherit its accepted user's identity.
   if (internal?.kind === 'goal_continuation' && message.senderId === 'goal-runtime'
-    && message.role === 'user' && turnId && runtime?.ownsWorkReservation(sessionKey, turnId)
+    && message.role === 'user' && turnId && runtime?.ownsWorkReservation(sessionKey, turnId, "continuation")
     && goal?.status === 'active' && goal.goalId === internal.goalId
     && goal.updatedAt === internal.goalUpdatedAt && route?.computerUseMessageId
     && route.channel === message.channel && route.chatId === message.chatId
@@ -19,6 +19,7 @@ export function computerUseRequestContext(message: InboundMessage, turnId?: stri
     // A one-time app approval must not carry over to the next automatic turn.
     const messageId = `goal:${goal.goalId}:${turnId}`;
     return { messageId, metadata: { ...message.metadata,
+      turn_source: route.source,
       turnId, turn_id: turnId, message_id: messageId,
       computerUseInteractive: true, computerUseInteractiveReason: 'interactive-user-message',
     } };

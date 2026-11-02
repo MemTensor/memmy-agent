@@ -4233,16 +4233,16 @@ export class AgentLoop {
         .some((entry) => entry.turnId === ctx.turnId);
       if (goal || hasReservedInbox) {
         const request = computerUseRequestContext(ctx.msg);
-        const source = sharedTurnSource(ctx.msg);
+        const turnSource = sharedTurnSource(ctx.msg);
         const persisted = await this.goalRuntime.persistGoalUserTurn(
           ctx.sessionKey,
           ctx.turnId,
           {
             channel: ctx.msg.channel,
             chatId: ctx.msg.chatId,
-            ...(source ? { source } : {}),
-            ...(source && request.metadata.computerUseInteractive === true
-              ? { computerUseMessageId: request.messageId! } : {}),
+            ...(turnSource ? { source: turnSource } : {}),
+            ...(turnSource && request.messageId && request.metadata.computerUseInteractive === true
+              ? { computerUseMessageId: request.messageId } : {}),
           },
           (session, entry) => {
             const source = entry
