@@ -398,9 +398,12 @@ export function AgentThreadPanel(props: {
   }, [ownerKey, updateBrowser, panel.open]);
   const closeBrowserTab = useCallback((id: number, owner = ownerKey) => {
     updateBrowser(owner, state => {
+      const index = state.tabs.findIndex(tab => tab.id === id);
+      if (index < 0) return state;
       const tabs = state.tabs.filter(tab => tab.id !== id);
+      const neighbor = tabs[index] ?? tabs[index - 1];
       return { ...state, tabs, mounted: tabs.length > 0, open: tabs.length > 0 && state.open,
-        activeId: state.activeId === id ? tabs.at(-1)?.id ?? 1 : state.activeId };
+        activeId: state.activeId === id ? neighbor?.id ?? 1 : state.activeId };
     });
   }, [ownerKey, updateBrowser]);
   useEffect(() => window.memmy?.onEmbeddedBrowserClose?.((guestId) => {
@@ -666,6 +669,7 @@ export function AgentThreadPanel(props: {
           </div>
           {(panel.hasContent || browserMounted) ? (
             <ThreadTabs
+              key={ownerKey}
               tabs={panel.hasContent ? panel.tabState.tabs : []}
               activeId={panel.tabState.activeId}
               browserSurfaceActive={browserOpen}
@@ -883,6 +887,102 @@ function ThreadOverviewPopover(props: {
 
 type BrowserStripTab = { id: number; guestId?: number; url?: string; title?: string };
 
+const THREAD_TAB_OPEN_MS = 180;
+
+function useThreadTabMotion(listRef: RefObject<HTMLDivElement | null>, tabKeys: string, activeKey: string | null) {
+  const previousKeysRef = useRef<Set<string> | null>(null);
+  const animationsRef = useRef(new Map<HTMLElement, Animation>());
+
+  useLayoutEffect(() => () => {
+    for (const animation of animationsRef.current.values()) animation.cancel();
+    animationsRef.current.clear();
+  }, []);
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const elements = [...list.querySelectorAll<HTMLElement>("[data-thread-tab-id]")];
+    const keys = new Set(elements.map(element => element.dataset.threadTabId!));
+    // The strip is keyed by conversation, so restored tabs seed the initial set.
+    const added = previousKeysRef.current
+      ? elements.filter(element => !previousKeysRef.current!.has(element.dataset.threadTabId!))
+      : [];
+    previousKeysRef.current = keys;
+
+    for (const [element, animation] of animationsRef.current) {
+      if (!list.contains(element)) {
+        animation.cancel();
+        animationsRef.current.delete(element);
+      }
+    }
+
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
+    const gap = parseFloat(getComputedStyle(list).columnGap) || 0;
+    let animated = false;
+    if (!reducedMotion) for (const element of added) {
+      if (typeof element.animate !== "function") continue;
+      const style = getComputedStyle(element);
+      const marginLeft = parseFloat(style.marginLeft) || 0;
+      const marginRight = parseFloat(style.marginRight) || 0;
+      // Animate flex sizing so existing tabs redistribute space on every frame.
+      // Cancel the new gap at zero width, including insertions at the start.
+      const animation = element.animate([
+        {
+          flexBasis: "0px", minWidth: "0px", maxWidth: "0px",
+          paddingLeft: "0px", paddingRight: "0px", overflow: "hidden",
+          marginLeft: `${marginLeft - (element.previousElementSibling ? gap : 0)}px`,
+          marginRight: `${marginRight - (!element.previousElementSibling && element.nextElementSibling ? gap : 0)}px`,
+        },
+        {
+          flexBasis: style.flexBasis, minWidth: style.minWidth, maxWidth: style.maxWidth,
+          paddingLeft: style.paddingLeft, paddingRight: style.paddingRight, overflow: "hidden",
+          marginLeft: style.marginLeft, marginRight: style.marginRight,
+        },
+      ], { duration: THREAD_TAB_OPEN_MS, easing: "cubic-bezier(0.33, 1, 0.67, 1)" });
+      animationsRef.current.set(element, animation);
+      const release = () => {
+        if (animationsRef.current.get(element) === animation) animationsRef.current.delete(element);
+      };
+      animation.onfinish = release;
+      animation.oncancel = release;
+      animated = true;
+    }
+
+    const active = elements.find(element => element.dataset.threadTabId === activeKey);
+    if (!active) return;
+    if (!animated) {
+      active.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+      return;
+    }
+
+    const startedAt = performance.now();
+    const startScroll = list.scrollLeft;
+    let frame = 0;
+    const follow = (now: number) => {
+      if (!list.contains(active)) return;
+      const progress = Math.min(1, Math.max(0, (now - startedAt) / THREAD_TAB_OPEN_MS));
+      const eased = 1 - (1 - progress) ** 3;
+      const bounds = list.getBoundingClientRect();
+      const rect = active.getBoundingClientRect();
+      const left = rect.left - bounds.left + list.scrollLeft;
+      const right = left + rect.width;
+      const target = left < startScroll ? left
+        : right > startScroll + list.clientWidth ? right - list.clientWidth : startScroll;
+      list.scrollLeft = startScroll + (target - startScroll) * eased;
+      if (progress < 1) frame = window.requestAnimationFrame(follow);
+    };
+    frame = window.requestAnimationFrame(follow);
+    const stopFollowing = () => window.cancelAnimationFrame(frame);
+    list.addEventListener("wheel", stopFollowing, { passive: true });
+    list.addEventListener("pointerdown", stopFollowing);
+    return () => {
+      stopFollowing();
+      list.removeEventListener("wheel", stopFollowing);
+      list.removeEventListener("pointerdown", stopFollowing);
+    };
+  }, [listRef, tabKeys, activeKey]);
+}
+
 function browserTabLabel(tab: BrowserStripTab, fallback: string): string {
   const title = tab.title?.trim() ?? "";
   if (title && !isBlankBrowserUrl(title)) return title;
@@ -913,11 +1013,7 @@ function ThreadTabs(props: {
   ];
   const activeKey = props.browserSurfaceActive ? `browser:${props.activeBrowserTabId}` : props.activeId;
 
-  useEffect(() => {
-    const active = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-thread-tab-id]") ?? [])]
-      .find((element) => element.dataset.threadTabId === activeKey);
-    active?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
-  }, [activeKey]);
+  useThreadTabMotion(listRef, JSON.stringify(items.map(item => item.key)), activeKey);
 
   function activateAt(index: number) {
     const item = items[index];
@@ -976,7 +1072,7 @@ function ThreadTabs(props: {
               <span className="thread-tab__icon">
                 {tab.type === "recording" ? <AudioLines size={16} /> : <ThreadFileIcon name={tab.name} />}
               </span>
-              <span className="thread-tab__title">{tab.name}</span>
+              <span className="thread-tab__title" title={tab.name}>{tab.name}</span>
               <button
                 type="button"
                 className="thread-tab__close"
@@ -1017,8 +1113,8 @@ function ThreadTabs(props: {
             <span className="thread-tab__icon">
               <Globe2 size={16} aria-hidden="true" />
             </span>
-            <span className="thread-tab__title">{label}</span>
-            {tab.guestId ? (
+            <span className="thread-tab__title" title={label}>{label}</span>
+            {tab.guestId && /^https?:\/\//i.test(tab.url ?? "") ? (
               <button
                 type="button"
                 className="thread-tab__close"

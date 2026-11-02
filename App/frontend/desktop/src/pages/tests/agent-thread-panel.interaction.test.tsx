@@ -85,6 +85,7 @@ const readyEnvironment = {
 describe("AgentThreadPanel", () => {
   let container: HTMLDivElement;
   let root: Root;
+  let restoreAnimate: (() => void) | undefined;
 
   beforeEach(() => {
     layoutWidth = LAYOUT_WIDTH;
@@ -113,6 +114,8 @@ describe("AgentThreadPanel", () => {
     act(() => root.unmount());
     while (takePendingBrowserNewTab()) { /* Drain requests left by failed assertions. */ }
     vi.restoreAllMocks();
+    restoreAnimate?.();
+    restoreAnimate = undefined;
     Reflect.deleteProperty(window, "memmy");
     document.body.replaceChildren();
     document.body.className = "";
@@ -128,6 +131,67 @@ describe("AgentThreadPanel", () => {
     });
     if (open) act(() => byTestId("open-panel").click());
   }
+
+  function mockTabAnimations() {
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "animate");
+    restoreAnimate = () => {
+      if (original) Object.defineProperty(HTMLElement.prototype, "animate", original);
+      else Reflect.deleteProperty(HTMLElement.prototype, "animate");
+    };
+    const animations: Array<{ cancel: ReturnType<typeof vi.fn>; onfinish: unknown; oncancel: unknown }> = [];
+    const animate = vi.fn((_frames: Keyframe[], _options: KeyframeAnimationOptions) => {
+      const animation = { cancel: vi.fn(), onfinish: null, oncancel: null };
+      animations.push(animation);
+      return animation;
+    });
+    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: animate });
+    return { animate, animations };
+  }
+
+  it('expands only newly added tabs from zero and preserves the animation through metadata updates', async () => {
+    const { animate } = mockTabAnimations();
+    Object.assign(window, { memmy: { selectEmbeddedBrowserTab: vi.fn() } });
+    render({ messages: [], context: emptyContext() });
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="浏览器"]')!.click());
+    expect(animate).not.toHaveBeenCalled();
+
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="新建标签页"]')!.click());
+    expect(animate).toHaveBeenCalledTimes(1);
+    expect(animate.mock.calls[0]?.[0]?.[0]).toMatchObject({
+      flexBasis: "0px", minWidth: "0px", maxWidth: "0px",
+      paddingLeft: "0px", paddingRight: "0px", overflow: "hidden",
+    });
+    await readyWebview(document.querySelectorAll('webview')[1]!, 28, 'https://example.com/', 'Loaded');
+    expect(animate).toHaveBeenCalledTimes(1);
+
+    render({ messages: [], context: emptyContext(), scopeKey: 'other-chat' });
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="浏览器"]')!.click());
+    render({ messages: [], context: emptyContext(), scopeKey: 'chat-1' });
+    expect(animate).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a removed tab animation and cleans up remaining animations on unmount', () => {
+    const { animations } = mockTabAnimations();
+    render({ messages: [], context: emptyContext() });
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="浏览器"]')!.click());
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="新建标签页"]')!.click());
+    act(() => document.querySelectorAll('[data-browser-tab]')[1]!.querySelector<HTMLButtonElement>('.thread-tab__close')!.click());
+    expect(animations[0]?.cancel).toHaveBeenCalledOnce();
+
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="新建标签页"]')!.click());
+    act(() => root.unmount());
+    expect(animations[1]?.cancel).toHaveBeenCalledOnce();
+  });
+
+  it('adds tabs immediately when reduced motion is enabled', () => {
+    const { animate } = mockTabAnimations();
+    vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: true } as MediaQueryList);
+    render({ messages: [], context: emptyContext() });
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="浏览器"]')!.click());
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="新建标签页"]')!.click());
+    expect(document.querySelectorAll('[data-browser-tab]')).toHaveLength(2);
+    expect(animate).not.toHaveBeenCalled();
+  });
 
   it("covers the chat on a narrow workspace instead of leaving composer controls exposed", () => {
     layoutWidth = 620;
@@ -178,6 +242,59 @@ describe("AgentThreadPanel", () => {
     expect(document.querySelectorAll('.thread-tabs [data-browser-tab]')[0]?.getAttribute('aria-selected')).toBe('true');
   });
 
+  it.each([
+    { scenario: 'middle active tab selects its right neighbor', count: 4, active: 1, closed: 1, selected: 2 },
+    { scenario: 'first active tab selects its right neighbor', count: 4, active: 0, closed: 0, selected: 1 },
+    { scenario: 'rightmost active tab selects its left neighbor', count: 4, active: 3, closed: 3, selected: 2 },
+    { scenario: 'closing a tab on the left preserves the active tab', count: 4, active: 2, closed: 0, selected: 2 },
+    { scenario: 'closing a tab on the right preserves the active tab', count: 4, active: 1, closed: 3, selected: 1 },
+    { scenario: 'closing the only tab leaves no selected browser tab', count: 1, active: 0, closed: 0, selected: null },
+  ])('$scenario', async ({ count, active, closed, selected }) => {
+    Object.assign(window, { memmy: { selectEmbeddedBrowserTab: vi.fn() } });
+    render({ messages: [], context: emptyContext() });
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="浏览器"]')!.click());
+    for (let index = 1; index < count; index++) {
+      act(() => document.querySelector<HTMLButtonElement>('[aria-label="新建标签页"]')!.click());
+    }
+    const views = [...document.querySelectorAll('webview')];
+    for (const [index, view] of views.entries()) {
+      await readyWebview(view, 27 + index, `https://example.com/${index}`, String.fromCharCode(65 + index));
+    }
+    const tabs = [...document.querySelectorAll<HTMLElement>('[data-browser-tab]')];
+    const expected = selected === null ? null : tabs[selected]!.dataset.threadTabId;
+    act(() => tabs[active]!.click());
+    act(() => tabs[closed]!.querySelector<HTMLButtonElement>('button[aria-label^="关闭 "]')!.click());
+
+    expect(document.querySelector('[data-browser-tab][aria-selected="true"]')?.getAttribute('data-thread-tab-id') ?? null).toBe(expected);
+    expect(document.querySelectorAll('[data-browser-tab]')).toHaveLength(count - 1);
+    expect(views[closed]?.isConnected).toBe(false);
+    expect(views.filter((_, index) => index !== closed).every(view => view.isConnected)).toBe(true);
+  });
+
+  it('selects the right neighbor when the Agent closes the active middle browser tab', async () => {
+    let closeTab: ((guestId: number) => void) | undefined;
+    Object.assign(window, { memmy: {
+      selectEmbeddedBrowserTab: vi.fn(),
+      onEmbeddedBrowserClose: (callback: (guestId: number) => void) => {
+        closeTab = callback;
+        return () => { closeTab = undefined; };
+      },
+    } });
+    render({ messages: [], context: emptyContext() });
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="浏览器"]')!.click());
+    for (let index = 1; index < 4; index++) {
+      act(() => document.querySelector<HTMLButtonElement>('[aria-label="新建标签页"]')!.click());
+    }
+    for (const [index, view] of [...document.querySelectorAll('webview')].entries()) {
+      await readyWebview(view, 27 + index, `https://example.com/${index}`, String.fromCharCode(65 + index));
+    }
+    const tabs = [...document.querySelectorAll<HTMLElement>('[data-browser-tab]')];
+    act(() => tabs[1]!.click());
+    act(() => closeTab?.(28));
+    expect(document.querySelector('[data-browser-tab][aria-selected="true"]')?.getAttribute('data-thread-tab-id')).toBe(tabs[2]!.dataset.threadTabId);
+    expect(tabTitles()).toEqual(['A', 'C', 'D']);
+  });
+
   it('does not label a blank browser tab or its address about:blank', () => {
     Object.defineProperty(window, "memmy", { configurable: true, value: { selectEmbeddedBrowserTab: vi.fn() } });
     render({ messages: [], context: emptyContext() });
@@ -194,6 +311,24 @@ describe("AgentThreadPanel", () => {
     expect(tab?.querySelector(".thread-tab__title")?.textContent).toBe("新标签页");
     expect(tab?.getAttribute("title")).toBe("新标签页");
     expect((document.querySelector('[aria-label="网页地址"]') as HTMLInputElement).value).toBe("");
+  });
+
+  it('hides the copy reference button on a live blank tab and updates it after navigation', async () => {
+    Object.assign(window, { memmy: { selectEmbeddedBrowserTab: vi.fn() } });
+    render({ messages: [], context: emptyContext() });
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="浏览器"]')!.click());
+    const view = document.querySelector('webview')!;
+
+    await readyWebview(view, 27, 'about:blank', '');
+    expect(document.querySelector('[aria-label="复制标签页引用"]')).toBeNull();
+    expect(document.querySelector('[aria-label="关闭 新标签页"]')).not.toBeNull();
+
+    await readyWebview(view, 27, 'https://example.com/', 'Example');
+    expect(document.querySelector('[aria-label="复制标签页引用"]')).not.toBeNull();
+
+    await readyWebview(view, 27, 'about:blank', '');
+    expect(document.querySelector('[aria-label="复制标签页引用"]')).toBeNull();
+    expect(document.querySelector('[aria-label="关闭 新标签页"]')).not.toBeNull();
   });
 
   it('keeps a browser tab beside the file tab in the same strip', async () => {

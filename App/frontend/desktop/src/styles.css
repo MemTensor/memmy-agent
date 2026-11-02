@@ -2715,9 +2715,11 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
 .thread-tab {
   display: flex;
   height: 32px;
-  min-width: 50px;
-  max-width: 180px;
-  flex: 0 1 156px;
+  /* Reserve readable title space beside the icon and both browser actions. */
+  min-width: 140px;
+  max-width: 240px;
+  /* Start equally wide and shrink every tab by the same amount. */
+  flex: 0 1 240px;
   align-items: center;
   gap: 6px;
   padding: 0 8px;
@@ -2749,8 +2751,12 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
   white-space: nowrap;
+  /* Leave the fade empty when the complete title fits. */
+  padding-right: 12px;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 12px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 12px), transparent);
 }
 
 .thread-tab__close {
