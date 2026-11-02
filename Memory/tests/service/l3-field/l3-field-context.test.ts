@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -52,6 +52,34 @@ function evidence() {
 }
 
 describe("new L3 session context", () => {
+
+  it("shares the main project's context with linked worktrees across Agent locations", () => {
+    const { service, repos, home, project } = setup();
+    mkdirSync(join(project, ".git"), { recursive: true });
+    writeFileSync(join(project, ".git", "config"), '[remote "origin"]\nurl = https://github.com/acme/demo.git\n');
+    const main = open(service, "main-checkout", project);
+    service.l3WorldModelContext(main.opened.sessionId, main.request);
+    const unit = repos.db.prepare(`SELECT unit_key FROM l3_units WHERE kind = 'project'`).get() as { unit_key: string };
+    repos.l3Field.insertItem({ unitKey: unit.unit_key, kind: "project_constraint", content: "改完跑 npm test", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
+    repos.l3Field.refreshSnapshot(unit.unit_key);
+    const locations = [
+      join(home, ".codex", "worktrees", "task", "demo"),
+      join(home, ".claude", "worktrees", "demo"),
+      join(home, ".cursor", "worktrees", "demo"),
+      join(home, "Library", "Application Support", "Claude", "scratch-workspaces", "task", "demo")
+    ];
+    locations.forEach((linked, index) => {
+      const gitDir = join(project, ".git", "worktrees", `agent-${index}`);
+      mkdirSync(gitDir, { recursive: true });
+      mkdirSync(join(linked, "src"), { recursive: true });
+      writeFileSync(join(gitDir, "commondir"), "../..\n");
+      writeFileSync(join(gitDir, "gitdir"), `${join(linked, ".git")}\n`);
+      writeFileSync(join(linked, ".git"), `gitdir: ${gitDir}\n`);
+      const next = open(service, `worktree-${index}`, join(linked, "src"));
+      expect(service.l3WorldModelContext(next.opened.sessionId, next.request).projectContract).toBe("- 改完跑 npm test");
+    });
+    expect(repos.db.prepare(`SELECT COUNT(*) AS n FROM l3_units WHERE kind = 'project'`).get()).toEqual({ n: 1 });
+  });
   it("reads without writing while memory writes are off, showing only what already exists", () => {
     const { db, service, repos, home, project } = setup();
     const { opened, request } = open(service, "read-only", project);

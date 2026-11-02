@@ -43,6 +43,7 @@ function worktree(mainRoot: string, worktreeRoot: string, name: string): void {
   const gitDir = join(mainRoot, ".git", "worktrees", name);
   mkdirSync(gitDir, { recursive: true });
   writeFileSync(join(gitDir, "commondir"), "../..\n");
+  writeFileSync(join(gitDir, "gitdir"), `${join(worktreeRoot, ".git")}\n`);
   mkdirSync(worktreeRoot, { recursive: true });
   writeFileSync(join(worktreeRoot, ".git"), `gitdir: ${path.relative(worktreeRoot, gitDir)}\n`);
 }
@@ -94,6 +95,73 @@ describe("readGitIdentity", () => {
 });
 
 describe("resolveProject", () => {
+
+  it.each([
+    ["Codex", ".codex/worktrees/id/demo"],
+    ["Claude Code", ".claude/worktrees/demo"],
+    ["Claude Code repository-local", "code/demo/.claude/worktrees/task"],
+    ["Cursor", ".cursor/worktrees/demo/task"],
+    ["another Agent", ".other-agent/checkouts/demo"],
+    ["Claude desktop", "Library/Application Support/Claude/scratch-workspaces/id/demo"],
+    ["dated task workspace", "Documents/Codex/2026-11-02/task/demo"],
+    ["temporary workspace", "tmp/worktree-demo"],
+    ["Memmy task workspace", "Memmy/task/demo"]
+  ])("recognizes a registered linked worktree and its child paths in %s", (_agent, location) => {
+    const main = dir("code", "demo");
+    gitRepo(main, "https://github.com/acme/demo.git");
+    const linked = dir(...location.split("/"));
+    worktree(main, linked, "agent-task");
+    const child = join(linked, "src", "nested");
+    mkdirSync(child, { recursive: true });
+    const selectedMain = { ...ctx, userProjects: [{ rootPath: main, name: "Demo" }] };
+    expect(resolveProject(asSession(linked), selectedMain)).toMatchObject({ identity: "github.com/acme/demo", source: "git", checkoutRoot: linked });
+    expect(resolveProject(asSession(child), selectedMain)).toMatchObject({ identity: "github.com/acme/demo", checkoutRoot: linked });
+    expect(resolveProject({ path: join(child, "new.ts"), role: "tool_path", sessionCwd: linked, sessionProjectRoot: linked }, selectedMain))
+      .toMatchObject({ identity: "github.com/acme/demo" });
+    expect(resolveProject(asSession(linked), { ...ctx, userProjects: [{ rootPath: linked, name: "Task" }] }))
+      .toMatchObject({ identity: "github.com/acme/demo", source: "user_selected" });
+  });
+
+  it("shares a hidden worktree's project with its main clone even without an origin", () => {
+    const main = dir("code", "local");
+    gitRepo(main);
+    const linked = dir(".some-agent", "worktrees", "local");
+    worktree(main, linked, "local");
+    expect(resolveProject(asSession(linked), ctx)?.identity).toBe(readGitIdentity(main)!.identity);
+  });
+
+  it.each(["Desktop", "Documents", "Downloads"])("does not promote an excluded %s container root through a linked worktree", (container) => {
+    const main = dir(container);
+    gitRepo(main, "https://github.com/acme/container.git");
+    const linked = dir(".some-agent", "worktrees", container);
+    worktree(main, linked, container);
+    expect(resolveProject(asSession(main), ctx)).toBeNull();
+    expect(resolveProject(asSession(linked), ctx)).toBeNull();
+  });
+
+  it("does not promote tool or dependency repositories through a linked worktree", () => {
+    for (const parts of [[".nvm"], ["code", "app", "node_modules", "dependency"]]) {
+      const tool = dir(...parts);
+      gitRepo(tool, "https://github.com/tool/installed.git");
+      const linked = dir(".some-agent", "worktrees", parts.at(-1)!);
+      worktree(tool, linked, parts.at(-1)!);
+      expect(resolveProject(asSession(linked), ctx)).toBeNull();
+    }
+  });
+
+  it("keeps ordinary hidden clones, unregistered pointers and plain scratch folders excluded", () => {
+    const clone = dir(".some-agent", "cache", "clone");
+    gitRepo(clone, "https://github.com/acme/cache.git");
+    expect(resolveProject(asSession(clone), ctx)).toBeNull();
+    const main = dir("code", "demo");
+    gitRepo(main, "https://github.com/acme/demo.git");
+    const invalid = dir(".some-agent", "worktrees", "invalid");
+    worktree(main, invalid, "invalid");
+    writeFileSync(join(main, ".git", "worktrees", "invalid", "gitdir"), `${join(home, "elsewhere", ".git")}\n`);
+    expect(resolveProject(asSession(invalid), ctx)).toBeNull();
+    expect(resolveProject(asSession(dir("Library", "Application Support", "Claude", "scratch-workspaces", "plain")), ctx)).toBeNull();
+    expect(resolveProject(asSession(dir("tmp", "plain")), ctx)).toBeNull();
+  });
   it("resolves a git repository by its origin, named after the remote repository", () => {
     const repo = dir("code", "memmy-agent-feature-x");
     gitRepo(repo, "https://github.com/MemTensor/memmy-agent.git");

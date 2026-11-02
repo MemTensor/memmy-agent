@@ -42,24 +42,32 @@ export function isPathWithin(parent: string, child: string, api: PathApi = path)
 /**
  * Decides which project a path belongs to: the nearer of a user-selected
  * folder and a git repository, otherwise (for a session folder) the folder
- * itself. Temporary and container folders never become projects.
+ * itself. A temporary checkout only joins a project through verified linked-worktree registration.
  */
 export function resolveProject(input: ResolveProjectInput, ctx: ResolverContext): ResolvedProject | null {
   if (!ctx.workspaceIsLocal || !path.isAbsolute(input.path)) return null;
   const target = lenientRealpath(input.path);
   const home = lenientRealpath(ctx.homeDir);
-  if (isThrowawayLocation(target, home, ctx)) return null;
-
   const startDir = existingDirectory(target);
   const selected = nearestUserProject(target, ctx.userProjects);
-  // A folder the user chose is a project wherever it is; otherwise tool install folders never are.
-  if (!selected && isToolLocation(target, home)) return null;
   // A dependency that is its own git clone belongs to the project that contains it.
   const gitStart = startDir ? outsidePackageDirectory(startDir) : null;
   const gitRaw = gitStart ? readGitIdentity(gitStart) : null;
-  const git = gitRaw && isUsableRoot(gitRaw.repoRoot, home, ctx) && !isToolLocation(gitRaw.repoRoot, home) ? gitRaw : null;
+  // Agents may put linked checkouts in hidden or temporary locations. A registered worktree of
+  // a usable user repository keeps that repository's identity; an installed tool's worktrees,
+  // ordinary clones, invalid pointers and unrelated scratch folders keep the normal exclusions.
+  // For an ordinary clone the common directory is <project>/.git. Apply root exclusions to
+  // that project, so e.g. a Desktop container does not become usable through Desktop/.git.
+  const commonRoot = gitRaw && (path.basename(gitRaw.commonDir) === ".git" ? path.dirname(gitRaw.commonDir) : gitRaw.commonDir);
+  const linked = Boolean(gitRaw?.linkedWorktree && commonRoot &&
+    isUsableRoot(commonRoot, home, ctx) && !isToolLocation(commonRoot, home) &&
+    !hasPackageDirectory(commonRoot));
+  if (isThrowawayLocation(target, home, ctx) && !linked) return null;
+  if (!selected && isToolLocation(target, home) && !linked) return null;
+  const git = gitRaw && (linked ||
+    (isUsableRoot(gitRaw.repoRoot, home, ctx) && !isToolLocation(gitRaw.repoRoot, home))) ? gitRaw : null;
 
-  if (selected && isUsableRoot(selected.root, home, ctx)) {
+  if (selected && (isUsableRoot(selected.root, home, ctx) || (linked && selected.root === git?.repoRoot))) {
     const gitIsNearer = git && git.repoRoot.length > selected.root.length;
     if (!gitIsNearer) {
       const sameRoot = git?.repoRoot === selected.root;
@@ -78,7 +86,7 @@ export function resolveProject(input: ResolveProjectInput, ctx: ResolverContext)
       source: "git",
       // Named after the remote repository so every checkout shows the same name.
       displayName: git.identity.startsWith("gitdir:")
-        ? path.basename(git.repoRoot)
+        ? path.basename(commonRoot ?? git.repoRoot)
         : git.identity.split("/").at(-1)!
     };
   }

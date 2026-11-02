@@ -6,6 +6,8 @@ export interface GitIdentity {
   repoRoot: string;
   /** Git directory shared by every worktree of the clone. */
   commonDir: string;
+  /** Registered linked checkout, verified against its common directory and registration backlink. */
+  linkedWorktree: boolean;
   /** Normalized origin URL, or `gitdir:<commonDir>` when there is no usable origin. */
   identity: string;
 }
@@ -27,6 +29,7 @@ export function readGitIdentity(startDir: string): GitIdentity | null {
       return {
         repoRoot: current,
         commonDir,
+        linkedWorktree: isRegisteredWorktree(current, located.gitDir, commonDir),
         identity: normalized ?? `gitdir:${commonDir}`
       };
     }
@@ -82,6 +85,18 @@ function locateGitDir(dir: string): { gitDir: string } | null {
     return { gitDir: path.resolve(dir, match[1]!.trim()) };
   } catch {
     return null;
+  }
+}
+
+/** A submodule or an arbitrary .git pointer is not a linked-worktree registration. */
+function isRegisteredWorktree(repoRoot: string, gitDir: string, commonDir: string): boolean {
+  const realGitDir = safeRealpath(gitDir);
+  if (realGitDir === commonDir || path.dirname(realGitDir) !== path.join(commonDir, "worktrees")) return false;
+  try {
+    const backlink = readFileSync(path.join(realGitDir, "gitdir"), "utf8").trim();
+    return Boolean(backlink) && safeRealpath(path.resolve(realGitDir, backlink)) === safeRealpath(path.join(repoRoot, ".git"));
+  } catch {
+    return false;
   }
 }
 
