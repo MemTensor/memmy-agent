@@ -15,11 +15,11 @@ async function environment(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return { root, data: join(root, "data") };
 }
-function call(data, capabilityId, input, extraEnv = {}) {
+function call(data, capabilityId, input, extraEnv = {}, observeStderr = () => {}) {
   return new Promise((ok, reject) => {
     const child = spawn(process.execPath, [executable], { env: { PATH: "/usr/bin:/bin", MEMMY_PLUGIN_DATA_DIR: data, ...extraEnv }, stdio: ["pipe", "pipe", "pipe"] });
     let output = "", errors = "";
-    child.stdout.on("data", b => output += b); child.stderr.on("data", b => errors += b);
+    child.stdout.on("data", b => output += b); child.stderr.on("data", b => { errors += b; observeStderr(b.toString()); });
     child.once("error", reject);
     child.once("close", code => {
       if (code) { reject(new Error(errors)); return; }
@@ -77,6 +77,41 @@ test("generated Han PDF uses the covered source font and still requires a real r
   const tasks = await readdir(join(data, "tasks")); assert.equal(tasks.length, 1);
   const zip = await JSZip.loadAsync(await readFile(join(data, "tasks", tasks[0], "source.docx")));
   assert.match(await zip.file("word/styles.xml").async("string"), /w:eastAsia="Owned PDF Han"/);
+});
+
+test("execute trace probes Host font metadata in the parent without widening the code child's read access", async t => {
+  const { data, root } = await environment(t);
+  const font = await writeMetadataFont(join(root, "private-font.ttf"), "Private Fixture Family", "中文内容文档生成预览与交付");
+  let stderr = "";
+  const result = await call(data, "office_execute", {
+    code: `await fs.readFile(${JSON.stringify(font)}); return {files:[]};`
+  }, { MEMMY_OFFICE_TRACE: "1", MEMMY_OFFICE_CJK_FONTS: JSON.stringify([font]) }, value => stderr += value);
+  assert.equal(result.code, "office_execution_failed");
+  assert.match(result.message, /Access|permission/i);
+  const line = stderr.split("\n").find(value => value.startsWith("Office CJK font diagnostic: "));
+  assert.ok(line, "the existing execute call should expose its bounded parent diagnostic");
+  const report = JSON.parse(line.slice("Office CJK font diagnostic: ".length));
+  assert.equal(report.hostFileCount, 1);
+  assert.equal(report.files[0].cmap.coveringFaces, 1);
+  for (const forbidden of [font, root, "Private Fixture Family", "中文"]) assert.equal(line.includes(forbidden), false);
+});
+
+test("execute trace with no Host fonts preserves normal code results", async t => {
+  const { data } = await environment(t);
+  let stderr = "";
+  const result = await call(data, "office_execute", { code: `
+    const document = new docx.Document({sections:[{children:[new docx.Paragraph("Trace without Host fonts")]}]});
+    await fs.writeFile(path.join(workspace,"trace.docx"),await docx.Packer.toBuffer(document));
+    return {files:["trace.docx"]};
+  ` }, { MEMMY_OFFICE_TRACE: "1" }, value => stderr += value);
+  assert.equal(result.type, "result", JSON.stringify(result));
+  assert.deepEqual(result.output.files, ["trace.docx"]);
+  const line = stderr.split("\n").find(value => value.startsWith("Office CJK font diagnostic: "));
+  assert.ok(line);
+  const diagnostic = JSON.parse(line.slice("Office CJK font diagnostic: ".length));
+  assert.equal(diagnostic.hostFileCount, 0); assert.deepEqual(diagnostic.files, []);
+  const inspected = await call(data, "office_inspect", { taskId: result.output.taskId, file: "trace.docx" });
+  assert.match(inspected.output.text, /Trace without Host fonts/);
 });
 
 test("exact replacement across Word formatting runs preserves unrelated parts", async t => {

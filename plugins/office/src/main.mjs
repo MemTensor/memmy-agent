@@ -12,7 +12,7 @@ import pptxgen from "pptxgenjs";
 import Ajv from "ajv";
 import { manifest } from "../scripts/manifest.mjs";
 import { parseDelimited } from "./delimited.mjs";
-import { selectCjkFont } from "./cjk-fonts.mjs";
+import { diagnoseCjkFonts, selectCjkFont } from "./cjk-fonts.mjs";
 
 const NS = {
   w: "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -527,6 +527,11 @@ async function handle(call) {
     }
     case "office_create": return await create(input);
     case "office_execute": {
+      // Probe in this already sandboxed parent, never in the restricted code child.
+      if (process.env.MEMMY_OFFICE_TRACE === "1") {
+        try { console.error("Office CJK font diagnostic: " + JSON.stringify(await diagnoseCjkFonts())); }
+        catch { console.error('Office CJK font diagnostic: {"probeFailed":true}'); }
+      }
       if (input.inputFiles?.length && !input.sourceTaskId) throw fail("invalid_input", "inputFiles require sourceTaskId");
       const task = await newTask();
       const executionDirectory = path.join(task.directory, "execution");
