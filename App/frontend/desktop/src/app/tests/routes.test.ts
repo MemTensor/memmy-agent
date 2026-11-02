@@ -100,6 +100,14 @@ describe("desktop route table", () => {
       "/memory",
       "/knowledge",
       "/memory-sources",
+      "/credit-purchase-details",
+      "/credit-reward-details",
+      "/credit-packs",
+      "/redeem",
+      "/credit-checkout",
+      "/plans",
+      "/checkin",
+      "/limits",
       "/settings"
     ]);
   });

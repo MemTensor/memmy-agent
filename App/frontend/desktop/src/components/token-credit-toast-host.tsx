@@ -1,4 +1,4 @@
-/** Enqueues the token-credit notification after a campaign reward is granted. */
+/** Enqueues an activity-reward notification with explicitly denominated credits. */
 import { useCallback, useEffect, useRef } from "react";
 import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
 import { useOptionalApiClients } from "../app/providers.js";
@@ -8,13 +8,13 @@ import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
 import { useNotificationCenter } from "./notification-center.js";
 
-const PREVIEW_TOKEN_AMOUNT = 500_000;
+const PREVIEW_CREDIT_AMOUNT = 200;
 
 /** Pushes a manual-close notice for the latest unacknowledged campaign reward. */
 export function TokenCreditToastHost() {
   const { state, dispatch } = useAppState();
   const { clients } = useOptionalApiClients();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   const { notify } = useNotificationCenter();
   const notifiedRef = useRef(false);
   const activeAccountUserIdRef = useRef<string | null>(null);
@@ -36,22 +36,25 @@ export function TokenCreditToastHost() {
   }, [clients, dispatch]);
 
   /** Enqueues the title + amount credit notification. */
-  const showTokenCredit = useCallback((tokens: number, onClose: () => void = refreshBalance) => {
+  const showRewardCredit = useCallback((reward: { creditAmount?: number; tokenAmount?: number }, onClose: () => void = refreshBalance) => {
+    const isCreditReward = reward.creditAmount !== undefined;
     notify({
       variant: "success",
-      title: t("tokenCredit.title"),
-      emphasis: `+${formatTokenGiftAmount(tokens)}`,
+      title: t(isCreditReward ? "tokenCredit.creditTitle" : "tokenCredit.title"),
+      emphasis: isCreditReward
+        ? t("tokenCredit.amount", { count: reward.creditAmount!.toLocaleString(language, { maximumFractionDigits: 2 }) })
+        : `+${formatTokenGiftAmount(reward.tokenAmount ?? 0)}`,
       onClose
     });
-  }, [notify, refreshBalance, t]);
+  }, [notify, refreshBalance, t, language]);
 
   useEffect(() => {
     if (notifiedRef.current || !isDesktopPromptPreview("tokenCredit")) {
       return;
     }
     notifiedRef.current = true;
-    showTokenCredit(PREVIEW_TOKEN_AMOUNT);
-  }, [showTokenCredit]);
+    showRewardCredit({ creditAmount: PREVIEW_CREDIT_AMOUNT });
+  }, [showRewardCredit]);
 
   useEffect(() => {
     const accountUserId = state.account.userId;
@@ -75,13 +78,14 @@ export function TokenCreditToastHost() {
             return;
           }
 
-          const rewardKey = reward.drawId ? `draw:${reward.drawId}` : `amount:${reward.tokenAmount}`;
+          const amountKey = reward.creditAmount === undefined ? `tokens:${reward.tokenAmount}` : `credits:${reward.creditAmount}`;
+          const rewardKey = reward.drawId ? `draw:${reward.drawId}` : `amount:${amountKey}`;
           if (shownRewardKeysRef.current.has(rewardKey)) {
             return;
           }
           shownRewardKeysRef.current.add(rewardKey);
 
-          showTokenCredit(reward.tokenAmount, () => {
+          showRewardCredit(reward, () => {
             void activeClients.account
               .ackLotteryReward(reward.drawId ? { drawId: reward.drawId } : {})
               .catch((error: unknown) => console.warn("[token-credit] failed to acknowledge reward:", error))
@@ -106,7 +110,7 @@ export function TokenCreditToastHost() {
       }
       window.removeEventListener("focus", checkReward);
     };
-  }, [clients, refreshBalance, showTokenCredit, state.account.userId]);
+  }, [clients, refreshBalance, showRewardCredit, state.account.userId]);
 
   return null;
 }

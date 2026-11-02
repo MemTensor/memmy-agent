@@ -17,6 +17,14 @@ const ROUTE_PAGE_TITLES: Record<AppRoutePath, string> = {
   "/memory": "Memory",
   "/knowledge": "Knowledge",
   "/memory-sources": "Memory Sources",
+  "/plans": "Plans",
+  "/credit-purchase-details": "Purchased Credit Details",
+  "/credit-reward-details": "Reward Credit Details",
+  "/credit-packs": "Credit Packs",
+  "/redeem": "Redeem Credits",
+  "/credit-checkout": "Credit Checkout",
+  "/checkin": "Daily Check-in",
+  "/limits": "Out of credits",
   "/settings": "Settings"
 };
 

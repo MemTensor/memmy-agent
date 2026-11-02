@@ -1,5 +1,6 @@
 /** Shared settings sidebar navigation for Desktop AppFrame + Settings page. */
 import type { MessageKey } from "../i18n/messages.js";
+import { isCreditsPreviewMode } from "../app/credits-preview-mode.js";
 
 export type SettingsTabId = "account" | "model" | "tokens" | "preferences" | "computer-use" | "about";
 
@@ -22,7 +23,7 @@ export const SETTINGS_NAV_SECTIONS: ReadonlyArray<SettingsNavSection> = [
     titleKey: "settings.nav.models",
     items: [
       { id: "model", labelKey: "settings.model" },
-      { id: "tokens", labelKey: "settings.tokens" }
+      { id: "tokens", labelKey: isCreditsPreviewMode() ? "credits.balance.title" : "settings.tokens" }
     ]
   },
   {
@@ -40,7 +41,7 @@ export const SETTINGS_NAV_ITEMS: ReadonlyArray<SettingsNavItem> = SETTINGS_NAV_S
   (section) => section.items
 );
 
-/** Deep-link that opens Token settings and scrolls to the memory budget card. */
+/** Deep-link that opens Model settings and scrolls to the memory budget card. */
 export const SETTINGS_MEMORY_BUDGET_HASH = "#token-usage-memory-budget";
 /** Same-window event used when Settings is already mounted. */
 export const SETTINGS_MEMORY_BUDGET_EVENT = "memmy:settings-focus-memory-budget";
@@ -79,13 +80,14 @@ export function resolveSettingsTabFromHash(hash: string): SettingsTabId | null {
     case "#pet-avatar":
     case "#preferences":
       return "preferences";
+    case "#model-usage":
+    case SETTINGS_MEMORY_BUDGET_HASH:
     case "#model-config":
     case "#model":
     case SETTINGS_ADD_MODEL_HASH:
       return "model";
     case "#token-usage":
     case "#tokens":
-    case SETTINGS_MEMORY_BUDGET_HASH:
       return "tokens";
     case "#about":
       return "about";
@@ -171,7 +173,7 @@ export function writeSettingsBrowserExtensionFocus(): void {
   window.dispatchEvent(new CustomEvent(SETTINGS_BROWSER_EXTENSION_EVENT));
 }
 
-/** Opens Token usage and asks Settings to locate the memory budget card. */
+/** Opens model usage and asks Settings to locate the memory budget card. */
 export function writeSettingsMemoryBudgetFocus(): void {
   if (typeof window === "undefined") {
     return;

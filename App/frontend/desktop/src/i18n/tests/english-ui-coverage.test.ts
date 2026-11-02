@@ -15,6 +15,11 @@ const allowedSourceFiles = new Set([
   "components/model-provider-logo.tsx",
   // App names people type to find an app in search, not visible UI copy.
   "pages/memory/app-search-aliases.ts",
+  // Credits preview fixtures carry paired Chinese and English example content.
+  "app/credit-usage-ledger.ts",
+  "app/credit-usage-mock-inputs.ts",
+  "app/credits-error-preview-bootstrap.ts",
+  "pages/credits-error-previews.tsx",
   // English ui coverage tests.
   "dev-agent-preview.tsx"
 ]);

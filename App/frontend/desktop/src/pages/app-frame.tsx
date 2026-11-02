@@ -8,9 +8,12 @@ import {
 } from "../app/product-tour.js";
 import { PRODUCT_TOUR_CHAT_CONTENT_ANCHOR, PRODUCT_TOUR_MEMORY_NAV_ANCHOR, PRODUCT_TOUR_TOOLS_NAV_ANCHOR } from "../app/product-tour-layout.js";
 import type { AppRoutePath } from "../app/routes.js";
-import { clearFocusedAgentTarget, clearProductTourStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
+import { clearFocusedAgentTarget, clearProductTourStep, readDeferredGuidanceStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
 import { useGuidanceProgress } from "../app/use-guidance-progress.js";
 import { isCampaignPromptSessionReady, isCampaignPromptSurfaceReady } from "../app/campaign-prompt-state.js";
+import { isCreditsPreviewMode } from "../app/credits-preview-mode.js";
+import { describeCreditPool } from "../app/credits-preview-quota.js";
+import { useCreditDemo } from "../app/use-credit-demo.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { buildOnboardingStepCompletedEvent } from "../analytics/onboarding-analytics.js";
 import {
@@ -67,8 +70,8 @@ import {
   Wand2
 } from "./memory/memory-prototype-icons.js";
 import { AppContentTopbar } from "./app-content-topbar.js";
-import { SETTINGS_BROWSER_EXTENSION_EVENT, SETTINGS_EXCEL_CONNECTION_EVENT, SETTINGS_NAV_ITEMS, writeSettingsMemoryBudgetFocus, type SettingsTabId } from "./settings-nav.js";
-import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, MousePointer2, Plus, RotateCcw } from "lucide-react";
+import { SETTINGS_BROWSER_EXTENSION_EVENT, SETTINGS_EXCEL_CONNECTION_EVENT, SETTINGS_NAV_ITEMS, writeSettingsMemoryBudgetFocus, writeSettingsTabHash, type SettingsTabId } from "./settings-nav.js";
+import { ArrowDown, ArrowUpRight, Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, LogOut, MoreHorizontal, MousePointer2, Plus, RotateCcw } from "lucide-react";
 
 export interface SettingsSidebarNav {
   activeTab: SettingsTabId;
@@ -260,6 +263,11 @@ function resolveProductTourNavAnchor(path: AppRoutePath): string | undefined {
   return undefined;
 }
 
+/** Plans and check-in reuse the settings sidebar, so Back must leave the whole group. */
+function isSettingsShellPath(path: AppRoutePath): boolean {
+  return path === "/settings" || path === "/credit-purchase-details" || path === "/credit-reward-details" || path === "/credit-packs" || path === "/redeem" || path === "/credit-checkout" || path === "/plans" || path === "/checkin" || path === "/limits";
+}
+
 export function shouldCreateNewAgentDraft(agent: NewAgentDraftState): boolean {
   if (agent.blankDraftActive) {
     return false;
@@ -287,6 +295,7 @@ export function AppFrame(props: AppFrameProps) {
   const { t, language } = useTranslation();
   const update = useOptionalUpdateCoordinator();
   const { track } = useAnalytics();
+  const apiClients = useOptionalApiClients();
   const taskStateCoordinator = useOptionalAgentRuntimeBridge()?.taskStateCoordinator
     ?? standaloneRenderTaskStateCoordinator;
   const taskBus = useTaskBus();
@@ -315,6 +324,10 @@ export function AppFrame(props: AppFrameProps) {
   });
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const windowsChrome = isWindowsDesktopPlatform();
+  const [accountMenu, setAccountMenu] = useState<{ left: number; bottom: number } | null>(null);
+  const [creditRefreshedAt, setCreditRefreshedAt] = useState<Date | null>(null);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const [logoutBusy, setLogoutBusy] = useState(false);
   const taskScrollRef = useRef<HTMLDivElement | null>(null);
   const [taskScrollFade, setTaskScrollFade] = useState(false);
   const sidebarResize = useCodexResizableSidebar("memmy.appFrame.sidebarWidth.codex.v3");
@@ -329,8 +342,15 @@ export function AppFrame(props: AppFrameProps) {
     unsetName: t("appFrame.unsetName"),
     unsetMeta: t("appFrame.unsetMeta")
   });
+  const creditAccountMenu = isCreditsPreviewMode() && state.bootstrap?.app.userMode === "account";
+  const creditDemo = useCreditDemo(creditAccountMenu);
+  const creditPool = creditAccountMenu ? describeCreditPool(creditDemo.demo, creditDemo.now) : null;
+  const creditQuota = creditPool ? { ...creditPool, balance: creditPool.totalRemaining } : null;
+  const profileMeta = creditQuota
+    ? (t(creditQuota.plan === "pro" ? "plan.pro.name" : "plan.free.name"))
+    : accountSummary.meta;
   const accountNameLine = truncateAccountDisplayText(accountSummary.name, SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH);
-  const accountMetaLine = truncateAccountDisplayText(accountSummary.meta, SIDEBAR_PROFILE_META_MAX_VISUAL_WIDTH);
+  const accountMetaLine = truncateAccountDisplayText(profileMeta, SIDEBAR_PROFILE_META_MAX_VISUAL_WIDTH);
   const sidebarUpdateAction = resolveSidebarUpdateAction(update, t);
   const visibleTasks = state.agent.tasks;
   const projectTree = useMemo(
@@ -461,7 +481,7 @@ export function AppFrame(props: AppFrameProps) {
   useEffect(() => {
     if (
       typeof document === "undefined"
-      || (!taskListMenuAnchor && !taskContextMenu && !projectContextMenu && !projectCreateMenuAnchor && !archiveConfirmSessionKey)
+      || (!taskListMenuAnchor && !taskContextMenu && !projectContextMenu && !projectCreateMenuAnchor && !archiveConfirmSessionKey && !accountMenu)
     ) {
       return;
     }
@@ -473,6 +493,7 @@ export function AppFrame(props: AppFrameProps) {
       setProjectContextMenu(null);
       setProjectCreateMenuAnchor(null);
       setArchiveConfirmSessionKey(null);
+      setAccountMenu(null);
     };
     const closeOnOutsidePointerDown = (event: PointerEvent) => {
       const target = event.target;
@@ -488,6 +509,7 @@ export function AppFrame(props: AppFrameProps) {
         target.closest(".app-frame-sidebar-menu")
         || target.closest(".app-frame-workspace-picker-menu")
         || target.closest(".app-frame-task-row--confirming")
+        || target.closest("[data-account-menu-trigger]")
       ) {
         return;
       }
@@ -505,7 +527,7 @@ export function AppFrame(props: AppFrameProps) {
       document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [archiveConfirmSessionKey, projectContextMenu, projectCreateMenuAnchor, taskContextMenu, taskListMenuAnchor]);
+  }, [accountMenu, archiveConfirmSessionKey, projectContextMenu, projectCreateMenuAnchor, taskContextMenu, taskListMenuAnchor]);
 
   function refreshAgentTasks(): void {
     taskStateCoordinator.refreshTaskState({ reason: "manual" });
@@ -541,14 +563,72 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function openSettingsFromSidebar() {
-    if (state.navigation.currentPath === "/settings") {
-      const prev = state.navigation.history.slice().reverse().find((p) => p !== "/settings");
+    if (isSettingsShellPath(state.navigation.currentPath)) {
+      const prev = state.navigation.history.slice().reverse().find((path) => !isSettingsShellPath(path));
       dispatch(appActions.navigate(prev ?? "/main"));
       return;
     }
 
     dispatch(appActions.navigate("/settings"));
     handleFirstSidebarInteraction();
+  }
+
+  function toggleCreditAccountMenu(trigger: HTMLElement) {
+    setAccountMenu((current) => {
+      if (current) {
+        return null;
+      }
+      const rect = trigger.getBoundingClientRect();
+      const width = 248;
+      return {
+        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+        bottom: Math.max(8, window.innerHeight - rect.top + 8)
+      };
+    });
+  }
+
+  function openCreditBalance() {
+    setAccountMenu(null);
+    writeSettingsTabHash("tokens");
+    dispatch(appActions.navigate("/settings"));
+  }
+
+  function openCreditPlans() {
+    setAccountMenu(null);
+    dispatch(appActions.navigate("/plans"));
+  }
+
+  function openSettingsFromAccountMenu() {
+    setAccountMenu(null);
+    writeSettingsTabHash("account");
+    if (state.navigation.currentPath !== "/settings") {
+      dispatch(appActions.navigate("/settings"));
+    }
+  }
+
+  async function confirmAccountLogout() {
+    if (logoutBusy) {
+      return;
+    }
+    setLogoutBusy(true);
+    try {
+      await (apiClients.clients?.account.logout() ?? Promise.resolve({ ok: true as const }));
+      track({ name: "account_logout", params: { page_path: state.navigation.currentPath }, consentTier: "basic" });
+      const { finalizeAccountLogout } = await import("./settings-page.js");
+      const nextUserMode = await finalizeAccountLogout({
+        modelConfig: state.modelConfig,
+        configClient: apiClients.clients?.config,
+        dispatch
+      });
+      if (nextUserMode === "unset") {
+        dispatch(appActions.navigate("/welcome"));
+      }
+      setLogoutConfirmOpen(false);
+    } catch (error) {
+      console.warn("logout account failed", error);
+    } finally {
+      setLogoutBusy(false);
+    }
   }
 
   function handleFirstSidebarInteraction() {
@@ -1427,9 +1507,18 @@ export function AppFrame(props: AppFrameProps) {
           <div className="app-frame-sidebar-footer app-frame-sidebar-footer--compound">
             <button
               type="button"
-              onClick={openSettingsFromSidebar}
-              title={t("settings.title")}
-              aria-label={t("settings.title")}
+              data-account-menu-trigger={creditAccountMenu ? "true" : undefined}
+              onClick={(event) => {
+                if (creditAccountMenu) {
+                  toggleCreditAccountMenu(event.currentTarget);
+                  return;
+                }
+                openSettingsFromSidebar();
+              }}
+              title={creditAccountMenu ? accountSummary.name : t("settings.title")}
+              aria-label={creditAccountMenu ? accountSummary.name : t("settings.title")}
+              aria-expanded={creditAccountMenu ? accountMenu != null : undefined}
+              aria-haspopup={creditAccountMenu ? "menu" : undefined}
               className="app-frame-sidebar-footer--button app-frame-sidebar-footer-account"
             >
               <span className="flex w-full min-w-0 items-center gap-2.5 px-2 py-1.5">
@@ -1444,7 +1533,7 @@ export function AppFrame(props: AppFrameProps) {
                   />
                   <SidebarProfileTextLine
                     className="app-frame-profile-meta text-text-ink/45 truncate"
-                    fullText={accountSummary.meta}
+                    fullText={profileMeta}
                     line={accountMetaLine}
                   />
                 </span>
@@ -1482,9 +1571,18 @@ export function AppFrame(props: AppFrameProps) {
         ) : (
           <button
             type="button"
-            onClick={openSettingsFromSidebar}
-            title={t("settings.title")}
-            aria-label={t("settings.title")}
+            data-account-menu-trigger={creditAccountMenu ? "true" : undefined}
+            onClick={(event) => {
+              if (creditAccountMenu) {
+                toggleCreditAccountMenu(event.currentTarget);
+                return;
+              }
+              openSettingsFromSidebar();
+            }}
+            title={creditAccountMenu ? accountSummary.name : t("settings.title")}
+            aria-label={creditAccountMenu ? accountSummary.name : t("settings.title")}
+            aria-expanded={creditAccountMenu ? accountMenu != null : undefined}
+            aria-haspopup={creditAccountMenu ? "menu" : undefined}
             className="app-frame-sidebar-footer app-frame-sidebar-footer--button"
           >
             <span className="flex w-full items-center gap-2.5 px-2 py-1.5">
@@ -1499,7 +1597,7 @@ export function AppFrame(props: AppFrameProps) {
                 />
                 <SidebarProfileTextLine
                   className="app-frame-profile-meta text-text-ink/45 truncate"
-                  fullText={accountSummary.meta}
+                  fullText={profileMeta}
                   line={accountMetaLine}
                 />
               </span>
@@ -1581,6 +1679,88 @@ export function AppFrame(props: AppFrameProps) {
         {props.sidePanel}
       </main>
       </div>
+      {accountMenu && creditQuota && typeof document !== "undefined" ? createPortal(
+        <div
+          className="app-frame-sidebar-menu app-frame-sidebar-menu--account"
+          style={{ left: accountMenu.left, bottom: accountMenu.bottom }}
+          role="menu"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="app-frame-sidebar-menu__account">
+            <span className="app-frame-sidebar-menu__account-avatar" aria-hidden="true"><User size={13} /></span>
+            <div className="app-frame-sidebar-menu__account-name">{accountSummary.name}</div>
+          </div>
+          <div className="app-frame-sidebar-menu__quota">
+            <div className="app-frame-sidebar-menu__quota-panel">
+              <button type="button" className="app-frame-sidebar-menu__quota-figures" role="menuitem" onClick={openCreditBalance}>
+                <span>
+                  <span>{t("credits.menu.plan")}</span>
+                  <strong>{t(creditQuota.plan === "pro" ? "plan.pro.name" : "plan.free.name")}</strong>
+                </span>
+                <span>
+                  <span>{t("credits.balance.title")}</span>
+                  <strong>
+                    {creditQuota.balance.toLocaleString(language === "en-US" ? "en-US" : "zh-CN", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2
+                    })}
+                  </strong>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="app-frame-sidebar-menu__quota-refresh"
+                role="menuitem"
+                aria-label={t("credits.balance.refresh")}
+                title={creditRefreshedAt ? t("credits.refreshed", { time: creditRefreshedAt.toLocaleTimeString(language) }) : t("credits.balance.refresh")}
+                onClick={() => { creditDemo.reload(); setCreditRefreshedAt(new Date()); }}
+              >
+                <RefreshCw size={13} aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+          <div className="app-frame-sidebar-menu__divider" />
+          {(
+            <button type="button" className="app-frame-sidebar-menu__item app-frame-sidebar-menu__quota-upgrade" role="menuitem" onClick={openCreditPlans}>
+              <span className="app-frame-sidebar-menu__item-icon"><ArrowUpRight size={13} /></span>
+              <span className="app-frame-sidebar-menu__item-label">{t(creditQuota.plan === "pro" ? "credits.balance.managePlan" : "credits.balance.upgrade")}</span>
+            </button>
+          )}
+          <button type="button" className="app-frame-sidebar-menu__item" role="menuitem" onClick={openSettingsFromAccountMenu}>
+            <span className="app-frame-sidebar-menu__item-icon"><Settings2 size={13} /></span>
+            <span className="app-frame-sidebar-menu__item-label">{t("settings.title")}</span>
+          </button>
+          <div className="app-frame-sidebar-menu__divider" />
+          <button
+            type="button"
+            className="app-frame-sidebar-menu__item"
+            role="menuitem"
+            onClick={() => {
+              setAccountMenu(null);
+              setLogoutConfirmOpen(true);
+            }}
+          >
+            <span className="app-frame-sidebar-menu__item-icon"><LogOut size={13} /></span>
+            <span className="app-frame-sidebar-menu__item-label">{t("settings.logout")}</span>
+          </button>
+        </div>,
+        document.body
+      ) : null}
+      <ConfirmDialog
+        open={logoutConfirmOpen}
+        title={t("settings.account.logoutTitle")}
+        message={t("settings.account.logoutDesc")}
+        cancelLabel={t("dialog.cancel")}
+        closeLabel={t("common.close")}
+        confirmLabel={t("settings.account.logoutOk")}
+        confirmDisabled={logoutBusy}
+        onCancel={() => {
+          if (!logoutBusy) {
+            setLogoutConfirmOpen(false);
+          }
+        }}
+        onConfirm={() => void confirmAccountLogout()}
+      />
       <ConfirmDialog
         open={removeProject != null}
         title={t("appFrame.project.remove")}

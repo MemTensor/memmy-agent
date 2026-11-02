@@ -68,6 +68,10 @@ import { PetStartupScreen } from "../pages/pet-startup-screen.js";
 import { StartupScreen } from "../pages/startup-screen.js";
 import { TokenDetailPage } from "../pages/token-detail-page.js";
 import { WelcomePage } from "../pages/welcome-page.js";
+import { CreditsCheckinPage, CreditsSourceDetailPage } from "../pages/credits-in-app.js";
+import { CreditsPlansPage, CreditsRedeemPage } from "../pages/credits-commerce.js";
+import { CreditsLimitsPage, CreditsMemoryPausedPage, CreditsKnowledgeLimitPage } from "../pages/credits-error-previews.js";
+import { creditErrorScenario, isCreditsPreviewMode } from "./credits-preview-mode.js";
 
 // These pages are not needed to show the startup, sign-in, or chat screens.
 const MemoryPage = lazy(() => import("../pages/memory-page.js").then(({ MemoryPage }) => ({ default: MemoryPage })));
@@ -374,6 +378,22 @@ function renderRoute(path: AppRoutePath) {
   switch (path) {
     case "/token-detail":
       return <TokenDetailPage />;
+    case "/credit-purchase-details":
+      return isCreditsPreviewMode() ? <CreditsPlansPage /> : <SettingsPage />;
+    case "/credit-reward-details":
+      return isCreditsPreviewMode() ? <CreditsSourceDetailPage source="reward" /> : <SettingsPage />;
+    case "/credit-packs":
+      return isCreditsPreviewMode() ? <CreditsPlansPage /> : <SettingsPage />;
+    case "/redeem":
+      return isCreditsPreviewMode() ? <CreditsRedeemPage /> : <SettingsPage />;
+    case "/credit-checkout":
+      return isCreditsPreviewMode() ? <CreditsPlansPage /> : <SettingsPage />;
+    case "/plans":
+      return isCreditsPreviewMode() ? <CreditsPlansPage /> : <SettingsPage />;
+    case "/checkin":
+      return isCreditsPreviewMode() ? <CreditsCheckinPage /> : <SettingsPage />;
+    case "/limits":
+      return isCreditsPreviewMode() ? <CreditsLimitsPage /> : <SettingsPage />;
     case "/login":
       return <LoginPage />;
     case "/api-key":
@@ -387,9 +407,9 @@ function renderRoute(path: AppRoutePath) {
     case "/tools":
       return <ToolsPage />;
     case "/memory":
-      return <MemoryPage />;
+      return creditErrorScenario() === "memory" ? <CreditsMemoryPausedPage /> : <MemoryPage />;
     case "/knowledge":
-      return <KnowledgePage />;
+      return creditErrorScenario() === "knowledge" ? <CreditsKnowledgeLimitPage /> : <KnowledgePage />;
     case "/memory-sources":
       return <MemoryPage initialSubPage="sources" />;
     case "/settings":
