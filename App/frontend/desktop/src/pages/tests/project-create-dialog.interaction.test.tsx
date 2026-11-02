@@ -124,6 +124,8 @@ describe("new project dialog", () => {
   }
 
   it("creates only the local project while sharing is off", async () => {
+    // 有人能加入时，两段模式标签才留着（新建 / 加入协作项目）。
+    expect(document.querySelector(".modal-body [role='tablist']")).not.toBeNull();
     expect(shareSwitch().getAttribute("aria-checked")).toBe("false");
     await act(async () => type(nameInput(), "demo"));
     await act(async () => submitButton().click());
@@ -262,6 +264,11 @@ describe("new project dialog", () => {
     expect(document.querySelector(".modal-body [role='switch']")).toBeNull();
     expect(document.body.textContent).not.toContain("与成员共享");
     expect(document.body.textContent).not.toContain("加入项目");
+    // 只剩一种模式：那排分段标签整条不渲染，否则孤零零一个「新建项目」会被读成弹窗里的按钮。
+    expect(document.querySelector(".modal-body [role='tablist']")).toBeNull();
+    // 项目不一定是协作项目，副标题只讲项目本身，不把成员与协作当时前提。
+    expect(document.body.textContent).not.toContain("成员协作");
+    expect(document.body.textContent).toContain("项目把相关任务归在一起，任务与对话都保存在项目里");
 
     await act(async () => type(nameInput(), "demo"));
     await act(async () => submitButton().click());

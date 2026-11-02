@@ -257,7 +257,8 @@ export const zhCNMessages = {
   "collab.session.deleteMessage": "「{title}」将从项目中移除，项目成员不再可见；本机的任务保留。",
   "collab.session.deleted": "已删除",
   "collab.create.title": "新建项目",
-  "collab.create.subtitle": "项目用于成员协作：成员的任务与对话汇总至项目，供成员及其 Agent 参考。",
+  // 项目不一定是协作项目：本机模式与 API Key 模式下也会用它，所以这句只讲项目本身。
+  "collab.create.subtitle": "项目把相关任务归在一起，任务与对话都保存在项目里。",
   "collab.create.name": "项目名称",
   "collab.create.namePlaceholder": "1–20 个字",
   "collab.create.dirOptional": "本机目录（可选）",
@@ -2814,7 +2815,7 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "collab.session.deleteMessage": "“{title}” will be removed from the project and members will no longer see it. The session on this computer is kept.",
   "collab.session.deleted": "Deleted",
   "collab.create.title": "New project",
-  "collab.create.subtitle": "A project is where members work together: their tasks and conversations collect here for members and their agents.",
+  "collab.create.subtitle": "A project groups related tasks and keeps their conversations together.",
   "collab.create.name": "Project name",
   "collab.create.namePlaceholder": "1–20 characters",
   "collab.create.dirOptional": "Local folder (optional)",

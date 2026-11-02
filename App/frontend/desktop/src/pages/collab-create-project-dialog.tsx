@@ -194,11 +194,13 @@ export function CreateProjectModal(props: {
         </>
       )}
     >
-      <div className={styles.projectTabs} role="tablist">
-        <button type="button" role="tab" aria-selected="true" className={`${styles.projectTab} ${styles.projectTabOn}`}>
-          {t("collab.create.title")}
-        </button>
-        {shareAvailable ? (
+      {/* 两种模式的分段标签：只有「加入协作项目」可用时才值得出现。
+          API Key 模式与未登录时只剩一种模式，孤零零一个标签会被当成长在弹窗里的按钮，所以整条不渲染。 */}
+      {shareAvailable ? (
+        <div className={styles.projectTabs} role="tablist">
+          <button type="button" role="tab" aria-selected="true" className={`${styles.projectTab} ${styles.projectTabOn}`}>
+            {t("collab.create.title")}
+          </button>
           <button
             type="button"
             role="tab"
@@ -208,8 +210,8 @@ export function CreateProjectModal(props: {
           >
             {t("collab.join.pasteTitle")}
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       {/* 与项目配置同一套行式排布：左侧标题与说明，右侧输入框 / 按钮 / 开关 */}
       <div className={styles.settingsRows}>
         <div className={styles.settingsRow}>
