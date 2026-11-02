@@ -600,7 +600,7 @@ async function routeRequest(
   requestId: string,
   signal?: AbortSignal
 ): Promise<unknown> {
-  const localPanel=principal.kind==="local"||principal.kind==="anonymous";
+  const localPanel=principal.kind==="local"||principal.kind==="anonymous"||principal.kind==="viewer";
   const panelEnvelope=localPanelRequest({namespace:principal.namespace,timeZone:principal.timeZone},localPanel);
   const readPanel = (method:string,args:unknown[]) => service.readPanel(method,args,signal);
   const path = url.pathname;
@@ -1031,13 +1031,14 @@ async function routeRequest(
 
   if (method === "DELETE" && path === "/api/v1/admin/data") {
     requireMemoryWrite(principal);
+    if (!localPanel) throw new MemoryServiceError("forbidden", "Clearing device memory requires local access");
     return agentSources.clearAllData();
   }
 
   const panelMemory=path.match(/^\/api\/v1\/panel\/memory\/([^/]+)$/u);
   if(method==="GET"&&panelMemory){
     requirePanelRead(principal);
-    return service.getPanelMemory(decodeURIComponent(panelMemory[1]!),{namespace:principal.namespace,timeZone:principal.timeZone},localPanel);
+    return service.getPanelMemory(decodeURIComponent(panelMemory[1]!),ownerBoundRequest({namespace:principal.namespace,timeZone:principal.timeZone},principal),localPanel);
   }
 
   if (method === "GET" && path === "/api/v1/panel/analysis") {
@@ -1172,7 +1173,7 @@ async function routeRequest(
       () =>
         service.getMemory(
           decodeMatchSegment(memoryGet, 1),
-          { namespace: principal.namespace, timeZone: principal.timeZone },
+          ownerBoundRequest({ namespace: principal.namespace, timeZone: principal.timeZone }, principal),
           localPanel
         ),
       (result) => ({ hit_count: hitCountFromGetResponse(result) }),
@@ -1182,18 +1183,18 @@ async function routeRequest(
   const panelTaskDelete = match(path, /^\/api\/v1\/panel\/tasks\/([^/]+)$/);
   if (method === "DELETE" && panelTaskDelete) {
     requireMemoryWrite(principal);
-    const request = envelopeWithPrincipal(asObject(body, "panel.task.delete"), principal) as MemoryGovernanceRequest;
+    const request = ownerBoundRequest(envelopeWithPrincipal(asObject(body, "panel.task.delete"), principal), principal) as MemoryGovernanceRequest;
     const id = decodeMatchSegment(panelTaskDelete, 1);
-    return publicDeletePanelTaskResponse(service.deletePanelTask(id, request));
+    return publicDeletePanelTaskResponse(service.deletePanelTask(id, request, localPanel));
   }
 
   const memoryDelete = match(path, /^\/api\/v1\/memory\/([^/]+)$/);
   if (method === "DELETE" && memoryDelete) {
     requireMemoryWrite(principal);
-    const request = envelopeWithPrincipal(asObject(body, "memory.delete"), principal) as MemoryGovernanceRequest;
+    const request = ownerBoundRequest(envelopeWithPrincipal(asObject(body, "memory.delete"), principal), principal) as MemoryGovernanceRequest;
     const id = decodeMatchSegment(memoryDelete, 1);
-    return publicDeleteMemoryResponse(await service.idempotent("memory.delete", request, { id, request }, () =>
-      service.deleteMemory(id, request)
+    return publicDeleteMemoryResponse(await service.idempotent("memory.delete", request, { id, request, local: localPanel }, () =>
+      service.deleteMemory(id, request, localPanel)
     ));
   }
 
@@ -1653,6 +1654,11 @@ function envelopeWithPrincipal<T extends Record<string, unknown>>(
     namespace,
     timeZone: principal.timeZone ?? (typeof body.timeZone === "string" ? body.timeZone : undefined)
   } as T & RequestEnvelope;
+}
+
+function ownerBoundRequest<T extends RequestEnvelope>(request: T, principal: AuthPrincipal): T {
+  if (principal.kind !== "cloud" && principal.kind !== "scoped") return request;
+  return { ...request, namespace: { ...request.namespace, userId: principal.authenticatedNamespace?.userId } };
 }
 
 function strictEnvelopeWithPrincipal(

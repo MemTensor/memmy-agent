@@ -2508,7 +2508,14 @@ export class MemoryService {
       const detail = {...item, memoryLayer: "UserMemory" as const, body: userMemory.content, sourceMemoryIds: [], metadata: item.metadata ?? {}};
       return {...detail, item: detail, refs: {}, etag: `user-memory-${userMemory.updatedAt}`};
     }
-    return this.episodeReadModel.getMemory(id, this.withTimeZone(request));
+    if (!local) {
+      const stored = readableMemoryIdKind(id) === "episode"
+        ? this.repos.runtime.getEpisode(id) : this.repos.memories.getForDisplay(id);
+      if (!stored || !request.namespace?.userId || stored.userId !== request.namespace.userId) {
+        throw new MemoryServiceError("not_found", "Memory is unavailable");
+      }
+    }
+    return this.episodeReadModel.withLocality(local).getMemory(id, this.withTimeZone(request));
   }
 
   async worldModelQuery(input: InternalMemorySearchRequest): Promise<{
@@ -2827,7 +2834,7 @@ export class MemoryService {
     };
   }
 
-  deleteMemory(id: string, request: MemoryGovernanceRequest = {}): {
+  deleteMemory(id: string, request: MemoryGovernanceRequest = {}, local = this.mode !== "cloud"): {
     ok: true;
     id: string;
     kind: MemoryKind;
@@ -2840,6 +2847,7 @@ export class MemoryService {
     this.assertMemoryAddEnabled();
     const userMemory = this.repos.userMemories.get(id);
     if (userMemory) {
+      if (!local) this.assertStoredOwnerInScope(userMemory.userId, request.namespace);
       const deleted = this.repos.userMemories.softDelete(userMemory.id, nowIso());
       if (!deleted) throw new MemoryServiceError("not_found", `user memory not found: ${id}`);
       const changeSeq = this.repos.runtime.appendChange({
@@ -2885,6 +2893,7 @@ export class MemoryService {
       };
     }
     const memory = this.requireExistingMemory(id);
+    if (!local) this.assertStoredOwnerInScope(memory.userId, request.namespace);
     const claimsV2WorldModel = memory.properties.internal_info.schema_version === 2 &&
       memory.memoryLayer === "L3";
     const strictV2WorldModel = isStrictL3WorldModelV2Memory(memory);
@@ -3016,29 +3025,33 @@ export class MemoryService {
     };
   }
 
-  deletePanelTask(id: string, request: MemoryGovernanceRequest = {}): {
+  deletePanelTask(id: string, request: MemoryGovernanceRequest = {}, local = this.mode !== "cloud"): {
     ok: true;
     id: string;
     deletedMemoryIds: string[];
     serverTime: string;
   } {
     this.assertMemoryAddEnabled();
-    const episode = this.requireEpisode(id);
-    this.assertEpisodeInScope(episode, request.namespace);
     const deletedMemoryIds: string[] = [];
 
     this.repos.transaction(() => {
+      const episode = this.requireEpisode(id);
+      if (!local) this.assertStoredOwnerInScope(episode.userId, request.namespace);
+      this.assertPanelEpisodeInScope(episode, request.namespace);
+      if (!local && this.repos.runtime.hasRawTurnsOutsideOwner(episode.id, episode.userId)) {
+        throw new MemoryServiceError("forbidden", "Task contains raw turns belonging to a different owner");
+      }
       const spanIds = new Set(this.repos.memories.listTaskSpanIds(
-        episode.userId, episode.id, episode.l1MemoryIds, this.mode !== "cloud"
+        episode.userId, episode.id, episode.l1MemoryIds, local
       ));
       for (const spanId of spanIds) {
-        this.deleteMemory(spanId, request);
+        this.deleteMemory(spanId, request, local);
         deletedMemoryIds.push(spanId);
       }
-      const currentL1Ids = this.repos.memories.ownedEpisodeL1Ids(episode, this.mode !== "cloud");
+      const currentL1Ids = this.repos.memories.ownedEpisodeL1Ids(episode, local);
       for (const memoryId of currentL1Ids) {
         if (!this.repos.memories.get(memoryId)) continue;
-        this.deleteMemory(memoryId, request);
+        this.deleteMemory(memoryId, request, local);
         deletedMemoryIds.push(memoryId);
       }
       if (!this.repos.runtime.deleteEpisode(id)) {
@@ -3891,6 +3904,13 @@ export class MemoryService {
 
   private assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {
     this.assertMemoryTenantScope(memory,namespace);
+  }
+
+  private assertStoredOwnerInScope(owner: string | null | undefined, namespace?: RuntimeNamespace): void {
+    // Nonlocal credentials retain their authenticated owner; local device sharing is separate.
+    if (!namespace?.userId || owner !== namespace.userId) {
+      throw new MemoryServiceError("forbidden", "Memory belongs to a different owner");
+    }
   }
 
   private assertPanelEpisodeInScope(episode:EpisodeRecord,namespace?:RuntimeNamespace):void {

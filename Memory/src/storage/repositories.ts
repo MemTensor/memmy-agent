@@ -2684,6 +2684,12 @@ export class RuntimeRepository {
     return rows.map(episodeFromSql);
   }
 
+  hasRawTurnsOutsideOwner(episodeId: string, userId: string): boolean {
+    // The FK cascades every attached row, including deleted/redacted and NULL-owner legacy rows.
+    return this.db.prepare("SELECT 1 FROM raw_turns WHERE episode_id = ? AND user_id IS NOT ? LIMIT 1")
+      .get(episodeId, userId) !== undefined;
+  }
+
   deleteEpisode(id: string): boolean {
     const result = this.db.prepare("DELETE FROM episodes WHERE id = ?").run(id);
     return result.changes === 1;

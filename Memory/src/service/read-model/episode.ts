@@ -157,6 +157,10 @@ export interface EpisodeReadModelDependencies {
 export class EpisodeReadModel {
   constructor(private readonly deps: EpisodeReadModelDependencies) {}
 
+  withLocality(localMemory: boolean): EpisodeReadModel {
+    return new EpisodeReadModel({ ...this.deps, localMemory });
+  }
+
   timeline(input: TimelineRequest,panelRead=false): EpisodeTimelineDetail {
     this.deps.assertMemorySearchEnabled();
     // Preserve the current service's context-resolution side effect/validation.
@@ -193,7 +197,8 @@ export class EpisodeReadModel {
     let rawTurns = timelineEpisodes
       ? timelineEpisodes
           .flatMap((episode) => this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, limit)
-            .filter(turn=>!panelRead || (!turn.redactedAt && turn.sessionId===episode.sessionId)))
+            .filter(turn=>(!panelRead || (!turn.redactedAt && turn.sessionId===episode.sessionId))
+              && (panelRead || this.deps.localMemory || (!turn.deletedAt && !turn.redactedAt && turn.userId === input.namespace?.userId))))
           .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id.localeCompare(b.id))
           .slice(0, limit)
           .map((turn) => this.deps.rawTurnSummary(turn))
@@ -240,6 +245,7 @@ export class EpisodeReadModel {
     return this.deps.repos.memories
       .getManyForDisplay(memoryIds)
       .filter((memory) => layerFilter.has(memory.memoryLayer))
+      .filter((memory) => panelRead || this.deps.localMemory || episodes.some(episode => episode.userId === memory.userId))
       .filter((memory) => this.deps.memoryMatchesTags(memory, tags))
       .sort((a, b) => this.deps.traceSortKey(a) - this.deps.traceSortKey(b) || a.id.localeCompare(b.id))
       .slice(cursor, cursor + limit)
@@ -293,7 +299,8 @@ export class EpisodeReadModel {
     (panelRead ? this.deps.assertPanelEpisodeInScope ?? this.deps.assertEpisodeInScope : this.deps.assertEpisodeInScope)(stored, request.namespace);
     const live = new Set(this.deps.repos.memories.getManyForDisplay([
       ...stored.l2PolicyIds, ...stored.l3WorldModelIds, ...stored.skillMemoryIds
-    ]).filter(memory => memory.status !== "deleted" && !memory.deletedAt).map(memory => memory.id));
+    ]).filter(memory => memory.status !== "deleted" && !memory.deletedAt
+      && (panelRead || this.deps.localMemory || memory.userId === stored.userId)).map(memory => memory.id));
     const episode = {...stored,
       l1MemoryIds: [...(this.deps.repos.memories.effectiveEpisodeL1Ids([stored],panelRead || this.deps.localMemory).get(id) ?? [])],
       l2PolicyIds: [...new Set(stored.l2PolicyIds.filter(id => live.has(id)))],
@@ -341,7 +348,7 @@ export class EpisodeReadModel {
     };
   }
 
-  private effectivePolicyLinks(links: TracePolicyLinkRecord[],panelRead=false): TracePolicyLinkRecord[] {
+  private effectivePolicyLinks(links: TracePolicyLinkRecord[],panelRead=false, owner?: string): TracePolicyLinkRecord[] {
     const local = panelRead || this.deps.localMemory;
     const memories = this.deps.repos.memories.getManyForDisplay([...new Set(links.flatMap(link => [link.l1MemoryId,link.l2MemoryId]))]);
     const byId = new Map(memories.filter(memory => memory.status !== "deleted" && !memory.deletedAt).map(memory => [memory.id,memory]));
@@ -350,6 +357,7 @@ export class EpisodeReadModel {
     return links.filter(link => {
       const trace=byId.get(link.l1MemoryId), policy=byId.get(link.l2MemoryId);
       if (!trace || !policy || (!local && trace.userId !== policy.userId) || !visible.has(trace.id)) return false;
+      if (!local && (trace.userId !== owner || link.userId !== owner)) return false;
       const internal=policy.properties.internal_info;
       const policyMeta=internal.policy as {source_trace_ids?:unknown} | undefined;
       const sources=policyMeta?.source_trace_ids ?? internal.source_trace_ids;
@@ -370,7 +378,8 @@ export class EpisodeReadModel {
       const candidate = rawTurnId ? this.deps.repos.runtime.getRawTurn(rawTurnId) : undefined;
       const rawTurn = candidate && !candidate.deletedAt && !candidate.redactedAt && (local ? !memory.sessionId || candidate.sessionId===memory.sessionId : candidate.userId===memory.userId) ? candidate : undefined;
       const episodeId = rawTurn?.episodeId ?? this.deps.episodeIdFromMemory(memory);
-      const episode = episodeId ? this.deps.repos.runtime.getEpisode(episodeId) : undefined;
+      const episodeCandidate = episodeId ? this.deps.repos.runtime.getEpisode(episodeId) : undefined;
+      const episode = episodeCandidate && (local || episodeCandidate.userId === memory.userId) ? episodeCandidate : undefined;
       return {
         rawTurn: rawTurn ? this.deps.rawTurnSummary(rawTurn) : undefined,
         episode: episode ? episodeRef(episode) : undefined,
@@ -378,7 +387,7 @@ export class EpisodeReadModel {
           userId: local ? undefined : memory.userId,
           l1MemoryId: memory.id,
           limit: 50
-        }),panelRead).map(policyLinkRef)
+        }),panelRead,memory.userId).map(policyLinkRef)
       };
     }
     if (memory.memoryLayer === "L2") {
@@ -387,7 +396,7 @@ export class EpisodeReadModel {
           userId: local ? undefined : memory.userId,
           l2MemoryId: memory.id,
           limit: 100
-        }),panelRead).map(policyLinkRef)
+        }),panelRead,memory.userId).map(policyLinkRef)
       };
     }
     if (memory.memoryLayer === "Skill") {
@@ -396,10 +405,11 @@ export class EpisodeReadModel {
           userId: local ? undefined : memory.userId,
           skillMemoryId: memory.id,
           limit: 100
-        }).map((trial) => skillTrialRef(
-          trial,
-          trial.episodeId ? this.deps.repos.runtime.getEpisode(trial.episodeId) : undefined
-        ))
+        }).filter(trial => local || trial.userId === memory.userId).map((trial) => {
+          const episode = trial.episodeId ? this.deps.repos.runtime.getEpisode(trial.episodeId) : undefined;
+          return local || !episode || episode.userId === memory.userId
+            ? skillTrialRef(trial, episode) : skillTrialRef({ ...trial, episodeId: undefined });
+        })
       };
     }
     return {};
