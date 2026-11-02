@@ -2281,6 +2281,11 @@ export class RuntimeRepository {
     return row ? sourceTurnCaptureFromSql(row) : undefined;
   }
 
+  sourceTurnNamespacesForRawTurn(rawTurnId: string): Array<{ source: string; profileId: string; namespaceKey: string }> {
+    return this.db.prepare(`SELECT source, profile_id AS profileId, namespace_key AS namespaceKey
+      FROM source_turn_captures WHERE raw_turn_id = ?`).all(rawTurnId) as Array<{ source: string; profileId: string; namespaceKey: string }>;
+  }
+
   latestSourceTurnCapture(scope: SourceTurnCaptureScope): SourceTurnCaptureRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM source_turn_captures
       WHERE source = @source AND profile_id = @profileId
@@ -3097,6 +3102,16 @@ export class RuntimeRepository {
     return this.memoryIdsForRawTurn(rawTurnId, true);
   }
 
+  namespaceProofMemoryIdsForRawTurn(rawTurnId: string): string[] {
+    // Authorization reads all stored references instead of trusting a cached ID subset.
+    return (this.db.prepare(`SELECT id FROM memories WHERE memory_layer = 'L1' AND (
+      json_extract(info_json, '$.raw_turn_id') = @raw
+      OR json_extract(properties_json, '$.internal_info.trace.raw_turn_id') = @raw
+      OR json_extract(properties_json, '$.internal_info.raw_turn_id') = @raw
+      OR json_extract(properties_json, '$.internal_info.source_raw_turn_id') = @raw)`)
+      .all({ raw: rawTurnId }) as Array<{ id: string }>).map(row => row.id);
+  }
+
   private memoryIdsForRawTurn(rawTurnId: string, l1Only: boolean, knownRaw?: RawTurnRecord): string[] {
     const raw = knownRaw ?? this.getRawTurn(rawTurnId);
     const layer = l1Only ? "memory_layer = 'L1' AND " : "";
@@ -3423,6 +3438,10 @@ export class RuntimeRepository {
       )
       .all(sessionId, limit) as SqlRawTurnRow[];
     return rows.map(rawTurnFromSql);
+  }
+
+  rawTurnIdsForEpisode(episodeId: string): string[] {
+    return (this.db.prepare("SELECT id FROM raw_turns WHERE episode_id = ?").all(episodeId) as Array<{ id: string }>).map(row => row.id);
   }
 
   listRawTurnsByEpisode(episodeId: string, limit = 100): RawTurnRecord[] {

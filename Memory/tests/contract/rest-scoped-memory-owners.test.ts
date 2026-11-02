@@ -17,6 +17,11 @@ async function setup() {
     workerStartupFallbackMs: 3600000, workerPostHealthDelayMs: 3600000, workerIdlePollMs: 3600000,
     auth: { localServiceToken: "local", cloudAccessTokens: { cloud: scope, "cloud-unbound": { source: "codex", profileId: "default" } },
       scopedApiKeys: { scoped: { namespace: scope, scopes: ["memory:read", "memory:write", "panel:read"] },
+        "same-device-scope": { namespace: { ...scope, userId: "other-account" }, scopes: ["memory:read", "memory:write"] },
+        "other-profile": { namespace: { ...scope, profileId: "foreign" }, scopes: ["memory:read", "memory:write"] },
+        "other-workspace": { namespace: { ...scope, workspaceId: "foreign" }, scopes: ["memory:read", "memory:write"] },
+        "other-tenant": { namespace: { ...scope, tenantId: "foreign" }, scopes: ["memory:read", "memory:write"] },
+        "source-writer": { namespace: { ...scope, tenantId: "source-tenant", projectId: "source-project", workspaceId: "source-workspace" }, scopes: ["memory:read", "memory:write"] },
         "scoped-admin": { namespace: scope, scopes: ["admin:write"] },
         "scoped-unbound": { namespace: { source: "codex", profileId: "default" }, scopes: ["memory:read", "memory:write"] } } } });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -34,6 +39,140 @@ async function setup() {
 }
 
 describe("authenticated nonlocal stored owners", () => {
+  it("allows a new device-owned writer round trip only with a proven matching namespace", async () => {
+    const f = await setup();
+    try {
+      const opened = await f.call("sessions/open", "scoped", "POST", { adapterId: "device-scope", requestId: "open-device-scope", sessionId: "device-scope" });
+      expect(opened.status).toBe(200);
+      const completed = await f.call("turns/device-scope/complete", "scoped", "POST", { sessionId: opened.body.sessionId,
+        query: "New device task question", answer: "New device task answer" });
+      expect(completed.status).toBe(200);
+      const id = completed.body.l1MemoryId as string;
+      expect((await f.call(`memory/${id}`, "scoped")).status).toBe(200);
+      expect((await f.call(`memory/${id}`, "same-device-scope")).status).toBe(200);
+      const episode = await f.call(`memory/${completed.body.episodeId}`, "scoped");
+      expect(episode.status).toBe(200);
+      expect(episode.body.refs.rawTurns).toHaveLength(1);
+      for (const token of ["other-profile", "other-workspace", "other-tenant"]) {
+        expect((await f.call(`memory/${id}`, token)).status).toBe(404);
+        expect((await f.call(`memory/${id}`, token, "DELETE", {})).status).toBe(403);
+        expect((await f.call(`panel/tasks/${completed.body.episodeId}`, token, "DELETE", {})).status).toBe(403);
+      }
+      f.repos.userMemories.insert({ id: "user-device", userId: "a", sourceTurnId: completed.body.rawTurnId,
+        sourceTurnRefs: [completed.body.rawTurnId], memoryTypes: ["User Preference"], content: "Scoped device preference",
+        normalizedUserTextHash: "scoped-device", status: "active", createdAt: "now", updatedAt: "now" });
+      expect((await f.call("memory/user-device", "scoped")).status).toBe(200);
+      expect((await f.call("memory/user-device", "other-profile")).status).toBe(404);
+      expect((await f.call("memory/user-device", "scoped", "DELETE", {})).status).toBe(200);
+      expect((await f.call(`memory/${id}`, "scoped", "DELETE", {})).status).toBe(200);
+      expect((await f.call(`panel/tasks/${completed.body.episodeId}`, "scoped", "DELETE", {})).status).toBe(200);
+    } finally { await f.close(); }
+  });
+
+  it("does not treat a rebound device session as proof of the original episode or UserMemory namespace", async () => {
+    const f = await setup();
+    try {
+      const opened = f.service.openSession({ namespace: scope });
+      const turn = await f.service.completeTurn("device-rebind", { sessionId: opened.sessionId, query: "Preserve the original project rule", answer: "The original rule is recorded" });
+      f.repos.userMemories.insert({ id: "user-rebind", userId: "a", sourceTurnId: turn.rawTurnId,
+        sourceTurnRefs: [turn.rawTurnId], memoryTypes: ["User Preference"], content: "Original scope preference",
+        normalizedUserTextHash: "scope-rebind", status: "active", createdAt: "now", updatedAt: "now" });
+      // Session reconfiguration remains supported; it must not relabel existing memory authorization.
+      expect((await f.call("sessions/open", "other-profile", "POST", { sessionId: opened.sessionId })).status).toBe(200);
+      const before = f.repos.runtime.getEpisode(turn.episodeId!);
+      expect((await f.call(`memory/${turn.episodeId}`, "other-profile")).status).toBe(404);
+      expect((await f.call(`panel/tasks/${turn.episodeId}`, "other-profile", "DELETE", {})).status).toBe(403);
+      expect((await f.call("memory/user-rebind", "other-profile")).status).toBe(404);
+      expect((await f.call("memory/user-rebind", "other-profile", "DELETE", {})).status).toBe(403);
+      expect(f.repos.runtime.getEpisode(turn.episodeId!)).toEqual(before);
+      expect(f.repos.userMemories.get("user-rebind")?.status).toBe("active");
+    } finally { await f.close(); }
+  });
+
+  it("fails closed when device raw references have no stored L1 namespace evidence", async () => {
+    const f = await setup();
+    try {
+      const opened = f.service.openSession({ namespace: scope });
+      const turn = await f.service.completeTurn("device-missing-proof", { sessionId: opened.sessionId, query: "Retain a scoped record", answer: "The scoped record is stored" });
+      f.repos.userMemories.insert({ id: "user-missing-proof", userId: "a", sourceTurnId: turn.rawTurnId,
+        sourceTurnRefs: [turn.rawTurnId], memoryTypes: ["User Preference"], content: "Unknown scope preference",
+        normalizedUserTextHash: "scope-missing", status: "active", createdAt: "now", updatedAt: "now" });
+      f.db.db.prepare("DELETE FROM memories WHERE id=?").run(turn.l1MemoryId);
+      expect((await f.call(`memory/${turn.episodeId}`, "scoped")).status).toBe(404);
+      expect((await f.call("memory/user-missing-proof", "scoped")).status).toBe(404);
+      expect((await f.call(`panel/tasks/${turn.episodeId}`, "scoped", "DELETE", {})).status).toBe(403);
+      expect(f.repos.runtime.getEpisode(turn.episodeId!)).toBeDefined();
+    } finally { await f.close(); }
+  });
+
+  it("allows a tenant source-capture writer to read and delete its proven device episode", async () => {
+    const f = await setup();
+    try {
+      const captured = await f.call("source-turns/complete", "source-writer", "POST", { source: "codex", channel: "hook",
+        sourceTurn: { source: "codex", profileId: "default", conversationId: "tenant-source-conversation", turnId: "tenant-source-turn",
+          startedAt: "2099-01-01T01:00:00.000Z", completedAt: "2099-01-01T01:01:00.000Z", sequence: 1, completionEvidence: "task_complete:1" },
+        query: "Implement a transaction that preserves the native source turn identity.", answer: "The transaction now stores the full source turn and schedules capture.",
+        toolCalls: [{ id: "call-source", name: "read_file", input: { path: "schema.ts" } }],
+        toolResults: [{ id: "call-source", output: "CREATE TABLE source_turn_captures" }] });
+      expect(captured.status).toBe(200);
+      expect(captured.body.status).toBe("stored");
+      const result = captured.body.result;
+      expect((await f.call(`memory/${result.l1MemoryId}`, "source-writer")).status).toBe(200);
+      expect((await f.call(`memory/${result.episodeId}`, "source-writer")).status).toBe(200);
+      expect((await f.call(`panel/tasks/${result.episodeId}`, "source-writer", "DELETE", {})).status).toBe(200);
+      expect(f.repos.runtime.getEpisode(result.episodeId)).toBeUndefined();
+    } finally { await f.close(); }
+  });
+
+  it("filters same-device foreign namespace children and policy links while retaining local references", async () => {
+    const f = await setup();
+    try {
+      const session = f.service.openSession({ namespace: scope });
+      const turn = await f.service.completeTurn("device-derived", { sessionId: session.sessionId, query: "Record the owned workflow", answer: "The owned workflow is recorded" });
+      const foreign = { ...scope, profileId: "foreign" };
+      const policies = [scope, foreign].map((namespace, i) => f.service.addMemory({ layer: "L2", namespace, content: i ? "FOREIGN_DEVICE_POLICY_BODY" : "OWNED_DEVICE_POLICY_BODY" }));
+      const world = f.service.addMemory({ layer: "L3", namespace: foreign, content: "FOREIGN_DEVICE_WORLD_BODY" });
+      const skill = f.service.addMemory({ layer: "Skill", namespace: foreign, content: "FOREIGN_DEVICE_SKILL_BODY" });
+      f.db.db.prepare("UPDATE episodes SET l2_policy_ids_json=?,l3_world_model_ids_json=?,skill_memory_ids_json=? WHERE id=?")
+        .run(JSON.stringify(policies.map(row => row.id)), JSON.stringify([world.id]), JSON.stringify([skill.id]), turn.episodeId);
+      f.repos.runtime.insertTracePolicyLink({ userId: "__memmy_device_memory__", l1MemoryId: turn.l1MemoryId!, l2MemoryId: policies[1]!.id });
+      const scoped = await f.call(`memory/${turn.episodeId}`, "scoped");
+      expect(scoped.status).toBe(200);
+      expect(JSON.stringify(scoped.body)).toContain("OWNED_DEVICE_POLICY_BODY");
+      for (const marker of ["FOREIGN_DEVICE_POLICY_BODY", "FOREIGN_DEVICE_WORLD_BODY", "FOREIGN_DEVICE_SKILL_BODY"])
+        expect(JSON.stringify(scoped.body)).not.toContain(marker);
+      expect(scoped.body.sourceMemoryIds).not.toContain(policies[1]!.id);
+      expect((await f.call(`memory/${turn.l1MemoryId}`, "scoped")).body.refs.policyLinks).toEqual([]);
+      const local = await f.call(`memory/${turn.episodeId}`, "local");
+      expect(JSON.stringify(local.body)).toContain("FOREIGN_DEVICE_POLICY_BODY");
+      expect((await f.call(`memory/${turn.l1MemoryId}`, "local")).body.refs.policyLinks).toHaveLength(1);
+    } finally { await f.close(); }
+  });
+
+  it("keeps device Skill trial episode and reward references within the authenticated namespace", async () => {
+    const f = await setup();
+    try {
+      const turns = [];
+      for (const [profileId, reward] of [["default", 0.5], ["foreign", 0.9]] as const) {
+        const session = f.service.openSession({ namespace: { ...scope, profileId } });
+        const turn = await f.service.completeTurn(`device-trial-${profileId}`, { sessionId: session.sessionId,
+          query: "Record a project workflow", answer: "The project workflow is recorded" });
+        f.db.db.prepare("UPDATE episodes SET r_task=? WHERE id=?").run(reward, turn.episodeId);
+        turns.push(turn);
+      }
+      const skill = f.service.addMemory({ layer: "Skill", namespace: scope, content: "Owned device skill" });
+      for (const [i, turn] of turns.entries()) f.repos.runtime.insertSkillTrial({ id: `device-trial-${i}`, userId: "__memmy_device_memory__",
+        skillMemoryId: skill.id, episodeId: turn.episodeId, rawTurnId: turn.rawTurnId, l1MemoryId: turn.l1MemoryId,
+        status: "pending", outcome: "unknown", createdAt: "now" });
+      f.repos.runtime.insertSkillTrial({ id: "device-trial-unknown", userId: "__memmy_device_memory__", skillMemoryId: skill.id,
+        status: "pending", outcome: "unknown", createdAt: "now" });
+      const scoped = await f.call(`memory/${skill.id}`, "scoped");
+      expect(scoped.status).toBe(200);
+      expect(scoped.body.refs.skillTrials).toEqual([{ trialId: "device-trial-0", status: "pending", episodeId: turns[0]!.episodeId, reward: 0.5 }]);
+      expect((await f.call(`memory/${skill.id}`, "local")).body.refs.skillTrials).toHaveLength(3);
+    } finally { await f.close(); }
+  });
+
   it("rejects nonlocal global clear before calling the executor, while local and validated viewer requests retain it", async () => {
     const f = await setup();
     try {

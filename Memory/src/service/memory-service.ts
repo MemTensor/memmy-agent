@@ -111,6 +111,7 @@ import type {
   RequestEnvelope,
   RetrievalMode,
   RuntimeNamespace,
+  UserMemoryRecord,
   SessionCompactRequest,
   SessionL3WorldModelContextResponse,
   SessionOpenRequest,
@@ -163,11 +164,13 @@ import {
   namespaceForMemory,
   namespaceForRawTurn,
   namespaceForSession,
+  profileIdFromMemory,
   normalizeNamespace
 } from "./namespace/namespace-scope.js";
 import {
   EpisodeReadModel,
   episodeRef,
+  type EpisodeReadAccess,
   type MemoryGetResponse
 } from "./read-model/episode.js";
 import {
@@ -2503,19 +2506,26 @@ export class MemoryService {
     this.assertMemorySearchEnabled();
     const userMemory = this.repos.userMemories.getForDisplay(id);
     if (userMemory) {
-      if (!local && (!request.namespace?.userId || request.namespace.userId !== userMemory.userId)) throw new MemoryServiceError("not_found", "Memory is unavailable");
+      if (!local && !this.storedOwnerMatches(userMemory.userId, request.namespace,
+        () => this.deviceUserMemoryMatchesNamespace(userMemory, request.namespace!))) {
+        throw new MemoryServiceError("not_found", "Memory is unavailable");
+      }
       const item = userMemoryPanelItem(userMemory);
       const detail = {...item, memoryLayer: "UserMemory" as const, body: userMemory.content, sourceMemoryIds: [], metadata: item.metadata ?? {}};
       return {...detail, item: detail, refs: {}, etag: `user-memory-${userMemory.updatedAt}`};
     }
     if (!local) {
-      const stored = readableMemoryIdKind(id) === "episode"
-        ? this.repos.runtime.getEpisode(id) : this.repos.memories.getForDisplay(id);
-      if (!stored || !request.namespace?.userId || stored.userId !== request.namespace.userId) {
+      const episode = readableMemoryIdKind(id) === "episode" ? this.repos.runtime.getEpisode(id) : undefined;
+      const memory = episode ? undefined : this.repos.memories.getForDisplay(id);
+      const stored = episode ?? memory;
+      if (!stored || !this.storedOwnerMatches(stored.userId, request.namespace, () => episode
+        ? this.deviceEpisodeMatchesNamespace(episode, request.namespace!)
+        : this.deviceMemoryMatchesNamespace(memory!, request.namespace!))) {
         throw new MemoryServiceError("not_found", "Memory is unavailable");
       }
     }
-    return this.episodeReadModel.withLocality(local).getMemory(id, this.withTimeZone(request));
+    return this.episodeReadModel.withLocality(local, local ? undefined : this.nonlocalReadAccess(request.namespace!))
+      .getMemory(id, this.withTimeZone(request));
   }
 
   async worldModelQuery(input: InternalMemorySearchRequest): Promise<{
@@ -2847,7 +2857,8 @@ export class MemoryService {
     this.assertMemoryAddEnabled();
     const userMemory = this.repos.userMemories.get(id);
     if (userMemory) {
-      if (!local) this.assertStoredOwnerInScope(userMemory.userId, request.namespace);
+      if (!local) this.assertStoredOwnerInScope(userMemory.userId, request.namespace,
+        () => this.deviceUserMemoryMatchesNamespace(userMemory, request.namespace!));
       const deleted = this.repos.userMemories.softDelete(userMemory.id, nowIso());
       if (!deleted) throw new MemoryServiceError("not_found", `user memory not found: ${id}`);
       const changeSeq = this.repos.runtime.appendChange({
@@ -2893,7 +2904,8 @@ export class MemoryService {
       };
     }
     const memory = this.requireExistingMemory(id);
-    if (!local) this.assertStoredOwnerInScope(memory.userId, request.namespace);
+    if (!local) this.assertStoredOwnerInScope(memory.userId, request.namespace,
+      () => this.deviceMemoryMatchesNamespace(memory, request.namespace!));
     const claimsV2WorldModel = memory.properties.internal_info.schema_version === 2 &&
       memory.memoryLayer === "L3";
     const strictV2WorldModel = isStrictL3WorldModelV2Memory(memory);
@@ -3036,8 +3048,9 @@ export class MemoryService {
 
     this.repos.transaction(() => {
       const episode = this.requireEpisode(id);
-      if (!local) this.assertStoredOwnerInScope(episode.userId, request.namespace);
-      this.assertPanelEpisodeInScope(episode, request.namespace);
+      if (!local) this.assertStoredOwnerInScope(episode.userId, request.namespace,
+        () => this.deviceEpisodeMatchesNamespace(episode, request.namespace!));
+      if (local || episode.userId !== DEVICE_MEMORY_OWNER) this.assertPanelEpisodeInScope(episode, request.namespace);
       if (!local && this.repos.runtime.hasRawTurnsOutsideOwner(episode.id, episode.userId)) {
         throw new MemoryServiceError("forbidden", "Task contains raw turns belonging to a different owner");
       }
@@ -3906,11 +3919,96 @@ export class MemoryService {
     this.assertMemoryTenantScope(memory,namespace);
   }
 
-  private assertStoredOwnerInScope(owner: string | null | undefined, namespace?: RuntimeNamespace): void {
-    // Nonlocal credentials retain their authenticated owner; local device sharing is separate.
-    if (!namespace?.userId || owner !== namespace.userId) {
+  private storedOwnerMatches(owner: string | null | undefined, namespace?: RuntimeNamespace, deviceProof?: () => boolean): boolean {
+    return Boolean(namespace?.userId && (owner === DEVICE_MEMORY_OWNER ? deviceProof?.() : owner === namespace.userId));
+  }
+
+  private assertStoredOwnerInScope(owner: string | null | undefined, namespace?: RuntimeNamespace, deviceProof?: () => boolean): void {
+    if (!this.storedOwnerMatches(owner, namespace, deviceProof)) {
       throw new MemoryServiceError("forbidden", "Memory belongs to a different owner");
     }
+  }
+
+  private sameDeviceNamespace(stored: RuntimeNamespace, requested: RuntimeNamespace): boolean {
+    const identity = (value: RuntimeNamespace) => {
+      const namespace = normalizeNamespace(value);
+      return { tenantId: namespace.tenantId ?? null, source: namespace.source, profileId: namespace.profileId,
+        projectId: namespace.projectId ?? namespace.workspaceId ?? null, workspaceId: namespace.workspaceId ?? null };
+    };
+    // Use structured identities; the display/cursor namespace ID is a lossy colon join.
+    return stableHash(identity(stored)) === stableHash(identity(requested));
+  }
+
+  private deviceSessionMatchesNamespace(session: SessionRecord, namespace: RuntimeNamespace): boolean {
+    const sourceKey = session.meta.source_namespace_key;
+    if (sourceKey !== undefined) {
+      if (sourceKey !== stableHash({ tenantId: namespace.tenantId ?? null,
+        projectId: namespace.projectId ?? null, workspaceId: namespace.workspaceId ?? null })) return false;
+    } else if (namespace.tenantId || session.meta.tenant_id || session.meta.tenantId) return false;
+    return this.sameDeviceNamespace({ ...namespaceForSession(session), tenantId: namespace.tenantId }, namespace);
+  }
+
+  private deviceMemoryMatchesNamespace(memory: MemoryRow, namespace: RuntimeNamespace): boolean {
+    const internal = memory.properties.internal_info;
+    if (isRecord(internal.external_evidence) || isRecord(internal.external_evidence_candidate)) {
+      return this.sameDeviceNamespace(externalEvidenceNamespaceForMemory(memory), namespace);
+    }
+    // Unscoped/imported records cannot establish an authenticated nonlocal identity.
+    if (!memory.agentId || !profileIdFromMemory(memory)) return false;
+    const session = memory.sessionId ? this.repos.runtime.getSession(memory.sessionId) : undefined;
+    if (memory.sessionId && (!session || !this.deviceSessionMatchesNamespace(session, namespace))) return false;
+    if (!session && namespace.tenantId) return false;
+    const rawId = rawTurnIdFromMemory(memory);
+    const captures = rawId ? this.repos.runtime.sourceTurnNamespacesForRawTurn(rawId) : [];
+    if (captures.length > 0) {
+      const normalized = normalizeNamespace(namespace);
+      const key = stableHash({ tenantId: namespace.tenantId ?? null,
+        projectId: namespace.projectId ?? null, workspaceId: namespace.workspaceId ?? null });
+      if (!captures.every(capture => capture.source === normalized.source
+        && capture.profileId === normalized.profileId && capture.namespaceKey === key)) return false;
+    } else if (namespace.tenantId) return false;
+    return this.sameDeviceNamespace({ ...namespaceForMemory(memory), tenantId: namespace.tenantId }, namespace);
+  }
+
+  private deviceRawTurnMatchesNamespace(id: string, namespace: RuntimeNamespace): boolean {
+    const raw = this.repos.runtime.getRawTurn(id);
+    const session = raw ? this.repos.runtime.getSession(raw.sessionId) : undefined;
+    if (!raw || raw.deletedAt || raw.redactedAt || !session
+      || (raw.userId !== DEVICE_MEMORY_OWNER && raw.userId !== namespace.userId)
+      || !this.deviceSessionMatchesNamespace(session, namespace)) return false;
+    const memories = this.repos.runtime.namespaceProofMemoryIdsForRawTurn(id);
+    return memories.length > 0 && memories.every(memoryId => {
+      const memory = this.repos.memories.getIncludingDeleted(memoryId);
+      return memory && (memory.userId === DEVICE_MEMORY_OWNER || memory.userId === namespace.userId)
+        && this.deviceMemoryMatchesNamespace(memory, namespace);
+    });
+  }
+
+  private deviceEpisodeMatchesNamespace(episode: EpisodeRecord, namespace: RuntimeNamespace): boolean {
+    if (!this.deviceSessionMatchesNamespace(this.requireSession(episode.sessionId), namespace)) return false;
+    const rawIds = this.repos.runtime.rawTurnIdsForEpisode(episode.id);
+    return rawIds.length > 0 && rawIds.every(id => this.deviceRawTurnMatchesNamespace(id, namespace));
+  }
+
+  private deviceUserMemoryMatchesNamespace(memory: UserMemoryRecord, namespace: RuntimeNamespace): boolean {
+    const refs = [...new Set([memory.sourceTurnId, ...memory.sourceTurnRefs].filter(Boolean))];
+    return refs.length > 0 && refs.every(id => this.deviceRawTurnMatchesNamespace(id, namespace));
+  }
+
+  private nonlocalReadAccess(namespace: RuntimeNamespace): EpisodeReadAccess {
+    const memories = new Map<string, boolean>(), rawTurns = new Map<string, boolean>(), episodes = new Map<string, boolean>();
+    const memo = (cache: Map<string, boolean>, id: string, check: () => boolean) => {
+      if (!cache.has(id)) cache.set(id, check());
+      return cache.get(id)!;
+    };
+    return {
+      memory: memory => memo(memories, memory.id, () => this.storedOwnerMatches(memory.userId, namespace,
+        () => this.deviceMemoryMatchesNamespace(memory, namespace))),
+      rawTurn: raw => memo(rawTurns, raw.id, () => this.storedOwnerMatches(raw.userId, namespace,
+        () => this.deviceRawTurnMatchesNamespace(raw.id, namespace))),
+      episode: episode => memo(episodes, episode.id, () => this.storedOwnerMatches(episode.userId, namespace,
+        () => this.deviceEpisodeMatchesNamespace(episode, namespace)))
+    };
   }
 
   private assertPanelEpisodeInScope(episode:EpisodeRecord,namespace?:RuntimeNamespace):void {
