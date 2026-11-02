@@ -282,7 +282,7 @@ describe("resolveSettingsTabFromHash", () => {
     expect(resolveSettingsTabFromHash("#model-config")).toBe("model");
     expect(resolveSettingsTabFromHash("#model-config-add")).toBe("model");
     expect(resolveSettingsTabFromHash("#token-usage")).toBe("tokens");
-    expect(resolveSettingsTabFromHash("#token-usage-memory-budget")).toBe("model");
+    expect(resolveSettingsTabFromHash("#token-usage-memory-budget")).toBe("tokens");
     expect(resolveSettingsTabFromHash("#about")).toBe("about");
     expect(resolveSettingsTabFromHash("#computer-use-browser-extension")).toBe("computer-use");
     expect(resolveSettingsTabFromHash("#computer-use-excel")).toBe("computer-use");
@@ -334,8 +334,8 @@ describe("SettingsPageView", () => {
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("平台赠送额度");
     expect(html).toContain(">1.4M</strong><span>/</span><span>5M</span><em>Token</em>");
-    expect(html).toContain("自有 API 模型用量");
-    expect(html).toContain("记忆服务 Token 限额");
+    expect(html).toContain("自定义 API Key 消耗");
+    expect(html).toContain("记忆进化 Token 限额");
     expect(html).not.toContain("查看用量详情");
     expect(html).toContain("select-control--compact select-control--subtle");
     expect(html).toContain('role="combobox"');
@@ -583,7 +583,7 @@ describe("SettingsPageView", () => {
   it("Token 用量不再展示计划总额概览", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createImprovementBonusState()));
 
-    expect(html).toContain("自有 API 模型用量");
+    expect(html).toContain("自定义 API Key 消耗");
     expect(html).not.toContain("赠送大模型额度已用");
     expect(html).not.toContain("共 30.3M Token");
     expect(html).not.toContain("剩余 30.3M Token");
@@ -628,7 +628,7 @@ describe("SettingsPageView", () => {
     expect(modelConfigHtml).toContain("Memmy Platform · ASR");
     expect(modelConfigHtml).not.toContain("为语音识别 ASR选择模型 Memmy Platform · 通用文本");
     expect(html).toContain("平台赠送额度");
-    expect(html).toContain("自有 API 模型用量");
+    expect(html).toContain("自定义 API Key 消耗");
     expect(html).not.toContain("查看用量详情");
     expect(modelConfigHtml).not.toContain("当前模式：");
     expect(modelConfigHtml).not.toContain("切换为自定义 API Key");
@@ -706,15 +706,7 @@ describe("SettingsPageView", () => {
     expect(source).toContain("dispatch(appActions.tokenUsageUpdated(tokenUsage))");
     expect(source).toContain("requestAccountInvitation(accountClient, accountKey)");
     expect(source).not.toContain("resolveDisplayInviteCode");
-    const invitationState = createAccountModeState();
-    invitationState.bootstrap = {
-      ...invitationState.bootstrap!,
-      promotions: {
-        ...invitationState.bootstrap!.promotions,
-        invitation: { enabled: true, inviterRewardTokens: 2_000_000, inviteeRewardTokens: 2_000_000 }
-      }
-    };
-    expect(renderSettingsPageView(invitationState)).toContain(zhCNMessages["settings.token.invite.title"]);
+    expect(source).toContain('t("settings.token.invite.title")');
     expect(source).toContain("usageStyles.invitationCard");
     expect(styles).toContain(".invitationCard");
     const compactStyles = styles.slice(styles.indexOf("@media (max-width: 640px)"));
@@ -871,9 +863,9 @@ describe("SettingsPageView", () => {
     expect(html).toContain("生图模型");
     expect(html).toContain("未配置");
     expect(html).toContain("Token 用量");
-    expect(html).toContain("自有 API 模型用量");
+    expect(html).toContain("自定义 API Key 消耗");
     expect(html).not.toContain("查看用量详情");
-    expect(html).not.toContain("分别查看平台赠送额度和自有 API 模型用量");
+    expect(html).not.toContain("分别查看平台赠送额度和自定义 API Key 消耗");
     expect(html).not.toContain("切换回平台 Token");
     expect(html).not.toContain("当前模式：");
     expect(html).not.toContain("默认任务模型");

@@ -657,10 +657,7 @@ export const LotteryRewardSchema = z.discriminatedUnion("hasReward", [
     z.object({
         hasReward: z.literal(true),
         drawId: z.string().min(1).optional(),
-        creditAmount: z.number().finite().positive().optional(),
-        tokenAmount: z.number().int().positive().optional()
-    }).refine((reward) => reward.creditAmount !== undefined || reward.tokenAmount !== undefined, {
-        message: "Reward must include a credit or legacy token amount"
+        tokenAmount: z.number().int().positive()
     })
 ]);
 export type LotteryReward = z.infer<typeof LotteryRewardSchema>;

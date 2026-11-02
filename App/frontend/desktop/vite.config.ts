@@ -85,7 +85,7 @@ export default defineConfig(({ mode }) => {
       watch: stableElectronDemo ? { ignored: ["**/*"] } : undefined,
       hmr: {
         host: "127.0.0.1",
-        port: Number(process.env.MEMMY_PREVIEW_HMR_PORT) || 19001
+        port: 19001
       },
       proxy: {
         "/webui": { target: memmyAgentTarget, changeOrigin: true },

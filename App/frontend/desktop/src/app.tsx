@@ -1,6 +1,5 @@
 import { useComputerHistoryModelSync } from "./app/computer-history-model-sync.js";
 import { isComputerHistorySupported } from "./app/computer-history-platform.js";
-import { creditErrorScenario, isCreditsPreviewMode } from "./app/credits-preview-mode.js";
 /** App module. */
 import { SseEventSchema, type AccountSessionView, type SseEvent } from "@memmy/local-api-contracts";
 import { rememberPublishedMemoryBudget } from "./components/memory-token-budget-banner.js";
@@ -206,17 +205,6 @@ function RuntimeApp() {
       dispatch(appActions.startupLoading());
 
       try {
-        const creditsPreview = import.meta.env.DEV && !window.memmy && isCreditsPreviewMode();
-        const errorPreview = creditErrorScenario();
-        if (creditsPreview) {
-          const { creditErrorPreviewBootstrap } = await import("./app/credits-error-preview-bootstrap.js");
-          if (!isActive) return;
-          dispatch(appActions.accountUpdated({ userId: "credits-preview", nickname: t("credits.preview.example"), email: "" }));
-          const previewRoute = readLaunchRouteOverride(window.location.search)
-            ?? (errorPreview === "agent" ? "/limits" : errorPreview === "memory" ? "/memory" : errorPreview === "knowledge" ? "/knowledge" : "/plans");
-          dispatch(appActions.bootstrapLoaded(creditErrorPreviewBootstrap(), previewRoute));
-          return;
-        }
         const runtimeConfig = await getRuntimeConfig();
         const clients = createAppClients({ runtimeConfig });
         const bootstrap = await clients.bootstrap.getBootstrap();
@@ -301,9 +289,6 @@ function RuntimeApp() {
         }
         dispatch(appActions.modelConfigUpdated(modelConfig));
         dispatch(appActions.preferredModeUpdated(persistedPreferredMode));
-        if (typeof window !== "undefined" && !window.memmy && isCreditsPreviewMode(window.location.search)) {
-          return;
-        }
         dispatch(appActions.eventStatusChanged("connecting"));
 
         events = createEventsConnection(runtimeConfig);
