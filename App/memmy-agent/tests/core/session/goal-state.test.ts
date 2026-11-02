@@ -38,6 +38,12 @@ describe("GoalState session metadata helpers", () => {
     const route = { channel: 'websocket', chatId: 'chat', source: { kind: 'gui', channel: 'websocket' },
       computerUseMessageId: 'accepted-user-request' };
     expect(parseGoalRoute(route)).toEqual(route);
+    expect(parseGoalRoute({ ...route, computerUseMessageId: ' accepted-user-request ' }))
+      .toEqual(route);
+    expect(parseGoalRoute({ ...route, source: { kind: 'im', channel: 'websocket' } })).toBeNull();
+    const imRoute = { ...route, channel: 'weixin', source: { kind: 'im', channel: 'weixin' } };
+    expect(parseGoalRoute(imRoute)).toEqual(imRoute);
+    expect(parseGoalRoute({ ...imRoute, source: { kind: 'gui', channel: 'weixin' } })).toBeNull();
     for (const computerUseMessageId of ['', ' ', 7, 'x'.repeat(513)])
       expect(parseGoalRoute({ ...route, computerUseMessageId })).toBeNull();
     expect(parseGoalRoute({ ...route, source: { kind: 'gui', channel: 'cron' } })).toBeNull();
