@@ -22,19 +22,20 @@ export interface CreateHttpModelConfigTesterOptions {
 
 export const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
 const SUCCESS_MESSAGE = "连接成功";
-const FALLBACK_ERROR_MESSAGE = "API Key 无效或模型列表不可用";
+const FALLBACK_ERROR_MESSAGE = "连接测试失败，请检查 API 地址、凭证和模型配置";
 const INVALID_SUCCESS_BODY_MESSAGE = "API 返回格式不符合模型列表接口，请检查 API 地址和协议";
 const UNSUPPORTED_MESSAGE = "当前 endpoint 协议不支持模型列表连接测试";
 const ANTHROPIC_VERSION = "2023-06-01";
 
-type ListProbe = {
+type ConnectionProbe = {
   url: string;
   headers: Record<string, string>;
   isValidBody(body: unknown): boolean;
-  listedModels(body: unknown): string[];
+  listedModels?(body: unknown): string[];
+  body?: Record<string, unknown>;
 };
 
-/** Creates an HTTP tester that only reads model-list endpoints. */
+/** Validate supported chat models with one bounded inference; retain list probes for other capabilities. */
 export function createHttpModelConfigTester(options: CreateHttpModelConfigTesterOptions = {}): ModelConfigTester {
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   const now = options.now ?? (() => new Date().toISOString());
@@ -42,19 +43,20 @@ export function createHttpModelConfigTester(options: CreateHttpModelConfigTester
 
   return {
     async test(input) {
-      const probe = listProbe(input);
+      const probe = chatProbe(input) ?? listProbe(input);
       if (!probe) return result(false, UNSUPPORTED_MESSAGE, now);
       try {
         const response = await fetchImpl(probe.url, {
-          method: "GET",
+          method: probe.body ? "POST" : "GET",
           headers: probe.headers,
+          ...(probe.body ? { body: JSON.stringify(probe.body) } : {}),
           signal: AbortSignal.timeout(timeoutMs)
         });
         if (!response.ok) {
-          const errorMessage = redactProbeSecrets(await readErrorMessage(response), input);
+          const errorMessage = redactProbeSecrets(await readErrorMessage(response, Boolean(probe.body)), input);
           return result(
             false,
-            response.status === 404
+            response.status === 404 && !probe.body
               ? appendBaseUrlGuidance(errorMessage, input.protocol)
               : errorMessage,
             now
@@ -67,10 +69,12 @@ export function createHttpModelConfigTester(options: CreateHttpModelConfigTester
           return result(false, redactProbeSecrets(providerError, input), now);
         }
         if (!probe.isValidBody(body)) {
-          return result(false, appendBaseUrlGuidance(INVALID_SUCCESS_BODY_MESSAGE, input.protocol), now);
+          return result(false, probe.body
+            ? "API 未返回有效的聊天响应，请检查 API 地址、模型和协议"
+            : appendBaseUrlGuidance(INVALID_SUCCESS_BODY_MESSAGE, input.protocol), now);
         }
 
-        const modelListed = probe.listedModels(body).some((model) => model === input.modelId);
+        const modelListed = probe.listedModels?.(body).some((model) => model === input.modelId);
         return result(true, SUCCESS_MESSAGE, now, modelListed);
       } catch (error) {
         return result(false, redactProbeSecrets(normalizeThrownError(error), input), now);
@@ -79,7 +83,50 @@ export function createHttpModelConfigTester(options: CreateHttpModelConfigTester
   };
 }
 
-function listProbe(input: ResolvedModelConfigTestInput): ListProbe | null {
+// Do not infer chat availability from /models: compatible gateways may not expose it.
+function chatProbe(input: ResolvedModelConfigTestInput): ConnectionProbe | null {
+  if (input.capability && input.capability !== "chat") return null;
+  const messages = [{ role: "user", content: "Reply briefly with OK." }];
+  if (input.protocol === "openai-chat-completions") {
+    // Modern OpenAI reasoning models use max_completion_tokens. Other compatible
+    // providers still accept max_tokens; do not retry paid inference automatically.
+    const modernTokens = input.provider === "doubao"
+      || /(?:^|\/)(?:gpt-[56]|o[134])(?:[-.\/]|$)/iu.test(input.modelId);
+    return {
+      url: resourceUrl(input.apiBase, "chat/completions"),
+      headers: probeHeaders({ "Content-Type": "application/json",
+        ...(input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : {}) }, input.extraHeaders),
+      body: { model: input.modelId, messages, stream: false,
+        [modernTokens ? "max_completion_tokens" : "max_tokens"]: 64 },
+      isValidBody(body) {
+        return records(record(body).choices).some(choice => {
+          const message = record(choice.message);
+          return message.role === "assistant" && (typeof message.content === "string"
+            || typeof message.refusal === "string"
+            || (message.content === null && choice.finish_reason === "length"));
+        });
+      }
+    };
+  }
+  if (input.protocol === "anthropic-messages") {
+    return {
+      url: versionedModelsUrl(input.apiBase, "v1").replace(/\/models$/u, "/messages"),
+      headers: probeHeaders({ "Content-Type": "application/json",
+        ...(input.apiKey ? { "x-api-key": input.apiKey } : {}),
+        "anthropic-version": ANTHROPIC_VERSION }, input.extraHeaders),
+      body: { model: input.modelId, messages, max_tokens: 64, stream: false },
+      isValidBody(body) {
+        const value = record(body);
+        return value.type === "message" && value.role === "assistant" && Array.isArray(value.content)
+          && (value.content.some(item => record(item).type === "text" && typeof record(item).text === "string")
+            || (value.content.length === 0 && value.stop_reason === "max_tokens"));
+      }
+    };
+  }
+  return null;
+}
+
+function listProbe(input: ResolvedModelConfigTestInput): ConnectionProbe | null {
   if (input.protocol === "anthropic-messages") {
     return {
       url: versionedModelsUrl(input.apiBase, "v1"),
@@ -205,9 +252,15 @@ function result(
   };
 }
 
-async function readErrorMessage(response: Response): Promise<string> {
+async function readErrorMessage(response: Response, chat: boolean): Promise<string> {
   const message = extractErrorMessage(await readJsonSafely(response));
-  return message ?? `${FALLBACK_ERROR_MESSAGE}（HTTP ${response.status}）`;
+  if (!chat) return message ?? `${FALLBACK_ERROR_MESSAGE}（HTTP ${response.status}）`;
+  const hint = response.status === 401 || response.status === 403
+    ? "认证或访问被拒绝，请检查 API Key 和访问权限"
+    : response.status === 404 ? "未找到聊天接口或模型，请检查 API 地址、模型名称和协议"
+    : response.status === 429 ? "服务拒绝了本次请求，请检查调用限额或稍后重试"
+    : "聊天测试请求失败";
+  return `${hint}（HTTP ${response.status}）${message ? `：${message}` : ""}`;
 }
 
 function normalizeThrownError(error: unknown): string {
