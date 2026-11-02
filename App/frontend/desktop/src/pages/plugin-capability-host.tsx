@@ -936,8 +936,8 @@ function AudioRecordCard(props: {
       : undefined;
     // An interview is handed over the moment it stops. Transcribing half an
     // hour of audio takes minutes, and the upload card that follows must be
-    // usable straight away; the transcription carries on at page level and
-    // the upload card waits for it when the user submits.
+    // usable straight away. Transcription carries on at page level while the
+    // upload card can submit the saved audio path without waiting for ASR.
     if (props.interview && props.asrClient && props.uploadFiles && transcriptionJobs && props.conversationId) {
       try {
         const stopped = await recorder.stop();
@@ -1218,19 +1218,21 @@ function recordingDeliverableField(files: UploadedAgentMedia[]): { recordingDeli
  * How a staged recording's transcription is doing, under its file name.
  *
  * Failure only shows once the automatic retries are spent. The retry action
- * stays available while a submission waits for the recording's text.
+ * stays available while the upload card is open. Submitting is blocked until
+ * the transcript is ready; `blocked` marks the row the user is sent back to.
  */
-function StagedTranscriptionStatus(props: { state?: PluginTranscriptionState; job?: PluginTranscriptionJob }) {
+function StagedTranscriptionStatus(props: { state?: PluginTranscriptionState; job?: PluginTranscriptionJob; blocked?: boolean }) {
   const { t } = useTranslation();
   const state = props.state;
   if (!state || state.status === "ready") return null;
   if (state.status === "transcribing") {
-    return <p className="diagnostic-upload-card__transcription" role="status">
+    return <p className={`diagnostic-upload-card__transcription${props.blocked ? " diagnostic-upload-card__transcription--blocked" : ""}`}
+      role={props.blocked ? "alert" : "status"}>
       {state.attempt > 1 ? t("plugin.ui.audio.retryingRow", { attempt: state.attempt - 1 }) : t("plugin.ui.audio.transcribingRow")}
     </p>;
   }
   if (state.status === "skipped") return <p className="diagnostic-upload-card__transcription">{t("plugin.ui.audio.skippedRow")}</p>;
-  return <div className="diagnostic-upload-card__transcription diagnostic-upload-card__transcription--failed" role="alert">
+  return <div className={`diagnostic-upload-card__transcription diagnostic-upload-card__transcription--failed${props.blocked ? " diagnostic-upload-card__transcription--blocked" : ""}`} role="alert">
     <span>{t("plugin.ui.audio.transcriptionFailedRow", { attempts: PLUGIN_TRANSCRIPTION_ATTEMPTS })}</span>
     <button type="button" onClick={() => props.job?.retry()}>{t("plugin.ui.audio.retryTranscription")}</button>
   </div>;
@@ -1269,14 +1271,28 @@ export function FileInputCard(props: {
   };
   const submitting = useRef(false);
   const pendingFeedback = useRef<PluginChatFeedback | null>(null);
-  const fileDraftKey = JSON.stringify([props.pluginId, props.conversationId, payload.taskId, payload.cardType, payload.targetPaperId]);
+  const fileDraftKey = JSON.stringify([
+    props.pluginId, normalizePluginConversationId(props.conversationId),
+    payload.chatFeedback === true && typeof payload.taskId === "string" ? payload.taskId : props.request.interactionId,
+    payload.cardType, payload.targetPaperId
+  ]);
   const fileDrafts = usePluginChatFeedback(payload.chatFeedback === true ? props.conversationId : undefined, (feedback) => {
     if (props.status === "answered") return false;
     pendingFeedback.current = feedback;
     if (!props.disabled) void releaseForChat();
     return true;
   });
-  useEffect(() => { const draft = fileDrafts?.get(fileDraftKey); if (draft) setFiles(draft); }, [fileDraftKey, fileDrafts]);
+  const lastFileDraftKey = useRef(fileDraftKey);
+  useEffect(() => {
+    if (lastFileDraftKey.current !== fileDraftKey) {
+      lastFileDraftKey.current = fileDraftKey;
+      setFiles(fileDrafts?.get(fileDraftKey) ?? []);
+      return;
+    }
+    const saved = fileDrafts?.get(fileDraftKey);
+    if (saved && files.length === 0) setFiles(saved);
+    else if (!saved && files.length > 0) fileDrafts?.set(fileDraftKey, files);
+  }, [fileDraftKey, fileDrafts, files]);
   useEffect(() => { if (!props.disabled && pendingFeedback.current) void releaseForChat(); }, [props.disabled]);
   async function releaseForChat() {
     const feedback = pendingFeedback.current;
@@ -1294,7 +1310,8 @@ export function FileInputCard(props: {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const transcriptionJobs = usePluginTranscriptions();
-  const [waitingForTranscripts, setWaitingForTranscripts] = useState(false);
+  const stagedRowRefs = useRef(new Map<string, HTMLLIElement>());
+  const [blockedRecordingPath, setBlockedRecordingPath] = useState<string | null>(null);
   useEffect(() => {
     // Older sessions may already contain both the pending audio-path row and
     // the completed transcript-path row. The pending row owns the handover;
@@ -1311,53 +1328,41 @@ export function FileInputCard(props: {
   /**
    * Resolves the staged recordings into what the plugin receives.
    *
-   * A recording that is still being transcribed is listed and submittable, so
-   * the user is never held at this card. What is sent still has to be the
-   * transcript, not a gap where the interview should be — so submitting waits
-   * here for any transcription in flight, and the card carries on by itself
-   * once it lands. The plugin already holds a collected recording, so only its
-   * text travels; one it has not seen goes as the transcript file.
+   * Only finished transcripts travel to the plugin; `upload` refuses to submit
+   * while a staged recording is still transcribing or has failed, so the
+   * interview never reaches the plugin as raw audio from this card.
    */
-  const collectStaged = async (keepPending = false) => {
+  const collectStaged = (keepPending = false) => {
     const transcripts: Record<string, { text: string; segments: PluginRecordingTranscript["segments"] }> = {};
     const recordingDeliverables: UploadedAgentMedia[] = [];
-    const jobs = stagedFiles.map((file) => transcriptionJobs?.transcriptionJob(file.path));
-    if (jobs.some((job) => job && job.state.status !== "ready")) setWaitingForTranscripts(true);
-    try {
-      const results = await Promise.all(jobs.map((job) => job?.wait()));
-      const files: UploadedAgentMedia[] = [];
-      const retained: PluginRecordingMaterial[] = [];
-      stagedFiles.forEach((file, index) => {
-        const { collected, pending: _pending, pendingAudio, ...media } = file;
-        if (!file.pending) {
-          if (!collected) files.push(media);
-          return;
-        }
-        const result = results[index];
-        if (result) {
-          if (pendingAudio) recordingDeliverables.push(pendingAudio);
-          if (result.transcriptFile) recordingDeliverables.push(result.transcriptFile);
-          // A recording the plugin already holds gets its text attached to that
-          // material, keyed by the recording's path. One it never saw arrives
-          // as the transcript file instead. Sending both would put the same
-          // interview into the session twice.
-          if (collected) transcripts[file.path] = { text: result.text, segments: result.segments };
-          else if (result.transcriptFile) files.push(result.transcriptFile);
-          return;
-        }
-        // No transcript. Closing the card is not a decision about the
-        // recording, so the row stays for the next round rather than being
-        // resolved by a submission the user never made.
-        if (keepPending) { retained.push(file); return; }
-        // The user chose to go on without the text: hand the audio over so the
-        // plugin can read it itself. A recording the plugin already holds
-        // needs nothing, which is the case once its text has been delivered.
-        if (!collected && file.pendingAudio) files.push(file.pendingAudio);
-      });
-      return { transcripts, files, recordingDeliverables, retained };
-    } finally {
-      setWaitingForTranscripts(false);
-    }
+    const files: UploadedAgentMedia[] = [];
+    const retained: PluginRecordingMaterial[] = [];
+    stagedFiles.forEach((file) => {
+      const { collected, pending: _pending, pendingAudio, ...media } = file;
+      if (!file.pending) {
+        if (!collected) files.push(media);
+        return;
+      }
+      const state = transcriptionJobs?.transcriptions.get(file.path);
+      const result = state?.status === "ready" ? state.transcript : null;
+      if (result) {
+        if (pendingAudio) recordingDeliverables.push(pendingAudio);
+        if (result.transcriptFile) recordingDeliverables.push(result.transcriptFile);
+        // A recording the plugin already holds gets its text attached to that
+        // material, keyed by the recording's path. One it never saw arrives
+        // as the transcript file instead. Sending both would put the same
+        // interview into the session twice.
+        if (collected) transcripts[file.path] = { text: result.text, segments: result.segments };
+        else if (result.transcriptFile) files.push(result.transcriptFile);
+        else if (pendingAudio) files.push(pendingAudio);
+        return;
+      }
+      // Closing the card is not a decision about the recording. Keep its row
+      // for the next collection round. Submitting never reaches here: `upload`
+      // holds the card until every staged recording has its transcript.
+      if (keepPending) retained.push(file);
+    });
+    return { transcripts, files, recordingDeliverables, retained };
   };
   const close = async () => {
     if (submitting.current || props.disabled) return;
@@ -1368,7 +1373,7 @@ export function FileInputCard(props: {
       // Closing skips this collection round; selected files stay in the draft.
       // A recording still being transcribed keeps its row, so its text travels
       // with the next card instead of being lost with this one.
-      const staged = await collectStaged(true);
+      const staged = collectStaged(true);
       await props.onRespond(props.request.interactionId, {
         action: "skip",
         files: staged.files,
@@ -1397,7 +1402,7 @@ export function FileInputCard(props: {
     // card keeps replacing, where the second pick is a new choice.
     const next = payload.multiple === true ? appendUniqueFiles(files, picked) : picked;
     setFiles(next);
-    if (fileDrafts?.has(fileDraftKey)) fileDrafts.set(fileDraftKey, next);
+    fileDrafts?.set(fileDraftKey, next);
     const nextReady = next.filter((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t).status === "ready");
     setValidationError(validateReadyFileCount([...nextReady, ...stagedFiles], maxFiles, minFiles, t));
   };
@@ -1417,15 +1422,24 @@ export function FileInputCard(props: {
     if (submitting.current || props.disabled) return;
     const next = files.filter((_file, candidateIndex) => candidateIndex !== index);
     setFiles(next);
-    if (fileDrafts?.has(fileDraftKey)) {
-      if (next.length) fileDrafts.set(fileDraftKey, next);
-      else fileDrafts.delete(fileDraftKey);
-    }
+    if (next.length) fileDrafts?.set(fileDraftKey, next);
+    else fileDrafts?.delete(fileDraftKey);
     const nextReady = next.filter((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t).status === "ready");
     setValidationError(validateReadyFileCount([...nextReady, ...stagedFiles], maxFiles, minFiles, t));
   };
   const upload = async () => {
     if (submitting.current || props.disabled) return;
+    // The plugin receives an interview as its transcript, never as raw audio.
+    // A recording still transcribing, or whose retries are spent, holds the
+    // submission; the user is taken to that row to wait or retry, or to remove it.
+    const unready = stagedFiles.find((file) => file.pending
+      && transcriptionJobs?.transcriptions.get(file.path)?.status !== "ready");
+    if (unready) {
+      setBlockedRecordingPath(unready.path);
+      stagedRowRefs.current.get(unready.path)?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      return;
+    }
+    setBlockedRecordingPath(null);
     const error = validateReadyFileCount([...readyFiles, ...stagedFiles], maxFiles, minFiles, t);
     if (error || !props.onUploadFiles) {
       setValidationError(error ?? t("plugin.ui.responseFailed"));
@@ -1438,7 +1452,7 @@ export function FileInputCard(props: {
         const classification = classifyAgentAttachmentFile(file, { allowAudio: true })!;
         return { blob: file, name: file.name, kind: classification.kind, mime: classification.mime };
       })) : [];
-      const staged = await collectStaged();
+      const staged = collectStaged();
       const submitted = [...staged.files, ...uploaded];
       const feedback = pendingFeedback.current;
       if (feedback) {
@@ -1492,10 +1506,12 @@ export function FileInputCard(props: {
           const transcriptFile = transcriptionState?.status === "ready" ? transcriptionState.transcript.transcriptFile : undefined;
           const displayFile = transcriptFile ?? file;
           const canOpen = Boolean(props.onOpenArtifact) && (!file.pending || Boolean(transcriptFile));
-          return <li key={file.path} className="diagnostic-upload-card__file">
+          return <li key={file.path} className="diagnostic-upload-card__file"
+            ref={(node) => { if (node) stagedRowRefs.current.set(file.path, node); else stagedRowRefs.current.delete(file.path); }}>
             <span className="diagnostic-upload-card__file-icon"><FileTypeIcon name={displayFile.name} mime={displayFile.mime} surface="row" /></span>
             <div className="diagnostic-upload-card__file-info"><button type="button" disabled={!canOpen} title={displayFile.name} onClick={() => props.onOpenArtifact?.({ id: displayFile.path, path: displayFile.path, uri: displayFile.path, name: displayFile.name, mediaType: displayFile.mime })}>{displayFile.name}</button>
-              <StagedTranscriptionStatus state={transcriptionState} job={transcriptionJobs?.transcriptionJob(file.path)} /></div>
+              <StagedTranscriptionStatus state={transcriptionState} job={transcriptionJobs?.transcriptionJob(file.path)}
+                blocked={blockedRecordingPath === file.path} /></div>
             <span className="diagnostic-upload-card__file-size">{formatUploadFileSize(displayFile.bytes)}</span>
             <button type="button" className="diagnostic-upload-card__remove" disabled={props.disabled}
               aria-label={t("plugin.ui.removeFile", { name: displayFile.name })}
@@ -1528,7 +1544,6 @@ export function FileInputCard(props: {
       {validationError ? <p className="diagnostic-upload-card__error" role="alert">{validationError}</p> : null}
       {props.status === "error" ? <p className="diagnostic-upload-card__error" role="alert">{t("plugin.ui.responseFailed")}</p> : null}
       {props.status === "answered" ? <p role="status">{t("plugin.ui.answered")}</p> : null}
-      {waitingForTranscripts ? <p className="diagnostic-upload-card__waiting" role="status">{t("plugin.ui.audio.waitingForTranscription")}</p> : null}
     </div>
     <footer className="diagnostic-upload-card__footer">
       {accept ? <p>{t("plugin.ui.acceptedFormats", { formats: summarizeAcceptedFormats(accept, t) })}</p> : null}
