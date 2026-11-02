@@ -454,7 +454,7 @@ export class RewardPipeline {
     if (evidence.highValueMemories.length === 0 || evidence.lowValueMemories.length === 0) return undefined;
     const valueDiff = this.deps.repairEvidenceValueDiff(evidence.highValueMemories, evidence.lowValueMemories);
     if (valueDiff < this.deps.config.algorithm.feedback.valueDelta) return undefined;
-    const contextHash = stableHash(`value-distribution:${triggerTrace.userId}:${triggerTrace.signature}`).slice(0, 16);
+    const contextHash = stableHash(`value-distribution:${triggerTrace.signature}`).slice(0, 16);
     const cooldownMs = this.deps.config.algorithm.feedback.cooldownMs;
     if (cooldownMs > 0) {
       const since = new Date(Date.parse(at) - cooldownMs).toISOString();

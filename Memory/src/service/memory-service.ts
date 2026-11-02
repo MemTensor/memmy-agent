@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "./namespace/memory-owner.js";
 import { statsStore } from "./panel/stats-store.js";
 import { PanelWriteCoordinator } from "./panel/write-coordinator.js";
 import {localPanelRequest} from "./panel/local-read.js";
@@ -738,6 +739,7 @@ export class MemoryService {
     });
     this.episodeReadModel = new EpisodeReadModel({
       repos: this.repos,
+      localMemory: this.mode !== "cloud",
       assertMemorySearchEnabled: this.assertMemorySearchEnabled.bind(this),
       resolveContext: this.resolveContext.bind(this),
       requireSession: this.requireSession.bind(this),
@@ -1687,8 +1689,8 @@ export class MemoryService {
   }
 
   async completeSourceTurn(request: SourceTurnCompleteRequest, signal?: AbortSignal): Promise<SourceTurnCompleteResponse> {
-    // Native scans have no Hook envelope. Use the configured owner only when
-    // the request (including authenticated scope) did not provide one.
+    // Native scans and Hooks use the same device-owned memory identity,
+    // regardless of the current account or a legacy authenticated envelope.
     const response = await this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.query, turnId: request.sourceTurn?.turnId },
       () => this.sessionTurns.completeSourceTurn(this.withTimeZone({
@@ -1698,7 +1700,7 @@ export class MemoryService {
           profileId: request.sourceTurn?.profileId,
           sessionKey: request.sourceTurn?.conversationId,
           ...request.namespace,
-          userId: request.namespace?.userId ?? this.config.userId
+          userId: DEVICE_MEMORY_OWNER
         }
       })), signal
     )));
@@ -2483,7 +2485,7 @@ export class MemoryService {
   }
 
   getPanelMemory(id:string,request:RequestEnvelope={},local=this.mode!=="cloud"):MemoryGetResponse {
-    if(!local)return this.getMemory(id,request);
+    if(!local)return this.getMemory(id,request,false);
     this.assertMemorySearchEnabled();
     const userMemory=this.repos.userMemories.getForDisplay(id);
     if(userMemory){
@@ -2497,11 +2499,11 @@ export class MemoryService {
     return this.episodeReadModel.getMemory(id,this.withTimeZone(request),true);
   }
 
-  getMemory(id: string, request: RequestEnvelope = {}): MemoryGetResponse {
+  getMemory(id: string, request: RequestEnvelope = {}, local = this.mode !== "cloud"): MemoryGetResponse {
     this.assertMemorySearchEnabled();
     const userMemory = this.repos.userMemories.getForDisplay(id);
     if (userMemory) {
-      if (!request.namespace?.userId || request.namespace.userId !== userMemory.userId) throw new MemoryServiceError("not_found", "Memory is unavailable");
+      if (!local && (!request.namespace?.userId || request.namespace.userId !== userMemory.userId)) throw new MemoryServiceError("not_found", "Memory is unavailable");
       const item = userMemoryPanelItem(userMemory);
       const detail = {...item, memoryLayer: "UserMemory" as const, body: userMemory.content, sourceMemoryIds: [], metadata: item.metadata ?? {}};
       return {...detail, item: detail, refs: {}, etag: `user-memory-${userMemory.updatedAt}`};
@@ -2838,10 +2840,6 @@ export class MemoryService {
     this.assertMemoryAddEnabled();
     const userMemory = this.repos.userMemories.get(id);
     if (userMemory) {
-      const namespaceUserId = request.namespace?.userId;
-      if (namespaceUserId && namespaceUserId !== userMemory.userId) {
-        throw new MemoryServiceError("forbidden", "user memory belongs to a different user");
-      }
       const deleted = this.repos.userMemories.softDelete(userMemory.id, nowIso());
       if (!deleted) throw new MemoryServiceError("not_found", `user memory not found: ${id}`);
       const changeSeq = this.repos.runtime.appendChange({
@@ -2894,11 +2892,7 @@ export class MemoryService {
       throw new MemoryServiceError("conflict", "invalid L3 World Model v2 record");
     }
     if (strictV2WorldModel) {
-      const effectiveUserId = normalizeNamespace(request.namespace).userId;
       const projectId = typeof memory.info.project_id === "string" ? memory.info.project_id : null;
-      if (effectiveUserId !== memory.userId) {
-        throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different user");
-      }
       if (request.namespace?.projectId && request.namespace.projectId !== projectId) {
         throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different project");
       }
@@ -2976,9 +2970,6 @@ export class MemoryService {
     this.assertMemorySearchEnabled();
     const event = this.repos.runtime.getRecallEventByQueryId(queryId);
     if (!event) throw new MemoryServiceError("not_found", `recall event not found: ${queryId}`);
-    if (request.namespace?.userId && request.namespace.userId !== event.userId) {
-      throw new MemoryServiceError("forbidden", "recall event belongs to a different user");
-    }
     const eventRequest = isRecord(event.request) ? event.request : {};
     const evidence = isRecord(eventRequest.recallEvidence) ? eventRequest.recallEvidence : {};
     const storedHits = Array.isArray(evidence.hits)
@@ -3038,13 +3029,13 @@ export class MemoryService {
 
     this.repos.transaction(() => {
       const spanIds = new Set(this.repos.memories.listTaskSpanIds(
-        episode.userId, episode.id, episode.l1MemoryIds
+        episode.userId, episode.id, episode.l1MemoryIds, this.mode !== "cloud"
       ));
       for (const spanId of spanIds) {
         this.deleteMemory(spanId, request);
         deletedMemoryIds.push(spanId);
       }
-      const currentL1Ids = this.repos.memories.ownedEpisodeL1Ids(episode);
+      const currentL1Ids = this.repos.memories.ownedEpisodeL1Ids(episode, this.mode !== "cloud");
       for (const memoryId of currentL1Ids) {
         if (!this.repos.memories.get(memoryId)) continue;
         this.deleteMemory(memoryId, request);
@@ -3410,7 +3401,7 @@ export class MemoryService {
       repos: this.repos,
       reader: this.embeddingMaintenanceReader,
       embedder: this.embedder,
-      userId: this.config.userId?.trim() || "local-user",
+      userId: DEVICE_MEMORY_OWNER,
       enqueueMemory: (memory, text, at, vectorField = embeddingRetryVectorFieldForMemory(memory)) => {
         const existing = this.repos.runtime.getEmbeddingRetryByTarget(
           embeddingRetryTargetKindForMemory(memory), memory.id, vectorField
@@ -3584,7 +3575,7 @@ export class MemoryService {
     return {
       id: input.id ?? newId(memoryIdPrefix(input.layer, input.kind)),
       timeline: at,
-      userId: input.userId,
+      userId: DEVICE_MEMORY_OWNER,
       conversationId: input.conversationId,
       sessionId: input.sessionId,
       agentId: input.agentId,
@@ -3887,7 +3878,6 @@ export class MemoryService {
     }
     const normalized = normalizeNamespace(namespace);
     const conflicts = [
-      normalized.userId !== session.userId,
       normalized.source !== session.source,
       normalized.profileId !== session.profileId,
       (normalized.projectId ?? null) !== (session.projectId ?? null),
@@ -3983,14 +3973,14 @@ export class MemoryService {
       if (session) {
         this.assertSessionInScope(session, request.namespace);
         return {
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           conversationId: session.conversationId,
           namespace: namespaceForSession(session)
         };
       }
     }
     const namespace = normalizeNamespace(request.namespace);
-    const userId = request.userId ?? namespace.userId;
+    const userId = DEVICE_MEMORY_OWNER;
     return {
       userId,
       namespace: {
@@ -4165,7 +4155,6 @@ function namespaceIdFromSession(session: SessionRecord): string {
 function namespaceIdFromContext(namespace: RuntimeNamespace): string {
   return [
     namespace.tenantId,
-    namespace.userId,
     namespace.projectId ?? namespace.workspaceId,
     namespace.source,
     namespace.profileId

@@ -1172,7 +1172,8 @@ async function routeRequest(
       () =>
         service.getMemory(
           decodeMatchSegment(memoryGet, 1),
-          { namespace: principal.namespace, timeZone: principal.timeZone }
+          { namespace: principal.namespace, timeZone: principal.timeZone },
+          localPanel
         ),
       (result) => ({ hit_count: hitCountFromGetResponse(result) }),
     );
@@ -1505,7 +1506,7 @@ function authenticate(
     return {
       kind: "cloud",
       tokenId: stableTokenId(candidate!),
-      namespace: mergeNamespaces(cloudNamespace, namespaceFromRequest(request, url)),
+      namespace: mergeNamespaces(namespaceFromRequest(request, url), cloudNamespace),
       authenticatedNamespace: cloudNamespace,
       scopes: ["*"]
     };
@@ -1518,7 +1519,7 @@ function authenticate(
     return {
       kind: "scoped",
       tokenId: stableTokenId(candidate!),
-      namespace: mergeNamespaces(scoped.namespace, namespaceFromRequest(request, url)),
+      namespace: mergeNamespaces(namespaceFromRequest(request, url), scoped.namespace),
       authenticatedNamespace: scoped.namespace,
       scopes: scoped.scopes ?? ["memory:read", "memory:write"]
     };
@@ -1663,7 +1664,6 @@ function strictEnvelopeWithPrincipal(
     : undefined;
   const principalNamespace = principal.namespace;
   const fields: Array<keyof RuntimeNamespace> = [
-    "userId",
     "tenantId",
     "projectId",
     "workspaceId",

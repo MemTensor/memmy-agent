@@ -68,14 +68,18 @@ describe("declared memory relationships", () => {
     expect(repos.runtime.getEpisode(target.id)?.l1MemoryIds).toEqual([]);
   });
 
-  it.each(["trace","raw"])("does not delete spans with a foreign %s owner",async source=>{
-    const {service,repos,raw,trace,episode,span}=await withSpan();
+  it.each(["trace","raw"])("does not delete spans with a %s source from another task",async source=>{
+    const {service,repos,raw,trace,episode,span,target}=await withSpan();
+    const foreignSession=service.openSession({namespace:{source:"codex",profileId:"default",sessionKey:"foreign-session"}}).sessionId;
+    repos.runtime.insertRawTurn({...raw,id:"foreign-source",turnId:"foreign-source",sessionId:foreignSession,episodeId:target.id});
     if(source==="trace"){
-      repos.memories.insert({...trace,id:"foreign-parent",memoryKey:"foreign-parent",userId:"other-owner"});
+      repos.memories.insert({...trace,id:"foreign-parent",memoryKey:"foreign-parent",sessionId:foreignSession,
+        info:{...trace.info,raw_turn_id:"foreign-source",episode_id:target.id},
+        properties:{...trace.properties,internal_info:{...trace.properties.internal_info,
+          trace:{raw_turn_id:"foreign-source",episode_id:target.id}}}});
       repos.memories.update({...span,properties:{...span.properties,internal_info:{...span.properties.internal_info,
         span:{...span.properties.internal_info.span,source_trace_id:"foreign-parent"}}}});
     }else{
-      repos.runtime.insertRawTurn({...raw,id:"foreign-source",turnId:"foreign-source",userId:"other-owner"});
       repos.memories.update({...span,info:{...span.info,raw_turn_id:"foreign-source"},properties:{...span.properties,
         internal_info:{...span.properties.internal_info,span:{...span.properties.internal_info.span,raw_turn_id:"foreign-source"}}}});
     }
@@ -94,9 +98,12 @@ describe("declared memory relationships", () => {
     expect(repos.runtime.getRawTurn(raw.id)?.episodeId).toBe(episode.id);
   });
 
-  it("does not rewrite another user's forged raw-turn references during rebind",async()=>{
-    const {repos,raw,trace,episode,target}=await withSpan();
-    repos.memories.insert({...trace,id:"foreign-rebind",memoryKey:"foreign-rebind",userId:"other-owner"});
+  it("does not rewrite a different session's forged raw-turn references during rebind",async()=>{
+    const {db,service,repos,raw,trace,episode,target}=await withSpan();
+    const foreign=service.openSession({namespace:{source:"codex",profileId:"default",sessionKey:"forged-source"}});
+    repos.memories.insert({...trace,id:"foreign-rebind",memoryKey:"foreign-rebind",userId:"other-owner",sessionId:foreign.sessionId});
+    // Simulate a historical row: new local inserts always use the device owner.
+    db.db.prepare("UPDATE memories SET user_id='other-owner' WHERE id='foreign-rebind'").run();
     const before=repos.memories.getIncludingDeleted("foreign-rebind");
     repos.runtime.rebindRawTurnEpisode(raw.id,episode.id,target.id);
     expect(repos.memories.getIncludingDeleted("foreign-rebind")).toEqual(before);
@@ -218,9 +225,11 @@ describe("declared memory relationships", () => {
     expect(repos.memories.get(trace.id)).toBeUndefined();
   });
 
-  it("does not delete another user's L1 from a forged historical task reference", async () => {
+  it("does not delete another task's L1 from a forged historical task reference", async () => {
     const { db, service, repos, trace, episode } = await setup();
-    const foreign = { ...trace, id: "foreign-trace", memoryKey: "foreign-trace", userId: "other-owner" };
+    const foreign = { ...trace, id: "foreign-trace", memoryKey: "foreign-trace", sessionId: "other-session",
+      info: { episode_id: "other-task" }, properties: { internal_info: { memory_layer: "L1" as const,
+        trace: { episode_id: "other-task" } } } };
     repos.memories.insert(foreign);
     db.db.prepare("UPDATE episodes SET l1_memory_ids_json=? WHERE id=?")
       .run(JSON.stringify([trace.id, foreign.id]), episode.id);
@@ -234,6 +243,23 @@ describe("declared memory relationships", () => {
       properties: { ...trace.properties, internal_info: { memory_layer: "L1", trace: { episode_id: episode.id } } } });
     expect(service.deletePanelTask(episode.id).deletedMemoryIds).toContain("legacy-owned");
     expect(repos.memories.get("legacy-owned")).toBeUndefined();
+  });
+
+  it.each(["visible", "redacted", "missing"])("deletes device traces and spans from a legacy task with a %s source", async state => {
+    const {db,service,repos,raw,trace,episode,span}=await withSpan();
+    db.db.prepare("UPDATE episodes SET user_id='legacy-account' WHERE id=?").run(episode.id);
+    db.db.prepare("UPDATE raw_turns SET user_id='legacy-account' WHERE id=?").run(raw.id);
+    const stored=repos.runtime.getEpisode(episode.id)!;
+    expect(repos.runtime.getRawTurn(raw.id)?.userId).toBe("legacy-account");
+    expect(repos.memories.ownedEpisodeL1Ids(stored)).not.toContain(trace.id);
+    expect(repos.memories.listTaskSpanIds(stored.userId,stored.id,stored.l1MemoryIds)).not.toContain(span.id);
+    if(state==="redacted")service.redactRawTurn(raw.id);
+    if(state==="missing")db.db.prepare("DELETE FROM raw_turns WHERE id=?").run(raw.id);
+    expect(service.deletePanelTask(episode.id).deletedMemoryIds).toEqual(expect.arrayContaining([trace.id,span.id]));
+    expect(repos.memories.get(trace.id)).toBeUndefined();
+    expect(repos.memories.get(span.id)).toBeUndefined();
+    expect(repos.memories.getIncludingDeleted(trace.id)?.userId).toBe(trace.userId);
+    expect(repos.memories.getIncludingDeleted(span.id)?.userId).toBe(span.userId);
   });
 
   it("rolls back task-owned trace deletion when deleting the task fails", async () => {

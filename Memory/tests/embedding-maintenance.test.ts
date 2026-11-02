@@ -168,18 +168,21 @@ describe("embedding maintenance regressions (MEMMY-709–711)", () => {
     expect(repos.vectors.exportRows()).toHaveLength(0);
   });
 
-  it("includes only this account's active user memories and filters their old-model vectors", async () => {
-    const { repos, service } = setup();
+  it("includes all active user memories across accounts and filters their old-model vectors", async () => {
+    const { repos, service, db } = setup();
     for (const [id, userId, current] of [["healthy", "local-user", true], ["old", "local-user", false], ["foreign", "other-user", false]] as const) {
       repos.userMemories.insert({ ...buildUserMemory({ id, sourceTurnId: id, userId, memoryTypes: ["User Preference"], content: `I prefer ${id}`, createdAt: at }),
         embedding: vector(), embeddingModel: current ? identity.model : "old-model", embeddingProvider: identity.provider });
     }
-    expect(await service.embeddingMaintenanceStats()).toMatchObject({ totalSlots: 2, ready: 1, modelMismatch: 1 });
+    expect(await service.embeddingMaintenanceStats()).toMatchObject({ totalSlots: 3, ready: 1, modelMismatch: 2 });
     expect(repos.userMemories.searchVectorIds("local-user", rememberEmbeddingIdentity(vector(), identity), 10).map(hit => hit.id)).toEqual(["healthy"]);
+    // Existing rows retain their account owner after an upgrade.
+    db.db.prepare("UPDATE user_memories SET user_id = 'historical-account' WHERE id = 'foreign'").run();
     const run = await service.rebuildEmbeddings("repair");
     await service.runWorkerOnce(200);
-    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ enqueued: 1, updated: 1, failed: 0, done: true });
-    expect(repos.userMemories.get("foreign")!.embeddingModel).toBe("old-model");
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ enqueued: 2, updated: 2, failed: 0, done: true });
+    expect(repos.userMemories.get("foreign")!.embeddingModel).toBe(identity.model);
+    expect(repos.userMemories.get("foreign")!.userId).toBe("historical-account");
   });
 
   it("keeps in-flight vector provenance when settings change and stops claiming the run completed", async () => {

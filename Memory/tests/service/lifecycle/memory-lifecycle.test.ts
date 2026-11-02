@@ -634,7 +634,7 @@ describe("L3 World Model scope deletion", () => {
     db.close();
   });
 
-  it("resets project profile state and prevents an old profile job from recreating the deleted L3", async () => {
+  it("preserves the independent profile request when deleting a contract-only L3", () => {
     const { db, service } = createTestService();
     const userId = "l3-project-delete-user";
     const workspaceUri = "file:///workspace/project-delete";
@@ -665,30 +665,20 @@ describe("L3 World Model scope deletion", () => {
       value: "Run project tests before commit."
     })!;
 
+    const profileBefore = db.db.prepare("SELECT * FROM l3_world_model_project_environment_state").get();
+    const jobsBefore = db.db.prepare("SELECT * FROM evolution_jobs WHERE job_type='project_environment_profile'").all();
     service.deleteMemory(existing.id, { namespace });
 
     expect(repos.l3WorldModels.getScope(userId, opened.projectId)).toMatchObject({
       workspaceUri,
       memoryId: undefined
     });
-    expect(db.db.prepare(
-      `SELECT status, current_scan_id, applied_scan_id, fingerprint, last_error
-       FROM l3_world_model_project_environment_state`
-    ).get()).toEqual({
-      status: "uninitialized",
-      current_scan_id: null,
-      applied_scan_id: null,
-      fingerprint: null,
-      last_error: null
-    });
+    expect(db.db.prepare("SELECT * FROM l3_world_model_project_environment_state").get()).toEqual(profileBefore);
+    expect(db.db.prepare("SELECT * FROM evolution_jobs WHERE job_type='project_environment_profile'").all()).toEqual(jobsBefore);
     expect(service.panelItems({ layer: "L3" }).items.some((item) => item.id === existing.id)).toBe(false);
 
-    await service.runWorkerOnce(10);
-    expect(db.db.prepare(
-      `SELECT status FROM evolution_jobs WHERE job_type = 'project_environment_profile'`
-    ).get()).toEqual({ status: "succeeded" });
-    expect(repos.l3WorldModels.getScope(userId, opened.projectId)?.memoryId).toBeUndefined();
-
+    // Directory execution and publication are covered with real temporary
+    // projects in project-environment-independent-deletion.test.ts.
     db.close();
   });
 });

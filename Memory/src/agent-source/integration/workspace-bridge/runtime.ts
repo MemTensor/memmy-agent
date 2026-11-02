@@ -87,13 +87,11 @@ export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Pr
   const memory = objectValue(yaml.memmyMemory);
   const storage = objectValue(memory.storage);
   const legacyStorage = objectValue(yaml.storage);
-  const app = objectValue(yaml.app);
+  void pinnedOwner; // Ownership is device-wide, including pinned runtime snapshots.
   return {
     endpoint: text(storage.endpoint) || text(memory.endpoint) || text(legacyStorage.endpoint) || text(snapshot.endpoint) || DEFAULT_ENDPOINT,
     token: text(storage.token) || text(memory.token) || text(legacyStorage.token) || text(snapshot.token),
-    userId: pinnedOwner
-      ? text(snapshot.userId) || "local-user"
-      : text(app.userId) || text(memory.userId) || text(snapshot.userId) || "local-user",
+    userId: "__memmy_device_memory__",
     workspaceHostId: text(snapshot.workspaceHostId),
   };
 }

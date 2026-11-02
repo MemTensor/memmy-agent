@@ -134,11 +134,10 @@ export async function routeViewerRequest(
     return { body: { ok: true } };
   }
   if (method === "GET" && path === "/api/v1/overview") {
-    const userId = viewerUserId(context);
     return {
       body: {
-        ...context.service.panelOverview({ ...envelope, userId }),
-        summary: (await context.service.readPanel("overview",[{ ...envelope, userId }])).data
+        ...context.service.panelOverview(envelope),
+        summary: (await context.service.readPanel("overview",[envelope])).data
       }
     };
   }
@@ -160,7 +159,6 @@ export async function routeViewerRequest(
     return {
       body: (await context.service.readPanel("items",[{
         ...envelope,
-        ...(layer === "UserMemory" ? { userId: viewerUserId(context) } : {}),
         layer,
         q: query(url, "q"),
         status: statusQuery(url),
@@ -418,11 +416,6 @@ function layerForViewerPath(path: string): RecallMemoryLayer | undefined {
   if (path === "/api/v1/world-models") return "L3";
   if (path === "/api/v1/skills") return "Skill";
   return undefined;
-}
-
-function viewerUserId(context: ViewerApiContext): string {
-  const userId = context.service.configStatus().config.userId?.trim();
-  return userId || "local-user";
 }
 
 function statusQuery(url: URL): "activated" | "resolving" | "archived" | "deleted" | undefined {

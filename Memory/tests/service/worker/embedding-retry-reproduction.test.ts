@@ -144,7 +144,7 @@ describe("v1.2.6 embedding retry reproduction", () => {
     expect(probe).toHaveBeenCalledTimes(2);
   });
 
-  it("combines both embedding queues and excludes unrelated or other users' jobs", () => {
+  it("combines both embedding queues across users and excludes unrelated jobs", () => {
     const { db } = createTestService();
     const runtime = new Repositories(db.db).runtime;
     const at = new Date(1_000).toISOString();
@@ -158,7 +158,7 @@ describe("v1.2.6 embedding retry reproduction", () => {
         createdAt: at, updatedAt: at });
     }
     runtime.enqueueEmbeddingRetry({ targetKind: "trace", targetId: "combined", vectorField: "vec_summary", sourceText: "test", now: 1_000 });
-    expect(runtime.embeddingMaintenanceQueueStats("local-user", 2_000)).toEqual({ pending: 3, active: 0, stale: 0, failed: 0 });
+    expect(runtime.embeddingMaintenanceQueueStats("local-user", 2_000)).toEqual({ pending: 4, active: 0, stale: 0, failed: 0 });
   });
 
   it("queues only the three missing vectors from the Viewer repair request", async () => {

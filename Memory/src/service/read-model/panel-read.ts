@@ -670,7 +670,7 @@ export class PanelReadModel {
     const pageSize = 20 as const;
     const query = input.q?.trim() || undefined;
     const userId = input.namespace?.userId;
-    const total = this.deps.repos.runtime.countEpisodes(userId, query, input.sourceAgent);
+    const total = this.deps.repos.runtime.countEpisodes(userId, query, input.sourceAgent, true);
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(normalizePageNumber(input.page), totalPages);
     const episodes = this.deps.repos.runtime.listEpisodes(
@@ -679,6 +679,7 @@ export class PanelReadModel {
       (page - 1) * pageSize,
       query,
       input.sourceAgent,
+      true,
     );
     const existingIds = effectiveEpisodeMemoryIds(this.deps.repos.db, episodes,!input.namespace?.userId);
     const pendingTitleIds = this.deps.repos.runtime.episodesWithJob(
@@ -707,10 +708,10 @@ export class PanelReadModel {
 
   panelTaskSummaries(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }) {
     const pageSize = 20 as const;
-    const total = this.deps.repos.runtime.countEpisodes(input.namespace?.userId, input.q?.trim() || undefined, input.sourceAgent);
+    const total = this.deps.repos.runtime.countEpisodes(input.namespace?.userId, input.q?.trim() || undefined, input.sourceAgent, true);
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(normalizePageNumber(input.page), totalPages);
-    const episodes = this.deps.repos.runtime.listEpisodes(input.namespace?.userId, pageSize, (page-1)*pageSize, input.q?.trim() || undefined, input.sourceAgent);
+    const episodes = this.deps.repos.runtime.listEpisodes(input.namespace?.userId, pageSize, (page-1)*pageSize, input.q?.trim() || undefined, input.sourceAgent, true);
     return { tasks: this.taskSummaries(episodes,input), page, pageSize, total, totalPages, hasNext: page < totalPages, hasPrev: page > 1, serverTime: this.now() };
   }
 

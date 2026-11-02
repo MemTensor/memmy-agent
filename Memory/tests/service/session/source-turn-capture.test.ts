@@ -165,7 +165,7 @@ describe("native source turn submission", () => {
     const { db, service } = createTestService();
     const input = request();
     const opened = service.openSession({ namespace: { ...input.namespace!, sessionKey: input.sourceTurn.conversationId }, meta: { conversationId: input.sourceTurn.conversationId } });
-    new Repositories(db.db).captureClaims.claim({ userId: "source-user", source: "codex", qaHash: memoryCaptureQaHash(input.query, input.answer), primaryMemoryId: "deleted-old-memory", capturedBy: "agent_source_scan", createdAt: "2026-01-01" });
+    new Repositories(db.db).captureClaims.claim({ userId: "__memmy_device_memory__", source: "codex", qaHash: memoryCaptureQaHash(input.query, input.answer), primaryMemoryId: "deleted-old-memory", capturedBy: "agent_source_scan", createdAt: "2026-01-01" });
     const stored = (await service.completeSourceTurn(request({ channel: "agent_source_scan" })));
     expect(stored.result?.sessionId).toBe(opened.sessionId);
     expect(counts(db).sessions).toBe(1);
@@ -191,12 +191,12 @@ describe("native source turn submission", () => {
     expect(second).toMatchObject({ status: "existing", result: { sessionId: opened.sessionId, l1MemoryId: first.result!.l1MemoryId } });
     expect(counts(db).sessions).toBe(1);
     expect(runtime.getSession(opened.sessionId)).toMatchObject({
-      userId: "source-user", hostSessionKey: original.hostSessionKey, conversationId: input.sourceTurn.conversationId,
+      userId: "__memmy_device_memory__", hostSessionKey: original.hostSessionKey, conversationId: input.sourceTurn.conversationId,
       projectId: original.projectId, workspaceId: original.workspaceId, meta: original.meta
     });
-    expect(runtime.getRawTurn(first.result!.rawTurnId)).toMatchObject({ userId: "source-user", conversationId: input.sourceTurn.conversationId });
+    expect(runtime.getRawTurn(first.result!.rawTurnId)).toMatchObject({ userId: "__memmy_device_memory__", conversationId: input.sourceTurn.conversationId });
     const memory = new Repositories(db.db).memories.get(first.result!.l1MemoryId)!;
-    expect(memory).toMatchObject({ userId: "source-user", conversationId: input.sourceTurn.conversationId, appId: original.workspaceId });
+    expect(memory).toMatchObject({ userId: "__memmy_device_memory__", conversationId: input.sourceTurn.conversationId, appId: original.workspaceId });
     expect(memory.info.project_id).toBe(original.projectId);
     service.closeSession(opened.sessionId, { namespace: input.namespace });
     expect(runtime.getEpisode(first.result!.episodeId)?.status).toBe("closed");
@@ -281,7 +281,7 @@ describe("native source turn submission", () => {
     expect(new Repositories(db.db).memories.get(completed.result!.l1MemoryId)?.conversationId).toBe(input.sourceTurn.conversationId);
   });
 
-  it.each(["user", "conversation"] as const)("refuses an observed RawTurn with a conflicting %s", async (conflict) => {
+  it.each(["user", "conversation"] as const)("validates observed RawTurn lineage while ignoring legacy UID (%s)", async (conflict) => {
     const { db, service } = createTestService();
     const input = request();
     const opened = service.openSession({ namespace: { ...input.namespace!, sessionKey: `codex-memory-${input.sourceTurn.conversationId}` } });
@@ -292,6 +292,11 @@ describe("native source turn submission", () => {
     const runtime = new Repositories(db.db).runtime;
     const original = runtime.getRawTurn(observed.rawTurnId!)!;
     const before = counts(db);
+    if (conflict === "user") {
+      const result = await service.completeSourceTurn(request({ sessionId: opened.sessionId }));
+      expect(result.status).toBe("stored");
+      return;
+    }
     await expect(async () => (await service.completeSourceTurn(request({ sessionId: opened.sessionId })))).rejects.toThrow("source_raw_turn_scope_conflict");
     expect(counts(db)).toEqual(before);
     expect(runtime.getRawTurn(observed.rawTurnId!)).toEqual(original);
@@ -303,7 +308,7 @@ describe("native source turn submission", () => {
     const input = request();
     const namespace = { ...input.namespace!, source: "cursor" };
     const opened = service.openSession({ namespace: { ...namespace, sessionKey: `codex-memory-${input.sourceTurn.conversationId}` } });
-    expect(new Repositories(db.db).runtime.sourceConversationSessions({ userId: "source-user", source: "cursor", profileId: "default",
+    expect(new Repositories(db.db).runtime.sourceConversationSessions({ userId: "__memmy_device_memory__", source: "cursor", profileId: "default",
       conversationId: input.sourceTurn.conversationId })).toEqual([]);
     const before = counts(db);
     await expect(async () => (await service.completeSourceTurn(request({ namespace, source: "cursor", sessionId: opened.sessionId,
@@ -347,7 +352,7 @@ describe("native source turn submission", () => {
           sessionId: opened.sessionId, episodeId: first.result!.episodeId
         } });
         expect(second.result!.l1MemoryId).not.toBe(first.result!.l1MemoryId);
-        expect(db.db.prepare("SELECT DISTINCT user_id FROM source_turn_captures").all()).toEqual([{ user_id: "installed-owner" }]);
+        expect(db.db.prepare("SELECT DISTINCT user_id FROM source_turn_captures").all()).toEqual([{ user_id: "__memmy_device_memory__" }]);
         expect(counts(db)).toMatchObject({ sessions: 1, episodes: 1, raw_turns: 2, source_turn_captures: 2 });
         await runWorkerRounds(service, 4);
         const recall = await service.search({ query: input.query, layers: ["L1"], limit: 10 });
@@ -370,7 +375,7 @@ describe("native source turn submission", () => {
     expect(scanned).toMatchObject({ status: "stored", result: { sessionId: opened.sessionId } });
     expect((await service.completeSourceTurn(input)).status).toBe("existing");
     expect(counts(db)).toMatchObject({ sessions: 1, episodes: 1, raw_turns: 1, source_turn_captures: 1 });
-    expect(new Repositories(db.db).memories.get(scanned.result!.l1MemoryId)?.userId).toBe(input.namespace!.userId);
+    expect(new Repositories(db.db).memories.get(scanned.result!.l1MemoryId)?.userId).toBe("__memmy_device_memory__");
   });
 
   it("retains cross-account conflicts and tombstones after the Episode closes", async () => {
