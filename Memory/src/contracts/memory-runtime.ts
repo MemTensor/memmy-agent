@@ -158,7 +158,9 @@ export type RecallEvidenceOutput = z.infer<typeof RecallEvidenceOutputSchema>;
 export const MemoryMetricsSchema = z.object({
   value: z.number().optional(),
   alpha: z.number().optional(),
-  reflectionDone: z.boolean()
+  reflectionDone: z.boolean(),
+  valuePending: z.boolean().optional(),
+  alphaPending: z.boolean().optional()
 });
 export type MemoryMetrics = z.infer<typeof MemoryMetricsSchema>;
 

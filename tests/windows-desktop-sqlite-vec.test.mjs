@@ -109,8 +109,10 @@ it("checks the desktop vector binding before and after Windows packaging", () =>
   const script = readFileSync(new URL("../scripts/internal/win/build-nsis.sh", import.meta.url), "utf8");
   const first = script.indexOf('verify-desktop-sqlite-vec.mjs" staged');
   const second = script.indexOf('verify-desktop-sqlite-vec.mjs" packaged');
+  const packageCall = script.lastIndexOf('\nrun_electron_builder_with_signing_recovery "$@"');
+  expect(packageCall).toBeGreaterThan(-1);
   expect(first).toBeGreaterThan(script.indexOf('npm_ci_win_x64 "$RUNTIME_DIR/memory"'));
-  expect(first).toBeLessThan(script.indexOf("npx electron-builder"));
-  expect(second).toBeGreaterThan(script.indexOf("npx electron-builder"));
+  expect(first).toBeLessThan(packageCall);
+  expect(second).toBeGreaterThan(packageCall);
   expect(existsSync(new URL("../scripts/internal/win/verify-desktop-sqlite-vec.mjs", import.meta.url))).toBe(true);
 });

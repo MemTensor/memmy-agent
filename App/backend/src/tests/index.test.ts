@@ -76,6 +76,57 @@ describe("local api", () => {
     }
   });
 
+  it("recovers a refused permission after a failed save response and backend restart", async () => {
+    // Startup now reconciles the plugin catalog; keep this permission test offline.
+    const realFetch = globalThis.fetch;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname === "/api/v1/plugins") return Promise.resolve(Response.json([]));
+      return realFetch(input, init);
+    });
+    try {
+      tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-refusal-restart-"));
+      const databasePath = join(tempDir, "app.sqlite");
+      const memmyConfigPath = join(tempDir, "config.yaml");
+      const initial = createAppStateStore({ databasePath });
+      initial.repositories.bootstrap.updateOnboarding({ scanPermission: "scan_only" });
+      initial.close();
+      const baseClient = createMockMemoryClient();
+      const options = {
+        databasePath, memmyConfigPath,
+        runtimeConfigPath: join(tempDir, "runtime.json"),
+        localToken: "test-token",
+        cloudClient: createMockCloudClient(),
+        memoryClient: {
+          ...baseClient,
+          async reloadConfig(input: Parameters<MemoryClient["reloadConfig"]>[0]) {
+            if (input?.reason === "scan_permission_saved") throw new Error("simulated Memory offline");
+            return baseClient.reloadConfig(input);
+          }
+        }
+      };
+      backend = await createLocalBackend(options);
+      const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/onboarding`, {
+        method: "PATCH", headers: { "x-memmy-local-token": "test-token", "content-type": "application/json" },
+        body: JSON.stringify({ scanPermission: "none", currentStep: "product_tour_required" })
+      });
+      expect(response.status).toBe(500);
+      expect(YAML.parse(readFileSync(memmyConfigPath, "utf8")).memmyMemory.agentAccess).toMatchObject({
+        scanPermission: "none", autoScanKnownAgents: false, watchFileChanges: false
+      });
+      await backend.close();
+      backend = await createLocalBackend({ ...options, memoryClient: baseClient });
+      const restored = createAppStateStore({ databasePath });
+      try {
+        expect(restored.repositories.bootstrap.getOnboardingState()).toMatchObject({
+          scanPermission: "none", currentStep: "scan_permission_required"
+        });
+      } finally { restored.close(); }
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it("reloads Memory config when the desktop backend starts", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-startup-reload-"));
     const baseClient = createMockMemoryClient();

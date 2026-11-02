@@ -8,7 +8,8 @@ import { splitL3TracesByRawTurn } from "../../storage/repositories.js";
 import type {
   EvolutionJobRecord,
   L3WorldModelInputTraceRecord,
-  Repositories
+  Repositories,
+  SessionRecord
 } from "../../storage/repositories.js";
 import type { MemoryFilter, MemoryRow } from "../../types.js";
 import { newId, stableHash } from "../../utils/id.js";
@@ -286,7 +287,7 @@ export class WorkMemoryPipeline {
     };
     const candidatesWithMatches = await this.retrieveCandidates(candidates, filter);
     const decisions = await this.decide(candidatesWithMatches);
-    this.persistDecisions(job, projectId, payload.trajectoryHash, candidates, candidatesWithMatches, decisions);
+    this.persistDecisions(job, projectId, session, payload.trajectoryHash, candidates, candidatesWithMatches, decisions);
   }
 
   private scheduleBatchInTransaction(batchId: string, at: string): EvolutionJobRecord | undefined {
@@ -489,6 +490,7 @@ export class WorkMemoryPipeline {
   private persistDecisions(
     job: EvolutionJobRecord,
     projectId: string | null,
+    sourceSession: Pick<SessionRecord, "source" | "workspaceId">,
     trajectoryHash: string,
     candidates: WorkMemoryCandidate[],
     candidatesWithMatches: Array<{ candidate: WorkMemoryCandidate; matches: MemoryRow[] }>,
@@ -518,9 +520,9 @@ export class WorkMemoryPipeline {
           const currentTarget = this.deps.repos.memories.get(target.id) ?? target;
           const requirement = normalizeRequirement(decision.merged_requirement ?? candidate.requirement);
           const reason = normalizeRequirement(decision.merged_reason ?? candidate.reason);
-          this.writeMemory(currentTarget, topicFromMemory(currentTarget), requirement, reason, trajectoryHash, at, job, projectId);
+          this.writeMemory(currentTarget, topicFromMemory(currentTarget), requirement, reason, trajectoryHash, at, job, sourceSession, projectId);
         } else {
-          this.writeMemory(undefined, topic, normalizeRequirement(candidate.requirement), normalizeRequirement(candidate.reason), trajectoryHash, at, job, projectId);
+          this.writeMemory(undefined, topic, normalizeRequirement(candidate.requirement), normalizeRequirement(candidate.reason), trajectoryHash, at, job, sourceSession, projectId);
         }
       }
     });
@@ -534,11 +536,13 @@ export class WorkMemoryPipeline {
     trajectoryHash: string,
     at: string,
     sourceJob: EvolutionJobRecord,
+    sourceSession: Pick<SessionRecord, "source" | "workspaceId">,
     projectId?: string | null
   ): MemoryRow {
     if (!requirement || !reason) throw new Error("work memory requirement and reason must be non-empty");
     const memoryValue = canonicalWorkMemoryText(topic, requirement, reason);
-    const info: Record<string, unknown> = { ...(existing?.info ?? {}) };
+    // Merges may cross Agents within a project; retain the original provenance.
+    const info: Record<string, unknown> = { ...(existing ? existing.info : { source: sourceSession.source }) };
     if (projectId !== undefined) {
       if (projectId) info.project_id = projectId;
       else delete info.project_id;
@@ -549,8 +553,8 @@ export class WorkMemoryPipeline {
       userId: existing?.userId ?? sourceJob.userId,
       ...(existing?.conversationId !== undefined ? { conversationId: existing.conversationId } : {}),
       sessionId: existing?.sessionId ?? sourceJob.sessionId,
-      ...(existing?.agentId !== undefined ? { agentId: existing.agentId } : {}),
-      ...(existing?.appId !== undefined ? { appId: existing.appId } : {}),
+      agentId: existing ? existing.agentId : sourceSession.source,
+      appId: existing ? existing.appId : sourceSession.workspaceId,
       memoryType: "LongTermMemory",
       status: "activated",
       visibility: "private",

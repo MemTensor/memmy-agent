@@ -21,7 +21,7 @@ export async function clearInAppBrowserData(
 ): Promise<void> {
   if (categories.includes('cookies')) await browserSession.clearStorageData({ storages: ['cookies'] });
   if (categories.includes('siteData')) await browserSession.clearStorageData({
-    storages: ['filesystem', 'indexdb', 'localstorage', 'websql', 'serviceworkers', 'cachestorage'],
+    storages: ['filesystem', 'indexdb', 'localstorage', 'serviceworkers', 'cachestorage'],
   });
   if (categories.includes('cache')) await browserSession.clearCache();
   if (categories.includes('downloadHistory')) downloads?.clearHistory();

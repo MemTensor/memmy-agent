@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit && vite build",
     "typecheck": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && tsc -p tsconfig.json --noEmit",
-    "test": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && npm run utilities:check && vitest run",
+    "test": "npm run build -w @memmy/knowledge && npm run build -w @memmy/desktop-interface && npm run utilities:check && vitest run --reporter=dot --silent=true",
     "utilities:sync": "node scripts/sync-prototype-utilities.mjs",
     "utilities:check": "node scripts/sync-prototype-utilities.mjs --check"
   },

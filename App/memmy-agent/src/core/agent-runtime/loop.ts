@@ -18,7 +18,7 @@ import {
 import { CommandContext, CommandRouter } from "../../command/router.js";
 import { registerBuiltinCommands } from "../../command/builtin.js";
 import { Config, ModelPresetConfig } from "../../config/schema.js";
-import { getWorkspacePath } from "../../config/paths.js";
+import { getWorkspacePath, getWorkspaceStatePath } from "../../config/paths.js";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { CronService } from "../../cron/service.js";
 import { makeProvider } from "../../providers/factory.js";
@@ -935,8 +935,9 @@ export class AgentLoop {
     const rawPresets = init.modelPresets ?? this.config.modelPresets;
     this.modelPresets = Object.fromEntries(Object.entries(rawPresets).map(([name, preset]) => [name, preset instanceof ModelPresetConfig ? preset : new ModelPresetConfig(preset)]));
     this.unifiedSession = init.unifiedSession ?? defaults.unifiedSession;
+    const stateWorkspace = getWorkspaceStatePath(this.workspace);
     this.sessions = init.sessionManager ?? new SessionManager(
-      init.sessionDir ?? path.join(this.workspace, "sessions"),
+      init.sessionDir ?? path.join(stateWorkspace, "sessions"),
       { legacyWebuiWorkspaceCwd: this.workspace },
     );
     this.goalRuntime = new GoalRuntime({
@@ -954,7 +955,7 @@ export class AgentLoop {
       ?? path.join(this.workspace, "sessions");
     this.terminalTurnLock = new TerminalSessionTurnLock(terminalControlRoot);
     this.terminalRunControl = new TerminalRunControl(terminalControlRoot);
-    this.cronService = init.cronService ?? new CronService(path.join(this.workspace, "cron", "jobs.json"));
+    this.cronService = init.cronService ?? new CronService(path.join(stateWorkspace, "cron", "jobs.json"));
     this.sessionDagQueue = init.sessionDagQueue ?? this.createSessionDagQueue();
     this.execSessionManager = new ExecSessionManager();
     this.fileStateStore = new FileStateStore();
@@ -1178,7 +1179,7 @@ export class AgentLoop {
   }
 
   private projectReadonlySkillRoots(): readonly string[] {
-    const roots = [path.join(this.workspace, "skills"), BUILTIN_SKILLS_DIR]
+    const roots = [path.join(getWorkspaceStatePath(this.workspace), "skills"), BUILTIN_SKILLS_DIR]
       .flatMap((root) => {
         try {
           return fs.statSync(root).isDirectory() ? [fs.realpathSync(root)] : [];

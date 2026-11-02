@@ -898,7 +898,8 @@ export class MemoryRepository {
   listStats(): MemoryStatsRow[] {
     const rows = this.db
       .prepare(
-        `SELECT conversation_id,
+        `SELECT id,
+                conversation_id,
                 session_id,
                 agent_id,
                 app_id,
@@ -912,6 +913,7 @@ export class MemoryRepository {
          WHERE deleted_at IS NULL`
       )
       .all() as Array<{
+        id: string;
         conversation_id: string | null;
         session_id: string | null;
         agent_id: string | null;
@@ -924,6 +926,7 @@ export class MemoryRepository {
         internal_source: unknown;
       }>;
     return rows.map((row) => ({
+      id: row.id,
       conversationId: row.conversation_id ?? undefined,
       sessionId: row.session_id ?? undefined,
       agentId: row.agent_id ?? undefined,
@@ -3338,6 +3341,28 @@ export class RuntimeRepository {
         event.createdAt
       );
     return event;
+  }
+
+  listRecallEvents(input: {
+    userId?: string;
+    limit?: number;
+  } = {}): RecallEventRecord[] {
+    const clauses = ["1=1"];
+    const params: SqlValue[] = [];
+    if (input.userId) {
+      clauses.push("user_id = ?");
+      params.push(input.userId);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM recall_events
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(...params, input.limit ?? 10_000) as SqlRecallEventRow[];
+    return rows.map(recallEventFromSql);
   }
 
   getRecallEvent(id: string): RecallEventRecord | undefined {
@@ -7110,10 +7135,28 @@ function listMetricsForMemory(memory: MemoryRow): MemoryListItem["metrics"] | un
     return undefined;
   }
 
+  // Capture/import initializes both scores to zero before reflection and reward.
+  // Preserve genuine zero results: reward evidence and reflection are independent.
+  const isTrace = kindFromMemory(memory) === "trace";
+  const rewardRecorded = numberMetric(trace.r_human) !== undefined
+    || numberMetric(internal.r_human) !== undefined
+    || numberMetric(memory.info.r_human) !== undefined;
+  const reflectionRecorded = Boolean(reflection)
+    || typeof trace.reflection_scored_at === "string";
+  // Older plugin imports discarded r_human. Missing historical evidence must not
+  // hide a completed zero. New imports explicitly preserve null for no reward.
+  const legacyImport = recordValue(internal.legacy_import);
+  const historicalReflectedImport = Boolean(reflection)
+    && ["openclaw", "hermes", "dsh"].includes(String(legacyImport.source))
+    && typeof legacyImport.source_id === "string"
+    && trace.r_human === undefined;
+
   return {
     ...(value === undefined ? {} : { value }),
     ...(alpha === undefined ? {} : { alpha }),
-    reflectionDone: Boolean(reflection)
+    reflectionDone: Boolean(reflection),
+    ...(isTrace && value === 0 && !rewardRecorded && !historicalReflectedImport ? { valuePending: true } : {}),
+    ...(isTrace && alpha === 0 && !reflectionRecorded && !rewardRecorded ? { alphaPending: true } : {})
   };
 }
 
@@ -7447,6 +7490,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
   addMemoryKindClause(filter.memoryKind);
+  addMemoryKindClause(filter.excludedMemoryKinds, true);
   addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
 
@@ -7498,7 +7542,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     params.push(...values);
   }
 
-  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined): void {
+  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined, exclude = false): void {
     if (value === undefined) return;
     const values = Array.isArray(value) ? value : [value];
     if (values.length === 0) return;
@@ -7512,7 +7556,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
         ELSE 'trace'
       END
     )`;
-    clauses.push(`${expression} IN (${values.map(() => "?").join(", ")})`);
+    clauses.push(`${expression} ${exclude ? "NOT IN" : "IN"} (${values.map(() => "?").join(", ")})`);
     params.push(...values);
   }
 

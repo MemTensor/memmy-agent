@@ -20,6 +20,12 @@ Default address `http://127.0.0.1:18960`. Once `storage.token`, `MEMMY_MEMORY_TO
 | `GET` | `/api/v1/panel/analysis` | Memory analytics |
 | `GET` | `/api/v1/panel/items` | Entry list |
 
+## Analysis Metrics
+
+`GET /api/v1/panel/analysis` returns a `metrics` object. `metrics.recentlyUsedSkills` counts recall hits and invocation records for skills whose current status is `activated`. The window covers today and the preceding six calendar dates in the resolved request time zone, using each event's creation time.
+
+Each skill counts once within a recall event, even if its ID appears more than once. Separate recalls and invocations count again. The value is a usage total, not a count of distinct skills or recently edited skill records; editing a skill alone does not increase it.
+
 ## Local Storage Configuration
 
 ```yaml

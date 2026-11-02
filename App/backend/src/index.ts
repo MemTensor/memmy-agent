@@ -122,9 +122,15 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     await ensureMemoryScanPreferences(
       memmyConfigPath,
-      appStateStore.repositories.bootstrap.getScanPreferences()
+      appStateStore.repositories.bootstrap.getScanPreferences(),
+      appStateStore.repositories.bootstrap.getOnboardingState().scanPermission
     );
     const scanPreferencesStore = createMemoryScanPreferencesStore(memmyConfigPath);
+    // Recover a permission save interrupted between config publication and DB update.
+    const scanPermission = scanPreferencesStore.getScanPermission();
+    if (scanPermission !== undefined && scanPermission !== appStateStore.repositories.bootstrap.getOnboardingState().scanPermission) {
+      appStateStore.repositories.bootstrap.updateOnboarding({ scanPermission });
+    }
 
     const permissionManager = createPermissionManager({
       appStateStore,

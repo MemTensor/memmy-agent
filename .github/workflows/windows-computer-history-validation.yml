@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - ".github/workflows/windows-computer-history-validation.yml"
+      - "tests/windows-memory-workflow.test.ts"
+      - "tests/windows-provider-receipt-workflow.test.ts"
       - "App/native-computer-history/**"
       - "App/native-computer-use/**"
       - "App/memmy-agent/src/tools/computer-history/**"
@@ -17,6 +19,16 @@ on:
       - "package.json"
       - "package-lock.json"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact candidate commit to validate with the trusted main workflow
+        required: true
+        type: string
+      source_repository:
+        description: Authoritative PR head repository selected by the trusted main source job
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -25,16 +37,80 @@ jobs:
   validate:
     runs-on: windows-2025
     timeout-minutes: 30
-    env:
-      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     defaults:
       run:
         shell: pwsh
     steps:
+      # github.sha belongs to the caller for reusable runs. Resolve the candidate
+      # before checkout, using only trusted workflow code and expression env values.
+      - name: Bind exact validation source
+        id: source
+        shell: node {0}
+        env:
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha || '' }}
+          INPUT_SOURCE_REPOSITORY: ${{ inputs.source_repository || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          CONTROLLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CONTROLLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          const fs = require('node:fs');
+          const env = process.env;
+          const isSha = value => typeof value === 'string' && value.length === 40 && /^[a-fA-F0-9]{40}$/.test(value);
+          const trustedCallers = new Set([
+            'MemTensor/memmy-agent/.github/workflows/github-draft-release-v2.yml@refs/heads/main',
+            'MemTensor/memmy-agent/.github/workflows/main-sync.yml@refs/heads/main',
+            'MemTensor/memmy-agent/.github/workflows/main-sync-validation.yml@refs/heads/main',
+          ]);
+          let candidate;
+          let mode;
+          let repository;
+          let receiptAllowed = true;
+          const directWorkflow = `${env.SOURCE_REPOSITORY}/.github/workflows/windows-computer-history-validation.yml@`;
+          if (env.INPUT_SOURCE_SHA || !env.CONTROLLER_WORKFLOW_REF?.startsWith(directWorkflow)) {
+            if (env.SOURCE_REPOSITORY !== 'MemTensor/memmy-agent' ||
+                !trustedCallers.has(env.CONTROLLER_WORKFLOW_REF) ||
+                !isSha(env.CONTROLLER_WORKFLOW_SHA)) {
+              throw new Error('Reusable validation requires the trusted main controller');
+            }
+            candidate = env.INPUT_SOURCE_SHA;
+            mode = 'workflow_call';
+            repository = env.INPUT_SOURCE_REPOSITORY || env.SOURCE_REPOSITORY;
+          } else {
+            if (!['pull_request', 'workflow_dispatch'].includes(env.EVENT_NAME)) {
+              throw new Error('An exact source_sha is required for reusable validation');
+            }
+            mode = env.EVENT_NAME;
+            if (mode === 'pull_request') {
+              candidate = env.PR_HEAD_SHA;
+              repository = env.PR_HEAD_REPOSITORY;
+              if (!repository) throw new Error('Missing PR head repository');
+              receiptAllowed = repository.toLowerCase() === env.SOURCE_REPOSITORY.toLowerCase();
+            } else {
+              candidate = env.EVENT_SHA;
+              repository = env.SOURCE_REPOSITORY;
+            }
+          }
+          if (!isSha(candidate)) throw new Error('Expected a full 40-hex source SHA');
+          if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Invalid candidate repository');
+          fs.appendFileSync(env.GITHUB_OUTPUT, `sha=${candidate.toLowerCase()}\nmode=${mode}\nrepository=${repository}\nreceipt_allowed=${receiptAllowed}\n`);
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          repository: ${{ steps.source.outputs.repository }}
+          ref: ${{ steps.source.outputs.sha }}
           persist-credentials: false
+      - name: Verify exact checked out source
+        id: exact-head
+        shell: node {0}
+        env:
+          EXPECTED_HEAD_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          const { execFileSync } = require('node:child_process');
+          const actual = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          if (actual !== process.env.EXPECTED_HEAD_SHA) throw new Error('Checked out HEAD differs from the candidate');
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -47,17 +123,24 @@ jobs:
             App/native-computer-history/apps/OpenComputerHistoryWindows/go.mod
             App/native-computer-use/apps/OpenComputerUseWindows/go.mod
       - name: Require Windows 11
+        id: windows-os
         run: |
           $ErrorActionPreference = 'Stop'
           $build = [Environment]::OSVersion.Version.Build
           if ($build -lt 22000) { throw "Windows 11 build 22000 or later required; found $build" }
           Write-Host "Windows build=$build; session=$((Get-Process -Id $PID).SessionId)"
       - name: Install workspace dependencies
-        run: npm ci
+        id: workspace-dependencies
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace dependency installation failed' }
       - name: Install standalone agent dependencies
-        run: npm ci --prefix App/memmy-agent
+        id: agent-dependencies
+        run: |
+          npm ci --prefix App/memmy-agent
+          if ($LASTEXITCODE -ne 0) { throw 'Agent dependency installation failed' }
       - name: Validate native protocol and lifecycle without desktop access
-        id: native_history_tests
+        id: native-go
         run: |
           $ErrorActionPreference = 'Stop'
           Push-Location App/native-computer-history/apps/OpenComputerHistoryWindows
@@ -69,18 +152,24 @@ jobs:
             go vet -unsafeptr=false ./...
             if ($LASTEXITCODE -ne 0) { throw 'Native recorder vet failed' }
           } finally { Pop-Location }
-      - name: Validate native Computer Use Go module
-        id: native_computer_use_tests
-        run: |
+      - name: Validate native ComputerUse protocol without desktop access
+        id: computer-use-go
+        run: |-
           $ErrorActionPreference = 'Stop'
           Push-Location App/native-computer-use/apps/OpenComputerUseWindows
           try {
             go test ./...
-            if ($LASTEXITCODE -ne 0) { throw 'Native Computer Use tests failed' }
+            if ($LASTEXITCODE -ne 0) { throw 'Native ComputerUse Go tests failed' }
+            go vet ./...
+            if ($LASTEXITCODE -ne 0) { throw 'Native ComputerUse vet failed' }
           } finally { Pop-Location }
       - name: Build agent and native History recorder from source
-        run: npm --prefix App/memmy-agent run build
+        id: source-build
+        run: |
+          npm --prefix App/memmy-agent run build
+          if ($LASTEXITCODE -ne 0) { throw 'Source build failed' }
       - name: Validate packaged app icons with Windows PowerShell 5.1
+        id: app-icons
         run: |
           $ErrorActionPreference = 'Stop'
           $source = 'App/memmy-agent/src/tools/computer-history/win/app-icon.ps1'
@@ -109,6 +198,7 @@ jobs:
             }
           }
       - name: Validate native recorder identity, pure self-test and installed app catalog
+        id: native-runtime
         run: |
           $ErrorActionPreference = 'Stop'
           $source = 'App/memmy-agent/src/tools/computer-history/win/win11-observer.ps1'
@@ -140,8 +230,11 @@ jobs:
           }
           Write-Host "Validated $(@($apps).Count) installed or running app entries"
       - name: Verify agent History platform contracts
+        id: history-contracts
         run: |
           $ErrorActionPreference = 'Stop'
+          node node_modules/vitest/vitest.mjs run tests/windows-memory-workflow.test.ts tests/windows-provider-receipt-workflow.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Windows workflow and receipt contract regressions failed' }
           $tests = @(
             'App/memmy-agent/tests/tools/computer-history/win/application-icon.test.ts'
             'App/memmy-agent/tests/tools/computer-history/win/win11.test.ts'
@@ -162,59 +255,118 @@ jobs:
       # On Windows, Vitest's Vite runner raises a collection-time SyntaxError for
       # this valid ESM test; the Node ESM runner executes the same assertions.
       - name: Verify packaged History assets
-        run: >-
-          node node_modules/vitest/vitest.mjs run
-          tests/computer-history-packaging.test.mjs
-          --experimental.viteModuleRunner=false
-      - name: Verify installer enforces the unpacked History observer
-        run: >-
-          node node_modules/vitest/vitest.mjs run
-          App/shell/desktop/tests/packaged-runtime-boundary.test.ts
-          -t "requires the native Windows 11 History recorder"
-      - name: Emit exact-source Windows provider receipt
-        id: windows_provider_receipt
-        if: ${{ success() && steps.native_history_tests.outcome == 'success' && steps.native_computer_use_tests.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        id: packaged-assets
         run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:RUNNER_OS -ne 'Windows') { throw 'Windows provider receipt requires a Windows runner' }
-          $head = (git rev-parse HEAD).Trim()
-          if ($LASTEXITCODE -ne 0 -or $head -ne $env:EXPECTED_SOURCE_SHA) {
-            throw "Executed checkout $head does not match expected source $env:EXPECTED_SOURCE_SHA"
+          node node_modules/vitest/vitest.mjs run tests/computer-history-packaging.test.mjs --experimental.viteModuleRunner=false
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged History assets failed' }
+      - name: Verify installer enforces the unpacked History observer
+        id: installer-boundary
+        run: |
+          node node_modules/vitest/vitest.mjs run App/shell/desktop/tests/packaged-runtime-boundary.test.ts -t "requires the native Windows 11 History recorder"
+          if ($LASTEXITCODE -ne 0) { throw 'Installer History boundary failed' }
+      - name: Produce Windows provider receipt after complete validation
+        id: provider-receipt
+        if: ${{ success() && steps.source.outputs.receipt_allowed == 'true' }}
+        shell: node {0}
+        env:
+          EXPECTED_HEAD_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_MODE: ${{ steps.source.outputs.mode }}
+          RECEIPT_ALLOWED: ${{ steps.source.outputs.receipt_allowed }}
+          CANDIDATE_REPOSITORY: ${{ steps.source.outputs.repository }}
+          VALIDATION_STEPS: ${{ toJSON(steps) }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          PROVIDER_RUN_ID: ${{ github.run_id }}
+          PROVIDER_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CONTROLLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CONTROLLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const os = require('node:os');
+          const { execFileSync } = require('node:child_process');
+          const env = process.env;
+          if (env.RECEIPT_ALLOWED !== 'true') throw new Error('A direct fork PR cannot issue a trusted receipt');
+          const required = [
+            'source', 'exact-head', 'windows-os', 'workspace-dependencies',
+            'agent-dependencies', 'native-go', 'computer-use-go', 'source-build', 'app-icons',
+            'native-runtime', 'history-contracts', 'packaged-assets', 'installer-boundary',
+          ];
+          const results = JSON.parse(env.VALIDATION_STEPS);
+          for (const id of required) {
+            if (results[id]?.outcome !== 'success' || results[id]?.conclusion !== 'success') {
+              throw new Error(`Missing or unsuccessful Windows validation: ${id}`);
+            }
           }
-          git diff --quiet
-          if ($LASTEXITCODE -ne 0) { throw 'Tracked source changed during validation' }
-          git diff --cached --quiet
-          if ($LASTEXITCODE -ne 0) { throw 'Index changed during validation' }
-          $receipt = [ordered]@{
-            schemaVersion = 1
-            provider = 'windows'
-            status = 'passed'
-            headSha = $head
-            repository = $env:GITHUB_REPOSITORY
-            workflowRef = $env:GITHUB_WORKFLOW_REF
-            workflowSha = $env:GITHUB_WORKFLOW_SHA
-            runId = $env:GITHUB_RUN_ID
-            runAttempt = [int]$env:GITHUB_RUN_ATTEMPT
-            runnerOS = $env:RUNNER_OS
-            runnerArch = $env:RUNNER_ARCH
-            windowsBuild = [Environment]::OSVersion.Version.Build
-            generatedAt = [DateTime]::UtcNow.ToString('o')
-            nativeModules = @(
-              'App/native-computer-history/apps/OpenComputerHistoryWindows'
-              'App/native-computer-use/apps/OpenComputerUseWindows'
-            )
-            liveCaptureValidated = $false
-            signedInstallerValidated = $false
+          const headSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          if (env.EXPECTED_HEAD_SHA?.length !== 40 || !/^[a-f0-9]{40}$/.test(env.EXPECTED_HEAD_SHA) || headSha !== env.EXPECTED_HEAD_SHA) {
+            throw new Error('Receipt HEAD differs from the validated candidate');
           }
-          $receipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath windows-provider-receipt.json -Encoding utf8NoBOM
-      - name: Upload exact-source Windows provider receipt
-        if: ${{ success() && steps.windows_provider_receipt.outcome == 'success' }}
+          execFileSync('git', ['diff', '--exit-code'], { stdio: 'pipe' });
+          execFileSync('git', ['diff', '--cached', '--exit-code'], { stdio: 'pipe' });
+          const build = Number(os.release().split('.')[2]);
+          if (os.platform() !== 'win32' || !Number.isInteger(build) || build < 22000) {
+            throw new Error('Receipt requires a Windows 11 native runner');
+          }
+          if (!/^[1-9][0-9]*$/.test(env.PROVIDER_RUN_ID) || !/^[1-9][0-9]*$/.test(env.PROVIDER_RUN_ATTEMPT) ||
+              !/^[a-fA-F0-9]{40}$/.test(env.CONTROLLER_WORKFLOW_SHA)) {
+            throw new Error('Missing provider run/controller identity');
+          }
+          const receipt = {
+            schemaVersion: 1,
+            provider: 'windows', status: 'passed', headSha,
+            repository: env.SOURCE_REPOSITORY,
+            sourceRepository: env.CANDIDATE_REPOSITORY,
+            runId: env.PROVIDER_RUN_ID, runAttempt: Number(env.PROVIDER_RUN_ATTEMPT),
+            workflow_sha: env.CONTROLLER_WORKFLOW_SHA,
+            controller: { workflowRef: env.CONTROLLER_WORKFLOW_REF, workflowSha: env.CONTROLLER_WORKFLOW_SHA },
+            workflow: '.github/workflows/windows-computer-history-validation.yml',
+            sourceMode: env.SOURCE_MODE,
+            os: { platform: os.platform(), release: os.release(), build, arch: os.arch() },
+            nativeModules: {
+              windowsComputerUse: { goTests: 'passed', goVet: 'passed' },
+              windowsHistory: { goTests: 'passed', goVet: 'passed', sourceBuild: 'passed',
+                binaryIdentity: 'passed', pureSelfTest: 'passed', workerSelfTest: 'passed',
+                appCatalog: 'passed', appIcons: 'passed' },
+            },
+            validationSteps: Object.fromEntries(required.map(id => [id, results[id].outcome])),
+            liveCaptureValidated: false, signedInstallerValidated: false,
+          };
+          const artifactName = `windows-provider-receipt-${headSha}-${env.PROVIDER_RUN_ATTEMPT}`;
+          const directory = path.join(env.RUNNER_TEMP, artifactName);
+          fs.mkdirSync(directory, { recursive: true });
+          fs.writeFileSync(path.join(directory, 'windows-provider-receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
+          const legacy = {
+            schemaVersion: 1, provider: 'windows', status: 'passed', headSha,
+            repository: env.SOURCE_REPOSITORY, workflowRef: env.CONTROLLER_WORKFLOW_REF,
+            workflowSha: env.CONTROLLER_WORKFLOW_SHA, runId: env.PROVIDER_RUN_ID,
+            runAttempt: Number(env.PROVIDER_RUN_ATTEMPT), runnerOS: 'Windows',
+            runnerArch: env.RUNNER_ARCH || os.arch().toUpperCase(), windowsBuild: build,
+            generatedAt: new Date().toISOString(),
+            nativeModules: ['App/native-computer-history/apps/OpenComputerHistoryWindows',
+              'App/native-computer-use/apps/OpenComputerUseWindows'],
+            liveCaptureValidated: false, signedInstallerValidated: false,
+          };
+          const legacyName = `windows-provider-receipt-legacy-${headSha}-${env.PROVIDER_RUN_ATTEMPT}`;
+          const legacyDirectory = path.join(env.RUNNER_TEMP, legacyName);
+          fs.mkdirSync(legacyDirectory, { recursive: true });
+          fs.writeFileSync(path.join(legacyDirectory, 'windows-provider-receipt.json'), JSON.stringify(legacy, null, 2) + '\n');
+          fs.appendFileSync(env.GITHUB_OUTPUT, `path=${directory}\nartifact_name=${artifactName}\nlegacy_path=${legacyDirectory}\nlegacy_artifact_name=${legacyName}\n`);
+      - name: Upload Windows provider receipt
+        if: ${{ success() && steps.provider-receipt.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: windows-provider-receipt-${{ env.EXPECTED_SOURCE_SHA }}-${{ github.run_attempt }}
-          path: windows-provider-receipt.json
+          name: ${{ steps.provider-receipt.outputs.artifact_name }}
+          path: ${{ steps.provider-receipt.outputs.path }}/windows-provider-receipt.json
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
+      - name: Upload legacy-format Windows provider receipt
+        if: ${{ success() && steps.provider-receipt.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.provider-receipt.outputs.legacy_artifact_name }}
+          path: ${{ steps.provider-receipt.outputs.legacy_path }}/windows-provider-receipt.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Record validation scope
         if: ${{ always() }}
         run: |

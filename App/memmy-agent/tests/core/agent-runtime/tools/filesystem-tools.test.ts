@@ -35,6 +35,7 @@ async function sampleFile(root: string): Promise<string> {
 afterEach(() => {
   ReadFileTool.MAX_CHARS = 128_000;
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) {
     fsSync.rmSync(root, { recursive: true, force: true });
   }
@@ -299,6 +300,16 @@ describe("EditFileTool", () => {
 });
 
 describe("filesystem post-write validation", () => {
+  it("does not run implicit validators for managed writes or edits", async () => {
+    vi.stubEnv("AGENT_MANAGED_EXECUTION_REQUIRED", "1");
+    const root = workspace();
+    const target = path.join(root, "managed.json");
+    const written = await new WriteFileTool({ workspace: root }).execute({ path: target, content: "invalid json" });
+    expect(written).toBe(`Successfully wrote ${target}`);
+    const edited = await new EditFileTool({ workspace: root }).execute({ path: target, old_text: "invalid", new_text: "still invalid" });
+    expect(edited).not.toContain("Lint results:");
+    expect(await fs.readFile(target, "utf8")).toBe("still invalid json");
+  });
   it("skips write_file I/O, file state updates, and lint when bytes are identical", async () => {
     const root = workspace();
     const target = path.join(root, "same.json");

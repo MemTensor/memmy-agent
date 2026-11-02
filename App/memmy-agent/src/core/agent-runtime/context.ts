@@ -1,3 +1,4 @@
+import { getWorkspaceStatePath } from "../../config/paths.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -102,10 +103,10 @@ export class ContextBuilder {
     this.workspace = path.resolve(opts.workspace ?? process.cwd());
     this.timezone = opts.timezone ?? null;
     this.fileMemoryEnabled = opts.fileMemoryEnabled === true;
-    this.memory = new MemoryStore(this.workspace, {
+    this.memory = new MemoryStore(getWorkspaceStatePath(this.workspace), {
       fileMemoryEnabled: this.fileMemoryEnabled,
     });
-    this.skills = new SkillsLoader(this.workspace, null, opts.disabledSkills ?? null);
+    this.skills = new SkillsLoader(this.memory.workspace, null, opts.disabledSkills ?? null);
   }
 
   static buildRuntimeContext(
@@ -140,7 +141,7 @@ export class ContextBuilder {
     const parts: string[] = [];
     for (const filename of ContextBuilder.BOOTSTRAP_FILES) {
       if (filename === "USER.md" && !this.fileMemoryEnabled) continue;
-      const file = path.join(this.workspace, filename);
+      const file = path.join(this.memory.workspace, filename);
       if (fs.existsSync(file)) parts.push(`## ${filename}\n\n${fs.readFileSync(file, "utf8")}`);
     }
     return parts.join("\n\n");
@@ -161,7 +162,7 @@ export class ContextBuilder {
     const runtime = `${platformName === "Darwin" ? "macOS" : platformName} ${os.arch()}, Node.js ${process.version}`;
     return renderTemplate("agent/identity.md", {
       workspacePath: sessionWorkspace,
-      customSkillsPath: path.join(this.workspace, "skills"),
+      customSkillsPath: path.join(this.memory.workspace, "skills"),
       runtime,
       platformPolicy: renderTemplate("agent/platform-policy.md", { system: platformName }),
       channel: channel ?? "",

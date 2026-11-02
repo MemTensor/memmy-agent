@@ -46,32 +46,59 @@ describe("standalone Memory runtime installer", () => {
     });
   });
 
-  it("compares stable and prerelease versions", () => {
+  it("compares complete version identifiers by character", () => {
     expect(compareVersions("2.1.0", "2.0.9")).toBe(1);
     expect(compareVersions("2.1.0", "2.1.0")).toBe(0);
-    expect(compareVersions("2.1.0-beta.1", "2.1.0")).toBe(-1);
+    expect(compareVersions("2.1.0-beta.1", "2.1.0")).toBe(1);
   });
 
   it.each([
-    ["2.1.0-rc.2", "2.1.0-rc.10"],
+    ["1.2.4", "1.2.401"],
+    ["1.2.401", "1.2.402"],
+    ["1.2.402", "1.2.5"],
+    ["1.2.5", "1.2.6"],
+    ["1.2.6", "1.3.0"],
+    ["1.2.10", "1.2.9"],
+    ["2.1.0-rc.10", "2.1.0-rc.2"],
     ["2.1.0-alpha", "2.1.0-alpha.1"],
     ["2.1.0-alpha.1", "2.1.0-alpha.beta"],
     ["2.1.0-beta.11", "2.1.0-rc.1"],
-    ["2.1.0-rc.10", "2.1.0"],
+    ["2.1.0", "2.1.0-rc.10"],
     ["2.1.0-rc.9007199254740992", "2.1.0-rc.9007199254740993"],
-  ])("orders prerelease %s before %s", (older, newer) => {
+  ])("orders %s before %s by character", (older, newer) => {
     expect(compareVersions(older, newer)).toBe(-1);
     expect(compareVersions(newer, older)).toBe(1);
   });
 
-  it("ignores build metadata when comparing semantic versions", () => {
-    expect(compareVersions("2.1.0-rc.1+first", "2.1.0-rc.1+second")).toBe(0);
+  it("includes build metadata in character comparisons", () => {
+    expect(compareVersions("2.1.0-rc.1+first", "2.1.0-rc.1+second")).toBe(-1);
   });
 
   it.each(["2.1.0-rc..1", "2.1.0-rc.01", "02.1.0", "2.1.0-"])(
     "rejects malformed semantic version %s",
-    (version) => expect(() => compareVersions(version, "2.1.0")).toThrow("invalid semantic version")
+    (version) => {
+      expect(() => compareVersions(version, "2.1.0")).toThrow("invalid semantic version");
+      expect(() => compareVersions("2.1.0", version)).toThrow("invalid semantic version");
+    }
   );
+
+  it.each([true, false])("activates a character-newer runtime and prevents reverting it (preferInstalledCompatible=%s)", async (preferInstalledCompatible) => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true, agents: [] };
+    const older = createRuntimeDirectory(root, "1.2.401");
+    const newer = createRuntimeDirectory(root, "1.2.5");
+    await installMemoryRuntime({ ...flags, runtimeDirectory: older });
+    await expect(installMemoryRuntime({ ...flags, preferInstalledCompatible, version: "1.2.5", dryRun: true }))
+      .resolves.toMatchObject({ pointer: { version: "1.2.5" } });
+    await expect(installMemoryRuntime({ ...flags, preferInstalledCompatible, runtimeDirectory: newer }))
+      .resolves.toMatchObject({ version: "1.2.5" });
+    for (const dryRun of [true, false]) {
+      await expect(installMemoryRuntime({ ...flags, version: "1.2.401", runtimeDirectory: older, dryRun }))
+        .rejects.toThrow("refusing to downgrade Memory");
+    }
+    expect(await currentInstalledRuntime(home)).toMatchObject({ version: "1.2.5" });
+  });
 
   it("plans a service-only install without downloading or mutating disk", async () => {
     const home = tempRoot();

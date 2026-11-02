@@ -66,6 +66,9 @@ export function OnboardingPage() {
   const { clients } = useApiClients();
   const { track } = useAnalytics();
   const { t, language } = useTranslation();
+  const permissionSavingRef = useRef(false);
+  const [permissionSaving, setPermissionSaving] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
   const [firstScanStep, setFirstScanStep] = useState<FirstScanStep | null>(null);
   const [firstScanAgents, setFirstScanAgents] = useState<DiscoveredAgent[] | null>(null);
   const [firstReportPayload, setFirstReportPayload] = useState<FirstEncounterReportPayload | null>(null);
@@ -237,8 +240,22 @@ export function OnboardingPage() {
         } as const
       : { completed: false, currentStep: "scan_permission_required", scanPermission: permission } as const;
 
-    dispatch(appActions.onboardingUpdated(patch));
-    dispatch(appActions.scanPreferencesUpdated(preferences));
+    if (permissionSavingRef.current || !clients) return;
+    permissionSavingRef.current = true;
+    setPermissionSaving(true);
+    setPermissionError(null);
+    try {
+      const persistedPatch = await clients.config.updateOnboarding(patch);
+      dispatch(appActions.scanPreferencesUpdated(preferences));
+      dispatch(appActions.onboardingUpdated(persistedPatch));
+    } catch (error) {
+      console.warn("save scan permission failed", error);
+      setPermissionError(t("onboarding.permission.saveFailed"));
+      return;
+    } finally {
+      permissionSavingRef.current = false;
+      setPermissionSaving(false);
+    }
     track(buildOnboardingStepCompletedEvent({
       step: "scan_permission",
       choice: permission,
@@ -248,9 +265,6 @@ export function OnboardingPage() {
       prepareFirstScanUi(permission === "scan_and_write_skill" ? "checking_plugins" : "scanning");
       if (clients) {
         try {
-          const persistedPatch = await clients.config.updateOnboarding(patch);
-          dispatch(appActions.onboardingUpdated(persistedPatch));
-          dispatch(appActions.scanPreferencesUpdated(await clients.config.updateScanPreferences(preferences)));
           if (permission === "scan_and_write_skill") {
             void startFirstScanInBackground().catch((error) => {
               console.warn("start first agent source scan failed", error);
@@ -268,19 +282,6 @@ export function OnboardingPage() {
           console.warn("start first agent source scan failed", error);
         }
       }
-    } else {
-      void clients?.config
-        .updateOnboarding(patch)
-        .then((persistedPatch) => {
-          dispatch(appActions.onboardingUpdated(persistedPatch));
-          return clients.config.updateScanPreferences(preferences);
-        })
-        .then((persistedPreferences) => {
-          dispatch(appActions.scanPreferencesUpdated(persistedPreferences));
-        })
-        .catch((error) => {
-          console.warn("save scan permission failed", error);
-        });
     }
   }
 
@@ -350,9 +351,19 @@ export function OnboardingPage() {
     await startFirstScanWithAnimation();
   }
 
-  function returnToScanPermission() {
+  async function returnToScanPermission() {
     const onboardingPatch = { completed: false, currentStep: "scan_permission_required", scanPermission: "unset" } as const;
-    const preferences = { autoScanKnownAgents: true, watchFileChanges: true, autoInjectSkill: false };
+    const preferences = { autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: false };
+    if (!clients || permissionSavingRef.current) return;
+    permissionSavingRef.current = true;
+    try {
+      await clients.config.updateOnboarding(onboardingPatch);
+    } catch (error) {
+      dispatch(appActions.agentSourcesFailed(error instanceof Error ? error.message : String(error)));
+      return;
+    } finally {
+      permissionSavingRef.current = false;
+    }
 
     setPluginConflictOpen(false);
     setPluginConflicts([]);
@@ -369,18 +380,6 @@ export function OnboardingPage() {
     setFirstScanStep(null);
     dispatch(appActions.onboardingUpdated(onboardingPatch));
     dispatch(appActions.scanPreferencesUpdated(preferences));
-    void clients?.config
-      .updateOnboarding(onboardingPatch)
-      .then((persistedPatch) => dispatch(appActions.onboardingUpdated(persistedPatch)))
-      .catch((error) => {
-        console.warn("return to scan permission failed", error);
-      });
-    void clients?.config
-      .updateScanPreferences(preferences)
-      .then((persistedPreferences) => dispatch(appActions.scanPreferencesUpdated(persistedPreferences)))
-      .catch((error) => {
-        console.warn("reset scan preferences failed", error);
-      });
   }
 
   async function finishMemoryPluginConflictInstall(replace: boolean, conflicts: AgentSourceMemoryPluginConflict[]) {
@@ -843,9 +842,11 @@ export function OnboardingPage() {
 
             <p className="text-xs text-text-ink/50 text-center mt-5 px-7">{t("onboarding.permission.notice")}</p>
 
+            {permissionError && <p role="alert" className="px-7 text-sm text-red-600">{permissionError}</p>}
             <div className="flex gap-3 px-7 py-6 mt-2">
               <button
                 type="button"
+                disabled={permissionSaving}
                 onClick={() => void choosePermission("none")}
                 className="flex-1 py-3 text-sm text-text-ink/65 bg-canvas-oat border border-border-stone/40 rounded-btn hover:bg-canvas-oat/80 transition-colors cursor-pointer"
               >
@@ -853,6 +854,7 @@ export function OnboardingPage() {
               </button>
               <button
                 type="button"
+                disabled={permissionSaving}
                 onClick={() => void choosePermission("scan_only")}
                 className="flex-1 py-3 text-sm text-text-ink/70 bg-background-paper border border-border-stone rounded-btn hover:bg-canvas-oat/40 transition-colors cursor-pointer"
               >
@@ -860,6 +862,7 @@ export function OnboardingPage() {
               </button>
               <button
                 type="button"
+                disabled={permissionSaving}
                 onClick={() => void choosePermission("scan_and_write_skill")}
                 className="flex-1 py-3 text-sm text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors font-semibold cursor-pointer shadow-md"
               >

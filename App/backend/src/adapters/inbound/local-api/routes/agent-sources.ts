@@ -33,6 +33,7 @@ export interface RegisterAgentSourceRoutesOptions {
   progressBus: ProgressBus;
   permissionManager: Pick<PermissionManager, "canScanAgentSource">;
   authenticateRuntimeToken: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
+  isScanAllowed?: () => boolean;
   scanClient?: AgentSourceScanClient;
 }
 
@@ -77,7 +78,7 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
 
   app.post("/api/agent-sources/scan", { preHandler: options.authenticateRuntimeToken }, withErrorEnvelope(async (request, reply) => {
     const input = AgentSourceScanInputSchema.parse(request.body);
-    if (!(await options.permissionManager.canScanAgentSource({ agentSourceId: input.sourceId }))) {
+    if (!(await options.permissionManager.canScanAgentSource({ agentSourceId: input.sourceId })) || options.isScanAllowed?.() === false) {
       return reply.code(403).send({ error: { code: "scan_not_permitted", message: "scan not permitted" } });
     }
     return reply.send(AgentSourceScanJobResponseSchema.parse(await scans.start(input)));

@@ -388,6 +388,11 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     agentSources,
     agentSourceAutoInject: createAgentSourceAutoInjectService({
       agentSources,
+      isScanAllowed: () => {
+        const permission = options.scanPreferencesStore?.getScanPermission()
+          ?? options.appStateStore.repositories.bootstrap.getOnboardingState().scanPermission;
+        return permission === "scan_only" || permission === "scan_and_write_skill";
+      },
       permissionManager: options.permissionManager,
       isAutoInjectSuppressed: (sourceId) => options.appStateStore.repositories.agentSources.isAutoInjectSuppressed(sourceId),
       getScanPreferences: () => options.scanPreferencesStore?.getScanPreferences()
