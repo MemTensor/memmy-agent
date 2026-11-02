@@ -137,11 +137,14 @@ it("keeps indexed candidate lookup for new first bindings, including parent-only
   expect(plan.some(row=>row.detail.startsWith("SCAN m"))).toBe(false);
 });
 
-it.each(["direct","binding"] as const)("preserves other-session attachments and policies during %s migration", async entry => {
+it.each(["direct","binding"] as const)("preserves other-session attachments and rejects undeclared policy links during %s migration", async entry => {
   const x=await setup();
   const foreign=x.service.openSession({namespace:{source:"codex",profileId:"default",sessionKey:"foreign-links"}}).sessionId;
   const artifact=x.repos.runtime.insertArtifact({sessionId:foreign,episodeId:"episode_old_task",rawTurnId:x.rawId,userId:"foreign",kind:"tool_call",payload:{},createdAt:new Date().toISOString()});
-  const fakePolicy={...x.policy,id:"foreign-policy",memoryKey:"foreign-policy",sessionId:foreign};
+  // A different creation session alone is legal for L2. This policy does not
+  // declare the migrating trace, even though a forged stored link claims it.
+  const fakePolicy={...x.policy,id:"foreign-policy",memoryKey:"foreign-policy",sessionId:foreign,
+    properties:{internal_info:{memory_layer:"L2" as const,source_trace_ids:[]}}};
   x.repos.memories.insert(fakePolicy);
   x.db.db.prepare("INSERT OR IGNORE INTO trace_policy_links(id,user_id,l1_memory_id,l2_memory_id,relation,strength,created_at) VALUES('foreign-link','foreign',?,?,'supports',1,'now')").run(x.trace.id,fakePolicy.id);
   x.db.db.prepare("INSERT INTO feedback(id,user_id,session_id,episode_id,raw_turn_id,channel,polarity,created_at) VALUES('foreign-feedback','foreign',?,'episode_old_task',?,'explicit','neutral','now')").run(foreign,x.rawId);

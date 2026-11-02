@@ -2997,8 +2997,7 @@ export class RuntimeRepository {
       }
       maintainMemoryRelations(this.db,id,invalidate,migration);
       const policies=this.db.prepare(`SELECT DISTINCT l.l2_memory_id FROM trace_policy_links l JOIN memories p ON p.id=l.l2_memory_id
-          WHERE l.l1_memory_id=? AND p.memory_layer='L2' AND p.deleted_at IS NULL
-            AND (p.session_id IS NULL OR p.session_id=?)`).pluck().all(id,raw.sessionId) as string[];
+          WHERE l.l1_memory_id=? AND p.memory_layer='L2' AND p.deleted_at IS NULL`).pluck().all(id) as string[];
       for (const policyId of policies) maintainMemoryRelations(this.db,policyId,invalidate,migration);
     }
   }

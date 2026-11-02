@@ -159,12 +159,15 @@ export function maintainMemoryRelations(db: Database.Database, id: string, inval
       .run(memoryId, episodeId, memoryId);
     changed ||= result.changes > 0;
   };
-  if (migration?.episodeId && (memory.sessionId === null || memory.sessionId === migration.sessionId)) {
+  if (migration?.episodeId) {
     const valid = db.prepare(`SELECT 1 FROM raw_turns r JOIN episodes e ON e.id=r.episode_id
       WHERE r.id=? AND r.session_id=? AND e.session_id=r.session_id AND e.id=?
         AND r.deleted_at IS NULL AND r.redacted_at IS NULL`).get(migration.id, migration.sessionId, migration.episodeId);
-    if (valid && memory.layer === "L1" && migration.memoryIds.has(id)) append(migration.episodeId, "l1_memory_ids_json", id);
+    if (valid && memory.layer === "L1" && migration.memoryIds.has(id) &&
+        (memory.sessionId === null || memory.sessionId === migration.sessionId)) append(migration.episodeId, "l1_memory_ids_json", id);
     if (valid && memory.layer === "L2" && memory.sources) {
+      // A policy's creation session is not the scope of all supporting traces.
+      // Only an existing link to a declared, verified migrating L1 proves membership.
       const declared = parseJson<unknown>(memory.sources, []);
       const linked = db.prepare("SELECT l.l1_memory_id AS id FROM trace_policy_links l JOIN memories m ON m.id=l.l1_memory_id WHERE l.l2_memory_id=? AND m.memory_layer='L1' AND m.deleted_at IS NULL AND m.status!='deleted'")
         .all(id) as Array<{id:string}>;
