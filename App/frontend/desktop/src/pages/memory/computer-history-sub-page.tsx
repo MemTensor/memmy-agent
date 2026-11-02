@@ -349,6 +349,7 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
   // needs an actionable message, not command output or local file paths.
   const recordingError = observationState === "failed" ? t("computerHistory.recordingFailedUnknown")
     : snapshot?.observation.error ? t("computerHistory.recordingProcessingError") : null;
+  const maintenanceError = snapshot?.observation.maintenanceError;
   const narrationError = snapshot?.observation.narrationError;
   const narrationErrorMessage = narrationError === "history_summary_accounting_unavailable"
     ? t("computerHistory.narrationAccountingUnavailable")
@@ -504,8 +505,9 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
         </div>
       </header>
 
-      {error || refreshError || recordingError || (narrationError && !narrationQuotaExhausted) ? (
+      {maintenanceError || error || refreshError || recordingError || (narrationError && !narrationQuotaExhausted) ? (
         <div className="ch__notices">
+          {maintenanceError ? <div role="status">{t("computerHistory.retentionDeferred")}</div> : null}
           {error ? <div className="ch__error" role="alert">{error}</div> : null}
           {refreshError ? <div className="ch__error" role="alert">{refreshError}</div> : null}
           {recordingError ? <div className="ch__error" role="alert">{recordingError}</div> : null}

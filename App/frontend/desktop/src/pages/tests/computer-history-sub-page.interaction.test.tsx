@@ -1427,6 +1427,16 @@ describe("ComputerHistorySubPage", () => {
     expect(client.stopComputerHistoryObservation).not.toHaveBeenCalled();
   });
 
+  it("shows deferred cleanup separately while preserving quota exhaustion", async () => {
+    await renderWith(snapshot({ observation: { ...snapshot().observation,
+      maintenanceError: "retention_deferred", narrationError: "Insufficient balance",
+      narrationErrorCategory: "quota_exhausted" } }));
+    expect(container.textContent).toContain("证据备份尚未完成");
+    expect(container.textContent).toContain("Token 已用完");
+    expect(container.textContent).not.toContain("摘要生成失败");
+    expect(container.textContent).not.toContain("retention_deferred");
+  });
+
   it("shows asynchronous recording and narration failures until the backend recovers", async () => {
     vi.useFakeTimers();
     const initial = snapshot({ observation: { ...snapshot().observation, state: "failed",

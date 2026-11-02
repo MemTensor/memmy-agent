@@ -112,6 +112,7 @@ export const ComputerHistorySnapshotSchema = z.object({
     error: z.string().nullable(),
     narrationError: z.string().nullable(),
     narrationErrorCategory: z.literal("quota_exhausted").nullable().optional(),
+    maintenanceError: z.literal("retention_deferred").nullable().optional(),
     modelSource: z.enum(["account", "byok"]).nullable().optional(),
     permissions: ComputerHistoryPermissionsSchema.optional(),
     captureHealth: ComputerHistoryCaptureHealthSchema.optional(),
