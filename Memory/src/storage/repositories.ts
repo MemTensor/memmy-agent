@@ -14,7 +14,7 @@ import { ensurePanelCache, panelVisibleMemorySql, visibleFactSql } from "./panel
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
-import { effectiveEpisodeMemoryIds, maintainMemoryRelations, ownedEpisodeMemoryIds, ownedTaskSpanIds, RAW_SOURCE_SQL } from "./memory-relations.js";
+import { effectiveEpisodeMemoryIds, maintainMemoryRelations, ownedEpisodeMemoryIds, ownedTaskSpanIds, RAW_SOURCE_SQL, turnMigrationMemoryIds } from "./memory-relations.js";
 import { invalidatePanelViews } from "./panel-security.js";
 import type Database from "better-sqlite3";
 import {
@@ -2865,7 +2865,7 @@ export class RuntimeRepository {
   // episode lists of its L1, feedback and repairs, L3 input registration,
   // Skill trials, the source-turn ledger and the turn's unfinished jobs.
   // Feedback the turn gave about an earlier result points at that earlier turn
-  // and stays where it is. L1 rows are updated by the caller.
+  // and stays where it is. L1 sources are validated and updated by the rebind.
   moveTurnLinks(input: {
     rawTurnId: string;
     l1MemoryIds: readonly string[];
@@ -2876,16 +2876,18 @@ export class RuntimeRepository {
     const { rawTurnId, fromEpisodeId, toEpisodeId } = input;
     if (fromEpisodeId === toEpisodeId) return;
     const at = input.at ?? nowIso();
-    const l1Ids = [...new Set(input.l1MemoryIds)];
-    const inL1 = l1Ids.length ? `IN (${l1Ids.map(() => "?").join(", ")})` : "IN (NULL)";
     this.db.transaction(() => {
-      this.rebindRawTurnEpisode(rawTurnId, fromEpisodeId, toEpisodeId, at);
+      // Caller-provided task arrays are historical hints, not migration proof.
+      const l1Ids = this.rebindRawTurnEpisode(rawTurnId, fromEpisodeId, toEpisodeId, at);
+      const sessionId = this.getRawTurn(rawTurnId)!.sessionId;
+      const inSession = "(session_id IS NULL OR session_id = ?)";
+      const inL1 = l1Ids.length ? `IN (${l1Ids.map(() => "?").join(", ")})` : "IN (NULL)";
       const movedFeedback = (this.db.prepare(
-        `SELECT id FROM feedback WHERE episode_id = ? AND (raw_turn_id = ? OR l1_memory_id ${inL1})`
-      ).all(fromEpisodeId, rawTurnId, ...l1Ids) as Array<{ id: string }>).map((row) => row.id);
+        `SELECT id FROM feedback WHERE episode_id = ? AND (raw_turn_id = ? OR l1_memory_id ${inL1}) AND ${inSession}`
+      ).all(fromEpisodeId, rawTurnId, ...l1Ids, sessionId) as Array<{ id: string }>).map((row) => row.id);
       const movedRepairs = (this.db.prepare(
-        `SELECT id FROM decision_repairs WHERE episode_id = ? AND raw_turn_id = ?`
-      ).all(fromEpisodeId, rawTurnId) as Array<{ id: string }>).map((row) => row.id);
+        `SELECT id FROM decision_repairs WHERE episode_id = ? AND raw_turn_id = ? AND ${inSession}`
+      ).all(fromEpisodeId, rawTurnId, sessionId) as Array<{ id: string }>).map((row) => row.id);
       const moveIds = (column: "l1_memory_ids_json" | "feedback_ids_json" | "decision_repair_ids_json", ids: readonly string[]) => {
         if (ids.length === 0) return;
         const read = (episodeId: string) => {
@@ -2902,45 +2904,27 @@ export class RuntimeRepository {
       moveIds("l1_memory_ids_json", l1Ids);
       moveIds("feedback_ids_json", movedFeedback);
       moveIds("decision_repair_ids_json", movedRepairs);
-      this.db.prepare(`UPDATE feedback SET episode_id = ? WHERE episode_id = ? AND (raw_turn_id = ? OR l1_memory_id ${inL1})`)
-        .run(toEpisodeId, fromEpisodeId, rawTurnId, ...l1Ids);
-      this.db.prepare(`UPDATE decision_repairs SET episode_id = ? WHERE episode_id = ? AND raw_turn_id = ?`)
-        .run(toEpisodeId, fromEpisodeId, rawTurnId);
-      this.db.prepare(`UPDATE skill_trials SET episode_id = ? WHERE episode_id = ? AND (raw_turn_id = ? OR l1_memory_id ${inL1})`)
-        .run(toEpisodeId, fromEpisodeId, rawTurnId, ...l1Ids);
-      // Soft-deleted (rejected) L1 rows of the turn: live rows are rewritten by
-      // the caller through the memory repository, which only reads live rows.
-      this.db.prepare(
-        `UPDATE memories
-         SET info_json = json_set(info_json, '$.episode_id', @to),
-             properties_json = json_set(
-               CASE WHEN json_type(properties_json, '$.info') = 'object'
-                 THEN json_set(properties_json, '$.info.episode_id', @to) ELSE properties_json END,
-               '$.internal_info.trace.episode_id', @to,
-               '$.internal_info.trace.key',
-               CASE WHEN substr(json_extract(properties_json, '$.internal_info.trace.key'), 1, length(@from) + 1) = @from || ':'
-                 THEN @to || substr(json_extract(properties_json, '$.internal_info.trace.key'), length(@from) + 1)
-                 ELSE json_extract(properties_json, '$.internal_info.trace.key') END
-             )
-         WHERE deleted_at IS NOT NULL
-           AND json_type(properties_json, '$.internal_info.trace') = 'object'
-           AND id ${inL1}`
-      ).run({ to: toEpisodeId, from: fromEpisodeId }, ...l1Ids);
-      this.db.prepare(`UPDATE l3_world_model_input_traces SET episode_id = ? WHERE raw_turn_id = ?`)
-        .run(toEpisodeId, rawTurnId);
-      this.db.prepare(`UPDATE source_turn_captures SET episode_id = ? WHERE raw_turn_id = ?`)
-        .run(toEpisodeId, rawTurnId);
+      this.db.prepare(`UPDATE feedback SET episode_id = ? WHERE episode_id = ? AND (raw_turn_id = ? OR l1_memory_id ${inL1}) AND ${inSession}`)
+        .run(toEpisodeId, fromEpisodeId, rawTurnId, ...l1Ids, sessionId);
+      this.db.prepare(`UPDATE decision_repairs SET episode_id = ? WHERE episode_id = ? AND raw_turn_id = ? AND ${inSession}`)
+        .run(toEpisodeId, fromEpisodeId, rawTurnId, sessionId);
+      this.db.prepare(`UPDATE skill_trials SET episode_id = ? WHERE episode_id = ? AND (raw_turn_id = ? OR l1_memory_id ${inL1}) AND ${inSession}`)
+        .run(toEpisodeId, fromEpisodeId, rawTurnId, ...l1Ids, sessionId);
+      this.db.prepare(`UPDATE l3_world_model_input_traces SET episode_id = ? WHERE raw_turn_id = ? AND ${inSession}`)
+        .run(toEpisodeId, rawTurnId, sessionId);
+      this.db.prepare(`UPDATE source_turn_captures SET episode_id = ? WHERE raw_turn_id = ? AND ${inSession}`)
+        .run(toEpisodeId, rawTurnId, sessionId);
       this.db.prepare(
         `UPDATE evolution_jobs SET episode_id = ?, updated_at = ?
-         WHERE episode_id = ? AND status IN ('queued', 'leased', 'failed') AND target_memory_id ${inL1}`
-      ).run(toEpisodeId, at, fromEpisodeId, ...l1Ids);
+         WHERE episode_id = ? AND status IN ('queued', 'leased', 'failed') AND target_memory_id ${inL1} AND ${inSession}`
+      ).run(toEpisodeId, at, fromEpisodeId, ...l1Ids, sessionId);
       this.db.prepare(
         `UPDATE evolution_jobs
          SET episode_id = ?,
              payload_json = json_set(payload_json, '$.triggerEpisodeId', ?),
              updated_at = ?
-         WHERE job_type = 'episode_idle_close' AND dedupe_key = ? AND status IN ('queued', 'leased', 'failed')`
-      ).run(toEpisodeId, toEpisodeId, at, `episode_idle_close:${rawTurnId}`);
+         WHERE job_type = 'episode_idle_close' AND dedupe_key = ? AND status IN ('queued', 'leased', 'failed') AND ${inSession}`
+      ).run(toEpisodeId, toEpisodeId, at, `episode_idle_close:${rawTurnId}`, sessionId);
       this.orderEpisodeTurnsBySourceTime(toEpisodeId);
     })();
   }
@@ -2950,16 +2934,23 @@ export class RuntimeRepository {
     fromEpisodeId: string,
     toEpisodeId: string,
     at = nowIso()
-  ): void {
-    if (fromEpisodeId === toEpisodeId) return;
-    this.db.transaction(() => {
+  ): string[] {
+    if (fromEpisodeId === toEpisodeId) return [];
+    return this.db.transaction(() => {
       const fromEpisode = this.getEpisode(fromEpisodeId);
       const toEpisode = this.getEpisode(toEpisodeId);
-      if (!fromEpisode || !toEpisode || fromEpisode.userId !== toEpisode.userId) {
+      if (!fromEpisode || !toEpisode) {
         throw new Error("cannot rebind a raw turn to a missing episode");
       }
-      const currentRaw = this.db.prepare("SELECT episode_id,user_id FROM raw_turns WHERE id=? AND deleted_at IS NULL AND redacted_at IS NULL").get(rawTurnId) as {episode_id:string;user_id:string}|undefined;
-      if (!currentRaw || currentRaw.episode_id !== fromEpisodeId || currentRaw.user_id !== fromEpisode.userId) throw new Error("raw turn ownership changed before rebind");
+      if (fromEpisode.sessionId !== toEpisode.sessionId || !this.getSession(fromEpisode.sessionId)) {
+        throw new Error("cannot rebind a raw turn across sessions");
+      }
+      const currentRaw = this.getRawTurn(rawTurnId);
+      if (!currentRaw || currentRaw.deletedAt || currentRaw.redactedAt ||
+          currentRaw.episodeId !== fromEpisodeId || currentRaw.sessionId !== fromEpisode.sessionId) {
+        throw new Error("raw turn ownership changed before rebind");
+      }
+      const ids = turnMigrationMemoryIds(this.db, currentRaw);
       const remainingRawTurnIds = fromEpisode.rawTurnIds.filter((id) => id !== rawTurnId);
       this.db
         .prepare(
@@ -2971,29 +2962,45 @@ export class RuntimeRepository {
         )
         .run(toJson(remainingRawTurnIds), remainingRawTurnIds.length, at, fromEpisodeId);
       this.db.prepare("UPDATE raw_turns SET episode_id = ? WHERE id = ?").run(toEpisodeId, rawTurnId);
-      this.db.prepare("UPDATE artifacts SET episode_id = ? WHERE raw_turn_id = ?").run(toEpisodeId, rawTurnId);
+      this.db.prepare("UPDATE artifacts SET episode_id = ? WHERE raw_turn_id = ? AND (session_id IS NULL OR session_id=?)").run(toEpisodeId, rawTurnId, currentRaw.sessionId);
       this.appendEpisodeRawTurn(toEpisodeId, rawTurnId, at);
-      const spanRaw = `coalesce(${RAW_SOURCE_SQL},json_extract(m.properties_json,'$.internal_info.span.raw_turn_id'))`;
-      const parentRaw = RAW_SOURCE_SQL.replaceAll("m.", "t.");
-      const ids = this.db.prepare(`SELECT m.id FROM memories m
-        LEFT JOIN memories t ON t.id=CASE WHEN json_extract(m.properties_json,'$.internal_info.memory_kind')='span'
-          THEN json_extract(m.properties_json,'$.internal_info.span.source_trace_id') END
-        WHERE m.memory_layer='L1' AND m.user_id=?
-          AND (t.id IS NULL OR (t.user_id=m.user_id AND t.memory_layer='L1'))
-          AND (${spanRaw}=? OR (${spanRaw} IS NULL AND ${parentRaw}=?))
-        ORDER BY m.id`).pluck().all(fromEpisode.userId,rawTurnId,rawTurnId) as string[];
-      for (const id of ids) {
-        this.db.prepare(`UPDATE memories SET
-          info_json=json_set(info_json,'$.episode_id',?),
-          properties_json=CASE WHEN json_extract(properties_json,'$.internal_info.memory_kind')='span'
-            THEN json_set(properties_json,'$.internal_info.trace.episode_id',?,'$.internal_info.span.episode_id',?)
-            ELSE json_set(properties_json,'$.internal_info.trace.episode_id',?) END,
-          updated_at=?,version=version+1 WHERE id=?`).run(toEpisodeId,toEpisodeId,toEpisodeId,toEpisodeId,at,id);
-        maintainMemoryRelations(this.db,id);
-        const policies=this.db.prepare("SELECT DISTINCT l2_memory_id FROM trace_policy_links WHERE l1_memory_id=?").pluck().all(id) as string[];
-        for (const policyId of policies) maintainMemoryRelations(this.db,policyId);
-      }
+      this.rebindTurnMemories({ ...currentRaw, episodeId: toEpisodeId }, ids, fromEpisodeId, at);
+      return ids;
     })();
+  }
+
+  private rebindTurnMemories(raw: RawTurnRecord & {episodeId:string}, ids: string[], fromEpisodeId: string | undefined, at: string, invalidate = true): void {
+    const migration = { id: raw.id, sessionId: raw.sessionId, episodeId: raw.episodeId, memoryIds: new Set(ids) };
+    for (const id of ids) {
+      const changed = this.db.prepare(`UPDATE memories SET
+          info_json=json_set(info_json,'$.episode_id',@to),
+          properties_json=json_set(
+            CASE WHEN json_extract(properties_json,'$.internal_info.memory_kind')='span'
+              THEN json_set(properties_json,'$.internal_info.span.episode_id',@to) ELSE properties_json END,
+            '$.internal_info.trace.episode_id',@to),
+          updated_at=@at,version=version+1 WHERE id=@id AND (
+            json_extract(info_json,'$.episode_id') IS NOT @to
+            OR json_extract(properties_json,'$.internal_info.trace.episode_id') IS NOT @to
+            OR (json_type(properties_json,'$.info')='object' AND json_extract(properties_json,'$.info.episode_id') IS NOT @to)
+            OR (json_type(properties_json,'$.internal_info.episode_id') IS NOT NULL AND json_extract(properties_json,'$.internal_info.episode_id') IS NOT @to)
+            OR (json_extract(properties_json,'$.internal_info.memory_kind')='span' AND json_extract(properties_json,'$.internal_info.span.episode_id') IS NOT @to)
+            OR (@from IS NOT NULL AND substr(json_extract(properties_json,'$.internal_info.trace.key'),1,length(@from)+1)=@from || ':')
+          )`).run({to:raw.episodeId,from:fromEpisodeId??null,at,id}).changes;
+      if (changed) {
+        this.db.prepare(`UPDATE memories SET properties_json=json_set(properties_json,
+          '$.internal_info.trace.key',@to || substr(json_extract(properties_json,'$.internal_info.trace.key'),length(@from)+1))
+          WHERE id=@id AND @from IS NOT NULL
+            AND substr(json_extract(properties_json,'$.internal_info.trace.key'),1,length(@from)+1)=@from || ':'`)
+          .run({to:raw.episodeId!,from:fromEpisodeId??null,id});
+        this.db.prepare("UPDATE memories SET properties_json=json_set(properties_json,'$.info.episode_id',?) WHERE id=? AND json_type(properties_json,'$.info')='object'").run(raw.episodeId,id);
+        this.db.prepare("UPDATE memories SET properties_json=json_set(properties_json,'$.internal_info.episode_id',?) WHERE id=? AND json_type(properties_json,'$.internal_info.episode_id') IS NOT NULL").run(raw.episodeId,id);
+      }
+      maintainMemoryRelations(this.db,id,invalidate,migration);
+      const policies=this.db.prepare(`SELECT DISTINCT l.l2_memory_id FROM trace_policy_links l JOIN memories p ON p.id=l.l2_memory_id
+          WHERE l.l1_memory_id=? AND p.memory_layer='L2' AND p.deleted_at IS NULL
+            AND (p.session_id IS NULL OR p.session_id=?)`).pluck().all(id,raw.sessionId) as string[];
+      for (const policyId of policies) maintainMemoryRelations(this.db,policyId,invalidate,migration);
+    }
   }
 
   appendEpisodeFeedback(episodeId: string, feedbackId: string, at = nowIso()): EpisodeRecord | undefined {
@@ -3121,34 +3128,38 @@ export class RuntimeRepository {
   }
 
   bindRawTurnEpisode(rawTurnId: string, episodeId: string, at: string): void {
-    const raw = this.getRawTurn(rawTurnId);
-    const episode = this.getEpisode(episodeId);
-    if (!raw || !episode || raw.sessionId !== episode.sessionId) throw new Error("invalid first episode binding");
-    const l1Ids = this.memoryIdsForRawTurn(rawTurnId, true, raw);
-    if (raw.episodeId && raw.episodeId !== episodeId) {
-      this.moveTurnLinks({ rawTurnId, l1MemoryIds: l1Ids, fromEpisodeId: raw.episodeId, toEpisodeId: episodeId, at });
-    }
-    this.updateRawTurn({ ...raw, episodeId });
-    this.appendEpisodeRawTurn(episodeId, rawTurnId, at);
-    for (const id of l1Ids) {
-      this.db.prepare(`UPDATE memories SET info_json = json_set(info_json, '$.episode_id', ?),
-        properties_json = json_set(properties_json, '$.info.episode_id', ?, '$.internal_info.trace.episode_id', ?) WHERE id = ?`)
-        .run(episodeId, episodeId, episodeId, id);
-      this.appendEpisodeTurn(episodeId, rawTurnId, id, at);
-    }
-    for (const table of ['artifacts', 'feedback', 'decision_repairs', 'l3_world_model_input_traces', 'source_turn_captures', 'skill_trials']) {
-      this.db.prepare(`UPDATE ${table} SET episode_id = ? WHERE raw_turn_id = ?`).run(episodeId, rawTurnId);
-    }
-    const targetIds = this.memoryIdsForRawTurn(rawTurnId, false, raw);
-    // Resolve provenance once through primary keys (or the legacy
-    // compatibility path), rather than nesting a memories scan inside an UPDATE.
-    this.db.prepare(`UPDATE evolution_jobs SET episode_id = ? WHERE json_extract(payload_json, '$.rawTurnId') = ?
-      OR target_memory_id IN (SELECT value FROM json_each(?))`)
-      .run(episodeId, rawTurnId, toJson(targetIds));
-    for (const row of this.db.prepare("SELECT id FROM feedback WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ id: string }>) this.appendEpisodeFeedback(episodeId, row.id, at);
-    for (const row of this.db.prepare("SELECT id FROM decision_repairs WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ id: string }>) this.appendEpisodeDecisionRepair(episodeId, row.id, at);
-    for (const row of this.db.prepare("SELECT skill_memory_id FROM skill_trials WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ skill_memory_id: string }>) this.appendEpisodeDerivedMemory(episodeId, "Skill", row.skill_memory_id, at);
-    this.orderEpisodeTurnsBySourceTime(episodeId);
+    this.db.transaction(() => {
+      const raw = this.getRawTurn(rawTurnId);
+      const episode = this.getEpisode(episodeId);
+      if (!raw || raw.deletedAt || raw.redactedAt || !episode || raw.sessionId !== episode.sessionId) throw new Error("invalid first episode binding");
+      const maintainedIds = raw.messagePayload?.captured_memory_ids;
+      const candidates = !raw.episodeId && Array.isArray(maintainedIds) && maintainedIds.every(id => typeof id === "string")
+        ? maintainedIds as string[] : undefined;
+      const l1Ids = turnMigrationMemoryIds(this.db, { ...raw, episodeId: raw.episodeId ?? episodeId }, candidates);
+      if (raw.episodeId && raw.episodeId !== episodeId) {
+        this.moveTurnLinks({ rawTurnId, l1MemoryIds: l1Ids, fromEpisodeId: raw.episodeId, toEpisodeId: episodeId, at });
+      } else {
+        this.updateRawTurn({ ...raw, episodeId });
+        this.rebindTurnMemories({ ...raw, episodeId }, l1Ids, undefined, at, false);
+      }
+      this.appendEpisodeRawTurn(episodeId, rawTurnId, at);
+      for (const table of ['artifacts', 'feedback', 'decision_repairs', 'l3_world_model_input_traces', 'source_turn_captures', 'skill_trials']) {
+        this.db.prepare(`UPDATE ${table} SET episode_id = ? WHERE raw_turn_id = ? AND (session_id IS NULL OR session_id=?)`).run(episodeId, rawTurnId, raw.sessionId);
+      }
+      const targetIds = this.memoryIdsForRawTurn(rawTurnId, false, raw).filter(id => {
+        const memory = this.db.prepare("SELECT session_id,memory_layer FROM memories WHERE id=?").get(id) as {session_id:string|null;memory_layer:string};
+        return (memory.session_id === null || memory.session_id === raw.sessionId) && (memory.memory_layer !== "L1" || l1Ids.includes(id));
+      });
+      // Resolve provenance once through primary keys (or the legacy
+      // compatibility path), rather than nesting a memories scan inside an UPDATE.
+      this.db.prepare(`UPDATE evolution_jobs SET episode_id = ? WHERE (session_id IS NULL OR session_id=?) AND (json_extract(payload_json, '$.rawTurnId') = ?
+        OR target_memory_id IN (SELECT value FROM json_each(?)))`)
+        .run(episodeId, raw.sessionId, rawTurnId, toJson(targetIds));
+      for (const row of this.db.prepare("SELECT id FROM feedback WHERE raw_turn_id = ? AND (session_id IS NULL OR session_id=?)").all(rawTurnId, raw.sessionId) as Array<{ id: string }>) this.appendEpisodeFeedback(episodeId, row.id, at);
+      for (const row of this.db.prepare("SELECT id FROM decision_repairs WHERE raw_turn_id = ? AND (session_id IS NULL OR session_id=?)").all(rawTurnId, raw.sessionId) as Array<{ id: string }>) this.appendEpisodeDecisionRepair(episodeId, row.id, at);
+      for (const row of this.db.prepare("SELECT skill_memory_id FROM skill_trials WHERE raw_turn_id = ? AND (session_id IS NULL OR session_id=?)").all(rawTurnId, raw.sessionId) as Array<{ skill_memory_id: string }>) this.appendEpisodeDerivedMemory(episodeId, "Skill", row.skill_memory_id, at);
+      this.orderEpisodeTurnsBySourceTime(episodeId);
+    })();
   }
 
   insertRawTurn(rawTurn: RawTurnRecord): RawTurnRecord {

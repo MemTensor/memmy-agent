@@ -98,9 +98,10 @@ describe("declared memory relationships", () => {
     expect(repos.runtime.getRawTurn(raw.id)?.episodeId).toBe(episode.id);
   });
 
-  it("does not rewrite another user's forged raw-turn references during rebind",async()=>{
-    const {db,repos,raw,trace,episode,target}=await withSpan();
-    repos.memories.insert({...trace,id:"foreign-rebind",memoryKey:"foreign-rebind",userId:"other-owner"});
+  it("does not rewrite a different session's forged raw-turn references during rebind",async()=>{
+    const {db,service,repos,raw,trace,episode,target}=await withSpan();
+    const foreign=service.openSession({namespace:{source:"codex",profileId:"default",sessionKey:"forged-source"}});
+    repos.memories.insert({...trace,id:"foreign-rebind",memoryKey:"foreign-rebind",userId:"other-owner",sessionId:foreign.sessionId});
     // Simulate a historical row: new local inserts always use the device owner.
     db.db.prepare("UPDATE memories SET user_id='other-owner' WHERE id='foreign-rebind'").run();
     const before=repos.memories.getIncludingDeleted("foreign-rebind");

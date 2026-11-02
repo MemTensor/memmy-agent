@@ -1,5 +1,6 @@
 import { setImmediate as yieldToIO } from "node:timers/promises";
 import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
+import { turnMigrationMemoryIds } from "../../storage/memory-relations.js";
 import { EpisodeSelectionRequired, selectionInput, selectionKey, selectEpisode, type EpisodeSelectionContext, type EpisodeSelectionResult } from "./episode-selection.js";
 import {
   captureTurnSteps,
@@ -3888,10 +3889,9 @@ export class SessionTurnService {
     toEpisodeId: string,
     at: string
   ): void {
-    const from: EpisodeRecord = this.deps.requireEpisode(fromEpisodeId);
-    const l1Memories = from.l1MemoryIds
+    const l1Memories = turnMigrationMemoryIds(this.deps.repos.db, rawTurn)
       .map((id) => this.deps.repos.memories.getIncludingDeleted(id))
-      .filter((memory): memory is MemoryRow => Boolean(memory) && this.deps.rawTurnIdFromMemory(memory!) === rawTurn.id);
+      .filter((memory): memory is MemoryRow => Boolean(memory));
     this.deps.repos.runtime.moveTurnLinks({
       rawTurnId: rawTurn.id,
       l1MemoryIds: l1Memories.map((memory) => memory.id),
@@ -3899,28 +3899,10 @@ export class SessionTurnService {
       toEpisodeId,
       at
     });
-    // Soft-deleted (rejected) L1 rows are moved by moveTurnLinks.
+    // The common transaction also updates spans and soft-deleted source metadata.
     for (const memory of l1Memories) {
       if (memory.deletedAt) continue;
-      const internal = memory.properties.internal_info;
-      const trace = isRecord(internal.trace) ? internal.trace : {};
-      const traceKey = typeof trace.key === "string" && trace.key.startsWith(`${fromEpisodeId}:`)
-        ? `${toEpisodeId}:${trace.key.slice(fromEpisodeId.length + 1)}`
-        : trace.key;
-      const moved = this.deps.repos.memories.update({
-        ...memory,
-        info: { ...memory.info, episode_id: toEpisodeId },
-        properties: {
-          ...memory.properties,
-          ...(isRecord(memory.properties.info) ? { info: { ...memory.properties.info, episode_id: toEpisodeId } } : {}),
-          internal_info: {
-            ...internal,
-            ...(typeof internal.episode_id === "string" ? { episode_id: toEpisodeId } : {}),
-            trace: { ...trace, episode_id: toEpisodeId, ...(traceKey !== undefined ? { key: traceKey } : {}) }
-          }
-        },
-        updatedAt: at
-      });
+      const moved = this.deps.repos.memories.get(memory.id)!;
       this.deps.repos.runtime.appendChange({
         memoryId: moved.id,
         namespaceId: this.deps.namespaceIdFromSession(session),
