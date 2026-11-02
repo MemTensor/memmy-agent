@@ -265,7 +265,7 @@ export function AgentWorkflowQuestionCard(props: {
     }
   };
 
-  if (Boolean(completedResponse)) return (
+  if (completedResponse) return (
     <details className="agent-question-summary" data-workflow={props.card.context?.workflow}>
       <summary>{props.card.title ?? t("home.question.title")} · {t(completedResponse?.cancelled ? "home.question.cancelled" : "home.question.answered")}</summary>
       <div className="agent-question-summary__body">{completedResponse?.cancelled ? <p>{t("home.question.cancelled")}</p> : props.card.questions.map((question) => (

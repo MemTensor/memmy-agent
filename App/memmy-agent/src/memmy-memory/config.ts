@@ -12,10 +12,6 @@ export function resolveMemmyMemoryConfig(config: Config | Record<string, any> | 
   };
 }
 
-function stringOrUndefined(value: any): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
 function memoryLayersOrUndefined(value: any): MemmyMemoryLayer[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return [...new Set(value.filter((layer): layer is MemmyMemoryLayer => MEMORY_LAYERS.has(layer)))];
