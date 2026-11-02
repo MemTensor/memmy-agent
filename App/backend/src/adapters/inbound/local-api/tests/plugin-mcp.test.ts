@@ -70,6 +70,22 @@ async function connect(
 }
 
 describe("plugin MCP bridge", () => {
+  it("wraps composed legacy tool schemas and unwraps their calls without weakening the original schema", async () => {
+    const { service, invoke } = createPlugins();
+    const legacy = structuredClone(plugin);
+    const schema = { type: "object", properties: { scope: { type: "string", enum: ["run", "task"] }, runId: { type: "string" } },
+      required: ["scope"], allOf: [{ if: { properties: { scope: { const: "run" } } }, then: { required: ["runId"] } }] };
+    legacy.manifest.capabilities[0]!.inputSchema = schema;
+    service.list = () => [legacy];
+    const client = await connect(service);
+    const { tools } = await client.listTools();
+    expect(tools[0]!.inputSchema).toMatchObject({ type: "object", required: ["input"], properties: { input: schema } });
+    expect(tools[0]!.inputSchema).not.toHaveProperty("allOf");
+    await client.callTool({ name: tools[0]!.name, arguments: { input: { scope: "run", runId: "original" } } });
+    expect((invoke.mock.calls as unknown[][])[0]?.[0]).toMatchObject({ input: { scope: "run", runId: "original" } });
+    expect(legacy.manifest.capabilities[0]!.inputSchema).toEqual(schema);
+  });
+
   it("forwards tool and turn provenance for migrated process records", async () => {
     const events: unknown[] = [];
     const { service } = createPlugins();

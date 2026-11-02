@@ -13,6 +13,13 @@ const t = (key: string, values?: Record<string, string | number>) => {
 };
 
 describe("agent-model-error", () => {
+  it("distinguishes a tool schema rejection from a model timeout and preserves the function name", () => {
+    const detail = "400 Invalid schema for function 'mcp_plugins_plugin_review_cancel_4fe426b5': allOf is not allowed";
+    expect(formatAgentModelError(`Error: ${detail}`, t)).toEqual({ title: "agent.error.toolSchemaInvalid", detail: `Error: ${detail}` });
+    expect(formatAgentModelError("Error: request timed out", t).title).toBe("agent.error.modelTimeout");
+    expect(formatAgentModelError("localized", t, { modelError: { category: "model_failed", detail, failedProvider: "custom", failedModel: "test" } })).toEqual({ title: "agent.error.toolSchemaInvalid", detail: `custom/test: ${detail}` });
+  });
+
   it("detects provider error messages", () => {
     expect(isAgentModelErrorContent("Error: 503 upstream connect error")).toBe(true);
     expect(isAgentModelErrorContent("Error calling LLM: missing key")).toBe(true);

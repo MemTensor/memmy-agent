@@ -88,7 +88,17 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
       }
       if (call.service !== "model-inference") throw serviceError("host_service_unavailable", `Unknown Host service: ${call.service}`, false);
       const input = ModelInferenceInputSchema.parse(call.input);
-      const resolved = await options.resolveModel(call.pluginId, call.modelPreset);
+      const selectionController = new AbortController();
+      const selectionSignal = call.signal ? AbortSignal.any([call.signal, selectionController.signal]) : selectionController.signal;
+      const selectionTimer = setTimeout(() => selectionController.abort(), Math.min(deadlineTimeout(call, options.timeoutMs ?? input.timeoutMs ?? DEFAULT_TIMEOUT_MS), input.timeoutMs ?? DEFAULT_TIMEOUT_MS));
+      let resolved: ModelSelectionResolution | null;
+      try {
+        resolved = await raceWithAbort(options.resolveModel(call.pluginId, call.modelPreset), selectionSignal);
+      } catch (error) {
+        if (call.signal?.aborted) throw cancelledError();
+        if (selectionController.signal.aborted) throw serviceError("model_inference_timeout", "Model selection timed out before a request was sent", true);
+        throw error;
+      } finally { clearTimeout(selectionTimer); }
       if (!resolved?.ok) throw serviceError("model_unavailable", "The current user model is not configured or available", false);
       const configuredAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
       const maxAttempts = input.maxAttempts === undefined ? configuredAttempts : Math.min(configuredAttempts, input.maxAttempts);
@@ -153,7 +163,8 @@ async function infer(
   try {
     throwIfCallerAborted(callerSignal);
     const request = requestForProtocol(resolved, input, maxTokens, controller.signal, literatureReview);
-    const response = await fetchImpl(request.url, request.init);
+    // AbortSignal alone does not settle a transport that ignores cancellation.
+    const response = await raceWithAbort(fetchImpl(request.url, request.init), controller.signal);
     if (!response.ok) {
       const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
       throw serviceError("model_inference_failed", `Current user model returned HTTP ${response.status}`, retryable);
@@ -162,7 +173,7 @@ async function infer(
     // `stream timeout` when its own upstream stalls, which parses to a
     // SyntaxError that says nothing about the model and retries nothing. It is
     // a transient upstream failure, so it is named and retried as one.
-    const raw = await response.text();
+    const raw = await raceWithAbort(response.text(), controller.signal);
     let body: unknown;
     try {
       body = JSON.parse(raw);
@@ -201,7 +212,7 @@ async function infer(
       ? String(record(body).model) : resolved.context.model } };
   } catch (error) {
     if (callerSignal?.aborted) throw cancelledError();
-    if (controller.signal.aborted) throw serviceError("model_inference_timeout", "Current user model request timed out", true);
+    if (controller.signal.aborted) throw serviceError("model_inference_timeout", `Current user model request timed out after ${timeoutMs}ms; provider=${resolved.context.provider}; model=${resolved.context.model}; inputCharacters=${input.messages.reduce((sum, message) => sum + message.content.length, 0)}; maxOutputTokens=${maxTokens}; thinkingMode=${input.thinkingMode ?? "inherit"}`, true);
     throw error;
   } finally {
     clearTimeout(timer);

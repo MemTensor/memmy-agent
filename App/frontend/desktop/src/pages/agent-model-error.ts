@@ -100,6 +100,13 @@ export function formatAgentModelError(content: string, t: Translate, options?: A
   const normalized = classificationText.replace(/^Error(?: calling LLM)?:\s*/i, "").trim();
   const haystack = `${classificationText}\n${normalized}`.toLowerCase();
 
+  if (/invalid schema for (?:function|tool)|invalid[_ ](?:function|tool)[_ ](?:parameters|schema)/i.test(haystack)) {
+    return { title: t("agent.error.toolSchemaInvalid"), detail: failureDetail ?? (text || null) };
+  }
+  if (/timeout|timed out|超时/.test(haystack)) {
+    return { title: t("agent.error.modelTimeout"), detail: failureDetail ?? (text || null) };
+  }
+
   if (LEGACY_QUOTA_CODE_PATTERN.test(text)) {
     return { title: t(ERROR_NOTICE_KEYS.agent.quotaExhausted), detail: text };
   }

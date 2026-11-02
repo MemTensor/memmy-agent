@@ -298,7 +298,11 @@ function capabilityTools(plugins: PluginMcpService): CapabilityTool[] {
       name: capabilityToolName(plugin.id, capability.id),
       plugin,
       capability,
-      wrapsInput: capability.inputSchema.type !== "object"
+      // Keep composed schemas below a plain object envelope. The runtime still
+      // validates the unwrapped input against the original capability schema.
+      wrapsInput: capability.inputSchema.type !== "object" ||
+        ["allOf", "anyOf", "oneOf", "enum", "const", "not", "if", "then", "else"]
+          .some(key => Object.hasOwn(capability.inputSchema, key))
     })));
 }
 
