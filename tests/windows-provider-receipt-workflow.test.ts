@@ -31,6 +31,8 @@ describe('Windows provider receipt workflow', () => {
     expect(workflow.permissions).toEqual({ contents: 'read' });
     expect(workflow.on.pull_request.paths).toContain('App/native-computer-use/**');
     expect(workflow.on.pull_request.paths).toContain('tests/windows-provider-receipt-workflow.test.ts');
+    expect(workflow.on.pull_request.paths).toContain('App/shell/desktop/src/main/windows-launch-at-login.ts');
+    expect(workflow.on.pull_request.paths).toContain('App/shell/desktop/tests/windows-launch-at-login*.test.ts');
     expect(steps.find(entry => entry.uses === 'actions/checkout@v4')?.with).toMatchObject({
       repository: '${{ steps.source.outputs.repository }}', ref: '${{ steps.source.outputs.sha }}',
       'persist-credentials': false,
@@ -76,6 +78,16 @@ describe('Windows provider receipt workflow', () => {
       'workflowRef', 'workflowSha', 'nativeModules', 'liveCaptureValidated: false', 'signedInstallerValidated: false']) {
       expect(script).toContain(value);
     }
+  });
+  it('executes Windows Electron startup integration without accepting skipped tests before issuing a receipt', () => {
+    const contracts = step('history-contracts');
+    expect(contracts?.run).toContain('App/shell/desktop/tests/windows-launch-at-login.test.ts');
+    expect(contracts?.run).toContain('App/shell/desktop/tests/windows-launch-at-login-electron.test.ts');
+    expect(contracts?.run).toContain('$loginReport.numTotalTests -lt 1');
+    expect(contracts?.run).toContain('$loginReport.numPendingTests -ne 0');
+    expect(contracts?.run).toContain('$loginReport.numPassedTests -ne $loginReport.numTotalTests');
+    expect(contracts?.['continue-on-error']).not.toBe(true);
+    expect(step('provider-receipt')?.run).toContain("'history-contracts'");
   });
   it('uploads immutable canonical and explicitly named legacy artifacts only after the producer succeeds', () => {
     const uploads = steps.filter(entry => entry.uses === 'actions/upload-artifact@v4');

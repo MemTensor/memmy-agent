@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   getWindowsLaunchAtLogin,
+  repairWindowsLaunchAtLogin,
   resolveWindowsLoginItemCommand,
   setWindowsLaunchAtLogin,
   type WindowsLoginItemApplication
@@ -28,7 +29,7 @@ describe("Windows launch at login", () => {
 
     expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, (path) => path === launcherPath)).toEqual({
       path: "C:\\Windows\\System32\\wscript.exe",
-      args: [`"${launcherPath}"`]
+      args: [launcherPath]
     });
   });
 
@@ -37,6 +38,55 @@ describe("Windows launch at login", () => {
       path: packagedWindowsEnvironment.executablePath,
       args: []
     });
+  });
+
+  it.each(["Lee", "Lee User", "中文 用户"])("passes an unquoted launcher path for user %s", (user) => {
+    const environment = { ...packagedWindowsEnvironment, localAppDataPath: `C:\\Users\\${user}\\AppData\\Local` };
+    const launcherPath = `${environment.localAppDataPath}\\Memmy\\launcher\\MemmyLauncher.vbs`;
+    expect(resolveWindowsLoginItemCommand(environment, () => true).args).toEqual([launcherPath]);
+  });
+
+  it.each([true, false])("repairs only the legacy Memmy command and preserves enabled=%s", (enabled) => {
+    const launcherPath = `${packagedWindowsEnvironment.localAppDataPath}\\Memmy\\launcher\\MemmyLauncher.vbs`;
+    let legacy = true;
+    const getLoginItemSettings = vi.fn((command: { args: string[] }) => ({
+      openAtLogin: legacy && command.args[0] === `"${launcherPath}"`,
+      executableWillLaunchAtLogin: true,
+      launchItems: [{ name: "other", scope: "user", path: "C:\\Windows\\System32\\wscript.exe", args: ["other.vbs"], enabled: true },
+        { name: "cn.memtensor.memmy", scope: "user", path: "c:/windows/system32/wscript.exe", args: [legacy ? `"${launcherPath}"` : launcherPath], enabled }]
+    }));
+    const setLoginItemSettings = vi.fn(() => { legacy = false; });
+    const application = { getLoginItemSettings, setLoginItemSettings };
+    expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(true);
+    expect(setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({
+      openAtLogin: true, enabled, path: "C:\\Windows\\System32\\wscript.exe", args: [launcherPath]
+    });
+    expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(false);
+    expect(setLoginItemSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { openAtLogin: false, name: "cn.memtensor.memmy", scope: "user" },
+    { openAtLogin: true, name: "another-app", scope: "user" },
+    { openAtLogin: true, name: "cn.memtensor.memmy", scope: "machine" }
+  ])("does not repair absent or unrelated startup: %j", ({ openAtLogin, name, scope }) => {
+    const launcherPath = `${packagedWindowsEnvironment.localAppDataPath}\\Memmy\\launcher\\MemmyLauncher.vbs`;
+    const application = {
+      getLoginItemSettings: vi.fn(() => ({ openAtLogin, executableWillLaunchAtLogin: true,
+        launchItems: [{ name, scope, path: "C:\\Windows\\System32\\wscript.exe", args: [`"${launcherPath}"`], enabled: true }] })),
+      setLoginItemSettings: vi.fn()
+    };
+    expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(false);
+    expect(application.setLoginItemSettings).not.toHaveBeenCalled();
+  });
+
+  it("leaves startup untouched when the launcher is missing or Windows is not packaged", () => {
+    const application = { getLoginItemSettings: vi.fn(), setLoginItemSettings: vi.fn() };
+    expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => false)).toBe(false);
+    expect(repairWindowsLaunchAtLogin(application, { ...packagedWindowsEnvironment, platform: "darwin" })).toBe(false);
+    expect(repairWindowsLaunchAtLogin(application, { ...packagedWindowsEnvironment, isPackaged: false })).toBe(false);
+    expect(application.getLoginItemSettings).not.toHaveBeenCalled();
+    expect(application.setLoginItemSettings).not.toHaveBeenCalled();
   });
 
   it("reads the effective Windows startup state for the exact registered command", () => {
@@ -72,7 +122,7 @@ describe("Windows launch at login", () => {
         enabled: true
       }, {
         path: "C:\\Windows\\System32\\wscript.exe",
-        args: [`"${launcherPath}"`],
+        args: [launcherPath],
         enabled: false
       }]
     }));
@@ -130,6 +180,9 @@ describe("Windows launch at login", () => {
     expect(mainSource).toContain('ipcMain.handle("memmy:set-launch-at-login"');
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:get-launch-at-login")');
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:set-launch-at-login")');
+    const startup = mainSource.slice(mainSource.indexOf("app.whenReady().then(async () => {"));
+    expect(startup.indexOf("repairWindowsLaunchAtLogin(app,")).toBeGreaterThan(startup.indexOf("const windowsUpgradeLockPath"));
+    expect(startup.indexOf("repairWindowsLaunchAtLogin(app,")).toBeLessThan(startup.indexOf("await boot();"));
     expect(preloadSource).toContain("getLaunchAtLogin(): Promise<boolean>;");
     expect(preloadSource).toContain("setLaunchAtLogin(enabled: boolean): Promise<boolean>;");
     expect(preloadSource).toContain('ipcRenderer.invoke("memmy:get-launch-at-login")');

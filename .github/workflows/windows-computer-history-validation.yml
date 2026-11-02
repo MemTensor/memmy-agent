@@ -6,6 +6,10 @@ on:
       - ".github/workflows/windows-computer-history-validation.yml"
       - "tests/windows-memory-workflow.test.ts"
       - "tests/windows-provider-receipt-workflow.test.ts"
+      - "App/shell/desktop/src/main/windows-launch-at-login.ts"
+      - "App/shell/desktop/src/main/main.ts"
+      - "App/shell/desktop/tests/windows-launch-at-login*.test.ts"
+      - "App/shell/desktop/tests/fixtures/windows-launch-at-login.cjs"
       - "App/native-computer-history/**"
       - "App/native-computer-use/**"
       - "App/memmy-agent/src/tools/computer-history/**"
@@ -235,6 +239,13 @@ jobs:
           $ErrorActionPreference = 'Stop'
           node node_modules/vitest/vitest.mjs run tests/windows-memory-workflow.test.ts tests/windows-provider-receipt-workflow.test.ts
           if ($LASTEXITCODE -ne 0) { throw 'Windows workflow and receipt contract regressions failed' }
+          $loginResults = Join-Path $env:RUNNER_TEMP 'windows-login-results.json'
+          node node_modules/vitest/vitest.mjs run App/shell/desktop/tests/windows-launch-at-login.test.ts App/shell/desktop/tests/windows-launch-at-login-electron.test.ts --reporter=default --reporter=json --outputFile=$loginResults
+          if ($LASTEXITCODE -ne 0) { throw 'Windows Electron startup regression failed' }
+          $loginReport = Get-Content -LiteralPath $loginResults -Raw | ConvertFrom-Json
+          if ($loginReport.numTotalTests -lt 1 -or $loginReport.numPendingTests -ne 0 -or $loginReport.numPassedTests -ne $loginReport.numTotalTests) {
+            throw 'Windows Electron startup validation must execute every selected test; skips are not accepted.'
+          }
           $tests = @(
             'App/memmy-agent/tests/tools/computer-history/win/application-icon.test.ts'
             'App/memmy-agent/tests/tools/computer-history/win/win11.test.ts'
