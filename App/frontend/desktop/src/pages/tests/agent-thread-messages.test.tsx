@@ -3,7 +3,7 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { WINDOW_CONTROLS_OVERLAY_SAFE_TOP_STYLE } from "../../theme/window-controls-overlay.js";
-import { AttachmentActionError, emailAddressFromMailtoHref, estimateDeferredMarkdownHeight, isLikelyExpensiveAgentMarkdown, isMailtoHref, localArtifactPathFromHref, runAttachmentAction } from "../agent-message-content.js";
+import { AgentMessageContent, AttachmentActionError, emailAddressFromMailtoHref, estimateDeferredMarkdownHeight, isLikelyExpensiveAgentMarkdown, isMailtoHref, localArtifactPathFromHref, runAttachmentAction } from "../agent-message-content.js";
 import { AgentThreadMessages, buildAgentDisplayUnits, CHAT_IMAGE_LIGHTBOX_CLOSE_BUTTON_CLASS, CHAT_IMAGE_LIGHTBOX_NAV_BUTTON_CLASS, copyImageToClipboard, deliveredFileSaveName, resolveAgentMessageDisplayContent, runDeliveredFileMenuAction, saveImageToFile } from "../agent-thread-messages.js";
 
 const agentThreadMessagesSourceUrl = new URL("../agent-thread-messages.tsx", import.meta.url);
@@ -2916,3 +2916,13 @@ function fileArtifact(path: string, name = "deck.pptx", mediaUrl?: string) {
     ...(mediaUrl ? { media_url: mediaUrl } : {})
   };
 }
+
+describe("display-only reasoning file paths", () => {
+  it("renders bare, inline-code and linked paths without file buttons", () => {
+    const html = renderToString(<AgentMessageContent displayOnlyFiles content={'/tmp/example.md and `/tmp/code.md` and [file](/tmp/link.md)'} />);
+    expect(html).not.toContain("<button");
+    expect(html).not.toContain("file-chip");
+    expect(html.match(/agent-message-content__inline-code/g)).toHaveLength(3);
+    expect(html).toContain("/tmp/link.md");
+  });
+});
