@@ -276,6 +276,8 @@ export abstract class LLMProvider {
   }
 
   abstract chat(args: {
+    /** Host task context, consumed only by the account gateway transport. */
+    taskType?: "literature-review";
     messages: Record<string, any>[];
     tools?: Record<string, any>[] | null;
     model?: string | null;

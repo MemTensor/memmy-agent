@@ -4,6 +4,28 @@ import { createPluginModelInferenceService } from "../plugin-model-inference-ser
 
 describe("plugin model inference Host service", () => {
   it.each([
+    ["literature-review", "memmy-account", "agent_chat", true],
+    ["other-plugin", "memmy-account", "agent_chat", false],
+    ["literature-review", "openai-chat-completions", "agent_chat", false],
+    ["literature-review", "memmy-account", "qwen3.8-flash", false]
+  ])("routes only official review inference: %s %s %s", async (pluginId, protocol, modelName, routed) => {
+    const model = resolved();
+    if (!model.ok) throw new Error("fixture");
+    model.context.protocol = protocol as typeof model.context.protocol;
+    model.context.model = String(modelName);
+    const fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("X-Agent-Task")).toBe(routed ? "literature-review" : null);
+      expect(JSON.parse(String(init?.body)).model).toBe(modelName);
+      return new Response(JSON.stringify({ model: "review-test-model",
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }));
+    });
+    const service = createPluginModelInferenceService({ resolveModel: async () => model, fetch: fetch as typeof globalThis.fetch });
+    const result = await service.invoke({ pluginId: String(pluginId), callId: "route", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Write" }] } });
+    if (routed) expect(result).toMatchObject({ model: { model: "review-test-model" } });
+  });
+
+  it.each([
     { code: 40308, data: null, message: "quota insufficient" },
     { error: { code: "40309", type: "insufficient_quota" } }
   ])("reports account quota errors without JSON fallback or model retries: %j", async (body) => {
