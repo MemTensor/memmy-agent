@@ -1,3 +1,4 @@
+import { computerUseRequestContext } from "../../../src/core/agent-runtime/computer-use-request-context.js";
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -68,7 +69,15 @@ function fixture(platform: 'darwin' | 'win32' = 'darwin') {
       arguments: { app: 'WPS Office' } })] }), new LLMResponse({ content: 'done' }));
     await loop.dispatchMessage(message);
   }
-  return { root, loop, bus, native, owner, invoke, ask, tool, responses, inbound, dispatch };
+  async function startGoal() {
+    loop.setChannelCapabilitiesResolver(() => ({ supportsStreaming: true }));
+    const message = await inbound(requestID, { content: '/goal Read the WPS window title' });
+    await loop.dispatchMessage(message);
+    await (loop as any).dispatchNextGoalWork(message.sessionKey);
+    expect(bus.inboundSize).toBe(1);
+    return bus.consumeInbound();
+  }
+  return { root, loop, bus, native, owner, invoke, ask, tool, responses, inbound, dispatch, startGoal };
 }
 
 afterEach(async () => {
@@ -80,6 +89,67 @@ afterEach(async () => {
 });
 
 describe('real WebSocket user → asynchronous progress hook → managed Computer Use', () => {
+  it('retains accepted /goal authorization through scheduled continuations and still asks for app access', async () => {
+    const f = fixture();
+    const continuation = await f.startGoal();
+    expect(continuation.internal?.kind).toBe('goal_continuation');
+    expect(f.loop.goalRuntime.route(continuation.sessionKey)).toMatchObject({
+      source: { kind: 'gui', channel: 'websocket' }, computerUseMessageId: requestID,
+    });
+    await f.dispatch(continuation);
+    expect(f.invoke.mock.calls[0][3]).toMatchObject({
+      messageId: `goal:${continuation.internal!.goalId}:${continuation.metadata.turnId}`,
+      metadata: { computerUseInteractive: true, turnId: continuation.metadata.turnId } });
+    expect(f.native.callTool.mock.calls.map(call => call[0])).toEqual(['list_apps', 'get_app_state']);
+    expect(f.ask).toHaveBeenCalledOnce();
+
+    await (f.loop as any).dispatchNextGoalWork(continuation.sessionKey);
+    const next = await f.bus.consumeInbound();
+    expect(next.metadata.turnId).not.toBe(continuation.metadata.turnId);
+    await f.dispatch(next);
+    expect(f.native.callTool.mock.calls.filter(call => call[0] === 'get_app_state')).toHaveLength(2);
+    expect(f.ask).toHaveBeenCalledTimes(2);
+    expect(f.invoke.mock.calls[1][3]?.messageId).not.toBe(f.invoke.mock.calls[0][3]?.messageId);
+  });
+
+  it.each(['paused', 'cleared'])('does not dispatch native tools after a queued Goal is %s', async action => {
+    const f = fixture();
+    const continuation = await f.startGoal();
+    const goal = f.loop.goalRuntime.get(continuation.sessionKey)!;
+    if (action === 'paused') await f.loop.goalRuntime.pause(continuation.sessionKey, goal.goalId);
+    else await f.loop.goalRuntime.clear(continuation.sessionKey, goal.goalId);
+    await f.dispatch(continuation);
+    expect(f.native.callTool).not.toHaveBeenCalled();
+    expect(f.ask).not.toHaveBeenCalled();
+  });
+
+  it.each(['legacy', 'no-reservation', 'wrong-goal', 'stale', 'wrong-chat', 'wrong-source', 'background'])
+  ('does not inherit Goal authorization for %s context', async kind => {
+    const f = fixture();
+    const message = await f.startGoal();
+    const session = f.loop.sessions.getOrCreate(message.sessionKey);
+    if (kind === 'legacy') {
+      delete session.metadata.goalRoute.computerUseMessageId;
+      f.loop.sessions.save(session);
+    }
+    if (kind === 'no-reservation') f.loop.goalRuntime.releaseWork(message.sessionKey, message.metadata.turnId);
+    if (kind === 'wrong-goal') message.internal!.goalId = 'another-goal';
+    if (kind === 'stale') message.internal!.goalUpdatedAt = '2020-01-01T00:00:00.000Z';
+    if (kind === 'wrong-chat') message.chatId = 'another-chat';
+    if (kind === 'wrong-source') message.turnSource = { kind: 'im', channel: 'telegram' };
+    if (kind === 'background') message.metadata.computerUseInteractive = false;
+    const request = computerUseRequestContext(message, message.metadata.turnId, f.loop.goalRuntime);
+    expect(request.metadata.computerUseInteractive).toBe(false);
+  });
+
+  it('does not bypass a denied native app approval in a Goal continuation', async () => {
+    const f = fixture();
+    f.ask.mockResolvedValue('deny' as any);
+    await f.dispatch(await f.startGoal());
+    expect(f.ask).toHaveBeenCalledOnce();
+    expect(f.native.callTool.mock.calls.some(call => call[0] === 'get_app_state')).toBe(false);
+  });
+
   it('closes its native PiP before awaiting unrelated browser cleanup at task completion', async () => {
     const f = fixture();
     vi.stubEnv('MEMMY_DESKTOP_MANAGED_GATEWAY', '1');

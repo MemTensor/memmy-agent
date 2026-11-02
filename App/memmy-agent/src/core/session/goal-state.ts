@@ -32,6 +32,7 @@ export type GoalRoute = {
   channel: string;
   chatId: string;
   source?: TurnSource;
+  computerUseMessageId?: string;
 };
 
 export type AgentGoalState = {
@@ -57,6 +58,7 @@ const GOAL_STATE_KEYS = new Set([
 ]);
 const LEGACY_GOAL_ROUTE_KEYS = new Set(["channel", "chatId"]);
 const GOAL_ROUTE_KEYS = new Set(["channel", "chatId", "source"]);
+const AUTHORIZED_GOAL_ROUTE_KEYS = new Set([...GOAL_ROUTE_KEYS, "computerUseMessageId"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -112,7 +114,7 @@ export function readGoalState(metadata?: Record<string, unknown> | null): GoalSt
 export function parseGoalRoute(value: unknown): GoalRoute | null {
   if (
     !isObject(value)
-    || (!hasExactKeys(value, LEGACY_GOAL_ROUTE_KEYS) && !hasExactKeys(value, GOAL_ROUTE_KEYS))
+    || (!hasExactKeys(value, LEGACY_GOAL_ROUTE_KEYS) && !hasExactKeys(value, GOAL_ROUTE_KEYS) && !hasExactKeys(value, AUTHORIZED_GOAL_ROUTE_KEYS))
   ) return null;
   if (typeof value.channel !== "string" || !value.channel.trim()) return null;
   if (typeof value.chatId !== "string" || !value.chatId.trim()) return null;
@@ -121,7 +123,12 @@ export function parseGoalRoute(value: unknown): GoalRoute | null {
   }
   const source = parseTurnSource(value.source);
   if (!source) return null;
-  return { channel: value.channel, chatId: value.chatId, source };
+  const messageId = value.computerUseMessageId;
+  if (Object.hasOwn(value, "computerUseMessageId")
+    && (typeof messageId !== "string" || !messageId.trim() || messageId.length > 512
+      || source.channel !== value.channel || ['system', 'cron'].includes(value.channel))) return null;
+  return { channel: value.channel, chatId: value.chatId, source,
+    ...(typeof messageId === "string" ? { computerUseMessageId: messageId } : {}) };
 }
 
 export function readGoalRoute(metadata?: Record<string, unknown> | null): GoalRoute | null {

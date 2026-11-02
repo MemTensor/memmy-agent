@@ -34,6 +34,15 @@ function goal(overrides: Partial<GoalState> = {}): GoalState {
 }
 
 describe("GoalState session metadata helpers", () => {
+  it("validates persisted Computer Use authorization without upgrading legacy routes", () => {
+    const route = { channel: 'websocket', chatId: 'chat', source: { kind: 'gui', channel: 'websocket' },
+      computerUseMessageId: 'accepted-user-request' };
+    expect(parseGoalRoute(route)).toEqual(route);
+    for (const computerUseMessageId of ['', ' ', 7, 'x'.repeat(513)])
+      expect(parseGoalRoute({ ...route, computerUseMessageId })).toBeNull();
+    expect(parseGoalRoute({ ...route, source: { kind: 'gui', channel: 'cron' } })).toBeNull();
+    expect(parseGoalRoute({ ...route, source: undefined })).toBeNull();
+  });
   it("accepts only the final strict contract", () => {
     expect(parseGoalState(goal())).toEqual(goal());
     expect(parseGoalState(JSON.stringify(goal()))).toBeNull();
