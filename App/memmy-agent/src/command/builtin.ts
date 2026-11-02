@@ -1,3 +1,4 @@
+import { computerUseRequestContext } from "../core/agent-runtime/computer-use-request-context.js";
 import { spawn, type SpawnOptions } from "node:child_process";
 import { OutboundMessage } from "../core/runtime-messages/events.js";
 import {
@@ -510,10 +511,15 @@ export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage> {
     const objective = command === "create" ? argument : rawArgs;
     const turnId = String(ctx.turnId ?? ctx.msg.metadata?.turn_id ?? "").trim();
     if (!turnId) throw new GoalRuntimeError("goal_route_unavailable");
+    const request = computerUseRequestContext(ctx.msg);
     const goal = await runtime.create({
       sessionKey: ctx.key,
       objective,
-      route: { channel: ctx.msg.channel, chatId: ctx.msg.chatId },
+      route: { channel: ctx.msg.channel, chatId: ctx.msg.chatId,
+        ...(ctx.msg.turnSource ? { source: ctx.msg.turnSource } : {}),
+        ...(ctx.msg.turnSource && request.metadata.computerUseInteractive === true
+          ? { computerUseMessageId: request.messageId! } : {}),
+      },
       turnId,
     });
     ctx.loop.scheduleGoalWork?.(ctx.key, goal);
