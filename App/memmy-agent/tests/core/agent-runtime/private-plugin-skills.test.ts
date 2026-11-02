@@ -32,7 +32,7 @@ describe("private plugin instruction projection", () => {
       new LLMResponse({ content: "done" })
     ]);
     const saved: unknown[] = []; const checkpoints: unknown[] = [];
-    const spec = new AgentRunSpec({ messages: [{ role: "user", content: "write a review" }], tools, provider, maxIterations: 3,
+    const spec = new AgentRunSpec({ model: "agent_chat", actualModelContext: { source: "account" } as any, messages: [{ role: "user", content: "write a review" }], tools, provider, maxIterations: 3,
       beforeFollowupModelRequest: async ctx => {
         expect(JSON.stringify(ctx.transcriptMessages)).not.toContain(secret);
         expect(JSON.stringify(ctx.modelMessages)).not.toContain(secret);
@@ -40,6 +40,8 @@ describe("private plugin instruction projection", () => {
       }, currentTurnMessageStartIndex: 0,
       onPrivateSkillRefsChanged: refs => saved.push(structuredClone(refs)), checkpointCallback: payload => { checkpoints.push(structuredClone(payload)); } });
     const result = await new AgentRunner(provider).run(spec);
+    expect(provider.requests[0].taskType).toBeUndefined();
+    expect(provider.requests[1].taskType).toBe("literature-review");
     expect(JSON.stringify(provider.requests[0])).not.toContain(secret);
     expect(JSON.stringify(provider.requests[1])).toContain(secret);
     for (const value of [result, spec.initialMessages, checkpoints, saved]) expect(JSON.stringify(value)).not.toContain(secret);
@@ -49,11 +51,22 @@ describe("private plugin instruction projection", () => {
     const restored = loader(); const resumedProvider = new Provider([new LLMResponse({ content: "resumed" })]);
     const resumed = await new AgentRunner(resumedProvider).run(new AgentRunSpec({
       messages: [{ role: "system", content: "compacted history without original tool results" }, { role: "user", content: "continue" }],
-      privateSkillRefs: saved.at(-1), tools: restored.tools, provider: resumedProvider, maxIterations: 1
+      privateSkillRefs: saved.at(-1), tools: restored.tools, provider: resumedProvider, model: "agent_chat",
+      actualModelContext: { source: "account" } as any, maxIterations: 1
     }));
+    expect(resumedProvider.requests[0].taskType).toBe("literature-review");
     expect(JSON.stringify(resumedProvider.requests)).toContain(secret);
     expect(JSON.stringify(resumed)).not.toContain(secret);
     expect(restored.callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["account", "byok"])("does not mark an explicitly selected model in %s mode", async source => {
+    const { tools } = loader();
+    const provider = new Provider([new LLMResponse({ content: "done" })]);
+    await new AgentRunner(provider).run(new AgentRunSpec({ messages: [{ role: "user", content: "continue" }],
+      privateSkillRefs: [ref], tools, provider, model: "qwen3.8-flash",
+      actualModelContext: { source } as any, maxIterations: 1 }));
+    expect(provider.requests[0].taskType).toBeUndefined();
   });
 
   it("does not accept a user message as an activation and never mutates history", async () => {
