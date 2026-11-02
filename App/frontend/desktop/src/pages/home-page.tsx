@@ -4,8 +4,6 @@ import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupI
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
-import { isCreditsPreviewMode } from "../app/credits-preview-mode.js";
-import { requestCreditsExhaustedPrompt } from "../app/credits-exhausted-prompt.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
   MemmyAgentRequestError,
@@ -27,7 +25,6 @@ import { setAnalyticsModelSource } from "../analytics/analytics-context.js";
 import { buildOnboardingActivationEvent } from "../analytics/onboarding-analytics.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { AgentModelSelector } from "../components/agent-model-selector.js";
-import { HomeCheckinCard } from "./credits-in-app.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { Select } from "../components/Select.js";
 import { formatMessage, type MessageKey, type MessageValues, zhCNMessages } from "../i18n/messages.js";
@@ -897,8 +894,6 @@ export function HomePage() {
   const { state, dispatch } = useAppState();
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
-  const creditsPreview = isCreditsPreviewMode();
-  const showHomeCheckin = creditsPreview && state.bootstrap?.app.userMode === "account";
   const { track } = useAnalytics();
   const { syncAgentConversation } = useTaskBus();
   const { connection, ensureChatSubscription, taskStateCoordinator } = useAgentRuntimeBridge();
@@ -1842,10 +1837,6 @@ export function HomePage() {
       resolvedConversationModel.candidate?.source === "platform"
       && isAccountTokenQuotaExhausted(state.bootstrap)
     ) {
-      if (creditsPreview) {
-        requestCreditsExhaustedPrompt();
-        return;
-      }
       dispatch(agentActions.operationFailed("chat", createAgentOperationError({
         source: "send",
         message: "agent.error.quotaExceeded",
@@ -2880,7 +2871,6 @@ export function HomePage() {
           getSearchRoot={getAgentConversationSearchRoot}
         />
       ) : null}
-      topBarEnd={hasActiveConversation && showHomeCheckin ? <HomeCheckinCard compact /> : null}
       topBarBorder={hasActiveConversation}
       topBarInset={hasActiveConversation ? false : undefined}
       topBarClassName={hasActiveConversation ? `thread-topbar ${threadPanelMotionClass}` : undefined}
@@ -2916,7 +2906,6 @@ export function HomePage() {
             <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
           </div>
           <div className="home-empty-column">
-            {showHomeCheckin ? <HomeCheckinCard dismissible /> : null}
             <AgentOperationErrorSlot message={agentError} />
             <div className="home-empty-composer-stack">
               <div

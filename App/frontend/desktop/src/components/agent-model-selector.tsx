@@ -1,5 +1,4 @@
 import { Settings2 } from "lucide-react";
-import { isCreditsPreviewMode } from "../app/credits-preview-mode.js";
 import type { ModelProviderConfig } from "../api/config-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { agentActions, appActions } from "../state/app-actions.js";
@@ -36,7 +35,6 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
   const { t } = useTranslation();
   const { state, dispatch } = useAppState();
   const workspace = createModelWorkspace(props.seedConfig ?? state.modelConfig);
-  const creditsPreview = isCreditsPreviewMode();
   const candidates = getTaskModelCandidates(workspace, props.mode);
   const committedSelection = state.agent.committedModelSelectionByScope[props.scopeKey];
   const pendingPreset = state.agent.pendingPresetByScope[props.scopeKey];
@@ -50,9 +48,7 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
 
   const optionForCandidate = (candidate: (typeof candidates)[number]): SelectOption => ({
         value: candidate.id,
-        label: creditsPreview
-          ? `${candidate.source === "platform" ? t("home.modelSelector.platformAgent") : candidate.model} · ${t(candidate.source === "platform" ? "credits.model.pricePending" : "credits.model.byokFree")}`
-          : (candidate.source === "platform" ? t("home.modelSelector.platformAgent") : candidate.model),
+        label: candidate.source === "platform" ? t("home.modelSelector.platformAgent") : candidate.model,
         selectedLabel: candidate.source === "platform" ? t("home.modelSelector.platformAgent") : candidate.model,
         groupLabel: candidate.source === "platform"
           ? t("home.modelSelector.platformGroup")

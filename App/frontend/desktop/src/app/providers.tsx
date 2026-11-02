@@ -7,7 +7,6 @@ import { AppStateProvider, useAppState } from "../state/app-state.js";
 import { ThemeProvider } from "../theme/theme-provider.js";
 import { useWindowFullScreenSync } from "../utils/window-fullscreen.js";
 import { resolveDesktopDisplayLanguage } from "./account-channel.js";
-import { isCreditsPreviewMode } from "./credits-preview-mode.js";
 
 /** Contract for api clients context value. */
 export interface ApiClientsContextValue {
@@ -41,9 +40,7 @@ function ApiClientsProvider(props: { children: ReactNode }) {
 /** Handles visual providers. */
 function VisualProviders(props: { children: ReactNode }) {
   const { state } = useAppState();
-  const language = typeof window !== "undefined" && isCreditsPreviewMode() && new URLSearchParams(window.location.search).get("preview-language") === "en-US"
-    ? "en-US"
-    : resolveDesktopDisplayLanguage(state.bootstrap?.app.language);
+  const language = resolveDesktopDisplayLanguage(state.bootstrap?.app.language);
   const theme = state.bootstrap?.app.theme ?? "system";
   useWindowFullScreenSync();
 

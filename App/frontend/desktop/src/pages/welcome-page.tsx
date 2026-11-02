@@ -3,7 +3,6 @@ import type { AccountLoginResultView, OnboardingStateDto, SocialLoginProvider } 
 import { Gift, Key } from "lucide-react";
 import { useEffect, useState } from "react";
 import { resolveDesktopAccountChannel } from "../app/account-channel.js";
-import { isCreditsPreviewMode } from "../app/credits-preview-mode.js";
 import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
 import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
@@ -41,8 +40,8 @@ export function WelcomePage() {
   const channel = resolveDesktopAccountChannel();
   const invitationEnabled = state.bootstrap?.promotions?.invitation?.enabled === true;
   const agentChatTokenTotal = state.bootstrap?.promotions?.agentChatTokenTotal;
-  const creditsPreview = isCreditsPreviewMode();
-  const showLoginBanner = creditsPreview || ((state.bootstrap?.promotions?.loginBanner ?? true) && (agentChatTokenTotal ?? 0) > 0);
+  const showLoginBanner =
+    (state.bootstrap?.promotions?.loginBanner ?? true) && (agentChatTokenTotal ?? 0) > 0;
 
   // Handles use effect.
   useEffect(() => {
@@ -221,14 +220,14 @@ export function WelcomePage() {
               <button
                 type="button"
                 onClick={() => dispatch(appActions.navigate("/token-detail"))}
-                aria-label={t(creditsPreview ? "credits.welcome.gift" : "welcome.gift.expand")}
+                aria-label={t("welcome.gift.expand")}
                 className="welcome-login-card__banner w-full flex items-center gap-2.5 text-left cursor-pointer"
               >
                 <span className="w-6 h-6 rounded-full bg-action-sky/15 flex items-center justify-center text-action-sky shrink-0">
                   <Gift size={14} strokeWidth={2.2} />
                 </span>
                 <span className="text-sm text-text-ink/70">
-                  {creditsPreview ? t("credits.welcome.gift") : t("welcome.gift", { count: formatTokenGiftAmount(agentChatTokenTotal) })}
+                  {t("welcome.gift", { count: formatTokenGiftAmount(agentChatTokenTotal) })}
                 </span>
               </button>
             )}

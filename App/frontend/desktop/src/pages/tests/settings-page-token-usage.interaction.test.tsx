@@ -18,7 +18,6 @@ describe("SettingsPage platform scene quota details", () => {
   let root: Root;
 
   beforeEach(() => {
-    window.history.replaceState(null, "", "/#model-usage");
     Object.defineProperty(window, "localStorage", {
       configurable: true,
       value: createMemoryStorage()
@@ -31,7 +30,6 @@ describe("SettingsPage platform scene quota details", () => {
   afterEach(() => {
     act(() => root.unmount());
     document.body.replaceChildren();
-    window.history.replaceState(null, "", "/");
   });
 
   it("shows all three platform scene totals inline without a detail-page click", () => {
@@ -254,7 +252,7 @@ describe("SettingsPage platform scene quota details", () => {
           <SettingsPageView
             state={createInitialAppState()}
             dispatch={vi.fn()}
-            activeTab="model"
+            activeTab="tokens"
             byokTokenUsageClient={{
               getSummary: vi.fn(async () => byokUsage),
               getMemoryBudget: vi.fn(async () => memoryBudgetFixture())
@@ -274,11 +272,14 @@ describe("SettingsPage platform scene quota details", () => {
       await Promise.resolve();
     });
 
-    const updated = container.querySelector('#model-panel-usage [class*="modelUsageUpdated"]');
-    expect(updated?.textContent).toContain("更新于");
+    const tokenUsageHeading = [...container.querySelectorAll("#token-usage h2")]
+      .find((heading) => heading.textContent === "Token 用量");
+    const tokenUsageHeader = tokenUsageHeading?.parentElement?.parentElement;
+    expect(tokenUsageHeader?.textContent).toContain("更新于");
+    expect(tokenUsageHeader?.className).toContain("justify-between");
   });
 
-  it("refreshes BYOK usage when entering model usage and when model usage regains focus", async () => {
+  it("refreshes BYOK usage when entering the Token tab and when the focused Token tab regains focus", async () => {
     const getSummary = vi.fn(async () => ({
       inputTokens: 1,
       outputTokens: 1,
@@ -300,7 +301,7 @@ describe("SettingsPage platform scene quota details", () => {
       requestInlineAction: vi.fn(async () => undefined),
       requestPrimaryAction: vi.fn(async () => undefined)
     };
-    const renderTab = async (activeTab: "account" | "model") => {
+    const renderTab = async (activeTab: "account" | "tokens") => {
       await act(async () => {
         root.render(
           <I18nProvider language="zh-CN">
@@ -320,7 +321,7 @@ describe("SettingsPage platform scene quota details", () => {
     await renderTab("account");
     expect(getSummary).not.toHaveBeenCalled();
 
-    await renderTab("model");
+    await renderTab("tokens");
     expect(getSummary).toHaveBeenCalledTimes(1);
 
     await act(async () => {
@@ -407,7 +408,6 @@ describe("memory token budget limit inputs", () => {
   let root: Root;
 
   beforeEach(() => {
-    window.history.replaceState(null, "", "/#model-usage");
     Object.defineProperty(window, "localStorage", {
       configurable: true,
       value: createMemoryStorage()
@@ -420,7 +420,6 @@ describe("memory token budget limit inputs", () => {
   afterEach(() => {
     act(() => root.unmount());
     document.body.replaceChildren();
-    window.history.replaceState(null, "", "/");
   });
 
   it("treats empty drafts as revert and only an explicit 0 as unlimited", () => {
@@ -526,7 +525,7 @@ describe("memory token budget limit inputs", () => {
           <SettingsPageView
             state={createInitialAppState()}
             dispatch={vi.fn()}
-            activeTab="model"
+            activeTab="tokens"
             configClient={{
               updateSettings,
               getModelConfig: vi.fn(async () => ({ providers: [] }))
@@ -571,7 +570,7 @@ describe("memory token budget limit inputs", () => {
     expect(updateSettings).toHaveBeenNthCalledWith(2, { memoryByokDailyLimitM: 20 });
   });
 
-  it("refreshes the open model usage budget without wiping an in-progress draft", async () => {
+  it("refreshes the open Token tab budget without wiping an in-progress draft", async () => {
     const getSummary = vi.fn(async () => ({
       inputTokens: 1,
       outputTokens: 1,
@@ -595,7 +594,7 @@ describe("memory token budget limit inputs", () => {
           <SettingsPageView
             state={createInitialAppState()}
             dispatch={vi.fn()}
-            activeTab="model"
+            activeTab="tokens"
             byokTokenUsageClient={{ getSummary, getMemoryBudget }}
             update={{
               appVersion: "1.0.4",
@@ -683,7 +682,7 @@ describe("memory token budget limit inputs", () => {
     expect(dailyBar?.getAttribute("data-tone")).toBe("yellow");
     expect(dailyBar?.getAttribute("aria-valuenow")).toBe("70");
     expect(dailyBar?.querySelector("span")?.getAttribute("style")).toContain("width: 70%");
-    expect(container.querySelector('[aria-label="已达到限额，暂停后台记忆处理。提高限额可恢复。"]')).toBeNull();
+    expect(container.querySelector('[aria-label="已达到限额，暂停记忆进化任务。提高限额可恢复。"]')).toBeNull();
 
     await act(async () => {
       root.render(
@@ -703,7 +702,7 @@ describe("memory token budget limit inputs", () => {
       );
     });
     const pausedMark = container.querySelector<HTMLElement>(
-      '[aria-label="已达到限额，暂停后台记忆处理。提高限额可恢复。"]'
+      '[aria-label="已达到限额，暂停记忆进化任务。提高限额可恢复。"]'
     );
     expect(pausedMark).toBeTruthy();
     expect(pausedMark?.tagName).toBe("BUTTON");
@@ -727,7 +726,7 @@ describe("memory token budget limit inputs", () => {
     expect(container.querySelector('[role="progressbar"]')).toBeNull();
   });
 
-  it("opens model usage from any tab and briefly highlights the memory budget card", async () => {
+  it("opens Token usage from any tab and briefly highlights the memory budget card", async () => {
     const scrollIntoView = vi.fn();
     const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
     HTMLElement.prototype.scrollIntoView = scrollIntoView;
@@ -785,8 +784,7 @@ describe("memory token budget limit inputs", () => {
 
     const section = container.querySelector("#memory-token-budget");
     const card = section?.querySelector("[class*='budgetPanel']");
-    expect(container.querySelector("#settings-panel-model")?.hasAttribute("hidden")).toBe(false);
-    expect(container.querySelector("#model-panel-usage")?.hasAttribute("hidden")).toBe(false);
+    expect(container.querySelector("#settings-panel-tokens")?.hasAttribute("hidden")).toBe(false);
     expect(section).not.toBeNull();
     expect(section?.className).not.toMatch(/budgetCardFlash/);
     expect(card?.className).toMatch(/budgetCardFlash/);

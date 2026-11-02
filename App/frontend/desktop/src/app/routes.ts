@@ -19,14 +19,6 @@ export type AppRoutePath =
   | "/memory"
   | "/knowledge"
   | "/memory-sources"
-  | "/credit-purchase-details"
-  | "/credit-reward-details"
-  | "/credit-packs"
-  | "/redeem"
-  | "/credit-checkout"
-  | "/plans"
-  | "/checkin"
-  | "/limits"
   | "/settings";
 
 const CURRENT_ROUTE_STORAGE_KEY = "memmy.currentRoute";
@@ -64,14 +56,6 @@ export const routeTable: Record<AppRoutePath, AppRouteDefinition> = {
   "/memory": { path: "/memory", navKey: "nav.memory", requiresBootstrap: true },
   "/knowledge": { path: "/knowledge", navKey: "nav.knowledge", requiresBootstrap: true },
   "/memory-sources": { path: "/memory-sources", navKey: "nav.memory", requiresBootstrap: true },
-  "/credit-purchase-details": { path: "/credit-purchase-details", navKey: "credits.plans.title", requiresBootstrap: true },
-  "/credit-reward-details": { path: "/credit-reward-details", navKey: "credits.detail.rewardTitle", requiresBootstrap: true },
-  "/credit-packs": { path: "/credit-packs", navKey: "credits.plans.title", requiresBootstrap: true },
-  "/redeem": { path: "/redeem", navKey: "credits.redeem.title", requiresBootstrap: true },
-  "/credit-checkout": { path: "/credit-checkout", navKey: "credits.plans.title", requiresBootstrap: true },
-  "/plans": { path: "/plans", navKey: "credits.plans.title", requiresBootstrap: true },
-  "/checkin": { path: "/checkin", navKey: "credits.checkin.title", requiresBootstrap: true },
-  "/limits": { path: "/limits", navKey: "credits.limits.title", requiresBootstrap: true },
   "/settings": { path: "/settings", navKey: "nav.settings", requiresBootstrap: true }
 };
 
@@ -708,7 +692,7 @@ function isAppRoutePath(value: string | null): value is AppRoutePath {
 }
 
 function isRestorableRoute(path: AppRoutePath): boolean {
-  return path === "/main" || path === "/pet" || path === "/tools" || path === "/memory" || path === "/memory-sources" || path === "/credit-purchase-details" || path === "/credit-reward-details" || path === "/credit-packs" || path === "/redeem" || path === "/credit-checkout" || path === "/plans" || path === "/checkin" || path === "/limits" || path === "/settings";
+  return path === "/main" || path === "/pet" || path === "/tools" || path === "/memory" || path === "/memory-sources" || path === "/settings";
 }
 
 function isPostOnboardingRoute(path: AppRoutePath): boolean {
