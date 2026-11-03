@@ -71,11 +71,12 @@ it.each([0, -1, 1.5, '42', 0x80000000])('rejects a malformed Windows PID %j', as
   await expect(resolveInstalledAppIdentity('Notepad', 'win32')).rejects.toMatchObject({ code: 'invalid-response' });
 });
 
-it('retains Memmy app safety on a native resolved identity', async () => {
-  reply({ platform: 'darwin', status: 'resolved', app: { appId: 'com.apple.Terminal', displayName: 'Terminal' } });
-  await expect(resolveInstalledAppIdentity('Terminal', 'darwin')).rejects.toMatchObject({ code: 'blocked' });
-  reply({ platform: 'win32', status: 'resolved', app: { appId: 'Microsoft.WindowsTerminal_8wekyb3d8bbwe!App', displayName: 'Terminal' } });
-  await expect(resolveInstalledAppIdentity('Terminal', 'win32')).rejects.toMatchObject({ code: 'blocked' });
+it.each([
+  { platform: 'darwin' as const, appId: 'com.apple.Terminal', displayName: 'Terminal' },
+  { platform: 'win32' as const, appId: 'Microsoft.WindowsTerminal_8wekyb3d8bbwe!App', displayName: 'Terminal' },
+])('accepts native resolved terminal identity on $platform', async app => {
+  reply({ platform: app.platform, status: 'resolved', app });
+  await expect(resolveInstalledAppIdentity('Terminal', app.platform)).resolves.toEqual(app);
 });
 
 it('bounds transport failure and does not retry or launch', async () => {

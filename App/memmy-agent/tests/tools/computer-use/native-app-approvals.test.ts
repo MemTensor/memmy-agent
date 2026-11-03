@@ -104,11 +104,11 @@ describe('native app approval', () => {
     expect(resolveNativeAppIdentity(windowsListing([]), 'notepad', 'win32')).toBeNull();
   });
 
-  it('does not authorize a shared UWP host or hide a blocked terminal behind a package identity', () => {
+  it('resolves native package identities independently of terminal or shared host process names', () => {
     for (const processName of ['ApplicationFrameHost', 'PowerShell', 'WindowsTerminal']) {
       const listing = windowsListing([{ ...windowsCalculator, processName }]);
-      expect(resolveNativeAppIdentity(listing, '2049', 'win32')).toBeNull();
-      expect(resolveNativeAppIdentity(listing, '计算器', 'win32')).toBeNull();
+      expect(resolveNativeAppIdentity(listing, '2049', 'win32')).toEqual(resolvedWindowsCalculator);
+      expect(resolveNativeAppIdentity(listing, '计算器', 'win32')).toEqual(resolvedWindowsCalculator);
     }
   });
 
@@ -126,12 +126,21 @@ describe('native app approval', () => {
   });
 
   it.each([
+    { platform: 'darwin' as const, appId: 'com.apple.Terminal', displayName: 'Terminal' },
     { platform: 'darwin' as const, appId: 'com.openai.codex', displayName: 'Codex' },
     { platform: 'darwin' as const, appId: 'com.googlecode.iterm2', displayName: 'iTerm' },
+    ...['cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe',
+      'wt', 'wt.exe', 'windowsterminal', 'windowsterminal.exe', 'chatgpt', 'chatgpt.exe',
+      'applicationframehost', 'applicationframehost.exe',
+      'microsoft.windowsterminal_8wekyb3d8bbwe!app', 'microsoft.windowsterminalpreview_8wekyb3d8bbwe!app']
+      .map(appId => ({ platform: 'win32' as const, appId, displayName: appId })),
   ])('requires normal user approval for $displayName', async app => {
-    const listing = { content: [{ type: 'text', text: `${app.displayName} — ${app.appId} [running]` }] };
+    const listing = app.platform === 'darwin'
+      ? { content: [{ type: 'text', text: `${app.displayName} — ${app.appId} [running]` }] }
+      : windowsListing([{ appId: app.appId, displayName: app.displayName, processName: app.appId, pid: 2049 }]);
     for (const target of [app.displayName, app.appId])
-      expect(resolveNativeAppIdentity(listing, target, 'darwin')).toEqual(app);
+      expect(resolveNativeAppIdentity(listing, target, app.platform)).toEqual(app.platform === 'darwin'
+        ? app : { ...app, runtimeSelector: '2049' });
     const ask = vi.fn().mockResolvedValueOnce('deny').mockResolvedValueOnce('allow-once')
       .mockResolvedValueOnce('allow-always');
     const approvals = store();
@@ -176,13 +185,13 @@ describe('native app approval', () => {
     expect(ask).toHaveBeenCalledTimes(2);
   });
 
-  it('fails closed for missing interactive context and protected terminal apps', async () => {
+  it('fails closed for missing interactive context and malformed app identities', async () => {
     const ask = vi.fn().mockResolvedValue('allow-always');
     const gate = new NativeAppApprovalGate(store(), ask);
     await expect(gate.authorize(calculator, null)).rejects.toBeInstanceOf(NativeAppApprovalDenied);
-    await expect(gate.authorize({ platform: 'darwin', appId: 'com.apple.Terminal', displayName: 'Terminal' },
+    await expect(gate.authorize({ platform: 'darwin', appId: '../Terminal', displayName: 'Terminal' },
       turn('first'))).rejects.toBeInstanceOf(NativeAppApprovalDenied);
-    await expect(gate.authorize({ platform: 'win32', appId: 'powershell', displayName: 'powershell' },
+    await expect(gate.authorize({ platform: 'win32', appId: 'powershell', displayName: '' },
       turn('first'))).rejects.toBeInstanceOf(NativeAppApprovalDenied);
     expect(ask).not.toHaveBeenCalled();
   });
