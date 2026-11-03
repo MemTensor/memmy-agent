@@ -44,6 +44,10 @@ import { memoryNeedsImportSummary, summaryProcessingJobType } from "../import/im
 import {
   classifyProcessingError,
   type EnqueueJobInput,
+  L3_RETRY_JOB_TYPES,
+  L3_SUSPEND_MINUTES,
+  l3FailureHandling,
+  type L3FailureHandling,
   processingJobMatchesMemory,
   processingStageForJob,
   sanitizeProcessingError,
@@ -62,6 +66,7 @@ import { resolveWorkerLeaseOptions, type WorkerLeaseOptions } from "./worker-lea
 import { WorkerConcurrencyController, workerCapacityKey, type PreparedWorkerExecution, type WorkerPermit } from "./worker-concurrency.js";
 import { workerWorkRequirements, workerEmbeddingGroupKey } from "./worker-work-requirements.js";
 import { observeWorker, type WorkerObserver, type WorkerMetricOutcome } from "./worker-observability.js";
+import { isL3FieldSnapshotMemory } from "../l3-field/snapshot-memory.js";
 
 export const SUMMARY_WORKER_CONCURRENCY = 4;
 export const EMBEDDING_RETRY_LEASE_MS = 5 * 60_000;
@@ -175,6 +180,16 @@ export interface WorkerRunnerDeps {
   runWorkerNoWrite: (request: RequestEnvelope) => Promise<WorkerRunSummary>;
   restartFailedProcessing: (at: string, limit: number) => number;
   enqueueObservationBackfill?: (limit: number, at: string) => number;
+  /** Drops new-L3 items that have been inactive longer than the retention window. */
+  purgeL3InactiveItems?: (at: string) => number;
+  /** Arms the idle flush of every Session holding turns not yet handed to the new L3. */
+  armPendingL3Flushes?: () => number;
+  /** Gives each dead-lettered new-L3 batch one automatic rerun. */
+  requeueL3DeadLettersOnce?: (at: string) => number;
+  /** Whether the new L3 is on; while off its jobs stay queued and are not leased. */
+  l3FieldActive?: () => boolean;
+  /** Without an evolution model, L3 jobs stay queued (not leased, no attempt used) until one is configured. */
+  evolutionModelConfigured?: () => boolean;
   previewPolicyEvidenceReconciliation: (limit: number) => PolicyEvidencePreflightReport;
   reconcileOrphanedPolicies: (at: string, limit: number) => number;
   enqueueJob: (input: EnqueueJobInput) => EvolutionJobRecord;
@@ -236,12 +251,14 @@ export class WorkerRunner {
     }
     this.refreshConfigurationBlockedJobs();
     const reconcileAt = this.deps.memoryBudgetNextReconcileAtMs?.();
-    const heldSummaryJobs = this.summaryJobsHeld();
+    // Wake only for jobs leasing would actually take, or a held job's runAfter spins the worker.
+    const heldJobs = this.excludedLeaseJobTypes();
     if (this.deps.memoryBudgetPaused()) {
       const allowed = allowedMemoryBudgetJobTypes(this.deps.memoryBudgetModelSources())
-        .filter((jobType) => !heldSummaryJobs?.includes(jobType));
+        .filter((jobType) => !heldJobs?.includes(jobType));
       const allowedAt = this.deps.repos.runtime.nextWorkerRunAt({
         jobTypes: allowed,
+        ...(heldJobs ? { excludedJobTypes: heldJobs } : {}),
         includeEmbeddingRetries: !this.deps.memoryBudgetJobConsumes("embedding")
       });
       const midnight = this.deps.memoryBudgetNextWakeAtMs();
@@ -249,7 +266,7 @@ export class WorkerRunner {
       return times.length > 0 ? Math.min(...times) : undefined;
     }
     const scheduled = this.deps.repos.runtime.nextWorkerRunAt(
-      heldSummaryJobs ? { excludedJobTypes: heldSummaryJobs } : undefined
+      heldJobs ? { excludedJobTypes: heldJobs } : undefined
     );
     const times = [scheduled, reconcileAt].filter((time): time is number => Number.isFinite(time));
     return times.length > 0 ? Math.min(...times) : undefined;
@@ -432,6 +449,7 @@ export class WorkerRunner {
     }, limit);
     for (const memory of retrievalMemories) {
       this.deps.repos.memories.reindexFts(memory);
+      if (isL3FieldSnapshotMemory(memory)) continue;
       if (!this.deps.capture.embedAfterCapture || retrievalDocumentIsCurrent(memory)) continue;
       if (this.deps.repos.runtime.hasPendingJob(memory.id, "embedding")) continue;
       const sourceHash = retrievalDocumentSourceHash(memory);
@@ -451,6 +469,9 @@ export class WorkerRunner {
       enqueuedRetrievalReindexes += 1;
     }
 
+    this.deps.purgeL3InactiveItems?.(at);
+    this.deps.requeueL3DeadLettersOnce?.(at);
+    this.deps.armPendingL3Flushes?.();
     this.refreshObservationModelConfiguration();
     return {
       requeuedJobs: interruptedJobs.length + failedJobs.length,
@@ -554,7 +575,7 @@ export class WorkerRunner {
         const comparison = this.schedulingShadow.sample({
           at: this.deps.nowIso(), limit: normalizedLimit, targetMemoryIds, laneWeights: options.laneWeights,
           priorityCohortOnly: request.priorityCohortOnly,
-          allowedJobTypes: allowedWhenPaused, excludedJobTypes: this.summaryJobsHeld(),
+          allowedJobTypes: allowedWhenPaused, excludedJobTypes: this.excludedLeaseJobTypes(),
           includeRetries: !(this.deps.memoryBudgetPaused() && this.deps.memoryBudgetJobConsumes("embedding"))
         });
         if (comparison) {
@@ -641,7 +662,7 @@ export class WorkerRunner {
         let previous: { key: string; permit: WorkerPermit; group: symbol; count: number } | undefined;
         const keyOf = (work: FairClaimedWork) => `${work.queue}:${work.queue === "main" ? work.job.id : work.retry.id}`;
         const paused = this.deps.memoryBudgetPaused();
-        const filters = JSON.stringify([retryOnly, paused, this.deps.memoryBudgetModelSources(), this.summaryJobsHeld(),
+        const filters = JSON.stringify([retryOnly, paused, this.deps.memoryBudgetModelSources(), this.excludedLeaseJobTypes(),
           this.deps.configurationFingerprint?.()]);
         if (!scan.more) scanDenied = scan.waiting.size > 0;
         const revision = this.deps.repos.runtime.scheduling.getDeadlineRevision();
@@ -686,7 +707,7 @@ export class WorkerRunner {
           at: this.deps.nowIso(), limit: capacity, targetMemoryIds: request.targetMemoryIds,
           priorityCohortOnly: request.priorityCohortOnly,
           allowedJobTypes: retryOnly ? [] : paused ? allowedMemoryBudgetJobTypes(this.deps.memoryBudgetModelSources()) : undefined,
-          excludedJobTypes: this.summaryJobsHeld(),
+          excludedJobTypes: this.excludedLeaseJobTypes(),
           includeRetries: !(paused && this.deps.memoryBudgetJobConsumes("embedding")),
           owner: this.leaseOwner, retryOwner: this.deps.embeddingRetryWorkerId,
           leaseSeconds: WORKER_LEASE_SECONDS,
@@ -872,7 +893,7 @@ export class WorkerRunner {
     const scheduled = this.deps.repos.runtime.nextWorkerRunAt({
       futureAfterMs: now, targetMemoryIds,
       jobTypes: retryOnly ? [] : paused ? allowedMemoryBudgetJobTypes(this.deps.memoryBudgetModelSources()) : undefined,
-      excludedJobTypes: this.summaryJobsHeld(),
+      excludedJobTypes: this.excludedLeaseJobTypes(),
       includeEmbeddingRetries: !(paused && this.deps.memoryBudgetJobConsumes("embedding"))
     });
     return scheduled;
@@ -1071,12 +1092,14 @@ export class WorkerRunner {
       this.observeWork({ queue: "main", job }, "finished", "released");
       return { succeeded: 0, failed: 0, ref: { ...jobToRef(deferred), status: "queued" } };
     }
+    const l3Handling = l3FailureHandling(job, error);
+    if (l3Handling.kind === "retry_later" || l3Handling.kind === "suspend") return this.rescheduleFailedL3Job(job, error, l3Handling);
     const errorMessage = processingStageForJob(job.jobType)
       ? sanitizeProcessingError(error)
       : error instanceof Error ? error.message : String(error);
     const classification = classifyProcessingError(error);
     const configurationBlocked = classification.retryAction === "open_settings" && classification.code !== "40309";
-    const forceDeadLetter = classification.code === "40309"
+    const forceDeadLetter = l3Handling.kind === "dead_letter" || classification.code === "40309"
       || classification.retryAction === "none"
       || error instanceof UnknownJobPolicyError
       || isTerminalL3WorldModelError(error)
@@ -1118,6 +1141,36 @@ export class WorkerRunner {
         ...jobToRef(job),
         status: resumed?.status ?? (failedJob.status === "dead_letter" ? "dead_letter" : "failed")
       }
+    };
+  }
+
+  /** Temporary trouble waits and retries; a configuration problem waits for a fix without using an attempt. */
+  private rescheduleFailedL3Job(
+    job: EvolutionJobRecord,
+    error: unknown,
+    handling: Extract<L3FailureHandling, { kind: "retry_later" | "suspend" }>
+  ): WorkerJobRunResult {
+    const at = this.deps.nowIso();
+    const minutes = handling.kind === "retry_later" ? handling.delayMinutes : L3_SUSPEND_MINUTES;
+    const rescheduled = this.deps.repos.runtime.rescheduleFailedJob(job.id, {
+      runAfter: new Date(Date.parse(at) + minutes * 60_000).toISOString(),
+      error: sanitizeProcessingError(error),
+      refundAttempt: handling.kind === "suspend",
+      minMaxAttempts: handling.kind === "retry_later" ? handling.maxAttempts : undefined,
+      at
+    }, job);
+    if (!rescheduled) return this.lostLeaseResult(job);
+    this.deps.appendJobChange(rescheduled, "queued", job);
+    workerLogger.warn(handling.kind === "suspend" ? "job.suspended" : "job.retry_scheduled", {
+      ...workerJobLogFields(rescheduled),
+      retryInMinutes: minutes,
+      ...memoryErrorFields(error)
+    });
+    this.observeWork({ queue: "main", job }, "finished", handling.kind === "suspend" ? "released" : "failed");
+    return {
+      succeeded: 0,
+      failed: handling.kind === "suspend" ? 0 : 1,
+      ref: { ...jobToRef(rescheduled), status: "queued" }
     };
   }
 
@@ -1400,6 +1453,20 @@ export class WorkerRunner {
     }
     this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
     return { succeeded: 0, failed: 0, item: null };
+  }
+
+  private excludedLeaseJobTypes(): readonly string[] | undefined {
+    const held = [
+      ...(this.summaryJobsHeld() ?? []),
+      ...(this.deps.evolutionModelConfigured?.() === false ? L3_RETRY_JOB_TYPES : [])
+    ];
+    // One L3 runs at a time; the other's jobs wait in the queue for the switch to turn back.
+    // Excluding l3_unit_update also holds new-L3 profile jobs, and excluding l3_world_model_update
+    // holds the old project profile jobs (see mainQueueEligibility).
+    const inactiveL3 = this.deps.l3FieldActive === undefined ? []
+      : this.deps.l3FieldActive() ? ["l3_world_model_update"] : ["l3_unit_update"];
+    const excluded = [...new Set([...held, ...inactiveL3])];
+    return excluded.length > 0 ? excluded : undefined;
   }
 
   private summaryJobsHeld(): readonly string[] | undefined {
