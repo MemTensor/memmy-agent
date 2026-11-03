@@ -18,6 +18,9 @@ it("shows management only, with recall off by default and no exposed saved secre
     authenticated: true,
     enabled: false,
     serviceAvailable: true,
+    maxBases: 50, currentPlanCode: "PRO",
+    limits: { baseLimit: 50, storageBytes: 53687091200, membersPerBase: 10 },
+    usage: { baseCount: 1, storageBytes: 1073741824, reservedUploadBytes: 0, reconciled: true },
     bases: [{ id: "base-1", name: "差旅制度", selected: false }],
   };
   const calls: { url: string; body?: Record<string, unknown> }[] = [];
@@ -59,6 +62,8 @@ it("shows management only, with recall off by default and no exposed saved secre
   expect(toggle.getAttribute("aria-checked")).toBe("false");
   expect(toggle.disabled).toBe(false);
   expect(container.textContent).toContain("差旅制度");
+  expect(container.textContent).toContain("总容量：1.00G/50G");
+  expect(container.textContent).toContain("可创建的知识库：1/50");
   expect(container.querySelector("textarea")).toBeNull();
   const fileInput =
     container.querySelector<HTMLInputElement>('input[type="file"]')!;
@@ -95,7 +100,7 @@ it("shows management only, with recall off by default and no exposed saved secre
     ".mk-group-title{display:flex;align-items:center;gap:6px;margin:0 0 2px;",
   );
   expect(container.querySelector(".mk-quota")?.textContent).toContain(
-    "可创建的知识库：1/10",
+    "可创建的知识库：1/50",
   );
   expect(container.querySelector("style")?.textContent).toContain(
     ".mk-side-foot{padding:10px 16px}",
@@ -605,7 +610,7 @@ it("shows share failure inside the modal instead of the page banner", async () =
       .click();
   });
   const shareError = container.querySelector(".mk-share-modal .mk-share-error");
-  expect(shareError?.textContent).toBe("用户不存在");
+  expect(shareError?.textContent).toBe("目标用户不存在");
   expect(getComputedStyle(shareError!).color).toBe("#c05a55");
   expect(container.querySelector(".mk-error")).toBeNull();
   expect(container.textContent).not.toContain("HTTP 404");

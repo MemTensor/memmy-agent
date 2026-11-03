@@ -38,3 +38,20 @@ export type CreditsGrantsPage = z.infer<typeof CreditsGrantsPageSchema>;
 export type CreditsLedgerPage = z.infer<typeof CreditsLedgerPageSchema>;
 export type CreditsGrantsQuery = z.infer<typeof CreditsGrantsQuerySchema>;
 export type CreditsLedgerQuery = z.infer<typeof CreditsLedgerQuerySchema>;
+
+export const CreditsPlansQuerySchema = z.object({
+  region: z.enum(["CN", "INTL"]).optional(), language: z.enum(["zh-CN", "en-US"]).optional(), clientVersion: z.string().max(64).optional()
+}).strict();
+export const CreditsPlansSchema = z.object({
+  currentPlan: z.enum(["FREE", "PRO"]),
+  plans: z.array(z.object({ code: z.enum(["FREE", "PRO"]), name: z.string(), cycleGrant: amount,
+    knowledgeEntitlement: CreditsSummarySchema.shape.knowledgeEntitlement })).length(2).refine(plans => new Set(plans.map(plan => plan.code)).size === 2),
+  application: z.object({ eligible: z.boolean(), formType: z.enum(["CN_ZH", "CN_EN", "INTL_ZH", "INTL_EN"]), formUrl: z.string().url() })
+});
+export const CreditsApplicationSchema = z.object({
+  applicationId: id, status: z.enum(["PENDING", "PROCESSING", "APPROVED", "REJECTED", "FAILED"]),
+  submittedAt: stamp, processedAt: stamp.nullable(), plan: z.enum(["FREE", "PRO"]), failureReason: z.string().nullable()
+}).nullable();
+export type CreditsPlansQuery = z.infer<typeof CreditsPlansQuerySchema>;
+export type CreditsPlans = z.infer<typeof CreditsPlansSchema>;
+export type CreditsApplication = z.infer<typeof CreditsApplicationSchema>;

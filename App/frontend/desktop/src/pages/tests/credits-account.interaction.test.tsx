@@ -26,7 +26,11 @@ const summary = {
 };
 const reward: CreditsGrant = { grantId: "9007199254740993", sourceType: "INVITATION", sourceId: "invite", sourceName: "真实邀请奖励", granted: "250.00", remaining: "214.56", reserved: "20.00", grantedAt: "2026-11-03T00:00+08:00", expiresAt: null, status: "AVAILABLE" };
 function fixture() {
-  return { summary: vi.fn(async () => summary),
+  return { plans: vi.fn(async () => ({ currentPlan: "FREE" as const, plans: [
+    { code: "FREE" as const, name: "Free", cycleGrant: "1000.00", knowledgeEntitlement: { baseLimit: 10, storageBytes: 10737418240, membersPerBase: 5 } },
+    { code: "PRO" as const, name: "Pro", cycleGrant: "5000.00", knowledgeEntitlement: { baseLimit: 50, storageBytes: 53687091200, membersPerBase: 10 } }
+  ], application: { eligible: true, formType: "CN_ZH" as const, formUrl: "https://alidocs.dingtalk.com/notable/share/form/v01GXn4ZWgaXodwdODQ_Gb8aww9_hSDStju?source=link" } })),
+    latestApplication: vi.fn(async () => null), summary: vi.fn(async () => summary),
     grants: vi.fn(async () => ({ items: [reward, { ...reward, grantId: "2", sourceType: "PLAN" as const, sourceName: "Free", granted: "1000.00", remaining: "1000.00", reserved: "0.00" }], hasMore: false, nextCursor: null as string | null })),
     ledger: vi.fn(async () => ({ items: [], hasMore: false, nextCursor: null })) } satisfies CreditsClient;
 }
@@ -70,8 +74,8 @@ it("opens original reward details and plan cards", async () => {
   expect(host.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("6");
   await click("已过期"); expect(host.textContent).not.toContain("真实邀请奖励");
   await click("积分余额"); await click("申请升级");
-  expect(host.querySelectorAll("article")).toHaveLength(2); expect(host.textContent).toContain("Pro 申请尚未接入");
-  expect(host.querySelector('a[aria-disabled="true"]')?.hasAttribute("href")).toBe(false);
+  expect(host.querySelectorAll("article")).toHaveLength(2); expect(host.textContent).toContain("5,000.00");
+  expect(host.querySelector('a[target="_blank"]')?.getAttribute("href")).toContain("Gb8aww9_hSDStju?source=link");
 });
 it("does not fall back to demo data after failed requests", async () => {
   const client = fixture(); client.summary.mockRejectedValueOnce(new ApiRequestError("expired", 401)); await mount(client);
@@ -97,4 +101,24 @@ it("keeps precise amounts and treats held credits as remaining", () => {
   expect(formatCreditAmount("-0.01", "en-US")).toBe("-0.01");
   expect(creditDisplayBuckets([], [reward])[0]?.remaining).toBe(23456n);
   expect(creditDisplayBuckets([], [{ ...reward, status: "EXPIRED", remaining: "0.00" }])[0]?.usageKnown).toBe(false); expect(creditUsagePercent(1544n, 25000n)).toBe(6.17);
+});
+
+it("opens the authoritative questionnaire through the system browser", async () => {
+  const client = fixture(); const openExternal = vi.fn(async () => undefined);
+  const previous = window.memmy;
+  Object.defineProperty(window, "memmy", { value: { openExternal }, configurable: true });
+  try {
+    await mount(client); await click("申请升级");
+    const link = host.querySelector<HTMLAnchorElement>('a[target="_blank"]');
+    await act(async () => link!.click());
+    expect(openExternal).toHaveBeenCalledWith((await client.plans()).application.formUrl);
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(client.latestApplication).toHaveBeenCalledTimes(2);
+  } finally { Object.defineProperty(window, "memmy", { value: previous, configurable: true }); }
+});
+it("never opens an arbitrary URL returned in a plan response", async () => {
+  const client = fixture(); const value = await client.plans();
+  client.plans.mockResolvedValue({ ...value, application: { ...value.application, formUrl: "https://example.invalid" } });
+  await mount(client); await click("申请升级");
+  expect(host.querySelector('a[target="_blank"]')?.hasAttribute("href")).toBe(false);
 });

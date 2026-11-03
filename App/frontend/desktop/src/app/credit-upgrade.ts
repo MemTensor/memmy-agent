@@ -13,5 +13,5 @@ export const CREDIT_UPGRADE_FORMS = {
 export function getCreditUpgradeFormUrl(edition: string | undefined, language: string): string {
   const region = edition === "intl" ? "intl" : "cn";
   const locale = language === "en-US" ? "en-US" : "zh-CN";
-  return CREDIT_UPGRADE_FORMS[region][locale];
+  return `${CREDIT_UPGRADE_FORMS[region][locale]}?source=link`;
 }

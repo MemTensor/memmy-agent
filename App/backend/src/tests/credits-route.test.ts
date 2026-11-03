@@ -19,13 +19,24 @@ function fixture() {
   return { read, getCredits, setCredential: (value: string | null) => { credential = value; } };
 }
 describe("credits local proxy", () => {
+  it("forwards region and language and supports no application", async () => {
+    const f = fixture();
+    f.getCredits.mockResolvedValueOnce({ currentPlan: "FREE", plans: ["FREE", "PRO"].map(code => ({ code, name: code, cycleGrant: "1000.00",
+      knowledgeEntitlement: { baseLimit: 10, storageBytes: 10737418240, membersPerBase: 5 } })), application: {
+      eligible: true, formType: "INTL_EN", formUrl: "https://alidocs.dingtalk.com/notable/share/form/test"
+    } } as never);
+    expect((await f.read("/api/credits/plans?region=INTL&language=en-US")).statusCode).toBe(200);
+    expect(f.getCredits).toHaveBeenCalledWith({ uuid: "private-account-token", resource: "plans", query: { region: "INTL", language: "en-US" } });
+    f.getCredits.mockResolvedValueOnce(null as never);
+    expect((await f.read("/api/credits/plan-applications/latest")).json()).toBeNull();
+  });
   it("requires runtime and account authentication for all three routes", async () => {
     const f = fixture();
-    for (const path of ["summary", "grants", "ledger"]) {
+    for (const path of ["summary", "grants", "ledger", "plans", "plan-applications/latest"]) {
       expect((await f.read(`/api/credits/${path}`, false)).statusCode).toBe(401);
     }
     f.setCredential(null);
-    for (const path of ["summary", "grants", "ledger"]) expect((await f.read(`/api/credits/${path}`)).statusCode).toBe(401);
+    for (const path of ["summary", "grants", "ledger", "plans", "plan-applications/latest"]) expect((await f.read(`/api/credits/${path}`)).statusCode).toBe(401);
     expect(f.getCredits).not.toHaveBeenCalled();
   });
   it("forwards validated filters and opaque cursors, without exposing the cloud credential", async () => {
@@ -36,7 +47,7 @@ describe("credits local proxy", () => {
       query: { sourceType: "PLAN", status: "AVAILABLE", limit: 1, cursor: "signed+cursor" } });
     expect(response.body).not.toContain("private-account-token");
     expect((await f.read("/api/credits/ledger?direction=DEBIT&businessType=MODEL_USAGE")).statusCode).toBe(200);
-    for (const path of ["summary?userId=8", "grants?userId=8", "ledger?limit=101", "ledger?direction=unknown"]) {
+    for (const path of ["summary?userId=8", "grants?userId=8", "ledger?limit=101", "ledger?direction=unknown", "plans?userId=8", "plans?region=evil", "plan-applications/latest?userId=8"]) {
       expect((await f.read(`/api/credits/${path}`)).statusCode).toBe(400);
     }
     expect(f.getCredits).toHaveBeenCalledTimes(2);

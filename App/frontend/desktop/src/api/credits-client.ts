@@ -1,4 +1,5 @@
 import {
+  CreditsPlansSchema, CreditsApplicationSchema, type CreditsPlansQuery,
   CreditsSummarySchema, CreditsGrantsPageSchema, CreditsLedgerPageSchema,
   type RuntimeConfig, type CreditsGrantsQuery, type CreditsLedgerQuery
 } from "@memmy/local-api-contracts";
@@ -12,6 +13,8 @@ export function createHttpCreditsClient(config: RuntimeConfig) {
     return `/api/credits/${resource}${search.size ? `?${search}` : ""}`;
   }
   return {
+    plans: (query: CreditsPlansQuery = {}) => requestJson({ config, path: path("plans", query), schema: CreditsPlansSchema }),
+    latestApplication: () => requestJson({ config, path: path("plan-applications/latest"), schema: CreditsApplicationSchema }),
     summary: () => requestJson({ config, path: path("summary"), schema: CreditsSummarySchema }),
     grants: (query: CreditsGrantsQuery = {}) => requestJson({ config, path: path("grants", query), schema: CreditsGrantsPageSchema }),
     ledger: (query: CreditsLedgerQuery = {}) => requestJson({ config, path: path("ledger", query), schema: CreditsLedgerPageSchema })
