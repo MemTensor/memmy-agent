@@ -23,7 +23,7 @@ import { creditDisplayBuckets, creditMinor, creditUsagePercent, formatCreditAmou
 import { useCreditDemo } from "../app/use-credit-demo.js";
 import { AppFrame } from "./app-frame.js";
 import { writeSettingsTabHash, type SettingsTabId } from "./settings-nav.js";
-import { CreditsUsageLedger } from "./credits-usage-ledger.js";
+import { CreditsUsageLedger, CreditBalanceActivity } from "./credits-usage-ledger.js";
 import { CreditsRedeemForm } from "./credits-redeem-form.js";
 import type { AppRoutePath } from "../app/routes.js";
 import usageStyles from "./settings-token-usage.module.css";
@@ -116,7 +116,7 @@ export function CreditSourceDetails(props: { source: CreditSource; buckets: Cred
     {buckets.length === 0
       ? <p className={usageStyles.sourceEmpty}>{t(expired ? "credits.detail.noExpired" : props.source === "reward" ? "credits.detail.noRewards" : "credits.source.empty")}</p>
       : <ul className={usageStyles.sourceBatches}>{visible.map(bucket => {
-        const used = bucket.granted - bucket.remaining;
+        const used = bucket.used;
         const usedPercent = bucket.usageKnown ? creditUsagePercent(used, bucket.granted) : 0;
         const label = bucket.id.startsWith("checkin:") ? t("credits.detail.checkinReward")
           : bucket.id.startsWith("invite:") ? t("credits.detail.inviteReward")
@@ -162,7 +162,7 @@ function CreditSourceSummary(props: { source: CreditSource; buckets: CreditBucke
   const buckets = creditDisplayBuckets(props.buckets, props.grants);
   const remaining = buckets.reduce((sum, b) => sum + b.remaining, 0n);
   const granted = buckets.reduce((sum, b) => sum + b.granted, 0n);
-  const used = granted - remaining;
+  const used = buckets.reduce((sum, bucket) => sum + bucket.used, 0n);
   const usedPercent = creditUsagePercent(used, granted);
   const expiring = buckets.filter(b => b.remaining > 0 && b.expiresAt).sort((a, b) => Date.parse(a.expiresAt!) - Date.parse(b.expiresAt!));
   const expiry = expiring[0]?.expiresAt;
@@ -197,6 +197,7 @@ export function CreditsSourceDetailPage(props: { source: "reward" }) {
   if (account.live && !account.summary) return <CreditsSettingsShell><CreditAccountStatus account={account} /></CreditsSettingsShell>;
   return <CreditsSettingsShell><div className={`${usageStyles.detailContent} ${usageStyles.commercePage}`}>
     <header className={usageStyles.commerceHeader}><h1>{t("credits.detail.rewardTitle")}</h1></header>
+    {account.error && <p role="status">{t("credits.live.stale")}</p>}
     <div className={usageStyles.creditTabs} role="tablist" aria-label={t("credits.detail.validity")}>
       {(["valid", "expired"] as const).map(value => <button key={value} type="button" role="tab" id={`credits-tab-${value}`} aria-selected={period === value} aria-controls="credits-source-panel" tabIndex={period === value ? 0 : -1} onClick={() => setPeriod(value)} onKeyDown={event => {
         if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
@@ -262,6 +263,7 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
 
   return (
     <div id="credits-balance" className={`${usageStyles.detailContent} ${usageStyles.balancePage}`}>
+      {account.live && account.error && <p role="status">{t(account.error === "auth" ? "credits.live.auth" : "credits.live.stale")}</p>}
       <section className={usageStyles.usageSection}>
         <div className={usageStyles.sectionHead}>
           <h2>
@@ -292,6 +294,7 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
             <div className={usageStyles.balanceAmount}>
               <strong>{account.summary ? formatCreditAmount(account.summary.account.balance, language) : formatCredits(pool.totalRemaining, language)}</strong>
               <span>{t("credits.balance.total")}</span>
+              {account.summary && <small>{t("credits.live.spendable")}: {formatCreditAmount(account.summary.account.spendable, language)} · {t("credits.live.held")}: {formatCreditAmount(account.summary.account.held, language)}</small>}
               <button type="button" className={usageStyles.balanceRefresh} onClick={refreshBalance} disabled={refreshing} aria-label={t(refreshing ? "credits.refreshing" : "credits.refresh")} title={refreshedAt ? t("credits.refreshed", {time:formatStamp(refreshedAt)}) : t("credits.refresh")}>
                 <RefreshCw size={15} className={refreshing ? usageStyles.creditsRefreshSpin : undefined} aria-hidden="true" />
               </button>
@@ -323,6 +326,7 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
         </div>
       </section>
 
+      {account.live && <CreditBalanceActivity />}
       <CreditsUsageLedger live={account.live} />
     </div>
   );

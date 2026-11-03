@@ -1,59 +1,48 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useRef } from "react";
 import type { CreditsGrant, CreditsSummary } from "@memmy/local-api-contracts";
 import type { CreditsClient } from "../api/credits-client.js";
-import { ApiRequestError } from "../api/http.js";
 import { useOptionalApiClients } from "./providers.js";
 import { useAppState } from "../state/app-state.js";
 import { isCreditsPreviewMode } from "./credits-preview-mode.js";
+import { useCreditRefresh } from "./use-credit-refresh.js";
 
-export async function readCreditGrants(client: CreditsClient, cancelled = () => false): Promise<CreditsGrant[]> {
+export async function readCreditGrants(client: CreditsClient, cancelled = () => false, signal?: AbortSignal): Promise<CreditsGrant[]> {
   const grants: CreditsGrant[] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
-  // shortcut: the existing source UI needs totals and page counts; use server counts before accounts accumulate large grant histories.
+  // shortcut: original source UI needs totals/page counts; replace with server counts before grant histories become large.
   do {
-    if (cancelled()) throw new Error("Credit request cancelled");
-    const page = await client.grants({ limit: 100, ...(cursor ? { cursor } : {}) });
+    if (cancelled() || signal?.aborted) throw new Error("Credit request cancelled");
+    const query = { limit: 100, ...(cursor ? { cursor } : {}) };
+    const page = await (signal ? client.grants(query, signal) : client.grants(query));
     grants.push(...page.items);
     if (!page.hasMore) return grants;
     if (!page.nextCursor || cursors.has(page.nextCursor)) throw new Error("Invalid credit pagination");
-    cursor = page.nextCursor;
-    cursors.add(cursor);
+    cursor = page.nextCursor; cursors.add(cursor);
   } while (true);
 }
 
-/** Supplies server data to the existing credits UI; preview mode remains explicitly separate. */
+const accountVersion = (data: { summary: CreditsSummary }) => data.summary.account.version;
+
 export function useCreditAccount() {
   const { state } = useAppState();
   const { clients } = useOptionalApiClients();
   const live = !isCreditsPreviewMode() && state.bootstrap?.app.userMode === "account";
   const userId = state.account.userId;
   const client = clients?.credits;
-  const [revision, setRevision] = useState(0);
-  const [snapshot, setSnapshot] = useState<{ userId: string | null; client: CreditsClient; summary: CreditsSummary; grants: CreditsGrant[] } | null>(null);
-  const [failure, setFailure] = useState<{ userId: string | null; message: "auth" | "load" } | null>(null);
-  const [loading, setLoading] = useState(true);
-  const reload = useCallback(() => { window.dispatchEvent(new Event("memmy:credits-refresh")); }, []);
-  useEffect(() => {
-    if (!live) return;
-    const refresh = () => setRevision(value => value + 1);
-    window.addEventListener("memmy:credits-refresh", refresh);
-    window.addEventListener("focus", refresh);
-    return () => { window.removeEventListener("memmy:credits-refresh", refresh); window.removeEventListener("focus", refresh); };
-  }, [live]);
-  useEffect(() => {
-    if (!live) return;
-    let cancelled = false;
-    setLoading(true); setSnapshot(null); setFailure(null);
-    if (client) void Promise.all([client.summary(), readCreditGrants(client, () => cancelled)]).then(([summary, grants]) => {
-      if (!cancelled) setSnapshot({ userId, client, summary, grants });
-    }).catch(error => {
-      if (!cancelled) setFailure({ userId, message: error instanceof ApiRequestError && error.status === 401 ? "auth" : "load" });
-    }).finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [live, client, userId, revision]);
-  const current = live && snapshot?.userId === userId && snapshot?.client === client ? snapshot : null;
-  return { live, loading: live && (loading || (!current && !failure)),
-    error: failure?.userId === userId ? failure?.message : null,
-    summary: current?.summary ?? null, grants: current?.grants ?? [], reload };
+  const latest = useRef<{ userId: string | null; client: CreditsClient; summary: CreditsSummary } | null>(null);
+  const load = useCallback(async (signal: AbortSignal) => {
+    if (!client) throw new Error("Credits unavailable");
+    const [summary, grants] = await Promise.all([client.summary(signal), readCreditGrants(client, () => signal.aborted, signal)]);
+    if (signal.aborted) throw new Error("Credit request cancelled");
+    if (latest.current?.userId === userId && latest.current.client === client && summary.account.version < latest.current.summary.account.version)
+      throw new Error("Stale credit account version");
+    latest.current = { userId, client, summary };
+    return { summary, grants };
+  }, [client, userId]);
+  const version = latest.current?.userId === userId && latest.current.client === client ? latest.current.summary.account.version : -1;
+  const result = useCreditRefresh(load, live && !!client, userId, version, accountVersion);
+  const reload = useCallback(() => window.dispatchEvent(new Event("memmy:credits-refresh")), []);
+  return { live, loading: live && (result.loading || (!result.data && !result.error)), error: result.error,
+    summary: result.data?.summary ?? null, grants: result.data?.grants ?? [], reload };
 }
