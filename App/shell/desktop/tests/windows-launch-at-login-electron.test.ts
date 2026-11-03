@@ -20,7 +20,7 @@ function cleanupTemporaryStartupEntries(itemName: string): void {
     'Software\\Microsoft\\Windows\\CurrentVersion\\Run',
     'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run',
   ]) {
-    for (const name of [itemName, `${itemName}-unrelated`]) {
+    for (const name of [itemName, `${itemName}-unrelated`, `${itemName}-same-command`]) {
       try {
         execFileSync(reg, ['delete', `HKCU\\${subkey}`, '/v', name, '/f'], {
           windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'],
@@ -85,6 +85,7 @@ it.runIf(process.platform === 'win32')('repairs real Electron startup commands a
       rawCommandExecuted: true,
       migrations: [{ enabled: true, executed: true }, { enabled: false, executed: true }],
       disabledPreservedWithUnrelatedEntry: true,
+      exactCommandAliasStates: [true, true, false, true],
       idempotent: true,
       closedStartupPreserved: true,
     });

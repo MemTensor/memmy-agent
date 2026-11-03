@@ -1,5 +1,7 @@
 import {afterEach,expect,it} from "vitest";
 import {mkdtempSync,rmSync,writeFileSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
 import {MemoryDb} from "../../src/storage/db.js";
 import {openCacheFixture} from "../fixtures/panel-cache-fixture.js";
 import {fillPanelCacheBatch,panelMemoryStats} from "../../src/storage/panel-cache.js";
@@ -8,7 +10,7 @@ import {Repositories} from "../../src/storage/repositories.js";
 const roots:string[]=[];const closes:Array<()=>void>=[];
 afterEach(()=>{for(const close of closes.splice(0).reverse())close();for(const root of roots.splice(0))rmSync(root,{recursive:true,force:true});});
 function fixture() {
- const root=mkdtempSync('/private/tmp/panel-isolation-');roots.push(root);
+ const root=mkdtempSync(join(tmpdir(),'panel-isolation-'));roots.push(root);
  const path=root+'/memory.sqlite';const source=new MemoryDb({path});closes.push(()=>source.close());
  const add=(id:string)=>source.db.prepare("INSERT INTO memories(id,user_id,timeline,memory_value,memory_layer,created_at,updated_at) VALUES(?,'u','now','body','L1','2026-11-03','2026-11-03')").run(id);
  const open=()=>{const reader=openCacheFixture(path);closes.push(()=>reader.source.db.open&&reader.close());return reader;};

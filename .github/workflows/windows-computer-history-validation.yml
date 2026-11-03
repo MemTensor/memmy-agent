@@ -6,6 +6,9 @@ on:
       - ".github/workflows/windows-computer-history-validation.yml"
       - "tests/windows-memory-workflow.test.ts"
       - "tests/windows-provider-receipt-workflow.test.ts"
+      - "Memory/tests/storage/panel-cache-isolation.test.ts"
+      - "Memory/tests/service/read-model/panel-stats-migration.test.ts"
+      - "Memory/tests/fixtures/panel-cache-fixture.ts"
       - "App/shell/desktop/src/main/windows-launch-at-login.ts"
       - "App/shell/desktop/src/main/main.ts"
       - "App/shell/desktop/tests/windows-launch-at-login*.test.ts"
@@ -246,6 +249,44 @@ jobs:
           if ($loginReport.numTotalTests -lt 1 -or $loginReport.numPendingTests -ne 0 -or $loginReport.numPassedTests -ne $loginReport.numTotalTests) {
             throw 'Windows Electron startup validation must execute every selected test; skips are not accepted.'
           }
+          npm run build -w @memmy/agent-source-core
+          if ($LASTEXITCODE -ne 0) { throw 'Memory fixture shared contracts build failed' }
+          $memoryPanelFiles = @(
+            'Memory/tests/storage/panel-cache-isolation.test.ts'
+            'Memory/tests/service/read-model/panel-stats-migration.test.ts'
+          )
+          $memoryPanelResults = Join-Path $env:RUNNER_TEMP 'windows-memory-panel-fixtures.json'
+          node node_modules/vitest/vitest.mjs run @memoryPanelFiles --reporter=default --reporter=json --outputFile=$memoryPanelResults
+          if ($LASTEXITCODE -ne 0) { throw 'Windows Memory fixture regression failed' }
+          $env:MEMMY_WINDOWS_MEMORY_PANEL_RESULTS = $memoryPanelResults
+          # Validate portable Memory fixture reports.
+          @'
+          const fs = require('node:fs');
+          let report;
+          try { report = JSON.parse(fs.readFileSync(process.env.MEMMY_WINDOWS_MEMORY_PANEL_RESULTS, 'utf8')); }
+          catch { throw new Error('Cannot read valid Windows Memory fixture report'); }
+          const expected = ['Memory/tests/storage/panel-cache-isolation.test.ts',
+            'Memory/tests/service/read-model/panel-stats-migration.test.ts'];
+          const files = Array.isArray(report?.testResults) ? report.testResults : [];
+          if (!Number.isInteger(report?.numTotalTests) || report.numTotalTests < 10
+            || report.numPassedTests !== report.numTotalTests || report.numPendingTests !== 0
+            || files.length !== expected.length) throw new Error('Windows Memory fixture report must contain both files and passing tests without skips');
+          let assertions = 0;
+          for (const file of expected) {
+            const matching = files.filter(result => {
+              const name = String(result?.name ?? '').replace(/\\/g, '/');
+              return name === file || name.endsWith('/' + file);
+            });
+            if (matching.length !== 1 || matching[0].status !== 'passed'
+              || !Array.isArray(matching[0].assertionResults) || matching[0].assertionResults.length === 0
+              || matching[0].assertionResults.some(test => test.status !== 'passed')) {
+              throw new Error('Windows Memory fixture file must execute successfully: ' + file);
+            }
+            assertions += matching[0].assertionResults.length;
+          }
+          if (assertions !== report.numTotalTests) throw new Error('Windows Memory fixture assertion totals are inconsistent');
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { throw 'Windows Memory fixture report validation failed' }
           $tests = @(
             'App/memmy-agent/tests/tools/computer-history/win/application-icon.test.ts'
             'App/memmy-agent/tests/tools/computer-history/win/win11.test.ts'

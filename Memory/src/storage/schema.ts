@@ -836,6 +836,9 @@ export function migrate(db: Database.Database): void {
         addColumnIfMissing(db, "recall_events", "merged_source_turn_ids_json", "TEXT NOT NULL DEFAULT '[]'");
         addColumnIfMissing(db, "recall_events", "member_memory_ids_by_source_turn_id_json", "TEXT NOT NULL DEFAULT '{}'");
       }
+      // Also install on current-schema reopen, after legacy query_id columns exist.
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_recall_events_query_created
+        ON recall_events (query_id, created_at DESC)`).run();
       db.prepare(
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_active_dedupe
          ON evolution_jobs (dedupe_key)

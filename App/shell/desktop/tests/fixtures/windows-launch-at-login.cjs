@@ -14,6 +14,7 @@ const root = process.env.MEMMY_LOGIN_FIXTURE_ROOT;
 const itemName = process.env.MEMMY_LOGIN_FIXTURE_ITEM_NAME;
 assert.match(itemName, /^memmy-login-probe-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const unrelatedName = `${itemName}-unrelated`;
+const aliasName = `${itemName}-same-command`;
 const productionName = 'cn.memtensor.memmy';
 const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const wscript = path.join(process.env.SystemRoot, 'System32', 'wscript.exe');
@@ -46,6 +47,7 @@ const application = {
 function cleanup() {
   app.setLoginItemSettings({ openAtLogin: false, name: itemName });
   app.setLoginItemSettings({ openAtLogin: false, name: unrelatedName });
+  app.setLoginItemSettings({ openAtLogin: false, name: aliasName });
 }
 
 const timeout = setTimeout(() => {
@@ -126,11 +128,33 @@ async function main() {
     migrations.push({ enabled, executed: true });
   }
 
+  const exactCommandAliasStates = [];
+  for (const [ownEnabled, aliasEnabled] of [[true, false], [false, true], [false, false], [true, true]]) {
+    app.setLoginItemSettings({ ...command, openAtLogin: true, enabled: ownEnabled });
+    app.setLoginItemSettings({ ...command, name: aliasName, openAtLogin: true, enabled: aliasEnabled });
+    const settings = app.getLoginItemSettings(command);
+    for (const [name, enabled] of [[itemName, ownEnabled], [aliasName, aliasEnabled]]) {
+      const item = settings.launchItems.find(value => value.name === name && value.scope === 'user');
+      assert.ok(item);
+      assert.deepEqual(item.args, [launcherPath]);
+      assert.equal(item.enabled, enabled);
+    }
+    const expected = ownEnabled || aliasEnabled;
+    assert.equal(getWindowsLaunchAtLogin(application, environment), expected);
+    // Preserve the real Electron values while checking both possible enumeration orders.
+    const reversed = { ...application, getLoginItemSettings(options) {
+      const value = application.getLoginItemSettings(options);
+      return { ...value, launchItems: [...value.launchItems].reverse() };
+    } };
+    assert.equal(getWindowsLaunchAtLogin(reversed, environment), expected);
+    exactCommandAliasStates.push(expected);
+  }
+
   assert.equal(setWindowsLaunchAtLogin(application, environment, false), false);
   assert.equal(repairWindowsLaunchAtLogin(application, environment), false);
   assert.equal(app.getLoginItemSettings(command).openAtLogin, false);
   console.log('MEMMY_ELECTRON_LOGIN_RESULT ' + JSON.stringify({
-    rawCommandExecuted: true, migrations, disabledPreservedWithUnrelatedEntry: true,
+    rawCommandExecuted: true, migrations, disabledPreservedWithUnrelatedEntry: true, exactCommandAliasStates,
     idempotent: true, closedStartupPreserved: true,
   }));
 }

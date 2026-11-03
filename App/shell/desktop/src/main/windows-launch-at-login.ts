@@ -100,7 +100,7 @@ export const repairWindowsLaunchAtLogin = (
   return true;
 };
 
-/** Reads whether the packaged Windows launch command will effectively run at login. */
+/** Reads effective matching entries while retaining the app's own registration as the setting gate. */
 export const getWindowsLaunchAtLogin = (
   application: WindowsLoginItemApplication,
   environment: WindowsLaunchAtLoginEnvironment,
@@ -116,12 +116,14 @@ export const getWindowsLaunchAtLogin = (
     return false;
   }
 
-  const matchingItem = settings.launchItems.find((item) => (
+  const matchingItems = settings.launchItems.filter((item) => (
     normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(command.path)
     && item.args.length === command.args.length
     && item.args.every((argument, index) => argument === command.args[index])
   ));
-  return matchingItem?.enabled ?? settings.executableWillLaunchAtLogin;
+  // Aliases can have their own StartupApproved state. Entry ordering must not
+  // hide an enabled command, and wscript's aggregate includes unrelated scripts.
+  return matchingItems.some((item) => item.enabled);
 };
 
 /** Writes the packaged Windows login item and returns the effective system state. */

@@ -891,8 +891,8 @@ async function routeRequest(
   if (method === "GET" && recallEvidence) {
     requireMemoryRead(principal);
     const queryId = decodeMatchSegment(recallEvidence, 1);
-    const request = envelopeWithPrincipal({}, principal) as RequestEnvelope;
-    return service.recallEvidence(queryId, request);
+    const request = ownerBoundRequest(envelopeWithPrincipal({}, principal), principal) as RequestEnvelope;
+    return service.recallEvidence(queryId, request, localPanel);
   }
 
   if (method === "POST" && path === "/api/v1/memory/add") {

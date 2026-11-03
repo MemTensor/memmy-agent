@@ -300,6 +300,15 @@ export interface RecallEventRecord {
   createdAt: string;
 }
 
+export interface RecallEvidenceReadScope {
+  userId: string;
+  source: string;
+  profileId: string;
+  tenantId?: string;
+  projectId?: string;
+  workspaceId?: string;
+}
+
 interface UserMemorySqlRow {
   id: string;
   source_turn_id: string;
@@ -3775,12 +3784,65 @@ export class RuntimeRepository {
     return row ? recallEventFromSql(row) : undefined;
   }
 
-  getRecallEventByQueryId(queryId: string): RecallEventRecord | undefined {
+  getRecallEventByQueryId(queryId: string, scope?: RecallEvidenceReadScope): RecallEventRecord | undefined {
+    if (scope) {
+      // Select the newest authorized event, not the newest global collision.
+      // Normalize project aliases exactly as the structured service identity does.
+      const projectId = scope.projectId ?? scope.workspaceId ?? null;
+      const sourceProjects = new Set<string | null>([scope.projectId ?? null]);
+      if (scope.workspaceId && projectId === scope.workspaceId) {
+        sourceProjects.add(null);
+        sourceProjects.add(scope.workspaceId);
+      }
+      const sourceKeys = [...sourceProjects].map(project => stableHash({
+        tenantId: scope.tenantId ?? null, projectId: project, workspaceId: scope.workspaceId ?? null
+      }));
+      const contextMatches = (alias: string) => `CASE WHEN json_valid(${alias}.meta_json) THEN (
+        ${alias}.source IS @source AND ${alias}.profile_id IS @profileId
+        AND COALESCE(${alias}.project_id, ${alias}.workspace_id) IS @projectId
+        AND ${alias}.workspace_id IS @workspaceId
+        AND CASE WHEN json_type(${alias}.meta_json, '$.source_namespace_key') IS NOT NULL THEN
+          json_type(${alias}.meta_json, '$.source_namespace_key') = 'text'
+          AND json_extract(${alias}.meta_json, '$.source_namespace_key') IN (SELECT value FROM json_each(@sourceKeys))
+        ELSE (@tenantId IS NULL OR @tenantId = '')
+          AND COALESCE(json_extract(${alias}.meta_json, '$.tenant_id'), '') = ''
+          AND COALESCE(json_extract(${alias}.meta_json, '$.tenantId'), '') = '' END
+      ) ELSE 0 END`;
+      const namespacePath = '$.namespace';
+      const row = this.db.prepare(`SELECT r.* FROM recall_events r
+        WHERE r.query_id = @queryId AND r.user_id IN (@userId, @deviceOwner)
+          AND json_type(r.request_json, '${namespacePath}') = 'object'
+          AND json_type(r.request_json, '${namespacePath}.source') = 'text'
+          AND length(trim(json_extract(r.request_json, '${namespacePath}.source'))) > 0
+          AND json_type(r.request_json, '${namespacePath}.profileId') = 'text'
+          AND length(trim(json_extract(r.request_json, '${namespacePath}.profileId'))) > 0
+          AND json_extract(r.request_json, '${namespacePath}.source') IS @source
+          AND json_extract(r.request_json, '${namespacePath}.profileId') IS @profileId
+          AND (json_type(r.request_json, '${namespacePath}.tenantId') IS NULL OR json_type(r.request_json, '${namespacePath}.tenantId') IN ('text', 'null'))
+          AND (json_type(r.request_json, '${namespacePath}.projectId') IS NULL OR json_type(r.request_json, '${namespacePath}.projectId') IN ('text', 'null'))
+          AND (json_type(r.request_json, '${namespacePath}.workspaceId') IS NULL OR json_type(r.request_json, '${namespacePath}.workspaceId') IN ('text', 'null'))
+          AND COALESCE(json_extract(r.request_json, '${namespacePath}.projectId'), json_extract(r.request_json, '${namespacePath}.workspaceId')) IS @projectId
+          AND json_extract(r.request_json, '${namespacePath}.workspaceId') IS @workspaceId
+          AND json_extract(r.request_json, '${namespacePath}.tenantId') IS @tenantId
+          AND (r.session_id IS NULL OR EXISTS (
+            SELECT 1 FROM sessions s WHERE s.id = r.session_id AND ${contextMatches("s")}))
+          AND (r.episode_id IS NULL OR EXISTS (
+            SELECT 1 FROM episodes e JOIN sessions s ON s.id = e.session_id
+            WHERE e.id = r.episode_id AND (r.session_id IS NULL OR e.session_id = r.session_id)
+              AND ${contextMatches("s")}))
+        ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`).get({
+        queryId, userId: scope.userId, deviceOwner: DEVICE_MEMORY_OWNER,
+        source: scope.source, profileId: scope.profileId, projectId,
+        workspaceId: scope.workspaceId ?? null, tenantId: scope.tenantId ?? null,
+        sourceKeys: JSON.stringify(sourceKeys)
+      }) as SqlRecallEventRow | undefined;
+      return row ? recallEventFromSql(row) : undefined;
+    }
     const row = this.db
       .prepare(
         `SELECT * FROM recall_events
          WHERE query_id = ?
-         ORDER BY created_at DESC
+         ORDER BY created_at DESC, rowid DESC
          LIMIT 1`
       )
       .get(queryId) as SqlRecallEventRow | undefined;

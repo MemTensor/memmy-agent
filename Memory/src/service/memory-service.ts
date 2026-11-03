@@ -2983,7 +2983,7 @@ export class MemoryService {
     };
   }
 
-  recallEvidence(queryId: string, request: RequestEnvelope = {}): {
+  recallEvidence(queryId: string, request: RequestEnvelope = {}, local = this.mode !== "cloud"): {
     recallEventId: string;
     queryId: string;
     query: string;
@@ -2997,14 +2997,37 @@ export class MemoryService {
     serverTime: string;
   } {
     this.assertMemorySearchEnabled();
-    const event = this.repos.runtime.getRecallEventByQueryId(queryId);
+    if (!local && !request.namespace?.userId) throw new MemoryServiceError("not_found", "Recall evidence is unavailable");
+    const namespace = request.namespace;
+    const event = this.repos.runtime.getRecallEventByQueryId(queryId, local ? undefined : {
+      ...normalizeNamespace(namespace), userId: namespace!.userId!
+    });
     if (!event) throw new MemoryServiceError("not_found", `recall event not found: ${queryId}`);
     const eventRequest = isRecord(event.request) ? event.request : {};
     const evidence = isRecord(eventRequest.recallEvidence) ? eventRequest.recallEvidence : {};
     const storedHits = Array.isArray(evidence.hits)
       ? evidence.hits.filter(isRecord) as unknown as RecallHit[]
       : [];
+    const permitted = new Map<string, boolean>();
+    const canReadMemory = (id: string): boolean => {
+      if (!permitted.has(id)) permitted.set(id, this.recallMemoryMatchesNamespace(id, namespace!));
+      return permitted.get(id)!;
+    };
     const hits = storedHits.flatMap((hit) => {
+      if (!local) {
+        // A merged snapshot's top-level text can aggregate every member. Keep it
+        // only when the complete snapshot and all declared references are proven.
+        if ((hit.members !== undefined && !Array.isArray(hit.members))
+          || (hit.memberMemoryIds !== undefined && !Array.isArray(hit.memberMemoryIds))) return [];
+        const ids = [hit.id, ...(hit.memberMemoryIds ?? []), ...(hit.members ?? []).map(member => member?.id)];
+        if (!ids.every(id => typeof id === "string" && canReadMemory(id))) return [];
+        if (hit.sourceTurnId) {
+          const raw = this.repos.runtime.getRawTurn(hit.sourceTurnId);
+          if (!raw || !this.recallRawTurnMatchesNamespace(raw, namespace!)) return [];
+        }
+        if (!this.recallHitSourceMatchesNamespace(hit, canReadMemory)) return [];
+        return [hit];
+      }
       if (!hit.members?.length) {
         return this.isDeletedRecallMemory(hit.id) ? [] : [hit];
       }
@@ -3022,8 +3045,9 @@ export class MemoryService {
     const rawTurn = event.sessionId && event.turnId
       ? this.repos.runtime.getRawTurnBySessionTurn(event.sessionId, event.turnId)
       : undefined;
-    const turnComplete = rawTurn && isRecord(rawTurn.messagePayload?.turn_complete)
-      ? rawTurn.messagePayload.turn_complete
+    const readableRawTurn = rawTurn && (local || this.recallRawTurnMatchesNamespace(rawTurn, namespace!)) ? rawTurn : undefined;
+    const turnComplete = readableRawTurn && isRecord(readableRawTurn.messagePayload?.turn_complete)
+      ? readableRawTurn.messagePayload.turn_complete
       : undefined;
     const recordedCapture = turnComplete && isRecord(turnComplete.memory_capture)
       ? turnComplete.memory_capture
@@ -3034,11 +3058,11 @@ export class MemoryService {
       query: event.query,
       hits,
       diagnostics: {
-        candidateMemoryIds: event.candidateMemoryIds ?? [],
-        injectedMemoryIds: event.injectedMemoryIds ?? [],
+        candidateMemoryIds: local ? event.candidateMemoryIds ?? [] : (event.candidateMemoryIds ?? []).filter(canReadMemory),
+        injectedMemoryIds: local ? event.injectedMemoryIds ?? [] : (event.injectedMemoryIds ?? []).filter(canReadMemory),
         ...(recordedCapture
-          ? { capture: recordedCapture }
-          : rawTurn ? { capture: { status: "pending" } } : {})
+          ? { capture: local ? recordedCapture : this.scopedRecallCapture(recordedCapture, canReadMemory) }
+          : readableRawTurn ? { capture: { status: "pending" } } : {})
       },
       createdAt: event.createdAt,
       serverTime: nowIso()
@@ -3930,6 +3954,59 @@ export class MemoryService {
 
   private storedOwnerMatches(owner: string | null | undefined, namespace?: RuntimeNamespace, deviceProof?: () => boolean): boolean {
     return Boolean(namespace?.userId && (owner === DEVICE_MEMORY_OWNER ? deviceProof?.() : owner === namespace.userId));
+  }
+
+  private recallMemoryMatchesNamespace(id: string, namespace: RuntimeNamespace): boolean {
+    if (typeof id !== "string" || !id || this.isDeletedRecallMemory(id)) return false;
+    const userMemory = this.repos.userMemories.getForDisplay(id);
+    if (userMemory) return this.storedOwnerMatches(userMemory.userId, namespace, () => true)
+      && this.deviceUserMemoryMatchesNamespace(userMemory, namespace);
+    const memory = this.repos.memories.getForDisplay(id);
+    if (memory) return this.storedOwnerMatches(memory.userId, namespace, () => true)
+      && this.deviceMemoryMatchesNamespace(memory, namespace);
+    const episode = this.repos.runtime.getEpisode(id);
+    return Boolean(episode && this.storedOwnerMatches(episode.userId, namespace, () => true)
+      && this.deviceEpisodeMatchesNamespace(episode, namespace));
+  }
+
+  private recallRawTurnMatchesNamespace(raw: RawTurnRecord, namespace: RuntimeNamespace): boolean {
+    return this.storedOwnerMatches(raw.userId, namespace, () => true)
+      && this.deviceRawTurnMatchesNamespace(raw.id, namespace);
+  }
+
+  private recallHitSourceMatchesNamespace(hit: RecallHit, canReadMemory: (id: string) => boolean): boolean {
+    const memory = this.repos.memories.getForDisplay(hit.id);
+    const internal = memory?.properties.internal_info;
+    const external = memory?.memoryLayer === "Skill" && internal?.read_only === true;
+    if (hit.readOnly !== undefined && hit.readOnly !== Boolean(external)) return false;
+    if (hit.sourceAgentId && (!external || internal?.source_agent_id !== hit.sourceAgentId)) return false;
+    if (hit.sourceSkillVersion && (!external || internal?.source_skill_version !== hit.sourceSkillVersion)) return false;
+    if (!hit.sourceSkillId) return true;
+    if (external) return internal?.source_skill_id === hit.sourceSkillId;
+    const source = this.repos.memories.getForDisplay(hit.sourceSkillId);
+    return Boolean(source?.memoryLayer === "Skill" && canReadMemory(source.id));
+  }
+
+  private scopedRecallCapture(capture: Record<string, unknown>, canReadMemory: (id: string) => boolean): Record<string, unknown> {
+    const result: Record<string, unknown> = { status: capture.status === "completed" ? "completed" : "pending" };
+    if (typeof capture.decided_at === "string") result.decided_at = capture.decided_at;
+    if (Array.isArray(capture.l1)) result.l1 = capture.l1.filter(isRecord).flatMap(item => {
+      const id = item.memory_id;
+      const memory = typeof id === "string" ? this.repos.memories.getForDisplay(id) : undefined;
+      return memory?.memoryLayer === "L1" && canReadMemory(memory.id)
+        && typeof item.written === "boolean" && typeof item.policy_eligible === "boolean"
+        ? [{ memory_id: memory.id, written: item.written, policy_eligible: item.policy_eligible }] : [];
+    });
+    const user = isRecord(capture.user_memory) ? capture.user_memory : undefined;
+    if (user && typeof user.written === "boolean" && ["none", "created", "updated", "confirmed", "corrected"].includes(String(user.action))) {
+      const ids = [user.memory_id, user.target_memory_id].filter(id => id !== undefined);
+      if (ids.every(id => typeof id === "string" && this.repos.userMemories.getForDisplay(id) && canReadMemory(id))) {
+        result.user_memory = { written: user.written, action: user.action,
+          ...(typeof user.memory_id === "string" ? { memory_id: user.memory_id } : {}),
+          ...(typeof user.target_memory_id === "string" ? { target_memory_id: user.target_memory_id } : {}) };
+      }
+    }
+    return result;
   }
 
   private assertStoredOwnerInScope(owner: string | null | undefined, namespace?: RuntimeNamespace, deviceProof?: () => boolean): void {

@@ -134,6 +134,53 @@ describe("Windows launch at login", () => {
     expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, (path) => path === launcherPath)).toBe(false);
   });
 
+  it.each([
+    { firstEnabled: false, ownEnabled: true, expected: true },
+    { firstEnabled: true, ownEnabled: false, expected: true },
+    { firstEnabled: false, ownEnabled: false, expected: false }
+  ])("reads all exact-command entries independently of ordering: %j", ({ firstEnabled, ownEnabled, expected }) => {
+    const launcherPath = `${packagedWindowsEnvironment.localAppDataPath}\\Memmy\\launcher\\MemmyLauncher.vbs`;
+    const application: WindowsLoginItemApplication = {
+      getLoginItemSettings: vi.fn(() => ({
+        openAtLogin: true,
+        executableWillLaunchAtLogin: true,
+        launchItems: [
+          { name: "aaa-alias", scope: "user", path: "c:/windows/system32/wscript.exe", args: [launcherPath], enabled: firstEnabled },
+          { name: "cn.memtensor.memmy", scope: "user", path: "C:\\Windows\\System32\\wscript.exe", args: [launcherPath], enabled: ownEnabled }
+        ]
+      })),
+      setLoginItemSettings: vi.fn()
+    };
+    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(expected);
+    expect(application.setLoginItemSettings).not.toHaveBeenCalled();
+  });
+
+  it("does not use aggregate wscript state without a matching command", () => {
+    const application: WindowsLoginItemApplication = {
+      getLoginItemSettings: vi.fn(() => ({
+        openAtLogin: true,
+        executableWillLaunchAtLogin: true,
+        launchItems: [{ name: "another-app", scope: "user", path: "C:\\Windows\\System32\\wscript.exe", args: ["C:\\Other\\startup.vbs"], enabled: true }]
+      })),
+      setLoginItemSettings: vi.fn()
+    };
+    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(false);
+  });
+
+  it("keeps a missing own registration off even when an alias has the same command", () => {
+    const launcherPath = `${packagedWindowsEnvironment.localAppDataPath}\\Memmy\\launcher\\MemmyLauncher.vbs`;
+    const application: WindowsLoginItemApplication = {
+      getLoginItemSettings: vi.fn(() => ({
+        openAtLogin: false,
+        executableWillLaunchAtLogin: true,
+        launchItems: [{ name: "alias", scope: "user", path: "C:\\Windows\\System32\\wscript.exe", args: [launcherPath], enabled: true }]
+      })),
+      setLoginItemSettings: vi.fn()
+    };
+    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(false);
+    expect(application.setLoginItemSettings).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])("writes and re-reads the effective Windows startup state: %s", (enabled) => {
     const getLoginItemSettings = vi.fn(() => ({
       openAtLogin: enabled,
