@@ -59,6 +59,38 @@ it("removes a local recording and transcript only after the row's confirmation s
   }
 });
 
+it("delivers the transcript already stored with an archived recording", async () => {
+  const scope = `recording-deliver-${crypto.randomUUID()}`;
+  const transcript = { path: "/workspace/recordings/录音转写.txt", name: "录音转写.txt", kind: "file" as const,
+    mime: "text/plain" as const, bytes: 6, url: "" };
+  const entry = {
+    id: "recording-deliver", title: "现场访谈", recordedAt: "2026-10-26T11:00:00Z",
+    durationMs: 4_000, speakerCount: 1, audioUrl: null, audioPath: "/workspace/recordings/录音.webm",
+    transcript: { text: "记录", segments: [] }, files: [
+      { path: "/workspace/recordings/录音.webm", name: "录音.webm", kind: "audio" as const,
+        mime: "audio/webm" as const, bytes: 10, url: "" },
+      transcript,
+    ],
+  };
+  saveRecordingArchiveEntry(scope, entry);
+  const deliver = vi.fn();
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container);
+  let controller!: RecordingEntryController;
+  function Page() {
+    controller = useRecordingEntry({} as never, undefined, deliver, { scope, resolveAudio: async () => null });
+    return null;
+  }
+  try {
+    await act(async () => root.render(<I18nProvider language="zh-CN"><Page /></I18nProvider>));
+    act(() => controller.session.deliver(controller.session.recordings[0]!, "attach"));
+    expect(deliver).toHaveBeenCalledWith(expect.any(File), "attach", transcript);
+  } finally {
+    await act(async () => root.unmount()); container.remove();
+    window.localStorage.removeItem(`memmy.recordingArchive.v1:${scope}`);
+  }
+});
+
 it("archives a guidance recording before its card disappears, reopens it from the list and retains it across route remounts", async () => {
   const storage=new Map<string,string>();
   Object.defineProperty(window,"localStorage",{ configurable:true,value:{

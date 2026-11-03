@@ -44,6 +44,7 @@ import {
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
   queuedMediaToPendingAttachment,
+  uploadedMediaToPendingAttachment,
   thinkingPayloadForSend,
   toReadableAsrError,
   updateAgentComposerOverlayHeight,
@@ -1389,6 +1390,35 @@ describe("HomePage", () => {
         expect.objectContaining({ path: "/media/websocket/webui/screenshot.png", kind: "image" }),
         expect.objectContaining({ path: "/media/websocket/webui/notes.pdf", kind: "file" }),
       ],
+    }), 1);
+  });
+
+  it("sends a stored recording transcript by path without uploading a cache copy", async () => {
+    const transcript = uploadedMediaToPendingAttachment({
+      kind: "file", name: "录音转写-2026-11-03T02-00-00-000Z.txt",
+      path: "/workspace/recordings/录音转写-2026-11-03T02-00-00-000Z.txt",
+      url: "/api/media/ws/transcript", mime: "text/plain", bytes: 24,
+    });
+    const uploadAgentMedia = vi.fn(async () => []);
+    const submitMessage = vi.fn(async () => ({ status: "accepted" as const }));
+
+    expect(await submitAgentComposerMessage({
+      chatId: "chat-1",
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(), submitMessage },
+      content: "请看录音转写",
+      pendingAttachments: [transcript],
+      uploadAgentMedia,
+      dispatch: vi.fn(),
+      track: vi.fn(),
+      clearComposer: vi.fn(),
+    })).toBe(true);
+
+    expect(uploadAgentMedia).not.toHaveBeenCalled();
+    expect(submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      media: [expect.objectContaining({
+        path: "/workspace/recordings/录音转写-2026-11-03T02-00-00-000Z.txt",
+        name: "录音转写-2026-11-03T02-00-00-000Z.txt",
+      })],
     }), 1);
   });
 
