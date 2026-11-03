@@ -754,7 +754,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   ): Promise<unknown> {
     if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
     const adapter = registry.require(sourceId);
-    if (!(await adapter.detect())) {
+    if (method === "POST" && !(await adapter.detect())) {
       throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
     }
     if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
@@ -774,8 +774,12 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         await target.install(renderMemmyDefaultSkillManifest(sourceId));
       }
     } else {
-      if (kind === "plugin" && target.uninstallPlugin) await target.uninstallPlugin(sourceId);
-      await target.uninstall(sourceId);
+      if (kind === "plugin" && target.uninstallPlugin) {
+        await target.uninstallPlugin(sourceId);
+        if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
+      } else {
+        await target.uninstall(sourceId);
+      }
     }
     const state = await readState();
     const stored = state.sources[sourceId] ?? emptySourceState();

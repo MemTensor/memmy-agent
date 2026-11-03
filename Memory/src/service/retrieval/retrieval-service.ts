@@ -1,4 +1,5 @@
 import { importedSkillDescription, importedSkillSourceDir, isImportedSkill } from "../../storage/imported-skill.js";
+import { skillInjectionDescription } from "./skill-injection-description.js";
 import type {
   RetrievalQueryExtract,
   RetrievalResult
@@ -846,8 +847,8 @@ function renderInjectedSnippet(
     const name = skill?.name || hit.title || "Skill";
     const guide = skill?.invocationGuide || hit.snippet;
     const summaryChars = options.skillSummaryChars ?? MEMORY_PACKET_SKILL_SUMMARY_CHARS;
-    // Imported skills describe themselves in their frontmatter; their guide
-    // starts with that raw frontmatter, so it is not used as the description.
+    // Keep the imported source description authoritative; otherwise select
+    // useful prose without treating the guide title or raw YAML as a summary.
     const importedDescription = memory && isImportedSkill(memory) ? importedSkillDescription(memory) : undefined;
     const sourceDir = memory && isImportedSkill(memory) ? importedSkillSourceDir(memory) : undefined;
     if (options.skillInjectionMode === "full") {
@@ -876,9 +877,12 @@ function renderInjectedSnippet(
       "",
       ...labeledInjectedBlock("Name", name),
       "",
-      ...labeledInjectedBlock("Description",
-        (importedDescription ? clipSkillDescription(importedDescription, summaryChars) : firstLineSummary(guide, summaryChars))
-          || "(not provided)")
+      ...labeledInjectedBlock("Description", importedDescription
+        ? clipSkillDescription(importedDescription, summaryChars)
+        : skillInjectionDescription({
+          name, guide, retrievalBlurb: skill?.retrievalBlurb,
+          triggerContext: skill?.triggerContext, maxChars: summaryChars
+        }))
     ];
     return {
       refKind: "skill",

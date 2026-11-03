@@ -4,6 +4,7 @@ import { npmInvocation } from "../../../scripts/internal/shared/npm-invocation.m
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { parsePackFilename } from "./npm-pack-metadata.mjs";
 
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
 const agentRoot = resolve(scriptRoot, "..");
@@ -71,9 +72,7 @@ console.log(`Prepared ${packageName}@${sourceManifest.version} at ${outputRoot}`
 
 async function pack(packageRoot, destination) {
   const result = await run("npm", ["pack", packageRoot, "--pack-destination", destination, "--ignore-scripts", "--json"], repoRoot);
-  const metadata = JSON.parse(result.stdout).at(-1);
-  if (!metadata?.filename) throw new Error(`npm pack did not return a filename for ${packageRoot}`);
-  return metadata.filename;
+  return parsePackFilename(result.stdout, packageRoot);
 }
 
 async function exists(path) {
