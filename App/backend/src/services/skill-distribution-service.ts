@@ -101,7 +101,7 @@ export function createSkillDistributionService(
       }
 
       await target.uninstallPlugin(sourceId);
-      await target.uninstall(sourceId);
+      if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
     },
 
     async isInstalledHookCurrent(sourceId) {

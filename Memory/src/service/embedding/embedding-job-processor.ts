@@ -58,6 +58,7 @@ import {
   updateMemoryVectorField
 } from "./embedding-pipeline.js";
 import { canonicalWorkMemoryText } from "../work-memory/work-memory-pipeline.js";
+import { isL3FieldSnapshotMemory } from "../l3-field/snapshot-memory.js";
 import { isObservationMemory, isObservationMemoryProcessed, observationJobPayload } from "../observation-memory-state.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
@@ -258,6 +259,7 @@ export class EmbeddingJobProcessor {
       throw new Error(`embedding target not found: ${job.targetMemoryId ?? "unknown"}`);
     }
     if (!processingJobMatchesMemory(job, memory)) return null;
+    if (isL3FieldSnapshotMemory(memory)) return null;
 
     if (isObservationMemory(memory)) {
       if (!isObservationMemoryProcessed(memory)) return null;
