@@ -1,3 +1,4 @@
+import type { PanelMemoryBudget } from "./memory-budget.js";
 import { randomUUID } from "node:crypto";
 import { MemoryServiceError } from "../../utils/error.js";
 import type { PanelReadModel } from "../read-model/panel-read.js";
@@ -31,6 +32,7 @@ export class PanelBrowse {
       safety: () => string;
       change: () => string | number;
       budget?: number;
+      memory?:PanelMemoryBudget;
       idleMs?: number;
     }
   ) {}
@@ -47,6 +49,7 @@ export class PanelBrowse {
       throw error;
     }
     view.touched = Date.now();
+    this.deps.memory?.touch(view);
     return view;
   }
   async create(input: Input, signal?: AbortSignal) {
@@ -165,6 +168,7 @@ export class PanelBrowse {
   private dispose(view: View, reason: Error = cancellation()): void {
     this.views.delete(view.id);
     for (const building of view.building.values()) building.controller.abort(reason);
+    this.deps.memory?.release(view);
     view.building.clear();
     view.pages.clear();
   }
@@ -188,6 +192,8 @@ export class PanelBrowse {
       this.dispose(view, new MemoryServiceError("conflict", "Panel view expired; refresh"));
   }
   private limit(current: View) {
+    try {this.deps.memory?.reserve(current,current.bytes,()=>this.dispose(current,new MemoryServiceError("conflict","Panel view expired; refresh")));}
+    catch(error){this.dispose(current,error instanceof Error?error:new Error(String(error)));throw error;}
     const budget = this.deps.budget ?? 64 * 1024 * 1024;
     let total = [...this.views.values()].reduce((sum, view) => sum + view.bytes, 0);
     for (const view of [...this.views.values()].sort((a, b) => a.touched - b.touched)) {

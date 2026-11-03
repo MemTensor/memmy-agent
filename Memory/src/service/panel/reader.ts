@@ -1,7 +1,6 @@
-import { PanelWriteCoordinator } from "./write-coordinator.js";
 import { Worker } from "node:worker_threads";
 import { MemoryServiceError } from "../../utils/error.js";
-type Result<T> = { safety: string; data: T };
+type Result<T> = { safety: string; data: T; bytes?:number };
 interface Pending {
   id: number;
   method: string;
@@ -23,13 +22,10 @@ export class PanelReader {
   private stopping?: Promise<number>;
   private closed = false;
   private resumeTimer?: ReturnType<typeof setTimeout>;
-  private writeRelease?: () => void;
-  private writeAbort?: AbortController;
   constructor(
     private readonly path: string,
     private readonly timeoutMs = 30_000,
-    private readonly backgroundBusy: () => boolean = () => false,
-    private readonly writes = new PanelWriteCoordinator()
+    private readonly backgroundBusy: () => boolean = () => false
   ) {}
   run<T>(method: string, args: unknown[], priority = 0, signal?: AbortSignal): Promise<Result<T>> {
     if (this.closed) return Promise.reject(new Error("Panel reader stopped"));
@@ -85,9 +81,7 @@ export class PanelReader {
     this.worker = undefined;
     this.pending.push(active);
     this.pending.sort((a, b) => a.priority - b.priority);
-    this.writeAbort?.abort();
-    const releaseWrite = this.writeRelease; this.writeRelease = undefined;
-    this.stopping = this.retire(worker).finally(() => releaseWrite?.());
+    this.stopping = this.retire(worker);
     void this.stopping.finally(() => {
       this.stopping = undefined;
       this.dispatch();
@@ -109,20 +103,6 @@ export class PanelReader {
         if (this.worker !== worker) return;
         const active = this.active;
         if (!active || active.id !== message.id) return;
-        if (message.write === "acquire") {
-          const controller = new AbortController();
-          this.writeAbort = controller;
-          void this.writes.acquire(controller.signal).then(release => {
-            if (this.worker !== worker || this.active !== active) { release(); return; }
-            this.writeRelease = release;
-            worker.postMessage({ writeGranted: active.id });
-          }).catch(() => undefined);
-          return;
-        }
-        if (message.write === "release") {
-          this.writeRelease?.(); this.writeRelease = undefined;
-          return;
-        }
         if (message.yield && isStatisticsMethod(active.method)) {
           // Model wait is not a database writer. Give foreground work one turn,
           // but never suspend statistics until all background jobs have ended.
@@ -166,9 +146,7 @@ export class PanelReader {
     const worker = this.worker;
     this.worker = undefined;
     if (worker) {
-      this.writeAbort?.abort();
-      const releaseWrite = this.writeRelease; this.writeRelease = undefined;
-      this.stopping = this.retire(worker).finally(() => releaseWrite?.());
+      this.stopping = this.retire(worker);
       void this.stopping.finally(() => {
         this.stopping = undefined;
         this.dispatch();

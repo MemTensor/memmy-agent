@@ -1,3 +1,4 @@
+import type { PanelMemoryBudget } from "./memory-budget.js";
 import type { StatsStore } from "./stats-store.js";
 import type { PanelReadModel } from "../read-model/panel-read.js";
 import { resolveTimeZone } from "../../utils/time.js";
@@ -26,10 +27,11 @@ export class PanelStats<TData = PanelStatsData> {
   private entries = new Map<string, Entry<TData>>();
   private stopped = false;
   constructor(
-    private readonly read: (input: StatsInput) => Promise<{ safety: string; data: TData }>,
+    private readonly read: (input: StatsInput) => Promise<{ safety: string; data: TData; bytes?:number }>,
     private readonly safety: () => string,
     private readonly revision: () => string = () => "0",
-    private readonly store?: StatsStore<TData>
+    private readonly store?: StatsStore<TData>,
+    private readonly memory?:PanelMemoryBudget
   ) {}
   get(input: StatsInput) {
     const timeZone = resolveTimeZone(input.timeZone);
@@ -45,20 +47,30 @@ export class PanelStats<TData = PanelStatsData> {
         disposed: false,
         generation: 0
       };
-      const saved = this.store?.load(key);
-      if (saved && saved.safety === entry.safety && saved.day === entry.day && saved.revision.split(":")[0] === entry.revision.split(":")[0]) {
-        entry.data = saved.data;
-        entry.generatedAt = saved.generatedAt;
-        entry.revision = saved.revision;
-        if (saved.revision === this.revision()) entry.lastAttempt = Date.now();
-      }
       this.entries.set(key, entry);
+      if(this.store) {
+        entry.running=true;
+        const current=entry, generation=current.generation;
+        void this.store.load(key).then(saved=>{
+          this.validate(current);
+          if(this.stopped || current.disposed || generation!==current.generation)return;
+          if(saved && saved.safety===current.safety && saved.day===current.day && saved.revision.split(":")[0]===current.revision.split(":")[0]) {
+            this.account(current,saved.data,saved.bytes);
+            current.data=saved.data;current.generatedAt=saved.generatedAt;current.revision=saved.revision;
+            if(saved.revision===this.revision())current.lastAttempt=Date.now();
+          }
+        }).catch(()=>undefined).finally(()=>{
+          current.running=false;
+          if(!this.stopped && !current.disposed && current.lastAttempt===undefined)this.generate(current);
+        });
+      }
       if (this.entries.size > 16) {
         const oldKey = this.entries.keys().next().value!;
         this.dispose(this.entries.get(oldKey)!);
         this.entries.delete(oldKey);
       }
     }
+    this.memory?.touch(entry);
     this.validate(entry);
     if (entry.revision !== this.revision() && !entry.running) {
       const remaining = 1000 - (Date.now() - (entry.lastAttempt ?? 0));
@@ -87,6 +99,7 @@ export class PanelStats<TData = PanelStatsData> {
     const revision = this.revision();
     if (entry.safety !== safety || entry.day !== day || entry.revision.split(":")[0] !== revision.split(":")[0]) {
       entry.generation++;
+      this.memory?.release(entry);
       entry.data = undefined;
       entry.generatedAt = undefined;
       entry.error = undefined;
@@ -105,15 +118,17 @@ export class PanelStats<TData = PanelStatsData> {
     clearTimeout(entry.timer);
     const generation = entry.generation;
     void this.read(entry.input)
-      .then((result) => {
+      .then(async (result) => {
         this.validate(entry);
         if (this.stopped || entry.disposed || generation !== entry.generation || result.safety !== entry.safety) return;
-        entry.data = result.data;
-        entry.generatedAt = new Date().toISOString();
-        entry.error = undefined;
-        const key = JSON.stringify([entry.input.namespace ?? {}, entry.input.userId ?? null, resolveTimeZone(entry.input.timeZone)]);
-        try { this.store?.save(key, {data:entry.data,generatedAt:entry.generatedAt,safety:entry.safety,revision:entry.revision,day:entry.day}); }
-        catch { /* Persistence failure must not discard valid in-memory statistics. */ }
+        const generatedAt=new Date().toISOString();
+        const key=JSON.stringify([entry.input.namespace ?? {},entry.input.userId ?? null,resolveTimeZone(entry.input.timeZone)]);
+        try {await this.store?.save(key,{data:result.data,generatedAt,safety:entry.safety,revision:entry.revision,day:entry.day,bytes:result.bytes});}
+        catch { /* A failed cache write must not discard a safe in-memory result. */ }
+        this.validate(entry);
+        if(this.stopped || entry.disposed || generation!==entry.generation || result.safety!==entry.safety)return;
+        this.account(entry,result.data,result.bytes);
+        entry.data=result.data;entry.generatedAt=generatedAt;entry.error=undefined;
       })
       .catch((error) => {
         this.validate(entry);
@@ -131,7 +146,14 @@ export class PanelStats<TData = PanelStatsData> {
         }
       });
   }
+  private account(entry:Entry<TData>,data:TData,bytes?:number) {
+    this.memory?.reserve(entry,bytes ?? Buffer.byteLength(JSON.stringify(data)),()=>{
+      this.dispose(entry);
+      for(const [key,value] of this.entries)if(value===entry)this.entries.delete(key);
+    });
+  }
   private dispose(entry: Entry<TData>) {
+    this.memory?.release(entry);
     entry.disposed = true;
     entry.generation++;
     clearTimeout(entry.timer);

@@ -1,6 +1,8 @@
 import { isSqliteBusy } from "./write-coordinator.js";
-import Database from "better-sqlite3";
-import { panelStatisticsDirtyIds, fillPanelCacheBatch, ensurePanelLogIds, panelLogIdsPending, panelCachePending, panelMemoryStats, type PanelCachePart } from "../../storage/panel-cache.js";
+import { openPanelCache } from "../../storage/panel-cache-db.js";
+import { sourceVersion } from "../../storage/source-changes.js";
+import { loadStatistics, saveStatistics, clearLegacyStatistics } from "./stats-worker-store.js";
+import { syncPanelCacheBatch, fillPanelCacheBatch, panelMemoryStats, type PanelCachePart } from "../../storage/panel-cache.js";
 import { parentPort, workerData } from "node:worker_threads";
 import { MemoryDb } from "../../storage/db.js";
 import { createPanelReaderModel } from "./reader-model.js";
@@ -9,9 +11,7 @@ import { MemoryServiceError } from "../../utils/error.js";
 import { setImmediate } from "node:timers/promises";
 import type { PanelReadModel } from "../read-model/panel-read.js";
 const db = new MemoryDb({ path: workerData.path, readonly: true });
-const cacheWriter = new Database(workerData.path, { fileMustExist: true });
-cacheWriter.pragma("busy_timeout = 1000");
-cacheWriter.pragma("synchronous = NORMAL");
+const cacheWriter = openPanelCache(db.db,workerData.path);
 const model = createPanelReaderModel(db);
 function partsFor(method: string,args: unknown[]): PanelCachePart[] {
   if (["stats", "analysis"].includes(method))
@@ -34,42 +34,16 @@ function closeWorker() {
   if (db.db.inTransaction) db.db.exec("ROLLBACK");
   cacheWriter.close(); db.db.close(); parentPort!.close();
 }
-let writeGranted: (() => void) | undefined;
-async function writeBatch<T>(id: number, operation: () => T): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    await new Promise<void>(resolve => { writeGranted = resolve; parentPort!.postMessage({id,write:"acquire"}); });
-    try { checkStopped(); return operation(); }
-    catch (error) { if (attempt >= 3 || !isSqliteBusy(error)) throw error; }
-    finally { parentPort!.postMessage({id,write:"release"}); }
-    await new Promise(resolve => setTimeout(resolve,25 * 2 ** attempt));
+async function writeBatch<T>(operation: () => T): Promise<T> {
+  for (let attempt=0;;attempt++) {
+    try {checkStopped();return operation();}
+    catch(error) {if(attempt>=3 || !isSqliteBusy(error))throw error;}
+    await new Promise(resolve=>setTimeout(resolve,25*2**attempt));
   }
 }
-let resumePreparation: (() => void) | undefined;
-async function prepare(parts: PanelCachePart[], id: number, backgroundId?: number) {
-  let batches = 0;
-  if (backgroundId !== undefined) {
-    for (const part of parts) {
-      if (part !== "memories" && part !== "metrics") continue;
-      const ids = panelStatisticsDirtyIds(cacheWriter, part);
-      for (let offset = 0; offset < ids.length; offset += 128) {
-        checkStopped();
-        await writeBatch(id, () => fillPanelCacheBatch(cacheWriter,part,128,ids.slice(offset,offset+128)));
-        await setImmediate();
-      }
-    }
-    return;
-  }
-  for (const part of parts)
-    while (await writeBatch(id, () => fillPanelCacheBatch(cacheWriter, part, part === "logs" ? 64 : 128))) {
-      // Release SQLite's writer after every small batch. Check producer
-      // activity initially and every four batches, avoiding an IPC round trip
-      // for each transaction when the service is idle.
-      if (backgroundId === undefined || batches++ % 4 !== 0) await setImmediate();
-      else await new Promise<void>(resolve => {
-        resumePreparation = resolve;
-        parentPort!.postMessage({ id: backgroundId, yield: true });
-      });
-    }
+async function prepare(parts:PanelCachePart[],target:number) {
+  while(await writeBatch(()=>syncPanelCacheBatch(db.db,target))) {checkStopped();await setImmediate();}
+  for(const part of parts)while(await writeBatch(()=>fillPanelCacheBatch(db.db,part,128))) {checkStopped();await setImmediate();}
 }
 async function statistics(method: "stats" | "overviewStats", input: Parameters<PanelReadModel["panelStatistics"]>[0]) {
   const safety = panelSafetyToken(db.db);
@@ -87,40 +61,40 @@ async function statistics(method: "stats" | "overviewStats", input: Parameters<P
     : model.panelStatistics(input, rows,true);
   return { safety, data };
 }
-parentPort!.on("message", async ({ id, method, args, resume, writeGranted: granted, stop }) => {
-  if (stop) { stopping = true; resumePreparation?.(); writeGranted?.(); if (!running) closeWorker(); return; }
-  if (granted !== undefined) { const resolve = writeGranted; writeGranted = undefined; resolve?.(); return; }
-  if (resume !== undefined) {
-    const continuePreparation = resumePreparation;
-    resumePreparation = undefined;
-    continuePreparation?.();
-    return;
-  }
+parentPort!.on("message", async ({ id, method, args, stop }) => {
+  if (stop) { stopping=true;if(!running)closeWorker();return; }
   running = true;
   try {
     checkStopped();
-    const parts = partsFor(method,args);
-    const stats = method === "stats" || method === "overviewStats";
-    const initialSafety = panelSafetyToken(db.db);
-    // A source write racing preparation is retried before entering the read snapshot.
-    let attempts = 0;
-    while (true) {
-      if (method === "logDetail") await writeBatch(id, () => ensurePanelLogIds(cacheWriter,[args[0]]));
-      await prepare(parts, id, method === "stats" || method === "overviewStats" ? id : undefined);
-      db.db.exec("BEGIN");
-      if (stats || !(method === "logDetail" ? panelLogIdsPending(db.db,[args[0]]) : panelCachePending(db.db, parts)))
-        break;
-      db.db.exec("ROLLBACK");
-      if (++attempts >= 8)
-        throw new MemoryServiceError("conflict", "Panel changed during preparation; retry");
+    const initialSafety=panelSafetyToken(db.db);
+    if(method==="statsLoad" || method==="statsSave") {
+      const state=cacheWriter.prepare("SELECT identity,generation,seq FROM panel_sync_state").get() as {identity:string;generation:number;seq:number};
+      const version=sourceVersion(db.db);
+      if(state.identity!==version.identity || state.generation!==version.generation || state.seq>version.seq || state.seq<version.floor)
+        await writeBatch(()=>syncPanelCacheBatch(db.db,version.seq));
+      let data;
+      if(method==="statsLoad")data=loadStatistics(db.db,cacheWriter,workerData.path,args[0],args[1]);
+      else if(args[2]?.safety===initialSafety)saveStatistics(cacheWriter,args[0],args[1],args[2]);
+      parentPort!.postMessage({id,result:{safety:initialSafety,data}});
+      return;
     }
+    if(method==="cacheClear")clearLegacyStatistics(workerData.path);
+    const target=sourceVersion(db.db).seq;
+    await prepare(partsFor(method,args),target);
+    if(method==="logDetail") {
+      while(await writeBatch(()=>fillPanelCacheBatch(db.db,"logs",128,[args[0]])))await setImmediate();
+      while(await writeBatch(()=>fillPanelCacheBatch(db.db,"visibility",128)))await setImmediate();
+    }
+    db.db.exec("BEGIN");
     checkStopped();
-    if (stats && panelSafetyToken(db.db) !== initialSafety) throw new MemoryServiceError("conflict", "Panel visibility changed during preparation");
+    if(panelSafetyToken(db.db)!==initialSafety)throw new MemoryServiceError("conflict","Panel visibility changed during preparation");
     const result = method === "stats" || method === "overviewStats"
       ? await statistics(method, args[0])
       : (() => {
         const safety = panelSafetyToken(db.db);
         switch (method) {
+          case "cacheClear":
+            return {safety,data:undefined};
           case "members":
             return { safety, data: model.panelMembers(args[0]) };
           case "page":
@@ -151,7 +125,7 @@ parentPort!.on("message", async ({ id, method, args, resume, writeGranted: grant
       })();
     if (db.db.inTransaction)
       db.db.exec("COMMIT");
-    parentPort!.postMessage({ id, result });
+    parentPort!.postMessage({ id, result:{...result,bytes:Buffer.byteLength(JSON.stringify(result.data) ?? "")} });
   }
   catch (error) {
     if (db.db.inTransaction)

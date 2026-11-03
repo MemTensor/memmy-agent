@@ -1,3 +1,5 @@
+import { PanelMemoryBudget } from "./panel/memory-budget.js";
+import { retryFtsRepairs } from "../storage/fts-maintenance.js";
 import { DEVICE_MEMORY_OWNER } from "./namespace/memory-owner.js";
 import { statsStore } from "./panel/stats-store.js";
 import { PanelWriteCoordinator } from "./panel/write-coordinator.js";
@@ -310,6 +312,7 @@ export class MemoryService {
   private readonly panelReadModel: PanelReadModel;
   private panelReader?: PanelReader;
   private readonly panelWrites = new PanelWriteCoordinator();
+  private readonly panelMemory = new PanelMemoryBudget();
   private panelBrowse?: PanelBrowse;
   private panelStats?: PanelStats;
   private panelOverviewStats?: PanelStats<ReturnType<PanelReadModel["panelOverviewSummary"]>>;
@@ -331,24 +334,24 @@ export class MemoryService {
     return localPanelRequest(this.withTimeZone(input),local);
   }
   private sharedPanelStats() {
-    this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db),statsStore(this.repos.db.name,"full"));
+    this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db),this.repos.db.name===":memory:"?undefined:statsStore(this.readPanel.bind(this),"full"),this.panelMemory);
     return this.panelStats;
   }
   panelStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
     return this.sharedPanelStats().get(this.panelStatsInput(input,local));
   }
   panelOverviewStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
-    this.panelOverviewStats ??= new PanelStats(input => this.readPanel("overviewStats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db),statsStore(this.repos.db.name,"overview"));
+    this.panelOverviewStats ??= new PanelStats(input => this.readPanel("overviewStats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db),this.repos.db.name===":memory:"?undefined:statsStore(this.readPanel.bind(this),"overview"),this.panelMemory);
     return this.panelOverviewStats.get(this.panelStatsInput(input,local));
   }
 
-  async readPanel<T>(method:string,args:unknown[],signal?:AbortSignal):Promise<{safety:string;data:T}> {
+  async readPanel<T>(method:string,args:unknown[],signal?:AbortSignal):Promise<{safety:string;data:T;bytes?:number}> {
     if(this.closing)throw new MemoryServiceError("conflict","Memory service is stopping");
     if(this.repos.db.name !== ":memory:") {
       this.panelReader ??= new PanelReader(this.repos.db.name, 30_000, () => {
         const activity = this.concurrency.snapshot();
         return activity.activeJobs > 0 || activity.embeddingRequests > 0 || Object.values(activity.resources).some(value => value > 0);
-      }, this.panelWrites);
+      });
       const result=await this.panelReader.run<T>(method,args,method === "stats" || method === "overviewStats" ? 1 : 0,signal);
       if(result.safety !== panelSafetyToken(this.repos.db)) throw new MemoryServiceError("conflict","Panel changed during read; refresh");
       return result;
@@ -372,7 +375,7 @@ export class MemoryService {
   }
 
   browsePanel(input: {op:"create"|"page"|"check"|"release";viewId?:string;page?:number;filter?:Parameters<PanelReadModel["panelMembers"]>[0]}, request:RequestEnvelope,signal?:AbortSignal,local=this.mode!=="cloud") {
-    this.panelBrowse ??= new PanelBrowse({read:this.readPanel.bind(this),safety:()=>panelSafetyToken(this.repos.db),change:()=>`${this.repos.runtime.latestChangeSeq()}:${this.repos.db.prepare("SELECT total_changes()").pluck().get()}:${this.repos.db.pragma("data_version",{simple:true})}`});
+    this.panelBrowse ??= new PanelBrowse({memory:this.panelMemory,read:this.readPanel.bind(this),safety:()=>panelSafetyToken(this.repos.db),change:()=>`${this.repos.runtime.latestChangeSeq()}:${this.repos.db.prepare("SELECT total_changes()").pluck().get()}:${this.repos.db.pragma("data_version",{simple:true})}`});
     const filter=this.panelInput({...input.filter,...request},local);
     if(input.op==="create") return this.panelBrowse.create(filter,signal);
     if(!input.viewId) throw new MemoryServiceError("invalid_argument","Missing panel view id");
@@ -2691,9 +2694,14 @@ export class MemoryService {
   clearAllData(): { ok: true; cleared: Record<string, number>; clearedAt: string; serverTime: string } {
     this.assertMemoryAddEnabled();
     const clearedAt = nowIso();
+    const cleared = this.repos.clearAllMemoryData();
+    this.panelBrowse?.clear();
+    this.panelStats?.stop(); this.panelStats=undefined;
+    this.panelOverviewStats?.stop(); this.panelOverviewStats=undefined;
+    if(this.repos.db.name!==":memory:")void this.readPanel("cacheClear",[]).catch(()=>undefined);
     return {
       ok: true,
-      cleared: this.repos.clearAllMemoryData(),
+      cleared,
       clearedAt,
       serverTime: nowIso()
     };
@@ -3511,6 +3519,7 @@ export class MemoryService {
     } = {},
     execution: WorkerRunExecution = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
+    retryFtsRepairs(this.repos.db);
     return this.workerRunner.runWorkerOnce(limit, request, execution);
   }
 
