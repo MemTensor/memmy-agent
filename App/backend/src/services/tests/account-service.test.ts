@@ -47,13 +47,13 @@ describe("AccountService", () => {
     });
     try {
       await service.getSession();
-      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor"]);
+      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor", "plugin:literature-review"]);
       await service.updateProfile({ nickname: "Legal Test" });
-      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor"]);
+      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor", "plugin:literature-review"]);
       expect(store.repositories.accountSession.get()).toMatchObject({ profile: { nickname: "Legal Test" } });
       grants = [];
       await service.getSession();
-      expect(store.repositories.accountSession.getEntitlements()).toEqual([]);
+      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:literature-review"]);
     } finally {
       store.close();
       rmSync(root, { recursive: true, force: true });
