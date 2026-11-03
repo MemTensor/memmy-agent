@@ -417,9 +417,14 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const savedDailyLimitRef = useRef<number | null>(bootstrap?.app.memoryByokDailyLimitM ?? 10);
   const savedTotalLimitRef = useRef<number | null>(bootstrap?.app.memoryByokTotalLimitM ?? 500);
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [invitationOwner, setInvitationOwner] = useState<string | null>();
   const [invitationInfo, setInvitationInfo] = useState<AccountInvitationView | null>(null);
   const [invitationLoadStatus, setInvitationLoadStatus] =
     useState<"idle" | "loading" | "ready" | "error">("idle");
+  const invitationAccountRef = useRef(state.account.userId);
+  invitationAccountRef.current = state.account.userId;
+  const [creditInvitation, setCreditInvitation] = useState<Awaited<ReturnType<NonNullable<typeof creditsClient>["invitationSummary"]>> | null>(null);
+  const [invitationRecords, setInvitationRecords] = useState<Awaited<ReturnType<NonNullable<typeof creditsClient>["invitations"]>> | null>(null);
   const [invitationReloadVersion, setInvitationReloadVersion] = useState(0);
   const preserveSuccessfulTestHydrateRef = useRef(false);
   const appSettings = bootstrap?.app;
@@ -513,7 +518,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const { isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
   const showGiftQuota = !isByokMode;
   const invitationPromotion = bootstrap?.promotions?.invitation;
-  const invitationEnabled = invitationPromotion?.enabled === true;
+  const invitationEnabled = (isAccountMode && !!creditsClient && !creditsPreview) || invitationPromotion?.enabled === true;
   const invitationRewardBody = invitationPromotion
     && invitationPromotion.inviterRewardTokens > 0
     && invitationPromotion.inviterRewardTokens === invitationPromotion.inviteeRewardTokens
@@ -521,7 +526,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           count: formatTokenGiftAmount(invitationPromotion.inviterRewardTokens)
         })
       : t("settings.token.invite.body");
-  const displayInviteCode = invitationInfo?.invitationCode ?? null;
+  const displayInviteCode = invitationOwner === state.account.userId ? invitationInfo?.invitationCode ?? null : null;
   const inviteDailyLimitReached = invitationInfo?.dailyLimitReached ?? false;
   const showInvitationBanner = invitationEnabled
     && (invitationLoadStatus !== "ready" || invitationInfo?.enabled === true);
@@ -646,6 +651,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     if (!accountClient || !isAccountMode || !hasAccountSession || !invitationEnabled) {
       setInvitationInfo(null);
       setInvitationLoadStatus("idle");
+      setCreditInvitation(null); setInvitationRecords(null);
       return () => {
         cancelled = true;
       };
@@ -654,10 +660,18 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     setInvitationLoadStatus("loading");
     const accountKey =
       state.account.email || state.account.phoneNumber || state.account.registeredAt || "account";
-    void requestAccountInvitation(accountClient, accountKey).then((result) => {
+    setCreditInvitation(null); setInvitationRecords(null); setInvitationInfo(null);
+    const load = creditsClient && !creditsPreview
+      ? Promise.all([creditsClient.invitationSummary(), creditsClient.invitations()]).then(([summary, records]) => {
+          if (!cancelled) { setCreditInvitation(summary); setInvitationRecords(records); }
+          return { enabled: true, invitationCode: summary.invitationCode, usedInviteSlotsToday: summary.todayRewarded, remainingInvitesToday: summary.todayRemaining, dailySuccessLimit: summary.rule.dailyLimit, dailyLimitReached: summary.todayRemaining === 0 };
+        })
+      : requestAccountInvitation(accountClient, accountKey);
+    void load.then((result) => {
       if (cancelled) {
         return;
       }
+      setInvitationOwner(state.account.userId);
       setInvitationInfo(result.enabled ? result : null);
       setInvitationLoadStatus("ready");
     }).catch((error) => {
@@ -677,6 +691,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     hasAccountSession,
     invitationEnabled,
     invitationReloadVersion,
+    creditsClient, creditsPreview, state.account.userId,
     isAccountMode
   ]);
 
@@ -1457,7 +1472,8 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
   }
 
-  const invitationCard = isAccountMode && showGiftQuota && showInvitationBanner ? (
+  const invitationCard = isAccountMode && (showGiftQuota || !!creditsClient) && showInvitationBanner ? (
+    <>
     <div
       className={`${usageStyles.invitationCard} border ${
         inviteDailyLimitReached
@@ -1474,7 +1490,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         <Gift size={15} strokeWidth={2.1} aria-hidden="true" />
       </span>
       <div className="min-w-0">
-        <p className="text-sm text-text-ink/80 leading-5">{t(creditsPreview ? "credits.invite.title" : "settings.token.invite.title")}</p>
+        <p className="text-sm text-text-ink/80 leading-5">{t(creditsPreview || !!creditsClient ? "credits.invite.title" : "settings.token.invite.title")}</p>
         <p
           className={`mt-0.5 text-xs leading-4 ${
             inviteDailyLimitReached ? "text-text-ink/50" : "text-text-ink/45"
@@ -1486,7 +1502,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               ? t("settings.token.invite.loading")
               : inviteDailyLimitReached
                 ? t("settings.token.invite.dailyLimit")
-                : creditsPreview ? t("credits.invite.body") : invitationRewardBody}
+                : creditInvitation ? t("credits.invite.liveRule", { inviter: creditInvitation.rule.inviterReward, invitee: creditInvitation.rule.inviteeReward, days: creditInvitation.rule.validDays, remaining: creditInvitation.todayRemaining, limit: creditInvitation.rule.dailyLimit }) : creditsPreview ? t("credits.invite.body") : invitationRewardBody}
         </p>
       </div>
       {displayInviteCode ? (
@@ -1540,6 +1556,20 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         </button>
       ) : null}
     </div>
+    {invitationOwner === state.account.userId && invitationRecords && invitationRecords.items.length > 0 && <div className="text-xs text-text-ink/70 space-y-2" aria-label={t("credits.invite.title")}>
+      {invitationRecords.items.map((record, index) => <p key={`${record.inviteeMask}:${record.registeredAt}:${index}`}>
+        {record.inviteeMask} · {new Date(record.registeredAt).toLocaleDateString()} · {t(`credits.invite.status.${record.status}`)} · +{record.inviterGrant} / +{record.inviteeGrant}
+      </p>)}
+      {invitationRecords.hasMore && <button type="button" onClick={() => {
+        const cursor = invitationRecords.nextCursor;
+        const userId = state.account.userId;
+        if (!cursor || !creditsClient) return;
+        void creditsClient.invitations({ cursor }).then(page => {
+          setInvitationRecords(current => current?.nextCursor === cursor && invitationAccountRef.current === userId ? { ...page, items: [...current.items, ...page.items] } : current);
+        }).catch(() => setInvitationLoadStatus("error"));
+      }}>{t("credits.detail.nextPage")}</button>}
+    </div>}
+    </>
   ) : null;
 
   const confirmDialog = confirm ? resolveAccountConfirmDialog(t) : null;
@@ -1766,7 +1796,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         >
         {creditsPreview && <CreditsSettingsPanel invitationContent={invitationCard} />}
         {!creditsPreview && isAccountMode && creditsClient && activeTab === "tokens" &&
-          <CreditsSettingsPanel key={state.account.userId ?? "signed-out"} />}
+          <CreditsSettingsPanel key={state.account.userId ?? "signed-out"} invitationContent={invitationCard} />}
         <div id="token-usage" className="mb-6" hidden={creditsPreview || (isAccountMode && !!creditsClient)}>
           <div className="flex items-center justify-between gap-4 mb-3">
             <div className="flex items-center gap-2">

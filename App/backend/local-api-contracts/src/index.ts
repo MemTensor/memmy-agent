@@ -1302,7 +1302,8 @@ export type AccountSessionView = z.infer<typeof AccountSessionViewSchema>;
 export const InvitationResultSchema = z.discriminatedUnion("status", [
     z.object({
         status: z.literal("success"),
-        inviteeRewardTokens: z.number().int().nonnegative()
+        inviteeRewardTokens: z.number().int().nonnegative(),
+        inviteeRewardCredits: z.string().regex(/^\d+\.\d{2}$/).optional()
     }),
     z.object({
         status: z.enum(["not_provided", "invalid", "not_new_user", "pending"])

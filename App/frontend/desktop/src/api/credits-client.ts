@@ -1,5 +1,6 @@
 import {
   CreditsPlansSchema, CreditsApplicationSchema, type CreditsPlansQuery,
+  CreditsCheckinSchema, CreditsRedemptionSchema, CreditsInvitationSummarySchema, CreditsInvitationsPageSchema, type CreditsInvitationsQuery,
   CreditsSummarySchema, CreditsGrantsPageSchema, CreditsLedgerPageSchema,
   CreditsUsagePageSchema, CreditsUsageDetailSchema, CreditsUsageExportSchema, CreditsUsageDownloadSchema,
   type CreditsUsageQuery, type CreditsUsageExportQuery,
@@ -15,6 +16,10 @@ export function createHttpCreditsClient(config: RuntimeConfig) {
     return `/api/credits/${resource}${search.size ? `?${search}` : ""}`;
   }
   return {
+    checkin: (requestId: string) => requestJson({ config, path: path("check-ins"), body: { requestId }, schema: CreditsCheckinSchema }),
+    redeem: (requestId: string, code: string) => requestJson({ config, path: path("redemptions"), body: { requestId, code }, schema: CreditsRedemptionSchema }),
+    invitationSummary: () => requestJson({ config, path: path("invitations/summary"), schema: CreditsInvitationSummarySchema }),
+    invitations: (query: CreditsInvitationsQuery = {}) => requestJson({ config, path: path("invitations", query), schema: CreditsInvitationsPageSchema }),
     plans: (query: CreditsPlansQuery = {}) => requestJson({ config, path: path("plans", query), schema: CreditsPlansSchema }),
     latestApplication: () => requestJson({ config, path: path("plan-applications/latest"), schema: CreditsApplicationSchema }),
     usage: (query: CreditsUsageQuery = {}, signal?: AbortSignal) => requestJson({ config, init: { signal }, path: path("usage", query), schema: CreditsUsagePageSchema }),

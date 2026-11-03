@@ -96,6 +96,14 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
   const deviceId = options.deviceId;
 
   return {
+    async postCreditReward(input) {
+      return requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, `/api/credits/v1/${input.resource}`, {
+        body: input.body, lang: "zh", bearerCredential: input.uuid, deviceId,
+        toError: (status, envelope) => Object.assign(new Error(envelope.message || "Credits request failed"), {
+          code: envelope.businessCode && ["BUSINESS_REQUEST_REUSED", "CHECKIN_ALREADY_CLAIMED", "VOUCHER_INVALID", "VOUCHER_ALREADY_REDEEMED", "VOUCHER_EXPIRED", "VOUCHER_EXHAUSTED", "VOUCHER_INELIGIBLE", "REWARD_RATE_LIMITED"].includes(envelope.businessCode) ? envelope.businessCode : status === 401 ? "unauthorized" : status === 409 ? "conflict" : status === 429 ? "rate_limited" : status < 500 ? "invalid_argument" : "internal"
+        })
+      });
+    },
     async getCredits(input) {
       const query = new URLSearchParams(Object.entries(input.query ?? {}).map(([key, value]) => [key, String(value)]));
       const path = `/api/credits/v1/${input.resource}${query.size ? `?${query}` : ""}`;
@@ -487,6 +495,7 @@ interface CloudRequestOptions {
 
 interface CloudEnvelope {
   code: number;
+  businessCode?: string;
   message?: string;
   data: unknown;
 }
@@ -575,6 +584,7 @@ async function readCloudEnvelope(response: Response): Promise<CloudEnvelope> {
     const value = JSON.parse(preserveIntegerIdentifiers(raw)) as Partial<CloudEnvelope>;
     return {
       code: typeof value.code === "number" ? value.code : response.ok ? 0 : response.status,
+      businessCode: typeof value.code === "string" ? value.code : undefined,
       message: typeof value.message === "string" ? value.message : undefined,
       data: "data" in value ? value.data : null
     };

@@ -22,7 +22,15 @@ export const API_ERROR_CODES = [
   "toolkit_unsupported",
   "model_config_changed",
   "config_write_busy",
-  "account_model_preset_conflict"
+  "account_model_preset_conflict",
+  "BUSINESS_REQUEST_REUSED",
+  "CHECKIN_ALREADY_CLAIMED",
+  "VOUCHER_INVALID",
+  "VOUCHER_ALREADY_REDEEMED",
+  "VOUCHER_EXPIRED",
+  "VOUCHER_EXHAUSTED",
+  "VOUCHER_INELIGIBLE",
+  "REWARD_RATE_LIMITED"
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
@@ -46,7 +54,15 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Objec
   toolkit_unsupported: 400,
   model_config_changed: 409,
   config_write_busy: 409,
-  account_model_preset_conflict: 409
+  account_model_preset_conflict: 409,
+  BUSINESS_REQUEST_REUSED: 409,
+  CHECKIN_ALREADY_CLAIMED: 409,
+  VOUCHER_INVALID: 422,
+  VOUCHER_ALREADY_REDEEMED: 409,
+  VOUCHER_EXPIRED: 422,
+  VOUCHER_EXHAUSTED: 409,
+  VOUCHER_INELIGIBLE: 422,
+  REWARD_RATE_LIMITED: 429
 });
 
 export interface ApiError extends Error {

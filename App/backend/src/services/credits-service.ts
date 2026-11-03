@@ -1,5 +1,6 @@
 import {
   CreditsPlansSchema, CreditsApplicationSchema, type CreditsPlansQuery,
+  CreditsCheckinSchema, CreditsRedemptionSchema, CreditsInvitationSummarySchema, CreditsInvitationsPageSchema, type CreditsInvitationsQuery,
   CreditsSummarySchema, CreditsGrantsPageSchema, CreditsLedgerPageSchema,
   CreditsUsagePageSchema, CreditsUsageDetailSchema, CreditsUsageExportSchema, CreditsUsageDownloadSchema,
   type CreditsUsageQuery, type CreditsUsageExportQuery,
@@ -9,12 +10,19 @@ import type { CloudClient } from "../adapters/outbound/cloud-client/types.js";
 import type { AccountSessionRepository } from "../infrastructure/app-state-store/repositories/account-session-repo.js";
 
 export function createCreditsService(cloud: CloudClient, accounts: AccountSessionRepository) {
-  async function read(resource: "summary" | "grants" | "ledger" | "plans" | "plan-applications/latest" | "usage" | `usage/${string}`, query?: Record<string, string | number | undefined>) {
+  async function read(resource: "summary" | "grants" | "ledger" | "invitations/summary" | "invitations" | "plans" | "plan-applications/latest" | "usage" | `usage/${string}`, query?: Record<string, string | number | undefined>) {
     const uuid = accounts.getCloudUuid();
     if (!uuid) throw Object.assign(new Error("Account session is not authenticated"), { code: "unauthorized" });
     const filtered = Object.fromEntries(Object.entries(query ?? {}).filter((entry): entry is [string, string | number] => entry[1] !== undefined));
     const result = await cloud.getCredits({ uuid, resource, query: filtered });
     // A response belonging to the previous account must not appear after account switching.
+    if (accounts.getCloudUuid() !== uuid) throw Object.assign(new Error("Account session changed"), { code: "unauthorized" });
+    return result;
+  }
+  async function write(resource: "check-ins" | "redemptions", body: { requestId: string; code?: string }) {
+    const uuid = accounts.getCloudUuid();
+    if (!uuid) throw Object.assign(new Error("Account session is not authenticated"), { code: "unauthorized" });
+    const result = await cloud.postCreditReward({ uuid, resource, body });
     if (accounts.getCloudUuid() !== uuid) throw Object.assign(new Error("Account session changed"), { code: "unauthorized" });
     return result;
   }
@@ -25,6 +33,10 @@ export function createCreditsService(cloud: CloudClient, accounts: AccountSessio
     async usageDetail(callId: string) { return CreditsUsageDetailSchema.parse(await read(`usage/${encodeURIComponent(callId)}`)); },
     async usageExport(query: CreditsUsageExportQuery) { return CreditsUsageExportSchema.parse(await read("usage/export", query)); },
     async usageDownload(query: CreditsUsageExportQuery & { token: string }) { return CreditsUsageDownloadSchema.parse(await read("usage/download", query)); },
+    async checkin(body: { requestId: string }) { return CreditsCheckinSchema.parse(await write("check-ins", body)); },
+    async redeem(body: { requestId: string; code: string }) { return CreditsRedemptionSchema.parse(await write("redemptions", body)); },
+    async invitationSummary() { return CreditsInvitationSummarySchema.parse(await read("invitations/summary")); },
+    async invitations(query: CreditsInvitationsQuery) { return CreditsInvitationsPageSchema.parse(await read("invitations", query)); },
     async summary() { return CreditsSummarySchema.parse(await read("summary")); },
     async grants(query: CreditsGrantsQuery) { return CreditsGrantsPageSchema.parse(await read("grants", query)); },
     async ledger(query: CreditsLedgerQuery) { return CreditsLedgerPageSchema.parse(await read("ledger", query)); }

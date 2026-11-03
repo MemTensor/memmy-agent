@@ -898,7 +898,7 @@ export function HomePage() {
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
   const creditsPreview = isCreditsPreviewMode();
-  const showHomeCheckin = creditsPreview && state.bootstrap?.app.userMode === "account";
+  const showHomeCheckin = state.bootstrap?.app.userMode === "account";
   const { track } = useAnalytics();
   const { syncAgentConversation } = useTaskBus();
   const { connection, ensureChatSubscription, taskStateCoordinator } = useAgentRuntimeBridge();

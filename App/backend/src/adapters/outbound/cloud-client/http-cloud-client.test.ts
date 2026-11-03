@@ -155,3 +155,12 @@ it("downloads signed CSV only from the authenticated cloud route", async () => {
   expect(await client.getCredits({ uuid: "test-credential", resource: "usage/download", query: { token: "signed+token" } })).toEqual({ csv: "RequestID,积分消耗\r\nlocal-test,1.01" });
   expect(fetchImpl).toHaveBeenCalledWith("https://cloud.test/api/credits/v1/usage/download?token=signed%2Btoken", expect.objectContaining({ headers: { authorization: "Bearer test-credential" }, redirect: "error" }));
 });
+it("posts reward idempotency keys and exposes the business rejection reason", async () => {
+  const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ code: "VOUCHER_EXPIRED", message: "兑换码已过期", retryable: false }), { status: 422 }));
+  const client = createHttpCloudClient({ baseUrl: "https://example.invalid", fetchImpl: fetchImpl as typeof fetch });
+  await expect(client.postCreditReward({ uuid: "test-account", resource: "redemptions", body: { requestId: "retry-1", code: "TEST-123" } })).rejects.toMatchObject({ code: "VOUCHER_EXPIRED", message: "兑换码已过期" });
+  expect(fetchImpl.mock.calls[0]?.[0]).toBe("https://example.invalid/api/credits/v1/redemptions");
+  const init = (fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1];
+  expect(init.method).toBe("POST"); expect(JSON.parse(init.body as string)).toEqual({ requestId: "retry-1", code: "TEST-123" });
+  expect(init.headers).toMatchObject({ authorization: "Bearer test-account" });
+});

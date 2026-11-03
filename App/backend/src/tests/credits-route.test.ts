@@ -67,3 +67,25 @@ describe("credits local proxy", () => {
     expect((await f.read("/api/credits/grants")).statusCode).toBe(401);
   });
 });
+
+it("protects reward writes, preserves retry bodies and rejects account spoofing", async () => {
+  let uuid: string | null = "account-a";
+  const result = { claimed: true, alreadyClaimed: false, businessDate: "2026-11-03",
+    grant: { grantId: "1", amount: "100.00", expiresAt: "2026-12-03T10:00:00+08:00" }, balance: "1100.00", accountVersion: 2 };
+  const postCreditReward = vi.fn(async () => result);
+  const app = Fastify(); apps.push(app);
+  registerCreditsRoutes(app, { credits: createCreditsService({ ...createMockCloudClient(), postCreditReward }, { getCloudUuid: () => uuid } as never),
+    authenticateRuntimeToken: async (req, reply) => { if (req.headers["x-memmy-local-token"] !== "runtime") return reply.code(401).send({}); } });
+  const write = (resource: string, payload: unknown, authenticated = true) => app.inject({ method: "POST", url: `/api/credits/${resource}`, payload: payload as never,
+    headers: authenticated ? { "x-memmy-local-token": "runtime" } : {} });
+  for (const resource of ["check-ins", "redemptions"]) expect((await write(resource, { requestId: "same" }, false)).statusCode).toBe(401);
+  expect((await write("check-ins", { requestId: "same", userId: "8" })).statusCode).toBe(400);
+  expect((await write("redemptions", { requestId: "same" })).statusCode).toBe(400);
+  expect((await write("check-ins", { requestId: "same" })).json()).toEqual(result);
+  expect((await write("check-ins", { requestId: "same" })).json()).toEqual(result);
+  expect(postCreditReward).toHaveBeenLastCalledWith({ uuid: "account-a", resource: "check-ins", body: { requestId: "same" } });
+  postCreditReward.mockImplementationOnce(async () => { uuid = "account-b"; return result; });
+  expect((await write("check-ins", { requestId: "next" })).statusCode).toBe(401);
+  uuid = null;
+  expect((await write("check-ins", { requestId: "no-session" })).statusCode).toBe(401);
+});
