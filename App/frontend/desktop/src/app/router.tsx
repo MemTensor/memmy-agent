@@ -324,7 +324,7 @@ export function AppRouter(props: { onRetry: () => void }) {
       )}
       {currentPath === "/main" ? null : (
         <Suspense fallback={<StartupScreen />}>
-          {renderRoute(currentPath)}
+          {renderRoute(currentPath, creditsPreview || state.bootstrap?.app.userMode === "account")}
         </Suspense>
       )}
       {windowDragRegion}
@@ -418,22 +418,22 @@ function hasReloadRestoreRoute(): boolean {
 }
 
 /** Renders render route. */
-function renderRoute(path: AppRoutePath) {
+function renderRoute(path: AppRoutePath, creditsEnabled: boolean) {
   switch (path) {
     case "/token-detail":
       return <TokenDetailPage />;
     case "/credit-purchase-details":
-      return isCreditsPreviewMode() ? <CreditsPlansPage /> : <SettingsPage />;
+      return creditsEnabled ? <CreditsPlansPage /> : <SettingsPage />;
     case "/credit-reward-details":
-      return isCreditsPreviewMode() ? <CreditsSourceDetailPage source="reward" /> : <SettingsPage />;
+      return creditsEnabled ? <CreditsSourceDetailPage source="reward" /> : <SettingsPage />;
     case "/credit-packs":
-      return isCreditsPreviewMode() ? <CreditsPlansPage /> : <SettingsPage />;
+      return creditsEnabled ? <CreditsPlansPage /> : <SettingsPage />;
     case "/redeem":
-      return isCreditsPreviewMode() ? <CreditsRedeemPage /> : <SettingsPage />;
+      return creditsEnabled ? <CreditsRedeemPage /> : <SettingsPage />;
     case "/credit-checkout":
-      return isCreditsPreviewMode() ? <CreditsPlansPage /> : <SettingsPage />;
+      return creditsEnabled ? <CreditsPlansPage /> : <SettingsPage />;
     case "/plans":
-      return isCreditsPreviewMode() ? <CreditsPlansPage /> : <SettingsPage />;
+      return creditsEnabled ? <CreditsPlansPage /> : <SettingsPage />;
     case "/checkin":
       return isCreditsPreviewMode() ? <CreditsCheckinPage /> : <SettingsPage />;
     case "/limits":

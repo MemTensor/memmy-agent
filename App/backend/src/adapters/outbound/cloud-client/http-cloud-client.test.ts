@@ -132,3 +132,19 @@ describe("getTokenQuotaEligibility", () => {
     expect((init as RequestInit).headers).toMatchObject({ authorization: "Bearer uuid-1" });
   });
 });
+
+describe("credits cloud APIs", () => {
+  it("uses authenticated GET and preserves cursor encoding", async () => {
+    const fetchImpl = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(JSON.stringify({ code: 0, data: { items: [], nextCursor: null, hasMore: false } })));
+    const client = createHttpCloudClient({ baseUrl: "http://127.0.0.1:18101", fetchImpl: fetchImpl as typeof fetch });
+    await expect(client.getCredits({ uuid: "cloud-token", resource: "grants", query: { cursor: "a+b/=", limit: 20 } })).resolves.toMatchObject({ items: [] });
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe("http://127.0.0.1:18101/api/credits/v1/grants?cursor=a%2Bb%2F%3D&limit=20");
+    expect(init?.method).toBe("GET");
+    expect(init?.headers).toMatchObject({ authorization: "Bearer cloud-token" });
+  });
+  it("maps expired cloud sessions to unauthorized", async () => {
+    const client = createHttpCloudClient({ baseUrl: "http://127.0.0.1:18101", fetchImpl: vi.fn(async () => new Response(JSON.stringify({ code: "AUTH_REQUIRED", message: "Please log in" }), { status: 401 })) as typeof fetch });
+    await expect(client.getCredits({ uuid: "expired", resource: "summary" })).rejects.toMatchObject({ code: "unauthorized" });
+  });
+});

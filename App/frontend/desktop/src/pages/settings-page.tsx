@@ -34,6 +34,7 @@ import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ComputerUseSettings } from "./computer-use-settings.js";
 import { CreditsSettingsPanel } from "./credits-in-app.js";
+import type { CreditsClient } from "../api/credits-client.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
   MEMORY_TOKEN_BUDGET_SECTION_ID,
@@ -239,6 +240,7 @@ export function SettingsPage() {
         configClient={clients?.config}
         byokTokenUsageClient={clients?.byokTokenUsage}
         tokenQuotaClient={clients?.tokenQuota}
+        creditsClient={clients?.credits}
         computerUseClient={clients?.memmyAgent}
         update={update}
         track={track}
@@ -270,6 +272,7 @@ export interface SettingsPageViewProps {
   configClient?: ConfigClient;
   byokTokenUsageClient?: ByokTokenUsageClient;
   tokenQuotaClient?: TokenQuotaClient;
+  creditsClient?: CreditsClient;
   computerUseClient?: import("../api/memmy-agent-client.js").MemmyAgentClient;
   update: UpdateCoordinatorValue;
   track?: TrackAnalyticsEvent;
@@ -335,6 +338,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     configClient,
     byokTokenUsageClient,
     tokenQuotaClient,
+    creditsClient,
     update,
     track = noopTrackAnalyticsEvent,
     activeTab: activeTabProp,
@@ -1758,10 +1762,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           role="tabpanel"
           aria-labelledby="settings-tab-tokens"
           hidden={activeTab !== "tokens"}
-          className={creditsPreview ? "flex flex-col" : undefined}
+          className={creditsPreview || (isAccountMode && !!creditsClient) ? "flex flex-col" : undefined}
         >
         {creditsPreview && <CreditsSettingsPanel invitationContent={invitationCard} />}
-        <div id="token-usage" className="mb-6" hidden={creditsPreview}>
+        {!creditsPreview && isAccountMode && creditsClient && activeTab === "tokens" &&
+          <CreditsSettingsPanel key={state.account.userId ?? "signed-out"} />}
+        <div id="token-usage" className="mb-6" hidden={creditsPreview || (isAccountMode && !!creditsClient)}>
           <div className="flex items-center justify-between gap-4 mb-3">
             <div className="flex items-center gap-2">
               <Zap size={16} className="text-text-ink/60" />
@@ -1806,7 +1812,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
 
         </div>
 
-        {!creditsPreview && invitationCard}
+        {!creditsPreview && !(isAccountMode && creditsClient) && invitationCard}
         </div>
 
         <div

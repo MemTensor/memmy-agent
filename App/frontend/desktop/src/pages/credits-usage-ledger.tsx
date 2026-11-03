@@ -79,9 +79,9 @@ function Pagination(props: { total: number; page: number; size: number; setPage:
   </nav>;
 }
 
-export function CreditsUsageLedger() {
+export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
   const { t, language }=useTranslation();
-  const { demo, now, reload }=useCreditDemo();
+  const { demo, now, reload }=useCreditDemo(!live);
   const [tab,setTab]=useState<UsageTab>("agent");
   const [span,setSpan]=useState<LedgerSpan | "custom">("7");
   const [customOpen,setCustomOpen]=useState(false);
@@ -94,7 +94,7 @@ export function CreditsUsageLedger() {
   const [exportStatus,setExportStatus]=useState("");
   const calendarRef=useRef<HTMLDivElement|null>(null);
   const calendarTriggerRef=useRef<HTMLButtonElement|null>(null);
-  useEffect(()=>{ const timer=window.setInterval(reload,10000); return ()=>window.clearInterval(timer); },[reload]);
+  useEffect(()=>{ if(live) return; const timer=window.setInterval(reload,10000); return ()=>window.clearInterval(timer); },[reload,live]);
   useEffect(()=>{
     if(!customOpen) return;
     const dismiss=(event:PointerEvent)=>{
@@ -107,7 +107,7 @@ export function CreditsUsageLedger() {
     document.addEventListener("keydown",escape);
     return ()=>{document.removeEventListener("pointerdown",dismiss);document.removeEventListener("keydown",escape);};
   },[customOpen]);
-  const calls=useMemo(()=>createUsageMock(new Date(demo.ledgerAnchor)),[demo.ledgerAnchor]);
+  const calls=useMemo(()=>live ? [] : createUsageMock(new Date(demo.ledgerAnchor)),[demo.ledgerAnchor,live]);
   const start=span==="custom" ? custom.start : formatDayKey(presetStart(span,now));
   const end=span==="custom" ? custom.end : formatDayKey(now);
   const range=usageRange(start,end)!;
@@ -125,6 +125,7 @@ export function CreditsUsageLedger() {
   const dateLabel=(row:UsageRow)=>row.source==="agent" ? stamp(row.at) : row.date===formatDayKey(now) ? stamp(now.toISOString()) : new Date(row.at).toLocaleDateString(language,{month:"2-digit",day:"2-digit"});
   const reset=()=>{setPage(1);setExportStatus("");};
   function refreshUsage() {
+    if (live) { setExportStatus(t("credits.live.usageUnavailable")); return; }
     reload();
     setExportStatus(t("usage.refreshed",{time:new Date().toLocaleTimeString(language,{hour:"2-digit",minute:"2-digit",hour12:false})}));
   }
@@ -180,7 +181,7 @@ export function CreditsUsageLedger() {
         <table className={styles.table}><thead><tr><th>{t(tab==="agent"?"credits.ledger.time":"usage.date")}</th><th>{t(tab==="agent"?"usage.request":"usage.operation")}</th><th>{t("credits.ledger.model")}</th><th className={styles.amount}>{t("credits.ledger.credits")}</th></tr></thead>
           <tbody>{visible.map(row=><tr key={row.id}><td className={styles.time}>{dateLabel(row)}</td><td>{row.source==="agent" ? <CreditRequestHover content={title(row)} requestId={row.calls[0]!.id} /> : <span>{title(row)}</span>}{row.source==="agent" && <small className={styles.rowRequestId}>{row.calls[0]!.id}</small>}{row.source==="agent" && row.status==="interrupted" && <small className={styles.state}>{t(`usage.status.${row.status}`)}</small>}</td><td className={styles.model}>{model(row)}</td><td className={styles.amount}>{number(row.credits)}</td></tr>)}</tbody>
         </table>
-        {!visible.length && <p className={styles.empty}>{t("credits.ledger.empty")}</p>}
+        {!visible.length && <p className={styles.empty}>{t(live ? "credits.live.usageUnavailable" : "credits.ledger.empty")}</p>}
       </div>
       <Pagination total={rows.length} page={currentPage} size={size} setPage={setPage} setSize={n=>{setSize(n);setPage(1);}}/>
     </div>

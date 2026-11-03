@@ -12,6 +12,13 @@ export const MEMORY_ADD_STATUS_SUMMARIES = [
 ] as const;
 
 export const zhCNMessages = {
+  "credits.live.usageUnavailable": "消费明细尚未接入，暂不展示消费记录。",
+  "credits.live.redeemUnavailable": "兑换功能尚未接入，暂不可提交。",
+  "credits.live.upgradeUnavailable": "Pro 申请尚未接入，暂不可提交。",
+  "credits.live.loading": "正在读取积分…",
+  "credits.live.auth": "登录已失效，请重新登录后查看积分。",
+  "credits.live.error": "积分加载失败，请稍后重试。",
+  "credits.live.retry": "重试",
   "browser.title": "浏览器",
   "browser.newTab": "新建标签页",
   "browser.blankTab": "新标签页",
@@ -2461,6 +2468,13 @@ export const zhCNMessages = {
 } as const;
 
 export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
+  "credits.live.usageUnavailable": "Usage details are not connected yet.",
+  "credits.live.redeemUnavailable": "Redemption is not available yet.",
+  "credits.live.upgradeUnavailable": "Pro applications are not available yet.",
+  "credits.live.loading": "Loading credits…",
+  "credits.live.auth": "Your session has expired. Sign in again to view credits.",
+  "credits.live.error": "Could not load credits. Please try again.",
+  "credits.live.retry": "Retry",
   "browser.title": "Browser",
   "browser.newTab": "New tab",
   "browser.blankTab": "New Tab",

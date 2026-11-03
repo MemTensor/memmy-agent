@@ -96,6 +96,16 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
   const deviceId = options.deviceId;
 
   return {
+    async getCredits(input) {
+      const query = new URLSearchParams(Object.entries(input.query ?? {}).map(([key, value]) => [key, String(value)]));
+      return requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs,
+        `/api/credits/v1/${input.resource}${query.size ? `?${query}` : ""}`, {
+          method: "GET", lang: "zh", bearerCredential: input.uuid,
+          toError: (status) => Object.assign(new Error(status === 401 ? "Account session expired" : "Credits request failed"), {
+            code: status === 401 ? "unauthorized" : status === 400 ? "invalid_argument" : "internal"
+          })
+        });
+    },
     async health(): Promise<CloudHealth> {
       return {
         status: "ok",

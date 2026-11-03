@@ -1,0 +1,24 @@
+import {
+  CreditsSummarySchema, CreditsGrantsPageSchema, CreditsLedgerPageSchema,
+  type CreditsGrantsQuery, type CreditsLedgerQuery
+} from "@memmy/local-api-contracts";
+import type { CloudClient } from "../adapters/outbound/cloud-client/types.js";
+import type { AccountSessionRepository } from "../infrastructure/app-state-store/repositories/account-session-repo.js";
+
+export function createCreditsService(cloud: CloudClient, accounts: AccountSessionRepository) {
+  async function read(resource: "summary" | "grants" | "ledger", query?: Record<string, string | number | undefined>) {
+    const uuid = accounts.getCloudUuid();
+    if (!uuid) throw Object.assign(new Error("Account session is not authenticated"), { code: "unauthorized" });
+    const filtered = Object.fromEntries(Object.entries(query ?? {}).filter((entry): entry is [string, string | number] => entry[1] !== undefined));
+    const result = await cloud.getCredits({ uuid, resource, query: filtered });
+    // A response belonging to the previous account must not appear after account switching.
+    if (accounts.getCloudUuid() !== uuid) throw Object.assign(new Error("Account session changed"), { code: "unauthorized" });
+    return result;
+  }
+  return {
+    async summary() { return CreditsSummarySchema.parse(await read("summary")); },
+    async grants(query: CreditsGrantsQuery) { return CreditsGrantsPageSchema.parse(await read("grants", query)); },
+    async ledger(query: CreditsLedgerQuery) { return CreditsLedgerPageSchema.parse(await read("ledger", query)); }
+  };
+}
+export type CreditsService = ReturnType<typeof createCreditsService>;

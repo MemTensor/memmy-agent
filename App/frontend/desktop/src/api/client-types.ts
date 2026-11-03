@@ -18,8 +18,10 @@ import { createHttpMemoryRuntimeClient, type MemoryRuntimeClient } from "./memor
 import { createMemmyAgentClient, type MemmyAgentClient } from "./memmy-agent-client.js";
 import { createHttpTokenQuotaClient, type TokenQuotaClient } from "./token-quota-client.js";
 import { configureUserTimeZone } from "../lib/user-time-zone.js";
+import { createHttpCreditsClient, type CreditsClient } from "./credits-client.js";
 
 export interface AppClients {
+  credits: CreditsClient;
   runtimeConfig: RuntimeConfig;
   bootstrap: BootstrapClient;
   account: AccountClient;
@@ -46,6 +48,7 @@ export function createAppClients(input: CreateAppClientsInput): AppClients {
   configureUserTimeZone(input.runtimeConfig.timeZone);
 
   return {
+    credits: createHttpCreditsClient(input.runtimeConfig),
     runtimeConfig: input.runtimeConfig,
     bootstrap: createHttpBootstrapClient(input.runtimeConfig),
     account: createHttpAccountClient(input.runtimeConfig),
