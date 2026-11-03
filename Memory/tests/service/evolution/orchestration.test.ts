@@ -34,7 +34,17 @@ describe("MemoryService / evolution / orchestration", () => {
   it("adds feedback and evolves L2/L3/Skill memories with the worker", async () => {
     const { db, service } = createTestService({
       skillLlm: createNoToolSkillLlm(),
-      embedder: createCapturingEmbedder([])
+      embedder: createCapturingEmbedder([]),
+      config: {
+        ...LEGACY_TEST_CONFIG,
+        algorithm: {
+          ...LEGACY_TEST_CONFIG.algorithm,
+          skill: {
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
+            directFromTrace: false
+          }
+        }
+      }
     });
     const session = service.openSession({
       namespace: {
@@ -503,6 +513,10 @@ describe("MemoryService / evolution / orchestration", () => {
           l2Induction: {
             ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             minEpisodesForActivation: 2
+          },
+          skill: {
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
+            directFromTrace: false
           }
         }
       }
