@@ -14,7 +14,7 @@ import {
 } from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
-import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
+import { renderMemmyResumeSkillFile, renderMemmySkillDirectoryFiles, renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
 import { prepareCodexHookTrust, type TrustMemmyCodexHooks } from "./hook-trust.js";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
@@ -114,29 +114,21 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
         [hookConfigPath, hookScriptPath, bridgePath, hooksFilePath, join(root, TARGET_FILE_NAME),
           join(root, "skills", "memmy-memory"), join(root, "skills", "memmy-resume"),
           join(hookDirectory, LEGACY_HOOK_SCRIPT_FILE_NAME)],
-        async (record) => {
+        async (transaction) => {
           await mkdir(hookDirectory, { recursive: true });
-          await writeFileAtomically(hookConfigPath, `${JSON.stringify(hookConfig, null, 2)}\n`);
-          await record(hookConfigPath);
-          await writeFileAtomically(hookScriptPath, renderMemmyResumeHookScript({ source: CODEX_TARGET_ID, mode: "codex" }));
-          await record(hookScriptPath);
-          await writeFileAtomically(bridgePath, await loadMemmyWorkspaceBridgeRuntimeAsset());
-          await record(bridgePath);
-          await upsertCodexHookConfig(hooksFilePath, hookCommand);
-          await record(hooksFilePath);
-          await rm(join(hookDirectory, LEGACY_HOOK_SCRIPT_FILE_NAME), { force: true });
-          await record(join(hookDirectory, LEGACY_HOOK_SCRIPT_FILE_NAME));
+          await transaction.writeFile(hookConfigPath, `${JSON.stringify(hookConfig, null, 2)}\n`);
+          await transaction.writeFile(hookScriptPath, renderMemmyResumeHookScript({ source: CODEX_TARGET_ID, mode: "codex" }));
+          await transaction.writeFile(bridgePath, await loadMemmyWorkspaceBridgeRuntimeAsset());
+          await upsertCodexHookConfig(hooksFilePath, hookCommand, transaction.writeFile);
+          await transaction.removeFile(join(hookDirectory, LEGACY_HOOK_SCRIPT_FILE_NAME));
           const manifest = renderMemmyPluginSkillManifest(_targetId);
           const filePath = join(root, TARGET_FILE_NAME);
-          await writeFileAtomically(
+          await transaction.writeFile(
             filePath,
             upsertMarkerBlock(await readTextFile(filePath), renderMemmySkillBootstrapManifest(manifest))
           );
-          await record(filePath);
-          await replaceMemmySkillDirectory(root, manifest);
-          await record(join(root, "skills", "memmy-memory"));
-          await replaceMemmyResumeSkillDirectory(root, CODEX_TARGET_ID);
-          await record(join(root, "skills", "memmy-resume"));
+          await transaction.replaceDirectory(join(root, "skills", "memmy-memory"), renderMemmySkillDirectoryFiles(manifest));
+          await transaction.replaceDirectory(join(root, "skills", "memmy-resume"), [{ relativePath: "SKILL.md", content: renderMemmyResumeSkillFile(CODEX_TARGET_ID) }]);
           // Trust only after all installation files have been written successfully.
           await trustHooks({ codexHomeDirectory: root, hooksFilePath, hookCommand });
         }
@@ -223,7 +215,7 @@ function removeLegacyMarkerBlock(existing: string): string {
   return existing.replace(createMarkerBlockPattern(LEGACY_CLI_START_MARKER, LEGACY_CLI_END_MARKER), "");
 }
 
-async function upsertCodexHookConfig(filePath: string, hookCommand: string): Promise<void> {
+async function upsertCodexHookConfig(filePath: string, hookCommand: string, write = writeFileAtomically): Promise<void> {
   const config = await readJsonConfig(filePath);
   const hooks = toMutableRecord(config.hooks);
   hooks.UserPromptSubmit = [
@@ -256,7 +248,7 @@ async function upsertCodexHookConfig(filePath: string, hookCommand: string): Pro
   hooks.PostCompact = codexHookEntries(hooks.PostCompact, hookCommand, "Updating Memmy world model");
   hooks.SessionEnd = codexHookEntries(hooks.SessionEnd, hookCommand, "Closing Memmy memory session", SESSION_END_TIMEOUT_SECONDS);
   config.hooks = hooks;
-  await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
+  await write(filePath, `${JSON.stringify(config, null, 2)}\n`);
 }
 
 async function removeCodexHookConfig(filePath: string): Promise<void> {

@@ -317,3 +317,25 @@ describe.each(["Backend", "Memory"])("%s cross-process installation lock", integ
     }
   }, 15000);
 });
+
+describe("review failure windows", () => {
+  it.each(["record-edit", "record-failure", "cleanup-failure", "persistent-read-failure", "stage-failure"])("rolls back only committed installer content (%s)", async mode => {
+    await runFailureFixture("codex-rollback-failure.mjs", [mode]);
+  });
+  it("recovers a confirmed dead lock owner", async () => {
+    await runFailureFixture("codex-crash-lock.mjs", []);
+  });
+});
+
+function runFailureFixture(file: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const loader = fileURLToPath(new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url));
+    const script = fileURLToPath(new URL(`./fixtures/${file}`, import.meta.url));
+    const child = spawn(process.execPath, ["--import", loader, script, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", data => { output += data; });
+    child.stderr.on("data", data => { output += data; });
+    child.on("error", reject);
+    child.on("close", code => code === 0 ? resolve() : reject(new Error(output)));
+  });
+}
