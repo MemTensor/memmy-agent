@@ -74,7 +74,12 @@ export function buildPluginMcpServer(
         const instructions = await skillContent.resolve(ref, extra.signal);
         // Not listed as a model tool. The runtime consumes this transient envelope directly.
         return { content: [], _meta: { "memmy.dev/private-skill-context": { ref, instructions } } };
-      } catch { return toolError("plugin_skill_load_failed: sign in, check connectivity and installed plugin version, then retry"); }
+      } catch (error) {
+        const codes = ["plugin_skill_access_denied", "plugin_skill_unavailable", "plugin_skill_bundle_missing", "plugin_skill_invalid", "plugin_skill_version_changed"];
+        const candidate = (error as { code?: string })?.code;
+        const code = codes.includes(candidate ?? "") ? candidate! : "plugin_skill_load_failed";
+        return { ...toolError(code), _meta: { "memmy.dev/private-skill-error": { code, retryable: code === "plugin_skill_unavailable" } } };
+      }
     }
     const tool = capabilityTools(plugins).find((candidate) => candidate.name === request.params.name);
     if (!tool) return toolError(`Plugin capability is not active: ${request.params.name}`);

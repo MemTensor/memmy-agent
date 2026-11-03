@@ -315,3 +315,16 @@ it("activates metadata only, keeps private text off progress events, and rejects
   expect(result.isError).not.toBe(true); expect(invoke).toHaveBeenCalledTimes(1);
   expect(JSON.stringify(events)).not.toContain(secret);
 });
+
+it.each(["plugin_skill_access_denied", "plugin_skill_unavailable", "plugin_skill_invalid"])("transmits only safe private-load diagnostics for %s", async code => {
+  const { service } = createPlugins();
+  const ref = { pluginId: plugin.id, skillId: "review", pluginVersion: plugin.version, revision: "r1", sha256: "a".repeat(64) };
+  const server = buildPluginMcpServer(service, createProgressBus(), undefined, { reference: () => ref,
+    resolve: async () => { throw Object.assign(new Error("PRIVATE-CONTENT-OR-CREDENTIAL-SENTINEL"), { code }); }, clear() {} });
+  const [a, b] = InMemoryTransport.createLinkedPair(); const client = new Client({ name: "test", version: "1" });
+  await server.connect(b); await client.connect(a); connections.push({ client, server });
+  const result = await client.callTool({ name: "resolve_plugin_skill_context", arguments: { ref }, _meta: { "memmy.dev/cloud-skills": "1" } });
+  expect(result.isError).toBe(true);
+  expect(result._meta?.["memmy.dev/private-skill-error"]).toEqual({ code, retryable: code === "plugin_skill_unavailable" });
+  expect(JSON.stringify(result)).not.toContain("PRIVATE-CONTENT-OR-CREDENTIAL-SENTINEL");
+});

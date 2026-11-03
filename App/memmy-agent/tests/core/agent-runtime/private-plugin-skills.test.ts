@@ -25,6 +25,47 @@ function loader() {
 }
 
 describe("private plugin instruction projection", () => {
+  it("recovers a transient private load before issuing exactly one model request", async () => {
+    const { tools, callTool } = loader();
+    callTool.mockRejectedValueOnce(new Error("temporary transport failure"));
+    const provider = new Provider([new LLMResponse({ content: "done" })]);
+    const notices: string[] = [];
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({ messages: [{ role: "user", content: "continue" }], privateSkillRefs: [ref], tools, provider, maxIterations: 1,
+      retryWaitCallback: (message: string) => { notices.push(message); } }));
+    expect(callTool).toHaveBeenCalledTimes(2);
+    expect(notices).toEqual(["Reloading private plugin instructions (retry 1 of 1)..."]);
+    expect(provider.requests).toHaveLength(1);
+    expect(JSON.stringify(provider.requests)).toContain(secret);
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it.each(["plugin_skill_access_denied", "plugin_skill_invalid", "plugin_skill_bundle_missing"])("does not retry or call the model for %s", async code => {
+    const { tools, callTool } = loader();
+    callTool.mockResolvedValue({ isError: true, content: [], _meta: { "memmy.dev/private-skill-error": { code, retryable: false } } } as any);
+    const provider = new Provider([]);
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({ messages: [{ role: "user", content: "continue" }], privateSkillRefs: [ref], tools, provider, maxIterations: 1 }));
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(provider.requests).toHaveLength(0);
+    expect(result.stopReason).toBe("error");
+    expect(JSON.stringify(result)).toContain(code);
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it("stops after a single transient retry without invoking the model", async () => {
+    const { tools, callTool } = loader(); callTool.mockRejectedValue(new Error("transport failed"));
+    const provider = new Provider([]);
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({ messages: [{ role: "user", content: "continue" }], privateSkillRefs: [ref], tools, provider, maxIterations: 1 }));
+    expect(callTool).toHaveBeenCalledTimes(2); expect(provider.requests).toHaveLength(0);
+    expect(result.stopReason).toBe("error");
+  });
+
+  it("does not retry after cancellation during backoff", async () => {
+    const controller = new AbortController(); const resolve = vi.fn(async () => { throw Object.assign(new Error("unavailable"), { code: "plugin_skill_unavailable", retryable: true }); });
+    await expect(projectPrivateSkillInstructions([], [ref], { get: () => ({ resolvePluginSkillInstructions: resolve }) }, controller.signal, "chat", false,
+      () => { controller.abort(new Error("cancelled")); })).rejects.toThrow("cancelled");
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps instructions out of transcript, checkpoints, tool events and saved metadata", async () => {
     const { tools, callTool } = loader();
     const provider = new Provider([
