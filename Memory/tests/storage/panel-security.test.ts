@@ -84,7 +84,7 @@ describe("panel safety generations", () => {
     db.db.prepare("UPDATE raw_turns SET episode_id=? WHERE id=?").run(wrong.id,turn.rawTurnId);
     expect(panelSafetyToken(db.db)).not.toBe(before);
   });
-  it("replaces an existing v14 trigger without changing its safety token or facts", async () => {
+  it("replaces an existing legacy trigger without changing its safety token or facts", async () => {
     const { db, repos, pending, episode } = await pendingCapture();
     db.db.exec(`DROP TRIGGER panel_safety_raw_turns_update;
       CREATE TRIGGER panel_safety_raw_turns_update AFTER UPDATE ON raw_turns
@@ -94,7 +94,7 @@ describe("panel safety generations", () => {
     const safety = panelSafetyToken(db.db);
     const reopened = new MemoryDb({ path: db.path });
     reopened.close();
-    expect(db.schemaVersion().version).toBe(14);
+    expect(db.schemaVersion().version).toBe(15);
     expect(panelSafetyToken(db.db)).toBe(safety);
     repos.runtime.bindRawTurnEpisode(pending.id, episode.id, episode.updatedAt);
     expect(panelSafetyToken(db.db)).toBe(safety);

@@ -1,18 +1,28 @@
 import type Database from "better-sqlite3";
+import { sourceVersion } from "./source-changes.js";
 import {projectPanelLogSql} from "./panel-log-summary.js";
 import { memoryDisplayedSourceSql } from "./panel-source-sql.js";
 import { RAW_SOURCE_SQL } from "./memory-relations.js";
 import type { MemoryStatsRow } from "../types.js";
-import { panelSourceForStatsRow } from "../utils/panel-source.js";
 /** Rebuildable presentation data. Source tables and their authorization remain authoritative. */
-export const PANEL_CACHE_VERSION = 2;
-const TABLES = {
-  memories: "panel_memory_dirty",
-  api_logs: "panel_log_dirty"
-} as const;
+export const PANEL_CACHE_VERSION = 3;
 export type PanelCachePart = "memories" | "logs" | "metrics" | "visibility";
-export function installPanelCache(db: Database.Database): void {
-  db.exec(`
+const cacheConnections = new WeakMap<Database.Database, Database.Database>();
+export function bindPanelCache(source: Database.Database, cache: Database.Database): void { cacheConnections.set(source,cache); }
+export function panelCacheConnection(source: Database.Database): Database.Database { return cacheConnections.get(source) ?? source; }
+export function hasPanelCache(source: Database.Database): boolean { return cacheConnections.has(source); }
+/** Persistent callers are owned by the worker. Legacy synchronous APIs use TEMP data only. */
+export function installPanelCache(source: Database.Database, cache?: Database.Database): void {
+  const db = cache ?? source;
+  const temporary = !cache || cache === source;
+  bindPanelCache(source,db);
+  const schema=temporary?"temp":"main";
+  const existing=db.prepare(`SELECT 1 FROM ${schema}.sqlite_master WHERE name='panel_cache_meta'`).get();
+  if(existing && db.prepare(`SELECT version FROM ${schema}.panel_cache_meta`).pluck().get()!==PANEL_CACHE_VERSION) {
+    for(const row of db.prepare(`SELECT name FROM ${schema}.sqlite_master WHERE type='table' AND name GLOB 'panel_*'`).all() as Array<{name:string}>)
+      db.exec(`DROP TABLE ${schema}."${row.name.replaceAll('"','""')}"`);
+  }
+  const ddl = `
   CREATE TABLE IF NOT EXISTS panel_cache_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL, revision INTEGER NOT NULL, log_revision INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS panel_memory_dirty(id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS panel_log_dirty(id INTEGER PRIMARY KEY, revision INTEGER NOT NULL);
@@ -29,55 +39,66 @@ export function installPanelCache(db: Database.Database): void {
   CREATE INDEX IF NOT EXISTS idx_panel_log_refs_target ON panel_log_refs(ref_id,log_id);
   CREATE TABLE IF NOT EXISTS panel_log_metrics(id INTEGER PRIMARY KEY,tool_name TEXT NOT NULL,source_agent TEXT,called_at TEXT NOT NULL,duration_ms REAL NOT NULL,success INTEGER NOT NULL,recall_score REAL);
   CREATE INDEX IF NOT EXISTS idx_panel_log_metrics_order ON panel_log_metrics(tool_name,called_at DESC,id DESC);
- `);
-  const meta = db.prepare("SELECT version FROM panel_cache_meta WHERE singleton=1").get() as {
-    version: number;
-  } | undefined;
-  if (meta && meta.version !== PANEL_CACHE_VERSION) {
-    // Cache format changes discard only derived data; source/schema data is untouched.
-    for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name GLOB 'panel_cache_*'").all() as Array<{
-      name: string;
-    }>)
-      db.exec(`DROP TRIGGER "${name.replaceAll('"', '""')}"`);
-    for (const table of ["panel_cache_meta", "panel_memory_dirty", "panel_log_dirty", "panel_metric_dirty", "panel_visibility_dirty", "panel_memory_facts", "panel_memory_visibility", "panel_log_facts", "panel_log_refs", "panel_log_metrics"])
-      db.exec(`DROP TABLE ${table}`);
-    installPanelCache(db);
-    return;
+ `;
+
+  db.exec(temporary ? ddl.replaceAll("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE IF NOT EXISTS").replaceAll("CREATE INDEX IF NOT EXISTS ", "CREATE INDEX IF NOT EXISTS temp.") : ddl);
+  db.exec(`${temporary ? "CREATE TEMP" : "CREATE"} TABLE IF NOT EXISTS panel_sync_state(
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL,generation INTEGER NOT NULL,
+    seq INTEGER NOT NULL,memory_after TEXT,log_after INTEGER,seeded INTEGER NOT NULL);
+    ${temporary ? "CREATE TEMP" : "CREATE"} TABLE IF NOT EXISTS panel_statistics(
+    section TEXT NOT NULL,cache_key TEXT NOT NULL,snapshot_json TEXT NOT NULL,PRIMARY KEY(section,cache_key));`);
+  const version = db.prepare("SELECT version FROM panel_cache_meta WHERE singleton=1").pluck().get();
+  if (version !== PANEL_CACHE_VERSION) resetPanelCache(source);
+}
+export function resetPanelCache(source: Database.Database): void {
+  const db = panelCacheConnection(source), version = sourceVersion(source);
+  db.transaction(() => {
+    for (const table of ["panel_memory_dirty","panel_log_dirty","panel_metric_dirty","panel_visibility_dirty","panel_memory_facts","panel_memory_visibility","panel_log_facts","panel_log_refs","panel_log_metrics","panel_statistics","panel_sync_state","panel_cache_meta"])
+      db.exec(`DELETE FROM ${table}`);
+    db.prepare("INSERT INTO panel_cache_meta VALUES(1,?,0,0)").run(PANEL_CACHE_VERSION);
+    db.prepare("INSERT INTO panel_sync_state VALUES(1,?,?,?,NULL,NULL,0)").run(version.identity,version.generation,version.seq);
+  })();
+}
+interface SyncState { identity:string;generation:number;seq:number;memory_after:string|null;log_after:number|null;seeded:number }
+/** Bounded durable journal ingestion. Pending IDs and the ingestion cursor commit together. */
+export function syncPanelCacheBatch(source: Database.Database, target: number, limit=128): boolean {
+  const db=panelCacheConnection(source), version=sourceVersion(source);
+  let state=db.prepare("SELECT * FROM panel_sync_state WHERE singleton=1").get() as SyncState;
+  if (state.identity!==version.identity || state.generation!==version.generation || state.seq<version.floor || state.seq>version.seq) {
+    resetPanelCache(source);
+    state=db.prepare("SELECT * FROM panel_sync_state WHERE singleton=1").get() as SyncState;
   }
-  if (!meta) {
-    db.prepare("INSERT INTO panel_cache_meta VALUES(1,?,1,1)").run(PANEL_CACHE_VERSION);
-    // Cheap ID-only initialization. JSON is parsed later in bounded, restartable worker batches.
-    db.exec(`INSERT INTO panel_memory_dirty SELECT id,1 FROM memories NOT INDEXED;
-   INSERT INTO panel_log_dirty SELECT id,1 FROM api_logs;
-   INSERT INTO panel_metric_dirty SELECT id,1 FROM api_logs;`);
+  if (state.seeded < 2) {
+    const memories=state.seeded===0, table=memories?"memories":"api_logs";
+    const after=memories?state.memory_after:state.log_after;
+    const ids=source.prepare(`SELECT id FROM ${table} ${after===null?"":"WHERE id>?"} ORDER BY id LIMIT ?`).pluck().all(...(after===null?[limit]:[after,limit])) as Array<string|number>;
+    db.transaction(()=>{
+      for(const id of ids) {
+        db.prepare(`INSERT OR REPLACE INTO ${memories?"panel_memory_dirty":"panel_log_dirty"} VALUES(?,?)`).run(id,state.seq);
+        if(!memories)db.prepare("INSERT OR REPLACE INTO panel_metric_dirty VALUES(?,?)").run(id,state.seq);
+      }
+      if(ids.length)db.prepare(`UPDATE panel_sync_state SET ${memories?"memory_after":"log_after"}=? WHERE singleton=1`).run(ids.at(-1));
+      if(ids.length<limit)db.prepare("UPDATE panel_sync_state SET seeded=seeded+1 WHERE singleton=1").run();
+    })();
+    return true;
   }
-  installMemoryIndexesWhenReady(db);
-  const bump = "UPDATE panel_cache_meta SET revision=revision+1 WHERE singleton=1;";
-  for (const [table, dirty] of Object.entries(TABLES)) {
-    for (const event of ["INSERT", "UPDATE", "DELETE"] as const) {
-      const row = event === "DELETE" ? "OLD" : "NEW";
-      const old = event === "UPDATE" ? `INSERT OR REPLACE INTO ${dirty} SELECT OLD.id,revision FROM panel_cache_meta;` : "";
-      const metrics = table === "api_logs" ? `INSERT OR REPLACE INTO panel_metric_dirty SELECT ${row}.id,revision FROM panel_cache_meta;
-    ${event === "UPDATE" ? "INSERT OR REPLACE INTO panel_metric_dirty SELECT OLD.id,revision FROM panel_cache_meta;" : ""}` : "";
-      const visibility = table === "memories" ? `INSERT OR IGNORE INTO panel_visibility_dirty SELECT ${row}.id,revision FROM panel_cache_meta WHERE EXISTS(SELECT 1 FROM panel_log_refs WHERE ref_id=${row}.id) OR EXISTS(SELECT 1 FROM panel_memory_visibility WHERE id=${row}.id);
-    ${event === "UPDATE" ? "INSERT OR IGNORE INTO panel_visibility_dirty SELECT OLD.id,revision FROM panel_cache_meta WHERE EXISTS(SELECT 1 FROM panel_log_refs WHERE ref_id=OLD.id) OR EXISTS(SELECT 1 FROM panel_memory_visibility WHERE id=OLD.id);" : ""}` : "";
-      const logRevision = table === "api_logs" ? "UPDATE panel_cache_meta SET log_revision=log_revision+1;" : `UPDATE panel_cache_meta SET log_revision=log_revision+1 WHERE EXISTS(SELECT 1 FROM panel_log_refs WHERE ref_id=CAST(${row}.id AS TEXT)${event === "UPDATE" ? " OR ref_id=CAST(OLD.id AS TEXT)" : ""});`;
-      db.exec(`CREATE TRIGGER IF NOT EXISTS panel_cache_${table}_${event.toLowerCase()} AFTER ${event} ON ${table} BEGIN
-    ${bump}${logRevision}${old} INSERT OR REPLACE INTO ${dirty} SELECT ${row}.id,revision FROM panel_cache_meta; ${metrics}${visibility} END;`);
+  const changes=source.prepare("SELECT seq,entity_type,entity_id FROM source_changes WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?").all(state.seq,target,limit) as Array<{seq:number;entity_type:string;entity_id:string}>;
+  if(!changes.length)return false;
+  db.transaction(()=>{
+    for(const row of changes) {
+      if(row.entity_type==="memories") {
+        db.prepare("INSERT OR REPLACE INTO panel_memory_dirty VALUES(?,?)").run(row.entity_id,row.seq);
+        db.prepare("INSERT OR REPLACE INTO panel_visibility_dirty SELECT ?,? WHERE EXISTS(SELECT 1 FROM panel_log_refs WHERE ref_id=?) OR EXISTS(SELECT 1 FROM panel_memory_visibility WHERE id=?)").run(row.entity_id,row.seq,row.entity_id,row.entity_id);
+      } else if(row.entity_type==="api_logs") {
+        db.prepare("INSERT OR REPLACE INTO panel_log_dirty VALUES(?,?)").run(Number(row.entity_id),row.seq);
+        db.prepare("INSERT OR REPLACE INTO panel_metric_dirty VALUES(?,?)").run(Number(row.entity_id),row.seq);
+      }
     }
-  }
-  for (const table of ["user_memories", "episodes"])
-    for (const event of ["INSERT", "UPDATE", "DELETE"]) {
-      const row = event === "DELETE" ? "OLD" : "NEW";
-      db.exec(`CREATE TRIGGER IF NOT EXISTS panel_cache_${table}_${event.toLowerCase()} AFTER ${event} ON ${table} BEGIN
-   ${table === "user_memories" ? bump : ""}
-   UPDATE panel_cache_meta SET log_revision=log_revision+1 WHERE EXISTS(SELECT 1 FROM panel_log_refs WHERE ref_id=CAST(${row}.id AS TEXT)${event === "UPDATE" ? " OR ref_id=CAST(OLD.id AS TEXT)" : ""}); END;`);
-    }
-  for (const event of ["INSERT", "UPDATE", "DELETE"]) {
-    const row = event === "DELETE" ? "OLD" : "NEW";
-    db.exec(`CREATE TRIGGER IF NOT EXISTS panel_cache_raw_${event.toLowerCase()} AFTER ${event} ON raw_turns BEGIN
-   UPDATE panel_cache_meta SET log_revision=log_revision+1 WHERE EXISTS(SELECT 1 FROM panel_memory_visibility f JOIN panel_log_refs r ON r.ref_id=f.id WHERE f.raw_id=${row}.id${event === "UPDATE" ? " OR f.raw_id=OLD.id" : ""}); END;`);
-  }
+    const seq=changes.at(-1)!.seq;
+    db.prepare("UPDATE panel_sync_state SET seq=? WHERE singleton=1").run(seq);
+    db.prepare("UPDATE panel_cache_meta SET revision=?,log_revision=? WHERE singleton=1").run(seq,seq);
+  })();
+  return true;
 }
 function installMemoryIndexesWhenReady(db: Database.Database): void {
   // Bulk backfill builds these once after the final batch. Maintaining both
@@ -90,101 +111,62 @@ function installMemoryIndexesWhenReady(db: Database.Database): void {
   `);
 }
 export function panelCacheRevision(db: Database.Database): string {
-  const row = db.prepare("SELECT version,revision FROM panel_cache_meta WHERE singleton=1").get() as {
-    version: number;
-    revision: number;
-  };
-  return `${row.version}:${row.revision}`;
+  const v=sourceVersion(db);
+  return `${v.identity}-${v.generation}:${PANEL_CACHE_VERSION}:${v.seq}`;
 }
-export function panelLogRevision(db: Database.Database): string {
-  const row = db.prepare("SELECT version,log_revision FROM panel_cache_meta WHERE singleton=1").get() as {
-    version: number;
-    log_revision: number;
-  };
-  return `${row.version}:${row.log_revision}`;
-}
+export const panelLogRevision = panelCacheRevision;
 export function panelCachePending(db: Database.Database, parts: readonly PanelCachePart[]): boolean {
-  return parts.some(part => Boolean(db.prepare(`SELECT 1 FROM ${dirtyTable(part)} LIMIT 1`).get()));
+  return parts.some(part => Boolean(panelCacheConnection(db).prepare(`SELECT 1 FROM ${dirtyTable(part)} LIMIT 1`).get()));
 }
 function dirtyTable(part: PanelCachePart) {
   return part === "memories" ? "panel_memory_dirty" : part === "logs" ? "panel_log_dirty" : part === "visibility" ? "panel_visibility_dirty" : "panel_metric_dirty";
 }
 /** Commit one bounded batch. A changed dirty revision prevents publishing an older projection. */
-export function fillPanelCacheBatch(db: Database.Database, part: PanelCachePart, limit = 64, ids?: readonly (string | number)[]): number {
-  if (part !== "logs") {
-    const filled = fillNativeFacts(db, part, limit, ids);
-    if (part === "memories") installMemoryIndexesWhenReady(db);
-    return filled;
-  }
-  const dirty = dirtyTable(part);
-  const source = "api_logs";
-  const columns = `s.id,s.tool_name,s.source_agent,s.called_at,s.duration_ms,s.success,s.input_json,s.output_json,${projectPanelLogSql("s.input_json")} AS projected_input,${projectPanelLogSql("s.output_json")} AS projected_output`;
-  const rows = db.prepare(`SELECT d.id AS dirty_id,d.revision AS dirty_revision,${columns} FROM ${dirty} d LEFT JOIN ${source} s ON s.id=d.id ${ids ? "WHERE d.id IN (SELECT value FROM json_each(?))" : ""} ORDER BY d.id LIMIT ?`).all(...(ids ? [JSON.stringify(ids), limit] : [limit])) as CacheRow[];
-  if (!rows.length)
-    return 0;
-  const projected = rows.map(row => ({ row, value: row.id !== null ? logFact(row) : undefined }));
-  db.transaction(() => {
-    const targets = new Set<string>();
-    const current = db.prepare(`SELECT revision FROM ${dirty} WHERE id=?`);
-    const done = db.prepare(`DELETE FROM ${dirty} WHERE id=? AND revision=?`);
-    const logWrite = db.prepare("INSERT OR REPLACE INTO panel_log_facts VALUES(?,?,?,?,?,?,?,?,?)");
-    const logDelete = db.prepare("DELETE FROM panel_log_facts WHERE id=?");
-    const refsDelete = db.prepare("DELETE FROM panel_log_refs WHERE log_id=?");
-    const ref = db.prepare("INSERT OR IGNORE INTO panel_log_refs VALUES(?,?)");
-    for (const { row, value } of projected) {
-      if ((current.get(row.dirty_id) as {
-        revision: number;
-      } | undefined)?.revision !== row.dirty_revision)
-        continue;
-      refsDelete.run(row.dirty_id);
-      if (!value)
-        logDelete.run(row.dirty_id);
-      else {
-        logWrite.run(...value.values);
-        for (const id of value.refs) {
-          ref.run(row.dirty_id, id);
-          targets.add(id);
+export function fillPanelCacheBatch(source: Database.Database, part: PanelCachePart, limit = 128, selected?: readonly (string | number)[]): number {
+  const db=panelCacheConnection(source),dirty=dirtyTable(part);
+  const ids=db.prepare(`SELECT id FROM ${dirty} ${selected?"WHERE id IN (SELECT value FROM json_each(?))":""} ORDER BY rowid LIMIT ?`).pluck().all(...(selected?[JSON.stringify(selected),limit]:[limit])) as Array<string|number>;
+  if(!ids.length) { if(part==="memories")installMemoryIndexesWhenReady(db); return 0; }
+  const keys=JSON.stringify(ids);
+  // Read source rows before beginning a cache-only write transaction.
+  if(part==="logs") {
+    const rows=source.prepare(`SELECT id,tool_name,source_agent,called_at,duration_ms,success,input_json,output_json,
+      ${projectPanelLogSql("input_json")} AS projected_input,${projectPanelLogSql("output_json")} AS projected_output
+      FROM api_logs WHERE id IN (SELECT value FROM json_each(?))`).all(keys) as CacheRow[];
+    const facts=rows.map(row=>({id:row.id!,value:logFact(row)}));
+    db.transaction(()=>{
+      db.prepare("DELETE FROM panel_log_facts WHERE id IN (SELECT value FROM json_each(?))").run(keys);
+      db.prepare("DELETE FROM panel_log_refs WHERE log_id IN (SELECT value FROM json_each(?))").run(keys);
+      for(const {id,value} of facts) {
+        db.prepare("INSERT INTO panel_log_facts VALUES(?,?,?,?,?,?,?,?,?)").run(...value.values);
+        for(const ref of value.refs) {
+          db.prepare("INSERT OR IGNORE INTO panel_log_refs VALUES(?,?)").run(id,ref);
+          db.prepare("INSERT OR IGNORE INTO panel_visibility_dirty VALUES(?,0)").run(ref);
         }
       }
-      done.run(row.dirty_id, row.dirty_revision);
-    }
-    db.prepare(`INSERT OR IGNORE INTO panel_visibility_dirty SELECT m.id,revision FROM memories m,panel_cache_meta WHERE m.id IN(SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT 1 FROM panel_memory_visibility v WHERE v.id=m.id)`).run(JSON.stringify([...targets]));
-  })();
-  return rows.length;
-}
-const registered = new WeakSet<Database.Database>();
-function fillNativeFacts(db: Database.Database, part: "memories" | "metrics" | "visibility", limit: number, selected?: readonly (string | number)[]): number {
-  const dirty = dirtyTable(part);
-  const ids = db.prepare(`SELECT id FROM ${dirty} ${selected ? "WHERE id IN (SELECT value FROM json_each(?))" : ""} ORDER BY rowid LIMIT ?`).pluck().all(...(selected ? [JSON.stringify(selected), limit] : [limit]));
-  if (!ids.length)
-    return 0;
-  if (!registered.has(db)) {
-    db.function("panel_source", { deterministic: true }, (infoSource, internalSource, sessionId, conversationId, agentId, appId) => panelSourceForStatsRow({ infoSource, internalSource, sessionId: typeof sessionId === "string" ? sessionId : undefined, conversationId: typeof conversationId === "string" ? conversationId : undefined, agentId: typeof agentId === "string" ? agentId : undefined, appId: typeof appId === "string" ? appId : undefined }));
-    registered.add(db);
+      db.prepare(`DELETE FROM ${dirty} WHERE id IN (SELECT value FROM json_each(?))`).run(keys);
+    })();
+  } else {
+    const displayed=memoryDisplayedSourceSql("CASE WHEN json_type(info_json,'$.source')='text' THEN json_extract(info_json,'$.source') END");
+    const query=part==="visibility"?`SELECT m.id,${RAW_SOURCE_SQL} FROM memories m WHERE m.id IN (SELECT value FROM json_each(?))`
+      :part==="memories"?`WITH projected AS MATERIALIZED (
+        SELECT id,memory_layer,status,created_at,updated_at,session_id,conversation_id,agent_id,app_id,
+          jsonb(info_json) AS info_json,jsonb(properties_json) AS properties_json
+        FROM memories WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL)
+        SELECT m.id,m.memory_layer,m.status,m.created_at,m.updated_at,
+        panel_source(${displayed},CASE WHEN json_type(properties_json,'$.internal_info.source')='text' THEN json_extract(properties_json,'$.internal_info.source') END,session_id,conversation_id,agent_id,app_id),${RAW_SOURCE_SQL},m.session_id FROM projected m`
+      :`SELECT id,tool_name,source_agent,called_at,duration_ms,success,
+        CASE WHEN json_valid(output_json) THEN CASE WHEN json_type(output_json,'$.stats.topRelevance') IN ('integer','real') AND json_extract(output_json,'$.stats.topRelevance') BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308 THEN max(0,json_extract(output_json,'$.stats.topRelevance')) END END
+        FROM api_logs WHERE id IN (SELECT value FROM json_each(?))`;
+    const rows=source.prepare(query).raw().all(keys) as Array<Array<string|number|null>>;
+    const table=part==="visibility"?"panel_memory_visibility":part==="memories"?"panel_memory_facts":"panel_log_metrics";
+    db.transaction(()=>{
+      db.prepare(`DELETE FROM ${table} WHERE id IN (SELECT value FROM json_each(?))`).run(keys);
+      const insert=db.prepare(`INSERT INTO ${table} VALUES(${Array(part==="visibility"?2:part==="memories"?8:7).fill("?").join(",")})`);
+      for(const row of rows)insert.run(...row);
+      db.prepare(`DELETE FROM ${dirty} WHERE id IN (SELECT value FROM json_each(?))`).run(keys);
+    })();
+    if(part==="memories")installMemoryIndexesWhenReady(db);
   }
-  const keys = JSON.stringify(ids), source = part === "metrics" ? "api_logs" : "memories", target = part === "memories" ? "panel_memory_facts" : part === "visibility" ? "panel_memory_visibility" : "panel_log_metrics";
-  db.transaction(() => {
-    if (part === "visibility") {
-      db.prepare(`INSERT OR REPLACE INTO panel_memory_visibility SELECT m.id,${RAW_SOURCE_SQL} FROM memories m WHERE m.id IN(SELECT value FROM json_each(?))`).run(keys);
-    }
-    else if (part === "memories") {
-      const displayed = memoryDisplayedSourceSql("CASE WHEN json_type(info_json,'$.source')='text' THEN json_extract(info_json,'$.source') END");
-      db.prepare(`WITH projected AS MATERIALIZED (
-      SELECT id,memory_layer,status,created_at,updated_at,session_id,conversation_id,agent_id,app_id,
-        jsonb(info_json) AS info_json,jsonb(properties_json) AS properties_json
-      FROM memories WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL
-    ) INSERT OR REPLACE INTO panel_memory_facts SELECT m.id,m.memory_layer,m.status,m.created_at,m.updated_at,
-    panel_source(${displayed},CASE WHEN json_type(properties_json,'$.internal_info.source')='text' THEN json_extract(properties_json,'$.internal_info.source') END,session_id,conversation_id,agent_id,app_id),${RAW_SOURCE_SQL},m.session_id
-    FROM projected m`).run(keys);
-    }
-    else {
-      db.prepare(`INSERT OR REPLACE INTO panel_log_metrics SELECT id,tool_name,source_agent,called_at,duration_ms,success,
-    CASE WHEN json_valid(output_json) THEN CASE WHEN json_type(output_json,'$.stats.topRelevance') IN ('integer','real') AND json_extract(output_json,'$.stats.topRelevance') BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308 THEN max(0,json_extract(output_json,'$.stats.topRelevance')) END END
-    FROM api_logs WHERE id IN (SELECT value FROM json_each(?))`).run(keys);
-    }
-    db.prepare(`DELETE FROM ${target} WHERE id IN (SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT 1 FROM ${source} s WHERE s.id=${target}.id ${part === "memories" ? "AND s.deleted_at IS NULL" : ""})`).run(keys);
-    db.prepare(`DELETE FROM ${dirty} WHERE id IN (SELECT value FROM json_each(?))`).run(keys);
-  })();
   return ids.length;
 }
 /** Direct/in-memory callers use the same projection as the worker. Readonly snapshots must be prepared first. */
@@ -194,11 +176,15 @@ export function ensurePanelCache(db: Database.Database, parts: readonly PanelCac
       throw new Error("Panel cache changed before read snapshot");
     return;
   }
+  if (!hasPanelCache(db)) installPanelCache(db);
+  const target=sourceVersion(db).seq;
+  while(syncPanelCacheBatch(db,target)) { /* synchronous compatibility for embedded callers; production uses the worker */ }
   for (const part of parts)
     while (fillPanelCacheBatch(db, part, part === "logs" ? 64 : 512)) { /* bounded transactions */ }
 }
 /** Legacy page/detail callers materialize only the requested IDs, never the whole log. */
 export function ensurePanelLogIds(db: Database.Database, ids: readonly number[]): void {
+  if (!db.readonly) ensurePanelCache(db,[]);
   const targets = () => db.prepare("SELECT DISTINCT ref_id FROM panel_log_refs WHERE log_id IN (SELECT value FROM json_each(?))").pluck().all(JSON.stringify(ids)) as string[];
   if (db.readonly) {
     if (panelLogIdsPending(db,ids)) throw new Error("Panel cache changed before read snapshot");

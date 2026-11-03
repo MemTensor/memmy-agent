@@ -152,7 +152,7 @@ export class MemoryDb {
   }
 }
 
-function packagedNativeBindingPath(): string | undefined {
+export function packagedNativeBindingPath(): string | undefined {
   if (!(process as NodeJS.Process & { pkg?: unknown }).pkg) return undefined;
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const candidates = [

@@ -1,3 +1,4 @@
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 import { WorkerConcurrencyController } from "../../../src/service/worker/worker-concurrency.js";
@@ -48,7 +49,7 @@ describe("bounded readonly executor", () => {
     expect(service.panelStatsSnapshot(input).data).toEqual(data);
     service.addMemory({content:"incremental write",source:"codex"});
     expect(service.panelOverviewStatsSnapshot(input)).toMatchObject({status:"ready",data:data.overview});
-    await vi.waitFor(()=>expect(read).toHaveBeenCalledTimes(3),{timeout:2000});
+    await vi.waitFor(()=>expect(read.mock.calls.filter(([method])=>method==="stats"||method==="overviewStats")).toHaveLength(3),{timeout:2000});
   });
   it("loads an isolated log detail without materializing unrelated logs", async () => {
     const {db}=createTestService();
@@ -58,7 +59,8 @@ describe("bounded readonly executor", () => {
     const reader=new PanelReader(db.path);
     try{
       expect((await reader.run("logDetail",[first.id])).data).toMatchObject({log:{id:first.id,inputJson:'{"query":"requested"}'}});
-      expect(db.db.prepare("SELECT id FROM panel_log_dirty").pluck().all()).toEqual([second.id]);
+      const cache=new Database(`${db.path}.panel-cache.sqlite`,{readonly:true});
+      try{expect(cache.prepare("SELECT id FROM panel_log_dirty").pluck().all()).toEqual([second.id]);}finally{cache.close();}
     }finally{await reader.stop();}
   });
   it("cancels queued work and preserves other requests, then rejects work after stop", async () => {
@@ -92,11 +94,11 @@ it("warms without HTTP or UID and shares device statistics with the first page",
   const data={overview:{counts:{memories:1}},analysis:{}};
   const read=vi.spyOn(service,"readPanel").mockImplementation(async method => ({safety,data:method === "overviewStats" ? data.overview : data}));
   service.startPanelWarmup();service.startPanelWarmup();
-  await vi.waitFor(()=>expect(read).toHaveBeenCalledTimes(2));
+  await vi.waitFor(()=>expect(read.mock.calls.filter(([method])=>method==="stats"||method==="overviewStats")).toHaveLength(2));
   const result=service.panelStatsSnapshot({namespace:{source:"codex",profileId:"default",userId:"history-owner"}});
   expect(result).toMatchObject({status:"ready",data});
   expect(service.panelOverviewStatsSnapshot({namespace:{source:"cursor",profileId:"other",userId:"new-owner"}}).data).toEqual(data.overview);
-  expect(read).toHaveBeenCalledTimes(2);
+  expect(read.mock.calls.filter(([method])=>method==="stats"||method==="overviewStats")).toHaveLength(2);
   await service.stop();
 });
 it("cancels startup warmup before it can touch closed storage",async()=>{
@@ -125,7 +127,7 @@ it("rebuilds invalidated statistics without leaving overview while a model permi
   } finally { permit.release(); }
 },15000);
 
-it("restores completed service statistics without dispatching a reader after restart", async () => {
+it("restores completed service statistics through the worker without recomputing after restart", async () => {
   const {db,service} = createTestService();
   service.addMemory({content:"persisted statistics member",source:"codex"});
   await vi.waitFor(() => expect(service.panelStatsSnapshot({}).status).toBe("ready"), {timeout:10000});
@@ -133,6 +135,6 @@ it("restores completed service statistics without dispatching a reader after res
   await service.stop();
   const restarted = createTestMemoryService({db,mode:"dev"});
   const read = vi.spyOn(restarted,"readPanel");
-  expect(restarted.panelStatsSnapshot({}).data).toEqual(expected);
-  expect(read).not.toHaveBeenCalled();
+  await vi.waitFor(()=>expect(restarted.panelStatsSnapshot({}).data).toEqual(expected),{timeout:10000});
+  expect(read.mock.calls.map(([method])=>method)).toEqual(["statsLoad"]);
 });

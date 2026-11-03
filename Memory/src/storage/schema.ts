@@ -1,11 +1,12 @@
-import { installPanelCache } from "./panel-cache.js";
+import { installSourceChanges } from "./source-changes.js";
+import { installFtsMappings, writeFts } from "./fts-maintenance.js";
 import { installPanelSafetyTriggers } from "./panel-security.js";
 import type Database from "better-sqlite3";
 import { installQueueSchedulingSchema } from "./queue-scheduling-schema.js";
 import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 
-export const SCHEMA_VERSION = 14;
-export const SCHEMA_MIGRATION_ID = "014_panel_read_indexes";
+export const SCHEMA_VERSION = 15;
+export const SCHEMA_MIGRATION_ID = "015_isolated_panel_cache";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -82,6 +83,12 @@ const statements = [
       AND json_extract(properties_json, '$.internal_info.memory_kind') = 'observed_activity'
       AND json_type(properties_json, '$.internal_info.external_evidence') = 'object'
       AND COALESCE(json_extract(properties_json, '$.internal_info.observation_memory.schema_version'), 0) < 1`,
+
+  `CREATE INDEX IF NOT EXISTS idx_memories_observation_config_pending ON memories(id)
+    WHERE deleted_at IS NULL
+      AND json_extract(properties_json, '$.internal_info.memory_kind') = 'observed_activity'
+      AND json_type(properties_json, '$.internal_info.observation_memory') = 'object'
+      AND json_extract(properties_json, '$.internal_info.observation_memory.status') = 'pending'`,
 
   `CREATE TABLE IF NOT EXISTS l3_world_model_scopes (
     scope_key TEXT PRIMARY KEY,
@@ -741,7 +748,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12 && version !== 13) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12 && version !== 13 && version !== 14) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
@@ -815,7 +822,13 @@ export function migrate(db: Database.Database): void {
         db.prepare(statement).run();
       }
       installPanelSafetyTriggers(db);
-      installPanelCache(db);
+      // Remove derived data from the business file before installing the change journal.
+      for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name GLOB 'panel_cache_*'").all() as Array<{name:string}>)
+        db.exec(`DROP TRIGGER "${row.name.replaceAll('"', '""')}"`);
+      for (const table of ["panel_cache_meta","panel_memory_dirty","panel_log_dirty","panel_metric_dirty","panel_visibility_dirty","panel_memory_facts","panel_memory_visibility","panel_log_facts","panel_log_refs","panel_log_metrics"])
+        db.exec(`DROP TABLE IF EXISTS ${table}`);
+      installSourceChanges(db);
+      installFtsMappings(db);
       if (version > 0 && version < 5) {
         addColumnIfMissing(db, "recall_events", "query_id", "TEXT");
         addColumnIfMissing(db, "recall_events", "user_memory_candidate_ids_json", "TEXT NOT NULL DEFAULT '[]'");
@@ -1132,12 +1145,8 @@ function removeLegacyProcessingMetadata(db: Database.Database): void {
     db.prepare(
       `UPDATE memories SET tags_json = ?, info_json = ?, properties_json = ? WHERE id = ?`
     ).run(JSON.stringify(tags), JSON.stringify(info), JSON.stringify(properties), row.id);
-    db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(row.id);
-    if (!row.deleted_at && row.status !== "deleted") {
-      db.prepare(
-        `INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`
-      ).run(row.id, row.id, row.memory_value, tags.join(" "));
-    }
+    writeFts(db,"memories",row.id,!row.deleted_at && row.status !== "deleted"
+      ? [row.id,row.memory_value,tags.join(" ")] : undefined);
   }
 }
 

@@ -1,10 +1,12 @@
+import {openCacheFixture} from "../fixtures/panel-cache-fixture.js";
+import {SCHEMA_VERSION} from "../../src/storage/schema.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { MemoryDb } from "../../src/storage/db.js";
 import { PanelLogReader } from "../../src/storage/panel-log-read.js";
-import { ensurePanelCache, fillPanelCacheBatch, panelMemoryStats, panelCachePending, panelAnalysisLogs, installPanelCache, PANEL_CACHE_VERSION } from "../../src/storage/panel-cache.js";
+import { ensurePanelCache, fillPanelCacheBatch, panelMemoryStats, panelAnalysisLogs, installPanelCache, PANEL_CACHE_VERSION } from "../../src/storage/panel-cache.js";
 import { panelRecallScore } from "../../src/service/read-model/model-costs.js";
 import { Repositories } from "../../src/storage/repositories.js";
 const now = "2026-10-29T08:00:00Z";
@@ -16,29 +18,19 @@ function log(db: MemoryDb, content: string, source = "codex") {
 }
 describe("persistent panel projections", () => {
   it("resumes committed batches after reopening and keeps source facts unchanged", () => {
-    const root = mkdtempSync(join(tmpdir(), "panel-cache-resume-")), path = join(root, "memory.sqlite");
-    let db = new MemoryDb({ path });
+    const root=mkdtempSync(join(tmpdir(),"panel-cache-resume-")),path=join(root,"memory.sqlite");
+    const db=new MemoryDb({path});let reader=openCacheFixture(path);
     try {
-      for (let i = 0; i < 150; i++)
-        addMemory(db, `memory-${i}`);
-      expect(fillPanelCacheBatch(db.db, "memories", 32)).toBe(32);
-      expect(db.db.prepare("SELECT count(*) FROM panel_memory_facts").pluck().get()).toBe(32);
-      db.close();
-      db = new MemoryDb({ path });
-      expect(db.db.prepare("SELECT count(*) FROM panel_memory_facts").pluck().get()).toBe(32);
-      const rows = [...panelMemoryStats(db.db)];
-      expect(rows).toHaveLength(150);
-      expect(panelCachePending(db.db, ["memories"])).toBe(false);
-      expect(db.db.prepare("SELECT count(*) FROM memories").pluck().get()).toBe(150);
+      for(let i=0;i<150;i++)addMemory(db,`memory-${i}`);
+      reader.ingest();expect(fillPanelCacheBatch(reader.source.db,"memories",32)).toBe(32);
+      reader.close();reader=openCacheFixture(path);
+      expect(reader.cache.prepare("SELECT count(*) FROM panel_memory_facts").pluck().get()).toBe(32);
+      reader.prepare(["memories"]);expect([...panelMemoryStats(reader.source.db,true)]).toHaveLength(150);
       db.db.prepare("UPDATE memories SET memory_layer='Skill',info_json='{\"source\":\"cursor-agent\"}' WHERE id='memory-0'").run();
-      expect([...panelMemoryStats(db.db)].filter(row => row.memoryLayer === "Skill")).toMatchObject([{ id: "memory-0", infoSource: "cursor" }]);
-      db.db.prepare("DELETE FROM memories WHERE id='memory-0'").run();
-      expect([...panelMemoryStats(db.db)]).toHaveLength(149);
-    }
-    finally {
-      db.close();
-      rmSync(root, { recursive: true, force: true });
-    }
+      reader.prepare(["memories"]);expect([...panelMemoryStats(reader.source.db,true)].filter(x=>x.memoryLayer==="Skill")).toMatchObject([{id:"memory-0",infoSource:"cursor"}]);
+      db.db.prepare("DELETE FROM memories WHERE id='memory-0'").run();reader.prepare(["memories"]);
+      expect([...panelMemoryStats(reader.source.db,true)]).toHaveLength(149);
+    }finally{reader.close();db.close();rmSync(root,{recursive:true,force:true});}
   });
   it("preserves exact full-payload substring searches after updates and deletes", () => {
     const db = new MemoryDb({ path: ":memory:" });
@@ -109,26 +101,22 @@ describe("persistent panel projections", () => {
       db.close();
     }
   });
-  it("rebuilds a v1 presentation cache on reopen while preserving every source row and schema version",()=>{
+  it("removes old business-file projections on upgrade without changing source rows",()=>{
     const root=mkdtempSync(join(tmpdir(),"panel-cache-v1-")),path=join(root,"memory.sqlite");
     let db=new MemoryDb({path});
-    try{
+    try {
       addMemory(db,"kept-v1");log(db,"kept payload");
-      ensurePanelCache(db.db,["memories","logs","visibility","metrics"]);
       const before={memories:db.db.prepare("SELECT * FROM memories").all(),logs:db.db.prepare("SELECT * FROM api_logs").all()};
-      db.db.exec(`DROP TABLE panel_memory_facts;
-        CREATE TABLE panel_memory_facts(id TEXT PRIMARY KEY,memory_layer TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,source TEXT NOT NULL);
-        INSERT INTO panel_memory_facts VALUES('kept-v1','L1','activated','now','now','codex');
-        UPDATE panel_cache_meta SET version=1`);
+      db.db.exec("CREATE TABLE panel_memory_facts(id TEXT PRIMARY KEY);CREATE TABLE panel_cache_meta(version INTEGER);INSERT INTO panel_cache_meta VALUES(1)");
       db.close();db=new MemoryDb({path});
-      expect(db.schemaVersion().version).toBe(14);
-      expect(db.db.prepare("SELECT version FROM panel_cache_meta").pluck().get()).toBe(PANEL_CACHE_VERSION);
-      expect([...panelMemoryStats(db.db)]).toHaveLength(1);
-      expect(db.db.prepare("SELECT raw_id,session_id FROM panel_memory_facts").get()).toEqual({raw_id:null,session_id:null});
-      expect(new PanelLogReader(db.db).list({q:"kept payload"}).total).toBe(1);
+      expect(db.schemaVersion().version).toBe(SCHEMA_VERSION);
+      expect(db.db.prepare("SELECT name FROM main.sqlite_master WHERE type='table' AND name GLOB 'panel_*'").all()).toEqual([]);
+      const reader=openCacheFixture(path);
+      try{reader.prepare(["memories","logs","visibility"]);expect([...panelMemoryStats(reader.source.db,true)]).toHaveLength(1);expect(new PanelLogReader(reader.source.db).list({q:"kept payload"}).total).toBe(1);}finally{reader.close();}
       expect({memories:db.db.prepare("SELECT * FROM memories").all(),logs:db.db.prepare("SELECT * FROM api_logs").all()}).toEqual(before);
-    }finally{if(db.db.open)db.close();rmSync(root,{recursive:true,force:true});}
+    }finally{db.close();rmSync(root,{recursive:true,force:true});}
   });
+
   it("materializes only requested legacy detail IDs and validates raw source rebinding", () => {
     const db = new MemoryDb({ path: ":memory:" });
     try {
@@ -167,26 +155,20 @@ describe("persistent panel projections", () => {
       db.close();
     }
   });
-  it("does not let a stale log batch overwrite a newer source revision", () => {
-    const db = new MemoryDb({ path: ":memory:" });
+  it("replays updates committed after a source row was read for a cache batch", () => {
+    const db=new MemoryDb({path:":memory:"});
     try {
-      const item = log(db, "old");
-      ensurePanelCache(db.db, ["logs"]);
+      const item=log(db,"old");ensurePanelCache(db.db,["logs"]);
       db.db.prepare("UPDATE api_logs SET input_json='{\"content\":\"first\"}' WHERE id=?").run(item.id);
-      const prepare = db.db.prepare.bind(db.db);
-      const changed = vi.spyOn(db.db, "prepare").mockImplementation(sql => {
-        if (sql.startsWith("SELECT revision FROM panel_log_dirty"))
-          prepare("UPDATE api_logs SET input_json='{\"content\":\"latest\"}' WHERE id=?").run(item.id);
+      ensurePanelCache(db.db,[]);
+      const prepare=db.db.prepare.bind(db.db);
+      const changed=vi.spyOn(db.db,"prepare").mockImplementation(sql=>{
+        if(sql.startsWith("DELETE FROM panel_log_facts"))prepare("UPDATE api_logs SET input_json='{\"content\":\"latest\"}' WHERE id=?").run(item.id);
         return prepare(sql);
       });
-      fillPanelCacheBatch(db.db, "logs", 1);
-      changed.mockRestore();
-      expect(db.db.prepare("SELECT input_json FROM panel_log_facts WHERE id=?").pluck().get(item.id)).toContain("old");
-      expect(panelCachePending(db.db, ["logs"])).toBe(true);
+      fillPanelCacheBatch(db.db,"logs",1);changed.mockRestore();
       expect(new PanelLogReader(db.db).list({}).logs[0]?.inputJson).toContain("latest");
-    }
-    finally {
-      db.close();
-    }
+    }finally{db.close();}
   });
+
 });

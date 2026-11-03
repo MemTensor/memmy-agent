@@ -139,7 +139,7 @@ describe("Embedding retry counter schema upgrade", () => {
       if (version === 12) db.db.prepare("UPDATE embedding_retry_queue SET lease_token='old-token' WHERE id='in_progress'").run();
       db.close(); db = new MemoryDb({ path });
       expect(db.schemaVersion().version).toBe(SCHEMA_VERSION);
-      expect(SCHEMA_VERSION).toBe(14);
+      expect(SCHEMA_VERSION).toBe(15);
       const repos = new Repositories(db.db);
       // Failures prove prior claims; an active/succeeded row proves one more.
       // Historical lease losses are unknowable, so recovery starts at zero.
