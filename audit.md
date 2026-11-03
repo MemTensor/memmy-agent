@@ -13,7 +13,7 @@
 术语说明：
 
 - **线上环境**：用户真实使用的 App 运行时，以及 Memory 通过账号模型访问的 `memmy-backend` 网关（`/api/agentexternal/` → `AgentExternalChatController`）。
-- **网关**：`/Users/jiang/MyProject/memmy-backend`，Java/Spring 实现，负责鉴权、额度、路由并把请求透传到下游模型服务。
+- **网关**：`<repository-root>`，Java/Spring 实现，负责鉴权、额度、路由并把请求透传到下游模型服务。
 
 ## 2. 核查基线与方法
 
