@@ -411,6 +411,7 @@ const DATA_URL_MIME_RE = /^data:([^;]+);base64,/i;
 const MAX_ISSUED_TOKENS = 10_000;
 const MAX_HTTP_JSON_BODY_BYTES = 64 * 1024;
 const MAX_ARTIFACT_STAGING_BYTES = 100 * 1024 * 1024;
+const MAX_TITLE_ATTACHMENT_TEXT_BYTES = 16 * 1024;
 /** Upload target that keeps the file in the default workspace's recordings folder. */
 const WEBUI_RECORDINGS_TARGET = "recordings";
 const WEBUI_RECORDINGS_DIR = "recordings";
@@ -3757,7 +3758,7 @@ export class WebSocketChannel extends BaseChannel {
   resolveEnvelopeMediaPaths(value: any): [string[], string | null] {
     if (value == null) return [[], null];
     if (!Array.isArray(value)) return [[], "malformed"];
-    const mediaRoot = realpathIfExists(getMediaDir("websocket"));
+    const allowedRoots = this.webuiMediaInputRoots();
     const out: string[] = [];
     for (const item of value) {
       if (typeof item !== "string" || !item.trim()) return [[], "malformed"];
@@ -3769,13 +3770,60 @@ export class WebSocketChannel extends BaseChannel {
       } catch {
         return [[], "missing"];
       }
-      if (!stat.isFile() || !isPathInside(resolved, mediaRoot)) return [[], "path"];
+      if (!stat.isFile() || !allowedRoots.some((root) => isPathInside(resolved, root))) return [[], "path"];
       const bytes = fs.readFileSync(resolved);
       const classification = classifySavedWebuiAttachment(resolved, bytes);
       if (!classification) return [[], "mime"];
       out.push(resolved);
     }
     return [out, null];
+  }
+
+  /**
+   * Reads a small UTF-8 excerpt for attachment-only automatic titles.
+   *
+   * The path must remain inside the same roots accepted by message envelopes,
+   * and only known text extensions are eligible. Binary documents, audio, and
+   * arbitrary workspace paths are never opened for title generation.
+   */
+  readWebuiTitleText(filePath: string): string | null {
+    let resolved: string;
+    let size: number;
+    try {
+      resolved = fs.realpathSync(path.resolve(expandHomePath(filePath)));
+      const stat = fs.statSync(resolved);
+      if (!stat.isFile()) return null;
+      size = stat.size;
+    } catch {
+      return null;
+    }
+    if (!this.webuiMediaInputRoots().some((root) => isPathInside(resolved, root))) return null;
+    if (!TEXT_MIME_BY_EXTENSION[path.extname(resolved).toLowerCase()]) return null;
+
+    const length = Math.min(size, MAX_TITLE_ATTACHMENT_TEXT_BYTES);
+    if (length <= 0) return null;
+    const bytes = Buffer.alloc(length);
+    let descriptor: number | null = null;
+    let read = 0;
+    try {
+      descriptor = fs.openSync(resolved, "r");
+      read = fs.readSync(descriptor, bytes, 0, length, 0);
+    } catch {
+      return null;
+    } finally {
+      if (descriptor != null) fs.closeSync(descriptor);
+    }
+    const sample = bytes.subarray(0, read);
+    if (!looksLikeText(sample)) return null;
+    const text = sample.toString("utf8").replace(/^\uFEFF/u, "").trim();
+    return text || null;
+  }
+
+  private webuiMediaInputRoots(): string[] {
+    return [
+      realpathIfExists(getMediaDir("websocket")),
+      realpathIfExists(path.join(this.workspacePath, WEBUI_RECORDINGS_DIR)),
+    ];
   }
 
   deprecatedEnvelopeMediaReason(value: any): string {
