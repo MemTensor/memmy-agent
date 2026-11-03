@@ -81,17 +81,12 @@ function windowsAppCandidates(listResult: unknown): WindowsAppCandidate[] | null
   return [...candidates.values()];
 }
 
-function nativeAppLookupTarget(target: string, platform: 'darwin' | 'win32'): string {
-  // Some Codex builds expose ChatGPT as their macOS display name.
-  return platform === 'darwin' && target.trim().toLowerCase() === 'codex' ? 'com.openai.codex' : target;
-}
-
 /** Resolve a tool's app argument to the native helper's own stable app identifier. */
 export function resolveNativeAppIdentity(listResult: unknown, target: string,
   platform: 'darwin' | 'win32'): ResolvedNativeApp | null {
   const blocks = (listResult as { content?: unknown })?.content;
   if (!Array.isArray(blocks) || (listResult as { isError?: unknown })?.isError === true) return null;
-  const wanted = nativeAppLookupTarget(target, platform).trim().toLocaleLowerCase();
+  const wanted = target.trim().toLocaleLowerCase();
   if (!wanted || target.length > 256) return null;
   if (platform === 'win32') {
     const candidates = windowsAppCandidates(listResult);
@@ -152,7 +147,7 @@ export async function resolveInstalledAppIdentity(target: string, platform: 'dar
   let raw: unknown;
   try {
     const executable = resolveOpenComputerUseCommand('open-computer-use', { platform });
-    const { stdout } = await execFileAsync(executable, ['resolve-app', '--query', nativeAppLookupTarget(target, platform)], {
+    const { stdout } = await execFileAsync(executable, ['resolve-app', '--query', target], {
       // Windows starts PowerShell and reads the Start menu for each lookup.
       timeout: platform === 'win32' ? 25_000 : 5000, maxBuffer: 16_384, signal: signal ?? undefined,
       ...(platform === 'win32' ? { env: { ...process.env, ...openComputerUseEnvironment('open-computer-use', null, 'win32') } } : {}),
