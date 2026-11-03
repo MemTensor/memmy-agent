@@ -3397,7 +3397,7 @@ export class WebSocketChannel extends BaseChannel {
       }
     }
     match = got.match(/^\/api\/media\/ws\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
-    if (match) return this.handleWorkspaceMediaFetch(match[1], match[2]);
+    if (match) return this.handleWorkspaceMediaFetch(match[1], match[2], request);
     match = got.match(/^\/api\/media\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
     if (match) return this.handleMediaFetch(match[1], match[2], request);
     if (got === this.expectedPath() && isWebsocketUpgrade(request)) {
@@ -4964,7 +4964,7 @@ export class WebSocketChannel extends BaseChannel {
     return `/api/media/ws/${b64urlEncode(this.workspaceMediaMac(payload))}/${payload}`;
   }
 
-  handleWorkspaceMediaFetch(sig: string, payload: string): HttpLikeResponse {
+  handleWorkspaceMediaFetch(sig: string, payload: string, request?: Pick<HttpRequestLike, "headers">): HttpLikeResponse {
     const expected = this.workspaceMediaMac(payload);
     let provided: Buffer;
     try {
@@ -4984,7 +4984,7 @@ export class WebSocketChannel extends BaseChannel {
     const workspaceRoot = comparablePath(this.workspacePath);
     const candidate = path.resolve(workspaceRoot, normalizeLocalPath(rel));
     if (!pathIsInside(candidate, workspaceRoot)) return httpError(404, "not found");
-    return mediaFileResponse(candidate, "private, no-cache");
+    return mediaFileResponse(candidate, "private, no-cache", request);
   }
 
   private workspaceMediaMac(payload: string): Buffer {
@@ -6016,14 +6016,49 @@ function boundedNumber(value: any, min: number, max: number, field: string): num
 }
 
 /** Serves a resolved media file with the headers every media route shares. */
-function mediaFileResponse(filePath: string, cacheControl = "private, max-age=31536000, immutable"): HttpLikeResponse {
+function mediaFileResponse(
+  filePath: string,
+  cacheControl = "private, max-age=31536000, immutable",
+  request?: Pick<HttpRequestLike, "headers">
+): HttpLikeResponse {
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return httpError(404, "not found");
+  const size = fs.statSync(filePath).size;
+  const mime = mediaMimeForPath(filePath);
+  const contentType = DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) || mime.startsWith("audio/") ? mime : "application/octet-stream";
+  const range = getHeader(request?.headers, "range");
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+    const suffix = match && !match[1];
+    const start = match ? (suffix ? Math.max(0, size - Number(match[2])) : Number(match[1])) : NaN;
+    const requestedEnd = match ? (suffix || !match[2] ? size - 1 : Number(match[2])) : NaN;
+    if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd)
+      || start < 0 || start >= size || requestedEnd < start) {
+      return { status: 416, headers: { "content-range": `bytes */${size}` }, body: Buffer.alloc(0) };
+    }
+    const end = Math.min(size - 1, requestedEnd, start + 2 * 1024 * 1024 - 1);
+    const body = Buffer.alloc(end - start + 1);
+    const descriptor = fs.openSync(filePath, "r");
+    try { fs.readSync(descriptor, body, 0, body.length, start); }
+    finally { fs.closeSync(descriptor); }
+    return {
+      status: 206,
+      headers: {
+        "content-type": contentType,
+        "accept-ranges": "bytes",
+        "content-range": `bytes ${start}-${end}/${size}`,
+        "cache-control": "private, no-store",
+        "x-content-type-options": "nosniff",
+      },
+      body,
+    };
+  }
+
   const body = fs.readFileSync(filePath);
-  const mime = mediaMimeForPath(filePath, body);
   return {
     status: 200,
     headers: {
-      "content-type": DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) || mime.startsWith("audio/") ? mime : "application/octet-stream",
+      "content-type": contentType,
+      "accept-ranges": "bytes",
       "cache-control": cacheControl,
       "x-content-type-options": "nosniff",
     },

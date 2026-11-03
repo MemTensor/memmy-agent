@@ -78,6 +78,16 @@ describe("WebSocket media route", () => {
     expect(mediaUrl).toMatch(/^\/api\/media\/ws\//);
     const [sig, payload] = mediaUrl.slice("/api/media/ws/".length).split("/");
     expect(channel.handleWorkspaceMediaFetch(sig!, payload!).status).toBe(200);
+    const range = channel.handleWorkspaceMediaFetch(sig!, payload!, { headers: { range: "bytes=1-3" } });
+    expect(range.status).toBe(206);
+    expect(range.body).toEqual(Buffer.from("udi"));
+    expect(range.headers).toMatchObject({
+      "accept-ranges": "bytes",
+      "content-range": "bytes 1-3/5",
+    });
+    const dispatchedRange = await channel.dispatchHttp(null, { path: mediaUrl, headers: { range: "bytes=2-" } });
+    expect(dispatchedRange?.status).toBe(206);
+    expect(dispatchedRange?.body).toEqual(Buffer.from("dio"));
     expect(request(outside).status).toBe(404);
     expect(request(path.join(recordings, "missing.webm")).status).toBe(404);
   });
