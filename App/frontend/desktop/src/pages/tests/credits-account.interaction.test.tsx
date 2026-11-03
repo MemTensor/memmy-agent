@@ -154,6 +154,18 @@ it("uses ledger-derived consumed amounts for expired grants", () => {
   expect(bucket.usageKnown).toBe(true); expect(bucket.used).toBe(1544n);
 });
 
+it.each([
+  ["0.00", "0.00", "250.00"],
+  ["15.44", "0.00", "234.56"],
+  ["15.44", "20.00", "214.56"],
+])("shows expired credits excluding consumed %s and held %s", async (used, reserved, expected) => {
+  const client = fixture();
+  client.grants.mockResolvedValue({ items: [{ ...reward, used, remaining: "0.00", reserved, status: "EXPIRED", expiresAt: "2026-01-01T00:00+08:00" }], hasMore: false, nextCursor: null });
+  await mount(client); await click("平台奖励积分"); await click("已过期");
+  expect(host.textContent).toContain(`失效积分${expected}`);
+  expect(host.textContent).toContain(`已使用 ${used} / 250.00`);
+});
+
 it("shows source balances in the existing account menu", async () => {
   const { AppFrame } = await vi.importActual<typeof import("../app-frame.js")>("../app-frame.js");
   const client = fixture();

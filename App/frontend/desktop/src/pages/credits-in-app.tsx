@@ -95,7 +95,8 @@ export function CreditSourceDetails(props: { source: CreditSource; buckets: Cred
     const expiryB = b.expiresAt ? Date.parse(b.expiresAt) : Infinity;
     return expiryA - expiryB || Date.parse(a.grantedAt) - Date.parse(b.grantedAt);
   });
-  const remaining = buckets.reduce((sum, bucket) => sum + bucket.remaining, 0n);
+  // Expiry clears the live balance; issued minus consumed and still-held credits is what expired.
+  const remaining = buckets.reduce((sum, bucket) => sum + (expired && props.grants ? bucket.granted - bucket.used - bucket.remaining : bucket.remaining), 0n);
   const pageSize = props.pageSize;
   const totalPages = Math.max(1, Math.ceil(buckets.length / pageSize));
   const currentPage = Math.min(page, totalPages);

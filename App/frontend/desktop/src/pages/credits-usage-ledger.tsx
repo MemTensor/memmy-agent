@@ -278,11 +278,11 @@ export function CreditBalanceActivity() {
     <Button variant="secondary" size="sm" aria-expanded={open} onClick={() => setOpen(value => !value)}>{t("credits.live.ledger")}</Button>
     {open && <div className={styles.tableScroll}>
       <p role="status">{result.error ? t(result.data ? "credits.live.stale" : "credits.live.error") : result.loading ? t("credits.live.loading") : ""}</p>
-      <table className={styles.table}><thead><tr><th>{t("credits.ledger.time")}</th><th>{t("usage.operation")}</th><th>{t("credits.ledger.credits")}</th><th>{t("credits.live.balanceAfter")}</th></tr></thead>
+      <table className={styles.table}><thead><tr><th>{t("credits.ledger.time")}</th><th>{t("usage.operation")}</th><th>{t("credits.live.balanceDelta")}</th><th>{t("credits.live.balanceAfter")}</th></tr></thead>
         <tbody>{result.data?.items.map(entry => <tr key={entry.ledgerId}><td>{new Date(entry.occurredAt).toLocaleString(language)}</td><td>{entry.title}</td><td>{formatCreditAmount(entry.balanceDelta, language)}{entry.heldDelta !== "0.00" && <small> · {t("credits.live.held")} {formatCreditAmount(entry.heldDelta, language)}</small>}</td><td>{formatCreditAmount(entry.balanceAfter, language)}</td></tr>)}</tbody>
       </table>
-      {!result.loading && !result.error && !result.data?.items.length && <p>{t("credits.ledger.empty")}</p>}
-      <nav className={styles.pagination}><Button size="sm" variant="secondary" disabled={result.loading} onClick={() => { setCursor(undefined); result.refresh(); }}>{t("usage.refresh")}</Button>
+      {!result.loading && !result.error && !result.data?.items.length && <p>{t("credits.live.ledgerEmpty")}</p>}
+      <nav className={styles.pagination}><Button size="sm" variant="secondary" disabled={result.loading} onClick={() => { setCursor(undefined); result.refresh(); }}>{t("credits.refresh")}</Button>
         <Button size="sm" variant="secondary" disabled={!result.data?.hasMore || result.loading || !!result.error} onClick={() => setCursor(result.data!.nextCursor!)}>{t("credits.detail.nextPage")}</Button></nav>
     </div>}
   </section>;
