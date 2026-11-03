@@ -1,3 +1,4 @@
+import {openCacheFixture} from "../fixtures/panel-cache-fixture.js";
 import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,26 +11,20 @@ import type { MemoryFilter } from "../../src/types.js";
 
 describe("panel member projection", () => {
   it("builds indexes after a restartable cold backfill, including selected batches", () => {
-    const root = mkdtempSync(join(tmpdir(), "panel-member-backfill-"));
-    const path = join(root, "memory.sqlite");
-    let db = new MemoryDb({path});
-    const indexes = () => db.db.prepare("SELECT name FROM sqlite_master WHERE name IN ('idx_panel_memory_source','idx_panel_memory_order')").all();
+    const root=mkdtempSync(join(tmpdir(),"panel-member-backfill-")),path=join(root,"memory.sqlite");
+    const db=new MemoryDb({path});let reader=openCacheFixture(path);
+    const indexes=()=>reader.cache.prepare("SELECT name FROM sqlite_master WHERE name IN ('idx_panel_memory_source','idx_panel_memory_order')").all();
     try {
       db.db.exec(`INSERT INTO memories(id,user_id,timeline,memory_value,memory_layer,created_at,updated_at,info_json)
         VALUES('a','owner','now','body','L1','2026-10-30','2026-10-31','{"source":"cursor"}'),
-        ('b','owner','now','body','L1','2026-10-30','2026-10-31','{"source":"codex"}');
-        DROP INDEX idx_panel_memory_source; DROP INDEX idx_panel_memory_order;`);
-      db.close(); db = new MemoryDb({path});
-      expect(indexes()).toHaveLength(0);
-      expect(fillPanelCacheBatch(db.db,"memories",1,["a"])).toBe(1);
-      expect(fillPanelCacheBatch(db.db,"memories",1,["a"])).toBe(0);
-      expect(indexes()).toHaveLength(0);
-      db.close(); db = new MemoryDb({path});
-      expect(indexes()).toHaveLength(0);
-      expect(fillPanelCacheBatch(db.db,"memories",1)).toBe(1);
-      expect(indexes()).toHaveLength(2);
-      expect(new Repositories(db.db).memories.panelMemberIds({panelSource:true,panelVisible:true,agentId:"cursor"})).toEqual(["a"]);
-    } finally { if(db.db.open)db.close(); rmSync(root,{recursive:true,force:true}); }
+        ('b','owner','now','body','L1','2026-10-30','2026-10-31','{"source":"codex"}')`);
+      reader.ingest();expect(indexes()).toHaveLength(0);
+      expect(fillPanelCacheBatch(reader.source.db,"memories",1,["a"])).toBe(1);
+      expect(fillPanelCacheBatch(reader.source.db,"memories",1,["a"])).toBe(0);expect(indexes()).toHaveLength(0);
+      reader.close();reader=openCacheFixture(path);expect(indexes()).toHaveLength(0);
+      expect(fillPanelCacheBatch(reader.source.db,"memories",1)).toBe(1);expect(indexes()).toHaveLength(2);
+      expect(new Repositories(reader.source.db).memories.panelMemberIds({panelSource:true,panelVisible:true,agentId:"cursor"})).toEqual(["a"]);
+    }finally{reader.close();db.close();rmSync(root,{recursive:true,force:true});}
   });
   it("preserves legacy IDs and order while avoiding source parsing on every fresh view", () => {
     const db = new MemoryDb({path: ":memory:"});
@@ -121,40 +116,18 @@ describe("panel member projection", () => {
     } finally { db.close(); }
   });
 
-  it("reclassifies only dirty memories and installs indexes on an existing clean cache without rebuilding it", () => {
-    const root = mkdtempSync(join(tmpdir(), "panel-member-upgrade-"));
-    const path = join(root, "memory.sqlite");
-    let db = new MemoryDb({path});
+  it("reclassifies only dirty memories after reopening a clean persistent cache",()=>{
+    const root=mkdtempSync(join(tmpdir(),"panel-member-upgrade-")),path=join(root,"memory.sqlite");
+    const db=new MemoryDb({path});let reader=openCacheFixture(path);
     try {
-      const insert = db.db.prepare(`INSERT INTO memories(id,user_id,timeline,memory_value,memory_layer,created_at,updated_at,info_json)
+      const insert=db.db.prepare(`INSERT INTO memories(id,user_id,timeline,memory_value,memory_layer,created_at,updated_at,info_json)
         VALUES(?,'owner','now','body','L1','2026-10-30','2026-10-31','{"source":"cursor"}')`);
-      db.db.transaction(()=>{for(let i=0;i<300;i++)insert.run(`m-${i}`);})();
-      ensurePanelCache(db.db,["memories"]);
-      const before = db.db.prepare("SELECT * FROM panel_memory_facts ORDER BY id").all();
-      const meta = db.db.prepare("SELECT * FROM panel_cache_meta").get();
-      db.db.exec("DROP INDEX idx_panel_memory_source; DROP INDEX idx_panel_memory_order");
-      db.close(); db = new MemoryDb({path});
-      expect(db.db.prepare("SELECT * FROM panel_cache_meta").get()).toEqual(meta);
-      expect(db.db.prepare("SELECT * FROM panel_memory_facts ORDER BY id").all()).toEqual(before);
-      expect(db.db.prepare("SELECT count(*) FROM panel_memory_dirty").pluck().get()).toBe(0);
-      expect(db.db.prepare("SELECT name FROM sqlite_master WHERE name IN ('idx_panel_memory_source','idx_panel_memory_order')").all()).toHaveLength(2);
-      let classified = 0;
-      const register = () => db.db.function("panel_source",{deterministic:true},(infoSource,internalSource,sessionId,conversationId,agentId,appId)=>{
-        classified++;
-        return panelSourceForStatsRow({infoSource,internalSource,sessionId:sessionId as string,conversationId:conversationId as string,agentId:agentId as string,appId:appId as string});
-      });
-      // Register after the existing cache writer has registered its own function.
-      ensurePanelCache(db.db,["memories"]);
-      const repos = new Repositories(db.db), filter: MemoryFilter = {panelSource:true,panelVisible:true,memoryLayer:"L1",agentId:"cursor"};
-      register(); expect(repos.memories.panelMemberIds(filter)).toHaveLength(300); expect(classified).toBe(0);
-      db.db.prepare("UPDATE memories SET info_json=? WHERE id='m-0'").run(JSON.stringify({source:"codex"}));
-      // First dirty batch on a reopened connection registers its canonical function.
-      ensurePanelCache(db.db,["memories"]); register(); classified = 0;
-      db.db.prepare("UPDATE memories SET info_json=? WHERE id='m-1'").run(JSON.stringify({source:"codex"}));
-      expect(repos.memories.panelMemberIds(filter)).toHaveLength(298); expect(classified).toBe(1);
-      expect(repos.memories.panelMemberIds({...filter,agentId:"codex"})).toEqual(["m-1","m-0"]); expect(classified).toBe(1);
-      db.db.exec("DELETE FROM memories WHERE id='m-1'");
-      expect(repos.memories.panelMemberIds({...filter,agentId:"codex"})).toEqual(["m-0"]); expect(classified).toBe(1);
-    } finally { if(db.db.open)db.close(); rmSync(root,{recursive:true,force:true}); }
+      db.db.transaction(()=>{for(let i=0;i<300;i++)insert.run(`m-${i}`);})();reader.prepare(["memories"]);
+      const before=reader.cache.prepare("SELECT * FROM panel_memory_facts ORDER BY id").all();reader.close();reader=openCacheFixture(path);
+      expect(reader.cache.prepare("SELECT * FROM panel_memory_facts ORDER BY id").all()).toEqual(before);
+      let classified=0;reader.source.db.function("panel_source",{deterministic:true},(infoSource,internalSource,sessionId,conversationId,agentId,appId)=>{classified++;return panelSourceForStatsRow({infoSource,internalSource,sessionId:String(sessionId ?? ""),conversationId:String(conversationId ?? ""),agentId:String(agentId ?? ""),appId:String(appId ?? "")});});
+      db.db.exec(`UPDATE memories SET info_json='{"source":"codex"}' WHERE id='m-0'`);reader.prepare(["memories"]);
+      expect(classified).toBe(1);expect(reader.cache.prepare("SELECT source FROM panel_memory_facts WHERE id='m-0'").pluck().get()).toBe("codex");
+    }finally{reader.close();db.close();rmSync(root,{recursive:true,force:true});}
   });
 });

@@ -1,3 +1,5 @@
+import Database from "better-sqlite3";
+import {existsSync} from "node:fs";
 import {afterEach,expect,it,vi} from "vitest";
 import {createMemoryServiceFixture} from "../../fixtures/memory-service-fixture.js";
 import {Repositories} from "../../../src/storage/repositories.js";
@@ -5,7 +7,7 @@ import {createMemoryHttpServer,closeMemoryHttpServer} from "../../../src/server/
 const fixture=createMemoryServiceFixture();
 let server:ReturnType<typeof createMemoryHttpServer>|undefined;
 afterEach(async()=>{if(server){await closeMemoryHttpServer(server);server=undefined;}await fixture.cleanup();});
-it.each(["service","http","memmy-service","memmy-http"])("commits each capture exactly once during cold and incremental backfill: %s",async transport=>{
+it.each(["service","http","memmy-service","memmy-http"])("commits each capture exactly once with cold and incremental panel warmup: %s",async transport=>{
  const {service,db,root}=fixture.createTestService();
  const memmy=transport.startsWith("memmy"),http=transport.endsWith("http");
  const session=service.openSession({namespace:{source:"memmy-agent",profileId:"test"}});
@@ -39,8 +41,12 @@ it.each(["service","http","memmy-service","memmy-http"])("commits each capture e
  for(const phase of ["cold","incremental"]) {
  if(phase==="incremental") db.db.transaction(()=>{for(let i=0;i<600;i++)repos.memories.insert({...seed,id:`incremental-${i}`,memoryKey:`incremental-${i}`});})();
  service.startPanelWarmup();
- await vi.waitFor(()=>expect(Number(db.db.prepare("SELECT count(*) FROM panel_memory_facts").pluck().get())).toBeGreaterThan(0),{timeout:10000,interval:1});
- expect(Number(db.db.prepare("SELECT count(*) FROM panel_memory_dirty").pluck().get())).toBeGreaterThan(0);
+ await vi.waitFor(()=>{expect(existsSync(`${db.path}.panel-cache.sqlite`)).toBe(true);
+  const cache=new Database(`${db.path}.panel-cache.sqlite`,{readonly:true});
+  // A small incremental batch may finish between polls. Completion is valid;
+  // the explicit held-cache-write-lock scenario lives in panel-cache-isolation.
+  try{expect(Number(cache.prepare("SELECT count(*) FROM panel_memory_facts").pluck().get())).toBeGreaterThan(0);}finally{cache.close();}
+ },{timeout:10000,interval:1});
  const capturedAt=new Date().toISOString();
  const inputs=Array.from({length:count},(_,i)=>({query:`synthetic ${phase} capture ${i}`,answer:"persist this completed native turn",channel:"hook" as const,
   sourceTurn:{completionEvidence:"native turn completed",source:"codex",profileId:"default",conversationId:`capture-${i}`,turnId:`${phase}-turn-${i}`,startedAt:capturedAt,completedAt:capturedAt}}));

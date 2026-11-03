@@ -1,3 +1,5 @@
+import { resetSourceGeneration } from "./source-changes.js";
+import { writeFts, repairFts, isBusy } from "./fts-maintenance.js";
 import { sharedProjectIds, sharedProjectIdentity } from "../service/namespace/shared-project.js";
 import { DEVICE_MEMORY_OWNER } from "../service/namespace/memory-owner.js";
 import {
@@ -113,6 +115,9 @@ const CLEAR_MEMORY_TABLES = [
   ...BUNDLE_TABLES,
   "memories_fts",
   "user_memories_fts",
+  "memories_fts_ids",
+  "user_memories_fts_ids",
+  "fts_repair_queue",
   "memory_vector_entries",
   "idempotency_keys",
   "legacy_migration_ledger"
@@ -1562,15 +1567,12 @@ export class MemoryRepository {
 
   reindexFts(memory: MemoryRow): void {
     try {
-      this.db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(memory.id);
-      if (!memory.deletedAt && memory.status !== "deleted") {
-        this.db
-          .prepare(`INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`)
-          .run(memory.id, memory.id, retrievalDocumentForMemory(memory), memory.tags.join(" "));
-      }
-    } catch {
-      // The service search path is deterministic JS scoring; FTS is maintained
-      // opportunistically for future cloud/local parity and should not block writes.
+      writeFts(this.db,"memories",memory.id,!memory.deletedAt && memory.status !== "deleted"
+        ? [memory.id,retrievalDocumentForMemory(memory),memory.tags.join(" ")] : undefined);
+    } catch (error) {
+      if (isBusy(error)) throw error;
+      // Preserve the existing degraded-write contract, but make repairs durable.
+      this.db.prepare("INSERT OR IGNORE INTO fts_repair_queue(kind,memory_id) VALUES('memories',?)").run(memory.id);
     }
   }
 
@@ -2050,13 +2052,10 @@ export class UserMemoryRepository {
   }
 
   private reindexFts(memory: UserMemoryRecord): void {
-    this.db.prepare(`DELETE FROM user_memories_fts WHERE id = ?`).run(memory.id);
-    if (memory.status === "active" && !memory.deletedAt) {
-      this.db.prepare(
-        `INSERT INTO user_memories_fts (id, content, memory_types) VALUES (?, ?, ?)`
-      ).run(memory.id, memory.content, memory.memoryTypes.join(" "));
-    }
+    writeFts(this.db,"user_memories",memory.id,memory.status === "active" && !memory.deletedAt
+      ? [memory.content,memory.memoryTypes.join(" ")] : undefined);
   }
+
 }
 
 // A first attempt waiting in the queue has not failed; only a job that already
@@ -6042,8 +6041,12 @@ export class RuntimeRepository {
         }
       }
       for (const row of Array.isArray(tables.memories) ? tables.memories : []) {
-        if (row && typeof row.id === "string") maintainMemoryRelations(this.db,row.id,false);
+        if (row && typeof row.id === "string") { maintainMemoryRelations(this.db,row.id,false); repairFts(this.db,"memories",row.id); }
       }
+      for (const row of Array.isArray(tables.user_memories) ? tables.user_memories : []) {
+        if (row && typeof row.id === "string") repairFts(this.db,"user_memories",row.id);
+      }
+      resetSourceGeneration(this.db);
       invalidatePanelViews(this.db);
     })();
     this.scheduleLogTablesPrune();
@@ -7403,6 +7406,7 @@ export class Repositories {
               .run(...sequenceTables);
           }
         }
+        resetSourceGeneration(this.db);
         invalidatePanelViews(this.db);
         return cleared;
       })();

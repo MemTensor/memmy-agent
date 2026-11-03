@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { RAW_SOURCE_SQL } from "./memory-relations.js";
 
 /** A reset token, not a change log: any destructive/visibility change invalidates panel views. */
 export function panelSafetyToken(db: Database.Database): string {
@@ -25,14 +26,16 @@ export function installPanelSafetyTriggers(db: Database.Database): void {
       AND session_id=NEW.session_id AND user_id IS NEW.user_id)`;
   const changes: Record<string, string> = {
     memories:
-      "OLD.deleted_at IS NOT NEW.deleted_at OR (OLD.status='deleted') != (NEW.status='deleted') OR OLD.user_id IS NOT NEW.user_id OR OLD.session_id IS NOT NEW.session_id OR OLD.visibility IS NOT NEW.visibility",
+      `OLD.deleted_at IS NOT NEW.deleted_at OR (OLD.status='deleted') != (NEW.status='deleted') OR OLD.user_id IS NOT NEW.user_id OR OLD.session_id IS NOT NEW.session_id OR OLD.visibility IS NOT NEW.visibility
+        OR (${RAW_SOURCE_SQL.replaceAll("m.","OLD.")}) IS NOT (${RAW_SOURCE_SQL.replaceAll("m.","NEW.")})`,
     user_memories:
       "OLD.deleted_at IS NOT NEW.deleted_at OR (OLD.status='deleted') != (NEW.status='deleted') OR OLD.user_id IS NOT NEW.user_id",
     raw_turns:
       `OLD.deleted_at IS NOT NEW.deleted_at OR OLD.redacted_at IS NOT NEW.redacted_at OR OLD.user_id IS NOT NEW.user_id
         OR OLD.session_id IS NOT NEW.session_id
         OR (OLD.episode_id IS NOT NEW.episode_id AND NOT (${firstCaptureBinding}))`,
-    episodes: "OLD.user_id IS NOT NEW.user_id OR OLD.project_id IS NOT NEW.project_id",
+    episodes: "OLD.user_id IS NOT NEW.user_id OR OLD.project_id IS NOT NEW.project_id OR OLD.session_id IS NOT NEW.session_id",
+    sessions: "OLD.user_id IS NOT NEW.user_id OR OLD.project_id IS NOT NEW.project_id OR OLD.workspace_id IS NOT NEW.workspace_id OR OLD.workspace_path IS NOT NEW.workspace_path",
     l3_world_model_scopes:
       "OLD.user_id IS NOT NEW.user_id OR OLD.project_id IS NOT NEW.project_id OR OLD.workspace_uri IS NOT NEW.workspace_uri OR OLD.memory_id IS NOT NEW.memory_id"
   };

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { MemoryDb } from "../src/storage/db.js";
+import Database from "better-sqlite3";
 
 it("prepares device statistics after real service startup without any HTTP request or UID", async () => {
   const directory = mkdtempSync(join(tmpdir(), "panel-service-warmup-"));
@@ -28,6 +29,7 @@ it("prepares device statistics after real service startup without any HTTP reque
   child.stderr?.on("data", data => { output += String(data); });
   const exited = new Promise<void>(done => child.once("exit", () => done()));
   let reader: MemoryDb | undefined;
+  let cache: Database.Database | undefined;
   try {
     await expect.poll(() => {
       if (child.exitCode !== null) throw new Error(output);
@@ -35,11 +37,13 @@ it("prepares device statistics after real service startup without any HTTP reque
       return existsSync(state) && JSON.parse(readFileSync(state, "utf8")).status;
     }, { timeout: 15_000 }).toBe("ready");
     reader = new MemoryDb({ path, readonly: true });
-    await expect.poll(() => reader!.db.prepare("SELECT count(*) FROM panel_memory_facts").pluck().get(), { timeout: 15_000 }).toBe(1);
-    expect(reader.db.prepare("SELECT count(*) FROM panel_memory_dirty").pluck().get()).toBe(0);
+    await expect.poll(() => existsSync(`${path}.panel-cache.sqlite`), { timeout: 15_000 }).toBe(true);
+    cache = new Database(`${path}.panel-cache.sqlite`, {readonly:true});
+    await expect.poll(() => cache!.prepare("SELECT count(*) FROM panel_memory_facts").pluck().get(), { timeout: 15_000 }).toBe(1);
+    expect(cache.prepare("SELECT count(*) FROM panel_memory_dirty").pluck().get()).toBe(0);
     expect(reader.db.prepare("SELECT user_id FROM memories WHERE id='startup'").pluck().get()).toBe("old-owner");
   } finally {
-    reader?.close(); child.kill("SIGTERM");
+    cache?.close(); reader?.close(); child.kill("SIGTERM");
     const force = setTimeout(() => child.kill("SIGKILL"), 5000);
     await exited; clearTimeout(force); rmSync(directory, { recursive: true, force: true });
   }
