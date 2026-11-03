@@ -37,6 +37,23 @@ function makeAutoCompact({
 }
 
 describe("AutoCompact", () => {
+  it("resolves an operation-specific consolidator before archiving and leaves sessions untouched on preparation failure", async () => {
+    const sessions = { getOrCreate: vi.fn() } as any;
+    const base = { compactIdleSession: vi.fn() };
+    const scoped = { compactIdleSession: vi.fn(async () => null) };
+    const resolve = vi.fn(async (_key: string) => scoped);
+    const ac = new AutoCompact(sessions, base, 15, resolve);
+    await ac.archiveExpiredSession("cli:old");
+    expect(resolve).toHaveBeenCalledWith("cli:old");
+    expect(scoped.compactIdleSession).toHaveBeenCalledWith("cli:old", 8);
+    expect(base.compactIdleSession).not.toHaveBeenCalled();
+    resolve.mockRejectedValueOnce(new Error("Catalog coordination unavailable"));
+    ac.archiving.add("cli:old");
+    await ac.archiveExpiredSession("cli:old");
+    expect(ac.archiving.has("cli:old")).toBe(false);
+    expect(scoped.compactIdleSession).toHaveBeenCalledOnce();
+    expect(sessions.getOrCreate).not.toHaveBeenCalled();
+  });
   it("detects expiration boundaries and formats summaries", () => {
     const ac = new AutoCompact(new SessionManager(tmpDir()), {}, 15);
     const now = new Date("2026-01-01T12:00:00.000Z");

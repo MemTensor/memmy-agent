@@ -754,6 +754,7 @@ export interface MemmyAgentNewChatResult {
 }
 
 export type MemmyAgentModelError = {
+  origin?: "model_catalog_fallback";
   category: "quota_exhausted" | "image_input_unsupported" | "image_analysis_failed" | "model_failed";
   detail?: string;
   presetId?: string;

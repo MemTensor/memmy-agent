@@ -1122,6 +1122,9 @@ describe("AccountService", () => {
 
 function createCloudClientStub() {
   return {
+    async getModelCapabilityCatalog(): Promise<never> {
+      throw new Error("Model catalog response is not configured in this test");
+    },
     async health() {
       return { status: "mock" as const, checkedAt: "2026-06-02T10:00:00.000Z" };
     },

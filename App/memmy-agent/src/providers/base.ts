@@ -150,6 +150,17 @@ export class GenerationSettings {
 export const SYNTHETIC_USER_CONTENT = "(conversation continued)";
 
 export abstract class LLMProvider {
+  static requestMaxTokens(args: { maxTokens?: number; modelCapabilities?: import("./turn-model-capabilities.js").TurnModelCapabilities }, generation: GenerationSettings): number | undefined {
+    const capabilities = args.modelCapabilities;
+    if (!capabilities) return args.maxTokens ?? generation.maxTokens;
+    return capabilities.taskMaxTokens !== undefined
+      ? Math.min(capabilities.taskMaxTokens, capabilities.maxTokens ?? capabilities.taskMaxTokens)
+      : capabilities.maxTokens;
+  }
+
+  static requestReasoningEffort(args: { reasoningEffort?: string | null; modelCapabilities?: import("./turn-model-capabilities.js").TurnModelCapabilities }, generation: GenerationSettings): string | null | undefined {
+    return args.modelCapabilities ? args.modelCapabilities.reasoningEffort : args.reasoningEffort ?? generation.reasoningEffort;
+  }
   static supportsProgressDeltas = false;
   protected static CHAT_RETRY_DELAYS = [1, 2, 4];
   protected static PERSISTENT_MAX_DELAY = 60;
@@ -276,6 +287,8 @@ export abstract class LLMProvider {
   }
 
   abstract chat(args: {
+    modelCapabilities?: import("./turn-model-capabilities.js").TurnModelCapabilities;
+    capabilityCatalogState?: import("./model-capability-catalog.js").RuntimeModelCapabilityCatalogState;
     messages: Record<string, any>[];
     tools?: Record<string, any>[] | null;
     model?: string | null;
@@ -513,9 +526,9 @@ export abstract class LLMProvider {
   private buildRetryArgs(args: Parameters<LLMProvider["chat"]>[0]): Parameters<LLMProvider["chat"]>[0] {
     return {
       ...args,
-      maxTokens: args.maxTokens ?? this.generation.maxTokens,
+      maxTokens: LLMProvider.requestMaxTokens(args, this.generation),
       temperature: args.temperature ?? this.generation.temperature,
-      reasoningEffort: args.reasoningEffort ?? this.generation.reasoningEffort,
+      reasoningEffort: LLMProvider.requestReasoningEffort(args, this.generation),
     };
   }
 

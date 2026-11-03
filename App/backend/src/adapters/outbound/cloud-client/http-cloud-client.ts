@@ -1,6 +1,7 @@
 /** Http cloud client module. */
 import {
   AccountInvitationViewSchema,
+  ModelCapabilityCatalogSchema,
   ASR_PROVIDER,
   AuthorizeIntegrationResponseSchema,
   resolveCloudServiceBaseUrl,
@@ -32,6 +33,8 @@ import {
   type TokenSceneUsageDto
 } from "@memmy/local-api-contracts";
 import type {
+  GetModelCapabilityCatalogInput,
+  ModelCapabilityCatalogResult,
   CloudAuthorizeIntegrationInput,
   CloudAsrTranscriptionInput,
   CloudAsrTranscriptionResult,
@@ -105,6 +108,34 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
   const deviceId = options.deviceId;
 
   return {
+    async getModelCapabilityCatalog(input: GetModelCapabilityCatalogInput): Promise<ModelCapabilityCatalogResult> {
+      if (!input.uuid?.trim()) throw new Error("Model catalog requires an account credential");
+      if (input.catalogVersion !== undefined
+        && (!Number.isSafeInteger(input.catalogVersion) || input.catalogVersion < 1)) {
+        throw new Error("Invalid model catalog version");
+      }
+      const query = input.catalogVersion === undefined ? "" : `?catalogVersion=${input.catalogVersion}`;
+      // This endpoint returns raw catalog JSON and an empty 304, without the cloud data envelope.
+      const response = await fetchImpl(`${baseUrl}/api/agent/model-config${query}`, {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${input.uuid}`,
+          lang: "zh",
+          "x-agent-region": normalizeAgentRegion(process.env.MEMMY_APP_EDITION)
+        },
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      if (response.status === 304) {
+        if (input.catalogVersion === undefined) throw new Error("Unexpected model catalog 304 without a local version");
+        return { status: "not-modified" };
+      }
+      if (response.status !== 200) {
+        const envelope = await readCloudEnvelope(response);
+        throw new Error(envelope.message || `Model catalog request failed with HTTP ${response.status}`);
+      }
+      return { status: "updated", catalog: ModelCapabilityCatalogSchema.parse(await response.json()) };
+    },
+
     async health(): Promise<CloudHealth> {
       return {
         status: "ok",

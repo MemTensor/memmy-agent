@@ -1,6 +1,7 @@
 import { InboundMessage, OutboundMessage } from "../runtime-messages/events.js";
 import { MessageBus } from "../runtime-messages/queue.js";
-import { LLMProvider } from "../../providers/base.js";
+import type { LLMRuntime } from "../../utils/llm-runtime.js";
+type TitleRuntime = Omit<LLMRuntime, "provider"> & { provider: any };
 import type { GoalStatus } from "./goal-state.js";
 import {
   Session,
@@ -62,7 +63,7 @@ function titleInputs(session: Session | any): [string, string] {
   return [userText, assistantText];
 }
 
-export async function maybeGenerateWebuiTitle({ sessions, sessionKey, provider, model }: { sessions: SessionManager; sessionKey?: string; provider: LLMProvider | any; model: string }): Promise<boolean> {
+export async function maybeGenerateWebuiTitle({ sessions, sessionKey, provider, model, prepare, modelCapabilities, capabilityCatalogState }: TitleRuntime & { sessions: SessionManager; sessionKey?: string }): Promise<boolean> {
   const key = sessionKey;
   if (!key) return false;
   const session = sessions.get(key);
@@ -89,7 +90,10 @@ export async function maybeGenerateWebuiTitle({ sessions, sessionKey, provider, 
 
   let response: any;
   try {
+    const runtime = prepare ? await prepare({ maxTokens: TITLE_GENERATION_MAX_TOKENS, thinkingEnabled: false })
+      : { provider, model, modelCapabilities, capabilityCatalogState };
     const args = {
+      ...(runtime.modelCapabilities ? { modelCapabilities: runtime.modelCapabilities, capabilityCatalogState: runtime.capabilityCatalogState } : {}),
       messages: [
         {
           role: "system",
@@ -98,13 +102,13 @@ export async function maybeGenerateWebuiTitle({ sessions, sessionKey, provider, 
         { role: "user", content: prompt },
       ],
       tools: null,
-      model,
+      model: runtime.model,
       maxTokens: TITLE_GENERATION_MAX_TOKENS,
       temperature: 0.2,
       reasoningEffort: TITLE_GENERATION_REASONING_EFFORT,
-      retryMode: "standard",
+      retryMode: "standard" as const,
     };
-    response = await provider.chatWithRetry(args);
+    response = await runtime.provider.chatWithRetry(args);
   } catch {
     return false;
   }
@@ -115,23 +119,15 @@ export async function maybeGenerateWebuiTitle({ sessions, sessionKey, provider, 
   return true;
 }
 
-export async function maybeGenerateWebuiTitleAfterTurn({
-  channel,
-  metadata,
-  sessions,
-  sessionKey,
-  provider,
-  model,
-}: {
+export async function maybeGenerateWebuiTitleAfterTurn(input: TitleRuntime & {
   channel: string;
   metadata: Record<string, any>;
   sessions: SessionManager;
   sessionKey?: string;
-  provider: LLMProvider | any;
-  model: string;
 }): Promise<boolean> {
+  const { channel, metadata } = input;
   if (channel !== "websocket" || metadata?.[WEBUI_SESSION_METADATA_KEY] !== true) return false;
-  return maybeGenerateWebuiTitle({ sessions, sessionKey, provider, model });
+  return maybeGenerateWebuiTitle(input);
 }
 
 export function websocketTurnWallStartedAt(chatId: string): number | null {
@@ -248,7 +244,7 @@ export class WebuiTurnCoordinator {
   bus: MessageBus | any;
   sessions: SessionManager;
   scheduleBackground: (promise: Promise<any>) => void;
-  private titleContexts = new Map<string, { provider: LLMProvider | any; model: string }>();
+  private titleContexts = new Map<string, TitleRuntime>();
 
   constructor(init: { bus: MessageBus | any; sessions: SessionManager; scheduleBackground?: (promise: Promise<any>) => void }) {
     this.bus = init.bus;
@@ -256,7 +252,7 @@ export class WebuiTurnCoordinator {
     this.scheduleBackground = init.scheduleBackground ?? ((promise) => void promise);
   }
 
-  captureTitleContext(sessionKey: string, msg: InboundMessage, llm: { provider: LLMProvider | any; model: string }): void {
+  captureTitleContext(sessionKey: string, msg: InboundMessage, llm: TitleRuntime): void {
     if (msg.channel === "websocket" && msg.metadata?.[WEBUI_SESSION_METADATA_KEY] === true) {
       this.titleContexts.set(sessionKey, llm);
     }
@@ -295,8 +291,7 @@ export class WebuiTurnCoordinator {
           metadata: msg.metadata,
           sessions: this.sessions,
           sessionKey,
-          provider: titleContext.provider,
-          model: titleContext.model,
+          ...titleContext,
         });
         if (generated) {
           const outbound = new OutboundMessage({

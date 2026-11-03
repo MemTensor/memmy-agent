@@ -1398,6 +1398,7 @@ describe("agent chat slice", () => {
   it("preserves image analysis failure context from live events and history", () => {
     const modelError = {
       category: "image_analysis_failed" as const,
+      origin: "model_catalog_fallback" as const,
       detail: "Error: internal vision failure",
       presetId: "account-agent",
       source: "account" as const,

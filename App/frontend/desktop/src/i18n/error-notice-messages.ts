@@ -1,5 +1,6 @@
 /** User-facing copy for governed Agent and memory-processing errors. */
 export const zhCNErrorNoticeMessages = {
+  "agent.error.modelCatalogUnavailable": "未获取到模型信息，请重启客户端",
   "agent.error.modelFailed": "模型请求失败，请稍后重试",
   "agent.error.connectionFailed": "无法连接到模型服务，请检查网络或 API 配置",
   "agent.error.authFailed": "API 密钥无效或已过期，请检查后重试",
@@ -40,6 +41,7 @@ export const zhCNErrorNoticeMessages = {
 } as const;
 
 export const enUSErrorNoticeMessages = {
+  "agent.error.modelCatalogUnavailable": "Model information could not be retrieved. Please restart the app.",
   "agent.error.modelFailed": "The model request failed. Please try again later.",
   "agent.error.connectionFailed": "Could not connect to the model service. Check your network or API settings.",
   "agent.error.authFailed": "The API key is invalid or expired. Check your settings and try again.",

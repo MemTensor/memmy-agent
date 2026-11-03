@@ -13,6 +13,13 @@ const t = (key: string, values?: Record<string, string | number>) => {
 };
 
 describe("agent-model-error", () => {
+  it.each(["model_failed", "quota_exhausted", "image_input_unsupported"] as const)("wraps only explicitly marked catalog fallback failures (%s)", (category) => {
+    expect(formatAgentModelError("actual upstream error", t, { modelError: {
+      origin: "model_catalog_fallback", category, detail: "actual upstream error"
+    } })).toEqual({ title: "agent.error.modelCatalogUnavailable", detail: null });
+    expect(formatAgentModelError("actual upstream error", t, { modelError: { category, detail: "actual upstream error" } }).title)
+      .not.toBe("agent.error.modelCatalogUnavailable");
+  });
   it("detects provider error messages", () => {
     expect(isAgentModelErrorContent("Error: 503 upstream connect error")).toBe(true);
     expect(isAgentModelErrorContent("Error calling LLM: missing key")).toBe(true);

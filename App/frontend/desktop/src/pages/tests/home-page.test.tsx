@@ -202,8 +202,7 @@ describe("HomePage", () => {
     expect(selectorSource).toContain("agentActions.pendingModelPresetUpdated");
     expect(selectorSource).toContain("AgentThinkingControl");
     expect(selectorSource).toContain("resolveThinkingConfigForModel");
-    expect(selectorSource).toContain("optionAside={(option) => (");
-    expect(selectorSource).toContain("option.value === resolved.candidateId && thinkingConfig");
+    expect(selectorSource).toContain("thinkingConfig={thinkingConfig}");
     expect(selectorSource).not.toContain("localStorage");
     expect(source).not.toContain('sendMessage({ chatId: state.agent.currentChatId, content: "/model');
     expect(styles).toContain(".agent-model-selector .agent-model-selector__menu");
@@ -223,8 +222,12 @@ describe("HomePage", () => {
     expect(source).not.toContain("agent-conversation-model-error");
   });
 
-  it("组帧时按模型思考表解析开关与默认档位", () => {
+  it("只发送用户显式思考选择，默认值由 Runtime 依据本轮目录解析", () => {
     const workspace = createModelWorkspace(null);
+    workspace.catalog.capabilityCatalog = { catalogVersion: 21, models: {
+      "gpt-5.4": { inputModalities: ["text"], contextWindowTokens: 128000, maxTokens: 8192,
+        thinking: { switchable: true, defaultEnabled: true, levels: ["low", "medium", "high"], defaultLevel: "medium" } }
+    } };
     const candidate: ModelCandidate = {
       id: "gpt-54",
       source: "byok",
@@ -238,19 +241,16 @@ describe("HomePage", () => {
       available: true
     };
 
-    expect(thinkingPayloadForSend(workspace, candidate, undefined)).toEqual({
-      thinkingEnabled: true,
-      thinkingLevel: "medium"
-    });
+    expect(thinkingPayloadForSend(workspace, candidate, undefined)).toEqual({});
     expect(thinkingPayloadForSend(workspace, candidate, { enabled: false })).toEqual({
-      thinkingEnabled: false,
-      thinkingLevel: null
+      thinkingEnabled: false
     });
     expect(thinkingPayloadForSend(workspace, candidate, { enabled: true, level: "high" })).toEqual({
       thinkingEnabled: true,
       thinkingLevel: "high"
     });
     expect(thinkingPayloadForSend(workspace, { ...candidate, model: "unlisted-model" }, undefined)).toEqual({});
+    expect(thinkingPayloadForSend(workspace, candidate, { level: "retired-level" })).toEqual({ thinkingLevel: "retired-level" });
   });
 
   it("hides the agent status line after the websocket is connected", () => {

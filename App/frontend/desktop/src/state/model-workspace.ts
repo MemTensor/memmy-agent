@@ -1,7 +1,6 @@
 /** Pure view-model helpers for the canonical model catalog returned by the local API. */
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
-  getModelThinkingConfig,
   type CatalogEndpointInput,
   type CatalogProviderId,
   type ModelAssignment,
@@ -1016,12 +1015,7 @@ export function resolveThinkingConfigForModel(
   if (isCustomModelEntry(workspace, candidate)) {
     return customThinkingConfigFor(workspace, candidate);
   }
-  if (
-    candidate
-    && endpointProtocolFor(workspace, candidate) === "openai-chat-completions"
-    && chatCompletionsHidesCatalogThinking(candidate.model)
-  ) {
-    return null;
-  }
-  return getModelThinkingConfig(candidate?.model);
+  if (candidate && endpointProtocolFor(workspace, candidate) === "openai-chat-completions"
+    && chatCompletionsHidesCatalogThinking(candidate.model)) return null;
+  return candidate ? workspace.catalog.capabilityCatalog?.models[candidate.model]?.thinking ?? null : null;
 }

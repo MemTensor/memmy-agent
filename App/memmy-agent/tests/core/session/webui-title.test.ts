@@ -6,6 +6,7 @@ import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
 import { SessionManager } from "../../../src/core/session/manager.js";
 import { WebuiTitleService } from "../../../src/core/session/webui-title.js";
 import { WEBUI_TITLE_METADATA_KEY, WEBUI_TITLE_USER_EDITED_METADATA_KEY } from "../../../src/core/session/webui-turns.js";
+import type { LLMRuntime } from "../../../src/utils/llm-runtime.js";
 
 const roots: string[] = [];
 
@@ -35,17 +36,19 @@ function createService({
   sessions,
   provider = titleProvider("需求范围整理"),
   recorder = { recordAgentChatUsage: vi.fn(async () => true) },
+  runtime,
 }: {
   sessions: SessionManager;
   provider?: any;
   recorder?: any;
+  runtime?: LLMRuntime;
 }): { bus: MessageBus; service: WebuiTitleService; scheduled: Promise<any>[]; provider: any; recorder: any } {
   const bus = new MessageBus();
   const scheduled: Promise<any>[] = [];
   const service = new WebuiTitleService({
     bus,
     sessions,
-    llmRuntime: () => ({ provider, model: "openai/gpt-4.1-mini" } as any),
+    llmRuntime: () => runtime ?? ({ provider, model: "openai/gpt-4.1-mini" } as any),
     scheduleBackground: (promise) => scheduled.push(promise),
     tokenUsageRecorder: recorder,
   });
@@ -69,6 +72,29 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 describe("WebuiTitleService", () => {
+  it.each([false, true])("prepares catalog parameters before requesting a title; preparation failure=%s", async (fails) => {
+    const sessions = new SessionManager(sessionRoot());
+    createSession(sessions);
+    const p = titleProvider("Prepared title");
+    const modelCapabilities = { mode: "provider-fallback" as const, maxTokens: 96, reasoningEffort: "none" };
+    const prepare = vi.fn(async () => {
+      if (fails) throw new Error("Catalog coordination unavailable");
+      return { provider: p, model: "gpt-4o", modelCapabilities };
+    });
+    const { service, scheduled } = createService({ sessions, provider: p, runtime: { provider: p, model: "gpt-4o", prepare } });
+    service.trackUserMessage({ chatId: "chat-1", content: "hello", metadata: { webui: true } });
+    expect(prepare).not.toHaveBeenCalled();
+    service.onUserMessagePersisted("chat-1");
+    await scheduled[0];
+    expect(prepare).toHaveBeenCalledExactlyOnceWith({ maxTokens: 96, thinkingEnabled: false });
+    if (fails) {
+      expect(p.chatWithRetry).not.toHaveBeenCalled();
+      expect(sessions.loadSession("websocket:chat-1")?.metadata).not.toHaveProperty(WEBUI_TITLE_METADATA_KEY);
+    } else {
+      expect(p.chatWithRetry.mock.calls[0][0].modelCapabilities).toBe(modelCapabilities);
+      expect(sessions.loadSession("websocket:chat-1")?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("Prepared title");
+    }
+  });
   it("only records pending title context before the user message is persisted", () => {
     const sessions = new SessionManager(sessionRoot());
     const provider = titleProvider("不会立即调用");
