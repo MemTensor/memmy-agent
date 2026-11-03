@@ -654,7 +654,17 @@ function defaultOfficeInstaller(pluginDataRoot?: string): OfficeRuntimeInstaller
   const catalogUrl = process.env.MEMMY_OFFICE_RUNTIME_CATALOG_URL
     ?? (registry ? new URL("/api/v1/plugins/office/runtimes/{target}", registry).href : undefined);
   if (!catalogUrl) return undefined;
-  return createOfficeRuntimeInstaller({ cacheRoot: process.env.MEMMY_OFFICE_RUNTIME_CACHE ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "office"), catalogUrl });
+  let lastStage = "", lastProgressAt = 0;
+  return createOfficeRuntimeInstaller({
+    cacheRoot: process.env.MEMMY_OFFICE_RUNTIME_CACHE ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "office"), catalogUrl,
+    onProgress(stage, bytes, total) {
+      const now = Date.now();
+      if (stage === lastStage && now - lastProgressAt < 10000) return;
+      lastStage = stage; lastProgressAt = now;
+      // Never log signed download URLs or account credentials.
+      console.info("Office runtime installation", { stage, bytes, total });
+    }
+  });
 }
 
 function defaultTexliveInstaller(pluginDataRoot?: string): TexliveRuntimeInstaller | undefined {

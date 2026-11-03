@@ -35,6 +35,8 @@ export interface PortableRuntimeInstallerOptions {
   cacheRoot: string;
   catalogUrl: string;
   fetchFn?: typeof fetch;
+  /** Abort a download that stops delivering bytes; active slow transfers retain the overall limit. */
+  downloadIdleTimeoutMs?: number;
   /** Primarily for progress displays/diagnostics; never contains signed URLs. */
   onProgress?: (stage: string, bytes?: number, total?: number) => void;
 }
@@ -110,11 +112,13 @@ export function createPortableRuntimeInstaller(options: PortableRuntimeInstaller
       const record = JSON.parse(await readFile(pointer, "utf8"));
       const manifest = parseManifest(record);
       if (manifest.target !== target) throw new Error("Cached runtime target mismatch");
+      options.onProgress?.("verifying");
       const installed = await verifyRoot(join(cache, target, manifest.archive.sha256), manifest);
       options.onProgress?.("cached"); return installed;
     } catch { /* Missing/corrupt caches are repaired by a verified reinstall. */ }
     const lock = join(cache, `${target}.lock`);
     let acquired = false;
+    options.onProgress?.("waiting");
     for (let attempt = 0; attempt < 1200; attempt++) {
       try {
         await mkdir(lock); acquired = true;
@@ -164,25 +168,37 @@ export function createPortableRuntimeInstaller(options: PortableRuntimeInstaller
       const archive = join(temporary, "runtime.zip"), content = join(temporary, "content");
       let lastError: unknown;
       for (let retry = 0; retry < 3; retry++) {
+        const idle = new AbortController();
+        let idleTimer: ReturnType<typeof setTimeout> | undefined;
+        const resetIdle = () => {
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => idle.abort(new Error("Portable runtime download stalled")), options.downloadIdleTimeoutMs ?? 30000);
+          idleTimer.unref();
+        };
+        const signal = AbortSignal.any([idle.signal, AbortSignal.timeout(10 * 60 * 1000)]);
         try {
+          resetIdle();
           options.onProgress?.(retry ? "retrying" : "downloading", 0, manifest.archive.bytes);
-          const download = await fetchFn(asset, { redirect: "error", signal: AbortSignal.timeout(10 * 60 * 1000) });
+          const download = await fetchFn(asset, { redirect: "error", signal });
           if (!download.ok || !download.body) throw new Error(`Portable runtime download returned HTTP ${download.status}`);
           let received = 0; const digest = createHash("sha256");
           const meter = new Transform({ transform(chunk: Buffer, _encoding, callback) {
+            resetIdle();
             received += chunk.length;
             if (received > manifest.archive.bytes || received > MAX_ARCHIVE) { callback(new Error("Portable runtime download exceeds declared size")); return; }
             digest.update(chunk); options.onProgress?.("downloading", received, manifest.archive.bytes); callback(null, chunk);
           } });
-          await pipeline(Readable.fromWeb(download.body as never), meter, createWriteStream(archive, { flags: "w", mode: 0o600 }));
+          await pipeline(Readable.fromWeb(download.body as never), meter, createWriteStream(archive, { flags: "w", mode: 0o600 }), { signal });
           if (received !== manifest.archive.bytes || digest.digest("hex") !== manifest.archive.sha256) throw new Error("Portable runtime archive integrity check failed");
           lastError = undefined; break;
         } catch (error) { lastError = error; await rm(archive, { force: true }); }
+        finally { clearTimeout(idleTimer); }
       }
       if (lastError) throw lastError;
       options.onProgress?.("extracting");
       await mkdir(content);
       await extractPortableRuntime(archive, content, manifest);
+      options.onProgress?.("verifying");
       await verifyRoot(content, manifest);
       await writeFile(join(content, ".memmy-runtime.json"), JSON.stringify(manifest));
       const parent = join(cache, target); await mkdir(parent, { recursive: true });
@@ -193,8 +209,9 @@ export function createPortableRuntimeInstaller(options: PortableRuntimeInstaller
       await rename(content, destination);
       const pending = join(cache, `${target}.${randomUUID()}.tmp`);
       await writeFile(pending, JSON.stringify(manifest), { flag: "wx" }); await rename(pending, pointer);
+      const installed = await verifyRoot(destination, manifest);
       options.onProgress?.("installed");
-      return await verifyRoot(destination, manifest);
+      return installed;
     } finally {
       if (temporary) await rm(temporary, { recursive: true, force: true });
       await rm(lock, { recursive: true, force: true });

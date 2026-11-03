@@ -27,15 +27,17 @@ describe("account session repository", () => {
     try {
       repo.upsert({ uuid: "account-a", cloudUuid: "credential-a", profile: profile("user-a", "Same Name", ["plugin:legal-labor"]) });
       repo.upsert({ profile: profile("user-a", "Changed Name"), rawProfileMode: "merge" });
-      expect(repo.getEntitlements()).toEqual(["plugin:legal-labor"]);
+      expect(repo.getEntitlements()).toEqual(["plugin:legal-labor", "plugin:literature-review"]);
 
       repo.upsert({ uuid: "account-b", cloudUuid: "credential-b", profile: profile("user-b", "Changed Name"), rawProfileMode: "merge" });
-      expect(repo.getEntitlements()).toEqual([]);
+      expect(repo.getEntitlements()).toEqual(["plugin:literature-review"]);
       expect(repo.activateByCloudUuid("credential-a")).toBe(true);
-      expect(repo.getEntitlements()).toEqual(["plugin:legal-labor"]);
+      expect(repo.getEntitlements()).toEqual(["plugin:legal-labor", "plugin:literature-review"]);
 
       // Even a reused local row must not merge grants across different cloud user IDs.
       repo.upsert({ uuid: "account-a", profile: profile("user-c", "Changed Name"), rawProfileMode: "merge" });
+      expect(repo.getEntitlements()).toEqual(["plugin:literature-review"]);
+      repo.clear();
       expect(repo.getEntitlements()).toEqual([]);
     } finally {
       store.close();
