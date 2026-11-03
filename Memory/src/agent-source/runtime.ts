@@ -725,8 +725,12 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         await target.install(renderMemmyDefaultSkillManifest(sourceId));
       }
     } else {
-      if (kind === "plugin" && target.uninstallPlugin) await target.uninstallPlugin(sourceId);
-      await target.uninstall(sourceId);
+      if (kind === "plugin" && target.uninstallPlugin) {
+        await target.uninstallPlugin(sourceId);
+        if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
+      } else {
+        await target.uninstall(sourceId);
+      }
     }
     const state = await readState();
     const stored = state.sources[sourceId] ?? emptySourceState();

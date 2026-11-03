@@ -16,3 +16,20 @@ describe("Codex hook file identity", () => {
       .not.toBe(canonicalCodexPath("/two/hooks.json", "darwin"));
   });
 });
+
+describe("Codex installation critical section", () => {
+  it("rejects nested acquisition instead of waiting on itself", async () => {
+    const { withCodexInstallationLock } = await import("../codex-installation.js");
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const root = await mkdtemp(join(tmpdir(), "codex-lock-"));
+    try {
+      await expect(withCodexInstallationLock(root, () => withCodexInstallationLock(root, async () => {})))
+        .rejects.toThrow("Nested Codex installation operation");
+      const failure = Object.assign(new Error("operation failed"), { code: "EEXIST" });
+      await expect(withCodexInstallationLock(root, async () => { throw failure; })).rejects.toBe(failure);
+      await expect(withCodexInstallationLock(root, async () => "released")).resolves.toBe("released");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});

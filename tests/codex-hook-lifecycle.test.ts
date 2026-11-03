@@ -1,3 +1,10 @@
+import { appendFileSync } from "node:fs";
+import { createSkillDistributionService } from "../App/backend/src/services/skill-distribution-service.js";
+import { createSkillTargetRegistry as backendRegistry } from "../App/backend/src/adapters/outbound/skill-writer/target-registry.js";
+import { createAgentSourceExecutor } from "../Memory/src/agent-source/runtime.js";
+import { createSourceRegistry } from "../Memory/src/agent-source/adapters/source-registry.js";
+import { createSkillTargetRegistry as memoryRegistry } from "../Memory/src/agent-source/integration/target-registry.js";
+import type { MemoryService } from "../Memory/src/service/memory-service.js";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -186,4 +193,127 @@ describe.each([
       expect(readdirSync(join(f.rootDirectory, "hooks")).sort()).toEqual(filesAfterUninstall);
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   }, 30000);
+});
+
+// Exercise the real callers: a plugin uninstall must not enqueue a second skill removal.
+describe.each([
+  { name: "Memory", createTarget: memoryTarget },
+  { name: "Backend", createTarget: backendTarget }
+])("$name review regressions", ({ name, createTarget }) => {
+  it.each(["failure", "timeout"])("preserves instructions saved while waiting for trust (%s)", async reason => {
+    const f = fixture();
+    const instructions = join(f.rootDirectory, "AGENTS.md");
+    writeFileSync(instructions, "Personal instructions\n");
+    const target = createTarget({ ...f, trustHooks: async () => {
+      appendFileSync(instructions, "New personal instructions\n");
+      throw new Error(reason);
+    } });
+    await expect(target.installPlugin!("codex")).rejects.toThrow(reason);
+    expect(readFileSync(instructions, "utf8")).toBe("Personal instructions\nNew personal instructions\n");
+    expect(await createTarget(f).isInstalled("codex")).toBe(false);
+  });
+  it.each(["file", "directory", "link"])("preserves later edits/additions to skills (%s)", async kind => {
+    const f = fixture();
+    const skill = join(f.rootDirectory, "skills", "memmy-memory");
+    const target = createTarget({ ...f, trustHooks: async () => {
+      if (kind === "link") {
+        const external = join(f.rootDirectory, "external"); mkdirSync(external);
+        rmSync(skill, { recursive: true }); symlinkSync(external, skill, "junction");
+      }
+      writeFileSync(join(skill, kind === "file" ? "SKILL.md" : "user.txt"), "new user file");
+      throw new Error("trust failed");
+    } });
+    await expect(target.installPlugin!("codex")).rejects.toThrow("preserved conflicting user edits");
+    expect(readFileSync(join(skill, kind === "file" ? "SKILL.md" : "user.txt"), "utf8")).toBe("new user file");
+    expect(existsSync(join(f.rootDirectory, "hooks", "memmy-resume-hook.mjs"))).toBe(false);
+  });
+  it("keeps SessionEnd at 3 seconds across refresh while preserving other events", async () => {
+    const f = fixture();
+    const target = createTarget({ ...f, trustHooks: async () => {} });
+    await target.installPlugin!("codex");
+    await target.installPlugin!("codex");
+    const hooks = JSON.parse(readFileSync(join(f.rootDirectory, "hooks.json"), "utf8")).hooks;
+    for (const event of events) expect(hooks[event][0].hooks[0].timeout).toBe(event === "SessionEnd" ? 3 : 60);
+  });
+  it.each([false, true])("serializes update, complete uninstall and reinstall through the actual caller (failure: %s)", async fail => {
+    const f = fixture();
+    let release!: () => void; let entered!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const started = new Promise<void>(r => { entered = r; });
+    let updates = 0;
+    const target = createTarget({ ...f, trustHooks: async () => {
+      if (++updates === 2) { entered(); await gate; if (fail) throw new Error("trust failed"); }
+    } });
+    const service = createSkillDistributionService({ targetRegistry: backendRegistry([target]) });
+    const executor = createAgentSourceExecutor({
+      service: {} as MemoryService, configPath: f.memmyConfigPath, statePath: join(f.rootDirectory, "state.json"),
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: f.rootDirectory },
+        detect: async () => true, async *scan() {}
+      }]), integrationRegistry: memoryRegistry([target])
+    });
+    const install = () => name === "Backend" ? service.installPlugin("codex") : executor.mutateConnection("codex", "plugin", "POST");
+    const remove = () => name === "Backend" ? service.uninstallPlugin("codex") : executor.mutateConnection("codex", "plugin", "DELETE");
+    try {
+      await install();
+      const update = install().catch(error => error);
+      await started;
+      const removing = remove();
+      // Let async registry/state work reach the per-home queue before requesting reinstall.
+      await new Promise(r => setTimeout(r, 30));
+      const reinstalling = install();
+      release();
+      await update; await removing; await reinstalling;
+      expect(await createTarget(f).isInstalled("codex")).toBe(true);
+      const hooks = JSON.parse(readFileSync(join(f.rootDirectory, "hooks.json"), "utf8")).hooks;
+      for (const event of events) expect(hooks[event]).toHaveLength(1);
+      for (const skill of ["memmy-memory", "memmy-resume"]) expect(existsSync(join(f.rootDirectory, "skills", skill, "SKILL.md"))).toBe(true);
+      if (name === "Memory") {
+        const state = JSON.parse(readFileSync(join(f.rootDirectory, "state.json"), "utf8")).sources.codex;
+        expect(state.status).not.toBe("not_connected");
+        expect(state.autoInjectSuppressed).toBeUndefined();
+        expect((await executor.list()).sources[0]!.status).not.toBe("not_connected");
+      }
+      await remove();
+      expect(await createTarget(f).isInstalled("codex")).toBe(false);
+      for (const event of events) expect(await newProcess(f.rootDirectory, { hook_event_name: event })).toEqual({ executed: 0 });
+    } finally { release(); await executor.dispose(); }
+  });
+});
+
+describe.each(["Backend", "Memory"])("%s cross-process installation lock", integration => {
+  it("waits for the other process rollback before uninstall; reopening never resurrects hooks", async () => {
+    const f = fixture();
+    const script = fileURLToPath(new URL("./fixtures/codex-installation-process.mjs", import.meta.url));
+    const loader = fileURLToPath(new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url));
+    const run = (side: string, action: string) => {
+      const child = spawn(process.execPath, ["--import", loader, script, f.rootDirectory, side, action], { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = ""; child.stderr.on("data", data => { stderr += data; });
+      const done = new Promise<void>((resolve, reject) => {
+        child.on("error", reject);
+        child.on("close", code => code === 0 ? resolve() : reject(new Error(stderr)));
+      });
+      return { child, done };
+    };
+    const install = run(integration, "install");
+    let removal: ReturnType<typeof run> | undefined;
+    try {
+      await vi.waitFor(() => expect(existsSync(join(f.rootDirectory, "entered"))).toBe(true));
+      appendFileSync(join(f.rootDirectory, "AGENTS.md"), "Cross-process personal edit\n");
+      removal = run(integration === "Memory" ? "Backend" : "Memory", "remove");
+      await new Promise(r => setTimeout(r, 250));
+      // The second process cannot remove files while the first awaits trust.
+      expect(existsSync(join(f.rootDirectory, "hooks", "memmy-resume-hook.mjs"))).toBe(true);
+      writeFileSync(join(f.rootDirectory, "release"), "");
+      await install.done; await removal.done;
+      expect(await memoryTarget(f).isInstalled("codex")).toBe(false);
+      expect(readFileSync(join(f.rootDirectory, "AGENTS.md"), "utf8")).toContain("Cross-process personal edit");
+      for (const skill of ["memmy-memory", "memmy-resume"]) expect(existsSync(join(f.rootDirectory, "skills", skill))).toBe(false);
+      for (const event of events) expect(await newProcess(f.rootDirectory, { hook_event_name: event })).toEqual({ executed: 0 });
+    } finally {
+      writeFileSync(join(f.rootDirectory, "release"), "");
+      await install.done;
+      await removal?.done;
+    }
+  }, 15000);
 });
