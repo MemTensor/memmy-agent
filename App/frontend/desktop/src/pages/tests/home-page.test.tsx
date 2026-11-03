@@ -656,7 +656,7 @@ describe("HomePage", () => {
     const styles = readFileSync(stylesSourcePath, "utf8");
     const conversationColumnRule = styles.match(/\.agent-workspace-layout > \.agent-conversation-panel\s*\{[^}]*\}/)?.[0] ?? "";
 
-    expect(source).toContain('className="home-empty-column"');
+    expect(source).toContain('className="home-empty-column home-empty-input"');
     expect(styles).toMatch(/\.home-empty-column\s*{[^}]*width:\s*clamp\(min\(100%,\s*40rem\),\s*62cqw,\s*var\(--home-column-max,\s*50rem\)\);/s);
     expect(styles).toMatch(/\.home-empty-column\s*{[^}]*max-width:\s*min\(\s*100%,\s*max\(calc\(100cqw - 2 \* var\(--agent-column-min-gap,\s*80px\)\),\s*min\(100%,\s*20rem\)\)\s*\);/s);
     expect(styles).toMatch(/\.agent-conversation-content\s*{[^}]*--agent-conversation-track:\s*min\(832px,\s*100cqw\);[^}]*width:\s*calc\(var\(--agent-conversation-track\) - 2 \* var\(--agent-conversation-inset\)\);/s);

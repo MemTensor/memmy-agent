@@ -194,7 +194,25 @@ body.memmy-window-fullscreen {
 }
 
 .home-empty-screen {
-  padding-bottom: 8%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(min-content, 1fr) auto minmax(min-content, 1fr);
+  justify-items: center;
+}
+
+.home-empty-brand {
+  grid-row: 1;
+  align-self: end;
+  margin-bottom: 2rem;
+}
+
+.home-empty-input {
+  grid-row: 2;
+}
+
+.home-empty-footer {
+  grid-row: 3;
+  align-self: start;
 }
 
 .home-empty-composer,
