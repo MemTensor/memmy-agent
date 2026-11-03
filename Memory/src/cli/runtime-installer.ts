@@ -1003,35 +1003,11 @@ export function runtimeTarget(platform: NodeJS.Platform, arch: string): string {
   return `${platformName}-${archName}`;
 }
 
+/** Use the same character ordering as Desktop without relaxing manifest validation. */
 export function compareVersions(left: string, right: string): number {
-  const parse = (value: string) => {
-    const match = value.match(SEMANTIC_VERSION_PATTERN);
-    if (!match) throw new Error(`invalid semantic version: ${value}`);
-    return { numbers: [match[1]!, match[2]!, match[3]!], prerelease: match[4]?.split(".") };
-  };
-  const compareNumericIdentifiers = (a: string, b: string) => Math.sign(a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0);
-  const a = parse(left); const b = parse(right);
-  for (let index = 0; index < 3; index += 1) {
-    const delta = compareNumericIdentifiers(a.numbers[index]!, b.numbers[index]!);
-    if (delta !== 0) return delta;
-  }
-  if (!a.prerelease && !b.prerelease) return 0;
-  if (!a.prerelease) return 1;
-  if (!b.prerelease) return -1;
-  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
-    const leftIdentifier = a.prerelease[index];
-    const rightIdentifier = b.prerelease[index];
-    if (leftIdentifier === undefined) return -1;
-    if (rightIdentifier === undefined) return 1;
-    if (leftIdentifier === rightIdentifier) continue;
-    const leftNumeric = /^\d+$/.test(leftIdentifier);
-    const rightNumeric = /^\d+$/.test(rightIdentifier);
-    if (leftNumeric && rightNumeric) return compareNumericIdentifiers(leftIdentifier, rightIdentifier);
-    if (leftNumeric) return -1;
-    if (rightNumeric) return 1;
-    return leftIdentifier < rightIdentifier ? -1 : 1;
-  }
-  return 0;
+  if (!validVersion(left)) throw new Error(`invalid semantic version: ${left}`);
+  if (!validVersion(right)) throw new Error(`invalid semantic version: ${right}`);
+  return left === right ? 0 : left < right ? -1 : 1;
 }
 
 function validVersion(value: unknown): value is string { return typeof value === "string" && SEMANTIC_VERSION_PATTERN.test(value); }

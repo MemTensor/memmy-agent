@@ -171,6 +171,17 @@ function makeInstallerFixture(root) {
 function fakeLinuxTools(root) {
   const tools = path.join(root, "tools");
   mkdirSync(tools, { recursive: true });
+  const realNode = process.execPath.replaceAll("'", "'\\''");
+  const node = path.join(tools, "node");
+  writeFileSync(node, [
+    "#!/usr/bin/env bash",
+    "if [ \"${1:-}\" = \"-e\" ] && [ -n \"${MEMMY_FIXTURE_NODE_VERSION:-}\" ]; then",
+    `  exec '${realNode}' -e \"Object.defineProperty(process.versions, 'node', { value: '$MEMMY_FIXTURE_NODE_VERSION' }); $2\"`,
+    "fi",
+    `exec '${realNode}' \"$@\"`,
+    "",
+  ].join("\n"));
+  chmodSync(node, 0o755);
   const uname = path.join(tools, "uname");
   writeFileSync(uname, [
     "#!/usr/bin/env bash",
@@ -225,6 +236,7 @@ function runInstaller(home, release, tools, overrides = {}) {
       MEMMY_INSTALL_COMPUTER_USE_DEPS: "0",
       MEMMY_RELEASE_BASE_URL: pathToFileURL(release).href.replace(/\/$/, ""),
       MEMMY_FIXTURE_MAIN_PID: String(process.pid),
+      MEMMY_FIXTURE_NODE_VERSION: "22.23.4",
       PATH: `${tools}${path.delimiter}${process.env.PATH ?? ""}`,
       ...overrides,
     }),
@@ -267,7 +279,7 @@ describe("Linux CLI package boundary", () => {
     expect(installer).toContain("gateway --config %s --workspace %s");
     expect(installer).toContain("x86_64|amd64");
     expect(installer).toContain("aarch64|arm64");
-    expect(installer).toContain("Node.js 22 or newer is required");
+    expect(installer).toContain("Node.js 22.23.4, 24.22.1 or 26.12.1 or newer is required");
     expect(installer).not.toMatch(/nohup|disown|pkill|killall|enable-linger/);
   });
 
@@ -443,6 +455,34 @@ describe("Linux CLI package boundary", () => {
 });
 
 describe("Linux one-line installer transaction", () => {
+  it("rejects a host Node release without the fixed root store", () => {
+    const root = temporaryRoot("memmy-linux-installer-node-gate-");
+    const release = path.join(root, "release");
+    const tools = fakeLinuxTools(root);
+    const home = path.join(root, "home");
+    mkdirSync(release);
+    mkdirSync(home);
+
+    const result = runInstaller(home, release, tools, { MEMMY_FIXTURE_NODE_VERSION: "22.23.3" });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("earlier releases still trust the compromised eMudhra roots");
+  });
+
+  it("rejects unverified future Node major lines", () => {
+    const root = temporaryRoot("memmy-linux-installer-node-future-");
+    const release = path.join(root, "release");
+    const tools = fakeLinuxTools(root);
+    mkdirSync(release);
+    for (const version of ["27.0.0", "28.0.0"]) {
+      const home = path.join(root, `home-${version}`);
+      mkdirSync(home);
+      const result = runInstaller(home, release, tools, { MEMMY_FIXTURE_NODE_VERSION: version });
+      expect(result.status, version).not.toBe(0);
+      expect(result.stderr, version).toContain("earlier releases still trust the compromised eMudhra roots");
+    }
+  });
+
   it("accepts stable and rc release versions while rejecting unsafe or malformed versions", () => {
     const root = temporaryRoot("memmy-linux-installer-version-");
     const release = path.join(root, "release");

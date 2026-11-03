@@ -39,6 +39,14 @@ describe("local project scanner", () => {
     );
   });
 
+  it("can skip running the declared runtimes", async () => {
+    const { root, uri } = await fixture();
+    await writeFile(join(root, "package.json"), JSON.stringify({ engines: { node: ">=22" } }));
+    const result = await scanLocalProject(uri, { withRuntimeProbes: false });
+    expect(result.runtimeProbes).toEqual([]);
+    expect(result.entries.map((entry) => entry.relativePath)).toEqual(["package.json"]);
+  });
+
   it("excludes gitignored, fixed, sensitive, binary, and symlink paths from the inventory", async () => {
     const { root, uri } = await fixture();
     await mkdir(join(root, "node_modules"));
@@ -54,6 +62,21 @@ describe("local project scanner", () => {
     const result = await scanLocalProject(uri);
     expect(result.entries.map((entry) => entry.relativePath)).toEqual([".gitignore", "visible.txt"]);
     expect(result.textFiles).toEqual([]);
+  });
+
+  it("applies nested gitignore rules through the package ignore adapter", async () => {
+    const { root, uri } = await fixture();
+    await mkdir(join(root, "src", "generated"), { recursive: true });
+    await writeFile(join(root, ".gitignore"), "src/generated/\n");
+    await writeFile(join(root, "src", "index.ts"), "export const value = 1;\n");
+    await writeFile(join(root, "src", "generated", "runtime.ts"), "generated\n");
+
+    const result = await scanLocalProject(uri);
+    expect(result.entries.map((entry) => entry.relativePath)).toEqual([
+      ".gitignore",
+      "src",
+      "src/index.ts",
+    ]);
   });
 
   it("does not decode oversized or invalid UTF-8 deterministic files", async () => {

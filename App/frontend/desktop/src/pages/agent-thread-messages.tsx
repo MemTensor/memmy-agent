@@ -2551,15 +2551,6 @@ function ThoughtSegmentBlock(props: { text: string; isLive: boolean; isOnlySegme
  */
 function useFollowAlongOpen(isLive: boolean): { open: boolean; onToggle: (next: boolean) => void } {
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
-  const wasLiveRef = useRef(isLive);
-
-  useEffect(() => {
-    if (wasLiveRef.current && !isLive) {
-      setManualOpen(null);
-    }
-    wasLiveRef.current = isLive;
-  }, [isLive]);
-
   return {
     open: manualOpen ?? isLive,
     onToggle: (next: boolean) => setManualOpen(next)

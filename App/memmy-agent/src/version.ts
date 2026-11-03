@@ -18,7 +18,9 @@ function readProjectVersion(): string {
       };
       if (typeof manifest.version === "string") {
         packagedVersion ??= manifest.version;
-        if (manifest.name === "memmy-agent" && Array.isArray(manifest.workspaces)) {
+        // A packaged runtime must not inspect manifests outside its execution boundary.
+        if (manifest.name === "@memtensor/memmy-agent"
+          || manifest.name === "memmy-agent" && Array.isArray(manifest.workspaces)) {
           return manifest.version;
         }
       }

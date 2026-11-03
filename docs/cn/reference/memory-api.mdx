@@ -20,6 +20,12 @@ icon: Database
 | `GET` | `/api/v1/panel/analysis` | 记忆分析 |
 | `GET` | `/api/v1/panel/items` | 条目列表 |
 
+## 分析指标
+
+`GET /api/v1/panel/analysis` 返回 `metrics` 对象。其中 `metrics.recentlyUsedSkills` 统计当前状态为 `activated` 的技能的召回命中与调用记录。统计窗口按请求解析出的时区覆盖当天及之前六个日历日期，以各事件的创建时间判断是否计入。
+
+同一次召回中，同一个技能 ID 即使出现多次也只计一次；不同召回和调用分别计数。该值是使用总次数，不是不同技能或最近编辑过的技能数量；仅编辑技能不会增加该值。
+
 ## 本地存储配置
 
 ```yaml

@@ -1,0 +1,41 @@
+name: Recover CodingAgent main synchronization request
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Existing stable Release database ID
+        required: true
+        type: string
+      source_sha:
+        description: Exact main commit recorded by that Release
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  request:
+    if: ${{ github.repository == 'MemTensor/memmy-agent' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Read authoritative release facts and seal a recovery request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_RELEASE_ID: ${{ inputs.release_id }}
+          SYNC_SOURCE_SHA: ${{ inputs.source_sha }}
+          MAIN_SYNC_REQUEST_PATH: ${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json
+        run: node scripts/main-sync/cli.mjs recover
+      - uses: actions/upload-artifact@v4
+        with:
+          name: memmy-main-sync-request-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json
+          if-no-files-found: error
+          retention-days: 30

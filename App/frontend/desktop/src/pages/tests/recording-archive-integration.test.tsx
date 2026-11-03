@@ -114,11 +114,11 @@ it("archives a guidance recording before its card disappears, reopens it from th
     await render();
     await act(async () => container.querySelector<HTMLButtonElement>(".recording-bar__button--primary")!.click());
     await act(async () => container.querySelector<HTMLButtonElement>(".recording-bar__button--primary")!.click());
-    // Answered straight away, before the transcript exists: the upload card
-    // lists the interview itself and can be submitted.
+    // The immediate ASR fixture has already supplied the stored transcript
+    // filename by the time the upload card is asserted.
     expect(respond).toHaveBeenCalledTimes(1);
     expect(container.querySelectorAll(".diagnostic-upload-card__file")).toHaveLength(1);
-    expect(container.querySelector(".diagnostic-upload-card")?.textContent).toContain("录音转写-");
+    expect(container.querySelector(".diagnostic-upload-card")?.textContent).toContain("访谈转写.txt");
     expect(container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__footer button")!.disabled).toBe(false);
     await act(async () => container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__footer button")!.click());
     expect(respond).toHaveBeenCalledTimes(2);

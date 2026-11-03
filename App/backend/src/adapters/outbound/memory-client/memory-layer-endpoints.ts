@@ -18,6 +18,7 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   startTurn: "/api/v1/turns/start",
   completeTurn: "/api/v1/turns/:turnId/complete",
   completeSourceTurn: "/api/v1/source-turns/complete",
+  freezeScanSessions: "/api/v1/l3/scan-sessions/freeze",
   search: "/api/v1/memory/search",
   embeddingInference: "/api/v1/models/embedding/infer",
   addMemory: "/api/v1/memory/add",

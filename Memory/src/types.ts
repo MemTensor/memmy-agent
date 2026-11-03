@@ -84,6 +84,7 @@ export type JobType =
   | "l2_induction"
   | "l3_abstraction"
   | "l3_world_model_update"
+  | "l3_unit_update"
   | "project_environment_profile"
   | "skill_crystallization"
   | "skill_cluster_assign"
@@ -175,6 +176,7 @@ export interface MemoryRow {
 
 /** Narrow projection used by aggregate read models without loading memory payloads or vectors. */
 export interface MemoryStatsRow {
+  id: string;
   conversationId?: string;
   sessionId?: string;
   agentId?: string;
@@ -201,6 +203,7 @@ export interface MemoryFilter {
   tags?: string[];
   ids?: string[];
   memoryKind?: MemoryKind | MemoryKind[];
+  excludedMemoryKinds?: MemoryKind[];
   workMemoryUserId?: string;
   workMemoryProjectId?: string | null;
   /** Leaves out skills imported from this Agent (compared after normalizing the Agent id). */
@@ -267,6 +270,8 @@ export interface MemoryListItem {
     value?: number;
     alpha?: number;
     reflectionDone: boolean;
+    valuePending?: boolean;
+    alphaPending?: boolean;
   };
   metadata?: Record<string, unknown>;
   createdAt: IsoTime;

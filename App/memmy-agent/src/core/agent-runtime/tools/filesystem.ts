@@ -1,3 +1,4 @@
+import { AuthorizedReadBatch, managedExecutionRequired } from "../managed-execution.js";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
@@ -818,7 +819,8 @@ export class WriteFileTool extends Tool {
       writeStarted = true;
       await fs.writeFile(target, params.content, { encoding: "utf8", signal: signal ?? undefined });
       this.fileStates().recordWrite(target);
-      if (!this.postWriteValidation) return `Successfully wrote ${target}`;
+      // Managed writes must not launch unapproved validators as hidden subprocesses.
+      if (!this.postWriteValidation || managedExecutionRequired()) return `Successfully wrote ${target}`;
       const content = await readBackWrittenFile(target, params.content, signal);
       const lint = await lintFile({ path: target, content }, { abortSignal: signal });
       return appendFileLintResults(`Successfully wrote ${target}`, [lint]);
@@ -1038,7 +1040,7 @@ export class EditFileTool extends Tool {
         await fs.writeFile(target, newText, { encoding: "utf8", signal: signal ?? undefined });
         this.fileStates().recordWrite(target);
         const success = exists ? "Successfully edited file" : `Successfully created ${target}`;
-        if (!this.postWriteValidation) return success;
+        if (!this.postWriteValidation || managedExecutionRequired()) return success;
         const content = await readBackWrittenFile(target, newText, signal);
         const lint = await lintFile({ path: target, content }, { abortSignal: signal });
         return appendFileLintResults(success, [lint]);
@@ -1106,7 +1108,7 @@ export class EditFileTool extends Tool {
       await fs.writeFile(target, updated, { encoding: "utf8", signal: signal ?? undefined });
       this.fileStates().recordWrite(target);
       const success = warning ? `${warning}\nSuccessfully edited file` : "Successfully edited file";
-      if (!this.postWriteValidation) return success;
+      if (!this.postWriteValidation || managedExecutionRequired()) return success;
       const content = await readBackWrittenFile(target, updated, signal);
       const lint = await lintFile({
         path: target,
@@ -1176,22 +1178,28 @@ export class ListDirTool extends Tool {
     if (!isToolPathAllowed(target, this.allowedDir, this.extraAllowedDirs)) return `Error: path outside workspace: ${params.path}`;
     const maxEntries = params.max_entries ?? params.maxEntries ?? 200;
     const rows: string[] = [];
+    const batch = new AuthorizedReadBatch(target);
     const walk = async (dir: string) => {
-      const entries = (await fs.readdir(dir, { withFileTypes: true }))
-        .filter((entry) => !IGNORED_DIRS.has(entry.name))
+      const authorizedEntries = await batch.read(dir, () => fs.readdir(dir, { withFileTypes: true }));
+      if (!authorizedEntries) return;
+      if (dir !== target) rows.push(workspaceRelative(this.workspace, dir).replaceAll(path.sep, "/") + "/");
+      const entries = authorizedEntries.filter((entry) => !IGNORED_DIRS.has(entry.name))
         .sort((a, b) => a.name.localeCompare(b.name));
       for (const entry of entries) {
         const full = path.join(dir, entry.name);
         const rel = workspaceRelative(this.workspace, full).replaceAll(path.sep, "/") + (entry.isDirectory() ? "/" : "");
-        rows.push(rel);
-        if (params.recursive && entry.isDirectory()) await walk(full);
+        if (params.recursive && entry.isDirectory()) {
+          await walk(full);
+        } else {
+          await batch.read(full, async () => { rows.push(rel); });
+        }
       }
     };
     if (!fsSync.existsSync(target)) return `Error: path not found: ${params.path}`;
     await walk(target);
-    if (!rows.length) return "(empty directory)";
+    if (!rows.length) return batch.format(batch.deniedPaths ? "(no authorized entries returned)" : "(empty directory)");
     const selected = rows.slice(0, maxEntries);
     if (rows.length > maxEntries) selected.push(`... truncated (${maxEntries} of ${rows.length} entries)`);
-    return selected.join("\n");
+    return batch.format(selected.join("\n"));
   }
 }

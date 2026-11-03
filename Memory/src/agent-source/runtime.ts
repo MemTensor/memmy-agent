@@ -1142,6 +1142,7 @@ async function stageStandaloneSource(
   return { adapter, stored, sourceId, mode, staged, scanErrorCount, errors };
 }
 
+/** Ingests a source's staged turns; the Sessions it touched go to L3 even when the pass stops early. */
 async function ingestStagedMessages(
   service: MemoryService,
   store: MemoryAgentSourceScanStore,
@@ -1150,6 +1151,38 @@ async function ingestStagedMessages(
   signal: AbortSignal,
   checkpoint: () => Promise<void>,
   onProgress: (progress: ScanProgress) => void,
+  scheduleWorker?: () => void,
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >,
+  scanMode?: MemoryDesktopAddScanMode
+): ReturnType<typeof ingestStagedTurns> {
+  const scannedSessionIds: string[] = [];
+  try {
+    return await ingestStagedTurns(
+      service, store, checkpoints, sourceId, signal, checkpoint, onProgress, scannedSessionIds, scheduleWorker, memoryAddAnalytics, scanMode
+    );
+  } finally {
+    // Frozen batches are new queued jobs; wake the worker in case its drain already finished.
+    try {
+      if ((service.freezeScannedL3Sessions?.(scannedSessionIds) ?? 0) > 0) scheduleWorker?.();
+    } catch {
+      // A failed freeze must not hide the scan's own result; the idle sweep hands these Sessions over later.
+    }
+  }
+}
+
+async function ingestStagedTurns(
+  service: MemoryService,
+  store: MemoryAgentSourceScanStore,
+  checkpoints: SourceCheckpoints,
+  sourceId: string,
+  signal: AbortSignal,
+  checkpoint: () => Promise<void>,
+  onProgress: (progress: ScanProgress) => void,
+  /** Sessions this pass added turns to; the caller freezes them into L3 when the pass ends. */
+  scannedSessionIds: string[],
   scheduleWorker?: () => void,
   memoryAddAnalytics?: Pick<
     MemoryDesktopAddAnalytics,
@@ -1276,11 +1309,14 @@ async function ingestStagedMessages(
           ...(resolvedScanMode ? { scanMode: resolvedScanMode } : {})
         };
         addStartedAt = Date.now();
+        let recoveredEvolutionScheduled = false;
         const result = await service.completeSourceTurn({
           ...buildSourceTurnRequest(sourceTurn, "agent_source_scan"),
           ...(legacyImportTurnId ? { legacyImportTurnId } : {}),
           ...(scanMode === "initial_subset" || scanMode === "full" ? { captureLegacyHistory: true } : {})
-        });
+        }, () => { recoveredEvolutionScheduled = true; });
+        // Recovery can enqueue committed work even when this turn remains pending.
+        if (result.status === "stored" || recoveredEvolutionScheduled || result.result?.scheduledEvolution === true) scheduleWorker?.();
         if (result.status === "rejected" && result.reason === "legacy_before_activation" && (scanMode === "initial_subset" || scanMode === "full")) {
           recordScanItemSkip(store, sourceId, turn.conversationId, result.reason, itemKey, turnLatest);
           noteUncommittedSkip(result.reason, turnLatest);
@@ -1308,11 +1344,11 @@ async function ingestStagedMessages(
           });
           reportedAdd = true;
         }
+        if (result.result?.sessionId) scannedSessionIds.push(result.result.sessionId);
         if (ids.length === 0) store.saveResult({ sourceId, itemKey, conversationId: turn.conversationId });
         for (const memoryId of ids) store.saveResult({ sourceId, itemKey, conversationId: turn.conversationId, memoryId });
         checkpoints.markMessages(turn.messages);
         messageCount += turn.messages.length;
-        if (result.status === "stored") scheduleWorker?.();
       } catch (error) {
         const reason = error instanceof Error ? error.message : "native turn ingestion failed";
         activeConversationFailed = true;

@@ -47,11 +47,19 @@ if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1
   fail "required SHA-256 tool not found (install sha256sum or shasum)"
 fi
 
-NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])')" \
-  || fail "could not determine Node.js version"
-if [ "$NODE_MAJOR" -lt 22 ]; then
-  fail "Node.js 22 or newer is required (found $(node --version))"
-fi
+# The CLI runs on the host's Node, so the host decides whether the compromised eMudhra
+# roots are still trusted. Require a release that carries the fixed root store.
+node -e '
+const fixed = { 22: [22, 23, 4], 24: [24, 22, 1], 26: [26, 12, 1] };
+const current = process.versions.node.split(".").map(Number);
+const minimum = fixed[current[0]];
+// Unknown major lines must be explicitly verified before they are accepted.
+if (!minimum) process.exit(1);
+for (let i = 0; i < 3; i += 1) {
+  if (current[i] !== minimum[i]) process.exit(current[i] > minimum[i] ? 0 : 1);
+}
+process.exit(0);
+' || fail "Node.js 22.23.4, 24.22.1 or 26.12.1 or newer is required (found $(node --version)); earlier releases still trust the compromised eMudhra roots"
 NODE_BIN="$(command -v node)"
 case "$NODE_BIN" in
   /*) ;;

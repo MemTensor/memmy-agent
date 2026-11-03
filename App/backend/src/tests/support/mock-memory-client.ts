@@ -141,6 +141,11 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
+    async freezeScanSessions() {
+      failIfNeeded();
+      return { batches: 0 };
+    },
+
     async completeSourceTurn(input) {
       failIfNeeded();
       const l1MemoryId = randomUUID();

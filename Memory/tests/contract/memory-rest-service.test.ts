@@ -789,7 +789,8 @@ describe("MemoryService / REST contract", () => {
   });
 
   it("auto-drains L3 World Model jobs frozen by a REST session.close with no open episode", async () => {
-    const { db, service } = createTestService();
+    // L3 jobs wait in the queue while no evolution model is configured, so configure one.
+    const { db, service } = createTestService({ skillLlm: createDeterministicSummaryLlm("unused") });
     const opened = service.openSession({
       l3WorldModelProtocolVersion: 2,
       l3WorldModelTransition: "resume_only",
@@ -848,7 +849,8 @@ describe("MemoryService / REST contract", () => {
     });
     expect(l3Jobs()).toHaveLength(1);
 
-    await waitFor(() => l3Jobs().every((job) => job.status !== "queued" && job.attempts > 0));
+    // The job ran once; a failed L3 run goes back to the queue to retry later.
+    await waitFor(() => l3Jobs().every((job) => job.attempts > 0 && job.status !== "leased"));
 
     });
     db.close();
