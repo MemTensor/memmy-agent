@@ -427,6 +427,47 @@ describe("web_search providers", () => {
     expect(result).not.toContain("ignored related search");
   });
 
+  it("uses Keenable's public endpoint without a key and prefers description", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        expect(url).toBe("https://api.keenable.ai/v1/search/public");
+        const headers = init.headers as Record<string, string>;
+        expect(headers["X-Keenable-Title"]).toBe("Memmy Agent");
+        expect(headers["X-API-Key"]).toBeUndefined();
+        expect(JSON.parse(String(init.body))).toEqual({ query: "test", max_results: 2 });
+        return jsonResponse({
+          results: [
+            { title: "Keenable Result", url: "https://keenable.ai", description: "Short summary", snippet: "x".repeat(2000) },
+          ],
+        });
+      }),
+    );
+
+    const t = tool({ provider: "keenable", apiKey: "" });
+    expect(t.effectiveProvider()).toBe("keenable");
+    const result = await t.execute({ query: "test", count: 2 });
+
+    expect(result).toContain("Keenable Result");
+    expect(result).toContain("Short summary");
+    expect(result).not.toContain("xxxxxxxxxx");
+  });
+
+  it("uses Keenable's keyed endpoint when a key is set", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        expect(url).toBe("https://api.keenable.ai/v1/search");
+        expect((init.headers as Record<string, string>)["X-API-Key"]).toBe("keenable-key");
+        return jsonResponse({ results: [{ title: "K", url: "https://k.example", snippet: "snip" }] });
+      }),
+    );
+
+    const result = await tool({ provider: "keenable", apiKey: "keenable-key" }).execute({ query: "test" });
+
+    expect(result).toContain("snip");
+  });
+
   it("falls back to DuckDuckGo when Kagi has no key", async () => {
     stubDuckDuckGo();
 

@@ -21,6 +21,7 @@ const WEB_SEARCH_PROVIDER_OPTIONS = [
   { name: "jina", label: "Jina", credential: "api_key" },
   { name: "kagi", label: "Kagi", credential: "api_key" },
   { name: "olostep", label: "Olostep", credential: "api_key" },
+  { name: "keenable", label: "Keenable (free, optional key)", credential: "none" },
 ] as const;
 
 const WEB_SEARCH_PROVIDER_BY_NAME: Map<string, (typeof WEB_SEARCH_PROVIDER_OPTIONS)[number]> = new Map(
