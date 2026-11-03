@@ -131,3 +131,22 @@ it("uses ledger-derived consumed amounts for expired grants", () => {
   const bucket = creditDisplayBuckets([], [{ ...reward, used: "15.44", remaining: "0.00", reserved: "0.00", status: "EXPIRED" }])[0]!;
   expect(bucket.usageKnown).toBe(true); expect(bucket.used).toBe(1544n);
 });
+
+it("shows source balances in the existing account menu", async () => {
+  const { AppFrame } = await vi.importActual<typeof import("../app-frame.js")>("../app-frame.js");
+  const client = fixture();
+  function MenuHarness() {
+    const { dispatch } = useAppState(); const { setClients } = useApiClients();
+    useEffect(() => {
+      setClients({ credits: client } as AppClients);
+      dispatch(appActions.bootstrapLoaded({ ...mockBootstrap, app: { ...mockBootstrap.app, userMode: "account", language: "zh-CN" } }, "/settings"));
+      dispatch(appActions.accountUpdated({ userId: "100001", email: "menu-test@example.invalid" }));
+    }, [dispatch, setClients]);
+    return <AppFrame title="test"><div>test</div></AppFrame>;
+  }
+  await act(async () => root.render(<AppProviders><MenuHarness /></AppProviders>));
+  const trigger = host.querySelector<HTMLButtonElement>('[data-account-menu-trigger="true"]'); expect(trigger).not.toBeNull();
+  await act(async () => trigger!.click());
+  const menu = document.querySelector('[role="menu"]');
+  expect(menu?.textContent).toContain("套餐积分1,000.00"); expect(menu?.textContent).toContain("平台奖励积分234.56");
+});

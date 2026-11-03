@@ -1710,6 +1710,10 @@ export function AppFrame(props: AppFrameProps) {
                     }) ?? "—"}
                   </strong>
                 </span>
+                {creditAccount.summary && (["plan", "reward"] as const).map(source => <span key={source}>
+                  <span>{t(`credits.source.${source}`)}</span>
+                  <strong>{formatCreditAmount(creditAccount.summary!.balanceBySource[source], language)}</strong>
+                </span>)}
               </button>
               <button
                 type="button"
@@ -1724,7 +1728,7 @@ export function AppFrame(props: AppFrameProps) {
             </div>
           </div>
           <div className="app-frame-sidebar-menu__divider" />
-          {creditAccount.live && (creditAccount.error || creditAccount.loading) && <p role={creditAccount.error ? "alert" : "status"}>{t(creditAccount.error === "auth" ? "credits.live.auth" : creditAccount.error ? "credits.live.error" : "credits.live.loading")}</p>}
+          {creditAccount.live && (creditAccount.error || creditAccount.loading) && <p role={creditAccount.error ? "alert" : "status"}>{t(creditAccount.error === "auth" ? "credits.live.auth" : creditAccount.error ? creditAccount.summary ? "credits.live.stale" : "credits.live.error" : "credits.live.loading")}</p>}
           {(
             <button type="button" className="app-frame-sidebar-menu__item app-frame-sidebar-menu__quota-upgrade" role="menuitem" onClick={openCreditPlans}>
               <span className="app-frame-sidebar-menu__item-icon"><ArrowUpRight size={13} /></span>
