@@ -76,8 +76,11 @@ function blockedBacklog(h: ReturnType<typeof harness>, count = 1000) {
   const provider = [{ key: "blocked-local", limit: 1 }];
   const held = h.concurrency.tryAcquire({ resourceClass: "summary", providers: provider, scopeKeys: [] })!;
   let prepared = 0;
+  const preparationsById = new Map<string, number>();
   h.deps.prepareExecution = work => {
     prepared++;
+    const id = work.queue === "main" ? work.job.id : work.retry.id;
+    preparationsById.set(id, (preparationsById.get(id) ?? 0) + 1);
     return { providers: work.queue === "main" && work.job.jobType === "trace_summary" ? provider : [],
       run: operation => operation() };
   };
@@ -86,7 +89,7 @@ function blockedBacklog(h: ReturnType<typeof harness>, count = 1000) {
     h.job("late-database");
     h.db.db.prepare("UPDATE evolution_jobs SET queue_lane='import'").run();
   });
-  return { held, prepared: () => prepared, count };
+  return { held, prepared: () => prepared, preparationsById, count };
 }
 
 describe("continuous worker event-loop fairness", () => {
@@ -332,7 +335,10 @@ describe("continuous worker event-loop fairness", () => {
       expect(rowsRead).toBeLessThanOrEqual(count + 49 + 200);
       expect(inspections.mock.calls.length).toBeLessThanOrEqual(count + 49 + 200);
       expect(pageCalls).toBeLessThan(count / 64 * 12 + 2000);
-      expect(backlog.prepared()).toBeLessThanOrEqual(count + 49);
+      // Runnable arrivals may retry after the embedding-request permit is
+      // released. Only the unchanged blocked backlog must avoid re-preparation.
+      expect([...backlog.preparationsById].filter(([id]) => id.startsWith("blocked-"))
+        .every(([, preparations]) => preparations === 1)).toBe(true);
       expect(backlog.prepared()).toBeGreaterThan(49);
     } finally { abort.abort(); h.runner.notifyWorkAvailable(); await run; backlog.held.release(); }
     // A later finite request starts from durable FIFO, not the cancelled scan.

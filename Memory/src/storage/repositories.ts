@@ -2072,6 +2072,20 @@ const AUTO_RETRY_SCHEDULED_SQL = `EXISTS(
 export class MemoryProcessingRepository {
   constructor(private readonly db: Database.Database) {}
 
+  /** Configuration checks need IDs, never memory bodies or hydrated vectors.
+   * Drive the join from the small observation index instead of all pending summaries. */
+  listObservationConfigurationChanges(configured: boolean, errorCode: string, limit = 10000): string[] {
+    return this.db.prepare(`SELECT p.memory_id
+      FROM memories m INDEXED BY idx_memories_observation_config_pending
+      CROSS JOIN memory_processing_state p ON p.memory_id=m.id
+      WHERE m.deleted_at IS NULL
+        AND json_extract(m.properties_json, '$.internal_info.memory_kind') = 'observed_activity'
+        AND json_type(m.properties_json, '$.internal_info.observation_memory') = 'object'
+        AND json_extract(m.properties_json, '$.internal_info.observation_memory.status') = 'pending'
+        AND p.state='summary_pending' AND p.error_code IS ${configured ? "" : "NOT "}?
+      ORDER BY p.updated_at ASC,p.memory_id ASC LIMIT ?`).pluck().all(errorCode,limit) as string[];
+  }
+
   get(memoryId: string): MemoryProcessingRecord | undefined {
     const row = this.db.prepare(
       `SELECT memory_processing_state.*,

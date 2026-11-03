@@ -1411,15 +1411,15 @@ export class WorkerRunner {
     const at = this.deps.nowIso();
     // Keep queued work durable while distinguishing a missing model from a
     // normal wait. Configuration restoration resumes the original job.
-    for (const processing of this.deps.repos.processing.listByStates(["summary_pending"])) {
-      const memory = this.deps.repos.memories.get(processing.memoryId);
-      if (!memory || !isObservationMemory(memory) || observationMemoryState(memory)?.status !== "pending") continue;
-      if (!configured && processing.errorCode !== OBSERVATION_SUMMARY_MODEL_UNCONFIGURED.errorCode) {
-        this.deps.repos.processing.update(memory.id, {
+    for (const memoryId of this.deps.repos.processing.listObservationConfigurationChanges(
+      configured, OBSERVATION_SUMMARY_MODEL_UNCONFIGURED.errorCode
+    )) {
+      if (!configured) {
+        this.deps.repos.processing.update(memoryId, {
           ...OBSERVATION_SUMMARY_MODEL_UNCONFIGURED, failedAt: null, updatedAt: at
         }, ["summary_pending"]);
-      } else if (configured && processing.errorCode === OBSERVATION_SUMMARY_MODEL_UNCONFIGURED.errorCode) {
-        this.deps.repos.processing.update(memory.id, {
+      } else {
+        this.deps.repos.processing.update(memoryId, {
           retryAction: "retry", errorCode: null, errorMessage: null, failedAt: null, updatedAt: at
         }, ["summary_pending"]);
       }
