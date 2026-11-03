@@ -3077,15 +3077,15 @@ export function HomePage() {
             <span className="sr-only">{t("home.history.loading")}</span>
           </section>
         ) : !hasActiveConversation ? (
-        <section className="app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full">
-          <div className="conversation-feature-cards agent-confirmation-dock">{features.cards}</div>
-          <div className="text-center mb-8">
+        <section className="app-frame-page-content home-empty-screen h-full">
+          <div className="home-empty-brand text-center">
+            <div className="conversation-feature-cards agent-confirmation-dock">{features.cards}</div>
             <div className="home-empty-brand-mascot flex justify-center">
               <Memmy pose="think" size={165} className="memmy-bob" />
             </div>
             <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
           </div>
-          <div className="home-empty-column">
+          <div className="home-empty-column home-empty-input">
             <AgentOperationErrorSlot message={agentError} />
             <div className="home-empty-composer-stack">
               <div
@@ -3194,6 +3194,8 @@ export function HomePage() {
                 />
               </div>
             </div>
+          </div>
+          <div className="home-empty-column home-empty-footer">
             <HomeStarterActions scenarios={features.scenarios} onSelect={selectHomeStarter} />
             <div className="home-empty-status-area">
               {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}

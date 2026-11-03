@@ -71,6 +71,36 @@ async function collect(iterable: AsyncIterable<CapabilityEvent>): Promise<Capabi
 }
 
 describe("CommandPluginAdapter", () => {
+  it("stops a silent plugin independently of its blocked event loop", async () => {
+    const adapter = createCommandPluginAdapter({ buildLaunch: async () => ({ command: process.execPath, args: ["-e", "while(true) {}"], cwd: root! }) });
+    const ctx = context("ndjson");
+    ctx.plugin.manifest.runtime.config = { ...ctx.plugin.manifest.runtime.config, timeoutMs: 10_000, noProgressTimeoutMs: 1000 };
+    const session = await adapter.activate(ctx);
+    try {
+      await expect(collect(adapter.invoke(session, { callId: "silent", pluginId: ctx.plugin.id, capabilityId: "run", conversationId: "v", input: {} }))).rejects.toMatchObject({ code: "plugin_no_progress" });
+    } finally { await adapter.deactivate(session); }
+  });
+
+  it("finishes a timed out command even when its Host service ignores cancellation", async () => {
+    let hostSignal: AbortSignal | undefined;
+    const adapter = createCommandPluginAdapter({
+      hostServices: { invoke: async call => { hostSignal = call.signal; return new Promise(() => {}); } },
+      buildLaunch: async () => ({ command: process.execPath, args: ["-e", `
+        const rl=require('node:readline').createInterface({input:process.stdin});
+        rl.once('line', () => console.log(JSON.stringify({type:'host-service-request',requestId:'stalled',service:'model-inference',input:{}})));
+      `], cwd: root! })
+    });
+    const ctx = context("ndjson");
+    ctx.plugin.manifest.runtime.config = { ...ctx.plugin.manifest.runtime.config, interactive: true, timeoutMs: 1000 };
+    const permission = { type: "host-service" as const, services: ["model-inference"] };
+    ctx.plugin.manifest.permissions = [permission]; ctx.plugin.approvedPermissions = [permission];
+    const session = await adapter.activate(ctx);
+    try {
+      await expect(collect(adapter.invoke(session, { callId: "stall", pluginId: ctx.plugin.id, capabilityId: "run", conversationId: "v", input: {} }))).rejects.toMatchObject({ code: "plugin_timeout" });
+      expect(hostSignal?.aborted).toBe(true);
+    } finally { await adapter.deactivate(session); }
+  });
+
   it.runIf(process.platform === "darwin" && process.env.CODEX_SANDBOX !== "seatbelt")(
     "limits macOS renderer services to Host-provisioned Office while preserving file and network boundaries", async () => {
       const data = realpathSync(mkdtempSync("/private/tmp/memmy-office-mach-"));

@@ -41,6 +41,8 @@ const CommandRuntimeConfigSchema = z.object({
   env: z.record(z.string(), z.string()).default({}),
   secretEnv: z.record(z.string(), z.string().min(1)).default({}),
   timeoutMs: z.number().int().positive().max(3_600_000).default(300_000),
+  /** Optional Host-side liveness bound, independent of the plugin event loop. */
+  noProgressTimeoutMs: z.number().int().positive().max(3_600_000).optional(),
   maxOutputBytes: z.number().int().positive().max(MAX_OUTPUT_BYTES).default(10 * 1024 * 1024),
   /**
    * Requests an unsandboxed child process.  Only honoured for plugins whose
@@ -232,8 +234,20 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       });
       const exit = processExit(child);
       let timedOut = false;
+      let noProgress = false;
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      const armIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        if (session.config.noProgressTimeoutMs) idleTimer = setTimeout(() => {
+          noProgress = true;
+          abortHostServices(session, call.callId);
+          terminate(child);
+        }, session.config.noProgressTimeoutMs);
+      };
+      armIdleTimer();
       let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
         timedOut = true;
+        abortHostServices(session, call.callId);
         terminate(child);
       }, callTimeoutMs(session.config.timeoutMs, call.deadline));
       try {
@@ -260,6 +274,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
               const raw = JSON.parse(line);
               const hostRequest = PluginHostServiceRequestSchema.safeParse(raw);
               if (hostRequest.success) {
+                armIdleTimer();
                 // Counted synchronously, so concurrent requests cannot share a
                 // slot and slip past the cap.
                 hostServiceRequests += 1;
@@ -270,6 +285,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
                 continue;
               }
               const event = CapabilityEventSchema.parse(raw);
+              armIdleTimer();
               if (event.type === "result" || event.type === "error") {
                 if (terminal) throw new Error("Plugin command emitted multiple terminal events");
                 terminal = event;
@@ -281,6 +297,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
                   clearTimeout(timer);
                   timer = undefined;
                 }
+                if (event.type === "interaction" && idleTimer) { clearTimeout(idleTimer); idleTimer = undefined; }
                 yield event;
               }
             }
@@ -304,6 +321,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
           jsonOutput = Buffer.concat(chunks, bytes);
         }
         const { code, signal } = await exit;
+        if (noProgress) throw Object.assign(new Error(`Plugin command produced no progress for ${session.config.noProgressTimeoutMs}ms`), { code: "plugin_no_progress" });
         if (timedOut) throw Object.assign(new Error("Plugin command timed out"), { code: "plugin_timeout" });
         if (inputError) throw inputError;
         if (code !== 0) throw new Error(`Plugin command exited with ${code ?? signal}: ${stderr.trim() || "no stderr"}`);
@@ -325,6 +343,9 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         if (terminal) yield terminal;
       } finally {
         if (timer) clearTimeout(timer);
+        if (idleTimer) clearTimeout(idleTimer);
+        abortHostServices(session, call.callId);
+        terminate(child);
         if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
         session.children.delete(call.callId);
       }
@@ -388,7 +409,7 @@ async function respondToHostServiceRequest(
     controllers.add(controller);
     session.hostServiceControllers.set(call.callId, controllers);
     try {
-      const response = await invoker.invoke({
+      const response = await awaitHostService(invoker.invoke({
         pluginId: session.pluginId,
         callId: call.callId,
         conversationId: call.conversationId,
@@ -397,7 +418,7 @@ async function respondToHostServiceRequest(
         input: request.input,
         deadline: call.deadline,
         signal: controller.signal
-      });
+      }), controller.signal);
       message = { type: "host-service-response", callId: call.callId, requestId: request.requestId, response };
     } catch (error) {
       const details = error as { code?: unknown; retryable?: unknown; message?: unknown };
@@ -421,6 +442,16 @@ function abortHostServices(session: CommandPluginSession, callId: string): void 
   if (!controllers) return;
   session.hostServiceControllers.delete(callId);
   for (const controller of controllers) controller.abort(new Error("plugin_call_cancelled"));
+}
+
+/** A cancelled call must finish even if an injected service ignores its signal. */
+function awaitHostService<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(Object.assign(new Error("Plugin call was cancelled"), { code: "plugin_call_cancelled", retryable: false }));
+    if (signal.aborted) { void pending.catch(() => undefined); abort(); return; }
+    signal.addEventListener("abort", abort, { once: true });
+    pending.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
 }
 
 function hostServiceError(callId: string, requestId: string, code: string, message: string, retryable: boolean): PluginHostServiceResponse {
@@ -708,7 +739,17 @@ function defaultOfficeInstaller(pluginDataRoot?: string): OfficeRuntimeInstaller
   const catalogUrl = process.env.MEMMY_OFFICE_RUNTIME_CATALOG_URL
     ?? (registry ? new URL("/api/v1/plugins/office/runtimes/{target}", registry).href : undefined);
   if (!catalogUrl) return undefined;
-  return createOfficeRuntimeInstaller({ cacheRoot: process.env.MEMMY_OFFICE_RUNTIME_CACHE ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "office"), catalogUrl });
+  let lastStage = "", lastProgressAt = 0;
+  return createOfficeRuntimeInstaller({
+    cacheRoot: process.env.MEMMY_OFFICE_RUNTIME_CACHE ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "office"), catalogUrl,
+    onProgress(stage, bytes, total) {
+      const now = Date.now();
+      if (stage === lastStage && now - lastProgressAt < 10000) return;
+      lastStage = stage; lastProgressAt = now;
+      // Never log signed download URLs or account credentials.
+      console.info("Office runtime installation", { stage, bytes, total });
+    }
+  });
 }
 
 function defaultTexliveInstaller(pluginDataRoot?: string): TexliveRuntimeInstaller | undefined {
