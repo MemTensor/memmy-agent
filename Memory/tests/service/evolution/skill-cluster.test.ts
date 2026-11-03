@@ -43,7 +43,7 @@ interface DirectSkillCall {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
 }
 
-function createDirectSkillLlm(calls: DirectSkillCall[]): LlmClient {
+function createDirectSkillLlm(calls: DirectSkillCall[], skillJson: Record<string, unknown> = DIRECT_SKILL_JSON): LlmClient {
   return {
     config: {
       ...LEGACY_TEST_CONFIG.evolution,
@@ -70,7 +70,7 @@ function createDirectSkillLlm(calls: DirectSkillCall[]): LlmClient {
         } as unknown as T;
       }
       if (options.operation.startsWith("skill.batch_evolve")) {
-        return { ...DIRECT_SKILL_JSON } as unknown as T;
+        return { ...skillJson } as unknown as T;
       }
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
@@ -104,9 +104,10 @@ async function runDirectSkillEpisode(input: {
   query?: string;
   answer?: string;
   config?: typeof LEGACY_TEST_CONFIG;
+  skillJson?: Record<string, unknown>;
 }) {
   const calls: DirectSkillCall[] = [];
-  const { db, service } = createTestService({ skillLlm: createDirectSkillLlm(calls), config: input.config });
+  const { db, service } = createTestService({ skillLlm: createDirectSkillLlm(calls, input.skillJson), config: input.config });
   const session = service.openSession({
     namespace: { source: "codex", profileId: "jiang", userId: input.userId }
   });
@@ -206,6 +207,28 @@ describe("MemoryService / evolution / skill cluster", () => {
     };
     expect(cluster.skill_memory_id).toBe(skill!.id);
     expect(cluster.meta_skill_md).toContain("anti_pattern");
+  });
+
+  it("records a failed api log when a direct Skill draft fails verification", async () => {
+    const { db } = await runDirectSkillEpisode({
+      userId: "direct-verification-failed",
+      rTask: 1,
+      skillJson: { ...DIRECT_SKILL_JSON, tools: ["python", "kubectl"] }
+    });
+    const skillCount = db.db.prepare(`SELECT COUNT(*) AS count FROM memories WHERE memory_layer = 'Skill'`).get() as { count: number };
+    expect(skillCount.count).toBe(0);
+    const failureLog = db.db.prepare(
+      `SELECT tool_name, success, input_json, output_json FROM api_logs
+       WHERE tool_name IN ('skill_generate', 'skill_evolve') ORDER BY id DESC LIMIT 1`
+    ).get() as { tool_name: string; success: number; input_json: string; output_json: string } | undefined;
+    expect(failureLog).toMatchObject({ tool_name: "skill_generate", success: 0 });
+    expect(JSON.parse(failureLog!.input_json)).toMatchObject({ phase: "failed", failureKind: "verification" });
+    expect(JSON.parse(failureLog!.input_json).skillId).toBeUndefined();
+    expect(JSON.parse(failureLog!.output_json)).toMatchObject({
+      kind: "skill.direct.failed",
+      reason: "tools_outside_evidence:kubectl",
+      source: DIRECT_SKILL_SOURCE
+    });
   });
 
   it("enqueues assign/evolve after episode reward without a manual skill job", async () => {

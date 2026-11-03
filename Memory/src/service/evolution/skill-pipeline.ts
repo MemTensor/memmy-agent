@@ -1,6 +1,7 @@
 import {
   SKILL_CRYSTALLIZE_PROMPT,
   SKILL_REBUILD_PROMPT,
+  SKILL_VERIFIER_VERSION,
   buildSkillDraft,
   cosine,
   extractToolNamesFromTraces,
@@ -32,8 +33,31 @@ type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
 type SkillMeta = NonNullable<ReturnType<typeof skillMetaFromMemory>>;
 type SkillDraft = NonNullable<ReturnType<typeof buildSkillDraft>>;
-type SkillEnhancementResult = { ok: true; draft: SkillDraft } | { ok: false; reason: string };
+type SkillFailureKind = "verification" | "llm_invalid" | "llm_refusal" | "llm_transport";
+type SkillEnhancementResult =
+  | { ok: true; draft: SkillDraft; llmCalled: true }
+  | { ok: false; reason: string; llmCalled: boolean; failureKind?: SkillFailureKind };
 type SkillRebuildLevel = "L0" | "L1" | "L2";
+type SkillPrompt = typeof SKILL_CRYSTALLIZE_PROMPT | typeof SKILL_REBUILD_PROMPT;
+type SkillGenerationContext = {
+  outputLanguage: ReturnType<typeof skillOutputLanguageFor>;
+  prompt: SkillPrompt;
+  rebuild: ReturnType<typeof skillRebuildPlan> | null;
+  targetSkillId: string | null;
+  inputFingerprint: string;
+  promptKey: string;
+};
+type SkillAttemptStatus = "verified" | "rejected" | "transient_failed";
+type SkillCrystallizationAttempt = {
+  fingerprint: string;
+  promptKey: string;
+  status: SkillAttemptStatus;
+  failureKind?: SkillFailureKind;
+  failureCount: number;
+  lastAttemptAt: string;
+  nextEligibleAt?: string;
+  reason?: string;
+};
 
 const SKILL_REFUSAL_PREFIXES = [
   /^i am claude\b/,
@@ -254,9 +278,31 @@ export class SkillPipeline {
         targetSkillId,
         job.payload.reason !== "policy.skill_fanout"
       );
-      if (this.isSkillCrystallizationInCooldown(policy, at)) {
-        logEvolutionDecision(job, "skill_crystallization", "cooldown", {
+      const fallbackDraft = buildSkillDraft({
+        policy,
+        existing: existingSkill,
+        minEtaForRetrieval: this.deps.config.algorithm.skill.minEtaForRetrieval,
+        minSupport: this.deps.config.algorithm.skill.minSupport,
+        minGain: this.deps.config.algorithm.skill.minGain
+      });
+      if (!fallbackDraft) {
+        logEvolutionDecision(job, "skill_crystallization", "not-eligible", {
+          policyId: policy.id
+        });
+        continue;
+      }
+      const generation = this.skillGenerationContext(policy, evidenceTraces, counterExamples, existingSkill);
+      const attempt = this.readSkillCrystallizationAttempt(policy.id, generation);
+      const attemptSkipReason = skillAttemptSkipReason(attempt, generation, at) ??
+        (!attempt && existingSkill && generation.rebuild?.level === "L0" ? "prompt_upgrade_baseline" : undefined);
+      if (attemptSkipReason === "prompt_upgrade_baseline") {
+        this.rebaseSkillCrystallizationAttempt(policy.id, attempt, generation, at);
+      }
+      if (attemptSkipReason) {
+        logEvolutionDecision(job, "skill_crystallization", attemptSkipReason, {
           policyId: policy.id,
+          inputFingerprint: generation.inputFingerprint,
+          promptKey: generation.promptKey,
           existingSkillId: existingSkill?.id
         });
         this.deps.repos.runtime.appendChange({
@@ -270,7 +316,35 @@ export class SkillPipeline {
           after: {
             policyId: policy.id,
             ...(existingSkill ? { skillId: existingSkill.id } : {}),
-            reason: "cooldown"
+            reason: attemptSkipReason,
+            inputFingerprint: generation.inputFingerprint,
+            promptKey: generation.promptKey,
+            ...(attempt?.nextEligibleAt ? { nextEligibleAt: attempt.nextEligibleAt } : {})
+          },
+          source: "worker.skill_crystallization.v7",
+          createdAt: at
+        });
+        continue;
+      }
+      if (this.isSkillCrystallizationInCooldown(policy, at)) {
+        logEvolutionDecision(job, "skill_crystallization", "cooldown", {
+          policyId: policy.id,
+          inputFingerprint: generation.inputFingerprint,
+          existingSkillId: existingSkill?.id
+        });
+        this.deps.repos.runtime.appendChange({
+          memoryId: policyMemory.id,
+          namespaceId: this.deps.namespaceIdFromMemory(policyMemory),
+          kind: "skill",
+          op: "skipped",
+          entityId: existingSkill?.id ?? policyMemory.id,
+          userId,
+          changeType: "skill_crystallization_skipped",
+          after: {
+            policyId: policy.id,
+            ...(existingSkill ? { skillId: existingSkill.id } : {}),
+            reason: "cooldown",
+            inputFingerprint: generation.inputFingerprint
           },
           source: "worker.skill_crystallization.v7",
           createdAt: at
@@ -278,19 +352,37 @@ export class SkillPipeline {
         continue;
       }
       this.markSkillCrystallizationRun(policy, at);
-      const fallbackDraft = buildSkillDraft({
+      const enhancement = await this.enhanceSkillDraft(
         policy,
-        existing: existingSkill,
-        minEtaForRetrieval: this.deps.config.algorithm.skill.minEtaForRetrieval,
-        minSupport: this.deps.config.algorithm.skill.minSupport,
-        minGain: this.deps.config.algorithm.skill.minGain
-      });
-      const enhancement = fallbackDraft
-        ? await this.enhanceSkillDraft(policy, fallbackDraft, evidenceTraces, counterExamples, existingSkill)
-        : { ok: false, reason: "not-eligible" } as const;
+        fallbackDraft,
+        evidenceTraces,
+        counterExamples,
+        existingSkill,
+        generation
+      );
       if (!enhancement.ok) {
+        if (enhancement.llmCalled && enhancement.failureKind) {
+          this.writeSkillCrystallizationFailure(
+            policy.id,
+            generation,
+            enhancement.failureKind,
+            enhancement.reason,
+            at
+          );
+          this.recordSkillCrystallizationFailure(
+            startedAt,
+            policy,
+            existingSkill,
+            generation,
+            enhancement.failureKind,
+            enhancement.reason
+          );
+        }
         logEvolutionDecision(job, "skill_crystallization", enhancement.reason, {
           policyId: policy.id,
+          skillId: existingSkill?.id,
+          failureKind: enhancement.failureKind,
+          inputFingerprint: generation.inputFingerprint,
           evidenceCount: evidenceTraces.length,
           counterExampleCount: counterExamples.length
         });
@@ -302,7 +394,15 @@ export class SkillPipeline {
           entityId: policyMemory.id,
           userId,
           changeType: "skill_crystallization_skipped",
-          after: { policyId: policy.id, reason: enhancement.reason },
+          after: {
+            policyId: policy.id,
+            ...(existingSkill ? { skillId: existingSkill.id } : {}),
+            reason: enhancement.reason,
+            ...(enhancement.failureKind ? { failureKind: enhancement.failureKind } : {}),
+            outputLanguage: generation.outputLanguage,
+            promptVersion: generation.prompt.version,
+            inputFingerprint: generation.inputFingerprint
+          },
           source: "worker.skill_crystallization.v7",
           createdAt: at
         });
@@ -311,8 +411,26 @@ export class SkillPipeline {
       const draft = enhancement.draft;
       const verdict = verifySkillDraft({ draft, evidenceTraces });
       if (!verdict.ok) {
+        this.writeSkillCrystallizationFailure(
+          policy.id,
+          generation,
+          "verification",
+          verdict.reason ?? "verification_failed",
+          at
+        );
+        this.recordSkillCrystallizationFailure(
+          startedAt,
+          policy,
+          existingSkill,
+          generation,
+          "verification",
+          verdict.reason ?? "verification_failed",
+          verdict
+        );
         logEvolutionDecision(job, "skill_crystallization", "verification_failed", {
           policyId: policy.id,
+          skillId: existingSkill?.id,
+          inputFingerprint: generation.inputFingerprint,
           verdict
         });
         this.deps.repos.runtime.appendChange({
@@ -323,7 +441,15 @@ export class SkillPipeline {
           entityId: policyMemory.id,
           userId,
           changeType: "skill_verification_failed",
-          after: { policyId: policy.id, verdict },
+          after: {
+            policyId: policy.id,
+            ...(existingSkill ? { skillId: existingSkill.id } : {}),
+            failureKind: "verification",
+            outputLanguage: generation.outputLanguage,
+            promptVersion: generation.prompt.version,
+            inputFingerprint: generation.inputFingerprint,
+            verdict
+          },
           source: "worker.skill_crystallization.v7",
           createdAt: at
         });
@@ -335,7 +461,7 @@ export class SkillPipeline {
         sourceTraceIds: evidenceAnchorIds,
         evidenceAnchorIds: uniq([...evidenceAnchorIds, ...draft.evidenceAnchorIds]).slice(0, 10),
         procedureJson: attachSkillStepPolicySources(
-          draft.procedureJson,
+          stripSkillStepEvidenceIds(draft.procedureJson),
           existingSkill?.memory,
           policy.id
         )
@@ -407,6 +533,15 @@ export class SkillPipeline {
         createdAt: at
       });
       const upsert = this.deps.upsertEvolutionMemory(skill);
+      const persistedSkill = skillMetaFromMemory(upsert.memory);
+      // The next run sees the persisted skill as its rebuild target, so record that context.
+      this.writeSkillCrystallizationVerified(
+        policy.id,
+        persistedSkill
+          ? this.skillGenerationContext(policy, evidenceTraces, counterExamples, persistedSkill)
+          : generation,
+        at
+      );
       for (const episodeId of uniq(evidenceTraces.map((trace) => trace.episodeId).filter((id): id is string => Boolean(id)))) {
         this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "Skill", upsert.memory.id, at);
       }
@@ -425,14 +560,25 @@ export class SkillPipeline {
       });
       recordApiLog(this.deps.repos.runtime,
         upsert.created ? "skill_generate" : "skill_evolve",
-        { phase: "done", skillId: upsert.memory.id, policyId: policy.id },
+        {
+          phase: "done",
+          skillId: upsert.memory.id,
+          policyId: policy.id,
+          outputLanguage: generation.outputLanguage,
+          promptVersion: generation.prompt.version,
+          inputFingerprint: generation.inputFingerprint
+        },
         {
           skillId: upsert.memory.id,
           kind: upsert.created ? "skill.crystallized" : "skill.rebuilt",
           name: verifiedDraft.name,
           status: verifiedDraft.status,
           eta: verifiedDraft.eta,
-          sourcePolicyIds: verifiedDraft.sourcePolicyIds
+          sourcePolicyIds: verifiedDraft.sourcePolicyIds,
+          verdict,
+          outputLanguage: generation.outputLanguage,
+          promptVersion: generation.prompt.version,
+          inputFingerprint: generation.inputFingerprint
         },
         elapsedApiLogMs(startedAt),
         true,
@@ -606,7 +752,206 @@ export class SkillPipeline {
     return skillMetaFromMemory(saved);
   }
 
-private isSkillCrystallizationInCooldown(policy: PolicyMeta, at: string): boolean {
+  private skillGenerationContext(
+    policy: PolicyMeta,
+    evidenceTraces: TraceMeta[],
+    counterExamples: TraceMeta[],
+    existingSkill?: SkillMeta | null
+  ): SkillGenerationContext {
+    const languageSamples = [
+      policy.title,
+      policy.trigger,
+      policy.procedure,
+      ...evidenceTraces.flatMap((trace) => [trace.userText, trace.agentText, trace.reflection])
+    ];
+    const steeredLanguage = steeredPromptLanguage(this.deps.config.language, languageSamples);
+    const outputLanguage = skillOutputLanguageFor(
+      this.deps.config.algorithm.skill.outputLanguageMode,
+      steeredLanguage
+    );
+    const rebuild = existingSkill ? skillRebuildPlan(policy, existingSkill, evidenceTraces) : null;
+    const prompt: SkillPrompt = rebuild ? SKILL_REBUILD_PROMPT : SKILL_CRYSTALLIZE_PROMPT;
+    const traceInput = (trace: TraceMeta) => {
+      const episode = skillEvidenceEpisode(this.deps.repos.runtime, trace.episodeId);
+      return {
+        id: trace.id,
+        episodeId: trace.episodeId ?? null,
+        capturedAt: formatZonedTime(trace.ts, trace.timeZone),
+        episodeOutcome: skillEvidenceEpisodeOutcome(episode),
+        episodeRTask: episode?.rTask ?? null,
+        user: trace.userText,
+        agent: trace.agentText,
+        reflection: trace.reflection,
+        value: trace.value,
+        alpha: trace.alpha,
+        tags: [...trace.tags].sort(),
+        toolNames: [...extractToolNamesFromTraces([trace])].sort()
+      };
+    };
+    const targetSkillId = existingSkill?.id ?? null;
+    // Hash semantic inputs that can change the generated procedure. Deliberately
+    // exclude row updatedAt: reward and embedding jobs rewrite rows without
+    // necessarily changing anything the model sees.
+    const inputFingerprint = stableHash({
+      policyHash: skillPolicyContentHash(policy),
+      evidence: evidenceTraces.map(traceInput),
+      counterExamples: counterExamples.map(traceInput),
+      evidenceTools: [...extractToolNamesFromTraces(evidenceTraces)].sort(),
+      rebuild: rebuild ? {
+        level: rebuild.level,
+        snapshot: rebuild.snapshot,
+        incrementalEvidence: rebuild.incrementalEvidence.map(traceInput)
+      } : null,
+      existingSkill: existingSkill ? {
+        id: existingSkill.id,
+        name: existingSkill.name,
+        status: existingSkill.status,
+        invocationGuide: existingSkill.invocationGuide,
+        procedureJson: skillProcedureJsonFromMemory(existingSkill.memory)
+      } : null,
+      targetSkillId,
+      outputLanguage
+    });
+    const promptKey = `${prompt.id}.v${prompt.version}/verifier.v${SKILL_VERIFIER_VERSION}`;
+    return { outputLanguage, prompt, rebuild, targetSkillId, inputFingerprint, promptKey };
+  }
+
+  private readSkillCrystallizationAttempt(
+    policyId: string,
+    generation: SkillGenerationContext
+  ): SkillCrystallizationAttempt | undefined {
+    const value = this.deps.repos.runtime.getKv(
+      skillAttemptKey(policyId, generation.targetSkillId)
+    )?.value;
+    if (!isRecord(value)) return undefined;
+    const fingerprint = typeof value.fingerprint === "string" ? value.fingerprint : "";
+    const promptKey = typeof value.promptKey === "string" ? value.promptKey : "";
+    const status = value.status;
+    const failureCount = typeof value.failureCount === "number" ? value.failureCount : 0;
+    const lastAttemptAt = typeof value.lastAttemptAt === "string" ? value.lastAttemptAt : "";
+    if (
+      !fingerprint ||
+      !promptKey ||
+      !lastAttemptAt ||
+      (status !== "verified" && status !== "rejected" && status !== "transient_failed")
+    ) return undefined;
+    const failureKind = value.failureKind;
+    return {
+      fingerprint,
+      promptKey,
+      status,
+      failureCount: Math.max(0, Math.floor(failureCount)),
+      lastAttemptAt,
+      ...(failureKind === "verification" || failureKind === "llm_invalid" ||
+        failureKind === "llm_refusal" || failureKind === "llm_transport"
+        ? { failureKind }
+        : {}),
+      ...(typeof value.nextEligibleAt === "string" ? { nextEligibleAt: value.nextEligibleAt } : {}),
+      ...(typeof value.reason === "string" ? { reason: value.reason } : {})
+    };
+  }
+
+  private writeSkillCrystallizationFailure(
+    policyId: string,
+    generation: SkillGenerationContext,
+    failureKind: SkillFailureKind,
+    reason: string,
+    at: string
+  ): void {
+    const previous = this.readSkillCrystallizationAttempt(policyId, generation);
+    const failureCount = previous?.fingerprint === generation.inputFingerprint &&
+      previous.promptKey === generation.promptKey
+      ? previous.failureCount + 1
+      : 1;
+    const status: SkillAttemptStatus = failureKind === "llm_transport" ? "transient_failed" : "rejected";
+    const delayMs = status === "transient_failed"
+      ? [5 * 60_000, 15 * 60_000, 60 * 60_000][Math.min(failureCount - 1, 2)]
+      : failureCount >= 3
+        ? undefined
+        : [60 * 60_000, 6 * 60 * 60_000][failureCount - 1];
+    const attemptedAt = Date.parse(at);
+    const nextEligibleAt = delayMs !== undefined && Number.isFinite(attemptedAt)
+      ? new Date(attemptedAt + delayMs).toISOString()
+      : undefined;
+    this.deps.repos.runtime.setKv(skillAttemptKey(policyId, generation.targetSkillId), {
+      fingerprint: generation.inputFingerprint,
+      promptKey: generation.promptKey,
+      status,
+      failureKind,
+      failureCount,
+      lastAttemptAt: at,
+      ...(nextEligibleAt ? { nextEligibleAt } : {}),
+      reason
+    } satisfies SkillCrystallizationAttempt, at);
+  }
+
+/** Record the current prompt/verifier version for an already verified Skill without regenerating it. */
+  private rebaseSkillCrystallizationAttempt(
+    policyId: string,
+    attempt: SkillCrystallizationAttempt | undefined,
+    generation: SkillGenerationContext,
+    at: string
+  ): void {
+    if (!attempt) {
+      this.writeSkillCrystallizationVerified(policyId, generation, at);
+      return;
+    }
+    this.deps.repos.runtime.setKv(skillAttemptKey(policyId, generation.targetSkillId), {
+      ...attempt,
+      fingerprint: generation.inputFingerprint,
+      promptKey: generation.promptKey
+    } satisfies SkillCrystallizationAttempt, at);
+  }
+
+  private writeSkillCrystallizationVerified(policyId: string, generation: SkillGenerationContext, at: string): void {
+    this.deps.repos.runtime.setKv(skillAttemptKey(policyId, generation.targetSkillId), {
+      fingerprint: generation.inputFingerprint,
+      promptKey: generation.promptKey,
+      status: "verified",
+      failureCount: 0,
+      lastAttemptAt: at
+    } satisfies SkillCrystallizationAttempt, at);
+  }
+
+  private recordSkillCrystallizationFailure(
+    startedAt: number,
+    policy: PolicyMeta,
+    existingSkill: SkillMeta | null | undefined,
+    generation: SkillGenerationContext,
+    failureKind: SkillFailureKind,
+    reason: string,
+    verdict?: ReturnType<typeof verifySkillDraft>
+  ): void {
+    recordApiLog(this.deps.repos.runtime,
+      existingSkill ? "skill_evolve" : "skill_generate",
+      {
+        phase: "failed",
+        policyId: policy.id,
+        ...(existingSkill ? { skillId: existingSkill.id } : {}),
+        failureKind,
+        reason,
+        outputLanguage: generation.outputLanguage,
+        promptVersion: generation.prompt.version,
+        inputFingerprint: generation.inputFingerprint
+      },
+      {
+        kind: "skill.crystallize.failed",
+        policyId: policy.id,
+        ...(existingSkill ? { skillId: existingSkill.id } : {}),
+        failureKind,
+        reason,
+        ...(verdict ? { verdict } : {}),
+        outputLanguage: generation.outputLanguage,
+        promptVersion: generation.prompt.version,
+        inputFingerprint: generation.inputFingerprint
+      },
+      elapsedApiLogMs(startedAt),
+      false,
+      nowIso()
+    );
+  }
+
+  private isSkillCrystallizationInCooldown(policy: PolicyMeta, at: string): boolean {
     const cooldownMs = this.deps.config.algorithm.skill.cooldownMs;
     if (cooldownMs <= 0) return false;
     const lastRunAt = this.skillCrystallizationRuns.get(this.skillCrystallizationCooldownKey(policy));
@@ -616,18 +961,18 @@ private isSkillCrystallizationInCooldown(policy: PolicyMeta, at: string): boolea
     return now - lastRunAt < cooldownMs;
   }
 
-private markSkillCrystallizationRun(policy: PolicyMeta, at: string): void {
+  private markSkillCrystallizationRun(policy: PolicyMeta, at: string): void {
     if (this.deps.config.algorithm.skill.cooldownMs <= 0) return;
     const now = Date.parse(at);
     if (!Number.isFinite(now)) return;
     this.skillCrystallizationRuns.set(this.skillCrystallizationCooldownKey(policy), now);
   }
 
-private skillCrystallizationCooldownKey(policy: PolicyMeta): string {
+  private skillCrystallizationCooldownKey(policy: PolicyMeta): string {
     return policy.id;
   }
 
-private gatherSkillEvidence(policy: PolicyMeta): TraceMeta[] {
+  private gatherSkillEvidence(policy: PolicyMeta): TraceMeta[] {
     const byId = new Map<string, TraceMeta>();
     const episodeIds = new Set(policy.sourceEpisodeIds);
     const failureEpisodeIds = new Set(
@@ -664,7 +1009,7 @@ private gatherSkillEvidence(policy: PolicyMeta): TraceMeta[] {
     return traces.map((trace) => this.capSkillEvidenceTrace(trace));
   }
 
-private isFailureEpisodeForSkillEvidence(episodeId: string): boolean {
+  private isFailureEpisodeForSkillEvidence(episodeId: string): boolean {
     const episode = this.deps.repos.runtime.getEpisode(episodeId);
     if (!episode) return false;
     if (typeof episode.rTask === "number") {
@@ -673,7 +1018,7 @@ private isFailureEpisodeForSkillEvidence(episodeId: string): boolean {
     return episode.rewardDetail.skipped === true;
   }
 
-private gatherSkillCounterExamples(policy: PolicyMeta): TraceMeta[] {
+  private gatherSkillCounterExamples(policy: PolicyMeta): TraceMeta[] {
     if (policy.sourceEpisodeIds.length === 0) return [];
     const episodeIds = new Set(policy.sourceEpisodeIds);
     return this.deps.repos.memories
@@ -692,12 +1037,12 @@ private gatherSkillCounterExamples(policy: PolicyMeta): TraceMeta[] {
       .map((trace) => this.capSkillEvidenceTrace(trace));
   }
 
-private skillEvidenceScore(trace: TraceMeta, policy: PolicyMeta): number {
+  private skillEvidenceScore(trace: TraceMeta, policy: PolicyMeta): number {
     const value = Number.isFinite(trace.value) ? trace.value : 0;
     return value + 0.2 * cosine(trace.vecSummary, policy.vec);
   }
 
-private capSkillEvidenceTrace(trace: TraceMeta): TraceMeta {
+  private capSkillEvidenceTrace(trace: TraceMeta): TraceMeta {
     const cap = Math.max(1, this.deps.config.algorithm.skill.traceCharCap);
     const userText = capSkillPromptText(trace.userText, cap);
     const agentText = capSkillPromptText(trace.agentText, cap);
@@ -767,15 +1112,16 @@ private capSkillEvidenceTrace(trace: TraceMeta): TraceMeta {
     }
   }
 
-private async enhanceSkillDraft(
+  private async enhanceSkillDraft(
     policy: PolicyMeta,
     fallback: SkillDraft,
     evidenceTraces: TraceMeta[],
     counterExamples: TraceMeta[],
-    existingSkill?: NonNullable<ReturnType<typeof skillMetaFromMemory>> | null
+    existingSkill: SkillMeta | null | undefined,
+    generation: SkillGenerationContext
   ): Promise<SkillEnhancementResult> {
     if (!this.deps.config.algorithm.skill.useLlm || !this.deps.skillLlm.isConfigured()) {
-      return { ok: false, reason: "llm_disabled" };
+      return { ok: false, reason: "llm_disabled", llmCalled: false };
     }
     try {
       const evidenceTools = Array.from(extractToolNamesFromTraces(evidenceTraces));
@@ -784,19 +1130,7 @@ private async enhanceSkillDraft(
         .map(skillMetaFromMemory)
         .filter((skill): skill is NonNullable<ReturnType<typeof skillMetaFromMemory>> => Boolean(skill))
         .map((skill) => skill.name);
-      const languageSamples = [
-        policy.title,
-        policy.trigger,
-        policy.procedure,
-        ...evidenceTraces.flatMap((trace) => [trace.userText, trace.agentText, trace.reflection])
-      ];
-      const steeredLanguage = steeredPromptLanguage(this.deps.config.language, languageSamples);
-      const outputLanguage = skillOutputLanguageFor(
-        this.deps.config.algorithm.skill.outputLanguageMode,
-        steeredLanguage
-      );
-      const rebuild = existingSkill ? skillRebuildPlan(policy, existingSkill, evidenceTraces) : null;
-      const prompt = rebuild ? SKILL_REBUILD_PROMPT : SKILL_CRYSTALLIZE_PROMPT;
+      const { outputLanguage, prompt, rebuild } = generation;
       const result = await this.deps.skillLlm.completeJson<{
         name?: unknown;
         retrieval_blurb?: unknown;
@@ -908,11 +1242,11 @@ private async enhanceSkillDraft(
         temperature: 0.2
       });
       if (detectSkillModelRefusal(result)) {
-        return { ok: false, reason: "llm-refusal" };
+        return { ok: false, reason: "llm-refusal", llmCalled: true, failureKind: "llm_refusal" };
       }
       const invalidReason = skillCrystallizerInvalidReason(result);
       if (invalidReason) {
-        return { ok: false, reason: invalidReason };
+        return { ok: false, reason: invalidReason, llmCalled: true, failureKind: "llm_invalid" };
       }
       const llmProcedureJson = coerceSkillProcedureJson(result);
       const procedureJson = rebuild
@@ -935,6 +1269,7 @@ private async enhanceSkillDraft(
       });
       return {
         ok: true,
+        llmCalled: true,
         draft: {
           ...fallback,
           name: skillName,
@@ -944,9 +1279,43 @@ private async enhanceSkillDraft(
         }
       };
     } catch (error) {
-      return { ok: false, reason: `llm-failed: ${errorMessageFromUnknown(error) ?? "unknown"}` };
+      return {
+        ok: false,
+        reason: `llm-failed: ${errorMessageFromUnknown(error) ?? "unknown"}`,
+        llmCalled: true,
+        failureKind: "llm_transport"
+      };
     }
   }
+}
+
+function skillAttemptKey(policyId: string, targetSkillId: string | null): string {
+  return `skill_crystallization_attempt:${policyId}:${encodeURIComponent(targetSkillId ?? "new")}`;
+}
+
+/**
+ * A prompt or verifier upgrade rebases an already verified Skill without a
+ * model call, so a release does not regenerate every successful policy at
+ * once. Rejected attempts are retried because the upgraded verifier may fix
+ * the rejection; semantic input changes also earn a new model call.
+ */
+function skillAttemptSkipReason(
+  attempt: SkillCrystallizationAttempt | undefined,
+  generation: SkillGenerationContext,
+  at: string
+): "attempt_verified" | "prompt_upgrade_baseline" | "attempt_exhausted" | "attempt_backoff" | undefined {
+  if (!attempt || attempt.fingerprint !== generation.inputFingerprint) return undefined;
+  if (attempt.promptKey !== generation.promptKey) {
+    return attempt.status === "verified" ? "prompt_upgrade_baseline" : undefined;
+  }
+  if (attempt.status === "verified") return "attempt_verified";
+  if (attempt.status === "rejected" && attempt.failureCount >= 3) return "attempt_exhausted";
+  const nextEligibleAt = attempt.nextEligibleAt ? Date.parse(attempt.nextEligibleAt) : Number.NaN;
+  const now = Date.parse(at);
+  if (Number.isFinite(nextEligibleAt) && Number.isFinite(now) && now < nextEligibleAt) {
+    return "attempt_backoff";
+  }
+  return undefined;
 }
 
 function updateSkillStats(memory: MemoryRow, input: {
@@ -1324,6 +1693,17 @@ function attachSkillStepPolicySources(
   };
 }
 
+function stripSkillStepEvidenceIds(procedure: Record<string, unknown>): Record<string, unknown> {
+  const steps = Array.isArray(procedure.steps) ? procedure.steps.filter(isRecord) : [];
+  return {
+    ...procedure,
+    steps: steps.map((step) => {
+      const { evidenceIds: _evidenceIds, evidence_ids: _evidenceIdsSnake, ...rest } = step;
+      return rest;
+    })
+  };
+}
+
 function normalizeSkillStepTitle(value: unknown): string {
   return skillText(value).toLowerCase().replace(/[\s_-]+/g, " ").trim();
 }
@@ -1482,7 +1862,7 @@ function collectSkillStrings(value: unknown): string[] {
   return Object.values(value as Record<string, unknown>).flatMap(collectSkillStrings);
 }
 
-function coerceSkillSteps(value: unknown): Array<{ title: string; body: string }> {
+function coerceSkillSteps(value: unknown): Array<{ title: string; body: string; evidenceIds?: string[] }> {
   if (!Array.isArray(value)) return [];
   return value
     .map((item) => {
@@ -1490,14 +1870,19 @@ function coerceSkillSteps(value: unknown): Array<{ title: string; body: string }
         const title = skillText(item.title);
         const body = skillMarkdown(item.body);
         if (!title && !body) return undefined;
+        const evidenceIds = uniq([
+          ...stringArray(item.evidence_ids),
+          ...stringArray(item.evidenceIds)
+        ]);
         return {
           title: title || body.slice(0, 32),
-          body
+          body,
+          ...(evidenceIds.length > 0 ? { evidenceIds } : {})
         };
       }
       return undefined;
     })
-    .filter((item): item is { title: string; body: string } => Boolean(item));
+    .filter((item): item is { title: string; body: string; evidenceIds?: string[] } => Boolean(item));
 }
 
 function coerceSkillParameters(value: unknown): Array<Record<string, unknown>> {

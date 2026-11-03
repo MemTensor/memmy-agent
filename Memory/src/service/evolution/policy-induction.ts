@@ -437,15 +437,17 @@ export class PolicyInductionEngine {
             createdAt: at
           });
         }
-        this.deps.enqueueJob({
-          jobType: "skill_crystallization",
-          userId: source.userId,
-          sessionId: source.sessionId,
-          episodeId: sourceTrace.episodeId,
-          targetMemoryId: upsert.memory.id,
-          payload: { signature },
-          createdAt: at
-        });
+        if (!this.deps.config.algorithm.skill.directFromTrace) {
+          this.deps.enqueueJob({
+            jobType: "skill_crystallization",
+            userId: source.userId,
+            sessionId: source.sessionId,
+            episodeId: sourceTrace.episodeId,
+            targetMemoryId: upsert.memory.id,
+            payload: { signature },
+            createdAt: at
+          });
+        }
       });
     }
   }
@@ -757,7 +759,7 @@ export class PolicyInductionEngine {
 
     const savedPolicy = policyMetaFromMemory(saved);
     if (savedPolicy) {
-      if (savedPolicy.status === "active") {
+      if (savedPolicy.status === "active" && !this.deps.config.algorithm.skill.directFromTrace) {
         this.deps.enqueueJob({
           jobType: "skill_crystallization",
           userId: saved.userId,
