@@ -1262,6 +1262,7 @@ export async function gateway({
         llmRuntime: (preset) => loop.llmRuntime(preset),
         scheduleBackground: (promise) => loop.scheduleBackground(promise),
         tokenUsageRecorder: createByokTokenUsageRecorder(loaded),
+        readMediaText: (filePath) => webuiChannel.readWebuiTitleText(filePath),
       }),
     );
     if (webuiChannel.guiSessionProjection && loop.sessions instanceof SessionManager) {
