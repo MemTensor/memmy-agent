@@ -84,6 +84,12 @@ const statements = [
       AND json_type(properties_json, '$.internal_info.external_evidence') = 'object'
       AND COALESCE(json_extract(properties_json, '$.internal_info.observation_memory.schema_version'), 0) < 1`,
 
+  `CREATE INDEX IF NOT EXISTS idx_memories_observation_config_pending ON memories(id)
+    WHERE deleted_at IS NULL
+      AND json_extract(properties_json, '$.internal_info.memory_kind') = 'observed_activity'
+      AND json_type(properties_json, '$.internal_info.observation_memory') = 'object'
+      AND json_extract(properties_json, '$.internal_info.observation_memory.status') = 'pending'`,
+
   `CREATE TABLE IF NOT EXISTS l3_world_model_scopes (
     scope_key TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
