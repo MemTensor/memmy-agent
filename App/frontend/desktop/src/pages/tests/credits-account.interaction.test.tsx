@@ -11,7 +11,7 @@ import { creditDisplayBuckets, creditUsagePercent, formatCreditAmount } from "..
 import { ApiRequestError } from "../../api/http.js";
 import { useAppState } from "../../state/app-state.js";
 import { appActions } from "../../state/app-actions.js";
-import { CreditsSettingsPanel, CreditsSourceDetailPage } from "../credits-in-app.js";
+import { CreditsSettingsPanel, CreditsSourceDetailPage, HomeCheckinCard } from "../credits-in-app.js";
 import { CreditsPlansPage } from "../credits-commerce.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
 vi.mock("../app-frame.js", () => ({ AppFrame: ({ children }: { children: ReactNode }) => <>{children}</> }));
@@ -26,11 +26,13 @@ const summary = {
 };
 const reward: CreditsGrant = { grantId: "9007199254740993", sourceType: "INVITATION", sourceId: "invite", sourceName: "真实邀请奖励", granted: "250.00", remaining: "214.56", reserved: "20.00", grantedAt: "2026-11-03T00:00+08:00", expiresAt: null, status: "AVAILABLE" };
 function fixture() {
-  return { summary: vi.fn(async () => summary),
+  return {
+    checkin: vi.fn(), redeem: vi.fn(), invitationSummary: vi.fn(), invitations: vi.fn(),
+    summary: vi.fn(async () => summary),
     grants: vi.fn(async () => ({ items: [reward, { ...reward, grantId: "2", sourceType: "PLAN" as const, sourceName: "Free", granted: "1000.00", remaining: "1000.00", reserved: "0.00" }], hasMore: false, nextCursor: null as string | null })),
     ledger: vi.fn(async () => ({ items: [], hasMore: false, nextCursor: null })) } satisfies CreditsClient;
 }
-function Harness({ client }: { client: CreditsClient }) {
+function Harness({ client, home = false }: { client: CreditsClient; home?: boolean }) {
   const { state, dispatch } = useAppState(); const { setClients } = useApiClients();
   switchAccount = id => dispatch(appActions.accountUpdated({ userId: id }));
   useEffect(() => {
@@ -41,7 +43,7 @@ function Harness({ client }: { client: CreditsClient }) {
   if (state.bootstrap?.app.userMode !== "account") return null;
   if (state.navigation.currentPath === "/credit-reward-details") return <CreditsSourceDetailPage source="reward" />;
   if (state.navigation.currentPath === "/plans") return <CreditsPlansPage />;
-  return <CreditsSettingsPanel />;
+  return home ? <HomeCheckinCard dismissible /> : <CreditsSettingsPanel />;
 }
 async function mount(client: CreditsClient) { await act(async () => root.render(<AppProviders><Harness client={client} /></AppProviders>)); }
 async function click(label: string) {
@@ -60,7 +62,7 @@ it("uses original balance/source/usage layout with real data and no simulated us
   expect(host.textContent).toContain("Agent 任务"); expect(host.textContent).toContain("记忆服务");
   expect(host.textContent).toContain("消费明细尚未接入"); expect(host.querySelectorAll("tbody tr")).toHaveLength(0);
   await click("刷新"); expect(client.summary).toHaveBeenCalledTimes(2);
-  await click("兑换码"); expect(host.textContent).toContain("兑换功能尚未接入");
+  await click("兑换码"); expect(host.textContent).toContain("兑换后积分将发放至您的个人账户");
   expect(host.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
   expect(client.ledger).not.toHaveBeenCalled(); // Accounting entries cannot be relabelled as model calls.
 });
@@ -97,4 +99,45 @@ it("keeps precise amounts and treats held credits as remaining", () => {
   expect(formatCreditAmount("-0.01", "en-US")).toBe("-0.01");
   expect(creditDisplayBuckets([], [reward])[0]?.remaining).toBe(23456n);
   expect(creditDisplayBuckets([], [{ ...reward, status: "EXPIRED", remaining: "0.00" }])[0]?.usageKnown).toBe(false); expect(creditUsagePercent(1544n, 25000n)).toBe(6.17);
+});
+
+it("retries a live redemption with the same request ID and displays its actual result", async () => {
+  const client = fixture();
+  client.redeem.mockRejectedValueOnce(new Error("timeout"));
+  client.redeem.mockResolvedValueOnce({ redeemed: true, activityName: "测试活动", grant: { grantId: "3", amount: "123.45", expiresAt: null }, balance: "1358.01", accountVersion: 3 });
+  await mount(client); await click("兑换码");
+  const input = host.querySelector<HTMLInputElement>("#credit-redemption-code")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "TEST-123");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const submit = () => act(async () => { host.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
+  await submit(); expect(host.querySelector('[role="alert"]')?.textContent).toBe("timeout");
+  await submit();
+  expect(client.redeem.mock.calls[0]).toEqual(client.redeem.mock.calls[1]);
+  expect(client.redeem.mock.calls[0]?.[1]).toBe("TEST-123");
+  expect(host.textContent).toContain("测试活动 +123.45"); expect(input.value).toBe("");
+});
+it("dismissal is per account and never claims a live check-in", async () => {
+  const client = fixture();
+  await act(async () => root.render(<AppProviders><Harness client={client} home /></AppProviders>));
+  const close = host.querySelector<HTMLButtonElement>(".home-checkin__close")!;
+  await act(async () => close.click());
+  expect(client.checkin).not.toHaveBeenCalled(); expect(host.querySelector(".home-checkin")).toBeNull();
+  await act(async () => switchAccount("100002"));
+  expect(host.querySelector(".home-checkin")).not.toBeNull();
+});
+it("check-in retries reuse the request ID and refresh the authoritative status", async () => {
+  const client = fixture();
+  client.checkin.mockRejectedValueOnce(new Error("timeout"));
+  client.checkin.mockImplementationOnce(async () => {
+    client.summary.mockResolvedValue({ ...summary, checkin: { ...summary.checkin, claimedToday: true } });
+    return { claimed: true, alreadyClaimed: false, businessDate: "2026-11-03", grant: { grantId: "3", amount: "100.00", expiresAt: "2026-12-03T00:00:00+08:00" }, balance: "1334.56", accountVersion: 3 };
+  });
+  await act(async () => root.render(<AppProviders><Harness client={client} home /></AppProviders>));
+  await act(async () => host.querySelector<HTMLButtonElement>(".home-checkin__action")!.click());
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe("timeout");
+  await act(async () => host.querySelector<HTMLButtonElement>(".home-checkin__action")!.click());
+  expect(client.checkin.mock.calls[0]).toEqual(client.checkin.mock.calls[1]);
+  expect(host.querySelector(".home-checkin--claimed")).not.toBeNull();
 });

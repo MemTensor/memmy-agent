@@ -44,7 +44,7 @@ export function useCreditAccount() {
   useEffect(() => {
     if (!live) return;
     let cancelled = false;
-    setLoading(true); setSnapshot(null); setFailure(null);
+    setLoading(true); setFailure(null);
     if (client) void Promise.all([client.summary(), readCreditGrants(client, () => cancelled)]).then(([summary, grants]) => {
       if (!cancelled) setSnapshot({ userId, client, summary, grants });
     }).catch(error => {

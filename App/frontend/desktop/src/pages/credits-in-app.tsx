@@ -1,5 +1,5 @@
 /** Credits balance, plans, and check-in, using the settings usage visual language. */
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Coins, Gift, RefreshCw, X } from "lucide-react";
 import { Button } from "../components/button.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -18,6 +18,7 @@ import {
   isCreditLow,
 } from "../app/credits-preview-quota.js";
 import type { CreditsGrant } from "@memmy/local-api-contracts";
+import { useOptionalApiClients } from "../app/providers.js";
 import { useCreditAccount } from "../app/use-credit-account.js";
 import { creditDisplayBuckets, creditMinor, creditUsagePercent, formatCreditAmount, formatCreditMinor } from "../app/credit-display.js";
 import { useCreditDemo } from "../app/use-credit-demo.js";
@@ -313,7 +314,7 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
           <h2>{t("credits.detail.title")}</h2>
           <Button type="button" size="sm" variant="secondary" aria-expanded={redeemOpen} aria-controls="credits-redeem-panel" onClick={() => setRedeemOpen(open => !open)}>{t("credits.redeem.title")}</Button>
         </div>
-        {redeemOpen && <div id="credits-redeem-panel"><CreditsRedeemForm available={!account.live} /></div>}
+        {redeemOpen && <div id="credits-redeem-panel"><CreditsRedeemForm /></div>}
         <div className={usageStyles.sourceSummaryList}>
           {(["plan", "reward"] as const).map(source => <CreditSourceSummary
             key={source} source={source} buckets={pool.buckets.filter(bucket => bucket.source === source)}
@@ -330,30 +331,52 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
 
 /** Check-in on the home screen. Claiming here uses the same preview balance as the check-in page. */
 export function HomeCheckinCard(props: { compact?: boolean; dismissible?: boolean }) {
+  const { state } = useAppState();
+  return <AccountCheckinCard key={state.account.userId ?? "preview"} {...props} />;
+}
+function AccountCheckinCard(props: { compact?: boolean; dismissible?: boolean }) {
   const { language, t } = useTranslation();
   const { demo, update, now } = useCreditDemo();
+  const account = useCreditAccount();
+  const { state } = useAppState();
+  const { clients } = useOptionalApiClients();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const requestId = useRef<string | null>(null);
   const today = formatDayKey(now);
-  const view = describeCheckin(demo, today);
+  const view = account.live ? { claimedToday: account.summary?.checkin.claimedToday ?? false, filled: 1 } : describeCheckin(demo, today);
+  const dismissKey = account.live ? `memmy.home.checkinDismissedOn:${state.account.userId}` : "memmy.home.checkinDismissedOn";
   const [dismissedOn, setDismissedOn] = useState<string | null>(() => {
-    try { return window.localStorage.getItem("memmy.home.checkinDismissedOn"); } catch { return null; }
+    try { return window.localStorage.getItem(dismissKey); } catch { return null; }
   });
 
   function dismiss() {
     const date = formatDayKey(new Date());
     setDismissedOn(date);
-    try { window.localStorage.setItem("memmy.home.checkinDismissedOn", date); } catch { /* Keep this visit dismissed when storage is unavailable. */ }
+    try { window.localStorage.setItem(dismissKey, date); } catch { /* Keep this visit dismissed when storage is unavailable. */ }
   }
 
-  function claim() {
-    update(current => claimCheckin(current, formatDayKey(new Date())));
+  async function claim() {
+    if (!account.live) { update(current => claimCheckin(current, formatDayKey(new Date()))); return; }
+    if (!clients?.credits || busy || !account.summary) return;
+    requestId.current ??= crypto.randomUUID();
+    setBusy(true); setError(null);
+    try {
+      const result = await clients.credits.checkin(requestId.current);
+      requestId.current = null;
+      window.dispatchEvent(new CustomEvent("credits.changed", { detail: { userId: state.account.userId, accountVersion: result.accountVersion } }));
+      account.reload();
+    } catch (error) { setError(error instanceof Error ? error.message : t("credits.live.error")); }
+    finally { setBusy(false); }
   }
+  const disabled = busy || (account.live && !account.summary);
 
   if (props.compact) {
     if (view.claimedToday) {
       return null;
     }
     return (
-      <Button type="button" variant="primary" size="sm" className={usageStyles.creditsAction} onClick={claim} style={{ marginRight: 8 }}>
+      <Button type="button" variant="primary" size="sm" className={usageStyles.creditsAction} disabled={disabled} onClick={claim} title={error ?? undefined} style={{ marginRight: 8 }}>
         {t("credits.checkin.compactAction", { n: String(CHECKIN_DAILY) })}
       </Button>
     );
@@ -366,6 +389,7 @@ export function HomeCheckinCard(props: { compact?: boolean; dismissible?: boolea
       <span className="home-checkin__mark" aria-hidden="true">
         {view.claimedToday ? <Check size={16} strokeWidth={1.8} /> : <CalendarDays size={16} strokeWidth={1.6} />}
       </span>
+      {error && <span role="alert">{error}</span>}
       <div className="home-checkin__main" role={view.claimedToday ? "status" : undefined}>
         <p className="home-checkin__title">{t(view.claimedToday ? "credits.checkin.done" : "credits.checkin.title")}</p>
         <p className="home-checkin__reward">
@@ -374,9 +398,9 @@ export function HomeCheckinCard(props: { compact?: boolean; dismissible?: boolea
         </p>
       </div>
       {view.claimedToday ? (
-        <span className="home-checkin__done">{t("credits.checkin.streakReceived", { n: String(view.filled) })}</span>
+        <span className="home-checkin__done">{account.live ? t("credits.checkin.received") : t("credits.checkin.streakReceived", { n: String(view.filled) })}</span>
       ) : (
-        <button type="button" className="home-checkin__action" onClick={claim}>
+        <button type="button" className="home-checkin__action" disabled={disabled} onClick={claim}>
           {t("credits.checkin.action")}
         </button>
       )}
@@ -389,7 +413,7 @@ export function HomeCheckinCard(props: { compact?: boolean; dismissible?: boolea
   );
 }
 
-/** Daily check-in backed by the shared local preview account until the server exists. */
+/** Reuses the home check-in entry. */
 export function CreditsCheckinPage() {
   return (
     <CreditsSettingsShell>

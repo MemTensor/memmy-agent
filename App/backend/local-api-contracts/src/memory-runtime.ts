@@ -976,7 +976,15 @@ export const ApiErrorCodeSchema = z.enum([
   "toolkit_unsupported",
   "model_config_changed",
   "config_write_busy",
-  "account_model_preset_conflict"
+  "account_model_preset_conflict",
+  "BUSINESS_REQUEST_REUSED",
+  "CHECKIN_ALREADY_CLAIMED",
+  "VOUCHER_INVALID",
+  "VOUCHER_ALREADY_REDEEMED",
+  "VOUCHER_EXPIRED",
+  "VOUCHER_EXHAUSTED",
+  "VOUCHER_INELIGIBLE",
+  "REWARD_RATE_LIMITED"
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 

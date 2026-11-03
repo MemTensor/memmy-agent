@@ -238,7 +238,8 @@ export interface CloudAsrTranscriptionResult {
 }
 
 export interface CloudClient {
-  getCredits(input: { uuid: string; resource: "summary" | "grants" | "ledger"; query?: Record<string, string | number> }): Promise<unknown>;
+  postCreditReward(input: { uuid: string; resource: "check-ins" | "redemptions"; body: { requestId: string; code?: string } }): Promise<unknown>;
+  getCredits(input: { uuid: string; resource: "summary" | "grants" | "ledger" | "invitations/summary" | "invitations"; query?: Record<string, string | number> }): Promise<unknown>;
   health(): Promise<CloudHealth>;
   sendEmailCode(input: SendEmailCodeInput): Promise<void>;
   sendPhoneCode(input: SendPhoneCodeInput): Promise<void>;

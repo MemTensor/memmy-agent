@@ -38,3 +38,13 @@ export type CreditsGrantsPage = z.infer<typeof CreditsGrantsPageSchema>;
 export type CreditsLedgerPage = z.infer<typeof CreditsLedgerPageSchema>;
 export type CreditsGrantsQuery = z.infer<typeof CreditsGrantsQuerySchema>;
 export type CreditsLedgerQuery = z.infer<typeof CreditsLedgerQuerySchema>;
+
+const rewardGrant = z.object({ grantId: id, amount, expiresAt: stamp.nullable() });
+export const CreditsCheckinRequestSchema = z.object({ requestId: z.string().regex(/^[A-Za-z0-9_:-]{1,128}$/) }).strict();
+export const CreditsRedemptionRequestSchema = CreditsCheckinRequestSchema.extend({ code: z.string().min(1).max(128) }).strict();
+export const CreditsCheckinSchema = z.object({ claimed: z.boolean(), alreadyClaimed: z.boolean(), businessDate: z.string(), grant: rewardGrant, balance: amount, accountVersion: z.number().int().nonnegative() });
+export const CreditsRedemptionSchema = z.object({ redeemed: z.boolean(), activityName: z.string(), grant: rewardGrant, balance: amount, accountVersion: z.number().int().nonnegative() });
+export const CreditsInvitationSummarySchema = z.object({ invitationCode: z.string(), rule: z.object({ inviterReward: amount, inviteeReward: amount, validDays: z.number().int(), dailyLimit: z.number().int() }), todayRewarded: z.number().int(), todayRemaining: z.number().int(), totalRewarded: amount });
+export const CreditsInvitationsQuerySchema = z.object({ status: z.enum(["PENDING", "QUALIFIED", "REWARDED", "REJECTED"]).optional(), cursor: z.string().max(4096).optional(), limit: z.coerce.number().int().min(1).max(100).optional() }).strict();
+export const CreditsInvitationsPageSchema = z.object({ items: z.array(z.object({ inviteeMask: z.string(), registeredAt: stamp, qualifiedAt: stamp.nullable(), inviterGrant: amount, inviteeGrant: amount, status: z.enum(["PENDING", "QUALIFIED", "REWARDED", "REJECTED"]) })), nextCursor: z.string().nullable(), hasMore: z.boolean() });
+export type CreditsInvitationsQuery = z.infer<typeof CreditsInvitationsQuerySchema>;
