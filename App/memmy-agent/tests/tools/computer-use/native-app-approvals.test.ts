@@ -125,6 +125,31 @@ describe('native app approval', () => {
     expect(store().allow(memmy)).toMatchObject([{ appId: memmy.appId }]);
   });
 
+  it.each([
+    { platform: 'darwin' as const, appId: 'com.openai.codex', displayName: 'Codex' },
+    { platform: 'darwin' as const, appId: 'com.googlecode.iterm2', displayName: 'iTerm' },
+  ])('requires normal user approval for $displayName', async app => {
+    const listing = { content: [{ type: 'text', text: `${app.displayName} — ${app.appId} [running]` }] };
+    for (const target of [app.displayName, app.appId])
+      expect(resolveNativeAppIdentity(listing, target, 'darwin')).toEqual(app);
+    const ask = vi.fn().mockResolvedValueOnce('deny').mockResolvedValueOnce('allow-once')
+      .mockResolvedValueOnce('allow-always');
+    const approvals = store();
+    const gate = new NativeAppApprovalGate(approvals, ask);
+    await expect(gate.authorize(app, null)).rejects.toBeInstanceOf(NativeAppApprovalDenied);
+    expect(ask).not.toHaveBeenCalled();
+    await expect(gate.authorize(app, turn('denied'))).rejects.toBeInstanceOf(NativeAppApprovalDenied);
+    await gate.authorize(app, turn('once'));
+    await gate.authorize(app, turn('once'));
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect(ask).toHaveBeenCalledWith(app);
+    expect(approvals.list()).toEqual([]);
+    await gate.authorize(app, turn('always'));
+    expect(approvals.list()).toMatchObject([app]);
+    await new NativeAppApprovalGate(approvals, ask).authorize(app, turn('later'));
+    expect(ask).toHaveBeenCalledTimes(3);
+  });
+
   it('asks before use, scopes allow-once and deny to a single user message', async () => {
     const ask = vi.fn().mockResolvedValueOnce('allow-once').mockResolvedValueOnce('deny');
     const approvals = store();

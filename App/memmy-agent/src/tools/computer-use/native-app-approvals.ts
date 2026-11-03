@@ -18,7 +18,7 @@ export type NativeAppApproval = NativeAppIdentity & { allowedAt: string };
 const APP_ID = /^[\w.!-]{1,256}$/;
 const MAX_FILE_BYTES = 128 * 1024;
 const MAX_ENTRIES = 200;
-const BLOCKED_MAC_IDS = new Set(['com.apple.Terminal', 'com.googlecode.iterm2', 'com.openai.codex']);
+const BLOCKED_MAC_IDS = new Set(['com.apple.Terminal']);
 const BLOCKED_WINDOWS_IDS = new Set(['cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe',
   'wt', 'wt.exe', 'windowsterminal', 'windowsterminal.exe', 'chatgpt', 'chatgpt.exe',
   'applicationframehost', 'applicationframehost.exe',
@@ -81,12 +81,17 @@ function windowsAppCandidates(listResult: unknown): WindowsAppCandidate[] | null
   return [...candidates.values()];
 }
 
+function nativeAppLookupTarget(target: string, platform: 'darwin' | 'win32'): string {
+  // Some Codex builds expose ChatGPT as their macOS display name.
+  return platform === 'darwin' && target.trim().toLowerCase() === 'codex' ? 'com.openai.codex' : target;
+}
+
 /** Resolve a tool's app argument to the native helper's own stable app identifier. */
 export function resolveNativeAppIdentity(listResult: unknown, target: string,
   platform: 'darwin' | 'win32'): ResolvedNativeApp | null {
   const blocks = (listResult as { content?: unknown })?.content;
   if (!Array.isArray(blocks) || (listResult as { isError?: unknown })?.isError === true) return null;
-  const wanted = target.trim().toLocaleLowerCase();
+  const wanted = nativeAppLookupTarget(target, platform).trim().toLocaleLowerCase();
   if (!wanted || target.length > 256) return null;
   if (platform === 'win32') {
     const candidates = windowsAppCandidates(listResult);
@@ -147,7 +152,7 @@ export async function resolveInstalledAppIdentity(target: string, platform: 'dar
   let raw: unknown;
   try {
     const executable = resolveOpenComputerUseCommand('open-computer-use', { platform });
-    const { stdout } = await execFileAsync(executable, ['resolve-app', '--query', target], {
+    const { stdout } = await execFileAsync(executable, ['resolve-app', '--query', nativeAppLookupTarget(target, platform)], {
       // Windows starts PowerShell and reads the Start menu for each lookup.
       timeout: platform === 'win32' ? 25_000 : 5000, maxBuffer: 16_384, signal: signal ?? undefined,
       ...(platform === 'win32' ? { env: { ...process.env, ...openComputerUseEnvironment('open-computer-use', null, 'win32') } } : {}),

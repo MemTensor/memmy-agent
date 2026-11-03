@@ -39,6 +39,28 @@ it.each(['Calculator', '计算器', 'com.apple.calculator'])
     expect(execFile).toHaveBeenCalledOnce();
   });
 
+it.each(['Codex', 'codex', ' CODEX '])('resolves %s by bundle ID when macOS calls it ChatGPT', async target => {
+  const codex = { platform: 'darwin', appId: 'com.openai.codex', displayName: 'ChatGPT' };
+  const listing = { content: [{ type: 'text', text:
+    'ChatGPT — com.openai.codex [running]\nChatGPT — com.openai.chat [running]\nCodex — example.other [running]' }] };
+  expect(resolveNativeAppIdentity(listing, target, 'darwin')).toEqual(codex);
+  expect(resolveNativeAppIdentity({ content: [{ type: 'text', text:
+    'ChatGPT — com.openai.chat [running]\nCodex — example.other [running]' }] }, target, 'darwin')).toBeNull();
+  reply({ platform: 'darwin', status: 'resolved', app: codex });
+  await expect(resolveInstalledAppIdentity(target, 'darwin')).resolves.toEqual(codex);
+  expect(execFile).toHaveBeenCalledWith(expect.stringContaining('MemmyComputerUse'),
+    ['resolve-app', '--query', 'com.openai.codex'], expect.any(Object), expect.any(Function));
+});
+
+it('keeps the Codex alias scoped to macOS and preserves installed lookup failures', async () => {
+  reply({ platform: 'win32', status: 'not-found' });
+  await expect(resolveInstalledAppIdentity('Codex', 'win32')).rejects.toMatchObject({ code: 'not-found' });
+  expect(execFile).toHaveBeenLastCalledWith(expect.any(String), ['resolve-app', '--query', 'Codex'],
+    expect.any(Object), expect.any(Function));
+  reply({ platform: 'darwin', status: 'ambiguous' });
+  await expect(resolveInstalledAppIdentity('Codex', 'darwin')).rejects.toMatchObject({ code: 'ambiguous' });
+});
+
 it('resolves a Windows app that is installed or has no window, binding a PID only when the helper found one window', async () => {
   reply({ platform: 'win32', status: 'resolved', app: { appId: 'Weixin', displayName: '微信' } });
   await expect(resolveInstalledAppIdentity('微信', 'win32')).resolves.toEqual({ platform: 'win32', appId: 'Weixin', displayName: '微信' });
