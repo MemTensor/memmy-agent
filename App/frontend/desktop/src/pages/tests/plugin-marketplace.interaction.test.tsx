@@ -173,6 +173,55 @@ describe("live marketplace controller", () => {
     expect(document.querySelector("[role=alert]")).toBeNull();
   });
 
+  it("finishes installation from Host state while the enable response remains pending", async () => {
+    vi.useFakeTimers();
+    let rejectResponse!: (error: Error) => void;
+    try {
+      clients.plugins.enable.mockImplementationOnce(() => {
+        records = [{ ...records[0], state: "enabling" }];
+        return new Promise((_resolve, reject) => { rejectResponse = reject; });
+      });
+      await render();
+      await click("安装文献综述");
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(addToChatButton()).toBeNull();
+      expect(button("刷新").disabled).toBe(true);
+      records = [{ ...records[0], state: "active" }];
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(addToChatButton()).not.toBeNull();
+      expect(button("刷新").disabled).toBe(false);
+      // A lost response must not overwrite the successful polled result later.
+      await act(async () => rejectResponse(new Error("connection closed")));
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(addToChatButton()).not.toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("shows a failed Host activation even when the enable response is lost", async () => {
+    vi.useFakeTimers();
+    try {
+      clients.plugins.enable.mockImplementationOnce(() => new Promise(() => {}));
+      await render();
+      await click("安装文献综述");
+      records = [{ ...records[0], state: "failed", lastError: "renderer preparation failed" }];
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(button("刷新").disabled).toBe(false);
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain("操作未完成，请重试");
+      expect(addToChatButton()).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("continues polling a Host activation after the marketplace is reopened", async () => {
+    vi.useFakeTimers();
+    try {
+      records = [{ ...pending, state: "enabling" }];
+      await render();
+      records = [{ ...pending, state: "active" }];
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(addToChatButton()).not.toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("shows installed plugins when the remote catalog is empty", async () => {
     records = [{ ...pending, state: "active" }, legal];
     clients.plugins.catalog.mockResolvedValueOnce([]);
