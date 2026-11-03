@@ -148,3 +148,10 @@ describe("credits cloud APIs", () => {
     await expect(client.getCredits({ uuid: "expired", resource: "summary" })).rejects.toMatchObject({ code: "unauthorized" });
   });
 });
+
+it("downloads signed CSV only from the authenticated cloud route", async () => {
+  const fetchImpl = vi.fn(async () => new Response("RequestID,积分消耗\r\nlocal-test,1.01", { headers: { "content-type": "text/csv;charset=UTF-8" } }));
+  const client = createHttpCloudClient({ baseUrl: "https://cloud.test", fetchImpl: fetchImpl as typeof fetch });
+  expect(await client.getCredits({ uuid: "test-credential", resource: "usage/download", query: { token: "signed+token" } })).toEqual({ csv: "RequestID,积分消耗\r\nlocal-test,1.01" });
+  expect(fetchImpl).toHaveBeenCalledWith("https://cloud.test/api/credits/v1/usage/download?token=signed%2Btoken", expect.objectContaining({ headers: { authorization: "Bearer test-credential" }, redirect: "error" }));
+});

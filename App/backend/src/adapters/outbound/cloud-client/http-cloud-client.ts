@@ -98,11 +98,21 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
   return {
     async getCredits(input) {
       const query = new URLSearchParams(Object.entries(input.query ?? {}).map(([key, value]) => [key, String(value)]));
-      return requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs,
-        `/api/credits/v1/${input.resource}${query.size ? `?${query}` : ""}`, {
+      const path = `/api/credits/v1/${input.resource}${query.size ? `?${query}` : ""}`;
+      if (input.resource === "usage/download") {
+        const response = await fetchImpl(`${baseUrl}${path}`, {
+          method: "GET", headers: { authorization: `Bearer ${input.uuid}` }, signal: AbortSignal.timeout(timeoutMs), redirect: "error"
+        });
+        if (!response.ok) throw Object.assign(new Error("Credits export download failed"), {
+          code: response.status === 401 ? "unauthorized" : response.status === 400 ? "invalid_argument" : "internal"
+        });
+        if (!response.headers.get("content-type")?.startsWith("text/csv")) throw new Error("Invalid credits export content type");
+        return { csv: await response.text() };
+      }
+      return requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, path, {
           method: "GET", lang: "zh", bearerCredential: input.uuid,
           toError: (status) => Object.assign(new Error(status === 401 ? "Account session expired" : "Credits request failed"), {
-            code: status === 401 ? "unauthorized" : status === 400 ? "invalid_argument" : "internal"
+            code: status === 401 ? "unauthorized" : status === 400 ? "invalid_argument" : status === 404 ? "not_found" : "internal"
           })
         });
     },

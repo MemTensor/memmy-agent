@@ -30,7 +30,7 @@ function fixture() {
     { code: "FREE" as const, name: "Free", cycleGrant: "1000.00", knowledgeEntitlement: { baseLimit: 10, storageBytes: 10737418240, membersPerBase: 5 } },
     { code: "PRO" as const, name: "Pro", cycleGrant: "5000.00", knowledgeEntitlement: { baseLimit: 50, storageBytes: 53687091200, membersPerBase: 10 } }
   ], application: { eligible: true, formType: "CN_ZH" as const, formUrl: "https://alidocs.dingtalk.com/notable/share/form/v01GXn4ZWgaXodwdODQ_Gb8aww9_hSDStju?source=link" } })),
-    latestApplication: vi.fn(async () => null), summary: vi.fn(async () => summary),
+    latestApplication: vi.fn(async () => null), usage: vi.fn(async () => ({ items: [], hasMore: false, nextCursor: null })), usageDetail: vi.fn(), usageExport: vi.fn(), usageDownload: vi.fn(), summary: vi.fn(async () => summary),
     grants: vi.fn(async () => ({ items: [reward, { ...reward, grantId: "2", sourceType: "PLAN" as const, sourceName: "Free", granted: "1000.00", remaining: "1000.00", reserved: "0.00" }], hasMore: false, nextCursor: null as string | null })),
     ledger: vi.fn(async () => ({ items: [], hasMore: false, nextCursor: null })) } satisfies CreditsClient;
 }
@@ -62,7 +62,7 @@ it("uses original balance/source/usage layout with real data and no simulated us
   expect(host.querySelector("#credits-balance")).not.toBeNull(); expect(host.textContent).toContain("1,234.56");
   expect(host.textContent).toContain("234.56"); expect(host.textContent).toContain("已用 15.44 / 250.00");
   expect(host.textContent).toContain("Agent 任务"); expect(host.textContent).toContain("记忆服务");
-  expect(host.textContent).toContain("消费明细尚未接入"); expect(host.querySelectorAll("tbody tr")).toHaveLength(0);
+  expect(host.textContent).not.toContain("消费明细尚未接入"); expect(client.usage).toHaveBeenCalled(); expect(host.querySelectorAll("tbody tr")).toHaveLength(0);
   await click("刷新"); expect(client.summary).toHaveBeenCalledTimes(2);
   await click("兑换码"); expect(host.textContent).toContain("兑换功能尚未接入");
   expect(host.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
@@ -121,4 +121,54 @@ it("never opens an arbitrary URL returned in a plan response", async () => {
   client.plans.mockResolvedValue({ ...value, application: { ...value.application, formUrl: "https://example.invalid" } });
   await mount(client); await click("申请升级");
   expect(host.querySelector('a[target="_blank"]')?.hasAttribute("href")).toBe(false);
+});
+const usageRow = { callId: "local-test-call", requestId: "local-test-request", domain: "agent", operation: "CHAT", model: "actual-test-model", inputTokens: 100, outputTokens: 20, chargedCredits: "1.01", status: "SETTLED", businessDate: "2026-11-03", callCount: 1, startedAt: "2026-11-03T10:00:00+08:00", settledAt: "2026-11-03T10:01:00+08:00", requestContent: null, requestContentStatus: "UNAVAILABLE" };
+it("renders settled calls, opens details and keeps balance activity separate", async () => {
+  const client = fixture();
+  client.usage.mockResolvedValue({ items: [usageRow], hasMore: true, nextCursor: "signed-next" } as never);
+  client.usageDetail.mockResolvedValue({ ...usageRow, pricingVersion: "1", cachedTokens: 10, audioSeconds: null, chargeCredits: "1.01", absorbedCredits: "0.00", settlementStatus: "SETTLED", remainingCredits: "998.99" });
+  client.ledger.mockResolvedValue({ items: [{ ledgerId: "1", title: "套餐积分重置", balanceDelta: "-8.00", heldDelta: "0.00", balanceAfter: "1000.00", occurredAt: usageRow.startedAt }], hasMore: false, nextCursor: null } as never);
+  await mount(client); expect(host.textContent).toContain("actual-test-model"); expect(host.textContent).toContain("1.01");
+  expect(host.textContent).toContain("请求内容不可用");
+  await click("Agent 执行"); expect(client.usageDetail).toHaveBeenCalledWith("local-test-call", expect.any(AbortSignal));
+  expect(document.body.textContent).toContain("价格版本");
+  await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+  await click("下一页"); expect(client.usage).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "signed-next", limit: 10 }), expect.any(AbortSignal));
+  await click("记忆服务"); expect(client.usage).toHaveBeenLastCalledWith(expect.objectContaining({ domain: "memory" }), expect.any(AbortSignal));
+  expect(client.usage.mock.calls.at(-1)?.[0]).not.toHaveProperty("cursor");
+  await click("余额变动流水"); expect(host.textContent).toContain("套餐积分重置"); expect(host.textContent).toContain("-8.00");
+});
+it("uses server CSV export and rejects a late download after switching accounts", async () => {
+  const client = fixture(); client.usage.mockResolvedValue({ items: [usageRow], hasMore: false, nextCursor: null } as never);
+  const url = "/api/credits/v1/usage/download?token=signed";
+  client.usageExport.mockResolvedValue({ exportId: "test-export", fileName: "test.csv", downloadUrl: url, rowCount: 1, expiresAt: usageRow.settledAt });
+  let resolve!: (value: { csv: string }) => void;
+  client.usageDownload.mockImplementation(() => new Promise(done => { resolve = done; }));
+  const create = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:test");
+  await mount(client); await click("导出"); expect(client.usageExport).toHaveBeenCalledWith(expect.objectContaining({ domain: "agent" }), expect.any(AbortSignal));
+  await act(async () => switchAccount("100002")); await act(async () => resolve({ csv: "test-data" }));
+  expect(create).not.toHaveBeenCalled(); create.mockRestore();
+});
+it("uses ledger-derived consumed amounts for expired grants", () => {
+  const bucket = creditDisplayBuckets([], [{ ...reward, used: "15.44", remaining: "0.00", reserved: "0.00", status: "EXPIRED" }])[0]!;
+  expect(bucket.usageKnown).toBe(true); expect(bucket.used).toBe(1544n);
+});
+
+it("shows source balances in the existing account menu", async () => {
+  const { AppFrame } = await vi.importActual<typeof import("../app-frame.js")>("../app-frame.js");
+  const client = fixture();
+  function MenuHarness() {
+    const { dispatch } = useAppState(); const { setClients } = useApiClients();
+    useEffect(() => {
+      setClients({ credits: client } as AppClients);
+      dispatch(appActions.bootstrapLoaded({ ...mockBootstrap, app: { ...mockBootstrap.app, userMode: "account", language: "zh-CN" } }, "/settings"));
+      dispatch(appActions.accountUpdated({ userId: "100001", email: "menu-test@example.invalid" }));
+    }, [dispatch, setClients]);
+    return <AppFrame title="test"><div>test</div></AppFrame>;
+  }
+  await act(async () => root.render(<AppProviders><MenuHarness /></AppProviders>));
+  const trigger = host.querySelector<HTMLButtonElement>('[data-account-menu-trigger="true"]'); expect(trigger).not.toBeNull();
+  await act(async () => trigger!.click());
+  const menu = document.querySelector('[role="menu"]');
+  expect(menu?.textContent).toContain("套餐积分1,000.00"); expect(menu?.textContent).toContain("平台奖励积分234.56");
 });
