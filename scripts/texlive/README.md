@@ -2,7 +2,9 @@
 
 Memmy downloads a versioned, verified portable TeX Live/TinyTeX runtime when a
 plugin declaring `runtimeDependencies: ["texlive"]` activates and the Host cannot
-find a complete local installation. Installation is user scoped, outside the app
+find a complete local installation. Probing, verification and installation run
+in the background after activation; startup, login and plugin enablement never
+wait for TeX. Installation is user scoped, outside the app
 and MPP; it does not use sudo, a system package manager or modify system PATH.
 
 The Host probes XeLaTeX and the review's required macro packages/fonts. A working
@@ -74,18 +76,59 @@ Host deployment overrides:
 - `MEMMY_TEXLIVE_RUNTIME_PREFER_MANAGED=1` — use the managed runtime for validation
 - `texliveRuntimeInstaller: null` — embedded Host API opt-out for offline deployments/tests
 
-Failure to acquire/validate the required runtime fails activation with an error
-and is retriable by enabling the plugin again. Missing dependencies must not
+The literature plugin can search and write while preparation is in progress.
+`review_check_render_environment` and `review_render` join the same preparation
+task and report an indeterminate progress message; a ready runtime is injected
+into a fresh per-call environment and sandbox, including its writable TeX cache.
+Other command plugins declaring TeX wait before invoking their capabilities.
+Cancelling or timing out a waiting call prevents the renderer from launching;
+the shared cache installation may finish in the background. Subsequent launches
+prepare TeX again using the verified cache, including repair of incomplete installs.
+
+Failure to acquire/validate the runtime does not fail activation. Preflight and
+render calls retry failed preparation, then let the plugin report unavailable
+TeX or offer its supported fallback if preparation still fails. No background
+failure dialog is shown. Missing dependencies must not
 silently produce an unbranded PDF: the literature plugin now rejects failed
 Memmy-layout compilation, retains Markdown/TeX, and deletes stale PDF output.
 The other explicitly selected layouts retain their existing labelled fallback.
 
 ## Release requirements
 
+### First-launch native acceptance
+
+Build the backend and the literature plugin's MPP first. For a desktop run, also
+build the desktop main/preload and frontend. Download the published native runtime
+manifest and its matching archive, then run on that target platform:
+
+```sh
+node scripts/texlive/first-launch-acceptance.mjs \
+  /path/to/Literature-Review-Plugin \
+  /path/to/texlive-runtime-darwin-arm64.json \
+  /path/to/texlive-runtime-darwin-arm64-HASH.zip \
+  /private/tmp/memmy-tex-acceptance-UNIQUE --desktop
+```
+
+Omit `--desktop` for backend-only acceptance. The output directory must not exist.
+The test uses a synthetic local signed-in account, a loopback plugin registry, the
+real MPP and the real native runtime archive. It ignores system TeX and starts
+with an absent cache. It withholds the runtime archive until startup and ordinary
+plugin calls succeed, checks bootstrap responsiveness while withheld, then allows
+the Host installer to download, verify, extract and probe the archive. It calls
+the installed plugin's real render capability with fixture review content and
+asserts XeLaTeX output without fallback or access to the system TeX tree.
+
+Desktop acceptance launches the development Electron app with isolated app data
+and waits for the visible startup screen to disappear before releasing TeX. The
+output includes timing JSON, desktop screenshots and a Chinese branded PDF.
+This verifies startup independence and native installation/export; loopback
+transfer timings do not represent production internet download speed. Live cloud
+authentication, model generation and packaged release behavior need separate QA.
+
 Publish the backend routes and per-target runtime artifacts before enabling this
 Host change in a desktop release. A route without a matching published runtime
-will return 404 and activation fails on machines lacking a complete local TeX
-installation. Ship the literature plugin change together with the Host change.
+will return 404 and typesetting is unavailable on machines lacking a complete
+local TeX installation; plugin activation still succeeds.
 Test macOS, Windows and Linux packages on their actual native targets; local
 macOS verification is not evidence of Windows/Linux support. No runtime artifact
 is added to the MPP or desktop bundle.

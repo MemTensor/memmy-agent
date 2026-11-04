@@ -373,8 +373,12 @@ export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTo
   return element.scrollTop + element.clientHeight >= element.scrollHeight - AGENT_CONVERSATION_BOTTOM_EPSILON_PX;
 }
 
-export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
-  return Boolean(currentChatId) && messageCount > 0;
+export function hasActiveAgentConversation(
+  currentChatId: string | null,
+  messageCount: number,
+  hasFeatureActivity = false
+): boolean {
+  return Boolean(currentChatId) && (messageCount > 0 || hasFeatureActivity);
 }
 
 export function shouldAcceptAgentStatusResult(input: {
@@ -967,6 +971,7 @@ export function HomePage() {
   const stopRequestLocksRef = useRef<Set<string>>(new Set());
   const goalMutationLocksRef = useRef<Set<string>>(new Set());
   const messageSendLocksRef = useRef<Set<string>>(new Set());
+  const pluginConversationCreationRef = useRef<Promise<string | null> | null>(null);
   const queueRemoveLocksRef = useRef<Set<string>>(new Set());
   const queueSteerLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
@@ -1061,17 +1066,75 @@ export function HomePage() {
     && isSteerableCurrentTurn(currentActiveTurnSource, Boolean(isCurrentGoalActive))
     && !currentQueuedMessages.some((item) => item.status === "steering")
   );
-  const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
-  const isOpeningConversation = Boolean(state.agent.currentChatId && state.agent.isLoadingHistory && !hasActiveConversation);
-  const hasConversationShell = hasActiveConversation || isOpeningConversation;
+  const hasMessageConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
+  const isOpeningConversation = Boolean(state.agent.currentChatId && state.agent.isLoadingHistory && !hasMessageConversation);
+  const hasBaseConversationShell = hasMessageConversation || isOpeningConversation;
   const [blankThreadPanelEnabled, setBlankThreadPanelEnabled] = useState(false);
   const threadPanel = useAgentThreadPanel({
     scopeKey: chatScopeKey,
     containerRef: workspaceLayoutRef,
-    enabled: hasConversationShell || blankThreadPanelEnabled,
+    enabled: hasBaseConversationShell || blankThreadPanelEnabled,
   });
   const [sidePanelMounted, setSidePanelMounted] = useState(false);
   const [recordingTabVisible, setRecordingTabVisible] = useState(false);
+  const ensurePluginConversation = useCallback((title: string): Promise<string | null> => {
+    if (state.agent.currentChatId) return Promise.resolve(state.agent.currentChatId);
+    if (pluginConversationCreationRef.current) return pluginConversationCreationRef.current;
+    const readyConnection = connection;
+    const expectedGeneration = readyConnection?.getReadyGeneration() ?? null;
+    if (!readyConnection || expectedGeneration === null || resolvedConversationModel.unavailable) {
+      return Promise.resolve(null);
+    }
+    const draftScope = chatScopeKey;
+    const selectionEpoch = state.agent.chatSelectionEpoch;
+    const flight = (async () => {
+      setIsCreatingChat(true);
+      try {
+        const created = await readyConnection.newChat(
+          expectedGeneration,
+          5000,
+          resolvedConversationModel.candidateId ?? undefined,
+          crypto.randomUUID()
+        );
+        if (chatSelectionEpochRef.current !== selectionEpoch) return null;
+        ensureChatSubscription(created.chatId);
+        threadPanel.promoteScope(draftScope, created.chatId);
+        // A plugin-only chat has no Agent message yet, so it is absent from the
+        // canonical session snapshot. Keep an optimistic task row for it; without
+        // one the next sidebar refresh reopens the blank draft and hides the card.
+        dispatch(agentActions.pluginConversationStarted({
+          chatId: created.chatId,
+          title,
+          target: draftTarget,
+          createdAt: new Date().toISOString()
+        }));
+        dispatch(agentActions.pendingModelPresetUpdated(created.chatId, created.modelPreset));
+        taskStateCoordinator.refreshTaskState({
+          expectedChatId: created.chatId,
+          reason: "new-chat",
+          state: state.agent
+        });
+        return created.chatId;
+      } catch (error) {
+        dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+          source: "new-chat",
+          message: error instanceof MemmyAgentMessageRejectedError
+            ? `${error.detail}:${error.reason}`
+            : readableError(error),
+          scopeKey: draftScope
+        })));
+        return null;
+      } finally {
+        setIsCreatingChat(false);
+      }
+    })();
+    pluginConversationCreationRef.current = flight;
+    void flight.finally(() => {
+      if (pluginConversationCreationRef.current === flight) pluginConversationCreationRef.current = null;
+    });
+    return flight;
+  }, [chatScopeKey, connection, dispatch, ensureChatSubscription, resolvedConversationModel.candidateId,
+    resolvedConversationModel.unavailable, state.agent, taskStateCoordinator, threadPanel.promoteScope, draftTarget]);
   const features = useConversationFeatures({
     scopeKey: chatScopeKey, sharedRowWidth: workspaceRowWidth,
     agentMessages: state.agent.messages,
@@ -1090,6 +1153,7 @@ export function HomePage() {
       setSidePanelMounted(true);
       threadPanel.openTab({ id: "recording:main", type: "recording", name: t("recording.page.title") });
     },
+    onEnsureConversation: ensurePluginConversation,
     onSend: (text) => submitAgentComposerMessage({
       chatId: state.agent.currentChatId, target: state.agent.currentChatId ? null : draftTarget,
       connection, ensureChatSubscription, content: text, pendingAttachments: [], language,
@@ -1098,6 +1162,12 @@ export function HomePage() {
       chatSelectionEpoch: state.agent.chatSelectionEpoch, getChatSelectionEpoch: () => chatSelectionEpochRef.current,
     }),
   });
+  const hasActiveConversation = hasActiveAgentConversation(
+    state.agent.currentChatId,
+    state.agent.messages.length,
+    features.hasConversationActivity
+  );
+  const hasConversationShell = hasActiveConversation || isOpeningConversation;
   const pluginRecordingTabScopeRef = useRef<string | null>(null);
   const pluginRecordingOpen = Boolean(features.pluginRecordingSession);
   useEffect(() => {
@@ -1774,7 +1844,7 @@ export function HomePage() {
   const modeVisibleSlashCommands = selectedComposerCommand
     ? filterGoalModeSlashCommands(visibleSlashCommands, Boolean(state.agent.currentChatId))
     : visibleSlashCommands;
-  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands, state.agent.modelPresets);
+  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands);
   const slashMenuOpen = filteredSlashCommands.length > 0;
   const displayConnectionStatus = state.agent.recoveryKind === "initial"
     ? "connecting"
@@ -2794,7 +2864,16 @@ export function HomePage() {
         event.preventDefault();
         const command = filteredSlashCommands[selectedCommandIndex] ?? filteredSlashCommands[0];
         if (command) {
-          selectSlashCommand(command);
+          const isExactModelCommand = (command.command === "/model" || command.command === "/model list")
+            && composerInput.trim() === command.command;
+          if (event.key === "Enter" && !event.shiftKey && isExactModelCommand
+            && composerPrimaryAction === "send" && !composerSendDisabled) {
+            rememberSlashCommand(command.command);
+            setSlashMenuDismissed(true);
+            void sendMessage();
+          } else {
+            selectSlashCommand(command);
+          }
         }
         return;
       }

@@ -13,6 +13,7 @@ import {
   selectOfficeCjkFontFiles
 } from "../command-adapter.js";
 import type { PluginRuntimeContext } from "../types.js";
+import * as texliveRuntime from "../texlive-installer.js";
 
 let root: string | undefined;
 
@@ -21,6 +22,7 @@ afterEach(() => {
   root = undefined;
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function context(outputMode: "json" | "ndjson" = "json"): PluginRuntimeContext {
@@ -688,7 +690,7 @@ describe("CommandPluginAdapter", () => {
     expect(String(fetchFn.mock.calls[0]?.[0])).toBe(`http://127.0.0.1:19391/api/v1/plugins/office/runtimes/win32-${process.arch}`);
   });
 
-  it("automatically resolves the TeX runtime from the literature registry when missing", async () => {
+  it("prepares TeX from the literature registry in the background without failing activation on HTTP 404", async () => {
     const pluginContext = context();
     vi.stubEnv("MEMMY_PLUGIN_REGISTRY_URL", "http://127.0.0.1:19391/api");
     vi.stubEnv("MEMMY_TEXLIVE_RUNTIME_PREFER_MANAGED", "1");
@@ -696,8 +698,99 @@ describe("CommandPluginAdapter", () => {
     delete process.env.MEMMY_TEXLIVE_RUNTIME_CATALOG_URL;
     const fetchFn = vi.fn(async (_input: unknown) => new Response("not provisioned", { status: 404 })); vi.stubGlobal("fetch", fetchFn);
     pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, runtimeDependencies: ["texlive"] };
-    await expect(createCommandPluginAdapter({ platform: "win32", pluginDataRoot: join(root!, "plugin-data") }).activate(pluginContext)).rejects.toThrow(/HTTP 404/);
+    const adapter = createCommandPluginAdapter({ platform: "win32", pluginDataRoot: join(root!, "plugin-data") });
+    const session = await adapter.activate(pluginContext);
+    await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled());
     expect(String(fetchFn.mock.calls[0]?.[0])).toBe(`http://127.0.0.1:19391/api/v1/plugins/literature-review/runtimes/win32-${process.arch}`);
+    await adapter.deactivate(session);
+  });
+
+  function deferredTexContext() {
+    const ctx = context();
+    ctx.plugin.id = "literature-review";
+    ctx.plugin.manifest.id = "literature-review";
+    ctx.plugin.manifest.runtime.config = { ...ctx.plugin.manifest.runtime.config, runtimeDependencies: ["texlive"] };
+    let finish!: (runtime: texliveRuntime.ResolvedTexliveRuntime) => void;
+    const resolve = vi.spyOn(texliveRuntime, "resolveTexliveRuntime").mockImplementation(() => new Promise(done => { finish = done; }));
+    const runtime = { pathEntries: [join(root!, "tex-bin")], readRoots: [join(root!, "tex")], executableRoots: [join(root!, "tex")],
+      environment: { MEMMY_TEX_CACHE_ROOT: join(root!, "tex-cache"), MEMMY_TEX_FONTSET: "fandol" } };
+    return { ctx, resolve, runtime, finish: () => finish(runtime) };
+  }
+
+  it("enables immediately, allows ordinary calls during download, and joins preparation before rendering with fresh sandbox roots", async () => {
+    const f = deferredTexContext();
+    const builds: unknown[] = [];
+    const spawnFn = vi.fn(spawn);
+    const adapter = createCommandPluginAdapter({ spawnFn, buildLaunch: async (_context, _config, _network, dependencies) => {
+      builds.push(dependencies);
+      return { command: process.execPath, args: ["-e", "console.log(JSON.stringify({path:process.env.PATH,fontset:process.env.MEMMY_TEX_FONTSET}))"], cwd: root! };
+    } });
+    const session = await adapter.activate(f.ctx);
+    expect(f.resolve).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(f.resolve).toHaveBeenCalledTimes(1));
+    const call = { callId: "search", pluginId: f.ctx.plugin.id, capabilityId: "review_search", conversationId: "test", input: {} };
+    expect((await collect(adapter.invoke(session, call))).at(-1)?.type).toBe("result");
+    const render = adapter.invoke(session, { ...call, callId: "render", capabilityId: "review_render" })[Symbol.asyncIterator]();
+    expect((await render.next()).value).toMatchObject({ type: "progress", cancellable: true });
+    const next = render.next();
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+    f.finish();
+    expect((await next).value).toMatchObject({ type: "result", output: { fontset: "fandol" } });
+    expect(builds.at(-1)).toMatchObject({ readRoots: f.runtime.readRoots, executableRoots: f.runtime.executableRoots, environment: f.runtime.environment });
+    expect(spawnFn.mock.calls.at(-1)?.[2]?.env?.PATH).toContain(f.runtime.pathEntries[0]);
+    expect(f.resolve).toHaveBeenCalledTimes(1);
+    await render.next();
+    await adapter.deactivate(session);
+  });
+
+  it.each(["cancel", "deactivate", "deadline"])("does not spawn a renderer after %s while TeX is downloading", async action => {
+    const f = deferredTexContext();
+    const spawnFn = vi.fn(spawn);
+    const adapter = createCommandPluginAdapter({ spawnFn, buildLaunch: async () => ({ command: process.execPath, args: [], cwd: root! }) });
+    const session = await adapter.activate(f.ctx);
+    const iterator = adapter.invoke(session, { callId: "waiting", pluginId: f.ctx.plugin.id, capabilityId: "review_render", conversationId: "test", input: {},
+      ...(action === "deadline" ? { deadline: new Date(Date.now() + 50).toISOString() } : {}) })[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({ type: "progress" });
+    if (action === "cancel") await adapter.cancel!(session, "waiting");
+    if (action === "deactivate") await adapter.deactivate(session);
+    await expect(iterator.next()).rejects.toMatchObject({ code: action === "deadline" ? "plugin_timeout" : "plugin_cancelled" });
+    expect(spawnFn).not.toHaveBeenCalled();
+    f.finish();
+    await adapter.deactivate(session);
+  });
+
+  it("keeps failed preparation usable for plugin preflight and retries on the next export", async () => {
+    const f = deferredTexContext();
+    f.resolve.mockRejectedValue(new Error("offline"));
+    const adapter = createCommandPluginAdapter({ buildLaunch: async () => ({ command: process.execPath, args: ["-e", "console.log('{}')"], cwd: root! }) });
+    const session = await adapter.activate(f.ctx);
+    const call = { callId: "preflight", pluginId: f.ctx.plugin.id, capabilityId: "review_check_render_environment", conversationId: "test", input: {} };
+    expect((await collect(adapter.invoke(session, call))).at(-1)?.type).toBe("result");
+    f.resolve.mockResolvedValue(f.runtime);
+    expect((await collect(adapter.invoke(session, { ...call, callId: "retry" }))).at(-1)?.type).toBe("result");
+    expect(f.resolve).toHaveBeenCalledTimes(2);
+    await adapter.deactivate(session);
+  });
+
+  it("shares preparation across exports and lets one waiter cancel without cancelling the other", async () => {
+    const f = deferredTexContext();
+    const adapter = createCommandPluginAdapter({ buildLaunch: async () => ({ command: process.execPath, args: ["-e", "console.log('{}')"], cwd: root! }) });
+    const session = await adapter.activate(f.ctx);
+    const call = { callId: "first", pluginId: f.ctx.plugin.id, capabilityId: "review_render", conversationId: "test", input: {} };
+    const first = adapter.invoke(session, call)[Symbol.asyncIterator]();
+    const second = adapter.invoke(session, { ...call, callId: "second" })[Symbol.asyncIterator]();
+    expect((await first.next()).value).toMatchObject({ type: "progress" });
+    expect((await second.next()).value).toMatchObject({ type: "progress" });
+    await adapter.cancel!(session, "first");
+    await expect(first.next()).rejects.toMatchObject({ code: "plugin_cancelled" });
+    const result = second.next();
+    f.finish();
+    expect((await result).value).toMatchObject({ type: "result" });
+    await second.next();
+    expect(f.resolve).toHaveBeenCalledTimes(1);
+    // A ready runtime no longer displays a preparation message.
+    expect((await collect(adapter.invoke(session, { ...call, callId: "ready" }))).map(event => event.type)).toEqual(["result"]);
+    await adapter.deactivate(session);
   });
 
   it("keeps plugin CLR/PowerShell variables out of the privileged Windows launcher", async () => {
