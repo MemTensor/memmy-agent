@@ -22,6 +22,8 @@ import { registerIntegrationRoutes } from "./routes/integrations.js";
 import { registerLocalDataRoutes } from "./routes/local-data.js";
 import { registerOnboardingInsightRoutes } from "./routes/onboarding-insight.js";
 import { registerProjectRoutes } from "./routes/projects.js";
+import { registerPluginRoutes } from "./routes/plugins.js";
+import { registerPluginMcpRoutes } from "./routes/plugin-mcp.js";
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 const LOCAL_API_SERVICE_NAME = "memmy-local-api";
@@ -43,14 +45,12 @@ export interface CreateLocalApiServerOptions {
   /** Configured agent timezone. Renderer headers are used only when absent. */
   timeZone?: string;
   /**
-   * Local validation token for the Composio MCP bridge; the agent carries it in mcpServers.composio.headers to access /mcp/composio.
+   * Local validation token shared by Memmy's loopback MCP bridges.
    */
   composioMcpToken: string;
   heartbeatIntervalMs?: number;
   allowedOrigins?: readonly string[];
-  scanProcess?: {
-    databasePath: string;
-  };
+  pluginCapabilitiesChanged?: () => Promise<void>;
 }
 
 interface EventsQuerystring {
@@ -62,6 +62,25 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   const app = Fastify({ logger: false });
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const authenticateRuntimeToken = createRuntimeTokenPreHandler(options.permissionManager);
+  const eventStreams = new Set<() => void>();
+  let closing = false;
+  const registerEventStream = (stop: () => void) => {
+    // Authentication may finish after preClose has already drained existing streams.
+    if (closing) stop();
+    else eventStreams.add(stop);
+    return () => { eventStreams.delete(stop); };
+  };
+  app.addHook("preClose", async () => {
+    closing = true;
+    // The renderer closes after this server; do not wait for its EventSource to
+    // disconnect. End only our notification streams, preserving ordinary writes.
+    for (const stop of eventStreams) stop();
+  });
+  app.addHook("onResponse", async () => {
+    // A request already running at preClose can become idle after Fastify's
+    // initial idle sweep. Preserve its response, then retire the idle socket.
+    if (closing) app.server.closeIdleConnections();
+  });
 
   if (options.knowledge) {
     registerKnowledgeRoutes(app, {
@@ -109,7 +128,7 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     progressBus: options.services.progressBus,
     permissionManager: options.permissionManager,
     authenticateRuntimeToken,
-    scanProcess: options.scanProcess
+    scanClient: options.services.memoryClient?.agentSources
   });
   registerAppConfigRoutes(app, {
     appConfig: options.services.appConfig,
@@ -131,6 +150,12 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   // The MCP bridge validates with its own x-memmy-mcp-token (the agent has no runtime token), so authenticateRuntimeToken is not attached.
   registerComposioMcpRoutes(app, {
     integrations: options.services.integrations,
+    mcpToken: options.composioMcpToken
+  });
+  registerPluginMcpRoutes(app, {
+    skillContent: options.services.pluginSkillContent,
+    plugins: options.services.plugins,
+    progressBus: options.services.progressBus,
     mcpToken: options.composioMcpToken
   });
   registerChannelRoutes(app, {
@@ -169,6 +194,12 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     permissionManager: options.permissionManager,
     authenticateRuntimeToken
   });
+  registerPluginRoutes(app, {
+    plugins: options.services.plugins,
+    progressBus: options.services.progressBus,
+    authenticateRuntimeToken,
+    refreshAgentTools: options.pluginCapabilitiesChanged
+  });
   registerAgentRuntimeRoutes(app, {
     services: options.services,
     timeZone: options.timeZone,
@@ -182,10 +213,58 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
       return reply.code(401).send({ error: "unauthorized" });
     }
 
-    startSse(reply, heartbeatIntervalMs, getSingleHeaderValue(request.headers.origin), options.services.progressBus);
+    startSse(reply, heartbeatIntervalMs, getSingleHeaderValue(request.headers.origin), options.services.progressBus, registerEventStream);
+  });
+
+  // The live ASR stream is a WebSocket, which Fastify's router never sees: an
+  // Upgrade request bypasses routing and lands on the raw HTTP server. The
+  // handshake is authenticated with the same runtime token the SSE channel
+  // takes as a query parameter, for the same reason — a browser WebSocket
+  // cannot carry custom headers. Origin is checked with the HTTP rules so a
+  // page that could not fetch the API cannot open a socket to it either.
+  app.server.on("upgrade", (request, socket, head) => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    if (url.pathname !== ASR_STREAM_PATH) {
+      socket.destroy();
+      return;
+    }
+    const origin = getSingleHeaderValue(request.headers.origin);
+    if (origin && !isAllowedOrigin(origin, options.allowedOrigins)) {
+      rejectUpgrade(socket, 403);
+      return;
+    }
+    const token = url.searchParams.get("token");
+    void (async () => {
+      if (!token || !(await options.permissionManager.verifyRuntimeToken(token))) {
+        rejectUpgrade(socket, 401);
+        return;
+      }
+      const relay = options.services.asrStream;
+      if (!relay) {
+        // Same partial-services allowance as the close hook: a test server
+        // without the relay answers 404 instead of throwing on a live socket.
+        rejectUpgrade(socket, 404);
+        return;
+      }
+      relay.handleUpgrade(request, socket, head);
+    })();
+  });
+  app.addHook("onClose", async () => {
+    // Route tests build a partial services object; the relay is only there in
+    // the real wiring, so its absence must not fail teardown.
+    await options.services.asrStream?.close();
   });
 
   return app;
+}
+
+const ASR_STREAM_PATH = "/api/asr/stream";
+
+/** Answers a rejected upgrade with a bare HTTP status before the socket is dropped. */
+function rejectUpgrade(socket: import("node:stream").Duplex, status: 401 | 403 | 404): void {
+  const text = status === 401 ? "Unauthorized" : status === 403 ? "Forbidden" : "Not Found";
+  socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  socket.destroy();
 }
 
 function createRuntimeTokenPreHandler(permissionManager: PermissionManager) {
@@ -270,7 +349,8 @@ function startSse(
   reply: FastifyReply,
   heartbeatIntervalMs: number,
   origin: string | undefined,
-  progressBus: BackendServices["progressBus"]
+  progressBus: BackendServices["progressBus"],
+  registerEventStream: (stop: () => void) => () => void
 ): void {
   // SSE is a long-lived response, so we take over the raw response to prevent Fastify from automatically ending the request.
   reply.hijack();
@@ -337,14 +417,38 @@ function startSse(
       payload: event
     });
   });
+  const unsubscribePluginCapability = progressBus.on("plugin.capability_event", (event) => {
+    send({
+      id: randomUUID(),
+      type: "plugin.capability_event",
+      timestamp: new Date().toISOString(),
+      payload: event
+    });
+  });
+  for (const payload of progressBus.pendingPluginEvents()) {
+    send({ id: randomUUID(), type: "plugin.capability_event", timestamp: new Date().toISOString(), payload });
+  }
+  const pendingCalls = [...new Map(progressBus.pendingPluginEvents().map(({ pluginId, capabilityId, callId, conversationId }) =>
+    [JSON.stringify([pluginId, capabilityId, callId, conversationId]), { pluginId, capabilityId, callId, conversationId }])).values()];
+  send({ id: randomUUID(), type: "plugin.capability_snapshot", timestamp: new Date().toISOString(), payload: { calls: pendingCalls } });
 
+  let cleanedUp = false;
+  let unregister = () => {};
   const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
     // Clean up the heartbeat timer promptly after the client disconnects, avoiding orphaned tasks lingering in the background.
     clearInterval(interval);
     unsubscribeScanProgress();
     unsubscribeScanCompleted();
+    unsubscribePluginCapability();
+    unregister();
   };
 
   reply.raw.once("close", cleanup);
   reply.raw.once("error", cleanup);
+  unregister = registerEventStream(() => {
+    cleanup();
+    reply.raw.end();
+  });
 }

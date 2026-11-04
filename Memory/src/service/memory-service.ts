@@ -1,3 +1,18 @@
+import { PanelMemoryBudget } from "./panel/memory-budget.js";
+import { retryFtsRepairs } from "../storage/fts-maintenance.js";
+import { DEVICE_MEMORY_OWNER } from "./namespace/memory-owner.js";
+import { statsStore } from "./panel/stats-store.js";
+import { PanelWriteCoordinator } from "./panel/write-coordinator.js";
+import {localPanelRequest} from "./panel/local-read.js";
+import { panelCacheRevision } from "../storage/panel-cache.js";
+import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
+import { EmbeddingMaintenanceReader } from "./embedding/embedding-maintenance-reader.js";
+import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
+import {PanelStats} from "./panel/stats.js";
+import { PanelReader } from "./panel/reader.js";
+import { PanelBrowse } from "./panel/browse.js";
+import { panelSafetyToken } from "../storage/panel-security.js";
+import { userMemoryPanelItem } from "./read-model/panel-read.js";
 import {
   assertJsonValue,
   canonicalJson,
@@ -41,7 +56,8 @@ import {
   HttpByokTokenUsageRecorder,
   type HttpByokTokenUsageRecorderOptions,
   type MemoryLlmModelRole,
-  type MemoryModelUsageEvent
+  type MemoryModelUsageEvent,
+  type MemoryTokenUsageSink
 } from "../model/token-usage.js";
 import { TokenUsageOutbox } from "../storage/token-usage-outbox.js";
 import { MemoryTokenBudgetLedger } from "./memory-token-budget-ledger.js";
@@ -97,6 +113,7 @@ import type {
   RequestEnvelope,
   RetrievalMode,
   RuntimeNamespace,
+  UserMemoryRecord,
   SessionCompactRequest,
   SessionL3WorldModelContextResponse,
   SessionOpenRequest,
@@ -149,11 +166,13 @@ import {
   namespaceForMemory,
   namespaceForRawTurn,
   namespaceForSession,
+  profileIdFromMemory,
   normalizeNamespace
 } from "./namespace/namespace-scope.js";
 import {
   EpisodeReadModel,
   episodeRef,
+  type EpisodeReadAccess,
   type MemoryGetResponse
 } from "./read-model/episode.js";
 import {
@@ -197,7 +216,11 @@ import {
   type ClosedEpisodeTrigger,
   type EnqueueJobInput
 } from "./worker/job-handlers.js";
-import { WorkerRunner } from "./worker/worker-runner.js";
+import { WorkerRunner, type WorkerRunExecution } from "./worker/worker-runner.js";
+import { WorkerConcurrencyController, providerDescriptor, workerModelBatchKey, type PreparedWorkerExecution } from "./worker/worker-concurrency.js";
+import { observeWorker, readWorkerQueueMetrics, WorkerObservability } from "./worker/worker-observability.js";
+import { jobPolicyRegistry, UnknownJobPolicyError } from "./worker/job-policy-registry.js";
+import type { FairClaimedWork } from "./worker/fair-worker-queue.js";
 
 const serviceLogger = createMemoryLogger("memory-service");
 
@@ -215,6 +238,10 @@ export type { FeedbackResponse } from "./feedback/feedback-experience.js";
 
 
 export interface MemoryServiceOptions {
+  /** One controller is shared by worker admission and actual model requests. */
+  concurrency?: WorkerConcurrencyController;
+  /** Optional process-local diagnostics sink, never a public status API. */
+  observability?: WorkerObservability;
   db?: MemoryDb;
   backend?: StorageBackend;
   mode?: "local" | "cloud" | "dev";
@@ -286,6 +313,79 @@ export class MemoryService {
   private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
   private readonly projectEnvironment: ProjectEnvironmentService;
   private readonly panelReadModel: PanelReadModel;
+  private panelReader?: PanelReader;
+  private readonly panelWrites = new PanelWriteCoordinator();
+  private readonly panelMemory = new PanelMemoryBudget();
+  private panelBrowse?: PanelBrowse;
+  private panelStats?: PanelStats;
+  private panelOverviewStats?: PanelStats<ReturnType<PanelReadModel["panelOverviewSummary"]>>;
+  private panelWarmupTimer?: ReturnType<typeof setTimeout>;
+  /** Local statistics describe the device; authenticated cloud scopes stay distinct. */
+  private panelStatsInput(input: RequestEnvelope, local: boolean) {
+    const scoped = this.panelInput(input, local);
+    return local && !scoped.namespace?.tenantId ? { ...scoped, namespace: undefined } : scoped;
+  }
+  startPanelWarmup(): void {
+    if (this.mode === "cloud" || this.closing || this.panelWarmupTimer) return;
+    this.panelWarmupTimer = setTimeout(() => {
+      this.panelWarmupTimer = undefined;
+      if (!this.closing) { this.panelOverviewStatsSnapshot({}, true); this.panelStatsSnapshot({}, true); }
+    }, 0);
+    this.panelWarmupTimer.unref();
+  }
+  private panelInput<T extends RequestEnvelope>(input:T,local=this.mode!=="cloud"):T {
+    return localPanelRequest(this.withTimeZone(input),local);
+  }
+  private sharedPanelStats() {
+    this.panelStats ??= new PanelStats(input=>this.readPanel("stats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db),this.repos.db.name===":memory:"?undefined:statsStore(this.readPanel.bind(this),"full"),this.panelMemory);
+    return this.panelStats;
+  }
+  panelStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
+    return this.sharedPanelStats().get(this.panelStatsInput(input,local));
+  }
+  panelOverviewStatsSnapshot(input:RequestEnvelope,local=this.mode!=="cloud") {
+    this.panelOverviewStats ??= new PanelStats(input => this.readPanel("overviewStats",[input]),()=>panelSafetyToken(this.repos.db),()=>panelCacheRevision(this.repos.db),this.repos.db.name===":memory:"?undefined:statsStore(this.readPanel.bind(this),"overview"),this.panelMemory);
+    return this.panelOverviewStats.get(this.panelStatsInput(input,local));
+  }
+
+  async readPanel<T>(method:string,args:unknown[],signal?:AbortSignal):Promise<{safety:string;data:T;bytes?:number}> {
+    if(this.closing)throw new MemoryServiceError("conflict","Memory service is stopping");
+    if(this.repos.db.name !== ":memory:") {
+      this.panelReader ??= new PanelReader(this.repos.db.name, 30_000, () => {
+        const activity = this.concurrency.snapshot();
+        return activity.activeJobs > 0 || activity.embeddingRequests > 0 || Object.values(activity.resources).some(value => value > 0);
+      });
+      const result=await this.panelReader.run<T>(method,args,method === "stats" || method === "overviewStats" ? 1 : 0,signal);
+      if(result.safety !== panelSafetyToken(this.repos.db)) throw new MemoryServiceError("conflict","Panel changed during read; refresh");
+      return result;
+    }
+    const model=this.panelReadModel;
+    const data=method === "members" ? model.panelMembers(args[0] as Parameters<PanelReadModel["panelMembers"]>[0])
+      : method === "page" ? model.panelPageByIds(args[0] as string[],args[1] as Parameters<PanelReadModel["panelMembers"]>[0])
+      : method === "items" ? model.panelItems(args[0] as Parameters<PanelReadModel["panelItems"]>[0])
+      : method === "tasks" ? model.panelTaskSummaries(args[0] as Parameters<PanelReadModel["panelTaskSummaries"]>[0])
+      : method === "taskCheck" ? model.panelTaskCheck(args[0] as string,args[1] as RequestEnvelope)
+      : method === "detail" ? model.panelTaskDetail(args[0] as string,args[1] as Parameters<PanelReadModel["panelTaskDetail"]>[1])
+      : method === "field" ? model.panelTaskField(args[0] as string,args[1] as string,args[2] as Parameters<PanelReadModel["panelTaskField"]>[2],args[3] as Parameters<PanelReadModel["panelTaskField"]>[3])
+      : method === "logs" ? model.panelLogs(args[0] as Parameters<PanelReadModel["panelLogs"]>[0],args[1] as RequestEnvelope)
+      : method === "logDetail" ? model.panelLogDetail(args[0] as number,args[1] as RequestEnvelope)
+      : method === "overview" ? model.panelOverviewSummary(args[0] as RequestEnvelope)
+      : method === "analysis" ? model.panelAnalysis(args[0] as RequestEnvelope)
+      : method === "legacyTasks" ? model.panelTasks(args[0] as Parameters<PanelReadModel["panelTasks"]>[0])
+      : method === "overviewStats" ? model.panelOverviewSummary(args[0] as RequestEnvelope)
+      : method === "stats" ? model.panelStatistics(args[0] as RequestEnvelope) : undefined;
+    return {safety:panelSafetyToken(this.repos.db),data:data as T};
+  }
+
+  browsePanel(input: {op:"create"|"page"|"check"|"release";viewId?:string;page?:number;filter?:Parameters<PanelReadModel["panelMembers"]>[0]}, request:RequestEnvelope,signal?:AbortSignal,local=this.mode!=="cloud") {
+    this.panelBrowse ??= new PanelBrowse({memory:this.panelMemory,read:this.readPanel.bind(this),safety:()=>panelSafetyToken(this.repos.db),change:()=>`${this.repos.runtime.latestChangeSeq()}:${this.repos.db.prepare("SELECT total_changes()").pluck().get()}:${this.repos.db.pragma("data_version",{simple:true})}`});
+    const filter=this.panelInput({...input.filter,...request},local);
+    if(input.op==="create") return this.panelBrowse.create(filter,signal);
+    if(!input.viewId) throw new MemoryServiceError("invalid_argument","Missing panel view id");
+    if(input.op==="page") return this.panelBrowse.page(input.viewId,input.page??1,filter,signal);
+    if(input.op==="check") return this.panelBrowse.check(input.viewId,filter);
+    return this.panelBrowse.release(input.viewId,filter);
+  }
   private readonly retrieval: RetrievalService;
   private readonly sessionTurns: SessionTurnService;
   private readonly skillReadModel: SkillReadModel;
@@ -294,16 +394,27 @@ export class MemoryService {
   private readonly workMemory: WorkMemoryPipeline;
   private readonly observationMemory: ObservationMemoryPipeline;
   private readonly repos: Repositories;
+  private readonly embeddingMaintenanceReader: EmbeddingMaintenanceReader;
   private readonly startedAt = Date.now();
   private readonly mode: "local" | "cloud" | "dev";
   private config: MemmyConfig;
   private readonly modelTasks: MemoryModelTaskRouter;
+  private readonly concurrency: WorkerConcurrencyController;
+  private readonly workerMetrics: WorkerObservability;
+  private readonly stopConcurrencyMetrics: () => void;
+  private readonly workerExecutionSnapshots = new WeakMap<MemoryModelTaskContext, {
+    batchKey: string;
+    providers: Map<string, PreparedWorkerExecution["providers"]>;
+  }>();
   private llm: LlmClient;
   private skillLlm: LlmClient;
   private embedder: Embedder;
+  private embeddingDimensionProbe?: { key: string; value: Promise<number> };
+  private embeddingUpgradeInFlight?: Promise<void>;
   private readonly embeddingRetryWorkerId = `embedding-retry-${newId("worker")}`;
   private readonly tokenBudgetLedger: MemoryTokenBudgetLedger;
   private readonly tokenUsageRecorder: HttpByokTokenUsageRecorder;
+  private readonly modelUsageSink: MemoryTokenUsageSink;
   private readonly fetchAppMemoryBudgetFn: (signal?: AbortSignal) => Promise<{ dailyUsed: number; lifetimeUsed: number } | null>;
   private readonly budgetAbort = new AbortController();
   private appBudgetReconcile: {
@@ -318,12 +429,25 @@ export class MemoryService {
     backoffMs: 1_000
   };
   private persistRecoveredListener?: () => void;
+  private capturePendingListener?: () => void;
   private closing = false;
+  private stopping?: Promise<void>;
   private viewerEndpoint?: string;
 
   constructor(private readonly options: MemoryServiceOptions) {
+    this.concurrency = options.concurrency ?? new WorkerConcurrencyController();
     this.viewerEndpoint = options.viewerEndpoint;
     this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
+    // Match the repositories' own connection: a pre-built backend owns the file,
+    // and production servers are wired that way rather than with a raw `db`.
+    this.embeddingMaintenanceReader = new EmbeddingMaintenanceReader({
+      repos: this.repos,
+      sqlitePath: options.backend?.sqlitePath ?? options.db?.path
+    });
+    this.workerMetrics = options.observability ?? new WorkerObservability({
+      queueSnapshot: (at) => readWorkerQueueMetrics(this.repos.db, at)
+    });
+    this.stopConcurrencyMetrics = this.concurrency.observe(this.workerMetrics);
     this.l3WorldModelContextReadModel = new L3WorldModelContextReadModel(this.repos);
     this.mode = options.mode ?? "local";
     this.config = cloneMemmyConfig(options.config ?? DEFAULT_MEMMY_CONFIG);
@@ -340,10 +464,17 @@ export class MemoryService {
       touchBudget: () => this.tokenBudgetLedger.touch(),
       onPersistRecovered: () => this.persistRecoveredListener?.()
     });
+    this.modelUsageSink = {
+      record: (event) => {
+        // Preserve the original sink's return/throw and budget/outbox semantics.
+        try { return this.tokenUsageRecorder.record(event); }
+        finally { this.observeModelTokens(event); }
+      }
+    };
     this.fetchAppMemoryBudgetFn = options.fetchAppMemoryBudget
       ?? ((signal) => fetchAppMemoryBudget({ signal }));
     this.startAppBudgetReconcile();
-    this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext());
+    this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext(), this.concurrency, this.workerMetrics);
     this.llm = this.modelTasks.client("summary");
     this.skillLlm = this.modelTasks.client("evolution");
     this.embedder = this.modelTasks.embedder();
@@ -526,6 +657,11 @@ export class MemoryService {
       appendEmbeddingRetryChange: this.workerHandlers.appendEmbeddingRetryChange,
       summarizeTraceForCapture: this.evolutionJobs.summarizeTraceForCapture.bind(this.evolutionJobs),
       decideTurnMemoryForCapture: this.evolutionJobs.decideTurnMemoryForCapture.bind(this.evolutionJobs),
+      buildTurnJudgeSnapshot: this.evolutionJobs.buildTurnJudgeSnapshot.bind(this.evolutionJobs),
+      judgeTurnForCapture: this.evolutionJobs.judgeTurnForCapture.bind(this.evolutionJobs),
+      applyTurnJudgment: (input) => this.sessionTurns.applyTurnJudgment(input),
+      withEpisodeSelection: (context, operation) => this.sessionTurns.withEpisodeSelection(context, operation),
+      turnJudgeKeepInput: () => this.config.algorithm.session.turnJudgeKeepInput,
       finalizeClosedEpisode: (episode, at) => this.workerHandlers.finalizeClosedEpisode(episode, at, "capture_decided")
     });
     const observationOwner = this;
@@ -547,6 +683,11 @@ export class MemoryService {
     });
     const workerRunnerOwner = this;
     this.workerRunner = new WorkerRunner({
+      concurrency: this.concurrency,
+      observer: this.workerMetrics,
+      prepareExecution: this.prepareWorkerExecution.bind(this),
+      prepareExecutionBatch: this.prepareWorkerExecutionBatch.bind(this),
+      onTurnJudgeDeadLetter: (job) => this.embeddingJobs.markTurnJudgeFailed(job),
       repos: this.repos,
       get embedder() { return workerRunnerOwner.embedder; },
       get capture() { return workerRunnerOwner.config.algorithm.capture; },
@@ -558,6 +699,27 @@ export class MemoryService {
       memoryBudgetNextWakeAtMs: () => this.tokenBudgetLedger.nextWakeAtMs(),
       memoryBudgetNextReconcileAtMs: () => this.nextAppBudgetReconcileAtMs(),
       summaryModelConfigured: () => workerRunnerOwner.llm.isConfigured(),
+      configurationFingerprint: () => {
+        const config = workerRunnerOwner.effectiveModelConfig();
+        return stableHash({ summary: config.summary, evolution: config.evolution,
+          embedding: config.embedding, roleRouting: config.roleRouting });
+      },
+      beforeRun: async request => {
+        await this.ensureAppBudgetReconciled();
+        // Run upgrade planning inside the shared worker entry so stop and scoped
+        // requests retain the same boundary as ordinary durable work.
+        if (request && this.config.algorithm.enableMemoryAdd && !this.shouldDeferBudgetedEmbedding() && !request.targetMemoryIds) {
+          this.embeddingUpgradeInFlight ??= this.withModelTaskContext(() => this.embeddingMaintenance().resumeUpgrade())
+            .finally(() => { this.embeddingUpgradeInFlight = undefined; });
+          await this.embeddingUpgradeInFlight;
+        }
+      },
+      maintenanceNextRunAtMs: () => this.config.algorithm.enableMemoryAdd && !this.shouldDeferBudgetedEmbedding()
+        ? this.embeddingMaintenance().nextUpgradeAttemptAt() : undefined,
+      afterRun: async () => {
+        if (this.config.algorithm.enableMemoryAdd) await this.embeddingMaintenance().upgradeProgress();
+        this.reconcileAutomaticHistorySkills(nowIso());
+      },
       nowIso,
       encodeChangeCursor: this.encodeChangeCursor.bind(this),
       namespaceIdFromMemory,
@@ -572,13 +734,18 @@ export class MemoryService {
       appendEmbeddingRetryChange: this.workerHandlers.appendEmbeddingRetryChange,
       jobHandlers: {
         processJob: (job) => this.withModelTaskContext(
-          () => this.workerHandlers.processJob(job)
+          async () => job.jobType === "episode_assignment"
+            ? this.sessionTurns.assignEpisode(job)
+            : job.jobType === "episode_finalize"
+              ? this.sessionTurns.finalizeAssignment(job)
+              : this.workerHandlers.processJob(job)
         )
       },
       embeddingJobs: this.embeddingJobs
     });
     this.episodeReadModel = new EpisodeReadModel({
       repos: this.repos,
+      localMemory: this.mode !== "cloud",
       assertMemorySearchEnabled: this.assertMemorySearchEnabled.bind(this),
       resolveContext: this.resolveContext.bind(this),
       requireSession: this.requireSession.bind(this),
@@ -586,6 +753,8 @@ export class MemoryService {
       assertSessionInScope: this.assertSessionInScope.bind(this),
       assertEpisodeInScope: this.assertEpisodeInScope.bind(this),
       assertMemoryInScope: this.assertMemoryInScope.bind(this),
+      assertPanelMemoryInScope: this.assertMemoryTenantScope.bind(this),
+      assertPanelEpisodeInScope: this.assertPanelEpisodeInScope.bind(this),
       namespaceForSession,
       readableMemoryIdKind,
       invalidArgument: (message) => new MemoryServiceError("invalid_argument", message),
@@ -608,7 +777,19 @@ export class MemoryService {
       assertMemoryInScope: this.assertMemoryInScope.bind(this),
       assertSessionInScope: this.assertSessionInScope.bind(this),
       requireOpenSession: this.requireOpenSession.bind(this),
-      ensureEpisode: this.ensureEpisode.bind(this),
+      ensureEpisode: (session, episodeId) => this.sessionTurns.captureEpisode(session, episodeId),
+      persistSkillEvent: (session, skillId, request) => {
+        const at = nowIso();
+        const turnId = request.turnId ?? `skill:${request.adapterId ?? ""}:${request.requestId ?? newId("event")}`;
+        const existing = this.repos.runtime.getRawTurnBySessionTurn(session.id, turnId);
+        if (existing) return existing;
+        const raw = this.repos.runtime.insertRawTurn({ id: `raw_${stableHash(`${session.id}:${turnId}`).slice(0, 20)}`,
+          userId: session.userId, sessionId: session.id, turnId, createdAt: at,
+          conversationId: session.conversationId, userText: `Use skill ${skillId}`, toolCalls: [], toolResults: [],
+          sourceMemoryIds: [skillId], usage: {}, messagePayload: { skill_use: { skillId, toolCallId: request.toolCallId } }, status: "observed" });
+        this.sessionTurns.queueAssignment(raw);
+        return raw;
+      },
       resolveSkillTrialEvidence: this.skillTrials.resolveSkillTrialEvidence.bind(this.skillTrials),
       encodeChangeCursor: this.encodeChangeCursor.bind(this),
       skillMetaFromMemory,
@@ -652,6 +833,7 @@ export class MemoryService {
     const retrievalOwner = this;
     this.retrieval = new RetrievalService({
       repos: this.repos,
+      writeTransaction: this.writeCaptureTransaction.bind(this),
       get config() { return retrievalOwner.config; },
       get llm() { return retrievalOwner.llm; },
       get skillLlm() { return retrievalOwner.skillLlm; },
@@ -671,6 +853,7 @@ export class MemoryService {
     const sessionTurnOwner = this;
     this.sessionTurns = new SessionTurnService({
       repos: this.repos,
+      writeTransaction: this.writeCaptureTransaction.bind(this),
       get config() { return sessionTurnOwner.config; },
       get llm() { return sessionTurnOwner.llm; },
       get skillLlm() { return sessionTurnOwner.skillLlm; },
@@ -708,6 +891,7 @@ export class MemoryService {
         llm: this.skillLlm
       }),
       shouldDeferBudgetedEvolutionLlm: () => this.shouldDeferBudgetedEvolutionLlm(),
+      shouldDeferEpisodeSelection: () => this.isMemoryBudgetPaused() && this.memoryBudgetJobConsumes("episode_title"),
       firstLine,
       memoryLayersForIntent,
       turnStartMemoryLayers,
@@ -726,8 +910,10 @@ export class MemoryService {
       stringifyForMemory,
       withDuplicateFlag
     });
+    this.sessionTurns.migrateLegacyCaptures();
     serviceLogger.info("initialized", memoryConfigLogFields(this.config));
     this.tokenUsageRecorder.start();
+    this.workerMetrics.start();
   }
 
   stopTokenUsageDelivery(): void {
@@ -735,12 +921,33 @@ export class MemoryService {
   }
 
   async stop(): Promise<void> {
-    if (this.closing) {
-      return;
-    }
+    this.modelTasks.assertCanStop();
+    const stopped = this.workerRunner.stop();
+    if (this.stopping) return this.stopping;
     this.closing = true;
     this.tokenUsageRecorder.stop();
     this.budgetAbort.abort();
+    // Close request admission synchronously before the worker releases provider
+    // slots, then keep storage alive through complete foreground business work.
+    const modelsStopped = this.modelTasks.stop();
+    const requestsStopped = this.concurrency.close();
+    this.panelBrowse?.clear();
+    this.panelStats?.stop();
+    this.panelOverviewStats?.stop();
+    this.panelWrites.close();
+    clearTimeout(this.panelWarmupTimer);
+    const readerStopped = this.panelReader?.stop();
+    // A display-only scan is safe to recompute and must not keep running while
+    // other accepted work drains during shutdown.
+    this.embeddingMaintenanceReader.cancelDiscardableStats();
+    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped]).then(async () => {
+      // Reads that a maintenance run depends on get a bounded grace period before
+      // the worker is terminated, so shutdown cannot hang on a stuck scan.
+      await this.embeddingMaintenanceReader.stop();
+      this.stopConcurrencyMetrics();
+      this.workerMetrics.stop();
+    });
+    return this.stopping;
   }
 
   private createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
@@ -748,7 +955,7 @@ export class MemoryService {
       modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
       {
         modelRole,
-        usageRecorder: this.tokenUsageRecorder
+        usageRecorder: this.modelUsageSink
       }
     );
   }
@@ -759,6 +966,17 @@ export class MemoryService {
       operation: event.operation,
       totalTokens: event.usage.totalTokens
     });
+  }
+
+  private observeModelTokens(event: MemoryModelUsageEvent): void {
+    try {
+      const descriptor = providerDescriptor({ provider: event.provider, endpoint: event.endpoint, model: event.model,
+        actualModelContext: event.actualModelContext }, this.concurrency.limits);
+      observeWorker(this.workerMetrics, { type: "tokens", kind: event.kind === "memory_summary" ? "summary"
+        : event.kind === "memory_evolution" ? "evolution" : "embedding",
+        providerKey: descriptor.providers[0]!.key, modelKey: descriptor.providers.at(-1)!.key,
+        inputTokens: event.usage.inputTokens, outputTokens: event.usage.outputTokens, totalTokens: event.usage.totalTokens });
+    } catch { /* Diagnostics must not change token persistence or budget accounting. */ }
   }
 
   private budgetModelSources(): MemoryBudgetModelSources {
@@ -778,6 +996,10 @@ export class MemoryService {
 
   private memoryBudgetJobConsumes(jobType: string): boolean {
     return jobTypeConsumesMemoryBudget(jobType, this.budgetModelSources());
+  }
+
+  private shouldDeferBudgetedEmbedding(): boolean {
+    return this.isMemoryBudgetPaused() && this.memoryBudgetJobConsumes("embedding");
   }
 
   private shouldDeferBudgetedEvolutionLlm(): boolean {
@@ -854,6 +1076,10 @@ export class MemoryService {
     this.appBudgetReconcile.settledListener = listener;
   }
 
+  setCapturePendingListener(listener?: () => void): void {
+    this.capturePendingListener = listener;
+  }
+
   setPersistRecoveredListener(listener?: () => void): void {
     this.persistRecoveredListener = listener;
   }
@@ -885,18 +1111,20 @@ export class MemoryService {
     ]);
   }
 
+  private effectiveModelConfig(): MemmyConfig {
+    return this.options.configPath || this.options.configLoader
+      ? (this.options.configLoader ?? loadMemmyConfig)(this.options.configPath).config
+      : this.config;
+  }
+
   private resolveModelTaskContext(): MemoryModelTaskContext {
-    const taskConfig = cloneMemmyConfig(
-      this.options.configPath || this.options.configLoader
-        ? (this.options.configLoader ?? loadMemmyConfig)(this.options.configPath).config
-        : this.config
-    );
+    const taskConfig = cloneMemmyConfig(this.effectiveModelConfig());
     const summary = this.options.llm
       ?? this.createConfiguredMemoryLlm(taskConfig, "memory_summary");
     const evolution = this.options.skillLlm
       ?? this.createConfiguredMemoryLlm(taskConfig, "memory_evolution");
     const embedding = this.options.embedder ?? createEmbedder(taskConfig.embedding, {
-      usageRecorder: this.tokenUsageRecorder
+      usageRecorder: this.modelUsageSink
     });
     freezeModelSelectionConfig(taskConfig);
     return {
@@ -905,6 +1133,70 @@ export class MemoryService {
       evolution,
       embedding
     };
+  }
+
+  private prepareWorkerExecutionBatch(): (work: FairClaimedWork) => PreparedWorkerExecution {
+    // One synchronous fill observes one configuration snapshot. Provider work is
+    // still resolved per candidate; injected runner factories may vary per work.
+    const context = this.modelTasks.snapshot();
+    return work => this.prepareWorkerExecution(work, context);
+  }
+
+  private prepareWorkerExecution(work: FairClaimedWork, snapshot?: MemoryModelTaskContext): PreparedWorkerExecution {
+    let roles: readonly ("summary" | "evolution" | "embedding")[];
+    try {
+      roles = jobPolicyRegistry.resolve({ jobType: work.queue === "main" ? work.job.jobType : "embedding_retry" }).concurrency.providerRoles;
+    } catch (error) {
+      if (!(error instanceof UnknownJobPolicyError)) throw error;
+      // Unregistered jobs are admitted only for controlled dead-letter cleanup.
+      return { providers: [], run: operation => operation() };
+    }
+    const context = snapshot ?? this.modelTasks.snapshot();
+    let cached = this.workerExecutionSnapshots.get(context);
+    if (!cached) {
+      cached = { batchKey: workerModelBatchKey([context.summary.config, context.evolution.config, context.embedding.config]), providers: new Map() };
+      this.workerExecutionSnapshots.set(context, cached);
+    }
+    const roleKey = roles.join("/");
+    let providers = cached.providers.get(roleKey);
+    if (!providers) {
+      providers = roles.flatMap(role => providerDescriptor(context[role].config, this.concurrency.limits).providers);
+      cached.providers.set(roleKey, providers);
+    }
+    return {
+      providers,
+      embedding: roles.includes("embedding"),
+      batchKey: cached.batchKey,
+      run: operation => this.modelTasks.runWith(context, operation)
+    };
+  }
+
+  notifyWorkerWorkAvailable(): void {
+    this.workerRunner.notifyWorkAvailable();
+  }
+
+  /** Source producers share the global background budget, without inheriting
+   * a model permit: any foreground request still admits its own providers. */
+  async withAgentSourceScanPermit<T>(sourceIds: string | readonly string[], signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+    const scopeKeys = [...new Set(typeof sourceIds === "string" ? [sourceIds] : sourceIds)]
+      .map(sourceId => `agent-source-scan:${sourceId}`);
+    for (;;) {
+      signal.throwIfAborted();
+      if (this.stopping) throw new Error("Memory service is stopping");
+      const permit = this.concurrency.tryAcquire({ resourceClass: "scan", providers: [],
+        scopeKeys });
+      if (permit) {
+        try { signal.throwIfAborted(); return await operation(); }
+        finally { permit.release(); }
+      }
+      await new Promise<void>((resolve, reject) => {
+        const finish = () => { unsubscribe(); signal.removeEventListener("abort", canceled); resolve(); };
+        const canceled = () => { unsubscribe(); signal.removeEventListener("abort", canceled); reject(signal.reason); };
+        const unsubscribe = this.concurrency.subscribe(finish);
+        signal.addEventListener("abort", canceled, { once: true });
+        if (signal.aborted) canceled();
+      });
+    }
   }
 
   private withModelTaskContext<T>(operation: () => T): T {
@@ -957,6 +1249,7 @@ export class MemoryService {
     };
     return {
       ok: schema.version > 0 && ![summary, evolution, embedding].some((model) => Boolean(model.lastError)),
+      status: "ready",
       serviceVersion: PROJECT_VERSION,
       ...(MEMORY_RUNTIME_BUILD_ID ? { buildId: MEMORY_RUNTIME_BUILD_ID } : {}),
       protocolVersion: MEMORY_PROTOCOL_VERSION,
@@ -968,6 +1261,7 @@ export class MemoryService {
       storage: {
         ...backend,
         schemaVersion: String(schema.version),
+        targetSchemaVersion: schema.version,
         ready: schema.version > 0,
         lastMigrationId: schema.lastMigrationId
       },
@@ -1003,6 +1297,29 @@ export class MemoryService {
           }
         : {}),
       serverTime: nowIso()
+    };
+  }
+
+  async embedTexts(
+    texts: string[],
+    role: "query" | "document" = "document"
+  ): Promise<{
+    embeddings: number[][];
+    model: { provider: string; model: string; mode: "cloud" | "local" | "custom"; dimension: number };
+  }> {
+    const embeddings = await this.embedder.embed(texts, role);
+    const dimension = embeddings[0]?.length ?? 0;
+    if (dimension < 1 || embeddings.some((embedding) => embedding.length !== dimension)) {
+      throw new MemoryServiceError("internal", "embedding provider returned inconsistent vector dimensions");
+    }
+    return {
+      embeddings,
+      model: {
+        provider: this.embedder.config.provider,
+        model: this.embedder.config.model || this.embedder.config.provider,
+        mode: this.config.embedding.mode,
+        dimension
+      }
     };
   }
 
@@ -1049,8 +1366,12 @@ export class MemoryService {
     this.appBudgetReconcile.nextAttemptAtMs = 0;
     this.startAppBudgetReconcile();
     if (!requiresRestart && request.restartFailedProcessing !== false) {
+      this.workerRunner.resumeJobsAfterConfigurationChange();
       this.restartFailedProcessing(reloadedAt);
+      for (const { before, after } of this.repos.runtime.requeueFailedEpisodeAssignments(reloadedAt)) this.workerHandlers.appendJobChange(after, "queued", before);
+      this.capturePendingListener?.();
     }
+    this.workerRunner.notifyWorkAvailable();
     serviceLogger.info("config.reloaded", {
       changed,
       requiresRestart,
@@ -1111,8 +1432,13 @@ export class MemoryService {
     if (!this.memoryAddEnabled()) {
       return scopedRun();
     }
+    // Recall responses depend on this gate. Do not replay a pre-gate response
+    // or a response produced while the opposite setting was active.
+    const recallPolicyKey = operation === "turn.start" || operation === "memory.search"
+      ? `:user-memory-recall:${this.config.algorithm.enableUserMemoryRecall === true}`
+      : "";
     const idempotencyKey = request.adapterId && request.requestId
-      ? `${operation}:${request.adapterId}:${request.requestId}`
+      ? `${operation}:${request.adapterId}:${request.requestId}${recallPolicyKey}`
       : undefined;
     if (!idempotencyKey) {
       return scopedRun();
@@ -1315,7 +1641,7 @@ export class MemoryService {
     return this.l3WorldModelContextReadModel.load(session);
   }
 
-  compactSession(sessionId: string, request: SessionCompactRequest = {}): {
+  async compactSession(sessionId: string, request: SessionCompactRequest = {}): Promise<{
     memorySnapshot: {
       summary: string;
       sourceTurnIds: string[];
@@ -1329,8 +1655,11 @@ export class MemoryService {
     syncCursor?: string;
     jobs: JobRef[];
     serverTime: string;
-  } {
-    return this.sessionTurns.compactSession(sessionId, this.withTimeZone(request));
+  }> {
+    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
+      { userText: request.summary ?? "" },
+      () => this.sessionTurns.compactSession(sessionId, this.withTimeZone(request))
+    )));
   }
 
   async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
@@ -1354,19 +1683,33 @@ export class MemoryService {
     return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
   }
 
-  completeSourceTurn(request: SourceTurnCompleteRequest): SourceTurnCompleteResponse {
-    // Native scans have no Hook envelope. Use the configured owner only when
-    // the request (including authenticated scope) did not provide one.
-    const response = this.sessionTurns.completeSourceTurn(this.withTimeZone({
-      ...request,
-      namespace: {
-        source: request.sourceTurn?.source,
-        profileId: request.sourceTurn?.profileId,
-        sessionKey: request.sourceTurn?.conversationId,
-        ...request.namespace,
-        userId: request.namespace?.userId ?? this.config.userId
-      }
-    }));
+  private writeCaptureTransaction<T>(operation: () => T, signal?: AbortSignal): Promise<T> {
+    return this.panelWrites.run(async () => this.repos.transaction(operation),
+      signal ? AbortSignal.any([signal, this.budgetAbort.signal]) : this.budgetAbort.signal);
+  }
+
+  private async acceptCapture<T>(execute: () => Promise<T>): Promise<T> {
+    const result = await execute();
+    this.capturePendingListener?.();
+    return result;
+  }
+
+  async completeSourceTurn(request: SourceTurnCompleteRequest, signal?: AbortSignal): Promise<SourceTurnCompleteResponse> {
+    // Native scans and Hooks use the same device-owned memory identity,
+    // regardless of the current account or a legacy authenticated envelope.
+    const response = await this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
+      { userText: request.query, turnId: request.sourceTurn?.turnId },
+      () => this.sessionTurns.completeSourceTurn(this.withTimeZone({
+        ...request,
+        namespace: {
+          source: request.sourceTurn?.source,
+          profileId: request.sourceTurn?.profileId,
+          sessionKey: request.sourceTurn?.conversationId,
+          ...request.namespace,
+          userId: DEVICE_MEMORY_OWNER
+        }
+      })), signal
+    )));
     serviceLogger.info("source_turn.complete", {
       source: request.sourceTurn?.source,
       profileId: request.sourceTurn?.profileId,
@@ -1383,8 +1726,11 @@ export class MemoryService {
     return response;
   }
 
-  completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): CompleteTurnResponse {
-    return this.sessionTurns.completeTurn(turnId, this.withTimeZone(request));
+  async completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>, signal?: AbortSignal): Promise<CompleteTurnResponse> {
+    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
+      { userText: request.query, turnId },
+      () => this.sessionTurns.completeTurn(turnId, this.withTimeZone(request)), signal
+    )));
   }
 
   async observeTool(input: ToolObserveRequest): Promise<{
@@ -1396,11 +1742,11 @@ export class MemoryService {
     syncCursor?: string;
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.sessionTurns.observeTool(this.withTimeZone(input)));
+    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.observeTool(this.withTimeZone(input))));
   }
 
 
-  subagentStart(input: SubagentStartRequest): {
+  async subagentStart(input: SubagentStartRequest): Promise<{
     ok: true;
     eventId: string;
     childSessionId?: string;
@@ -1408,12 +1754,18 @@ export class MemoryService {
     changeSeq: number;
     syncCursor: string;
     serverTime: string;
-  } {
-    return this.sessionTurns.subagentStart(this.withTimeZone(input));
+  }> {
+    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
+      { userText: input.task ?? "" },
+      () => this.sessionTurns.subagentStart(this.withTimeZone(input))
+    )));
   }
 
-  subagentComplete(input: SubagentCompleteRequest): CompleteTurnResponse {
-    return this.sessionTurns.subagentComplete(this.withTimeZone(input));
+  async subagentComplete(input: SubagentCompleteRequest): Promise<CompleteTurnResponse> {
+    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
+      { userText: input.summary ?? "Subagent completed" },
+      () => this.sessionTurns.subagentComplete(this.withTimeZone(input))
+    )));
   }
 
   async repairSuggestion(input: RepairSuggestionRequest): Promise<{
@@ -2138,8 +2490,45 @@ export class MemoryService {
     return this.episodeReadModel.timeline(this.withTimeZone(input));
   }
 
-  getMemory(id: string, request: RequestEnvelope = {}): MemoryGetResponse {
-    return this.episodeReadModel.getMemory(id, this.withTimeZone(request));
+  getPanelMemory(id:string,request:RequestEnvelope={},local=this.mode!=="cloud"):MemoryGetResponse {
+    if(!local)return this.getMemory(id,request,false);
+    this.assertMemorySearchEnabled();
+    const userMemory=this.repos.userMemories.getForDisplay(id);
+    if(userMemory){
+      const item=userMemoryPanelItem(userMemory);
+      const detail={...item,memoryLayer:"UserMemory" as const,body:userMemory.content,sourceMemoryIds:[],metadata:item.metadata??{}};
+      return {...detail,item:detail,refs:{},etag:`user-memory-${userMemory.updatedAt}`};
+    }
+    const memory=this.repos.memories.getForDisplay(id);
+    if(memory && (memory.status==="deleted" || !this.repos.memories.visibleEvidenceIds([id],true).has(id)))
+      throw new MemoryServiceError("not_found","Memory is unavailable");
+    return this.episodeReadModel.getMemory(id,this.withTimeZone(request),true);
+  }
+
+  getMemory(id: string, request: RequestEnvelope = {}, local = this.mode !== "cloud"): MemoryGetResponse {
+    this.assertMemorySearchEnabled();
+    const userMemory = this.repos.userMemories.getForDisplay(id);
+    if (userMemory) {
+      if (!local && !this.storedOwnerMatches(userMemory.userId, request.namespace,
+        () => this.deviceUserMemoryMatchesNamespace(userMemory, request.namespace!))) {
+        throw new MemoryServiceError("not_found", "Memory is unavailable");
+      }
+      const item = userMemoryPanelItem(userMemory);
+      const detail = {...item, memoryLayer: "UserMemory" as const, body: userMemory.content, sourceMemoryIds: [], metadata: item.metadata ?? {}};
+      return {...detail, item: detail, refs: {}, etag: `user-memory-${userMemory.updatedAt}`};
+    }
+    if (!local) {
+      const episode = readableMemoryIdKind(id) === "episode" ? this.repos.runtime.getEpisode(id) : undefined;
+      const memory = episode ? undefined : this.repos.memories.getForDisplay(id);
+      const stored = episode ?? memory;
+      if (!stored || !this.storedOwnerMatches(stored.userId, request.namespace, () => episode
+        ? this.deviceEpisodeMatchesNamespace(episode, request.namespace!)
+        : this.deviceMemoryMatchesNamespace(memory!, request.namespace!))) {
+        throw new MemoryServiceError("not_found", "Memory is unavailable");
+      }
+    }
+    return this.episodeReadModel.withLocality(local, local ? undefined : this.nonlocalReadAccess(request.namespace!))
+      .getMemory(id, this.withTimeZone(request));
   }
 
   async worldModelQuery(input: InternalMemorySearchRequest): Promise<{
@@ -2214,7 +2603,7 @@ export class MemoryService {
     return this.skillReadModel.getSkill(skillId, this.withTimeZone(request));
   }
 
-  useSkill(skillId: string, request: SkillUseRequest): {
+  async useSkill(skillId: string, request: SkillUseRequest): Promise<{
     skillId: string;
     trialId: string;
     status: "pending";
@@ -2222,8 +2611,11 @@ export class MemoryService {
     syncCursor: string;
     serverTime: string;
     duplicate?: boolean;
-  } {
-    return this.skillReadModel.useSkill(skillId, this.withTimeZone(request));
+  }> {
+    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
+      { userText: `Use skill ${skillId}` },
+      () => this.skillReadModel.useSkill(skillId, this.withTimeZone(request))
+    )));
   }
 
   async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
@@ -2319,9 +2711,14 @@ export class MemoryService {
   clearAllData(): { ok: true; cleared: Record<string, number>; clearedAt: string; serverTime: string } {
     this.assertMemoryAddEnabled();
     const clearedAt = nowIso();
+    const cleared = this.repos.clearAllMemoryData();
+    this.panelBrowse?.clear();
+    this.panelStats?.stop(); this.panelStats=undefined;
+    this.panelOverviewStats?.stop(); this.panelOverviewStats=undefined;
+    if(this.repos.db.name!==":memory:")void this.readPanel("cacheClear",[]).catch(()=>undefined);
     return {
       ok: true,
-      cleared: this.repos.clearAllMemoryData(),
+      cleared,
       clearedAt,
       serverTime: nowIso()
     };
@@ -2355,6 +2752,7 @@ export class MemoryService {
     const result = this.repos.runtime.importBundleTables(request.bundle.tables, {
       conflictStrategy: request.conflictStrategy ?? "skip"
     });
+    this.sessionTurns.migrateLegacyCaptures();
     const importedVectors = importedMemoryVectors(request.bundle.tables.memory_vectors);
     this.repos.vectors.importRows(importedVectors);
     result.inserted.memory_vectors = importedVectors.length;
@@ -2454,7 +2852,7 @@ export class MemoryService {
     };
   }
 
-  deleteMemory(id: string, request: MemoryGovernanceRequest = {}): {
+  deleteMemory(id: string, request: MemoryGovernanceRequest = {}, local = this.mode !== "cloud"): {
     ok: true;
     id: string;
     kind: MemoryKind;
@@ -2467,10 +2865,8 @@ export class MemoryService {
     this.assertMemoryAddEnabled();
     const userMemory = this.repos.userMemories.get(id);
     if (userMemory) {
-      const namespaceUserId = request.namespace?.userId;
-      if (namespaceUserId && namespaceUserId !== userMemory.userId) {
-        throw new MemoryServiceError("forbidden", "user memory belongs to a different user");
-      }
+      if (!local) this.assertStoredOwnerInScope(userMemory.userId, request.namespace,
+        () => this.deviceUserMemoryMatchesNamespace(userMemory, request.namespace!));
       const deleted = this.repos.userMemories.softDelete(userMemory.id, nowIso());
       if (!deleted) throw new MemoryServiceError("not_found", `user memory not found: ${id}`);
       const changeSeq = this.repos.runtime.appendChange({
@@ -2516,6 +2912,8 @@ export class MemoryService {
       };
     }
     const memory = this.requireExistingMemory(id);
+    if (!local) this.assertStoredOwnerInScope(memory.userId, request.namespace,
+      () => this.deviceMemoryMatchesNamespace(memory, request.namespace!));
     const claimsV2WorldModel = memory.properties.internal_info.schema_version === 2 &&
       memory.memoryLayer === "L3";
     const strictV2WorldModel = isStrictL3WorldModelV2Memory(memory);
@@ -2523,11 +2921,7 @@ export class MemoryService {
       throw new MemoryServiceError("conflict", "invalid L3 World Model v2 record");
     }
     if (strictV2WorldModel) {
-      const effectiveUserId = normalizeNamespace(request.namespace).userId;
       const projectId = typeof memory.info.project_id === "string" ? memory.info.project_id : null;
-      if (effectiveUserId !== memory.userId) {
-        throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different user");
-      }
       if (request.namespace?.projectId && request.namespace.projectId !== projectId) {
         throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different project");
       }
@@ -2589,7 +2983,7 @@ export class MemoryService {
     };
   }
 
-  recallEvidence(queryId: string, request: RequestEnvelope = {}): {
+  recallEvidence(queryId: string, request: RequestEnvelope = {}, local = this.mode !== "cloud"): {
     recallEventId: string;
     queryId: string;
     query: string;
@@ -2603,17 +2997,37 @@ export class MemoryService {
     serverTime: string;
   } {
     this.assertMemorySearchEnabled();
-    const event = this.repos.runtime.getRecallEventByQueryId(queryId);
+    if (!local && !request.namespace?.userId) throw new MemoryServiceError("not_found", "Recall evidence is unavailable");
+    const namespace = request.namespace;
+    const event = this.repos.runtime.getRecallEventByQueryId(queryId, local ? undefined : {
+      ...normalizeNamespace(namespace), userId: namespace!.userId!
+    });
     if (!event) throw new MemoryServiceError("not_found", `recall event not found: ${queryId}`);
-    if (request.namespace?.userId && request.namespace.userId !== event.userId) {
-      throw new MemoryServiceError("forbidden", "recall event belongs to a different user");
-    }
     const eventRequest = isRecord(event.request) ? event.request : {};
     const evidence = isRecord(eventRequest.recallEvidence) ? eventRequest.recallEvidence : {};
     const storedHits = Array.isArray(evidence.hits)
       ? evidence.hits.filter(isRecord) as unknown as RecallHit[]
       : [];
+    const permitted = new Map<string, boolean>();
+    const canReadMemory = (id: string): boolean => {
+      if (!permitted.has(id)) permitted.set(id, this.recallMemoryMatchesNamespace(id, namespace!));
+      return permitted.get(id)!;
+    };
     const hits = storedHits.flatMap((hit) => {
+      if (!local) {
+        // A merged snapshot's top-level text can aggregate every member. Keep it
+        // only when the complete snapshot and all declared references are proven.
+        if ((hit.members !== undefined && !Array.isArray(hit.members))
+          || (hit.memberMemoryIds !== undefined && !Array.isArray(hit.memberMemoryIds))) return [];
+        const ids = [hit.id, ...(hit.memberMemoryIds ?? []), ...(hit.members ?? []).map(member => member?.id)];
+        if (!ids.every(id => typeof id === "string" && canReadMemory(id))) return [];
+        if (hit.sourceTurnId) {
+          const raw = this.repos.runtime.getRawTurn(hit.sourceTurnId);
+          if (!raw || !this.recallRawTurnMatchesNamespace(raw, namespace!)) return [];
+        }
+        if (!this.recallHitSourceMatchesNamespace(hit, canReadMemory)) return [];
+        return [hit];
+      }
       if (!hit.members?.length) {
         return this.isDeletedRecallMemory(hit.id) ? [] : [hit];
       }
@@ -2631,8 +3045,9 @@ export class MemoryService {
     const rawTurn = event.sessionId && event.turnId
       ? this.repos.runtime.getRawTurnBySessionTurn(event.sessionId, event.turnId)
       : undefined;
-    const turnComplete = rawTurn && isRecord(rawTurn.messagePayload?.turn_complete)
-      ? rawTurn.messagePayload.turn_complete
+    const readableRawTurn = rawTurn && (local || this.recallRawTurnMatchesNamespace(rawTurn, namespace!)) ? rawTurn : undefined;
+    const turnComplete = readableRawTurn && isRecord(readableRawTurn.messagePayload?.turn_complete)
+      ? readableRawTurn.messagePayload.turn_complete
       : undefined;
     const recordedCapture = turnComplete && isRecord(turnComplete.memory_capture)
       ? turnComplete.memory_capture
@@ -2643,39 +3058,45 @@ export class MemoryService {
       query: event.query,
       hits,
       diagnostics: {
-        candidateMemoryIds: event.candidateMemoryIds ?? [],
-        injectedMemoryIds: event.injectedMemoryIds ?? [],
+        candidateMemoryIds: local ? event.candidateMemoryIds ?? [] : (event.candidateMemoryIds ?? []).filter(canReadMemory),
+        injectedMemoryIds: local ? event.injectedMemoryIds ?? [] : (event.injectedMemoryIds ?? []).filter(canReadMemory),
         ...(recordedCapture
-          ? { capture: recordedCapture }
-          : rawTurn ? { capture: { status: "pending" } } : {})
+          ? { capture: local ? recordedCapture : this.scopedRecallCapture(recordedCapture, canReadMemory) }
+          : readableRawTurn ? { capture: { status: "pending" } } : {})
       },
       createdAt: event.createdAt,
       serverTime: nowIso()
     };
   }
 
-  deletePanelTask(id: string, request: MemoryGovernanceRequest = {}): {
+  deletePanelTask(id: string, request: MemoryGovernanceRequest = {}, local = this.mode !== "cloud"): {
     ok: true;
     id: string;
     deletedMemoryIds: string[];
     serverTime: string;
   } {
     this.assertMemoryAddEnabled();
-    const episode = this.requireEpisode(id);
-    this.assertEpisodeInScope(episode, request.namespace);
     const deletedMemoryIds: string[] = [];
 
     this.repos.transaction(() => {
+      const episode = this.requireEpisode(id);
+      if (!local) this.assertStoredOwnerInScope(episode.userId, request.namespace,
+        () => this.deviceEpisodeMatchesNamespace(episode, request.namespace!));
+      if (local || episode.userId !== DEVICE_MEMORY_OWNER) this.assertPanelEpisodeInScope(episode, request.namespace);
+      if (!local && this.repos.runtime.hasRawTurnsOutsideOwner(episode.id, episode.userId)) {
+        throw new MemoryServiceError("forbidden", "Task contains raw turns belonging to a different owner");
+      }
       const spanIds = new Set(this.repos.memories.listTaskSpanIds(
-        episode.userId, episode.id, episode.l1MemoryIds
+        episode.userId, episode.id, episode.l1MemoryIds, local
       ));
       for (const spanId of spanIds) {
-        this.deleteMemory(spanId, request);
+        this.deleteMemory(spanId, request, local);
         deletedMemoryIds.push(spanId);
       }
-      for (const memoryId of episode.l1MemoryIds) {
+      const currentL1Ids = this.repos.memories.ownedEpisodeL1Ids(episode, local);
+      for (const memoryId of currentL1Ids) {
         if (!this.repos.memories.get(memoryId)) continue;
-        this.deleteMemory(memoryId, request);
+        this.deleteMemory(memoryId, request, local);
         deletedMemoryIds.push(memoryId);
       }
       if (!this.repos.runtime.deleteEpisode(id)) {
@@ -2810,7 +3231,7 @@ export class MemoryService {
     excludedSourceAgents?: string[];
     limit?: number;
     offset?: number;
-  } = {}): {
+  } = {},local=this.mode!=="cloud"): {
     logs: ReturnType<Repositories["runtime"]["listApiLogs"]>["logs"];
     total: number;
     limit: number;
@@ -2818,7 +3239,7 @@ export class MemoryService {
     nextOffset?: number;
     serverTime: string;
   } {
-    return this.panelReadModel.apiLogs(input);
+    return this.panelReadModel.apiLogs(input,local);
   }
 
   serviceMetrics(input: RequestEnvelope & { userId?: string } = {}): {
@@ -2872,7 +3293,7 @@ export class MemoryService {
     etag: string;
     serverTime: string;
   } {
-    return this.panelReadModel.panelOverview(this.withTimeZone(input));
+    return this.panelReadModel.panelOverview(this.panelInput(input));
   }
 
   panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
@@ -2890,7 +3311,7 @@ export class MemoryService {
     }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
-    return this.panelReadModel.panelOverviewSummary(this.withTimeZone(input));
+    return this.panelReadModel.panelOverviewSummary(this.panelInput(input));
   }
 
   panelAnalysis(input: RequestEnvelope & { userId?: string } = {}): {
@@ -2909,11 +3330,12 @@ export class MemoryService {
       series: Array<{ name: string; points: Array<{ date: string; avgMs: number }> }>;
     };
   } {
-    return this.panelReadModel.panelAnalysis(this.withTimeZone(input));
+    return this.panelReadModel.panelAnalysis(this.panelInput(input));
   }
 
   panelItems(input: RequestEnvelope & {
     userId?: string;
+    userSummary?: boolean;
     layer?: RecallMemoryLayer;
     status?: "activated" | "resolving" | "archived" | "deleted";
     q?: string;
@@ -2935,7 +3357,7 @@ export class MemoryService {
     nextCursor?: string;
     serverTime: string;
   } {
-    return this.panelReadModel.panelItems(this.withTimeZone(input));
+    return this.panelReadModel.panelItems(this.panelInput(input));
   }
 
   panelTasks(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }): {
@@ -2954,7 +3376,19 @@ export class MemoryService {
     hasPrev: boolean;
     serverTime: string;
   } {
-    return this.panelReadModel.panelTasks(this.withTimeZone(input));
+    return this.panelReadModel.panelTasks(this.panelInput(input));
+  }
+
+  panelTaskSummaries(input: Parameters<PanelReadModel["panelTaskSummaries"]>[0]) {
+    return this.panelReadModel.panelTaskSummaries(this.panelInput(input));
+  }
+
+  panelTaskDetail(id: string, input: Parameters<PanelReadModel["panelTaskDetail"]>[1]) {
+    return this.panelReadModel.panelTaskDetail(id, this.panelInput(input));
+  }
+
+  panelTaskField(id: string, turnId: string, field: Parameters<PanelReadModel["panelTaskField"]>[2], input: Parameters<PanelReadModel["panelTaskField"]>[3]) {
+    return this.panelReadModel.panelTaskField(id, turnId, field, this.panelInput(input));
   }
 
   panelChanges(input: RequestEnvelope & {
@@ -3010,85 +3444,83 @@ export class MemoryService {
     job?: JobRef;
     serverTime: string;
   } {
-    return this.importJobs.retryMemoryProcessing(memoryId, request);
+    // The existing operation validates memory ownership before touching its raw work.
+    const result = this.importJobs.retryMemoryProcessing(memoryId, request);
+    const memory = this.repos.memories.get(memoryId);
+    const rawId = memory ? rawTurnIdFromMemory(memory) : undefined;
+    const retried = rawId ? this.repos.runtime.requeueFailedEpisodeAssignments(nowIso(), rawId) : [];
+    for (const { before, after } of retried) this.workerHandlers.appendJobChange(after, "queued", before);
+    if (retried.length) this.capturePendingListener?.();
+    return retried.length ? { ...result, accepted: true, job: result.job ?? jobToRef(retried[0]!.after) } : result;
   }
 
-  rebuildEmbeddings(): {
-    accepted: true;
-    enqueued: number;
-    serverTime: string;
-  } {
+  private embeddingMaintenance(): EmbeddingMaintenance {
+    return new EmbeddingMaintenance({
+      repos: this.repos,
+      reader: this.embeddingMaintenanceReader,
+      embedder: this.embedder,
+      userId: DEVICE_MEMORY_OWNER,
+      enqueueMemory: (memory, text, at, vectorField = embeddingRetryVectorFieldForMemory(memory)) => {
+        const existing = this.repos.runtime.getEmbeddingRetryByTarget(
+          embeddingRetryTargetKindForMemory(memory), memory.id, vectorField
+        );
+        // Join an already running job without clearing its worker lease.
+        if (existing?.status === "pending" || existing?.status === "in_progress") return existing.id;
+        return this.workerHandlers.enqueueEmbeddingRetry(memory, text, at, vectorField).id;
+      },
+      enqueueUserMemory: (memory, at) => this.workerHandlers.enqueueJob({
+        jobType: "user_memory_embedding", userId: memory.userId, targetMemoryId: memory.id,
+        payload: { contentHash: stableHash(memory.content) }, maxAttempts: 6, createdAt: at
+      }).id
+    });
+  }
+
+  rebuildEmbeddings(mode: "repair" | "rebuild" = "rebuild") {
     this.assertMemoryAddEnabled();
-    const at = nowIso();
-    let offset = 0;
-    let enqueued = 0;
-    for (;;) {
-      const memories = this.repos.memories.list({}, 250, offset);
-      for (const memory of memories) {
-        this.workerHandlers.enqueueEmbeddingRetry(memory, memory.memoryValue, at);
-        enqueued += 1;
-      }
-      if (memories.length < 250) break;
-      offset += memories.length;
-    }
-    const userId = this.config.userId?.trim() || "local-user";
-    offset = 0;
-    for (;;) {
-      const userMemories = this.repos.userMemories.listForPanel({
-        userId,
-        status: "active",
-        limit: 250,
-        offset
-      });
-      for (const memory of userMemories) {
-        this.workerHandlers.enqueueJob({
-          jobType: "user_memory_embedding",
-          userId: memory.userId,
-          targetMemoryId: memory.id,
-          payload: { contentHash: stableHash(memory.content) },
-          maxAttempts: 6,
-          createdAt: at
-        });
-        enqueued += 1;
-      }
-      if (userMemories.length < 250) break;
-      offset += userMemories.length;
-    }
-    return { accepted: true, enqueued, serverTime: at };
+    return this.withModelTaskContext(async () => {
+      const dimension = mode === "repair" ? await this.currentEmbeddingDimension() : undefined;
+      if (mode === "repair" && !dimension) throw new MemoryServiceError("invalid_argument", "embedding model is not configured");
+      return this.embeddingMaintenance().start(mode, dimension);
+    });
   }
 
-  embeddingMaintenanceStats(): {
-    dimension: number;
-    available: boolean;
-    totalSlots: number;
-    ready: number;
-    missing: number;
-    dimMismatch: number;
-    needsRepair: number;
-  } {
-    const userId = this.config.userId?.trim() || "local-user";
-    const regular = this.repos.vectors.maintenanceDimensionCounts();
-    const user = this.repos.userMemories.embeddingDimensionCounts(userId);
-    const dimensions = new Map<number, number>();
-    for (const row of [...regular.dimensions, ...user.dimensions]) {
-      if (row.dimension > 0) dimensions.set(row.dimension, (dimensions.get(row.dimension) ?? 0) + row.count);
-    }
-    const [dimension = 0] = [...dimensions.entries()]
-      .sort((left, right) => right[1] - left[1] || right[0] - left[0])[0] ?? [];
-    const stored = [...dimensions.values()].reduce((sum, count) => sum + count, 0);
-    const totalSlots = regular.totalSlots + user.totalSlots;
-    const ready = dimension > 0 ? dimensions.get(dimension) ?? 0 : 0;
-    const missing = Math.max(0, totalSlots - stored);
-    const dimMismatch = Math.max(0, stored - ready);
-    return {
-      dimension,
-      available: this.embedder.status().configured,
-      totalSlots,
-      ready,
-      missing,
-      dimMismatch,
-      needsRepair: missing + dimMismatch
-    };
+  embeddingMaintenanceProgress(runId?: string) {
+    return this.withModelTaskContext(() => this.embeddingMaintenance().progress(runId));
+  }
+
+  embeddingMaintenanceStats() {
+    return this.withModelTaskContext(async () => {
+      let dimension: number;
+      try {
+        dimension = await this.currentEmbeddingDimension();
+      } catch (error) {
+        return { ...await this.embeddingMaintenance().stats(0), dimensionError: error instanceof Error ? error.message : String(error) };
+      }
+      return this.embeddingMaintenance().stats(dimension);
+    });
+  }
+
+  private currentEmbeddingDimension(): Promise<number> {
+    if (!this.embedder.status().configured) return Promise.resolve(0);
+    const requested = this.embedder.config.extraBody?.dimensions;
+    if (typeof requested === "number" && Number.isSafeInteger(requested) && requested > 0) return Promise.resolve(requested);
+    if (this.embedder.config.provider === "local" && this.embedder.config.model === "Xenova/all-MiniLM-L6-v2") return Promise.resolve(384);
+    // Pin the routed model for the probe; changing any embedding configuration
+    // invalidates the cached result. Concurrent panel refreshes share one probe.
+    const key = stableHash(stableStringify(this.embedder.config));
+    if (this.embeddingDimensionProbe?.key === key) return this.embeddingDimensionProbe.value;
+    const value = probeEmbedding(this.embedder).then(result => {
+      if (!result.ok || !result.dimensions) {
+        throw new MemoryServiceError("internal", result.error ?? "embedding model returned no dimension", 502);
+      }
+      return result.dimensions;
+    });
+    const probe = { key, value };
+    this.embeddingDimensionProbe = probe;
+    void value.catch(() => {
+      if (this.embeddingDimensionProbe === probe) this.embeddingDimensionProbe = undefined;
+    });
+    return value;
   }
 
   private restartFailedProcessing(at: string, limit = 10000): number {
@@ -3104,7 +3536,11 @@ export class MemoryService {
   }
 
   nextWorkerRunAt(): number | undefined {
-    return this.workerRunner.nextWorkerRunAt();
+    const workerAt = this.workerRunner.nextWorkerRunAt();
+    const upgradeAt = this.config.algorithm.enableMemoryAdd && !this.shouldDeferBudgetedEmbedding()
+      ? this.embeddingMaintenance().nextUpgradeAttemptAt() : undefined;
+    const times = [workerAt, upgradeAt].filter((time): time is number => Number.isFinite(time));
+    return times.length ? Math.min(...times) : undefined;
   }
 
   memoryTokenBudgetSnapshot() {
@@ -3130,12 +3566,11 @@ export class MemoryService {
     request: RequestEnvelope & {
       targetMemoryIds?: string[];
       priorityCohortOnly?: boolean;
-    } = {}
+    } = {},
+    execution: WorkerRunExecution = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
-    await this.ensureAppBudgetReconciled();
-    const result = await this.workerRunner.runWorkerOnce(limit, request);
-    this.reconcileAutomaticHistorySkills(nowIso());
-    return result;
+    retryFtsRepairs(this.repos.db);
+    return this.workerRunner.runWorkerOnce(limit, request, execution);
   }
 
   private async queryVector(query: string): Promise<number[] | undefined> {
@@ -3199,7 +3634,7 @@ export class MemoryService {
     return {
       id: input.id ?? newId(memoryIdPrefix(input.layer, input.kind)),
       timeline: at,
-      userId: input.userId,
+      userId: DEVICE_MEMORY_OWNER,
       conversationId: input.conversationId,
       sessionId: input.sessionId,
       agentId: input.agentId,
@@ -3404,7 +3839,7 @@ export class MemoryService {
     });
   }
 
-  private subagentStartNoWrite(input: SubagentStartRequest): ReturnType<MemoryService["subagentStart"]> {
+  private subagentStartNoWrite(input: SubagentStartRequest): Awaited<ReturnType<MemoryService["subagentStart"]>> {
     const cursor = this.readOnlyCursor(input.namespace);
     const rawTurnId = `raw_${stableHash(`readonly:subagent:${input.sessionId}:${input.subagentId ?? input.task}`).slice(0, 20)}`;
     return {
@@ -3502,7 +3937,6 @@ export class MemoryService {
     }
     const normalized = normalizeNamespace(namespace);
     const conflicts = [
-      normalized.userId !== session.userId,
       normalized.source !== session.source,
       normalized.profileId !== session.profileId,
       (normalized.projectId ?? null) !== (session.projectId ?? null),
@@ -3515,6 +3949,161 @@ export class MemoryService {
   }
 
   private assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {
+    this.assertMemoryTenantScope(memory,namespace);
+  }
+
+  private storedOwnerMatches(owner: string | null | undefined, namespace?: RuntimeNamespace, deviceProof?: () => boolean): boolean {
+    return Boolean(namespace?.userId && (owner === DEVICE_MEMORY_OWNER ? deviceProof?.() : owner === namespace.userId));
+  }
+
+  private recallMemoryMatchesNamespace(id: string, namespace: RuntimeNamespace): boolean {
+    if (typeof id !== "string" || !id || this.isDeletedRecallMemory(id)) return false;
+    const userMemory = this.repos.userMemories.getForDisplay(id);
+    if (userMemory) return this.storedOwnerMatches(userMemory.userId, namespace, () => true)
+      && this.deviceUserMemoryMatchesNamespace(userMemory, namespace);
+    const memory = this.repos.memories.getForDisplay(id);
+    if (memory) return this.storedOwnerMatches(memory.userId, namespace, () => true)
+      && this.deviceMemoryMatchesNamespace(memory, namespace);
+    const episode = this.repos.runtime.getEpisode(id);
+    return Boolean(episode && this.storedOwnerMatches(episode.userId, namespace, () => true)
+      && this.deviceEpisodeMatchesNamespace(episode, namespace));
+  }
+
+  private recallRawTurnMatchesNamespace(raw: RawTurnRecord, namespace: RuntimeNamespace): boolean {
+    return this.storedOwnerMatches(raw.userId, namespace, () => true)
+      && this.deviceRawTurnMatchesNamespace(raw.id, namespace);
+  }
+
+  private recallHitSourceMatchesNamespace(hit: RecallHit, canReadMemory: (id: string) => boolean): boolean {
+    const memory = this.repos.memories.getForDisplay(hit.id);
+    const internal = memory?.properties.internal_info;
+    const external = memory?.memoryLayer === "Skill" && internal?.read_only === true;
+    if (hit.readOnly !== undefined && hit.readOnly !== Boolean(external)) return false;
+    if (hit.sourceAgentId && (!external || internal?.source_agent_id !== hit.sourceAgentId)) return false;
+    if (hit.sourceSkillVersion && (!external || internal?.source_skill_version !== hit.sourceSkillVersion)) return false;
+    if (!hit.sourceSkillId) return true;
+    if (external) return internal?.source_skill_id === hit.sourceSkillId;
+    const source = this.repos.memories.getForDisplay(hit.sourceSkillId);
+    return Boolean(source?.memoryLayer === "Skill" && canReadMemory(source.id));
+  }
+
+  private scopedRecallCapture(capture: Record<string, unknown>, canReadMemory: (id: string) => boolean): Record<string, unknown> {
+    const result: Record<string, unknown> = { status: capture.status === "completed" ? "completed" : "pending" };
+    if (typeof capture.decided_at === "string") result.decided_at = capture.decided_at;
+    if (Array.isArray(capture.l1)) result.l1 = capture.l1.filter(isRecord).flatMap(item => {
+      const id = item.memory_id;
+      const memory = typeof id === "string" ? this.repos.memories.getForDisplay(id) : undefined;
+      return memory?.memoryLayer === "L1" && canReadMemory(memory.id)
+        && typeof item.written === "boolean" && typeof item.policy_eligible === "boolean"
+        ? [{ memory_id: memory.id, written: item.written, policy_eligible: item.policy_eligible }] : [];
+    });
+    const user = isRecord(capture.user_memory) ? capture.user_memory : undefined;
+    if (user && typeof user.written === "boolean" && ["none", "created", "updated", "confirmed", "corrected"].includes(String(user.action))) {
+      const ids = [user.memory_id, user.target_memory_id].filter(id => id !== undefined);
+      if (ids.every(id => typeof id === "string" && this.repos.userMemories.getForDisplay(id) && canReadMemory(id))) {
+        result.user_memory = { written: user.written, action: user.action,
+          ...(typeof user.memory_id === "string" ? { memory_id: user.memory_id } : {}),
+          ...(typeof user.target_memory_id === "string" ? { target_memory_id: user.target_memory_id } : {}) };
+      }
+    }
+    return result;
+  }
+
+  private assertStoredOwnerInScope(owner: string | null | undefined, namespace?: RuntimeNamespace, deviceProof?: () => boolean): void {
+    if (!this.storedOwnerMatches(owner, namespace, deviceProof)) {
+      throw new MemoryServiceError("forbidden", "Memory belongs to a different owner");
+    }
+  }
+
+  private sameDeviceNamespace(stored: RuntimeNamespace, requested: RuntimeNamespace): boolean {
+    const identity = (value: RuntimeNamespace) => {
+      const namespace = normalizeNamespace(value);
+      return { tenantId: namespace.tenantId ?? null, source: namespace.source, profileId: namespace.profileId,
+        projectId: namespace.projectId ?? namespace.workspaceId ?? null, workspaceId: namespace.workspaceId ?? null };
+    };
+    // Use structured identities; the display/cursor namespace ID is a lossy colon join.
+    return stableHash(identity(stored)) === stableHash(identity(requested));
+  }
+
+  private deviceSessionMatchesNamespace(session: SessionRecord, namespace: RuntimeNamespace): boolean {
+    const sourceKey = session.meta.source_namespace_key;
+    if (sourceKey !== undefined) {
+      if (sourceKey !== stableHash({ tenantId: namespace.tenantId ?? null,
+        projectId: namespace.projectId ?? null, workspaceId: namespace.workspaceId ?? null })) return false;
+    } else if (namespace.tenantId || session.meta.tenant_id || session.meta.tenantId) return false;
+    return this.sameDeviceNamespace({ ...namespaceForSession(session), tenantId: namespace.tenantId }, namespace);
+  }
+
+  private deviceMemoryMatchesNamespace(memory: MemoryRow, namespace: RuntimeNamespace): boolean {
+    const internal = memory.properties.internal_info;
+    if (isRecord(internal.external_evidence) || isRecord(internal.external_evidence_candidate)) {
+      return this.sameDeviceNamespace(externalEvidenceNamespaceForMemory(memory), namespace);
+    }
+    // Unscoped/imported records cannot establish an authenticated nonlocal identity.
+    if (!memory.agentId || !profileIdFromMemory(memory)) return false;
+    const session = memory.sessionId ? this.repos.runtime.getSession(memory.sessionId) : undefined;
+    if (memory.sessionId && (!session || !this.deviceSessionMatchesNamespace(session, namespace))) return false;
+    if (!session && namespace.tenantId) return false;
+    const rawId = rawTurnIdFromMemory(memory);
+    const captures = rawId ? this.repos.runtime.sourceTurnNamespacesForRawTurn(rawId) : [];
+    if (captures.length > 0) {
+      const normalized = normalizeNamespace(namespace);
+      const key = stableHash({ tenantId: namespace.tenantId ?? null,
+        projectId: namespace.projectId ?? null, workspaceId: namespace.workspaceId ?? null });
+      if (!captures.every(capture => capture.source === normalized.source
+        && capture.profileId === normalized.profileId && capture.namespaceKey === key)) return false;
+    } else if (namespace.tenantId) return false;
+    return this.sameDeviceNamespace({ ...namespaceForMemory(memory), tenantId: namespace.tenantId }, namespace);
+  }
+
+  private deviceRawTurnMatchesNamespace(id: string, namespace: RuntimeNamespace): boolean {
+    const raw = this.repos.runtime.getRawTurn(id);
+    const session = raw ? this.repos.runtime.getSession(raw.sessionId) : undefined;
+    if (!raw || raw.deletedAt || raw.redactedAt || !session
+      || (raw.userId !== DEVICE_MEMORY_OWNER && raw.userId !== namespace.userId)
+      || !this.deviceSessionMatchesNamespace(session, namespace)) return false;
+    const memories = this.repos.runtime.namespaceProofMemoryIdsForRawTurn(id);
+    return memories.length > 0 && memories.every(memoryId => {
+      const memory = this.repos.memories.getIncludingDeleted(memoryId);
+      return memory && (memory.userId === DEVICE_MEMORY_OWNER || memory.userId === namespace.userId)
+        && this.deviceMemoryMatchesNamespace(memory, namespace);
+    });
+  }
+
+  private deviceEpisodeMatchesNamespace(episode: EpisodeRecord, namespace: RuntimeNamespace): boolean {
+    if (!this.deviceSessionMatchesNamespace(this.requireSession(episode.sessionId), namespace)) return false;
+    const rawIds = this.repos.runtime.rawTurnIdsForEpisode(episode.id);
+    return rawIds.length > 0 && rawIds.every(id => this.deviceRawTurnMatchesNamespace(id, namespace));
+  }
+
+  private deviceUserMemoryMatchesNamespace(memory: UserMemoryRecord, namespace: RuntimeNamespace): boolean {
+    const refs = [...new Set([memory.sourceTurnId, ...memory.sourceTurnRefs].filter(Boolean))];
+    return refs.length > 0 && refs.every(id => this.deviceRawTurnMatchesNamespace(id, namespace));
+  }
+
+  private nonlocalReadAccess(namespace: RuntimeNamespace): EpisodeReadAccess {
+    const memories = new Map<string, boolean>(), rawTurns = new Map<string, boolean>(), episodes = new Map<string, boolean>();
+    const memo = (cache: Map<string, boolean>, id: string, check: () => boolean) => {
+      if (!cache.has(id)) cache.set(id, check());
+      return cache.get(id)!;
+    };
+    return {
+      memory: memory => memo(memories, memory.id, () => this.storedOwnerMatches(memory.userId, namespace,
+        () => this.deviceMemoryMatchesNamespace(memory, namespace))),
+      rawTurn: raw => memo(rawTurns, raw.id, () => this.storedOwnerMatches(raw.userId, namespace,
+        () => this.deviceRawTurnMatchesNamespace(raw.id, namespace))),
+      episode: episode => memo(episodes, episode.id, () => this.storedOwnerMatches(episode.userId, namespace,
+        () => this.deviceEpisodeMatchesNamespace(episode, namespace)))
+    };
+  }
+
+  private assertPanelEpisodeInScope(episode:EpisodeRecord,namespace?:RuntimeNamespace):void {
+    const session=this.requireSession(episode.sessionId);
+    const tenant=session.meta.tenant_id ?? session.meta.tenantId ?? null;
+    if(tenant!==(namespace?.tenantId??null))throw new MemoryServiceError("forbidden","task belongs to a different tenant");
+  }
+
+  private assertMemoryTenantScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {
     const internal = memory.properties.internal_info;
     // The local panel is shared across source/user/profile settings. History
     // keeps its original user ID across config changes; preserve panel deletion
@@ -3588,14 +4177,14 @@ export class MemoryService {
       if (session) {
         this.assertSessionInScope(session, request.namespace);
         return {
-          userId: session.userId,
+          userId: DEVICE_MEMORY_OWNER,
           conversationId: session.conversationId,
           namespace: namespaceForSession(session)
         };
       }
     }
     const namespace = normalizeNamespace(request.namespace);
-    const userId = request.userId ?? namespace.userId;
+    const userId = DEVICE_MEMORY_OWNER;
     return {
       userId,
       namespace: {
@@ -3770,7 +4359,6 @@ function namespaceIdFromSession(session: SessionRecord): string {
 function namespaceIdFromContext(namespace: RuntimeNamespace): string {
   return [
     namespace.tenantId,
-    namespace.userId,
     namespace.projectId ?? namespace.workspaceId,
     namespace.source,
     namespace.profileId
@@ -3876,6 +4464,7 @@ function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {
     embeddingMode: config.embedding.mode,
     memoryAddEnabled: config.algorithm.enableMemoryAdd,
     memorySearchEnabled: config.algorithm.enableMemorySearch,
+    userMemoryRecallEnabled: config.algorithm.enableUserMemoryRecall,
     summaryModel: {
       provider: config.summary.provider,
       vendor: config.summary.vendor,

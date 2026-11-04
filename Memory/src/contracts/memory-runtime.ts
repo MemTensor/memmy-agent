@@ -41,6 +41,8 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 
 /** Schema for job type. */
 export const JobTypeSchema = z.enum([
+  "episode_assignment",
+  "episode_finalize",
   "episode_idle_close",
   "episode_title",
   "trace_summary",
@@ -240,7 +242,7 @@ export type MemoryDetailItem = z.infer<typeof MemoryDetailItemSchema>;
 /** Schema for raw turn summary. */
 export const RawTurnSummarySchema = z.object({
   rawTurnId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
+  episodeId: NonEmptyStringSchema.optional(),
   turnId: NonEmptyStringSchema,
   userText: z.string().optional(),
   assistantText: z.string().optional(),
@@ -466,7 +468,8 @@ export type CompleteTurnInput = z.infer<typeof CompleteTurnInputSchema>;
 export const CompleteTurnOutputSchema = z.object({
   turnId: NonEmptyStringSchema,
   sessionId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
+  episodeId: NonEmptyStringSchema.optional(),
+  assignmentStatus: z.enum(["pending", "assigned"]).optional(),
   rawTurnId: NonEmptyStringSchema,
   userMemoryId: z.string().optional(),
   userMemoryIds: z.array(NonEmptyStringSchema).optional(),
@@ -491,6 +494,22 @@ export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   verbose: z.boolean().optional()
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;
+
+/** Generate vectors with the embedding model currently owned by the Memory runtime. */
+export const EmbeddingInferenceInputSchema = z.object({
+  texts: z.array(z.string().min(1).max(16_000)).min(1).max(256),
+  role: z.enum(["query", "document"]).default("document")
+}).superRefine((input, context) => {
+  const totalCharacters = input.texts.reduce((sum, text) => sum + text.length, 0);
+  if (totalCharacters > 200_000) {
+    context.addIssue({
+      code: "custom",
+      path: ["texts"],
+      message: "Total embedding input exceeds 200000 characters"
+    });
+  }
+});
+export type EmbeddingInferenceInput = z.input<typeof EmbeddingInferenceInputSchema>;
 
 /** Schema for default search output. */
 export const DefaultSearchOutputSchema = z.object({
@@ -697,6 +716,7 @@ export type RetryMemoryProcessingOutput = z.infer<typeof RetryMemoryProcessingOu
 
 /** Schema for panel items input. */
 export const PanelItemsInputSchema = z.object({
+  userSummary: z.enum(["true", "false"]).transform(value => value === "true").or(z.boolean()).optional(),
   layer: RecallMemoryLayerSchema.optional(),
   status: MemoryStatusSchema.optional(),
   q: z.string().optional(),
@@ -845,6 +865,53 @@ export const PanelTasksOutputSchema = z.object({
 });
 export type PanelTasksOutput = z.infer<typeof PanelTasksOutputSchema>;
 
+
+/** Explicit summary contract; legacy panel/tasks keeps its turns field. */
+export const PanelTaskSummarySchema = PanelTaskItemSchema.omit({ turns: true }).extend({
+  firstUserText: z.string(), firstAssistantText: z.string(), toolCallCount: z.number().int().nonnegative()
+});
+export type PanelTaskSummary = z.infer<typeof PanelTaskSummarySchema>;
+export const PanelTaskSummariesOutputSchema = PanelTasksOutputSchema.extend({ tasks: z.array(PanelTaskSummarySchema) });
+export type PanelTaskSummariesOutput = z.infer<typeof PanelTaskSummariesOutputSchema>;
+export const PanelTurnFieldSchema = z.enum(["userText", "assistantText", "reasoningSummary", "toolCalls", "toolResults"]);
+export const PanelTaskDetailInputSchema = z.object({ cursor: z.string().max(2048).optional() });
+export const PanelToolSummarySchema = z.object({id:z.string(),field:z.enum(["toolCalls","toolResults"]),name:z.string(),characters:z.number().int().nonnegative()});
+export type PanelToolSummary = z.infer<typeof PanelToolSummarySchema>;
+export const PanelTaskDetailOutputSchema = z.object({
+  task: PanelTaskSummarySchema,
+  turns: z.array(RawTurnSummarySchema.extend({ moreFields: z.array(PanelTurnFieldSchema), toolCallCount: z.number().int().nonnegative(), toolResultCount: z.number().int().nonnegative(), tools:z.array(PanelToolSummarySchema).optional() })),
+  nextCursor: z.string().optional(), hasNewer: z.boolean(), serverTime: IsoTimeSchema
+});
+export type PanelTaskDetailOutput = z.infer<typeof PanelTaskDetailOutputSchema>;
+export const PanelTaskCheckOutputSchema = z.object({ latestTurnId: z.string().optional(), serverTime: IsoTimeSchema });
+export type PanelTaskCheckOutput = z.infer<typeof PanelTaskCheckOutputSchema>;
+export const PanelTaskFieldInputSchema = z.object({ field: PanelTurnFieldSchema, toolId:z.string().max(512).optional(), offset: z.coerce.number().int().nonnegative().optional(), revision: z.string().optional() });
+export type PanelTaskFieldInput = z.infer<typeof PanelTaskFieldInputSchema>;
+export const PanelTaskFieldOutputSchema = z.object({ text: z.string(), revision: z.string(), tools:z.array(PanelToolSummarySchema).optional(), nextOffset: z.number().int().nonnegative().optional(), serverTime: IsoTimeSchema });
+export type PanelTaskFieldOutput = z.infer<typeof PanelTaskFieldOutputSchema>;
+
+
+export const PanelBrowseInputSchema = z.object({
+  op: z.enum(["create","page","check","release"]), viewId: z.string().optional(), page: z.coerce.number().int().positive().optional(),
+  filter: PanelItemsInputSchema.extend({section:z.enum(["items","tasks"]).optional()}).optional()
+});
+export type PanelBrowseInput = z.infer<typeof PanelBrowseInputSchema>;
+export const PanelBrowsePageSchema = z.object({
+  viewId:z.string(), instanceId:z.string(), safety:z.string(), createdAt:IsoTimeSchema,
+  page:z.number().int().positive(), pageSize:z.literal(20), total:z.number().int().nonnegative(),totalPages:z.number().int().positive(),hasNext:z.boolean(),hasPrev:z.boolean(),
+  items:z.array(PanelMemoryListItemSchema).optional(), tasks:z.array(PanelTaskSummarySchema).optional(), serverTime:IsoTimeSchema
+});
+export type PanelBrowsePage = z.infer<typeof PanelBrowsePageSchema>;
+export const PanelBrowseCheckSchema = z.object({viewId:z.string(),instanceId:z.string(),safety:z.string(),updated:z.boolean(),serverTime:IsoTimeSchema});
+export const PanelBrowseOutputSchema = z.union([PanelBrowsePageSchema,PanelBrowseCheckSchema,z.object({ok:z.literal(true)})]);
+export type PanelBrowseOutput = z.infer<typeof PanelBrowseOutputSchema>;
+
+
+export const PanelStatsOutputSchema=z.object({status:z.enum(["preparing","ready","error"]),data:z.object({overview:PanelOverviewOutputSchema,analysis:PanelAnalysisOutputSchema}).optional(),generatedAt:IsoTimeSchema.optional(),error:z.string().optional(),serverTime:IsoTimeSchema});
+export type PanelStatsOutput=z.infer<typeof PanelStatsOutputSchema>;
+export const PanelOverviewStatsOutputSchema=z.object({status:z.enum(["preparing","ready","error"]),data:PanelOverviewOutputSchema.optional(),generatedAt:IsoTimeSchema.optional(),error:z.string().optional(),serverTime:IsoTimeSchema});
+export type PanelOverviewStatsOutput=z.infer<typeof PanelOverviewStatsOutputSchema>;
+
 /** Schema for deleting a task from the memory panel. */
 export const DeletePanelTaskOutputSchema = z.object({
   ok: z.literal(true),
@@ -856,6 +923,7 @@ export type DeletePanelTaskOutput = z.infer<typeof DeletePanelTaskOutputSchema>;
 
 /** Schema for memory api log. */
 export const MemoryApiLogSchema = z.object({
+  detailAvailable:z.boolean().optional(),
   id: z.number().int().nonnegative(),
   toolName: MemoryApiLogToolNameSchema,
   sourceAgent: NonEmptyStringSchema.optional(),
@@ -877,6 +945,13 @@ export const MemoryApiLogsOutputSchema = z.object({
   serverTime: IsoTimeSchema
 });
 export type MemoryApiLogsOutput = z.infer<typeof MemoryApiLogsOutputSchema>;
+export const PanelLogsInputSchema=MemoryApiLogsInputSchema.extend({skillId:z.string().optional(),cursor:z.string().max(2048).optional(),q:z.string().optional()});
+export type PanelLogsInput=z.infer<typeof PanelLogsInputSchema>;
+export const PanelLogsOutputSchema=MemoryApiLogsOutputSchema.extend({nextCursor:z.string().optional()});
+export type PanelLogsOutput=z.infer<typeof PanelLogsOutputSchema>;
+export const PanelLogDetailOutputSchema=z.object({log:MemoryApiLogSchema,serverTime:IsoTimeSchema});
+export type PanelLogDetailOutput=z.infer<typeof PanelLogDetailOutputSchema>;
+
 
 /** Schema for panel item detail output. */
 export const PanelItemDetailOutputSchema = z.object({

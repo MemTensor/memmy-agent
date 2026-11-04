@@ -1,3 +1,5 @@
+import type { OutputDelivery } from "./output-location.js";
+
 export type JsonSchema = Record<string, any>;
 
 export type FileMutationOutcome = {
@@ -13,6 +15,10 @@ export type TextResultOptions = {
 };
 
 export type ToolExecutionContext = {
+  /** Unique UI identity, even when a provider reuses its tool-call ID. */
+  uiToolCallId?: string | null;
+  sessionKey?: string | null;
+  modelPreset?: string | null;
   maxResultChars?: number;
   availableTools?: string[];
   /** Keep raw external text separate from its bounded model and UI representations. */
@@ -23,7 +29,9 @@ export type ToolExecutionContext = {
   /** Stop this run without asking the model to select another executor. */
   stopTurn?: (message: string) => void;
   reportFileMutation?: (outcome: FileMutationOutcome) => void;
-
+  outputLocation?: OutputDelivery;
+  /** Set only when this call declared output_paths: report work that outlives the call. */
+  trackOutputProducer?: (isRunning: () => boolean) => void;
 };
 
 const JSON_TYPE_MAP: Record<string, (value: any) => boolean> = {

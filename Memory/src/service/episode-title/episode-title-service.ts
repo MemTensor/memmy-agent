@@ -93,6 +93,7 @@ interface EpisodeTitleBuiltInput {
   language: PromptLanguage;
   /** Raw turns the episode held when the input was built, not the sampled subset. */
   totalTurnCount: number;
+  coveredUserTurns: Array<{ id: string; hash: string }>;
 }
 
 export interface EpisodeTitleMeta {
@@ -101,6 +102,7 @@ export interface EpisodeTitleMeta {
   model: string;
   sourceTurnCount: number;
   sourceHash: string;
+  coveredUserTurns?: Array<{ id: string; hash: string }>;
   reason?: string;
 }
 
@@ -157,7 +159,8 @@ export class EpisodeTitleService {
       generatedAt: at,
       model: this.deps.llm.config.model ?? "",
       sourceTurnCount: built.totalTurnCount,
-      sourceHash: built.sourceHash
+      sourceHash: built.sourceHash,
+      coveredUserTurns: built.coveredUserTurns
     };
     const saved = this.deps.repos.runtime.updateEpisodeTitle(episodeId, {
       title: output.title,
@@ -204,7 +207,9 @@ export class EpisodeTitleService {
         this.deps.language,
         userSamples.length > 0 ? userSamples : assistantSamples
       ),
-      totalTurnCount: selected.totalTurnCount
+      totalTurnCount: selected.totalTurnCount,
+      coveredUserTurns: selected.turns.filter(({ turn }) => (turn.userText?.length ?? 0) <= USER_TEXT_MAX_CHARS)
+        .map(({ turn }) => ({ id: turn.id, hash: stableHash(turn.userText ?? "") }))
     };
   }
 

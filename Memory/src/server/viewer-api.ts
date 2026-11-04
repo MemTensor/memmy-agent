@@ -1,3 +1,4 @@
+import { routeAgentSourceScan } from "./agent-source-api.js";
 import { readFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { parse as parseYaml } from "yaml";
@@ -49,6 +50,7 @@ export const VIEWER_API_ROUTES = [
   "POST /api/v1/system/restart",
   "POST /api/v1/models/test",
   "GET /api/v1/embeddings/maintenance",
+  "GET /api/v1/embeddings/rebuild",
   "POST /api/v1/embeddings/rebuild",
   "GET /api/v1/export",
   "POST /api/v1/import",
@@ -132,40 +134,38 @@ export async function routeViewerRequest(
     return { body: { ok: true } };
   }
   if (method === "GET" && path === "/api/v1/overview") {
-    const userId = viewerUserId(context);
     return {
       body: {
-        ...context.service.panelOverview({ ...envelope, userId }),
-        summary: context.service.panelOverviewSummary({ ...envelope, userId })
+        ...context.service.panelOverview(envelope),
+        summary: (await context.service.readPanel("overview",[envelope])).data
       }
     };
   }
   if (method === "GET" && path === "/api/v1/analytics") {
-    return { body: context.service.panelAnalysis(envelope) };
+    return { body: (await context.service.readPanel("analysis",[envelope])).data };
   }
   if (method === "GET" && path === "/api/v1/episodes") {
     return {
-      body: context.service.panelTasks({
+      body: (await context.service.readPanel("legacyTasks",[{
         ...envelope,
         q: query(url, "q"),
         sourceAgent: query(url, "sourceAgent"),
         page: numberQuery(url, "page")
-      })
+      }])).data
     };
   }
   const layer = layerForViewerPath(path);
   if (method === "GET" && layer) {
     return {
-      body: context.service.panelItems({
+      body: (await context.service.readPanel("items",[{
         ...envelope,
-        ...(layer === "UserMemory" ? { userId: viewerUserId(context) } : {}),
         layer,
         q: query(url, "q"),
         status: statusQuery(url),
         sourceAgent: query(url, "sourceAgent"),
         page: numberQuery(url, "page"),
         limit: numberQuery(url, "limit")
-      })
+      }])).data
     };
   }
   if (method === "GET" && path === "/api/v1/api-logs") {
@@ -199,9 +199,8 @@ export async function routeViewerRequest(
   if (method === "PATCH" && path === "/api/v1/config") {
     return { body: await patchViewerConfig(context, body) };
   }
-  if (method === "GET" && path === "/api/v1/agent-sources") {
-    return { body: await context.agentSources.list() };
-  }
+  const scanResult = await routeAgentSourceScan(context.agentSources, method, url, body);
+  if (scanResult) return scanResult;
   if (method === "GET" && path === "/api/v1/system/cli") {
     return { body: await viewerCliStatus(context.viewerCli) };
   }
@@ -218,24 +217,6 @@ export async function routeViewerRequest(
       afterResponse: context.restartService,
     };
   }
-  if (method === "POST" && path === "/api/v1/agent-sources/scan") {
-    return { status: 202, body: await context.agentSources.startScan(body) };
-  }
-  if (method === "GET" && path === "/api/v1/agent-sources/scan/status") {
-    return { body: context.agentSources.scanStatus() };
-  }
-  const scanResults = path.match(/^\/api\/v1\/agent-sources\/scan\/jobs\/([^/]+)\/results$/);
-  if (method === "GET" && scanResults?.[1]) {
-    return { body: context.agentSources.scanResults
-      ? await context.agentSources.scanResults(decodeURIComponent(scanResults[1]), query(url, "cursor") ?? "0", numberQuery(url, "limit") ?? 100)
-      : { items: [], nextCursor: null } };
-  }
-  if (method === "POST" && path === "/api/v1/agent-sources/scan/stop") {
-    return { body: await context.agentSources.pauseScan() };
-  }
-  if (method === "POST" && path === "/api/v1/agent-sources/scan/cancel") {
-    return { body: await context.agentSources.cancelScan() };
-  }
   const sourceConnection = path.match(/^\/api\/v1\/agent-sources\/([^/]+)\/(plugin|skill)$/);
   if ((method === "POST" || method === "DELETE") && sourceConnection?.[1] && sourceConnection[2]) {
     return {
@@ -250,10 +231,17 @@ export async function routeViewerRequest(
     return { body: await context.service.testModels() };
   }
   if (method === "GET" && path === "/api/v1/embeddings/maintenance") {
-    return { body: context.service.embeddingMaintenanceStats() };
+    return { body: await context.service.embeddingMaintenanceStats() };
+  }
+  if (method === "GET" && path === "/api/v1/embeddings/rebuild") {
+    return { body: await context.service.embeddingMaintenanceProgress(url.searchParams.get("runId") ?? undefined) };
   }
   if (method === "POST" && path === "/api/v1/embeddings/rebuild") {
-    const result = context.service.rebuildEmbeddings();
+    const requestedMode = body && typeof body === "object" ? (body as Record<string, unknown>).mode : undefined;
+    if (requestedMode !== undefined && requestedMode !== "repair" && requestedMode !== "rebuild") {
+      throw new MemoryServiceError("invalid_argument", "mode must be repair or rebuild");
+    }
+    const result = await context.service.rebuildEmbeddings(requestedMode ?? "rebuild");
     context.scheduleWorker();
     return { status: 202, body: result };
   }
@@ -428,11 +416,6 @@ function layerForViewerPath(path: string): RecallMemoryLayer | undefined {
   if (path === "/api/v1/world-models") return "L3";
   if (path === "/api/v1/skills") return "Skill";
   return undefined;
-}
-
-function viewerUserId(context: ViewerApiContext): string {
-  const userId = context.service.configStatus().config.userId?.trim();
-  return userId || "local-user";
 }
 
 function statusQuery(url: URL): "activated" | "resolving" | "archived" | "deleted" | undefined {

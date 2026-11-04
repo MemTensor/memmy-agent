@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { orderedTurns, sourceTurnFromMessages, sourceTurnFailureReason, buildSourceTurnRequest, hasStagedSourceTurn, legacyImportTurnIdFromMessages } from "@memmy/agent-source-core";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
-import type { ConversationMessage } from "../adapters/outbound/agent-source/types.js";
+import type { ConversationMessage } from "@memmy/agent-source-readers/adapters/types";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type {
   MemoryDesktopAddAnalytics,

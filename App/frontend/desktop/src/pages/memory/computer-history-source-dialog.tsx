@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown, Plus, Search, X } from "lucide-react";
 import type { ComputerHistoryObservationSettings } from "../../api/computer-history-contract.js";
@@ -10,7 +10,6 @@ import { APP_SEARCH_ALIASES } from "./app-search-aliases.js";
 type Rule = ComputerHistoryObservationSettings["observation"]["rules"][number];
 type Scope = Rule["scope"];
 type Behavior = Rule["behavior"];
-const APP_MENU_WIDTH = 240;
 
 function opposite(behavior: Behavior): Behavior {
   return behavior === "observe" ? "do_not_observe" : "observe";
@@ -47,7 +46,6 @@ export function ComputerHistorySourceDialog(props: {
   const [appQuery, setAppQuery] = useState("");
   const [activeAppIndex, setActiveAppIndex] = useState(0);
   const [appMenuOpen, setAppMenuOpen] = useState(false);
-  const [appMenuBox, setAppMenuBox] = useState({ top: 0, left: 0 });
   const [domainInput, setDomainInput] = useState("");
   const [addingWebsite, setAddingWebsite] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -161,29 +159,6 @@ export function ComputerHistorySourceDialog(props: {
   }, [availableApps, appQuery]);
   const highlightedAppIndex = Math.min(activeAppIndex, Math.max(matchingApps.length - 1, 0));
 
-  function placeAppMenu() {
-    const button = addAppRef.current;
-    const dialog = dialogRef.current;
-    if (!button || !dialog) return;
-    const buttonBox = button.getBoundingClientRect();
-    const dialogBox = dialog.getBoundingClientRect();
-    const left = Math.max(8, Math.min(buttonBox.left - dialogBox.left, dialogBox.width - APP_MENU_WIDTH - 8));
-    setAppMenuBox({ top: buttonBox.bottom - dialogBox.top + 4, left });
-  }
-
-  useLayoutEffect(() => {
-    if (!appMenuOpen) return;
-    placeAppMenu();
-    const list = addAppRef.current?.closest(".ch-source-dialog__list");
-    const onMove = () => placeAppMenu();
-    window.addEventListener("resize", onMove);
-    list?.addEventListener("scroll", onMove);
-    return () => {
-      window.removeEventListener("resize", onMove);
-      list?.removeEventListener("scroll", onMove);
-    };
-  }, [appMenuOpen]);
-
   function defaultBehavior(scope: Scope): Behavior {
     return scope === "app" ? settings!.observation.defaultApplicationBehavior : settings!.observation.defaultURLBehavior;
   }
@@ -262,6 +237,34 @@ export function ComputerHistorySourceDialog(props: {
 
   if (!props.open) return null;
 
+  const appMenu = settings && appMenuOpen ? <div ref={appMenuRef} id="ch-app-menu" className="ch-source-dialog__app-menu" role="listbox"
+    aria-label={t("computerHistory.sources.matches")}
+    onMouseDown={(event) => {
+      if (event.target === event.currentTarget) event.currentTarget.querySelector("input")?.focus();
+    }}>
+    <div className="ch-source-dialog__app-search">
+      <Search size={14} aria-hidden="true" />
+      <input autoFocus value={appQuery} aria-label={t("computerHistory.sources.searchApps")}
+        placeholder={t("computerHistory.sources.searchApps")}
+        onChange={(event) => {
+          setAppQuery(event.target.value);
+          setActiveAppIndex(0);
+        }}
+        onKeyDown={onAppSearchKeyDown} />
+    </div>
+    {catalogState === "ready" && matchingApps.length > 0 ? matchingApps.map((app, index) =>
+      <button type="button" role="option" key={app.bundleId} className="ch-source-dialog__app-option"
+        aria-selected={index === highlightedAppIndex} onMouseEnter={() => setActiveAppIndex(index)}
+        onClick={() => addApp(app.bundleId)}>
+        <AppIcon bundleId={app.bundleId} client={props.client} />
+        <span>{app.name}</span>
+      </button>) : <p className="ch-source-dialog__app-empty" role="status">{t(
+        catalogState === "loading" ? "computerHistory.sources.loadingApps"
+          : catalogState === "error" ? "computerHistory.sources.catalogUnavailable"
+            : availableApps.length === 0 ? "computerHistory.sources.allAppsAdded"
+              : "computerHistory.sources.noAppsFound")}</p>}
+  </div> : null;
+
   return createPortal(<div className="ch-source-dialog__backdrop" onMouseDown={(event) => {
     if (event.target === event.currentTarget && !busy) props.onCancel();
   }}>
@@ -281,8 +284,8 @@ export function ComputerHistorySourceDialog(props: {
               </select>
               <ChevronDown size={16} aria-hidden="true" />
             </label>
-            <div className="ch-source-dialog__list">
-              {scope === "app" ? <button ref={addAppRef} type="button" className="ch-source-dialog__add" disabled={busy}
+            <div className={`ch-source-dialog__list${scope === "app" ? " ch-source-dialog__list--apps" : ""}`}>
+              {scope === "app" ? <button ref={addAppRef} type="button" className="ch-source-dialog__add ch-source-dialog__add--app" disabled={busy}
                 aria-expanded={appMenuOpen} aria-haspopup="listbox" aria-controls="ch-app-menu"
                 onClick={() => {
                   if (appMenuOpen) {
@@ -290,7 +293,6 @@ export function ComputerHistorySourceDialog(props: {
                     return;
                   }
                   setActiveAppIndex(0);
-                  placeAppMenu();
                   setAppMenuOpen(true);
                 }}>
                 <span className="ch-source-dialog__add-icon" aria-hidden="true"><Plus size={18} /></span>
@@ -314,6 +316,7 @@ export function ComputerHistorySourceDialog(props: {
               </div> : <button type="button" className="ch-source-dialog__add" disabled={busy} onClick={() => setAddingWebsite(true)}>
                 <Plus size={18} /> {t("computerHistory.sources.dialogAddWebsite")}
               </button>}
+              {scope === "app" ? appMenu : null}
               <ul className="ch-source-dialog__rules">{rules.map((rule) => <li key={ruleKey(rule)}>
                 {rule.scope === "app" ? <AppIcon bundleId={rule.bundleID} client={props.client} /> : null}
                 <span>{rule.scope === "app" ? appNames.get(rule.bundleID) ?? rule.bundleID : rule.urlDomain}</span>
@@ -325,33 +328,6 @@ export function ComputerHistorySourceDialog(props: {
             </div>
           </div>;
         })}
-      </div> : null}
-      {settings && appMenuOpen ? <div ref={appMenuRef} id="ch-app-menu" className="ch-source-dialog__app-menu" role="listbox"
-        aria-label={t("computerHistory.sources.matches")} style={{ top: appMenuBox.top, left: appMenuBox.left }}
-        onMouseDown={(event) => {
-          if (event.target === event.currentTarget) event.currentTarget.querySelector("input")?.focus();
-        }}>
-        <div className="ch-source-dialog__app-search">
-          <Search size={14} aria-hidden="true" />
-          <input autoFocus value={appQuery} aria-label={t("computerHistory.sources.searchApps")}
-            placeholder={t("computerHistory.sources.searchApps")}
-            onChange={(event) => {
-              setAppQuery(event.target.value);
-              setActiveAppIndex(0);
-            }}
-            onKeyDown={onAppSearchKeyDown} />
-        </div>
-        {catalogState === "ready" && matchingApps.length > 0 ? matchingApps.map((app, index) =>
-          <button type="button" role="option" key={app.bundleId} className="ch-source-dialog__app-option"
-            aria-selected={index === highlightedAppIndex} onMouseEnter={() => setActiveAppIndex(index)}
-            onClick={() => addApp(app.bundleId)}>
-            <AppIcon bundleId={app.bundleId} client={props.client} />
-            <span>{app.name}</span>
-          </button>) : <p className="ch-source-dialog__app-empty" role="status">{t(
-            catalogState === "loading" ? "computerHistory.sources.loadingApps"
-              : catalogState === "error" ? "computerHistory.sources.catalogUnavailable"
-                : availableApps.length === 0 ? "computerHistory.sources.allAppsAdded"
-                  : "computerHistory.sources.noAppsFound")}</p>}
       </div> : null}
       <p id="ch-source-dialog-privacy" className="ch-source-dialog__privacy">{t("computerHistory.sources.browserPrivacy")}</p>
       {error ? <p className="ch-source-dialog__error" role="alert">{error}</p> : null}

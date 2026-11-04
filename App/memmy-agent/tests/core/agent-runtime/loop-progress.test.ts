@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentHookContext } from "../../../src/core/agent-runtime/hook.js";
 import { AgentLoop, TurnContext } from "../../../src/core/agent-runtime/loop.js";
 import { AgentProgressHook } from "../../../src/core/agent-runtime/progress-hook.js";
+import { MessageTool } from "../../../src/core/agent-runtime/tools/message.js";
 import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
 import { Session } from "../../../src/core/session/manager.js";
@@ -58,6 +59,33 @@ afterEach(() => {
 });
 
 describe("progress events and tool hints", () => {
+  it("does not stream a provisional delivery claim while the Agent resolves plugin files", async () => {
+    const loop = makeLoop();
+    const report = path.join(loop.workspace, "review.pdf");
+    fs.writeFileSync(report, "report");
+    (loop.tools.get("message") as MessageTool).markPendingPluginFiles();
+    (loop.provider as any).supportsProgressDeltas = true;
+    const responses = [
+      new LLMResponse({ content: "全部产物已交付。", toolCalls: [] }),
+      new LLMResponse({ content: "当前无法发送文件。", toolCalls: [] }),
+    ];
+    (loop.provider as any).chatStreamWithRetry = vi.fn(async (args: any) => {
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected model request");
+      await args.onContentDelta(response.content);
+      return response;
+    });
+    const streamed: string[] = [];
+    const [finalContent] = await loop.runAgentLoop([
+      { role: "user", content: "生成报告" },
+      { role: "tool", name: "mcp_plugins_plugin_review_render_12345678", tool_call_id: "render",
+        content: [{ type: "text", text: JSON.stringify({ publishedFiles: [
+          { name: "review.pdf", path: report }
+        ] }) }] },
+    ], { onStream: async (delta: string) => { streamed.push(delta); } });
+    expect(finalContent).toBe("当前无法发送文件。");
+    expect(streamed).toEqual(["当前无法发送文件。"]);
+  });
   it("formats concise tool hints and collapses adjacent duplicates", () => {
     const hint = formatToolHints(
       [

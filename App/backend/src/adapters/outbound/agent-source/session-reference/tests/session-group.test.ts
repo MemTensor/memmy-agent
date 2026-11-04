@@ -6,7 +6,7 @@ import {
   directoryGroup,
   mainCheckoutOf
 } from "../session-group.js";
-import type { SourceAdapter } from "../../types.js";
+import type { SourceAdapter } from "@memmy/agent-source-readers/adapters/types";
 
 describe("local session groups", () => {
   it("groups by working directory, named after the folder", () => {

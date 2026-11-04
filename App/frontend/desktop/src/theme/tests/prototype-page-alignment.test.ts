@@ -46,8 +46,7 @@ describe("prototype page structure alignment", () => {
     expect(source("styles.css")).toContain(".home-empty-composer");
     expect(source("styles.css")).toContain(".agent-composer-shell");
     expect(source("pages/home-page.tsx")).toContain("relative home-empty-composer agent-composer-shell rounded-card-lg");
-    // 输入框换成内联富文本后仍沿用同一套外层尺寸与圆角，只是去掉 textarea 专属的 resize/placeholder 类。
-    expect(source("pages/home-page.tsx")).toContain("w-full px-5 pt-4 pb-12 text-sm rounded-card-lg bg-background-paper");
+    expect(source("pages/home-page.tsx")).toContain("w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40");
     expect(source("pages/home-page.tsx")).toContain("composer-actions absolute bottom-3 right-4 z-50");
     expect(source("pages/home-page.tsx")).not.toContain("home.suggestion.");
     expect(source("pages/home-page.tsx")).toContain("agent-conversation-panel flex flex-col h-full");
@@ -64,9 +63,9 @@ describe("prototype page structure alignment", () => {
 
   it("aligns utility pages with their prototype counterparts", () => {
     expect(source("pages/api-key-page.tsx")).toContain("min-h-screen bg-canvas-oat px-4 pt-4 pb-8 relative overflow-hidden");
-    expect(source("pages/tools-page.tsx")).toContain("app-frame-page-content h-full overflow-y-auto py-6");
-    expect(source("pages/tools-page.tsx")).toContain("tools-icon-grid");
-    expect(source("styles.css")).toContain("grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));");
+    expect(source("pages/tools-page.tsx")).toContain("app-frame-page-content h-full overflow-y-auto tools-page-content");
+    expect(source("pages/connection-catalog-section.tsx")).toContain("plugin-marketplace-grid");
+    expect(source("pages/plugin-tools-layout.css")).toContain("grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));");
     expect(source("styles.css")).toContain("gap: 8px;");
     expect(source("styles.css")).toContain("gap: 12px;");
     expect(source("styles.css")).not.toContain("aspect-ratio: 1 / 1");

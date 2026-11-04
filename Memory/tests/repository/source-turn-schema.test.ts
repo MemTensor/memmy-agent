@@ -9,10 +9,10 @@ const { cleanup, createTestService } = createMemoryServiceFixture();
 afterEach(cleanup);
 
 describe("source turn schema upgrade", () => {
-  it("upgrades v7 without changing old memories and keeps its activation boundary after reopen", () => {
+  it("upgrades v7 without changing old memories and keeps its activation boundary after reopen", async () => {
     const { db, service, root } = createTestService();
     const session = service.openSession({});
-    service.completeTurn("old-turn", { sessionId: session.sessionId, query: "Implement a schema migration safely.", answer: "Existing data is preserved by the migration." });
+    (await service.completeTurn("old-turn", { sessionId: session.sessionId, query: "Implement a schema migration safely.", answer: "Existing data is preserved by the migration." }));
     const before = db.db.prepare("SELECT * FROM memories ORDER BY id").all();
     db.db.exec(`DROP TABLE source_turn_captures;
       DELETE FROM runtime_kv WHERE key = 'source_turn_capture_activated_at';

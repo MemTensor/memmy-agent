@@ -20,7 +20,7 @@ const { cleanup, createTestService } = createMemoryServiceFixture();
 afterEach(cleanup);
 
 describe("Work Memory pipeline", () => {
-  it("在一次 token compaction boundary 为每个新 L3 batch 只入队一个 Job，重复 boundary 不重复入队", () => {
+  it("在一次 token compaction boundary 为每个新 L3 batch 只入队一个 Job，重复 boundary 不重复入队", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -35,12 +35,12 @@ describe("Work Memory pipeline", () => {
       workspaceHostId: "a".repeat(64),
       namespace
     });
-    const completed = service.completeTurn("work-memory-boundary-turn", {
+    const completed = (await service.completeTurn("work-memory-boundary-turn", {
       sessionId: opened.sessionId,
       query: "项目要求所有提交前都运行测试。",
       answer: "已记录该要求。",
       status: "succeeded"
-    });
+    }));
     const boundaryNamespace = opened.projectId ? { ...namespace, projectId: opened.projectId } : namespace;
 
     const first = service.l3WorldModelBoundary(opened.sessionId, {
@@ -88,12 +88,12 @@ describe("Work Memory pipeline", () => {
       workspaceHostId: "b".repeat(64),
       namespace
     });
-    const completed = service.completeTurn("work-memory-create-turn", {
+    const completed = (await service.completeTurn("work-memory-create-turn", {
       sessionId: opened.sessionId,
       query: "SFT 训练必须使用固定的数据清洗流水线，因为结果需要可复现。",
       answer: "后续训练会遵守该要求。",
       status: "succeeded"
-    });
+    }));
     const boundaryNamespace = opened.projectId ? { ...namespace, projectId: opened.projectId } : namespace;
     service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "work-memory-create-request",
@@ -181,12 +181,12 @@ describe("Work Memory pipeline", () => {
       workMemoryUserId: opened.userId,
       workMemoryProjectId: opened.projectId ?? null
     }, 5)).toHaveLength(1);
-    const completed = service.completeTurn("work-memory-merge-turn", {
+    const completed = (await service.completeTurn("work-memory-merge-turn", {
       sessionId: opened.sessionId,
       query: "同一条 SFT 数据清洗要求仍然必须保持固定，以便结果可复现。",
       answer: "会继续沿用原有要求。",
       status: "succeeded"
-    });
+    }));
     const boundaryNamespace = opened.projectId ? { ...namespace, projectId: opened.projectId } : namespace;
     service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "work-memory-merge-request",
@@ -265,21 +265,21 @@ describe("Work Memory pipeline", () => {
     expect(recall.injectedContext.markdown).toContain("Requirement rationale: 保证训练结果可复现");
   });
 
-  it("从没压缩过的会话在 session close 时抽完全部 trace", () => {
+  it("从没压缩过的会话在 session close 时抽完全部 trace", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-close-session", "work-memory-close-user");
-    service.completeTurn("work-memory-close-turn-1", {
+    (await service.completeTurn("work-memory-close-turn-1", {
       sessionId: opened.sessionId,
       query: "第一条要求。",
       answer: "已记录。",
       status: "succeeded"
-    });
-    service.completeTurn("work-memory-close-turn-2", {
+    }));
+    (await service.completeTurn("work-memory-close-turn-2", {
       sessionId: opened.sessionId,
       query: "第二条要求。",
       answer: "也记录了。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     expect(workMemoryJobs(repos)).toHaveLength(0);
 
@@ -294,15 +294,15 @@ describe("Work Memory pipeline", () => {
     expect(repos.runtime.getWorkMemoryCursor(opened.sessionId).lastExtractedSeq).toBe(2);
   });
 
-  it("压缩之后再 close 只抽尾巴，已抽过的窗口不再入队", () => {
+  it("压缩之后再 close 只抽尾巴，已抽过的窗口不再入队", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-tail-session", "work-memory-tail-user");
-    const first = service.completeTurn("work-memory-tail-turn-1", {
+    const first = (await service.completeTurn("work-memory-tail-turn-1", {
       sessionId: opened.sessionId,
       query: "压缩前的要求。",
       answer: "已记录。",
       status: "succeeded"
-    });
+    }));
     service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "work-memory-tail-request-1",
       adapterId: "codex-memory",
@@ -314,12 +314,12 @@ describe("Work Memory pipeline", () => {
     const repos = new Repositories(db.db);
     expect(workMemoryJobs(repos)).toHaveLength(1);
 
-    service.completeTurn("work-memory-tail-turn-2", {
+    (await service.completeTurn("work-memory-tail-turn-2", {
       sessionId: opened.sessionId,
       query: "压缩后的要求。",
       answer: "也记录了。",
       status: "succeeded"
-    });
+    }));
     service.closeSession(opened.sessionId, { namespace: opened.namespace });
 
     const jobs = workMemoryJobs(repos);
@@ -331,12 +331,12 @@ describe("Work Memory pipeline", () => {
   it("压缩之后再 idle，不再产生新的 extract", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-idle-session", "work-memory-idle-user");
-    const completed = service.completeTurn("work-memory-idle-turn", {
+    const completed = (await service.completeTurn("work-memory-idle-turn", {
       sessionId: opened.sessionId,
       query: "完整要求。",
       answer: "已记录。",
       status: "succeeded"
-    });
+    }));
     service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "work-memory-idle-request",
       adapterId: "codex-memory",
@@ -357,12 +357,12 @@ describe("Work Memory pipeline", () => {
   it("idle 到期时抽出未抽取的增量，游标推进到当前最大 trace", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-idle-flush-session", "work-memory-idle-flush-user");
-    service.completeTurn("work-memory-idle-flush-turn", {
+    (await service.completeTurn("work-memory-idle-flush-turn", {
       sessionId: opened.sessionId,
       query: "idle 才抽的要求。",
       answer: "已记录。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     expect(workMemoryJobs(repos)).toHaveLength(0);
 
@@ -379,12 +379,12 @@ describe("Work Memory pipeline", () => {
   it("idle 之后 close 不再重复抽取，也不关 episode", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-idle-close-session", "work-memory-idle-close-user");
-    service.completeTurn("work-memory-idle-close-turn", {
+    (await service.completeTurn("work-memory-idle-close-turn", {
       sessionId: opened.sessionId,
       query: "先 idle 再关闭。",
       answer: "已记录。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     makeIdleFlushDue(db, opened.sessionId);
     backdateInputTraces(db, opened.sessionId);
@@ -397,26 +397,26 @@ describe("Work Memory pipeline", () => {
     expect(repos.runtime.listJobs(undefined, 100).some((job) => job.jobType === "l3_world_model_update")).toBe(true);
   });
 
-  it("同一 session 两次 turn 武装同一个 dedupeKey，runAfter 以第二次为准", () => {
+  it("同一 session 两次 turn 武装同一个 dedupeKey，runAfter 以第二次为准", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-arm-session", "work-memory-arm-user");
-    service.completeTurn("work-memory-arm-turn-1", {
+    (await service.completeTurn("work-memory-arm-turn-1", {
       sessionId: opened.sessionId,
       query: "第一次说话。",
       answer: "好。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     const first = idleFlushJobs(repos);
     expect(first).toHaveLength(1);
     const firstRunAfter = String(first[0]?.payload.runAfter);
 
-    service.completeTurn("work-memory-arm-turn-2", {
+    (await service.completeTurn("work-memory-arm-turn-2", {
       sessionId: opened.sessionId,
       query: "第二次说话。",
       answer: "好。",
       status: "succeeded"
-    });
+    }));
 
     const second = idleFlushJobs(repos);
     expect(second).toHaveLength(1);
@@ -427,12 +427,12 @@ describe("Work Memory pipeline", () => {
   it("session 已关闭时 idle flush 不抽取", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-closed-idle-session", "work-memory-closed-idle-user");
-    service.completeTurn("work-memory-closed-idle-turn", {
+    (await service.completeTurn("work-memory-closed-idle-turn", {
       sessionId: opened.sessionId,
       query: "先关闭再 idle。",
       answer: "已记录。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     service.closeSession(opened.sessionId, { namespace: opened.namespace });
     const before = workMemoryJobs(repos).length;
@@ -444,26 +444,26 @@ describe("Work Memory pipeline", () => {
     expect(workMemoryJobs(repos)).toHaveLength(before);
   });
 
-  it("失败后重新武装的 idle flush 仍然可被调度", () => {
+  it("失败后重新武装的 idle flush 仍然可被调度", async () => {
     const { db, service } = createTestService();
-    const opened = openWorkMemorySession(service, "work-memory-retry-session", "work-memory-retry-user");    service.completeTurn("work-memory-retry-turn", {
+    const opened = openWorkMemorySession(service, "work-memory-retry-session", "work-memory-retry-user");    (await service.completeTurn("work-memory-retry-turn", {
       sessionId: opened.sessionId,
       query: "重试路径。",
       answer: "好。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     const job = idleFlushJobs(repos)[0]!;
     db.db.prepare(
       `UPDATE evolution_jobs SET status = 'failed', payload_json = '{}', last_error = 'boom' WHERE id = ?`
     ).run(job.id);
 
-    service.completeTurn("work-memory-retry-turn-2", {
+    (await service.completeTurn("work-memory-retry-turn-2", {
       sessionId: opened.sessionId,
       query: "再来一次。",
       answer: "好。",
       status: "succeeded"
-    });
+    }));
 
     const revived = idleFlushJobs(repos)[0]!;
     expect(revived.status).toBe("queued");

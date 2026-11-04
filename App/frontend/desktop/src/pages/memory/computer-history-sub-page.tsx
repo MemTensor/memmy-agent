@@ -1,3 +1,4 @@
+import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileText } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -253,7 +254,7 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
     const ids = linkedSkillIds.split("\u0000");
     void Promise.all(ids.map(async (id) => {
       try {
-        const detail = await props.memoryClient!.getMemory(id);
+        const detail = await readMemoryPanelDetail(props.memoryClient!,id);
         return [id, detail.item.memoryLayer === "Skill" && detail.item.status !== "deleted"
           ? { title: detail.item.title || id, available: true, candidate: detail.item.status === "resolving" }
           : { title: id, available: false }] as const;

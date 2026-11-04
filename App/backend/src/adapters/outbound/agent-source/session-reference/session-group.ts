@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import type { SourceAdapter } from "../types.js";
+import type { SourceAdapter } from "@memmy/agent-source-readers/adapters/types";
 
 /** The organizing unit a session belongs to. Sessions outside every unit have no group. */
 export interface LocalSessionGroup {

@@ -8,7 +8,7 @@ import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
 import { AgentDefaults } from "../../../src/config/schema.js";
 import { Session } from "../../../src/core/session/manager.js";
 
-const DEFAULT_MAX_MESSAGES = 120;
+const DEFAULT_MAX_MESSAGES = 80;
 const roots: string[] = [];
 
 function tmpRoot(): string {
@@ -17,7 +17,7 @@ function tmpRoot(): string {
   return root;
 }
 
-function makeLoop(maxMessages = DEFAULT_MAX_MESSAGES): AgentLoop {
+function makeLoop(maxMessages?: number): AgentLoop {
   const provider = { getDefaultModel: () => "test-model", generation: { maxTokens: 4096 } };
   return new AgentLoop({
     bus: new MessageBus(),
@@ -71,7 +71,7 @@ describe("AgentLoop maxMessages configuration", () => {
     const session = populatedSession(80);
     const history = session.getHistory();
 
-    expect(history.length).toBeLessThanOrEqual(DEFAULT_MAX_MESSAGES);
+    expect(history).toHaveLength(DEFAULT_MAX_MESSAGES);
   });
 
   it("session history respects explicit maxMessages", () => {
@@ -92,7 +92,7 @@ describe("AgentLoop maxMessages configuration", () => {
     const session = populatedSession(80);
     const history = session.getHistory(0);
 
-    expect(history.length).toBeLessThanOrEqual(DEFAULT_MAX_MESSAGES);
+    expect(history).toHaveLength(DEFAULT_MAX_MESSAGES);
   });
 
   it("small sessions are unaffected by larger maxMessages", () => {

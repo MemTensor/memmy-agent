@@ -8,10 +8,10 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { readCodexRollout } from "../adapters/outbound/agent-source/codex/rollout-reader.js";
-import { readClaudeCodeTranscript } from "../adapters/outbound/agent-source/claude-code/transcript-reader.js";
-import { readDeepseekHarnessSession } from "../adapters/outbound/agent-source/deepseek-harness/session-reader.js";
-import { readPiHistory } from "../adapters/outbound/agent-source/pi/history-reader.js";
+import { readCodexRollout } from "@memmy/agent-source-readers/adapters/codex/rollout-reader";
+import { readClaudeCodeTranscript } from "@memmy/agent-source-readers/adapters/claude-code/transcript-reader";
+import { readDeepseekHarnessSession } from "@memmy/agent-source-readers/adapters/deepseek-harness/session-reader";
+import { readPiHistory } from "@memmy/agent-source-readers/adapters/pi/history-reader";
 
 /** 一个任务在本机记录文件里的一轮：问、答、这一轮开始的时间。 */
 export interface RecordedTurn {

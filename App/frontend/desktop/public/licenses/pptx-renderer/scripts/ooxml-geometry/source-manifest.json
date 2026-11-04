@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "standard": {
+    "id": "ECMA-376-1:2016",
+    "part": 1,
+    "edition": 5,
+    "publicationLabel": "5th edition, December 2016",
+    "landingPage": "https://ecma-international.org/publications-and-standards/standards/ecma-376/",
+    "downloadUrl": "https://ecma-international.org/wp-content/uploads/ECMA-376-1_5th_edition_december_2016.zip",
+    "packageSha256": "9d0bcad9cf06054785b03762fcfadbf6bab7e54a5f9d69434e34b7fd464d4129"
+  },
+  "geometryArchive": {
+    "outerPackageEntry": "OfficeOpenXML-DrawingMLGeometries.zip",
+    "repositoryPath": "scripts/ooxml-geometry/vendor/OfficeOpenXML-DrawingMLGeometries.zip",
+    "bytes": 51672,
+    "sha256": "a8517838a3a60492d267d1ff92e1ebd831adc04584de79a38a5532a68902abf6"
+  },
+  "presetShapeDefinitions": {
+    "archiveEntry": "presetShapeDefinitions.xml",
+    "bytes": 559368,
+    "sha256": "2f7c868d857c1e3c4b5a6068759fe0e07d77ad58377a6618d1b02ba3507b6939"
+  },
+  "copyright": {
+    "holder": "Ecma International",
+    "noticePath": "licenses/ECMA-text-copyright-notice.txt",
+    "policyUrl": "https://ecma-international.org/policies/by-ipr/ecma-text-copyright-policy/"
+  }
+}

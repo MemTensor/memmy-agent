@@ -834,6 +834,31 @@ export class WriteFileTool extends Tool {
   }
 }
 
+const EDIT_FILE_ALIASES = [
+  ["old_text", "oldText"],
+  ["new_text", "newText"],
+  ["replace_all", "replaceAll"],
+  ["line_hint", "lineHint"],
+  ["expected_replacements", "expectedReplacements"],
+] as const;
+
+/** Normalize legacy inputs while rejecting ambiguous values before file access. */
+function normalizeEditAliases(params: Record<string, any>): { params: Record<string, any>; error: string | null } {
+  const normalized = { ...params };
+  for (const [canonical, alias] of EDIT_FILE_ALIASES) {
+    const value = params[canonical];
+    const legacy = params[alias];
+    // Nullish values are unset for compatibility; empty text and false are explicit values.
+    if (value != null && legacy != null && value !== legacy) {
+      return { params, error: `Conflicting parameters: ${canonical} and ${alias} must have the same value when both are provided.` };
+    }
+    if (value == null && legacy !== undefined) normalized[canonical] = legacy;
+    if (normalized[canonical] === undefined) delete normalized[canonical];
+    delete normalized[alias];
+  }
+  return { params: normalized, error: null };
+}
+
 interface EditFileParams {
   path?: string;
   old_text?: string;
@@ -851,12 +876,12 @@ interface EditFileParams {
 
 function resolveEditParams(params: EditFileParams) {
   return {
-    oldText: params.old_text ?? params.oldText,
-    newText: params.new_text ?? params.newText,
-    replaceAll: params.replace_all ?? params.replaceAll ?? false,
+    oldText: params.old_text,
+    newText: params.new_text,
+    replaceAll: params.replace_all ?? false,
     occurrence: params.occurrence ?? null,
-    lineHint: params.line_hint ?? params.lineHint ?? null,
-    expectedReplacements: params.expected_replacements ?? params.expectedReplacements ?? null,
+    lineHint: params.line_hint ?? null,
+    expectedReplacements: params.expected_replacements ?? null,
   };
 }
 
@@ -936,25 +961,35 @@ export class EditFileTool extends Tool {
       properties: {
         path: { type: "string", description: "File path, absolute or relative to the workspace." },
         old_text: { type: "string", description: "Required text to replace, copied from read_file. Empty string selects create mode: create a missing file or fill an empty/whitespace-only file, without selectors." },
-        oldText: { type: "string", description: "Alias of old_text; prefer old_text. The snake_case value takes precedence when both are supplied." },
         new_text: { type: "string", description: "Required replacement text; empty string deletes the selected text." },
-        newText: { type: "string", description: "Alias of new_text; prefer new_text. The snake_case value takes precedence when both are supplied." },
         replace_all: { type: "boolean", description: "Replace every match when true; defaults to false. When true, cannot be combined with non-null occurrence or line_hint, or used in create mode. When false, may be combined with occurrence or line_hint, or used in create mode." },
-        replaceAll: { type: "boolean", description: "Alias of replace_all, with the same restrictions; prefer replace_all. The snake_case value takes precedence when both are supplied." },
         occurrence: { type: ["integer", "null"], minimum: 1, description: "Select the 1-based occurrence of old_text in file order. Omit or use null when unused. Cannot be combined with line_hint or replace_all=true, or used in create mode." },
         line_hint: { type: ["integer", "null"], minimum: 1, description: "Select the match whose start is nearest this 1-based line number; equal-distance ties fail. Omit or use null when unused. Cannot be combined with occurrence or replace_all=true, or used in create mode." },
-        lineHint: { type: ["integer", "null"], minimum: 1, description: "Alias of line_hint, with the same restrictions; prefer line_hint. A non-null line_hint takes precedence when both are supplied." },
         expected_replacements: { type: ["integer", "null"], minimum: 1, description: "Independent assertion of the number of selected replacements, checked before writing. Works with every selection mode; does not select a match. Omit or use null to skip; create mode accepts only 1 when supplied, including a no-op." },
-        expectedReplacements: { type: ["integer", "null"], minimum: 1, description: "Alias of expected_replacements, with the same restrictions; prefer expected_replacements. A non-null snake_case value takes precedence when both are supplied." },
       },
-      required: ["path"],
+      required: ["path", "old_text", "new_text"],
     };
   }
 
+  castParams(params: Record<string, any>): Record<string, any> {
+    const cast = super.castParams(params);
+    if (!cast || typeof cast !== "object" || Array.isArray(cast)) return cast;
+    for (const [canonical, alias] of EDIT_FILE_ALIASES) {
+      if (alias in cast) {
+        cast[alias] = super.castParams({ [canonical]: cast[alias] })[canonical];
+      }
+    }
+    // On conflict, preserve both cast values so validateParams can report the error.
+    return normalizeEditAliases(cast).params;
+  }
+
   validateParams(params: Record<string, any>): string[] {
-    const errors = super.validateParams(params);
+    if (!params || typeof params !== "object" || Array.isArray(params)) return super.validateParams(params);
+    const normalized = normalizeEditAliases(params);
+    if (normalized.error) return [normalized.error];
+    const errors = super.validateParams(normalized.params);
     if (errors.length) return errors;
-    const error = editOptionsError(resolveEditParams(params));
+    const error = editOptionsError(resolveEditParams(normalized.params as EditFileParams));
     return error ? [error] : [];
   }
 
@@ -967,13 +1002,17 @@ export class EditFileTool extends Tool {
   }
 
   async execute(params: EditFileParams = {}, context?: ToolExecutionContext): Promise<string> {
+    params = this.castParams(params) as EditFileParams;
+    if (!params || typeof params !== "object" || Array.isArray(params)) return "Error editing file: parameters must be an object.";
+    const normalized = normalizeEditAliases(params);
+    if (normalized.error) return `Error: ${normalized.error}`;
+    params = normalized.params as EditFileParams;
     if (!params.path) return "Error editing file: Unknown path";
-    const options = resolveEditParams(params);
-    const { oldText, newText, replaceAll, occurrence, lineHint, expectedReplacements } = options;
+    const { oldText, newText, replaceAll, occurrence, lineHint, expectedReplacements } = resolveEditParams(params);
     if (oldText == null) return "Error editing file: Unknown old_text";
     if (newText == null) return "Error editing file: Unknown new_text";
-    const parameterError = editOptionsError(options);
-    if (parameterError) return `Error: ${parameterError}`;
+    const parameterErrors = this.validateParams(params);
+    if (parameterErrors.length) return `Error: ${parameterErrors.join("; ")}`;
     const target = resolveWorkspacePath(this.workspace, params.path);
     if (!isToolPathAllowed(target, this.allowedDir, this.extraAllowedDirs)) return `Error editing file: path outside workspace: ${params.path}`;
     const signal = context?.abortSignal ?? null;

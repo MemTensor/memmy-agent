@@ -253,6 +253,19 @@ describe("MessageTool", () => {
     expect(tool.turnDeliveredMediaPaths()).toEqual([path.resolve(file)]);
   });
 
+  it("does not send a text-only message as file delivery when a plugin has produced files", async () => {
+    const sent: OutboundMessage[] = [];
+    const tool = new MessageTool({ sendCallback: async (outbound) => { sent.push(outbound); } });
+    tool.setContext(new RequestContext({ channel: "websocket", chatId: "chat-1" }));
+    tool.startTurn();
+    tool.observePluginToolResult("mcp_plugins_plugin_report_render_12345678", JSON.stringify({
+      publishedFiles: [{ name: "report.docx", path: "/workspace/report.docx" }]
+    }));
+
+    expect(await tool.execute({ content: "报告已生成，路径已返回。" })).toContain("no media attachments");
+    expect(sent).toHaveLength(0);
+  });
+
   it("clears tracked media at the start of a turn", async () => {
     const root = workspace("msg-turn-");
     const file = path.join(root, "doc.md");

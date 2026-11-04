@@ -253,6 +253,15 @@ export class TerminalRunControl {
     });
   }
 
+  hasActiveRuns(): boolean {
+    if (!fs.existsSync(this.root)) return false;
+    return fs.readdirSync(this.root).some(name => {
+      if (!/^run-[a-f0-9]+\.json$/.test(name)) return false;
+      const state = readJson(path.join(this.root, name));
+      return state !== null && !isStale(state);
+    });
+  }
+
   read(sessionKey: string): TerminalRunState | null {
     const state = readJson(this.runPath(sessionKey));
     if (state && !isStale(state)) return state;

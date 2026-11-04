@@ -9,6 +9,7 @@ import type { LlmClient } from "../../model/types.js";
 import type {
   EpisodeRecord,
   EvolutionJobRecord,
+  RawTurnRecord,
   Repositories
 } from "../../storage/repositories.js";
 import type { MemoryRow,ToolCallPayload } from "../../types.js";
@@ -36,6 +37,7 @@ import { SkillClusterPipeline } from "./skill-cluster-pipeline.js";
 import { SkillPipeline } from "./skill-pipeline.js";
 import { SpanPipeline } from "./span-pipeline.js";
 import type { TraceCaptureSummary, TurnMemoryCaptureDecision } from "./span-pipeline.js";
+import type { TurnJudgeSnapshot, TurnJudgment } from "./turn-judge.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
@@ -245,6 +247,24 @@ export class EvolutionJobProcessor {
     mustKeep?: boolean;
   }): Promise<TurnMemoryCaptureDecision> {
     return this.span.decideTurnMemoryForCapture(input);
+  }
+
+  buildTurnJudgeSnapshot(input: {
+    trace: TraceMeta;
+    rawTurn: RawTurnRecord;
+    mustKeep: boolean;
+    catchUp?: boolean;
+    at: string;
+  }): TurnJudgeSnapshot {
+    return this.span.buildTurnJudgeSnapshot(input);
+  }
+
+  judgeTurnForCapture(input: {
+    trace: TraceMeta;
+    rawTurn: RawTurnRecord;
+    snapshot: TurnJudgeSnapshot;
+  }): Promise<TurnJudgment> {
+    return this.span.judgeTurnForCapture(input);
   }
 
   findExistingSkillForPolicy(policy: PolicyMeta) {

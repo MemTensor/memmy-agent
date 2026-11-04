@@ -263,7 +263,7 @@ export class NegativeExperiencePipeline {
     const episode = job.episodeId
       ? this.deps.repos.runtime.getEpisode(job.episodeId)
       : undefined;
-    if (!source || !episode || episode.userId !== job.userId) return undefined;
+    if (!source || !episode) return undefined;
 
     const feedbackId = text(job.payload.feedbackId);
     const repairId = text(job.payload.repairId);

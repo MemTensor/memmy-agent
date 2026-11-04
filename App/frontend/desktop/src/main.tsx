@@ -1,6 +1,7 @@
 import { lazy, StrictMode, Suspense, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "./app.js";
+import { ErrorBoundary } from "./app/error-boundary.js";
 import { AppProviders } from "./app/providers.js";
 import { initGtag } from "./analytics/gtag-init.js";
 import { NicknameModal } from "./components/nickname-modal.js";

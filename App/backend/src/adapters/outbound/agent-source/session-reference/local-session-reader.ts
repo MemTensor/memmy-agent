@@ -3,8 +3,8 @@
  * online project, and reads one session's turns so they can be uploaded to it. It runs in the desktop backend on
  * the backend's own agent adapters, so online projects do not depend on the Memory service.
  */
-import type { SourceRegistry } from "../source-registry.js";
-import type { ConversationMessage, SourceAdapter } from "../types.js";
+import type { SourceRegistry } from "@memmy/agent-source-readers/adapters/source-registry";
+import type { ConversationMessage, SourceAdapter } from "@memmy/agent-source-readers/adapters/types";
 import { rankLocalSessions } from "./local-session-rank.js";
 import { createSessionGrouper, type LocalSessionGroup, type SessionGrouper } from "./session-group.js";
 

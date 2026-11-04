@@ -1,9 +1,16 @@
+import { ComposerHighlightedTextarea } from "./composer-highlighted-textarea.js";
+import { useQuestionDockLayout } from "./use-question-dock-layout.js";
+import { PluginCapabilityLabelsContext } from "./plugin-tool-activity.js";
+import { useSharedRowWidth } from "./sidebar-resize.js";
+export * from "./plugin-conversation-controls.js";
+import { useConversationFeatures } from "./conversation-features.js";
+import { applySidebarRecordingAction, sidebarRecordingStatus } from "./recording-entry.js";
+import { pendingAgentQuestion, AgentQuestionCard, AgentQuestionActiveRequestContext } from "./agent-question-card.js";
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
 import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
-import { ComposerInlineEditor, caretAtTextStart } from "./composer-inline-editor.js";
 import { mentionEmptyLabelKey } from "./collab-session-mention.js";
 import { CollabShareToggle } from "./collab-share-toggle.js";
 import { getCollabProjectsSnapshot, selectCollabProject, subscribeCollabProjects } from "../app/collab-projects-store.js";
@@ -22,6 +29,7 @@ import {
   type AgentTurnSource,
   type MemmyAgentUiLanguage,
   type MemmyAgentWebSocketConnection,
+  type MemmyAgentMediaInput,
   type UploadAgentMediaInput,
   type UploadedAgentMedia,
   type WebuiSessionTarget
@@ -47,7 +55,7 @@ import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integ
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
-import { NEW_TASK_MODEL_SCOPE_KEY, type AgentChatMessage, type AgentState, type AgentThinkingState, type ComposerMention } from "../state/agent-chat-slice.js";
+import { NEW_TASK_MODEL_SCOPE_KEY, type AgentChatMediaAttachment, type AgentChatMessage, type AgentState, type AgentThinkingState, type ComposerMention } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
@@ -81,8 +89,9 @@ import {
 import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList, queuedComposerEditDecision } from "./agent-queued-message-list.js";
+import { agentOutputSignature, useStalledOutputShimmer } from "./agent-stall-shimmer.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
-import { AgentThreadPanel, useAgentThreadPanel } from "./agent-thread-panel.js";
+import { AgentThreadPanel, PLUGIN_RECORDING_TAB_ID, useAgentThreadPanel } from "./agent-thread-panel.js";
 import { hasPendingBrowserOpen, MEMMY_BROWSER_OPEN_EVENT } from "./browser-panel.js";
 import { threadTabForInAppPreview, threadTabForPath } from "./agent-thread-panel-model.js";
 import { THREAD_SEARCH_SCROLL_OFFSET } from "./agent-thread-search.js";
@@ -107,10 +116,11 @@ import {
   writePendingFirstEncounterTaskLaunch
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
+import { HomeStarterActions } from "./home-starter-actions.js";
 import { LlmProviderLogo } from "./llm-provider-logo.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
-import { ArrowDown, Check, ChevronDown, Folder, MessageSquare, Plus as LucidePlus, RotateCw, Target, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, Folder, MessageSquare, PanelRight, Plus as LucidePlus, RotateCw, Target, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -363,7 +373,7 @@ export function requestAgentStop(input: RequestAgentStopInput): boolean {
   }
 }
 
-export function isSingleLineComposerInput(element: HTMLElement): boolean {
+export function isSingleLineComposerInput(element: HTMLTextAreaElement): boolean {
   const style = window.getComputedStyle(element);
   const lineHeight = Number.parseFloat(style.lineHeight);
   const paddingTop = Number.parseFloat(style.paddingTop) || 0;
@@ -453,7 +463,7 @@ export function ComposerImageAttachmentChip(props: {
   const extensionLabel = splitAgentAttachmentName(item.fileName, item.encodedMime ? `.${item.encodedMime.slice("image/".length)}` : undefined).extensionLabel;
   const subline = item.status === "error"
     ? t(item.errorKey ?? "home.media.error.sendReadFailed")
-    : `${extensionLabel} · ${formatBytes(item.originalBytes)}`;
+    : item.reusedMedia ? extensionLabel : `${extensionLabel} · ${formatBytes(item.originalBytes)}`;
 
   return (
     <AgentAttachmentCard
@@ -484,7 +494,7 @@ export function ComposerFileAttachmentChip(props: {
       kind="file"
       name={item.fileName}
       mime={item.uploadMime}
-      subline={`${extensionLabel} · ${formatBytes(item.uploadBytes ?? item.originalBytes)}`}
+      subline={item.reusedMedia ? extensionLabel : `${extensionLabel} · ${formatBytes(item.uploadBytes ?? item.originalBytes)}`}
       removable
       removeLabel={props.removeLabel}
       title={item.fileName}
@@ -566,6 +576,32 @@ export function ComposerCommandChip(props: {
         <X size={13} strokeWidth={2.25} aria-hidden="true" className="composer-command-chip__icon composer-command-chip__icon--remove" />
       </button>
       <span className="composer-command-chip__label">{label}</span>
+    </div>
+  );
+}
+
+/**
+ * A referenced project task in the composer. It reads like the Goal token but carries its own icon,
+ * so the person can tell a reference from a command; the text it stands for travels with the message.
+ */
+export function ComposerMentionChip(props: {
+  label: string;
+  removeLabel: string;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="composer-command-chip composer-mention-chip">
+      <button
+        type="button"
+        className="composer-command-chip__leading"
+        aria-label={`${props.removeLabel} ${props.label}`}
+        title={`${props.removeLabel} ${props.label}`}
+        onClick={props.onRemove}
+      >
+        <MessageSquare size={13} strokeWidth={2} aria-hidden="true" className="composer-command-chip__icon composer-mention-chip__icon" />
+        <X size={13} strokeWidth={2.25} aria-hidden="true" className="composer-command-chip__icon composer-command-chip__icon--remove" />
+      </button>
+      <span className="composer-command-chip__label">{props.label}</span>
     </div>
   );
 }
@@ -751,15 +787,15 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     }
   }
 
-  const uploadInputs = input.pendingAttachments.map((item) => ({
+  const uploadInputs = input.pendingAttachments.filter((item) => !item.reusedMedia).map((item) => ({
     blob: uploadBlobForPendingAttachment(item),
     name: safeAgentAttachmentFilename(item.fileName, uploadClassificationForPendingAttachment(item)),
     kind: item.kind,
     mime: uploadMimeForPendingAttachment(item)
   }));
-  let uploadedAttachments: UploadedAgentMedia[];
+  let uploadedNewAttachments: UploadedAgentMedia[];
   try {
-    uploadedAttachments = uploadInputs.length ? await input.uploadAgentMedia(uploadInputs) : [];
+    uploadedNewAttachments = uploadInputs.length ? await input.uploadAgentMedia(uploadInputs) : [];
   } catch (error) {
     if (createdNewChat && chatId) {
       input.dispatch(agentActions.transientSendFailed(chatId));
@@ -772,6 +808,14 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     input.setComposerMediaError?.(uploadErrorKey);
     return false;
   }
+  let newAttachmentIndex = 0;
+  const uploadedAttachments: MemmyAgentMediaInput[] = input.pendingAttachments.flatMap((item) => {
+    if (item.reusedMedia) {
+      return [{ ...item.reusedMedia, kind: item.reusedMedia.kind ?? item.kind, name: item.reusedMedia.name ?? item.fileName }];
+    }
+    const uploaded = uploadedNewAttachments[newAttachmentIndex++];
+    return uploaded ? [uploaded] : [];
+  });
 
   const payload = {
     type: "message",
@@ -938,12 +982,14 @@ export function HomePage() {
   const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
   const composerDrafts = state.agent.composerDraftsByScope;
   const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
-  const inputRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const workspaceLayoutRef = useRef<HTMLDivElement | null>(null);
+  const [workspaceLayoutRef, workspaceRowWidth] = useSharedRowWidth<HTMLDivElement>();
   const conversationPanelRef = useRef<HTMLElement | null>(null);
+  const conversationContentRef = useRef<HTMLDivElement | null>(null);
   const composerOverlayRef = useRef<HTMLDivElement | null>(null);
+  const [questionDockTarget, setQuestionDockTarget] = useState<HTMLDivElement | null>(null);
   const pendingStatusChatRef = useRef<string | null>(null);
   const pendingLastCompactionChatRef = useRef<string | null>(null);
   const pendingHistoryDagChatRef = useRef<string | null>(null);
@@ -1129,12 +1175,108 @@ export function HomePage() {
     && !currentQueuedMessages.some((item) => item.status === "steering")
   );
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
+  const isOpeningConversation = Boolean(state.agent.currentChatId && state.agent.isLoadingHistory && !hasActiveConversation);
+  const hasConversationShell = hasActiveConversation || isOpeningConversation;
+  const [blankThreadPanelEnabled, setBlankThreadPanelEnabled] = useState(false);
   const threadPanel = useAgentThreadPanel({
     scopeKey: chatScopeKey,
     containerRef: workspaceLayoutRef,
-    enabled: hasActiveConversation,
+    enabled: hasConversationShell || blankThreadPanelEnabled,
   });
   const [sidePanelMounted, setSidePanelMounted] = useState(false);
+  const [recordingTabVisible, setRecordingTabVisible] = useState(false);
+  const features = useConversationFeatures({
+    scopeKey: chatScopeKey, sharedRowWidth: workspaceRowWidth,
+    agentMessages: state.agent.messages,
+    onDraft: (text) => setCurrentComposerDraft(text),
+    onStageFiles: (files) => attachMediaFilesToScope(chatScopeKey, files),
+    onOpenArtifact: (artifact) => {
+      if (!artifact.path) return false;
+      const tab = threadTabForInAppPreview({ name: artifact.name, path: artifact.path });
+      if (!tab) return false;
+      setSidePanelMounted(true);
+      threadPanel.openTab(tab);
+      return true;
+    },
+    onOpenRecording: () => {
+      setSidePanelMounted(true);
+      threadPanel.openTab({ id: "recording:main", type: "recording", name: t("recording.page.title") });
+    },
+    onSend: (text) => submitAgentComposerMessage({
+      chatId: state.agent.currentChatId, target: state.agent.currentChatId ? null : draftTarget,
+      connection, ensureChatSubscription, content: text, pendingAttachments: [], language,
+      dispatch, track, uploadAgentMedia: (files) => clients!.memmyAgent.uploadAgentMedia(files), clearComposer: () => {},
+      setCreatingChat: setIsCreatingChat, modelPreset: resolvedConversationModel.candidateId ?? undefined,
+      chatSelectionEpoch: state.agent.chatSelectionEpoch, getChatSelectionEpoch: () => chatSelectionEpochRef.current,
+    }),
+  });
+  const pluginRecordingTabScopeRef = useRef<string | null>(null);
+  const pluginRecordingOpen = Boolean(features.pluginRecordingSession);
+  useEffect(() => {
+    if (pluginRecordingOpen) {
+      if (pluginRecordingTabScopeRef.current !== chatScopeKey) {
+        pluginRecordingTabScopeRef.current = chatScopeKey;
+        setSidePanelMounted(true);
+        threadPanel.openTab({ id: PLUGIN_RECORDING_TAB_ID, type: "recording", name: t("recording.page.title") });
+      }
+      return;
+    }
+    if (pluginRecordingTabScopeRef.current === chatScopeKey) threadPanel.closeTab(PLUGIN_RECORDING_TAB_ID);
+    pluginRecordingTabScopeRef.current = null;
+  }, [pluginRecordingOpen, chatScopeKey, threadPanel.openTab, threadPanel.closeTab, t]);
+  const [viewedRecordingId, setViewedRecordingId] = useState<string | null>(null);
+  const currentRecording = features.recording.session.live;
+  const recordingTabActive = !features.sidePanel && recordingTabVisible
+    && threadPanel.tabState.activeId === "recording:main";
+  useEffect(() => {
+    const session = features.recording.session;
+    if (recordingTabActive && session.view === "transcript" && currentRecording
+      && (currentRecording.status === "ready" || currentRecording.status === "failed")
+      && (session.opened?.id ?? currentRecording.id) === currentRecording.id) {
+      setViewedRecordingId(currentRecording.id);
+    }
+  }, [recordingTabActive, features.recording.session.view,
+    features.recording.session.opened?.id, currentRecording?.id, currentRecording?.status]);
+  const handledRecordingRequestRef = useRef(0);
+  const recordingSidebarPhase = sidebarRecordingStatus(features.recording.session);
+  useEffect(() => {
+    dispatch(appActions.recordingStatusChanged(recordingSidebarPhase));
+  }, [dispatch, recordingSidebarPhase]);
+  useEffect(() => () => dispatch(appActions.recordingStatusChanged("idle")), [dispatch]);
+  useEffect(() => {
+    const requestId = state.navigation.recordingRequestId;
+    if (state.navigation.currentPath !== "/main" || requestId <= state.navigation.recordingHandledId
+      || requestId <= handledRecordingRequestRef.current) return;
+    handledRecordingRequestRef.current = requestId;
+    dispatch(appActions.recordingRequestHandled(requestId));
+    if (!features.recordingAuthenticated) {
+      features.signIn();
+      return;
+    }
+    setBlankThreadPanelEnabled(true);
+    features.openRecording();
+    if (state.navigation.recordingRequestAction === "open"
+      && (features.recording.session.live?.status === "ready" || features.recording.session.live?.status === "failed")) {
+      features.recording.session.open(features.recording.session.live);
+    }
+    applySidebarRecordingAction(features.recording.session, state.navigation.recordingRequestAction);
+  }, [state.navigation.currentPath, state.navigation.recordingRequestId, state.navigation.recordingHandledId,
+    state.navigation.recordingRequestAction, dispatch, features.recordingAuthenticated, features.signIn,
+    features.openRecording, features.recording.session]);
+  const pendingNativeCard = state.agent.currentChatId && state.agent.stopInFlightByChatId[state.agent.currentChatId]
+    ? null : pendingAgentQuestion(state.agent.messages, currentActiveTurnId);
+  const pendingCardKey = pendingNativeCard ? `${chatScopeKey}:question:${pendingNativeCard.requestId}`
+    : features.pendingKey ? `${chatScopeKey}:plugin:${features.pendingKey}` : null;
+  useQuestionDockLayout({ panelRef: conversationPanelRef, composerRef: composerOverlayRef,
+    questionDock: questionDockTarget, pendingKey: pendingCardKey, scopeKey: chatScopeKey,
+    followingRef: shouldAutoScrollAgentConversationRef, scrollToLatest: scrollAgentConversationToBottom });
+  const answerQuestion = useCallback(async (_card: unknown, response: import("./agent-question-card.js").AgentQuestionResponse) => {
+    const generation = connection?.getReadyGeneration();
+    if (!connection || !state.agent.currentChatId || generation == null) return false;
+    try { await connection.respondToQuestion(state.agent.currentChatId, response, generation); return true; }
+    catch { return false; }
+  }, [connection, state.agent.currentChatId]);
+
   useEffect(() => {
     if (threadPanel.visible) setSidePanelMounted(true);
   }, [threadPanel.visible]);
@@ -1178,6 +1320,11 @@ export function HomePage() {
       state.agent.runStartedAtByChatId[state.agent.currentChatId] ||
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
+  );
+  useStalledOutputShimmer(
+    conversationContentRef,
+    (isCurrentAgentRunning || isCurrentGoalActive) && !pendingCardKey,
+    agentOutputSignature(state.agent.messages)
   );
   const currentTaskCompletedUnseen = state.agent.chatWindowFocused && state.agent.chatViewVisible && !state.agent.blankDraftActive
     ? false
@@ -1733,6 +1880,7 @@ export function HomePage() {
   const slashQuery = slashMenuDismissed ? null : slashQueryFromInput(composerInput);
   const localizedSlashCommands = localizeSlashCommands(slashCommands, language, t);
   const slashCommandsWithLocal = [
+    ...features.commandItems,
     lastCompactionSlashCommand,
     ...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")
   ];
@@ -1941,10 +2089,12 @@ export function HomePage() {
     const submittedAttachments = [...pendingAttachments];
     const submittedCommand = selectedComposerCommand;
     const submittedMentions = [...pendingMentions];
+    // A conversation feature may rewrite what the agent receives; references are added on top of that.
+    const promptedInput = features.agentPrompt(input) ?? input;
     // The agent needs the file paths; the bubble shows only what the person wrote.
     const contentWithReferences = submittedMentions.length
-      ? `${submittedMentions.map((item) => item.reference).join("\n\n")}\n\n${input}`
-      : input;
+      ? `${submittedMentions.map((item) => item.reference).join("\n\n")}\n\n${promptedInput}`
+      : promptedInput;
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
     dispatch(agentActions.modelSelectionRequestStarted(
@@ -1962,8 +2112,8 @@ export function HomePage() {
         connection,
         ensureChatSubscription,
         content: contentWithReferences,
-        // With references or a command the wire text differs from what was typed; show the typed part.
-        displayContent: (selectedComposerCommand || (submittedMentions.length && composerInput.trim())) ? composerInput : undefined,
+        // With references, a command or a rewritten prompt the wire text differs from what was typed; show the typed part.
+        displayContent: (features.agentPrompt(input) || selectedComposerCommand || (submittedMentions.length && composerInput.trim())) ? composerInput : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
@@ -2082,6 +2232,7 @@ export function HomePage() {
     const removed = await removeQueuedMessage(clientRequestId);
     if (!removed) return;
     setCurrentComposerDraft(item.content);
+    setCurrentPendingAttachments(item.media.map((media, index) => queuedMediaToPendingAttachment(media, clientRequestId, index)));
     inputRef.current?.focus();
   }
 
@@ -2107,6 +2258,9 @@ export function HomePage() {
       || item.status !== "queued"
       || queueSteerLocksRef.current.has(chatId)
     ) return;
+    const releasePluginInputs = features.capturePendingInputRelease(turnId);
+    const nativeQuestion = pendingNativeCard;
+    let steeringAccepted = false;
     queueSteerLocksRef.current.add(chatId);
     dispatch(agentActions.queueItemSteerStarted(chatId, clientRequestId));
     try {
@@ -2116,7 +2270,13 @@ export function HomePage() {
         turnId,
         generation
       );
-      if (result.outcome !== "steered") {
+      if (result.outcome === "steered") {
+        steeringAccepted = true;
+        await releasePluginInputs();
+        if (nativeQuestion && !await answerQuestion(nativeQuestion, {
+          requestId: nativeQuestion.requestId, cancelled: true, answers: []
+        })) throw new Error("Could not release the pending question");
+      } else {
         if (result.outcome === "already_dequeued") {
           dispatch(agentActions.queueItemSteerReset(chatId, clientRequestId));
         } else {
@@ -2141,7 +2301,7 @@ export function HomePage() {
         clientRequestId,
         createAgentOperationError({
           source: "queue",
-          message: "home.queue.steerFailed",
+          message: steeringAccepted ? "home.queue.questionReleaseFailed" : "home.queue.steerFailed",
           chatId
         })
       ));
@@ -2205,6 +2365,7 @@ export function HomePage() {
   }
 
   function runExactLocalSlashCommand(command: string): boolean {
+    if (!pendingAttachments.length && features.runCommand(command)) { setCurrentComposerDraft(""); return true; }
     const normalized = command.trim().toLowerCase();
     if (pendingAttachments.length > 0) return false;
     if (normalized === "/last-compaction") {
@@ -2393,6 +2554,19 @@ export function HomePage() {
     }
   }
 
+  function selectHomeStarter(prompt: string) {
+    setSelectedComposerCommandForScope(chatScopeKey, null);
+    setCurrentComposerDraft(prompt);
+    setSlashMenuDismissed(true);
+    window.requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (!input) return;
+      resizeComposerInput(input);
+      input.focus();
+      input.setSelectionRange(prompt.length, prompt.length);
+    });
+  }
+
   /** Removes the selected command token while preserving the typed message. */
   function clearSelectedComposerCommand() {
     setSelectedComposerCommandForScope(chatScopeKey, null);
@@ -2407,14 +2581,7 @@ export function HomePage() {
    *
    * @param element The textarea whose height should be adjusted.
    */
-  function resizeComposerInput(element: HTMLElement) {
-    // 内联编辑器随内容自然长高，高度由 CSS 的 min/max-height 兜住。给它写死 height 会把它压成一行，
-    // 因为 div 的 scrollHeight 只反映当前内容，不像 rows=3 的 textarea 一开始就有三行高。
-    if (!(element instanceof HTMLTextAreaElement)) {
-      element.style.height = "";
-      setIsComposerSingleLine(isSingleLineComposerInput(element));
-      return;
-    }
+  function resizeComposerInput(element: HTMLTextAreaElement) {
     element.style.height = "auto";
     const isSingleLine = isSingleLineComposerInput(element);
     setIsComposerSingleLine(isSingleLine);
@@ -2780,7 +2947,7 @@ export function HomePage() {
     dispatch(agentActions.composerMentionsUpdated(scopeKey, existing.filter((item) => item.id !== id)));
   }
 
-  function handleComposerKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isComposingKeyboardEvent(event) && (event.key === "Enter" || event.key === "Tab")) {
       return;
     }
@@ -2838,12 +3005,10 @@ export function HomePage() {
       }
     }
 
-    // Backspace at the very start of the text removes the chip in front of it, like a chat mention.
+    // Backspace at the very start of the text removes the last mention chip, like a chat mention.
     if (event.key === "Backspace" && pendingMentions.length) {
       const element = inputRef.current;
-      const selection = window.getSelection();
-      const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
-      if (element && range?.collapsed && caretAtTextStart(element, range)) {
+      if (element && element.selectionStart === 0 && element.selectionEnd === 0) {
         event.preventDefault();
         removeMention(chatScopeKey, pendingMentions[pendingMentions.length - 1]!.id);
         return;
@@ -2908,7 +3073,7 @@ export function HomePage() {
     }
   }
 
-  function handleComposerPaste(event: ClipboardEvent<HTMLDivElement>) {
+  function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
     const files = clipboardAttachmentFilesFromDataTransfer(event.clipboardData);
     if (!files.length) {
       return;
@@ -3040,18 +3205,22 @@ export function HomePage() {
   const previewAttachmentInApp = useCallback((file: { name: string; path?: string; url?: string }) => {
     const tab = threadTabForInAppPreview(file);
     if (!tab) return false;
+    features.closeSidePanel();
     threadPanel.openTab(tab);
     return true;
-  }, [threadPanel.openTab]);
+  }, [threadPanel.openTab, features.closeSidePanel]);
   const openActivityFileInPanel = useCallback((file: { path: string; name: string }) => {
+    features.closeSidePanel();
     threadPanel.openTab(threadTabForPath(file.path, file.name));
-  }, [threadPanel.openTab]);
+  }, [threadPanel.openTab, features.closeSidePanel]);
   const threadPanelMotionClass = `thread-panel-motion--${threadPanel.motion}`;
 
   return (
     <AppFrame
       title={t("home.title")}
-      topBar={hasActiveConversation ? (
+      recordingActive={recordingTabActive}
+      recordingViewed={Boolean(currentRecording && viewedRecordingId === currentRecording.id)}
+      topBar={hasConversationShell ? (
         <AgentThreadToolbar
           key={chatScopeKey}
           title={activeConversationTitleDisplay}
@@ -3065,12 +3234,34 @@ export function HomePage() {
           getSearchRoot={getAgentConversationSearchRoot}
         />
       ) : null}
-      topBarBorder={hasActiveConversation}
-      topBarInset={hasActiveConversation ? false : undefined}
-      topBarClassName={hasActiveConversation ? `thread-topbar ${threadPanelMotionClass}` : undefined}
-      topBarStyle={hasActiveConversation ? { right: threadPanel.offset } : undefined}
-      sidePanel={sidePanelMounted ? (
+      topBarEnd={!hasConversationShell && threadPanel.phase !== "open" ? <button type="button"
+        className="thread-toolbar__button" aria-label={t("home.threadPanel.open")}
+        title={t("home.threadPanel.open")}
+        onClick={() => {
+          setSidePanelMounted(true);
+          setBlankThreadPanelEnabled(true);
+          threadPanel.open();
+        }}>
+        <PanelRight size={16} aria-hidden="true" />
+      </button> : null}
+      topBarBorder={hasConversationShell}
+      topBarInset={hasConversationShell ? false : undefined}
+      topBarClassName={`thread-topbar ${threadPanelMotionClass}`}
+      topBarStyle={{ right: features.sidePanelWidth ?? threadPanel.offset }}
+      sidePanel={features.sidePanel ?? (sidePanelMounted ? (
         <AgentThreadPanel
+          recordingSession={features.recording.session}
+          pluginRecordingSession={features.pluginRecordingSession}
+          recordingAuthenticated={features.recordingAuthenticated}
+          recordingRevealRequestId={state.navigation.recordingRequestId}
+          onRecordingVisibleChange={setRecordingTabVisible}
+          onRecordingSignIn={features.signIn}
+          onOpenRecording={features.openRecording}
+          onCloseRecording={features.recording.close}
+          onClosePluginRecording={() => {
+            features.closePluginRecording();
+            threadPanel.closeTab(PLUGIN_RECORDING_TAB_ID);
+          }}
           controller={threadPanel}
           messages={state.agent.messages}
           workspaceRoot={activeTask?.cwd.trim() || workspaceEnvironment.data?.snapshot.cwd || null}
@@ -3083,16 +3274,22 @@ export function HomePage() {
             workspaceRoot: activeTask?.cwd.trim() || null,
           }}
         />
-      ) : null}
-      windowsTitlebarSafe={hasActiveConversation}
+      ) : null)}
+      windowsTitlebarSafe={hasConversationShell}
     >
+      {features.recorders}
       <div
         ref={workspaceLayoutRef}
         className={`agent-workspace-layout ${threadPanelMotionClass}`}
-        style={{ "--thread-panel-offset": `${threadPanel.offset}px` } as CSSProperties}
+        style={{ "--thread-panel-offset": `${features.sidePanelWidth ?? threadPanel.offset}px` } as CSSProperties}
       >
-        {!hasActiveConversation ? (
+        {isOpeningConversation ? (
+          <section className="agent-conversation-panel flex flex-col h-full" aria-busy="true">
+            <span className="sr-only">{t("home.history.loading")}</span>
+          </section>
+        ) : !hasActiveConversation ? (
         <section className="app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full">
+          <div className="conversation-feature-cards agent-confirmation-dock">{features.cards}</div>
           <div className="text-center mb-8">
             <div className="home-empty-brand-mascot flex justify-center">
               <Memmy pose="think" size={165} className="memmy-bob" />
@@ -3145,23 +3342,32 @@ export function HomePage() {
                     />
                   </div>
                 ) : null}
-                <ComposerInlineEditor
-                  editorRef={inputRef}
+                {pendingMentions.length ? (
+                  <div className="composer-command-chip-slot composer-command-chip-slot--home">
+                    {pendingMentions.map((item) => (
+                      <ComposerMentionChip
+                        key={item.id}
+                        label={item.title}
+                        removeLabel={t("common.remove")}
+                        onRemove={() => removeMention(chatScopeKey, item.id)}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+                <ComposerHighlightedTextarea
+                  textareaRef={inputRef}
+                  highlightedCommands={slashCommandsWithLocal.map((command) => command.command)}
                   value={composerInput}
-                  chips={pendingMentions.map((item) => ({ id: item.id, label: item.title }))}
                   placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
-                  removeChipLabel={t("common.remove")}
-                  className="w-full px-5 pt-4 pb-12 text-sm rounded-card-lg bg-background-paper"
-                  onChange={(value, caret) => {
-                    setComposerCaret(caret);
-                    updateComposerInput(value);
-                    const element = inputRef.current;
-                    if (element) resizeComposerInput(element);
+                  rows={3}
+                  className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
+                  onChange={(event) => {
+                    setComposerCaret(event.target.selectionStart ?? 0);
+                    updateComposerInput(event.target.value);
+                    resizeComposerInput(event.target);
                   }}
-                  onCaretChange={setComposerCaret}
                   onKeyDown={handleComposerKeyDown}
                   onPaste={handleComposerPaste}
-                  onRemoveChip={(id) => removeMention(chatScopeKey, id)}
                 />
                 <div className="composer-actions absolute bottom-3 right-4 z-50">
                   <AgentModelSelector
@@ -3224,6 +3430,7 @@ export function HomePage() {
                 />
               </div>
             </div>
+            <HomeStarterActions scenarios={features.scenarios} onSelect={selectHomeStarter} />
             <div className="home-empty-status-area">
               {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
               <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
@@ -3232,7 +3439,7 @@ export function HomePage() {
           </div>
         </section>
         ) : (
-        <section ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full">
+        <section ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full">
           <div
             ref={scrollRef}
             className="app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto"
@@ -3240,7 +3447,7 @@ export function HomePage() {
             onWheel={markAgentConversationUserScrollIntent}
             onTouchMove={markAgentConversationUserScrollIntent}
           >
-            <div className="agent-conversation-content agent-conversation-column space-y-3">
+            <div ref={conversationContentRef} className="agent-conversation-content agent-conversation-column space-y-3">
               {displayConnectionStatus !== "connected" && (
                 <div className="text-center">
                   <span className="inline-flex text-[11px] px-3 py-1 rounded-tag bg-background-paper text-text-ink/55 border border-border-stone/30">
@@ -3248,8 +3455,11 @@ export function HomePage() {
                   </span>
                 </div>
               )}
+              <AgentQuestionActiveRequestContext.Provider value={pendingNativeCard?.requestId ?? null}>
+              <PluginCapabilityLabelsContext.Provider value={features.capabilityLabels}>
               <AgentThreadMessages
                 key={chatScopeKey}
+                onAnswerQuestion={answerQuestion}
                 chatScopeKey={chatScopeKey}
                 historyVersion={currentHistoryVersion}
                 messages={state.agent.messages}
@@ -3258,12 +3468,17 @@ export function HomePage() {
                 forceMessageActionsForMessageId={firstEncounterRelayAnswerMessageId}
                 retryWaitStatus={state.agent.currentChatId ? state.agent.retryWaitStatusByChatId[state.agent.currentChatId] ?? null : null}
                 isSending={state.agent.isSending}
+                activeTurnId={currentActiveTurnId}
+                taskPlan={state.agent.taskPlanState}
+                pluginInteractionStatus={features.processInteraction}
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
                 artifactClient={sessionArtifactClient}
                 onPreviewFile={previewAttachmentInApp}
                 onOpenActivityFile={openActivityFileInPanel}
                 memoryRuntimeClient={clients?.memoryRuntime ?? null}
               />
+              </PluginCapabilityLabelsContext.Provider>
+              </AgentQuestionActiveRequestContext.Provider>
             </div>
           </div>
           {showScrollToBottomFab ? (
@@ -3291,6 +3506,36 @@ export function HomePage() {
                     />
                   </div>
                 )}
+                <AgentQueuedMessageList
+                  items={currentQueuedMessages}
+                  label={t("home.queue.label")}
+                  removeLabel={t("home.queue.remove")}
+                  editLabel={t("home.queue.edit")}
+                  steerLabel={t("home.queue.steer")}
+                  canSteer={canSteerCurrentQueue}
+                  attachmentOnlyLabel={(count) => t("home.queue.attachmentOnly", { count })}
+                  sourceLabels={{
+                    gui: t("home.queue.source.gui"),
+                    tui: t("home.queue.source.tui"),
+                    im: (channelName) => t("home.queue.source.im", { channel: channelName }),
+                    unknownIm: t("home.queue.source.imUnknown")
+                  }}
+                  onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
+                  onEdit={(clientRequestId) => void editQueuedMessage(clientRequestId)}
+                  onSteer={(clientRequestId) => void steerQueuedMessage(clientRequestId)}
+                  onReorder={state.agent.currentChatId && connection?.getReadyGeneration() != null
+                    && state.agent.queueRevisionByChatId[state.agent.currentChatId] !== undefined
+                    ? (orderedIds) => {
+                      const chatId = state.agent.currentChatId!;
+                      const generation = connection.getReadyGeneration();
+                      const revision = state.agent.queueRevisionByChatId[chatId];
+                      if (generation === null || revision === undefined) return;
+                      connection.reorderQueuedMessages(chatId, orderedIds, revision, generation);
+                    }
+                    : undefined}
+                />
+                <div className="conversation-feature-cards agent-confirmation-dock">{features.cards}</div>
+                {features.shortcuts}
                 {slashMenuOpen && (
                   <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
                     <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
@@ -3335,24 +3580,10 @@ export function HomePage() {
                 ) : null}
                 <AgentOperationErrorSlot message={agentError} />
                 <div className="agent-composer-stack">
-                  <AgentQueuedMessageList
-                    items={currentQueuedMessages}
-                    label={t("home.queue.label")}
-                    removeLabel={t("home.queue.remove")}
-                    editLabel={t("home.queue.edit")}
-                    steerLabel={t("home.queue.steer")}
-                    canSteer={canSteerCurrentQueue}
-                    attachmentOnlyLabel={(count) => t("home.queue.attachmentOnly", { count })}
-                    sourceLabels={{
-                      gui: t("home.queue.source.gui"),
-                      tui: t("home.queue.source.tui"),
-                      im: (channelName) => t("home.queue.source.im", { channel: channelName }),
-                      unknownIm: t("home.queue.source.imUnknown")
-                    }}
-                    onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
-                    onEdit={(clientRequestId) => void editQueuedMessage(clientRequestId)}
-                    onSteer={(clientRequestId) => void steerQueuedMessage(clientRequestId)}
-                  />
+                  <div ref={setQuestionDockTarget} className="agent-question-dock">
+                    {pendingNativeCard ? <AgentQuestionCard key={pendingNativeCard.requestId} card={pendingNativeCard}
+                      onSubmit={(response) => answerQuestion(pendingNativeCard, response)} /> : null}
+                  </div>
                   {state.agent.currentChatId && currentGoal ? (
                     <AgentGoalBar
                       chatId={state.agent.currentChatId}
@@ -3374,23 +3605,32 @@ export function HomePage() {
                       selectedLabel={t("home.media.addPhotoFile")}
                       t={t}
                     />
-                    <ComposerInlineEditor
-                      editorRef={inputRef}
+                    {pendingMentions.length ? (
+                      <div className="composer-command-chip-slot">
+                        {pendingMentions.map((item) => (
+                          <ComposerMentionChip
+                            key={item.id}
+                            label={item.title}
+                            removeLabel={t("common.remove")}
+                            onRemove={() => removeMention(chatScopeKey, item.id)}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                    <ComposerHighlightedTextarea
+                      textareaRef={inputRef}
+                      highlightedCommands={slashCommandsWithLocal.map((command) => command.command)}
                       value={composerInput}
-                      chips={pendingMentions.map((item) => ({ id: item.id, label: item.title }))}
                       placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
-                      removeChipLabel={t("common.remove")}
+                      rows={isComposerSingleLine ? 1 : 3}
                       className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm rounded-card-lg bg-background-paper`}
-                      onChange={(value, caret) => {
-                        setComposerCaret(caret);
-                        updateComposerInput(value);
-                        const element = inputRef.current;
-                        if (element) resizeComposerInput(element);
+                      onChange={(event) => {
+                        setComposerCaret(event.target.selectionStart ?? 0);
+                        updateComposerInput(event.target.value);
+                        resizeComposerInput(event.target);
                       }}
-                      onCaretChange={setComposerCaret}
                       onKeyDown={handleComposerKeyDown}
                       onPaste={handleComposerPaste}
-                      onRemoveChip={(id) => removeMention(chatScopeKey, id)}
                     />
                     <div className="agent-composer-toolbar">
                       <div className="agent-composer-toolbar__leading">
@@ -4064,9 +4304,30 @@ function isPendingAttachmentReadyForUpload(item: PendingAttachment): boolean {
   if (item.status !== "ready") {
     return false;
   }
+  if (item.reusedMedia) return Boolean(item.reusedMedia.path);
   return item.kind === "image"
     ? Boolean(item.encodedBlob && item.encodedMime)
     : Boolean(item.uploadBlob && item.uploadMime);
+}
+
+export function queuedMediaToPendingAttachment(
+  media: AgentChatMediaAttachment,
+  clientRequestId: string,
+  index: number,
+): PendingAttachment {
+  if (!media.path) throw new Error("Queued attachment has no reusable path");
+  const fileName = media.name || `attachment-${index + 1}`;
+  const base = {
+    id: `queued-${clientRequestId}-${index}`,
+    sourceKey: `queued:${media.path}`,
+    fileName,
+    status: "ready" as const,
+    originalBytes: 0,
+    reusedMedia: { ...media, path: media.path, name: fileName, kind: media.kind ?? "file" as const },
+  };
+  return media.kind === "image"
+    ? { ...base, kind: "image", previewUrl: media.url ?? "" }
+    : { ...base, kind: "file", extension: fileName.includes(".") ? fileName.slice(fileName.lastIndexOf(".")) : "" };
 }
 
 function uploadBlobForPendingAttachment(item: PendingAttachment): Blob {
@@ -4307,6 +4568,7 @@ function createPreviewUrl(file: File): string {
 }
 
 function revokePendingAttachment(item: PendingAttachment): void {
+  if (item.reusedMedia) return;
   if (item.kind === "image" && item.previewUrl && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
     URL.revokeObjectURL(item.previewUrl);
   }

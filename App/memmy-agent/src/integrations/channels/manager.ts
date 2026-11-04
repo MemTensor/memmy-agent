@@ -68,6 +68,7 @@ export class ChannelManager {
   activeGoalStopHandler: ((sessionKey: string) => Promise<boolean>) | null = null;
   getWebuiQueueSnapshot: ((sessionKey: string) => WebuiQueueSnapshotDescriptor | Promise<WebuiQueueSnapshotDescriptor>) | null = null;
   removeQueuedWebuiMessage: ((sessionKey: string, clientRequestId: string) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>) | null = null;
+  reorderQueuedWebuiMessages: ((sessionKey: string, orderedIds: string[], expectedRevision: number) => import("../../core/agent-runtime/loop.js").ReorderQueuedMessageResult | Promise<import("../../core/agent-runtime/loop.js").ReorderQueuedMessageResult>) | null = null;
   steerQueuedWebuiMessage: ((sessionKey: string, clientRequestId: string, expectedTurnId: string) => SteerQueuedMessageResult | Promise<SteerQueuedMessageResult>) | null = null;
   stopExpectedTurn: ((sessionKey: string, expectedTurnId: string) => Promise<"stopped" | "already_finished" | "not_owned">) | null = null;
 
@@ -91,6 +92,7 @@ export class ChannelManager {
       activeGoalStopHandler?: ((sessionKey: string) => Promise<boolean>) | null;
       getWebuiQueueSnapshot?: ((sessionKey: string) => WebuiQueueSnapshotDescriptor | Promise<WebuiQueueSnapshotDescriptor>) | null;
       removeQueuedWebuiMessage?: ((sessionKey: string, clientRequestId: string) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>) | null;
+      reorderQueuedWebuiMessages?: ((sessionKey: string, orderedIds: string[], expectedRevision: number) => import("../../core/agent-runtime/loop.js").ReorderQueuedMessageResult | Promise<import("../../core/agent-runtime/loop.js").ReorderQueuedMessageResult>) | null;
       steerQueuedWebuiMessage?: ((sessionKey: string, clientRequestId: string, expectedTurnId: string) => SteerQueuedMessageResult | Promise<SteerQueuedMessageResult>) | null;
       stopExpectedTurn?: ((sessionKey: string, expectedTurnId: string) => Promise<"stopped" | "already_finished" | "not_owned">) | null;
     } = {},
@@ -117,6 +119,7 @@ export class ChannelManager {
     this.activeGoalStopHandler = options.activeGoalStopHandler ?? null;
     this.getWebuiQueueSnapshot = options.getWebuiQueueSnapshot ?? null;
     this.removeQueuedWebuiMessage = options.removeQueuedWebuiMessage ?? null;
+    this.reorderQueuedWebuiMessages = options.reorderQueuedWebuiMessages ?? null;
     this.steerQueuedWebuiMessage = options.steerQueuedWebuiMessage ?? null;
     this.stopExpectedTurn = options.stopExpectedTurn ?? null;
     this.initChannels();
@@ -194,6 +197,7 @@ export class ChannelManager {
     if (this.activeGoalStopHandler) options.activeGoalStopHandler = this.activeGoalStopHandler;
     if (this.getWebuiQueueSnapshot) options.getWebuiQueueSnapshot = this.getWebuiQueueSnapshot;
     if (this.removeQueuedWebuiMessage) options.removeQueuedWebuiMessage = this.removeQueuedWebuiMessage;
+    if (this.reorderQueuedWebuiMessages) options.reorderQueuedWebuiMessages = this.reorderQueuedWebuiMessages;
     if (this.steerQueuedWebuiMessage) options.steerQueuedWebuiMessage = this.steerQueuedWebuiMessage;
     if (this.stopExpectedTurn) options.stopExpectedTurn = this.stopExpectedTurn;
     return options;

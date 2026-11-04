@@ -1,10 +1,8 @@
+import { assignedEpisodeId, settleCaptureAssignments } from "../../fixtures/memory-service-fixture.js";
+import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  DEFAULT_MEMMY_CONFIG,
-  MemoryDb,
-  type LlmClient
-} from "../../../src/index.js";
+import { MemoryDb, type LlmClient } from "../../../src/index.js";
 import {
   createBatchReflectionLlm,
   createMemoryServiceFixture,
@@ -26,7 +24,7 @@ function createEmptyRewardSummaryLlm(calls: Array<{
 }>): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.summary,
+      ...LEGACY_TEST_CONFIG.summary,
       provider: "host",
       endpoint: "http://127.0.0.1/empty-reward-summary",
       model: "empty-reward-summary"
@@ -41,6 +39,7 @@ function createEmptyRewardSummaryLlm(calls: Array<{
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
@@ -77,7 +76,7 @@ function createCapturingRewardSummaryLlm(calls: Array<{
 }>): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.summary,
+      ...LEGACY_TEST_CONFIG.summary,
       provider: "host",
       endpoint: "http://127.0.0.1/reward-summary-capturing",
       model: "reward-summary-capturing"
@@ -96,6 +95,7 @@ function createCapturingRewardSummaryLlm(calls: Array<{
         maxTokens?: number;
       }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
@@ -139,7 +139,7 @@ function createCapturingRewardSummaryLlm(calls: Array<{
 function createRejectingCaptureLlm(calls: string[]): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.summary,
+      ...LEGACY_TEST_CONFIG.summary,
       provider: "host",
       endpoint: "http://127.0.0.1/rejecting-capture",
       model: "rejecting-capture"
@@ -157,6 +157,7 @@ function createRejectingCaptureLlm(calls: string[]): LlmClient {
       _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push(options.operation);
       if (options.operation !== "capture.summarize") {
         throw new Error(`unexpected downstream model call: ${options.operation}`);
@@ -180,7 +181,7 @@ function createRejectingCaptureLlm(calls: string[]): LlmClient {
 function createMixedCaptureLlm(calls: Array<{ operation: string; stepCount?: number }>): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.summary,
+      ...LEGACY_TEST_CONFIG.summary,
       provider: "host",
       endpoint: "http://127.0.0.1/mixed-capture",
       model: "mixed-capture"
@@ -195,6 +196,7 @@ function createMixedCaptureLlm(calls: Array<{ operation: string; stepCount?: num
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       const payload = messages.find((message) => message.role === "user")?.content ?? "";
       if (options.operation === "capture.reflection.batch.v13") {
         const parsed = JSON.parse(payload) as { steps?: Array<{ idx: number }> };
@@ -243,11 +245,11 @@ describe("MemoryService / evolution / reward", () => {
       }
     });
 
-    const complete = service.completeTurn("turn-implicit-reward", {
+    const complete = (await service.completeTurn("turn-implicit-reward", {
       sessionId: session.sessionId,
       query: "finish the migration scaffold with durable sqlite state and a worker queue",
       answer: "implemented the service scaffold, sqlite schema, raw turn capture, and asynchronous worker queue"
-    });
+    }));
     expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close", "episode_title"]);
 
     const rewardBeforeClose = db.db.prepare(
@@ -255,7 +257,7 @@ describe("MemoryService / evolution / reward", () => {
        FROM evolution_jobs
        WHERE job_type = 'reward'
          AND episode_id = ?`
-    ).get(complete.episodeId) as { count: number };
+    ).get(assignedEpisodeId(service, complete)) as { count: number };
     expect(rewardBeforeClose.count).toBe(0);
 
     service.closeSession(session.sessionId);
@@ -265,7 +267,7 @@ describe("MemoryService / evolution / reward", () => {
        FROM evolution_jobs
        WHERE job_type = 'reflection'
          AND episode_id = ?`
-    ).get(complete.episodeId) as { target_memory_id: string | null; payload_json: string } | undefined;
+    ).get(assignedEpisodeId(service, complete)) as { target_memory_id: string | null; payload_json: string } | undefined;
     expect(queuedReflection?.target_memory_id).toBe(complete.l1MemoryId);
     expect(JSON.parse(queuedReflection!.payload_json)).toMatchObject({
       trigger: "session_closed",
@@ -276,14 +278,14 @@ describe("MemoryService / evolution / reward", () => {
        FROM evolution_jobs
        WHERE job_type = 'reward'
          AND episode_id = ?`
-    ).get(complete.episodeId) as { count: number };
+    ).get(assignedEpisodeId(service, complete)) as { count: number };
     expect(queuedRewardBeforeReflection.count).toBe(0);
     const queuedEvolutionBeforeReward = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
        WHERE job_type IN ('l2_association', 'l2_induction')
          AND episode_id = ?`
-    ).get(complete.episodeId) as { count: number };
+    ).get(assignedEpisodeId(service, complete)) as { count: number };
     expect(queuedEvolutionBeforeReward.count).toBe(0);
     const l1TargetedDownstream = db.db.prepare(
       `SELECT COUNT(*) AS count
@@ -310,14 +312,14 @@ describe("MemoryService / evolution / reward", () => {
        FROM evolution_jobs
        WHERE job_type IN ('l2_association', 'l2_induction')
          AND episode_id = ?`
-    ).get(complete.episodeId) as { count: number };
+    ).get(assignedEpisodeId(service, complete)) as { count: number };
     expect(queuedL2EvolutionAfterReward.count).toBe(0);
     const queuedReward = db.db.prepare(
       `SELECT target_memory_id, payload_json
        FROM evolution_jobs
        WHERE job_type = 'reward'
          AND episode_id = ?`
-    ).get(complete.episodeId) as { target_memory_id: string | null; payload_json: string } | undefined;
+    ).get(assignedEpisodeId(service, complete)) as { target_memory_id: string | null; payload_json: string } | undefined;
     expect(queuedReward?.target_memory_id).toBeNull();
     const rewardPayload = JSON.parse(queuedReward!.payload_json) as Record<string, unknown>;
     expect(rewardPayload).toMatchObject({
@@ -337,24 +339,24 @@ describe("MemoryService / evolution / reward", () => {
     const { db, service } = createTestService({
       llm: createBatchReflectionLlm(calls),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           capture: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            ...LEGACY_TEST_CONFIG.algorithm.capture,
             embedAfterCapture: false,
             synthReflection: true
           },
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             useLlm: false
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: false
           }
         }
@@ -368,21 +370,22 @@ describe("MemoryService / evolution / reward", () => {
       }
     });
     const firstQuery = `我喜欢吃的水果是西瓜，${"这是需要保留的较长用户补充说明。".repeat(12)}`;
-    const first = service.completeTurn("turn-reward-before-reflection-1", {
+    const first = (await service.completeTurn("turn-reward-before-reflection-1", {
       sessionId: session.sessionId,
       episodeId: "episode-reward-before-reflection",
       query: firstQuery,
       answer: "记住了，你喜欢吃的水果是西瓜。"
-    });
-    const second = service.completeTurn("turn-reward-before-reflection-2", {
+    }));
+    await settleCaptureAssignments(service);
+    const second = (await service.completeTurn("turn-reward-before-reflection-2", {
       sessionId: session.sessionId,
-      episodeId: first.episodeId,
+      episodeId: assignedEpisodeId(service, first),
       query: "水果中和西瓜比较相似有哪些，推荐一个",
       answer: "我推荐哈密瓜。"
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
-      episodeId: second.episodeId,
+      episodeId: assignedEpisodeId(service, second),
       l1MemoryId: second.l1MemoryId,
       channel: "explicit",
       polarity: "negative",
@@ -394,17 +397,17 @@ describe("MemoryService / evolution / reward", () => {
       `SELECT r_task
        FROM episodes
        WHERE id = ?`
-    ).get(first.episodeId) as { r_task: number | null };
+    ).get(assignedEpisodeId(service, first)) as { r_task: number | null };
     expect(openEpisode.r_task).toBeNull();
     expect(calls.filter((call) => call.options.operation === "reward.reward.r_human.v7")).toEqual([]);
     expect(calls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(2);
 
-    const third = service.completeTurn("turn-reward-before-reflection-3", {
+    const third = (await service.completeTurn("turn-reward-before-reflection-3", {
       sessionId: session.sessionId,
-      episodeId: first.episodeId,
+      episodeId: assignedEpisodeId(service, first),
       query: "哈密瓜和西瓜谁的营养价值更高",
       answer: "综合营养密度上哈密瓜通常更高一点。"
-    });
+    }));
 
     service.closeSession(session.sessionId);
     const queuedReflection = db.db.prepare(
@@ -412,7 +415,7 @@ describe("MemoryService / evolution / reward", () => {
        FROM evolution_jobs
        WHERE job_type = 'reflection'
          AND episode_id = ?`
-    ).get(first.episodeId) as { count: number };
+    ).get(assignedEpisodeId(service, first)) as { count: number };
     expect(queuedReflection.count).toBe(0);
 
     await service.runWorkerOnce(20);
@@ -446,7 +449,7 @@ describe("MemoryService / evolution / reward", () => {
       `SELECT r_task, reward_detail_json
        FROM episodes
        WHERE id = ?`
-    ).get(first.episodeId) as { r_task: number | null; reward_detail_json: string };
+    ).get(assignedEpisodeId(service, first)) as { r_task: number | null; reward_detail_json: string };
     expect(typeof rewarded.r_task).toBe("number");
     expect(JSON.parse(rewarded.reward_detail_json)).toMatchObject({
       phase: "final",
@@ -468,19 +471,20 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-rejected-capture-barrier"
       }
     });
-    const complete = service.completeTurn("turn-rejected-capture-barrier", {
+    const complete = (await service.completeTurn("turn-rejected-capture-barrier", {
       sessionId: session.sessionId,
       query: "What did I ask before?",
       answer: "There is no durable task result in this turn."
-    });
+    }));
 
     service.closeSession(session.sessionId);
+    await settleCaptureAssignments(service);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
        WHERE episode_id = ?
          AND job_type IN ('reflection', 'reward')`
-    ).get(complete.episodeId)).toEqual({ count: 0 });
+    ).get(assignedEpisodeId(service, complete))).toEqual({ count: 0 });
 
     await runWorkerRounds(service, 4, 20);
 
@@ -489,7 +493,7 @@ describe("MemoryService / evolution / reward", () => {
     ).get(complete.l1MemoryId)).toEqual({ status: "deleted" });
     expect(db.db.prepare(
       `SELECT l1_memory_ids_json FROM episodes WHERE id = ?`
-    ).get(complete.episodeId)).toEqual({
+    ).get(assignedEpisodeId(service, complete))).toEqual({
       l1_memory_ids_json: JSON.stringify([complete.l1MemoryId])
     });
     expect(db.db.prepare(
@@ -497,7 +501,7 @@ describe("MemoryService / evolution / reward", () => {
        FROM evolution_jobs
        WHERE episode_id = ?
          AND job_type IN ('reflection', 'reward', 'embedding')`
-    ).get(complete.episodeId)).toEqual({ count: 0 });
+    ).get(assignedEpisodeId(service, complete))).toEqual({ count: 0 });
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
@@ -516,7 +520,7 @@ describe("MemoryService / evolution / reward", () => {
       staleEmbeddingJobId,
       "user-rejected-capture-barrier",
       session.sessionId,
-      complete.episodeId,
+      assignedEpisodeId(service, complete),
       complete.l1MemoryId,
       createdAt,
       createdAt
@@ -533,11 +537,11 @@ describe("MemoryService / evolution / reward", () => {
     const { db, service } = createTestService({
       llm: createMixedCaptureLlm(calls),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           capture: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            ...LEGACY_TEST_CONFIG.algorithm.capture,
             embedAfterCapture: false
           }
         }
@@ -550,24 +554,25 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-mixed-capture-barrier"
       }
     });
-    const accepted = service.completeTurn("turn-mixed-capture-accepted", {
+    const accepted = (await service.completeTurn("turn-mixed-capture-accepted", {
       sessionId: session.sessionId,
       episodeId: "episode-mixed-capture-barrier",
       query: "implement the durable migration",
       answer: "I will implement it."
-    });
-    const rejected = service.completeTurn("turn-mixed-capture-rejected", {
+    }));
+    await settleCaptureAssignments(service);
+    const rejected = (await service.completeTurn("turn-mixed-capture-rejected", {
       sessionId: session.sessionId,
-      episodeId: accepted.episodeId,
+      episodeId: assignedEpisodeId(service, accepted),
       query: "What did I ask before?",
       answer: "You asked about a migration."
-    });
+    }));
 
     service.closeSession(session.sessionId);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM evolution_jobs
        WHERE episode_id = ? AND job_type = 'reflection'`
-    ).get(accepted.episodeId)).toEqual({ count: 0 });
+    ).get(assignedEpisodeId(service, accepted))).toEqual({ count: 0 });
 
     await service.runWorkerOnce(20);
     expect(db.db.prepare(
@@ -579,7 +584,7 @@ describe("MemoryService / evolution / reward", () => {
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM evolution_jobs
        WHERE episode_id = ? AND job_type = 'reflection'`
-    ).get(accepted.episodeId)).toEqual({ count: 1 });
+    ).get(assignedEpisodeId(service, accepted))).toEqual({ count: 1 });
 
     await service.runWorkerOnce(20);
     expect(calls.filter((call) => call.operation === "capture.reflection.batch.v13")).toEqual([
@@ -600,14 +605,14 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-negative-l2"
       }
     });
-    const complete = service.completeTurn("turn-negative-l2", {
+    const complete = (await service.completeTurn("turn-negative-l2", {
       sessionId: session.sessionId,
       query: "fix the sqlite migration by reading the error first",
       answer: "I retried the same command without reading the error."
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       l1MemoryId: complete.l1MemoryId,
       channel: "explicit",
       polarity: "negative",
@@ -636,7 +641,7 @@ describe("MemoryService / evolution / reward", () => {
        FROM evolution_jobs
        WHERE episode_id = ?
          AND job_type IN ('l2_association', 'l2_induction')`
-    ).get(complete.episodeId) as { count: number };
+    ).get(assignedEpisodeId(service, complete)) as { count: number };
     expect(l2Jobs.count).toBe(0);
     db.close();
   });
@@ -651,11 +656,11 @@ describe("MemoryService / evolution / reward", () => {
       }
     });
 
-    const complete = service.completeTurn("turn-trivial-reward", {
+    const complete = (await service.completeTurn("turn-trivial-reward", {
       sessionId: session.sessionId,
       query: "hi",
       answer: "ok"
-    });
+    }));
     expect(complete.l1MemoryId).toBe("");
     expect(complete.l1MemoryIds).toEqual([]);
     service.closeSession(session.sessionId);
@@ -665,7 +670,7 @@ describe("MemoryService / evolution / reward", () => {
       `SELECT meta_json
        FROM episodes
        WHERE id = ?`
-    ).get(complete.episodeId) as { meta_json: string };
+    ).get(assignedEpisodeId(service, complete)) as { meta_json: string };
     const meta = JSON.parse(episode.meta_json) as {
       closeReason?: string;
       abandonReason?: string;
@@ -684,7 +689,7 @@ describe("MemoryService / evolution / reward", () => {
        WHERE episode_id = ?
          AND job_type = 'reward'
          AND status = 'queued'`
-    ).get(complete.episodeId) as { payload_json: string } | undefined;
+    ).get(assignedEpisodeId(service, complete)) as { payload_json: string } | undefined;
     expect(queuedReward).toBeUndefined();
 
     const rewardUpdates = db.db.prepare(
@@ -709,25 +714,25 @@ describe("MemoryService / evolution / reward", () => {
       mode: "dev",
       llm: createEmptyRewardSummaryLlm(rewardCalls),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           capture: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            ...LEGACY_TEST_CONFIG.algorithm.capture,
             synthReflection: false,
             embedAfterCapture: false,
             alphaScoring: false
           },
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             useLlm: false
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: false
           }
         }
@@ -740,15 +745,16 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-empty-reward"
       }
     });
-    const complete = service.completeTurn("turn-empty-reward", {
+    const complete = (await service.completeTurn("turn-empty-reward", {
       sessionId: session.sessionId,
       episodeId: "episode-empty-reward",
       query: "verify the focused workflow",
       answer: "The focused workflow passed."
-    });
+    }));
+    await settleCaptureAssignments(service);
     await service.feedback({
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       l1MemoryId: complete.l1MemoryId,
       channel: "explicit",
       polarity: "positive",
@@ -773,7 +779,7 @@ describe("MemoryService / evolution / reward", () => {
     expect(trace.reward_reason).toContain("heuristic explicit");
     const episode = db.db.prepare(
       `SELECT r_task, reward_detail_json FROM episodes WHERE id = ?`
-    ).get(complete.episodeId) as { r_task: number; reward_detail_json: string };
+    ).get(assignedEpisodeId(service, complete)) as { r_task: number; reward_detail_json: string };
     const rewardDetail = JSON.parse(episode.reward_detail_json) as {
       source?: string;
       rHuman?: number;
@@ -802,24 +808,24 @@ describe("MemoryService / evolution / reward", () => {
       llm: createCapturingRewardSummaryLlm(rewardCalls),
       skillLlm: createBatchReflectionLlm([], "reflected reward summary"),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           capture: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            ...LEGACY_TEST_CONFIG.algorithm.capture,
             synthReflection: false,
             embedAfterCapture: false
           },
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             useLlm: false
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: false
           }
         }
@@ -832,7 +838,7 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-reward-llm"
       }
     });
-    service.completeTurn("turn-reward-llm-1", {
+    (await service.completeTurn("turn-reward-llm-1", {
       sessionId: session.sessionId,
       episodeId: "episode-reward-llm",
       query: "verify reward scoring prompt",
@@ -843,16 +849,17 @@ describe("MemoryService / evolution / reward", () => {
         output: "ok",
         success: true
       }]
-    });
-    const complete = service.completeTurn("turn-reward-llm-2", {
+    }));
+    const complete = (await service.completeTurn("turn-reward-llm-2", {
       sessionId: session.sessionId,
       episodeId: "episode-reward-llm",
       query: "now summarize the final reward result",
       answer: "summarized the final reward result"
-    });
+    }));
+    await settleCaptureAssignments(service);
     await service.feedback({
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       l1MemoryId: complete.l1MemoryId,
       channel: "explicit",
       polarity: "positive",
@@ -952,7 +959,7 @@ describe("MemoryService / evolution / reward", () => {
       `SELECT meta_json, r_task, reward_detail_json
        FROM episodes
        WHERE id = ?`
-    ).get(complete.episodeId) as {
+    ).get(assignedEpisodeId(service, complete)) as {
       meta_json: string;
       r_task: number | null;
       reward_detail_json: string;
@@ -995,16 +1002,16 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-feedback-attribution"
       }
     });
-    const complete = service.completeTurn("turn-feedback-attribution", {
+    const complete = (await service.completeTurn("turn-feedback-attribution", {
       sessionId: session.sessionId,
       episodeId: "episode-feedback-attribution",
       query: "Configure nginx TLS for the service and verify the port.",
       answer: "I configured the listener on port 80 and skipped the TLS verification step."
-    });
+    }));
 
     const feedback = await service.feedback({
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       channel: "explicit",
       polarity: "negative",
       magnitude: 1,
@@ -1024,13 +1031,13 @@ describe("MemoryService / evolution / reward", () => {
     };
     expect(feedbackRow.l1_memory_id).toBe(complete.l1MemoryId);
     expect(feedbackRow.raw_turn_id).toBe(complete.rawTurnId);
-    expect(feedbackRow.episode_id).toBe(complete.episodeId);
+    expect(feedbackRow.episode_id).toBe(assignedEpisodeId(service, complete));
     expect(feedbackRow.session_id).toBe(session.sessionId);
     const episodeIndexes = db.db.prepare(
       `SELECT feedback_ids_json, decision_repair_ids_json
        FROM episodes
        WHERE id = ?`
-    ).get(complete.episodeId) as {
+    ).get(assignedEpisodeId(service, complete)) as {
       feedback_ids_json: string;
       decision_repair_ids_json: string;
     };
@@ -1051,12 +1058,12 @@ describe("MemoryService / evolution / reward", () => {
        FROM evolution_jobs
        WHERE job_type = 'reward'
          AND episode_id = ?`
-    ).get(complete.episodeId) as {
+    ).get(assignedEpisodeId(service, complete)) as {
       episode_id: string | null;
       target_memory_id: string | null;
       payload_json: string;
     };
-    expect(rewardJobRow.episode_id).toBe(complete.episodeId);
+    expect(rewardJobRow.episode_id).toBe(assignedEpisodeId(service, complete));
     expect(rewardJobRow.target_memory_id).toBeNull();
     expect(JSON.parse(rewardJobRow.payload_json)).toMatchObject({
       phase: "final",

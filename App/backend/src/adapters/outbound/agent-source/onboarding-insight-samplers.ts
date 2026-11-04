@@ -15,12 +15,12 @@ import {
   resolveQwenworkProjectsDirectory,
   resolveWorkbuddyProjectsDirectory
 } from "../agent-paths.js";
-import { extractPiMessage } from "./pi/history-reader.js";
-import { extractQwenworkMessage } from "./qwenwork/history-reader.js";
-import { extractWorkbuddyMessage } from "./workbuddy/history-reader.js";
-import { createDeepseekHarnessSourceAdapter } from "./deepseek-harness/index.js";
-import { redactSecrets } from "./secret-redactor.js";
-import type { SourceRegistry } from "./source-registry.js";
+import { extractPiMessage } from "@memmy/agent-source-readers/adapters/pi/history-reader";
+import { extractQwenworkMessage } from "@memmy/agent-source-readers/adapters/qwenwork/history-reader";
+import { extractWorkbuddyMessage } from "@memmy/agent-source-readers/adapters/workbuddy/history-reader";
+import { createDeepseekHarnessSourceAdapter } from "@memmy/agent-source-readers/adapters/deepseek-harness/index";
+import { redactSecrets } from "@memmy/agent-source-readers/adapters/secret-redactor";
+import type { SourceRegistry } from "@memmy/agent-source-readers/adapters/source-registry";
 import {
   emptyOnboardingSampleResult,
   type OnboardingConversationWindow,

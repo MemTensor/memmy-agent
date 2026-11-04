@@ -228,13 +228,12 @@ body.memmy-window-fullscreen {
    composer must NEVER get this: it is 76px tall single-line (12px padding
    multi-line), so an opaque 44px strip covers the text line itself — the
    field looks dead: invisible placeholder, invisible caret, "can't type". */
-/* 新任务页输入框沿用原来 textarea 的尺寸：1.6 行高、三行起步、352px 上限并滚动。
-   min-height 按 border-box 计算，所以要带上 pt-4 + pb-12 的 4rem 内边距；否则去掉 padding 后只剩一行。 */
-.home-empty-composer .composer-inline-editor {
-  line-height: 1.6;
-  min-height: calc(3 * 1.6em + 4rem);
+.home-empty-composer textarea {
   max-height: 352px;
-  overflow-y: auto;
+}
+
+.agent-conversation-composer textarea {
+  max-height: 300px;
 }
 
 .home-empty-composer.agent-composer-shell::after {
@@ -759,82 +758,6 @@ body.memmy-window-fullscreen {
   transform: scale(0.75);
 }
 
-/* 输入框：引用的会话作为行内 chip，与被引用的提问在同一行，像聊天里的 @ 提及 */
-.composer-inline-editor {
-  outline: none;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  cursor: text;
-  /* An empty editor is a bare div: keep one line tall so the field never collapses. */
-  min-height: 1.5em;
-}
-
-.composer-inline-editor:empty::before {
-  content: attr(data-placeholder);
-  color: color-mix(in srgb, var(--color-text-ink) 40%, transparent);
-  pointer-events: none;
-}
-
-/* chip 与输入文字共用同一条基线：inline-block + 继承行高，避免 flex 居中把基线错开 */
-.composer-inline-chip {
-  display: inline-block;
-  margin-right: 5px;
-  padding: 0 6px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--color-action-sky) 13%, transparent);
-  color: color-mix(in srgb, var(--color-action-sky) 85%, var(--color-text-ink));
-  /* Same size as the surrounding text, so the chip's baseline and the typed text's coincide. */
-  font-size: inherit;
-  font-weight: 600;
-  line-height: inherit;
-  vertical-align: baseline;
-  user-select: none;
-}
-
-.composer-inline-chip__leading {
-  position: relative;
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  margin-right: 3px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  vertical-align: -2px;
-  cursor: pointer;
-}
-
-.composer-inline-chip__icon {
-  position: absolute;
-  inset: 1px;
-  transition: opacity 120ms ease, transform 120ms ease;
-}
-
-.composer-inline-chip__icon--idle {
-  opacity: 1;
-  transform: scale(1);
-}
-
-.composer-inline-chip__icon--remove {
-  opacity: 0;
-  transform: scale(0.75);
-}
-
-.composer-inline-chip__leading:hover .composer-inline-chip__icon--idle {
-  opacity: 0;
-  transform: scale(0.75);
-}
-
-.composer-inline-chip__leading:hover .composer-inline-chip__icon--remove {
-  opacity: 1;
-  transform: scale(1);
-}
-
-.composer-inline-chip__label {
-  display: inline;
-}
-
 .composer-command-chip__label {
   white-space: nowrap;
 }
@@ -888,6 +811,7 @@ body.memmy-window-fullscreen {
 
 .agent-composer-toolbar .composer-actions {
   margin-left: auto;
+  min-width: 0;
 }
 
 /* Composer bottom-right controls: one shared hit size / color / spacing. */
@@ -896,6 +820,15 @@ body.memmy-window-fullscreen {
   align-items: center;
   gap: 4px;
   overflow: visible;
+}
+
+/* The home row is anchored at the right; give its model label a finite area
+   so the fixed-size file, microphone and send buttons cannot push it out. */
+.home-empty-composer > .composer-actions {
+  left: 12px;
+  right: 16px;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
 .composer-action-btn {
@@ -1202,6 +1135,7 @@ body.memmy-window-fullscreen {
   position: relative;
   z-index: 50;
   display: flex;
+  flex: 0 1 auto;
   width: max-content;
   max-width: 180px;
   min-width: 0;
@@ -1211,14 +1145,17 @@ body.memmy-window-fullscreen {
 }
 
 .agent-model-selector__control.select-control--compact {
-  width: max-content;
-  max-width: 180px;
+  flex-shrink: 1;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   overflow: visible;
 }
 
 .agent-model-selector__button {
-  width: max-content;
-  max-width: 180px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   height: 32px !important;
   min-height: 32px !important;
   padding: 0 28px 0 8px !important;
@@ -1233,7 +1170,7 @@ body.memmy-window-fullscreen {
 
 .agent-model-selector__button .select-control__selection {
   gap: 6px;
-  overflow: visible;
+  overflow: hidden;
   align-items: center;
 }
 
@@ -2116,6 +2053,20 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
   padding-top: var(--codex-toolbar-height);
 }
 
+/* When the main sidebar is folded on macOS, the knowledge list becomes the
+   window's left edge. Keep its heading below the native window controls. */
+.sidebar-shell--hidden:not(.sidebar-shell--windows-titlebar)
+  .app-frame-main--sidebar-hidden .memmy-knowledge .mk-side {
+  padding-top: calc(var(--codex-toolbar-height) + 16px);
+}
+
+/* Tools already reserve the content toolbar above their scroll region. The
+   extra collapsed-sidebar padding should only supply a small control gap. */
+.sidebar-shell--hidden:not(.sidebar-shell--windows-titlebar)
+  .app-frame-main--sidebar-hidden .tools-page-content {
+  padding-top: 20px;
+}
+
 .community-popover-grid {
   align-items: center;
   grid-template-columns: 118px auto;
@@ -2454,6 +2405,8 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
 .agent-workspace-layout > .home-empty-screen {
   min-width: 0;
   flex: 1 1 auto;
+  margin-right: var(--thread-panel-offset, 0px);
+  transition: margin-right 200ms cubic-bezier(0, 0, 0.2, 1);
 }
 
 .app-frame-content-topbar.thread-topbar {
@@ -2473,12 +2426,14 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
 }
 
 .agent-workspace-layout.thread-panel-motion--closing > .agent-conversation-panel,
+.agent-workspace-layout.thread-panel-motion--closing > .home-empty-screen,
 .app-frame-content-topbar.thread-panel-motion--closing {
   transition-duration: 150ms;
   transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
 }
 
 .agent-workspace-layout.thread-panel-motion--resizing > .agent-conversation-panel,
+.agent-workspace-layout.thread-panel-motion--resizing > .home-empty-screen,
 .app-frame-content-topbar.thread-panel-motion--resizing {
   transition: none;
 }
@@ -2751,6 +2706,21 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
   background: var(--color-background-paper);
   color: var(--color-text-ink);
   font-family: var(--font-sans);
+}
+
+.thread-panel--overlay {
+  border-left: 0;
+}
+
+/* At narrow widths the preview owns the conversation area. The chat topbar
+   otherwise paints above its tabs because the topbar has a higher z-index. */
+.app-frame-main:has(> .thread-panel--overlay[aria-hidden="false"])
+  > .app-frame-content-topbar.thread-topbar {
+  display: none;
+}
+
+.app-frame-main--sidebar-hidden > .thread-panel--overlay .thread-panel__header {
+  padding-left: var(--codex-sidebar-hidden-topbar-padding);
 }
 
 .thread-panel--fullscreen {
@@ -3892,6 +3862,40 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   margin-bottom: 0;
 }
 
+/* A quiet running turn sweeps its last visible line after three seconds. */
+.agent-stall-shimmer {
+  background-image:
+    linear-gradient(90deg, transparent, var(--color-action-sky-hover), transparent),
+    linear-gradient(var(--agent-stall-ink), var(--agent-stall-ink));
+  background-repeat: no-repeat;
+  background-size: var(--agent-stall-band) var(--agent-stall-height), 100% 100%;
+  background-position: var(--agent-stall-from) var(--agent-stall-y), 0 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: agent-stall-sweep 1.8s linear infinite;
+}
+
+.agent-stall-shimmer :where(code, .agent-activity-diff, .agent-activity-diff *) {
+  -webkit-text-fill-color: currentColor;
+}
+
+@keyframes agent-stall-sweep {
+  from {
+    background-position: var(--agent-stall-from) var(--agent-stall-y), 0 0;
+  }
+  to {
+    background-position: var(--agent-stall-to) var(--agent-stall-y), 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-stall-shimmer {
+    animation: none;
+    background-position: calc((var(--agent-stall-from) + var(--agent-stall-to)) / 2) var(--agent-stall-y), 0 0;
+  }
+}
+
 .agent-thinking-pulse {
   display: inline-block;
   width: 6px;
@@ -4304,7 +4308,7 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: color-mix(in srgb, var(--color-text-ink) 46%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
 }
 
 /* Process-timeline failures are intermediate steps the agent works through;
@@ -4389,15 +4393,31 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
   line-height: 1.55;
 }
 
-/* Reasoning body uses the shared markdown renderer in a muted register:
-   tertiary ink, a looser 1.786 line box, body-size regular-weight headings
-   and 8px block spacing. Inline code, emphasis and links keep the answer's
-   treatment. */
+/* Keep reasoning readable in mixed prose/code while preserving its quieter
+   headings and spacing. These overrides leave answer markdown unchanged. */
 .agent-message-content.agent-message-content--reasoning {
   font-size: var(--chat-md-root);
   line-height: 1.786;
-  color: color-mix(in srgb, var(--color-text-ink) 54%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 82%, transparent);
   font-weight: 400;
+}
+
+/* Decorate each wrapped fragment so long paths stay part of the paragraph. */
+.agent-message-content.agent-message-content--reasoning .agent-message-content__inline-code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  font-weight: 400;
+  line-height: inherit;
+  color: inherit;
+  background: color-mix(in srgb, var(--color-text-ink) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-text-ink) 10%, transparent);
+  border-radius: 6px;
+  padding: 0 0.3em;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 .agent-message-content.agent-message-content--reasoning :where(h1, h2, h3, h4, h5, h6) {
@@ -4579,118 +4599,6 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
   max-height: min(432px, calc(100dvh - var(--agent-composer-overlay-height, 120px) + 16px));
   overflow-y: auto;
   overscroll-behavior: contain;
-}
-
-.agent-queue-panel {
-  max-height: min(200px, 32dvh);
-  overflow: hidden;
-}
-
-.agent-queue-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: min(200px, 32dvh);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.agent-queue-item {
-  display: flex;
-  min-height: 40px;
-  align-items: center;
-  gap: 8px;
-  padding: 0 8px 0 12px;
-  border-radius: var(--radius-composer);
-  background: color-mix(in srgb, var(--color-border-stone) 16%, var(--color-background-paper));
-}
-
-.agent-queue-item__source {
-  display: inline-flex;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
-}
-
-.agent-queue-item__source-mark {
-  display: block;
-  width: 16px;
-  height: 16px;
-  max-width: 16px;
-  max-height: 16px;
-  flex: 0 0 16px;
-  object-fit: contain;
-}
-
-.agent-queue-item__source-image {
-  border-radius: 3px;
-}
-
-.agent-queue-item__text {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
-  font-size: 13px;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-queue-item__actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 2px;
-  margin-left: auto;
-}
-
-.agent-queue-item__remove,
-.agent-queue-item__steer,
-.agent-queue-item__edit {
-  display: inline-flex;
-  width: 24px;
-  height: 24px;
-  min-width: 24px;
-  flex: 0 0 24px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: color-mix(in srgb, var(--color-text-ink) 42%, transparent);
-  cursor: pointer;
-  transition: background 140ms ease, color 140ms ease, opacity 140ms ease;
-}
-
-.agent-queue-item__steer:hover:not(:disabled),
-.agent-queue-item__edit:hover:not(:disabled),
-.agent-queue-item__remove:hover:not(:disabled) {
-  background: var(--color-canvas-oat);
-}
-
-.agent-queue-item__remove:hover:not(:disabled) {
-  color: var(--color-status-error);
-}
-
-.agent-queue-item__remove:focus-visible,
-.agent-queue-item__steer:focus-visible,
-.agent-queue-item__edit:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-action-sky) 32%, transparent);
-}
-
-.agent-queue-item__remove:disabled,
-.agent-queue-item__steer:disabled,
-.agent-queue-item__edit:disabled {
-  cursor: not-allowed;
-  opacity: 0.38;
 }
 
 .agent-chat-bubble-frame {
@@ -5412,15 +5320,14 @@ button {
 }
 
 /* Expanded composers keep controls in a footer so text can use the full row. */
-.agent-composer-shell--expanded .composer-inline-editor.agent-composer-input--conversation {
+.agent-composer-shell--expanded textarea.agent-composer-input--conversation {
   padding-right: 1rem;
   padding-bottom: 6px;
 }
 
 /* Keep this more specific than `.agent-composer-shell textarea` above so its generic line-height cannot shift the caret.
    Keep overflow-y:auto (not hidden): if single-line detection lags behind wrapped content, the field must stay scrollable. */
-.agent-composer-shell textarea.agent-composer-input--single,
-.agent-composer-shell .composer-inline-editor.agent-composer-input--single {
+.agent-composer-shell textarea.agent-composer-input--single {
   height: 76px;
   padding-top: 16px;
   padding-bottom: 20px;
@@ -5442,23 +5349,23 @@ button {
   box-shadow: 0 16px 32px -8px rgb(17 29 28 / 0.06), 0 2px 4px -4px rgb(17 29 28 / 0.1);
 }
 
-/* 会话输入框：行内 chip 需要块级排版，故文本与 chip 共用同一可编辑区 */
-.agent-conversation-composer .agent-composer-shell .composer-inline-editor.agent-composer-input--conversation {
+.agent-conversation-composer .agent-composer-shell textarea.agent-composer-input--conversation {
   padding-top: 12px;
   padding-bottom: 0;
   border-radius: 23px 23px 0 0;
   color: var(--color-text-ink);
   font-size: 15px;
   line-height: 26.25px;
-  min-height: 26.25px;
-  max-height: 40vh;
-  overflow-y: auto;
 }
 
 /* Wrapped drafts keep the single-line height as their floor so a second
    line never shrinks the box. */
-.agent-conversation-composer .agent-composer-shell .composer-inline-editor.agent-composer-input--conversation:not(.agent-composer-input--single) {
+.agent-conversation-composer .agent-composer-shell textarea.agent-composer-input--conversation:not(.agent-composer-input--single) {
   min-height: 76px;
+}
+
+.agent-conversation-composer .agent-composer-shell textarea.agent-composer-input--conversation::placeholder {
+  color: color-mix(in srgb, var(--color-text-ink) 40%, transparent);
 }
 
 .agent-conversation-composer .agent-composer-shell--expanded .agent-composer-toolbar {
@@ -7278,6 +7185,16 @@ body.memmy-platform-windows .memory-drawer-backdrop__close {
   text-transform: uppercase;
 }
 
+.memory-processing-notice--progress {
+  border-color: var(--color-border-stone);
+  background: var(--color-background-paper);
+}
+
+.memory-processing-notice--progress .agent-model-error-notice__icon,
+.memory-processing-notice--progress .agent-model-error-notice__title {
+  color: var(--color-text-ink);
+}
+
 .memory-processing-notice--success {
   border-color: color-mix(in srgb, var(--color-status-success) 40%, transparent);
   background: color-mix(in srgb, var(--color-status-success) 7%, var(--color-background-paper));
@@ -7769,6 +7686,10 @@ body.memmy-platform-windows .memory-drawer-backdrop__close {
   font-size: 13px;
   line-height: 1.68;
   overflow-wrap: anywhere;
+}
+
+.memory-markdown__literal-html {
+  white-space: pre-wrap;
 }
 
 .memory-markdown :first-child {
@@ -11705,6 +11626,121 @@ body.memmy-platform-windows :is(
   color: var(--color-action-sky-hover);
 }
 
+.app-frame-sidebar .app-frame-nav-button:hover,
+.app-frame-sidebar .app-frame-nav-button:focus-visible,
+.app-frame-sidebar .app-frame-recording-nav:hover .app-frame-nav-button,
+.app-frame-sidebar .app-frame-recording-nav:focus-within .app-frame-nav-button {
+  background: var(--color-nav-active-bg);
+  color: var(--color-action-sky-hover);
+}
+
+.app-frame-recording-nav { position: relative; }
+.app-frame-recording-nav .app-frame-nav-button { padding-right: 90px; }
+.app-frame-recording-nav--recording .app-frame-nav-button { background: var(--color-nav-active-bg); }
+.app-frame-recording-nav__controls {
+  position: absolute;
+  top: 50%;
+  right: 17px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.app-frame-recording-nav--recording .app-frame-recording-nav__controls,
+.app-frame-recording-nav:has(.app-frame-recording-nav__control--stop) .app-frame-recording-nav__controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+.app-frame-recording-nav:hover .app-frame-recording-nav__controls,
+.app-frame-recording-nav:focus-within .app-frame-recording-nav__controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+.app-frame-recording-nav__control,
+.app-frame-recording-nav__signal {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: var(--color-action-sky-hover);
+}
+.app-frame-recording-nav__signal { color: color-mix(in srgb, var(--color-text-ink) 62%, transparent); }
+.app-frame-recording-wave {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+}
+.app-frame-recording-wave > span {
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+  background: currentColor;
+  transform: scaleY(.45);
+  transform-origin: center;
+}
+.app-frame-recording-wave > span:nth-child(2),
+.app-frame-recording-wave > span:nth-child(4) { transform: scaleY(.75); }
+.app-frame-recording-wave > span:nth-child(3) { transform: scaleY(.95); }
+.app-frame-recording-wave--live > span { animation: app-frame-recording-wave 700ms ease-in-out infinite alternate; }
+.app-frame-recording-wave--live > span:nth-child(2) { animation-duration: 520ms; animation-delay: -260ms; }
+.app-frame-recording-wave--live > span:nth-child(3) { animation-duration: 760ms; animation-delay: -570ms; }
+.app-frame-recording-wave--live > span:nth-child(4) { animation-duration: 600ms; animation-delay: -180ms; }
+.app-frame-recording-wave--live > span:nth-child(5) { animation-duration: 820ms; animation-delay: -690ms; }
+@keyframes app-frame-recording-wave { from { transform: scaleY(.25); } to { transform: scaleY(.9); } }
+@media (prefers-reduced-motion: reduce) { .app-frame-recording-wave--live > span { animation: none; } }
+.app-frame-recording-pause-glyph {
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+  gap: 4px;
+}
+.app-frame-recording-pause-glyph > span { width: 4px; height: 12px; border-radius: 2px; background: currentColor; }
+.app-frame-recording-stop-glyph { width: 11px; height: 11px; border-radius: 2px; background: currentColor; }
+.app-frame-recording-nav__control--record {
+  width: auto;
+  gap: 4px;
+  padding: 0 4px;
+  color: var(--color-text-ink);
+  font-size: 12px;
+  line-height: 20px;
+}
+.app-frame-recording-nav__control--record .app-frame-recording-wave { color: color-mix(in srgb, var(--color-text-ink) 62%, transparent); }
+.app-frame-recording-nav__post-status {
+  position: absolute;
+  top: 50%;
+  right: 19px;
+  transform: translateY(-50%);
+  color: var(--color-action-sky-hover);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+.app-frame-recording-nav__post-status--view {
+  padding: 2px 5px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.app-frame-recording-nav__post-status--view:hover,
+.app-frame-recording-nav__post-status--view:focus-visible {
+  background: color-mix(in srgb, var(--color-action-sky-hover) 10%, transparent);
+}
+.app-frame-recording-nav__control:hover,
+.app-frame-recording-nav__control:focus-visible { background: color-mix(in srgb, var(--color-action-sky-hover) 10%, transparent); }
+.app-frame-recording-nav__control--stop { color: #ff5f57; }
+.app-frame-recording-nav__control--stop:hover,
+.app-frame-recording-nav__control--stop:focus-visible { background: color-mix(in srgb, #ff5f57 10%, transparent); }
+.app-frame-recording-nav__control:disabled { opacity: .45; cursor: not-allowed; }
+.app-frame-recording-nav__control svg,
+.app-frame-recording-nav__signal svg { width: 16px; height: 16px; }
+
 .app-frame-footer-action {
   width: calc(100% - 16px);
   margin: 0 8px;
@@ -14570,6 +14606,13 @@ body.memmy-platform-windows :is(
   background: color-mix(in srgb, var(--color-background-paper) 96%, var(--color-canvas-oat));
 }
 
+.ch-source-dialog__list--apps {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: 0;
+}
+
 .ch-source-dialog__add {
   display: flex;
   align-items: center;
@@ -14584,6 +14627,15 @@ body.memmy-platform-windows :is(
   font-size: 14px;
   font-weight: 550;
   cursor: pointer;
+}
+
+.ch-source-dialog__add--app {
+  flex: none;
+  z-index: 1;
+  border-bottom: 1px solid var(--ch-border);
+  border-radius: 0;
+  padding-block: 12px;
+  background: var(--ch-surface);
 }
 
 .ch-source-dialog__add-icon {
@@ -14602,18 +14654,15 @@ body.memmy-platform-windows :is(
 }
 
 .ch-source-dialog__app-menu {
-  position: absolute;
-  z-index: 5;
   display: flex;
   flex-direction: column;
-  width: 240px;
-  max-height: 350px;
+  flex: 0 1 220px;
+  min-height: 120px;
   overflow: auto;
-  padding: 4px;
-  border: 1px solid var(--ch-border);
-  border-radius: 12px;
-  background: var(--ch-surface);
-  box-shadow: 0 12px 32px rgb(22 24 31 / 16%);
+  margin-top: 8px;
+  padding: 4px 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-text-ink) 18%, var(--ch-surface));
+  background: color-mix(in srgb, var(--color-canvas-oat) 55%, var(--ch-surface));
 }
 
 .ch-source-dialog__app-search {
@@ -14699,6 +14748,12 @@ body.memmy-platform-windows :is(
   margin: 8px 0 0;
   padding: 0;
   list-style: none;
+}
+
+.ch-source-dialog__list--apps .ch-source-dialog__rules {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .ch-source-dialog__rules li {

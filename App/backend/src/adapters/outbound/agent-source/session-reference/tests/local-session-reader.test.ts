@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createSourceRegistry } from "../../source-registry.js";
-import type { ConversationMessage, SourceAdapter } from "../../types.js";
+import { createSourceRegistry } from "@memmy/agent-source-readers/adapters/source-registry";
+import type { ConversationMessage, SourceAdapter } from "@memmy/agent-source-readers/adapters/types";
 import { cleanQuestion, createLocalSessionReader, isInternalUserMessage } from "../local-session-reader.js";
 
 describe("local session reader", () => {
