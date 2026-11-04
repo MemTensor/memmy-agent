@@ -380,6 +380,11 @@ export interface SourceTurnIdentity {
   completedAt: IsoTime;
   sequence?: number;
   completionEvidence: string;
+  externalImport?: {
+    sourcePath: string;
+    contentHash?: string;
+    importedThreadId: string;
+  };
 }
 
 export interface SourceTurnCompleteRequest extends Omit<TurnCompleteRequest, "sessionId"> {
