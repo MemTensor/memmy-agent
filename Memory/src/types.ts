@@ -1,4 +1,5 @@
 import type {
+  ApiErrorBody as RuntimeApiErrorBody,
   L3WorldModelFeatures,
   L3WorldModelProtocolVersion,
   L3WorldModelTransition,
@@ -115,22 +116,7 @@ export interface RequestEnvelope {
   timeZone?: string;
 }
 
-export interface ApiErrorBody {
-  error: {
-    code:
-      | "invalid_argument"
-      | "unauthorized"
-      | "forbidden"
-      | "not_found"
-      | "conflict"
-      | "rate_limited"
-      | "memory_starting"
-      | "memory_upgrading"
-      | "internal";
-    message: string;
-    requestId?: string;
-  };
-}
+export type ApiErrorBody = RuntimeApiErrorBody;
 
 export interface JobRef {
   jobId: string;

@@ -736,7 +736,7 @@ describe("MemoryService / import / processing", () => {
       stage: "summary",
       attemptCount: 1,
       retryAction: "open_settings",
-      errorCode: "40309",
+      errorCode: "quota_exhausted",
       errorMessage: detail,
       autoRetryScheduled: false
     });
@@ -745,7 +745,7 @@ describe("MemoryService / import / processing", () => {
     const reopened = new MemoryDb({ path: dbPath });
     const repos = new Repositories(reopened.db);
     expect(repos.processing.get(added.id)).toMatchObject({
-      errorCode: "40309",
+      errorCode: "quota_exhausted",
       errorMessage: detail,
       autoRetryScheduled: false
     });

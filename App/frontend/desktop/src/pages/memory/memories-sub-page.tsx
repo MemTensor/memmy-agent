@@ -800,6 +800,8 @@ function MemoryProcessingFailureCard(props: {
   // Background processing keeps its normal progress indicator, even when a
   // previous attempt failed. Only an explicit manual retry needs this feedback.
   const retryInProgress = feedback?.status === "running";
+  const quotaExhausted = processing?.errorCode === "quota_exhausted" ||
+    processing?.errorCode === "40308" || processing?.errorCode === "40309";
   if (
     processing?.state !== "failed" &&
     !retryInProgress &&
@@ -822,7 +824,7 @@ function MemoryProcessingFailureCard(props: {
     ? t("memory.memories.processing.retrySucceeded")
     : retryInProgress
       ? t("memory.memories.processing.retrying")
-      : processing?.errorCode === "40309"
+      : quotaExhausted
         ? t(ERROR_NOTICE_KEYS.memory.quotaExhausted)
         : settingsRequired && processing?.state !== "failed"
           ? t("memory.memories.processing.needsSettings")
@@ -849,7 +851,7 @@ function MemoryProcessingFailureCard(props: {
         </ErrorNoticeDetail>
       ) : null}
       <div className="memory-processing-failure__actions">
-        {(settingsRequired || processing?.errorCode === "40309") && props.onOpenSettings && !retryDisabled && (
+        {(settingsRequired || quotaExhausted) && props.onOpenSettings && !retryDisabled && (
           <button type="button" className="memory-processing-action" onClick={props.onOpenSettings}>
             <Settings2 size={14} />
             {t("memory.memories.processing.openSettings")}
