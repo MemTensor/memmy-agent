@@ -20,7 +20,7 @@ for (let index = 2; index < process.argv.length; index++) {
   --report-dir <absolute-dir>  parent for a new run directory (default: OS temp)
   --native-bin <absolute-dir>  Windows production EXE + fixture build directory
 
-Builds TypeScript dependencies and Agent, checks types/lint, runs History tests
+Builds TypeScript dependencies and Agent, checks types/lint, runs History and Provider tests
 with two workers, checks both summary CLI paths and builds the frontend.
 Optional native smoke tests cover lifecycle only; they do not activate windows
 or inject input. Full foreground/IME tests and App acceptance are separate.
@@ -96,7 +96,7 @@ function tests(name, cwd, files, env = environment) {
 
 try {
   console.log(`[History] Evidence: ${directory}`);
-  for (const [relative, config] of [["Knowledge", "tsconfig.json"], ["Migrations", "tsconfig.build.json"],
+  for (const [relative, config] of [["Memory/AgentSourceCore", "tsconfig.json"], ["Knowledge", "tsconfig.json"], ["Migrations", "tsconfig.build.json"],
     ["App/backend/local-api-contracts", "tsconfig.json"], ["App/shell/desktop/interface", "tsconfig.json"]]) {
     const cwd = path.join(root, relative);
     run(`build-${path.basename(relative)}`, cwd, [binary(cwd, "typescript/bin/tsc"), "-p", config]);
@@ -107,6 +107,7 @@ try {
   run("frontend-types", frontend, [binary(frontend, "typescript/bin/tsc"), "-p", "tsconfig.json", "--noEmit"]);
   run("agent-lint", agent, [binary(agent, "eslint/bin/eslint.js"),
     "src/tools/computer-recordings/**/*.ts", "tests/tools/computer-recordings/**/*.ts",
+    "src/providers/openai-responses/**/*.ts", "tests/providers/openai-responses.test.ts", "tests/providers/extra-body-config.test.ts",
     "src/tools/computer-history/**/*.ts", "tests/tools/computer-history/**/*.ts",
     "src/tools/computer-use/extract-workflow-candidate.ts", "tests/tools/computer-use/extract-workflow-candidate.test.ts",
     "src/integrations/channels/websocket.ts", "tests/integrations/channels/websocket-computer-history-routes.test.ts",
@@ -126,6 +127,9 @@ try {
     "tests/tools/computer-recordings",
     "tests/core/agent-runtime/skills-loader.test.ts", "tests/integrations/channels/websocket-computer-history-routes.test.ts",
     `--exclude=${nativeTest}`]);
+  // CU also changes shared model request construction; keep the complete Provider
+  // contract suite in both platform jobs, including extra_body tool merging.
+  tests("provider-tests", agent, ["tests/providers"]);
   tests("frontend-tests", frontend, frontendTests);
   tests("recording-media-proxy-tests", root, ["App/shell/desktop/tests/recording-media-proxy.test.ts", "App/shell/desktop/tests/task-recording-exit.test.ts",
     "App/shell/desktop/tests/computer-history-exit.test.ts"]);

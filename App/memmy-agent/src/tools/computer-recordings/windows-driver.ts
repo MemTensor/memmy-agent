@@ -5,6 +5,8 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import { RecordingFrameSchema, RecordingGapSchema, WindowsRecordingWindowSchema, type RecordingEvent, type RecordingSession } from "@memmy/local-api-contracts";
 import { WindowsSettingsStore, discoverApplications, resolveWindowsCollector } from "../computer-history/win/settings.js";
+import { ObservationSettingsStore } from "../computer-history/core/settings-store.js";
+import { windowsScopeAllows } from "../computer-history/win/unified-settings.js";
 import { authorizedRule, compileWindowsPolicy, pathKey, readNativePolicy } from "../computer-history/win/policy.js";
 import { parseNativeEvent } from "../computer-history/win/protocol.js";
 import { SnapshotNormalizer } from "../computer-history/win/normalize.js";
@@ -38,20 +40,34 @@ export function nativeTaskEvent(value: unknown) {
   return { event, clock };
 }
 export class WindowsTaskRecordingDriver implements TaskRecordingDriver {
-  constructor(private readonly binary?: string, private readonly store = new WindowsSettingsStore()) {}
+  constructor(private readonly binary?: string, private readonly store = new WindowsSettingsStore(undefined, new ObservationSettingsStore())) {}
+  private authorizedSettings(choices: string[]) {
+    let settings: ReturnType<WindowsSettingsStore["read"]>;
+    let shared: ReturnType<WindowsSettingsStore["readObservation"]>;
+    try {
+      settings = this.store.read();
+      shared = this.store.readObservation();
+      if (!shared) throw new Error("shared_observation_settings_required");
+    } catch { throw new RecordingError(422, "recording_observation_policy_invalid"); }
+    if (choices.some(choice => !windowsScopeAllows(shared, choice))) throw new RecordingError(422, "recording_application_not_authorized");
+    return settings;
+  }
   private run(args: string[], timeout = 120_000): Promise<void> {
     return new Promise((resolve, reject) => execFile(resolveWindowsCollector(this.binary), args,
       { windowsHide: true, timeout, maxBuffer: 64 * 1024 }, (error) => error ? reject(new Error("task_media_processing_failed")) : resolve()));
   }
   async start(input: Parameters<TaskRecordingDriver["start"]>[0]): Promise<TaskRecordingHandle> {
     const binary = resolveWindowsCollector(this.binary);
-    const settings = this.store.read();
     const choices = input.applications.map(pathKey);
     if (choices.some((choice) => ["mstsc.exe", "msrdc.exe", "wfica32.exe", "cdviewer.exe"].includes(path.win32.basename(choice)))) throw new RecordingError(422, "recording_application_unsupported");
-    if (new Set(choices).size !== choices.length || choices.some((choice) => settings.deny?.executables?.some((exe) => pathKey(exe) === choice)
-      || (settings.defaultApplicationBehavior !== "observe" && !settings.applications.some((rule) => pathKey(rule.executable) === choice)))) throw new RecordingError(422, "recording_application_not_authorized");
+    if (!choices.length || new Set(choices).size !== choices.length) throw new RecordingError(422, "recording_application_not_authorized");
+    this.authorizedSettings(choices);
+    const bindings = await discoverApplications(binary);
+    // Discovery is asynchronous: permissions may change after message selection or
+    // while processes are being listed. Recheck immediately before writing/spawning.
+    const settings = this.authorizedSettings(choices);
     const policy = compileWindowsPolicy(input.applications.map((executable) => settings.applications.find((r) => pathKey(r.executable) === pathKey(executable)) ?? { executable }),
-      await discoverApplications(binary), { sensitiveAutomationIds: settings.sensitiveAutomationIds, deny: settings.deny, limits: settings.limits });
+      bindings, { sensitiveAutomationIds: settings.sensitiveAutomationIds, deny: settings.deny, limits: settings.limits });
     if (!policy.applications.length || choices.some((choice) => !policy.applications.some((app) => pathKey(app.executable) === choice))) throw new RecordingError(422, "recording_application_unavailable");
     const policyFile = path.join(input.directory, "policy.json");
     fs.writeFileSync(policyFile, JSON.stringify(policy), { flag: "wx", mode: 0o600 });
