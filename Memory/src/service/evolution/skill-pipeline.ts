@@ -365,20 +365,17 @@ export class SkillPipeline {
         continue;
       }
       const targetSkillId = requestedSkillId ?? directSkills[0]?.id;
-      const existingSkill = this.consolidateCompatibleSkillsForPolicy(
+      const consolidation = this.consolidateCompatibleSkillsForPolicy(
         policy,
         at,
         targetSkillId,
         job.payload.reason !== "policy.skill_fanout"
       );
-      const pendingRevisions = existingSkill && isRecord(existingSkill.memory.properties.internal_info.skill)
-        ? existingSkill.memory.properties.internal_info.skill.pending_policy_revisions : undefined;
-      if (isRecord(pendingRevisions) && Object.keys(pendingRevisions).some((id) => {
-        const row = this.deps.repos.memories.get(id);
-        const meta = row ? policyMetaFromMemory(row) : null;
-        return !meta || !policyIsEligibleForDownstream(meta)
-          || (id !== policy.id && storedSkillPolicyContentHash(existingSkill!.memory, id) !== skillPolicyContentHash(meta));
-      })) continue;
+      if (consolidation.blocked) {
+        logEvolutionDecision(job, "skill_crystallization", "pending_policy_revision", { policyId: policy.id });
+        continue;
+      }
+      const existingSkill = consolidation.skill;
       if (this.isSkillCrystallizationInCooldown(policy, at, existingSkill?.id)) {
         logEvolutionDecision(job, "skill_crystallization", "cooldown", {
           policyId: policy.id,
@@ -636,17 +633,35 @@ export class SkillPipeline {
       ));
   }
 
+  private hasUnresolvedPolicyRevision(skill: SkillMeta): boolean {
+    const data = skill.memory.properties.internal_info.skill;
+    const pending = isRecord(data) ? data.pending_policy_revisions : undefined;
+    if (!isRecord(pending)) return false;
+    const hashes = storedSkillPolicyContentHashes(skill.memory);
+    return Object.entries(pending).some(([id, revision]) => {
+      const row = this.deps.repos.memories.get(id);
+      const policy = row ? policyMetaFromMemory(row) : null;
+      // Successful repair keeps the marker until ordinary crystallization, but
+      // records the exact source hash. Mere L2 reactivation cannot clear it.
+      return !row || row.deletedAt || row.userId !== skill.memory.userId || row.status !== "activated"
+        || !policy || !policyIsEligibleForDownstream(policy)
+        || revision !== l2ContentRevision(row) || hashes[id] !== skillPolicyContentHash(policy);
+    });
+  }
+
   private consolidateCompatibleSkillsForPolicy(
     policy: PolicyMeta,
     at: string,
     targetSkillId?: string,
     allowTargetMerge = true
-  ): SkillMeta | null {
+  ): { blocked: true } | { blocked: false; skill: SkillMeta | null } {
     const mutableSkills = this.mutableSkillsForPolicy(policy);
     const target = targetSkillId
       ? mutableSkills.find((skill) => skill.id === targetSkillId)
       : undefined;
-    if (target && !allowTargetMerge) return target;
+    if (target && !allowTargetMerge) {
+      return this.hasUnresolvedPolicyRevision(target) ? { blocked: true } : { blocked: false, skill: target };
+    }
     const compatible = mutableSkills
       .filter((skill) => skillPolicyCompatibility(skill, policy) >= 0.8)
       .sort(compareSkillMergeTargets);
@@ -659,8 +674,11 @@ export class SkillPipeline {
         )
       : [];
     const candidates = seed ? [seed, ...mergeable].sort(compareSkillMergeTargets) : [];
+    // Check every participant BEFORE saving a canonical or archiving an alias.
+    // Returning a distinct blocked result also prevents creating a new Skill.
+    if (candidates.some(skill => this.hasUnresolvedPolicyRevision(skill))) return { blocked: true };
     const canonical = candidates[0];
-    if (!canonical || candidates.length === 1) return canonical ?? null;
+    if (!canonical || candidates.length === 1) return { blocked: false, skill: canonical ?? null };
 
     const aliases = candidates.slice(1);
     const sourcePolicyIds = uniq(candidates.flatMap((skill) => skill.sourcePolicyIds));
@@ -764,7 +782,7 @@ export class SkillPipeline {
         createdAt: at
       });
     }
-    return skillMetaFromMemory(saved);
+    return { blocked: false, skill: skillMetaFromMemory(saved) };
   }
 
 private isSkillCrystallizationInCooldown(policy: PolicyMeta, at: string, skillId?: string): boolean {

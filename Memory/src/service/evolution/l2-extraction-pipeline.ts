@@ -7,6 +7,7 @@ import type { MemmyConfig } from "../../config/index.js";
 import { embeddingIdentity, vectorEmbeddingIdentity } from "../../model/embedding-identity.js";
 import type { Embedder, LlmClient } from "../../model/types.js";
 import type { EvolutionJobRecord, Repositories } from "../../storage/repositories.js";
+import { L2_EXTRACTION_OPERATION_PREFIX, L2_EXTRACTION_SNAPSHOT_PREFIX } from "../../storage/l2-extraction-keys.js";
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import { clip } from "../../utils/text.js";
@@ -301,7 +302,7 @@ export class UnifiedL2ExtractionPipeline {
 
   private async extractBatch(job: EvolutionJobRecord, scope: string, batch: Batch, renew: () => void): Promise<void> {
     const input = this.batchInput(batch);
-    const snapshotKey = `l2.extract.snapshot.v2:${digest({ scope, input })}`;
+    const snapshotKey = `${L2_EXTRACTION_SNAPSHOT_PREFIX}${digest({ scope, input })}`;
     const snapshot = this.deps.repos.runtime.getKv(snapshotKey)?.value;
     if (isRecord(snapshot) && snapshot.status === "committed") return;
     const at = this.now();
@@ -412,7 +413,7 @@ export class UnifiedL2ExtractionPipeline {
 
   private applyOperation(operation: L2ExtractionOperation, sources: L2Candidate[], at: string, revision?: MemoryRow): void {
     const evidence = sources.filter((source) => operation.l1_ids.includes(source.sourceMemoryId));
-    const key = `l2.extract.operation.v2:${digest({ operation, sources: evidence.map((source) => [source.sourceMemoryId, source.sourceVersion]) })}`;
+    const key = `${L2_EXTRACTION_OPERATION_PREFIX}${digest({ operation, sources: evidence.map((source) => [source.sourceMemoryId, source.sourceVersion]) })}`;
     if (this.deps.repos.runtime.getKv(key)) return;
     if (operation.operation === "revise") {
       if (!revision) throw new Error("l2 revision: prepared vectors required");

@@ -58,5 +58,25 @@ describe("unified L2 worker admission", () => {
     expect(queries).toBe(1); expect(extractions).toBe(1);
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
     expect(controller.snapshot()).toMatchObject({ activeJobs: 0, embeddingRequests: 0, resources: {}, providers: {} });
+
+    // Exercise keys written by the real extractor, not hand-made legacy snapshots.
+    const copies = db.db.prepare("SELECT key, value_json FROM runtime_kv WHERE key LIKE 'l2.extract.snapshot.%' OR key LIKE 'l2.extract.operation.%'")
+      .all() as Array<{ key: string; value_json: string }>;
+    expect(copies).toHaveLength(2);
+    expect(copies.some(row => JSON.parse(row.value_json).input?.L1_RECORDS.some((source: { id: string }) => source.id === "source"))).toBe(true);
+    expect(copies.some(row => JSON.parse(row.value_json).operation?.l1_ids.includes("source"))).toBe(true);
+    expect(repos.runtime.invalidateUnifiedL2Source("source", "other-user", at)).toEqual({ candidates: 0, snapshots: 0, operations: 0 });
+    service.deleteMemory("source", { namespace: { source: "codex", profileId: "default", userId: "u" } });
+    expect(db.db.prepare("SELECT 1 FROM l2_candidate_pool WHERE source_memory_id = 'source'").get()).toBeUndefined();
+    for (const copy of copies) {
+      const tombstone = repos.runtime.getKv(copy.key)?.value;
+      expect(tombstone).toMatchObject({ sourceInvalidatedAt: expect.any(String) });
+      expect(tombstone).not.toHaveProperty("input");
+      expect(tombstone).not.toHaveProperty("operations");
+      expect(tombstone).not.toHaveProperty("operation");
+      if (copy.key.includes("snapshot")) expect(tombstone).toHaveProperty("status", "committed");
+      else expect(tombstone).toHaveProperty("committedAt");
+    }
+    expect(repos.runtime.invalidateUnifiedL2Source("source", "u", at)).toEqual({ candidates: 0, snapshots: 0, operations: 0 });
   });
 });

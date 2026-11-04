@@ -1,4 +1,5 @@
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
+import { L2_EXTRACTION_OPERATION_PREFIXES, L2_EXTRACTION_SNAPSHOT_PREFIXES } from "./l2-extraction-keys.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
 import type Database from "better-sqlite3";
@@ -5288,20 +5289,20 @@ export class RuntimeRepository {
         `UPDATE runtime_kv
          SET value_json = json_set(json_remove(value_json, '$.input', '$.operations'), '$.sourceInvalidatedAt', ?),
              updated_at = ?
-         WHERE key LIKE 'l2.extract.snapshot.v1:%'
+         WHERE (${L2_EXTRACTION_SNAPSHOT_PREFIXES.map(() => "key LIKE ?").join(" OR ")})
            AND json_extract(json_extract(value_json, '$.scope'), '$[0]') = ?
            AND EXISTS (SELECT 1 FROM json_each(value_json, '$.input.L1_RECORDS') AS source
                        WHERE json_extract(source.value, '$.id') = ?)`
-      ).run(at, at, userId, sourceMemoryId).changes;
+      ).run(at, at, ...L2_EXTRACTION_SNAPSHOT_PREFIXES.map(prefix => `${prefix}%`), userId, sourceMemoryId).changes;
       const operations = this.db.prepare(
         `UPDATE runtime_kv
          SET value_json = json_set(json_remove(value_json, '$.operation'), '$.sourceInvalidatedAt', ?),
              updated_at = ?
-         WHERE key LIKE 'l2.extract.operation.v1:%'
+         WHERE (${L2_EXTRACTION_OPERATION_PREFIXES.map(() => "key LIKE ?").join(" OR ")})
            AND EXISTS (SELECT 1 FROM memories WHERE id = ? AND user_id = ?)
            AND EXISTS (SELECT 1 FROM json_each(value_json, '$.operation.l1_ids') AS source
                        WHERE source.value = ?)`
-      ).run(at, at, sourceMemoryId, userId, sourceMemoryId).changes;
+      ).run(at, at, ...L2_EXTRACTION_OPERATION_PREFIXES.map(prefix => `${prefix}%`), sourceMemoryId, userId, sourceMemoryId).changes;
       return { candidates, snapshots, operations };
     })();
   }
