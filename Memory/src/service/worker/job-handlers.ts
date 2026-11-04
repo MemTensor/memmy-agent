@@ -640,6 +640,10 @@ export function classifyProcessingError(error: unknown): {
   // request per item when an embedding batch is rejected.
   if (error instanceof ModelHttpError) {
     const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
+    if (providerCode === "missingsessionid" ||
+      /(?:missing|required|absent).{0,100}x-opencode-session|x-opencode-session.{0,100}(?:missing|required|absent)/.test(normalized)) {
+      return { code: "model_configuration", retryAction: "open_settings" };
+    }
     if (providerCode === "operationnotsupported" || providerCode === "insufficientquota" ||
       /operation.{0,80}(?:does not work|not supported)|insufficient[\s_-]+(?:quota|balance)/.test(normalized)) {
       return { code: "model_configuration", retryAction: "open_settings" };

@@ -18,6 +18,7 @@ import { clip, firstLine } from "../../utils/text.js";
 import { turnJudgeJobFlags } from "../evolution/turn-judge.js";
 import { isObservationMemory, observationJobPayload } from "../observation-memory-state.js";
 import { externalSkillJobPayload } from "../evidence/history-skill-policy.js";
+import { canRetryMemoryProcessing, processingWithRetryAction } from "./processing-retry-policy.js";
 
 
 
@@ -395,7 +396,12 @@ export class ImportJobProcessor {
   memoryProcessingStatus(memoryIds: readonly string[], request: RequestEnvelope = {}): { items: MemoryProcessingRecord[]; serverTime: string } {
     const ids = dedupeStrings(memoryIds).slice(0, 10_000);
     void request;
-    return { items: this.deps.processing.getMany(ids), serverTime: this.deps.nowIso() };
+    const items = this.deps.processing.getMany(ids).map(processing => {
+      if (processing.retryAction !== "none" || processing.errorCode !== "invalid_model_request") return processing;
+      const memory = this.deps.memories.get(processing.memoryId);
+      return memory ? processingWithRetryAction(memory, processing)! : processing;
+    });
+    return { items, serverTime: this.deps.nowIso() };
   }
 
   retryMemoryProcessing(memoryId: string, request: RequestEnvelope = {}): { accepted: boolean; processing: MemoryProcessingRecord; job?: JobRef; serverTime: string } {
@@ -407,11 +413,11 @@ export class ImportJobProcessor {
     const current = d.processing.get(memoryId);
     if (!current) throw d.createError("invalid_argument", `memory has no asynchronous processing state: ${memoryId}`);
     if (current.state !== "failed") return { accepted: false, processing: current, serverTime: d.nowIso() };
-    if (current.retryAction === "none" || !current.stage) throw d.createError("conflict", current.errorMessage ?? "memory processing cannot be retried");
+    if (!canRetryMemoryProcessing(memory, current)) throw d.createError("conflict", current.errorMessage ?? "memory processing cannot be retried");
     const at = d.nowIso();
     const result = d.transaction(() => {
       const latest = d.processing.get(memoryId);
-      if (!latest || latest.state !== "failed" || !latest.stage) return latest ? { accepted: false, processing: latest } : undefined;
+      if (!latest || !canRetryMemoryProcessing(memory, latest)) return latest ? { accepted: false, processing: latest } : undefined;
       const summaryJobType = summaryProcessingJobType(memory);
       const job = d.enqueueJob({ jobType: latest.stage === "summary" ? summaryJobType : "embedding", userId: memory.userId,
         sessionId: memory.sessionId, targetMemoryId: memory.id, payload: { source: "memory.processing.manual_retry", previousErrorCode: latest.errorCode ?? undefined, ...observationJobPayload(memory), ...externalSkillJobPayload(memory),
@@ -425,6 +431,15 @@ export class ImportJobProcessor {
     });
     if (!result) throw d.createError("not_found", `processing state not found: ${memoryId}`);
     return { ...result, serverTime: at };
+  }
+
+  /** Scan replays recover eligible originals through the same guarded retry path. */
+  retryFailedMemoryProcessingOnScan(memoryId: string): boolean {
+    if (!this.deps.config.algorithm.enableMemoryAdd) return false;
+    const memory = this.deps.memories.get(memoryId);
+    const current = this.deps.processing.get(memoryId);
+    if (!memory || !current || !canRetryMemoryProcessing(memory, current)) return false;
+    return this.retryMemoryProcessing(memoryId).accepted;
   }
 
   restartFailedProcessing(at: string, limit = 10_000): number {
