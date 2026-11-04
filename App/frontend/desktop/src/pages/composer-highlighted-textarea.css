@@ -8,11 +8,11 @@
 .composer-rich-input__backdrop {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: 1;
   overflow: hidden;
   padding: 1rem 1.25rem 3rem;
   border-radius: inherit;
-  color: transparent;
+  color: var(--color-text-ink);
   font-size: 0.875rem;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -33,6 +33,12 @@
 }
 .composer-rich-input__field--highlighted {
   position: relative;
-  z-index: 1;
+  z-index: 2;
   background: transparent !important;
+  /* The backdrop paints the text; keep the native caret and selection above chips. */
+  color: transparent !important;
+  caret-color: var(--color-text-ink);
+}
+.composer-rich-input__field--highlighted::selection {
+  color: var(--color-text-ink);
 }
