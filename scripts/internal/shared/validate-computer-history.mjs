@@ -20,12 +20,12 @@ for (let index = 2; index < process.argv.length; index++) {
   --report-dir <absolute-dir>  parent for a new run directory (default: OS temp)
   --native-bin <absolute-dir>  Windows production EXE + fixture build directory
 
-Builds TypeScript dependencies and Agent, checks types/lint, runs History tests
+Builds TypeScript dependencies and Agent, checks types/lint, runs History and Provider tests
 with two workers, checks both summary CLI paths and builds the frontend.
 Optional native smoke tests cover lifecycle only; they do not activate windows
 or inject input. Full foreground/IME tests and App acceptance are separate.
 Each run saves logs, Vitest JSON reports, skipped test names and results.json.
-Requires installed repository and Agent dependencies; downloads nothing.`);
+Requires installed repository and Agent dependencies; Windows builds need Go 1.22.12.`);
     process.exit(0);
   }
   if (!["--report-dir", "--native-bin"].includes(argument) || options[argument]) {
@@ -77,6 +77,7 @@ function tests(name, cwd, files, env = environment) {
   const output = path.join(directory, `${name}.json`);
   try {
     run(name, cwd, [binary(cwd, "vitest/vitest.mjs"), "run", ...files, "--maxWorkers=2",
+      "--exclude=**/.history-migration/**", "--exclude=**/.history-ci/**", "--exclude=**/.recording-ci/**",
       "--reporter=default", "--reporter=json", `--outputFile=${output}`], env);
   } finally {
     if (fs.existsSync(output)) {
@@ -95,16 +96,18 @@ function tests(name, cwd, files, env = environment) {
 
 try {
   console.log(`[History] Evidence: ${directory}`);
-  for (const [relative, config] of [["Knowledge", "tsconfig.json"], ["Migrations", "tsconfig.build.json"],
+  for (const [relative, config] of [["Memory/AgentSourceCore", "tsconfig.json"], ["Knowledge", "tsconfig.json"], ["Migrations", "tsconfig.build.json"],
     ["App/backend/local-api-contracts", "tsconfig.json"], ["App/shell/desktop/interface", "tsconfig.json"]]) {
     const cwd = path.join(root, relative);
     run(`build-${path.basename(relative)}`, cwd, [binary(cwd, "typescript/bin/tsc"), "-p", config]);
   }
   run("agent-types", agent, [binary(agent, "typescript/bin/tsc"), "-p", "tsconfig.json", "--noEmit"]);
   run("agent-build", agent, [binary(agent, "typescript/bin/tsc"), "-p", "tsconfig.build.json"]);
+  run("agent-assets", agent, ["scripts/copy-build-assets.mjs"]);
   run("frontend-types", frontend, [binary(frontend, "typescript/bin/tsc"), "-p", "tsconfig.json", "--noEmit"]);
   run("agent-lint", agent, [binary(agent, "eslint/bin/eslint.js"),
     "src/tools/computer-recordings/**/*.ts", "tests/tools/computer-recordings/**/*.ts",
+    "src/providers/openai-responses/**/*.ts", "tests/providers/openai-responses.test.ts", "tests/providers/extra-body-config.test.ts",
     "src/tools/computer-history/**/*.ts", "tests/tools/computer-history/**/*.ts",
     "src/tools/computer-use/extract-workflow-candidate.ts", "tests/tools/computer-use/extract-workflow-candidate.test.ts",
     "src/integrations/channels/websocket.ts", "tests/integrations/channels/websocket-computer-history-routes.test.ts",
@@ -124,11 +127,24 @@ try {
     "tests/tools/computer-recordings",
     "tests/core/agent-runtime/skills-loader.test.ts", "tests/integrations/channels/websocket-computer-history-routes.test.ts",
     `--exclude=${nativeTest}`]);
+  // CU also changes shared model request construction; keep the complete Provider
+  // contract suite in both platform jobs, including extra_body tool merging.
+  tests("provider-tests", agent, ["tests/providers"]);
   tests("frontend-tests", frontend, frontendTests);
-  tests("recording-media-proxy-tests", root, ["App/shell/desktop/tests/recording-media-proxy.test.ts", "App/shell/desktop/tests/task-recording-exit.test.ts"]);
-  tests("contract-packaging-tests", root, ["tests/computer-history-contract.test.ts", "tests/computer-history-packaging.test.mjs",
-    "tests/computer-history-windows-packaging.test.mjs", "tests/windows-history-workflow.test.ts"],
-  { ...environment, ...(options["--native-bin"] ? { MEMMY_WINDOWS_HISTORY_TEST_BIN_DIR: options["--native-bin"] } : {}) });
+  tests("recording-media-proxy-tests", root, ["App/shell/desktop/tests/recording-media-proxy.test.ts", "App/shell/desktop/tests/task-recording-exit.test.ts",
+    "App/shell/desktop/tests/computer-history-exit.test.ts"]);
+  tests("contract-tests", root, ["tests/computer-history-contract.test.ts", "tests/windows-history-workflow.test.ts"]);
+  // The Windows Vite module runner cannot load electron-builder's ESM graph.
+  // Keep the Node runner limited to MJS packaging tests: TS source imports need Vite resolution.
+  if (process.platform === "darwin" || process.platform === "win32") {
+    // Electron downloads its binary lazily on first require. Prepare the dependency
+    // separately so a cold checkout does not spend the test's timeout downloading it.
+    run("prepare-electron", root, ["--input-type=module", "-e",
+      `import { createRequire } from 'node:module'; console.log(createRequire(${JSON.stringify(path.join(root, "App/shell/desktop/package.json"))})('electron'));`]);
+  }
+  tests("packaging-tests", root, ["tests/computer-history-packaging.test.mjs", "tests/computer-history-windows-packaging.test.mjs",
+    ...(process.platform === "win32" ? ["--experimental.viteModuleRunner=false"] : [])],
+    { ...environment, ...(options["--native-bin"] ? { MEMMY_WINDOWS_HISTORY_TEST_BIN_DIR: options["--native-bin"] } : {}) });
   for (const platform of ["core", "mac"]) {
     run(`summary-cli-${platform}`, agent, [`dist/tools/computer-history/${platform}/summarize-history.js`, "--help"]);
   }

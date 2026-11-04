@@ -383,7 +383,7 @@ describe("CommandPluginAdapter", () => {
           fs.closeSync(0);
           // Keep descriptor zero occupied so libuv cannot reuse it for an
           // internal handle (some Node 24 builds assert when closing fd 0).
-          fs.openSync(process.platform==='win32'?'NUL':'/dev/null','r');
+          fs.openSync(require('node:os').devNull,'r');
           console.log(JSON.stringify({type:'host-service-request',requestId:'closed-pipe',service:'model-inference',input:{}}));
           setInterval(() => {}, 1000);
         `], cwd: root!
@@ -464,8 +464,11 @@ describe("CommandPluginAdapter", () => {
   });
 
   it("prepends only Host-resolved runtime paths to the plugin environment", () => {
+    vi.stubEnv("SystemRoot", "C:\\Windows");
     expect(resolvePluginEnvironment({ TEXMFHOME: "/plugin/path" }, {}, {}, ["/trusted/tex/bin"], { TEXMFHOME: "/trusted/texmf" })).toMatchObject({
-      PATH: "/trusted/tex/bin:/usr/bin:/bin",
+      PATH: process.platform === "win32"
+        ? "/trusted/tex/bin;C:\\Windows\\System32;C:\\Windows"
+        : "/trusted/tex/bin:/usr/bin:/bin",
       LANG: "C.UTF-8",
       TEXMFHOME: "/trusted/texmf"
     });

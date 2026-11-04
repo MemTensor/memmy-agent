@@ -40,7 +40,13 @@ jobs:
           npm ci --ignore-scripts --prefix App/memmy-agent
           npm rebuild better-sqlite3 esbuild
           npm rebuild better-sqlite3 esbuild --prefix App/memmy-agent
+      - name: Prepare isolated browser fixtures
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/teach-test-browsers
+        run: node App/memmy-agent/node_modules/playwright/cli.js install chromium
       - name: Validate the checked-out Host
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/teach-test-browsers
         run: node scripts/internal/shared/validate-teach-host.mjs --report-dir "$RUNNER_TEMP/teach-host"
       - uses: actions/upload-artifact@v4
         if: always()

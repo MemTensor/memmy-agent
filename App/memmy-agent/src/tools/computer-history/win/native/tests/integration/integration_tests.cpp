@@ -1729,7 +1729,13 @@ void CaseTaskVideoIdle() {
             && frame.at("window").at("hwnd") == fixture.HwndA()) { capturedPrefix = true; break; }
       }
     }
-    if (!capturedPrefix) Sleep(100);
+    if (!capturedPrefix) {
+      // WGC may deliver its first static image after a newer blank display tick.
+      // Drive a fresh fixture image during startup, then leave it fully static
+      // for the idle assertions below; keep the fresh-frame requirement intact.
+      fixture.Command("set-message idle-first-" + std::to_string(attempt));
+      Sleep(100);
+    }
   }
   Expect(capturedPrefix, "idle test requires an actual authorized captured frame before waiting");
   waitInForeground(16000, "during the initial idle wait");

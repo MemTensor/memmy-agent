@@ -45,7 +45,7 @@ jobs:
           bash scripts/internal/mac/build-computer-history-helpers.sh .recording-ci/helpers arm64
           bash scripts/internal/mac/build-computer-history-helpers.sh .recording-ci/helpers x64
       - name: Run native media, macOS lifecycle, UI and packaging checks
-        run: node scripts/internal/shared/validate-computer-history.mjs --report-dir .recording-ci/regression
+        run: node scripts/internal/shared/validate-computer-history.mjs --report-dir "$GITHUB_WORKSPACE/.recording-ci/regression"
       - name: Record validation scope
         if: ${{ always() }}
         run: |
