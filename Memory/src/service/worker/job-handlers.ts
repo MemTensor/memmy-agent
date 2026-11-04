@@ -25,6 +25,7 @@ import {
 import { episodeTitleIsCurrent } from "../episode-title/episode-title-service.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
 import { observationMemoryState } from "../observation-memory-state.js";
+import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
 import { isNeutralFeedback, turnJudgeJobFlags } from "../evolution/turn-judge.js";
 import {
   namespaceForMemory,
@@ -68,6 +69,7 @@ export interface WorkerJobProcessors {
     abstractL3(job: EvolutionJobRecord): MaybePromise<void>;
     updateL3WorldModel(job: EvolutionJobRecord): MaybePromise<void>;
     updateProjectEnvironment(job: EvolutionJobRecord): MaybePromise<void>;
+    updateL3Unit(job: EvolutionJobRecord): MaybePromise<void>;
     crystallizeSkill(job: EvolutionJobRecord): MaybePromise<void>;
     assignSkillCluster(job: EvolutionJobRecord): MaybePromise<void>;
     evolveSkillCluster(job: EvolutionJobRecord): MaybePromise<void>;
@@ -96,7 +98,7 @@ export interface WorkerJobProcessors {
 }
 
 export interface WorkerJobHandlerDeps {
-  repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime">;
+  repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime" | "l3WorldModels">;
   capture: { synthReflection: boolean };
   reward: { feedbackWindowSec: number };
   nowIso(): string;
@@ -270,6 +272,10 @@ export async function processJob(
     case "project_environment_profile":
       await deps.processors.evolution.updateProjectEnvironment(job);
       return;
+    case "l3_unit_update":
+      // A terminal error goes straight to dead letter in failLeasedWorkerJob.
+      await deps.processors.evolution.updateL3Unit(job);
+      return;
     case "skill_crystallization":
       await deps.processors.evolution.crystallizeSkill(job);
       return;
@@ -381,7 +387,15 @@ export function finalizeClosedEpisode(
   trigger: ClosedEpisodeTrigger
 ): EvolutionJobRecord[] {
   const current = deps.repos.runtime.getEpisode(episode.id) ?? episode;
-  if (current.status !== "closed" || current.l1MemoryIds.length === 0) return [];
+  if (current.status !== "closed") return [];
+  // Every way a task closes ends up here, so this is where its turns go to the new L3.
+  deps.repos.l3WorldModels.freezeClosedTask({
+    sessionId: current.sessionId,
+    episodeId: current.id,
+    trigger: trigger === "idle_timeout" ? "episode_idle_close" : trigger === "session_closed" ? "session_close" : "new_task",
+    at
+  });
+  if (current.l1MemoryIds.length === 0) return [];
   if (episodeHasPendingCaptureDecision(deps, current) || deps.repos.runtime.hasUnassignedTurns(current.sessionId)) return [];
   // Titling is independent of reward and reflection, so it must be queued before
   // the mutually exclusive branches below can return.
@@ -568,6 +582,7 @@ export function workerJobCanRunInParallel(job: EvolutionJobRecord): boolean {
     job.jobType === "observation_extract" ||
     job.jobType === "embedding" ||
     job.jobType === "l3_world_model_update" ||
+    job.jobType === "l3_unit_update" ||
     job.jobType === "project_environment_profile";
 }
 
@@ -655,6 +670,60 @@ export function classifyProcessingError(error: unknown): {
     return { code: "embedding_failed", retryAction: "retry" };
   }
   return { code: "processing_failed", retryAction: "retry" };
+}
+
+/** L3 jobs whose failures are retried later instead of right away. */
+export const L3_RETRY_JOB_TYPES: readonly string[] = ["l3_world_model_update", "l3_unit_update", "project_environment_profile"];
+/** Waits before retries 1-5 of a temporary failure; the sixth run that fails goes to dead letter. */
+export const L3_RETRY_DELAYS_MINUTES = [1, 5, 15, 30, 60] as const;
+/** Used-up quota (40309) or no connection is tried again this often, without using up an attempt. */
+export const L3_SUSPEND_MINUTES = 30;
+
+export type L3FailureHandling =
+  | { kind: "retry_later"; delayMinutes: number; maxAttempts: number }
+  | { kind: "suspend" }
+  | { kind: "dead_letter" }
+  | { kind: "default" };
+
+/** Connection errors that mean the model endpoint cannot be reached at all, as when the computer is offline. */
+const CANNOT_CONNECT_CODES = new Set([
+  "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "ENETDOWN", "UND_ERR_CONNECT_TIMEOUT"
+]);
+
+/**
+ * How a failed L3 job goes back into the queue. Used-up quota or no connection waits without using
+ * an attempt, so going offline loses nothing; any other configuration problem (a bad key or endpoint)
+ * is left to the queue, which holds the job until the configuration changes. Temporary model trouble
+ * retries five times; any other failure (a rejected answer, a bug) would most likely fail the same
+ * way, so it gets one more try. Then the job goes to dead letter, never to "failed": a failed L3
+ * job left in the queue would hold back every later batch of the same scope until a restart.
+ */
+export function l3FailureHandling(job: EvolutionJobRecord, error: unknown): L3FailureHandling {
+  if (!L3_RETRY_JOB_TYPES.includes(job.jobType) || isTerminalL3WorldModelError(error)) return { kind: "default" };
+  if (cannotConnect(error)) return { kind: "suspend" };
+  const message = error instanceof Error ? error.message : String(error);
+  // What the model clients really throw (model/http.ts, model/llm.ts): an empty body or missing
+  // output, and fetch's TypeError or the timeout's AbortError. Checked before configuration errors,
+  // because an empty reply also says "expected JSON".
+  const emptyReply = /received an empty response|response missing |unexpected end of json input/i
+    .test(message);
+  const network = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError" ||
+    (error instanceof TypeError && /fetch failed|network|socket/i.test(message)));
+  const classification = classifyProcessingError(error);
+  if (!emptyReply && !network && classification.retryAction === "open_settings") {
+    return classification.code === "40309" ? { kind: "suspend" } : { kind: "default" };
+  }
+  const temporary = emptyReply || network || classification.code === "transient_provider_error";
+  const delay = (temporary ? L3_RETRY_DELAYS_MINUTES : L3_RETRY_DELAYS_MINUTES.slice(0, 1))[job.failureCount ?? 0];
+  if (delay === undefined) return { kind: "dead_letter" };
+  return { kind: "retry_later", delayMinutes: delay, maxAttempts: L3_RETRY_DELAYS_MINUTES.length + 1 };
+}
+
+/** fetch's "fetch failed" whose cause says the host was never reached (no cause: same, nothing was sent). */
+function cannotConnect(error: unknown): boolean {
+  if (!(error instanceof TypeError) || !/fetch failed/i.test(error.message)) return false;
+  const code = (error.cause as { code?: unknown } | undefined)?.code;
+  return typeof code !== "string" || CANNOT_CONNECT_CODES.has(code);
 }
 
 export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "episodeId" | "targetMemoryId" | "payload">): string | undefined {

@@ -1,3 +1,4 @@
+import { skillInjectionDescription } from "./skill-injection-description.js";
 import type {
   RetrievalQueryExtract,
   RetrievalResult
@@ -870,7 +871,7 @@ function renderInjectedSnippet(
       "",
       ...labeledInjectedBlock("Name", name),
       "",
-      ...labeledInjectedBlock("Description", firstLineSummary(guide, summaryChars) || "(not provided)")
+      ...labeledInjectedBlock("Description", skillInjectionDescription({ name, guide, retrievalBlurb: skill?.retrievalBlurb, triggerContext: skill?.triggerContext, maxChars: summaryChars }))
     ];
     return {
       refKind: "skill",

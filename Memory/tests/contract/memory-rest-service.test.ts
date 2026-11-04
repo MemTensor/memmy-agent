@@ -491,6 +491,39 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("forwards recordEvent=false through HTTP search without persisting recall or API logs", async () => {
+    const { db, service } = createTestService();
+    const counts = () => ({
+      recalls: (db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get() as { count: number }).count,
+      apiLogs: (db.db.prepare("SELECT COUNT(*) AS count FROM api_logs WHERE tool_name = 'memory_search'").get() as { count: number }).count
+    });
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const search = (body: Record<string, unknown>) => fetch(`http://127.0.0.1:${address.port}/api/v1/memory/search`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+      });
+
+      const before = counts();
+      const recorded = await search({ query: "recorded search query" });
+      expect(recorded.status).toBe(200);
+      const afterRecorded = counts();
+      expect(afterRecorded).toEqual({ recalls: before.recalls + 1, apiLogs: before.apiLogs + 1 });
+
+      const skipped = await search({ query: "unrecorded search query", recordEvent: false });
+      expect(skipped.status).toBe(200);
+      expect(counts()).toEqual(afterRecorded);
+
+      const invalid = await search({ query: "invalid search query", recordEvent: "false" });
+      expect(invalid.status).toBe(400);
+      expect((await invalid.json() as { error: { code: string } }).error.code).toBe("invalid_argument");
+      expect(counts()).toEqual(afterRecorded);
+    });
+    db.close();
+  });
+
   it("preserves lifecycle routing fields across the REST boundary", async () => {
     const { db, service } = createTestService();
     const analyticsEvents: string[] = [];
@@ -742,7 +775,8 @@ describe("MemoryService / REST contract", () => {
   });
 
   it("auto-drains L3 World Model jobs frozen by a REST session.close with no open episode", async () => {
-    const { db, service } = createTestService();
+    // L3 jobs wait in the queue while no evolution model is configured, so configure one.
+    const { db, service } = createTestService({ skillLlm: createDeterministicSummaryLlm("unused") });
     const opened = service.openSession({
       l3WorldModelProtocolVersion: 2,
       l3WorldModelTransition: "resume_only",
@@ -801,7 +835,8 @@ describe("MemoryService / REST contract", () => {
     });
     expect(l3Jobs()).toHaveLength(1);
 
-    await waitFor(() => l3Jobs().every((job) => job.status !== "queued" && job.attempts > 0));
+    // The job ran once; a failed L3 run goes back to the queue to retry later.
+    await waitFor(() => l3Jobs().every((job) => job.attempts > 0 && job.status !== "leased"));
 
     });
     db.close();

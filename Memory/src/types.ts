@@ -84,6 +84,7 @@ export type JobType =
   | "l2_induction"
   | "l3_abstraction"
   | "l3_world_model_update"
+  | "l3_unit_update"
   | "project_environment_profile"
   | "skill_crystallization"
   | "skill_cluster_assign"
@@ -509,6 +510,12 @@ export interface MemorySearchRequest extends RequestEnvelope {
   limit?: number;
   contextBudget?: number;
   includeInjectedContext?: boolean;
+  /**
+   * When false, skip persisting the recall event and memory_search API log.
+   * Retrieval model calls, request idempotency records and plugin analytics are unaffected,
+   * and the returned searchEventId does not resolve to a stored recall event.
+   */
+  recordEvent?: boolean;
   verbose?: boolean;
 }
 

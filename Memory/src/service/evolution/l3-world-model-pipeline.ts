@@ -199,7 +199,8 @@ function strictJobPayload(job: EvolutionJobRecord): {
   batchId: string;
   targetField: L3WorldModelTargetField;
 } {
-  const keys = Object.keys(job.payload).sort();
+  // runAfter is the queue's own retry time, not part of the job's evidence.
+  const keys = Object.keys(job.payload).filter((key) => key !== "runAfter").sort();
   if (keys.join(",") !== "batchId,targetField") {
     throw new L3WorldModelTerminalEvidenceError("invalid L3 World Model job payload keys");
   }

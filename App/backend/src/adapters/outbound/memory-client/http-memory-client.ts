@@ -11,6 +11,7 @@ import {
   CloseSessionOutputSchema,
   CompleteTurnOutputSchema,
   SourceTurnCompleteOutputSchema,
+  L3ScanSessionsFreezeResponseSchema,
   DeleteMemoryOutputSchema,
   EmbeddingInferenceOutputSchema,
   DeletePanelTaskOutputSchema,
@@ -32,6 +33,7 @@ import {
   RetryMemoryProcessingOutputSchema,
   WorkerRunOutputSchema
 } from "@memmy/local-api-contracts";
+import { randomUUID } from "node:crypto";
 import { z, type ZodType } from "zod";
 import { MemoryLayerError, MemoryLayerNetworkError } from "./errors.js";
 import { buildMemoryLayerUrl, MEMORY_LAYER_PATHS } from "./memory-layer-endpoints.js";
@@ -204,6 +206,12 @@ export function createHttpMemoryClient(
 
     async completeSourceTurn(input, context) {
       return request("POST", "completeSourceTurn", SourceTurnCompleteOutputSchema, { body: input, context });
+    },
+
+    async freezeScanSessions(source, sessionIds, context) {
+      // The L3 envelope resolves the owner the same way the source turns that opened these Sessions did.
+      const body = { requestId: randomUUID(), adapterId: `agent-source:${source}`, source, sessionIds };
+      return request("POST", "freezeScanSessions", L3ScanSessionsFreezeResponseSchema, { body, context });
     },
 
     async search(input, context) {
