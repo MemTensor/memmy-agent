@@ -65,6 +65,10 @@ describe.skipIf(!fs.existsSync(executable))('production extension through the re
       headless: true, args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
     const extensionWorker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', { timeout: 5000 });
     expect(extensionWorker.url()).toMatch(/^chrome-extension:\/\//);
+    // A cold MV3 worker exists before its WebSocket handshake finishes. Start
+    // the page-discovery deadline only after the real extension is connected.
+    const connected = await bridge.waitForConnection('chrome', 20_000);
+    expect(connected, JSON.stringify(bridge.connectionDiagnostics())).toBe(true);
     const page = await context.newPage(); await page.goto(origin);
     // The fixture's browser owner observes only. Without a listener both its
     // Playwright connection and Memmy's executor would dismiss the same alert.

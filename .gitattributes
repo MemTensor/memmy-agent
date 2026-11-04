@@ -9,3 +9,5 @@ App/backend/src/project-version.ts text eol=lf
 App/native-computer-use/apps/OpenComputerUseLinux/version.go text eol=lf
 App/native-computer-use/apps/OpenComputerUseWindows/version.go text eol=lf
 App/native-computer-use/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/OpenComputerUseVersion.swift text eol=lf
+# The browser sensor generator emits LF on every platform.
+App/shell/desktop/extensions/memmy-browser/history-sensor.js text eol=lf
