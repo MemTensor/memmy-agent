@@ -1296,6 +1296,13 @@ export class AgentLoop {
     return initialization;
   }
 
+  /** Long-running service only: keep Memory's copy of the desktop project list current. */
+  startL3UserProjectSync(): void {
+    const projectStore = this.projectStore;
+    if (!projectStore) return;
+    this.memmyMemoryIntegration.startL3UserProjectSync?.(() => projectStore.snapshot());
+  }
+
   async closeRuntimeTools(): Promise<void> {
     this.messageLoopReady = false;
     this.runtimeToolsClosed = true;

@@ -1162,6 +1162,7 @@ export async function gateway({
     cronService: cron,
     projectStore,
   });
+  loop.startL3UserProjectSync?.();
   reportStartupStage("agent-loop-created");
   if (loop.sessions instanceof SessionManager) {
     loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, canonicalWorkspace);
@@ -1261,6 +1262,7 @@ export async function gateway({
         llmRuntime: (preset) => loop.llmRuntime(preset),
         scheduleBackground: (promise) => loop.scheduleBackground(promise),
         tokenUsageRecorder: createByokTokenUsageRecorder(loaded),
+        readMediaText: (filePath) => webuiChannel.readWebuiTitleText(filePath),
       }),
     );
     if (webuiChannel.guiSessionProjection && loop.sessions instanceof SessionManager) {

@@ -24,6 +24,8 @@ export interface SkillTarget {
   uninstall(targetId: string): Promise<void>;
   isInstalled(targetId: string): Promise<boolean>;
   installPlugin?(targetId: string): Promise<void>;
+  /** Plugin removal already includes instructions and skill cleanup in one critical section. */
+  readonly pluginUninstallIncludesSkills?: boolean;
   uninstallPlugin?(targetId: string): Promise<void>;
   isInstalledHookCurrent?(): Promise<boolean>;
   detectMemoryPluginConflict?(): Promise<MemoryPluginConflict | null>;

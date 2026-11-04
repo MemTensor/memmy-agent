@@ -122,6 +122,13 @@ describe("agent-model-error", () => {
     });
   });
 
+  it("classifies the current legacy 40308 before the generic 403 auth branch", () => {
+    expect(formatAgentModelError("Error calling LLM: code 40308\nraw provider detail", t)).toEqual({
+      title: "当前模型 Token 余额不足，请更换模型后重试",
+      detail: "Error calling LLM: code 40308\nraw provider detail"
+    });
+  });
+
   it("does not infer quota exhaustion from error text", () => {
     expect(formatAgentModelError("Error calling LLM: insufficient quota", t)).toEqual({
       title: "模型请求失败",
