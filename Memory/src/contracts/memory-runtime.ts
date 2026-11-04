@@ -960,6 +960,9 @@ export const ApiErrorCodeSchema = z.enum([
   "rate_limited",
   "internal",
   "memory_layer_unavailable",
+  "memory_starting",
+  "memory_upgrading",
+  "memory_scan_upgrade_required",
   "missing_idempotency_key",
   "idempotency_body_mismatch",
   "scan_not_permitted",
@@ -970,7 +973,8 @@ export const ApiErrorCodeSchema = z.enum([
   "toolkit_unsupported",
   "model_config_changed",
   "config_write_busy",
-  "account_model_preset_conflict"
+  "account_model_preset_conflict",
+  "plugin_entitlement_required"
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 
@@ -979,7 +983,8 @@ export const ApiErrorBodySchema = z.object({
   error: z.object({
     code: ApiErrorCodeSchema,
     message: z.string(),
-    requestId: NonEmptyStringSchema
+    requestId: NonEmptyStringSchema.optional(),
+    upstreamRequestId: NonEmptyStringSchema.optional()
   })
 });
 export type ApiErrorBody = z.infer<typeof ApiErrorBodySchema>;

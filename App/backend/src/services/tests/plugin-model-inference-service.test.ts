@@ -18,6 +18,38 @@ describe("plugin model inference Host service", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    [403, { error: { message: "Token quota is insufficient", type: "insufficient_quota", code: "40309", memmy_code: "40308" } }],
+    [429, { error: { message: "quota exhausted", type: "insufficient_quota", code: "40308" } }]
+  ])("reports account quota from a non-2xx HTTP %s gateway error", async (status, body) => {
+    const account = resolved();
+    if (!account.ok) throw new Error("fixture");
+    account.context.protocol = "memmy-account";
+    const fetch = vi.fn(async () => new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json", "x-should-retry": "false" }
+    }));
+    const service = createPluginModelInferenceService({ resolveModel: async () => account, fetch: fetch as typeof globalThis.fetch });
+    await expect(service.invoke({ pluginId: "literature-review", callId: "quota-http", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Write" }], responseFormat: "json" }
+    })).rejects.toMatchObject({ code: "model_quota_exhausted", retryable: false });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps other non-2xx account gateway errors as model failures", async () => {
+    const account = resolved();
+    if (!account.ok) throw new Error("fixture");
+    account.context.protocol = "memmy-account";
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      error: { message: "No permission", type: "permission_error", code: "40101" }
+    }), { status: 403, headers: { "content-type": "application/json" } }));
+    const service = createPluginModelInferenceService({ resolveModel: async () => account, fetch: fetch as typeof globalThis.fetch });
+    await expect(service.invoke({ pluginId: "literature-review", callId: "forbidden", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Write" }], responseFormat: "json" }
+    })).rejects.toMatchObject({ code: "model_inference_failed", retryable: false });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the current user model without exposing credentials", async () => {
     const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(init?.headers).toMatchObject({ authorization: "Bearer secret-key" });
