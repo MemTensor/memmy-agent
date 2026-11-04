@@ -18,7 +18,8 @@ export class AutoCompact {
   archiving = new Set<string>();
   summaries = new Map<string, [string, Date]>();
 
-  constructor(sessions?: SessionManager, consolidator?: any, sessionTtlMinutes = 0) {
+  constructor(sessions?: SessionManager, consolidator?: any, sessionTtlMinutes = 0,
+    private readonly resolveConsolidator?: (sessionKey: string) => Promise<{ compactIdleSession(key: string, maxSuffix: number): Promise<string | null> }>) {
     this.sessions = sessions ?? new SessionManager(process.cwd());
     this.consolidator = consolidator;
     this.ttl = sessionTtlMinutes;
@@ -49,7 +50,8 @@ export class AutoCompact {
 
   async archiveExpiredSession(key: string): Promise<void> {
     try {
-      const summary = await this.consolidator?.compactIdleSession?.(key, AutoCompact.RECENT_SUFFIX_MESSAGES);
+      const consolidator = this.resolveConsolidator ? await this.resolveConsolidator(key) : this.consolidator;
+      const summary = await consolidator?.compactIdleSession?.(key, AutoCompact.RECENT_SUFFIX_MESSAGES);
       if (summary && summary !== "(nothing)") {
         const session = this.sessions.getOrCreate(key);
         const meta = session.metadata?.lastSummary;

@@ -257,12 +257,12 @@ describe("config schema validation", () => {
     expect(() => new InlineFallbackConfig({ provider: "", model: "gpt-4.1" })).toThrow(/fallback provider/);
 
     expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).model).toBe("gpt-4.1");
-    expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).maxTokens).toBe(32_768);
+    expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).maxTokens).toBe(DEFAULT_MAX_TOKENS);
     expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).temperature).toBe(0.7);
     expect(new InlineFallbackConfig({ provider: "openai", model: "gpt-4.1" }).provider).toBe("openai");
   });
 
-  it("resolves model token defaults only for BYOK text-generation presets", () => {
+  it("does not infer token limits from a model name", () => {
     const preset = (overrides: Record<string, unknown> = {}) => new ModelPresetConfig({
       endpoint: "chat",
       model: "gpt-5.6",
@@ -275,10 +275,10 @@ describe("config schema validation", () => {
     const defaults = new AgentDefaults();
     expect(defaults.maxTokens).toBe(DEFAULT_MAX_TOKENS);
     expect(defaults.contextWindowTokens).toBe(DEFAULT_CONTEXT_WINDOW_TOKENS);
-    expect(preset()).toMatchObject({ maxTokens: 128_000, contextWindowTokens: 1_050_000 });
+    expect(preset()).toMatchObject({ maxTokens: DEFAULT_MAX_TOKENS, contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS });
     expect(preset({ provider: "custom-openai" })).toMatchObject({
-      maxTokens: 128_000,
-      contextWindowTokens: 1_050_000,
+      maxTokens: DEFAULT_MAX_TOKENS,
+      contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
     });
     expect(preset({ model: "private-model" })).toMatchObject({
       maxTokens: DEFAULT_MAX_TOKENS,
@@ -297,17 +297,17 @@ describe("config schema validation", () => {
     }
     for (const capability of ["agent", "memory_summary", "memory_evolution"]) {
       expect(preset({ capabilities: [capability] })).toMatchObject({
-        maxTokens: 128_000,
-        contextWindowTokens: 1_050_000,
+        maxTokens: DEFAULT_MAX_TOKENS,
+        contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
       });
     }
 
     expect(preset({ maxTokens: 12_345 })).toMatchObject({
       maxTokens: 12_345,
-      contextWindowTokens: 1_050_000,
+      contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
     });
     expect(preset({ contextWindowTokens: 345_678 })).toMatchObject({
-      maxTokens: 128_000,
+      maxTokens: DEFAULT_MAX_TOKENS,
       contextWindowTokens: 345_678,
     });
     expect(preset({ maxTokens: 12_345, contextWindowTokens: 345_678 })).toMatchObject({

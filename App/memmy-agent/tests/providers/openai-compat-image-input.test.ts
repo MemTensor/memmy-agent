@@ -14,24 +14,28 @@ function imageMessages(): Record<string, any>[] {
 
 describe("OpenAI-compatible image input", () => {
   it.each(["chat", "chatStream"] as const)(
-    "fails DeepSeek %s before creating an SDK client",
+    "lets the Provider reject unknown DeepSeek image capability in %s",
     async (method) => {
       const provider = new OpenAICompatProvider({
         apiKey: "deepseek-key",
         defaultModel: "deepseek-chat",
         spec: findByName("deepseek"),
       });
-      const ensureClient = vi.spyOn(provider, "ensureClient");
+      const create = vi.fn(async (_body: Record<string, any>) => {
+        throw Object.assign(new Error("image_url is not supported"), { status: 400 });
+      });
+      provider.client = { chat: { completions: { create } }, responses: { create: vi.fn() } };
 
       const response = await provider[method]({ messages: imageMessages() });
 
       expect(response).toMatchObject({
         finishReason: "error",
         errorStatusCode: 400,
-        errorCategory: "image_input_unsupported",
-        errorShouldRetry: false,
       });
-      expect(ensureClient).not.toHaveBeenCalled();
+      expect(create).toHaveBeenCalledOnce();
+      expect(create.mock.calls[0][0].messages[0].content).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "image_url" }),
+      ]));
     },
   );
 
