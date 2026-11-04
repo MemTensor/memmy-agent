@@ -1,8 +1,7 @@
 /** Session discovery module. */
 import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
-import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { readJsonlObjects } from "../jsonl-lines.js";
 import { readDirectoryIfExists } from "../read-directory.js";
 
@@ -11,7 +10,6 @@ export interface CodexSessionFile {
   sessionFilePath: string;
   workspacePath: string | null;
   gitRoot: string | null;
-  externalImport?: { sourcePath: string; contentHash?: string; importedThreadId: string };
 }
 
 export interface DiscoverCodexSessionsOptions {
@@ -24,7 +22,6 @@ export interface DiscoverCodexSessionsOptions {
 /** Handles discover codex sessions. */
 export async function discoverCodexSessions(options: DiscoverCodexSessionsOptions): Promise<CodexSessionFile[]> {
   const files = await listRolloutFiles(options.root, options.order ?? "path_asc", options.maxSessions);
-  const imports = await readCodexImportLedger(join(dirname(options.root), "external_agent_session_imports.json"));
   const sessions: CodexSessionFile[] = [];
 
   for (const filePath of files) {
@@ -32,35 +29,11 @@ export async function discoverCodexSessions(options: DiscoverCodexSessionsOption
     sessions.push({
       sessionFilePath: filePath,
       workspacePath,
-      gitRoot: workspacePath ? findGitRoot(workspacePath) : null,
-      ...(imports.get(rolloutThreadId(filePath)) ? { externalImport: imports.get(rolloutThreadId(filePath)) } : {})
+      gitRoot: workspacePath ? findGitRoot(workspacePath) : null
     });
   }
 
   return sessions;
-}
-
-async function readCodexImportLedger(path: string): Promise<Map<string, { sourcePath: string; contentHash?: string; importedThreadId: string }>> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-    if (!isRecord(parsed) || !Array.isArray(parsed.imports)) return new Map();
-    const imports = new Map<string, { sourcePath: string; contentHash?: string; importedThreadId: string }>();
-    for (const entry of parsed.imports) {
-      if (!isRecord(entry) || typeof entry.source_path !== "string" || typeof entry.imported_thread_id !== "string") continue;
-      imports.set(entry.imported_thread_id, {
-        sourcePath: entry.source_path,
-        ...(typeof entry.content_hash === "string" ? { contentHash: entry.content_hash } : {}),
-        importedThreadId: entry.imported_thread_id
-      });
-    }
-    return imports;
-  } catch {
-    return new Map();
-  }
-}
-
-function rolloutThreadId(filePath: string): string {
-  return basename(filePath).replace(/^rollout-/u, "").replace(/\.jsonl$/u, "");
 }
 
 /** Handles list rollout files. */

@@ -33,12 +33,6 @@ export interface SourceTurn {
   toolCalls: SourceToolCall[];
   toolResults: SourceToolResult[];
   workspacePath?: string;
-  /** Marks a native turn copied from another agent's history. */
-  externalImport?: {
-    sourcePath: string;
-    contentHash?: string;
-    importedThreadId: string;
-  };
 }
 
 /** Shape every native reader stages, before it is turned into a ConversationMessage. */
@@ -119,9 +113,7 @@ export function buildSourceTurnRequest(turn: SourceTurn, channel: "hook" | "agen
   return {
     sourceTurn: {
       source: turn.source, profileId: resolvedProfileId, conversationId: turn.conversationId, turnId: turn.turnId,
-      startedAt: turn.startedAt, completedAt: turn.completedAt, sequence: turn.sequence,
-      completionEvidence: turn.completionEvidence,
-      ...(turn.externalImport ? { externalImport: turn.externalImport } : {})
+      startedAt: turn.startedAt, completedAt: turn.completedAt, sequence: turn.sequence, completionEvidence: turn.completionEvidence
     },
     source: turn.source, profileId: resolvedProfileId, channel, query: turn.query, answer: turn.answer,
     status: turn.status, toolCalls: turn.toolCalls, toolResults: turn.toolResults,

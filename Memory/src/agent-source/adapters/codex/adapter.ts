@@ -78,7 +78,7 @@ export function createCodexSourceAdapter(deps: CreateCodexSourceAdapterDeps = {}
           options.onProgress?.({ sourceId: descriptor.sourceId, phase: "redact", current: emittedMessages, total: emittedMessages + 1 });
           emittedMessages += 1;
           options.onProgress?.({ sourceId: descriptor.sourceId, phase: "emit", current: emittedMessages, total: emittedMessages });
-          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot, session.externalImport);
+          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot);
         }
       }
 
@@ -91,12 +91,8 @@ function toConversationMessage(
   sourceId: string,
   rawMessage: RawCodexMessage,
   workspacePath: string | null,
-  gitRoot: string | null,
-  externalImport?: { sourcePath: string; contentHash?: string; importedThreadId: string }
+  gitRoot: string | null
 ): ConversationMessage {
-  const sourceTurn = isRecord(rawMessage.rawMeta.sourceTurn) && externalImport
-    ? { ...rawMessage.rawMeta.sourceTurn, externalImport }
-    : rawMessage.rawMeta.sourceTurn;
   return {
     messageId: rawMessage.messageId,
     sourceId,
@@ -107,11 +103,7 @@ function toConversationMessage(
     workspacePath,
     gitRoot,
     ordinal: rawMessage.ordinal,
-    rawMeta: {
-      ...rawMessage.rawMeta,
-      ...(externalImport ? { externalImport } : {}),
-      ...(sourceTurn ? { sourceTurn } : {})
-    }
+    rawMeta: rawMessage.rawMeta
   };
 }
 
@@ -127,8 +119,4 @@ function limitReached(count: number, maxMessages: number | undefined): boolean {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
