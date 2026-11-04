@@ -188,6 +188,15 @@ describe("AgentCommandPalette", () => {
     ]);
   });
 
+  it("localizes the literature review plugin command only for Chinese UI", () => {
+    const command = { command: "/literature-review", title: "Literature Review", description: "Create or continue an evidence-grounded literature review.", icon: "book-open", argHint: "<topic>" };
+    expect(localizeSlashCommands([command], "zh-CN", (key) => zhCNMessages[key])[0]).toEqual({
+      ...command, title: "文献综述", description: "创建或继续基于文献证据的文献综述。", argHint: "<主题>"
+    });
+    expect(localizeSlashCommands([command], "en-US", (key) => enUSMessages[key])[0]).toBe(command);
+    expect(command.title).toBe("Literature Review");
+  });
+
   it("hides the Goal argument hint in non-Chinese palettes", () => {
     const localized = localizeSlashCommands(
       [{ command: "/goal", title: "Goal", description: "Start goal", icon: "activity", argHint: "[status|create <objective>|pause]" }],

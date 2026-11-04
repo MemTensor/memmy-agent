@@ -14,12 +14,14 @@ import {
 } from "./plugin-marketplace-section.js";
 import { writeSettingsTabHash } from "./settings-nav.js";
 import { isNewerPluginVersion } from "./plugin-version.js";
+import { resolveLanguage } from "../i18n/messages.js";
+import { officialPluginCatalog } from "./official-plugin-catalog.js";
 
 /** Live marketplace: installed state is always read back from the plugin host. */
 export function PluginMarketplace() {
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   const [catalog, setCatalog] = useState<PluginCatalogEntry[] | null>(null);
   const [installed, setInstalled] = useState<InstalledPlugin[]>([]);
   const [loading, setLoading] = useState(true);
@@ -166,7 +168,7 @@ export function PluginMarketplace() {
     await clients!.plugins.enable(plugin.id);
   }
 
-  const plugins = marketplacePlugins(catalog, installed);
+  const plugins = marketplacePlugins(catalog, installed, language);
 
   return <>
     {modelError && <p role="alert" className="mb-4 text-sm text-text-ink/60">{modelError}</p>}
@@ -228,7 +230,7 @@ export function PluginMarketplace() {
 }
 
 /** Merge the remote catalog with Host state, including plugins missing from that catalog. */
-export function marketplacePlugins(catalog: PluginCatalogEntry[] | null, installed: InstalledPlugin[]): MarketplacePlugin[] {
+export function marketplacePlugins(catalog: PluginCatalogEntry[] | null, installed: InstalledPlugin[], language = "en-US"): MarketplacePlugin[] {
   const installedById = new Map(installed.map((plugin) => [plugin.id, plugin]));
   const listed = new Set((catalog ?? []).map((entry) => entry.manifest.id));
   const plugins = (catalog ?? []).filter((entry) => entry.eligibility.visible
@@ -256,7 +258,16 @@ export function marketplacePlugins(catalog: PluginCatalogEntry[] | null, install
       installable: false, eligibility: local.eligibility, installed: local
     });
   }
-  return plugins;
+  if (resolveLanguage(language) !== "zh-CN") return plugins;
+  // Registry manifests describe runtime tools in English. Use the official UI
+  // copy for these plugins, including when only the installed record is available.
+  const localized = new Map(officialPluginCatalog({ language, installed: [] })
+    .filter((plugin) => plugin.id === "literature-review" || plugin.id === "office")
+    .map((plugin) => [plugin.id, plugin]));
+  return plugins.map((plugin) => {
+    const presentation = localized.get(plugin.id);
+    return presentation ? { ...plugin, name: presentation.name, description: presentation.description } : plugin;
+  });
 }
 
 function pluginCategory(pluginId: string): MarketplacePlugin["category"] {
