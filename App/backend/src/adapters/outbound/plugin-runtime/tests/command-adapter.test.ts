@@ -3,6 +3,7 @@ import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:c
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import type { CapabilityEvent } from "@memmy/local-api-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -373,18 +374,29 @@ describe("CommandPluginAdapter", () => {
 
   it("reports a closed response pipe as a call failure without an uncaught stream error", async () => {
     const invoke = vi.fn(async () => ({ ok: true }));
+    let child: ChildProcessWithoutNullStreams | undefined;
     const adapter = createCommandPluginAdapter({
       hostServices: { invoke },
+      spawnFn: ((command, args, options) => {
+        child = spawn(command, args, options) as ChildProcessWithoutNullStreams;
+        const input = child.stdin;
+        // Keep the real child/protocol, but inject the broken response write at
+        // the stream boundary. Closing CRT fd 0 does not reliably close Node's
+        // inherited Windows pipe handle; callback + error-event behavior is
+        // what the Host must handle on every platform.
+        child.stdin = new Writable({ write(chunk, encoding, callback) {
+          if (JSON.parse(chunk.toString()).type === "host-service-response") {
+            callback(Object.assign(new Error("Response pipe closed"), { code: "EPIPE" }));
+          } else input.write(chunk, encoding, callback);
+        } });
+        return child;
+      }) as typeof spawn,
       buildLaunch: async () => ({
         command: process.execPath,
         args: ["-e", `
-          const fs=require('node:fs');
-          fs.readSync(0,Buffer.alloc(65536),0,65536,null);
-          fs.closeSync(0);
-          // Keep descriptor zero occupied so libuv cannot reuse it for an
-          // internal handle (some Node 24 builds assert when closing fd 0).
-          fs.openSync(require('node:os').devNull,'r');
-          console.log(JSON.stringify({type:'host-service-request',requestId:'closed-pipe',service:'model-inference',input:{}}));
+          require('node:readline').createInterface({input:process.stdin}).once('line', () => {
+            console.log(JSON.stringify({type:'host-service-request',requestId:'closed-pipe',service:'model-inference',input:{}}));
+          });
           setInterval(() => {}, 1000);
         `], cwd: root!
       })
@@ -400,6 +412,8 @@ describe("CommandPluginAdapter", () => {
         callId: "call-closed-pipe", pluginId: pluginContext.plugin.id, capabilityId: "run", conversationId: "conversation-1", input: {}
       }))).rejects.toMatchObject({ code: "EPIPE" });
       expect(invoke).toHaveBeenCalledOnce();
+      expect(child).toBeDefined();
+      expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
     } finally { await adapter.deactivate(session); }
   });
 
