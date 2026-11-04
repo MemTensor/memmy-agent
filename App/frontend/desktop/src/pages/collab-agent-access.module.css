@@ -155,13 +155,6 @@
   color: color-mix(in srgb, var(--color-text-ink, #111d1c) 80%, transparent);
 }
 
-.rowParts {
-  flex: none;
-  margin-right: 4px;
-  font-size: 11.5px;
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 40%, transparent);
-}
-
 .status {
   display: inline-flex;
   align-items: center;

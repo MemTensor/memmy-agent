@@ -199,9 +199,6 @@ export function CollabAgentAccessDialog(props: {
                     ? <img className={styles.rowLogo} src={agentSourceLogoUrl(agent.sourceId)} alt="" />
                     : <span className={styles.rowMark}>{Array.from(agent.name)[0] ?? "A"}</span>}
                   <span className={styles.rowName}>{agent.name}</span>
-                  <span className={styles.rowParts}>
-                    {collabAgentParts(agent.sourceId) === "hook" ? t("collab.access.partsHook") : t("collab.access.partsSkill")}
-                  </span>
                   {status === "done" ? (
                     <span className={`${styles.status} ${styles.statusOk}`}>
                       <Check size={13} aria-hidden="true" />{t("collab.access.rowDone")}
