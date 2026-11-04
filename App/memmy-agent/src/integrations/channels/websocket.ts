@@ -5,6 +5,7 @@ import { CollectorBusyError } from "../../tools/computer-history/core/collector-
 import { invokeNativePluginService, shutdownNativePlugins } from "../../tools/plugin-host/native-services.js";
 import { SkillsLoader } from "../../core/agent-runtime/skills.js";
 import { agentTaskActivity } from "../../core/agent-runtime/task-activity.js";
+import { PluginUpdateLease } from "../../core/agent-runtime/plugin-update-lease.js";
 import { historySummaryRuntime } from "../../providers/history-summary-runtime.js";
 import crypto from "node:crypto";
 import * as childProcess from "node:child_process";
@@ -370,7 +371,7 @@ function normalizeAgentQuestionResponse(
 
 const MAX_WEBUI_UPLOAD_BODY_BYTES = 256 * 1024 * 1024;
 // Control characters and the escaped path separators are intentional filename exclusions.
-// eslint-disable-next-line no-control-regex, no-useless-escape
+// eslint-disable-next-line no-useless-escape
 const UNSAFE_FILENAME_CHARS = /[<>:"\/\\|?*\x00-\x1F]/g;
 const IMAGE_MIME_ALLOWED = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const DOCUMENT_MIME_BY_EXTENSION: Record<string, string> = {
@@ -836,6 +837,7 @@ export class WebSocketChannel extends BaseChannel {
   private pendingCronOutbox: CronNotificationOutbox | null = null;
   private flushingPendingCron = false;
   terminalRunControl: TerminalRunControl | null = null;
+  private pluginUpdateLease: PluginUpdateLease;
   staticDistPath: string | null = null;
   runtimeModelName: RuntimeModelNameResolver = null;
   runtimeToolNames: RuntimeToolNamesResolver = null;
@@ -889,6 +891,7 @@ export class WebSocketChannel extends BaseChannel {
     this.terminalRunControl = this.sessionManager?.root
       ? new TerminalRunControl(this.sessionManager.root)
       : null;
+    this.pluginUpdateLease = new PluginUpdateLease(agentTaskActivity, this.terminalRunControl);
     this.projectStore = options.projectStore ?? config?.projectStore ?? null;
     const staticDistPath = options.staticDistPath ?? config?.staticDistPath ?? null;
     this.staticDistPath = staticDistPath ? path.resolve(String(staticDistPath)) : null;
@@ -3312,6 +3315,23 @@ export class WebSocketChannel extends BaseChannel {
       if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
       return httpJsonResponse({ busy: agentTaskActivity.busy || Boolean(this.terminalRunControl?.hasActiveRuns()) });
     }
+    if (got === "/api/runtime/plugin-update-lease") {
+      if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+      if (request.method !== "POST") return httpError(405, "Method not allowed");
+      let body: { token?: unknown; action?: unknown; ownerPid?: unknown };
+      try { body = JSON.parse(String(request.body ?? "{}")); }
+      catch { return httpError(400, "Invalid lease request"); }
+      if (!body || typeof body.token !== "string" || !/^[a-f0-9-]{36}$/.test(body.token)
+        || !["acquire", "release"].includes(String(body.action))) return httpError(400, "Invalid lease request");
+      if (body.action === "release") {
+        await this.pluginUpdateLease.release(body.token);
+        return httpJsonResponse({ released: true });
+      }
+      if (typeof body.ownerPid !== "number" || !Number.isSafeInteger(body.ownerPid) || body.ownerPid <= 0) {
+        return httpError(400, "Invalid lease owner");
+      }
+      return httpJsonResponse({ acquired: await this.pluginUpdateLease.acquire(body.token, body.ownerPid) });
+    }
     if (got === "/api/sessions") return this.handleSessionsList(request);
     if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);
@@ -3498,6 +3518,7 @@ export class WebSocketChannel extends BaseChannel {
   }
 
   override async stop(): Promise<void> {
+    await this.pluginUpdateLease.close();
     if (this.computerHistoryModelTimer) clearInterval(this.computerHistoryModelTimer);
     this.computerHistoryModelTimer = null;
     if (!this.running && !this.server) return;

@@ -60,7 +60,7 @@ vi.mock("node:child_process", async () => {
 import { run } from "../../../../src/tools/computer-history/mac/record-human-history.js";
 
 const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
-let root: string, listeners: Map<string, Function[]>;
+let root: string, listeners: Map<string, NodeJS.SignalsListener[]>;
 beforeEach(() => {
   fixture.input = new PassThrough(); fixture.commands = []; fixture.rotation = undefined; fixture.spawns = 0; fixture.stopAtRotation = false;
   root = fs.mkdtempSync(path.join(os.tmpdir(), "mac-checkpoint-ingest-"));

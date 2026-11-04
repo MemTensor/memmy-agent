@@ -187,6 +187,23 @@ export class TerminalRunControl {
     return path.join(this.root, `run-${sessionHash(sessionKey)}.target`);
   }
 
+  private pluginUpdateTarget(): string { return path.join(this.root, "plugin-update.target"); }
+
+  /** Shares admission with CLI processes before they publish a running turn. */
+  async tryBlockStarts(): Promise<(() => Promise<void>) | null> {
+    const target = this.pluginUpdateTarget();
+    ensureTarget(target);
+    const lockfilePath = terminalControlLockfilePath(target);
+    fs.mkdirSync(path.dirname(lockfilePath), { recursive: true });
+    try {
+      return await lockfile.lock(target, { lockfilePath, realpath: false,
+        stale: TURN_LOCK_STALE_MS, update: TURN_LOCK_UPDATE_MS, retries: 0 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ELOCKED") return null;
+      throw error;
+    }
+  }
+
   private async update(
     sessionKey: string,
     operation: (current: TerminalRunState | null) => TerminalRunState | null,
@@ -207,14 +224,17 @@ export class TerminalRunControl {
   }
 
   async create(sessionKey: string, turnId: string): Promise<TerminalRunState> {
-    const now = Date.now();
-    return (await this.update(sessionKey, () => ({
-      canonicalSessionKey: sessionKey,
-      turnId,
-      startedAt: now,
-      heartbeatAt: now,
-      cancelRequested: false,
-    })))!;
+    const release = await acquire(this.pluginUpdateTarget(), { stale: TURN_LOCK_STALE_MS, update: TURN_LOCK_UPDATE_MS });
+    try {
+      const now = Date.now();
+      return (await this.update(sessionKey, () => ({
+        canonicalSessionKey: sessionKey,
+        turnId,
+        startedAt: now,
+        heartbeatAt: now,
+        cancelRequested: false,
+      })))!;
+    } finally { await release(); }
   }
 
   async heartbeat(sessionKey: string, turnId: string): Promise<TerminalRunState | null> {

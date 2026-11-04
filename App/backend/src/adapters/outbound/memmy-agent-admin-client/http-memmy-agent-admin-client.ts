@@ -5,6 +5,7 @@ import {
   ChannelStatusSchema
 } from "@memmy/local-api-contracts";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import type { MemmyAgentAdminClient } from "./index.js";
 
 export const DEFAULT_MEMMY_AGENT_ADMIN_BASE_URL = "http://127.0.0.1:18980";
@@ -75,6 +76,46 @@ class HttpMemmyAgentAdminClient implements MemmyAgentAdminClient {
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout
     });
     return response.busy;
+  }
+
+  async tryAcquirePluginUpdateLease(signal?: AbortSignal): Promise<(() => Promise<void>) | null> {
+    const token = randomUUID();
+    let released = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const release = async () => {
+      if (released) return;
+      // Release must still run after shutdown/cancellation of the acquisition.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await this.request("/api/runtime/plugin-update-lease", z.object({ released: z.literal(true) }), {
+            method: "POST", body: JSON.stringify({ action: "release", token }), signal: AbortSignal.timeout(10_000)
+          });
+          released = true;
+          clearTimeout(retry);
+          return;
+        } catch (error) {
+          if (attempt >= 2) {
+            // Keep recovering a lost release after reporting the update failure.
+            retry ??= setTimeout(() => { retry = undefined; void release().catch(() => undefined); }, 1_000);
+            retry.unref();
+            throw error;
+          }
+        }
+      }
+    };
+    try {
+      const timeout = AbortSignal.timeout(10_000);
+      const result = await this.request("/api/runtime/plugin-update-lease", z.object({ acquired: z.boolean() }), {
+        method: "POST", body: JSON.stringify({ action: "acquire", token, ownerPid: process.pid }),
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout
+      });
+      if (!result.acquired) return null;
+      if (signal?.aborted) { await release(); signal.throwIfAborted(); }
+      return release;
+    } catch (error) {
+      await release();
+      throw error;
+    }
   }
 
   async getChannelDefinitions() {

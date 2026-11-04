@@ -8,6 +8,8 @@ import type {
 export interface MemmyAgentAdminClient {
   /** True for the entire Agent turn, including model thinking and interaction waits. */
   hasActiveTasks?(signal?: AbortSignal): Promise<boolean>;
+  /** Atomically reserves idle runtime task admission until the returned release is called. */
+  tryAcquirePluginUpdateLease?(signal?: AbortSignal): Promise<(() => Promise<void>) | null>;
   getChannelDefinitions(): Promise<ChannelDefinitionsResponse>;
   getChannelConnections(): Promise<ChannelConnectionsResponse>;
   /** Returns the canonical workspace currently bound to a WebUI conversation. */

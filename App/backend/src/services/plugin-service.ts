@@ -78,6 +78,7 @@ export interface CreatePluginServiceOptions {
   catalogPluginIds?: () => readonly string[];
   /** Runtime-wide barrier: plugin tools and Skills are shared across Agent turns. */
   hasActiveAgentTasks?: (signal: AbortSignal) => Promise<boolean>;
+  tryAcquireAgentUpdateLease?: (signal: AbortSignal) => Promise<(() => Promise<void>) | null>;
 }
 
 export function createPluginService(options: CreatePluginServiceOptions): PluginService {
@@ -305,9 +306,9 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       const entry = { status: "waiting" as "waiting" | "installing", version, promise: undefined as unknown as Promise<InstalledPlugin> };
       updates.set(id, entry);
       entry.promise = Promise.resolve().then(async () => {
-        try {
-          // A gap between calls is not a task boundary. Keep serving the old
-          // version until the Agent turn AND all capability iterators finish.
+        let artifact: Awaited<ReturnType<PluginArtifactManager["install"]>> | undefined;
+        let artifactHandled = false;
+        const waitUntilIdle = async () => {
           for (;;) {
             while (activeCalls.get(id)) {
               if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
@@ -320,100 +321,139 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
             if (!agentBusy && !activeCalls.get(id) && !busy(id)) break;
             await delay(1_000, undefined, { signal: shutdown.signal });
           }
-          return await serial(id, async () => {
-            entry.status = "installing";
-            const previous = required(id);
-            const release = await options.registry.resolve(id, version);
-            const manifest = PluginManifestSchema.parse(release.manifest);
-            compatible(manifest);
-            if (missingFeatures(manifest).length) throw pluginError("plugin_incompatible", `Missing Host capabilities: ${missingFeatures(manifest).join(", ")}`);
-            if (manifest.id !== id || (version && manifest.version !== version)) {
-              throw pluginError("plugin_invalid", "Registry returned a different plugin release");
+        };
+        try {
+          await waitUntilIdle();
+          const previous = required(id);
+          const release = await waitForPluginPromise(options.registry.resolve(id, version), shutdown.signal);
+          const manifest = PluginManifestSchema.parse(release.manifest);
+          compatible(manifest);
+          if (missingFeatures(manifest).length) throw pluginError("plugin_incompatible", `Missing Host capabilities: ${missingFeatures(manifest).join(", ")}`);
+          if (manifest.id !== id || (version && manifest.version !== version)) {
+            throw pluginError("plugin_invalid", "Registry returned a different plugin release");
+          }
+          if (!options.runtimeHost.supports(manifest.runtime.adapter)) {
+            throw pluginError("plugin_adapter_unsupported", `Unsupported plugin adapter: ${manifest.runtime.adapter}`);
+          }
+          assertEntitled(manifest);
+          if (previous.version === manifest.version) {
+            if (!manifestsEqual(previous.manifest, manifest)) {
+              throw pluginError("conflict", `Plugin release manifest changed: ${id}@${manifest.version}`);
             }
-            if (!options.runtimeHost.supports(manifest.runtime.adapter)) {
-              throw pluginError("plugin_adapter_unsupported", `Unsupported plugin adapter: ${manifest.runtime.adapter}`);
-            }
-            assertEntitled(manifest);
-            if (previous.version === manifest.version) {
-              if (!manifestsEqual(previous.manifest, manifest)) {
-                throw pluginError("conflict", `Plugin release manifest changed: ${id}@${manifest.version}`);
-              }
-              assertReleaseDigest(previous, release.artifact?.sha256);
-              return publicPlugin(previous);
-            }
+            assertReleaseDigest(previous, release.artifact?.sha256);
+            return publicPlugin(previous);
+          }
 
-            const artifact = await options.artifactManager.install({ ...release, manifest });
-            if (busy(id)) {
-              if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
-              throw pluginError("conflict", "Plugin became busy; update deferred");
+          // Download does not close task/tool admission or hold the lifecycle queue.
+          const downloading = options.artifactManager.install({ ...release, manifest });
+          void downloading.then(async staged => {
+            if (shutdown.signal.aborted && staged.rootPath !== options.repository.get(id)?.rootPath) {
+              await options.artifactManager.remove(staged);
             }
-            const approvedPermissions = previous.approvedPermissions.filter((approved) =>
-              manifest.permissions.some((declared) => permissionKey(approved) === permissionKey(declared))
-            );
-            const pendingApproval = !samePermissions(approvedPermissions, manifest.permissions);
-            const draft: PluginRecord = {
-              ...previous,
-              nativeExecutionAllowed: release.nativeExecutionAllowed, registryOrigin: release.registryOrigin,
-              version: manifest.version,
-              manifest,
-              approvedPermissions,
-              state: pendingApproval ? "pending_approval" : "disabled",
-              ...artifact
-            };
+          }).catch(() => undefined);
+          artifact = await waitForPluginPromise(downloading, shutdown.signal);
+          const stagedArtifact = artifact;
+          for (;;) {
+            await waitUntilIdle();
+            if (options.hasActiveAgentTasks && !options.tryAcquireAgentUpdateLease) {
+              throw pluginError("plugin_unavailable", "Agent update coordination is unavailable; update deferred");
+            }
+            const releaseLease = options.tryAcquireAgentUpdateLease
+              ? await options.tryAcquireAgentUpdateLease(shutdown.signal) : async () => {};
+            if (!releaseLease) {
+              await delay(1_000, undefined, { signal: shutdown.signal });
+              continue;
+            }
             try {
-              validateConfig(draft, draft.config);
-              const secrets = pendingApproval ? {} : readSecrets(draft, options.secretStore);
-              if (previous.state === "active") {
-                options.repository.setState(id, "disabling");
-                await deactivateContributions(id);
-              }
-              let updated = options.repository.save({
-                manifest,
-                state: draft.state,
-                nativeExecutionAllowed: release.nativeExecutionAllowed, registryOrigin: release.registryOrigin,
-                ...artifact
-              });
-              updated = options.repository.setApprovedPermissions(id, approvedPermissions);
-              if (previous.state === "active" && !pendingApproval) {
-                await activateContributions(updated, secrets);
-                updated = options.repository.setState(id, "active");
-              }
-              if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(previous);
-              return publicPlugin(updated);
-            } catch (error) {
-              await deactivateContributions(id).catch(() => undefined);
-              let restored = options.repository.save({
-                manifest: previous.manifest,
-                state: previous.state === "active" ? "disabled" : previous.state,
-                artifactHash: previous.artifactHash,
-                rootPath: previous.rootPath,
-                nativeExecutionAllowed: previous.nativeExecutionAllowed, registryOrigin: previous.registryOrigin
-              });
-              restored = options.repository.setApprovedPermissions(id, previous.approvedPermissions);
-              restored = options.repository.setConfig(id, previous.config);
-              let rollbackError: unknown;
-              if (previous.state === "active") {
-                try {
-                  await activateContributions(restored, readSecrets(restored, options.secretStore));
-                  options.repository.setState(id, "active");
-                } catch (restoreError) {
-                  rollbackError = restoreError;
-                  options.repository.setState(id, "failed", `Update rollback failed: ${errorMessage(restoreError)}`);
-                }
-              }
-              if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
-              if (rollbackError) {
-                throw pluginError(
-                  "plugin_activation_failed",
-                  `Plugin update failed (${errorMessage(error)}) and rollback failed (${errorMessage(rollbackError)})`
+              const result = await serial(id, async () => {
+                if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
+                if (activeCalls.get(id) || busy(id)) return null;
+                // Re-read after preparation/waiting: disable/configure may have completed.
+                const previous = required(id);
+                assertEntitled(manifest);
+                entry.status = "installing";
+                const artifact = stagedArtifact;
+                artifactHandled = true;
+                const approvedPermissions = previous.approvedPermissions.filter((approved) =>
+                  manifest.permissions.some((declared) => permissionKey(approved) === permissionKey(declared))
                 );
-              }
-              throw error;
+                const pendingApproval = !samePermissions(approvedPermissions, manifest.permissions);
+                const draft: PluginRecord = {
+                  ...previous,
+                  nativeExecutionAllowed: release.nativeExecutionAllowed, registryOrigin: release.registryOrigin,
+                  version: manifest.version,
+                  manifest,
+                  approvedPermissions,
+                  state: pendingApproval ? "pending_approval" : "disabled",
+                  ...artifact
+                };
+                try {
+                  validateConfig(draft, draft.config);
+                  const secrets = pendingApproval ? {} : readSecrets(draft, options.secretStore);
+                  if (previous.state === "active") {
+                    options.repository.setState(id, "disabling");
+                    await deactivateContributions(id);
+                  }
+                  let updated = options.repository.save({
+                    manifest,
+                    state: draft.state,
+                    nativeExecutionAllowed: release.nativeExecutionAllowed, registryOrigin: release.registryOrigin,
+                    ...artifact
+                  });
+                  updated = options.repository.setApprovedPermissions(id, approvedPermissions);
+                  if (previous.state === "active" && !pendingApproval) {
+                    await activateContributions(updated, secrets);
+                    updated = options.repository.setState(id, "active");
+                  }
+                  if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(previous);
+                  return publicPlugin(updated);
+                } catch (error) {
+                  await deactivateContributions(id).catch(() => undefined);
+                  let restored = options.repository.save({
+                    manifest: previous.manifest,
+                    state: previous.state === "active" ? "disabled" : previous.state,
+                    artifactHash: previous.artifactHash,
+                    rootPath: previous.rootPath,
+                    nativeExecutionAllowed: previous.nativeExecutionAllowed, registryOrigin: previous.registryOrigin
+                  });
+                  restored = options.repository.setApprovedPermissions(id, previous.approvedPermissions);
+                  restored = options.repository.setConfig(id, previous.config);
+                  let rollbackError: unknown;
+                  if (previous.state === "active") {
+                    try {
+                      await activateContributions(restored, readSecrets(restored, options.secretStore));
+                      options.repository.setState(id, "active");
+                    } catch (restoreError) {
+                      rollbackError = restoreError;
+                      options.repository.setState(id, "failed", `Update rollback failed: ${errorMessage(restoreError)}`);
+                    }
+                  }
+                  if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
+                  if (rollbackError) {
+                    throw pluginError(
+                      "plugin_activation_failed",
+                      `Plugin update failed (${errorMessage(error)}) and rollback failed (${errorMessage(rollbackError)})`
+                    );
+                  }
+                  throw error;
+                }
+              });
+              if (result) return result;
+            } finally {
+              // Covers successful activation, rollback, shutdown, and late resource races.
+              await releaseLease();
             }
-          });
+            await delay(1_000, undefined, { signal: shutdown.signal });
+          }
         } finally {
-          updates.delete(id);
-          idleWaiters.delete(id);
+          try {
+            if (artifact && !artifactHandled && artifact.rootPath !== options.repository.get(id)?.rootPath) {
+              await options.artifactManager.remove(artifact);
+            }
+          } finally {
+            updates.delete(id);
+            idleWaiters.delete(id);
+          }
         }
       });
       return entry.promise;
@@ -615,6 +655,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       const restoring = [...recoveries.values()];
       for (const id of recoveries.keys()) cancelRecovery(id);
       await Promise.allSettled(restoring.map(job => job.promise));
+      await Promise.allSettled([...updates.values()].map(job => job.promise));
       options.onSkillContentInvalidated?.();
       await Promise.allSettled(options.repository.list()
         .filter((plugin) => plugin.state === "active" || plugin.state === "enabling")

@@ -79,6 +79,21 @@ describe("WebSocket HTTP route helpers", () => {
     expect(await activity()).toEqual({ busy: true });
     await channel.terminalRunControl!.remove("cli:external", "external-turn");
     expect(await activity()).toEqual({ busy: false });
+    const token = "12345678-1234-1234-1234-123456789abc";
+    const leaseUrl = `${base}/api/runtime/plugin-update-lease`;
+    expect((await fetch(leaseUrl, { method: "POST" })).status).toBe(401);
+    expect((await fetch(leaseUrl, { headers })).status).toBe(405);
+    expect((await fetch(leaseUrl, { headers, method: "POST", body: "{}" })).status).toBe(400);
+    const lease = async (action: string) => (await fetch(leaseUrl, {
+      headers, method: "POST", body: JSON.stringify({ token, action, ownerPid: process.pid })
+    })).json();
+    expect(await lease("acquire")).toEqual({ acquired: true });
+    const run = vi.fn(async () => {}), waiting = agentTaskActivity.run(run);
+    try {
+      expect(await lease("acquire")).toEqual({ acquired: true });
+      expect(run).not.toHaveBeenCalled();
+    } finally { expect(await lease("release")).toEqual({ released: true }); await waiting; }
+    expect(run).toHaveBeenCalledOnce();
   });
 
   function tmpRoot(prefix = "memmy-ws-http-"): string {

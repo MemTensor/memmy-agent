@@ -263,6 +263,10 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       if (!memmyAgentAdminClient.hasActiveTasks) throw new Error("Agent task activity is unavailable; update deferred until the runtime is updated and retry");
       return memmyAgentAdminClient.hasActiveTasks(signal);
     },
+    tryAcquireAgentUpdateLease: async signal => {
+      if (!memmyAgentAdminClient.tryAcquirePluginUpdateLease) throw new Error("Agent update coordination is unavailable; update deferred");
+      return memmyAgentAdminClient.tryAcquirePluginUpdateLease(signal);
+    },
     secretStore: options.appStateStore.secretStore,
     registry: options.pluginRegistry ?? unavailablePluginRegistry,
     runtimeHost: pluginRuntimeHost,

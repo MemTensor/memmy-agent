@@ -55,7 +55,10 @@ export function recorderCheckpoints(options: {
       timer.unref(); pending.set(command.id, { timer, through: command.through ?? new Date().toISOString(), finishing: false,
         ...(rotation ? { rotation } : {}) });
       if (!options.requestNative) { void finish(command.id, false); return; }
-      try { range ? options.requestNative(command.id, range) : options.requestNative(command.id); } catch { void finish(command.id, false); }
+      try {
+        if (range) options.requestNative(command.id, range);
+        else options.requestNative(command.id);
+      } catch { void finish(command.id, false); }
     } catch { /* Recorder stdin carries controls, never executable instructions. */ }
   });
   return {

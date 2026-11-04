@@ -18,7 +18,11 @@ export async function launchTeachingBrowser(browser: "chrome" | "edge", platform
   await new Promise<void>((resolve, reject) => {
     const child = spawn(executable, args, { stdio: "ignore", windowsHide: false });
     const timer = setTimeout(() => reject(new Error("browser_capture_browser_launch_timeout")), 8_000);
-    const done = (error?: Error) => { clearTimeout(timer); error ? reject(error) : resolve(); };
+    const done = (error?: Error) => {
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
     child.once("error", () => done(new Error("browser_capture_browser_launch_failed")));
     if (wait) child.once("exit", code => done(code === 0 ? undefined : new Error("browser_capture_browser_launch_failed")));
     else child.once("spawn", () => { child.unref(); done(); });

@@ -1,0 +1,48 @@
+name: Teach Host regression
+
+on:
+  pull_request:
+    paths:
+      - "App/backend/**"
+      - "App/memmy-agent/**"
+      - "App/shell/desktop/extensions/**"
+      - "App/frontend/desktop/**"
+      - "scripts/internal/shared/**"
+      - "tests/**"
+      - "package*.json"
+      - ".github/workflows/teach-host-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            App/memmy-agent/package-lock.json
+      - name: Install dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm ci --ignore-scripts --prefix App/memmy-agent
+          npm rebuild better-sqlite3 esbuild
+          npm rebuild better-sqlite3 esbuild --prefix App/memmy-agent
+      - name: Validate the checked-out Host
+        run: node scripts/internal/shared/validate-teach-host.mjs --report-dir "$RUNNER_TEMP/teach-host"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: teach-host-validation
+          path: ${{ runner.temp }}/teach-host/**
+          if-no-files-found: warn
+          retention-days: 14

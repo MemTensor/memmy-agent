@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createPluginUpdateService } from "../plugin-update-service.js";
+import { AgentTaskActivity } from "../../../../memmy-agent/src/core/agent-runtime/task-activity.js";
 import { reconcileEntitledPlugins } from "../plugin-entitlement-reconcile-service.js";
 import { createInMemoryPluginRegistry, type PluginRelease } from "../../adapters/outbound/plugin-registry/index.js";
 import { createAppStateStore, type AppStateStore } from "../../infrastructure/app-state-store/index.js";
@@ -58,7 +60,8 @@ function createContext(
   lifecycleOrAuthenticated: Partial<CreatePluginServiceOptions> | (() => boolean) = {},
   catalogPluginIds?: () => readonly string[],
   isEntitlementGranted?: (entitlement: string) => boolean,
-  hasActiveAgentTasks?: (signal: AbortSignal) => Promise<boolean>
+  hasActiveAgentTasks?: (signal: AbortSignal) => Promise<boolean>,
+  tryAcquireAgentUpdateLease?: CreatePluginServiceOptions["tryAcquireAgentUpdateLease"]
 ) {
   root = mkdtempSync(join(tmpdir(), "memmy-plugin-service-"));
   store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
@@ -101,7 +104,10 @@ function createContext(
       ...(typeof lifecycleOrAuthenticated === "object" ? lifecycleOrAuthenticated : { isAuthenticated: lifecycleOrAuthenticated }),
       catalogPluginIds,
       isEntitlementGranted,
-      hasActiveAgentTasks
+      hasActiveAgentTasks,
+      tryAcquireAgentUpdateLease: tryAcquireAgentUpdateLease ?? (hasActiveAgentTasks
+        ? async signal => await hasActiveAgentTasks(signal) ? null : async () => {}
+        : undefined)
     })
   };
 }
@@ -531,7 +537,7 @@ describe("PluginService", () => {
     expect(service.get(release.manifest.id).update).toBeUndefined();
   });
 
-  it("blocks new calls during installation and preserves the old active version on download failure", async () => {
+  it("keeps serving the old version during download and preserves it on download failure", async () => {
     const next = { manifest: { ...release.manifest, version: "2.0.0" } };
     const { service, artifactManager } = createContext([release, next]);
     await service.install(release.manifest.id, "1.0.0");
@@ -543,13 +549,98 @@ describe("PluginService", () => {
     const update = service.update(release.manifest.id, "2.0.0");
     const failed = expect(update).rejects.toThrow("download failed");
     await vi.waitFor(() => expect(rejectDownload).toBeDefined());
-    await expect(service.invoke({
+    const call = service.invoke({
       callId: "new", pluginId: release.manifest.id, capabilityId: "run", conversationId: "chat", input: {}
-    })[Symbol.asyncIterator]().next()).rejects.toThrow(/being installed/);
+    })[Symbol.asyncIterator]();
+    await expect(call.next()).resolves.toMatchObject({ value: { type: "result" } });
+    await call.return?.();
     rejectDownload(new Error("download failed"));
     await failed;
     expect(service.get(release.manifest.id)).toMatchObject({ version: "1.0.0", state: "active" });
     expect(service.get(release.manifest.id).update).toBeUndefined();
+  });
+
+  it("defers automatic activation when a whole Agent task starts during download", async () => {
+    let agentBusy = false;
+    const activity = vi.fn(async () => agentBusy);
+    const next = { manifest: { ...release.manifest, version: "2.0.0", rules: { autoUpdate: true } } };
+    const initial = { ...release, manifest: { ...release.manifest, rules: { autoUpdate: true } } };
+    const { service, artifactManager, runtimeHost } = createContext([initial, next], undefined, undefined, undefined, undefined, activity);
+    await service.install(release.manifest.id, "1.0.0");
+    service.configure(release.manifest.id, { config: { database: "crossref" }, secrets: { "api-key": "secret" } });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    let finishDownload!: () => void;
+    const downloaded = new Promise<void>(resolve => { finishDownload = resolve; });
+    vi.mocked(artifactManager.install).mockImplementationOnce(async () => {
+      await downloaded; return { artifactHash: null, rootPath: null };
+    });
+    const updates = createPluginUpdateService(service);
+    const updating = updates.check();
+    try {
+      await vi.waitFor(() => expect(artifactManager.install).toHaveBeenCalledTimes(2));
+      agentBusy = true;
+      finishDownload();
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(service.get(release.manifest.id)).toMatchObject({ version: "1.0.0", state: "active" });
+      expect(runtimeHost.deactivate).not.toHaveBeenCalled();
+    } finally {
+      agentBusy = false; finishDownload(); await updating; await updates.close();
+    }
+    expect(service.get(release.manifest.id).version).toBe("2.0.0");
+    expect(runtimeHost.deactivate).toHaveBeenCalledTimes(1);
+    await service.shutdown();
+  });
+
+  it.each([false, true])("holds task admission through activation and rollback (fails=%s)", async fails => {
+    const activity = new AgentTaskActivity();
+    const leaseReleased = vi.fn();
+    const next = { manifest: { ...release.manifest, version: "2.0.0" } };
+    const { service, runtimeHost } = createContext([release, next], undefined, undefined, undefined, undefined,
+      async () => activity.busy, async () => {
+        const unblock = activity.tryBlockTasks();
+        return unblock ? async () => { unblock(); leaseReleased(); } : null;
+      });
+    await service.install(release.manifest.id, "1.0.0");
+    service.configure(release.manifest.id, { config: { database: "crossref" }, secrets: { "api-key": "secret" } });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    let activate!: () => void;
+    const activating = new Promise<void>(resolve => { activate = resolve; });
+    vi.mocked(runtimeHost.activate).mockImplementationOnce(async () => {
+      await activating;
+      if (fails) throw new Error("activation failed");
+    });
+    const update = service.update(release.manifest.id, "2.0.0");
+    const completed = fails ? expect(update).rejects.toThrow("activation failed") : expect(update).resolves.toMatchObject({ version: "2.0.0" });
+    await vi.waitFor(() => expect(runtimeHost.activate).toHaveBeenCalledTimes(2));
+    const run = vi.fn(async () => service.get(release.manifest.id).version);
+    const task = activity.run(run);
+    expect(run).not.toHaveBeenCalled();
+    activate(); await completed;
+    expect(await task).toBe(fails ? "1.0.0" : "2.0.0");
+    expect(leaseReleased).toHaveBeenCalledOnce();
+    await service.shutdown();
+  });
+
+  it("cancels a downloaded update waiting on a new task without acquiring admission", async () => {
+    let busy = false;
+    const lease = vi.fn(async () => async () => {});
+    const next = { manifest: { ...release.manifest, version: "2.0.0" } };
+    const { service, artifactManager, runtimeHost } = createContext([release, next], undefined, undefined, undefined, undefined,
+      async () => busy, lease);
+    await service.install(release.manifest.id, "1.0.0");
+    vi.mocked(artifactManager.install).mockImplementationOnce(async () => {
+      busy = true; return { artifactHash: "next", rootPath: "/test/staged-update" };
+    });
+    const update = service.update(release.manifest.id, "2.0.0");
+    const rejected = expect(update).rejects.toThrow();
+    await vi.waitFor(() => expect(artifactManager.install).toHaveBeenCalledTimes(2));
+    await service.shutdown(); await rejected;
+    expect(lease).not.toHaveBeenCalled();
+    expect(runtimeHost.activate).not.toHaveBeenCalled();
+    expect(artifactManager.remove).toHaveBeenCalledWith(expect.objectContaining({ rootPath: "/test/staged-update" }));
+    expect(service.get(release.manifest.id).version).toBe("1.0.0");
   });
 
   it.each(["return", "error", "shutdown"] as const)("releases a queued update when a call ends via %s", async (ending) => {

@@ -17,6 +17,52 @@ afterEach(async () => {
 });
 
 describe("http memmy-agent admin client", () => {
+  it("uses one authenticated reservation token and releases after the caller aborts", async () => {
+    const requests: Array<{ action: string; token: string }> = [];
+    const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/webui/bootstrap") return Response.json({ token: "boot-token" });
+      expect(init?.headers).toMatchObject({ authorization: "Bearer boot-token" });
+      expect(init?.method).toBe("POST");
+      expect(init?.signal?.aborted).toBe(false);
+      const body = JSON.parse(String(init?.body)); requests.push(body);
+      return Response.json(body.action === "acquire" ? { acquired: true } : { released: true });
+    });
+    const client = createHttpMemmyAgentAdminClient({ fetchFn: fetchFn as typeof fetch });
+    const controller = new AbortController();
+    const release = await client.tryAcquirePluginUpdateLease!(controller.signal);
+    expect(release).not.toBeNull();
+    controller.abort(); await release!();
+    expect(requests.map(request => request.action)).toEqual(["acquire", "release"]);
+    expect(requests[0]!.token).toBe(requests[1]!.token);
+  });
+
+  it("cleans up an uncertain acquisition and retries a failed release", async () => {
+    const actions: string[] = [];
+    let releases = 0;
+    const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/webui/bootstrap") return Response.json({ token: "boot-token" });
+      const { action } = JSON.parse(String(init?.body)); actions.push(action);
+      if (action === "acquire") throw new Error("response lost");
+      if (++releases === 1) throw new Error("temporary disconnect");
+      return Response.json({ released: true });
+    });
+    const client = createHttpMemmyAgentAdminClient({ fetchFn: fetchFn as typeof fetch });
+    await expect(client.tryAcquirePluginUpdateLease!()).rejects.toThrow("response lost");
+    expect(actions).toEqual(["acquire", "release", "release"]);
+  });
+
+  it("does not report an acquired lease for a busy or incompatible runtime", async () => {
+    let result: unknown = { acquired: false };
+    const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/webui/bootstrap") return Response.json({ token: "boot-token" });
+      return Response.json(JSON.parse(String(init?.body)).action === "release" ? { released: true } : result);
+    });
+    const client = createHttpMemmyAgentAdminClient({ fetchFn: fetchFn as typeof fetch });
+    expect(await client.tryAcquirePluginUpdateLease!()).toBeNull();
+    result = {};
+    await expect(client.tryAcquirePluginUpdateLease!()).rejects.toThrow();
+  });
+
   it("reads authenticated task activity with a timeout and rejects malformed status", async () => {
     const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const path = new URL(String(input)).pathname;
