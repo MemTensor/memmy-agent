@@ -1,14 +1,31 @@
 import { dirname } from "node:path";
 import type { MemoryRow } from "../types.js";
+import { normalizeAgentIdKey } from "../utils/agent-source-id.js";
 
 /**
  * Skills imported from other Agents' skill directories are read-only Skill
- * records. These helpers read the import-specific fields kept in
- * `properties.internal_info`.
+ * records. Source installation identity is stored separately from their
+ * lifecycle metadata in `properties.internal_info`.
  */
 
 /** Records written by the source reconcile carry this version in `import_state_version`. */
 export const IMPORTED_SKILL_STATE_VERSION = 1;
+
+export interface AgentSkillInstallation {
+  sourceSkillId: string;
+  normalizedName: string;
+}
+
+/** Source inventory contains identities only, independently of memory deletion. */
+export interface AgentSkillInstallations {
+  version: 1;
+  skills: AgentSkillInstallation[];
+  registrations: AgentSkillInstallation[];
+}
+
+export function agentSkillInstallationsKey(sourceAgentId: string): string {
+  return `agent-skill-installations:${normalizeAgentIdKey(sourceAgentId)}`;
+}
 
 /**
  * Records whose summary and retrieval text come from the frontmatter

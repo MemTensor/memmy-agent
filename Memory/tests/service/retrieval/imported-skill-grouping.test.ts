@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSkillReconcileSkill } from "../../../src/service/import/agent-skill-library.js";
+import { IndexedCandidatePool } from "../../../src/service/retrieval/indexed-candidate-pool.js";
 import { compileRetrievalQuery } from "../../../src/algorithm/plugin-algorithms.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { createCapturingEmbedder, createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
@@ -181,4 +182,40 @@ describe("imported skill grouping in recall", () => {
 
     expect(await recallSkillIds(service, "claude_code", "sqlite migration service deploy")).toEqual([available]);
   });
+
+  it("selects the latest same-named copy within requested tags", async () => {
+    const { service } = createTestService();
+    const [older] = importSkills(service, "codex", [skill("debugging", "Diagnose failing sqlite migrations.", "2026-01-01T00:00:00Z")]);
+    const [newer] = importSkills(service, "hermes", [skill("debugging", "Diagnose failing sqlite migrations with logs.", "2026-06-01T00:00:00Z")]);
+    await runWorkerRounds(service, 2, 50);
+    const session = service.openSession({ namespace: { source: "claude_code", profileId: "default", userId } });
+    const filtered = await service.search({ sessionId: session.sessionId, query: "failing sqlite migrations", layers: ["Skill"], tags: [" CODEX "], limit: 5 });
+    expect(filtered.hits.map(hit => hit.id)).toContain(older);
+    expect(filtered.hits.map(hit => hit.id)).not.toContain(newer);
+    expect(await recallSkillIds(service, "claude_code", "failing sqlite migrations")).toContain(newer);
+  });
+
+  it.each(["info", "properties"] as const)("finds the newest tag-eligible copy outside initial candidates using %s tags", async tagLocation => {
+    const { service, db } = createTestService();
+    const [older] = importSkills(service, "codex", [skill("release-check", "Verify the sqlite migration release evidence.", "2026-01-01T00:00:00Z")]);
+    const [eligible] = importSkills(service, "hermes", [skill("release-check", "Checklist before shipping.", "2026-04-01T00:00:00Z")]);
+    const [unqualified] = importSkills(service, "cursor", [skill("release-check", "Checklist for a deployment.", "2026-06-01T00:00:00Z")]);
+    await runWorkerRounds(service, 2, 50);
+    const repos = new Repositories(db.db);
+    for (const id of [older!, eligible!]) {
+      const row = repos.memories.get(id)!;
+      repos.memories.updateMaintenance({ ...row, [tagLocation]: { ...row[tagLocation], tags: ["release"] } });
+    }
+    const query = compileRetrievalQuery("sqlite migration evidence");
+    const filter = { memoryLayer: "Skill" as const, status: ["activated" as const, "resolving" as const], tags: ["release"] };
+    const initial = [...repos.memories.searchFtsIds(query.ftsMatch, filter, 20), ...repos.memories.searchPatternIds(query.patternTerms, filter, 20)].map(hit => hit.id);
+    expect(initial).toContain(older);
+    expect(initial).not.toContain(eligible);
+    const pool = new IndexedCandidatePool({ repos, memoryHasImportPipeline: () => false });
+    const result = await pool.indexedRetrievalCandidatePool({ userId, compiledQuery: query, layers: ["Skill"], tags: ["release"], currentAgentId: "claude_code",
+      config: { tier1TopK: 5, tier2TopK: 5, tier3TopK: 5, candidatePoolFactor: 4, keywordTopK: 20, tagFilter: "off" } });
+    expect(result.memories.map(memory => memory.id)).toEqual([eligible]);
+    expect(result.memories.map(memory => memory.id)).not.toContain(unqualified);
+  });
+
 });

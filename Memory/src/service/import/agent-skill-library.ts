@@ -3,6 +3,8 @@ import { retrievalDocumentIsCurrent } from "../../algorithm/plugin-algorithms.js
 import {
   IMPORTED_SKILL_RETRIEVAL_VERSION,
   IMPORTED_SKILL_STATE_VERSION,
+  agentSkillInstallationsKey,
+  type AgentSkillInstallations,
   importedSkillArchiveReason,
   isIdentityOnlyReason,
   normalizeSkillName,
@@ -112,6 +114,7 @@ export class AgentSkillLibrary {
       serverTime: at
     };
     this.deps.repos.transaction(() => {
+      this.recordInstallations(request, at);
       const groups = groupBySourceIdentity(this.deps.repos.memories.listImportedSkillsForSource(sourceAgentId));
       const scannedIds = new Set<string>();
       for (const skill of request.skills) {
@@ -132,7 +135,7 @@ export class AgentSkillLibrary {
         if (scannedIds.has(sourceSkillId) || isRegistrationGroup(versions)) continue;
         for (const version of versions) {
           if (isDeleted(version)) continue;
-          const reason = importedSkillArchiveReason(version);
+          const reason = archiveReasonForReconcile(version);
           if (reason === "user") {
             // The user's archive stays, but what happened at the source is
             // remembered so undoing the archive does not share it again.
@@ -158,6 +161,31 @@ export class AgentSkillLibrary {
       }
     });
     return result;
+  }
+
+  /** Scan observations remain useful even when memory import is blocked or fails. */
+  private recordInstallations(request: AgentSkillReconcileRequest, at: string): void {
+    const key = agentSkillInstallationsKey(request.sourceAgentId);
+    const stored = this.deps.repos.runtime.getKv(key)?.value as AgentSkillInstallations | undefined;
+    const previous = stored?.version === 1
+      ? stored
+      : this.deps.repos.memories.legacyInstalledSkillsForAgent(request.sourceAgentId);
+    const skills = new Map(previous.skills.map(entry => [entry.sourceSkillId, entry.normalizedName] as const));
+    const registrations = new Map(previous.registrations.map(entry => [entry.sourceSkillId, entry.normalizedName] as const));
+    if (request.complete) skills.clear();
+    for (const skill of request.skills) skills.set(skill.sourceSkillId, normalizeSkillName(skill.title));
+    if (request.registrations) {
+      if (request.registrationsComplete) registrations.clear();
+      for (const registration of request.registrations) {
+        registrations.set(registration.sourceSkillId, normalizeSkillName(registration.name));
+      }
+    }
+    const inventory: AgentSkillInstallations = {
+      version: 1,
+      skills: [...skills].map(([sourceSkillId, normalizedName]) => ({ sourceSkillId, normalizedName })),
+      registrations: [...registrations].map(([sourceSkillId, normalizedName]) => ({ sourceSkillId, normalizedName }))
+    };
+    this.deps.repos.runtime.setKv(key, inventory, at);
   }
 
   /**
@@ -656,8 +684,19 @@ export class AgentSkillLibrary {
   }
 }
 
+/** Reconciliation can run before startup has marked legacy user archives. */
+function archiveReasonForReconcile(memory: MemoryRow): ImportedSkillArchiveReason | undefined {
+  const reason = importedSkillArchiveReason(memory);
+  if (reason !== undefined || memory.status !== "archived") return reason;
+  const internal = memory.properties.internal_info;
+  if (Number(internal.import_state_version ?? 0) < IMPORTED_SKILL_STATE_VERSION) {
+    return typeof internal.superseded_by_skill_id === "string" ? "superseded" : "user";
+  }
+  return undefined;
+}
+
 function desiredState(skill: AgentSkillReconcileSkill, versions: readonly MemoryRow[], disconnected: boolean): DesiredState {
-  if (versions.some((version) => !isDeleted(version) && importedSkillArchiveReason(version) === "user")) {
+  if (versions.some((version) => !isDeleted(version) && archiveReasonForReconcile(version) === "user")) {
     const sourceState = disconnected ? "disconnected"
       : skill.disableModelInvocation === true || skill.allowImplicitInvocation === false ? "invocation_policy" : "present";
     return { status: "archived", reason: "user", sourceState };

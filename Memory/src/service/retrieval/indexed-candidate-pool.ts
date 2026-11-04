@@ -91,22 +91,27 @@ export class IndexedCandidatePool {
     channelScoresByMemory: ReadonlyMap<string, SeededChannelScores>;
   }> {
     const queryVector = input.queryVector && input.queryVector.length > 0 ? input.queryVector : undefined;
+    const commonFilter: MemoryFilter = {
+      status: ["activated", "resolving"],
+      ...(input.tags?.length ? { tags: input.tags } : {})
+    };
+    const skillFilter: MemoryFilter = {
+      ...commonFilter,
+      memoryLayer: "Skill",
+      ...(input.currentAgentId ? { excludedImportedSkillSourceAgentId: input.currentAgentId } : {})
+    };
     const collectRoutes = (layers: readonly MemoryLayer[], extraPool: number): Array<Promise<MemorySearchIdHit[]>> => {
       const routeTasks: Array<Promise<MemorySearchIdHit[]>> = [];
       const addRoute = (run: () => MemorySearchIdHit[]): void => {
         routeTasks.push(Promise.resolve().then(run));
       };
       for (const layer of layers) {
-        const filter: MemoryFilter = {
+        const filter: MemoryFilter = layer === "Skill" ? skillFilter : {
+          ...commonFilter,
           memoryLayer: layer,
-          status: ["activated", "resolving"],
           ...(layer === "L1" && input.projectId !== undefined
             ? { workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
-            : {}),
-          ...(input.tags?.length ? { tags: input.tags } : {}),
-          // The current Agent's own imported skills are left out in the query,
-          // so they never take a candidate slot.
-          ...(layer === "Skill" && input.currentAgentId ? { excludedImportedSkillSourceAgentId: input.currentAgentId } : {})
+            : {})
         };
         const vectorPool = this.retrievalVectorPoolSize(layer, input.config) + extraPool;
         const keywordPool = this.retrievalKeywordPoolSize(layer, input.config) + extraPool;
@@ -163,7 +168,7 @@ export class IndexedCandidatePool {
     };
 
     const takenNames = new Set<string>();
-    const grouped = this.groupImportedSkillsByName(await loadHits(routeTasks), channelScoresByMemory, input.currentAgentId, takenNames);
+    const grouped = this.groupImportedSkillsByName(await loadHits(routeTasks), channelScoresByMemory, skillFilter, takenNames);
     let readyMemories = grouped.memories;
     // Same-name copies dropped by grouping would otherwise leave the Skill
     // layer short; widen the Skill queries by the number dropped so far until
@@ -175,7 +180,7 @@ export class IndexedCandidatePool {
       const refill = this.groupImportedSkillsByName(
         await loadHits(collectRoutes(["Skill"], removed)),
         channelScoresByMemory,
-        input.currentAgentId,
+        skillFilter,
         takenNames
       );
       readyMemories = [...readyMemories, ...refill.memories];
@@ -201,15 +206,16 @@ export class IndexedCandidatePool {
   private groupImportedSkillsByName(
     memories: readonly MemoryRow[],
     channelScoresByMemory: Map<string, SeededChannelScores>,
-    currentAgentId: string | undefined,
+    filter: MemoryFilter,
     takenNames: Set<string>
   ): { memories: MemoryRow[]; removed: number } {
+    const currentAgentId = filter.excludedImportedSkillSourceAgentId;
     const named = memories.filter((memory) => isImportedSkill(memory) && importedSkillName(memory));
     if (named.length === 0) return { memories: [...memories], removed: 0 };
-    const installed = currentAgentId ? this.deps.repos.memories.listInstalledSkillNamesForAgent(currentAgentId) : new Set<string>();
+    const installed = currentAgentId ? this.deps.repos.listInstalledSkillNamesForAgent(currentAgentId) : new Set<string>();
     const names = dedupeStrings(named.map((memory) => importedSkillName(memory)!))
       .filter((name) => !installed.has(name) && !takenNames.has(name));
-    const latest = this.deps.repos.memories.latestImportedSkillsByName(names, currentAgentId);
+    const latest = this.deps.repos.memories.latestImportedSkillsByName(names, filter);
     const groupScores = new Map<string, SeededChannelScores>();
     for (const memory of named) {
       const name = importedSkillName(memory)!;
@@ -232,14 +238,15 @@ export class IndexedCandidatePool {
         removed += 1;
         continue;
       }
-      takenNames.add(name);
       const chosenId = latest.get(name) ?? memory.id;
-      const chosen = chosenId === memory.id
-        ? memory
-        : memories.find((candidate) => candidate.id === chosenId) ?? this.deps.repos.memories.get(chosenId);
-      const usable = chosen && this.isMemoryReadyForRetrieval(chosen) && this.isSkillVisibleToAgent(chosen, currentAgentId)
-        ? chosen
-        : memory;
+      const eligible = this.deps.repos.memories.list({ ...filter, ids: [chosenId, memory.id] }, 2)
+        .filter(candidate => this.isMemoryReadyForRetrieval(candidate) && this.isSkillVisibleToAgent(candidate, currentAgentId));
+      const usable = eligible.find(candidate => candidate.id === chosenId) ?? eligible[0];
+      if (!usable) {
+        removed += 1;
+        continue;
+      }
+      takenNames.add(name);
       channelScoresByMemory.set(usable.id, groupScores.get(name) ?? channelScoresByMemory.get(usable.id) ?? {});
       kept.push(usable);
     }

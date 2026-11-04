@@ -1,4 +1,11 @@
-import { isIdentityOnlyImportedSkill } from "./imported-skill.js";
+import {
+  agentSkillInstallationsKey,
+  IMPORTED_SKILL_STATE_VERSION,
+  isIdentityOnlyImportedSkill,
+  normalizeSkillName,
+  type AgentSkillInstallation,
+  type AgentSkillInstallations
+} from "./imported-skill.js";
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
@@ -824,50 +831,62 @@ export class MemoryRepository {
     return rows.map((row) => this.hydrate(memoryFromSql(row)));
   }
 
-  /**
-   * Normalized names of the skills an Agent already has installed: its own
-   * imported skills that are current, archived by the user (while the source
-   * file is still there), user-invoked only or disconnected, plus its plugin
-   * registrations.
-   */
-  listInstalledSkillNamesForAgent(sourceAgentId: string): Set<string> {
-    const normalized = sourceAgentId.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  /** Seeds each installed source identity from its current version before the first scan. */
+  legacyInstalledSkillsForAgent(sourceAgentId: string): AgentSkillInstallations {
+    const normalized = normalizeAgentIdKey(sourceAgentId);
     const rows = this.db.prepare(
-      `SELECT DISTINCT json_extract(properties_json, '$.internal_info.normalized_name') AS name
+      `SELECT
+         COALESCE(NULLIF(json_extract(properties_json, '$.internal_info.source_skill_id'), ''),
+           json_extract(properties_json, '$.internal_info.source_skill_path'), id) AS sourceSkillId,
+         COALESCE(NULLIF(json_extract(properties_json, '$.internal_info.normalized_name'), ''),
+           NULLIF(json_extract(properties_json, '$.internal_info.name'), ''),
+           json_extract(info_json, '$.title'), '') AS name,
+         COALESCE(json_extract(properties_json, '$.internal_info.source_kind'), '') = 'plugin' AS isPlugin
        FROM memories
        WHERE memory_layer = 'Skill'
          AND deleted_at IS NULL
          AND json_extract(properties_json, '$.internal_info.read_only') = 1
          AND replace(replace(lower(trim(COALESCE(json_extract(properties_json, '$.internal_info.source_agent_id'), ''))), '-', '_'), ' ', '_') = ?
-         AND json_extract(properties_json, '$.internal_info.normalized_name') IS NOT NULL
          AND (status IN ('activated', 'resolving')
            OR json_extract(properties_json, '$.internal_info.archive_reason')
              IN ('invocation_policy', 'disconnected', 'registration')
            OR (json_extract(properties_json, '$.internal_info.archive_reason') = 'user'
-             AND COALESCE(json_extract(properties_json, '$.internal_info.source_state'), '') != 'source_missing'))`
-    ).all(normalized) as Array<{ name: string }>;
-    return new Set(rows.map((row) => row.name));
+             AND COALESCE(json_extract(properties_json, '$.internal_info.source_state'), '') != 'source_missing')
+           OR (status = 'archived'
+             AND COALESCE(json_extract(properties_json, '$.internal_info.import_state_version'), 0) < ?
+             AND COALESCE(json_type(properties_json, '$.internal_info.superseded_by_skill_id'), '') != 'text'))
+       ORDER BY (status IN ('activated', 'resolving')) DESC,
+         CASE WHEN json_type(properties_json, '$.internal_info.imported_at') = 'text'
+           THEN json_extract(properties_json, '$.internal_info.imported_at') ELSE updated_at END DESC,
+         updated_at DESC, created_at ASC, id ASC`
+    ).all(normalized, IMPORTED_SKILL_STATE_VERSION) as Array<{ sourceSkillId: string; name: string; isPlugin: number }>;
+    const skills = new Map<string, AgentSkillInstallation>();
+    const registrations = new Map<string, AgentSkillInstallation>();
+    for (const row of rows) {
+      const normalizedName = normalizeSkillName(row.name);
+      if (!normalizedName) continue;
+      const entries = row.isPlugin ? registrations : skills;
+      if (!entries.has(row.sourceSkillId)) {
+        entries.set(row.sourceSkillId, { sourceSkillId: row.sourceSkillId, normalizedName });
+      }
+    }
+    return { version: 1, skills: [...skills.values()], registrations: [...registrations.values()] };
   }
 
-  /**
-   * For each normalized name, the current imported skill (outside the given
-   * Agent) whose source file was modified most recently.
-   */
-  latestImportedSkillsByName(names: readonly string[], excludedSourceAgentId?: string): Map<string, string> {
+  /** Most recently modified current imported skill satisfying the request filter. */
+  latestImportedSkillsByName(names: readonly string[], filter: MemoryFilter = {}): Map<string, string> {
     const result = new Map<string, string>();
     if (names.length === 0) return result;
-    const excluded = excludedSourceAgentId?.trim().toLowerCase().replace(/[\s-]+/g, "_") ?? "";
+    const built = buildMemoryWhere({ ...filter, memoryLayer: "Skill", status: ["activated", "resolving"] });
     const rows = this.db.prepare(
       `SELECT id, json_extract(properties_json, '$.internal_info.normalized_name') AS name
        FROM memories
-       WHERE memory_layer = 'Skill'
-         AND deleted_at IS NULL
-         AND status IN ('activated', 'resolving')
+       WHERE ${built.where}
          AND json_extract(properties_json, '$.internal_info.read_only') = 1
+         AND trim(COALESCE(json_extract(properties_json, '$.internal_info.source_agent_id'), '')) != ''
          AND json_extract(properties_json, '$.internal_info.normalized_name') IN (${names.map(() => "?").join(", ")})
-         AND replace(replace(lower(trim(COALESCE(json_extract(properties_json, '$.internal_info.source_agent_id'), ''))), '-', '_'), ' ', '_') != ?
        ORDER BY COALESCE(json_extract(properties_json, '$.internal_info.source_modified_at'), timeline, created_at) DESC, id`
-    ).all(...names, excluded) as Array<{ id: string; name: string }>;
+    ).all(...built.params, ...names) as Array<{ id: string; name: string }>;
     for (const row of rows) {
       if (!result.has(row.name)) result.set(row.name, row.id);
     }
@@ -7021,6 +7040,13 @@ export class Repositories {
     this.l3Field = new L3FieldRepository(db, this.memories);
     this.l3WorldModels = new L3WorldModelRepository(db, this.memories, this.l3Field);
     this.projectEnvironments = new ProjectEnvironmentRepository(db, this.l3WorldModels, this.runtime);
+  }
+
+  /** Scanned installation identity survives deleting its imported memory. */
+  listInstalledSkillNamesForAgent(sourceAgentId: string): Set<string> {
+    const stored = this.runtime.getKv(agentSkillInstallationsKey(sourceAgentId))?.value as AgentSkillInstallations | undefined;
+    const inventory = stored?.version === 1 ? stored : this.memories.legacyInstalledSkillsForAgent(sourceAgentId);
+    return new Set([...inventory.skills, ...inventory.registrations].map(entry => entry.normalizedName));
   }
 
   transaction<T>(fn: () => T): T {
