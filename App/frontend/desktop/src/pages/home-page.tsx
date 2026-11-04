@@ -1843,7 +1843,7 @@ export function HomePage() {
   const modeVisibleSlashCommands = selectedComposerCommand
     ? filterGoalModeSlashCommands(visibleSlashCommands, Boolean(state.agent.currentChatId))
     : visibleSlashCommands;
-  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands, state.agent.modelPresets);
+  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands);
   const slashMenuOpen = filteredSlashCommands.length > 0;
   const displayConnectionStatus = state.agent.recoveryKind === "initial"
     ? "connecting"
@@ -2863,7 +2863,16 @@ export function HomePage() {
         event.preventDefault();
         const command = filteredSlashCommands[selectedCommandIndex] ?? filteredSlashCommands[0];
         if (command) {
-          selectSlashCommand(command);
+          const isExactModelCommand = (command.command === "/model" || command.command === "/model list")
+            && composerInput.trim() === command.command;
+          if (event.key === "Enter" && !event.shiftKey && isExactModelCommand
+            && composerPrimaryAction === "send" && !composerSendDisabled) {
+            rememberSlashCommand(command.command);
+            setSlashMenuDismissed(true);
+            void sendMessage();
+          } else {
+            selectSlashCommand(command);
+          }
         }
         return;
       }

@@ -114,7 +114,8 @@ const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; descripti
   },
   "/model": {
     title: "home.command.modelTitle",
-    description: "home.command.modelDescription"
+    description: "home.command.modelDescription",
+    hideArgHint: true
   },
   "/history": {
     title: "home.command.historyTitle",
@@ -247,19 +248,11 @@ export function buildVisibleSlashCommands(
 export function filterSlashCommands(
   commands: SlashCommandPaletteItem[],
   query: string,
-  recentCommands: string[],
-  modelPresets: ReadonlyArray<{ name: string; available: boolean }> = []
+  recentCommands: string[]
 ): SlashCommandPaletteItem[] {
   const normalizedQuery = query.toLowerCase().replace(/[\t ]+/g, " ");
   const descendants = commands.flatMap((parent) => {
-    const suffixes = [...(SUBCOMMANDS[parent.command.toLowerCase()] ?? [])];
-    if (parent.command.toLowerCase() === "/model") {
-      for (const preset of modelPresets) {
-        if (preset.available && !/\s/.test(preset.name) && preset.name.toLowerCase() !== "list") {
-          suffixes.push([preset.name, ""]);
-        }
-      }
-    }
+    const suffixes = SUBCOMMANDS[parent.command.toLowerCase()] ?? [];
     return suffixes.map(([suffix, argHint]) => ({
       ...parent, command: `${parent.command} ${suffix}`, argHint
     }));
