@@ -95,7 +95,12 @@ export function resolveContributionIcon(name: string | undefined): LucideIcon {
   return (name ? iconByName[name] : undefined) ?? Activity;
 }
 
-const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; description: MessageKey; hideArgHint?: boolean }> = {
+const localizedCommandKeys: Record<string, { title: MessageKey; description: MessageKey; argHint?: MessageKey; hideArgHint?: boolean }> = {
+  "/literature-review": {
+    title: "plugins.ui.literatureReview",
+    description: "plugins.command.literatureReviewDescription",
+    argHint: "plugins.command.literatureReviewTopicHint"
+  },
   "/new": {
     title: "home.command.newTitle",
     description: "home.command.newDescription"
@@ -157,7 +162,7 @@ export function localizeSlashCommands(
   t: SlashCommandTranslator
 ): MemmyAgentSlashCommand[] {
   return commands.map((command) => {
-    const keys = localizedBuiltinCommandKeys[command.command];
+    const keys = localizedCommandKeys[command.command];
     if (!keys) {
       return command;
     }
@@ -167,6 +172,7 @@ export function localizeSlashCommands(
     return {
       ...command,
       ...(language === "zh-CN" ? { title: t(keys.title), description: t(keys.description) } : {}),
+      ...(language === "zh-CN" && keys.argHint ? { argHint: t(keys.argHint) } : {}),
       ...(keys.hideArgHint ? { argHint: "" } : {})
     };
   });
