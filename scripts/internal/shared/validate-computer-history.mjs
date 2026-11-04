@@ -136,7 +136,7 @@ try {
   tests("contract-tests", root, ["tests/computer-history-contract.test.ts", "tests/windows-history-workflow.test.ts"]);
   // The Windows Vite module runner cannot load electron-builder's ESM graph.
   // Keep the Node runner limited to MJS packaging tests: TS source imports need Vite resolution.
-  if (process.platform === "darwin") {
+  if (process.platform === "darwin" || process.platform === "win32") {
     // Electron downloads its binary lazily on first require. Prepare the dependency
     // separately so a cold checkout does not spend the test's timeout downloading it.
     run("prepare-electron", root, ["--input-type=module", "-e",

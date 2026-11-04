@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { AsarPackager } from "app-builder-lib/out/asar/asarUtil.js";
 import { FileMatcher } from "app-builder-lib/out/fileMatcher.js";
 import { parse } from "yaml";
@@ -56,7 +56,7 @@ it.runIf(process.platform === "win32" && !!nativeDir)("Electron executes the pac
     if (!binary.includes('app.asar.unpacked')) throw new Error('Not unpacked');
     console.log(execFileSync(binary, ['version'], { encoding: 'utf8', windowsHide: true }));
   `);
-  const electron = fileURLToPath(new URL("../App/shell/desktop/node_modules/electron/dist/electron.exe", import.meta.url));
+  const electron = createRequire(new URL("../App/shell/desktop/package.json", import.meta.url))("electron");
   const stdout = execFileSync(electron, [probe], { encoding: "utf8", timeout: 30_000, windowsHide: true,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", MEMMY_WINDOWS_HISTORY_BINARY: "C:/missing-environment.exe", PATH: join(root, "no-tools") } });
   expect(stdout.trim()).toBe("memmy-history-recorder 0.1.0 protocol 1");
