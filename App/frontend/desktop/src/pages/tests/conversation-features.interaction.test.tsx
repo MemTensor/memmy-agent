@@ -57,7 +57,7 @@ describe("conversation feature integration", () => {
       onSend: mocks.send, onOpenRecording: mocks.openRecording });
     return <>{features.recorders}<nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
   }
-  const render = () => root.render(<I18nProvider language="zh-CN"><PluginUiProvider><Harness /></PluginUiProvider></I18nProvider>);
+  const render = (language = "zh-CN") => root.render(<I18nProvider language={language}><PluginUiProvider><Harness /></PluginUiProvider></I18nProvider>);
   const button = (name: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === name);
   const enterLegalConversation = async () => {
     mocks.chatId = "legal-chat";
@@ -72,6 +72,21 @@ describe("conversation feature integration", () => {
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   });
   afterEach(async () => { await act(async () => root.unmount()); container.remove(); localStorage.clear(); });
+
+  it.each([
+    ["zh-CN", "文献综述", "创建或继续基于文献证据的文献综述。", "<主题>"],
+    ["en-US", "Literature Review", "Create or continue an evidence-grounded literature review.", "<topic>"]
+  ])("localizes installed plugin palette entries for %s", async (language, title, description, argHint) => {
+    mocks.list.mockResolvedValue([{ id: "literature-review", state: "active", manifest: {
+      capabilities: [], commands: [{ command: "/literature-review", name: "Literature Review",
+        description: "Create or continue an evidence-grounded literature review.", argHint: "<topic>",
+        capabilityId: "review_create_task", agentSkillId: "literature-review" }]
+    } }]);
+    await act(async () => render(language));
+    expect(features.commandItems).toEqual([{
+      command: "/literature-review", title, description, argHint, icon: "activity", synthetic: true
+    }]);
+  });
 
   it("keeps legal shortcuts out of empty and unrelated conversations", async () => {
     await act(async () => render());

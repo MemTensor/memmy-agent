@@ -15,7 +15,7 @@ import { pendingAgentQuestion } from "./agent-question-card.js";
 import { PluginCapabilityHost, RecordingBarPortalContext, selectVisiblePluginCalls, isActiveLegalWorkflowCard } from "./plugin-capability-host.js";
 import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { canUseAccountRecording, useRecordingEntry, RecordingEntryCard, type RecordingArchiveEntry } from "./recording-entry.js";
-import { type SlashCommandPaletteItem } from "./agent-command-palette.js";
+import { localizeSlashCommands, type SlashCommandPaletteItem } from "./agent-command-palette.js";
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
 
 const NO_CALLS: PluginUiCall[] = [];
@@ -164,10 +164,10 @@ export function useConversationFeatures(options: {
       .map((command) => ({ plugin,
         command: plugin.id === "legal-labor" && command.command === "/legal-guide"
           ? { ...command, capabilityId: "guide-open" } : command }))), [plugins]);
-  const commandItems: SlashCommandPaletteItem[] = targets.map(({ command }) => ({
+  const commandItems: SlashCommandPaletteItem[] = localizeSlashCommands(targets.map(({ command }) => ({
     command: command.command, title: command.name, description: command.description ?? "",
     icon: command.icon ?? "activity", argHint: command.argHint ?? "", synthetic: true
-  }));
+  })), language, t);
 
   const legalFlowCardOpen = prepared.some((call) => isActiveLegalWorkflowCard(call)
     && !ui?.hiddenCallIds.has(call.callId) && !ui?.dismissedCallIds.has(call.callId));
