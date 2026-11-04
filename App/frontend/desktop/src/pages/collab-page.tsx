@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import {
   createHttpCollabClient,
   type AddedAgent,
+  type CollabAgentAccessView,
   type CollabClient,
   type CollabInstructionsHandover,
   type CollabKnowledgeView,
@@ -37,6 +38,9 @@ import {
 } from "../app/collab-projects-store.js";
 import type { MemmyAgentProject } from "../api/memmy-agent-client.js";
 import { openAgentTaskInChat } from "../app/open-agent-task.js";
+import { Memmy } from "../components/mascot/memmy.js";
+import { CollabAgentAccessDialog } from "./collab-agent-access-dialog.js";
+import { CollabAgentChips } from "./collab-agent-chips.js";
 import { sessionKeyToChatId } from "../api/memmy-agent-client.js";
 import { agentActions, appActions } from "../state/app-actions.js";
 import { agentChatScopeKey, shouldCreateNewAgentDraft } from "../state/agent-composer-state.js";
@@ -460,6 +464,18 @@ const CollabBoard = memo(function CollabBoard(props: {
   const [reading, setReading] = useState<{ session: CollabProjectSession; turns: CollabSessionTurn[] } | null>(null);
   const [readingId, setReadingId] = useState<string | null>(null);
   const [pickOpen, setPickOpen] = useState(false);
+  /**
+   * 「在其他 Agent 中使用协作项目」的授权：未授权时「关联任务」弹窗只给授权说明，
+   * 引导结束后与加入他人项目时各询问一次。
+   */
+  const [agentAccess, setAgentAccess] = useState<CollabAgentAccessView | null>(null);
+  const [accessOpen, setAccessOpen] = useState(false);
+  /** 引导结束后手动触发一次状态重读。 */
+  const [accessCheckKey, setAccessCheckKey] = useState(0);
+  /** 同一次进入看板只主动问一次，弹窗关掉后靠设置或点「关联任务」再授权。 */
+  const accessAskedRef = useRef(false);
+  /** 刚结束首次引导：引导之后问一次，普通打开看板不算。 */
+  const askAccessAfterTourRef = useRef(false);
   /** Choosing which of the project's own Memmy sessions members may read. */
   const [taskPickerOpen, setTaskPickerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -576,6 +592,9 @@ const CollabBoard = memo(function CollabBoard(props: {
   const finishTour = useCallback(() => {
     writeCollabTourSeen();
     setTourStep(null);
+    // 引导结束后问一次授权：还没授权时才真的弹出来，由下面的 effect 判断。
+    askAccessAfterTourRef.current = true;
+    setAccessCheckKey((key) => key + 1);
   }, []);
 
   /**
@@ -594,6 +613,63 @@ const CollabBoard = memo(function CollabBoard(props: {
   useEffect(() => {
     if (tourStep !== null && tourStep >= COLLAB_TOUR_STEP_KEYS.length) finishTour();
   }, [tourStep, finishTour]);
+
+  /** 读一次授权状态：看板要据此决定「关联任务」是列任务还是给授权说明。 */
+  const refreshAgentAccess = useCallback(async () => {
+    if (!collab || !collabEnabled) return;
+    // 旧后端/测试替身没有这个接口：拿不到就按已授权处理，行为与升级前一致。
+    try {
+      const view = await collab.getAgentAccess();
+      if (view) setAgentAccess(view);
+    } catch {
+      // 未授权状态读不出来时不做任何拦截，避免一个接口失败堵住整个看板。
+    }
+  }, [collab, collabEnabled]);
+
+  useEffect(() => {
+    void refreshAgentAccess();
+  }, [refreshAgentAccess, sharedId, accessCheckKey]);
+
+  /**
+   * 两个询问时机：刚结束首次引导（创建者），以及加入他人项目的人第一次打开这个项目的看板。
+   * 只要还没授权、也没在这里问过，就弹一次；选「暂不安装」之后不再弹。
+   */
+  useEffect(() => {
+    if (!agentAccess || agentAccess.granted || agentAccess.askedInProject) return;
+    if (accessAskedRef.current) return;
+    const joined = shared !== null && shared.role !== "owner";
+    if (!joined && !askAccessAfterTourRef.current) return;
+    accessAskedRef.current = true;
+    askAccessAfterTourRef.current = false;
+    setAccessOpen(true);
+  }, [agentAccess, shared]);
+
+  /** 关掉授权弹窗：选了「暂不安装」也记下已询问，之后只从设置里授权。 */
+  const closeAccessDialog = useCallback((granted: boolean) => {
+    setAccessOpen(false);
+    if (!collab) return;
+    if (granted) {
+      void refreshAgentAccess();
+      return;
+    }
+    // 只说一句去哪授权：之后不再主动问，但设置里随时可以装。
+    showToast(t("collab.access.declined"));
+    void collab.markAgentAccessAsked()
+      .then((view) => setAgentAccess(view))
+      .catch(() => undefined);
+  }, [collab, refreshAgentAccess, showToast, t]);
+
+  /** 「关联任务」里就地授权：装完立刻刷新状态，弹窗自己会重新读列表。 */
+  const grantAccessInPlace = useCallback(async (): Promise<boolean> => {
+    if (!collab) return false;
+    try {
+      const result = await collab.setAgentAccess(true);
+      setAgentAccess(result.view);
+      return result.view.granted;
+    } catch {
+      return false;
+    }
+  }, [collab]);
 
   // 宽看板默认展开配置；窄到放不下时先收起。用户点过收起或展开之后，以他的选择为准。
   useLayoutEffect(() => {
@@ -1515,6 +1591,16 @@ const CollabBoard = memo(function CollabBoard(props: {
           onSkip={finishTour}
         />
       ) : null}
+      {collab && collabEnabled ? (
+        <CollabAgentAccessDialog
+          open={accessOpen}
+          collab={collab}
+          // 示例句里带上项目名，让人知道那句话该怎么说。
+          projectName={project?.name}
+          onDecided={(granted) => closeAccessDialog(granted)}
+          onClose={() => closeAccessDialog(false)}
+        />
+      ) : null}
       {project ? (
         <ProjectInstructionsDialog
           open={instructionsOpen}
@@ -1616,6 +1702,10 @@ const CollabBoard = memo(function CollabBoard(props: {
           open={pickOpen}
           collab={collab}
           project={shared}
+          // 未授权时只给授权说明：弹窗自己不会去列本机其他 Agent 的任务。
+          accessGranted={agentAccess?.granted ?? true}
+          accessAgents={agentAccess?.agents}
+          onGrantAccess={grantAccessInPlace}
           onClose={() => setPickOpen(false)}
           onLinked={(result) => {
             // The selection is already saved; the upload continues in the background and the board shows it.
@@ -2547,6 +2637,12 @@ export function AssociateSessionsModal(props: {
   project: CollabProject;
   onClose: () => void;
   onLinked: (result: CollabSyncResult) => void | Promise<void>;
+  /** 「在其他 Agent 中使用协作项目」是否已授权；未授权时弹窗只给授权说明，不读本机记录。 */
+  accessGranted?: boolean;
+  /** 授权说明里列出的 Agent 与其中被关掉的：说明这一屏在讲哪些 Agent。 */
+  accessAgents?: ReadonlyArray<{ sourceId: string; name: string; enabled: boolean; available: boolean }>;
+  /** 在弹窗内就地授权：成功返回 true，列表随即在当前弹窗里出现。 */
+  onGrantAccess?: () => Promise<boolean>;
 }) {
   const { t } = useTranslation();
   const appState = useOptionalAppState();
@@ -2560,9 +2656,15 @@ export function AssociateSessionsModal(props: {
   const [error, setError] = useState<string | null>(null);
   const [confirmUnlinkGroup, setConfirmUnlinkGroup] = useState(false);
   const [addAgentOpen, setAddAgentOpen] = useState(false);
+  const [granting, setGranting] = useState(false);
   /** 已添加的 Agent：只用于添加弹窗里的清单，用户添加的 Agent 不进左侧列表。 */
   const [addedAgents, setAddedAgents] = useState<AddedAgent[]>([]);
   const { collab, open, project } = props;
+  /** 「在其他 Agent 中使用协作项目」是否已授权：未传按已授权处理，只有涉及授权的页面会传它。 */
+  const accessGranted = props.accessGranted ?? true;
+  /** 授权说明里列出的 Agent：只列可用的，关掉的单独用一句话说明。 */
+  const gateAgents = (props.accessAgents ?? []).filter((agent) => agent.available && agent.enabled);
+  const gateDisabledNames = (props.accessAgents ?? []).filter((agent) => agent.available && !agent.enabled).map((agent) => agent.name);
   /** 添加弹窗打开时读一次已添加清单，移除后重读；用户添加的 Agent 不进左侧列表。 */
   const reloadAddedAgents = useCallback(async () => {
     if (!collab) return;
@@ -2585,6 +2687,8 @@ export function AssociateSessionsModal(props: {
     setQuery("");
     setExpanded(new Set());
     setError(null);
+    // 未授权时一个本机记录也不读：弹窗里只有授权说明，授权后这一段会重新跑。
+    if (!accessGranted) return;
     // The last scan shows at once; when it is older, the newer list replaces it a few seconds later.
     Promise.all([collab.listLocalSessions({ limit: MAX_LOCAL_SESSIONS }), collab.getLinks(project.id)])
       .then(([listing, current]) => {
@@ -2605,7 +2709,21 @@ export function AssociateSessionsModal(props: {
     return () => {
       cancelled = true;
     };
-  }, [collab, open, project.id]);
+  }, [accessGranted, collab, open, project.id]);
+
+  /** 就地授权：授权成功后同一个弹窗直接列出任务，不用先关掉再点一次。 */
+  async function grantAccess() {
+    if (granting || !props.onGrantAccess) return;
+    setGranting(true);
+    setError(null);
+    try {
+      if (!(await props.onGrantAccess())) setError(t("collab.access.failed"));
+    } catch {
+      setError(t("collab.access.failed"));
+    } finally {
+      setGranting(false);
+    }
+  }
 
   /**
    * 左侧只列 Memmy 自己能读到任务的 Agent。用户添加的 Agent 不出现：Memmy 不读它们的记录，
@@ -2757,13 +2875,35 @@ export function AssociateSessionsModal(props: {
           ) : <span />}
           <span className={styles.footerButtons}>
             <Button variant="ghost" disabled={busy} onClick={props.onClose}>{t("collab.cancel")}</Button>
-            <Button variant="primary" disabled={!changed || busy} onClick={requestSave}>
-              {busy ? t("collab.pick.saving") : t("collab.pick.save")}
-            </Button>
+            {/* 未授权时没有可保存的选择：这一支的按钮是「授权并继续」，点完正文换成任务列表。 */}
+            {accessGranted ? (
+              <Button variant="primary" disabled={!changed || busy} onClick={requestSave}>
+                {busy ? t("collab.pick.saving") : t("collab.pick.save")}
+              </Button>
+            ) : (
+              <Button variant="primary" disabled={granting} onClick={() => void grantAccess()}>
+                {granting ? t("collab.access.installing") : t("collab.pick.gateGrant")}
+              </Button>
+            )}
           </span>
         </>
       )}
     >
+      {!accessGranted ? (
+        /* 未授权：同一个弹窗只给授权说明，不列出任何本机记录，也不给「保存」。 */
+        <div className={styles.pickBody}>
+          <div className={styles.gate}>
+            <Memmy pose="shield" size={72} className={styles.gateMascot} />
+            <h3 className={styles.gateTitle}>{t("collab.pick.gate")}</h3>
+            <p className={styles.gateText}>{t("collab.pick.gateHint", { project: project.name })}</p>
+            <CollabAgentChips agents={gateAgents} />
+            {gateDisabledNames.length ? (
+              <p className={styles.gateOff}>{t("collab.pick.gateDisabled", { names: gateDisabledNames.join("、") })}</p>
+            ) : null}
+            <p className={styles.gateSmall}>{t("collab.pick.gateNote")}</p>
+          </div>
+        </div>
+      ) : (
       <div className={styles.pickBody}>
         <div className={styles.agentColumn}>
         <nav className={styles.agentList} aria-label="Agent">
@@ -2813,6 +2953,7 @@ export function AssociateSessionsModal(props: {
           {pickerList}
         </section>
       </div>
+      )}
     </Modal>
     <ConfirmDialog
       open={props.open && confirmUnlinkGroup}

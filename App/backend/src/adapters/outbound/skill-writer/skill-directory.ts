@@ -88,6 +88,11 @@ export async function isMemmyProjectSkillDirectoryCurrent(rootDirectory: string,
   return actual === renderMemmyProjectSkillFile({ ...(source ? { source } : {}) });
 }
 
+/** 这个 Agent 的技能目录里有没有 `memmy-project`，不看内容是不是当前版本。 */
+export async function memmyProjectSkillExists(rootDirectory: string): Promise<boolean> {
+  return pathExists(join(rootDirectory, "skills", MEMMY_PROJECT_SKILL_DIRECTORY_NAME));
+}
+
 function temporarySiblingPath(path: string): string {
   return join(dirname(path), `.${basename(path)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
 }

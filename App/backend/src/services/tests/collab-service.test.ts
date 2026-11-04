@@ -1438,7 +1438,8 @@ describe("collab service", () => {
       if (previousHome === undefined) delete process.env.MEMMY_HOME;
       else process.env.MEMMY_HOME = previousHome;
     }
-  });
+    // 没有给出 --source 时，定位记录文件本身允许等 5 秒，两次提交就是 10 秒：默认的 5 秒不够。
+  }, 20_000);
 
   it("binds a submitted task to its record file, then syncs the file's new turns", async () => {
     // 已添加的 Agent 与它的记录文件：提交时给出 --source，绑定后按文件同步。
@@ -1602,6 +1603,89 @@ function addFetch(local: LocalAgentSession[], questions: Record<string, string> 
     "DELETE /api/collab/projects/p-1/sessions/id-c1": () => ({ code: 0, data: null })
   });
 }
+
+describe("collab agent access", () => {
+  const denied = { granted: false, disabledAgents: [] as string[] };
+
+  it("refuses to list other agents' tasks before the person authorizes it, without reading them", async () => {
+    const local = [localSession("cursor", "c1", null, "2026-10-22T01:00:00.000Z")];
+    const { fetcher, calls } = fakeFetch({
+      "POST /api/v1/agent-sessions/available": () => ({ sessions: local, refreshing: false })
+    });
+    const svc = service(fetcher, { agentAccess: async () => denied });
+
+    await expect(svc.listLocalSessions({ limit: 10 })).rejects.toThrow(/授权/);
+    // 一个本机 Agent 的记录都没有读：拒绝发生在读之前。
+    expect(calls).toHaveLength(0);
+  });
+
+  it("hides the agents turned off in settings", async () => {
+    const local = [
+      localSession("cursor", "c1", null, "2026-10-22T01:00:00.000Z"),
+      localSession("codex", "x1", null, "2026-10-22T01:00:00.000Z")
+    ];
+    const { fetcher } = fakeFetch({
+      "POST /api/v1/agent-sessions/available": () => ({ sessions: local, refreshing: false })
+    });
+    const svc = service(fetcher, { agentAccess: async () => ({ granted: true, disabledAgents: ["cursor"] }) });
+
+    const listing = await svc.listLocalSessions({ limit: 10 });
+    expect(listing.sessions.map((session) => session.sourceId)).toEqual(["codex"]);
+  });
+
+  it("skips the background sync entirely when not authorized", async () => {
+    const local = [localSession("claude_code", "a1", "g1", "2026-10-22T01:00:00.000Z")];
+    const { fetcher } = fakeFetch({
+      "GET /api/collab/projects": () => ({ code: 0, data: { projects: [{ id: "p-1", name: "Memmy 开发" }] } }),
+      "POST /api/v1/agent-sessions/available": () => ({ sessions: local, refreshing: false })
+    });
+    const svc = service(fetcher, { agentAccess: async () => denied });
+
+    await expect(svc.syncLinkedSessions()).resolves.toEqual({ uploaded: 0, removed: 0, failed: 0 });
+  });
+
+  it("still accepts a task an added agent submits, because adding it was its own authorization", async () => {
+    const home = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(home);
+    writeFileSync(join(home, "collab-agents.json"), JSON.stringify({
+      agents: [{ sourceId: "added-kimi-code-62d20b3a", displayName: "Kimi Code", skillDirectory: "/tmp/kimi", updatedAt: "2026-11-01T00:00:00.000Z" }]
+    }));
+    const previousHome = process.env.MEMMY_HOME;
+    process.env.MEMMY_HOME = home;
+    try {
+      const { fetcher } = fakeFetch({
+        "GET /api/collab/projects": () => ({
+          code: 0,
+          data: { projects: [{ id: "p-1", name: "Memmy 开发", role: "owner", memberCount: 1, sessionCount: 0, createdAt: null }] }
+        }),
+        "PUT /api/collab/projects/p-1/sessions": () => ({ code: 0, data: { sessions: [{ id: "cloud-1-1" }] } })
+      });
+      const svc = service(fetcher, { agentAccess: async () => denied });
+
+      const result = await svc.addCurrentSession({
+        project: "Memmy 开发",
+        submission: { agentName: "Kimi Code", title: "分享接口的重试策略", turns: [{ question: "重试几次？", reply: "两次。" }] }
+      });
+      expect(result.ok).toBe(true);
+      expect(result.text).toContain("已把任务");
+    } finally {
+      if (previousHome === undefined) delete process.env.MEMMY_HOME;
+      else process.env.MEMMY_HOME = previousHome;
+    }
+    // 没有 --source 时定位记录文件允许等 5 秒，超过默认的用例超时。
+  }, 20_000);
+
+  it("tells the agent to authorize first instead of reading its records", async () => {
+    const { fetcher, calls } = fakeFetch({
+      "GET /api/collab/projects": () => ({ code: 0, data: { projects: [{ id: "p-1", name: "Memmy 开发" }] } })
+    });
+    const svc = service(fetcher, { agentAccess: async () => denied });
+
+    const result = await svc.addCurrentSession({ project: "Memmy 开发", cwd: "/repo" });
+    expect(result.text).toContain("设置 → 偏好 → 协作项目");
+    expect(calls.some((call) => call.url.endsWith("/agent-sessions/available"))).toBe(false);
+  });
+});
 
 function localSession(sourceId: string, conversationId: string, groupId: string | null, updatedAt: string): LocalAgentSession {
   return {

@@ -37,6 +37,11 @@ const SLOW_DELETE_MS = 2_000;
 const UPLOAD_TIMEOUT_MS = 60_000;
 /** Enough for every agent's recent sessions, so association sees the same pool as the picker. */
 const MAX_LOCAL_SESSIONS = 500;
+/** 没有接授权时的默认值：只有不涉及授权的装配与测试会走到。 */
+const PERMISSIVE_AGENT_ACCESS = Object.freeze({ granted: true, disabledAgents: [] as readonly string[] });
+/** 未授权时读取本机其他 Agent 的提示语，界面与命令行共用。 */
+const AGENT_ACCESS_REQUIRED_TEXT =
+  "还没有授权在其他 Agent 中使用协作项目。在 Memmy 中打开「设置 → 偏好 → 协作项目」，授权后再试。";
 /** How many sessions the @ menu lists before the person types anything. */
 const CANDIDATE_LIMIT = 5;
 /** The board's page size, so a long project does not render every session at once. */
@@ -158,6 +163,11 @@ export interface CollabServiceOptions {
    * 账号会话可能还留着上次登录的凭据，但项目、成员与共享一律按未登录处理。
    */
   userMode?: () => string;
+  /**
+   * 「在其他 Agent 中使用协作项目」的授权。读其他 Agent 的历史、后台同步、在 Agent 里加入任务
+   * 都要它；未提供时按已授权处理，那只用于不涉及授权的装配与测试。
+   */
+  agentAccess?: () => Promise<{ granted: boolean; disabledAgents: readonly string[] }>;
 }
 
 /**
@@ -799,6 +809,21 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     return account;
   }
 
+  /**
+   * 读取其他 Agent 的任务需要单独授权：记忆侧的「扫描已有 Agent 对话」不包含它，
+   * 因为这一项会把选中的任务同步给成员。
+   */
+  async function requireAgentAccess(): Promise<{ disabledAgents: readonly string[] }> {
+    const access = await (options.agentAccess?.() ?? PERMISSIVE_AGENT_ACCESS);
+    if (!access.granted) throw new CollabError("forbidden", AGENT_ACCESS_REQUIRED_TEXT);
+    return access;
+  }
+
+  /** 未授权时的提示语，界面与命令行都用这一句。 */
+  function agentAccessRequiredText(): string {
+    return AGENT_ACCESS_REQUIRED_TEXT;
+  }
+
   /** One page of a project's sessions, shared by the board and the @ menu so both read the same list. */
   async function listSessions(projectId: string, options: SessionListOptions = {}): Promise<CollabSessionPage> {
     const account = requireAccount();
@@ -821,13 +846,18 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
   }
 
   async function listLocalSessions(input: { query?: string; sourceIds?: string[]; limit?: number; fresh?: boolean }) {
+    const access = await requireAgentAccess();
     const data = await readLocal((reader) => reader.available({
       ...(input.query === undefined ? {} : { query: input.query }),
       ...(input.sourceIds === undefined ? {} : { sourceIds: input.sourceIds }),
       ...(input.limit === undefined ? {} : { limit: input.limit }),
       fresh: input.fresh === true
     }));
-    return { sessions: data.sessions.map(toLocalSession), refreshing: data.refreshing };
+    // 设置里关掉的 Agent 即使读到了也不列出来：这一份清单就是用户能看到与勾选的范围。
+    const sessions = data.sessions
+      .filter((session) => !access.disabledAgents.includes(session.sourceId))
+      .map(toLocalSession);
+    return { sessions, refreshing: data.refreshing };
   }
 
   /** Upload progress per project, kept in memory: the board polls it while sessions arrive. */
@@ -1663,7 +1693,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
    * 有绑定记录的任务：文件改了就用绑定的读取方式重读并上传；文件不在了就停止同步，项目里的内容保留。
    * 标题沿用提交时的那个，不因文件里的标题变化而改。
    */
-  async function syncBoundRecords(projectId: string, accountId: string): Promise<{ uploaded: number; failed: number }> {
+  async function syncBoundRecords(projectId: string, accountId: string, skipSourceIds: readonly string[] = []): Promise<{ uploaded: number; failed: number }> {
     const stored = await readLinks(projectId, accountId);
     if (!Object.values(stored.synced).some((entry) => entry.source)) return { uploaded: 0, failed: 0 };
     let uploaded = 0;
@@ -1672,6 +1702,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     for (const [key, synced] of Object.entries(stored.synced)) {
       const binding = synced.source;
       if (!binding) continue;
+      // 设置里关掉的 Agent 不再读它的记录文件：已加入项目的任务保留，只是暂停更新。
+      if (skipSourceIds.includes(parseSessionKey(key).sourceId)) continue;
       const info = await stat(binding.path).catch(() => null);
       if (!info?.isFile()) {
         delete synced.source;
@@ -1788,6 +1820,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
 
     async projectsForAgentSession(sourceId, conversationId) {
       const account = requireAccount();
+      // 由 Agent 发起的命令先看授权：没授权时它一般连组件都没装上，但升级前已经装上的还会调到。
+      await requireAgentAccess();
       const projects = list((await cloud("/projects")).projects).map(toProject);
       const records = await Promise.all(projects.map(async (project) => ({ project, links: await readLinks(project.id, account.accountId) })));
       const key = sessionKey({ sourceId, conversationId });
@@ -1834,6 +1868,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       const account = requireAccount();
       return exclusive(async () => {
         const stored = await readLinks(projectId, account.accountId);
+        // 连过的任务要按本机任务重新对一遍，这也是一次读其他 Agent 的操作。
+        await requireAgentAccess();
         const { sessions: local } = await listLocalSessions({ limit: MAX_LOCAL_SESSIONS });
         const tasks = await projectTaskSessions(stored);
         const candidates = linkCandidates(stored, [...local, ...tasks]);
@@ -2137,6 +2173,9 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         const account = options.getAccount();
         const total: CollabSyncResult = { uploaded: 0, removed: 0, failed: 0 };
         if (!account) return total;
+        // 未授权时整轮跳过：既不去读本机其他 Agent 的记录，也不动已加入项目的任务。
+        const access = await (options.agentAccess?.() ?? PERMISSIVE_AGENT_ACCESS);
+        if (!access.granted) return total;
         const projects = await stillJoined(await readAllLinks(account.accountId));
         if (!projects.length) return total;
         // The Memory service only holds the other agents' sessions; Memmy's own tasks must still sync without it.
@@ -2146,7 +2185,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
           .catch(() => []);
         for (const stored of projects) {
           // 用户添加的 Agent 的任务以本机记录文件为准：文件改了先按文件更新，再走常规上传。
-          const bound = await syncBoundRecords(stored.projectId, account.accountId);
+          const bound = await syncBoundRecords(stored.projectId, account.accountId, access.disabledAgents);
           const { result, synced } = await uploadPending(stored, [...local, ...await projectTaskSessions(stored)]);
           await recordUploaded(stored.projectId, account.accountId, synced);
           total.uploaded += result.uploaded + bound.uploaded;
@@ -2228,7 +2267,12 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       const hint = input.hint?.trim() ?? "";
       const project = input.project?.trim() ?? "";
       // 用户添加的 Agent 交上来的任务：内容由它整理好，不再去本机记录里找这一条。
+      // 添加它本身就是那一下授权，所以不受下面这道门限制。
       if (input.submission) return addSubmittedTask(projects, project, input.submission);
+      // 下面的几条路径都要读这个 Agent 的记录，所以权限不满足时只回一句话，不去读文件。
+      if (options.agentAccess && !(await options.agentAccess()).granted) {
+        return { text: agentAccessRequiredText() };
+      }
       const sourceId = input.sourceId?.trim() ?? "";
       const conversationId = input.conversationId?.trim() ?? "";
       // The running conversation, when the agent names it. That whole task is added; a different one is not.

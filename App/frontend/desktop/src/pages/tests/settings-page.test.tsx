@@ -1157,6 +1157,16 @@ describe("赠送活动开关 - Token 页申请更多按钮", () => {
     expect(isPendingQuotaRequestError(new Error("request already pending"))).toBe(true);
     expect(isPendingQuotaRequestError(new Error("network failed"))).toBe(false);
   });
+
+  it("协作项目授权只在账号模式的偏好里出现", () => {
+    const accountHtml = normalizeSsrHtml(renderSettingsPageView(createAccountModeState()));
+    const byokHtml = normalizeSsrHtml(renderSettingsPageView(createByokModeState()));
+
+    // 账号模式：偏好面板里多一张「协作项目」卡片，未授权时给出授权入口。
+    expect(accountHtml).toContain("协作项目");
+    expect(accountHtml).toContain("在其他 Agent 中使用协作项目");
+    expect(byokHtml).not.toContain("在其他 Agent 中使用协作项目");
+  });
 });
 
 /**

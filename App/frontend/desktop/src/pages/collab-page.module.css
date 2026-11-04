@@ -1199,6 +1199,53 @@
   overflow: hidden;
 }
 
+/* 未授权时同一弹窗里的授权说明：居中一屏，不列任何本机记录。 */
+.gate {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 20px 80px;
+}
+
+.gateMascot {
+  display: block;
+}
+
+.gateTitle {
+  margin: 6px 0 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--collab-ink);
+}
+
+.gateText {
+  margin: 8px 0 0;
+  max-width: 470px;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--collab-muted);
+}
+
+.gateText + div {
+  margin-top: 14px;
+  justify-content: center;
+}
+
+.gateOff {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--collab-ter);
+}
+
+.gateSmall {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--collab-ter);
+}
+
 .agentList {
   flex: 1 1 auto;
   display: flex;

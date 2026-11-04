@@ -72,6 +72,7 @@ import {
   createSkillDistributionService,
   type SkillDistributionService
 } from "./skill-distribution-service.js";
+import { readCollabAgentAccess } from "./collab-agent-access.js";
 import { createTurnService, type TurnService } from "./turn-service.js";
 import {
   createProjectInstructionsService,
@@ -123,6 +124,8 @@ export interface BackendServices {
   collabInstructions: CollabInstructionsService;
   /** Third-party plugins. */
   plugins: PluginService;
+  /** 给其他 Agent 写技能的入口：协作项目的 `memmy-project` 由授权状态决定装与不装。 */
+  skillDistribution: SkillDistributionService;
   pluginSkillContent?: PluginSkillContentService;
 }
 
@@ -292,7 +295,9 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   const skillDistributionService =
     options.skillDistributionService ??
     createSkillDistributionService({
-      targetRegistry: skillTargetRegistry
+      targetRegistry: skillTargetRegistry,
+      // 协作项目单独授权：没授权时启动也不写 `memmy-project`，关掉的 Agent 同样跳过。
+      projectSkillPermission: () => readCollabAgentAccess()
     });
   const resolveAnalyticsUserId = () => {
     const session = accountSessionRepository.get();
@@ -456,7 +461,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       memmyConfigPath: options.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml")
     }),
     plugins,
-    pluginSkillContent
+    pluginSkillContent,
+    skillDistribution: skillDistributionService
   };
 }
 

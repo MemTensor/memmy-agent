@@ -1,5 +1,5 @@
 /** Skill distribution service tests. */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -347,6 +347,61 @@ describe("skill distribution service", () => {
     });
 
     await expect(service.refreshInstalledSkill("cursor", "skill")).resolves.toBe(false);
+  });
+});
+
+describe("project skill authorization", () => {
+  const denied = async () => ({ granted: false, disabledAgents: [] as string[] });
+
+  it("writes nothing on startup while collaboration is not authorized", async () => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-agent-project-denied-"));
+    try {
+      const service = createSkillDistributionService({
+        targetRegistry: createSkillTargetRegistry([createFakeTarget({ resolveRootDirectory: () => rootDirectory })]),
+        projectSkillPermission: denied
+      });
+      await expect(service.ensureProjectSkills()).resolves.toEqual([]);
+      expect(existsSync(join(rootDirectory, "skills", "memmy-project"))).toBe(false);
+    } finally {
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("still refreshes the memory skill but leaves the project skill out", async () => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-agent-project-memory-only-"));
+    try {
+      await replaceMemmySkillDirectory(rootDirectory, { targetId: "cursor", content: "## Agent Loop\nold", marker: "m" });
+      const service = createSkillDistributionService({
+        targetRegistry: createSkillTargetRegistry([createFakeTarget({ resolveRootDirectory: () => rootDirectory })]),
+        projectSkillPermission: denied
+      });
+
+      await expect(service.refreshInstalledSkill("cursor")).resolves.toBe(true);
+      expect(readFileSync(join(rootDirectory, "skills", "memmy-memory", "SKILL.md"), "utf8")).toContain("## Agent Loop");
+      expect(existsSync(join(rootDirectory, "skills", "memmy-project"))).toBe(false);
+    } finally {
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the agents turned off and can install or remove one on demand", async () => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-agent-project-per-agent-"));
+    try {
+      const present = join(rootDirectory, "cursor-home");
+      mkdirSync(present);
+      const service = createSkillDistributionService({
+        targetRegistry: createSkillTargetRegistry([createFakeTarget({ resolveRootDirectory: () => present })]),
+        projectSkillPermission: async () => ({ granted: true, disabledAgents: ["cursor"] })
+      });
+
+      await expect(service.ensureProjectSkills()).resolves.toEqual([]);
+      await expect(service.installProjectSkill("cursor")).resolves.toBeUndefined();
+      await expect(service.hasProjectSkill("cursor")).resolves.toBe(true);
+      await service.removeProjectSkill("cursor");
+      await expect(service.hasProjectSkill("cursor")).resolves.toBe(false);
+    } finally {
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
   });
 });
 

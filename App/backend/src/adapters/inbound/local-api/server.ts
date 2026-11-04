@@ -7,6 +7,7 @@ import { registerKnowledgeRoutes } from "@memmy/knowledge/routes";
 import type { PermissionManager } from "../../../permission/index.js";
 import type { BackendServices } from "../../../services/index.js";
 import type { CollabService } from "../../../services/collab-service.js";
+import type { CollabAgentAccessService } from "../../../services/collab-agent-access-service.js";
 import type { ProjectDirectoryService } from "../../../services/project-directory-service.js";
 import { registerAccountRoutes } from "./routes/account.js";
 import { registerCollabRoutes } from "./routes/collab.js";
@@ -38,6 +39,8 @@ export interface CreateLocalApiServerOptions {
   knowledge?: ManagedKnowledgeOptions;
   /** Online projects; absent in tests that do not exercise them. */
   collab?: CollabService;
+  /** 「在其他 Agent 中使用协作项目」的授权状态；absent 时那几个接口不可用。 */
+  collabAgentAccess?: CollabAgentAccessService;
   /** The managed folder a project created by name alone runs its tasks in. */
   projectDirectory?: ProjectDirectoryService;
   permissionManager: PermissionManager;
@@ -170,6 +173,7 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     const knowledge = options.knowledge ? new ManagedKnowledgeClient(options.knowledge) : null;
     registerCollabRoutes(app, {
       collab: options.collab, authenticateRuntimeToken,
+      ...(options.collabAgentAccess ? { agentAccess: options.collabAgentAccess } : {}),
       ...(knowledge ? { recallProjectKnowledge: (query: string, projectId: string) => recallProjectBases(knowledge, query, projectId) } : {})
     });
   }

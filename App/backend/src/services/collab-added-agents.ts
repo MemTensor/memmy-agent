@@ -137,7 +137,7 @@ export async function removeCollabAgent(name: string, homeDirectory = defaultHom
   const agents = await loadCollabAgents(homeDirectory);
   const existing = agents.find((agent) => agent.sourceId === sourceId);
   if (!existing) return `没有名为「${name.trim()}」的已添加 Agent。`;
-  await rm(join(existing.skillDirectory, "memmy-project"), { recursive: true, force: true });
+  await removeAddedAgentSkill(existing);
   await writeAgents(homeDirectory, agents.filter((agent) => agent.sourceId !== sourceId));
   return `已移除 ${existing.displayName}，并卸掉 memmy-project。已加入项目的任务保留。`;
 }
@@ -151,18 +151,36 @@ export async function refreshCollabAgentSkills(options: { homeDirectory?: string
   const agents = await loadCollabAgents(home);
   let updated = 0;
   for (const agent of agents) {
-    const target = join(agent.skillDirectory, "memmy-project");
-    const skillPath = join(target, "SKILL.md");
-    const directory = await stat(agent.skillDirectory).catch(() => null);
-    if (!directory?.isDirectory()) continue;
-    const expected = renderAddedAgentSkill(agent.displayName, agent.skillDirectory);
-    const actual = await readFile(skillPath, "utf8").catch(() => null);
-    if (actual === expected) continue;
-    await mkdir(target, { recursive: true });
-    await writeFile(skillPath, expected, "utf8");
-    updated += 1;
+    if (await installAddedAgentSkill(agent)) updated += 1;
   }
   return updated;
+}
+
+/**
+ * 把 `memmy-project` 写进这个已添加 Agent 的技能目录，内容已经是最新时什么也不做。
+ * 技能目录不存在时返回 false：不新建目录，也不再给这个 Agent 装组件。
+ */
+export async function installAddedAgentSkill(agent: CollabAddedAgent): Promise<boolean> {
+  const directory = await stat(agent.skillDirectory).catch(() => null);
+  if (!directory?.isDirectory()) return false;
+  const target = join(agent.skillDirectory, "memmy-project");
+  const skillPath = join(target, "SKILL.md");
+  const expected = renderAddedAgentSkill(agent.displayName, agent.skillDirectory);
+  const actual = await readFile(skillPath, "utf8").catch(() => null);
+  if (actual === expected) return false;
+  await mkdir(target, { recursive: true });
+  await writeFile(skillPath, expected, "utf8");
+  return true;
+}
+
+/** 从已添加 Agent 的技能目录移除 `memmy-project`；清单与已加入项目的任务都不动。 */
+export async function removeAddedAgentSkill(agent: CollabAddedAgent): Promise<void> {
+  await rm(join(agent.skillDirectory, "memmy-project"), { recursive: true, force: true });
+}
+
+/** 这个已添加 Agent 的技能目录里是否还有 `memmy-project`。 */
+export async function hasAddedAgentSkill(agent: CollabAddedAgent): Promise<boolean> {
+  return (await stat(join(agent.skillDirectory, "memmy-project", "SKILL.md")).catch(() => null))?.isFile() === true;
 }
 
 /** A submitted task is one agent's conversation: the same agent asking the same first question keeps one task. */

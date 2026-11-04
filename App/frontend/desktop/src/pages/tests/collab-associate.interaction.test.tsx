@@ -41,6 +41,29 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
 describe("associate other agents' tasks", () => {
+  it("shows the authorization note instead of reading other agents' tasks, then lists them in place", async () => {
+    const listLocalSessions = vi.fn().mockResolvedValue({ sessions, refreshing: false });
+    const client = {
+      listLocalSessions,
+      getLinks: vi.fn().mockResolvedValue(whole),
+      saveLinks
+    } as unknown as CollabClient;
+    const onGrantAccess = vi.fn().mockResolvedValue(true);
+    await act(async () => root.render(<I18nProvider language="zh-CN"><AssociateSessionsModal open collab={client} project={project} accessGranted={false} onGrantAccess={onGrantAccess} onClose={onClose} onLinked={onLinked} /></I18nProvider>));
+
+    // 未授权：正文是授权说明，一个本机记录也不读，也没有「保存」。
+    expect(document.body.textContent).toContain("关联前需要你的授权");
+    expect(listLocalSessions).not.toHaveBeenCalled();
+    expect([...document.querySelectorAll("button")].some((item) => item.textContent?.trim() === "保存")).toBe(false);
+
+    await act(async () => button("授权并继续").click());
+    expect(onGrantAccess).toHaveBeenCalledOnce();
+    // 父级把授权状态翻成已授权后，同一个弹窗里直接列出任务，不用关掉再点一次。
+    await act(async () => root.render(<I18nProvider language="zh-CN"><AssociateSessionsModal open collab={client} project={project} accessGranted onGrantAccess={onGrantAccess} onClose={onClose} onLinked={onLinked} /></I18nProvider>));
+    expect(listLocalSessions).toHaveBeenCalled();
+    expect(document.querySelector("nav[aria-label='Agent']")?.textContent).toContain("WorkBuddy");
+  });
+
   it("saves an individual exclusion without confirmation and retains the whole-group indication", async () => {
     await render();
     expect(button("保存").disabled).toBe(true);

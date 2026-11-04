@@ -5,7 +5,9 @@ import { join, relative } from "node:path";
 import {
   isMemmyProjectSkillDirectoryCurrent,
   isMemmySkillDirectoryCurrent,
+  memmyProjectSkillExists,
   readInstalledSkillKind,
+  removeMemmyProjectSkillDirectory,
   replaceMemmyProjectSkillDirectory,
   replaceMemmySkillDirectory
 } from "../adapters/outbound/skill-writer/skill-directory.js";
@@ -14,6 +16,9 @@ import { renderMemmyPluginSkillManifest } from "../adapters/outbound/skill-write
 import type { MemoryPluginConflict } from "../adapters/outbound/skill-writer/types.js";
 import type { SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
 import { AgentSourceUnavailableError } from "./runtime-errors.js";
+
+/** 没有接授权时的默认值：只用于不涉及授权的场景与测试。 */
+const PERMISSIVE: ProjectSkillPermission = Object.freeze({ granted: true, disabledAgents: [] });
 
 export interface ScannedAgentSkill {
   sourceAgentId: string;
@@ -42,22 +47,50 @@ export interface SkillDistributionService {
    */
   refreshInstalledSkill(sourceId: string, mode?: "skill" | "plugin"): Promise<boolean>;
   /**
-   * Writes the `memmy-project` skill into every agent home that already exists. A new install has no
-   * memory skill yet, and auto-inject is off unless the person turns it on, so this is what puts the
-   * project skill on disk after the app is installed.
+   * Writes the `memmy-project` skill into every agent home that already exists and is allowed. A new install has no
+   * memory skill yet, and auto-inject is off unless the person turns it on, so this is what puts the project skill
+   * on disk after the app is installed.
    */
   ensureProjectSkills(): Promise<string[]>;
+  /** 只给这一个 Agent 装 `memmy-project`；授权后逐个安装、重新打开时用它。 */
+  installProjectSkill(sourceId: string): Promise<void>;
+  /** 只从这一个 Agent 移除 `memmy-project`，记忆接入与它的历史都不动。 */
+  removeProjectSkill(sourceId: string): Promise<void>;
+  /** 撤销授权时把所有 Agent 的 `memmy-project` 一并移除，返回实际移除的 Agent。 */
+  removeProjectSkills(): Promise<string[]>;
+  /** 这个 Agent 的技能目录里是否已经有 `memmy-project`。 */
+  hasProjectSkill(sourceId: string): Promise<boolean>;
+}
+
+/**
+ * `memmy-project` 能不能写进某个 Agent。协作项目默认没有这项授权：未授权时不装、也不刷新，
+ * 按 Agent 关掉的同样跳过。生产环境在创建服务时接上授权状态文件。
+ */
+export interface ProjectSkillPermission {
+  granted: boolean;
+  disabledAgents: readonly string[];
 }
 
 /** Contract for create skill distribution service options. */
 export interface CreateSkillDistributionServiceOptions {
   targetRegistry: SkillTargetRegistry;
+  /**
+   * 读当前授权。不传时按「已授权、没有关掉的 Agent」处理，只用于不涉及授权的校验；
+   * 后端在 `services/index.ts` 里显式接上 `~/.memmy/collab-agent-access.json`。
+   */
+  projectSkillPermission?: () => Promise<ProjectSkillPermission>;
 }
 
 /** Creates create skill distribution service. */
 export function createSkillDistributionService(
   options: CreateSkillDistributionServiceOptions
 ): SkillDistributionService {
+  /** 授权的唯一判据：未授权或这个 Agent 被关掉，都不写 `memmy-project`。 */
+  async function projectSkillAllowed(sourceId: string): Promise<boolean> {
+    const permission = await options.projectSkillPermission?.() ?? PERMISSIVE;
+    return permission.granted && !permission.disabledAgents.includes(sourceId);
+  }
+
   return {
     async listSkills(sourceId) {
       const target = options.targetRegistry.get(sourceId);
@@ -155,7 +188,9 @@ export function createSkillDistributionService(
         ? renderMemmyPluginSkillManifest(sourceId)
         : renderMemmyDefaultSkillManifest(sourceId);
       const memoryCurrent = await isMemmySkillDirectoryCurrent(root, manifest);
-      if (memoryCurrent && await isMemmyProjectSkillDirectoryCurrent(root, sourceId)) return false;
+      const projectAllowed = await projectSkillAllowed(sourceId);
+      const projectCurrent = !projectAllowed || await isMemmyProjectSkillDirectoryCurrent(root, sourceId);
+      if (memoryCurrent && projectCurrent) return false;
 
       if (!memoryCurrent) {
         if (kind === "plugin") await target.installPlugin!(sourceId);
@@ -163,13 +198,19 @@ export function createSkillDistributionService(
         else await replaceMemmySkillDirectory(root, manifest);
       }
       // The project skill is installed with the memory skill; an agent connected before it existed gets it here.
-      if (!(await isMemmyProjectSkillDirectoryCurrent(root, sourceId))) await replaceMemmyProjectSkillDirectory(root, sourceId);
+      // 没授权协作项目时不补装：这一份授权是单独的，不能靠记忆接入顺带写进去。
+      if (projectAllowed && !(await isMemmyProjectSkillDirectoryCurrent(root, sourceId))) {
+        await replaceMemmyProjectSkillDirectory(root, sourceId);
+      }
       return true;
     },
 
     async ensureProjectSkills() {
+      const permission = await options.projectSkillPermission?.() ?? PERMISSIVE;
+      if (!permission.granted) return [];
       const written: string[] = [];
       for (const target of options.targetRegistry.list()) {
+        if (permission.disabledAgents.includes(target.targetId)) continue;
         const root = await target.resolveRootDirectory();
         if (!root || !(await directoryExists(root))) continue;
         if (await isMemmyProjectSkillDirectoryCurrent(root, target.targetId)) continue;
@@ -177,6 +218,36 @@ export function createSkillDistributionService(
         written.push(target.targetId);
       }
       return written;
+    },
+
+    async installProjectSkill(sourceId) {
+      const target = options.targetRegistry.require(sourceId);
+      const root = await target.resolveRootDirectory();
+      if (!root) throw new AgentSourceUnavailableError(target.displayName);
+      await replaceMemmyProjectSkillDirectory(root, sourceId);
+    },
+
+    async removeProjectSkill(sourceId) {
+      const root = await options.targetRegistry.get(sourceId)?.resolveRootDirectory();
+      if (!root) return;
+      await removeMemmyProjectSkillDirectory(root);
+    },
+
+    async removeProjectSkills() {
+      const removed: string[] = [];
+      for (const target of options.targetRegistry.list()) {
+        const root = await target.resolveRootDirectory().catch(() => null);
+        if (!root) continue;
+        if (!(await memmyProjectSkillExists(root))) continue;
+        await removeMemmyProjectSkillDirectory(root);
+        removed.push(target.targetId);
+      }
+      return removed;
+    },
+
+    async hasProjectSkill(sourceId) {
+      const root = await options.targetRegistry.get(sourceId)?.resolveRootDirectory().catch(() => null);
+      return root ? memmyProjectSkillExists(root) : false;
     }
   };
 }

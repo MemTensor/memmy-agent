@@ -30,6 +30,7 @@ import { createCollabCloudRequest, createCollabService } from "./services/collab
 import { createLocalSessionReader } from "./adapters/outbound/agent-source/session-reference/local-session-reader.js";
 import { createBuiltinAgentSourceRegistry } from "./services/builtin-agent-source-registry.js";
 import { defaultCollabHome, refreshCollabAgentSkills } from "./services/collab-added-agents.js";
+import { createCollabAgentAccessService } from "./services/collab-agent-access-service.js";
 import { createProjectDirectoryService } from "./services/project-directory-service.js";
 import type { PluginService } from "./services/plugin-service.js";
 import {
@@ -285,17 +286,46 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
      * 启动时顺手把它们的技能刷到当前版本。
      */
     const collabHome = defaultCollabHome();
+    const collabAgentRegistry = createBuiltinAgentSourceRegistry();
+    /**
+     * 在其他 Agent 中使用协作项目的授权。读取任务、安装 `memmy-project` 都看这一份：
+     * 未授权时本机任务读取器一个适配器也不给，根本就不去扫它们的记录。
+     */
+    const collabAgentAccess = createCollabAgentAccessService({
+      homeDirectory: collabHome,
+      skillDistributionService: services.skillDistribution,
+      sourceRegistry: collabAgentRegistry
+    });
+    // 用户自己添加的 Agent 不在授权范围里：添加它们本身就是那一下授权，启动时照旧刷到当前版本。
     void refreshCollabAgentSkills({ homeDirectory: collabHome }).then((updated) => {
       if (updated > 0) console.log(`Refreshed the memmy-project skill of ${updated} added agent(s)`);
     }).catch((error: unknown) => {
       console.warn(`Refreshing added agents' skills did not complete: ${error instanceof Error ? error.message : String(error)}`);
     });
+    // 内置 Agent 看协作项目的授权：授权还在时给新出现的 Agent 补装，未授权时什么也不写。
+    void collabAgentAccess.read()
+      .then(async (access) => (access.granted ? await collabAgentAccess.install() : null))
+      .then((result) => {
+        const failed = result?.results.filter((item) => !item.ok) ?? [];
+        if (failed.length) console.warn(`memmy-project install did not complete for: ${failed.map((item) => item.sourceId).join(", ")}`);
+      })
+      .catch((error: unknown) => {
+        console.warn(`Installing memmy-project at startup did not complete: ${error instanceof Error ? error.message : String(error)}`);
+      });
     const collab = createCollabService({
       cloudBaseUrl: cloudConfig.baseUrl,
       getAccount: getCollabAccount,
       userMode,
       // The backend reads this machine's agent sessions itself, so association works without the Memory service.
-      localSessions: createLocalSessionReader({ registry: createBuiltinAgentSourceRegistry() }),
+      localSessions: createLocalSessionReader({
+        registry: collabAgentRegistry,
+        // 未授权时一个都不读；关掉的 Agent 也不进入扫描范围，而不是读完再筛。
+        adapters: async () => {
+          const allowed = new Set(await collabAgentAccess.readableSourceIds());
+          return collabAgentRegistry.list().filter((adapter) => allowed.has(adapter.descriptor.sourceId));
+        }
+      }),
+      agentAccess: () => collabAgentAccess.read(),
       ...(process.env.MEMMY_SESSION_LINK_BASE_URL?.trim() ? { linkBaseUrl: process.env.MEMMY_SESSION_LINK_BASE_URL.trim() } : {}),
       // 协作项目的指令存在协作侧自己的文件里，与本机项目的项目指令互不影响。
       collabInstructions: services.collabInstructions,
@@ -317,6 +347,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         getSession: getCloudAccount
       },
       collab,
+      collabAgentAccess,
       projectDirectory: createProjectDirectoryService(),
       permissionManager,
       services,

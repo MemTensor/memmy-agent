@@ -3,11 +3,14 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { MAX_COLLAB_INSTRUCTIONS_CHARS } from "@memmy/local-api-contracts";
 import { CollabError, sinceWindowMs, type CollabService } from "../../../../services/collab-service.js";
+import type { CollabAgentAccessService } from "../../../../services/collab-agent-access-service.js";
 import { connectCollabAgent, removeCollabAgent } from "../../../../services/collab-added-agents.js";
 import { withErrorEnvelope } from "../../../../services/error-envelope.js";
 
 export interface RegisterCollabRoutesOptions {
   collab: CollabService;
+  /** 「在其他 Agent 中使用协作项目」的授权：设置页与授权弹窗读写它。 */
+  agentAccess?: CollabAgentAccessService;
   authenticateRuntimeToken: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
   recallProjectKnowledge?: (query: string, projectId: string) => Promise<{ enabled: boolean; evidence: unknown[]; projectOnly?: boolean }>;
 }
@@ -44,6 +47,11 @@ const CandidatesSchema = z.object({
   limit: z.coerce.number().int().min(1).max(20).optional()
 });
 const SourceIdSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/u);
+/** 用户添加的 Agent 的 sourceId 形如 `added-qoder-82ef827e`，与内置来源同一套字符。 */
+const AgentSourceSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,40}$/u, "Agent ID 无效");
+const AgentAccessSchema = z.object({ granted: z.boolean() }).strict();
+const AgentAccessInstallSchema = z.object({ sourceIds: z.array(AgentSourceSchema).max(100).optional() }).strict();
+const AgentEnabledSchema = z.object({ enabled: z.boolean() }).strict();
 const ConversationIdSchema = z.string().min(1).max(200);
 const LinksSchema = z.object({
   groups: z.array(z.object({
@@ -340,6 +348,46 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
   app.post("/api/collab/local-sessions", guard, withErrorEnvelope(async (request, reply) => {
     const input = LocalSessionsSchema.parse(request.body ?? {});
     return reply.send(await options.collab.listLocalSessions(input));
+  }));
+
+  // 在其他 Agent 中使用协作项目的授权：设置页、授权弹窗与看板的询问都读写这一份状态。
+  app.get("/api/collab/agent-access", guard, withErrorEnvelope(async (_request, reply) => {
+    if (!options.agentAccess) throw new CollabError("not_found", "这个版本不支持协作项目授权");
+    return reply.send(await options.agentAccess.view());
+  }));
+
+  app.put("/api/collab/agent-access", guard, withErrorEnvelope(async (request, reply) => {
+    if (!options.agentAccess) throw new CollabError("not_found", "这个版本不支持协作项目授权");
+    const input = AgentAccessSchema.parse(request.body ?? {});
+    const result = await options.agentAccess.setGranted(input.granted);
+    // 状态与逐个 Agent 的安装结果平铺在同一个回应里：界面一次拿到，失败的可重试。
+    return reply.send({ ...result.view, results: result.results });
+  }));
+
+  // 已授权但没装上（当时 Agent 不在、或装失败）时重新装一次，可只装指定几个。
+  app.post("/api/collab/agent-access/install", guard, withErrorEnvelope(async (request, reply) => {
+    if (!options.agentAccess) throw new CollabError("not_found", "这个版本不支持协作项目授权");
+    const input = AgentAccessInstallSchema.parse(request.body ?? {});
+    const result = await options.agentAccess.install(input.sourceIds);
+    return reply.send({ ...result.view, results: result.results });
+  }));
+
+  // 记下已经在项目里询问过一次：选「暂不安装」也算，之后不再主动询问。
+  app.post("/api/collab/agent-access/asked", guard, withErrorEnvelope(async (_request, reply) => {
+    if (!options.agentAccess) throw new CollabError("not_found", "这个版本不支持协作项目授权");
+    await options.agentAccess.markAsked();
+    return reply.send(await options.agentAccess.view());
+  }));
+
+  // 设置里逐个开关：关掉不再读取、卸载组件；打开时若已授权就装回去。
+  app.put<{ Params: { sourceId: string } }>("/api/collab/agent-access/agents/:sourceId", guard, withErrorEnvelope(async (request, reply) => {
+    if (!options.agentAccess) throw new CollabError("not_found", "这个版本不支持协作项目授权");
+    const input = AgentEnabledSchema.parse(request.body ?? {});
+    const result = await options.agentAccess.setAgentEnabled(
+      AgentSourceSchema.parse((request.params as { sourceId: string }).sourceId),
+      input.enabled
+    );
+    return reply.send({ ...result.view, results: result.results });
   }));
 
   app.get("/api/collab/sessions/search", guard, withErrorEnvelope(async (request, reply) => {

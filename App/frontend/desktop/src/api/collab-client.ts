@@ -124,6 +124,33 @@ const AddedAgentSchema = z.object({
 export type AddedAgent = z.infer<typeof AddedAgentSchema>;
 const AddedAgentsResponseSchema = z.object({ agents: z.array(AddedAgentSchema) });
 const RemoveAgentResponseSchema = z.object({ text: z.string() });
+/** 「在其他 Agent 中使用协作项目」：设置里列出的一个 Agent。 */
+const CollabAgentAccessAgentSchema = z.object({
+  sourceId: z.string(),
+  name: z.string(),
+  available: z.boolean(),
+  enabled: z.boolean(),
+  installed: z.boolean(),
+  added: z.boolean().nullish().transform((value) => value ?? false)
+});
+const CollabAgentInstallResultSchema = z.object({
+  sourceId: z.string(),
+  name: z.string(),
+  ok: z.boolean(),
+  message: z.string().optional()
+});
+/**
+ * 授权状态与 Agent 清单。`results` 只在授权或重新安装的回应里有：
+ * 失败的几个可以在界面上重试，其余当已装好。
+ */
+const CollabAgentAccessViewSchema = z.object({
+  granted: z.boolean(),
+  askedInProject: z.boolean(),
+  agents: z.array(CollabAgentAccessAgentSchema)
+});
+const CollabAgentAccessResponseSchema = CollabAgentAccessViewSchema.extend({
+  results: z.array(CollabAgentInstallResultSchema).nullish().transform((value) => value ?? [])
+});
 const SyncResponseSchema = z.object({
   uploaded: z.number(),
   removed: z.number(),
@@ -242,6 +269,10 @@ export type CollabInvite = z.infer<typeof InviteSchema>;
 export type CollabInvitePreview = z.infer<typeof InvitePreviewSchema>;
 export type CollabJoinResult = z.infer<typeof JoinResultSchema>;
 export type CollabKnowledgeView = z.infer<typeof KnowledgeViewSchema>;
+/** 授权状态与设置里列出的 Agent。 */
+export type CollabAgentAccessView = z.infer<typeof CollabAgentAccessViewSchema>;
+export type CollabAgentAccessAgent = z.infer<typeof CollabAgentAccessAgentSchema>;
+export type CollabAgentInstallResult = z.infer<typeof CollabAgentInstallResultSchema>;
 
 export interface CollabClient {
   listProjects(): Promise<{
@@ -298,6 +329,16 @@ export interface CollabClient {
   listAddedAgents(): Promise<AddedAgent[]>;
   /** Removes the agent's memmy-project skill and forgets it; tasks it already joined stay in the project. */
   removeAddedAgent(name: string): Promise<{ text: string }>;
+  /** 在其他 Agent 中使用协作项目的授权状态：看板、授权弹窗与设置页都读它。 */
+  getAgentAccess(): Promise<CollabAgentAccessView>;
+  /** 授权并安装（`true`）或撤销并移除组件（`false`）。 */
+  setAgentAccess(granted: boolean): Promise<{ view: CollabAgentAccessView; results: CollabAgentInstallResult[] }>;
+  /** 已授权但没装上的重新装一次；不传 `sourceIds` 时只补没装的。 */
+  installAgentAccess(sourceIds?: readonly string[]): Promise<{ view: CollabAgentAccessView; results: CollabAgentInstallResult[] }>;
+  /** 记下已经在项目里询问过一次：选「暂不安装」也算，之后不再主动询问。 */
+  markAgentAccessAsked(): Promise<CollabAgentAccessView>;
+  /** 设置里逐个开关某个 Agent：关掉不再读取并卸载组件，打开时若已授权就装回去。 */
+  setAgentEnabled(sourceId: string, enabled: boolean): Promise<{ view: CollabAgentAccessView; results: CollabAgentInstallResult[] }>;
   /** Saves the selection and queues the upload; it returns before the sessions arrive. */
   saveLinks(projectId: string, links: CollabLinks): Promise<CollabSyncResult>;
   /** The Memmy sessions of the project's local folder, each saying whether the project includes it. */
@@ -337,6 +378,11 @@ export interface CollabClient {
   previewInvite(reference: string): Promise<CollabInvitePreview>;
   /** Joins at once or applies, as the project's join mode says; `directory` is where its tasks will run. */
   joinProject(reference: string, directory?: string): Promise<CollabJoinResult>;
+}
+
+/** 只取状态部分：安装结果与状态同一个回应，界面把它们分开用。 */
+function toAgentAccessView(result: { granted: boolean; askedInProject: boolean; agents: CollabAgentAccessAgent[] }): CollabAgentAccessView {
+  return { granted: result.granted, askedInProject: result.askedInProject, agents: result.agents };
 }
 
 /** Online projects through the desktop's local API, which signs cloud requests with the person's account. */
@@ -487,6 +533,46 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
 
     async removeAddedAgent(name) {
       return requestJson({ config, path: "/api/collab/agents/remove", schema: RemoveAgentResponseSchema, body: { name } });
+    },
+
+    async getAgentAccess() {
+      return requestJson({ config, path: "/api/collab/agent-access", schema: CollabAgentAccessViewSchema });
+    },
+
+    async setAgentAccess(granted) {
+      const result = await requestJson({
+        config,
+        path: "/api/collab/agent-access",
+        schema: CollabAgentAccessResponseSchema,
+        body: { granted },
+        init: { method: "PUT" }
+      });
+      return { view: toAgentAccessView(result), results: result.results };
+    },
+
+    async installAgentAccess(sourceIds) {
+      const result = await requestJson({
+        config,
+        path: "/api/collab/agent-access/install",
+        schema: CollabAgentAccessResponseSchema,
+        body: sourceIds && sourceIds.length ? { sourceIds: [...sourceIds] } : {}
+      });
+      return { view: toAgentAccessView(result), results: result.results };
+    },
+
+    async markAgentAccessAsked() {
+      return requestJson({ config, path: "/api/collab/agent-access/asked", schema: CollabAgentAccessViewSchema });
+    },
+
+    async setAgentEnabled(sourceId, enabled) {
+      const result = await requestJson({
+        config,
+        path: `/api/collab/agent-access/agents/${encodeURIComponent(sourceId)}`,
+        schema: CollabAgentAccessResponseSchema,
+        body: { enabled },
+        init: { method: "PUT" }
+      });
+      return { view: toAgentAccessView(result), results: result.results };
     },
 
     async saveLinks(projectId, links) {
