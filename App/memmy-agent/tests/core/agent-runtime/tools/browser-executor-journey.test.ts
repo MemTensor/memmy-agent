@@ -143,5 +143,7 @@ describe.skipIf(!fs.existsSync(executable))('production extension through the re
     await expect(manager.callTool(scope, 'browser_snapshot', {})).rejects.toThrow(/blocked/);
     await manager.closeSession(relatedScope);
     expect(page.isClosed()).toBe(false); expect(popup.isClosed()).toBe(false);
-  }, 45_000);
+  // This includes cold Chromium startup and the complete multi-action journey;
+  // individual bridge and browser operations retain their own bounded deadlines.
+  }, 120_000);
 });

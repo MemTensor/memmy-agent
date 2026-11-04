@@ -82,11 +82,15 @@ try {
     "src/services/tests/plugin-service.test.ts", "src/services/tests/plugin-update-service.test.ts",
     "src/adapters/outbound/memmy-agent-admin-client/**/*.ts"]);
   // Full Agent regression includes Provider, MCP, runtime admission, History and recording.
+  // The real Chromium journey owns a browser process tree. Run it separately so
+  // cold extension startup does not compete with another test file on hosted Macs.
+  const browserJourney = "tests/core/agent-runtime/tools/browser-executor-journey.test.ts";
+  tests("browser-executor-journey", agent, [browserJourney]);
   // Keep the complete suite, partitioned by Vitest's exhaustive file sharding.
   // Cold hosted runners exceeded the per-process 10-minute bound while still
   // finishing tests; each shard keeps that bound and a separate JSON report.
   for (let shard = 1; shard <= 4; shard++) {
-    tests(`agent-full-${shard}-of-4`, agent, [`--shard=${shard}/4`]);
+    tests(`agent-full-${shard}-of-4`, agent, [`--exclude=${browserJourney}`, `--shard=${shard}/4`]);
   }
   tests("plugin-host", root, ["App/backend/src/services/tests/plugin-service.test.ts",
     "App/backend/src/services/tests/plugin-update-service.test.ts",
