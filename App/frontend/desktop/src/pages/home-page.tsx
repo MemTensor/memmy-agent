@@ -1085,6 +1085,7 @@ export function HomePage() {
     agentMessages: state.agent.messages,
     onDraft: (text) => setCurrentComposerDraft(text),
     onStageFiles: (files) => attachMediaFilesToScope(chatScopeKey, files),
+    onStageExistingFiles: (files) => attachExistingMediaToScope(chatScopeKey, files),
     onOpenArtifact: (artifact) => {
       if (!artifact.path) return false;
       const tab = threadTabForInAppPreview({ name: artifact.name, path: artifact.path });
@@ -2932,6 +2933,30 @@ export function HomePage() {
     }
   }
 
+  /**
+   * Stages files that are already stored by the gateway.
+   *
+   * Recording transcripts live in the workspace's recordings folder. Reusing
+   * their paths avoids an identical upload into the private media cache (and
+   * the random cache prefix that comes with it).
+   */
+  async function attachExistingMediaToScope(scopeKey: string, media: UploadedAgentMedia[]): Promise<boolean> {
+    const seenSourceKeys = new Set((pendingAttachmentsRef.current[scopeKey] ?? []).map((item) => item.sourceKey));
+    const nextPending: PendingAttachment[] = [];
+    for (const item of media) {
+      if (item.kind !== "file" && item.kind !== "image") continue;
+      const pending = uploadedMediaToPendingAttachment(item);
+      if (seenSourceKeys.has(pending.sourceKey)) continue;
+      seenSourceKeys.add(pending.sourceKey);
+      nextPending.push(pending);
+    }
+    if (!nextPending.length) return false;
+    setPendingAttachmentsForScope(scopeKey, (current) => [...current, ...nextPending]);
+    setComposerMediaErrorForScope(scopeKey, null);
+    track({ name: "agent_media_attached", params: { page_path: "/main", media_type: mediaTypeForAnalytics(nextPending) }, consentTier: "basic" });
+    return true;
+  }
+
   async function updatePendingImageEncoding(scopeKey: string, id: string, file: File): Promise<boolean> {
     try {
       const encoded = await encodePendingAgentImage(file);
@@ -4081,6 +4106,28 @@ export function queuedMediaToPendingAttachment(
     status: "ready" as const,
     originalBytes: 0,
     reusedMedia: { ...media, path: media.path, name: fileName, kind: media.kind ?? "file" as const },
+  };
+  return media.kind === "image"
+    ? { ...base, kind: "image", previewUrl: media.url ?? "" }
+    : { ...base, kind: "file", extension: fileName.includes(".") ? fileName.slice(fileName.lastIndexOf(".")) : "" };
+}
+
+/**
+ * Turns a gateway-owned file into a composer attachment without another upload.
+ *
+ * Only images and documents are composer attachment types. Audio recordings
+ * reach the conversation through their text transcript instead.
+ */
+export function uploadedMediaToPendingAttachment(media: UploadedAgentMedia): PendingAttachment {
+  if (media.kind === "audio") throw new Error("Audio cannot be attached directly to the composer");
+  const fileName = media.name || "attachment";
+  const base = {
+    id: randomPendingAttachmentId(media.kind),
+    sourceKey: `stored:${media.path}`,
+    fileName,
+    status: "ready" as const,
+    originalBytes: media.bytes,
+    reusedMedia: { ...media, path: media.path, name: fileName },
   };
   return media.kind === "image"
     ? { ...base, kind: "image", previewUrl: media.url ?? "" }

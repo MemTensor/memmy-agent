@@ -73,7 +73,8 @@ try {
     "App/backend/src/adapters/outbound/memmy-agent-admin-client/tests"]);
   const packaging = JSON.parse(fs.readFileSync(path.join(root, "package.json"))).scripts["test:packaging-guards"];
   tests("packaging-guards", root, packaging.replace(/^vitest run /, "").split(/\s+/));
-  tests("recording-ui", frontend, ["src/pages/tests/task-recordings.interaction.test.tsx", "src/pages/tests/plugin-update-indicator.test.tsx"]);
+  tests("recording-ui", frontend, ["src/pages/tests/task-recordings.interaction.test.tsx", "src/pages/tests/plugin-update-indicator.test.tsx",
+    "src/pages/tests/conversation-features.interaction.test.tsx"]);
   report.status = report.stages.every(stage => stage.exitCode === 0) ? "passed" : "failed";
 } catch (error) {
   report.status = "failed";

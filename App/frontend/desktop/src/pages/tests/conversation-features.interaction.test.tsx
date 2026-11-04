@@ -16,6 +16,9 @@ const mocks = vi.hoisted(() => ({
   openArtifact: vi.fn(() => true),
   send: vi.fn(async () => true), sending: false,
   messages: [] as AgentChatMessage[],
+  stageFiles: vi.fn(async () => undefined),
+  stageExistingFiles: vi.fn(async () => undefined),
+  recordingDeliver: undefined as undefined | ((file: File, mode: "summarize" | "attach", persisted?: unknown) => void),
 }));
 vi.mock("../../app/providers.js", () => ({ useApiClients: () => ({ clients: clients }) }));
 vi.mock("../../state/app-state.js", () => ({ useAppState: () => ({
@@ -25,7 +28,8 @@ vi.mock("../../state/app-state.js", () => ({ useAppState: () => ({
 vi.mock("../recording-entry.js", async (original) => {
   const actual = await original<typeof import("../recording-entry.js")>();
   const { useState } = await import("react");
-  return { ...actual, useRecordingEntry: () => {
+  return { ...actual, useRecordingEntry: (_asr: unknown, _upload: unknown, deliver: typeof mocks.recordingDeliver) => {
+    mocks.recordingDeliver = deliver;
     const [compactOpen, setCompact] = useState(false);
     return { compactOpen, toggleCompact: () => setCompact((open) => !open), closeCompact: () => setCompact(false),
       close() {}, archive() {}, session: { status: "idle", elapsedMs: 0, live: null, error: null, lines: [], recordings: [],
@@ -50,7 +54,7 @@ describe("conversation feature integration", () => {
   function Harness() {
     ui = usePluginUi();
     features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: mocks.draft,
-      onStageFiles: async () => {}, onOpenArtifact: mocks.openArtifact, onSend: mocks.send, onOpenRecording: mocks.openRecording });
+      onStageFiles: mocks.stageFiles, onStageExistingFiles: mocks.stageExistingFiles, onOpenArtifact: mocks.openArtifact, onSend: mocks.send, onOpenRecording: mocks.openRecording });
     return <>{features.recorders}<header>{features.conversationShortcut}</header><nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
   }
   const render = () => root.render(<I18nProvider language="zh-CN"><PluginUiProvider><Harness /></PluginUiProvider></I18nProvider>);
@@ -145,6 +149,22 @@ describe("conversation feature integration", () => {
     expect(recordingArchiveMaterials(entry)).toEqual([]);
     expect(recordingArchiveMaterials({ ...entry, id: "archive:other", handedOver: false }))
       .toEqual([{ ...transcriptFile, collected: true }]);
+  });
+
+  it("reuses a persisted recording transcript instead of staging a new upload", async () => {
+    await act(async () => render());
+    const persisted = { kind: "file" as const, path: "/workspace/recordings/录音转写.txt", name: "录音转写.txt",
+      mime: "text/plain" as const, bytes: 34, url: "/text" };
+    const generated = new File(["转写内容"], "录音记录.txt", { type: "text/plain" });
+
+    await act(async () => mocks.recordingDeliver?.(generated, "attach", persisted));
+    expect(mocks.stageExistingFiles).toHaveBeenCalledWith([persisted]);
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+
+    mocks.stageExistingFiles.mockClear();
+    await act(async () => mocks.recordingDeliver?.(generated, "attach"));
+    expect(mocks.stageExistingFiles).not.toHaveBeenCalled();
+    expect(mocks.stageFiles).toHaveBeenCalledWith([generated]);
   });
 
   it("opens a staged transcript in the shared task file preview", async () => {

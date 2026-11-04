@@ -84,6 +84,8 @@ export interface MemoryClient {
   completeTurn(input: CompleteTurnInput & { turnId: string }, context?: MemoryRequestContext): Promise<CompleteTurnOutput>;
 
   completeSourceTurn(input: SourceTurnCompleteInput, context?: MemoryRequestContext): Promise<SourceTurnCompleteOutput>;
+  /** Freeze what an import added to these scanned Sessions into L3 batches. */
+  freezeScanSessions(source: string, sessionIds: string[], context?: MemoryRequestContext): Promise<{ batches: number }>;
 
   search(input: SearchInput, context?: MemoryRequestContext): Promise<SearchOutput>;
   embeddingInference?(input: EmbeddingInferenceInput, options?: { signal?: AbortSignal }): Promise<EmbeddingInferenceOutput>;

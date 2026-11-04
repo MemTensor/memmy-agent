@@ -241,6 +241,19 @@ test "$install_calls" -eq 1`;
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
+  it("resolves Electron through the desktop workspace when npm hoists the package", () => {
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+
+electron_dir="$(resolve_electron_package_dir)"
+expected_dir="$(node --eval 'const path = require("node:path"); process.stdout.write(path.dirname(require.resolve("electron/package.json")))')"
+test -f "$electron_dir/install.js"
+test "$electron_dir" = "$expected_dir"`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it("migrates managed Windows launchers and preserves unrelated files", () => {
     const source = readFileSync(devStartPath, "utf8");
     expect(source).toContain('if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then');

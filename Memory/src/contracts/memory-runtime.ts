@@ -57,6 +57,7 @@ export const JobTypeSchema = z.enum([
   "l2_induction",
   "l3_abstraction",
   "l3_world_model_update",
+  "l3_unit_update",
   "project_environment_profile",
   "skill_crystallization",
   "skill_cluster_assign",
@@ -493,6 +494,7 @@ export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   episodeId: z.string().optional(),
   turnId: z.string().optional(),
   layers: z.array(MemoryLayerSchema).optional(),
+  recordEvent: z.boolean().optional(),
   verbose: z.boolean().optional()
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;
