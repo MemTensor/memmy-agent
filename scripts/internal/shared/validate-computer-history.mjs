@@ -136,6 +136,12 @@ try {
   tests("contract-tests", root, ["tests/computer-history-contract.test.ts", "tests/windows-history-workflow.test.ts"]);
   // The Windows Vite module runner cannot load electron-builder's ESM graph.
   // Keep the Node runner limited to MJS packaging tests: TS source imports need Vite resolution.
+  if (process.platform === "darwin") {
+    // Electron downloads its binary lazily on first require. Prepare the dependency
+    // separately so a cold checkout does not spend the test's timeout downloading it.
+    run("prepare-electron", root, ["--input-type=module", "-e",
+      `import { createRequire } from 'node:module'; console.log(createRequire(${JSON.stringify(path.join(root, "App/shell/desktop/package.json"))})('electron'));`]);
+  }
   tests("packaging-tests", root, ["tests/computer-history-packaging.test.mjs", "tests/computer-history-windows-packaging.test.mjs",
     ...(process.platform === "win32" ? ["--experimental.viteModuleRunner=false"] : [])],
     { ...environment, ...(options["--native-bin"] ? { MEMMY_WINDOWS_HISTORY_TEST_BIN_DIR: options["--native-bin"] } : {}) });
