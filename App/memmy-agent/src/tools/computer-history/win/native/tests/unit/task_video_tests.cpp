@@ -43,6 +43,17 @@ int wmain() {
     idle.Finish(70000); Require(idle.VideoTime(70000) == 21000 && idle.Spans().size() == 2);
     memmy::IdleVideoTimeline original(false);
     Require(original.Observe(60000, false) && original.VideoTime(60000) == 60000);
+    Require(original.CanRotate(60000));
+    memmy::IdleVideoTimeline boundary(true);
+    Require(boundary.Observe(200, true));
+    Require(boundary.CanRotate(9199) && !boundary.CanRotate(9200));
+    Require(boundary.Observe(10000, false) && !boundary.CanRotate(10000));
+    Require(!boundary.Observe(10200, false));
+    Require(boundary.Observe(19000, true) && boundary.CanRotate(19000));
+    Require(boundary.VideoTime(19000) == 10200 && boundary.Spans().size() == 1);
+    memmy::IdleVideoTimeline activeBoundary(true);
+    Require(activeBoundary.Observe(200, true) && !activeBoundary.CanRotate(10000));
+    Require(activeBoundary.Observe(10050, true) && activeBoundary.CanRotate(10050));
     fs::create_directory(root);
     Require(memmy::win::TaskVideo::WriteFixture(root.wstring()) == 0);
     Require(memmy::win::TaskVideo::Finalize(root.wstring()) == 0);

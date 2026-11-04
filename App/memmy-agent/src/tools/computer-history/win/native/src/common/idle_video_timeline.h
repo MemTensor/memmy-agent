@@ -18,6 +18,10 @@ class IdleVideoTimeline {
   double VideoTime(double now) const {
     return std::max(0.0, now - skipped_ - (idleStart_ ? std::max(0.0, now - *idleStart_) : 0.0));
   }
+  // A periodic rollover immediately before idle would create a tiny final
+  // encoder segment. Let idle seal the current segment instead (at most one
+  // second later); any new image change permits normal rollover immediately.
+  bool CanRotate(double now) const { return !enabled_ || now - lastChange_ < 9000; }
   void Finish(double now) {
     if (!idleStart_) return;
     if (now > *idleStart_) { spans_.emplace_back(*idleStart_, now); skipped_ += now - *idleStart_; }

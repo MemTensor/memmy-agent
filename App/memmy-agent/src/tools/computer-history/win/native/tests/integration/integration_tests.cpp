@@ -1742,6 +1742,14 @@ void CaseTaskVideoIdle() {
   const auto idle = ParseLine(ReadFileBytes(directory / L"idle-spans.json"));
   Expect(idle.at("activeStartMs").is_number(), "static image automatically suspends encoding after 10 seconds");
   Expect(fs::exists(directory / L"parts/000001.json"), "captured prefix is durably sealed during idle wait");
+  // Check the current tail too: the old test accepted a previously rotated
+  // prefix even when Finalize was stuck on an unsealed short second part.
+  for (const auto& entry : fs::directory_iterator(directory / L"parts")) {
+    if (entry.path().extension() == L".mp4") {
+      auto metadata = entry.path(); metadata.replace_extension(L".json");
+      Expect(fs::exists(metadata), "every captured part is durably sealed during idle wait");
+    }
+  }
   const auto before = ReadFileBytes(directory / L"frames.jsonl"); waitInForeground(1000, "during idle file stability check");
   Expect(before == ReadFileBytes(directory / L"frames.jsonl"), "no frames written during idle wait");
   fixture.Command("set-message idle-image-changed"); waitInForeground(2200, "after the idle image changes");

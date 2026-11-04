@@ -385,6 +385,8 @@ struct TaskVideo::Impl {
         gapReason = std::move(reason); gapStart = now;
       };
       const auto seal = [&](double end) {
+        std::fprintf(stderr, "[task-video] sealing part=%u durationMs=%.3f frames=%u\n", part, end - partStart, partFrame);
+        std::fflush(stderr);
         encoder.Close(static_cast<LONGLONG>((end - partStart) * 10000));
         if (!FlushFileBuffers(indexFile.get()) || !FlushFileBuffers(gapFile.get())) throw std::runtime_error("index_flush_failed");
         auto sealed = Own(CreateFileW(file.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
@@ -392,6 +394,8 @@ struct TaskVideo::Impl {
         sealed.reset();
         AtomicJson(directory / L"parts" / PartName(part, L"json"), {{"index", part}, {"startMs", partStart},
           {"durationMs", end - partStart}, {"bytes", std::filesystem::file_size(file)}, {"sha256", Sha256Hex(Read(file, 64 * 1024 * 1024))}});
+        std::fprintf(stderr, "[task-video] sealed part=%u\n", part);
+        std::fflush(stderr);
       };
       encoder.Push(pixels, 0);
       WriteAll(indexFile.get(), DumpJson({{"index", 0}, {"timeMs", 0}, {"qpc", std::to_string(origin)}, {"partId", "part-000001"},
@@ -472,7 +476,7 @@ struct TaskVideo::Impl {
           }
           if (write) {
             const auto videoTime = timeline.VideoTime(now);
-            if (!encoderOpen || (videoTime - partStart >= 10000 && partFrame > 0)) {
+            if (!encoderOpen || (videoTime - partStart >= 10000 && partFrame > 0 && timeline.CanRotate(now))) {
               if (encoderOpen) seal(videoTime);
               ++part; partFrame = 0; partStart = videoTime;
               file = directory / L"parts" / PartName(part, L"mp4"); encoder.Open(file);
