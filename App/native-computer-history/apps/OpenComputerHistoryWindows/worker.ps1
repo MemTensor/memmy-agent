@@ -360,8 +360,6 @@ if ($SelfTest) {
   [void]$snapshotTargets.Add(@{runtimeId='public-button';target=@{role='AXButton';title='Save'}})
   $serializedSnapshot=SnapshotResult $snapshotLines $snapshotTargets $true 2 | ConvertTo-Json -Depth 6 | ConvertFrom-Json
   if ($serializedSnapshot.targets.Count -ne 1 -or $serializedSnapshot.targets[0].target.title -ne 'Save' -or -not $serializedSnapshot.truncated -or $serializedSnapshot.readFailures -ne 2) {throw 'Snapshot target serialization failed'}
-  if (-not (PrivateSignal 'Guest') -or -not (PrivateSignal 'InPrivate') -or -not (PrivateSignal '无痕')) {throw 'Private markers failed'}
-  if (PrivateSignal 'Example - Google Chrome') {throw 'Normal title falsely private'}
   if ((Url 'https://user:secret@example.com/path?token=secret#fragment') -ne 'https://example.com/path') {throw 'URL sanitization failed'}
   if (Url 'chrome://settings') {throw 'Non-web URL accepted'}
   if (ConsentAllowed '') {throw 'Missing consent accepted'}
@@ -369,7 +367,7 @@ if ($SelfTest) {
   if (IsWeChatProcess 'win32.chrome') {throw 'Unrelated app excluded as WeChat'}
   if ((Clean ('a'*1500) 1000).Length -ne 1000) {throw 'Text budget failed'}
   if (-not (NormalProfile 'You' 'avatar_button' '') -or -not (NormalProfile '您' '' 'AvatarToolbarButton')) {throw 'Explicit normal proof failed'}
-  foreach ($label in @('Guest','Incógnito','Privat','Alice','Profile 1','You are browsing privately')) {if (NormalProfile $label 'avatar_button' '') {throw 'Unknown profile accepted'}}
+  foreach ($label in @('Guest','InPrivate','无痕','Incógnito','Privat','Alice','Profile 1','You are browsing privately','Example - Google Chrome')) {if (NormalProfile $label 'avatar_button' '') {throw 'Unknown profile accepted'}}
   if (NormalProfile 'You' 'page-profile-button' '') {throw 'Page label accepted'}
   $one=New-Object 'System.Collections.Generic.HashSet[string]';[void]$one.Add('https://example.com/')
   $empty=New-Object 'System.Collections.Generic.HashSet[string]'

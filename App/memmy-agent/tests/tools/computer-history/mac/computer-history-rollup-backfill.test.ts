@@ -1,3 +1,4 @@
+import { privatePosixFixtureMetadata } from "../../../fixtures/posix-private-state.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +42,7 @@ function legacy(id: string, cited: string[]) {
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "history-rollup-backfill-"));
+  privatePosixFixtureMetadata(root);
   fs.mkdirSync(path.join(root, "histories"));
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });

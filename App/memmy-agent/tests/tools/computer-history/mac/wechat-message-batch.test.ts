@@ -1,11 +1,16 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   normalizeWeChatBatch, WeChatMessageBatchReader, WeChatReaderError,
 } from "../../../../src/tools/computer-history/mac/wechat-message-batch.js";
 import { WeChatHistoryConsentStore } from "../../../../src/tools/computer-history/mac/wechat-consent.js";
+
+// The reader protocol fixture does not invoke the separate native ACL helper.
+vi.mock("../../../../src/tools/computer-history/win/private-files.js", () => ({
+  prepareWindowsWeChatState: () => {}, validateWindowsWeChatConsent: () => true,
+}));
 
 const MESSAGE_TABLE = "Msg_0123456789abcdef0123456789abcdef";
 const CURSOR_KEY = `message_0.db:${MESSAGE_TABLE}`;

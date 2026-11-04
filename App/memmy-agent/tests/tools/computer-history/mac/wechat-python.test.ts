@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveMacWeChatPython } from "../../../../src/tools/computer-history/mac/wechat-python.js";
 
 const temporaries: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   while (temporaries.length) fs.rmSync(temporaries.pop()!, { recursive: true, force: true });
 });
 
@@ -65,6 +66,13 @@ describe("WeChat macOS bundled interpreter", () => {
     const moduleFile = bundle({ executable: false });
     const binary = path.join(path.dirname(moduleFile), "wechat", "python", "bin", "python3");
     fs.writeFileSync(binary, "", { mode: 0o644 });
+    if (process.platform === "win32") {
+      const access = fs.accessSync;
+      vi.spyOn(fs, "accessSync").mockImplementation((file, mode) => {
+        if (file === binary && mode === fs.constants.X_OK) throw Object.assign(new Error("Not executable"), { code: "EACCES" });
+        return access(file, mode);
+      });
+    }
     expect(resolveMacWeChatPython({ moduleFile })).toBeNull();
   });
 });

@@ -1,3 +1,4 @@
+import { privatePosixFixtureMetadata } from "../../../fixtures/posix-private-state.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -90,6 +91,7 @@ beforeEach(() => {
   vi.spyOn(os, "release").mockReturnValue("26.0.0");
   children.length = 0;
   root = fs.mkdtempSync(path.join(os.tmpdir(), "wechat-resume-"));
+  privatePosixFixtureMetadata(root);
   const state = path.join(root, "wechat");
   fs.mkdirSync(state, { mode: 0o700 });
   cursorFile = path.join(state, "cursor.json");

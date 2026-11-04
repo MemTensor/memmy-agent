@@ -44,7 +44,8 @@ function run(name, cwd, command, args) {
     result = spawnSync(command, args, { cwd, env, stdio: ["ignore", descriptor, descriptor], timeout: 600_000 });
   } finally { fs.closeSync(descriptor); }
   if (result.error) fs.appendFileSync(log, result.error.message);
-  report.stages.push({ name, exitCode: result.status, signal: result.signal, elapsedMs: Date.now() - started, log });
+  report.stages.push({ name, exitCode: result.status, signal: result.signal, elapsedMs: Date.now() - started, log,
+    command, args, errorCode: result.error?.code ?? null, timedOut: result.error?.code === "ETIMEDOUT" });
   write();
   console.log(`[Teach Host] ${name}: ${result.status === 0 ? "passed" : `FAILED (see ${log})`}`);
   return result.status === 0;
@@ -81,7 +82,12 @@ try {
     "src/services/tests/plugin-service.test.ts", "src/services/tests/plugin-update-service.test.ts",
     "src/adapters/outbound/memmy-agent-admin-client/**/*.ts"]);
   // Full Agent regression includes Provider, MCP, runtime admission, History and recording.
-  tests("agent-full", agent, []);
+  // Keep the complete suite, partitioned by Vitest's exhaustive file sharding.
+  // Cold hosted runners exceeded the per-process 10-minute bound while still
+  // finishing tests; each shard keeps that bound and a separate JSON report.
+  for (let shard = 1; shard <= 4; shard++) {
+    tests(`agent-full-${shard}-of-4`, agent, [`--shard=${shard}/4`]);
+  }
   tests("plugin-host", root, ["App/backend/src/services/tests/plugin-service.test.ts",
     "App/backend/src/services/tests/plugin-update-service.test.ts",
     "App/backend/src/services/tests/plugin-native-host-services.test.ts",
