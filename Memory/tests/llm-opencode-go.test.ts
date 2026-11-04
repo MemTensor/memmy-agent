@@ -124,4 +124,10 @@ describe("OpenCode Go memory requests", () => {
     expect(classifyProcessingError(new ModelHttpError("upstream error", "openai_compatible", 503, undefined, "missing x-opencode-session")))
       .toEqual({ code: "transient_provider_error", retryAction: "retry" });
   });
+
+  it("recognizes a structured missing-session error type preserved by the HTTP client", () => {
+    expect(classifyProcessingError(new ModelHttpError("invalid session", "openai_compatible", 400,
+      undefined, "invalid session", undefined, "MissingSessionID")))
+      .toEqual({ code: "model_configuration", retryAction: "open_settings" });
+  });
 });

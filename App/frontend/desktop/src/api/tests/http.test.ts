@@ -32,7 +32,8 @@ describe("requestJson", () => {
             error: {
               code: "memory_layer_unavailable",
               message: "Memory layer unavailable",
-              requestId: "req-1"
+              requestId: "req-1",
+              upstreamRequestId: "memory-req-1"
             }
           }),
           { status: 503, headers: { "content-type": "application/json" } }
@@ -51,6 +52,7 @@ describe("requestJson", () => {
       status: 503,
       code: "memory_layer_unavailable",
       requestId: "req-1",
+      upstreamRequestId: "memory-req-1",
       message: "Memory layer unavailable"
     } satisfies Partial<ApiRequestError>);
   });
