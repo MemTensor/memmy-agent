@@ -223,9 +223,10 @@ export class TerminalRunControl {
     }
   }
 
-  async create(sessionKey: string, turnId: string): Promise<TerminalRunState> {
-    const release = await acquire(this.pluginUpdateTarget(), { stale: TURN_LOCK_STALE_MS, update: TURN_LOCK_UPDATE_MS });
+  async create(sessionKey: string, turnId: string, signal?: AbortSignal | null): Promise<TerminalRunState> {
+    const release = await acquire(this.pluginUpdateTarget(), { signal, stale: TURN_LOCK_STALE_MS, update: TURN_LOCK_UPDATE_MS });
     try {
+      if (signal?.aborted) throw abortError(signal);
       const now = Date.now();
       return (await this.update(sessionKey, () => ({
         canonicalSessionKey: sessionKey,

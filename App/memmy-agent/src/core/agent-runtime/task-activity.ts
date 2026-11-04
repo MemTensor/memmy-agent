@@ -19,8 +19,22 @@ export class AgentTaskActivity {
     };
   }
 
-  async run<T>(operation: () => Promise<T>): Promise<T> {
-    while (this.update) await this.update.done;
+  async run<T>(operation: () => Promise<T>, signal?: AbortSignal | null): Promise<T> {
+    while (this.update) {
+      const done = this.update.done;
+      await new Promise<void>((resolve, reject) => {
+        const aborted = () => {
+          const error = new Error("task cancelled"); error.name = "TaskCancelledError";
+          signal?.removeEventListener("abort", aborted); reject(error);
+        };
+        if (signal?.aborted) { aborted(); return; }
+        signal?.addEventListener("abort", aborted, { once: true });
+        void done.then(() => { signal?.removeEventListener("abort", aborted); resolve(); });
+      });
+      if (signal?.aborted) {
+        const error = new Error("task cancelled"); error.name = "TaskCancelledError"; throw error;
+      }
+    }
     this.active++;
     try { return await operation(); }
     finally { this.active--; }

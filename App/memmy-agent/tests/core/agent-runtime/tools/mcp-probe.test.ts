@@ -51,8 +51,15 @@ describe("MCP HTTP probe", () => {
     expect(await probeHttpUrl("http://127.0.0.1:19999/mcp", 0.05)).toBe(false);
   });
 
-  it("uses the default HTTP port when URL has no port", async () => {
-    expect(await probeHttpUrl("http://unreachable-host.test/mcp", 0.05)).toBe(false);
+  it.each([["http", 80], ["https", 443]])("uses the default %s port without depending on local DNS or proxy routing", async (protocol, port) => {
+    const connect = vi.spyOn(net, "createConnection").mockImplementation(() => {
+      const socket = new EventEmitter() as net.Socket;
+      socket.destroy = vi.fn(() => socket);
+      queueMicrotask(() => socket.emit("error", new Error("controlled refusal")));
+      return socket;
+    });
+    expect(await probeHttpUrl(`${protocol}://unreachable-host.test/mcp`, 0.05)).toBe(false);
+    expect(connect).toHaveBeenCalledWith({ host: "unreachable-host.test", port });
   });
 });
 

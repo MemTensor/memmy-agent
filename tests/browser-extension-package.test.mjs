@@ -51,6 +51,14 @@ describe("packaged browser extension provenance", () => {
     manifest.content_scripts[0].world = "ISOLATED"; manifest.permissions.push("cookies"); fs.writeFileSync(file, JSON.stringify(manifest));
     expect(() => verifyBrowserExtension(source, destination)).toThrow(/permission scope/u);
   });
+  it.each([["matches", ["<all_urls>"]], ["match_about_blank", true], ["match_origin_as_fallback", true]])
+    ("refuses expanded History frame scope: %s", (key, value) => {
+      const destination = fixture(), file = path.join(destination, "manifest.json");
+      const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+      manifest.content_scripts[0][key] = value;
+      fs.writeFileSync(file, JSON.stringify(manifest));
+      expect(() => verifyBrowserExtension(source, destination)).toThrow(/History scripts/u);
+    });
   it("guards both Mac and Windows final resource folders", () => {
     for (const file of ["scripts/internal/mac/build-dmg.sh", "scripts/internal/win/build-nsis.sh"])
       expect(fs.readFileSync(path.join(root, file), "utf8")).toContain("verify-browser-extension.mjs");

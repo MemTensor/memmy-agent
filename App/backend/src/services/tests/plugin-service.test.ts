@@ -643,6 +643,30 @@ describe("PluginService", () => {
     expect(service.get(release.manifest.id).version).toBe("1.0.0");
   });
 
+  it("keeps a recording acquired during download and lets disable release it before updating", async () => {
+    let leased = false;
+    const next = { manifest: { ...release.manifest, version: "2.0.0" } };
+    const { service, artifactManager, runtimeHost } = createContext([release, next], undefined, {
+      hasResourceLease: () => leased,
+      releaseResources: async () => { leased = false; }
+    });
+    await service.install(release.manifest.id, "1.0.0");
+    service.configure(release.manifest.id, { config: { database: "crossref" }, secrets: { "api-key": "secret" } });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    vi.mocked(artifactManager.install).mockImplementationOnce(async () => {
+      leased = true; return { artifactHash: null, rootPath: null };
+    });
+    const update = service.update(release.manifest.id, "2.0.0");
+    await vi.waitFor(() => expect(leased).toBe(true));
+    expect(service.get(release.manifest.id).version).toBe("1.0.0");
+    expect(runtimeHost.deactivate).not.toHaveBeenCalled();
+    await service.disable(release.manifest.id);
+    expect(await update).toMatchObject({ version: "2.0.0", state: "disabled" });
+    expect(runtimeHost.activate).toHaveBeenCalledTimes(1);
+    await service.shutdown();
+  });
+
   it.each(["return", "error", "shutdown"] as const)("releases a queued update when a call ends via %s", async (ending) => {
     const next = { manifest: { ...release.manifest, version: "2.0.0" } };
     const { service, runtimeHost, artifactManager } = createContext([release, next]);

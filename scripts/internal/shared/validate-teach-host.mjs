@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const agent = path.join(root, "App/memmy-agent");
@@ -17,8 +18,16 @@ const parent = args[1] ?? os.tmpdir();
 fs.mkdirSync(parent, { recursive: true });
 const directory = fs.mkdtempSync(path.join(parent, "teach-host-validation-"));
 const git = (...args) => spawnSync("git", args, { cwd: root, encoding: "utf8" }).stdout?.trim();
+const fingerprint = () => {
+  const hash = createHash("sha256").update(git("rev-parse", "HEAD") ?? "").update(git("diff", "HEAD", "--binary") ?? "");
+  for (const file of (git("ls-files", "--others", "--exclude-standard", "-z") ?? "").split("\0").filter(Boolean).sort()) {
+    hash.update(file).update(fs.readFileSync(path.join(root, file)));
+  }
+  return hash.digest("hex");
+};
 const report = {
   commit: git("rev-parse", "HEAD"), tree: git("rev-parse", "HEAD^{tree}"),
+  sourceFingerprint: fingerprint(),
   workingTree: git("status", "--porcelain"), platform: process.platform, node: process.version,
   startedAt: new Date().toISOString(), status: "running", stages: [],
   scope: { desktopOperation: false, installedApp: false, physicalPlatformAcceptance: false },
@@ -28,9 +37,13 @@ const env = { ...process.env, MEMMY_WINDOWS_HISTORY_TEST_BIN_DIR: "" };
 function run(name, cwd, command, args) {
   const started = Date.now();
   console.log(`[Teach Host] ${name}`);
-  const result = spawnSync(command, args, { cwd, env, encoding: "utf8", timeout: 600_000, maxBuffer: 64 * 1024 * 1024 });
   const log = path.join(directory, `${name}.log`);
-  fs.writeFileSync(log, (result.stdout ?? "") + (result.stderr ?? "") + (result.error?.message ?? ""));
+  const descriptor = fs.openSync(log, "w");
+  let result;
+  try {
+    result = spawnSync(command, args, { cwd, env, stdio: ["ignore", descriptor, descriptor], timeout: 600_000 });
+  } finally { fs.closeSync(descriptor); }
+  if (result.error) fs.appendFileSync(log, result.error.message);
   report.stages.push({ name, exitCode: result.status, signal: result.signal, elapsedMs: Date.now() - started, log });
   write();
   console.log(`[Teach Host] ${name}: ${result.status === 0 ? "passed" : `FAILED (see ${log})`}`);
@@ -57,10 +70,12 @@ try {
     "src/tools/computer-history/**/*.ts", "tests/tools/computer-history/**/*.ts",
     "src/tools/computer-recordings/**/*.ts", "tests/tools/computer-recordings/**/*.ts",
     "src/core/agent-runtime/task-activity.ts", "src/core/agent-runtime/plugin-update-lease.ts",
+    "src/core/agent-runtime/loop.ts", "src/core/agent-runtime/subagent.ts",
     "tests/core/agent-runtime/task-activity.test.ts", "tests/core/agent-runtime/plugin-update-lease.test.ts",
     "src/core/session/terminal-session-control.ts", "src/integrations/channels/websocket.ts",
     "tests/integrations/channels/websocket-http-routes.test.ts",
-    "tests/core/agent-runtime/tools/mcp-tool.test.ts", "tests/providers/extra-body-config.test.ts"]);
+    "tests/core/agent-runtime/tools/mcp-tool.test.ts", "tests/core/agent-runtime/tools/mcp-probe.test.ts",
+    "tests/providers/extra-body-config.test.ts"]);
   node("backend-lint", path.join(root, "App/backend"), [path.join(root, "node_modules/eslint/bin/eslint.js"),
     "src/services/plugin-service.ts", "src/services/plugin-update-service.ts", "src/services/index.ts",
     "src/services/tests/plugin-service.test.ts", "src/services/tests/plugin-update-service.test.ts",
@@ -80,6 +95,8 @@ try {
   report.status = "failed";
   report.error = error.message;
 } finally {
+  report.sourceChangedDuringRun = report.sourceFingerprint !== fingerprint();
+  if (report.sourceChangedDuringRun) report.status = "failed";
   report.finishedAt = new Date().toISOString();
   write();
   console.log(`[Teach Host] ${report.status}: ${directory}`);

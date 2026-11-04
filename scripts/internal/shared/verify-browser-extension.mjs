@@ -19,7 +19,8 @@ export function verifyBrowserExtension(source, packaged) {
   const [content, teaching] = manifest.content_scripts;
   if (JSON.stringify(content.matches) !== JSON.stringify(["http://*/*", "https://*/*"])
     || JSON.stringify(content.js) !== JSON.stringify(expectedScripts) || content.world !== "ISOLATED"
-    || content.all_frames !== true || content.match_about_blank !== false || content.run_at !== "document_start") {
+    || content.all_frames !== true || content.match_about_blank !== false || content.match_origin_as_fallback === true
+    || content.run_at !== "document_start") {
     throw new Error("Packaged browser History scripts must remain isolated and restricted to ordinary HTTP(S) frames");
   }
   if (JSON.stringify(teaching.matches) !== JSON.stringify(["http://*/*", "https://*/*"])

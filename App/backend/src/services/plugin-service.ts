@@ -347,7 +347,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
           // Download does not close task/tool admission or hold the lifecycle queue.
           const downloading = options.artifactManager.install({ ...release, manifest });
           void downloading.then(async staged => {
-            if (shutdown.signal.aborted && staged.rootPath !== options.repository.get(id)?.rootPath) {
+            if (shutdown.signal.aborted && staged.rootPath !== previous.rootPath) {
               await options.artifactManager.remove(staged);
             }
           }).catch(() => undefined);
