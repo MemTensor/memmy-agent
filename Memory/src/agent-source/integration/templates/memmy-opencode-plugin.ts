@@ -444,6 +444,7 @@ const createMemmyHooks = async ({ client, directory, worktree, resolveAgent, mod
           const result = await memmy.post("/api/v1/memory/search", {
             query: normalizeText(args.query),
             layers: Array.isArray(args.layers) ? args.layers : undefined,
+            verbose: true,
             source: SOURCE
           });
           return renderMemmyContextPacket(
@@ -1118,7 +1119,7 @@ function formatSearchResult(result) {
     const id = normalizeText(hit.id) || normalizeText(hit.memoryId) || normalizeText(hit.refId);
     const layer = normalizeText(hit.memoryLayer || hit.layer) || "memory";
     const title = normalizeText(hit.title) || id || "Memory " + String(index + 1);
-    const summary = normalizeText(hit.summary) || normalizeText(hit.body) || normalizeText(hit.content);
+    const summary = normalizeText(hit.summary) || normalizeText(hit.body) || normalizeText(hit.content) || normalizeText(hit.snippet);
     return String(index + 1) + ". [" + layer + "] " + title + (id ? " (" + id + ")" : "") +
       (summary ? "\n" + truncateText(summary, 1200) : "");
   }).join("\n\n");

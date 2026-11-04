@@ -1,4 +1,6 @@
 import { get_encoding } from "tiktoken";
+import { randomUUID } from "node:crypto";
+import { openCodeGoHeaders } from "./opencode-go.js";
 import { MEMORY_SUMMARY_MAX_TOKENS, type LlmConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { resolveMemoryAgentRegion } from "./agent-region.js";
@@ -102,6 +104,7 @@ export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptio
 }
 
 class HttpLlmClient implements LlmClient {
+  private readonly fallbackSessionId = randomUUID();
   private lastOkAt: string | undefined;
   private lastError: string | undefined;
   private openAiJsonResponseFormat: "json_object" | "text" = "json_object";
@@ -369,7 +372,7 @@ class HttpLlmClient implements LlmClient {
         url,
         headers: {
           ...bearer(this.config.apiKey),
-          ...(this.config.extraHeaders ?? {}),
+          ...openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId),
           ...(agentRegion ? { "X-Agent-Region": agentRegion } : {})
         },
         timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
@@ -433,7 +436,7 @@ class HttpLlmClient implements LlmClient {
       url,
       headers: {
         ...bearer(this.config.apiKey),
-        ...(this.config.extraHeaders ?? {})
+        ...openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -499,7 +502,7 @@ class HttpLlmClient implements LlmClient {
       operation: options.operation,
       model: this.config.model,
       url,
-      headers: this.config.extraHeaders,
+      headers: openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId),
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       body
@@ -536,7 +539,7 @@ class HttpLlmClient implements LlmClient {
       headers: {
         "x-api-key": this.config.apiKey,
         "anthropic-version": "2023-06-01",
-        ...(this.config.extraHeaders ?? {})
+        ...openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -588,7 +591,7 @@ class HttpLlmClient implements LlmClient {
       url: `${base}/model/${model}/converse`,
       headers: {
         ...(this.config.apiKey ? { authorization: this.config.apiKey } : {}),
-        ...(this.config.extraHeaders ?? {})
+        ...openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -632,7 +635,7 @@ class HttpLlmClient implements LlmClient {
       url: this.config.endpoint,
       headers: {
         ...bearer(this.config.apiKey),
-        ...(this.config.extraHeaders ?? {})
+        ...openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
