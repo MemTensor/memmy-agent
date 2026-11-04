@@ -1,6 +1,9 @@
 name: Teach Host regression
 
 on:
+  push:
+    branches:
+      - "pxlin/dev"
   pull_request:
     paths:
       - "App/backend/**"
