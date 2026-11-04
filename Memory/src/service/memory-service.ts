@@ -685,7 +685,8 @@ export class MemoryService {
             ? this.sessionTurns.assignEpisode(job)
             : job.jobType === "episode_finalize"
               ? this.sessionTurns.finalizeAssignment(job)
-              : this.workerHandlers.processJob(job)
+              : this.workerHandlers.processJob(job),
+          job.sessionId ?? job.targetMemoryId ?? job.episodeId ?? job.id
         )
       },
       embeddingJobs: this.embeddingJobs
@@ -1130,8 +1131,8 @@ export class MemoryService {
     }
   }
 
-  private withModelTaskContext<T>(operation: () => T): T {
-    return this.modelTasks.run(operation);
+  private withModelTaskContext<T>(operation: () => T, sessionId?: string): T {
+    return this.modelTasks.run(operation, sessionId);
   }
 
   private memoryAddEnabled(): boolean {
@@ -1741,7 +1742,7 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.summary ?? "" },
       () => this.sessionTurns.compactSession(sessionId, this.withTimeZone(request))
-    )));
+    ), sessionId));
   }
 
   async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
@@ -1762,7 +1763,7 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
+    return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)), request.sessionId);
   }
 
   private async acceptCapture<T>(execute: () => Promise<T>): Promise<T> {
@@ -1787,7 +1788,16 @@ export class MemoryService {
           userId: request.namespace?.userId ?? this.config.userId
         }
       }), () => { recoveredEvolutionScheduled = true; })
-    )));
+    ), request.sessionId ?? (request.sourceTurn
+      ? `${request.sourceTurn.source}:${request.sourceTurn.profileId}:${request.sourceTurn.conversationId}` : undefined)));
+    // Full scans are an explicit recovery action. Hooks and incremental scans
+    // must not repeatedly restart a terminal failure without user intervention.
+    if (request.channel === "agent_source_scan" && request.captureLegacyHistory === true && response.status === "existing") {
+      const ids = response.result?.l1MemoryIds ?? (response.legacyImportMemoryId ? [response.legacyImportMemoryId] : []);
+      for (const id of ids) {
+        if (this.retryFailedMemoryProcessingOnScan(id)) recoveredEvolutionScheduled = true;
+      }
+    }
     serviceLogger.info("source_turn.complete", {
       source: request.sourceTurn?.source,
       profileId: request.sourceTurn?.profileId,
@@ -1810,7 +1820,7 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.query, turnId },
       () => this.sessionTurns.completeTurn(turnId, this.withTimeZone(request))
-    )));
+    ), request.sessionId));
   }
 
   async observeTool(input: ToolObserveRequest): Promise<{
@@ -3471,6 +3481,10 @@ export class MemoryService {
     for (const { before, after } of retried) this.workerHandlers.appendJobChange(after, "queued", before);
     if (retried.length) this.capturePendingListener?.();
     return retried.length ? { ...result, accepted: true, job: result.job ?? jobToRef(retried[0]!.after) } : result;
+  }
+
+  retryFailedMemoryProcessingOnScan(memoryId: string): boolean {
+    return this.importJobs.retryFailedMemoryProcessingOnScan(memoryId);
   }
 
   private embeddingMaintenance(): EmbeddingMaintenance {

@@ -372,18 +372,43 @@ it("services pause during preparation before any ingestion and preserves the exe
   } finally { clearInterval(timer); }
 });
 
-it("does not restart an already failed summary when rescanning identical raw history", async () => {
+it.each([
+  { code: "invalid_model_request", expectedState: "summary_pending" },
+  { code: "memory_corrupt", expectedState: "failed" }
+])("recovers eligible scan failures but keeps $code restrictions for identical history", async ({ code, expectedState }) => {
   const { service: memory, db } = fixture.createTestService();
   const scan = executor(root(), adapter(), memory);
   await scan.startScan({ sourceId: "fixture", mode: "full" });
   const completed = await done(scan);
   const memoryId = completed.results![0]!.memoryIds![0]!;
   db.db.prepare("UPDATE evolution_jobs SET status='failed', last_error='model rejected' WHERE target_memory_id=?").run(memoryId);
-  db.db.prepare("UPDATE memory_processing_state SET state='failed', error_message='model rejected', failed_at=? WHERE memory_id=?").run(new Date().toISOString(), memoryId);
+  db.db.prepare("UPDATE memory_processing_state SET state='failed', retry_action='none', error_code=?, error_message='model rejected', failed_at=? WHERE memory_id=?").run(code, new Date().toISOString(), memoryId);
   await scan.startScan({ sourceId: "fixture", mode: "full", waitForProcessing: true });
   expect((await done(scan)).error).toBeNull();
-  expect(memory.memoryProcessingStatus([memoryId]).items[0]).toMatchObject({ state: "failed", errorMessage: "model rejected" });
-  expect(db.db.prepare("SELECT COUNT(*) AS count FROM evolution_jobs WHERE target_memory_id=?").get(memoryId)).toEqual({ count: 1 });
+  expect(memory.memoryProcessingStatus([memoryId]).items[0]).toMatchObject({ state: expectedState, errorMessage: "model rejected" });
+  expect(db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE id=?").get(memoryId)).toEqual({ count: 1 });
+  expect(db.db.prepare("SELECT COUNT(*) AS count FROM evolution_jobs WHERE target_memory_id=? AND status IN ('queued','leased')").get(memoryId))
+    .toEqual({ count: expectedState === "summary_pending" ? 1 : 0 });
+});
+
+it("does not restart legacy failures during incremental replay but recovers them on full scan", async () => {
+  const { service: memory, db } = fixture.createTestService();
+  // A changed conversation can cause readers to replay context from a prior turn.
+  const messages = turn("one");
+  const source = adapter(messages);
+  const scan = executor(root(), source, memory);
+  await scan.startScan({ sourceId: "fixture", mode: "full" });
+  const memoryId = (await done(scan)).results![0]!.memoryIds![0]!;
+  db.db.prepare("UPDATE evolution_jobs SET status='dead_letter' WHERE target_memory_id=?").run(memoryId);
+  db.db.prepare("UPDATE memory_processing_state SET state='failed', active_job_id=NULL, retry_action='none', error_code='invalid_model_request', error_message='unchanged configuration' WHERE memory_id=?").run(memoryId);
+  const before = memory.memoryProcessingStatus([memoryId]).items[0]!;
+  messages.push(...turn("one", "2026-09-02T10:00:00.000Z").map(message => ({ ...message, messageId: `next-${message.messageId}` })));
+  await scan.startScan({ sourceId: "fixture", mode: "incremental" });
+  expect((await done(scan)).error).toBeNull();
+  expect(memory.memoryProcessingStatus([memoryId]).items[0]).toEqual(before);
+  await scan.startScan({ sourceId: "fixture", mode: "full" });
+  expect((await done(scan)).error).toBeNull();
+  expect(memory.memoryProcessingStatus([memoryId]).items[0]).toMatchObject({ state: "summary_pending", manualRetryCount: 1 });
 });
 
 it("returns every error below the shared 500-detail cap", async () => {

@@ -48,6 +48,7 @@ describe("MemoryService / embedding / processing", () => {
         ["insufficient_quota", "Insufficient balance.", false],
         ["rate_limit_exceeded", "Rate limit exceeded.", true]
       ] as const)(`${queue} queue does not fan out shared HTTP 400 %s (${format})`, async (code, message, transient) => {
+        const quotaExhausted = code === "insufficient_quota";
         const inputs: string[][] = [];
         const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
           inputs.push((JSON.parse(String(init?.body)) as { input: string[] }).input);
@@ -74,7 +75,7 @@ describe("MemoryService / embedding / processing", () => {
           await service.runWorkerOnce(ids.length, { targetMemoryIds: ids });
           for (const id of ids) expect(repos.processing.get(id)).toMatchObject({
             state: transient ? "embedding_pending" : "failed",
-            errorCode: transient ? "transient_provider_error" : "model_configuration",
+            errorCode: transient ? "transient_provider_error" : quotaExhausted ? "quota_exhausted" : "model_configuration",
             retryAction: transient ? "retry" : "open_settings"
           });
         } else {
@@ -87,9 +88,9 @@ describe("MemoryService / embedding / processing", () => {
           await service.runWorkerOnce(10);
           for (const retry of retries) {
             const stored = repos.runtime.getEmbeddingRetry(retry.id)!;
-            expect(stored).toMatchObject({ status: transient ? "pending" : "failed", attempts: transient ? 1 : 0 });
+            expect(stored).toMatchObject({ status: transient ? "pending" : "failed", attempts: transient || quotaExhausted ? 1 : 0 });
             if (transient) expect(stored.nextAttemptAt).toBeGreaterThan(Date.now());
-            else expect(stored.blockedReason).toBe("configuration");
+            else expect(stored.blockedReason).toBe(quotaExhausted ? null : "configuration");
           }
         }
         expect(fetchMock).toHaveBeenCalledTimes(1);

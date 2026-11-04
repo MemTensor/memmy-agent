@@ -660,6 +660,11 @@ export function classifyProcessingError(error: unknown): {
   // request per item when an embedding batch is rejected.
   if (error instanceof ModelHttpError) {
     const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
+    const providerType = error.errorType?.toLowerCase().replace(/[\s_-]/g, "");
+    if (providerCode === "missingsessionid" || providerType === "missingsessionid" ||
+      /(?:missing|required|absent).{0,100}x-opencode-session|x-opencode-session.{0,100}(?:missing|required|absent)/.test(normalized)) {
+      return { code: "model_configuration", retryAction: "open_settings" };
+    }
     if (providerCode === "insufficientquota" || /insufficient[\s_-]+(?:quota|balance)/.test(normalized)) {
       return { code: QUOTA_PROCESSING_ERROR_CODE, retryAction: "open_settings" };
     }
