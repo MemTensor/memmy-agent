@@ -57,6 +57,7 @@ export function useConversationFeatures(options: {
   onOpenArtifact?(artifact: PluginArtifactRef): boolean;
   onSend(text: string): Promise<boolean>;
   onOpenRecording(): void;
+  onEnsureConversation?(title: string): Promise<string | null>;
 }) {
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
@@ -193,12 +194,15 @@ export function useConversationFeatures(options: {
     if (plugin.id === "legal-labor" && command.command === "/legal-record") { toggleCompactRecording(); return; }
     if (legalQuestionOwnsComposer && plugin.id === "legal-labor") return;
     if (!clients?.plugins) return;
-    setHiddenRecordings((current) => { const next = new Set(current); next.delete(normalizePluginConversationId(conversationId)!); return next; });
     if (command.agentSkillId) { latest.current.onDraft(`${command.command} ${args}`); return; }
+    const invocationConversationId = state.agent.currentChatId ?? state.agent.currentSessionKey
+      ?? await latest.current.onEnsureConversation?.(command.name);
+    if (!invocationConversationId) return;
+    setHiddenRecordings((current) => { const next = new Set(current); next.delete(normalizePluginConversationId(invocationConversationId)!); return next; });
     setError(null);
     try {
       await pressPinnedPluginCommand({ calls, pluginId: plugin.id, capabilityId: command.capabilityId,
-        conversationId, dismissedCallIds: ui?.dismissedCallIds,
+        conversationId: invocationConversationId, dismissedCallIds: ui?.dismissedCallIds,
         pinnedCapabilities: new Set(targets.filter(({ command }) => command.pinned).map(({ plugin, command }) => `${plugin.id}:${command.capabilityId}`)),
         opening: ui?.openingCommands ?? invocationFlights.current,
         toggleVisibility: (callId) => ui?.setHiddenCallIds((current) => {
@@ -208,10 +212,10 @@ export function useConversationFeatures(options: {
           return next;
         }),
         open: () => clients.plugins.invoke(plugin.id, command.capabilityId, {
-          conversationId, input: { command: command.command, arguments: args }, origin: "user"
+          conversationId: invocationConversationId, input: { command: command.command, arguments: args }, origin: "user"
         })
       });
-    } catch (cause) { setError({ conversationId, message: cause instanceof Error ? cause.message : String(cause) }); }
+    } catch (cause) { setError({ conversationId: invocationConversationId, message: cause instanceof Error ? cause.message : String(cause) }); }
   };
   const runCommand = (text: string): boolean => {
     const [name, ...args] = text.trim().split(/\s+/u);
@@ -314,6 +318,7 @@ export function useConversationFeatures(options: {
   };
   return { cards, recorders, shortcuts, scenarios, recording, openRecording, closeSidePanel, closePluginRecording,
     pluginRecordingSession: pluginRecording && !hiddenRecordings.has(recordingOwner) ? pluginRecording : null, capabilityLabels,
+    hasConversationActivity: Boolean(state.agent.currentChatId && calls.length),
     processInteraction,
     capturePendingInputRelease,
     pendingKey: pending ? `${pending.call.callId}:${pluginInteractionSignature(pending.call)}` : null,

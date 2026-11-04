@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(async () => ({ callId: "guide-call" })),
   list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(),
   openArtifact: vi.fn(() => true),
+  ensureConversation: vi.fn(async (_title: string) => "created-chat" as string | null),
   send: vi.fn(async () => true), sending: false,
   messages: [] as AgentChatMessage[],
   activeTurnIdByChatId: {} as Record<string, string | null>,
@@ -54,7 +55,7 @@ describe("conversation feature integration", () => {
     ui = usePluginUi();
     features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: vi.fn(),
       onStageFiles: async () => {}, onOpenArtifact: mocks.openArtifact,
-      onSend: mocks.send, onOpenRecording: mocks.openRecording });
+      onSend: mocks.send, onOpenRecording: mocks.openRecording, onEnsureConversation: mocks.ensureConversation });
     return <>{features.recorders}<nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
   }
   const render = () => root.render(<I18nProvider language="zh-CN"><PluginUiProvider><Harness /></PluginUiProvider></I18nProvider>);
@@ -225,6 +226,27 @@ describe("conversation feature integration", () => {
     expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith("legal-labor", "guide-open", expect.objectContaining({
       conversationId: "legal-chat", origin: "user", input: { command: "/legal-guide", arguments: "" }
     }));
+  });
+
+  it("creates a real conversation before opening a typed guide from the empty home screen", async () => {
+    await act(async () => render());
+    await act(async () => {
+      expect(features.runCommand("/legal-guide")).toBe(true);
+      await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith(
+        "legal-labor",
+        "guide-open",
+        expect.objectContaining({ conversationId: "created-chat", origin: "user" })
+      ));
+    });
+    expect(mocks.ensureConversation).toHaveBeenCalledExactlyOnceWith("诊断指引");
+
+    mocks.chatId = "created-chat";
+    await act(async () => render());
+    await act(async () => ui.receive({ pluginId: "legal-labor", capabilityId: "guide-open", callId: "created-guide",
+      conversationId: "created-chat", origin: "user", event: { type: "interaction", request: {
+        interactionId: "guide", type: "question", payload: { title: "诊断指引", readOnly: true }
+      } } }));
+    expect(features.hasConversationActivity).toBe(true);
   });
 
   it("does not offer a guide shortcut that the installed plugin cannot run", async () => {

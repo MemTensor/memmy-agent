@@ -612,7 +612,9 @@ describe("HomePage", () => {
     expect(agentChatScopeKey(null, 3)).toBe("draft-3");
     expect(hasActiveAgentConversation("chat-1", 1)).toBe(true);
     expect(hasActiveAgentConversation("chat-1", 0)).toBe(false);
+    expect(hasActiveAgentConversation("chat-1", 0, true)).toBe(true);
     expect(hasActiveAgentConversation(null, 1)).toBe(false);
+    expect(hasActiveAgentConversation(null, 0, true)).toBe(false);
   });
 
   it("keeps composer drafts isolated by chat scope", () => {
