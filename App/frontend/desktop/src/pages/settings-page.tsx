@@ -1,6 +1,6 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Gauge, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy, Users} from "lucide-react";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Gauge, History, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy, Users} from "lucide-react";
 import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, MemoryTokenBudgetDto, ModelConfigView, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { copyInvitationCode } from "../app/invitation-analytics.js";
@@ -32,7 +32,7 @@ import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ComputerUseSettings } from "./computer-use-settings.js";
 import { agentSourceLogoUrl } from "./agent-source-logos.js";
-import { collabAgentParts } from "./collab-agent-chips.js";
+import { CollabAssistRecords, CollabAssistSettings } from "./collab-assist-settings.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
   MEMORY_TOKEN_BUDGET_SECTION_ID,
@@ -1854,6 +1854,15 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         {isAccountMode ? (
           <Section icon={<Users size={16} className="text-text-ink/60" />} title={t("settings.collab")}>
             <CollabAgentAccessSection client={props.collabClient} />
+            {/* 成员协助紧接在「在其他 Agent 中使用协作项目」之后：执行用的 Agent 来自那里。 */}
+            <CollabAssistSettings client={props.collabClient} />
+          </Section>
+        ) : null}
+
+        {/* 协助记录单独一节：每条写明由哪个 Agent 执行、发出了什么，保留 30 天。 */}
+        {isAccountMode ? (
+          <Section icon={<History size={16} className="text-text-ink/60" />} title={t("settings.assist.recordsTitle")}>
+            <CollabAssistRecords client={props.collabClient} />
           </Section>
         ) : null}
 
@@ -3811,8 +3820,8 @@ function formatTokens(value: number): string {
 /**
  * 设置 → 偏好 → 协作项目：在其他 Agent 中使用协作项目的授权。
  *
- * 未授权时只有一行说明与「授权」；授权后列出每个 Agent 写入的内容与状态，可逐个关闭，也可整体撤销。
- * 撤销与关闭都不动已经加入项目的任务，只是停止同步。
+ * 用户只需要知道「授权了没有」和「哪个 Agent 被关掉了」，所以这一块只显示状态、开关与撤销，
+ * 不逐个列出装了 skill 还是 hook——那是实现细节。
  */
 export function CollabAgentAccessSection(props: { client?: CollabClient }) {
   const { t } = useTranslation();
@@ -3856,32 +3865,27 @@ export function CollabAgentAccessSection(props: { client?: CollabClient }) {
   const agents = view?.agents.filter((agent) => agent.available) ?? [];
 
   return (
-    <div>
-      <div className="flex items-center justify-between gap-4 py-3">
+    <div className="space-y-1">
+      <div className="flex items-start justify-between gap-4 py-3">
         <div className="min-w-0">
           <div className="text-sm text-text-ink/70">{t("settings.collab.row")}</div>
-          <div className="mt-0.5 text-xs text-text-ink/50 leading-relaxed">
+          <div className="mt-0.5 text-xs leading-relaxed text-text-ink/50">
             {granted ? t("settings.collab.descriptionGranted") : t("settings.collab.description")}
           </div>
           {error ? <div className="mt-1 text-xs text-status-error" role="alert">{error}</div> : null}
         </div>
-        <div className="flex shrink-0 items-center gap-3">
+        <div className="flex shrink-0 items-center gap-3 pt-0.5">
           {granted ? (
             <>
-              {busy ? (
-                <span className="flex items-center gap-1.5 text-xs text-text-ink/45">
-                  <Loader2 size={12} className="animate-spin" />{t("settings.collab.installing")}
-                </span>
-              ) : failures.length ? (
-                <span className="rounded-full bg-status-error/10 px-2 py-0.5 text-[11px] text-status-error">
-                  {t("settings.collab.failedCount", { count: String(failures.length) })}
-                </span>
-              ) : null}
+              <span className="flex items-center gap-1.5 text-xs text-text-ink/45">
+                {busy ? <Loader2 size={12} className="animate-spin" /> : <Check size={13} className="text-status-success" />}
+                {busy ? t("settings.collab.installing") : t("settings.collab.granted")}
+              </span>
               <button
                 type="button"
                 disabled={busy}
                 onClick={() => setConfirmRevoke(true)}
-                className="px-0 py-1 text-xs text-text-ink/50 hover:text-status-error cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                className="text-xs text-text-ink/50 hover:text-status-error cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {t("settings.collab.revoke")}
               </button>
@@ -3901,7 +3905,7 @@ export function CollabAgentAccessSection(props: { client?: CollabClient }) {
 
       {granted ? (
         <>
-          <div className="mb-3 mt-0.5 overflow-hidden rounded-input border-content-panel">
+          <div className="overflow-hidden rounded-input border-content-panel">
             {agents.map((agent) => (
               <CollabAgentSettingsRow
                 key={agent.sourceId}
@@ -3909,10 +3913,10 @@ export function CollabAgentAccessSection(props: { client?: CollabClient }) {
                 onToggle={(enabled) => client && void run(() => client.setAgentEnabled(agent.sourceId, enabled))}
               />
             ))}
-            {!agents.length ? <p className="px-3.5 py-3 text-xs text-text-ink/50">{t("settings.collab.none")}</p> : null}
+            {!agents.length ? <p className="px-3.5 py-2.5 text-xs text-text-ink/50">{t("settings.collab.none")}</p> : null}
           </div>
           {failures.length ? (
-            <div className="mt-2 flex items-center justify-between gap-3 rounded-input border-content-panel px-3.5 py-2.5">
+            <div className="mt-2 flex items-center justify-between gap-3 rounded-input border-content-panel px-3.5 py-2">
               <span className="text-xs text-status-error">
                 {t("settings.collab.failed", { names: failures.map((item) => item.name).join("、") })}
               </span>
@@ -3920,7 +3924,7 @@ export function CollabAgentAccessSection(props: { client?: CollabClient }) {
                 type="button"
                 disabled={busy || !client}
                 onClick={() => client && void run(() => client.installAgentAccess(failures.map((item) => item.sourceId)))}
-                className="shrink-0 px-2.5 py-1 text-xs text-action-sky border border-action-sky/30 rounded-btn hover:bg-action-sky/8 cursor-pointer disabled:opacity-60"
+                className="shrink-0 rounded-btn border border-action-sky/30 px-2.5 py-1 text-xs text-action-sky hover:bg-action-sky/8 cursor-pointer disabled:opacity-60"
               >
                 {t("settings.collab.retry")}
               </button>
@@ -3947,7 +3951,7 @@ export function CollabAgentAccessSection(props: { client?: CollabClient }) {
   );
 }
 
-/** 设置里的一行 Agent：图标、名字、写入内容、状态与开关。关掉的那一行整体变淡。 */
+/** 设置里的一行 Agent：图标、名字与开关；关掉的那一行变淡并注明已关闭。 */
 function CollabAgentSettingsRow(props: {
   agent: CollabAgentAccessView["agents"][number];
   onToggle: (enabled: boolean) => void;
@@ -3956,7 +3960,7 @@ function CollabAgentSettingsRow(props: {
   const { agent } = props;
   const logo = agentSourceLogoUrl(agent.sourceId);
   return (
-    <div className="flex items-center gap-2.5 border-t border-border-stone/30 px-3.5 py-2.5 first:border-t-0">
+    <div className="flex items-center gap-2.5 border-t border-border-stone/30 px-3.5 py-2 first:border-t-0">
       <span className={`flex h-4 w-4 shrink-0 items-center justify-center ${agent.enabled ? "" : "opacity-50"}`}>
         {logo ? <img src={logo} alt="" className="h-4 w-4 rounded object-contain" /> : (
           <span className="flex h-4 w-4 items-center justify-center rounded bg-action-sky/20 text-[10px] font-semibold text-action-sky-hover">
@@ -3964,21 +3968,10 @@ function CollabAgentSettingsRow(props: {
           </span>
         )}
       </span>
-      <span className={`flex-1 min-w-0 truncate text-[13px] ${agent.enabled ? "text-text-ink/80" : "text-text-ink/40"}`}>
+      <span className={`min-w-0 flex-1 truncate text-sm ${agent.enabled ? "text-text-ink/70" : "text-text-ink/40"}`}>
         {agent.name}
       </span>
-      <span className="shrink-0 text-[11.5px] text-text-ink/40">
-        {collabAgentParts(agent.sourceId) === "hook"
-          ? t("collab.access.partsHook")
-          : t("collab.access.partsSkill")}
-      </span>
-      <span className={`shrink-0 text-[11.5px] ${agent.enabled ? (agent.installed ? "text-[#1f9e78]" : "text-text-ink/40") : "text-text-ink/40"}`}>
-        {!agent.enabled
-          ? t("settings.collab.agentOff")
-          : agent.installed
-            ? t("settings.collab.agentInstalled")
-            : t("settings.collab.agentMissing")}
-      </span>
+      {!agent.enabled ? <span className="shrink-0 text-xs text-text-ink/40">{t("settings.collab.agentOff")}</span> : null}
       <Toggle checked={agent.enabled} ariaLabel={agent.name} onChange={props.onToggle} />
     </div>
   );

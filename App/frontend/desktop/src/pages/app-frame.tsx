@@ -66,6 +66,7 @@ import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { CollabCreateProjectDialog } from "./collab-create-project-dialog.js";
 import { CollabJoinProjectDialog } from "./collab-join-project-dialog.js";
+import { CollabAssistHost } from "./collab-assist-host.js";
 import { COLLAB_TOUR_ANCHORS } from "./collab-tour.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
 import { writeMemorySubPage } from "./memory-sub-page-storage.js";
@@ -2075,6 +2076,8 @@ export function AppFrame(props: AppFrameProps) {
         onCancel={() => setDeleteConfirmTask(null)}
         onConfirm={() => void confirmDeleteArchivedTask()}
       />
+      {/* 成员协助：轮询收件箱、发通知、弹出授权与执行过程；只在账号模式下工作。 */}
+      <CollabAssistHost collab={collabClient} enabled={collabEnabled && Boolean(state.account.userId)} />
       <CollabJoinProjectDialog
         open={joinProjectOpen}
         onCreateProject={() => {

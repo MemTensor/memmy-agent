@@ -8,9 +8,11 @@ import type { PermissionManager } from "../../../permission/index.js";
 import type { BackendServices } from "../../../services/index.js";
 import type { CollabService } from "../../../services/collab-service.js";
 import type { CollabAgentAccessService } from "../../../services/collab-agent-access-service.js";
+import type { CollabAssistService } from "../../../services/collab-assist-service.js";
 import type { ProjectDirectoryService } from "../../../services/project-directory-service.js";
 import { registerAccountRoutes } from "./routes/account.js";
 import { registerCollabRoutes } from "./routes/collab.js";
+import { registerCollabAssistRoutes } from "./routes/collab-assist.js";
 import { registerTokenQuotaRoutes } from "./routes/token-quota.js";
 import { registerAppConfigRoutes } from "./routes/app-config.js";
 import { registerAgentSourceRoutes } from "./routes/agent-sources.js";
@@ -41,6 +43,8 @@ export interface CreateLocalApiServerOptions {
   collab?: CollabService;
   /** 「在其他 Agent 中使用协作项目」的授权状态；absent 时那几个接口不可用。 */
   collabAgentAccess?: CollabAgentAccessService;
+  /** 成员协助：执行方的收件箱与授权、发起方的请求卡片；absent 时那几个接口不可用。 */
+  collabAssist?: CollabAssistService;
   /** The managed folder a project created by name alone runs its tasks in. */
   projectDirectory?: ProjectDirectoryService;
   permissionManager: PermissionManager;
@@ -176,6 +180,10 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
       ...(options.collabAgentAccess ? { agentAccess: options.collabAgentAccess } : {}),
       ...(knowledge ? { recallProjectKnowledge: (query: string, projectId: string) => recallProjectBases(knowledge, query, projectId) } : {})
     });
+  }
+  // 成员协助与协作项目共生：它挂在项目与成员上，没有协作项目就没有可协助的对象。
+  if (options.collabAssist) {
+    registerCollabAssistRoutes(app, { assist: options.collabAssist, authenticateRuntimeToken });
   }
   // 项目指令与托管目录都是项目自己的接口，任一需要时都注册：指令不依赖托管目录。
   if (options.projectDirectory || options.services.projectInstructions) {

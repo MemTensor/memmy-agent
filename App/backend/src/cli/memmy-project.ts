@@ -30,11 +30,17 @@ const USAGE = [
   "  memmy-project session read <link|id|id#turn> [--turns <from>-<to> | --around <turn> | --find \"<sentence>\" | --all]",
   "  memmy-project session add [--project <project name>] [--hint \"<sentence>\"]",
   "  memmy-project session add --agent <agent name> --project <project name> --file <task.json> [--source <record file>]",
+  "  memmy-project assist ask --project <project name> --member <name> --file <request.json> [--continue <request id>] [--wait]",
+  "  memmy-project assist wait <request id> [--timeout <seconds>]",
+  "  memmy-project assist status <request id>",
+  "  memmy-project assist cancel <request id>",
+  "  memmy-project assist end --project <project name> [--member <name>]",
   "  memmy-project agent connect --name <agent name> --skill-dir <directory>",
   "  memmy-project agent remove --name <agent name>",
   "  memmy-project session share [--project <project name>] [--off]",
   "",
-  "Finds and reads sessions of your shared Memmy projects, and shares the current one to a project. Memmy must be running."
+  "Finds and reads sessions of your shared Memmy projects, shares the current one to a project, and asks a member's",
+  "computer to run a task for you. Memmy must be running."
 ].join("\n");
 
 export interface MemmyProjectDeps {
@@ -128,6 +134,9 @@ export async function runMemmyProject(argv: readonly string[], deps: MemmyProjec
       return typeof result.text === "string" ? result.text : "";
     }
     throw new Error(`未知命令：agent ${action ?? ""}\n\n${USAGE}`);
+  }
+  if (resource === "assist") {
+    return runAssist(deps, parsed, action, rest);
   }
   if (resource !== "session") throw new Error(`未知命令：${resource}\n\n${USAGE}`);
   if (action === "read") {
@@ -344,14 +353,15 @@ async function localApi(
   deps: MemmyProjectDeps,
   method: "GET" | "POST",
   path: string,
-  body?: unknown
+  body?: unknown,
+  timeoutMs: number = REQUEST_TIMEOUT_MS
 ): Promise<Record<string, unknown>> {
   const runtime = await readRuntimeConfig(deps.runtimeConfigPath ?? defaultRuntimeConfigPath());
   let response: Response;
   try {
     response = await (deps.fetch ?? fetch)(new URL(path, runtime.baseUrl), {
       method,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: {
         [RUNTIME_TOKEN_HEADER]: runtime.localToken,
         ...(body === undefined ? {} : { "content-type": "application/json" })
@@ -454,6 +464,171 @@ async function readSubmission(
     turns: cleaned,
     ...(sourcePath ? { sourcePath } : {})
   };
+}
+
+/**
+ * 成员协助：请另一位成员的电脑执行任务。
+ *
+ * `ask` 只写要做的事与原因，不指定由哪个 Agent 执行——那由对方决定。同一次排查的后续请求带
+ * `--continue <请求 id>`，对方在同一个会话里续跑，她的 Agent 记得前面查过什么。
+ */
+async function runAssist(
+  deps: MemmyProjectDeps,
+  parsed: ParsedArgs,
+  action: string | undefined,
+  rest: readonly string[]
+): Promise<string> {
+  if (action === "ask") {
+    if (rest.length) throw new Error("assist ask 用 --project、--member 与 --file 指定");
+    const project = optionString(parsed, "project")?.trim();
+    const member = optionString(parsed, "member")?.trim();
+    const file = optionString(parsed, "file")?.trim();
+    if (!project || !member || !file) {
+      throw new Error("assist ask 需要 --project、--member 与 --file");
+    }
+    const thread = optionString(parsed, "continue")?.trim();
+    const wait = parsed.options.wait === true || parsed.options.wait === "true";
+    const request = await readAssistFile(file);
+    // 发起方是哪个 Agent：对方弹窗里要说明「他的 Codex 需要……」，所以把它带上去。
+    const via = optionString(parsed, "via")?.trim() || requestingAgentName(deps.env ?? process.env);
+    const created = await localApi(deps, "POST", "/api/collab/assist/requests", {
+      project,
+      member,
+      ...request,
+      via,
+      ...(thread ? { thread } : {})
+    });
+    const requestId = isRecord(created.request) ? text(created.request.id) : "";
+    const sent = typeof created.text === "string" ? created.text : `已发送协助请求 ${requestId}。`;
+    if (!wait || !requestId) return sent;
+    // --wait 在本轮里等结果：等待期间可以继续做别的，结果回来再接着分析。
+    const waited = await waitForAssist(deps, requestId, waitTimeoutMs(parsed));
+    return `${sent}\n\n${text(waited.text)}`;
+  }
+  if (action === "wait") {
+    const requestId = rest[0]?.trim();
+    if (!requestId) throw new Error("assist wait 需要协助请求 ID");
+    const waited = await waitForAssist(deps, requestId, waitTimeoutMs(parsed));
+    return text(waited.text);
+  }
+  if (action === "status") {
+    const requestId = rest[0]?.trim();
+    if (!requestId) throw new Error("assist status 需要协助请求 ID");
+    const result = await localApi(deps, "GET", `/api/collab/assist/requests/${encodeURIComponent(requestId)}`);
+    return formatAssistStatus(isRecord(result.request) ? result.request : {});
+  }
+  if (action === "cancel") {
+    const requestId = rest[0]?.trim();
+    if (!requestId) throw new Error("assist cancel 需要协助请求 ID");
+    const result = await localApi(deps, "POST", `/api/collab/assist/requests/${encodeURIComponent(requestId)}/cancel`);
+    return isRecord(result.request) && text(result.request.status) === "cancelled"
+      ? "已撤回这次协助请求；对方那边的通知随之消失。"
+      : "这次请求已经处理过了，没有撤回。";
+  }
+  if (action === "end") {
+    if (rest.length) throw new Error("assist end 用 --project 指定项目名称");
+    const project = optionString(parsed, "project")?.trim();
+    if (!project) throw new Error("assist end 需要 --project");
+    const member = optionString(parsed, "member")?.trim();
+    const result = await localApi(deps, "POST", "/api/collab/assist/end", { project, ...(member ? { member } : {}) });
+    return typeof result.text === "string" ? result.text : "";
+  }
+  throw new Error(`未知命令：assist ${action ?? ""}\n\n${USAGE}`);
+}
+
+/** 发起协助请求的 Agent 名称：外部 Agent 用它在记录里的名字，认不出来时退回 Memmy。 */
+export function requestingAgentName(env: NodeJS.ProcessEnv): string {
+  const running = runningConversation(env);
+  const names: Record<string, string> = {
+    memmy: "Memmy",
+    cursor: "Cursor",
+    claude_code: "Claude Code",
+    codex: "Codex"
+  };
+  return names[running?.sourceId ?? ""] ?? "Memmy";
+}
+
+/** 等结果的最长时间：一次请求最长 15 分钟，等它结束再多留一会儿。 */
+function waitTimeoutMs(parsed: ParsedArgs): number {
+  const raw = optionString(parsed, "timeout")?.trim();
+  if (!raw) return 16 * 60 * 1000;
+  const seconds = Number.parseInt(raw, 10);
+  if (!/^\d+$/u.test(raw) || seconds < 1) throw new Error("--timeout 的写法如 600，单位是秒");
+  return Math.min(seconds, 16 * 60) * 1000;
+}
+
+/** 在本轮里等结果：等不到就把当前状态告诉 Agent，不假装完成。 */
+async function waitForAssist(deps: MemmyProjectDeps, requestId: string, timeoutMs: number): Promise<Record<string, unknown>> {
+  return localApi(deps, "POST", `/api/collab/assist/requests/${encodeURIComponent(requestId)}/wait`,
+    { timeoutMs: Math.min(timeoutMs, 16 * 60 * 1000) }, timeoutMs + REQUEST_TIMEOUT_MS);
+}
+
+/** 执行方标识换成名字：命令行与界面用同一套叫法；认不出来时退回标识。 */
+function assistAgentLabel(sourceId: string): string {
+  const names: Record<string, string> = {
+    memmy: "Memmy",
+    claude_code: "Claude Code",
+    codex: "Codex",
+    cursor: "Cursor",
+    opencode: "OpenCode",
+    openclaw: "OpenClaw",
+    hermes: "Hermes",
+    workbuddy: "WorkBuddy",
+    qwenwork: "QwenWork",
+    deepseek_harness: "DeepSeek Harness",
+    pi: "Pi"
+  };
+  return sourceId ? names[sourceId] ?? sourceId : "";
+}
+
+/** `assist status` 的一行：谁在执行、到哪一步、结果或原因。 */
+function formatAssistStatus(request: Record<string, unknown>): string {
+  const status = text(request.status);
+  const executor = isRecord(request.executor) ? text(request.executor.name) : "对方";
+  const agent = assistAgentLabel(text(request.agent));
+  const steps = Array.isArray(request.steps) ? request.steps.filter(isRecord) : [];
+  const lines: string[] = [];
+  if (status === "pending") lines.push(`等待${executor}选择执行的 Agent 并授权。`);
+  else if (status === "confirm") lines.push(`等待${executor}确认这次请求。`);
+  else if (status === "running") lines.push(`${executor}的 ${agent || "Agent"} 正在执行。`);
+  else if (status === "done") lines.push(`已完成：由${executor}的 ${agent} 执行。`);
+  else if (status === "rejected") lines.push(`${executor}没有允许这次请求。`);
+  else if (status === "cancelled") lines.push("这次请求已撤回。");
+  else if (status === "expired") lines.push("这次请求已过期：对方 24 小时内没有处理。");
+  else if (status === "stopped") lines.push(text(request.failure) || `${executor}停止了这次执行。`);
+  else if (status === "failed") lines.push(`执行没有完成：${text(request.failure) || "原因不明"}`);
+  for (const step of steps) {
+    const output = text(step.output);
+    lines.push(`  · ${text(step.text)}${output ? ` → ${output}` : ""}`);
+  }
+  const reply = text(request.reply);
+  if (reply) lines.push("", "── 结果 ──", reply);
+  const items = Array.isArray(request.resultItems) ? request.resultItems.filter(isRecord) : [];
+  for (const item of items) lines.push(`${text(item.key)}：${text(item.value)}`);
+  return lines.join("\n");
+}
+
+/**
+ * 读取协助请求文件：`{ title, reason?, items: [] }`。内容由发起方的 Agent 写，这里只校验形状。
+ */
+async function readAssistFile(file: string): Promise<{ title: string; reason?: string; items: string[] }> {
+  const raw = await readFile(file, "utf8").catch(() => null);
+  if (raw === null) throw new Error(`找不到请求文件：${file}`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("请求文件需要是 JSON：{ \"title\": \"…\", \"items\": [\"…\"] }");
+  }
+  if (!isRecord(parsed)) throw new Error("请求文件需要是 JSON 对象");
+  const title = text(parsed.title).trim();
+  const reason = text(parsed.reason).trim();
+  const items = Array.isArray(parsed.items)
+    ? parsed.items.map((item) => text(item).trim()).filter(Boolean)
+    : [];
+  if (!title) throw new Error("请求文件需要 title：一句话说明要做的事");
+  if (!items.length) throw new Error("请求文件需要 items：逐条列出要做的事");
+  return { title, ...(reason ? { reason } : {}), items };
 }
 
 async function main(): Promise<void> {

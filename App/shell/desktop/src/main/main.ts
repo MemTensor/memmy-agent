@@ -976,12 +976,25 @@ function configureAppIdentity(): void {
       throw error;
     }
   }
-  const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
+  // 开发态并排跑两个实例（例如一个账号当发起方、另一个当执行方）时，各自的 userData 必须分开：
+  // Electron 的单实例锁挂在 userData 上，共用一个目录的话第二个进程只会把第一个窗口拉到前台。
+  // 只认开发态的这个开关，打包后的应用仍然用固定的数据目录。
+  const devProfile = app.isPackaged ? null : process.env.MEMMY_DEV_PROFILE_DIR?.trim() || null;
+  const userDataPath = devProfile
+    ? join(devProfile, "userData")
+    : windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
   const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
   app.setPath("userData", userDataPath);
+  if (devProfile) {
+    // 会话、日志、临时目录一并放进这个 profile：两个实例互不干扰。
+    app.setPath("sessionData", join(devProfile, "sessionData"));
+    app.setPath("logs", join(devProfile, "logs"));
+    app.setPath("temp", join(devProfile, "temp"));
+    app.setPath("crashDumps", join(devProfile, "crashDumps"));
+  }
   if (localTestProfile) {
     if (resolve(userDataPath) !== localTestProfile.userData || resolve(memmyHome) !== localTestProfile.runtimeHome) {
       throw new Error('Isolated test profile path validation failed');

@@ -27,6 +27,9 @@ import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, type BootstrapScenario } from "./services/index.js";
 import { migrateLegacyCollabInstructions } from "./services/collab-instructions-service.js";
 import { createCollabCloudRequest, createCollabService } from "./services/collab-service.js";
+import { createCollabAssistService } from "./services/collab-assist-service.js";
+import { createAcpAssistRunner } from "./services/assist/runner.js";
+import { assistRecipe } from "./services/assist/recipes.js";
 import { createLocalSessionReader } from "./adapters/outbound/agent-source/session-reference/local-session-reader.js";
 import { createBuiltinAgentSourceRegistry } from "./services/builtin-agent-source-registry.js";
 import { defaultCollabHome, refreshCollabAgentSkills } from "./services/collab-added-agents.js";
@@ -114,6 +117,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
   let collabSyncTimer: ReturnType<typeof setInterval> | undefined;
+  /** 成员协助的轮询器：关闭后端时一并停掉。 */
+  let collabAssistTimer: (() => void) | undefined;
   let pluginService: PluginService | null = null;
 
   try {
@@ -341,6 +346,31 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       });
     }, COLLAB_SYNC_INTERVAL_MS);
     collabSyncTimer.unref();
+    /**
+     * 成员协助：执行方轮询收件箱、拉起对方选的 Agent、回传结果；发起方的请求与等结果也在这一份里。
+     * 它用与协作项目同一套云端签名；执行方可以选的 Agent 就是「在其他 Agent 中使用协作项目」里已装上协
+     * 作组件的那些，再加上这台电脑上确实能拉起的才列出来。
+     */
+    const collabAssist = createCollabAssistService({
+      cloud: createCollabCloudRequest({ cloudBaseUrl: cloudConfig.baseUrl, getAccount: getCollabAccount, userMode }),
+      userMode,
+      projectDirectory: async (projectId: string) =>
+        (await collab.ensureWorkingDirectory(projectId)).localDirectory ?? null,
+      agents: async () => {
+        const view = await collabAgentAccess.view();
+        return view.agents
+          .filter((agent) => agent.enabled && agent.available)
+          .map((agent) => ({
+            sourceId: agent.sourceId,
+            name: agent.name,
+            // 只有配置了启动配方、命令也在这台电脑上，才算真的能用：否则授权后也跑不起来。
+            available: assistRecipe(agent.sourceId) !== null
+          }));
+      },
+      runner: createAcpAssistRunner()
+    });
+    // 轮询在后台跑：5 秒一次查收件箱，有长期授权的请求直接开始执行。
+    collabAssistTimer = collabAssist.start();
     server = createLocalApiServer({
       knowledge: {
         baseUrl: cloudConfig.baseUrl,
@@ -348,6 +378,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       },
       collab,
       collabAgentAccess,
+      collabAssist,
       projectDirectory: createProjectDirectoryService(),
       permissionManager,
       services,
@@ -421,6 +452,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       },
       async close() {
         clearInterval(collabSyncTimer);
+        collabAssistTimer?.();
         try {
           await boundServer.close();
         } finally {
@@ -431,6 +463,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     };
   } catch (error) {
     clearInterval(collabSyncTimer);
+    collabAssistTimer?.();
     await server?.close().catch(() => undefined);
     await pluginService?.shutdown();
     appStateStore.close();

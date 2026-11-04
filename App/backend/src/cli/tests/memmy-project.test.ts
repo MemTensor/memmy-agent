@@ -414,3 +414,84 @@ describe("memmy-project", () => {
       .rejects.toThrow(/不要再加 --turns/u);
   });
 });
+
+describe("memmy-project assist", () => {
+  function requestFile(): string {
+    const root = mkdtempSync(join(tmpdir(), "memmy-assist-request-"));
+    roots.push(root);
+    const path = join(root, "request.json");
+    writeFileSync(path, JSON.stringify({
+      title: "收集 Cursor 任务读取相关的信息",
+      reason: "关联任务弹窗里看不到 Cursor 的任务",
+      items: ["查看 Memmy、Cursor 与系统的版本"]
+    }));
+    return path;
+  }
+
+  it("asks a member's computer for help, naming the agent that is asking", async () => {
+    let body: Record<string, unknown> = {};
+    const fetcher = (async (input: string | URL, init?: RequestInit) => {
+      expect(new URL(input).pathname).toBe("/api/collab/assist/requests");
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ request: { id: "a7f3k111" }, threadId: "t1", text: "已发送协助请求 A7F3K1。" }));
+    }) as typeof fetch;
+
+    const output = await run([
+      "assist", "ask", "--project", "Memmy 内测反馈", "--member", "王雨", "--file", requestFile()
+    ], { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }), env: { CODEX_THREAD_ID: "thread-1" } });
+
+    // 请求只写要做的事和原因，不指定由哪个 Agent 执行；发起方是哪个 Agent 要带上去，弹窗里才说得清。
+    expect(body).toMatchObject({
+      project: "Memmy 内测反馈",
+      member: "王雨",
+      title: "收集 Cursor 任务读取相关的信息",
+      reason: "关联任务弹窗里看不到 Cursor 的任务",
+      items: ["查看 Memmy、Cursor 与系统的版本"],
+      via: "Codex"
+    });
+    expect(body).not.toHaveProperty("thread");
+    expect(output).toContain("已发送协助请求 A7F3K1。");
+  });
+
+  it("continues the same investigation by carrying the thread", async () => {
+    let body: Record<string, unknown> = {};
+    const fetcher = (async (_input: string | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ request: { id: "r2" }, threadId: "t1", text: "ok" }));
+    }) as typeof fetch;
+
+    await run([
+      "assist", "ask", "--project", "Memmy 内测反馈", "--member", "王雨", "--file", requestFile(), "--continue", "t1"
+    ], { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) });
+
+    expect(body).toHaveProperty("thread", "t1");
+    // 在 Memmy 自己的任务里发起时，发起方就是 Memmy。
+    expect(body).toHaveProperty("via", "Memmy");
+  });
+
+  it("prints where the request stands, including the steps and the result", async () => {
+    const fetcher = (async () => new Response(JSON.stringify({
+      request: {
+        id: "r1",
+        status: "done",
+        agent: "claude_code",
+        executor: { name: "王雨" },
+        steps: [{ text: "运行 sw_vers", output: "macOS 15.6" }],
+        reply: "版本：Memmy 1.2.6",
+        resultItems: [{ key: "版本", value: "Memmy 1.2.6" }]
+      }
+    }))) as typeof fetch;
+
+    const output = await run(["assist", "status", "r1"], { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) });
+
+    expect(output).toContain("已完成：由王雨的 Claude Code 执行。");
+    expect(output).toContain("· 运行 sw_vers → macOS 15.6");
+    expect(output).toContain("版本：Memmy 1.2.6");
+  });
+
+  it("rejects an incomplete ask instead of guessing", async () => {
+    await expect(run(["assist", "ask", "--project", "P"], { runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) }))
+      .rejects.toThrow(/--member/u);
+    await expect(run(["assist", "nope"], {})).rejects.toThrow(/未知命令/u);
+  });
+});

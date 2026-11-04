@@ -274,6 +274,132 @@ export type CollabAgentAccessView = z.infer<typeof CollabAgentAccessViewSchema>;
 export type CollabAgentAccessAgent = z.infer<typeof CollabAgentAccessAgentSchema>;
 export type CollabAgentInstallResult = z.infer<typeof CollabAgentInstallResultSchema>;
 
+/** 一条协助请求里的一位成员。 */
+const AssistMemberSchema = z.object({
+  userId: z.string(),
+  name: z.string(),
+  mine: z.boolean()
+});
+
+const AssistStepSchema = z.object({
+  text: z.string(),
+  output: z.string().nullish().transform((value) => value ?? "")
+});
+
+const AssistResultItemSchema = z.object({
+  key: z.string(),
+  value: z.string()
+});
+
+const AssistFileSchema = z.object({
+  name: z.string(),
+  size: z.string(),
+  /** 只有发起方读详情时带正文：执行方那边自己就有这些日志。 */
+  content: z.string().nullish().transform((value) => value ?? null)
+});
+
+/** 请求的状态：与云端一致，界面按它选徽标与说明。 */
+const AssistStatusSchema = z.enum([
+  "pending", "running", "confirm", "done", "rejected", "cancelled", "expired", "failed", "stopped"
+]);
+
+const AssistRequestSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  projectName: z.string(),
+  threadId: z.string(),
+  attempt: z.number(),
+  /** 发起方的 Agent 名称（如 Codex、Memmy）。 */
+  via: z.string(),
+  title: z.string(),
+  /** 起因：一句话说明为什么请对方协助，弹窗与通知里会引用它。 */
+  reason: z.string(),
+  items: z.array(z.string()),
+  status: AssistStatusSchema,
+  agent: z.string().nullable(),
+  scope: z.enum(["once", "always"]).nullable(),
+  steps: z.array(AssistStepSchema),
+  reply: z.string(),
+  resultItems: z.array(AssistResultItemSchema),
+  files: z.array(AssistFileSchema),
+  failure: z.string().nullable(),
+  requester: AssistMemberSchema,
+  executor: AssistMemberSchema,
+  mine: z.boolean(),
+  createdAt: z.string().nullable(),
+  decidedAt: z.string().nullable(),
+  finishedAt: z.string().nullable()
+});
+
+const AssistInboxItemSchema = AssistRequestSchema.extend({
+  /** 已经有长期授权：执行方的 Memmy 直接开始执行，不再弹授权。 */
+  granted: z.boolean(),
+  grantAgent: z.string().nullable(),
+  /** 这位成员今天已经请她执行了几次：到上限时先问她。 */
+  usedToday: z.number()
+});
+
+const AssistGrantSchema = z.object({
+  projectId: z.string(),
+  projectName: z.string(),
+  grantee: AssistMemberSchema,
+  agent: z.string(),
+  active: z.boolean(),
+  usedToday: z.number().nullish().transform((value) => value ?? 0),
+  createdAt: z.string().nullable(),
+  revokedAt: z.string().nullable()
+});
+
+const AssistRecordSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  memberName: z.string(),
+  status: AssistStatusSchema,
+  agent: z.string().nullable(),
+  files: z.number(),
+  createdAt: z.string().nullable(),
+  attempt: z.number(),
+  threadId: z.string()
+});
+
+const AssistExecutionSchema = z.object({
+  requestId: z.string(),
+  threadId: z.string(),
+  projectId: z.string(),
+  agent: z.string(),
+  status: z.enum(["queued", "running", "done", "failed"]),
+  steps: z.array(AssistStepSchema),
+  startedAt: z.string(),
+  finishedAt: z.string().nullable(),
+  failure: z.string().nullable()
+});
+
+const AssistAgentSchema = z.object({
+  sourceId: z.string(),
+  name: z.string(),
+  available: z.boolean()
+});
+
+const AssistSettingsSchema = z.object({
+  allowAssist: z.boolean(),
+  running: z.number(),
+  queued: z.number()
+});
+
+export type AssistStatus = z.infer<typeof AssistStatusSchema>;
+export type AssistMember = z.infer<typeof AssistMemberSchema>;
+export type AssistStep = z.infer<typeof AssistStepSchema>;
+export type AssistResultItem = z.infer<typeof AssistResultItemSchema>;
+export type AssistRequest = z.infer<typeof AssistRequestSchema>;
+export type AssistInboxItem = z.infer<typeof AssistInboxItemSchema>;
+export type AssistGrant = z.infer<typeof AssistGrantSchema>;
+export type AssistRecord = z.infer<typeof AssistRecordSchema>;
+export type AssistExecution = z.infer<typeof AssistExecutionSchema>;
+export type AssistAgent = z.infer<typeof AssistAgentSchema>;
+export type AssistSettings = z.infer<typeof AssistSettingsSchema>;
+/** 执行方这次授权到什么程度：仅这一次，还是以后都直接执行。 */
+export type AssistScope = "once" | "always";
+
 export interface CollabClient {
   listProjects(): Promise<{
     projects: CollabProject[];
@@ -378,6 +504,44 @@ export interface CollabClient {
   previewInvite(reference: string): Promise<CollabInvitePreview>;
   /** Joins at once or applies, as the project's join mode says; `directory` is where its tasks will run. */
   joinProject(reference: string, directory?: string): Promise<CollabJoinResult>;
+
+  // ---------- 成员协助 ----------
+
+  /** 执行方收件箱：等着她授权或确认的请求，以及正在执行的请求。 */
+  assistInbox(): Promise<{ requests: AssistInboxItem[]; dailyLimit: number }>;
+  /** 执行方能不能收到协助请求，以及当前并发情况。 */
+  assistSettings(): Promise<AssistSettings>;
+  /** 关掉之后不再领取新请求；已经发出的请求保留。 */
+  setAssistAllow(allow: boolean): Promise<AssistSettings>;
+  /** 授权弹窗里列出的执行方：已关联到协作项目的 Agent。 */
+  assistAgents(projectId: string): Promise<AssistAgent[]>;
+  assistRequest(requestId: string): Promise<AssistRequest>;
+  /** 允许或拒绝。允许时要写清由哪个 Agent 执行、这次授权到什么程度。 */
+  decideAssist(requestId: string, decision: { action: "allow" | "reject"; agent?: string; scope?: AssistScope }): Promise<AssistRequest>;
+  /** 执行方停止当前执行，发起方会看到「谁停止了这次执行」。 */
+  stopAssist(requestId: string): Promise<AssistRequest>;
+  /** 执行方在任务页补充一句说明：作为一条进展发给发起方。 */
+  noteAssist(requestId: string, note: string): Promise<void>;
+  /** 发起方撤回还没被执行的请求。 */
+  cancelAssist(requestId: string): Promise<AssistRequest>;
+  /** 发起一次协助请求；同一次排查的后续请求带 `thread`。 */
+  createAssistRequest(input: {
+    project: string;
+    member: string;
+    title: string;
+    reason?: string;
+    items: string[];
+    thread?: string;
+  }): Promise<{ request: AssistRequest; threadId: string; text: string }>;
+  /** 本机正在执行与排队中的请求。 */
+  assistExecutions(): Promise<AssistExecution[]>;
+  assistGrants(projectId: string): Promise<{ grants: AssistGrant[]; dailyLimit: number }>;
+  /** 更换某位成员的执行 Agent：一位成员只对应一个。 */
+  setAssistGrantAgent(projectId: string, grantee: string, agent: string): Promise<{ grants: AssistGrant[]; dailyLimit: number }>;
+  /** 结束对某位成员的授权；之后的请求重新问她。 */
+  revokeAssistGrant(projectId: string, grantee: string): Promise<{ grants: AssistGrant[]; dailyLimit: number }>;
+  /** 协助记录，保留 30 天。 */
+  assistRecords(projectId: string): Promise<{ records: AssistRecord[]; retentionDays: number }>;
 }
 
 /** 只取状态部分：安装结果与状态同一个回应，界面把它们分开用。 */
@@ -760,6 +924,138 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
         path: "/api/collab/invites/join",
         schema: JoinResultSchema,
         body: { reference, ...(directory ? { directory } : {}) }
+      });
+    },
+
+    async assistInbox() {
+      return requestJson({
+        config,
+        path: "/api/collab/assist/inbox",
+        schema: z.object({ requests: z.array(AssistInboxItemSchema), dailyLimit: z.number() })
+      });
+    },
+
+    async assistSettings() {
+      return requestJson({ config, path: "/api/collab/assist/settings", schema: AssistSettingsSchema });
+    },
+
+    async setAssistAllow(allow) {
+      return requestJson({
+        config,
+        path: "/api/collab/assist/settings",
+        schema: AssistSettingsSchema,
+        body: { allowAssist: allow },
+        init: { method: "PUT" }
+      });
+    },
+
+    async assistAgents(projectId) {
+      const result = await requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/agents`,
+        schema: z.object({ agents: z.array(AssistAgentSchema) })
+      });
+      return result.agents;
+    },
+
+    async assistRequest(requestId) {
+      return (await requestJson({
+        config,
+        path: `/api/collab/assist/requests/${encodeURIComponent(requestId)}`,
+        schema: z.object({ request: AssistRequestSchema })
+      })).request;
+    },
+
+    async decideAssist(requestId, decision) {
+      return (await requestJson({
+        config,
+        path: `/api/collab/assist/requests/${encodeURIComponent(requestId)}/decision`,
+        schema: z.object({ request: AssistRequestSchema }),
+        body: {
+          action: decision.action,
+          ...(decision.agent ? { agent: decision.agent } : {}),
+          ...(decision.scope ? { scope: decision.scope } : {})
+        }
+      })).request;
+    },
+
+    async noteAssist(requestId, note) {
+      await requestJson({
+        config,
+        path: `/api/collab/assist/requests/${encodeURIComponent(requestId)}/note`,
+        schema: OkResponseSchema,
+        body: { note }
+      });
+    },
+
+    async stopAssist(requestId) {
+      return (await requestJson({
+        config,
+        path: `/api/collab/assist/requests/${encodeURIComponent(requestId)}/stop`,
+        schema: z.object({ request: AssistRequestSchema }),
+        body: {}
+      })).request;
+    },
+
+    async cancelAssist(requestId) {
+      return (await requestJson({
+        config,
+        path: `/api/collab/assist/requests/${encodeURIComponent(requestId)}/cancel`,
+        schema: z.object({ request: AssistRequestSchema }),
+        body: {}
+      })).request;
+    },
+
+    async createAssistRequest(input) {
+      return requestJson({
+        config,
+        path: "/api/collab/assist/requests",
+        schema: z.object({ request: AssistRequestSchema, threadId: z.string(), text: z.string() }),
+        body: input
+      });
+    },
+
+    async assistExecutions() {
+      const result = await requestJson({
+        config,
+        path: "/api/collab/assist/executions",
+        schema: z.object({ executions: z.array(AssistExecutionSchema) })
+      });
+      return result.executions;
+    },
+
+    async assistGrants(projectId) {
+      return requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/grants`,
+        schema: z.object({ grants: z.array(AssistGrantSchema), dailyLimit: z.number() })
+      });
+    },
+
+    async setAssistGrantAgent(projectId, grantee, agent) {
+      return requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/grants/${encodeURIComponent(grantee)}`,
+        schema: z.object({ grants: z.array(AssistGrantSchema), dailyLimit: z.number() }),
+        body: { agent },
+        init: { method: "PATCH" }
+      });
+    },
+
+    async revokeAssistGrant(projectId, grantee) {
+      return requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/grants/${encodeURIComponent(grantee)}`,
+        schema: z.object({ grants: z.array(AssistGrantSchema), dailyLimit: z.number() }),
+        init: { method: "DELETE" }
+      });
+    },
+
+    async assistRecords(projectId) {
+      return requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/records`,
+        schema: z.object({ records: z.array(AssistRecordSchema), retentionDays: z.number() })
       });
     }
   };
