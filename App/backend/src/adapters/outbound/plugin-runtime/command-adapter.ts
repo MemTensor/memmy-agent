@@ -21,6 +21,7 @@ import type { PluginAdapter, PluginHostServiceInvoker, PluginRuntimeContext, Plu
 import { createOfficeRuntimeInstaller, type OfficeRuntimeInstaller } from "./office-installer.js";
 import { createTexliveRuntimeInstaller, resolveTexliveRuntime, type TexliveRuntimeInstaller } from "./texlive-installer.js";
 import { resolvePluginRegistryBaseUrl } from "../../../config/service-urls.js";
+import { BackgroundTexlive } from "./background-texlive.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
@@ -68,6 +69,10 @@ interface CommandPluginSession extends PluginSession {
   children: Map<string, ChildProcessWithoutNullStreams>;
   hostServiceControllers: Map<string, Set<AbortController>>;
   approvedHostServices: Set<string>;
+  texlive?: BackgroundTexlive;
+  withTexlive: (runtime: ResolvedCommandRuntimeDependencies) => Promise<{ launch: SandboxLaunch; env: Record<string, string> }>;
+  preparations: Map<string, AbortController>;
+  closed: boolean;
 }
 
 export interface CreateCommandPluginAdapterOptions {
@@ -151,9 +156,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       if (deniedHost) throw Object.assign(new Error(`Command plugin network host is not in the host allowlist: ${deniedHost}`), {
         code: "plugin_permission_denied"
       });
-      const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies, platform,
-        options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller ?? defaultOfficeInstaller(options.pluginDataRoot),
-        options.texliveRuntimeInstaller === null ? undefined : options.texliveRuntimeInstaller ?? defaultTexliveInstaller(options.pluginDataRoot));
+      const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies.filter(dependency => dependency !== "texlive"), platform,
+        options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller ?? defaultOfficeInstaller(options.pluginDataRoot));
       const env = resolvePluginEnvironment(
         config.env,
         config.secretEnv,
@@ -178,9 +182,29 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       }
       if (platform === "win32") env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
         ? await Promise.all((options.fileInputRoots ?? []).map(root => realpath(root))) : []);
+      const launch = await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies);
+      const withTexlive = async (tex: ResolvedCommandRuntimeDependencies) => {
+        const combined = {
+          pathEntries: [...runtimeDependencies.pathEntries, ...tex.pathEntries],
+          readRoots: [...runtimeDependencies.readRoots, ...tex.readRoots],
+          executableRoots: [...runtimeDependencies.executableRoots, ...tex.executableRoots],
+          environment: { ...runtimeDependencies.environment, ...tex.environment }
+        };
+        return {
+          launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0, combined),
+          env: { ...env, ...tex.environment,
+            PATH: resolvePluginEnvironment(config.env, config.secretEnv, context.secrets, combined.pathEntries, combined.environment).PATH! }
+        };
+      };
+      const texlive = config.runtimeDependencies.includes("texlive") ? new BackgroundTexlive(() => resolveTexliveRuntime(platform,
+        options.texliveRuntimeInstaller === null ? undefined : options.texliveRuntimeInstaller ?? defaultTexliveInstaller(options.pluginDataRoot))) : undefined;
       return {
         pluginId: context.plugin.id,
-        launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies),
+        launch,
+        texlive,
+        withTexlive,
+        preparations: new Map(),
+        closed: false,
         config,
         pluginConfig: context.config,
         env,
@@ -194,6 +218,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async *invoke(rawSession, call) {
       const session = asCommandSession(rawSession);
+      const expiresAt = Date.now() + callTimeoutMs(session.config.timeoutMs, call.deadline);
+      const { launch, env } = yield* prepareCommandInvocation(session, call, expiresAt);
       const request = JSON.stringify({
         callId: call.callId,
         pluginId: call.pluginId,
@@ -204,11 +230,11 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         config: session.pluginConfig,
         hostServiceBudget: { maxRequests: MAX_HOST_SERVICE_REQUESTS_PER_CALL }
       });
-      const args = session.launch.args.map((arg) => applyPlaceholders(arg, call));
+      const args = launch.args.map((arg) => applyPlaceholders(arg, call));
       if (session.config.inputMode === "argument-json") args.push(request);
-      const child = spawnFn(session.launch.command, args, {
-        cwd: session.launch.cwd,
-        env: session.launch.windowsAppContainer ? windowsLauncherEnvironment(session.env) : session.env,
+      const child = spawnFn(launch.command, args, {
+        cwd: launch.cwd,
+        env: launch.windowsAppContainer ? windowsLauncherEnvironment(env) : env,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"]
       });
@@ -249,7 +275,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         timedOut = true;
         abortHostServices(session, call.callId);
         terminate(child);
-      }, callTimeoutMs(session.config.timeoutMs, call.deadline));
+      }, Math.max(1, expiresAt - Date.now()));
       try {
         let terminal: CapabilityEvent | null = null;
         let jsonOutput: Buffer | null = null;
@@ -367,6 +393,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async cancel(rawSession, callId) {
       const session = asCommandSession(rawSession);
+      session.preparations.get(callId)?.abort();
       abortHostServices(session, callId);
       const child = session.children.get(callId);
       if (child) {
@@ -377,6 +404,9 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async deactivate(rawSession) {
       const session = asCommandSession(rawSession);
+      session.closed = true;
+      session.texlive?.stopScheduling();
+      for (const controller of session.preparations.values()) controller.abort();
       const children = [...session.children.values()];
       for (const callId of session.children.keys()) abortHostServices(session, callId);
       for (const child of children) terminate(child);
@@ -384,6 +414,31 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       session.children.clear();
     }
   };
+}
+
+async function* prepareCommandInvocation(
+  session: CommandPluginSession, call: CapabilityCall, expiresAt: number
+): AsyncGenerator<CapabilityEvent, { launch: SandboxLaunch; env: Record<string, string> }> {
+  const controller = new AbortController();
+  session.preparations.set(call.callId, controller);
+  try {
+    if (session.closed) controller.abort();
+    let tex = session.texlive?.ready;
+    // Existing literature releases declare the dependency for the entire plugin.
+    // Only preflight/render need to wait; searching and writing remain available.
+    const needsTex = session.pluginId !== "literature-review"
+      || call.capabilityId === "review_check_render_environment" || call.capabilityId === "review_render";
+    if (session.texlive && needsTex && !controller.signal.aborted) {
+      tex = yield* session.texlive.wait(controller.signal, expiresAt);
+    }
+    // Build a per-call launch: never mutate another running call's environment or sandbox.
+    const prepared = tex ? await session.withTexlive(tex) : { launch: session.launch, env: session.env };
+    if (controller.signal.aborted) throw Object.assign(new Error("Plugin call was cancelled"), { code: "plugin_cancelled" });
+    if (Date.now() >= expiresAt) throw Object.assign(new Error("Plugin call timed out"), { code: "plugin_timeout" });
+    return prepared;
+  } finally {
+    session.preparations.delete(call.callId);
+  }
 }
 
 async function respondToHostServiceRequest(
