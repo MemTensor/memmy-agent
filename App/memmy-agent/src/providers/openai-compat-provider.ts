@@ -223,11 +223,14 @@ export class OpenAICompatProvider extends LLMProvider {
       OpenAICompatProvider.maybeMapping(data?.base_resp) ??
       OpenAICompatProvider.maybeMapping(error.base_resp) ??
       {};
+    const canonicalMemmyCode = provider?.trim().toLowerCase() === "memmy_account"
+      ? error.memmy_code ?? data?.memmy_code
+      : null;
     return {
       provider,
       httpStatus,
       errorType: LLMProvider.normalizeErrorToken(error.type ?? data?.type),
-      errorCode: LLMProvider.normalizeErrorToken(error.code ?? data?.code),
+      errorCode: LLMProvider.normalizeErrorToken(canonicalMemmyCode ?? error.code ?? data?.code),
       metadataErrorType: LLMProvider.normalizeErrorToken(metadata.error_type),
       baseRespStatusCode: LLMProvider.normalizeErrorToken(baseResp.status_code),
     };

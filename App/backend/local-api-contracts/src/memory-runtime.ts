@@ -1000,6 +1000,8 @@ export const ApiErrorCodeSchema = z.enum([
   "rate_limited",
   "internal",
   "memory_layer_unavailable",
+  "memory_starting",
+  "memory_upgrading",
   "memory_scan_upgrade_required",
   "missing_idempotency_key",
   "idempotency_body_mismatch",
@@ -1030,7 +1032,8 @@ export const ApiErrorBodySchema = z.object({
   error: z.object({
     code: ApiErrorCodeSchema,
     message: z.string(),
-    requestId: NonEmptyStringSchema
+    requestId: NonEmptyStringSchema.optional(),
+    upstreamRequestId: NonEmptyStringSchema.optional()
   })
 });
 export type ApiErrorBody = z.infer<typeof ApiErrorBodySchema>;

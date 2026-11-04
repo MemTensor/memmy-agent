@@ -378,6 +378,7 @@ class HttpLlmClient implements LlmClient {
         },
         timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
         maxRetries: options.maxRetries ?? this.config.maxRetries,
+        ...(memmyAccount ? { businessEnvelope: "memmy_account" as const } : {}),
         body: {
           model: this.config.model,
           messages,

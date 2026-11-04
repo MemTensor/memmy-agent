@@ -17,13 +17,21 @@ export class ApiRequestError extends Error {
   readonly status: number;
   readonly code: ApiErrorCode | null;
   readonly requestId: string | null;
+  readonly upstreamRequestId: string | null;
 
-  constructor(message: string, status: number, code: ApiErrorCode | null = null, requestId: string | null = null) {
+  constructor(
+    message: string,
+    status: number,
+    code: ApiErrorCode | null = null,
+    requestId: string | null = null,
+    upstreamRequestId: string | null = null
+  ) {
     super(message);
     this.name = "ApiRequestError";
     this.status = status;
     this.code = code;
     this.requestId = requestId;
+    this.upstreamRequestId = upstreamRequestId;
   }
 }
 
@@ -62,7 +70,8 @@ async function toApiRequestError(response: Response, path: string): Promise<ApiR
       parsedError.data.error.message,
       response.status,
       parsedError.data.error.code,
-      parsedError.data.error.requestId
+      parsedError.data.error.requestId ?? null,
+      parsedError.data.error.upstreamRequestId ?? null
     );
   }
 

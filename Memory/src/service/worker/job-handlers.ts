@@ -620,16 +620,36 @@ export function classifyProcessingError(error: unknown): {
   if (error instanceof EmbeddingInputLimitError) {
     return { code: "model_input_too_long", retryAction: "none" };
   }
-  if (error instanceof ModelHttpError && error.errorCode === "40309") {
-    return { code: "40309", retryAction: "open_settings" };
+  if (error instanceof ModelHttpError) {
+    const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
+    const providerType = error.errorType?.toLowerCase().replace(/[\s_-]/g, "");
+    if (error.errorCategory === "quota_exhausted" || providerCode === "40308" || providerCode === "40309" ||
+      providerCode === "insufficientquota" || providerType === "insufficientquota") {
+      return { code: QUOTA_PROCESSING_ERROR_CODE, retryAction: "open_settings" };
+    }
+    if (error.errorCategory === "authentication_required" || providerCode === "40100") {
+      return { code: "authentication_required", retryAction: "open_settings" };
+    }
+    if (error.errorCategory === "permission_denied" || providerCode === "40101") {
+      return { code: "permission_denied", retryAction: "open_settings" };
+    }
+    if (error.errorCategory === "invalid_model_request" || providerCode === "40000") {
+      return { code: "invalid_model_request", retryAction: "none" };
+    }
+    if (error.errorCategory === "rate_limited" || providerCode === "40300" || providerType === "ratelimiterror") {
+      return { code: "transient_provider_error", retryAction: "retry" };
+    }
+    if (error.errorCategory === "provider_server_error" || providerCode === "50000" || providerCode === "50001") {
+      return { code: "transient_provider_error", retryAction: "retry" };
+    }
   }
   const hasStructuredCode = error instanceof ModelHttpError && error.errorCode !== undefined;
   const message = error instanceof ModelHttpError
     ? `${error.message}\n${error.detail}`
     : error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
-  if (!hasStructuredCode && /\b40309\b/.test(normalized)) {
-    return { code: "40309", retryAction: "open_settings" };
+  if (!hasStructuredCode && /\b(?:40308|40309)\b/.test(normalized)) {
+    return { code: QUOTA_PROCESSING_ERROR_CODE, retryAction: "open_settings" };
   }
   // Temporary HTTP failures can mention API keys; keep their retry semantics.
   if (error instanceof ModelHttpError && (error.httpStatus === 408 || error.httpStatus === 429 ||
@@ -640,8 +660,11 @@ export function classifyProcessingError(error: unknown): {
   // request per item when an embedding batch is rejected.
   if (error instanceof ModelHttpError) {
     const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
-    if (providerCode === "operationnotsupported" || providerCode === "insufficientquota" ||
-      /operation.{0,80}(?:does not work|not supported)|insufficient[\s_-]+(?:quota|balance)/.test(normalized)) {
+    if (providerCode === "insufficientquota" || /insufficient[\s_-]+(?:quota|balance)/.test(normalized)) {
+      return { code: QUOTA_PROCESSING_ERROR_CODE, retryAction: "open_settings" };
+    }
+    if (providerCode === "operationnotsupported" ||
+      /operation.{0,80}(?:does not work|not supported)/.test(normalized)) {
       return { code: "model_configuration", retryAction: "open_settings" };
     }
     if (providerCode === "ratelimitexceeded" || /rate[\s_-]*limit/.test(normalized)) {
@@ -672,11 +695,17 @@ export function classifyProcessingError(error: unknown): {
   return { code: "processing_failed", retryAction: "retry" };
 }
 
+export const QUOTA_PROCESSING_ERROR_CODE = "quota_exhausted";
+
+export function isQuotaProcessingErrorCode(code: string): boolean {
+  return code === QUOTA_PROCESSING_ERROR_CODE || code === "40308" || code === "40309";
+}
+
 /** L3 jobs whose failures are retried later instead of right away. */
 export const L3_RETRY_JOB_TYPES: readonly string[] = ["l3_world_model_update", "l3_unit_update", "project_environment_profile"];
 /** Waits before retries 1-5 of a temporary failure; the sixth run that fails goes to dead letter. */
 export const L3_RETRY_DELAYS_MINUTES = [1, 5, 15, 30, 60] as const;
-/** Used-up quota (40309) or no connection is tried again this often, without using up an attempt. */
+/** Used-up quota or no connection is tried again this often, without using up an attempt. */
 export const L3_SUSPEND_MINUTES = 30;
 
 export type L3FailureHandling =
@@ -711,7 +740,7 @@ export function l3FailureHandling(job: EvolutionJobRecord, error: unknown): L3Fa
     (error instanceof TypeError && /fetch failed|network|socket/i.test(message)));
   const classification = classifyProcessingError(error);
   if (!emptyReply && !network && classification.retryAction === "open_settings") {
-    return classification.code === "40309" ? { kind: "suspend" } : { kind: "default" };
+    return isQuotaProcessingErrorCode(classification.code) ? { kind: "suspend" } : { kind: "default" };
   }
   const temporary = emptyReply || network || classification.code === "transient_provider_error";
   const delay = (temporary ? L3_RETRY_DELAYS_MINUTES : L3_RETRY_DELAYS_MINUTES.slice(0, 1))[job.failureCount ?? 0];

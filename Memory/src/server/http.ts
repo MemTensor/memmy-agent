@@ -289,7 +289,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         durationMs: Date.now() - startedAt
       });
     } catch (error) {
-      const status = error instanceof MemoryServiceError ? statusForCode(error.code) : 500;
+      const status = error instanceof MemoryServiceError ? error.status : 500;
       const fields = {
         requestId,
         method: request.method,
@@ -1436,7 +1436,7 @@ function writeViewerAsset(
 
 function writeError(response: ServerResponse, error: unknown, requestId?: string): void {
   if (error instanceof MemoryServiceError) {
-    writeJson(response, statusForCode(error.code), {
+    writeJson(response, error.status, {
       error: {
         code: error.code,
         message: error.message,

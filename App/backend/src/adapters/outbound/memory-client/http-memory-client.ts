@@ -117,19 +117,21 @@ export function createHttpMemoryClient(
           throw new MemoryLayerError("memory_scan_upgrade_required", 503,
             "The running Memory service does not support unified scanning. Update and restart that service, then try again.");
         }
-        if (response.status >= 500) {
-          throw new MemoryLayerError("memory_layer_unavailable", 503, "memory layer 5xx");
-        }
-
         const rawBody = await response.json().catch(() => undefined);
         const parsed = ApiErrorBodySchema.safeParse(rawBody);
         if (parsed.success) {
-          throw new MemoryLayerError(parsed.data.error.code, response.status, parsed.data.error.message);
+          throw new MemoryLayerError(
+            parsed.data.error.code,
+            response.status,
+            parsed.data.error.message,
+            undefined,
+            parsed.data.error.requestId
+          );
         }
         throw new MemoryLayerError(
           response.status >= 500 ? "memory_layer_unavailable" : "internal",
-          response.status,
-          "memory layer returned an unrecognized error response",
+          response.status >= 500 ? 503 : response.status,
+          response.status >= 500 ? "memory layer 5xx" : "memory layer returned an unrecognized error response",
           rawBody
         );
       },
