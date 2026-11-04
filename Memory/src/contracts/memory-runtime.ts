@@ -494,6 +494,7 @@ export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   episodeId: z.string().optional(),
   turnId: z.string().optional(),
   layers: z.array(MemoryLayerSchema).optional(),
+  recordEvent: z.boolean().optional(),
   verbose: z.boolean().optional()
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;

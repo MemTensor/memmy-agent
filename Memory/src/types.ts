@@ -510,6 +510,12 @@ export interface MemorySearchRequest extends RequestEnvelope {
   limit?: number;
   contextBudget?: number;
   includeInjectedContext?: boolean;
+  /**
+   * When false, skip persisting the recall event and memory_search API log.
+   * Retrieval model calls, request idempotency records and plugin analytics are unaffected,
+   * and the returned searchEventId does not resolve to a stored recall event.
+   */
+  recordEvent?: boolean;
   verbose?: boolean;
 }
 
