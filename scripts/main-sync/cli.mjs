@@ -28,8 +28,10 @@ export async function createRequest({api,env,configBytes,assetDirectory,allowPub
   const repositoryId=positiveInteger(env.GITHUB_REPOSITORY_ID,'repository id');
   const sourceSha=assertSha(env.SYNC_SOURCE_SHA);
   const controllerSha=assertSha(env.GITHUB_WORKFLOW_SHA || env.SYNC_CONTROLLER_SHA);
-  const release=env.SYNC_RELEASE_ID ? api.request('GET','/releases/'+positiveInteger(env.SYNC_RELEASE_ID,'release id')) :
-    api.request('GET','/releases/tags/'+encodeURIComponent(env.SYNC_TAG));
+  const releaseId=positiveInteger(env.SYNC_RELEASE_ID,'release id');
+  const release=api.request('GET','/releases/'+releaseId);
+  requireValue(release?.id ===releaseId,'Release id changed');
+  if (env.SYNC_TAG) requireValue(release.tag_name ===env.SYNC_TAG,'Release tag changed');
   const assets=release.assets;
   requireValue(Array.isArray(assets) && assets.filter(item=>item.name?.startsWith('Memmy-')).length >=6 &&
     metadata.every(name=>assets.some(item=>item.name ===name)),'Canonical release assets are missing');
@@ -44,7 +46,7 @@ export async function createRequest({api,env,configBytes,assetDirectory,allowPub
       expectedAssets.push({name,size:stat.size,sha256:await fileDigest(file)});
     }
   }
-  const releaseInfo=validateRelease(release,{releaseId:release.id,sourceSha,tagSha:await tagCommit(api,release.tag_name),expectedAssets,allowPublished});
+  const releaseInfo=validateRelease(release,{releaseId,sourceSha,tagSha:await tagCommit(api,release.tag_name),expectedAssets,allowPublished});
   const main=api.request('GET','/git/ref/heads/main');
   const comparison=api.request('GET','/compare/'+sourceSha+'...'+assertSha(main.object?.sha));
   requireValue(comparison.merge_base_commit?.sha ===sourceSha,'Release source is not in main history');

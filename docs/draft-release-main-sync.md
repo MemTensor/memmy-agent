@@ -5,6 +5,20 @@ the Release, source SHA and asset inventory, then publishes a synchronization re
 artifact. The Release does not need to be published. Upload failures retain the
 existing cleanup behavior; a later request failure preserves the completed Draft.
 
+After every asset has uploaded and the upload cleanup trap has been cleared, the
+normal producer uses the draft-aware `gh release view` lookup to obtain the
+Release's immutable numeric ID. It validates a positive safe integer ID, the
+expected tag, Draft state and absence of a prerelease flag, then passes that ID to
+the synchronization verifier as `SYNC_RELEASE_ID`. Draft lookup does not use the
+published-release-by-tag API. A failed lookup or invalid identity stops the request
+without deleting the completed Draft.
+
+When no tag existed before Draft creation, the Draft's `target_commitish` must
+equal the exact source SHA. Existing-tag recovery retains the earlier tag/source
+check instead: GitHub can ignore `target_commitish` when the tag already exists.
+The verifier re-reads the tag and checks its commit against the source before
+emitting a request.
+
 The existing cloud CodingAgent GitHub webhook receives `workflow_run.completed`
 notifications. Notifications only wake the Scheduler. It re-reads the exact workflow
 run attempt, original artifact and digest, Release, main history and target configuration
@@ -68,3 +82,11 @@ supported if their tag resolves to the exact source.
 Diagnose failures using the request workflow, original cloud task and specific
 `main-sync-validation.yml` run. A queued workflow, model completion claim or green
 result for an older commit does not establish readiness.
+
+An HTTP 403 from manual recovery records a denied API request; that response alone
+does not establish whether token permissions, repository policy or rate limiting
+caused it. Record only sanitized diagnostics: the failing endpoint, HTTP status,
+request ID, rate-limit hints and the run's effective permissions. Do not retain
+tokens or raw HTTP headers or response bodies. Check the existing Release ID and
+visibility before changing credentials or permissions. Do not delete a completed
+Draft or expand permissions blindly to work around an unconfirmed cause.
