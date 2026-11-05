@@ -13,6 +13,7 @@ import {
   pendingText,
   resultText,
   shortId,
+  stopText,
   toAssistRequest,
   type AssistRunner
 } from "../collab-assist-service.js";
@@ -234,7 +235,7 @@ describe("createCollabAssistService", () => {
       if (path.endsWith("/assist/grants")) return { grants: [], dailyLimit: 20 };
       if (path.endsWith("/assist/threads")) {
         return {
-          threads: [thread(MEMBER, "workbuddy", "2026-11-04T09:00:00Z"), thread(other, "hermes", "2026-11-04T10:00:00Z")],
+          threads: [thread(MEMBER, "openclaw", "2026-11-04T09:00:00Z"), thread(other, "hermes", "2026-11-04T10:00:00Z")],
           open: 0,
           retentionDays: 30
         };
@@ -251,7 +252,7 @@ describe("createCollabAssistService", () => {
         { sourceId: "cursor", name: "Cursor", available: true },
         { sourceId: "hermes", name: "Hermes", available: true },
         { sourceId: "opencode", name: "OpenCode", available: true },
-        { sourceId: "workbuddy", name: "WorkBuddy", available: true }
+        { sourceId: "openclaw", name: "OpenClaw", available: true }
       ],
       agentUsage: async () => ({
         project: { cursor: "2026-11-03T00:00:00Z" },
@@ -266,13 +267,13 @@ describe("createCollabAssistService", () => {
     expect(choice.agents.map((agent) => [agent.sourceId, agent.group])).toEqual([
       ["memmy", "used"],
       ["hermes", "used"],
-      ["workbuddy", "used"],
+      ["openclaw", "used"],
       ["cursor", "used"],
       ["codex", "other"],
       ["opencode", "other"]
     ]);
-    // 她上一次给孙起选的是 WorkBuddy。
-    expect(choice.defaultAgent).toBe("workbuddy");
+    // 她上一次给孙起选的是 OpenClaw。
+    expect(choice.defaultAgent).toBe("openclaw");
     // 别人的请求没有选择记录时默认 Memmy。
     expect((await service.agents("p1", "123")).defaultAgent).toBe("memmy");
   });
@@ -865,3 +866,199 @@ describe("createCollabAssistService", () => {
     expect(withoutFinalReply([{ kind: "text", text: "好" }, { kind: "text", text: "结论：正常" }], "结论：正常")).toEqual([{ kind: "text", text: "好" }]);
   });
 });
+
+describe("stopping a run from either side", () => {
+  /** 一个跑到被中止为止的执行：用来验证发起方停止之后本机真的停下来。 */
+  function waitingRunner(state: { started: boolean; aborted: boolean }): AssistRunner {
+    return {
+      async run(input) {
+        state.started = true;
+        input.onStep({ text: "运行 sw_vers", output: "macOS 15.6" });
+        await new Promise<void>((resolve) => {
+          input.signal.addEventListener("abort", () => {
+            state.aborted = true;
+            resolve();
+          });
+        });
+        throw new AcpError("发起方停止了这次执行", "cancelled");
+      }
+    };
+  }
+
+  it("aborts a run whose request is no longer in the inbox", async () => {
+    const requestId = request().id;
+    let status = "running";
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/assist/inbox") return { requests: status === "running" ? [{ ...request(), granted: false, grantAgent: null }] : [] };
+      if (path === `/assist/requests/${requestId}`) return { request: request({ status }) };
+      return { request: request({ status }) };
+    });
+    const state = { started: false, aborted: false };
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => "/tmp",
+      agents: async () => [],
+      runner: waitingRunner(state)
+    });
+
+    await service.pollNow();
+    await until(() => state.started);
+
+    // 发起方在另一边停了：收件箱里不再有它，本机要真的停下，而不是白跑完再回传。
+    status = "stopped";
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await service.pollNow();
+    await until(() => state.aborted);
+
+    expect(state.aborted).toBe(true);
+  });
+
+  it("never aborts a run when the inbox cannot be read", async () => {
+    const state = { started: false, aborted: false };
+    let failInbox = false;
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/assist/inbox") {
+        if (failInbox) throw Object.assign(new Error("网络不通"), { code: "memory_layer_unavailable" });
+        return { requests: [{ ...request(), granted: false, grantAgent: null }] };
+      }
+      return { request: request() };
+    });
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => "/tmp",
+      agents: async () => [],
+      runner: waitingRunner(state)
+    });
+
+    await service.pollNow();
+    await until(() => state.started);
+    // 读不到收件箱（网络、登录态）不等于对方停了：不能凭读失败就把本机正在跑的执行掐掉。
+    failInbox = true;
+    await service.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(state.aborted).toBe(false);
+  });
+
+  it("uploads how far the run got when it is stopped", async () => {
+    const { calls, cloud } = fakeCloud((path) => {
+      if (path === "/assist/inbox") return { requests: [{ ...request({ agent: "memmy" }), granted: false, grantAgent: null }] };
+      return { request: request({ agent: "memmy" }) };
+    });
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => "/tmp",
+      agents: async () => [],
+      runner: {
+        async run(input) {
+          input.onStep({ text: "运行 sw_vers", output: "macOS 15.6" });
+          throw new AcpError("执行方在任务里停止了这次执行", "cancelled");
+        }
+      }
+    });
+
+    await service.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // 停止不是失败，但做到哪一步要留在协助会话里：双方都能看到停之前执行了什么。
+    const progress = calls.filter((call) => call.path.endsWith("/progress"));
+    expect(progress.length).toBeGreaterThan(0);
+    expect(progress[progress.length - 1]!.body).toMatchObject({ steps: [{ text: "运行 sw_vers", output: "macOS 15.6" }] });
+  });
+
+  it("does not send a result back when the requester stopped it", async () => {
+    let status = "running";
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
+      if (path === "/projects/p1/assist/requests") return request({ status: "pending", mine: true, sourceTask: "chat-src" });
+      if (path === "/assist/inbox") return { requests: [] };
+      return { request: request({ status, mine: true, stoppedBy: "requester", failure: "孙起停止了这次执行" }) };
+    });
+    const delivered: Array<{ chatId: string; content: string }> = [];
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => null,
+      agents: async () => [],
+      runner: runner(),
+      deliverResult: async (input) => {
+        delivered.push(input);
+        return "sent";
+      }
+    });
+    await service.createRequest({
+      project: "Memmy 内测反馈", member: "王雨", title: "看磁盘占用", items: ["看 ~/.memmy 的大小"], sourceTask: "chat-src"
+    });
+
+    status = "stopped";
+    await service.pollNow();
+    await service.pollNow();
+
+    // 自己停下的不送回：否则 Memmy 会在来源任务里再分析一轮。
+    expect(delivered).toHaveLength(0);
+    expect((await service.taskAssist("chat-src")).requested).toMatchObject([{ status: "stopped", delivered: true }]);
+  });
+
+  it("still sends a result back when the executor stopped it", async () => {
+    let status = "running";
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
+      if (path === "/projects/p1/assist/requests") return request({ status: "pending", mine: true, sourceTask: "chat-src" });
+      if (path === "/assist/inbox") return { requests: [] };
+      return {
+        request: request({
+          status, mine: true, stoppedBy: "executor", failure: "王雨停止了这次执行"
+        })
+      };
+    });
+    const delivered: Array<{ chatId: string; content: string }> = [];
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => null,
+      agents: async () => [],
+      runner: runner(),
+      deliverResult: async (input) => {
+        delivered.push(input);
+        return "sent";
+      }
+    });
+    await service.createRequest({
+      project: "Memmy 内测反馈", member: "王雨", title: "看磁盘占用", items: ["看 ~/.memmy 的大小"], sourceTask: "chat-src"
+    });
+
+    status = "stopped";
+    await service.pollNow();
+
+    // 对方停下的要送回：发起方的 Memmy 才知道这次没跑完。
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.content).toContain("王雨停止了这次执行");
+  });
+
+  it("says who stopped it, from either side", () => {
+    const stoppedByRequester = toAssistRequest(request({ status: "stopped", mine: true, stoppedBy: "requester" }));
+    const stoppedByExecutor = toAssistRequest(request({ status: "stopped", mine: true, stoppedBy: "executor" }));
+
+    // 本人停的就是「你」，对方停的写名字。
+    expect(stopText(stoppedByRequester)).toBe("你停止了这次执行");
+    expect(stopText(stoppedByExecutor)).toBe("王雨停止了这次执行");
+    expect(resultText(stoppedByRequester)).toContain("你停止了这次执行");
+  });
+
+  it("reads an old stopped request as stopped by the executor, and a running one as neither", () => {
+    expect(toAssistRequest(request({ status: "stopped" })).stoppedBy).toBe("executor");
+    expect(toAssistRequest(request({ status: "running" })).stoppedBy).toBeNull();
+  });
+});
+
+/** 等到条件成立（执行是异步拉起来的），最多等一秒。 */
+async function until(check: () => boolean): Promise<void> {
+  for (let index = 0; index < 100; index += 1) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("等待超时");
+}

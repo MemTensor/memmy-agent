@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistInboxItem, AssistRequest, AssistTaskView, AssistThread, CollabClient } from "../../api/collab-client.js";
+import { ApiRequestError } from "../../api/http.js";
 import { consumeAssistFocus, getAssistFocus } from "../../app/collab-assist-focus.js";
 import { loadCollabProjects, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
@@ -41,6 +42,7 @@ function request(overrides: Partial<AssistRequest> = {}): AssistRequest {
     resultItems: [],
     files: [],
     failure: null,
+    stoppedBy: null,
     requester: REQUESTER,
     executor: ME,
     mine: false,
@@ -379,6 +381,104 @@ describe("发起方在 Memmy 中", () => {
     expect(document.body.textContent).toContain("- sessions：11G");
     expect(document.body.textContent).toContain("以上内容来自王雨的电脑");
     expect(document.body.textContent).not.toContain("请结合这份结果");
+  });
+});
+
+describe("发起方停下执行中的请求", () => {
+  const running = (overrides: Partial<AssistRequest> = {}) => request({
+    status: "running",
+    agent: "memmy",
+    scope: "once",
+    mine: true,
+    requester: { ...REQUESTER, mine: true },
+    executor: { ...ME, mine: false },
+    decidedAt: "2026-11-05T01:00:10Z",
+    ...overrides
+  });
+
+  it("卡片在执行中给出「停止」，点完变成已停止并写明是你停的", async () => {
+    const onChanged = vi.fn();
+    const collab = client({ cancelAssist: vi.fn().mockResolvedValue(running({ status: "stopped", stoppedBy: "requester" })) });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistRequestCard request={running()} collab={collab} onChanged={onChanged} />
+      </I18nProvider>
+    ));
+    expect(document.body.textContent).toContain("正在执行");
+    // 执行中也能自己停：位置与样式同等待授权时的「撤回」。
+    await act(async () => button("停止")?.click());
+    expect(collab.cancelAssist).toHaveBeenCalledWith("r1");
+    expect(onChanged).toHaveBeenCalledWith(expect.objectContaining({ status: "stopped" }));
+
+    // 卡片由持有请求的那一层重画：换成停下的这一份后，按钮消失、写明是你停的。
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistRequestCard request={running({ status: "stopped", stoppedBy: "requester" })} collab={collab} onChanged={onChanged} />
+      </I18nProvider>
+    ));
+    expect(button("停止")).toBeUndefined();
+    expect(document.body.textContent).toContain("你停止了这次执行");
+  });
+
+  it("停止后的卡片写「你停止了这次执行」，对方停的写名字", async () => {
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistRequestCard request={running({ status: "stopped", stoppedBy: "requester" })} collab={client()} />
+        <CollabAssistRequestCard request={running({ status: "stopped", stoppedBy: "executor" })} collab={client()} />
+      </I18nProvider>
+    ));
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("你停止了这次执行");
+    expect(text).toContain("王雨停止了这次执行");
+  });
+
+  it("刚好在对方跑完时停止：不报错，改成显示最新的一次", async () => {
+    const done = running({ status: "done", reply: "版本是 macOS 15.6" });
+    const collab = client({
+      cancelAssist: vi.fn().mockRejectedValue(new ApiRequestError("这次请求已经处理过了", 409, "conflict")),
+      assistRequest: vi.fn().mockResolvedValue(done)
+    });
+    const onChanged = vi.fn();
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistRequestCard request={running()} collab={collab} onChanged={onChanged} />
+      </I18nProvider>
+    ));
+    await act(async () => button("停止")?.click());
+    expect(collab.assistRequest).toHaveBeenCalledWith("r1");
+    expect(onChanged).toHaveBeenCalledWith(expect.objectContaining({ status: "done" }));
+  });
+
+  it("协助会话里发起人在执行中也有「停止」", async () => {
+    const collab = client({
+      cancelAssist: vi.fn().mockResolvedValue(running({ status: "stopped", stoppedBy: "requester" })),
+      assistThread: vi.fn().mockResolvedValue({ thread: thread({ mine: true, requester: { ...REQUESTER, mine: true }, executor: { ...ME, mine: false } }, [running()]), sourceTask: null })
+    });
+    const mineThread = thread({ mine: true, requester: { ...REQUESTER, mine: true }, executor: { ...ME, mine: false } }, [running()]);
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistConversation thread={mineThread} collab={collab} onClose={() => undefined} />
+      </I18nProvider>
+    ));
+    await act(async () => undefined);
+    await act(async () => button("停止")?.click());
+    expect(collab.cancelAssist).toHaveBeenCalledWith("r1");
+  });
+
+  it("两边几乎同时停止时，后到的那一下不显示错误", async () => {
+    const collab = client({
+      cancelAssist: vi.fn().mockRejectedValue(new ApiRequestError("这次请求已经处理过了", 409, "conflict")),
+      assistThread: vi.fn().mockResolvedValue({ thread: thread({ mine: true, requester: { ...REQUESTER, mine: true }, executor: { ...ME, mine: false } }, [running()]), sourceTask: null })
+    });
+    const mineThread = thread({ mine: true, requester: { ...REQUESTER, mine: true }, executor: { ...ME, mine: false } }, [running()]);
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistConversation thread={mineThread} collab={collab} onClose={() => undefined} />
+      </I18nProvider>
+    ));
+    await act(async () => undefined);
+    await act(async () => button("停止")?.click());
+    expect(document.body.textContent).not.toContain("这次操作没有完成");
   });
 });
 

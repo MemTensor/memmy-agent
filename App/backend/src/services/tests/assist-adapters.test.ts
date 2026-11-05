@@ -29,8 +29,8 @@ describe("assist adapters", () => {
     expect(adapterFor("claude_code")?.bin).toBe("claude-agent-acp");
     expect(adapterFor("codex")?.bin).toBe("codex-acp");
     expect(adapterFor("pi")?.bin).toBe("pi-acp");
-    // 原生支持 ACP 的七个不需要适配器：多装一层只会多一个会坏的地方。
-    for (const sourceId of ["cursor", "opencode", "openclaw", "hermes", "workbuddy", "qwenwork", "deepseek_harness"]) {
+    // 原生支持 ACP 的六个不需要适配器：多装一层只会多一个会坏的地方。
+    for (const sourceId of ["cursor", "opencode", "openclaw", "hermes", "qwenwork", "deepseek_harness"]) {
       expect(adapterFor(sourceId)).toBeNull();
     }
   });

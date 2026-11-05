@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ASSIST_COMMAND_ENV, assistRunnable } from "../assist/recipes.js";
+import { ASSIST_COMMAND_ENV, assistAgentName, assistRecipe, assistRunnable } from "../assist/recipes.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -49,5 +49,44 @@ describe("assistRunnable", () => {
 
   it("never lists an agent Memmy has no recipe for", () => {
     expect(assistRunnable("added-qoder-82ef827e", { PATH: binWith("qoder") } as NodeJS.ProcessEnv)).toBe(false);
+  });
+
+  it("never offers WorkBuddy, even when its old command line is on PATH", () => {
+    // WorkBuddy 2026-11-05 下线：`codebuddy` 拉起的是另外安装的 CodeBuddy 命令行，不是 WorkBuddy 自己。
+    const env = { PATH: binWith("codebuddy") } as NodeJS.ProcessEnv;
+    expect(assistRunnable("workbuddy", env)).toBe(false);
+    expect(assistRecipe("workbuddy", env)).toBeNull();
+    // 以前带着它执行过的记录仍然按名字显示，不会露出标识。
+    expect(assistAgentName("workbuddy")).toBe("WorkBuddy");
+  });
+
+  /** 一个 --version 输出给定版本的 dsh。 */
+  function dshWithVersion(version: string): string {
+    const bin = binWith("dsh");
+    writeFileSync(join(bin, "dsh"), `#!/bin/sh\necho "${version}"\n`);
+    return bin;
+  }
+
+  it("needs a DeepSeek Harness desktop app or a dsh that supports acp", () => {
+    const old = { PATH: dshWithVersion("0.1.0-rc.6") } as NodeJS.ProcessEnv;
+    // 0.1.x 没有 acp profile：不能当作可执行方，否则用户选了它总是失败。
+    expect(assistRunnable("deepseek_harness", old, { appDirs: [] })).toBe(false);
+
+    const fresh = { PATH: dshWithVersion("0.2.1-rc.5") } as NodeJS.ProcessEnv;
+    expect(assistRunnable("deepseek_harness", fresh, { appDirs: [] })).toBe(true);
+  });
+
+  it("accepts DeepSeek Harness when only its desktop app is installed", () => {
+    // 只装了桌面版、没有 dsh 命令行：应当算可运行（入口用桌面版自带的引擎）。
+    const root = mkdtempSync(join(tmpdir(), "memmy-assist-app-"));
+    roots.push(root);
+    const bundle = join(root, "DeepSeek Harness.app");
+    mkdirSync(join(bundle, "Contents", "MacOS"), { recursive: true });
+    mkdirSync(join(bundle, "Contents", "Resources"), { recursive: true });
+    writeFileSync(join(bundle, "Contents", "MacOS", "DeepSeek Harness"), "#!/bin/sh\n");
+    writeFileSync(join(bundle, "Contents", "Resources", "app.asar"), "fake asar");
+
+    const env = { PATH: binWith() } as NodeJS.ProcessEnv;
+    expect(assistRunnable("deepseek_harness", env, { appDirs: [bundle] })).toBe(true);
   });
 });

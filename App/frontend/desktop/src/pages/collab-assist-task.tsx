@@ -20,6 +20,7 @@ import {
   ASSIST_STATUS_KEYS,
   AssistAgentLogo,
   assistAgentName,
+  assistStopText,
   grantSummary,
   pickAssistAgent,
   useAssistAgentChoice
@@ -83,7 +84,10 @@ export function CollabAssistTaskBar(props: { view: AssistTaskView; collab: Colla
     thread.attempt > 1 ? t("collab.assist.attemptLabel", { attempt: String(thread.attempt) }) : "",
     // 等待确认或授权时这一次还没有授权方式，上一次的「仅这一次」不再适用。
     thread.scope && latest?.status !== "confirm" && latest?.status !== "pending" ? scope : "",
-    latest && latest.status !== "running" ? t(ASSIST_STATUS_KEYS[latest.status]) : ""
+    // 停下的写明是谁停的：被发起方停下时，执行方在任务页里就知道不用再管了。
+    latest && latest.status !== "running"
+      ? latest.status === "stopped" ? assistStopText(latest, t) : t(ASSIST_STATUS_KEYS[latest.status])
+      : ""
   ].filter(Boolean);
 
   async function act(run: () => Promise<unknown>) {
@@ -200,7 +204,9 @@ export function CollabAssistTaskDock(props: { view: AssistTaskView; collab: Coll
         </div>
       ) : null}
       {thread && latest && !confirm && (latest.status === "failed" || latest.status === "stopped") ? (
-        <div className={styles.sent}>{latest.failure ?? t(ASSIST_STATUS_KEYS[latest.status])}</div>
+        <div className={styles.sent}>
+          {latest.status === "stopped" ? assistStopText(latest, t) : latest.failure ?? t(ASSIST_STATUS_KEYS[latest.status])}
+        </div>
       ) : null}
       {waiting.map((request) => (
         <CollabAssistRequestCard key={request.id} request={request} collab={collab} onChanged={() => props.onChanged()} />

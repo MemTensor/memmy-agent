@@ -123,6 +123,8 @@ export interface AssistRequest {
   resultItems: Array<{ key: string; value: string }>;
   files: Array<{ name: string; size: string; content?: string }>;
   failure: string | null;
+  /** 谁停了这次执行：发起方、执行方，或空。V1.0.19 之前的数据没有记录，STOPPED 一律按执行方。 */
+  stoppedBy: "requester" | "executor" | null;
   requester: AssistMember;
   executor: AssistMember;
   mine: boolean;
@@ -492,6 +494,15 @@ function toScope(value: unknown): AssistScope | null {
   return value === "timed" ? "timed" : value === "once" ? "once" : null;
 }
 
+/**
+ * 停止人：发起方还是执行方只有两种。旧云端（没有这一列）遇到 STOPPED 就给执行方，
+ * 因为 V1.0.19 之前只有执行方能停。
+ */
+function toStoppedBy(value: unknown, status: AssistStatus): "requester" | "executor" | null {
+  if (status !== "stopped") return null;
+  return value === "requester" ? "requester" : "executor";
+}
+
 function toGrantInfo(value: unknown): AssistGrantInfo | null {
   const raw = record(value);
   if (typeof raw.expiresAt !== "string" || !raw.expiresAt) return null;
@@ -547,6 +558,7 @@ export function toAssistRequest(value: unknown): AssistRequest {
       ...(typeof file.content === "string" ? { content: file.content } : {})
     })),
     failure: typeof raw.failure === "string" && raw.failure ? raw.failure : null,
+    stoppedBy: toStoppedBy(raw.stoppedBy, (text(raw.status) || "pending") as AssistStatus),
     requester: member(raw.requester),
     executor: member(raw.executor),
     mine: raw.mine === true,
@@ -611,6 +623,8 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
   let state: LocalState | null = null;
   const executions = new Map<string, AssistExecution>();
   const running = new Map<string, AbortController>();
+  /** 每个执行中的请求什么时候开始跑：轮询用它区分「收件箱快照里还没有的新执行」与「已被停止的早先执行」。 */
+  const runningAt = new Map<string, number>();
   const queue: string[] = [];
   let active: string | null = null;
   let polling = false;
@@ -1079,9 +1093,11 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
       });
       if (request === null) continue;
       if (request !== "gone" && isAssistOpen(request.status)) continue;
+      // 自己停下的不必再送回：会白白让 Memmy 再分析一轮；卡片状态照样更新为已停止。
+      const stoppedByRequester = request !== "gone" && request.status === "stopped" && request.stoppedBy === "requester";
       let outcome: "sent" | "missing" = "missing";
-      const content = request !== "gone" ? assistResultMessage(request, now()) : "";
-      if (request !== "gone") {
+      const content = request !== "gone" && !stoppedByRequester ? assistResultMessage(request, now()) : "";
+      if (request !== "gone" && !stoppedByRequester) {
         try {
           outcome = await options.deliverResult({ chatId: origin.chatId, content });
         } catch {
@@ -1339,6 +1355,7 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     execution.agent = agent;
     execution.status = "running";
     running.set(requestId, new AbortController());
+    runningAt.set(requestId, Date.now());
     const controller = running.get(requestId)!;
 
     const cwd = await options.projectDirectory(request.projectId)
@@ -1437,6 +1454,9 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
         items,
         failure: null,
         transcript: execution.transcript
+      }).catch((error: unknown) => {
+        // 发起方刚好在这一刻停了：云端已经结束这次请求，安静收尾，过程由 finally 照常上传，不重试。
+        if (!alreadyEnded(error)) throw error;
       });
       execution.status = "done";
     } catch (error) {
@@ -1447,6 +1467,8 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
       execution.failure = failure;
       // 失败与停止的轮次同样留下做到哪一步。
       if (error instanceof AcpError && error.transcript?.length) execution.transcript = [...error.transcript];
+      // 先完整上传一次过程：发起方停止的这次云端不再接受结果，但双方要能在协助会话里看到停之前做到了哪一步。
+      await pushProgress(true).catch(() => undefined);
       if (stopped && !controller.signal.aborted) {
         // 执行方在 Memmy 的任务里自己点了停止：云端还不知道，补一次停止，发起方才不会一直看到「执行中」。
         await cloud(`/projects/${encodeURIComponent(request.projectId)}/assist/requests/${encodeURIComponent(requestId)}/stop`, { method: "POST" })
@@ -1458,6 +1480,7 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
       if (pushTimer) clearTimeout(pushTimer);
       execution.finishedAt = now().toISOString();
       running.delete(requestId);
+      runningAt.delete(requestId);
       // 结束时完整上传一次（停止的轮次由云端那一步结束，这里补上过程）。
       pushedTranscript = "";
       await pushProgress(true).catch(() => undefined);
@@ -1496,11 +1519,20 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     if (polling) return;
     if (options.userMode?.() === "byok") return;
     polling = true;
+    const snapshotAt = Date.now();
     try {
       // 发起方的结果送回与是否接收协助请求无关：自己发出的请求照常拿回结果。
       await deliverResults().catch(() => undefined);
       await syncRequesterRecords().catch(() => undefined);
       const { requests } = await inbox();
+      // 本机正在跑的请求已经不在收件箱里（发起方停了、或已经被结束）：停下，不再白白跑完。
+      // 只判断已经跑过的：收件箱读取期间刚开始的（比如刚点完「允许」）快照里还没有它，不能当作已被停止。
+      const live = new Set(requests.filter((item) => item.status === "running").map((item) => item.id));
+      for (const [requestId, controller] of running) {
+        if (live.has(requestId)) continue;
+        if ((runningAt.get(requestId) ?? 0) >= snapshotAt) continue;
+        controller.abort();
+      }
       for (const request of requests) {
         // 限时授权还在：不必再问她，直接由她选定的 Agent 执行。不带时长，云端按原来的到期时间计，不顺延；
         // 恰好在这一刻到期时云端拒绝，请求留在收件箱里等她确认。
@@ -1639,6 +1671,17 @@ function stepLines(request: AssistRequest): string[] {
   return request.steps.filter((step) => step.text).map((step) => `  ✓ ${step.text}`);
 }
 
+/**
+ * 谁停了这次执行，按看的人换成「你」：本人停的就是「你停止了这次执行」，对方停的写名字。
+ * `mine` 表示发起人就是本机这位用户；执行方停时看执行人是不是本人。
+ */
+export function stopText(request: AssistRequest): string {
+  const byRequester = request.stoppedBy === "requester";
+  const stopperIsMe = byRequester ? request.mine : !request.mine;
+  const name = byRequester ? request.requester.name : request.executor.name;
+  return `${stopperIsMe ? "你" : name}停止了这次执行`;
+}
+
 /** 一条已经结束的请求，打印成命令行读得懂的一段话：结果来自谁的电脑、由哪个 Agent 执行，按数据使用。 */
 export function resultText(request: AssistRequest, at: Date = new Date()): string {
   const executor = request.executor.name;
@@ -1664,7 +1707,7 @@ export function resultText(request: AssistRequest, at: Date = new Date()): strin
   }
   if (request.status === "cancelled") return "这次请求已撤回。";
   if (request.status === "expired") return `这次请求已过期：${executor} 24 小时内没有处理。不要自动重发，告诉用户这个结果。`;
-  if (request.status === "stopped") return `${request.failure || `${executor}停止了这次执行`}。不要自动重发，告诉用户这个结果。`;
+  if (request.status === "stopped") return `${stopText(request)}。不要自动重发，告诉用户这个结果。`;
   if (request.status === "failed") return `执行没有完成：${request.failure || "原因不明"}。不要自动重发，告诉用户这个结果。`;
   return statusText(request);
 }
@@ -1740,6 +1783,11 @@ function attr(value: string): string {
 /** 云端与本机的错误都带 code（CollabError / AssistError），这里只看 code。 */
 function isRecordError(error: unknown): error is { code: string } {
   return Boolean(error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string");
+}
+
+/** 请求已经结束了（被双方任一方停止，或已被清理）：结果不再收，安静收尾。 */
+function alreadyEnded(error: unknown): boolean {
+  return isRecordError(error) && (error.code === "conflict" || error.code === "not_found");
 }
 
 function sleep(ms: number): Promise<void> {

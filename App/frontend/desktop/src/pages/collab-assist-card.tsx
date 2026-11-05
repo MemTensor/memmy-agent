@@ -5,11 +5,12 @@
  * 展示时也按「结果」这一栏排，不拼进对话正文。
  */
 import { AlertCircle, CheckCircle2, FileText, X, WifiOff } from "lucide-react";
+import { useState } from "react";
 import type { AssistRequest, CollabClient } from "../api/collab-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { agentSourceLogoUrl } from "./agent-source-logos.js";
 import styles from "./collab-assist-card.module.css";
-import { assistClock, assistDuration, grantSummary } from "./collab-assist-view.js";
+import { assistClock, assistDuration, assistStopText, grantSummary } from "./collab-assist-view.js";
 
 export function CollabAssistRequestCard(props: {
   request: AssistRequest;
@@ -18,6 +19,7 @@ export function CollabAssistRequestCard(props: {
 }) {
   const { t } = useTranslation();
   const { request } = props;
+  const [busy, setBusy] = useState(false);
   const executor = request.executor.name;
   const agentName = agentLabel(request.agent, t("collab.assist.executorFallback"));
   const status = request.status;
@@ -28,7 +30,9 @@ export function CollabAssistRequestCard(props: {
     : status === "running" ? { className: styles.pillRun, label: t("collab.assist.statusRunning") }
     : status === "confirm" ? { className: styles.pillWarn, label: t("collab.assist.statusConfirm", { name: executor }) }
     : status === "rejected" ? { className: styles.pillErr, label: t("collab.assist.statusRejected", { name: executor }) }
-    : status === "failed" || status === "stopped" ? { className: styles.pillErr, label: t("collab.assist.statusFailed") }
+    : status === "failed" ? { className: styles.pillErr, label: t("collab.assist.statusFailed") }
+    // 停下与失败分开说：本人或对方主动停下的，写「已停止」而不是「没有完成」。
+    : status === "stopped" ? { className: styles.pillErr, label: t("collab.assist.state.stopped") }
     : status === "cancelled" || status === "expired" ? { className: styles.pillWait, label: t("collab.assist.statusClosed") }
     // 她的限时授权还在：不是在等她授权，她的 Memmy 会直接开始。
     : request.autoRun ? { className: styles.pillRun, label: t("collab.assist.state.autoRun") }
@@ -36,9 +40,16 @@ export function CollabAssistRequestCard(props: {
   const plannedAgent = agentLabel(request.grant?.agent ?? request.agent, t("collab.assist.executorFallback"));
 
   async function cancel() {
-    if (!props.collab) return;
-    const next = await props.collab.cancelAssist(request.id).catch(() => null);
-    if (next) props.onChanged?.(next);
+    if (!props.collab || busy) return;
+    setBusy(true);
+    try {
+      const next = await props.collab.cancelAssist(request.id).catch(() => null);
+      // 已经结束（对方刚好跑完）：不报错，读取最新的一次让卡片自己回到终态。
+      const latest = next ?? await props.collab.assistRequest(request.id).catch(() => null);
+      if (latest) props.onChanged?.(latest);
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -102,7 +113,7 @@ export function CollabAssistRequestCard(props: {
               ? t("collab.assist.footerAutoRun", { name: executor, agent: plannedAgent, time: assistClock(request.grant.expiresAt, true) })
               : t("collab.assist.footerWaiting", { name: executor })}
             <span className={styles.grow} />
-            <button type="button" className={`${styles.linkButton} ${styles.linkMuted}`} onClick={() => void cancel()}>
+            <button type="button" className={`${styles.linkButton} ${styles.linkMuted}`} disabled={busy} onClick={() => void cancel()}>
               {t("collab.assist.withdraw")}
             </button>
           </>
@@ -113,13 +124,18 @@ export function CollabAssistRequestCard(props: {
               <AgentLogo agent={request.agent} name={agentName} />
               {t("collab.assist.footerRunning", { name: executor, agent: agentName, attempt: String(request.attempt) })}{grantNote}
             </span>
+            {/* 执行中也能自己停下：同位置同样式，不另弹确认。 */}
+            <span className={styles.grow} />
+            <button type="button" className={`${styles.linkButton} ${styles.linkMuted}`} disabled={busy} onClick={() => void cancel()}>
+              {t("collab.assist.stop")}
+            </button>
           </>
         ) : status === "confirm" ? (
           <>
             <AlertCircle size={13} aria-hidden="true" />
             {t("collab.assist.footerConfirm", { name: executor })}
             <span className={styles.grow} />
-            <button type="button" className={`${styles.linkButton} ${styles.linkMuted}`} onClick={() => void cancel()}>
+            <button type="button" className={`${styles.linkButton} ${styles.linkMuted}`} disabled={busy} onClick={() => void cancel()}>
               {t("collab.assist.withdraw")}
             </button>
           </>
@@ -136,6 +152,12 @@ export function CollabAssistRequestCard(props: {
             <X size={13} aria-hidden="true" />
             {/* 她关闭了接收协助请求时，等待中的请求以这个原因结束：照原因说。 */}
             {request.failure ?? t("collab.assist.footerRejected", { name: executor })}
+          </>
+        ) : status === "stopped" ? (
+          <>
+            <WifiOff size={13} aria-hidden="true" />
+            {/* 谁停的都写清楚：本人停的就是「你停止了这次执行」。 */}
+            {assistStopText(request, t)}
           </>
         ) : (
           <>

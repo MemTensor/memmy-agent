@@ -157,7 +157,7 @@ export const ASSIST_STATUS_KEYS: Record<AssistStatus, MessageKey> = {
   cancelled: "collab.assist.state.cancelled",
   expired: "collab.assist.state.expired",
   failed: "collab.assist.state.failed",
-  stopped: "collab.assist.state.failed"
+  stopped: "collab.assist.state.stopped"
 };
 
 /**
@@ -173,6 +173,21 @@ export function assistStatusKey(target: { status: AssistStatus; autoRun?: boolea
 /** 请求还没结束：等待授权、执行中、等待确认。 */
 export function assistIsOpen(status: AssistStatus): boolean {
   return status === "pending" || status === "running" || status === "confirm";
+}
+
+/**
+ * 谁停了这次执行，按看的人换成「你」：本人停的就是「你停止了这次执行」，对方停的写名字。
+ * 旧后端不给 stoppedBy 时按执行方算（V1.0.19 之前只有执行方能停）。
+ */
+export function assistStopText(
+  request: Pick<AssistRequest, "stoppedBy" | "status" | "mine" | "requester" | "executor">,
+  t: (key: MessageKey, values?: Record<string, string>) => string
+): string {
+  const byRequester = request.status === "stopped" && request.stoppedBy === "requester";
+  const stopperIsMe = byRequester ? request.mine : !request.mine;
+  return stopperIsMe
+    ? t("collab.assist.stoppedByMe")
+    : t("collab.assist.stoppedBy", { name: byRequester ? request.requester.name : request.executor.name });
 }
 
 /** 用时：从对方授权到结果回传；没授权就从发出算起。说法交给调用方的 t()。 */

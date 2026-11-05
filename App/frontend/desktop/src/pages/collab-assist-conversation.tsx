@@ -11,6 +11,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactEle
 import { createPortal } from "react-dom";
 import { AlertCircle, Brain, ChevronRight, FileText, Inbox, Loader2, Terminal, X } from "lucide-react";
 import type { AssistRequest, AssistThread, AssistThreadDetail, AssistTranscriptItem, CollabClient } from "../api/collab-client.js";
+import { ApiRequestError } from "../api/http.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { AgentMessageContent } from "./agent-message-content.js";
@@ -21,6 +22,7 @@ import {
   assistAgentName,
   assistClock,
   assistIsOpen,
+  assistStopText,
   grantDurationLabel,
   pickAssistAgent,
   useAssistAgentChoice
@@ -265,11 +267,12 @@ export function CollabAssistConversation(props: {
     setError(null);
     try {
       await run();
+    } catch (error) {
+      // 两人几乎同时停止、或对方刚好跑完时，后到的那一下拿到 409：不是故障，刷新面板就行。
+      if (!(error instanceof ApiRequestError && error.status === 409)) setError(t("collab.assist.failed"));
+    } finally {
       props.onChanged?.();
       void load();
-    } catch {
-      setError(t("collab.assist.failed"));
-    } finally {
       setBusy(false);
     }
   }
@@ -384,6 +387,12 @@ export function CollabAssistConversation(props: {
           {thread.mine && latest && (latest.status === "pending" || latest.status === "confirm") && collab ? (
             <button type="button" className={detailStyles.button} disabled={busy} onClick={() => void act(() => collab.cancelAssist(latest.id))}>
               {t("collab.assist.withdraw")}
+            </button>
+          ) : null}
+          {/* 发起人也能停下执行中的请求：同一位置、同一样式，只换文案。 */}
+          {thread.mine && latest?.status === "running" && collab ? (
+            <button type="button" className={detailStyles.button} disabled={busy} onClick={() => void act(() => collab.cancelAssist(latest.id))}>
+              {t("collab.assist.stop")}
             </button>
           ) : null}
           {thread.executor.mine && latest?.status === "running" && collab ? (
@@ -553,7 +562,9 @@ function AssistRound(props: {
       {(request.status === "failed" || request.status === "stopped") ? (
         <p className={detailStyles.failure} data-assist-part="failure">
           <AlertCircle size={13} aria-hidden="true" />
-          {t("collab.assist.conv.notFinished", { reason: request.failure ?? t("collab.assist.state.failed") })}
+          {request.status === "stopped"
+            ? t("collab.assist.conv.notFinished", { reason: assistStopText(request, t) })
+            : t("collab.assist.conv.notFinished", { reason: request.failure ?? t("collab.assist.state.failed") })}
         </p>
       ) : null}
 
@@ -704,6 +715,9 @@ function decisionText(
         : t("collab.assist.conv.decision.pending", { executor });
     case "confirm":
       return t("collab.assist.conv.decision.confirm", { executor });
+    case "stopped":
+      // 谁停的按看的人写：本人停的就是「你停止了这次执行」。
+      return assistStopText(request, t);
     case "rejected":
       return request.failure ?? t("collab.assist.conv.decision.rejected", { executor });
     case "cancelled":

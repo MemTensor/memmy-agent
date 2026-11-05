@@ -590,6 +590,60 @@ describe("memmy-project assist", () => {
     expect(output).toBe("按王雨给你的限时授权，等待王雨的 Agent 开始执行。");
   });
 
+  it("says which of withdrawing and stopping happened, from one command", async () => {
+    const cancelTo = (request: Record<string, unknown>, status = 200) => (async (input: string | URL) => {
+      expect(new URL(input).pathname).toMatch(/\/api\/collab\/assist\/requests\/r1\/cancel$/u);
+      return new Response(JSON.stringify(status === 200
+        ? { request }
+        : { error: { code: "conflict", message: "这次请求已经处理过了" } }), { status });
+    }) as typeof fetch;
+    const deps = (fetcher: typeof fetch) => ({ fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) });
+
+    // 还没开始的撤回。
+    await expect(run(["assist", "cancel", "r1"], deps(cancelTo({ id: "r1", status: "cancelled" }))))
+      .resolves.toBe("已撤回这次协助请求；对方那边的通知随之消失。");
+    // 已经在执行的直接停：说明过程还在，并给出换个要求的写法。
+    const stopped = await run(["assist", "cancel", "r1"], deps(cancelTo({ id: "a7f3k111-1111", status: "stopped", executor: { name: "李四" } })));
+    expect(stopped).toContain("已停止李四那边的执行");
+    expect(stopped).toContain("memmy-project assist ask --continue A7F3K1");
+    // 已经结束的不是故障：没有可撤回或停止的。
+    await expect(run(["assist", "cancel", "r1"], deps(cancelTo({}, 409)))).resolves.toBe("这次请求已经结束，没有可撤回或停止的。");
+  });
+
+  it("finds the request to a member in a project when no id is given", async () => {
+    const listing = (requests: Array<Record<string, unknown>>) => (async (input: string | URL) => {
+      const path = new URL(input).pathname;
+      if (path === "/api/collab/projects") return new Response(JSON.stringify({ projects: [{ id: "p1", name: "Memmy 内测反馈" }] }));
+      if (path === "/api/collab/projects/p1/assist/threads") {
+        return new Response(JSON.stringify({ threads: [{ threadId: "t1", requests }] }));
+      }
+      if (path === "/api/collab/assist/requests/a7f3k111-1111/cancel") {
+        return new Response(JSON.stringify({ request: { id: "a7f3k111-1111", status: "stopped", executor: { name: "李四" } } }));
+      }
+      return new Response(JSON.stringify({ error: { code: "not_found", message: "Route not found" } }), { status: 404 });
+    }) as typeof fetch;
+    const deps = (fetcher: typeof fetch) => ({ fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) });
+    const mine = { id: "a7f3k111-1111", title: "查日志", status: "running", mine: true, executor: { name: "李四" } };
+
+    // 恰好一条：直接停它。
+    await expect(run(["assist", "cancel", "--project", "Memmy 内测反馈", "--member", "李四"], deps(listing([mine]))))
+      .resolves.toContain("已停止李四那边的执行");
+
+    // 多条时列出短 id、标题与状态，让用户指定，不猜。
+    const several = await run(["assist", "cancel", "--project", "Memmy 内测反馈", "--member", "李四"], deps(listing([
+      { ...mine, id: "a7f3k111-1111", title: "查日志", status: "running" },
+      { ...mine, id: "b8e4m222-2222", title: "看磁盘", status: "pending" }
+    ])));
+    expect(several).toContain("有 2 条还没结束");
+    expect(several).toContain("A7F3K1 · 查日志 · 执行中");
+    expect(several).toContain("B8E4M2 · 看磁盘 · 等待对方授权");
+
+    // 没有：说明没有，不报错。
+    await expect(run(["assist", "cancel", "--project", "Memmy 内测反馈", "--member", "李四"], deps(listing([
+      { ...mine, status: "done" }
+    ])))).resolves.toBe("没有你发给李四、还没结束的协助请求。");
+  });
+
   it("rejects an incomplete ask instead of guessing", async () => {
     await expect(run(["assist", "ask", "--project", "P"], { runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) }))
       .rejects.toThrow(/--member/u);

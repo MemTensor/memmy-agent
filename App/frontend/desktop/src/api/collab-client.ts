@@ -364,6 +364,9 @@ const AssistRequestSchema = z.object({
   resultItems: z.array(AssistResultItemSchema),
   files: z.array(AssistFileSchema),
   failure: z.string().nullable(),
+  /** "谁停了这次执行"：发起方、执行方，或空（没停）。旧后端不给时为 null，界面按执行方处理。 */
+  stoppedBy: z.string().nullish().transform((value): "requester" | "executor" | null =>
+    value === "requester" ? "requester" : value === "executor" ? "executor" : null),
   requester: AssistMemberSchema,
   executor: AssistMemberSchema,
   mine: z.boolean(),
@@ -657,7 +660,7 @@ export interface CollabClient {
   stopAssist(requestId: string): Promise<AssistRequest>;
   /** 执行方在任务页补充一句说明：作为一条进展发给发起方。 */
   noteAssist(requestId: string, note: string): Promise<void>;
-  /** 发起方撤回还没被执行的请求。 */
+  /** 发起方撤回，或停下已经在执行的请求。 */
   cancelAssist(requestId: string): Promise<AssistRequest>;
   /** 发起一次协助请求；同一次排查的后续请求带 `thread`。 */
   createAssistRequest(input: {

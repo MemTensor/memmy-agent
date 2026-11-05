@@ -245,6 +245,31 @@ class JsonRpcConnection {
   }
 }
 
+/**
+ * Agent 异常退出时从 stderr 里挑一行真正能说明问题的。
+ *
+ * <p>Node 崩溃时的最后一行只是版本号（`Node.js v22.23.1`），直接把最后一行当原因会变成
+ * 「Agent 中断了这次执行：Node.js v22.23.1」，双方都不知道发生了什么。因此先排除版本行，
+ * 再从后往前找报错行（`Error:` / `error:` / `failed`），都没有时退回最后一个非版本行。</p>
+ */
+export function assistFailureReason(stderr: string): string | null {
+  const lines = stderr
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !isVersionLine(line));
+  if (lines.length === 0) return null;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!;
+    if (/(?:^|\s)(?:[A-Za-z]*Error|error)\s*:|\bfail(?:ed|ure)\b/iu.test(line)) return line;
+  }
+  return lines[lines.length - 1]!;
+}
+
+/** `Node.js v22.23.1` 或单独的 `v22.23.1`：这些只是运行时版本号，不是原因。 */
+function isVersionLine(line: string): boolean {
+  return /^Node\.js v\d/iu.test(line) || /^v\d+\.\d+\.\d+$/u.test(line);
+}
+
 /** 从 session/update 通知里取一步进展：正文按块拼起来，工具调用逐条记下来。 */
 function readUpdate(update: Record<string, unknown>): { text?: string; step?: AssistStep } {
   const kind = String(update.sessionUpdate ?? "");
@@ -405,7 +430,7 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
   child.on("exit", (code) => {
     connection.close(`Agent 退出了（${code ?? "unknown"}）`);
     if (settled) return;
-    const reason = stderrTail.trim().split("\n").pop();
+    const reason = assistFailureReason(stderrTail);
     finish(new AcpError(reason ? `Agent 中断了这次执行：${reason}` : "Agent 中断了这次执行", "failed"));
   });
 

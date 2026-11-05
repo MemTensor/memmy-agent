@@ -1,7 +1,7 @@
 /**
  * 执行方的运行组件（ACP 适配器）：按需安装，用户不需要自己动手。
  *
- * <p>七个内置 Agent 原生支持 ACP（Cursor、OpenCode、OpenClaw、Hermes、WorkBuddy、QwenWork、
+ * <p>六个内置 Agent 原生支持 ACP（Cursor、OpenCode、OpenClaw、Hermes、QwenWork、
  * DeepSeek Harness），直接拉起它们自己的程序即可。另外三个——Claude Code、Codex、Pi——需要一层
  * 适配器把 ACP 翻成它们各自的接口。适配器不随安装包分发：授权之后由 Memmy 自己装到
  * {@code ~/.memmy/assist/adapters}，装一次之后一直复用，升级时也由这里负责。</p>

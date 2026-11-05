@@ -34,11 +34,13 @@ const USAGE = [
   "  memmy-project assist wait <request id> [--timeout <seconds, default 90>]",
   "  memmy-project assist status <request id>",
   "  memmy-project assist cancel <request id>",
+  "  memmy-project assist cancel --project <project name> --member <name>",
   "  memmy-project assist end --project <project name> [--member <name>]",
   "  memmy-project agent connect --name <agent name> --skill-dir <directory>",
   "  memmy-project agent remove --name <agent name>",
   "  memmy-project session share [--project <project name>] [--off]",
   "",
+  "assist cancel withdraws your request, or stops it when the other side has already started.",
   "Finds and reads sessions of your shared Memmy projects, shares the current one to a project, and asks a member's",
   "computer to run a task for you. Memmy must be running."
 ].join("\n");
@@ -602,12 +604,37 @@ async function runAssist(
     return formatAssistStatus(isRecord(result.request) ? result.request : {});
   }
   if (action === "cancel") {
-    const requestId = rest[0]?.trim();
-    if (!requestId) throw new Error("assist cancel 需要协助请求 ID");
-    const result = await localApi(deps, "POST", `/api/collab/assist/requests/${encodeURIComponent(requestId)}/cancel`);
-    return isRecord(result.request) && text(result.request.status) === "cancelled"
-      ? "已撤回这次协助请求；对方那边的通知随之消失。"
-      : "这次请求已经处理过了，没有撤回。";
+    if (rest.length > 1) throw new Error("assist cancel 只接受一个请求 ID");
+    const project = optionString(parsed, "project")?.trim();
+    const member = optionString(parsed, "member")?.trim();
+    let requestId = rest[0]?.trim();
+    if (!requestId) {
+      if (!project || !member) throw new Error("assist cancel 用请求 ID，或用 --project 与 --member 指定是哪一条");
+      const found = await openRequestsTo(deps, project, member);
+      if (!found.length) return `没有你发给${member}、还没结束的协助请求。`;
+      if (found.length > 1) {
+        return [
+          `你发给${member}的协助请求有 ${found.length} 条还没结束，请指定其中一条的 ID：`,
+          ...found.map((request) => `  ${shortRequestId(text(request.id))} · ${text(request.title)} · ${requestStatusLabel(text(request.status))}`)
+        ].join("\n");
+      }
+      requestId = text(found[0]!.id);
+    }
+    // 请求已经结束时云端回 409：不是故障，照实说没有可撤回或停止的。
+    const result = await localApi(deps, "POST", `/api/collab/assist/requests/${encodeURIComponent(requestId)}/cancel`)
+      .catch((error: unknown) => {
+        if ((error as { status?: number }).status === 409) return null;
+        throw error;
+      });
+    if (!result) return "这次请求已经结束，没有可撤回或停止的。";
+    const request = isRecord(result.request) ? result.request : {};
+    const status = text(request.status);
+    if (status === "cancelled") return "已撤回这次协助请求；对方那边的通知随之消失。";
+    if (status === "stopped") {
+      const executor = isRecord(request.executor) ? text(request.executor.name) : "对方";
+      return `已停止${executor}那边的执行，已经执行的过程保留在协助会话里。需要换个要求时用 memmy-project assist ask --continue ${shortRequestId(text(request.id))} 再发。`;
+    }
+    return "这次请求已经结束，没有可撤回或停止的。";
   }
   if (action === "end") {
     if (rest.length) throw new Error("assist end 用 --project 指定项目名称");
@@ -656,6 +683,50 @@ async function waitForAssist(
     { timeoutMs: Math.min(timeoutMs, 16 * 60 * 1000) }, session, timeoutMs + 15_000);
 }
 
+/** 请求 id 显示前 6 位：与 Memmy 里显示的短 id 一致。 */
+function shortRequestId(id: string): string {
+  return id.replace(/-/gu, "").slice(0, 6).toUpperCase();
+}
+
+/** 一条还没结束的请求在列表里的状态：只说等什么，不展开。 */
+function requestStatusLabel(status: string): string {
+  if (status === "pending") return "等待对方授权";
+  if (status === "confirm") return "等待对方确认";
+  if (status === "running") return "执行中";
+  return status;
+}
+
+/**
+ * 本人发给某位成员、在某项目里还没结束的请求。`--project --member` 找的就是它们：
+ * 恰好一条直接处理，多条就让用户指定 ID，不猜。
+ */
+async function openRequestsTo(
+  deps: MemmyProjectDeps,
+  project: string,
+  member: string
+): Promise<Record<string, unknown>[]> {
+  const projects = await listProjects(deps);
+  if (projects === null) throw new Error("读不到协作项目列表，请确认 Memmy 已登录并运行。");
+  const matched = projects.filter((item) => text(item.id) === project || text(item.name) === project);
+  if (!matched.length) throw new Error(`没有项目「${project}」，或你不是项目成员`);
+  if (matched.length > 1) throw new Error(`有 ${matched.length} 个同名项目，请改用项目 id 指定`);
+  const projectId = text(matched[0]!.id);
+  const result = await localApi(deps, "GET", `/api/collab/projects/${encodeURIComponent(projectId)}/assist/threads`);
+  const threads = Array.isArray(result.threads) ? result.threads.filter(isRecord) : [];
+  const open = new Set(["pending", "confirm", "running"]);
+  const found: Record<string, unknown>[] = [];
+  for (const thread of threads) {
+    const requests = Array.isArray(thread.requests) ? thread.requests.filter(isRecord) : [];
+    for (const request of requests) {
+      if (request.mine !== true || !open.has(text(request.status))) continue;
+      const executor = isRecord(request.executor) ? request.executor : {};
+      if (text(executor.name) !== member && text(executor.userId) !== member) continue;
+      found.push(request);
+    }
+  }
+  return found;
+}
+
 /** 执行方标识换成名字：命令行与界面用同一套叫法；认不出来时退回标识。 */
 function assistAgentLabel(sourceId: string): string {
   const names: Record<string, string> = {
@@ -674,6 +745,18 @@ function assistAgentLabel(sourceId: string): string {
   return sourceId ? names[sourceId] ?? sourceId : "";
 }
 
+/**
+ * 停止这次执行的人，按看的人换成「你」：本人停的就是「你停止了这次执行」。
+ * 旧后端不给 stoppedBy 时按执行方算（那时只有执行方能停）。
+ */
+function stoppedText(request: Record<string, unknown>): string {
+  const byRequester = text(request.stoppedBy) === "requester";
+  const requester = isRecord(request.requester) ? text(request.requester.name) : "";
+  const executor = isRecord(request.executor) ? text(request.executor.name) : "对方";
+  const stopperIsMe = byRequester ? request.mine === true : request.mine !== true;
+  return `${stopperIsMe ? "你" : byRequester ? requester : executor}停止了这次执行`;
+}
+
 /** `assist status` 的一行：谁在执行、到哪一步、结果或原因。 */
 function formatAssistStatus(request: Record<string, unknown>): string {
   const status = text(request.status);
@@ -690,7 +773,7 @@ function formatAssistStatus(request: Record<string, unknown>): string {
   else if (status === "rejected") lines.push(text(request.failure) ? `${text(request.failure)}。` : `${executor}没有允许这次请求。`);
   else if (status === "cancelled") lines.push("这次请求已撤回。");
   else if (status === "expired") lines.push("这次请求已过期：对方 24 小时内没有处理。");
-  else if (status === "stopped") lines.push(text(request.failure) || `${executor}停止了这次执行。`);
+  else if (status === "stopped") lines.push(`${stoppedText(request)}。`);
   else if (status === "failed") lines.push(`执行没有完成：${text(request.failure) || "原因不明"}`);
   for (const step of steps) {
     const output = text(step.output);

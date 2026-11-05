@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { AcpError, runAcpAgent } from "../assist/acp-client.js";
+import { AcpError, assistFailureReason, runAcpAgent } from "../assist/acp-client.js";
 
 /** 一个说得清话的假 Agent：按 ACP 的顺序回应 initialize、session/new、session/prompt。 */
 const FAKE_AGENT = String.raw`
@@ -146,8 +146,7 @@ process.stdin.resume();
     expect(text).not.toContain("上一次的思考");
   });
 
-  it("says the Agent is not installed when the command does not exist", async () => {
-    await expect(runAcpAgent({
+  it("says the Agent is not installed when the command does not exist", async () => {    await expect(runAcpAgent({
       command: "/definitely/not/here/memmy-assist-agent",
       args: [],
       cwd: process.cwd(),
@@ -155,7 +154,92 @@ process.stdin.resume();
       timeoutMs: 5_000
     })).rejects.toBeInstanceOf(AcpError);
   });
+});
 
+describe("assistFailureReason", () => {
+  it("skips the Node version line and reports the real error", () => {
+    // 实测的失败样子：Node 崩溃时最后一行只是运行时版本号。
+    const stderr = [
+      "Error: Cannot find module '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/bin.js'",
+      "    at Module._resolveFilename (node:internal/modules/cjs/loader:1210:15)",
+      "Node.js v22.23.1",
+      ""
+    ].join("\n");
+    expect(assistFailureReason(stderr)).toBe(
+      "Error: Cannot find module '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/bin.js'"
+    );
+  });
+
+  it("also accepts lowercase errors and failures", () => {
+    expect(assistFailureReason("loading profile\nerror: profile \"acp\" does not exist\nNode.js v22.23.1"))
+      .toBe('error: profile "acp" does not exist');
+    expect(assistFailureReason("start\ninitialization failed\nv0.1.0"))
+      .toBe("initialization failed");
+  });
+
+  it("falls back to the last line that is not a version", () => {
+    expect(assistFailureReason("one\ntwo\nNode.js v22.23.1\n")).toBe("two");
+  });
+
+  it("has nothing to say when only a version was printed", () => {
+    expect(assistFailureReason("Node.js v22.23.1\n")).toBeNull();
+    expect(assistFailureReason("   \n\n")).toBeNull();
+  });
+});
+
+describe("runAcpAgent failures", () => {
+  it("reports what the Agent said on stderr, not the Node version below it", async () => {
+    const CRASHING_AGENT = String.raw`
+process.stderr.write("Error: Cannot find module '/tmp/nope.js'\n    at Module._resolveFilename (node:internal/modules/cjs/loader:1210:15)\nNode.js v22.23.1\n");
+process.exit(1);
+`;
+    const error = await runAcpAgent({
+      command: process.execPath,
+      args: ["-e", CRASHING_AGENT],
+      cwd: process.cwd(),
+      prompt: "看一下版本",
+      timeoutMs: 5_000
+    }).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(AcpError);
+    expect((error as AcpError).message).toContain("Cannot find module '/tmp/nope.js'");
+    expect((error as AcpError).message).not.toContain("Node.js v22");
+  });
+
+  it("passes a JSON-RPC error from session/prompt through as the reason", async () => {
+    // 模型没配好时 DSH 会这样回：必须原样告诉双方，否则只能看到一句“中断了”。
+    const FAILING_AGENT = String.raw`
+let buffer = "";
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk.toString("utf8");
+  let at;
+  while ((at = buffer.indexOf("\n")) >= 0) {
+    const line = buffer.slice(0, at).trim();
+    buffer = buffer.slice(at + 1);
+    if (!line) continue;
+    const message = JSON.parse(line);
+    if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1 } });
+    else if (message.method === "session/new") send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "s-3" } });
+    else if (message.method === "session/prompt") send({ jsonrpc: "2.0", id: message.id, error: { code: -32603, message: "Internal error: turn failed: llm-pi-ai: no credential for provider route \"deepseek-official\"" } });
+  }
+});
+process.stdin.resume();
+`;
+    const error = await runAcpAgent({
+      command: process.execPath,
+      args: ["-e", FAILING_AGENT],
+      cwd: process.cwd(),
+      prompt: "只回复两个字：你好。",
+      timeoutMs: 5_000
+    }).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(AcpError);
+    expect((error as AcpError).message).toContain("no credential for provider route");
+  });
+});
+
+describe("runAcpAgent cancellation", () => {
   it("stops when the person stops it, without waiting for the Agent", async () => {
     const controller = new AbortController();
     const run = runAcpAgent({

@@ -1,6 +1,6 @@
 /**
  * 临时预览页：把成员协助的各处界面用真实组件与样式渲出来，便于对照方案自查。
- * 地址参数 `?view=dialog|dialog-other|board|detail|conversation|chain|chain-memmy|task|task-ask|card|requester|settings|settings-off`，不连接本机接口。
+ * 地址参数 `?view=dialog|dialog-other|board|detail|conversation|chain|chain-memmy|task|task-ask|card|card-running|card-stopped-by-me|conversation-stop|task-stopped|requester|settings|settings-off`，不连接本机接口。
  * `detail` 与 `conversation` 是同一份协助会话（两轮请求：发起方由 Memmy 发起、执行方由 Memmy 执行，第二轮按限时授权直接执行），
  * 没有发起方记录，就是旧记录的显示。`chain` 是完整链条：DeepSeek Harness 发起、Memmy 执行，两轮（第二轮 --continue）；
  * `chain-memmy` 是 Memmy 发起的完整链条，第二轮收到后的记录还在同步。
@@ -44,6 +44,7 @@ function request(overrides: Partial<AssistRequest> = {}): AssistRequest {
     resultItems: [],
     files: [],
     failure: null,
+    stoppedBy: null,
     requester: REQUESTER,
     executor: EXECUTOR,
     mine: false,
@@ -582,6 +583,32 @@ function Preview() {
     );
   }
 
+  if (view === "conversation-stop") {
+    // 发起人在协助会话里看到执行中的那一次：页脚有「停止」。
+    // 不要把 CONVERSATION 的 requests 一起铺进来：thread() 里它排在后面的 requests 参数之前，会把下面这两轮盖掉。
+    const { requests: _ignored, ...conversationBase } = CONVERSATION;
+    const runningThread: AssistThread = thread({
+      ...conversationBase,
+      threadId: "th-stop",
+      status: "running"
+    }, [
+      { ...CONV_SECOND, mine: true, status: "running" },
+      // 上一轮是对方停下的：每一轮的「执行方的决定」处按看的人写谁停的。
+      { ...CONV_FIRST, mine: true, status: "stopped", stoppedBy: "executor", failure: "王雨停止了这次执行" }
+    ]);
+    return (
+      <div style={{ minHeight: "100vh", background: "#fff" }}>
+        <CollabAssistConversation
+          thread={runningThread}
+          collab={fakeClient({ thread: runningThread })}
+          sourceTaskAvailable={() => true}
+          onOpenTask={() => undefined}
+          onClose={() => undefined}
+        />
+      </div>
+    );
+  }
+
   if (view === "requester") {
     const waiting = { ...request({ status: "running", agent: "memmy", scope: "once", mine: true, title: "看一下 Memmy 的磁盘占用", items: ["查看 ~/.memmy 的总大小与最大的几个目录"], steps: [{ text: "运行命令 du -sh ~/.memmy", output: "14G" }] }), delivered: false };
     return (
@@ -591,6 +618,45 @@ function Preview() {
         <AssistMessageCard envelope={parseAssistEnvelope(RESULT_MESSAGE)!} />
         <AssistantText>孙落那边 ~/.memmy 一共 14G，主要是 sessions 目录。</AssistantText>
       </TaskFrame>
+    );
+  }
+
+  if (view === "card-running" || view === "card-stopped-by-me") {
+    // 发起方卡片：执行中时底栏有「停止」；自己停下的显示「你停止了这次执行」，对方停的写名字。
+    const running = request({
+      status: "running",
+      agent: "claude_code",
+      scope: "once",
+      mine: true,
+      steps: STEPS,
+      decidedAt: "2026-11-04T08:41:30Z"
+    });
+    const stoppedByMe = request({
+      ...DONE_FIELDS,
+      status: "stopped",
+      mine: true,
+      stoppedBy: "requester",
+      failure: "孙起停止了这次执行",
+      reply: "",
+      resultItems: [],
+      files: []
+    });
+    const stoppedByOther = request({
+      ...stoppedByMe,
+      stoppedBy: "executor",
+      failure: "王雨停止了这次执行"
+    });
+    return (
+      <div style={{ minHeight: "100vh", background: "#fff", padding: "32px 24px" }}>
+        <div style={{ maxWidth: 760, margin: "0 auto" }}>
+          <CollabAssistRequestCard
+            request={view === "card-running" ? running : stoppedByMe}
+            collab={client}
+            onChanged={() => undefined}
+          />
+          {view === "card-stopped-by-me" ? <CollabAssistRequestCard request={stoppedByOther} collab={client} onChanged={() => undefined} /> : null}
+        </div>
+      </div>
     );
   }
 
@@ -605,6 +671,29 @@ function Preview() {
           <CollabAssistRequestCard request={request({ status: "pending", autoRun: true, agent: null, scope: null, grant: { ...GRANT, agent: "memmy" }, mine: true })} collab={client} />
         </div>
       </div>
+    );
+  }
+
+  if (view === "task-stopped") {
+    // 执行方：被发起方停下之后，协助条写「孙起停止了这次执行」，停止按钮不再出现。
+    const stoppedRequest = {
+      ...VERSION_DONE,
+      status: "stopped" as const,
+      stoppedBy: "requester" as const,
+      failure: "孙起停止了这次执行",
+      reply: "",
+      resultItems: [],
+      files: []
+    };
+    const stoppedThread = thread({ agent: "memmy", scope: "once", status: "stopped" }, [stoppedRequest, VERSION_FIRST]);
+    const stoppedView = { executing: { thread: stoppedThread, confirm: null }, requested: [] };
+    return (
+      <TaskFrame
+        bar={<CollabAssistTaskBar view={stoppedView} collab={client} onChanged={() => undefined} />}
+        dock={<CollabAssistTaskDock view={stoppedView} collab={client} onChanged={() => undefined} />}
+      >
+        <AssistMessageCard envelope={parseAssistEnvelope(REQUEST_MESSAGE)!} />
+      </TaskFrame>
     );
   }
 

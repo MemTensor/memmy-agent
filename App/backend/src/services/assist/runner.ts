@@ -1,7 +1,7 @@
 /**
  * 执行方真正跑一次协助请求：先保证这个 Agent 的运行组件就位，再交给 ACP 客户端。
  *
- * <p>七个 Agent 原生支持 ACP，直接拉起它们自己的程序；Claude Code、Codex、Pi 需要一层适配器，
+ * <p>六个 Agent 原生支持 ACP，直接拉起它们自己的程序；Claude Code、Codex、Pi 需要一层适配器，
  * 由 {@link ./adapters} 在授权后按需装到 Memmy 自己的目录里——用户不需要先装任何东西。</p>
  *
  * <p>拉起失败、组件没装成、中途退出都变成一句能直接给双方看的原因（例如「没能准备好 Claude Code
@@ -9,6 +9,7 @@
  */
 import { AcpError, runAcpAgent } from "./acp-client.js";
 import { ensureAdapter } from "./adapters.js";
+import { DEEPSEEK_HARNESS_SOURCE_ID, deepSeekHarnessLaunch } from "./deepseek-harness.js";
 import { MEMMY_SOURCE_ID, assistAgentName, assistRecipe, findExecutable } from "./recipes.js";
 import type { AssistRunner } from "../collab-assist-service.js";
 
@@ -49,6 +50,28 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
       if (!recipe) {
         // 不认识这个执行方：要么是手动添加的 Agent（Memmy 不读它的记录，也不驱动它），要么是被撤掉了。
         throw new AcpError(`${name} 不能由 Memmy 在这台电脑上启动`, "unavailable");
+      }
+
+      // DeepSeek Harness 的入口与环境变量要单独解析：桌面版自带的引擎优先，参数里还要叠上模型补丁。
+      if (input.agent === DEEPSEEK_HARNESS_SOURCE_ID) {
+        const launch = deepSeekHarnessLaunch({
+          env,
+          ...(options.home === undefined ? {} : { home: options.home })
+        });
+        if (!launch.ok) throw new AcpError(`${name} 未启动：${launch.reason}`, "unavailable");
+        return runAcpAgent({
+          command: launch.command,
+          args: launch.args,
+          cwd: input.cwd,
+          env: launch.env,
+          prompt: input.prompt,
+          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+          onStep: input.onStep,
+          ...(input.onTranscript ? { onTranscript: input.onTranscript } : {}),
+          onSession: input.onSession,
+          signal: input.signal,
+          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs })
+        });
       }
       // 自带适配器优先；没有适配器的 Agent 回到 PATH 上找它自己的程序。
       const executable = adapter?.executable ?? findExecutable(recipe.resolved, env);
