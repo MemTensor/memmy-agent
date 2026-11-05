@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { ensureLocalMemoryToken } from "../config/local-token.js";
+import { DEFAULT_MEMORY_URL, resolveMemoryConnection, sameHttpOrigin } from "@memmy/agent-source-core/memory-connection";
+import { randomBytes } from "node:crypto";
 import { mutateMemoryConfig } from "../config/writer.js";
 import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -67,7 +68,6 @@ async function runMemoryService(argv: string[], lifecycle: {
     });
     const options = parseServeArgs(argv);
     const { config, path: configPath } = loadMemmyConfig(options.configPath);
-    config.storage.token = await ensureLocalMemoryToken(configPath);
     const host = options.host ?? process.env.MEMMY_MEMORY_HOST ?? process.env.MEMORY_SERVICE_HOST ?? "127.0.0.1";
     assertLoopbackBindHost(host);
     const port = options.port ??
@@ -114,6 +114,8 @@ async function runMemoryService(argv: string[], lifecycle: {
     lifecycle.setStopService(requestShutdown);
 
     try {
+        const listenOrigin = `http://${host === "::1" ? "[::1]" : host}:${port}`;
+        const credential = listenerCredential(configPath, listenOrigin);
         sqliteLock = config.storage.backend === "openmem-cloud-rest"
             ? undefined
             : acquireSqliteServerLock({ sqlitePath, host, port });
@@ -125,13 +127,19 @@ async function runMemoryService(argv: string[], lifecycle: {
             port,
             mode: config.storage.mode,
             storageBackend: config.storage.backend,
-            localServiceToken: config.storage.token,
+            localServiceToken: credential.token,
             state: () => startupState,
             onShutdownRequested: lifecycle.shutdown
         });
         const { url } = startupServer;
         startupStage("http.ready");
-        if (configPath) await writeCurrentEndpoint(configPath, url);
+        if (credential.initializeFrom) {
+            await initializeListenerConfig(configPath, url, credential.token, credential.initializeFrom);
+        }
+        if (config.storage.backend === "sqlite") {
+            config.storage.endpoint = url;
+            config.storage.token = credential.token;
+        }
         writeRuntimeState(serviceHome, {
             pid: process.pid,
             endpoint: url,
@@ -200,7 +208,7 @@ async function runMemoryService(argv: string[], lifecycle: {
                     requestShutdown();
                 }
             }),
-            auth: { localServiceToken: config.storage.token },
+            auth: { localServiceToken: credential.token },
             configPath,
             startAgentSourceAutomation: true
         });
@@ -454,22 +462,37 @@ export function assertLoopbackBindHost(host: string): void {
     }
 }
 
-export async function writeCurrentEndpoint(configPath: string, endpoint: string): Promise<void> {
-    try {
-        await mutateMemoryConfig(configPath, (root) => {
-            const memmyMemory = mutableRecord(root.memmyMemory);
-            const storage = mutableRecord(memmyMemory.storage);
-            storage.endpoint = endpoint;
-            memmyMemory.storage = storage;
-            root.memmyMemory = memmyMemory;
-        });
-    } catch (error) {
-        logger.warn("config.endpoint_write_failed", {
-            configPath,
-            endpoint,
-            ...memoryErrorFields(error)
-        });
+function listenerCredential(configPath: string, listenOrigin: string): { token: string; initializeFrom?: string } {
+    const { config } = loadMemmyConfig(configPath, {});
+    const { storage } = config;
+    const fileOrigin = storage.endpoint ?? DEFAULT_MEMORY_URL;
+    const { token } = resolveMemoryConnection(fileOrigin, storage.token, process.env, listenOrigin);
+    // A shell override for B must neither reuse nor rewrite A's saved connection.
+    if (token) return { token };
+    if (storage.token || process.env.MEMMY_MEMORY_TOKEN?.trim() || process.env.MEMORY_SERVICE_TOKEN?.trim()) {
+        throw new Error("Memory requires a credential for the listen endpoint; the configured token belongs to another origin");
     }
+    if (storage.mode !== "local" || storage.backend !== "sqlite") {
+        throw new Error("Memory service requires a configured storage token for non-local storage");
+    }
+    return { token: randomBytes(32).toString("hex"), initializeFrom: fileOrigin };
+}
+
+export async function initializeListenerConfig(configPath: string, endpoint: string, token: string, expectedOrigin: string): Promise<void> {
+    await mutateMemoryConfig(configPath, (root) => {
+        const memmyMemory = mutableRecord(root.memmyMemory);
+        const storage = mutableRecord(memmyMemory.storage);
+        // Check the effective on-disk connection under the writer lock. Legacy
+        // configs may use top-level fields or environment substitutions.
+        const saved = loadMemmyConfig(configPath, {}).config.storage;
+        if (saved.token || !sameHttpOrigin(saved.endpoint ?? DEFAULT_MEMORY_URL, expectedOrigin)) {
+            throw new Error("Memory connection changed while starting");
+        }
+        storage.token = token;
+        storage.endpoint = endpoint;
+        memmyMemory.storage = storage;
+        root.memmyMemory = memmyMemory;
+    });
 }
 
 function mutableRecord(value: unknown): Record<string, unknown> {

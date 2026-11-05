@@ -42,3 +42,19 @@ it("rejects external-page Viewer requests and preflight without granting cross-o
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
   }
 });
+
+
+it("authenticates ordinary admin routes even with the Viewer header", async () => {
+  const { url, shutdown } = await serve({ localServiceToken: "test-secret" });
+  const headers = { "x-memmy-viewer": "1", "content-type": "application/json" };
+  for (const path of ["/admin/shutdown", "/admin/reload-config"]) {
+    const send = (extra: Record<string, string>) => fetch(url + "/api/v1" + path, { method: "POST", headers: { ...headers, ...extra } });
+    expect((await send({})).status).toBe(401);
+    expect((await send({ authorization: "Bearer wrong" })).status).toBe(401);
+  }
+  expect(shutdown).not.toHaveBeenCalled();
+  expect((await fetch(url + "/api/v1/admin/shutdown", {
+    method: "POST", headers: { ...headers, authorization: "Bearer test-secret" }
+  })).status).toBe(200);
+  await vi.waitFor(() => expect(shutdown).toHaveBeenCalledOnce());
+});

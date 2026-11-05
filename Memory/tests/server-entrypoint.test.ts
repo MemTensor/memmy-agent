@@ -1,3 +1,4 @@
+import { createServer } from "node:net";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
@@ -7,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
 import { describe, expect, it, vi } from "vitest";
-import { isDirectRun, main, writeCurrentEndpoint } from "../src/server/index.js";
+import { isDirectRun, main, initializeListenerConfig } from "../src/server/index.js";
 import * as memoryHttp from "../src/server/http.js";
 import * as memoryRestart from "../src/server/service-restart.js";
 
@@ -67,7 +68,7 @@ describe("memmy memory server entrypoint", () => {
     )).toBe(false);
   });
 
-  it("patches only the Memory endpoint and preserves unknown catalog fields", async () => {
+  it("initializes the Memory connection and preserves unknown catalog fields", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-memory-server-config-"));
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({
@@ -88,7 +89,7 @@ describe("memmy memory server entrypoint", () => {
     }));
 
     try {
-      await writeCurrentEndpoint(configPath, "http://127.0.0.1:18960");
+      await initializeListenerConfig(configPath, "http://127.0.0.1:18960", "generated", "http://old.local");
       const saved = YAML.parse(readFileSync(configPath, "utf8"));
       expect(saved).toMatchObject({
         futureSection: { keepMe: true },
@@ -105,6 +106,7 @@ describe("memmy memory server entrypoint", () => {
           futureMemoryField: "keep-memory",
           storage: {
             endpoint: "http://127.0.0.1:18960",
+            token: "generated",
             futureStorageField: "keep-storage"
           }
         }
@@ -165,6 +167,38 @@ describe("memmy memory server entrypoint", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it.each([false, true])("uses the listener origin for the environment credential (saved A: %s)", async savedA => {
+    const root = mkdtempSync(join(tmpdir(), "memory-listener-origin-"));
+    const configPath = join(root, "config.json");
+    const storage = { mode: "local", backend: "sqlite", sqlitePath: join(root, "memory.sqlite"),
+      ...(savedA ? { endpoint: "http://127.0.0.1:1", token: "token-A" } : {}) };
+    const original = JSON.stringify({ memmyMemory: { storage } });
+    writeFileSync(configPath, original);
+    const probe = createServer();
+    probe.listen(0, "127.0.0.1");
+    await once(probe, "listening");
+    const address = probe.address();
+    if (!address || typeof address === "string") throw new Error("missing test port");
+    await new Promise<void>(resolve => probe.close(() => resolve()));
+    const endpoint = `http://127.0.0.1:${address.port}`;
+    const child = spawn(process.execPath, [
+      "--import", "tsx", fileURLToPath(new URL("../src/server/index.ts", import.meta.url)),
+      "--config", configPath, "--port", String(address.port), "--host", "127.0.0.1"
+    ], { stdio: "ignore", env: { ...process.env, HOME: root, USERPROFILE: root, MEMMY_CONFIG: configPath,
+      MEMMY_MEMORY_URL: endpoint, MEMMY_MEMORY_TOKEN: "token-B" } });
+    const closed = once(child, "close");
+    try {
+      const check = (token: string) => fetch(endpoint + "/api/v1/auth/check", { headers: { authorization: "Bearer " + token } });
+      await vi.waitFor(async () => expect((await check("token-B")).status).toBe(200), { timeout: 10_000 });
+      expect((await check("token-A")).status).toBe(401);
+      expect(readFileSync(configPath, "utf8")).toBe(original);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await closed;
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it("shuts down through the admin endpoint and releases the sqlite server lock", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-memory-server-shutdown-"));

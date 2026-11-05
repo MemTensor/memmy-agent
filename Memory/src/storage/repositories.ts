@@ -5523,9 +5523,10 @@ export class RuntimeRepository {
     };
   }
 
-  exportBundleTables(includeRawText = false): Record<string, Array<Record<string, unknown>>> {
+  exportBundleTables(includeRawText = false, options: { includeApiLogs?: boolean } = {}): Record<string, Array<Record<string, unknown>>> {
     const tables: Record<string, Array<Record<string, unknown>>> = {};
     for (const table of BUNDLE_TABLES) {
+      if (table === "api_logs" && options.includeApiLogs === false) continue;
       const rows = this.db.prepare(`SELECT * FROM ${table}`).all() as Array<Record<string, unknown>>;
       tables[table] = rows.map((row) => {
         const projected = table === "memory_change_log" ? compactHistoryChangeRow(row) : row;

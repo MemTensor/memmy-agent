@@ -2699,7 +2699,7 @@ export class MemoryService {
     );
   }
 
-  exportBundle(request: MemoryExportRequest = {}): {
+  exportBundle(request: MemoryExportRequest = {}, options: { includeApiLogs?: boolean } = {}): {
     schemaVersion: number;
     exportedAt: string;
     manifest: {
@@ -2715,7 +2715,7 @@ export class MemoryService {
     this.assertMemorySearchEnabled();
     const context = this.resolveContext(request);
     const tables = scopeBundleTables(
-      this.repos.runtime.exportBundleTables(request.includeRawText === true),
+      this.repos.runtime.exportBundleTables(request.includeRawText === true, options),
       context.namespace
     );
     tables.memory_vectors = this.repos.vectors.exportRows().map((row) => ({ ...row }));

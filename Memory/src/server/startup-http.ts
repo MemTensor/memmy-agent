@@ -80,7 +80,7 @@ export async function listenMemoryStartupHttpServer(options: {
     });
   });
   const address = server.address() as AddressInfo;
-  url = `http://${address.address}:${address.port}`;
+  url = `http://${options.host === "::1" ? "[::1]" : options.host}:${address.port}`;
   return {
     server,
     url,
