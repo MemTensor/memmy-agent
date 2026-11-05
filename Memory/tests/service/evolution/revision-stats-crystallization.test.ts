@@ -92,6 +92,44 @@ function legacySameSourceSkill(trialFirst = true) {
 
 // These exercise the event sequence, not just repeated calls with one final state.
 describe("MEMMY-647 crystallization contribution and rebuild order", () => {
+  it.each(["drift", "crystallization"] as const)("withdraws the only %s contribution while retaining a later trial", mode => {
+    let p = updatePolicy(policy(), "A", { A: 1 });
+    let s = mode === "drift" ? drift(skill(), p) : crystallize(skill(), p);
+    s = trial(s, "verified", 1, 1);
+    const original = skillMetaFromMemory(s)!;
+    p = updatePolicy(p, "A", {});
+    s = drift(s, p);
+    const withoutSource = skillMetaFromMemory(trial(skill(), "verified", 1, 1))!;
+    expect(policyMetaFromMemory(p)!.support).toBe(0);
+    expect(skillMetaFromMemory(s)!.eta).toBeCloseTo(withoutSource.eta);
+    expect(skillMetaFromMemory(s)!.trialsPassed).toBe(1);
+    p = updatePolicy(p, "A", { A: 1 });
+    s = drift(s, p);
+    expect(skillMetaFromMemory(s)!.eta).toBeCloseTo(original.eta);
+    expect(skillMetaFromMemory(s)!.trialsPassed).toBe(1);
+  });
+
+  it("restores withdrawn A in later B aggregates without changing trials", () => {
+    let p = updatePolicy(policy(), "A", { A: 1 });
+    let s = drift(skill(), p);
+    p = updatePolicy(p, "B", { A: 1, B: 0.8 });
+    s = trial(drift(s, p), "verified", 1, 1);
+    const originalPolicy = policyMetaFromMemory(p)!;
+    const originalSkill = skillMetaFromMemory(s)!;
+    for (let i = 0; i < 2; i++) {
+      p = updatePolicy(p, "A", { B: 0.8 });
+      s = drift(s, p);
+      expect(policyMetaFromMemory(p)!.support).toBe(1);
+      expect(skillMetaFromMemory(s)!.trialsPassed).toBe(1);
+      p = updatePolicy(p, "A", { A: 1, B: 0.8 });
+      s = drift(s, p);
+      expect(policyMetaFromMemory(p)!.gain).toBeCloseTo(originalPolicy.gain);
+      expect(policyMetaFromMemory(p)!.support).toBe(2);
+      expect(skillMetaFromMemory(s)!.eta).toBeCloseTo(originalSkill.eta);
+      expect(skillMetaFromMemory(s)!.trialsPassed).toBe(1);
+    }
+  });
+
   it("replaces a crystallized source without adding another reward contribution", () => {
     let p = updatePolicy(policy(), "A", { A: 1 });
     let s = crystallize(undefined, p);

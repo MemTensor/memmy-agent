@@ -77,6 +77,11 @@ async function settle(service: ReturnType<typeof createTestService>["service"], 
   }
 }
 
+/** These cases check the old L3 World Model's evidence, which the new L3 replaces when it is on. */
+function withOldL3(config: ReturnType<typeof turnJudgeConfig>): ReturnType<typeof turnJudgeConfig> {
+  return { ...config, algorithm: { ...config.algorithm, l3FieldCognition: { ...config.algorithm.l3FieldCognition, enabled: false } } };
+}
+
 describe("turn.judge.v1 routing (switch on)", () => {
   it("does not call a model at the start of a turn and reports the relation as pending", async () => {
     const { llm, judgeCalls, otherCalls } = createTurnJudgeLlm();
@@ -123,7 +128,7 @@ describe("turn.judge.v1 routing (switch on)", () => {
   it.each(["positive", "negative"])("closes new_task and freezes its %s feedback in L3 evidence", async (polarity) => {
     const { llm } = createTurnJudgeLlm({ "第二轮": [judged("new_task", polarity, l1For("第二轮：换个事，写求职信"))] });
     const l3Evidence = captureL3Evidence(llm);
-    const { service, db } = createTestService({ llm, config: turnJudgeConfig() });
+    const { service, db } = createTestService({ llm, config: withOldL3(turnJudgeConfig()) });
     const session = service.openSession({
       l3WorldModelProtocolVersion: 2,
       l3WorldModelTransition: "resume_only",
@@ -191,7 +196,7 @@ describe("turn.judge.v1 routing (switch on)", () => {
       "C task": [judged("follow_up", "positive", l1For("C task"))]
     });
     const l3Evidence = captureL3Evidence(llm);
-    const { service, db } = createTestService({ llm, config: turnJudgeConfig() });
+    const { service, db } = createTestService({ llm, config: withOldL3(turnJudgeConfig()) });
     const session = service.openSession({ l3WorldModelProtocolVersion: 2, l3WorldModelTransition: "resume_only",
       namespace: { source: "codex", profileId: "default", userId: "reopen-backlog", sessionKey: "reopen-backlog" } });
     const historical = await service.completeTurn("historical", { sessionId: session.sessionId, query: "Historical task", answer: "Historical output" });

@@ -40,7 +40,7 @@ async function waitForGate(signal: ReturnType<typeof gate>) {
 }
 function setup(archiveEta?: number, valueDistributionRepairEnabled = false) {
   const state = {
-    operations: [] as string[], relation: "follow_up", reward: 0.9, variant: 0,
+    selectedEpisodeId: null as string | null, operations: [] as string[], relation: "follow_up", reward: 0.9, variant: 0,
     spans: [{ start: 0, end: 3, spanGoal: "TLS old inspect", summary: "Inspect nginx TLS certificate configuration" },
       { start: 4, end: 10, spanGoal: "TLS old verify", summary: "Verify nginx TLS secure endpoint" }],
     blockOperation: "", failOperation: "",
@@ -66,7 +66,7 @@ function setup(archiveEta?: number, valueDistributionRepairEnabled = false) {
       let payload: { steps?: Array<{ idx: number }>; evidence_trace_ids?: string[] } = {};
       try { payload = JSON.parse([...messages].reverse().find((item) => item.role === "user")?.content ?? "{}"); } catch { /* Some capture prompts use plain text. */ }
       let output: Record<string, unknown> = {};
-      if (options.operation === "episode.select.v1") output = { episodeId: null, title: "TLS test", summary: "TLS verification" };
+      if (options.operation === "episode.select.v1") output = { episodeId: state.selectedEpisodeId, title: "TLS test", summary: "TLS verification" };
       if (options.operation === "relation.classify.v1") output = { relation: state.relation, confidence: 0.99, reason: "fixed diagnostic relation" };
       if (options.operation === "capture.summarize") {
         const userQuote = (messages.find((item) => item.role === "user")?.content ?? "").match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
@@ -146,6 +146,54 @@ function snapshot(context: Context, prepared: Prepared) {
 }
 
 describe("MEMMY-647 current baseline acceptance", () => {
+  it.each([1, 3])("normal lifecycle withdraws and restores positive contribution (%i sources)", async count => {
+    const c = setup(); c.config.algorithm.reward.feedbackWindowSec = 1; const p = await prepare(c);
+    const members = [p];
+    for (let i = 1; i < count; i++) members.push(await prepare(c, `member ${i}`));
+    for (const item of members) {
+      makeTraceEligibleForL2(c.db, item.first.l1MemoryId);
+      setTraceSignatureAndVectorForTest(c.db, item.first.l1MemoryId, "python|pytest|_|_", [1, 0, 0]);
+    }
+    const source = c.repos.memories.get(p.first.l1MemoryId)!;
+    const common = { userId: p.namespace.userId, sessionId: p.session.sessionId, agentId: source.agentId ?? "codex", profileId: p.namespace.profileId };
+    insertActivePolicyMemory(c.db, { ...common, id: "647-transition-policy", appId: "647-test", sourceTraceId: p.first.l1MemoryId, sourceEpisodeId: p.first.episodeId });
+    insertActiveSkillMemoryForTest(c.db, { ...common, id: "647-transition-skill", sourcePolicyIds: ["647-transition-policy"] });
+    for (const item of members) insertTracePolicyLinkForTest(c.db, { userId: p.namespace.userId, l1MemoryId: item.first.l1MemoryId, l2MemoryId: "647-transition-policy" });
+    const drain = async () => { for (let i = 0; i < 45; i++) { vi.setSystemTime(Date.now() + 1_000); await c.service.runWorkerOnce(40); } };
+    const close = async () => {
+      vi.setSystemTime(Date.now() + 3 * 60 * 60 * 1000);
+      c.state.selectedEpisodeId = null; c.state.relation = "new_task";
+      await prepare(c, "unrelated idle sweep trigger"); await drain();
+    };
+    const read = () => ({ policy: policyMetaFromMemory(c.repos.memories.get("647-transition-policy")!)!, skill: skillMetaFromMemory(c.repos.memories.get("647-transition-skill")!)! });
+    await close();
+    expect(c.repos.runtime.getEpisode(p.first.episodeId)).toMatchObject({ status: "closed", rTask: 0.9 });
+    expect(read().policy.support).toBe(count);
+    const success = read();
+    const reopen = async (reward: number) => {
+      c.state.reward = reward; c.state.selectedEpisodeId = p.first.episodeId; c.state.relation = "revision";
+      const turn = await c.service.completeTurn(`revision-${++sequence}`, { sessionId: p.session.sessionId,
+        query: "Revise the same nginx TLS task: the certificate must be checked again", answer: "Rechecked the same deployment and certificate.", toolCalls: [] });
+      await settleCaptureAssignments(c.service); await drain();
+      expect(c.repos.runtime.getRawTurn(turn.rawTurnId)?.episodeId).toBe(p.first.episodeId);
+      expect(c.repos.runtime.getEpisode(p.first.episodeId)?.status).toBe("open");
+      await close();
+      expect(c.repos.runtime.getEpisode(p.first.episodeId)?.rTask).toBe(reward);
+    };
+    await reopen(-0.9);
+    evidence(`review-transition-${count}`, { success, failure: read(), episode: c.repos.runtime.getEpisode(p.first.episodeId) });
+    expect.soft(read().policy.support).toBe(count - 1);
+    expect.soft(read().policy.sourceEpisodeIds).not.toContain(p.first.episodeId);
+    expect.soft(read().skill.eta).not.toBe(success.skill.eta);
+    if (count === 1) expect.soft(read().policy.status).toBe("quarantined");
+    await reopen(0.9);
+    expect(read().policy.sourceEpisodeIds).toContain(p.first.episodeId);
+    expect(read().policy.support).toBe(count);
+    const restored = read(); await drain();
+    expect(read().policy.gain).toBe(restored.policy.gain);
+    expect(read().skill.eta).toBe(restored.skill.eta);
+  });
+
   it("clears stale closure reasons on reopen without changing routing", async () => {
     const c = setup(); const p = await prepare(c);
     c.repos.runtime.closeEpisode(p.first.episodeId, { closeReason: "abandoned", abandonReason: "old closure" });

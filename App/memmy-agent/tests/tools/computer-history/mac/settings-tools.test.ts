@@ -11,6 +11,7 @@ import {
   runStateFrom,
 } from "../../../../src/tools/computer-history/mac/computer-history-settings.js";
 import { ToolLoader } from "../../../../src/core/agent-runtime/tools/loader.js";
+import { collectorGate } from "../../../../src/tools/computer-history/core/collector-gate.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -46,7 +47,17 @@ afterEach(() => {
 });
 
 describe("Computer History settings tools", () => {
-  it("registers all three tools alongside retrieval", () => {
+  it("keeps application observation rules fixed while a task recording owns the collector", async () => {
+    const store = temporaryStore(), before = store.read();
+    const release = collectorGate.acquire("task");
+    try {
+      const tool = new ComputerHistoryUpdateSettingsTool(store);
+      expect(await tool.execute({ settings: { observation: { defaultApplicationBehavior: "do_not_observe", defaultURLBehavior: "do_not_observe", rules: [] } } })).toContain("stop task recording");
+      expect(store.read()).toEqual(before); expect(fs.existsSync(store.filePath)).toBe(false);
+    } finally { release(); }
+  });
+  it.each(["darwin", "win32"] as const)("registers all three tools alongside retrieval on %s", (platform) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue(platform);
     vi.spyOn(historyPlatform, "isComputerHistorySupported").mockReturnValue(true);
     vi.stubEnv("MEMMY_COMPUTER_HISTORY", undefined);
     const registry = new ToolLoader({

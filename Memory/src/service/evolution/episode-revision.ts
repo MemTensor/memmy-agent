@@ -35,12 +35,16 @@ export const REVISIONED_JOBS = new Set([
 ]);
 
 export function jobEpisodeRevision(repos: Pick<Repositories, "memories" | "runtime">, job: Pick<EvolutionJobRecord, "episodeId" | "jobType"> & { payload?: Record<string, unknown> }): string | undefined {
+  // Unified extraction loads durable candidate versions at execution and validates
+  // them before committing. Episode changes must not drop pending explicit feedback.
+  if (job.jobType === "l2_induction" && job.payload?.unified === true) return undefined;
   return job.episodeId && REVISIONED_JOBS.has(job.jobType)
     ? episodeInputRevision(repos, job.episodeId, job.jobType !== "reward" || job.payload?.afterRewardRepair === true)
     : undefined;
 }
 
 export function jobRevisionIsCurrent(repos: Pick<Repositories, "memories" | "runtime">, job: EvolutionJobRecord): boolean {
+  if (job.jobType === "l2_induction" && job.payload.unified === true) return true;
   // Explicit feedback and repair events survive an Episode lifecycle transition.
   // Their worker re-reads current context and retries if that context changes while generating.
   if (job.jobType === "negative_experience" && job.payload.source !== "episode_reward") return true;

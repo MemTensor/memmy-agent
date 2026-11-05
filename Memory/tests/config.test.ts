@@ -21,6 +21,19 @@ afterEach(() => {
 });
 
 describe("memmy memory config", () => {
+  it("turns the new L3 on by default, and off from the config file or MEMMY_L3_FIELD_COGNITION=0", () => {
+    const root = tempRoot(), configPath = join(root, "config.yaml");
+    envBackup.MEMMY_L3_FIELD_COGNITION = process.env.MEMMY_L3_FIELD_COGNITION;
+    delete process.env.MEMMY_L3_FIELD_COGNITION;
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+    expect(loadMemmyConfig(configPath).config.algorithm.l3FieldCognition.enabled).toBe(true);
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: { algorithm: { l3FieldCognition: { enabled: false } } } }));
+    expect(loadMemmyConfig(configPath).config.algorithm.l3FieldCognition.enabled).toBe(false);
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+    process.env.MEMMY_L3_FIELD_COGNITION = "0";
+    expect(loadMemmyConfig(configPath).config.algorithm.l3FieldCognition.enabled).toBe(false);
+  });
+
   it.each([
     ["ja-jp", "ja-JP"], ["fr-fr", "fr-FR"], ["zh-hant-tw", "zh-Hant-TW"],
     ["en-gb", "en-GB"], ["sr-latn-rs", "sr-Latn-RS"], ["en-us-u-ca-gregory", "en-US-u-ca-gregory"],

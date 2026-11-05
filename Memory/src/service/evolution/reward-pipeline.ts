@@ -1,4 +1,5 @@
 import { episodeInputRevision, jobRevisionIsCurrent } from "./episode-revision.js";
+import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   REWARD_R_HUMAN_PROMPT,
   backpropagateTraces,
@@ -67,6 +68,7 @@ export interface RewardPipelineDeps {
   synthesizeDecisionRepairDraft: SynthesizeDecisionRepairDraft;
   isTraceEligibleForL2(trace: TraceMeta): boolean;
   recordCandidatePoolTrace(trace: TraceMeta, signature: string, at: string): void;
+  recomputePolicyStats(policyId: string, at: string, triggerEpisodeId?: string): MemoryRow | undefined;
   repairEvidenceValueDiff(highValue: MemoryRow[], lowValue: MemoryRow[]): number;
 }
 
@@ -288,6 +290,7 @@ export class RewardPipeline {
     });
     const at = this.deps.nowIso();
     const l2Eligible: Array<{ memory: MemoryRow; trace: TraceMeta }> = [];
+    const affectedPolicyIds = new Set<string>();
     for (const update of updates) {
       const current = this.deps.repos.memories.get(update.traceId);
       if (!current) continue;
@@ -345,10 +348,20 @@ export class RewardPipeline {
         || !rawTurn || rawTurn.toolCalls.length < SPAN_BIG_TURN_MIN_TOOL_CALLS)) {
         retireSourceSpans(this.deps.repos, saved.id, [], at, this.deps.namespaceIdFromMemory);
       }
+      if (savedTrace) {
+        for (const policyId of new Set(this.deps.repos.runtime.listTracePolicyLinks({ l1MemoryId: saved.id, limit: -1 })
+          .filter((link) => {
+            const target = this.deps.repos.memories.get(link.l2MemoryId);
+            return target && (this.deps.config.algorithm.l2Induction.mode === "legacy"
+              || link.relation === l2SupportRelation(target));
+          }).map((link) => link.l2MemoryId))) {
+          affectedPolicyIds.add(policyId);
+        }
+      }
       if (payload.downstreamScheduled !== true && savedTrace && this.deps.isTraceEligibleForL2(savedTrace)) {
         this.deps.recordCandidatePoolTrace(savedTrace, signatureFromTrace(savedTrace), at);
         l2Eligible.push({ memory: saved, trace: savedTrace });
-        this.deps.enqueueJob({
+        if (this.deps.config.algorithm.l2Induction.mode === "legacy") this.deps.enqueueJob({
           jobType: "l2_association",
           userId: saved.userId,
           sessionId: saved.sessionId,
@@ -365,10 +378,16 @@ export class RewardPipeline {
           payload: { afterRewardRepair: true }, createdAt: at });
       }
     }
+    // Refresh existing consumers even when the revised source is no longer eligible.
+    // All traces must be saved before taking a new policy evidence snapshot.
+    for (const policyId of affectedPolicyIds) {
+      this.deps.recomputePolicyStats(policyId, at, trace.episodeId);
+    }
     const inductionSeed = l2Eligible[0];
     if (payload.downstreamScheduled !== true && inductionSeed) {
       this.deps.enqueueJob({
         jobType: "l2_induction",
+        dedupeKey: this.deps.config.algorithm.l2Induction.mode === "unified" ? `l2_unified:reward:${job.id}` : undefined,
         userId: inductionSeed.memory.userId,
         sessionId: inductionSeed.memory.sessionId,
         episodeId: trace.episodeId,

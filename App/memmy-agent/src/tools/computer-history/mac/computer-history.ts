@@ -2,8 +2,8 @@ import { Tool } from "../../../core/agent-runtime/tools/base.js";
 import {
   ComputerHistoryApiError,
   getComputerHistoryDemoService,
-} from "./computer-history-api.js";
-import type { ComputerHistoryDemoService } from "./computer-history-api.js";
+} from "../computer-history-api.js";
+import type { ComputerHistoryDemoService } from "../core/computer-history-api.js";
 import { isComputerHistorySupported } from "../platform.js";
 
 const PARAMETERS = {

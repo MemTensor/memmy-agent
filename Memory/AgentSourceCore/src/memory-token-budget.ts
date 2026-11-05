@@ -22,6 +22,7 @@ export const MEMORY_WORKER_JOB_TYPES = [
   "l2_induction",
   "l3_abstraction",
   "l3_world_model_update",
+  "l3_unit_update",
   "project_environment_profile",
   "skill_crystallization",
   "skill_cluster_assign",

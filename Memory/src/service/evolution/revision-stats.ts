@@ -17,7 +17,7 @@ type PolicyState = { gain: number; support: number; status: PolicyStatus };
 type PolicyInput = { evidence: NumericTrace[]; reference: NumericTrace[]; parameters: {
   minSupport: number; minGain: number; archiveGain: number; tauSoftmax: number; gainEmaAlpha: number;
 } };
-type PolicyUpdate = { type?: "update"; id: string; sources?: string[]; input: PolicyInput; gain: number; support?: number };
+type PolicyUpdate = { type?: "update"; id: string; sources?: string[]; dependencies?: string[]; input: PolicyInput; gain: number; support?: number };
 type PolicyCheckpoint = { type: "checkpoint"; id: string; state: PolicyState; rawGain: number; gain: number; support: number };
 type PolicyEvent = PolicyUpdate | PolicyCheckpoint;
 export interface PolicyRevisionHistory {
@@ -75,12 +75,13 @@ export function revisePolicyStatistics(memory: MemoryRow, input: PolicyInput, so
   // Correct changed evidence wherever an earlier aggregate actually used that source.
   // Do not silently mark a snapshot as handled while ignoring another member's revision.
   for (const event of updates) {
+    event.dependencies ??= [...new Set([...event.input.evidence, ...event.input.reference].map(group))];
     for (const id of changedGroups) {
       // The first update attributed to B keeps the preceding A checkpoint intact.
       // Revisions of an already recorded update replace its historical dependency.
       if (id === sourceId && !prior) continue;
       const present = [...event.input.evidence, ...event.input.reference].some(trace => group(trace) === id);
-      if (!present && !(event === prior && id === sourceId)) continue;
+      if (!present && !event.dependencies.includes(id) && !(event === prior && id === sourceId)) continue;
       const replace = (before: NumericTrace[], current: NumericTrace[]) => [
         ...before.filter(trace => group(trace) !== id), ...current.filter(trace => group(trace) === id)
       ].sort((a,b) => a.id.localeCompare(b.id));
@@ -132,8 +133,8 @@ type SkillStatus = "candidate" | "active" | "archived";
 type SkillState = { eta: number; status: SkillStatus; trialsAttempted: number; trialsPassed: number };
 type SkillOptions = Pick<MemmyConfig["algorithm"]["skill"], "candidateTrials" | "minEtaForRetrieval" | "repairCandidateMinEta" | "archiveEta">;
 type SkillEvent = { id: string; type: "checkpoint"; state: SkillState }
-  | { id: string; type: "policy"; policyId: string; policyEventId: string; gain: number; archiveEta: number }
-  | { id: string; type: "crystallization"; policyId: string; policyEventId: string; gain: number; support: number; minEta: number; minSupport: number; status: SkillStatus }
+  | { id: string; type: "policy"; policyId: string; policyEventId: string; gain: number; disabled?: boolean; archiveEta: number }
+  | { id: string; type: "crystallization"; policyId: string; policyEventId: string; gain: number; disabled?: boolean; support: number; minEta: number; minSupport: number; status: SkillStatus }
   | { id: string; type: "trial"; attempted: number; passed: number; options: SkillOptions; repairOrigin: boolean };
 interface SkillHistory { version: 1; base: SkillState; events: SkillEvent[]; last?: SkillState; externallyArchived?: boolean }
 
@@ -164,6 +165,8 @@ function replaySkill(history: SkillHistory) {
   for (const event of history.events) {
     if (event.type === "checkpoint") {
       state = { ...event.state };
+    } else if ((event.type === "policy" || event.type === "crystallization") && event.disabled) {
+      continue;
     } else if (event.type === "policy") {
       const eta = skillEtaAfterRewardDrift({ currentEta: state.eta, magnitude: event.gain });
       state = { ...state, eta, status: skillStatusAfterRewardDrift({ currentStatus: state.status, eta, archiveEta: event.archiveEta }) };
@@ -286,6 +289,8 @@ export function reviseSkillPolicy(memory: MemoryRow, policyMemory: MemoryRow, ar
     const replacement = policyHistory?.events.find(item => item.id === event.policyEventId);
     if (replacement) {
       event.gain = replacement.gain;
+      if (replacement.type !== "checkpoint" && replacement.input.evidence.length === 0) event.disabled = true;
+      else delete event.disabled;
       if (event.type === "crystallization") event.support = replacement.support ?? event.support;
     }
   }
@@ -305,12 +310,13 @@ export function reviseSkillPolicy(memory: MemoryRow, policyMemory: MemoryRow, ar
   }
   const gain = policyHistory?.events.find(event => event.id === eventId)?.gain ?? policy.gain;
   const existing = history.events.find(event => event.id === id);
-  if (existing?.type === "policy") existing.gain = gain;
+  const disabled = policy.support === 0;
+  if (existing?.type === "policy") { existing.gain = gain; if (disabled) existing.disabled = true; else delete existing.disabled; }
   // Crystallization already used this Policy contribution, including revisions
   // of earlier inputs represented by its later aggregate. Only a new source
   // adds another drift; correcting an existing contribution just replays it.
   else if (!knownPolicyEvents.has(eventId) && (!policyHistory?.revising || knownPolicyEvents.size === 0)) {
-    history.events.push({ id, type: "policy", policyId: policy.id, policyEventId: eventId, gain, archiveEta });
+    history.events.push({ id, type: "policy", policyId: policy.id, policyEventId: eventId, gain, archiveEta, ...(disabled ? { disabled: true } : {}) });
   }
   return replaySkill(history);
 }

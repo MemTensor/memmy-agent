@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+// Consent behavior is covered separately; these fixtures exercise the message protocol.
+vi.mock("../../../../src/tools/computer-history/win/private-files.js", () => ({
+  prepareWindowsWeChatState: () => {}, validateWindowsWeChatConsent: () => true,
+}));
 import {
   normalizeWeChatBatch, WeChatMessageBatchReader, WeChatReaderError,
 } from "../../../../src/tools/computer-history/mac/wechat-message-batch.js";
@@ -124,7 +128,7 @@ describe("personal WeChat History messages", () => {
       expect(() => reader.acknowledge({ [table]: 1 }, "missing")).toThrow("revoked");
       const firstConsent = consent.grant().consentId!;
       reader.acknowledge({ [table]: 1 }, firstConsent);
-      expect(fs.statSync(cursorFile).mode & 0o777).toBe(0o600);
+      if (process.platform !== "win32") expect(fs.statSync(cursorFile).mode & 0o777).toBe(0o600);
       expect(() => reader.acknowledge({ [table]: 0 }, firstConsent)).toThrow("regressed");
       consent.revoke();
       const secondConsent = consent.grant().consentId!;
@@ -261,7 +265,7 @@ process.exit(2);
   it("rejects a dangling cursor symlink without launching the reader or replacing the link", async () => {
     const fixture = createReadFixture();
     const missingTarget = `${fixture.cursorFile}.missing`;
-    fs.symlinkSync(missingTarget, fixture.cursorFile, "file");
+    fs.symlinkSync(missingTarget, fixture.cursorFile, process.platform === "win32" ? "junction" : "file");
     expect(fs.existsSync(fixture.cursorFile)).toBe(false);
 
     await expect(fixture.reader.read()).rejects.toThrow("WeChat cursor is unreadable");
@@ -284,4 +288,24 @@ process.exit(2);
     expect(fs.readdirSync(fixture.cursorFile)).toEqual(["retained.txt"]);
     expect(fs.readFileSync(path.join(fixture.cursorFile, "retained.txt"), "utf8")).toBe("fixture contents");
   });
+});
+
+
+it("terminates a running reader subprocess on cancellation without advancing its cursor", async () => {
+  const fixture = createReadFixture();
+  const helper = fixture.options.helper;
+  const pidFile = path.join(path.dirname(helper), "reader-pid.txt");
+  fs.writeFileSync(helper, `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid)); setInterval(()=>{},1000);`);
+  const pending = fixture.reader.read().then(() => "unexpected success", error => error);
+  await vi.waitFor(() => expect(fs.existsSync(pidFile)).toBe(true));
+  const pid = Number(fs.readFileSync(pidFile, "utf8"));
+  try {
+    expect(() => process.kill(pid, 0)).not.toThrow();
+    fixture.reader.cancel();
+    expect(await pending).toBeInstanceOf(WeChatReaderError);
+    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow());
+    expect(fs.existsSync(fixture.cursorFile)).toBe(false);
+  } finally {
+    fixture.reader.cancel();
+  }
 });
