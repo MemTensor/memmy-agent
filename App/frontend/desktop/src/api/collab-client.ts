@@ -508,6 +508,15 @@ const AssistThreadDetailSchema = z.object({
   serverTime: z.string().nullish().transform((value) => value ?? null)
 });
 export type AssistThreadDetail = z.infer<typeof AssistThreadDetailSchema>;
+
+/** 看板上的协助列表。 */
+export interface AssistThreadListing {
+  threads: AssistThread[];
+  open: number;
+  retentionDays: number;
+  maxThreads: number | null;
+  prunedAt: string | null;
+}
 /** 授权弹窗、任务内确认与项目设置里「换用」共用的候选，以及默认选中的那一个。 */
 export interface AssistAgentChoice {
   agents: AssistAgent[];
@@ -666,9 +675,13 @@ export interface CollabClient {
   setAssistGrantAgent(projectId: string, grantee: string, agent: string): Promise<{ grants: AssistGrant[] }>;
   /** 结束对某位成员的授权；之后的请求重新问她。 */
   revokeAssistGrant(projectId: string, grantee: string): Promise<{ grants: AssistGrant[] }>;
-  /** 协助记录，保留 30 天。 */
-  /** 项目里的协助：本人作为发起人或执行人的排查，按一次排查一行，保留 30 天。 */
-  assistThreads(projectId: string): Promise<{ threads: AssistThread[]; open: number; retentionDays: number }>;
+  /**
+   * 项目里的协助：本人作为发起人或执行人的排查，按一次排查一行，保留 30 天（没执行过的 7 天）。列表只有概要。
+   * {@code prunedAt}：最近 30 天里因为超过项目上限（{@code maxThreads} 次排查或 200MB）清掉过较早的协助。
+   */
+  assistThreads(projectId: string): Promise<AssistThreadListing>;
+  /** 从本人的列表中移除一次已经结束的协助：只对自己隐藏，双方都移除后云端删除。 */
+  hideAssistThread(projectId: string, threadId: string): Promise<{ threadId: string; removed: "hidden" | "deleted" }>;
   /** 打开一次协助：各次请求的提示词、执行过程、回复与发起方收到的内容。只有发起人和执行人能读。 */
   assistThread(projectId: string, threadId: string): Promise<AssistThreadDetail>;
   /** 一条 Memmy 任务上的协助：任务页据此显示协助条、请求卡片与确认卡片。 */
@@ -1195,7 +1208,23 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
       return requestJson({
         config,
         path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/threads`,
-        schema: z.object({ threads: z.array(AssistThreadSchema), open: z.number(), retentionDays: z.number() })
+        schema: z.object({
+          threads: z.array(AssistThreadSchema),
+          open: z.number(),
+          retentionDays: z.number(),
+          // 旧版本机后端不给这两项：按「没有上限说明」处理。
+          maxThreads: z.number().nullable().optional().transform((value) => value ?? null),
+          prunedAt: z.string().nullable().optional().transform((value) => value ?? null)
+        })
+      });
+    },
+
+    async hideAssistThread(projectId, threadId) {
+      return requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/threads/${encodeURIComponent(threadId)}`,
+        schema: z.object({ threadId: z.string(), removed: z.enum(["hidden", "deleted"]) }),
+        init: { method: "DELETE" }
       });
     },
 

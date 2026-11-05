@@ -2649,6 +2649,17 @@ interface MemmySessionRecords {
 }
 
 /**
+ * 成员协助的结果送回发起方任务时是一条以 {@code <memmy_assist_result} 开头的消息，内容来自执行方的电脑，
+ * 只有协助双方看得到。发起方把这条任务共享到项目时，这一轮的提问只留下面这句说明，不把结果带给全体成员；
+ * 发起方 Agent 收到后的分析是发起方自己的内容，照常共享。
+ */
+export const ASSIST_RESULT_PLACEHOLDER = "（这里是一次成员协助的结果，只有协助双方看得到）";
+
+export function isAssistResult(content: string): boolean {
+  return /^\s*<memmy_assist_result\b/u.test(content);
+}
+
+/**
  * Reads one of Memmy's task session files: a metadata line first, then user, assistant and tool records that
  * group into turns the same way the board shows them.
  */
@@ -2691,8 +2702,10 @@ async function readSessionRecords(path: string): Promise<MemmySessionRecords | n
     const role = text(raw.role);
     if (role === "user") {
       if (current) turns.push(current);
-      lastQuestion = text(raw.content);
-      current = { question: lastQuestion, reply: "", steps: [], startedAt: timestamp };
+      // 协助结果送回发起方任务的那条消息：内容来自执行方的电脑，只有协助双方看得到。这条任务共享到项目时只留一句说明。
+      const question = isAssistResult(text(raw.content)) ? ASSIST_RESULT_PLACEHOLDER : text(raw.content);
+      if (!isAssistResult(text(raw.content))) lastQuestion = question;
+      current = { question, reply: "", steps: [], startedAt: timestamp };
       continue;
     }
     if (role === "assistant") {

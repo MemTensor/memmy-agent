@@ -637,6 +637,86 @@
   color: var(--collab-ink-2);
 }
 
+/* 等你处理的协助：与上面的取用提示同一种提示条，右侧按钮用主色，点了就去处理 */
+.assistWaiting {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--collab-accent) 30%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--collab-active) 55%, var(--color-background-paper, #fff));
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.assistWaitingIcon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--collab-accent-deep);
+}
+
+.assistWaitingText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--collab-ink-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistWaitingAction {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--collab-accent-deep);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.assistWaitingAction:hover {
+  background: color-mix(in srgb, var(--collab-accent) 16%, transparent);
+}
+
+/* 「协助」列表底部：收起的未执行请求与上限说明，都是一行小字 */
+.assistFooter {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 0 12px;
+}
+
+.assistFooterToggle {
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--collab-muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.assistFooterToggle:hover {
+  color: var(--collab-ink-2);
+  text-decoration: underline;
+}
+
+.assistFooterNote {
+  margin: 0;
+  color: var(--collab-ter);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .configKnowledgeList {
   display: flex;
   flex-direction: column;

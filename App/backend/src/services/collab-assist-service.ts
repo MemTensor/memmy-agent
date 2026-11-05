@@ -287,6 +287,15 @@ export interface AssistRunner {
 }
 
 /** 打开一次协助：完整会话，加上双方在这台电脑上能打开的任务。 */
+/** 看板上的协助列表：只有概要。{@code prunedAt} 为最近 30 天里因超过项目上限清理较早协助的时间。 */
+export interface AssistThreadListing {
+  threads: AssistThread[];
+  open: number;
+  retentionDays: number;
+  maxThreads: number | null;
+  prunedAt: string | null;
+}
+
 export interface AssistThreadDetail {
   thread: AssistThread & {
     /** 发起方由 Memmy 发起时，发起的那条任务（只给发起人本人）。 */
@@ -431,8 +440,13 @@ export interface CollabAssistService {
   grants(projectId: string): Promise<{ grants: AssistGrant[] }>;
   revokeGrant(input: { projectId: string; grantee: string }): Promise<{ grants: AssistGrant[] }>;
   setGrantAgent(input: { projectId: string; grantee: string; agent: string }): Promise<{ grants: AssistGrant[] }>;
-  /** 项目里的协助：本人作为发起人或执行人的排查，保留 30 天。 */
-  threads(projectId: string): Promise<{ threads: AssistThread[]; open: number; retentionDays: number }>;
+  /**
+   * 项目里的协助：本人作为发起人或执行人的排查，保留 30 天（没执行过的 7 天）。列表只有概要，打开时再读全。
+   * {@code prunedAt}：最近 30 天里因为超过项目上限（{@code maxThreads} 次排查或 200MB）清掉过较早的协助。
+   */
+  threads(projectId: string): Promise<AssistThreadListing>;
+  /** 从本人的列表中移除一次已经结束的协助：只对自己隐藏；双方都移除后云端删除这次记录。 */
+  hideThread(projectId: string, threadId: string): Promise<{ threadId: string; removed: "hidden" | "deleted" }>;
   /** 打开一次协助：各次请求的完整会话内容。只有发起人和执行人能读。 */
   thread(projectId: string, threadId: string): Promise<AssistThreadDetail>;
   /** 一条 Memmy 任务上的协助：执行中的那次排查，以及从它发出的请求。 */
@@ -964,7 +978,7 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     return grants(input.projectId);
   }
 
-  async function threads(projectId: string): Promise<{ threads: AssistThread[]; open: number; retentionDays: number }> {
+  async function threads(projectId: string): Promise<AssistThreadListing> {
     const data = await cloud(`/projects/${encodeURIComponent(projectId)}/assist/threads`);
     const current = await loadState();
     return {
@@ -973,8 +987,15 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
         return { ...thread, conversationId: memmyTaskOf(current, thread) };
       }),
       open: typeof data.open === "number" ? data.open : 0,
-      retentionDays: typeof data.retentionDays === "number" ? data.retentionDays : 30
+      retentionDays: typeof data.retentionDays === "number" ? data.retentionDays : 30,
+      maxThreads: typeof data.maxThreads === "number" ? data.maxThreads : null,
+      prunedAt: typeof data.prunedAt === "string" && data.prunedAt ? data.prunedAt : null
     };
+  }
+
+  async function hideThread(projectId: string, threadId: string): Promise<{ threadId: string; removed: "hidden" | "deleted" }> {
+    const data = await cloud(`/projects/${encodeURIComponent(projectId)}/assist/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
+    return { threadId, removed: data.removed === "deleted" ? "deleted" : "hidden" };
   }
 
   /**
@@ -1519,6 +1540,7 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     revokeGrant,
     setGrantAgent,
     threads,
+    hideThread,
     thread,
     taskAssist,
     settings,

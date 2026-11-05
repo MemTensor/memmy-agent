@@ -143,8 +143,22 @@ function sameAssistThreads(left: readonly AssistThread[], right: readonly Assist
 }
 
 const NO_ASSIST_THREADS: AssistThread[] = [];
+const NO_ASSIST_LIMIT: { maxThreads: number | null; prunedAt: string | null } = { maxThreads: null, prunedAt: null };
 
-/** 一行任务或一行协助：按最近活动时间混排，协助用「协助」标签区分。 */
+/** 没有执行过的协助：每一次请求都是未允许、已撤回或已过期，只剩一行请求。 */
+export function assistNeverRan(thread: AssistThread): boolean {
+  return thread.requests.length > 0
+    && thread.requests.every((request) => request.status === "rejected" || request.status === "cancelled" || request.status === "expired");
+}
+
+/** 等你处理的协助：你是执行人，最近一次请求在等你确认，或在等你授权且没有生效中的限时授权。 */
+export function assistWaitsForMe(thread: AssistThread): boolean {
+  if (!thread.executor.mine) return false;
+  if (thread.status === "confirm") return true;
+  return thread.status === "pending" && !thread.requests[0]?.autoRun;
+}
+
+/** 一行任务或一行协助：「全部」「我的」「成员」只有任务，「协助」只有协助。 */
 type BoardRow =
   | { kind: "session"; at: string; session: CollabProjectSession }
   | { kind: "assist"; at: string; thread: AssistThread };
@@ -492,7 +506,10 @@ const CollabBoard = memo(function CollabBoard(props: {
    * 执行方选了外部 Agent、或发起方点开时，在右侧展开详情；由 Memmy 执行的直接进入那条任务。
    */
   const [assistThreads, setAssistThreads] = useState<AssistThread[]>(NO_ASSIST_THREADS);
-  const [assistOpen, setAssistOpen] = useState(0);
+  /** 项目上限说明：最近 30 天里因为超过上限清掉过较早的协助时，「协助」列表底部注明。 */
+  const [assistLimit, setAssistLimit] = useState<{ maxThreads: number | null; prunedAt: string | null }>(NO_ASSIST_LIMIT);
+  /** 「协助」列表里没有执行过的请求（未允许、已撤回、已过期）默认收起。 */
+  const [assistShowUnrun, setAssistShowUnrun] = useState(false);
   const [assistDetailId, setAssistDetailId] = useState<string | null>(null);
   const assistFocus = useSyncExternalStore(subscribeAssistFocus, getAssistFocus, getAssistFocus);
   const [readingId, setReadingId] = useState<string | null>(null);
@@ -529,6 +546,8 @@ const CollabBoard = memo(function CollabBoard(props: {
   /** 待审核的加入申请数：弹窗没开时也轮询，别人提交申请后「邀请」入口上直接出现角标。 */
   const [pendingRequests, setPendingRequests] = useState(0);
   const [deleting, setDeleting] = useState<CollabProjectSession | null>(null);
+  /** 「协助」里要删除的那一次：删除只是从自己的列表中移除，另一方仍看得到。 */
+  const [deletingAssist, setDeletingAssist] = useState<AssistThread | null>(null);
   /** 多选删除：进入选择模式后勾选本人的任务，一次移除。 */
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -1008,7 +1027,9 @@ const CollabBoard = memo(function CollabBoard(props: {
     try {
       const view = await collab.assistThreads(sharedId);
       setAssistThreads((current) => (sameAssistThreads(current, view.threads) ? current : view.threads.length ? view.threads : NO_ASSIST_THREADS));
-      setAssistOpen(view.open);
+      setAssistLimit((current) => (current.maxThreads === view.maxThreads && current.prunedAt === view.prunedAt
+        ? current
+        : { maxThreads: view.maxThreads, prunedAt: view.prunedAt }));
     } catch {
       // 云端还没有这个接口或暂时不可用：看板照常显示任务，只是没有协助条目。
     }
@@ -1017,7 +1038,8 @@ const CollabBoard = memo(function CollabBoard(props: {
   // 协助与任务一样随看板轮询：窗口在后台时跳过，切回来立刻补一次。
   useEffect(() => {
     setAssistThreads(NO_ASSIST_THREADS);
-    setAssistOpen(0);
+    setAssistLimit(NO_ASSIST_LIMIT);
+    setAssistShowUnrun(false);
     setAssistDetailId(null);
     if (!collab || !sharedId) return;
     void refreshAssists();
@@ -1053,20 +1075,36 @@ const CollabBoard = memo(function CollabBoard(props: {
   const filtering = Boolean(query) || (member !== "all" && member !== "assist");
 
   /**
-   * 列表里的行：任务按云端的分页来；协助条目只混在「全部」的第一页里（数量少，保留 30 天），
-   * 选「协助」时只看协助。按成员筛选时不出现协助：它不属于某一位成员的任务。
+   * 「协助」里的两组：有执行内容或还在进行的协助照常列出；没有执行过的（未允许、已撤回、已过期）只剩一行请求，默认收起。
+   */
+  const assistGroups = useMemo(() => {
+    const matched = assistThreads.filter((thread) => !query || thread.title.toLowerCase().includes(query.toLowerCase()));
+    return {
+      active: matched.filter((thread) => !assistNeverRan(thread)),
+      unrun: matched.filter(assistNeverRan)
+    };
+  }, [assistThreads, query]);
+  /** 等你处理的协助：你是执行人，请求在等你授权或确认（按限时授权会自动执行的不算）。 */
+  const waitingAssists = useMemo(() => assistThreads.filter(assistWaitsForMe), [assistThreads]);
+
+  /**
+   * 列表里的行：「全部」「我的」「成员」只列项目任务——协助只对两个人可见，混进项目共享的任务列表会让两人看到的「全部」不一样，
+   * 也会把任务挤到后面；等你处理的协助在列表上方单独提示。选「协助」时只看协助。
    */
   const boardRows = useMemo<BoardRow[] | null>(() => {
-    const assistRows: BoardRow[] = assistThreads
-      .filter((thread) => !query || thread.title.toLowerCase().includes(query.toLowerCase()))
-      .map((thread) => ({ kind: "assist", at: thread.lastActiveAt ?? thread.createdAt ?? "", thread }));
-    if (member === "assist") return assistRows;
+    if (member === "assist") {
+      return [...assistGroups.active, ...(assistShowUnrun ? assistGroups.unrun : [])]
+        .map((thread) => ({ kind: "assist", at: thread.lastActiveAt ?? thread.createdAt ?? "", thread }));
+    }
     if (sessions === null) return null;
-    const sessionRows: BoardRow[] = sessions.map((session) => ({ kind: "session", at: session.lastActiveAt ?? "", session }));
-    if (member !== "all" || pageIndex > 0) return sessionRows;
-    return [...sessionRows, ...assistRows].sort((left, right) => right.at.localeCompare(left.at));
-  }, [assistThreads, member, pageIndex, query, sessions]);
+    return sessions.map((session) => ({ kind: "session", at: session.lastActiveAt ?? "", session }));
+  }, [assistGroups, assistShowUnrun, member, sessions]);
   const assistDetail = assistDetailId ? assistThreads.find((thread) => thread.threadId === assistDetailId) ?? null : null;
+  /** 多选能勾的：「协助」里是列出来的、已经结束的协助；其余是本页本人的任务。 */
+  const selectableIds = useMemo(() => (member === "assist"
+    ? (boardRows ?? []).flatMap((row) => (row.kind === "assist" && !assistIsOpen(row.thread.status) ? [row.thread.threadId] : []))
+    : (page?.sessions ?? []).filter((session) => session.mine).map((session) => session.id)), [boardRows, member, page]);
+  const allPageSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
 
   /**
    * 点开一行协助：双方都先在右侧打开这次协助的完整会话。由 Memmy 执行或发起时，会话底部再给出
@@ -1181,6 +1219,21 @@ const CollabBoard = memo(function CollabBoard(props: {
     }
   }
 
+  /** 从自己的列表中移除一次协助；对方也移除过时，云端删除这次记录。 */
+  async function confirmDeleteAssist() {
+    if (!collab || !sharedId || !deletingAssist) return;
+    const thread = deletingAssist;
+    setDeletingAssist(null);
+    try {
+      const result = await collab.hideAssistThread(sharedId, thread.threadId);
+      if (assistDetailId === thread.threadId) setAssistDetailId(null);
+      showToast(t(result.removed === "deleted" ? "collab.assist.removedDeleted" : "collab.assist.removed"));
+      await refreshAssists();
+    } catch (cause) {
+      showToast(messageOf(cause));
+    }
+  }
+
   /** 选择模式只在本人任务上生效：他人的任务只能看，删除也由云端限定为本人。 */
   function toggleSelected(sessionId: string) {
     setSelected((current) => {
@@ -1192,22 +1245,36 @@ const CollabBoard = memo(function CollabBoard(props: {
   }
 
   function selectAllMine() {
-    const mine = (page?.sessions ?? []).filter((session) => session.mine).map((session) => session.id);
-    setSelected((current) => (mine.length > 0 && mine.every((id) => current.has(id)) ? new Set() : new Set(mine)));
+    const ids = selectableIds;
+    setSelected((current) => (ids.length > 0 && ids.every((id) => current.has(id)) ? new Set() : new Set(ids)));
   }
 
   async function deleteSelected() {
     if (!collab || !sharedId || !selected.size) return;
     const ids = [...selected];
+    const assists = member === "assist";
     setConfirmBulkDelete(false);
     setBulkDeleting(true);
     let failed = 0;
     for (const id of ids) {
       try {
-        await collab.removeSession(sharedId, id);
+        if (assists) await collab.hideAssistThread(sharedId, id);
+        else await collab.removeSession(sharedId, id);
       } catch {
         failed += 1;
       }
+    }
+    if (assists) {
+      setBulkDeleting(false);
+      setSelected(new Set());
+      setSelecting(false);
+      if (assistDetailId && ids.includes(assistDetailId)) setAssistDetailId(null);
+      const removed = ids.length - failed;
+      showToast(failed
+        ? t("collab.assist.bulkRemovedPartial", { removed: String(removed), failed: String(failed) })
+        : t("collab.assist.bulkRemoved", { count: String(removed) }));
+      await refreshAssists();
+      return;
     }
     setBulkDeleting(false);
     setSelected(new Set());
@@ -1229,8 +1296,9 @@ const CollabBoard = memo(function CollabBoard(props: {
     { value: "me", label: t("collab.filter.you") },
     { value: "others", label: t("collab.filter.others") },
     // 只在有协助时出现：没有协助的项目里，这一格没有可看的内容。
+    // 数字只数等你处理的：执行中、已完成的不需要你做什么。
     ...(assistThreads.length || member === "assist"
-      ? [{ value: "assist" as const, label: t("collab.filter.assist"), count: assistOpen }]
+      ? [{ value: "assist" as const, label: t("collab.filter.assist"), count: waitingAssists.length }]
       : [])
   ];
 
@@ -1243,8 +1311,31 @@ const CollabBoard = memo(function CollabBoard(props: {
     && otherSessionCount > 0
     && !contextTipSeen.includes(project.id);
 
-  const selectableSessions = (page?.sessions ?? []).filter((session) => session.mine);
-  const allPageSelected = selectableSessions.length > 0 && selectableSessions.every((session) => selected.has(session.id));
+  /** 「协助」列表底部：没有执行过的请求默认收起；最近因超过项目上限清理过较早的协助时注明。 */
+  const assistFooter = member === "assist" && (assistGroups.unrun.length || assistLimit.prunedAt) ? (
+    <div className={styles.assistFooter}>
+      {assistGroups.unrun.length ? (
+        <button
+          type="button"
+          className={styles.assistFooterToggle}
+          aria-expanded={assistShowUnrun}
+          onClick={() => setAssistShowUnrun((value) => !value)}
+        >
+          {assistShowUnrun
+            ? t("collab.assist.unrunHide")
+            : t("collab.assist.unrunShow", { count: String(assistGroups.unrun.length) })}
+        </button>
+      ) : null}
+      {assistLimit.prunedAt ? (
+        <p className={styles.assistFooterNote}>
+          {assistLimit.maxThreads
+            ? t("collab.assist.pruned", { max: String(assistLimit.maxThreads) })
+            : t("collab.assist.prunedShort")}
+        </p>
+      ) : null}
+    </div>
+  ) : null;
+
 
   return (
     <AppFrame title={project?.name ?? t("nav.collab")}>
@@ -1384,7 +1475,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                           <span className={styles.selectCount}>
                             {t("collab.sessions.selectedCount", { count: String(selected.size) })}
                           </span>
-                          <Button size="sm" variant="ghost" disabled={!selectableSessions.length || bulkDeleting} onClick={selectAllMine}>
+                          <Button size="sm" variant="ghost" disabled={!selectableIds.length || bulkDeleting} onClick={selectAllMine}>
                             {t(allPageSelected ? "collab.sessions.deselectAll" : "collab.sessions.selectAll")}
                           </Button>
                           <Button size="sm" variant="ghost" disabled={bulkDeleting} onClick={() => setSelecting(false)}>
@@ -1417,8 +1508,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                             <RefreshCw size={14} aria-hidden="true" />
                             <span className={styles.actionLabel}>{t("collab.sessions.refresh")}</span>
                           </Button>
-                          {/* 多选只对本人任务生效：没有本人的任务时不显示入口 */}
-                          {(sessions ?? []).some((session) => session.mine) ? (
+                          {/* 多选只对能删的生效：本人的任务，或「协助」里已经结束的协助；一条都没有时不显示入口 */}
+                          {selectableIds.length ? (
                             <Button
                               size="sm"
                               variant="ghost"
@@ -1486,13 +1577,38 @@ const CollabBoard = memo(function CollabBoard(props: {
                         </button>
                       </div>
                     ) : null}
+                    {member !== "assist" && waitingAssists.length && !tourActive ? (
+                      <div className={styles.assistWaiting} role="status" data-collab-assist-waiting="">
+                        <span className={styles.assistWaitingIcon} aria-hidden="true"><LifeBuoy size={13} /></span>
+                        <span className={styles.assistWaitingText}>
+                          {waitingAssists.length === 1
+                            ? t("collab.assist.waitingOne", { name: waitingAssists[0]!.requester.name, title: waitingAssists[0]!.title })
+                            : t("collab.assist.waitingMany", { count: String(waitingAssists.length) })}
+                        </span>
+                        <button
+                          type="button"
+                          className={styles.assistWaitingAction}
+                          onClick={() => {
+                            if (waitingAssists.length === 1) openAssist(waitingAssists[0]!);
+                            else setMember("assist");
+                          }}
+                        >
+                          {t("collab.assist.waitingAction")}
+                        </button>
+                      </div>
+                    ) : null}
                     {boardRows === null ? (
                       tourActive ? null : <p className={styles.loading}>{t("collab.loading")}</p>
                     ) : boardRows.length === 0 && member === "assist" ? (
                       tourActive ? null : (
-                        <div className={styles.empty}>
-                          <p>{query ? t("collab.sessions.noMatch.bodyAssist", { query }) : t("collab.assist.boardEmpty")}</p>
-                        </div>
+                        <>
+                          {assistGroups.unrun.length ? null : (
+                            <div className={styles.empty}>
+                              <p>{query ? t("collab.sessions.noMatch.bodyAssist", { query }) : t("collab.assist.boardEmpty")}</p>
+                            </div>
+                          )}
+                          {assistFooter}
+                        </>
                       )
                     ) : boardRows.length === 0 && filtering ? (
                       tourActive ? null : (
@@ -1542,6 +1658,11 @@ const CollabBoard = memo(function CollabBoard(props: {
                                 thread={row.thread}
                                 selecting={selecting}
                                 onOpen={() => openAssist(row.thread)}
+                                selected={selected.has(row.thread.threadId)}
+                                onToggle={() => toggleSelected(row.thread.threadId)}
+                                menuOpen={openMenuId === `assist:${row.thread.threadId}`}
+                                onMenu={(open) => setOpenMenuId(open ? `assist:${row.thread.threadId}` : null)}
+                                onDelete={() => setDeletingAssist(row.thread)}
                               />
                             );
                           }
@@ -1643,7 +1764,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                           );
                         })}
                       </ul>
-                      {member === "assist" ? null : total > SESSION_PAGE_SIZE ? (
+                      {member === "assist" ? assistFooter : total > SESSION_PAGE_SIZE ? (
                         <nav className={styles.pager} aria-label={t("collab.sessions.pager")}>
                           <span className={styles.pagerInfo}>
                             {t("collab.sessions.pageInfo", {
@@ -1861,6 +1982,11 @@ const CollabBoard = memo(function CollabBoard(props: {
           if (dispatch) void openAgentTaskInChat({ memmyAgent: clients?.memmyAgent, dispatch, task: { sessionKey: `websocket:${chatId}` } });
         }}
         onChanged={() => void refreshAssists()}
+        onRemoved={(removed) => {
+          setAssistDetailId(null);
+          void refreshAssists();
+          showToast(t(removed === "deleted" ? "collab.assist.removedDeleted" : "collab.assist.removed"));
+        }}
         onClose={() => setAssistDetailId(null)}
       />
       <SessionReaderPanel
@@ -1872,14 +1998,32 @@ const CollabBoard = memo(function CollabBoard(props: {
       />
       <ConfirmDialog
         open={confirmBulkDelete}
-        title={t("collab.sessions.bulkDeleteTitle")}
-        message={t("collab.sessions.bulkDeleteMessage", { count: String(selected.size) })}
+        title={t(member === "assist" ? "collab.assist.bulkDeleteTitle" : "collab.sessions.bulkDeleteTitle")}
+        message={member === "assist"
+          ? t("collab.assist.bulkDeleteMessage", { count: String(selected.size) })
+          : t("collab.sessions.bulkDeleteMessage", { count: String(selected.size) })}
         cancelLabel={t("collab.cancel")}
         confirmLabel={t("collab.session.delete")}
         confirmVariant="danger"
         icon={null}
         onCancel={() => setConfirmBulkDelete(false)}
         onConfirm={() => void deleteSelected()}
+      />
+      <ConfirmDialog
+        open={deletingAssist !== null}
+        title={t("collab.assist.deleteTitle")}
+        message={deletingAssist
+          ? t("collab.assist.deleteMessage", {
+            title: deletingAssist.title,
+            other: deletingAssist.mine ? deletingAssist.executor.name : deletingAssist.requester.name
+          })
+          : ""}
+        cancelLabel={t("collab.cancel")}
+        confirmLabel={t("collab.session.delete")}
+        confirmVariant="danger"
+        icon={null}
+        onCancel={() => setDeletingAssist(null)}
+        onConfirm={() => void confirmDeleteAssist()}
       />
       <ConfirmDialog
         open={deleting !== null}
@@ -1900,11 +2044,24 @@ const CollabBoard = memo(function CollabBoard(props: {
 
 /**
  * 看板上的一行协助：「协助」标签 + 要做的事，行尾写清谁请谁、由哪个 Agent 执行、现在的状态。
- * 选择模式下不可勾选：协助不是可删除的任务。
+ *
+ * 与任务行一样，右侧「…」菜单里可以删除，多选时可以勾选。删除只是从自己的列表中移除，另一方仍看得到；还没结束的协助
+ * 不能删（先撤回或停止），没有菜单，多选时也不能勾选。不给 {@code onDelete} 时不出现菜单。
  */
-export function AssistBoardRow(props: { thread: AssistThread; selecting: boolean; onOpen: () => void }) {
+export function AssistBoardRow(props: {
+  thread: AssistThread;
+  selecting: boolean;
+  onOpen: () => void;
+  selected?: boolean;
+  onToggle?: () => void;
+  menuOpen?: boolean;
+  onMenu?: (open: boolean) => void;
+  onDelete?: () => void;
+}) {
   const { t } = useTranslation();
   const { thread } = props;
+  const deletable = !assistIsOpen(thread.status) && Boolean(props.onDelete);
+  const menuOpen = Boolean(props.menuOpen) && deletable;
   // 还在等待、按限时授权会直接执行时，执行 Agent 取那份授权指定的。
   const plannedAgent = thread.agent ?? thread.requests[0]?.grant?.agent ?? null;
   const agent = plannedAgent ? assistAgentName(plannedAgent, "") : "";
@@ -1920,12 +2077,27 @@ export function AssistBoardRow(props: { thread: AssistThread; selecting: boolean
   const summary = thread.requests[0]?.reason ?? "";
   return (
     <li
-      className={`${styles.row} ${props.selecting ? styles.rowSelecting : styles.rowOpenable}`}
+      className={`${styles.row} ${props.selecting ? styles.rowSelecting : styles.rowOpenable} ${menuOpen ? styles.rowMenuOpen : ""} ${props.selected ? styles.rowSelected : ""}`}
       data-collab-assist-row=""
       onClick={() => {
-        if (!props.selecting) props.onOpen();
+        if (!props.selecting) {
+          props.onOpen();
+          return;
+        }
+        // 选择模式下点整行就是勾选；还没结束的不可选。
+        if (deletable) props.onToggle?.();
       }}
     >
+      {props.selecting && deletable ? (
+        <input
+          type="checkbox"
+          className={styles.rowCheck}
+          checked={Boolean(props.selected)}
+          aria-label={thread.title}
+          onClick={(event) => event.stopPropagation()}
+          onChange={() => props.onToggle?.()}
+        />
+      ) : null}
       <span className={`${styles.avatar} ${styles.assistIcon}`} aria-hidden="true">
         <LifeBuoy size={15} />
       </span>
@@ -1937,6 +2109,47 @@ export function AssistBoardRow(props: { thread: AssistThread; selecting: boolean
         {summary ? <span className={styles.rowSummary}>{summary}</span> : null}
       </div>
       <span className={`${styles.meta} ${assistIsOpen(thread.status) ? styles.assistMetaOpen : ""}`}>{meta}</span>
+      {props.selecting || !deletable ? null : (
+        <button
+          type="button"
+          className={styles.moreButton}
+          aria-label={t("collab.session.more")}
+          title={t("collab.session.more")}
+          aria-expanded={menuOpen}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onMenu?.(!menuOpen);
+          }}
+        >
+          <MoreHorizontal size={15} aria-hidden="true" />
+        </button>
+      )}
+      {menuOpen ? (
+        <>
+          <button
+            type="button"
+            className={styles.menuScrim}
+            aria-label={t("collab.cancel")}
+            onClick={(event) => {
+              event.stopPropagation();
+              props.onMenu?.(false);
+            }}
+          />
+          <div className={styles.menu} role="menu" onClick={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              role="menuitem"
+              className={`${styles.menuItem} ${styles.menuItemDanger}`}
+              onClick={() => {
+                props.onMenu?.(false);
+                props.onDelete?.();
+              }}
+            >
+              {t("collab.session.delete")}
+            </button>
+          </div>
+        </>
+      ) : null}
     </li>
   );
 }

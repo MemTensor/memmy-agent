@@ -210,6 +210,12 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
     return reply.send(await options.assist.thread(ProjectIdSchema.parse(params.projectId), RequestIdSchema.parse(params.threadId)));
   }));
 
+  // 从本人的列表中移除一次已经结束的协助：只对自己隐藏，双方都移除后云端删除。所有者与管理员不能删别人的协助。
+  app.delete<{ Params: { projectId: string; threadId: string } }>("/api/collab/projects/:projectId/assist/threads/:threadId", guard, withErrorEnvelope(async (request, reply) => {
+    const params = request.params as { projectId: string; threadId: string };
+    return reply.send(await options.assist.hideThread(ProjectIdSchema.parse(params.projectId), RequestIdSchema.parse(params.threadId)));
+  }));
+
   // 一条 Memmy 任务上的协助：它是执行方的一次协助，或者在它里面发出过请求。任务页据此显示协助条与卡片。
   app.get<{ Params: { chatId: string } }>("/api/collab/assist/tasks/:chatId", guard, withErrorEnvelope(async (request, reply) =>
     reply.send(await options.assist.taskAssist(ChatIdSchema.parse((request.params as { chatId: string }).chatId)))));

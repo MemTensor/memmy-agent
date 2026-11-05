@@ -452,7 +452,8 @@ function fakeClient(options: { receiving?: boolean; defaultAgent?: string; threa
     assistGrants: async () => ({ grants }),
     setAssistGrantAgent: async () => ({ grants }),
     revokeAssistGrant: async () => ({ grants: [] }),
-    assistThreads: async () => ({ threads: THREADS, open: 1, retentionDays: 30 }),
+    assistThreads: async () => ({ threads: THREADS, open: 1, retentionDays: 30, maxThreads: 100, prunedAt: null }),
+    hideAssistThread: async (_projectId: string, threadId: string) => ({ threadId, removed: "hidden" as const }),
     assistThread: async () => ({
       // DeepSeek Harness 发起时没有发起的 Memmy 任务。
       thread: { ...(options.thread ?? CONVERSATION), sourceTask: options.thread?.via === "DeepSeek Harness" ? null : "chat-src" },

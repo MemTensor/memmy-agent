@@ -80,6 +80,11 @@ export function CollabAssistConversation(props: {
   onOpenTask?: (chatId: string) => void;
   /** 撤回、停止或确认之后：看板重新读一次协助。 */
   onChanged?: () => void;
+  /**
+   * 从本人的列表中移除之后：只对自己隐藏（hidden），或者对方也移除过、记录已删除（deleted）。看板据此关掉面板并提示。
+   * 不给时不出现「删除」。删除只是从自己的列表中移除，另一方仍看得到。
+   */
+  onRemoved?: (removed: "hidden" | "deleted") => void;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
@@ -104,6 +109,8 @@ export function CollabAssistConversation(props: {
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 点了「删除」，正在等确认：底部换成一句说明与「取消 / 删除」。 */
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
   /** 判断「还在等发起方补传」用的时刻：只在打开时与某次请求的等待到期时更新，不随轮询重画。 */
   const [clock, setClock] = useState(() => Date.now());
   /** 上一次读到的内容：没变就不写，面板不跟着轮询重画。 */
@@ -145,6 +152,7 @@ export function CollabAssistConversation(props: {
     setDetail(null);
     setError(null);
     setLoadFailed(false);
+    setConfirmingRemove(false);
     setClock(Date.now());
     loadedKey.current = "";
   }, [threadId]);
@@ -234,6 +242,22 @@ export function CollabAssistConversation(props: {
   const sourceTask = current?.thread.sourceTask ?? (thread.mine ? thread.requests.find((request) => request.sourceTask)?.sourceTask ?? null : null);
   const canOpenSource = Boolean(sourceTask && props.onOpenTask && (props.sourceTaskAvailable?.(sourceTask) ?? true));
   const executorTask = thread.executor.mine ? thread.conversationId : null;
+
+  async function remove() {
+    if (busy || !collab || !thread) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await collab.hideAssistThread(thread.projectId, thread.threadId);
+      setConfirmingRemove(false);
+      props.onRemoved?.(result.removed);
+    } catch {
+      setError(t("collab.assist.failed"));
+      setConfirmingRemove(false);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function act(run: () => Promise<unknown>) {
     if (busy) return;
@@ -329,9 +353,34 @@ export function CollabAssistConversation(props: {
           {error ? <p className={detailStyles.error} role="alert">{error}</p> : null}
         </div>
 
+        {confirmingRemove ? (
+          <footer className={detailStyles.foot} data-assist-remove-confirm="">
+            <span className={detailStyles.footNote}>
+              {t("collab.assist.removeConfirm", { other: thread.mine ? thread.executor.name : thread.requester.name })}
+            </span>
+            <span className={detailStyles.grow} />
+            <button type="button" className={detailStyles.button} disabled={busy} onClick={() => setConfirmingRemove(false)}>
+              {t("collab.cancel")}
+            </button>
+            <button
+              type="button"
+              className={`${detailStyles.button} ${detailStyles.buttonPrimary}`}
+              disabled={busy}
+              onClick={() => void remove()}
+            >
+              {t("collab.assist.removeAction")}
+            </button>
+          </footer>
+        ) : (
         <footer className={detailStyles.foot}>
           <span className={detailStyles.footNote}>{t("collab.assist.detail.visibility")}</span>
           <span className={detailStyles.grow} />
+          {/* 结束了的协助可以从自己的列表中移除；还在进行的先撤回或停止。 */}
+          {!live && collab && props.onRemoved ? (
+            <button type="button" className={detailStyles.button} disabled={busy} onClick={() => setConfirmingRemove(true)}>
+              {t("collab.assist.remove")}
+            </button>
+          ) : null}
           {thread.mine && latest && (latest.status === "pending" || latest.status === "confirm") && collab ? (
             <button type="button" className={detailStyles.button} disabled={busy} onClick={() => void act(() => collab.cancelAssist(latest.id))}>
               {t("collab.assist.withdraw")}
@@ -353,6 +402,7 @@ export function CollabAssistConversation(props: {
             </button>
           ) : null}
         </footer>
+        )}
       </aside>
     </div>,
     document.body

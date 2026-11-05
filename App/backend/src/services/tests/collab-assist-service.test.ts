@@ -786,6 +786,21 @@ describe("createCollabAssistService", () => {
     expect(Object.values(records)[0]!.path).toBe(join(sessionDir, "session.v4.jsonl"));
   });
 
+  it("passes on the project limit note and removes an assist only from my own list", async () => {
+    const { calls, cloud } = fakeCloud((path, init) => {
+      if (path === "/projects/p1/assist/threads") {
+        return { threads: [], open: 0, retentionDays: 30, maxThreads: 100, prunedAt: "2026-11-05T07:00:00Z" };
+      }
+      if (path === "/projects/p1/assist/threads/thread-1" && init?.method === "DELETE") return { threadId: "thread-1", removed: "deleted" };
+      return {};
+    });
+    const service = createCollabAssistService({ cloud, homeDirectory: home(), projectDirectory: async () => null, agents: async () => [], runner: runner() });
+
+    expect(await service.threads("p1")).toMatchObject({ maxThreads: 100, prunedAt: "2026-11-05T07:00:00Z" });
+    expect(await service.hideThread("p1", "thread-1")).toEqual({ threadId: "thread-1", removed: "deleted" });
+    expect(calls.some((call) => call.method === "DELETE" && call.path === "/projects/p1/assist/threads/thread-1")).toBe(true);
+  });
+
   it("opens an investigation with the whole conversation and the tasks each side can open", async () => {
     const { calls, cloud } = fakeCloud(() => ({
       thread: {

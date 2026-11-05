@@ -798,6 +798,38 @@ describe("collab service", () => {
     expect((await svc.listProjectTasks("p-9")).tasks.every((task) => !task.included)).toBe(true);
   });
 
+  it("keeps an assist result out of a shared task: only the two sides of the assist may see it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(root);
+    const agentSessions = join(root, "workspace", "sessions");
+    mkdirSync(agentSessions, { recursive: true });
+    writeMemmyTask(agentSessions, "task-a", "local-9", "查分享 409", [
+      { role: "user", content: "请王雨看一下她那边的日志", timestamp: "2026-10-22T05:00:00.000Z" },
+      { role: "assistant", content: "已请王雨协助。", timestamp: "2026-10-22T05:00:01.000Z" },
+      { role: "user", content: "<memmy_assist_result request=\"r1\" from=\"王雨\" status=\"done\">\n结果：\n王雨电脑上的日志全文\n</memmy_assist_result>", timestamp: "2026-10-22T05:05:00.000Z" },
+      { role: "assistant", content: "王雨那边是重复请求导致的 409。", timestamp: "2026-10-22T05:05:01.000Z" }
+    ]);
+    const { fetcher, calls } = fakeFetch({
+      "GET /api/collab/projects": () => ({ code: 0, data: { projects: [{ id: "p-9", name: "Memmy 开发", role: "owner", memberCount: 2, sessionCount: 0, createdAt: null }] } }),
+      "PUT /api/collab/projects/p-9/sessions": (call) => {
+        const upload = (call.body as { sessions: Array<{ sourceSessionId: string }> }).sessions[0]!;
+        return { code: 0, data: { sessions: [{ id: `id-${upload.sourceSessionId}` }] } };
+      }
+    });
+    const svc = service(fetcher, { projectsDir: join(root, "projects"), agentSessionsDir: agentSessions });
+    await svc.bindLocalProject("p-9", "local-9");
+
+    await svc.setTaskSharing("p-9", "task-a", true);
+    await waitForUploads(svc, "p-9");
+
+    const body = JSON.stringify(calls.find((call) => call.method === "PUT")!.body);
+    expect(body).not.toContain("王雨电脑上的日志全文");
+    expect(body).not.toContain("memmy_assist_result");
+    expect(body).toContain("（这里是一次成员协助的结果，只有协助双方看得到）");
+    // 发起方自己的分析照常共享。
+    expect(body).toContain("王雨那边是重复请求导致的 409。");
+  });
+
   it("shares one task on demand and stops sharing it, deleting the cloud copy", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
     roots.push(root);
