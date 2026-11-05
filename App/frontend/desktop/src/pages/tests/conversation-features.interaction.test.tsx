@@ -14,10 +14,14 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(async () => ({ callId: "guide-call" })),
   list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(),
   openArtifact: vi.fn(() => true),
+  ensureConversation: vi.fn(async (_title: string) => "created-chat" as string | null),
   send: vi.fn(async () => true), sending: false,
   messages: [] as AgentChatMessage[],
   activeTurnIdByChatId: {} as Record<string, string | null>,
   stopInFlightByChatId: {} as Record<string, boolean>,
+  stageFiles: vi.fn(async () => undefined),
+  stageExistingFiles: vi.fn(async () => undefined),
+  recordingDeliver: undefined as undefined | ((file: File, mode: "summarize" | "attach", persisted?: unknown) => void),
 }));
 vi.mock("../../app/providers.js", () => ({ useApiClients: () => ({ clients: clients }) }));
 vi.mock("../../state/app-state.js", () => ({ useAppState: () => ({
@@ -28,7 +32,8 @@ vi.mock("../../state/app-state.js", () => ({ useAppState: () => ({
 vi.mock("../recording-entry.js", async (original) => {
   const actual = await original<typeof import("../recording-entry.js")>();
   const { useState } = await import("react");
-  return { ...actual, useRecordingEntry: () => {
+  return { ...actual, useRecordingEntry: (_asr: unknown, _upload: unknown, deliver: typeof mocks.recordingDeliver) => {
+    mocks.recordingDeliver = deliver;
     const [compactOpen, setCompact] = useState(false);
     return { compactOpen, toggleCompact: () => setCompact((open) => !open), closeCompact: () => setCompact(false),
       close() {}, archive() {}, session: { status: "idle", elapsedMs: 0, live: null, error: null, lines: [], recordings: [],
@@ -53,8 +58,8 @@ describe("conversation feature integration", () => {
   function Harness() {
     ui = usePluginUi();
     features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: vi.fn(),
-      onStageFiles: async () => {}, onOpenArtifact: mocks.openArtifact,
-      onSend: mocks.send, onOpenRecording: mocks.openRecording });
+      onStageFiles: mocks.stageFiles, onStageExistingFiles: mocks.stageExistingFiles, onOpenArtifact: mocks.openArtifact,
+      onSend: mocks.send, onOpenRecording: mocks.openRecording, onEnsureConversation: mocks.ensureConversation });
     return <>{features.recorders}<nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
   }
   const render = (language = "zh-CN") => root.render(<I18nProvider language={language}><PluginUiProvider><Harness /></PluginUiProvider></I18nProvider>);
@@ -160,6 +165,22 @@ describe("conversation feature integration", () => {
       .toEqual([{ ...transcriptFile, collected: true }]);
   });
 
+  it("reuses a persisted recording transcript instead of staging a new upload", async () => {
+    await act(async () => render());
+    const persisted = { kind: "file" as const, path: "/workspace/recordings/录音转写.txt", name: "录音转写.txt",
+      mime: "text/plain" as const, bytes: 34, url: "/text" };
+    const generated = new File(["转写内容"], "录音记录.txt", { type: "text/plain" });
+
+    await act(async () => mocks.recordingDeliver?.(generated, "attach", persisted));
+    expect(mocks.stageExistingFiles).toHaveBeenCalledWith([persisted]);
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+
+    mocks.stageExistingFiles.mockClear();
+    await act(async () => mocks.recordingDeliver?.(generated, "attach"));
+    expect(mocks.stageExistingFiles).not.toHaveBeenCalled();
+    expect(mocks.stageFiles).toHaveBeenCalledWith([generated]);
+  });
+
   it("opens a staged transcript in the shared task file preview", async () => {
     mocks.chatId = "legal-chat";
     await act(async () => render());
@@ -182,6 +203,8 @@ describe("conversation feature integration", () => {
     mocks.sending = true;
     await enterLegalConversation();
     expect(container.querySelectorAll("nav button")).toHaveLength(2);
+    expect(features.commandItems.map((item) => item.command)).not.toContain("/legal-guide");
+    expect(features.commandItems.map((item) => item.command)).not.toContain("/legal-record");
     expect(button("录音")).toBeUndefined();
     await act(async () => button("访谈录音")!.click());
     expect(container.querySelectorAll(".recording-entry-card")).toHaveLength(1);
@@ -192,11 +215,13 @@ describe("conversation feature integration", () => {
     expect(container.querySelector(".recording-entry-card")).toBeNull();
   });
 
-  it("routes an explicitly typed recording command to the Host even without a diagnosis session", async () => {
+  it("does not route the button-only legal actions from slash input", async () => {
     await act(async () => render());
-    await act(async () => expect(features.runCommand("/legal-record")).toBe(true));
-    expect(container.querySelector(".recording-entry-card")).not.toBeNull();
+    expect(features.runCommand("/legal-guide")).toBe(false);
+    expect(features.runCommand("/legal-record")).toBe(false);
+    expect(container.querySelector(".recording-entry-card")).toBeNull();
     expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.ensureConversation).not.toHaveBeenCalled();
   });
 
   it("covers the guide and recording shortcuts while the Agent's legal question is open", async () => {

@@ -1,0 +1,7 @@
+# Preserve the exact upstream evidence bytes verified by the notice collector.
+/plugins/office/licenses/fontkit-2.0.4/NOTICE-SUPPLEMENT.txt -text
+/plugins/office/licenses/fontkit-2.0.4/SPDX-MIT-template.txt -text
+/plugins/office/licenses/fontkit-2.0.4/SPDX-MIT.json -text
+/plugins/office/licenses/fontkit-2.0.4/upstream-README.md -text
+/plugins/office/licenses/fontkit-2.0.4/upstream-npm-metadata.json -text
+/plugins/office/licenses/fontkit-2.0.4/upstream-package.json -text

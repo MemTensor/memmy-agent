@@ -111,16 +111,18 @@ describe("AgentCommandPalette", () => {
     expect(defaultSlashCommandIndex("missing", 0)).toBe(0);
   });
 
-  it("matches available model preset names without changing their case", () => {
-    const presets = [
-      { name: "FastModel", available: true },
-      { name: "unavailable", available: false }
-    ];
-    expect(filterSlashCommands(commands, "model ", [], presets).map((item) => item.command)).toEqual(["/model FastModel", "/model list"]);
-    expect(filterSlashCommands(commands, "m", [], presets).map((item) => item.command)).toEqual(["/model FastModel", "/model list", "/model"]);
-    expect(filterSlashCommands(commands, "model fa", [], presets)[0]).toMatchObject({ command: "/model FastModel", argHint: "" });
-    expect(filterSlashCommands(commands, "model un", [], presets)).toEqual([]);
-    expect(filterSlashCommands(commands, "model FastModel ", [], presets)).toEqual([]);
+  it("suggests only the model command and list subcommand, leaving model names as manual arguments", () => {
+    const recent = ["/model memmy-account-db8cf6de6ab1-agent", "/model FastModel"];
+    for (const query of ["m", "model"]) {
+      const matches = filterSlashCommands(commands, query, recent);
+      expect(matches.map((item) => item.command)).toEqual(["/model list", "/model"]);
+      expect(matches[defaultSlashCommandIndex(query, matches.length)]?.command).toBe("/model");
+    }
+    expect(filterSlashCommands(commands, "", recent).filter((item) => item.command.startsWith("/model")).map((item) => item.command)).toEqual(["/model", "/model list"]);
+    expect(filterSlashCommands(commands, "model ", recent).map((item) => item.command)).toEqual(["/model list"]);
+    for (const query of ["model fa", "model FastModel", "model memmy-account-db8cf6de6ab1-agent"]) {
+      expect(filterSlashCommands(commands, query, recent)).toEqual([]);
+    }
   });
 
   it("orders empty-query results by recent commands without storing /stop", () => {
@@ -172,6 +174,7 @@ describe("AgentCommandPalette", () => {
         { command: "/new", title: "New", description: "New chat", icon: "square-pen", argHint: "" },
         { command: "/status", title: "Status", description: "Show status", icon: "activity", argHint: "" },
         { command: "/history-dag", title: "History DAG", description: "Show history DAG", icon: "git-branch", argHint: "" },
+        { command: "/model", title: "Model", description: "Show model", icon: "brain", argHint: "[list|preset]" },
         { command: "/goal", title: "Goal", description: "Start goal", icon: "activity", argHint: "[status|create <objective>|pause]" },
         { command: "/plugin", title: "Plugin", description: "Plugin command", icon: "activity", argHint: "" }
       ],
@@ -183,6 +186,7 @@ describe("AgentCommandPalette", () => {
       { command: "/new", title: "新对话", description: "停止当前任务，并开始一段全新的对话。", icon: "square-pen", argHint: "" },
       { command: "/status", title: "查看状态", description: "显示运行时、模型供应商和频道状态。", icon: "activity", argHint: "" },
       { command: "/history-dag", title: "查看历史 DAG", description: "查看当前会话的任务状态图。", icon: "git-branch", argHint: "" },
+      { command: "/model", title: "切换模型预设", description: "查看或切换当前使用的模型预设。", icon: "brain", argHint: "" },
       { command: "/goal", title: "开始长期目标", description: "让 Agent 将本次请求作为长期目标处理。", icon: "activity", argHint: "" },
       { command: "/plugin", title: "Plugin", description: "Plugin command", icon: "activity", argHint: "" }
     ]);
@@ -197,14 +201,18 @@ describe("AgentCommandPalette", () => {
     expect(command.title).toBe("Literature Review");
   });
 
-  it("hides the Goal argument hint in non-Chinese palettes", () => {
+  it("hides Model and Goal argument hints in non-Chinese palettes", () => {
     const localized = localizeSlashCommands(
-      [{ command: "/goal", title: "Goal", description: "Start goal", icon: "activity", argHint: "[status|create <objective>|pause]" }],
+      [
+        { command: "/goal", title: "Goal", description: "Start goal", icon: "activity", argHint: "[status|create <objective>|pause]" },
+        { command: "/model", title: "Model", description: "Show model", icon: "brain", argHint: "[list|preset]" }
+      ],
       "en-US",
       (key) => enUSMessages[key]
     );
 
     expect(localized[0]).toMatchObject({ title: "Goal", description: "Start goal", argHint: "" });
+    expect(localized[1]).toMatchObject({ title: "Model", description: "Show model", argHint: "" });
   });
 
   it("renders command metadata as a listbox", () => {

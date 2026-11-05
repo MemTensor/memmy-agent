@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -9,9 +9,11 @@ import {
   buildPluginSandboxLaunch,
   createCommandPluginAdapter,
   resolveCommandRuntimeDependencies,
-  resolvePluginEnvironment
+  resolvePluginEnvironment,
+  selectOfficeCjkFontFiles
 } from "../command-adapter.js";
 import type { PluginRuntimeContext } from "../types.js";
+import * as texliveRuntime from "../texlive-installer.js";
 
 let root: string | undefined;
 
@@ -20,6 +22,7 @@ afterEach(() => {
   root = undefined;
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function context(outputMode: "json" | "ndjson" = "json"): PluginRuntimeContext {
@@ -99,6 +102,115 @@ describe("CommandPluginAdapter", () => {
       expect(hostSignal?.aborted).toBe(true);
     } finally { await adapter.deactivate(session); }
   });
+
+  it.runIf(process.platform === "darwin" && process.env.CODEX_SANDBOX !== "seatbelt")(
+    "limits macOS renderer services to Host-provisioned Office while preserving file and network boundaries", async () => {
+      const data = realpathSync(mkdtempSync("/private/tmp/memmy-office-mach-"));
+      const sentinel = join(data, "host-only.txt");
+      writeFileSync(sentinel, "owned boundary fixture\n");
+      const unix = createServer(socket => socket.end());
+      const tcp = createServer(socket => socket.end());
+      await new Promise<void>(ok => unix.listen(join(data, "host.sock"), ok));
+      await new Promise<void>(ok => tcp.listen(0, "127.0.0.1", ok));
+      try {
+        const baseContext = context();
+        const executable = join(root!, "runtime/plugin");
+        execFileSync("/usr/bin/clang", ["-x", "c", "-o", executable, "-"], { input: String.raw`
+          #include <sys/socket.h>
+          #include <sys/un.h>
+          #include <netinet/in.h>
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <unistd.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <errno.h>
+          static int lookup(const char *name) {
+            mach_port_t port = MACH_PORT_NULL;
+            kern_return_t result = bootstrap_look_up(bootstrap_port, name, &port);
+            if (result != KERN_SUCCESS || port == MACH_PORT_NULL) return 0;
+            mach_port_deallocate(mach_task_self(), port);
+            return 1;
+          }
+          int main(int argc, char **argv) {
+            if (argc != 5 || chdir(argv[1]) != 0) return 2;
+            int launch = lookup("com.apple.coreservices.launchservicesd");
+            int window = lookup("com.apple.windowserver.active");
+            struct sockaddr_un own = {0}; own.sun_family = AF_UNIX; strcpy(own.sun_path, "inside.sock");
+            int a = socket(AF_UNIX, SOCK_STREAM, 0);
+            int bound = bind(a, (struct sockaddr *)&own, sizeof(own)) == 0;
+            struct sockaddr_un other = {0}; other.sun_family = AF_UNIX; strcpy(other.sun_path, argv[2]);
+            int b = socket(AF_UNIX, SOCK_STREAM, 0);
+            int external = connect(b, (struct sockaddr *)&other, sizeof(other)) == 0;
+            struct sockaddr_in remote = {0}; remote.sin_family = AF_INET;
+            remote.sin_addr.s_addr = htonl(0x7f000001); remote.sin_port = htons((unsigned short)atoi(argv[4]));
+            int c = socket(AF_INET, SOCK_STREAM, 0);
+            int network = connect(c, (struct sockaddr *)&remote, sizeof(remote)) == 0;
+            errno = 0; FILE *read = fopen(argv[3], "r"); int read_error = errno;
+            if (read) fclose(read);
+            errno = 0; FILE *write = fopen(argv[3], "a"); int write_error = errno;
+            if (write) fclose(write);
+            printf("{\"launchServices\":%s,\"windowServer\":%s,\"bound\":%s,\"external\":%s,\"network\":%s,\"readOutside\":%s,\"writeOutside\":%s,\"readErrno\":%d,\"writeErrno\":%d}\n",
+              launch ? "true" : "false", window ? "true" : "false", bound ? "true" : "false",
+              external ? "true" : "false", network ? "true" : "false", read ? "true" : "false", write ? "true" : "false", read_error, write_error);
+            close(a); close(b); close(c); return 0;
+          }` });
+        const fixtureRoot = realpathSync(root!);
+        const tools = Object.fromEntries(["soffice", "pdfinfo", "pdftoppm", "pdftotext"]
+          .map(name => [name, realpathSync(executable)]));
+        const ensure = vi.fn(async () => ({ root: fixtureRoot, version: "test-renderer", tools }));
+        vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+        const cases = [
+          { name: "office", id: "office", provisioned: true, allowed: true },
+          { name: "ordinary", id: "com.example.command", provisioned: true, allowed: false },
+          { name: "forged-env", id: "office", provisioned: false, allowed: false }
+        ];
+        for (const testCase of cases) {
+          const pluginContext = structuredClone(baseContext);
+          pluginContext.plugin.id = testCase.id;
+          pluginContext.plugin.manifest.id = testCase.id;
+          const permission = { type: "host-service" as const, services: ["plugin-data"] };
+          pluginContext.plugin.manifest.permissions = [permission];
+          pluginContext.plugin.approvedPermissions = [permission];
+          const dataRoot = join(data, testCase.name);
+          pluginContext.plugin.manifest.runtime.config = {
+            command: "runtime/plugin",
+            args: [join(dataRoot, testCase.id), join(data, "host.sock"), sentinel, String((tcp.address() as { port: number }).port)],
+            runtimeDependencies: testCase.provisioned ? ["office"] : [],
+            env: testCase.provisioned ? {} : { MEMMY_OFFICE_TOOLS: JSON.stringify(tools), MEMMY_OFFICE_RENDERER_RESOLVED: "1" },
+            ...(!testCase.provisioned ? { officeRendererResolved: true } : {})
+          };
+          const adapter = createCommandPluginAdapter({ pluginDataRoot: dataRoot, officeRuntimeInstaller: { ensure } });
+          const session = await adapter.activate(pluginContext);
+          try {
+            const profile = (session as typeof session & { launch: { args: string[] } }).launch.args[1] ?? "";
+            const services = [...profile.matchAll(/\(global-name\s+"([^"]+)"\)/gu)].map(match => match[1]);
+            expect(services, testCase.name).toEqual(testCase.allowed
+              ? ["com.apple.coreservices.launchservicesd", "com.apple.windowserver.active"] : []);
+            expect(profile).not.toMatch(/global-name-prefix|local-name|xpc-service-name|system-graphics|\(allow\s+mach-lookup\s*\)/u);
+            const events = await collect(adapter.invoke(session, {
+              callId: testCase.name, pluginId: testCase.id, capabilityId: "run", conversationId: "test", input: {}
+            }));
+            expect(events).toHaveLength(1);
+            expect(events[0]?.type).toBe("result");
+            const output = (events[0] as Extract<CapabilityEvent, { type: "result" }>).output as Record<string, unknown>;
+            expect(output, testCase.name).toMatchObject({
+              launchServices: testCase.allowed, windowServer: testCase.allowed,
+              bound: true, external: false, network: false, readOutside: false, writeOutside: false
+            });
+            expect([1, 13], `${testCase.name} read errno`).toContain(output.readErrno);
+            expect([1, 13], `${testCase.name} write errno`).toContain(output.writeErrno);
+          } finally { await adapter.deactivate(session); }
+        }
+        expect(ensure).toHaveBeenCalledTimes(2);
+        expect(readFileSync(sentinel, "utf8")).toBe("owned boundary fixture\n");
+      } finally {
+        await Promise.all([new Promise<void>(ok => unix.close(() => ok())), new Promise<void>(ok => tcp.close(() => ok()))]);
+        rmSync(data, { recursive: true, force: true });
+      }
+    }, 30000
+  );
 
   it.runIf(process.platform === "darwin" && process.env.CODEX_SANDBOX !== "seatbelt")(
     "allows private plugin IPC while denying sockets outside plugin-data and loopback TCP", async () => {
@@ -467,6 +579,71 @@ describe("CommandPluginAdapter", () => {
     });
   });
 
+  it("keeps Host CJK font paths reserved after configured and secret environment injection", () => {
+    const forged = JSON.stringify(["/untrusted/user-font.ttf"]);
+    const trusted = JSON.stringify(["/trusted/system-font.ttc"]);
+    const configured = { MEMMY_OFFICE_CJK_FONTS: forged };
+    const secretEnv = { MEMMY_OFFICE_CJK_FONTS: "forged-fonts" };
+    const secrets = { "forged-fonts": forged };
+    expect(resolvePluginEnvironment(configured, secretEnv, secrets, [], { MEMMY_OFFICE_CJK_FONTS: trusted })
+      .MEMMY_OFFICE_CJK_FONTS).toBe(trusted);
+    expect(resolvePluginEnvironment(configured, secretEnv, secrets).MEMMY_OFFICE_CJK_FONTS).toBe("[]");
+  });
+
+  it("includes Host CJK font paths from the verified managed runtime without adding sandbox roots", async () => {
+    context(); vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+    const installed = realpathSync(root!);
+    mkdirSync(join(installed, "fonts"));
+    const font = join(installed, "fonts", "NotoSansCJKsc-Regular.otf");
+    writeFileSync(font, "owned font selection fixture");
+    const tools = Object.fromEntries(["soffice", "pdfinfo", "pdftoppm", "pdftotext"].map(name => [name, join(installed, "runtime/plugin")]));
+    const ensure = vi.fn(async () => ({ root: installed, version: "test-fonts", tools }));
+    const dependencies = await resolveCommandRuntimeDependencies(["office"], "darwin", { ensure });
+    expect(dependencies.environment.MEMMY_OFFICE_CJK_FONTS).toBeTypeOf("string");
+    expect(JSON.parse(dependencies.environment.MEMMY_OFFICE_CJK_FONTS!)).toContain(realpathSync(font));
+    expect(dependencies.readRoots).toEqual([installed]);
+    expect(dependencies.executableRoots).toEqual([installed]);
+  });
+
+  it("selects only canonical readable Host CJK font files inside the approved source", async () => {
+    context();
+    const fixture = realpathSync(root!);
+    const approved = join(fixture, "approved"); mkdirSync(approved);
+    const fonts = join(approved, "fonts"); mkdirSync(fonts);
+    const font = join(fonts, "owned.ttf"); writeFileSync(font, "owned font fixture");
+    const userFonts = join(fixture, "user", "Library", "Fonts"); mkdirSync(userFonts, { recursive: true });
+    writeFileSync(join(userFonts, "User.ttf"), "outside approved roots");
+    symlinkSync(userFonts, join(approved, "escaped"), process.platform === "win32" ? "junction" : "dir");
+    symlinkSync(fonts, join(approved, "alias"), process.platform === "win32" ? "junction" : "dir");
+    mkdirSync(join(approved, "directory.ttf"));
+    writeFileSync(join(approved, "empty.ttf"), "");
+    writeFileSync(join(approved, "oversized.ttf"), ""); truncateSync(join(approved, "oversized.ttf"), 256 * 1024 * 1024 + 1);
+    writeFileSync(join(approved, "not-a-font.txt"), "not a font");
+    const candidates = ["fonts/owned.ttf", "alias/owned.ttf", "escaped/User.ttf", "../user/Library/Fonts/User.ttf",
+      "directory.ttf", "empty.ttf", "oversized.ttf", "not-a-font.txt", "missing.otf"];
+    if (process.platform !== "win32") {
+      writeFileSync(join(approved, "unreadable.ttf"), "unreadable", { mode: 0o000 });
+      candidates.push("unreadable.ttf");
+    }
+    expect(await selectOfficeCjkFontFiles([{ root: approved, candidates }])).toEqual([realpathSync(font)]);
+    const redirected = join(fixture, "redirected");
+    symlinkSync(approved, redirected, process.platform === "win32" ? "junction" : "dir");
+    expect(await selectOfficeCjkFontFiles([{ root: redirected, candidates: ["fonts/owned.ttf"] }])).toEqual([]);
+    expect(await selectOfficeCjkFontFiles([{ root: approved, candidates: ["missing.ttf"] }])).toEqual([]);
+  });
+
+  it("caps Host CJK font candidates at sixteen without adding font directories to sandbox grants", async () => {
+    context();
+    const approved = realpathSync(root!);
+    const candidates = Array.from({ length: 20 }, (_, index) => `font-${index}.ttf`);
+    for (const file of candidates) writeFileSync(join(approved, file), "owned font fixture");
+    expect(await selectOfficeCjkFontFiles([{ root: approved, candidates }]))
+      .toEqual(candidates.slice(0, 16).map(file => realpathSync(join(approved, file))));
+    const dependency = await resolveCommandRuntimeDependencies([]);
+    expect(dependency.readRoots).toEqual([]);
+    expect(resolvePluginEnvironment({}, {}, {}, dependency.pathEntries, dependency.environment).MEMMY_OFFICE_CJK_FONTS).toBe("[]");
+  });
+
   it("grants declared TeX Live dependencies read and executable sandbox access on macOS", async () => {
     const dependency = await resolveCommandRuntimeDependencies(["texlive"], "darwin");
     if (dependency.pathEntries.length === 0) return;
@@ -513,7 +690,7 @@ describe("CommandPluginAdapter", () => {
     expect(String(fetchFn.mock.calls[0]?.[0])).toBe(`http://127.0.0.1:19391/api/v1/plugins/office/runtimes/win32-${process.arch}`);
   });
 
-  it("automatically resolves the TeX runtime from the literature registry when missing", async () => {
+  it("prepares TeX from the literature registry in the background without failing activation on HTTP 404", async () => {
     const pluginContext = context();
     vi.stubEnv("MEMMY_PLUGIN_REGISTRY_URL", "http://127.0.0.1:19391/api");
     vi.stubEnv("MEMMY_TEXLIVE_RUNTIME_PREFER_MANAGED", "1");
@@ -521,8 +698,99 @@ describe("CommandPluginAdapter", () => {
     delete process.env.MEMMY_TEXLIVE_RUNTIME_CATALOG_URL;
     const fetchFn = vi.fn(async (_input: unknown) => new Response("not provisioned", { status: 404 })); vi.stubGlobal("fetch", fetchFn);
     pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, runtimeDependencies: ["texlive"] };
-    await expect(createCommandPluginAdapter({ platform: "win32", pluginDataRoot: join(root!, "plugin-data") }).activate(pluginContext)).rejects.toThrow(/HTTP 404/);
+    const adapter = createCommandPluginAdapter({ platform: "win32", pluginDataRoot: join(root!, "plugin-data") });
+    const session = await adapter.activate(pluginContext);
+    await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled());
     expect(String(fetchFn.mock.calls[0]?.[0])).toBe(`http://127.0.0.1:19391/api/v1/plugins/literature-review/runtimes/win32-${process.arch}`);
+    await adapter.deactivate(session);
+  });
+
+  function deferredTexContext() {
+    const ctx = context();
+    ctx.plugin.id = "literature-review";
+    ctx.plugin.manifest.id = "literature-review";
+    ctx.plugin.manifest.runtime.config = { ...ctx.plugin.manifest.runtime.config, runtimeDependencies: ["texlive"] };
+    let finish!: (runtime: texliveRuntime.ResolvedTexliveRuntime) => void;
+    const resolve = vi.spyOn(texliveRuntime, "resolveTexliveRuntime").mockImplementation(() => new Promise(done => { finish = done; }));
+    const runtime = { pathEntries: [join(root!, "tex-bin")], readRoots: [join(root!, "tex")], executableRoots: [join(root!, "tex")],
+      environment: { MEMMY_TEX_CACHE_ROOT: join(root!, "tex-cache"), MEMMY_TEX_FONTSET: "fandol" } };
+    return { ctx, resolve, runtime, finish: () => finish(runtime) };
+  }
+
+  it("enables immediately, allows ordinary calls during download, and joins preparation before rendering with fresh sandbox roots", async () => {
+    const f = deferredTexContext();
+    const builds: unknown[] = [];
+    const spawnFn = vi.fn(spawn);
+    const adapter = createCommandPluginAdapter({ spawnFn, buildLaunch: async (_context, _config, _network, dependencies) => {
+      builds.push(dependencies);
+      return { command: process.execPath, args: ["-e", "console.log(JSON.stringify({path:process.env.PATH,fontset:process.env.MEMMY_TEX_FONTSET}))"], cwd: root! };
+    } });
+    const session = await adapter.activate(f.ctx);
+    expect(f.resolve).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(f.resolve).toHaveBeenCalledTimes(1));
+    const call = { callId: "search", pluginId: f.ctx.plugin.id, capabilityId: "review_search", conversationId: "test", input: {} };
+    expect((await collect(adapter.invoke(session, call))).at(-1)?.type).toBe("result");
+    const render = adapter.invoke(session, { ...call, callId: "render", capabilityId: "review_render" })[Symbol.asyncIterator]();
+    expect((await render.next()).value).toMatchObject({ type: "progress", cancellable: true });
+    const next = render.next();
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+    f.finish();
+    expect((await next).value).toMatchObject({ type: "result", output: { fontset: "fandol" } });
+    expect(builds.at(-1)).toMatchObject({ readRoots: f.runtime.readRoots, executableRoots: f.runtime.executableRoots, environment: f.runtime.environment });
+    expect(spawnFn.mock.calls.at(-1)?.[2]?.env?.PATH).toContain(f.runtime.pathEntries[0]);
+    expect(f.resolve).toHaveBeenCalledTimes(1);
+    await render.next();
+    await adapter.deactivate(session);
+  });
+
+  it.each(["cancel", "deactivate", "deadline"])("does not spawn a renderer after %s while TeX is downloading", async action => {
+    const f = deferredTexContext();
+    const spawnFn = vi.fn(spawn);
+    const adapter = createCommandPluginAdapter({ spawnFn, buildLaunch: async () => ({ command: process.execPath, args: [], cwd: root! }) });
+    const session = await adapter.activate(f.ctx);
+    const iterator = adapter.invoke(session, { callId: "waiting", pluginId: f.ctx.plugin.id, capabilityId: "review_render", conversationId: "test", input: {},
+      ...(action === "deadline" ? { deadline: new Date(Date.now() + 50).toISOString() } : {}) })[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({ type: "progress" });
+    if (action === "cancel") await adapter.cancel!(session, "waiting");
+    if (action === "deactivate") await adapter.deactivate(session);
+    await expect(iterator.next()).rejects.toMatchObject({ code: action === "deadline" ? "plugin_timeout" : "plugin_cancelled" });
+    expect(spawnFn).not.toHaveBeenCalled();
+    f.finish();
+    await adapter.deactivate(session);
+  });
+
+  it("keeps failed preparation usable for plugin preflight and retries on the next export", async () => {
+    const f = deferredTexContext();
+    f.resolve.mockRejectedValue(new Error("offline"));
+    const adapter = createCommandPluginAdapter({ buildLaunch: async () => ({ command: process.execPath, args: ["-e", "console.log('{}')"], cwd: root! }) });
+    const session = await adapter.activate(f.ctx);
+    const call = { callId: "preflight", pluginId: f.ctx.plugin.id, capabilityId: "review_check_render_environment", conversationId: "test", input: {} };
+    expect((await collect(adapter.invoke(session, call))).at(-1)?.type).toBe("result");
+    f.resolve.mockResolvedValue(f.runtime);
+    expect((await collect(adapter.invoke(session, { ...call, callId: "retry" }))).at(-1)?.type).toBe("result");
+    expect(f.resolve).toHaveBeenCalledTimes(2);
+    await adapter.deactivate(session);
+  });
+
+  it("shares preparation across exports and lets one waiter cancel without cancelling the other", async () => {
+    const f = deferredTexContext();
+    const adapter = createCommandPluginAdapter({ buildLaunch: async () => ({ command: process.execPath, args: ["-e", "console.log('{}')"], cwd: root! }) });
+    const session = await adapter.activate(f.ctx);
+    const call = { callId: "first", pluginId: f.ctx.plugin.id, capabilityId: "review_render", conversationId: "test", input: {} };
+    const first = adapter.invoke(session, call)[Symbol.asyncIterator]();
+    const second = adapter.invoke(session, { ...call, callId: "second" })[Symbol.asyncIterator]();
+    expect((await first.next()).value).toMatchObject({ type: "progress" });
+    expect((await second.next()).value).toMatchObject({ type: "progress" });
+    await adapter.cancel!(session, "first");
+    await expect(first.next()).rejects.toMatchObject({ code: "plugin_cancelled" });
+    const result = second.next();
+    f.finish();
+    expect((await result).value).toMatchObject({ type: "result" });
+    await second.next();
+    expect(f.resolve).toHaveBeenCalledTimes(1);
+    // A ready runtime no longer displays a preparation message.
+    expect((await collect(adapter.invoke(session, { ...call, callId: "ready" }))).map(event => event.type)).toEqual(["result"]);
+    await adapter.deactivate(session);
   });
 
   it("keeps plugin CLR/PowerShell variables out of the privileged Windows launcher", async () => {
@@ -542,6 +810,21 @@ describe("CommandPluginAdapter", () => {
     const isolatedEnv = JSON.parse(Buffer.from(launcherEnv.MEMMY_SANDBOX_CHILD_ENV!, "base64").toString("utf8"));
     expect(isolatedEnv.COR_PROFILER_PATH).toBe("untrusted.dll");
     expect(isolatedEnv.LOCALAPPDATA).toBe("untrusted-profile");
+  });
+
+  it.runIf(process.platform === "darwin")("does not authorize macOS services for an unverified Office renderer", async () => {
+    context(); vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+    const installed = join(root!, "installed"); mkdirSync(installed);
+    const external = join(root!, "outside-renderer"); writeFileSync(external, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const escaped = join(installed, "escaped-renderer"); symlinkSync(external, escaped);
+    const nonExecutable = join(installed, "non-executable"); writeFileSync(nonExecutable, "fixture", { mode: 0o644 });
+    const directory = join(installed, "directory"); mkdirSync(directory);
+    for (const soffice of [external, escaped, nonExecutable, directory]) {
+      const tools = Object.fromEntries(["soffice", "pdfinfo", "pdftoppm", "pdftotext"].map(name => [name, soffice]));
+      const ensure = vi.fn(async () => ({ root: installed, version: "unverified", tools }));
+      const dependencies = await resolveCommandRuntimeDependencies(["office"], "darwin", { ensure });
+      expect(dependencies.officeRendererResolved, soffice).not.toBe(true);
+    }
   });
 
   it("injects only the Host-installed portable Office tools into the runtime", async () => {

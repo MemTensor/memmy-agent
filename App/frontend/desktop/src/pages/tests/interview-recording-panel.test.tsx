@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import { formatClock, groupSpeakerTurns, InterviewRecordingPanel, type RecordingPanelSession } from "../interview-recording-panel.js";
+import { formatClock, groupSpeakerTurns, InterviewRecordingPanel, RecordingPlayer, type RecordingPanelSession } from "../interview-recording-panel.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -53,6 +53,71 @@ describe("formatClock", () => {
 
   it("floors a negative offset at zero", () => {
     expect(formatClock(-1_000)).toBe("00:00");
+  });
+});
+
+describe("RecordingPlayer", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.replaceChildren();
+  });
+
+  const render = (durationMs: number) => act(() => {
+    root.render(<I18nProvider language="zh-CN"><RecordingPlayer src="blob:recording" durationMs={durationMs} /></I18nProvider>);
+  });
+
+  it("does not let implausibly short WebM metadata replace the measured duration", () => {
+    render(3_000);
+    const audio = container.querySelector("audio")!;
+    Object.defineProperty(audio, "duration", { configurable: true, value: 0.003 });
+    act(() => audio.dispatchEvent(new Event("loadedmetadata")));
+
+    const times = container.querySelectorAll(".recording-panel__player-time");
+    const scrubber = container.querySelector<HTMLInputElement>(".recording-panel__player-scrubber")!;
+    expect(times[1]?.textContent).toBe("00:03");
+    expect(scrubber.max).toBe("3000");
+  });
+
+  it("uses the real media duration and keeps playback progress bounded", () => {
+    render(500);
+    const audio = container.querySelector("audio")!;
+    Object.defineProperty(audio, "duration", { configurable: true, value: 3 });
+    act(() => audio.dispatchEvent(new Event("durationchange")));
+    Object.defineProperty(audio, "currentTime", { configurable: true, value: 1.5 });
+    act(() => audio.dispatchEvent(new Event("timeupdate")));
+
+    const scrubber = container.querySelector<HTMLInputElement>(".recording-panel__player-scrubber")!;
+    expect(scrubber.max).toBe("3000");
+    expect(scrubber.value).toBe("1500");
+    expect(scrubber.style.background).toContain("50%");
+
+    Object.defineProperty(audio, "currentTime", { configurable: true, value: 9 });
+    act(() => audio.dispatchEvent(new Event("timeupdate")));
+    expect(scrubber.value).toBe("3000");
+    expect(scrubber.style.background).toContain("100%");
+    expect(scrubber.style.background).not.toContain("300%");
+  });
+
+  it("finishes at 100% when the playable media ends before the measured duration", () => {
+    render(4_250);
+    const audio = container.querySelector("audio")!;
+    Object.defineProperty(audio, "duration", { configurable: true, value: 4.05 });
+    Object.defineProperty(audio, "currentTime", { configurable: true, value: 4.05 });
+    act(() => audio.dispatchEvent(new Event("ended")));
+
+    const scrubber = container.querySelector<HTMLInputElement>(".recording-panel__player-scrubber")!;
+    expect(scrubber.max).toBe("4250");
+    expect(scrubber.value).toBe("4250");
+    expect(scrubber.style.background).toContain("100%");
   });
 });
 

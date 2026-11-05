@@ -21,10 +21,13 @@ import type { PluginAdapter, PluginHostServiceInvoker, PluginRuntimeContext, Plu
 import { createOfficeRuntimeInstaller, type OfficeRuntimeInstaller } from "./office-installer.js";
 import { createTexliveRuntimeInstaller, resolveTexliveRuntime, type TexliveRuntimeInstaller } from "./texlive-installer.js";
 import { resolvePluginRegistryBaseUrl } from "../../../config/service-urls.js";
+import { BackgroundTexlive } from "./background-texlive.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_HOST_SERVICE_REQUESTS_PER_CALL = 16;
+const MAX_OFFICE_CJK_FONTS = 16;
+const MAX_OFFICE_CJK_FONT_BYTES = 256 * 1024 * 1024;
 const CommandRuntimeDependencySchema = z.enum(["texlive", "office"]);
 
 const CommandRuntimeConfigSchema = z.object({
@@ -66,6 +69,10 @@ interface CommandPluginSession extends PluginSession {
   children: Map<string, ChildProcessWithoutNullStreams>;
   hostServiceControllers: Map<string, Set<AbortController>>;
   approvedHostServices: Set<string>;
+  texlive?: BackgroundTexlive;
+  withTexlive: (runtime: ResolvedCommandRuntimeDependencies) => Promise<{ launch: SandboxLaunch; env: Record<string, string> }>;
+  preparations: Map<string, AbortController>;
+  closed: boolean;
 }
 
 export interface CreateCommandPluginAdapterOptions {
@@ -124,7 +131,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         options.pluginDataRoot,
         runtimeDependencies.readRoots,
         runtimeDependencies.executableRoots,
-        runtimeDependencies.environment.MEMMY_TEX_CACHE_ROOT
+        runtimeDependencies.environment.MEMMY_TEX_CACHE_ROOT,
+        runtimeDependencies.officeRendererResolved === true
       )
   ));
   const allowedNetworkHosts = new Set((options.allowedNetworkHosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean));
@@ -148,9 +156,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       if (deniedHost) throw Object.assign(new Error(`Command plugin network host is not in the host allowlist: ${deniedHost}`), {
         code: "plugin_permission_denied"
       });
-      const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies, platform,
-        options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller ?? defaultOfficeInstaller(options.pluginDataRoot),
-        options.texliveRuntimeInstaller === null ? undefined : options.texliveRuntimeInstaller ?? defaultTexliveInstaller(options.pluginDataRoot));
+      const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies.filter(dependency => dependency !== "texlive"), platform,
+        options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller ?? defaultOfficeInstaller(options.pluginDataRoot));
       const env = resolvePluginEnvironment(
         config.env,
         config.secretEnv,
@@ -175,9 +182,29 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       }
       if (platform === "win32") env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
         ? await Promise.all((options.fileInputRoots ?? []).map(root => realpath(root))) : []);
+      const launch = await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies);
+      const withTexlive = async (tex: ResolvedCommandRuntimeDependencies) => {
+        const combined = {
+          pathEntries: [...runtimeDependencies.pathEntries, ...tex.pathEntries],
+          readRoots: [...runtimeDependencies.readRoots, ...tex.readRoots],
+          executableRoots: [...runtimeDependencies.executableRoots, ...tex.executableRoots],
+          environment: { ...runtimeDependencies.environment, ...tex.environment }
+        };
+        return {
+          launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0, combined),
+          env: { ...env, ...tex.environment,
+            PATH: resolvePluginEnvironment(config.env, config.secretEnv, context.secrets, combined.pathEntries, combined.environment).PATH! }
+        };
+      };
+      const texlive = config.runtimeDependencies.includes("texlive") ? new BackgroundTexlive(() => resolveTexliveRuntime(platform,
+        options.texliveRuntimeInstaller === null ? undefined : options.texliveRuntimeInstaller ?? defaultTexliveInstaller(options.pluginDataRoot))) : undefined;
       return {
         pluginId: context.plugin.id,
-        launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies),
+        launch,
+        texlive,
+        withTexlive,
+        preparations: new Map(),
+        closed: false,
         config,
         pluginConfig: context.config,
         env,
@@ -191,6 +218,8 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async *invoke(rawSession, call) {
       const session = asCommandSession(rawSession);
+      const expiresAt = Date.now() + callTimeoutMs(session.config.timeoutMs, call.deadline);
+      const { launch, env } = yield* prepareCommandInvocation(session, call, expiresAt);
       const request = JSON.stringify({
         callId: call.callId,
         pluginId: call.pluginId,
@@ -201,11 +230,11 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         config: session.pluginConfig,
         hostServiceBudget: { maxRequests: MAX_HOST_SERVICE_REQUESTS_PER_CALL }
       });
-      const args = session.launch.args.map((arg) => applyPlaceholders(arg, call));
+      const args = launch.args.map((arg) => applyPlaceholders(arg, call));
       if (session.config.inputMode === "argument-json") args.push(request);
-      const child = spawnFn(session.launch.command, args, {
-        cwd: session.launch.cwd,
-        env: session.launch.windowsAppContainer ? windowsLauncherEnvironment(session.env) : session.env,
+      const child = spawnFn(launch.command, args, {
+        cwd: launch.cwd,
+        env: launch.windowsAppContainer ? windowsLauncherEnvironment(env) : env,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"]
       });
@@ -246,7 +275,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         timedOut = true;
         abortHostServices(session, call.callId);
         terminate(child);
-      }, callTimeoutMs(session.config.timeoutMs, call.deadline));
+      }, Math.max(1, expiresAt - Date.now()));
       try {
         let terminal: CapabilityEvent | null = null;
         let jsonOutput: Buffer | null = null;
@@ -364,6 +393,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async cancel(rawSession, callId) {
       const session = asCommandSession(rawSession);
+      session.preparations.get(callId)?.abort();
       abortHostServices(session, callId);
       const child = session.children.get(callId);
       if (child) {
@@ -374,6 +404,9 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async deactivate(rawSession) {
       const session = asCommandSession(rawSession);
+      session.closed = true;
+      session.texlive?.stopScheduling();
+      for (const controller of session.preparations.values()) controller.abort();
       const children = [...session.children.values()];
       for (const callId of session.children.keys()) abortHostServices(session, callId);
       for (const child of children) terminate(child);
@@ -381,6 +414,31 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       session.children.clear();
     }
   };
+}
+
+async function* prepareCommandInvocation(
+  session: CommandPluginSession, call: CapabilityCall, expiresAt: number
+): AsyncGenerator<CapabilityEvent, { launch: SandboxLaunch; env: Record<string, string> }> {
+  const controller = new AbortController();
+  session.preparations.set(call.callId, controller);
+  try {
+    if (session.closed) controller.abort();
+    let tex = session.texlive?.ready;
+    // Existing literature releases declare the dependency for the entire plugin.
+    // Only preflight/render need to wait; searching and writing remain available.
+    const needsTex = session.pluginId !== "literature-review"
+      || call.capabilityId === "review_check_render_environment" || call.capabilityId === "review_render";
+    if (session.texlive && needsTex && !controller.signal.aborted) {
+      tex = yield* session.texlive.wait(controller.signal, expiresAt);
+    }
+    // Build a per-call launch: never mutate another running call's environment or sandbox.
+    const prepared = tex ? await session.withTexlive(tex) : { launch: session.launch, env: session.env };
+    if (controller.signal.aborted) throw Object.assign(new Error("Plugin call was cancelled"), { code: "plugin_cancelled" });
+    if (Date.now() >= expiresAt) throw Object.assign(new Error("Plugin call timed out"), { code: "plugin_timeout" });
+    return prepared;
+  } finally {
+    session.preparations.delete(call.callId);
+  }
 }
 
 async function respondToHostServiceRequest(
@@ -520,7 +578,8 @@ export async function buildPluginSandboxLaunch(
   pluginDataRoot?: string,
   runtimeReadRoots: readonly string[] = [],
   runtimeExecutableRoots: readonly string[] = [],
-  runtimeWritableRoot?: string
+  runtimeWritableRoot?: string,
+  officeRendererResolved = false
 ): Promise<SandboxLaunch> {
   const { root, runtimeCommand, runtimeArgs, cwd, interpreter } = await resolveCommandEntrypoint(context, config);
   const runtimeRoot = interpreter === "node" ? (platform === "win32" ? dirname(runtimeCommand) : resolve(dirname(runtimeCommand), "..")) : null;
@@ -554,7 +613,7 @@ export async function buildPluginSandboxLaunch(
     const ipcRoot = await resolvePluginDataPath(context, pluginDataRoot);
     return {
       command: "/usr/bin/sandbox-exec",
-      args: ["-p", seatbeltProfile(root, filesystem, networkEnabled, runtimeRoot, runtimeReadRoots, runtimeExecutableRoots, ipcRoot), "--", runtimeCommand, ...runtimeArgs],
+      args: ["-p", seatbeltProfile(root, filesystem, networkEnabled, runtimeRoot, runtimeReadRoots, runtimeExecutableRoots, ipcRoot, context.plugin.id, officeRendererResolved), "--", runtimeCommand, ...runtimeArgs],
       cwd
     };
   }
@@ -569,6 +628,8 @@ export interface ResolvedCommandRuntimeDependencies {
   readRoots: string[];
   executableRoots: string[];
   environment: Record<string, string>;
+  /** Host-only proof of an executable renderer inside an approved Office root. */
+  officeRendererResolved?: boolean;
 }
 
 /** Resolve only Host-approved runtimes; plugin manifests cannot inject arbitrary executable roots. */
@@ -585,6 +646,7 @@ export async function resolveCommandRuntimeDependencies(
     resolved.readRoots.push(...office.readRoots);
     resolved.executableRoots.push(...office.executableRoots);
     Object.assign(resolved.environment, office.environment);
+    if (office.officeRendererResolved === true) resolved.officeRendererResolved = true;
   }
   if (dependencies.includes("texlive")) {
     const tex = await resolveTexliveRuntime(platform, texliveInstaller);
@@ -602,6 +664,7 @@ export async function resolveCommandRuntimeDependencies(
  */
 export async function resolveOfficeRuntime(platform: NodeJS.Platform = process.platform, installer?: OfficeRuntimeInstaller): Promise<ResolvedCommandRuntimeDependencies> {
   const result: ResolvedCommandRuntimeDependencies = { pathEntries: [], readRoots: [], executableRoots: [], environment: {} };
+  const fontSources = officeSystemFontSources(platform);
   const override = process.env.MEMMY_PLUGIN_OFFICE_ROOT;
   if (override && !isAbsolute(override)) throw new Error("MEMMY_PLUGIN_OFFICE_ROOT must be absolute");
   const defaults = platform === "darwin"
@@ -628,6 +691,9 @@ export async function resolveOfficeRuntime(platform: NodeJS.Platform = process.p
       if (!binary) continue;
       const canonical = await realpath(binary);
       tools[name] = canonical;
+      if (platform === "darwin" && name === "soffice") {
+        result.officeRendererResolved = await verifiedOfficeRenderer(root, canonical);
+      }
       // Homebrew's bin symlinks resolve inside Cellar. The Host-approved root
       // includes associated dylibs, fonts and shared resources as well.
       result.readRoots.push(root);
@@ -640,12 +706,86 @@ export async function resolveOfficeRuntime(platform: NodeJS.Platform = process.p
     Object.assign(tools, installed.tools);
     result.readRoots.push(installed.root); result.executableRoots.push(installed.root);
     result.pathEntries.push(...Object.values(installed.tools).map(file => dirname(file)));
+    if (platform === "darwin" && installed.tools.soffice) {
+      result.officeRendererResolved = await verifiedOfficeRenderer(installed.root, installed.tools.soffice);
+    }
+    fontSources.push({ root: installed.root, candidates: officeManagedFontCandidates() });
   }
   result.readRoots = [...new Set(result.readRoots)];
   result.executableRoots = [...new Set(result.executableRoots)];
   result.pathEntries = [...new Set(result.pathEntries)];
   result.environment.MEMMY_OFFICE_TOOLS = JSON.stringify(tools);
+  result.environment.MEMMY_OFFICE_CJK_FONTS = JSON.stringify(await selectOfficeCjkFontFiles(fontSources));
   return result;
+}
+
+interface OfficeCjkFontSource {
+  root: string;
+  candidates: readonly string[];
+}
+
+const OFFICE_CJK_FONT_NAMES = [
+  "NotoSansCJKsc-Regular.otf", "NotoSansCJK-Regular.ttc", "NotoSansSC-Regular.otf", "NotoSansSC-Regular.ttf",
+  "NotoSerifCJKsc-Regular.otf", "NotoSerifCJK-Regular.ttc", "SourceHanSansSC-Regular.otf", "SourceHanSerifSC-Regular.otf"
+];
+
+function officeSystemFontSources(platform: NodeJS.Platform): OfficeCjkFontSource[] {
+  if (platform === "darwin") return [
+    { root: "/System/Library/Fonts", candidates: ["Supplemental/Arial Unicode.ttf", "Hiragino Sans GB.ttc", "STHeiti Medium.ttc", "STHeiti Light.ttc", "PingFang.ttc"] },
+    { root: "/Library/Fonts", candidates: ["Arial Unicode.ttf", ...OFFICE_CJK_FONT_NAMES] }
+  ];
+  if (platform === "win32") return [{
+    root: win32.join(process.env.SystemRoot ?? "C:\\Windows", "Fonts"),
+    candidates: ["msyh.ttc", "msyhbd.ttc", "simsun.ttc", "simhei.ttf", "mingliu.ttc", "arialuni.ttf", "meiryo.ttc", "malgun.ttf", ...OFFICE_CJK_FONT_NAMES]
+  }];
+  if (platform === "linux") return [
+    { root: "/usr/share/fonts", candidates: [
+      ...["opentype/noto", "truetype/noto", "opentype/source-han-sans", "truetype"].flatMap(directory => OFFICE_CJK_FONT_NAMES.map(name => `${directory}/${name}`)),
+      "truetype/wqy/wqy-zenhei.ttc", "truetype/wqy/wqy-microhei.ttc", "truetype/droid/DroidSansFallbackFull.ttf"
+    ] },
+    { root: "/usr/local/share/fonts", candidates: OFFICE_CJK_FONT_NAMES }
+  ];
+  return [];
+}
+
+function officeManagedFontCandidates(): string[] {
+  return ["fonts", "share/fonts", "share/fonts/truetype", "share/fonts/opentype", "share/fonts/opentype/noto",
+    "LibreOffice/share/fonts/truetype", "LibreOffice/share/fonts/opentype", "LibreOffice.app/Contents/Resources/fonts/truetype"]
+    .flatMap(directory => OFFICE_CJK_FONT_NAMES.map(name => `${directory}/${name}`));
+}
+
+/** Host-internal filesystem selection, exported for owned boundary fixtures; never accepts plugin configuration. */
+export async function selectOfficeCjkFontFiles(sources: readonly OfficeCjkFontSource[]): Promise<string[]> {
+  const fonts = new Set<string>();
+  for (const source of sources) {
+    if (!isAbsolute(source.root)) continue;
+    const root = await realpath(source.root).catch(() => null);
+    // A source root must not redirect the approved grant to a different tree.
+    if (!root || root !== resolve(source.root)) continue;
+    for (const candidate of source.candidates) {
+      if (fonts.size >= MAX_OFFICE_CJK_FONTS) return [...fonts];
+      try {
+        const font = await canonicalDescendant(root, resolve(root, candidate));
+        if (!/\.(?:ttf|ttc|otf)$/i.test(font)) continue;
+        const info = await lstat(font);
+        if (!info.isFile() || info.size === 0 || info.size > MAX_OFFICE_CJK_FONT_BYTES) continue;
+        await access(font, fsConstants.R_OK);
+        fonts.add(font);
+      } catch { /* Missing, unreadable and escaping candidates are not grants. */ }
+    }
+  }
+  return [...fonts];
+}
+
+async function verifiedOfficeRenderer(root: string, renderer: string): Promise<boolean> {
+  try {
+    const binary = await canonicalDescendant(await realpath(root), renderer);
+    if (!(await lstat(binary)).isFile()) return false;
+    await access(binary, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function defaultOfficeInstaller(pluginDataRoot?: string): OfficeRuntimeInstaller | undefined {
@@ -740,7 +880,9 @@ function seatbeltProfile(
   runtimeRoot: string | null,
   runtimeReadRoots: readonly string[],
   runtimeExecutableRoots: readonly string[],
-  ipcRoot: string | null
+  ipcRoot: string | null,
+  pluginId: string,
+  officeRendererResolved: boolean
 ): string {
   const readPaths = [
     root,
@@ -768,6 +910,11 @@ function seatbeltProfile(
     `(allow file-map-executable (subpath "/System") (subpath "/System/Volumes/Preboot/Cryptexes/OS") (subpath "/usr/lib") (subpath "/Library/Apple") ${seatbeltSubpath(root)}${runtimeRoot ? ` ${seatbeltSubpath(runtimeRoot)}` : ""}${runtimeExecutableRoots.map((path) => ` ${seatbeltSubpath(path)}`).join("")})`,
     `(allow file-read* ${readPaths.map(seatbeltSubpath).join(" ")})`
   ];
+  // Aqua initializes these services even for headless conversion. The grant
+  // applies only to Office's sandbox after the Host verifies its renderer.
+  if (pluginId === "office" && officeRendererResolved === true) clauses.push(
+    '(allow mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.windowserver.active"))'
+  );
   if (writePaths.length) clauses.push(`(allow file-write* ${writePaths.map(seatbeltSubpath).join(" ")})`);
   if (ipcRoot) clauses.push(
     "(allow system-socket (socket-domain AF_UNIX))",
@@ -858,6 +1005,8 @@ export function resolvePluginEnvironment(
     if (!value) throw new Error(`Missing plugin secret for environment variable ${name}`);
     env[name] = value;
   }
+  // Neither manifest env nor secret aliases may replace Host-approved font paths.
+  env.MEMMY_OFFICE_CJK_FONTS = runtimeEnvironment.MEMMY_OFFICE_CJK_FONTS ?? "[]";
   return env;
 }
 

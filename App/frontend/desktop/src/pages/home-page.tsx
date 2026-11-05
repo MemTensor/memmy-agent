@@ -373,8 +373,12 @@ export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTo
   return element.scrollTop + element.clientHeight >= element.scrollHeight - AGENT_CONVERSATION_BOTTOM_EPSILON_PX;
 }
 
-export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
-  return Boolean(currentChatId) && messageCount > 0;
+export function hasActiveAgentConversation(
+  currentChatId: string | null,
+  messageCount: number,
+  hasFeatureActivity = false
+): boolean {
+  return Boolean(currentChatId) && (messageCount > 0 || hasFeatureActivity);
 }
 
 export function shouldAcceptAgentStatusResult(input: {
@@ -967,6 +971,7 @@ export function HomePage() {
   const stopRequestLocksRef = useRef<Set<string>>(new Set());
   const goalMutationLocksRef = useRef<Set<string>>(new Set());
   const messageSendLocksRef = useRef<Set<string>>(new Set());
+  const pluginConversationCreationRef = useRef<Promise<string | null> | null>(null);
   const queueRemoveLocksRef = useRef<Set<string>>(new Set());
   const queueSteerLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
@@ -1061,22 +1066,81 @@ export function HomePage() {
     && isSteerableCurrentTurn(currentActiveTurnSource, Boolean(isCurrentGoalActive))
     && !currentQueuedMessages.some((item) => item.status === "steering")
   );
-  const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
-  const isOpeningConversation = Boolean(state.agent.currentChatId && state.agent.isLoadingHistory && !hasActiveConversation);
-  const hasConversationShell = hasActiveConversation || isOpeningConversation;
+  const hasMessageConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
+  const isOpeningConversation = Boolean(state.agent.currentChatId && state.agent.isLoadingHistory && !hasMessageConversation);
+  const hasBaseConversationShell = hasMessageConversation || isOpeningConversation;
   const [blankThreadPanelEnabled, setBlankThreadPanelEnabled] = useState(false);
   const threadPanel = useAgentThreadPanel({
     scopeKey: chatScopeKey,
     containerRef: workspaceLayoutRef,
-    enabled: hasConversationShell || blankThreadPanelEnabled,
+    enabled: hasBaseConversationShell || blankThreadPanelEnabled,
   });
   const [sidePanelMounted, setSidePanelMounted] = useState(false);
   const [recordingTabVisible, setRecordingTabVisible] = useState(false);
+  const ensurePluginConversation = useCallback((title: string): Promise<string | null> => {
+    if (state.agent.currentChatId) return Promise.resolve(state.agent.currentChatId);
+    if (pluginConversationCreationRef.current) return pluginConversationCreationRef.current;
+    const readyConnection = connection;
+    const expectedGeneration = readyConnection?.getReadyGeneration() ?? null;
+    if (!readyConnection || expectedGeneration === null || resolvedConversationModel.unavailable) {
+      return Promise.resolve(null);
+    }
+    const draftScope = chatScopeKey;
+    const selectionEpoch = state.agent.chatSelectionEpoch;
+    const flight = (async () => {
+      setIsCreatingChat(true);
+      try {
+        const created = await readyConnection.newChat(
+          expectedGeneration,
+          5000,
+          resolvedConversationModel.candidateId ?? undefined,
+          crypto.randomUUID()
+        );
+        if (chatSelectionEpochRef.current !== selectionEpoch) return null;
+        ensureChatSubscription(created.chatId);
+        threadPanel.promoteScope(draftScope, created.chatId);
+        // A plugin-only chat has no Agent message yet, so it is absent from the
+        // canonical session snapshot. Keep an optimistic task row for it; without
+        // one the next sidebar refresh reopens the blank draft and hides the card.
+        dispatch(agentActions.pluginConversationStarted({
+          chatId: created.chatId,
+          title,
+          target: draftTarget,
+          createdAt: new Date().toISOString()
+        }));
+        dispatch(agentActions.pendingModelPresetUpdated(created.chatId, created.modelPreset));
+        taskStateCoordinator.refreshTaskState({
+          expectedChatId: created.chatId,
+          reason: "new-chat",
+          state: state.agent
+        });
+        return created.chatId;
+      } catch (error) {
+        dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+          source: "new-chat",
+          message: error instanceof MemmyAgentMessageRejectedError
+            ? `${error.detail}:${error.reason}`
+            : readableError(error),
+          scopeKey: draftScope
+        })));
+        return null;
+      } finally {
+        setIsCreatingChat(false);
+      }
+    })();
+    pluginConversationCreationRef.current = flight;
+    void flight.finally(() => {
+      if (pluginConversationCreationRef.current === flight) pluginConversationCreationRef.current = null;
+    });
+    return flight;
+  }, [chatScopeKey, connection, dispatch, ensureChatSubscription, resolvedConversationModel.candidateId,
+    resolvedConversationModel.unavailable, state.agent, taskStateCoordinator, threadPanel.promoteScope, draftTarget]);
   const features = useConversationFeatures({
     scopeKey: chatScopeKey, sharedRowWidth: workspaceRowWidth,
     agentMessages: state.agent.messages,
     onDraft: (text) => setCurrentComposerDraft(text),
     onStageFiles: (files) => attachMediaFilesToScope(chatScopeKey, files),
+    onStageExistingFiles: (files) => attachExistingMediaToScope(chatScopeKey, files),
     onOpenArtifact: (artifact) => {
       if (!artifact.path) return false;
       const tab = threadTabForInAppPreview({ name: artifact.name, path: artifact.path });
@@ -1089,6 +1153,7 @@ export function HomePage() {
       setSidePanelMounted(true);
       threadPanel.openTab({ id: "recording:main", type: "recording", name: t("recording.page.title") });
     },
+    onEnsureConversation: ensurePluginConversation,
     onSend: (text) => submitAgentComposerMessage({
       chatId: state.agent.currentChatId, target: state.agent.currentChatId ? null : draftTarget,
       connection, ensureChatSubscription, content: text, pendingAttachments: [], language,
@@ -1097,6 +1162,12 @@ export function HomePage() {
       chatSelectionEpoch: state.agent.chatSelectionEpoch, getChatSelectionEpoch: () => chatSelectionEpochRef.current,
     }),
   });
+  const hasActiveConversation = hasActiveAgentConversation(
+    state.agent.currentChatId,
+    state.agent.messages.length,
+    features.hasConversationActivity
+  );
+  const hasConversationShell = hasActiveConversation || isOpeningConversation;
   const pluginRecordingTabScopeRef = useRef<string | null>(null);
   const pluginRecordingOpen = Boolean(features.pluginRecordingSession);
   useEffect(() => {
@@ -1773,7 +1844,7 @@ export function HomePage() {
   const modeVisibleSlashCommands = selectedComposerCommand
     ? filterGoalModeSlashCommands(visibleSlashCommands, Boolean(state.agent.currentChatId))
     : visibleSlashCommands;
-  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands, state.agent.modelPresets);
+  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands);
   const slashMenuOpen = filteredSlashCommands.length > 0;
   const displayConnectionStatus = state.agent.recoveryKind === "initial"
     ? "connecting"
@@ -2793,7 +2864,16 @@ export function HomePage() {
         event.preventDefault();
         const command = filteredSlashCommands[selectedCommandIndex] ?? filteredSlashCommands[0];
         if (command) {
-          selectSlashCommand(command);
+          const isExactModelCommand = (command.command === "/model" || command.command === "/model list")
+            && composerInput.trim() === command.command;
+          if (event.key === "Enter" && !event.shiftKey && isExactModelCommand
+            && composerPrimaryAction === "send" && !composerSendDisabled) {
+            rememberSlashCommand(command.command);
+            setSlashMenuDismissed(true);
+            void sendMessage();
+          } else {
+            selectSlashCommand(command);
+          }
         }
         return;
       }
@@ -2921,6 +3001,30 @@ export function HomePage() {
       setComposerMediaErrorForScope(scopeKey, error instanceof Error ? error.message : String(error));
       return false;
     }
+  }
+
+  /**
+   * Stages files that are already stored by the gateway.
+   *
+   * Recording transcripts live in the workspace's recordings folder. Reusing
+   * their paths avoids an identical upload into the private media cache (and
+   * the random cache prefix that comes with it).
+   */
+  async function attachExistingMediaToScope(scopeKey: string, media: UploadedAgentMedia[]): Promise<boolean> {
+    const seenSourceKeys = new Set((pendingAttachmentsRef.current[scopeKey] ?? []).map((item) => item.sourceKey));
+    const nextPending: PendingAttachment[] = [];
+    for (const item of media) {
+      if (item.kind !== "file" && item.kind !== "image") continue;
+      const pending = uploadedMediaToPendingAttachment(item);
+      if (seenSourceKeys.has(pending.sourceKey)) continue;
+      seenSourceKeys.add(pending.sourceKey);
+      nextPending.push(pending);
+    }
+    if (!nextPending.length) return false;
+    setPendingAttachmentsForScope(scopeKey, (current) => [...current, ...nextPending]);
+    setComposerMediaErrorForScope(scopeKey, null);
+    track({ name: "agent_media_attached", params: { page_path: "/main", media_type: mediaTypeForAnalytics(nextPending) }, consentTier: "basic" });
+    return true;
   }
 
   async function updatePendingImageEncoding(scopeKey: string, id: string, file: File): Promise<boolean> {
@@ -4064,6 +4168,28 @@ export function queuedMediaToPendingAttachment(
     status: "ready" as const,
     originalBytes: 0,
     reusedMedia: { ...media, path: media.path, name: fileName, kind: media.kind ?? "file" as const },
+  };
+  return media.kind === "image"
+    ? { ...base, kind: "image", previewUrl: media.url ?? "" }
+    : { ...base, kind: "file", extension: fileName.includes(".") ? fileName.slice(fileName.lastIndexOf(".")) : "" };
+}
+
+/**
+ * Turns a gateway-owned file into a composer attachment without another upload.
+ *
+ * Only images and documents are composer attachment types. Audio recordings
+ * reach the conversation through their text transcript instead.
+ */
+export function uploadedMediaToPendingAttachment(media: UploadedAgentMedia): PendingAttachment {
+  if (media.kind === "audio") throw new Error("Audio cannot be attached directly to the composer");
+  const fileName = media.name || "attachment";
+  const base = {
+    id: randomPendingAttachmentId(media.kind),
+    sourceKey: `stored:${media.path}`,
+    fileName,
+    status: "ready" as const,
+    originalBytes: media.bytes,
+    reusedMedia: { ...media, path: media.path, name: fileName },
   };
   return media.kind === "image"
     ? { ...base, kind: "image", previewUrl: media.url ?? "" }

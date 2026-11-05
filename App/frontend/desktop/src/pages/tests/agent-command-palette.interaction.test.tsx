@@ -44,6 +44,17 @@ it("scrolls to and selects commands beyond the initial visible rows", () => {
     expect(container.textContent).toContain("/goal budget none");
     act(() => closest.click());
     expect(onSelect).toHaveBeenLastCalledWith(expect.objectContaining({ command: "/goal" }));
+
+    const modelMatches = filterSlashCommands(commands.filter((command) => !command.command.includes(" ")), "model", ["/model memmy-account-db8cf6de6ab1-agent"]);
+    act(() => root.render(<AgentCommandPalette commands={modelMatches} heading="Commands" selectedIndex={defaultSlashCommandIndex("model", modelMatches.length)} onSelect={onSelect} />));
+    const modelOptions = container.querySelectorAll<HTMLButtonElement>('[role="option"]');
+    expect([...modelOptions].map((option) => option.querySelector(".font-mono")?.textContent)).toEqual(["/model list", "/model"]);
+    expect(modelOptions[1]?.getAttribute("aria-selected")).toBe("true");
+    expect(container.textContent).not.toContain("memmy-account-");
+    act(() => modelOptions[1]!.click());
+    expect(onSelect).toHaveBeenLastCalledWith(expect.objectContaining({ command: "/model" }));
+    act(() => modelOptions[0]!.click());
+    expect(onSelect).toHaveBeenLastCalledWith(expect.objectContaining({ command: "/model list" }));
   } finally {
     act(() => root.unmount());
     container.remove();

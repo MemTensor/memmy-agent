@@ -322,6 +322,7 @@ export type AgentAction =
   | { type: "agent/newChatRequested" }
   | { type: "agent/blankDraftReopened" }
   | { type: "agent/newChatCreated"; chatId: string }
+  | { type: "agent/pluginConversationStarted"; chatId: string; title: string; target: WebuiSessionTarget; createdAt: string }
   | { type: "agent/transientSendFailed"; chatId: string }
   | { type: "agent/optimisticMessageRejected"; chatId: string; clientRequestId: string }
   | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string; queueIfBusy?: boolean }
@@ -647,6 +648,22 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       return enterBlankDraft(state, state.newChatRequestId);
     case "agent/newChatCreated":
       return switchCurrentChat({ ...state, blankDraftActive: false }, action.chatId, chatIdToSessionKey(action.chatId));
+    case "agent/pluginConversationStarted": {
+      const selected = switchCurrentChat(
+        { ...state, blankDraftActive: false },
+        action.chatId,
+        chatIdToSessionKey(action.chatId)
+      );
+      if (hasCanonicalSession(selected, action.chatId)) return selected;
+      const title = action.title.trim() || "Plugin activity";
+      return deriveTasks({
+        ...selected,
+        optimisticTasksByChatId: {
+          ...selected.optimisticTasksByChatId,
+          [action.chatId]: { content: title, createdAt: action.createdAt, target: action.target }
+        }
+      });
+    }
     case "agent/transientSendFailed":
       return clearTransientSend(state, action.chatId);
     case "agent/optimisticMessageRejected":

@@ -17,8 +17,15 @@ import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { canUseAccountRecording, useRecordingEntry, RecordingEntryCard, type RecordingArchiveEntry } from "./recording-entry.js";
 import { localizeSlashCommands, type SlashCommandPaletteItem } from "./agent-command-palette.js";
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
+import type { UploadedAgentMedia } from "../api/memmy-agent-client.js";
 
 const NO_CALLS: PluginUiCall[] = [];
+const LEGAL_BUTTON_ONLY_COMMANDS = new Set(["/legal-guide", "/legal-record"]);
+
+/** These legal actions stay available as composer buttons, not slash commands. */
+function isLegalButtonOnlyCommand(plugin: InstalledPlugin, command: PluginCommandContribution): boolean {
+  return plugin.id === "legal-labor" && LEGAL_BUTTON_ONLY_COMMANDS.has(command.command);
+}
 
 /** A handed-over interview already has one pending row keyed by its audio path. */
 export function recordingArchiveMaterials(entry: RecordingArchiveEntry): PluginRecordingMaterial[] {
@@ -54,9 +61,12 @@ export function useConversationFeatures(options: {
   sharedRowWidth?: number | null;
   onDraft(text: string): void;
   onStageFiles(files: File[]): Promise<unknown>;
+  /** Stages files that already have a gateway/workspace path without uploading them again. */
+  onStageExistingFiles?(files: UploadedAgentMedia[]): Promise<unknown>;
   onOpenArtifact?(artifact: PluginArtifactRef): boolean;
   onSend(text: string): Promise<boolean>;
   onOpenRecording(): void;
+  onEnsureConversation?(title: string): Promise<string | null>;
 }) {
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
@@ -135,8 +145,12 @@ export function useConversationFeatures(options: {
   }, [ui?.addRecordingMaterials]);
   const recording = useRecordingEntry(clients?.asr,
     clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined,
-    (file, mode) => {
-      void latest.current.onStageFiles([file]);
+    (file, mode, persistedTranscript) => {
+      if (persistedTranscript && latest.current.onStageExistingFiles) {
+        void latest.current.onStageExistingFiles([persistedTranscript]);
+      } else {
+        void latest.current.onStageFiles([file]);
+      }
       if (mode === "summarize") latest.current.onDraft(t("recording.summaryPrompt"));
     }, {
       scope: String(state.account.userId ?? "local"),
@@ -164,7 +178,9 @@ export function useConversationFeatures(options: {
       .map((command) => ({ plugin,
         command: plugin.id === "legal-labor" && command.command === "/legal-guide"
           ? { ...command, capabilityId: "guide-open" } : command }))), [plugins]);
-  const commandItems: SlashCommandPaletteItem[] = localizeSlashCommands(targets.map(({ command }) => ({
+  const slashTargets = useMemo(() => targets.filter(({ plugin, command }) =>
+    !isLegalButtonOnlyCommand(plugin, command)), [targets]);
+  const commandItems: SlashCommandPaletteItem[] = localizeSlashCommands(slashTargets.map(({ command }) => ({
     command: command.command, title: command.name, description: command.description ?? "",
     icon: command.icon ?? "activity", argHint: command.argHint ?? "", synthetic: true
   })), language, t);
@@ -193,12 +209,15 @@ export function useConversationFeatures(options: {
     if (plugin.id === "legal-labor" && command.command === "/legal-record") { toggleCompactRecording(); return; }
     if (legalQuestionOwnsComposer && plugin.id === "legal-labor") return;
     if (!clients?.plugins) return;
-    setHiddenRecordings((current) => { const next = new Set(current); next.delete(normalizePluginConversationId(conversationId)!); return next; });
     if (command.agentSkillId) { latest.current.onDraft(`${command.command} ${args}`); return; }
+    const invocationConversationId = state.agent.currentChatId ?? state.agent.currentSessionKey
+      ?? await latest.current.onEnsureConversation?.(command.name);
+    if (!invocationConversationId) return;
+    setHiddenRecordings((current) => { const next = new Set(current); next.delete(normalizePluginConversationId(invocationConversationId)!); return next; });
     setError(null);
     try {
       await pressPinnedPluginCommand({ calls, pluginId: plugin.id, capabilityId: command.capabilityId,
-        conversationId, dismissedCallIds: ui?.dismissedCallIds,
+        conversationId: invocationConversationId, dismissedCallIds: ui?.dismissedCallIds,
         pinnedCapabilities: new Set(targets.filter(({ command }) => command.pinned).map(({ plugin, command }) => `${plugin.id}:${command.capabilityId}`)),
         opening: ui?.openingCommands ?? invocationFlights.current,
         toggleVisibility: (callId) => ui?.setHiddenCallIds((current) => {
@@ -208,14 +227,14 @@ export function useConversationFeatures(options: {
           return next;
         }),
         open: () => clients.plugins.invoke(plugin.id, command.capabilityId, {
-          conversationId, input: { command: command.command, arguments: args }, origin: "user"
+          conversationId: invocationConversationId, input: { command: command.command, arguments: args }, origin: "user"
         })
       });
-    } catch (cause) { setError({ conversationId, message: cause instanceof Error ? cause.message : String(cause) }); }
+    } catch (cause) { setError({ conversationId: invocationConversationId, message: cause instanceof Error ? cause.message : String(cause) }); }
   };
   const runCommand = (text: string): boolean => {
     const [name, ...args] = text.trim().split(/\s+/u);
-    const target = targets.find(({ command }) => command.command.toLowerCase() === name?.toLowerCase());
+    const target = slashTargets.find(({ command }) => command.command.toLowerCase() === name?.toLowerCase());
     if (!target || target.command.agentSkillId) return false;
     void invoke(target.plugin, target.command, args.join(" "));
     return true;
@@ -314,6 +333,7 @@ export function useConversationFeatures(options: {
   };
   return { cards, recorders, shortcuts, scenarios, recording, openRecording, closeSidePanel, closePluginRecording,
     pluginRecordingSession: pluginRecording && !hiddenRecordings.has(recordingOwner) ? pluginRecording : null, capabilityLabels,
+    hasConversationActivity: Boolean(state.agent.currentChatId && calls.length),
     processInteraction,
     capturePendingInputRelease,
     pendingKey: pending ? `${pending.call.callId}:${pluginInteractionSignature(pending.call)}` : null,
@@ -321,7 +341,7 @@ export function useConversationFeatures(options: {
     sidePanel: content ? <div className={`conversation-feature-sidepanel${sidePanelOverlay ? " conversation-feature-sidepanel--overlay" : ""}`}
       style={{ width: sidePanelOverlay ? "100%" : featurePanelWidth }}>{content}</div> : null,
     sidePanelWidth: content ? sidePanelOverlay ? 0 : featurePanelWidth : null,
-    agentPrompt: (text: string) => buildAgentRoutedPluginPrompt(text, targets), recordingAuthenticated, runCommand, commandItems,
+    agentPrompt: (text: string) => buildAgentRoutedPluginPrompt(text, slashTargets), recordingAuthenticated, runCommand, commandItems,
     waiting: Boolean(pending), pendingAgentTurnId: pending?.call.origin === "agent" ? pending.call.turnId : null,
     signIn: () => dispatch(appActions.navigate("/welcome")) };
 }
