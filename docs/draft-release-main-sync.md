@@ -58,12 +58,20 @@ enable `main_sync.enabled` in the registered Memmy repository configuration.
 The feature is disabled by default.
 
 Reuse the existing model configuration, bot push/fork registration and repository
-allowlists. The GitHub token needs contents push, pull-request write, Actions
-read/write, checks read and commit-status write permissions. Keep credentials in
-secret management, not request artifacts or the repository. Source changes alone
-do not update live deployments, configuration or webhooks.
+allowlists. The cloud CodingAgent GitHub token needs contents push, pull-request
+write, Actions read/write, checks read and commit-status write permissions. Keep
+credentials in secret management, not request artifacts or the repository. Source
+changes alone do not update live deployments, configuration or webhooks.
 
 ## Recovery
+
+The recovery `request` job grants `contents: write` only to its job token for
+unpublished Draft visibility. The producer still enforces repository-scoped GET
+requests only; no mutating API call is added. Workflow defaults remain
+`contents: read` and `actions: read`, while the recovery job retains `actions: read`.
+Its main-only guard, pinned `github.workflow_sha` checkout and
+`persist-credentials: false` remain unchanged. It uses `GITHUB_TOKEN`, not a PAT,
+and does not change repository member roles or rulesets.
 
 If the Draft is complete but its synchronization request failed, run the recovery
 workflow on main. Set `RELEASE_ID` to the existing Release's numeric GitHub ID and
@@ -82,6 +90,13 @@ supported if their tag resolves to the exact source.
 Diagnose failures using the request workflow, original cloud task and specific
 `main-sync-validation.yml` run. A queued workflow, model completion claim or green
 result for an older commit does not establish readiness.
+
+The diagnosed recovery failure reported `Resource not accessible by integration`
+with an unexhausted core quota, identifying access denial rather than primary quota
+exhaustion. The permission change is a candidate fix, not proof of closure. After
+merge, an actual recovery run must read the existing Release ID and seal a request
+whose source SHA and asset inventory match the retained Draft. Do not recreate,
+delete or publish the completed Draft as part of this access check.
 
 An HTTP 403 from manual recovery records a denied API request; that response alone
 does not establish whether token permissions, repository policy or rate limiting

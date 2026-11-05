@@ -35,6 +35,39 @@ function fixture() {
  return {directory,release,api,requests};
 }
 
+describe('Draft recovery job permission boundary',()=>{
+ it('keeps workflow defaults read-only and scopes contents write to the guarded recovery job',()=>{
+  const source=readFileSync(new URL('../.github/workflows/main-sync.yml',import.meta.url),'utf8');
+  const workflow=YAML.parse(source),job=workflow.jobs.request;
+  expect(workflow.permissions).toEqual({contents:'read',actions:'read'});
+  expect(Object.keys(workflow.on)).toEqual(['workflow_dispatch']);
+  expect(workflow.on.workflow_dispatch.inputs).toMatchObject({
+   release_id:{required:true,type:'string'},source_sha:{required:true,type:'string'},
+  });
+  expect(Object.keys(workflow.jobs)).toEqual(['request']);
+  expect(job.if).toBe("${{ github.repository == 'MemTensor/memmy-agent' && github.ref == 'refs/heads/main' }}");
+  expect(job.steps.find(step=>step.uses?.startsWith('actions/checkout@')).with)
+   .toMatchObject({ref:'${{ github.workflow_sha }}','persist-credentials':false});
+  const commands=job.steps.filter(step=>typeof step.run==='string');
+  expect(commands).toHaveLength(1);
+  expect(commands[0].run.trim()).toBe('node scripts/main-sync/cli.mjs recover');
+  expect(commands[0].env).toMatchObject({
+   GH_TOKEN:'${{ github.token }}',SYNC_RELEASE_ID:'${{ inputs.release_id }}',
+   SYNC_SOURCE_SHA:'${{ inputs.source_sha }}',
+   MAIN_SYNC_REQUEST_PATH:'${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json',
+  });
+  expect(Object.keys(commands[0].env).filter(key=>/(?:^|_)(?:TOKEN|PAT)(?:_|$)/i.test(key)))
+   .toEqual(['GH_TOKEN']);
+  expect(source).not.toMatch(/\bsecrets\./);
+  const artifact=job.steps.find(step=>step.uses?.startsWith('actions/upload-artifact@'));
+  expect(artifact.with).toMatchObject({
+   path:'${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json','if-no-files-found':'error',
+  });
+  // Keep the added permission confined to this guarded recovery job.
+  expect(job.permissions).toEqual({contents:'write',actions:'read'});
+ });
+});
+
 function draftProducerFixture(options={}) {
  const directory=mkdtempSync(join(tmpdir(),'main-sync-draft-id-'));roots.push(directory);
  const assetsDirectory=join(directory,'release-assets');mkdirSync(assetsDirectory);
