@@ -20,6 +20,12 @@ import type { AgentChatMessage } from "../state/agent-chat-slice.js";
 import type { UploadedAgentMedia } from "../api/memmy-agent-client.js";
 
 const NO_CALLS: PluginUiCall[] = [];
+const LEGAL_BUTTON_ONLY_COMMANDS = new Set(["/legal-guide", "/legal-record"]);
+
+/** These legal actions stay available as composer buttons, not slash commands. */
+function isLegalButtonOnlyCommand(plugin: InstalledPlugin, command: PluginCommandContribution): boolean {
+  return plugin.id === "legal-labor" && LEGAL_BUTTON_ONLY_COMMANDS.has(command.command);
+}
 
 /** A handed-over interview already has one pending row keyed by its audio path. */
 export function recordingArchiveMaterials(entry: RecordingArchiveEntry): PluginRecordingMaterial[] {
@@ -172,7 +178,9 @@ export function useConversationFeatures(options: {
       .map((command) => ({ plugin,
         command: plugin.id === "legal-labor" && command.command === "/legal-guide"
           ? { ...command, capabilityId: "guide-open" } : command }))), [plugins]);
-  const commandItems: SlashCommandPaletteItem[] = localizeSlashCommands(targets.map(({ command }) => ({
+  const slashTargets = useMemo(() => targets.filter(({ plugin, command }) =>
+    !isLegalButtonOnlyCommand(plugin, command)), [targets]);
+  const commandItems: SlashCommandPaletteItem[] = localizeSlashCommands(slashTargets.map(({ command }) => ({
     command: command.command, title: command.name, description: command.description ?? "",
     icon: command.icon ?? "activity", argHint: command.argHint ?? "", synthetic: true
   })), language, t);
@@ -226,7 +234,7 @@ export function useConversationFeatures(options: {
   };
   const runCommand = (text: string): boolean => {
     const [name, ...args] = text.trim().split(/\s+/u);
-    const target = targets.find(({ command }) => command.command.toLowerCase() === name?.toLowerCase());
+    const target = slashTargets.find(({ command }) => command.command.toLowerCase() === name?.toLowerCase());
     if (!target || target.command.agentSkillId) return false;
     void invoke(target.plugin, target.command, args.join(" "));
     return true;
@@ -333,7 +341,7 @@ export function useConversationFeatures(options: {
     sidePanel: content ? <div className={`conversation-feature-sidepanel${sidePanelOverlay ? " conversation-feature-sidepanel--overlay" : ""}`}
       style={{ width: sidePanelOverlay ? "100%" : featurePanelWidth }}>{content}</div> : null,
     sidePanelWidth: content ? sidePanelOverlay ? 0 : featurePanelWidth : null,
-    agentPrompt: (text: string) => buildAgentRoutedPluginPrompt(text, targets), recordingAuthenticated, runCommand, commandItems,
+    agentPrompt: (text: string) => buildAgentRoutedPluginPrompt(text, slashTargets), recordingAuthenticated, runCommand, commandItems,
     waiting: Boolean(pending), pendingAgentTurnId: pending?.call.origin === "agent" ? pending.call.turnId : null,
     signIn: () => dispatch(appActions.navigate("/welcome")) };
 }

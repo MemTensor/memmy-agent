@@ -203,6 +203,8 @@ describe("conversation feature integration", () => {
     mocks.sending = true;
     await enterLegalConversation();
     expect(container.querySelectorAll("nav button")).toHaveLength(2);
+    expect(features.commandItems.map((item) => item.command)).not.toContain("/legal-guide");
+    expect(features.commandItems.map((item) => item.command)).not.toContain("/legal-record");
     expect(button("录音")).toBeUndefined();
     await act(async () => button("访谈录音")!.click());
     expect(container.querySelectorAll(".recording-entry-card")).toHaveLength(1);
@@ -213,11 +215,13 @@ describe("conversation feature integration", () => {
     expect(container.querySelector(".recording-entry-card")).toBeNull();
   });
 
-  it("routes an explicitly typed recording command to the Host even without a diagnosis session", async () => {
+  it("does not route the button-only legal actions from slash input", async () => {
     await act(async () => render());
-    await act(async () => expect(features.runCommand("/legal-record")).toBe(true));
-    expect(container.querySelector(".recording-entry-card")).not.toBeNull();
+    expect(features.runCommand("/legal-guide")).toBe(false);
+    expect(features.runCommand("/legal-record")).toBe(false);
+    expect(container.querySelector(".recording-entry-card")).toBeNull();
     expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.ensureConversation).not.toHaveBeenCalled();
   });
 
   it("covers the guide and recording shortcuts while the Agent's legal question is open", async () => {
@@ -261,27 +265,6 @@ describe("conversation feature integration", () => {
     expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith("legal-labor", "guide-open", expect.objectContaining({
       conversationId: "legal-chat", origin: "user", input: { command: "/legal-guide", arguments: "" }
     }));
-  });
-
-  it("creates a real conversation before opening a typed guide from the empty home screen", async () => {
-    await act(async () => render());
-    await act(async () => {
-      expect(features.runCommand("/legal-guide")).toBe(true);
-      await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith(
-        "legal-labor",
-        "guide-open",
-        expect.objectContaining({ conversationId: "created-chat", origin: "user" })
-      ));
-    });
-    expect(mocks.ensureConversation).toHaveBeenCalledExactlyOnceWith("诊断指引");
-
-    mocks.chatId = "created-chat";
-    await act(async () => render());
-    await act(async () => ui.receive({ pluginId: "legal-labor", capabilityId: "guide-open", callId: "created-guide",
-      conversationId: "created-chat", origin: "user", event: { type: "interaction", request: {
-        interactionId: "guide", type: "question", payload: { title: "诊断指引", readOnly: true }
-      } } }));
-    expect(features.hasConversationActivity).toBe(true);
   });
 
   it("does not offer a guide shortcut that the installed plugin cannot run", async () => {
