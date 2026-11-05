@@ -6,6 +6,10 @@ export type FileMutationOutcome = {
 };
 
 export type ToolExecutionContext = {
+  /** Unique UI identity, even when a provider reuses its tool-call ID. */
+  uiToolCallId?: string | null;
+  sessionKey?: string | null;
+  modelPreset?: string | null;
   abortSignal?: AbortSignal | null;
   toolName?: string;
   callId?: string | null;

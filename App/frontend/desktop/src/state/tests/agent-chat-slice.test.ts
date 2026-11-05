@@ -2938,6 +2938,8 @@ describe("agent chat slice", () => {
           { url: "/api/media/sig/deck", name: "deck.pptx" },
           { url: "/api/media/sig/image", name: "result.png" },
           { url: "/api/media/sig/clip", name: "clip.mp4" },
+          { url: "/api/media/sig/audio", name: "interview.mp3", kind: "audio" },
+          { url: "/api/media/sig/old-recording", name: "录音-2026-10-27T10-13-53-172Z.webm", kind: "video" },
           { url: "/api/media/sig/explicit", name: "archive.bin", kind: "file", path: "/Users/yuan/archive.bin" }
         ]
       }
@@ -2949,6 +2951,8 @@ describe("agent chat slice", () => {
         { kind: "file", url: "/api/media/sig/deck", name: "deck.pptx" },
         { kind: "image", url: "/api/media/sig/image", name: "result.png" },
         { kind: "video", url: "/api/media/sig/clip", name: "clip.mp4" },
+        { kind: "audio", url: "/api/media/sig/audio", name: "interview.mp3" },
+        { kind: "audio", url: "/api/media/sig/old-recording", name: "录音-2026-10-27T10-13-53-172Z.webm" },
         { kind: "file", url: "/api/media/sig/explicit", name: "archive.bin", path: "/Users/yuan/archive.bin" }
       ]
     });
@@ -5065,6 +5069,31 @@ describe("agent chat slice", () => {
     expect(state.currentSessionKey).toBe("websocket:chat-new");
     expect(state.messages).toEqual([]);
     expect(state.isSending).toBe(false);
+    expect(state.blankDraftActive).toBe(false);
+  });
+
+  it("keeps a plugin-only conversation selected across an empty canonical snapshot", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/newChatRequested" });
+    state = agentReducer(state, {
+      type: "agent/pluginConversationStarted",
+      chatId: "chat-plugin",
+      title: "诊断指引",
+      target: { kind: "standalone" },
+      createdAt: "2026-11-04T12:00:00.000Z"
+    });
+
+    expect(state.currentChatId).toBe("chat-plugin");
+    expect(state.messages).toEqual([]);
+    expect(state.tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ chatId: "chat-plugin", title: "诊断指引" })
+    ]));
+
+    state = agentReducer(state, {
+      type: "agent/sessionSnapshotApplied",
+      snapshot: { sessions: [], projects: [], projectRegistryState: "ready", sidebarState: state.sidebarState }
+    });
+
+    expect(state.currentChatId).toBe("chat-plugin");
     expect(state.blankDraftActive).toBe(false);
   });
 

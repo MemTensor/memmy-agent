@@ -98,6 +98,24 @@ describe("resolveAssignedModel", () => {
     }
   });
 
+  it("treats persisted null provider options as unconfigured optional maps", () => {
+    const current = catalog() as any;
+    current.providers.memmy_account.extraHeaders = null;
+    current.providers.memmy_account.extraBody = null;
+
+    const resolved = resolveAssignedModel({
+      catalog: current,
+      mode: "account",
+      activeAccountId: "account-a",
+      capability: "memory_summary"
+    });
+
+    expect(resolved).toEqual(expect.objectContaining({
+      ok: true,
+      provider: expect.objectContaining({ extraHeaders: {}, extraBody: {} })
+    }));
+  });
+
   it("does not fall back when an explicit preset is unassigned", () => {
     expect(resolveAssignedModel({
       catalog: catalog(),

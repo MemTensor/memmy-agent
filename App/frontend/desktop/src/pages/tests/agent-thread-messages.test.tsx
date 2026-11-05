@@ -664,11 +664,11 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("agent-activity-segment--narration");
     expect(html).toContain(draft);
     expect(html).not.toContain("agent-narration-block__preview");
-    expect(html).toContain("思考一下");
+    expect(html).toContain("简短思考");
     expect(html).not.toContain("先规划三轮循环。");
     expect(html).not.toContain("agent-chat-bubble--assistant");
     expect(html).not.toContain("agent-message-copy-button--left");
-    expect(html.indexOf("思考一下")).toBeLessThan(html.indexOf("我来帮你规划国庆出行方案"));
+    expect(html.indexOf("简短思考")).toBeLessThan(html.indexOf("我来帮你规划国庆出行方案"));
   });
 
   it("counts every row in the group label — web search plus grep reads 浏览了 2 处", () => {
@@ -1078,12 +1078,36 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("工作中");
     // The thought was superseded by the tool step, so it folds to its
     // one-line label; the prose re-appears on demand, not by default.
-    expect(html).toContain("思考一下");
+    expect(html).toContain("简短思考");
     expect(html).not.toContain("先判断要不要查资料。");
     expect(html).toContain("准备读取本地说明。");
     expect(html).not.toContain("正在执行 2 个步骤");
     expect(html).not.toContain("执行了 2 个步骤");
     expect(html).not.toContain("text-status-success");
+  });
+
+  it("keeps the live thought after a tool while the earlier thought folds", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages chatScopeKey="chat-thought-tool-thought" isSending messages={[
+          { id: "question", role: "user", content: "继续" },
+          { id: "before", role: "assistant", content: "", reasoning: "先生成小节。", activitySegmentId: "activity-review" },
+          { id: "tool", role: "tool", kind: "trace", content: "Generate review sections",
+            traces: ["Generate review sections"], activitySegmentId: "activity-review" },
+          { id: "after", role: "assistant", content: "", reasoning: "All 4 paragraphs saved; continue.",
+            activitySegmentId: "activity-review", isStreaming: true, reasoningStreaming: true }
+        ]} />
+      </I18nProvider>
+    );
+
+    const oldThought = html.indexOf("简短思考");
+    const tool = html.indexOf("Generate review sections");
+    const liveBody = html.indexOf("All 4 paragraphs saved; continue.");
+    expect(oldThought).toBeGreaterThanOrEqual(0);
+    expect(tool).toBeGreaterThan(oldThought);
+    expect(liveBody).toBeGreaterThan(tool);
+    expect(html).not.toContain("agent-activity-segment__live-thought-label");
+    expect(html).not.toContain("先生成小节。");
   });
 
   it("renders reasoning as muted prose while preserving real markdown blocks", () => {
@@ -1120,7 +1144,7 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain("Keep markdown lists compact.");
     expect(html).toContain("<strong>Decision</strong>");
     expect(html).not.toContain("The user wants a detailed introduction<br");
-    expect(html).not.toContain("思考一下</span>");
+    expect(html).not.toContain("简短思考</span>");
   });
 
   it("renders the complete decoded Windows error in tool details", () => {
@@ -1604,7 +1628,7 @@ describe("AgentThreadMessages", () => {
     // header, separate from the always-visible final answer bubble below it.
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('data-icon="chevron-right"');
-    expect(html).toContain("思考一下");
+    expect(html).toContain("简短思考");
     expect(html).not.toContain("data-reasoning-key=");
     expect(html).toContain("最终回答");
     // Reasoning body is only rendered when the user expands the collapsed cluster.
@@ -1656,7 +1680,7 @@ describe("AgentThreadMessages", () => {
     // Reasoning finished but answer is still streaming → cluster collapses (reasoning not running).
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('data-icon="chevron-right"');
-    expect(html).toContain("思考一下");
+    expect(html).toContain("简短思考");
     expect(html).not.toContain("data-reasoning-key=");
     expect(html).toContain("正在回答");
     // Reasoning body is only rendered when the user expands the collapsed cluster.
@@ -1686,7 +1710,7 @@ describe("AgentThreadMessages", () => {
       </I18nProvider>
     );
 
-    expect(html).toContain("思考一下");
+    expect(html).toContain("简短思考");
     expect(html).toContain("data-activity-key=");
     expect(html).toContain("完成。");
     expect(html).not.toContain("data-reasoning-key=");
@@ -2113,6 +2137,33 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain('img src="/api/media/sig/deck"');
     expect(html).toContain('img src="/api/media/sig/image"');
     expect(html).toContain('video src="/api/media/sig/clip"');
+  });
+
+  it("renders delivered recordings as the same file bubble used for other files", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-recording"
+          messages={[{
+            id: "answer",
+            role: "assistant",
+            content: "报告和录音已交付",
+            media: [
+              { kind: "audio", url: "/api/media/sig/recording", name: "录音-2026-10-27T10-13-53-172Z.webm" },
+              { kind: "file", url: "/api/media/sig/report", name: "诊断报告.docx" }
+            ]
+          }]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain('data-testid="agent-attachment-card-file"');
+    expect(html).toContain("录音-2026-10-27T10-13-53-172Z.webm");
+    expect(html).toContain(">WEBM<");
+    expect(html).toContain("诊断报告.docx");
+    expect(html).not.toContain('video src="/api/media/sig/recording"');
+    expect(html).not.toContain('audio src="/api/media/sig/recording"');
+    expect(html).not.toContain("另存为");
   });
 
   it("renders user media as compact thumbnails above the text bubble", () => {

@@ -1,3 +1,4 @@
+import { agentTaskActivity } from "../../../src/core/agent-runtime/task-activity.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -56,6 +57,30 @@ afterEach(async () => {
 });
 
 describe("WebSocket HTTP route helpers", () => {
+  it("protects task activity and reports an entire turn rather than only tool calls", async () => {
+    const channel = new WebSocketChannel(
+      { enabled: true, allowFrom: ["*"], host: "127.0.0.1", port: 0, path: "/", websocketRequiresToken: false },
+      new MessageBus(), { sessionManager: new SessionManager(tmpRoot()) }
+    );
+    running.push(channel);
+    await channel.start();
+    const base = `http://127.0.0.1:${(channel as any).server.address().port}`;
+    expect((await fetch(`${base}/api/runtime/task-activity`)).status).toBe(401);
+    const bootstrap = await (await fetch(`${base}/webui/bootstrap`)).json() as { token: string };
+    const headers = { Authorization: `Bearer ${bootstrap.token}` };
+    const activity = async () => (await fetch(`${base}/api/runtime/task-activity`, { headers })).json();
+    expect(await activity()).toEqual({ busy: false });
+    let finish!: () => void;
+    const turn = agentTaskActivity.run(() => new Promise<void>(resolve => { finish = resolve; }));
+    try { expect(await activity()).toEqual({ busy: true }); }
+    finally { finish(); await turn; }
+    expect(await activity()).toEqual({ busy: false });
+    await channel.terminalRunControl!.create("cli:external", "external-turn");
+    expect(await activity()).toEqual({ busy: true });
+    await channel.terminalRunControl!.remove("cli:external", "external-turn");
+    expect(await activity()).toEqual({ busy: false });
+  });
+
   function tmpRoot(prefix = "memmy-ws-http-"): string {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
     tmpDirs.push(root);
@@ -385,6 +410,200 @@ describe("WebSocket HTTP route helpers", () => {
     expect(responseJson(createBranchResponse!)).toMatchObject({
       snapshot: { scope_kind: "session", repository: { branch: "feature/new-branch" } },
     });
+  });
+
+  it("lists standalone task files one directory at a time", async () => {
+    const root = tmpRoot();
+    fs.mkdirSync(path.join(root, "src"));
+    fs.mkdirSync(path.join(root, "node_modules"));
+    fs.writeFileSync(path.join(root, "src", "index.ts"), "export {};\n", "utf8");
+    const manager = seedSession(tmpRoot(), "websocket:workspace-files", root);
+    const channel = makeChannel({ sessionManager: manager, workspacePath: root });
+    const headers = withApiToken(channel);
+    const encoded = encodeURIComponent("websocket:workspace-files");
+
+    const rootResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/files`,
+      headers,
+    });
+    expect(rootResponse?.status).toBe(200);
+    const rootListing = responseJson(rootResponse!);
+    expect(rootListing).toMatchObject({
+      root: { kind: "task", label: path.basename(root) },
+      path: "",
+      truncated: false,
+    });
+    expect(rootListing.entries).toContainEqual(expect.objectContaining({
+      name: "src",
+      path: "src",
+      kind: "directory",
+    }));
+    expect(rootListing.entries).toContainEqual(expect.objectContaining({
+      name: "node_modules",
+      path: "node_modules",
+      kind: "directory",
+    }));
+
+    const deniedResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/files`,
+    });
+    expect(deniedResponse?.status).toBe(401);
+    const methodResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/files`,
+      method: "POST",
+      headers,
+    });
+    expect(methodResponse?.status).toBe(405);
+
+    const nestedResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/files?path=src`,
+      headers,
+    });
+    expect(responseJson(nestedResponse!)).toMatchObject({
+      path: "src",
+      entries: [{
+        name: "index.ts",
+        path: "src/index.ts",
+        kind: "file",
+        size: 11,
+      }],
+    });
+
+    const fileResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/file?path=src%2Findex.ts`,
+      headers,
+    });
+    expect(fileResponse?.status).toBe(200);
+    expect(fileResponse?.headers).toMatchObject({
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    });
+    expect(Buffer.from(fileResponse?.body as Buffer).toString("utf8")).toBe("export {};\n");
+
+    const revealResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/file/reveal?path=src%2Findex.ts`,
+      method: "POST",
+      headers,
+    });
+    expect(revealResponse?.status).toBe(200);
+    const [revealCommand, revealArgs] = expectedRevealInvocation(fs.realpathSync(path.join(root, "src", "index.ts")));
+    expect(childProcessMocks.spawn).toHaveBeenLastCalledWith(revealCommand, revealArgs, {
+      detached: true,
+      stdio: "ignore",
+    });
+
+    const traversalResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/workspace/files?path=..%2Foutside`,
+      headers,
+    });
+    expect(traversalResponse?.status).toBe(400);
+    expect(responseJson(traversalResponse!)).toMatchObject({ code: "workspace_files_path_invalid" });
+  });
+
+  it("uses the bound project's active root and label for workspace files", async () => {
+    const root = tmpRoot();
+    const workspace = path.join(root, "project-root");
+    fs.mkdirSync(workspace);
+    fs.writeFileSync(path.join(workspace, "project.md"), "project", "utf8");
+    const projectStore = new ProjectStore({ filePath: path.join(root, "projects.json") });
+    const project = projectStore.add(workspace, "existing", "Research project");
+    const manager = seedSession(path.join(root, "sessions"), "websocket:project-files", workspace);
+    const session = manager.get("websocket:project-files")!;
+    session.metadata.webuiProjectId = project.id;
+    manager.save(session);
+    const channel = makeChannel({ sessionManager: manager, projectStore, workspacePath: root });
+    const headers = withApiToken(channel);
+
+    const response = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encodeURIComponent("websocket:project-files")}/workspace/files`,
+      headers,
+    });
+
+    expect(response?.status).toBe(200);
+    expect(responseJson(response!)).toMatchObject({
+      root: { kind: "project", label: "Research project" },
+      entries: [{
+        name: "project.md",
+        path: "project.md",
+        kind: "file",
+        size: 7,
+      }],
+    });
+
+    const projectListing = await channel.dispatchHttp(localConnection, {
+      path: `/api/projects/${encodeURIComponent(project.id)}/workspace/files`,
+      headers,
+    });
+    expect(projectListing?.status).toBe(200);
+    expect(responseJson(projectListing!)).toMatchObject({
+      root: { kind: "project", label: "Research project" },
+      entries: [expect.objectContaining({ path: "project.md" })],
+    });
+
+    const projectFile = await channel.dispatchHttp(localConnection, {
+      path: `/api/projects/${encodeURIComponent(project.id)}/workspace/file?path=project.md`,
+      headers,
+    });
+    expect(Buffer.from(projectFile?.body as Buffer).toString("utf8")).toBe("project");
+  });
+
+  it("does not fall back to the task cwd when a bound project is missing", async () => {
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, "task-only.txt"), "hidden", "utf8");
+    const manager = seedSession(tmpRoot(), "websocket:missing-project-files", root);
+    const session = manager.get("websocket:missing-project-files")!;
+    session.metadata.webuiProjectId = "00000000-0000-4000-8000-000000000000";
+    manager.save(session);
+    const projectStore = new ProjectStore({ filePath: path.join(tmpRoot(), "projects.json") });
+    const channel = makeChannel({ sessionManager: manager, projectStore, workspacePath: root });
+    const headers = withApiToken(channel);
+
+    const response = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encodeURIComponent("websocket:missing-project-files")}/workspace/files`,
+      headers,
+    });
+
+    expect(response?.status).toBe(404);
+    expect(responseJson(response!)).toMatchObject({ code: "project_not_found" });
+  });
+
+  it("does not fall back to the task cwd when the project registry is corrupt", async () => {
+    const root = tmpRoot();
+    const manager = seedSession(tmpRoot(), "websocket:corrupt-project-files", root);
+    const session = manager.get("websocket:corrupt-project-files")!;
+    session.metadata.webuiProjectId = "00000000-0000-4000-8000-000000000000";
+    manager.save(session);
+    const projectRegistryPath = path.join(tmpRoot(), "projects.json");
+    fs.writeFileSync(projectRegistryPath, "not json", "utf8");
+    const projectStore = new ProjectStore({ filePath: projectRegistryPath });
+    const channel = makeChannel({ sessionManager: manager, projectStore, workspacePath: root });
+    const headers = withApiToken(channel);
+
+    const response = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encodeURIComponent("websocket:corrupt-project-files")}/workspace/files`,
+      headers,
+    });
+
+    expect(response?.status).toBe(503);
+    expect(responseJson(response!)).toMatchObject({ code: "project_registry_corrupt" });
+  });
+
+  it("reports an unavailable workspace when the session binding is missing", async () => {
+    const manager = new SessionManager(tmpRoot());
+    const session = new Session({ key: "websocket:missing-workspace-binding" });
+    session.metadata.webui = true;
+    manager.save(session);
+    const channel = makeChannel({ sessionManager: manager });
+    const headers = withApiToken(channel);
+
+    const response = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encodeURIComponent("websocket:missing-workspace-binding")}/workspace/files`,
+      headers,
+    });
+
+    expect(response?.status).toBe(422);
+    expect(responseJson(response!)).toMatchObject({ code: "workspace_missing" });
   });
 
   it("serves the selected project environment before a Session exists", async () => {
@@ -1056,7 +1275,13 @@ describe("WebSocket HTTP route helpers", () => {
       body: JSON.stringify({ path: note, sessionKey }),
     });
     expect(resolvedFile.status).toBe(200);
-    expect(await resolvedFile.json()).toMatchObject({ ok: true, path: resolvedNotePath, name: "result.md", kind: "file" });
+    expect(await resolvedFile.json()).toMatchObject({
+      ok: true,
+      path: resolvedNotePath,
+      name: "result.md",
+      kind: "file",
+      relative_path: "result.md"
+    });
 
     const resolvedImage = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",
@@ -1064,7 +1289,13 @@ describe("WebSocket HTTP route helpers", () => {
       body: JSON.stringify({ path: "diagram.png", sessionKey }),
     });
     expect(resolvedImage.status).toBe(200);
-    expect(await resolvedImage.json()).toMatchObject({ ok: true, name: "diagram.png", kind: "image", media_url: expect.stringMatching(/^\/api\/media\//) });
+    expect(await resolvedImage.json()).toMatchObject({
+      ok: true,
+      name: "diagram.png",
+      kind: "image",
+      relative_path: "diagram.png",
+      media_url: expect.stringMatching(/^\/api\/media\//)
+    });
 
     const stagedOutside = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",
@@ -1072,7 +1303,9 @@ describe("WebSocket HTTP route helpers", () => {
       body: JSON.stringify({ path: outside, sessionKey }),
     });
     expect(stagedOutside.status).toBe(200);
-    expect(await stagedOutside.json()).toMatchObject({ ok: true, name: "outside.md", kind: "file", media_url: expect.stringMatching(/^\/api\/media\//) });
+    const stagedOutsideBody = await stagedOutside.json() as Record<string, unknown>;
+    expect(stagedOutsideBody).toMatchObject({ ok: true, name: "outside.md", kind: "file", media_url: expect.stringMatching(/^\/api\/media\//) });
+    expect(stagedOutsideBody).not.toHaveProperty("relative_path");
 
     const resolvedDirectory = await fetch(`http://127.0.0.1:${port}/api/webui/artifacts/resolve`, {
       method: "POST",

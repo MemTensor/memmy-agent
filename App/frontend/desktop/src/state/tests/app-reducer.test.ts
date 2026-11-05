@@ -77,6 +77,33 @@ describe("app reducer", () => {
     expect(nextState.agent.chatViewVisible).toBe(false);
   });
 
+  it("routes recording preview and transport actions without creating a task", () => {
+    let state = appReducer(createInitialAppState(), appActions.bootstrapLoaded(bootstrap, "/tools"));
+    const chatBefore = state.agent.currentChatId;
+    state = appReducer(state, appActions.requestRecordingOpen());
+    expect(state.navigation.currentPath).toBe("/main");
+    expect(state.navigation.recordingRequestId).toBe(1);
+    expect(state.navigation.recordingHandledId).toBe(0);
+    expect(state.navigation.recordingRequestAction).toBe("open");
+    expect(state.agent.currentChatId).toBe(chatBefore);
+    expect(state.agent.chatViewVisible).toBe(true);
+
+    state = appReducer(state, appActions.recordingRequestHandled(1));
+    expect(state.navigation.recordingHandledId).toBe(1);
+    state = appReducer(state, appActions.recordingStatusChanged("recording"));
+    expect(state.navigation.recordingStatus).toBe("recording");
+    state = appReducer(state, appActions.recordingStatusChanged("transcribing"));
+    state = appReducer(state, appActions.recordingStatusChanged("ready"));
+    expect(state.navigation.recordingStatus).toBe("ready");
+    state = appReducer(state, appActions.requestRecordingControl());
+    expect(state.navigation.recordingRequestId).toBe(2);
+    expect(state.navigation.recordingHandledId).toBe(1);
+    expect(state.navigation.recordingRequestAction).toBe("control");
+    state = appReducer(state, appActions.requestRecordingFinish());
+    expect(state.navigation.recordingRequestAction).toBe("finish");
+    expect(state.navigation.recordingRequestId).toBe(3);
+  });
+
   it("updates chat view visibility on route changes", () => {
     let state = appReducer(createInitialAppState(), appActions.bootstrapLoaded(bootstrap, "/main"));
     expect(state.agent.chatViewVisible).toBe(true);

@@ -1,0 +1,111 @@
+.home-scenario-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
+  gap: 10px;
+  margin: 18px 2px 0;
+}
+.home-scenario-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+  border-radius: 11px;
+  background: var(--color-background-paper);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+.home-scenario-card:hover {
+  border-color: color-mix(in srgb, var(--color-border-stone) 80%, transparent);
+  background: color-mix(in srgb, var(--color-canvas-oat) 45%, var(--color-background-paper));
+}
+.home-scenario-card__icon {
+  display: inline-flex;
+  flex: 0 0 26px;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 16%, var(--color-background-paper));
+  color: var(--color-action-sky);
+}
+.home-scenario-card__icon--scale {
+  background: color-mix(in srgb, #7268df 13%, var(--color-background-paper));
+  color: #625ee0;
+}
+.home-scenario-card__body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.home-scenario-card__title {
+  color: color-mix(in srgb, var(--color-text-ink) 88%, transparent);
+  font-size: 13px;
+  font-weight: 500;
+}
+.home-scenario-card__description {
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.home-scenario-card__cta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-self: center;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 22%, var(--color-background-paper));
+  color: var(--color-action-sky);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.home-scenario-card:hover .home-scenario-card__cta {
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 34%, var(--color-background-paper));
+}
+.home-prompt-suggestions {
+  display: grid;
+  gap: 7px;
+  margin: 18px 2px 0;
+}
+.home-prompt-suggestions button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 11px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.home-prompt-suggestions button:hover {
+  background: color-mix(in srgb, var(--color-canvas-oat) 68%, transparent);
+  color: var(--color-text-ink);
+}
+.home-prompt-suggestions__icon {
+  display: inline-flex;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 16%, var(--color-background-paper));
+  color: var(--color-action-sky);
+}
+.home-prompt-suggestions button > span:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+}

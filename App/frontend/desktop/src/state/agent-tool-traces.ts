@@ -213,6 +213,8 @@ const CANONICAL_TOOL_NAMES = new Set([
 function canonicalToolName(name: string): string {
   const trimmed = name.trim();
   const lower = trimmed.toLowerCase();
+  // Plugin capability suffixes (for example review_create_task) are not core tool aliases.
+  if (lower.startsWith("mcp_plugins_")) return lower;
   if (lower === "apply_patch") return "apply_patch";
   if (TOOL_NAME_ALIASES[lower]) return TOOL_NAME_ALIASES[lower]!;
   if (CANONICAL_TOOL_NAMES.has(lower)) return lower;

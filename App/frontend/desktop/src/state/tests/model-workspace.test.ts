@@ -25,6 +25,7 @@ import {
   deleteModelConnection,
   getModelCandidates,
   getTaskModelCandidates,
+  officialPlatformAgentCandidate,
   modelConfigInput,
   resolveModelSelection,
   setDefaultTaskModel,
@@ -970,6 +971,12 @@ describe("canonical model workspace adapter", () => {
   it("Agent 多选/default 与其他任务单选引用 preset ID", () => {
     const workspace = createModelWorkspace(catalog());
     expect(getTaskModelCandidates(workspace, "account").map((item) => item.id)).toEqual(["account-agent", "byok-agent"]);
+    expect(officialPlatformAgentCandidate(getTaskModelCandidates(workspace, "account"))).toMatchObject({
+      id: "account-agent",
+      source: "platform",
+      model: "agent_chat"
+    });
+    expect(officialPlatformAgentCandidate(getTaskModelCandidates(workspace, "byok"))).toBeUndefined();
     expect(resolveModelSelection(workspace, "account", null).candidateId).toBe("account-agent");
     expect(resolveModelSelection(workspace, "byok", "missing")).toMatchObject({ unavailable: true, candidateId: "missing" });
   });

@@ -872,6 +872,45 @@ describe("cloud client", () => {
     ]);
   });
 
+  it("http client waits out a diarized transcription instead of applying the short default timeout", async () => {
+    // Speaker separation runs upstream as a batch job the cloud polls for us,
+    // so this single request stays open far longer than any other endpoint.
+    server = createServer(async (_request, response) => {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
+      sendJson(response, {
+        code: 0,
+        message: "ok",
+        data: {
+          text: "甲说完乙说",
+          modelId: "qwen-audio-3.0-asr-flash-filetrans",
+          provider: "aliyun",
+          segments: [
+            { text: "甲说", speakerId: 0, startMs: 0, endMs: 500 },
+            { text: "乙说", speakerId: 1, startMs: 500, endMs: 900 }
+          ]
+        }
+      });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Mock cloud server did not bind to a port");
+    }
+    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 20 });
+
+    const result = await client.transcribeAudio({
+      uuid: "cloud.login.uuid",
+      audioBase64: "UklGRg==",
+      mimeType: "audio/wav",
+      diarization: true
+    });
+
+    expect(result.segments).toEqual([
+      { text: "甲说", speakerId: 0, startMs: 0, endMs: 500 },
+      { text: "乙说", speakerId: 1, startMs: 500, endMs: 900 }
+    ]);
+  });
+
   it("http client proxies integration capabilities/authorize/list/delete through Cloud Service with machine token", async () => {
     const requests: Array<{
       path: string;
@@ -1237,6 +1276,30 @@ describe("cloud client", () => {
         body: { drawId: "1" },
         authorization: "Bearer cloud.login.uuid"
       }
+    ]);
+  });
+
+  it("idempotently ensures the launch gift and acknowledges its notice", async () => {
+    const requests: Array<{ path: string; method: string; body: unknown; authorization: string | undefined }> = [];
+    server = createServer(async (request, response) => {
+      requests.push({ path: request.url ?? "", method: request.method ?? "", body: await readJson(request),
+        authorization: request.headers.authorization });
+      sendJson(response, { code: 0, message: "ok", data: request.url?.endsWith("/ack")
+        ? true
+        : { hasGift: true, grantId: "v125_task_token_gift_20m", audience: "existing", tokenAmount: 20_000_000, totalTokens: 22_000_000 } });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Mock cloud server did not bind to a port");
+    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
+
+    await expect(client.ensureTaskTokenGift({ uuid: "cloud.login.uuid" })).resolves.toMatchObject({ hasGift: true, tokenAmount: 20_000_000 });
+    await expect(client.ackTaskTokenGift({ uuid: "cloud.login.uuid", grantId: "v125_task_token_gift_20m" }))
+      .resolves.toBeUndefined();
+    expect(requests).toEqual([
+      { path: "/api/agentUser/quota/launchGift/ensure", method: "POST", body: {}, authorization: "Bearer cloud.login.uuid" },
+      { path: "/api/agentUser/quota/launchGift/ack", method: "POST", body: { grantId: "v125_task_token_gift_20m" },
+        authorization: "Bearer cloud.login.uuid" }
     ]);
   });
 

@@ -354,6 +354,12 @@ export function getTaskModelCandidates(workspace: ModelWorkspace, mode: ModelWor
   return order.map((id) => byId.get(id)).filter((candidate): candidate is ModelCandidate => Boolean(candidate));
 }
 
+/** Official Memmy Agent model used by plugins that cannot switch to a custom model. */
+export function officialPlatformAgentCandidate(candidates: readonly ModelCandidate[]): ModelCandidate | undefined {
+  return candidates.find((candidate) => candidate.source === "platform" && candidate.available && candidate.model === "agent_chat")
+    ?? candidates.find((candidate) => candidate.source === "platform" && candidate.available);
+}
+
 export function resolveModelSelection(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,

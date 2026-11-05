@@ -1,6 +1,7 @@
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AsarPackager } from "app-builder-lib/out/asar/asarUtil.js";
@@ -114,7 +115,7 @@ it.runIf(process.platform === "darwin")("Electron resolves and executes both pac
       }
     })().catch(error => { console.error(error); process.exitCode = 1; });
   `);
-  const electron = repoFile("App", "shell", "desktop", "node_modules", "electron", "dist", "Electron.app", "Contents", "MacOS", "Electron");
+  const electron = createRequire(repoFile("App", "shell", "desktop", "package.json"))("electron");
   const stdout = execFileSync(electron, [probe], {
     encoding: "utf8", timeout: 30_000,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", HOME: root, PATH: join(root, "no-tools") },

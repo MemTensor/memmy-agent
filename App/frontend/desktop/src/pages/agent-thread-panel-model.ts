@@ -1,5 +1,4 @@
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
-import { localArtifactPathFromHref } from "./agent-message-content.js";
 
 export type ThreadPanelView = "overview" | "files" | "changes";
 
@@ -20,6 +19,7 @@ export type ThreadFileKind =
   | "file";
 
 export type ThreadPreviewKind =
+  | "document"
   | "pdf"
   | "image"
   | "video"
@@ -48,7 +48,8 @@ export type ThreadFileChange = {
 
 export type ThreadPanelTab =
   | { id: string; type: "file"; name: string; path?: string; url?: string }
-  | { id: string; type: "change"; name: string; path: string; absolutePath?: string; added: number; deleted: number };
+  | { id: string; type: "change"; name: string; path: string; absolutePath?: string; added: number; deleted: number }
+  | { id: string; type: "recording"; name: string };
 
 export type ThreadTabState = {
   tabs: ThreadPanelTab[];
@@ -131,7 +132,7 @@ const EXTENSION_KINDS: Record<string, ThreadFileKind> = {
 const CODE_EXTENSIONS = new Set([
   "bash", "c", "cc", "cpp", "cs", "css", "dart", "go", "h", "hpp", "java", "js", "jsx", "kt", "less",
   "lua", "m", "mjs", "cjs", "php", "pl", "ps1", "py", "r", "rb", "rs", "sass", "scala", "scss", "sh",
-  "sql", "swift", "ts", "tsx", "vue", "zsh",
+  "tex", "bib", "sty", "cls", "bst", "dtx", "ltx", "typ", "sql", "swift", "ts", "tsx", "vue", "zsh",
 ]);
 
 const PREVIEW_BY_KIND: Partial<Record<ThreadFileKind, ThreadPreviewKind>> = {
@@ -158,6 +159,7 @@ export function threadFileKind(name: string): ThreadFileKind {
 
 export function threadPreviewKind(name: string): ThreadPreviewKind {
   const extension = threadFileExtension(name);
+  if (extension === "docx" || extension === "xlsx" || extension === "pptx") return "document";
   if (extension === "csv" || extension === "tsv") return "csv";
   return PREVIEW_BY_KIND[threadFileKind(name)] ?? "unsupported";
 }
@@ -226,7 +228,9 @@ export function collectThreadArtifacts(messages: AgentChatMessage[]): ThreadArti
   };
 
   for (const message of messages) {
-    if (message.role !== "assistant" || message.kind === "trace" || message.kind === "context_compaction") continue;
+    if (message.role !== "assistant" || message.kind === "trace" || message.kind === "context_compaction" || message.isStreaming) continue;
+    // Only attachments explicitly delivered by the assistant belong in Artifacts.
+    // Markdown links remain clickable in the answer, and file edits belong in Changes.
     for (const media of message.media ?? []) {
       const path = media.path?.trim() || undefined;
       const url = media.url?.trim() || undefined;
@@ -234,12 +238,6 @@ export function collectThreadArtifacts(messages: AgentChatMessage[]): ThreadArti
       const name = media.name?.trim() || threadFileName(path ?? url ?? "");
       if (!name) continue;
       add({ name, ...(path ? { path } : {}), ...(url ? { url } : {}) });
-    }
-    for (const href of markdownLinkTargets(message.content)) {
-      const localPath = localArtifactPathFromHref(href);
-      if (!localPath || !threadFileExtension(threadFileName(localPath))) continue;
-      const path = withoutUrlDriveSlash(localPath);
-      add({ name: threadFileName(path), path });
     }
   }
   return [...artifacts.values()];
@@ -249,7 +247,7 @@ export function collectThreadFileChanges(messages: AgentChatMessage[]): ThreadFi
   const changes = new Map<string, ThreadFileChange>();
   for (const message of messages) {
     for (const edit of message.fileEdits ?? []) {
-      if (edit.status === "error" || edit.unchanged === true || edit.pending === true) continue;
+      if (edit.status !== "done" || edit.unchanged === true || edit.pending === true) continue;
       const displayPath = edit.path?.trim();
       const absolutePath = typeof edit.absolute_path === "string" && edit.absolute_path.trim()
         ? edit.absolute_path.trim()
@@ -276,6 +274,26 @@ export function collectThreadFileChanges(messages: AgentChatMessage[]): ThreadFi
     }
   }
   return [...changes.values()];
+}
+
+/** Completed writes are the signal to refresh an already open file preview. */
+export function completedFileEditRevision(
+  tab: ThreadPanelTab | null,
+  messages: AgentChatMessage[],
+  workspaceRoot: string | null,
+): string {
+  if (!tab || tab.type === "recording") return "";
+  const target = normalizeThreadPath(tab.type === "change" ? tab.absolutePath ?? joinThreadPath(workspaceRoot ?? "", tab.path) : tab.path ?? "");
+  if (!target) return "";
+  const revisions = new Set<string>();
+  for (const message of messages) {
+    for (const edit of message.fileEdits ?? []) {
+      if (edit.status !== "done" || edit.unchanged === true) continue;
+      const path = normalizeThreadPath(edit.absolute_path || (workspaceRoot ? joinThreadPath(workspaceRoot, edit.path) : edit.path));
+      if (path === target) revisions.add(`${edit.call_id}:${edit.added ?? 0}:${edit.deleted ?? 0}`);
+    }
+  }
+  return [...revisions].join("|");
 }
 
 export function sumThreadFileChanges(changes: ThreadFileChange[]): { added: number; deleted: number } {
@@ -311,7 +329,8 @@ export function threadTabForInAppPreview(file: { name: string; path?: string; ur
   const candidates = [file.name, file.path, file.url]
     .map((value) => (value ? threadFileName(value) : ""))
     .filter(Boolean);
-  const name = candidates.find((candidate) => threadPreviewKind(candidate) === "markdown");
+  const name = candidates.find((candidate) => threadPreviewKind(candidate) !== "unsupported")
+    ?? candidates[0];
   if (!name || (!file.path && !file.url)) return null;
   if (file.path) {
     return {
@@ -376,18 +395,14 @@ export function threadPanelOffset(width: number, containerWidth: number): number
   return Math.max(0, Math.min(width, containerWidth - THREAD_CHAT_FLOOR_WIDTH));
 }
 
+/** A side-by-side layout cannot fit both the narrow panel and usable chat. */
+export function threadPanelUsesOverlay(containerWidth: number): boolean {
+  return containerWidth > 0 && containerWidth < THREAD_PANEL_MIN_WIDTH + THREAD_CHAT_FLOOR_WIDTH;
+}
+
 export function clampThreadListWidth(width: number, panelWidth: number): number {
   const max = Math.max(THREAD_LIST_MIN_WIDTH, panelWidth - THREAD_PREVIEW_MIN_WIDTH);
   return Math.round(Math.min(Math.max(width, THREAD_LIST_MIN_WIDTH), max));
-}
-
-function markdownLinkTargets(content: string): string[] {
-  const targets: string[] = [];
-  for (const match of content.matchAll(/\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^"']*["'])?\s*\)/gu)) {
-    if (match.index != null && match.index > 0 && content[match.index - 1] === "!") continue;
-    if (match[1]) targets.push(match[1]);
-  }
-  return targets;
 }
 
 function countOrZero(value: unknown): number {

@@ -4,7 +4,6 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GoalRuntime,
-  GoalRuntimeError,
   goalTurnTokens,
   sanitizeGoalInboxMetadata,
   type GoalRuntimeCallbacks,
@@ -549,6 +548,26 @@ describe("GoalRuntime control and inbox arbitration", () => {
         webui_request_digest: "digest-overflow",
       },
     })), "goal_inbox_full");
+  });
+
+  it("persists reordered goal inbox messages across a runtime reload", async () => {
+    const { runtime, sessions } = createRuntime();
+    await createGoal(runtime);
+    const ids = ["request-0", "request-1", "request-2"];
+    for (const [index, id] of ids.entries()) {
+      await runtime.enqueueUserMessage(SESSION_KEY, new InboundMessage({
+        channel: "websocket", chatId: ROUTE.chatId, senderId: "user", content: `message-${index}`,
+        metadata: { client_request_id: id, webui_request_digest: `digest-${index}`,
+          queued_at: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString() },
+      }));
+    }
+    const ordered = [ids[2]!, ids[0]!, ids[1]!];
+    await runtime.reorderInboxEntries(SESSION_KEY, ordered, new Map(ordered.map((id, index) => [
+      id, new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+    ])));
+    const restored = new GoalRuntime({ sessions });
+    expect(restored.inbox(SESSION_KEY).map((entry) => entry.id)).toEqual(ordered);
+    expect((await restored.reserveInboxEntry(SESSION_KEY, "next-turn"))?.id).toBe(ids[2]);
   });
 
   it("persists an inbox user Turn and removes its entry in one atomic save", async () => {

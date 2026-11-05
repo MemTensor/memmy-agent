@@ -108,7 +108,7 @@ records general tool contracts and less obvious usage patterns.
 - Use `message` to send content or local media to the user/channel.
 - `read_file` reads content only for your analysis; it does not send the file to the user.
 - When sending an existing local file, attach it through the message/media mechanism instead of pasting file contents, unless the user asks for text.
-- When a file is the task's final deliverable, attach it to the current conversation through the `message` tool's `media` parameter by default.
+- When sending an existing local file, use the `message` tool's `media` parameter. Check that the file exists and is ready to open. Do not include local paths in cross-channel delivery text.
 
 ## Scheduling and Background Work
 

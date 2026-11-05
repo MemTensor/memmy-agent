@@ -1,5 +1,7 @@
 import { executeManagedTool, emitManagedToolEvent, managedExecutionRequired, ManagedExecutionError } from "./managed-execution.js";
 import { requestTiming } from "../../utils/request-timing.js";
+import { collectPrivateSkillRefs, normalizePrivateSkillRefs, projectPrivateSkillInstructions } from "./private-plugin-skills.js";
+import type { PluginSkillRef } from "@memmy/local-api-contracts";
 import crypto from "node:crypto";
 import { redactBrowserAuthArguments } from "../../utils/browser-auth-privacy.js";
 import path from "node:path";
@@ -12,6 +14,7 @@ import {
 } from "../../providers/model-input-capabilities.js";
 import type { ActualModelContext } from "@memmy/local-api-contracts";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
+import { MessageTool } from "./tools/message.js";
 import { ToolRegistry } from "./tools/registry.js";
 import type { FileMutationOutcome, ToolExecutionContext } from "./tools/base.js";
 import { withToolExecutionRequestContext } from "./tools/context.js";
@@ -141,6 +144,10 @@ type PendingImageBatch = {
 };
 
 export class AgentRunSpec {
+  privateSkillRefs: PluginSkillRef[];
+  privateSkillRequestStarted = false;
+  privateSkillPromptTokens = 0;
+  onPrivateSkillRefsChanged?: (refs: PluginSkillRef[]) => void;
   messages: Record<string, any>[];
   initialMessages: Record<string, any>[];
   tools?: ToolRegistry | any;
@@ -178,8 +185,11 @@ export class AgentRunSpec {
   onMaxFinalizationStarting?: (() => void) | null;
   currentTurnMessageStartIndex?: number | null;
   beforeFollowupModelRequest?: ((ctx: FollowupModelRequestContext) => Promise<FollowupModelContextUpdate>) | null;
+  finalResponseContinuation?: ((ctx: { finalContent: string; messages: Record<string, any>[] }) => string | null) | null;
 
   constructor(init: {
+    privateSkillRefs?: unknown;
+    onPrivateSkillRefsChanged?: (refs: PluginSkillRef[]) => void;
     messages?: Record<string, any>[];
     initialMessages?: Record<string, any>[];
     provider?: LLMProvider;
@@ -217,7 +227,10 @@ export class AgentRunSpec {
     onMaxFinalizationStarting?: (() => void) | null;
     currentTurnMessageStartIndex?: number | null;
     beforeFollowupModelRequest?: ((ctx: FollowupModelRequestContext) => Promise<FollowupModelContextUpdate>) | null;
+    finalResponseContinuation?: ((ctx: { finalContent: string; messages: Record<string, any>[] }) => string | null) | null;
   } = {}) {
+    this.privateSkillRefs = normalizePrivateSkillRefs(init.privateSkillRefs);
+    this.onPrivateSkillRefsChanged = init.onPrivateSkillRefsChanged;
     this.messages = this.initialMessages = init.messages ?? init.initialMessages ?? [];
     this.provider = init.provider;
     this.tools = init.tools;
@@ -254,6 +267,7 @@ export class AgentRunSpec {
     this.onMaxFinalizationStarting = init.onMaxFinalizationStarting ?? null;
     this.currentTurnMessageStartIndex = init.currentTurnMessageStartIndex ?? null;
     this.beforeFollowupModelRequest = init.beforeFollowupModelRequest ?? null;
+    this.finalResponseContinuation = init.finalResponseContinuation ?? null;
   }
 }
 
@@ -434,6 +448,10 @@ export class AgentRunner {
       retryMode: spec.providerRetryMode,
       onRetryWait: spec.retryWaitCallback,
     };
+    if (spec.actualModelContext?.source === "account" && spec.model === "agent_chat"
+      && spec.privateSkillRefs.some(ref => ref.pluginId === "literature-review" && ref.skillId === "literature-review")) {
+      args.taskType = "literature-review";
+    }
     if (spec.temperature != null) args.temperature = spec.temperature;
     if (spec.maxTokens != null) args.maxTokens = spec.maxTokens;
     if (spec.reasoningEffort != null) args.reasoningEffort = spec.reasoningEffort;
@@ -819,6 +837,36 @@ export class AgentRunner {
     const tools = options.toolsOverride === undefined
       ? spec.tools?.getDefinitions?.() ?? []
       : options.toolsOverride;
+    const previousRefs = JSON.stringify(spec.privateSkillRefs);
+    const publicMessages = messages;
+    try {
+      messages = await projectPrivateSkillInstructions(publicMessages, spec.privateSkillRefs, spec.tools, spec.abortSignal, spec.sessionKey, !spec.privateSkillRequestStarted,
+        () => spec.retryWaitCallback?.("Reloading private plugin instructions (retry 1 of 1)..."));
+    } catch (error) {
+      if (spec.abortSignal?.aborted) return abortedResponse();
+      const candidate = (error as { code?: string })?.code ?? (error instanceof Error ? error.message : "");
+      const reasons: Record<string, string> = {
+        plugin_skill_access_denied: "Sign in and check plugin access.",
+        plugin_skill_unavailable: "The instruction service could not be reached after one retry. Check connectivity and resume.",
+        plugin_skill_bundle_missing: "The installed plugin's instruction bundle is unavailable. Check the published plugin version.",
+        plugin_skill_invalid: "The instruction bundle failed validation. Update or repair the plugin.",
+        plugin_skill_version_changed: "The installed plugin changed during this turn. Resume in a new turn to reload the current version.",
+        plugin_skill_client_upgrade_required: "Update Memmy to load this plugin's private instructions."
+      };
+      const code = Object.hasOwn(reasons, candidate) ? candidate : "plugin_skill_load_failed";
+      return new LLMResponse({ content: `Private plugin instructions could not be loaded (${code}). ${reasons[code] ?? "Check plugin access, connectivity and version, then resume."} No plugin work was started by this model request.`,
+        finishReason: "error", errorKind: "invalid_request", errorCode: code, errorShouldRetry: false });
+    }
+    if (spec.privateSkillRefs.length) {
+      const privateMessage = messages[0];
+      spec.privateSkillPromptTokens = estimateMessageTokens(privateMessage);
+      // Reserve private context without ever exposing it to transcript compaction or checkpoints.
+      messages = [privateMessage, ...this.prepareMessagesForModel(spec, publicMessages, {
+        toolsForRequest: tools, reservedPromptTokens: spec.privateSkillPromptTokens
+      })];
+    }
+    spec.privateSkillRequestStarted = true;
+    if (JSON.stringify(spec.privateSkillRefs) !== previousRefs) spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
     const inputBudget = this.inputTokenBudget(spec);
     if (inputBudget != null) {
       const estimateResult = estimatePromptTokensChain(provider, spec.model ?? null, messages, tools);
@@ -1149,6 +1197,9 @@ export class AgentRunner {
         abortSignal: spec.abortSignal ?? null,
         toolName: call.name,
         callId: call.id ?? null,
+        uiToolCallId: getOrCreateUiToolCallId(call),
+        sessionKey: spec.sessionKey ?? null,
+        modelPreset: spec.actualModelContext?.presetId ?? null,
         stopTurn: (message) => { stopTurn ??= message; },
         reportFileMutation: (outcome) => {
           fileMutationOutcomes.set(path.resolve(outcome.path), {
@@ -1195,6 +1246,8 @@ export class AgentRunner {
         );
       }
       const result = this.normalizeToolResult(spec, call.id, call.name, raw);
+      const messageTool = spec.tools?.get?.("message");
+      if (messageTool instanceof MessageTool) messageTool.observePluginToolResult(call.name, raw);
       if (stopTurn) event.status = "error";
       await spec.hook?.afterToolCall(new AgentHookContext({ spec, toolCalls: [call], toolResults: [result], toolEvents: [event] }), call, result);
       return { call, result, event, error, ...(stopTurn ? { stopTurn } : {}) };
@@ -1599,6 +1652,8 @@ export class AgentRunner {
     const requiresBufferedLlmContent = hook.requiresBufferedLlmContent();
     const streamsHookContent = hook.wantsStreaming() && !requiresBufferedLlmContent;
     const messages = [...spec.initialMessages];
+    if (!spec.privateSkillRefs.length) spec.privateSkillRefs = collectPrivateSkillRefs(messages);
+    spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
     const toolCalls: any[] = [];
     const toolEvents: Record<string, any>[] = [];
     const toolsUsed: string[] = [];
@@ -1644,7 +1699,7 @@ export class AgentRunner {
             requestKind: "iteration",
             iteration,
             toolsForRequest,
-            reservedPromptTokens: 0,
+            reservedPromptTokens: spec.privateSkillPromptTokens,
           },
         );
         if (spec.abortSignal?.aborted) {
@@ -1667,7 +1722,7 @@ export class AgentRunner {
       let messagesForModel = this.modelContextMessages(requestMessages, modelContextProjection);
       messagesForModel = this.prepareMessagesForModel(spec, messagesForModel, {
         toolsForRequest,
-        reservedPromptTokens: 0,
+        reservedPromptTokens: spec.privateSkillPromptTokens,
       });
       messagesForModel = this.prepareImageMessages(messagesForModel, imageTextState);
 
@@ -1756,6 +1811,9 @@ export class AgentRunner {
           toolEvents.push(item.event);
           const toolMessage = { role: "tool", tool_call_id: item.call.id, name: item.call.name, content: item.result };
           messages.push(toolMessage);
+          const previousRefs = JSON.stringify(spec.privateSkillRefs);
+          spec.privateSkillRefs = collectPrivateSkillRefs([toolMessage], spec.privateSkillRefs);
+          if (JSON.stringify(spec.privateSkillRefs) !== previousRefs) spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
           completed.push(toolMessage);
         }
         context.toolResults = executed.map((item) => item.result);
@@ -1954,11 +2012,17 @@ export class AgentRunner {
         hookContinuationExhausted = true;
         break;
       }
+      const deliveryContinuation = spec.finalResponseContinuation?.({ finalContent: clean as string, messages });
       if (streamsHookContent) {
-        await hook.onStreamEnd(context, { resuming: false });
+        await hook.onStreamEnd(context, { resuming: Boolean(deliveryContinuation) });
       }
 
       messages.push(assistant ?? buildAssistantMessage(clean));
+      if (deliveryContinuation) {
+        messages.push({ role: "system", content: deliveryContinuation });
+        await hook.afterIteration(context);
+        continue;
+      }
       await this.emitCheckpoint(spec, {
         phase: "finalResponse",
         iteration,
@@ -1988,7 +2052,7 @@ export class AgentRunner {
         const reservedPromptTokens = estimateMessageTokens({
           role: "user",
           content: spec.maxIterationsFinalPrompt,
-        });
+        }) + spec.privateSkillPromptTokens;
         if (!spec.abortSignal?.aborted) {
           modelContextProjection = await this.updateProjectionBeforeFollowup(
             spec,

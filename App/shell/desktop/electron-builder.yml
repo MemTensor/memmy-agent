@@ -11,7 +11,10 @@ files:
   - package.json
   - "!dist/runtime/memory/**"
   - "!dist/native/sqlcipher/**"
+  # Plugins load from extraResources; exclude the duplicate ASAR copy.
+  - "!dist/bundled-plugins{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/docx{,/**}"
+  - "!dist/runtime/memmy-agent/dist/skills/pdf{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/pptx{,/**}"
   - "!dist/runtime/memmy-agent/dist/skills/xlsx{,/**}"
   - "!dist/runtime/memmy-agent/dist/extra-dependencies/office-rendering{,/**}"
@@ -31,6 +34,7 @@ files:
 
 asar: true
 asarUnpack:
+  - "**/plugin-runtime/windows/**"
   - "dist/native/memmy-pip.node"
   - "dist/native/menu-bar-appearance.node"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/mac/native/**"
@@ -73,6 +77,8 @@ extraResources:
     to: embedding-models
     filter:
       - "**/*"
+  - from: dist/bundled-plugins
+    to: bundled-plugins
   - from: dist/native/sqlcipher
     to: native/sqlcipher
     filter:
