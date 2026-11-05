@@ -44,6 +44,7 @@ interface AssistLaunch {
   command: string;
   args: readonly string[];
   env?: Readonly<Record<string, string>>;
+  sessionConfig?: Readonly<Record<string, string>>;
 }
 
 export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): AssistRunner {
@@ -96,7 +97,12 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
             "unavailable"
           );
         }
-        return { command, args: recipe.args, ...(recipe.env ? { env: recipe.env } : {}) };
+        return {
+          command,
+          args: recipe.args,
+          ...(recipe.env ? { env: recipe.env } : {}),
+          ...(recipe.sessionConfig ? { sessionConfig: recipe.sessionConfig } : {})
+        };
       };
 
       const runOnce = async () => {
@@ -109,6 +115,7 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
           env: mergedEnv(env, current.env),
           prompt: input.prompt,
           agentName: name,
+          ...(current.sessionConfig ? { sessionConfig: current.sessionConfig } : {}),
           ...(input.sessionId ? { sessionId: input.sessionId } : {}),
           onStep: input.onStep,
           ...(input.onTranscript ? { onTranscript: input.onTranscript } : {}),

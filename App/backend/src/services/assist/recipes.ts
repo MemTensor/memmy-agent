@@ -31,6 +31,8 @@ export interface AssistRecipe {
   env?: Readonly<Record<string, string>>;
   /** 工作目录不方便指定时（CLI 固定工作目录），改用 ACP 的 cwd 告知。 */
   cwdHint?: string;
+  /** 会话建好后要设的 ACP 会话选项（configId → 值或显示名），见 {@link ./acp-client} 的 sessionConfig。 */
+  sessionConfig?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -43,7 +45,10 @@ const RECIPES: readonly AssistRecipe[] = [
   { sourceId: "claude_code", name: "Claude Code", command: "claude-agent-acp", args: [] },
   { sourceId: "codex", name: "Codex", command: "codex-acp", args: [] },
   // Cursor 的 ACP 入口是隐藏参数：帮助里看不到，但可以直接用。
-  { sourceId: "cursor", name: "Cursor", command: "cursor-agent", args: ["acp"] },
+  // 模型统一用 Auto（ACP 里的值是 `default[]`）：CLI 的模型选择存在 ~/.cursor/cli-config.json，与 IDE 里选的不是一份，
+  // 而 Cursor 自家模型与其他模型分开计额度，CLI 里选的模型可能恰好没有额度（2026-11-05 实测：Other Models 用尽时
+  // kimi-k3 只回「Upgrade your plan to continue」，Auto 正常）。
+  { sourceId: "cursor", name: "Cursor", command: "cursor-agent", args: ["acp"], sessionConfig: { model: "default[]" } },
   { sourceId: "opencode", name: "OpenCode", command: "opencode", args: ["acp"] },
   // OpenClaw 的 CLI 工作目录固定，改由 ACP 的 cwd 指定。
   { sourceId: "openclaw", name: "OpenClaw", command: "openclaw", args: ["acp"], cwdHint: "acp" },

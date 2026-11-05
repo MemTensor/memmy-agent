@@ -46,6 +46,11 @@ export interface AcpRunOptions {
    * （QwenWork 实测 120 秒仍无响应），不能跟着它一起等下去。
    */
   authTimeoutMs?: number;
+  /**
+   * 会话建好后要设置的会话选项（ACP 的 {@code session/set_config_option}）：configId → 值。
+   * 值先按选项的 value 精确匹配，再按显示名（不分大小写）匹配；Agent 不支持或设置失败时照常执行。
+   */
+  sessionConfig?: Readonly<Record<string, string>>;
 }
 
 export interface AcpRunResult {
@@ -192,12 +197,31 @@ export const REPLY_ERROR_MAX_CHARS = 400;
 
 export function assistReplyError(reply: string, toolCalls: number, agentName = "Agent"): string | null {
   const text = reply.trim();
-  if (!text.startsWith("Error:")) return null;
+  if (!text.startsWith("Error:") && !QUOTA_REPLY.test(text)) return null;
   // 做了事还是失败，过程本身有意义，交给正常流程展示。
   if (toolCalls > 0) return null;
   // 多行或者很长的一段更像正常回答（例如解释一个有出错信息的日志）。
   if (text.includes("\n") || text.length > REPLY_ERROR_MAX_CHARS) return null;
   return `${agentName} 返回错误：${text}`;
+}
+
+/**
+ * 额度或账单问题时的回复：Cursor 在模型额度用完时同样以 {@code end_turn} 结束，回复只有一句
+ * 「Upgrade your plan to continue」或「You have an unpaid invoice …」。和上面的 Error: 一样按失败处理。
+ */
+const QUOTA_REPLY = /^(?:upgrade your plan|you have an unpaid invoice|you(?:'ve| have) (?:hit|reached) your usage limit)/iu;
+
+/**
+ * Cursor 的 ACP 在一轮结束时会在回复末尾附一行 {@code Error: RetriableError: WritableIterable is closed}，
+ * 正常回答也会带（2026-11-05 实测 2026.11.05 版本）。这一行不是这次执行的内容，要从回复里去掉。
+ */
+const TRAILING_STREAM_NOISE = /(?:^|\n)\s*Error:[^\n]*WritableIterable is closed\.?\s*$/u;
+
+/** 去掉回复末尾的那行流关闭报错；没有时原样返回。 */
+export function stripTrailingStreamNoise(text: string): string {
+  let current = text;
+  while (TRAILING_STREAM_NOISE.test(current)) current = current.replace(TRAILING_STREAM_NOISE, "");
+  return current;
 }
 
 /** 单次请求的上限：单次最长 15 分钟，超时就当作失败并告诉发起方。 */
@@ -492,11 +516,16 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
         .map((method) => method?.id)
         .filter((id): id is string => typeof id === "string" && id.length > 0);
 
+      /** 会话建好时 Agent 给出的会话选项（模型、模式等），设置 {@link AcpRunOptions.sessionConfig} 时用来找值。 */
+      let configOptions: AcpConfigOption[] = [];
+
       /** 接回已有会话；接不回（或本来就没会话）就新开一个。 */
       const openSession = async (): Promise<string> => {
         if (sessionId) {
           try {
-            await connection.request("session/load", { sessionId, cwd: options.cwd, mcpServers: [] });
+            const loaded = await connection.request("session/load", { sessionId, cwd: options.cwd, mcpServers: [] }) as
+              { configOptions?: AcpConfigOption[] } | null | undefined;
+            configOptions = Array.isArray(loaded?.configOptions) ? loaded.configOptions : [];
             return sessionId;
           } catch {
             // 这个 Agent 接不回那条会话（换过版本、会话被清理）：新开一个，本次照常执行。
@@ -504,8 +533,10 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
         }
         const session = await connection.request("session/new", { cwd: options.cwd, mcpServers: [] }) as {
           sessionId?: string;
+          configOptions?: AcpConfigOption[];
         };
         if (typeof session.sessionId !== "string") throw new AcpError("Agent 没有给我们一个会话", "failed");
+        configOptions = Array.isArray(session.configOptions) ? session.configOptions : [];
         return session.sessionId;
       };
 
@@ -546,6 +577,13 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
       sessionId = opened;
       options.onSession?.(opened);
 
+      // 配方要求的会话选项（例如 Cursor 统一用 Auto 模型）：设不上就按 Agent 自己的设置执行，不让这一步拦住执行。
+      for (const [configId, wanted] of Object.entries(options.sessionConfig ?? {})) {
+        const value = resolveConfigValue(configOptions, configId, wanted);
+        if (value === null) continue;
+        await connection.request("session/set_config_option", { sessionId, configId, value }).catch(() => undefined);
+      }
+
       prompting = true;
       try {
         await connection.request("session/prompt", {
@@ -557,12 +595,15 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
         if (isAuthenticationError(error)) throw unauthenticated(error);
         throw error;
       }
-      // Cursor 会把「账号有问题」当成正常结束：回复只有一句 Error: …。这种回复不能当答案。
-      const replyError = assistReplyError(
-        reply,
-        transcript.items.filter((item) => item.kind === "tool").length,
-        options.agentName ?? "Agent"
-      );
+      // Cursor 在回复末尾附带的流关闭报错不是执行内容：回复与执行过程里的最后一段说明都去掉。
+      const rawReply = reply;
+      reply = stripTrailingStreamNoise(reply);
+      const lastText = [...transcript.items].reverse().find((item) => item.kind === "text");
+      if (lastText && lastText.kind === "text") lastText.text = stripTrailingStreamNoise(lastText.text);
+      const toolCalls = transcript.items.filter((item) => item.kind === "tool").length;
+      // Cursor 会把「账号有问题」「额度用完」当成正常结束：回复只有一句 Error: … 或 Upgrade your plan …。
+      // 只剩那行流关闭报错时也一样：Agent 什么都没做成。这种回复不能当答案。
+      const replyError = assistReplyError(reply.trim() ? reply : rawReply, toolCalls, options.agentName ?? "Agent");
       if (replyError) throw new AcpError(replyError, "failed");
       finish(undefined, { reply: reply.trim(), steps, transcript: transcript.settle(true), sessionId });
     } catch (error) {
@@ -589,4 +630,28 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
       }
     );
   });
+}
+
+/** ACP 会话选项（{@code session/new} 返回的 {@code configOptions}）里用得到的部分。 */
+export interface AcpConfigOption {
+  id?: string;
+  currentValue?: string;
+  options?: Array<{ value?: string; name?: string }>;
+}
+
+/**
+ * 要设置的会话选项值：先按 value 精确匹配，再按显示名（不分大小写）匹配；已经是这个值时返回 null 不必再设。
+ * Agent 没给出这个选项（例如接回旧会话时不返回选项列表）就按原值试一次；给了但没有匹配的值时不设，
+ * 免得把一个它不认的值写进去。
+ */
+export function resolveConfigValue(configOptions: readonly AcpConfigOption[], configId: string, wanted: string): string | null {
+  const option = configOptions.find((candidate) => candidate.id === configId);
+  if (!option) return wanted;
+  const choices = option.options ?? [];
+  const lower = wanted.toLowerCase();
+  const match = choices.find((choice) => choice.value === wanted)
+    ?? choices.find((choice) => (choice.name ?? "").toLowerCase() === lower);
+  const value = match?.value;
+  if (!value) return null;
+  return value === option.currentValue ? null : value;
 }

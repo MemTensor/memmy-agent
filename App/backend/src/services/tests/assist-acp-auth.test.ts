@@ -2,7 +2,14 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AcpError, assistReplyError, isAuthenticationError, runAcpAgent } from "../assist/acp-client.js";
+import {
+  AcpError,
+  assistReplyError,
+  isAuthenticationError,
+  resolveConfigValue,
+  runAcpAgent,
+  stripTrailingStreamNoise
+} from "../assist/acp-client.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -55,7 +62,13 @@ process.stdin.on("data", (data) => {
       if (mode !== "never-needs-auth" && mode !== "prompt-auth" && !authed()) {
         return fail(message.id, -32000, "Authentication required: Authentication is required.");
       }
+      if (mode === "config") {
+        return reply(message.id, { sessionId: "s-1", configOptions: [{ id: "model", currentValue: "kimi-k3[reasoning=max]", options: [{ value: "default[]", name: "Auto" }, { value: "kimi-k3[reasoning=max]", name: "kimi-k3" }] }] });
+      }
       reply(message.id, { sessionId: "s-1" });
+    } else if (message.method === "session/set_config_option") {
+      record("set:" + message.params.configId + "=" + message.params.value);
+      reply(message.id, { configOptions: [] });
     } else if (message.method === "authenticate") {
       if (mode === "auth-hangs") return; // 一直不回应：实测 QwenWork 就是这样
       if (process.env.FAKE_AUTHED) fs.writeFileSync(process.env.FAKE_AUTHED, "1");
@@ -64,6 +77,15 @@ process.stdin.on("data", (data) => {
       if (mode === "prompt-auth") return fail(message.id, -32000, "Authentication required");
       if (mode === "reply-error") {
         chunk("Error: I: WritableIterable is closed");
+        return reply(message.id, { stopReason: "end_turn" });
+      }
+      if (mode === "quota") {
+        chunk("\n\nUpgrade your plan to continue");
+        return reply(message.id, { stopReason: "end_turn" });
+      }
+      if (mode === "ok-with-noise") {
+        chunk("ok");
+        chunk("\n\nError: RetriableError: WritableIterable is closed");
         return reply(message.id, { stopReason: "end_turn" });
       }
       if (mode === "reply-with-error-text") {
@@ -79,13 +101,16 @@ process.stdin.resume();
 `;
 
 interface FakeRun {
-  result?: { reply: string };
+  result?: { reply: string; transcript: Array<{ kind: string; text?: string }> };
   error?: unknown;
   calls: string[];
 }
 
 /** 跑一次假 Agent；登录标记放在临时目录里，认证成功由 Agent 自己写下。 */
-async function run(mode: string, extra: { authTimeoutMs?: number; agentName?: string } = {}): Promise<FakeRun> {
+async function run(
+  mode: string,
+  extra: { authTimeoutMs?: number; agentName?: string; sessionConfig?: Record<string, string> } = {}
+): Promise<FakeRun> {
   const root = workdir();
   const file = join(root, "calls.log");
   const result = await runAcpAgent({
@@ -179,5 +204,56 @@ describe("把 Error: 回复当失败", () => {
     expect(assistReplyError("Error: 第一行\n第二行的说明", 0, "Cursor")).toBeNull();
     expect(assistReplyError(`Error: ${"x".repeat(401)}`, 0, "Cursor")).toBeNull();
     expect(assistReplyError("正常的回答", 0, "Cursor")).toBeNull();
+  });
+});
+
+describe("Cursor 的额度错误与回复末尾的流关闭报错", () => {
+  it("reports an out-of-quota reply as a failure", async () => {
+    const { error } = await run("quota", { agentName: "Cursor" });
+    expect(error).toBeInstanceOf(AcpError);
+    expect((error as AcpError).kind).toBe("failed");
+    expect((error as AcpError).message).toBe("Cursor 返回错误：Upgrade your plan to continue");
+  });
+
+  it("drops the trailing stream-closed line from a normal reply and its transcript", async () => {
+    const { result, error } = await run("ok-with-noise", { agentName: "Cursor" });
+    expect(error).toBeUndefined();
+    expect(result?.reply).toBe("ok");
+    const texts = (result?.transcript ?? []).filter((item) => item.kind === "text").map((item) => item.text);
+    expect(texts.join("")).not.toContain("WritableIterable");
+  });
+
+  it("still fails when the stream-closed line is the whole reply", async () => {
+    const { error } = await run("reply-error", { agentName: "Cursor" });
+    expect((error as AcpError).message).toBe("Cursor 返回错误：Error: I: WritableIterable is closed");
+  });
+
+  it("strips only that trailing line", () => {
+    expect(stripTrailingStreamNoise("ok\n\nError: RetriableError: WritableIterable is closed")).toBe("ok");
+    expect(stripTrailingStreamNoise("Error: I: WritableIterable is closed")).toBe("");
+    expect(stripTrailingStreamNoise("日志里有 Error: boom\n结论在这")).toBe("日志里有 Error: boom\n结论在这");
+  });
+});
+
+describe("会话选项（Cursor 统一用 Auto）", () => {
+  it("sets the requested option after the session opens, matching by value", async () => {
+    const { calls: seen, result } = await run("config", { sessionConfig: { model: "default[]" } });
+    expect(result?.reply).toBe("ok");
+    expect(seen).toContain("set:model=default[]");
+    expect(seen.indexOf("set:model=default[]")).toBeLessThan(seen.indexOf("session/prompt"));
+  });
+
+  it("does not send anything without a session config", async () => {
+    const { calls: seen } = await run("config");
+    expect(seen.some((call) => call.startsWith("set:"))).toBe(false);
+  });
+
+  it("resolves the value by display name and skips values already in effect or unknown", () => {
+    const options = [{ id: "model", currentValue: "kimi-k3", options: [{ value: "default[]", name: "Auto" }, { value: "kimi-k3", name: "kimi-k3" }] }];
+    expect(resolveConfigValue(options, "model", "auto")).toBe("default[]");
+    expect(resolveConfigValue(options, "model", "kimi-k3")).toBeNull();
+    expect(resolveConfigValue(options, "model", "nope")).toBeNull();
+    // 没给出这个选项（接回旧会话时）就按原值试一次。
+    expect(resolveConfigValue([], "model", "default[]")).toBe("default[]");
   });
 });
