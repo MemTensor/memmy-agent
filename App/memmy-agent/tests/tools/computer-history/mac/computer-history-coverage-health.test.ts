@@ -222,6 +222,39 @@ describe("live raw visibility and summary refresh", () => {
   });
 });
 
+describe("master switch cascades optional capture settings", () => {
+  function enableConsent() {
+    fs.writeFileSync(path.join(root, "wechat-consent.json"), JSON.stringify({ version: 1, enabled: true,
+      consentId: "synthetic-consent", consentedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+    fs.writeFileSync(path.join(root, "keys.json"), "synthetic key state");
+  }
+  it("revokes WeChat persistently, cancels setup, and disables browser capture across a stop/start", async () => {
+    active(); enableConsent();
+    fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ observation: {
+      defaultApplicationBehavior: "observe", defaultURLBehavior: "observe", rules: [] } }));
+    expect(service.getBrowserCaptureIntent().enabled).toBe(true);
+    const connection = new SyntheticRecorder();
+    const kill = vi.spyOn(connection, "kill");
+    (service as unknown as { weChatConnectionChild: SyntheticRecorder | null }).weChatConnectionChild = connection;
+    const stopped = await service.stopObservation();
+    expect(stopped.observation.state).toBe("stopped");
+    expect(JSON.parse(fs.readFileSync(path.join(root, "wechat-consent.json"), "utf8")).enabled).toBe(false);
+    expect(fs.existsSync(path.join(root, "keys.json"))).toBe(false);
+    expect(kill).toHaveBeenCalled();
+    expect(service.getBrowserCaptureIntent().enabled).toBe(false);
+    service.startObservation();
+    expect(JSON.parse(fs.readFileSync(path.join(root, "wechat-consent.json"), "utf8")).enabled).toBe(false);
+    if (stopped.wechat) expect(service.snapshot().wechat).toMatchObject({ enabled: false, connection: "disabled" });
+  });
+  it.each(["pause", "shutdown"])("preserves optional consent on %s rather than treating it as switching off", async (action) => {
+    active(); enableConsent();
+    if (action === "pause") await service.pauseObservation();
+    else await service.shutdown();
+    expect(JSON.parse(fs.readFileSync(path.join(root, "wechat-consent.json"), "utf8")).enabled).toBe(true);
+    expect(service.getBrowserCaptureIntent().enabled).toBe(false);
+  });
+});
+
 describe("durable semantic evidence before raw retention", () => {
   it.each([undefined, 1])("upgrades a legacy projection (%s) without rewriting a ready summary", (projectionVersion) => {
     const segment = fixture(); append(segment, "UPGRADE_EVIDENCE"); service.snapshot();

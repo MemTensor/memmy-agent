@@ -339,6 +339,12 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
   const observationState = snapshot?.observation.state ?? "stopped";
   const recording = observationState === "running" || observationState === "stopping";
   const paused = observationState === "paused";
+  const childSettingsUnavailable = !recording && !paused;
+  useEffect(() => {
+    if (!snapshot || observationState !== "stopped" || !trayIndicatorEnabled) return;
+    setTrayIndicatorEnabled(false);
+    writeComputerHistoryTrayIndicator(false);
+  }, [snapshot, observationState, trayIndicatorEnabled]);
   const showIntroduction = !!snapshot && observationState === "stopped"
     && snapshot.histories.length === 0 && !permissionSetup && !weChatPermissionReturned;
 
@@ -587,14 +593,21 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
         </div>
       </div>
 
+      {!recording ? <p id="computer-history-capture-state" className="ch__setting-description px-6 py-3" role="status">
+        {t(paused ? "computerHistory.capturePausedSettings" : "computerHistory.childrenUnavailable")}
+      </p> : null}
+
+      <fieldset className="ch__dependent-settings" disabled={childSettingsUnavailable}
+        inert={childSettingsUnavailable} aria-label={t("computerHistory.childSettings")}
+        aria-describedby={childSettingsUnavailable ? "computer-history-capture-state" : undefined}>
       {window.memmy?.platform === "darwin" ? <div className="ch__recording-setting flex items-center justify-between">
         <div className="flex-1 pr-4">
           <div id="computer-history-tray-label" className="ch__setting-label">{t("computerHistory.trayIndicator")}</div>
           <p id="computer-history-tray-description" className="ch__setting-description">{t("computerHistory.trayIndicatorDescription")}</p>
         </div>
         <button type="button" role="switch" aria-checked={trayIndicatorEnabled}
-          aria-labelledby="computer-history-tray-label" aria-describedby="computer-history-tray-description"
-          className={`ch__recording-switch relative inline-flex shrink-0 h-5 w-9 items-center rounded-full border-0 p-0 cursor-pointer transition-colors ${trayIndicatorEnabled ? "bg-action-sky" : "bg-border-stone"}`}
+          aria-labelledby="computer-history-tray-label" aria-describedby={`computer-history-tray-description${recording ? "" : " computer-history-capture-state"}`}
+          className={`ch__recording-switch relative inline-flex shrink-0 h-5 w-9 items-center rounded-full border-0 p-0 cursor-pointer transition-colors ${recording && trayIndicatorEnabled ? "bg-action-sky" : "bg-border-stone"}`}
           onClick={() => {
             const enabled = !trayIndicatorEnabled;
             setTrayIndicatorEnabled(enabled);
@@ -630,10 +643,10 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
             role="switch"
             aria-checked={snapshot.wechat.connection === "connected"}
             aria-labelledby="computer-history-wechat-label"
-            aria-describedby="computer-history-wechat-description"
+            aria-describedby={`computer-history-wechat-description${recording ? "" : " computer-history-capture-state"}`}
             disabled={busy || !props.client || snapshot.wechat.connection === "connecting"}
             className={`ch__recording-switch relative inline-flex shrink-0 h-5 w-9 items-center rounded-full border-0 p-0 cursor-pointer transition-colors ${
-              snapshot.wechat.connection === "connected" ? "bg-action-sky" : "bg-border-stone"
+              recording && snapshot.wechat.connection === "connected" ? "bg-action-sky" : "bg-border-stone"
             }`}
             onClick={() => snapshot.wechat?.connection === "connected"
               ? void runAction((client) => client.setComputerHistoryWeChatAccess(false))
@@ -643,9 +656,10 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
           </button>
         </div>
       ) : null}
-      <ComputerHistoryBrowserEnhancement client={props.client} />
+      <ComputerHistoryBrowserEnhancement client={props.client} captureState={recording ? "recording" : paused ? "paused" : "inactive"} />
       <ComputerHistorySources key={sourcesRevision} client={props.client} syncStatus={snapshot?.memorySync}
         onChoose={() => setSourceSetupMode("edit")} />
+      </fieldset>
       </div>}
 
       {(windowsSettingsOpen || (windows && permissionSetup)) && props.client ? <WindowsHistorySettings client={props.client}

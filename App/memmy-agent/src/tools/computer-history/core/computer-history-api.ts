@@ -968,12 +968,23 @@ export class ComputerHistoryDemoService {
       if (this.observationState === "running") this.startWeChatPolling();
       if (this.llmRuntime) this.retrySummariesInBackground();
     } else {
-      this.weChatConsent.revoke();
-      this.clearWeChatPolling();
+      this.disableWeChatChatAccess();
     }
     this.weChatError = null;
     this.weChatReadFailures = 0;
     return this.snapshot();
+  }
+
+  /** Revocation persists across restart and invalidates in-flight reads/setup. */
+  private disableWeChatChatAccess(): void {
+    this.clearWeChatPolling();
+    this.weChatConsent.revoke();
+    const connection = this.weChatConnectionChild;
+    this.weChatConnectionChild = null;
+    connection?.kill("SIGINT");
+    this.weChatPhase = null;
+    this.weChatError = null;
+    this.weChatReadFailures = 0;
   }
 
   /** User-initiated setup: the helper reports phases while it restores WeChat. */
@@ -1015,6 +1026,7 @@ export class ComputerHistoryDemoService {
     this.weChatConnectionChild = child;
     let pending = "";
     const readStatus = (line: string) => {
+      if (this.weChatConnectionChild !== child || !this.weChatConsent.read().enabled) return;
       try {
         const status = JSON.parse(line) as { event?: unknown; category?: unknown; detail?: unknown };
         const failedPhase = this.weChatPhase;
@@ -1077,12 +1089,15 @@ export class ComputerHistoryDemoService {
     return this.snapshot();
   }
 
+  private activeWeChatReader: WeChatMessageBatchReader | null = null;
+
   private async pollWeChatMessages(): Promise<void> {
     if (this.weChatPollInFlight || this.weChatConnectionChild || this.observationState !== "running" || !this.segment
       || !this.weChatConsent.read().enabled) return;
     const reader = this.weChatReader();
     if (!reader) return;
     this.weChatPollInFlight = true;
+    this.activeWeChatReader = reader;
     const generation = this.weChatPollGeneration;
     try {
       // The durable cursor decides first connection versus resume. Recorder
@@ -1103,6 +1118,7 @@ export class ComputerHistoryDemoService {
     } catch (error) {
       if (generation === this.weChatPollGeneration) this.recordWeChatReadFailure(error);
     } finally {
+      if (this.activeWeChatReader === reader) this.activeWeChatReader = null;
       this.weChatPollInFlight = false;
     }
   }
@@ -1135,6 +1151,7 @@ export class ComputerHistoryDemoService {
 
   private clearWeChatPolling(): void {
     this.weChatPollGeneration += 1;
+    this.activeWeChatReader?.cancel();
     if (this.weChatPollTimer) clearInterval(this.weChatPollTimer);
     this.weChatPollTimer = null;
   }
@@ -2533,6 +2550,11 @@ export class ComputerHistoryDemoService {
     if (this.observationState === "stopped") {
       if (transitioning) return this.snapshot();
       throw new ComputerHistoryApiError(409, "Computer History is not running");
+    }
+    // Explicitly switching History off also switches its optional reader off.
+    // App shutdown preserves preferences for the next launch.
+    if (!this.shuttingDown && (this.weChatConsent.read().enabled || this.weChatConnectionChild)) {
+      this.disableWeChatChatAccess();
     }
     const segment = this.segment;
     this.observationState = "stopping";
