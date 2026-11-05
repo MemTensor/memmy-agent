@@ -3,6 +3,36 @@ import { normalizeBrowserCdpCommandOptions, normalizeBrowserCdpEventQuery,
   normalizeBrowserCdpReadCall } from './browser-cdp-readonly.js';
 
 describe('controlled browser CDP contract', () => {
+  it.each([
+    ['Runtime.evaluate', { expression: '1+1' }],
+    ['DOM.getDocument', {}],
+    ['DOM.getDocument', { depth: 3 }],
+    ['Page.captureScreenshot', {}],
+    ['Page.captureScreenshot', { format: 'jpeg' }],
+    ['Page.getLayoutMetrics', {}],
+    ['Accessibility.getFullAXTree', {}],
+  ])('accepts its own normalized output for %s', (method, params) => {
+    const call = normalizeBrowserCdpReadCall(method, params);
+    expect(normalizeBrowserCdpReadCall(call.method, call.params)).toEqual(call);
+  });
+
+  it.each([
+    ['Runtime.evaluate', { expression: '1+1' }, 'throwOnSideEffect', false],
+    ['Runtime.evaluate', { expression: '1+1' }, 'returnByValue', false],
+    ['Runtime.evaluate', { expression: '1+1' }, 'awaitPromise', true],
+    ['Runtime.evaluate', { expression: '1+1' }, 'userGesture', true],
+    ['DOM.getDocument', {}, 'pierce', true],
+    ['Page.captureScreenshot', {}, 'captureBeyondViewport', true],
+  ])('rejects altered %s safety parameter %s', (method, params, key, unsafe) => {
+    const call = normalizeBrowserCdpReadCall(method, params);
+    for (const value of [unsafe, undefined, null, 0, 'false']) {
+      expect(() => normalizeBrowserCdpReadCall(method, { ...call.params, [key as string]: value }))
+        .toThrow(/unavailable/);
+    }
+    expect(() => normalizeBrowserCdpReadCall(method, { ...call.params, unknown: false }))
+      .toThrow(/unavailable/);
+  });
+
   it('restricts commands to bounded reads and forces side-effect checks', () => {
     expect(normalizeBrowserCdpReadCall('Runtime.evaluate', { expression: 'document.title' }))
       .toEqual({ method: 'Runtime.evaluate', params: { expression: 'document.title',
