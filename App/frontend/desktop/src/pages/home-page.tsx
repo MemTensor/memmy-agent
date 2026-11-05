@@ -8,6 +8,8 @@ import { applySidebarRecordingAction, sidebarRecordingStatus } from "./recording
 import { pendingAgentQuestion, AgentQuestionCard, AgentQuestionActiveRequestContext } from "./agent-question-card.js";
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import type { RecordingStart } from "@memmy/local-api-contracts";
+import { AgentTaskRecordingOption, TaskRecordingsPanel } from "./memory/task-recordings.js";
 import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
@@ -313,6 +315,7 @@ export interface SubmitAgentComposerMessageInput {
   ensureChatSubscription?: (chatId: string) => void;
   content: string;
   displayContent?: string;
+  taskRecording?: RecordingStart;
   language?: MemmyAgentUiLanguage;
   pendingAttachments: PendingAttachment[];
   uploadAgentMedia: (attachments: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
@@ -785,6 +788,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     webui: true,
     queue_surface: "chat_composer",
     client_request_id: clientRequestId,
+    ...(input.taskRecording ? { task_recording: input.taskRecording } : {}),
     ...(capturedTarget ? { target: capturedTarget } : {}),
     ...(input.language ? { language: input.language } : {}),
     ...(confirmedModelPreset !== undefined ? { model_preset: confirmedModelPreset } : {}),
@@ -810,6 +814,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
       chatId,
       content: text,
       clientRequestId,
+      ...(input.taskRecording ? { taskRecording: input.taskRecording } : {}),
       ...(capturedTarget ? { target: capturedTarget } : {}),
       ...(input.language ? { language: input.language } : {}),
       ...(confirmedModelPreset !== undefined ? { modelPreset: confirmedModelPreset } : {}),
@@ -925,6 +930,7 @@ export function HomePage() {
   const slashCommandsRetryTimerRef = useRef<number | null>(null);
   const slashCommandsAttemptRef = useRef(0);
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
+  const [taskRecording, setTaskRecording] = useState<RecordingStart | null>(null);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [selectedComposerCommandsByScope, setSelectedComposerCommandsByScope] = useState<Record<string, typeof COMPOSER_GOAL_COMMAND>>({});
   const [recentSlashCommands, setRecentSlashCommands] = useState<string[]>(() => readRecentSlashCommands());
@@ -973,6 +979,7 @@ export function HomePage() {
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+  useEffect(() => { setTaskRecording(null); }, [chatScopeKey]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const pendingModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey];
@@ -1077,6 +1084,7 @@ export function HomePage() {
     agentMessages: state.agent.messages,
     onDraft: (text) => setCurrentComposerDraft(text),
     onStageFiles: (files) => attachMediaFilesToScope(chatScopeKey, files),
+    onStageExistingFiles: (files) => attachExistingMediaToScope(chatScopeKey, files),
     onOpenArtifact: (artifact) => {
       if (!artifact.path) return false;
       const tab = threadTabForInAppPreview({ name: artifact.name, path: artifact.path });
@@ -1990,6 +1998,7 @@ export function HomePage() {
         connection,
         ensureChatSubscription,
         content: features.agentPrompt(input) ?? input,
+        taskRecording: taskRecording ?? undefined,
         displayContent: features.agentPrompt(input) ? input : selectedComposerCommand ? composerInput : undefined,
         language,
         pendingAttachments,
@@ -2037,7 +2046,7 @@ export function HomePage() {
       });
       if (!submitted) {
         dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
-      }
+      } else setTaskRecording(null);
     } catch (error) {
       dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
       throw error;
@@ -2923,6 +2932,30 @@ export function HomePage() {
     }
   }
 
+  /**
+   * Stages files that are already stored by the gateway.
+   *
+   * Recording transcripts live in the workspace's recordings folder. Reusing
+   * their paths avoids an identical upload into the private media cache (and
+   * the random cache prefix that comes with it).
+   */
+  async function attachExistingMediaToScope(scopeKey: string, media: UploadedAgentMedia[]): Promise<boolean> {
+    const seenSourceKeys = new Set((pendingAttachmentsRef.current[scopeKey] ?? []).map((item) => item.sourceKey));
+    const nextPending: PendingAttachment[] = [];
+    for (const item of media) {
+      if (item.kind !== "file" && item.kind !== "image") continue;
+      const pending = uploadedMediaToPendingAttachment(item);
+      if (seenSourceKeys.has(pending.sourceKey)) continue;
+      seenSourceKeys.add(pending.sourceKey);
+      nextPending.push(pending);
+    }
+    if (!nextPending.length) return false;
+    setPendingAttachmentsForScope(scopeKey, (current) => [...current, ...nextPending]);
+    setComposerMediaErrorForScope(scopeKey, null);
+    track({ name: "agent_media_attached", params: { page_path: "/main", media_type: mediaTypeForAnalytics(nextPending) }, consentTier: "basic" });
+    return true;
+  }
+
   async function updatePendingImageEncoding(scopeKey: string, id: string, file: File): Promise<boolean> {
     try {
       const encoded = await encodePendingAgentImage(file);
@@ -3086,6 +3119,7 @@ export function HomePage() {
           </div>
           <div className="home-empty-column">
             <AgentOperationErrorSlot message={agentError} />
+            {state.agent.currentChatId && <TaskRecordingsPanel client={clients?.memmyAgent ?? null} chatId={state.agent.currentChatId} connection={connection} />}
             <div className="home-empty-composer-stack">
               <div
                 className="relative home-empty-composer agent-composer-shell rounded-card-lg"
@@ -3160,6 +3194,7 @@ export function HomePage() {
                   >
                     {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
                   </button>
+                  <AgentTaskRecordingOption client={clients?.memmyAgent ?? null} value={taskRecording} disabled={isCreatingChat || messageSendInFlight} onChange={setTaskRecording} />
                   <ComposerSubmitButton
                     isSending={isCurrentAgentRunning}
                     disabled={composerSubmitDisabled}
@@ -3331,6 +3366,7 @@ export function HomePage() {
                   </p>
                 ) : null}
                 <AgentOperationErrorSlot message={agentError} />
+                {state.agent.currentChatId && <TaskRecordingsPanel client={clients?.memmyAgent ?? null} chatId={state.agent.currentChatId} connection={connection} />}
                 <div className="agent-composer-stack">
                   <div ref={setQuestionDockTarget} className="agent-question-dock">
                     {pendingNativeCard ? <AgentQuestionCard key={pendingNativeCard.requestId} card={pendingNativeCard}
@@ -3409,6 +3445,7 @@ export function HomePage() {
                         >
                           {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
                         </button>
+                        <AgentTaskRecordingOption client={clients?.memmyAgent ?? null} value={taskRecording} disabled={isCreatingChat || messageSendInFlight} onChange={setTaskRecording} />
                         <ComposerSubmitButton
                           isSending={composerPrimaryAction === "stop"}
                           disabled={composerSubmitDisabled}
@@ -4061,6 +4098,28 @@ export function queuedMediaToPendingAttachment(
     status: "ready" as const,
     originalBytes: 0,
     reusedMedia: { ...media, path: media.path, name: fileName, kind: media.kind ?? "file" as const },
+  };
+  return media.kind === "image"
+    ? { ...base, kind: "image", previewUrl: media.url ?? "" }
+    : { ...base, kind: "file", extension: fileName.includes(".") ? fileName.slice(fileName.lastIndexOf(".")) : "" };
+}
+
+/**
+ * Turns a gateway-owned file into a composer attachment without another upload.
+ *
+ * Only images and documents are composer attachment types. Audio recordings
+ * reach the conversation through their text transcript instead.
+ */
+export function uploadedMediaToPendingAttachment(media: UploadedAgentMedia): PendingAttachment {
+  if (media.kind === "audio") throw new Error("Audio cannot be attached directly to the composer");
+  const fileName = media.name || "attachment";
+  const base = {
+    id: randomPendingAttachmentId(media.kind),
+    sourceKey: `stored:${media.path}`,
+    fileName,
+    status: "ready" as const,
+    originalBytes: media.bytes,
+    reusedMedia: { ...media, path: media.path, name: fileName },
   };
   return media.kind === "image"
     ? { ...base, kind: "image", previewUrl: media.url ?? "" }

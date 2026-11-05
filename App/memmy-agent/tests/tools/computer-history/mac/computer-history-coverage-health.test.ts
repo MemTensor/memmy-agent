@@ -34,6 +34,7 @@ vi.mock("../../../../src/tools/computer-history/memory-adapter.js", () => ({
   },
 }));
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
+import { applyNarrative, compactEventEvidence } from "../../../../src/tools/computer-history/mac/summary-writer.js";
 
 interface FixtureSegment {
   id: string; directory: string; eventsFile: string; historyFile: string; metadataFile: string;
@@ -222,6 +223,60 @@ describe("live raw visibility and summary refresh", () => {
 });
 
 describe("durable semantic evidence before raw retention", () => {
+  it.each([undefined, 1])("upgrades a legacy projection (%s) without rewriting a ready summary", (projectionVersion) => {
+    const segment = fixture(); append(segment, "UPGRADE_EVIDENCE"); service.snapshot();
+    const complete = compactEventEvidence(fs.readFileSync(segment.eventsFile, "utf8").split("\n"), { purpose: "retention" });
+    const checkpoint = JSON.parse(fs.readFileSync(checkpointPath(segment), "utf8"));
+    checkpoint.projectionVersion = projectionVersion;
+    checkpoint.evidence = "Older projection with less capture context";
+    checkpoint.evidenceSha256 = crypto.createHash("sha256").update(checkpoint.evidence).digest("hex");
+    fs.writeFileSync(checkpointPath(segment), JSON.stringify(checkpoint));
+    const ready = applyNarrative(fs.readFileSync(segment.historyFile, "utf8"), {
+      title: "Existing account", description: "Already narrated", body: "## Memory summary\n\nAlready narrated.",
+    });
+    fs.writeFileSync(segment.historyFile, ready);
+    expired();
+    expect(service.snapshot().observation).toMatchObject({ narrationError: null, retentionDeferred: false });
+    expect(fs.existsSync(segment.eventsFile)).toBe(false);
+    expect(JSON.parse(fs.readFileSync(checkpointPath(segment), "utf8")).evidence).toBe(complete);
+    expect(fs.readFileSync(segment.historyFile, "utf8")).toBe(ready);
+    expect(fs.existsSync(`${segment.historyFile}.staging`)).toBe(false);
+  });
+
+  it("keeps raw and the previous archive when projection migration fails, then retries", () => {
+    const segment = fixture(); append(segment, "MIGRATION_RETRY"); service.snapshot();
+    const legacy = JSON.parse(fs.readFileSync(checkpointPath(segment), "utf8"));
+    delete legacy.projectionVersion;
+    legacy.evidence = "Older projection";
+    legacy.evidenceSha256 = crypto.createHash("sha256").update(legacy.evidence).digest("hex");
+    const saved = JSON.stringify(legacy);
+    fs.writeFileSync(checkpointPath(segment), saved);
+    service.setLlmRuntime(null, "byok", "Actual model configuration error");
+    const original = fs.writeFileSync;
+    const writes = vi.spyOn(fs, "writeFileSync").mockImplementation(((file, ...args) => {
+      if (String(file).startsWith(`${checkpointPath(segment)}.`)) throw Object.assign(new Error("synthetic archive failure"), { code: "EIO" });
+      return original(file, ...args);
+    }) as typeof fs.writeFileSync);
+    expired();
+    expect(service.snapshot().observation).toMatchObject({ narrationError: "Actual model configuration error", retentionDeferred: true });
+    expect(fs.existsSync(segment.eventsFile)).toBe(true);
+    expect(fs.readFileSync(checkpointPath(segment), "utf8")).toBe(saved);
+    writes.mockRestore();
+    expect(service.snapshot().observation).toMatchObject({ narrationError: "Actual model configuration error", retentionDeferred: false });
+    expect(fs.existsSync(segment.eventsFile)).toBe(false);
+    expect(fs.readFileSync(checkpointPath(segment), "utf8")).toContain("MIGRATION_RETRY");
+  });
+
+  it("still reads legacy archives when their raw source has already expired", () => {
+    const segment = fixture(); append(segment, "LEGACY_ARCHIVED_FACT"); service.snapshot();
+    const legacy = JSON.parse(fs.readFileSync(checkpointPath(segment), "utf8"));
+    delete legacy.projectionVersion;
+    fs.writeFileSync(checkpointPath(segment), JSON.stringify(legacy));
+    fs.rmSync(segment.directory, { recursive: true });
+    expect(service.searchHistories("LEGACY_ARCHIVED_FACT")[0]?.history.id).toBe(`${segment.id}-10min-summary`);
+    expect(service.snapshot().observation.narrationError).toBeNull();
+  });
+
   it("retains all activity arcs and long fields without a model before expiring raw", () => {
     const segment = fixture();
     for (let i = 0; i < 61; i++) append(segment, `ARC_${i}_MARKER`, `complete field ${i} `.repeat(70));
@@ -251,7 +306,7 @@ describe("durable semantic evidence before raw retention", () => {
     expired(); service.snapshot();
     expect(fs.existsSync(segment.eventsFile)).toBe(true);
     expect(fs.readFileSync(checkpointPath(segment), "utf8")).toBe(standing);
-    expect(service.snapshot().observation.maintenanceError).toBe("retention_deferred");
+    expect(service.snapshot().observation.retentionDeferred).toBe(true);
     expect(service.snapshot().observation.narrationError).toBeNull();
   });
 
@@ -259,7 +314,7 @@ describe("durable semantic evidence before raw retention", () => {
     const segment = fixture(); append(segment, "MIGRATE_COMPLETE_EVIDENCE"); service.snapshot();
     const file = checkpointPath(segment);
     const legacy = JSON.parse(fs.readFileSync(file, "utf8"));
-    delete legacy.evidenceFormatVersion;
+    delete legacy.projectionVersion;
     legacy.evidence = "Old extraction format";
     legacy.evidenceSha256 = crypto.createHash("sha256").update(legacy.evidence).digest("hex");
     fs.writeFileSync(file, JSON.stringify(legacy));
@@ -269,10 +324,10 @@ describe("durable semantic evidence before raw retention", () => {
     expired();
     const snapshot = service.snapshot();
     const migrated = JSON.parse(fs.readFileSync(file, "utf8"));
-    expect(migrated.evidenceFormatVersion).toBe(1);
+    expect(migrated.projectionVersion).toBeGreaterThan(0);
     expect(migrated.evidence).toContain("MIGRATE_COMPLETE_EVIDENCE");
     expect(fs.existsSync(segment.eventsFile)).toBe(false);
-    expect(snapshot.observation).toMatchObject({ maintenanceError: null,
+    expect(snapshot.observation).toMatchObject({ retentionDeferred: false,
       narrationError: "Insufficient balance", narrationErrorCategory: "quota_exhausted" });
   });
 
@@ -280,7 +335,7 @@ describe("durable semantic evidence before raw retention", () => {
     const segment = fixture(); append(segment, "LEGACY_RETRY"); service.snapshot();
     const file = checkpointPath(segment);
     const legacy = JSON.parse(fs.readFileSync(file, "utf8"));
-    delete legacy.evidenceFormatVersion;
+    delete legacy.projectionVersion;
     fs.writeFileSync(file, JSON.stringify(legacy));
     const saved = fs.readFileSync(file, "utf8");
     const original = fs.writeFileSync;
@@ -289,11 +344,11 @@ describe("durable semantic evidence before raw retention", () => {
       return original(target, ...args);
     }) as typeof fs.writeFileSync);
     expired();
-    expect(service.snapshot().observation).toMatchObject({ maintenanceError: "retention_deferred", narrationError: null });
+    expect(service.snapshot().observation).toMatchObject({ retentionDeferred: true, narrationError: null });
     expect(fs.existsSync(segment.eventsFile)).toBe(true);
     expect(fs.readFileSync(file, "utf8")).toBe(saved);
     writes.mockRestore();
-    expect(service.snapshot().observation.maintenanceError).toBeNull();
+    expect(service.snapshot().observation.retentionDeferred).toBe(false);
     expect(fs.existsSync(segment.eventsFile)).toBe(false);
   });
 
@@ -384,6 +439,8 @@ describe("capture health protocol", () => {
   });
 
   it("reports missing macOS heartbeat and recovers without requiring user events", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+    vi.spyOn(os, "release").mockReturnValue("26.0.0");
     active(); await vi.advanceTimersByTimeAsync(60_001);
     expect(status()).toMatchObject({ status: "degraded", issues: [{ code: "heartbeat_missing", count: 1 }] });
     health("heartbeat"); expect(status().status).toBe("healthy");
@@ -470,7 +527,8 @@ describe("capture health protocol", () => {
         limitations: expect.arrayContaining(["foreground_events_and_accessibility_only"]) });
       expect(status().limitations).not.toContain("private_and_unverifiable_browsers_excluded");
     });
-    expect(status().limitations).not.toContain("foreground_events_and_accessibility_only");
+    expect(status().limitations).toContain(process.platform === "win32"
+      ? "foreground_events_and_accessibility_only" : "foreground_accessibility_only");
   });
 
   it("uses Windows heartbeats to confirm idle capture and reports a missing heartbeat despite new events", async () => {

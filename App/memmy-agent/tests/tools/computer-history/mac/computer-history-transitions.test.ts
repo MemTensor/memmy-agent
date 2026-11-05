@@ -22,6 +22,7 @@ vi.mock("node:child_process", async (original) => ({
   spawn: () => { const child = new RecorderChild(); state.children.push(child); return child; },
 }));
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
+import { collectorGate } from "../../../../src/tools/computer-history/core/collector-gate.js";
 
 let root: string;
 let service: ComputerHistoryDemoService;
@@ -98,6 +99,19 @@ describe("recorder transition ordering", () => {
     const file = path.join(root, "recordings", "segments", id, "events.jsonl");
     fs.appendFileSync(file, JSON.stringify({ recordType: "human_event", eventType: "recording_stopped", details: { reason } }) + "\n");
   }
+
+  it("holds the shared capture gate until the legacy process exits, then blocks history while a task owns it", async () => {
+    service.startObservation();
+    const pause = service.pauseObservation();
+    expect(() => collectorGate.acquire("task")).toThrow("collector_busy");
+    state.children[0].exit(); await pause;
+    const release = collectorGate.acquire("task");
+    try {
+      expect(() => service.resumeObservation()).toThrow("collector_busy");
+      expect(state.children).toHaveLength(1);
+    } finally { release(); }
+    service.resumeObservation(); expect(state.children).toHaveLength(2);
+  });
 
   it.each(["stop_hotkey", "user_stop", "user_interrupt"])("finishes a user stop (%s) without an error", async (reason) => {
     service.startObservation();

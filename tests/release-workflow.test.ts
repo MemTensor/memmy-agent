@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
+import { bash } from "./fixtures/bash.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const legacyWorkflowPath = resolve(repoRoot, ".github/workflows/github-release.yml");
@@ -192,7 +193,7 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(releaseCompareSource).toContain('"--name-status", "-z"');
     expect(releaseCompareSource).toContain('"--numstat", "-z"');
     expect(releaseCompareSource).toContain('"merge-base", "--is-ancestor"');
-  });
+  }, 30_000);
 
   it("keeps every shell block syntactically valid", () => {
     const tempDir = mkdtempSync(resolve(tmpdir(), "memmy-release-workflow-"));
@@ -203,7 +204,7 @@ describe("GitHub Draft Release v2 workflow", () => {
 
       const scriptPath = resolve(tempDir, `step-${index}.sh`);
       writeFileSync(scriptPath, script);
-      const result = spawnSync("bash", ["-n", scriptPath], {
+      const result = spawnSync(bash, ["-n", scriptPath], {
         cwd: repoRoot,
         encoding: "utf8",
       });

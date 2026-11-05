@@ -218,7 +218,7 @@ describe("buildResponsesBody extra body integration", () => {
     expect(body.parallel_tool_calls).toBe(false);
   });
 
-  it("appends configured Responses API tools", () => {
+  it.each([undefined, true, false])("appends configured Responses API tools while preserving strict=%s", (strict) => {
     const provider = new OpenAICompatProvider({
       apiKey: "test-key",
       defaultModel: "gpt-5",
@@ -235,6 +235,7 @@ describe("buildResponsesBody extra body integration", () => {
               name: "read_file",
               description: "Read a file",
               parameters: { type: "object" },
+              ...(strict === undefined ? {} : { strict }),
             },
           },
         ],
@@ -247,6 +248,7 @@ describe("buildResponsesBody extra body integration", () => {
         name: "read_file",
         description: "Read a file",
         parameters: { type: "object" },
+        strict: strict ?? false,
       },
       { type: "web_search" },
     ]);

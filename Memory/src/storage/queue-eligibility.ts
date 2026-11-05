@@ -51,29 +51,7 @@ export function mainQueueEligibility(at: string, options: QueueEligibilityOption
                json_extract(payload_json, '$.runAfter') IS NULL
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
              )
-             AND ${includeDependencyBlocked ? "1=1" : `(
-               job_type NOT IN ('l3_world_model_update', 'work_memory_extract')
-               OR (
-                 scope_key IS NOT NULL
-                 AND scope_seq IS NOT NULL
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM evolution_jobs AS leased_l3_job
-                   WHERE leased_l3_job.job_type = evolution_jobs.job_type
-                     AND leased_l3_job.scope_key = evolution_jobs.scope_key
-                     AND leased_l3_job.status = 'leased'
-                     AND leased_l3_job.id <> evolution_jobs.id
-                 )
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM evolution_jobs AS earlier_l3_job
-                   WHERE earlier_l3_job.job_type = evolution_jobs.job_type
-                     AND earlier_l3_job.scope_key = evolution_jobs.scope_key
-                     AND earlier_l3_job.scope_seq < evolution_jobs.scope_seq
-                     AND earlier_l3_job.status IN ('queued', 'leased', 'failed')
-                 )
-               )
-             )`}
+             AND ${includeDependencyBlocked ? "1=1" : scopedJobReadySql()}
              AND ${includeDependencyBlocked ? "1=1" : `NOT (
                job_type = 'feedback_experience'
                AND EXISTS (
@@ -131,9 +109,73 @@ export function mainQueueEligibility(at: string, options: QueueEligibilityOption
              ))`}
              ${allowedJobTypes ? `AND job_type IN (${allowedJobTypes.map(() => "?").join(", ")})` : ""}
              ${excludedJobTypes?.length ? `AND job_type NOT IN (${excludedJobTypes.map(() => "?").join(", ")})` : ""}
+             ${l3ProfileHeldSql(excludedJobTypes)}
              ${targetFilter}`,
-    params: [at, at, at, ...(allowedJobTypes ?? []), ...(excludedJobTypes ?? []), ...(targetMemoryIds ?? [])]
+    params: [at, at, at, ...(includeDependencyBlocked ? [] : [at]),
+      ...(allowedJobTypes ?? []), ...(excludedJobTypes ?? []), ...(targetMemoryIds ?? [])]
   };
+}
+
+/**
+ * Profile jobs of the L3 that is not running wait with its update jobs: excluding l3_unit_update
+ * (the new L3 is off) holds new-L3 profiles, excluding l3_world_model_update (the new L3 is on)
+ * holds the old project profiles.
+ */
+export function l3ProfileHeldSql(excludedJobTypes: readonly string[] | undefined): string {
+  const held = [
+    ...(excludedJobTypes?.includes("l3_unit_update")
+      ? ["NOT (job_type = 'project_environment_profile' AND json_extract(payload_json, '$.mode') IS 'l3_field')"] : []),
+    ...(excludedJobTypes?.includes("l3_world_model_update")
+      ? ["NOT (job_type = 'project_environment_profile' AND json_extract(payload_json, '$.mode') IS NOT 'l3_field')"] : [])
+  ];
+  return held.map((condition) => `AND ${condition}`).join(" ");
+}
+
+/**
+ * Whether a job is not held back by an earlier job of its scope (L3 and Work Memory run in order)
+ * or, for a new-L3 batch, by L1 summaries still being written. Leasing and the worker's next
+ * wake-up both use it; a wake-up time for a job that cannot be leased would spin the worker.
+ * Its one parameter is the current time: a lease that ran out no longer holds the scope, so an
+ * earlier batch put back in the queue is not stuck behind a later batch whose run was lost.
+ */
+export function scopedJobReadySql(): string {
+  return `(
+      job_type NOT IN ('l3_world_model_update', 'l3_unit_update', 'work_memory_extract')
+      OR (
+        scope_key IS NOT NULL
+        AND scope_seq IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM evolution_jobs AS leased_l3_job
+          WHERE leased_l3_job.job_type = evolution_jobs.job_type
+            AND leased_l3_job.scope_key = evolution_jobs.scope_key
+            AND leased_l3_job.status = 'leased'
+            AND leased_l3_job.leased_until > ?
+            AND leased_l3_job.id <> evolution_jobs.id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM evolution_jobs AS earlier_l3_job
+          WHERE earlier_l3_job.job_type = evolution_jobs.job_type
+            AND earlier_l3_job.scope_key = evolution_jobs.scope_key
+            AND earlier_l3_job.scope_seq < evolution_jobs.scope_seq
+            AND earlier_l3_job.status IN ('queued', 'leased', 'failed')
+        )
+      )
+    )
+    AND NOT (
+      job_type = 'l3_unit_update'
+      AND EXISTS (
+        SELECT 1
+        FROM l3_unit_batches AS unit_batch, json_each(unit_batch.l1_memory_ids_json) AS batch_l1
+        JOIN memory_processing_state AS l1_state ON l1_state.memory_id = batch_l1.value
+        JOIN memories AS batch_memory ON batch_memory.id = l1_state.memory_id
+        WHERE unit_batch.id = CAST(json_extract(evolution_jobs.payload_json, '$.batchId') AS TEXT)
+          AND l1_state.state IN ('summary_pending', 'summarizing')
+          -- A deleted L1 is skipped by the pipeline, so it must not hold the batch back.
+          AND batch_memory.deleted_at IS NULL AND batch_memory.status != 'deleted'
+      )
+    )`;
 }
 
 export function retryQueueEligibility(now: number, targetMemoryIds?: readonly string[]): {
