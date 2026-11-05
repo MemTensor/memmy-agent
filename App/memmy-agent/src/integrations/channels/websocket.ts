@@ -2613,7 +2613,13 @@ export class WebSocketChannel extends BaseChannel {
         const bytes = Buffer.from(await file.arrayBuffer());
         const originalName = typeof file.name === "string" && file.name.trim() ? file.name : "attachment";
         const classification = classifyWebuiUploadAttachment(originalName, declaredMime, bytes);
-        if (!classification) return failUpload(httpError(415, "unsupported attachment mime"));
+        if (!classification) {
+          const extension = path.extname(originalName).toLowerCase();
+          const message = TEXT_MIME_BY_EXTENSION[extension] && !looksLikeText(bytes)
+            ? "invalid_text_content: file is binary or uses an unsupported text encoding"
+            : "unsupported attachment mime";
+          return failUpload(httpError(415, message));
+        }
         const safeOriginalName = safeFilename(originalName).replace(/\.[^.]*$/, "") + classification.extension;
         const inWorkspace = targets[index] === WEBUI_RECORDINGS_TARGET;
         let target: string;
@@ -6164,6 +6170,16 @@ function looksLikeZip(bytes: Buffer): boolean {
 
 function looksLikeText(bytes: Buffer): boolean {
   const sample = bytes.subarray(0, Math.min(bytes.length, 64 * 1024));
+  // UTF-16 text legitimately contains zero bytes; validate BOM-marked text
+  // after decoding rather than treating it as a binary payload.
+  const encoding = sample[0] === 0xff && sample[1] === 0xfe ? "utf-16le"
+    : sample[0] === 0xfe && sample[1] === 0xff ? "utf-16be" : null;
+  if (encoding) {
+    try {
+      const text = new TextDecoder(encoding, { fatal: true }).decode(bytes);
+      return !/[\u0000-\u0008\u000e-\u001f]/u.test(text);
+    } catch { return false; }
+  }
   return !sample.includes(0);
 }
 

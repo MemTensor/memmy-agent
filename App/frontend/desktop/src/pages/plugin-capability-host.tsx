@@ -1276,6 +1276,8 @@ export function FileInputCard(props: {
   const reviewImport = props.pluginId === "literature-review" && payload.cardType === "source-import";
   const [files, setFiles] = useState<File[]>([]);
   const [skippedFromFolder, setSkippedFromFolder] = useState(0);
+  const [uploadErrors, setUploadErrors] = useState(new Map<File, string>());
+  const uploadedReviewFiles = useRef(new Map<File, UploadedAgentMedia[]>());
   const localPreviewUrls = useRef<string[]>([]);
   useEffect(() => () => { for (const uri of localPreviewUrls.current) URL.revokeObjectURL(uri); }, []);
   const openSelected = (file: File) => {
@@ -1293,6 +1295,10 @@ export function FileInputCard(props: {
     return true;
   });
   useEffect(() => { const draft = fileDrafts?.get(fileDraftKey); if (draft) setFiles(draft); }, [fileDraftKey, fileDrafts]);
+  useEffect(() => {
+    setUploadErrors(new Map());
+    uploadedReviewFiles.current.clear();
+  }, [fileDraftKey]);
   useEffect(() => { if (!props.disabled && pendingFeedback.current) void releaseForChat(); }, [props.disabled]);
   async function releaseForChat() {
     const feedback = pendingFeedback.current;
@@ -1413,6 +1419,7 @@ export function FileInputCard(props: {
     // card keeps replacing, where the second pick is a new choice.
     const next = payload.multiple === true ? appendUniqueFiles(files, picked) : picked;
     setFiles(next);
+    if (props.status === "error") props.onStatus("idle");
     if (fileDrafts?.has(fileDraftKey)) fileDrafts.set(fileDraftKey, next);
     const nextReady = next.filter((file) => classifyPluginInputFile(file, accept, maxBytes, fileRules, t).status === "ready");
     setValidationError(validateReadyFileCount([...nextReady, ...stagedFiles], maxFiles, minFiles, t));
@@ -1431,6 +1438,10 @@ export function FileInputCard(props: {
   };
   const remove = (index: number) => {
     if (submitting.current || props.disabled) return;
+    const removed = files[index];
+    setUploadErrors((current) => { const next = new Map(current); if (removed) next.delete(removed); return next; });
+    if (removed) uploadedReviewFiles.current.delete(removed);
+    if (props.status === "error") props.onStatus("idle");
     const next = files.filter((_file, candidateIndex) => candidateIndex !== index);
     setFiles(next);
     if (fileDrafts?.has(fileDraftKey)) {
@@ -1450,7 +1461,26 @@ export function FileInputCard(props: {
     submitting.current = true;
     props.onStatus("submitting");
     try {
-      const uploaded = readyFiles.length ? await props.onUploadFiles(readyFiles.map((file) => {
+      let uploaded: UploadedAgentMedia[];
+      if (reviewImport && !payload.targetPaperId) {
+        const errors = new Map<File, string>();
+        setUploadErrors(new Map());
+        for (const file of readyFiles) {
+          if (uploadedReviewFiles.current.has(file)) continue;
+          try {
+            const classification = classifyAgentAttachmentFile(file, { allowAudio: true })!;
+            const result = await props.onUploadFiles([{ blob: file, name: file.name, kind: classification.kind, mime: classification.mime }]);
+            if (!result.length) throw new Error("empty_upload_result");
+            uploadedReviewFiles.current.set(file, result);
+          } catch (error) {
+            errors.set(file, error instanceof Error && error.message.includes("invalid_text_content")
+              ? t("plugin.ui.invalidTextContent") : t("plugin.ui.uploadFailed"));
+          }
+        }
+        setUploadErrors(errors);
+        if (errors.size) { submitting.current = false; props.onStatus("error"); return; }
+        uploaded = readyFiles.flatMap((file) => uploadedReviewFiles.current.get(file) ?? []);
+      } else uploaded = readyFiles.length ? await props.onUploadFiles(readyFiles.map((file) => {
         const classification = classifyAgentAttachmentFile(file, { allowAudio: true })!;
         return { blob: file, name: file.name, kind: classification.kind, mime: classification.mime };
       })) : [];
@@ -1554,9 +1584,9 @@ export function FileInputCard(props: {
     </footer>
   </article>;
   if (props.pluginId === REVIEW_PLUGIN_ID && payload.cardType === "source-import" && !payload.targetPaperId) return <ReviewSourceCard
-    files={fileStates.map((item) => ({ file: item.file, blocked: item.status === "blocked" ? item.message : null }))}
+    files={fileStates.map((item) => ({ file: item.file, blocked: item.status === "blocked" ? item.message : null, uploadError: uploadErrors.get(item.file) }))}
     accept={accept} maxFiles={maxFiles} validationError={validationError}
-    skippedFromFolder={skippedFromFolder} status={props.status} disabled={props.disabled}
+    skippedFromFolder={skippedFromFolder} status={uploadErrors.size ? "idle" : props.status} disabled={props.disabled}
     canUpload={Boolean(props.onUploadFiles) && readyFiles.length > 0} english={language === "en-US"}
     onFilesPicked={(picked) => { setSkippedFromFolder(0); addFiles(picked); }} onFolderPicked={chooseReviewFolder}
     onRemove={remove} onConfirm={() => { void upload(); }} onSkip={() => { void skip(); }} />;

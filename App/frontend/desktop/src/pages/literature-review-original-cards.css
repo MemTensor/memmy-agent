@@ -322,6 +322,13 @@
   white-space: nowrap;
 }
 
+.litrev-source-list__row small.litrev-source-list__error {
+  color: var(--color-danger, #b42318);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 320px;
+}
+
 .litrev-source-list__row > button {
   display: inline-grid;
   width: 24px;
