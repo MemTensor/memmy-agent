@@ -34,7 +34,12 @@ function run() {
     }
   }
   function permission(askUserIfNeeded) {
-    var target = $.NSAppleEventDescriptor.descriptorWithBundleIdentifier("com.microsoft.Excel");
+    var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("com.microsoft.Excel");
+    var count = Number(apps.count);
+    if (count === 0) fail("Microsoft Excel did not start; open Excel and retry authorization", "excelNotRunning");
+    if (count !== 1) fail("Multiple Excel application instances are running; close extra instances and retry", "multipleInstances");
+    // Bundle-ID descriptors can return procNotFound even while Excel is running.
+    var target = $.NSAppleEventDescriptor.descriptorWithProcessIdentifier(apps.objectAtIndex(0).processIdentifier);
     var code = $.AEDeterminePermissionToAutomateTarget(target.aeDesc, 0x2a2a2a2a, 0x2a2a2a2a, askUserIfNeeded === true);
     if (code === -1744) fail("Automation permission required (-1744). Retry Excel authorization and allow Memmy to control Microsoft Excel in the system prompt", code);
     if (code === -1743) fail("Automation denied (-1743). Allow Memmy to control Microsoft Excel in System Settings > Privacy & Security > Automation, then retry Excel authorization", code);
