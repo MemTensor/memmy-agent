@@ -1,4 +1,5 @@
 /** Model config tester module. */
+import { anthropicRequestModelId } from "@memmy/local-api-contracts";
 import type {
   ModelConfigTestInput,
   ModelConfigTestResult,
@@ -114,7 +115,7 @@ function chatProbe(input: ResolvedModelConfigTestInput): ConnectionProbe | null 
       headers: probeHeaders({ "Content-Type": "application/json",
         ...(input.apiKey ? { "x-api-key": input.apiKey } : {}),
         "anthropic-version": ANTHROPIC_VERSION }, input.extraHeaders),
-      body: { model: input.modelId, messages, max_tokens: 64, stream: false },
+      body: { model: anthropicRequestModelId(input.modelId), messages, max_tokens: 64, stream: false },
       isValidBody(body) {
         const value = record(body);
         return value.type === "message" && value.role === "assistant" && Array.isArray(value.content)

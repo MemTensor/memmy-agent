@@ -57,6 +57,28 @@ describe("model config tester", () => {
     expect(result.ok).toBe(true);
   });
 
+  it.each([
+    ["anthropic-messages", "anthropic/claude-sonnet-test", "claude-sonnet-test"],
+    ["anthropic-messages", "claude-sonnet-test", "claude-sonnet-test"],
+    ["anthropic-messages", "gateway/claude-sonnet-test", "gateway/claude-sonnet-test"],
+    ["anthropic-messages", "gateway/anthropic/claude-sonnet-test", "gateway/anthropic/claude-sonnet-test"],
+    ["openai-chat-completions", "anthropic/claude-sonnet-test", "anthropic/claude-sonnet-test"],
+    ["openai-chat-completions", "deepseek/deepseek-flash", "deepseek/deepseek-flash"]
+  ] as const)("uses the runtime model name for %s / %s", async (protocol, modelId, expected) => {
+    const fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      return body.model === expected
+        ? json(protocol === "anthropic-messages" ? message : completion)
+        : json({ error: { message: "model not found" } }, 404);
+    });
+    const config = input({ protocol, modelId });
+    const result = await createHttpModelConfigTester({ fetch }).test(config);
+    expect(result.ok).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body)).model).toBe(expected);
+    expect(config.modelId).toBe(modelId);
+  });
+
   it.each([{ data: [] }, { type: "message", role: "assistant", content: [] }, { type: "error", error: { message: "invalid model" } }])(
     "rejects invalid Anthropic responses: %j", async body => {
       expect((await createHttpModelConfigTester({ fetch: async () => json(body) }).test(input({ protocol: "anthropic-messages" }))).ok).toBe(false);
