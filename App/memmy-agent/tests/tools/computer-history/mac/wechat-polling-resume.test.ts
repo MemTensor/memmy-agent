@@ -35,6 +35,7 @@ vi.mock("../../../../src/tools/computer-history/win/private-files.js", () => ({
   prepareWindowsWeChatState: () => {}, validateWindowsWeChatConsent: () => true,
 }));
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
+import { mockMacConsentPermissions } from "../private-consent-fixture.js";
 import {
   WeChatMessageBatchReader, WeChatReaderError, type WeChatMessageEvidence,
 } from "../../../../src/tools/computer-history/mac/wechat-message-batch.js";
@@ -94,6 +95,7 @@ beforeEach(() => {
   fs.mkdirSync(state, { mode: 0o700 });
   cursorFile = path.join(state, "cursor.json");
   consentFile = path.join(state, "consent.json");
+  mockMacConsentPermissions(consentFile);
   const library = path.join(root, "sqlcipher.dylib");
   fs.writeFileSync(library, "inert fixture");
   fs.writeFileSync(path.join(root, "recorder.js"), "// inert fixture");
