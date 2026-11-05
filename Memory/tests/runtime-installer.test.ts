@@ -1,3 +1,5 @@
+import { upgradeMemoryCli } from "../src/cli/setup.js";
+import { parse as parseYaml } from "yaml";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +24,61 @@ afterEach(() => {
 });
 
 describe("standalone Memory runtime installer", () => {
+  it("persists and reuses a custom configuration path and token", async () => {
+    const root = tempRoot(); const home = join(root, "home"), configPath = join(root, "custom.yaml");
+    const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
+    const flags = { home, runtimeDirectory, skipServiceRegistration: true, skipHealthCheck: true };
+    await installMemoryRuntime({ ...flags, configPath });
+    const original = readFileSync(configPath, "utf8");
+    expect(original).toMatch(/token: [a-f0-9]{64}/);
+    expect(await installMemoryRuntime({ ...flags, preferInstalledCompatible: true })).toMatchObject({ configPath });
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+    expect(existsSync(join(home, "config.yaml"))).toBe(false);
+  });
+  it("imports legacy settings before initializing the first shared credential during upgrade", async () => {
+    const root = tempRoot(), home = join(root, "home");
+    const legacy = join(root, ".openclaw", "memos-plugin");
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, "config.yaml"), "hub: {enabled: false}\n");
+    const result = await upgradeMemoryCli({
+      home, legacyRoot: root, nonInteractive: true, runtimeDirectory: createRuntimeDirectory(root, "2.1.0"),
+      skipServiceRegistration: true, skipHealthCheck: true
+    });
+    expect(result.migration).toMatchObject({ configSource: "openclaw" });
+    expect(parseYaml(readFileSync(join(home, "config.yaml"), "utf8")).memmyMemory).toMatchObject({
+      migratedFrom: "openclaw", storage: { token: expect.stringMatching(/^[a-f0-9]{64}$/) }
+    });
+  });
+  it("waits for the old service lock in its custom config directory before switching", async () => {
+    const root = tempRoot(), home = join(root, "home");
+    const configPath = join(root, "custom", "config.yaml");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true };
+    await installMemoryRuntime({ ...flags, configPath, runtimeDirectory: createRuntimeDirectory(root, "2.1.0") });
+    const state = join(root, "custom", "memory-service");
+    mkdirSync(state, { recursive: true });
+    const lock = join(state, "service.lock");
+    writeFileSync(lock, JSON.stringify({ pid: process.pid }));
+    const switching = installMemoryRuntime({ ...flags, configPath: join(home, "new.yaml"), runtimeDirectory: createRuntimeDirectory(root, "2.1.1") });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect((await currentInstalledRuntime(home))?.version).toBe("2.1.0");
+    rmSync(lock);
+    await switching;
+    expect((await currentInstalledRuntime(home))?.version).toBe("2.1.1");
+  });
+  it.each(["anonymous", "mismatch", "unsupported", "malformed"])("does not reactivate an older runtime after %s authentication", async mode => {
+    const root = tempRoot(), home = join(root, "home");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true };
+    await installMemoryRuntime({ ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.0") });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/health")) return new Response(JSON.stringify({ ok: true, protocolVersion: 1, serviceVersion: "2.1.1" }));
+      if (mode === "malformed") return new Response("invalid", { status: new Headers(init?.headers).has("authorization") ? 200 : 401 });
+      return new Response("{}", { status: mode === "anonymous" ? 200 : mode === "mismatch" ? 401 : 404 });
+    });
+    try {
+      await expect(installMemoryRuntime({ ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.1"), skipHealthCheck: false, healthCheckTimeoutMs: 1_000 })).rejects.toThrow(mode === "malformed" ? "could not be verified" : `authentication is ${mode}`);
+      expect(await currentInstalledRuntime(home)).toMatchObject({ version: "2.1.1" });
+    } finally { fetchSpy.mockRestore(); }
+  });
   it("maps all supported release targets", () => {
     expect(runtimeTarget("darwin", "arm64")).toBe("darwin-arm64");
     expect(runtimeTarget("darwin", "x64")).toBe("darwin-x64");
@@ -126,7 +183,7 @@ describe("standalone Memory runtime installer", () => {
     expect(readFileSync(pointer!.entrypoint, "utf8")).toContain("runtime fixture");
     const launcher = readFileSync(join(home, "bin", "memmy-memory-service.cjs"), "utf8");
     expect(launcher).toContain(`MEMMY_HOME: ${JSON.stringify(home)}`);
-    expect(launcher).toContain(`MEMMY_CONFIG: ${JSON.stringify(join(home, "config.yaml"))}`);
+    expect(launcher).toContain(`MEMMY_CONFIG: pointer.configPath || ${JSON.stringify(join(home, "config.yaml"))}`);
     expect(launcher).toContain("MEMMY_EMBEDDING_MODEL_ROOT");
     expect(JSON.parse(readFileSync(join(home, "memory-service", "installation.json"), "utf8"))).toMatchObject({
       agents: ["openclaw", "hermes"]
@@ -185,7 +242,8 @@ describe("standalone Memory runtime installer", () => {
     const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
     let releaseHealth!: () => void;
     const healthReady = new Promise<void>((resolve) => { releaseHealth = resolve; });
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/auth/check")) return new Response(JSON.stringify({ authenticated: true, authVersion: 1 }), { status: new Headers(init?.headers).has("authorization") ? 200 : 401 });
       resolveStarted();
       await healthReady;
       return { ok: true, json: async () => ({ ok: true, protocolVersion: 1, serviceVersion: "2.1.0" }) } as Response;
@@ -367,7 +425,8 @@ describe("standalone Memory runtime installer", () => {
       resolveStarted = resolve;
     });
     const startedAt = Date.now();
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/auth/check")) return new Response(JSON.stringify({ authenticated: true, authVersion: 1 }), { status: new Headers(init?.headers).has("authorization") ? 200 : 401 });
       resolveStarted();
       const ready = Date.now() - startedAt >= 16_000;
       return {

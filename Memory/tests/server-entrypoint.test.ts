@@ -133,7 +133,12 @@ describe("memmy memory server entrypoint", () => {
         "--db", databasePath
       ]);
       const endpoint = await waitForWrittenEndpoint(configPath);
-      const response = await fetch(`${endpoint}/api/v1/admin/shutdown`, { method: "POST" });
+      const token = YAML.parse(readFileSync(configPath, "utf8")).memmyMemory.storage.token;
+      expect(token).toMatch(/^[a-f0-9]{64}$/);
+      expect((await fetch(`${endpoint}/api/v1/admin/shutdown`, { method: "POST" })).status).toBe(401);
+      const response = await fetch(`${endpoint}/api/v1/admin/shutdown`, {
+        method: "POST", headers: { authorization: `Bearer ${token}` }
+      });
 
       expect(response.ok).toBe(true);
       await running;

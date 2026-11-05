@@ -392,7 +392,8 @@ export function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig
 
   return {
     baseUrl,
-    token: env.MEMMY_MEMORY_LAYER_TOKEN ?? env.MEMMY_MEMORY_TOKEN ?? env.MEMORY_SERVICE_TOKEN ?? "",
+    token: [env.MEMMY_MEMORY_LAYER_TOKEN, env.MEMMY_MEMORY_TOKEN, env.MEMORY_SERVICE_TOKEN]
+      .find((value) => value?.trim())?.trim() ?? "",
     timeoutMs: Number.parseInt(env.MEMMY_MEMORY_LAYER_TIMEOUT_MS ?? String(DEFAULT_MEMORY_LAYER_TIMEOUT_MS), 10),
     maxRetries: Number.parseInt(env.MEMMY_MEMORY_LAYER_MAX_RETRIES ?? "3", 10)
   };

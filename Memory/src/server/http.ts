@@ -70,6 +70,7 @@ const workerLogger = createMemoryLogger("worker");
 export const API_ROUTES = [
   "GET /health",
   "GET /api/v1/health",
+  "GET /api/v1/auth/check",
   "POST /api/v1/admin/reload-config",
   "GET /api/v1/admin/memory-token-budget",
   "POST /api/v1/admin/shutdown",
@@ -231,6 +232,12 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         ...(viewerRequest ? viewerPrincipal() : authenticate(request, url, options)),
         timeZone: requestTimeZone(request, options.timeZone)
       };
+      if (request.method === "GET" && url.pathname === "/api/v1/auth/check") {
+        // Never let the Viewer or an explicit test-only anonymous identity prove token auth.
+        if (principal.kind !== "local") throw new MemoryServiceError("unauthorized", "local service token required");
+        writeJson(response, 200, { authenticated: true, authVersion: 1 });
+        return;
+      }
       const body = await readJson(request);
       if (viewerRequest) {
         const viewerResult = await routeViewerRequest({
@@ -1497,7 +1504,7 @@ function authenticate(
       scopes: scoped.scopes ?? ["memory:read", "memory:write"]
     };
   }
-  if (!localToken && (!auth || auth.allowAnonymous === true)) {
+  if (!localToken && auth?.allowAnonymous === true) {
     return {
       kind: "anonymous",
       namespace: namespaceFromRequest(request, url),

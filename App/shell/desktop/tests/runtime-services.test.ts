@@ -138,7 +138,7 @@ describe("packaged desktop runtime config", () => {
         agentWorkspace: "/memmy/workspace",
         memoryDatabasePath: "/memmy/memory.sqlite",
         memoryBaseUrl: "http://127.0.0.1:18960",
-        memoryToken: "",
+        memoryToken: "fixture-secret",
         memoryListenHost: "127.0.0.1",
         memoryListenPort: 18960,
         agentGatewayBaseUrl: "http://127.0.0.1:18980",
@@ -173,6 +173,10 @@ describe("packaged desktop runtime config", () => {
       "    response.writeHead(200, { 'content-type': 'application/json' });",
       "    response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));",
       "    return;",
+      "  }",
+      "  if (request.url === '/api/v1/auth/check') {",
+      "    response.writeHead(request.headers.authorization === 'Bearer ' + process.env.MEMMY_MEMORY_TOKEN ? 200 : 401);",
+      "    response.end(JSON.stringify({ authenticated: true, authVersion: 1 })); return;",
       "  }",
       "  response.writeHead(404);",
       "  response.end();",
@@ -217,7 +221,7 @@ describe("packaged desktop runtime config", () => {
       agentWorkspace: join(home, "workspace"),
       memoryDatabasePath: join(home, "memory.sqlite"),
       memoryBaseUrl: "http://127.0.0.1:" + port,
-      memoryToken: "",
+      memoryToken: "fixture-secret",
       memoryListenHost: "127.0.0.1",
       memoryListenPort: port,
       agentGatewayBaseUrl: "http://127.0.0.1:18980",
@@ -365,10 +369,14 @@ describe("packaged desktop runtime config", () => {
 
     const startServer = async () => {
       activeServer = createServer((request, response) => {
+        if (request.url === "/api/v1/auth/check") {
+          response.writeHead(request.headers.authorization === "Bearer memory-token" ? 200 : 401);
+          response.end(JSON.stringify({ authenticated: true, authVersion: 1 })); return;
+        }
         expect(request.headers.authorization).toBe("Bearer memory-token");
         if (request.method === "GET" && request.url === "/api/v1/health") {
           response.writeHead(200, { "content-type": "application/json" });
-          response.end(JSON.stringify({ ok: true }));
+          response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));
           return;
         }
         if (request.method === "POST" && request.url === "/api/v1/admin/shutdown") {
@@ -582,7 +590,11 @@ describe("packaged desktop runtime config", () => {
       sqlitePath: databasePath
     }));
 
-    const server = createServer((_request, response) => {
+    const server = createServer((request, response) => {
+      if (request.url === "/api/v1/auth/check") {
+        response.writeHead(request.headers.authorization === "Bearer fixture-secret" ? 200 : 401);
+        response.end(JSON.stringify({ authenticated: true, authVersion: 1 })); return;
+      }
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));
     });
@@ -597,7 +609,7 @@ describe("packaged desktop runtime config", () => {
         agentWorkspace: join(root, "workspace"),
         memoryDatabasePath: databasePath,
         memoryBaseUrl: `http://127.0.0.1:${port}`,
-        memoryToken: "",
+        memoryToken: "fixture-secret",
         memoryListenHost: "127.0.0.1",
         memoryListenPort: port,
         agentGatewayBaseUrl: "http://127.0.0.1:18980",
@@ -621,7 +633,11 @@ describe("packaged desktop runtime config", () => {
   it("reuses a compatible degraded Memory service started by dev-start", async () => {
     const root = await makeTempRoot();
     const databasePath = join(root, "memory.sqlite");
-    const server = createServer((_request, response) => {
+    const server = createServer((request, response) => {
+      if (request.url === "/api/v1/auth/check") {
+        response.writeHead(request.headers.authorization === "Bearer fixture-secret" ? 200 : 401);
+        response.end(JSON.stringify({ authenticated: true, authVersion: 1 })); return;
+      }
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
         ok: false,
@@ -643,7 +659,7 @@ describe("packaged desktop runtime config", () => {
         agentWorkspace: join(root, "workspace"),
         memoryDatabasePath: databasePath,
         memoryBaseUrl: `http://127.0.0.1:${address.port}`,
-        memoryToken: "",
+        memoryToken: "fixture-secret",
         memoryListenHost: "127.0.0.1",
         memoryListenPort: address.port,
         agentGatewayBaseUrl: "http://127.0.0.1:18980",

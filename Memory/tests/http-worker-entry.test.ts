@@ -45,7 +45,7 @@ describe("Memory HTTP unified worker entry", () => {
     const added = addAgentSourceImport(service, namespace, "already queued before wake", "already-queued");
     expect(service.enqueuePendingImportSummaries(10_000, [added.id]).enqueued).toBe(0);
     const run = vi.spyOn(service, "runWorkerOnce");
-    const base = await listen(createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 }));
+    const base = await listen(createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 60_000 }));
     expect(run).not.toHaveBeenCalled();
     const response = await post(base, "/api/v1/worker/import-summaries/enqueue", { memoryIds: [added.id] });
     expect(response.status).toBe(200);
@@ -69,7 +69,7 @@ describe("Memory HTTP unified worker entry", () => {
     const targets = Array.from({ length: 8 }, (_, i) => addAgentSourceImport(service, namespace,
       `parallel entry ${i}`, `parallel-entry-${i}`).id);
     const run = vi.spyOn(service, "runWorkerOnce");
-    const base = await listen(createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 }));
+    const base = await listen(createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 60_000 }));
     let manual: Promise<Response> | undefined;
     try {
       expect((await post(base, "/api/v1/worker/import-summaries/enqueue", { memoryIds: targets })).status).toBe(200);
@@ -100,7 +100,7 @@ describe("Memory HTTP unified worker entry", () => {
     const targets = Array.from({ length: 8 }, (_, i) => addAgentSourceImport(service, namespace,
       `shutdown entry ${i}`, `shutdown-entry-${i}`).id);
     const run = vi.spyOn(service, "runWorkerOnce");
-    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 60_000 });
     const base = await listen(server);
     let manual: Promise<Response | Error> | undefined;
     let closing: Promise<void> | undefined;
@@ -154,7 +154,7 @@ describe("Memory HTTP unified worker entry", () => {
     await service.runWorkerOnce(1);
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
     rejectRequest = false;
-    const base = await listen(createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 }));
+    const base = await listen(createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 60_000 }));
     const response = await post(base, `/api/v1/memory/${added.id}/processing/retry`, { namespace });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ accepted: true });

@@ -649,6 +649,7 @@ async function startFixture(options: {
     fetchAppMemoryBudget: async () => null
   });
   const server = createMemoryHttpServer({
+    auth: { allowAnonymous: true },
     service,
     configPath,
     viewerCli: options.viewerCli,

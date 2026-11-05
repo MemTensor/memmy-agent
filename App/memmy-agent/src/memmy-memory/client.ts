@@ -53,7 +53,11 @@ export class MemmyMemoryClient {
   timeZone: string;
   private fetchImpl: FetchLike;
 
-  constructor(connection: MemmyMemoryConnection, fetchImpl: FetchLike = fetch) {
+  constructor(
+    connection: MemmyMemoryConnection,
+    fetchImpl: FetchLike = fetch,
+    private readonly rediscover?: () => MemmyMemoryConnection,
+  ) {
     this.baseUrl = connection.baseUrl.replace(/\/+$/, "");
     this.token = connection.token ?? null;
     this.timeoutMs = connection.timeoutMs ?? DEFAULT_MEMOS_MEMORY_TIMEOUT_MS;
@@ -79,7 +83,12 @@ export class MemmyMemoryClient {
   } = {}): Promise<T> {
     const headers: Record<string, string> = { accept: "application/json", ...(opts.headers ?? {}) };
     headers["x-memmy-time-zone"] = this.timeZone;
-    if (this.token) headers.authorization = `Bearer ${this.token}`;
+    if (!this.token && this.rediscover) {
+      const connection = this.rediscover();
+      if (connection.baseUrl === this.baseUrl) this.token = connection.token ?? null;
+    }
+    const requestToken = this.token;
+    if (requestToken) headers.authorization = `Bearer ${requestToken}`;
     if (opts.body !== undefined) headers["content-type"] = "application/json";
     const requestId = opts.body && typeof opts.body === "object" ? opts.body.requestId : null;
     if (requestId) headers["x-request-id"] = String(requestId);
@@ -95,6 +104,8 @@ export class MemmyMemoryClient {
     const text = await response.text();
     const parsed = text.trim() ? safeJsonParse(text) : null;
     if (!response.ok) {
+      // Rediscover before the next operation; never replay a write.
+      if (response.status === 401 && this.rediscover && this.token === requestToken) this.token = null;
       const fallback = text || `${method} ${path} failed with ${response.status}`;
       const message = parsed?.error?.message ?? parsed?.message ?? fallback;
       throw new MemmyMemoryHttpError(response.status, message, parsed ?? text);

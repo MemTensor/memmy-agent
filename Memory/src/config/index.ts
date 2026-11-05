@@ -630,7 +630,7 @@ function configFromEnv(): Record<string, unknown> {
       backend: process.env.MEMMY_MEMORY_BACKEND,
       sqlitePath: process.env.MEMMY_MEMORY_DB ?? process.env.MEMORY_SERVICE_DB,
       endpoint: process.env.MEMMY_MEMORY_URL ?? process.env.MEMORY_SERVICE_URL,
-      token: process.env.MEMMY_MEMORY_TOKEN ?? process.env.MEMORY_SERVICE_TOKEN
+      token: process.env.MEMMY_MEMORY_TOKEN?.trim() || process.env.MEMORY_SERVICE_TOKEN?.trim() || undefined
     }),
     summary: compactRecord({
       provider: process.env.MEMMY_SUMMARY_PROVIDER,
@@ -806,7 +806,7 @@ function normalizeStorage(input: Record<string, unknown>): StorageConfig {
     backend: storageBackend(input.backend, DEFAULT_MEMMY_CONFIG.storage.backend),
     sqlitePath: optionalPathString(input.sqlitePath),
     endpoint: optionalString(input.endpoint) ?? DEFAULT_MEMMY_CONFIG.storage.endpoint,
-    token: optionalString(input.token)
+    token: optionalString(input.token)?.trim() || undefined
   };
 }
 

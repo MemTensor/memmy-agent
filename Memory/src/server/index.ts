@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { ensureLocalMemoryToken } from "../config/local-token.js";
 import { mutateMemoryConfig } from "../config/writer.js";
 import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -66,6 +67,7 @@ async function runMemoryService(argv: string[], lifecycle: {
     });
     const options = parseServeArgs(argv);
     const { config, path: configPath } = loadMemmyConfig(options.configPath);
+    config.storage.token = await ensureLocalMemoryToken(configPath);
     const host = options.host ?? process.env.MEMMY_MEMORY_HOST ?? process.env.MEMORY_SERVICE_HOST ?? "127.0.0.1";
     assertLoopbackBindHost(host);
     const port = options.port ??
@@ -198,9 +200,7 @@ async function runMemoryService(argv: string[], lifecycle: {
                     requestShutdown();
                 }
             }),
-            auth: config.storage.token
-                ? { localServiceToken: config.storage.token }
-                : { allowAnonymous: true },
+            auth: { localServiceToken: config.storage.token },
             configPath,
             startAgentSourceAutomation: true
         });

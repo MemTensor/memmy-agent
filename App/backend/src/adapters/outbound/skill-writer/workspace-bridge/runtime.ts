@@ -45,6 +45,7 @@ import {
 const DEFAULT_ENDPOINT = "http://127.0.0.1:18960";
 
 export interface RuntimeConfig {
+  configUrl?: string;
   endpoint: string;
   token: string;
   userId: string;
@@ -89,6 +90,7 @@ export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Pr
   const legacyStorage = objectValue(yaml.storage);
   const app = objectValue(yaml.app);
   return {
+    configUrl: configUrl.href,
     endpoint: text(storage.endpoint) || text(memory.endpoint) || text(legacyStorage.endpoint) || text(snapshot.endpoint) || DEFAULT_ENDPOINT,
     token: text(storage.token) || text(memory.token) || text(legacyStorage.token) || text(snapshot.token),
     userId: pinnedOwner
@@ -531,7 +533,13 @@ class RuntimeHttpClient {
   private async request(url: URL, init: RequestInit): Promise<unknown> {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
-    if (this.config.token) headers.set("authorization", `Bearer ${this.config.token}`);
+    // A long-lived plugin session may predate token initialization or rotation.
+    // Refresh only connection credentials; preserve its pinned session identity.
+    const current = this.config.configUrl ? await readRuntimeConfig(new URL(this.config.configUrl)) : this.config;
+    if (current.endpoint.replace(/\/+$/u, "") !== this.config.endpoint.replace(/\/+$/u, "")) {
+      throw new Error("Memory endpoint changed; reopen the session before sending credentials");
+    }
+    if (current.token) headers.set("authorization", `Bearer ${current.token}`);
     let response: Response;
     try {
       response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(45_000) });

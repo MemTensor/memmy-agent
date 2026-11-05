@@ -45,7 +45,7 @@ export function createMemmyMemoryIntegration(
     ...discoverMemmyMemoryConnection(),
     timeZone: typeof defaults?.timezone === "string" ? defaults.timezone : undefined
   };
-  const client = new MemmyMemoryClient(connection);
+  const client = new MemmyMemoryClient(connection, fetch, discoverMemmyMemoryConnection);
   const hook = new MemmyMemoryHook(client, {
     workspace: options.workspace ?? null,
     userId: resolved.userId,

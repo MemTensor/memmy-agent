@@ -104,9 +104,32 @@ requesting when their estimated input would exceed an 8,192-token context;
 the requested output budget and a 512-token provider overhead margin are
 reserved first.
 
-When `storage.token`, `MEMMY_MEMORY_TOKEN`, or `MEMORY_SERVICE_TOKEN` is set,
-all HTTP routes except `GET /api/v1/health` require that token as a bearer token
-or `x-api-key`.
+Ordinary HTTP APIs require a valid bearer token or `x-api-key`, including admin
+shutdown during startup. Local SQLite initialization, installation, upgrade and
+direct server startup reuse the configured `storage.token`; when absent they
+persist a random token in the shared config before listening. A failed config
+write stops startup. Nonempty `MEMMY_MEMORY_TOKEN` / `MEMORY_SERVICE_TOKEN`
+overrides remain supported for direct starts. OS-managed services use the shared
+file: registration saves an explicit environment token if the file has none,
+and rejects a conflicting value before stopping the existing service.
+
+The CLI, bundled Hooks and plugins read the shared config automatically. Manual
+clients such as curl or Postman must send `Authorization: Bearer <storage.token>`;
+previously anonymous ordinary requests now return 401. Keep the token private and
+out of logs and URLs. Health (`/health`, `/api/v1/health`) stays public. The local
+Viewer keeps its existing loopback, Host, Origin and request checks.
+
+Desktop verifies rejection without credentials and acceptance with its token
+before reusing a running service. Verified old managed services are switched only
+after startup/migrations finish and their database lock is released. Credential
+mismatches or unknown owners produce an error instead of a forced takeover.
+Update an independently managed old service through its own installer. Failed
+authentication during CLI activation does not reactivate an unverified old runtime.
+
+This shared credential retains full local-service privileges; it is not per-Agent
+access control or an OS security boundary against agents that can read local files.
+The HTTP helper's `allowAnonymous: true` is an explicit test opt-in and is never
+enabled automatically by the packaged entry point.
 
 ## CLI
 

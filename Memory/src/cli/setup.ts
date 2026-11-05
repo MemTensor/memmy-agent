@@ -1,3 +1,4 @@
+import { ensureLocalMemoryToken } from "../config/local-token.js";
 import { syncMemoryModelCatalog } from "../config/model-catalog.js";
 import { mutateMemoryConfig } from "../config/writer.js";
 import {
@@ -14,6 +15,7 @@ import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { asRecord, expandHome, optionalString } from "./config.js";
 import {
+  currentInstalledRuntime,
   installMemoryRuntime,
   installedAgents,
   type MemoryRuntimeInstallOptions
@@ -70,6 +72,8 @@ export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promis
     });
   }
 
+  if (!options.dryRun) await ensureLocalMemoryToken(configPath);
+
   let agentInstallations: AgentSkillInstallResult[] = [];
 
   const requestedAgents = options.skipAgentSkills
@@ -102,10 +106,12 @@ export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promis
 
 export async function installMemoryCli(options: MemoryCliSetupOptions = {}): Promise<Record<string, unknown>> {
   const sourceInstall = options.sourcePath !== undefined || options.binPath !== undefined;
-  const paths = setupPaths(options);
+  const previous = sourceInstall ? undefined : await currentInstalledRuntime(options.home);
+  const paths = setupPaths({ ...options, configPath: options.configPath ?? previous?.configPath });
   const memmyConfigExisted = options.memmyConfigPreexisting ?? existsSync(paths.configPath);
   const init = await initMemoryCli({
     ...options,
+    configPath: paths.configPath,
     skipAgentSkills: options.serviceOnly ? true : options.skipAgentSkills
   });
   const migration = options.skipLegacyMigration
@@ -172,18 +178,20 @@ export async function installMemoryCli(options: MemoryCliSetupOptions = {}): Pro
 }
 
 export async function upgradeMemoryCli(options: MemoryCliSetupOptions = {}): Promise<Record<string, unknown>> {
-  const paths = setupPaths(options);
+  const installed = await currentInstalledRuntime(options.home);
+  const paths = setupPaths({ ...options, configPath: options.configPath ?? installed?.configPath });
   const migration = options.skipLegacyMigration
     ? undefined
     : await migrateLegacyLocalPlugins({
         configPath: paths.configPath,
         dbPath: paths.dbPath,
-        memmyConfigExisted: existsSync(paths.configPath),
+        memmyConfigExisted: options.memmyConfigPreexisting ?? existsSync(paths.configPath),
         configSource: options.configSource,
         legacyRoot: options.legacyRoot,
         nonInteractive: options.nonInteractive,
         dryRun: options.dryRun
       });
+  if (!options.dryRun) await ensureLocalMemoryToken(paths.configPath);
   const agents = options.agents?.length
     ? options.agents
     : await installedAgents(options.home);
@@ -191,6 +199,7 @@ export async function upgradeMemoryCli(options: MemoryCliSetupOptions = {}): Pro
     ? await installMemmyMemorySkillForAgents(agents, {
         agentRoot: options.agentRoot,
         assetRoot: options.assetRoot,
+        memmyConfigPath: paths.configPath,
         dryRun: options.dryRun
       })
     : [];

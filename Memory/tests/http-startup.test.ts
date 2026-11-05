@@ -26,6 +26,7 @@ describe("Memory HTTP startup", () => {
     service.runWorkerOnce = runWorkerOnce;
     const dispose = vi.fn(() => sources);
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 0,
       agentSourceExecutor: { dispose } as unknown as AgentSourceExecutor,
@@ -55,6 +56,7 @@ describe("Memory HTTP startup", () => {
   it("serves health before startup reconciliation begins", async () => {
     let reconciliations = 0;
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service: stubService(() => {
         reconciliations += 1;
       }),
@@ -75,6 +77,7 @@ describe("Memory HTTP startup", () => {
   it("starts the worker after a fallback delay when no health probe arrives", async () => {
     let reconciliations = 0;
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service: stubService(() => {
         reconciliations += 1;
       }),
@@ -107,6 +110,7 @@ describe("Memory HTTP startup", () => {
       return workerResult(0);
     };
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 0,
       workerPostHealthDelayMs: 0
@@ -125,6 +129,7 @@ describe("Memory HTTP startup", () => {
       reconciliations += 1;
     });
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 80,
       workerPostHealthDelayMs: 80
@@ -158,6 +163,7 @@ describe("Memory HTTP startup", () => {
       return workerResult(0);
     };
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 0,
       workerPostHealthDelayMs: 0
@@ -181,6 +187,7 @@ describe("Memory HTTP startup", () => {
       return workerResult(0);
     };
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 0,
       workerPostHealthDelayMs: 0
@@ -200,6 +207,7 @@ describe("Memory HTTP startup", () => {
       reconciliations += 1;
     });
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 80,
       workerPostHealthDelayMs: 80
@@ -233,6 +241,7 @@ describe("Memory HTTP startup", () => {
       return workerResult(0);
     };
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 0,
       workerPostHealthDelayMs: 0
@@ -251,6 +260,7 @@ describe("Memory HTTP startup", () => {
       reconciliations += 1;
     });
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 0,
       workerPostHealthDelayMs: 0
@@ -269,6 +279,7 @@ describe("Memory HTTP startup", () => {
       reconciliations += 1;
     });
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 0,
       workerPostHealthDelayMs: 0

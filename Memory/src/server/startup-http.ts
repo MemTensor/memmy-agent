@@ -50,7 +50,7 @@ export async function listenMemoryStartupHttpServer(options: {
     }
     if (request.method === "POST" && requestUrl.pathname === "/api/v1/admin/shutdown") {
       const candidate = bearerToken(request.headers.authorization);
-      if (options.localServiceToken && candidate !== options.localServiceToken) {
+      if (!options.localServiceToken?.trim() || candidate !== options.localServiceToken) {
         writeJson(response, 401, { error: { code: "unauthorized", message: "invalid memory service token", requestId } });
         return;
       }

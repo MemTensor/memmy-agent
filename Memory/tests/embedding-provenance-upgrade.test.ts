@@ -189,7 +189,7 @@ describe("one-time upgrade repair", () => {
   it("automatically starts the upgrade in the production HTTP worker without a manual repair", async () => {
     const { service, repos, root } = setup();
     repos.memories.insert(withVector(record("legacy-startup", "L2", true), "vec", null));
-    const server = createMemoryHttpServer({ service, configPath: join(root, "config.json"), workerStartupFallbackMs: 0 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, configPath: join(root, "config.json"), workerStartupFallbackMs: 0 });
     try {
       await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
       await expect.poll(() => (repos.runtime.getKv(key)?.value as any)?.completedAt).toBeTruthy();
@@ -211,7 +211,7 @@ describe("one-time upgrade repair", () => {
     configured = true;
     const restarted = fixture.createTestMemoryService({ db, embedder: model });
     expect(restarted.nextWorkerRunAt()).toBe(due);
-    const server = createMemoryHttpServer({ service: restarted, configPath: join(root, "config.json"), workerStartupFallbackMs: 0 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service: restarted, configPath: join(root, "config.json"), workerStartupFallbackMs: 0 });
     try {
       await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
       await expect.poll(() => (repos.runtime.getKv(key)?.value as any)?.completedAt).toBeTruthy();
@@ -351,7 +351,7 @@ describe("automatic provenance repair budget gates", () => {
     model.status = () => ({ ...identity, configured: true, remote: false });
     const restarted = fixture.createTestMemoryService({ db, config, embedder: model });
     expect(restarted.nextWorkerRunAt()).toBe(due);
-    const server = createMemoryHttpServer({ service: restarted, configPath: join(root, "config.json"), workerStartupFallbackMs: 0 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service: restarted, configPath: join(root, "config.json"), workerStartupFallbackMs: 0 });
     try {
       await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
       await expect.poll(() => (repos.runtime.getKv(key)?.value as any)?.completedAt).toBeTruthy();

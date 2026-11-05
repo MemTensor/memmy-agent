@@ -496,6 +496,10 @@ describe("local api", () => {
     });
   });
 
+  it("ignores empty credential aliases instead of hiding the active service token", () => {
+    expect(readMemoryLayerConfig({ MEMMY_MEMORY_URL: "http://127.0.0.1:18960", MEMMY_MEMORY_LAYER_TOKEN: " ", MEMMY_MEMORY_TOKEN: "", MEMORY_SERVICE_TOKEN: "configured-token" })).toMatchObject({ token: "configured-token" });
+  });
+
   it("accepts Memory service URL aliases for the writable Memory Layer client", () => {
     expect(readMemoryLayerConfig({
       MEMMY_MEMORY_URL: " http://127.0.0.1:18960 ",
