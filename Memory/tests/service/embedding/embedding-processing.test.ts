@@ -15,6 +15,8 @@ import {
   embeddingTextForMemory,
   updateMemoryVectorField
 } from "../../../src/service/embedding/embedding-pipeline.js";
+import { l2VectorCacheKey } from "../../../src/service/embedding/l2-vector-cache.js";
+import { memoryVector } from "../../../src/storage/memory-vector-state.js";
 import { ModelHttpError } from "../../../src/model/http.js";
 import { createEmbedder } from "../../../src/model/embedder.js";
 import { Repositories } from "../../../src/storage/repositories.js";
@@ -41,6 +43,40 @@ afterEach(async () => {
 });
 
 describe("MemoryService / embedding / processing", () => {
+  it.each([false, true])("reuses exact L2 query vectors across jobs (preseeded: %s)", async (preseeded) => {
+    const seen: string[] = [];
+    const embedder = createCapturingEmbedder(seen);
+    const { db, service } = createTestService({ embedder });
+    const repos = new Repositories(db.db);
+    const memory = negativePolicyMemory("PPT headings", "Before presenting");
+    repos.memories.insert(memory);
+    const key = () => l2VectorCacheKey(embedder.config, "query", embeddingTextForMemory(repos.memories.get(memory.id)!));
+    if (preseeded) repos.runtime.setKv(key(), [1, 0, 0], memory.createdAt);
+    // A document vector must never serve a query request.
+    repos.runtime.setKv(l2VectorCacheKey(embedder.config, "document", embeddingTextForMemory(memory)), [0, 1, 0], memory.createdAt);
+    async function run(index: number) {
+      const id = `l2-cache-job-${index}`;
+      repos.runtime.enqueueJob({ id, jobType: "embedding", status: "queued", dedupeKey: id,
+        userId: memory.userId, targetMemoryId: memory.id, payload: {}, attempts: 0, maxAttempts: 3,
+        createdAt: memory.createdAt, updatedAt: memory.createdAt });
+      const result = await service.runWorkerOnce(10);
+      expect(result.jobs).toContainEqual(expect.objectContaining({ jobId: id, status: "succeeded" }));
+    }
+    await run(1);
+    await run(2);
+    expect(seen).toHaveLength(preseeded ? 0 : 1);
+    expect(repos.runtime.getKv(key())?.value).toEqual([1, 0, 0]);
+    expect(memoryVector(repos.memories.get(memory.id)!, "vec")).toEqual([1, 0, 0]);
+    const changed = repos.memories.get(memory.id)!;
+    (changed.properties.internal_info.policy as Record<string, unknown>).trigger = "After a style correction";
+    repos.memories.update(changed);
+    await run(3);
+    expect(seen).toHaveLength(preseeded ? 1 : 2);
+    embedder.config.model = "different-model";
+    await run(4);
+    expect(seen).toHaveLength(preseeded ? 2 : 3);
+  });
+
   for (const queue of ["fresh", "retry"] as const) {
     for (const format of ["code", "message"] as const) {
       it.each([
