@@ -511,6 +511,7 @@ export class ComputerHistoryDemoService {
   private narrationError: string | null = null;
   private narrationErrorCategory: "quota_exhausted" | null = null;
   private retentionDeferred = false;
+  private readonly verifiedRetentionSources = new Map<string, string>();
   private modelSource: "account" | "byok" | null = null;
   /** Coalesce open-segment narration without suppressing later input versions. */
   private readonly narratedOpenSegments = new Set<string>();
@@ -2653,7 +2654,7 @@ export class ComputerHistoryDemoService {
           && Number(readFrontmatterValue(prepared, "summary_input_bytes")) === stat.size
           && checkpoint?.rawBytes === stat.size && checkpoint.rawMtimeMs === stat.mtimeMs
           && readFrontmatterValue(prepared, "summary_input_sha256") === checkpoint.rawSha256) {
-          if (checkpoint.projectionVersion === RETENTION_EVIDENCE_VERSION) continue;
+          if (this.retentionCheckpointMatches(directory)) continue;
           // The raw source is unchanged, but an upgrade may extract more
           // evidence. Refresh only its archive; keep ready summaries and any
           // in-flight narration intact. Never expire raw using an old projection.
@@ -2668,7 +2669,7 @@ export class ComputerHistoryDemoService {
         // Legacy metadata has no open/closed state or byte marker. A completed
         // summary is safe to retain only if the stream ended before it was
         // written, rather than reopening after an earlier recording_stopped.
-        if (checkpoint?.projectionVersion === RETENTION_EVIDENCE_VERSION && prepared && !readFrontmatterValue(prepared, "summary_input_bytes")
+        if (this.retentionCheckpointMatches(directory) && checkpoint && prepared && !readFrontmatterValue(prepared, "summary_input_bytes")
           && readFrontmatterValue(prepared, "status") === "completed"
           && metadata.state !== "open"
           && recordingEnded(fs.readFileSync(eventsFile, "utf8"))
@@ -2737,6 +2738,7 @@ export class ComputerHistoryDemoService {
       evidenceSha256: hashText(evidence), evidence };
     atomicWriteText(file, `${JSON.stringify(checkpoint)}\n`);
     this.retentionCache.delete(file);
+    this.retentionCheckpointMatches(path.dirname(eventsFile));
   }
 
   private retentionCheckpointPath(historyId: string): string | null {
@@ -2765,16 +2767,35 @@ export class ComputerHistoryDemoService {
     } catch { return null; }
   }
 
+  /** Shared by recovery and deletion; always verify the persisted archive. */
+  private retentionCheckpointMatches(directory: string, verifyPersisted = false): boolean {
+    try {
+      const rawFile = path.join(directory, "events.jsonl");
+      const checkpointFile = this.retentionCheckpointPath(`${path.basename(directory)}-10min-summary`);
+      if (!checkpointFile) return false;
+      const rawStat = fs.statSync(rawFile);
+      const checkpointStat = fs.statSync(checkpointFile);
+      const signature = `${rawStat.size}:${rawStat.mtimeMs}:${rawStat.ctimeMs}:${checkpointStat.size}:${checkpointStat.mtimeMs}:${checkpointStat.ctimeMs}`;
+      if (!verifyPersisted && this.verifiedRetentionSources.get(directory) === signature) return true;
+      const raw = fs.readFileSync(rawFile);
+      const checkpoint = this.readRetentionCheckpoint(`${path.basename(directory)}-10min-summary`, true);
+      const valid = !!checkpoint && checkpoint.projectionVersion === RETENTION_EVIDENCE_VERSION
+        && checkpoint.rawBytes === raw.length && checkpoint.rawSha256 === hashBytes(raw)
+        && checkpoint.evidence === completeRawEvidence(raw);
+      if (valid) this.verifiedRetentionSources.set(directory, signature);
+      else this.verifiedRetentionSources.delete(directory);
+      return valid;
+    } catch { return false; }
+  }
+
   private canExpireRaw(directory: string): boolean {
     const eventsFile = path.join(directory, "events.jsonl");
     if (!fs.existsSync(eventsFile)) return true;
     try {
       const raw = fs.readFileSync(eventsFile);
-      const evidence = completeRawEvidence(raw);
+      completeRawEvidence(raw);
       if (!segmentHasActivity(eventsFile)) return true;
-      const checkpoint = this.readRetentionCheckpoint(`${path.basename(directory)}-10min-summary`, true);
-      if (checkpoint && checkpoint.rawBytes === raw.length && checkpoint.rawSha256 === hashBytes(raw)
-        && checkpoint.evidence === evidence) return true;
+      if (this.retentionCheckpointMatches(directory, true)) return true;
     } catch { /* Keep incomplete or unreadable evidence. Never expose its contents. */ }
     this.retentionDeferred = true;
     return false;

@@ -306,7 +306,50 @@ describe("durable semantic evidence before raw retention", () => {
     expired(); service.snapshot();
     expect(fs.existsSync(segment.eventsFile)).toBe(true);
     expect(fs.readFileSync(checkpointPath(segment), "utf8")).toBe(standing);
-    expect(service.snapshot().observation).toMatchObject({ narrationError: null, retentionDeferred: true });
+    expect(service.snapshot().observation.retentionDeferred).toBe(true);
+    expect(service.snapshot().observation.narrationError).toBeNull();
+  });
+
+  it("migrates a self-consistent legacy archive before expiring raw and preserves quota errors", () => {
+    const segment = fixture(); append(segment, "MIGRATE_COMPLETE_EVIDENCE"); service.snapshot();
+    const file = checkpointPath(segment);
+    const legacy = JSON.parse(fs.readFileSync(file, "utf8"));
+    delete legacy.projectionVersion;
+    legacy.evidence = "Old extraction format";
+    legacy.evidenceSha256 = crypto.createHash("sha256").update(legacy.evidence).digest("hex");
+    fs.writeFileSync(file, JSON.stringify(legacy));
+    const state = service as unknown as { setNarrationError(reason: string, category: "quota_exhausted"): void };
+    state.setNarrationError("Insufficient balance", "quota_exhausted");
+    expect(internal().canExpireRaw(segment.directory)).toBe(false);
+    expired();
+    const snapshot = service.snapshot();
+    const migrated = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect(migrated.projectionVersion).toBeGreaterThan(0);
+    expect(migrated.evidence).toContain("MIGRATE_COMPLETE_EVIDENCE");
+    expect(fs.existsSync(segment.eventsFile)).toBe(false);
+    expect(snapshot.observation).toMatchObject({ retentionDeferred: false,
+      narrationError: "Insufficient balance", narrationErrorCategory: "quota_exhausted" });
+  });
+
+  it("keeps a legacy archive and raw on failed migration, then retries successfully", () => {
+    const segment = fixture(); append(segment, "LEGACY_RETRY"); service.snapshot();
+    const file = checkpointPath(segment);
+    const legacy = JSON.parse(fs.readFileSync(file, "utf8"));
+    delete legacy.projectionVersion;
+    fs.writeFileSync(file, JSON.stringify(legacy));
+    const saved = fs.readFileSync(file, "utf8");
+    const original = fs.writeFileSync;
+    const writes = vi.spyOn(fs, "writeFileSync").mockImplementation(((target, ...args) => {
+      if (String(target).startsWith(`${file}.`)) throw new Error("synthetic archive failure");
+      return original(target, ...args);
+    }) as typeof fs.writeFileSync);
+    expired();
+    expect(service.snapshot().observation).toMatchObject({ retentionDeferred: true, narrationError: null });
+    expect(fs.existsSync(segment.eventsFile)).toBe(true);
+    expect(fs.readFileSync(file, "utf8")).toBe(saved);
+    writes.mockRestore();
+    expect(service.snapshot().observation.retentionDeferred).toBe(false);
+    expect(fs.existsSync(segment.eventsFile)).toBe(false);
   });
 
   it("rejects a same-byte-length replacement using the raw SHA256", () => {
