@@ -16,7 +16,7 @@ export function panelListItemFromMemory(
   memory: MemoryRow,
   processing?: MemoryProcessingRecord
 ): MemoryListItem {
-  processing = processingWithRetryAction(memory, processing);
+  const processingView = processingWithRetryAction(memory, processing);
   const spanGoal = panelSpanGoalForMemory(memory);
   const observationSummary = observedActivitySummary(memory);
   const observation = isRecord(memory.properties.internal_info.observation_memory)
@@ -24,7 +24,7 @@ export function panelListItemFromMemory(
   return {
     ...item,
     ...(observationSummary ? { summary: observationSummary } : {}),
-    processing,
+    processing: processingView,
     metadata: {
       ...(item.metadata ?? {}),
       source: panelSourceForMemory(memory),
@@ -33,7 +33,7 @@ export function panelListItemFromMemory(
         : {}),
       ...(spanGoal ? { spanGoal } : {})
     },
-    tags: panelTagsForMemory(memory, processing)
+    tags: panelTagsForMemory(memory, processingView)
   };
 }
 

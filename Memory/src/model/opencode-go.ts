@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import type { LlmConfig } from "../config/index.js";
 
+const OPENCODE_GO_HOST = "opencode.ai";
+// Official Go endpoints; custom gateways are identified by sourceProvider.
+const OPENCODE_GO_PATH = /^\/(?:zen|inference)\/go(?:\/|$)/;
+
 /** Only Go connections need these defaults; custom headers are case-insensitive. */
 export function openCodeGoHeaders(config: LlmConfig, sessionId: string): Record<string, string> {
   const explicit = config.extraHeaders ?? {};
@@ -19,7 +23,7 @@ function isOpenCodeGo(config: LlmConfig): boolean {
   if (config.sourceProvider?.toLowerCase().replace(/[_-]/g, "") === "opencodego") return true;
   try {
     const endpoint = new URL(config.endpoint ?? "");
-    return endpoint.hostname === "opencode.ai" && /^\/(?:zen|inference)\/go(?:\/|$)/.test(endpoint.pathname);
+    return endpoint.hostname === OPENCODE_GO_HOST && OPENCODE_GO_PATH.test(endpoint.pathname);
   } catch {
     return false;
   }

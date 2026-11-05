@@ -18,7 +18,7 @@ import { clip, firstLine } from "../../utils/text.js";
 import { turnJudgeJobFlags } from "../evolution/turn-judge.js";
 import { isObservationMemory, observationJobPayload } from "../observation-memory-state.js";
 import { externalSkillJobPayload } from "../evidence/history-skill-policy.js";
-import { canRetryMemoryProcessing, processingWithRetryAction } from "./processing-retry-policy.js";
+import { canRetryMemoryProcessing, isManualRecoveryCandidate, processingWithRetryAction } from "./processing-retry-policy.js";
 
 
 
@@ -397,9 +397,9 @@ export class ImportJobProcessor {
     const ids = dedupeStrings(memoryIds).slice(0, 10_000);
     void request;
     const items = this.deps.processing.getMany(ids).map(processing => {
-      if (processing.retryAction !== "none" || processing.errorCode !== "invalid_model_request") return processing;
+      if (!isManualRecoveryCandidate(processing)) return processing;
       const memory = this.deps.memories.get(processing.memoryId);
-      return memory ? processingWithRetryAction(memory, processing)! : processing;
+      return memory ? (processingWithRetryAction(memory, processing) ?? processing) : processing;
     });
     return { items, serverTime: this.deps.nowIso() };
   }
@@ -431,15 +431,6 @@ export class ImportJobProcessor {
     });
     if (!result) throw d.createError("not_found", `processing state not found: ${memoryId}`);
     return { ...result, serverTime: at };
-  }
-
-  /** Scan replays recover eligible originals through the same guarded retry path. */
-  retryFailedMemoryProcessingOnScan(memoryId: string): boolean {
-    if (!this.deps.config.algorithm.enableMemoryAdd) return false;
-    const memory = this.deps.memories.get(memoryId);
-    const current = this.deps.processing.get(memoryId);
-    if (!memory || !current || !canRetryMemoryProcessing(memory, current)) return false;
-    return this.retryMemoryProcessing(memoryId).accepted;
   }
 
   restartFailedProcessing(at: string, limit = 10_000): number {

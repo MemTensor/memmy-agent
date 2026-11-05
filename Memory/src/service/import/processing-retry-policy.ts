@@ -2,12 +2,16 @@ import { traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import type { MemoryProcessingRecord, MemoryRow } from "../../types.js";
 import { isObservationMemory } from "../observation-memory-state.js";
 
+export function isManualRecoveryCandidate(processing: MemoryProcessingRecord): boolean {
+  return processing.retryAction === "none" && processing.errorCode === "invalid_model_request";
+}
+
 export function canRetryMemoryProcessing(memory: MemoryRow, processing: MemoryProcessingRecord): boolean {
   if (processing.state !== "failed" || (processing.stage !== "summary" && processing.stage !== "embedding")) return false;
   if (memory.status === "deleted" || memory.deletedAt || !memory.memoryValue.trim()) return false;
   // Legacy generic 4xx failures may become runnable after a connection repair.
   // Corrupt, oversized and other explicitly terminal failures remain restricted.
-  if (processing.retryAction === "none" && processing.errorCode !== "invalid_model_request") return false;
+  if (processing.retryAction === "none" && !isManualRecoveryCandidate(processing)) return false;
   if (memory.memoryLayer === "L1" && !isObservationMemory(memory)) {
     const trace = traceMetaFromMemory(memory);
     if (!trace || !(trace.userText.trim() || trace.agentText.trim() || trace.toolCalls.some(call =>

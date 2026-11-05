@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, type LlmConfig } from "../src/config/index.js";
 import { ModelHttpError } from "../src/model/http.js";
 import { createLlmClient } from "../src/model/llm.js";
+import { MemoryModelTaskRouter } from "../src/model/task-routing.js";
 import { classifyProcessingError } from "../src/service/worker/job-handlers.js";
 import { addAgentSourceImport, createMemoryServiceFixture } from "./fixtures/memory-service-fixture.js";
 
@@ -129,5 +130,59 @@ describe("OpenCode Go memory requests", () => {
     expect(classifyProcessingError(new ModelHttpError("invalid session", "openai_compatible", 400,
       undefined, "invalid session", undefined, "MissingSessionID")))
       .toEqual({ code: "model_configuration", retryAction: "open_settings" });
+  });
+
+  it.each([
+    ["Missing required header", "x-opencode-session"],
+    ["X-OpenCode-Session", "is required"],
+    ["Missing\nrequired header", "\nX-OPENCODE-SESSION"]
+  ])("classifies missing headers across message/detail boundaries: %s", (message, detail) => {
+    expect(classifyProcessingError(new ModelHttpError(message, "openai_compatible", 400, undefined, detail)))
+      .toEqual({ code: "model_configuration", retryAction: "open_settings" });
+  });
+
+  it.each([408, 429, 503])("preserves transient HTTP %s even with missing-header text", status => {
+    expect(classifyProcessingError(new ModelHttpError("Missing required header", "openai_compatible", status, undefined, "x-opencode-session")))
+      .toEqual({ code: "transient_provider_error", retryAction: "retry" });
+  });
+
+  it("does not classify a header name alone as a missing-header configuration error", () => {
+    expect(classifyProcessingError(new ModelHttpError("invalid input", "openai_compatible", 400, undefined, "x-opencode-session")))
+      .toEqual({ code: "invalid_model_request", retryAction: "none" });
+  });
+
+  it("keeps the process fallback stable across real TaskRouter client replacements", async () => {
+    const seen = mockProvider();
+    const router = new MemoryModelTaskRouter(() => ({ config: DEFAULT_MEMMY_CONFIG,
+      summary: createLlmClient(config()), evolution: createLlmClient(config()), embedding: {} as never }));
+    try {
+      await router.client("summary").complete([{ role: "user", content: "first" }], { operation: "capture.summarize" });
+      await router.client("evolution").complete([{ role: "user", content: "second" }], { operation: "capture.summarize" });
+      expect(seen).toHaveLength(2);
+      expect(seen[0]!.get("x-opencode-session")).toBe(seen[1]!.get("x-opencode-session"));
+    } finally { await router.stop(); }
+  });
+
+  it("keeps each service fallback stable across roles and config reloads while isolating services", async () => {
+    const seen = mockProvider();
+    let currentConfig = { ...DEFAULT_MEMMY_CONFIG, summary: config(), evolution: config(),
+      roleRouting: { summary: "fixed" as const, evolution: "fixed" as const } };
+    const first = fixture.createTestService({ config: currentConfig, configLoader: () => ({ config: currentConfig }) }).service;
+    const second = fixture.createTestService({ config: currentConfig }).service;
+    // Exercise service-owned clients through the production router, not injected clients.
+    const clients = (service: typeof first) => service as unknown as {
+      llm: ReturnType<typeof createLlmClient>; skillLlm: ReturnType<typeof createLlmClient>
+    };
+    await clients(first).llm.complete([{ role: "user", content: "summary" }], { operation: "capture.summarize" });
+    await clients(first).skillLlm.complete([{ role: "user", content: "evolution" }], { operation: "capture.summarize" });
+    currentConfig = { ...currentConfig, summary: config({ model: "replacement-model" }) };
+    first.reloadConfig({ restartFailedProcessing: false });
+    await clients(first).llm.complete([{ role: "user", content: "reloaded" }], { operation: "capture.summarize" });
+    await clients(second).llm.complete([{ role: "user", content: "other service" }], { operation: "capture.summarize" });
+    const ids = seen.map(headers => headers.get("x-opencode-session"));
+    expect(ids).toHaveLength(4);
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[0]).toBe(ids[2]);
+    expect(ids[0]).not.toBe(ids[3]);
   });
 });

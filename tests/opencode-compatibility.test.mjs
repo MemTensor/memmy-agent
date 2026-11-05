@@ -194,7 +194,7 @@ describe.each([["Backend", backend], ["Memory", memory]])("%s memory search", (_
       await target.installPlugin("opencode");
       vi.stubGlobal("fetch", vi.fn(async () => Response.json({
         [field]: [{ id: "legacy-memory", memoryLayer: "L2", title: "Stored preference",
-          snippet: "Lower priority snippet", [textField]: "Keep release notes concise." }]
+          ...(textField === "snippet" ? {} : { snippet: "Lower priority snippet" }), [textField]: "Keep release notes concise." }]
       })));
       const search = await searchTool(await load(root), root, generation);
       try {
@@ -238,6 +238,7 @@ async function searchTool(plugin, root, generation) {
       if (!signal.aborted) await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
     } }
   });
+  expect(search, "V2 must register memmy_memory_search").toBeDefined();
   return {
     async execute(args) {
       const result = await search.execute(args, context);

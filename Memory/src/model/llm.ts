@@ -15,6 +15,7 @@ import {
 import type { LlmClient, LlmCompletionOptions, LlmMessage, ModelStatus } from "./types.js";
 
 const logger = createMemoryLogger("llm");
+const PROCESS_FALLBACK_SESSION_ID = randomUUID();
 
 interface OpenAiResponsesResponse {
   status?: string;
@@ -94,6 +95,7 @@ interface ThinkingControl {
 let summaryEncoder: ReturnType<typeof get_encoding> | undefined;
 
 export interface CreateLlmClientOptions {
+  fallbackSessionId?: string;
   modelRole?: MemoryLlmModelRole;
   onBudgetedUsage?: (event: MemoryModelUsageEvent) => void;
   usageRecorder?: MemoryTokenUsageSink;
@@ -104,7 +106,6 @@ export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptio
 }
 
 class HttpLlmClient implements LlmClient {
-  private readonly fallbackSessionId = randomUUID();
   private lastOkAt: string | undefined;
   private lastError: string | undefined;
   private openAiJsonResponseFormat: "json_object" | "text" = "json_object";
@@ -114,6 +115,11 @@ class HttpLlmClient implements LlmClient {
     this.usageRecorder = options.usageRecorder ?? new HttpByokTokenUsageRecorder({
       onBudgetedUsage: options.onBudgetedUsage
     });
+  }
+
+  private providerHeaders(options: LlmCompletionOptions): Record<string, string> {
+    return openCodeGoHeaders(this.config,
+      options.sessionId ?? this.options.fallbackSessionId ?? PROCESS_FALLBACK_SESSION_ID);
   }
 
   isConfigured(): boolean {
@@ -372,7 +378,7 @@ class HttpLlmClient implements LlmClient {
         url,
         headers: {
           ...bearer(this.config.apiKey),
-          ...openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId),
+          ...this.providerHeaders(options),
           ...(agentRegion ? { "X-Agent-Region": agentRegion } : {})
         },
         timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
@@ -436,7 +442,7 @@ class HttpLlmClient implements LlmClient {
       url,
       headers: {
         ...bearer(this.config.apiKey),
-        ...openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId)
+        ...this.providerHeaders(options)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -502,7 +508,7 @@ class HttpLlmClient implements LlmClient {
       operation: options.operation,
       model: this.config.model,
       url,
-      headers: openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId),
+      headers: this.providerHeaders(options),
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       body
@@ -539,7 +545,7 @@ class HttpLlmClient implements LlmClient {
       headers: {
         "x-api-key": this.config.apiKey,
         "anthropic-version": "2023-06-01",
-        ...openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId)
+        ...this.providerHeaders(options)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -591,7 +597,7 @@ class HttpLlmClient implements LlmClient {
       url: `${base}/model/${model}/converse`,
       headers: {
         ...(this.config.apiKey ? { authorization: this.config.apiKey } : {}),
-        ...openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId)
+        ...this.providerHeaders(options)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -635,7 +641,7 @@ class HttpLlmClient implements LlmClient {
       url: this.config.endpoint,
       headers: {
         ...bearer(this.config.apiKey),
-        ...openCodeGoHeaders(this.config, options.sessionId ?? this.fallbackSessionId)
+        ...this.providerHeaders(options)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,

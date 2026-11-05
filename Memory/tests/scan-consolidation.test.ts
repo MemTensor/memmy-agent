@@ -411,6 +411,27 @@ it("does not restart legacy failures during incremental replay but recovers them
   expect(memory.memoryProcessingStatus([memoryId]).items[0]).toMatchObject({ state: "summary_pending", manualRetryCount: 1 });
 });
 
+it("preserves legacy scan success when optional failed-memory recovery cannot enqueue", async () => {
+  const { service: memory, db } = fixture.createTestService();
+  const scan = executor(root(), adapter(), memory);
+  await scan.startScan({ sourceId: "fixture", mode: "full" });
+  const memoryId = (await done(scan)).results![0]!.memoryIds![0]!;
+  db.db.prepare("UPDATE evolution_jobs SET status='dead_letter' WHERE target_memory_id=?").run(memoryId);
+  db.db.prepare("UPDATE memory_processing_state SET state='failed',active_job_id=NULL,retry_action='none',error_code='invalid_model_request' WHERE memory_id=?").run(memoryId);
+  const original = db.db.prepare("SELECT * FROM memories WHERE id=?").get(memoryId);
+  const internals = memory as unknown as { importJobs: { retryMemoryProcessing: () => never } };
+  const failure = vi.spyOn(internals.importJobs, "retryMemoryProcessing").mockImplementation(() => { throw new Error("scan retry enqueue failed"); });
+  try {
+    await scan.startScan({ sourceId: "fixture", mode: "full" });
+    const result = await done(scan);
+    expect(result.error).toBeNull();
+    expect(result.results![0]!.errorCount).toBe(0);
+    expect(result.results![0]!.memoryIds).toContain(memoryId);
+    expect(memory.memoryProcessingStatus([memoryId]).items[0]?.state).toBe("failed");
+    expect(db.db.prepare("SELECT * FROM memories WHERE id=?").get(memoryId)).toEqual(original);
+  } finally { failure.mockRestore(); }
+});
+
 it("returns every error below the shared 500-detail cap", async () => {
   const scan = executor(root(), adapter(Array.from({ length: 101 }, (_, i) => turn(String(i))).flat()), service({ addMemory: () => { throw new Error("write failed"); } }));
   await scan.startScan({ sourceId: "fixture", mode: "full" });

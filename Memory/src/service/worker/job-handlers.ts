@@ -662,7 +662,7 @@ export function classifyProcessingError(error: unknown): {
     const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
     const providerType = error.errorType?.toLowerCase().replace(/[\s_-]/g, "");
     if (providerCode === "missingsessionid" || providerType === "missingsessionid" ||
-      /(?:missing|required|absent).{0,100}x-opencode-session|x-opencode-session.{0,100}(?:missing|required|absent)/.test(normalized)) {
+      /(?:missing|required|absent).{0,100}x-opencode-session|x-opencode-session.{0,100}(?:missing|required|absent)/s.test(normalized)) {
       return { code: "model_configuration", retryAction: "open_settings" };
     }
     if (providerCode === "insufficientquota" || /insufficient[\s_-]+(?:quota|balance)/.test(normalized)) {

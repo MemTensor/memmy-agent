@@ -6,7 +6,7 @@ import {
 } from "../../fixtures/memory-service-fixture.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
-afterEach(cleanup);
+afterEach(async () => { vi.restoreAllMocks(); await cleanup(); });
 const namespace = { source: "codex", profileId: "default", userId: "bug903-recovery-user" };
 
 function setup() {
@@ -113,5 +113,140 @@ describe("recovery after repairing model configuration", () => {
     expect(wake).toHaveBeenCalledOnce();
     expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories").get()).toEqual({ n: 1 });
     expect(db.db.prepare("SELECT COUNT(*) AS n FROM source_turn_captures").get()).toEqual({ n: 1 });
+  });
+
+  function nativeFailure() {
+    const fixture = createTestService({ llm: createBatchReflectionLlm([]) });
+    const request = { namespace, source: "codex", channel: "agent_source_scan" as const, captureLegacyHistory: true,
+      sourceTurn: { source: "codex", profileId: "default", conversationId: "recovery-episode-conversation", turnId: "episode-turn",
+        startedAt: "2099-01-01T10:00:00.000Z", completedAt: "2099-01-01T10:01:00.000Z", sequence: 1,
+        completionEvidence: "stop:episode-turn" },
+      query: "Validate the isolated recovery transaction.", answer: "Preserve the original capture and dependent tasks." };
+    return { ...fixture, request };
+  }
+
+  async function failedNativeWithEpisodeTasks() {
+    const fixture = nativeFailure();
+    const { db, service, request } = fixture;
+    const first = await service.completeSourceTurn(request);
+    const id = first.result!.l1MemoryId;
+    const rawTurnId = first.result!.rawTurnId;
+    const repos = new Repositories(db.db);
+    const row = db.db.prepare("SELECT id FROM evolution_jobs WHERE target_memory_id=? LIMIT 1").get(id) as { id: string };
+    const template = repos.runtime.getJob(row.id)!;
+    db.db.prepare("UPDATE evolution_jobs SET status='dead_letter' WHERE target_memory_id=?").run(id);
+    repos.processing.update(id, { state: "failed", stage: "summary", activeJobId: null, retryAction: "none", errorCode: "invalid_model_request" });
+    db.db.prepare("UPDATE raw_turns SET message_payload_json=json_set(message_payload_json,'$.episode_assignment',json(?)) WHERE id=?")
+      .run(JSON.stringify({ status: "failed", generation: 1 }), rawTurnId);
+    const tasks = ["episode_assignment", "episode_finalize"] as const;
+    for (const jobType of tasks) repos.runtime.enqueueJob({ ...template, id: `recovery-${jobType}`, jobType, status: "dead_letter",
+      dedupeKey: undefined, payload: { rawTurnId, generation: 1 }, targetMemoryId: id });
+    // This task belongs to an earlier generation and must remain untouched.
+    repos.runtime.enqueueJob({ ...template, id: "recovery-stale-generation", jobType: "episode_assignment", status: "dead_letter",
+      dedupeKey: undefined, payload: { rawTurnId, generation: 0 }, targetMemoryId: id });
+    return { ...fixture, id, rawTurnId, repos, tasks };
+  }
+
+  function internals(service: ReturnType<typeof createTestService>["service"]) {
+    return service as unknown as {
+      repos: Repositories;
+      importJobs: { retryMemoryProcessing: (...args: unknown[]) => unknown };
+      workerHandlers: { appendJobChange: (...args: unknown[]) => void };
+    };
+  }
+
+  it.each(["manual", "scan"] as const)("atomically recovers memory and matching Episode work through %s retry", async kind => {
+    const { service, db, request, id, tasks, repos } = await failedNativeWithEpisodeTasks();
+    const original = repos.memories.get(id);
+    const observed: unknown[] = [];
+    const notify = vi.fn(() => observed.push({ inTransaction: db.db.inTransaction,
+      memoryState: repos.processing.get(id)?.state,
+      episodeStates: tasks.map(task => repos.runtime.getJob(`recovery-${task}`)?.status) }));
+    service.setCapturePendingListener(notify);
+    if (kind === "manual") expect(service.retryMemoryProcessing(id, { namespace }).accepted).toBe(true);
+    else expect(service.retryFailedMemoryProcessingOnScan(id)).toBe(true);
+    expect(notify).toHaveBeenCalledOnce();
+    expect(observed).toEqual([{ inTransaction: false, memoryState: "summary_pending", episodeStates: ["queued", "queued"] }]);
+    expect(repos.memories.get(id)).toEqual(original);
+    expect(repos.runtime.getJob("recovery-stale-generation")?.status).toBe("dead_letter");
+    for (const task of tasks) {
+      expect(db.db.prepare("SELECT COUNT(*) AS n FROM memory_change_log WHERE entity_id=? AND change_type='job_queued'")
+        .get(`recovery-${task}`)).toEqual({ n: 1 });
+    }
+    const after = repos.processing.get(id);
+    expect(service.retryFailedMemoryProcessingOnScan(id)).toBe(false);
+    expect(repos.processing.get(id)).toEqual(after);
+    expect(notify).toHaveBeenCalledOnce();
+    service.setCapturePendingListener(undefined);
+    expect((await service.completeSourceTurn(request)).status).toBe("existing");
+  });
+
+  it.each(["enqueue", "episode", "change"] as const)("rolls back all recovery writes on %s failure; scan is best effort and manual retry reports failure", async step => {
+    const { service, db, id, repos } = await failedNativeWithEpisodeTasks();
+    const target = internals(service);
+    const before = repos.processing.get(id);
+    const jobsBefore = db.db.prepare("SELECT * FROM evolution_jobs ORDER BY id").all();
+    const changesBefore = db.db.prepare("SELECT COUNT(*) AS n FROM memory_change_log").get();
+    const notify = vi.fn();
+    service.setCapturePendingListener(notify);
+    if (step === "enqueue") {
+      const real = target.importJobs.retryMemoryProcessing.bind(target.importJobs);
+      vi.spyOn(target.importJobs, "retryMemoryProcessing").mockImplementation((...args) => {
+        real(...args); throw new Error("injected enqueue failure");
+      });
+    } else if (step === "episode") {
+      const real = target.repos.runtime.requeueFailedEpisodeAssignments.bind(target.repos.runtime);
+      vi.spyOn(target.repos.runtime, "requeueFailedEpisodeAssignments").mockImplementation((...args) => {
+        real(...args); throw new Error("injected episode failure");
+      });
+    } else {
+      vi.spyOn(target.workerHandlers, "appendJobChange").mockImplementation(() => { throw new Error("injected change failure"); });
+    }
+    expect(service.retryFailedMemoryProcessingOnScan(id)).toBe(false);
+    expect(() => service.retryMemoryProcessing(id, { namespace })).toThrow(`injected ${step} failure`);
+    expect(repos.processing.get(id)).toEqual(before);
+    expect(db.db.prepare("SELECT * FROM evolution_jobs ORDER BY id").all()).toEqual(jobsBefore);
+    expect(db.db.prepare("SELECT COUNT(*) AS n FROM memory_change_log").get()).toEqual(changesBefore);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("keeps native capture accepted when dependent recovery fails", async () => {
+    const { service, db, request, id, repos } = await failedNativeWithEpisodeTasks();
+    vi.spyOn(internals(service).repos.runtime, "requeueFailedEpisodeAssignments").mockImplementation(() => {
+      throw new Error("injected native recovery failure");
+    });
+    const response = await service.completeSourceTurn(request);
+    expect(response.status).toBe("existing");
+    expect(response.result?.l1MemoryId).toBe(id);
+    expect(repos.processing.get(id)?.state).toBe("failed");
+    expect(db.db.prepare("SELECT COUNT(*) AS n FROM source_turn_captures").get()).toEqual({ n: 1 });
+    expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories").get()).toEqual({ n: 1 });
+  });
+
+  it("does not touch failed Episode tasks behind ready or active memory during scan replay", async () => {
+    const { service, id, repos } = await failedNativeWithEpisodeTasks();
+    for (const state of ["ready", "summary_pending", "summarizing", "embedding_pending", "embedding"] as const) {
+      repos.processing.update(id, { state });
+      expect(service.retryFailedMemoryProcessingOnScan(id)).toBe(false);
+      expect(repos.runtime.getJob("recovery-episode_assignment")?.status).toBe("dead_letter");
+    }
+  });
+
+  it("does not report a committed retry as failed when its scheduling listener throws", () => {
+    const { service, added, repos } = setup();
+    service.setCapturePendingListener(() => { throw new Error("injected listener failure"); });
+    expect(service.retryFailedMemoryProcessingOnScan(added.id)).toBe(true);
+    expect(repos.processing.get(added.id)?.state).toBe("summary_pending");
+  });
+
+  it.each(["assigned", "deleted", "redacted"] as const)("does not restore %s raw-turn Episode work", async reason => {
+    const { service, db, id, rawTurnId, repos } = await failedNativeWithEpisodeTasks();
+    if (reason === "assigned") db.db.prepare("UPDATE raw_turns SET message_payload_json=json_set(message_payload_json,'$.episode_assignment.status','assigned') WHERE id=?").run(rawTurnId);
+    else db.db.prepare(`UPDATE raw_turns SET ${reason === "deleted" ? "deleted_at" : "redacted_at"}=? WHERE id=?`)
+      .run(new Date().toISOString(), rawTurnId);
+    expect(service.retryFailedMemoryProcessingOnScan(id)).toBe(true);
+    expect(repos.processing.get(id)?.state).toBe("summary_pending");
+    expect(repos.runtime.getJob("recovery-episode_assignment")?.status).toBe("dead_letter");
+    expect(repos.runtime.getJob("recovery-episode_finalize")?.status).toBe("dead_letter");
   });
 });
