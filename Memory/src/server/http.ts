@@ -215,7 +215,12 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         return;
       }
       const viewerRequest = isViewerApiRequest(request, url);
-      if (viewerRequest) assertLocalViewerRequest(request, url);
+      // Node fetch also sends Sec-Fetch-Mode: cors. That header alone does not
+      // identify a browser or require a loopback Host for authenticated clients.
+      const browserLogRead = request.method === "GET" && url.pathname === "/api/v1/memory/logs" &&
+        (request.headers.origin !== undefined || request.headers["sec-fetch-site"] !== undefined ||
+          request.headers["sec-fetch-dest"] !== undefined);
+      if (viewerRequest || browserLogRead) assertLocalViewerRequest(request, url);
       if (viewerRequest && request.method === "GET" && url.pathname === "/api/v1/events") {
         streamViewerEvents({
           service: options.service,
@@ -1096,7 +1101,7 @@ async function routeRequest(
   }
 
   if (method === "GET" && path === "/api/v1/memory/logs") {
-    requirePanelRead(principal);
+    requireRawLogRead(principal);
     return service.apiLogs({
       tools: parseApiLogTools(url.searchParams.get("tools")),
       sourceAgent: url.searchParams.get("sourceAgent") ?? undefined,
@@ -1575,6 +1580,14 @@ function requireMemoryWrite(principal: AuthPrincipal): void {
 
 function requirePanelRead(principal: AuthPrincipal): void {
   requireAnyScope(principal, ["panel:read", "panel:write", "memory:read", "memory:write", "admin:read", "admin:write"]);
+}
+
+function requireRawLogRead(principal: AuthPrincipal): void {
+  // Logs are device-wide: an automatically granted cloud/anonymous wildcard
+  // cannot authorize access to unpartitioned tool inputs and outputs.
+  if (principal.kind === "local" || principal.kind === "viewer") return;
+  if (principal.kind === "scoped") return requireAnyScope(principal, ["admin:read", "admin:write"]);
+  throw new MemoryServiceError("forbidden", "raw logs require administrator access");
 }
 
 function requireAdminWrite(principal: AuthPrincipal): void {
