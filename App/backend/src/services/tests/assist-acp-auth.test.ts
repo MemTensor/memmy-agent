@@ -248,10 +248,11 @@ describe("会话选项（Cursor 统一用 Auto）", () => {
     expect(seen.some((call) => call.startsWith("set:"))).toBe(false);
   });
 
-  it("resolves the value by display name and skips values already in effect or unknown", () => {
+  it("resolves the value by display name, sets it even when reported as current, and skips unknown values", () => {
     const options = [{ id: "model", currentValue: "kimi-k3", options: [{ value: "default[]", name: "Auto" }, { value: "kimi-k3", name: "kimi-k3" }] }];
     expect(resolveConfigValue(options, "model", "auto")).toBe("default[]");
-    expect(resolveConfigValue(options, "model", "kimi-k3")).toBeNull();
+    // 报告的当前值不可信（Cursor 报告与实际不一致），照样设。
+    expect(resolveConfigValue(options, "model", "kimi-k3")).toBe("kimi-k3");
     expect(resolveConfigValue(options, "model", "nope")).toBeNull();
     // 没给出这个选项（接回旧会话时）就按原值试一次。
     expect(resolveConfigValue([], "model", "default[]")).toBe("default[]");

@@ -640,9 +640,13 @@ export interface AcpConfigOption {
 }
 
 /**
- * 要设置的会话选项值：先按 value 精确匹配，再按显示名（不分大小写）匹配；已经是这个值时返回 null 不必再设。
+ * 要设置的会话选项值：先按 value 精确匹配，再按显示名（不分大小写）匹配。
  * Agent 没给出这个选项（例如接回旧会话时不返回选项列表）就按原值试一次；给了但没有匹配的值时不设，
  * 免得把一个它不认的值写进去。
+ *
+ * <p>即使它报告的当前值已经是想要的值也照样设一次：Cursor 报告的当前模型取自 {@code ~/.cursor/acp-config.json}，
+ * 实际执行用的却是 {@code cli-config.json} 里的模型，两者可能不一致（2026-11-05 实测：报告 {@code default[]}，
+ * 实际用 kimi-k3 并回「Upgrade your plan to continue」）。</p>
  */
 export function resolveConfigValue(configOptions: readonly AcpConfigOption[], configId: string, wanted: string): string | null {
   const option = configOptions.find((candidate) => candidate.id === configId);
@@ -651,7 +655,5 @@ export function resolveConfigValue(configOptions: readonly AcpConfigOption[], co
   const lower = wanted.toLowerCase();
   const match = choices.find((choice) => choice.value === wanted)
     ?? choices.find((choice) => (choice.name ?? "").toLowerCase() === lower);
-  const value = match?.value;
-  if (!value) return null;
-  return value === option.currentValue ? null : value;
+  return match?.value || null;
 }
