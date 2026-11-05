@@ -80,10 +80,16 @@ describe("MemoryService / embedding / processing", () => {
   for (const queue of ["fresh", "retry"] as const) {
     for (const format of ["code", "message"] as const) {
       it.each([
-        ["OperationNotSupported", "The embeddings operation does not work with the specified model.", false],
-        ["insufficient_quota", "Insufficient balance.", false],
-        ["rate_limit_exceeded", "Rate limit exceeded.", true]
-      ] as const)(`${queue} queue does not fan out shared HTTP 400 %s (${format})`, async (code, message, transient) => {
+        ["OperationNotSupported", "The embeddings operation does not work with the specified model.",
+          "model_configuration", "failed", 0, "configuration"],
+        ["insufficient_quota", "Insufficient balance.",
+          "quota_exhausted", "failed", 1, null],
+        ["rate_limit_exceeded", "Rate limit exceeded.",
+          "transient_provider_error", "pending", 1, null]
+      ] as const)(`${queue} queue does not fan out shared HTTP 400 %s (${format})`, async (
+        code, message, errorCode, retryStatus, attempts, blockedReason
+      ) => {
+        const transient = retryStatus === "pending";
         const inputs: string[][] = [];
         const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
           inputs.push((JSON.parse(String(init?.body)) as { input: string[] }).input);
@@ -110,7 +116,7 @@ describe("MemoryService / embedding / processing", () => {
           await service.runWorkerOnce(ids.length, { targetMemoryIds: ids });
           for (const id of ids) expect(repos.processing.get(id)).toMatchObject({
             state: transient ? "embedding_pending" : "failed",
-            errorCode: transient ? "transient_provider_error" : "model_configuration",
+            errorCode,
             retryAction: transient ? "retry" : "open_settings"
           });
         } else {
@@ -123,9 +129,8 @@ describe("MemoryService / embedding / processing", () => {
           await service.runWorkerOnce(10);
           for (const retry of retries) {
             const stored = repos.runtime.getEmbeddingRetry(retry.id)!;
-            expect(stored).toMatchObject({ status: transient ? "pending" : "failed", attempts: transient ? 1 : 0 });
+            expect(stored).toMatchObject({ status: retryStatus, attempts, blockedReason });
             if (transient) expect(stored.nextAttemptAt).toBeGreaterThan(Date.now());
-            else expect(stored.blockedReason).toBe("configuration");
           }
         }
         expect(fetchMock).toHaveBeenCalledTimes(1);
