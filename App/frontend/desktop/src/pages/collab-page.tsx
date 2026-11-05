@@ -83,6 +83,7 @@ import {
 import styles from "./collab-page.module.css";
 import { consumeAssistFocus, getAssistFocus, subscribeAssistFocus } from "../app/collab-assist-focus.js";
 import { CollabAssistConversation } from "./collab-assist-conversation.js";
+import { READER_PANEL_WIDTH_STORAGE_KEY, useReaderPanelWidth } from "./collab-reader-resize.js";
 import { CollabAssistProjectSettings } from "./collab-assist-settings.js";
 import { assistAgentName, assistIsOpen, assistStatusKey } from "./collab-assist-view.js";
 
@@ -2842,6 +2843,7 @@ function SessionReaderPanel(props: {
   const { t } = useTranslation();
   const titleId = useId();
   const panelRef = useRef<HTMLElement | null>(null);
+  const panelWidth = useReaderPanelWidth(READER_PANEL_WIDTH_STORAGE_KEY, t("collab.reader.resize"));
   const data = props.session;
   const open = data !== null;
   const name = data ? data.session.memberName || (data.session.mine ? t("collab.session.you") : "") : "";
@@ -2892,7 +2894,9 @@ function SessionReaderPanel(props: {
         aria-labelledby={titleId}
         data-collab-reader=""
         tabIndex={-1}
+        style={panelWidth.style}
       >
+        {panelWidth.handle}
         <header className={styles.readerHead}>
           <span
             className={`${styles.avatar} ${styles.avatarSoft} ${styles.readerHeadAvatar}`}

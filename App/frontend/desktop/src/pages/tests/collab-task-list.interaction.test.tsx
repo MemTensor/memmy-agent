@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetCollabProjectsStore } from "../../app/collab-projects-store.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { CollabPage } from "../collab-page.js";
+import { ASSIST_PANEL_WIDTH_STORAGE_KEY, READER_PANEL_WIDTH_STORAGE_KEY } from "../collab-reader-resize.js";
 
 const mocks = vi.hoisted(() => ({
   listProjects: vi.fn(),
@@ -304,6 +305,23 @@ describe("collab task list", () => {
     expect(panel!.textContent).not.toContain("Bash");
     // 一个任务只标一次 Agent 名
     expect(panel!.textContent?.match(/Claude Code/g) ?? []).toHaveLength(1);
+
+    // 左边缘往左拖可以拉宽：宽度记在本机，与协助会话各记各的。
+    const handle = panel!.querySelector<HTMLElement>("[role='separator']")!;
+    expect(handle.getAttribute("aria-label")).toBe("调整任务面板宽度");
+    expect(panel!.style.width).toBe("520px");
+    await act(async () => {
+      handle.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 600 }));
+    });
+    await act(async () => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 500 }));
+      window.dispatchEvent(new PointerEvent("pointerup", { clientX: 500 }));
+    });
+    expect(panel!.style.width).toBe("620px");
+    expect(window.localStorage.getItem(READER_PANEL_WIDTH_STORAGE_KEY)).toBe("620");
+    // 协助会话的宽度不跟着变。
+    expect(window.localStorage.getItem(ASSIST_PANEL_WIDTH_STORAGE_KEY)).not.toBe("620");
+    window.localStorage.removeItem(READER_PANEL_WIDTH_STORAGE_KEY);
 
     // Esc 关闭，面板回到看板
     await act(async () => {

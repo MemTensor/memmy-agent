@@ -28,7 +28,7 @@ import {
   useAssistAgentChoice
 } from "./collab-assist-view.js";
 import frame from "./collab-page.module.css";
-import { SidebarResizeHandle, useResizableSidebar } from "./sidebar-resize.js";
+import { ASSIST_PANEL_WIDTH_STORAGE_KEY, useReaderPanelWidth } from "./collab-reader-resize.js";
 import detailStyles from "./collab-assist-detail.module.css";
 import styles from "./collab-assist-conversation.module.css";
 
@@ -46,32 +46,8 @@ const SYNC_WINDOW_MS = 30 * 60_000;
 /** 提示词与收到的内容默认显示的行数。 */
 const PREVIEW_LINES = 6;
 
-/**
- * 面板宽度：默认与读任务的只读面板一样 520，左边缘可以往左拖宽，拖到的宽度记在本机，下次打开沿用。
- * 拖得再宽也给看板留出 {@link PANEL_BOARD_RESERVE}：点面板外就能关闭，看得到自己在哪个项目。
- * 窗口变窄时只收窄显示的宽度，不改写记下的宽度，窗口再变宽就恢复。
- */
-export const ASSIST_PANEL_WIDTH_STORAGE_KEY = "memmy.collab.assistPanel.width.v1";
-const PANEL_DEFAULT_WIDTH = 520;
-const PANEL_MIN_WIDTH = 420;
-const PANEL_MAX_WIDTH = 1600;
-/** 面板四周的留白（左右各 24）。 */
-const PANEL_GUTTER = 48;
-const PANEL_BOARD_RESERVE = 240;
-/** 窗口窄于这个宽度时面板铺满（见样式里的 720px 断点），不再能拖。 */
-const PANEL_FILL_BELOW = 720;
-
-/** 窗口的宽度，随窗口变化更新。 */
-function useViewportWidth(): number | null {
-  const [width, setWidth] = useState<number | null>(() => (typeof window === "undefined" ? null : window.innerWidth));
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const update = () => setWidth(window.innerWidth);
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, []);
-  return width;
-}
+/** 旧的引用位置：宽度常量已移到 collab-reader-resize。 */
+export { ASSIST_PANEL_WIDTH_STORAGE_KEY };
 
 export function CollabAssistConversation(props: {
   /** 看板列表里的这一行：打开时先用它画出标题，详情读到后再补全会话。 */
@@ -92,18 +68,7 @@ export function CollabAssistConversation(props: {
   const { t } = useTranslation();
   const titleId = useId();
   const panelRef = useRef<HTMLElement | null>(null);
-  const viewport = useViewportWidth();
-  const resizable = viewport === null || viewport > PANEL_FILL_BELOW;
-  const panelWidth = useResizableSidebar({
-    storageKey: ASSIST_PANEL_WIDTH_STORAGE_KEY,
-    defaultWidth: PANEL_DEFAULT_WIDTH,
-    minWidth: PANEL_MIN_WIDTH,
-    maxWidth: PANEL_MAX_WIDTH,
-    // 手柄在面板左边：往左拖是变宽。
-    resizeDirection: -1,
-    availableWidth: viewport === null ? null : viewport - PANEL_GUTTER,
-    reservedPrimaryWidth: PANEL_BOARD_RESERVE
-  });
+  const panelWidth = useReaderPanelWidth(ASSIST_PANEL_WIDTH_STORAGE_KEY, t("collab.assist.conv.resize"));
   const { thread: summary, collab } = props;
   const open = summary !== null;
   const [detail, setDetail] = useState<AssistThreadDetail | null>(null);
@@ -288,21 +253,9 @@ export function CollabAssistConversation(props: {
         aria-labelledby={titleId}
         data-collab-assist-conversation=""
         tabIndex={-1}
-        style={resizable ? { width: panelWidth.appliedWidth } : undefined}
+        style={panelWidth.style}
       >
-        {resizable ? (
-          <div className={styles.resizeEdge}>
-            <SidebarResizeHandle
-              label={t("collab.assist.conv.resize")}
-              width={panelWidth.appliedWidth}
-              minWidth={panelWidth.appliedMinWidth}
-              maxWidth={panelWidth.appliedMaxWidth}
-              isResizing={panelWidth.isResizing}
-              onResizeStart={panelWidth.beginResize}
-              onResizeBy={panelWidth.resizeBy}
-            />
-          </div>
-        ) : null}
+        {panelWidth.handle}
         <header className={frame.readerHead}>
           <div className={frame.readerHeadText}>
             <h2 id={titleId} className={frame.readerTitle}>{t("collab.assist.detail.title", { title: thread.title })}</h2>

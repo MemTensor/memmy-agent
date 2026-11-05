@@ -352,20 +352,3 @@
   overflow-wrap: anywhere;
 }
 
-/*
- * 面板左边缘的拖动条：沿用侧栏的 sidebar-resize-handle（悬停与拖动时出现一条细线、col-resize 光标），
- * 只是贴在浮起卡片的内侧。上下让开圆角，线不会画到圆角外面；面板裁掉溢出，所以去掉手柄原有的负边距。
- */
-.resizeEdge {
-  position: absolute;
-  top: 22px;
-  bottom: 22px;
-  left: 0;
-  z-index: 2;
-  display: flex;
-  width: 8px;
-}
-
-.resizeEdge > :global(.sidebar-resize-handle) {
-  margin: 0;
-}
