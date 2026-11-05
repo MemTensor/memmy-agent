@@ -1,3 +1,7 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { fileURLToPath } from "node:url";
+import { runCommand } from "../src/cli/commands.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -109,6 +113,58 @@ describe("memmy memory server entrypoint", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.each(["json", "yaml"])("keeps an existing %s config usable by the CLI across service restarts", async extension => {
+    const root = mkdtempSync(join(tmpdir(), "memory-credential-restart-"));
+    const configPath = join(root, `config.${extension}`);
+    const databasePath = join(root, "memory.sqlite");
+    const original = {
+      appMetadata: { labels: ["01", "off"], enabled: false },
+      memmyMemory: { storage: { mode: "local", backend: "sqlite", sqlitePath: databasePath, extra: 42 } }
+    };
+    const json = extension === "json";
+    writeFileSync(configPath, json ? JSON.stringify(original) : YAML.stringify(original));
+    const readConfig = () => {
+      const contents = readFileSync(configPath, "utf8");
+      return json ? JSON.parse(contents) : YAML.parse(contents);
+    };
+    for (const key of ["MEMMY_MEMORY_TOKEN", "MEMORY_SERVICE_TOKEN", "MEMMY_MEMORY_URL", "MEMORY_SERVICE_URL"]) {
+      vi.stubEnv(key, undefined);
+    }
+    let firstToken: string | undefined;
+    let port = "0";
+    try {
+      for (let start = 0; start < 2; start++) {
+        const child = spawn(process.execPath, [
+          "--import", "tsx", fileURLToPath(new URL("../src/server/index.ts", import.meta.url)),
+          "--config", configPath, "--host", "127.0.0.1", "--port", port
+        ], { stdio: "ignore", env: { ...process.env, MEMMY_CONFIG: configPath, HOME: root, USERPROFILE: root } });
+        const closed = once(child, "close");
+        try {
+          await vi.waitFor(async () => {
+            const saved = readConfig();
+            expect(saved).toMatchObject(original);
+            expect(saved.memmyMemory.storage.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+            const response = await runCommand({ argv: ["raw", "GET", "/auth/check", "--config", configPath] });
+            expect(response).toMatchObject({ authenticated: true });
+          }, { timeout: 10_000 });
+          const { endpoint, token } = readConfig().memmyMemory.storage;
+          expect(token).toMatch(/^[a-f0-9]{64}$/);
+          if (start === 0) firstToken = token;
+          else expect(token).toBe(firstToken);
+          port = new URL(endpoint).port;
+          await runCommand({ argv: ["raw", "POST", "/admin/shutdown", "--config", configPath] });
+          expect((await closed)[0]).toBe(0);
+        } finally {
+          if (child.exitCode === null && child.signalCode === null) child.kill();
+          await closed;
+        }
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("shuts down through the admin endpoint and releases the sqlite server lock", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-memory-server-shutdown-"));
