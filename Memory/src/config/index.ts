@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { DEFAULT_MEMORY_URL, resolveMemoryConnection } from "@memmy/agent-source-core/memory-connection";
 import { normalizeMemoryByokLimitM } from "@memmy/agent-source-core";
 import { parse as parseYaml } from "yaml";
 import {
@@ -345,7 +346,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     mode: "local",
     backend: "sqlite",
     sqlitePath: defaultMemoryDatabasePath(),
-    endpoint: "http://127.0.0.1:18960",
+    endpoint: DEFAULT_MEMORY_URL,
     token: undefined
   },
   summary: {
@@ -575,7 +576,7 @@ export function defaultConfigPaths(): string[] {
   ].filter((value): value is string => Boolean(value));
 }
 
-export function loadMemmyConfig(configPath?: string): {
+export function loadMemmyConfig(configPath?: string, connectionEnv = process.env): {
   config: MemmyConfig;
   path: string;
 } {
@@ -602,9 +603,15 @@ export function loadMemmyConfig(configPath?: string): {
     fileConfig,
     envConfig
   ));
+  const storage = asRecord(fileConfig.storage);
+  const connection = resolveMemoryConnection(
+    optionalString(storage.endpoint) ?? optionalString(fileConfig.endpoint) ?? DEFAULT_MEMORY_URL,
+    optionalString(storage.token) ?? optionalString(fileConfig.token), connectionEnv
+  );
   return {
     config: {
       ...merged,
+      storage: { ...merged.storage, endpoint: connection.endpoint, token: connection.token },
       ...(configuredTimeZone ? { timeZone: resolveTimeZone(configuredTimeZone) } : {})
     },
     path: selectedPath
@@ -628,9 +635,7 @@ function configFromEnv(): Record<string, unknown> {
     storage: compactRecord({
       mode: process.env.MEMMY_MEMORY_MODE,
       backend: process.env.MEMMY_MEMORY_BACKEND,
-      sqlitePath: process.env.MEMMY_MEMORY_DB ?? process.env.MEMORY_SERVICE_DB,
-      endpoint: process.env.MEMMY_MEMORY_URL ?? process.env.MEMORY_SERVICE_URL,
-      token: process.env.MEMMY_MEMORY_TOKEN?.trim() || process.env.MEMORY_SERVICE_TOKEN?.trim() || undefined
+      sqlitePath: process.env.MEMMY_MEMORY_DB ?? process.env.MEMORY_SERVICE_DB
     }),
     summary: compactRecord({
       provider: process.env.MEMMY_SUMMARY_PROVIDER,

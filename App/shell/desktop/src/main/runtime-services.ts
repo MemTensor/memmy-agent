@@ -4,6 +4,7 @@ import { bindComputerUseWindowCaptureIpc } from './computer-use-window-capture.j
 import { bindComputerUseOnboardingIpc, type ComputerUseOnboarding } from './computer-use-onboarding.js';
 import { mutateRuntimeConfig } from "@memmy/migrations";
 import type { EmbeddedExecutorEventSink } from './embedded-browser-driver.js';
+import { resolveMemoryConnection, sameHttpOrigin } from "@memmy/local-api-contracts";
 import { BROWSER_PROFILE_CLEAR_REQUEST, BROWSER_ACCESS_RESULT, BROWSER_DOWNLOAD_RESULT, BROWSER_CAPABILITY_RESULT, EMBEDDED_BROWSER_EVENT, EMBEDDED_BROWSER_RESULT, NATIVE_APP_ACCESS_RESULT,
   isBrowserAccessRequest, isBrowserDownloadRequest, isBrowserCapabilityRequest, isBrowserProfileClearResult, isComputerUseSurfaceAction, isComputerUseSurfaceMessage, isNativeAppAccessRequest, type AgentGatewayStartupIssue,
   type BrowserCapabilityRequest,
@@ -130,6 +131,8 @@ export interface PackagedRuntimeConfig {
   agentWorkspace: string;
   memoryDatabasePath: string;
   memoryBaseUrl: string;
+  /** An override for another origin can be probed, but cannot take over this installation. */
+  externalMemoryOrigin?: boolean;
   memoryToken: string;
   memoryListenHost: string;
   memoryListenPort: number;
@@ -470,20 +473,22 @@ export async function preparePackagedRuntimeConfig(
     setMissing(storage, "mode", "local");
     setMissing(storage, "backend", "sqlite");
     setMissing(storage, "sqlitePath", memoryDatabasePath);
-    setMissing(storage, "endpoint", DEFAULT_MEMORY_URL);
-    const memoryUrl = parseHttpUrl(
-      stringValue(env.MEMMY_MEMORY_URL) ?? stringValue(env.MEMORY_SERVICE_URL) ??
-        stringValue(storage.endpoint) ?? DEFAULT_MEMORY_URL,
-      "Memory endpoint"
-    );
+    const legacyEndpoint = stringValue(memmyMemory.endpoint);
+    setMissing(storage, "endpoint", legacyEndpoint ?? DEFAULT_MEMORY_URL);
+    const fileEndpoint = stringValue(storage.endpoint) ?? DEFAULT_MEMORY_URL;
+    const legacyToken = stringValue(memmyMemory.token);
+    if (legacyToken && (!legacyEndpoint || sameHttpOrigin(fileEndpoint, legacyEndpoint))) {
+      setMissing(storage, "token", legacyToken);
+    }
+    const connection = resolveMemoryConnection(fileEndpoint, stringValue(storage.token), env);
+    const memoryUrl = parseHttpUrl(connection.endpoint, "Memory endpoint");
     // The unified scan API requires a local principal. Persist the credential
     // before starting either client or server so legacy tokenless installations
     // and Hooks reading the shared config use the same token on the next start.
     // Remote services and explicit credentials remain owned by their operator.
     if (shouldWriteConfig && storage.mode === "local" && storage.backend === "sqlite"
       && ["127.0.0.1", "localhost", "::1"].includes(listenHostFromUrl(memoryUrl))
-      && !stringValue(env.MEMMY_MEMORY_TOKEN) && !stringValue(env.MEMORY_SERVICE_TOKEN)
-      && !stringValue(storage.token)) {
+      && sameHttpOrigin(connection.endpoint, fileEndpoint) && !connection.token) {
       storage.token = secretFactory();
     }
     setMissing(websocket, "host", LOCAL_HOST);
@@ -534,15 +539,9 @@ export async function preparePackagedRuntimeConfig(
     ]);
   }
 
-  const memoryEndpoint = stringValue(env.MEMMY_MEMORY_URL) ??
-    stringValue(env.MEMORY_SERVICE_URL) ??
-    stringValue(storage.endpoint) ??
-    DEFAULT_MEMORY_URL;
-  const memoryUrl = parseHttpUrl(memoryEndpoint, "Memory endpoint");
-  const memoryToken = stringValue(env.MEMMY_MEMORY_TOKEN) ??
-    stringValue(env.MEMORY_SERVICE_TOKEN) ??
-    stringValue(storage.token) ??
-    "";
+  const fileEndpoint = stringValue(storage.endpoint) ?? DEFAULT_MEMORY_URL;
+  const connection = resolveMemoryConnection(fileEndpoint, stringValue(storage.token), env);
+  const memoryUrl = parseHttpUrl(connection.endpoint, "Memory endpoint");
   const agentWebsocketHost = stringValue(websocket.host) ?? LOCAL_HOST;
   const agentWebsocketPort = numberValue(websocket.port) ?? DEFAULT_AGENT_WEBSOCKET_PORT;
   const gatewayHealthHost = stringValue(gateway.host) ?? LOCAL_HOST;
@@ -554,7 +553,8 @@ export async function preparePackagedRuntimeConfig(
     agentWorkspace,
     memoryDatabasePath,
     memoryBaseUrl: normalizeBaseUrl(memoryUrl),
-    memoryToken,
+    externalMemoryOrigin: !sameHttpOrigin(connection.endpoint, fileEndpoint),
+    memoryToken: connection.token ?? "",
     memoryListenHost: listenHostFromUrl(memoryUrl),
     memoryListenPort: listenPortFromUrl(memoryUrl),
     agentGatewayBaseUrl: `http://${clientHost(agentWebsocketHost)}:${agentWebsocketPort}`,
@@ -901,9 +901,18 @@ export async function ensureMemoryService(
   shouldStop?: () => boolean
 ): Promise<void> {
   if (shouldStop?.()) return;
+  if (!runtimeConfig.memoryToken) throw new Error("Memory authentication requires a credential for the selected endpoint");
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
-  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const healthHeaders = {};
   let probe = await probeMemoryService(healthUrl, healthHeaders);
+  if (runtimeConfig.externalMemoryOrigin) {
+    if (probe === "starting") await waitForCompatibleMemoryService(healthUrl, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS);
+    else if (probe !== "ready") throw new Error(`Overridden Memory endpoint is ${probe}: ${healthUrl}`);
+    if (await probeMemoryAuthentication(runtimeConfig.memoryBaseUrl, runtimeConfig.memoryToken) !== "authenticated") {
+      throw new Error("Overridden Memory endpoint rejected authentication");
+    }
+    return;
+  }
   if ((options.platform ?? process.platform) === "win32"
     && options.offlineMemoryRuntimeDirectory
     && hasPreviousMemoryRuntimeMarker(runtimeConfig.configPath)
@@ -1066,7 +1075,7 @@ async function stopOlderBundledMemoryRuntime(
     || !isPackagedMemoryServiceProcess(lock.pid, installed.entrypoint, serviceHome, options.runtimeExecutable)) return false;
 
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
-  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const healthHeaders = {};
   try {
     const response = await fetch(healthUrl, { headers: healthHeaders, cache: "no-store", signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
     const health: unknown = await response.json();
@@ -1231,7 +1240,7 @@ async function startManagedMemoryService(
 ): Promise<void> {
   if (shouldStop?.()) return;
   const healthUrl = runtimeConfig.memoryBaseUrl + "/api/v1/health";
-  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const healthHeaders = {};
   // A service can release its lock, or stop responding altogether, while the
   // health waiter runs. Either way this Desktop instance then takes over.
   const existingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
@@ -1402,8 +1411,11 @@ async function restartManagedMemoryService(
   options: StartManagedRuntimeServicesOptions,
   onRestartRequested?: () => void
 ): Promise<void> {
+  if (runtimeConfig.externalMemoryOrigin) {
+    return restartExternalMemoryService({ baseUrl: runtimeConfig.memoryBaseUrl, token: runtimeConfig.memoryToken });
+  }
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
-  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const healthHeaders = {};
   const managedMemory = children.filter((child) => child.name === "memory" && isManagedChildRunning(child));
   const installed = options.offlineMemoryRuntimeDirectory
     ? await readInstalledMemoryRuntime(runtimeConfig.configPath)
@@ -1537,7 +1549,7 @@ export async function restartExternalMemoryService(input: {
 }): Promise<void> {
   const baseUrl = normalizeBaseUrl(parseHttpUrl(input.baseUrl, "Memory service URL"));
   const healthUrl = `${baseUrl}/api/v1/health`;
-  const healthHeaders = memoryAuthHeaders(input.token);
+  const healthHeaders = {};
   const probe = await probeHttpService(healthUrl, healthHeaders);
   if (probe !== "ready") {
     throw new Error(probe === "unexpected"
@@ -1545,6 +1557,9 @@ export async function restartExternalMemoryService(input: {
       : `Memory service is not running: ${healthUrl}`);
   }
 
+  if (await probeMemoryAuthentication(baseUrl, input.token) !== "authenticated") {
+    throw new Error("Memory endpoint rejected authentication before restart");
+  }
   await requestMemoryServiceShutdown(input);
   await waitForHttpServiceStop(healthUrl, healthHeaders);
   await waitForCompatibleMemoryService(healthUrl, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS);

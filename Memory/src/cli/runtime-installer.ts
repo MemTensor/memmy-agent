@@ -1,4 +1,5 @@
 import { ensureLocalMemoryToken } from "../config/local-token.js";
+import { loadCliMemoryConfig } from "./config.js";
 import { probeMemoryAuthentication } from "./auth-probe.js";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -45,6 +46,7 @@ export interface MemoryRuntimeInstallOptions {
   /** Maximum time to wait for the newly activated service to report its version. */
   healthCheckTimeoutMs?: number;
   endpoint?: string;
+  token?: string;
   agents?: string[];
   /** Desktop uses a newer compatible installation instead of replacing it with its bundled copy. */
   preferInstalledCompatible?: boolean;
@@ -111,7 +113,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     // the pointer while this installer was resolving its release.
     const previous = await currentInstalledRuntime(home);
     pointer.configPath = resolveHome(options.configPath ?? previous?.configPath ?? join(home, "config.yaml"));
-    await ensureLocalMemoryToken(pointer.configPath, !options.skipServiceRegistration);
+    await ensureLocalMemoryToken(pointer.configPath, !options.skipServiceRegistration, options);
     const versionComparison = previous ? compareVersions(manifest.version, previous.version) : 1;
     if (previous && options.preferInstalledCompatible && previous.protocolVersion === MEMORY_PROTOCOL_VERSION
       && (versionComparison < 0 || (versionComparison === 0
@@ -158,7 +160,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     if (previous && !options.skipServiceRegistration && !options.skipHealthCheck) {
       // A generic activation timeout may roll back only to a runtime proven safe before stopping it.
       const previousConfig = previous.configPath ?? join(home, "config.yaml");
-      const previousEndpoint = loadMemmyConfig(previousConfig).config.storage.endpoint;
+      const previousEndpoint = loadMemmyConfig(previousConfig, {}).config.storage.endpoint;
       if (previousEndpoint) {
         previousAuthenticated = await waitForRuntimeHealth(previousEndpoint, previous.version, 1_000, previous.buildId, previousConfig)
           .then(() => true, () => false);
@@ -183,11 +185,12 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     if (!options.skipHealthCheck) {
       try {
         await waitForRuntimeHealth(
-          options.endpoint ?? loadMemmyConfig(pointer.configPath).config.storage.endpoint ?? "http://127.0.0.1:18960",
+          options.endpoint ?? loadMemmyConfig(pointer.configPath, {}).config.storage.endpoint ?? "http://127.0.0.1:18960",
           manifest.version,
           healthCheckTimeoutMs,
           identity.buildId,
-          pointer.configPath
+          pointer.configPath,
+          options.token
         );
       } catch (error) {
         if (!options.skipServiceRegistration) {
@@ -374,10 +377,10 @@ export async function stopInstalledMemoryService(
 
   const endpoint = loopbackEndpoint(runtimeState.endpoint);
   const configPath = runtimeState.configPath ?? join(resolvedHome, "config.yaml");
-  const token = loadMemmyConfig(configPath).config.storage.token ?? "";
+  const token = loadCliMemoryConfig(configPath, endpoint).config.token;
   const request = dependencies.fetch ?? fetch;
   const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
-  const probe = await probeMemoryRuntime(endpoint, headers, request);
+  const probe = await probeMemoryRuntime(endpoint, request);
   if (probe === "unexpected") {
     throw new Error(`refusing to stop an unexpected service at ${endpoint}`);
   }
@@ -399,7 +402,7 @@ export async function stopInstalledMemoryService(
     } catch (error) {
       shutdownError = error;
     }
-    const stopped = await waitForMemoryRuntimeStop(endpoint, headers, request);
+    const stopped = await waitForMemoryRuntimeStop(endpoint, request);
     if (!stopped) {
       throw shutdownError instanceof Error
         ? shutdownError
@@ -411,12 +414,10 @@ export async function stopInstalledMemoryService(
 
 async function probeMemoryRuntime(
   endpoint: string,
-  headers: Record<string, string>,
   request: typeof fetch
 ): Promise<"stopped" | "memory" | "unexpected"> {
   try {
     const response = await request(`${endpoint}/api/v1/health`, {
-      headers,
       signal: AbortSignal.timeout(1_000)
     });
     if (!response.ok) return "unexpected";
@@ -429,12 +430,11 @@ async function probeMemoryRuntime(
 
 async function waitForMemoryRuntimeStop(
   endpoint: string,
-  headers: Record<string, string>,
   request: typeof fetch
 ): Promise<boolean> {
   const deadline = Date.now() + SERVICE_STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await probeMemoryRuntime(endpoint, headers, request) === "stopped") return true;
+    if (await probeMemoryRuntime(endpoint, request) === "stopped") return true;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
   }
   return false;
@@ -504,11 +504,12 @@ async function reuseInstalledRuntime(
   if (!options.skipHealthCheck) {
     try {
       await waitForRuntimeHealth(
-        options.endpoint ?? loadMemmyConfig(configPath).config.storage.endpoint ?? "http://127.0.0.1:18960",
+        options.endpoint ?? loadMemmyConfig(configPath, {}).config.storage.endpoint ?? "http://127.0.0.1:18960",
         pointer.version,
         healthCheckTimeoutMs,
         pointer.buildId,
-        configPath
+        configPath,
+        options.token
       );
     } catch (error) {
       if (error instanceof MemoryAuthenticationError && !options.skipServiceRegistration) {
@@ -889,7 +890,8 @@ async function waitForRuntimeHealth(
   expectedVersion: string,
   timeoutMs: number,
   expectedBuildId?: string,
-  configPath?: string
+  configPath?: string,
+  explicitToken?: string
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "service did not respond";
@@ -908,7 +910,7 @@ async function waitForRuntimeHealth(
           && (!expectedBuildId || health.buildId === expectedBuildId)
           && health.status !== "starting" && health.status !== "upgrading"
         ) {
-          const token = loadMemmyConfig(configPath).config.storage.token ?? "";
+          const token = explicitToken || loadCliMemoryConfig(configPath, endpoint).config.token || "";
           const authentication = await probeMemoryAuthentication(endpoint, token).catch((cause) => {
             throw new MemoryAuthenticationError("Memory activation rejected: service authentication could not be verified", { cause });
           });

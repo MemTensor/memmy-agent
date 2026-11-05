@@ -302,7 +302,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain('memory/node_modules/@memmy/local-api-contracts');
     expect(source).not.toContain('memory/node_modules/@memmy/migrations');
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
-    expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
+    expect(source).toContain('cp -R "$MEMORY_DIR/dist/adapters" "$RUNTIME_DIR/memory/adapters"');
     expect(source).toContain('node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs" \\');
     expect(manifestSource).toContain("protocolVersion: 1");
     expect(source.indexOf("run build -w @memmy/local-api-contracts")).toBeLessThan(
@@ -1742,7 +1742,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain('if [ ! -x "$AGENT_DIR/node_modules/.bin/tsc" ]');
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"');
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
-    expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
+    expect(source).toContain('cp -R "$MEMORY_DIR/dist/adapters" "$RUNTIME_DIR/memory/adapters"');
     expect(source).toContain(
       'npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --install-links --os=darwin --cpu="$TARGET_CPU"'
     );

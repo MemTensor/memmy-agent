@@ -233,6 +233,28 @@ describe("standalone Memory runtime installer", () => {
     expect(launcher).not.toContain("/desktop/electron");
   }, 15_000);
 
+  it("requires a credential for the activation endpoint before accepting a different origin", async () => {
+    const root = tempRoot();
+    const options = { home: join(root, "home"), runtimeDirectory: createRuntimeDirectory(root, "2.1.0"),
+      endpoint: "https://other.invalid", skipServiceRegistration: true };
+    const headers: (string | null)[] = [];
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const bearer = new Headers(init?.headers).get("authorization");
+      headers.push(bearer);
+      if (String(url).endsWith("/health")) return Response.json({ ok: true, protocolVersion: 1, serviceVersion: "2.1.0" });
+      return Response.json({ authenticated: true, authVersion: 1 }, { status: bearer ? 200 : 401 });
+    });
+    try {
+      await expect(installMemoryRuntime(options)).rejects.toThrow("authentication");
+      expect(headers).toEqual([null]);
+      headers.length = 0;
+      await installMemoryRuntime({ ...options, preferInstalledCompatible: true, token: "explicit-test-token" });
+      expect(headers).toEqual([null, null, "Bearer explicit-test-token"]);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
   it("holds the installer lock until a reused runtime finishes activation", async () => {
     const root = tempRoot();
     const home = join(root, "home");
@@ -618,25 +640,16 @@ describe("standalone Memory runtime installer", () => {
     const home = join(root, "home");
     const configPath = join(home, "config.yaml");
     mkdirSync(join(home, "memory-service"), { recursive: true });
-    writeFileSync(configPath, [
-      "memmyMemory:",
-      "  storage:",
-      "    mode: local",
-      "    backend: sqlite",
-      `    sqlitePath: ${JSON.stringify(join(home, "memory-service", "memory.sqlite"))}`,
-      "    token: service-token",
-      ""
-    ].join("\n"));
-
     let shutdownRequests = 0;
     const server = createServer((request, response) => {
-      expect(request.headers.authorization).toBe("Bearer service-token");
       if (request.method === "GET" && request.url === "/api/v1/health") {
+        expect(request.headers.authorization).toBeUndefined();
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));
         return;
       }
       if (request.method === "POST" && request.url === "/api/v1/admin/shutdown") {
+        expect(request.headers.authorization).toBe("Bearer service-token");
         shutdownRequests += 1;
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ ok: true }));
@@ -648,6 +661,17 @@ describe("standalone Memory runtime installer", () => {
     await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port");
+    writeFileSync(configPath, [
+      "memmyMemory:",
+      "  storage:",
+      "    mode: local",
+      "    backend: sqlite",
+      `    sqlitePath: ${JSON.stringify(join(home, "memory-service", "memory.sqlite"))}`,
+      `    endpoint: http://127.0.0.1:${address.port}`,
+      "    token: service-token",
+      ""
+    ].join("\n"));
+
     writeFileSync(join(home, "memory-service", "runtime.json"), JSON.stringify({
       pid: 12345,
       endpoint: `http://127.0.0.1:${address.port}`,

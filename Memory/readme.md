@@ -166,7 +166,13 @@ memmy-memory raw <method> <path>
 ```
 
 Use `--url`, `--token`, `--user-id`, `--source`, or `--config` to select the
-target service and namespace for an individual command.
+target service and namespace for an individual command. The CLI automatically
+uses the saved token only for the configured service origin (scheme, host and
+port). To authenticate to a different origin, pass its token with `--token`
+or set `MEMMY_MEMORY_URL` and `MEMMY_MEMORY_TOKEN` together. The legacy
+`MEMORY_SERVICE_URL` and `MEMORY_SERVICE_TOKEN` also form a pair. Install
+and upgrade require a matching credential if the shell supplies a token for
+another origin and the target configuration has none.
 
 `memmy-memory get` prints compact, agent-readable content by default. Add
 `--verbose` to inspect the complete JSON detail response.

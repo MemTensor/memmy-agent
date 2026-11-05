@@ -3,7 +3,8 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import YAML from "yaml";
 
-export const DEFAULT_MEMORY_URL = "http://127.0.0.1:18960";
+import { DEFAULT_MEMORY_URL, resolveMemoryConnection } from "@memmy/agent-source-core/memory-connection";
+export { DEFAULT_MEMORY_URL, sameHttpOrigin } from "@memmy/agent-source-core/memory-connection";
 
 export interface CliMemoryConfig {
   endpoint?: string;
@@ -11,7 +12,7 @@ export interface CliMemoryConfig {
   userId?: string;
 }
 
-export function loadCliMemoryConfig(configPath?: string): {
+export function loadCliMemoryConfig(configPath?: string, targetEndpoint?: string): {
   config: CliMemoryConfig;
   path?: string;
 } {
@@ -22,19 +23,11 @@ export function loadCliMemoryConfig(configPath?: string): {
     ? parseConfigFile(selectedPath)
     : {};
   const memmyMemory = asRecord(rootConfig.memmyMemory);
-  const storage = asRecord(memmyMemory.storage);
   const app = asRecord(rootConfig.app);
 
   return {
     config: {
-      endpoint: optionalString(process.env.MEMMY_MEMORY_URL) ??
-        optionalString(process.env.MEMORY_SERVICE_URL) ??
-        optionalString(storage.endpoint) ??
-        optionalString(memmyMemory.endpoint),
-      token: optionalString(process.env.MEMMY_MEMORY_TOKEN) ??
-        optionalString(process.env.MEMORY_SERVICE_TOKEN) ??
-        optionalString(storage.token) ??
-        optionalString(memmyMemory.token),
+      ...resolveCliConnection(memmyMemory, targetEndpoint),
       userId: optionalString(process.env.MEMMY_MEMORY_USER_ID) ??
         optionalString(process.env.MEMMY_USER_ID) ??
         optionalString(process.env.MEMORY_SERVICE_USER_ID) ??
@@ -43,6 +36,18 @@ export function loadCliMemoryConfig(configPath?: string): {
     },
     path: selectedPath
   };
+}
+
+/** Keep each implicit credential bound to the endpoint it was configured for. */
+export function resolveCliConnection(memory: Record<string, unknown>, targetEndpoint?: string) {
+  const storage = asRecord(memory.storage);
+  const fileEndpoint = configuredCliEndpoint(memory);
+  const fileToken = optionalString(storage.token) ?? optionalString(memory.token);
+  return resolveMemoryConnection(fileEndpoint, fileToken, process.env, targetEndpoint);
+}
+
+export function configuredCliEndpoint(memory: Record<string, unknown>): string {
+  return optionalString(asRecord(memory.storage).endpoint) ?? optionalString(memory.endpoint) ?? DEFAULT_MEMORY_URL;
 }
 
 export function defaultConfigPaths(): string[] {

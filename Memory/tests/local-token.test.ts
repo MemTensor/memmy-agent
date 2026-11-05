@@ -10,7 +10,7 @@ const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "memory-auth-config-")); roots.push(root);
-  vi.stubEnv("MEMMY_MEMORY_TOKEN", ""); vi.stubEnv("MEMORY_SERVICE_TOKEN", "");
+  for (const key of ["MEMMY_MEMORY_TOKEN", "MEMORY_SERVICE_TOKEN", "MEMMY_MEMORY_URL", "MEMORY_SERVICE_URL"]) vi.stubEnv(key, undefined);
   return join(root, "config.yaml");
 }
 it("concurrent initializers persist one credential and preserve unrelated configuration", async () => {
@@ -47,4 +47,20 @@ it("shares the install token with a launcher that does not inherit the terminal 
   expect(await ensureLocalMemoryToken(path)).toBe("terminal-credential");
   vi.stubEnv("MEMMY_MEMORY_TOKEN", "different-credential");
   await expect(ensureLocalMemoryToken(path, true)).rejects.toThrow("match the shared config");
+});
+
+
+it("persists only the environment pair matching the launcher's file endpoint", async () => {
+  const path = await fixture();
+  const origin = "http://127.0.0.1:18081";
+  const original = YAML.stringify({ memmyMemory: { storage: { endpoint: origin } } });
+  await writeFile(path, original);
+  vi.stubEnv("MEMMY_MEMORY_URL", "http://127.0.0.1:18082");
+  vi.stubEnv("MEMMY_MEMORY_TOKEN", "other-service");
+  await expect(ensureLocalMemoryToken(path, true)).rejects.toThrow("another origin");
+  expect(await readFile(path, "utf8")).toBe(original);
+  vi.stubEnv("MEMORY_SERVICE_URL", origin);
+  vi.stubEnv("MEMORY_SERVICE_TOKEN", "this-service");
+  expect(await ensureLocalMemoryToken(path, true)).toBe("this-service");
+  expect(YAML.parse(await readFile(path, "utf8")).memmyMemory.storage).toEqual({ endpoint: origin, token: "this-service" });
 });
