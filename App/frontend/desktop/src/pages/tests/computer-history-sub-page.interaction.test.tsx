@@ -83,6 +83,48 @@ describe("ComputerHistorySubPage", () => {
     return client;
   };
 
+  it("starts a new Windows profile after confirmation without requiring application selection", async () => {
+    window.memmy = { platform: "win32" } as NonNullable<Window["memmy"]>;
+    const permissions = { supported: true, platform: "windows" as const, ready: true, accessibility: false, inputMonitoring: false, reason: "ready" as const };
+    const initial = snapshot({ observation: { ...snapshot().observation, permissions } });
+    const client = await renderWith(initial, {
+      startComputerHistoryObservation: vi.fn().mockResolvedValue(snapshot({ observation: { ...initial.observation, state: "running" } })),
+      getWindowsHistoryConfiguration: vi.fn().mockResolvedValue({ settings: { version: 1, defaultApplicationBehavior: "observe", applications: [] }, applications: [], permissions }),
+      updateWindowsHistorySettings: vi.fn(),
+    });
+    expect(client.startComputerHistoryObservation).not.toHaveBeenCalled();
+    act(() => container.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
+    await act(async () => confirmationButton()!.click());
+    expect(client.startComputerHistoryObservation).toHaveBeenCalledOnce();
+    expect(container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("true");
+    expect(document.querySelector(".ch__permission-dialog")).toBeNull();
+    expect(client.getWindowsHistoryConfiguration).toHaveBeenCalledOnce();
+    expect(client.updateWindowsHistorySettings).not.toHaveBeenCalled();
+  });
+
+  it("uses explicit Windows application setup and keeps cancellation closed across polls", async () => {
+    vi.useFakeTimers();
+    window.memmy = { platform: "win32" } as NonNullable<Window["memmy"]>;
+    const permissions = { supported: true, platform: "windows" as const, ready: false, accessibility: false, inputMonitoring: false, reason: "authorization_required" as const };
+    const missing = snapshot({ observation: { ...snapshot().observation, permissions } });
+    const client = await renderWith(snapshot(), {
+      getComputerHistory: vi.fn().mockResolvedValue(missing),
+      startComputerHistoryObservation: vi.fn().mockResolvedValue(missing),
+      getWindowsHistoryConfiguration: vi.fn().mockResolvedValue({ settings: { version: 1, applications: [] }, applications: [], permissions }),
+      openComputerHistoryPermission: vi.fn(),
+    });
+    act(() => container.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
+    expect(document.body.textContent).toContain("采集范围内支持的应用中的操作");
+    await act(async () => confirmationButton()!.click());
+    expect(document.querySelector(".ch__permission-dialog")?.textContent).toContain("应用范围");
+    expect(document.querySelector(".ch__permission-dialog")?.textContent).not.toContain("两项权限");
+    expect(client.openComputerHistoryPermission).not.toHaveBeenCalled();
+    await act(async () => document.querySelector<HTMLButtonElement>('.ch__permission-dialog button[aria-label="关闭"]')!.click());
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(document.querySelector(".ch__permission-dialog")).toBeNull();
+    expect(readHistoryPermissionSetup()).toBeNull();
+  });
+
   it("routes the announcement's enable request through the normal confirmation", async () => {
     requestComputerHistoryLaunchEnable(window.sessionStorage);
     const client = await renderWith(snapshot());
@@ -294,8 +336,7 @@ describe("ComputerHistorySubPage", () => {
     document.body.classList.remove("memmy-platform-windows");
   });
 
-  it.each(["darwin", "win32"].flatMap((platform) => ["cancel", "close", "escape"].map((dismissal) => [platform, dismissal])))
-    ("keeps WeChat disabled after %s risk dialog %s and starts a fresh countdown on reopening", async (platform, dismissal) => {
+  it.each(["darwin", "win32"].flatMap((platform) => ["cancel", "close", "escape"].map((dismissal) => [platform, dismissal])))("keeps WeChat disabled after %s risk dialog %s and starts a fresh countdown on reopening", async (platform, dismissal) => {
       vi.useFakeTimers();
       window.memmy = { platform, getFullDiskAccessStatus: vi.fn().mockResolvedValue(true) } as unknown as NonNullable<Window["memmy"]>;
       if (platform === "win32") document.body.classList.add("memmy-platform-windows");
@@ -842,6 +883,24 @@ describe("ComputerHistorySubPage", () => {
     expect(container.textContent).toContain("My recording");
     expect(client.stopComputerHistoryObservation).not.toHaveBeenCalled();
     expect(client.clearComputerHistories).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["zh-CN", "部分原始记录尚未完成安全归档，已暂缓清理。记录仍保留。"],
+    ["en-US", "Cleanup is deferred until some original records are safely archived. Those records are still retained."],
+  ] as const)("shows deferred retention as a recoverable %s status, separate from summary errors", async (language, message) => {
+    vi.useFakeTimers();
+    const initial = snapshot({ observation: { ...snapshot().observation, retentionDeferred: true } });
+    const getComputerHistory = vi.fn().mockResolvedValue(initial);
+    const client = await renderWith(initial, { getComputerHistory });
+    await act(async () => root.render(page(client, false, {}, language)));
+    expect(container.querySelector(".ch__notices [role=status]")?.textContent).toBe(message);
+    expect(container.querySelector(".ch__notices [role=alert]")).toBeNull();
+    expect(client.stopComputerHistoryObservation).not.toHaveBeenCalled();
+    expect(client.clearComputerHistories).not.toHaveBeenCalled();
+    getComputerHistory.mockResolvedValue(snapshot());
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(container.querySelector(".ch__notices [role=status]")).toBeNull();
   });
 
   it.each(["429 Too many requests", "Network unavailable", "Invalid API key"])("does not show quota exhaustion for %s", async (narrationError) => {

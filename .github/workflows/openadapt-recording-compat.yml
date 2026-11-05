@@ -1,0 +1,54 @@
+name: OpenAdapt recording export compatibility
+on:
+  push:
+    branches:
+      - "feature/windows-history-native-core"
+  pull_request:
+    paths:
+      - "App/memmy-agent/src/tools/computer-recordings/**"
+      - "App/memmy-agent/tests/tools/computer-recordings/**"
+      - "App/backend/local-api-contracts/src/computer-recordings.ts"
+      - "scripts/internal/shared/*openadapt*"
+      - ".github/workflows/openadapt-recording-compat.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  upstream-format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: scripts/internal/shared/openadapt-flow-compat.lock
+      - name: Install isolated development dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --prefix App/memmy-agent --ignore-scripts --no-audit --no-fund
+          npm run build -w @memmy/local-api-contracts
+          python -m pip install -r scripts/internal/shared/openadapt-flow-compat.lock
+      - name: Generate a real Flow export and compile it offline with upstream 1.35.1
+        run: |
+          node --import tsx App/memmy-agent/tests/tools/computer-recordings/generate-flow-fixture.ts "$RUNNER_TEMP/memmy-flow-fixture"
+          python scripts/internal/shared/verify-openadapt-export.py "$RUNNER_TEMP/memmy-flow-fixture/flow" "$RUNNER_TEMP/memmy-flow-bundle"
+          node --import tsx App/memmy-agent/tests/tools/computer-recordings/generate-flow-fixture.ts "$RUNNER_TEMP/memmy-flow-macos-fixture" --macos
+          python scripts/internal/shared/verify-openadapt-export.py "$RUNNER_TEMP/memmy-flow-macos-fixture/flow" "$RUNNER_TEMP/memmy-flow-macos-bundle"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: openadapt-format-fixture
+          path: |
+            ${{ runner.temp }}/memmy-flow-fixture/flow/**
+            ${{ runner.temp }}/memmy-flow-bundle/**
+            ${{ runner.temp }}/memmy-flow-macos-fixture/flow/**
+            ${{ runner.temp }}/memmy-flow-macos-bundle/**
+          if-no-files-found: warn

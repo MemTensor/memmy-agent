@@ -15,6 +15,8 @@ import {
   embeddingTextForMemory,
   updateMemoryVectorField
 } from "../../../src/service/embedding/embedding-pipeline.js";
+import { l2VectorCacheKey } from "../../../src/service/embedding/l2-vector-cache.js";
+import { memoryVector } from "../../../src/storage/memory-vector-state.js";
 import { ModelHttpError } from "../../../src/model/http.js";
 import { createEmbedder } from "../../../src/model/embedder.js";
 import { Repositories } from "../../../src/storage/repositories.js";
@@ -41,14 +43,53 @@ afterEach(async () => {
 });
 
 describe("MemoryService / embedding / processing", () => {
+  it.each([false, true])("reuses exact L2 query vectors across jobs (preseeded: %s)", async (preseeded) => {
+    const seen: string[] = [];
+    const embedder = createCapturingEmbedder(seen);
+    const { db, service } = createTestService({ embedder });
+    const repos = new Repositories(db.db);
+    const memory = negativePolicyMemory("PPT headings", "Before presenting");
+    repos.memories.insert(memory);
+    const key = () => l2VectorCacheKey(embedder.config, "query", embeddingTextForMemory(repos.memories.get(memory.id)!));
+    if (preseeded) repos.runtime.setKv(key(), [1, 0, 0], memory.createdAt);
+    // A document vector must never serve a query request.
+    repos.runtime.setKv(l2VectorCacheKey(embedder.config, "document", embeddingTextForMemory(memory)), [0, 1, 0], memory.createdAt);
+    async function run(index: number) {
+      const id = `l2-cache-job-${index}`;
+      repos.runtime.enqueueJob({ id, jobType: "embedding", status: "queued", dedupeKey: id,
+        userId: memory.userId, targetMemoryId: memory.id, payload: {}, attempts: 0, maxAttempts: 3,
+        createdAt: memory.createdAt, updatedAt: memory.createdAt });
+      const result = await service.runWorkerOnce(10);
+      expect(result.jobs).toContainEqual(expect.objectContaining({ jobId: id, status: "succeeded" }));
+    }
+    await run(1);
+    await run(2);
+    expect(seen).toHaveLength(preseeded ? 0 : 1);
+    expect(repos.runtime.getKv(key())?.value).toEqual([1, 0, 0]);
+    expect(memoryVector(repos.memories.get(memory.id)!, "vec")).toEqual([1, 0, 0]);
+    const changed = repos.memories.get(memory.id)!;
+    (changed.properties.internal_info.policy as Record<string, unknown>).trigger = "After a style correction";
+    repos.memories.update(changed);
+    await run(3);
+    expect(seen).toHaveLength(preseeded ? 1 : 2);
+    embedder.config.model = "different-model";
+    await run(4);
+    expect(seen).toHaveLength(preseeded ? 2 : 3);
+  });
+
   for (const queue of ["fresh", "retry"] as const) {
     for (const format of ["code", "message"] as const) {
       it.each([
-        ["OperationNotSupported", "The embeddings operation does not work with the specified model.", false],
-        ["insufficient_quota", "Insufficient balance.", false],
-        ["rate_limit_exceeded", "Rate limit exceeded.", true]
-      ] as const)(`${queue} queue does not fan out shared HTTP 400 %s (${format})`, async (code, message, transient) => {
-        const quotaExhausted = code === "insufficient_quota";
+        ["OperationNotSupported", "The embeddings operation does not work with the specified model.",
+          "model_configuration", "failed", 0, "configuration"],
+        ["insufficient_quota", "Insufficient balance.",
+          "quota_exhausted", "failed", 1, null],
+        ["rate_limit_exceeded", "Rate limit exceeded.",
+          "transient_provider_error", "pending", 1, null]
+      ] as const)(`${queue} queue does not fan out shared HTTP 400 %s (${format})`, async (
+        code, message, errorCode, retryStatus, attempts, blockedReason
+      ) => {
+        const transient = retryStatus === "pending";
         const inputs: string[][] = [];
         const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
           inputs.push((JSON.parse(String(init?.body)) as { input: string[] }).input);
@@ -75,7 +116,7 @@ describe("MemoryService / embedding / processing", () => {
           await service.runWorkerOnce(ids.length, { targetMemoryIds: ids });
           for (const id of ids) expect(repos.processing.get(id)).toMatchObject({
             state: transient ? "embedding_pending" : "failed",
-            errorCode: transient ? "transient_provider_error" : quotaExhausted ? "quota_exhausted" : "model_configuration",
+            errorCode,
             retryAction: transient ? "retry" : "open_settings"
           });
         } else {
@@ -88,9 +129,8 @@ describe("MemoryService / embedding / processing", () => {
           await service.runWorkerOnce(10);
           for (const retry of retries) {
             const stored = repos.runtime.getEmbeddingRetry(retry.id)!;
-            expect(stored).toMatchObject({ status: transient ? "pending" : "failed", attempts: transient || quotaExhausted ? 1 : 0 });
+            expect(stored).toMatchObject({ status: retryStatus, attempts, blockedReason });
             if (transient) expect(stored.nextAttemptAt).toBeGreaterThan(Date.now());
-            else expect(stored.blockedReason).toBe(quotaExhausted ? null : "configuration");
           }
         }
         expect(fetchMock).toHaveBeenCalledTimes(1);

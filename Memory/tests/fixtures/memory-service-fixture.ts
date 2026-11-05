@@ -14,6 +14,7 @@ import type { ActualModelContext } from "../../src/contracts/index.js";
 // production default changes. Enabled/default-on suites use production config.
 // That includes the old L3 World Model: the new L3 replaces it when on.
 export const LEGACY_TEST_CONFIG = { ...DEFAULT_MEMMY_CONFIG, algorithm: { ...DEFAULT_MEMMY_CONFIG.algorithm,
+  l2Induction: { ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction, mode: "legacy" as const },
   session: { ...DEFAULT_MEMMY_CONFIG.algorithm.session, turnJudge: false },
   l3FieldCognition: { ...DEFAULT_MEMMY_CONFIG.algorithm.l3FieldCognition, enabled: false } } };
 

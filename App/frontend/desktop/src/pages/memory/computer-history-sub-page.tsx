@@ -20,6 +20,9 @@ import { BrainCircuit, Trash2, Wand2 } from "./memory-prototype-icons.js";
 import { ComputerHistoryPermissionGuide } from "./computer-history-permission-guide.js";
 import { readHistoryPermissionSetup, saveHistoryPermissionSetup } from "./computer-history-permission-state.js";
 import { ComputerHistoryRecordingConfirmation } from "./computer-history-recording-confirmation.js";
+import { WindowsHistorySettings } from "./windows-history-settings.js";
+import { historyPermissionsReady, type WindowsHistoryConfiguration } from "../../api/computer-history-contract.js";
+import { TaskRecordingsPanel } from "./task-recordings.js";
 import { ComputerHistoryWeChatConfirmation } from "./computer-history-wechat-confirmation.js";
 import { ComputerHistoryWeChatRiskConfirmation } from "./computer-history-wechat-risk-confirmation.js";
 import { clearWeChatPermissionReturn, shouldReturnToWeChatSettings } from "./computer-history-wechat-permission-state.js";
@@ -197,6 +200,9 @@ function Prose(props: { text: string }) {
 
 export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
   const { t } = useTranslation();
+  const windows = window.memmy?.platform === "win32";
+  const [windowsSettingsOpen, setWindowsSettingsOpen] = useState(false);
+  const [windowsConfiguration, setWindowsConfiguration] = useState<WindowsHistoryConfiguration | null>(null);
   const [snapshot, setSnapshot] = useState<ComputerHistorySnapshot | null>(null);
   const [pendingRecordingAction, setPendingRecordingAction] = useState<"start" | "resume" | null>(null);
   const [sourceSetupMode, setSourceSetupMode] = useState<"start" | "edit" | null>(null);
@@ -282,7 +288,7 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
         recordingSeen.current = true;
         saveHistoryPermissionSetup(null);
         setPermissionSetup(null);
-      } else if ((readHistoryPermissionSetup() || recordingSeen.current) && permission?.supported && (!permission.accessibility || !permission.inputMonitoring)) {
+      } else if ((readHistoryPermissionSetup() || recordingSeen.current) && permission?.supported && !historyPermissionsReady(permission)) {
         saveHistoryPermissionSetup("start");
         setPermissionSetup("start");
       }
@@ -381,7 +387,7 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
         recordingSeen.current = true;
         saveHistoryPermissionSetup(null);
         setPermissionSetup(null);
-      } else if ((readHistoryPermissionSetup() || recordingSeen.current) && permission?.supported && (!permission.accessibility || !permission.inputMonitoring)) {
+      } else if ((readHistoryPermissionSetup() || recordingSeen.current) && permission?.supported && !historyPermissionsReady(permission)) {
         saveHistoryPermissionSetup("start");
         setPermissionSetup("start");
       }
@@ -454,6 +460,12 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
       : client.startComputerHistoryObservation(), t("computerHistory.recordingStartFailed"));
     if (!next || next.observation.state !== "running") throw new Error(t("computerHistory.recordingStartFailed"));
   }, [runAction, permissionSetup, paused, t]);
+  useEffect(() => {
+    if (!windows || !props.client?.getWindowsHistoryConfiguration) return;
+    let active = true;
+    void props.client.getWindowsHistoryConfiguration().then((next) => { if (active) setWindowsConfiguration(next); }).catch(() => {});
+    return () => { active = false; };
+  }, [windows, props.client]);
 
   const deleteHistory = useCallback(async (historyId: string) => {
     if (!props.client) return;
@@ -501,16 +513,25 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
           <h3 className="memory-panel__title">
             {t("memory.nav.computerHistory")}
           </h3>
+          <p id="computer-history-record-description" className="memory-panel__subtitle">{t(windows ? "computerHistory.windows.description" : "computerHistory.recordDescription")}</p>
+          {recording && snapshot?.observation.captureHealth?.content ? <p className="memory-panel__subtitle" role="status">
+            {t(`computerHistory.windows.content.${snapshot.observation.captureHealth.content.status}`)}
+            {" · "}{new Date(snapshot.observation.captureHealth.content.timestamp).toLocaleTimeString()}
+          </p> : null}
         </div>
       </header>
+      <TaskRecordingsPanel client={props.client} human />
 
-      {error || refreshError || recordingError || (narrationError && !narrationQuotaExhausted) ? (
+      {error || refreshError || recordingError || snapshot?.observation.retentionDeferred || (narrationError && !narrationQuotaExhausted) ? (
         <div className="ch__notices">
           {error ? <div className="ch__error" role="alert">{error}</div> : null}
           {refreshError ? <div className="ch__error" role="alert">{refreshError}</div> : null}
           {recordingError ? <div className="ch__error" role="alert">{recordingError}</div> : null}
           {narrationError && !narrationQuotaExhausted ? (
             <div className="ch__error" role="alert">{narrationErrorMessage}</div>
+          ) : null}
+          {snapshot?.observation.retentionDeferred ? (
+            <div className="ch__setting-description" role="status">{t("computerHistory.retentionDeferred")}</div>
           ) : null}
         </div>
       ) : null}
@@ -525,6 +546,8 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
           <p id="computer-history-record-description" className="ch__setting-description">{t("computerHistory.recordDescription")}</p>
         </div>
         <div className="ch__head-actions">
+          {windows ? <Button type="button" variant="ghost" size="sm" disabled={busy || !props.client || observationState === "stopping"}
+            onClick={() => setWindowsSettingsOpen(true)}>{t("computerHistory.windows.title")}</Button> : null}
           {quotaExhausted || recording || paused ? (
             <span
               className={`memory-pill ch__recording-status${quotaExhausted ? " ch__recording-status--quota" : paused ? "" : " memory-pill--processing"}`}
@@ -625,7 +648,14 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
         onChoose={() => setSourceSetupMode("edit")} />
       </div>}
 
-      {permissionSetup && props.client ? <ComputerHistoryPermissionGuide
+      {(windowsSettingsOpen || (windows && permissionSetup)) && props.client ? <WindowsHistorySettings client={props.client}
+        onSaved={(configuration) => { recordingSeen.current = false; setWindowsConfiguration(configuration); void refresh(); }}
+        onStart={permissionSetup ? async () => {
+          const next = await runAction((client) => client.startComputerHistoryObservation());
+          if (next?.observation.state !== "running") throw new Error(t("computerHistory.recordingFailedUnknown"));
+        } : undefined}
+        onClose={() => { recordingSeen.current = false; setWindowsSettingsOpen(false); saveHistoryPermissionSetup(null); setPermissionSetup(null); }} /> : null}
+      {!windows && permissionSetup && props.client ? <ComputerHistoryPermissionGuide
         client={props.client}
         onStart={startAfterPermissions}
         onCancel={() => {
@@ -819,7 +849,7 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
                         <ul className="ch-entry__apps">
                           {visibleApplications.map((bundleId) => (
                             <li key={bundleId}>
-                              <AppIcon bundleId={bundleId} client={props.client} />
+                              <AppIcon bundleId={bundleId} client={props.client} displayName={windowsConfiguration?.applications.find((app) => app.id === bundleId)?.name} />
                             </li>
                           ))}
                         </ul>
@@ -851,16 +881,18 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
       />
       <ComputerHistoryRecordingConfirmation
         open={pendingRecordingAction !== null}
+        windows={windows}
         onCancel={() => setPendingRecordingAction(null)}
         onConfirm={() => {
           const action = pendingRecordingAction;
           setPendingRecordingAction(null);
           if (action) {
-            if (action === "start") {
+            if (action === "start" && !windows) {
               setSourceSetupMode("start");
             } else {
               saveHistoryPermissionSetup(action);
-              void runAction((client) => client.resumeComputerHistoryObservation(), t("computerHistory.recordingStartFailed"));
+              void runAction((client) => action === "start" ? client.startComputerHistoryObservation()
+                : client.resumeComputerHistoryObservation(), t("computerHistory.recordingStartFailed"));
             }
           }
         }}

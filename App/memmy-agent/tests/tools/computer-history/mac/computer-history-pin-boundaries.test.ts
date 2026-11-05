@@ -51,18 +51,25 @@ describe("pinning is confined to stored recording segments", () => {
   it("rejects a canonical segment whose directory is an outside symlink", () => {
     const outside = path.join(root, "outside");
     fs.renameSync(directory, outside);
-    fs.symlinkSync(outside, directory, "dir");
+    // Junctions exercise the same directory escape on Windows without requiring
+    // Developer Mode or an elevated test runner.
+    fs.symlinkSync(outside, directory, process.platform === "win32" ? "junction" : "dir");
     fs.writeFileSync(path.join(outside, ".pinned"), "keep");
     expect(() => service.pinSegment(id, true)).toThrow(/no longer on disk/);
     expect(() => service.pinSegment(id, false)).toThrow(/no longer on disk/);
     expect(fs.readFileSync(path.join(outside, ".pinned"), "utf8")).toBe("keep");
   });
 
-  it("never follows a pin marker symlink to truncate its target", () => {
+  it("never follows a pin marker symlink to truncate its target (requires file-symlink permission)", (context) => {
     const outside = path.join(root, "outside-file");
     fs.writeFileSync(outside, "must survive");
     const marker = path.join(directory, ".pinned");
-    fs.symlinkSync(outside, marker);
+    try { fs.symlinkSync(outside, marker); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || (code !== "EPERM" && code !== "EACCES")) throw error;
+      context.skip("Windows did not grant file-symlink creation; rerun with that capability or on Mac");
+    }
     expect(() => service.pinSegment(id, true)).toThrow(/regular file/);
     expect(fs.readFileSync(outside, "utf8")).toBe("must survive");
     service.pinSegment(id, false);

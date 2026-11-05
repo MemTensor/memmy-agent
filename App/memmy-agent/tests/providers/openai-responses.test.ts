@@ -290,6 +290,17 @@ describe("OpenAI Responses convertTools", () => {
       { type: "function", function: { name: "b", parameters: {} } },
     ])).toHaveLength(2);
   });
+
+  it("keeps window selection optional and preserves explicit strict schemas", () => {
+    const parameters = { type: "object", properties: { app: { type: "string" }, window_id: { type: "integer" } }, required: ["app"] };
+    const [nativeTool, strictTool] = convertTools([
+      { function: { name: "get_app_state", parameters } },
+      { function: { name: "strict_tool", strict: true, parameters } },
+    ]);
+    expect(nativeTool).toMatchObject({ strict: false, parameters });
+    expect(nativeTool.parameters.required).toEqual(["app"]);
+    expect(strictTool.strict).toBe(true);
+  });
 });
 
 describe("OpenAI Responses mapFinishReason", () => {
@@ -500,6 +511,32 @@ describe("OpenAI Responses consumeSdkStream", () => {
       { call_id: "c1", name: "write_file", arguments_delta: "" },
       { call_id: "c1", name: "write_file", arguments_delta: '{"path":"a.txt","content":"' },
       { call_id: "c1", name: "write_file", arguments_delta: "hello\\n" },
+    ]);
+  });
+
+  it("joins interleaved argument events by item_id without duplicating tool calls", async () => {
+    const deltas: Record<string, any>[] = [];
+    const [, toolCalls] = await consumeSdkStream(streamFrom([
+      { type: "response.output_item.added", output_index: 1, item: { type: "function_call", call_id: "c1", id: "fc1", name: "get_weather", arguments: "" } },
+      { type: "response.output_item.added", output_index: 2, item: { type: "function_call", call_id: "c2", id: "fc2", name: "get_time", arguments: "" } },
+      { type: "response.function_call_arguments.delta", item_id: "fc1", output_index: 1, delta: '{"city":' },
+      { type: "response.function_call_arguments.delta", item_id: "fc2", output_index: 2, delta: '{"zone":"UTC"}' },
+      { type: "response.function_call_arguments.delta", item_id: "fc1", output_index: 1, delta: '"SF"}' },
+      { type: "response.function_call_arguments.done", item_id: "fc2", output_index: 2, arguments: '{"zone":"UTC"}' },
+      { type: "response.function_call_arguments.done", item_id: "fc1", output_index: 1, arguments: '{"city":"SF"}' },
+      { type: "response.output_item.done", output_index: 1, item: { type: "function_call", call_id: "c1", id: "fc1", name: "get_weather", arguments: '{"city":"SF"}' } },
+      { type: "response.output_item.done", output_index: 2, item: { type: "function_call", call_id: "c2", id: "fc2", name: "get_time", arguments: '{"zone":"UTC"}' } },
+      { type: "response.completed", response: { status: "completed", usage: null, output: [] } },
+    ]), { onToolCallDelta: (delta) => { deltas.push(delta); } });
+
+    expect(toolCalls.map(({ id, name, arguments: args }) => ({ id, name, args }))).toEqual([
+      { id: "c1|fc1", name: "get_weather", args: { city: "SF" } },
+      { id: "c2|fc2", name: "get_time", args: { zone: "UTC" } },
+    ]);
+    expect(deltas.slice(2)).toEqual([
+      { call_id: "c1", name: "get_weather", arguments_delta: '{"city":' },
+      { call_id: "c2", name: "get_time", arguments_delta: '{"zone":"UTC"}' },
+      { call_id: "c1", name: "get_weather", arguments_delta: '"SF"}' },
     ]);
   });
 
