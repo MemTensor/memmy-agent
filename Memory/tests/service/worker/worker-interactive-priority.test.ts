@@ -1,5 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryDb } from "../../../src/storage/db.js";
 import { Repositories, type EvolutionJobRecord } from "../../../src/storage/repositories.js";
@@ -11,7 +12,7 @@ import type { WorkerObservation } from "../../../src/service/worker/worker-obser
 const resources: Array<{ root: string; db: MemoryDb; runner: WorkerRunner }> = [];
 function gate() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 function harness(process: WorkerRunnerDeps["jobHandlers"]["processJob"], cap = 1, algorithm: "wrr" | "legacy" = "wrr") {
-  const root = mkdtempSync("/private/tmp/worker-interactive-"), db = new MemoryDb({ path: join(root, "memory.sqlite") });
+  const root = mkdtempSync(join(tmpdir(), "worker-interactive-")), db = new MemoryDb({ path: join(root, "memory.sqlite") });
   const repos = new Repositories(db.db), concurrency = new WorkerConcurrencyController({}, {});
   const events: WorkerObservation[] = [];
   const unexpected = () => { throw new Error("Unexpected fixture dependency"); };
