@@ -17,7 +17,7 @@ export function ASSIST_COMMAND_ENV(sourceId: string): string {
 }
 
 /** 一个可执行文件在常见位置：PATH、Homebrew、以及各个包管理器的全局 bin。 */
-const LOOKUP_DIRS = [
+export const LOOKUP_DIRS = [
   "/opt/homebrew/bin",
   "/usr/local/bin",
   "/usr/bin",

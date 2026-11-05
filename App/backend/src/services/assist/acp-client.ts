@@ -39,6 +39,13 @@ export interface AcpRunOptions {
   signal?: AbortSignal;
   /** 单次请求的最长时间：与产品内置的 15 分钟一致。 */
   timeoutMs?: number;
+  /** Agent 的名字，只用于拼给人看的原因（例如「Cursor 返回错误：…」）；默认「Agent」。 */
+  agentName?: string;
+  /**
+   * 需要登录时调 authenticate 的上限，默认 15 秒。有的 Agent 的登录方法会一直不回应
+   * （QwenWork 实测 120 秒仍无响应），不能跟着它一起等下去。
+   */
+  authTimeoutMs?: number;
 }
 
 export interface AcpRunResult {
@@ -149,18 +156,55 @@ function readFullToolOutput(content: unknown): string {
   return parts.join("\n");
 }
 
-/** 拉不起来、中途失败、超时：都带一句能直接给双方看的中文原因。 */
+/** 拉不起来、需要登录、中途失败、超时：都带一句能直接给双方看的中文原因。 */
 export class AcpError extends Error {
   /** 中途失败时已经记下的执行过程：失败的轮次也要让双方看到做到了哪一步。 */
   transcript?: AssistTranscriptItem[];
-  constructor(message: string, readonly kind: "unavailable" | "failed" | "timeout" | "cancelled") {
+  /** JSON-RPC 错误码：只有在判断「是不是要登录」时用得着（有的 Agent 用 -32000 表示需要认证）。 */
+  code?: number;
+  constructor(
+    message: string,
+    readonly kind: "unavailable" | "failed" | "timeout" | "cancelled" | "unauthenticated"
+  ) {
     super(message);
     this.name = "AcpError";
   }
 }
 
+/**
+ * 这个错误是不是「要先登录」：JSON-RPC 错误里有认证字样，或者用的是 -32000 这个通用服务端错误码
+ * （QwenWork 用它回「Authentication required」，Cursor 用它回需要认证）。
+ * 用它区分「Agent 自己坏了」与「登录一下就能跑」，后者由上层替人发起登录。
+ */
+export function isAuthenticationError(error: unknown): boolean {
+  if (!(error instanceof AcpError)) return false;
+  if (/auth|authenticat|unauthor|login|log in|登录/iu.test(error.message)) return true;
+  return error.code === -32000;
+}
+
+/**
+ * 有的 Agent 把错误当成正常回答：Cursor 在账号有问题时会以 {@code end_turn} 正常结束，
+ * 回复只是一句 {@code Error: I: WritableIterable is closed}，看不出真正原因。这种回复要当失败处理，
+ * 不能当成答案交给发起方。只匹配「整段回复以 Error: 开头、没有换行、很短且这一轮没有任何工具调用」，
+ * 正常回答里提到 Error: 不会被当失败。
+ */
+export const REPLY_ERROR_MAX_CHARS = 400;
+
+export function assistReplyError(reply: string, toolCalls: number, agentName = "Agent"): string | null {
+  const text = reply.trim();
+  if (!text.startsWith("Error:")) return null;
+  // 做了事还是失败，过程本身有意义，交给正常流程展示。
+  if (toolCalls > 0) return null;
+  // 多行或者很长的一段更像正常回答（例如解释一个有出错信息的日志）。
+  if (text.includes("\n") || text.length > REPLY_ERROR_MAX_CHARS) return null;
+  return `${agentName} 返回错误：${text}`;
+}
+
 /** 单次请求的上限：单次最长 15 分钟，超时就当作失败并告诉发起方。 */
 export const ACP_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** 需要登录时调 authenticate 的上限：QwenWork 的登录方法会一直不回应，不能跟着一起等。 */
+export const AUTH_TIMEOUT_MS = 15_000;
 
 interface Pending {
   resolve: (value: unknown) => void;
@@ -237,8 +281,11 @@ class JsonRpcConnection {
     if (!pending) return;
     this.pending.delete(id);
     if (message.error) {
-      const error = message.error as { message?: string };
-      pending.reject(new AcpError(error.message || "Agent 返回错误", "failed"));
+      const detail = message.error as { message?: string; code?: number };
+      const error = new AcpError(detail.message || "Agent 返回错误", "failed");
+      // 留下错误码：判断「是不是要登录」时用得到（见 {@link isAuthenticationError}）。
+      if (typeof detail.code === "number") error.code = detail.code;
+      pending.reject(error);
       return;
     }
     pending.resolve(message.result);
@@ -441,27 +488,82 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
         // 不声明 fs 与 terminal：文件读写与命令都由 Agent 自己完成。
         clientCapabilities: {}
       }) as { authMethods?: Array<{ id?: string; name?: string }> } | undefined;
-      // 有的 Agent（例如 Cursor）要求先走一次它自己的登录：它把人已经登录过的身份接进来，
-      // 不调这一步，session/new 会直接回「需要认证」。第一个方法就是它默认的登录方式。
-      const authMethod = initialized?.authMethods?.find((method) => typeof method.id === "string")?.id;
-      if (authMethod) {
-        await connection.request("authenticate", { methodId: authMethod }).catch(() => undefined);
+      const authMethods = (initialized?.authMethods ?? [])
+        .map((method) => method?.id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+
+      /** 接回已有会话；接不回（或本来就没会话）就新开一个。 */
+      const openSession = async (): Promise<string> => {
+        if (sessionId) {
+          try {
+            await connection.request("session/load", { sessionId, cwd: options.cwd, mcpServers: [] });
+            return sessionId;
+          } catch {
+            // 这个 Agent 接不回那条会话（换过版本、会话被清理）：新开一个，本次照常执行。
+          }
+        }
+        const session = await connection.request("session/new", { cwd: options.cwd, mcpServers: [] }) as {
+          sessionId?: string;
+        };
+        if (typeof session.sessionId !== "string") throw new AcpError("Agent 没有给我们一个会话", "failed");
+        return session.sessionId;
+      };
+
+      /**
+       * 只在真的要登录时才调 authenticate：它原来是 initialize 之后无条件调一次，
+       * 而 QwenWork 的登录方法会一直不回应（实测 120 秒仍无响应），把本来能跑的会话也一起卡死。
+       * 这里给一个短超时，超时就当登录没完成，交给上层去发起浏览器登录。
+       */
+      const authenticate = async (): Promise<void> => {
+        const methodId = authMethods[0]!;
+        await withTimeout(
+          connection.request("authenticate", { methodId }),
+          options.authTimeoutMs ?? AUTH_TIMEOUT_MS,
+          () => new AcpError("Agent 要求登录，但它的登录方法没有回应", "unauthenticated")
+        );
+      };
+
+      const unauthenticated = (error: unknown): AcpError => {
+        const reason = error instanceof Error ? error.message.trim() : "";
+        return new AcpError(reason ? `这个 Agent 需要先登录：${reason}` : "这个 Agent 需要先登录", "unauthenticated");
+      };
+
+      let opened: string;
+      try {
+        opened = await openSession();
+      } catch (error) {
+        if (!isAuthenticationError(error)) throw error;
+        // 它要求登录。没有登录方法时不能替它认证，但这个错误仍然是「登录一下就能跑」，交给上层提示去登录。
+        if (authMethods.length === 0) throw unauthenticated(error);
+        // 有用它给的第一个登录方法试一次，成功后再建一次会话。
+        try {
+          await authenticate();
+          opened = await openSession();
+        } catch (retry) {
+          throw isAuthenticationError(retry) ? unauthenticated(retry) : retry;
+        }
       }
-      const session = sessionId
-        ? (await connection.request("session/load", { sessionId, cwd: options.cwd, mcpServers: [] }).then(
-            () => ({ sessionId }), async () => await connection.request("session/new", { cwd: options.cwd, mcpServers: [] })
-          ) as { sessionId?: string })
-        : (await connection.request("session/new", { cwd: options.cwd, mcpServers: [] }) as { sessionId?: string });
-      if (typeof session.sessionId === "string") {
-        sessionId = session.sessionId;
-        options.onSession?.(session.sessionId);
-      }
-      if (!sessionId) throw new AcpError("Agent 没有给我们一个会话", "failed");
+      sessionId = opened;
+      options.onSession?.(opened);
+
       prompting = true;
-      await connection.request("session/prompt", {
-        sessionId,
-        prompt: [{ type: "text", text: options.prompt }]
-      });
+      try {
+        await connection.request("session/prompt", {
+          sessionId,
+          prompt: [{ type: "text", text: options.prompt }]
+        });
+      } catch (error) {
+        // 有的 Agent 在 initialize 时给不出登录方法，直到真的让它动起来才回报需要认证。
+        if (isAuthenticationError(error)) throw unauthenticated(error);
+        throw error;
+      }
+      // Cursor 会把「账号有问题」当成正常结束：回复只有一句 Error: …。这种回复不能当答案。
+      const replyError = assistReplyError(
+        reply,
+        transcript.items.filter((item) => item.kind === "tool").length,
+        options.agentName ?? "Agent"
+      );
+      if (replyError) throw new AcpError(replyError, "failed");
       finish(undefined, { reply: reply.trim(), steps, transcript: transcript.settle(true), sessionId });
     } catch (error) {
       finish(error instanceof AcpError ? error : new AcpError(
@@ -470,4 +572,21 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
   })();
 
   return done;
+}
+
+/** 给一个请求加超时：超时就抛调用方给的错误，原请求之后才失败不会变成未处理的拒绝。 */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () => AcpError): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(onTimeout()), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new AcpError(String(error), "failed"));
+      }
+    );
+  });
 }

@@ -31,6 +31,7 @@ import { createCollabAssistService } from "./services/collab-assist-service.js";
 import { createAcpAssistRunner, createAssistRunner } from "./services/assist/runner.js";
 import { createMemmyAssistRunner } from "./services/assist/memmy-runner.js";
 import { MEMMY_SOURCE_ID, assistRunnable } from "./services/assist/recipes.js";
+import { assistEnv } from "./services/assist/shell-env.js";
 import { createLocalSessionReader } from "./adapters/outbound/agent-source/session-reference/local-session-reader.js";
 import { createBuiltinAgentSourceRegistry } from "./services/builtin-agent-source-registry.js";
 import { defaultCollabHome, refreshCollabAgentSkills } from "./services/collab-added-agents.js";
@@ -362,9 +363,12 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         (await collab.ensureWorkingDirectory(projectId)).localDirectory ?? null,
       agents: async () => {
         const view = await collabAgentAccess.view();
-        // 能运行才出现：有数据目录或装过协作组件不代表能拉起来（Pi、QwenWork 有数据目录却没有命令行）。
+        // 判断用的是补上登录 shell PATH 的环境：打包后的 Memmy 进程 PATH 里没有 Homebrew / nvm 的目录，
+        // 按进程 PATH 判断会把装了命令行的人也说成不可用（见 services/assist/shell-env）。
+        // 能运行才出现：有数据目录或装过协作组件不代表能拉起来（Pi 有数据目录却没有命令行）。
+        const assistEnvironment = assistEnv();
         const external = view.agents
-          .filter((agent) => agent.enabled && agent.available && assistRunnable(agent.sourceId))
+          .filter((agent) => agent.enabled && agent.available && assistRunnable(agent.sourceId, assistEnvironment))
           .map((agent) => ({ sourceId: agent.sourceId, name: agent.name, available: true }));
         return memmyCanAssist
           ? [{ sourceId: MEMMY_SOURCE_ID, name: "Memmy", available: true }, ...external]

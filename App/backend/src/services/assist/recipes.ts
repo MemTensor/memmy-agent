@@ -8,6 +8,10 @@
  * <p>这些程序的入口有一半来自桌面端自带的引擎或隐藏参数，对方升级后可能变化；因此每个配方都可以用
  * 环境变量覆盖（见 {@link ASSIST_COMMAND_ENV}），出问题时不必改代码。</p>
  */
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+import { adapterFor, installedAdapterPath } from "./adapters.js";
 import type { DeepSeekHarnessOptions } from "./deepseek-harness.js";
 import { DEEPSEEK_HARNESS_SOURCE_ID, resolveDeepSeekHarness } from "./deepseek-harness.js";
 import { ASSIST_COMMAND_ENV, findExecutable } from "./executables.js";
@@ -48,6 +52,7 @@ const RECIPES: readonly AssistRecipe[] = [
   // 账号、额度都不是 WorkBuddy 的；WorkBuddy 自带的引擎由桌面端带着内部参数与账号拉起，单独走 ACP 没有响应。
   // 等有稳定的调用方式再加回来。
   // QwenWork 用桌面端包内的 Qoder 引擎，ACP 同样是隐藏参数。
+  // 引擎不在 PATH 上，装在应用包里（见 {@link qwenWorkEngine}），找不到时由它补上绝对路径。
   { sourceId: "qwenwork", name: "QwenWork", command: "qoderclicn", args: ["--acp"] },
   // DeepSeek Harness 的一次性模式不能续跑，协助统一走 ACP。真正的入口与参数由 ./deepseek-harness 解析：
   // 桌面版自带的引擎优先，其次是版本够新的 dsh 命令行，并且要叠上桌面版的模型补丁。
@@ -79,40 +84,93 @@ export function assistRecipe(sourceId: string, env: NodeJS.ProcessEnv = process.
 }
 
 /** 这台电脑上可以拿来执行的 Agent：只列配置了配方且能运行的，界面用它说明「可用」。 */
-export function availableAssistAgents(env: NodeJS.ProcessEnv = process.env): AssistAgentRecipe[] {
+export function availableAssistAgents(
+  env: NodeJS.ProcessEnv = process.env,
+  options: AssistRunnableOptions = {}
+): AssistAgentRecipe[] {
   return RECIPES.map((recipe) => assistRecipe(recipe.sourceId, env))
-    .filter((recipe): recipe is AssistAgentRecipe => recipe !== null && assistRunnable(recipe.sourceId, env));
+    .filter((recipe): recipe is AssistAgentRecipe => recipe !== null && assistRunnable(recipe.sourceId, env, options));
 }
 
 /**
- * 靠适配器接入 ACP 的 Agent 要看它本体的命令行：适配器可以在授权后按需安装，
- * 但本体不在，装上适配器也跑不起来。
+ * 靠适配器接入 ACP 的 Agent 里，本体命令行是跑起来的必要条件的那一个：
+ * Pi 的适配器驱动的是 {@code pi} 本体，本体不在就装上也跑不起来。
+ *
+ * <p>Claude Code 与 Codex 不在这里：它们的适配器自带引擎（适配器自己依赖 claude / codex 的可执行包），
+ * 只装了 Claude App 或 Codex App（引擎在应用包里）的人命令行上并没有 {@code claude} / {@code codex}，
+ * 按本体命令行判断会把他们错判成不可用。这两个看成「适配器已装好，或者能现场装」。</p>
  */
 const BODY_COMMANDS: Readonly<Record<string, string>> = Object.freeze({
-  claude_code: "claude",
-  codex: "codex",
   pi: "pi"
 });
 
+/** 需要适配器的两个 Agent：它们能不能跑与本体命令行无关（见 {@link BODY_COMMANDS}）。 */
+const ADAPTER_BODY_AGENTS: ReadonlySet<string> = new Set(["claude_code", "codex"]);
+
+/** 判断「能不能运行」时可以让测试注入的位置，正式运行按默认位置找。 */
+export interface AssistRunnableOptions extends Pick<DeepSeekHarnessOptions, "appDirs" | "dshHome"> {
+  /** 适配器与协助状态目录，默认 {@code MEMMY_HOME} 或 {@code ~/.memmy}。 */
+  home?: string;
+  /** QwenWork 应用包的位置，按顺序找；测试可注入。 */
+  qwenWorkAppDirs?: readonly string[];
+}
+
+/** QwenWork 桌面端应用包的默认位置。 */
+export function defaultQwenWorkAppDirs(): string[] {
+  return ["/Applications/QwenWorkCN.app", join(homedir(), "Applications", "QwenWorkCN.app")];
+}
+
+/** 引擎在应用包里的位置：{@code Contents/Resources/bin/qoderclicn}。 */
+const QWENWORK_ENGINE = join("Contents", "Resources", "bin", "qoderclicn");
+
 /**
- * 这个 Agent 在这台电脑上能不能运行：有环境变量覆盖时看覆盖的命令；需要适配器的看本体命令行；
- * DeepSeek Harness 看桌面版或够新的命令行；其余看配方里的命令本身。没有配方的（用户自己添加的 Agent）
- * 一律不能由 Memmy 拉起。
+ * QwenWork 的引擎：这个程序既不在 PATH 上，也不在常见命令目录里，只在应用包里。
+ * 找不到时返回 null，由调用方把「没装」变成给双方看的失败原因。
+ */
+export function qwenWorkEngine(
+  env: NodeJS.ProcessEnv = process.env,
+  appDirs: readonly string[] = defaultQwenWorkAppDirs()
+): string | null {
+  const onPath = findExecutable("qoderclicn", env);
+  if (onPath) return onPath;
+  for (const appDir of appDirs) {
+    const engine = join(appDir.replace(/[\\/]+$/u, ""), QWENWORK_ENGINE);
+    if (findExecutable(engine, env)) return engine;
+  }
+  return null;
+}
+
+/**
+ * 这个 Agent 在这台电脑上能不能运行：有环境变量覆盖时看覆盖的命令；需要适配器的看适配器（已装好，
+ * 或者有 npm 与 node 能现场装；Pi 另看本体命令行）；QwenWork 看应用包里的引擎；DeepSeek Harness 看
+ * 桌面版或够新的命令行；其余看配方里的命令本身。没有配方的（用户自己添加的 Agent）一律不能由 Memmy 拉起。
+ *
+ * <p>这里不看「有没有登录」：未登录的 Agent 在执行时由 Memmy 代为发起登录（见 ./login），
+ * 从候选里剔掉会让只差一次登录的人找不到它。</p>
  */
 export function assistRunnable(
   sourceId: string,
   env: NodeJS.ProcessEnv = process.env,
-  /** 只给测试注入桌面版位置与 dsh 主目录；正式运行按默认位置找。 */
-  dsh: Pick<DeepSeekHarnessOptions, "appDirs" | "dshHome"> = {}
+  options: AssistRunnableOptions = {}
 ): boolean {
   if (sourceId === MEMMY_SOURCE_ID) return true;
   const recipe = assistRecipe(sourceId, env);
   if (!recipe) return false;
   if (env[ASSIST_COMMAND_ENV(sourceId)]?.trim()) return findExecutable(recipe.resolved, env) !== null;
   // DeepSeek Harness 的入口不止 PATH 上一个命令：桌面版自带的引擎能跑就够（见 ./deepseek-harness）。
-  if (sourceId === DEEPSEEK_HARNESS_SOURCE_ID) return resolveDeepSeekHarness({ ...dsh, env }).ok;
+  if (sourceId === DEEPSEEK_HARNESS_SOURCE_ID) return resolveDeepSeekHarness({ ...options, env }).ok;
+  if (sourceId === "qwenwork") return qwenWorkEngine(env, options.qwenWorkAppDirs) !== null;
   const body = BODY_COMMANDS[sourceId];
-  return findExecutable(body ?? recipe.command, env) !== null;
+  if (body) return findExecutable(body, env) !== null;
+  const adapter = adapterFor(sourceId);
+  if (adapter) {
+    if (installedAdapterPath(adapter, options.home) !== null) return true;
+    // 没装过也能装：npm 与 node 都在就行。npm 是 `#!/usr/bin/env node` 脚本，只有 npm 没有 node 跑不起来。
+    return ADAPTER_BODY_AGENTS.has(sourceId)
+      && findExecutable("npm", env) !== null
+      && findExecutable("node", env) !== null;
+  }
+  return findExecutable(recipe.command, env) !== null;
 }
 
 /** 已知的 Agent 名：失败原因要说清是哪个 Agent 起不来。下线的也留着名字，旧记录里仍然按名字显示。 */

@@ -2,7 +2,14 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ASSIST_COMMAND_ENV, assistAgentName, assistRecipe, assistRunnable } from "../assist/recipes.js";
+import { adaptersDirectory } from "../assist/adapters.js";
+import {
+  ASSIST_COMMAND_ENV,
+  assistAgentName,
+  assistRecipe,
+  assistRunnable,
+  qwenWorkEngine
+} from "../assist/recipes.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -28,11 +35,66 @@ function binWith(...commands: string[]): string {
  * 所以这里用这台电脑上不可能存在的命令名来覆盖配方，验证判断依据而不是本机装了什么。
  */
 describe("assistRunnable", () => {
-  it("checks the agent's own command line for agents that need an adapter", () => {
-    const env = { PATH: binWith("claude") } as NodeJS.ProcessEnv;
-    // Claude Code 看 claude 本体：适配器可以授权后再装，本体在就能跑。
-    expect(assistRunnable("claude_code", env)).toBe(true);
-    expect(assistRunnable("memmy", env)).toBe(true);
+  /** 一个临时 home：把适配器目录与真实的 ~/.memmy 隔开。 */
+  function tempHome(): string {
+    const root = mkdtempSync(join(tmpdir(), "memmy-assist-home-"));
+    roots.push(root);
+    return root;
+  }
+
+  /** 造一个「适配器已装好」的 home。 */
+  function homeWithAdapter(bin: string): string {
+    const root = tempHome();
+    const binDir = join(adaptersDirectory(root), "node_modules", ".bin");
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(binDir, bin), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(binDir, bin), 0o755);
+    return root;
+  }
+
+  it("treats Claude Code and Codex as usable once their adapter is there", () => {
+    // 适配器自带引擎（各自依赖 claude / codex 的可执行包），不需要 PATH 上有 claude / codex：
+    // 只装了 Claude App 或 Codex App 的人命令行上并没有这两个命令。
+    expect(assistRunnable("claude_code", { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv, {
+      home: homeWithAdapter("claude-agent-acp")
+    })).toBe(true);
+    expect(assistRunnable("codex", { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv, {
+      home: homeWithAdapter("codex-acp")
+    })).toBe(true);
+  });
+
+  it("treats Claude Code and Codex as usable when npm and node are there to install the adapter", () => {
+    const bin = binWith("npm", "node");
+    const env = { PATH: bin } as NodeJS.ProcessEnv;
+    expect(assistRunnable("claude_code", env, { home: tempHome() })).toBe(true);
+    expect(assistRunnable("codex", env, { home: tempHome() })).toBe(true);
+  });
+
+  it("still needs the pi command itself, because its adapter drives pi", () => {
+    expect(assistRunnable("pi", { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv, { home: tempHome() })).toBe(false);
+    expect(assistRunnable("pi", { PATH: binWith("pi") } as NodeJS.ProcessEnv, { home: tempHome() })).toBe(true);
+  });
+
+  it("finds QwenWork's engine inside its app bundle", () => {
+    // 引擎既不在 PATH 上也不在常见命令目录里，只在应用包里；按 PATH 找会一直说它不可用。
+    const root = mkdtempSync(join(tmpdir(), "memmy-assist-qwenwork-"));
+    roots.push(root);
+    const bundle = join(root, "QwenWorkCN.app");
+    const bin = join(bundle, "Contents", "Resources", "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "qoderclicn"), "#!/bin/sh\n");
+    chmodSync(join(bin, "qoderclicn"), 0o755);
+
+    const env = { PATH: binWith() } as NodeJS.ProcessEnv;
+    expect(qwenWorkEngine(env, [bundle])).toBe(join(bin, "qoderclicn"));
+    expect(assistRunnable("qwenwork", env, { qwenWorkAppDirs: [bundle] })).toBe(true);
+    // 没有这个应用包时不能凭空说它能用。
+    expect(assistRunnable("qwenwork", env, { qwenWorkAppDirs: [join(root, "NotThere.app")] })).toBe(false);
+  });
+
+  it("checks the agent's own command line for agents with native ACP", () => {
+    expect(assistRunnable("cursor", { PATH: binWith("cursor-agent") } as NodeJS.ProcessEnv)).toBe(true);
+    expect(assistRunnable("memmy", { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv)).toBe(true);
   });
 
   it("uses the override command when one is set", () => {

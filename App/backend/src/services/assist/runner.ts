@@ -6,11 +6,16 @@
  *
  * <p>拉起失败、组件没装成、中途退出都变成一句能直接给双方看的原因（例如「没能准备好 Claude Code
  * 的运行组件」），由上层回传成 FAILED，而不是让请求一直停在「执行中」。</p>
+ *
+ * <p>没登录不再直接失败：先由 Memmy 用这个 Agent 引擎自带的登录命令在她电脑上打开浏览器（见 ./login），
+ * 登录完成后用同样的参数重跑一次，只重试一次。</p>
  */
-import { AcpError, runAcpAgent } from "./acp-client.js";
+import { AcpError, runAcpAgent, type AcpRunOptions } from "./acp-client.js";
 import { ensureAdapter } from "./adapters.js";
 import { DEEPSEEK_HARNESS_SOURCE_ID, deepSeekHarnessLaunch } from "./deepseek-harness.js";
-import { MEMMY_SOURCE_ID, assistAgentName, assistRecipe, findExecutable } from "./recipes.js";
+import { signIn, type AssistSignInOutcome } from "./login.js";
+import { MEMMY_SOURCE_ID, assistAgentName, assistRecipe, findExecutable, qwenWorkEngine } from "./recipes.js";
+import { assistEnv } from "./shell-env.js";
 import type { AssistRunner } from "../collab-assist-service.js";
 
 /**
@@ -28,13 +33,31 @@ export interface AcpAssistRunnerOptions {
   timeoutMs?: number;
   /** 本机状态目录，默认 ~/.memmy；适配器也装在这下面。 */
   home?: string;
+  /** QwenWork 应用包位置，测试可注入。 */
+  qwenWorkAppDirs?: readonly string[];
+  /** 等登录完成的上限，默认 5 分钟。 */
+  loginTimeoutMs?: number;
+}
+
+/** 一次执行要用什么命令、参数、环境变量：装好适配器之后才定得下来。 */
+interface AssistLaunch {
+  command: string;
+  args: readonly string[];
+  env?: Readonly<Record<string, string>>;
 }
 
 export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): AssistRunner {
-  const env = options.env ?? process.env;
+  /**
+   * 协助用的环境变量：打包后的 Memmy 进程 PATH 只有系统默认目录，要补上用户登录 shell 的那一份
+   * （见 ./shell-env），否则 Homebrew / nvm 装的 npm、node 与各 Agent 的命令行都找不到。
+   * 第一次真的要执行时才读：读一次要起一个登录 shell，不该拖慢启动。
+   */
+  let prepared: NodeJS.ProcessEnv | null = null;
+  const assistEnvironment = (): NodeJS.ProcessEnv => (prepared ??= options.env ?? assistEnv());
   return {
     async run(input) {
       const name = assistAgentName(input.agent);
+      const env = assistEnvironment();
 
       // 需要适配器的 Agent：没有就地装一次。装的过程作为一步进展显示出来，避免界面一直静着。
       const adapter = await ensureAdapter(input.agent, {
@@ -52,19 +75,40 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
         throw new AcpError(`${name} 不能由 Memmy 在这台电脑上启动`, "unavailable");
       }
 
-      // DeepSeek Harness 的入口与环境变量要单独解析：桌面版自带的引擎优先，参数里还要叠上模型补丁。
-      if (input.agent === DEEPSEEK_HARNESS_SOURCE_ID) {
-        const launch = deepSeekHarnessLaunch({
-          env,
-          ...(options.home === undefined ? {} : { home: options.home })
-        });
-        if (!launch.ok) throw new AcpError(`${name} 未启动：${launch.reason}`, "unavailable");
-        return runAcpAgent({
-          command: launch.command,
-          args: launch.args,
+      const launch = (): AssistLaunch => {
+        // DeepSeek Harness 的入口与环境变量要单独解析：桌面版自带的引擎优先，参数里还要叠上模型补丁。
+        if (input.agent === DEEPSEEK_HARNESS_SOURCE_ID) {
+          const resolved = deepSeekHarnessLaunch({
+            env,
+            ...(options.home === undefined ? {} : { home: options.home })
+          });
+          if (!resolved.ok) throw new AcpError(`${name} 未启动：${resolved.reason}`, "unavailable");
+          return { command: resolved.command, args: resolved.args, env: resolved.env };
+        }
+        // 自带适配器优先；QwenWork 的引擎在应用包里；其余回到 PATH 上找它自己的程序。
+        const engine = input.agent === "qwenwork" ? qwenWorkEngine(env, options.qwenWorkAppDirs) : null;
+        const command = adapter?.executable ?? engine ?? findExecutable(recipe.resolved, env);
+        if (!command) {
+          throw new AcpError(
+            input.agent === "qwenwork"
+              ? `${name} 未启动：没有找到它的引擎，确认 QwenWork 装在这台电脑上`
+              : `${name} 未启动：没有找到 ${recipe.resolved}`,
+            "unavailable"
+          );
+        }
+        return { command, args: recipe.args, ...(recipe.env ? { env: recipe.env } : {}) };
+      };
+
+      const runOnce = async () => {
+        const current = launch();
+        return await runAcpAgent({
+          command: current.command,
+          args: current.args,
           cwd: input.cwd,
-          env: launch.env,
+          // 拉起 Agent 时也要带上补好的 PATH：Agent 自己的工具要靠它找到 node、git 这些命令。
+          env: mergedEnv(env, current.env),
           prompt: input.prompt,
+          agentName: name,
           ...(input.sessionId ? { sessionId: input.sessionId } : {}),
           onStep: input.onStep,
           ...(input.onTranscript ? { onTranscript: input.onTranscript } : {}),
@@ -72,26 +116,49 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
           signal: input.signal,
           ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs })
         });
-      }
-      // 自带适配器优先；没有适配器的 Agent 回到 PATH 上找它自己的程序。
-      const executable = adapter?.executable ?? findExecutable(recipe.resolved, env);
-      if (!executable) {
-        throw new AcpError(`${name} 未启动：没有找到 ${recipe.resolved}`, "unavailable");
-      }
+      };
 
-      return runAcpAgent({
-        command: executable,
-        args: recipe.args,
-        cwd: input.cwd,
-        ...(recipe.env ? { env: recipe.env } : {}),
-        prompt: input.prompt,
-        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-        onStep: input.onStep,
-        ...(input.onTranscript ? { onTranscript: input.onTranscript } : {}),
-        onSession: input.onSession,
-        signal: input.signal,
-        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs })
-      });
+      try {
+        return await runOnce();
+      } catch (error) {
+        if (!(error instanceof AcpError) || error.kind !== "unauthenticated") throw error;
+        // 没登录：先替她发起这个 Agent 自己的登录，登录完成后重跑一次，只重试一次。
+        const outcome: AssistSignInOutcome = await signIn({
+          sourceId: input.agent,
+          name,
+          env,
+          signal: input.signal,
+          onStep: input.onStep,
+          ...(options.home === undefined ? {} : { home: options.home }),
+          ...(options.qwenWorkAppDirs === undefined ? {} : { qwenWorkAppDirs: options.qwenWorkAppDirs }),
+          ...(adapter?.executable ? { adapterExecutable: adapter.executable } : {}),
+          ...(options.loginTimeoutMs === undefined ? {} : { timeoutMs: options.loginTimeoutMs })
+        });
+        if (outcome === "cancelled") throw new AcpError("执行已停止", "cancelled");
+        if (outcome !== "ok") throw new AcpError(signInFailure(name, outcome), "unauthenticated");
+        return await runOnce();
+      }
     }
   };
+}
+
+/** 执行用的环境变量：补好的 PATH 加上配方自己要的那几个变量（值都是确定的字符串）。 */
+function mergedEnv(
+  base: NodeJS.ProcessEnv,
+  extra?: Readonly<Record<string, string>>
+): NonNullable<AcpRunOptions["env"]> {
+  const merged: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (typeof value === "string") merged[key] = value;
+  }
+  for (const [key, value] of Object.entries(extra ?? {})) merged[key] = value;
+  return merged;
+}
+
+/** 登录没成时给双方看的原因：直接说没成什么，不用比喻。 */
+function signInFailure(name: string, outcome: Exclude<AssistSignInOutcome, "ok" | "cancelled">): string {
+  // 没有可代为执行的登录命令：只能请她在自己电脑上登录一次。
+  if (outcome === "unsupported") return `${name} 没有登录，在这台电脑上登录后再试`;
+  if (outcome === "timeout") return `${name} 的登录页长时间没有完成，完成登录后再试`;
+  return `${name} 的登录没有完成，完成登录后再试`;
 }
