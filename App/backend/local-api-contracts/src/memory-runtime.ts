@@ -41,6 +41,8 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 
 /** Schema for job type. */
 export const JobTypeSchema = z.enum([
+  "episode_assignment",
+  "episode_finalize",
   "episode_idle_close",
   "episode_title",
   "trace_summary",
@@ -54,6 +56,7 @@ export const JobTypeSchema = z.enum([
   "l2_induction",
   "l3_abstraction",
   "l3_world_model_update",
+  "l3_unit_update",
   "project_environment_profile",
   "skill_crystallization",
   "skill_trial_resolve",
@@ -153,7 +156,9 @@ export type RecallEvidenceOutput = z.infer<typeof RecallEvidenceOutputSchema>;
 export const MemoryMetricsSchema = z.object({
   value: z.number().optional(),
   alpha: z.number().optional(),
-  reflectionDone: z.boolean()
+  reflectionDone: z.boolean(),
+  valuePending: z.boolean().optional(),
+  alphaPending: z.boolean().optional()
 });
 export type MemoryMetrics = z.infer<typeof MemoryMetricsSchema>;
 
@@ -237,7 +242,7 @@ export type MemoryDetailItem = z.infer<typeof MemoryDetailItemSchema>;
 /** Schema for raw turn summary. */
 export const RawTurnSummarySchema = z.object({
   rawTurnId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
+  episodeId: NonEmptyStringSchema.optional(),
   turnId: NonEmptyStringSchema,
   userText: z.string().optional(),
   assistantText: z.string().optional(),
@@ -469,7 +474,8 @@ export type CompleteTurnInput = z.infer<typeof CompleteTurnInputSchema>;
 export const CompleteTurnOutputSchema = z.object({
   turnId: NonEmptyStringSchema,
   sessionId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
+  episodeId: NonEmptyStringSchema.optional(),
+  assignmentStatus: z.enum(["pending", "assigned"]).optional(),
   rawTurnId: NonEmptyStringSchema,
   userMemoryId: z.string().optional(),
   userMemoryIds: z.array(NonEmptyStringSchema).optional(),
@@ -518,6 +524,7 @@ export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   episodeId: z.string().optional(),
   turnId: z.string().optional(),
   layers: z.array(MemoryLayerSchema).optional(),
+  recordEvent: z.boolean().optional(),
   verbose: z.boolean().optional()
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;
@@ -994,6 +1001,9 @@ export const ApiErrorCodeSchema = z.enum([
   "rate_limited",
   "internal",
   "memory_layer_unavailable",
+  "memory_starting",
+  "memory_upgrading",
+  "memory_scan_upgrade_required",
   "missing_idempotency_key",
   "idempotency_body_mismatch",
   "scan_not_permitted",
@@ -1014,7 +1024,8 @@ export const ApiErrorBodySchema = z.object({
   error: z.object({
     code: ApiErrorCodeSchema,
     message: z.string(),
-    requestId: NonEmptyStringSchema
+    requestId: NonEmptyStringSchema.optional(),
+    upstreamRequestId: NonEmptyStringSchema.optional()
   })
 });
 export type ApiErrorBody = z.infer<typeof ApiErrorBodySchema>;

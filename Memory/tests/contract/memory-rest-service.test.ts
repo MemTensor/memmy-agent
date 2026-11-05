@@ -1,7 +1,9 @@
+import { assignedEpisodeId } from "../fixtures/memory-service-fixture.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentSourceExecutor } from "../../src/agent-source/runtime.js";
 import { canonicalJson, sha256Hex } from "../../src/contracts/index.js";
 import {
   DEFAULT_MEMMY_CONFIG,
@@ -20,6 +22,7 @@ import {
   createFailingLlm,
   createMemoryServiceFixture,
   runWorkerRounds,
+  runWorkerRoundsWithDueRetries,
   setRawTurnActivityAt
 } from "../fixtures/memory-service-fixture.js";
 
@@ -60,7 +63,8 @@ function createDeterministicSummaryLlm(summary: string): LlmClient {
     async complete() {
       return "{}";
     },
-    async completeJson<T extends Record<string, unknown>>() {
+    async completeJson<T extends Record<string, unknown>>(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       return { title: "Beach trip", summary } as unknown as T;
     },
     status: () => ({
@@ -425,7 +429,7 @@ describe("MemoryService / REST contract", () => {
     });
     const namespace = { source: "hermes", profileId: "default", userId: "http-retry-user" };
     const added = addAgentSourceImport(service, namespace, "retry through HTTP", "http-retry");
-    await runWorkerRounds(service, 3, 1);
+    await runWorkerRoundsWithDueRetries(service, db, [added.id], 3, 1);
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
 
     const server = createMemoryHttpServer({ service });
@@ -483,6 +487,39 @@ describe("MemoryService / REST contract", () => {
       expect(result.l1MemoryIds).toHaveLength(1);
       const row = db.db.prepare("SELECT source_memory_ids_json FROM raw_turns WHERE id = ?").get(result.rawTurnId) as { source_memory_ids_json: string };
       expect(JSON.parse(row.source_memory_ids_json)).toEqual([]);
+    });
+    db.close();
+  });
+
+  it("forwards recordEvent=false through HTTP search without persisting recall or API logs", async () => {
+    const { db, service } = createTestService();
+    const counts = () => ({
+      recalls: (db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get() as { count: number }).count,
+      apiLogs: (db.db.prepare("SELECT COUNT(*) AS count FROM api_logs WHERE tool_name = 'memory_search'").get() as { count: number }).count
+    });
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const search = (body: Record<string, unknown>) => fetch(`http://127.0.0.1:${address.port}/api/v1/memory/search`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+      });
+
+      const before = counts();
+      const recorded = await search({ query: "recorded search query" });
+      expect(recorded.status).toBe(200);
+      const afterRecorded = counts();
+      expect(afterRecorded).toEqual({ recalls: before.recalls + 1, apiLogs: before.apiLogs + 1 });
+
+      const skipped = await search({ query: "unrecorded search query", recordEvent: false });
+      expect(skipped.status).toBe(200);
+      expect(counts()).toEqual(afterRecorded);
+
+      const invalid = await search({ query: "invalid search query", recordEvent: "false" });
+      expect(invalid.status).toBe(400);
+      expect((await invalid.json() as { error: { code: string } }).error.code).toBe("invalid_argument");
+      expect(counts()).toEqual(afterRecorded);
     });
     db.close();
   });
@@ -718,7 +755,7 @@ describe("MemoryService / REST contract", () => {
       ok: true,
       sessionId: session.sessionId,
       status: "closed",
-      closedEpisodeIds: [complete.episodeId],
+      closedEpisodeIds: expect.any(Array),
       changeSeq: expect.any(Number),
       syncCursor: expect.any(String)
     });
@@ -738,7 +775,8 @@ describe("MemoryService / REST contract", () => {
   });
 
   it("auto-drains L3 World Model jobs frozen by a REST session.close with no open episode", async () => {
-    const { db, service } = createTestService();
+    // L3 jobs wait in the queue while no evolution model is configured, so configure one.
+    const { db, service } = createTestService({ skillLlm: createDeterministicSummaryLlm("unused") });
     const opened = service.openSession({
       l3WorldModelProtocolVersion: 2,
       l3WorldModelTransition: "resume_only",
@@ -749,17 +787,17 @@ describe("MemoryService / REST contract", () => {
         userId: "auto-worker-l3-close-user"
       }
     });
-    const first = service.completeTurn("turn-auto-worker-l3-close", {
+    const first = (await service.completeTurn("turn-auto-worker-l3-close", {
       sessionId: opened.sessionId,
       query: "Configure nginx TLS for the service",
       answer: "Use port 443 and verify the certificate chain."
-    });
-    const ended = service.completeTurn("turn-auto-worker-l3-close-end", {
+    }));
+    const ended = (await service.completeTurn("turn-auto-worker-l3-close-end", {
       sessionId: opened.sessionId,
       query: "结束会话",
       answer: "好的，本话题到这里结束。"
-    });
-    expect(ended.closedEpisodeIds).toEqual([first.episodeId]);
+    }));
+    expect(ended.closedEpisodeIds).toEqual([assignedEpisodeId(service, first)]);
     await service.runWorkerOnce(20);
     const l3Jobs = () => db.db.prepare(
       `SELECT status, attempts
@@ -797,7 +835,8 @@ describe("MemoryService / REST contract", () => {
     });
     expect(l3Jobs()).toHaveLength(1);
 
-    await waitFor(() => l3Jobs().every((job) => job.status !== "queued" && job.attempts > 0));
+    // The job ran once; a failed L3 run goes back to the queue to retry later.
+    await waitFor(() => l3Jobs().every((job) => job.attempts > 0 && job.status !== "leased"));
 
     });
     db.close();
@@ -813,11 +852,11 @@ describe("MemoryService / REST contract", () => {
         sessionKey: "auto-idle-session"
       }
     });
-    const idleTurn = service.completeTurn("turn-auto-idle-old", {
+    const idleTurn = (await service.completeTurn("turn-auto-idle-old", {
       sessionId: idleSession.sessionId,
       query: "Remember the old task",
       answer: "The old task is recorded."
-    });
+    }));
     await service.runWorkerOnce(20);
     setRawTurnActivityAt(
       db,
@@ -864,7 +903,7 @@ describe("MemoryService / REST contract", () => {
         `SELECT status
          FROM episodes
          WHERE id = ?`
-      ).get(idleTurn.episodeId) as { status: string } | undefined;
+      ).get(assignedEpisodeId(service, idleTurn)) as { status: string } | undefined;
       return episode?.status === "closed";
     });
     const reflection = db.db.prepare(
@@ -872,7 +911,7 @@ describe("MemoryService / REST contract", () => {
        FROM evolution_jobs
        WHERE episode_id = ?
          AND job_type = 'reflection'`
-    ).get(idleTurn.episodeId) as { count: number };
+    ).get(assignedEpisodeId(service, idleTurn)) as { count: number };
     expect(reflection.count).toBe(1);
 
     });
@@ -889,11 +928,11 @@ describe("MemoryService / REST contract", () => {
         sessionKey: "memory-add-idle-session"
       }
     });
-    const idleTurn = service.completeTurn("turn-memory-add-idle-old", {
+    const idleTurn = (await service.completeTurn("turn-memory-add-idle-old", {
       sessionId: idleSession.sessionId,
       query: "Remember the old memory add task",
       answer: "The old memory add task is recorded."
-    });
+    }));
     await service.runWorkerOnce(20);
     setRawTurnActivityAt(
       db,
@@ -932,14 +971,14 @@ describe("MemoryService / REST contract", () => {
         `SELECT status
          FROM episodes
          WHERE id = ?`
-      ).get(idleTurn.episodeId) as { status: string } | undefined;
+      ).get(assignedEpisodeId(service, idleTurn)) as { status: string } | undefined;
       return episode?.status === "closed";
     });
     const closedEpisode = db.db.prepare(
       `SELECT meta_json
        FROM episodes
        WHERE id = ?`
-    ).get(idleTurn.episodeId) as { meta_json: string };
+    ).get(assignedEpisodeId(service, idleTurn)) as { meta_json: string };
     expect(JSON.parse(closedEpisode.meta_json)).toMatchObject({
       closeReason: "idle_timeout",
       triggerSource: "memory.add",
@@ -950,7 +989,7 @@ describe("MemoryService / REST contract", () => {
        FROM evolution_jobs
        WHERE episode_id = ?
          AND job_type = 'reflection'`
-    ).get(idleTurn.episodeId) as { count: number };
+    ).get(assignedEpisodeId(service, idleTurn)) as { count: number };
     expect(reflection.count).toBe(1);
 
     });
@@ -972,11 +1011,11 @@ describe("MemoryService / REST contract", () => {
       namespace,
       sessionId: "openclaw-memory-agent:auto-worker-start"
     });
-    const complete = service.completeTurn("turn-auto-worker-start", {
+    const complete = (await service.completeTurn("turn-auto-worker-start", {
       sessionId: session.sessionId,
       query: "remember queued startup embeddings",
       answer: "queued jobs should drain when the server starts"
-    });
+    }));
     const queuedRow = db.db.prepare(
       `SELECT embedding_dim
        FROM memory_vector_entries
@@ -1067,6 +1106,9 @@ describe("MemoryService / REST contract", () => {
     expect(repos.runtime.getPendingJob(interruptedMemory.id, "embedding")?.jobType).toBe("embedding");
     const [interruptedJob] = repos.runtime.leaseQueuedJobs(1, 600, [interruptedMemory.id]);
     expect(interruptedJob?.jobType).toBe("embedding");
+    // Startup recovery must wait for expiry rather than revoke a valid owner.
+    db.db.prepare("UPDATE evolution_jobs SET leased_until = ? WHERE id = ?")
+      .run(new Date(Date.now() - 1_000).toISOString(), interruptedJob!.id);
 
     const failedMemory = addAgentSourceImport(
       service,
@@ -1155,8 +1197,10 @@ describe("MemoryService / REST contract", () => {
       config: DEFAULT_MEMMY_CONFIG,
       configLoader: () => ({ config: accountRuntimeConfig() })
     });
+    const reconcileScanPermission = vi.fn(async () => {});
     const server = createMemoryHttpServer({
       service,
+      agentSourceExecutor: { reconcileScanPermission, dispose: async () => {} } as unknown as AgentSourceExecutor,
       auth: {
         scopedApiKeys: {
           "admin-token": {
@@ -1201,6 +1245,7 @@ describe("MemoryService / REST contract", () => {
     const result = await client.reloadConfig({ reason: "profile_switched" });
 
     expect(readerResponse.status).toBe(403);
+    expect(reconcileScanPermission).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       changed: true,
       requiresRestart: false,

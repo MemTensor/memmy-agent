@@ -1,6 +1,8 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
+import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_MEMMY_CONFIG, MemoryDb, type LlmClient } from "../../../src/index.js";
+import { MemoryDb, type LlmClient } from "../../../src/index.js";
 import { l2CandidateIdFor } from "../../../src/algorithm/plugin-algorithms.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
@@ -38,7 +40,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const { db, service } = createTestService();
     const userId = "induction-fairness";
     const session = service.openSession({ namespace: { source: "codex", profileId: "fairness", userId }, workspaceId: "fairness" });
-    const completed = service.completeTurn("fairness-turn", {
+    const completed = await service.completeTurn("fairness-turn", {
       sessionId: session.sessionId,
       episodeId: "fairness-episode",
       query: "Run the focused tests",
@@ -66,11 +68,11 @@ describe("MemoryService / evolution / policy induction", () => {
       llm: createBc08SummaryLlm(),
       skillLlm: createCapturingL2Llm([]),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             minEpisodesForActivation: 2,
             minGain: -1
           }
@@ -79,14 +81,14 @@ describe("MemoryService / evolution / policy induction", () => {
     });
     const namespace = { source: "codex", profileId: "jiang", userId: "bc-08-user" };
     const firstSession = service.openSession({ namespace, workspaceId: "bc-08-workspace" });
-    const first = service.completeTurn("bc-08-feedback", {
+    const first = (await service.completeTurn("bc-08-feedback", {
       sessionId: firstSession.sessionId,
       episodeId: "bc-08-feedback-episode",
       query: "你刚才写了很多兜底代码，我更喜欢简洁的代码，以后不要写不必要的兜底代码",
       answer: "已精简代码并通过测试。",
       toolCalls: [{ id: "bc-08-test-1", name: "run_tests", input: { scope: "changed" } }],
       toolResults: [{ toolCallId: "bc-08-test-1", success: true, output: "passed" }]
-    });
+    }));
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     makeTraceEligibleForL2(db, first.l1MemoryId);
     setTraceSignatureAndVectorForTest(db, first.l1MemoryId, "code|simplify|pytest|fallback", [1, 0, 0]);
@@ -111,14 +113,14 @@ describe("MemoryService / evolution / policy induction", () => {
     });
 
     const secondSession = service.openSession({ namespace, workspaceId: "bc-08-workspace" });
-    const second = service.completeTurn("bc-08-verified-fix", {
+    const second = (await service.completeTurn("bc-08-verified-fix", {
       sessionId: secondSession.sessionId,
       episodeId: "bc-08-verified-episode",
       query: "按反馈删除不必要的兜底代码并运行测试",
       answer: "已保持实现简洁，测试验证通过。",
       toolCalls: [{ id: "bc-08-test-2", name: "run_tests", input: { scope: "changed" } }],
       toolResults: [{ toolCallId: "bc-08-test-2", success: true, output: "passed" }]
-    });
+    }));
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     makeTraceEligibleForL2(db, second.l1MemoryId);
     setTraceSignatureAndVectorForTest(db, second.l1MemoryId, "code|simplify|pytest|fallback", [1, 0, 0]);
@@ -218,11 +220,11 @@ describe("MemoryService / evolution / policy induction", () => {
   it("associates each L1 trace to only the best L2 policy like the plugin", async () => {
     const { db, service } = createTestService({
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             minEpisodesForActivation: 1
           }
         }
@@ -236,12 +238,12 @@ describe("MemoryService / evolution / policy induction", () => {
       },
       workspaceId: "workspace-best-l2"
     });
-    const complete = service.completeTurn("turn-best-l2-association", {
+    const complete = (await service.completeTurn("turn-best-l2-association", {
       sessionId: session.sessionId,
       episodeId: "episode-best-l2-association",
       query: "python pytest retry workflow should choose the closest policy",
       answer: "Run pytest, inspect the failure, and retry after fixing the closest issue."
-    });
+    }));
     await addPositiveFeedbackForTurn(service, session.sessionId, complete);
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     const signature = traceSignatureForTest(db, complete.l1MemoryId);
@@ -253,7 +255,7 @@ describe("MemoryService / evolution / policy induction", () => {
       appId: "workspace-best-l2",
       profileId: "jiang",
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     });
     insertActivePolicyMemory(db, {
       id: "policy_weaker_l2_association",
@@ -263,7 +265,7 @@ describe("MemoryService / evolution / policy induction", () => {
       appId: "workspace-best-l2",
       profileId: "jiang",
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     });
     setPolicySignatureAndVectorForTest(db, "policy_best_l2_association", signature, [1, 0, 0]);
     setPolicySignatureAndVectorForTest(db, "policy_weaker_l2_association", signature, [0, 1, 0]);
@@ -286,7 +288,7 @@ describe("MemoryService / evolution / policy induction", () => {
       "job_best_l2_association",
       "user-best-l2-association",
       session.sessionId,
-      complete.episodeId,
+      assignedEpisodeId(service, complete),
       complete.l1MemoryId,
       associationAt,
       associationAt
@@ -336,7 +338,7 @@ describe("MemoryService / evolution / policy induction", () => {
       },
       workspaceId: "workspace-l2-support"
     });
-    const completeA = service.completeTurn("turn-l2-support-traces-a", {
+    const completeA = (await service.completeTurn("turn-l2-support-traces-a", {
       sessionId: session.sessionId,
       episodeId: "episode-l2-support-traces",
       query: "python pytest support should count same episode tool traces",
@@ -344,16 +346,16 @@ describe("MemoryService / evolution / policy induction", () => {
       toolCalls: [
         { name: "pytest", input: "pytest tests/a.py", output: "failed with EXIT_1", errorCode: "E_EXIT_1", success: false }
       ]
-    });
-    const completeB = service.completeTurn("turn-l2-support-traces-b", {
+    }));
+    const completeB = (await service.completeTurn("turn-l2-support-traces-b", {
       sessionId: session.sessionId,
       query: "also inspect the pytest failure in tests/b.py",
       answer: "Run pytest for tests/b.py and inspect the failure.",
       toolCalls: [
         { name: "pytest", input: "pytest tests/b.py", output: "failed with EXIT_1", errorCode: "E_EXIT_1", success: false }
       ]
-    });
-    expect(completeB.episodeId).toBe(completeA.episodeId);
+    }));
+    expect(assignedEpisodeId(service, completeB)).toBe(assignedEpisodeId(service, completeA));
     const evidenceIds = [completeA.l1MemoryId, completeB.l1MemoryId];
     expect(evidenceIds).toHaveLength(2);
     for (const id of evidenceIds) {
@@ -367,7 +369,7 @@ describe("MemoryService / evolution / policy induction", () => {
       appId: "workspace-l2-support",
       profileId: "jiang",
       sourceTraceId: evidenceIds[0]!,
-      sourceEpisodeId: completeA.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, completeA)
     });
     setPolicySignatureAndVectorForTest(db, "policy_l2_support_traces", traceSignatureForTest(db, evidenceIds[0]!), [1, 0, 0]);
     setPolicyStatsForTest(db, "policy_l2_support_traces", {
@@ -396,7 +398,7 @@ describe("MemoryService / evolution / policy induction", () => {
       "job_l2_support_trace_count",
       "user-l2-support-traces",
       session.sessionId,
-      completeA.episodeId,
+      assignedEpisodeId(service, completeA),
       evidenceIds[0],
       at,
       at
@@ -435,20 +437,20 @@ describe("MemoryService / evolution / policy induction", () => {
       mode: "dev",
       skillLlm: createNoToolSkillLlm(),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             useLlm: true,
             minEpisodesForInduction: 2
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: false
           }
         }
@@ -470,18 +472,18 @@ describe("MemoryService / evolution / policy induction", () => {
       },
       workspaceId: "workspace-shared"
     });
-    const firstA = service.completeTurn("turn-cross-profile-a1", {
+    const firstA = (await service.completeTurn("turn-cross-profile-a1", {
       sessionId: profileA.sessionId,
       episodeId: "episode-cross-profile-a1",
       query: "python pytest retry workflow should remain profile scoped",
       answer: "Run pytest, inspect the failure, and retry after fixing the profile scoped issue."
-    });
-    const firstB = service.completeTurn("turn-cross-profile-b1", {
+    }));
+    const firstB = (await service.completeTurn("turn-cross-profile-b1", {
       sessionId: profileB.sessionId,
       episodeId: "episode-cross-profile-b1",
       query: "python pytest retry workflow should remain profile scoped",
       answer: "Run pytest, inspect the failure, and retry after fixing the profile scoped issue."
-    });
+    }));
     await addPositiveFeedbackForTurn(service, profileA.sessionId, firstA);
     await addPositiveFeedbackForTurn(service, profileB.sessionId, firstB);
     makeTraceEligibleForL2(db, firstA.l1MemoryId);
@@ -513,12 +515,12 @@ describe("MemoryService / evolution / policy induction", () => {
       },
       workspaceId: "workspace-shared"
     });
-    const secondA = service.completeTurn("turn-cross-profile-a2", {
+    const secondA = (await service.completeTurn("turn-cross-profile-a2", {
       sessionId: profileANext.sessionId,
       episodeId: "episode-cross-profile-a2",
       query: "python pytest retry workflow should induce only inside profile a",
       answer: "Run pytest, inspect the failure, and retry after fixing the profile scoped issue."
-    });
+    }));
     await addPositiveFeedbackForTurn(service, profileANext.sessionId, secondA);
     makeTraceEligibleForL2(db, secondA.l1MemoryId);
     service.closeSession(profileANext.sessionId);
@@ -567,20 +569,20 @@ describe("MemoryService / evolution / policy induction", () => {
       skillLlm: createCapturingL2Llm([]),
       embedder: createCapturingEmbedder([]),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             useLlm: true,
             minEpisodesForInduction: 2
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: false
           }
         }
@@ -603,12 +605,12 @@ describe("MemoryService / evolution / policy induction", () => {
       workspaceId: "workspace-key"
     });
     const signature = "python|pytest|_|_";
-    const turnsA = ["a1", "a2"].map((suffix) => service.completeTurn(`turn-shared-key-${suffix}`, {
+    const turnsA = (await Promise.all(["a1", "a2"].map(async (suffix) => (await service.completeTurn(`turn-shared-key-${suffix}`, {
       sessionId: profileA.sessionId,
       episodeId: `episode-shared-key-${suffix}`,
       query: "python pytest retry workflow should stay scoped to profile a",
       answer: "Run pytest, inspect the failure, and retry after fixing the issue."
-    }));
+    })))));
     for (const turn of turnsA) {
       await addPositiveFeedbackForTurn(service, profileA.sessionId, turn);
     }
@@ -626,12 +628,12 @@ describe("MemoryService / evolution / policy induction", () => {
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded' WHERE job_type <> 'l2_induction'`).run();
     await service.runWorkerOnce(20);
 
-    const turnsB = ["b1", "b2"].map((suffix) => service.completeTurn(`turn-shared-key-${suffix}`, {
+    const turnsB = (await Promise.all(["b1", "b2"].map(async (suffix) => (await service.completeTurn(`turn-shared-key-${suffix}`, {
       sessionId: profileB.sessionId,
       episodeId: `episode-shared-key-${suffix}`,
       query: "python pytest retry workflow should stay scoped to profile b",
       answer: "Run pytest, inspect the failure, and retry after fixing the issue."
-    }));
+    })))));
     for (const turn of turnsB) {
       await addPositiveFeedbackForTurn(service, profileB.sessionId, turn);
     }
@@ -674,11 +676,11 @@ describe("MemoryService / evolution / policy induction", () => {
       skillLlm: createCapturingL2Llm([]),
       llm: createBatchReflectionLlm([], "run tests and keep the policy as a candidate", "reflection-batch", "pytest workflow status candidate policy"),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             minGain: 0.99
           }
         }
@@ -691,12 +693,12 @@ describe("MemoryService / evolution / policy induction", () => {
         userId: "user-candidate-status"
       }
     });
-    const complete = service.completeTurn("turn-candidate-policy", {
+    const complete = (await service.completeTurn("turn-candidate-policy", {
       sessionId: session.sessionId,
       episodeId: "episode-candidate-policy",
       query: "pytest workflow status candidate policy",
       answer: "run tests and keep the policy as a candidate"
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       l1MemoryId: complete.l1MemoryId,
@@ -766,19 +768,19 @@ describe("MemoryService / evolution / policy induction", () => {
       }),
       embedder: createCapturingEmbedder([]),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             traceCharCap: 700
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: false
           }
         }
@@ -791,7 +793,7 @@ describe("MemoryService / evolution / policy induction", () => {
         userId: "user-l2-prompt"
       }
     });
-    const complete = service.completeTurn("turn-l2-prompt", {
+    const complete = (await service.completeTurn("turn-l2-prompt", {
       sessionId: session.sessionId,
       episodeId: "episode-l2-prompt",
       query: `pytest failure workflow ${"x".repeat(1200)}`,
@@ -802,7 +804,7 @@ describe("MemoryService / evolution / policy induction", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       l1MemoryId: complete.l1MemoryId,
@@ -884,20 +886,20 @@ describe("MemoryService / evolution / policy induction", () => {
       mode: "dev",
       skillLlm: createCapturingL2Llm(l2Calls, undefined, l2Response),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             useLlm: true,
             minEpisodesForInduction: 1
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: false
           }
         }
@@ -911,7 +913,7 @@ describe("MemoryService / evolution / policy induction", () => {
       },
       workspaceId: "workspace-l2-support-subset"
     });
-    const completeA = service.completeTurn("turn-l2-support-subset-a", {
+    const completeA = (await service.completeTurn("turn-l2-support-subset-a", {
       sessionId: session.sessionId,
       episodeId: "episode-l2-support-subset",
       query: "pytest repeated failures should keep all bucket evidence",
@@ -919,16 +921,16 @@ describe("MemoryService / evolution / policy induction", () => {
       toolCalls: [
         { name: "pytest", input: "pytest tests/a.py", output: "failed with EXIT_1", errorCode: "E_EXIT_1", success: false }
       ]
-    });
-    const completeB = service.completeTurn("turn-l2-support-subset-b", {
+    }));
+    const completeB = (await service.completeTurn("turn-l2-support-subset-b", {
       sessionId: session.sessionId,
       query: "also keep the pytest failure evidence from tests/b.py",
       answer: "Run the focused pytest check for tests/b.py.",
       toolCalls: [
         { name: "pytest", input: "pytest tests/b.py", output: "failed with EXIT_1", errorCode: "E_EXIT_1", success: false }
       ]
-    });
-    expect(completeB.episodeId).toBe(completeA.episodeId);
+    }));
+    expect(assignedEpisodeId(service, completeB)).toBe(assignedEpisodeId(service, completeA));
     const evidenceIds = [completeA.l1MemoryId, completeB.l1MemoryId];
     expect(evidenceIds).toHaveLength(2);
     const signature = "pytest|python|pytest|EXIT_1";
@@ -965,7 +967,7 @@ describe("MemoryService / evolution / policy induction", () => {
       "job_l2_support_subset",
       "user-l2-support-subset",
       session.sessionId,
-      completeA.episodeId,
+      assignedEpisodeId(service, completeA),
       evidenceIds[0],
       at,
       at
@@ -1020,19 +1022,19 @@ describe("MemoryService / evolution / policy induction", () => {
         trigger: "pytest workflow fails around sqlite migration output"
       }]),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             traceCharCap: 700
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: false
           }
         }
@@ -1045,7 +1047,7 @@ describe("MemoryService / evolution / policy induction", () => {
         userId
       }
     });
-    const complete = service.completeTurn("turn-invalid-l2-draft", {
+    const complete = (await service.completeTurn("turn-invalid-l2-draft", {
       sessionId: session.sessionId,
       episodeId: "episode-invalid-l2-draft",
       query: "pytest sqlite migration workflow needs focused diagnostics",
@@ -1056,7 +1058,7 @@ describe("MemoryService / evolution / policy induction", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       l1MemoryId: complete.l1MemoryId,
@@ -1152,19 +1154,19 @@ describe("MemoryService / evolution / policy induction", () => {
         exclusions: ["Do not apply when the failure is unrelated to migrations."]
       }]),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             traceCharCap: 700
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: false
           }
         }
@@ -1177,7 +1179,7 @@ describe("MemoryService / evolution / policy induction", () => {
         userId
       }
     });
-    const complete = service.completeTurn("turn-l2-third-draft-valid", {
+    const complete = (await service.completeTurn("turn-l2-third-draft-valid", {
       sessionId: session.sessionId,
       episodeId: "episode-l2-third-draft-valid",
       query: "pytest migration output needs focused diagnosis",
@@ -1188,7 +1190,7 @@ describe("MemoryService / evolution / policy induction", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     await service.feedback({
       sessionId: session.sessionId,
       l1MemoryId: complete.l1MemoryId,
@@ -1255,7 +1257,7 @@ describe("MemoryService / evolution / policy induction", () => {
 function createBc08SummaryLlm(): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.summary,
+      ...LEGACY_TEST_CONFIG.summary,
       provider: "host",
       endpoint: "http://127.0.0.1/bc-08-summary",
       model: "bc-08-summary"
@@ -1266,6 +1268,7 @@ function createBc08SummaryLlm(): LlmClient {
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation !== "capture.summarize") return {} as T;
       const payload = messages.find((message) => message.role === "user")?.content ?? "";
       if (payload.includes("以后不要写不必要的兜底代码")) {

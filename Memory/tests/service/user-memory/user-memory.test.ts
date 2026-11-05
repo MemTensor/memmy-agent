@@ -5,7 +5,7 @@ import {
   type LlmCompletionOptions,
   type LlmMessage
 } from "../../../src/index.js";
-import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import { configWithMemoryGates, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
 
@@ -51,21 +51,21 @@ describe("User Memory", () => {
     });
     const session = open(service, "bc-06-user");
     const turns = [
-      service.completeTurn("bc-06-preference", {
+      (await service.completeTurn("bc-06-preference", {
         sessionId: session.sessionId,
         query: "我喜欢玩飞盘",
         answer: "记住了。"
-      }),
-      service.completeTurn("bc-06-temporary", {
+      })),
+      (await service.completeTurn("bc-06-temporary", {
         sessionId: session.sessionId,
         query: "换一个",
         answer: "可以，改为桌游。"
-      }),
-      service.completeTurn("bc-06-directive", {
+      })),
+      (await service.completeTurn("bc-06-directive", {
         sessionId: session.sessionId,
         query: "以后不要再推荐飞盘",
         answer: "好的。"
-      })
+      }))
     ];
 
     await service.runWorkerOnce(50, { priorityCohortOnly: true });
@@ -119,11 +119,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "one-off-task-user");
-    const turns = requests.map((query, index) => service.completeTurn(`one-off-task-${index}`, {
+    const turns = (await Promise.all(requests.map(async (query, index) => (await service.completeTurn(`one-off-task-${index}`, {
       sessionId: session.sessionId,
       query,
       answer: "好的。"
-    }));
+    })))));
 
     await service.runWorkerOnce(50, { priorityCohortOnly: true });
 
@@ -152,11 +152,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "merge-convention-user");
-    const completed = service.completeTurn("merge-convention", {
+    const completed = (await service.completeTurn("merge-convention", {
       sessionId: session.sessionId,
       query,
       answer: "好的。"
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
@@ -181,13 +181,13 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "model-recall-only-user");
-    const completed = service.completeTurn("turn-model-recall-only", {
+    const completed = (await service.completeTurn("turn-model-recall-only", {
       sessionId: session.sessionId,
       query: "我喜欢吃什么水果？从历史记忆里找",
       answer: "历史记录显示你喜欢苹果。",
       toolCalls: [{ name: "memmy_memory_search", input: { query: "水果偏好" }, output: ["喜欢苹果"] }],
       sourceMemoryIds: ["trace-old-preference"]
-    });
+    }));
 
     expect(completed.userMemoryIds).toEqual([]);
     expect(completed.l1MemoryIds).toHaveLength(1);
@@ -215,12 +215,12 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "preference-question-user");
-    const completed = service.completeTurn("turn-preference-question", {
+    const completed = (await service.completeTurn("turn-preference-question", {
       sessionId: session.sessionId,
       query: "财经类新闻呢？我喜欢看吗",
       answer: "你喜欢看政治相关新闻，也对财经类新闻感兴趣。",
       sourceMemoryIds: ["user_memory_politics"]
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
@@ -242,11 +242,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "model-preference-user");
-    const completed = service.completeTurn("turn-model-preference", {
+    const completed = (await service.completeTurn("turn-model-preference", {
       sessionId: session.sessionId,
       query: "我最喜欢的水果是苹果",
       answer: "好的。"
-    });
+    }));
 
     expect(completed.userMemoryIds).toEqual([]);
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
@@ -283,11 +283,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "model-both-user");
-    const completed = service.completeTurn("turn-model-both", {
+    const completed = (await service.completeTurn("turn-model-both", {
       sessionId: session.sessionId,
       query: "我更喜欢简洁的代码，以后不要写不必要的兜底代码",
       answer: "已精简实现并通过测试。"
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
@@ -318,13 +318,13 @@ describe("User Memory", () => {
     };
     const { db, service } = createTestService({ llm });
     const session = open(service, "model-hardware-guard-user");
-    const completed = service.completeTurn("turn-model-hardware-guard", {
+    const completed = (await service.completeTurn("turn-model-hardware-guard", {
       sessionId: session.sessionId,
       query: "我的电脑内存多大？",
       answer: "工具读取结果是 16 GB。",
       toolCalls: [{ name: "system_info", input: { field: "memory" } }],
       toolResults: [{ totalMemory: "16 GB" }]
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
@@ -358,13 +358,13 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "unmatched-evidence-user");
-    const completed = service.completeTurn("turn-unmatched-evidence", {
+    const completed = (await service.completeTurn("turn-unmatched-evidence", {
       sessionId: session.sessionId,
       query: "我的电脑内存多大？",
       answer: "工具读取结果是 16 GB。",
       toolCalls: [{ name: "system_info", input: { field: "memory" } }],
       toolResults: [{ totalMemory: "16 GB" }]
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
@@ -394,13 +394,13 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "empty-forced-title-user");
-    const completed = service.completeTurn("turn-empty-forced-title", {
+    const completed = (await service.completeTurn("turn-empty-forced-title", {
       sessionId: session.sessionId,
       query: "我的电脑内存多大？",
       answer: "工具读取结果是 16 GB。",
       toolCalls: [{ name: "system_info", input: { field: "memory" } }],
       toolResults: [{ totalMemory: "16 GB" }]
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
@@ -444,17 +444,18 @@ describe("User Memory", () => {
       llm: {
         ...base,
         async completeJson(nextMessages, options) {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as any;
           messages.push(nextMessages);
           return base.completeJson(nextMessages, options);
         }
       }
     });
     const session = open(service, "capture-language-user");
-    service.completeTurn("turn-capture-language", {
+    (await service.completeTurn("turn-capture-language", {
       sessionId: session.sessionId,
       query: "请记住这台电脑的内存是 16 GB。",
       answer: "已记下。"
-    });
+    }));
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     const steering = messages[0]?.find((message) => message.content.includes("All natural-language answers MUST"))?.content;
     expect(steering).toContain("English");
@@ -473,11 +474,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "null-l1-user");
-    const completed = service.completeTurn("turn-null-l1", {
+    const completed = (await service.completeTurn("turn-null-l1", {
       sessionId: session.sessionId,
       query: "今天天气怎么样？",
       answer: "我没有查天气。"
-    });
+    }));
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
       .toEqual({ status: "deleted" });
@@ -496,11 +497,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "model-feedback-guard-user");
-    const completed = service.completeTurn("turn-model-feedback-guard", {
+    const completed = (await service.completeTurn("turn-model-feedback-guard", {
       sessionId: session.sessionId,
       query: "你刚才写了很多兜底代码，我更喜欢简洁的代码，以后不要写不必要的兜底代码",
       answer: "已精简实现并通过测试。"
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
@@ -538,11 +539,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "model-directive-guard-user");
-    const completed = service.completeTurn("turn-model-directive-guard", {
+    const completed = (await service.completeTurn("turn-model-directive-guard", {
       sessionId: session.sessionId,
       query: "以后不要再推荐飞盘",
       answer: "好的。"
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
@@ -587,11 +588,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "model-compound-guard-user");
-    const completed = service.completeTurn("turn-model-compound-guard", {
+    const completed = (await service.completeTurn("turn-model-compound-guard", {
       sessionId: session.sessionId,
       query: content,
       answer: "好的。"
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
@@ -615,11 +616,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "model-independent-branches-user");
-    const completed = service.completeTurn("turn-model-independent-branches", {
+    const completed = (await service.completeTurn("turn-model-independent-branches", {
       sessionId: session.sessionId,
       query: content,
       answer: "已记录项目技术选择。"
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
@@ -644,11 +645,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "question-like-wording-user");
-    const completed = service.completeTurn("question-like-wording", {
+    const completed = (await service.completeTurn("question-like-wording", {
       sessionId: session.sessionId,
       query: content,
       answer: "Understood."
-    });
+    }));
 
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
@@ -658,15 +659,15 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("[BC-01] does not persist an agent guess about the user as User Memory or L1", () => {
+  it("[BC-01] does not persist an agent guess about the user as User Memory or L1", async () => {
     const { db, service } = createTestService();
     const session = open(service, "guess-user");
 
-    const completed = service.completeTurn("turn-guess", {
+    const completed = (await service.completeTurn("turn-guess", {
       sessionId: session.sessionId,
       query: "我喜欢吃什么？",
       answer: "你喜欢川菜。"
-    });
+    }));
 
     expect(completed.userMemoryIds).toEqual([]);
     expect(completed.l1MemoryIds).toEqual([]);
@@ -675,18 +676,18 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("[BC-03 recall] does not create L1 from an extended user-preference lookup backed only by recalled memory", () => {
+  it("[BC-03 recall] does not create L1 from an extended user-preference lookup backed only by recalled memory", async () => {
     const { db, service } = createTestService();
     const session = open(service, "history-preference-question-user");
 
-    const completed = service.completeTurn("turn-history-preference-question", {
+    const completed = (await service.completeTurn("turn-history-preference-question", {
       sessionId: session.sessionId,
       query: "我喜欢吃什么水果？从workbuddy的历史记忆里找",
       answer: "从历史记忆来看，你喜欢吃苹果。",
       toolCalls: [{ id: "memory-search-1", name: "memmy_memory_search", input: { query: "水果偏好" } }],
       toolResults: [{ toolCallId: "memory-search-1", memories: ["用户喜欢吃苹果"] }],
       sourceMemoryIds: ["trace-existing-apple-preference"]
-    });
+    }));
 
     expect(completed.userMemoryIds).toEqual([]);
     expect(completed.l1MemoryIds).toEqual([]);
@@ -698,11 +699,11 @@ describe("User Memory", () => {
     const { db, service } = createTestService();
     const session = open(service, "unverified-answer-user");
 
-    const completed = service.completeTurn("turn-unverified-answer", {
+    const completed = (await service.completeTurn("turn-unverified-answer", {
       sessionId: session.sessionId,
       query: "火星上最大的城市是什么？",
       answer: "最大的城市是火星城。"
-    });
+    }));
 
     expect(completed.userMemoryIds).toEqual([]);
     expect(completed.l1MemoryIds).toHaveLength(1);
@@ -722,7 +723,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("[BC-03 repeat] coalesces exact repeats while preserving first creation and latest expression times", () => {
+  it("[BC-03 repeat] coalesces exact repeats while preserving first creation and latest expression times", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const { db, service } = createTestService();
@@ -730,11 +731,11 @@ describe("User Memory", () => {
 
     for (let index = 0; index < 5; index += 1) {
       vi.setSystemTime(new Date(`2026-01-0${index + 1}T00:00:00.000Z`));
-      const completed = service.completeTurn(`turn-apple-${index}`, {
+      const completed = (await service.completeTurn(`turn-apple-${index}`, {
         sessionId: session.sessionId,
         query: "我最喜欢的水果是苹果",
         answer: "好的。"
-      });
+      }));
       expect(completed.userMemoryIds).toHaveLength(1);
       expect(completed.l1MemoryIds).toEqual([]);
     }
@@ -772,11 +773,11 @@ describe("User Memory", () => {
     const session = open(service, "model-repeat-user");
 
     for (let index = 0; index < 5; index += 1) {
-      service.completeTurn(`turn-model-apple-${index}`, {
+      (await service.completeTurn(`turn-model-apple-${index}`, {
         sessionId: session.sessionId,
         query: "我最喜欢的水果是苹果",
         answer: "好的。"
-      });
+      }));
       await service.runWorkerOnce(20, { priorityCohortOnly: true });
     }
 
@@ -789,10 +790,11 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("uses this turn's recalled User Memory candidates to confirm a semantic repeat", async () => {
+  it.each([false, true])("uses this turn's recalled User Memory candidates to confirm a semantic repeat (recall enabled: %s)", async (enableUserMemoryRecall) => {
     let existingMemoryId = "";
     let sawCandidate = false;
     const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall }),
       llm: captureDecisionRouterLlm((payload) => {
         const second = payload.includes("苹果是我最喜欢的水果");
         if (second) {
@@ -813,11 +815,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "semantic-repeat-user");
-    service.completeTurn("semantic-repeat-first", {
+    (await service.completeTurn("semantic-repeat-first", {
       sessionId: session.sessionId,
       query: "我最喜欢的水果是苹果",
       answer: "好的。"
-    });
+    }));
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     existingMemoryId = (db.db.prepare(`SELECT id FROM user_memories`).get() as { id: string }).id;
 
@@ -827,11 +829,11 @@ describe("User Memory", () => {
       query: "苹果是我最喜欢的水果"
     });
     expect(started.sourceMemoryIds).not.toContain(existingMemoryId);
-    service.completeTurn(started.turnId, {
+    (await service.completeTurn(started.turnId, {
       sessionId: session.sessionId,
       query: "苹果是我最喜欢的水果",
       answer: "好的。"
-    });
+    }));
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     expect(sawCandidate).toBe(true);
@@ -846,13 +848,14 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("[BC-02 correction] uses the summary model to archive an explicitly corrected recalled User Memory", async () => {
+  it.each([false, true])("[BC-02 correction] uses the summary model to archive an explicitly corrected recalled User Memory (recall enabled: %s)", async (enableUserMemoryRecall) => {
     let appleMemoryId = "";
     let sawCorrectionCandidate = false;
     const original = "我在大学的时候最喜欢吃苹果，我现在爱看的书是《百年孤独》";
     const correction = "前面说错了，我在大学的时候最喜欢吃的是西瓜";
     const revised = "我在大学的时候最喜欢吃西瓜，我现在爱看的书是《百年孤独》";
     const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall }),
       llm: captureDecisionRouterLlm((payload) => {
         const isCorrection = payload.includes(correction);
         if (isCorrection) {
@@ -876,11 +879,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "automatic-correction-user");
-    service.completeTurn("automatic-correction-apple", {
+    (await service.completeTurn("automatic-correction-apple", {
       sessionId: session.sessionId,
       query: original,
       answer: "好的。"
-    });
+    }));
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     appleMemoryId = (db.db.prepare(`SELECT id FROM user_memories`).get() as { id: string }).id;
 
@@ -890,11 +893,11 @@ describe("User Memory", () => {
       query: correction
     });
     expect(started.sourceMemoryIds).not.toContain(appleMemoryId);
-    service.completeTurn(started.turnId, {
+    (await service.completeTurn(started.turnId, {
       sessionId: session.sessionId,
       query: correction,
       answer: "已修正。"
-    });
+    }));
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     expect(sawCorrectionCandidate).toBe(true);
@@ -919,7 +922,7 @@ describe("User Memory", () => {
     ]));
     const evidence = service.recallEvidence(started.turnId);
     expect(evidence.diagnostics).toMatchObject({
-      candidateMemoryIds: expect.arrayContaining([appleMemoryId]),
+      candidateMemoryIds: enableUserMemoryRecall ? expect.arrayContaining([appleMemoryId]) : [],
       injectedMemoryIds: expect.not.arrayContaining([appleMemoryId]),
       capture: {
         status: "completed",
@@ -936,14 +939,14 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("lists User Memory in its own panel layer with user isolation and search", () => {
+  it("lists User Memory in its own panel layer with user isolation and search", async () => {
     const { db, service } = createTestService();
     const session = open(service, "panel-user");
-    service.completeTurn("turn-panel-user-memory", {
+    (await service.completeTurn("turn-panel-user-memory", {
       sessionId: session.sessionId,
       query: "我最喜欢的水果是苹果",
       answer: "好的。"
-    });
+    }));
 
     const panel = service.panelItems({
       namespace: { source: "codex", profileId: "default", userId: "panel-user" },
@@ -972,13 +975,15 @@ describe("User Memory", () => {
   });
 
   it("includes User Memory in search log candidates and statistics", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true })
+    });
     const session = open(service, "user-memory-log-user");
-    const completed = service.completeTurn("turn-user-memory-log", {
+    const completed = (await service.completeTurn("turn-user-memory-log", {
       sessionId: session.sessionId,
       query: "我比较喜欢定期清理服务器，让服务器保持简洁干净",
       answer: "好的。"
-    });
+    }));
     const userMemoryId = completed.userMemoryIds[0]!;
 
     const recall = await service.search({
@@ -1018,14 +1023,16 @@ describe("User Memory", () => {
   });
 
   it("limits the User Memory recall lane to the requested TopK", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true })
+    });
     const session = open(service, "user-memory-top-k-user");
     for (let index = 0; index < 12; index += 1) {
-      service.completeTurn(`turn-user-memory-top-k-${index}`, {
+      (await service.completeTurn(`turn-user-memory-top-k-${index}`, {
         sessionId: session.sessionId,
         query: `我喜欢共同关键词主题${index}`,
         answer: "好的。"
-      });
+      }));
     }
 
     await service.search({
@@ -1044,13 +1051,15 @@ describe("User Memory", () => {
   });
 
   it("excludes User Memory from automatic injection for the current session's latest 8 turns", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true })
+    });
     const session = open(service, "recent-user-memory-user");
-    const completed = service.completeTurn("turn-recent-user-memory", {
+    const completed = (await service.completeTurn("turn-recent-user-memory", {
       sessionId: session.sessionId,
       query: "我最喜欢的水果是苹果",
       answer: "好的。"
-    });
+    }));
     const userMemoryId = completed.userMemoryIds[0]!;
 
     const immediate = await service.search({
@@ -1084,11 +1093,11 @@ describe("User Memory", () => {
     expect(crossSession.hits.map((hit) => hit.id)).toContain(userMemoryId);
 
     for (let index = 0; index < 8; index += 1) {
-      service.completeTurn(`turn-after-user-memory-${index}`, {
+      (await service.completeTurn(`turn-after-user-memory-${index}`, {
         sessionId: session.sessionId,
         query: "好的",
         answer: "好的。"
-      });
+      }));
     }
     const afterEightNewerTurns = await service.search({
       sessionId: session.sessionId,
@@ -1101,17 +1110,17 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("[BC-02 correction] archives only the targeted User Memory on explicit correction", () => {
+  it("[BC-02 correction] archives only the targeted User Memory on explicit correction", async () => {
     const { db, service } = createTestService();
     const session = open(service, "correction-user");
-    const apple = service.completeTurn("turn-apple", {
+    const apple = (await service.completeTurn("turn-apple", {
       sessionId: session.sessionId,
       query: "我最喜欢的水果是苹果",
       answer: "好的。"
-    });
+    }));
     const appleId = apple.userMemoryIds[0]!;
 
-    const corrected = service.completeTurn("turn-watermelon-correction", {
+    const corrected = (await service.completeTurn("turn-watermelon-correction", {
       sessionId: session.sessionId,
       query: "前面说错了，我最喜欢的水果是西瓜",
       answer: "已修正。",
@@ -1119,7 +1128,7 @@ describe("User Memory", () => {
         targetMemoryId: appleId,
         revisedContent: "我最喜欢的水果是西瓜"
       }
-    });
+    }));
 
     expect(corrected.userMemoryIds).toHaveLength(1);
     expect(corrected.l1MemoryIds).toEqual([]);
@@ -1148,6 +1157,7 @@ describe("User Memory", () => {
     let appleMemoryId = "";
     let sawHistoricalCandidate = false;
     const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true }),
       llm: captureDecisionRouterLlm((payload) => {
         const current = payload.includes("我现在最喜欢的水果是西瓜");
         if (current) {
@@ -1168,11 +1178,11 @@ describe("User Memory", () => {
       })
     });
     const session = open(service, "time-change-user");
-    service.completeTurn("turn-old-favorite", {
+    (await service.completeTurn("turn-old-favorite", {
       sessionId: session.sessionId,
       query: "我最喜欢的水果是苹果",
       answer: "好的。"
-    });
+    }));
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     appleMemoryId = (db.db.prepare(`SELECT id FROM user_memories`).get() as { id: string }).id;
     const started = await service.startTurn({
@@ -1181,11 +1191,11 @@ describe("User Memory", () => {
       query: "我现在最喜欢的水果是西瓜"
     });
     expect(started.sourceMemoryIds).not.toContain(appleMemoryId);
-    service.completeTurn(started.turnId, {
+    (await service.completeTurn(started.turnId, {
       sessionId: session.sessionId,
       query: "我现在最喜欢的水果是西瓜",
       answer: "好的。"
-    });
+    }));
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     expect(sawHistoricalCandidate).toBe(true);
@@ -1221,14 +1231,16 @@ describe("User Memory", () => {
   });
 
   it("[BC-28] stores a compound user statement as one record and no L1", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true })
+    });
     const session = open(service, "compound-user");
     const content = "我在大学的时候最喜欢吃苹果，我现在爱看的书是《百年孤独》";
-    const completed = service.completeTurn("turn-compound", {
+    const completed = (await service.completeTurn("turn-compound", {
       sessionId: session.sessionId,
       query: content,
       answer: "好的。"
-    });
+    }));
     await service.runWorkerOnce(20);
 
     expect(completed.userMemoryIds).toHaveLength(1);
@@ -1249,13 +1261,15 @@ describe("User Memory", () => {
   });
 
   it("[BC-25] independently creates User Memory and L1, then merges them by source turn", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: configWithMemoryGates({ enableUserMemoryRecall: true })
+    });
     const session = open(service, "same-turn-user");
-    const completed = service.completeTurn("turn-code-feedback", {
+    const completed = (await service.completeTurn("turn-code-feedback", {
       sessionId: session.sessionId,
       query: "你刚才写了很多兜底代码，我更喜欢简洁的代码，以后不要写不必要的兜底代码",
       answer: "已精简实现并通过测试。"
-    });
+    }));
     await service.runWorkerOnce(50);
 
     expect(completed.userMemoryIds).toHaveLength(1);
@@ -1345,20 +1359,20 @@ describe("User Memory", () => {
   it("[BC-04][BC-05] keeps device observations in L1 and current weather out of long-lived memory", async () => {
     const { db, service } = createTestService();
     const session = open(service, "dynamic-fact-user");
-    const hardware = service.completeTurn("turn-hardware", {
+    const hardware = (await service.completeTurn("turn-hardware", {
       sessionId: session.sessionId,
       query: "我的电脑内存多大？",
       answer: "工具读取结果是 16 GB。",
       toolCalls: [{ name: "system_info", input: { field: "memory" } }],
       toolResults: [{ totalMemory: "16 GB" }]
-    });
-    const weather = service.completeTurn("turn-weather", {
+    }));
+    const weather = (await service.completeTurn("turn-weather", {
       sessionId: session.sessionId,
       query: "上海今天天气怎么样？",
       answer: "当前是晴天。",
       toolCalls: [{ name: "weather", input: { city: "上海" } }],
       toolResults: [{ condition: "晴" }]
-    });
+    }));
 
     expect(hardware.userMemoryIds).toEqual([]);
     expect(hardware.l1MemoryIds).toHaveLength(1);
@@ -1388,23 +1402,23 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("[BC-04 update] updates a device observation in place when the same scoped fact changes", () => {
+  it("[BC-04 update] updates a device observation in place when the same scoped fact changes", async () => {
     const { db, service } = createTestService();
     const session = open(service, "hardware-update-user");
-    const first = service.completeTurn("turn-hardware-16", {
+    const first = (await service.completeTurn("turn-hardware-16", {
       sessionId: session.sessionId,
       query: "我的电脑内存多大？",
       answer: "工具读取结果是 16 GB。",
       toolCalls: [{ name: "system_info", input: { field: "memory" } }],
       toolResults: [{ totalMemory: "16 GB" }]
-    });
-    const second = service.completeTurn("turn-hardware-32", {
+    }));
+    const second = (await service.completeTurn("turn-hardware-32", {
       sessionId: session.sessionId,
       query: "我的电脑内存多大？",
       answer: "工具读取结果是 32 GB。",
       toolCalls: [{ name: "system_info", input: { field: "memory" } }],
       toolResults: [{ totalMemory: "32 GB" }]
-    });
+    }));
 
     expect(second.l1MemoryIds).toEqual(first.l1MemoryIds);
     expect(db.db.prepare(
@@ -1420,11 +1434,11 @@ describe("User Memory", () => {
   it("[BC-27 management] deletes only the selected branch of a same-turn pair", async () => {
     const { db, service } = createTestService();
     const session = open(service, "delete-user");
-    const completed = service.completeTurn("turn-delete-pair", {
+    const completed = (await service.completeTurn("turn-delete-pair", {
       sessionId: session.sessionId,
       query: "你刚才的实现兜底太多，我以后更喜欢简洁代码，不要再写不必要的兜底代码",
       answer: "已按要求修改。"
-    });
+    }));
     await service.runWorkerOnce(50);
 
     service.deleteMemory(completed.userMemoryIds[0]!, {
@@ -1488,6 +1502,7 @@ function captureDecisionLlm(calls: string[], decision: LegacyCaptureDecision): L
       _messages: LlmMessage[],
       options: LlmCompletionOptions
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push(options.operation);
       if (options.operation === "capture.summarize") return compactCaptureDecision(decision) as T;
       return { summary: decision.l1_summary } as unknown as T;
@@ -1517,6 +1532,7 @@ function captureDecisionRouterLlm(
       messages: LlmMessage[],
       options: LlmCompletionOptions
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation !== "capture.summarize") return { summary: "" } as unknown as T;
       return compactCaptureDecision(
         decide(messages.find((message) => message.role === "user")?.content ?? "")

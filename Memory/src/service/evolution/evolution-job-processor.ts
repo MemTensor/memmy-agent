@@ -1,3 +1,4 @@
+import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   policyMetaFromMemory,
   skillMetaFromMemory,
@@ -5,10 +6,11 @@ import {
   worldModelMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
-import type { LlmClient } from "../../model/types.js";
+import type { Embedder, LlmClient } from "../../model/types.js";
 import type {
   EpisodeRecord,
   EvolutionJobRecord,
+  RawTurnRecord,
   Repositories
 } from "../../storage/repositories.js";
 import type { MemoryRow,ToolCallPayload } from "../../types.js";
@@ -36,6 +38,7 @@ import { SkillClusterPipeline } from "./skill-cluster-pipeline.js";
 import { SkillPipeline } from "./skill-pipeline.js";
 import { SpanPipeline } from "./span-pipeline.js";
 import type { TraceCaptureSummary, TurnMemoryCaptureDecision } from "./span-pipeline.js";
+import type { TurnJudgeSnapshot, TurnJudgment } from "./turn-judge.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
@@ -52,6 +55,7 @@ export interface EvolutionJobProcessorDeps {
   config: MemmyConfig;
   llm: LlmClient;
   skillLlm: LlmClient;
+  embedder: Embedder;
   traceMeta(memory: MemoryRow | undefined | null): TraceMeta | null;
   namespaceIdFromMemory(memory: MemoryRow): string;
   buildMemory(input: Record<string, unknown>): MemoryRow;
@@ -118,6 +122,7 @@ export class EvolutionJobProcessor {
       repos: deps.repos,
       nowIso,
       get skillLlm() { return owner.deps.skillLlm; },
+      get embedder() { return owner.deps.embedder; },
       traceMeta: deps.traceMeta,
       projectIdFromMemory,
       profileIdFromMemory,
@@ -126,7 +131,8 @@ export class EvolutionJobProcessor {
       enqueueJob: deps.enqueueJob,
       enqueueChange: deps.repos.runtime.appendChange.bind(deps.repos.runtime),
       namespaceIdFromMemory: deps.namespaceIdFromMemory,
-      onSkillRewardDrift: this.skill.applySkillRewardDriftForPolicy.bind(this.skill)
+      onSkillRewardDrift: this.skill.applySkillRewardDriftForPolicy.bind(this.skill),
+      onPolicyRevised: this.skill.suspendForPolicyRevision.bind(this.skill)
     });
     this.l3WorldModel = new L3WorldModelTraceFieldPipeline({
       repos: deps.repos,
@@ -168,6 +174,7 @@ export class EvolutionJobProcessor {
       synthesizeDecisionRepairDraft: deps.synthesizeDecisionRepairDraft,
       isTraceEligibleForL2: this.policy.isTraceEligibleForL2.bind(this.policy),
       recordCandidatePoolTrace: this.policy.recordCandidatePoolTrace.bind(this.policy),
+      recomputePolicyStats: this.policy.recomputePolicyStats.bind(this.policy),
       repairEvidenceValueDiff: deps.repairEvidenceValueDiff
     });
     this.negativeExperience = new NegativeExperiencePipeline({
@@ -185,7 +192,7 @@ export class EvolutionJobProcessor {
     return this.policy.induceL2(job);
   }
 
-  associateL2(job: EvolutionJobRecord): void {
+  associateL2(job: EvolutionJobRecord): Promise<void> {
     return this.policy.associateL2(job);
   }
 
@@ -247,6 +254,24 @@ export class EvolutionJobProcessor {
     return this.span.decideTurnMemoryForCapture(input);
   }
 
+  buildTurnJudgeSnapshot(input: {
+    trace: TraceMeta;
+    rawTurn: RawTurnRecord;
+    mustKeep: boolean;
+    catchUp?: boolean;
+    at: string;
+  }): TurnJudgeSnapshot {
+    return this.span.buildTurnJudgeSnapshot(input);
+  }
+
+  judgeTurnForCapture(input: {
+    trace: TraceMeta;
+    rawTurn: RawTurnRecord;
+    snapshot: TurnJudgeSnapshot;
+  }): Promise<TurnJudgment> {
+    return this.span.judgeTurnForCapture(input);
+  }
+
   findExistingSkillForPolicy(policy: PolicyMeta) {
     return this.skill.findExistingSkillForPolicy(policy);
   }
@@ -299,7 +324,7 @@ export class EvolutionJobProcessor {
           userId: memory.userId,
           l1MemoryId: trace.id,
           l2MemoryId: policy.id,
-          relation: "supports",
+          relation: l2SupportRelation(memory),
           strength: 1,
           createdAt: at
         });
@@ -337,10 +362,11 @@ export class EvolutionJobProcessor {
         item.policy?.status === "active"
       )
       .map(({ memory, policy }) => {
+        const unifiedEvidence = this.deps.config.algorithm.l2Induction.mode === "unified" || policy.schemaVersion === 2;
         const linkedTraceIds = new Set(this.deps.repos.runtime.listTracePolicyLinks({
           l2MemoryId: policy.id,
           limit: 1000
-        }).map((link) => link.l1MemoryId));
+        }).filter((link) => !unifiedEvidence || link.relation === l2SupportRelation(memory)).map((link) => link.l1MemoryId));
         const candidateTraceIds = Array.from(new Set([
           ...policy.sourceTraceIds,
           ...linkedTraceIds
@@ -349,7 +375,9 @@ export class EvolutionJobProcessor {
           .getMany(candidateTraceIds)
           .map((candidate) => this.deps.traceMeta(candidate))
           .filter((trace): trace is TraceMeta => Boolean(
-            trace && this.policy.isTraceEligibleForL2(trace)
+            trace && (unifiedEvidence
+              ? trace.userId === memory.userId && this.policy.isPolicyEvidenceValid(trace, policy)
+              : this.policy.isTraceEligibleForL2(trace))
           ));
         return { memory, policy, linkedTraceIds, validTraces };
       });
@@ -357,6 +385,7 @@ export class EvolutionJobProcessor {
 
   invalidateMemoryDependencies(memory: MemoryRow, at: string): void {
     if (memory.memoryLayer === "L1") {
+      this.deps.repos.runtime.invalidateUnifiedL2Source(memory.id, memory.userId, at);
       const policyIds = Array.from(new Set(
         this.deps.repos.runtime
           .listTracePolicyLinks({ l1MemoryId: memory.id, limit: 1000 })

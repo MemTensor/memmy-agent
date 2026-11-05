@@ -8,12 +8,15 @@ import { createStorageBackend, type StorageBackend } from "../storage/backend.js
 import { loadMemmyConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { MemoryService } from "../service/memory-service.js";
-import { closeMemoryHttpServer, listenMemoryHttpServer } from "./http.js";
+import { closeMemoryHttpServer, createMemoryHttpServer } from "./http.js";
 import { loadCloudServiceEnv } from "../cli/load-env.js";
 import { requestMemoryServiceRestart } from "./service-restart.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
 import { SCHEMA_VERSION } from "../storage/schema.js";
+import { defaultDatabasePath } from "../storage/db.js";
 import { MEMORY_RUNTIME_BUILD_ID } from "../runtime-build.js";
+import { listenMemoryStartupHttpServer, type MemoryStartupHttpServer, type MemoryStartupState } from "./startup-http.js";
+import { prepareSqliteStorage } from "./storage-startup.js";
 
 const logger = createMemoryLogger("server");
 
@@ -56,6 +59,11 @@ async function runMemoryService(argv: string[], lifecycle: {
     shutdown(): void;
     setStopService(stop: () => void): void;
 }): Promise<boolean> {
+    const startupStartedAt = Date.now();
+    const startupStage = (phase: string): void => logger.info("service.startup_stage", {
+        phase,
+        elapsedMs: Date.now() - startupStartedAt
+    });
     const options = parseServeArgs(argv);
     const { config, path: configPath } = loadMemmyConfig(options.configPath);
     const host = options.host ?? process.env.MEMMY_MEMORY_HOST ?? process.env.MEMORY_SERVICE_HOST ?? "127.0.0.1";
@@ -64,7 +72,7 @@ async function runMemoryService(argv: string[], lifecycle: {
         numberEnv("MEMMY_MEMORY_PORT") ??
         numberEnv("MEMORY_SERVICE_PORT") ??
         18960;
-    const sqlitePath = options.dbPath ?? config.storage.sqlitePath;
+    const sqlitePath = options.dbPath ?? config.storage.sqlitePath ?? defaultDatabasePath();
     const serviceHome = resolve(dirname(configPath), "memory-service");
     logger.info("service.starting", {
         serviceVersion: MEMORY_SERVICE_VERSION,
@@ -78,38 +86,110 @@ async function runMemoryService(argv: string[], lifecycle: {
         configPath
     });
     const serviceLock = acquireUserServiceLock({ serviceHome, host, port });
+    startupStage("service_lock.acquired");
     let sqliteLock: SqliteServerLock | undefined;
     let backend: StorageBackend | undefined;
     let service: MemoryService | undefined;
-    let server: Server | undefined;
+    let serviceServer: Server | undefined;
+    let startupServer: MemoryStartupHttpServer | undefined;
     let requestShutdown!: () => void;
     let restartRequested = false;
+    const startupController = new AbortController();
+    const startupState: MemoryStartupState = {
+        status: "starting",
+        phase: "service_lock.acquired",
+        startedAt: startupStartedAt,
+        targetSchemaVersion: SCHEMA_VERSION
+    };
+    let settleShutdown!: () => void;
     const shutdownRequested = new Promise<void>((resolveShutdown) => {
-        requestShutdown = resolveShutdown;
+        settleShutdown = resolveShutdown;
     });
+    requestShutdown = () => {
+        startupController.abort(new Error("Memory startup was cancelled"));
+        settleShutdown();
+    };
     lifecycle.setStopService(requestShutdown);
 
     try {
         sqliteLock = config.storage.backend === "openmem-cloud-rest"
             ? undefined
             : acquireSqliteServerLock({ sqlitePath, host, port });
+        startupStage("sqlite_lock.acquired");
+        startupState.phase = "http.listening";
+        startupStage("http.listening");
+        startupServer = await listenMemoryStartupHttpServer({
+            host,
+            port,
+            mode: config.storage.mode,
+            storageBackend: config.storage.backend,
+            localServiceToken: config.storage.token,
+            state: () => startupState,
+            onShutdownRequested: lifecycle.shutdown
+        });
+        const { url } = startupServer;
+        startupStage("http.ready");
+        if (configPath) await writeCurrentEndpoint(configPath, url);
+        writeRuntimeState(serviceHome, {
+            pid: process.pid,
+            endpoint: url,
+            status: "starting",
+            startupPhase: startupState.phase,
+            serviceVersion: MEMORY_SERVICE_VERSION,
+            buildId: MEMORY_RUNTIME_BUILD_ID,
+            supportedSchemaVersion: SCHEMA_VERSION,
+            protocolVersion: MEMORY_PROTOCOL_VERSION,
+            configPath,
+            sqlitePath,
+            startedAt: new Date(startupStartedAt).toISOString()
+        });
+
+        if (config.storage.backend !== "openmem-cloud-rest") {
+            startupState.phase = "storage.preparing";
+            startupStage("storage.preparing");
+            try {
+                await prepareSqliteStorage({
+                    sqlitePath,
+                    signal: startupController.signal,
+                    onStage: (stage) => {
+                        startupState.phase = stage.phase;
+                        startupState.currentSchemaVersion = stage.currentSchemaVersion ?? startupState.currentSchemaVersion;
+                        if ((stage.currentSchemaVersion ?? 0) > 0 && (stage.currentSchemaVersion ?? SCHEMA_VERSION) < SCHEMA_VERSION) {
+                            startupState.status = "upgrading";
+                        }
+                    }
+                });
+            } catch (error) {
+                if (startupController.signal.aborted) return false;
+                startupState.status = "failed";
+                startupState.phase = "storage.failed";
+                startupState.error = error instanceof Error ? error.message : String(error);
+                throw error;
+            }
+        }
+
+        startupState.phase = "storage.opening";
+        startupStage("storage.opening");
         backend = createStorageBackend({
             mode: config.storage.mode,
             backend: config.storage.backend,
             sqlitePath,
             endpoint: config.storage.endpoint,
-            token: config.storage.token
+            token: config.storage.token,
+            skipMigrations: config.storage.backend !== "openmem-cloud-rest"
         });
+        startupStage("storage.ready");
+        startupStage("service.constructing");
         service = new MemoryService({
             backend,
             mode: config.storage.mode,
             configPath,
             config
         });
-        const listening = await listenMemoryHttpServer({
+        startupStage("service.ready");
+        service.setViewerEndpoint(url);
+        serviceServer = createMemoryHttpServer({
             service,
-            host,
-            port,
             timeZone: config.timeZone,
             onShutdownRequested: lifecycle.shutdown,
             onRestartRequested: () => requestMemoryServiceRestart({
@@ -124,22 +204,19 @@ async function runMemoryService(argv: string[], lifecycle: {
             configPath,
             startAgentSourceAutomation: true
         });
-        server = listening.server;
-        const { url } = listening;
-        service.setViewerEndpoint(url);
-        if (configPath) {
-            await writeCurrentEndpoint(configPath, url);
-        }
+        startupServer.activate(serviceServer);
+        startupState.phase = "ready";
         writeRuntimeState(serviceHome, {
             pid: process.pid,
             endpoint: url,
+            status: "ready",
             serviceVersion: MEMORY_SERVICE_VERSION,
             buildId: MEMORY_RUNTIME_BUILD_ID,
             supportedSchemaVersion: SCHEMA_VERSION,
             protocolVersion: MEMORY_PROTOCOL_VERSION,
             configPath,
             sqlitePath,
-            startedAt: new Date().toISOString()
+            startedAt: new Date(startupStartedAt).toISOString()
         });
 
         logger.info("service.listening", {
@@ -149,9 +226,8 @@ async function runMemoryService(argv: string[], lifecycle: {
         });
         await shutdownRequested;
     } finally {
-        if (server) {
-            await closeMemoryHttpServer(server);
-        }
+        await startupServer?.close();
+        if (serviceServer) await closeMemoryHttpServer(serviceServer);
         if (service) {
             await service.stop();
         }

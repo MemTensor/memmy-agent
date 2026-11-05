@@ -37,13 +37,13 @@ async function fixture() {
   return {
     service,
     endpoint,
-    addTask(userId: string, label: string) {
+    async addTask(userId: string, label: string) {
       const session = service.openSession({ namespace: namespace(userId) });
-      return service.completeTurn(`turn-${label}`, {
+      return (await service.completeTurn(`turn-${label}`, {
         sessionId: session.sessionId,
         query: `issue 409 ${label}`,
         answer: `Completed ${label}`
-      }).episodeId;
+      })).episodeId;
     },
     panel(token: string, getUserId: () => string) {
       return createPanelService({
@@ -65,9 +65,9 @@ const ctx = { adapterId: "runtime", userId: "stale-caller-user", timeZone: "+08:
 describe("desktop task identity / issue 409", () => {
   it("keeps local and account tasks visible across login, account switching and logout, matching the viewer", async () => {
     const f = await fixture();
-    const localIds = Array.from({ length: 21 }, (_, i) => f.addTask("local-user", `local-task-${i}`));
-    const accountId = f.addTask("account-user", "account-task");
-    const previousAccountId = f.addTask("previous-account", "previous-task");
+    const localIds = await Promise.all(Array.from({ length: 21 }, (_, i) => f.addTask("local-user", `local-task-${i}`)));
+    const accountId = await f.addTask("account-user", "account-task");
+    const previousAccountId = await f.addTask("previous-account", "previous-task");
     const expectedIds = [...localIds, accountId, previousAccountId].sort();
     let currentUser = "local-user";
     const panel = f.panel("local-panel-token", () => currentUser);
@@ -103,8 +103,8 @@ describe("desktop task identity / issue 409", () => {
 
   it("preserves Memory service authentication and token-bound user scopes", async () => {
     const f = await fixture();
-    const localId = f.addTask("local-user", "local-scope-task");
-    const accountId = f.addTask("account-user", "account-scope-task");
+    const localId = await f.addTask("local-user", "local-scope-task");
+    const accountId = await f.addTask("account-user", "account-scope-task");
     for (const token of ["scoped-panel-token", "cloud-panel-token"]) {
       const panel = f.panel(token, () => "account-user");
       const result = await panel.tasks({}, ctx);

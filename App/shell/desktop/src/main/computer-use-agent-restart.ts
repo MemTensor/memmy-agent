@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { constants, accessSync, realpathSync } from 'node:fs';
+import { constants, accessSync, lstatSync, realpathSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -60,7 +60,18 @@ function listAgentProcesses(binary: string): AgentProcess[] {
   return agents;
 }
 
+function agentSocketExists(socketPath: string): boolean {
+  try {
+    if (!lstatSync(socketPath).isSocket()) throw new Error('Native Computer Use agent path is not a socket');
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
+  if (!agentSocketExists(agent.socketPath)) return Promise.resolve();
   const bundle = dirname(dirname(dirname(binary)));
   return new Promise((resolveStop, rejectStop) => {
     let connected = false;
@@ -79,10 +90,13 @@ function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
     const timer = setTimeout(() => finish(new Error('Native Computer Use agent shutdown timed out')), AGENT_STOP_TIMEOUT_MS);
     socket.setEncoding('utf8');
     socket.on('connect', () => {
+      if (finished) return;
       connected = true;
       socket.write(JSON.stringify({ kind: 'agentInfo' }) + '\n');
     });
     socket.on('data', chunk => {
+      // Destruction is asynchronous: late events must never restart the handshake.
+      if (finished) return;
       buffered += chunk;
       if (buffered.length > 8192) { finish(new Error('Unexpected native agent lifecycle response')); return; }
       let end: number;
@@ -104,8 +118,12 @@ function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
       }
     });
     socket.on('error', error => {
-      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) finish();
-      else finish(error);
+      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+        try {
+          agentSocketExists(agent.socketPath);
+          finish();
+        } catch (reason) { finish(reason instanceof Error ? reason : new Error(String(reason))); }
+      } else finish(error);
     });
     socket.on('close', () => finish(accepted ? undefined : new Error('Native agent closed without confirming shutdown')));
   });

@@ -451,6 +451,7 @@ function rebaseEndpoints(
     const merged = structuredClone(latestEndpoint);
     merged.apiBase = mergeIntentValue(baseEndpoint.apiBase, desiredEndpoint.apiBase, latestEndpoint.apiBase, `Endpoint ${endpointId} URL`);
     merged.protocol = mergeIntentValue(baseEndpoint.protocol, desiredEndpoint.protocol, latestEndpoint.protocol, `Endpoint ${endpointId} protocol`);
+    mergeOptionalField(merged, baseEndpoint, desiredEndpoint, latestEndpoint, "inheritProviderDefaults", `Endpoint ${endpointId} defaults inheritance`);
     mergeOptionalField(merged, baseEndpoint, desiredEndpoint, latestEndpoint, "apiKey", `Endpoint ${endpointId} API key`);
     mergeOptionalField(merged, baseEndpoint, desiredEndpoint, latestEndpoint, "extraHeaders", `Endpoint ${endpointId} headers`);
     mergeOptionalField(merged, baseEndpoint, desiredEndpoint, latestEndpoint, "extraBody", `Endpoint ${endpointId} body`);

@@ -16,6 +16,7 @@ import {
   MemoryDetailItemSchema,
   MemoryHealthSnapshotSchema,
   MemoryListItemSchema,
+  MemoryMetricsSchema,
   MemoryReloadConfigInputSchema,
   MemoryReloadConfigOutputSchema,
   OpenSessionInputSchema,
@@ -425,3 +426,8 @@ function panelDays() {
     "2026-05-29"
   ].map((date) => ({ date, count: 0 }));
 }
+
+ it("preserves independent pending score flags across the desktop contract", () => {
+   expect(MemoryMetricsSchema.parse({ value: 0, alpha: 0, reflectionDone: false, valuePending: true, alphaPending: true }))
+     .toEqual({ value: 0, alpha: 0, reflectionDone: false, valuePending: true, alphaPending: true });
+ });

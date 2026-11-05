@@ -1,3 +1,7 @@
+import { RecordingStartSchema } from "@memmy/local-api-contracts";
+import { handleRecordingHttp } from "../../tools/computer-recordings/http-api.js";
+import { getRecordingSessionService, shutdownRecordingService } from "../../tools/computer-recordings/service.js";
+import { CollectorBusyError } from "../../tools/computer-history/core/collector-gate.js";
 import { agentTaskActivity } from "../../core/agent-runtime/task-activity.js";
 import { historySummaryRuntime } from "../../providers/history-summary-runtime.js";
 import crypto from "node:crypto";
@@ -130,8 +134,9 @@ import {
   ComputerHistoryApiError,
   getComputerHistoryDemoService,
   clientSnapshot,
-} from "../../tools/computer-history/mac/computer-history-api.js";
-import type { ComputerHistoryDemoService } from "../../tools/computer-history/mac/computer-history-api.js";
+} from "../../tools/computer-history/computer-history-api.js";
+import type { ComputerHistoryDemoService } from "../../tools/computer-history/core/computer-history-api.js";
+import { getWindowsComputerHistoryService } from "../../tools/computer-history/win/computer-history-api.js";
 import { isComputerHistorySupported } from "../../tools/computer-history/platform.js";
 import {
   removeSessionDagFiles,
@@ -140,7 +145,7 @@ import {
 
 type Query = Record<string, string[]>;
 type HttpRequestLike = { path: string; method?: string; headers?: http.IncomingHttpHeaders | Record<string, any>; body?: Buffer | string };
-type HttpLikeResponse = { status: number; headers: Record<string, string>; body: Buffer | string };
+type HttpLikeResponse = { status: number; headers: Record<string, string>; body: Buffer | string; stream?: fs.ReadStream };
 type WorkspaceEnvironmentContextResult =
   | { ok: true; context: WorkspaceEnvironmentContext }
   | { ok: false; response: HttpLikeResponse };
@@ -271,6 +276,7 @@ export type WebuiMessageDigestInput = {
   thinkingEnabled?: boolean;
   thinkingLevel?: string | null;
   interruptPendingTurnId?: string | null;
+  taskRecording?: unknown;
 };
 
 export function computeWebuiMessageDigest(input: WebuiMessageDigestInput): string {
@@ -287,6 +293,7 @@ export function computeWebuiMessageDigest(input: WebuiMessageDigestInput): strin
     thinking_enabled: input.thinkingEnabled ?? null,
     thinking_level: input.thinkingLevel ?? null,
     ...(input.interruptPendingTurnId ? { interrupt_pending_turn_id: input.interruptPendingTurnId } : {}),
+    ...(input.taskRecording ? { task_recording: input.taskRecording } : {}),
   })).digest("hex");
 }
 
@@ -411,6 +418,7 @@ const DATA_URL_MIME_RE = /^data:([^;]+);base64,/i;
 const MAX_ISSUED_TOKENS = 10_000;
 const MAX_HTTP_JSON_BODY_BYTES = 64 * 1024;
 const MAX_ARTIFACT_STAGING_BYTES = 100 * 1024 * 1024;
+const MAX_TITLE_ATTACHMENT_TEXT_BYTES = 16 * 1024;
 /** Upload target that keeps the file in the default workspace's recordings folder. */
 const WEBUI_RECORDINGS_TARGET = "recordings";
 const WEBUI_RECORDINGS_DIR = "recordings";
@@ -3308,6 +3316,11 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
     if (got === "/api/computer-history") return this.handleComputerHistory(request, "snapshot");
+    if (got === "/api/computer-recordings" || got.startsWith("/api/computer-recordings/")) {
+      if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+      return handleRecordingHttp(getRecordingSessionService(), request, true);
+    }
+    if (got === "/api/computer-history/windows/settings") return this.handleWindowsHistorySettings(request);
     if (got === "/api/computer-history/observation/status") return this.handleComputerHistory(request, "observation-status");
     if (got === "/api/computer-history/settings") return this.handleComputerHistory(request, "settings");
     if (got === "/api/computer-history/apps") return this.handleComputerHistory(request, "apps");
@@ -3396,9 +3409,9 @@ export class WebSocketChannel extends BaseChannel {
       }
     }
     match = got.match(/^\/api\/media\/ws\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
-    if (match) return this.handleWorkspaceMediaFetch(match[1], match[2]);
+    if (match) return this.handleWorkspaceMediaFetch(match[1], match[2], request);
     match = got.match(/^\/api\/media\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
-    if (match) return this.handleMediaFetch(match[1], match[2]);
+    if (match) return this.handleMediaFetch(match[1], match[2], request);
     if (got === this.expectedPath() && isWebsocketUpgrade(request)) {
       const clientId = (queryFirst(query, "client_id") ?? "").slice(0, 128);
       if (!this.isAllowed(clientId)) return connectionRespond(connection, 403, "Forbidden");
@@ -3411,6 +3424,7 @@ export class WebSocketChannel extends BaseChannel {
 
   override async start(): Promise<void> {
     this.running = true;
+    if (process.platform === "win32" || process.platform === "darwin") void getRecordingSessionService().list().catch(() => {});
     this.startComputerHistoryModelSync();
     await nativeExcelControl.start();
     if (process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === "1") {
@@ -3476,6 +3490,7 @@ export class WebSocketChannel extends BaseChannel {
     // Recording is scoped to the app: closing it finalizes the open segment
     // rather than leaving a recorder running behind the user's back.
     await this.computerHistory.shutdown();
+    await shutdownRecordingService();
     if (typeof this.server?.close === "function") {
       await new Promise<void>((resolve) => this.server.close(() => resolve()));
     }
@@ -3506,7 +3521,7 @@ export class WebSocketChannel extends BaseChannel {
    */
   async handleComputerHistoryAppIcon(request: any): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if (!isComputerHistorySupported()) return httpError(400, "Computer History requires macOS or Windows 11");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available on macOS and Windows");
     if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
     // The router carries the path, query and all, on `request.path`; there is
     // no `request.url` here, and reading one silently loses every parameter.
@@ -3515,7 +3530,7 @@ export class WebSocketChannel extends BaseChannel {
     try {
       return httpJsonResponse({ icon: await this.computerHistory.applicationIcon(bundleId) });
     } catch (error) {
-      if (error instanceof ComputerHistoryApiError) return httpError(error.status, error.message);
+      if (error instanceof ComputerHistoryApiError || error instanceof CollectorBusyError) return httpError(error.status, error.message);
       return httpError(500, error instanceof Error ? error.message : String(error));
     }
   }
@@ -3525,7 +3540,7 @@ export class WebSocketChannel extends BaseChannel {
     action: "snapshot" | "observation-status" | "settings" | "apps" | "model-select" | "permissions-check" | "permissions-open" | "wechat-consent" | "wechat-connect" | "wechat-prepare" | "history-delete" | "history-clear" | "history-pin" | "import" | "observation-start" | "observation-pause" | "observation-resume" | "observation-stop" | "workflow-create",
   ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if (!isComputerHistorySupported()) return httpError(400, "Computer History requires macOS or Windows 11");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available on macOS and Windows");
     const method = (request.method ?? "GET").toUpperCase();
     if (action === "snapshot") {
       return method === "GET"
@@ -3578,7 +3593,7 @@ export class WebSocketChannel extends BaseChannel {
           snapshot = this.computerHistory.connectWeChat();
           break;
         case "settings":
-          return httpJsonResponse(this.computerHistory.updateObservationSettings(body.settings) as unknown as Record<string, any>);
+          return httpJsonResponse(await this.computerHistory.updateObservationSettings(body.settings) as unknown as Record<string, any>);
         case "model-select": {
           if (body.model_preset !== undefined && body.model_preset !== null
             && (typeof body.model_preset !== "string" || !body.model_preset.trim())) {
@@ -3640,8 +3655,26 @@ export class WebSocketChannel extends BaseChannel {
       }
       return httpJsonResponse(clientSnapshot(snapshot!) as unknown as Record<string, any>);
     } catch (error) {
-      if (error instanceof ComputerHistoryApiError) return httpError(error.status, error.message);
+      if (error instanceof ComputerHistoryApiError || error instanceof CollectorBusyError) return httpError(error.status, error.message);
       return httpError(500, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async handleWindowsHistorySettings(request: any): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if (process.platform !== "win32") return httpError(400, "Windows Computer History settings require Windows");
+    const service = getWindowsComputerHistoryService();
+    try {
+      if ((request.method ?? "GET").toUpperCase() === "GET") return httpJsonResponse(await service.getWindowsConfiguration());
+      if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+      const raw = requestBodyText(request);
+      if (Buffer.byteLength(raw, "utf8") > 256 * 1024) return httpError(413, "settings are too large");
+      let body;
+      try { body = JSON.parse(raw); } catch { return httpError(400, "body must be JSON"); }
+      return httpJsonResponse(await service.updateWindowsSettings(body?.settings));
+    } catch (error) {
+      return httpError(error instanceof ComputerHistoryApiError ? error.status : 503,
+        error instanceof ComputerHistoryApiError ? error.message : "Windows Computer History configuration is unavailable");
     }
   }
 
@@ -3757,7 +3790,7 @@ export class WebSocketChannel extends BaseChannel {
   resolveEnvelopeMediaPaths(value: any): [string[], string | null] {
     if (value == null) return [[], null];
     if (!Array.isArray(value)) return [[], "malformed"];
-    const mediaRoot = realpathIfExists(getMediaDir("websocket"));
+    const allowedRoots = this.webuiMediaInputRoots();
     const out: string[] = [];
     for (const item of value) {
       if (typeof item !== "string" || !item.trim()) return [[], "malformed"];
@@ -3769,13 +3802,60 @@ export class WebSocketChannel extends BaseChannel {
       } catch {
         return [[], "missing"];
       }
-      if (!stat.isFile() || !isPathInside(resolved, mediaRoot)) return [[], "path"];
+      if (!stat.isFile() || !allowedRoots.some((root) => isPathInside(resolved, root))) return [[], "path"];
       const bytes = fs.readFileSync(resolved);
       const classification = classifySavedWebuiAttachment(resolved, bytes);
       if (!classification) return [[], "mime"];
       out.push(resolved);
     }
     return [out, null];
+  }
+
+  /**
+   * Reads a small UTF-8 excerpt for attachment-only automatic titles.
+   *
+   * The path must remain inside the same roots accepted by message envelopes,
+   * and only known text extensions are eligible. Binary documents, audio, and
+   * arbitrary workspace paths are never opened for title generation.
+   */
+  readWebuiTitleText(filePath: string): string | null {
+    let resolved: string;
+    let size: number;
+    try {
+      resolved = fs.realpathSync(path.resolve(expandHomePath(filePath)));
+      const stat = fs.statSync(resolved);
+      if (!stat.isFile()) return null;
+      size = stat.size;
+    } catch {
+      return null;
+    }
+    if (!this.webuiMediaInputRoots().some((root) => isPathInside(resolved, root))) return null;
+    if (!TEXT_MIME_BY_EXTENSION[path.extname(resolved).toLowerCase()]) return null;
+
+    const length = Math.min(size, MAX_TITLE_ATTACHMENT_TEXT_BYTES);
+    if (length <= 0) return null;
+    const bytes = Buffer.alloc(length);
+    let descriptor: number | null = null;
+    let read = 0;
+    try {
+      descriptor = fs.openSync(resolved, "r");
+      read = fs.readSync(descriptor, bytes, 0, length, 0);
+    } catch {
+      return null;
+    } finally {
+      if (descriptor != null) fs.closeSync(descriptor);
+    }
+    const sample = bytes.subarray(0, read);
+    if (!looksLikeText(sample)) return null;
+    const text = sample.toString("utf8").replace(/^\uFEFF/u, "").trim();
+    return text || null;
+  }
+
+  private webuiMediaInputRoots(): string[] {
+    return [
+      realpathIfExists(getMediaDir("websocket")),
+      realpathIfExists(path.join(this.workspacePath, WEBUI_RECORDINGS_DIR)),
+    ];
   }
 
   deprecatedEnvelopeMediaReason(value: any): string {
@@ -3973,6 +4053,11 @@ export class WebSocketChannel extends BaseChannel {
       });
       return;
     }
+    const recording = envelope.task_recording == null ? null : RecordingStartSchema.safeParse(envelope.task_recording);
+    if (recording && !recording.success) {
+      await this.sendWebuiRequestError(connection, { chatId, clientRequestId, detail: "message_request_rejected", reason: "task_recording_consent_invalid" });
+      return;
+    }
     const digest = clientRequestId
       ? this.webuiMessageDigest({
           chatId,
@@ -3984,6 +4069,7 @@ export class WebSocketChannel extends BaseChannel {
           queueSurface,
           turnAdmission,
           expectedTurnId,
+          taskRecording: recording?.success ? recording.data : null,
           thinkingEnabled: typeof envelope.thinking_enabled === "boolean" ? envelope.thinking_enabled : undefined,
           thinkingLevel: typeof envelope.thinking_level === "string" ? envelope.thinking_level : undefined,
           interruptPendingTurnId,
@@ -4089,6 +4175,7 @@ export class WebSocketChannel extends BaseChannel {
     }
     const metadata: Record<string, any> = {
       remote: connection?.remoteAddress ?? null,
+      ...(recording?.success ? { task_recording: recording.data } : {}),
       message_id: clientRequestId ?? crypto.randomUUID(),
       webui: envelope.webui === true,
       model_preset: modelSelection.preset,
@@ -4844,7 +4931,7 @@ export class WebSocketChannel extends BaseChannel {
     };
   }
 
-  handleMediaFetch(sig: string, payload: string): HttpLikeResponse {
+  handleMediaFetch(sig: string, payload: string, request?: Pick<HttpRequestLike, "headers">): HttpLikeResponse {
     const expected = crypto.createHmac("sha256", this.mediaSecret).update(payload).digest().subarray(0, 16);
     let provided: Buffer;
     try {
@@ -4865,8 +4952,31 @@ export class WebSocketChannel extends BaseChannel {
     const candidate = path.resolve(mediaRoot, normalizeLocalPath(rel));
     if (!pathIsInside(candidate, mediaRoot)) return httpError(404, "not found");
     if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) return httpError(404, "not found");
+    const mime = mediaMimeForPath(candidate);
+    const size = fs.statSync(candidate).size;
+    const range = getHeader(request?.headers, "range");
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      const suffix = match && !match[1];
+      const start = match ? (suffix ? Math.max(0, size - Number(match[2])) : Number(match[1])) : NaN;
+      const requestedEnd = match ? (suffix || !match[2] ? size - 1 : Number(match[2])) : NaN;
+      if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd)
+        || start < 0 || start >= size || requestedEnd < start) {
+        return { status: 416, headers: { "content-range": `bytes */${size}` }, body: Buffer.alloc(0) };
+      }
+      const end = Math.min(size - 1, requestedEnd, start + 2 * 1024 * 1024 - 1);
+      const body = Buffer.alloc(end - start + 1);
+      const descriptor = fs.openSync(candidate, "r");
+      try { fs.readSync(descriptor, body, 0, body.length, start); }
+      finally { fs.closeSync(descriptor); }
+      return { status: 206, headers: {
+        "content-type": DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) || mime.startsWith("audio/") ? mime : "application/octet-stream",
+        "accept-ranges": "bytes", "content-range": `bytes ${start}-${end}/${size}`,
+        "cache-control": "private, no-store", "x-content-type-options": "nosniff",
+      }, body };
+    }
+
     const body = fs.readFileSync(candidate);
-    const mime = mediaMimeForPath(candidate, body);
     return {
       status: 200,
       headers: {
@@ -4893,7 +5003,7 @@ export class WebSocketChannel extends BaseChannel {
     return `/api/media/ws/${b64urlEncode(this.workspaceMediaMac(payload))}/${payload}`;
   }
 
-  handleWorkspaceMediaFetch(sig: string, payload: string): HttpLikeResponse {
+  handleWorkspaceMediaFetch(sig: string, payload: string, request?: Pick<HttpRequestLike, "headers">): HttpLikeResponse {
     const expected = this.workspaceMediaMac(payload);
     let provided: Buffer;
     try {
@@ -4913,7 +5023,7 @@ export class WebSocketChannel extends BaseChannel {
     const workspaceRoot = comparablePath(this.workspacePath);
     const candidate = path.resolve(workspaceRoot, normalizeLocalPath(rel));
     if (!pathIsInside(candidate, workspaceRoot)) return httpError(404, "not found");
-    return mediaFileResponse(candidate, "private, no-cache");
+    return mediaFileResponse(candidate, "private, no-cache", request);
   }
 
   private workspaceMediaMac(payload: string): Buffer {
@@ -5204,6 +5314,10 @@ export class WebSocketChannel extends BaseChannel {
         turnId: this.turnIdFromMetadata(message.metadata),
         source: parseTurnSource(message.metadata.turn_source),
       });
+      return;
+    }
+    if (message.metadata?.taskRecordingStatus) {
+      await this.broadcast(message.chatId, { event: "task_recording", chat_id: message.chatId, ...message.metadata.taskRecordingStatus });
       return;
     }
     if (message.metadata?.turnEnd) {
@@ -5850,8 +5964,15 @@ function httpConnectionFromRequest(req: http.IncomingMessage): any {
 }
 
 function writeNodeResponse(res: http.ServerResponse, response: HttpLikeResponse): void {
+  if (response.stream) {
+    res.writeHead(response.status, response.headers);
+    response.stream.on("error", () => res.destroy());
+    res.on("close", () => response.stream?.destroy());
+    response.stream.pipe(res);
+    return;
+  }
   const body = typeof response.body === "string" ? Buffer.from(response.body, "utf8") : response.body;
-  const headers = { ...response.headers, "content-length": String(body.length) };
+  const headers = { "content-length": String(body.length), ...response.headers };
   res.writeHead(response.status, headers);
   res.end(body);
 }
@@ -5893,6 +6014,7 @@ function corsHeadersForRequest(config: WebSocketConfig, request: { headers?: htt
       "x-memmy-agent-auth",
       MCP_VALUES_HEADER,
     ].join(", "),
+    "access-control-expose-headers": "Content-Range, Accept-Ranges",
     "access-control-max-age": "600",
   };
 }
@@ -5944,14 +6066,49 @@ function boundedNumber(value: any, min: number, max: number, field: string): num
 }
 
 /** Serves a resolved media file with the headers every media route shares. */
-function mediaFileResponse(filePath: string, cacheControl = "private, max-age=31536000, immutable"): HttpLikeResponse {
+function mediaFileResponse(
+  filePath: string,
+  cacheControl = "private, max-age=31536000, immutable",
+  request?: Pick<HttpRequestLike, "headers">
+): HttpLikeResponse {
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return httpError(404, "not found");
+  const size = fs.statSync(filePath).size;
+  const mime = mediaMimeForPath(filePath);
+  const contentType = DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) || mime.startsWith("audio/") ? mime : "application/octet-stream";
+  const range = getHeader(request?.headers, "range");
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+    const suffix = match && !match[1];
+    const start = match ? (suffix ? Math.max(0, size - Number(match[2])) : Number(match[1])) : NaN;
+    const requestedEnd = match ? (suffix || !match[2] ? size - 1 : Number(match[2])) : NaN;
+    if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd)
+      || start < 0 || start >= size || requestedEnd < start) {
+      return { status: 416, headers: { "content-range": `bytes */${size}` }, body: Buffer.alloc(0) };
+    }
+    const end = Math.min(size - 1, requestedEnd, start + 2 * 1024 * 1024 - 1);
+    const body = Buffer.alloc(end - start + 1);
+    const descriptor = fs.openSync(filePath, "r");
+    try { fs.readSync(descriptor, body, 0, body.length, start); }
+    finally { fs.closeSync(descriptor); }
+    return {
+      status: 206,
+      headers: {
+        "content-type": contentType,
+        "accept-ranges": "bytes",
+        "content-range": `bytes ${start}-${end}/${size}`,
+        "cache-control": "private, no-store",
+        "x-content-type-options": "nosniff",
+      },
+      body,
+    };
+  }
+
   const body = fs.readFileSync(filePath);
-  const mime = mediaMimeForPath(filePath, body);
   return {
     status: 200,
     headers: {
-      "content-type": DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) || mime.startsWith("audio/") ? mime : "application/octet-stream",
+      "content-type": contentType,
+      "accept-ranges": "bytes",
       "cache-control": cacheControl,
       "x-content-type-options": "nosniff",
     },

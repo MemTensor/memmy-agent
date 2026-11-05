@@ -16,6 +16,7 @@ import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { canUseAccountRecording, useRecordingEntry, RecordingEntryCard, type RecordingArchiveEntry } from "./recording-entry.js";
 import { type SlashCommandPaletteItem } from "./agent-command-palette.js";
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
+import type { UploadedAgentMedia } from "../api/memmy-agent-client.js";
 
 const NO_CALLS: PluginUiCall[] = [];
 
@@ -54,6 +55,8 @@ export function useConversationFeatures(options: {
   sharedRowWidth?: number | null;
   onDraft(text: string): void;
   onStageFiles(files: File[]): Promise<unknown>;
+  /** Stages files that already have a gateway/workspace path without uploading them again. */
+  onStageExistingFiles?(files: UploadedAgentMedia[]): Promise<unknown>;
   onOpenArtifact?(artifact: PluginArtifactRef): boolean;
   onSend(text: string): Promise<boolean>;
   onOpenRecording(): void;
@@ -135,8 +138,12 @@ export function useConversationFeatures(options: {
   }, [ui?.addRecordingMaterials]);
   const recording = useRecordingEntry(clients?.asr,
     clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined,
-    (file, mode) => {
-      void latest.current.onStageFiles([file]);
+    (file, mode, persistedTranscript) => {
+      if (persistedTranscript && latest.current.onStageExistingFiles) {
+        void latest.current.onStageExistingFiles([persistedTranscript]);
+      } else {
+        void latest.current.onStageFiles([file]);
+      }
       if (mode === "summarize") latest.current.onDraft(t("recording.summaryPrompt"));
     }, {
       scope: String(state.account.userId ?? "local"),

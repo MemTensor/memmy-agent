@@ -10,7 +10,7 @@ import {
   type IngestionWarning
 } from "../ingestion-service.js";
 import type { AgentSourceRepository } from "../../infrastructure/agent-source-store/index.js";
-import type { ConversationMessage } from "../../adapters/outbound/agent-source/types.js";
+import type { ConversationMessage } from "@memmy/agent-source-readers/adapters/types";
 
 describe("native Codex ingestion", () => {
   function nativeMessages(complete = true): ConversationMessage[] {
@@ -45,6 +45,41 @@ describe("native Codex ingestion", () => {
     expect(completeSourceTurn.mock.calls[0]?.[0].captureLegacyHistory).toBeUndefined();
     expect(stats.memoryIds).toEqual(["l1-native"]);
     expect(markSeen).toHaveBeenCalledTimes(2);
+  });
+
+  it("freezes the sessions an import touched once it ends, and a failed freeze does not fail the import", async () => {
+    const completeSourceTurn = vi.fn().mockResolvedValue({ status: "stored", result: { sessionId: "s-1", l1MemoryIds: ["l1-native"] } });
+    const freezeScanSessions = vi.fn().mockResolvedValue({ batches: 1 });
+    await createService({ completeSourceTurn, freezeScanSessions }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex" });
+    expect(freezeScanSessions).toHaveBeenCalledWith("codex", ["s-1"]);
+
+    const failing = vi.fn().mockRejectedValue(new Error("memory unavailable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const stats = await createService({ completeSourceTurn, freezeScanSessions: failing })
+      .ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex" });
+    expect(stats.memoryIds).toEqual(["l1-native"]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("l3.freeze_failed"));
+    warn.mockRestore();
+
+    // Importing the same history again returns "existing"; the freeze is asked again so it can catch up.
+    const again = vi.fn().mockResolvedValue({ batches: 1 });
+    const existing = vi.fn().mockResolvedValue({ status: "existing", result: { sessionId: "s-1", l1MemoryIds: ["l1-native"] } });
+    await createService({ completeSourceTurn: existing, freezeScanSessions: again }).ingest(toAsyncIterable(nativeMessages()), { sourceId: "codex" });
+    expect(again).toHaveBeenCalledWith("codex", ["s-1"]);
+  });
+
+  it("still freezes what an import added when the import stops with an error", async () => {
+    const completeSourceTurn = vi.fn().mockResolvedValue({ status: "stored", result: { sessionId: "s-1", l1MemoryIds: ["l1-native"] } });
+    const freezeScanSessions = vi.fn().mockResolvedValue({ batches: 1 });
+    async function* brokenSource() {
+      yield* nativeMessages();
+      // A later conversation fails to read after the first one was stored.
+      yield { ...nativeMessages()[0]!, conversationId: "next-conversation", messageId: "next-0" };
+      throw new Error("source read failed");
+    }
+    await expect(createService({ completeSourceTurn, freezeScanSessions }).ingest(brokenSource(), { sourceId: "codex" }))
+      .rejects.toThrow("source read failed");
+    expect(freezeScanSessions).toHaveBeenCalledWith("codex", ["s-1"]);
   });
 
   it("emits add analytics only when a native scan turn is newly stored", async () => {

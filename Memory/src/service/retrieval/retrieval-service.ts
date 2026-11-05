@@ -1,4 +1,5 @@
 import { budgetInjection } from "./injection-budget.js";
+import { skillInjectionDescription } from "./skill-injection-description.js";
 import type {
   RetrievalQueryExtract,
   RetrievalResult
@@ -675,17 +676,27 @@ export function buildInjectedContext(
       },
       sourceMemoryIds: uniq(sourceMemoryIds)
     };
-  }, (item) => item.section.memoryIds.map((id) => ({
-    id, kind: item.section.kind, memoryLayer: item.section.memoryLayer,
-    tokenEstimate: item.section.tokenEstimate
-  })), fixedContextChars);
+  }, (id) => {
+    const memory = memoryById.get(id);
+    const section = memories.find((item) => item.section.memoryIds.includes(id))?.section;
+    return {
+      id,
+      kind: memory ? kindFromMemory(memory) : section!.kind,
+      memoryLayer: memory ? memory.memoryLayer : section!.memoryLayer,
+      ...(section ? { tokenEstimate: section.tokenEstimate } : {})
+    };
+  }, fixedContextChars);
 }
 
 function buildTimeFilteredInjectedContext(memories: MemoryRow[], timeZone: string, budget: number) {
+  const byId = new Map(memories.map((memory) => [memory.id, memory]));
   return budgetInjection(memories, budget,
     (selected) => renderTimeFilteredInjectedContext(selected, timeZone),
-    (memory) => [{ id: memory.id, kind: kindFromMemory(memory), memoryLayer: memory.memoryLayer,
-      tokenEstimate: renderTimeFilteredInjectedContext([memory], timeZone).injectedContext.tokenEstimate }]);
+    (id) => {
+      const memory = byId.get(id)!;
+      return { id, kind: kindFromMemory(memory), memoryLayer: memory.memoryLayer,
+        tokenEstimate: renderTimeFilteredInjectedContext([memory], timeZone).injectedContext.tokenEstimate };
+    });
 }
 
 function renderTimeFilteredInjectedContext(
@@ -863,7 +874,7 @@ function renderInjectedSnippet(
       "",
       ...labeledInjectedBlock("Name", name),
       "",
-      ...labeledInjectedBlock("Description", firstLineSummary(guide, summaryChars) || "(not provided)")
+      ...labeledInjectedBlock("Description", skillInjectionDescription({ name, guide, retrievalBlurb: skill?.retrievalBlurb, triggerContext: skill?.triggerContext, maxChars: summaryChars }))
     ];
     return {
       refKind: "skill",
@@ -1925,6 +1936,9 @@ export class RetrievalService {
       ? requestedSemanticLayers.filter((layer) => layer !== "L1")
       : requestedSemanticLayers;
     const searchAt = Date.now();
+    const userMemoryRecallEnabled = this.deps.config.algorithm.enableUserMemoryRecall === true;
+    // Capture uses these candidates to confirm or correct existing User Memory,
+    // even when it must not be returned to an agent.
     const includeUserMemory = !onboardingFirstReportHit && semanticLayers.includes("L1");
     const userMemoryCount = includeUserMemory
       ? this.deps.repos.userMemories.listActive(context.userId).length
@@ -2015,7 +2029,9 @@ export class RetrievalService {
     const agentHits = onboardingFirstReportHit || timeFilter
       ? retrieval.hits
       : filterL1TraceSpanRecallHits(retrieval.hits, memories);
-    const merged = mergeSameTurnRecallHits(agentHits, memories, userMemoryOutput.hits);
+    const merged = mergeSameTurnRecallHits(
+      agentHits, memories, userMemoryRecallEnabled ? userMemoryOutput.hits : []
+    );
     const rerankAt = Date.now();
     const filteredHits = onboardingFirstReportHit
       ? { hits: retrieval.hits, status: ["first_report_handoff:latest_only"] }
@@ -2054,14 +2070,17 @@ export class RetrievalService {
       .map((memory) => memory.id);
     const candidateMemoryIds = uniq([
       ...memories.map((memory) => memory.id),
-      ...userMemoryCandidateIds
+      ...(userMemoryRecallEnabled ? userMemoryCandidateIds : [])
     ]);
     const sourceMemoryIds = contextPacket.sourceMemoryIds;
     const hitIds = new Set(hits.flatMap((hit) => hit.memberMemoryIds ?? [hit.id]));
+    const accountedSourceIds = new Set([
+      ...hitIds, ...sourceMemoryIds, ...contextPacket.droppedDueToBudget.map((source) => source.id)
+    ]);
     const dropped = [
       ...contextPacket.droppedDueToBudget,
       ...memories
-        .filter((memory) => !hitIds.has(memory.id))
+        .filter((memory) => !accountedSourceIds.has(memory.id))
         .slice(0, 50)
         .map((memory) => ({
           id: memory.id,
@@ -2069,8 +2088,8 @@ export class RetrievalService {
           memoryLayer: memory.memoryLayer,
           reason: "rank_threshold" as const
         })),
-      ...userMemoryOutput.memories
-        .filter((memory) => !hitIds.has(memory.id))
+      ...(userMemoryRecallEnabled ? userMemoryOutput.memories : [])
+        .filter((memory) => !accountedSourceIds.has(memory.id))
         .slice(0, 50)
         .map((memory) => ({
           id: memory.id,
@@ -2139,6 +2158,7 @@ export class RetrievalService {
       },
       status: uniq([
         ...filteredHits.status,
+        ...(!userMemoryRecallEnabled ? ["user_memory_recall:disabled"] : []),
         ...(dynamicCurrentQuery ? ["dynamic_current:refresh_required"] : []),
         ...(stalePolicyIds.size > 0 ? ["policy:revalidation_required"] : []),
         ...(!this.deps.memoryAddEnabled() ? ["memory_add:disabled:no_recall_log"] : [])

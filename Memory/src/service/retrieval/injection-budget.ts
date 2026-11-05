@@ -17,7 +17,7 @@ export function budgetInjection<T>(
   candidates: T[],
   budget: number,
   render: (selected: T[]) => InjectionPacket,
-  sources: (candidate: T) => BudgetSource[],
+  sourceForId: (id: string) => BudgetSource,
   fixedContextChars = 0
 ): InjectionPacket & { droppedDueToBudget: Array<BudgetSource & { reason: "token_budget" }> } {
   const limit = Number.isFinite(budget) ? Math.max(0, Math.floor(budget)) : 0;
@@ -38,25 +38,22 @@ export function budgetInjection<T>(
     injectedContext: { markdown: "", sections: [], tokenEstimate: 0 }, sourceMemoryIds: []
   };
   const selected: T[] = [];
-  const rejected: T[] = [];
   const empty = measure([]);
   if (fits(empty)) result = empty;
   for (const candidate of candidates) {
-    if (limit === 0) { rejected.push(candidate); continue; }
+    if (limit === 0) continue;
     const trial = measure([...selected, candidate]);
     if (fits(trial)) {
       selected.push(candidate);
       result = trial;
-    } else {
-      rejected.push(candidate);
     }
   }
   const retained = new Set(result.sourceMemoryIds);
   const dropped = new Map<string, BudgetSource & { reason: "token_budget" }>();
-  for (const candidate of rejected) {
-    for (const source of sources(candidate)) {
-      if (!retained.has(source.id)) dropped.set(source.id, { ...source, reason: "token_budget" });
-    }
+  // Only sources present in the unbounded render can be removed by the budget.
+  // This includes linked advice, but excludes advice hidden by ranking/line caps.
+  for (const id of full.sourceMemoryIds) {
+    if (!retained.has(id)) dropped.set(id, { ...sourceForId(id), reason: "token_budget" });
   }
   return { ...result, droppedDueToBudget: [...dropped.values()] };
 }

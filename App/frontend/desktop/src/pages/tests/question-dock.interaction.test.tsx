@@ -138,6 +138,36 @@ it("keeps a manually expanded tool group open when the next reasoning step arriv
   expect(container.querySelector<HTMLDetailsElement>(".agent-activity-tool-group-details")?.open).toBe(true);
 });
 
+it("automatically folds an untouched tool group when the next reasoning step arrives", async () => {
+  const tool = (id: string) => ({ id, role: "tool" as const, kind: "trace" as const, turnId: "turn", content: "",
+    toolEvents: [{ phase: "end" as const, name: "mcp_plugins_plugin_review_find_tasks", call_id: id }] });
+  const initial = [tool("first"), tool("second")];
+  await act(async () => root.render(<I18nProvider language="zh-CN"><AgentThreadMessages chatScopeKey="review" isSending messages={initial} /></I18nProvider>));
+  const group = container.querySelector<HTMLDetailsElement>(".agent-activity-tool-group-details")!;
+  expect(group.open).toBe(true);
+  await act(async () => group.dispatchEvent(new Event("toggle")));
+  await act(async () => root.render(<I18nProvider language="zh-CN"><AgentThreadMessages chatScopeKey="review" isSending messages={[
+    ...initial, { id: "next", role: "assistant", content: "", reasoning: "开始下一步", turnId: "turn", isStreaming: true }
+  ]} /></I18nProvider>));
+  expect(container.querySelector<HTMLDetailsElement>(".agent-activity-tool-group-details")?.open).toBe(false);
+});
+
+it("keeps a manually closed tool group closed when its result updates", async () => {
+  const tool = (id: string) => ({ id, role: "tool" as const, kind: "trace" as const, turnId: "turn", content: "",
+    toolEvents: [{ phase: "end" as const, name: "mcp_plugins_plugin_review_find_tasks", call_id: id }] });
+  const initial = [tool("first"), tool("second")];
+  await act(async () => root.render(<I18nProvider language="zh-CN"><AgentThreadMessages chatScopeKey="review" isSending messages={initial} /></I18nProvider>));
+  const group = container.querySelector<HTMLDetailsElement>(".agent-activity-tool-group-details")!;
+  await act(async () => group.querySelector("summary")!.click());
+  expect(group.open).toBe(false);
+  const updated = initial.map((message, index) => index === 1 ? {
+    ...message, toolEvents: message.toolEvents.map((event) => ({ ...event, result: "Found two tasks" }))
+  } : message);
+  await act(async () => root.render(<I18nProvider language="zh-CN"><AgentThreadMessages chatScopeKey="review" isSending messages={updated} /></I18nProvider>));
+  expect(container.querySelector<HTMLDetailsElement>(".agent-activity-tool-group-details")).toBe(group);
+  expect(group.open).toBe(false);
+});
+
 it("reserves the covered area and follows a new card once while respecting later manual scrolling", async () => {
   const follow = { current: false };
   const scroll = vi.fn();

@@ -1,3 +1,4 @@
+import { assignedEpisodeId, settleCaptureAssignments } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   insertActivePolicyMemory,
@@ -228,11 +229,11 @@ describe("MemoryService / retrieval / injected context", () => {
       userId: "user-injected-packet"
     };
     const session = service.openSession({ namespace });
-    service.completeTurn("turn-injected-packet", {
+    (await service.completeTurn("turn-injected-packet", {
       sessionId: session.sessionId,
       query: "Use the sqlite migration checklist and preserve local memory service state.",
       answer: "Applied the sqlite migration checklist and verified the local memory service state."
-    });
+    }));
     await service.runWorkerOnce(20);
     insertActiveSkillMemoryForTest(db, {
       id: "skill_injected_packet",
@@ -318,17 +319,18 @@ describe("MemoryService / retrieval / injected context", () => {
       userId: "user-episode-get-hint"
     };
     const session = service.openSession({ namespace });
-    const first = service.completeTurn("turn-episode-get-hint-a", {
+    const first = (await service.completeTurn("turn-episode-get-hint-a", {
       sessionId: session.sessionId,
       query: "sqlite migration pytest failed because migration table was missing",
       answer: "inspected the migration output and fixed the sqlite migration path"
-    });
-    service.completeTurn("turn-episode-get-hint-b", {
+    }));
+    await settleCaptureAssignments(service);
+    (await service.completeTurn("turn-episode-get-hint-b", {
       sessionId: session.sessionId,
-      episodeId: first.episodeId,
+      episodeId: assignedEpisodeId(service, first),
       query: "rerun the focused sqlite migration pytest after the fix",
       answer: "reran the focused pytest and verified the migration state"
-    });
+    }));
     service.closeSession(session.sessionId);
     await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
@@ -345,14 +347,14 @@ describe("MemoryService / retrieval / injected context", () => {
 
     expect(recall.hits).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        id: first.episodeId,
+        id: assignedEpisodeId(service, first),
         source: "episode",
         memoryLayer: "L1"
       })
     ]));
     expect(recall.injectedContext.markdown).not.toContain("## L1 Trace Memories");
     expect(recall.injectedContext.markdown).toContain("## Similar Past Episodes");
-    expect(recall.injectedContext.markdown).toContain(`id: ${first.episodeId}`);
+    expect(recall.injectedContext.markdown).toContain(`id: ${assignedEpisodeId(service, first)}`);
     expect(recall.injectedContext.markdown).toContain("step 1");
     expect(recall.injectedContext.markdown).not.toContain(`memmy_memory_get(id="${first.l1MemoryId}")`);
     expect(recall.injectedContext.markdown).not.toContain("trace_id:");
@@ -449,12 +451,12 @@ describe("MemoryService / retrieval / injected context", () => {
       }
     });
     for (const suffix of ["alpha", "beta", "gamma"]) {
-      service.completeTurn(`turn-budget-seed-${suffix}`, {
+      (await service.completeTurn(`turn-budget-seed-${suffix}`, {
         sessionId: seedSession.sessionId,
         episodeId: `episode-budget-seed-${suffix}`,
         query: `sqlite budget migration ${suffix}`,
         answer: `Remember sqlite budget migration ${suffix} with a deliberately long explanation ${"detail ".repeat(80)}`
-      });
+      }));
     }
     await runWorkerRounds(service, 2, 50);
     const activeSession = service.openSession({
@@ -497,13 +499,13 @@ describe("MemoryService / retrieval / injected context", () => {
       retrieval_mode: "turn_start"
     });
 
-    const completed = service.completeTurn("turn-budget-prepare", {
+    const completed = (await service.completeTurn("turn-budget-prepare", {
       sessionId: activeSession.sessionId,
       query: "fix sqlite budget migration",
       answer: "The sqlite budget migration is fixed."
-    });
+    }));
     expect(prepared).not.toHaveProperty("episodeId");
-    expect(completed.episodeId).toMatch(/^episode_/u);
+    expect(assignedEpisodeId(service, completed)).toMatch(/^episode_/u);
     const rawTurn = db.db.prepare(
       "SELECT source_memory_ids_json, message_payload_json FROM raw_turns WHERE id = ?"
     ).get(completed.rawTurnId) as {
@@ -530,11 +532,11 @@ describe("MemoryService / retrieval / injected context", () => {
       userId: "user-guidance-source"
     };
     const session = service.openSession({ namespace });
-    const complete = service.completeTurn("turn-guidance-source", {
+    const complete = (await service.completeTurn("turn-guidance-source", {
       sessionId: session.sessionId,
       query: "visible alpha trace source",
       answer: "visible alpha trace result"
-    });
+    }));
     await service.runWorkerOnce(20);
     const at = new Date().toISOString();
     const policyId = "policy_guidance_source";
@@ -585,7 +587,7 @@ describe("MemoryService / retrieval / injected context", () => {
             policy_confidence: 0.8,
             status: "active",
             source_trace_ids: [complete.l1MemoryId],
-            source_episode_ids: [complete.episodeId],
+            source_episode_ids: [assignedEpisodeId(service, complete)],
             decision_guidance: {
               preference: ["prefer linked policy guidance when the visible trace is recalled"],
               anti_pattern: ["avoid dropping guidance source ids from injected recall packets"]
@@ -627,11 +629,11 @@ describe("MemoryService / retrieval / injected context", () => {
       userId: "user-guidance-ranking"
     };
     const session = service.openSession({ namespace });
-    const complete = service.completeTurn("turn-guidance-ranking", {
+    const complete = (await service.completeTurn("turn-guidance-ranking", {
       sessionId: session.sessionId,
       query: "visible guidance ranking trace",
       answer: "visible guidance ranking result"
-    });
+    }));
 
     const base = {
       userId: namespace.userId,
@@ -640,7 +642,7 @@ describe("MemoryService / retrieval / injected context", () => {
       appId: "memmy-test",
       profileId: namespace.profileId,
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     };
     insertActivePolicyMemory(db, {
       ...base,
@@ -707,7 +709,7 @@ describe("MemoryService / retrieval / injected context", () => {
     db.close();
   });
 
-  it("falls back to source policy decision guidance for legacy skill recall", async () => {
+  it.each([false, true])("accounts for legacy skill advice sources (failure=%s)", async (failure) => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -752,6 +754,7 @@ describe("MemoryService / retrieval / injected context", () => {
           schema_version: 1,
           policy: {
             title: "Legacy skill source policy",
+            ...(failure ? { experience_type: "failure_avoidance", evidence_polarity: "negative" } : {}),
             trigger: "orthogonal source trigger",
             procedure: "Use only as source guidance for a legacy skill.",
             verification: "The guidance source is included in recall source ids.",
@@ -852,7 +855,7 @@ describe("MemoryService / retrieval / injected context", () => {
     });
 
     expect(recall.hits.map((hit) => hit.id)).toContain(skillId);
-    const guidance = recall.injectedContext.sections.find((section) => section.id === "decision-guidance");
+    const guidance = recall.injectedContext.sections.find((section) => section.id === (failure ? "failure-avoidance" : "decision-guidance"));
     expect(guidance?.content).toContain("prefer source policy guidance for legacy skills");
     expect(guidance?.memoryIds).toContain(policyId);
     expect(recall.sourceMemoryIds).toEqual(expect.arrayContaining([skillId, policyId]));
@@ -862,6 +865,32 @@ describe("MemoryService / retrieval / injected context", () => {
        WHERE id = ?`
     ).get(recall.searchEventId) as { injected_memory_ids_json: string };
     expect(JSON.parse(recallRow.injected_memory_ids_json)).toEqual(expect.arrayContaining([policyId]));
+
+    // A linked policy is injected as advice even though it is not a direct hit.
+    expect(recall.hits.map((hit) => hit.id)).not.toContain(policyId);
+    const ampleEvent = db.db.prepare("SELECT dropped_json FROM recall_events WHERE id = ?")
+      .get(recall.searchEventId) as { dropped_json: string };
+    expect.soft(JSON.parse(ampleEvent.dropped_json)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: policyId })
+    ]));
+    for (const contextBudget of [0, 1]) {
+      const bounded = await service.search({
+        sessionId: session.sessionId,
+        query: "legacy widget fallback skill guide",
+        layers: ["Skill", "L2"], includeInjectedContext: true, contextBudget
+      });
+      expect(bounded.sourceMemoryIds).toEqual([]);
+      const expected = [
+        expect.objectContaining({ id: skillId, kind: "skill", memoryLayer: "Skill", reason: "token_budget" }),
+        expect.objectContaining({ id: policyId, kind: "policy", memoryLayer: "L2", reason: "token_budget" })
+      ];
+      expect.soft(bounded.droppedDueToBudget).toEqual(expect.arrayContaining(expected));
+      const event = db.db.prepare("SELECT dropped_json FROM recall_events WHERE id = ?")
+        .get(bounded.searchEventId) as { dropped_json: string };
+      const dropped = JSON.parse(event.dropped_json);
+      expect.soft(dropped).toEqual(expect.arrayContaining(expected));
+      expect(dropped.filter((item: { id: string }) => item.id === policyId)).toHaveLength(1);
+    }
 
     db.close();
   });
@@ -878,12 +907,13 @@ describe("MemoryService / retrieval / injected context", () => {
       const { db, service } = createTestService({ llm, embedder });
       const namespace = { source: "memmy-agent", profileId: "default", userId: "self-introduction-user" };
       const session = service.openSession({ namespace });
-      const previous = service.completeTurn("turn-before-introduction", {
+      const previous = await service.completeTurn("turn-before-introduction", {
         sessionId: session.sessionId,
         query: "Fix the pytest failure and run the tests again.",
         answer: "The pytest failure is fixed and the tests pass."
       });
-      insertActivePolicyMemory(db, {
+      await settleCaptureAssignments(service);
+    insertActivePolicyMemory(db, {
         id: "policy-introduction-test",
         userId: namespace.userId,
         sessionId: session.sessionId,
@@ -891,7 +921,7 @@ describe("MemoryService / retrieval / injected context", () => {
         appId: "memmy",
         profileId: namespace.profileId,
         sourceTraceId: previous.l1MemoryId,
-        sourceEpisodeId: previous.episodeId
+        sourceEpisodeId: assignedEpisodeId(service, previous)
       });
       expect(db.db.prepare("SELECT status FROM memories WHERE id = ?").get("policy-introduction-test"))
         .toEqual({ status: "activated" });
@@ -906,7 +936,7 @@ describe("MemoryService / retrieval / injected context", () => {
       expect(prepared.status).toContain(
         query === "谢谢" ? "intent:chitchat:retrieval_skipped" : "intent:meta:retrieval_skipped"
       );
-      const completed = service.completeTurn("turn-self-introduction", {
+      const completed = await service.completeTurn("turn-self-introduction", {
         sessionId: session.sessionId,
         query,
         answer: "我是 Memmy，可以帮你处理任务。"

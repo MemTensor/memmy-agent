@@ -49,12 +49,22 @@ it.each(["range", "wrapper", "optional target", "native target", "wrong OS"])("r
   expect(() => verifyWindowsDesktopSqliteVec(value)).toThrow(/exact version|does not match/);
 });
 
-it.each(["arm64", "Mach-O", "EXE", "symlink"])("rejects a %s native target", kind => {
+it.each(["arm64", "Mach-O", "EXE"])("rejects a %s native target", kind => {
   const value = fixture(); const file = join(value.nativeDirectory, "vec0.dll");
-  if (kind === "symlink") { const external = join(value.directory, "external.dll"); cpSync(file, external); rmSync(file); symlinkSync(external, file); }
-  else if (kind === "Mach-O") write(file, Buffer.from("cffaedfe0c000001", "hex"));
+  if (kind === "Mach-O") write(file, Buffer.from("cffaedfe0c000001", "hex"));
   else { const dll = windowsPEFixture(kind === "arm64" ? 0xaa64 : 0x8664); if (kind !== "EXE") dll.writeUInt16LE(0x2022, 0x96); write(file, dll); }
   expect(() => verifyWindowsDesktopSqliteVec(value)).toThrow(/physical file|PE DLL|x64 PE32\+ DLL/);
+});
+
+it("rejects a symlink native target", context => {
+  const value = fixture(); const file = join(value.nativeDirectory, "vec0.dll");
+  const external = join(value.directory, "external.dll"); cpSync(file, external); rmSync(file);
+  try { symlinkSync(external, file); }
+  catch (error) {
+    if (error.code === "EPERM" || error.code === "EACCES") context.skip("Host does not permit file symlinks");
+    throw error;
+  }
+  expect(() => verifyWindowsDesktopSqliteVec(value)).toThrow(/physical file/);
 });
 
 it.each(["electron-builder.win.yml", "electron-builder.win.unsigned.yml"])(
@@ -109,8 +119,10 @@ it("checks the desktop vector binding before and after Windows packaging", () =>
   const script = readFileSync(new URL("../scripts/internal/win/build-nsis.sh", import.meta.url), "utf8");
   const first = script.indexOf('verify-desktop-sqlite-vec.mjs" staged');
   const second = script.indexOf('verify-desktop-sqlite-vec.mjs" packaged');
+  const packageCall = script.lastIndexOf('\nrun_electron_builder_with_signing_recovery "$@"');
+  expect(packageCall).toBeGreaterThan(-1);
   expect(first).toBeGreaterThan(script.indexOf('npm_ci_win_x64 "$RUNTIME_DIR/memory"'));
-  expect(first).toBeLessThan(script.indexOf("npx electron-builder"));
-  expect(second).toBeGreaterThan(script.indexOf("npx electron-builder"));
+  expect(first).toBeLessThan(packageCall);
+  expect(second).toBeGreaterThan(packageCall);
   expect(existsSync(new URL("../scripts/internal/win/verify-desktop-sqlite-vec.mjs", import.meta.url))).toBe(true);
 });

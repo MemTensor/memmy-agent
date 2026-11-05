@@ -81,7 +81,9 @@ describe("memory deadlines on the real AgentRunner", () => {
       const prep = f.hook.beforeBuildSystemPrompt(f.ctx);
       await vi.advanceTimersByTimeAsync(8_000);
       await prep;
-      expect((await f.runner.run(f.spec)).finalContent).toBe("回答成功");
+      const run = f.runner.run(f.spec);
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect((await run).finalContent).toBe("回答成功");
       expect(f.model).toHaveBeenCalledTimes(1);
       expect(f.client[stage]).toHaveBeenCalledTimes(1);
       expect(f.client.startTurn).not.toHaveBeenCalled();
@@ -99,7 +101,7 @@ describe("memory deadlines on the real AgentRunner", () => {
       expect(f.client.l3WorldModelContext).not.toHaveBeenCalled();
     },
   );
-  it("shares the remaining two seconds after six seconds of initialization", async () => {
+  it("gives recall eight seconds after six seconds of initialization", async () => {
     const f = fixture();
     const ready = deferred();
     const recall = deferred();
@@ -110,7 +112,7 @@ describe("memory deadlines on the real AgentRunner", () => {
     ready.resolve(health);
     await prep;
     const run = f.runner.run(f.spec);
-    await vi.advanceTimersByTimeAsync(1_999);
+    await vi.advanceTimersByTimeAsync(7_999);
     expect(f.model).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect((await run).finalContent).toBe("回答成功");

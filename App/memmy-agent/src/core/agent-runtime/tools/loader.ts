@@ -1,3 +1,4 @@
+import { managedExecutionRequired } from "../managed-execution.js";
 import { DesktopScreenCaptureTool } from '../../../tools/computer-use/desktop-screen-capture.js';
 import fs from "node:fs";
 import path from "node:path";
@@ -23,6 +24,7 @@ import { CreateTaskPlanTool, GetTaskPlanTool, UpdateTaskPlanTool } from "./task-
 import { MessageTool } from "./message.js";
 import { FindFilesTool, GrepTool } from "./search.js";
 import { ExecTool } from "./shell.js";
+import { SetOutputDirectoryTool } from "./output-location.js";
 import { SpawnTool } from "./spawn.js";
 import { WebFetchTool, WebSearchTool } from "./web.js";
 import { BROWSER_TOOL_CLASSES } from "./browser.js";
@@ -72,6 +74,7 @@ const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   GetTaskPlanTool,
   MessageTool,
   ReadFileTool,
+  SetOutputDirectoryTool,
   SpawnTool,
   WebFetchTool,
   WebSearchTool,
@@ -228,6 +231,8 @@ export class ToolLoader {
   }
 
   discoverPlugins(): ToolClass[] {
+    // Workspace code cannot run before its file/process permissions have been checked.
+    if (managedExecutionRequired()) return [];
     const out: ToolClass[] = [];
     const seenPackages = new Set<string>();
     for (const nodeModules of nearestNodeModulesRoots(this.workspace)) {

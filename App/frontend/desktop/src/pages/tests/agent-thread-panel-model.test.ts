@@ -60,6 +60,7 @@ describe("thread panel model", () => {
     expect(threadTabForInAppPreview({ name: "交付物.xlsx", path: "/work/交付物.xlsx" })).toMatchObject({ name: "交付物.xlsx", type: "file" });
     expect(threadTabForInAppPreview({ name: "report.pdf", path: "/work/report.pdf" })).toMatchObject({ name: "report.pdf", type: "file" });
     expect(threadTabForInAppPreview({ name: "archive.zip", path: "/work/archive.zip" })).toBeNull();
+    expect(threadTabForInAppPreview({ name: "deck.pptx", url: "http://127.0.0.1/api/media/deck" })).toMatchObject({ name: "deck.pptx", type: "file" });
   });
 
   it("collects delivered assistant files, not files merely linked or edited", () => {

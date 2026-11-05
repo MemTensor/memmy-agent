@@ -13,6 +13,21 @@ function skill(id: string, guide: string, procedure: Record<string, unknown> = {
   return { hit, memory };
 }
 
+function linkedPolicy(id: string, failure = false): MemoryRow {
+  const memory = skill(id, "Historical guidance").memory;
+  memory.memoryLayer = "L2";
+  memory.memoryType = "LongTermMemory";
+  memory.properties.internal_info = { memory_layer: "L2", memory_kind: "policy", policy: {
+    title: id, trigger: "Before migrating", procedure: "Check backup", status: "active", policy_confidence: 0.9,
+    ...(failure ? { experience_type: "failure_avoidance", evidence_polarity: "negative" } : {}),
+    decision_guidance: { preference: [`Verify the backup for ${id}`], anti_pattern: failure ? [`Never delete the backup for ${id}`] : [] }
+  } };
+  return memory;
+}
+function link(row: ReturnType<typeof skill>, policies: MemoryRow[]) {
+  Object.assign(row.memory.properties.internal_info.skill!, { source_policy_ids: policies.map(p => p.id) });
+}
+
 describe("Injected context budget", () => {
   const tuning = { skillInjectionMode: "full" as const };
   const packet = (rows: ReturnType<typeof skill>[], budget: number, query?: string) => buildInjectedContext(
@@ -99,4 +114,60 @@ describe("Injected context budget", () => {
     expect(allowed.sourceMemoryIds).toEqual(["short"]);
     expect(Math.ceil((allowed.injectedContext.markdown.length - fixed.injectedContext.markdown.length) / 4)).toBeLessThanOrEqual(800);
   });
+  it.each([false, true])("tracks linked advice sources for failure=%s across budget limits", failure => {
+    const row = skill("legacy", "Short migration guide");
+    const policy = linkedPolicy("backup", failure);
+    link(row, [policy]);
+    const render = (budget: number) => buildInjectedContext([row.hit], budget, [row.memory, policy],
+      "turn_start", undefined, undefined, tuning);
+    const ample = render(10000);
+    expect(ample.sourceMemoryIds).toEqual(["legacy", "backup"]);
+    expect(ample.injectedContext.markdown).toContain(failure ? "Failure avoidance" : "Decision guidance");
+    expect(ample.droppedDueToBudget).toEqual([]);
+    for (const budget of [0, 1, ample.injectedContext.tokenEstimate! - 1]) {
+      const bounded = render(budget);
+      expect(bounded.sourceMemoryIds).toEqual([]);
+      expect(bounded.droppedDueToBudget).toEqual([
+        expect.objectContaining({ id: "legacy", kind: "skill", memoryLayer: "Skill", reason: "token_budget" }),
+        { id: "backup", kind: "policy", memoryLayer: "L2", reason: "token_budget" }
+      ]);
+    }
+  });
+  it("keeps shared linked advice when only one of its skills is removed", () => {
+    const large = skill("large", "Long procedure ".repeat(1000));
+    const small = skill("small", "Short guide");
+    const policy = linkedPolicy("shared-policy");
+    link(large, [policy]); link(small, [policy]);
+    const bounded = buildInjectedContext([large.hit, small.hit], 800,
+      [large.memory, small.memory, policy], "turn_start", undefined, undefined, tuning);
+    expect(bounded.sourceMemoryIds).toEqual(["small", "shared-policy"]);
+    expect(bounded.droppedDueToBudget.map(source => source.id)).toEqual(["large"]);
+  });
+  it.each([false, true])("does not blame advice line caps on the budget (failure=%s)", failure => {
+    const row = skill("legacy", "Guide");
+    const policies = [1, 2, 3, 4].map(n => linkedPolicy(`policy-${n}`, failure));
+    link(row, policies);
+    const render = (budget: number) => buildInjectedContext([row.hit], budget,
+      [row.memory, ...policies], "turn_start", undefined, undefined, tuning);
+    const ample = render(10000);
+    expect(ample.sourceMemoryIds).toHaveLength(4);
+    expect(render(0).droppedDueToBudget.map(source => source.id)).toEqual(ample.sourceMemoryIds);
+  });
+  it.each(["trace", "episode"])("tracks advice linked through a %s", via => {
+    const row = skill("trace_linked", "Past migration conversation");
+    row.hit.kind = "trace"; row.hit.memoryLayer = "L1"; row.hit.source = "search";
+    row.memory.memoryLayer = "L1";
+    row.memory.properties.internal_info = { memory_layer: "L1", memory_kind: "trace",
+      trace: { episode_id: "episode_linked", user_text: "Past migration", assistant_text: "Backup checked" } };
+    const policy = linkedPolicy("trace-policy");
+    Object.assign(policy.properties.internal_info.policy!, via === "trace"
+      ? { source_trace_ids: [row.hit.id] } : { source_episode_ids: ["episode_linked"] });
+    const render = (budget: number) => buildInjectedContext([row.hit], budget,
+      [row.memory, policy], "turn_start", undefined, undefined, tuning);
+    expect(render(10000).sourceMemoryIds).toContain(policy.id);
+    expect(render(0).droppedDueToBudget).toContainEqual({
+      id: policy.id, kind: "policy", memoryLayer: "L2", reason: "token_budget"
+    });
+  });
+
 });

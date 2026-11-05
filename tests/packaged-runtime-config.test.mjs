@@ -11,8 +11,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { finished } from "node:stream/promises";
 import { createPackageWithOptions, listPackage } from "@electron/asar";
 import { afterEach, describe, expect, it } from "vitest";
+import { bash } from "./fixtures/bash.mjs";
+import { transpileModule, ModuleKind, ScriptTarget } from "typescript";
 import {
   normalizePublicCloudService,
   writeDesktopEditionManifest,
@@ -28,7 +31,36 @@ afterEach(() => {
   while (roots.length) rmSync(roots.pop(), { recursive: true, force: true });
 });
 
-describe("packaged desktop runtime configuration", () => {
+// These cases stage ASAR fixtures and launch independent verification processes.
+describe("packaged desktop runtime configuration", { timeout: 20_000 }, () => {
+  it.each(["mac/build-dmg.sh", "win/build-nsis.sh"])("stages executable scan ordering for standalone agent contracts: %s", (script) => {
+    const root = fixtureRoot();
+    const memory = join(root, "Memory");
+    const core = join(memory, "AgentSourceCore");
+    mkdirSync(join(core, "dist/src"), { recursive: true });
+    const repo = dirname(dirname(fileURLToPath(import.meta.url)));
+    writeFileSync(join(core, "package.json"), readFileSync(join(repo, "Memory/AgentSourceCore/package.json")));
+    // Packaging guards run before workspace builds on a clean checkout.
+    // Compile the actual shared implementation inside the isolated fixture.
+    const source = readFileSync(join(repo, "Memory/AgentSourceCore/src/scan-state.ts"), "utf8");
+    writeFileSync(join(core, "dist/src/scan-state.js"), transpileModule(source, {
+      compilerOptions: { module: ModuleKind.ESNext, target: ScriptTarget.ES2022 },
+    }).outputText);
+    const runtime = join(root, "runtime");
+    const build = readFileSync(join(repo, "scripts/internal", script), "utf8");
+    const stage = build.slice(build.lastIndexOf('RUNTIME_AGENT_SOURCE_CORE_DIR='), build.indexOf('RUNTIME_LOCAL_API_CONTRACTS_DIR='));
+    expect(stage).toContain('cp -R');
+    const staged = spawnSync("bash", ["-eu", "-c", stage], { env: { ...process.env, MEMORY_DIR: memory, RUNTIME_DIR: runtime }, encoding: "utf8" });
+    expect(staged.status, staged.stderr).toBe(0);
+    const agent = join(runtime, "memmy-agent");
+    writeFileSync(join(agent, "check.mjs"), `import { acceptsScanUpdate } from '@memmy/agent-source-core/scan-state';
+      import { createRequire } from 'node:module';
+      createRequire(import.meta.url).resolve('@memmy/agent-source-core/package.json');
+      if (acceptsScanUpdate({version:{generation:2,sequence:3}}, {version:{generation:2,sequence:2}})) throw Error('stale accepted');`);
+    const imported = spawnSync(process.execPath, [join(agent, "check.mjs")], { encoding: "utf8" });
+    expect(imported.status, imported.stderr).toBe(0);
+  });
+
   it("writes exactly the public allowlist and never serializes env decoys", async () => {
     const root = fixtureRoot();
     const envFile = join(root, ".env");
@@ -219,11 +251,11 @@ describe("packaged desktop runtime configuration", () => {
     seedMemoryBuildInputs(root);
     const memoryDir = join(root, "Memory");
     const runtimeDir = join(root, "runtime");
-    const coreDir = join(root, "AgentSourceCore");
+    const coreDir = join(root, "Memory", "AgentSourceCore");
     const buildScript = readFileSync(join(
       dirname(fileURLToPath(import.meta.url)),
       "..", "scripts", "internal", "mac", "build-dmg.sh",
-    ), "utf8");
+    ), "utf8").replaceAll("\r\n", "\n");
     writeFixtureJson(join(memoryDir, "package.json"), {
       version: "2.1.1",
       dependencies: { "@memmy/agent-source-core": "0.0.0", zod: "4.4.3" },
@@ -232,8 +264,8 @@ describe("packaged desktop runtime configuration", () => {
       lockfileVersion: 3,
       requires: true,
       packages: {
-        "node_modules/@memmy/agent-source-core": { resolved: "AgentSourceCore", link: true },
-        AgentSourceCore: { name: "@memmy/agent-source-core", version: "0.0.0" },
+        "node_modules/@memmy/agent-source-core": { resolved: "Memory/AgentSourceCore", link: true },
+        "Memory/AgentSourceCore": { name: "@memmy/agent-source-core", version: "0.0.0" },
         "node_modules/zod": { version: "4.4.3" },
       },
     });
@@ -241,7 +273,7 @@ describe("packaged desktop runtime configuration", () => {
       buildScript.indexOf("create_memory_runtime_manifest() {"),
       buildScript.indexOf("\nprune_better_sqlite3_build_artifacts()"),
     );
-    const generated = spawnSync("bash", ["-c", `${manifestFunction}\ncreate_memory_runtime_manifest "$MEMORY_RUNTIME_DIR"`], {
+    const generated = spawnSync(bash, ["-c", `${manifestFunction}\ncreate_memory_runtime_manifest "$MEMORY_RUNTIME_DIR"`], {
       encoding: "utf8",
       env: { ...process.env, ROOT_DIR: root, MEMORY_DIR: memoryDir, MEMORY_RUNTIME_DIR: runtimeDir, TARGET_CPU: "arm64" },
     });
@@ -250,12 +282,12 @@ describe("packaged desktop runtime configuration", () => {
       buildId: expect.stringMatching(/^[a-f0-9]{64}$/), schemaVersion: 9
     });
     expect(JSON.parse(readFileSync(join(runtimeDir, "package.json"), "utf8")).dependencies).toEqual({
-      "@memmy/agent-source-core": "file:../../../../../../AgentSourceCore",
+      "@memmy/agent-source-core": "file:../../../../../../Memory/AgentSourceCore",
       zod: "4.4.3",
     });
     const lock = JSON.parse(readFileSync(join(runtimeDir, "package-lock.json"), "utf8"));
     expect(lock.packages[""].dependencies).toEqual({
-      "@memmy/agent-source-core": "file:../../../../../../AgentSourceCore",
+      "@memmy/agent-source-core": "file:../../../../../../Memory/AgentSourceCore",
       zod: "4.4.3",
     });
     expect(lock.packages["node_modules/@memmy/agent-source-core"]).toBeUndefined();
@@ -276,9 +308,10 @@ describe("packaged desktop runtime configuration", () => {
     const stageEnd = buildScript.indexOf('\nnode "$ROOT_DIR/scripts/internal/shared/check-office-slim-assets.mjs"', stageStart);
     expect(stageStart).toBeGreaterThanOrEqual(0);
     expect(stageEnd).toBeGreaterThan(stageStart);
-    const staged = spawnSync("bash", ["-c", buildScript.slice(stageStart, stageEnd)], {
+    const staged = spawnSync(bash, ["-c", buildScript.slice(stageStart, stageEnd)], {
       encoding: "utf8",
-      env: { ...process.env, ROOT_DIR: root, RUNTIME_DIR: runtimeDir, MEMORY_DIR: memoryDir, AGENT_DIR: join(root, "App", "memmy-agent") },
+      env: { ...process.env, ROOT_DIR: root.replaceAll("\\", "/"), RUNTIME_DIR: runtimeDir.replaceAll("\\", "/"),
+        MEMORY_DIR: memoryDir.replaceAll("\\", "/"), AGENT_DIR: join(root, "App", "memmy-agent").replaceAll("\\", "/") },
     });
     expect(staged.status, staged.stderr).toBe(0);
     expect(existsSync(join(runtimeDir, "memory", "AgentSourceCore", "package.json"))).toBe(true);
@@ -427,6 +460,22 @@ describe("packaged desktop runtime configuration", () => {
     });
     expect(good.status, good.stderr).toBe(0);
 
+    const historyPrefix = "dist/runtime/memmy-agent/dist/tools/computer-history/win/";
+    const missingHelper = await createAsarFixture(root, "missing-history-helper", "1.0.8");
+    rmSync(join(`${missingHelper}.unpacked`, historyPrefix, "memmy-history-recorder.exe"));
+    const missing = spawnSync(process.execPath, [verifier, ...verifierArgs(missingHelper, "1.0.8")], { encoding: "utf8" });
+    expect(missing.status).not.toBe(0);
+    expect(missing.stderr).toContain("memmy-history-recorder.exe");
+    for (const [name, extra, expectedError] of [
+      ["invalid-history-pe", [`${historyPrefix}memmy-history-recorder.exe`, "not an executable"], "x64 PE executable"],
+      ["history-test-sources", [`${historyPrefix}native/tests/fixture.cpp`, "test source"], "native build/test sources"],
+    ]) {
+      const invalid = await createAsarFixture(root, name, "1.0.8", false, true, [extra]);
+      const result = spawnSync(process.execPath, [verifier, ...verifierArgs(invalid, "1.0.8")], { encoding: "utf8" });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(expectedError);
+    }
+
     const missingAgentSourceCoreAsar = await createAsarFixture(
       root,
       "without-agent-source-core",
@@ -501,7 +550,7 @@ describe("packaged desktop runtime configuration", () => {
     });
     expect(thirdPartyMap.status).not.toBe(0);
     expect(thirdPartyMap.stderr).toContain("third-party production source map");
-  });
+  }, 30_000);
 
   it("passes the defined Windows package architecture to the shared ASAR verifier", () => {
     const buildScript = readFileSync(join(
@@ -607,14 +656,17 @@ const nativePath = createRequire(import.meta.url)("node:path");
 const hostJoin = nativePath.join;
 const hostDirname = nativePath.dirname;
 const hostBasename = nativePath.basename;
+const windowsJoin = nativePath.win32.join;
+const windowsDirname = nativePath.win32.dirname;
+const windowsBasename = nativePath.win32.basename;
 nativePath.sep = "\\";
 nativePath.join = (...parts) => parts.every(part => !part.includes("/") && !part.includes("\\"))
-  ? nativePath.win32.join(...parts)
+  ? windowsJoin(...parts)
   : hostJoin(...parts.map(part => part.replaceAll("\\", "/")));
 nativePath.dirname = path => path.includes("\\") && !path.includes("/")
-  ? nativePath.win32.dirname(path) : hostDirname(path);
+  ? windowsDirname(path) : hostDirname(path);
 nativePath.basename = path => path.includes("\\") && !path.includes("/")
-  ? nativePath.win32.basename(path) : hostBasename(path);
+  ? windowsBasename(path) : hostBasename(path);
 syncBuiltinESMExports();
 process.argv.splice(1, 1);
 await import(pathToFileURL(process.argv[1]).href);
@@ -642,7 +694,7 @@ await import(pathToFileURL(process.argv[1]).href);
       "..", "scripts", "internal", "win", "build-nsis.sh",
     ), "utf8");
 
-    expect(buildScript).toContain('AGENT_SOURCE_CORE_DIR="$ROOT_DIR/AgentSourceCore"');
+    expect(buildScript).toContain('AGENT_SOURCE_CORE_DIR="$ROOT_DIR/Memory/AgentSourceCore"');
     expect(buildScript).toContain(
       'node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs"',
     );
@@ -659,7 +711,7 @@ await import(pathToFileURL(process.argv[1]).href);
       buildScript.indexOf('RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"'),
     );
     expect(buildScript).toContain(
-      'local packaged_memory_runtime="$DESKTOP_DIR/release/win-unpacked/resources/memory-runtime"',
+      'local packaged_memory_runtime="$UNPACKED_DIR/resources/memory-runtime"',
     );
     expect(buildScript).toContain(
       'require_packaged_runtime_file "$packaged_agent_source_core/package.json"',
@@ -678,7 +730,7 @@ await import(pathToFileURL(process.argv[1]).href);
         dirname(fileURLToPath(import.meta.url)),
         "..", "App", "shell", "desktop", configName,
       ), "utf8");
-      expect(config).toContain([
+      expect(config.replaceAll("\r\n", "\n")).toContain([
         "  - from: dist/runtime/memory/node_modules",
         "    to: memory-runtime/node_modules",
         "    filter:",
@@ -736,6 +788,12 @@ async function createAsarFixture(
   mkdirSync(dirname(knowledge), { recursive: true });
   writeFileSync(knowledge, "export {};\n");
   if (platform === "win32") {
+    const historyRoot = join(source, "dist/runtime/memmy-agent/dist/tools/computer-history/win");
+    mkdirSync(historyRoot, { recursive: true });
+    const pe = Buffer.alloc(128);
+    pe.write("MZ"); pe.writeUInt32LE(64, 60); pe.write("PE\0\0", 64); pe.writeUInt16LE(0x8664, 68);
+    writeFileSync(join(historyRoot, "memmy-history-recorder.exe"), pe);
+    writeFileSync(join(historyRoot, "memmy-history-recorder.NOTICES.md"), "MIT fixture");
     for (const relativePath of [
       "dist/main/computer-use-window-capture.js",
       "dist/runtime/memmy-agent/dist/tools/computer-use/managed-ocu-session.js",
@@ -808,7 +866,8 @@ async function createAsarFixture(
     writeFileSync(targetPath, contents);
   }
   if (includeEnv) writeFileSync(join(source, ".env.production"), "TOKEN=decoy\n");
-  await createPackageWithOptions(source, asar, { unpackDir: "dist/renderer", unpack: "**/*.{node,exe}" });
+  const output = await createPackageWithOptions(source, asar, { unpackDir: "dist/renderer", unpack: "**/*.{node,exe}" });
+  await finished(output);
   return asar;
 }
 
@@ -830,11 +889,11 @@ function fixtureRoot() {
 }
 
 function seedMemoryBuildInputs(root) {
-  for (const path of ["Memory/src/storage", "Memory/viewer/src", "Memory/viewer/public", "Memory/adapters", "AgentSourceCore/src"]) {
+  for (const path of ["Memory/src/storage", "Memory/viewer/src", "Memory/viewer/public", "Memory/adapters", "Memory/AgentSourceCore/src"]) {
     mkdirSync(join(root, path), { recursive: true });
   }
   for (const path of ["Memory/package.json", "Memory/tsconfig.json", "Memory/tsconfig.base.json",
-    "Memory/viewer/package.json", "AgentSourceCore/package.json", "AgentSourceCore/tsconfig.json",
+    "Memory/viewer/package.json", "Memory/AgentSourceCore/package.json", "Memory/AgentSourceCore/tsconfig.json",
     "tsconfig.base.json", "package-lock.json"]) writeFixtureJson(join(root, path), {});
   writeFileSync(join(root, "Memory/src/storage/schema.ts"), "export const SCHEMA_VERSION = 9;\n");
   writeFileSync(join(root, "Memory/viewer/vite.config.ts"), "export default {};\n");

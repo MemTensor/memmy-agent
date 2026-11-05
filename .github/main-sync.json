@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "repository": "MemTensor/memmy-agent",
+  "targets": [
+    "v1.2.5",
+    "v1.2.6",
+    "v1.2.7"
+  ],
+  "maxRounds": 6,
+  "maxNoProgress": 2,
+  "maxDurationMinutes": 180
+}

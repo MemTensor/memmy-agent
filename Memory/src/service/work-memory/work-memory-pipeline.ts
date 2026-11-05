@@ -8,7 +8,8 @@ import { splitL3TracesByRawTurn } from "../../storage/repositories.js";
 import type {
   EvolutionJobRecord,
   L3WorldModelInputTraceRecord,
-  Repositories
+  Repositories,
+  SessionRecord
 } from "../../storage/repositories.js";
 import type { MemoryFilter, MemoryRow } from "../../types.js";
 import { newId, stableHash } from "../../utils/id.js";
@@ -55,6 +56,8 @@ export interface WorkMemoryPipelineDependencies {
   embedder: Embedder;
   embedAfterCapture: boolean;
   nowIso: () => string;
+  /** With the new L3 on, the idle flush also hands a quiet Session's turns to L3. */
+  l3FieldActive?: () => boolean;
 }
 
 const WORK_MEMORY_SCHEMA_VERSION = 1;
@@ -111,7 +114,7 @@ export class WorkMemoryPipeline {
     at = this.deps.nowIso()
   ): WorkMemoryExtractionResult {
     const session = this.deps.repos.runtime.getSession(sessionId);
-    if (!session || session.meta.l3_world_model_protocol_version !== 2) {
+    if (!session || session.meta.l3_world_model_protocol_version !== 2 || session.meta.work_memory_disabled === true) {
       return { windows: 0, enqueued: 0, cursorAdvancedTo: 0 };
     }
     // The first Work Memory pass of a Session starts from a clean slate: the L3
@@ -196,6 +199,8 @@ export class WorkMemoryPipeline {
   ): EvolutionJobRecord | undefined {
     const session = this.deps.repos.runtime.getSession(sessionId);
     if (!session || session.meta.l3_world_model_protocol_version !== 2) return undefined;
+    // A scanned Session has no Work Memory, but with the new L3 on the same flush hands its turns to L3.
+    if (session.meta.work_memory_disabled === true && this.deps.l3FieldActive?.() !== true) return undefined;
     return this.deps.repos.runtime.armWorkMemoryIdleFlush({
       sessionId,
       userId: session.userId,
@@ -217,9 +222,10 @@ export class WorkMemoryPipeline {
     if (!sessionId) throw new Error(`work memory idle flush job has no session: ${job.id}`);
     const empty: WorkMemoryExtractionResult = { windows: 0, enqueued: 0, cursorAdvancedTo: 0 };
     const session = this.deps.repos.runtime.getSession(sessionId);
-    if (!session || session.status !== "open" || session.meta.l3_world_model_protocol_version !== 2) {
-      return empty;
-    }
+    if (!session || session.status !== "open" || session.meta.l3_world_model_protocol_version !== 2) return empty;
+    const workMemory = session.meta.work_memory_disabled !== true;
+    const l3Field = this.deps.l3FieldActive?.() === true;
+    if (!workMemory && !l3Field) return empty;
     const at = this.deps.nowIso();
     const lastActivityAt = this.deps.repos.l3WorldModels.latestInputTraceCreatedAt(sessionId)
       ?? (typeof job.payload.lastActivityAt === "string" ? job.payload.lastActivityAt : at);
@@ -230,7 +236,12 @@ export class WorkMemoryPipeline {
       return empty;
     }
     const throughTraceSeq = this.deps.repos.l3WorldModels.maxInputTraceSeq(sessionId);
-    return this.deps.repos.transaction(() => this.extractUnextracted(sessionId, throughTraceSeq, at));
+    return this.deps.repos.transaction(() => {
+      // Every captured turn ends up here once its Session goes quiet, so a conversation that just
+      // stops (no close, no later turn) still reaches the new L3; what is already frozen is skipped.
+      if (l3Field) this.deps.repos.l3WorldModels.freezeBatches({ sessionId, trigger: "session_idle", at });
+      return workMemory ? this.extractUnextracted(sessionId, throughTraceSeq, at) : empty;
+    });
   }
 
   async extract(job: EvolutionJobRecord): Promise<void> {
@@ -286,7 +297,7 @@ export class WorkMemoryPipeline {
     };
     const candidatesWithMatches = await this.retrieveCandidates(candidates, filter);
     const decisions = await this.decide(candidatesWithMatches);
-    this.persistDecisions(job, projectId, payload.trajectoryHash, candidates, candidatesWithMatches, decisions);
+    this.persistDecisions(job, projectId, session, payload.trajectoryHash, candidates, candidatesWithMatches, decisions);
   }
 
   private scheduleBatchInTransaction(batchId: string, at: string): EvolutionJobRecord | undefined {
@@ -489,6 +500,7 @@ export class WorkMemoryPipeline {
   private persistDecisions(
     job: EvolutionJobRecord,
     projectId: string | null,
+    sourceSession: Pick<SessionRecord, "source" | "workspaceId">,
     trajectoryHash: string,
     candidates: WorkMemoryCandidate[],
     candidatesWithMatches: Array<{ candidate: WorkMemoryCandidate; matches: MemoryRow[] }>,
@@ -518,9 +530,9 @@ export class WorkMemoryPipeline {
           const currentTarget = this.deps.repos.memories.get(target.id) ?? target;
           const requirement = normalizeRequirement(decision.merged_requirement ?? candidate.requirement);
           const reason = normalizeRequirement(decision.merged_reason ?? candidate.reason);
-          this.writeMemory(currentTarget, topicFromMemory(currentTarget), requirement, reason, trajectoryHash, at, job, projectId);
+          this.writeMemory(currentTarget, topicFromMemory(currentTarget), requirement, reason, trajectoryHash, at, job, sourceSession, projectId);
         } else {
-          this.writeMemory(undefined, topic, normalizeRequirement(candidate.requirement), normalizeRequirement(candidate.reason), trajectoryHash, at, job, projectId);
+          this.writeMemory(undefined, topic, normalizeRequirement(candidate.requirement), normalizeRequirement(candidate.reason), trajectoryHash, at, job, sourceSession, projectId);
         }
       }
     });
@@ -534,11 +546,13 @@ export class WorkMemoryPipeline {
     trajectoryHash: string,
     at: string,
     sourceJob: EvolutionJobRecord,
+    sourceSession: Pick<SessionRecord, "source" | "workspaceId">,
     projectId?: string | null
   ): MemoryRow {
     if (!requirement || !reason) throw new Error("work memory requirement and reason must be non-empty");
     const memoryValue = canonicalWorkMemoryText(topic, requirement, reason);
-    const info: Record<string, unknown> = { ...(existing?.info ?? {}) };
+    // Merges may cross Agents within a project; retain the original provenance.
+    const info: Record<string, unknown> = { ...(existing ? existing.info : { source: sourceSession.source }) };
     if (projectId !== undefined) {
       if (projectId) info.project_id = projectId;
       else delete info.project_id;
@@ -549,8 +563,8 @@ export class WorkMemoryPipeline {
       userId: existing?.userId ?? sourceJob.userId,
       ...(existing?.conversationId !== undefined ? { conversationId: existing.conversationId } : {}),
       sessionId: existing?.sessionId ?? sourceJob.sessionId,
-      ...(existing?.agentId !== undefined ? { agentId: existing.agentId } : {}),
-      ...(existing?.appId !== undefined ? { appId: existing.appId } : {}),
+      agentId: existing ? existing.agentId : sourceSession.source,
+      appId: existing ? existing.appId : sourceSession.workspaceId,
       memoryType: "LongTermMemory",
       status: "activated",
       visibility: "private",

@@ -132,14 +132,14 @@ describe("long-document review through the real AgentRunner", () => {
     }
   });
 
-  it("exposes the remaining oversized single-line text recovery limitation", async () => {
+  it("bounds oversized single-line text and points to character recovery", async () => {
     const root = await workspace();
     const file = path.join(root, "single-line-extraction.txt");
     await fs.writeFile(file, "x".repeat(200_000) + "TAIL");
     const result = await new ReadFileTool({ workspace: root }).execute({ path: file });
-    // Characterization of a known gap, not evidence that this recovery route is safe.
-    expect(result.length).toBeGreaterThan(ReadFileTool.MAX_CHARS);
+    expect(result.length).toBeLessThanOrEqual(ReadFileTool.MAX_CHARS);
     expect(result).not.toContain("Use offset=");
-    expect(result).toContain("End of file");
+    expect(result).toContain("char_offset/char_limit");
+    expect(result).toContain("TAIL");
   });
 });

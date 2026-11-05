@@ -25,6 +25,12 @@ export function formatAgentSourceScanRequestError(
   source: AgentSourceView | undefined,
   t: AgentSourceScanErrorTranslator
 ): string {
+  if (error instanceof ApiRequestError && error.code === "memory_scan_upgrade_required") {
+    return t("memory.scanUpgradeRequired");
+  }
+  if (error instanceof ApiRequestError && error.code === "memory_layer_unavailable") {
+    return t("memory.scanServiceUnavailable");
+  }
   const reason = error instanceof Error ? error.message : String(error);
   const missingPath = extractMissingScanPath(reason);
   if (missingPath) {

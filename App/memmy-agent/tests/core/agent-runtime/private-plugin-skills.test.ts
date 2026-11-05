@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { AgentHook, type AgentHookContext } from "../../../src/core/agent-runtime/hook.js";
+import { withMemmyMemoryPrompt } from "../../../src/memmy-memory/protocol.js";
+import { estimatePromptTokens } from "../../../src/utils/helpers.js";
 import { AgentRunner, AgentRunSpec } from "../../../src/core/agent-runtime/runner.js";
 import { collectPrivateSkillRefs, projectPrivateSkillInstructions } from "../../../src/core/agent-runtime/private-plugin-skills.js";
 import { MCPToolWrapper } from "../../../src/core/agent-runtime/tools/mcp.js";
@@ -15,16 +18,50 @@ class Provider extends LLMProvider {
   getDefaultModel() { return "test"; }
   async chat(args: any) { this.requests.push(args); return this.responses.shift() ?? new LLMResponse({ content: "done" }); }
 }
-function loader() {
+function loader(instructions = secret) {
   const callTool = vi.fn(async (name: string) => name === "read_plugin_skill"
     ? { content: [{ type: "text", text: marker }] }
-    : { content: [], _meta: { "memmy.dev/private-skill-context": { ref, instructions: secret } } });
+    : { content: [], _meta: { "memmy.dev/private-skill-context": { ref, instructions } } });
   const tools = new ToolRegistry();
   tools.register(new MCPToolWrapper({ callTool }, "plugins", { name: "read_plugin_skill" }));
   return { tools, callTool };
 }
 
 describe("private plugin instruction projection", () => {
+  it("retains the owning request through private-skill trimming and appends one runtime scope", async () => {
+    const { tools } = loader(secret.repeat(30));
+    const context = { turnId: "MERGED-TURN" };
+    const requests: any[] = [];
+    const provider: any = {
+      getDefaultModel: () => "test",
+      estimatePromptTokens: (messages: any[]) => [estimatePromptTokens(messages), "test"],
+      chatWithRetry: vi.fn(async (args: any) => { requests.push(structuredClone(args)); return new LLMResponse({ content: "done" }); }),
+    };
+    class ScopeHook extends AgentHook {
+      override async beforeRun(ctx: AgentHookContext) { ctx.spec!.memoryTurnContext = context; }
+    }
+    const messages = [
+      { role: "system", content: "Stable system instructions" },
+      withMemmyMemoryPrompt({ role: "user", content: "ORIGINAL_REQUEST_SENTINEL: keep the requested report scope" }, context, "user_request"),
+      { role: "assistant", content: "old partial output ".repeat(100) },
+      { role: "assistant", content: "Latest observation before continuing the requested report" },
+    ];
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      provider, tools, messages, privateSkillRefs: [ref], hook: new ScopeHook(),
+      contextWindowTokens: 10_000, contextBlockLimit: 650, maxIterations: 1,
+    }));
+    expect(result.stopReason).toBe("completed");
+    expect(requests).toHaveLength(1);
+    const wire = JSON.stringify(requests[0].messages);
+    expect(wire).toContain(secret);
+    expect(wire).toContain("ORIGINAL_REQUEST_SENTINEL");
+    expect(wire).not.toContain("old partial output");
+    expect(wire.match(/active_turn_id/g)).toHaveLength(1);
+    expect(JSON.stringify(requests[0].messages.at(-1))).toContain("MERGED-TURN");
+    expect(JSON.stringify(requests[0].messages.filter((message: any) => message.role === "system"))).not.toContain("MERGED-TURN");
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
   it("keeps instructions out of transcript, checkpoints, tool events and saved metadata", async () => {
     const { tools, callTool } = loader();
     const provider = new Provider([

@@ -16,6 +16,7 @@ import type {
 } from "../../storage/repositories.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 import { completeStrictJson } from "../l3-world-model/strict-json-completion.js";
+import { isNeutralFeedback } from "./turn-judge.js";
 
 type FieldUpdateOperation = "noop" | "create" | "update";
 
@@ -148,7 +149,8 @@ export class L3WorldModelTraceFieldPipeline {
     const feedbackByRawTurn = new Map<string, FeedbackRecord[]>();
     for (const feedbackId of batch.feedbackIds) {
       const feedback = this.deps.repos.runtime.getFeedback(feedbackId);
-      if (!feedback) continue;
+      // A neutral reaction says nothing about the result and is not evidence.
+      if (!feedback || isNeutralFeedback(feedback)) continue;
       const trace = feedback.rawTurnId
         ? traceByRawTurn.get(feedback.rawTurnId)
         : feedback.l1MemoryId
@@ -197,7 +199,8 @@ function strictJobPayload(job: EvolutionJobRecord): {
   batchId: string;
   targetField: L3WorldModelTargetField;
 } {
-  const keys = Object.keys(job.payload).sort();
+  // runAfter is the queue's own retry time, not part of the job's evidence.
+  const keys = Object.keys(job.payload).filter((key) => key !== "runAfter").sort();
   if (keys.join(",") !== "batchId,targetField") {
     throw new L3WorldModelTerminalEvidenceError("invalid L3 World Model job payload keys");
   }

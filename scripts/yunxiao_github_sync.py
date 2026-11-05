@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -14,6 +16,8 @@ from urllib.request import Request, urlopen
 
 
 SOURCE_LABELS = {"issue": "Issue", "pr": "PR"}
+SEARCH_PAGE_SIZE = 200
+SEARCH_WINDOW = 10000
 # Yunxiao projects can customize workflow names. Keep the canonical names used
 # by the sync state machine, then resolve them to the first matching name in
 # the target project's workflow.
@@ -116,7 +120,70 @@ def build_title(
     item: dict[str, Any],
     repository: str | None = None,
 ) -> str:
-    return f"{build_source_key(item_type, item, repository)} {item['title']}"
+    return f"[{SOURCE_LABELS[item_type]} #{item['number']}] {item['title']}"
+
+
+def source_url(item_type: str, number: int, repository: str) -> str:
+    path = "issues" if item_type == "issue" else "pull"
+    return f"https://github.com/{repository_name(repository)}/{path}/{number}"
+
+
+def shortened_subject(
+    subject: str, item_type: str, item: dict[str, Any], repository: str
+) -> str | None:
+    short_key = f"[{SOURCE_LABELS[item_type]} #{item['number']}]"
+    for key in (short_key, build_source_key(item_type, item, repository), legacy_source_key(item_type, item)):
+        if subject == key or subject.startswith(f"{key} "):
+            return short_key + subject[len(key):]
+    return None
+
+
+class DescriptionText(HTMLParser):
+    """Read the leading source line from Markdown or Yunxiao rich text."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in ("br", "p", "div"):
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("p", "div"):
+            self.parts.append("\n")
+
+
+def description_source_url(description: Any) -> str | None:
+    if not isinstance(description, str):
+        return None
+    parser = DescriptionText()
+    parser.feed(description)
+    first_line = next(
+        (line.strip() for line in "".join(parser.parts).splitlines() if line.strip()),
+        "",
+    )
+    match = re.fullmatch(
+        r"GitHub:\s+(https://github\.com/[^/\s]+/[^/\s]+/(?:issues|pull)/[1-9][0-9]*/?)",
+        first_line,
+    )
+    if match:
+        return match.group(1).rstrip("/").casefold()
+    # Early manually imported cards used a source section before the URL.
+    legacy = re.match(
+        r"\A来源[：:]\s*GitHub\s+(Issue|PR)\s+#([1-9][0-9]*)\s+"
+        r"(https://github\.com/[^/\s]+/[^/\s]+/(issues|pull)/([1-9][0-9]*)/?)(?=\s|$)",
+        "".join(parser.parts).replace("\ufeff", " ").lstrip(),
+    )
+    if not legacy:
+        return None
+    label, number, url, path, url_number = legacy.groups()
+    if number != url_number or {"Issue": "issues", "PR": "pull"}[label] != path:
+        return None
+    return url.rstrip("/").casefold()
 
 
 def iso_after_days(value: str, days: int) -> str:
@@ -371,14 +438,14 @@ def sync_labels(
     return name_to_id
 
 
-def find_workitem(
+def search_workitems(
     org: str,
     project_id: str,
     prefix: str,
     client: YunxiaoClient,
     *,
     category: str = DEFAULT_WORKITEM_CATEGORY,
-) -> str | None:
+) -> list[dict[str, Any]]:
     conditions = json.dumps(
         {
             "conditionGroups": [
@@ -395,24 +462,49 @@ def find_workitem(
         },
         ensure_ascii=False,
     )
-    response = client.transport(
-        "POST",
-        f"/oapi/v1/projex/organizations/{org}/workitems:search",
-        {"spaceId": project_id, "category": category, "conditions": conditions},
-    )
-    data = (
-        response
-        if isinstance(response, list)
-        else (response or {}).get("data", response)
-        if isinstance(response, dict)
-        else response
-    )
-    items = (
-        (data.get("workitems", data.get("items", [])) if isinstance(data, dict) else data)
-        if data
-        else []
-    )
-    return item_id(items[0]) if items else None
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for page in range(1, SEARCH_WINDOW // SEARCH_PAGE_SIZE + 1):
+        response = client.transport(
+            "POST",
+            f"/oapi/v1/projex/organizations/{org}/workitems:search",
+            {
+                "spaceId": project_id,
+                "category": category,
+                "conditions": conditions,
+                "page": page,
+                "perPage": SEARCH_PAGE_SIZE,
+                "orderBy": "gmtCreate",
+                "sort": "asc",
+            },
+        )
+        data = response.get("data", response) if isinstance(response, dict) else response
+        if isinstance(data, dict):
+            data = data.get("workitems", data.get("items"))
+        if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+            raise PreflightError("无法解析云效工作项搜索结果，停止以避免重复建卡")
+        for workitem in data:
+            identifier = item_id(workitem)
+            if identifier in seen:
+                raise PreflightError("云效搜索分页返回重复工作项，请重试")
+            seen.add(identifier)
+            result.append(workitem)
+        if len(data) < SEARCH_PAGE_SIZE:
+            return result
+    raise PreflightError("云效搜索达到 10000 条分页窗口，请缩小范围后重试")
+
+
+def workitem_details(
+    org: str, workitem: dict[str, Any], client: YunxiaoClient
+) -> dict[str, Any]:
+    # Search results are projections; verify identity using the detail endpoint.
+    identifier = item_id(workitem)
+    detail = client.get(f"/oapi/v1/projex/organizations/{org}/workitems/{identifier}")
+    if isinstance(detail, dict):
+        detail = detail.get("data", detail)
+    if not isinstance(detail, dict) or item_id(detail) != identifier:
+        raise PreflightError(f"无法核对云效工作项：{identifier}")
+    return detail
 
 
 def legacy_source_key(item_type: str, item: dict[str, Any]) -> str:
@@ -429,25 +521,31 @@ def find_existing_workitem(
     *,
     category: str,
 ) -> str | None:
-    current_key = build_source_key(item_type, item, repository)
-    existing_id = find_workitem(
-        org,
-        project_id,
-        current_key,
-        client,
-        category=category,
-    )
-    if existing_id:
-        return existing_id
-    # MemOS PR #2159 used a repository-less key. Keep this fallback during
-    # migration so a new workflow cannot duplicate those existing work items.
-    return find_workitem(
-        org,
-        project_id,
+    # Display titles are short; the first description line identifies the source.
+    # Search all historical forms so a rename cannot cause a duplicate card.
+    keys = (
+        f"[{SOURCE_LABELS[item_type]} #{item['number']}]",
+        build_source_key(item_type, item, repository),
         legacy_source_key(item_type, item),
-        client,
-        category=category,
     )
+    expected_url = source_url(item_type, item["number"], repository).casefold()
+    matches: set[str] = set()
+    for key in keys:
+        for candidate in search_workitems(org, project_id, key, client, category=category):
+            candidate = workitem_details(org, candidate, client)
+            subject = candidate.get("subject", "")
+            if subject != key and not subject.startswith(f"{key} "):
+                continue
+            candidate_url = description_source_url(candidate.get("description"))
+            if not candidate_url:
+                raise PreflightError(
+                    f"工作项 {item_id(candidate)} 缺少可验证的 GitHub 来源，停止同步"
+                )
+            if candidate_url == expected_url:
+                matches.add(item_id(candidate))
+    if len(matches) > 1:
+        raise PreflightError(f"同一 GitHub 来源匹配到多个云效工作项：{sorted(matches)}")
+    return next(iter(matches), None)
 
 
 def item_description(item: dict[str, Any]) -> str:
@@ -484,8 +582,19 @@ def sync_one(
     if existing_id:
         if not apply:
             return "dry-run-status"
+        current = workitem_details(org, {"id": existing_id}, client)
+        subject = shortened_subject(current.get("subject", ""), item_type, item, repository)
+        if (
+            subject is None
+            or description_source_url(current.get("description"))
+            != source_url(item_type, item["number"], repository).casefold()
+        ):
+            raise PreflightError(f"工作项 {existing_id} 的来源或标题已变更，请重新同步")
         status_name = source_status(item_type, item)
-        update_payload: dict[str, Any] = {"status": cfg["statuses"][status_name]}
+        update_payload: dict[str, Any] = {
+            "status": cfg["statuses"][status_name],
+            "subject": subject,
+        }
         if cfg.get("sprint_id"):
             update_payload["sprint"] = cfg["sprint_id"]
         if cfg.get("assignee_id"):
@@ -680,6 +789,86 @@ def github_collection(
         page += 1
 
 
+def rename_titles(client: YunxiaoClient, *, apply: bool) -> int:
+    """Shorten existing cards only; never create cards or reset other fields."""
+    repository = repository_name()
+    cfg = configuration_from_environment(client)
+    org = cfg["org"]
+    candidates: dict[str, dict[str, Any]] = {}
+    # Finish reading every page before any PUT changes the search results.
+    for prefix in (
+        f"[GitHub {repository} ", "[GitHub Issue #", "[GitHub PR #", "[Issue #", "[PR #"
+    ):
+        for workitem in search_workitems(
+            org, cfg["project_id"], prefix, client, category=cfg["workitem_category"]
+        ):
+            candidates[item_id(workitem)] = workitem
+
+    pattern = re.compile(
+        rf"^\[GitHub (?:{re.escape(repository)} )?(Issue|PR) #([1-9][0-9]*)\]( .*)?$",
+        re.DOTALL,
+    )
+    short_pattern = re.compile(r"^\[(Issue|PR) #([1-9][0-9]*)\]( .*)?$", re.DOTALL)
+    stats = {"source": len(candidates), "would_rename": 0, "renamed": 0, "skipped": 0, "failed": 0}
+    planned: dict[str, list[tuple[str, str, str]]] = {}
+    for identifier, candidate in candidates.items():
+        try:
+            candidate = workitem_details(org, candidate, client)
+            old_title = candidate.get("subject", "")
+            match = pattern.fullmatch(old_title) or short_pattern.fullmatch(old_title)
+            if not match:
+                stats["skipped"] += 1
+                continue
+            label, number, suffix = match.groups()
+            kind = "issue" if label == "Issue" else "pr"
+            expected_url = source_url(kind, int(number), repository).casefold()
+            actual_url = description_source_url(candidate.get("description"))
+            if not actual_url:
+                raise PreflightError("缺少可验证的 GitHub 来源")
+            if actual_url != expected_url:
+                stats["skipped"] += 1
+                continue
+            new_title = f"[{label} #{number}]{suffix or ''}"
+            planned.setdefault(expected_url, []).append((identifier, old_title, new_title))
+        except (YunxiaoApiError, PreflightError, OSError) as error:
+            stats["failed"] += 1
+            print(f"failed rename {identifier}: {error}", file=sys.stderr)
+
+    for expected_url, changes in planned.items():
+        if len(changes) != 1:
+            stats["failed"] += len(changes)
+            print(f"同一 GitHub 来源有多个工作项，跳过整理：{expected_url}", file=sys.stderr)
+            continue
+        identifier, old_title, new_title = changes[0]
+        if old_title == new_title:
+            stats["skipped"] += 1
+            continue
+        if not apply:
+            stats["would_rename"] += 1
+            continue
+        try:
+            # Re-read before writing so a manual edit during the scan is not lost.
+            current = workitem_details(org, {"id": identifier}, client)
+            if (
+                current.get("subject") != old_title
+                or description_source_url(current.get("description")) != expected_url
+            ):
+                raise PreflightError("工作项在扫描后已变更，请重新预览")
+            client.transport(
+                "PUT",
+                f"/oapi/v1/projex/organizations/{org}/workitems/{identifier}",
+                {"subject": new_title},
+            )
+            stats["renamed"] += 1
+        except (YunxiaoApiError, PreflightError, OSError) as error:
+            stats["failed"] += 1
+            print(f"failed rename {identifier}: {error}", file=sys.stderr)
+        time.sleep(0.12)
+
+    print(json.dumps({"titles": stats}, ensure_ascii=False))
+    return 1 if stats["failed"] else 0
+
+
 def backfill(client: YunxiaoClient, *, apply: bool, state: str) -> int:
     github_token = os.environ.get("GH_TOKEN", "").strip()
     repository = repository_name(os.environ.get("GITHUB_REPOSITORY"))
@@ -740,7 +929,9 @@ def backfill(client: YunxiaoClient, *, apply: bool, state: str) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="GitHub → 云效同步")
-    parser.add_argument("--mode", choices=("preflight", "event", "backfill"), default="preflight")
+    parser.add_argument(
+        "--mode", choices=("preflight", "event", "backfill", "rename-titles"), default="preflight"
+    )
     parser.add_argument("--state", choices=("open", "all"), default="open")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -769,6 +960,8 @@ def main() -> int:
             return handle_event(client)
         if args.mode == "backfill":
             return backfill(client, apply=args.apply and not args.dry_run, state=args.state)
+        if args.mode == "rename-titles":
+            return rename_titles(client, apply=args.apply and not args.dry_run)
 
         result = configuration_from_environment(client)
         print(

@@ -3379,6 +3379,21 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   padding: 8px 24px 32px;
 }
 
+.agent-activity-output-file {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+  font-size: 13px;
+}
+.agent-activity-output-file__notice { margin-top: 6px; font-size: 12px; opacity: .65; }
+.thread-preview__paged { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; }
+.thread-preview__text-pager { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 8px; padding: 8px 12px; font-size: 12px; }
+.thread-preview__text-pager button { flex-shrink: 0; white-space: nowrap; }
+.thread-preview__text-pager span { flex-basis: 100%; opacity: .65; }
+.thread-preview__text-page { flex: 1 1 auto; min-height: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; font-size: 13px; }
+
 .thread-preview__code,
 .thread-preview__table-wrap {
   min-height: 0;
@@ -7037,6 +7052,16 @@ body.memmy-platform-windows .memory-drawer-backdrop__close {
   text-transform: uppercase;
 }
 
+.memory-processing-notice--progress {
+  border-color: var(--color-border-stone);
+  background: var(--color-background-paper);
+}
+
+.memory-processing-notice--progress .agent-model-error-notice__icon,
+.memory-processing-notice--progress .agent-model-error-notice__title {
+  color: var(--color-text-ink);
+}
+
 .memory-processing-notice--success {
   border-color: color-mix(in srgb, var(--color-status-success) 40%, transparent);
   background: color-mix(in srgb, var(--color-status-success) 7%, var(--color-background-paper));
@@ -7528,6 +7553,10 @@ body.memmy-platform-windows .memory-drawer-backdrop__close {
   font-size: 13px;
   line-height: 1.68;
   overflow-wrap: anywhere;
+}
+
+.memory-markdown__literal-html {
+  white-space: pre-wrap;
 }
 
 .memory-markdown :first-child {
@@ -14159,6 +14188,22 @@ body.memmy-platform-windows :is(
   border-top: 1px solid var(--ch-border);
 }
 
+.ch__dependent-settings {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.ch__dependent-settings > * + * { border-top: 1px solid var(--ch-border); }
+.ch__dependent-settings:disabled { opacity: 0.45; }
+.ch__dependent-settings > section[aria-label] {
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
+  padding: 0;
+}
+
 .ch__settings-card .ch__recording-setting {
   margin: 0;
   padding: 20px 22px;
@@ -14393,6 +14438,13 @@ body.memmy-platform-windows :is(
   background: color-mix(in srgb, var(--color-background-paper) 96%, var(--color-canvas-oat));
 }
 
+.ch-source-dialog__list--apps {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: 0;
+}
+
 .ch-source-dialog__add {
   display: flex;
   align-items: center;
@@ -14407,6 +14459,15 @@ body.memmy-platform-windows :is(
   font-size: 14px;
   font-weight: 550;
   cursor: pointer;
+}
+
+.ch-source-dialog__add--app {
+  flex: none;
+  z-index: 1;
+  border-bottom: 1px solid var(--ch-border);
+  border-radius: 0;
+  padding-block: 12px;
+  background: var(--ch-surface);
 }
 
 .ch-source-dialog__add-icon {
@@ -14425,18 +14486,15 @@ body.memmy-platform-windows :is(
 }
 
 .ch-source-dialog__app-menu {
-  position: absolute;
-  z-index: 5;
   display: flex;
   flex-direction: column;
-  width: 240px;
-  max-height: 350px;
+  flex: 0 1 220px;
+  min-height: 120px;
   overflow: auto;
-  padding: 4px;
-  border: 1px solid var(--ch-border);
-  border-radius: 12px;
-  background: var(--ch-surface);
-  box-shadow: 0 12px 32px rgb(22 24 31 / 16%);
+  margin-top: 8px;
+  padding: 4px 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-text-ink) 18%, var(--ch-surface));
+  background: color-mix(in srgb, var(--color-canvas-oat) 55%, var(--ch-surface));
 }
 
 .ch-source-dialog__app-search {
@@ -14522,6 +14580,12 @@ body.memmy-platform-windows :is(
   margin: 8px 0 0;
   padding: 0;
   list-style: none;
+}
+
+.ch-source-dialog__list--apps .ch-source-dialog__rules {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .ch-source-dialog__rules li {
@@ -15153,6 +15217,18 @@ body.memmy-platform-windows :is(
 /* Share the recording confirmation's shell, type scale and footer. */
 .ch__permission-dialog:focus { outline: none; }
 .ch__permission-dialog .confirm-dialog__footer { padding-top: 12px; }
+.ch__windows-settings .ch__windows-settings-body { flex: 1 1 auto; overflow-y: auto; }
+.ch__windows-settings .modal-header, .ch__windows-settings .modal-footer { flex: 0 0 auto; }
+.ch__windows-settings-body > p { flex: 0 0 auto; margin: 0 0 12px; font-size: 13px; line-height: 1.6; }
+.ch__windows-scope { display: grid; gap: 8px; font-size: 13px; }
+.ch__windows-scope select { min-width: 0; width: 100%; padding: 8px; border: 1px solid var(--color-border-stone); border-radius: 8px; background: var(--color-background-paper); color: var(--color-text-ink); }
+.ch__windows-settings-body input[type="search"] { width: 100%; padding: 8px; border: 1px solid var(--color-border-stone); border-radius: 8px; background: var(--color-background-paper); color: var(--color-text-ink); }
+.ch__windows-applications { flex: 0 0 auto; display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
+.ch__windows-application { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border: 1px solid var(--color-border-stone); border-radius: 8px; font-size: 13px; }
+.ch__windows-application > input { flex: 0 0 auto; margin-top: 3px; }
+.ch__windows-application > span { min-width: 0; }
+.ch__windows-application-state { margin-left: 8px; font-size: 12px; }
+.ch__windows-application-path { display: block; overflow-wrap: anywhere; font-size: 12px; color: color-mix(in srgb, var(--color-text-ink) 60%, transparent); }
 .ch__permission-description { margin: 0; }
 .ch__permission-list { display: grid; gap: 4px; margin: 16px 0 8px; }
 .ch__permission-row { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 4px 0; }

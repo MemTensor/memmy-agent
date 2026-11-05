@@ -20,7 +20,7 @@ const { cleanup, createTestService } = createMemoryServiceFixture();
 afterEach(cleanup);
 
 describe("Work Memory pipeline", () => {
-  it("在一次 token compaction boundary 为每个新 L3 batch 只入队一个 Job，重复 boundary 不重复入队", () => {
+  it("在一次 token compaction boundary 为每个新 L3 batch 只入队一个 Job，重复 boundary 不重复入队", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -35,12 +35,12 @@ describe("Work Memory pipeline", () => {
       workspaceHostId: "a".repeat(64),
       namespace
     });
-    const completed = service.completeTurn("work-memory-boundary-turn", {
+    const completed = (await service.completeTurn("work-memory-boundary-turn", {
       sessionId: opened.sessionId,
       query: "项目要求所有提交前都运行测试。",
       answer: "已记录该要求。",
       status: "succeeded"
-    });
+    }));
     const boundaryNamespace = opened.projectId ? { ...namespace, projectId: opened.projectId } : namespace;
 
     const first = service.l3WorldModelBoundary(opened.sessionId, {
@@ -73,10 +73,26 @@ describe("Work Memory pipeline", () => {
     }));
   });
 
-  it("第一阶段只抽取 requirement/reason，第二阶段 create 时生成 topic 并写入 L1 Work Memory", async () => {
+  it.each([
+    { source: "memmy-agent", displayedSource: "memmy", filter: "memmy-agent" },
+    { source: "cursor", displayedSource: "cursor", filter: "cursor" },
+    { source: "claude_code", displayedSource: "claude_code", filter: "claude_code" },
+    { source: "codex", displayedSource: "codex", filter: "codex" },
+    { source: "opencode", displayedSource: "opencode", filter: "opencode" },
+    { source: "openclaw", displayedSource: "openclaw", filter: "openclaw" },
+    { source: "hermes", displayedSource: "hermes", filter: "hermes" },
+    { source: "deepseek_harness", displayedSource: "deepseek_harness", filter: "deepseek_harness" },
+    { source: "workbuddy", displayedSource: "workbuddy", filter: "workbuddy" },
+    { source: "pi", displayedSource: "pi", filter: "pi" },
+    { source: "qwenwork", displayedSource: "qwenwork", filter: "qwenwork" },
+    { source: "claude-code", displayedSource: "claude-code", filter: "claude_code" },
+    { source: "claude", displayedSource: "claude-code", filter: "claude_code" },
+    { source: "open-code", displayedSource: "opencode", filter: "opencode" },
+    { source: "deepseek-harness", displayedSource: "deepseek-harness", filter: "deepseek_harness" }
+  ])("$source 创建的工作记忆保留会话来源并支持管理页 Agent 筛选", async ({ source, displayedSource, filter }) => {
     const { db, service } = createTestService();
     const namespace = {
-      source: "codex",
+      source,
       profileId: "default",
       sessionKey: "work-memory-create-session",
       userId: "work-memory-create-user"
@@ -88,17 +104,17 @@ describe("Work Memory pipeline", () => {
       workspaceHostId: "b".repeat(64),
       namespace
     });
-    const completed = service.completeTurn("work-memory-create-turn", {
+    const completed = (await service.completeTurn("work-memory-create-turn", {
       sessionId: opened.sessionId,
       query: "SFT 训练必须使用固定的数据清洗流水线，因为结果需要可复现。",
       answer: "后续训练会遵守该要求。",
       status: "succeeded"
-    });
+    }));
     const boundaryNamespace = opened.projectId ? { ...namespace, projectId: opened.projectId } : namespace;
     service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "work-memory-create-request",
-      adapterId: "codex-memory",
-      source: "codex",
+      adapterId: `${source}-memory`,
+      source,
       namespace: boundaryNamespace,
       trigger: "token_compaction",
       throughL1MemoryId: completed.l1MemoryId
@@ -132,9 +148,12 @@ describe("Work Memory pipeline", () => {
     }, 20);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
+      agentId: source,
+      appId: repos.runtime.getSession(opened.sessionId)?.workspaceId,
+      info: { source, project_id: opened.projectId },
       memoryLayer: "L1",
       memoryValue: canonicalWorkMemoryText("SFT training pipeline", "固定数据清洗流水线", "保证训练结果可复现"),
-      properties: { internal_info: expect.objectContaining({
+      properties: { info: { source, project_id: opened.projectId }, internal_info: expect.objectContaining({
         memory_kind: "work_memory",
         work_topic: "SFT training pipeline",
         requirement: "固定数据清洗流水线",
@@ -142,7 +161,14 @@ describe("Work Memory pipeline", () => {
         schema_version: 1
       }) }
     });
+    const panelItem = service.panelItems({ layer: "L1" }).items.find((item) => item.id === rows[0]!.id);
+    expect(panelItem?.metadata?.source).toBe(displayedSource);
+    const filtered = service.panelItems({ layer: "L1", sourceAgent: filter });
+    expect(filtered.items.some((item) => item.id === rows[0]!.id)).toBe(true);
+    const otherSource = source === "codex" ? "claude-code" : "codex";
+    expect(service.panelItems({ layer: "L1", sourceAgent: otherSource }).items.some((item) => item.id === rows[0]!.id)).toBe(false);
     const detail = service.getMemory(rows[0]!.id, { namespace: boundaryNamespace });
+    expect(detail.item.metadata.source).toBe(displayedSource);
     expect("workMemory" in detail.item ? detail.item.workMemory : undefined).toEqual({
       workTopic: "SFT training pipeline",
       requirement: "固定数据清洗流水线",
@@ -157,7 +183,7 @@ describe("Work Memory pipeline", () => {
     expect(completeJson.mock.calls[1]?.[0]?.[1]?.content).toContain("## 待判断的新 Work Memory");
   });
 
-  it("merge 只更新召回到的旧行，并复用旧 Work Memory 的 topic", async () => {
+  it.each([false, true])("merge 保留旧工作记忆的内容标识和来源，已有明确来源=%s", async (hasSource) => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -173,6 +199,15 @@ describe("Work Memory pipeline", () => {
       namespace
     });
     const existing = workMemoryRow(opened.userId, opened.projectId ?? null);
+    if (hasSource) {
+      const original = service.openSession({
+        namespace: { source: "cursor", profileId: "default", userId: opened.userId }
+      });
+      existing.sessionId = original.sessionId;
+      existing.agentId = "cursor";
+      existing.appId = "original-workspace";
+      existing.info.source = "cursor";
+    }
     const repos = new Repositories(db.db);
     repos.memories.insert(existing);
     expect(repos.memories.searchPatternIds(["固定", "SFT", "数据清洗"], {
@@ -181,12 +216,12 @@ describe("Work Memory pipeline", () => {
       workMemoryUserId: opened.userId,
       workMemoryProjectId: opened.projectId ?? null
     }, 5)).toHaveLength(1);
-    const completed = service.completeTurn("work-memory-merge-turn", {
+    const completed = (await service.completeTurn("work-memory-merge-turn", {
       sessionId: opened.sessionId,
       query: "同一条 SFT 数据清洗要求仍然必须保持固定，以便结果可复现。",
       answer: "会继续沿用原有要求。",
       status: "succeeded"
-    });
+    }));
     const boundaryNamespace = opened.projectId ? { ...namespace, projectId: opened.projectId } : namespace;
     service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "work-memory-merge-request",
@@ -226,6 +261,15 @@ describe("Work Memory pipeline", () => {
       memoryValue: canonicalWorkMemoryText("SFT training pipeline", "固定 SFT 数据清洗流程", "保证训练结果可复现"),
       properties: { internal_info: expect.objectContaining({ work_topic: "SFT training pipeline" }) }
     });
+    expect(saved?.agentId).toBe(existing.agentId);
+    expect(saved?.appId).toBe(existing.appId);
+    expect(saved?.info.source).toBe(existing.info.source);
+    expect(saved?.properties.info).toEqual(saved?.info);
+    if (hasSource) {
+      expect(saved?.sessionId).toBe(existing.sessionId);
+      expect(service.panelItems({ layer: "L1", sourceAgent: "cursor" }).items.some((item) => item.id === existing.id)).toBe(true);
+      expect(service.panelItems({ layer: "L1", sourceAgent: "codex" }).items.some((item) => item.id === existing.id)).toBe(false);
+    }
     expect(repos.memories.list({ memoryKind: "work_memory", workMemoryUserId: opened.userId, workMemoryProjectId: opened.projectId ?? null }, 20)).toHaveLength(1);
   });
 
@@ -265,21 +309,21 @@ describe("Work Memory pipeline", () => {
     expect(recall.injectedContext.markdown).toContain("Requirement rationale: 保证训练结果可复现");
   });
 
-  it("从没压缩过的会话在 session close 时抽完全部 trace", () => {
+  it("从没压缩过的会话在 session close 时抽完全部 trace", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-close-session", "work-memory-close-user");
-    service.completeTurn("work-memory-close-turn-1", {
+    (await service.completeTurn("work-memory-close-turn-1", {
       sessionId: opened.sessionId,
       query: "第一条要求。",
       answer: "已记录。",
       status: "succeeded"
-    });
-    service.completeTurn("work-memory-close-turn-2", {
+    }));
+    (await service.completeTurn("work-memory-close-turn-2", {
       sessionId: opened.sessionId,
       query: "第二条要求。",
       answer: "也记录了。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     expect(workMemoryJobs(repos)).toHaveLength(0);
 
@@ -294,15 +338,15 @@ describe("Work Memory pipeline", () => {
     expect(repos.runtime.getWorkMemoryCursor(opened.sessionId).lastExtractedSeq).toBe(2);
   });
 
-  it("压缩之后再 close 只抽尾巴，已抽过的窗口不再入队", () => {
+  it("压缩之后再 close 只抽尾巴，已抽过的窗口不再入队", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-tail-session", "work-memory-tail-user");
-    const first = service.completeTurn("work-memory-tail-turn-1", {
+    const first = (await service.completeTurn("work-memory-tail-turn-1", {
       sessionId: opened.sessionId,
       query: "压缩前的要求。",
       answer: "已记录。",
       status: "succeeded"
-    });
+    }));
     service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "work-memory-tail-request-1",
       adapterId: "codex-memory",
@@ -314,12 +358,12 @@ describe("Work Memory pipeline", () => {
     const repos = new Repositories(db.db);
     expect(workMemoryJobs(repos)).toHaveLength(1);
 
-    service.completeTurn("work-memory-tail-turn-2", {
+    (await service.completeTurn("work-memory-tail-turn-2", {
       sessionId: opened.sessionId,
       query: "压缩后的要求。",
       answer: "也记录了。",
       status: "succeeded"
-    });
+    }));
     service.closeSession(opened.sessionId, { namespace: opened.namespace });
 
     const jobs = workMemoryJobs(repos);
@@ -331,12 +375,12 @@ describe("Work Memory pipeline", () => {
   it("压缩之后再 idle，不再产生新的 extract", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-idle-session", "work-memory-idle-user");
-    const completed = service.completeTurn("work-memory-idle-turn", {
+    const completed = (await service.completeTurn("work-memory-idle-turn", {
       sessionId: opened.sessionId,
       query: "完整要求。",
       answer: "已记录。",
       status: "succeeded"
-    });
+    }));
     service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "work-memory-idle-request",
       adapterId: "codex-memory",
@@ -357,12 +401,12 @@ describe("Work Memory pipeline", () => {
   it("idle 到期时抽出未抽取的增量，游标推进到当前最大 trace", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-idle-flush-session", "work-memory-idle-flush-user");
-    service.completeTurn("work-memory-idle-flush-turn", {
+    (await service.completeTurn("work-memory-idle-flush-turn", {
       sessionId: opened.sessionId,
       query: "idle 才抽的要求。",
       answer: "已记录。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     expect(workMemoryJobs(repos)).toHaveLength(0);
 
@@ -379,12 +423,12 @@ describe("Work Memory pipeline", () => {
   it("idle 之后 close 不再重复抽取，也不关 episode", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-idle-close-session", "work-memory-idle-close-user");
-    service.completeTurn("work-memory-idle-close-turn", {
+    (await service.completeTurn("work-memory-idle-close-turn", {
       sessionId: opened.sessionId,
       query: "先 idle 再关闭。",
       answer: "已记录。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     makeIdleFlushDue(db, opened.sessionId);
     backdateInputTraces(db, opened.sessionId);
@@ -397,26 +441,26 @@ describe("Work Memory pipeline", () => {
     expect(repos.runtime.listJobs(undefined, 100).some((job) => job.jobType === "l3_world_model_update")).toBe(true);
   });
 
-  it("同一 session 两次 turn 武装同一个 dedupeKey，runAfter 以第二次为准", () => {
+  it("同一 session 两次 turn 武装同一个 dedupeKey，runAfter 以第二次为准", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-arm-session", "work-memory-arm-user");
-    service.completeTurn("work-memory-arm-turn-1", {
+    (await service.completeTurn("work-memory-arm-turn-1", {
       sessionId: opened.sessionId,
       query: "第一次说话。",
       answer: "好。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     const first = idleFlushJobs(repos);
     expect(first).toHaveLength(1);
     const firstRunAfter = String(first[0]?.payload.runAfter);
 
-    service.completeTurn("work-memory-arm-turn-2", {
+    (await service.completeTurn("work-memory-arm-turn-2", {
       sessionId: opened.sessionId,
       query: "第二次说话。",
       answer: "好。",
       status: "succeeded"
-    });
+    }));
 
     const second = idleFlushJobs(repos);
     expect(second).toHaveLength(1);
@@ -427,12 +471,12 @@ describe("Work Memory pipeline", () => {
   it("session 已关闭时 idle flush 不抽取", async () => {
     const { db, service } = createTestService();
     const opened = openWorkMemorySession(service, "work-memory-closed-idle-session", "work-memory-closed-idle-user");
-    service.completeTurn("work-memory-closed-idle-turn", {
+    (await service.completeTurn("work-memory-closed-idle-turn", {
       sessionId: opened.sessionId,
       query: "先关闭再 idle。",
       answer: "已记录。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     service.closeSession(opened.sessionId, { namespace: opened.namespace });
     const before = workMemoryJobs(repos).length;
@@ -444,26 +488,26 @@ describe("Work Memory pipeline", () => {
     expect(workMemoryJobs(repos)).toHaveLength(before);
   });
 
-  it("失败后重新武装的 idle flush 仍然可被调度", () => {
+  it("失败后重新武装的 idle flush 仍然可被调度", async () => {
     const { db, service } = createTestService();
-    const opened = openWorkMemorySession(service, "work-memory-retry-session", "work-memory-retry-user");    service.completeTurn("work-memory-retry-turn", {
+    const opened = openWorkMemorySession(service, "work-memory-retry-session", "work-memory-retry-user");    (await service.completeTurn("work-memory-retry-turn", {
       sessionId: opened.sessionId,
       query: "重试路径。",
       answer: "好。",
       status: "succeeded"
-    });
+    }));
     const repos = new Repositories(db.db);
     const job = idleFlushJobs(repos)[0]!;
     db.db.prepare(
       `UPDATE evolution_jobs SET status = 'failed', payload_json = '{}', last_error = 'boom' WHERE id = ?`
     ).run(job.id);
 
-    service.completeTurn("work-memory-retry-turn-2", {
+    (await service.completeTurn("work-memory-retry-turn-2", {
       sessionId: opened.sessionId,
       query: "再来一次。",
       answer: "好。",
       status: "succeeded"
-    });
+    }));
 
     const revived = idleFlushJobs(repos)[0]!;
     expect(revived.status).toBe("queued");

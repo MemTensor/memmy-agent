@@ -3,11 +3,10 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access, lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { createRequire } from "node:module";
 import { delimiter, isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { Ignore } from "ignore";
+import ignore, { type Ignore } from "ignore";
 import {
   canonicalJson,
   isLocalWorkspaceUri,
@@ -30,7 +29,7 @@ import type {
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
-const createIgnore = createRequire(import.meta.url)("ignore") as () => Ignore;
+const createIgnore: () => Ignore = ignore;
 
 const FIXED_EXCLUDES = new Set([
   ".git", "node_modules", "vendor", ".venv", "venv", "env", "dist", "build", "out",
@@ -57,7 +56,11 @@ interface InventorySnapshot {
   omittedCount: number;
 }
 
-export async function scanLocalProject(workspaceUri: WorkspaceUri): Promise<ProjectEnvironmentScanResult> {
+/** `withRuntimeProbes: false` skips running the declared runtimes (the new L3 keeps them in the machine profile). */
+export async function scanLocalProject(
+  workspaceUri: WorkspaceUri,
+  options: { withRuntimeProbes?: boolean } = {}
+): Promise<ProjectEnvironmentScanResult> {
   const root = await resolveLocalWorkspaceRoot(workspaceUri);
   let stable = await scanInventory(root);
   let next = await scanInventory(root);
@@ -73,7 +76,7 @@ export async function scanLocalProject(workspaceUri: WorkspaceUri): Promise<Proj
     if (textFile) textFiles.push(textFile);
   }
   const runtimeProbes: RuntimeProbeResult[] = [];
-  for (const probe of requiredRuntimeProbes(stable.entries)) {
+  for (const probe of options.withRuntimeProbes === false ? [] : requiredRuntimeProbes(stable.entries)) {
     runtimeProbes.push(await runProbe(root, probe));
   }
   return { ...stable, textFiles, runtimeProbes };

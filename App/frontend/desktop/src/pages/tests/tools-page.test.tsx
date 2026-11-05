@@ -76,7 +76,7 @@ describe("ToolsPageView", () => {
     const catalog = getAllIntegrationMeta();
 
     expect(catalog.filter((item) => item.isChannel)).toHaveLength(6);
-    expect(catalog.filter((item) => !item.isChannel)).toHaveLength(118);
+    expect(catalog.filter((item) => !item.isChannel)).toHaveLength(117);
     expect(html).not.toContain("Telegram");
     expect(html).not.toContain("WeChat");
     expect(html).toContain("GitHub");
@@ -87,6 +87,7 @@ describe("ToolsPageView", () => {
     expect(channelsHtml).not.toContain('data-surface="integration"');
     expect(html).toContain('data-surface="integration"');
     expect(html).not.toContain('data-surface="channel"');
+    expect(html).not.toContain("Strava");
     expect(html).not.toContain("ToolDetailDrawer");
     expect(html).not.toContain("modal-right");
   });

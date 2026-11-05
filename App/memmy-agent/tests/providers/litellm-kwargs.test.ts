@@ -477,6 +477,7 @@ describe("OpenAI-compatible request kwargs", () => {
   it("matches OpenAI temperature and token parameter rules", () => {
     expect(OpenAICompatProvider.supportsTemperature("gpt-4o")).toBe(true);
     expect(OpenAICompatProvider.supportsTemperature("gpt-5-chat")).toBe(false);
+    expect(OpenAICompatProvider.supportsTemperature("gpt-6.1-sol")).toBe(false);
     expect(OpenAICompatProvider.supportsTemperature("o3-mini")).toBe(false);
     expect(OpenAICompatProvider.supportsTemperature("gpt-4o", "medium")).toBe(false);
     expect(OpenAICompatProvider.supportsTemperature("kimi-k2.5")).toBe(false);
@@ -492,6 +493,19 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(kwargs.max_completion_tokens).toBe(4096);
     expect(kwargs).not.toHaveProperty("max_tokens");
     expect(kwargs).not.toHaveProperty("temperature");
+  });
+
+  it("omits unsupported GPT 6 temperature from explicit Responses requests", () => {
+    const provider = new OpenAICompatProvider({
+      spec: findByName("openai"), apiType: "responses", defaultModel: "gpt-6.1-sol",
+      extraBody: { reasoning: { effort: "low" } },
+    });
+    const body = provider.buildResponsesBody({
+      messages: [{ role: "user", content: "Open the test presentation." }],
+      temperature: 0.7, maxTokens: 512,
+    });
+    expect(body).toMatchObject({ model: "gpt-6.1-sol", max_output_tokens: 512, reasoning: { effort: "low" } });
+    expect(body).not.toHaveProperty("temperature");
   });
 
   it("sanitizes OpenAI-compatible tool history for strict providers", () => {
@@ -780,8 +794,19 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(kw.messages[1]).not.toHaveProperty("reasoning_content");
   });
 
-  it("applies memmy account reasoning none thinking controls by model family", () => {
-    const agentChat = buildKwargsFor("memmy_account", "agent_chat", "none");
+  it("keeps domestic agent_chat reasoning controls", () => {
+    const agentChat = providerFor("memmy_account", "agent_chat", {
+      extraHeaders: { "X-Agent-Region": "cn" },
+    }).buildKwargs({
+      messages: [{ role: "user", content: "hi" }],
+      tools: null,
+      model: "agent_chat",
+      maxTokens: 1024,
+      temperature: 0.7,
+      reasoningEffort: "none",
+      toolChoice: null,
+    });
+    expect(agentChat.temperature).toBe(0.7);
     expect(agentChat.extra_body).toEqual({ enable_thinking: false });
     expect(agentChat.max_tokens).toBe(1024);
     expect(agentChat).not.toHaveProperty("max_completion_tokens");

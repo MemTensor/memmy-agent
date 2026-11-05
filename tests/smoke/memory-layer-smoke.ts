@@ -14,11 +14,13 @@ import {
 } from "../../Memory/src/index.js";
 import { createLocalBackend, type LocalBackend } from "../../App/backend/src/index.js";
 import { createHttpMemoryClient } from "../../App/backend/src/adapters/outbound/memory-client/index.js";
+import { createTurnJudgeLlm, turnJudgeConfig } from "../../Memory/tests/service/session/turn-judge-llm.js";
 
 const MEMORY_TOKEN = "memory-layer-smoke-token";
 const BACKEND_TOKEN = "backend-smoke-token";
 
 export interface MemoryLayerSmokeResult {
+  turnJudge: boolean;
   healthRouteCount: number;
   backendChecks: number;
   memoryId: string;
@@ -26,18 +28,21 @@ export interface MemoryLayerSmokeResult {
   panelItemCount: number;
 }
 
-export async function runMemoryLayerSmoke(): Promise<MemoryLayerSmokeResult> {
+export async function runMemoryLayerSmoke(turnJudge = true): Promise<MemoryLayerSmokeResult> {
   const root = mkdtempSync(join(tmpdir(), "memmy-memory-layer-smoke-"));
   const configPath = join(root, "config.yaml");
   const adapterDirectory = join(root, "empty-agent-adapters");
   mkdirSync(adapterDirectory, { recursive: true });
   const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+  const config = turnJudgeConfig(turnJudge);
+  const { llm, judgeCalls } = createTurnJudgeLlm();
   const service = new MemoryService({
     db,
     mode: "dev",
     configPath,
-    configLoader: () => ({ config: DEFAULT_MEMMY_CONFIG, path: configPath }),
-    config: DEFAULT_MEMMY_CONFIG,
+    configLoader: () => ({ config, path: configPath }),
+    config,
+    llm,
     embedder: createSmokeEmbedder(),
     fetchAppMemoryBudget: async () => null
   });
@@ -115,7 +120,7 @@ export async function runMemoryLayerSmoke(): Promise<MemoryLayerSmokeResult> {
     );
     assert(started.turnId === turnId, "Backend must start the requested turn");
 
-    const completed = await backendRequest<{ l1MemoryId?: string }>(
+    const completed = await backendRequest<{ l1MemoryId?: string; rawTurnId?: string; episodeId?: string; assignmentStatus?: string }>(
       backend.runtimeConfig.baseUrl,
       "POST",
       `/api/v1/turns/${encodeURIComponent(turnId)}/complete`,
@@ -131,7 +136,16 @@ export async function runMemoryLayerSmoke(): Promise<MemoryLayerSmokeResult> {
     );
     const memoryId = completed.l1MemoryId;
     assert(memoryId, "Backend completion must return an L1 Memory id");
-    await waitForProcessingReady(backend.runtimeConfig.baseUrl, memoryId);
+    assert(completed.rawTurnId, "Backend completion must return the persisted raw turn id");
+    assert(completed.assignmentStatus === "pending" && !completed.episodeId, "Completion must expose pending attribution");
+    const original = db.db.prepare("SELECT user_text, assistant_text FROM raw_turns WHERE id=?").get(completed.rawTurnId) as { user_text: string; assistant_text: string } | undefined;
+    assert(original?.user_text === "Verify the Memmy v1.1.2 release attachment contract"
+      && original.assistant_text === "Run every release check and publish only after every attachment is verified.", "Acceptance must persist the original turn");
+    await waitForProcessingReady(backend.runtimeConfig.baseUrl, memoryId, () => {
+      const raw = db.db.prepare("SELECT episode_id FROM raw_turns WHERE id=?").get(completed.rawTurnId!) as { episode_id: string | null };
+      return Boolean(raw.episode_id) && db.db.prepare("SELECT 1 FROM evolution_jobs WHERE job_type='episode_finalize' AND status='succeeded' AND json_extract(payload_json,'$.rawTurnId')=?").get(completed.rawTurnId!) !== undefined;
+    });
+    assert(judgeCalls.length === (turnJudge ? 1 : 0), "Smoke must execute the selected judgment mode");
 
     const queryId = "backend-smoke-query";
     const recall = await backendRequest<{
@@ -199,6 +213,7 @@ export async function runMemoryLayerSmoke(): Promise<MemoryLayerSmokeResult> {
     assert(deleted.ok && deleted.id === memoryId && deleted.status === "deleted", "Backend must delete the smoke Memory");
 
     return {
+      turnJudge,
       healthRouteCount: health.capabilities.routes.length,
       backendChecks: 12,
       memoryId,
@@ -249,14 +264,14 @@ export async function runMemoryLayerSmoke(): Promise<MemoryLayerSmokeResult> {
   }
 }
 
-async function waitForProcessingReady(baseUrl: string, memoryId: string): Promise<void> {
+async function waitForProcessingReady(baseUrl: string, memoryId: string, assignmentReady: () => boolean): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     const status = await backendRequest<{
       items?: Array<{ memoryId?: string; state?: string; errorMessage?: string | null }>;
     }>(baseUrl, "POST", "/api/v1/memory/processing/status", { memoryIds: [memoryId] });
     const item = status.items?.find((candidate) => candidate.memoryId === memoryId);
-    if (item?.state === "ready" || item?.state === "ready_text_only") return;
+    if ((item?.state === "ready" || item?.state === "ready_text_only") && assignmentReady()) return;
     if (item?.state === "failed") {
       throw new Error(`Memory processing failed: ${item.errorMessage ?? "unknown error"}`);
     }
@@ -326,8 +341,12 @@ function assert(condition: unknown, message: string): asserts condition {
 
 const entrypoint = process.argv[1] ? resolve(process.argv[1]) : "";
 if (entrypoint === fileURLToPath(import.meta.url)) {
-  runMemoryLayerSmoke()
-    .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
+  (async () => {
+    for (const enabled of [false, true]) {
+      const result = await runMemoryLayerSmoke(enabled);
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    }
+  })()
     .catch((error: unknown) => {
       console.error(error instanceof Error ? error.stack ?? error.message : String(error));
       process.exitCode = 1;

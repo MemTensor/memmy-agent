@@ -15,9 +15,12 @@ import {
   embeddingTextForMemory,
   updateMemoryVectorField
 } from "../../../src/service/embedding/embedding-pipeline.js";
+import { l2VectorCacheKey } from "../../../src/service/embedding/l2-vector-cache.js";
+import { memoryVector } from "../../../src/storage/memory-vector-state.js";
 import { ModelHttpError } from "../../../src/model/http.js";
 import { createEmbedder } from "../../../src/model/embedder.js";
 import { Repositories } from "../../../src/storage/repositories.js";
+import { WorkerConcurrencyController } from "../../../src/service/worker/worker-concurrency.js";
 import {
   addAgentSourceImport,
   createBatchReflectionLlm,
@@ -33,39 +36,87 @@ const {
   createTestService
 } = createMemoryServiceFixture();
 
-afterEach(() => {
-  cleanup();
+afterEach(async () => {
+  await cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe("MemoryService / embedding / processing", () => {
+  it.each([false, true])("reuses exact L2 query vectors across jobs (preseeded: %s)", async (preseeded) => {
+    const seen: string[] = [];
+    const embedder = createCapturingEmbedder(seen);
+    const { db, service } = createTestService({ embedder });
+    const repos = new Repositories(db.db);
+    const memory = negativePolicyMemory("PPT headings", "Before presenting");
+    repos.memories.insert(memory);
+    const key = () => l2VectorCacheKey(embedder.config, "query", embeddingTextForMemory(repos.memories.get(memory.id)!));
+    if (preseeded) repos.runtime.setKv(key(), [1, 0, 0], memory.createdAt);
+    // A document vector must never serve a query request.
+    repos.runtime.setKv(l2VectorCacheKey(embedder.config, "document", embeddingTextForMemory(memory)), [0, 1, 0], memory.createdAt);
+    async function run(index: number) {
+      const id = `l2-cache-job-${index}`;
+      repos.runtime.enqueueJob({ id, jobType: "embedding", status: "queued", dedupeKey: id,
+        userId: memory.userId, targetMemoryId: memory.id, payload: {}, attempts: 0, maxAttempts: 3,
+        createdAt: memory.createdAt, updatedAt: memory.createdAt });
+      const result = await service.runWorkerOnce(10);
+      expect(result.jobs).toContainEqual(expect.objectContaining({ jobId: id, status: "succeeded" }));
+    }
+    await run(1);
+    await run(2);
+    expect(seen).toHaveLength(preseeded ? 0 : 1);
+    expect(repos.runtime.getKv(key())?.value).toEqual([1, 0, 0]);
+    expect(memoryVector(repos.memories.get(memory.id)!, "vec")).toEqual([1, 0, 0]);
+    const changed = repos.memories.get(memory.id)!;
+    (changed.properties.internal_info.policy as Record<string, unknown>).trigger = "After a style correction";
+    repos.memories.update(changed);
+    await run(3);
+    expect(seen).toHaveLength(preseeded ? 1 : 2);
+    embedder.config.model = "different-model";
+    await run(4);
+    expect(seen).toHaveLength(preseeded ? 2 : 3);
+  });
+
   for (const queue of ["fresh", "retry"] as const) {
     for (const format of ["code", "message"] as const) {
       it.each([
-        ["OperationNotSupported", "The embeddings operation does not work with the specified model.", false],
-        ["insufficient_quota", "Insufficient balance.", false],
-        ["rate_limit_exceeded", "Rate limit exceeded.", true]
-      ] as const)(`${queue} queue does not fan out shared HTTP 400 %s (${format})`, async (code, message, transient) => {
-        const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: {
-          code: format === "code" ? code : undefined,
-          message: format === "message" ? message : "Request rejected"
-        } }), { status: 400 }));
+        ["OperationNotSupported", "The embeddings operation does not work with the specified model.",
+          "model_configuration", "failed", 0, "configuration"],
+        ["insufficient_quota", "Insufficient balance.",
+          "quota_exhausted", "failed", 1, null],
+        ["rate_limit_exceeded", "Rate limit exceeded.",
+          "transient_provider_error", "pending", 1, null]
+      ] as const)(`${queue} queue does not fan out shared HTTP 400 %s (${format})`, async (
+        code, message, errorCode, retryStatus, attempts, blockedReason
+      ) => {
+        const transient = retryStatus === "pending";
+        const inputs: string[][] = [];
+        const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+          inputs.push((JSON.parse(String(init?.body)) as { input: string[] }).input);
+          return new Response(JSON.stringify({ error: {
+            code: format === "code" ? code : undefined,
+            message: format === "message" ? message : "Request rejected"
+          } }), { status: 400 });
+        });
         vi.stubGlobal("fetch", fetchMock);
         const { db, service } = createTestService({
+          // Four background members fit one request while the realtime slot remains reserved.
+          concurrency: new WorkerConcurrencyController({ maxActiveJobs: 5 }),
           embedder: createHttpTestEmbedder(),
           llm: createBatchReflectionLlm([], "Synthetic summary.")
         });
         const repos = new Repositories(db.db);
         if (queue === "fresh") {
           const session = service.openSession({ namespace: { source: "codex", profileId: "shared-error", userId: "test" } });
-          const ids = ["GOOD_A", "GOOD_B", "GOOD_C"].map((answer, i) => service.completeTurn(`turn-${i}`, {
+          const ids = await Promise.all(["GOOD_A", "GOOD_B", "GOOD_C"].map(async (answer, i) => (await service.completeTurn(`turn-${i}`, {
             sessionId: session.sessionId, query: "Remember this.", answer
-          }).l1MemoryId);
-          await service.runWorkerOnce(20, { priorityCohortOnly: true });
-          await service.runWorkerOnce(20, { priorityCohortOnly: true });
+          })).l1MemoryId));
+          await prepareFreshEmbeddingBatch(service, ids);
+          expect(fetchMock).not.toHaveBeenCalled();
+          await service.runWorkerOnce(ids.length, { targetMemoryIds: ids });
           for (const id of ids) expect(repos.processing.get(id)).toMatchObject({
             state: transient ? "embedding_pending" : "failed",
-            errorCode: transient ? "transient_provider_error" : "model_configuration",
+            errorCode,
             retryAction: transient ? "retry" : "open_settings"
           });
         } else {
@@ -78,11 +129,12 @@ describe("MemoryService / embedding / processing", () => {
           await service.runWorkerOnce(10);
           for (const retry of retries) {
             const stored = repos.runtime.getEmbeddingRetry(retry.id)!;
-            expect(stored).toMatchObject({ status: transient ? "pending" : "failed", attempts: 1 });
+            expect(stored).toMatchObject({ status: retryStatus, attempts, blockedReason });
             if (transient) expect(stored.nextAttemptAt).toBeGreaterThan(Date.now());
           }
         }
         expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(inputs.map(input => input.length)).toEqual([3]);
         expect(db.db.prepare("SELECT count(*) AS n FROM memory_vector_entries").get()).toEqual({ n: 0 });
       });
     }
@@ -91,8 +143,10 @@ describe("MemoryService / embedding / processing", () => {
       ["context_length_exceeded", "maximum context length exceeded"],
       ["20015", "The parameter is invalid."]
     ])(`${queue} queue preserves valid siblings through the HTTP adapter (%s)`, async (code, message) => {
-      const fetchMock = vi.fn(async (_url, init) => {
+      const inputs: string[][] = [];
+      const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
         const { input } = JSON.parse(String(init?.body)) as { input: string[] };
+        inputs.push(input);
         const bad = input.some(text => text.includes("BAD_EMBEDDING_ITEM"));
         return new Response(JSON.stringify(bad ? { code, message } : {
           data: input.map(() => ({ embedding: [1, 0, 0] }))
@@ -100,16 +154,18 @@ describe("MemoryService / embedding / processing", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
       const { db, service } = createTestService({ embedder: createHttpTestEmbedder(),
+        concurrency: new WorkerConcurrencyController({ maxActiveJobs: 5 }),
         llm: createBatchReflectionLlm([], "Synthetic summary.") });
       const repos = new Repositories(db.db);
       const texts = ["GOOD_A", "GOOD_B", "GOOD_C", "BAD_EMBEDDING_ITEM"];
       if (queue === "fresh") {
         const session = service.openSession({ namespace: { source: "codex", profileId: "isolation", userId: "test" } });
-        const ids = texts.map((answer, i) => service.completeTurn(`turn-${i}`, {
+        const ids = await Promise.all(texts.map(async (answer, i) => (await service.completeTurn(`turn-${i}`, {
           sessionId: session.sessionId, query: "Remember this.", answer
-        }).l1MemoryId);
-        await service.runWorkerOnce(20, { priorityCohortOnly: true });
-        await service.runWorkerOnce(20, { priorityCohortOnly: true });
+        })).l1MemoryId));
+        await prepareFreshEmbeddingBatch(service, ids);
+        expect(fetchMock).not.toHaveBeenCalled();
+        await service.runWorkerOnce(ids.length, { targetMemoryIds: ids });
         expect(ids.map(id => repos.processing.get(id)?.state)).toEqual([
           "ready", "ready", "ready", code === "context_length_exceeded" ? "ready_text_only" : "failed"
         ]);
@@ -127,6 +183,8 @@ describe("MemoryService / embedding / processing", () => {
       }
       expect(db.db.prepare("SELECT count(*) AS n FROM memory_vector_entries").get()).toEqual({ n: 3 });
       expect(fetchMock).toHaveBeenCalledTimes(5);
+      expect(inputs.map(input => input.length)).toEqual([4, 1, 1, 1, 1]);
+      for (const marker of texts) expect(inputs[0]!.filter(text => text.includes(marker))).toHaveLength(1);
       await service.runWorkerOnce(20, { priorityCohortOnly: true });
       expect(fetchMock).toHaveBeenCalledTimes(5);
     });
@@ -200,6 +258,7 @@ describe("MemoryService / embedding / processing", () => {
   });
 
   it("retries trace embedding jobs without leaving the processing state stuck", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const root = createTestRoot("mindock-memory-embedding-retry-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -218,18 +277,20 @@ describe("MemoryService / embedding / processing", () => {
         userId: "user-retry"
       }
     });
-    const complete = service.completeTurn("turn-retry-1", {
+    const complete = (await service.completeTurn("turn-retry-1", {
       sessionId: session.sessionId,
       query: "Remember that transient embedding failures should be retried.",
       answer: "I will keep the retry queue durable."
-    });
+    }));
     const initialMemory = db.db
       .prepare(`SELECT version FROM memories WHERE id = ?`)
       .get(complete.l1MemoryId) as { version: number };
 
-    const summaryRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    // Use an explicit one-job budget to inspect the intermediate state before
+    // continuous admission can immediately start the generated embedding.
+    const summaryRun = await service.runWorkerOnce(1, { targetMemoryIds: [complete.l1MemoryId] });
     expect(summaryRun.jobs.some((job) => job.jobType === "trace_summary" && job.status === "succeeded")).toBe(true);
-    const firstRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    const firstRun = await service.runWorkerOnce(1, { targetMemoryIds: [complete.l1MemoryId] });
     const failedEmbedding = firstRun.jobs.find((job) => job.jobType === "embedding" && job.status === "failed");
     expect(failedEmbedding?.jobId).toBeTruthy();
     const failedJob = db.db.prepare(
@@ -257,6 +318,9 @@ describe("MemoryService / embedding / processing", () => {
       attemptCount: 1
     });
 
+    const retryAt = new Repositories(db.db).runtime.getJob(failedJob.id)!.availableAt!;
+    expect(Date.parse(retryAt)).toBeGreaterThan(Date.now());
+    vi.setSystemTime(Date.parse(retryAt));
     const secondRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
     expect(secondRun.jobs).toEqual(expect.arrayContaining([
       expect.objectContaining({ jobId: failedJob.id, jobType: "embedding", status: "succeeded" })
@@ -279,7 +343,10 @@ describe("MemoryService / embedding / processing", () => {
       .prepare(`SELECT version FROM memories WHERE id = ?`)
       .get(complete.l1MemoryId) as { version: number };
     const reindexRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
-    expect(reindexRun.jobs.some((job) => job.jobType === "embedding" && job.status === "succeeded")).toBe(true);
+    const afterReflection = [...reflectionRun.jobs, ...reindexRun.jobs];
+    expect(afterReflection.some((job) => job.jobType === "embedding" && job.status === "succeeded")).toBe(true);
+    expect(afterReflection.findIndex(job => job.jobType === "reflection"))
+      .toBeLessThan(afterReflection.findIndex(job => job.jobType === "embedding"));
     expect(new Repositories(db.db).processing.get(complete.l1MemoryId)?.state).toBe("ready");
     const memory = db.db
       .prepare(
@@ -318,19 +385,20 @@ describe("MemoryService / embedding / processing", () => {
     const session = service.openSession({
       namespace: { source: "codex", profileId: "batch-isolation", userId: "user-batch-isolation" }
     });
-    const good = service.completeTurn("turn-embedding-good", {
+    const good = (await service.completeTurn("turn-embedding-good", {
       sessionId: session.sessionId,
       query: "Remember the valid embedding item.",
       answer: "VALID_EMBEDDING_ITEM"
-    });
-    const bad = service.completeTurn("turn-embedding-bad", {
+    }));
+    const bad = (await service.completeTurn("turn-embedding-bad", {
       sessionId: session.sessionId,
       query: "Remember the oversized embedding item.",
       answer: "BAD_EMBEDDING_ITEM"
-    });
+    }));
 
-    await service.runWorkerOnce(20, { priorityCohortOnly: true });
-    const embeddingRun = await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    const targets = { targetMemoryIds: [good.l1MemoryId, bad.l1MemoryId] };
+    await service.runWorkerOnce(2, targets);
+    const embeddingRun = await service.runWorkerOnce(2, targets);
     const repositories = new Repositories(db.db);
 
     expect(embeddingRun.jobs).toEqual(expect.arrayContaining([
@@ -347,7 +415,7 @@ describe("MemoryService / embedding / processing", () => {
     db.close();
   });
 
-  it("terminates a legacy embedding retry after a deterministic provider failure", async () => {
+  it("holds a forbidden legacy embedding retry for configuration repair without consuming an attempt", async () => {
     const { db, service } = createTestService({ embedder: createForbiddenEmbedder() });
     const repositories = new Repositories(db.db);
     const memory = skillMemory();
@@ -364,11 +432,12 @@ describe("MemoryService / embedding / processing", () => {
     const run = await service.runWorkerOnce(10);
 
     expect(run.embeddingRetries.items).toEqual([
-      expect.objectContaining({ id: retry.id, status: "failed", attempts: 1 })
+      expect.objectContaining({ id: retry.id, status: "failed", attempts: 0 })
     ]);
     expect(repositories.runtime.getEmbeddingRetry(retry.id)).toMatchObject({
       status: "failed",
-      attempts: 1,
+      attempts: 0,
+      blockedReason: "configuration",
       lastError: "Access to the configured model is forbidden."
     });
     db.close();
@@ -523,11 +592,11 @@ describe("MemoryService / embedding / processing", () => {
         userId: "user-dual-embedding"
       }
     });
-    const complete = service.completeTurn("turn-dual-embedding", {
+    const complete = (await service.completeTurn("turn-dual-embedding", {
       sessionId: session.sessionId,
       query: "Remember the SQLite migration rule.",
       answer: "I will run the focused migration test before broad checks."
-    });
+    }));
 
     await service.runWorkerOnce(10);
     await service.runWorkerOnce(10);
@@ -584,13 +653,13 @@ describe("MemoryService / embedding / processing", () => {
     expect(db.db.prepare("SELECT COUNT(*) AS count FROM evolution_jobs").get()).toEqual({ count: 0 });
     expect(db.db.prepare("SELECT COUNT(*) AS count FROM memory_processing_state").get()).toEqual({ count: 0 });
 
-    const complete = service.completeTurn("turn-live-trace-summary", {
+    const complete = (await service.completeTurn("turn-live-trace-summary", {
       sessionId: session.sessionId,
       query: "Remember the SQLite migration workflow.",
       answer: "Use focused checks first, then broaden only after the migration path is verified."
-    });
+    }));
 
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close", "episode_title"]);
+    expect(complete.jobs.map((job) => job.jobType)).toEqual(["episode_assignment", "episode_finalize", "trace_summary"]);
     expect(new Repositories(db.db).processing.get(complete.l1MemoryId)).toMatchObject({
       state: "summary_pending",
       stage: "summary",
@@ -603,14 +672,22 @@ describe("MemoryService / embedding / processing", () => {
     });
     expect(recall.hits.some((hit) => hit.id === complete.l1MemoryId)).toBe(false);
     const openEpisodeRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
-    expect(openEpisodeRun.jobs.map((job) => job.jobType)).toEqual(["trace_summary"]);
+    expect(openEpisodeRun.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobType: "trace_summary", targetMemoryId: complete.l1MemoryId })
+    ]));
     expect(llmCalls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(1);
+    expect(llmCalls.some((call) => call.options.operation === "capture.reflection.batch.v13")).toBe(false);
     const embeddingRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
-    expect(embeddingRun.jobs.map((job) => job.jobType)).toEqual(["embedding"]);
-    const episodeRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
-    expect(episodeRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
-    const titleRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
-    expect(titleRun.jobs.map((job) => job.jobType)).toEqual(["episode_title"]);
+    // Newly produced embedding work may finish in the original drain.
+    const completed = [...openEpisodeRun.jobs, ...embeddingRun.jobs];
+    expect(completed).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobType: "embedding", targetMemoryId: complete.l1MemoryId })
+    ]));
+    const reflectionIndex = completed.findIndex((job) => job.jobType === "reflection");
+    const embeddingIndex = completed.findIndex((job) => job.jobType === "embedding");
+    if (reflectionIndex >= 0) expect(embeddingIndex).toBeLessThan(reflectionIndex);
+    const auxiliaryJobs = [...openEpisodeRun.jobs, ...embeddingRun.jobs].map((job) => job.jobType);
+    expect(auxiliaryJobs).toEqual(expect.arrayContaining(["episode_assignment", "episode_finalize", "episode_idle_close"]));
     expect(embeddingTexts).toHaveLength(1);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM evolution_jobs
@@ -655,7 +732,8 @@ describe("MemoryService / embedding / processing", () => {
       async complete() {
         return "{}";
       },
-      async completeJson<T extends Record<string, unknown>>() {
+      async completeJson<T extends Record<string, unknown>>(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
         return { title: "生成标题", summary: "生成摘要" } as unknown as T;
       },
       status: () => ({
@@ -669,11 +747,11 @@ describe("MemoryService / embedding / processing", () => {
     const session = service.openSession({
       namespace: { source: "codex", profileId: "default", sessionKey: "unconfigured-summary" }
     });
-    service.completeTurn("turn-unconfigured-summary", {
+    (await service.completeTurn("turn-unconfigured-summary", {
       sessionId: session.sessionId,
       query: "请修复自动扫描卡顿并运行测试",
       answer: "已完成修复并运行测试。"
-    });
+    }));
     addAgentSourceImport(
       service,
       { source: "codex", profileId: "unconfigured-import", userId: "unconfigured-import" },
@@ -836,6 +914,18 @@ function worldModelMemory(): MemoryRow {
     createdAt: now,
     updatedAt: now
   };
+}
+
+/** Prepare all compatible embedding jobs before draining, without relying on old priority cohorts. */
+async function prepareFreshEmbeddingBatch(
+  service: ReturnType<typeof createTestService>["service"], ids: readonly string[]
+): Promise<void> {
+  for (const id of ids) {
+    const run = await service.runWorkerOnce(1, { targetMemoryIds: [id] });
+    expect(run.jobs).toEqual([expect.objectContaining({
+      jobType: "trace_summary", targetMemoryId: id, status: "succeeded"
+    })]);
+  }
 }
 
 function createHttpTestEmbedder(): Embedder {

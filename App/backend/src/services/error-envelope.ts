@@ -12,6 +12,9 @@ export const API_ERROR_CODES = [
   "rate_limited",
   "internal",
   "memory_layer_unavailable",
+  "memory_starting",
+  "memory_upgrading",
+  "memory_scan_upgrade_required",
   "missing_idempotency_key",
   "idempotency_body_mismatch",
   "scan_not_permitted",
@@ -46,6 +49,9 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Objec
   rate_limited: 429,
   internal: 500,
   memory_layer_unavailable: 503,
+  memory_starting: 503,
+  memory_upgrading: 503,
+  memory_scan_upgrade_required: 503,
   missing_idempotency_key: 400,
   idempotency_body_mismatch: 409,
   scan_not_permitted: 403,
@@ -78,6 +84,7 @@ interface ErrorEnvelope {
   code: ApiErrorCode;
   status: number;
   message: string;
+  upstreamRequestId?: string;
 }
 
 /** Handles with error envelope. */
@@ -93,7 +100,8 @@ export function withErrorEnvelope<Reply>(
         error: {
           code: envelope.code,
           message: envelope.message,
-          requestId: extractRequestId(request)
+          requestId: extractRequestId(request),
+          ...(envelope.upstreamRequestId ? { upstreamRequestId: envelope.upstreamRequestId } : {})
         }
       });
     }
@@ -115,7 +123,8 @@ function toErrorEnvelope(error: unknown): ErrorEnvelope {
     return {
       code,
       status: error.status,
-      message: error.message
+      message: error.message,
+      ...(error.requestId ? { upstreamRequestId: error.requestId } : {})
     };
   }
 

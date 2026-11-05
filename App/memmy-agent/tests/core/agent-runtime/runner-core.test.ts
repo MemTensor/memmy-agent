@@ -187,7 +187,7 @@ describe("AgentRunner expanded behavior", () => {
     tools.register(new StaticTool("large_tool", "x".repeat(100)));
 
     await new AgentRunner(provider).run(
-      new AgentRunSpec({ messages: [], tools, maxIterations: 2, maxToolResultChars: 10, model: "test-model" }),
+      new AgentRunSpec({ messages: [], tools, maxIterations: 2, maxToolResultChars: 10, toolResultCompressionEnabled: true, model: "test-model" }),
     );
 
     const secondMessages = provider.calls[1].messages;

@@ -1,3 +1,7 @@
+import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
+import { L2_EXTRACTION_OPERATION_PREFIXES, L2_EXTRACTION_SNAPSHOT_PREFIXES } from "./l2-extraction-keys.js";
+import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
+import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
 import type Database from "better-sqlite3";
 import {
   canonicalJson,
@@ -10,7 +14,7 @@ import {
   type WorkspaceUri
 } from "../contracts/index.js";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
-import { displayFieldsForMemory } from "../service/read-model/display-fields.js";
+import { displayFieldsForMemory, isTraceMemory, storedTraceSummary } from "../service/read-model/display-fields.js";
 import type {
   ProjectEnvironmentKind,
   ProjectEnvironmentStateRecord
@@ -38,9 +42,10 @@ import type {
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { agentSourceFamilyRoots, normalizeAgentIdKey } from "../utils/agent-source-id.js";
 import { newId, stableHash } from "../utils/id.js";
-import { asStringArray, parseJson, toJson } from "../utils/json.js";
-import { firstSemanticUserLine } from "../utils/text.js";
+import { asStringArray, isRecord, parseJson, toJson } from "../utils/json.js";
+import { firstSemanticUserLine, semanticUserText } from "../utils/text.js";
 import { nowIso } from "../utils/time.js";
+import { assertCurrentJobLease, withoutJobLeaseGuard } from "./job-lease-context.js";
 import {
   attachMemoryVectors,
   dirtyMemoryVectorEntries,
@@ -54,7 +59,17 @@ import {
   VECTOR_SEARCH_WINDOW,
   type VectorSearchCandidate
 } from "./sqlite-vec-store.js";
+import { QueueSchedulingStore, type SchedulingMetadata } from "./queue-scheduling-store.js";
+import {
+  l3ProfileHeldSql,
+  mainQueueEligibility,
+  retryQueueEligibility,
+  scopedJobReadySql,
+  type QueueEligibilityOptions
+} from "./queue-eligibility.js";
 import { compactHistoryChangePayload, compactHistoryChangeRow } from "./history-change-snapshot.js";
+import { L3FieldRepository } from "./l3-field-repository.js";
+import { isL3FieldSnapshotMemory } from "../service/l3-field/snapshot-memory.js";
 
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
@@ -80,6 +95,10 @@ const BUNDLE_TABLES = [
   "api_logs",
   "memory_change_log",
   "l3_world_model_project_environment_state",
+  "l3_units",
+  "l3_unit_batches",
+  "l3_items",
+  "l3_user_projects",
   "evolution_jobs",
   "embedding_retry_queue",
   "memory_processing_state",
@@ -88,7 +107,7 @@ const BUNDLE_TABLES = [
   "audit_logs"
 ] as const;
 const CLEAR_MEMORY_TABLES = [
-  ...BUNDLE_TABLES.filter((table) => table !== "source_turn_captures"),
+  ...BUNDLE_TABLES,
   "memories_fts",
   "user_memories_fts",
   "memory_vector_entries",
@@ -202,7 +221,7 @@ export interface SkillClusterMemberRecord {
 export interface RawTurnRecord {
   id: string;
   sessionId: string;
-  episodeId: string;
+  episodeId?: string;
   turnId: string;
   userId: string;
   conversationId?: string;
@@ -305,7 +324,7 @@ export interface ApiLogRecord {
   calledAt: string;
 }
 
-export interface EvolutionJobRecord {
+export interface EvolutionJobRecord extends SchedulingMetadata {
   id: string;
   jobType: JobType;
   status: JobStatus;
@@ -320,8 +339,25 @@ export interface EvolutionJobRecord {
   attempts: number;
   maxAttempts: number;
   leasedUntil?: string | null;
+  leaseOwner?: string | null;
+  leaseToken?: string | null;
+  availableAt?: string | null;
+  blockedReason?: string | null;
+  failureCount?: number;
+  leaseCount?: number;
+  leaseRecoveryCount?: number;
   lastError?: string | null;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface EmbeddingMaintenanceTask {
+  targetId: string;
+  userMemory: boolean;
+  vectorField?: MemoryVectorField;
+  contentHash?: string;
+  sourceText?: string;
+  status: "pending" | "active" | "stale" | "failed";
   updatedAt: string;
 }
 
@@ -330,7 +366,11 @@ export type L3WorldModelBatchTrigger =
   | "token_compaction"
   | "token_compaction_attempt"
   | "session_close"
-  | "episode_idle_close";
+  | "episode_idle_close"
+  /** A finished agent-source scan pass; new L3 only (scans stay out of the old pipeline). */
+  | "scan_pass"
+  /** A Session that went quiet without a close (its idle flush); new L3 only. */
+  | "session_idle";
 
 export type L3WorldModelTargetField = Exclude<L3WorldModelFieldName, "project_environment_profile">;
 
@@ -425,10 +465,11 @@ export interface MemorySearchIdHit {
 export type MemorySearchChannel = EmbeddingRetryVectorField | "fts" | "pattern" | "structural";
 
 export interface MemoryVectorSearchOptions {
+  identity?: EmbeddingIdentity;
   anyOfTags?: string[];
 }
 
-export interface EmbeddingRetryRecord {
+export interface EmbeddingRetryRecord extends SchedulingMetadata {
   id: string;
   targetKind: EmbeddingRetryTargetKind;
   targetId: string;
@@ -437,10 +478,16 @@ export interface EmbeddingRetryRecord {
   embedRole: "document" | "query";
   status: EmbeddingRetryStatus;
   attempts: number;
+  /** Cumulative claims; migrated history is a lower bound. */
+  leaseCount?: number;
+  /** Expired-lease recoveries observed since counter migration. */
+  leaseRecoveryCount?: number;
   maxAttempts: number;
   nextAttemptAt: number;
   claimedBy?: string | null;
   leaseUntil?: number | null;
+  leaseToken?: string | null;
+  blockedReason?: string | null;
   lastError?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -588,7 +635,11 @@ export class MemoryRepository {
     return this.updateRow(memory, false);
   }
 
-  private updateRow(memory: MemoryRow, bumpVersion: boolean): MemoryRow {
+  updateIfVersion(memory: MemoryRow, expectedVersion: number): MemoryRow {
+    return this.db.transaction(() => this.updateRow(memory, true, expectedVersion))();
+  }
+
+  private updateRow(memory: MemoryRow, bumpVersion: boolean, expectedVersion?: number): MemoryRow {
     const existing = this.get(memory.id);
     if (!existing) {
       throw new Error(`memory not found: ${memory.id}`);
@@ -596,9 +647,9 @@ export class MemoryRepository {
     const prepared = prepareMemoryForStorage(memory);
     const updated = {
       ...prepared.memory,
-      version: bumpVersion ? memory.version + 1 : existing.version
+      version: bumpVersion ? (expectedVersion ?? memory.version) + 1 : existing.version
     };
-    this.db
+    const write = this.db
       .prepare(
         `UPDATE memories
          SET timeline = @timeline,
@@ -620,9 +671,10 @@ export class MemoryRepository {
              version = @version,
              updated_at = @updatedAt,
              deleted_at = @deletedAt
-         WHERE id = @id`
+         WHERE id = @id AND (@expectedVersion IS NULL OR version = @expectedVersion)`
       )
-      .run(memoryToSql(updated));
+      .run({ ...memoryToSql(updated), expectedVersion: expectedVersion ?? null });
+    if (write.changes !== 1) throw new Error(`memory version changed: ${memory.id}`);
     const mergedVectors = mergeMemoryVectors(
       attachedMemoryVectorEntries(existing),
       prepared.vectorUpdates
@@ -827,6 +879,30 @@ export class MemoryRepository {
     return ids.map((id) => byId.get(id)).filter((row): row is MemoryRow => Boolean(row));
   }
 
+  /** Title scheduling needs provenance, never conversation bodies or vectors. */
+  areAllHistoricalCaptureMemories(ids: readonly string[]): boolean {
+    const distinctIds = [...new Set(ids)];
+    if (distinctIds.length === 0) return false;
+    const row = this.db.prepare(`SELECT COUNT(*) AS found,
+      COALESCE(SUM(CASE WHEN
+        json_extract(properties_json, '$.internal_info.capture_origin') = 'agent_source_scan'
+        AND lower(COALESCE(agent_id, '')) != 'memmy-onboarding'
+        AND NOT EXISTS (SELECT 1 FROM (
+          SELECT value FROM json_each(CASE WHEN json_type(tags_json) = 'array' THEN tags_json ELSE '[]' END)
+          UNION ALL
+          SELECT value FROM json_each(CASE WHEN json_type(info_json, '$.tags') = 'array'
+            THEN json_extract(info_json, '$.tags') ELSE '[]' END)
+          UNION ALL
+          SELECT value FROM json_each(CASE WHEN json_type(properties_json, '$.tags') = 'array'
+            THEN json_extract(properties_json, '$.tags') ELSE '[]' END)
+        ) WHERE lower(value) IN ('first-encounter-report', 'onboarding-report'))
+        THEN 1 ELSE 0 END), 0) AS historical
+      FROM memories
+      WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL`)
+      .get(toJson(distinctIds)) as { found: number; historical: number };
+    return row.found === distinctIds.length && row.historical === row.found;
+  }
+
   list(filter: MemoryFilter = {}, limit = 50, offset = 0): MemoryRow[] {
     const built = buildMemoryWhere(filter);
     const rows = this.db
@@ -844,7 +920,8 @@ export class MemoryRepository {
   listStats(): MemoryStatsRow[] {
     const rows = this.db
       .prepare(
-        `SELECT conversation_id,
+        `SELECT id,
+                conversation_id,
                 session_id,
                 agent_id,
                 app_id,
@@ -858,6 +935,7 @@ export class MemoryRepository {
          WHERE deleted_at IS NULL`
       )
       .all() as Array<{
+        id: string;
         conversation_id: string | null;
         session_id: string | null;
         agent_id: string | null;
@@ -870,6 +948,7 @@ export class MemoryRepository {
         internal_source: unknown;
       }>;
     return rows.map((row) => ({
+      id: row.id,
       conversationId: row.conversation_id ?? undefined,
       sessionId: row.session_id ?? undefined,
       agentId: row.agent_id ?? undefined,
@@ -1138,6 +1217,7 @@ export class MemoryRepository {
       status: filter.status ?? ["activated", "resolving"]
     });
     const anyTag = buildAnyTagWhere(options.anyOfTags);
+    const identity = options.identity ?? vectorEmbeddingIdentity(query);
     const candidateWindow = VECTOR_SEARCH_WINDOW;
     const rows = this.db
       .prepare(
@@ -1148,11 +1228,13 @@ export class MemoryRepository {
          JOIN memories ON memories.id = memory_vector_entries.memory_id
          WHERE ${built.where}
            AND memory_vector_entries.vector_field = ?
+           AND memory_vector_entries.embedding_dim = ?
+           ${identity ? "AND memory_vector_entries.embedding_provider = ? AND memory_vector_entries.embedding_model = ?" : ""}
            ${anyTag.where ? `AND ${anyTag.where}` : ""}
          ORDER BY memory_vector_entries.updated_at DESC, memory_vector_entries.id DESC
          LIMIT ?`
       )
-      .all(...built.params, vectorField, ...anyTag.params, candidateWindow) as Array<{
+      .all(...built.params, vectorField, query.length, ...(identity ? [identity.provider, identity.model] : []), ...anyTag.params, candidateWindow) as Array<{
         id: string;
         vector_id: number;
         embedding_dim: number;
@@ -1317,7 +1399,7 @@ export class MemoryRepository {
   reindexFts(memory: MemoryRow): void {
     try {
       this.db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(memory.id);
-      if (!memory.deletedAt && memory.status !== "deleted") {
+      if (!memory.deletedAt && memory.status !== "deleted" && !isL3FieldSnapshotMemory(memory)) {
         this.db
           .prepare(`INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`)
           .run(memory.id, memory.id, retrievalDocumentForMemory(memory), memory.tags.join(" "));
@@ -1568,6 +1650,15 @@ export class UserMemoryRepository {
     return row.count;
   }
 
+  embeddingMaintenanceEntries(userId: string): EmbeddingMaintenanceEntry[] {
+    return this.db.prepare(`
+      SELECT id, 'user_memory' AS kind, COALESCE(json_array_length(embedding_json), 0) AS dimension,
+             embedding_model AS embeddingModel, embedding_provider AS embeddingProvider
+      FROM user_memories WHERE user_id = ? AND status = 'active' AND deleted_at IS NULL
+      ORDER BY id
+    `).all(userId) as EmbeddingMaintenanceEntry[];
+  }
+
   embeddingDimensionCounts(userId: string): {
     totalSlots: number;
     dimensions: Array<{ dimension: number; count: number }>;
@@ -1675,10 +1766,10 @@ export class UserMemoryRepository {
     return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "pattern" }));
   }
 
-  searchVectorIds(userId: string, query: readonly number[], limit: number): MemorySearchIdHit[] {
+  searchVectorIds(userId: string, query: readonly number[], limit: number, identity = vectorEmbeddingIdentity(query)): MemorySearchIdHit[] {
     if (query.length === 0 || limit <= 0) return [];
     return this.listActive(userId)
-      .flatMap((memory) => memory.embedding?.length === query.length
+      .flatMap((memory) => memory.embedding?.length === query.length && (!identity || sameEmbeddingIdentity(memory, identity))
         ? [{ id: memory.id, score: cosineVectors(query, memory.embedding), channel: "vec" as const }]
         : [])
       .filter((hit) => hit.score > 0)
@@ -1702,6 +1793,7 @@ const AUTO_RETRY_SCHEDULED_SQL = `EXISTS(
                 SELECT 1 FROM evolution_jobs
                 WHERE evolution_jobs.id = memory_processing_state.active_job_id
                   AND evolution_jobs.status IN ('failed', 'queued')
+                  AND evolution_jobs.attempts > 0
                   AND evolution_jobs.last_error IS NOT NULL
                   AND evolution_jobs.attempts < evolution_jobs.max_attempts
               ) AS auto_retry_scheduled`;
@@ -1830,11 +1922,14 @@ function sourceTurnCaptureFromSql(row: Record<string, unknown>): SourceTurnCaptu
 }
 
 export class RuntimeRepository {
+  readonly scheduling: QueueSchedulingStore;
+  private readonly leaseOwner = newId("worker");
   private readonly scheduledLogPrunes = new Set<LogTableName>();
   private historyLogCompactionScheduled = false;
   private historyLogCompactionCursor = 0;
 
   constructor(private readonly db: Database.Database) {
+    this.scheduling = new QueueSchedulingStore(db);
     this.scheduleHistoryLogCompaction();
   }
 
@@ -1843,7 +1938,7 @@ export class RuntimeRepository {
     if (reset) this.historyLogCompactionCursor = 0;
     if (this.historyLogCompactionScheduled || !this.db.open || this.db.readonly) return;
     this.historyLogCompactionScheduled = true;
-    setImmediate(() => {
+    withoutJobLeaseGuard(() => setImmediate(() => {
       this.historyLogCompactionScheduled = false;
       if (!this.db.open || this.db.readonly) return;
       try {
@@ -1864,7 +1959,7 @@ export class RuntimeRepository {
         // Best-effort maintenance must not interfere with capture or worker writes.
         // An interrupted pass is retried on the next service start.
       }
-    });
+    }));
   }
 
   getKv(key: string): { value: unknown; updatedAt: string } | undefined {
@@ -2356,10 +2451,11 @@ export class RuntimeRepository {
     return episode;
   }
 
-  getEpisode(id: string): EpisodeRecord | undefined {
+  getEpisode(id: string | undefined): EpisodeRecord | undefined {
+    if (!id) return undefined;
     const row = this.db
       .prepare(`SELECT * FROM episodes WHERE id = ?`)
-      .get(id) as SqlEpisodeRow | undefined;
+      .get(id ?? null) as SqlEpisodeRow | undefined;
     return row ? episodeFromSql(row) : undefined;
   }
 
@@ -2482,6 +2578,91 @@ export class RuntimeRepository {
     };
   }
 
+  // Moves one turn and everything derived from it to another episode in one
+  // transaction: the raw turn and its attachments (rebindRawTurnEpisode), the
+  // episode lists of its L1, feedback and repairs, L3 input registration,
+  // Skill trials, the source-turn ledger and the turn's unfinished jobs.
+  // Feedback the turn gave about an earlier result points at that earlier turn
+  // and stays where it is. L1 rows are updated by the caller.
+  moveTurnLinks(input: {
+    rawTurnId: string;
+    l1MemoryIds: readonly string[];
+    fromEpisodeId: string;
+    toEpisodeId: string;
+    at?: string;
+  }): void {
+    const { rawTurnId, fromEpisodeId, toEpisodeId } = input;
+    if (fromEpisodeId === toEpisodeId) return;
+    const at = input.at ?? nowIso();
+    const l1Ids = [...new Set(input.l1MemoryIds)];
+    const inL1 = l1Ids.length ? `IN (${l1Ids.map(() => "?").join(", ")})` : "IN (NULL)";
+    this.db.transaction(() => {
+      this.rebindRawTurnEpisode(rawTurnId, fromEpisodeId, toEpisodeId, at);
+      const movedFeedback = (this.db.prepare(
+        `SELECT id FROM feedback WHERE episode_id = ? AND (raw_turn_id = ? OR l1_memory_id ${inL1})`
+      ).all(fromEpisodeId, rawTurnId, ...l1Ids) as Array<{ id: string }>).map((row) => row.id);
+      const movedRepairs = (this.db.prepare(
+        `SELECT id FROM decision_repairs WHERE episode_id = ? AND raw_turn_id = ?`
+      ).all(fromEpisodeId, rawTurnId) as Array<{ id: string }>).map((row) => row.id);
+      const moveIds = (column: "l1_memory_ids_json" | "feedback_ids_json" | "decision_repair_ids_json", ids: readonly string[]) => {
+        if (ids.length === 0) return;
+        const read = (episodeId: string) => {
+          const row = this.db.prepare(`SELECT ${column} AS value FROM episodes WHERE id = ?`).get(episodeId) as { value: string } | undefined;
+          return row ? parseJson<string[]>(row.value, []) : [];
+        };
+        const moving = new Set(ids);
+        this.db.prepare(`UPDATE episodes SET ${column} = ?, updated_at = ? WHERE id = ?`)
+          .run(toJson(read(fromEpisodeId).filter((id) => !moving.has(id))), at, fromEpisodeId);
+        const target = read(toEpisodeId);
+        this.db.prepare(`UPDATE episodes SET ${column} = ?, updated_at = ? WHERE id = ?`)
+          .run(toJson([...target, ...ids.filter((id) => !target.includes(id))]), at, toEpisodeId);
+      };
+      moveIds("l1_memory_ids_json", l1Ids);
+      moveIds("feedback_ids_json", movedFeedback);
+      moveIds("decision_repair_ids_json", movedRepairs);
+      this.db.prepare(`UPDATE feedback SET episode_id = ? WHERE episode_id = ? AND (raw_turn_id = ? OR l1_memory_id ${inL1})`)
+        .run(toEpisodeId, fromEpisodeId, rawTurnId, ...l1Ids);
+      this.db.prepare(`UPDATE decision_repairs SET episode_id = ? WHERE episode_id = ? AND raw_turn_id = ?`)
+        .run(toEpisodeId, fromEpisodeId, rawTurnId);
+      this.db.prepare(`UPDATE skill_trials SET episode_id = ? WHERE episode_id = ? AND (raw_turn_id = ? OR l1_memory_id ${inL1})`)
+        .run(toEpisodeId, fromEpisodeId, rawTurnId, ...l1Ids);
+      // Soft-deleted (rejected) L1 rows of the turn: live rows are rewritten by
+      // the caller through the memory repository, which only reads live rows.
+      this.db.prepare(
+        `UPDATE memories
+         SET info_json = json_set(info_json, '$.episode_id', @to),
+             properties_json = json_set(
+               CASE WHEN json_type(properties_json, '$.info') = 'object'
+                 THEN json_set(properties_json, '$.info.episode_id', @to) ELSE properties_json END,
+               '$.internal_info.trace.episode_id', @to,
+               '$.internal_info.trace.key',
+               CASE WHEN substr(json_extract(properties_json, '$.internal_info.trace.key'), 1, length(@from) + 1) = @from || ':'
+                 THEN @to || substr(json_extract(properties_json, '$.internal_info.trace.key'), length(@from) + 1)
+                 ELSE json_extract(properties_json, '$.internal_info.trace.key') END
+             )
+         WHERE deleted_at IS NOT NULL
+           AND json_type(properties_json, '$.internal_info.trace') = 'object'
+           AND id ${inL1}`
+      ).run({ to: toEpisodeId, from: fromEpisodeId }, ...l1Ids);
+      this.db.prepare(`UPDATE l3_world_model_input_traces SET episode_id = ? WHERE raw_turn_id = ?`)
+        .run(toEpisodeId, rawTurnId);
+      this.db.prepare(`UPDATE source_turn_captures SET episode_id = ? WHERE raw_turn_id = ?`)
+        .run(toEpisodeId, rawTurnId);
+      this.db.prepare(
+        `UPDATE evolution_jobs SET episode_id = ?, updated_at = ?
+         WHERE episode_id = ? AND status IN ('queued', 'leased', 'failed') AND target_memory_id ${inL1}`
+      ).run(toEpisodeId, at, fromEpisodeId, ...l1Ids);
+      this.db.prepare(
+        `UPDATE evolution_jobs
+         SET episode_id = ?,
+             payload_json = json_set(payload_json, '$.triggerEpisodeId', ?),
+             updated_at = ?
+         WHERE job_type = 'episode_idle_close' AND dedupe_key = ? AND status IN ('queued', 'leased', 'failed')`
+      ).run(toEpisodeId, toEpisodeId, at, `episode_idle_close:${rawTurnId}`);
+      this.orderEpisodeTurnsBySourceTime(toEpisodeId);
+    })();
+  }
+
   rebindRawTurnEpisode(
     rawTurnId: string,
     fromEpisodeId: string,
@@ -2593,6 +2774,64 @@ export class RuntimeRepository {
     };
   }
 
+  l1MemoryIdsForRawTurn(rawTurnId: string): string[] {
+    return (this.db.prepare(`SELECT id FROM memories WHERE memory_layer = 'L1' AND
+      (json_extract(info_json, '$.raw_turn_id') = ? OR json_extract(properties_json, '$.internal_info.trace.raw_turn_id') = ?)`)
+      .all(rawTurnId, rawTurnId) as Array<{ id: string }>).map(r => r.id);
+  }
+
+  /** An L1 of a new-L3 batch whose summary is still being written (the batch waits for it), if any. */
+  unsummarizedL3BatchL1(batchId: string): string | undefined {
+    return this.db.prepare(
+      `SELECT batch_l1.value FROM l3_unit_batches AS unit_batch, json_each(unit_batch.l1_memory_ids_json) AS batch_l1
+       JOIN memory_processing_state AS l1_state ON l1_state.memory_id = batch_l1.value
+       JOIN memories AS batch_memory ON batch_memory.id = l1_state.memory_id
+       WHERE unit_batch.id = ? AND l1_state.state IN ('summary_pending', 'summarizing')
+         AND batch_memory.deleted_at IS NULL AND batch_memory.status != 'deleted'
+       LIMIT 1`
+    ).pluck().get(batchId) as string | undefined;
+  }
+
+  hasUnassignedTurns(sessionId: string): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM raw_turns WHERE session_id = ? AND deleted_at IS NULL AND redacted_at IS NULL
+      AND (episode_id IS NULL OR json_extract(message_payload_json, '$.episode_assignment.status') IN ('pending', 'selected', 'applying')) LIMIT 1`).get(sessionId));
+  }
+
+  isRawTurnAttributionPending(rawTurnId: string | undefined): boolean {
+    const raw = rawTurnId ? this.getRawTurn(rawTurnId) : undefined;
+    if (!raw || raw.deletedAt || raw.redactedAt) return false;
+    const assignment = raw.messagePayload?.episode_assignment;
+    return !raw.episodeId || (isRecord(assignment) && ["pending", "selected", "applying"].includes(String(assignment.status)));
+  }
+
+  bindRawTurnEpisode(rawTurnId: string, episodeId: string, at: string): void {
+    const raw = this.getRawTurn(rawTurnId);
+    const episode = this.getEpisode(episodeId);
+    if (!raw || !episode || raw.sessionId !== episode.sessionId) throw new Error("invalid first episode binding");
+    const l1Ids = this.l1MemoryIdsForRawTurn(rawTurnId);
+    if (raw.episodeId && raw.episodeId !== episodeId) {
+      this.moveTurnLinks({ rawTurnId, l1MemoryIds: l1Ids, fromEpisodeId: raw.episodeId, toEpisodeId: episodeId, at });
+    }
+    this.updateRawTurn({ ...raw, episodeId });
+    this.appendEpisodeRawTurn(episodeId, rawTurnId, at);
+    for (const id of l1Ids) {
+      this.db.prepare(`UPDATE memories SET info_json = json_set(info_json, '$.episode_id', ?),
+        properties_json = json_set(properties_json, '$.info.episode_id', ?, '$.internal_info.trace.episode_id', ?) WHERE id = ?`)
+        .run(episodeId, episodeId, episodeId, id);
+      this.appendEpisodeTurn(episodeId, rawTurnId, id, at);
+    }
+    for (const table of ['artifacts', 'feedback', 'decision_repairs', 'l3_world_model_input_traces', 'source_turn_captures', 'skill_trials']) {
+      this.db.prepare(`UPDATE ${table} SET episode_id = ? WHERE raw_turn_id = ?`).run(episodeId, rawTurnId);
+    }
+    this.db.prepare(`UPDATE evolution_jobs SET episode_id = ? WHERE json_extract(payload_json, '$.rawTurnId') = ?
+      OR target_memory_id IN (SELECT id FROM memories WHERE json_extract(info_json, '$.raw_turn_id') = ?)`)
+      .run(episodeId, rawTurnId, rawTurnId);
+    for (const row of this.db.prepare("SELECT id FROM feedback WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ id: string }>) this.appendEpisodeFeedback(episodeId, row.id, at);
+    for (const row of this.db.prepare("SELECT id FROM decision_repairs WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ id: string }>) this.appendEpisodeDecisionRepair(episodeId, row.id, at);
+    for (const row of this.db.prepare("SELECT skill_memory_id FROM skill_trials WHERE raw_turn_id = ?").all(rawTurnId) as Array<{ skill_memory_id: string }>) this.appendEpisodeDerivedMemory(episodeId, "Skill", row.skill_memory_id, at);
+    this.orderEpisodeTurnsBySourceTime(episodeId);
+  }
+
   insertRawTurn(rawTurn: RawTurnRecord): RawTurnRecord {
     this.db
       .prepare(
@@ -2610,6 +2849,7 @@ export class RuntimeRepository {
       )
       .run({
         ...rawTurn,
+        episodeId: rawTurn.episodeId ?? null,
         conversationId: rawTurn.conversationId ?? null,
         userText: rawTurn.userText ?? null,
         assistantText: rawTurn.assistantText ?? null,
@@ -2645,7 +2885,7 @@ export class RuntimeRepository {
       )
       .run({
         id: rawTurn.id,
-        episodeId: rawTurn.episodeId,
+        episodeId: rawTurn.episodeId ?? null,
         userText: rawTurn.userText ?? null,
         assistantText: rawTurn.assistantText ?? null,
         reasoningSummary: rawTurn.reasoningSummary ?? null,
@@ -2677,6 +2917,49 @@ export class RuntimeRepository {
         AND created_at > ?
       LIMIT 1
     `).get(episodeId, turnId, startedAt) as { found: number } | undefined;
+    return row?.found === 1;
+  }
+
+  // Completed raw turns of a session that came before the given turn, oldest
+  // first. Order is by turn time (created_at), then insertion order, so a
+  // judgment made later never reads this turn or any turn after it.
+  completedRawTurnsBefore(rawTurnId: string, options: { episodeId?: string } = {}): RawTurnRecord[] {
+    const anchor = this.db.prepare(`SELECT rowid AS seq, session_id AS sessionId, created_at AS createdAt
+      FROM raw_turns WHERE id = ?`).get(rawTurnId) as { seq: number; sessionId: string; createdAt: string } | undefined;
+    if (!anchor) return [];
+    const rows = this.db.prepare(`
+      SELECT * FROM raw_turns
+      WHERE session_id = @sessionId
+        AND (@episodeId IS NULL OR episode_id = @episodeId)
+        AND id != @rawTurnId
+        AND deleted_at IS NULL
+        AND json_type(message_payload_json, '$.turn_complete') = 'object'
+        AND (created_at < @createdAt OR (created_at = @createdAt AND rowid < @seq))
+      ORDER BY created_at ASC, rowid ASC
+    `).all({
+      sessionId: anchor.sessionId,
+      episodeId: options.episodeId ?? null,
+      rawTurnId,
+      createdAt: anchor.createdAt,
+      seq: anchor.seq
+    }) as SqlRawTurnRow[];
+    return rows.map(rawTurnFromSql);
+  }
+
+  // True when a turn of the same session that came after this one has already
+  // been judged: this turn arrived late and its judgment must not move it.
+  sessionHasJudgedTurnAfter(rawTurnId: string): boolean {
+    const anchor = this.db.prepare(`SELECT rowid AS seq, session_id AS sessionId, created_at AS createdAt
+      FROM raw_turns WHERE id = ?`).get(rawTurnId) as { seq: number; sessionId: string; createdAt: string } | undefined;
+    if (!anchor) return false;
+    const row = this.db.prepare(`
+      SELECT 1 AS found FROM raw_turns
+      WHERE session_id = @sessionId
+        AND id != @rawTurnId
+        AND (created_at > @createdAt OR (created_at = @createdAt AND rowid > @seq))
+        AND json_extract(message_payload_json, '$.turn_judge.status') IN ('judged', 'failed', 'skipped')
+      LIMIT 1
+    `).get({ sessionId: anchor.sessionId, rawTurnId, createdAt: anchor.createdAt, seq: anchor.seq }) as { found: number } | undefined;
     return row?.found === 1;
   }
 
@@ -2782,6 +3065,11 @@ export class RuntimeRepository {
       LIMIT 1
     `).get(input) as { found: number } | undefined;
     return row?.found === 1;
+  }
+
+  listUnassignedRawTurnsBySession(sessionId: string): RawTurnRecord[] {
+    return (this.db.prepare("SELECT * FROM raw_turns WHERE session_id=? AND episode_id IS NULL AND deleted_at IS NULL ORDER BY created_at,rowid")
+      .all(sessionId) as SqlRawTurnRow[]).map(rawTurnFromSql);
   }
 
   listRecentRawTurnsBySession(sessionId: string, limit = 8): RawTurnRecord[] {
@@ -3089,6 +3377,28 @@ export class RuntimeRepository {
     return event;
   }
 
+  listRecallEvents(input: {
+    userId?: string;
+    limit?: number;
+  } = {}): RecallEventRecord[] {
+    const clauses = ["1=1"];
+    const params: SqlValue[] = [];
+    if (input.userId) {
+      clauses.push("user_id = ?");
+      params.push(input.userId);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM recall_events
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(...params, input.limit ?? 10_000) as SqlRecallEventRow[];
+    return rows.map(recallEventFromSql);
+  }
+
   getRecallEvent(id: string): RecallEventRecord | undefined {
     const row = this.db
       .prepare(`SELECT * FROM recall_events WHERE id = ?`)
@@ -3249,24 +3559,35 @@ export class RuntimeRepository {
   enqueueJobInTransaction(job: EvolutionJobRecord): EvolutionJobRecord {
     const existing = job.dedupeKey ? this.getActiveJobByDedupeKey(job.dedupeKey) : undefined;
     if (existing) {
+      // Capture an older/raw producer's explicit promotion before merging a new
+      // delivery's payload. Current projections are a cheap indexed no-op.
+      this.scheduling.refreshOne("main", existing.id);
       const updatedAt = job.updatedAt ?? nowIso();
       const payload = mergeJobPayload(existing.payload, job.payload);
+      const manualRetry = existing.status === "failed" && job.payload.source === "memory.processing.manual_retry";
       this.db
         .prepare(
           `UPDATE evolution_jobs
-           SET status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
+           SET status = CASE WHEN @manualRetry = 1 THEN 'queued' ELSE status END,
+               attempts = CASE WHEN @manualRetry = 1 THEN 0 ELSE attempts END,
+               failure_count = CASE WHEN @manualRetry = 1 THEN 0 ELSE failure_count END,
+               available_at = CASE WHEN @manualRetry = 1 THEN NULL ELSE available_at END,
+               blocked_reason = CASE WHEN @manualRetry = 1 THEN NULL ELSE blocked_reason END,
+               lease_owner = CASE WHEN @manualRetry = 1 THEN NULL ELSE lease_owner END,
+               lease_token = CASE WHEN @manualRetry = 1 THEN NULL ELSE lease_token END,
+               leased_until = CASE WHEN @manualRetry = 1 THEN NULL ELSE leased_until END,
+               last_error = CASE WHEN @manualRetry = 1 THEN NULL ELSE last_error END,
                session_id = COALESCE(@sessionId, session_id),
                episode_id = COALESCE(@episodeId, episode_id),
                target_memory_id = COALESCE(@targetMemoryId, target_memory_id),
                payload_json = @payloadJson,
                max_attempts = MAX(max_attempts, @maxAttempts),
-               leased_until = CASE WHEN status = 'failed' THEN NULL ELSE leased_until END,
-               last_error = CASE WHEN status = 'failed' THEN NULL ELSE last_error END,
                updated_at = @updatedAt
            WHERE id = @id`
         )
         .run({
           id: existing.id,
+          manualRetry: manualRetry ? 1 : 0,
           sessionId: job.sessionId ?? null,
           episodeId: job.episodeId ?? null,
           targetMemoryId: job.targetMemoryId ?? null,
@@ -3274,13 +3595,12 @@ export class RuntimeRepository {
           maxAttempts: job.maxAttempts,
           updatedAt
         });
+      this.scheduling.refreshOne("main", existing.id);
       return this.getJob(existing.id) ?? {
         ...existing,
         payload,
         updatedAt,
-        status: existing.status === "failed" ? "queued" : existing.status,
-        leasedUntil: existing.status === "failed" ? null : existing.leasedUntil,
-        lastError: existing.status === "failed" ? null : existing.lastError
+        status: existing.status
       };
     }
     this.db
@@ -3307,7 +3627,8 @@ export class RuntimeRepository {
         leasedUntil: job.leasedUntil ?? null,
         lastError: job.lastError ?? null
       });
-    return job;
+    this.scheduling.refreshOne("main", job.id);
+    return this.getJob(job.id) ?? job;
   }
 
   /** Allocate the next FIFO sequence for Work Memory jobs in a merge scope. */
@@ -3393,6 +3714,8 @@ export class RuntimeRepository {
              payload_json = ?,
              attempts = 0,
              leased_until = NULL,
+             lease_owner = NULL, lease_token = NULL,
+             available_at = NULL, blocked_reason = NULL, failure_count = 0,
              last_error = NULL,
              updated_at = ?
          WHERE id = ?`
@@ -3451,6 +3774,9 @@ export class RuntimeRepository {
     jobTypes?: readonly string[];
     excludedJobTypes?: readonly string[];
     includeEmbeddingRetries?: boolean;
+    targetMemoryIds?: readonly string[];
+    /** Ignore already due rows when scheduling a running pump's next wake. */
+    futureAfterMs?: number;
   }): number | undefined {
     const jobTypes = options?.jobTypes ?? (options?.jobType ? [options.jobType] : undefined);
     const jobTypeFilter = jobTypes
@@ -3459,39 +3785,35 @@ export class RuntimeRepository {
         : `AND job_type IN (${jobTypes.map(() => "?").join(", ")})`
       : "";
     const excluded = options?.excludedJobTypes?.length ? options.excludedJobTypes : undefined;
+    // Same rule as leasing: excluding an L3's update jobs also keeps its profile jobs out.
     const excludeFilter = excluded
-      ? `AND job_type NOT IN (${excluded.map(() => "?").join(", ")})`
+      ? `AND job_type NOT IN (${excluded.map(() => "?").join(", ")}) ${l3ProfileHeldSql(excluded)}`
       : "";
     const jobTypeParams = [
       ...(jobTypes && jobTypes.length > 0 ? jobTypes : []),
       ...(excluded ?? [])
     ];
+    const targets = options?.targetMemoryIds;
+    if (targets?.length === 0) return undefined;
+    const targetFilter = targets ? `AND target_memory_id IN (${targets.map(() => "?").join(", ")})` : "";
+    const retryTargetFilter = targets ? `AND target_id IN (${targets.map(() => "?").join(", ")})` : "";
+    const future = options?.futureAfterMs;
+    const futureIso = future === undefined ? undefined : new Date(future).toISOString();
+    // A job its scope still holds back is not a reason to wake, neither by its runAfter nor by its lease running out.
+    const mainParams = [nowIso(), ...jobTypeParams, ...(targets ?? []), ...(futureIso ? [futureIso] : [])];
     const queuedJob = this.db
-      .prepare(
-        `SELECT CAST(json_extract(payload_json, '$.runAfter') AS TEXT) AS run_after
-         FROM evolution_jobs
-         WHERE status = 'queued'
-           AND attempts < max_attempts
-           AND json_type(payload_json, '$.runAfter') = 'text'
-           ${jobTypeFilter}
-           ${excludeFilter}
-         ORDER BY run_after ASC
-         LIMIT 1`
-      )
-      .get(...jobTypeParams) as { run_after: string } | undefined;
+      .prepare(`SELECT ${MAIN_DEADLINE} AS run_after
+        FROM evolution_jobs INDEXED BY worker_main_deadline
+        WHERE ${MAIN_TIMED} AND ${scopedJobReadySql()} ${jobTypeFilter} ${excludeFilter} ${targetFilter}
+          ${futureIso ? `AND ${MAIN_DEADLINE} > ?` : ""}
+        ORDER BY ${MAIN_DEADLINE} ASC LIMIT 1`)
+      .get(...mainParams) as { run_after: string } | undefined;
     const leasedJob = this.db
-      .prepare(
-        `SELECT leased_until
-         FROM evolution_jobs
-         WHERE status = 'leased'
-           AND attempts < max_attempts
-           AND leased_until IS NOT NULL
-           ${jobTypeFilter}
-           ${excludeFilter}
-         ORDER BY leased_until ASC
-         LIMIT 1`
-      )
-      .get(...jobTypeParams) as { leased_until: string } | undefined;
+      .prepare(`SELECT leased_until FROM evolution_jobs INDEXED BY worker_main_lease_deadline
+        WHERE ${MAIN_LEASED} AND ${scopedJobReadySql()} ${jobTypeFilter} ${excludeFilter} ${targetFilter}
+          ${futureIso ? "AND leased_until > ?" : ""}
+        ORDER BY leased_until ASC LIMIT 1`)
+      .get(...mainParams) as { leased_until: string } | undefined;
     const includeEmbeddingRetries = options?.includeEmbeddingRetries !== false;
     const pendingEmbedding = includeEmbeddingRetries
       ? this.db
@@ -3499,22 +3821,25 @@ export class RuntimeRepository {
           `SELECT next_attempt_at
            FROM embedding_retry_queue
            WHERE status = 'pending'
+             ${retryTargetFilter}
+             ${future !== undefined ? "AND next_attempt_at > ?" : ""}
            ORDER BY next_attempt_at ASC
            LIMIT 1`
         )
-        .get() as { next_attempt_at: number } | undefined
+        .get(...(targets ?? []), ...(future === undefined ? [] : [future])) as { next_attempt_at: number } | undefined
       : undefined;
     const inProgressEmbedding = includeEmbeddingRetries
       ? this.db
         .prepare(
-          `SELECT MAX(next_attempt_at, lease_until) AS run_at
-           FROM embedding_retry_queue
-           WHERE status = 'in_progress'
-             AND lease_until IS NOT NULL
+          `SELECT ${RETRY_DEADLINE} AS run_at
+           FROM embedding_retry_queue INDEXED BY worker_retry_lease_deadline
+           WHERE ${RETRY_LEASED}
+             ${retryTargetFilter}
+             ${future !== undefined ? `AND ${RETRY_DEADLINE} > ?` : ""}
            ORDER BY run_at ASC
            LIMIT 1`
         )
-        .get() as { run_at: number } | undefined
+        .get(...(targets ?? []), ...(future === undefined ? [] : [future])) as { run_at: number } | undefined
       : undefined;
     const times = [
       queuedJob ? Date.parse(queuedJob.run_after) : Number.NaN,
@@ -3555,6 +3880,18 @@ export class RuntimeRepository {
          LIMIT 1`
       )
       .get(dedupeKey) as SqlJobRow | undefined;
+    return row ? jobFromSql(row) : undefined;
+  }
+
+  // The newest job of a type for a memory, whatever its status; rebuilt jobs
+  // copy the per-turn judgment flags from it.
+  latestJobForTarget(targetMemoryId: string, jobType: JobType): EvolutionJobRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM evolution_jobs
+       WHERE target_memory_id = ? AND job_type = ?
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT 1`
+    ).get(targetMemoryId, jobType) as SqlJobRow | undefined;
     return row ? jobFromSql(row) : undefined;
   }
 
@@ -3608,141 +3945,223 @@ export class RuntimeRepository {
     return Boolean(row);
   }
 
+  /** Legacy order without side effects, for stage-3 shadow comparison only. */
+  previewQueuedJobs(input: {
+    at: string; limit: number; targetMemoryIds?: readonly string[];
+    priorityCohortOnly?: boolean; allowedJobTypes?: readonly string[]; excludedJobTypes?: readonly string[];
+  }): EvolutionJobRecord[] {
+    const eligibility = mainQueueEligibility(input.at, input);
+    const rows = this.db.prepare(`SELECT *, ${evolutionJobPrioritySql()} AS queue_priority
+      FROM evolution_jobs WHERE ${eligibility.sql} ORDER BY ${evolutionJobOrderSql()} LIMIT ?`)
+      .all(...eligibility.params, input.limit) as Array<SqlJobRow & { queue_priority: number }>;
+    return (input.priorityCohortOnly && rows[0]
+      ? rows.filter((row) => row.queue_priority === rows[0]!.queue_priority) : rows).map(jobFromSql);
+  }
+
+  previewDueEmbeddingRetries(input: { now: number; limit: number; targetMemoryIds?: readonly string[] }): EmbeddingRetryRecord[] {
+    if (input.limit <= 0) return [];
+    const eligibility = retryQueueEligibility(input.now, input.targetMemoryIds);
+    return (this.db.prepare(`SELECT q.* FROM embedding_retry_queue q LEFT JOIN memories m ON m.id = q.target_id
+      WHERE ${eligibility.sql} ORDER BY ${embeddingRetryOrderSql()} LIMIT ?`)
+      .all(...eligibility.params, input.limit) as SqlEmbeddingRetryRow[]).map(embeddingRetryFromSql);
+  }
+
+  /** Legacy ordering for resource admission, paged without acquiring a lease. */
+  previewLegacyJobPage(input: QueueEligibilityOptions & {
+    at: string; limit: number; offset?: number; excludedIds?: readonly string[];
+  }): Array<{ job: EvolutionJobRecord; priority: number }> {
+    if (input.limit <= 0) return [];
+    const eligibility = mainQueueEligibility(input.at, input);
+    const rows = this.db.prepare(`SELECT *, ${evolutionJobPrioritySql()} AS queue_priority
+      FROM evolution_jobs WHERE ${eligibility.sql}
+      ${input.excludedIds?.length ? "AND id NOT IN (SELECT value FROM json_each(?))" : ""}
+      ORDER BY ${evolutionJobOrderSql()} LIMIT ? OFFSET ?`)
+      .all(...eligibility.params, ...(input.excludedIds?.length ? [JSON.stringify(input.excludedIds)] : []),
+        Math.min(200, Math.floor(input.limit)), Math.max(0, Math.floor(input.offset ?? 0))) as Array<SqlJobRow & { queue_priority: number }>;
+    return rows.map(row => ({ job: jobFromSql(row), priority: row.queue_priority }));
+  }
+
+  previewLegacyRetryPage(input: { now: number; limit: number; offset?: number; targetMemoryIds?: readonly string[]; excludedIds?: readonly string[] }): EmbeddingRetryRecord[] {
+    if (input.limit <= 0) return [];
+    const eligibility = retryQueueEligibility(input.now, input.targetMemoryIds);
+    return (this.db.prepare(`SELECT q.* FROM embedding_retry_queue q LEFT JOIN memories m ON m.id = q.target_id
+      WHERE ${eligibility.sql}
+      ${input.excludedIds?.length ? "AND q.id NOT IN (SELECT value FROM json_each(?))" : ""}
+      ORDER BY ${embeddingRetryOrderSql()} LIMIT ? OFFSET ?`)
+      .all(...eligibility.params, ...(input.excludedIds?.length ? [JSON.stringify(input.excludedIds)] : []),
+        Math.min(200, Math.floor(input.limit)), Math.max(0, Math.floor(input.offset ?? 0))) as SqlEmbeddingRetryRow[]).map(embeddingRetryFromSql);
+  }
+
   leaseQueuedJobs(
     limit = 10,
     leaseSeconds = 60,
     targetMemoryIds?: readonly string[],
     priorityCohortOnly = false,
     allowedJobTypes?: readonly string[],
-    excludedJobTypes?: readonly string[]
+    excludedJobTypes?: readonly string[],
+    owner = this.leaseOwner
   ): EvolutionJobRecord[] {
     if (targetMemoryIds?.length === 0 || allowedJobTypes?.length === 0) {
       return [];
     }
     const at = nowIso();
     const leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-    const targetFilter = targetMemoryIds
-      ? `AND target_memory_id IN (${targetMemoryIds.map(() => "?").join(", ")})`
-      : "";
+    const eligibility = mainQueueEligibility(at, { targetMemoryIds, allowedJobTypes, excludedJobTypes });
     const transaction = this.db.transaction(() => {
-      const candidates = this.db
-        .prepare(
-          `SELECT *, ${evolutionJobPrioritySql()} AS queue_priority
-           FROM evolution_jobs
-           WHERE (status = 'queued'
-              OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until <= ?))
-             AND attempts < max_attempts
-             AND NOT (
-               job_type = 'reward'
-               AND json_extract(payload_json, '$.l1MemoryId') IS NOT NULL
-               AND (
-                 json_extract(payload_json, '$.polarity') IS NULL
-                 OR json_extract(payload_json, '$.polarity') = 'positive'
-               )
-               AND EXISTS (
-                 SELECT 1
-                 FROM memory_processing_state
-                 JOIN memories ON memories.id = memory_processing_state.memory_id
-                 WHERE memory_processing_state.memory_id =
-                   CAST(json_extract(evolution_jobs.payload_json, '$.l1MemoryId') AS TEXT)
-                   AND NOT EXISTS (
-                     SELECT 1
-                     FROM memory_vector_entries
-                     WHERE memory_vector_entries.memory_id = memory_processing_state.memory_id
-                       AND memory_vector_entries.vector_field = 'vec_summary'
-                   )
-                   AND (
-                     memory_processing_state.state IN ('embedding_pending', 'embedding')
-                   OR memory_processing_state.state IN ('summary_pending', 'summarizing')
-                   )
-               )
-             )
-             AND (
-               json_extract(payload_json, '$.runAfter') IS NULL
-               OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
-             )
-             AND (
-               job_type NOT IN ('l3_world_model_update', 'work_memory_extract')
-               OR (
-                 scope_key IS NOT NULL
-                 AND scope_seq IS NOT NULL
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM evolution_jobs AS leased_l3_job
-                   WHERE leased_l3_job.job_type = evolution_jobs.job_type
-                     AND leased_l3_job.scope_key = evolution_jobs.scope_key
-                     AND leased_l3_job.status = 'leased'
-                     AND leased_l3_job.id <> evolution_jobs.id
-                 )
-                 AND NOT EXISTS (
-                   SELECT 1
-                   FROM evolution_jobs AS earlier_l3_job
-                   WHERE earlier_l3_job.job_type = evolution_jobs.job_type
-                     AND earlier_l3_job.scope_key = evolution_jobs.scope_key
-                     AND earlier_l3_job.scope_seq < evolution_jobs.scope_seq
-                     AND earlier_l3_job.status IN ('queued', 'leased', 'failed')
-                 )
-               )
-             )
-             ${allowedJobTypes ? `AND job_type IN (${allowedJobTypes.map(() => "?").join(", ")})` : ""}
-             ${excludedJobTypes?.length ? `AND job_type NOT IN (${excludedJobTypes.map(() => "?").join(", ")})` : ""}
-             ${targetFilter}
-           ORDER BY ${evolutionJobOrderSql()}
-           LIMIT ?`
-        )
-        .all(at, at, ...(allowedJobTypes ?? []), ...(excludedJobTypes ?? []), ...(targetMemoryIds ?? []), limit) as Array<SqlJobRow & {
-          queue_priority: number;
-        }>;
+      const candidates = this.db.prepare(`SELECT *, ${evolutionJobPrioritySql()} AS queue_priority
+        FROM evolution_jobs WHERE ${eligibility.sql} ORDER BY ${evolutionJobOrderSql()} LIMIT ?`)
+        .all(...eligibility.params, limit) as Array<SqlJobRow & { queue_priority: number }>;
       const queuePriority = candidates[0]?.queue_priority;
       const rows = priorityCohortOnly && queuePriority !== undefined
         ? candidates.filter((row) => row.queue_priority === queuePriority)
         : candidates;
 
+      const claimed: EvolutionJobRecord[] = [];
       for (const row of rows) {
+        const token = newId("lease");
+        const recovered = row.status === "leased" ? 1 : 0;
         this.db
           .prepare(
             `UPDATE evolution_jobs
              SET status = 'leased',
-                 attempts = attempts + 1,
+                 attempts = attempts + 1 - ?,
                  leased_until = ?,
+                 lease_owner = ?, lease_token = ?,
+                 lease_count = lease_count + 1,
+                 lease_recovery_count = lease_recovery_count + ?,
+                 available_at = NULL,
                  updated_at = ?
              WHERE id = ?`
           )
-          .run(leaseUntil, at, row.id);
+          .run(recovered, leaseUntil, owner, token, recovered, at, row.id);
+        claimed.push(this.getJob(row.id)!);
       }
-      return rows.map((row) =>
-        jobFromSql({
-          ...row,
-          status: "leased",
-          attempts: row.attempts + 1,
-          leased_until: leaseUntil,
-          updated_at: at
-        })
-      );
+      return claimed;
     });
     return transaction();
   }
 
-  completeJob(id: string, at = nowIso()): EvolutionJobRecord | undefined {
-    this.db
-      .prepare(
-        `UPDATE evolution_jobs
-         SET status = 'succeeded',
-             leased_until = NULL,
-             updated_at = ?
-         WHERE id = ?`
-      )
-      .run(at, id);
-    return this.getJob(id);
+  /** Claim the specific WRR-selected candidate; never substitute a legacy head. */
+  claimQueuedJob(id: string, input: QueueEligibilityOptions & {
+    at?: string; leaseSeconds?: number; owner?: string;
+  } = {}): EvolutionJobRecord | undefined {
+    const at = input.at ?? nowIso();
+    const leaseUntil = new Date(Date.parse(at) + (input.leaseSeconds ?? 60) * 1000).toISOString();
+    const eligibility = mainQueueEligibility(at, input);
+    return this.db.transaction(() => {
+      const row = this.db.prepare(`UPDATE evolution_jobs SET
+          attempts = attempts + CASE WHEN status = 'leased' THEN 0 ELSE 1 END,
+          lease_recovery_count = lease_recovery_count + CASE WHEN status = 'leased' THEN 1 ELSE 0 END,
+          status = 'leased', leased_until = ?, lease_owner = ?, lease_token = ?,
+          lease_count = lease_count + 1, available_at = NULL, updated_at = ?
+        WHERE id = ? AND (${eligibility.sql}) RETURNING *`)
+        .get(leaseUntil, input.owner ?? this.leaseOwner, newId("lease"), at, id, ...eligibility.params) as SqlJobRow | undefined;
+      return row ? jobFromSql(row) : undefined;
+    })();
+  }
+
+  /** A missing claim is reserved for unowned legacy/admin rows only. */
+  private jobClaimWhere(claim: EvolutionJobRecord | undefined, at: string): { sql: string; params: SqlValue[] } {
+    return claim ? {
+      sql: "status = 'leased' AND lease_owner = ? AND lease_token = ? AND leased_until > ?",
+      params: [claim.leaseOwner ?? "", claim.leaseToken ?? "", at]
+    } : { sql: "status IN ('queued', 'leased') AND lease_owner IS NULL AND lease_token IS NULL", params: [] };
+  }
+
+  isJobLeaseHeld(job: EvolutionJobRecord, at = nowIso()): boolean {
+    if (!job.leaseOwner || !job.leaseToken) return false;
+    const claim = this.jobClaimWhere(job, at);
+    return Boolean(this.db.prepare(`SELECT 1 FROM evolution_jobs WHERE id = ? AND ${claim.sql}`)
+      .get(job.id, ...claim.params));
+  }
+
+  renewJobLease(job: EvolutionJobRecord, leaseSeconds = 60, at = nowIso()): EvolutionJobRecord | undefined {
+    if (!job.leaseOwner || !job.leaseToken) return undefined;
+    const claim = this.jobClaimWhere(job, at);
+    const until = new Date(Date.parse(at) + Math.max(1, leaseSeconds) * 1000).toISOString();
+    const result = this.db.prepare(`UPDATE evolution_jobs SET leased_until = MAX(leased_until, ?), updated_at = ?
+      WHERE id = ? AND ${claim.sql}`).run(until, at, job.id, ...claim.params);
+    return result.changes > 0 ? this.getJob(job.id) : undefined;
+  }
+
+  completeJob(id: string, at = nowIso(), claim?: EvolutionJobRecord): EvolutionJobRecord | undefined {
+    const where = this.jobClaimWhere(claim, at);
+    const result = this.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded',
+      leased_until = NULL, lease_owner = NULL, lease_token = NULL,
+      available_at = NULL, blocked_reason = NULL, updated_at = ?
+      WHERE id = ? AND ${where.sql}`).run(at, id, ...where.params);
+    return result.changes > 0 ? this.getJob(id) : undefined;
+  }
+
+  /**
+   * Puts a failed job this run still holds back in the queue to run after `runAfter`. A refunded
+   * attempt means the run did not count as a failure (waiting for a configuration fix);
+   * `minMaxAttempts` raises the failure limit. Returns undefined when the run lost its lease.
+   */
+  rescheduleFailedJob(id: string, input: {
+    runAfter: string;
+    error: string;
+    refundAttempt?: boolean;
+    minMaxAttempts?: number;
+    at?: string;
+  }, claim?: EvolutionJobRecord): EvolutionJobRecord | undefined {
+    const at = input.at ?? nowIso();
+    const where = this.jobClaimWhere(claim, at);
+    const result = this.db.prepare(`UPDATE evolution_jobs SET status = 'queued', leased_until = NULL,
+      lease_owner = NULL, lease_token = NULL, available_at = ?, blocked_reason = NULL, last_error = ?,
+      failure_count = failure_count + CASE WHEN ? THEN 0 ELSE 1 END,
+      attempts = CASE WHEN ? THEN MAX(0, attempts - 1) ELSE attempts END,
+      max_attempts = MAX(max_attempts, ?), updated_at = ?,
+      payload_json = json_set(payload_json, '$.runAfter', ?)
+      WHERE id = ? AND ${where.sql}`).run(
+      input.runAfter, input.error, input.refundAttempt ? 1 : 0, input.refundAttempt ? 1 : 0,
+      input.minMaxAttempts ?? 0, at, input.runAfter, id, ...where.params
+    );
+    return result.changes > 0 ? this.getJob(id) : undefined;
   }
 
   /** Waiting for a dependency is not a model failure and does not consume an attempt. */
-  deferProcessingJob(id: string, runAfter: string, at = nowIso()): EvolutionJobRecord | undefined {
-    this.db.prepare(`UPDATE evolution_jobs SET status = 'queued', leased_until = NULL,
+  deferProcessingJob(id: string, runAfter: string, at = nowIso(), claim?: EvolutionJobRecord): EvolutionJobRecord | undefined {
+    const where = this.jobClaimWhere(claim, at);
+    const result = this.db.prepare(`UPDATE evolution_jobs SET status = 'queued', leased_until = NULL,
+      lease_owner = NULL, lease_token = NULL, available_at = ?, blocked_reason = NULL,
       attempts = MAX(0, attempts - 1), updated_at = ?,
       payload_json = json_set(payload_json, '$.runAfter', ?)
-      WHERE id = ? AND status = 'leased'`).run(at, runAfter, id);
-    return this.getJob(id);
+      WHERE id = ? AND ${where.sql}`).run(runAfter, at, runAfter, id, ...where.params);
+    return result.changes > 0 ? this.getJob(id) : undefined;
+  }
+
+  releaseClaimedJobs(jobs: readonly EvolutionJobRecord[], at = nowIso()): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    return this.db.transaction(() => {
+      const result: Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> = [];
+      for (const job of jobs) {
+        if (!this.isJobLeaseHeld(job, at)) continue;
+        const before = this.getJob(job.id)!;
+        const where = this.jobClaimWhere(job, at);
+        const changed = this.db.prepare(`UPDATE evolution_jobs SET status = 'queued',
+          leased_until = NULL, lease_owner = NULL, lease_token = NULL,
+          attempts = MAX(0, attempts - 1), updated_at = ?
+          WHERE id = ? AND ${where.sql}`).run(at, job.id, ...where.params);
+        if (changed.changes > 0) result.push({ before, after: this.getJob(job.id)! });
+      }
+      return result;
+    })();
+  }
+
+  requeueFailedEpisodeAssignments(at = nowIso(), rawTurnId?: string): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    return this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT * FROM evolution_jobs j WHERE job_type IN ('episode_assignment','episode_finalize')
+        AND status IN ('failed','dead_letter') ${rawTurnId ? "AND json_extract(payload_json, '$.rawTurnId') = ?" : ""}
+        AND EXISTS (SELECT 1 FROM raw_turns r WHERE r.id=json_extract(j.payload_json,'$.rawTurnId')
+          AND r.deleted_at IS NULL AND r.redacted_at IS NULL
+          AND json_extract(r.message_payload_json,'$.episode_assignment.status') <> 'assigned'
+          AND json_extract(r.message_payload_json,'$.episode_assignment.generation') = json_extract(j.payload_json,'$.generation'))`)
+        .all(...(rawTurnId ? [rawTurnId] : [])) as SqlJobRow[];
+      return rows.map(row => {
+        this.db.prepare("UPDATE evolution_jobs SET status='queued',attempts=0,failure_count=0,leased_until=NULL,lease_owner=NULL,lease_token=NULL,available_at=NULL,blocked_reason=NULL,last_error=NULL,updated_at=?,payload_json=json_remove(payload_json,'$.runAfter') WHERE id=?").run(at,row.id);
+        return { before: jobFromSql(row), after: this.getJob(row.id)! };
+      });
+    })();
   }
 
   requeueFailedJobs(
@@ -3762,12 +4181,14 @@ export class RuntimeRepository {
           `SELECT *
            FROM evolution_jobs
            WHERE status = 'failed'
-             AND attempts < max_attempts
+             AND failure_count < max_attempts
+             AND (blocked_reason IS NULL OR blocked_reason != 'configuration')
+             AND (available_at IS NULL OR available_at <= ?)
              ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`
         )
-        .all(...(targetMemoryIds ?? []), limit) as SqlJobRow[];
+        .all(at, ...(targetMemoryIds ?? []), limit) as SqlJobRow[];
 
       for (const row of rows) {
         this.db
@@ -3775,6 +4196,7 @@ export class RuntimeRepository {
             `UPDATE evolution_jobs
              SET status = 'queued',
                  leased_until = NULL,
+                 lease_owner = NULL, lease_token = NULL,
                  updated_at = ?
              WHERE id = ?`
           )
@@ -3795,43 +4217,27 @@ export class RuntimeRepository {
   }
 
   requeueLeasedJobsAfterRestart(
-    at = nowIso()
+    at = nowIso(),
+    activeCaptureIds: readonly string[] = []
   ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
-    const transaction = this.db.transaction(() => {
-      const rows = this.db
-        .prepare(
-          `SELECT *
-           FROM evolution_jobs
-           WHERE status = 'leased'
-           ORDER BY ${evolutionJobOrderSql()}`
-        )
-        .all() as SqlJobRow[];
+    return this.requeueLeasedJobsWhere(
+      `status = 'leased' AND (leased_until IS NULL OR leased_until <= ?)
+        ${activeCaptureIds.length ? `AND id NOT IN (${activeCaptureIds.map(() => "?").join(", ")})` : ""}`, [at, ...activeCaptureIds], at
+    );
+  }
 
-      for (const row of rows) {
-        this.db
-          .prepare(
-            `UPDATE evolution_jobs
-             SET status = 'queued',
-                 attempts = MAX(0, attempts - 1),
-                 leased_until = NULL,
-                 updated_at = ?
-             WHERE id = ?`
-          )
-          .run(at, row.id);
-      }
-
-      return rows.map((row) => ({
-        before: jobFromSql(row),
-        after: jobFromSql({
-          ...row,
-          status: "queued",
-          attempts: Math.max(0, row.attempts - 1),
-          leased_until: null,
-          updated_at: at
-        })
-      }));
-    });
-    return transaction();
+  resumeConfigurationBlockedJobs(at = nowIso(), ids?: readonly string[]): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
+    if (ids?.length === 0) return [];
+    return this.db.transaction(() => {
+      const filter = ids ? ` AND id IN (${ids.map(() => "?").join(", ")})` : "";
+      const rows = this.db.prepare(`SELECT * FROM evolution_jobs
+        WHERE status = 'failed' AND blocked_reason = 'configuration'${filter}`).all(...(ids ?? [])) as SqlJobRow[];
+      return rows.map((row) => {
+        this.db.prepare(`UPDATE evolution_jobs SET status = 'queued', available_at = ?,
+          blocked_reason = NULL, updated_at = ? WHERE id = ?`).run(at, at, row.id);
+        return { before: jobFromSql(row), after: this.getJob(row.id)! };
+      });
+    })();
   }
 
   requeueUnstartedLeasedJobs(
@@ -3842,9 +4248,10 @@ export class RuntimeRepository {
       return [];
     }
     return this.requeueLeasedJobsWhere(
-      `status = 'leased' AND id IN (${ids.map(() => "?").join(", ")})`,
+      `status = 'leased' AND lease_owner IS NULL AND lease_token IS NULL AND id IN (${ids.map(() => "?").join(", ")})`,
       [...ids],
-      at
+      at,
+      false
     );
   }
 
@@ -3868,7 +4275,8 @@ export class RuntimeRepository {
   private requeueLeasedJobsWhere(
     whereSql: string,
     params: readonly unknown[],
-    at: string
+    at: string,
+    recovery = true
   ): Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> {
     const transaction = this.db.transaction(() => {
       const rows = this.db
@@ -3887,21 +4295,17 @@ export class RuntimeRepository {
              SET status = 'queued',
                  attempts = MAX(0, attempts - 1),
                  leased_until = NULL,
+                 lease_owner = NULL, lease_token = NULL,
+                 lease_recovery_count = lease_recovery_count + ?,
                  updated_at = ?
              WHERE id = ?`
           )
-          .run(at, row.id);
+          .run(recovery ? 1 : 0, at, row.id);
       }
 
       return rows.map((row) => ({
         before: jobFromSql(row),
-        after: jobFromSql({
-          ...row,
-          status: "queued",
-          attempts: Math.max(0, row.attempts - 1),
-          leased_until: null,
-          updated_at: at
-        })
+        after: this.getJob(row.id)!
       }));
     });
     return transaction();
@@ -3911,27 +4315,34 @@ export class RuntimeRepository {
     id: string,
     error: string,
     at = nowIso(),
-    forceDeadLetter = false
+    forceDeadLetter = false,
+    claim?: EvolutionJobRecord,
+    options: { availableAt?: string | null; blockedReason?: string | null; countFailure?: boolean } = {}
   ): EvolutionJobRecord | undefined {
+    const where = this.jobClaimWhere(claim, at);
     return this.db.transaction(() => {
       const row = this.db
-        .prepare(`SELECT * FROM evolution_jobs WHERE id = ?`)
-        .get(id) as SqlJobRow | undefined;
+        .prepare(`SELECT * FROM evolution_jobs WHERE id = ? AND ${where.sql}`)
+        .get(id, ...where.params) as SqlJobRow | undefined;
       if (!row) return undefined;
       if (row.status === "dead_letter") return jobFromSql(row);
-      const status: JobStatus = forceDeadLetter || row.attempts >= row.max_attempts
+      const failures = row.failure_count + (options.countFailure === false ? 0 : 1);
+      const status: JobStatus = forceDeadLetter || failures >= row.max_attempts
         ? "dead_letter"
         : "failed";
       this.db
         .prepare(
           `UPDATE evolution_jobs
            SET status = ?,
-               leased_until = NULL,
+               leased_until = NULL, lease_owner = NULL, lease_token = NULL,
+               failure_count = ?, attempts = MAX(0, attempts - ?),
+               available_at = ?, blocked_reason = ?,
                last_error = ?,
                updated_at = ?
-           WHERE id = ?`
+           WHERE id = ? AND ${where.sql}`
         )
-        .run(status, error, at, id);
+        .run(status, failures, options.countFailure === false ? 1 : 0,
+          options.availableAt ?? null, options.blockedReason ?? null, error, at, id, ...where.params);
       if (status === "dead_letter" && row.job_type === "l3_world_model_update") {
         const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
         const batchId = typeof payload.batchId === "string" ? payload.batchId : undefined;
@@ -3943,6 +4354,14 @@ export class RuntimeRepository {
              WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
           ).run(at, batchId, targetField);
           updateL3WorldModelBatchTerminalOutcome(this.db, batchId, at);
+        }
+      }
+      if (status === "dead_letter" && row.job_type === "l3_unit_update") {
+        const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+        if (typeof payload.batchId === "string") {
+          this.db.prepare(
+            `UPDATE l3_unit_batches SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'queued'`
+          ).run(at, payload.batchId);
         }
       }
       if (status === "dead_letter" && row.job_type === "project_environment_profile") {
@@ -3973,6 +4392,10 @@ export class RuntimeRepository {
     now?: number;
   }): EmbeddingRetryRecord {
     const now = input.now ?? Date.now();
+    const unchangedActive = `(embedding_retry_queue.source_text = excluded.source_text
+      AND embedding_retry_queue.embed_role = excluded.embed_role
+      AND embedding_retry_queue.status IN ('pending', 'in_progress'))`;
+    const unchangedPending = `(${unchangedActive} AND embedding_retry_queue.status = 'pending')`;
     this.db
       .prepare(
         `INSERT INTO embedding_retry_queue (
@@ -3987,23 +4410,21 @@ export class RuntimeRepository {
         ON CONFLICT(target_kind, target_id, vector_field) DO UPDATE SET
           source_text = excluded.source_text,
           embed_role = excluded.embed_role,
-          status = CASE
-            WHEN embedding_retry_queue.status IN ('failed', 'succeeded') THEN 'pending'
-            ELSE embedding_retry_queue.status
-          END,
-          attempts = CASE
-            WHEN embedding_retry_queue.status IN ('failed', 'succeeded') THEN 0
-            ELSE embedding_retry_queue.attempts
-          END,
+          status = CASE WHEN ${unchangedPending} THEN embedding_retry_queue.status ELSE 'pending' END,
+          attempts = CASE WHEN ${unchangedActive} THEN embedding_retry_queue.attempts ELSE 0 END,
           max_attempts = excluded.max_attempts,
-          next_attempt_at = MIN(embedding_retry_queue.next_attempt_at, excluded.next_attempt_at),
+          next_attempt_at = CASE WHEN ${unchangedActive} THEN embedding_retry_queue.next_attempt_at ELSE excluded.next_attempt_at END,
           claimed_by = NULL,
           lease_until = NULL,
-          last_error = CASE
-            WHEN embedding_retry_queue.status IN ('failed', 'succeeded') THEN NULL
-            ELSE embedding_retry_queue.last_error
-          END,
-          updated_at = excluded.updated_at`
+          lease_token = NULL,
+          blocked_reason = CASE WHEN ${unchangedActive} THEN embedding_retry_queue.blocked_reason ELSE NULL END,
+          last_error = CASE WHEN ${unchangedActive} THEN embedding_retry_queue.last_error ELSE NULL END,
+          updated_at = excluded.updated_at
+        WHERE NOT (${unchangedActive}
+          AND embedding_retry_queue.status = 'in_progress'
+          AND embedding_retry_queue.claimed_by IS NOT NULL
+          AND embedding_retry_queue.lease_until IS NOT NULL
+          AND embedding_retry_queue.lease_until > excluded.next_attempt_at)`
       )
       .run({
         id: input.id ?? newId("embed_retry"),
@@ -4019,7 +4440,8 @@ export class RuntimeRepository {
     if (!record) {
       throw new Error(`embedding retry was not persisted: ${input.targetKind}:${input.targetId}`);
     }
-    return record;
+    this.scheduling.refreshOne("embedding_retry", record.id);
+    return this.getEmbeddingRetry(record.id)!;
   }
 
   getEmbeddingRetry(id: string): EmbeddingRetryRecord | undefined {
@@ -4083,6 +4505,103 @@ export class RuntimeRepository {
     return row?.count ?? 0;
   }
 
+  embeddingRetryQueueStats(now = Date.now()): {
+    pending: number;
+    active: number;
+    stale: number;
+    failed: number;
+  } {
+    const row = this.db.prepare(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+         COUNT(*) FILTER (WHERE status = 'in_progress'
+           AND claimed_by IS NOT NULL AND lease_until > ?) AS active,
+         COUNT(*) FILTER (WHERE status = 'in_progress'
+           AND (claimed_by IS NULL OR lease_until IS NULL OR lease_until <= ?)) AS stale,
+         COUNT(*) FILTER (WHERE status = 'failed') AS failed
+       FROM embedding_retry_queue`
+    ).get(now, now) as { pending: number; active: number; stale: number; failed: number };
+    return row;
+  }
+
+  embeddingMaintenanceQueueStats(
+    userId: string,
+    now = Date.now(),
+    isCurrentWork: (task: EmbeddingMaintenanceTask) => boolean = () => true
+  ): {
+    pending: number;
+    active: number;
+    stale: number;
+    failed: number;
+  } {
+    const at = new Date(now).toISOString();
+    const retries = this.db.prepare(
+      `SELECT target_id, vector_field, source_text, status, claimed_by, lease_until, updated_at
+       FROM embedding_retry_queue WHERE status != 'succeeded'`
+    ).all() as Array<Pick<SqlEmbeddingRetryRow,
+      "target_id" | "vector_field" | "source_text" | "status" | "claimed_by" | "lease_until" | "updated_at">>;
+    const jobs = this.db.prepare(
+      `SELECT j.target_memory_id, j.job_type, j.payload_json, j.status, j.leased_until, j.updated_at,
+         m.memory_layer
+       FROM evolution_jobs j LEFT JOIN memories m ON m.id = j.target_memory_id
+       WHERE j.status != 'succeeded' AND (
+         j.job_type = 'embedding' OR (j.job_type = 'user_memory_embedding' AND j.user_id = ?))`
+    ).all(userId) as Array<Pick<SqlJobRow,
+      "target_memory_id" | "job_type" | "payload_json" | "status" | "leased_until" | "updated_at"> & { memory_layer: string | null }>;
+    const tasks: EmbeddingMaintenanceTask[] = [
+      ...retries.map(row => ({
+        targetId: row.target_id, userMemory: false, vectorField: row.vector_field,
+        sourceText: row.source_text, updatedAt: new Date(row.updated_at).toISOString(),
+        status: row.status === "pending" ? "pending" as const : row.status === "failed" ? "failed" as const
+          : row.claimed_by && row.lease_until !== null && row.lease_until > now ? "active" as const : "stale" as const
+      })),
+      ...jobs.flatMap(row => {
+        const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+        return [{
+          targetId: row.target_memory_id ?? "", userMemory: row.job_type === "user_memory_embedding",
+          vectorField: row.memory_layer === "L1" ? "vec_summary" as const : "vec" as const,
+          contentHash: typeof payload.contentHash === "string" ? payload.contentHash : undefined,
+          updatedAt: row.updated_at,
+          status: row.status === "queued" ? "pending" as const
+            : row.status === "leased" ? row.leased_until && row.leased_until > at ? "active" as const : "stale" as const
+              : "failed" as const
+        }];
+      })
+    ];
+    const counts = { pending: 0, active: 0, stale: 0, failed: 0 };
+    const failures = new Set<string>();
+    for (const task of tasks) {
+      if (!isCurrentWork(task)) continue;
+      if (task.status === "failed") {
+        // History can contain multiple failures for the same still-unresolved target.
+        failures.add(`${task.userMemory ? "user" : "memory"}:${task.targetId}:${task.vectorField ?? "default"}`);
+      } else counts[task.status]++;
+    }
+    counts.failed = failures.size;
+    return counts;
+  }
+
+  hasSuccessfulEmbeddingWork(input: {
+    targetId: string;
+    userMemory: boolean;
+    vectorField: MemoryVectorField;
+    contentHash: string;
+    sourceTexts: string[];
+    since: string;
+  }): boolean {
+    const job = input.vectorField !== "vec_action" && this.db.prepare(
+      `SELECT 1 FROM evolution_jobs WHERE target_memory_id = ? AND job_type = ?
+       AND status = 'succeeded' AND updated_at >= ?
+       AND json_extract(payload_json, '$.contentHash') = ? LIMIT 1`
+    ).get(input.targetId, input.userMemory ? "user_memory_embedding" : "embedding", input.since, input.contentHash);
+    if (job) return true;
+    if (input.userMemory) return false;
+    return Boolean(this.db.prepare(
+      `SELECT 1 FROM embedding_retry_queue WHERE target_id = ? AND vector_field = ?
+       AND status = 'succeeded' AND updated_at >= ? AND source_text IN (${input.sourceTexts.map(() => "?").join(",")}) LIMIT 1`
+    ).get(input.targetId, input.vectorField, Date.parse(input.since), ...input.sourceTexts));
+  }
+
   requeueEmbeddingRetriesAfterRestart(
     now = Date.now()
   ): Array<{ before: EmbeddingRetryRecord; after: EmbeddingRetryRecord }> {
@@ -4091,20 +4610,21 @@ export class RuntimeRepository {
         .prepare(
           `SELECT *
            FROM embedding_retry_queue
-           WHERE status IN ('in_progress', 'failed')
+           WHERE status = 'in_progress' AND (lease_until IS NULL OR lease_until <= ?)
            ORDER BY updated_at ASC, id ASC`
         )
-        .all() as SqlEmbeddingRetryRow[];
+        .all(now) as SqlEmbeddingRetryRow[];
 
       for (const row of rows) {
         this.db
           .prepare(
             `UPDATE embedding_retry_queue
              SET status = 'pending',
-                 attempts = CASE WHEN status = 'failed' THEN 0 ELSE attempts END,
                  next_attempt_at = ?,
+                 lease_recovery_count = lease_recovery_count + 1,
                  claimed_by = NULL,
                  lease_until = NULL,
+                 lease_token = NULL,
                  updated_at = ?
              WHERE id = ?`
           )
@@ -4116,10 +4636,12 @@ export class RuntimeRepository {
         after: embeddingRetryFromSql({
           ...row,
           status: "pending",
-          attempts: row.status === "failed" ? 0 : row.attempts,
+          attempts: row.attempts,
+          lease_recovery_count: row.lease_recovery_count + 1,
           next_attempt_at: now,
           claimed_by: null,
           lease_until: null,
+          lease_token: null,
           updated_at: now
         })
       }));
@@ -4138,48 +4660,44 @@ export class RuntimeRepository {
       return [];
     }
     const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 25)));
-    const targetFilter = input.targetMemoryIds
-      ? `AND q.target_id IN (${input.targetMemoryIds.map(() => "?").join(", ")})`
-      : "";
+    const eligibility = retryQueueEligibility(input.now, input.targetMemoryIds);
     const transaction = this.db.transaction(() => {
-      const rows = this.db
-        .prepare(
-          `SELECT q.*
-           FROM embedding_retry_queue q
-           LEFT JOIN memories m ON m.id = q.target_id
-           WHERE (
-             q.status = 'pending'
-             OR (q.status = 'in_progress' AND q.lease_until IS NOT NULL AND q.lease_until <= ?)
-           )
-             AND q.next_attempt_at <= ?
-             ${targetFilter}
-           ORDER BY ${embeddingRetryOrderSql()}
-           LIMIT ?`
-        )
-        .all(input.now, input.now, ...(input.targetMemoryIds ?? []), limit) as SqlEmbeddingRetryRow[];
+      const rows = this.db.prepare(`SELECT q.* FROM embedding_retry_queue q
+        LEFT JOIN memories m ON m.id = q.target_id WHERE ${eligibility.sql}
+        ORDER BY ${embeddingRetryOrderSql()} LIMIT ?`)
+        .all(...eligibility.params, limit) as SqlEmbeddingRetryRow[];
       const claimed: EmbeddingRetryRecord[] = [];
       for (const row of rows) {
+        const leaseToken = newId("retry_lease");
         const result = this.db
           .prepare(
             `UPDATE embedding_retry_queue
-             SET status = 'in_progress',
+             SET lease_count = lease_count + 1,
+                 lease_recovery_count = lease_recovery_count + CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END,
+                 status = 'in_progress',
                  claimed_by = ?,
                  lease_until = ?,
+                 lease_token = ?,
                  updated_at = ?
              WHERE id = ?
                AND (
                  status = 'pending'
-                 OR (status = 'in_progress' AND lease_until IS NOT NULL AND lease_until <= ?)
+                 OR (status = 'in_progress' AND (
+                   claimed_by IS NULL OR lease_until IS NULL OR lease_until <= ?
+                 ))
                )
                AND next_attempt_at <= ?`
           )
-          .run(input.workerId, input.leaseUntil, input.now, row.id, input.now, input.now);
+          .run(input.workerId, input.leaseUntil, leaseToken, input.now, row.id, input.now, input.now);
         if (result.changes > 0) {
           claimed.push(embeddingRetryFromSql({
             ...row,
             status: "in_progress",
+            lease_count: row.lease_count + 1,
+            lease_recovery_count: row.lease_recovery_count + (row.status === "in_progress" ? 1 : 0),
             claimed_by: input.workerId,
             lease_until: input.leaseUntil,
+            lease_token: leaseToken,
             updated_at: input.now
           }));
         }
@@ -4189,10 +4707,84 @@ export class RuntimeRepository {
     return transaction();
   }
 
+  /** Claim only the chosen retry id, rechecking readiness under the write lock. */
+  claimEmbeddingRetryById(id: string, input: {
+    now: number; workerId: string; leaseUntil: number; targetMemoryIds?: readonly string[];
+  }): EmbeddingRetryRecord | undefined {
+    const eligibility = retryQueueEligibility(input.now, input.targetMemoryIds);
+    return this.db.transaction(() => {
+      const row = this.db.prepare(`UPDATE embedding_retry_queue AS q SET
+          lease_count = lease_count + 1,
+          lease_recovery_count = lease_recovery_count + CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END,
+          status = 'in_progress',
+          claimed_by = ?, lease_until = ?, lease_token = ?, updated_at = ?
+        WHERE q.id = ? AND (${eligibility.sql}) RETURNING *`)
+        .get(input.workerId, input.leaseUntil, newId("retry_lease"), input.now, id, ...eligibility.params) as SqlEmbeddingRetryRow | undefined;
+      return row ? embeddingRetryFromSql(row) : undefined;
+    })();
+  }
+
+  /** Return unstarted retry claims without changing retry/attempt history. */
+  releaseClaimedEmbeddingRetries(retries: readonly EmbeddingRetryRecord[], now = Date.now()): Array<{ before: EmbeddingRetryRecord; after: EmbeddingRetryRecord }> {
+    return this.db.transaction(() => {
+      const transitions: Array<{ before: EmbeddingRetryRecord; after: EmbeddingRetryRecord }> = [];
+      for (const retry of retries) {
+        if (!retry.claimedBy || !retry.leaseToken || retry.leaseUntil == null) continue;
+        const before = this.getEmbeddingRetry(retry.id);
+        const row = this.db.prepare(`UPDATE embedding_retry_queue SET status = 'pending',
+            claimed_by = NULL, lease_until = NULL, lease_token = NULL, updated_at = ?
+          WHERE id = ? AND status = 'in_progress' AND claimed_by = ? AND lease_token = ?
+            AND lease_until = ? AND lease_until > ? RETURNING *`)
+          .get(now, retry.id, retry.claimedBy, retry.leaseToken, retry.leaseUntil, now) as SqlEmbeddingRetryRow | undefined;
+        if (row && before) transitions.push({ before, after: embeddingRetryFromSql(row) });
+      }
+      return transitions;
+    })();
+  }
+
+  markEmbeddingRetryConfigurationBlockedClaimed(id: string, input: {
+    workerId: string; leaseUntil: number; leaseToken: string; error: string; now: number;
+  }): EmbeddingRetryRecord | undefined {
+    const result = this.db.prepare(`UPDATE embedding_retry_queue SET status = 'failed',
+      blocked_reason = 'configuration', claimed_by = NULL, lease_until = NULL, lease_token = NULL,
+      last_error = ?, updated_at = ?
+      WHERE id = ? AND status = 'in_progress' AND claimed_by = ? AND lease_until = ? AND lease_token = ? AND lease_until > ?`)
+      .run(input.error, input.now, id, input.workerId, input.leaseUntil, input.leaseToken, input.now);
+    return result.changes > 0 ? this.getEmbeddingRetry(id) : undefined;
+  }
+
+  resumeConfigurationBlockedEmbeddingRetries(now = Date.now(), ids?: readonly string[]): Array<{ before: EmbeddingRetryRecord; after: EmbeddingRetryRecord }> {
+    if (ids?.length === 0) return [];
+    const targetFilter = ids ? ` AND id IN (${ids.map(() => "?").join(", ")})` : "";
+    return this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT * FROM embedding_retry_queue
+        WHERE status = 'failed' AND blocked_reason = 'configuration'${targetFilter}`).all(...(ids ?? [])) as SqlEmbeddingRetryRow[];
+      return rows.map((row) => {
+        this.db.prepare(`UPDATE embedding_retry_queue SET status = 'pending', blocked_reason = NULL,
+          next_attempt_at = ?, updated_at = ? WHERE id = ?`).run(now, now, row.id);
+        return { before: embeddingRetryFromSql(row), after: this.getEmbeddingRetry(row.id)! };
+      });
+    })();
+  }
+
+  renewEmbeddingRetryClaim(
+    id: string,
+    claim: { workerId: string; leaseUntil: number; leaseToken: string },
+    newUntil: number,
+    now = Date.now()
+  ): EmbeddingRetryRecord | undefined {
+    if (newUntil <= now) return undefined;
+    const result = this.db.prepare(`UPDATE embedding_retry_queue SET lease_until = ?, updated_at = ?
+      WHERE id = ? AND status = 'in_progress' AND claimed_by = ? AND lease_until = ? AND lease_token = ? AND lease_until > ?`)
+      .run(Math.max(claim.leaseUntil, newUntil), now, id, claim.workerId, claim.leaseUntil, claim.leaseToken, now);
+    return result.changes > 0 ? this.getEmbeddingRetry(id) : undefined;
+  }
+
   isEmbeddingRetryClaimHeld(id: string, input: {
     workerId: string;
     leaseUntil: number;
-  }): boolean {
+    leaseToken: string;
+  }, now = Date.now()): boolean {
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS count
@@ -4200,15 +4792,18 @@ export class RuntimeRepository {
          WHERE id = ?
            AND status = 'in_progress'
            AND claimed_by = ?
-           AND lease_until = ?`
+           AND lease_until = ?
+           AND lease_token = ?
+           AND lease_until > ?`
       )
-      .get(id, input.workerId, input.leaseUntil) as { count: number } | undefined;
+      .get(id, input.workerId, input.leaseUntil, input.leaseToken, now) as { count: number } | undefined;
     return (row?.count ?? 0) > 0;
   }
 
   markEmbeddingRetryRetryClaimed(id: string, input: {
     workerId: string;
     leaseUntil: number;
+    leaseToken: string;
     attempts: number;
     nextAttemptAt: number;
     error: string;
@@ -4217,17 +4812,20 @@ export class RuntimeRepository {
     const result = this.db
       .prepare(
         `UPDATE embedding_retry_queue
-         SET status = 'pending',
+         SET status = 'pending', blocked_reason = NULL,
              attempts = ?,
              next_attempt_at = ?,
              claimed_by = NULL,
              lease_until = NULL,
+             lease_token = NULL,
              last_error = ?,
              updated_at = ?
          WHERE id = ?
            AND status = 'in_progress'
            AND claimed_by = ?
-           AND lease_until = ?`
+           AND lease_until = ?
+           AND lease_token = ?
+           AND lease_until > ?`
       )
       .run(
         input.attempts,
@@ -4236,7 +4834,9 @@ export class RuntimeRepository {
         input.now,
         id,
         input.workerId,
-        input.leaseUntil
+        input.leaseUntil,
+        input.leaseToken,
+        input.now
       );
     return result.changes > 0 ? this.getEmbeddingRetry(id) : undefined;
   }
@@ -4244,6 +4844,7 @@ export class RuntimeRepository {
   markEmbeddingRetryFailedClaimed(id: string, input: {
     workerId: string;
     leaseUntil: number;
+    leaseToken: string;
     attempts: number;
     error: string;
     now: number;
@@ -4251,40 +4852,47 @@ export class RuntimeRepository {
     const result = this.db
       .prepare(
         `UPDATE embedding_retry_queue
-         SET status = 'failed',
+         SET status = 'failed', blocked_reason = NULL,
              attempts = ?,
              claimed_by = NULL,
              lease_until = NULL,
+             lease_token = NULL,
              last_error = ?,
              updated_at = ?
          WHERE id = ?
            AND status = 'in_progress'
            AND claimed_by = ?
-           AND lease_until = ?`
+           AND lease_until = ?
+           AND lease_token = ?
+           AND lease_until > ?`
       )
-      .run(input.attempts, input.error, input.now, id, input.workerId, input.leaseUntil);
+      .run(input.attempts, input.error, input.now, id, input.workerId, input.leaseUntil, input.leaseToken, input.now);
     return result.changes > 0 ? this.getEmbeddingRetry(id) : undefined;
   }
 
   markEmbeddingRetrySucceededClaimed(id: string, input: {
     workerId: string;
     leaseUntil: number;
+    leaseToken: string;
     now: number;
   }): EmbeddingRetryRecord | undefined {
     const result = this.db
       .prepare(
         `UPDATE embedding_retry_queue
-         SET status = 'succeeded',
+         SET status = 'succeeded', blocked_reason = NULL,
              next_attempt_at = ?,
              claimed_by = NULL,
              lease_until = NULL,
+             lease_token = NULL,
              updated_at = ?
          WHERE id = ?
            AND status = 'in_progress'
            AND claimed_by = ?
-           AND lease_until = ?`
+           AND lease_until = ?
+           AND lease_token = ?
+           AND lease_until > ?`
       )
-      .run(input.now, input.now, id, input.workerId, input.leaseUntil);
+      .run(input.now, input.now, id, input.workerId, input.leaseUntil, input.leaseToken, input.now);
     return result.changes > 0 ? this.getEmbeddingRetry(id) : undefined;
   }
 
@@ -4578,8 +5186,11 @@ export class RuntimeRepository {
     now?: string;
     limit?: number;
   }): CandidatePoolRecord[] {
-    const clauses = ["status = 'pending'", "(expires_at IS NULL OR expires_at >= ?)"];
+    const clauses = ["status = 'pending'", "(expires_at IS NULL OR expires_at >= ?)",
+      "COALESCE(json_extract(evidence_json, '$.schemaVersion'), 0) != 2"];
     const params: SqlValue[] = [input.now ?? nowIso()];
+    // Preserve the legacy shared candidate pool. Unified candidates use the
+    // separately scoped listUnifiedL2Candidates method below.
     if (input.candidateKey) {
       clauses.push("candidate_key = ?");
       params.push(input.candidateKey);
@@ -4594,6 +5205,106 @@ export class RuntimeRepository {
       )
       .all(...params, input.limit ?? 1000) as SqlCandidatePoolRow[];
     return rows.map(candidatePoolFromSql);
+  }
+
+  getUnifiedL2Candidate(id: string, userId: string): CandidatePoolRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l2_candidate_pool
+       WHERE id = ? AND user_id = ? AND json_extract(evidence_json, '$.schemaVersion') = 2`
+    ).get(id, userId) as SqlCandidatePoolRow | undefined;
+    return row ? candidatePoolFromSql(row) : undefined;
+  }
+
+  /** Keep a completed candidate completed on replay, and reopen it only for changed source evidence. */
+  upsertUnifiedL2Candidate(input: Omit<CandidatePoolRecord, "status" | "expiresAt">): void {
+    this.db.prepare(
+      `INSERT INTO l2_candidate_pool (
+        id, user_id, session_id, source_memory_id, candidate_key, candidate_value,
+        score, status, evidence_json, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL)
+      ON CONFLICT(id) DO UPDATE SET
+        session_id = excluded.session_id,
+        candidate_key = excluded.candidate_key,
+        candidate_value = excluded.candidate_value,
+        score = excluded.score,
+        status = CASE
+          WHEN json_extract(l2_candidate_pool.evidence_json, '$.sourceVersion') =
+               json_extract(excluded.evidence_json, '$.sourceVersion')
+          THEN l2_candidate_pool.status ELSE 'pending' END,
+        evidence_json = excluded.evidence_json,
+        updated_at = excluded.updated_at,
+        expires_at = NULL
+      WHERE l2_candidate_pool.user_id = excluded.user_id
+        AND l2_candidate_pool.source_memory_id = excluded.source_memory_id`
+    ).run(input.id, input.userId, input.sessionId ?? null, input.sourceMemoryId,
+      input.candidateKey, input.candidateValue, input.score, toJson(input.evidence),
+      input.createdAt, input.updatedAt);
+  }
+
+  listUnifiedL2Candidates(input: {
+    userId: string;
+    episodeId: string | null;
+    limit?: number;
+  }): CandidatePoolRecord[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM l2_candidate_pool
+       WHERE user_id = ? AND status = 'pending'
+         AND json_extract(evidence_json, '$.schemaVersion') = 2
+         AND json_extract(evidence_json, '$.episodeId') IS ?
+       ORDER BY created_at ASC, id ASC LIMIT ?`
+    ).all(input.userId, input.episodeId, input.limit ?? -1) as SqlCandidatePoolRow[];
+    return rows.map(candidatePoolFromSql);
+  }
+
+  markUnifiedL2CandidateProcessed(input: {
+    id: string;
+    userId: string;
+    sourceVersion: string;
+    operations: unknown;
+    at: string;
+  }): boolean {
+    const result = this.db.prepare(
+      `UPDATE l2_candidate_pool
+       SET status = 'promoted', updated_at = ?,
+           evidence_json = json_set(evidence_json, '$.processedAt', ?, '$.operations', json(?))
+       WHERE id = ? AND user_id = ? AND status = 'pending'
+         AND json_extract(evidence_json, '$.schemaVersion') = 2
+         AND json_extract(evidence_json, '$.sourceVersion') = ?`
+    ).run(input.at, input.at, toJson(input.operations ?? null), input.id, input.userId, input.sourceVersion);
+    return result.changes === 1;
+  }
+
+  /** Remove withdrawn source text while retaining committed-operation idempotency tombstones. */
+  invalidateUnifiedL2Source(sourceMemoryId: string, userId: string, at = nowIso()): {
+    candidates: number;
+    snapshots: number;
+    operations: number;
+  } {
+    return this.db.transaction(() => {
+      const candidates = this.db.prepare(
+        `DELETE FROM l2_candidate_pool WHERE source_memory_id = ? AND user_id = ?
+         AND json_extract(evidence_json, '$.schemaVersion') = 2`
+      ).run(sourceMemoryId, userId).changes;
+      const snapshots = this.db.prepare(
+        `UPDATE runtime_kv
+         SET value_json = json_set(json_remove(value_json, '$.input', '$.operations'), '$.sourceInvalidatedAt', ?),
+             updated_at = ?
+         WHERE (${L2_EXTRACTION_SNAPSHOT_PREFIXES.map(() => "key LIKE ?").join(" OR ")})
+           AND json_extract(json_extract(value_json, '$.scope'), '$[0]') = ?
+           AND EXISTS (SELECT 1 FROM json_each(value_json, '$.input.L1_RECORDS') AS source
+                       WHERE json_extract(source.value, '$.id') = ?)`
+      ).run(at, at, ...L2_EXTRACTION_SNAPSHOT_PREFIXES.map(prefix => `${prefix}%`), userId, sourceMemoryId).changes;
+      const operations = this.db.prepare(
+        `UPDATE runtime_kv
+         SET value_json = json_set(json_remove(value_json, '$.operation'), '$.sourceInvalidatedAt', ?),
+             updated_at = ?
+         WHERE (${L2_EXTRACTION_OPERATION_PREFIXES.map(() => "key LIKE ?").join(" OR ")})
+           AND EXISTS (SELECT 1 FROM memories WHERE id = ? AND user_id = ?)
+           AND EXISTS (SELECT 1 FROM json_each(value_json, '$.operation.l1_ids') AS source
+                       WHERE source.value = ?)`
+      ).run(at, at, ...L2_EXTRACTION_OPERATION_PREFIXES.map(prefix => `${prefix}%`), sourceMemoryId, userId, sourceMemoryId).changes;
+      return { candidates, snapshots, operations };
+    })();
   }
 
   pruneCandidatePool(now = nowIso()): number {
@@ -4857,6 +5568,10 @@ export class RuntimeRepository {
       }>
     };
     this.db.transaction(() => {
+      const keptL3Units = this.existingL3Units(tables, conflictStrategy);
+      // Unfinished work of a kept unit that this database does not have: its Sessions' traces must be
+      // frozen again here, so their cursors are moved back below the first trace no batch here covers.
+      const droppedL3Work: Array<{ sessionId: string; startTraceSeq: number }> = [];
       const hadRuntimeData = Boolean(this.db.prepare(`SELECT EXISTS(
         SELECT 1 FROM memories UNION ALL SELECT 1 FROM sessions UNION ALL
         SELECT 1 FROM raw_turns UNION ALL SELECT 1 FROM source_turn_captures
@@ -4866,6 +5581,21 @@ export class RuntimeRepository {
         for (const row of rows) {
           const defaults = applyBundleDefaults(table, deserializeBundleRow(row));
           const normalized = table === "memory_change_log" ? compactHistoryChangeRow(defaults) : defaults;
+          const l3UnitKey = keptL3Units.size > 0 ? bundleRowL3UnitKey(table, normalized) : null;
+          if (l3UnitKey && keptL3Units.has(l3UnitKey)) {
+            if (table === "l3_unit_batches" && normalized.status !== "applied" && typeof normalized.id === "string" &&
+                !this.rowExists("l3_unit_batches", ["id"], [normalized.id]) &&
+                typeof normalized.session_id === "string" && typeof normalized.start_trace_seq === "number" &&
+                typeof normalized.end_trace_seq === "number") {
+              const unfrozen = this.firstUnfrozenL3Trace(normalized.session_id, normalized.start_trace_seq, normalized.end_trace_seq);
+              if (unfrozen !== null) droppedL3Work.push({ sessionId: normalized.session_id, startTraceSeq: unfrozen });
+            }
+            if (table === "l3_units") {
+              result.conflicts.push({ table, primaryKey: "unit_key", sourceId: l3UnitKey, targetId: l3UnitKey, action: "skipped" });
+            }
+            result.skipped[table] = (result.skipped[table] ?? 0) + 1;
+            continue;
+          }
           const identity = bundleIdentity(table, normalized);
           if (identity) {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
@@ -4923,10 +5653,33 @@ export class RuntimeRepository {
           }
         }
       }
+      const rewind = this.db.prepare(
+        `UPDATE l3_world_model_session_cursors SET last_scheduled_seq = MIN(last_scheduled_seq, ?) WHERE session_id = ?`
+      );
+      for (const work of droppedL3Work) rewind.run(work.startTraceSeq - 1, work.sessionId);
     })();
     this.scheduleLogTablesPrune();
     this.scheduleHistoryLogCompaction(true);
     return result;
+  }
+
+  /**
+   * Row-by-row conflict handling cannot keep an L3 unit consistent (an old item could stay active
+   * next to its imported successor), so a unit that already exists here is kept whole: the bundle's
+   * rows for it (unit, items, batches, jobs, snapshot) are all skipped, as re-importing one's own
+   * backup skips every other existing row. With conflictStrategy "error" the import fails instead.
+   */
+  private existingL3Units(tables: Record<string, unknown>, conflictStrategy: "skip" | "replace" | "error"): Set<string> {
+    const rows = Array.isArray(tables.l3_units) ? tables.l3_units as Array<Record<string, unknown>> : [];
+    const exists = this.db.prepare(`SELECT 1 FROM l3_units WHERE unit_key = ?`).pluck();
+    const kept = new Set<string>();
+    for (const row of rows) {
+      const unitKey = deserializeBundleRow(row).unit_key;
+      if (typeof unitKey !== "string" || !exists.get(unitKey)) continue;
+      if (conflictStrategy === "error") throw new Error(`import conflict: l3 unit already exists: ${unitKey}`);
+      kept.add(unitKey);
+    }
+    return kept;
   }
 
   private mergeSourceTurnActivation(
@@ -4953,6 +5706,28 @@ export class RuntimeRepository {
     return existing ? "replaced" : "inserted";
   }
 
+
+  /**
+   * The first trace in [start, end] that no batch of this database froze, or null when all were
+   * (an earlier import of the same bundle refroze them). A batch counts only if it froze the turn now
+   * at that position: a replace import can put another turn there, which a batch reading its frozen
+   * ids would leave out.
+   */
+  private firstUnfrozenL3Trace(sessionId: string, start: number, end: number): number | null {
+    const covered = this.db.prepare(
+      `SELECT EXISTS(
+         SELECT 1 FROM l3_world_model_input_traces t JOIN l3_unit_batches b
+           ON b.session_id = t.session_id AND b.start_trace_seq <= t.trace_seq AND b.end_trace_seq >= t.trace_seq
+         WHERE t.session_id = ? AND t.trace_seq = ?
+           AND EXISTS(SELECT 1 FROM json_each(b.l1_memory_ids_json) WHERE value = t.l1_memory_id)
+           AND EXISTS(SELECT 1 FROM json_each(b.raw_turn_ids_json) WHERE value = t.raw_turn_id)
+       )`
+    ).pluck();
+    for (let seq = start; seq <= end; seq += 1) {
+      if (!covered.get(sessionId, seq)) return seq;
+    }
+    return null;
+  }
   private rowExists(table: BundleTableName, columns: string[], values: Array<string | number>): boolean {
     const tableColumns = this.tableColumns(table);
     if (columns.length === 0 || columns.some((column) => !tableColumns.includes(column))) {
@@ -4988,14 +5763,14 @@ export class RuntimeRepository {
       return;
     }
     this.scheduledLogPrunes.add(table);
-    setImmediate(() => {
+    withoutJobLeaseGuard(() => setImmediate(() => {
       this.scheduledLogPrunes.delete(table);
       try {
         this.pruneLogTable(table);
       } catch {
         // Log retention is best-effort and must not affect memory write paths.
       }
-    });
+    }));
   }
 
   private pruneLogTable(table: LogTableName): number {
@@ -5055,10 +5830,44 @@ export class L3WorldModelScopeWorkspaceConflictError extends Error {
 }
 
 export class L3WorldModelRepository {
+  /** When it returns a machine id, frozen batches go to the new L3 (field cognition) instead. */
+  private fieldCognitionMachineId?: () => string | null;
+
   constructor(
     private readonly db: Database.Database,
-    private readonly memories: MemoryRepository
+    private readonly memories: MemoryRepository,
+    private readonly l3Field?: L3FieldRepository
   ) {}
+
+  routeBatchesToFieldCognition(machineId: () => string | null): void {
+    this.fieldCognitionMachineId = machineId;
+  }
+
+  /** v2 Sessions holding captured turns that were never frozen into a batch, with their last activity. */
+  sessionsWithUnfrozenTurns(): Array<{ sessionId: string; open: boolean; lastActivityAt: string }> {
+    return (this.db.prepare(
+      `SELECT s.id AS sessionId, s.status = 'open' AS open, t.last_at AS lastActivityAt FROM sessions AS s
+       JOIN (SELECT session_id, MAX(trace_seq) AS last_seq, MAX(created_at) AS last_at
+             FROM l3_world_model_input_traces GROUP BY session_id) AS t
+         ON t.session_id = s.id
+       LEFT JOIN l3_world_model_session_cursors AS c ON c.session_id = s.id
+       WHERE json_extract(s.meta_json, '$.l3_world_model_protocol_version') = 2
+         AND t.last_seq > COALESCE(c.last_scheduled_seq, 0)`
+    ).all() as Array<{ sessionId: string; open: number; lastActivityAt: string }>)
+      .map((row) => ({ ...row, open: row.open === 1 }));
+  }
+
+  /**
+   * New L3 only: hand a closed task's turns to L3. Called wherever a task closes, so a conversation that
+   * simply stops (idle, or the user ended the topic) still reaches L3; what is already frozen is skipped.
+   * With the switch off nothing changes.
+   */
+  freezeClosedTask(input: { sessionId: string; episodeId: string; trigger: L3WorldModelBatchTrigger; at?: string }): void {
+    if (!this.l3Field || !this.fieldCognitionMachineId?.()) return;
+    const row = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(input.sessionId) as SqlSessionRow | undefined;
+    if (!row || sessionFromSql(row).meta.l3_world_model_protocol_version !== 2) return;
+    this.freezeBatches({ sessionId: input.sessionId, trigger: input.trigger, episodeId: input.episodeId, at: input.at });
+  }
 
   getScope(userId: string, projectId?: string | null): L3WorldModelScopeRecord | undefined {
     const row = this.db.prepare(
@@ -5147,6 +5956,34 @@ export class L3WorldModelRepository {
       episodeId: input.episodeId ?? undefined,
       createdAt
     };
+  }
+
+  /** Register retained native-scan history on its existing IDs when its Session first adopts v2. */
+  backfillSourceInputTraces(sessionId: string): number {
+    const session = this.requireV2Session(sessionId);
+    // Keep L1 outermost: resolve each retained raw-turn reference by ID, not every L1 per raw turn.
+    // A migrated capture ledger may retain the submitting account; the Session, raw turn and L1
+    // keep the original owner. Match native identity plus raw/session IDs without rewriting provenance.
+    const rows = this.db.prepare(
+      `SELECT DISTINCT r.id AS rawTurnId, r.episode_id AS episodeId, r.created_at AS createdAt, m.id AS l1MemoryId
+       FROM memories m
+       CROSS JOIN raw_turns r ON r.id IN (json_extract(m.info_json, '$.raw_turn_id'), json_extract(m.properties_json, '$.internal_info.trace.raw_turn_id'))
+         AND r.session_id = m.session_id AND r.user_id = m.user_id
+       CROSS JOIN source_turn_captures c ON c.source = ? AND c.profile_id = ?
+         AND c.namespace_key = ? AND c.conversation_id = ? AND c.turn_id = r.turn_id
+         AND c.raw_turn_id = r.id AND c.session_id = r.session_id
+       WHERE m.session_id = ? AND m.user_id = ? AND m.memory_layer = 'L1'
+         AND r.deleted_at IS NULL AND r.redacted_at IS NULL
+         AND m.deleted_at IS NULL AND m.status != 'deleted'
+         AND json_extract(m.properties_json, '$.internal_info.capture_decision.status') IS NOT 'rejected'
+         AND NOT EXISTS (SELECT 1 FROM l3_world_model_input_traces t WHERE t.session_id = r.session_id AND t.l1_memory_id = m.id)
+       ORDER BY r.created_at, r.id, m.created_at, m.id`
+    ).all(session.source, session.profileId, session.meta.source_namespace_key ?? null,
+      session.conversationId ?? session.hostSessionKey ?? null, session.id, session.userId) as Array<{
+      rawTurnId: string; episodeId: string | null; createdAt: string; l1MemoryId: string;
+    }>;
+    for (const row of rows) this.registerInputTrace({ sessionId, ...row });
+    return rows.length;
   }
 
   traceHead(sessionId: string): L3WorldModelTraceHeadResponse {
@@ -5444,13 +6281,20 @@ export class L3WorldModelRepository {
   }
 
   insertImmutableJob(job: EvolutionJobRecord): EvolutionJobRecord {
-    if (job.jobType !== "l3_world_model_update" && job.jobType !== "project_environment_profile") {
+    if (
+      job.jobType !== "l3_world_model_update" &&
+      job.jobType !== "project_environment_profile" &&
+      job.jobType !== "l3_unit_update"
+    ) {
       throw new TypeError("immutable L3 job must use an L3 World Model job type");
     }
     if (!job.dedupeKey) {
       throw new TypeError("immutable L3 job requires dedupeKey");
     }
-    if (job.jobType === "l3_world_model_update" && (!job.scopeKey || job.scopeSeq === undefined)) {
+    if (
+      (job.jobType === "l3_world_model_update" || job.jobType === "l3_unit_update") &&
+      (!job.scopeKey || job.scopeSeq === undefined)
+    ) {
       throw new TypeError("L3 field update job requires scopeKey and scopeSeq");
     }
     if (job.jobType === "project_environment_profile" && (job.scopeKey || job.scopeSeq !== undefined)) {
@@ -5483,6 +6327,43 @@ export class L3WorldModelRepository {
     return job;
   }
 
+  /** One new-L3 batch per chunk, run in order per machine through the l3_unit_update FIFO. */
+  private freezeL3UnitBatch(
+    session: SessionRecord,
+    machineId: string,
+    trigger: L3WorldModelBatchTrigger,
+    chunk: readonly L3WorldModelInputTraceRecord[],
+    at: string
+  ): string {
+    const batch = this.l3Field!.freezeUnitBatch({
+      userId: session.userId,
+      machineId,
+      sessionId: session.id,
+      trigger,
+      startTraceSeq: chunk[0]!.traceSeq,
+      endTraceSeq: chunk.at(-1)!.traceSeq,
+      l1MemoryIds: chunk.map((trace) => trace.l1MemoryId),
+      rawTurnIds: [...new Set(chunk.map((trace) => trace.rawTurnId))],
+      at
+    });
+    this.insertImmutableJob({
+      id: newId("job"),
+      jobType: "l3_unit_update",
+      status: "queued",
+      dedupeKey: `l3_unit_update:${batch.id}`,
+      userId: session.userId,
+      sessionId: session.id,
+      scopeKey: batch.machineUnitKey,
+      scopeSeq: batch.scopeSeq,
+      payload: { batchId: batch.id },
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+    return batch.id;
+  }
+
   private freezeBatchesInTransaction(input: {
     sessionId: string;
     trigger: L3WorldModelBatchTrigger;
@@ -5491,6 +6372,11 @@ export class L3WorldModelRepository {
     at?: string;
   }): FreezeL3WorldModelBatchesResult {
     const session = this.requireV2Session(input.sessionId);
+    // Scanned history only ever goes to the new L3. While it is off (switched off after the scan), the
+    // turns wait without moving the cursor, so they reach the new L3 once it is on again.
+    if (session.meta.work_memory_disabled === true && !(this.l3Field && this.fieldCognitionMachineId?.())) {
+      return { scheduled: false, batchIds: [], targetCount: 0 };
+    }
     const at = input.at ?? nowIso();
     this.db.prepare(
       `INSERT INTO l3_world_model_session_cursors (session_id, last_scheduled_seq, updated_at)
@@ -5509,7 +6395,9 @@ export class L3WorldModelRepository {
       ).get(session.id, input.throughL1MemoryId) as { trace_seq: number } | undefined;
       if (!through) throw new Error("through L1 memory does not belong to the L3 World Model session trace");
       endTraceSeq = through.trace_seq;
-    } else if (input.trigger === "episode_idle_close") {
+    } else if (input.trigger === "episode_idle_close" || input.episodeId) {
+      // A new_task found by turn.judge.v1 after later turns were stored freezes
+      // only through the old task's last trace.
       if (!input.episodeId) throw new TypeError("episode_idle_close requires episodeId");
       const end = this.db.prepare(
         `SELECT COALESCE(MAX(trace_seq), 0) AS trace_seq
@@ -5545,6 +6433,21 @@ export class L3WorldModelRepository {
     }
 
     const chunks = splitL3TracesByRawTurn(traces, 20);
+    const fieldMachineId = this.l3Field ? this.fieldCognitionMachineId?.() ?? null : null;
+    if (fieldMachineId) {
+      const batchIds = chunks.map((chunk) => this.freezeL3UnitBatch(session, fieldMachineId, input.trigger, chunk, at));
+      this.db.prepare(
+        `UPDATE l3_world_model_session_cursors
+         SET last_scheduled_seq = ?, updated_at = ? WHERE session_id = ?`
+      ).run(endTraceSeq, at, session.id);
+      return {
+        scheduled: true,
+        throughL1MemoryId: traces.at(-1)?.l1MemoryId,
+        throughTraceSeq: endTraceSeq,
+        batchIds,
+        targetCount: batchIds.length
+      };
+    }
     const scope = this.ensureScope(session.userId, session.projectId, at);
     const batchIds: string[] = [];
     let targetCount = 0;
@@ -6017,6 +6920,7 @@ export class Repositories {
   readonly processing: MemoryProcessingRepository;
   readonly runtime: RuntimeRepository;
   readonly l3WorldModels: L3WorldModelRepository;
+  readonly l3Field: L3FieldRepository;
   readonly projectEnvironments: ProjectEnvironmentRepository;
   readonly vectors: SqliteVecStore;
 
@@ -6027,12 +6931,16 @@ export class Repositories {
     this.userMemories = new UserMemoryRepository(db);
     this.processing = new MemoryProcessingRepository(db);
     this.runtime = new RuntimeRepository(db);
-    this.l3WorldModels = new L3WorldModelRepository(db, this.memories);
+    this.l3Field = new L3FieldRepository(db, this.memories);
+    this.l3WorldModels = new L3WorldModelRepository(db, this.memories, this.l3Field);
     this.projectEnvironments = new ProjectEnvironmentRepository(db, this.l3WorldModels, this.runtime);
   }
 
   transaction<T>(fn: () => T): T {
-    return this.db.transaction(fn)();
+    return this.db.transaction(() => {
+      assertCurrentJobLease();
+      return fn();
+    })();
   }
 
   clearAllMemoryData(): Record<string, number> {
@@ -6054,8 +6962,8 @@ export class Repositories {
             cleared[table] = this.db.prepare(`DELETE FROM "${table}"`).run().changes;
           }
         }
-        // Keep source tombstones, but a deleted Session must not block future turns.
-        this.db.prepare(`UPDATE source_turn_captures SET session_id = NULL, episode_id = NULL, raw_turn_id = NULL`).run();
+        // A full clear resets capture identities so explicitly rescanning the same
+        // source history can import it again. Individual deletions keep tombstones.
         if (existing.has("sqlite_sequence")) {
           const sequenceTables = tables.filter((table) => !table.startsWith("memory_vec_"));
           if (sequenceTables.length) {
@@ -6558,6 +7466,7 @@ function listTitleForMemory(memory: MemoryRow): string {
 }
 
 function listSummaryForMemory(memory: MemoryRow): string {
+  if (isTraceMemory(memory)) return storedTraceSummary(memory) ?? "";
   const internal = memory.properties.internal_info;
   if (internal.memory_kind === "work_memory" && typeof internal.requirement === "string") {
     return internal.requirement.trim();
@@ -6592,10 +7501,28 @@ function listMetricsForMemory(memory: MemoryRow): MemoryListItem["metrics"] | un
     return undefined;
   }
 
+  // Capture/import initializes both scores to zero before reflection and reward.
+  // Preserve genuine zero results: reward evidence and reflection are independent.
+  const isTrace = kindFromMemory(memory) === "trace";
+  const rewardRecorded = numberMetric(trace.r_human) !== undefined
+    || numberMetric(internal.r_human) !== undefined
+    || numberMetric(memory.info.r_human) !== undefined;
+  const reflectionRecorded = Boolean(reflection)
+    || typeof trace.reflection_scored_at === "string";
+  // Older plugin imports discarded r_human. Missing historical evidence must not
+  // hide a completed zero. New imports explicitly preserve null for no reward.
+  const legacyImport = recordValue(internal.legacy_import);
+  const historicalReflectedImport = Boolean(reflection)
+    && ["openclaw", "hermes", "dsh"].includes(String(legacyImport.source))
+    && typeof legacyImport.source_id === "string"
+    && trace.r_human === undefined;
+
   return {
     ...(value === undefined ? {} : { value }),
     ...(alpha === undefined ? {} : { alpha }),
-    reflectionDone: Boolean(reflection)
+    reflectionDone: Boolean(reflection),
+    ...(isTrace && value === 0 && !rewardRecorded && !historicalReflectedImport ? { valuePending: true } : {}),
+    ...(isTrace && alpha === 0 && !reflectionRecorded && !rewardRecorded ? { alphaPending: true } : {})
   };
 }
 
@@ -6621,26 +7548,25 @@ function firstReadableMemoryValueLine(value: string): string | undefined {
 }
 
 function firstUserMemoryValueLine(value: string): string | undefined {
-  let inUserSection = false;
-  const userLines: string[] = [];
-  for (const line of value.split(/\r?\n/)) {
+  const lines = semanticUserText(value).split(/\r?\n/);
+  let fence = "";
+  for (const [index, line] of lines.entries()) {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (marker) {
+      if (!fence) fence = marker[1]!;
+      else if (marker[1]![0] === fence[0] && marker[1]!.length >= fence.length) fence = "";
+      continue;
+    }
+    if (fence) continue;
     const role = memoryValueRoleMarker(line);
-    if (role) {
-      if (inUserSection && role !== "user") {
-        break;
-      }
-      inUserSection = role === "user";
-      continue;
-    }
-    if (!inUserSection) {
-      continue;
-    }
-    userLines.push(line);
+    if (role !== "user") continue;
+    const userLines = semanticUserText(lines.slice(index + 1).join("\n")).split(/\r?\n/);
+    const nextRole = userLines.findIndex(line => Boolean(memoryValueRoleMarker(line)));
+    const title = firstSemanticUserLine((nextRole < 0 ? userLines : userLines.slice(0, nextRole)).join("\n"));
+    return title && !isPlaceholderMemorySummary(title) && !isWorldSectionHeading(title) && !isInternalMemoryKey(title)
+      ? title : undefined;
   }
-  const title = firstSemanticUserLine(userLines.join("\n"));
-  return title && !isPlaceholderMemorySummary(title) && !isWorldSectionHeading(title) && !isInternalMemoryKey(title)
-    ? title
-    : undefined;
+  return undefined;
 }
 
 function isPlaceholderMemorySummary(value: string | undefined): boolean {
@@ -6930,6 +7856,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
   addMemoryKindClause(filter.memoryKind);
+  addMemoryKindClause(filter.excludedMemoryKinds, true);
   addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
 
@@ -6981,7 +7908,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     params.push(...values);
   }
 
-  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined): void {
+  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined, exclude = false): void {
     if (value === undefined) return;
     const values = Array.isArray(value) ? value : [value];
     if (values.length === 0) return;
@@ -6995,7 +7922,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
         ELSE 'trace'
       END
     )`;
-    clauses.push(`${expression} IN (${values.map(() => "?").join(", ")})`);
+    clauses.push(`${expression} ${exclude ? "NOT IN" : "IN"} (${values.map(() => "?").join(", ")})`);
     params.push(...values);
   }
 
@@ -7360,7 +8287,7 @@ function skillClusterMemberFromSql(row: SqlSkillClusterMemberRow): SkillClusterM
 interface SqlRawTurnRow {
   id: string;
   session_id: string;
-  episode_id: string;
+  episode_id: string | null;
   turn_id: string;
   user_id: string;
   conversation_id: string | null;
@@ -7400,7 +8327,7 @@ function rawTurnFromSql(row: SqlRawTurnRow): RawTurnRecord {
   return {
     id: row.id,
     sessionId: row.session_id,
-    episodeId: row.episode_id,
+    episodeId: row.episode_id ?? undefined,
     turnId: row.turn_id,
     userId: row.user_id,
     conversationId: row.conversation_id ?? undefined,
@@ -7489,7 +8416,16 @@ function recallEventFromSql(row: SqlRecallEventRow): RecallEventRecord {
   };
 }
 
-interface SqlJobRow {
+interface SqlSchedulingMetadata {
+  queue_lane: string | null; resource_class: string | null; enqueue_seq: number | null;
+  first_queued_at: string | null; base_priority: number | null; policy_version: number | null;
+}
+function schedulingMetadataFromSql(row: SqlSchedulingMetadata): SchedulingMetadata {
+  return { queueLane: row.queue_lane, resourceClass: row.resource_class, enqueueSeq: row.enqueue_seq,
+    firstQueuedAt: row.first_queued_at, basePriority: row.base_priority, policyVersion: row.policy_version };
+}
+
+interface SqlJobRow extends SqlSchedulingMetadata {
   id: string;
   job_type: JobType;
   status: JobStatus;
@@ -7504,6 +8440,13 @@ interface SqlJobRow {
   attempts: number;
   max_attempts: number;
   leased_until: string | null;
+  lease_owner: string | null;
+  lease_token: string | null;
+  available_at: string | null;
+  blocked_reason: string | null;
+  failure_count: number;
+  lease_count: number;
+  lease_recovery_count: number;
   last_error: string | null;
   created_at: string;
   updated_at: string;
@@ -7524,7 +8467,7 @@ interface SqlMemoryProcessingRow {
   updated_at: string;
 }
 
-interface SqlEmbeddingRetryRow {
+interface SqlEmbeddingRetryRow extends SqlSchedulingMetadata {
   id: string;
   target_kind: EmbeddingRetryTargetKind;
   target_id: string;
@@ -7533,10 +8476,14 @@ interface SqlEmbeddingRetryRow {
   embed_role: "document" | "query";
   status: EmbeddingRetryStatus;
   attempts: number;
+  lease_count: number;
+  lease_recovery_count: number;
   max_attempts: number;
   next_attempt_at: number;
   claimed_by: string | null;
   lease_until: number | null;
+  lease_token: string | null;
+  blocked_reason: string | null;
   last_error: string | null;
   created_at: number;
   updated_at: number;
@@ -7623,6 +8570,7 @@ interface SqlAuditLogRow {
 
 function jobFromSql(row: SqlJobRow): EvolutionJobRecord {
   return {
+    ...schedulingMetadataFromSql(row),
     id: row.id,
     jobType: row.job_type,
     status: row.status,
@@ -7637,6 +8585,13 @@ function jobFromSql(row: SqlJobRow): EvolutionJobRecord {
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
     leasedUntil: row.leased_until,
+    leaseOwner: row.lease_owner,
+    leaseToken: row.lease_token,
+    availableAt: row.available_at,
+    blockedReason: row.blocked_reason,
+    failureCount: row.failure_count,
+    leaseCount: row.lease_count,
+    leaseRecoveryCount: row.lease_recovery_count,
     lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -7675,6 +8630,7 @@ function mergeJobPayload(existing: Record<string, unknown>, next: Record<string,
 
 function embeddingRetryFromSql(row: SqlEmbeddingRetryRow): EmbeddingRetryRecord {
   return {
+    ...schedulingMetadataFromSql(row),
     id: row.id,
     targetKind: row.target_kind,
     targetId: row.target_id,
@@ -7683,10 +8639,14 @@ function embeddingRetryFromSql(row: SqlEmbeddingRetryRow): EmbeddingRetryRecord 
     embedRole: row.embed_role,
     status: row.status,
     attempts: row.attempts,
+    leaseCount: row.lease_count,
+    leaseRecoveryCount: row.lease_recovery_count,
     maxAttempts: row.max_attempts,
     nextAttemptAt: row.next_attempt_at,
     claimedBy: row.claimed_by,
     leaseUntil: row.lease_until,
+    leaseToken: row.lease_token,
+    blockedReason: row.blocked_reason,
     lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -7892,6 +8852,31 @@ interface BundleIdentity {
   values: Array<string | number>;
 }
 
+/** The new-L3 unit a bundle row belongs to, for the tables that hold one unit's state. */
+function bundleRowL3UnitKey(table: string, row: Record<string, unknown>): string | null {
+  const record = (value: unknown): Record<string, unknown> => {
+    const parsed = typeof value === "string" ? parseJson<unknown>(value, {}) : value;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  };
+  const text = (value: unknown) => (typeof value === "string" && value ? value : null);
+  switch (table) {
+    case "l3_units":
+    case "l3_items":
+      return text(row.unit_key);
+    case "l3_unit_batches":
+      return text(row.machine_unit_key);
+    case "evolution_jobs": {
+      if (row.job_type === "l3_unit_update") return text(row.scope_key);
+      const payload = record(row.payload_json);
+      return row.job_type === "project_environment_profile" && payload.mode === "l3_field" ? text(payload.unitKey) : null;
+    }
+    case "memories":
+      return text(record(record(record(row.properties_json).internal_info).l3_field).unit_key);
+    default:
+      return null;
+  }
+}
+
 function bundleIdentity(
   table: BundleTableName,
   row: Record<string, unknown>
@@ -7905,7 +8890,9 @@ function bundleIdentity(
     l3_world_model_input_traces: ["session_id", "trace_seq"],
     l3_world_model_evidence_batches: ["id"],
     l3_world_model_batch_targets: ["batch_id", "target_field"],
-    l3_world_model_project_environment_state: ["user_id", "project_id"]
+    l3_world_model_project_environment_state: ["user_id", "project_id"],
+    l3_units: ["unit_key"],
+    l3_user_projects: ["user_id", "root_path"]
   };
   const newColumns = newTableIdentityColumns[table];
   if (newColumns) {
@@ -7967,6 +8954,9 @@ function nestedString(record: Record<string, unknown>, ...path: string[]): strin
 }
 
 function redactBundleRow(table: BundleTableName, row: Record<string, unknown>): Record<string, unknown> {
+  if (table === "evolution_jobs" && row.job_type === "capture_replay") {
+    return { ...row, payload_json: JSON.stringify({ rawTextExcluded: true }) };
+  }
   if (table !== "raw_turns") {
     return row;
   }
@@ -7995,9 +8985,15 @@ function normalizeRedactedL3WorldModelBundle(
     .filter((row) => terminalBatchIds.has(String(row.batch_id)));
   tables.evolution_jobs = (tables.evolution_jobs ?? []).filter((row) => {
     const jobType = row.job_type;
-    if (jobType !== "l3_world_model_update" && jobType !== "project_environment_profile") return true;
+    if (
+      jobType !== "l3_world_model_update" &&
+      jobType !== "project_environment_profile" &&
+      jobType !== "l3_unit_update"
+    ) return true;
     return row.status === "succeeded" || row.status === "dead_letter";
   });
+  // Unfinished unit batches depend on raw text that a redacted bundle no longer carries.
+  tables.l3_unit_batches = (tables.l3_unit_batches ?? []).filter((row) => row.status === "applied");
   tables.l3_world_model_project_environment_state = (
     tables.l3_world_model_project_environment_state ?? []
   ).map((row) => ({
@@ -8055,6 +9051,13 @@ function deserializeBundleRow(row: Record<string, unknown>): Record<string, unkn
 }
 
 function applyBundleDefaults(table: BundleTableName, row: Record<string, unknown>): Record<string, unknown> {
+  if (table === "evolution_jobs" || table === "embedding_retry_queue") {
+    // A queue position belongs to the database it was taken in: an imported row is numbered on
+    // insert, after what is already queued here, instead of colliding with (or, on replace,
+    // displacing) a local row that holds the same number.
+    const { enqueue_seq: _sourcePosition, ...rest } = row;
+    return rest;
+  }
   if (table === "sessions" && row.last_seen_at === undefined) {
     return {
       ...row,
@@ -8145,7 +9148,7 @@ function evolutionJobOrderSql(): string {
              ELSE ''
            END DESC,
            CASE
-             WHEN job_type IN ('trace_summary', 'import_summary', 'observation_extract') THEN 0
+             WHEN job_type IN ('episode_assignment', 'episode_finalize', 'trace_summary', 'import_summary', 'observation_extract') THEN 0
              WHEN job_type = 'embedding' THEN 1
              ELSE 2
            END ASC,
@@ -8172,7 +9175,7 @@ function evolutionJobPrioritySql(): string {
                  'startup.processing_repair',
                  'startup.placeholder_summary_repair'
                ) THEN 90
-             WHEN job_type IN ('trace_summary', 'observation_extract')
+             WHEN job_type IN ('episode_assignment', 'episode_finalize', 'trace_summary', 'observation_extract')
                OR (job_type = 'embedding' AND ${interactiveL1Target}) THEN 1
              WHEN job_type = 'import_summary'
                OR (job_type = 'embedding' AND ${importedTarget}) THEN 2
@@ -8186,7 +9189,7 @@ function evolutionJobPrioritySql(): string {
              WHEN job_type = 'l2_association' THEN 40
              WHEN job_type = 'l2_induction' THEN 50
              WHEN job_type = 'project_environment_profile' THEN 55
-             WHEN job_type IN ('l3_abstraction', 'l3_world_model_update') THEN 60
+             WHEN job_type IN ('l3_abstraction', 'l3_world_model_update', 'l3_unit_update') THEN 60
              WHEN job_type = 'skill_crystallization' THEN 70
              WHEN job_type = 'skill_cluster_assign' THEN 72
              WHEN job_type = 'skill_batch_evolve' THEN 73

@@ -1,14 +1,8 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
+import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  DEFAULT_MEMMY_CONFIG,
-  MemoryDb,
-  type LlmClient,
-  type LlmCompletionOptions,
-  type LlmMessage,
-  type MemoryRow,
-  type RecallHit
-} from "../../../src/index.js";
+import { MemoryDb, type LlmClient, type LlmCompletionOptions, type LlmMessage, type MemoryRow, type RecallHit } from "../../../src/index.js";
 import { Repositories, type RawTurnRecord } from "../../../src/storage/repositories.js";
 import {
   policyIsEligibleForDownstream,
@@ -301,12 +295,12 @@ describe("MemoryService / retrieval / query and filtering", () => {
     expect(start.sourceMemoryIds).toEqual([]);
     expect(start.status).toContain("memory_search:disabled");
 
-    const complete = service.completeTurn("search-disabled-turn", {
+    const complete = (await service.completeTurn("search-disabled-turn", {
       namespace,
       sessionId: session.sessionId,
       query: "Training turn should not retrieve memory.",
       answer: "Captured without retrieval."
-    });
+    }));
     expect(complete.l1MemoryIds).toHaveLength(1);
     expect(countRows(db, "memories")).toBe(1);
 
@@ -324,11 +318,11 @@ describe("MemoryService / retrieval / query and filtering", () => {
 
   it("uses the summed tier topK as the explicit search default limit", async () => {
     const config = {
-      ...DEFAULT_MEMMY_CONFIG,
+      ...LEGACY_TEST_CONFIG,
       algorithm: {
-        ...DEFAULT_MEMMY_CONFIG.algorithm,
+        ...LEGACY_TEST_CONFIG.algorithm,
         retrieval: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm.retrieval,
+          ...LEGACY_TEST_CONFIG.algorithm.retrieval,
           tier1TopK: 1,
           tier2TopK: 2,
           tier3TopK: 4,
@@ -465,11 +459,11 @@ describe("MemoryService / retrieval / query and filtering", () => {
 
   it("limits turn-start recall to tier1 + tier2 topK", async () => {
     const config = {
-      ...DEFAULT_MEMMY_CONFIG,
+      ...LEGACY_TEST_CONFIG,
       algorithm: {
-        ...DEFAULT_MEMMY_CONFIG.algorithm,
+        ...LEGACY_TEST_CONFIG.algorithm,
         retrieval: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm.retrieval,
+          ...LEGACY_TEST_CONFIG.algorithm.retrieval,
           tier1TopK: 1,
           tier2TopK: 2,
           tier3TopK: 4,
@@ -619,12 +613,12 @@ describe("MemoryService / retrieval / query and filtering", () => {
     }> = [];
     const seenEmbeddings: string[] = [];
     const config = {
-      ...DEFAULT_MEMMY_CONFIG,
+      ...LEGACY_TEST_CONFIG,
       algorithm: {
-        ...DEFAULT_MEMMY_CONFIG.algorithm,
+        ...LEGACY_TEST_CONFIG.algorithm,
         enableQueryRewrite: true,
         retrieval: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm.retrieval,
+          ...LEGACY_TEST_CONFIG.algorithm.retrieval,
           relativeThresholdFloor: 0,
           smartSeed: false,
           llmFilterEnabled: false
@@ -747,7 +741,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    const config = DEFAULT_MEMMY_CONFIG;
+    const config = LEGACY_TEST_CONFIG;
     const failingFilterLlm = createFailingLlm();
     const service = createTestMemoryService({
       db,
@@ -758,6 +752,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
           messages: LlmMessage[],
           options: LlmCompletionOptions
         ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
           if (options.operation === "capture.summarize") {
             return acceptedCaptureDecision("Python pytest failure was inspected.", messages) as unknown as T;
           }
@@ -786,18 +781,18 @@ describe("MemoryService / retrieval / query and filtering", () => {
         userId: "user-filter"
       }
     });
-    const first = service.completeTurn("turn-filter-1", {
+    const first = (await service.completeTurn("turn-filter-1", {
       sessionId: session.sessionId,
       episodeId: "episode_filter_1",
       query: "Python pytest fixture failed",
       answer: "Inspected pytest fixture setup."
-    });
-    const second = service.completeTurn("turn-filter-2", {
+    }));
+    const second = (await service.completeTurn("turn-filter-2", {
       sessionId: session.sessionId,
       episodeId: "episode_filter_2",
       query: "Python pytest import failed",
       answer: "Checked Python import path."
-    });
+    }));
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
@@ -821,7 +816,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
       messages: Array<{ role: string; content: string }>;
       options: { operation: string };
     }> = [];
-    const config = DEFAULT_MEMMY_CONFIG;
+    const config = LEGACY_TEST_CONFIG;
     const { db, service } = createTestService({
       llm: createRankedRetrievalFilterLlm(calls, [0]),
       embedder: createCapturingEmbedder([]),
@@ -882,7 +877,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
       messages: Array<{ role: string; content: string }>;
       options: { operation: string };
     }> = [];
-    const config = DEFAULT_MEMMY_CONFIG;
+    const config = LEGACY_TEST_CONFIG;
     const service = createTestMemoryService({
       db,
       mode: "dev",
@@ -908,18 +903,18 @@ describe("MemoryService / retrieval / query and filtering", () => {
         userId: "user-filter-empty"
       }
     });
-    const first = service.completeTurn("turn-filter-empty-1", {
+    const first = (await service.completeTurn("turn-filter-empty-1", {
       sessionId: session.sessionId,
       episodeId: "episode_filter_empty_1",
       query: "Python pytest fixture failed",
       answer: "Inspected pytest fixture setup."
-    });
-    const second = service.completeTurn("turn-filter-empty-2", {
+    }));
+    const second = (await service.completeTurn("turn-filter-empty-2", {
       sessionId: session.sessionId,
       episodeId: "episode_filter_empty_2",
       query: "Python pytest import failed",
       answer: "Checked Python import path."
-    });
+    }));
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
@@ -950,7 +945,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     }> = [];
     const llm: LlmClient = {
       config: {
-        ...DEFAULT_MEMMY_CONFIG.summary,
+        ...LEGACY_TEST_CONFIG.summary,
         provider: "host",
         endpoint: "http://127.0.0.1/retrieval-filter",
         model: "retrieval-filter"
@@ -965,6 +960,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
         options: { operation: string; maxTokens?: number }
       ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
         calls.push({ messages, options });
         if (options.operation === "capture.summarize") {
           return acceptedCaptureDecision("Python pytest failure was inspected.", messages) as unknown as T;
@@ -983,7 +979,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         };
       }
     };
-    const config = DEFAULT_MEMMY_CONFIG;
+    const config = LEGACY_TEST_CONFIG;
     const service = createTestMemoryService({
       db,
       mode: "dev",
@@ -1013,18 +1009,18 @@ describe("MemoryService / retrieval / query and filtering", () => {
         userId: "user-filter-contract"
       }
     });
-    const first = service.completeTurn("turn-filter-contract-1", {
+    const first = (await service.completeTurn("turn-filter-contract-1", {
       sessionId: session.sessionId,
       episodeId: "episode_filter_contract_1",
       query: "Python pytest fixture failed",
       answer: "Inspected pytest fixture setup."
-    });
-    const second = service.completeTurn("turn-filter-contract-2", {
+    }));
+    const second = (await service.completeTurn("turn-filter-contract-2", {
       sessionId: session.sessionId,
       episodeId: "episode_filter_contract_2",
       query: "Python pytest import failed",
       answer: "Checked Python import path."
-    });
+    }));
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
@@ -1065,7 +1061,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     let summaryFails = false;
     const summaryLlm: LlmClient = {
       config: {
-        ...DEFAULT_MEMMY_CONFIG.summary,
+        ...LEGACY_TEST_CONFIG.summary,
         provider: "host",
         endpoint: "http://127.0.0.1/summary",
         model: "summary"
@@ -1080,6 +1076,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
         options: { operation: string }
       ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
         if (options.operation === "capture.summarize") {
           return acceptedCaptureDecision("Python pytest failure was inspected.", messages) as unknown as T;
         }
@@ -1109,7 +1106,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     };
     const evolutionLlm: LlmClient = {
       config: {
-        ...DEFAULT_MEMMY_CONFIG.evolution,
+        ...LEGACY_TEST_CONFIG.evolution,
         provider: "host",
         endpoint: "http://127.0.0.1/evolution",
         model: "evolution"
@@ -1124,6 +1121,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         _messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
         options: { operation: string; thinkingMode?: string }
       ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
         evolutionCalls.push({ operation: options.operation, thinkingMode: options.thinkingMode });
         return {
           ranked: [2],
@@ -1139,7 +1137,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         };
       }
     };
-    const config = DEFAULT_MEMMY_CONFIG;
+    const config = LEGACY_TEST_CONFIG;
     const service = createTestMemoryService({
       db,
       mode: "dev",
@@ -1166,18 +1164,18 @@ describe("MemoryService / retrieval / query and filtering", () => {
         userId: "user-filter-evolution"
       }
     });
-    const first = service.completeTurn("turn-filter-evolution-1", {
+    const first = (await service.completeTurn("turn-filter-evolution-1", {
       sessionId: session.sessionId,
       episodeId: "episode_filter_evolution_1",
       query: "Python pytest fixture failed",
       answer: "Inspected pytest fixture setup."
-    });
-    const second = service.completeTurn("turn-filter-evolution-2", {
+    }));
+    const second = (await service.completeTurn("turn-filter-evolution-2", {
       sessionId: session.sessionId,
       episodeId: "episode_filter_evolution_2",
       query: "Python pytest import failed",
       answer: "Checked Python import path."
-    });
+    }));
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
@@ -1259,11 +1257,11 @@ describe("MemoryService / retrieval / query and filtering", () => {
         userId: "user-filter-single"
       }
     });
-    service.completeTurn("turn-filter-single-1", {
+    (await service.completeTurn("turn-filter-single-1", {
       sessionId: session.sessionId,
       query: "Remember that pytest fixture setup failed",
       answer: "Captured the pytest fixture failure context."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const recall = await service.search({
@@ -1290,7 +1288,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
-    const config = DEFAULT_MEMMY_CONFIG;
+    const config = LEGACY_TEST_CONFIG;
     const calls: Array<{
       messages: Array<{ role: string; content: string }>;
       options: { operation: string };
@@ -1318,11 +1316,11 @@ describe("MemoryService / retrieval / query and filtering", () => {
         userId: "user-filter-min-candidates"
       }
     });
-    service.completeTurn("turn-filter-min-candidates-1", {
+    (await service.completeTurn("turn-filter-min-candidates-1", {
       sessionId: session.sessionId,
       query: "Remember that pytest fixture setup failed",
       answer: "Captured the pytest fixture failure context."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const recall = await service.search({
@@ -1347,18 +1345,18 @@ describe("MemoryService / retrieval / query and filtering", () => {
       userId: "user-tag-filter"
     };
     const session = service.openSession({ namespace });
-    const sqlite = service.completeTurn("turn-tag-sqlite", {
+    const sqlite = (await service.completeTurn("turn-tag-sqlite", {
       sessionId: session.sessionId,
       query: "tag scoped runtime memory",
       answer: "use sqlite local storage for the memory substrate",
       tags: ["SQLite"]
-    });
-    const docker = service.completeTurn("turn-tag-docker", {
+    }));
+    const docker = (await service.completeTurn("turn-tag-docker", {
       sessionId: session.sessionId,
       query: "tag scoped runtime memory",
       answer: "use docker container networking for the memory substrate",
       tags: ["Docker"]
-    });
+    }));
     const sqliteRow = db.db.prepare(
       `SELECT info_json, properties_json FROM memories WHERE id = ?`
     ).get(sqlite.l1MemoryId) as { info_json: string; properties_json: string };
@@ -1427,22 +1425,22 @@ describe("MemoryService / retrieval / query and filtering", () => {
       },
       workspaceId: "workspace-recall"
     });
-    const profileAMemory = service.completeTurn("turn-profile-a-recall", {
+    const profileAMemory = (await service.completeTurn("turn-profile-a-recall", {
       sessionId: profileA.sessionId,
       query: "remember profile A sqlite migration path",
       answer: "Profile A should inspect migration output first."
-    });
-    const profileAOtherEpisodeMemory = service.completeTurn("turn-profile-a-other-episode", {
+    }));
+    const profileAOtherEpisodeMemory = (await service.completeTurn("turn-profile-a-other-episode", {
       sessionId: profileA.sessionId,
       episodeId: "episode-profile-a-other",
       query: "remember profile A unrelated docker cache path",
       answer: "Profile A unrelated docker cache notes."
-    });
-    const profileBMemory = service.completeTurn("turn-profile-b-recall", {
+    }));
+    const profileBMemory = (await service.completeTurn("turn-profile-b-recall", {
       sessionId: profileB.sessionId,
       query: "remember profile B shared vectorstore token cross_profile_secret_b",
       answer: "Profile B shared token marker should remain globally recallable."
-    });
+    }));
     await service.runWorkerOnce(50);
 
     const recallA = await service.search({
@@ -1491,7 +1489,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         profileId: "profile-a",
         userId: "shared-recall-user"
       },
-      episodeId: profileAMemory.episodeId,
+      episodeId: assignedEpisodeId(service, profileAMemory),
       limit: 10
     });
     expect(episodeTimelineA.sessionId).toBe(profileA.sessionId);
@@ -1618,11 +1616,11 @@ describe("MemoryService / retrieval / query and filtering", () => {
     const { db, service } = createTestService({
       llm: createQueryExtractCapturingLlm(extractInputs),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           retrieval: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.retrieval,
+            ...LEGACY_TEST_CONFIG.algorithm.retrieval,
             queryExtractHistoryTurns: 0
           }
         }
@@ -1727,7 +1725,7 @@ async function seedQueryExtractHistory(
   const secondAnswer = "已改为先建新表再复制数据，绕开 DROP COLUMN。";
   const toolOutputMarker = "TOOL_OUTPUT_MARKER_pytest_1_failed";
   expect(firstAnswer.length).toBeGreaterThan(200);
-  service.completeTurn("turn-query-extract-history-1", {
+  (await service.completeTurn("turn-query-extract-history-1", {
     sessionId: session.sessionId,
     query: firstQuery,
     answer: firstAnswer,
@@ -1737,12 +1735,12 @@ async function seedQueryExtractHistory(
       output: toolOutputMarker,
       success: true
     }]
-  });
-  service.completeTurn("turn-query-extract-history-2", {
+  }));
+  (await service.completeTurn("turn-query-extract-history-2", {
     sessionId: session.sessionId,
     query: secondQuery,
     answer: secondAnswer
-  });
+  }));
   await service.runWorkerOnce(20);
   return {
     sessionId: session.sessionId,
@@ -1757,7 +1755,7 @@ async function seedQueryExtractHistory(
 function createQueryExtractCapturingLlm(extractInputs: string[]): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.summary,
+      ...LEGACY_TEST_CONFIG.summary,
       provider: "host",
       endpoint: "http://127.0.0.1/query-extract-history",
       model: "query-extract-history"
@@ -1772,6 +1770,7 @@ function createQueryExtractCapturingLlm(extractInputs: string[]): LlmClient {
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation === "capture.summarize") {
         return acceptedCaptureDecision("query extract history trace", messages) as unknown as T;
       }
@@ -1901,7 +1900,7 @@ function createTimeFilterLlm(
 ): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.evolution,
+      ...LEGACY_TEST_CONFIG.evolution,
       provider: "host",
       endpoint: "http://127.0.0.1/time-filter",
       model: "time-filter"
@@ -1916,6 +1915,7 @@ function createTimeFilterLlm(
       messages: LlmMessage[],
       options: LlmCompletionOptions
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       return {
         queryVecText: "",
@@ -1943,7 +1943,7 @@ function createRankedRetrievalFilterLlm(
 ): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.summary,
+      ...LEGACY_TEST_CONFIG.summary,
       provider: "host",
       endpoint: "http://127.0.0.1/retrieval-filter",
       model: "retrieval-filter"
@@ -1958,6 +1958,7 @@ function createRankedRetrievalFilterLlm(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation === "capture.summarize") {
         return acceptedCaptureDecision("durable retrieval test trace", messages) as unknown as T;
       }
@@ -2006,7 +2007,7 @@ function createQueryRewriteLlm(
 ): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.summary,
+      ...LEGACY_TEST_CONFIG.summary,
       provider: "host",
       endpoint: "http://127.0.0.1/query-rewrite",
       model: "query-rewrite"
@@ -2021,6 +2022,7 @@ function createQueryRewriteLlm(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string; timeoutMs?: number; maxRetries?: number }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "retrieval.retrieval.query.extract.v3") {
         return {

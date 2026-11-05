@@ -12,6 +12,21 @@ afterEach(async () => {
 });
 
 describe("HttpMemoryClient", () => {
+  it("recognizes a healthy older service without desktop scan endpoints and does not retry its 404", async () => {
+    const calls: string[] = [];
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture", timeoutMs: 500, maxRetries: 2 }, {
+      fetchImpl: (async (url) => {
+        calls.push(String(url));
+        return new Response(JSON.stringify({ error: { code: "not_found", message: "route is not registered", requestId: "old-memory" } }), { status: 404 });
+      }) as typeof fetch
+    });
+    await expect(client.agentSources!.status()).rejects.toMatchObject({ code: "memory_scan_upgrade_required", status: 503 });
+    expect(calls).toHaveLength(1);
+    await expect(client.agentSources!.list()).rejects.toMatchObject({ code: "memory_scan_upgrade_required" });
+    expect(calls).toHaveLength(2);
+    // A missing memory record is not a scanner compatibility failure.
+    await expect(client.getMemory({ memoryId: "missing" })).rejects.not.toMatchObject({ code: "memory_scan_upgrade_required" });
+  });
   it("posts a native turn without a Runtime Session and preserves pending reasons", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture-token", timeoutMs: 500, maxRetries: 0 }, {
@@ -30,8 +45,28 @@ describe("HttpMemoryClient", () => {
     expect(JSON.parse(String(calls[0]?.init?.body))).toEqual(input);
     expect(new Headers(calls[0]?.init?.headers).get("x-memmy-user-id")).toBe("fixture-user");
   });
+  it("hands scanned Sessions to L3 inside a full request envelope for their source", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture-token", timeoutMs: 500, maxRetries: 0 }, {
+      fetchImpl: (async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify({ batches: 2, serverTime: "2099-01-01T00:00:00.000Z" }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch
+    });
+    expect(await client.freezeScanSessions("codex", ["s-1", "s-2"])).toEqual({ batches: 2, serverTime: "2099-01-01T00:00:00.000Z" });
+    expect(calls[0]?.url).toBe("http://memory.test/api/v1/l3/scan-sessions/freeze");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      requestId: expect.stringMatching(/^[0-9a-f-]{36}$/), adapterId: "agent-source:codex", source: "codex", sessionIds: ["s-1", "s-2"]
+    });
+  });
   it("only defines path templates for the final memory HTTP APIs", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
+      "/api/v1/agent-sources",
+      "/api/v1/agent-sources/scan",
+      "/api/v1/agent-sources/scan/status",
+      "/api/v1/agent-sources/scan/jobs/:jobId/results",
+      "/api/v1/agent-sources/scan/stop",
+      "/api/v1/agent-sources/scan/cancel",
       "/api/v1/health",
       "/api/v1/admin/reload-config",
       "/api/v1/admin/memory-token-budget",
@@ -42,6 +77,7 @@ describe("HttpMemoryClient", () => {
       "/api/v1/turns/start",
       "/api/v1/turns/:turnId/complete",
       "/api/v1/source-turns/complete",
+      "/api/v1/l3/scan-sessions/freeze",
       "/api/v1/memory/search",
       "/api/v1/models/embedding/infer",
       "/api/v1/memory/add",
@@ -374,7 +410,8 @@ describe("HttpMemoryClient", () => {
     await expect(client.health()).rejects.toMatchObject({
       code: "invalid_argument",
       status: 400,
-      message: "x"
+      message: "x",
+      requestId: "req-1"
     });
     expect(calls).toBe(1);
   });
@@ -409,6 +446,25 @@ describe("HttpMemoryClient", () => {
     // 503 already throws memory_layer_unavailable in the 5xx branch; this confirms it is still a stable code.
     await expect(client.health()).rejects.toMatchObject({ code: "memory_layer_unavailable" });
   });
+
+  it.each(["memory_starting", "memory_upgrading"] as const)(
+    "preserves the structured startup 503 code %s",
+    async (code) => {
+      const baseUrl = await startServer(async (_request, response) => {
+        response.writeHead(503, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          error: { code, message: `Memory ${code}`, requestId: "memory-startup-1", retryable: true, phase: "migrate" }
+        }));
+      });
+      const client = createHttpMemoryClient({ baseUrl, token: "", timeoutMs: 500, maxRetries: 0 });
+
+      await expect(client.health()).rejects.toMatchObject({
+        code,
+        status: 503,
+        requestId: "memory-startup-1"
+      });
+    }
+  );
 
   it("throws MemoryLayerNetworkError for connection failures", async () => {
     const baseUrl = await startServer(async (_request, response) => {

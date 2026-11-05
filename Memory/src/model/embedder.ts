@@ -271,6 +271,7 @@ class HttpEmbedder implements Embedder {
       },
       timeoutMs: this.config.timeoutMs,
       maxRetries: this.config.maxRetries,
+      ...(this.config.sourceProvider === "memmy_account" ? { businessEnvelope: "memmy_account" as const } : {}),
       body: {
         model: this.config.model,
         input: inputs,

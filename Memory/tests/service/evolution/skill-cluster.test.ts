@@ -1,5 +1,7 @@
+import { assignedEpisodeId, settleCaptureAssignments } from "../../fixtures/memory-service-fixture.js";
+import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_MEMMY_CONFIG, type LlmClient } from "../../../src/index.js";
+import { type LlmClient } from "../../../src/index.js";
 import { DIRECT_SKILL_SOURCE } from "../../../src/algorithm/trace-direct-skill.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
@@ -44,7 +46,7 @@ interface DirectSkillCall {
 function createDirectSkillLlm(calls: DirectSkillCall[]): LlmClient {
   return {
     config: {
-      ...DEFAULT_MEMMY_CONFIG.evolution,
+      ...LEGACY_TEST_CONFIG.evolution,
       provider: "host",
       endpoint: "http://127.0.0.1/direct-skill",
       model: "direct-skill"
@@ -59,6 +61,7 @@ function createDirectSkillLlm(calls: DirectSkillCall[]): LlmClient {
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       calls.push({ operation: options.operation, messages });
       if (options.operation.startsWith("skill.batch_evolve.meta")) {
         return {
@@ -100,14 +103,14 @@ async function runDirectSkillEpisode(input: {
   rTask: number;
   query?: string;
   answer?: string;
-  config?: typeof DEFAULT_MEMMY_CONFIG;
+  config?: typeof LEGACY_TEST_CONFIG;
 }) {
   const calls: DirectSkillCall[] = [];
   const { db, service } = createTestService({ skillLlm: createDirectSkillLlm(calls), config: input.config });
   const session = service.openSession({
     namespace: { source: "codex", profileId: "jiang", userId: input.userId }
   });
-  const complete = service.completeTurn(`${input.userId}-turn`, {
+  const complete = (await service.completeTurn(`${input.userId}-turn`, {
     sessionId: session.sessionId,
     query: input.query ?? "fill totals in report.xlsx with python openpyxl",
     answer: input.answer ?? "Opened report.xlsx with openpyxl and wrote the totals.",
@@ -117,12 +120,12 @@ async function runDirectSkillEpisode(input: {
       output: { ok: true },
       success: true
     }]
-  });
+  }));
   const repos = new Repositories(db.db);
   const at = new Date().toISOString();
   db.db.prepare(`UPDATE episodes SET status = 'closed', closed_at = ?, updated_at = ? WHERE id = ?`)
-    .run(at, at, complete.episodeId);
-  repos.runtime.updateEpisodeReward(complete.episodeId, {
+    .run(at, at, assignedEpisodeId(service, complete));
+  repos.runtime.updateEpisodeReward(assignedEpisodeId(service, complete), {
     rTask: input.rTask,
     rewardDetail: { source: "test" }
   }, at);
@@ -132,7 +135,7 @@ async function runDirectSkillEpisode(input: {
     status: "queued",
     userId: input.userId,
     sessionId: session.sessionId,
-    episodeId: complete.episodeId,
+    episodeId: assignedEpisodeId(service, complete),
     payload: { reason: "test" },
     attempts: 0,
     maxAttempts: 3,
@@ -159,11 +162,11 @@ describe("MemoryService / evolution / skill cluster", () => {
       userId: `skill-language-${language}-${outputLanguageMode}`,
       rTask: 1,
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         language,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
-          skill: { ...DEFAULT_MEMMY_CONFIG.algorithm.skill, outputLanguageMode }
+          ...LEGACY_TEST_CONFIG.algorithm,
+          skill: { ...LEGACY_TEST_CONFIG.algorithm.skill, outputLanguageMode }
         }
       }
     });
@@ -210,25 +213,25 @@ describe("MemoryService / evolution / skill cluster", () => {
     const { db, service } = createTestService({
       llm: createDirectSkillLlm(calls),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           capture: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            ...LEGACY_TEST_CONFIG.algorithm.capture,
             synthReflection: false,
             embedAfterCapture: false,
             alphaScoring: false
           },
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             useLlm: false
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: true,
             directFromTrace: true
           }
@@ -239,7 +242,7 @@ describe("MemoryService / evolution / skill cluster", () => {
     const session = service.openSession({
       namespace: { source: "codex", profileId: "jiang", userId }
     });
-    const complete = service.completeTurn(`${userId}-turn`, {
+    const complete = (await service.completeTurn(`${userId}-turn`, {
       sessionId: session.sessionId,
       episodeId: `${userId}-episode`,
       query: "fill totals in report.xlsx with python openpyxl",
@@ -250,10 +253,11 @@ describe("MemoryService / evolution / skill cluster", () => {
         output: { ok: true },
         success: true
       }]
-    });
+    }));
+    await settleCaptureAssignments(service);
     await service.feedback({
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       l1MemoryId: complete.l1MemoryId,
       channel: "explicit",
       polarity: "positive",
@@ -275,7 +279,7 @@ describe("MemoryService / evolution / skill cluster", () => {
     ).all() as Array<{ job_type: string; status: string }>;
     const rewarded = db.db.prepare(
       `SELECT r_task FROM episodes WHERE id = ?`
-    ).get(complete.episodeId) as { r_task: number | null };
+    ).get(assignedEpisodeId(service, complete)) as { r_task: number | null };
     expect(rewarded.r_task).toBe(1);
     expect(jobs.map((job) => job.job_type)).toEqual([
       "skill_cluster_assign",
@@ -318,7 +322,7 @@ describe("MemoryService / evolution / skill cluster", () => {
       skillLlm: createDirectSkillLlm(calls),
       embedder: {
         config: {
-          ...DEFAULT_MEMMY_CONFIG.embedding,
+          ...LEGACY_TEST_CONFIG.embedding,
           provider: "local",
           model: "scene-split"
         },
@@ -348,7 +352,7 @@ describe("MemoryService / evolution / skill cluster", () => {
     const secondSession = service.openSession({
       namespace: { source: "codex", profileId: "jiang", userId }
     });
-    const first = service.completeTurn(`${userId}-lookup`, {
+    const first = (await service.completeTurn(`${userId}-lookup`, {
       sessionId: firstSession.sessionId,
       query: "fix INDEX MATCH lookup in report.xlsx",
       answer: "Opened report.xlsx with openpyxl and rewrote the lookup.",
@@ -358,8 +362,8 @@ describe("MemoryService / evolution / skill cluster", () => {
         output: { ok: true },
         success: true
       }]
-    });
-    const second = service.completeTurn(`${userId}-delete`, {
+    }));
+    const second = (await service.completeTurn(`${userId}-delete`, {
       sessionId: secondSession.sessionId,
       query: "delete filtered rows from report.xlsx",
       answer: "Opened report.xlsx and deleted the matching rows.",
@@ -369,12 +373,12 @@ describe("MemoryService / evolution / skill cluster", () => {
         output: { ok: true },
         success: true
       }]
-    });
+    }));
     const repos = new Repositories(db.db);
     const at = new Date().toISOString();
     const pairs = [
-      { episodeId: first.episodeId, sessionId: firstSession.sessionId },
-      { episodeId: second.episodeId, sessionId: secondSession.sessionId }
+      { episodeId: assignedEpisodeId(service, first), sessionId: firstSession.sessionId },
+      { episodeId: assignedEpisodeId(service, second), sessionId: secondSession.sessionId }
     ];
     for (const [index, pair] of pairs.entries()) {
       db.db.prepare(`UPDATE episodes SET status = 'closed', closed_at = ?, updated_at = ? WHERE id = ?`)

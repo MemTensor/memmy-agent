@@ -61,7 +61,7 @@ jobs:
           ref: ${{ github.event_name == 'release' && format('refs/tags/{0}', github.event.release.tag_name) || github.sha }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.4
           cache: npm
       - uses: actions/setup-go@v5
         with:
@@ -124,7 +124,7 @@ jobs:
           path: release-assets
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.4
       - name: Install twice and exercise the CLI
         env:
           VERSION: ${{ needs.build.outputs.version }}

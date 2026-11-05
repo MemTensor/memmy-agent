@@ -146,9 +146,14 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
     if (!memory || memory.memoryLayer !== "Skill") {
       return;
     }
+    const data = memory.properties.internal_info.skill;
+    const revisedAt = isRecord(data) && typeof data.content_revised_at === "string" ? data.content_revised_at : undefined;
+    if (isRecord(data) && data.status === "suspended" && isRecord(data.pending_policy_revisions)) return;
+    // Historical trials remain auditable, but cannot validate rewritten content.
+    if (revisedAt && trial.createdAt <= revisedAt) return;
     const trials = this.deps.repos.runtime
       .listSkillTrials({ skillMemoryId: trial.skillMemoryId, limit: 1000 })
-      .filter((item) => item.outcome !== "unknown");
+      .filter((item) => item.outcome !== "unknown" && (!revisedAt || item.createdAt > revisedAt));
     const attempted = trials.length;
     const passed = trials.filter((item) => item.outcome === "success").length;
     const currentSkill = skillMetaFromMemory(memory);
@@ -295,7 +300,7 @@ outcomeForSkillTrial(
 resolveSkillTrialEvidence(
     request: SkillUseRequest,
     session: SessionRecord,
-    episode: EpisodeRecord
+    episode: EpisodeRecord | undefined
   ): {
     l1MemoryId?: string;
     rawTurnId?: string;
@@ -306,7 +311,7 @@ resolveSkillTrialEvidence(
       if (rawTurn.sessionId !== session.id) {
         throw new MemoryServiceError("conflict", "skill trial raw turn does not belong to the requested session");
       }
-      if (rawTurn.episodeId !== episode.id) {
+      if (episode && rawTurn.episodeId !== episode.id) {
         throw new MemoryServiceError("conflict", "skill trial raw turn does not belong to the requested episode");
       }
     }
@@ -321,7 +326,7 @@ resolveSkillTrialEvidence(
       if (memory.sessionId && memory.sessionId !== session.id) {
         throw new MemoryServiceError("conflict", "skill trial memory does not belong to the requested session");
       }
-      if (trace.episodeId && trace.episodeId !== episode.id) {
+      if (episode && trace.episodeId && trace.episodeId !== episode.id) {
         throw new MemoryServiceError("conflict", "skill trial memory does not belong to the requested episode");
       }
       const traceRawTurnId = rawTurnIdFromMemory(memory);

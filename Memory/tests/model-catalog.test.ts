@@ -1,7 +1,118 @@
 import { describe, expect, it } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import YAML from "yaml";
+import { loadMemmyConfig } from "../src/config/index.js";
 import { syncMemoryModelCatalog } from "../src/config/model-catalog.js";
+import { BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID } from "../src/contracts/index.js";
+
+function platformFixture(): Record<string, any> {
+  const connection = { provider: "openai_compatible", sourceProvider: "memmy_account", endpoint: "https://platform.example.test/v1", model: "memory_evolution", apiKey: "fixture-token" };
+  return {
+    app: { userMode: "account", userId: "owner" },
+    providers: { memmy_account: { ownerAccountId: "owner", apiKey: connection.apiKey, endpoints: { platform: { apiBase: connection.endpoint, protocol: "memmy-account" } } } },
+    modelPresets: { platform: { provider: "memmy_account", endpoint: "platform", model: connection.model, source: "account", ownerAccountId: "owner", capabilities: ["memory_evolution"] } },
+    modelAssignments: { account: { ownerAccountId: "owner", memoryEvolution: "platform" } },
+    memmyMemory: { roleRouting: { evolution: "fixed" }, evolution: connection },
+  };
+}
 
 describe("Memory model catalog inheritance", () => {
+  it("persists an explicit account local choice and allows switching back to its cloud model", () => {
+    const root: any = {
+      app: { userMode: "account", userId: "owner-a" },
+      modelAssignments: { account: { ownerAccountId: "owner-a", embedding: "platform-a" } },
+      modelPresets: {
+        "platform-b": { source: "account", ownerAccountId: "owner-b", capabilities: ["embedding"] },
+        "platform-a": { source: "account", ownerAccountId: "owner-a", capabilities: ["embedding"] }
+      }
+    };
+    const memory = { embedding: { mode: "local" } };
+    syncMemoryModelCatalog(root, memory, memory);
+    expect(root.modelAssignments.account).toMatchObject({
+      ownerAccountId: "owner-a", embedding: BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
+    });
+    memory.embedding.mode = "cloud";
+    syncMemoryModelCatalog(root, memory, memory);
+    expect(root.modelAssignments.account.embedding).toBe("platform-a");
+  });
+
+  it.each(["sourceProvider", "provider"])("does not copy a platform connection into BYOK when %s identifies its source", (field) => {
+    const root = platformFixture();
+    const connection = root.memmyMemory.evolution;
+    delete connection.sourceProvider;
+    connection[field] = "memmy_account";
+    const original = structuredClone(root);
+    syncMemoryModelCatalog(root, root.memmyMemory, { evolution: connection });
+    expect(root.providers).toEqual(original.providers);
+    expect(root.modelPresets).toEqual(original.modelPresets);
+    expect(root.modelAssignments).toEqual(original.modelAssignments);
+  });
+
+  it.each([
+    { endpoint: "https://personal.example.test/v1" },
+    { model: "personal-model" },
+    { apiKey: "personal-key" },
+    { provider: "anthropic", endpoint: "https://personal.example.test/v1", model: "personal-model" },
+  ])("registers an edited platform connection and loads the new assignment: %j", patch => {
+    const root = platformFixture();
+    Object.assign(root.memmyMemory.evolution, patch);
+    syncMemoryModelCatalog(root, root.memmyMemory, { evolution: patch });
+    const id = root.modelAssignments.account.memoryEvolution;
+    expect(id).not.toBe("platform");
+    expect(root.modelPresets[id].source).toBe("byok");
+    expect(root.memmyMemory.evolution.sourceProvider).not.toBe("memmy_account");
+    const folder = mkdtempSync(join(tmpdir(), "memmy-700-catalog-"));
+    try {
+      const file = join(folder, "config.yaml"); writeFileSync(file, YAML.stringify(root));
+      const effective = loadMemmyConfig(file).config.evolution;
+      expect(effective.endpoint).toBe(root.memmyMemory.evolution.endpoint);
+      expect(effective.model).toBe(root.memmyMemory.evolution.model);
+      expect(effective.apiKey).toBe(root.memmyMemory.evolution.apiKey);
+      expect(effective.sourceProvider).toBe(patch.provider === "anthropic" ? "anthropic" : "openai");
+    } finally { rmSync(folder, { recursive: true, force: true }); }
+    const once = JSON.stringify(root);
+    syncMemoryModelCatalog(root, root.memmyMemory, { evolution: patch });
+    expect(JSON.stringify(root)).toBe(once);
+  });
+
+  it.each([{}, { temperature: 0.2 }, { maxTokens: 4000 }, { enableThinking: true }, { extraBody: { top_p: 0.8 } }, { extraHeaders: { "X-Request-Option": "value" } }])(
+    "does not duplicate an unchanged platform connection when adjusting request options: %j", patch => {
+      const root = platformFixture();
+      Object.assign(root.memmyMemory.evolution, patch);
+      const presets = structuredClone(root.modelPresets), providers = structuredClone(root.providers);
+      syncMemoryModelCatalog(root, root.memmyMemory, { evolution: patch });
+      expect(root.modelPresets).toEqual(presets);
+      expect(root.providers).toEqual(providers);
+      expect(root.modelAssignments.account.memoryEvolution).toBe("platform");
+    }
+  );
+
+  it.each(["unassigned", "stale-copy", "personal"])("recognizes the platform catalog independently of the selected model (%s)", selection => {
+    const root = platformFixture();
+    const assignment = root.modelAssignments.account;
+    if (selection === "unassigned") delete assignment.memoryEvolution;
+    else {
+      root.providers.openai = { endpoints: { custom: { apiBase: selection === "personal" ? "https://personal.example.test/v1" : root.memmyMemory.evolution.endpoint, protocol: "openai-chat-completions", apiKey: "different-key" } } };
+      root.modelPresets.custom = { provider: "openai", endpoint: "custom", model: "memory_evolution", source: "byok", capabilities: ["memory_evolution"] };
+      assignment.memoryEvolution = "custom";
+    }
+    const original = structuredClone(root);
+    syncMemoryModelCatalog(root, root.memmyMemory, { evolution: root.memmyMemory.evolution });
+    expect(root.providers).toEqual(original.providers);
+    expect(root.modelPresets).toEqual(original.modelPresets);
+    expect(root.modelAssignments).toEqual(original.modelAssignments);
+  });
+
+  it.each(["preset", "provider"])("does not trust another account's platform %s", changed => {
+    const root = platformFixture();
+    if (changed === "preset") root.modelPresets.platform.ownerAccountId = "another-owner";
+    else root.providers.memmy_account.ownerAccountId = "another-owner";
+    syncMemoryModelCatalog(root, root.memmyMemory, { evolution: root.memmyMemory.evolution });
+    expect(root.modelPresets[root.modelAssignments.account.memoryEvolution].source).toBe("byok");
+  });
+
   it("forces account summaries to use a fixed route", () => {
     const root: Record<string, unknown> = {
       app: { userMode: "account" },

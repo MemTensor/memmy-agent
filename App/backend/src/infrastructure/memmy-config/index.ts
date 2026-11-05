@@ -145,6 +145,14 @@ export interface RuntimeProjectionResult {
   memoryConfigAffected: boolean;
 }
 
+export interface CatalogEndpointRequestOptions {
+  apiBase: string;
+  protocol: string;
+  inheritProviderDefaults?: boolean;
+  apiKey?: string;
+  extraHeaders?: Record<string, string>;
+}
+
 export interface MemmyConfigWriter {
   readModelConfig?(): Promise<ModelConfigView>;
 
@@ -155,6 +163,8 @@ export interface MemmyConfigWriter {
   ): Promise<ModelSelectionResolution>;
 
   readEndpointApiKey?(provider: string, endpointId: string): Promise<string | null>;
+
+  readEndpointRequestOptions?(provider: string, endpointId: string): Promise<CatalogEndpointRequestOptions | null>;
 
   /** Atomically persist the active account/BYOK namespace without rewriting the model catalog. */
   writeUserMode?(mode: UserMode): Promise<void>;
@@ -243,6 +253,10 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
       return readCatalogEndpointApiKey(configPath, provider, endpointId);
     },
 
+    async readEndpointRequestOptions(provider, endpointId) {
+      return readCatalogEndpointRequestOptions(configPath, provider, endpointId);
+    },
+
     async writeUserMode(mode) {
       await mutateRuntimeConfig(configPath, (config) => {
         const app = asRecord(config.app);
@@ -313,7 +327,24 @@ export async function readCatalogEndpointApiKey(
   const provider = asRecord(asRecord(config.providers)?.[providerId]);
   const endpoint = asRecord(asRecord(provider?.endpoints)?.[endpointId]);
   if (!provider || !endpoint) return null;
-  return existingString(endpoint.apiKey) ?? existingString(provider.apiKey) ?? null;
+  return existingString(endpoint.apiKey) ?? (endpoint.inheritProviderDefaults === false ? null : existingString(provider.apiKey)) ?? null;
+}
+
+export async function readCatalogEndpointRequestOptions(
+  configPath: string, providerId: string, endpointId: string
+): Promise<CatalogEndpointRequestOptions | null> {
+  const config = await readCurrentRuntimeConfig(configPath);
+  const provider = asRecord(asRecord(config.providers)?.[providerId]);
+  const endpoint = asRecord(asRecord(provider?.endpoints)?.[endpointId]);
+  if (!provider || !endpoint || !existingString(endpoint.apiBase) || !existingString(endpoint.protocol)) return null;
+  const inherited = endpoint.inheritProviderDefaults === false ? {} : provider;
+  const apiKey = existingString(endpoint.apiKey) ?? existingString(inherited.apiKey);
+  const extraHeaders = Object.fromEntries(Object.entries({
+    ...asRecord(inherited.extraHeaders), ...asRecord(endpoint.extraHeaders)
+  }).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  return { apiBase: existingString(endpoint.apiBase)!, protocol: existingString(endpoint.protocol)!,
+    ...(typeof endpoint.inheritProviderDefaults === "boolean" ? { inheritProviderDefaults: endpoint.inheritProviderDefaults } : {}),
+    ...(apiKey ? { apiKey } : {}), ...(Object.keys(extraHeaders).length ? { extraHeaders } : {}) };
 }
 
 async function readCurrentRuntimeConfig(configPath: string): Promise<Record<string, unknown>> {
@@ -966,13 +997,15 @@ function updateAccountAssignment(
     imageGeneration: "image_generation"
   } as const;
   const next: Record<string, unknown> = { ...existing, ownerAccountId, agent };
+  const legacyLocalEmbedding = sameOwner
+    && asRecord(asRecord(config.memmyMemory)?.embedding)?.mode === "local";
   for (const [field, capability] of Object.entries(singles) as Array<[keyof typeof singles, AccountCapability]>) {
     const current = existingString(existing[field]);
     const keepBuiltInLocalEmbedding = field === "embedding"
       && sameOwner
-      && current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+      && (current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID || legacyLocalEmbedding);
     next[field] = keepBuiltInLocalEmbedding
-      ? current
+      ? BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
       : current && assignmentPresetIsUsable(presets, current, capability, ownerAccountId)
         ? current
         : presetIds[capability];

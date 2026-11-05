@@ -26,6 +26,7 @@ import { episodeTitleIsCurrent } from "../episode-title/episode-title-service.js
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
 import { observationMemoryState } from "../observation-memory-state.js";
 import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
+import { isNeutralFeedback, turnJudgeJobFlags } from "../evolution/turn-judge.js";
 import {
   namespaceForMemory,
   namespaceForSession
@@ -68,6 +69,7 @@ export interface WorkerJobProcessors {
     abstractL3(job: EvolutionJobRecord): MaybePromise<void>;
     updateL3WorldModel(job: EvolutionJobRecord): MaybePromise<void>;
     updateProjectEnvironment(job: EvolutionJobRecord): MaybePromise<void>;
+    updateL3Unit(job: EvolutionJobRecord): MaybePromise<void>;
     crystallizeSkill(job: EvolutionJobRecord): MaybePromise<void>;
     assignSkillCluster(job: EvolutionJobRecord): MaybePromise<void>;
     evolveSkillCluster(job: EvolutionJobRecord): MaybePromise<void>;
@@ -96,7 +98,7 @@ export interface WorkerJobProcessors {
 }
 
 export interface WorkerJobHandlerDeps {
-  repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime">;
+  repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime" | "l3WorldModels">;
   capture: { synthReflection: boolean };
   reward: { feedbackWindowSec: number };
   nowIso(): string;
@@ -207,6 +209,16 @@ export function enqueueJob(
   input: EnqueueJobInput
 ): EvolutionJobRecord {
   const at = input.createdAt ?? deps.nowIso();
+  const payload = { ...input.payload };
+  if (input.jobType === "episode_title") {
+    // Title jobs have no target memory. Only a wholly historical episode can
+    // inherit the historical lane; mixed or incomplete episodes stay interactive.
+    delete payload.captureOrigin;
+    const episode = input.episodeId ? deps.repos.runtime.getEpisode(input.episodeId) : undefined;
+    if (episode && deps.repos.memories.areAllHistoricalCaptureMemories(episode.l1MemoryIds)) {
+      payload.captureOrigin = "agent_source_scan";
+    }
+  }
   const job = deps.repos.runtime.enqueueJob({
     id: newId("job"),
     jobType: input.jobType,
@@ -216,7 +228,7 @@ export function enqueueJob(
     sessionId: input.sessionId,
     episodeId: input.episodeId,
     targetMemoryId: input.targetMemoryId,
-    payload: input.payload ?? {},
+    payload,
     attempts: 0,
     maxAttempts: input.maxAttempts ?? 3,
     createdAt: at,
@@ -255,22 +267,14 @@ export async function processJob(
       await deps.processors.evolution.abstractL3(job);
       return;
     case "l3_world_model_update":
-      try {
-        await deps.processors.evolution.updateL3WorldModel(job);
-      } catch (error) {
-        if (isTerminalL3WorldModelError(error)) {
-          deps.repos.runtime.failJob(
-            job.id,
-            error instanceof Error ? error.message : String(error),
-            deps.nowIso(),
-            true
-          );
-        }
-        throw error;
-      }
+      await deps.processors.evolution.updateL3WorldModel(job);
       return;
     case "project_environment_profile":
       await deps.processors.evolution.updateProjectEnvironment(job);
+      return;
+    case "l3_unit_update":
+      // A terminal error goes straight to dead letter in failLeasedWorkerJob.
+      await deps.processors.evolution.updateL3Unit(job);
       return;
     case "skill_crystallization":
       await deps.processors.evolution.crystallizeSkill(job);
@@ -383,8 +387,16 @@ export function finalizeClosedEpisode(
   trigger: ClosedEpisodeTrigger
 ): EvolutionJobRecord[] {
   const current = deps.repos.runtime.getEpisode(episode.id) ?? episode;
-  if (current.status !== "closed" || current.l1MemoryIds.length === 0) return [];
-  if (episodeHasPendingCaptureDecision(deps, current)) return [];
+  if (current.status !== "closed") return [];
+  // Every way a task closes ends up here, so this is where its turns go to the new L3.
+  deps.repos.l3WorldModels.freezeClosedTask({
+    sessionId: current.sessionId,
+    episodeId: current.id,
+    trigger: trigger === "idle_timeout" ? "episode_idle_close" : trigger === "session_closed" ? "session_close" : "new_task",
+    at
+  });
+  if (current.l1MemoryIds.length === 0) return [];
+  if (episodeHasPendingCaptureDecision(deps, current) || deps.repos.runtime.hasUnassignedTurns(current.sessionId)) return [];
   // Titling is independent of reward and reflection, so it must be queued before
   // the mutually exclusive branches below can return.
   const titleJobs = enqueueEpisodeTitle(deps, current, at, "final");
@@ -436,10 +448,11 @@ export function enqueueEpisodeRewardAfterReflection(
   ) return [];
   const target = deps.feedbackTargetFromEpisode(episode);
   if (!target) return [];
+  // The newest reaction with an attitude: neutral ones never displace it.
   const feedback = [...episode.feedbackIds]
     .reverse()
     .map((id) => deps.repos.runtime.getFeedback(id))
-    .find((item) => Boolean(item));
+    .find((item) => Boolean(item) && !isNeutralFeedback(item!));
   const feedbackWindowSec = Math.max(1, deps.reward.feedbackWindowSec);
   const runAfter = feedback
     ? at
@@ -520,7 +533,13 @@ export function enqueueImportSummaryIfMissing(
       userId: memory.userId,
       sessionId: memory.sessionId,
       targetMemoryId: memory.id,
-      payload: { source: "worker.embedding.summary_guard", contentHash: memory.contentHash },
+      payload: {
+        source: "worker.embedding.summary_guard",
+        contentHash: memory.contentHash,
+        ...(jobType === "trace_summary"
+          ? turnJudgeJobFlags(deps.repos.runtime.latestJobForTarget(memory.id, jobType)?.payload)
+          : {})
+      },
       maxAttempts: 3,
       createdAt: at
     });
@@ -557,11 +576,13 @@ export function episodeRewardWasSkipped(episode: EpisodeRecord): boolean {
 }
 
 export function workerJobCanRunInParallel(job: EvolutionJobRecord): boolean {
-  return job.jobType === "trace_summary" ||
+  return job.jobType === "episode_assignment" ||
+    job.jobType === "trace_summary" ||
     job.jobType === "import_summary" ||
     job.jobType === "observation_extract" ||
     job.jobType === "embedding" ||
     job.jobType === "l3_world_model_update" ||
+    job.jobType === "l3_unit_update" ||
     job.jobType === "project_environment_profile";
 }
 
@@ -599,28 +620,57 @@ export function classifyProcessingError(error: unknown): {
   if (error instanceof EmbeddingInputLimitError) {
     return { code: "model_input_too_long", retryAction: "none" };
   }
-  if (error instanceof ModelHttpError && error.errorCode === "40309") {
-    return { code: "40309", retryAction: "open_settings" };
+  if (error instanceof ModelHttpError) {
+    const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
+    const providerType = error.errorType?.toLowerCase().replace(/[\s_-]/g, "");
+    if (error.errorCategory === "quota_exhausted" || providerCode === "40308" || providerCode === "40309" ||
+      providerCode === "insufficientquota" || providerType === "insufficientquota") {
+      return { code: QUOTA_PROCESSING_ERROR_CODE, retryAction: "open_settings" };
+    }
+    if (error.errorCategory === "authentication_required" || providerCode === "40100") {
+      return { code: "authentication_required", retryAction: "open_settings" };
+    }
+    if (error.errorCategory === "permission_denied" || providerCode === "40101") {
+      return { code: "permission_denied", retryAction: "open_settings" };
+    }
+    if (error.errorCategory === "invalid_model_request" || providerCode === "40000") {
+      return { code: "invalid_model_request", retryAction: "none" };
+    }
+    if (error.errorCategory === "rate_limited" || providerCode === "40300" || providerType === "ratelimiterror") {
+      return { code: "transient_provider_error", retryAction: "retry" };
+    }
+    if (error.errorCategory === "provider_server_error" || providerCode === "50000" || providerCode === "50001") {
+      return { code: "transient_provider_error", retryAction: "retry" };
+    }
   }
   const hasStructuredCode = error instanceof ModelHttpError && error.errorCode !== undefined;
   const message = error instanceof ModelHttpError
     ? `${error.message}\n${error.detail}`
     : error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
-  if (!hasStructuredCode && /\b40309\b/.test(normalized)) {
-    return { code: "40309", retryAction: "open_settings" };
+  if (!hasStructuredCode && /\b(?:40308|40309)\b/.test(normalized)) {
+    return { code: QUOTA_PROCESSING_ERROR_CODE, retryAction: "open_settings" };
   }
-  // Providers can report shared model/account failures as HTTP 400. Classify
-  // their reason before generic 4xx handling, which permits item isolation.
+  // Temporary HTTP failures can mention API keys; keep their retry semantics.
+  if (error instanceof ModelHttpError && (error.httpStatus === 408 || error.httpStatus === 429 ||
+    (error.httpStatus >= 500 && error.httpStatus < 600))) {
+    return { code: "transient_provider_error", retryAction: "retry" };
+  }
+  // Shared HTTP 400 configuration/quota failures must not fan out into one
+  // request per item when an embedding batch is rejected.
   if (error instanceof ModelHttpError) {
     const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
-    if (providerCode === "operationnotsupported" || providerCode === "insufficientquota" ||
-      /operation.{0,80}(?:does not work|not supported)|insufficient[\s_-]+(?:quota|balance)/.test(normalized)) {
+    if (providerCode === "insufficientquota" || /insufficient[\s_-]+(?:quota|balance)/.test(normalized)) {
+      return { code: QUOTA_PROCESSING_ERROR_CODE, retryAction: "open_settings" };
+    }
+    if (providerCode === "operationnotsupported" ||
+      /operation.{0,80}(?:does not work|not supported)/.test(normalized)) {
       return { code: "model_configuration", retryAction: "open_settings" };
     }
     if (providerCode === "ratelimitexceeded" || /rate[\s_-]*limit/.test(normalized)) {
       return { code: "transient_provider_error", retryAction: "retry" };
     }
+
   }
   if (/api.?key|unauthorized|forbidden|\b401\b|\b403\b|\b404\b|model.+not configured|missing.+model|expected json|html instead of json|configured model endpoint/.test(normalized)) {
     return { code: "model_configuration", retryAction: "open_settings" };
@@ -643,6 +693,66 @@ export function classifyProcessingError(error: unknown): {
     return { code: "embedding_failed", retryAction: "retry" };
   }
   return { code: "processing_failed", retryAction: "retry" };
+}
+
+export const QUOTA_PROCESSING_ERROR_CODE = "quota_exhausted";
+
+export function isQuotaProcessingErrorCode(code: string): boolean {
+  return code === QUOTA_PROCESSING_ERROR_CODE || code === "40308" || code === "40309";
+}
+
+/** L3 jobs whose failures are retried later instead of right away. */
+export const L3_RETRY_JOB_TYPES: readonly string[] = ["l3_world_model_update", "l3_unit_update", "project_environment_profile"];
+/** Waits before retries 1-5 of a temporary failure; the sixth run that fails goes to dead letter. */
+export const L3_RETRY_DELAYS_MINUTES = [1, 5, 15, 30, 60] as const;
+/** Used-up quota or no connection is tried again this often, without using up an attempt. */
+export const L3_SUSPEND_MINUTES = 30;
+
+export type L3FailureHandling =
+  | { kind: "retry_later"; delayMinutes: number; maxAttempts: number }
+  | { kind: "suspend" }
+  | { kind: "dead_letter" }
+  | { kind: "default" };
+
+/** Connection errors that mean the model endpoint cannot be reached at all, as when the computer is offline. */
+const CANNOT_CONNECT_CODES = new Set([
+  "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "ENETDOWN", "UND_ERR_CONNECT_TIMEOUT"
+]);
+
+/**
+ * How a failed L3 job goes back into the queue. Used-up quota or no connection waits without using
+ * an attempt, so going offline loses nothing; any other configuration problem (a bad key or endpoint)
+ * is left to the queue, which holds the job until the configuration changes. Temporary model trouble
+ * retries five times; any other failure (a rejected answer, a bug) would most likely fail the same
+ * way, so it gets one more try. Then the job goes to dead letter, never to "failed": a failed L3
+ * job left in the queue would hold back every later batch of the same scope until a restart.
+ */
+export function l3FailureHandling(job: EvolutionJobRecord, error: unknown): L3FailureHandling {
+  if (!L3_RETRY_JOB_TYPES.includes(job.jobType) || isTerminalL3WorldModelError(error)) return { kind: "default" };
+  if (cannotConnect(error)) return { kind: "suspend" };
+  const message = error instanceof Error ? error.message : String(error);
+  // What the model clients really throw (model/http.ts, model/llm.ts): an empty body or missing
+  // output, and fetch's TypeError or the timeout's AbortError. Checked before configuration errors,
+  // because an empty reply also says "expected JSON".
+  const emptyReply = /received an empty response|response missing |unexpected end of json input/i
+    .test(message);
+  const network = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError" ||
+    (error instanceof TypeError && /fetch failed|network|socket/i.test(message)));
+  const classification = classifyProcessingError(error);
+  if (!emptyReply && !network && classification.retryAction === "open_settings") {
+    return isQuotaProcessingErrorCode(classification.code) ? { kind: "suspend" } : { kind: "default" };
+  }
+  const temporary = emptyReply || network || classification.code === "transient_provider_error";
+  const delay = (temporary ? L3_RETRY_DELAYS_MINUTES : L3_RETRY_DELAYS_MINUTES.slice(0, 1))[job.failureCount ?? 0];
+  if (delay === undefined) return { kind: "dead_letter" };
+  return { kind: "retry_later", delayMinutes: delay, maxAttempts: L3_RETRY_DELAYS_MINUTES.length + 1 };
+}
+
+/** fetch's "fetch failed" whose cause says the host was never reached (no cause: same, nothing was sent). */
+function cannotConnect(error: unknown): boolean {
+  if (!(error instanceof TypeError) || !/fetch failed/i.test(error.message)) return false;
+  const code = (error.cause as { code?: unknown } | undefined)?.code;
+  return typeof code !== "string" || CANNOT_CONNECT_CODES.has(code);
 }
 
 export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "episodeId" | "targetMemoryId" | "payload">): string | undefined {

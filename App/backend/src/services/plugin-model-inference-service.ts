@@ -134,6 +134,24 @@ export function createPluginModelInferenceService(options: CreatePluginModelInfe
   };
 }
 
+/** Throws the terminal quota error when an account gateway body reports used-up quota (40308, legacy 40309). */
+function throwIfMemmyAccountQuotaExhausted(body: unknown): void {
+  const envelope = record(body);
+  const error = record(envelope.error);
+  const code = String(error.memmy_code ?? envelope.memmy_code ?? envelope.code ?? error.code ?? "");
+  if (code === "40308" || code === "40309" || error.type === "insufficient_quota") {
+    throw serviceError("model_quota_exhausted", "Account Agent token quota is insufficient; replenish quota before resuming the saved task", false);
+  }
+}
+
+function parseJsonOrUndefined(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
 async function infer(
   resolved: Extract<ModelSelectionResolution, { ok: true }>,
   input: z.output<typeof ModelInferenceInputSchema>,
@@ -154,6 +172,11 @@ async function infer(
     const request = requestForProtocol(resolved, input, maxTokens, controller.signal);
     const response = await fetchImpl(request.url, request.init);
     if (!response.ok) {
+      // Keep accepting non-2xx quota envelopes as well as the compatibility
+      // HTTP 200 form below, so either gateway/client release order stays safe.
+      if (protocol === "memmy-account") {
+        throwIfMemmyAccountQuotaExhausted(await response.text().then(parseJsonOrUndefined, () => undefined));
+      }
       const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
       throw serviceError("model_inference_failed", `Current user model returned HTTP ${response.status}`, retryable);
     }
@@ -172,14 +195,7 @@ async function infer(
         true
       );
     }
-    if (protocol === "memmy-account") {
-      const envelope = record(body);
-      const error = record(envelope.error);
-      const code = String(envelope.code ?? error.code ?? "");
-      if (code === "40308" || code === "40309" || error.type === "insufficient_quota") {
-        throw serviceError("model_quota_exhausted", "Account Agent token quota is insufficient; replenish quota before resuming the saved task", false);
-      }
-    }
+    if (protocol === "memmy-account") throwIfMemmyAccountQuotaExhausted(body);
     const parsed = extractResponse(protocol, body);
     // An exhausted budget surfaces two ways, and a reasoning model reaches it
     // before writing anything: no content at all, or content cut mid-object.
