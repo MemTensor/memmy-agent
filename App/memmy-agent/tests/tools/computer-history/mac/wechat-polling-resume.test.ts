@@ -154,7 +154,7 @@ describe.each(["darwin", "win32"] as const)("%s WeChat checkpoint resume", (plat
     expect(position()).toBe(12);
   });
 
-  it.each(["pause", "stop"])("resumes pending messages after %s without taking another baseline", async (action) => {
+  it.each(["pause", "stop"])("handles pending messages after %s according to the remaining consent", async (action) => {
     checkpoint(8);
     rows = [];
     service.startObservation();
@@ -168,8 +168,14 @@ describe.each(["darwin", "win32"] as const)("%s WeChat checkpoint resume", (plat
     if (action === "pause") service.resumeObservation();
     else service.startObservation();
     await settle();
-    expect(events()).toHaveLength(1);
-    expect(position()).toBe(9);
+    if (action === "pause") {
+      expect(events()).toHaveLength(1);
+      expect(position()).toBe(9);
+    } else {
+      expect(events()).toEqual([]);
+      expect(position()).toBe(8);
+      expect(service.snapshot().wechat).toMatchObject({ enabled: false, connection: "disabled" });
+    }
   });
 
   it("retries after a restart without duplicating rows already written before a failed acknowledgement", async () => {
@@ -226,6 +232,29 @@ describe.each(["darwin", "win32"] as const)("%s WeChat checkpoint resume", (plat
     await vi.advanceTimersByTimeAsync(15_000);
     expect(position()).toBe(11);
     expect(service.snapshot().wechat).toMatchObject({ connection: "connected", error: null });
+  });
+
+  it("cancels an in-flight DB reader on stop and rejects any late results without acknowledging them", async () => {
+    checkpoint(8);
+    const oldBatch = batch();
+    let resolve!: (value: typeof oldBatch) => void;
+    const read = vi.mocked(WeChatMessageBatchReader.prototype.read).mockImplementationOnce(() =>
+      new Promise(done => { resolve = done; }));
+    const cancel = vi.spyOn(WeChatMessageBatchReader.prototype, "cancel");
+    service.startObservation();
+    expect(read).toHaveBeenCalledOnce();
+    await service.stopObservation();
+    expect(cancel).toHaveBeenCalled();
+    resolve(oldBatch);
+    await settle();
+    expect(events()).toEqual([]);
+    expect(position()).toBe(8);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(read).toHaveBeenCalledOnce();
+    expect(service.snapshot().wechat).toMatchObject({ enabled: false, connection: "disabled" });
+    await service.shutdown();
+    service = makeService();
+    expect(service.snapshot().wechat).toMatchObject({ enabled: false, connection: "disabled" });
   });
 
   it("rejects an old in-flight read after an explicit connection finishes", async () => {

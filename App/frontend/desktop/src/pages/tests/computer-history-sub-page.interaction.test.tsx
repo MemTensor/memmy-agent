@@ -1486,6 +1486,65 @@ describe("ComputerHistorySubPage", () => {
     expect(client.stopComputerHistoryObservation).not.toHaveBeenCalled();
   });
 
+  it.each(["paused"] as const)("shows saved child preferences as inactive when History is %s and restores them on resume", async (state) => {
+    vi.useFakeTimers();
+    Object.defineProperty(window, "memmy", { configurable: true, value: { platform: "darwin" } });
+    window.localStorage.setItem("memmy.computerHistory.trayIndicatorEnabled", "true");
+    const initial = snapshot({ observation: { ...snapshot().observation, state },
+      wechat: { enabled: true, connection: "connected", phase: null, error: null } });
+    const client = await renderWith(initial);
+    const child = (label: string) => container.querySelector<HTMLButtonElement>(`[aria-labelledby="${label}"]`)!;
+    for (const label of ["computer-history-tray-label", "computer-history-wechat-label"]) {
+      expect(child(label).getAttribute("aria-checked")).toBe("true");
+      expect(child(label).className).not.toContain("bg-action-sky");
+      expect(child(label).getAttribute("aria-describedby")).toContain("computer-history-capture-state");
+    }
+    expect(container.textContent).toContain("History 已暂停");
+    const options = container.querySelector<HTMLFieldSetElement>(".ch__dependent-settings")!;
+    expect(options.disabled).toBe(false);
+    expect(options.hasAttribute("inert")).toBe(false);
+    expect(options.querySelector("#computer-history-tray-label")).not.toBeNull();
+    expect(options.querySelector("#computer-history-wechat-label")).not.toBeNull();
+    expect(options.querySelector(".ch__browser-enhancement-heading")).not.toBeNull();
+    expect(options.querySelector(".ch__sources")).not.toBeNull();
+    vi.mocked(client.getComputerHistory).mockResolvedValue({ ...initial, observation: { ...initial.observation, state: "running" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(container.querySelector("#computer-history-capture-state")).toBeNull();
+    expect(options.disabled).toBe(false);
+    expect(options.hasAttribute("inert")).toBe(false);
+    for (const label of ["computer-history-tray-label", "computer-history-wechat-label"]) {
+      expect(child(label).getAttribute("aria-checked")).toBe("true");
+      expect(child(label).className).toContain("bg-action-sky");
+    }
+    expect(client.setComputerHistoryWeChatAccess).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("memmy.computerHistory.trayIndicatorEnabled")).toBe("true");
+  });
+
+  it("persists child switches off after stopping and keeps them off when History restarts", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(window, "memmy", { configurable: true, value: { platform: "darwin" } });
+    window.localStorage.setItem("memmy.computerHistory.trayIndicatorEnabled", "true");
+    const initial = snapshot({ observation: { ...snapshot().observation, state: "running" },
+      wechat: { enabled: true, connection: "connected", phase: null, error: null } });
+    const stopped = snapshot({ wechat: { enabled: false, connection: "disabled", phase: null, error: null } });
+    const client = await renderWith(initial, { stopComputerHistoryObservation: vi.fn().mockResolvedValue(stopped) });
+    await act(async () => container.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
+    const options = container.querySelector<HTMLFieldSetElement>(".ch__dependent-settings")!;
+    expect(options.disabled).toBe(true);
+    expect(options.hasAttribute("inert")).toBe(true);
+    expect(container.textContent).toContain("电脑历史记录关闭时不可用");
+    for (const label of ["computer-history-tray-label", "computer-history-wechat-label"]) {
+      expect(container.querySelector(`[aria-labelledby="${label}"]`)!.getAttribute("aria-checked")).toBe("false");
+    }
+    expect(window.localStorage.getItem("memmy.computerHistory.trayIndicatorEnabled")).toBe("false");
+    vi.mocked(client.getComputerHistory).mockResolvedValue({ ...stopped, observation: { ...stopped.observation, state: "running" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(options.disabled).toBe(false);
+    for (const label of ["computer-history-tray-label", "computer-history-wechat-label"]) {
+      expect(container.querySelector(`[aria-labelledby="${label}"]`)!.getAttribute("aria-checked")).toBe("false");
+    }
+  });
+
   it("shows asynchronous recording and narration failures until the backend recovers", async () => {
     vi.useFakeTimers();
     const initial = snapshot({ observation: { ...snapshot().observation, state: "failed",
