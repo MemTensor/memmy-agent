@@ -146,7 +146,7 @@ describe("PluginCapabilityHost", () => {
     expect(container.textContent).toContain("已忽略文件夹中 1 个");
     expect(container.textContent).not.toContain("旧论文.doc");
     await act(async () => container.querySelector<HTMLButtonElement>(".review-card-footer .button-primary")!.click());
-    expect(upload.mock.calls[0]?.[0].map((file) => file.name)).toEqual(["研究.pdf", "笔记.md"]);
+    expect(upload.mock.calls.flatMap(([files]) => files.map((file) => file.name))).toEqual(["研究.pdf", "笔记.md"]);
     expect(respond).toHaveBeenCalledWith("review-sources", { files: expect.any(Array) });
   });
 
@@ -1054,6 +1054,40 @@ describe("PluginCapabilityHost", () => {
 
     await act(async () => buttons().find((button) => button.textContent === "Add to chat")?.click());
     expect(onAddArtifact).toHaveBeenCalledWith(call.events[3]!.type === "artifact" ? call.events[3]!.artifact : null);
+  });
+
+  it("keeps review upload failures on their file rows and retries only failed files", async () => {
+    const good = new File(["paper"], "good.txt", { type: "text/plain" });
+    const bad = new File([new Uint8Array([0, 0, 1, 154])], "ssoreport.txt", { type: "text/plain" });
+    const upload = vi.fn(async (inputs: UploadAgentMediaInput[]): Promise<UploadedAgentMedia[]> => {
+      if (inputs[0]!.name === "ssoreport.txt") throw new Error("invalid_text_content: binary");
+      return [{ path: "/media/good.txt", name: "good.txt", kind: "file", mime: "text/plain", bytes: 5, url: "http://agent.test/good.txt" }];
+    });
+    const respond = vi.fn(async () => undefined);
+    function Harness() {
+      const [status, setStatus] = useState<"idle" | "submitting" | "answered" | "error">("idle");
+      return <I18nProvider language="zh-CN"><FileInputCard pluginId="literature-review" title="Sources"
+        request={{ interactionId: "row-failure", type: "file-input", payload: { cardType: "source-import", multiple: true, accept: [".txt"] } }}
+        description={null} disabled={status === "submitting" || status === "answered"} status={status}
+        onStatus={setStatus} onRespond={respond} onUploadFiles={upload} /></I18nProvider>;
+    }
+    await act(async () => root.render(<Harness />));
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, "files", { value: [good, bad] });
+    await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+    const confirm = () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "确认资料并继续")!;
+    await act(async () => confirm().click());
+    const failedRow = Array.from(container.querySelectorAll(".litrev-source-list__row")).find((row) => row.textContent?.includes("ssoreport.txt"))!;
+    expect(failedRow.querySelector('[role="alert"]')?.textContent).toContain("无法读取为文本");
+    expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    expect(respond).not.toHaveBeenCalled();
+    await act(async () => confirm().click());
+    expect(upload.mock.calls.map(([inputs]) => inputs[0]!.name)).toEqual(["good.txt", "ssoreport.txt", "ssoreport.txt"]);
+    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="移除 ssoreport.txt"]')!.click());
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => confirm().click());
+    expect(upload).toHaveBeenCalledTimes(3);
+    expect(respond).toHaveBeenCalledWith("row-failure", { files: [expect.objectContaining({ name: "good.txt" })] });
   });
 
   it("allows an optional file-input interaction to be skipped without uploading", async () => {
