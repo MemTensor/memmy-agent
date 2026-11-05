@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import YAML from "yaml";
 import { resolveDeepseekHarnessHomeDirectory } from "../../agent-paths.js";
 import {
   removeMemmyResumeSkillDirectory,
@@ -35,6 +37,8 @@ export function createDeepseekHarnessSkillTarget(
   const rootDirectory = deps.rootDirectory ?? resolveDeepseekHarnessHomeDirectory();
   const memmyConfigPath = deps.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml");
   const pluginDirectory = join(rootDirectory, "profiles", "node_modules", "@memmy", "memmy-memory");
+  const bridgePath = join(pluginDirectory, "memmy-workspace-bridge.mjs");
+  const configPath = join(pluginDirectory, "memmy-memory-config.json");
   const patchPath = join(rootDirectory, "cordis.patch.yml");
 
   return {
@@ -59,17 +63,33 @@ export function createDeepseekHarnessSkillTarget(
     },
 
     async isInstalled() {
-      if (!(await this.resolveRootDirectory())) return false;
       const patch = await readTextFile(patchPath);
-      const pluginSource = await readTextFile(join(pluginDirectory, "index.mjs"));
-      const clientSource = await readTextFile(join(pluginDirectory, "client.js"));
-      const packageSource = await readTextFile(join(pluginDirectory, "package.json"));
-      const bridgeSource = await readTextFile(join(pluginDirectory, "memmy-workspace-bridge.mjs"));
-      return patch.includes("name: " + yamlString(PLUGIN_PACKAGE_NAME)) &&
-        pluginSource === DEEPSEEK_HARNESS_PLUGIN_INDEX &&
-        clientSource === DEEPSEEK_HARNESS_PLUGIN_CLIENT &&
-        packageSource === JSON.stringify(createDeepseekHarnessPluginPackageManifest(), null, 2) + "\n" &&
-        bridgeSource === await loadMemmyWorkspaceBridgeRuntimeAsset();
+      if (!hasPluginRegistration(patch)) return false;
+      const manifest = parseManifest(await readTextFile(join(pluginDirectory, "package.json")));
+      if (manifest?.name !== PLUGIN_PACKAGE_NAME || manifest.type !== "module"
+        || manifest.exports?.["."] !== "./index.mjs" || manifest.exports?.["./client"] !== "./client.js") return false;
+      // Both installers own this layout, but their bridge bundles can differ.
+      const files = [join(pluginDirectory, "index.mjs"), join(pluginDirectory, "client.js"), bridgePath, configPath];
+      return (await Promise.all(files.map(isNonemptyFile))).every(Boolean);
+    },
+
+    async isInstalledHookCurrent() {
+      if (!(await this.isInstalled(TARGET_ID))) return false;
+      const index = await readTextFile(join(pluginDirectory, "index.mjs"));
+      const client = await readTextFile(join(pluginDirectory, "client.js"));
+      const manifest = await readTextFile(join(pluginDirectory, "package.json"));
+      if (index !== DEEPSEEK_HARNESS_PLUGIN_INDEX || client !== DEEPSEEK_HARNESS_PLUGIN_CLIENT
+        || manifest !== JSON.stringify(createDeepseekHarnessPluginPackageManifest(), null, 2) + "\n") return false;
+      const config = await readTextFile(configPath);
+      let integrity: unknown;
+      try {
+        integrity = JSON.parse(config)?.bridge_integrity;
+      } catch {
+        return false;
+      }
+      const bridge = await readTextFile(bridgePath);
+      // Older installs have no recorded digest. Their installing runtime can still verify them.
+      return integrity === undefined ? bridge === await loadMemmyWorkspaceBridgeRuntimeAsset() : integrity === bridgeIntegrity(bridge);
     },
 
     async installPlugin() {
@@ -83,17 +103,13 @@ export function createDeepseekHarnessSkillTarget(
       );
       await writeFileAtomically(join(pluginDirectory, "index.mjs"), DEEPSEEK_HARNESS_PLUGIN_INDEX);
       await writeFileAtomically(join(pluginDirectory, "client.js"), DEEPSEEK_HARNESS_PLUGIN_CLIENT);
-      await writeFileAtomically(
-        join(pluginDirectory, "memmy-workspace-bridge.mjs"),
-        await loadMemmyWorkspaceBridgeRuntimeAsset()
-      );
-      await writeFileAtomically(
-        join(pluginDirectory, "memmy-memory-config.json"),
-        JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2) + "\n"
-      );
+      const bridge = await loadMemmyWorkspaceBridgeRuntimeAsset();
+      const config = { memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) };
+      await writeFileAtomically(bridgePath, bridge);
       await upsertPatch(patchPath, renderPluginPatch(memmyConfigPath));
       await replaceMemmySkillDirectory(rootDirectory, renderMemmyPluginSkillManifest(TARGET_ID));
       await replaceMemmyResumeSkillDirectory(rootDirectory, TARGET_ID);
+      await writeFileAtomically(configPath, JSON.stringify({ ...config, bridge_integrity: bridgeIntegrity(bridge) }, null, 2) + "\n");
     },
 
     async uninstallPlugin() {
@@ -104,6 +120,40 @@ export function createDeepseekHarnessSkillTarget(
       await removeMemmySkillDirectory(rootDirectory);
     }
   };
+}
+
+function hasPluginRegistration(patch: string): boolean {
+  try {
+    const entries = YAML.parse(patch);
+    return Array.isArray(entries) && entries.some((entry) => Array.isArray(entry?.insert)
+      && entry.insert.some((plugin: { name?: string; id?: string } | null) =>
+        plugin?.id === "memmy-memory" && plugin.name === PLUGIN_PACKAGE_NAME));
+  } catch {
+    return false;
+  }
+}
+
+function parseManifest(text: string): { name?: string; type?: string; exports?: Record<string, string> } | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+async function isNonemptyFile(path: string): Promise<boolean> {
+  try {
+    const info = await stat(path);
+    return info.isFile() && info.size > 0;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+// Bump the revision when a bridge change needs to be distributed to existing DSH installs.
+function bridgeIntegrity(bridge: string): string {
+  return "1:" + createHash("sha256").update(bridge).digest("hex");
 }
 
 function renderPluginPatch(memmyConfigPath: string): string {
