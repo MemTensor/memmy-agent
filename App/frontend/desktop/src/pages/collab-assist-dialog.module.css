@@ -4,7 +4,24 @@
  */
 
 :global(.modal).dialog {
+  display: flex;
+  flex-direction: column;
   width: min(520px, calc(100vw - 32px));
+  /* 内容比窗口高时（Agent 多、窗口矮）弹窗不超出窗口：正文单独滚动，底部「拒绝 / 允许」始终可见。
+     减去遮罩的上下内边距；Windows 上遮罩从标题栏下方开始，再减一个工具栏高度。 */
+  max-height: calc(100dvh - 48px - var(--codex-toolbar-height, 0px));
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.footer {
+  flex: 0 0 auto;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-stone, #cce0db) 35%, transparent);
 }
 
 /* 与看板其它弹窗一致：一层浅遮罩，不做整窗模糊。 */
@@ -160,17 +177,28 @@
   line-height: 1.6;
 }
 
-/* 允许方式：两档，默认「仅这一次」。 */
+/* 允许方式：两档，默认「仅这一次」；选了「一段时间内直接执行」时，时长在这一项里面展开。 */
 .opt {
-  display: flex;
-  gap: 10px;
   margin-bottom: 8px;
-  padding: 9px 14px;
   border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--color-border-stone, #cce0db) 50%, transparent);
   background: #fff;
+}
+
+.optHead {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 14px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
   cursor: pointer;
   text-align: left;
+}
+
+.optExtra {
+  padding: 0 14px 11px 40px;
 }
 
 .optOn {
@@ -180,6 +208,28 @@
 
 .opt .radio {
   margin-top: 2px;
+}
+
+/* 第二层执行方默认收起：一行「使用其他 Agent（N）」，展开后与第一层同样可选。 */
+.moreToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 58%, transparent);
+  cursor: pointer;
+}
+
+.moreToggle:hover {
+  color: var(--color-action-sky-hover, #3aa893);
+}
+
+.moreToggle + .agents {
+  margin-top: 6px;
 }
 
 .optBody {

@@ -72,3 +72,18 @@ describe("replyWithoutItems", () => {
     expect(replyWithoutItems("只用了一句话回答。")).toBe("只用了一句话回答。");
   });
 });
+
+describe("assistPrompt for a Memmy-run request", () => {
+  it("wraps the request for the task page and leaves the result format to the hidden context", async () => {
+    const { ASSIST_RESULT_FORMAT } = await import("../assist/prompt.js");
+    const prompt = assistPrompt(
+      { requesterName: "孙起", projectName: "Memmy 内测反馈", title: "查看版本", reason: "本机复现不了", items: ["查看 Memmy 与 macOS 的版本"] },
+      { envelope: { requestId: "req-1", via: "Claude Code", attempt: 2 } }
+    );
+    expect(prompt.startsWith('<memmy_assist_request request="req-1" from="孙起" via="Claude Code" attempt="2">')).toBe(true);
+    expect(prompt.endsWith("</memmy_assist_request>")).toBe(true);
+    expect(prompt).toContain("- 查看 Memmy 与 macOS 的版本");
+    expect(prompt).not.toContain("结果：");
+    expect(ASSIST_RESULT_FORMAT).toContain("以「结果：」开头");
+  });
+});

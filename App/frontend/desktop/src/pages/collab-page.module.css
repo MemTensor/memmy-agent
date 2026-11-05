@@ -2241,3 +2241,60 @@
     display: none;
   }
 }
+
+/*
+ * 成员协助在看板上的一行：图标代替头像，标题前一个「协助」标签，行尾写清谁请谁、由哪个 Agent 执行、现在的状态。
+ * 只用现有的薄荷绿主题变量。
+ */
+.assistIcon {
+  background: color-mix(in srgb, var(--color-accent-mint, #5cbfae) 14%, var(--color-background-paper, #fff));
+  color: var(--color-accent-deep, #2f8f7f);
+}
+
+.assistTag {
+  display: inline-block;
+  margin-right: 7px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--color-accent-mint, #5cbfae) 45%, transparent);
+  border-radius: 5px;
+  color: var(--color-accent-deep, #2f8f7f);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 18px;
+  vertical-align: 1px;
+}
+
+/* 还没结束的协助：状态用主题色，一眼看得出哪几条还在进行。 */
+.assistMetaOpen {
+  color: var(--color-accent-deep, #2f8f7f);
+}
+
+/* 筛选栏「协助」后面的待处理数量。 */
+.segCount {
+  display: inline-block;
+  min-width: 16px;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-accent-mint, #5cbfae) 18%, transparent);
+  color: var(--color-accent-deep, #2f8f7f);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* 项目设置里内容较多的一行（成员协助）：说明在上，列表在下。 */
+.settingsRowStack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+/* 成员协助的第一行：「接收协助请求」与开关，下面才是限时授权列表。 */
+.settingsRowReceive {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}

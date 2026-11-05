@@ -30,8 +30,8 @@ const USAGE = [
   "  memmy-project session read <link|id|id#turn> [--turns <from>-<to> | --around <turn> | --find \"<sentence>\" | --all]",
   "  memmy-project session add [--project <project name>] [--hint \"<sentence>\"]",
   "  memmy-project session add --agent <agent name> --project <project name> --file <task.json> [--source <record file>]",
-  "  memmy-project assist ask --project <project name> --member <name> --file <request.json> [--continue <request id>] [--wait]",
-  "  memmy-project assist wait <request id> [--timeout <seconds>]",
+  "  memmy-project assist ask --project <project name> --member <name> --file <request.json> [--continue <request id>]",
+  "  memmy-project assist wait <request id> [--timeout <seconds, default 90>]",
   "  memmy-project assist status <request id>",
   "  memmy-project assist cancel <request id>",
   "  memmy-project assist end --project <project name> [--member <name>]",
@@ -98,7 +98,7 @@ export async function runMemmyProject(argv: readonly string[], deps: MemmyProjec
     if (action) throw new Error("list 不接受额外参数");
     const projects = await listProjects(deps);
     if (!projects) throw new Error("无法读取协作项目列表，请稍后重试。");
-    return formatProjects(projects);
+    return formatProjects(projects, await memberNames(deps, projects));
   }
   if (resource === "knowledge") {
     if (action !== "search") throw new Error(`未知命令：knowledge ${action ?? ""}\n\n${USAGE}`);
@@ -244,10 +244,39 @@ async function listProjects(deps: MemmyProjectDeps): Promise<Record<string, unkn
   return Array.isArray(result.projects) ? result.projects.filter(isRecord) : null;
 }
 
-/** One line per project: the name `--project` takes, its members and its shared tasks. */
-function formatProjects(projects: readonly Record<string, unknown>[]): string {
+/**
+ * Member names per project: an agent matches「让李四看一下」to `--member` with them. One request per project
+ * (at most ten members each); a project whose members cannot be read just shows the count.
+ */
+async function memberNames(deps: MemmyProjectDeps, projects: readonly Record<string, unknown>[]): Promise<Map<string, string[]>> {
+  const names = new Map<string, string[]>();
+  await Promise.all(projects.map(async (project) => {
+    const id = text(project.id);
+    if (!id) return;
+    const result = await localApi(deps, "GET", `/api/collab/projects/${encodeURIComponent(id)}/members`).catch(() => null);
+    const members = result && Array.isArray(result.members) ? result.members.filter(isRecord) : [];
+    const list = members.map((member) => text(member.name).trim()).filter(Boolean);
+    if (list.length) names.set(id, list);
+  }));
+  return names;
+}
+
+/**
+ * One line per project: the name `--project` takes, its members, who receives assist requests there and its shared
+ * tasks. An agent asks a member for help only in a project where that member receives requests.
+ */
+function formatProjects(projects: readonly Record<string, unknown>[], names: ReadonlyMap<string, string[]> = new Map()): string {
   if (!projects.length) return NO_PROJECT;
-  const lines = projects.map((project) => `${text(project.name)} · ${count(project.memberCount)} 位成员 · ${count(project.sessionCount)} 个任务`);
+  const lines = projects.map((project) => {
+    const members = names.get(text(project.id));
+    const people = `${count(project.memberCount)} 位成员${members?.length ? `（${members.join("、")}）` : ""}`;
+    const receivers = Array.isArray(project.assistReceivers)
+      ? project.assistReceivers.filter(isRecord).map((member) => text(member.name).trim()).filter(Boolean)
+      : null;
+    // 旧版本的本机后端不返回这一项：那时不写，免得被读成「没有人接收」。
+    const assist = receivers === null ? "" : ` · 接收协助：${receivers.length ? receivers.join("、") : "无人开启"}`;
+    return `${text(project.name)} · ${people}${assist} · ${count(project.sessionCount)} 个任务`;
+  });
   return [`已加入 ${projects.length} 个协作项目：`, ...lines, ...(sharedTasks(projects) ? [] : ["", NO_SHARED_TASKS])].join("\n");
 }
 
@@ -489,14 +518,18 @@ async function runAssist(
     const thread = optionString(parsed, "continue")?.trim();
     const wait = parsed.options.wait === true || parsed.options.wait === "true";
     const request = await readAssistFile(file);
+    const env = deps.env ?? process.env;
     // 发起方是哪个 Agent：对方弹窗里要说明「他的 Codex 需要……」，所以把它带上去。
-    const via = optionString(parsed, "via")?.trim() || requestingAgentName(deps.env ?? process.env);
+    const via = optionString(parsed, "via")?.trim() || requestingAgentName(env);
+    // 在 Memmy 的任务里发起：记下这条任务，结果回来后自动送回来，Memmy 不必守着等。
+    const sourceTask = env.MEMMY_TASK_ID?.trim();
     const created = await localApi(deps, "POST", "/api/collab/assist/requests", {
       project,
       member,
       ...request,
       via,
-      ...(thread ? { thread } : {})
+      ...(thread ? { thread } : {}),
+      ...(sourceTask ? { sourceTask } : {})
     });
     const requestId = isRecord(created.request) ? text(created.request.id) : "";
     const sent = typeof created.text === "string" ? created.text : `已发送协助请求 ${requestId}。`;
@@ -514,6 +547,10 @@ async function runAssist(
   if (action === "status") {
     const requestId = rest[0]?.trim();
     if (!requestId) throw new Error("assist status 需要协助请求 ID");
+    // 由本机后端写这段话：第一次读到终态时，它就是发起方 Agent 收到的内容，会记进协助会话。
+    // 旧版后端没有这个接口时退回读详情、在这里格式化。
+    const status = await localApi(deps, "POST", `/api/collab/assist/requests/${encodeURIComponent(requestId)}/status`).catch(() => null);
+    if (status && typeof status.text === "string") return status.text;
     const result = await localApi(deps, "GET", `/api/collab/assist/requests/${encodeURIComponent(requestId)}`);
     return formatAssistStatus(isRecord(result.request) ? result.request : {});
   }
@@ -548,10 +585,13 @@ export function requestingAgentName(env: NodeJS.ProcessEnv): string {
   return names[running?.sourceId ?? ""] ?? "Memmy";
 }
 
-/** 等结果的最长时间：一次请求最长 15 分钟，等它结束再多留一会儿。 */
+/**
+ * 一次等多久：默认 90 秒。Agent 执行命令有超时（Claude Code 默认 2 分钟），等太久会被中途杀掉；
+ * 没结束时命令会说明进展与下一条命令，由 Agent 再等一轮。
+ */
 function waitTimeoutMs(parsed: ParsedArgs): number {
   const raw = optionString(parsed, "timeout")?.trim();
-  if (!raw) return 16 * 60 * 1000;
+  if (!raw) return 90 * 1000;
   const seconds = Number.parseInt(raw, 10);
   if (!/^\d+$/u.test(raw) || seconds < 1) throw new Error("--timeout 的写法如 600，单位是秒");
   return Math.min(seconds, 16 * 60) * 1000;
@@ -560,7 +600,7 @@ function waitTimeoutMs(parsed: ParsedArgs): number {
 /** 在本轮里等结果：等不到就把当前状态告诉 Agent，不假装完成。 */
 async function waitForAssist(deps: MemmyProjectDeps, requestId: string, timeoutMs: number): Promise<Record<string, unknown>> {
   return localApi(deps, "POST", `/api/collab/assist/requests/${encodeURIComponent(requestId)}/wait`,
-    { timeoutMs: Math.min(timeoutMs, 16 * 60 * 1000) }, timeoutMs + REQUEST_TIMEOUT_MS);
+    { timeoutMs: Math.min(timeoutMs, 16 * 60 * 1000) }, timeoutMs + 15_000);
 }
 
 /** 执行方标识换成名字：命令行与界面用同一套叫法；认不出来时退回标识。 */
@@ -588,11 +628,13 @@ function formatAssistStatus(request: Record<string, unknown>): string {
   const agent = assistAgentLabel(text(request.agent));
   const steps = Array.isArray(request.steps) ? request.steps.filter(isRecord) : [];
   const lines: string[] = [];
-  if (status === "pending") lines.push(`等待${executor}选择执行的 Agent 并授权。`);
+  if (status === "pending" && request.autoRun === true) lines.push(`按${executor}给你的限时授权，等待${executor}的 Agent 开始执行。`);
+  else if (status === "pending") lines.push(`等待${executor}选择执行的 Agent 并授权。`);
   else if (status === "confirm") lines.push(`等待${executor}确认这次请求。`);
   else if (status === "running") lines.push(`${executor}的 ${agent || "Agent"} 正在执行。`);
   else if (status === "done") lines.push(`已完成：由${executor}的 ${agent} 执行。`);
-  else if (status === "rejected") lines.push(`${executor}没有允许这次请求。`);
+  // 她关闭了接收协助请求时，等待中的请求以这个原因结束：照原因说，不笼统写「没有允许」。
+  else if (status === "rejected") lines.push(text(request.failure) ? `${text(request.failure)}。` : `${executor}没有允许这次请求。`);
   else if (status === "cancelled") lines.push("这次请求已撤回。");
   else if (status === "expired") lines.push("这次请求已过期：对方 24 小时内没有处理。");
   else if (status === "stopped") lines.push(text(request.failure) || `${executor}停止了这次执行。`);

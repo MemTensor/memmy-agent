@@ -17,6 +17,52 @@ afterEach(async () => {
 });
 
 describe("http memmy-agent admin client", () => {
+  it("starts, reads and stops an assist run, keeping the runtime's reason when it refuses", async () => {
+    const bodies: unknown[] = [];
+    const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/webui/bootstrap") return Response.json({ token: "boot-token" });
+      expect(init?.headers).toMatchObject({ authorization: "Bearer boot-token" });
+      if (path === "/api/webui/assist/runs") {
+        bodies.push(JSON.parse(String(init?.body)));
+        return bodies.length === 1
+          ? Response.json({ chat_id: "chat-1", status: "starting", steps: [], reply: "", error: null }, { status: 202 })
+          : Response.json({ chat_id: "chat-2", status: "failed", steps: [], reply: "", error: "model_selection_unavailable" }, { status: 409 });
+      }
+      if (path === "/api/webui/assist/runs/chat-1") {
+        return Response.json({ chat_id: "chat-1", status: "running", steps: [{ text: "运行命令 ls", status: "running" }], reply: "", error: null });
+      }
+      if (path === "/api/webui/assist/runs/chat-1/stop") {
+        expect(init?.method).toBe("POST");
+        return Response.json({ chat_id: "chat-1", status: "stopped", steps: [], reply: "", error: null });
+      }
+      return Response.json({ error: "run_not_found" }, { status: 404 });
+    });
+    const client = createHttpMemmyAgentAdminClient({ fetchFn: fetchFn as typeof fetch });
+    const input = {
+      projectId: "local-p1",
+      title: "收集版本信息",
+      content: "看一下版本",
+      assist: { requestId: "r1", threadId: "t1", cloudProjectId: "p1", requesterName: "孙起", requesterId: "1", via: "Codex", attempt: 1, title: "收集版本信息" }
+    };
+
+    expect(await client.startAssistRun!(input)).toMatchObject({ chatId: "chat-1", status: "starting" });
+    expect(bodies[0]).toMatchObject({ project_id: "local-p1", title: "收集版本信息", content: "看一下版本", assist: { requestId: "r1" } });
+    expect(bodies[0]).not.toHaveProperty("chat_id");
+    expect(await client.startAssistRun!({ ...input, chatId: "chat-2" })).toMatchObject({ status: "failed", error: "model_selection_unavailable" });
+    expect(bodies[1]).toMatchObject({ chat_id: "chat-2" });
+    expect(await client.readAssistRun!("chat-1")).toEqual({
+      chatId: "chat-1",
+      status: "running",
+      steps: [{ text: "运行命令 ls", status: "running" }],
+      transcript: [],
+      reply: "",
+      error: null
+    });
+    expect(await client.readAssistRun!("missing")).toBeNull();
+    expect(await client.stopAssistRun!("chat-1")).toMatchObject({ status: "stopped" });
+  });
+
   it("reads authenticated task activity with a timeout and rejects malformed status", async () => {
     const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const path = new URL(String(input)).pathname;

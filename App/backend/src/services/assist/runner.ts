@@ -9,8 +9,17 @@
  */
 import { AcpError, runAcpAgent } from "./acp-client.js";
 import { ensureAdapter } from "./adapters.js";
-import { assistAgentName, assistRecipe, findExecutable } from "./recipes.js";
+import { MEMMY_SOURCE_ID, assistAgentName, assistRecipe, findExecutable } from "./recipes.js";
 import type { AssistRunner } from "../collab-assist-service.js";
+
+/**
+ * 按执行方分派：选了 Memmy 自己时在项目下新建一条 Memmy 任务（见 ./memmy-runner），其余 Agent 走 ACP。
+ */
+export function createAssistRunner(runners: { acp: AssistRunner; memmy: AssistRunner }): AssistRunner {
+  return {
+    run: (input) => (input.agent === MEMMY_SOURCE_ID ? runners.memmy : runners.acp).run(input)
+  };
+}
 
 export interface AcpAssistRunnerOptions {
   env?: NodeJS.ProcessEnv;
@@ -55,6 +64,7 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
         prompt: input.prompt,
         ...(input.sessionId ? { sessionId: input.sessionId } : {}),
         onStep: input.onStep,
+        ...(input.onTranscript ? { onTranscript: input.onTranscript } : {}),
         onSession: input.onSession,
         signal: input.signal,
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs })

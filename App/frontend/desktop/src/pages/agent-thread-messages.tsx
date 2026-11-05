@@ -1,4 +1,5 @@
 import { PluginToolActivity, isPluginToolFailure, useHasCompletedPluginInteraction, usePluginCapabilityLabel } from "./plugin-tool-activity.js";
+import { AssistMessageCard, parseAssistEnvelope } from "./collab-assist-message.js";
 import { AgentTaskPlanBar } from "./agent-task-plan-bar.js";
 /**
  * Agent chat message rendering.
@@ -641,6 +642,15 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
 
   if (message.role === "user") {
     if (readAgentQuestionResponse(message.content)) return null;
+    // 成员协助的请求与结果：Memmy 写进任务的消息，显示成卡片而不是一大段原文。
+    const assistEnvelope = parseAssistEnvelope(message.content);
+    if (assistEnvelope) {
+      return (
+        <div className="agent-user-turn flex min-w-0" data-agent-message-id={message.id || undefined}>
+          <AssistMessageCard envelope={assistEnvelope} />
+        </div>
+      );
+    }
     const hasContent = message.content.trim().length > 0;
     const timestamp = messageTimestamp(message.createdAt);
     const copyAction = <MessageBubbleCopyButton text={message.content} align="right" timestamp={timestamp} />;

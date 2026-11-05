@@ -1,75 +1,35 @@
 /*
- * 成员协助：执行方那条任务页上的协助部分（授权条、请求消息、执行步骤、二次确认）。
- * 尺寸与间距照着原型来；页面自身的顶栏与会话输入框沿用产品现有的。
+ * 成员协助在 Memmy 任务页上的部分：面包屑下方的协助条、消息流里的请求与结果卡片、任务底部的确认与「已发给谁」。
+ * 颜色只用现有的薄荷绿主题变量；页面自身的顶栏与输入框沿用产品现有的。
  */
 
-.page {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  height: 100%;
-  background: var(--color-background-paper, #fff);
-}
-
-/* ---------- 授权条 ---------- */
+/* ---------- 协助条 ---------- */
 
 .grantbar {
-  position: sticky;
-  top: 0;
-  z-index: 4;
   display: flex;
+  flex: none;
   align-items: center;
   gap: 10px;
-  padding: 9px 18px;
+  padding: 8px 18px;
   background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 9%, white);
   border-bottom: 1px solid color-mix(in srgb, var(--color-action-sky, #5cbfae) 22%, transparent);
   font-size: 12.5px;
   color: #2a3a37;
 }
 
-.grantbarOff {
-  background: #f4f6f6;
-  border-bottom-color: #e3e9e8;
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 60%, transparent);
-}
-
 .grantText {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
   flex: 1;
 }
 
-.grantText span {
+.grantText > span:last-child {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-}
-
-.agentLogo {
-  width: 18px;
-  height: 18px;
-  flex: none;
-  border-radius: 5px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  background: #fff;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-stone, #cce0db) 70%, transparent);
-}
-
-.agentLogo img {
-  width: 13px;
-  height: 13px;
-}
-
-.agentMark {
-  font-size: 10px;
-  font-weight: 700;
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 60%, transparent);
 }
 
 .grantButton {
@@ -81,6 +41,12 @@
   font-size: 12px;
   color: var(--color-action-sky-hover, #3aa893);
   white-space: nowrap;
+  cursor: pointer;
+}
+
+.grantButton:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .grantButtonDanger {
@@ -88,26 +54,51 @@
   border-color: color-mix(in srgb, var(--color-status-error, #f87b8e) 40%, transparent);
 }
 
-/* ---------- 会话正文 ---------- */
-
-.thread {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 18px 0 8px;
+.avatar {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
 }
 
-.column {
-  width: min(760px, calc(100% - 48px));
-  margin: 0 auto;
+.agentLogo {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-stone, #cce0db) 70%, transparent);
 }
 
-/* 请求消息：谁在请求、要做的事。 */
+.agentLogo img {
+  width: 12px;
+  height: 12px;
+}
+
+.agentMark {
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--color-accent-deep, #2f8f7f);
+}
+
+/* ---------- 消息流里的请求与结果卡片 ---------- */
+
 .request {
-  margin: 4px 0 16px;
+  width: 100%;
   border: 1px solid color-mix(in srgb, var(--color-border-stone, #cce0db) 80%, transparent);
   border-radius: 12px;
   overflow: hidden;
+  background: var(--color-background-paper, #fff);
 }
 
 .requestHead {
@@ -126,238 +117,145 @@
   font-weight: 600;
 }
 
-.avatar {
-  width: 18px;
-  height: 18px;
-  flex: none;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-}
-
 .requestBody {
-  padding: 10px 14px 6px;
+  padding: 10px 14px 10px;
   font-size: 13.5px;
   line-height: 1.75;
   color: color-mix(in srgb, var(--color-text-ink, #111d1c) 80%, transparent);
 }
 
+.requestBody p {
+  margin: 0;
+}
+
+.requestKey {
+  margin-top: 6px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 45%, transparent);
+  font-size: 12px;
+}
+
 .requestBody ol {
-  margin: 4px 0 6px;
+  margin: 2px 0 0;
   padding-left: 18px;
   list-style: decimal;
+}
+
+.resultRows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 2px 0 0;
+}
+
+.resultRows > div {
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.resultRows dt {
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 55%, transparent);
+}
+
+.resultRows dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.resultText {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .grow {
   flex: 1;
 }
 
-.muted {
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 40%, transparent);
-}
+/* ---------- 任务底部 ---------- */
 
-/* 执行过程：一行一步，当前那步转圈，完成那步打勾。 */
-.block {
-  margin: 0 0 16px;
-  font-size: 14px;
-  line-height: 1.8;
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 80%, transparent);
-}
-
-.processHead {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 8px;
-  font-size: 12.5px;
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 60%, transparent);
-}
-
-.processHead strong {
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 80%, transparent);
-  font-weight: 600;
-}
-
-.steps {
+.dock {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  margin: 0 0 12px;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.sent,
+.sentToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 50%, transparent);
+}
+
+.sentToggle {
+  align-self: flex-start;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.sentToggle:hover {
+  color: var(--color-action-sky-hover, #3aa893);
+}
+
+.sentBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 展开的内容在输入框上方：限高后在块内滚动，不顶出窗口、不压住面包屑 */
+.sentBody {
+  max-height: min(42vh, 360px);
+  overflow-y: auto;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone, #cce0db) 40%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-stone, #cce0db) 50%, transparent);
   border-radius: 10px;
   background: #fbfdfc;
   font-size: 12.5px;
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 70%, transparent);
+  line-height: 1.7;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 78%, transparent);
 }
 
-.step {
+.sentItems {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0 0 6px;
 }
 
-.stepIcon {
-  display: inline-flex;
-  margin-top: 3px;
-  color: var(--color-status-success, #2dc999);
+.sentItems > div {
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  gap: 12px;
 }
 
-.stepIconWaiting {
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 40%, transparent);
-}
-
-.stepIconBlocked {
-  color: #e4b44a;
-}
-
-.stepOutput {
-  margin-top: 2px;
-  font-size: 11.5px;
+.sentItems dt {
   color: color-mix(in srgb, var(--color-text-ink, #111d1c) 50%, transparent);
 }
 
-/* 结果已发出的一条说明。 */
-.sent {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0 0 8px;
-  font-size: 12.5px;
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 50%, transparent);
+.sentItems dd {
+  margin: 0;
 }
 
-.linkButton {
+.sentReply {
+  margin: 0;
+  min-width: 0;
+  --chat-md-root: 13px;
+}
+
+.inlineToggle {
+  margin-left: 6px;
+  padding: 0;
   border: 0;
   background: none;
-  padding: 0;
-  font-size: 12px;
   color: var(--color-action-sky-hover, #3aa893);
-  cursor: pointer;
-}
-
-/* 二次确认卡：她上次选的是「仅这一次」时，后续请求先问她。 */
-.askCard {
-  margin: 2px 0 16px;
-  border: 1px solid color-mix(in srgb, #e4b44a 40%, transparent);
-  border-radius: 12px;
-  background: #fff;
-  overflow: hidden;
-}
-
-.askHead {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  background: color-mix(in srgb, #e4b44a 14%, white);
-  font-size: 13px;
-  font-weight: 600;
-  color: #8a6414;
-}
-
-.askBody {
-  padding: 12px 14px 4px;
-  font-size: 13px;
-  line-height: 1.75;
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 80%, transparent);
-}
-
-.askActions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 10px 14px 12px;
-}
-
-.askButton {
-  padding: 6px 14px;
-  border-radius: 8px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone, #cce0db) 70%, transparent);
-  background: #fff;
-  font-size: 12.5px;
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 70%, transparent);
-}
-
-.askButtonPrimary {
-  background: var(--color-action-sky, #5cbfae);
-  border-color: var(--color-action-sky, #5cbfae);
-  color: #fff;
-  font-weight: 600;
-}
-
-/* ---------- 输入框 ---------- */
-
-.composer {
-  flex: none;
-  padding: 8px 0 16px;
-}
-
-.composerBox {
-  width: min(760px, calc(100% - 48px));
-  margin: 0 auto;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone, #cce0db) 80%, transparent);
-  border-radius: 16px;
-  background: #fff;
-  padding: 10px 12px 8px;
-  box-shadow: 0 4px 16px -8px rgba(17, 29, 28, 0.12);
-}
-
-.composerInput {
-  width: 100%;
-  min-height: 22px;
-  border: 0;
-  outline: none;
-  resize: none;
   font: inherit;
-  font-size: 13.5px;
-  color: var(--color-text-ink, #111d1c);
-  background: transparent;
-}
-
-.composerInput::placeholder {
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 40%, transparent);
-}
-
-.composerBar {
-  display: flex;
-  align-items: center;
-  margin-top: 8px;
-}
-
-.send {
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: 50%;
-  background: #d9e6e3;
-  color: #fff;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  font-size: 12.5px;
   cursor: pointer;
-}
-
-.sendActive {
-  background: var(--color-action-sky, #5cbfae);
-}
-
-.spin {
-  width: 12px;
-  height: 12px;
-  flex: none;
-  border-radius: 50%;
-  border: 2px solid color-mix(in srgb, var(--color-action-sky, #5cbfae) 25%, transparent);
-  border-top-color: var(--color-action-sky, #5cbfae);
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }

@@ -28,8 +28,9 @@ import { createBackendServices, type BootstrapScenario } from "./services/index.
 import { migrateLegacyCollabInstructions } from "./services/collab-instructions-service.js";
 import { createCollabCloudRequest, createCollabService } from "./services/collab-service.js";
 import { createCollabAssistService } from "./services/collab-assist-service.js";
-import { createAcpAssistRunner } from "./services/assist/runner.js";
-import { assistRecipe } from "./services/assist/recipes.js";
+import { createAcpAssistRunner, createAssistRunner } from "./services/assist/runner.js";
+import { createMemmyAssistRunner } from "./services/assist/memmy-runner.js";
+import { MEMMY_SOURCE_ID, assistRunnable } from "./services/assist/recipes.js";
 import { createLocalSessionReader } from "./adapters/outbound/agent-source/session-reference/local-session-reader.js";
 import { createBuiltinAgentSourceRegistry } from "./services/builtin-agent-source-registry.js";
 import { defaultCollabHome, refreshCollabAgentSkills } from "./services/collab-added-agents.js";
@@ -348,9 +349,12 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     collabSyncTimer.unref();
     /**
      * 成员协助：执行方轮询收件箱、拉起对方选的 Agent、回传结果；发起方的请求与等结果也在这一份里。
-     * 它用与协作项目同一套云端签名；执行方可以选的 Agent 就是「在其他 Agent 中使用协作项目」里已装上协
-     * 作组件的那些，再加上这台电脑上确实能拉起的才列出来。
+     * 它用与协作项目同一套云端签名。执行方可以选的第一个是 Memmy 自己（在对应项目下新建一条任务执行），
+     * 其后是这台电脑上能运行的 Agent（按启动配方查命令行，需要适配器的看本体命令行）；
+     * 「在其他 Agent 中使用协作项目」里被逐个关掉的不列。分层与默认项在 collab-assist-service 里按项目算。
      */
+    const memmyAgentAdmin = options.memmyAgentAdminClient;
+    const memmyCanAssist = Boolean(memmyAgentAdmin?.startAssistRun && memmyAgentAdmin.readAssistRun);
     const collabAssist = createCollabAssistService({
       cloud: createCollabCloudRequest({ cloudBaseUrl: cloudConfig.baseUrl, getAccount: getCollabAccount, userMode }),
       userMode,
@@ -358,18 +362,38 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         (await collab.ensureWorkingDirectory(projectId)).localDirectory ?? null,
       agents: async () => {
         const view = await collabAgentAccess.view();
-        return view.agents
-          .filter((agent) => agent.enabled && agent.available)
-          .map((agent) => ({
-            sourceId: agent.sourceId,
-            name: agent.name,
-            // 只有配置了启动配方、命令也在这台电脑上，才算真的能用：否则授权后也跑不起来。
-            available: assistRecipe(agent.sourceId) !== null
-          }));
+        // 能运行才出现：有数据目录或装过协作组件不代表能拉起来（Pi、QwenWork 有数据目录却没有命令行）。
+        const external = view.agents
+          .filter((agent) => agent.enabled && agent.available && assistRunnable(agent.sourceId))
+          .map((agent) => ({ sourceId: agent.sourceId, name: agent.name, available: true }));
+        return memmyCanAssist
+          ? [{ sourceId: MEMMY_SOURCE_ID, name: "Memmy", available: true }, ...external]
+          : external;
       },
-      runner: createAcpAssistRunner()
+      // 本机关联记录里各 Agent 的使用情况：这个项目里关联过的放在第一层。
+      agentUsage: (projectId: string) => collab.agentUsage(projectId),
+      runner: createAssistRunner({
+        acp: createAcpAssistRunner(),
+        memmy: createMemmyAssistRunner({
+          client: memmyAgentAdmin ?? {},
+          localProjectId: (projectId) => collab.localProjectIdFor(projectId)
+        })
+      }),
+      // 在 Memmy 任务里发起的请求：结果回来后送回那条任务，Memmy 接着分析。
+      ...(memmyAgentAdmin?.deliverAssistResult
+        ? { deliverResult: (input: { chatId: string; content: string }) => memmyAgentAdmin.deliverAssistResult!(input) }
+        : {}),
+      // 结果送回后 Memmy 那一轮的回复：作为「发起方 Agent 收到后的回复」记进协助会话。
+      ...(memmyAgentAdmin?.readAssistRun
+        ? {
+            readDeliveryReply: async (chatId: string) => {
+              const run = await memmyAgentAdmin.readAssistRun!(chatId);
+              return run ? { status: run.status, reply: run.reply } : null;
+            }
+          }
+        : {})
     });
-    // 轮询在后台跑：5 秒一次查收件箱，有长期授权的请求直接开始执行。
+    // 轮询在后台跑：5 秒一次查收件箱，有生效中的限时授权的请求直接开始执行。
     collabAssistTimer = collabAssist.start();
     server = createLocalApiServer({
       knowledge: {

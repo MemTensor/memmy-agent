@@ -9,6 +9,7 @@ import type { AssistRequest, CollabClient } from "../api/collab-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { agentSourceLogoUrl } from "./agent-source-logos.js";
 import styles from "./collab-assist-card.module.css";
+import { assistClock, assistDuration, grantSummary } from "./collab-assist-view.js";
 
 export function CollabAssistRequestCard(props: {
   request: AssistRequest;
@@ -20,6 +21,8 @@ export function CollabAssistRequestCard(props: {
   const executor = request.executor.name;
   const agentName = agentLabel(request.agent, t("collab.assist.executorFallback"));
   const status = request.status;
+  // 对方给了限时授权：与看板详情同一句「1 小时内直接执行（到 08:45）」，让发起方知道这段时间里的请求不再等她授权。
+  const grantNote = request.scope === "timed" && request.grant ? ` · ${grantSummary(request.grant, t)}` : "";
 
   const pill = status === "done" ? { className: styles.pillOk, label: t("collab.assist.statusDone") }
     : status === "running" ? { className: styles.pillRun, label: t("collab.assist.statusRunning") }
@@ -27,7 +30,10 @@ export function CollabAssistRequestCard(props: {
     : status === "rejected" ? { className: styles.pillErr, label: t("collab.assist.statusRejected", { name: executor }) }
     : status === "failed" || status === "stopped" ? { className: styles.pillErr, label: t("collab.assist.statusFailed") }
     : status === "cancelled" || status === "expired" ? { className: styles.pillWait, label: t("collab.assist.statusClosed") }
+    // 她的限时授权还在：不是在等她授权，她的 Memmy 会直接开始。
+    : request.autoRun ? { className: styles.pillRun, label: t("collab.assist.state.autoRun") }
     : { className: styles.pillWait, label: t("collab.assist.statusWaiting", { name: executor }) };
+  const plannedAgent = agentLabel(request.grant?.agent ?? request.agent, t("collab.assist.executorFallback"));
 
   async function cancel() {
     if (!props.collab) return;
@@ -90,7 +96,9 @@ export function CollabAssistRequestCard(props: {
         {status === "pending" ? (
           <>
             <span className={styles.spin} />
-            {t("collab.assist.footerWaiting", { name: executor })}
+            {request.autoRun && request.grant
+              ? t("collab.assist.footerAutoRun", { name: executor, agent: plannedAgent, time: assistClock(request.grant.expiresAt, true) })
+              : t("collab.assist.footerWaiting", { name: executor })}
             <span className={styles.grow} />
             <button type="button" className={`${styles.linkButton} ${styles.linkMuted}`} onClick={() => void cancel()}>
               {t("collab.assist.withdraw")}
@@ -101,7 +109,7 @@ export function CollabAssistRequestCard(props: {
             <span className={styles.spin} />
             <span className={styles.byline}>
               <AgentLogo agent={request.agent} name={agentName} />
-              {t("collab.assist.footerRunning", { name: executor, agent: agentName, attempt: String(request.attempt) })}
+              {t("collab.assist.footerRunning", { name: executor, agent: agentName, attempt: String(request.attempt) })}{grantNote}
             </span>
           </>
         ) : status === "confirm" ? (
@@ -118,13 +126,14 @@ export function CollabAssistRequestCard(props: {
             <CheckCircle2 size={13} aria-hidden="true" />
             <span className={styles.byline}>
               <AgentLogo agent={request.agent} name={agentName} />
-              {t("collab.assist.footerDone", { name: executor, agent: agentName, took: durationOf(request) })}
+              {t("collab.assist.footerDone", { name: executor, agent: agentName, took: assistDuration(request, t) })}{grantNote}
             </span>
           </>
         ) : status === "rejected" ? (
           <>
             <X size={13} aria-hidden="true" />
-            {t("collab.assist.footerRejected", { name: executor })}
+            {/* 她关闭了接收协助请求时，等待中的请求以这个原因结束：照原因说。 */}
+            {request.failure ?? t("collab.assist.footerRejected", { name: executor })}
           </>
         ) : (
           <>
@@ -153,18 +162,6 @@ export function agentLabel(sourceId: string | null, fallback: string): string {
     pi: "Pi"
   };
   return sourceId ? names[sourceId] ?? sourceId : fallback;
-}
-
-/** 用时：从她授权开始算到结果回传，与原型里「用时 1 分 08 秒」同一口径。 */
-function durationOf(request: AssistRequest): string {
-  if (!request.decidedAt || !request.finishedAt) return "";
-  const start = new Date(request.decidedAt).getTime();
-  const end = new Date(request.finishedAt).getTime();
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "";
-  const seconds = Math.round((end - start) / 1000);
-  if (seconds < 60) return `${seconds} 秒`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes} 分 ${String(seconds % 60).padStart(2, "0")} 秒`;
 }
 
 function AgentLogo(props: { agent: string | null; name: string }) {

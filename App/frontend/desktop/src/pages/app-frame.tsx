@@ -2076,8 +2076,15 @@ export function AppFrame(props: AppFrameProps) {
         onCancel={() => setDeleteConfirmTask(null)}
         onConfirm={() => void confirmDeleteArchivedTask()}
       />
-      {/* 成员协助：轮询收件箱、发通知、弹出授权与执行过程；只在账号模式下工作。 */}
-      <CollabAssistHost collab={collabClient} enabled={collabEnabled && Boolean(state.account.userId)} />
+      {/* 成员协助：轮询收件箱、发通知、弹出授权；只在账号模式下工作。由 Memmy 执行的协助是项目里的一条任务，直接打开它；其余在项目看板上展开。 */}
+      <CollabAssistHost
+        collab={collabClient}
+        enabled={collabEnabled && Boolean(state.account.userId)}
+        onOpenTask={(conversationId) => {
+          void openAgentTaskInChat({ memmyAgent: clients?.memmyAgent, dispatch, task: { sessionKey: `websocket:${conversationId}` } });
+        }}
+        onOpenBoard={openProjectBoard}
+      />
       <CollabJoinProjectDialog
         open={joinProjectOpen}
         onCreateProject={() => {

@@ -189,6 +189,13 @@ export interface CollabProject {
   localProjectId: string | null;
   /** 项目指令全文；成员只读。未设定时为空串。 */
   instructions: string;
+  /** 本人在这个项目里是否接收协助请求；旧云端不返回时为 false。 */
+  acceptAssist: boolean;
+  /**
+   * 开启了接收协助请求的成员（含本人）。只有项目列表带这一项，单个项目的接口不带，此时为空数组。
+   * 发起方的 Agent 据此知道在哪个项目里请谁。
+   */
+  assistReceivers: Array<{ userId: string; name: string; mine: boolean }>;
 }
 
 /** 项目关联的一个知识库：只是引用，名字随知识库改名而变。 */
@@ -330,6 +337,8 @@ export interface CollabMember {
   /** The signed-in person, labelled「（你）」. */
   mine: boolean;
   joinedAt: string | null;
+  /** 这位成员是否在这个项目里接收协助请求；旧云端不返回时为 false。 */
+  acceptAssist: boolean;
 }
 
 export interface CollabJoinRequest {
@@ -494,6 +503,13 @@ export interface CollabService {
   createProject(name: string, directory?: string): Promise<{ project: CollabProject; localDirectory: string }>;
   /** Records which local Memmy project runs this online project's tasks. */
   bindLocalProject(projectId: string, localProjectId: string): Promise<{ ok: true }>;
+  /** 云端项目在这台电脑上对应的 Memmy 项目；还没绑定时返回 null。成员协助由 Memmy 执行时把任务建在这里。 */
+  localProjectIdFor(projectId: string): Promise<string | null>;
+  /**
+   * 本机关联记录里各 Agent 的使用情况：这个项目关联过哪些 Agent（groups / sessions / synced），
+   * 以及所有项目里各 Agent 最近一次同步的时间。成员协助的执行方候选据此分层排序；只读 links 文件，不读 Agent 的记录。
+   */
+  agentUsage(projectId: string): Promise<{ project: Record<string, string | null>; recent: Record<string, string | null> }>;
   /**
    * 某个工作目录属于哪个协作项目；不属于任何项目时返回 null。
    * 知识库检索用它把会话所在目录翻成项目，再把项目关联的知识库并入检索。
@@ -1798,6 +1814,23 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       return { ok: true };
     },
 
+    async localProjectIdFor(projectId) {
+      const account = requireAccount();
+      return (await readLinks(projectId, account.accountId)).localProjectId;
+    },
+
+    async agentUsage(projectId) {
+      const account = requireAccount();
+      const project = linkUsage(await readLinks(projectId, account.accountId));
+      const recent: Record<string, string | null> = {};
+      for (const stored of await readAllLinks(account.accountId)) {
+        for (const [sourceId, at] of Object.entries(linkUsage(stored))) {
+          recent[sourceId] = laterIso(recent[sourceId] ?? null, at);
+        }
+      }
+      return { project, recent };
+    },
+
     /**
      * 目录 → 协作项目：逐个读本机各项目的 links 文件，按工作目录匹配。
      *
@@ -2789,6 +2822,25 @@ function toDecision(raw: unknown): CollabApplicationDecision | null {
   };
 }
 
+/** 一份 links 里出现过的 Agent → 最近一次同步的时间（关联了但还没同步过的为 null）。 */
+function linkUsage(stored: StoredLinks): Record<string, string | null> {
+  const usage: Record<string, string | null> = {};
+  for (const group of stored.groups) usage[group.sourceId] = laterIso(usage[group.sourceId] ?? null, null);
+  for (const session of stored.sessions) usage[session.sourceId] = laterIso(usage[session.sourceId] ?? null, null);
+  for (const [key, synced] of Object.entries(stored.synced)) {
+    const { sourceId } = parseSessionKey(key);
+    if (!sourceId) continue;
+    usage[sourceId] = laterIso(usage[sourceId] ?? null, synced.updatedAt || null);
+  }
+  return usage;
+}
+
+function laterIso(left: string | null, right: string | null): string | null {
+  if (!left) return right;
+  if (!right) return left;
+  return left > right ? left : right;
+}
+
 function toProject(raw: unknown): CollabProject {
   const project = record(raw);
   return {
@@ -2801,7 +2853,12 @@ function toProject(raw: unknown): CollabProject {
     // The cloud has no notion of this computer's project; listProjects fills it in from the local store.
     localProjectId: null,
     // A cloud from before instructions existed omits the field; the board then shows the empty state.
-    instructions: text(project.instructions).trim()
+    instructions: text(project.instructions).trim(),
+    acceptAssist: project.acceptAssist === true,
+    assistReceivers: list(project.assistReceivers).map((raw) => {
+      const member = record(raw);
+      return { userId: text(member.userId), name: text(member.name), mine: member.mine === true };
+    }).filter((member) => member.userId)
   };
 }
 
@@ -2823,7 +2880,8 @@ function toMember(raw: unknown): CollabMember {
     name: text(member.name),
     role: toRole(member.role),
     mine: member.mine === true,
-    joinedAt: nullableText(member.joinedAt)
+    joinedAt: nullableText(member.joinedAt),
+    acceptAssist: member.acceptAssist === true
   };
 }
 
@@ -2917,7 +2975,12 @@ function summarizeSteps(steps: readonly string[]): string {
  */
 const LOCAL_CODE_BY_CLOUD_CODE: Readonly<Record<number, ApiErrorCode>> = Object.freeze({
   /** 云端 ErrorCode.COLLAB_QUOTA：每人可创建的在线项目数量达到上限。 */
-  41004: "collab_quota_exceeded"
+  41004: "collab_quota_exceeded",
+  /**
+   * 云端 ErrorCode.COLLAB_ASSIST_NOT_RECEIVING：对方没有在这个项目里开启接收协助请求。
+   * 消息原样保留（「李四还没有在「某项目」中开启接收协助请求」），命令行与界面直接给人看。
+   */
+  41005: "collab_assist_not_receiving"
 });
 
 function errorCode(status: number): ApiErrorCode {

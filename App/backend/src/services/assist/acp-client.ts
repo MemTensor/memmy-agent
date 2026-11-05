@@ -10,6 +10,8 @@
  * 失败与越界都由它自己处理，结果由它写在回答里。</p>
  */
 
+import { ASSIST_TRANSCRIPT_PART_BYTES, clipBytes, type AssistTranscriptItem } from "./transcript.js";
+
 /** 执行过程中的一步：做了什么、结果是什么。 */
 export interface AssistStep {
   text: string;
@@ -29,6 +31,8 @@ export interface AcpRunOptions {
   sessionId?: string;
   /** 每一步刚发生时回调：执行方的 Memmy 据此实时展示。 */
   onStep?: (step: AssistStep) => void;
+  /** 完整执行过程有变化时回调（整份）：说明文字与工具调用按顺序排列。 */
+  onTranscript?: (items: AssistTranscriptItem[]) => void;
   /** 会话已建立时回调：把会话 id 记下来，下一次请求接着用。 */
   onSession?: (sessionId: string) => void;
   /** 停止执行：杀掉子进程，prompt 以 cancelled 结束。 */
@@ -40,11 +44,113 @@ export interface AcpRunOptions {
 export interface AcpRunResult {
   reply: string;
   steps: AssistStep[];
+  /** 完整执行过程：Agent 的说明文字（agent_message_chunk）与工具调用（tool_call / tool_call_update）。 */
+  transcript: AssistTranscriptItem[];
   sessionId: string | null;
+}
+
+/**
+ * 从 ACP 的 session/update 里整理完整执行过程：说明文字按块拼进同一段，遇到工具调用另起一项；
+ * 工具调用按 toolCallId 合并后续更新，输出保留原有换行。
+ */
+export class AcpTranscriptCollector {
+  readonly items: AssistTranscriptItem[] = [];
+  private readonly tools = new Map<string, Extract<AssistTranscriptItem, { kind: "tool" }>>();
+
+  /** 返回这次更新是否改变了执行过程。 */
+  consume(update: Record<string, unknown>): boolean {
+    const kind = String(update.sessionUpdate ?? "");
+    if (kind === "agent_message_chunk") {
+      const content = update.content as { type?: string; text?: string } | undefined;
+      if (content?.type !== "text" || !content.text) return false;
+      const last = this.items[this.items.length - 1];
+      if (last?.kind === "text") {
+        if (last.truncated) return false;
+        const joined = clipBytes(`${last.text}${content.text}`, ASSIST_TRANSCRIPT_PART_BYTES);
+        if (joined !== `${last.text}${content.text}`) last.truncated = true;
+        last.text = joined;
+      } else {
+        this.items.push({ kind: "text", text: clipBytes(content.text, ASSIST_TRANSCRIPT_PART_BYTES) });
+      }
+      return true;
+    }
+    if (kind !== "tool_call" && kind !== "tool_call_update") return false;
+    const id = typeof update.toolCallId === "string" ? update.toolCallId : "";
+    let item = id ? this.tools.get(id) : undefined;
+    if (!item) {
+      item = { kind: "tool", name: "执行了一步", input: "", output: "", status: "running" };
+      if (id) this.tools.set(id, item);
+      this.items.push(item);
+    }
+    if (typeof update.title === "string" && update.title.trim()) item.name = update.title.trim();
+    if (update.rawInput !== undefined && !item.input) item.input = clipBytes(formatInput(update.rawInput), ASSIST_TRANSCRIPT_PART_BYTES);
+    const output = readFullToolOutput(update.content) || formatRaw(update.rawOutput);
+    if (output) {
+      const clipped = clipBytes(output, ASSIST_TRANSCRIPT_PART_BYTES);
+      if (clipped !== output) item.truncated = true;
+      item.output = clipped;
+    }
+    const status = typeof update.status === "string" ? update.status : "";
+    if (status === "completed") item.status = "done";
+    else if (status === "failed") item.status = "failed";
+    return true;
+  }
+
+  /** 收尾：还在进行中的工具调用按这一轮的结局落定。 */
+  settle(succeeded: boolean): AssistTranscriptItem[] {
+    for (const item of this.items) {
+      if (item.kind === "tool" && item.status === "running") item.status = succeeded ? "done" : "failed";
+    }
+    return this.snapshot();
+  }
+
+  snapshot(): AssistTranscriptItem[] {
+    return this.items.map((item) => ({ ...item }));
+  }
+}
+
+/** 工具调用的参数：命令行工具给命令原文，其余格式化成 JSON。 */
+function formatInput(raw: unknown): string {
+  if (typeof raw === "string") return raw;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>;
+    for (const key of ["command", "cmd"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim()) return value;
+      if (Array.isArray(value) && value.every((part) => typeof part === "string")) return value.join(" ");
+    }
+  }
+  return formatRaw(raw);
+}
+
+function formatRaw(raw: unknown): string {
+  if (raw === undefined || raw === null) return "";
+  if (typeof raw === "string") return raw;
+  try {
+    return JSON.stringify(raw, null, 2);
+  } catch {
+    return "";
+  }
+}
+
+/** 工具调用的完整产出：内容块里的文字按原样拼接，差异块写成「修改 路径」。 */
+function readFullToolOutput(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const item of content) {
+    if (!item || typeof item !== "object") continue;
+    const block = item as { type?: string; content?: { text?: string }; text?: string; path?: string; newText?: string };
+    if (block.type === "content" && block.content?.text) parts.push(block.content.text);
+    else if (block.type === "text" && block.text) parts.push(block.text);
+    else if (block.type === "diff" && block.path) parts.push(`修改 ${block.path}${block.newText ? `\n${block.newText}` : ""}`);
+  }
+  return parts.join("\n");
 }
 
 /** 拉不起来、中途失败、超时：都带一句能直接给双方看的中文原因。 */
 export class AcpError extends Error {
+  /** 中途失败时已经记下的执行过程：失败的轮次也要让双方看到做到了哪一步。 */
+  transcript?: AssistTranscriptItem[];
   constructor(message: string, readonly kind: "unavailable" | "failed" | "timeout" | "cancelled") {
     super(message);
     this.name = "AcpError";
@@ -185,6 +291,7 @@ function readToolOutput(content: unknown): string {
 export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult> {
   const { spawn } = await import("node:child_process");
   const steps: AssistStep[] = [];
+  const transcript = new AcpTranscriptCollector();
   let reply = "";
   let sessionId: string | null = options.sessionId ?? null;
   let settled = false;
@@ -199,8 +306,9 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
     if (settled) return;
     settled = true;
     cleanup();
-    if (error) rejectRun(error);
-    else resolveRun(result ?? { reply, steps, sessionId });
+    transcript.settle(!error);
+    if (error) rejectRun(Object.assign(error, { transcript: transcript.snapshot() }));
+    else resolveRun(result ?? { reply, steps, transcript: transcript.snapshot(), sessionId });
   };
 
   let resolveRun: (value: AcpRunResult) => void = () => undefined;
@@ -222,6 +330,7 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
       if (payload.sessionId) sessionId = payload.sessionId;
       const update = payload.update ?? {};
       const read = readUpdate(update);
+      if (transcript.consume(update)) options.onTranscript?.(transcript.snapshot());
       if (read.text) reply += read.text;
       if (read.step) {
         steps.push(read.step);
@@ -319,7 +428,7 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
         sessionId,
         prompt: [{ type: "text", text: options.prompt }]
       });
-      finish(undefined, { reply: reply.trim(), steps, sessionId });
+      finish(undefined, { reply: reply.trim(), steps, transcript: transcript.settle(true), sessionId });
     } catch (error) {
       finish(error instanceof AcpError ? error : new AcpError(
         error instanceof Error ? error.message : "Agent 执行失败", "failed"));

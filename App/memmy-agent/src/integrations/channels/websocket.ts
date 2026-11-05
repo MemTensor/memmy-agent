@@ -18,6 +18,8 @@ import {
 import { requestMcpReload } from "../../core/agent-runtime/tools/mcp.js";
 import { BaseChannel, type ChannelHandleMessageOptions } from "./base.js";
 import { CronNotificationOutbox } from "./cron-notification-outbox.js";
+import { AssistRunRecorder } from "./webui-assist-run.js";
+import { renderAssistRequestSection } from "../../assist-request/index.js";
 import {
   OUTBOUND_META_AGENT_UI,
   OutboundMessage,
@@ -415,6 +417,27 @@ const MAX_ARTIFACT_STAGING_BYTES = 100 * 1024 * 1024;
 const WEBUI_RECORDINGS_TARGET = "recordings";
 const WEBUI_RECORDINGS_DIR = "recordings";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** 成员协助里由 Memmy 执行的那一轮，派发时用这个发送方：与人在界面里发的消息区分开。 */
+const ASSIST_RUN_CLIENT_ID = "memmy-assist";
+
+/**
+ * 协助任务上记的请求信息：界面据此说明「这是谁的请求」。只留已知字段，每个都限长度，
+ * 不认识的一律丢掉，避免把任意内容写进会话。
+ */
+function assistRunMetadata(value: unknown): Record<string, string | number> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const out: Record<string, string | number> = {};
+  for (const key of ["requestId", "threadId", "cloudProjectId", "requesterName", "requesterId", "via", "title"]) {
+    const item = raw[key];
+    if (typeof item === "string" && item.trim()) out[key] = item.trim().slice(0, 200);
+  }
+  // 交给模型、不在任务里显示的要求（结果的写法）：由协助钩子放进系统提示词。
+  if (typeof raw.context === "string" && raw.context.trim()) out.context = raw.context.trim().slice(0, 2_000);
+  if (typeof raw.attempt === "number" && Number.isSafeInteger(raw.attempt) && raw.attempt > 0) out.attempt = raw.attempt;
+  return out.requestId ? out : null;
+}
 
 export function stripTrailingSlash(value: string): string {
   if (!value) return "/";
@@ -818,6 +841,11 @@ export class WebSocketChannel extends BaseChannel {
   activeTurnIdByChatId = new Map<string, string>();
   activeTurnSourceByChatId = new Map<string, TurnSource>();
   connectionSurface = new Map<any, ClientSurface>();
+  /**
+   * 成员协助里由 Memmy 执行的几轮，按任务 id 记着：本机后端据此读取进度、停止执行。
+   * 每一轮由一个服务端连接订阅，与界面收到同一份事件。
+   */
+  private readonly assistRuns = new Map<string, { recorder: AssistRunRecorder; connection: any }>();
   mediaSecret = crypto.randomBytes(32);
   settingsRestartSections = new Set<string>();
   sessionManager: any = null;
@@ -1705,6 +1733,190 @@ export class WebSocketChannel extends BaseChannel {
       chat_id: chatId,
       session_key: sessionKey,
     });
+  }
+
+  /**
+   * 成员协助：在项目下新建一条任务，把另一位成员的请求作为第一条消息交给 Memmy 执行。
+   *
+   * <p>任务先建好再派发：项目绑定、标题（用请求标题，模型不再另起）和协助标记都写在会话上，界面据此把它
+   * 显示成一条普通的项目任务。派发走与界面完全相同的路径（{@link dispatchEnvelope} 的 `message`），由一个
+   * 服务端连接订阅这条任务，执行方在界面里打开它看到的就是同一轮。</p>
+   *
+   * <p>带 `chat_id` 时是同一次排查的后续请求：续在同一条任务里，Memmy 记得前面查到的内容。</p>
+   */
+  async handleAssistRunStart(request: any): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    if (!this.sessionManager) return httpError(503, "session manager unavailable");
+    let decoded: any;
+    try {
+      decoded = JSON.parse(requestBodyText(request));
+    } catch {
+      return httpError(400, "body must be JSON");
+    }
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return httpError(400, "body must be an object");
+    const content = typeof decoded.content === "string" ? decoded.content.trim() : "";
+    // 送回发起方的结果里带着完整回复（云端上限 64KB），请求本身也可能较长：按 80,000 字放行。
+    if (!content || content.length > 80_000) return httpError(400, "content is required");
+    const title = typeof decoded.title === "string" ? decoded.title.trim().slice(0, 120) : "";
+    const projectId = typeof decoded.project_id === "string" && UUID_RE.test(decoded.project_id)
+      ? decoded.project_id
+      : null;
+    const assist = assistRunMetadata(decoded.assist);
+    // 「deliver」：把协助结果送回发起方已有的任务，只续发，不建任务，也不改任务上的协助标记。
+    const deliver = decoded.mode === "deliver";
+
+    const continuing = typeof decoded.chat_id === "string"
+      && UUID_RE.test(decoded.chat_id)
+      && this.sessionManager.get(`websocket:${decoded.chat_id}`)
+      ? decoded.chat_id as string
+      : null;
+    if (deliver && !continuing) return httpJsonResponse({ error: "chat_not_found" }, { status: 404 });
+    const chatId = continuing ?? crypto.randomUUID();
+    const sessionKey = `websocket:${chatId}`;
+    if (continuing) {
+      if (this.assistRuns.get(chatId)?.recorder.finished === false) {
+        return httpJsonResponse({ error: "run_in_progress" }, { status: 409 });
+      }
+      if (assist && !deliver) {
+        const session = this.sessionManager.get(sessionKey) as Session;
+        session.metadata.assistRequest = assist;
+        this.sessionManager.save(session, { fsync: true });
+      }
+    } else {
+      let binding: { projectId: string | null; cwd: string };
+      try {
+        binding = this.assistRunBinding(projectId);
+      } catch (error) {
+        const status = error instanceof WebuiProjectError ? error.status : 422;
+        return httpJsonResponse({ error: this.webuiBindingErrorReason(error) }, { status });
+      }
+      const session = new Session({ key: sessionKey });
+      session.metadata.webui = true;
+      session.metadata[WEBUI_PROJECT_ID_METADATA_KEY] = binding.projectId;
+      session.metadata[WEBUI_WORKSPACE_CWD_METADATA_KEY] = binding.cwd;
+      if (title) {
+        session.metadata.title = title;
+        session.metadata.titleUserEdited = true;
+      }
+      if (assist) session.metadata.assistRequest = assist;
+      this.sessionManager.save(session, { fsync: true });
+    }
+
+    const clientRequestId = crypto.randomUUID();
+    const recorder = new AssistRunRecorder({ chatId, clientRequestId });
+    const connection = this.assistRunConnection(recorder);
+    this.rememberAssistRun(chatId, recorder, connection);
+    this.attachConnection(connection, chatId);
+    await this.dispatchEnvelope(connection, ASSIST_RUN_CLIENT_ID, {
+      type: "message",
+      chat_id: chatId,
+      content,
+      webui: true,
+      client_request_id: clientRequestId,
+      turn_admission: "queue",
+    });
+    // 新任务出现在侧栏与项目里：界面收到这条通知会重新读取任务列表。
+    this.queueGlobalSessionUpdated(chatId, "metadata");
+    const snapshot: Record<string, unknown> = { ...recorder.snapshot() };
+    // 这一轮实际交给模型、不在任务里显示的那段系统提示词：协助会话里与提示词分开显示。
+    const hidden = !deliver && assist && typeof assist.context === "string" ? renderAssistRequestSection(assist.context) : "";
+    if (hidden) snapshot.prompt_context = hidden;
+    return httpJsonResponse(snapshot, { status: recorder.status === "failed" ? 409 : 202 });
+  }
+
+  handleAssistRunRead(request: any, chatId: string): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const run = this.assistRuns.get(chatId);
+    if (!run) return httpJsonResponse({ error: "run_not_found" }, { status: 404 });
+    const snapshot = run.recorder.snapshot();
+    // 回答若没有经由事件送达（例如只落进了会话），收尾后从会话里补上最后一条回答。
+    if (run.recorder.finished && !snapshot.reply) snapshot.reply = this.lastAssistantReply(`websocket:${chatId}`);
+    return httpJsonResponse(snapshot);
+  }
+
+  async handleAssistRunStop(request: any, chatId: string): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    const run = this.assistRuns.get(chatId);
+    if (!run) return httpJsonResponse({ error: "run_not_found" }, { status: 404 });
+    if (!run.recorder.finished) {
+      // 与界面里点「停止」同一条路径：停下当前这一轮，订阅方收到 stop_result。
+      await this.dispatchEnvelope(run.connection, ASSIST_RUN_CLIENT_ID, { type: "stop", chat_id: chatId });
+      // 还在排队、没有开始的那一轮不会有 stop_result，这里直接落定。
+      run.recorder.finish("stopped");
+    }
+    return httpJsonResponse(run.recorder.snapshot());
+  }
+
+  private assistRunBinding(projectId: string | null): { projectId: string | null; cwd: string } {
+    if (!projectId) return { projectId: null, cwd: this.createStandaloneTaskCwd() };
+    const store = this.requireProjectStore();
+    if (store.snapshot().state === "corrupt") throw new WebuiProjectError("project_registry_corrupt", 503);
+    if (store.isDeleting(projectId)) throw new WebuiProjectError("project_removed", 409);
+    const project = store.getActive(projectId);
+    if (!project) throw new WebuiProjectError("project_not_found", 404);
+    let cwd: string;
+    try {
+      cwd = assertWebuiWorkspaceAvailable(project.rootPath);
+    } catch {
+      throw new WebuiProjectError("project_unavailable", 422);
+    }
+    return { projectId: project.id, cwd };
+  }
+
+  /** 订阅协助任务的服务端连接：收到的每个事件交给记录器，这一轮结束后退订。 */
+  private assistRunConnection(recorder: AssistRunRecorder): any {
+    const connection = {
+      remoteAddress: null,
+      send: (raw: string) => {
+        try {
+          recorder.consume(JSON.parse(raw));
+        } catch {
+          // 不是 JSON 的推送与这一轮无关。
+        }
+      },
+      close: () => undefined,
+    };
+    const unsubscribe = recorder.onChange(() => {
+      if (!recorder.finished) return;
+      unsubscribe();
+      this.safeCleanupConnection(connection);
+      // 界面没有订阅这条任务时收不到这一轮的结束事件：广播一次，让侧栏与项目里的「进行中」状态及时消失。
+      this.queueGlobalSessionUpdated(recorder.chatId, "metadata");
+    });
+    return connection;
+  }
+
+  /** 记住这一轮；结束超过一小时的不再保留，总数也有上限。 */
+  private rememberAssistRun(chatId: string, recorder: AssistRunRecorder, connection: any): void {
+    const previous = this.assistRuns.get(chatId);
+    if (previous && previous.connection !== connection) this.safeCleanupConnection(previous.connection);
+    this.assistRuns.set(chatId, { recorder, connection });
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const [key, run] of this.assistRuns) {
+      if (run.recorder.finished && (run.recorder.finishedAt ?? 0) < cutoff) this.assistRuns.delete(key);
+    }
+    while (this.assistRuns.size > 50) {
+      const oldest = this.assistRuns.keys().next().value;
+      if (oldest === undefined) break;
+      const run = this.assistRuns.get(oldest);
+      if (run && !run.recorder.finished) break;
+      this.assistRuns.delete(oldest);
+    }
+  }
+
+  private lastAssistantReply(sessionKey: string): string {
+    const session = this.sessionManager?.get?.(sessionKey) as Session | null;
+    const messages = Array.isArray(session?.messages) ? session!.messages : [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message?.role === "user") break;
+      if (message?.role === "assistant" && typeof message.content === "string" && message.content.trim()) {
+        return message.content.trim();
+      }
+    }
+    return "";
   }
 
   handleWebuiSidebarStateUpdate(request: any): HttpLikeResponse {
@@ -3379,6 +3591,14 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/webui/sidebar-state") return this.handleWebuiSidebarState(request);
     if (got === "/api/webui/sidebar-state/update") return this.handleWebuiSidebarStateUpdate(request);
     if (got === "/api/webui/seed-chat") return this.handleWebuiSeedChat(request);
+    if (got === "/api/webui/assist/runs") return this.handleAssistRunStart(request);
+    const assistRunMatch = got.match(/^\/api\/webui\/assist\/runs\/([^/]+)(\/stop)?$/);
+    if (assistRunMatch) {
+      const assistChatId = decodeURIComponent(assistRunMatch[1]!);
+      return assistRunMatch[2]
+        ? this.handleAssistRunStop(request, assistChatId)
+        : this.handleAssistRunRead(request, assistChatId);
+    }
     if (got === "/api/webui/artifacts/resolve") return this.handleArtifactResolve(request);
     if (got === "/api/webui/recordings/resolve") return this.handleWebuiRecordingResolve(request);
     if (got === "/api/webui/artifacts/reveal") return this.handleArtifactReveal(request);

@@ -22,6 +22,8 @@ const allowedSourceFiles = new Set([
   "pages/collab-board-text.ts",
   // 交给 Agent 执行的任务说明（不是界面文案）：让它在另一个 Agent 里确认记录位置并写读取规则。
   "pages/collab-agent-connect-prompt.ts",
+  // 成员协助消息的协议标记（起因：、结果：等），与本机后端写进任务的文本逐字对应，不是界面文案。
+  "pages/collab-assist-protocol.ts",
   // English ui coverage tests.
   "dev-agent-preview.tsx"
 ]);

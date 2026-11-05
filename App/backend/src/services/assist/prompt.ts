@@ -20,8 +20,45 @@ export interface AssistPromptInput {
   earlier?: readonly string[];
 }
 
-/** 写给执行方 Agent 的指令。 */
-export function assistPrompt(input: AssistPromptInput): string {
+/**
+ * 结果的写法。外部 Agent 把它写在请求正文末尾；由 Memmy 执行时它不出现在任务里，
+ * 而是作为不显示的上下文交给模型（运行时放进系统提示词），任务页上只看到请求本身。
+ */
+export const ASSIST_RESULT_FORMAT = [
+  "请直接在这台电脑上完成请求里的事，然后把查到的内容整理成结果。",
+  "结论用中文写，最后另起一段，以「结果：」开头，逐项写成一行的「- 名称：内容」，不要写别的格式。"
+].join("\n");
+
+/** 由 Memmy 执行时，请求正文包在这个标签里：任务页据此把它显示成请求卡片，而不是一大段文字。 */
+export interface AssistEnvelope {
+  requestId: string;
+  via: string;
+  attempt: number;
+}
+
+/**
+ * 写给执行方 Agent 的指令。给了 {@link AssistEnvelope} 时（由 Memmy 执行），正文包进
+ * `<memmy_assist_request>`，且不带结果的写法——那一段由 {@link ASSIST_RESULT_FORMAT} 作为不显示的上下文交给模型。
+ */
+export function assistPrompt(input: AssistPromptInput, options: { envelope?: AssistEnvelope } = {}): string {
+  const body = requestBody(input);
+  const envelope = options.envelope;
+  if (!envelope) return [...body, "", ASSIST_RESULT_FORMAT].join("\n");
+  const attrs = [
+    `request="${attr(envelope.requestId)}"`,
+    `from="${attr(input.requesterName)}"`,
+    `via="${attr(envelope.via)}"`,
+    `attempt="${envelope.attempt}"`
+  ].join(" ");
+  return [`<memmy_assist_request ${attrs}>`, ...body, "</memmy_assist_request>"].join("\n");
+}
+
+/** 标签属性里的值：去掉引号与尖括号，避免把标签写坏。 */
+function attr(value: string): string {
+  return value.replace(/["<>\n\r]/gu, " ").trim();
+}
+
+function requestBody(input: AssistPromptInput): string[] {
   const lines: string[] = [];
   lines.push(`${input.requesterName}正在排查一个问题，需要这台电脑上的信息。`);
   if (input.projectName) lines.push(`这件事发生在协作项目「${input.projectName}」里。`);
@@ -35,10 +72,7 @@ export function assistPrompt(input: AssistPromptInput): string {
     for (const summary of input.earlier) lines.push(`- ${summary}`);
     lines.push("这次接着上次的结果继续，不必重复前面的步骤。");
   }
-  lines.push("");
-  lines.push("请直接在这台电脑上完成上面的事，然后把查到的内容整理成结果。");
-  lines.push("结论用中文写，最后另起一段，以「结果：」开头，逐项写成一行的「- 名称：内容」，不要写别的格式。");
-  return lines.join("\n");
+  return lines;
 }
 
 /** 从回答里取「结果」那一段：`- 名称：内容` 的逐项说明。 */

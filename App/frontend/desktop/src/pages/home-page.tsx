@@ -11,6 +11,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
+import { CollabAssistTaskBar, CollabAssistTaskDock, useAssistTask } from "./collab-assist-task.js";
+import { collabEnabledFor } from "../app/collab-mode.js";
 import { mentionEmptyLabelKey } from "./collab-session-mention.js";
 import { CollabShareToggle } from "./collab-share-toggle.js";
 import { getCollabProjectsSnapshot, selectCollabProject, subscribeCollabProjects } from "../app/collab-projects-store.js";
@@ -1066,6 +1068,15 @@ export function HomePage() {
   const [mentionDismissed, setMentionDismissed] = useState(false);
   const collabClient = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
   const collabProjects = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
+  /**
+   * 成员协助：这条任务是执行方的一次协助（顶部协助条、底部确认卡片与「已发给谁」），或者在它里面请成员协助过
+   * （底部请求卡片）。只在账号模式读；普通任务拿到空视图，页面上不多出任何东西。
+   */
+  const assistTask = useAssistTask(
+    collabClient,
+    state.agent.currentChatId,
+    collabEnabledFor(state.bootstrap?.app.userMode) && Boolean(state.account.userId)
+  );
   const mentionQuery = useMemo(
     () => (mentionDismissed ? null : mentionQueryFromInput(composerInput, composerCaret)),
     [composerInput, composerCaret, mentionDismissed]
@@ -3440,6 +3451,7 @@ export function HomePage() {
         </section>
         ) : (
         <section ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full">
+          <CollabAssistTaskBar view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
           <div
             ref={scrollRef}
             className="app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto"
@@ -3584,6 +3596,7 @@ export function HomePage() {
                     {pendingNativeCard ? <AgentQuestionCard key={pendingNativeCard.requestId} card={pendingNativeCard}
                       onSubmit={(response) => answerQuestion(pendingNativeCard, response)} /> : null}
                   </div>
+                  <CollabAssistTaskDock view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
                   {state.agent.currentChatId && currentGoal ? (
                     <AgentGoalBar
                       chatId={state.agent.currentChatId}

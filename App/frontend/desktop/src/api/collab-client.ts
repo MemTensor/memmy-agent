@@ -303,6 +303,33 @@ const AssistStatusSchema = z.enum([
   "pending", "running", "confirm", "done", "rejected", "cancelled", "expired", "failed", "stopped"
 ]);
 
+/** 授权方式：仅这一次或限时；认不出的旧值（已取消的 always）按没有授权方式处理。 */
+const AssistScopeSchema = z.string().nullish().transform((value): "once" | "timed" | null =>
+  value === "timed" ? "timed" : value === "once" ? "once" : null);
+
+/** 限时授权：时长（分钟）、到期时间、是否仍然有效。 */
+const AssistGrantInfoSchema = z.object({
+  minutes: z.number().nullish().transform((value) => value ?? null),
+  expiresAt: z.string(),
+  active: z.boolean(),
+  /** 还在等待、按限时授权会直接执行的请求：由哪个 Agent 执行。 */
+  agent: z.string().nullish().transform((value) => value ?? null)
+});
+
+/** 完整执行过程里的一项：Agent 的说明文字、一次工具调用，或「中间省略了几步」。 */
+const AssistTranscriptItemSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("text"), text: z.string(), truncated: z.boolean().optional() }),
+  z.object({
+    kind: z.literal("tool"),
+    name: z.string(),
+    input: z.string().default(""),
+    output: z.string().default(""),
+    status: z.enum(["running", "done", "failed"]),
+    truncated: z.boolean().optional()
+  }),
+  z.object({ kind: z.literal("omitted"), count: z.number() })
+]);
+
 const AssistRequestSchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -317,7 +344,9 @@ const AssistRequestSchema = z.object({
   items: z.array(z.string()),
   status: AssistStatusSchema,
   agent: z.string().nullable(),
-  scope: z.enum(["once", "always"]).nullable(),
+  scope: AssistScopeSchema,
+  /** 这次用的是限时授权时的时长与到期时间；仅这一次、或旧后端时为 null。 */
+  grant: AssistGrantInfoSchema.nullish().transform((value) => value ?? null),
   steps: z.array(AssistStepSchema),
   reply: z.string(),
   resultItems: z.array(AssistResultItemSchema),
@@ -328,15 +357,59 @@ const AssistRequestSchema = z.object({
   mine: z.boolean(),
   createdAt: z.string().nullable(),
   decidedAt: z.string().nullable(),
-  finishedAt: z.string().nullable()
+  finishedAt: z.string().nullable(),
+  /** 发起方在 Memmy 的哪条任务里发出这次请求：只回给发起人本人；外部 Agent 发起、或旧后端时为 null。 */
+  sourceTask: z.string().nullish().transform((value) => value ?? null),
+  /** 还在等待、但执行方的限时授权仍然有效：她的 Memmy 会直接执行，不写「等待授权」。 */
+  autoRun: z.boolean().nullish().transform((value) => value ?? false),
+  /** 这一次新给出的限时授权时长；仅这一次、或按已有限时授权直接执行时为 null。 */
+  decidedMinutes: z.number().nullish().transform((value) => value ?? null),
+  /** 发起方第一次收到结果的时间。 */
+  deliveredAt: z.string().nullish().transform((value) => value ?? null),
+  // 以下是会话内容，只在打开一次协助时返回；旧请求没有时为 undefined / null，界面按已有内容显示。
+  /** 执行方 Agent 收到的提示词。 */
+  prompt: z.string().nullish(),
+  /** Memmy 执行时隐藏注入的格式要求。 */
+  promptContext: z.string().nullish(),
+  /** 完整执行过程。 */
+  transcript: z.array(AssistTranscriptItemSchema).optional(),
+  /** 发起方 Agent 实际收到的内容。 */
+  delivery: z.string().nullish(),
+  /** 发起方 Agent 收到后的回复。 */
+  deliveryReply: z.string().nullish()
 });
 
 const AssistInboxItemSchema = AssistRequestSchema.extend({
-  /** 已经有长期授权：执行方的 Memmy 直接开始执行，不再弹授权。 */
+  /** 有生效中的限时授权：执行方的 Memmy 直接开始执行，不再弹授权。 */
   granted: z.boolean(),
   grantAgent: z.string().nullable(),
-  /** 这位成员今天已经请她执行了几次：到上限时先问她。 */
-  usedToday: z.number()
+  grantExpiresAt: z.string().nullish().transform((value) => value ?? null),
+  /** 同一次排查上一次由哪个 Agent 执行：等待确认的请求还没选 Agent，通知与确认卡片据此说明。 */
+  lastAgent: z.string().nullish().transform((value) => value ?? null),
+  /** 上一次由 Memmy 执行时，这次排查在这台电脑上对应的任务：确认就在那条任务里进行。 */
+  conversationId: z.string().nullish().transform((value) => value ?? null)
+});
+
+/** 项目里的一次排查（看板上的一行协助）：只有发起人和执行人看得到。 */
+const AssistThreadSchema = z.object({
+  threadId: z.string(),
+  projectId: z.string(),
+  title: z.string(),
+  via: z.string(),
+  agent: z.string().nullable(),
+  scope: AssistScopeSchema,
+  grant: AssistGrantInfoSchema.nullish().transform((value) => value ?? null),
+  status: AssistStatusSchema,
+  attempt: z.number(),
+  requester: AssistMemberSchema,
+  executor: AssistMemberSchema,
+  mine: z.boolean(),
+  createdAt: z.string().nullable(),
+  lastActiveAt: z.string().nullable(),
+  /** 各次请求，按新到旧：第一条就是最近一次。 */
+  requests: z.array(AssistRequestSchema),
+  /** 执行方本人、由 Memmy 执行时这台电脑上对应的任务：看板点开直接进入它。 */
+  conversationId: z.string().nullish().transform((value) => value ?? null)
 });
 
 const AssistGrantSchema = z.object({
@@ -345,21 +418,20 @@ const AssistGrantSchema = z.object({
   grantee: AssistMemberSchema,
   agent: z.string(),
   active: z.boolean(),
-  usedToday: z.number().nullish().transform((value) => value ?? 0),
+  /** 授权时长与到期时间：项目设置里显示剩余时间。 */
+  minutes: z.number().nullish().transform((value) => value ?? null),
+  expiresAt: z.string().nullish().transform((value) => value ?? null),
   createdAt: z.string().nullable(),
   revokedAt: z.string().nullable()
 });
 
-const AssistRecordSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  memberName: z.string(),
-  status: AssistStatusSchema,
-  agent: z.string().nullable(),
-  files: z.number(),
-  createdAt: z.string().nullable(),
-  attempt: z.number(),
-  threadId: z.string()
+/** 一条 Memmy 任务上的协助：它本身是一次协助的执行，或在它里面发出过请求。 */
+const AssistTaskViewSchema = z.object({
+  executing: z.object({
+    thread: AssistThreadSchema,
+    confirm: AssistInboxItemSchema.nullable()
+  }).nullable(),
+  requested: z.array(AssistRequestSchema.extend({ delivered: z.boolean() }))
 });
 
 const AssistExecutionSchema = z.object({
@@ -369,6 +441,8 @@ const AssistExecutionSchema = z.object({
   agent: z.string(),
   status: z.enum(["queued", "running", "done", "failed"]),
   steps: z.array(AssistStepSchema),
+  /** 由 Memmy 执行时，这次执行所在的那条 Memmy 任务；外部 Agent 执行、或旧后端不返回时为 null。 */
+  conversationId: z.string().nullable().optional().transform((value) => value ?? null),
   startedAt: z.string(),
   finishedAt: z.string().nullable(),
   failure: z.string().nullable()
@@ -377,13 +451,18 @@ const AssistExecutionSchema = z.object({
 const AssistAgentSchema = z.object({
   sourceId: z.string(),
   name: z.string(),
-  available: z.boolean()
+  available: z.boolean(),
+  /** `used`：这个项目里用过（Memmy 固定在这一层）；`other`：能运行但没用过，弹窗里默认收起。 */
+  group: z.enum(["used", "other"]).nullish().transform((value) => value ?? "used"),
+  lastActiveAt: z.string().nullish().transform((value) => value ?? null)
 });
 
-const AssistSettingsSchema = z.object({
-  allowAssist: z.boolean(),
-  running: z.number(),
-  queued: z.number()
+/** 本人在一个项目里是否接收协助请求。 */
+const AssistReceivingSchema = z.object({
+  projectId: z.string(),
+  enabled: z.boolean(),
+  /** 关闭时结束了几条还在等待的请求。 */
+  closed: z.number().optional()
 });
 
 export type AssistStatus = z.infer<typeof AssistStatusSchema>;
@@ -393,12 +472,33 @@ export type AssistResultItem = z.infer<typeof AssistResultItemSchema>;
 export type AssistRequest = z.infer<typeof AssistRequestSchema>;
 export type AssistInboxItem = z.infer<typeof AssistInboxItemSchema>;
 export type AssistGrant = z.infer<typeof AssistGrantSchema>;
-export type AssistRecord = z.infer<typeof AssistRecordSchema>;
+export type AssistThread = z.infer<typeof AssistThreadSchema>;
+export type AssistTaskView = z.infer<typeof AssistTaskViewSchema>;
 export type AssistExecution = z.infer<typeof AssistExecutionSchema>;
 export type AssistAgent = z.infer<typeof AssistAgentSchema>;
-export type AssistSettings = z.infer<typeof AssistSettingsSchema>;
-/** 执行方这次授权到什么程度：仅这一次，还是以后都直接执行。 */
-export type AssistScope = "once" | "always";
+export type AssistGrantInfo = z.infer<typeof AssistGrantInfoSchema>;
+export type AssistReceiving = z.infer<typeof AssistReceivingSchema>;
+export type AssistTranscriptItem = z.infer<typeof AssistTranscriptItemSchema>;
+
+/** 打开一次协助：完整会话，加上双方在这台电脑上能打开的任务。 */
+const AssistThreadDetailSchema = z.object({
+  thread: AssistThreadSchema.extend({
+    /** 发起方由 Memmy 发起时，发起的那条任务（只给发起人本人）。 */
+    sourceTask: z.string().nullish().transform((value) => value ?? null)
+  }),
+  /** 云端数据库的当前时间：与本机时钟的差用来把会话里的时间换成本机时间。 */
+  serverTime: z.string().nullish().transform((value) => value ?? null)
+});
+export type AssistThreadDetail = z.infer<typeof AssistThreadDetailSchema>;
+/** 授权弹窗、任务内确认与项目设置里「换用」共用的候选，以及默认选中的那一个。 */
+export interface AssistAgentChoice {
+  agents: AssistAgent[];
+  defaultAgent: string | null;
+}
+/** 执行方这次授权到什么程度：仅这一次，还是一段时间内直接执行。 */
+export type AssistScope = "once" | "timed";
+/** 限时授权的四档时长（分钟），默认 1 小时。 */
+export type AssistGrantMinutes = 30 | 60 | 120 | 240;
 
 export interface CollabClient {
   listProjects(): Promise<{
@@ -508,16 +608,24 @@ export interface CollabClient {
   // ---------- 成员协助 ----------
 
   /** 执行方收件箱：等着她授权或确认的请求，以及正在执行的请求。 */
-  assistInbox(): Promise<{ requests: AssistInboxItem[]; dailyLimit: number }>;
-  /** 执行方能不能收到协助请求，以及当前并发情况。 */
-  assistSettings(): Promise<AssistSettings>;
-  /** 关掉之后不再领取新请求；已经发出的请求保留。 */
-  setAssistAllow(allow: boolean): Promise<AssistSettings>;
-  /** 授权弹窗里列出的执行方：已关联到协作项目的 Agent。 */
-  assistAgents(projectId: string): Promise<AssistAgent[]>;
+  assistInbox(): Promise<{ requests: AssistInboxItem[] }>;
+  /** 本人在这个项目里是否接收协助请求（项目设置里的开关）。 */
+  assistReceiving(projectId: string): Promise<AssistReceiving>;
+  /** 打开或关闭「接收协助请求」；关闭时她给出的限时授权结束，等待中的请求以明确原因结束。 */
+  setAssistReceiving(projectId: string, enabled: boolean): Promise<AssistReceiving>;
+  /**
+   * 执行方的候选：这台电脑上能运行的 Agent，分「本项目用过」与「其他」两层。
+   * 给出 `requester` 时，默认项是她给这位成员选过的 Agent，没有就是 Memmy。
+   */
+  assistAgents(projectId: string, requester?: string): Promise<AssistAgentChoice>;
   assistRequest(requestId: string): Promise<AssistRequest>;
-  /** 允许或拒绝。允许时要写清由哪个 Agent 执行、这次授权到什么程度。 */
-  decideAssist(requestId: string, decision: { action: "allow" | "reject"; agent?: string; scope?: AssistScope }): Promise<AssistRequest>;
+  /** 允许或拒绝。允许时要写清由哪个 Agent 执行、这次授权到什么程度；限时授权带时长。 */
+  decideAssist(requestId: string, decision: {
+    action: "allow" | "reject";
+    agent?: string;
+    scope?: AssistScope;
+    minutes?: AssistGrantMinutes;
+  }): Promise<AssistRequest>;
   /** 执行方停止当前执行，发起方会看到「谁停止了这次执行」。 */
   stopAssist(requestId: string): Promise<AssistRequest>;
   /** 执行方在任务页补充一句说明：作为一条进展发给发起方。 */
@@ -535,13 +643,18 @@ export interface CollabClient {
   }): Promise<{ request: AssistRequest; threadId: string; text: string }>;
   /** 本机正在执行与排队中的请求。 */
   assistExecutions(): Promise<AssistExecution[]>;
-  assistGrants(projectId: string): Promise<{ grants: AssistGrant[]; dailyLimit: number }>;
-  /** 更换某位成员的执行 Agent：一位成员只对应一个。 */
-  setAssistGrantAgent(projectId: string, grantee: string, agent: string): Promise<{ grants: AssistGrant[]; dailyLimit: number }>;
+  assistGrants(projectId: string): Promise<{ grants: AssistGrant[] }>;
+  /** 本人在这个项目里仍然有效的限时授权。更换某位成员的执行 Agent：一位成员只对应一个。 */
+  setAssistGrantAgent(projectId: string, grantee: string, agent: string): Promise<{ grants: AssistGrant[] }>;
   /** 结束对某位成员的授权；之后的请求重新问她。 */
-  revokeAssistGrant(projectId: string, grantee: string): Promise<{ grants: AssistGrant[]; dailyLimit: number }>;
+  revokeAssistGrant(projectId: string, grantee: string): Promise<{ grants: AssistGrant[] }>;
   /** 协助记录，保留 30 天。 */
-  assistRecords(projectId: string): Promise<{ records: AssistRecord[]; retentionDays: number }>;
+  /** 项目里的协助：本人作为发起人或执行人的排查，按一次排查一行，保留 30 天。 */
+  assistThreads(projectId: string): Promise<{ threads: AssistThread[]; open: number; retentionDays: number }>;
+  /** 打开一次协助：各次请求的提示词、执行过程、回复与发起方收到的内容。只有发起人和执行人能读。 */
+  assistThread(projectId: string, threadId: string): Promise<AssistThreadDetail>;
+  /** 一条 Memmy 任务上的协助：任务页据此显示协助条、请求卡片与确认卡片。 */
+  assistTask(chatId: string): Promise<AssistTaskView>;
 }
 
 /** 只取状态部分：安装结果与状态同一个回应，界面把它们分开用。 */
@@ -931,31 +1044,39 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
       return requestJson({
         config,
         path: "/api/collab/assist/inbox",
-        schema: z.object({ requests: z.array(AssistInboxItemSchema), dailyLimit: z.number() })
+        schema: z.object({ requests: z.array(AssistInboxItemSchema) })
       });
     },
 
-    async assistSettings() {
-      return requestJson({ config, path: "/api/collab/assist/settings", schema: AssistSettingsSchema });
-    },
-
-    async setAssistAllow(allow) {
+    async assistReceiving(projectId) {
       return requestJson({
         config,
-        path: "/api/collab/assist/settings",
-        schema: AssistSettingsSchema,
-        body: { allowAssist: allow },
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/receiving`,
+        schema: AssistReceivingSchema
+      });
+    },
+
+    async setAssistReceiving(projectId, enabled) {
+      return requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/receiving`,
+        schema: AssistReceivingSchema,
+        body: { enabled },
         init: { method: "PUT" }
       });
     },
 
-    async assistAgents(projectId) {
+    async assistAgents(projectId, requester) {
+      const query = requester ? `?requester=${encodeURIComponent(requester)}` : "";
       const result = await requestJson({
         config,
-        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/agents`,
-        schema: z.object({ agents: z.array(AssistAgentSchema) })
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/agents${query}`,
+        schema: z.object({
+          agents: z.array(AssistAgentSchema),
+          defaultAgent: z.string().nullish().transform((value) => value ?? null)
+        })
       });
-      return result.agents;
+      return { agents: result.agents.filter((agent) => agent.available), defaultAgent: result.defaultAgent };
     },
 
     async assistRequest(requestId) {
@@ -974,7 +1095,8 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
         body: {
           action: decision.action,
           ...(decision.agent ? { agent: decision.agent } : {}),
-          ...(decision.scope ? { scope: decision.scope } : {})
+          ...(decision.scope ? { scope: decision.scope } : {}),
+          ...(decision.scope === "timed" && decision.minutes ? { minutes: decision.minutes } : {})
         }
       })).request;
     },
@@ -1028,7 +1150,7 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
       return requestJson({
         config,
         path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/grants`,
-        schema: z.object({ grants: z.array(AssistGrantSchema), dailyLimit: z.number() })
+        schema: z.object({ grants: z.array(AssistGrantSchema) })
       });
     },
 
@@ -1036,7 +1158,7 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
       return requestJson({
         config,
         path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/grants/${encodeURIComponent(grantee)}`,
-        schema: z.object({ grants: z.array(AssistGrantSchema), dailyLimit: z.number() }),
+        schema: z.object({ grants: z.array(AssistGrantSchema) }),
         body: { agent },
         init: { method: "PATCH" }
       });
@@ -1046,16 +1168,32 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
       return requestJson({
         config,
         path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/grants/${encodeURIComponent(grantee)}`,
-        schema: z.object({ grants: z.array(AssistGrantSchema), dailyLimit: z.number() }),
+        schema: z.object({ grants: z.array(AssistGrantSchema) }),
         init: { method: "DELETE" }
       });
     },
 
-    async assistRecords(projectId) {
+    async assistThreads(projectId) {
       return requestJson({
         config,
-        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/records`,
-        schema: z.object({ records: z.array(AssistRecordSchema), retentionDays: z.number() })
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/threads`,
+        schema: z.object({ threads: z.array(AssistThreadSchema), open: z.number(), retentionDays: z.number() })
+      });
+    },
+
+    async assistThread(projectId, threadId) {
+      return requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/assist/threads/${encodeURIComponent(threadId)}`,
+        schema: AssistThreadDetailSchema
+      });
+    },
+
+    async assistTask(chatId) {
+      return requestJson({
+        config,
+        path: `/api/collab/assist/tasks/${encodeURIComponent(chatId)}`,
+        schema: AssistTaskViewSchema
       });
     }
   };

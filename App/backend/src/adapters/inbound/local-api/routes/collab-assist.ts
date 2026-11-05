@@ -28,16 +28,25 @@ const CreateRequestSchema = z.object({
   items: ItemsSchema,
   /** 发起方的 Agent 名称：弹窗里要说明是谁的 Agent 在请求。 */
   via: z.string().trim().max(40).optional(),
-  /** 同一次排查的续跑：带上上一次的 thread。 */
-  thread: z.string().regex(/^[A-Za-z0-9-]{1,36}$/u).optional()
+  /** 同一次排查的续跑：带上上一次请求的 id（完整或 6 位短 id）。 */
+  thread: z.string().regex(/^[A-Za-z0-9-]{1,36}$/u).optional(),
+  /** 在 Memmy 的哪条任务里发起：结果回来后送回这条任务。 */
+  sourceTask: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional()
 }).strict();
+const ChatIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u, "任务 ID 无效");
+/** 限时授权只有四档：30 分钟、1 小时、2 小时、4 小时。 */
+const GrantMinutesSchema = z.union([z.literal(30), z.literal(60), z.literal(120), z.literal(240)]);
 const DecisionSchema = z.object({
   action: z.enum(["allow", "reject"]),
   agent: AgentSchema.optional(),
-  scope: z.enum(["once", "always"]).optional()
-}).strict().refine((value) => value.action === "reject" || Boolean(value.agent), "允许时需要指定执行方");
+  scope: z.enum(["once", "timed"]).optional(),
+  minutes: GrantMinutesSchema.optional()
+}).strict()
+  .refine((value) => value.action === "reject" || Boolean(value.agent), "允许时需要指定执行方")
+  .refine((value) => value.minutes === undefined || value.scope === "timed", "只有限时授权需要时长");
 const GrantAgentSchema = z.object({ agent: AgentSchema }).strict();
-const AllowAssistSchema = z.object({ allowAssist: z.boolean() }).strict();
+const ReceivingSchema = z.object({ enabled: z.boolean() }).strict();
+const UserIdQuerySchema = z.object({ requester: z.string().regex(/^[0-9]{1,19}$/u).optional() }).passthrough();
 const WaitSchema = z.object({ timeoutMs: z.number().int().min(1_000).max(16 * 60 * 1000).optional() }).strict();
 const NoteSchema = z.object({ note: z.string().trim().min(1).max(2_000) }).strict();
 const EndAssistSchema = z.object({
@@ -62,14 +71,20 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
       ...(input.reason === undefined ? {} : { reason: input.reason }),
       items: input.items,
       ...(input.via === undefined ? {} : { via: input.via }),
-      ...(input.thread === undefined ? {} : { thread: input.thread })
+      ...(input.thread === undefined ? {} : { thread: input.thread }),
+      ...(input.sourceTask === undefined ? {} : { sourceTask: input.sourceTask })
     });
-    return reply.send({ request: created.request, threadId: created.threadId, text: created.text });
+    return reply.send({ request: created.request, threadId: created.threadId, text: created.text, activeGrant: created.activeGrant });
   }));
 
   // 一条请求的当前状态：界面刷新卡片、命令行 `assist status` 都用它。
   app.get<{ Params: { requestId: string } }>("/api/collab/assist/requests/:requestId", guard, withErrorEnvelope(async (request, reply) =>
     reply.send({ request: await options.assist.requestStatus(RequestIdSchema.parse((request.params as { requestId: string }).requestId)) })));
+
+  // 命令行 `assist status`：当前状态的一段文字；第一次读到终态时把这段文字记为发起方收到的内容。
+  // 界面刷新卡片用上面的 GET，不经过这里，免得把界面的读取当成 Agent 收到了结果。
+  app.post<{ Params: { requestId: string } }>("/api/collab/assist/requests/:requestId/status", guard, withErrorEnvelope(async (request, reply) =>
+    reply.send(await options.assist.agentStatus(RequestIdSchema.parse((request.params as { requestId: string }).requestId)))));
 
   // 发起方等结果：等不到就返回当前状态，不假装完成。
   app.post<{ Params: { requestId: string } }>("/api/collab/assist/requests/:requestId/wait", guard, withErrorEnvelope(async (request, reply) => {
@@ -86,7 +101,8 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
       requestId,
       action: input.action,
       ...(input.agent === undefined ? {} : { agent: input.agent }),
-      ...(input.scope === undefined ? {} : { scope: input.scope })
+      ...(input.scope === undefined ? {} : { scope: input.scope }),
+      ...(input.minutes === undefined ? {} : { minutes: input.minutes })
     }) });
   }));
 
@@ -110,7 +126,7 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
     return reply.send({ request: await options.assist.cancelRequest(requestId) });
   }));
 
-  // 结束协助：结束本人对这个项目里的成员的长期授权；之后的请求重新询问她。
+  // 结束协助：结束本人对这个项目里的成员的限时授权；之后的请求重新询问她。
   app.post("/api/collab/assist/end", guard, withErrorEnvelope(async (request, reply) => {
     const input = EndAssistSchema.parse(request.body ?? {});
     return reply.send(await options.assist.endAssist(input));
@@ -120,20 +136,29 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
   app.get("/api/collab/assist/executions", guard, withErrorEnvelope(async (_request, reply) =>
     reply.send({ executions: options.assist.executions() })));
 
-  // 执行方：总开关与当前并发情况。
+  // 执行方：当前并发情况（同一时间只执行一个，其余排队）。
   app.get("/api/collab/assist/settings", guard, withErrorEnvelope(async (_request, reply) =>
     reply.send(options.assist.settings())));
 
-  app.put("/api/collab/assist/settings", guard, withErrorEnvelope(async (request, reply) => {
-    const input = AllowAssistSchema.parse(request.body ?? {});
-    return reply.send(await options.assist.setAllowAssist(input.allowAssist));
+  // 本人在这个项目里是否接收协助请求：项目设置里的开关。默认关闭，只能改自己的。
+  app.get<{ Params: { projectId: string } }>("/api/collab/projects/:projectId/assist/receiving", guard, withErrorEnvelope(async (request, reply) =>
+    reply.send(await options.assist.receiving(ProjectIdSchema.parse((request.params as { projectId: string }).projectId)))));
+
+  app.put<{ Params: { projectId: string } }>("/api/collab/projects/:projectId/assist/receiving", guard, withErrorEnvelope(async (request, reply) => {
+    const projectId = ProjectIdSchema.parse((request.params as { projectId: string }).projectId);
+    const input = ReceivingSchema.parse(request.body ?? {});
+    return reply.send(await options.assist.setReceiving(projectId, input.enabled));
   }));
 
-  // 授权弹窗里列出的 Agent：已关联到协作项目的，加上 Memmy 本身。
-  app.get<{ Params: { projectId: string } }>("/api/collab/projects/:projectId/assist/agents", guard, withErrorEnvelope(async (request, reply) =>
-    reply.send({ agents: await options.assist.agents(ProjectIdSchema.parse((request.params as { projectId: string }).projectId)) })));
+  // 执行方的候选：这台电脑上能运行的 Agent，分「本项目用过」与「其他」两层，带默认选中项。
+  // 授权弹窗、任务内确认与项目设置里的「换用」都用这一份；`requester` 给出时按她对这位发起人的选择定默认项。
+  app.get<{ Params: { projectId: string } }>("/api/collab/projects/:projectId/assist/agents", guard, withErrorEnvelope(async (request, reply) => {
+    const projectId = ProjectIdSchema.parse((request.params as { projectId: string }).projectId);
+    const query = UserIdQuerySchema.parse(request.query ?? {});
+    return reply.send(await options.assist.agents(projectId, query.requester));
+  }));
 
-  // 长期授权：设置页列出、更换执行的 Agent、结束授权。
+  // 限时授权：项目设置列出剩余时间、更换执行的 Agent、结束授权。
   app.get<{ Params: { projectId: string } }>("/api/collab/projects/:projectId/assist/grants", guard, withErrorEnvelope(async (request, reply) =>
     reply.send(await options.assist.grants(ProjectIdSchema.parse((request.params as { projectId: string }).projectId)))));
 
@@ -155,7 +180,17 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
     }));
   }));
 
-  // 协助记录：保留 30 天。
-  app.get<{ Params: { projectId: string } }>("/api/collab/projects/:projectId/assist/records", guard, withErrorEnvelope(async (request, reply) =>
-    reply.send(await options.assist.records(ProjectIdSchema.parse((request.params as { projectId: string }).projectId)))));
+  // 项目里的协助：本人作为发起人或执行人的排查，按一次排查一行，保留 30 天。看板上的协助条目用它。
+  app.get<{ Params: { projectId: string } }>("/api/collab/projects/:projectId/assist/threads", guard, withErrorEnvelope(async (request, reply) =>
+    reply.send(await options.assist.threads(ProjectIdSchema.parse((request.params as { projectId: string }).projectId)))));
+
+  // 打开一次协助：各次请求的提示词、执行过程、回复与发起方收到的内容，只有发起人和执行人能读。
+  app.get<{ Params: { projectId: string; threadId: string } }>("/api/collab/projects/:projectId/assist/threads/:threadId", guard, withErrorEnvelope(async (request, reply) => {
+    const params = request.params as { projectId: string; threadId: string };
+    return reply.send(await options.assist.thread(ProjectIdSchema.parse(params.projectId), RequestIdSchema.parse(params.threadId)));
+  }));
+
+  // 一条 Memmy 任务上的协助：它是执行方的一次协助，或者在它里面发出过请求。任务页据此显示协助条与卡片。
+  app.get<{ Params: { chatId: string } }>("/api/collab/assist/tasks/:chatId", guard, withErrorEnvelope(async (request, reply) =>
+    reply.send(await options.assist.taskAssist(ChatIdSchema.parse((request.params as { chatId: string }).chatId)))));
 }

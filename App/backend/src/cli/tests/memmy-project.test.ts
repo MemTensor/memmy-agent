@@ -100,20 +100,34 @@ describe("memmy-project", () => {
 
   it("lists the projects the person is in, and says when there is nothing to search", async () => {
     let projects: unknown[] = [];
-    let lastUrl = "";
+    const paths: string[] = [];
     const fetcher = (async (input: string | URL) => {
-      lastUrl = String(input);
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      // 成员名字让 Agent 能把「让孙落看一下」对到 --member；读不到成员的项目只显示人数。
+      if (path === "/api/collab/projects/p1/members") {
+        return new Response(JSON.stringify({ members: [{ name: "孙起" }, { name: "孙落" }] }), { status: 200 });
+      }
+      if (path.endsWith("/members")) return new Response(JSON.stringify({ error: { message: "x" } }), { status: 503 });
       return new Response(JSON.stringify({ projects }), { status: 200 });
     }) as typeof fetch;
     const runtimeConfigPath = runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" });
 
     projects = [
-      { id: "p1", name: "Memmy 开发", memberCount: 5, sessionCount: 32 },
+      { id: "p1", name: "Memmy 开发", memberCount: 2, sessionCount: 32 },
       { id: "p2", name: "设计评审", memberCount: 3, sessionCount: 0 }
     ];
     expect(await run(["list"], { fetch: fetcher, runtimeConfigPath }))
-      .toBe("已加入 2 个协作项目：\nMemmy 开发 · 5 位成员 · 32 个任务\n设计评审 · 3 位成员 · 0 个任务");
-    expect(new URL(lastUrl).pathname).toBe("/api/collab/projects");
+      .toBe("已加入 2 个协作项目：\nMemmy 开发 · 2 位成员（孙起、孙落） · 32 个任务\n设计评审 · 3 位成员 · 0 个任务");
+    expect(paths[0]).toBe("/api/collab/projects");
+
+    // 项目列表带上谁接收协助请求：Agent 据此在对方开启了的项目里发请求。
+    projects = [
+      { id: "p1", name: "Memmy 开发", memberCount: 2, sessionCount: 32, assistReceivers: [{ userId: "2", name: "孙落" }] },
+      { id: "p2", name: "设计评审", memberCount: 3, sessionCount: 0, assistReceivers: [] }
+    ];
+    expect(await run(["list"], { fetch: fetcher, runtimeConfigPath }))
+      .toBe("已加入 2 个协作项目：\nMemmy 开发 · 2 位成员（孙起、孙落） · 接收协助：孙落 · 32 个任务\n设计评审 · 3 位成员 · 接收协助：无人开启 · 0 个任务");
 
     projects = [{ id: "p2", name: "设计评审", memberCount: 3, sessionCount: 0 }];
     expect(await run(["list"], { fetch: fetcher, runtimeConfigPath })).toMatch(/还没有共享的任务，换关键词也找不到/u);
@@ -487,6 +501,50 @@ describe("memmy-project assist", () => {
     expect(output).toContain("已完成：由王雨的 Claude Code 执行。");
     expect(output).toContain("· 运行 sw_vers → macOS 15.6");
     expect(output).toContain("版本：Memmy 1.2.6");
+  });
+
+  it("passes on the cloud's explanation when the member does not receive assist requests", async () => {
+    const fetcher = (async () => new Response(JSON.stringify({
+      error: { code: "collab_assist_not_receiving", message: "王雨还没有在「Memmy 内测反馈」中开启接收协助请求" }
+    }), { status: 409 })) as typeof fetch;
+
+    await expect(run([
+      "assist", "ask", "--project", "Memmy 内测反馈", "--member", "王雨", "--file", requestFile()
+    ], { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) }))
+      .rejects.toThrow("王雨还没有在「Memmy 内测反馈」中开启接收协助请求");
+  });
+
+  it("says why a waiting request ended when the member stopped receiving requests", async () => {
+    const fetcher = (async () => new Response(JSON.stringify({
+      request: { id: "r1", status: "rejected", executor: { name: "王雨" }, failure: "王雨已关闭接收协助请求", steps: [] }
+    }))) as typeof fetch;
+
+    const output = await run(["assist", "status", "r1"], { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) });
+
+    expect(output).toBe("王雨已关闭接收协助请求。");
+  });
+
+  it("prints the backend's status text, which is what gets recorded as received", async () => {
+    const paths: string[] = [];
+    const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
+      paths.push(`${init?.method ?? "GET"} ${new URL(String(input)).pathname}`);
+      return new Response(JSON.stringify({ request: { id: "r1", status: "done" }, text: "已完成：王雨的 Memmy 在王雨的电脑上执行（第 1 次）。" }));
+    }) as typeof fetch;
+
+    const output = await run(["assist", "status", "r1"], { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) });
+
+    expect(paths).toEqual(["POST /api/collab/assist/requests/r1/status"]);
+    expect(output).toBe("已完成：王雨的 Memmy 在王雨的电脑上执行（第 1 次）。");
+  });
+
+  it("does not say it waits for permission when her timed permission will run it", async () => {
+    const fetcher = (async (input: string | URL | Request) => new URL(String(input)).pathname.endsWith("/status")
+      ? new Response(JSON.stringify({ error: { code: "not_found", message: "Route not found" } }), { status: 404 })
+      : new Response(JSON.stringify({ request: { id: "r1", status: "pending", autoRun: true, executor: { name: "王雨" }, steps: [] } }))) as typeof fetch;
+
+    const output = await run(["assist", "status", "r1"], { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) });
+
+    expect(output).toBe("按王雨给你的限时授权，等待王雨的 Agent 开始执行。");
   });
 
   it("rejects an incomplete ask instead of guessing", async () => {

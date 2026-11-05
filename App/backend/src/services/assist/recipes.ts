@@ -63,7 +63,7 @@ const RECIPES: readonly AssistRecipe[] = [
   { sourceId: "pi", name: "Pi", command: "pi-acp", args: [] }
 ];
 
-/** 执行方标识里 Memmy 自己不用 ACP：它由运行时的模型直接执行（见 {@link ./memmy-executor}）。 */
+/** 执行方标识里 Memmy 自己不用 ACP：它在项目下新建一条 Memmy 任务执行（见 {@link ./memmy-runner}）。 */
 export const MEMMY_SOURCE_ID = "memmy";
 
 /** 一个可执行文件在常见位置：PATH、Homebrew、以及各个包管理器的全局 bin。 */
@@ -97,10 +97,33 @@ export function assistRecipe(sourceId: string, env: NodeJS.ProcessEnv = process.
   return { ...base, resolved: base.command };
 }
 
-/** 这台电脑上可以拿来执行的 Agent：只列配置了配方且命令存在的，界面用它说明「可用」。 */
+/** 这台电脑上可以拿来执行的 Agent：只列配置了配方且能运行的，界面用它说明「可用」。 */
 export function availableAssistAgents(env: NodeJS.ProcessEnv = process.env): AssistAgentRecipe[] {
   return RECIPES.map((recipe) => assistRecipe(recipe.sourceId, env))
-    .filter((recipe): recipe is AssistAgentRecipe => recipe !== null && findExecutable(recipe.resolved, env) !== null);
+    .filter((recipe): recipe is AssistAgentRecipe => recipe !== null && assistRunnable(recipe.sourceId, env));
+}
+
+/**
+ * 靠适配器接入 ACP 的 Agent 要看它本体的命令行：适配器可以在授权后按需安装，
+ * 但本体不在，装上适配器也跑不起来。
+ */
+const BODY_COMMANDS: Readonly<Record<string, string>> = Object.freeze({
+  claude_code: "claude",
+  codex: "codex",
+  pi: "pi"
+});
+
+/**
+ * 这个 Agent 在这台电脑上能不能运行：有环境变量覆盖时看覆盖的命令；需要适配器的看本体命令行；
+ * 其余看配方里的命令本身。没有配方的（用户自己添加的 Agent）一律不能由 Memmy 拉起。
+ */
+export function assistRunnable(sourceId: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (sourceId === MEMMY_SOURCE_ID) return true;
+  const recipe = assistRecipe(sourceId, env);
+  if (!recipe) return false;
+  if (env[ASSIST_COMMAND_ENV(sourceId)]?.trim()) return findExecutable(recipe.resolved, env) !== null;
+  const body = BODY_COMMANDS[sourceId];
+  return findExecutable(body ?? recipe.command, env) !== null;
 }
 
 /** 在 PATH 与常见目录里找一个可执行文件；找不到时返回 null。 */
@@ -116,5 +139,6 @@ export function findExecutable(command: string, env: NodeJS.ProcessEnv = process
 
 /** 已知的 Agent 名：失败原因要说清是哪个 Agent 起不来。 */
 export function assistAgentName(sourceId: string): string {
+  if (sourceId === MEMMY_SOURCE_ID) return "Memmy";
   return RECIPES.find((recipe) => recipe.sourceId === sourceId)?.name ?? sourceId;
 }

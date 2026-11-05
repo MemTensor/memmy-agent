@@ -1,0 +1,236 @@
+/*
+ * 协助会话：外框沿用只读任务面板（collab-page.module.css 的 reader*），工具步骤沿用对话页的
+ * agent-activity-* 全局样式，这里只画请求气泡、决定行、提示词与收到的内容这几块。颜色只用现有的薄荷绿主题变量。
+ */
+
+.note {
+  margin: 0;
+  color: var(--collab-ter, #8a9a96);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* 发起方的请求：与对话里人说的话同一侧、同一种底色 */
+.requestSide {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  min-width: 0;
+}
+
+.byline {
+  color: var(--collab-ter, #8a9a96);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.requestBubble {
+  display: flex;
+  max-width: min(90%, 520px);
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  border-radius: 14px 14px 4px 14px;
+  background: color-mix(in srgb, var(--collab-accent, #5cbfae) 11%, var(--color-background-paper, #fff));
+  color: var(--collab-ink, #111d1c);
+  font-size: 14px;
+  line-height: 1.65;
+  word-break: break-word;
+}
+
+.requestTitle {
+  font-weight: 650;
+}
+
+.requestReason {
+  margin: 0;
+  color: var(--collab-ink-2, #2a3a37);
+}
+
+.requestItems {
+  margin: 2px 0 0;
+  padding-left: 20px;
+  list-style: decimal;
+}
+
+.requestItems li + li {
+  margin-top: 2px;
+}
+
+/* 执行方的决定：一行居中的说明，两侧细线 */
+.decision {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--collab-muted, #5f716c);
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.decision::before,
+.decision::after {
+  content: "";
+  flex: 1;
+  min-width: 16px;
+  height: 1px;
+  background: var(--collab-line-soft, rgba(214, 223, 220, 0.45));
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sectionLabel {
+  color: var(--collab-muted, #5f716c);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.subLabel {
+  margin-top: 2px;
+  color: var(--collab-ter, #8a9a96);
+  font-size: 11.5px;
+}
+
+.folded {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.foldedText {
+  width: 100%;
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone, #d6dfdc) 42%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-background-paper, #fff) 62%, var(--collab-surface, #f6f8f8));
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 72%, transparent);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.foldToggle {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--collab-accent-deep, #2f8f7f);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.foldToggle:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 执行过程：左侧一道细线把说明与工具步骤归成一组，与下面的回复区分开 */
+.process {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--collab-line-soft, rgba(214, 223, 220, 0.45));
+}
+
+/* 过程里 Agent 的说明文字：比回复正文淡一档、小一号，与对话页的过程区一致 */
+.processText {
+  min-width: 0;
+  --chat-md-root: 13.5px;
+}
+
+.processText :global(.agent-message-content) {
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 62%, transparent);
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.toolRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.runningLine,
+.omitted {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--collab-ter, #8a9a96);
+  font-size: 12.5px;
+}
+
+.truncated {
+  margin: 0;
+  padding: 0 12px 7px;
+  color: var(--collab-ter, #8a9a96);
+  font-size: 11.5px;
+}
+
+.spinIcon {
+  animation: assistConversationSpin 0.9s linear infinite;
+}
+
+@keyframes assistConversationSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinIcon {
+    animation: none;
+  }
+}
+
+.byTime {
+  margin-left: auto;
+  color: var(--collab-ter, #8a9a96);
+  font-weight: 500;
+}
+
+.results {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--collab-surface, #f6f8f8);
+}
+
+.resultRow {
+  display: grid;
+  grid-template-columns: minmax(64px, max-content) 1fr;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.resultRow dt {
+  color: var(--collab-muted, #5f716c);
+}
+
+.resultRow dd {
+  margin: 0;
+  color: var(--collab-ink, #111d1c);
+  word-break: break-word;
+}
+
+.deliveryReply {
+  margin-top: 6px;
+}

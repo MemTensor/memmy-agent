@@ -1,6 +1,6 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Gauge, History, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy, Users} from "lucide-react";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, Bell, ExternalLink, FolderOpen, Gift, Gauge, Info, KeyRound, LogOut, Wrench, Eye, EyeOff, ChevronDown, ChevronUp, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy, Users} from "lucide-react";
 import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, MemoryTokenBudgetDto, ModelConfigView, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { copyInvitationCode } from "../app/invitation-analytics.js";
@@ -32,7 +32,6 @@ import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ComputerUseSettings } from "./computer-use-settings.js";
 import { agentSourceLogoUrl } from "./agent-source-logos.js";
-import { CollabAssistRecords, CollabAssistSettings } from "./collab-assist-settings.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
   MEMORY_TOKEN_BUDGET_SECTION_ID,
@@ -1853,16 +1852,8 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         {/* 协作项目只在账号模式存在：API Key 模式没有云端，这一项也不显示。 */}
         {isAccountMode ? (
           <Section icon={<Users size={16} className="text-text-ink/60" />} title={t("settings.collab")}>
+            {/* 成员协助不在这里设置：是否接收协助请求按项目在项目设置里开关，限时授权也列在那里。 */}
             <CollabAgentAccessSection client={props.collabClient} />
-            {/* 成员协助紧接在「在其他 Agent 中使用协作项目」之后：执行用的 Agent 来自那里。 */}
-            <CollabAssistSettings client={props.collabClient} />
-          </Section>
-        ) : null}
-
-        {/* 协助记录单独一节：每条写明由哪个 Agent 执行、发出了什么，保留 30 天。 */}
-        {isAccountMode ? (
-          <Section icon={<History size={16} className="text-text-ink/60" />} title={t("settings.assist.recordsTitle")}>
-            <CollabAssistRecords client={props.collabClient} />
           </Section>
         ) : null}
 

@@ -137,6 +137,7 @@ import { installMemmyMemory, type MemmyMemoryIntegration } from "../../memmy-mem
 import { createKnowledgeHook } from "../../knowledge/register.js";
 import { createProjectInstructionsHook } from "../../project-instructions/index.js";
 import { createCollabInstructionsHook } from "../../collab-instructions/index.js";
+import { createAssistRequestHook } from "../../assist-request/index.js";
 import { createByokTokenUsageRecorder, installByokTokenUsage } from "../../integrations/byok-token-usage/index.js";
 import {
   SessionDagQueueManager,
@@ -880,6 +881,8 @@ export class AgentLoop {
     // 协作项目的指令走自己的文件与段落，与本机项目指令互不覆盖。
     // 先登记、后执行：下面的本机项目指令钩子会插在它前面先跑，协作段才能按 after 定位到本机段之后。
     this.extraHooks.unshift(createCollabInstructionsHook());
+    // 成员协助：结果的写法交给模型、不出现在任务里。会话在下面才建好，钩子每一轮按需读取。
+    this.extraHooks.push(createAssistRequestHook(() => this.sessions));
     // 项目里新建的 Memmy 任务都要遵循该项目的项目指令，像项目级的 AGENTS.md 一样带在系统提示词里。
     this.extraHooks.unshift(createProjectInstructionsHook());
     this.memmyMemoryIntegration = installMemmyMemory(this.config, {

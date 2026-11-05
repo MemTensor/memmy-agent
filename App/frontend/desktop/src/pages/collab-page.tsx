@@ -1,9 +1,10 @@
-import { AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Layers, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plug, RefreshCw, Search, Settings, Trash2, UserPlus, X } from "lucide-react";
+import { AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Layers, LifeBuoy, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plug, RefreshCw, Search, Settings, Trash2, UserPlus, X } from "lucide-react";
 import { memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
   createHttpCollabClient,
   type AddedAgent,
+  type AssistThread,
   type CollabAgentAccessView,
   type CollabClient,
   type CollabInstructionsHandover,
@@ -80,6 +81,10 @@ import {
   writeCollabTourSeen
 } from "./collab-tour.js";
 import styles from "./collab-page.module.css";
+import { consumeAssistFocus, getAssistFocus, subscribeAssistFocus } from "../app/collab-assist-focus.js";
+import { CollabAssistConversation } from "./collab-assist-conversation.js";
+import { CollabAssistProjectSettings } from "./collab-assist-settings.js";
+import { assistAgentName, assistIsOpen, assistStatusKey } from "./collab-assist-view.js";
 
 export { memberColor };
 
@@ -121,8 +126,28 @@ const EMPTY_PROJECT_INSTRUCTIONS: ProjectInstructions = {
   cloudProjectId: null,
   updatedAt: null
 };
-/** Member filter: anyone, only me, or only the other members. */
-type MemberFilter = "all" | "me" | "others";
+/**
+ * Member filter: anyone, only me, only the other members, or only assists. Assists are not sessions: the
+ * session list never receives "assist", which only switches the board to the assist entries.
+ */
+type MemberFilter = "all" | "me" | "others" | "assist";
+
+/** What the session list is asked for: "all" and "assist" both read every session. */
+function sessionMemberParam(member: MemberFilter): { member?: "me" | "others" } {
+  return member === "me" || member === "others" ? { member } : {};
+}
+
+/** 内容没变就保留原数组，看板不必因为每 5 秒的轮询重画。 */
+function sameAssistThreads(left: readonly AssistThread[], right: readonly AssistThread[]): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+const NO_ASSIST_THREADS: AssistThread[] = [];
+
+/** 一行任务或一行协助：按最近活动时间混排，协助用「协助」标签区分。 */
+type BoardRow =
+  | { kind: "session"; at: string; session: CollabProjectSession }
+  | { kind: "assist"; at: string; thread: AssistThread };
 
 /** How an agent organizes its sessions, which names the groups in the picker. */
 export type GroupingKind = "directory" | "project" | "workspace" | "workbuddy";
@@ -462,6 +487,14 @@ const CollabBoard = memo(function CollabBoard(props: {
   const [searchDraft, setSearchDraft] = useState("");
   const [pageIndex, setPageIndex] = useState(0);
   const [reading, setReading] = useState<{ session: CollabProjectSession; turns: CollabSessionTurn[] } | null>(null);
+  /**
+   * 项目里的协助：一次排查一行，只有发起人和执行人看得到（云端按本人过滤）。
+   * 执行方选了外部 Agent、或发起方点开时，在右侧展开详情；由 Memmy 执行的直接进入那条任务。
+   */
+  const [assistThreads, setAssistThreads] = useState<AssistThread[]>(NO_ASSIST_THREADS);
+  const [assistOpen, setAssistOpen] = useState(0);
+  const [assistDetailId, setAssistDetailId] = useState<string | null>(null);
+  const assistFocus = useSyncExternalStore(subscribeAssistFocus, getAssistFocus, getAssistFocus);
   const [readingId, setReadingId] = useState<string | null>(null);
   const [pickOpen, setPickOpen] = useState(false);
   /**
@@ -813,7 +846,7 @@ const CollabBoard = memo(function CollabBoard(props: {
         }
         const result = await collab.listSessions(sharedId, {
           ...(query ? { query } : {}),
-          ...(member === "all" ? {} : { member }),
+          ...sessionMemberParam(member),
           offset: pageIndex * SESSION_PAGE_SIZE,
           limit: SESSION_PAGE_SIZE
         });
@@ -838,7 +871,7 @@ const CollabBoard = memo(function CollabBoard(props: {
     if (!collab || !sharedId) return;
     void collab.listSessions(sharedId, {
       ...(query ? { query } : {}),
-      ...(member === "all" ? {} : { member }),
+      ...sessionMemberParam(member),
       offset: pageIndex * SESSION_PAGE_SIZE,
       limit: SESSION_PAGE_SIZE
     })
@@ -853,7 +886,7 @@ const CollabBoard = memo(function CollabBoard(props: {
     try {
       const result = await collab.listSessions(projectId, {
         ...(query ? { query } : {}),
-        ...(member === "all" ? {} : { member }),
+        ...sessionMemberParam(member),
         offset: pageIndex * SESSION_PAGE_SIZE,
         limit: SESSION_PAGE_SIZE
       });
@@ -895,7 +928,7 @@ const CollabBoard = memo(function CollabBoard(props: {
       }
       const [next, listing] = await Promise.all([
         collab.getSyncProgress(sharedId).catch(() => null),
-        collab.listSessions(sharedId, { ...(member === "all" ? {} : { member }), ...(query ? { query } : {}), offset: pageIndex * SESSION_PAGE_SIZE, limit: SESSION_PAGE_SIZE }).catch(() => null)
+        collab.listSessions(sharedId, { ...sessionMemberParam(member), ...(query ? { query } : {}), offset: pageIndex * SESSION_PAGE_SIZE, limit: SESSION_PAGE_SIZE }).catch(() => null)
       ]);
       if (cancelled) return;
       if (listing) applyPage(listing);
@@ -969,12 +1002,85 @@ const CollabBoard = memo(function CollabBoard(props: {
     };
   }, [collab, sharedId, membersOpen]);
 
+  /** 读一次项目里的协助；内容没变就不写，看板不跟着轮询重画。 */
+  const refreshAssists = useCallback(async () => {
+    if (!collab || !sharedId) return;
+    try {
+      const view = await collab.assistThreads(sharedId);
+      setAssistThreads((current) => (sameAssistThreads(current, view.threads) ? current : view.threads.length ? view.threads : NO_ASSIST_THREADS));
+      setAssistOpen(view.open);
+    } catch {
+      // 云端还没有这个接口或暂时不可用：看板照常显示任务，只是没有协助条目。
+    }
+  }, [collab, sharedId]);
+
+  // 协助与任务一样随看板轮询：窗口在后台时跳过，切回来立刻补一次。
+  useEffect(() => {
+    setAssistThreads(NO_ASSIST_THREADS);
+    setAssistOpen(0);
+    setAssistDetailId(null);
+    if (!collab || !sharedId) return;
+    void refreshAssists();
+    const timer = setInterval(() => {
+      if (!document.hidden) void refreshAssists();
+    }, BOARD_POLL_MS);
+    const refreshNow = () => {
+      if (!document.hidden) void refreshAssists();
+    };
+    document.addEventListener("visibilitychange", refreshNow);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshNow);
+    };
+  }, [collab, sharedId, refreshAssists]);
+
+  // 从授权弹窗或通知跳过来：在右侧展开那次协助。读到列表之后再展开，列表里还没有就先等下一轮。
+  useEffect(() => {
+    if (!assistFocus || !sharedId || assistFocus.projectId !== sharedId) return;
+    if (!assistThreads.some((thread) => thread.threadId === assistFocus.threadId)) {
+      void refreshAssists();
+      return;
+    }
+    consumeAssistFocus();
+    setAssistDetailId(assistFocus.threadId);
+  }, [assistFocus, sharedId, assistThreads, refreshAssists]);
+
   useEffect(() => () => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
 
   const sessions = page?.sessions ?? null;
-  const filtering = Boolean(query) || member !== "all";
+  const filtering = Boolean(query) || (member !== "all" && member !== "assist");
+
+  /**
+   * 列表里的行：任务按云端的分页来；协助条目只混在「全部」的第一页里（数量少，保留 30 天），
+   * 选「协助」时只看协助。按成员筛选时不出现协助：它不属于某一位成员的任务。
+   */
+  const boardRows = useMemo<BoardRow[] | null>(() => {
+    const assistRows: BoardRow[] = assistThreads
+      .filter((thread) => !query || thread.title.toLowerCase().includes(query.toLowerCase()))
+      .map((thread) => ({ kind: "assist", at: thread.lastActiveAt ?? thread.createdAt ?? "", thread }));
+    if (member === "assist") return assistRows;
+    if (sessions === null) return null;
+    const sessionRows: BoardRow[] = sessions.map((session) => ({ kind: "session", at: session.lastActiveAt ?? "", session }));
+    if (member !== "all" || pageIndex > 0) return sessionRows;
+    return [...sessionRows, ...assistRows].sort((left, right) => right.at.localeCompare(left.at));
+  }, [assistThreads, member, pageIndex, query, sessions]);
+  const assistDetail = assistDetailId ? assistThreads.find((thread) => thread.threadId === assistDetailId) ?? null : null;
+
+  /**
+   * 点开一行协助：双方都先在右侧打开这次协助的完整会话。由 Memmy 执行或发起时，会话底部再给出
+   * 「在 Memmy 中打开任务」或「打开发起的任务」。
+   */
+  function openAssist(thread: AssistThread) {
+    setAssistDetailId(thread.threadId);
+  }
+
+  /** 发起的任务是否还在这台电脑上：详情里的「打开发起的任务」只对还在的任务出现。 */
+  const sourceTaskAvailable = useCallback(
+    (chatId: string) => tasks.some((task) => task.chatId === chatId || (task.sessionKey && sessionKeyToChatId(task.sessionKey) === chatId)),
+    [tasks]
+  );
 
   const total = page?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / SESSION_PAGE_SIZE));
@@ -1118,10 +1224,14 @@ const CollabBoard = memo(function CollabBoard(props: {
     setSelected(new Set());
   }, [pageIndex, member, query, selecting]);
 
-  const memberOptions: { value: MemberFilter; label: string }[] = [
+  const memberOptions: { value: MemberFilter; label: string; count?: number }[] = [
     { value: "all", label: t("collab.filter.all") },
     { value: "me", label: t("collab.filter.you") },
-    { value: "others", label: t("collab.filter.others") }
+    { value: "others", label: t("collab.filter.others") },
+    // 只在有协助时出现：没有协助的项目里，这一格没有可看的内容。
+    ...(assistThreads.length || member === "assist"
+      ? [{ value: "assist" as const, label: t("collab.filter.assist"), count: assistOpen }]
+      : [])
   ];
 
   // 提示条只在有他人的任务时出现，数字与成员名都取自同一批数据，不加一次请求。
@@ -1233,6 +1343,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                             onClick={() => setMember(option.value)}
                           >
                             {option.label}
+                            {option.count ? <span className={styles.segCount}>{option.count}</span> : null}
                           </button>
                         ))}
                       </div>
@@ -1375,9 +1486,15 @@ const CollabBoard = memo(function CollabBoard(props: {
                         </button>
                       </div>
                     ) : null}
-                    {sessions === null ? (
+                    {boardRows === null ? (
                       tourActive ? null : <p className={styles.loading}>{t("collab.loading")}</p>
-                    ) : sessions.length === 0 && filtering ? (
+                    ) : boardRows.length === 0 && member === "assist" ? (
+                      tourActive ? null : (
+                        <div className={styles.empty}>
+                          <p>{query ? t("collab.sessions.noMatch.bodyAssist", { query }) : t("collab.assist.boardEmpty")}</p>
+                        </div>
+                      )
+                    ) : boardRows.length === 0 && filtering ? (
                       tourActive ? null : (
                       // 筛选没结果时只说明当前筛选下没有任务：清除入口在筛选控件本身，不必再给一个按钮。
                       <div className={styles.empty}>
@@ -1391,7 +1508,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                         )}
                       </div>
                       )
-                    ) : sessions.length === 0 ? (
+                    ) : boardRows.length === 0 ? (
                       // An empty project is the one place to explain the board: what it collects and what a
                       // member can do with it. New projects start here, so it carries the first-run guidance.
                       tourActive ? null : (
@@ -1417,7 +1534,18 @@ const CollabBoard = memo(function CollabBoard(props: {
                     ) : (
                       tourActive ? null : <>
                       <ul className={`${styles.list} ${styles.stream} ${styles.flatStream}`}>
-                        {sessions.map((session) => {
+                        {boardRows.map((row) => {
+                          if (row.kind === "assist") {
+                            return (
+                              <AssistBoardRow
+                                key={`assist-${row.thread.threadId}`}
+                                thread={row.thread}
+                                selecting={selecting}
+                                onOpen={() => openAssist(row.thread)}
+                              />
+                            );
+                          }
+                          const session = row.session;
                           // Members see this person's nickname in their own Memmy, so the avatar keeps the nickname.
                           const name = session.memberName || (session.mine ? t("collab.session.you") : "");
                           // 旧记录里的摘要可能停在 Agent 的完成通知上，读不出内容就不显示。
@@ -1515,7 +1643,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                           );
                         })}
                       </ul>
-                      {total > SESSION_PAGE_SIZE ? (
+                      {member === "assist" ? null : total > SESSION_PAGE_SIZE ? (
                         <nav className={styles.pager} aria-label={t("collab.sessions.pager")}>
                           <span className={styles.pagerInfo}>
                             {t("collab.sessions.pageInfo", {
@@ -1724,6 +1852,17 @@ const CollabBoard = memo(function CollabBoard(props: {
           }}
         />
       ) : null}
+      <CollabAssistConversation
+        thread={assistDetail}
+        collab={collab}
+        sourceTaskAvailable={sourceTaskAvailable}
+        onOpenTask={(chatId) => {
+          setAssistDetailId(null);
+          if (dispatch) void openAgentTaskInChat({ memmyAgent: clients?.memmyAgent, dispatch, task: { sessionKey: `websocket:${chatId}` } });
+        }}
+        onChanged={() => void refreshAssists()}
+        onClose={() => setAssistDetailId(null)}
+      />
       <SessionReaderPanel
         session={reading}
         loading={readingId !== null}
@@ -1758,6 +1897,49 @@ const CollabBoard = memo(function CollabBoard(props: {
     </AppFrame>
   );
 });
+
+/**
+ * 看板上的一行协助：「协助」标签 + 要做的事，行尾写清谁请谁、由哪个 Agent 执行、现在的状态。
+ * 选择模式下不可勾选：协助不是可删除的任务。
+ */
+export function AssistBoardRow(props: { thread: AssistThread; selecting: boolean; onOpen: () => void }) {
+  const { t } = useTranslation();
+  const { thread } = props;
+  // 还在等待、按限时授权会直接执行时，执行 Agent 取那份授权指定的。
+  const plannedAgent = thread.agent ?? thread.requests[0]?.grant?.agent ?? null;
+  const agent = plannedAgent ? assistAgentName(plannedAgent, "") : "";
+  const status = t(assistStatusKey(thread));
+  const meta = [
+    t("collab.assist.boardRoute", { requester: thread.requester.name, executor: thread.executor.name }),
+    agent,
+    thread.attempt > 1 && assistIsOpen(thread.status)
+      ? `${t("collab.assist.attemptLabel", { attempt: String(thread.attempt) })} ${status}`
+      : status,
+    stampLabel(taskStamp(thread.lastActiveAt), t)
+  ].filter(Boolean).join(" · ");
+  const summary = thread.requests[0]?.reason ?? "";
+  return (
+    <li
+      className={`${styles.row} ${props.selecting ? styles.rowSelecting : styles.rowOpenable}`}
+      data-collab-assist-row=""
+      onClick={() => {
+        if (!props.selecting) props.onOpen();
+      }}
+    >
+      <span className={`${styles.avatar} ${styles.assistIcon}`} aria-hidden="true">
+        <LifeBuoy size={15} />
+      </span>
+      <div className={styles.rowText}>
+        <span className={styles.rowTitle}>
+          <span className={styles.assistTag}>{t("collab.assist.tag")}</span>
+          {thread.title}
+        </span>
+        {summary ? <span className={styles.rowSummary}>{summary}</span> : null}
+      </div>
+      <span className={`${styles.meta} ${assistIsOpen(thread.status) ? styles.assistMetaOpen : ""}`}>{meta}</span>
+    </li>
+  );
+}
 
 /**
  * The sessions tab of a project that is not shared: this computer's own tasks for it, nothing more. Sharing is
@@ -2384,6 +2566,12 @@ function ProjectBoardSettingsDialog(props: {
               <Button size="sm" onClick={props.onPickSessions}>{t("collab.settings.pickSessions")}</Button>
             </div>
           </div>
+        ) : null}
+
+        {/* 成员协助：本人在这个项目里是否接收协助请求（默认关闭），开启时列出她给出的限时授权。
+            只在账号模式、已共享的项目里出现。 */}
+        {sharedId && props.shareAvailable && props.open ? (
+          <CollabAssistProjectSettings client={props.collab} projectId={sharedId} />
         ) : null}
 
         {sharedId && props.onReplayTour ? (
