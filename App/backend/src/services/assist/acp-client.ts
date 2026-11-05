@@ -44,7 +44,7 @@ export interface AcpRunOptions {
 export interface AcpRunResult {
   reply: string;
   steps: AssistStep[];
-  /** 完整执行过程：Agent 的说明文字（agent_message_chunk）与工具调用（tool_call / tool_call_update）。 */
+  /** 完整执行过程：Agent 的说明文字（agent_message_chunk）、思考（agent_thought_chunk）与工具调用（tool_call / tool_call_update）。 */
   transcript: AssistTranscriptItem[];
   sessionId: string | null;
 }
@@ -60,17 +60,19 @@ export class AcpTranscriptCollector {
   /** 返回这次更新是否改变了执行过程。 */
   consume(update: Record<string, unknown>): boolean {
     const kind = String(update.sessionUpdate ?? "");
-    if (kind === "agent_message_chunk") {
+    if (kind === "agent_message_chunk" || kind === "agent_thought_chunk") {
+      // 说明文字与思考各自按块拼进同一段；两者交替出现时另起一项，保留先后。
+      const itemKind = kind === "agent_thought_chunk" ? "thinking" : "text";
       const content = update.content as { type?: string; text?: string } | undefined;
       if (content?.type !== "text" || !content.text) return false;
       const last = this.items[this.items.length - 1];
-      if (last?.kind === "text") {
+      if (last && last.kind === itemKind) {
         if (last.truncated) return false;
         const joined = clipBytes(`${last.text}${content.text}`, ASSIST_TRANSCRIPT_PART_BYTES);
         if (joined !== `${last.text}${content.text}`) last.truncated = true;
         last.text = joined;
       } else {
-        this.items.push({ kind: "text", text: clipBytes(content.text, ASSIST_TRANSCRIPT_PART_BYTES) });
+        this.items.push({ kind: itemKind, text: clipBytes(content.text, ASSIST_TRANSCRIPT_PART_BYTES) });
       }
       return true;
     }
@@ -295,6 +297,11 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
   let reply = "";
   let sessionId: string | null = options.sessionId ?? null;
   let settled = false;
+  /**
+   * 这一轮的指令已经发出。续跑时 {@code session/load} 会先把这条会话的全部历史以 {@code session/update} 重放一遍（ACP 的规定），
+   * 那些是前几次请求的内容，不能算进这一次的过程与回复；只收发出指令之后的更新。
+   */
+  let prompting = false;
 
   const child = spawn(options.command, [...options.args], {
     cwd: options.cwd,
@@ -328,6 +335,7 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
       if (method !== "session/update") return;
       const payload = params as { sessionId?: string; update?: Record<string, unknown> };
       if (payload.sessionId) sessionId = payload.sessionId;
+      if (!prompting) return;
       const update = payload.update ?? {};
       const read = readUpdate(update);
       if (transcript.consume(update)) options.onTranscript?.(transcript.snapshot());
@@ -424,6 +432,7 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
         options.onSession?.(session.sessionId);
       }
       if (!sessionId) throw new AcpError("Agent 没有给我们一个会话", "failed");
+      prompting = true;
       await connection.request("session/prompt", {
         sessionId,
         prompt: [{ type: "text", text: options.prompt }]

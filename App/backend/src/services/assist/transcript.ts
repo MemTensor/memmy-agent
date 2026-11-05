@@ -1,14 +1,19 @@
 /**
- * 协助会话里的完整执行过程：执行方 Agent 的说明文字与每一步工具调用，按发生顺序排列。
+ * 协助会话里的完整执行过程：执行方 Agent 的说明文字、思考与每一步工具调用，按发生顺序排列。发起方一侧的记录
+ * （发起前 origin、收到后 followup）用同一套结构，另有 {@code user}：用户在发起方 Agent 里说的话。
  *
  * <p>双方在项目看板里打开一次协助时看到的就是它。这里统一上限：单段文字（说明、命令或参数、输出）16KB，
- * 单次请求合计 1MB，提示词与发起方收到的内容各 64KB。云端（memmy-backend 的 {@code CollabLimits}）用同一组数字兜底，
- * 本机先裁好再上传，避免每次推送都被云端截断。</p>
+ * 单次请求合计 1MB（发起方记录的两段各 1MB），提示词与发起方收到的内容各 64KB。云端（memmy-backend 的
+ * {@code CollabLimits}）用同一组数字兜底，本机先裁好再上传，避免每次推送都被云端截断。</p>
  */
 
 export type AssistTranscriptItem =
   | { kind: "text"; text: string; truncated?: boolean }
-  | { kind: "tool"; name: string; input: string; output: string; status: "running" | "done" | "failed"; truncated?: boolean }
+  | { kind: "thinking"; text: string; truncated?: boolean }
+  /** 发起方记录里用户说的话；{@code delivery} 表示它是送进 Memmy 任务的结果消息，不是用户说的。 */
+  | { kind: "user"; text: string; truncated?: boolean; delivery?: boolean }
+  /** {@code delivery} 只出现在发起方记录里：这一步第一次拿到了终态结果。 */
+  | { kind: "tool"; name: string; input: string; output: string; status: "running" | "done" | "failed"; truncated?: boolean; delivery?: boolean }
   | { kind: "omitted"; count: number };
 
 /** 单段文字的上限：说明、命令或参数、输出各自不超过 16KB。 */
@@ -45,14 +50,26 @@ export function clipBytes(value: string, maxBytes: number): string {
 /** 一项的各段按 16KB 截断，截过的标上 {@code truncated}。 */
 export function clipItem(item: AssistTranscriptItem): AssistTranscriptItem {
   if (item.kind === "omitted") return item;
-  if (item.kind === "text") {
+  if (item.kind === "text" || item.kind === "thinking" || item.kind === "user") {
     const text = clipBytes(item.text, ASSIST_TRANSCRIPT_PART_BYTES);
-    return { kind: "text", text, ...(item.truncated || text !== item.text ? { truncated: true } : {}) };
+    return {
+      ...item,
+      text,
+      ...(item.truncated || text !== item.text ? { truncated: true } : {})
+    } as AssistTranscriptItem;
   }
   const input = clipBytes(item.input, ASSIST_TRANSCRIPT_PART_BYTES);
   const output = clipBytes(item.output, ASSIST_TRANSCRIPT_PART_BYTES);
   const truncated = item.truncated || input !== item.input || output !== item.output;
-  return { kind: "tool", name: item.name, input, output, status: item.status, ...(truncated ? { truncated: true } : {}) };
+  return {
+    kind: "tool",
+    name: item.name,
+    input,
+    output,
+    status: item.status,
+    ...(truncated ? { truncated: true } : {}),
+    ...(item.delivery ? { delivery: true } : {})
+  };
 }
 
 function stepCount(item: AssistTranscriptItem): number {
@@ -114,7 +131,10 @@ export function toTranscript(value: unknown): AssistTranscriptItem[] {
     if (!raw || typeof raw !== "object") continue;
     const item = raw as Record<string, unknown>;
     const truncated = item.truncated === true ? { truncated: true } : {};
+    const delivery = item.delivery === true ? { delivery: true } : {};
     if (item.kind === "text" && typeof item.text === "string") items.push({ kind: "text", text: item.text, ...truncated });
+    else if (item.kind === "thinking" && typeof item.text === "string") items.push({ kind: "thinking", text: item.text, ...truncated });
+    else if (item.kind === "user" && typeof item.text === "string") items.push({ kind: "user", text: item.text, ...truncated, ...delivery });
     else if (item.kind === "tool") {
       const status = item.status === "running" || item.status === "failed" ? item.status : "done";
       items.push({
@@ -123,7 +143,8 @@ export function toTranscript(value: unknown): AssistTranscriptItem[] {
         input: typeof item.input === "string" ? item.input : "",
         output: typeof item.output === "string" ? item.output : "",
         status,
-        ...truncated
+        ...truncated,
+        ...delivery
       });
     } else if (item.kind === "omitted" && typeof item.count === "number") items.push({ kind: "omitted", count: item.count });
   }

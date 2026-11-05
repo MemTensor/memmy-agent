@@ -20,6 +20,12 @@ const RequestIdSchema = z.string().regex(/^[A-Za-z0-9-]{1,36}$/u, "协助请求 
 const MemberSchema = z.string().trim().min(1).max(100);
 const AgentSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/u, "执行方无效");
 const ItemsSchema = z.array(z.string().trim().min(1).max(500)).min(1).max(10);
+/** 发起方在哪个 Agent 的哪一条会话里发起：本机据此读出发起方一侧的记录。路径只接受记录文件本身（服务里再校验文件名）。 */
+const RequesterSessionSchema = z.object({
+  sourceId: z.enum(["memmy", "deepseek_harness"]),
+  sessionId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/u, "会话 ID 无效"),
+  recordPath: z.string().min(1).max(1024).optional()
+}).strict();
 const CreateRequestSchema = z.object({
   project: z.string().trim().min(1).max(100),
   member: MemberSchema,
@@ -31,7 +37,8 @@ const CreateRequestSchema = z.object({
   /** 同一次排查的续跑：带上上一次请求的 id（完整或 6 位短 id）。 */
   thread: z.string().regex(/^[A-Za-z0-9-]{1,36}$/u).optional(),
   /** 在 Memmy 的哪条任务里发起：结果回来后送回这条任务。 */
-  sourceTask: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional()
+  sourceTask: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional(),
+  requesterSession: RequesterSessionSchema.optional()
 }).strict();
 const ChatIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u, "任务 ID 无效");
 /** 限时授权只有四档：30 分钟、1 小时、2 小时、4 小时。 */
@@ -47,7 +54,11 @@ const DecisionSchema = z.object({
 const GrantAgentSchema = z.object({ agent: AgentSchema }).strict();
 const ReceivingSchema = z.object({ enabled: z.boolean() }).strict();
 const UserIdQuerySchema = z.object({ requester: z.string().regex(/^[0-9]{1,19}$/u).optional() }).passthrough();
-const WaitSchema = z.object({ timeoutMs: z.number().int().min(1_000).max(16 * 60 * 1000).optional() }).strict();
+const WaitSchema = z.object({
+  timeoutMs: z.number().int().min(1_000).max(16 * 60 * 1000).optional(),
+  requesterSession: RequesterSessionSchema.optional()
+}).strict();
+const StatusSchema = z.object({ requesterSession: RequesterSessionSchema.optional() }).strict();
 const NoteSchema = z.object({ note: z.string().trim().min(1).max(2_000) }).strict();
 const EndAssistSchema = z.object({
   project: z.string().trim().min(1).max(100),
@@ -72,7 +83,8 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
       items: input.items,
       ...(input.via === undefined ? {} : { via: input.via }),
       ...(input.thread === undefined ? {} : { thread: input.thread }),
-      ...(input.sourceTask === undefined ? {} : { sourceTask: input.sourceTask })
+      ...(input.sourceTask === undefined ? {} : { sourceTask: input.sourceTask }),
+      ...(input.requesterSession === undefined ? {} : { requesterSession: input.requesterSession })
     });
     return reply.send({ request: created.request, threadId: created.threadId, text: created.text, activeGrant: created.activeGrant });
   }));
@@ -83,14 +95,22 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
 
   // 命令行 `assist status`：当前状态的一段文字；第一次读到终态时把这段文字记为发起方收到的内容。
   // 界面刷新卡片用上面的 GET，不经过这里，免得把界面的读取当成 Agent 收到了结果。
-  app.post<{ Params: { requestId: string } }>("/api/collab/assist/requests/:requestId/status", guard, withErrorEnvelope(async (request, reply) =>
-    reply.send(await options.assist.agentStatus(RequestIdSchema.parse((request.params as { requestId: string }).requestId)))));
+  app.post<{ Params: { requestId: string } }>("/api/collab/assist/requests/:requestId/status", guard, withErrorEnvelope(async (request, reply) => {
+    const input = StatusSchema.parse(request.body ?? {});
+    return reply.send(await options.assist.agentStatus(
+      RequestIdSchema.parse((request.params as { requestId: string }).requestId),
+      input.requesterSession === undefined ? {} : { requesterSession: input.requesterSession }
+    ));
+  }));
 
   // 发起方等结果：等不到就返回当前状态，不假装完成。
   app.post<{ Params: { requestId: string } }>("/api/collab/assist/requests/:requestId/wait", guard, withErrorEnvelope(async (request, reply) => {
     const requestId = RequestIdSchema.parse((request.params as { requestId: string }).requestId);
     const input = WaitSchema.parse(request.body ?? {});
-    return reply.send(await options.assist.waitRequest(requestId, input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }));
+    return reply.send(await options.assist.waitRequest(requestId, {
+      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      ...(input.requesterSession === undefined ? {} : { requesterSession: input.requesterSession })
+    }));
   }));
 
   // 执行方允许或拒绝。允许之后本机立刻开始执行，界面不必等下一个轮询周期。

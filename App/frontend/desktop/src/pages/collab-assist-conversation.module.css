@@ -234,3 +234,138 @@
 .deliveryReply {
   margin-top: 6px;
 }
+
+/* 完整链条：每一段前面一行写明是哪一方、谁的哪个 Agent */
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sideHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--collab-muted, #5f716c);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 发起方记录里用户说的话：与对话页人说的话同一侧、同一种底色 */
+.userSide {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.userBubble {
+  max-width: min(90%, 520px);
+  padding: 8px 14px;
+  border-radius: 14px 14px 4px 14px;
+  background: color-mix(in srgb, var(--collab-accent, #5cbfae) 11%, var(--color-background-paper, #fff));
+  color: var(--collab-ink, #111d1c);
+  --chat-md-root: 14px;
+}
+
+/* 发起方拿到结果的那一步：浅底细边框，与过程区分开 */
+.received {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--collab-accent, #5cbfae) 32%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--collab-accent, #5cbfae) 5%, var(--color-background-paper, #fff));
+}
+
+.receivedLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--collab-accent-deep, #2f8f7f);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.receivedCommand {
+  color: var(--collab-ter, #8a9a96);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+/* 思考：默认收起，一行灰字预览，展开看全文 */
+.thinking {
+  min-width: 0;
+}
+
+.thinkingSummary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+  color: var(--collab-ter, #8a9a96);
+  font-size: 12.5px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.thinkingSummary::-webkit-details-marker {
+  display: none;
+}
+
+.thinkingLabel {
+  flex: none;
+  font-weight: 600;
+}
+
+.thinkingPreview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thinkingChevron {
+  flex: none;
+  transition: transform 0.15s ease;
+}
+
+.thinking[open] .thinkingChevron {
+  transform: rotate(90deg);
+}
+
+.thinking[open] .thinkingPreview {
+  display: none;
+}
+
+.thinkingText {
+  margin: 4px 0 2px;
+  padding-left: 19px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 55%, transparent);
+  font-size: 12.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * 面板左边缘的拖动条：沿用侧栏的 sidebar-resize-handle（悬停与拖动时出现一条细线、col-resize 光标），
+ * 只是贴在浮起卡片的内侧。上下让开圆角，线不会画到圆角外面；面板裁掉溢出，所以去掉手柄原有的负边距。
+ */
+.resizeEdge {
+  position: absolute;
+  top: 22px;
+  bottom: 22px;
+  left: 0;
+  z-index: 2;
+  display: flex;
+  width: 8px;
+}
+
+.resizeEdge > :global(.sidebar-resize-handle) {
+  margin: 0;
+}

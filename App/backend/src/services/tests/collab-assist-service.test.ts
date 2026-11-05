@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -686,6 +686,106 @@ describe("createCollabAssistService", () => {
     expect(deliveries()).toHaveLength(2);
   });
 
+  it("binds a DeepSeek Harness request to its session record, tells the user and uploads both halves once", async () => {
+    const root = home();
+    const recordPath = join(root, "session.v4.jsonl");
+    const id = "a7f3k111-1111-1111-1111-111111111111";
+    let seq = 0;
+    const event = (type: string, data: Record<string, unknown>) => JSON.stringify({ type, seq: ++seq, time: seq, data });
+    const lines = [
+      event("turn/start", { turn: 1 }),
+      event("user/message", { content: [{ type: "text", text: "请王雨看一下版本" }], source: { kind: "user" } }),
+      event("tool/call", { turn: 1, step: 1, callId: "c1", name: "bash", arguments: JSON.stringify({ command: "memmy-project assist ask --project p --member 王雨 --file /tmp/r.json" }) }),
+      event("tool/result", { turn: 1, step: 1, message: { source: { callId: "c1" }, content: [{ type: "text", text: "已发送协助请求 A7F3K1。" }] } })
+    ];
+    writeFileSync(recordPath, lines.join("\n"));
+    const { calls, cloud } = fakeCloud((path) => {
+      if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
+      if (path === "/projects/p1/assist/requests") return request({ status: "pending", mine: true, via: "DeepSeek Harness" });
+      if (path === "/assist/inbox") return { requests: [] };
+      return { ok: true };
+    });
+    const service = createCollabAssistService({ cloud, homeDirectory: root, projectDirectory: async () => null, agents: async () => [], runner: runner() });
+
+    const created = await service.createRequest({
+      project: "Memmy 内测反馈", member: "王雨", title: "查版本", items: ["看版本"], via: "DeepSeek Harness",
+      requesterSession: { sourceId: "deepseek_harness", sessionId: "dsh-1", recordPath }
+    });
+    // 发出请求时就说清：这一轮的对话对方也看得到。
+    expect(created.text).toContain("请告诉用户：这一轮里你与 Agent 的对话、工具调用与输出，王雨也能在协助会话里看到。");
+
+    const uploads = () => calls.filter((call) => call.path === `/projects/p1/assist/requests/${id}/delivery`).map((call) => call.body as Record<string, unknown>);
+    await service.pollNow();
+    expect(uploads()).toHaveLength(1);
+    expect(uploads()[0]).toEqual({ origin: [
+      { kind: "user", text: "请王雨看一下版本" },
+      expect.objectContaining({ kind: "tool", output: "已发送协助请求 A7F3K1。" })
+    ] });
+    // 文件没变：不重读、不重传。
+    await service.pollNow();
+    expect(uploads()).toHaveLength(1);
+
+    writeFileSync(recordPath, [...lines,
+      event("tool/call", { turn: 1, step: 2, callId: "c2", name: "bash", arguments: JSON.stringify({ command: "memmy-project assist wait A7F3K1" }) }),
+      event("tool/result", { turn: 1, step: 2, message: { source: { callId: "c2" }, content: [{ type: "text", text: "已完成：王雨的 Memmy……" }] } }),
+      event("assistant/message", { turn: 1, step: 3, message: { content: [{ type: "text", text: "版本是 1.2.6。" }] } }),
+      event("turn/end", { turn: 1 })
+    ].join("\n"));
+    utimesSync(recordPath, new Date(), new Date(Date.now() + 5_000));
+    await service.pollNow();
+    expect(uploads()).toHaveLength(2);
+    expect(uploads()[1]).toEqual({ followup: [
+      expect.objectContaining({ kind: "tool", delivery: true }),
+      { kind: "text", text: "版本是 1.2.6。" }
+    ] });
+    // 收到后的那一轮已经结束：之后不再读。
+    utimesSync(recordPath, new Date(), new Date(Date.now() + 10_000));
+    await service.pollNow();
+    expect(uploads()).toHaveLength(2);
+  });
+
+  it("never reads a file that is not a session record, and then says nothing about visibility", async () => {
+    const root = home();
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
+      return request({ status: "pending", mine: true });
+    });
+    const service = createCollabAssistService({
+      cloud, homeDirectory: root, dshHome: join(root, "dsh"), projectDirectory: async () => null, agents: async () => [], runner: runner()
+    });
+
+    const created = await service.createRequest({
+      project: "Memmy 内测反馈", member: "王雨", title: "查版本", items: ["看版本"],
+      requesterSession: { sourceId: "deepseek_harness", sessionId: "dsh-1", recordPath: "/etc/passwd" }
+    });
+
+    expect(created.text).not.toContain("协助会话里看到");
+    expect(JSON.parse(readFileSync(join(root, "collab-assist.json"), "utf8")).records).toBeUndefined();
+  });
+
+  it("finds the record of the DeepSeek Harness desktop app, which passes only a session id that already starts with session-", async () => {
+    const root = home();
+    const dshHome = join(root, "dsh");
+    const sessionId = "session-a29aa3c1-7331-4f59-9962-c43a5f57efe6";
+    const sessionDir = join(dshHome, "sessions", "--Users-sunq-work--", sessionId);
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, "session.v4.jsonl"), "");
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
+      return request({ status: "pending", mine: true, via: "DeepSeek Harness" });
+    });
+    const service = createCollabAssistService({ cloud, homeDirectory: root, dshHome, projectDirectory: async () => null, agents: async () => [], runner: runner() });
+
+    const created = await service.createRequest({
+      project: "Memmy 内测反馈", member: "王雨", title: "查版本", items: ["看版本"], via: "DeepSeek Harness",
+      requesterSession: { sourceId: "deepseek_harness", sessionId }
+    });
+
+    expect(created.text).toContain("王雨也能在协助会话里看到");
+    const records = JSON.parse(readFileSync(join(root, "collab-assist.json"), "utf8")).records as Record<string, { path: string }>;
+    expect(Object.values(records)[0]!.path).toBe(join(sessionDir, "session.v4.jsonl"));
+  });
+
   it("opens an investigation with the whole conversation and the tasks each side can open", async () => {
     const { calls, cloud } = fakeCloud(() => ({
       thread: {
@@ -721,6 +821,20 @@ describe("createCollabAssistService", () => {
       { kind: "text", text: "先看日志。" },
       { kind: "tool", name: "运行命令 tail", input: "tail -n 2 a.log", output: "第一行\n第二行", status: "done" },
       { kind: "text", text: "日志正常。" }
+    ]);
+  });
+
+  it("collects the agent's thinking as its own items, in order with the text", () => {
+    const collector = new AcpTranscriptCollector();
+    collector.consume({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "先确认" } });
+    collector.consume({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "日志位置。" } });
+    collector.consume({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "看一下日志。" } });
+    collector.consume({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "日志没有报错。" } });
+
+    expect(collector.snapshot()).toEqual([
+      { kind: "thinking", text: "先确认日志位置。" },
+      { kind: "text", text: "看一下日志。" },
+      { kind: "thinking", text: "日志没有报错。" }
     ]);
   });
 

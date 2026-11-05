@@ -467,6 +467,49 @@ describe("memmy-project assist", () => {
     expect(output).toContain("已发送协助请求 A7F3K1。");
   });
 
+  it("names DeepSeek Harness as the asking agent and passes its session record to the desktop", async () => {
+    const bodies: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const fetcher = (async (input: string | URL, init?: RequestInit) => {
+      bodies.push({ path: new URL(input).pathname, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      if (new URL(input).pathname === "/api/collab/assist/requests") {
+        return new Response(JSON.stringify({ request: { id: "a7f3k111" }, threadId: "t1", text: "已发送协助请求 A7F3K1。" }));
+      }
+      return new Response(JSON.stringify({ text: "还没结束" }));
+    }) as typeof fetch;
+    const env = { DSH_SESSION_ID: "dsh-1", DSH_SESSION_JSONL: "/Users/me/.dsh/sessions/x/session-dsh-1/session.v4.jsonl.zstd" };
+    const deps = { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }), env };
+
+    await run(["assist", "ask", "--project", "Memmy 内测反馈", "--member", "王雨", "--file", requestFile()], deps);
+    await run(["assist", "wait", "A7F3K1"], deps);
+    await run(["assist", "status", "A7F3K1"], deps);
+
+    const session = { sourceId: "deepseek_harness", sessionId: "dsh-1", recordPath: env.DSH_SESSION_JSONL };
+    expect(bodies[0]!.body).toMatchObject({ via: "DeepSeek Harness", requesterSession: session });
+    expect(bodies[0]!.body).not.toHaveProperty("sourceTask");
+    expect(bodies[1]).toMatchObject({ path: "/api/collab/assist/requests/A7F3K1/wait", body: { requesterSession: session } });
+    expect(bodies[2]).toMatchObject({ path: "/api/collab/assist/requests/A7F3K1/status", body: { requesterSession: session } });
+  });
+
+  it("drops the session and asks again when an older desktop rejects the field", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetcher = (async (_input: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      bodies.push(body);
+      if ("requesterSession" in body) {
+        return new Response(JSON.stringify({ error: { code: "invalid_argument", message: "Unrecognized key" } }), { status: 400 });
+      }
+      return new Response(JSON.stringify({ request: { id: "a7f3k111" }, threadId: "t1", text: "已发送协助请求 A7F3K1。" }));
+    }) as typeof fetch;
+
+    const output = await run(["assist", "ask", "--project", "p", "--member", "王雨", "--file", requestFile()], {
+      fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }), env: { DSH_SESSION_ID: "dsh-1" }
+    });
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).not.toHaveProperty("requesterSession");
+    expect(output).toContain("已发送协助请求 A7F3K1");
+  });
+
   it("continues the same investigation by carrying the thread", async () => {
     let body: Record<string, unknown> = {};
     const fetcher = (async (_input: string | URL, init?: RequestInit) => {

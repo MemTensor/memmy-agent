@@ -6,7 +6,7 @@ import type { AssistInboxItem, AssistRequest, AssistTaskView, AssistThread, Coll
 import { consumeAssistFocus, getAssistFocus } from "../../app/collab-assist-focus.js";
 import { loadCollabProjects, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import { CollabAssistConversation } from "../collab-assist-conversation.js";
+import { ASSIST_PANEL_WIDTH_STORAGE_KEY, CollabAssistConversation } from "../collab-assist-conversation.js";
 import { CollabAssistRequestCard } from "../collab-assist-card.js";
 import { AssistBoardRow } from "../collab-page.js";
 import { CollabAssistDialog } from "../collab-assist-dialog.js";
@@ -437,6 +437,259 @@ describe("看板上的协助会话", () => {
     // 轮次按时间顺序：第 1 次在前。
     const rounds = [...document.querySelectorAll("[data-assist-round]")].map((node) => node.getAttribute("data-assist-round"));
     expect(rounds).toEqual(["1", "2"]);
+  });
+
+  it("有发起方记录时按链展示：发起方的对话 → 请求 → 执行方 → 发起方收到的结果与之后的过程", async () => {
+    const done = request({
+      status: "done", agent: "memmy", scope: "once", via: "DeepSeek Harness",
+      transcript: [{ kind: "thinking", text: "先看版本。" }, { kind: "tool", name: "运行命令 sw_vers", input: "sw_vers", output: "15.6", status: "done" }],
+      reply: "macOS 15.6。",
+      delivery: "已完成：王雨的 Memmy……",
+      origin: [
+        { kind: "user", text: "请王雨看一下 **版本**" },
+        { kind: "thinking", text: "需要王雨电脑上的信息。\n先写请求文件。" },
+        { kind: "tool", name: "发起协助请求", input: "memmy-project assist ask --file /tmp/r.json", output: "已发送协助请求 A7F3K1。", status: "done" },
+        { kind: "tool", name: "等待协助结果", input: "memmy-project assist wait A7F3K1", output: "还没结束：王雨的 Memmy 正在执行", status: "done" }
+      ],
+      followup: [
+        { kind: "tool", name: "等待协助结果", input: "memmy-project assist wait A7F3K1", output: "已完成：版本是 15.6", status: "done", delivery: true },
+        { kind: "text", text: "王雨那边是 macOS 15.6。" }
+      ]
+    });
+    const collab = client({ assistThread: vi.fn().mockResolvedValue(detail([done], { via: "DeepSeek Harness" })) });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistConversation thread={thread({ agent: "memmy", via: "DeepSeek Harness" }, [done])} collab={collab} onClose={() => undefined} />
+      </I18nProvider>
+    ));
+    await act(async () => undefined);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("发起方 · 孙起的 DeepSeek Harness");
+    expect(text).toContain("执行方 · 王雨的 Memmy");
+    // 链上的顺序：发起方的对话在请求之前，收到后的过程在最后。
+    const parts = [...document.querySelectorAll("[data-assist-part]")].map((node) => node.getAttribute("data-assist-part"));
+    expect(parts.indexOf("origin")).toBeLessThan(parts.indexOf("request"));
+    expect(parts.indexOf("reply")).toBeLessThan(parts.indexOf("followup"));
+    // 有发起方记录时不再单列「收到的内容」。
+    expect(parts).not.toContain("delivery");
+    // 用户的话按 Markdown；思考默认收起，只露第一行。
+    expect(document.querySelector("[data-assist-item='user'] strong")?.textContent).toBe("版本");
+    const thinking = [...document.querySelectorAll<HTMLDetailsElement>("details[data-assist-item='thinking']")];
+    expect(thinking).toHaveLength(2);
+    expect(thinking.every((node) => !node.open)).toBe(true);
+    expect(text).toContain("等待协助结果");
+    // 拿到结果的那一步单独突出。
+    const received = document.querySelector("[data-assist-part='followup'] [data-assist-item='received']");
+    expect(received?.textContent).toContain("收到的结果");
+    expect(received?.textContent).toContain("已完成：版本是 15.6");
+    expect(text).toContain("王雨那边是 macOS 15.6。");
+  });
+
+  it("Memmy 发起时收到的结果显示成结果卡片；收到后的记录还没同步时说明一句", async () => {
+    const message = '<memmy_assist_result request="r1" from="王雨" agent="Memmy" status="done" attempt="1" title="查版本">\n王雨的 Memmy 完成了协助请求。\n\n结果：\nmacOS 15.6\n</memmy_assist_result>';
+    const first = request({
+      id: "r1", attempt: 1, status: "done", agent: "memmy", scope: "once", via: "Memmy", reply: "macOS 15.6",
+      createdAt: "2026-11-05T01:00:00Z",
+      origin: [{ kind: "user", text: "请王雨看版本" }],
+      followup: [{ kind: "user", text: message, delivery: true }, { kind: "text", text: "好的，版本一致。" }]
+    });
+    const second = request({
+      id: "r2", attempt: 2, status: "done", agent: "memmy", scope: "timed", via: "Memmy", reply: "日志正常",
+      // 刚刚结束：发起方还在补传收到后的记录。
+      createdAt: "2026-11-05T01:05:00Z", finishedAt: new Date().toISOString(),
+      delivery: message,
+      origin: [{ kind: "thinking", text: "再问一次。" }],
+      followup: null
+    });
+    const collab = client({ assistThread: vi.fn().mockResolvedValue(detail([second, first], { via: "Memmy" })) });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistConversation thread={thread({ agent: "memmy", via: "Memmy" }, [second, first])} collab={collab} onClose={() => undefined} />
+      </I18nProvider>
+    ));
+    await act(async () => undefined);
+    const text = document.body.textContent ?? "";
+    expect(text).not.toContain("<memmy_assist_result");
+    expect(document.querySelector("[data-assist-part='followup'] [data-collab-assist-result]")).not.toBeNull();
+    expect(text).toContain("好的，版本一致。");
+    // 第二轮：收到后的记录还没同步，先显示收到的内容（也是卡片）。
+    expect(text).toContain("孙起的 Memmy 收到结果之后的记录还在同步。");
+    expect(document.querySelector("[data-assist-part='delivery'] [data-collab-assist-result]")).not.toBeNull();
+  });
+
+  it("请求结束后面板继续重读：发起方后来补传的记录自己出现，30 分钟后不再重读", async () => {
+    vi.useFakeTimers();
+    try {
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+      const base = request({
+        id: "r1", attempt: 1, status: "done", agent: "memmy", scope: "once", via: "DeepSeek Harness", reply: "macOS 15.6",
+        createdAt: new Date(Date.now() - 60_000).toISOString(), finishedAt: new Date().toISOString(),
+        origin: [{ kind: "user", text: "请王雨看版本" }],
+        followup: null
+      });
+      const synced = {
+        ...base,
+        delivery: "已完成：版本是 15.6",
+        followup: [
+          { kind: "tool" as const, name: "等待协助结果", input: "memmy-project assist wait A7F3K1", output: "已完成：版本是 15.6", status: "done" as const, delivery: true },
+          { kind: "text" as const, text: "王雨那边是 macOS 15.6，和我这边一致。" }
+        ]
+      };
+      // 云端每次返回的都是当时的时间。
+      let reads = 0;
+      const assistThread = vi.fn().mockImplementation(async () => {
+        reads += 1;
+        return detail([reads === 1 ? base : synced], { via: "DeepSeek Harness" });
+      });
+      const summary = thread({ agent: "memmy", via: "DeepSeek Harness" }, [base]);
+      await act(async () => root.render(
+        <I18nProvider language="zh-CN">
+          <CollabAssistConversation thread={summary} collab={client({ assistThread })} onClose={() => undefined} />
+        </I18nProvider>
+      ));
+      await act(async () => undefined);
+      expect(document.body.textContent).toContain("收到结果之后的记录还在同步。");
+
+      // 看板那一行没有变，面板自己重读到发起方补传的内容。
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      const text = document.body.textContent ?? "";
+      expect(text).toContain("王雨那边是 macOS 15.6，和我这边一致。");
+      expect(text).not.toContain("还在同步");
+
+      // 30 分钟之后不会再有新内容，停止重读。
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(31 * 60_000);
+      });
+      const calls = assistThread.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(assistThread.mock.calls.length).toBe(calls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("结束超过 30 分钟仍没有收到后的记录时，不再说「还在同步」", async () => {
+    const old = request({
+      id: "r1", attempt: 1, status: "done", agent: "memmy", scope: "once", via: "DeepSeek Harness", reply: "macOS 15.6",
+      createdAt: "2026-11-05T01:00:00Z", finishedAt: new Date(Date.now() - 45 * 60_000).toISOString(),
+      origin: [{ kind: "user", text: "请王雨看版本" }],
+      followup: null
+    });
+    const collab = client({ assistThread: vi.fn().mockResolvedValue(detail([old], { via: "DeepSeek Harness" })) });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistConversation thread={thread({ agent: "memmy", via: "DeepSeek Harness" }, [old])} collab={collab} onClose={() => undefined} />
+      </I18nProvider>
+    ));
+    await act(async () => undefined);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("没有读到孙起的 DeepSeek Harness 收到结果之后的记录。");
+    expect(text).not.toContain("还在同步");
+  });
+
+  it("左边缘往左拖可以把面板拉宽，宽度记在本机，下次打开沿用", async () => {
+    window.localStorage.removeItem(ASSIST_PANEL_WIDTH_STORAGE_KEY);
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1600 });
+    const done = request({ status: "done", agent: "memmy", reply: "macOS 15.6", finishedAt: "2026-11-05T01:00:00Z" });
+    const collab = client({ assistThread: vi.fn().mockResolvedValue(detail([done])) });
+    const render = (value: AssistThread | null) => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistConversation thread={value} collab={collab} onClose={() => undefined} />
+      </I18nProvider>
+    );
+    const panel = () => document.querySelector<HTMLElement>("[data-collab-assist-conversation]");
+    const handle = () => document.querySelector<HTMLElement>("[data-collab-assist-conversation] [role='separator']")!;
+    try {
+      await act(async () => render(thread({ agent: "memmy" }, [done])));
+      await act(async () => undefined);
+      expect(panel()?.style.width).toBe("520px");
+      expect(handle().getAttribute("aria-label")).toBe("调整协助会话宽度");
+
+      // 按住左边缘往左拖 300：变宽 300。
+      await act(async () => {
+        handle().dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 1000 }));
+      });
+      await act(async () => {
+        window.dispatchEvent(new PointerEvent("pointermove", { clientX: 700 }));
+        window.dispatchEvent(new PointerEvent("pointerup", { clientX: 700 }));
+      });
+      expect(panel()?.style.width).toBe("820px");
+      expect(window.localStorage.getItem(ASSIST_PANEL_WIDTH_STORAGE_KEY)).toBe("820");
+
+      // 再拖也给看板留出一截：窗口 1600 时最宽 1600 - 48 - 240。
+      await act(async () => {
+        handle().dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 700 }));
+      });
+      await act(async () => {
+        window.dispatchEvent(new PointerEvent("pointermove", { clientX: 0 }));
+        window.dispatchEvent(new PointerEvent("pointerup", { clientX: 0 }));
+      });
+      expect(panel()?.style.width).toBe("1312px");
+
+      // 键盘：右方向键变窄。
+      await act(async () => {
+        handle().dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowRight" }));
+      });
+      expect(panel()?.style.width).toBe("1296px");
+
+      // 关掉再打开：沿用上次的宽度。
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await act(async () => render(thread({ agent: "memmy" }, [done])));
+      expect(panel()?.style.width).toBe("1296px");
+
+      // 窗口变窄：只收窄显示的宽度，记下的宽度不变。
+      await act(async () => {
+        Object.defineProperty(window, "innerWidth", { configurable: true, value: 1000 });
+        window.dispatchEvent(new Event("resize"));
+      });
+      expect(panel()?.style.width).toBe("712px");
+      expect(window.localStorage.getItem(ASSIST_PANEL_WIDTH_STORAGE_KEY)).toBe("1296");
+
+      // 很窄的窗口里面板铺满，不再能拖。
+      await act(async () => {
+        Object.defineProperty(window, "innerWidth", { configurable: true, value: 700 });
+        window.dispatchEvent(new Event("resize"));
+      });
+      expect(panel()?.style.width).toBe("");
+      expect(document.querySelector("[data-collab-assist-conversation] [role='separator']")).toBeNull();
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+      window.localStorage.removeItem(ASSIST_PANEL_WIDTH_STORAGE_KEY);
+    }
+  });
+
+  it("关闭时还在路上的读取返回后，面板不会重新出现", async () => {
+    const done = request({ status: "done", agent: "memmy", reply: "macOS 15.6", finishedAt: new Date().toISOString() });
+    let resolveLate: ((value: ReturnType<typeof detail>) => void) | null = null;
+    const assistThread = vi.fn()
+      .mockResolvedValueOnce(detail([done]))
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveLate = resolve;
+      }));
+    const collab = client({ assistThread });
+    const summary = thread({ agent: "memmy" }, [done]);
+    const render = (value: AssistThread | null) => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistConversation thread={value} collab={collab} onClose={() => undefined} />
+      </I18nProvider>
+    );
+    await act(async () => render(summary));
+    await act(async () => undefined);
+    // 看板那一行变了：再读一次，这次还没返回。
+    await act(async () => render({ ...summary, lastActiveAt: "2026-11-05T02:00:00Z" }));
+    expect(assistThread).toHaveBeenCalledTimes(2);
+    // 关掉面板，之后那次读取才返回。
+    await act(async () => render(null));
+    expect(document.querySelector("[data-collab-assist-conversation]")).toBeNull();
+    await act(async () => {
+      resolveLate?.(detail([done]));
+    });
+    expect(document.querySelector("[data-collab-assist-conversation]")).toBeNull();
   });
 
   it("旧请求没有会话内容时按已有内容显示", async () => {

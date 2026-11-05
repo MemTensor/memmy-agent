@@ -107,6 +107,27 @@ describe("AssistRunRecorder", () => {
     expect(recorder.snapshot()).toMatchObject({ status: "stopped", steps: [{ text: "读取 /tmp/a.log", status: "failed" }] });
   });
 
+  it("records the model's thinking from reasoning deltas, one item per reasoning block", () => {
+    const recorder = new AssistRunRecorder({ chatId: "c1", clientRequestId: "r1" });
+    recorder.consume({ event: "reasoning_delta", turn_id: "t0", text: "上一轮的思考" });
+    recorder.consume({ event: "message_accepted", client_request_id: "r1" });
+    recorder.consume({ event: "run_status", status: "running", turn_id: "t1" });
+    recorder.consume({ event: "reasoning_delta", turn_id: "t1", text: "先确认" });
+    recorder.consume({ event: "reasoning_delta", turn_id: "t1", text: "系统版本。" });
+    recorder.consume({ event: "reasoning_end", turn_id: "t1" });
+    recorder.consume({ event: "message", kind: "progress", turn_id: "t1", tool_events: [{ phase: "start", ui_tool_call_id: "u1", name: "exec", arguments: { command: "sw_vers" } }] });
+    recorder.consume({ event: "message", kind: "progress", turn_id: "t1", tool_events: [{ phase: "end", ui_tool_call_id: "u1", name: "exec", result: "15.6" }] });
+    recorder.consume({ event: "reasoning_delta", turn_id: "t1", text: "版本已知。" });
+    recorder.consume({ event: "stream_end", turn_id: "t1", text: "macOS 15.6。" });
+    recorder.consume({ event: "turn_end", turn_id: "t1" });
+
+    const kinds = recorder.snapshot().transcript.map((item) => item.kind);
+    expect(kinds).toEqual(["thinking", "tool", "thinking", "text"]);
+    expect(recorder.snapshot().transcript[0]).toEqual({ kind: "thinking", text: "先确认系统版本。" });
+    expect(recorder.snapshot().transcript[2]).toEqual({ kind: "thinking", text: "版本已知。" });
+    expect(recorder.reply).toBe("macOS 15.6。");
+  });
+
   it("keeps the full transcript: explanations in order and multi-line tool output", () => {
     const recorder = new AssistRunRecorder({ chatId: "c1", clientRequestId: "r1" });
     recorder.consume({ event: "message_accepted", client_request_id: "r1" });

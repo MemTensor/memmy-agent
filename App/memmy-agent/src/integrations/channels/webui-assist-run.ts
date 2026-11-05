@@ -22,6 +22,8 @@ export interface AssistRunStep {
  */
 export type AssistTranscriptItem =
   | { kind: "text"; text: string; truncated?: boolean }
+  /** 模型的思考：由 reasoning_delta 逐段拼成，reasoning_end 结束一段。 */
+  | { kind: "thinking"; text: string; truncated?: boolean }
   | { kind: "tool"; name: string; input: string; output: string; status: "running" | "done" | "failed"; truncated?: boolean }
   | { kind: "omitted"; count: number };
 
@@ -65,6 +67,8 @@ export class AssistRunRecorder {
   private armed = false;
   private readonly stepByCall = new Map<string, number>();
   private readonly toolByCall = new Map<string, Extract<AssistTranscriptItem, { kind: "tool" }>>();
+  /** 正在接收的一段思考：reasoning_end 或其他内容插进来之后，下一段另起一项。 */
+  private thinking: { item: Extract<AssistTranscriptItem, { kind: "thinking" }>; raw: string } | null = null;
   private readonly listeners = new Set<() => void>();
 
   constructor(input: { chatId: string; clientRequestId: string; now?: number }) {
@@ -121,6 +125,15 @@ export class AssistRunRecorder {
     }
     if (!this.armed) return;
     if (!this.belongsToTurn(event)) return;
+
+    if (name === "reasoning_delta") {
+      if (typeof event.text === "string" && event.text) this.addThinking(event.text);
+      return;
+    }
+    if (name === "reasoning_end") {
+      this.thinking = null;
+      return;
+    }
 
     if (name === "message") {
       if (Array.isArray(event.tool_events)) this.consumeToolEvents(event.tool_events);
@@ -214,6 +227,23 @@ export class AssistRunRecorder {
       changed = true;
     }
     if (changed) this.emit();
+  }
+
+  /** 一段思考的增量：接在正在接收的那一段后面，超过 16KB 的部分截断并注明。 */
+  private addThinking(delta: string): void {
+    const last = this.transcript[this.transcript.length - 1];
+    if (!this.thinking || last !== this.thinking.item) {
+      const item: Extract<AssistTranscriptItem, { kind: "thinking" }> = { kind: "thinking", text: "" };
+      this.thinking = { item, raw: "" };
+      this.pushItem(item);
+    }
+    const current = this.thinking;
+    if (current.item.truncated) return;
+    current.raw += delta;
+    const clipped = clipBytes(current.raw, TRANSCRIPT_PART_BYTES);
+    current.item.text = clipped;
+    if (clipped !== current.raw) current.item.truncated = true;
+    this.emit();
   }
 
   /** 一段说明文字：与上一段相同（同一段回答经由两种事件送达）时不重复记。 */

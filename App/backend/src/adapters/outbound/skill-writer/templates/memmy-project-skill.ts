@@ -367,6 +367,7 @@ export function renderMemmyProjectSkillFile(options: MemmyProjectSkillOptions = 
     "### 发出后怎么等",
     "",
     "- `assist ask` 发出后，用 `memmy-project assist wait <请求 ID>` 等待，每次最多 90 秒。",
+    "- 输出里有「请告诉用户：这一轮里你与 Agent 的对话……李四也能在协助会话里看到」时，把这一点告诉用户：发起这次请求的这一轮对话、工具调用与输出，李四也看得到。",
     "- 输出写明「李四给你的限时授权到 09:06，李四的 Memmy 会直接执行」时，对方不需要再授权：告诉用户这一点，照常运行 `assist wait`。",
     "- 输出「还没结束」时，用一句话告诉用户进展（如「李四已授权，他的 Memmy 正在执行」），再运行输出里的同一条 `assist wait`。不要重新发请求。",
     "- 最长等约 15 分钟。仍没结束就告诉用户请求还在进行，之后可以用 `assist status <请求 ID>` 查看。",

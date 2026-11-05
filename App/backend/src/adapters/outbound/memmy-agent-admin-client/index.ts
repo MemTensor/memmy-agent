@@ -79,5 +79,6 @@ export interface AssistRunSnapshot {
 /** 完整执行过程里的一项，与运行时、云端同一结构。 */
 export type AssistTranscriptItem =
   | { kind: "text"; text: string; truncated?: boolean }
+  | { kind: "thinking"; text: string; truncated?: boolean }
   | { kind: "tool"; name: string; input: string; output: string; status: "running" | "done" | "failed"; truncated?: boolean }
   | { kind: "omitted"; count: number };

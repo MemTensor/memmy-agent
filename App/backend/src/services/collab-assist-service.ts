@@ -14,14 +14,16 @@
  * 本机只留续跑用的 Agent 会话 id、短 id 与来源任务这些记录；请求正文与结果都在云端，
  * 换一台电脑照常能看到自己等待中的请求。</p>
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 import type { AssistStep } from "./assist/acp-client.js";
 import { AcpError } from "./assist/acp-client.js";
 import { assistAgentName, MEMMY_SOURCE_ID } from "./assist/recipes.js";
 import { ASSIST_RESULT_FORMAT, assistPrompt, parseResultItems, replyWithoutItems } from "./assist/prompt.js";
+import { readRequesterRecord, sliceRequesterRecord, type RequesterSource } from "./assist/requester-record.js";
 import {
   ASSIST_DELIVERY_BYTES,
   ASSIST_PROMPT_BYTES,
@@ -145,6 +147,23 @@ export interface AssistRequest {
   delivery?: string | null;
   /** 发起方 Agent 收到后的回复。 */
   deliveryReply?: string | null;
+  /**
+   * 发起方一侧的记录（发起前、收到后）：发起这次请求的那一轮里，用户、思考、说明与工具调用。
+   * 只在打开一次协助时给出；旧请求或读不到发起方记录时为 null。
+   */
+  origin?: AssistTranscriptItem[] | null;
+  followup?: AssistTranscriptItem[] | null;
+}
+
+/**
+ * 发起方在哪个 Agent 的哪一条会话里发起：命令行从环境变量读出来传给本机接口。
+ * Memmy 是 {@code MEMMY_TASK_ID}（记录在本机任务目录），DeepSeek Harness 是 {@code DSH_SESSION_ID} 与
+ * {@code DSH_SESSION_JSONL}（记录文件的绝对路径，首次写盘前可能还不存在）。
+ */
+export interface AssistRequesterSession {
+  sourceId: RequesterSource;
+  sessionId: string;
+  recordPath?: string;
 }
 
 /** 收件箱里的一条：请求本身，加上「她是否给了生效中的限时授权」。 */
@@ -303,6 +322,10 @@ export interface CollabAssistServiceOptions {
   deliverResult?: AssistResultDelivery;
   /** 结果送回来源任务后，读 Memmy 那一轮的回复，作为「发起方 Agent 收到后的回复」上传。 */
   readDeliveryReply?: AssistDeliveryReplyReader;
+  /** Memmy 任务记录所在目录，默认 ~/.memmy/workspace/sessions（认 MEMMY_HOME）。 */
+  memmySessionsDirectory?: string;
+  /** DeepSeek Harness 的主目录，默认 $DSH_HOME 或 ~/.dsh：命令行没给记录路径时按会话 id 在这里找。 */
+  dshHome?: string;
   now?: () => Date;
   /** 轮询间隔，默认 5 秒。 */
   pollIntervalMs?: number;
@@ -343,6 +366,27 @@ interface LocalState {
    * 这台电脑上由 Memmy 执行协助的任务：任务 id → 哪个项目的哪一次排查。任务页据此找到对应的协助。
    */
   tasks?: Record<string, { threadId: string; projectId: string }>;
+  /**
+   * 发起方记录的绑定：请求 id → 发起方在哪份记录里发出它。轮询按文件修改时间重读、切片、上传，
+   * 收到后的那一轮结束（或等满 30 分钟）就不再读。与 {@link origins} 分开：origins 只管「结果要不要送回 Memmy 任务」。
+   */
+  records?: Record<string, RequesterBinding>;
+}
+
+interface RequesterBinding {
+  sourceId: RequesterSource;
+  sessionId: string;
+  path: string;
+  projectId: string;
+  at: string;
+  /** 上次读取时文件的修改时间：没变就不重读。 */
+  mtimeMs?: number;
+  /** 上次上传的两段内容的摘要：没变就不重传。 */
+  originHash?: string;
+  followupHash?: string;
+  /** 第一次看到请求已经结束的时间：从这时起最多等 30 分钟。 */
+  endedAt?: string;
+  done?: boolean;
 }
 
 const EMPTY_STATE: LocalState = { sessions: {} };
@@ -360,13 +404,15 @@ export interface CollabAssistService {
     via?: string;
     /** 在 Memmy 的哪条任务里发起：结果回来后送回这条任务。 */
     sourceTask?: string;
+    /** 发起方的会话：据此读出发起方一侧的记录，双方在协助会话里都能看到。 */
+    requesterSession?: AssistRequesterSession;
   }): Promise<{ request: AssistRequest; threadId: string; text: string; activeGrant: { agent: string; expiresAt: string } | null }>;
   /** 等结果，返回给命令行打印的一段文字。 */
-  waitRequest(requestId: string, options?: { timeoutMs?: number }): Promise<{ request: AssistRequest; text: string }>;
+  waitRequest(requestId: string, options?: { timeoutMs?: number; requesterSession?: AssistRequesterSession }): Promise<{ request: AssistRequest; text: string }>;
   /** 一条请求的当前状态。 */
   requestStatus(requestId: string): Promise<AssistRequest>;
   /** 命令行 `assist status`：当前状态的一段文字；第一次读到终态时把这段文字记为发起方收到的内容。 */
-  agentStatus(requestId: string): Promise<{ request: AssistRequest; text: string }>;
+  agentStatus(requestId: string, options?: { requesterSession?: AssistRequesterSession }): Promise<{ request: AssistRequest; text: string }>;
   /** 结束协助：结束本人对这个项目里的成员的限时授权。 */
   endAssist(input: { project: string; member?: string }): Promise<{ text: string }>;
   /** 撤回自己还没被执行的请求。 */
@@ -502,7 +548,9 @@ export function toAssistRequest(value: unknown): AssistRequest {
     ...("promptContext" in raw ? { promptContext: nullableText(raw.promptContext) } : {}),
     ...("transcript" in raw ? { transcript: toTranscript(raw.transcript) } : {}),
     ...("delivery" in raw ? { delivery: nullableText(raw.delivery) } : {}),
-    ...("deliveryReply" in raw ? { deliveryReply: nullableText(raw.deliveryReply) } : {})
+    ...("deliveryReply" in raw ? { deliveryReply: nullableText(raw.deliveryReply) } : {}),
+    ...("origin" in raw ? { origin: Array.isArray(raw.origin) ? toTranscript(raw.origin) : null } : {}),
+    ...("followup" in raw ? { followup: Array.isArray(raw.followup) ? toTranscript(raw.followup) : null } : {})
   };
 }
 
@@ -541,6 +589,8 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
   // 与适配器目录同一口径：认 MEMMY_HOME。同一台电脑上跑两个开发实例时，各自的短 id、续跑会话与来源任务才不会互相覆盖。
   const home = options.homeDirectory ?? (process.env.MEMMY_HOME?.trim() || join(homedir(), ".memmy"));
   const statePath = join(home, "collab-assist.json");
+  const memmySessionsDir = options.memmySessionsDirectory ?? join(home, "workspace", "sessions");
+  const dshHome = options.dshHome ?? (process.env.DSH_HOME?.trim() || join(homedir(), ".dsh"));
   const pollMs = options.pollIntervalMs ?? DEFAULT_POLL_MS;
   const progressMs = options.progressIntervalMs ?? DEFAULT_PROGRESS_MS;
 
@@ -566,7 +616,8 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
         sessions: parsed.sessions && typeof parsed.sessions === "object" ? { ...parsed.sessions } : {},
         recent: parsed.recent && typeof parsed.recent === "object" ? { ...parsed.recent } : {},
         ...(parsed.origins && typeof parsed.origins === "object" ? { origins: { ...parsed.origins } } : {}),
-        ...(parsed.tasks && typeof parsed.tasks === "object" ? { tasks: { ...parsed.tasks } } : {})
+        ...(parsed.tasks && typeof parsed.tasks === "object" ? { tasks: { ...parsed.tasks } } : {}),
+        ...(parsed.records && typeof parsed.records === "object" ? { records: { ...parsed.records } } : {})
       };
     } catch {
       state = { ...EMPTY_STATE, sessions: {} };
@@ -610,6 +661,7 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     thread?: string;
     via?: string;
     sourceTask?: string;
+    requesterSession?: AssistRequesterSession;
   }): Promise<{ request: AssistRequest; threadId: string; text: string; activeGrant: { agent: string; expiresAt: string } | null }> {
     const projectId = await projectIdOf(input.project);
     // 续跑时给的是上一次请求的 id：Agent 手里多半是命令行显示的短 id，先换成完整 id。
@@ -627,7 +679,10 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
       }
     });
     const request = toAssistRequest(data);
-    await remember(request.id, input.sourceTask);
+    const session = input.requesterSession
+      ?? (input.sourceTask ? { sourceId: MEMMY_SOURCE_ID as RequesterSource, sessionId: input.sourceTask } : undefined);
+    const binding = session ? await requesterBinding(session, request.projectId) : null;
+    await remember(request.id, input.sourceTask, binding);
     const short = shortId(request.id);
     // 她给发起人的限时授权还在：这次不等她授权，由她的 Agent 直接执行。到期时刻按本机时钟换算（剩余秒数由云端数据库算）。
     const grant = record(data.activeGrant);
@@ -642,11 +697,45 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     const sent = activeGrant
       ? `已发送协助请求 ${short}。${executor}给你的限时授权到 ${clockText(activeGrant.expiresAt, now())}，${executor}的 ${assistAgentName(activeGrant.agent)} 会直接执行。`
       : `已发送协助请求 ${short}，等待${executor}选择执行的 Agent 并授权。`;
-    return { request, threadId: request.threadId, text: `${sent}${next}`, activeGrant };
+    // 发起方这一轮的对话会进入协助会话：发出请求时就让 Agent 告诉用户，不在事后才让人发现。
+    const visible = binding
+      ? `请告诉用户：这一轮里你与 Agent 的对话、工具调用与输出，${executor}也能在协助会话里看到。`
+      : "";
+    return { request, threadId: request.threadId, text: `${sent}${visible}${next}`, activeGrant };
   }
 
-  /** 记住这台电脑发出的请求，短 id 之后能换回完整 id；从 Memmy 任务里发出的还记下来源任务。 */
-  async function remember(requestId: string, sourceTask?: string): Promise<void> {
+  /**
+   * 发起方记录在哪里：Memmy 任务在本机任务目录；DeepSeek Harness 用命令行给的路径，没给时按会话 id 在
+   * ~/.dsh/sessions 下找。路径只认两种记录文件的文件名，不读别的文件。
+   */
+  async function requesterBinding(session: AssistRequesterSession, projectId: string): Promise<RequesterBinding | null> {
+    const sessionId = session.sessionId.trim();
+    if (!sessionId || !projectId) return null;
+    let path = "";
+    if (session.sourceId === MEMMY_SOURCE_ID) {
+      if (!/^[A-Za-z0-9_-]{1,64}$/u.test(sessionId)) return null;
+      path = join(memmySessionsDir, `websocket_${sessionId}.jsonl`);
+    } else if (session.sourceId === "deepseek_harness") {
+      const given = session.recordPath?.trim();
+      path = given && isDeepseekRecordPath(given) ? given : await locateDeepseekRecord(dshHome, sessionId) ?? "";
+    }
+    if (!path) return null;
+    return { sourceId: session.sourceId, sessionId, path, projectId, at: now().toISOString() };
+  }
+
+  /** 等结果时补上绑定：老版命令行发出的请求，或发起时还找不到记录文件。只绑本人发出的请求。 */
+  async function ensureBinding(request: AssistRequest, session: AssistRequesterSession | undefined): Promise<void> {
+    if (!session || !request.mine || !request.id) return;
+    const current = await loadState();
+    if (current.records?.[request.id]) return;
+    const binding = await requesterBinding(session, request.projectId);
+    if (!binding) return;
+    const latest = await loadState();
+    await saveState({ ...latest, records: trimRecords({ ...(latest.records ?? {}), [request.id]: binding }) });
+  }
+
+  /** 记住这台电脑发出的请求，短 id 之后能换回完整 id；从 Memmy 任务里发出的还记下来源任务与发起方记录。 */
+  async function remember(requestId: string, sourceTask?: string, binding?: RequesterBinding | null): Promise<void> {
     if (!requestId) return;
     const current = await loadState();
     const recent = { ...(current.recent ?? {}), [shortId(requestId)]: requestId };
@@ -658,7 +747,8 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
       const originKeys = Object.keys(origins);
       for (const key of originKeys.slice(0, Math.max(0, originKeys.length - MAX_ORIGINS))) delete origins[key];
     }
-    await saveState({ ...current, recent, ...(origins ? { origins } : {}) });
+    const records = binding ? trimRecords({ ...(current.records ?? {}), [requestId]: binding }) : current.records;
+    await saveState({ ...current, recent, ...(origins ? { origins } : {}), ...(records ? { records } : {}) });
   }
 
   /**
@@ -693,10 +783,18 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
    * 等结果：轮询到终态为止，默认最多 90 秒。没结束时说明到了哪一步、已经完成的步骤和下一条该运行的命令，
    * 不假装完成，也不让 Agent 以为要重新发请求。
    */
-  async function waitRequest(requestId: string, wait: { timeoutMs?: number } = {}): Promise<{ request: AssistRequest; text: string }> {
+  async function waitRequest(
+    requestId: string,
+    wait: { timeoutMs?: number; requesterSession?: AssistRequesterSession } = {}
+  ): Promise<{ request: AssistRequest; text: string }> {
     const deadline = Date.now() + (wait.timeoutMs ?? WAIT_TIMEOUT_MS);
+    let bound = false;
     for (;;) {
       const request = await readRequest(requestId);
+      if (!bound) {
+        bound = true;
+        await ensureBinding(request, wait.requesterSession).catch(() => undefined);
+      }
       if (!isAssistOpen(request.status)) {
         const result = resultText(request, now());
         await recordAgentDelivery(request, result);
@@ -713,8 +811,9 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     return readRequest(requestId);
   }
 
-  async function agentStatus(requestId: string): Promise<{ request: AssistRequest; text: string }> {
+  async function agentStatus(requestId: string, options_: { requesterSession?: AssistRequesterSession } = {}): Promise<{ request: AssistRequest; text: string }> {
     const request = await readRequest(requestId);
+    await ensureBinding(request, options_.requesterSession).catch(() => undefined);
     if (!isAssistOpen(request.status)) {
       const result = resultText(request, now());
       await recordAgentDelivery(request, result);
@@ -1027,6 +1126,71 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     return { running: running.size, queued: queue.length };
   }
 
+  /**
+   * 发起方记录：文件有变化就重读、按这次请求切片，内容变了才上传。origin 发起后就传（请求进行中也接受），
+   * followup 要等请求结束。收到后的那一轮结束，或请求结束后等了 30 分钟，就不再读。
+   * DeepSeek Harness 的记录可能滞后于它的对话（缓冲里的轮次还没写盘），所以这里只按修改时间追读。
+   */
+  async function syncRequesterRecords(): Promise<void> {
+    const current = await loadState();
+    const pending = Object.entries(current.records ?? {}).filter(([, binding]) => !binding.done);
+    for (const [requestId, binding] of pending) {
+      const info = await stat(binding.path).catch(() => null);
+      const waitedTooLong = binding.endedAt ? now().getTime() - Date.parse(binding.endedAt) > DELIVERY_REPLY_WAIT_MS : false;
+      // 发起了两天还没结束的（等待授权最多 24 小时），也不再追。
+      const stale = now().getTime() - Date.parse(binding.at) > 2 * 24 * 60 * 60 * 1000;
+      const update: Partial<RequesterBinding> = {};
+      if (!info || info.mtimeMs === binding.mtimeMs) {
+        if (waitedTooLong || stale) await patchBinding(requestId, { done: true });
+        continue;
+      }
+      const parsed = await readRequesterRecord(binding.sourceId, binding.path).catch(() => null);
+      if (!parsed) {
+        await patchBinding(requestId, { mtimeMs: info.mtimeMs });
+        continue;
+      }
+      const slice = sliceRequesterRecord(parsed, requestId, shortId(requestId));
+      if (!slice.found) {
+        await patchBinding(requestId, { mtimeMs: info.mtimeMs, ...(waitedTooLong || stale ? { done: true } : {}) });
+        continue;
+      }
+      const path = `/projects/${encodeURIComponent(binding.projectId)}/assist/requests/${encodeURIComponent(requestId)}/delivery`;
+      // 上传失败（网络、云端还是旧版本）时不记下修改时间，下一轮重试；等满 30 分钟就不再试。
+      let uploaded = true;
+      const originHash = digest(slice.origin);
+      if (originHash !== binding.originHash && slice.origin.length) {
+        const ok = await cloud(path, { method: "POST", body: { origin: slice.origin } }).then(() => true).catch(() => false);
+        if (ok) update.originHash = originHash;
+        else uploaded = false;
+      }
+      if (slice.followup) {
+        // 切出 followup 就说明拿到了终态结果：请求已经结束，不必再问云端。
+        const endedAt = binding.endedAt ?? now().toISOString();
+        update.endedAt = endedAt;
+        const followupHash = digest(slice.followup);
+        if (followupHash !== binding.followupHash) {
+          const ok = await cloud(path, { method: "POST", body: { followup: slice.followup } }).then(() => true).catch(() => false);
+          if (ok) update.followupHash = followupHash;
+          else uploaded = false;
+        }
+        const expired = now().getTime() - Date.parse(endedAt) > DELIVERY_REPLY_WAIT_MS;
+        if ((uploaded && slice.complete) || expired) update.done = true;
+      } else if (stale) {
+        update.done = true;
+      }
+      if (uploaded) update.mtimeMs = info.mtimeMs;
+      await patchBinding(requestId, update);
+    }
+  }
+
+  async function patchBinding(requestId: string, update: Partial<RequesterBinding>): Promise<void> {
+    if (!Object.keys(update).length) return;
+    const latest = await loadState();
+    const existing = latest.records?.[requestId];
+    if (!existing) return;
+    await saveState({ ...latest, records: { ...(latest.records ?? {}), [requestId]: { ...existing, ...update } } });
+  }
+
   async function receiving(projectId: string): Promise<AssistReceiving> {
     const data = await cloud(`/projects/${encodeURIComponent(projectId)}/assist/receiving`);
     return { projectId, enabled: data.enabled === true };
@@ -1314,6 +1478,7 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     try {
       // 发起方的结果送回与是否接收协助请求无关：自己发出的请求照常拿回结果。
       await deliverResults().catch(() => undefined);
+      await syncRequesterRecords().catch(() => undefined);
       const { requests } = await inbox();
       for (const request of requests) {
         // 限时授权还在：不必再问她，直接由她选定的 Agent 执行。不带时长，云端按原来的到期时间计，不顺延；
@@ -1372,6 +1537,47 @@ function latestOf(left: string | null, right: string | null): string | null {
   if (!left) return right;
   if (!right) return left;
   return left > right ? left : right;
+}
+
+/** 本机最多留这么多条发起方记录绑定：早已传完的不必一直留着。 */
+const MAX_RECORD_BINDINGS = 200;
+
+function trimRecords<T>(records: Record<string, T>): Record<string, T> {
+  const keys = Object.keys(records);
+  if (keys.length <= MAX_RECORD_BINDINGS) return records;
+  const result = { ...records };
+  for (const key of keys.slice(0, keys.length - MAX_RECORD_BINDINGS)) delete result[key];
+  return result;
+}
+
+function digest(value: unknown): string {
+  return createHash("sha1").update(JSON.stringify(value)).digest("hex");
+}
+
+/** DeepSeek Harness 的会话记录：绝对路径、文件名是 session.v<N>.jsonl[.zstd]。别的文件不读。 */
+export function isDeepseekRecordPath(path: string): boolean {
+  return isAbsolute(path) && /^session\.v\d+\.jsonl(\.zstd)?$/u.test(basename(path));
+}
+
+/**
+ * 命令行没给记录路径时，按会话 id 在 ~/.dsh/sessions/<目录>/ 下找。DeepSeek Harness 桌面版只注入 DSH_SESSION_ID、不注入
+ * DSH_SESSION_JSONL，而会话 id 本身就是「session-<uuid>」，与会话目录同名；没有前缀的 id 再按「session-<id>」找。
+ */
+async function locateDeepseekRecord(dshHome: string, sessionId: string): Promise<string | null> {
+  if (!/^[A-Za-z0-9_-]{1,80}$/u.test(sessionId)) return null;
+  const candidates = sessionId.startsWith("session-") ? [sessionId, `session-${sessionId}`] : [`session-${sessionId}`, sessionId];
+  const root = join(dshHome, "sessions");
+  const folders = await readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const folder of folders) {
+    if (!folder.isDirectory()) continue;
+    for (const name of candidates) {
+      const sessionDir = join(root, folder.name, name);
+      const files = await readdir(sessionDir).catch(() => [] as string[]);
+      const names = files.filter((file) => /^session\.v\d+\.jsonl(\.zstd)?$/u.test(file)).sort().reverse();
+      if (names[0]) return join(sessionDir, names[0]);
+    }
+  }
+  return null;
 }
 
 /** 续跑会话按「哪一次排查 + 哪个 Agent」记：同一次排查换了 Agent 就是新的会话。 */

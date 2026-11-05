@@ -316,19 +316,31 @@ const AssistGrantInfoSchema = z.object({
   agent: z.string().nullish().transform((value) => value ?? null)
 });
 
-/** 完整执行过程里的一项：Agent 的说明文字、一次工具调用，或「中间省略了几步」。 */
+/**
+ * 完整执行过程里的一项：Agent 的说明文字、思考、一次工具调用，或「中间省略了几步」。发起方记录另有用户说的话（user），
+ * 「拿到结果的那一步」带 delivery。
+ */
 const AssistTranscriptItemSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("text"), text: z.string(), truncated: z.boolean().optional() }),
+  z.object({ kind: z.literal("thinking"), text: z.string(), truncated: z.boolean().optional() }),
+  z.object({ kind: z.literal("user"), text: z.string(), truncated: z.boolean().optional(), delivery: z.boolean().optional() }),
   z.object({
     kind: z.literal("tool"),
     name: z.string(),
     input: z.string().default(""),
     output: z.string().default(""),
     status: z.enum(["running", "done", "failed"]),
-    truncated: z.boolean().optional()
+    truncated: z.boolean().optional(),
+    delivery: z.boolean().optional()
   }),
   z.object({ kind: z.literal("omitted"), count: z.number() })
 ]);
+
+/** 执行过程与发起方记录：不认识的条目（更新的版本加的）丢掉，不让整次协助读不出来。 */
+const AssistTranscriptSchema = z.array(z.unknown()).transform((items) => items.flatMap((item) => {
+  const parsed = AssistTranscriptItemSchema.safeParse(item);
+  return parsed.success ? [parsed.data] : [];
+}));
 
 const AssistRequestSchema = z.object({
   id: z.string(),
@@ -372,11 +384,17 @@ const AssistRequestSchema = z.object({
   /** Memmy 执行时隐藏注入的格式要求。 */
   promptContext: z.string().nullish(),
   /** 完整执行过程。 */
-  transcript: z.array(AssistTranscriptItemSchema).optional(),
+  transcript: AssistTranscriptSchema.optional(),
   /** 发起方 Agent 实际收到的内容。 */
   delivery: z.string().nullish(),
   /** 发起方 Agent 收到后的回复。 */
-  deliveryReply: z.string().nullish()
+  deliveryReply: z.string().nullish(),
+  /**
+   * 发起方一侧的记录：发起前（origin）与收到后（followup）。只有 Memmy 与 DeepSeek Harness 发起时有；
+   * 旧请求、其他 Agent 发起或记录读不到时为 null，界面退回原来的显示。
+   */
+  origin: AssistTranscriptSchema.nullish(),
+  followup: AssistTranscriptSchema.nullish()
 });
 
 const AssistInboxItemSchema = AssistRequestSchema.extend({

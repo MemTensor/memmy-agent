@@ -50,9 +50,10 @@ const AssistRunSnapshotSchema = z.object({
     output: z.string().optional(),
     status: z.enum(["running", "done", "failed"])
   })).default([]),
-  /** 完整执行过程：旧运行时没有这一项。 */
+  /** 完整执行过程：旧运行时没有这一项；思考（thinking）是后来加的。 */
   transcript: z.array(z.union([
     z.object({ kind: z.literal("text"), text: z.string(), truncated: z.boolean().optional() }),
+    z.object({ kind: z.literal("thinking"), text: z.string(), truncated: z.boolean().optional() }),
     z.object({
       kind: z.literal("tool"),
       name: z.string(),

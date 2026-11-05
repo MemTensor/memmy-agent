@@ -62,6 +62,8 @@ export function CollabAssistRequestCard(props: {
         <ol>
           {request.items.map((item) => <li key={item}>{item}</li>)}
         </ol>
+        {/* 发起这次请求的那一轮会进入协助会话：在请求旁边就说清对方看得到什么。 */}
+        <p className={styles.visibility}>{t("collab.assist.cardVisibility", { name: executor })}</p>
         {status === "done" ? (
           <>
             <div className={styles.key}>{t("collab.assist.cardResult")}</div>

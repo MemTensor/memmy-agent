@@ -101,7 +101,7 @@ function AssistResultMessage(props: { envelope: AssistEnvelope }) {
 }
 
 /** 结果里写的是 Agent 的名字：换回标识以便取图标。 */
-function agentSourceIdOf(name: string): string | null {
+export function agentSourceIdOf(name: string): string | null {
   const ids: Record<string, string> = {
     Memmy: "memmy",
     "Claude Code": "claude_code",

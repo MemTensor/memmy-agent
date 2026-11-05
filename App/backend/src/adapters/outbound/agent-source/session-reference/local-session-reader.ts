@@ -452,7 +452,7 @@ function toolName(message: ConversationMessage): string {
 }
 
 /** Drops context that memory plugins and hosts inject into the prompt, keeping what the person typed. */
-function stripInjectedContext(text: string): string {
+export function stripInjectedContext(text: string): string {
   return text
     .replace(/<(system[_-]reminder|[a-z_]*memory_context|memmy_reference|project_context)\b[^>]*>[\s\S]*?<\/\1>/giu, "")
     .trim();

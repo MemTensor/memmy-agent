@@ -226,6 +226,9 @@ export function runningConversation(env: NodeJS.ProcessEnv): { sourceId: string;
   // Memmy 自己的任务：exec 把当前会话写进 MEMMY_TASK_ID，加入 / 共享都按这一条走。
   const memmy = env.MEMMY_TASK_ID?.trim();
   if (memmy) return { sourceId: "memmy", conversationId: memmy };
+  // DeepSeek Harness 每次执行命令都重新注入 DSH_SESSION_ID（并去掉继承来的 DSH_*），它就是当前这条会话。
+  const dsh = env.DSH_SESSION_ID?.trim();
+  if (dsh) return { sourceId: "deepseek_harness", conversationId: dsh };
   const cursor = env.CURSOR_CONVERSATION_ID?.trim();
   if (cursor) return { sourceId: "cursor", conversationId: cursor };
   const claude = env.CLAUDE_SESSION_ID?.trim() || env.CLAUDE_CODE_SESSION_ID?.trim();
@@ -403,9 +406,50 @@ async function localApi(
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) {
     const error = isRecord(payload.error) ? payload.error : {};
-    throw new Error(text(error.message) || `Memmy request failed (${response.status})`);
+    throw Object.assign(new Error(text(error.message) || `Memmy request failed (${response.status})`), { status: response.status });
   }
   return payload;
+}
+
+/**
+ * 带上发起方会话调用本机接口。桌面端可能比命令行旧（启动脚本先跑 checkout 的命令行），旧接口不认这个字段时回 400，
+ * 这时去掉它再试一次：协助照常进行，只是协助会话里没有发起方的记录。
+ */
+async function withRequesterSession(
+  deps: MemmyProjectDeps,
+  path: string,
+  body: Record<string, unknown>,
+  session: AssistRequesterSession | undefined,
+  timeoutMs?: number
+): Promise<Record<string, unknown>> {
+  if (!session) return localApi(deps, "POST", path, body, timeoutMs);
+  try {
+    return await localApi(deps, "POST", path, { ...body, requesterSession: session }, timeoutMs);
+  } catch (error) {
+    if ((error as { status?: number }).status !== 400) throw error;
+    return localApi(deps, "POST", path, body, timeoutMs);
+  }
+}
+
+/** 发起方在哪个 Agent 的哪一条会话里。 */
+interface AssistRequesterSession {
+  sourceId: "memmy" | "deepseek_harness";
+  sessionId: string;
+  recordPath?: string;
+}
+
+/**
+ * 发起方会话：本机据此读出发起这次协助的那一轮，双方在协助会话里都能看到。目前读得到的只有 Memmy 与
+ * DeepSeek Harness：Memmy 是 MEMMY_TASK_ID；DeepSeek Harness 是 DSH_SESSION_ID 加 DSH_SESSION_JSONL（记录文件的绝对路径，
+ * 只是位置提示，首次写盘前可能还不存在，所以只记下路径，由本机之后再读）。
+ */
+export function requesterSessionFrom(env: NodeJS.ProcessEnv): AssistRequesterSession | undefined {
+  const memmy = env.MEMMY_TASK_ID?.trim();
+  if (memmy) return { sourceId: "memmy", sessionId: memmy };
+  const dsh = env.DSH_SESSION_ID?.trim();
+  if (!dsh) return undefined;
+  const recordPath = env.DSH_SESSION_JSONL?.trim();
+  return { sourceId: "deepseek_harness", sessionId: dsh, ...(recordPath ? { recordPath } : {}) };
 }
 
 /**
@@ -523,25 +567,27 @@ async function runAssist(
     const via = optionString(parsed, "via")?.trim() || requestingAgentName(env);
     // 在 Memmy 的任务里发起：记下这条任务，结果回来后自动送回来，Memmy 不必守着等。
     const sourceTask = env.MEMMY_TASK_ID?.trim();
-    const created = await localApi(deps, "POST", "/api/collab/assist/requests", {
+    // Memmy 的任务记录由 sourceTask 找得到；其余读得到记录的 Agent（DeepSeek Harness）另带会话与记录路径。
+    const session = requesterSessionFrom(env);
+    const created = await withRequesterSession(deps, "/api/collab/assist/requests", {
       project,
       member,
       ...request,
       via,
       ...(thread ? { thread } : {}),
       ...(sourceTask ? { sourceTask } : {})
-    });
+    }, session?.sourceId === "memmy" ? undefined : session);
     const requestId = isRecord(created.request) ? text(created.request.id) : "";
     const sent = typeof created.text === "string" ? created.text : `已发送协助请求 ${requestId}。`;
     if (!wait || !requestId) return sent;
     // --wait 在本轮里等结果：等待期间可以继续做别的，结果回来再接着分析。
-    const waited = await waitForAssist(deps, requestId, waitTimeoutMs(parsed));
+    const waited = await waitForAssist(deps, requestId, waitTimeoutMs(parsed), session);
     return `${sent}\n\n${text(waited.text)}`;
   }
   if (action === "wait") {
     const requestId = rest[0]?.trim();
     if (!requestId) throw new Error("assist wait 需要协助请求 ID");
-    const waited = await waitForAssist(deps, requestId, waitTimeoutMs(parsed));
+    const waited = await waitForAssist(deps, requestId, waitTimeoutMs(parsed), requesterSessionFrom(deps.env ?? process.env));
     return text(waited.text);
   }
   if (action === "status") {
@@ -549,7 +595,8 @@ async function runAssist(
     if (!requestId) throw new Error("assist status 需要协助请求 ID");
     // 由本机后端写这段话：第一次读到终态时，它就是发起方 Agent 收到的内容，会记进协助会话。
     // 旧版后端没有这个接口时退回读详情、在这里格式化。
-    const status = await localApi(deps, "POST", `/api/collab/assist/requests/${encodeURIComponent(requestId)}/status`).catch(() => null);
+    const status = await withRequesterSession(deps, `/api/collab/assist/requests/${encodeURIComponent(requestId)}/status`, {},
+      requesterSessionFrom(deps.env ?? process.env)).catch(() => null);
     if (status && typeof status.text === "string") return status.text;
     const result = await localApi(deps, "GET", `/api/collab/assist/requests/${encodeURIComponent(requestId)}`);
     return formatAssistStatus(isRecord(result.request) ? result.request : {});
@@ -578,6 +625,7 @@ export function requestingAgentName(env: NodeJS.ProcessEnv): string {
   const running = runningConversation(env);
   const names: Record<string, string> = {
     memmy: "Memmy",
+    deepseek_harness: "DeepSeek Harness",
     cursor: "Cursor",
     claude_code: "Claude Code",
     codex: "Codex"
@@ -598,9 +646,14 @@ function waitTimeoutMs(parsed: ParsedArgs): number {
 }
 
 /** 在本轮里等结果：等不到就把当前状态告诉 Agent，不假装完成。 */
-async function waitForAssist(deps: MemmyProjectDeps, requestId: string, timeoutMs: number): Promise<Record<string, unknown>> {
-  return localApi(deps, "POST", `/api/collab/assist/requests/${encodeURIComponent(requestId)}/wait`,
-    { timeoutMs: Math.min(timeoutMs, 16 * 60 * 1000) }, timeoutMs + 15_000);
+async function waitForAssist(
+  deps: MemmyProjectDeps,
+  requestId: string,
+  timeoutMs: number,
+  session?: AssistRequesterSession
+): Promise<Record<string, unknown>> {
+  return withRequesterSession(deps, `/api/collab/assist/requests/${encodeURIComponent(requestId)}/wait`,
+    { timeoutMs: Math.min(timeoutMs, 16 * 60 * 1000) }, session, timeoutMs + 15_000);
 }
 
 /** 执行方标识换成名字：命令行与界面用同一套叫法；认不出来时退回标识。 */

@@ -1,27 +1,32 @@
 /**
  * 看板上打开的一次协助：按会话展示双方的完整上下文，位置与排版和读成员任务的只读面板一致。
  *
- * 每一次请求是一轮，按时间顺序依次是：发起方的请求、执行方的决定、执行方 Agent 收到的提示词（Memmy 执行时另有
- * 隐藏注入的格式要求）、执行过程（说明文字与每一步工具调用）、执行方的回复，以及发起方实际收到的内容与它的回复。
- * 发起人与执行人看到的是同一份内容；项目里的其他成员看不到。执行中每 3 秒重读一次。
+ * 每一次请求是一轮，按时间顺序是一条链：发起方 Agent 里发起这次请求的对话（用户的话、思考、说明与工具调用）→
+ * 请求 → 执行方的决定 → 执行方 Agent 收到的提示词（Memmy 执行时另有隐藏注入的格式要求）、执行过程与回复 →
+ * 发起方收到的结果与之后的过程和回复。发起方那两段只有 Memmy 与 DeepSeek Harness 发起时有；旧请求与其他 Agent 发起时
+ * 仍是「收到的内容 + 收到后的回复」。发起人与执行人看到的是同一份内容；项目里的其他成员看不到。执行中每 3 秒重读一次；
+ * 请求结束后发起方那边还会陆续上传收到的内容与之后的过程，所以结束后 30 分钟内每 5 秒再读一次。
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactElement } from "react";
 import { createPortal } from "react-dom";
-import { AlertCircle, ChevronRight, FileText, Loader2, Terminal, X } from "lucide-react";
+import { AlertCircle, Brain, ChevronRight, FileText, Inbox, Loader2, Terminal, X } from "lucide-react";
 import type { AssistRequest, AssistThread, AssistThreadDetail, AssistTranscriptItem, CollabClient } from "../api/collab-client.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { AgentMessageContent } from "./agent-message-content.js";
 import { ConfirmCard } from "./collab-assist-detail.js";
+import { agentSourceIdOf, AssistMessageCard, parseAssistEnvelope } from "./collab-assist-message.js";
 import {
   AssistAgentLogo,
   assistAgentName,
   assistClock,
+  assistIsOpen,
   grantDurationLabel,
   pickAssistAgent,
   useAssistAgentChoice
 } from "./collab-assist-view.js";
 import frame from "./collab-page.module.css";
+import { SidebarResizeHandle, useResizableSidebar } from "./sidebar-resize.js";
 import detailStyles from "./collab-assist-detail.module.css";
 import styles from "./collab-assist-conversation.module.css";
 
@@ -29,8 +34,42 @@ type Translate = (key: MessageKey, values?: Record<string, string>) => string;
 
 /** 执行中多久重读一次。 */
 const LIVE_POLL_MS = 3_000;
+/** 请求结束后多久重读一次：与发起方 Memmy 追读本机记录的节奏一致。 */
+const SYNC_POLL_MS = 5_000;
+/**
+ * 请求结束后还等发起方补传多久：与本机后端停止追读发起方记录、等待 Memmy 收到后回复的上限相同（30 分钟）。
+ * 超过之后不会再有新内容，面板停止重读。
+ */
+const SYNC_WINDOW_MS = 30 * 60_000;
 /** 提示词与收到的内容默认显示的行数。 */
 const PREVIEW_LINES = 6;
+
+/**
+ * 面板宽度：默认与读任务的只读面板一样 520，左边缘可以往左拖宽，拖到的宽度记在本机，下次打开沿用。
+ * 拖得再宽也给看板留出 {@link PANEL_BOARD_RESERVE}：点面板外就能关闭，看得到自己在哪个项目。
+ * 窗口变窄时只收窄显示的宽度，不改写记下的宽度，窗口再变宽就恢复。
+ */
+export const ASSIST_PANEL_WIDTH_STORAGE_KEY = "memmy.collab.assistPanel.width.v1";
+const PANEL_DEFAULT_WIDTH = 520;
+const PANEL_MIN_WIDTH = 420;
+const PANEL_MAX_WIDTH = 1600;
+/** 面板四周的留白（左右各 24）。 */
+const PANEL_GUTTER = 48;
+const PANEL_BOARD_RESERVE = 240;
+/** 窗口窄于这个宽度时面板铺满（见样式里的 720px 断点），不再能拖。 */
+const PANEL_FILL_BELOW = 720;
+
+/** 窗口的宽度，随窗口变化更新。 */
+function useViewportWidth(): number | null {
+  const [width, setWidth] = useState<number | null>(() => (typeof window === "undefined" ? null : window.innerWidth));
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const update = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  return width;
+}
 
 export function CollabAssistConversation(props: {
   /** 看板列表里的这一行：打开时先用它画出标题，详情读到后再补全会话。 */
@@ -46,6 +85,18 @@ export function CollabAssistConversation(props: {
   const { t } = useTranslation();
   const titleId = useId();
   const panelRef = useRef<HTMLElement | null>(null);
+  const viewport = useViewportWidth();
+  const resizable = viewport === null || viewport > PANEL_FILL_BELOW;
+  const panelWidth = useResizableSidebar({
+    storageKey: ASSIST_PANEL_WIDTH_STORAGE_KEY,
+    defaultWidth: PANEL_DEFAULT_WIDTH,
+    minWidth: PANEL_MIN_WIDTH,
+    maxWidth: PANEL_MAX_WIDTH,
+    // 手柄在面板左边：往左拖是变宽。
+    resizeDirection: -1,
+    availableWidth: viewport === null ? null : viewport - PANEL_GUTTER,
+    reservedPrimaryWidth: PANEL_BOARD_RESERVE
+  });
   const { thread: summary, collab } = props;
   const open = summary !== null;
   const [detail, setDetail] = useState<AssistThreadDetail | null>(null);
@@ -53,9 +104,19 @@ export function CollabAssistConversation(props: {
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 判断「还在等发起方补传」用的时刻：只在打开时与某次请求的等待到期时更新，不随轮询重画。 */
+  const [clock, setClock] = useState(() => Date.now());
+  /** 上一次读到的内容：没变就不写，面板不跟着轮询重画。 */
+  const loadedKey = useRef("");
+  /**
+   * 现在开着的是哪一次协助（关着时为 null）。读取是异步的：关掉面板或换到另一次协助时，还在路上的那次读取
+   * 返回后不能再写进来，否则面板会在关闭后又显示出来，而且再也关不掉。
+   */
+  const activeThread = useRef<string | null>(null);
 
   const projectId = summary?.projectId ?? null;
   const threadId = summary?.threadId ?? null;
+  activeThread.current = open ? threadId : null;
   // 列表里这一行有变化（新请求、状态变了）时也重读一次。
   const changeKey = summary ? `${summary.lastActiveAt ?? ""}|${summary.status}|${summary.attempt}` : "";
 
@@ -63,13 +124,20 @@ export function CollabAssistConversation(props: {
     if (!collab || !projectId || !threadId) return;
     try {
       const next = await collab.assistThread(projectId, threadId);
-      setDetail(next);
+      if (activeThread.current !== threadId) return;
+      const key = JSON.stringify(next.thread);
+      if (key !== loadedKey.current) {
+        loadedKey.current = key;
+        setDetail(next);
+      }
       setLoadFailed(false);
       // 云端数据库的时间与本机时钟的差：会话里的时间都按本机时间显示（测试库的时区设置差了 8 小时）。
+      // 每次读到的差会有几十毫秒的抖动，差超过 1 秒才更新，面板不跟着重画。
       const server = next.serverTime ? Date.parse(next.serverTime) : Number.NaN;
-      setOffset(Number.isFinite(server) ? Date.now() - server : 0);
+      const nextOffset = Number.isFinite(server) ? Date.now() - server : 0;
+      setOffset((current) => (Math.abs(current - nextOffset) > 1_000 ? nextOffset : current));
     } catch {
-      setLoadFailed(true);
+      if (activeThread.current === threadId) setLoadFailed(true);
     }
   }, [collab, projectId, threadId]);
 
@@ -77,6 +145,8 @@ export function CollabAssistConversation(props: {
     setDetail(null);
     setError(null);
     setLoadFailed(false);
+    setClock(Date.now());
+    loadedKey.current = "";
   }, [threadId]);
 
   useEffect(() => {
@@ -84,7 +154,14 @@ export function CollabAssistConversation(props: {
     void load();
   }, [open, load, changeKey]);
 
-  const thread = detail?.thread ?? summary;
+  // 重新打开时从当前时刻算起：面板关着的时候时刻不更新。
+  useEffect(() => {
+    if (open) setClock(Date.now());
+  }, [open, changeKey]);
+
+  // 关着时什么都不画；读到的内容只在属于现在开着的这次协助时才用。
+  const current = open && detail && detail.thread.threadId === threadId ? detail : null;
+  const thread = !open ? null : current?.thread ?? summary;
   const live = Boolean(thread?.requests.some((request) => request.status === "running" || request.status === "pending" || request.status === "confirm"));
   useEffect(() => {
     if (!open || !live) return;
@@ -109,6 +186,41 @@ export function CollabAssistConversation(props: {
   const choice = useAssistAgentChoice(collab, thread?.projectId ?? null, thread?.requester.userId ?? null, confirming);
   const rounds = useMemo(() => [...(thread?.requests ?? [])].reverse(), [thread]);
 
+  /**
+   * 请求结束之后，发起方那边还会陆续上传收到的内容、收到之后的过程与回复。这些上传不改变看板上的时间，
+   * 列表那一行不会变，所以结束后的 30 分钟里面板自己接着读。按云端时间换算成本机时刻。
+   */
+  const syncDeadlines = useMemo(() => {
+    const deadlines = new Map<string, number>();
+    for (const request of thread?.requests ?? []) {
+      if (assistIsOpen(request.status)) continue;
+      const end = request.finishedAt ?? request.decidedAt ?? request.createdAt;
+      const at = end ? Date.parse(end) : Number.NaN;
+      if (Number.isFinite(at)) deadlines.set(request.id, at + offset + SYNC_WINDOW_MS);
+    }
+    return deadlines;
+  }, [thread, offset]);
+  const nextDeadline = useMemo(() => {
+    const upcoming = [...syncDeadlines.values()].filter((deadline) => deadline > clock);
+    return upcoming.length ? Math.min(...upcoming) : null;
+  }, [syncDeadlines, clock]);
+  const syncing = nextDeadline !== null;
+
+  // 等到期时更新一次时刻：停止重读，并把「还在同步」换成「没有读到」。
+  useEffect(() => {
+    if (!open || nextDeadline === null) return;
+    const timer = setTimeout(() => setClock(Date.now()), Math.max(0, nextDeadline - Date.now()) + 50);
+    return () => clearTimeout(timer);
+  }, [open, nextDeadline]);
+
+  useEffect(() => {
+    if (!open || live || !syncing) return;
+    const timer = setInterval(() => {
+      if (!document.hidden) void load();
+    }, SYNC_POLL_MS);
+    return () => clearInterval(timer);
+  }, [open, live, syncing, load]);
+
   if (!thread || typeof document === "undefined") return null;
 
   const shift = (iso: string | null) => (iso ? new Date(Date.parse(iso) + offset).toISOString() : null);
@@ -119,7 +231,7 @@ export function CollabAssistConversation(props: {
   const confirmAgent = pickAssistAgent(choice, thread.agent);
   const confirmAgentName = choice?.agents.find((item) => item.sourceId === confirmAgent)?.name
     ?? assistAgentName(confirmAgent, t("collab.assist.executorFallback"));
-  const sourceTask = detail?.thread.sourceTask ?? (thread.mine ? thread.requests.find((request) => request.sourceTask)?.sourceTask ?? null : null);
+  const sourceTask = current?.thread.sourceTask ?? (thread.mine ? thread.requests.find((request) => request.sourceTask)?.sourceTask ?? null : null);
   const canOpenSource = Boolean(sourceTask && props.onOpenTask && (props.sourceTaskAvailable?.(sourceTask) ?? true));
   const executorTask = thread.executor.mine ? thread.conversationId : null;
 
@@ -149,7 +261,21 @@ export function CollabAssistConversation(props: {
         aria-labelledby={titleId}
         data-collab-assist-conversation=""
         tabIndex={-1}
+        style={resizable ? { width: panelWidth.appliedWidth } : undefined}
       >
+        {resizable ? (
+          <div className={styles.resizeEdge}>
+            <SidebarResizeHandle
+              label={t("collab.assist.conv.resize")}
+              width={panelWidth.appliedWidth}
+              minWidth={panelWidth.appliedMinWidth}
+              maxWidth={panelWidth.appliedMaxWidth}
+              isResizing={panelWidth.isResizing}
+              onResizeStart={panelWidth.beginResize}
+              onResizeBy={panelWidth.resizeBy}
+            />
+          </div>
+        ) : null}
         <header className={frame.readerHead}>
           <div className={frame.readerHeadText}>
             <h2 id={titleId} className={frame.readerTitle}>{t("collab.assist.detail.title", { title: thread.title })}</h2>
@@ -170,15 +296,16 @@ export function CollabAssistConversation(props: {
         </header>
 
         <div className={frame.readerBody}>
-          {!detail && !loadFailed ? <p className={styles.note}>{t("collab.assist.conv.loading")}</p> : null}
-          {loadFailed && !detail ? <p className={styles.note}>{t("collab.assist.conv.loadFailed")}</p> : null}
+          {!current && !loadFailed ? <p className={styles.note}>{t("collab.assist.conv.loading")}</p> : null}
+          {loadFailed && !current ? <p className={styles.note}>{t("collab.assist.conv.loadFailed")}</p> : null}
           {rounds.map((request) => (
             <AssistRound
               key={request.id}
               request={request}
               thread={thread}
               showIndex={rounds.length > 1}
-              withConversation={Boolean(detail)}
+              withConversation={Boolean(current)}
+              syncing={(syncDeadlines.get(request.id) ?? 0) > clock}
               shift={shift}
               t={t}
             />
@@ -232,13 +359,15 @@ export function CollabAssistConversation(props: {
   );
 }
 
-/** 一次请求：请求、决定、提示词、过程、回复、发起方收到的内容。 */
+/** 一次请求：发起方的对话、请求、决定、提示词、过程、回复、发起方收到的结果与之后的过程。 */
 function AssistRound(props: {
   request: AssistRequest;
   thread: AssistThread;
   showIndex: boolean;
   /** 详情已经读到：没有会话内容时按旧请求处理，只显示已有的部分。 */
   withConversation: boolean;
+  /** 这次请求结束不到 30 分钟：发起方那边可能还在补传。 */
+  syncing: boolean;
   shift: (iso: string | null) => string | null;
   t: Translate;
 }) {
@@ -253,11 +382,30 @@ function AssistRound(props: {
   // 新请求带完整过程；旧请求只有摘要步骤，按工具调用列出。
   const transcript: AssistTranscriptItem[] = request.transcript
     ?? request.steps.map((step) => ({ kind: "tool" as const, name: step.text, input: "", output: step.output ?? "", status: "done" as const }));
+  // 发起方的记录（Memmy 与 DeepSeek Harness 发起时有）：有就按链展示，没有就是原来的「收到的内容」。
+  const chain = props.withConversation && (request.origin != null || request.followup != null);
+  const requesterSide = (
+    <SideHead
+      label={t("collab.assist.conv.side.requester", { requester, via: request.via })}
+      agent={agentSourceIdOf(request.via)}
+      name={request.via}
+    />
+  );
 
   return (
     <article className={frame.readerTurn} data-assist-round={request.attempt}>
       {props.showIndex ? (
         <span className={frame.readerTurnIndex}>{t("collab.assist.attemptLabel", { attempt: String(request.attempt) })}</span>
+      ) : null}
+
+      {/* 0. 发起方 Agent 里发起这次请求的对话 */}
+      {chain ? (
+        <section className={styles.side} data-assist-part="origin">
+          {requesterSide}
+          {request.origin?.length
+            ? <ChainItems items={request.origin} t={t} />
+            : <p className={styles.note}>{t("collab.assist.conv.originPending", { requester, via: request.via })}</p>}
+        </section>
       ) : null}
 
       {/* 1. 发起方的请求 */}
@@ -276,6 +424,14 @@ function AssistRound(props: {
 
       {/* 2. 执行方的决定 */}
       <p className={styles.decision} data-assist-part="decision">{decisionText(request, thread, agent, props.shift, t)}</p>
+
+      {chain && (request.prompt || request.promptContext || ran) ? (
+        <SideHead
+          label={t("collab.assist.conv.side.executor", { executor, agent })}
+          agent={request.agent ?? request.grant?.agent ?? null}
+          name={agent}
+        />
+      ) : null}
 
       {/* 3. 执行方 Agent 收到的提示词 */}
       {request.prompt || request.promptContext ? (
@@ -351,28 +507,134 @@ function AssistRound(props: {
         </p>
       ) : null}
 
-      {/* 6. 发起方收到的内容 */}
-      {finished && props.withConversation ? (
-        request.delivery ? (
-          <section className={styles.section} data-assist-part="delivery">
-            <span className={styles.sectionLabel}>
-              {[t("collab.assist.conv.delivery", { requester, via: request.via }), assistClock(props.shift(request.deliveredAt))].filter(Boolean).join(" · ")}
-            </span>
-            <FoldedText text={request.delivery} t={t} />
-            {request.deliveryReply ? (
-              <div className={`${frame.readerAgent} ${styles.deliveryReply}`}>
-                <div className={frame.readerAgentHead}>
-                  <span>{t("collab.assist.conv.deliveryReply", { requester, via: request.via })}</span>
+      {/* 6. 发起方收到的结果：有发起方记录时是收到结果那一步起的过程与回复，否则是收到的内容与回复 */}
+      {finished && chain && request.followup?.length ? (
+        <section className={styles.side} data-assist-part="followup">
+          {requesterSide}
+          <ChainItems items={request.followup} t={t} />
+        </section>
+      ) : finished && props.withConversation ? (
+        <>
+          {request.delivery ? (
+            <section className={styles.section} data-assist-part="delivery">
+              <span className={styles.sectionLabel}>
+                {[t("collab.assist.conv.delivery", { requester, via: request.via }), assistClock(props.shift(request.deliveredAt))].filter(Boolean).join(" · ")}
+              </span>
+              <DeliveredText text={request.delivery} t={t} />
+              {request.deliveryReply ? (
+                <div className={`${frame.readerAgent} ${styles.deliveryReply}`}>
+                  <div className={frame.readerAgentHead}>
+                    <span>{t("collab.assist.conv.deliveryReply", { requester, via: request.via })}</span>
+                  </div>
+                  <AgentMessageContent content={request.deliveryReply} readOnlyFileReferences />
                 </div>
-                <AgentMessageContent content={request.deliveryReply} readOnlyFileReferences />
-              </div>
-            ) : null}
-          </section>
-        ) : request.status !== "cancelled" ? (
-          <p className={styles.note} data-assist-part="delivery">{t("collab.assist.conv.notDelivered", { requester })}</p>
-        ) : null
+              ) : null}
+            </section>
+          ) : request.status !== "cancelled" && !chain ? (
+            <p className={styles.note} data-assist-part="delivery">{t("collab.assist.conv.notDelivered", { requester })}</p>
+          ) : null}
+          {chain && request.status !== "cancelled" ? (
+            <p className={styles.note} data-assist-part="followup-pending">
+              {t(props.syncing ? "collab.assist.conv.followupPending" : "collab.assist.conv.followupMissing", { requester, via: request.via })}
+            </p>
+          ) : null}
+        </>
       ) : null}
     </article>
+  );
+}
+
+/** 链上一段的归属：哪一方、谁的哪个 Agent。 */
+function SideHead(props: { label: string; agent: string | null; name: string }) {
+  return (
+    <div className={styles.sideHead}>
+      <AssistAgentLogo agent={props.agent} name={props.name} className={detailStyles.agentLogo} markClassName={detailStyles.agentMark} />
+      <span>{props.label}</span>
+    </div>
+  );
+}
+
+/**
+ * 发起方记录的一段：用户说的话单独成气泡，其余（思考、说明、工具调用）与执行过程同一种排法；
+ * 拿到结果的那一步突出显示为「收到的结果」。
+ */
+function ChainItems(props: { items: readonly AssistTranscriptItem[]; t: Translate }) {
+  const { t } = props;
+  const blocks: ReactElement[] = [];
+  let group: AssistTranscriptItem[] = [];
+  const flush = () => {
+    if (!group.length) return;
+    const items = group;
+    group = [];
+    blocks.push(
+      <div key={`g${blocks.length}`} className={styles.process}>
+        {items.map((item, index) => <TranscriptLine key={index} item={item} t={t} />)}
+      </div>
+    );
+  };
+  for (const item of props.items) {
+    const delivery = (item.kind === "tool" || item.kind === "user") && item.delivery === true;
+    if (item.kind !== "user" && !delivery) {
+      group.push(item);
+      continue;
+    }
+    flush();
+    const key = `i${blocks.length}`;
+    if (delivery) {
+      blocks.push(<ReceivedResult key={key} item={item} t={t} />);
+    } else if (item.kind === "user") {
+      const envelope = parseAssistEnvelope(item.text);
+      blocks.push(envelope ? (
+        <div key={key} className={styles.received}><AssistMessageCard envelope={envelope} /></div>
+      ) : (
+        <div key={key} className={styles.userSide} data-assist-item="user">
+          <div className={styles.userBubble}>
+            <AgentMessageContent content={item.text} readOnlyFileReferences />
+          </div>
+        </div>
+      ));
+    }
+  }
+  flush();
+  return <>{blocks}</>;
+}
+
+/** 发起方拿到结果的那一步：外部 Agent 是那次 wait / status 的输出，Memmy 是送进任务的结果消息（显示成结果卡片）。 */
+function ReceivedResult(props: { item: AssistTranscriptItem; t: Translate }) {
+  const { item, t } = props;
+  const text = item.kind === "tool" ? item.output : item.kind === "user" ? item.text : "";
+  return (
+    <section className={styles.received} data-assist-item="received">
+      <span className={styles.receivedLabel}>
+        <Inbox size={13} aria-hidden="true" />
+        {t("collab.assist.conv.received")}
+      </span>
+      {item.kind === "tool" && item.input ? <code className={styles.receivedCommand}>{item.input}</code> : null}
+      <DeliveredText text={text} t={t} />
+    </section>
+  );
+}
+
+/** 发起方收到的内容：Memmy 的结果消息显示成结果卡片，不露出标签；命令行输出按原文显示。 */
+function DeliveredText(props: { text: string; t: Translate }) {
+  const envelope = parseAssistEnvelope(props.text);
+  return envelope ? <AssistMessageCard envelope={envelope} /> : <FoldedText text={props.text} t={props.t} />;
+}
+
+/** 一段思考：默认收起，只显示第一行，展开看全文。 */
+function ThinkingLine(props: { text: string; truncated?: boolean; t: Translate }) {
+  const preview = props.text.trim().split("\n")[0] ?? "";
+  return (
+    <details className={styles.thinking} data-assist-item="thinking">
+      <summary className={styles.thinkingSummary}>
+        <Brain size={13} aria-hidden="true" />
+        <span className={styles.thinkingLabel}>{props.t("collab.assist.conv.thinking")}</span>
+        <span className={styles.thinkingPreview}>{preview}</span>
+        <ChevronRight size={12} aria-hidden="true" className={styles.thinkingChevron} />
+      </summary>
+      <div className={styles.thinkingText}>{props.text}</div>
+      {props.truncated ? <p className={styles.truncated}>{props.t("collab.assist.conv.truncated")}</p> : null}
+    </details>
   );
 }
 
@@ -443,7 +705,8 @@ function TranscriptLine(props: { item: AssistTranscriptItem; t: Translate }) {
   if (item.kind === "omitted") {
     return <p className={styles.omitted}>{t("collab.assist.conv.omitted", { count: String(item.count) })}</p>;
   }
-  if (item.kind === "text") {
+  if (item.kind === "thinking") return <ThinkingLine text={item.text} {...(item.truncated ? { truncated: true } : {})} t={t} />;
+  if (item.kind === "text" || item.kind === "user") {
     return (
       <div className={styles.processText}>
         <AgentMessageContent content={item.text} readOnlyFileReferences />

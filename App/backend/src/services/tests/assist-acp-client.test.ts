@@ -95,6 +95,57 @@ describe("runAcpAgent", () => {
     expect(result.reply).toContain('"optionId":"allow"');
   });
 
+  it("does not count the history a resumed session replays as part of this run", async () => {
+    // 按 ACP 的规定，session/load 先把会话历史重放一遍，再回应 load；之后才是这一次的执行。
+    const RESUMING_AGENT = String.raw`
+let buffer = "";
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+const update = (u) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s-old", update: u } });
+process.stdin.on("data", (chunk) => {
+  buffer += chunk.toString("utf8");
+  let at;
+  while ((at = buffer.indexOf("\n")) >= 0) {
+    const line = buffer.slice(0, at).trim();
+    buffer = buffer.slice(at + 1);
+    if (!line) continue;
+    const message = JSON.parse(line);
+    if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1 } });
+    else if (message.method === "session/load") {
+      update({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "上一次：打印今天吃什么" } });
+      update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "上一次的思考" } });
+      update({ sessionUpdate: "tool_call", toolCallId: "old", title: "print 今天吃什么", status: "completed" });
+      update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "今天吃什么？" } });
+      send({ jsonrpc: "2.0", id: message.id, result: {} });
+    } else if (message.method === "session/prompt") {
+      update({ sessionUpdate: "tool_call", toolCallId: "new", title: "print hello kitty" });
+      update({ sessionUpdate: "tool_call_update", toolCallId: "new", status: "completed" });
+      update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hello kitty" } });
+      send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
+    }
+  }
+});
+process.stdin.resume();
+`;
+    const steps: string[] = [];
+    const result = await runAcpAgent({
+      command: process.execPath,
+      args: ["-e", RESUMING_AGENT],
+      cwd: process.cwd(),
+      prompt: "打印 hello kitty",
+      sessionId: "s-old",
+      onStep: (step) => steps.push(step.text),
+      timeoutMs: 5_000
+    });
+
+    expect(result.sessionId).toBe("s-old");
+    expect(result.reply).toBe("hello kitty");
+    expect(steps.every((step) => !step.includes("今天吃什么"))).toBe(true);
+    const text = JSON.stringify(result.transcript);
+    expect(text).toContain("print hello kitty");
+    expect(text).not.toContain("今天吃什么");
+    expect(text).not.toContain("上一次的思考");
+  });
+
   it("says the Agent is not installed when the command does not exist", async () => {
     await expect(runAcpAgent({
       command: "/definitely/not/here/memmy-assist-agent",
