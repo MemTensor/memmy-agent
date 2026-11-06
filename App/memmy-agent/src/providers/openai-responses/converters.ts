@@ -125,6 +125,9 @@ export function convertTools(tools: Record<string, any>[]): Record<string, any>[
       name: fn.name,
       description: fn.description ?? "",
       parameters: parameters && typeof parameters === "object" && !Array.isArray(parameters) ? parameters : {},
+      // Responses defaults to strict validation, which makes optional CU fields
+      // (such as window_id before observation) mandatory. Preserve the tool contract.
+      strict: fn.strict ?? false,
     });
   }
   return out;

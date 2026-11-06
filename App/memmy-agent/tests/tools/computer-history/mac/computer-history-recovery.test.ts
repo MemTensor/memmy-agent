@@ -20,7 +20,7 @@ function makeService() {
   services.push(service);
   return service;
 }
-function rawSegment() {
+function rawSegment(platform: "macOS" | "windows" = "macOS") {
   const directory = path.join(root, "recordings", "segments", id);
   fs.mkdirSync(directory, { recursive: true });
   fs.mkdirSync(path.join(root, "histories"), { recursive: true });
@@ -29,7 +29,7 @@ function rawSegment() {
   const metadataFile = path.join(directory, "metadata.json");
   fs.writeFileSync(metadataFile, JSON.stringify({ id, startedAt: "2026-09-13T00:00:00Z", state: "open" }));
   fs.writeFileSync(eventsFile, [
-    { recordType: "human_history_metadata", schemaVersion: 1, recordingId: id, title: "Review", platform: "macOS" },
+    { recordType: "human_history_metadata", schemaVersion: 1, recordingId: id, title: "Review", platform },
     { recordType: "human_event", eventType: "application_changed", timestamp: "2026-09-13T00:00:01Z", application: { name: "Notes", bundleId: "com.apple.Notes" }, details: {} },
     { recordType: "human_event", eventType: "accessibility_snapshot", timestamp: "2026-09-13T00:05:00Z", application: { name: "Notes", bundleId: "com.apple.Notes" }, ax: { mode: "fullTree", text: "AXStaticText||LATE_DECISION_RELEASE_218|||" }, details: {} },
   ].map((record) => JSON.stringify(record)).join("\n") + "\n");
@@ -50,8 +50,8 @@ afterEach(async () => {
 });
 
 describe("interrupted segment recovery", () => {
-  it("recovers raw-only evidence before the first live summary and does not repeat it", async () => {
-    const segment = rawSegment();
+  it.each(["macOS", "windows"] as const)("recovers raw-only %s evidence using the recorded platform and does not repeat it", async (platform) => {
+    const segment = rawSegment(platform);
     const service = makeService();
     const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
     service.setLlmRuntime(makeRuntime(chat));
@@ -59,6 +59,10 @@ describe("interrupted segment recovery", () => {
     expect(service.snapshot().histories.find((entry) => entry.id === `${id}-10min-summary`)?.markdown).toContain("LATE_DECISION_RELEASE_218");
     expect(JSON.stringify(chat.mock.calls)).toContain("LATE_DECISION_RELEASE_218");
     expect(fs.readFileSync(segment.historyFile, "utf8")).toContain("capture_end_reason: interrupted");
+    const markdown = fs.readFileSync(segment.historyFile, "utf8");
+    expect(markdown.match(/^capture_policy:.*$/gm)).toEqual([platform === "windows"
+      ? "capture_policy: accessibility_events_no_screenshots"
+      : "capture_policy: accessibility_events_and_page_urls_no_screenshots"]);
     const count = chat.mock.calls.length;
     await service.backfillUnwrittenSummaries();
     expect(chat).toHaveBeenCalledTimes(count);

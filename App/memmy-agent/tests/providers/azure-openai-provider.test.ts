@@ -116,7 +116,7 @@ describe("AzureOpenAIProvider body construction", () => {
       null,
     );
 
-    expect(body.tools).toEqual([{ type: "function", name: "get_weather", description: "", parameters: {} }]);
+    expect(body.tools).toEqual([{ type: "function", name: "get_weather", description: "", parameters: {}, strict: false }]);
     expect(body.tool_choice).toBe("auto");
   });
 

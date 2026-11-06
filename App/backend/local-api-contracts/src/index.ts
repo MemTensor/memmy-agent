@@ -13,6 +13,7 @@ export { normalizeOutputLanguage } from "./output-language.js";
 
 export * from "./model-catalog-resolver.js";
 export * from "./model-thinking-levels.js";
+export { anthropicRequestModelId } from "./anthropic-model-id.js";
 
 export * from "./memory-runtime.js";
 export * from "./memory-canonical-json.js";
@@ -1845,6 +1846,7 @@ export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;
 export * from './desktop-screen-capture.js';
 export * from './computer-use-onboarding.js';
 
+export * from "./computer-recordings.js";
 /** Memory owns scan execution; desktop translates this state into its existing events. */
 export const MemoryAgentSourceScanStateSchema = z.object({
     version: ScanVersionSchema.optional(),

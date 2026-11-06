@@ -1,4 +1,5 @@
 import type {
+  ApiErrorBody as RuntimeApiErrorBody,
   L3WorldModelFeatures,
   L3WorldModelProtocolVersion,
   L3WorldModelTransition,
@@ -84,6 +85,7 @@ export type JobType =
   | "l2_induction"
   | "l3_abstraction"
   | "l3_world_model_update"
+  | "l3_unit_update"
   | "project_environment_profile"
   | "skill_crystallization"
   | "skill_cluster_assign"
@@ -114,22 +116,7 @@ export interface RequestEnvelope {
   timeZone?: string;
 }
 
-export interface ApiErrorBody {
-  error: {
-    code:
-      | "invalid_argument"
-      | "unauthorized"
-      | "forbidden"
-      | "not_found"
-      | "conflict"
-      | "rate_limited"
-      | "memory_starting"
-      | "memory_upgrading"
-      | "internal";
-    message: string;
-    requestId?: string;
-  };
-}
+export type ApiErrorBody = RuntimeApiErrorBody;
 
 export interface JobRef {
   jobId: string;
@@ -359,6 +346,7 @@ export interface TurnStartRequest extends RequestEnvelope {
   turnId?: string;
   layers?: MemoryLayer[];
   contextHints?: Record<string, unknown>;
+  /** Estimated recalled-context token limit; fixed task instructions are exempt. Default: 1800. */
   contextBudget?: number;
 }
 
@@ -507,8 +495,15 @@ export interface MemorySearchRequest extends RequestEnvelope {
   layers?: MemoryLayer[];
   tags?: string[];
   limit?: number;
+  /** Estimated recalled-context token limit; fixed task instructions are exempt. Default: 1800. */
   contextBudget?: number;
   includeInjectedContext?: boolean;
+  /**
+   * When false, skip persisting the recall event and memory_search API log.
+   * Retrieval model calls, request idempotency records and plugin analytics are unaffected,
+   * and the returned searchEventId does not resolve to a stored recall event.
+   */
+  recordEvent?: boolean;
   verbose?: boolean;
 }
 

@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveMacWeChatPython } from "../../../../src/tools/computer-history/mac/wechat-python.js";
 
 const temporaries: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   while (temporaries.length) fs.rmSync(temporaries.pop()!, { recursive: true, force: true });
 });
 
@@ -61,7 +62,19 @@ describe("WeChat macOS bundled interpreter", () => {
     expect(resolveMacWeChatPython({ moduleFile: bundle({ executable: false }) })).toBeNull();
   });
 
-  it("returns null when python3 exists but is not executable", () => {
+  it("returns null when executable access is denied", () => {
+    const moduleFile = bundle();
+    const binary = path.join(path.dirname(moduleFile), "wechat", "python", "bin", "python3");
+    const access = vi.spyOn(fs, "accessSync").mockImplementation(() => {
+      throw Object.assign(new Error("fixture executable access denied"), { code: "EACCES" });
+    });
+    expect(resolveMacWeChatPython({ moduleFile })).toBeNull();
+    expect(access).toHaveBeenCalledWith(binary, fs.constants.X_OK);
+  });
+
+  // Windows does not implement POSIX execute bits; the denial path above is
+  // still exercised on every host, and macOS checks the real filesystem mode.
+  it.skipIf(process.platform === "win32")("returns null when python3 exists but is not executable", () => {
     const moduleFile = bundle({ executable: false });
     const binary = path.join(path.dirname(moduleFile), "wechat", "python", "bin", "python3");
     fs.writeFileSync(binary, "", { mode: 0o644 });

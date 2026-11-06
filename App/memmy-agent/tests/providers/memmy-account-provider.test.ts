@@ -140,7 +140,41 @@ describe("Memmy Account quota errors", () => {
     expect(response.content).toBe(`Error calling LLM: ${detail}`);
   });
 
-  it.each([0, "0", 40308])("does not classify business code %j", (code) => {
+  it("classifies the current HTTP 200 quota business code 40308", () => {
+    const response = provider().parseResponse({ code: 40308, message: "account quota exhausted" });
+
+    expect(response.finishReason).toBe("error");
+    expect(response.errorCode).toBe("40308");
+    expect(response.errorCategory).toBe("quota_exhausted");
+  });
+
+  it("classifies the standard insufficient_quota error type for Memmy Account", () => {
+    const response = provider().parseResponse({
+      error: { code: "40308", type: "insufficient_quota", message: "account quota exhausted" },
+    });
+
+    expect(response.finishReason).toBe("error");
+    expect(response.errorType).toBe("insufficient_quota");
+    expect(response.errorCategory).toBe("quota_exhausted");
+  });
+
+  it("prefers memmy_code while accepting the legacy wire quota code", () => {
+    const response = provider().parseResponse({
+      error: {
+        code: "40309",
+        memmy_code: "40308",
+        type: "insufficient_quota",
+        message: "account quota exhausted",
+      },
+    });
+
+    expect(response.finishReason).toBe("error");
+    expect(response.errorCode).toBe("40308");
+    expect(response.errorType).toBe("insufficient_quota");
+    expect(response.errorCategory).toBe("quota_exhausted");
+  });
+
+  it.each([0, "0"])("does not classify success business code %j", (code) => {
     const response = provider().parseResponse({ code, message: "quota-like text" });
 
     expect(response.errorCategory).toBeNull();

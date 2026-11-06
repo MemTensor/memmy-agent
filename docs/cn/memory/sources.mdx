@@ -262,6 +262,8 @@ Hermes 同样只允许一个活动的 Memory Provider；检测到其他 Provider
 
 点击 **移除 Hook**、**移除插件** 或 **移除 Skill** 时，Memmy 会清理自己管理的接入内容；其他配置会保留，已经进入 Memmy 的历史记忆不会被删除。
 
+Codex 出现在列表中只表示发现了会话目录。安装 Hook 还需要可运行的 Codex CLI：Memmy 会检查插件目录、PATH、macOS 应用内置 CLI、Windows 桌面运行时缓存及常见 npm 安装位置。如果使用自定义位置，可将 `MEMMY_CODEX_EXECUTABLE` 设置为 Codex CLI 的绝对路径后重启 Memmy；也兼容 `CODEX_CLI_PATH`，但前者优先。请指定 CLI，不能指定桌面应用的启动程序。路径无效时安装会报错，不会写入新的 Hook 文件。
+
 ### 本地访问与失败行为
 
 - Hook 和插件从 `~/.memmy/config.yaml` 读取 Memory 服务地址与 token，并把运行所需配置保存在对应 Agent 的本地配置目录。请不要公开这些配置文件。

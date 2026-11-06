@@ -7,6 +7,7 @@ export function ComputerHistoryRecordingConfirmation(props: {
   open: boolean;
   onCancel(): void;
   onConfirm(): void;
+  windows?: boolean;
 }) {
   const { t } = useTranslation();
   const [noticeBefore, noticeAfter] = t("computerHistory.enableModelNotice").split("{operations}");
@@ -34,11 +35,14 @@ export function ComputerHistoryRecordingConfirmation(props: {
         closeLabel={t("common.close")}
         confirmLabel={t("computerHistory.enableConfirm")}
         message={(
-          <p className="ch-recording-confirmation__details">
-            {noticeBefore}
-            <strong className="font-semibold text-text-ink">{t("computerHistory.enableAllOperations")}</strong>
-            {noticeAfter}{t("computerHistory.enableLocalNotice")}
-          </p>
+          <ul className="ch-recording-confirmation__details">
+            <li>
+              {noticeBefore}
+              <strong className="font-semibold text-text-ink">{t(props.windows ? "computerHistory.windows.selectedOperations" : "computerHistory.enableAllOperations")}</strong>
+              {noticeAfter}{t("computerHistory.enableLocalNotice")}
+            </li>
+            {props.windows && <li>{t("computerHistory.windows.stopHotkey")}</li>}
+          </ul>
         )}
         onCancel={props.onCancel}
         onConfirm={props.onConfirm}

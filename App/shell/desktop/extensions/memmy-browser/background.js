@@ -1485,6 +1485,7 @@ async function probeCdpTarget(tabId, args, commandId) {
   return approved;
 }
 
+// Accept raw reads and normalized upstream output; safety options must match exactly.
 function normalizeCdpRead(method, params) {
   if (!params || typeof params !== 'object' || Array.isArray(params)
     || JSON.stringify(params).length > 24000) throw new Error('Invalid CDP parameters');
@@ -1494,22 +1495,25 @@ function normalizeCdpRead(method, params) {
     return {};
   }
   if (method === 'DOM.getDocument') {
-    if (keys.some(key => key !== 'depth') || (params.depth !== undefined
+    if (keys.some(key => key !== 'depth' && (key !== 'pierce' || params[key] !== false))
+      || (params.depth !== undefined
       && (!Number.isInteger(params.depth) || params.depth < 0 || params.depth > 3))) {
       throw new Error('CDP DOM depth is unavailable');
     }
     return { depth: params.depth ?? 1, pierce: false };
   }
   if (method === 'Page.captureScreenshot') {
-    if (keys.some(key => key !== 'format') || (params.format !== undefined
+    if (keys.some(key => key !== 'format' && (key !== 'captureBeyondViewport' || params[key] !== false))
+      || (params.format !== undefined
       && params.format !== 'png' && params.format !== 'jpeg')) throw new Error('CDP screenshot parameters are unavailable');
     return { format: params.format ?? 'png', captureBeyondViewport: false };
   }
   if (method === 'Runtime.evaluate') {
-    if (keys.some(key => key !== 'expression') || typeof params.expression !== 'string'
+    const safetyParams = { throwOnSideEffect: true, returnByValue: true, awaitPromise: false, userGesture: false };
+    if (keys.some(key => key !== 'expression'
+      && (!Object.hasOwn(safetyParams, key) || params[key] !== safetyParams[key])) || typeof params.expression !== 'string'
       || !params.expression || params.expression.length > 20000) throw new Error('CDP expression is unavailable');
-    return { expression: params.expression, throwOnSideEffect: true,
-      returnByValue: true, awaitPromise: false, userGesture: false };
+    return { expression: params.expression, ...safetyParams };
   }
   throw new Error('CDP method is unavailable');
 }

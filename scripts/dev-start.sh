@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MEMMY_AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
-ELECTRON_PACKAGE_DIR="$DESKTOP_DIR/node_modules/electron"
+ELECTRON_PACKAGE_DIR=""
 MEMORY_CLI_ENTRY="$ROOT_DIR/Memory/dist/src/cli/index.js"
 MEMMY_CONFIG_PATH="${MEMMY_CONFIG:-$HOME/.memmy/config.yaml}"
 MEMMY_WORKSPACE_IS_EXPLICIT=0
@@ -162,11 +162,20 @@ electron_runtime_available() {
   ) >/dev/null 2>&1
 }
 
+resolve_electron_package_dir() {
+  node --eval '
+    const path = require("node:path");
+    const searchRoot = process.argv[1];
+    process.stdout.write(path.dirname(require.resolve("electron/package.json", { paths: [searchRoot] })));
+  ' "$DESKTOP_DIR"
+}
+
 ensure_electron_runtime() {
   local electron_platform electron_platform_path electron_zip_path
 
+  ELECTRON_PACKAGE_DIR="$(resolve_electron_package_dir 2>/dev/null || true)"
   if [[ ! -f "$ELECTRON_PACKAGE_DIR/install.js" ]]; then
-    printf '[dev-start] missing Electron package at %s; run npm install first\n' "$ELECTRON_PACKAGE_DIR" >&2
+    printf '[dev-start] unable to resolve the Electron package for %s; run npm install first\n' "$DESKTOP_DIR" >&2
     exit 1
   fi
 

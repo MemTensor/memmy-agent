@@ -41,7 +41,7 @@ afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimer
 
 describe("verification code network failures", () => {
   it.each([0, Number.MAX_SAFE_INTEGER, -1, NaN, Infinity, 1.5])("keeps Retry-After %s within a usable retry window", async (seconds) => {
-    mocks.sendCode.mockRejectedValueOnce(new ApiRequestError("retry later", 429, "rate_limited", null, seconds));
+    mocks.sendCode.mockRejectedValueOnce(new ApiRequestError("retry later", 429, "rate_limited", null, null, seconds));
     await render();
     await act(async () => sendButton().click());
     expect(auth.countdown).toBe(60);
@@ -166,7 +166,7 @@ describe("verification code network failures", () => {
   });
 
   it("uses the server's remaining retry delay after reopening the page", async () => {
-    mocks.sendCode.mockRejectedValueOnce(new ApiRequestError("retry later", 429, "rate_limited", null, 17));
+    mocks.sendCode.mockRejectedValueOnce(new ApiRequestError("retry later", 429, "rate_limited", null, null, 17));
     await render(); await act(async () => sendButton().click());
     expect(auth.countdown).toBe(17);
     await act(async () => { vi.advanceTimersByTime(17_000); });

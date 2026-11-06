@@ -162,8 +162,18 @@ export interface RecordingEntryController {
   archive(entry: RecordingArchiveEntry): void;
 }
 
-/** Sends a transcript into the conversation, however the host wires that up. */
-export type RecordingDeliverFn = (transcript: File, mode: RecordingDelivery) => void;
+/**
+ * Sends a transcript into the conversation, however the host wires that up.
+ *
+ * A persisted transcript is supplied separately so the conversation composer
+ * can reuse its workspace path instead of uploading an identical cache copy.
+ * The generated File remains the fallback for legacy rows and failed saves.
+ */
+export type RecordingDeliverFn = (
+  transcript: File,
+  mode: RecordingDelivery,
+  persistedTranscript?: UploadedAgentMedia
+) => void;
 
 /**
  * Translator, taken from the page.
@@ -680,8 +690,11 @@ export function useRecordingEntry(
     },
     deliver: (entry, mode) => {
       // The file is written with the speaker labels the UI shows, so it reads
-      // the same in the conversation as it did on the page.
-      deliver?.(transcriptFile(entry, t), mode);
+      // the same in the conversation as it did on the page. Prefer the copy
+      // already kept in the recordings folder; the generated File is the
+      // fallback for legacy rows or a transcript whose save failed.
+      const persistedTranscript = entry.files?.find((file) => file.kind === "file" && file.mime === "text/plain");
+      deliver?.(transcriptFile(entry, t), mode, persistedTranscript);
     },
     reset
   }), [

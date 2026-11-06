@@ -39,6 +39,8 @@ export type WebuiTitleServiceOptions = {
   llmRuntime: LLMRuntimeResolver;
   scheduleBackground: (promise: Promise<any>) => void;
   tokenUsageRecorder: ByokTokenUsageRecorderLike;
+  /** Reads a bounded text excerpt from an attachment already validated by the WebUI gateway. */
+  readMediaText?: (filePath: string) => string | null;
 };
 
 export class WebuiTitleService {
@@ -47,6 +49,7 @@ export class WebuiTitleService {
   private readonly llmRuntime: LLMRuntimeResolver;
   private readonly scheduleBackground: (promise: Promise<any>) => void;
   private readonly tokenUsageRecorder: ByokTokenUsageRecorderLike;
+  private readonly readMediaText: ((filePath: string) => string | null) | null;
   private readonly pendingByChatId = new Map<string, PendingTitleRequest>();
   private readonly inFlightSessionKeys = new Set<string>();
 
@@ -56,6 +59,7 @@ export class WebuiTitleService {
     this.llmRuntime = options.llmRuntime;
     this.scheduleBackground = options.scheduleBackground;
     this.tokenUsageRecorder = options.tokenUsageRecorder;
+    this.readMediaText = options.readMediaText ?? null;
   }
 
   trackUserMessage(input: WebuiTitleTrackInput): void {
@@ -118,8 +122,10 @@ export class WebuiTitleService {
     try {
       const session = this.sessions.loadSession(pending.sessionKey);
       if (!this.canWriteModelTitle(session)) return false;
-      if (countTitleUserMessages(session) !== 1) return false;
-      const userText = firstTitleUserMessage(session);
+      if (countTitleUserInputs(session) !== 1) return false;
+      // Text remains authoritative when the user supplied it. An attachment
+      // excerpt is used only for a file-only first message.
+      const userText = firstTitleUserMessage(session) || this.firstMediaText(pending.mediaPaths);
       if (!userText) return false;
 
       const response = await this.requestModelTitle(pending.provider, pending.model, userText);
@@ -185,6 +191,20 @@ export class WebuiTitleService {
     });
   }
 
+  private firstMediaText(mediaPaths: string[]): string {
+    if (!this.readMediaText) return "";
+    for (const filePath of mediaPaths) {
+      try {
+        const text = this.readMediaText(filePath)?.trim();
+        if (text) return text;
+      } catch {
+        // A missing, replaced, or unreadable attachment simply leaves the
+        // session untitled; title generation must never affect the main turn.
+      }
+    }
+    return "";
+  }
+
   private recordTitleUsage(pending: PendingTitleRequest, usage: Record<string, unknown> | null | undefined): void {
     void this.tokenUsageRecorder.recordAgentChatUsage({
       usage,
@@ -221,12 +241,19 @@ export function firstTitleUserMessage(session: Session | any): string {
   return "";
 }
 
-function countTitleUserMessages(session: Session | any): number {
+function countTitleUserInputs(session: Session | any): number {
   let count = 0;
   for (const message of session?.messages ?? []) {
-    if (webuiTitleUserText(message)) count += 1;
+    if (webuiTitleUserText(message) || titleMessageMediaPaths(message).length) count += 1;
   }
   return count;
+}
+
+function titleMessageMediaPaths(message: any): string[] {
+  if (message?.role !== "user" || message?.internal_context === "goal_continuation") return [];
+  return Array.isArray(message?.media)
+    ? message.media.filter((item: unknown): item is string => typeof item === "string" && Boolean(item.trim()))
+    : [];
 }
 
 function isCommandOnlyText(content: string, mediaPaths: string[]): boolean {
