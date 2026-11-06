@@ -17,7 +17,8 @@ const runtime = vi.hoisted(() => ({
     getReadyGeneration: vi.fn(() => 1),
     submitMessage: vi.fn(() => Promise.resolve()),
     onStatusResult: vi.fn(() => () => undefined),
-    onHistoryDagResult: vi.fn(() => () => undefined)
+    onHistoryDagResult: vi.fn(() => () => undefined),
+    onChat: vi.fn(() => () => undefined)
   },
   ensureChatSubscription: vi.fn(),
   taskStateCoordinator: { refreshTaskState: vi.fn() }
