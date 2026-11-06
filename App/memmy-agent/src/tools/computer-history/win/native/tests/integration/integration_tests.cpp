@@ -83,6 +83,29 @@ void WriteFileBytes(const fs::path& path, const std::string& bytes) {
   if (!out) Fail("could not write " + U8(path.wstring()));
 }
 
+void WriteLivePolicy(const fs::path& path, const std::string& bytes) {
+  // The recorder holds a read lease through each authorized sample. Wait only
+  // for that lease, then exclude readers until the complete revision is written.
+  // Keep capture running so the test still exercises revocation without pause.
+  const auto deadline = GetTickCount64() + 5000;
+  HANDLE file = INVALID_HANDLE_VALUE;
+  for (;;) {
+    file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) break;
+    const auto error = GetLastError();
+    if (error != ERROR_SHARING_VIOLATION || GetTickCount64() >= deadline) {
+      Fail("could not update live policy " + U8(path.wstring()) + ": " + std::to_string(error));
+    }
+    Sleep(10);
+  }
+  DWORD written = 0;
+  const bool complete = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr)
+    && written == bytes.size() && FlushFileBuffers(file);
+  const auto error = complete ? ERROR_SUCCESS : GetLastError();
+  CloseHandle(file);
+  Expect(complete, "could not write live policy " + U8(path.wstring()) + ": " + std::to_string(error));
+}
+
 std::string ReadFileBytes(const fs::path& path) {
   std::ifstream in(path, std::ios::binary);
   return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
@@ -1823,8 +1846,8 @@ void CaseTaskVideoStaticFrames() {
   recording.Send("resume"); recording.Wait("session.resumed", 5000); hold("resumed-static", false, 1500);
   fixture.RequireForeground('b'); hold("unauthorized", true, 800); fixture.ExpectForeground('b', "during unauthorized recording");
   const auto returnedAt = now(); fixture.RequireForeground('a'); hold("returned-static", false, 1500, returnedAt);
-  WriteFileBytes(policy, memmy::DumpJson({{"version", 1}, {"applications", Json::array()}})); hold("revoked", true, 800);
-  const auto restoredAt = now(); WriteFileBytes(policy, memmy::DumpJson(allowed)); hold("restored-static", false, 1500, restoredAt);
+  WriteLivePolicy(policy, memmy::DumpJson({{"version", 1}, {"applications", Json::array()}})); hold("revoked", true, 800);
+  const auto restoredAt = now(); WriteLivePolicy(policy, memmy::DumpJson(allowed)); hold("restored-static", false, 1500, restoredAt);
   recording.Send("stop"); recording.Wait("session.stopped", 5000);
   Expect(recording.Finish(5000, "task-static-recording") == 0, "static capture stopped within bound");
   Expect(RunToEnd(g_paths.Recorder(), {L"finalize-task", L"--output-dir", directory.wstring()}, "task-static-finalize").exitCode == 0, "static task remux");

@@ -592,6 +592,7 @@ TEST(notepad_scope_binds_application_and_exact_native_class_chain) {
   CHECK(parsed.policy && policy::HasNotepadDocumentScope(parsed.policy->applications[0]));
   CHECK(!policy::MatchesSelector(parsed.policy->applications[0].documentRegions, classify::kDocument, L""));
   Json input = *ParseJsonStrict(good, 32);
+  input["applications"][0]["captureText"] = false;
   input["applications"][0]["executable"] = "C:\\Other.exe";
   CHECK(!policy::Parse(DumpJson(input)).policy);
   input = *ParseJsonStrict(good, 32);
