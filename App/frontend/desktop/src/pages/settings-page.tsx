@@ -3856,9 +3856,9 @@ export function CollabAgentAccessSection(props: { client?: CollabClient }) {
   const agents = view?.agents.filter((agent) => agent.available) ?? [];
 
   return (
-    <div className="space-y-1">
-      <div className="flex items-start justify-between gap-4 py-3">
-        <div className="min-w-0">
+    <div>
+      <div className="flex items-start justify-between gap-6 py-3">
+        <div className="min-w-0 flex-1">
           <div className="text-sm text-text-ink/70">{t("settings.collab.row")}</div>
           <div className="mt-0.5 text-xs leading-relaxed text-text-ink/50">
             {granted ? t("settings.collab.descriptionGranted") : t("settings.collab.description")}
@@ -3868,10 +3868,20 @@ export function CollabAgentAccessSection(props: { client?: CollabClient }) {
         <div className="flex shrink-0 items-center gap-3 pt-0.5">
           {granted ? (
             <>
-              <span className="flex items-center gap-1.5 text-xs text-text-ink/45">
-                {busy ? <Loader2 size={12} className="animate-spin" /> : <Check size={13} className="text-status-success" />}
-                {busy ? t("settings.collab.installing") : t("settings.collab.granted")}
-              </span>
+              {busy ? (
+                <span className="flex items-center gap-1.5 text-xs text-text-ink/45">
+                  <Loader2 size={12} className="animate-spin" />{t("settings.collab.installing")}
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 text-xs text-text-ink/45">
+                  <Check size={13} className="text-status-success" />{t("settings.collab.granted")}
+                </span>
+              )}
+              {!busy && failures.length ? (
+                <span className="rounded-full bg-status-error/10 px-2 py-0.5 text-[11px] text-status-error">
+                  {t("settings.collab.failedCount", { count: String(failures.length) })}
+                </span>
+              ) : null}
               <button
                 type="button"
                 disabled={busy}
@@ -3896,7 +3906,7 @@ export function CollabAgentAccessSection(props: { client?: CollabClient }) {
 
       {granted ? (
         <>
-          <div className="overflow-hidden rounded-input border-content-panel">
+          <div className="pt-1">
             {agents.map((agent) => (
               <CollabAgentSettingsRow
                 key={agent.sourceId}
@@ -3904,10 +3914,10 @@ export function CollabAgentAccessSection(props: { client?: CollabClient }) {
                 onToggle={(enabled) => client && void run(() => client.setAgentEnabled(agent.sourceId, enabled))}
               />
             ))}
-            {!agents.length ? <p className="px-3.5 py-2.5 text-xs text-text-ink/50">{t("settings.collab.none")}</p> : null}
+            {!agents.length ? <p className="py-3 text-xs text-text-ink/50">{t("settings.collab.none")}</p> : null}
           </div>
           {failures.length ? (
-            <div className="mt-2 flex items-center justify-between gap-3 rounded-input border-content-panel px-3.5 py-2">
+            <div className="mt-3 flex items-center justify-between gap-3 rounded-card border-content-panel px-4 py-2.5">
               <span className="text-xs text-status-error">
                 {t("settings.collab.failed", { names: failures.map((item) => item.name).join("、") })}
               </span>
@@ -3942,7 +3952,12 @@ export function CollabAgentAccessSection(props: { client?: CollabClient }) {
   );
 }
 
-/** 设置里的一行 Agent：图标、名字与开关；关掉的那一行变淡并注明已关闭。 */
+/**
+ * 设置里的一行 Agent：图标、名字与开关。
+ *
+ * 行距照着「记忆管理 → 跨 Agent 接入」的 Agent 列表来：图标放进浅色方块，第二行放状态胶囊，
+ * 每行 py-3.5、行间一条浅分隔线，避免元素挤在一起。
+ */
 function CollabAgentSettingsRow(props: {
   agent: CollabAgentAccessView["agents"][number];
   onToggle: (enabled: boolean) => void;
@@ -3951,18 +3966,24 @@ function CollabAgentSettingsRow(props: {
   const { agent } = props;
   const logo = agentSourceLogoUrl(agent.sourceId);
   return (
-    <div className="flex items-center gap-2.5 border-t border-border-stone/30 px-3.5 py-2 first:border-t-0">
-      <span className={`flex h-4 w-4 shrink-0 items-center justify-center ${agent.enabled ? "" : "opacity-50"}`}>
-        {logo ? <img src={logo} alt="" className="h-4 w-4 rounded object-contain" /> : (
-          <span className="flex h-4 w-4 items-center justify-center rounded bg-action-sky/20 text-[10px] font-semibold text-action-sky-hover">
-            {Array.from(agent.name)[0] ?? "A"}
-          </span>
+    <div className={`flex items-center gap-3.5 border-t border-border-stone/30 py-3.5 first:border-t-0 ${agent.enabled ? "" : "opacity-70"}`}>
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-canvas-oat">
+        {logo ? <img src={logo} alt="" aria-hidden="true" className="h-5 w-5 object-contain" /> : (
+          <span className="text-xs font-bold text-text-ink/65">{Array.from(agent.name)[0] ?? "A"}</span>
         )}
       </span>
-      <span className={`min-w-0 flex-1 truncate text-sm ${agent.enabled ? "text-text-ink/70" : "text-text-ink/40"}`}>
-        {agent.name}
-      </span>
-      {!agent.enabled ? <span className="shrink-0 text-xs text-text-ink/40">{t("settings.collab.agentOff")}</span> : null}
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm text-text-ink/80">{agent.name}</div>
+        {/* 打开的行不必再写「已授权」，表头已经说过；关掉的行才需要点明。 */}
+        {agent.enabled ? null : (
+          <div className="mt-1 flex items-center gap-2">
+            <span className="shrink-0 rounded-full bg-border-stone/30 px-2 py-0.5 text-[11px] text-text-ink/50">
+              {t("settings.collab.agentOff")}
+            </span>
+            <span className="truncate text-xs text-text-ink/45">{t("settings.collab.agentOffHint")}</span>
+          </div>
+        )}
+      </div>
       <Toggle checked={agent.enabled} ariaLabel={agent.name} onChange={props.onToggle} />
     </div>
   );
