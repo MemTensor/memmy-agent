@@ -30,6 +30,8 @@ export interface CursorVscdbSource {
   mainComposerIds(): Iterable<string>;
   /** Parsed `cursorDiskKV` row `composerData:{composerId}`. */
   composerData(composerId: string): unknown;
+  /** Parsed header-index chunk from cursorDiskKV. */
+  conversationHeaderChunk?(composerId: string, index: number): unknown;
   /** Parsed `cursorDiskKV` row `bubbleId:{composerId}:{bubbleId}`. */
   bubble(composerId: string, bubbleId: string): unknown;
 }
@@ -59,7 +61,8 @@ export async function* readCursorComposer(
   signal?.throwIfAborted();
   const data = source.composerData(composerId);
   if (!isRecord(data) || isRecord(data.subagentInfo)) return;
-  const headers = Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+  const headers = readConversationHeaders(source, composerId, data);
+  if (!headers) return;
   const composerStatus = text(data.status);
 
   let current: CursorBubble[] = [];
@@ -135,7 +138,8 @@ export function resolveCursorTurnId(
   if (!requestId) return undefined;
   const data = source.composerData(composerId);
   if (!isRecord(data)) return undefined;
-  const headers = Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+  const headers = readConversationHeaders(source, composerId, data);
+  if (!headers) return undefined;
   for (const header of headers) {
     if (!isRecord(header) || header.type !== USER_BUBBLE) continue;
     const bubble = readBubble(source, composerId, header);
@@ -153,6 +157,39 @@ export async function readCursorSourceTurn(
     || (expected.requestId ? resolveCursorTurnId(source, expected.conversationId, expected.requestId) : undefined);
   if (!turnId) return { turn: null, reason: "identity_unresolved" };
   return selectSourceTurn(readCursorComposer(source, expected.conversationId), { conversationId: expected.conversationId, turnId });
+}
+
+/** A declared chunk log is authoritative; never fall back to a partial inline index. */
+function readConversationHeaders(
+  source: CursorVscdbSource,
+  composerId: string,
+  data: Record<string, unknown>
+): unknown[] | undefined {
+  if (data.headerLog == null) {
+    return Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+  }
+  const log = data.headerLog;
+  if (!isRecord(log)) return undefined;
+  const { chunkSize, chunkCount, count } = log;
+  if (typeof chunkSize !== "number" || !Number.isSafeInteger(chunkSize) || chunkSize <= 0
+    || typeof chunkCount !== "number" || !Number.isSafeInteger(chunkCount) || chunkCount < 0
+    || typeof count !== "number" || !Number.isSafeInteger(count) || count < 0
+    || chunkCount > 65_536 // Cursor's maximum number of header chunks.
+    || !source.conversationHeaderChunk) return undefined;
+  const headers: unknown[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < chunkCount; index++) {
+    const chunk = source.conversationHeaderChunk(composerId, index);
+    if (!Array.isArray(chunk) || headers.length + chunk.length > count) return undefined;
+    for (const header of chunk) {
+      if (!isRecord(header) || typeof header.bubbleId !== "string" || !header.bubbleId || seen.has(header.bubbleId)) {
+        return undefined;
+      }
+      seen.add(header.bubbleId);
+      headers.push(header);
+    }
+  }
+  return headers.length === count ? headers : undefined;
 }
 
 function readBubble(source: CursorVscdbSource, composerId: string, header: Record<string, unknown>): CursorBubble | undefined {

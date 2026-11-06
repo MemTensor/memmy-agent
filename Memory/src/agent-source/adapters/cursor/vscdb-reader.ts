@@ -57,6 +57,7 @@ function createSource(db: Database.Database): CursorVscdbSource | null {
   return {
     mainComposerIds: () => (mainComposers.all() as Array<{ composerId: string }>).map((row) => row.composerId),
     composerData: (composerId) => parse(`composerData:${composerId}`),
+    conversationHeaderChunk: (composerId, index) => parse(`composerConvHeaders:${composerId}:${String(index).padStart(6, "0")}`),
     bubble: (composerId, bubbleId) => parse(`bubbleId:${composerId}:${bubbleId}`)
   };
 }
