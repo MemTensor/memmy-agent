@@ -54,12 +54,17 @@ it("loads cloud instructions through the real bridge without persisting bodies a
     expect(transcript).not.toContain(secret); expect(transcript).not.toContain("PRIVATE-EVIDENCE-SENTINEL");
     expect(transcript).toContain("memmy_plugin_skill_ref_v1");
     content.clear(); // Simulated Host restart: all instruction memory is lost.
+    fetchFn.mockResolvedValueOnce(new Response("temporary instruction service outage", { status: 503 }));
+    const retryNotices: string[] = [];
     const resumedRequests: any[] = [];
     const resumedProvider = { chat: async (args: any) => { resumedRequests.push(args); return new LLMResponse({ content: "resumed" }); } };
     const restored = JSON.parse(transcript);
     const resumed = await new AgentRunner(resumedProvider as any).run(new AgentRunSpec({ messages: [{ role: "user", content: "continue after compaction" }],
+      retryWaitCallback: (message: string) => { retryNotices.push(message); },
       privateSkillRefs: restored.metadata.privatePluginSkillRefs, tools: await tools(), sessionKey: "chat", provider: resumedProvider as any, maxIterations: 1 }));
-    expect(fetchFn).toHaveBeenCalledTimes(2); expect(JSON.stringify(resumedRequests)).toContain(secret);
+    expect(fetchFn).toHaveBeenCalledTimes(3); expect(JSON.stringify(resumedRequests)).toContain(secret);
+    expect(resumedRequests).toHaveLength(1); expect(retryNotices).toHaveLength(1);
+    expect(invoke).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(resumed.messages)).not.toContain(secret);
   } finally {
     content.clear(); await Promise.all(connections.flatMap(({ client, server }) => [client.close(), server.close()])); rmSync(root, { recursive: true, force: true });

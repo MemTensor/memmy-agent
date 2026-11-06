@@ -18,6 +18,51 @@ function fixture(body = payload) {
   return { service, fetchFn, login: (token: string) => { authorization = token; }, disable: () => { active = false; } };
 }
 describe("private Skill cloud reads", () => {
+  it("enforces its deadline even if fetch ignores abort and never caches a late response", async () => {
+    const { service, fetchFn } = fixture();
+    const ref = service.reference("literature-review", "literature-review");
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(controller.signal);
+    let complete!: (response: Response) => void;
+    fetchFn.mockImplementationOnce(() => new Promise<Response>(resolve => { complete = resolve; }));
+    try {
+      const first = service.resolve(ref);
+      const rejection = expect(first).rejects.toMatchObject({ code: "plugin_skill_unavailable", retryable: true });
+      controller.abort(new DOMException("Deadline reached", "TimeoutError")); await rejection;
+      complete(new Response(payload));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(await service.resolve(ref)).toContain(secret);
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+    } finally { timeout.mockRestore(); }
+  });
+
+  it.each([[401, "plugin_skill_access_denied", false], [403, "plugin_skill_access_denied", false], [404, "plugin_skill_bundle_missing", false], [429, "plugin_skill_unavailable", true], [503, "plugin_skill_unavailable", true]])("preserves a safe classification for HTTP %s", async (status, code, retryable) => {
+    const { service, fetchFn } = fixture();
+    fetchFn.mockResolvedValueOnce(new Response("upstream body must stay private", { status: Number(status) }));
+    await expect(service.resolve(service.reference("literature-review", "literature-review"))).rejects.toMatchObject({ code, retryable });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves invalid bundle failures instead of reporting a network failure", async () => {
+    const { service } = fixture("tampered");
+    await expect(service.resolve(service.reference("literature-review", "literature-review"))).rejects.toMatchObject({ code: "plugin_skill_invalid", retryable: false });
+  });
+
+  it("cancels one consumer immediately while another completes the shared read", async () => {
+    const { service, fetchFn } = fixture();
+    const ref = service.reference("literature-review", "literature-review");
+    let complete!: (response: Response) => void;
+    fetchFn.mockImplementationOnce(() => new Promise<Response>(resolve => { complete = resolve; }));
+    const controller = new AbortController();
+    const first = service.resolve(ref, controller.signal);
+    const second = service.resolve(ref);
+    const rejected = expect(first).rejects.toThrow("cancelled");
+    controller.abort(new Error("cancelled")); await rejected;
+    complete(new Response(payload));
+    expect(await second).toContain(secret);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
   it("returns metadata only from reference and deduplicates account-bound memory reads", async () => {
     const { service, fetchFn, login } = fixture();
     const ref = service.reference("literature-review", "literature-review");

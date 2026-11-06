@@ -149,6 +149,14 @@ describe("Office and source files in the merged thread preview", () => {
     expect(container.textContent).toContain("字典内容");
   });
 
+  it("shows an unpreviewable zip with the current preview placeholder", async () => {
+    await render("bundle.zip", new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], { type: "application/zip" }));
+    expect(container.querySelector(".thread-preview__placeholder-name")?.textContent).toBe("bundle.zip");
+    expect(container.textContent).toContain("暂不支持在侧栏中预览此格式");
+    expect(container.querySelector(".workspace-artifact-preview-empty")).toBeNull();
+    expect(container.querySelector(".workspace-artifact-file-list")).toBeNull();
+  });
+
   it.each([
     ["review.tex", "\\documentclass{article}\n\\begin{document}\n正文\n\\end{document}"],
     ["references.bib", "@article{example, title={示例文献}, year={2026}}"],

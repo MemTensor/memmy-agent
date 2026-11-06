@@ -14,15 +14,21 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(async () => ({ callId: "guide-call" })),
   list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(),
   openArtifact: vi.fn(() => true),
+  ensureConversation: vi.fn(async (_title: string) => "created-chat" as string | null),
   send: vi.fn(async () => true), sending: false,
   messages: [] as AgentChatMessage[],
+
+activeTurnIdByChatId: {} as Record<string, string | null>,
+  stopInFlightByChatId: {} as Record<string, boolean>,
+
   stageFiles: vi.fn(async () => undefined),
   stageExistingFiles: vi.fn(async () => undefined),
   recordingDeliver: undefined as undefined | ((file: File, mode: "summarize" | "attach", persisted?: unknown) => void),
 }));
 vi.mock("../../app/providers.js", () => ({ useApiClients: () => ({ clients: clients }) }));
 vi.mock("../../state/app-state.js", () => ({ useAppState: () => ({
-  state: { agent: { currentChatId: mocks.chatId, currentSessionKey: mocks.chatId ? `websocket:${mocks.chatId}` : null, isSending: mocks.sending },
+  state: { agent: { currentChatId: mocks.chatId, currentSessionKey: mocks.chatId ? `websocket:${mocks.chatId}` : null, isSending: mocks.sending,
+    messages: mocks.messages, activeTurnIdByChatId: mocks.activeTurnIdByChatId, stopInFlightByChatId: mocks.stopInFlightByChatId },
     account: { userId: "test-user" }, bootstrap: { app: { userMode: "account" } } }, dispatch: mocks.dispatch
 }) }));
 vi.mock("../recording-entry.js", async (original) => {
@@ -55,10 +61,11 @@ describe("conversation feature integration", () => {
     ui = usePluginUi();
     features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: vi.fn(),
       onStageFiles: mocks.stageFiles, onStageExistingFiles: mocks.stageExistingFiles, onOpenArtifact: mocks.openArtifact,
-      onSend: mocks.send, onOpenRecording: mocks.openRecording });
+      onSend: mocks.send, onOpenRecording: mocks.openRecording, onEnsureConversation: mocks.ensureConversation });
+
     return <>{features.recorders}<nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
   }
-  const render = () => root.render(<I18nProvider language="zh-CN"><PluginUiProvider><Harness /></PluginUiProvider></I18nProvider>);
+  const render = (language = "zh-CN") => root.render(<I18nProvider language={language}><PluginUiProvider><Harness /></PluginUiProvider></I18nProvider>);
   const button = (name: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === name);
   const enterLegalConversation = async () => {
     mocks.chatId = "legal-chat";
@@ -67,11 +74,27 @@ describe("conversation feature integration", () => {
       conversationId: "websocket:legal-chat", origin: "agent", event: { type: "progress", current: 0, message: "Preparing" } }));
   };
   beforeEach(() => {
-    vi.clearAllMocks(); mocks.chatId = null; mocks.sending = false; mocks.messages = []; mocks.list.mockResolvedValue([plugin]);
+    vi.clearAllMocks(); mocks.chatId = null; mocks.sending = false; mocks.messages = [];
+    mocks.activeTurnIdByChatId = {}; mocks.stopInFlightByChatId = {}; mocks.list.mockResolvedValue([plugin]);
     localStorage.clear();
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   });
   afterEach(async () => { await act(async () => root.unmount()); container.remove(); localStorage.clear(); });
+
+  it.each([
+    ["zh-CN", "文献综述", "创建或继续基于文献证据的文献综述。", "<主题>"],
+    ["en-US", "Literature Review", "Create or continue an evidence-grounded literature review.", "<topic>"]
+  ])("localizes installed plugin palette entries for %s", async (language, title, description, argHint) => {
+    mocks.list.mockResolvedValue([{ id: "literature-review", state: "active", manifest: {
+      capabilities: [], commands: [{ command: "/literature-review", name: "Literature Review",
+        description: "Create or continue an evidence-grounded literature review.", argHint: "<topic>",
+        capabilityId: "review_create_task", agentSkillId: "literature-review" }]
+    } }]);
+    await act(async () => render(language));
+    expect(features.commandItems).toEqual([{
+      command: "/literature-review", title, description, argHint, icon: "activity", synthetic: true
+    }]);
+  });
 
   it("keeps legal shortcuts out of empty and unrelated conversations", async () => {
     await act(async () => render());
@@ -82,15 +105,31 @@ describe("conversation feature integration", () => {
     expect(mocks.invoke).not.toHaveBeenCalled();
   });
 
-  it("offers scenarios from active installed plugins on the new-task screen", async () => {
+  it("offers legal scenarios only while that plugin can be used", async () => {
     const scenario = { id: "labor-risk-diagnosis", name: "用工风险诊断", description: "生成诊断报告",
       icon: "scale", prompt: "帮我生成诊断报告" };
+    const office = { id: "office", name: "制作办公文档", description: "创建或修改 Word、Excel、PPT 和 PDF",
+      icon: "FileText", prompt: "制作办公文档" };
     mocks.list.mockResolvedValue([
       { ...plugin, manifest: { ...plugin.manifest, scenarios: [scenario] } },
-      { ...plugin, id: "disabled-legal", state: "disabled", manifest: { ...plugin.manifest, scenarios: [scenario] } }
+      { ...plugin, id: "disabled-legal", state: "disabled", manifest: { ...plugin.manifest, scenarios: [scenario] } },
+      { ...plugin, id: "office", state: "active", manifest: { ...plugin.manifest, scenarios: [office] } }
     ]);
     await act(async () => render());
     expect(features.scenarios).toEqual([{ ...scenario, pluginId: "legal-labor" }]);
+  });
+
+  it("shows no home scenario when the legal plugin cannot be used", async () => {
+    const scenario = { id: "labor-risk-diagnosis", name: "用工风险诊断", description: "生成诊断报告",
+      icon: "scale", prompt: "帮我生成诊断报告" };
+    const office = { id: "office", name: "制作办公文档", description: "创建或修改 Word、Excel、PPT 和 PDF",
+      icon: "FileText", prompt: "制作办公文档" };
+    mocks.list.mockResolvedValue([
+      { ...plugin, eligibility: { canUse: false }, manifest: { ...plugin.manifest, scenarios: [scenario] } },
+      { ...plugin, id: "office", state: "active", manifest: { ...plugin.manifest, scenarios: [office] } }
+    ]);
+    await act(async () => render());
+    expect(features.scenarios).toEqual([]);
   });
 
   it("publishes an idle interview for the shared right task panel", async () => {
@@ -106,11 +145,9 @@ describe("conversation feature integration", () => {
     expect(features.pluginRecordingSession?.status).toBe("idle");
   });
 
-  it("does not keep the recording shortcut active for a completed interview", () => {
-    expect(recordingShortcutOpen(false, { status: "recording" }, false)).toBe(true);
-    expect(recordingShortcutOpen(false, { status: "done" }, false)).toBe(false);
-    expect(recordingShortcutOpen(false, { status: "recording" }, true)).toBe(false);
-    expect(recordingShortcutOpen(true, { status: "done" }, false)).toBe(true);
+  it("highlights the composer recording shortcut only for its own card", () => {
+    expect(recordingShortcutOpen(false)).toBe(false);
+    expect(recordingShortcutOpen(true)).toBe(true);
   });
 
   it("overlays a standalone artifact preview when both columns cannot fit", () => {
@@ -169,6 +206,8 @@ describe("conversation feature integration", () => {
     mocks.sending = true;
     await enterLegalConversation();
     expect(container.querySelectorAll("nav button")).toHaveLength(2);
+    expect(features.commandItems.map((item) => item.command)).not.toContain("/legal-guide");
+    expect(features.commandItems.map((item) => item.command)).not.toContain("/legal-record");
     expect(button("录音")).toBeUndefined();
     await act(async () => button("访谈录音")!.click());
     expect(container.querySelectorAll(".recording-entry-card")).toHaveLength(1);
@@ -179,11 +218,48 @@ describe("conversation feature integration", () => {
     expect(container.querySelector(".recording-entry-card")).toBeNull();
   });
 
-  it("routes an explicitly typed recording command to the Host even without a diagnosis session", async () => {
+  it("does not route the button-only legal actions from slash input", async () => {
     await act(async () => render());
-    await act(async () => expect(features.runCommand("/legal-record")).toBe(true));
-    expect(container.querySelector(".recording-entry-card")).not.toBeNull();
+    expect(features.runCommand("/legal-guide")).toBe(false);
+    expect(features.runCommand("/legal-record")).toBe(false);
+    expect(container.querySelector(".recording-entry-card")).toBeNull();
     expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.ensureConversation).not.toHaveBeenCalled();
+  });
+
+  it("covers the guide and recording shortcuts while the Agent's legal question is open", async () => {
+    await enterLegalConversation();
+    expect(button("诊断指引")).toBeDefined();
+    expect(button("访谈录音")).toBeDefined();
+    await act(async () => button("访谈录音")!.click());
+    expect(container.querySelector(".recording-entry-card")).not.toBeNull();
+    await act(async () => {
+      ui.receive({ pluginId: "legal-labor", capabilityId: "guide-open", callId: "guide-call",
+        conversationId: "legal-chat", origin: "user", event: { type: "artifact", artifact: { id: "template", name: "准备清单.xlsx",
+          role: "setup", uri: "plugin-artifact://template", mediaType: "application/vnd.ms-excel" } } });
+      ui.receive({ pluginId: "legal-labor", capabilityId: "guide-open", callId: "guide-call",
+        conversationId: "legal-chat", origin: "user", event: { type: "interaction", request: { interactionId: "guide",
+          type: "question", payload: { title: "诊断指引", readOnly: true } } } });
+    });
+    expect(container.querySelector(".diagnostic-guidance-card")).not.toBeNull();
+
+    mocks.activeTurnIdByChatId = { "legal-chat": "turn-1" };
+    mocks.messages = [{ id: "q", role: "assistant", content: "", turnId: "turn-1", agentUi: { questionCard: {
+      version: 1, requestId: "question-1", questions: [{ id: "handle", prompt: "刚录到的这段要怎么处理？",
+        options: [{ id: "rerecord", label: "重新录一遍用工访谈" }, { id: "ignore", label: "忽略这段" }],
+        allowMultiple: false, allowOther: true }] } } }];
+    await act(async () => render());
+
+    expect(button("诊断指引")).toBeUndefined();
+    expect(button("访谈录音")).toBeUndefined();
+    expect(container.querySelector(".diagnostic-guidance-card")).toBeNull();
+    expect(container.querySelector(".recording-entry-card")).toBeNull();
+
+    mocks.messages = [];
+    await act(async () => render());
+    expect(button("诊断指引")).toBeDefined();
+    expect(button("访谈录音")).toBeDefined();
+    expect(container.querySelector(".diagnostic-guidance-card")).not.toBeNull();
   });
 
   it("opens the read-only guide directly and leaves session creation to the Agent", async () => {

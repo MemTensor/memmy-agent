@@ -48,7 +48,7 @@ export const BUILTIN_COMMAND_SPECS = [
   new BuiltinCommandSpec("/stop", "Stop current task", "Cancel the active agent turn for this chat.", "square"),
   new BuiltinCommandSpec("/restart", "Restart memmy", "Restart the bot process in place.", "rotate-cw"),
   new BuiltinCommandSpec("/status", "Show status", "Display runtime, provider, and channel status.", "activity"),
-  new BuiltinCommandSpec("/model", "Switch model preset", "Show, list, or switch the active model preset.", "brain", "[list|preset]"),
+  new BuiltinCommandSpec("/model", "Switch model preset", "Show, list, or switch the active model preset or model.", "brain", "[list|preset|model]"),
   new BuiltinCommandSpec("/history", "Show conversation history", "Print the last N persisted conversation messages.", "history", "[n]"),
   new BuiltinCommandSpec("/history-dag", "Show history DAG", "Show the task-state DAG for this chat.", "git-branch"),
   new BuiltinCommandSpec(
@@ -329,8 +329,29 @@ function modelCommandStatus(ctx: CommandContext): string {
     "## Model",
     `- Current model: \`${selection ? `${selection.provider} / ${catalogModelName(selection)}` : "(none configured)"}\``,
     `- Current preset: \`${selection?.preset ?? "(none configured)"}\``,
+    `- Provider: \`${selection?.provider ?? "(none configured)"}\``,
+    `- Model: \`${selection ? catalogModelName(selection) : "(none configured)"}\``,
+    `- Endpoint: \`${modelCommandEndpoint(selection)}\``,
     `- Available presets: ${formatPresetNames(modelPresetNames())}`,
   ].join("\n");
+}
+
+function modelCommandEndpoint(selection: ResolvedModelSelection | null): string {
+  if (!selection) return "(none configured)";
+  // Account routing is managed by the platform. Only BYOK connections expose
+  // their configured address, with credentials and URL parameters removed.
+  if (selection.source === "account") return selection.endpointId;
+  try {
+    const url = new URL(selection.providerConfig.apiBase);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return selection.endpointId;
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return `${selection.endpointId} (${url.toString()})`;
+  } catch {
+    return selection.endpointId;
+  }
 }
 
 export async function cmdModel(ctx: CommandContext): Promise<OutboundMessage> {
@@ -339,7 +360,7 @@ export async function cmdModel(ctx: CommandContext): Promise<OutboundMessage> {
   const metadata = { renderAs: "text" };
   if (!args) return reply(ctx, modelCommandStatus(ctx), metadata);
   const parts = args.split(/\s+/);
-  if (parts.length !== 1) return reply(ctx, "Usage: `/model [list|preset]`", metadata);
+  if (parts.length !== 1) return reply(ctx, "Usage: `/model [list|preset|model]`", metadata);
   if (parts[0]?.toLowerCase() === "list") {
     return reply(ctx, modelCommandList(), metadata);
   }
@@ -347,9 +368,16 @@ export async function cmdModel(ctx: CommandContext): Promise<OutboundMessage> {
   try {
     const session = ctx.session ?? loop?.sessions?.get?.(ctx.key);
     if (!session) throw new Error("No active Session is available");
+    const available = readModelCatalog().items.filter((item) => item.available);
+    const preset = available.find((item) => item.preset === parts[0]);
+    const modelMatches = preset ? [] : available.filter((item) => item.model === parts[0]);
+    if (modelMatches.length > 1) {
+      return reply(ctx, `Could not switch model: model_selection_ambiguous\n\nUse a preset name: ${formatPresetNames(modelMatches.map((item) => item.preset))}`, metadata);
+    }
+    const requestedPreset = preset?.preset ?? modelMatches[0]?.preset ?? parts[0];
     const selection = typeof loop?.applySessionModelPresetLocked === "function"
-      ? loop.applySessionModelPresetLocked(session, parts[0])
-      : resolveAndPersistSessionModel(loop, session, parts[0]);
+      ? loop.applySessionModelPresetLocked(session, requestedPreset)
+      : resolveAndPersistSessionModel(loop, session, requestedPreset);
     await publishSessionModelUpdate(ctx, selection);
     const lines = [
       `Switched this Session to \`${selection.preset}\`.`,

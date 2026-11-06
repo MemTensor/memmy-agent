@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -28,6 +28,7 @@ import { resolveModelSelection } from "../../../memmy-agent/src/providers/model-
 import YAML from "yaml";
 import { createOfficeRuntimeInstaller } from "../adapters/outbound/plugin-runtime/office-installer.js";
 import { serveRegistry } from "../../../../plugins/office/scripts/serve.mjs";
+import { auditPdfGlyphs } from "./support/pdf-glyph-audit.js";
 
 const repo = resolve(import.meta.dirname, "../../../..");
 const pluginRoot = join(repo, "plugins/office");
@@ -129,10 +130,14 @@ describe("Office MPP end to end", () => {
       return {files:["table.docx"]};
     ` });
     expect((await call("office_inspect", { taskId: advanced.taskId, file: "table.docx" })).text).toContain("Advanced template table");
+    const textFixture = { title: "Office integration", paragraphs: ["This document verifies the standalone Office plugin.", "中文内容：文档生成、预览与交付。"] };
     for (const format of ["docx", "pdf", "pptx", "xlsx"]) {
       const content = format === "pptx" ? { slides: [{ title: "Office integration", body: ["Independent plugin", "Actual page rendering"], notes: "Preserved speaker notes" }] }
         : format === "xlsx" ? { sheets: [{ name: "Budget", rows: [["Item", "Amount"], ["Research", 20], ["Writing", 30]] }] }
-        : { title: "Office integration", paragraphs: ["This document verifies the standalone Office plugin.", "中文内容：文档生成、预览与交付。"] };
+        : textFixture;
+      // Keep the expectation independent of generated files and their text mappings.
+      let glyphSource = format === "docx" || format === "pdf"
+        ? [textFixture.title, ...textFixture.paragraphs].join("\n") : null;
       let document = await call("office_create", { format, name: `sample.${format}`, ...content });
       const source = join(dataRoot, "office/tasks", document.taskId, document.file);
       const sourceHash = sha(readFileSync(source));
@@ -148,6 +153,7 @@ describe("Office MPP end to end", () => {
           expect(await edited.file(name)!.async("nodebuffer"), `Untouched part ${name}`).toEqual(await originalZip.file(name)!.async("nodebuffer"));
         }
         expect((await call("office_inspect", { taskId: document.taskId, file: document.file })).text).toContain("Office delivery verified");
+        if (format === "docx") glyphSource = ["Office delivery verified", ...textFixture.paragraphs].join("\n");
       }
       if (format === "xlsx") {
         document = await call("office_edit", { taskId: document.taskId, file: document.file, name: "calculation.xlsx", cells: [{ sheet: "Budget", address: "B4", formula: "SUM(B2:B3)" }] });
@@ -178,8 +184,30 @@ describe("Office MPP end to end", () => {
         expect(readFileSync(join(dataRoot, "office/tasks", document.taskId, document.file))).toEqual(calculatedBytes);
         await call("office_deliver", { taskId: document.taskId, file: document.file, revision: sha(calculatedBytes), reviewedPages: [1], reviewNotes: "not yet reviewed" }, "stale_review");
       }
+      const taskRoot = join(dataRoot, "office/tasks", document.taskId);
+      const qaBefore = new Set(readdirSync(taskRoot).filter(name => name.startsWith("qa-")));
       const rendered = await call("office_render", { taskId: document.taskId, file: document.file });
       expect(rendered.pages.length).toBeGreaterThan(0);
+      if (glyphSource !== null) {
+        expect(/\p{Unified_Ideograph}/u.test(glyphSource), "The real DOCX/PDF fixtures must exercise Chinese").toBe(true);
+        let auditFile = join(taskRoot, document.file);
+        if (format === "docx") {
+          const created = readdirSync(taskRoot, { withFileTypes: true })
+            .filter(entry => entry.isDirectory() && entry.name.startsWith("qa-") && !qaBefore.has(entry.name));
+          expect(created).toHaveLength(1);
+          const qa = join(taskRoot, created[0]!.name);
+          const pdfs = readdirSync(qa, { withFileTypes: true }).filter(entry => entry.isFile() && entry.name.endsWith(".pdf"));
+          expect(pdfs).toHaveLength(1);
+          auditFile = join(qa, pdfs[0]!.name);
+        }
+        const glyphAudit = await auditPdfGlyphs(readFileSync(auditFile), glyphSource, "all");
+        expect(glyphAudit.auditedGlyphs).toBeGreaterThan(0);
+        const qaRoot = process.env.OFFICE_E2E_QA_DIR;
+        if (qaRoot) {
+          mkdirSync(qaRoot, { recursive: true });
+          writeFileSync(join(qaRoot, format + "-glyph-audit.json"), JSON.stringify(glyphAudit, null, 2) + "\n");
+        }
+      }
       const pageNumbers = rendered.pages.map((p: { page: number }) => p.page);
       await call("office_deliver", { taskId: document.taskId, file: document.file, revision: rendered.revision, reviewedPages: pageNumbers, reviewNotes: "premature" }, "pages_not_viewed");
       for (const page of pageNumbers) {

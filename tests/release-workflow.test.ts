@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 import { bash } from "./fixtures/bash.mjs";
@@ -57,6 +58,173 @@ function readJson(relativePath: string): {
 } {
   return JSON.parse(readFileSync(resolve(repoRoot, relativePath), "utf8"));
 }
+
+function createReleaseHistoryFixture(options: { tags: string[]; noteTags?: string[] }) {
+  const directory = mkdtempSync(resolve(tmpdir(), "memmy-release-order-"));
+  const checkout = resolve(directory, "checkout");
+  const origin = resolve(directory, "origin.git");
+  const output = resolve(directory, "github-output");
+  const bin = resolve(directory, "bin");
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_ALLOW_PROTOCOL: "file",
+    LC_ALL: "C",
+  };
+  const git = (args: string[]) => {
+    const result = spawnSync("git", args, { cwd: checkout, env, encoding: "utf8" });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    return result.stdout.trim();
+  };
+  try {
+    mkdirSync(checkout);
+    git(["init", "--initial-branch=main", "--template="]);
+    git(["config", "user.name", "Release Order Fixture"]);
+    git(["config", "user.email", "release-order@example.invalid"]);
+    writeFileSync(resolve(checkout, "fixture.txt"), "Owned release history fixture\n");
+    if (options.noteTags?.length) {
+      const notes = resolve(checkout, ".github/release-notes");
+      mkdirSync(notes, { recursive: true });
+      for (const tag of options.noteTags) {
+        writeFileSync(resolve(notes, `${tag}.md`), `# ${tag}\n\nOwned notes for ${tag}.\n`);
+      }
+    }
+    git(["add", "."]);
+    git(["commit", "-m", "owned release history"]);
+    const targetSha = git(["rev-parse", "HEAD"]);
+    for (const [index, tag] of options.tags.entries()) {
+      git(index % 2 ? ["tag", "-a", tag, "-m", `Owned ${tag}`] : ["tag", tag]);
+    }
+    git(["clone", "--bare", checkout, origin]);
+    git(["remote", "add", "origin", origin]);
+    // The actual workflow fetch must populate the checkout from this local origin.
+    for (const tag of options.tags) git(["tag", "-d", tag]);
+    git(["config", `url.${pathToFileURL(origin).href}.insteadOf`, "https://github.com/ReleaseFixture/memmy-agent.git"]);
+    mkdirSync(bin);
+    writeFileSync(resolve(bin, "gh"), `#!/bin/sh
+if [ "$*" != "release view $TAG --repo $GITHUB_REPOSITORY" ]; then exit 93; fi
+printf '%s\\n' "$*" >> "$FIXTURE_GH_LOG"
+test "$FIXTURE_RELEASE_EXISTS" = 1
+`, { mode: 0o755 });
+    return { directory, checkout, output, bin, env, git, targetSha };
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function withReleaseHistory<T>(options: { tags: string[]; noteTags?: string[] },
+  run: (fixture: ReturnType<typeof createReleaseHistoryFixture>) => T): T {
+  const fixture = createReleaseHistoryFixture(options);
+  try { return run(fixture); }
+  finally { rmSync(fixture.directory, { recursive: true, force: true }); }
+}
+
+function runReleaseHistoryStep(fixture: ReturnType<typeof createReleaseHistoryFixture>, name: string,
+  tag: string, overrides: Record<string, string> = {}) {
+  const script = draftScript(name);
+  expect(script, name).not.toBe("");
+  writeFileSync(fixture.output, "");
+  const result = spawnSync("bash", ["-c", script], {
+    cwd: fixture.checkout,
+    encoding: "utf8",
+    env: {
+      ...fixture.env,
+      PATH: `${fixture.bin}:${process.env.PATH ?? ""}`,
+      GITHUB_REPOSITORY: "ReleaseFixture/memmy-agent",
+      GITHUB_OUTPUT: fixture.output,
+      TAG: tag,
+      TARGET_SHA: fixture.targetSha,
+      MANUAL_TARGET_SHA_SUPPLIED: "true",
+      FIXTURE_GH_LOG: resolve(fixture.directory, "gh-calls"),
+      FIXTURE_RELEASE_EXISTS: "0",
+      ...overrides,
+    },
+  });
+  expect(result.error).toBeUndefined();
+  return { ...result, output: readFileSync(fixture.output, "utf8") };
+}
+
+describe("release identifier policy in actual workflow programs", () => {
+  it.each([
+    { label: "allows 401 to 5 and selects the actual 401 tag", tags: ["v1.2.4", "v1.2.401"], current: "v1.2.5", previous: "v1.2.401" },
+    { label: "rejects 5 to 401", tags: ["v1.2.4", "v1.2.5"], current: "v1.2.401", previous: undefined },
+    { label: "rejects 5 when a future 6 tag already exists", tags: ["v1.2.401", "v1.2.6"], current: "v1.2.5", previous: undefined },
+    { label: "selects 5 before a new 6", tags: ["v1.2.4", "v1.2.5"], current: "v1.2.6", previous: "v1.2.5" },
+    { label: "ignores prereleases and invalid leading-zero stable tags", tags: ["v1.2.4", "v1.2.6-rc.1", "v01.9.9", "v9.0.0-beta.1"], current: "v1.2.5", previous: "v1.2.4" },
+    { label: "supports the first stable release", tags: [], current: "v1.2.5", previous: "" },
+  ])("$label", ({ tags, current, previous }) => {
+    withReleaseHistory({ tags }, (fixture) => {
+      const result = runReleaseHistoryStep(fixture, "Resolve previous stable release tag", current);
+      if (previous === undefined) {
+        expect(result.status, result.stderr).toBe(1);
+        expect(result.stderr).toContain("Release version is not newer");
+        expect(result.output).not.toContain("previous_tag=");
+      } else {
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.output).toBe(`previous_tag=${previous}\n`);
+        if (previous) expect(fixture.git(["rev-parse", `${previous}^{commit}`])).toBe(fixture.targetSha);
+      }
+    });
+  });
+
+  it.each([
+    { kind: "lightweight", tags: ["v1.2.4", "v1.2.401", "v1.2.5"] },
+    { kind: "annotated", tags: ["v1.2.3", "v1.2.4", "v1.2.401", "v1.2.5"] },
+  ])("recovers an equal $kind tag only when its target matches and the Release is missing", ({ tags }) => {
+    withReleaseHistory({ tags }, (fixture) => {
+      const existing = runReleaseHistoryStep(fixture, "Check for an existing tag or release", "v1.2.5");
+      expect(existing.status, existing.stderr).toBe(0);
+      expect(existing.output).toContain("tag_preexists=true\n");
+      expect(existing.output).toContain(`existing_tag_sha=${fixture.targetSha}\n`);
+      const previous = runReleaseHistoryStep(fixture, "Resolve previous stable release tag", "v1.2.5");
+      expect(previous.status, previous.stderr).toBe(0);
+      expect(previous.output).toBe("previous_tag=v1.2.401\n");
+      expect(readFileSync(resolve(fixture.directory, "gh-calls"), "utf8"))
+        .toBe("release view v1.2.5 --repo ReleaseFixture/memmy-agent\n");
+    });
+  });
+
+  it("rejects an already existing 6 Release without proceeding to selection", () => {
+    withReleaseHistory({ tags: ["v1.2.6"] }, (fixture) => {
+      const result = runReleaseHistoryStep(fixture, "Check for an existing tag or release", "v1.2.6", { FIXTURE_RELEASE_EXISTS: "1" });
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain("Release already exists");
+    });
+  });
+
+  it("rejects an existing tag bound to another actual commit", () => {
+    withReleaseHistory({ tags: ["v1.2.5"] }, (fixture) => {
+      writeFileSync(resolve(fixture.checkout, "fixture.txt"), "Different target\n");
+      fixture.git(["add", "."]);
+      fixture.git(["commit", "-m", "different target"]);
+      const result = runReleaseHistoryStep(fixture, "Check for an existing tag or release", "v1.2.5", {
+        TARGET_SHA: fixture.git(["rev-parse", "HEAD"]),
+      });
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain("Release tag points to a different commit");
+    });
+  });
+
+  it("selects recent style examples by executing the actual release-notes Node heredoc", () => {
+    withReleaseHistory({ tags: [], noteTags: ["v1.2.401", "v1.2.402", "v1.2.5", "v1.2.6", "v1.3.0", "v9.0.0-rc.1"] }, (fixture) => {
+      const programs = heredocBodies(draftScript("Build release notes"), "NODE");
+      expect(programs).toHaveLength(1);
+      const result = spawnSync(process.execPath, ["-e", programs[0]!], {
+        cwd: fixture.checkout,
+        encoding: "utf8",
+        env: { ...fixture.env, TARGET_SHA: fixture.targetSha, TAG: "v1.3.0" },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      const examples = JSON.parse(result.stdout).github_release_notes as Array<{ tag: string; body: string }>;
+      expect(examples.map((example) => example.tag)).toEqual(["v1.2.402", "v1.2.5", "v1.2.6"]);
+      for (const example of examples) expect(example.body).toContain(`Owned notes for ${example.tag}.`);
+    });
+  });
+});
 
 describe("Memmy release workflow metadata", () => {
   it("keeps Memmy metadata aligned while preserving the independent Memory version", () => {
@@ -127,6 +295,32 @@ describe("Memmy release workflow metadata", () => {
 });
 
 describe("GitHub Draft Release v2 workflow", () => {
+  it("runs release contracts in read-only PR CI without release credentials or packaging", () => {
+    const validation = YAML.parse(readFileSync(resolve(repoRoot, ".github/workflows/release-workflow-validation.yml"), "utf8"));
+    expect(validation.on.pull_request.paths).toEqual(expect.arrayContaining([
+      ".github/workflows/github-draft-release-v2.yml",
+      ".github/workflows/release-workflow-validation.yml",
+      "tests/release-workflow.test.ts",
+    ]));
+    expect(validation.on.push.branches).toEqual(["main"]);
+    expect(validation.permissions).toEqual({ contents: "read" });
+    expect(validation.env).toBeUndefined();
+    const job = validation.jobs.contracts;
+    expect(job.environment).toBeUndefined();
+    expect(job.env).toBeUndefined();
+    expect(job["continue-on-error"]).toBeUndefined();
+    const steps = job.steps as Array<Record<string, unknown>>;
+    expect(steps.find((step) => step.uses === "actions/checkout@v4")?.with).toEqual({ "persist-credentials": false });
+    expect(steps.filter((step) => step.run).map((step) => step.run))
+      .toEqual(["npm ci --ignore-scripts", "npm run test:release-workflow"]);
+    for (const step of steps) {
+      expect(step.if).toBeUndefined();
+      expect(step.env).toBeUndefined();
+      expect(step["continue-on-error"]).toBeUndefined();
+    }
+    expect(JSON.stringify(validation)).not.toContain("secrets.");
+  });
+
   it("builds an uncapped, NUL-safe comparison from the trusted local Git graph", () => {
     const tempDir = mkdtempSync(resolve(tmpdir(), "memmy-release-compare-"));
     const git = (args: string[]) =>

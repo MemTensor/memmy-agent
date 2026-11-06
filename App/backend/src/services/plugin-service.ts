@@ -77,6 +77,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
   const eligibility = (manifest: PluginRecord["manifest"]) => pluginEligibility(manifest, options.isAuthenticated?.() ?? false, isEntitlementGranted);
   const activeCalls = new Map<string, number>();
   const suspended = new Set<string>();
+  const enabling = new Map<string, Promise<InstalledPlugin>>();
   const updates = new Map<string, { status: "waiting" | "installing"; version?: string; promise: Promise<InstalledPlugin> }>();
   const idleWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   let closing = false;
@@ -345,6 +346,9 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     },
 
     async enable(id) {
+      if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
+      const inFlight = enabling.get(id);
+      if (inFlight) return inFlight;
       suspended.delete(id);
       const plugin = required(id);
       if (plugin.state === "active") return publicPlugin(plugin);
@@ -355,13 +359,19 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       validateConfig(plugin, plugin.config);
       const secrets = readSecrets(plugin, options.secretStore);
       options.repository.setState(id, "enabling");
-      try {
-        await activateContributions(plugin, secrets);
-        return publicPlugin(options.repository.setState(id, "active"));
-      } catch (error) {
-        options.repository.setState(id, "failed", errorMessage(error));
-        throw pluginError("plugin_activation_failed", errorMessage(error));
-      }
+      // Account reconciliation and the marketplace can enable concurrently.
+      // Publish the promise before activation starts so both join one attempt.
+      const attempt = Promise.resolve().then(async () => {
+        try {
+          await activateContributions(plugin, secrets);
+          return publicPlugin(options.repository.setState(id, "active"));
+        } catch (error) {
+          options.repository.setState(id, "failed", errorMessage(error));
+          throw pluginError("plugin_activation_failed", errorMessage(error));
+        } finally { enabling.delete(id); }
+      });
+      enabling.set(id, attempt);
+      return attempt;
     },
 
     async disable(id) {
@@ -477,11 +487,14 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       for (const plugin of options.repository.list().filter((candidate) => candidate.state === "active" || candidate.state === "enabling")) {
         try {
           if (!eligibility(plugin.manifest).canUse) { options.repository.setState(plugin.id, "disabled"); continue; }
+          if (plugin.state === "enabling") {
+            await this.enable(plugin.id);
+            continue;
+          }
           assertEntitled(plugin.manifest);
           if (!hasAllPermissions(plugin)) throw new Error("Plugin permissions have changed");
           validateConfig(plugin, plugin.config);
           await activateContributions(plugin, readSecrets(plugin, options.secretStore));
-          if (plugin.state === "enabling") options.repository.setState(plugin.id, "active");
         } catch (error) {
           options.repository.setState(plugin.id, "failed", errorMessage(error));
         }

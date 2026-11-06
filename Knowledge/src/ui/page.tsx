@@ -2549,7 +2549,7 @@ const styles = `
 .mk-share-modal{width:440px}
 .mk-share-modal .mk-share-hint{font-size:12.5px;color:var(--mk-sub);line-height:1.7;margin:0 0 14px!important;white-space:normal;overflow-wrap:anywhere}
 .mk-share-modal .mk-share-form{display:flex;flex-direction:row;align-items:center;justify-content:flex-start;gap:8px;width:100%;max-width:100%;min-width:0}
-.mk-share-modal .mk-share-form input{flex:1 1 220px;width:auto;min-width:0;max-width:220px}
+.mk-share-modal .mk-share-form input{flex:1 1 auto;width:auto;min-width:0}
 .mk-share-modal .mk-share-form .mk-primary{flex:0 0 auto;width:auto;padding:8px 16px}
 .mk-members{list-style:none;padding:0;margin:14px 0 0;max-height:260px;overflow-y:auto}
 .mk-members li{display:flex;align-items:center;gap:12px;padding:10px 4px;border-radius:8px}

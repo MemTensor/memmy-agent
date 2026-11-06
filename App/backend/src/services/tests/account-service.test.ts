@@ -47,13 +47,13 @@ describe("AccountService", () => {
     });
     try {
       await service.getSession();
-      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor"]);
+      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor", "plugin:literature-review"]);
       await service.updateProfile({ nickname: "Legal Test" });
-      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor"]);
+      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor", "plugin:literature-review"]);
       expect(store.repositories.accountSession.get()).toMatchObject({ profile: { nickname: "Legal Test" } });
       grants = [];
       await service.getSession();
-      expect(store.repositories.accountSession.getEntitlements()).toEqual([]);
+      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:literature-review"]);
     } finally {
       store.close();
       rmSync(root, { recursive: true, force: true });
@@ -106,6 +106,34 @@ describe("AccountService", () => {
     expect(calls).toEqual([
       { get: { uuid: "cloud.login.uuid" } },
       { ack: { uuid: "cloud.login.uuid", drawId: "1" } }
+    ]);
+  });
+
+  it("ensures and acknowledges the automatic one-time task Token gift with the current cloud account", async () => {
+    const calls: unknown[] = [];
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async ensureTaskTokenGift(input) {
+          calls.push({ ensure: input });
+          return { hasGift: true as const, grantId: "launch-gift-20m", audience: "existing" as const,
+            tokenAmount: 20_000_000, totalTokens: 22_000_000 };
+        },
+        async ackTaskTokenGift(input) { calls.push({ ack: input }); }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        getCloudUuid() { return "cloud.login.uuid"; }
+      }
+    });
+
+    await expect(service.ensureTaskTokenGift()).resolves.toMatchObject({
+      hasGift: true, audience: "existing", tokenAmount: 20_000_000
+    });
+    await expect(service.ackTaskTokenGift({ grantId: "launch-gift-20m" })).resolves.toEqual({ ok: true });
+    expect(calls).toEqual([
+      { ensure: { uuid: "cloud.login.uuid" } },
+      { ack: { uuid: "cloud.login.uuid", grantId: "launch-gift-20m" } }
     ]);
   });
 
