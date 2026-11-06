@@ -477,6 +477,8 @@ export class WebSearchTool extends Tool {
       return this.config.apiKey || process.env.JINA_API_KEY ? "jina" : "duckduckgo";
     if (provider === "kagi")
       return this.config.apiKey || process.env.KAGI_API_KEY ? "kagi" : "duckduckgo";
+    // Keenable has a free keyless endpoint, so it never needs the DuckDuckGo fallback.
+    if (provider === "keenable") return "keenable";
     if (provider === "olostep")
       return this.config.apiKey || process.env.OLOSTEP_API_KEY ? "olostep" : "duckduckgo";
     return provider;
@@ -503,6 +505,7 @@ export class WebSearchTool extends Tool {
     if (provider === "jina") return this.searchJina(query, n);
     if (provider === "brave") return this.searchBrave(query, n);
     if (provider === "kagi") return this.searchKagi(query, n);
+    if (provider === "keenable") return this.searchKeenable(query, n);
     return `Error: unknown search provider '${provider}'`;
   }
 
@@ -634,6 +637,33 @@ export class WebSearchTool extends Tool {
       return formatResults(query, items, n);
     } catch {
       return this.searchDuckduckgo(query, n);
+    }
+  }
+
+  async searchKeenable(query: string, n: number): Promise<string> {
+    const apiKey = this.config.apiKey || process.env.KEENABLE_API_KEY || "";
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "User-Agent": this.userAgent,
+      "X-Keenable-Title": "Memmy Agent",
+    };
+    if (apiKey) headers["X-API-Key"] = apiKey;
+    try {
+      const data = await requestJson(
+        apiKey ? "https://api.keenable.ai/v1/search" : "https://api.keenable.ai/v1/search/public",
+        { method: "POST", headers, body: JSON.stringify({ query, max_results: n }) },
+      );
+      const items = (data.results ?? []).map((item: Record<string, any>) => {
+        const snippet = String(item.snippet ?? "");
+        return {
+          title: item.title ?? "",
+          url: item.url ?? "",
+          content: item.description || (snippet.length > 500 ? `${snippet.slice(0, 500)}…` : snippet),
+        };
+      });
+      return formatResults(query, items, n);
+    } catch (err) {
+      return `Error: Keenable search failed (${(err as Error).message})`;
     }
   }
 
