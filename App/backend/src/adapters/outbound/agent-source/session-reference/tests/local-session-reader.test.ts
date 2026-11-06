@@ -46,6 +46,37 @@ describe("local session reader", () => {
       .toEqual(Array.from({ length: 30 }, (_, index) => `c-${String(index + 6).padStart(2, "0")}`));
   });
 
+  it("reads the store once at the widest window it may need, instead of rescanning wider from scratch", async () => {
+    const windows: number[] = [];
+    const messages: ConversationMessage[] = [];
+    const start = Date.UTC(2026, 9, 21, 12, 0, 0);
+    // 前 12 条是空记录：按 limit 算的窗口凑不满列表，旧实现会从零再扫一个更大的窗口。
+    for (let index = 0; index < 200; index += 1) {
+      const id = `c-${String(index).padStart(3, "0")}`;
+      const at = new Date(start - index * 60_000).toISOString();
+      messages.push(index < 12
+        ? message("codex", id, "system", "boot", at, "/repo")
+        : message("codex", id, "user", `第 ${index} 个问题`, at, "/repo"));
+    }
+    const windowed = windowedAdapter("codex", "Codex", messages);
+    const counted: SourceAdapter = {
+      ...windowed,
+      scan: (options) => {
+        windows.push(options.maxScanTargets ?? 0);
+        return windowed.scan(options);
+      }
+    };
+    const reader = readerWith([counted]);
+
+    const { sessions } = await reader.available({ limit: 30 });
+
+    // 一次遍历、取能到达的最宽窗口（min(200, 30 * 4)），不再逐级重扫。
+    expect(windows).toEqual([120]);
+    expect(sessions).toHaveLength(30);
+    expect(sessions[0]?.conversationId).toBe("c-012");
+    expect(sessions.at(-1)?.conversationId).toBe("c-041");
+  });
+
   it("ranks keyword hits, then the given directory, then the most recent, and filters by agent", async () => {
     const reader = readerWith([
       fakeAdapter("codex", "Codex", [

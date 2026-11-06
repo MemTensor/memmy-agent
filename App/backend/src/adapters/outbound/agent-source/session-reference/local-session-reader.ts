@@ -12,7 +12,7 @@ export type { LocalSessionGroup } from "./session-group.js";
 
 const DEFAULT_SESSIONS_PER_SOURCE = 30;
 /**
- * 列表要的是任务数，而窗口按文件算：空记录、后台派生的记录不出现在列表里。凑不满时按倍数向前扩大窗口，
+ * 列表要的是任务数，而窗口按文件算：空记录、后台派生的记录不出现在列表里。凑不满时向前扩大窗口，
  * 直到拿到要求数量的任务或到达这个上限。
  */
 const RECENT_SCAN_FACTORS = [1, 2, 4] as const;
@@ -199,31 +199,36 @@ export async function readRecentSessions(adapter: SourceAdapter, limit: number):
       return [];
     }
     const grouper = createSessionGrouper(adapter);
-    let sessions: LocalSession[] = [];
-    // 窗口里的空记录、后台派生的记录不计入列表，所以不能把窗口大小当成条数：凑不满就向前补。
-    for (const factor of RECENT_SCAN_FACTORS) {
-      const window = Math.min(WIDE_SESSIONS_PER_SOURCE, limit * factor);
-      const builders = new Map<string, SessionBuilder>();
-      for await (const message of adapter.scan({ order: "recent_first", maxScanTargets: window, maxConversations: window, fullHistory: true })) {
-        let builder = builders.get(message.conversationId);
-        if (!builder) {
-          builder = { workspacePath: null, updatedAt: "", turns: [], nativeTitle: "" };
-          builders.set(message.conversationId, builder);
-        }
-        appendMessage(builder, message);
+    const window = recentScanWindow(limit);
+    const builders = new Map<string, SessionBuilder>();
+    for await (const message of adapter.scan({ order: "recent_first", maxScanTargets: window, maxConversations: window, fullHistory: true })) {
+      let builder = builders.get(message.conversationId);
+      if (!builder) {
+        builder = { workspacePath: null, updatedAt: "", turns: [], nativeTitle: "" };
+        builders.set(message.conversationId, builder);
       }
-      sessions = [...builders.entries()]
-        .map(([conversationId, builder]) => finishSession(adapter, grouper, conversationId, builder))
-        .filter((session): session is LocalSession => session !== null);
-      if (sessions.length >= limit || window >= WIDE_SESSIONS_PER_SOURCE) {
-        break;
-      }
+      appendMessage(builder, message);
     }
+    const sessions = [...builders.entries()]
+      .map(([conversationId, builder]) => finishSession(adapter, grouper, conversationId, builder))
+      .filter((session): session is LocalSession => session !== null);
     // 扫描按最近优先返回，多出来的都是更早的任务。
     return sessions.slice(0, limit);
   } catch {
     return [];
   }
+}
+
+/**
+ * 一次读取用的窗口：就是原先逐级扩大能到达的最宽一档。
+ *
+ * <p>窗口按文件算而列表按任务算，空记录与后台派生的记录占窗口却不进列表，所以窗口要比 `limit` 大。
+ * 原先的做法是扫一遍、凑不满就从零再扫一个更大的窗口，前一遍的结果全部作废——同一份存储被读了两三遍。
+ * 现在只用最宽那一档扫一遍：会话按最近优先排列，更宽窗口的前若干个正是窄窗口能拿到的那些，
+ * 而原先每一遍的结果本来就只有最后一遍会被返回，所以结果集合与顺序不变。</p>
+ */
+function recentScanWindow(limit: number): number {
+  return Math.min(WIDE_SESSIONS_PER_SOURCE, limit * RECENT_SCAN_FACTORS[RECENT_SCAN_FACTORS.length - 1]!);
 }
 
 /**
