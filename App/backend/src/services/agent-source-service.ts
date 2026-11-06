@@ -489,13 +489,26 @@ async function listSources(options: CreateAgentSourceServiceOptions): Promise<Ag
     })
     : [];
   const memoryById = new Map(memorySources.map((source) => [source.sourceId, source]));
+  const supersededRemovals = new Set<string>();
+  await Promise.all(builtinViews.map(async (source) => {
+    if (source.status === "not_connected" || !options.agentSourceRepository.isAutoInjectSuppressed(source.sourceId)) return;
+    const suppressedRevision = options.agentSourceRepository.getSuppressedRevision?.(source.sourceId) ?? null;
+    if (typeof suppressedRevision !== "number" || !options.memoryClient.agentSources?.connectionState) return;
+    const current = await options.memoryClient.agentSources.connectionState(source.sourceId).catch(() => undefined);
+    if (isSuppressionSuperseded(suppressedRevision, current?.connectionEvent)) {
+      supersededRemovals.add(source.sourceId);
+    }
+  }));
   return [
     ...builtinViews.map((source) => ({
       ...source,
       ...memoryById.get(source.sourceId),
       // A failed removal can already have deleted every detectable marker.
-      // Keep the removal action until an explicit cleanup attempt completes.
-      ...(source.status !== "not_connected" && options.agentSourceRepository.isAutoInjectSuppressed(source.sourceId)
+      // Keep the removal action until an explicit cleanup attempt completes
+      // or a newer committed connection/disconnection supersedes it.
+      ...(source.status !== "not_connected"
+        && options.agentSourceRepository.isAutoInjectSuppressed(source.sourceId)
+        && !supersededRemovals.has(source.sourceId)
         ? { status: resolvePluginSourceKind(source.sourceId) ? "plugin_installed" : "skill_installed" } as const
         : {}),
       syncBoundaryAt: memoryById.get(source.sourceId)?.syncBoundaryAt ?? options.agentSourceRepository.getScanWatermark(source.sourceId)?.baselineAt ?? null
@@ -510,16 +523,28 @@ async function listSources(options: CreateAgentSourceServiceOptions): Promise<Ag
   ];
 }
 
+function isSuppressionSuperseded(
+  suppressedRevision: number | null | undefined,
+  event: { revision?: number } | undefined
+): boolean {
+  return typeof suppressedRevision === "number"
+    && typeof event?.revision === "number"
+    && event.revision > suppressedRevision;
+}
+
 /** An unavailable authority is an error, never permission to write Agent files. */
 async function automaticConnectionAllowed(options: CreateAgentSourceServiceOptions, sourceId: string): Promise<boolean> {
   const client = options.memoryClient.agentSources;
   if (!client?.connectionState) throw new Error("Memory connection authority is unavailable. Retry after Memory is updated or reachable.");
-  const { connectionState } = await client.connectionState(sourceId);
+  const { connectionState, connectionEvent } = await client.connectionState(sourceId);
   if (connectionState === "disconnected") return false;
-  // A completed removal can be superseded by an explicit reconnect elsewhere.
-  // Pending local cleanup/notification intent must still be retried locally.
-  return !options.agentSourceRepository.isAutoInjectSuppressed(sourceId)
-    || (connectionState === "connected" && readSourceStatus(options, sourceId) === "not_connected");
+  if (!options.agentSourceRepository.isAutoInjectSuppressed(sourceId)) return true;
+  if (connectionState !== "connected") return false;
+  // A completed removal or an earlier failed removal is superseded once a
+  // strictly newer explicit reconnect commits in Memory.
+  if (readSourceStatus(options, sourceId) === "not_connected") return true;
+  const suppressedRevision = options.agentSourceRepository.getSuppressedRevision?.(sourceId) ?? null;
+  return isSuppressionSuperseded(suppressedRevision, connectionEvent);
 }
 
 async function installAutomatically(
@@ -561,6 +586,7 @@ async function cleanupAutomaticInstallation(
   const pendingLocalRemoval = options.agentSourceRepository.isAutoInjectSuppressed(sourceId)
     && readSourceStatus(options, sourceId) !== "not_connected";
   options.agentSourceRepository.setConnectionState(sourceId, kind === "plugin" ? "plugin_installed" : "skill_installed", true);
+  options.agentSourceRepository.setSuppressedRevision?.(sourceId, baseline.event?.revision ?? 0);
   await compensation.compensate(sourceId, baseline, {
     remove: [() => kind === "plugin" ? options.skillDistributionService.uninstallPlugin(sourceId) : options.skillDistributionService.uninstall(sourceId)],
     install: desiredKind => desiredKind === "plugin" ? options.skillDistributionService.installPlugin(sourceId) : options.skillDistributionService.install(sourceId),
@@ -568,7 +594,12 @@ async function cleanupAutomaticInstallation(
       // A newer local operation already saved its own success or retry state.
       if (compensation.currentAction(sourceId) !== actionBeforeCleanup && !decision.kind && !decision.event) return;
       if (decision.kind) options.agentSourceRepository.setConnectionState(sourceId, decision.kind === "plugin" ? "plugin_installed" : "skill_installed", false);
-      else if (!pendingLocalRemoval || decision.event?.state === "disconnected") options.agentSourceRepository.setConnectionState(sourceId, "not_connected", true);
+      else if (!pendingLocalRemoval || decision.event?.state === "disconnected") {
+        options.agentSourceRepository.setConnectionState(sourceId, "not_connected", true);
+        if (typeof decision.event?.revision === "number") {
+          options.agentSourceRepository.setSuppressedRevision?.(sourceId, decision.event.revision);
+        }
+      }
     }
   });
 }
@@ -582,10 +613,12 @@ async function disconnectAgentSkillConnection(
 ): Promise<ConnectionEvent | undefined> {
   let connectionEvent: ConnectionEvent | undefined;
   let preparationError: Error | undefined;
+  const startedRevision = action.startedEventKnown ? (action.startedEvent?.revision ?? 0) : null;
   try {
     ensureSourceExists(options, sourceId);
     const cleanupStatus = kind === "plugin" || resolvePluginSourceKind(sourceId) ? "plugin_installed" : "skill_installed";
     options.agentSourceRepository.setConnectionState(sourceId, cleanupStatus, true);
+    options.agentSourceRepository.setSuppressedRevision?.(sourceId, startedRevision);
   } catch (error) {
     preparationError = error instanceof Error ? error : new Error(String(error));
   }
@@ -603,6 +636,13 @@ async function disconnectAgentSkillConnection(
   if (preparationError) {
     throw new Error(`Skill sharing is stopped. Cleanup state could not be saved. Retry removal. ${preparationError.message}`,
       { cause: preparationError });
+  }
+  if (typeof connectionEvent?.revision === "number") {
+    try {
+      options.agentSourceRepository.setSuppressedRevision?.(sourceId, connectionEvent.revision);
+    } catch {
+      // Preparation already recorded the pre-disconnect watermark.
+    }
   }
   let saving = false;
   try {
@@ -623,6 +663,12 @@ async function disconnectAgentSkillConnection(
         options.agentSourceRepository.setConnectionState(sourceId,
           decision.kind === "plugin" ? "plugin_installed" : decision.kind === "skill" ? "skill_installed" : "not_connected",
           !decision.kind);
+        if (!decision.kind && typeof (decision.event?.revision ?? connectionEvent?.revision) === "number") {
+          options.agentSourceRepository.setSuppressedRevision?.(
+            sourceId,
+            (decision.event?.revision ?? connectionEvent?.revision)!
+          );
+        }
         saving = false;
       }
     }, action);

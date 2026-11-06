@@ -5,6 +5,7 @@ import { Repositories } from "../../../src/storage/repositories.js";
 import { agentSkillInstallationsKey, currentImportedSkillVersion, importedSkillContentHash,
   type AgentSkillInstallations } from "../../../src/storage/imported-skill.js";
 import { replayRound6ManualCollision, replayRound9UnverifiedArchive } from "../../fixtures/round6-manual-collision.js";
+import type { MemoryRow } from "../../../src/types.js";
 import { createFailingLlm, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const fixture = createMemoryServiceFixture();
@@ -225,5 +226,148 @@ describe("chronological legacy imported Skill history", () => {
       const plan = reopened.db.prepare("EXPLAIN QUERY PLAN SELECT before_json, after_json FROM memory_change_log WHERE memory_id = ? ORDER BY seq DESC").all("synthetic") as Array<{ detail: string }>;
       expect(plan.some(step => step.detail.includes("idx_memory_change_log_memory_seq"))).toBe(true);
     } finally { reopened.close(); }
+  });
+
+  it.each([false, true])("repairs deleted_current on pre-upgrade soft-deleted collision victims according to source presence (absent=%s)", async absent => {
+    const { db, service, repos, row, file, missing, collide, scan, search, other } = setup();
+    if (absent) missing();
+    const manual = collide("manual-before-delete");
+    // Simulate a soft-delete written by Round 6 / Round 9 while superseded_by_skill_id pointed to the manual collision
+    const polluted = row(file);
+    const softDeleted = repos.memories.softDelete(file, time(5))!;
+    const legacyDeleted: MemoryRow = {
+      ...softDeleted,
+      memoryValue: "",
+      properties: {
+        ...softDeleted.properties,
+        status: "deleted",
+        internal_info: {
+          ...softDeleted.properties.internal_info,
+          deleted_current: false,
+          superseded_by_skill_id: manual
+        }
+      }
+    };
+    repos.memories.rewriteDeletedRow(legacyDeleted);
+    repos.runtime.appendChange({
+      memoryId: file,
+      userId: polluted.userId,
+      changeType: "delete",
+      source: "panel.delete",
+      createdAt: time(5),
+      before: polluted,
+      after: legacyDeleted
+    });
+    repos.runtime.scrubImportedSkillCopies(file);
+
+    service.reconcileWorkerStartup(1);
+    expect(row(file).properties.internal_info.superseded_by_skill_id).toBeUndefined();
+    expect(row(file).properties.internal_info.deleted_current).toBe(!absent);
+
+    const nextScan = service.reconcileAgentSkills({
+      namespace,
+      sourceAgentId: "hermes",
+      complete: true,
+      skills: [{
+        sourceSkillId: "source-directory",
+        sourceSkillPath: "/synthetic/hermes/source-directory/SKILL.md",
+        title: "source-skill",
+        content: body + "\nVersion 2 after upgrade.",
+        contentHash: importedSkillContentHash(body + "\nVersion 2 after upgrade."),
+        modifiedAt: time(6)
+      }]
+    });
+    expect(nextScan.skills[0]?.outcome).toBe(absent ? "created" : "deleted_by_user");
+    const listedIds = service.listSkills({ namespace: { ...namespace, source: "cursor" } }).skills.map(skill => skill.id);
+    if (absent) {
+      expect(listedIds).toContain(nextScan.skills[0]!.memoryId!);
+    } else {
+      expect(listedIds).not.toContain(file);
+    }
+    const hermesRecall = await search();
+    expect(hermesRecall.hits.map(hit => hit.id)).toEqual([]);
+    const foreignRecall = await service.search({
+      namespace: { ...namespace, source: "cursor" },
+      query: "deploymentquartz",
+      layers: ["Skill"],
+      limit: 10
+    });
+    expect(foreignRecall.hits.map(hit => hit.id)).toContain(absent ? nextScan.skills[0]!.memoryId! : other);
+    void db;
+  });
+
+  it("repairs every live and deleted collision victim in one startup pass under pruned history and small batch sizes", () => {
+    const { db, service } = fixture.createTestService({ llm: createFailingLlm() });
+    const repos = new Repositories(db.db);
+    const skills = Array.from({ length: 6 }, (_, index) => {
+      const id = `skill-${index + 1}`;
+      const content = `---\nname: ${id}\ndescription: Desc ${id}.\n---\nBody ${id}.`;
+      return {
+        sourceSkillId: id,
+        sourceSkillPath: `/synthetic/hermes/${id}/SKILL.md`,
+        title: id,
+        content,
+        contentHash: importedSkillContentHash(content),
+        modifiedAt: `2026-01-01T00:0${index}:00.000Z`
+      };
+    });
+    const importedIds = service.reconcileAgentSkills({
+      namespace,
+      sourceAgentId: "hermes",
+      complete: true,
+      skills
+    }).skills.map(entry => entry.memoryId!);
+
+    const manualIds = importedIds.map((_, index) =>
+      replayRound6ManualCollision(
+        service,
+        repos,
+        {
+          namespace,
+          source: "hermes",
+          layer: "Skill",
+          title: `manual-${index + 1}`,
+          turnId: `skill-${index + 1}`,
+          content: `Manual note ${index + 1}`
+        },
+        `2026-01-02T00:0${index}:00.000Z`,
+        { inheritedPath: true }
+      )
+    );
+
+    // Pre-upgrade soft-delete on even indices (0, 2, 4) so repairing them drops them out of the WHERE set
+    for (const evenIndex of [0, 2, 4]) {
+      const targetId = importedIds[evenIndex]!;
+      const soft = repos.memories.softDelete(targetId, time(5))!;
+      repos.memories.rewriteDeletedRow({
+        ...soft,
+        memoryValue: "",
+        properties: {
+          ...soft.properties,
+          status: "deleted",
+          internal_info: {
+            ...soft.properties.internal_info,
+            deleted_current: false,
+            superseded_by_skill_id: manualIds[evenIndex]
+          }
+        }
+      });
+    }
+    db.db.prepare("DELETE FROM memory_change_log").run();
+
+    // Batch size 2 forces 3 keyset pages; previously OFFSET pagination skipped odd-indexed live victims!
+    service.reconcileWorkerStartup(2);
+
+    for (const [index, id] of importedIds.entries()) {
+      const repaired = repos.memories.getIncludingDeleted(id)!;
+      expect(repaired.properties.internal_info.superseded_by_skill_id).toBeUndefined();
+      if (index % 2 === 0) {
+        expect(repaired.status).toBe("deleted");
+        expect(repaired.properties.internal_info.deleted_current).toBe(true);
+      } else {
+        expect(repaired.status).toBe("archived");
+        expect(repaired.properties.internal_info.archive_reason).toBe("source_review_pending");
+      }
+    }
   });
 });

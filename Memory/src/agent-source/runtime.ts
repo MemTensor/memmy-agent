@@ -144,6 +144,7 @@ export interface AgentSourceExecutor {
 interface PersistedSourceState {
   status: AgentConnectionStatus;
   autoInjectSuppressed?: boolean;
+  suppressedRevision?: number;
   messageCount: number;
   lastScannedAt: string | null;
   latestSeenAt: string | null;
@@ -255,7 +256,10 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
             return undefined;
           })
         : undefined;
-      const cleanupPending = stored?.autoInjectSuppressed === true && stored.status !== "not_connected";
+      const event = options.service.agentSkillConnectionEvent?.(adapter.descriptor.sourceId);
+      const cleanupPending = stored?.autoInjectSuppressed === true
+        && stored.status !== "not_connected"
+        && !isSuppressionSuperseded(stored.suppressedRevision, event);
       const status = cleanupPending || installation?.pluginInstalled || installation?.skillInstalled
         ? connectionStatus(adapter.descriptor.sourceId)
         : "not_connected";
@@ -759,8 +763,14 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     const connectionEvent = event ? { connectionEvent: event } : {};
     const stored = state.sources[sourceId];
     // A pending local removal can outlive a failed notification, leaving stale
-    // connected KV. Only a completed removal may yield to an explicit reconnect.
-    if (stored?.autoInjectSuppressed && (stored.status !== "not_connected" || !explicit)) {
+    // connected KV. Only a completed removal or a strictly newer committed
+    // reconnect revision may supersede the pending local removal.
+    const pendingRemoval = Boolean(
+      stored?.autoInjectSuppressed
+      && stored.status !== "not_connected"
+      && !(event?.state === "connected" && isSuppressionSuperseded(stored.suppressedRevision, event))
+    );
+    if (pendingRemoval || (stored?.autoInjectSuppressed && !explicit)) {
       return { connectionState: "disconnected", ...connectionEvent };
     }
     return { connectionState: explicit ?? (await options.service.agentSkillsDisconnected?.(sourceId) ? "disconnected" : null), ...connectionEvent };
@@ -776,7 +786,17 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     const state = await readState();
     const stored = state.sources[sourceId];
     const pendingLocalRemoval = !action && stored?.autoInjectSuppressed && stored.status !== "not_connected";
-    let owned: PersistedSourceState = { ...(stored ?? emptySourceState()), status: kind === "plugin" ? "plugin_installed" : "skill_installed", autoInjectSuppressed: true };
+    const baselineRevision = action
+      ? (typeof action.event?.revision === "number"
+        ? action.event.revision
+        : action.startedEventKnown ? (action.startedEvent?.revision ?? 0) : stored?.suppressedRevision)
+      : (baseline.event?.revision ?? 0);
+    let owned: PersistedSourceState = {
+      ...(stored ?? emptySourceState()),
+      status: kind === "plugin" ? "plugin_installed" : "skill_installed",
+      autoInjectSuppressed: true,
+      ...(typeof baselineRevision === "number" ? { suppressedRevision: baselineRevision } : {})
+    };
     state.sources[sourceId] = owned;
     const save = async (snapshot: PersistedState) => {
       try { await persist(snapshot); }
@@ -794,7 +814,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       ? [() => target.uninstallPlugin!(sourceId), ...(!target.pluginUninstallIncludesSkills ? [() => target.uninstall(sourceId)] : [])]
       : [() => target.uninstall(sourceId)];
     try {
-      if (!action) await save(state);
+      if (!action || owned.suppressedRevision !== stored?.suppressedRevision) await save(state);
       await compensation.compensate(sourceId, baseline, {
         remove,
         install: async desiredKind => {
@@ -810,9 +830,12 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
             if (decision.kind) {
               next.status = decision.kind === "plugin" ? "plugin_installed" : "skill_installed";
               delete next.autoInjectSuppressed;
+              delete next.suppressedRevision;
             } else if (!pendingLocalRemoval || decision.event?.state === "disconnected") {
               next.status = "not_connected";
               next.autoInjectSuppressed = true;
+              const settledRevision = decision.event?.revision ?? owned.suppressedRevision;
+              if (typeof settledRevision === "number") next.suppressedRevision = settledRevision;
             }
             await save({ ...state, sources: { ...state.sources, [sourceId]: next } });
             if (state.sources[sourceId] === current) state.sources[sourceId] = owned = next;
@@ -926,11 +949,18 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       let preparationError: Error | undefined;
       try {
         const state = await readState();
-        state.sources[sourceId] = {
-          ...(state.sources[sourceId] ?? emptySourceState()),
+        const previous = state.sources[sourceId];
+        const startedRevision = action?.startedEventKnown
+          ? (action.startedEvent?.revision ?? 0)
+          : previous?.suppressedRevision;
+        const prepared: PersistedSourceState = {
+          ...(previous ?? emptySourceState()),
           status: kind === "plugin" ? "plugin_installed" : connectionStatus(sourceId),
-          autoInjectSuppressed: true
+          autoInjectSuppressed: true,
+          ...(typeof startedRevision === "number" ? { suppressedRevision: startedRevision } : {})
         };
+        if (typeof startedRevision !== "number") delete prepared.suppressedRevision;
+        state.sources[sourceId] = prepared;
         await persist(state);
       } catch (error) {
         preparationError = error instanceof Error ? error : new Error(String(error));
@@ -970,6 +1000,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         status: kind === "plugin" ? "plugin_installed" : "skill_installed"
       };
       delete nextState.autoInjectSuppressed;
+      delete nextState.suppressedRevision;
       const next = { ...state, sources: { ...state.sources, [sourceId]: nextState } };
       await persist(next);
       // Check before replacing the cached source: another local removal may
@@ -1017,8 +1048,15 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     const refreshTarget = integrationRegistry.get("opencode");
     if (registry.get("opencode") && refreshTarget?.isInstalledHookCurrent) {
       const stateBeforeRefresh = await readState();
-      if ((!stateBeforeRefresh.sources.opencode?.autoInjectSuppressed || stateBeforeRefresh.sources.opencode?.status === "not_connected")
-        && (stateBeforeRefresh.sources.opencode?.status === "plugin_installed" || await refreshTarget.isInstalled("opencode"))) {
+      const opencodeStored = stateBeforeRefresh.sources.opencode;
+      const opencodeEvent = options.service.agentSkillConnectionEvent?.("opencode");
+      const opencodePendingRemoval = Boolean(
+        opencodeStored?.autoInjectSuppressed
+        && opencodeStored.status !== "not_connected"
+        && !(opencodeEvent?.state === "connected" && isSuppressionSuperseded(opencodeStored.suppressedRevision, opencodeEvent))
+      );
+      if (!opencodePendingRemoval
+        && (opencodeStored?.status === "plugin_installed" || await refreshTarget.isInstalled("opencode"))) {
         try {
           if (!(await refreshTarget.isInstalledHookCurrent())) {
             if (isCurrent() && await automaticConnectionAllowed("opencode")) {
@@ -1068,7 +1106,10 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       const current = await readState();
       const sources = Object.fromEntries(Object.entries(current.sources).map(([sourceId, source]) => [sourceId, {
         status: source.status,
-        ...(source.autoInjectSuppressed === true ? { autoInjectSuppressed: true } : {}),
+        ...(source.autoInjectSuppressed === true ? {
+          autoInjectSuppressed: true,
+          ...(typeof source.suppressedRevision === "number" ? { suppressedRevision: source.suppressedRevision } : {})
+        } : {}),
         messageCount: 0,
         lastScannedAt: null,
         latestSeenAt: null
@@ -1993,7 +2034,12 @@ async function loadState(path: string): Promise<PersistedState> {
       const status = source.status === "skill_installed" || source.status === "plugin_installed" ? source.status : "not_connected";
       return [sourceId, {
         status,
-        ...(source.autoInjectSuppressed === true ? { autoInjectSuppressed: true } : {}),
+        ...(source.autoInjectSuppressed === true ? {
+          autoInjectSuppressed: true,
+          ...(typeof source.suppressedRevision === "number" && Number.isSafeInteger(source.suppressedRevision) && source.suppressedRevision >= 0
+            ? { suppressedRevision: source.suppressedRevision }
+            : {})
+        } : {}),
         messageCount: typeof source.messageCount === "number" && Number.isFinite(source.messageCount) ? Math.max(0, Math.floor(source.messageCount)) : 0,
         lastScannedAt: typeof source.lastScannedAt === "string" ? source.lastScannedAt : null,
         latestSeenAt: typeof source.latestSeenAt === "string" ? source.latestSeenAt : null,
@@ -2100,6 +2146,12 @@ async function writeState(path: string, state: PersistedState, signal?: AbortSig
   } finally {
     await rm(temporary, { force: true });
   }
+}
+
+function isSuppressionSuperseded(suppressedRevision: number | undefined, event: ConnectionEvent | undefined): boolean {
+  return typeof suppressedRevision === "number"
+    && typeof event?.revision === "number"
+    && event.revision > suppressedRevision;
 }
 
 function connectionStatus(sourceId: string): AgentConnectionStatus {

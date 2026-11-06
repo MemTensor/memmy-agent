@@ -3188,15 +3188,30 @@ export class MemoryService {
       throw new MemoryServiceError("forbidden", "recall event belongs to a different user");
     }
     const eventRequest = isRecord(event.request) ? event.request : {};
+    const eventSource = typeof eventRequest.source === "string" && eventRequest.source.trim()
+      ? eventRequest.source.trim()
+      : isRecord(eventRequest.namespace) && typeof eventRequest.namespace.source === "string" && eventRequest.namespace.source.trim()
+        ? eventRequest.namespace.source.trim()
+        : event.sessionId
+          ? this.repos.runtime.getSession(event.sessionId)?.source?.trim() || undefined
+          : undefined;
+    const requestSource = request.namespace?.source?.trim() || undefined;
+    const isEligibleRecallId = (id: string): boolean => {
+      if (!this.isRecallMemoryEligible(id, eventSource)) return false;
+      if (requestSource && requestSource !== eventSource) {
+        return this.isRecallMemoryEligible(id, requestSource);
+      }
+      return true;
+    };
     const evidence = isRecord(eventRequest.recallEvidence) ? eventRequest.recallEvidence : {};
     const storedHits = Array.isArray(evidence.hits)
       ? evidence.hits.filter(isRecord) as unknown as RecallHit[]
       : [];
     const hits = storedHits.flatMap((hit) => {
       if (!hit.members?.length) {
-        return this.isDeletedRecallMemory(hit.id) ? [] : [hit];
+        return isEligibleRecallId(hit.id) ? [hit] : [];
       }
-      const members = hit.members.filter((member) => !this.isDeletedRecallMemory(member.id));
+      const members = hit.members.filter((member) => isEligibleRecallId(member.id));
       if (members.length === 0) return [];
       const memberIds = new Set(members.map((member) => member.id));
       return [{
@@ -3222,8 +3237,8 @@ export class MemoryService {
       query: event.query,
       hits,
       diagnostics: {
-        candidateMemoryIds: event.candidateMemoryIds ?? [],
-        injectedMemoryIds: event.injectedMemoryIds ?? [],
+        candidateMemoryIds: (event.candidateMemoryIds ?? []).filter(isEligibleRecallId),
+        injectedMemoryIds: (event.injectedMemoryIds ?? []).filter(isEligibleRecallId),
         ...(recordedCapture
           ? { capture: recordedCapture }
           : rawTurn ? { capture: { status: "pending" } } : {})
@@ -4130,6 +4145,13 @@ export class MemoryService {
     if (userMemory) return userMemory.status === "deleted" || Boolean(userMemory.deletedAt);
     const memory = this.repos.memories.getIncludingDeleted(id);
     return Boolean(memory && (memory.status === "deleted" || memory.deletedAt));
+  }
+
+  private isRecallMemoryEligible(id: string, currentAgentId?: string): boolean {
+    if (this.isDeletedRecallMemory(id)) return false;
+    const memory = this.repos.memories.getIncludingDeleted(id);
+    if (!memory || !isImportedSkill(memory)) return true;
+    return this.repos.isImportedSkillEligibleForRecall(memory, currentAgentId);
   }
 
   private requireRawTurn(rawTurnId: string): RawTurnRecord {

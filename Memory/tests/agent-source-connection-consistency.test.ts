@@ -780,6 +780,70 @@ describe("shared connection authority includes local removal intent", () => {
     await expect(h.executor.connectionState(h.sourceId)).rejects.toThrow();
     expect(h.service.agentSkillConnectionState(h.sourceId)).toBeUndefined();
   });
+
+  it.each(["skill", "plugin"] as const)("honors a newer committed $kind reconnect when local state persistence fails after a failed disconnect", async kind => {
+    const h = harness(kind, kind === "plugin" ? "opencode" : undefined);
+    await h.executor.mutateConnection(h.sourceId, kind, "POST");
+    vi.spyOn(h.target, kind === "plugin" ? "uninstallPlugin" : "uninstall")
+      .mockRejectedValueOnce(new Error("fixture uninstall failed"));
+    await expect(h.executor.mutateConnection(h.sourceId, kind, "DELETE")).rejects.toThrow("Integration cleanup failed");
+    await expect(h.executor.connectionState(h.sourceId)).resolves.toMatchObject({ connectionState: "disconnected" });
+
+    const rename = fsPromises.rename;
+    let failedStateSave = false;
+    const renameSpy = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      if (!failedStateSave && to === h.statePath) {
+        failedStateSave = true;
+        throw new Error("fixture state save failed after reconnect");
+      }
+      return rename(from, to);
+    });
+    await expect(h.executor.mutateConnection(h.sourceId, kind, "POST")).rejects.toThrow("fixture state save failed after reconnect");
+    renameSpy.mockRestore();
+
+    const event = h.service.agentSkillConnectionEvent(h.sourceId)!;
+    expect(event).toMatchObject({ state: "connected", kind });
+    await expect(h.executor.connectionState(h.sourceId)).resolves.toMatchObject({
+      connectionState: "connected",
+      connectionEvent: event
+    });
+    const restarted = await h.restartExecutor();
+    await expect(restarted.connectionState(h.sourceId)).resolves.toMatchObject({
+      connectionState: "connected",
+      connectionEvent: event
+    });
+  });
+
+  it("clears stale pending-removal status in list() once another runtime finishes uninstall and records a newer disconnect", async () => {
+    const h = harness("plugin", "opencode");
+    await h.executor.mutateConnection(h.sourceId, "plugin", "POST");
+    const realUninstall = h.target.uninstallPlugin!.bind(h.target);
+    vi.spyOn(h.target, "uninstallPlugin").mockRejectedValueOnce(new Error("fixture viewer uninstall failed"));
+    await expect(h.executor.mutateConnection(h.sourceId, "plugin", "DELETE")).rejects.toThrow("Integration cleanup failed");
+    expect((await h.executor.list()).sources[0]?.status).toBe("plugin_installed");
+
+    // Simulate Desktop App completing physical removal + committing newer disconnected event
+    await realUninstall(h.sourceId);
+    h.service.reconcileAgentSkills({
+      sourceAgentId: h.sourceId,
+      complete: false,
+      connectionState: "disconnected",
+      connectionKind: "plugin",
+      skills: []
+    });
+    expect((await h.executor.list()).sources[0]?.status).toBe("not_connected");
+
+    // Subsequent Desktop App reconnect must not be overridden by Viewer's stale local suppression
+    await h.target.installPlugin!(h.sourceId);
+    h.service.reconcileAgentSkills({
+      sourceAgentId: h.sourceId,
+      complete: false,
+      connectionState: "connected",
+      connectionKind: "plugin",
+      skills: []
+    });
+    await expect(h.executor.connectionState(h.sourceId)).resolves.toMatchObject({ connectionState: "connected" });
+  });
 });
 
 

@@ -541,7 +541,8 @@ export class PanelReadModel {
         .map((memory) => [memory.id, memory] as const)
     );
     return {
-      items: memories.map((memory) => {
+      items: memories.map((rawMemory) => {
+        const memory = this.deps.repos.projectMemoryForRead(rawMemory);
         const listed = panelListItemFromMemory(
           this.deps.repos.memories.toListItem(memory),
           memory,

@@ -82,6 +82,8 @@ export interface TimelineRequest extends RequestEnvelope {
 
 /** The storage-facing portion of the read model's dependency contract. */
 export interface EpisodeReadModelRepositories {
+  projectMemoryForRead?(memory: MemoryRow): MemoryRow;
+  isImportedSkillEligibleForEmbedding?(memory: MemoryRow): boolean;
   memories: {
     get(id: string): MemoryRow | undefined;
     getMany(ids: readonly string[]): MemoryRow[];
@@ -244,8 +246,16 @@ export class EpisodeReadModel {
       throw this.deps.invalidArgument("raw turn ids are internal; use the containing trace_ or episode_ id");
     }
 
-    const memory = this.deps.repos.memories.get(id);
-    if (!memory) throw this.deps.notFound(`memory not found: ${id}`);
+    const rawMemory = this.deps.repos.memories.get(id);
+    if (
+      !rawMemory
+      || (isImportedSkill(rawMemory) && rawMemory.properties.internal_info.source_kind === "plugin")
+    ) {
+      throw this.deps.notFound(`memory not found: ${id}`);
+    }
+    const memory = this.deps.repos.projectMemoryForRead
+      ? this.deps.repos.projectMemoryForRead(rawMemory)
+      : rawMemory;
     this.deps.assertMemoryInScope(memory, request.namespace);
     const detail = this.deps.detailFromMemory(memory, this.deps.repos.processing.get(memory.id));
     const refs = this.refsForMemory(memory);
@@ -253,8 +263,14 @@ export class EpisodeReadModel {
     // An imported skill whose directory holds scripts or references points
     // there, so an Agent on the same machine can open them. Output only; the
     // stored body is the SKILL.md as imported.
-    const sourceDir = isImportedSkill(memory) ? importedSkillSourceDir(memory) : undefined;
-    if (sourceDir && typeof item.body === "string") item.body = `${item.body}\n\nsource dir: ${sourceDir}`;
+    const eligibleForSourceDir = isImportedSkill(memory)
+      && (this.deps.repos.isImportedSkillEligibleForEmbedding
+        ? this.deps.repos.isImportedSkillEligibleForEmbedding(memory)
+        : true);
+    const sourceDir = eligibleForSourceDir ? importedSkillSourceDir(memory) : undefined;
+    if (sourceDir && typeof item.body === "string" && item.body.trim().length > 0) {
+      item.body = `${item.body}\n\nsource dir: ${sourceDir}`;
+    }
     if (memory.properties.internal_info.memory_kind === "span") {
       const span = memory.properties.internal_info.span as {
         raw_turn_id: string;

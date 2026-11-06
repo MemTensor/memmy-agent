@@ -2350,3 +2350,73 @@ it.each(["App", "Memory"].flatMap(removingSide => ["local", "remote"].map(reconn
       await expect(h.service.isAutomaticConnectionAllowed(h.sourceId)).resolves.toBe(true);
     } finally { await http.close(); }
   });
+
+it.each(["skill", "plugin"] as const)("honors a newer committed $kind reconnect across restart when App local status save fails after a failed disconnect", async kind => {
+  const h = createConnectionHarness(kind, kind === "plugin" ? "opencode" : undefined);
+  await h.connect();
+  const http = await useRealConnectionHttpClient(h);
+  h.memoryClient.reconcileAgentSkills = http.client.reconcileAgentSkills;
+  try {
+    vi.spyOn(h.target, kind === "plugin" ? "uninstallPlugin" : "uninstall")
+      .mockRejectedValueOnce(new Error("fixture uninstall failed"));
+    await expect(h.disconnect()).rejects.toThrow("Integration cleanup failed");
+    expect(h.repository.isAutoInjectSuppressed(h.sourceId)).toBe(true);
+    await expect(h.service.isAutomaticConnectionAllowed(h.sourceId)).resolves.toBe(false);
+
+    vi.spyOn(h.repository, "setConnectionState").mockImplementationOnce(() => {
+      throw new Error("fixture post-commit status save failed");
+    });
+    await expect(h.connect()).rejects.toThrow("fixture post-commit status save failed");
+
+    expect(await h.target.isInstalled(h.sourceId)).toBe(true);
+    expect(h.memory.agentSkillConnectionEvent(h.sourceId)).toMatchObject({ state: "connected", kind });
+    await expect(h.service.isAutomaticConnectionAllowed(h.sourceId)).resolves.toBe(true);
+    const restarted = h.restartService();
+    await expect(restarted.isAutomaticConnectionAllowed(h.sourceId)).resolves.toBe(true);
+  } finally {
+    await http.close();
+  }
+});
+
+it("resolves cross-runtime pending removals in both directions using revision watermarks", async () => {
+  // Direction 1 (1B): Viewer failed DELETE -> App uninstallPlugin clears zombie status -> App installPlugin honors connected
+  const h1 = createConnectionHarness("plugin", "opencode");
+  await h1.executor.mutateConnection(h1.sourceId, "plugin", "POST");
+  const http1 = await useRealConnectionHttpClient(h1);
+  h1.memoryClient.reconcileAgentSkills = http1.client.reconcileAgentSkills;
+  try {
+    const realUninstall = h1.target.uninstallPlugin!.bind(h1.target);
+    vi.spyOn(h1.target, "uninstallPlugin").mockRejectedValueOnce(new Error("fixture viewer delete failed"));
+    await expect(h1.executor.mutateConnection(h1.sourceId, "plugin", "DELETE")).rejects.toThrow("Integration cleanup failed");
+    expect((await h1.service.list()).find(s => s.sourceId === h1.sourceId)?.status).toBe("plugin_installed");
+
+    vi.mocked(h1.target.uninstallPlugin!).mockImplementation(realUninstall);
+    await h1.service.uninstallPlugin(h1.sourceId);
+    expect((await h1.executor.list()).sources.find(s => s.sourceId === h1.sourceId)?.status).toBe("not_connected");
+    expect((await h1.service.list()).find(s => s.sourceId === h1.sourceId)?.status).toBe("not_connected");
+
+    await h1.service.installPlugin(h1.sourceId);
+    await expect(http1.client.agentSources!.connectionState(h1.sourceId)).resolves.toMatchObject({ connectionState: "connected" });
+    await expect(h1.service.isAutomaticConnectionAllowed(h1.sourceId)).resolves.toBe(true);
+  } finally {
+    await http1.close();
+  }
+
+  // Direction 2 (1C): App failed uninstallPlugin -> Viewer POST reconnect restores automatic connection across App restart
+  const h2 = createConnectionHarness("plugin", "opencode");
+  await h2.connect();
+  const http2 = await useRealConnectionHttpClient(h2);
+  h2.memoryClient.reconcileAgentSkills = http2.client.reconcileAgentSkills;
+  try {
+    vi.spyOn(h2.target, "uninstallPlugin").mockRejectedValueOnce(new Error("fixture app uninstall failed"));
+    await expect(h2.disconnect()).rejects.toThrow("Integration cleanup failed");
+    await expect(h2.service.isAutomaticConnectionAllowed(h2.sourceId)).resolves.toBe(false);
+
+    await h2.executor.mutateConnection(h2.sourceId, "plugin", "POST");
+    await expect(h2.service.isAutomaticConnectionAllowed(h2.sourceId)).resolves.toBe(true);
+    const restarted = h2.restartService();
+    await expect(restarted.isAutomaticConnectionAllowed(h2.sourceId)).resolves.toBe(true);
+  } finally {
+    await http2.close();
+  }
+});

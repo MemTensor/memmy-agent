@@ -15,6 +15,7 @@ import {
   importedSkillBodyMatchesSource,
   importedSkillContentHash,
   importedSkillMatchesContent,
+  stripImportedSkillBody,
   withImportedSkillRawHash,
   withoutImportedSkillBodyCopies,
   importedSkillSourceState,
@@ -22,6 +23,7 @@ import {
   importedSkillSourceIdentity,
   isHistoricalImportedSkill,
   isUnverifiedLegacySkillCollision,
+  hasRestrictedImportedSkillContent,
   isIdentityOnlyImportedSkill,
   isIdentityOnlyReason,
   normalizeSkillName,
@@ -195,8 +197,17 @@ export class AgentSkillLibrary {
             // The user's archive stays, but what happened at the source is
             // remembered so undoing the archive does not share it again.
             const sourceState = request.complete ? "source_missing" : undefined;
-            if (sourceState && version.properties.internal_info.source_state !== sourceState) {
-              this.deps.repos.memories.updateMaintenance(withImportFields(version, { source_state: sourceState }, version.updatedAt));
+            const restrict = hasRestrictedImportedSkillContent(version);
+            if ((sourceState && version.properties.internal_info.source_state !== sourceState)
+              || (restrict && version.memoryValue)) {
+              const base = restrict ? stripBody(version, version.updatedAt) : version;
+              const updated = this.deps.repos.memories.updateMaintenance(
+                sourceState ? withImportFields(base, { source_state: sourceState }, version.updatedAt) : base
+              );
+              if (restrict) {
+                this.deps.repos.runtime.scrubImportedSkillCopies(updated.id);
+                this.clearSkillIndex(updated.id);
+              }
             }
             continue;
           }
@@ -483,9 +494,12 @@ export class AgentSkillLibrary {
     let repaired = 0;
     const inventories = new Map<string, AgentSkillInstallations>();
     const batchSize = Math.max(1, limit);
-    for (let offset = 0;; offset += batchSize) {
-      const batch = this.deps.repos.memories.listImportedSkillsWithLegacyCollisionHistory(batchSize, offset, sourceAgentId);
+    let cursor: { createdAt: string; id: string } | undefined;
+    for (;;) {
+      const batch = this.deps.repos.memories.listImportedSkillsWithLegacyCollisionHistory(batchSize, cursor, sourceAgentId);
       if (batch.length === 0) break;
+      const last = batch.at(-1)!;
+      cursor = { createdAt: last.createdAt, id: last.id };
       for (const memory of batch) {
         const source = String(memory.properties.internal_info.source_agent_id ?? "");
         const successorId = memory.properties.internal_info.superseded_by_skill_id;
@@ -500,8 +514,9 @@ export class AgentSkillLibrary {
           && importedSkillSourceState(successor) === "present" && successorPolicy && typeof successorPolicy === "object"
           && !Array.isArray(successorPolicy) && (successorPolicy as Record<string, unknown>).policy_observed === true) continue;
         let resolved = this.deps.repos.memories.resolveLegacyImportedSkillVersion(memory);
-        if (resolved.status === memory.status
-          && JSON.stringify(resolved.properties.internal_info) === JSON.stringify(memory.properties.internal_info)) continue;
+        const unchangedProjection = resolved.status === memory.status
+          && JSON.stringify(resolved.properties.internal_info) === JSON.stringify(memory.properties.internal_info);
+        if (unchangedProjection && (!isDeleted(resolved) || resolved.properties.internal_info.deleted_current !== false)) continue;
         if (!inventories.has(source)) {
           const stored = this.deps.repos.runtime.getKv(agentSkillInstallationsKey(source))?.value as AgentSkillInstallations | undefined;
           if (stored?.version === 1) inventories.set(source, this.deps.repos.memories.resolvedSkillInstallationsForAgent(source));
@@ -517,11 +532,22 @@ export class AgentSkillLibrary {
           const versions = this.deps.repos.memories.listImportedSkillsForSource(source)
             .filter(version => importedSkillSourceIdentity(version) === importedSkillSourceIdentity(resolved))
             .map(version => version.id === resolved.id ? resolved : this.deps.repos.memories.resolveLegacyImportedSkillVersion(version));
+          const inventory = inventories.get(source);
+          const preserveContentScope = resolved.properties.internal_info.deleted_current === false
+            && inventory?.version === 1
+            && ![...inventory.skills, ...inventory.registrations]
+              .some(entry => entry.sourceSkillId === importedSkillSourceIdentity(resolved));
           const contentOnly = isUnverifiedLegacySkillCollision(resolved)
-            || importedSkillSourceState(resolved) === "source_missing" || isHistoricalImportedSkill(resolved, versions);
-          this.deps.repos.memories.rewriteDeletedRow(stripBody(withImportFields(resolved, {
-            deleted_current: contentOnly ? false : resolved.properties.internal_info.deleted_current ?? true
-          }, resolved.updatedAt), resolved.updatedAt));
+            || importedSkillSourceState(resolved) === "source_missing"
+            || preserveContentScope
+            || isHistoricalImportedSkill(resolved, versions);
+          const rewritten = stripBody(withImportFields(resolved, {
+            deleted_current: !contentOnly
+          }, resolved.updatedAt), resolved.updatedAt);
+          if (unchangedProjection
+            && !memory.memoryValue
+            && JSON.stringify(rewritten.properties.internal_info) === JSON.stringify(memory.properties.internal_info)) continue;
+          this.deps.repos.memories.rewriteDeletedRow(rewritten);
           this.deps.repos.runtime.scrubImportedSkillCopies(resolved.id);
           this.clearSkillIndex(resolved.id);
         } else {
@@ -643,12 +669,15 @@ export class AgentSkillLibrary {
     if (!desired.sourceState) delete next.properties.internal_info.source_state;
     next = { ...next, status: desired.status, properties: { ...next.properties, status: desired.status } };
     next = withFixedImportEta(next);
-    const restricted = disconnected || desiredIdentityOnly(desired) || next.properties.internal_info.source_kind === "plugin";
+    const restricted = disconnected || desiredIdentityOnly(desired)
+      || next.properties.internal_info.source_kind === "plugin"
+      || hasRestrictedImportedSkillContent(next);
     if (restricted || isIdentityOnlyImportedSkill(next)) {
       if (restricted || !importedSkillBodyMatchesSource(next)) next = stripBody(next, memory.updatedAt);
       this.clearSkillIndex(memory.id);
     }
     const saved = this.deps.repos.memories.updateMaintenance(next);
+    if (restricted || isIdentityOnlyImportedSkill(saved)) this.deps.repos.runtime.scrubImportedSkillCopies(saved.id);
     if (!this.deps.repos.isImportedSkillEligibleForEmbedding(saved)) this.clearSkillIndex(saved.id);
   }
 
@@ -1015,17 +1044,21 @@ export class AgentSkillLibrary {
         || existing.timeline !== maintenance.timeline
         || existing.sessionId !== maintenance.sessionId || existing.conversationId !== maintenance.conversationId || existing.appId !== maintenance.appId;
       const saved = metadataChanged ? this.deps.repos.memories.updateMaintenance(maintenance) : existing;
+      if (restricted) this.deps.repos.runtime.scrubImportedSkillCopies(saved.id);
       this.reconcileSkillIndex(saved, at);
       return { memory: saved, created: false, previous: existing, outcome: "unchanged" };
     }
     const saved = existing ? this.deps.repos.memories.update(next) : this.deps.repos.memories.insert(next);
     this.appendChange(saved, existing, existing ? "updated" : "created", existing ? "update" : "create", at);
+    if (restricted) this.deps.repos.runtime.scrubImportedSkillCopies(saved.id);
     this.reconcileSkillIndex(saved, at);
     return { memory: saved, created: !existing, previous: existing, outcome: existing ? "updated" : "created" };
   }
 
   private applyState(memory: MemoryRow, desired: DesiredState, at: string, changeType: string, supersededBy?: string, previous: MemoryRow = memory): void {
-    const restricted = desiredIdentityOnly(desired) || memory.properties.internal_info.source_kind === "plugin";
+    const restricted = desiredIdentityOnly(desired)
+      || memory.properties.internal_info.source_kind === "plugin"
+      || hasRestrictedImportedSkillContent(memory);
     const identityOnly = restricted || !memory.memoryValue.trim();
     const stripContent = restricted || (identityOnly && !importedSkillBodyMatchesSource(memory));
     const base = stripContent ? stripBody(memory, at) : memory;
@@ -1040,6 +1073,7 @@ export class AgentSkillLibrary {
     const saved = this.deps.repos.memories.update(applyRetrievalRepresentation(next, memory));
     this.reconcileSkillIndex(saved, at);
     this.appendChange(saved, previous, "archived", changeType, at);
+    if (restricted) this.deps.repos.runtime.scrubImportedSkillCopies(saved.id);
   }
 
   /** Representation metadata alone does not invalidate a current vector or owned retry. */
@@ -1325,27 +1359,7 @@ function withImportFields(memory: MemoryRow, fields: Record<string, unknown>, at
 }
 
 function stripBody(memory: MemoryRow, at: string): MemoryRow {
-  memory = withImportedSkillRawHash(memory);
-  const internal = { ...memory.properties.internal_info };
-  const skill = skillRecord(memory);
-  internal.invocation_guide = "";
-  internal.procedure_json = { summary: "" };
-  internal.summary = "";
-  internal.skill = { ...skill, invocation_guide: "", procedure_json: { summary: "" } };
-  delete internal.skill_description;
-  delete internal.retrieval_index;
-  delete internal.retrieval_previous;
-  return {
-    ...memory,
-    memoryValue: "",
-    info: { ...memory.info, summary: "" },
-    properties: {
-      ...memory.properties,
-      ...(memory.properties.info ? { info: { ...memory.properties.info, summary: "" } } : {}),
-      internal_info: internal
-    },
-    updatedAt: at
-  };
+  return stripImportedSkillBody(memory, at);
 }
 
 function skillRecord(memory: MemoryRow): Record<string, unknown> {

@@ -127,6 +127,38 @@ export function isIdentityOnlyImportedSkill(memory: ImportedSkillEligibilityMemo
     || sourceState === "disconnected" || sourceState === "invocation_policy" || sourceState === "policy_unknown";
 }
 
+/** True when explicit policy, connection, plugin or frontmatter errors forbid retaining or exposing the body. */
+export function hasRestrictedImportedSkillContent(memory: ImportedSkillEligibilityMemory): boolean {
+  if (!isImportedSkill(memory)) return false;
+  const internal = memory.properties.internal_info;
+  if (internal.source_kind === "plugin") return true;
+  const sourceState = internal.source_state;
+  if (isIdentityOnlyReason(importedSkillArchiveReason(memory))
+    || sourceState === "disconnected"
+    || sourceState === "invocation_policy"
+    || sourceState === "policy_unknown"
+    || sourceState === "scan_pending") return true;
+  const invocation = internal.invocation;
+  const policy = typeof invocation === "object" && invocation !== null && !Array.isArray(invocation)
+    ? invocation as Record<string, unknown> : {};
+  const frontmatter = memory.memoryValue ? parseSkillFrontmatter(memory.memoryValue) : undefined;
+  if (internal.frontmatter_error || internal.policy_error || frontmatter?.error) return true;
+  if (policy.disable_model_invocation === true || policy.allow_implicit_invocation === false
+    || (frontmatter !== undefined && frontmatterBoolean(frontmatter.data, "disable-model-invocation") === true)) return true;
+  return false;
+}
+
+/** True when a cold or missing Codex record has never had its openai.yaml sidecar observed. */
+export function hasUnobservedCodexSkillPolicy(memory: ImportedSkillEligibilityMemory): boolean {
+  if (!isImportedSkill(memory) || !memory.memoryValue.trim()) return false;
+  const internal = memory.properties.internal_info;
+  if (normalizeAgentIdKey(String(internal.source_agent_id ?? "")) !== "codex") return false;
+  const invocation = internal.invocation;
+  const policy = typeof invocation === "object" && invocation !== null && !Array.isArray(invocation)
+    ? invocation as Record<string, unknown> : {};
+  return policy.policy_observed !== true && typeof policy.allow_implicit_invocation !== "boolean";
+}
+
 /** Full raw UTF-8 bytes, shared by direct imports, source observations and tombstones. */
 export function importedSkillContentHash(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -188,6 +220,33 @@ export function withoutImportedSkillBodyCopies(memory: MemoryRow): MemoryRow {
   skill.procedure_json = compactProcedure(skill.procedure_json);
   internal.skill = skill;
   return { ...memory, properties: { ...memory.properties, internal_info: internal } };
+}
+
+/** Strips body, summary and guide copies for identity-only or restricted imported skills. */
+export function stripImportedSkillBody(memory: MemoryRow, at = memory.updatedAt): MemoryRow {
+  memory = withImportedSkillRawHash(memory);
+  const internal = { ...memory.properties.internal_info };
+  const skill = typeof internal.skill === "object" && internal.skill !== null && !Array.isArray(internal.skill)
+    ? internal.skill as Record<string, unknown>
+    : {};
+  internal.invocation_guide = "";
+  internal.procedure_json = { summary: "" };
+  internal.summary = "";
+  internal.skill = { ...skill, invocation_guide: "", procedure_json: { summary: "" } };
+  delete internal.skill_description;
+  delete internal.retrieval_index;
+  delete internal.retrieval_previous;
+  return {
+    ...memory,
+    memoryValue: "",
+    info: { ...memory.info, summary: "" },
+    properties: {
+      ...memory.properties,
+      ...(memory.properties.info ? { info: { ...memory.properties.info, summary: "" } } : {}),
+      internal_info: internal
+    },
+    updatedAt: at
+  };
 }
 
 export function importedSkillName(memory: MemoryRow): string {

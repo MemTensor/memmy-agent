@@ -2,8 +2,9 @@ import "../../fixtures/isolated-user-home.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { agentSkillConnectionKey, agentSkillInstallationsKey, importedSkillContentHash } from "../../../src/storage/imported-skill.js";
-import type { MemoryAddRequest } from "../../../src/types.js";
+import type { MemoryAddRequest, MemoryRow } from "../../../src/types.js";
 import { withLegacyImportedSkillWriter } from "../../fixtures/legacy-imported-skill-writer.js";
+import { replayRound6ManualCollision, replayRound9UnverifiedArchive } from "../../fixtures/round6-manual-collision.js";
 import { createCapturingEmbedder, createFailingLlm, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const fixture = createMemoryServiceFixture();
@@ -203,6 +204,221 @@ describe("pure old-writer collision before startup or any directory scan", () =>
     const result = await service.search({ namespace: { ...namespace, source: "cursor" },
       query: "deploymentquartz", layers: ["Skill"], limit: 10 });
     expect(result.hits.some(hit => hit.id === id)).toBe(explicitReconnect);
+  });
+
+  it.each([false, true])("excludes cold Round-9 archive/restore laundered missing skills from recall, count, listSkills and embedding while allowing reobserved=%s", async reobserved => {
+    const embedded: string[] = [];
+    const { db, service } = fixture.createTestService({
+      llm: { ...createFailingLlm(), isConfigured: () => false },
+      embedder: createCapturingEmbedder(embedded)
+    });
+    const repos = new Repositories(db.db);
+    const hermesScan = (skills: Array<{ sourceSkillId: string; sourceSkillPath: string; title: string; content: string; contentHash: string; modifiedAt: string }>) =>
+      service.reconcileAgentSkills({ namespace, sourceAgentId: "hermes", complete: true, skills });
+    const id = hermesScan([{
+      sourceSkillId: "deploy-helper",
+      sourceSkillPath: "/synthetic/hermes/deploy-helper/SKILL.md",
+      title: "deploy-helper",
+      content: fileText,
+      contentHash: importedSkillContentHash(fileText),
+      modifiedAt: "2026-11-01T00:00:00.000Z"
+    }]).skills[0]!.memoryId!;
+    const foreignId = service.reconcileAgentSkills({
+      namespace: { ...namespace, source: "claude_code" },
+      sourceAgentId: "claude_code",
+      complete: true,
+      skills: [{
+        sourceSkillId: "deploy-helper",
+        sourceSkillPath: "/synthetic/claude/deploy-helper/SKILL.md",
+        title: "deploy-helper",
+        content: fileText,
+        contentHash: importedSkillContentHash(fileText),
+        modifiedAt: "2026-10-31T00:00:00.000Z"
+      }]
+    }).skills[0]!.memoryId!;
+
+    // Complete scan observes hermes file missing, then Round 6 collides, then Round 9 archive->restore launders cold row to activated!
+    hermesScan([]);
+    const beforeCollision = repos.memories.getIncludingDeleted(id)!;
+    expect(beforeCollision.properties.internal_info.archive_reason).toBe("source_missing");
+    const manualId = replayRound6ManualCollision(
+      service,
+      repos,
+      {
+        namespace,
+        source: "hermes",
+        layer: "Skill",
+        title: "tool-note",
+        turnId: "deploy-helper",
+        content: "Manual note."
+      },
+      "2026-11-01T12:00:00.000Z"
+    );
+    expect(repos.memories.getIncludingDeleted(id)!.properties.internal_info.superseded_by_skill_id).toBe(manualId);
+
+    replayRound9UnverifiedArchive(repos, id, manualId, "2026-11-02T00:00:00.000Z");
+    const archivedByR9 = repos.memories.getIncludingDeleted(id)!;
+    const launderedInternal = { ...archivedByR9.properties.internal_info };
+    delete launderedInternal.archive_reason;
+    const laundered = repos.memories.update({
+      ...archivedByR9,
+      status: "activated",
+      updatedAt: "2026-11-02T01:00:00.000Z",
+      properties: { ...archivedByR9.properties, status: "activated", internal_info: launderedInternal }
+    });
+    repos.runtime.appendChange({
+      memoryId: id,
+      userId: archivedByR9.userId,
+      kind: "skill",
+      op: "activated",
+      changeType: "restore",
+      source: "panel.restore",
+      createdAt: "2026-11-02T01:00:00.000Z",
+      before: archivedByR9,
+      after: laundered
+    });
+
+    if (reobserved) {
+      hermesScan([{
+        sourceSkillId: "deploy-helper",
+        sourceSkillPath: "/synthetic/hermes/deploy-helper/SKILL.md",
+        title: "deploy-helper",
+        content: fileText,
+        contentHash: importedSkillContentHash(fileText),
+        modifiedAt: "2026-11-03T00:00:00.000Z"
+      }]);
+    }
+    embedded.length = 0;
+
+    // Cold read before reconcileWorkerStartup:
+    expect(repos.isImportedSkillEligibleForRecall(repos.memories.getIncludingDeleted(id)!, "cursor")).toBe(reobserved);
+    expect(repos.isImportedSkillEligibleForEmbedding(repos.memories.getIncludingDeleted(id)!)).toBe(reobserved);
+    const listedIds = service.listSkills({ namespace: { ...namespace, source: "cursor" } }).skills.map(skill => skill.id);
+    expect(listedIds.includes(id)).toBe(reobserved);
+    expect(listedIds).toContain(foreignId);
+
+    const recalled = await service.search({
+      namespace: { ...namespace, source: "cursor" },
+      query: "deploymentquartz",
+      layers: ["Skill"],
+      limit: 10
+    });
+    expect(recalled.hits.map(hit => hit.id)).toEqual([reobserved ? id : foreignId]);
+  });
+
+  it("redacts restricted and pending cold imported skills in getMemory, getSkill and panelItems while preserving eligible and user-archived reads", () => {
+    const { db, service } = fixture.createTestService({ llm: createFailingLlm(), embedder: createCapturingEmbedder([]) });
+    const repos = new Repositories(db.db);
+    const secretMarker = "COLD-RESTRICTED-SECRET-BODY";
+    const eligibleMarker = "COLD-ELIGIBLE-PUBLIC-BODY";
+
+    const addCold = (source: string, name: string, body: string, extraInternal: Record<string, unknown> = {}) => {
+      const created = service.addMemory({
+        namespace: { ...namespace, source },
+        source,
+        layer: "Skill",
+        title: name,
+        content: body,
+        sourceAgentId: source,
+        sourceSkillId: name,
+        sourceSkillPath: `/synthetic/${source}/${name}/SKILL.md`,
+        sourceContentHash: importedSkillContentHash(body),
+        deferProcessing: true
+      });
+      const raw = repos.memories.getIncludingDeleted(created.id)!;
+      const legacyInternal: MemoryRow["properties"]["internal_info"] = {
+        ...raw.properties.internal_info,
+        has_supporting_files: true,
+        ...extraInternal
+      };
+      delete legacyInternal.import_state_version;
+      delete legacyInternal.archive_reason;
+      delete legacyInternal.source_state;
+      delete legacyInternal.invocation;
+      repos.memories.updateMaintenance({
+        ...raw,
+        status: "activated",
+        memoryValue: body,
+        info: { ...raw.info, summary: `Summary ${body.includes(secretMarker) ? secretMarker : eligibleMarker}` },
+        properties: { ...raw.properties, status: "activated", internal_info: legacyInternal }
+      });
+      return created.id;
+    };
+
+    const archivedId = service.reconcileAgentSkills({
+      namespace: { ...namespace, source: "openclaw" },
+      sourceAgentId: "openclaw",
+      complete: true,
+      skills: [{
+        sourceSkillId: "archived-helper",
+        sourceSkillPath: "/synthetic/openclaw/archived-helper/SKILL.md",
+        title: "archived-helper",
+        content: `---\nname: archived-helper\ndescription: archived desc\n---\nArchived body.`,
+        contentHash: importedSkillContentHash(`---\nname: archived-helper\ndescription: archived desc\n---\nArchived body.`),
+        modifiedAt: "2026-11-01T00:00:00.000Z",
+        hasSupportingFiles: true
+      }]
+    }).skills[0]!.memoryId!;
+    service.archiveMemory(archivedId, { namespace: { ...namespace, source: "openclaw" } });
+
+    const coldDisabledId = addCold(
+      "opencode",
+      "cold-disabled",
+      `---\nname: cold-disabled\ndescription: disabled desc\ndisable-model-invocation: true\n---\n${secretMarker}`
+    );
+    const coldBrokenId = addCold(
+      "hermes",
+      "cold-broken",
+      `---\nname: [unterminated\n---\n${secretMarker}`
+    );
+    const coldCodexUnobservedId = addCold(
+      "codex",
+      "cold-codex",
+      `---\nname: cold-codex\ndescription: codex desc\n---\n${secretMarker}`
+    );
+    const coldPendingId = addCold(
+      "cursor",
+      "cold-pending",
+      `---\nname: cold-pending\ndescription: pending desc\n---\n${secretMarker}`,
+      { source_review_required: true }
+    );
+    const coldEligibleId = addCold(
+      "hermes",
+      "cold-eligible",
+      `---\nname: cold-eligible\ndescription: eligible desc\n---\n${eligibleMarker}`
+    );
+
+    for (const restrictedId of [coldDisabledId, coldBrokenId, coldCodexUnobservedId, coldPendingId]) {
+      const memDetail = service.getMemory(restrictedId, { namespace: { ...namespace, source: "claude_code" } });
+      expect(JSON.stringify(memDetail)).not.toContain(secretMarker);
+      expect(memDetail.body).not.toContain("source dir:");
+      const skillDetail = service.getSkill(restrictedId, { namespace: { ...namespace, source: "claude_code" } });
+      expect(JSON.stringify(skillDetail)).not.toContain(secretMarker);
+      // Cold SQLite row remains unmutated by pure read projections
+      expect(repos.memories.getIncludingDeleted(restrictedId)!.memoryValue).toContain(secretMarker);
+    }
+
+    const panel = service.panelItems({ namespace, layer: "Skill", page: 1, limit: 50 });
+    expect(JSON.stringify(panel)).not.toContain(secretMarker);
+
+    // Positive controls: eligible skill includes body + supporting source dir; user-archived skill keeps archived status without source dir
+    const eligibleDetail = service.getMemory(coldEligibleId, { namespace: { ...namespace, source: "claude_code" } });
+    expect(eligibleDetail.body).toContain(eligibleMarker);
+    expect(eligibleDetail.body).toContain("source dir: /synthetic/hermes/cold-eligible");
+
+    const archivedDetail = service.getMemory(archivedId, { namespace: { ...namespace, source: "openclaw" } });
+    expect(archivedDetail.status).toBe("archived");
+    expect(archivedDetail.body).not.toContain("source dir:");
+
+    // Complete scan marking a restricted cold row source_missing also scrubs SQLite and logs
+    service.reconcileAgentSkills({
+      namespace: { ...namespace, source: "opencode" },
+      sourceAgentId: "opencode",
+      complete: true,
+      skills: []
+    });
+    expect(repos.memories.getIncludingDeleted(coldDisabledId)!.memoryValue).toBe("");
+    expect(JSON.stringify(service.getMemory(coldDisabledId, { namespace: { ...namespace, source: "claude_code" } }))).not.toContain(secretMarker);
   });
 
 });

@@ -10,8 +10,12 @@ import {
   importedSkillArchiveReason,
   importedSkillName,
   importedSkillSourceIdentity,
+  importedSkillSourceState,
+  hasRestrictedImportedSkillContent,
+  hasUnobservedCodexSkillPolicy,
   isIdentityOnlyImportedSkill,
   normalizeSkillName,
+  stripImportedSkillBody,
   type AgentSkillInstallation,
   type AgentSkillInstallations
 } from "./imported-skill.js";
@@ -885,11 +889,18 @@ export class MemoryRepository {
   }
 
   /** Candidates include already-repaired R9 rows whose false edge survives only in history. */
-  listImportedSkillsWithLegacyCollisionHistory(limit: number, offset = 0, sourceAgentId?: string): MemoryRow[] {
+  listImportedSkillsWithLegacyCollisionHistory(
+    limit: number,
+    cursor: { createdAt: string; id: string } | number = 0,
+    sourceAgentId?: string
+  ): MemoryRow[] {
+    const keyset = typeof cursor === "object" && cursor !== null ? cursor : undefined;
+    const offset = typeof cursor === "number" ? cursor : 0;
     const rows = this.db.prepare(`SELECT m.* FROM memories m
       WHERE m.memory_layer = 'Skill'
         AND memmy_is_imported_skill(m.properties_json, m.info_json, m.tags_json, m.memory_key) = 1
         ${sourceAgentId === undefined ? "" : `AND ${importedSkillAgentIdSql("json_extract(m.properties_json, '$.internal_info.source_agent_id')")} = ?`}
+        ${keyset === undefined ? "" : "AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))"}
         AND (json_type(m.properties_json, '$.internal_info.superseded_by_skill_id') IS NOT NULL
           OR json_extract(m.properties_json, '$.internal_info.source_review_required') = 1
           OR (json_extract(m.properties_json, '$.internal_info.source_kind') = 'skill'
@@ -897,7 +908,10 @@ export class MemoryRepository {
           OR EXISTS (SELECT 1 FROM memory_change_log h WHERE h.memory_id = m.id
             AND h.change_type IN ('legacy_manual_supersession_repaired', 'read_only_skill_superseded')))
       ORDER BY m.created_at, m.id LIMIT ? OFFSET ?`).all(
-        ...(sourceAgentId === undefined ? [] : [normalizeAgentIdKey(sourceAgentId)]), limit, offset
+        ...(sourceAgentId === undefined ? [] : [normalizeAgentIdKey(sourceAgentId)]),
+        ...(keyset === undefined ? [] : [keyset.createdAt, keyset.createdAt, keyset.id]),
+        limit,
+        offset
       ) as MemorySqlRow[];
     return rows.map(row => this.hydrate(memoryFromSql(row)));
   }
@@ -1131,7 +1145,7 @@ export class MemoryRepository {
   latestImportedSkillsByName(names: readonly string[], filter: MemoryFilter = {}): Map<string, string> {
     const result = new Map<string, string>();
     if (names.length === 0) return result;
-    const built = buildMemoryWhere({ ...filter, memoryLayer: "Skill", status: ["activated", "resolving"], eligibleImportedSkillsOnly: true });
+    const built = buildMemoryWhere({ ...filter, memoryLayer: "Skill", status: ["activated", "resolving"], eligibleImportedSkillsOnly: true }, this.db);
     const rows = this.db.prepare(
       `SELECT id, json_extract(properties_json, '$.internal_info.normalized_name') AS normalizedName,
          json_extract(properties_json, '$.internal_info.name') AS name, json_extract(info_json, '$.title') AS title
@@ -1280,7 +1294,7 @@ export class MemoryRepository {
   }
 
   list(filter: MemoryFilter = {}, limit = 50, offset = 0): MemoryRow[] {
-    const built = buildMemoryWhere(filter);
+    const built = buildMemoryWhere(filter, this.db);
     const rows = this.db
       .prepare(
         `SELECT *
@@ -1481,7 +1495,7 @@ export class MemoryRepository {
   }
 
   count(filter: MemoryFilter = {}): number {
-    const built = buildMemoryWhere(filter);
+    const built = buildMemoryWhere(filter, this.db);
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS count
@@ -1496,7 +1510,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const poolLimit = Math.min(Math.max(limit + offset, limit), 500);
     const rows = this.db
       .prepare(
@@ -1541,7 +1555,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const searchBuilt = buildMemorySearchWhere(query, true);
     if (!searchBuilt.where || limit <= 0) {
       return [];
@@ -1564,7 +1578,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const needles = searchNeedles(query);
     if (needles.length === 0) {
       return this.count(filter);
@@ -1592,7 +1606,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const anyTag = buildAnyTagWhere(options.anyOfTags);
     const identity = options.identity ?? vectorEmbeddingIdentity(query);
     const candidateWindow = VECTOR_SEARCH_WINDOW;
@@ -1631,7 +1645,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const row = this.db
       .prepare(
         `SELECT 1 AS ok
@@ -1659,7 +1673,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     try {
       const rows = this.db
         .prepare(
@@ -1824,7 +1838,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const termColumns = normalized.map((term) => importedSkillOnly && !includeTags
       ? ["lower(memories.memory_value) LIKE ? ESCAPE '\\'"]
       : likeColumnsForTerm(term, includeTags));
@@ -7498,6 +7512,28 @@ export class Repositories {
     return importedSkillEligibleForRecall(this.db, memory, currentAgentId);
   }
 
+  /** Projects cold imported skills without mutating SQLite, redacting restricted bodies. */
+  projectMemoryForRead(memory: MemoryRow): MemoryRow {
+    if (!isImportedSkill(memory)) return memory;
+    const resolved = hasImportedSkillCollisionHistory(this.db, memory)
+      ? this.memories.resolveLegacyImportedSkillVersion(memory)
+      : memory;
+    const sourceAgentId = String(resolved.properties.internal_info.source_agent_id ?? "");
+    const sourceState = importedSkillSourceState(resolved);
+    if (agentSkillSourceDisconnected(this.db, sourceAgentId)
+      || hasRestrictedImportedSkillContent(resolved)
+      || hasUnobservedCodexSkillPolicy(resolved)
+      || isUnverifiedLegacySkillCollision(resolved)
+      || sourceState === "disconnected"
+      || sourceState === "invocation_policy"
+      || sourceState === "policy_unknown"
+      || sourceState === "scan_pending"
+      || sourceState === "source_review_pending") {
+      return stripImportedSkillBody(resolved, memory.updatedAt);
+    }
+    return resolved;
+  }
+
   /** Scanned installation identity survives deleting its imported memory. */
   listInstalledSkillNamesForAgent(sourceAgentId: string): Set<string> {
     const inventory = this.memories.resolvedSkillInstallationsForAgent(sourceAgentId);
@@ -8437,7 +8473,30 @@ function layerWeight(layer: MemoryLayer): number {
 // they are never listed, counted or searched as memories.
 const NOT_PLUGIN_REGISTRATION_SQL = "NOT (memory_layer = 'Skill' AND COALESCE(json_extract(properties_json, '$.internal_info.source_kind'), '') = 'plugin')";
 
-function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlValue[] } {
+function ineligibleColdCollisionSkillIds(db: Database.Database): string[] {
+  const candidates = db
+    .prepare(
+      `SELECT memories.*
+       FROM memories
+       WHERE memories.deleted_at IS NULL
+         AND memories.memory_layer = 'Skill'
+         AND memories.status IN ('activated', 'resolving')
+         AND EXISTS (
+           SELECT 1 FROM memory_change_log AS h
+           WHERE h.memory_id = memories.id
+             AND h.change_type IN ('legacy_manual_supersession_repaired', 'read_only_skill_superseded')
+         )`
+    )
+    .all() as MemorySqlRow[];
+  if (candidates.length === 0) return [];
+  const repo = new MemoryRepository(db, new SqliteVecStore(db));
+  return candidates
+    .map(memoryFromSql)
+    .filter((row) => isImportedSkill(row) && !importedSkillMayEmbed(repo.resolveLegacyImportedSkillVersion(row)))
+    .map((row) => row.id);
+}
+
+function buildMemoryWhere(filter: MemoryFilter, db?: Database.Database): { where: string; params: SqlValue[] } {
   const clauses = [
     "deleted_at IS NULL",
     NOT_PLUGIN_REGISTRATION_SQL
@@ -8465,6 +8524,13 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
       THEN memmy_imported_skill_eligible(memories.properties_json, memories.info_json, memories.tags_json, memories.memory_key, memories.memory_value, memories.status, memories.deleted_at) = 1
         AND NOT (${agentSkillSourceDisconnectedSql("json_extract(memories.properties_json, '$.internal_info.source_agent_id')")})
       ELSE 1 END`);
+    if (db) {
+      const ineligibleIds = ineligibleColdCollisionSkillIds(db);
+      if (ineligibleIds.length > 0) {
+        clauses.push(`memories.id NOT IN (${ineligibleIds.map(() => "?").join(", ")})`);
+        params.push(...ineligibleIds);
+      }
+    }
   }
 
   return {
@@ -9888,10 +9954,30 @@ function agentSkillSourceDisconnected(db: Database.Database, sourceAgentId: stri
   return row.disconnected === 1;
 }
 
+function hasImportedSkillCollisionHistory(db: Database.Database, memory: MemoryRow): boolean {
+  const internal = memory.properties.internal_info;
+  if (typeof internal.superseded_by_skill_id === "string" || internal.source_review_required === true) return true;
+  if (internal.source_kind === "skill" && typeof internal.source_skill_id === "string" && internal.source_skill_id === internal.turn_id) {
+    return true;
+  }
+  return Boolean(
+    db.prepare(
+      `SELECT 1 FROM memory_change_log
+       WHERE memory_id = ? AND change_type IN ('legacy_manual_supersession_repaired', 'read_only_skill_superseded')
+       LIMIT 1`
+    ).get(memory.id)
+  );
+}
+
 function importedSkillSourceEligible(db: Database.Database, memory: ImportedSkillEligibilityMemory): boolean {
   if (!isImportedSkill(memory)) return true;
-  return importedSkillMayEmbed(memory)
-    && !agentSkillSourceDisconnected(db, String(memory.properties.internal_info.source_agent_id ?? ""));
+  if (!importedSkillMayEmbed(memory)) return false;
+  if (agentSkillSourceDisconnected(db, String(memory.properties.internal_info.source_agent_id ?? ""))) return false;
+  if ("id" in memory && typeof (memory as Partial<MemoryRow>).id === "string" && hasImportedSkillCollisionHistory(db, memory as MemoryRow)) {
+    const resolved = new MemoryRepository(db, new SqliteVecStore(db)).resolveLegacyImportedSkillVersion(memory as MemoryRow);
+    if (!importedSkillMayEmbed(resolved)) return false;
+  }
+  return true;
 }
 
 function importedSkillEligibleForRecall(db: Database.Database, memory: MemoryRow, currentAgentId?: string): boolean {

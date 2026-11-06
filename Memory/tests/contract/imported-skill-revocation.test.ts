@@ -55,7 +55,11 @@ async function harness() {
     const response = await fetch(`http://127.0.0.1:${address.port}${path}`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer fixture-token" }, body: JSON.stringify(request) });
     expect(response.status).toBe(200); return await response.json() as any;
   };
-  return { ...h, post };
+  const get = async (path: string) => {
+    const response = await fetch(`http://127.0.0.1:${address.port}${path}`, { method: "GET", headers: { authorization: "Bearer fixture-token" } });
+    expect(response.status).toBe(200); return await response.json() as any;
+  };
+  return { ...h, post, get };
 }
 describe("imported Skill asynchronous recall and response copies", () => {
   it.each(["delete", "disconnect", "archive", "policy", "installed", "superseded"])("revalidates %s while the filter is awaiting and excludes every log copy", async transition => {
@@ -207,6 +211,58 @@ describe("imported Skill asynchronous recall and response copies", () => {
     expect(result.hits.map(hit => hit.id)).toContain(manual.id);
     expect(JSON.stringify(result)).not.toContain(marker);
     expect(JSON.stringify(result)).toContain("MANUAL-KEPT");
+  });
+
+  it.each(["memory.search", "turn.start"].flatMap(operation =>
+    ["delete", "disconnect", "archive", "policy", "installed", "superseded"].map(transition => ({ operation, transition }))
+  ))("excludes $transition imported Skills from public recallEvidence after $operation while keeping manual positive controls", async ({ operation, transition }) => {
+    const h = await harness();
+    const id = imported(h.service);
+    const manual = await h.service.addMemory({
+      namespace,
+      layer: "Skill",
+      title: "Manual recall control",
+      content: "synthetic workflow marker MANUAL-EVIDENCE-KEPT",
+      deferProcessing: true
+    });
+    const session = await h.post("/api/v1/sessions/open", { namespace });
+    const path = operation === "memory.search" ? "/api/v1/memory/search" : "/api/v1/turns/start";
+    const recalled = await h.post(path, {
+      namespace,
+      sessionId: session.sessionId,
+      adapterId: "fixture",
+      requestId: `evidence-${operation}-${transition}`,
+      query: "synthetic workflow marker",
+      layers: ["Skill"],
+      includeInjectedContext: true
+    });
+    expect(JSON.stringify(recalled)).toContain(marker);
+
+    const recallRow = h.db.db.prepare("SELECT query_id FROM recall_events ORDER BY created_at DESC LIMIT 1")
+      .get() as { query_id: string };
+    const beforeEvidence = await h.get(`/api/v1/memory/recalls/${encodeURIComponent(recallRow.query_id)}`);
+    expect(beforeEvidence.hits.map((hit: { id: string }) => hit.id)).toContain(id);
+
+    revoke(h.service, id, transition);
+
+    const afterEvidence = await h.get(`/api/v1/memory/recalls/${encodeURIComponent(recallRow.query_id)}`);
+    expect(afterEvidence.hits.map((hit: { id: string }) => hit.id)).not.toContain(id);
+    expect(afterEvidence.diagnostics.candidateMemoryIds).not.toContain(id);
+    expect(afterEvidence.diagnostics.injectedMemoryIds).not.toContain(id);
+    expect(afterEvidence.hits.map((hit: { id: string }) => hit.id)).toContain(manual.id);
+    if (transition !== "superseded") {
+      expect(JSON.stringify(afterEvidence)).not.toContain(marker);
+    }
+    if (["delete", "disconnect", "policy"].includes(transition)) {
+      expect(
+        h.db.db.prepare("SELECT COUNT(*) AS n FROM memory_change_log WHERE before_json LIKE ? OR after_json LIKE ?")
+          .get(`%${marker}%`, `%${marker}%`)
+      ).toEqual({ n: 0 });
+      expect(
+        h.db.db.prepare("SELECT COUNT(*) AS n FROM recall_events WHERE request_json LIKE ?")
+          .get(`%${marker}%`)
+      ).toEqual({ n: 0 });
+    }
   });
 
 });
