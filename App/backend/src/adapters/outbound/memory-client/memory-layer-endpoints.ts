@@ -1,6 +1,7 @@
 /** Definition for memory layer paths. */
 
 export const MEMORY_LAYER_PATHS = Object.freeze({
+  agentSourceConnectionState: "/api/v1/agent-sources/:sourceId/connection-state",
   agentSources: "/api/v1/agent-sources",
   agentSourceScan: "/api/v1/agent-sources/scan",
   agentSourceStatus: "/api/v1/agent-sources/scan/status",

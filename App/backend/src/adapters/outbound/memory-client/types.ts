@@ -64,6 +64,7 @@ export interface UpdateObservedSkillOutput extends ApproveObservedSkillOutput {
 }
 
 export interface AgentSourceScanClient {
+  connectionState(sourceId: string): Promise<{ connectionState: "connected" | "disconnected" | null; connectionEvent?: { id: string; revision?: number; state: "connected" | "disconnected"; kind?: "skill" | "plugin" } }>;
   list(): Promise<import("@memmy/local-api-contracts").MemoryAgentSourceList>;
   start(input: import("@memmy/local-api-contracts").AgentSourceScanInput): Promise<import("@memmy/local-api-contracts").AgentSourceScanJobResponse>;
   status(): Promise<import("@memmy/local-api-contracts").MemoryAgentSourceScanState>;

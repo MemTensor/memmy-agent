@@ -1,4 +1,4 @@
-import { importedSkillMayEmbed, isImportedSkill } from "../../storage/imported-skill.js";
+import { isImportedSkill } from "../../storage/imported-skill.js";
 import type { EpisodeSelectionContext } from "../session/episode-selection.js";
 import { embeddingIdentity, vectorEmbeddingIdentity } from "../../model/embedding-identity.js";
 import { isRecord } from "../../utils/json.js";
@@ -142,7 +142,7 @@ export interface ScheduleEmbeddingAfterTextUpdateInput {
 
 /** The host supplies cross-domain policy rather than this module reaching into MemoryService. */
 export interface EmbeddingJobProcessorDeps {
-  repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime">;
+  repos: Pick<Repositories, "isImportedSkillEligibleForEmbedding" | "transaction" | "memories" | "userMemories" | "processing" | "runtime">;
   embedder: Embedder;
   llm: LlmClient;
   capture: { embedAfterCapture: boolean };
@@ -263,7 +263,7 @@ export class EmbeddingJobProcessor {
       throw new Error(`embedding target not found: ${job.targetMemoryId ?? "unknown"}`);
     }
     if (!processingJobMatchesMemory(job, memory)) return null;
-    if (!importedSkillMayEmbed(memory)) return null;
+    if (!this.deps.repos.isImportedSkillEligibleForEmbedding(memory)) return null;
     if (isL3FieldSnapshotMemory(memory)) return null;
 
     if (isObservationMemory(memory)) {
@@ -311,21 +311,34 @@ export class EmbeddingJobProcessor {
   }
 
   applyEmbeddingVector(item: PreparedEmbeddingJob, vector: number[]): void {
-    const current = this.deps.repos.memories.get(item.memory.id);
-    if (!current) {
-      if (this.isRejectedCaptureTarget(item.memory.id)) return;
-      throw new Error(`embedding target not found: ${item.memory.id}`);
-    }
-    if (!processingJobMatchesMemory(item.job, current)) return;
-    if (item.sourceHash && retrievalDocumentSourceHash(current) !== item.sourceHash) return;
-    this.persistEmbeddingVector({
-      memoryId: current.id,
-      vectorField: item.vectorField,
-      vector,
-      attemptCount: item.job.attempts,
-      source: "worker.embedding",
-      sourceHash: item.sourceHash,
-      allowedProcessingStates: ["embedding_pending", "embedding"]
+    this.deps.repos.transaction(() => {
+      const current = this.deps.repos.memories.get(item.memory.id);
+      if (isImportedSkill(item.memory) && (!current || !this.deps.repos.isImportedSkillEligibleForEmbedding(current))) {
+        this.deps.repos.memories.deleteVector(item.memory.id, item.vectorField);
+        this.deps.repos.runtime.deleteEmbeddingRetriesForMemory(item.memory.id);
+        return;
+      }
+      if (!current) {
+        if (this.isRejectedCaptureTarget(item.memory.id)) return;
+        throw new Error(`embedding target not found: ${item.memory.id}`);
+      }
+      if (!processingJobMatchesMemory(item.job, current)) return;
+      if (item.sourceHash && retrievalDocumentSourceHash(current) !== item.sourceHash) {
+        if (isImportedSkill(current)) {
+          const retry = this.deps.enqueueEmbeddingRetry(current, embeddingTextForMemory(current), this.deps.nowIso(), item.vectorField);
+          this.deps.appendEmbeddingRetryChange(retry, "queued");
+        }
+        return;
+      }
+      this.persistEmbeddingVector({
+        memoryId: current.id,
+        vectorField: item.vectorField,
+        vector,
+        attemptCount: item.job.attempts,
+        source: "worker.embedding",
+        sourceHash: item.sourceHash,
+        allowedProcessingStates: ["embedding_pending", "embedding"]
+      });
     });
   }
 
@@ -358,18 +371,27 @@ export class EmbeddingJobProcessor {
   }
 
   enqueueEmbeddingRetryAfterFailure(item: PreparedEmbeddingJob, error: unknown): boolean {
-    if (this.deps.repos.processing.get(item.memory.id)) return false;
-    const retry = this.deps.enqueueEmbeddingRetry(
-      item.memory,
-      item.text,
-      this.deps.nowIso(),
-      item.vectorField
-    );
-    this.deps.appendEmbeddingRetryChange(retry, "queued", undefined, {
-      code: "embedding_error",
-      message: error instanceof Error ? error.message : String(error)
+    return this.deps.repos.transaction(() => {
+      let memory = item.memory;
+      let text = item.text;
+      if (isImportedSkill(memory)) {
+        const current = this.deps.repos.memories.get(memory.id);
+        if (!current || !this.deps.repos.isImportedSkillEligibleForEmbedding(current)) {
+          this.deps.repos.memories.deleteVector(memory.id, item.vectorField);
+          this.deps.repos.runtime.deleteEmbeddingRetriesForMemory(memory.id);
+          return true;
+        }
+        memory = current;
+        text = embeddingTextForMemory(current);
+      }
+      if (this.deps.repos.processing.get(memory.id)) return false;
+      const retry = this.deps.enqueueEmbeddingRetry(memory, text, this.deps.nowIso(), item.vectorField);
+      this.deps.appendEmbeddingRetryChange(retry, "queued", undefined, {
+        code: "embedding_error",
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return true;
     });
-    return true;
   }
 
   async summarizeImportedTrace(job: EvolutionJobRecord): Promise<void> {

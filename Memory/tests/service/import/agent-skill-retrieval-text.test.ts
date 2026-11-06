@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { retrievalDocumentIsCurrent } from "../../../src/algorithm/plugin-algorithms.js";
+import { withLegacyImportedSkillWriter } from "../../fixtures/legacy-imported-skill-writer.js";
+import { IMPORTED_SKILL_RETRIEVAL_VERSION } from "../../../src/storage/imported-skill.js";
 import { DEFAULT_MEMMY_CONFIG } from "../../../src/index.js";
 import { embeddingTextForMemory } from "../../../src/service/embedding/embedding-pipeline.js";
 import { Repositories } from "../../../src/storage/repositories.js";
@@ -65,16 +67,16 @@ function repoMemory(db: Db, id: string) {
 }
 
 describe("imported skill summary and retrieval text", () => {
-  it("uses the frontmatter description as summary, injected description and retrieval text", async () => {
+  it("uses the frontmatter description as summary and injected description while preserving full retrieval text", async () => {
     const { db, service } = createTestService();
     const [result] = service.reconcileAgentSkills({ namespace: codex, sourceAgentId: "codex", complete: true, skills: [skill()] }).skills;
     const id = result!.memoryId!;
     await runWorkerRounds(service, 2, 50);
 
     const row = stored(db, id);
-    expect(row).toMatchObject({ summary: "Design memory layers for long-running agents.", blurb: "Design memory layers for long-running agents.", version: 1 });
+    expect(row).toMatchObject({ summary: "Design memory layers for long-running agents.", blurb: "Design memory layers for long-running agents.", version: IMPORTED_SKILL_RETRIEVAL_VERSION });
     expect(row.fts).toContain("Design memory layers");
-    expect(row.fts).not.toContain("eviction");
+    expect(row.fts).toContain("eviction");
 
     const session = service.openSession({ namespace: { ...codex, source: "claude_code" } });
     const recall = await service.search({ sessionId: session.sessionId, query: "design memory layers for agents", layers: ["Skill"], limit: 5, includeInjectedContext: true });
@@ -86,35 +88,37 @@ describe("imported skill summary and retrieval text", () => {
   it("switches existing skills at startup and can restore what they had", async () => {
     const seen: string[] = [];
     const { db, service } = createTestService({ embedder: createCapturingEmbedder(seen) });
-    const legacy = service.addMemory({
+    // Representation rollback is independent of Codex sidecar discovery.
+    const legacy = withLegacyImportedSkillWriter(service, () => service.addMemory({
       namespace: codex,
       requestId: "legacy-memory-systems",
-      adapterId: "agent-source:codex",
+      adapterId: "agent-source:hermes",
       layer: "Skill",
       title: "memory-systems",
       content: BODY,
-      source: "codex",
-      sourceAgentId: "codex",
+      source: "hermes",
+      sourceAgentId: "hermes",
       sourceSkillId: "memory-systems",
       sourceContentHash: createHash("sha256").update(BODY).digest("hex")
-    });
+    }));
     await runWorkerRounds(service, 2, 50);
     const before = stored(db, legacy.id);
     const textBefore = embeddingTextForMemory(repoMemory(db, legacy.id));
     expect(before.summary).toBe("---");
 
+    expect(new Repositories(db.db).memories.hasVector(legacy.id, "vec")).toBe(false);
     service.reconcileWorkerStartup();
     const upgraded = stored(db, legacy.id);
     expect(upgraded).toMatchObject({
       summary: "Design memory layers for long-running agents.",
       blurb: "Design memory layers for long-running agents.",
-      version: 1,
+      version: IMPORTED_SKILL_RETRIEVAL_VERSION,
       updated_at: before.updated_at
     });
-    // The startup repair queued an embedding of the new text.
+    // This legacy row has no valid vector yet; startup queues its current full body.
     expect(pendingEmbeddings(db, legacy.id)).toBe(1);
 
-    // Restored before that job runs: the job embeds what the record has now.
+    // Restoring display metadata also keeps the full retrieval document stable.
     expect(service.restoreImportedSkillRetrievalText()).toEqual({ restored: 1 });
     expect(stored(db, legacy.id)).toMatchObject({ summary: "---", blurb: null, version: null, updated_at: before.updated_at });
     expect(stored(db, legacy.id).fts).toBe(before.fts);
@@ -128,7 +132,7 @@ describe("imported skill summary and retrieval text", () => {
 
   it("drops the earlier retrieval text when the skill is deleted", () => {
     const { db, service } = createTestService();
-    const legacy = service.addMemory({
+    const legacy = withLegacyImportedSkillWriter(service, () => service.addMemory({
       namespace: codex,
       requestId: "legacy-memory-systems",
       adapterId: "agent-source:codex",
@@ -139,7 +143,7 @@ describe("imported skill summary and retrieval text", () => {
       sourceAgentId: "codex",
       sourceSkillId: "memory-systems",
       sourceContentHash: createHash("sha256").update(BODY).digest("hex")
-    });
+    }));
     service.reconcileWorkerStartup();
     expect(propertiesOf(db, legacy.id)).toContain("retrieval_previous");
 

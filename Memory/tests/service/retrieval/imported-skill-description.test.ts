@@ -12,7 +12,7 @@ function injectedDescription(guide: string, description?: string, procedure: Rec
     id, timeline: "2026-11-03T00:00:00Z", userId: "test", memoryType: "SkillMemory",
     status: "activated", visibility: "private", memoryKey: id, memoryValue: guide, tags: [], info: {},
     properties: { internal_info: {
-      memory_layer: "Skill", memory_kind: "skill", read_only: true,
+      memory_layer: "Skill", memory_kind: "skill", read_only: true, source_kind: "file",
       ...(description === undefined ? {} : { skill_description: description }),
       skill: { name: id, invocation_guide: guide, procedure_json: procedure }
     } },

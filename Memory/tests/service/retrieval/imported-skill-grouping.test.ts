@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { insertActiveSkillMemoryForTest } from "../../fixtures/evolution-fixture.js";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSkillReconcileSkill } from "../../../src/service/import/agent-skill-library.js";
 import { IndexedCandidatePool } from "../../../src/service/retrieval/indexed-candidate-pool.js";
@@ -218,4 +219,77 @@ describe("imported skill grouping in recall", () => {
     expect(result.memories.map(memory => memory.id)).not.toContain(unqualified);
   });
 
+  it("preserves an explicitly invoked imported skill instead of replacing it with a newer same-name source", async () => {
+    const { service } = createTestService();
+    const [target] = importSkills(service, "claude_code", [skill("migration-review", "Review a failing sqlite migration.", "2026-01-01T00:00:00Z")]);
+    const [newer] = importSkills(service, "hermes", [skill("migration-review", "Review a failing sqlite migration with newer instructions.", "2026-06-01T00:00:00Z")]);
+    await runWorkerRounds(service, 2, 50);
+    const session = service.openSession({ namespace: { source: "cursor", profileId: "default", userId } });
+    const result = await service.search({ sessionId: session.sessionId, query: "review a failing sqlite migration", layers: ["Skill"],
+      retrievalMode: "skill_invoke", targetSkillId: target, limit: 10 });
+    expect(result.hits.map(hit => hit.id)).toEqual([target]);
+    expect(result.hits.map(hit => hit.id)).not.toContain(newer);
+  });
+
+  it.each(["archived", "tag_mismatch", "missing"] as const)("does not substitute a same-name copy for a %s invocation target", async state => {
+    const { service } = createTestService();
+    const [target] = importSkills(service, "claude_code", [skill("migration-review", "Review a failing sqlite migration.", "2026-01-01T00:00:00Z")]);
+    importSkills(service, "hermes", [skill("migration-review", "Review a failing sqlite migration with newer instructions.", "2026-06-01T00:00:00Z")]);
+    await runWorkerRounds(service, 2, 50);
+    if (state === "archived") service.archiveMemory(target!);
+    const session = service.openSession({ namespace: { source: "cursor", profileId: "default", userId } });
+    const result = await service.search({ sessionId: session.sessionId, query: "review a failing sqlite migration", layers: ["Skill"],
+      retrievalMode: "skill_invoke", targetSkillId: state === "missing" ? "skill_missing_invocation_target" : target,
+      ...(state === "tag_mismatch" ? { tags: ["hermes"] } : {}), limit: 10 });
+    expect(result.hits).toEqual([]);
+  });
+
+
+  it.each(["matching tags", "mismatching tags", "archived", "deleted"] as const)("validates an explicit generated Skill target for %s", async state => {
+    const { db, service } = createTestService();
+    const namespace = { source: "cursor", profileId: "default", userId };
+    const session = service.openSession({ namespace });
+    const target = "generated-python-migration";
+    insertActiveSkillMemoryForTest(db, {
+      id: target,
+      userId,
+      sessionId: session.sessionId,
+      agentId: namespace.source,
+      profileId: namespace.profileId,
+      tags: ["python"],
+      name: "python-migration",
+      invocationGuide: "Review the python sqlite migration checklist before applying changes."
+    });
+    if (state === "archived") service.archiveMemory(target, { namespace });
+    if (state === "deleted") service.deleteMemory(target, { namespace });
+
+    const result = await service.search({
+      sessionId: session.sessionId,
+      query: "review the python sqlite migration checklist",
+      layers: ["Skill"],
+      retrievalMode: "skill_invoke",
+      targetSkillId: target,
+      tags: state === "mismatching tags" ? ["rust"] : ["python"]
+    });
+
+    expect(result.hits.map(hit => hit.id)).toEqual(state === "matching tags" ? [target] : []);
+  });
+
+  it.each(["", " \n ", "\u00a0\u3000\t\r\n"])("skips a newer blank source while selecting the newest usable same-name copy, body=%j", async blank => {
+    const { db, service } = createTestService({ embedder: rankingEmbedder() });
+    const name = "empty-release-check";
+    const [older] = importSkills(service, "codex", [skill(name, "Inspect canaryprobeunrelatedtoken sqlite evidence.", "2026-01-01T00:00:00Z")]);
+    const [latest] = importSkills(service, "hermes", [skill(name, ROLLBACK, "2026-06-01T00:00:00Z")]);
+    const [empty] = importSkills(service, "claude_code", [skill(name, blank, "2026-11-04T00:00:00Z")]);
+    await runWorkerRounds(service, 2, 50);
+    const repos = new Repositories(db.db);
+
+    expect.soft(repos.memories.latestImportedSkillsByName([name], {
+      status: ["activated", "resolving"], excludedImportedSkillSourceAgentId: "cursor"
+    }).get(name)).toBe(latest);
+    const result = await recallSkillIds(service, "cursor", "canaryprobeunrelatedtoken");
+    expect(result).toEqual([latest]);
+    expect(result).not.toContain(older);
+    expect(result).not.toContain(empty);
+  });
 });

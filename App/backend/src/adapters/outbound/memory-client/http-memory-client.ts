@@ -149,6 +149,7 @@ export function createHttpMemoryClient(
 
   return {
     agentSources: {
+      connectionState: (sourceId) => request("GET", "agentSourceConnectionState", z.object({ connectionState: z.enum(["connected", "disconnected"]).nullable(), connectionEvent: z.object({ id: z.string().min(1), revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), state: z.enum(["connected", "disconnected"]), kind: z.enum(["skill", "plugin"]).optional() }).optional() }), { params: { sourceId }, maxRetries: 0 }),
       list: () => request("GET", "agentSources", MemoryAgentSourceListSchema),
       start: (input) => request("POST", "agentSourceScan", AgentSourceScanJobResponseSchema, { body: input, maxRetries: 0 }),
       status: () => request("GET", "agentSourceStatus", MemoryAgentSourceScanStateSchema),

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { resolveDeepseekHarnessHomeDirectory } from "../../agent-paths.js";
 import {
+  pathExists,
   removeMemmyResumeSkillDirectory,
   removeMemmySkillDirectory,
   replaceMemmyResumeSkillDirectory,
@@ -70,6 +71,11 @@ export function createDeepseekHarnessSkillTarget(
         clientSource === DEEPSEEK_HARNESS_PLUGIN_CLIENT &&
         packageSource === JSON.stringify(createDeepseekHarnessPluginPackageManifest(), null, 2) + "\n" &&
         bridgeSource === await loadMemmyWorkspaceBridgeRuntimeAsset();
+    },
+
+    async isPluginInstalled() {
+      return await pathExists(join(pluginDirectory, "index.mjs"))
+        || (await readTextFile(patchPath)).includes(PATCH_START);
     },
 
     async installPlugin() {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSkillReconcileSkill } from "../../../src/service/import/agent-skill-library.js";
+import { withLegacyImportedSkillWriter } from "../../fixtures/legacy-imported-skill-writer.js";
 import { DEFAULT_MEMMY_CONFIG } from "../../../src/index.js";
 import { embeddingTextForMemory } from "../../../src/service/embedding/embedding-pipeline.js";
 import { Repositories } from "../../../src/storage/repositories.js";
@@ -205,7 +206,7 @@ describe("agent skill reconcile", () => {
     expect(disconnected).toMatchObject({ status: "archived", reason: "disconnected", memory_value: "" });
     expect(inFts(db, disconnected!.id)).toBe(false);
 
-    service.reconcileAgentSkills({ namespace, sourceAgentId: "codex", complete: true, skills: [skill("shared", "Shared body.")] });
+    service.reconcileAgentSkills({ namespace, sourceAgentId: "codex", complete: true, connectionState: "connected", skills: [skill("shared", "Shared body.")] });
     expect(rows(db, "shared")[0]).toMatchObject({ status: "activated", reason: null, memory_value: "Shared body." });
   });
 
@@ -236,7 +237,7 @@ describe("agent skill reconcile", () => {
   it("adopts a record written by the old memory.add import instead of duplicating it", () => {
     const { db, service } = createTestService();
     const content = "Legacy body.";
-    const legacy = service.addMemory({
+    const legacy = withLegacyImportedSkillWriter(service, () => service.addMemory({
       namespace,
       requestId: "legacy-skill",
       adapterId: "agent-source:codex",
@@ -247,7 +248,7 @@ describe("agent skill reconcile", () => {
       sourceAgentId: "codex",
       sourceSkillId: "legacy",
       sourceContentHash: createHash("sha256").update(content).digest("hex")
-    });
+    }));
 
     const result = service.reconcileAgentSkills({ namespace, sourceAgentId: "codex", complete: true, skills: [skill("legacy", content)] });
 
@@ -311,7 +312,7 @@ describe("agent skill reconcile", () => {
 
     expect(seen.some((text) => text.includes("MANUAL-ONLY"))).toBe(false);
     expect(seen.some((text) => text.includes("STALE TEXT"))).toBe(false);
-    expect(db.db.prepare(`SELECT status FROM embedding_retry_queue WHERE id = 'retry-manual'`).get()).toEqual({ status: "succeeded" });
+    expect(db.db.prepare(`SELECT status FROM embedding_retry_queue WHERE id = 'retry-manual'`).get()).toBeUndefined();
   });
 
   it("lets the user undo an archive, back to the state the source implies", () => {
@@ -472,7 +473,10 @@ describe("agent skill reconcile", () => {
     await runWorkerRounds(service, 3, 50);
 
     expect(seen).not.toContain("OUTDATED TEXT");
-    expect(seen.some((text) => text.includes("Fresh body."))).toBe(true);
+    const currentText = embeddingTextForMemory(new Repositories(db.db).memories.get(id)!);
+    expect(seen).toContain(currentText);
+    // Without a description, the current retrieval document includes the body.
+    expect(currentText).toContain("Fresh body.");
   });
 
   it("rebuilds L2, L3 and generated skills exactly as before", async () => {

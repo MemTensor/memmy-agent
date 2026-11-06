@@ -1,6 +1,15 @@
 import {
   agentSkillInstallationsKey,
-  IMPORTED_SKILL_STATE_VERSION,
+  agentSkillConnectionKey,
+  isImportedSkill,
+  hasImportedSkillSourceEvidence,
+  isUnverifiedLegacySkillCollision,
+  importedSkillMayEmbed,
+  type ImportedSkillEligibilityMemory,
+  currentImportedSkillVersion,
+  importedSkillArchiveReason,
+  importedSkillName,
+  importedSkillSourceIdentity,
   isIdentityOnlyImportedSkill,
   normalizeSkillName,
   type AgentSkillInstallation,
@@ -79,6 +88,7 @@ import { L3FieldRepository } from "./l3-field-repository.js";
 import { isL3FieldSnapshotMemory } from "../service/l3-field/snapshot-memory.js";
 
 type SqlValue = string | number | Buffer | null;
+const importedSkillFunctions = new WeakSet<Database.Database>();
 const BUNDLE_TABLES = [
   "memories",
   "memory_capture_claims",
@@ -610,7 +620,33 @@ export class MemoryRepository {
   constructor(
     private readonly db: Database.Database,
     private readonly vectors: SqliteVecStore
-  ) {}
+  ) {
+    if (!importedSkillFunctions.has(db)) {
+      db.function("memmy_imported_skill_agent_id", { deterministic: true }, value => normalizeAgentIdKey(String(value ?? "")));
+      db.function("memmy_is_imported_skill", { deterministic: true }, (properties, info, tags, memoryKey) => {
+        const parsed = parseJson(String(properties ?? "{}"), {}) as MemoryRow["properties"];
+        const parsedInfo = parseJson(String(info ?? "{}"), {}) as MemoryRow["info"];
+        return Number(isImportedSkill({
+          memoryLayer: "Skill",
+          properties: { ...parsed, internal_info: parsed.internal_info ?? {} },
+          tags: [...asStringArray(parseJson(String(tags ?? "[]"), [])), ...asStringArray(parsed.tags), ...asStringArray(parsedInfo.tags)],
+          memoryKey: typeof memoryKey === "string" ? memoryKey : undefined
+        }));
+      });
+      db.function("memmy_imported_skill_eligible", { deterministic: true }, (properties, info, tags, memoryKey, body, status, deletedAt) => {
+        const parsed = parseJson(String(properties ?? "{}"), {}) as MemoryRow["properties"];
+        const parsedInfo = parseJson(String(info ?? "{}"), {}) as MemoryRow["info"];
+        return Number(importedSkillMayEmbed({
+          memoryLayer: "Skill", memoryValue: String(body ?? ""), status: String(status) as MemoryStatus,
+          deletedAt: typeof deletedAt === "string" ? deletedAt : undefined,
+          properties: { ...parsed, internal_info: parsed.internal_info ?? { memory_layer: "Skill" } },
+          tags: [...asStringArray(parseJson(String(tags ?? "[]"), [])), ...asStringArray(parsed.tags), ...asStringArray(parsedInfo.tags)],
+          memoryKey: typeof memoryKey === "string" ? memoryKey : undefined
+        }));
+      });
+      importedSkillFunctions.add(db);
+    }
+  }
 
   insert(memory: MemoryRow): MemoryRow {
     const prepared = prepareMemoryForStorage(memory);
@@ -819,76 +855,293 @@ export class MemoryRepository {
     return rows.map((row) => this.hydrate(memoryFromSql(row)));
   }
 
+  /** Raw old writer rows, including deleted manuals; deliberately independent of source classification. */
+  listLegacyReadOnlySkills(limit: number, offset = 0, sourceAgentId?: string): MemoryRow[] {
+    const rows = this.db.prepare(`SELECT * FROM memories
+      WHERE memory_layer = 'Skill' AND json_extract(properties_json, '$.internal_info.read_only') = 1
+      ${sourceAgentId === undefined ? "" : `AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?`}
+      ORDER BY created_at, id LIMIT ? OFFSET ?`).all(
+        ...(sourceAgentId === undefined ? [] : [normalizeAgentIdKey(sourceAgentId)]), limit, offset
+      ) as MemorySqlRow[];
+    return rows.map(row => this.hydrate(memoryFromSql(row)));
+  }
+
   /** All imported (read-only) Skill records of one source Agent, deleted ones included. */
   listImportedSkillsForSource(sourceAgentId: string): MemoryRow[] {
     const rows = this.db.prepare(
       `SELECT * FROM memories
        WHERE memory_layer = 'Skill'
-         AND json_extract(properties_json, '$.internal_info.read_only') = 1
-         AND json_extract(properties_json, '$.internal_info.source_agent_id') = ?
+         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+         AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?
        ORDER BY created_at, id`
-    ).all(sourceAgentId) as MemorySqlRow[];
+    ).all(normalizeAgentIdKey(sourceAgentId)) as MemorySqlRow[];
     return rows.map((row) => this.hydrate(memoryFromSql(row)));
+  }
+
+  /** Candidates include already-repaired R9 rows whose false edge survives only in history. */
+  listImportedSkillsWithLegacyCollisionHistory(limit: number, offset = 0, sourceAgentId?: string): MemoryRow[] {
+    const rows = this.db.prepare(`SELECT m.* FROM memories m
+      WHERE m.memory_layer = 'Skill'
+        AND memmy_is_imported_skill(m.properties_json, m.info_json, m.tags_json, m.memory_key) = 1
+        ${sourceAgentId === undefined ? "" : `AND ${importedSkillAgentIdSql("json_extract(m.properties_json, '$.internal_info.source_agent_id')")} = ?`}
+        AND (json_type(m.properties_json, '$.internal_info.superseded_by_skill_id') IS NOT NULL
+          OR json_extract(m.properties_json, '$.internal_info.source_review_required') = 1
+          OR (json_extract(m.properties_json, '$.internal_info.source_kind') = 'skill'
+            AND json_extract(m.properties_json, '$.internal_info.source_skill_id') = json_extract(m.properties_json, '$.internal_info.turn_id'))
+          OR EXISTS (SELECT 1 FROM memory_change_log h WHERE h.memory_id = m.id
+            AND h.change_type IN ('legacy_manual_supersession_repaired', 'read_only_skill_superseded')))
+      ORDER BY m.created_at, m.id LIMIT ? OFFSET ?`).all(
+        ...(sourceAgentId === undefined ? [] : [normalizeAgentIdKey(sourceAgentId)]), limit, offset
+      ) as MemorySqlRow[];
+    return rows.map(row => this.hydrate(memoryFromSql(row)));
+  }
+
+  /** Pure historical projection; never relabel ambiguous source-shaped rows as manual. */
+  resolveLegacyImportedSkillVersion(memory: MemoryRow): MemoryRow {
+    const previous = memory.properties.internal_info;
+    if (isUnverifiedLegacySkillCollision(memory)) {
+      const peers = this.listImportedSkillsForSource(String(previous.source_agent_id ?? ""))
+        .filter(peer => peer.id !== memory.id && !isUnverifiedLegacySkillCollision(peer)
+          && importedSkillSourceIdentity(peer) === importedSkillSourceIdentity(memory)
+          && (peer.properties.internal_info.superseded_by_skill_id === memory.id
+            || this.db.prepare(`SELECT 1 FROM memory_change_log WHERE memory_id = ?
+              AND json_extract(after_json, '$.properties.internal_info.superseded_by_skill_id') = ? LIMIT 1`)
+              .get(peer.id, memory.id)));
+      const current = currentImportedSkillVersion(peers.map(peer => this.resolveLegacyImportedSkillVersion(peer)));
+      const missing = current && (importedSkillArchiveReason(current) === "source_missing"
+        || current.properties.internal_info.source_state === "source_missing");
+      const status = memory.status === "deleted" || memory.deletedAt ? memory.status : "archived";
+      const internal = { ...previous, source_review_required: true,
+        source_state: missing ? "source_missing" : previous.source_state === "source_missing" ? "source_missing" : "source_review_pending",
+        archive_reason: importedSkillArchiveReason(memory) === "user" ? "user" : "source_review_pending" };
+      return { ...memory, status, properties: { ...memory.properties, status, internal_info: internal } };
+    }
+    const untrustedEdge = (row: MemoryRow): MemoryRow | undefined => {
+      const targetId = row.properties.internal_info.superseded_by_skill_id;
+      const target = typeof targetId === "string" ? this.getIncludingDeleted(targetId) : undefined;
+      return target && target.memoryLayer === "Skill"
+        && (!hasImportedSkillSourceEvidence(target) || isUnverifiedLegacySkillCollision(target)) ? target : undefined;
+    };
+    const successor = untrustedEdge(memory);
+    // Unknown/empty/genuine successor markers retain their historical meaning.
+    if (!successor && typeof previous.superseded_by_skill_id === "string") return memory;
+    const snapshot = (json: string | null): MemoryRow | undefined => {
+      const value: unknown = json === null ? undefined : parseJson(json, undefined);
+      if (!isRecord(value) || value.id !== memory.id || value.memoryLayer !== "Skill"
+        || !isRecord(value.properties) || !isRecord(value.properties.internal_info)) return undefined;
+      const row = value as unknown as MemoryRow;
+      const fields = row.properties.internal_info;
+      if (normalizeAgentIdKey(String(fields.source_agent_id ?? "")) !== normalizeAgentIdKey(String(previous.source_agent_id ?? ""))
+        || importedSkillSourceIdentity(row) !== importedSkillSourceIdentity(memory)
+        || fields.imported_at !== previous.imported_at
+        || typeof fields.source_content_hash === "string" && typeof previous.source_content_hash === "string"
+          && fields.source_content_hash !== previous.source_content_hash) return undefined;
+      return row;
+    };
+    let provedCollision = Boolean(successor);
+    let observed: MemoryRow | undefined;
+    let laterAbsence: MemoryRow | undefined;
+    let userArchived = false;
+    let pendingUserSnapshot: MemoryRow | undefined;
+    let sourceObservationBarrier = false;
+    // Iteration uses (memory_id, seq) and stops at the nearest real observation.
+    // User archive/restore and previous repair events never establish presence.
+    for (const change of this.db.prepare(`SELECT change_type, source, before_json, after_json
+      FROM memory_change_log WHERE memory_id = ? ORDER BY seq DESC`).iterate(memory.id) as Iterable<{
+        change_type: string; source: string; before_json: string | null; after_json: string | null;
+      }>) {
+      const after = snapshot(change.after_json);
+      const before = snapshot(change.before_json);
+      const afterEdge = after && untrustedEdge(after);
+      const beforeEdge = before && untrustedEdge(before);
+      if (pendingUserSnapshot && (!after || !Number.isFinite(after.version) || !Number.isFinite(pendingUserSnapshot.version))) {
+        sourceObservationBarrier = true;
+        break;
+      }
+      if (pendingUserSnapshot && after && after.version <= pendingUserSnapshot.version) {
+        // Follow a neutral user/present snapshot to the event that produced it.
+        // A missing version may hide a later real source observation: do not
+        // carry an older absence across that pruned segment of the chain.
+        if (after.version < pendingUserSnapshot.version) { sourceObservationBarrier = true; break; }
+        pendingUserSnapshot = undefined;
+      }
+      if (after && (change.change_type === "create" || change.change_type === "update")
+        && (change.source === "memory.add" || change.source === "agent_skill.reconcile")) {
+        if (!provedCollision) return memory;
+        if (!afterEdge) observed = after;
+        else sourceObservationBarrier = true;
+        break;
+      }
+      if (after && change.change_type === "agent_skill_source_missing") laterAbsence ??= after;
+      if (!provedCollision && !afterEdge && !beforeEdge) continue;
+      provedCollision = true;
+      if (laterAbsence) { observed = laterAbsence; break; }
+      // R9 repair and archive logs can contain the bad pre-repair row but an
+      // invented after.source_state=present. Only its earlier side is evidence.
+      const candidates = change.change_type === "read_only_skill_superseded" ? [before]
+        : change.change_type === "legacy_manual_supersession_repaired" || beforeEdge && !afterEdge ? [before]
+          : [after, before];
+      for (const candidate of candidates) {
+        if (!candidate || untrustedEdge(candidate)) continue;
+        const reason = importedSkillArchiveReason(candidate);
+        if (reason === "user") {
+          userArchived = true;
+          if (typeof candidate.properties.internal_info.superseded_by_skill_id !== "string"
+            && (candidate.properties.internal_info.source_state === "present"
+              || candidate.properties.internal_info.source_state === undefined)) {
+            // R9 could synthesize present while archiving a repaired collision.
+            // Preserve the archive, but trace source facts independently.
+            pendingUserSnapshot = candidate;
+            continue;
+          }
+        }
+        if (reason === "source_review_pending" || reason === "scan_pending") continue;
+        observed = candidate;
+        break;
+      }
+      if (observed) break;
+    }
+    if (!provedCollision) return memory;
+    if (pendingUserSnapshot) sourceObservationBarrier = true;
+    const internal = { ...previous };
+    const currentReason = importedSkillArchiveReason(memory);
+    delete internal.superseded_by_skill_id;
+    if (currentReason === "superseded") delete internal.archive_reason;
+    if (userArchived && (currentReason === undefined || currentReason === "superseded")) internal.archive_reason = "user";
+    if (observed) {
+      const restored = observed.properties.internal_info;
+      const reason = importedSkillArchiveReason(observed);
+      if (typeof restored.superseded_by_skill_id === "string" && !untrustedEdge(observed)) {
+        internal.superseded_by_skill_id = restored.superseded_by_skill_id;
+      }
+      if (!userArchived && (currentReason === undefined || currentReason === "superseded") && reason !== undefined) internal.archive_reason = reason;
+      // A no-pointer R9 archive may have overwritten the source state itself.
+      // The proven false-edge chain permits replacing that synthesized value.
+      if (internal.source_state === undefined || !successor && internal.source_state === "present") {
+        if (restored.source_state !== undefined) internal.source_state = restored.source_state;
+        else if (reason === "source_missing") internal.source_state = "source_missing";
+        else if (!successor) internal.source_state = "source_review_pending";
+      }
+    } else if (sourceObservationBarrier && userArchived
+      || !successor && internal.source_state === "present" && !sourceObservationBarrier) {
+      internal.source_state = "source_review_pending";
+    }
+    const manualMissing = successor && !isUnverifiedLegacySkillCollision(successor)
+      && (importedSkillArchiveReason(successor) === "source_missing" || successor.properties.internal_info.source_state === "source_missing");
+    const laterSourceEpoch = successor && typeof previous.imported_at === "string"
+      && Number.isFinite(Date.parse(previous.imported_at)) && Number.isFinite(Date.parse(successor.updatedAt))
+      && Date.parse(previous.imported_at) > Date.parse(successor.updatedAt);
+    if (internal.source_state === undefined && manualMissing && !sourceObservationBarrier && !laterSourceEpoch && (!observed
+      || Number.isFinite(Date.parse(successor!.updatedAt)) && Number.isFinite(Date.parse(observed.updatedAt))
+        && Date.parse(successor!.updatedAt) >= Date.parse(observed.updatedAt))) internal.source_state = "source_missing";
+    return { ...memory, properties: { ...memory.properties, internal_info: internal } };
   }
 
   /** Seeds each installed source identity from its current version before the first scan. */
   legacyInstalledSkillsForAgent(sourceAgentId: string): AgentSkillInstallations {
-    const normalized = normalizeAgentIdKey(sourceAgentId);
-    const rows = this.db.prepare(
-      `SELECT
-         COALESCE(NULLIF(json_extract(properties_json, '$.internal_info.source_skill_id'), ''),
-           json_extract(properties_json, '$.internal_info.source_skill_path'), id) AS sourceSkillId,
-         COALESCE(NULLIF(json_extract(properties_json, '$.internal_info.normalized_name'), ''),
-           NULLIF(json_extract(properties_json, '$.internal_info.name'), ''),
-           json_extract(info_json, '$.title'), '') AS name,
-         COALESCE(json_extract(properties_json, '$.internal_info.source_kind'), '') = 'plugin' AS isPlugin
-       FROM memories
-       WHERE memory_layer = 'Skill'
-         AND deleted_at IS NULL
-         AND json_extract(properties_json, '$.internal_info.read_only') = 1
-         AND replace(replace(lower(trim(COALESCE(json_extract(properties_json, '$.internal_info.source_agent_id'), ''))), '-', '_'), ' ', '_') = ?
-         AND (status IN ('activated', 'resolving')
-           OR json_extract(properties_json, '$.internal_info.archive_reason')
-             IN ('invocation_policy', 'disconnected', 'registration')
-           OR (json_extract(properties_json, '$.internal_info.archive_reason') = 'user'
-             AND COALESCE(json_extract(properties_json, '$.internal_info.source_state'), '') != 'source_missing')
-           OR (status = 'archived'
-             AND COALESCE(json_extract(properties_json, '$.internal_info.import_state_version'), 0) < ?
-             AND COALESCE(json_type(properties_json, '$.internal_info.superseded_by_skill_id'), '') != 'text'))
-       ORDER BY (status IN ('activated', 'resolving')) DESC,
-         CASE WHEN json_type(properties_json, '$.internal_info.imported_at') = 'text'
-           THEN json_extract(properties_json, '$.internal_info.imported_at') ELSE updated_at END DESC,
-         updated_at DESC, created_at ASC, id ASC`
-    ).all(normalized, IMPORTED_SKILL_STATE_VERSION) as Array<{ sourceSkillId: string; name: string; isPlugin: number }>;
-    const skills = new Map<string, AgentSkillInstallation>();
-    const registrations = new Map<string, AgentSkillInstallation>();
-    for (const row of rows) {
-      const normalizedName = normalizeSkillName(row.name);
-      if (!normalizedName) continue;
-      const entries = row.isPlugin ? registrations : skills;
-      if (!entries.has(row.sourceSkillId)) {
-        entries.set(row.sourceSkillId, { sourceSkillId: row.sourceSkillId, normalizedName });
-      }
+    const groups = new Map<string, MemoryRow[]>();
+    for (const raw of this.listImportedSkillsForSource(sourceAgentId)) {
+      const memory = this.resolveLegacyImportedSkillVersion(raw);
+      const identity = importedSkillSourceIdentity(memory);
+      const versions = groups.get(identity) ?? [];
+      versions.push(memory);
+      groups.set(identity, versions);
     }
-    return { version: 1, skills: [...skills.values()], registrations: [...registrations.values()] };
+    const skills: AgentSkillInstallation[] = [];
+    const registrations: AgentSkillInstallation[] = [];
+    for (const [sourceSkillId, versions] of groups) {
+      const current = currentImportedSkillVersion(versions);
+      if (!current || importedSkillArchiveReason(current) === "source_missing"
+        || current.properties.internal_info.source_state === "source_missing") continue;
+      const normalizedName = importedSkillName(current);
+      if (!normalizedName) continue;
+      const entries = current.properties.internal_info.source_kind === "plugin" ? registrations : skills;
+      entries.push({ sourceSkillId, normalizedName });
+    }
+    return { version: 1, skills, registrations };
+  }
+
+  /** The same pure inventory projection is used by cold readers and transactional repair. */
+  resolvedSkillInstallationsForAgent(sourceAgentId: string, legacyManuals: readonly MemoryRow[] = []): AgentSkillInstallations {
+    const saved = this.db.prepare("SELECT value_json FROM runtime_kv WHERE key = ?")
+      .get(agentSkillInstallationsKey(sourceAgentId)) as { value_json: string } | undefined;
+    const stored = saved ? parseJson(saved.value_json, undefined) as AgentSkillInstallations | undefined : undefined;
+    if (stored?.version !== 1) return this.legacyInstalledSkillsForAgent(sourceAgentId);
+    const versions = this.listImportedSkillsForSource(sourceAgentId);
+    const manuals = new Map<string, MemoryRow>();
+    const addManual = (memory: MemoryRow) => {
+      if (memory.memoryLayer === "Skill" && !hasImportedSkillSourceEvidence(memory)) manuals.set(memory.id, memory);
+    };
+    for (const manual of legacyManuals) addManual(manual);
+    const oldManuals = this.db.prepare(`SELECT * FROM memories
+      WHERE memory_layer = 'Skill' AND json_extract(properties_json, '$.internal_info.read_only') = 1
+        AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 0
+        AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?`)
+      .all(normalizeAgentIdKey(sourceAgentId)) as MemorySqlRow[];
+    for (const row of oldManuals) addManual(this.hydrate(memoryFromSql(row)));
+    for (const version of versions) {
+      const successorId = version.properties.internal_info.superseded_by_skill_id;
+      const successor = typeof successorId === "string" ? this.getIncludingDeleted(successorId) : undefined;
+      if (successor) addManual(successor);
+    }
+    const affected = new Set<string>();
+    for (const manual of manuals.values()) {
+      for (const identity of [manual.id, manual.memoryKey, importedSkillSourceIdentity(manual)]) if (identity) affected.add(identity);
+    }
+    const groups = new Map<string, MemoryRow[]>();
+    for (const raw of versions) {
+      const identity = importedSkillSourceIdentity(raw);
+      if (manuals.has(String(raw.properties.internal_info.superseded_by_skill_id ?? ""))) affected.add(identity);
+      const resolved = this.resolveLegacyImportedSkillVersion(raw);
+      if (isUnverifiedLegacySkillCollision(raw)) { affected.add(identity); continue; }
+      if (JSON.stringify(resolved.properties.internal_info) !== JSON.stringify(raw.properties.internal_info)) affected.add(identity);
+      const group = groups.get(identity) ?? [];
+      group.push(resolved);
+      groups.set(identity, group);
+    }
+    const skills = new Map(stored.skills.map(entry => [entry.sourceSkillId, entry]));
+    const missing = (memory: MemoryRow) => importedSkillArchiveReason(memory) === "source_missing"
+      || memory.properties.internal_info.source_state === "source_missing";
+    for (const identity of affected) {
+      const group = groups.get(identity) ?? [];
+      const current = currentImportedSkillVersion(group);
+      if (current && !missing(current)) {
+        const normalizedName = importedSkillName(current);
+        if (normalizedName && current.properties.internal_info.source_kind !== "plugin") {
+          skills.set(identity, { sourceSkillId: identity, normalizedName });
+        }
+      } else if (current && missing(current) || group.length === 0 || group.every(missing)) {
+        // Equal manual/file titles do not validate a contaminated entry. Only
+        // resolved source evidence can retain it; unrelated inventory is kept.
+        skills.delete(identity);
+      }
+      // History-only/deleted groups without absence evidence do not disprove a
+      // separately recorded installation. Preserve their existing inventory.
+    }
+    return { version: 1, skills: [...skills.values()], registrations: stored.registrations };
   }
 
   /** Most recently modified current imported skill satisfying the request filter. */
   latestImportedSkillsByName(names: readonly string[], filter: MemoryFilter = {}): Map<string, string> {
     const result = new Map<string, string>();
     if (names.length === 0) return result;
-    const built = buildMemoryWhere({ ...filter, memoryLayer: "Skill", status: ["activated", "resolving"] });
+    const built = buildMemoryWhere({ ...filter, memoryLayer: "Skill", status: ["activated", "resolving"], eligibleImportedSkillsOnly: true });
     const rows = this.db.prepare(
-      `SELECT id, json_extract(properties_json, '$.internal_info.normalized_name') AS name
+      `SELECT id, json_extract(properties_json, '$.internal_info.normalized_name') AS normalizedName,
+         json_extract(properties_json, '$.internal_info.name') AS name, json_extract(info_json, '$.title') AS title
        FROM memories
        WHERE ${built.where}
-         AND json_extract(properties_json, '$.internal_info.read_only') = 1
+         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
          AND trim(COALESCE(json_extract(properties_json, '$.internal_info.source_agent_id'), '')) != ''
-         AND json_extract(properties_json, '$.internal_info.normalized_name') IN (${names.map(() => "?").join(", ")})
        ORDER BY COALESCE(json_extract(properties_json, '$.internal_info.source_modified_at'), timeline, created_at) DESC, id`
-    ).all(...built.params, ...names) as Array<{ id: string; name: string }>;
+    ).all(...built.params) as Array<{ id: string; normalizedName: unknown; name: unknown; title: unknown }>;
+    const wanted = new Set(names.map(normalizeSkillName));
     for (const row of rows) {
-      if (!result.has(row.name)) result.set(row.name, row.id);
+      const rawName = [row.normalizedName, row.name, row.title].find(value => typeof value === "string" && value.trim());
+      const name = typeof rawName === "string" ? normalizeSkillName(rawName) : "";
+      if (!wanted.has(name) || result.has(name)) continue;
+      const memory = this.get(row.id);
+      if (memory && importedSkillSourceEligible(this.db, memory)) result.set(name, row.id);
     }
     return result;
   }
@@ -899,8 +1152,8 @@ export class MemoryRepository {
       `SELECT * FROM memories
        WHERE memory_layer = 'Skill'
          AND deleted_at IS NULL
-         AND json_extract(properties_json, '$.internal_info.read_only') = 1
-         AND COALESCE(json_extract(properties_json, '$.internal_info.retrieval_representation_version'), 0) ${mode === "below" ? "<" : "="} ?
+         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+         AND COALESCE(json_extract(properties_json, '$.internal_info.retrieval_representation_version'), 0) ${mode === "below" ? "<" : "BETWEEN 1 AND"} ?
        ORDER BY created_at, id
        LIMIT ?`
     ).all(version, limit) as MemorySqlRow[];
@@ -912,7 +1165,7 @@ export class MemoryRepository {
     const rows = this.db.prepare(
       `SELECT * FROM memories
        WHERE memory_layer = 'Skill'
-         AND json_extract(properties_json, '$.internal_info.read_only') = 1
+         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
          AND COALESCE(json_extract(properties_json, '$.internal_info.import_state_version'), 0) < ?
        ORDER BY created_at, id
        LIMIT ?`
@@ -946,15 +1199,15 @@ export class MemoryRepository {
          AND id != ?
          AND deleted_at IS NULL
          AND status IN ('activated', 'resolving')
-         AND json_extract(properties_json, '$.internal_info.read_only') = 1
-         AND json_extract(properties_json, '$.internal_info.source_agent_id') = ?
+         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+         AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?
          AND COALESCE(
            json_extract(properties_json, '$.internal_info.source_skill_id'),
            json_extract(properties_json, '$.internal_info.source_skill_path')
          ) = ?`
     ).all(
       input.currentMemoryId,
-      input.sourceAgentId,
+      normalizeAgentIdKey(input.sourceAgentId),
       input.sourceSkillIdentity
     ) as MemorySqlRow[];
     return rows.map((row) => {
@@ -979,7 +1232,7 @@ export class MemoryRepository {
     });
   }
 
-  getMany(ids: string[]): MemoryRow[] {
+  getMany(ids: string[], options: { includeVectors?: boolean } = {}): MemoryRow[] {
     if (ids.length === 0) {
       return [];
     }
@@ -987,10 +1240,10 @@ export class MemoryRepository {
     const rows = this.db
       .prepare(`SELECT * FROM memories WHERE id IN (${placeholders}) AND deleted_at IS NULL`)
       .all(...ids) as MemorySqlRow[];
-    const vectors = this.vectors.getMany(rows.map((row) => row.id));
+    const vectors = options.includeVectors === false ? undefined : this.vectors.getMany(rows.map((row) => row.id));
     const byId = new Map(rows.map((row) => {
       const memory = memoryFromSql(row);
-      attachMemoryVectors(memory, vectors.get(row.id) ?? []);
+      if (vectors) attachMemoryVectors(memory, vectors.get(row.id) ?? []);
       return [row.id, memory];
     }));
     return ids.map((id) => byId.get(id)).filter((row): row is MemoryRow => Boolean(row));
@@ -1419,8 +1672,16 @@ export class MemoryRepository {
     }
   }
 
-  searchPatternIds(terms: string[], filter: MemoryFilter = {}, limit = 20): MemorySearchIdHit[] {
-    return this.searchLikeIds(terms, filter, limit, true, "pattern");
+  searchPatternIds(terms: string[], filter: MemoryFilter = {}, limit = 20, excludeImportedSkills = false): MemorySearchIdHit[] {
+    return this.searchLikeIds(terms, filter, limit, true, "pattern", false, excludeImportedSkills);
+  }
+
+  searchImportedSkillBodyIds(terms: string[], filter: MemoryFilter = {}, limit = 20): MemorySearchIdHit[] {
+    return this.searchLikeIds(terms, { ...filter, memoryLayer: "Skill" }, limit, false, "pattern", true);
+  }
+
+  searchImportedSkillPatternIds(terms: string[], filter: MemoryFilter = {}, limit = 20): MemorySearchIdHit[] {
+    return this.searchLikeIds(terms, { ...filter, memoryLayer: "Skill" }, limit, true, "pattern", true);
   }
 
   searchStructuralIds(fragments: string[], filter: MemoryFilter = {}, limit = 20): MemorySearchIdHit[] {
@@ -1545,7 +1806,9 @@ export class MemoryRepository {
     filter: MemoryFilter,
     limit: number,
     includeTags: boolean,
-    channel: "pattern" | "structural"
+    channel: "pattern" | "structural",
+    importedSkillOnly = false,
+    excludeImportedSkills = false
   ): MemorySearchIdHit[] {
     const normalized = terms
       .map((term) => term.trim().toLowerCase())
@@ -1556,23 +1819,30 @@ export class MemoryRepository {
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
     });
-    const termColumns = normalized.map((term) => likeColumnsForTerm(term, includeTags));
+    const termColumns = normalized.map((term) => importedSkillOnly && !includeTags
+      ? ["lower(memories.memory_value) LIKE ? ESCAPE '\\'"]
+      : likeColumnsForTerm(term, includeTags));
     const clauses = termColumns.map((columns) => `(${columns.join(" OR ")})`);
     const params = normalized.flatMap((term, index) => {
       const pattern = `%${escapeLikePattern(term)}%`;
       return termColumns[index]!.map(() => pattern);
     });
+    // Only imported Skill routes use coverage; preserve legacy ranking elsewhere.
+    const coverage = clauses.map(clause => `CASE WHEN ${clause} THEN 1.0 ELSE 0.0 END`).join(" + ");
+    const imported = "memmy_is_imported_skill(memories.properties_json, memories.info_json, memories.tags_json, memories.memory_key)";
     const rows = this.db
       .prepare(
-        `SELECT memories.id AS id
+        `SELECT memories.id AS id ${importedSkillOnly ? `, (${coverage}) / ${normalized.length} AS coverage` : ""}
          FROM memories
          WHERE ${built.where}
+           ${importedSkillOnly ? `AND ${imported} = 1` : ""}
+           ${excludeImportedSkills ? `AND (memories.memory_layer != 'Skill' OR ${imported} = 0)` : ""}
            AND (${clauses.join(" OR ")})
-         ORDER BY memories.updated_at DESC, memories.id DESC
+         ORDER BY ${importedSkillOnly ? "coverage DESC," : ""} memories.updated_at DESC, memories.id DESC
          LIMIT ?`
       )
-      .all(...built.params, ...params, limit) as Array<{ id: string }>;
-    return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel }));
+      .all(...(importedSkillOnly ? params : []), ...built.params, ...params, limit) as Array<{ id: string; coverage?: number }>;
+    return rows.map((row, index) => ({ id: row.id, score: row.coverage ?? 1 / (index + 1), channel }));
   }
 }
 
@@ -3583,7 +3853,8 @@ export class RuntimeRepository {
     apiLogs: number;
     recallEvents: number;
   } {
-    const retries = this.db.prepare(`DELETE FROM embedding_retry_queue WHERE target_id = ?`).run(memoryId).changes;
+    this.invalidateImportedSkillResponseCopies(memoryId);
+    const retries = this.deleteEmbeddingRetriesForMemory(memoryId);
     let changeLogs = 0;
     // Embedding retry changes are logged under the retry id with the skill id
     // as targetId and the embedded text as sourceText.
@@ -3608,9 +3879,20 @@ export class RuntimeRepository {
     const needle = `%${escapeLikePattern(memoryId)}%`;
     let apiLogs = 0;
     for (const row of this.db.prepare(
-      `SELECT id, output_json FROM api_logs WHERE tool_name = 'memory_search' AND output_json LIKE ? ESCAPE '\\'`
-    ).all(needle) as Array<{ id: number; output_json: string }>) {
+      `SELECT id, tool_name, input_json, output_json FROM api_logs
+       WHERE tool_name IN ('memory_search', 'memory_add') AND output_json LIKE ? ESCAPE '\\'`
+    ).all(needle) as Array<{ id: number; tool_name: string; input_json: string; output_json: string }>) {
       const output = parseJsonRecord(row.output_json);
+      if (row.tool_name === "memory_add") {
+        // Both add writers emit one memory per log. Its input content belongs
+        // to that single details.traceId, including legacy Skill imports.
+        const details = Array.isArray(output.details) ? output.details : [];
+        if (!details.some(detail => isRecordLike(detail) && detail.traceId === memoryId)) continue;
+        this.db.prepare(`UPDATE api_logs SET input_json = ?, output_json = ? WHERE id = ?`)
+          .run(redactSkillBodyJson(row.input_json), redactSkillBodyJson(row.output_json), row.id);
+        apiLogs += 1;
+        continue;
+      }
       let changed = false;
       for (const key of ["candidates", "filtered", "droppedByLlm"]) {
         const entries = output[key];
@@ -3657,6 +3939,11 @@ export class RuntimeRepository {
       recallEvents += 1;
     }
     return { retries, changeLogs, auditLogs, apiLogs, recallEvents };
+  }
+
+  deleteEmbeddingRetriesForMemory(memoryId: string): number {
+    assertCurrentJobLease();
+    return this.db.prepare(`DELETE FROM embedding_retry_queue WHERE target_id = ?`).run(memoryId).changes;
   }
 
   appendChange(change: Omit<ChangeLogRecord, "seq">): number {
@@ -3736,7 +4023,48 @@ export class RuntimeRepository {
     }));
   }
 
-  saveIdempotency(key: string, requestHash: string, response: unknown, createdAt = nowIso()): void {
+  /** Invalidates recall snapshots and strips old add summaries without rerunning writes. */
+  invalidateImportedSkillResponseCopies(memoryId: string): void {
+    for (const row of this.db.prepare(`SELECT DISTINCT k.key, k.response_json FROM idempotency_keys k,
+      json_tree(k.response_json) j WHERE j.type = 'text' AND j.value = ?`).all(memoryId) as Array<{ key: string; response_json: string }>) {
+      if (row.key.startsWith("memory.search:") || row.key.startsWith("turn.start:")) {
+        this.db.prepare("DELETE FROM idempotency_keys WHERE key = ?").run(row.key);
+      } else if (row.key.startsWith("memory.add:")) {
+        this.db.prepare("UPDATE idempotency_keys SET response_json = ? WHERE key = ?")
+          .run(JSON.stringify(redactSkillBody(JSON.parse(row.response_json))), row.key);
+      }
+    }
+  }
+
+  /** Repairs snapshots already persisted by older releases, including current-state tombstones. */
+  repairImportedSkillResponseCopies(): void {
+    const rows = this.db.prepare(`SELECT DISTINCT k.key, k.response_json FROM idempotency_keys k,
+      json_tree(k.response_json) j JOIN memories m ON m.id = j.value
+      WHERE m.memory_layer = 'Skill' AND j.type = 'text'
+        AND (k.key LIKE 'memory.search:%' OR k.key LIKE 'turn.start:%' OR k.key LIKE 'memory.add:%')`)
+      .all() as Array<{ key: string; response_json: string }>;
+    for (const row of rows) {
+      const parsed = parseJson(row.response_json, undefined);
+      const response = this.sanitizeIdempotencyResponse(row.key, parsed);
+      if (response === undefined) this.db.prepare("DELETE FROM idempotency_keys WHERE key = ?").run(row.key);
+      else if (response !== parsed) this.db.prepare("UPDATE idempotency_keys SET response_json = ? WHERE key = ?").run(toJson(response), row.key);
+    }
+  }
+
+  /** Returns undefined for recall snapshots whose imported content must be retrieved afresh. */
+  sanitizeIdempotencyResponse(key: string, response: unknown, currentAgentId?: string): unknown {
+    if (!key.startsWith("memory.search:") && !key.startsWith("turn.start:") && !key.startsWith("memory.add:")) return response;
+    const rows = this.db.prepare(`SELECT DISTINCT m.* FROM memories m JOIN json_tree(?) j ON j.value = m.id
+      WHERE m.memory_layer = 'Skill' AND j.type = 'text'`).all(toJson(response)) as MemorySqlRow[];
+    const revoked = rows.map(memoryFromSql).filter(memory => isImportedSkill(memory)
+      && !importedSkillEligibleForRecall(this.db, memory, currentAgentId));
+    if (revoked.length === 0) return response;
+    return key.startsWith("memory.add:") ? redactSkillBody(response) : undefined;
+  }
+
+  saveIdempotency(key: string, requestHash: string, response: unknown, createdAt = nowIso(), currentAgentId?: string): void {
+    response = this.sanitizeIdempotencyResponse(key, response, currentAgentId);
+    if (response === undefined) return;
     this.db
       .prepare(
         `INSERT INTO idempotency_keys (key, request_hash, response_json, created_at, expires_at)
@@ -3748,17 +4076,21 @@ export class RuntimeRepository {
       .run(key, requestHash, toJson(response), createdAt);
   }
 
-  getIdempotency(key: string): { requestHash: string; response: unknown } | undefined {
+  getIdempotency(key: string, currentAgentId?: string): { requestHash: string; response: unknown } | undefined {
     const row = this.db
       .prepare(`SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?`)
       .get(key) as { request_hash: string; response_json: string } | undefined;
     if (!row) {
       return undefined;
     }
-    return {
-      requestHash: row.request_hash,
-      response: parseJson(row.response_json, undefined)
-    };
+    const parsed = parseJson(row.response_json, undefined);
+    const response = this.sanitizeIdempotencyResponse(key, parsed, currentAgentId);
+    if (response === undefined) {
+      this.db.prepare("DELETE FROM idempotency_keys WHERE key = ?").run(key);
+      return undefined;
+    }
+    if (response !== parsed) this.db.prepare("UPDATE idempotency_keys SET response_json = ? WHERE key = ?").run(toJson(response), key);
+    return { requestHash: row.request_hash, response };
   }
 
   enqueueJob(job: EvolutionJobRecord): EvolutionJobRecord {
@@ -7042,10 +7374,24 @@ export class Repositories {
     this.projectEnvironments = new ProjectEnvironmentRepository(db, this.l3WorldModels, this.runtime);
   }
 
+  /** Explicit authorization wins; legacy row evidence remains authoritative until migrated. */
+  isAgentSkillSourceDisconnected(sourceAgentId: string): boolean {
+    return agentSkillSourceDisconnected(this.db, sourceAgentId);
+  }
+
+  /** Shared source gate for candidates and all embedding queues; reload after await. */
+  isImportedSkillEligibleForEmbedding(memory: MemoryRow): boolean {
+    return importedSkillSourceEligible(this.db, memory);
+  }
+
+  /** Call with a freshly loaded row at async and response-cache boundaries. */
+  isImportedSkillEligibleForRecall(memory: MemoryRow, currentAgentId?: string): boolean {
+    return importedSkillEligibleForRecall(this.db, memory, currentAgentId);
+  }
+
   /** Scanned installation identity survives deleting its imported memory. */
   listInstalledSkillNamesForAgent(sourceAgentId: string): Set<string> {
-    const stored = this.runtime.getKv(agentSkillInstallationsKey(sourceAgentId))?.value as AgentSkillInstallations | undefined;
-    const inventory = stored?.version === 1 ? stored : this.memories.legacyInstalledSkillsForAgent(sourceAgentId);
+    const inventory = this.memories.resolvedSkillInstallationsForAgent(sourceAgentId);
     return new Set([...inventory.skills, ...inventory.registrations].map(entry => entry.normalizedName));
   }
 
@@ -7067,10 +7413,29 @@ export class Repositories {
     this.db.pragma("foreign_keys = OFF");
     try {
       return this.db.transaction(() => {
+        // Clearing memory must not grant a source authorization. Before removing
+        // unmigrated rows, promote their disconnect evidence to the independent
+        // authority that this operation already preserves. Explicit reconnects win.
+        const legacySources = this.db.prepare(`SELECT DISTINCT
+            ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} AS sourceAgentId
+          FROM memories WHERE memory_layer = 'Skill'
+            AND json_extract(properties_json, '$.internal_info.read_only') = 1
+            AND (json_extract(properties_json, '$.internal_info.archive_reason') = 'disconnected'
+              OR json_extract(properties_json, '$.internal_info.source_state') = 'disconnected')`)
+          .all() as Array<{ sourceAgentId: string | null }>;
+        for (const { sourceAgentId } of legacySources) {
+          if (!sourceAgentId) continue;
+          const key = agentSkillConnectionKey(sourceAgentId);
+          const explicit = this.runtime.getKv(key)?.value;
+          if (explicit !== "connected" && explicit !== "disconnected" && this.isAgentSkillSourceDisconnected(sourceAgentId)) {
+            this.runtime.setKv(key, "disconnected");
+          }
+        }
         const cleared: Record<string, number> = {};
         for (const table of tables) {
           if (table === "runtime_kv") {
-            cleared[table] = this.db.prepare(`DELETE FROM runtime_kv WHERE key != 'source_turn_capture_activated_at'`).run().changes;
+            cleared[table] = this.db.prepare(`DELETE FROM runtime_kv WHERE key != 'source_turn_capture_activated_at'
+              AND key NOT LIKE 'agent-skill-connection:%'`).run().changes;
           } else {
             cleared[table] = this.db.prepare(`DELETE FROM "${table}"`).run().changes;
           }
@@ -7884,6 +8249,11 @@ function normalizedAgentIdSql(column: string): string {
   return `lower(replace(replace(TRIM(${column}), '-', '_'), ' ', '_'))`;
 }
 
+/** Imported-source matching shares the exact canonical TypeScript normalization. */
+function importedSkillAgentIdSql(column: string): string {
+  return `memmy_imported_skill_agent_id(${column})`;
+}
+
 /** Keep the narrow stats projection and panel filters aligned with panelSourceForMemory. */
 function memoryDisplayedSourceSql(fallback: string): string {
   const candidate = "$.internal_info.external_evidence_candidate";
@@ -7974,12 +8344,19 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addRangeClause("created_at", "<", filter.createdAtLt);
   addArrayClause("memory_layer", filter.memoryLayer);
   addArrayClause("status", filter.status);
-  addArrayClause("id", filter.ids);
+  addArrayClause("memories.id", filter.ids);
   addMemoryKindClause(filter.memoryKind);
   addMemoryKindClause(filter.excludedMemoryKinds, true);
   addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
   addImportedSkillSourceExclusion(filter.excludedImportedSkillSourceAgentId);
+  if (filter.eligibleImportedSkillsOnly) {
+    clauses.push(`CASE WHEN memory_layer = 'Skill'
+      AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+      THEN memmy_imported_skill_eligible(memories.properties_json, memories.info_json, memories.tags_json, memories.memory_key, memories.memory_value, memories.status, memories.deleted_at) = 1
+        AND NOT (${agentSkillSourceDisconnectedSql("json_extract(memories.properties_json, '$.internal_info.source_agent_id')")})
+      ELSE 1 END`);
+  }
 
   return {
     where: clauses.join(" AND "),
@@ -7987,11 +8364,11 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   };
 
   function addImportedSkillSourceExclusion(sourceAgentId: string | undefined): void {
-    const normalized = sourceAgentId?.trim().toLowerCase().replace(/[\s-]+/g, "_");
+    const normalized = sourceAgentId ? normalizeAgentIdKey(sourceAgentId) : undefined;
     if (!normalized) return;
     clauses.push(`NOT (memory_layer = 'Skill'
-      AND json_extract(properties_json, '$.internal_info.read_only') = 1
-      AND replace(replace(lower(trim(COALESCE(json_extract(properties_json, '$.internal_info.source_agent_id'), ''))), '-', '_'), ' ', '_') = ?)`);
+      AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+      AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?)`);
     params.push(normalized);
   }
 
@@ -9382,6 +9759,43 @@ export function jobToRef(job: EvolutionJobRecord): JobRef {
   };
 }
 
+/** SQL and row consumers share connection precedence without recursive SQLite calls. */
+function agentSkillSourceDisconnectedSql(sourceAgentIdExpression: string): string {
+  const normalized = importedSkillAgentIdSql(sourceAgentIdExpression);
+  return `CASE (SELECT CASE WHEN json_valid(value_json) THEN json_extract(value_json, '$') END
+    FROM runtime_kv WHERE key = 'agent-skill-connection:' || ${normalized})
+    WHEN 'connected' THEN 0 WHEN 'disconnected' THEN 1
+    ELSE EXISTS(SELECT 1 FROM memories AS source_connection_evidence
+      WHERE source_connection_evidence.memory_layer = 'Skill'
+        AND json_extract(source_connection_evidence.properties_json, '$.internal_info.read_only') = 1
+        AND ${importedSkillAgentIdSql("json_extract(source_connection_evidence.properties_json, '$.internal_info.source_agent_id')")} = ${normalized}
+        AND (json_extract(source_connection_evidence.properties_json, '$.internal_info.archive_reason') = 'disconnected'
+          OR json_extract(source_connection_evidence.properties_json, '$.internal_info.source_state') = 'disconnected')) END`;
+}
+
+function agentSkillSourceDisconnected(db: Database.Database, sourceAgentId: string): boolean {
+  const row = db.prepare(`SELECT ${agentSkillSourceDisconnectedSql("@sourceAgentId")} AS disconnected`)
+    .get({ sourceAgentId }) as { disconnected: number };
+  return row.disconnected === 1;
+}
+
+function importedSkillSourceEligible(db: Database.Database, memory: ImportedSkillEligibilityMemory): boolean {
+  if (!isImportedSkill(memory)) return true;
+  return importedSkillMayEmbed(memory)
+    && !agentSkillSourceDisconnected(db, String(memory.properties.internal_info.source_agent_id ?? ""));
+}
+
+function importedSkillEligibleForRecall(db: Database.Database, memory: MemoryRow, currentAgentId?: string): boolean {
+  if (!isImportedSkill(memory)) return true;
+  const internal = memory.properties.internal_info;
+  const sourceAgentId = typeof internal.source_agent_id === "string" ? internal.source_agent_id.trim() : "";
+  if (!importedSkillSourceEligible(db, memory)) return false;
+  if (!currentAgentId) return true;
+  if (normalizeAgentIdKey(sourceAgentId) === normalizeAgentIdKey(currentAgentId)) return false;
+  const installations = new MemoryRepository(db, new SqliteVecStore(db)).resolvedSkillInstallationsForAgent(currentAgentId);
+  return ![...installations.skills, ...installations.registrations].some(entry => entry.normalizedName === importedSkillName(memory));
+}
+
 const SKILL_BODY_KEYS = new Set([
   "memoryValue",
   "memory_value",
@@ -9395,7 +9809,12 @@ const SKILL_BODY_KEYS = new Set([
   "source_text",
   "summary",
   "description",
-  "skill_description"
+  "skill_description",
+  "blurb",
+  "retrievalBlurb",
+  "retrieval_previous",
+  "steps",
+  "trigger"
 ]);
 
 /** Blanks every skill-body field of a value, at any depth. */

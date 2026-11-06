@@ -1,4 +1,4 @@
-import { importedSkillMayEmbed, isImportedSkill } from "../../storage/imported-skill.js";
+import { isImportedSkill } from "../../storage/imported-skill.js";
 import { ModelHttpError } from "../../model/http.js";
 /**
  * Worker scheduling and execution domain.
@@ -27,7 +27,7 @@ import {
   type EvolutionJobRecord,
   type Repositories
 } from "../../storage/repositories.js";
-import type { JobRef,MemoryRow,RequestEnvelope } from "../../types.js";
+import type { JobRef,MemoryFilter,MemoryRow,RequestEnvelope } from "../../types.js";
 import {
   SummaryModelUnconfiguredError,
   type EmbeddingJobProcessor,
@@ -147,7 +147,7 @@ type EmbeddingRetryResult = {
  * that the scheduler invokes.
  */
 export interface WorkerRunnerDeps {
-  repos: Pick<Repositories, "transaction" | "memories" | "processing" | "runtime"> & Partial<Pick<Repositories, "l3WorldModels">>;
+  repos: Pick<Repositories, "isImportedSkillEligibleForEmbedding" | "transaction" | "memories" | "processing" | "runtime"> & Partial<Pick<Repositories, "l3WorldModels">>;
   // Mark exhausted judgment attempts; durable assignment waits for an explicit retry.
   onTurnJudgeDeadLetter?: (job: EvolutionJobRecord) => void;
   embedder: Embedder;
@@ -444,32 +444,41 @@ export class WorkerRunner {
       });
     }
 
-    const retrievalMemories = this.deps.repos.memories.list({
+    const retrievalFilter: MemoryFilter = {
       memoryLayer: ["Skill", "L3"],
       status: ["activated", "resolving"]
-    }, limit);
-    for (const memory of retrievalMemories) {
-      this.deps.repos.memories.reindexFts(memory);
-      if (isL3FieldSnapshotMemory(memory)) continue;
-      if (!this.deps.capture.embedAfterCapture || retrievalDocumentIsCurrent(memory)) continue;
-      if (!importedSkillMayEmbed(memory)) continue;
-      if (this.deps.repos.runtime.hasPendingJob(memory.id, "embedding")) continue;
-      const sourceHash = retrievalDocumentSourceHash(memory);
-      this.deps.enqueueJob({
-        jobType: "embedding",
-        userId: memory.userId,
-        sessionId: memory.sessionId,
-        targetMemoryId: memory.id,
-        dedupeKey: `embedding:retrieval-v2:${memory.id}:${sourceHash}${externalSkillGeneration(memory) ? `:${externalSkillGeneration(memory)}` : ""}`,
-        payload: {
-          reason: "startup.retrieval_document_v2",
-          retrievalSourceHash: sourceHash, ...externalSkillJobPayload(memory)
-        },
-        maxAttempts: 6,
-        createdAt: at
-      });
-      enqueuedRetrievalReindexes += 1;
-    }
+    };
+    const retrievalPageSize = Number.isFinite(limit) && limit > 0 ? Math.max(1, Math.floor(limit)) : 10000;
+    // FTS repair and enqueue do not change memory ordering. Keep one snapshot
+    // while paging so a concurrent writer cannot move records between pages.
+    this.deps.repos.transaction(() => {
+      const total = this.deps.repos.memories.count(retrievalFilter);
+      for (let offset = 0; offset < total; offset += retrievalPageSize) {
+        const retrievalMemories = this.deps.repos.memories.list(retrievalFilter, retrievalPageSize, offset);
+        for (const memory of retrievalMemories) {
+          this.deps.repos.memories.reindexFts(memory);
+          if (isL3FieldSnapshotMemory(memory)) continue;
+          if (!this.deps.capture.embedAfterCapture || retrievalDocumentIsCurrent(memory)) continue;
+          if (!this.deps.repos.isImportedSkillEligibleForEmbedding(memory)) continue;
+          if (this.deps.repos.runtime.hasPendingJob(memory.id, "embedding")) continue;
+          const sourceHash = retrievalDocumentSourceHash(memory);
+          this.deps.enqueueJob({
+            jobType: "embedding",
+            userId: memory.userId,
+            sessionId: memory.sessionId,
+            targetMemoryId: memory.id,
+            dedupeKey: `embedding:retrieval-v2:${memory.id}:${sourceHash}${externalSkillGeneration(memory) ? `:${externalSkillGeneration(memory)}` : ""}`,
+            payload: {
+              reason: "startup.retrieval_document_v2",
+              retrievalSourceHash: sourceHash, ...externalSkillJobPayload(memory)
+            },
+            maxAttempts: 6,
+            createdAt: at
+          });
+          enqueuedRetrievalReindexes += 1;
+        }
+      }
+    });
 
     this.deps.purgeL3InactiveItems?.(at);
     this.deps.requeueL3DeadLettersOnce?.(at);
@@ -1041,6 +1050,9 @@ export class WorkerRunner {
       return this.holdPreparedEmbeddingJobs([item])[0]!;
     }
     try {
+      const current = this.refreshImportedEmbeddingItem(item);
+      if (!current) return this.completeLeasedWorkerJob(item.job);
+      item = current;
       this.captureExecutionConfiguration(item.job);
       const vector = await this.deps.embedder.embedOne(item.text || "(empty)", item.role);
       this.withJobLease(item.job, () => this.deps.embeddingJobs.applyEmbeddingVector(item, vector));
@@ -1050,17 +1062,34 @@ export class WorkerRunner {
     }
   }
 
+  private refreshImportedEmbeddingItem(item: PreparedEmbeddingJob): PreparedEmbeddingJob | null {
+    if (!isImportedSkill(item.memory)) return item;
+    return this.withJobLease(item.job, () => this.deps.repos.transaction(() => {
+      const current = this.deps.repos.memories.get(item.memory.id);
+      if (!current || !this.deps.repos.isImportedSkillEligibleForEmbedding(current)) {
+        this.deps.repos.memories.deleteVector(item.memory.id, item.vectorField);
+        this.deps.repos.runtime.deleteEmbeddingRetriesForMemory(item.memory.id);
+        return null;
+      }
+      return this.deps.embeddingJobs.prepareEmbeddingJob(item.job);
+    }));
+  }
+
   finishFailedEmbeddingItem(item: PreparedEmbeddingJob, error: unknown): WorkerJobRunResult {
-    if (error instanceof JobLeaseLostError || !this.deps.repos.runtime.isJobLeaseHeld(item.job, this.deps.nowIso())) {
-      return this.lostLeaseResult(item.job);
-    }
-    if (classifyProcessingError(error).retryAction !== "retry") {
-      return this.failLeasedWorkerJob(item.job, error);
-    }
-    if (!this.withJobLease(item.job, () => this.deps.embeddingJobs.enqueueEmbeddingRetryAfterFailure(item, error))) {
-      return this.failLeasedWorkerJob(item.job, error);
-    }
-    return this.completeLeasedWorkerJob(item.job);
+    return this.deps.repos.transaction(() => {
+      if (error instanceof JobLeaseLostError || !this.deps.repos.runtime.isJobLeaseHeld(item.job, this.deps.nowIso())) {
+        return this.lostLeaseResult(item.job);
+      }
+      const current = this.refreshImportedEmbeddingItem(item);
+      if (!current) return this.completeLeasedWorkerJob(item.job);
+      if (current.text === item.text && classifyProcessingError(error).retryAction !== "retry") {
+        return this.failLeasedWorkerJob(item.job, error);
+      }
+      if (!this.withJobLease(item.job, () => this.deps.embeddingJobs.enqueueEmbeddingRetryAfterFailure(current, error))) {
+        return this.failLeasedWorkerJob(item.job, error);
+      }
+      return this.completeLeasedWorkerJob(item.job);
+    });
   }
 
   completeLeasedWorkerJob(job: EvolutionJobRecord): WorkerJobRunResult {
@@ -1328,6 +1357,8 @@ export class WorkerRunner {
       return this.holdUnstartedEmbeddingRetry(retry);
     }
     try {
+      const settled: EmbeddingRetryResult[] = [];
+      if (this.settleImportedSkillRetry(retry, claim, settled)) return settled[0]!;
       this.observeWork({ queue: "embedding_retry", retry }, "started");
       this.captureExecutionConfiguration(claim);
       const vector = await this.deps.embedder.embedOne(retry.sourceText || "(empty)", retry.embedRole);
@@ -1338,28 +1369,43 @@ export class WorkerRunner {
   }
 
   /**
-   * Imported skills are checked before the embedding call: a deleted,
-   * archived or identity-only record is settled without one, and a retry
-   * whose text is outdated is replaced by one for the current text.
+   * Recheck imported skills before a request and when its result arrives.
+   * Restricted targets lose retry work without logging the stale body again.
+   * Active targets with outdated text get a retry for the current text.
    */
   private settleImportedSkillRetry(
     retry: EmbeddingRetryRecord,
     claim: EmbeddingRetryClaim,
     results: EmbeddingRetryResult[]
   ): boolean {
-    const memory = this.deps.repos.memories.getIncludingDeleted(retry.targetId);
-    if (!memory || !isImportedSkill(memory)) return false;
-    const mayEmbed = importedSkillMayEmbed(memory);
-    const currentText = embeddingTextForMemory(memory);
-    if (mayEmbed && currentText === retry.sourceText) return false;
-    const completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, { ...claim, now: this.nowMs() });
-    if (completed) this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
-    if (mayEmbed) {
+    return this.deps.repos.transaction(() => {
+      if (!this.isEmbeddingRetryLeaseHeld(retry, claim)) {
+        results.push({ succeeded: 0, failed: 0, item: null });
+        return true;
+      }
+      const memory = this.deps.repos.memories.getIncludingDeleted(retry.targetId);
+      if (!memory || !isImportedSkill(memory)) return false;
+      if (!this.deps.repos.isImportedSkillEligibleForEmbedding(memory)) {
+        this.deps.repos.memories.deleteVector(memory.id, retry.vectorField);
+        this.deps.repos.runtime.deleteEmbeddingRetriesForMemory(memory.id);
+        this.observeWork({ queue: "embedding_retry", retry }, "finished", "released");
+        results.push({ succeeded: 0, failed: 0, item: null });
+        return true;
+      }
+      const currentText = embeddingTextForMemory(memory);
+      if (currentText === retry.sourceText) return false;
+      const completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, { ...claim, now: this.nowMs() });
+      if (!completed) {
+        results.push({ succeeded: 0, failed: 0, item: null });
+        return true;
+      }
+      this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
       const replacement = this.deps.enqueueEmbeddingRetry(memory, currentText, this.deps.nowIso(), retry.vectorField);
       this.deps.appendEmbeddingRetryChange(replacement, "queued");
-    }
-    results.push({ succeeded: 0, failed: 0, item: completed ? embeddingRetryToRunItem(completed) : null });
-    return true;
+      this.observeWork({ queue: "embedding_retry", retry }, "finished", "released");
+      results.push({ succeeded: 0, failed: 0, item: embeddingRetryToRunItem(completed) });
+      return true;
+    });
   }
 
   applyEmbeddingRetryVector(
@@ -1367,63 +1413,67 @@ export class WorkerRunner {
     claim: EmbeddingRetryClaim,
     vector: number[]
   ): EmbeddingRetryResult {
-    if (!this.isEmbeddingRetryLeaseHeld(retry, claim)) {
-      this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
-      return { succeeded: 0, failed: 0, item: null };
-    }
-    const memory = this.deps.repos.memories.get(retry.targetId);
-    if (!memory) {
-      throw new Error(`embedding retry target not found: ${retry.targetKind}:${retry.targetId}`);
-    }
-    const currentText = retry.vectorField === "vec_action" ? traceActionEmbeddingText(memory)
-      : memory.memoryLayer === "Skill" || memory.memoryLayer === "L3" || memory.memoryLayer === "L2"
-        ? embeddingTextForMemory(memory) : undefined;
-    if (currentText !== undefined && currentText !== retry.sourceText) {
-      const completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, {
-        ...claim,
-        now: this.nowMs()
-      });
-      if (!completed) {
+    return this.deps.repos.transaction(() => {
+      if (!this.isEmbeddingRetryLeaseHeld(retry, claim)) {
         this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
         return { succeeded: 0, failed: 0, item: null };
       }
-      this.observeWork({ queue: "embedding_retry", retry }, "finished", "released");
-      if (completed) this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
-      const replacement = this.deps.enqueueEmbeddingRetry(
-        memory,
-        currentText,
-        this.deps.nowIso(),
-        retry.vectorField
-      );
-      this.deps.appendEmbeddingRetryChange(replacement, "queued");
-      return { succeeded: 0, failed: 0, item: completed ? embeddingRetryToRunItem(completed) : null };
-    }
-    let completed: EmbeddingRetryRecord | undefined;
-    withJobLeaseGuard(retry, () => this.isEmbeddingRetryLeaseHeld(retry, claim), () => this.deps.embeddingJobs.persistEmbeddingVector({
-      memoryId: memory.id,
-      vectorField: retry.vectorField,
-      vector,
-      attemptCount: retry.attempts + 1,
-      source: "worker.embedding_retry",
-      sourceHash: memory.memoryLayer === "Skill" || memory.memoryLayer === "L3"
-        ? retrievalDocumentSourceHash(memory)
-        : undefined,
-      allowedProcessingStates: ["embedding_pending", "embedding"],
-      finalize: () => {
-        completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, {
+      const settled: EmbeddingRetryResult[] = [];
+      if (this.settleImportedSkillRetry(retry, claim, settled)) return settled[0]!;
+      const memory = this.deps.repos.memories.get(retry.targetId);
+      if (!memory) {
+        throw new Error(`embedding retry target not found: ${retry.targetKind}:${retry.targetId}`);
+      }
+      const currentText = retry.vectorField === "vec_action" ? traceActionEmbeddingText(memory)
+        : memory.memoryLayer === "Skill" || memory.memoryLayer === "L3" || memory.memoryLayer === "L2"
+          ? embeddingTextForMemory(memory) : undefined;
+      if (currentText !== undefined && currentText !== retry.sourceText) {
+        const completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, {
           ...claim,
           now: this.nowMs()
         });
+        if (!completed) {
+          this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
+          return { succeeded: 0, failed: 0, item: null };
+        }
+        this.observeWork({ queue: "embedding_retry", retry }, "finished", "released");
+        if (completed) this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
+        const replacement = this.deps.enqueueEmbeddingRetry(
+          memory,
+          currentText,
+          this.deps.nowIso(),
+          retry.vectorField
+        );
+        this.deps.appendEmbeddingRetryChange(replacement, "queued");
+        return { succeeded: 0, failed: 0, item: completed ? embeddingRetryToRunItem(completed) : null };
       }
-    }));
-    if (completed) {
-      this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
-      workerLogger.info("embedding_retry.succeeded", embeddingRetryLogFields(completed));
-      this.observeWork({ queue: "embedding_retry", retry }, "finished", "succeeded");
-      return { succeeded: 1, failed: 0, item: embeddingRetryToRunItem(completed) };
-    }
-    this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
-    return { succeeded: 0, failed: 0, item: null };
+      let completed: EmbeddingRetryRecord | undefined;
+      withJobLeaseGuard(retry, () => this.isEmbeddingRetryLeaseHeld(retry, claim), () => this.deps.embeddingJobs.persistEmbeddingVector({
+        memoryId: memory.id,
+        vectorField: retry.vectorField,
+        vector,
+        attemptCount: retry.attempts + 1,
+        source: "worker.embedding_retry",
+        sourceHash: memory.memoryLayer === "Skill" || memory.memoryLayer === "L3"
+          ? retrievalDocumentSourceHash(memory)
+          : undefined,
+        allowedProcessingStates: ["embedding_pending", "embedding"],
+        finalize: () => {
+          completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, {
+            ...claim,
+            now: this.nowMs()
+          });
+        }
+      }));
+      if (completed) {
+        this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
+        workerLogger.info("embedding_retry.succeeded", embeddingRetryLogFields(completed));
+        this.observeWork({ queue: "embedding_retry", retry }, "finished", "succeeded");
+        return { succeeded: 1, failed: 0, item: embeddingRetryToRunItem(completed) };
+      }
+      this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
+      return { succeeded: 0, failed: 0, item: null };
+    });
   }
 
   failClaimedEmbeddingRetry(
@@ -1432,55 +1482,59 @@ export class WorkerRunner {
     attemptNo: number,
     error: unknown
   ): EmbeddingRetryResult {
-    if (error instanceof JobLeaseLostError || !this.isEmbeddingRetryLeaseHeld(retry, claim)) {
+    return this.deps.repos.transaction(() => {
+      if (error instanceof JobLeaseLostError || !this.isEmbeddingRetryLeaseHeld(retry, claim)) {
+        this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
+        return { succeeded: 0, failed: 0, item: null };
+      }
+      const settled: EmbeddingRetryResult[] = [];
+      if (this.settleImportedSkillRetry(retry, claim, settled)) return settled[0]!;
+      const message = sanitizeProcessingError(error);
+      const classification = classifyProcessingError(error);
+      const configurationBlocked = classification.retryAction === "open_settings" && classification.code !== "40309";
+      const terminal = classification.retryAction !== "retry" || attemptNo >= retry.maxAttempts;
+      const updated = configurationBlocked
+        ? this.deps.repos.runtime.markEmbeddingRetryConfigurationBlockedClaimed(retry.id, {
+          ...claim, error: message, now: this.nowMs()
+        })
+        : terminal
+        ? this.deps.repos.runtime.markEmbeddingRetryFailedClaimed(retry.id, {
+          ...claim,
+          attempts: attemptNo,
+          error: message,
+          now: this.nowMs()
+        })
+        : this.deps.repos.runtime.markEmbeddingRetryRetryClaimed(retry.id, {
+          ...claim,
+          attempts: attemptNo,
+          nextAttemptAt: this.nowMs() + embeddingRetryBackoffMs(attemptNo),
+          error: message,
+          now: this.nowMs()
+        });
+      if (updated) {
+        if (configurationBlocked) observeWorker(this.deps.observer, { type: "skipped", lane: retry.queueLane, reason: "configuration" });
+        this.observeWork({ queue: "embedding_retry", retry }, "finished", "failed");
+        this.deps.appendEmbeddingRetryChange(updated, terminal ? "failed" : "retry", retry);
+        const fields = {
+          ...embeddingRetryLogFields(updated),
+          terminal,
+          blockedReason: updated.blockedReason,
+          ...memoryErrorFields(error)
+        };
+        if (terminal) {
+          workerLogger.error("embedding_retry.failed", fields);
+        } else {
+          workerLogger.warn("embedding_retry.retry_scheduled", fields);
+        }
+        const resumed = configurationBlocked && this.executionConfigurationChanged(claim)
+          ? this.deps.repos.runtime.resumeConfigurationBlockedEmbeddingRetries(this.nowMs(), [retry.id])[0]?.after
+          : undefined;
+        if (resumed) this.deps.appendEmbeddingRetryChange(resumed, "queued", updated);
+        return { succeeded: 0, failed: 1, item: embeddingRetryToRunItem(resumed ?? updated) };
+      }
       this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
       return { succeeded: 0, failed: 0, item: null };
-    }
-    const message = sanitizeProcessingError(error);
-    const classification = classifyProcessingError(error);
-    const configurationBlocked = classification.retryAction === "open_settings" && classification.code !== "40309";
-    const terminal = classification.retryAction !== "retry" || attemptNo >= retry.maxAttempts;
-    const updated = configurationBlocked
-      ? this.deps.repos.runtime.markEmbeddingRetryConfigurationBlockedClaimed(retry.id, {
-        ...claim, error: message, now: this.nowMs()
-      })
-      : terminal
-      ? this.deps.repos.runtime.markEmbeddingRetryFailedClaimed(retry.id, {
-        ...claim,
-        attempts: attemptNo,
-        error: message,
-        now: this.nowMs()
-      })
-      : this.deps.repos.runtime.markEmbeddingRetryRetryClaimed(retry.id, {
-        ...claim,
-        attempts: attemptNo,
-        nextAttemptAt: this.nowMs() + embeddingRetryBackoffMs(attemptNo),
-        error: message,
-        now: this.nowMs()
-      });
-    if (updated) {
-      if (configurationBlocked) observeWorker(this.deps.observer, { type: "skipped", lane: retry.queueLane, reason: "configuration" });
-      this.observeWork({ queue: "embedding_retry", retry }, "finished", "failed");
-      this.deps.appendEmbeddingRetryChange(updated, terminal ? "failed" : "retry", retry);
-      const fields = {
-        ...embeddingRetryLogFields(updated),
-        terminal,
-        blockedReason: updated.blockedReason,
-        ...memoryErrorFields(error)
-      };
-      if (terminal) {
-        workerLogger.error("embedding_retry.failed", fields);
-      } else {
-        workerLogger.warn("embedding_retry.retry_scheduled", fields);
-      }
-      const resumed = configurationBlocked && this.executionConfigurationChanged(claim)
-        ? this.deps.repos.runtime.resumeConfigurationBlockedEmbeddingRetries(this.nowMs(), [retry.id])[0]?.after
-        : undefined;
-      if (resumed) this.deps.appendEmbeddingRetryChange(resumed, "queued", updated);
-      return { succeeded: 0, failed: 1, item: embeddingRetryToRunItem(resumed ?? updated) };
-    }
-    this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
-    return { succeeded: 0, failed: 0, item: null };
+    });
   }
 
   private excludedLeaseJobTypes(): readonly string[] | undefined {

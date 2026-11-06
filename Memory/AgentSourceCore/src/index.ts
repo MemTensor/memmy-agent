@@ -335,3 +335,5 @@ function hashMetaString(meta: Readonly<Record<string, unknown>>, key: string): s
 }
 export * from "./skill-inventory.js";
 export * from "./codex-file-rollback.js";
+
+export { createConnectionCompensation, type ConnectionAction, type ConnectionEvent } from "./connection-compensation.js";

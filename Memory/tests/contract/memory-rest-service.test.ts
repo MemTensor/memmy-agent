@@ -1,3 +1,4 @@
+import "../fixtures/isolated-user-home.js";
 import { assignedEpisodeId } from "../fixtures/memory-service-fixture.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,8 +34,8 @@ const {
   createTestService
 } = createMemoryServiceFixture();
 
-afterEach(() => {
-  cleanupMemoryServiceFixture();
+afterEach(async () => {
+  await cleanupMemoryServiceFixture();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -159,21 +160,22 @@ describe("MemoryService / REST contract", () => {
           body: await response.json() as { id?: string; duplicate?: boolean; error?: { code?: string } }
         };
       };
+      // Identity, path changes and content hashes are independent of Codex sidecar policy.
       const firstRequest = {
-        adapterId: "agent-source:codex",
-        requestId: "agent-source-skill:codex:.system/imagegen:content-hash-v1",
-        namespace: { source: "codex", profileId: "default" },
+        adapterId: "agent-source:hermes",
+        requestId: "agent-source-skill:hermes:.system/imagegen:content-hash-v1",
+        namespace: { source: "hermes", profileId: "default" },
         content: "Generate images from a prompt.",
         layer: "Skill" as const,
         title: "imagegen",
-        tags: ["agent-source", "cross-agent-skill", "codex"],
-        source: "codex",
+        tags: ["agent-source", "cross-agent-skill", "hermes"],
+        source: "hermes",
         turnId: "skill:.system/imagegen:version-1",
         createdAt: "2026-09-04T02:13:03.091Z",
         deferProcessing: true,
-        sourceAgentId: "codex",
+        sourceAgentId: "hermes",
         sourceSkillId: ".system/imagegen",
-        sourceSkillPath: "/old-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillPath: "/old-home/.hermes/skills/.system/imagegen/SKILL.md",
         sourceSkillVersion: "version-1",
         sourceContentHash: "content-hash-v1"
       };
@@ -187,11 +189,11 @@ describe("MemoryService / REST contract", () => {
       const replayed = await post({
         ...firstRequest,
         title: "Image generation",
-        tags: ["agent-source", "codex", "new-metadata"],
+        tags: ["agent-source", "hermes", "new-metadata"],
         turnId: "skill:.system/imagegen:parser-version-2",
         createdAt: "2026-09-17T03:24:19.000Z",
         deferProcessing: false,
-        sourceSkillPath: "/new-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillPath: "/new-home/.hermes/skills/.system/imagegen/SKILL.md",
         sourceSkillVersion: "parser-version-2",
         timeZone: "Asia/Shanghai"
       });
@@ -202,15 +204,23 @@ describe("MemoryService / REST contract", () => {
       const duplicate = await post({
         ...firstRequest,
         title: "Generate an image",
-        tags: ["agent-source", "codex", "latest-metadata"],
+        tags: ["agent-source", "hermes", "latest-metadata"],
         turnId: "skill:.system/imagegen:parser-version-3",
         createdAt: "2026-09-18T03:24:19.000Z",
-        sourceSkillPath: "/another-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillPath: "/another-home/.hermes/skills/.system/imagegen/SKILL.md",
         sourceSkillVersion: "parser-version-3",
         timeZone: "UTC"
       });
       expect(duplicate.response.status).toBe(200);
-      expect(duplicate.body).toMatchObject({ id: legacy.id, duplicate: true });
+      expect(duplicate.body.id).toBe(legacy.id);
+      expect(duplicate.body.duplicate).toBeUndefined();
+      const observed = new Repositories(db.db).memories.get(legacy.id)!;
+      expect(observed.status).toBe("activated");
+      expect(observed.properties.internal_info).toMatchObject({
+        source_skill_path: "/another-home/.hermes/skills/.system/imagegen/SKILL.md",
+        source_skill_version: "parser-version-3"
+      });
+      expect(observed.tags).toContain("latest-metadata");
       expect(db.db.prepare(
         `SELECT COUNT(*) AS count FROM memories
          WHERE json_extract(properties_json, '$.internal_info.source_skill_id') = ?`

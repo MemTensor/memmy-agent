@@ -1,7 +1,13 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import "../fixtures/isolated-user-home.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createAgentSourceExecutor } from "../../src/agent-source/runtime.js";
+import { createSourceRegistry } from "../../src/agent-source/adapters/source-registry.js";
+import { createSkillTargetRegistry } from "../../src/agent-source/integration/target-registry.js";
+import { LEGACY_TEST_CONFIG } from "../fixtures/memory-service-fixture.js";
+import { readAgentSkillInventory } from "@memmy/agent-source-core";
 import {
   createMemoryHttpServer,
   type Embedder,
@@ -43,6 +49,93 @@ describe("skill archive over the service API", () => {
     expect(missingId.status).toBe(400);
   });
 
+  it("passes unknown invocation metadata and explicit connection events to reconciliation", async () => {
+    const { baseUrl, service } = await startServer("skill-token");
+    const reconcile = vi.spyOn(service, "reconcileAgentSkills");
+    const request = { sourceAgentId: "codex", complete: false, connectionState: "disconnected", disconnected: true,
+      skills: [{ sourceSkillId: "private", sourceSkillPath: "/isolated/private/SKILL.md", title: "private",
+        content: "Body", contentHash: "hash", modifiedAt: "2026-11-04T00:00:00.000Z",
+        policyError: "permission denied", frontmatterError: "unclosed frontmatter" }] };
+    const response = await post(baseUrl, "/api/v1/agent-skills/reconcile", request, "skill-token");
+    expect(response.status).toBe(200);
+    expect(reconcile).toHaveBeenLastCalledWith(expect.objectContaining(request));
+  });
+
+  it("allows only administrative connection events when memory capture is disabled", async () => {
+    const { baseUrl, service, configPath } = await startServer("skill-token");
+    const skill = { sourceSkillId: "private", sourceSkillPath: "/isolated/private/SKILL.md", title: "private",
+      content: "Private procedure", contentHash: "hash", modifiedAt: "2026-11-04T00:00:00.000Z" };
+    const created = service.reconcileAgentSkills({ sourceAgentId: "codex", complete: true, skills: [skill] });
+    const memoryId = created.skills[0]!.memoryId!;
+    writeFileSync(configPath, JSON.stringify({ memmyMemory: {
+      ...LEGACY_TEST_CONFIG,
+      algorithm: { ...LEGACY_TEST_CONFIG.algorithm, enableMemoryAdd: false }
+    } }));
+    service.reloadConfig({ restartFailedProcessing: false });
+
+    const events = [
+      { connectionState: "disconnected", disconnected: true },
+      { connectionState: "connected" },
+      { disconnected: true }
+    ];
+    for (const event of events) {
+      const response = await post(baseUrl, "/api/v1/agent-skills/reconcile", {
+        sourceAgentId: "codex", complete: false, skills: [], ...event
+      }, "skill-token");
+      expect(response.status).toBe(200);
+      expect(service.agentSkillConnectionState("codex")).toBe(event.connectionState ?? "disconnected");
+    }
+    expect(service.getMemory(memoryId)).toMatchObject({ status: "archived", body: "" });
+
+    const forbidden = [
+      { complete: false, skills: [] },
+      { complete: true, skills: [], connectionState: "connected" },
+      { complete: false, skills: [skill], connectionState: "connected" },
+      { complete: false, skills: [], connectionState: "connected", registrations: [
+        { sourceSkillId: "plugin:private", sourceSkillPath: "/isolated/plugin/SKILL.md", name: "private" }
+      ] },
+      { complete: false, skills: [], connectionState: "connected", registrations: [], registrationsComplete: true }
+    ];
+    for (const request of forbidden) {
+      const response = await post(baseUrl, "/api/v1/agent-skills/reconcile", { sourceAgentId: "codex", ...request }, "skill-token");
+      expect(response.status).toBe(403);
+    }
+    expect(service.agentSkillConnectionState("codex")).toBe("disconnected");
+    expect(() => service.addMemory({ content: "Capture remains disabled" })).toThrow("memory add is disabled");
+  });
+
+  it("reconciles empty and regular SKILL.md files in the same HTTP batch", async () => {
+    const { baseUrl, service, configPath } = await startServer("skill-token");
+    const skillsRoot = join(dirname(configPath), "skills");
+    for (const [name, content] of [["empty", ""], ["whitespace", " \n "], ["regular", "A normal procedure.\n"]]) {
+      const directory = join(skillsRoot, name!);
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "SKILL.md"), content!);
+    }
+    const inventory = await readAgentSkillInventory(skillsRoot);
+    expect(inventory.complete).toBe(true);
+    const skills = inventory.items.map((item) => ({ sourceSkillId: item.sourceSkillId, sourceSkillPath: item.sourceSkillPath,
+      title: item.name ?? basename(item.sourceSkillId), content: item.content, contentHash: item.contentHash, modifiedAt: item.modifiedAt }));
+    const reconcile = vi.spyOn(service, "reconcileAgentSkills");
+    const response = await post(baseUrl, "/api/v1/agent-skills/reconcile", { sourceAgentId: "hermes", complete: true, skills }, "skill-token");
+    expect(response.status).toBe(200);
+    const result = await response.json() as { skills: Array<{ sourceSkillId: string; outcome: string; memoryId: string }> };
+    expect(result.skills).toHaveLength(3);
+    for (const item of result.skills) {
+      const scanned = skills.find((skill) => skill.sourceSkillId === item.sourceSkillId)!;
+      expect(item.outcome).toBe("created");
+      expect(service.getMemory(item.memoryId)).toMatchObject({ status: "activated", body: scanned.content });
+    }
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ skills }));
+    for (const content of [undefined, null, 42, {}, []]) {
+      const invalid = await post(baseUrl, "/api/v1/agent-skills/reconcile", {
+        sourceAgentId: "hermes", complete: true, skills: [skills[2], { ...skills[0], content }]
+      }, "skill-token");
+      expect(invalid.status).toBe(400);
+    }
+    expect(reconcile).toHaveBeenCalledTimes(1);
+  });
+
   it("wakes the worker after reactivating through either route", async () => {
     const { baseUrl, service } = await startServer("skill-token");
     const skill = service.addMemory({ content: "skill", source: "contract", layer: "Skill" });
@@ -58,12 +151,25 @@ describe("skill archive over the service API", () => {
   });
 });
 
-async function startServer(token: string): Promise<{ baseUrl: string; service: MemoryService }> {
+async function startServer(token: string): Promise<{ baseUrl: string; service: MemoryService; configPath: string }> {
   const root = mkdtempSync(join(tmpdir(), "memmy-skill-archive-http-"));
   const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+  const llm = {
+    config: { ...LEGACY_TEST_CONFIG.summary, provider: "local_only" as const },
+    isConfigured: () => false,
+    async complete(): Promise<never> { throw new Error("Unexpected test LLM call"); },
+    async completeJson(): Promise<never> { throw new Error("Unexpected test LLM call"); },
+    status: () => ({ provider: "local_only", configured: false, remote: false })
+  };
   const service = new MemoryService({
     db,
     mode: "dev",
+    llm,
+    skillLlm: llm,
+    config: LEGACY_TEST_CONFIG,
+    configPath: join(root, "config.yaml"),
+    l3FieldEnvironment: () => ({ machineId: "f".repeat(64), homeDir: root, tempRoots: [root] }),
+    l3MachineProbe: () => new Promise(() => undefined),
     embedder: createTestEmbedder(),
     fetchAppMemoryBudget: async () => null
   });
@@ -71,6 +177,11 @@ async function startServer(token: string): Promise<{ baseUrl: string; service: M
   const server = createMemoryHttpServer({
     service,
     auth: { localServiceToken: token },
+    configPath: join(root, "config.yaml"),
+    agentSourceExecutor: createAgentSourceExecutor({
+      service, configPath: join(root, "config.yaml"), statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([]), integrationRegistry: createSkillTargetRegistry([])
+    }),
     workerStartupFallbackMs: 60_000
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -82,7 +193,7 @@ async function startServer(token: string): Promise<{ baseUrl: string; service: M
     async () => service.stop(),
     () => new Promise<void>((resolve) => server.close(() => resolve()))
   );
-  return { baseUrl: `http://127.0.0.1:${address.port}`, service };
+  return { baseUrl: `http://127.0.0.1:${address.port}`, service, configPath: join(root, "config.yaml") };
 }
 
 function post(

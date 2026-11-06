@@ -1,3 +1,4 @@
+import { createConnectionCompensation, type ConnectionAction, type ConnectionEvent } from "@memmy/agent-source-core";
 /** Agent source service module. */
 import { randomUUID } from "node:crypto";
 import { memoryScanUnavailable } from "../adapters/outbound/memory-client/errors.js";
@@ -25,9 +26,11 @@ import type { SourceRegistry } from "@memmy/agent-source-readers/adapters/source
 import type { AgentSourceRepository, AgentSourceRecord } from "../infrastructure/agent-source-store/index.js";
 import type { IngestionService } from "./ingestion-service.js";
 import { AgentSourceUnavailableError } from "./runtime-errors.js";
+import type { SkillInstallationState } from "../adapters/outbound/skill-writer/skill-directory.js";
 import type { SkillDistributionService } from "./skill-distribution-service.js";
 import {
   createAgentSourceLifecycleAnalytics,
+  resolvePluginSourceKind,
   type AgentSourceInstallType,
   type AgentSourceLifecycleAnalytics,
 } from "../analytics/agent-source-analytics.js";
@@ -55,10 +58,11 @@ export interface AgentSourceService {
   syncManaged(sourceId: string): Promise<ManagedAgentSourceImportResult>;
   updateManaged(sourceId: string, input: ManagedAgentSourceUpdateInput): Promise<AgentSourceView>;
   remove(sourceId: string): Promise<void>;
-  installSkill(sourceId: string, action?: Pick<AgentSourcePluginActionInput, "installType">, beforeInstall?: () => void): Promise<void>;
-  uninstallSkill(sourceId: string): Promise<void>;
-  installPlugin(sourceId: string, action?: AgentSourcePluginActionInput, beforeInstall?: () => void): Promise<void>;
+  installSkill(sourceId: string, action?: Pick<AgentSourcePluginActionInput, "installType">, beforeInstall?: () => void | Promise<void>): Promise<void>;
+  uninstallSkill(sourceId: string, action?: Pick<AgentSourcePluginActionInput, "installType">): Promise<void>;
+  installPlugin(sourceId: string, action?: AgentSourcePluginActionInput, beforeInstall?: () => void | Promise<void>): Promise<void>;
   uninstallPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
+  isAutomaticConnectionAllowed(sourceId: string): Promise<boolean>;
   isInstalledHookCurrent(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts(): Promise<AgentSourceMemoryPluginConflict[]>;
 }
@@ -97,6 +101,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
   const now = options.now ?? (() => new Date().toISOString());
   const createId = options.createId ?? randomUUID;
   const agentSourceAnalytics = options.agentSourceAnalytics ?? createAgentSourceLifecycleAnalytics();
+  const compensation = createConnectionCompensation(async sourceId => (await options.memoryClient.agentSources?.connectionState(sourceId))?.connectionEvent);
 
   return {
     async list() {
@@ -238,117 +243,153 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       options.agentSourceRepository.removeSource(sourceId);
     },
 
-    async installSkill(sourceId, action = {}, beforeInstall) {
-      const startedAt = Date.now();
-      const installType = normalizePluginInstallType(action.installType);
-      const statusBefore = readSourceStatus(options, sourceId);
-      const permission = await readScanPermission(options);
-      const builtin = readSourceBuiltin(options, sourceId);
-      try {
-        await ensureSourceAvailable(options, sourceId);
-        beforeInstall?.();
-        await (beforeInstall ? options.skillDistributionService.install(sourceId, beforeInstall) : options.skillDistributionService.install(sourceId));
-        ensureSourceExists(options, sourceId);
-        if (installType === "auto_inject") {
-          options.agentSourceRepository.setStatus(sourceId, "skill_installed");
-        } else {
-          options.agentSourceRepository.setConnectionState(sourceId, "skill_installed", false);
-        }
-        agentSourceAnalytics.trackSkillInstalled({
-          sourceId,
-          builtin,
-          permission,
-          statusBefore,
-          statusAfter: "skill_installed",
-          success: true,
-          latencyMs: Date.now() - startedAt,
-        });
-      } catch (error) {
-        agentSourceAnalytics.trackSkillInstalled({
-          sourceId,
-          builtin,
-          permission,
-          statusBefore,
-          statusAfter: statusBefore,
-          success: false,
-          latencyMs: Date.now() - startedAt,
-          errorCode: errorCodeFromUnknown(error),
-        });
-        throw error;
-      }
+    async isAutomaticConnectionAllowed(sourceId) {
+      return automaticConnectionAllowed(options, sourceId);
     },
 
-    async uninstallSkill(sourceId) {
-      const startedAt = Date.now();
-      const statusBefore = readSourceStatus(options, sourceId);
-      const permission = await readScanPermission(options);
-      const builtin = readSourceBuiltin(options, sourceId);
+    async installSkill(sourceId, action = {}, beforeInstall) {
+      const explicitAction = action.installType !== "auto_inject" ? await compensation.begin(sourceId, "connected", "skill") : undefined;
+      let successful = false;
       try {
-        await options.skillDistributionService.uninstall(sourceId);
-        ensureSourceExists(options, sourceId);
-        options.agentSourceRepository.setConnectionState(sourceId, "not_connected", true);
-        await stopSharingAgentSkills(options, sourceId);
-        agentSourceAnalytics.trackSkillUninstalled({
-          sourceId,
-          builtin,
-          permission,
-          statusBefore,
-          statusAfter: "not_connected",
-          success: true,
-          latencyMs: Date.now() - startedAt,
-        });
-      } catch (error) {
-        agentSourceAnalytics.trackSkillUninstalled({
-          sourceId,
-          builtin,
-          permission,
-          statusBefore,
-          statusAfter: statusBefore,
-          success: false,
-          latencyMs: Date.now() - startedAt,
-          errorCode: errorCodeFromUnknown(error),
-        });
-        throw error;
-      }
+        const startedAt = Date.now();
+        const installType = normalizePluginInstallType(action.installType);
+        const statusBefore = readSourceStatus(options, sourceId);
+        const permission = await readScanPermission(options);
+        const builtin = readSourceBuiltin(options, sourceId);
+        try {
+          await ensureSourceAvailable(options, sourceId);
+          const installationBefore = installType === "auto_inject"
+            ? undefined
+            : await options.skillDistributionService.readInstallationState?.(sourceId);
+          if (installType === "auto_inject") {
+            await installAutomatically(options, sourceId, "skill", compensation, beforeInstall);
+          } else {
+            await beforeInstall?.();
+            await (beforeInstall ? options.skillDistributionService.install(sourceId, beforeInstall) : options.skillDistributionService.install(sourceId));
+          }
+          ensureSourceExists(options, sourceId);
+          if (installType === "auto_inject") {
+            options.agentSourceRepository.setConnectionState(sourceId, "skill_installed", false);
+          } else {
+            const event = await confirmAgentSkillConnection(options, sourceId, "skill", installationBefore);
+            compensation.record(explicitAction, event);
+            options.agentSourceRepository.setConnectionState(sourceId, "skill_installed", false);
+          }
+          agentSourceAnalytics.trackSkillInstalled({
+            sourceId,
+            builtin,
+            permission,
+            statusBefore,
+            statusAfter: "skill_installed",
+            success: true,
+            latencyMs: Date.now() - startedAt,
+          });
+        } catch (error) {
+          agentSourceAnalytics.trackSkillInstalled({
+            sourceId,
+            builtin,
+            permission,
+            statusBefore,
+            statusAfter: statusBefore,
+            success: false,
+            latencyMs: Date.now() - startedAt,
+            errorCode: errorCodeFromUnknown(error),
+          });
+          throw error;
+        }
+        successful = true;
+      } finally { await compensation.settle(explicitAction, successful); }
+    },
+
+    async uninstallSkill(sourceId, action = {}) {
+      if (action.installType === "auto_inject") return cleanupAutomaticInstallation(options, sourceId, "skill", compensation);
+      const explicitAction = await compensation.begin(sourceId, "disconnected", "skill");
+      let successful = false;
+      try {
+        const startedAt = Date.now();
+        const statusBefore = readSourceStatus(options, sourceId);
+        const permission = await readScanPermission(options);
+        const builtin = readSourceBuiltin(options, sourceId);
+        try {
+          const event = await disconnectAgentSkillConnection(options, sourceId, "skill", compensation, explicitAction);
+          compensation.record(explicitAction, event);
+          agentSourceAnalytics.trackSkillUninstalled({
+            sourceId,
+            builtin,
+            permission,
+            statusBefore,
+            statusAfter: "not_connected",
+            success: true,
+            latencyMs: Date.now() - startedAt,
+          });
+        } catch (error) {
+          agentSourceAnalytics.trackSkillUninstalled({
+            sourceId,
+            builtin,
+            permission,
+            statusBefore,
+            statusAfter: statusBefore,
+            success: false,
+            latencyMs: Date.now() - startedAt,
+            errorCode: errorCodeFromUnknown(error),
+          });
+          throw error;
+        }
+        successful = true;
+      } finally { await compensation.settle(explicitAction, successful); }
     },
 
     async installPlugin(sourceId, action = {}, beforeInstall) {
-      const startedAt = Date.now();
-      const installType = normalizePluginInstallType(action.installType);
-      const statusBefore = readSourceStatus(options, sourceId);
-      const permission = await readScanPermission(options);
+      const explicitAction = action.installType !== "auto_inject" ? await compensation.begin(sourceId, "connected", "plugin") : undefined;
+      let successful = false;
       try {
-        await ensureSourceAvailable(options, sourceId);
-        beforeInstall?.();
-        await (beforeInstall ? options.skillDistributionService.installPlugin(sourceId, beforeInstall) : options.skillDistributionService.installPlugin(sourceId));
-        ensureSourceExists(options, sourceId);
-        if (installType === "auto_inject") {
-          options.agentSourceRepository.setStatus(sourceId, "plugin_installed");
-        } else {
-          options.agentSourceRepository.setConnectionState(sourceId, "plugin_installed", false);
+        const startedAt = Date.now();
+        const installType = normalizePluginInstallType(action.installType);
+        const statusBefore = readSourceStatus(options, sourceId);
+        const permission = await readScanPermission(options);
+        try {
+          await ensureSourceAvailable(options, sourceId);
+          const installationBefore = installType === "auto_inject"
+            ? undefined
+            : await options.skillDistributionService.readInstallationState?.(sourceId);
+          if (installType === "auto_inject") {
+            await installAutomatically(options, sourceId, "plugin", compensation, beforeInstall);
+          } else {
+            await beforeInstall?.();
+            await (beforeInstall ? options.skillDistributionService.installPlugin(sourceId, beforeInstall) : options.skillDistributionService.installPlugin(sourceId));
+          }
+          ensureSourceExists(options, sourceId);
+          if (installType === "auto_inject") {
+            options.agentSourceRepository.setConnectionState(sourceId, "plugin_installed", false);
+          } else {
+            const event = await confirmAgentSkillConnection(options, sourceId, "plugin", installationBefore);
+            compensation.record(explicitAction, event);
+            options.agentSourceRepository.setConnectionState(sourceId, "plugin_installed", false);
+          }
+          agentSourceAnalytics.trackPluginInstalled({
+            sourceId,
+            permission,
+            statusBefore,
+            statusAfter: "plugin_installed",
+            installType,
+            success: true,
+            latencyMs: Date.now() - startedAt,
+          });
+        } catch (error) {
+          agentSourceAnalytics.trackPluginInstalled({
+            sourceId,
+            permission,
+            statusBefore,
+            statusAfter: statusBefore,
+            installType,
+            success: false,
+            latencyMs: Date.now() - startedAt,
+            errorCode: errorCodeFromUnknown(error),
+          });
+          throw error;
         }
-        agentSourceAnalytics.trackPluginInstalled({
-          sourceId,
-          permission,
-          statusBefore,
-          statusAfter: "plugin_installed",
-          installType,
-          success: true,
-          latencyMs: Date.now() - startedAt,
-        });
-      } catch (error) {
-        agentSourceAnalytics.trackPluginInstalled({
-          sourceId,
-          permission,
-          statusBefore,
-          statusAfter: statusBefore,
-          installType,
-          success: false,
-          latencyMs: Date.now() - startedAt,
-          errorCode: errorCodeFromUnknown(error),
-        });
-        throw error;
-      }
+        successful = true;
+      } finally { await compensation.settle(explicitAction, successful); }
     },
 
     async isInstalledHookCurrent(sourceId) {
@@ -356,37 +397,41 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
     },
 
     async uninstallPlugin(sourceId, action = {}) {
-      const startedAt = Date.now();
-      const installType = normalizePluginInstallType(action.installType);
-      const statusBefore = readSourceStatus(options, sourceId);
-      const permission = await readScanPermission(options);
+      if (action.installType === "auto_inject") return cleanupAutomaticInstallation(options, sourceId, "plugin", compensation);
+      const explicitAction = await compensation.begin(sourceId, "disconnected", "plugin");
+      let successful = false;
       try {
-        await options.skillDistributionService.uninstallPlugin(sourceId);
-        ensureSourceExists(options, sourceId);
-        options.agentSourceRepository.setConnectionState(sourceId, "not_connected", true);
-        await stopSharingAgentSkills(options, sourceId);
-        agentSourceAnalytics.trackPluginUninstalled({
-          sourceId,
-          permission,
-          statusBefore,
-          statusAfter: "not_connected",
-          installType,
-          success: true,
-          latencyMs: Date.now() - startedAt,
-        });
-      } catch (error) {
-        agentSourceAnalytics.trackPluginUninstalled({
-          sourceId,
-          permission,
-          statusBefore,
-          statusAfter: statusBefore,
-          installType,
-          success: false,
-          latencyMs: Date.now() - startedAt,
-          errorCode: errorCodeFromUnknown(error),
-        });
-        throw error;
-      }
+        const startedAt = Date.now();
+        const installType = normalizePluginInstallType(action.installType);
+        const statusBefore = readSourceStatus(options, sourceId);
+        const permission = await readScanPermission(options);
+        try {
+          const event = await disconnectAgentSkillConnection(options, sourceId, "plugin", compensation, explicitAction);
+          compensation.record(explicitAction, event);
+          agentSourceAnalytics.trackPluginUninstalled({
+            sourceId,
+            permission,
+            statusBefore,
+            statusAfter: "not_connected",
+            installType,
+            success: true,
+            latencyMs: Date.now() - startedAt,
+          });
+        } catch (error) {
+          agentSourceAnalytics.trackPluginUninstalled({
+            sourceId,
+            permission,
+            statusBefore,
+            statusAfter: statusBefore,
+            installType,
+            success: false,
+            latencyMs: Date.now() - startedAt,
+            errorCode: errorCodeFromUnknown(error),
+          });
+          throw error;
+        }
+        successful = true;
+      } finally { await compensation.settle(explicitAction, successful); }
     },
 
     async detectMemoryPluginConflicts() {
@@ -448,6 +493,11 @@ async function listSources(options: CreateAgentSourceServiceOptions): Promise<Ag
     ...builtinViews.map((source) => ({
       ...source,
       ...memoryById.get(source.sourceId),
+      // A failed removal can already have deleted every detectable marker.
+      // Keep the removal action until an explicit cleanup attempt completes.
+      ...(source.status !== "not_connected" && options.agentSourceRepository.isAutoInjectSuppressed(source.sourceId)
+        ? { status: resolvePluginSourceKind(source.sourceId) ? "plugin_installed" : "skill_installed" } as const
+        : {}),
       syncBoundaryAt: memoryById.get(source.sourceId)?.syncBoundaryAt ?? options.agentSourceRepository.getScanWatermark(source.sourceId)?.baselineAt ?? null
     })),
     ...[...persistedById.values()].map((source) =>
@@ -460,16 +510,172 @@ async function listSources(options: CreateAgentSourceServiceOptions): Promise<Ag
   ];
 }
 
-/** Stops sharing a disconnected Agent's skills right away instead of at the next scan. */
-async function stopSharingAgentSkills(options: CreateAgentSourceServiceOptions, sourceId: string): Promise<void> {
+/** An unavailable authority is an error, never permission to write Agent files. */
+async function automaticConnectionAllowed(options: CreateAgentSourceServiceOptions, sourceId: string): Promise<boolean> {
+  const client = options.memoryClient.agentSources;
+  if (!client?.connectionState) throw new Error("Memory connection authority is unavailable. Retry after Memory is updated or reachable.");
+  const { connectionState } = await client.connectionState(sourceId);
+  if (connectionState === "disconnected") return false;
+  // A completed removal can be superseded by an explicit reconnect elsewhere.
+  // Pending local cleanup/notification intent must still be retried locally.
+  return !options.agentSourceRepository.isAutoInjectSuppressed(sourceId)
+    || (connectionState === "connected" && readSourceStatus(options, sourceId) === "not_connected");
+}
+
+async function installAutomatically(
+  options: CreateAgentSourceServiceOptions, sourceId: string, kind: "skill" | "plugin",
+  compensation: ReturnType<typeof createConnectionCompensation>, beforeInstall?: () => void | Promise<void>
+): Promise<void> {
+  await compensation.capture(sourceId);
+  const guard = async () => {
+    await beforeInstall?.();
+    if (!(await automaticConnectionAllowed(options, sourceId))) throw new Error("Automatic integration blocked by disconnection or pending cleanup");
+    await beforeInstall?.();
+  };
+  await guard();
+  let attempted = false;
+  let installError: unknown;
   try {
-    await options.memoryClient.reconcileAgentSkills({ sourceAgentId: sourceId, complete: false, disconnected: true, skills: [] });
-  } catch (error) {
-    console.warn(`[agent-source] connection.skill_sharing_stop_failed ${JSON.stringify({
-      sourceId,
-      reason: error instanceof Error ? error.message : String(error)
-    })}`);
+    const beforeWrite = async () => { await guard(); attempted = true; };
+    if (kind === "plugin") await options.skillDistributionService.installPlugin(sourceId, beforeWrite);
+    else await options.skillDistributionService.install(sourceId, beforeWrite);
+  } catch (error) { installError = error; }
+  if (attempted) {
+    try { await guard(); } catch (authorizationError) {
+      try { await cleanupAutomaticInstallation(options, sourceId, kind, compensation); }
+      catch (cleanupError) { throw new AggregateError([installError, authorizationError, cleanupError].filter(Boolean), "Automatic integration could not be confirmed. Cleanup failed. Retry removal."); }
+      throw new AggregateError([installError, authorizationError].filter(Boolean), "Automatic integration canceled; installed files removed.");
+    }
   }
+  if (installError) throw installError;
+}
+
+/** Rollback rechecks the user's latest action before and after every file operation. */
+async function cleanupAutomaticInstallation(
+  options: CreateAgentSourceServiceOptions, sourceId: string, kind: "skill" | "plugin",
+  compensation: ReturnType<typeof createConnectionCompensation>
+): Promise<void> {
+  const baseline = await compensation.baseline(sourceId);
+  ensureSourceExists(options, sourceId);
+  const actionBeforeCleanup = compensation.currentAction(sourceId);
+  const pendingLocalRemoval = options.agentSourceRepository.isAutoInjectSuppressed(sourceId)
+    && readSourceStatus(options, sourceId) !== "not_connected";
+  options.agentSourceRepository.setConnectionState(sourceId, kind === "plugin" ? "plugin_installed" : "skill_installed", true);
+  await compensation.compensate(sourceId, baseline, {
+    remove: [() => kind === "plugin" ? options.skillDistributionService.uninstallPlugin(sourceId) : options.skillDistributionService.uninstall(sourceId)],
+    install: desiredKind => desiredKind === "plugin" ? options.skillDistributionService.installPlugin(sourceId) : options.skillDistributionService.install(sourceId),
+    commit: async decision => {
+      // A newer local operation already saved its own success or retry state.
+      if (compensation.currentAction(sourceId) !== actionBeforeCleanup && !decision.kind && !decision.event) return;
+      if (decision.kind) options.agentSourceRepository.setConnectionState(sourceId, decision.kind === "plugin" ? "plugin_installed" : "skill_installed", false);
+      else if (!pendingLocalRemoval || decision.event?.state === "disconnected") options.agentSourceRepository.setConnectionState(sourceId, "not_connected", true);
+    }
+  });
+}
+
+async function disconnectAgentSkillConnection(
+  options: CreateAgentSourceServiceOptions,
+  sourceId: string,
+  kind: "skill" | "plugin",
+  compensation: ReturnType<typeof createConnectionCompensation>,
+  action: ConnectionAction
+): Promise<ConnectionEvent | undefined> {
+  let connectionEvent: ConnectionEvent | undefined;
+  let preparationError: Error | undefined;
+  try {
+    ensureSourceExists(options, sourceId);
+    const cleanupStatus = kind === "plugin" || resolvePluginSourceKind(sourceId) ? "plugin_installed" : "skill_installed";
+    options.agentSourceRepository.setConnectionState(sourceId, cleanupStatus, true);
+  } catch (error) {
+    preparationError = error instanceof Error ? error : new Error(String(error));
+  }
+  try {
+    connectionEvent = await notifyAgentSkillConnection(options, sourceId, "disconnected", kind);
+    compensation.record(action, connectionEvent);
+  } catch (error) {
+    if (preparationError) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new AggregateError([preparationError, error],
+        `Agent disconnection could not be confirmed. Cleanup state could not be saved. Retry removal. ${preparationError.message} ${reason}`);
+    }
+    throw error;
+  }
+  if (preparationError) {
+    throw new Error(`Skill sharing is stopped. Cleanup state could not be saved. Retry removal. ${preparationError.message}`,
+      { cause: preparationError });
+  }
+  let saving = false;
+  try {
+    await compensation.compensate(sourceId, compensation.after(action), {
+      remove: [async () => {
+        saving = false;
+        if (kind === "plugin") await options.skillDistributionService.uninstallPlugin(sourceId);
+        else await options.skillDistributionService.uninstall(sourceId);
+      }],
+      install: async desiredKind => {
+        saving = false;
+        if (desiredKind === "plugin") await options.skillDistributionService.installPlugin(sourceId);
+        else await options.skillDistributionService.install(sourceId);
+      },
+      commit: async decision => {
+        if (compensation.currentAction(sourceId) !== action && !decision.kind && !decision.event) return;
+        saving = true;
+        options.agentSourceRepository.setConnectionState(sourceId,
+          decision.kind === "plugin" ? "plugin_installed" : decision.kind === "skill" ? "skill_installed" : "not_connected",
+          !decision.kind);
+        saving = false;
+      }
+    }, action);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(saving
+      ? `Skill sharing is stopped. Cleanup state could not be saved. Retry removal. ${reason}`
+      : `Skill sharing is stopped. Integration cleanup failed. Retry removal. ${reason}`, { cause: error });
+  }
+  return connectionEvent;
+}
+
+async function confirmAgentSkillConnection(
+  options: CreateAgentSourceServiceOptions,
+  sourceId: string,
+  kind: "skill" | "plugin",
+  before: SkillInstallationState | undefined
+): Promise<ConnectionEvent | undefined> {
+  try {
+    return await notifyAgentSkillConnection(options, sourceId, "connected", kind);
+  } catch (error) {
+    if (before && !before.skillInstalled && before.pluginInstalled === false) {
+      try {
+        await notifyAgentSkillConnection(options, sourceId, "disconnected", kind);
+      } catch (compensationError) {
+        const retainedStatus = kind === "plugin" || resolvePluginSourceKind(sourceId) ? "plugin_installed" : "skill_installed";
+        options.agentSourceRepository.setStatus(sourceId, retainedStatus);
+        throw new AggregateError([error, compensationError],
+          "Agent connection result is uncertain. Integration retained so disconnection can be retried.");
+      }
+    }
+    if (before) await options.skillDistributionService.rollbackInstallation?.(sourceId, kind, before);
+    throw error;
+  }
+}
+
+/** Keep explicit connection actions visible to the Memory service. */
+async function notifyAgentSkillConnection(
+  options: CreateAgentSourceServiceOptions,
+  sourceId: string,
+  connectionState: "connected" | "disconnected",
+  connectionKind: "skill" | "plugin"
+): Promise<ConnectionEvent | undefined> {
+  // A failed notification fails the action so an explicit retry can deliver it.
+  const result = await options.memoryClient.reconcileAgentSkills({
+    sourceAgentId: sourceId,
+    complete: false,
+    connectionState,
+    connectionKind,
+    disconnected: connectionState === "disconnected",
+    skills: []
+  });
+  return result?.connectionEvent;
 }
 
 function latestMessageCreatedAt(messages: readonly { createdAt: string }[]): string | null {

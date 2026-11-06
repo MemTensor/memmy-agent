@@ -1,3 +1,4 @@
+import { isImportedSkillObservation } from "../service/import/memory-import-pipeline.js";
 import type { AgentSkillReconcileRequest } from "../service/import/agent-skill-library.js";
 import { assertLocalAgentSourceRequest, isAgentSourceScanPath, routeAgentSourceScan } from "./agent-source-api.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -38,7 +39,6 @@ import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
 import { withoutWorkerSchedulerContext } from "../service/worker/worker-scheduler.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
-import { stableHash } from "../utils/id.js";
 import { resolveTimeZone } from "../utils/time.js";
 import { readDesktopAnalyticsIdentity } from "./desktop-analytics-identity.js";
 import {
@@ -946,14 +946,14 @@ async function routeRequest(
       sourceSkillVersion: typeof request.sourceSkillVersion === "string" ? request.sourceSkillVersion : undefined,
       sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined
     };
-    const idempotency = memoryAddIdempotency(publicRequest, path);
     const result = await trackStoredExternalMemoryAdd(
       pluginRuntimeAnalytics,
       { ...request, layer: publicRequest.layer },
-      () =>
-        service.idempotent("memory.add", idempotency.request, idempotency.fingerprint, () =>
-          service.addMemory(publicRequest)
-        ),
+      () => isImportedSkillObservation(publicRequest)
+        ? service.addMemory(publicRequest)
+        : service.idempotent("memory.add", publicRequest, { path, request: publicRequest }, () =>
+            service.addMemory(publicRequest)
+          ),
     );
     if (!publicRequest.deferProcessing) {
       autoWorker.schedule();
@@ -1193,49 +1193,6 @@ async function routeRequest(
   }
 
   throw new MemoryServiceError("not_found", `${method} ${path} is not registered`);
-}
-
-function memoryAddIdempotency(
-  request: MemoryAddRequest,
-  path: string
-): { request: RequestEnvelope; fingerprint: unknown } {
-  const sourceAgentId = request.sourceAgentId?.trim();
-  const sourceSkillId = request.sourceSkillId?.trim();
-  const sourceContentHash = request.sourceContentHash?.trim();
-  const isAgentSourceSkill =
-    request.layer === "Skill" &&
-    Boolean(request.requestId) &&
-    Boolean(sourceAgentId) &&
-    Boolean(sourceSkillId) &&
-    Boolean(sourceContentHash) &&
-    request.adapterId === `agent-source:${sourceAgentId}`;
-
-  if (!isAgentSourceSkill) {
-    return {
-      request,
-      fingerprint: { path, request }
-    };
-  }
-
-  const identity = {
-    namespace: request.namespace,
-    sourceAgentId,
-    sourceSkillId,
-    sourceContentHash
-  };
-  return {
-    request: {
-      adapterId: request.adapterId,
-      // Version the key so legacy full-request fingerprints cannot keep
-      // conflicting after volatile Skill metadata changes.
-      requestId: `agent-source-skill:v2:${stableHash(identity)}`,
-      namespace: request.namespace
-    },
-    fingerprint: {
-      path,
-      skill: identity
-    }
-  };
 }
 
 function publicOpenSessionResponse(result: unknown): Record<string, unknown> {
@@ -1631,9 +1588,9 @@ function agentSkillReconcileRequest(request: RequestEnvelope & Record<string, un
     }
     return value as Record<string, unknown>[];
   };
-  const required = (item: Record<string, unknown>, key: string, field: string): string => {
+  const required = (item: Record<string, unknown>, key: string, field: string, allowEmpty = false): string => {
     const value = text(item[key]);
-    if (!value) throw new MemoryServiceError("invalid_argument", `agent-skills.reconcile ${field}.${key} is required`);
+    if (value === undefined || (!allowEmpty && value.length === 0)) throw new MemoryServiceError("invalid_argument", `agent-skills.reconcile ${field}.${key} is required`);
     return value;
   };
   const sourceAgentId = text(request.sourceAgentId);
@@ -1646,18 +1603,22 @@ function agentSkillReconcileRequest(request: RequestEnvelope & Record<string, un
     sourceAgentId,
     complete: request.complete === true,
     disconnected: request.disconnected === true,
+    connectionState: request.connectionState === "connected" || request.connectionState === "disconnected" ? request.connectionState : undefined,
+    connectionKind: request.connectionKind === "skill" || request.connectionKind === "plugin" ? request.connectionKind : undefined,
     registrationsComplete: request.registrationsComplete === true,
     skills: records(request.skills, "skills").map((item) => ({
       sourceSkillId: required(item, "sourceSkillId", "skills"),
       sourceSkillPath: required(item, "sourceSkillPath", "skills"),
       title: required(item, "title", "skills"),
-      content: required(item, "content", "skills"),
+      content: required(item, "content", "skills", true),
       contentHash: required(item, "contentHash", "skills"),
       modifiedAt: required(item, "modifiedAt", "skills"),
       version: text(item.version),
       description: text(item.description),
       disableModelInvocation: flag(item.disableModelInvocation),
       allowImplicitInvocation: flag(item.allowImplicitInvocation),
+      policyError: text(item.policyError),
+      frontmatterError: text(item.frontmatterError),
       hasSupportingFiles: flag(item.hasSupportingFiles)
     })),
     ...(request.registrations === undefined ? {} : {

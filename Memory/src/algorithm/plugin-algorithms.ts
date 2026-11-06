@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { isImportedSkill } from "../storage/imported-skill.js";
 import type {
   MemoryKind,
   MemoryLayer,
@@ -2043,6 +2045,8 @@ const CAPTURE_KEYWORD_TAGS: ReadonlyArray<{ re: RegExp; tag: string }> = [
 
 export interface CompiledRetrievalQuery {
   text: string;
+  /** Literal imported-Skill terms, independent of semantic query rewriting. */
+  importedSkillTerms?: string[];
   tags: string[];
   structuralFragments: string[];
   ftsMatch: string | null;
@@ -3541,7 +3545,12 @@ export const RETRIEVAL_DOCUMENT_VERSION = 2;
 export function retrievalDocumentForMemory(memory: MemoryRow): string {
   const skill = skillMetaFromMemory(memory);
   if (skill) {
-    const shortGuide = [skill.retrievalBlurb, skill.triggerContext].filter(Boolean);
+    // The real-query gate did not approve description-only imported retrieval.
+    // Keep source-body evidence in every canonical retrieval channel; descriptions
+    // remain available for summaries/injection. Generated Skills keep their blurb.
+    const shortGuide = isImportedSkill(memory)
+      ? []
+      : [skill.retrievalBlurb, skill.triggerContext].filter(Boolean);
     return [skill.name, ...(shortGuide.length > 0 ? shortGuide : [skill.invocationGuide]), memory.tags.join(" ")]
       .filter(Boolean)
       .join("\n");
@@ -3565,7 +3574,12 @@ export function retrievalDocumentForMemory(memory: MemoryRow): string {
 }
 
 export function retrievalDocumentSourceHash(memory: MemoryRow): string {
-  return stableHash(retrievalDocumentForMemory(memory));
+  const document = retrievalDocumentForMemory(memory);
+  // Imported documents have no length cap. Hash every rendered byte while
+  // preserving stableHash's exact result for documents that were never truncated.
+  return isImportedSkill(memory)
+    ? createHash("sha256").update(JSON.stringify(document)).digest("hex")
+    : stableHash(document);
 }
 
 export function retrievalDocumentIsCurrent(memory: MemoryRow): boolean {
@@ -5931,6 +5945,20 @@ function structuralOverlap(fragments: string[], memory: MemoryRow, text: string)
   return hits === 0 ? 0 : Math.min(1, 0.9 + 0.1 * ((hits - 1) / Math.max(1, fragments.length - 1)));
 }
 
+/** Imported bodies and metadata share one bounded literal coverage denominator. */
+export function importedSkillBodyPatternTerms(query: CompiledRetrievalQuery): string[] {
+  return query.importedSkillTerms ?? extractImportedSkillTerms([query.text, ...query.keywords].join(" "));
+}
+
+function extractImportedSkillTerms(text: string): string[] {
+  const tokens = text.match(/(?:--|@)?[A-Za-z0-9_%](?:[A-Za-z0-9_./:@%=-]*[A-Za-z0-9_%])?/g) ?? [];
+  const terms = tokens.map(term => term.toLowerCase())
+    .filter(term => term.length >= 2 && !GENERIC_STOP_WORDS.has(term));
+  const identifiers = terms.filter(term => /[._/:@%=-]/.test(term));
+  const cjk = extractMemoryPatternTerms(text).filter(term => /[\u3400-\u9fff]/.test(term));
+  return [...new Set([...identifiers, ...terms, ...cjk])].slice(0, 16);
+}
+
 export function compileRetrievalQuery(
   raw: string,
   extract?: RetrievalQueryExtract | null,
@@ -5941,6 +5969,7 @@ export function compileRetrievalQuery(
 
 function finalizeRetrievalQuery(raw: string, extract?: RetrievalQueryExtract | null): CompiledRetrievalQuery {
   const normalized = normalizeRetrievalExtract(raw, extract);
+  const importedSkillTerms = extractImportedSkillTerms([raw, ...(extract?.keywords ?? []), normalized.queryText].join(" "));
   const trimmed = normalized.queryText;
   const keywords = normalized.keywords;
   const keywordText = keywords.join(" ");
@@ -5954,6 +5983,7 @@ function finalizeRetrievalQuery(raw: string, extract?: RetrievalQueryExtract | n
   if (trimmed.length <= MAX_QUERY_CHARS) {
     return {
       text: trimmed,
+      importedSkillTerms,
       tags: extractTagsFromText(trimmed),
       structuralFragments: extractErrorSignatures({
         toolCalls: [],
@@ -5971,6 +6001,7 @@ function finalizeRetrievalQuery(raw: string, extract?: RetrievalQueryExtract | n
   const text = `${trimmed.slice(0, half)}\n...[truncated]...\n${trimmed.slice(trimmed.length - half)}`;
   return {
     text,
+    importedSkillTerms,
     tags: extractTagsFromText(trimmed),
     structuralFragments: extractErrorSignatures({
       toolCalls: [],

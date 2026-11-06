@@ -46,12 +46,36 @@ describe("parseSkillFrontmatter", () => {
 
   it("falls back to top-level key lines when the YAML is invalid", () => {
     const parsed = parseSkillFrontmatter("---\nname: context-degradation\ndescription: Use when: the context grows\nversion: 1.0.0\n---\nBody\n");
-    expect(parsed.error).toBeTruthy();
+    expect(parsed.error).toBeUndefined();
     expect(parsed.data).toMatchObject({
       name: "context-degradation",
       description: "Use when: the context grows",
       version: "1.0.0"
     });
+  });
+
+  it("recovers closed plain frontmatter with a colon description and a trusted invocation flag", () => {
+    const parsed = parseSkillFrontmatter("---\nname: \"quoted-name\"\ndescription: Use when: diagnosing sqlite locks\ndisable-model-invocation: true # manual only\n---\nBody\n");
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.data).toMatchObject({ name: "quoted-name", description: "Use when: diagnosing sqlite locks", "disable-model-invocation": "true" });
+  });
+
+  it.each([
+    "---\nname: sample\ndescription: \"unclosed\n---\nBody",
+    "---\nname: sample\ndescription: Use when: debugging\nmetadata:\n  mode: unknown\n---\nBody",
+    "---\nname: sample\ndescription: Use when: debugging\nmetadata: mode: unknown\n---\nBody",
+    "---\nname: sample\ndescription: Use when: debugging\ndisable-model-invocation: true\ndisable-model-invocation: false\n---\nBody",
+    "---\nname: sample\ndisable-model-invocation: sometimes\n---\nBody",
+    "---\n- disable-model-invocation: true\n---\nBody",
+    "---\nname: sample\ndisable-model-invocation: true\nBody"
+  ])("marks untrustworthy invocation metadata as unknown", (content) => {
+    expect(parseSkillFrontmatter(content).error).toBeTruthy();
+  });
+
+  it("retains valid quoted, nested and multiline YAML metadata", () => {
+    const parsed = parseSkillFrontmatter("---\nname: sample\ndescription: |\n  Use when: debugging\n  Line two\ndisable-model-invocation: false\nmetadata:\n  values: [one, two]\n---\nBody");
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.data).toMatchObject({ description: "Use when: debugging\nLine two\n", metadata: { values: ["one", "two"] } });
   });
 
   it("treats a file without frontmatter as empty", () => {
@@ -88,9 +112,9 @@ describe("readAgentSkillInventory", () => {
     });
   });
 
-  it("keeps a skill whose frontmatter or policy cannot be parsed and records why", async () => {
+  it("keeps complete identities while reporting malformed frontmatter and policy", async () => {
     const root = tempRoot();
-    writeSkill(root, "broken", "---\nname: broken\ndescription: Use when: it breaks\n---\nBody\n");
+    writeSkill(root, "broken", "---\nname: broken\ndescription: Use when: it breaks\ndisable-model-invocation: sometimes\n---\nBody\n");
     writeSkill(root, "bad-policy", "---\nname: bad-policy\n---\nBody\n");
     mkdirSync(join(root, "bad-policy/agents"), { recursive: true });
     writeFileSync(join(root, "bad-policy/agents/openai.yaml"), "policy: [unclosed\n");
@@ -98,11 +122,47 @@ describe("readAgentSkillInventory", () => {
     const inventory = await readAgentSkillInventory(root);
 
     expect(inventory.complete).toBe(true);
+    expect(inventory.errors).toEqual([
+      expect.objectContaining({ path: join(root, "bad-policy/agents/openai.yaml") }),
+      expect.objectContaining({ path: join(root, "broken/SKILL.md") })
+    ]);
     expect(inventory.items.map((item) => item.name)).toEqual(["bad-policy", "broken"]);
     expect(inventory.items[0]?.policyError).toBeTruthy();
     expect(inventory.items[0]).not.toHaveProperty("allowImplicitInvocation");
     expect(inventory.items[1]?.frontmatterError).toBeTruthy();
-    expect(inventory.items[1]?.description).toBe("Use when: it breaks");
+  });
+
+  it("keeps the skill identity when its invocation policy cannot be read", async () => {
+    if (process.getuid?.() === 0) return;
+    const root = tempRoot();
+    writeSkill(root, "manual-only", "---\nname: manual-only\n---\nBody\n");
+    const policyPath = join(root, "manual-only/agents/openai.yaml");
+    mkdirSync(join(policyPath, ".."), { recursive: true });
+    writeFileSync(policyPath, "policy:\n  allow_implicit_invocation: false\n");
+    chmodSync(policyPath, 0o000);
+    try {
+      const inventory = await readAgentSkillInventory(root);
+      expect(inventory.complete).toBe(true);
+      expect(inventory.errors).toEqual([expect.objectContaining({ path: policyPath })]);
+      expect(inventory.items).toEqual([expect.objectContaining({ sourceSkillId: "manual-only", policyError: expect.any(String) })]);
+    } finally {
+      chmodSync(policyPath, 0o644);
+    }
+  });
+
+  it("reports an invalid invocation boolean without treating an enumerated skill as missing", async () => {
+    const root = tempRoot();
+    writeSkill(root, "bad-flag", "---\nname: bad-flag\ndisable-model-invocation: sometimes\n---\nBody\n");
+    writeSkill(root, "bad-policy", "---\nname: bad-policy\n---\nBody\n");
+    mkdirSync(join(root, "bad-policy/agents"), { recursive: true });
+    writeFileSync(join(root, "bad-policy/agents/openai.yaml"), "policy:\n  allow_implicit_invocation: sometimes\n");
+    const inventory = await readAgentSkillInventory(root);
+    expect(inventory.complete).toBe(true);
+    expect(inventory.items).toEqual([
+      expect.objectContaining({ sourceSkillId: "bad-flag", frontmatterError: expect.any(String) }),
+      expect.objectContaining({ sourceSkillId: "bad-policy", policyError: expect.any(String) })
+    ]);
+    expect(inventory.errors).toHaveLength(2);
   });
 
   it("treats a missing root as an empty, complete inventory", async () => {
@@ -143,6 +203,19 @@ describe("readAgentSkillInventory", () => {
 });
 
 describe("plugin skill inventories", () => {
+  it("preserves complete nested plugin-relative skill identities", async () => {
+    const home = tempRoot();
+    for (const [group, name] of [["group-a", "alpha-one"], ["group-b", "alpha-two"]]) {
+      writeSkill(home, `plugins/cache/market/multi/1.0/skills/${group}/same-folder`, `---\nname: ${name}\n---\nSynthetic body`);
+    }
+    writeFileSync(join(home, "config.toml"), '[plugins."multi@market"]\nenabled = true\n');
+    const inventory = await readCodexPluginSkills(home);
+    expect(inventory.complete).toBe(true);
+    expect(inventory.items.map(item => (item as { sourceSkillId?: string }).sourceSkillId)).toEqual([
+      "plugin:multi@market/group-a/same-folder", "plugin:multi@market/group-b/same-folder"
+    ]);
+  });
+
   it("lists skills of enabled Claude Code plugins only", async () => {
     const home = tempRoot();
     const enabledPath = join(home, "plugins/cache/market/superpowers/6.0.3");
@@ -165,7 +238,7 @@ describe("plugin skill inventories", () => {
     expect(inventory).toEqual({
       complete: true,
       errors: [],
-      items: [{ pluginId: "superpowers@market", name: "brainstorming", sourceSkillPath: join(enabledPath, "skills/brainstorming/SKILL.md") }]
+      items: [{ sourceSkillId: "plugin:superpowers@market/brainstorming", pluginId: "superpowers@market", name: "brainstorming", sourceSkillPath: join(enabledPath, "skills/brainstorming/SKILL.md") }]
     });
   });
 

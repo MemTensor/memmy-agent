@@ -23,7 +23,7 @@ export interface AgentSkillInventoryItem {
   hasSupportingFiles: boolean;
   /** Set when the frontmatter is not valid YAML; fields were read line by line. */
   frontmatterError?: string;
-  /** Set when `agents/openai.yaml` could not be read; the policy is treated as undeclared. */
+  /** Set when `agents/openai.yaml` could not be read or parsed; invocation policy is unknown. */
   policyError?: string;
 }
 
@@ -35,7 +35,8 @@ export interface AgentSkillInventoryError {
 /**
  * `complete` is true only when every directory and SKILL.md under the root was
  * read. Callers must not treat a skill missing from an incomplete inventory as
- * removed.
+ * removed. Metadata errors are reported separately while their identities
+ * remain enumerated.
  */
 export interface AgentSkillInventory {
   complete: boolean;
@@ -61,7 +62,8 @@ export interface SkillFrontmatter {
  * YAML failsafe schema so scalars stay as written (`version: 1.0` stays
  * "1.0"). Agents accept frontmatter that is not strict YAML, such as an
  * unquoted description containing ": "; when YAML parsing fails the top-level
- * `key: value` lines are still read and `error` says why.
+ * `key: value` scalar lines are accepted when their invocation flag is valid.
+ * Other malformed metadata retains an error so callers can restrict that skill.
  */
 export function parseSkillFrontmatter(content: string): SkillFrontmatter {
   const text = content.replace(/^\uFEFF/, "");
@@ -70,24 +72,50 @@ export function parseSkillFrontmatter(content: string): SkillFrontmatter {
   if (end < 0) return { data: {}, error: "frontmatter is not closed" };
   const firstLineEnd = text.search(/\r?\n/);
   const block = text.slice(firstLineEnd + 1, end + 1);
+  let data: Record<string, unknown> = {};
+  let error: string | undefined;
   try {
     const parsed: unknown = parseYaml(block, { schema: "failsafe" });
-    return { data: isRecord(parsed) ? parsed : {} };
-  } catch (error) {
-    return { data: parseFrontmatterLines(block), error: errorReason(error) };
+    if (isRecord(parsed)) data = parsed;
+    else if (parsed !== null && parsed !== undefined) error = "frontmatter must be a mapping";
+  } catch (parseError) {
+    const fallback = parseFrontmatterLines(block);
+    data = fallback.data;
+    if (!fallback.trusted) error = errorReason(parseError);
   }
+  if (Object.hasOwn(data, "disable-model-invocation") && frontmatterBoolean(data, "disable-model-invocation") === undefined) {
+    error = "disable-model-invocation must be true or false";
+  }
+  return { data, ...(error ? { error } : {}) };
 }
 
-function parseFrontmatterLines(block: string): Record<string, unknown> {
+function parseFrontmatterLines(block: string): { data: Record<string, unknown>; trusted: boolean } {
   const data: Record<string, unknown> = {};
+  let trusted = true;
   for (const line of block.split(/\r?\n/)) {
+    if (/^\s*(?:#|$)/.test(line)) continue;
     const match = /^([A-Za-z0-9_-]+):[ \t]*(.*?)[ \t]*$/.exec(line);
-    if (!match || match[2] === "") continue;
+    if (!match) { trusted = false; continue; }
+    const key = match[1]!;
     const value = match[2]!;
-    const quoted = /^(["'])(.*)\1$/.exec(value);
-    data[match[1]!] = quoted ? quoted[2] : value;
+    if (Object.hasOwn(data, key)) trusted = false;
+    if (/^["']/.test(value)) {
+      try {
+        const parsed: unknown = parseYaml(value, { schema: "failsafe" });
+        if (typeof parsed === "string") data[key] = parsed;
+        else trusted = false;
+      } catch {
+        trusted = false;
+      }
+    } else {
+      // Recovery is limited to top-level scalar lines, including colon descriptions.
+      if (/^(?:[\[\]{}&*!|>%@`]|[-?:](?:\s|$))/.test(value)) trusted = false;
+      const scalar = value.replace(/[ \t]+#.*$/, "").trimEnd();
+      if (key !== "description" && /:\s/.test(scalar)) trusted = false;
+      data[key] = scalar;
+    }
   }
-  return data;
+  return { data, trusted };
 }
 
 export function frontmatterString(data: Record<string, unknown>, key: string): string | undefined {
@@ -98,8 +126,8 @@ export function frontmatterString(data: Record<string, unknown>, key: string): s
 export function frontmatterBoolean(data: Record<string, unknown>, key: string): boolean | undefined {
   const value = data[key];
   if (typeof value === "boolean") return value;
-  if (value === "true") return true;
-  if (value === "false") return false;
+  if (typeof value === "string" && value.toLowerCase() === "true") return true;
+  if (typeof value === "string" && value.toLowerCase() === "false") return false;
   return undefined;
 }
 
@@ -111,16 +139,21 @@ export async function readAgentSkillInventory(
   const checkpoint = options.checkpoint ?? (async () => {});
   const errors: AgentSkillInventoryError[] = [];
   const files = await findSkillFiles(skillsRoot, checkpoint, errors);
+  let complete = errors.length === 0;
   const items: AgentSkillInventoryItem[] = [];
   for (const filePath of files) {
     await checkpoint();
     try {
-      items.push(await readSkillItem(skillsRoot, filePath));
+      const item = await readSkillItem(skillsRoot, filePath);
+      items.push(item);
+      if (item.frontmatterError) errors.push({ path: filePath, reason: item.frontmatterError });
+      if (item.policyError) errors.push({ path: join(dirname(filePath), "agents", "openai.yaml"), reason: item.policyError });
     } catch (error) {
+      complete = false;
       errors.push({ path: filePath, reason: errorReason(error) });
     }
   }
-  return { complete: errors.length === 0, items, errors };
+  return { complete, items, errors };
 }
 
 async function readSkillItem(skillsRoot: string, filePath: string): Promise<AgentSkillInventoryItem> {
@@ -162,8 +195,14 @@ async function readOpenAiImplicitInvocation(skillDir: string): Promise<boolean |
     throw error;
   }
   const parsed: unknown = parseYaml(text, { schema: "failsafe" });
-  const policy = isRecord(parsed) && isRecord(parsed.policy) ? parsed.policy : undefined;
-  return policy ? frontmatterBoolean(policy, "allow_implicit_invocation") : undefined;
+  if (parsed === null || parsed === undefined) return undefined;
+  if (!isRecord(parsed)) throw new Error("openai.yaml must be a mapping");
+  if (!Object.hasOwn(parsed, "policy")) return undefined;
+  if (!isRecord(parsed.policy)) throw new Error("openai.yaml policy must be a mapping");
+  if (!Object.hasOwn(parsed.policy, "allow_implicit_invocation")) return undefined;
+  const allowImplicitInvocation = frontmatterBoolean(parsed.policy, "allow_implicit_invocation");
+  if (allowImplicitInvocation === undefined) throw new Error("allow_implicit_invocation must be true or false");
+  return allowImplicitInvocation;
 }
 
 async function findSkillFiles(
@@ -236,6 +275,8 @@ export function sharedSkillRootsForAgent(agentId: string, homeDirectory: string)
 
 /** A skill shipped inside an enabled agent plugin. Only its identity is read, never its body. */
 export interface PluginSkillEntry {
+  /** Stable plugin id plus the complete directory relative to its skills root. */
+  sourceSkillId: string;
   pluginId: string;
   name: string;
   sourceSkillPath: string;
@@ -341,7 +382,8 @@ async function readPluginSkillRoots(
         errors.push({ path: filePath, reason: errorReason(error) });
         continue;
       }
-      items.push({ pluginId, name: name ?? basename(dirname(filePath)), sourceSkillPath: filePath });
+      items.push({ sourceSkillId: `plugin:${pluginId}/${relative(root, dirname(filePath)).replaceAll("\\", "/")}`,
+        pluginId, name: name ?? basename(dirname(filePath)), sourceSkillPath: filePath });
     }
   }
   return { complete: errors.length === 0, items, errors };

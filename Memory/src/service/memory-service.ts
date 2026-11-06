@@ -573,6 +573,8 @@ export class MemoryService {
       titleFromImportTrace,
       memoryAddTags,
       memoryAddKey,
+      repairManualSkillsForSource: (sourceAgentId, at) => this.agentSkills.repairLegacyManualSkills(at, 200, sourceAgentId),
+      upsertImportedSkill: (memory, at, options) => this.agentSkills.upsertMemoryAdd(memory, at, options),
       toolCallsFromUnknown,
       renderTraceMemoryValue,
       buildMemory: (input) => this.buildMemory(input as Parameters<MemoryService["buildMemory"]>[0]),
@@ -1442,15 +1444,19 @@ export class MemoryService {
       return scopedRun();
     }
     const requestHash = stableHash({ operation, fingerprint });
-    const existing = this.repos.runtime.getIdempotency(idempotencyKey);
+    const currentAgentId = this.resolveContext(request).namespace.source;
+    const existing = this.repos.runtime.getIdempotency(idempotencyKey, currentAgentId);
     if (existing) {
       if (existing.requestHash !== requestHash) {
         throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
       }
       return withDuplicateFlag(existing.response) as T;
     }
-    const response = await scopedRun();
-    this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response);
+    const result = await scopedRun();
+    const response = operation === "memory.search" || operation === "turn.start"
+      ? this.retrieval.refreshImportedSkillResponse(result, request, operation === "turn.start" ? "turn_start" : "search")
+      : this.repos.runtime.sanitizeIdempotencyResponse(idempotencyKey, result, currentAgentId) as T;
+    this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response, nowIso(), currentAgentId);
     return response;
   }
 
@@ -1774,7 +1780,8 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
+    const response = await this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
+    return this.retrieval.refreshImportedSkillResponse(response, request, "turn_start");
   }
 
   private async acceptCapture<T>(execute: () => Promise<T>): Promise<T> {
@@ -1945,15 +1952,27 @@ export class MemoryService {
     return this.agentSkills.isDisconnected(sourceAgentId);
   }
 
+  agentSkillConnectionState(sourceAgentId: string): "connected" | "disconnected" | undefined {
+    return this.agentSkills.connectionState(sourceAgentId);
+  }
+
+  agentSkillConnectionEvent(sourceAgentId: string) {
+    return this.agentSkills.connectionEvent(sourceAgentId);
+  }
+
   /** Brings the imported Skills of one source Agent in line with one scan of that Agent. */
   reconcileAgentSkills(request: AgentSkillReconcileRequest): AgentSkillReconcileResult {
-    this.assertMemoryAddEnabled();
     if (typeof request.sourceAgentId !== "string" || !request.sourceAgentId.trim()) {
       throw new MemoryServiceError("invalid_argument", "agent skill reconcile requires sourceAgentId");
     }
     if (!Array.isArray(request.skills)) {
       throw new MemoryServiceError("invalid_argument", "agent skill reconcile requires skills");
     }
+    // Connection authorization remains manageable while memory capture is disabled.
+    const connectionOnly = request.complete === false && request.skills.length === 0
+      && request.registrations === undefined && request.registrationsComplete !== true
+      && (request.connectionState === "connected" || request.connectionState === "disconnected" || request.disconnected === true);
+    if (!connectionOnly) this.assertMemoryAddEnabled();
     return this.agentSkills.reconcile(request);
   }
 
@@ -2895,12 +2914,11 @@ export class MemoryService {
       // snapshot moves the project versions too, or clients keep using their cached context.
       const l3Unit = row ? l3FieldSnapshotUnitKey(memory) : null;
       if (l3Unit) this.repos.l3Field.refreshProjectContexts(l3Unit, at);
-      return row;
+      return row && isImportedSkill(row) ? this.agentSkills.markUserArchived(row, at) : row;
     });
     if (!archived) {
       throw new MemoryServiceError("not_found", `memory not found: ${id}`);
     }
-    if (isImportedSkill(archived)) archived = this.agentSkills.markUserArchived(archived, at);
     const changeSeq = this.repos.runtime.appendChange({
       memoryId: archived.id,
       namespaceId: namespaceIdFromMemory(archived),
@@ -3079,71 +3097,74 @@ export class MemoryService {
     } else {
       this.assertMemoryInScope(memory, request.namespace);
     }
-    const kind = kindFromMemory(memory);
-    const at = nowIso();
     const importedSkill = isImportedSkill(memory);
-    if (importedSkill) this.agentSkills.stripBeforeDelete(memory, at);
-    const deletedL3Unit = l3FieldSnapshotUnitKey(memory);
-    const deleted = this.repos.transaction(() => {
-      const removed = strictV2WorldModel
-        ? this.repos.l3WorldModels.deleteScopeMemory(memory.id, at)?.deleted
-        : this.repos.memories.softDelete(memory.id, at);
-      // Deleting a new-L3 snapshot resets its unit: what it knew goes, later sessions start it afresh.
-      // Same transaction, so a failure never leaves the unit's items behind a deleted snapshot.
-      if (removed && deletedL3Unit) this.repos.l3Field.markUnitDeleted(deletedL3Unit, at);
-      return removed;
-    });
-    if (!deleted) {
-      throw new MemoryServiceError("not_found", `memory not found: ${id}`);
-    }
-    if (kind === "observed_activity") {
-      this.retractExternalEvidenceSkills(deleted.id, at);
-      const origin = memory.properties.internal_info.external_evidence;
-      if (isRecord(origin) && typeof origin.source === "string"
-        && typeof origin.sourceRecordId === "string") {
-        this.retractDependentExternalEvidence(deleted, origin.source, origin.sourceRecordId, at);
+    const remove = () => {
+      const kind = kindFromMemory(memory);
+      const at = nowIso();
+      if (importedSkill) this.agentSkills.stripBeforeDelete(memory, at);
+      const deletedL3Unit = l3FieldSnapshotUnitKey(memory);
+      const deleted = this.repos.transaction(() => {
+        const removed = strictV2WorldModel
+          ? this.repos.l3WorldModels.deleteScopeMemory(memory.id, at)?.deleted
+          : this.repos.memories.softDelete(memory.id, at);
+        // Deleting a new-L3 snapshot resets its unit: what it knew goes, later sessions start it afresh.
+        // Same transaction, so a failure never leaves the unit's items behind a deleted snapshot.
+        if (removed && deletedL3Unit) this.repos.l3Field.markUnitDeleted(deletedL3Unit, at);
+        return removed;
+      });
+      if (!deleted) {
+        throw new MemoryServiceError("not_found", `memory not found: ${id}`);
       }
-    }
-    const changeSeq = this.repos.runtime.appendChange({
-      memoryId: deleted.id,
-      namespaceId: namespaceIdFromMemory(deleted),
-      kind: kindFromMemory(deleted),
-      op: "deleted",
-      entityId: deleted.id,
-      userId: deleted.userId,
-      changeType: "delete",
-      version: deleted.version,
-      before: memory,
-      after: deleted,
-      source: "panel.delete",
-      createdAt: deleted.updatedAt
-    });
-    const audit = this.repos.runtime.insertAudit({
-      userId: deleted.userId,
-      sessionId: deleted.sessionId,
-      actor: request.namespace ? { ...request.namespace } : {},
-      action: "delete",
-      targetKind: kindFromMemory(deleted),
-      targetId: deleted.id,
-      before: memory,
-      after: deleted,
-      meta: { reason: request.reason },
-      createdAt: deleted.updatedAt
-    });
-    // A deleted imported skill keeps only its source identity; its body is
-    // also removed from the log and queue copies written above or earlier.
-    if (importedSkill) this.repos.runtime.scrubImportedSkillCopies(deleted.id);
-    this.evolutionJobs.invalidateMemoryDependencies(memory, at);
-    return {
-      ok: true,
-      id: deleted.id,
-      kind: kindFromMemory(deleted),
-      status: "deleted",
-      changeSeq,
-      syncCursor: this.encodeChangeCursor(changeSeq, request.namespace ?? namespaceForMemory(deleted)),
-      auditId: audit.id,
-      serverTime: nowIso()
+      if (kind === "observed_activity") {
+        this.retractExternalEvidenceSkills(deleted.id, at);
+        const origin = memory.properties.internal_info.external_evidence;
+        if (isRecord(origin) && typeof origin.source === "string"
+          && typeof origin.sourceRecordId === "string") {
+          this.retractDependentExternalEvidence(deleted, origin.source, origin.sourceRecordId, at);
+        }
+      }
+      const changeSeq = this.repos.runtime.appendChange({
+        memoryId: deleted.id,
+        namespaceId: namespaceIdFromMemory(deleted),
+        kind: kindFromMemory(deleted),
+        op: "deleted",
+        entityId: deleted.id,
+        userId: deleted.userId,
+        changeType: "delete",
+        version: deleted.version,
+        before: memory,
+        after: deleted,
+        source: "panel.delete",
+        createdAt: deleted.updatedAt
+      });
+      const audit = this.repos.runtime.insertAudit({
+        userId: deleted.userId,
+        sessionId: deleted.sessionId,
+        actor: request.namespace ? { ...request.namespace } : {},
+        action: "delete",
+        targetKind: kindFromMemory(deleted),
+        targetId: deleted.id,
+        before: memory,
+        after: deleted,
+        meta: { reason: request.reason },
+        createdAt: deleted.updatedAt
+      });
+      // A deleted imported skill keeps only its source identity; its body is
+      // also removed from the log and queue copies written above or earlier.
+      if (importedSkill) this.repos.runtime.scrubImportedSkillCopies(deleted.id);
+      this.evolutionJobs.invalidateMemoryDependencies(memory, at);
+      return {
+        ok: true as const,
+        id: deleted.id,
+        kind: kindFromMemory(deleted),
+        status: "deleted" as const,
+        changeSeq,
+        syncCursor: this.encodeChangeCursor(changeSeq, request.namespace ?? namespaceForMemory(deleted)),
+        auditId: audit.id,
+        serverTime: nowIso()
+      };
     };
+    return importedSkill ? this.repos.transaction(remove) : remove();
   }
 
   recallEvidence(queryId: string, request: RequestEnvelope = {}): {
@@ -3744,15 +3765,17 @@ export class MemoryService {
   }
 
   reconcileWorkerStartup(limit = 10000): ReturnType<WorkerRunner["reconcileWorkerStartup"]> {
-    if (this.memoryAddEnabled()) {
-      try {
-        const migration = this.agentSkills.migrateLegacyRecords(nowIso(), limit);
-        if (migration.migrated > 0) serviceLogger.info("agent_skill.legacy_migrated", migration);
+    try {
+      // Existing source restrictions and deleted bodies still need repair when capture is disabled.
+      const migration = this.agentSkills.migrateLegacyRecords(nowIso(), limit);
+      this.repos.runtime.repairImportedSkillResponseCopies();
+      if (migration.migrated > 0) serviceLogger.info("agent_skill.legacy_migrated", migration);
+      if (this.memoryAddEnabled()) {
         const upgraded = this.agentSkills.upgradeRetrievalRepresentation(limit);
         if (upgraded > 0) serviceLogger.info("agent_skill.retrieval_text_upgraded", { upgraded });
-      } catch (error) {
-        serviceLogger.error("agent_skill.legacy_migration_failed", memoryErrorFields(error));
       }
+    } catch (error) {
+      serviceLogger.error("agent_skill.legacy_migration_failed", memoryErrorFields(error));
     }
     const result = this.workerRunner.reconcileWorkerStartup(limit);
     this.reconcileAutomaticHistorySkills(nowIso(), limit);

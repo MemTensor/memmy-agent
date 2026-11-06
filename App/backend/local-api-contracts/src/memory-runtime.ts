@@ -600,13 +600,15 @@ export const AgentSkillReconcileSkillSchema = z.object({
   sourceSkillId: NonEmptyStringSchema,
   sourceSkillPath: NonEmptyStringSchema,
   title: NonEmptyStringSchema,
-  content: NonEmptyStringSchema,
+  content: z.string(),
   contentHash: NonEmptyStringSchema,
   modifiedAt: IsoTimeSchema,
   version: z.string().optional(),
   description: z.string().optional(),
   disableModelInvocation: z.boolean().optional(),
   allowImplicitInvocation: z.boolean().optional(),
+  policyError: z.string().optional(),
+  frontmatterError: z.string().optional(),
   hasSupportingFiles: z.boolean().optional()
 });
 
@@ -619,10 +621,19 @@ export const AgentSkillReconcileRegistrationSchema = z.object({
 });
 
 /** Definition for agent skill reconcile input: everything one scan found for one source Agent. */
+export const AgentSkillConnectionEventSchema = z.object({
+  id: NonEmptyStringSchema,
+  revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  state: z.enum(["connected", "disconnected"]),
+  kind: z.enum(["skill", "plugin"]).optional()
+});
+
 export const AgentSkillReconcileInputSchema = RuntimeRequestFieldsSchema.extend({
   sourceAgentId: NonEmptyStringSchema,
   complete: z.boolean(),
   disconnected: z.boolean().optional(),
+  connectionState: z.enum(["connected", "disconnected"]).optional(),
+  connectionKind: z.enum(["skill", "plugin"]).optional(),
   skills: z.array(AgentSkillReconcileSkillSchema),
   registrations: z.array(AgentSkillReconcileRegistrationSchema).optional(),
   registrationsComplete: z.boolean().optional()
@@ -632,6 +643,7 @@ export type AgentSkillReconcileInput = z.infer<typeof AgentSkillReconcileInputSc
 /** Schema for agent skill reconcile output. */
 export const AgentSkillReconcileOutputSchema = z.object({
   sourceAgentId: NonEmptyStringSchema,
+  connectionEvent: AgentSkillConnectionEventSchema.optional(),
   skills: z.array(z.object({
     sourceSkillId: NonEmptyStringSchema,
     outcome: z.enum(["created", "updated", "unchanged", "deleted_by_user", "failed"]),

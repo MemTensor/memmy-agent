@@ -1,3 +1,4 @@
+import { createConnectionCompensation, type ConnectionAction, type ConnectionEvent } from "@memmy/agent-source-core";
 import type { AgentSkillReconcileSkill } from "../service/import/agent-skill-library.js";
 import { nextScanGeneration } from "./scan-version.js";
 import { matchesScanExecution, compareScanVersions, type ScanVersion, type ScanLifecycle, type ScanControlInput } from "@memmy/agent-source-core/scan-state";
@@ -6,7 +7,7 @@ import { openSourceCheckpoints, publishSourceCheckpoints, type SourceCheckpoints
 import { setImmediate as yieldEventLoop } from "node:timers/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync, readdirSync, rmSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { once } from "node:events";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
@@ -56,7 +57,8 @@ import {
   readClaudeCodePluginSkills,
   readCodexPluginSkills,
   sharedSkillRootsForAgent,
-  type ScanStore
+  type ScanStore,
+  type AgentSkillInventory
 } from "@memmy/agent-source-core";
 import { openMemoryAgentSourceScanStore, readScanRequestedMode, type MemoryAgentSourceScanStore } from "./scan-store.js";
 import { createWorkbuddySourceAdapter } from "./adapters/workbuddy/index.js";
@@ -73,6 +75,7 @@ import {
   createSkillTargetRegistry,
   type SkillTargetRegistry
 } from "./integration/target-registry.js";
+import { readSkillInstallationState, rollbackSkillInstallation } from "./integration/skill-directory.js";
 import { renderMemmyDefaultSkillManifest } from "./integration/templates/memmy-default.js";
 import { createWorkbuddySkillTarget } from "./integration/workbuddy/index.js";
 import type {
@@ -119,6 +122,7 @@ export interface AgentSourceScanState {
 export interface ScanControlResult { ok: true; outcome: "applied" | "already_terminal" | "conflict"; snapshot: AgentSourceScanState }
 
 export interface AgentSourceExecutor {
+  connectionState(sourceId: string): Promise<{ connectionState: "connected" | "disconnected" | null; connectionEvent?: ConnectionEvent }>;
   list(): Promise<{ executorAvailable: true; sources: AgentSourceView[] }>;
   clearAllData(): Promise<ReturnType<MemoryService["clearAllData"]>>;
   startScan(input: unknown): Promise<{ accepted: true; jobId: string; attemptId?: string; attemptStartedAt?: string; version?: ScanVersion }>;
@@ -175,6 +179,7 @@ export interface CreateAgentSourceExecutorOptions {
 
 export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOptions): AgentSourceExecutor {
   const registry = options.sourceRegistry ?? createBuiltinSourceRegistry();
+  const resolveAgentSkillRoot = options.resolveAgentSkillRoot ?? agentRootDirectory;
   const configPath = options.configPath ?? join(
     process.env.MEMMY_HOME?.trim() || join(homedir(), ".memmy"),
     "config.yaml"
@@ -182,6 +187,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   const integrationRegistry = options.integrationRegistry ?? createBuiltinIntegrationRegistry(configPath);
   const statePath = options.statePath ?? join(dirname(configPath), "memory-service", "agent-sources.json");
   const scanStoreDirectory = options.scanStoreDirectory ?? join(dirname(statePath), "agent-source-scans");
+  const compensation = createConnectionCompensation(async sourceId => options.service.agentSkillConnectionEvent?.(sourceId));
   let statePromise: Promise<PersistedState> | undefined;
   const generation = nextScanGeneration(scanStoreDirectory);
   let sequence = 0;
@@ -239,19 +245,24 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       const stored = state.sources[adapter.descriptor.sourceId];
       const available = await adapter.detect();
       const target = integrationRegistry.get(adapter.descriptor.sourceId);
-      const installed = target
-        ? await target.isInstalled(adapter.descriptor.sourceId).catch((error) => {
-            logger.warn("connection.status_read_failed", {
-              sourceId: adapter.descriptor.sourceId,
-              ...memoryErrorFields(error)
-            });
-            return false;
+      const reportStatusError = (error: unknown) => logger.warn("connection.status_read_failed", {
+        sourceId: adapter.descriptor.sourceId,
+        ...memoryErrorFields(error)
+      });
+      const installation = target
+        ? await readSkillInstallationState(target, adapter.descriptor.sourceId, reportStatusError).catch((error) => {
+            reportStatusError(error);
+            return undefined;
           })
-        : false;
+        : undefined;
+      const cleanupPending = stored?.autoInjectSuppressed === true && stored.status !== "not_connected";
+      const status = cleanupPending || installation?.pluginInstalled || installation?.skillInstalled
+        ? connectionStatus(adapter.descriptor.sourceId)
+        : "not_connected";
       return {
         ...adapter.descriptor,
         available,
-        status: installed ? connectionStatus(adapter.descriptor.sourceId) : "not_connected",
+        status,
         messageCount: stored?.messageCount ?? 0,
         lastScannedAt: stored?.lastScannedAt ?? null,
         syncBoundaryAt: stored?.syncBoundaryAt ?? null
@@ -412,7 +423,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         await waitWhilePaused(signal);
         signal.throwIfAborted();
         if (await adapter.detect()) available.push(adapter);
-        else if (hasAgentSkillsDirectory(adapter.descriptor.sourceId, options.resolveAgentSkillRoot)) skillOnly.push(adapter);
+        else if (resolveAgentSkillRoot(adapter.descriptor.sourceId)) skillOnly.push(adapter);
         else if (request.sourceId !== "all") throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
       }
       for (const adapter of available) {
@@ -733,25 +744,116 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     signal.throwIfAborted();
   }
 
-  /**
-   * An Agent disconnected here, or from the desktop App (which archives its
-   * skills as disconnected right away), stays disconnected until its Memmy
-   * integration is installed again from either side.
-   */
+  /** Explicit connection events take precedence over legacy local state. */
   async function skillsDisconnected(sourceId: string, stored: PersistedSourceState | undefined): Promise<boolean> {
-    if (!isUserDisconnected(stored) && !options.service.agentSkillsDisconnected(sourceId)) return false;
-    // Connecting again, here or from the App, installs the integration.
-    const target = integrationRegistry.get(sourceId);
-    return !(target && await target.isInstalled(sourceId).catch(() => false));
+    const connectionState = options.service.agentSkillConnectionState?.(sourceId);
+    if (connectionState) return connectionState === "disconnected";
+    return isUserDisconnected(stored) || options.service.agentSkillsDisconnected(sourceId);
+  }
+
+  async function connectionState(sourceId: string): Promise<{ connectionState: "connected" | "disconnected" | null; connectionEvent?: ConnectionEvent }> {
+    registry.require(sourceId);
+    const state = await readState();
+    const explicit = options.service.agentSkillConnectionState?.(sourceId);
+    const event = options.service.agentSkillConnectionEvent?.(sourceId);
+    const connectionEvent = event ? { connectionEvent: event } : {};
+    const stored = state.sources[sourceId];
+    // A pending local removal can outlive a failed notification, leaving stale
+    // connected KV. Only a completed removal may yield to an explicit reconnect.
+    if (stored?.autoInjectSuppressed && (stored.status !== "not_connected" || !explicit)) {
+      return { connectionState: "disconnected", ...connectionEvent };
+    }
+    return { connectionState: explicit ?? (await options.service.agentSkillsDisconnected?.(sourceId) ? "disconnected" : null), ...connectionEvent };
+  }
+
+  async function automaticConnectionAllowed(sourceId: string): Promise<boolean> {
+    return (await connectionState(sourceId)).connectionState !== "disconnected";
+  }
+
+  async function reconcileInstallationRemoval(sourceId: string, kind: "skill" | "plugin", action?: ConnectionAction): Promise<void> {
+    const baseline = action ? compensation.after(action) : await compensation.baseline(sourceId);
+    const target = integrationRegistry.get(sourceId)!;
+    const state = await readState();
+    const stored = state.sources[sourceId];
+    const pendingLocalRemoval = !action && stored?.autoInjectSuppressed && stored.status !== "not_connected";
+    let owned: PersistedSourceState = { ...(stored ?? emptySourceState()), status: kind === "plugin" ? "plugin_installed" : "skill_installed", autoInjectSuppressed: true };
+    state.sources[sourceId] = owned;
+    const save = async (snapshot: PersistedState) => {
+      try { await persist(snapshot); }
+      catch (error) {
+        if (action) throw new Error(`Skill sharing is stopped. Cleanup state could not be saved. Retry removal. ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+        throw error;
+      }
+    };
+    const saveLatest = async () => {
+      let latest: PersistedSourceState | undefined;
+      do { latest = state.sources[sourceId]; await save(state); }
+      while (state.sources[sourceId] !== latest);
+    };
+    const remove = kind === "plugin" && target.uninstallPlugin
+      ? [() => target.uninstallPlugin!(sourceId), ...(!target.pluginUninstallIncludesSkills ? [() => target.uninstall(sourceId)] : [])]
+      : [() => target.uninstall(sourceId)];
+    try {
+      if (!action) await save(state);
+      await compensation.compensate(sourceId, baseline, {
+        remove,
+        install: async desiredKind => {
+          if (desiredKind === "plugin") {
+            if (!target.installPlugin) throw new Error("Cannot restore explicitly connected plugin");
+            await target.installPlugin(sourceId);
+          } else await target.install(renderMemmyDefaultSkillManifest(sourceId));
+        },
+        commit: async decision => {
+          const current = state.sources[sourceId];
+          if (current === owned || decision.kind || decision.event?.state === "disconnected") {
+            const next = { ...(current ?? owned) };
+            if (decision.kind) {
+              next.status = decision.kind === "plugin" ? "plugin_installed" : "skill_installed";
+              delete next.autoInjectSuppressed;
+            } else if (!pendingLocalRemoval || decision.event?.state === "disconnected") {
+              next.status = "not_connected";
+              next.autoInjectSuppressed = true;
+            }
+            await save({ ...state, sources: { ...state.sources, [sourceId]: next } });
+            if (state.sources[sourceId] === current) state.sources[sourceId] = owned = next;
+          }
+          if (state.sources[sourceId] !== owned) await saveLatest();
+        }
+      }, action);
+    } finally {
+      if (state.sources[sourceId] !== owned) await saveLatest();
+    }
   }
 
   async function mutateConnection(
+    sourceId: string, kind: "plugin" | "skill", method: "POST" | "DELETE",
+    installType: "manual" | "auto_inject" = "manual", isAutomaticInstallAllowed?: () => boolean
+  ): Promise<unknown> {
+    const action = installType === "manual" ? await compensation.begin(sourceId, method === "POST" ? "connected" : "disconnected", kind) : undefined;
+    let successful = false;
+    try {
+      if (installType === "auto_inject" && method === "POST") await compensation.capture(sourceId);
+      const result = await mutateConnectionOperation(sourceId, kind, method, installType, isAutomaticInstallAllowed, action);
+      successful = true;
+      return result;
+    } finally { await compensation.settle(action, successful); }
+  }
+
+  async function mutateConnectionOperation(
     sourceId: string,
     kind: "plugin" | "skill",
     method: "POST" | "DELETE",
     installType: "manual" | "auto_inject" = "manual",
-    isAutomaticInstallAllowed?: () => boolean
+    isAutomaticInstallAllowed?: () => boolean,
+    action?: ConnectionAction
   ): Promise<unknown> {
+    const guard = async () => {
+      if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) throw new Error("Automatic integration permission revoked");
+      if (!(await automaticConnectionAllowed(sourceId))) throw new Error("Automatic integration blocked by disconnection or pending cleanup");
+      if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) throw new Error("Automatic integration permission revoked");
+    };
+    if (installType === "auto_inject" && method === "POST") await guard();
+    if (installType === "auto_inject" && method === "DELETE") return reconcileInstallationRemoval(sourceId, kind);
     if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
     const adapter = registry.require(sourceId);
     if (method === "POST" && !(await adapter.detect())) {
@@ -760,49 +862,132 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
     const target = integrationRegistry.get(sourceId);
     if (!target) throw new MemoryServiceError("invalid_argument", `Agent source ${sourceId} cannot be connected automatically`);
+    const notifyConnection = (connectionState: "connected" | "disconnected") => options.service.reconcileAgentSkills({
+      sourceAgentId: sourceId,
+      complete: false,
+      connectionState,
+      connectionKind: kind,
+      disconnected: connectionState === "disconnected",
+      skills: []
+    });
     if (method === "POST") {
       if (!(await target.resolveRootDirectory())) {
         throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
       }
       if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
-      if (kind === "plugin") {
-        if (!target.installPlugin) {
-          throw new MemoryServiceError("invalid_argument", `${adapter.descriptor.displayName} does not support automatic Hook or plugin installation`);
+      const installationBefore = installType === "auto_inject"
+        ? undefined
+        : await readSkillInstallationState(target, sourceId);
+      if (installType === "auto_inject") await guard();
+      let installError: unknown;
+      try {
+        if (kind === "plugin") {
+          if (!target.installPlugin) {
+            throw new MemoryServiceError("invalid_argument", `${adapter.descriptor.displayName} does not support automatic Hook or plugin installation`);
+          }
+          await target.installPlugin(sourceId);
+        } else {
+          await target.install(renderMemmyDefaultSkillManifest(sourceId));
         }
-        await target.installPlugin(sourceId);
-      } else {
-        await target.install(renderMemmyDefaultSkillManifest(sourceId));
+      } catch (error) { installError = error; }
+      if (installType === "auto_inject") {
+        try { await guard(); } catch (authorizationError) {
+          try { await reconcileInstallationRemoval(sourceId, kind); }
+          catch (cleanupError) { throw new AggregateError([installError, authorizationError, cleanupError].filter(Boolean), "Automatic integration could not be confirmed. Cleanup failed. Retry removal."); }
+          throw new AggregateError([installError, authorizationError].filter(Boolean), "Automatic integration canceled; installed files removed.");
+        }
+      }
+      if (installError) throw installError;
+      if (installationBefore) {
+        try {
+          const notification = await notifyConnection("connected");
+          compensation.record(action, notification.connectionEvent);
+        } catch (error) {
+          if (!installationBefore.skillInstalled && installationBefore.pluginInstalled === false) {
+            try {
+              const notification = await notifyConnection("disconnected");
+              compensation.record(action, notification.connectionEvent);
+            } catch (compensationError) {
+              const state = await readState();
+              state.sources[sourceId] = {
+                ...(state.sources[sourceId] ?? emptySourceState()),
+                status: kind === "plugin" ? "plugin_installed" : connectionStatus(sourceId)
+              };
+              await persist(state);
+              throw new AggregateError([error, compensationError],
+                "Agent connection result is uncertain. Integration retained so disconnection can be retried.");
+            }
+          }
+          await rollbackSkillInstallation(target, sourceId, kind, installationBefore);
+          throw error;
+        }
       }
     } else {
-      if (kind === "plugin" && target.uninstallPlugin) {
-        await target.uninstallPlugin(sourceId);
-        if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
-      } else {
-        await target.uninstall(sourceId);
-      }
-    }
-    const state = await readState();
-    const stored = state.sources[sourceId] ?? emptySourceState();
-    const nextState: PersistedSourceState = {
-      ...stored,
-      status: method === "POST" ? connectionStatus(sourceId) : "not_connected"
-    };
-    if (method === "DELETE") {
-      nextState.autoInjectSuppressed = true;
-    } else if (installType === "manual") {
-      delete nextState.autoInjectSuppressed;
-    }
-    state.sources[sourceId] = nextState;
-    await persist(state);
-    if (method === "DELETE") {
+      let preparationError: Error | undefined;
       try {
-        options.service.reconcileAgentSkills({ sourceAgentId: sourceId, complete: false, disconnected: true, skills: [] });
+        const state = await readState();
+        state.sources[sourceId] = {
+          ...(state.sources[sourceId] ?? emptySourceState()),
+          status: kind === "plugin" ? "plugin_installed" : connectionStatus(sourceId),
+          autoInjectSuppressed: true
+        };
+        await persist(state);
       } catch (error) {
-        logger.warn("connection.skill_sharing_stop_failed", { sourceId, ...memoryErrorFields(error) });
+        preparationError = error instanceof Error ? error : new Error(String(error));
+      }
+      try {
+        const notification = await notifyConnection("disconnected");
+        compensation.record(action, notification.connectionEvent);
+      } catch (error) {
+        if (preparationError) {
+          const reason = error instanceof Error ? error.message : String(error);
+          throw new AggregateError([preparationError, error],
+            `Agent disconnection could not be confirmed. Cleanup state could not be saved. Retry removal. ${preparationError.message} ${reason}`);
+        }
+        throw error;
+      }
+      if (preparationError) {
+        throw new Error(`Skill sharing is stopped. Cleanup state could not be saved. Retry removal. ${preparationError.message}`,
+          { cause: preparationError });
+      }
+      try {
+        await reconcileInstallationRemoval(sourceId, kind, action);
+        const state = await readState();
+        const status = state.sources[sourceId]?.status ?? "not_connected";
+        logger.info(status === "not_connected" ? "connection.removed" : "connection.installed", { sourceId, kind });
+        return { ok: true, sourceId, status };
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Skill sharing is stopped. Cleanup state")) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`Skill sharing is stopped. Integration cleanup failed. Retry removal. ${reason}`, { cause: error });
       }
     }
-    logger.info(method === "POST" ? "connection.installed" : "connection.removed", { sourceId, kind });
-    return { ok: true, sourceId, status: state.sources[sourceId].status };
+    try {
+      const state = await readState();
+      const stored = state.sources[sourceId] ?? emptySourceState();
+      const nextState: PersistedSourceState = {
+        ...stored,
+        status: kind === "plugin" ? "plugin_installed" : "skill_installed"
+      };
+      delete nextState.autoInjectSuppressed;
+      const next = { ...state, sources: { ...state.sources, [sourceId]: nextState } };
+      await persist(next);
+      // Check before replacing the cached source: another local removal may
+      // have published retryable suppression while this durable write waited.
+      if (installType === "auto_inject") await guard();
+      state.sources[sourceId] = nextState;
+      logger.info("connection.installed", { sourceId, kind });
+      return { ok: true, sourceId, status: state.sources[sourceId].status };
+    } catch (error) {
+      if (installType === "auto_inject") {
+        try { await guard(); } catch (authorizationError) {
+          try { await reconcileInstallationRemoval(sourceId, kind); }
+          catch (cleanupError) { throw new AggregateError([error, authorizationError, cleanupError], "Automatic integration could not be confirmed. Cleanup failed. Retry removal."); }
+          throw new AggregateError([error, authorizationError], "Automatic integration canceled; installed files removed.");
+        }
+      }
+      throw error;
+    }
   }
 
   function scheduleAutomation(delay: number, startup: boolean): void {
@@ -832,17 +1017,12 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     const refreshTarget = integrationRegistry.get("opencode");
     if (registry.get("opencode") && refreshTarget?.isInstalledHookCurrent) {
       const stateBeforeRefresh = await readState();
-      if (!stateBeforeRefresh.sources.opencode?.autoInjectSuppressed
+      if ((!stateBeforeRefresh.sources.opencode?.autoInjectSuppressed || stateBeforeRefresh.sources.opencode?.status === "not_connected")
         && (stateBeforeRefresh.sources.opencode?.status === "plugin_installed" || await refreshTarget.isInstalled("opencode"))) {
         try {
           if (!(await refreshTarget.isInstalledHookCurrent())) {
-            const latestState = await readState();
-            if (isCurrent() && !latestState.sources.opencode?.autoInjectSuppressed) {
+            if (isCurrent() && await automaticConnectionAllowed("opencode")) {
               await mutateConnection("opencode", "plugin", "POST", "auto_inject", isCurrent);
-              const installedState = await readState();
-              if (installedState.sources.opencode?.autoInjectSuppressed) {
-                await mutateConnection("opencode", "plugin", "DELETE", "auto_inject");
-              }
             }
           }
         } catch (error) {
@@ -852,19 +1032,13 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     }
 
     if (config.autoInjectSkill) {
-      const state = await readState();
       const discovered = await list();
       for (const source of discovered.sources) {
         if (!canInstall()) return;
-        if (!source.available || source.status !== "not_connected" || state.sources[source.sourceId]?.autoInjectSuppressed === true) continue;
+        if (!source.available || source.status !== "not_connected") continue;
         try {
           const kind = agentConnectionKind(source.sourceId);
           await mutateConnection(source.sourceId, kind, "POST", "auto_inject", canInstall);
-          const currentState = await readState();
-          if (currentState.sources[source.sourceId]?.autoInjectSuppressed === true) {
-            await mutateConnection(source.sourceId, kind, "DELETE", "auto_inject");
-          }
-
         } catch (error) {
           logger.warn("connection.auto_install_failed", { sourceId: source.sourceId, ...memoryErrorFields(error) });
         }
@@ -929,6 +1103,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
 
   return {
     list,
+    connectionState,
     clearAllData,
     startScan,
     scanStatus: snapshot,
@@ -1629,10 +1804,24 @@ async function ingestAgentSkills(
     }
   };
 
-  const inventories = [{ prefix: "", inventory: await readAgentSkillInventory(join(root, "skills"), { checkpoint }) }];
-  // Skills from a shared directory belong to every Agent that loads it.
-  for (const shared of sharedSkillRootsForAgent(sourceId, homedir())) {
-    inventories.push({ prefix: `shared:${shared.id}/`, inventory: await readAgentSkillInventory(shared.root, { checkpoint }) });
+  let rootExists = false;
+  let rootComplete = true;
+  try {
+    rootExists = (await stat(root)).isDirectory();
+  } catch (error) {
+    const missing = error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
+    if (!missing) {
+      rootComplete = false;
+      reportScanErrors([{ path: root, reason: error instanceof Error ? error.message : String(error) }]);
+    }
+  }
+  const inventories: Array<{ prefix: string; inventory: AgentSkillInventory }> = [];
+  if (rootExists) {
+    inventories.push({ prefix: "", inventory: await readAgentSkillInventory(join(root, "skills"), { checkpoint }) });
+    // An absent Agent cannot load skills from the shared directory.
+    for (const shared of sharedSkillRootsForAgent(sourceId, homedir())) {
+      inventories.push({ prefix: `shared:${shared.id}/`, inventory: await readAgentSkillInventory(shared.root, { checkpoint }) });
+    }
   }
   const skills: AgentSkillReconcileSkill[] = [];
   for (const { prefix, inventory } of inventories) {
@@ -1649,7 +1838,7 @@ async function ingestAgentSkills(
       skills.push({
         sourceSkillId: `${prefix}${skill.sourceSkillId}`,
         sourceSkillPath: skill.sourceSkillPath,
-        title: skill.name ?? skill.sourceSkillId,
+        title: skill.name ?? basename(skill.sourceSkillId),
         content: skill.content,
         contentHash: skill.contentHash,
         modifiedAt: skill.modifiedAt,
@@ -1657,13 +1846,16 @@ async function ingestAgentSkills(
         ...(skill.description ? { description: skill.description } : {}),
         disableModelInvocation: skill.disableModelInvocation,
         ...(skill.allowImplicitInvocation === undefined ? {} : { allowImplicitInvocation: skill.allowImplicitInvocation }),
+        ...(skill.policyError ? { policyError: skill.policyError } : {}),
+        ...(skill.frontmatterError ? { frontmatterError: skill.frontmatterError } : {}),
         hasSupportingFiles: skill.hasSupportingFiles
       });
     }
   }
-  const plugins = sourceId === "claude_code"
-    ? await readClaudeCodePluginSkills(root, { checkpoint })
-    : sourceId === "codex" ? await readCodexPluginSkills(root, { checkpoint }) : undefined;
+  const plugins = !rootExists
+    ? { complete: rootComplete, items: [], errors: [] }
+    : sourceId === "claude_code" ? await readClaudeCodePluginSkills(root, { checkpoint })
+      : sourceId === "codex" ? await readCodexPluginSkills(root, { checkpoint }) : undefined;
   if (plugins) reportScanErrors(plugins.errors);
 
   await checkpoint();
@@ -1675,12 +1867,12 @@ async function ingestAgentSkills(
     const disconnected = await isDisconnected();
     result = service.reconcileAgentSkills({
       sourceAgentId: sourceId,
-      complete: inventories.every(({ inventory }) => inventory.complete),
+      complete: rootComplete && inventories.every(({ inventory }) => inventory.complete),
       disconnected,
       skills,
       ...(plugins ? {
         registrations: plugins.items.map((plugin) => ({
-          sourceSkillId: `plugin:${plugin.pluginId}/${basename(dirname(plugin.sourceSkillPath))}`,
+          sourceSkillId: plugin.sourceSkillId,
           sourceSkillPath: plugin.sourceSkillPath,
           name: plugin.name,
           pluginId: plugin.pluginId
@@ -1725,21 +1917,7 @@ async function ingestAgentSkills(
 
 /** The user removed this Agent's connection; its skills stop being shared. */
 function isUserDisconnected(source: PersistedSourceState | undefined): boolean {
-  return source?.status === "not_connected" && source.autoInjectSuppressed === true;
-}
-
-/**
- * Whether the Agent is installed as far as skills are concerned: its root
- * exists, so its own, shared and plugin skills are scanned even when skills/
- * is empty or missing. Shared directories alone do not count; no installed
- * Agent loads them then.
- */
-function hasAgentSkillsDirectory(
-  sourceId: string,
-  resolveAgentSkillRoot: (sourceId: string) => string | null = agentRootDirectory
-): boolean {
-  const root = resolveAgentSkillRoot(sourceId);
-  return Boolean(root && existsSync(root));
+  return source?.autoInjectSuppressed === true;
 }
 
 function agentRootDirectory(sourceId: string): string | null {

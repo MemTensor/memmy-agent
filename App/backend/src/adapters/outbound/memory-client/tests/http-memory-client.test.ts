@@ -61,6 +61,7 @@ describe("HttpMemoryClient", () => {
   });
   it("only defines path templates for the final memory HTTP APIs", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
+      "/api/v1/agent-sources/:sourceId/connection-state",
       "/api/v1/agent-sources",
       "/api/v1/agent-sources/scan",
       "/api/v1/agent-sources/scan/status",

@@ -3,6 +3,7 @@ import type {
   SeededChannelScores
 } from "../../algorithm/plugin-algorithms.js";
 import {
+  importedSkillBodyPatternTerms,
   isMemoryReadyForRetrieval
 } from "../../algorithm/plugin-algorithms.js";
 import {
@@ -44,7 +45,8 @@ export class IndexedCandidatePool {
   }): number {
     const baseFilter: MemoryFilter = {
       memoryLayer: input.layers,
-      status: ["activated", "resolving"]
+      status: ["activated", "resolving"],
+      eligibleImportedSkillsOnly: true
     };
     const scopedFilter = input.layers.includes("L1") && input.projectId !== undefined
       ? { ...baseFilter, workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
@@ -61,7 +63,8 @@ export class IndexedCandidatePool {
     if (input.layers.length === 0) return false;
     const baseFilter: MemoryFilter = {
       memoryLayer: input.layers,
-      status: ["activated", "resolving"]
+      status: ["activated", "resolving"],
+      eligibleImportedSkillsOnly: true
     };
     const scopedFilter = input.layers.includes("L1") && input.projectId !== undefined
       ? { ...baseFilter, workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
@@ -93,13 +96,16 @@ export class IndexedCandidatePool {
     const queryVector = input.queryVector && input.queryVector.length > 0 ? input.queryVector : undefined;
     const commonFilter: MemoryFilter = {
       status: ["activated", "resolving"],
+      eligibleImportedSkillsOnly: true,
       ...(input.tags?.length ? { tags: input.tags } : {})
     };
     const skillFilter: MemoryFilter = {
       ...commonFilter,
       memoryLayer: "Skill",
+      ...(input.targetSkillId ? { ids: [input.targetSkillId] } : {}),
       ...(input.currentAgentId ? { excludedImportedSkillSourceAgentId: input.currentAgentId } : {})
     };
+    const importedBodyTerms = importedSkillBodyPatternTerms(input.compiledQuery);
     const collectRoutes = (layers: readonly MemoryLayer[], extraPool: number): Array<Promise<MemorySearchIdHit[]>> => {
       const routeTasks: Array<Promise<MemorySearchIdHit[]>> = [];
       const addRoute = (run: () => MemorySearchIdHit[]): void => {
@@ -128,7 +134,15 @@ export class IndexedCandidatePool {
           addRoute(() => this.deps.repos.memories.searchFtsIds(input.compiledQuery.ftsMatch, filter, keywordPool));
         }
         if (input.compiledQuery.patternTerms.length > 0) {
-          addRoute(() => this.deps.repos.memories.searchPatternIds(input.compiledQuery.patternTerms, filter, keywordPool));
+          addRoute(() => this.deps.repos.memories.searchPatternIds(input.compiledQuery.patternTerms, filter, keywordPool, layer === "Skill"));
+        }
+        if (layer === "Skill" && importedBodyTerms.length > 0) {
+          // Both imported routes share actual coverage, so a time-ranked legacy
+          // pattern hit cannot overwrite the body route's relevance evidence.
+          if (input.compiledQuery.patternTerms.length > 0) {
+            addRoute(() => this.deps.repos.memories.searchImportedSkillPatternIds(importedBodyTerms, filter, keywordPool));
+          }
+          addRoute(() => this.deps.repos.memories.searchImportedSkillBodyIds(importedBodyTerms, filter, keywordPool));
         }
         if (layer === "L1" && input.compiledQuery.structuralFragments.length > 0) {
           addRoute(() => this.deps.repos.memories.searchStructuralIds(
@@ -143,7 +157,8 @@ export class IndexedCandidatePool {
 
     const routeTasks = collectRoutes(input.layers, 0);
     if (input.targetSkillId && input.layers.includes("Skill")) {
-      routeTasks.push(Promise.resolve([{ id: input.targetSkillId, score: 1, channel: "vec" }]));
+      const target = this.deps.repos.memories.list(skillFilter, 1)[0];
+      if (target) routeTasks.push(Promise.resolve([{ id: target.id, score: 1, channel: "vec" }]));
     }
     if (routeTasks.length === 0) {
       return { memories: [], channelScoresByMemory: new Map() };
@@ -256,7 +271,8 @@ export class IndexedCandidatePool {
   private isSkillVisibleToAgent(memory: MemoryRow, currentAgentId?: string): boolean {
     if (memory.memoryLayer !== "Skill") return true;
     const internal = memory.properties.internal_info;
-    if (internal.read_only !== true) return true;
+    if (!isImportedSkill(memory)) return true;
+    if (!this.deps.repos.isImportedSkillEligibleForEmbedding(memory)) return false;
     const sourceAgentId = typeof internal.source_agent_id === "string"
       ? internal.source_agent_id.trim()
       : "";

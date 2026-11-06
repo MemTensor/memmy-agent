@@ -6,6 +6,7 @@ import { readAgentSkillInventory } from "@memmy/agent-source-core";
 import { MemoryDb } from "../../../src/index.js";
 import { MemoryRepository, Repositories } from "../../../src/storage/repositories.js";
 import type { AgentSkillReconcileSkill } from "../../../src/service/import/agent-skill-library.js";
+import { withLegacyImportedSkillWriter } from "../../fixtures/legacy-imported-skill-writer.js";
 import { createCapturingEmbedder, createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
 
 const fixture = createMemoryServiceFixture();
@@ -14,6 +15,10 @@ const userId = "installed-skill-review-user";
 const namespace = { source: "codex", profileId: "default", userId };
 const query = "debug a failing sqlite migration";
 type Service = ReturnType<typeof fixture.createTestService>["service"];
+
+function legacyImport(service: Service, request: Parameters<Service["addMemory"]>[0]) {
+  return withLegacyImportedSkillWriter(service, () => service.addMemory(request));
+}
 
 function constantEmbedder() {
   return { ...createCapturingEmbedder([]),
@@ -123,7 +128,7 @@ describe("installed Skill identity independent of memory deletion", () => {
   ])("seeds unmigrated legacy installations before a $label", async ({ disconnected, nameField }) => {
     const { service, db } = fixture.createTestService({ embedder: constantEmbedder() });
     const sourceSkill = skill("  Debug__Migrations  ", "legacy-directory");
-    const legacy = service.addMemory({
+    const legacy = legacyImport(service, {
       namespace, adapterId: "agent-source:codex", layer: "Skill", title: sourceSkill.title,
       content: sourceSkill.content, source: "codex", sourceAgentId: "codex",
       sourceSkillId: sourceSkill.sourceSkillId, sourceContentHash: sourceSkill.contentHash
@@ -153,7 +158,7 @@ describe("installed Skill identity independent of memory deletion", () => {
   ])("preserves the installation meaning of an unmigrated $label", async ({ supersededBy, recallOther }) => {
     const { service, db } = fixture.createTestService({ embedder: constantEmbedder() });
     const sourceSkill = skill("debugging");
-    const legacy = service.addMemory({
+    const legacy = legacyImport(service, {
       namespace, adapterId: "agent-source:codex", layer: "Skill", title: sourceSkill.title,
       content: sourceSkill.content, source: "codex", sourceAgentId: "codex",
       sourceSkillId: sourceSkill.sourceSkillId, sourceContentHash: sourceSkill.contentHash
@@ -181,7 +186,7 @@ describe("installed Skill identity independent of memory deletion", () => {
     const { service, db } = fixture.createTestService({ embedder: constantEmbedder() });
     for (const [index, title] of names.entries()) {
       const content = `Diagnose a failing sqlite migration with ${title}, version ${index}.`;
-      const version = service.addMemory({
+      const version = legacyImport(service, {
         namespace, adapterId: "agent-source:codex", layer: "Skill", title, content,
         source: "codex", sourceAgentId: "codex", sourceSkillId: "stable-directory",
         sourceContentHash: createHash("sha256").update(content).digest("hex")
@@ -219,7 +224,7 @@ describe("installed Skill identity independent of memory deletion", () => {
   ])("keeps legacy user archives through a $label before startup migration", async ({ complete, disconnected, observed, sourceState }) => {
     const { service, db } = fixture.createTestService({ embedder: constantEmbedder() });
     const sourceSkill = skill("debugging");
-    const legacy = service.addMemory({
+    const legacy = legacyImport(service, {
       namespace, adapterId: "agent-source:codex", layer: "Skill", title: sourceSkill.title,
       content: sourceSkill.content, source: "codex", sourceAgentId: "codex",
       sourceSkillId: sourceSkill.sourceSkillId, sourceContentHash: sourceSkill.contentHash
@@ -230,10 +235,14 @@ describe("installed Skill identity independent of memory deletion", () => {
     expect(repos.memories.get(legacy.id)?.properties.internal_info).not.toHaveProperty("import_state_version");
 
     service.reconcileAgentSkills({ namespace, sourceAgentId: "codex", complete, disconnected, skills: observed ? [sourceSkill] : [] });
-    expect(repos.memories.get(legacy.id)).toMatchObject({ status: "archived", memoryValue: sourceSkill.content });
+    expect(repos.memories.get(legacy.id)).toMatchObject({ status: "archived", memoryValue: disconnected ? "" : sourceSkill.content });
+    if (disconnected) {
+      expect(repos.memories.hasVector(legacy.id, "vec")).toBe(false);
+      expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories_fts WHERE id = ?").get(legacy.id)).toEqual({ n: 0 });
+    }
     service.reconcileWorkerStartup();
     expect(repos.memories.get(legacy.id)?.properties.internal_info).toMatchObject({ archive_reason: "user", source_state: sourceState });
-    reconcile(service, "codex", [sourceSkill]);
+    service.reconcileAgentSkills({ namespace, sourceAgentId: "codex", complete: true, connectionState: "connected", skills: [sourceSkill] });
     expect(repos.memories.get(legacy.id)).toMatchObject({ status: "archived", memoryValue: sourceSkill.content,
       properties: { internal_info: { archive_reason: "user", source_state: "present" } } });
     await runWorkerRounds(service, 2, 50);
@@ -285,4 +294,32 @@ describe("installed Skill identity independent of memory deletion", () => {
     expect(recalled).toContain(beta!.memoryId);
   });
 
+
+  it("preserves an installed legacy tombstone before any source scan confirms absence", async () => {
+    const { service, db, root } = fixture.createTestService({ embedder: constantEmbedder() });
+    const source = skill("legacy-still-installed");
+    const skillsRoot = join(root, "legacy-skills");
+    const directory = join(skillsRoot, source.sourceSkillId);
+    await mkdir(directory, { recursive: true });
+    const path = join(directory, "SKILL.md");
+    await writeFile(path, source.content);
+    const own = legacyImport(service, { namespace, adapterId: "agent-source:codex", layer: "Skill",
+      title: source.title, content: source.content, source: "codex", sourceAgentId: "codex",
+      sourceSkillId: source.sourceSkillId, sourceSkillPath: path, sourceContentHash: source.contentHash }).id;
+    const repos = new Repositories(db.db);
+    repos.memories.softDelete(own);
+    const other = reconcile(service, "hermes", [source]).skills[0]!.memoryId!;
+    await runWorkerRounds(service, 2, 50);
+
+    expect([...repos.listInstalledSkillNamesForAgent("codex")]).toEqual([source.title]);
+    expect(await hits(service)).not.toContain(other);
+    service.reconcileWorkerStartup();
+    expect([...repos.listInstalledSkillNamesForAgent("codex")]).toEqual([source.title]);
+    expect((await scan(service, skillsRoot)).skills[0]?.outcome).toBe("deleted_by_user");
+    expect(await hits(service)).not.toContain(other);
+    await unlink(path);
+    await scan(service, skillsRoot);
+    expect([...repos.listInstalledSkillNamesForAgent("codex")]).toEqual([]);
+    expect(await hits(service)).toContain(other);
+  });
 });
