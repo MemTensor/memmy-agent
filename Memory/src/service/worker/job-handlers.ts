@@ -22,7 +22,6 @@ import {
   embeddingRetryTargetKindForMemory,
   embeddingRetryVectorFieldForMemory
 } from "../embedding/embedding-pipeline.js";
-import { episodeTitleIsCurrent } from "../episode-title/episode-title-service.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
 import { observationMemoryState } from "../observation-memory-state.js";
 import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
@@ -99,6 +98,7 @@ export interface WorkerJobProcessors {
 
 export interface WorkerJobHandlerDeps {
   repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime" | "l3WorldModels">;
+  episodeTitleIsCurrent(episode: EpisodeRecord): boolean;
   capture: { synthReflection: boolean };
   reward: { feedbackWindowSec: number };
   nowIso(): string;
@@ -419,7 +419,7 @@ export function enqueueEpisodeTitle(
   at: string,
   stage: "provisional" | "final"
 ): EvolutionJobRecord[] {
-  if (episodeTitleIsCurrent(episode, deps.repos.runtime.countRawTurnsByEpisode(episode.id))) return [];
+  if (deps.episodeTitleIsCurrent(episode)) return [];
   return [enqueueJob(deps, {
     jobType: "episode_title",
     userId: episode.userId,

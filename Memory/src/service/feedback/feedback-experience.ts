@@ -7,6 +7,8 @@ import type {
 } from "../../algorithm/plugin-algorithms.js";
 import {
   DECISION_REPAIR_PROMPT,
+  languageSteeringLine,
+  steeredPromptLanguage,
   classifyFeedbackText,
   cosine,
   policyMetaFromMemory,
@@ -15,6 +17,7 @@ import {
   traceMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
 import {
+  normalizeMemoryLanguage,
   type MemmyConfig
 } from "../../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
@@ -2272,6 +2275,7 @@ export async function synthesizeFailureExperienceSink(
   },
   options: {
     llm: LlmClient;
+    language?: MemmyConfig["language"];
   }
 ): Promise<FailureExperienceSinkDraft | undefined> {
   if (!options.llm.isConfigured()) return undefined;
@@ -2288,6 +2292,8 @@ export async function synthesizeFailureExperienceSink(
       confidence?: unknown;
     }>([
       { role: "system", content: FAILURE_EXPERIENCE_SINK_PROMPT.system },
+      { role: "system", content: languageSteeringLine(normalizeMemoryLanguage(options.language)
+        ?? steeredPromptLanguage(undefined, [input.userRequest, input.feedbackText, input.episodeContext])) },
       {
         role: "user",
         content: failureExperienceSinkUserPrompt({

@@ -441,6 +441,7 @@ export class MemoryService {
     });
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
+      episodeTitleIsCurrent: (episode) => this.episodeTitle.isCurrent(episode),
       repos: this.repos,
       get capture() { return workerHandlerOwner.config.algorithm.capture; },
       get reward() { return workerHandlerOwner.config.algorithm.reward; },

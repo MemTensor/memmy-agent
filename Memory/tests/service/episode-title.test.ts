@@ -4,7 +4,8 @@ import { DEFAULT_MEMMY_CONFIG, type LlmClient, type MemoryDb, type MemoryService
 import {
   EpisodeTitleService,
   episodeTitleDisplayState,
-  episodeTitleMeta
+  episodeTitleMeta,
+  validateEpisodeTitleLanguage
 } from "../../src/service/episode-title/episode-title-service.js";
 import { Repositories, type EvolutionJobRecord } from "../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../fixtures/memory-service-fixture.js";
@@ -19,6 +20,78 @@ afterEach(() => {
 
 const FIRST_USER_TEXT = "帮我把打包脚本里的架构判断改成从 process.arch 读取，现在写死了 arm64。";
 const FIRST_ASSISTANT_TEXT = "已定位到 scripts/package-mac.mjs 第 42 行的硬编码，改为读取 process.arch 后 x64 构建可以正常产出。";
+
+describe("episode output language", () => {
+  it.each([
+    { title: "Local Sensitive Logic Exposure", summary: "已修复缓存处理。" },
+    { title: "修复缓存处理", summary: "Fixed cache handling and verified API responses." }
+  ])("does not save a mismatched field and allows retry: %j", async (invalid) => {
+    const { db, service } = createTestService();
+    const { episodeId } = await completeOneTurn(service);
+    let output = invalid;
+    const complete = vi.fn(async () => JSON.stringify(output));
+    const { repos, titleService } = createTitleService(db, titleLlm(complete), { language: "zh-CN" });
+    await expect(titleService.generate(titleJob(episodeId, "final"))).rejects.toThrow(/language/);
+    expect(episodeTitleMeta(repos.runtime.getEpisode(episodeId)!)).toBeUndefined();
+    expect(complete).toHaveBeenCalledTimes(1); // No schema repair locking in the wrong language.
+    output = { title: "修复缓存处理", summary: "已修复缓存并验证响应。" };
+    await titleService.generate(titleJob(episodeId, "final"));
+    expect(repos.runtime.getEpisode(episodeId)!.title).toBe(output.title);
+    await titleService.generate(titleJob(episodeId, "final"));
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates freshness on a language switch and rejects an in-flight stale language", async () => {
+    const { db, service } = createTestService();
+    const { episodeId } = await completeOneTurn(service);
+    const repos = new Repositories(db.db);
+    let language = "zh-CN";
+    let output = { title: "修复缓存处理", summary: "已修复缓存并验证响应。" };
+    const llm = titleLlm(async () => JSON.stringify(output));
+    const titleService = new EpisodeTitleService({
+      repos, llm, get language() { return language; },
+      nowIso: () => "2026-02-02T03:04:05.000Z", namespaceIdFromSession: session => session.id
+    });
+    await titleService.generate(titleJob(episodeId, "final"));
+    expect(titleService.isCurrent(repos.runtime.getEpisode(episodeId)!)).toBe(true);
+    language = "en";
+    expect(titleService.isCurrent(repos.runtime.getEpisode(episodeId)!)).toBe(false);
+    output = { title: "Repair cache handling", summary: "Fixed cache handling and verified responses." };
+    await titleService.generate(titleJob(episodeId, "final"));
+    expect(repos.runtime.getEpisode(episodeId)!.title).toBe(output.title);
+    language = "zh-CN";
+    let release!: (value: string) => void;
+    llm.complete = () => new Promise<string>(resolve => { release = resolve; });
+    const pending = titleService.generate(titleJob(episodeId, "final"));
+    language = "ja";
+    release(JSON.stringify({ title: "修复缓存处理", summary: "已修复缓存" }));
+    await expect(pending).rejects.toThrow(/input changed/);
+    expect(repos.runtime.getEpisode(episodeId)!.title).toBe(output.title);
+  });
+
+  it.each([
+    ["zh-CN", "Repair cache handling"],
+    ["zh-CN", "Fixed cache handling and verified API responses."],
+    ["ja", "Repair cache handling"],
+    ["en", "修复缓存处理"],
+    ["fr", "Fixed the cache and verified responses"]
+  ])("rejects obvious mismatch for %s: %s", (language, text) => {
+    expect(() => validateEpisodeTitleLanguage(text, language, "title")).toThrow(/language/);
+    expect(() => validateEpisodeTitleLanguage(text, language, "summary")).toThrow(/language/);
+  });
+
+  it.each([
+    ["zh-CN", "修复 Node.js API 缓存"], ["zh-TW", "修復快取"],
+    ["en", "Repair Node.js API cache"], ["ja", "キャッシュを修復"],
+    ["ko", "캐시 수정"], ["ru", "Исправление кеша"],
+    ["ar", "إصلاح التخزين المؤقت"], ["fr", "Réparer le cache API"],
+    ["zh-CN", "Node.js API"], ["zh-CN", "React Native"],
+    ["zh-CN", "React Native Windows"], ["zh-CN", "`npm install typescript`"],
+    ["en-Abcd", "Ambiguous script"]
+  ])("preserves valid or ambiguous output for %s: %s", (language, text) => {
+    expect(() => validateEpisodeTitleLanguage(text, language, "title")).not.toThrow();
+  });
+});
 
 function titleLlm(
   complete: LlmClient["complete"],
@@ -227,6 +300,22 @@ describe("episode title generation", () => {
 
     expect(calls).toHaveLength(1);
     expect(repos.runtime.getEpisode(episodeId)!.title).toBe("单轮任务标题");
+  });
+
+  it("regenerates once in a new language and preserves the final title against late provisional jobs", async () => {
+    const { db, service } = createTestService();
+    const { episodeId } = await completeOneTurn(service);
+    const en = respondWith("Fix packaging", "Use the detected architecture.");
+    const zh = respondWith("修复打包", "按运行架构选择依赖。");
+    const english = createTitleService(db, en.llm, { language: "en-US" });
+    const chinese = createTitleService(db, zh.llm, { language: "zh-CN" });
+    await english.titleService.generate(titleJob(episodeId, "final"));
+    await chinese.titleService.generate(titleJob(episodeId, "final"));
+    await chinese.titleService.generate(titleJob(episodeId, "final"));
+    await english.titleService.generate(titleJob(episodeId, "provisional"));
+    expect(zh.calls).toHaveLength(1);
+    expect(en.calls).toHaveLength(1);
+    expect(english.repos.runtime.getEpisode(episodeId)!.title).toBe("修复打包");
   });
 
   it("leaves the columns empty and marks the episode waiting when no model is configured", async () => {
