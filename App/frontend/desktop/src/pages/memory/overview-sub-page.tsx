@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import type { PanelOverviewOutput } from "@memmy/local-api-contracts";
 import { PRODUCT_TOUR_MEMORY_OVERVIEW_COUNTS_ANCHOR } from "../../app/product-tour-layout.js";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
@@ -6,12 +6,11 @@ import { Tooltip } from "../../components/tooltip.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { BarChart3, BrainCircuit, Globe2, Layers, Sparkles, UserRound, Wand2 } from "./memory-prototype-icons.js";
-import {
-  memoryPanelCacheKey,
-  readMemoryPanelCache,
-  writeMemoryPanelCache
-} from "./memory-panel-cache.js";
-import { type RemoteData, toErrorMessage } from "./remote-state.js";
+import { type MemoryPanelErrorInfo } from "./memory-panel-error.js";
+import { MemoryPanelStatus } from "./memory-panel-status.js";
+import type { RemoteData } from "./remote-state.js";
+import { useMemoryPanelLoad } from "./use-memory-panel-load.js";
+import { useMemoryServiceRestart, type MemoryRestartFeedback } from "./use-memory-service-restart.js";
 
 interface OverviewCountCard {
   id: "memories" | "userMemories" | "skills" | "experiences" | "worldModels";
@@ -66,42 +65,51 @@ export function loadOverviewData(client: MemoryRuntimeClient): Promise<PanelOver
   return client.getPanelOverview();
 }
 
+/**
+ * Loads the overview panel and keeps it usable while the Memory service is away.
+ *
+ * See `useMemoryPanelLoad`: a failed read keeps the last cached snapshot on
+ * screen and retries on a backoff schedule. Once the automatic attempts run
+ * out, the error notice offers an explicit retry and a service restart.
+ */
 export function OverviewSubPage(props: OverviewSubPageProps) {
   const { t } = useTranslation();
-  const [state, setState] = useState<RemoteData<PanelOverviewOutput>>({ status: "loading" });
+  const panel = useMemoryPanelLoad<PanelOverviewOutput>({
+    client: props.client,
+    section: "overview",
+    load: loadOverviewData,
+    clientNotReadyMessage: t("memory.clientNotReady")
+  });
+  const serviceRestart = useMemoryServiceRestart(panel.reload);
 
-  useEffect(() => {
-    if (!props.client) {
-      setState({ status: "error", message: t("memory.clientNotReady") });
-      return;
-    }
-
-    let active = true;
-    const cacheKey = memoryPanelCacheKey("overview");
-    const cached = readMemoryPanelCache<PanelOverviewOutput>(cacheKey);
-    setState((current) => cached ? { status: "ready", data: cached } : current.status === "ready" ? current : { status: "loading" });
-    void loadOverviewData(props.client)
-      .then((data) => {
-        writeMemoryPanelCache(cacheKey, data);
-        if (active) setState({ status: "ready", data });
-      })
-      .catch((error) => {
-        if (active) setState({ status: "error", message: toErrorMessage(error) });
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [props.client, t]);
-
-  return <OverviewSubPageView state={state} onNavigate={props.onNavigate} />;
+  return (
+    <OverviewSubPageView
+      state={panel.state}
+      onNavigate={props.onNavigate}
+      errorInfo={panel.errorInfo}
+      retrying={panel.retrying}
+      autoRetrying={panel.autoRetrying}
+      onRetry={panel.reload}
+      restarting={serviceRestart.restarting}
+      onRestartService={serviceRestart.canRestart ? serviceRestart.restart : undefined}
+      restartFeedback={serviceRestart.feedback}
+    />
+  );
 }
 
 export function OverviewSubPageView(props: {
   state: RemoteData<PanelOverviewOutput>;
   onNavigate: (page: OverviewCountTargetPage) => void;
+  errorInfo?: MemoryPanelErrorInfo | null;
+  retrying?: boolean;
+  autoRetrying?: boolean;
+  onRetry?: () => void;
+  restarting?: boolean;
+  onRestartService?: () => void;
+  restartFeedback?: MemoryRestartFeedback | null;
 }) {
   const { t } = useTranslation();
+  const notice = props.errorInfo ?? null;
 
   return (
     <section className="memory-page-section">
@@ -113,8 +121,34 @@ export function OverviewSubPageView(props: {
       </header>
 
       {props.state.status === "loading" && <StateBox message={t("memory.overview.loading")} />}
-      {props.state.status === "error" && <StateBox message={props.state.message} tone="error" />}
-      {props.state.status === "ready" && <OverviewContent data={props.state.data} onNavigate={props.onNavigate} />}
+      {props.state.status === "error" && (notice
+        ? (
+            <MemoryPanelStatus
+              errorInfo={notice}
+              retrying={props.retrying}
+              autoRetrying={props.autoRetrying}
+              onRetry={props.onRetry}
+              restarting={props.restarting}
+              onRestartService={props.onRestartService}
+              restartFeedback={props.restartFeedback}
+            />
+          )
+        : <StateBox message={props.state.message} tone="error" />)}
+      {props.state.status === "ready" && (
+        <>
+          <MemoryPanelStatus
+            errorInfo={notice}
+            retrying={props.retrying}
+            autoRetrying={props.autoRetrying}
+            onRetry={props.onRetry}
+            restarting={props.restarting}
+            onRestartService={props.onRestartService}
+            restartFeedback={props.restartFeedback}
+            compact
+          />
+          <OverviewContent data={props.state.data} onNavigate={props.onNavigate} />
+        </>
+      )}
     </section>
   );
 }

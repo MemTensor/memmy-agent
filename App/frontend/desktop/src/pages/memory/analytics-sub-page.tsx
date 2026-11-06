@@ -3,8 +3,11 @@ import type { PanelAnalysisOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { BarChart3 } from "./memory-prototype-icons.js";
-import { memoryPanelCacheKey, readMemoryPanelCache, writeMemoryPanelCache } from "./memory-panel-cache.js";
-import { type RemoteData, toErrorMessage } from "./remote-state.js";
+import { type MemoryPanelErrorInfo } from "./memory-panel-error.js";
+import { MemoryPanelStatus } from "./memory-panel-status.js";
+import { type RemoteData } from "./remote-state.js";
+import { useMemoryPanelLoad } from "./use-memory-panel-load.js";
+import { useMemoryServiceRestart, type MemoryRestartFeedback } from "./use-memory-service-restart.js";
 
 interface DailyPoint {
   date: string;
@@ -44,39 +47,47 @@ export function loadAnalyticsData(client: MemoryRuntimeClient): Promise<PanelAna
   return client.getPanelAnalysis();
 }
 
+/**
+ * Loads the analytics panel with the same keep-cached / retry behavior as the
+ * overview. Analytics is read through the same Memory service, so it fails for
+ * exactly the same reasons and must not present a dead end either.
+ */
 export function AnalyticsSubPage(props: AnalyticsSubPageProps) {
   const { t } = useTranslation();
-  const [state, setState] = useState<RemoteData<PanelAnalysisOutput>>({ status: "loading" });
+  const panel = useMemoryPanelLoad<PanelAnalysisOutput>({
+    client: props.client,
+    section: "analytics",
+    load: loadAnalyticsData,
+    clientNotReadyMessage: t("memory.clientNotReady")
+  });
+  const serviceRestart = useMemoryServiceRestart(panel.reload);
 
-  useEffect(() => {
-    if (!props.client) {
-      setState({ status: "error", message: t("memory.clientNotReady") });
-      return;
-    }
-
-    let active = true;
-    const cacheKey = memoryPanelCacheKey("analytics");
-    const cached = readMemoryPanelCache<PanelAnalysisOutput>(cacheKey);
-    setState((current) => cached ? { status: "ready", data: cached } : current.status === "ready" ? current : { status: "loading" });
-    void loadAnalyticsData(props.client)
-      .then((data) => {
-        writeMemoryPanelCache(cacheKey, data);
-        if (active) setState({ status: "ready", data });
-      })
-      .catch((error) => {
-        if (active) setState({ status: "error", message: toErrorMessage(error) });
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [props.client, t]);
-
-  return <AnalyticsSubPageView state={state} />;
+  return (
+    <AnalyticsSubPageView
+      state={panel.state}
+      errorInfo={panel.errorInfo}
+      retrying={panel.retrying}
+      autoRetrying={panel.autoRetrying}
+      onRetry={panel.reload}
+      restarting={serviceRestart.restarting}
+      onRestartService={serviceRestart.canRestart ? serviceRestart.restart : undefined}
+      restartFeedback={serviceRestart.feedback}
+    />
+  );
 }
 
-export function AnalyticsSubPageView(props: { state: RemoteData<PanelAnalysisOutput> }) {
+export function AnalyticsSubPageView(props: {
+  state: RemoteData<PanelAnalysisOutput>;
+  errorInfo?: MemoryPanelErrorInfo | null;
+  retrying?: boolean;
+  autoRetrying?: boolean;
+  onRetry?: () => void;
+  restarting?: boolean;
+  onRestartService?: () => void;
+  restartFeedback?: MemoryRestartFeedback | null;
+}) {
   const { t } = useTranslation();
+  const notice = props.errorInfo ?? null;
 
   return (
     <section className="memory-page-section">
@@ -90,8 +101,34 @@ export function AnalyticsSubPageView(props: { state: RemoteData<PanelAnalysisOut
       </header>
 
       {props.state.status === "loading" && <StateBox message={t("memory.analytics.loading")} />}
-      {props.state.status === "error" && <StateBox message={props.state.message} tone="error" />}
-      {props.state.status === "ready" && <AnalyticsContent data={toAnalyticsViewData(props.state.data, t("memory.overview.today"))} />}
+      {props.state.status === "error" && (notice
+        ? (
+            <MemoryPanelStatus
+              errorInfo={notice}
+              retrying={props.retrying}
+              autoRetrying={props.autoRetrying}
+              onRetry={props.onRetry}
+              restarting={props.restarting}
+              onRestartService={props.onRestartService}
+              restartFeedback={props.restartFeedback}
+            />
+          )
+        : <StateBox message={props.state.message} tone="error" />)}
+      {props.state.status === "ready" && (
+        <>
+          <MemoryPanelStatus
+            errorInfo={notice}
+            retrying={props.retrying}
+            autoRetrying={props.autoRetrying}
+            onRetry={props.onRetry}
+            restarting={props.restarting}
+            onRestartService={props.onRestartService}
+            restartFeedback={props.restartFeedback}
+            compact
+          />
+          <AnalyticsContent data={toAnalyticsViewData(props.state.data, t("memory.overview.today"))} />
+        </>
+      )}
     </section>
   );
 }
