@@ -291,7 +291,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         durationMs: Date.now() - startedAt
       });
     } catch (error) {
-      const status = error instanceof MemoryServiceError ? statusForCode(error.code) : 500;
+      const status = error instanceof MemoryServiceError ? error.status : 500;
       const fields = {
         requestId,
         method: request.method,
@@ -877,6 +877,9 @@ async function routeRequest(
     requireMemoryRead(principal);
     const request = requestWithPrincipal<MemorySearchRequest>(body, "memory.search", principal);
     requireStringField(request, "query", "memory.search");
+    if (request.recordEvent !== undefined && typeof request.recordEvent !== "boolean") {
+      throw new MemoryServiceError("invalid_argument", "memory.search recordEvent must be a boolean");
+    }
     const publicRequest: MemorySearchRequest = {
       requestId: request.requestId,
       adapterId: request.adapterId,
@@ -895,6 +898,7 @@ async function routeRequest(
         ? Math.max(0, Math.trunc(request.contextBudget))
         : undefined,
       includeInjectedContext: typeof request.includeInjectedContext === "boolean" ? request.includeInjectedContext : undefined,
+      recordEvent: request.recordEvent,
       verbose: request.verbose === true
     };
     return publicSearchResponse(await trackExternalToolCall(
@@ -1414,7 +1418,7 @@ function writeViewerAsset(
 
 function writeError(response: ServerResponse, error: unknown, requestId?: string): void {
   if (error instanceof MemoryServiceError) {
-    writeJson(response, statusForCode(error.code), {
+    writeJson(response, error.status, {
       error: {
         code: error.code,
         message: error.message,

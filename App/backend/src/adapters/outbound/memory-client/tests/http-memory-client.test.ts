@@ -414,7 +414,8 @@ describe("HttpMemoryClient", () => {
     await expect(client.health()).rejects.toMatchObject({
       code: "invalid_argument",
       status: 400,
-      message: "x"
+      message: "x",
+      requestId: "req-1"
     });
     expect(calls).toBe(1);
   });
@@ -449,6 +450,25 @@ describe("HttpMemoryClient", () => {
     // 503 already throws memory_layer_unavailable in the 5xx branch; this confirms it is still a stable code.
     await expect(client.health()).rejects.toMatchObject({ code: "memory_layer_unavailable" });
   });
+
+  it.each(["memory_starting", "memory_upgrading"] as const)(
+    "preserves the structured startup 503 code %s",
+    async (code) => {
+      const baseUrl = await startServer(async (_request, response) => {
+        response.writeHead(503, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          error: { code, message: `Memory ${code}`, requestId: "memory-startup-1", retryable: true, phase: "migrate" }
+        }));
+      });
+      const client = createHttpMemoryClient({ baseUrl, token: "", timeoutMs: 500, maxRetries: 0 });
+
+      await expect(client.health()).rejects.toMatchObject({
+        code,
+        status: 503,
+        requestId: "memory-startup-1"
+      });
+    }
+  );
 
   it("throws MemoryLayerNetworkError for connection failures", async () => {
     const baseUrl = await startServer(async (_request, response) => {

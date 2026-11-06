@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
+import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   resolveStartupSplashHtml,
@@ -22,6 +23,7 @@ const functionNames = new Set([
 const variableNames = new Set([
   "mainWindow", "memmyPermissionOnboarding", "pipScreenPermissionGuide", "petWindow", "runtimeServices", "runtimeConfig", "isBootReady", "isQuitting",
   "isQuitCleanupInProgress", "isQuitCleanupComplete", "stopMemoryServiceForCurrentQuit",
+  "quitCleanupContext",
   "splashWindow", "splashCloseTimer", "splashTimer", "SPLASH_MAX_VISIBLE_MS", "STARTUP_SLOW_MS",
   "UPDATE_SPLASH_MAX_VISIBLE_MS", "bootStage", "bootStartedAt", "isPetWindowReadyToShow",
   "latestPetWindowLayout", "petMascotScreenAnchor", "startupRendererCleanup", "STARTUP_RENDERER_TIMEOUT_MS",
@@ -108,7 +110,7 @@ function setup(options: { delay?: number; gatewayDelay?: number; apiDelay?: numb
   const noop = () => {};
   context = createContext({
     app, BrowserWindow: FakeWindow, process: { platform: options.platform ?? "win32", env: {}, resourcesPath: "test-resources" },
-    console: { warn: vi.fn(), error: vi.fn() }, Date, setTimeout, clearTimeout,
+    console: { warn: vi.fn(), error: vi.fn() }, Date, setTimeout, clearTimeout, randomUUID,
     join: (...parts: string[]) => parts.join("/"),
     dirname: (path: string) => path.slice(0, path.lastIndexOf("/")),
     writePackagedStartupLog: async (message: string) => { events.push(message); },
@@ -165,7 +167,10 @@ function setup(options: { delay?: number; gatewayDelay?: number; apiDelay?: numb
     shouldQuitWhenAllWindowsClosed,
     hasSingleInstanceLock: true,
     readStopMemoryServiceOnExitSetting: () => false, armQuitCleanupForceExitTimer: noop,
-    cleanupBeforeQuit: async () => { await services.close(); }, clearQuitCleanupForceExitTimer: noop, relaunchAfterQuitCleanupIfRequested: noop
+    recordQuitDiagnostic: noop,
+    closeRuntimeForQuit: async (quit: any) => quit.services?.close({ stopMemory: quit.stopMemory }),
+    cleanupBeforeQuit: async () => { await runInContext("closeRuntimeForQuit(quitCleanupContext)", context); },
+    clearQuitCleanupForceExitTimer: noop, relaunchAfterQuitCleanupIfRequested: noop
   });
   runInContext(code, context);
   return {
@@ -362,14 +367,64 @@ describe("desktop startup lifecycle", () => {
     expect(test.quit).not.toHaveBeenCalled();
   });
 
-  it("closes a fast startup splash on renderer load and cancels the slow-start notice", async () => {
+  it("closes a fast startup splash on first paint and cancels the slow-start notice", async () => {
     const test = setup();
     await test.start();
-    test.main()!.webContents.emit("did-finish-load");
+    test.main()!.emit("ready-to-show");
     expect(test.splash()).toBeNull();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(test.events.some(event => event.startsWith("boot:slow"))).toBe(false);
     expect(test.quit).not.toHaveBeenCalled();
+  });
+
+  it("keeps the full window hidden and the splash alive until the first frame is painted", async () => {
+    const test = setup();
+    await test.start();
+    expect(test.main()?.visible).toBe(false);
+    test.main()!.webContents.emit("did-finish-load");
+    expect(test.main()?.visible).toBe(false);
+    expect(test.splash()?.isDestroyed()).toBe(false);
+    test.main()!.emit("ready-to-show");
+    expect(test.main()?.visible).toBe(true);
+    expect(test.splash()).toBeNull();
+  });
+
+  it.each(["darwin", "linux"])("preserves %s first-window visibility and load handoff", async platform => {
+    const test = setup({ platform });
+    await test.start();
+    expect(test.main()?.visible).toBe(true);
+    test.main()!.webContents.emit("did-finish-load");
+    expect(test.splash()).toBeNull();
+    expect(test.quit).not.toHaveBeenCalled();
+  });
+
+  it("does not show a late first frame after explicit quit", async () => {
+    const test = setup();
+    await test.start();
+    const main = test.main()!;
+    test.app.quit();
+    main.emit("ready-to-show");
+    expect(main.visible).toBe(false);
+    expect(test.splash()).toBeNull();
+  });
+
+  it("does not show a destroyed full window when its first frame arrives", async () => {
+    const test = setup();
+    await test.start();
+    const main = test.main()!;
+    main.destroy();
+    expect(() => main.emit("ready-to-show")).not.toThrow();
+    expect(main.visible).toBe(false);
+  });
+
+  it("reports a missing first frame even after the full page finished loading", async () => {
+    const test = setup();
+    await test.start();
+    test.main()!.webContents.emit("did-finish-load");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(test.events.some(event => event.startsWith("boot:error\n") && event.includes("30000"))).toBe(true);
+    expect(test.events).toContain("error-dialog");
+    expect(test.quit).toHaveBeenCalled();
   });
 
   it("keeps the pet startup splash until the renderer layout makes the pet visible", async () => {

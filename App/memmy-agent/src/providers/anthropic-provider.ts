@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { anthropicRequestModelId } from "@memmy/local-api-contracts";
 import { createProviderAbortError, isProviderAbortError, LLMProvider, LLMResponse, providerAbortOptions, ToolCallRequest } from "./base.js";
 import { classifyQuotaExhaustion } from "./provider-error-classifier.js";
 import { parseToolArguments } from "./tool-json.js";
@@ -139,7 +140,7 @@ export class AnthropicProvider extends LLMProvider {
   }
 
   static stripPrefix(model: string): string {
-    return model.startsWith("anthropic/") ? model.slice("anthropic/".length) : model;
+    return anthropicRequestModelId(model);
   }
 
   static omitsTemperature(model: string): boolean {

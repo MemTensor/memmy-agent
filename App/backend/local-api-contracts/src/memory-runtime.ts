@@ -430,6 +430,7 @@ export const StartTurnInputSchema = RuntimeRequestFieldsSchema.extend({
   query: NonEmptyStringSchema,
   turnId: NonEmptyStringSchema.optional(),
   contextHints: UnknownRecordSchema.optional(),
+  /** Estimated recalled-context token limit; fixed task instructions are exempt. Default: 1800. */
   contextBudget: z.number().int().nonnegative().optional()
 });
 export type StartTurnInput = z.infer<typeof StartTurnInputSchema>;
@@ -523,6 +524,7 @@ export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   episodeId: z.string().optional(),
   turnId: z.string().optional(),
   layers: z.array(MemoryLayerSchema).optional(),
+  recordEvent: z.boolean().optional(),
   verbose: z.boolean().optional()
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;
@@ -1069,6 +1071,8 @@ export const ApiErrorCodeSchema = z.enum([
   "rate_limited",
   "internal",
   "memory_layer_unavailable",
+  "memory_starting",
+  "memory_upgrading",
   "memory_scan_upgrade_required",
   "missing_idempotency_key",
   "idempotency_body_mismatch",
@@ -1090,7 +1094,8 @@ export const ApiErrorBodySchema = z.object({
   error: z.object({
     code: ApiErrorCodeSchema,
     message: z.string(),
-    requestId: NonEmptyStringSchema
+    requestId: NonEmptyStringSchema.optional(),
+    upstreamRequestId: NonEmptyStringSchema.optional()
   })
 });
 export type ApiErrorBody = z.infer<typeof ApiErrorBodySchema>;

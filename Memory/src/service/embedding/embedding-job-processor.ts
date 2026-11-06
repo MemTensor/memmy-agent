@@ -1,6 +1,7 @@
 import { isImportedSkill } from "../../storage/imported-skill.js";
 import type { EpisodeSelectionContext } from "../session/episode-selection.js";
 import { embeddingIdentity, vectorEmbeddingIdentity } from "../../model/embedding-identity.js";
+import { l2VectorCacheKey, readL2VectorCache } from "./l2-vector-cache.js";
 import { isRecord } from "../../utils/json.js";
 
 export class SummaryModelUnconfiguredError extends Error {
@@ -104,6 +105,7 @@ export interface PreparedEmbeddingJob {
   role: "document" | "query";
   vectorField: EmbeddingRetryVectorField;
   sourceHash?: string;
+  l2VectorCacheKey?: string;
 }
 
 export interface EnqueueWorkerJobInput {
@@ -298,7 +300,7 @@ export class EmbeddingJobProcessor {
     }
 
     const text = embeddingTextForMemory(memory);
-    return {
+    const item: PreparedEmbeddingJob = {
       job,
       memory,
       text,
@@ -306,8 +308,17 @@ export class EmbeddingJobProcessor {
       vectorField: "vec",
       sourceHash: memory.memoryLayer === "Skill" || memory.memoryLayer === "L3"
         ? retrievalDocumentSourceHash(memory)
-        : undefined
+        : undefined,
+      l2VectorCacheKey: memory.memoryLayer === "L2" ? l2VectorCacheKey(this.deps.embedder.config, "query", text) : undefined
     };
+    if (item.l2VectorCacheKey) {
+      const cached = readL2VectorCache(this.deps.repos.runtime, item.l2VectorCacheKey, this.deps.embedder.config);
+      if (cached) {
+        this.applyEmbeddingVector(item, cached);
+        return null;
+      }
+    }
+    return item;
   }
 
   applyEmbeddingVector(item: PreparedEmbeddingJob, vector: number[]): void {
@@ -323,12 +334,22 @@ export class EmbeddingJobProcessor {
         throw new Error(`embedding target not found: ${item.memory.id}`);
       }
       if (!processingJobMatchesMemory(item.job, current)) return;
+      // L2 text may have been revised while this embedding request was in flight.
+      if (current.memoryLayer === "L2" && embeddingTextForMemory(current) !== item.text) return;
       if (item.sourceHash && retrievalDocumentSourceHash(current) !== item.sourceHash) {
         if (isImportedSkill(current)) {
           const retry = this.deps.enqueueEmbeddingRetry(current, embeddingTextForMemory(current), this.deps.nowIso(), item.vectorField);
           this.deps.appendEmbeddingRetryChange(retry, "queued");
         }
         return;
+      }
+      if (item.l2VectorCacheKey && item.l2VectorCacheKey === l2VectorCacheKey(this.deps.embedder.config, item.role, item.text)) {
+        const actual = vectorEmbeddingIdentity(vector);
+        const expected = embeddingIdentity(this.deps.embedder.config);
+        if ((!actual || (actual.provider === expected.provider && actual.model === expected.model))
+          && vector.length && vector.every(Number.isFinite) && vector.some((value) => value !== 0)) {
+          this.deps.repos.runtime.setKv(item.l2VectorCacheKey, vector, this.deps.nowIso());
+        }
       }
       this.persistEmbeddingVector({
         memoryId: current.id,

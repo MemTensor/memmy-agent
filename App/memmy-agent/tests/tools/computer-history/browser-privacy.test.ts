@@ -63,8 +63,7 @@ it("maps supported extension browser process names", () => {
 
 describe("window-bound browser capture", () => {
   it.each(["", row("ControlType.Edit", "Address and search bar", "https://allowed.example/"),
-    row("ControlType.Button", "您"), row("ControlType.Edit", "URL", "https://allowed.example/")])
-    ("never proves normal mode from a flat/empty/page-controlled tree: %s", axText => {
+    row("ControlType.Button", "您"), row("ControlType.Edit", "URL", "https://allowed.example/")])("never proves normal mode from a flat/empty/page-controlled tree: %s", axText => {
       const result = resolveBrowserContext(normal({ axText, nativeContext: undefined }));
       expect(result).toEqual({ private: null, url: "", source: "unknown" });
     });

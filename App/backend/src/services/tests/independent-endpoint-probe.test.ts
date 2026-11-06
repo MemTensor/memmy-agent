@@ -20,7 +20,7 @@ function fixture(endpoint: Record<string, unknown>, provider: Record<string, unk
     memmyConfigWriter: createMemmyConfigWriter({ configPath }),
     modelConfigTester: createHttpModelConfigTester({ fetch: async (url, init) => {
       requests.push(new Request(url, init));
-      return new Response(JSON.stringify({ data: [{ id: "local-model" }] }), { status: 200 });
+      return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "OK" }, finish_reason: "stop" }] }), { status: 200 });
     } })
   });
   const input = { provider: "openai_compatible" as const, endpointId: "local", protocol: "openai-chat-completions" as const,
@@ -33,7 +33,7 @@ describe("saved independent endpoints through the real model test service and HT
     const h = fixture({ inheritProviderDefaults: false }, { apiKey: "provider-secret", extraHeaders: { Authorization: "Bearer provider-header" } });
     await expect(h.service.testModelConfig(h.input)).resolves.toMatchObject({ ok: true });
     expect(h.requests).toHaveLength(1);
-    expect(h.requests[0]!.url).toBe("http://127.0.0.1:18789/v1/models");
+    expect(h.requests[0]!.url).toBe("http://127.0.0.1:18789/v1/chat/completions");
     expect(h.requests[0]!.headers.has("Authorization")).toBe(false);
     expect(h.requests[0]!.headers.has("x-api-key")).toBe(false);
   });

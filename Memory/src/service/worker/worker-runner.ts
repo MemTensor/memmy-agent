@@ -44,6 +44,7 @@ import {
 import { memoryNeedsImportSummary, summaryProcessingJobType } from "../import/import-job-processor.js";
 import {
   classifyProcessingError,
+  isQuotaProcessingErrorCode,
   type EnqueueJobInput,
   L3_RETRY_JOB_TYPES,
   L3_SUSPEND_MINUTES,
@@ -1129,8 +1130,9 @@ export class WorkerRunner {
       ? sanitizeProcessingError(error)
       : error instanceof Error ? error.message : String(error);
     const classification = classifyProcessingError(error);
-    const configurationBlocked = classification.retryAction === "open_settings" && classification.code !== "40309";
-    const forceDeadLetter = l3Handling.kind === "dead_letter" || classification.code === "40309"
+    const quotaExhausted = isQuotaProcessingErrorCode(classification.code);
+    const configurationBlocked = classification.retryAction === "open_settings" && !quotaExhausted;
+    const forceDeadLetter = l3Handling.kind === "dead_letter" || quotaExhausted
       || classification.retryAction === "none"
       || error instanceof UnknownJobPolicyError
       || isTerminalL3WorldModelError(error)
@@ -1491,7 +1493,8 @@ export class WorkerRunner {
       if (this.settleImportedSkillRetry(retry, claim, settled)) return settled[0]!;
       const message = sanitizeProcessingError(error);
       const classification = classifyProcessingError(error);
-      const configurationBlocked = classification.retryAction === "open_settings" && classification.code !== "40309";
+      const configurationBlocked = classification.retryAction === "open_settings" &&
+        !isQuotaProcessingErrorCode(classification.code);
       const terminal = classification.retryAction !== "retry" || attemptNo >= retry.maxAttempts;
       const updated = configurationBlocked
         ? this.deps.repos.runtime.markEmbeddingRetryConfigurationBlockedClaimed(retry.id, {

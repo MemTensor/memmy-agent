@@ -64,7 +64,7 @@ describe("App language in the common macOS and Windows History narrator", () => 
       configureLanguage(language);
       for (const window of ["10min", "6h"] as const) {
         const { file, markdown } = seed(window);
-        const model = vi.fn(async (_request: ChatRequest) => response(title));
+        const model = vi.fn<(request: ChatRequest) => Promise<{ content: string }>>(async () => response(title));
         const { internal } = serviceAt(model);
         expect(await internal.writeSummaryWith(file, window, null)).toBe(true);
         expect(model).toHaveBeenCalledOnce();
@@ -86,7 +86,7 @@ describe("App language in the common macOS and Windows History narrator", () => 
     configureLanguage(before);
     const { file, markdown } = seed("10min");
     const replies: Array<(value: { content: string }) => void> = [];
-    const model = vi.fn((_request: ChatRequest) => new Promise<{ content: string }>((resolve) => replies.push(resolve)));
+    const model = vi.fn<(request: ChatRequest) => Promise<{ content: string }>>(() => new Promise((resolve) => replies.push(resolve)));
     const { internal } = serviceAt(model);
     const previous = internal.writeSummaryWith(file, "10min", null);
     configureLanguage(after);

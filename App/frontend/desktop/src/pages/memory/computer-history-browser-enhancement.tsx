@@ -4,7 +4,7 @@ import type { MemmyAgentClient } from "../../api/memmy-agent-client.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { BrowserExtensionSetup } from "../browser-extension-setup.js";
 
-export function ComputerHistoryBrowserEnhancement({ client }: { client: MemmyAgentClient | null }) {
+export function ComputerHistoryBrowserEnhancement({ client, captureState }: { client: MemmyAgentClient | null; captureState?: "recording" | "paused" | "inactive" }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   return <section className="ch__browser-enhancement">
@@ -18,7 +18,10 @@ export function ComputerHistoryBrowserEnhancement({ client }: { client: MemmyAge
       <ChevronDown size={18} aria-hidden="true" className={expanded ? "ch__browser-enhancement-expanded" : undefined} />
     </button>
     {expanded ? <div id="computer-history-browser-extension">
-      <BrowserExtensionSetup client={client} platform={window.memmy?.platform} />
+      <BrowserExtensionSetup client={client} platform={window.memmy?.platform}
+        connectedLabel={captureState === "inactive" ? t("computerHistory.browserEnhancement.connectedInactive")
+          : captureState === "paused" ? t("computerHistory.browserEnhancement.connectedPaused")
+            : captureState === "recording" ? t("computerHistory.browserEnhancement.connectedRecording") : undefined} />
     </div> : null}
   </section>;
 }

@@ -691,7 +691,7 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("已尝试次数");
   });
 
-  it("收到 40309 错误码时提示模型 Token 余额不足", () => {
+  it.each(["quota_exhausted", "40308", "40309"])("收到额度错误码 %s 时提示模型 Token 余额不足", (errorCode) => {
     const processing = {
       memoryId: memoryListItemFixture.id,
       state: "failed" as const,
@@ -700,7 +700,7 @@ describe("MemoriesSubPage", () => {
       attemptCount: 3,
       manualRetryCount: 0,
       retryAction: "open_settings" as const,
-      errorCode: "40309",
+      errorCode,
       errorMessage: "account quota exhausted",
       failedAt: "2026-06-03T09:30:00.000Z",
       updatedAt: "2026-06-03T09:30:00.000Z"

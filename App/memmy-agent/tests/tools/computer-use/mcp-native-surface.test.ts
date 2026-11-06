@@ -76,6 +76,7 @@ it.each(['darwin', 'win32'] as const)('emits %s ownership from native metadata a
 });
 
 it('registers takeover and stop for a live window that has no screenshot dimensions', async () => {
+  vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
   vi.stubEnv('MEMMY_DESKTOP_MANAGED_GATEWAY', '1');
   const events = new EventEmitter();
   vi.stubGlobal('process', Object.assign(Object.create(process), {

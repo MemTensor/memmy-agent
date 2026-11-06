@@ -11,7 +11,7 @@ const RETRY_GIVING_UP_PATTERN = /Model request failed after \d+ retries, giving 
 const RETRY_ATTEMPT_PATTERN = /Model request failed, retrying attempt (\d+) in (\d+)s\.\.\./;
 const RETRY_WAIT_PATTERN = /Retry attempt (\d+): Model request still waiting to retry in (\d+)s\.\.\./;
 const PERSISTENT_RETRY_STOPPED_PATTERN = /Persistent retry stopped after \d+ identical errors\./;
-const LEGACY_QUOTA_CODE_PATTERN = /\b40309\b/;
+const LEGACY_QUOTA_CODE_PATTERN = /\b(?:40308|40309)\b/;
 
 export function isAgentModelErrorContent(content: string): boolean {
   const text = content.trim();

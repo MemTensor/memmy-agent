@@ -1,3 +1,4 @@
+import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   REWARD_R_HUMAN_PROMPT,
   backpropagateTraces,
@@ -65,6 +66,7 @@ export interface RewardPipelineDeps {
   synthesizeDecisionRepairDraft: SynthesizeDecisionRepairDraft;
   isTraceEligibleForL2(trace: TraceMeta): boolean;
   recordCandidatePoolTrace(trace: TraceMeta, signature: string, at: string): void;
+  recomputePolicyStats(policyId: string, at: string, triggerEpisodeId?: string): MemoryRow | undefined;
   repairEvidenceValueDiff(highValue: MemoryRow[], lowValue: MemoryRow[]): number;
 }
 
@@ -302,10 +304,19 @@ export class RewardPipeline {
           createdAt: at
         });
       }
+      if (this.deps.config.algorithm.l2Induction.mode === "unified" && savedTrace) {
+        for (const policyId of new Set(this.deps.repos.runtime.listTracePolicyLinks({ l1MemoryId: saved.id, limit: 10000 })
+          .filter((link) => {
+            const target = this.deps.repos.memories.get(link.l2MemoryId);
+            return target && link.relation === l2SupportRelation(target);
+          }).map((link) => link.l2MemoryId))) {
+          this.deps.recomputePolicyStats(policyId, at, savedTrace.episodeId);
+        }
+      }
       if (job.payload.downstreamScheduled !== true && savedTrace && this.deps.isTraceEligibleForL2(savedTrace)) {
         this.deps.recordCandidatePoolTrace(savedTrace, signatureFromTrace(savedTrace), at);
         l2Eligible.push({ memory: saved, trace: savedTrace });
-        this.deps.enqueueJob({
+        if (this.deps.config.algorithm.l2Induction.mode === "legacy") this.deps.enqueueJob({
           jobType: "l2_association",
           userId: saved.userId,
           sessionId: saved.sessionId,
@@ -323,6 +334,7 @@ export class RewardPipeline {
     if (job.payload.downstreamScheduled !== true && inductionSeed) {
       this.deps.enqueueJob({
         jobType: "l2_induction",
+        dedupeKey: this.deps.config.algorithm.l2Induction.mode === "unified" ? `l2_unified:reward:${job.id}` : undefined,
         userId: inductionSeed.memory.userId,
         sessionId: inductionSeed.memory.sessionId,
         episodeId: trace.episodeId,
