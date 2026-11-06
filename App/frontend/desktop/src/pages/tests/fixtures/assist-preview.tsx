@@ -59,6 +59,8 @@ function request(overrides: Partial<AssistRequest> = {}): AssistRequest {
     autoRun: false,
     decidedMinutes: null,
     deliveredAt: null,
+    executorOffline: false,
+    waitingSeconds: null,
     ...overrides
   };
 }
@@ -845,6 +847,20 @@ function Preview() {
     );
   }
 
+  if (view === "card-offline") {
+    // 对方不在线：不写「已通知」，按限时授权也说明要她上线才执行；过期写明她 24 小时内没有处理。
+    return (
+      <div style={{ minHeight: "100vh", background: "#fff", padding: "32px 24px" }}>
+        <div style={{ maxWidth: 760, margin: "0 auto" }}>
+          <CollabAssistRequestCard request={request({ status: "pending", agent: null, scope: null, mine: true, executorOffline: true })} collab={client} />
+          <CollabAssistRequestCard request={request({ status: "pending", autoRun: true, agent: null, scope: null, grant: { ...GRANT, agent: "claude_code" }, mine: true, executorOffline: true })} collab={client} />
+          <CollabAssistRequestCard request={request({ status: "confirm", scope: "once", attempt: 2, mine: true, executorOffline: true })} collab={client} />
+          <CollabAssistRequestCard request={request({ status: "expired", agent: null, scope: null, mine: true, finishedAt: "2026-11-05T08:41:00Z" })} collab={client} />
+        </div>
+      </div>
+    );
+  }
+
   if (view === "card") {
     return (
       <div style={{ minHeight: "100vh", background: "#fff", padding: "32px 24px" }}>
@@ -905,9 +921,11 @@ function Preview() {
 
   // dialog-other：她上次给这位成员选的是第二层里的 Codex，打开时第二层自动展开并选中它。
   const dialogClient = view === "dialog-other" ? fakeClient({ defaultAgent: "codex" }) : client;
+  // dialog-waited：她上线时请求已经等了 18 小时，弹窗写明多久前发起。
+  const shownItem = view === "dialog-waited" ? { ...inboxItem, waitingSeconds: 18 * 3600 + 120 } : inboxItem;
   return (
     <div style={{ minHeight: "100vh", background: "var(--color-canvas-oat, #f4f7f6)" }}>
-      <CollabAssistDialog open request={inboxItem} collab={dialogClient} onDecided={() => undefined} onClose={() => undefined} />
+      <CollabAssistDialog open request={shownItem} collab={dialogClient} onDecided={() => undefined} onClose={() => undefined} />
     </div>
   );
 }

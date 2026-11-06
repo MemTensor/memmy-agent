@@ -381,6 +381,10 @@ const AssistRequestSchema = z.object({
   decidedMinutes: z.number().nullish().transform((value) => value ?? null),
   /** 发起方第一次收到结果的时间。 */
   deliveredAt: z.string().nullish().transform((value) => value ?? null),
+  /** 执行方此刻不在线（她的 Memmy 没有运行或没有登录）：只在请求还在等她处理时可能为 true；旧后端不给时按在线。 */
+  executorOffline: z.boolean().nullish().transform((value) => value ?? false),
+  /** 请求已经等了多久（秒），由云端算；旧后端不给时为 null。 */
+  waitingSeconds: z.number().nullish().transform((value) => value ?? null),
   // 以下是会话内容，只在打开一次协助时返回；旧请求没有时为 undefined / null，界面按已有内容显示。
   /** 执行方 Agent 收到的提示词。 */
   prompt: z.string().nullish(),
@@ -409,6 +413,18 @@ const AssistInboxItemSchema = AssistRequestSchema.extend({
   lastAgent: z.string().nullish().transform((value) => value ?? null),
   /** 上一次由 Memmy 执行时，这次排查在这台电脑上对应的任务：确认就在那条任务里进行。 */
   conversationId: z.string().nullish().transform((value) => value ?? null)
+});
+
+/** 外部 Agent 发出的请求有了结果、Agent 还没取走：发起方的 Memmy 据此弹一条通知。 */
+const AssistOutcomeSchema = z.object({
+  requestId: z.string(),
+  projectId: z.string(),
+  threadId: z.string(),
+  status: AssistStatusSchema,
+  title: z.string(),
+  via: z.string(),
+  executor: AssistMemberSchema,
+  failure: z.string().nullable()
 });
 
 /** 项目里的一次排查（看板上的一行协助）：只有发起人和执行人看得到。 */
@@ -492,6 +508,7 @@ export type AssistStep = z.infer<typeof AssistStepSchema>;
 export type AssistResultItem = z.infer<typeof AssistResultItemSchema>;
 export type AssistRequest = z.infer<typeof AssistRequestSchema>;
 export type AssistInboxItem = z.infer<typeof AssistInboxItemSchema>;
+export type AssistOutcome = z.infer<typeof AssistOutcomeSchema>;
 export type AssistGrant = z.infer<typeof AssistGrantSchema>;
 export type AssistThread = z.infer<typeof AssistThreadSchema>;
 export type AssistTaskView = z.infer<typeof AssistTaskViewSchema>;
@@ -639,6 +656,12 @@ export interface CollabClient {
 
   /** 执行方收件箱：等着她授权或确认的请求，以及正在执行的请求。 */
   assistInbox(): Promise<{ requests: AssistInboxItem[] }>;
+  /**
+   * 发起方：外部 Agent 发出、已经有结果但 Agent 还没取走的请求。通知过就调 {@link dismissAssistOutcome}。
+   * 可选：测试替身与旧版本可以不实现。
+   */
+  assistOutcomes?(): Promise<AssistOutcome[]>;
+  dismissAssistOutcome?(requestId: string): Promise<void>;
   /** 本人在这个项目里是否接收协助请求（项目设置里的开关）。 */
   assistReceiving(projectId: string): Promise<AssistReceiving>;
   /** 打开或关闭「接收协助请求」；关闭时她给出的限时授权结束，等待中的请求以明确原因结束。 */
@@ -1079,6 +1102,23 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
         config,
         path: "/api/collab/assist/inbox",
         schema: z.object({ requests: z.array(AssistInboxItemSchema) })
+      });
+    },
+
+    async assistOutcomes() {
+      return (await requestJson({
+        config,
+        path: "/api/collab/assist/outcomes",
+        schema: z.object({ outcomes: z.array(AssistOutcomeSchema) })
+      })).outcomes;
+    },
+
+    async dismissAssistOutcome(requestId) {
+      await requestJson({
+        config,
+        path: `/api/collab/assist/outcomes/${encodeURIComponent(requestId)}`,
+        schema: z.object({ ok: z.boolean() }),
+        init: { method: "DELETE" }
       });
     },
 

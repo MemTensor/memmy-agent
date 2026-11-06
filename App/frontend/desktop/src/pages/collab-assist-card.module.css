@@ -195,6 +195,8 @@
 }
 
 .linkButton {
+  flex-shrink: 0;
+  white-space: nowrap;
   border: 0;
   background: none;
   padding: 0;

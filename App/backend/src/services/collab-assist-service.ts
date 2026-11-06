@@ -139,6 +139,13 @@ export interface AssistRequest {
   decidedMinutes: number | null;
   /** 发起方第一次收到结果的时间。 */
   deliveredAt: string | null;
+  /**
+   * 执行方此刻不在线（她的 Memmy 没有运行或没有登录）：只在请求还在等她处理时可能为 true。
+   * 旧云端不给在线状态时为 false，按在线处理。
+   */
+  executorOffline: boolean;
+  /** 请求已经等了多久（秒），由云端数据库算；旧云端不给时为 null。 */
+  waitingSeconds: number | null;
   /** 以下是会话内容，只在打开一次协助时给出（旧请求为空）。执行方 Agent 收到的提示词。 */
   prompt?: string | null;
   /** Memmy 执行时隐藏注入的格式要求。 */
@@ -356,6 +363,13 @@ const WAIT_POLL_MS = 2_000;
 const MAX_ORIGINS = 200;
 /** 送回来源任务后最多等 Memmy 回复这么久，过了就不再等。 */
 const DELIVERY_REPLY_WAIT_MS = 30 * 60 * 1000;
+/**
+ * 请求结束后，等外部 Agent 自己取走结果的时间：它正在 `assist wait` 时每 2 秒读一次，取走了就不必再通知。
+ */
+const OUTCOME_GRACE_MS = 20_000;
+/** 等结果的请求最多记这么多条、这么久：超过 30 天的请求云端已经清掉了。 */
+const MAX_NOTICES = 200;
+const NOTICE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface LocalState {
   /**
@@ -382,6 +396,34 @@ interface LocalState {
    * 收到后的那一轮结束（或等满 30 分钟）就不再读。与 {@link origins} 分开：origins 只管「结果要不要送回 Memmy 任务」。
    */
   records?: Record<string, RequesterBinding>;
+  /**
+   * 这台电脑上从外部 Agent 发出的请求：请求 id → 等结果的进度。外部 Agent 常常不在本轮等到结果（比如对方不在线），
+   * 结果回来、而 Agent 还没取走时，由 Memmy 通知用户。Memmy 任务里发出的由 {@link origins} 送回任务，不在这里。
+   */
+  notices?: Record<string, AssistNotice>;
+}
+
+interface AssistNotice {
+  at: string;
+  /** 第一次看到请求已经结束的时间：Agent 可能正在 `assist wait`，先给它一点时间自己取走结果。 */
+  endedAt?: string;
+  /** 到了该通知的时候：界面取走后删除这一条。 */
+  outcome?: AssistOutcome;
+}
+
+/**
+ * 外部 Agent 发出的请求有了结果、Agent 却还没取走：界面据此弹一条通知，告诉发起人回到那个 Agent 里取回结果，
+ * 或者在项目的「协助」里查看。
+ */
+export interface AssistOutcome {
+  requestId: string;
+  projectId: string;
+  threadId: string;
+  status: AssistStatus;
+  title: string;
+  via: string;
+  executor: AssistMember;
+  failure: string | null;
 }
 
 interface RequesterBinding {
@@ -460,6 +502,11 @@ export interface CollabAssistService {
   setReceiving(projectId: string, enabled: boolean): Promise<AssistReceiving>;
   /** 执行方可以选的 Agent，分「本项目用过」与「其他」两层；`requester` 给出时按她对这位发起人的选择定默认项。 */
   agents(projectId: string, requester?: string): Promise<AssistAgentChoice>;
+  /**
+   * 外部 Agent 发出、已经有结果但 Agent 还没取走的请求：界面弹通知告诉发起人。取走（通知过）后调 {@link dismissOutcome}。
+   */
+  outcomes(): Promise<AssistOutcome[]>;
+  dismissOutcome(requestId: string): Promise<void>;
   /** 开始后台轮询；返回停止函数。 */
   start(): () => void;
   /** 立即轮询一次（界面刚授权后不必等下一个周期）。 */
@@ -569,6 +616,8 @@ export function toAssistRequest(value: unknown): AssistRequest {
     autoRun: raw.autoRun === true,
     decidedMinutes: typeof raw.decidedMinutes === "number" ? raw.decidedMinutes : null,
     deliveredAt: nullableText(raw.deliveredAt),
+    executorOffline: raw.executorOnline === false,
+    waitingSeconds: typeof raw.waitingSeconds === "number" ? raw.waitingSeconds : null,
     // 会话内容只在打开一次协助时返回；列表里没有这些键，不补空值，免得界面以为「有过但是空的」。
     ...("prompt" in raw ? { prompt: nullableText(raw.prompt) } : {}),
     ...("promptContext" in raw ? { promptContext: nullableText(raw.promptContext) } : {}),
@@ -645,7 +694,8 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
         recent: parsed.recent && typeof parsed.recent === "object" ? { ...parsed.recent } : {},
         ...(parsed.origins && typeof parsed.origins === "object" ? { origins: { ...parsed.origins } } : {}),
         ...(parsed.tasks && typeof parsed.tasks === "object" ? { tasks: { ...parsed.tasks } } : {}),
-        ...(parsed.records && typeof parsed.records === "object" ? { records: { ...parsed.records } } : {})
+        ...(parsed.records && typeof parsed.records === "object" ? { records: { ...parsed.records } } : {}),
+        ...(parsed.notices && typeof parsed.notices === "object" ? { notices: { ...parsed.notices } } : {})
       };
     } catch {
       state = { ...EMPTY_STATE, sessions: {} };
@@ -717,14 +767,23 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     const activeGrant = typeof grant.agent === "string" && grant.agent
       ? { agent: grant.agent, expiresAt: localExpiry(grant.remainingSeconds, grant.expiresAt, true) ?? text(grant.expiresAt) }
       : null;
-    // 在 Memmy 的任务里发起：不必等，结果回来会自动送回这条任务。外部 Agent 用 wait 反复等待。
+    const executor = request.executor.name;
+    const offline = request.executorOffline;
+    // 在 Memmy 的任务里发起：不必等，结果回来会自动送回这条任务。外部 Agent 用 wait 反复等待；
+    // 对方不在线时原地等也等不到，这一轮就结束，结果回来时由 Memmy 通知用户。
     const next = input.sourceTask
       ? `结果回来后会自动送回这条任务，届时接着分析；现在不需要等待，也不要运行 assist wait。`
-      : `用 memmy-project assist wait ${short} 等待结果，每次最多等 90 秒。`;
-    const executor = request.executor.name;
-    const sent = activeGrant
-      ? `已发送协助请求 ${short}。${executor}给你的限时授权到 ${clockText(activeGrant.expiresAt, now())}，${executor}的 ${assistAgentName(activeGrant.agent)} 会直接执行。`
-      : `已发送协助请求 ${short}，等待${executor}选择执行的 Agent 并授权。`;
+      : offline
+        ? `${executor}不在线时不必等待，也不要运行 assist wait：告诉用户这一点，这一轮就结束。结果回来时用户的 Memmy 会通知他；之后用 memmy-project assist status ${short} 取回结果，不要重新发请求。`
+        : `用 memmy-project assist wait ${short} 等待结果，每次最多等 90 秒。`;
+    const until = activeGrant ? clockText(activeGrant.expiresAt, now()) : "";
+    const sent = activeGrant && offline
+      ? `已发送协助请求 ${short}。${executor}给你的限时授权到 ${until}，但${executor}目前不在线：${executor}在 ${until} 前打开 Memmy，${executor}的 ${assistAgentName(activeGrant.agent)} 会直接执行；之后打开则需要${executor}重新授权。24 小时内没有处理会自动过期。`
+      : activeGrant
+        ? `已发送协助请求 ${short}。${executor}给你的限时授权到 ${until}，${executor}的 ${assistAgentName(activeGrant.agent)} 会直接执行。`
+        : offline
+          ? `已发送协助请求 ${short}。${executor}目前不在线，打开 Memmy 后会看到这次请求；24 小时内没有处理会自动过期。`
+          : `已发送协助请求 ${short}，等待${executor}选择执行的 Agent 并授权。`;
     // 发起方这一轮的对话会进入协助会话：发出请求时就让 Agent 告诉用户，不在事后才让人发现。
     const visible = binding
       ? `请告诉用户：这一轮里你与 Agent 的对话、工具调用与输出，${executor}也能在协助会话里看到。`
@@ -776,7 +835,20 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
       for (const key of originKeys.slice(0, Math.max(0, originKeys.length - MAX_ORIGINS))) delete origins[key];
     }
     const records = binding ? trimRecords({ ...(current.records ?? {}), [requestId]: binding }) : current.records;
-    await saveState({ ...current, recent, ...(origins ? { origins } : {}), ...(records ? { records } : {}) });
+    // 外部 Agent 发出的请求：结果回来、Agent 还没取走时由 Memmy 通知用户。
+    let notices = current.notices;
+    if (!sourceTask) {
+      notices = { ...(current.notices ?? {}), [requestId]: { at: now().toISOString() } };
+      const noticeKeys = Object.keys(notices);
+      for (const key of noticeKeys.slice(0, Math.max(0, noticeKeys.length - MAX_NOTICES))) delete notices[key];
+    }
+    await saveState({
+      ...current,
+      recent,
+      ...(origins ? { origins } : {}),
+      ...(records ? { records } : {}),
+      ...(notices ? { notices } : {})
+    });
   }
 
   /**
@@ -828,7 +900,8 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
         await recordAgentDelivery(request, result);
         return { request, text: result };
       }
-      if (Date.now() >= deadline) {
+      // 对方不在线、请求还在等她处理：原地等也等不到，直接说明，让 Agent 结束这一轮。
+      if (Date.now() >= deadline || waitsForOfflineExecutor(request)) {
         return { request, text: pendingText(request, now()) };
       }
       await sleep(WAIT_POLL_MS);
@@ -861,6 +934,12 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     if (!request.mine || request.deliveredAt) return;
     const current = await loadState();
     if (current.origins?.[request.id]) return;
+    // Agent 自己取走了结果：不必再通知用户。
+    if (current.notices?.[request.id]) {
+      const notices = { ...current.notices };
+      delete notices[request.id];
+      await saveState({ ...current, notices });
+    }
     await cloud(`/projects/${encodeURIComponent(request.projectId)}/assist/requests/${encodeURIComponent(request.id)}/delivery`, {
       method: "POST",
       body: { content: clipBytes(content, ASSIST_DELIVERY_BYTES) }
@@ -1523,6 +1602,7 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     try {
       // 发起方的结果送回与是否接收协助请求无关：自己发出的请求照常拿回结果。
       await deliverResults().catch(() => undefined);
+      await watchOutcomes().catch(() => undefined);
       await syncRequesterRecords().catch(() => undefined);
       const { requests } = await inbox();
       // 本机正在跑的请求已经不在收件箱里（发起方停了、或已经被结束）：停下，不再白白跑完。
@@ -1547,6 +1627,81 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     } finally {
       polling = false;
     }
+  }
+
+  /**
+   * 外部 Agent 发出的请求：结束后 Agent 一段时间内没有自己取走结果，就记下来让界面通知用户。
+   * 还没结束的请求从一次发件箱读取里判断，只为已经不在发件箱里的请求单独读详情。
+   */
+  async function watchOutcomes(): Promise<void> {
+    const current = await loadState();
+    const notices = current.notices ?? {};
+    const watching = Object.entries(notices).filter(([, notice]) => !notice.outcome);
+    if (!watching.length) return;
+    const outbox = await cloud("/assist/outbox");
+    const open = new Set(list(outbox.requests, (raw) => text(raw.id)));
+    const updates = new Map<string, AssistNotice | null>();
+    for (const [requestId, notice] of watching) {
+      if (now().getTime() - Date.parse(notice.at) > NOTICE_KEEP_MS) {
+        updates.set(requestId, null);
+        continue;
+      }
+      if (open.has(requestId)) continue;
+      const request = await readRequest(requestId).catch((error: unknown) => {
+        if (isRecordError(error) && error.code === "not_found") return "gone" as const;
+        return null;
+      });
+      if (request === null) continue;
+      // 已经清掉、Agent 已经取走、或发起人自己撤回或停止的：不必通知。
+      if (request === "gone" || request.deliveredAt || request.status === "cancelled"
+        || (request.status === "stopped" && request.stoppedBy === "requester")) {
+        updates.set(requestId, null);
+        continue;
+      }
+      if (isAssistOpen(request.status)) continue;
+      if (!notice.endedAt) {
+        updates.set(requestId, { ...notice, endedAt: now().toISOString() });
+        continue;
+      }
+      if (now().getTime() - Date.parse(notice.endedAt) < OUTCOME_GRACE_MS) continue;
+      updates.set(requestId, {
+        ...notice,
+        outcome: {
+          requestId: request.id,
+          projectId: request.projectId,
+          threadId: request.threadId,
+          status: request.status,
+          title: request.title,
+          via: request.via,
+          executor: request.executor,
+          failure: request.failure
+        }
+      });
+    }
+    if (!updates.size) return;
+    const latest = await loadState();
+    const next = { ...(latest.notices ?? {}) };
+    for (const [requestId, notice] of updates) {
+      if (!next[requestId]) continue;
+      if (notice) next[requestId] = notice;
+      else delete next[requestId];
+    }
+    await saveState({ ...latest, notices: next });
+  }
+
+  async function outcomes(): Promise<AssistOutcome[]> {
+    const current = await loadState();
+    return Object.values(current.notices ?? {})
+      .map((notice) => notice.outcome)
+      .filter((outcome): outcome is AssistOutcome => Boolean(outcome));
+  }
+
+  async function dismissOutcome(requestId: string): Promise<void> {
+    const current = await loadState();
+    if (!current.notices?.[requestId]) return;
+    const notices = { ...current.notices };
+    delete notices[requestId];
+    await saveState({ ...current, notices });
   }
 
   function start(): () => void {
@@ -1580,6 +1735,8 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     setReceiving,
     agents,
     start,
+    outcomes,
+    dismissOutcome,
     pollNow: async () => {
       await poll();
     }
@@ -1720,11 +1877,11 @@ export function statusText(request: AssistRequest, at: Date = new Date()): strin
       // 她的限时授权还在：不是在等她授权，而是等她的 Memmy 开始执行（收件箱每 5 秒轮询一次）。
       if (request.autoRun) {
         const agent = request.grant?.agent ? assistAgentName(request.grant.agent) : "Agent";
-        return `按${request.executor.name}给你的限时授权，等待${request.executor.name}的 ${agent} 开始执行（第 ${request.attempt} 次）`;
+        return `按${request.executor.name}给你的限时授权，等待${request.executor.name}的 ${agent} 开始执行（第 ${request.attempt} 次）${offlineNote(request)}`;
       }
-      return `等待${request.executor.name}选择执行的 Agent 并授权（第 ${request.attempt} 次）`;
+      return `等待${request.executor.name}选择执行的 Agent 并授权（第 ${request.attempt} 次）${offlineNote(request)}`;
     case "confirm":
-      return `等待${request.executor.name}确认这次请求（第 ${request.attempt} 次）`;
+      return `等待${request.executor.name}确认这次请求（第 ${request.attempt} 次）${offlineNote(request)}`;
     case "running": {
       const since = durationText(request.decidedAt ?? request.createdAt, at);
       return `${request.executor.name}的 ${name} 正在执行（第 ${request.attempt} 次${since ? `，已 ${since}` : ""}）`;
@@ -1734,12 +1891,30 @@ export function statusText(request: AssistRequest, at: Date = new Date()): strin
   }
 }
 
+/**
+ * 请求还在等执行方处理（授权或确认），而她此刻不在线：她打开 Memmy 之前不会有进展，发起方不必原地等。
+ * 已经在执行的不算：执行中掉线的情形交给执行方的 Memmy 自己收尾。
+ */
+export function waitsForOfflineExecutor(request: AssistRequest): boolean {
+  return request.executorOffline && (request.status === "pending" || request.status === "confirm");
+}
+
+/** 状态后面补的一句：对方不在线时说明她打开 Memmy 后才会看到。 */
+function offlineNote(request: AssistRequest): string {
+  return waitsForOfflineExecutor(request) ? `；${request.executor.name}目前不在线，打开 Memmy 后才会看到这次请求` : "";
+}
+
 /** 等了一轮还没结束：说明进展、已完成的步骤和下一条命令。 */
 export function pendingText(request: AssistRequest, at: Date = new Date()): string {
   const lines = [`还没结束：${statusText(request, at)}。`];
   const steps = stepLines(request);
   if (steps.length) lines.push("已完成：", ...steps);
-  lines.push(`再运行一次 memmy-project assist wait ${shortId(request.id)} 继续等待，不要重新发请求。`);
+  if (waitsForOfflineExecutor(request)) {
+    // 对方不在线：不让 Agent 一轮轮地等，结果回来时由用户的 Memmy 通知。
+    lines.push(`${request.executor.name}不在线时不必继续等待：告诉用户这一点，这一轮就结束。结果回来时用户的 Memmy 会通知他；之后用 memmy-project assist status ${shortId(request.id)} 取回结果，不要重新发请求。`);
+  } else {
+    lines.push(`再运行一次 memmy-project assist wait ${shortId(request.id)} 继续等待，不要重新发请求。`);
+  }
   return lines.join("\n");
 }
 

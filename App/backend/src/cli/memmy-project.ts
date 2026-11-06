@@ -772,7 +772,7 @@ function formatAssistStatus(request: Record<string, unknown>): string {
   // 她关闭了接收协助请求时，等待中的请求以这个原因结束：照原因说，不笼统写「没有允许」。
   else if (status === "rejected") lines.push(text(request.failure) ? `${text(request.failure)}。` : `${executor}没有允许这次请求。`);
   else if (status === "cancelled") lines.push("这次请求已撤回。");
-  else if (status === "expired") lines.push("这次请求已过期：对方 24 小时内没有处理。");
+  else if (status === "expired") lines.push(`这次请求已过期：${executor} 24 小时内没有处理。`);
   else if (status === "stopped") lines.push(`${stoppedText(request)}。`);
   else if (status === "failed") lines.push(`执行没有完成：${text(request.failure) || "原因不明"}`);
   for (const step of steps) {

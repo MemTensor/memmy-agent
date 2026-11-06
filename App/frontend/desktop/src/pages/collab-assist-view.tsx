@@ -170,6 +170,19 @@ export function assistStatusKey(target: { status: AssistStatus; autoRun?: boolea
   return ASSIST_STATUS_KEYS[target.status];
 }
 
+/**
+ * 请求等了多久，用于执行方弹窗「18 小时前发起」。不到 10 分钟不写：刚发出的请求不需要说明。
+ * 秒数由云端算，不受两端时钟与时区影响。
+ */
+export function assistWaitedText(
+  seconds: number | null | undefined,
+  t: (key: MessageKey, values?: Record<string, string>) => string
+): string {
+  if (typeof seconds !== "number" || seconds < 600) return "";
+  if (seconds < 3600) return t("collab.assist.agoMinutes", { count: String(Math.floor(seconds / 60)) });
+  return t("collab.assist.agoHours", { count: String(Math.floor(seconds / 3600)) });
+}
+
 /** 请求还没结束：等待授权、执行中、等待确认。 */
 export function assistIsOpen(status: AssistStatus): boolean {
   return status === "pending" || status === "running" || status === "confirm";

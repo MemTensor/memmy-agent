@@ -72,6 +72,14 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
   app.get("/api/collab/assist/inbox", guard, withErrorEnvelope(async (_request, reply) =>
     reply.send(await options.assist.inbox())));
 
+  // 发起方：外部 Agent 发出的请求有了结果、Agent 还没取走时，界面据此弹通知；通知过就删掉。
+  app.get("/api/collab/assist/outcomes", guard, withErrorEnvelope(async (_request, reply) =>
+    reply.send({ outcomes: await options.assist.outcomes() })));
+  app.delete<{ Params: { requestId: string } }>("/api/collab/assist/outcomes/:requestId", guard, withErrorEnvelope(async (request, reply) => {
+    await options.assist.dismissOutcome(RequestIdSchema.parse((request.params as { requestId: string }).requestId));
+    return reply.send({ ok: true });
+  }));
+
   // 发起方：发一条请求，或续跑同一次排查（带 thread）。
   app.post("/api/collab/assist/requests", guard, withErrorEnvelope(async (request, reply) => {
     const input = CreateRequestSchema.parse(request.body ?? {});

@@ -7,12 +7,16 @@
  * 协助放在项目里：由 Memmy 执行时它就是项目里的一条 Memmy 任务，允许后直接进入；由外部 Agent 执行时
  * 打开项目看板并在右侧展开这次协助。通知随请求的状态收起：请求在别处处理掉（另一处点了允许、限时授权自动执行、
  * 对方撤回、过期）后，对应的通知不再留着。
+ *
+ * 发起方也在这里得到通知：从外部 Agent 发出的请求，Agent 常常不在本轮等到结果（比如对方不在线），
+ * 结果回来、Agent 还没取走时弹一条通知，告诉发起人回到那个 Agent 取回结果，或者在项目的「协助」里查看。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import type { AssistInboxItem, CollabClient } from "../api/collab-client.js";
+import type { AssistInboxItem, AssistOutcome, CollabClient } from "../api/collab-client.js";
 import { requestAssistFocus } from "../app/collab-assist-focus.js";
 import { getCollabProjectsSnapshot, subscribeCollabProjects } from "../app/collab-projects-store.js";
 import { useOptionalNotificationCenter } from "../components/notification-center.js";
+import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { CollabAssistDialog } from "./collab-assist-dialog.js";
 import { assistAgentName } from "./collab-assist-view.js";
@@ -23,6 +27,48 @@ export const ASSIST_POLL_MS = 5_000;
 /** 等她处理的请求：等待授权或等待确认。 */
 function waitingForHer(item: AssistInboxItem): boolean {
   return item.status === "pending" || item.status === "confirm";
+}
+
+/** 发起方收到的结果通知：按结局写标题与正文。 */
+function outcomeNotice(
+  outcome: AssistOutcome,
+  t: (key: MessageKey, values?: Record<string, string>) => string
+): { variant: "success" | "info" | "warning"; title: string; body: string } {
+  const name = outcome.executor.name;
+  const title = outcome.title;
+  switch (outcome.status) {
+    case "done":
+      return {
+        variant: "success",
+        title: t("collab.assist.outcome.doneTitle", { name }),
+        body: t("collab.assist.outcome.doneBody", { title, via: outcome.via })
+      };
+    case "rejected":
+      // 她关闭了接收协助请求时，原因写在 failure 里：照原因说。
+      return {
+        variant: "warning",
+        title: t("collab.assist.outcome.rejectedTitle", { name }),
+        body: outcome.failure ?? t("collab.assist.outcome.rejectedBody", { title })
+      };
+    case "expired":
+      return {
+        variant: "warning",
+        title: t("collab.assist.outcome.expiredTitle"),
+        body: t("collab.assist.outcome.expiredBody", { name, title })
+      };
+    case "stopped":
+      return {
+        variant: "info",
+        title: t("collab.assist.outcome.stoppedTitle", { name }),
+        body: t("collab.assist.outcome.stoppedBody", { title })
+      };
+    default:
+      return {
+        variant: "warning",
+        title: t("collab.assist.outcome.failedTitle", { name }),
+        body: t("collab.assist.outcome.failedBody", { title, reason: outcome.failure ?? t("collab.assist.state.failed") })
+      };
+  }
 }
 
 /** 等待确认、上一次由 Memmy 执行且任务还在：确认就在那条任务的底部进行，不另弹窗。 */
@@ -61,6 +107,8 @@ export function CollabAssistHost(props: {
   const projects = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot).projects ?? [];
   /** 已经提示过的请求 → 那条通知的 id：同一条请求只弹一次，请求处理掉后收起。 */
   const announced = useRef(new Map<string, string | null>());
+  /** 已经通知过的发起方结果：本机删除失败时也不重复弹。 */
+  const announcedOutcomes = useRef(new Set<string>());
 
   /** 把人带到这次协助：由 Memmy 执行的进入那条任务，其余打开项目看板并展开详情。 */
   const openAssist = useCallback((item: { projectId: string; threadId: string; conversationId?: string | null }, viaMemmy: boolean) => {
@@ -83,8 +131,33 @@ export function CollabAssistHost(props: {
     setDialogRequest(item);
   }, [openAssist]);
 
+  /** 发起方：外部 Agent 发出的请求有了结果、Agent 还没取走，各通知一次，通知过就从本机删掉。 */
+  const announceOutcomes = useCallback(async () => {
+    if (!collab?.assistOutcomes || !notifications) return;
+    let outcomes: AssistOutcome[];
+    try {
+      outcomes = await collab.assistOutcomes();
+    } catch {
+      return;
+    }
+    for (const outcome of outcomes) {
+      if (announcedOutcomes.current.has(outcome.requestId)) continue;
+      announcedOutcomes.current.add(outcome.requestId);
+      const notice = outcomeNotice(outcome, t);
+      notifications.notify({
+        variant: notice.variant,
+        title: notice.title,
+        body: notice.body,
+        actionLabel: t("collab.assist.outcome.action"),
+        onAction: () => openAssist({ projectId: outcome.projectId, threadId: outcome.threadId }, false)
+      });
+      void collab.dismissAssistOutcome?.(outcome.requestId).catch(() => undefined);
+    }
+  }, [collab, notifications, t, openAssist]);
+
   const poll = useCallback(async () => {
     if (!collab || !enabled) return;
+    void announceOutcomes();
     let next: AssistInboxItem[] = [];
     try {
       next = (await collab.assistInbox()).requests;
@@ -123,7 +196,7 @@ export function CollabAssistHost(props: {
       // 有生效中的限时授权的请求不打扰她：她的 Memmy 会直接开始执行。
       if (item.status === "pending" && !item.granted) setDialogRequest(item);
     }
-  }, [collab, enabled, notifications, t, actOn]);
+  }, [collab, enabled, notifications, t, actOn, announceOutcomes]);
 
   useEffect(() => {
     announced.current.clear();

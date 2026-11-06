@@ -16,7 +16,7 @@ import { Memmy } from "../components/mascot/memmy.js";
 import { Modal } from "../components/modal.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { agentSourceLogoUrl } from "./agent-source-logos.js";
-import { DEFAULT_GRANT_MINUTES, GrantDurationPicker } from "./collab-assist-view.js";
+import { DEFAULT_GRANT_MINUTES, GrantDurationPicker, assistWaitedText } from "./collab-assist-view.js";
 import styles from "./collab-assist-dialog.module.css";
 
 export function CollabAssistDialog(props: {
@@ -77,6 +77,7 @@ export function CollabAssistDialog(props: {
   const requester = request.requester.name;
   const chosen = agents?.find((item) => item.sourceId === agent) ?? null;
   const agentName = chosen?.name ?? t("collab.assist.executorFallback");
+  const waited = assistWaitedText(request.waitingSeconds, t);
   const others = agents?.filter((item) => item.group === "other") ?? [];
 
   async function submit(action: "allow" | "reject") {
@@ -129,7 +130,10 @@ export function CollabAssistDialog(props: {
       <div className={styles.sect}>
         <div className={styles.sectKey}>
           <Folder size={13} aria-hidden="true" />
-          {t("collab.assist.fromProject", { project: request.projectName })}
+          {/* 请求等了一段时间才被看到（比如她刚上线）：写明多久前发起，旧了她可以直接拒绝。 */}
+          {waited
+            ? t("collab.assist.fromProjectWaited", { project: request.projectName, waited })
+            : t("collab.assist.fromProject", { project: request.projectName })}
         </div>
         <div className={styles.todo}>
           <ol>

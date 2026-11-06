@@ -1062,3 +1062,153 @@ async function until(check: () => boolean): Promise<void> {
   }
   throw new Error("等待超时");
 }
+
+describe("when the executor is offline", () => {
+  const OFFLINE = { status: "pending", agent: null, scope: null, executorOnline: false, mine: true, requester: ME, executor: MEMBER };
+
+  it("says so when sending, and tells an external Agent not to wait", async () => {
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
+      return request(OFFLINE);
+    });
+    const service = createCollabAssistService({ cloud, homeDirectory: home(), projectDirectory: async () => null, agents: async () => [], runner: runner() });
+
+    const created = await service.createRequest({ project: "Memmy 内测反馈", member: "孙起", title: "查日志", items: ["看日志"], via: "Codex" });
+
+    expect(created.request.executorOffline).toBe(true);
+    expect(created.text).toContain("孙起目前不在线，打开 Memmy 后会看到这次请求；24 小时内没有处理会自动过期。");
+    expect(created.text).toContain("不要运行 assist wait");
+    expect(created.text).not.toContain("每次最多等 90 秒");
+  });
+
+  it("explains that a timed permission only runs if she comes online before it ends", async () => {
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
+      return { ...request(OFFLINE), activeGrant: { agent: "claude_code", remainingSeconds: 1800, expiresAt: "2026-11-06T07:30:00Z" } };
+    });
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => null,
+      agents: async () => [],
+      runner: runner()
+    });
+
+    const created = await service.createRequest({ project: "Memmy 内测反馈", member: "孙起", title: "查日志", items: ["看日志"], via: "Codex" });
+
+    // 到期时刻按本机时钟加上云端给的剩余秒数换算。
+    expect(created.text).toMatch(/孙起给你的限时授权到 (\d{2}:\d{2})，但孙起目前不在线：孙起在 \1 前打开 Memmy，孙起的 Claude Code 会直接执行；之后打开则需要孙起重新授权。/u);
+  });
+
+  it("does not hold the Agent for 90 seconds while she is offline", async () => {
+    const { cloud } = fakeCloud(() => ({ request: request(OFFLINE) }));
+    const service = createCollabAssistService({ cloud, homeDirectory: home(), projectDirectory: async () => null, agents: async () => [], runner: runner() });
+
+    const started = Date.now();
+    const waited = await service.waitRequest(request().id, { timeoutMs: 90_000 });
+
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(waited.text).toContain("孙起目前不在线");
+    expect(waited.text).toContain("不必继续等待");
+    expect(waited.text).not.toContain("继续等待，不要重新发请求");
+  });
+
+  it("keeps waiting as before once she is online", () => {
+    const text = pendingText(toAssistRequest(request({ ...OFFLINE, executorOnline: true })));
+    expect(text).not.toContain("不在线");
+    expect(text).toContain("继续等待，不要重新发请求");
+  });
+});
+
+describe("telling the requester when an external Agent's request ends", () => {
+  it("notifies once the Agent has not picked up the result for a while", async () => {
+    let clock = new Date("2026-11-06T07:00:00Z");
+    let status = "pending";
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
+      if (path === "/assist/outbox") return { requests: status === "pending" ? [request({ status, mine: true })] : [] };
+      if (path === "/assist/inbox") return { requests: [] };
+      if (path.startsWith("/assist/requests/")) {
+        return { request: request({ status, mine: true, requester: ME, executor: MEMBER, deliveredAt: null }) };
+      }
+      return request({ status: "pending", agent: null, scope: null, mine: true, requester: ME, executor: MEMBER });
+    });
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => null,
+      agents: async () => [],
+      runner: runner(),
+      now: () => clock
+    });
+    const created = await service.createRequest({ project: "Memmy 内测反馈", member: "孙起", title: "查日志", items: ["看日志"], via: "Codex" });
+
+    await service.pollNow();
+    expect(await service.outcomes()).toEqual([]);
+
+    status = "expired";
+    await service.pollNow();
+    // 刚结束：Agent 可能正在 assist wait，先给它时间自己取走。
+    expect(await service.outcomes()).toEqual([]);
+
+    clock = new Date(clock.getTime() + 25_000);
+    await service.pollNow();
+    const outcomes = await service.outcomes();
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ requestId: created.request.id, status: "expired", via: "Codex", executor: { name: "孙起" } });
+
+    await service.dismissOutcome(created.request.id);
+    expect(await service.outcomes()).toEqual([]);
+  });
+
+  it("does not notify when the Agent already received the result", async () => {
+    let clock = new Date("2026-11-06T07:00:00Z");
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
+      if (path === "/assist/outbox" || path === "/assist/inbox") return { requests: [] };
+      if (path.startsWith("/assist/requests/")) {
+        return { request: request({ status: "done", reply: "日志正常", mine: true, requester: ME, executor: MEMBER, deliveredAt: null }) };
+      }
+      return request({ status: "pending", agent: null, scope: null, mine: true, requester: ME, executor: MEMBER });
+    });
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => null,
+      agents: async () => [],
+      runner: runner(),
+      now: () => clock
+    });
+    const created = await service.createRequest({ project: "Memmy 内测反馈", member: "孙起", title: "查日志", items: ["看日志"], via: "Codex" });
+
+    // Agent 在本轮 assist status 取走了结果。
+    await service.agentStatus(created.request.id);
+    clock = new Date(clock.getTime() + 60_000);
+    await service.pollNow();
+    await service.pollNow();
+
+    expect(await service.outcomes()).toEqual([]);
+  });
+
+  it("does not watch requests sent from a Memmy task: those results go back into the task", async () => {
+    const clock = new Date("2026-11-06T07:00:00Z");
+    const { cloud } = fakeCloud((path) => {
+      if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
+      if (path === "/assist/outbox" || path === "/assist/inbox") return { requests: [] };
+      if (path.startsWith("/assist/requests/")) return { request: request({ status: "expired", mine: true, requester: ME, executor: MEMBER }) };
+      return request({ status: "pending", agent: null, scope: null, mine: true, requester: ME, executor: MEMBER });
+    });
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => null,
+      agents: async () => [],
+      runner: runner(),
+      now: () => clock
+    });
+    await service.createRequest({ project: "Memmy 内测反馈", member: "孙起", title: "查日志", items: ["看日志"], via: "Memmy", sourceTask: "chat-1" });
+
+    await service.pollNow();
+    expect(await service.outcomes()).toEqual([]);
+  });
+});

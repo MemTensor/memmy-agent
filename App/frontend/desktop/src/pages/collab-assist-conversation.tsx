@@ -652,6 +652,11 @@ function ThinkingLine(props: { text: string; truncated?: boolean; t: Translate }
   );
 }
 
+/** 还在等她处理、而她此刻不在线：补一句她打开 Memmy 后才会看到。 */
+function offlineSuffix(request: AssistRequest, executor: string, t: Translate): string {
+  return request.executorOffline ? ` · ${t("collab.assist.conv.offline", { executor })}` : "";
+}
+
 /** 执行方的决定：一行说明谁允许、由哪个 Agent、授权到什么程度，或者为什么没有执行。 */
 function decisionText(
   request: AssistRequest,
@@ -663,11 +668,11 @@ function decisionText(
   const executor = thread.executor.name;
   switch (request.status) {
     case "pending":
-      return request.autoRun
+      return (request.autoRun
         ? t("collab.assist.conv.decision.autoPending", { executor, agent })
-        : t("collab.assist.conv.decision.pending", { executor });
+        : t("collab.assist.conv.decision.pending", { executor })) + offlineSuffix(request, executor, t);
     case "confirm":
-      return t("collab.assist.conv.decision.confirm", { executor });
+      return t("collab.assist.conv.decision.confirm", { executor }) + offlineSuffix(request, executor, t);
     case "stopped":
       // 谁停的按看的人写：本人停的就是「你停止了这次执行」。
       return assistStopText(request, t);
@@ -676,7 +681,7 @@ function decisionText(
     case "cancelled":
       return t("collab.assist.conv.decision.cancelled");
     case "expired":
-      return t("collab.assist.conv.decision.expired");
+      return t("collab.assist.conv.decision.expired", { executor });
     default:
       break;
   }

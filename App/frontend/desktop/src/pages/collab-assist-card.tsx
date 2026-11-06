@@ -109,9 +109,11 @@ export function CollabAssistRequestCard(props: {
         {status === "pending" ? (
           <>
             <span className={styles.spin} />
+            {/* 她不在线时不写「已通知」：她打开 Memmy 之前看不到，按限时授权也要等她上线后才执行。 */}
             {request.autoRun && request.grant
-              ? t("collab.assist.footerAutoRun", { name: executor, agent: plannedAgent, time: assistClock(request.grant.expiresAt, true) })
-              : t("collab.assist.footerWaiting", { name: executor })}
+              ? t(request.executorOffline ? "collab.assist.footerAutoRunOffline" : "collab.assist.footerAutoRun",
+                { name: executor, agent: plannedAgent, time: assistClock(request.grant.expiresAt, true) })
+              : t(request.executorOffline ? "collab.assist.footerOffline" : "collab.assist.footerWaiting", { name: executor })}
             <span className={styles.grow} />
             <button type="button" className={`${styles.linkButton} ${styles.linkMuted}`} disabled={busy} onClick={() => void cancel()}>
               {t("collab.assist.withdraw")}
@@ -133,7 +135,7 @@ export function CollabAssistRequestCard(props: {
         ) : status === "confirm" ? (
           <>
             <AlertCircle size={13} aria-hidden="true" />
-            {t("collab.assist.footerConfirm", { name: executor })}
+            {t(request.executorOffline ? "collab.assist.footerConfirmOffline" : "collab.assist.footerConfirm", { name: executor })}
             <span className={styles.grow} />
             <button type="button" className={`${styles.linkButton} ${styles.linkMuted}`} disabled={busy} onClick={() => void cancel()}>
               {t("collab.assist.withdraw")}
@@ -162,7 +164,9 @@ export function CollabAssistRequestCard(props: {
         ) : (
           <>
             <WifiOff size={13} aria-hidden="true" />
-            {request.failure ?? t("collab.assist.footerClosed")}
+            {request.failure ?? (status === "expired"
+              ? t("collab.assist.footerExpired", { name: executor })
+              : t("collab.assist.footerClosed"))}
           </>
         )}
       </div>
