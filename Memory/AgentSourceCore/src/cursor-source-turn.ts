@@ -38,6 +38,8 @@ export interface CursorVscdbSource {
 
 const USER_BUBBLE = 1;
 const ASSISTANT_BUBBLE = 2;
+// Cursor's SimulatedMsgReason.BACKGROUND_TASK_COMPLETION.
+const BACKGROUND_TASK_COMPLETION = 3;
 
 interface CursorBubble {
   bubbleId: string;
@@ -45,6 +47,7 @@ interface CursorBubble {
   createdAt: string;
   text: string;
   requestId: string;
+  backgroundTaskNotification: boolean;
   tool?: Record<string, unknown>;
 }
 
@@ -112,6 +115,11 @@ export async function* readCursorComposer(
     if (!isRecord(header)) continue;
     const bubble = readBubble(source, composerId, header);
     if (!bubble) continue;
+    // Close the real turn before the notification and ignore its replies until the next user turn.
+    if (bubble.backgroundTaskNotification) {
+      yield* finish(false);
+      continue;
+    }
     // A user bubble with no typed text is an injected context message, not a new turn.
     if (bubble.type === USER_BUBBLE && bubble.text.trim()) {
       yield* finish(false);
@@ -143,7 +151,7 @@ export function resolveCursorTurnId(
   for (const header of headers) {
     if (!isRecord(header) || header.type !== USER_BUBBLE) continue;
     const bubble = readBubble(source, composerId, header);
-    if (bubble?.requestId === requestId && bubble.text.trim()) return bubble.bubbleId;
+    if (bubble?.requestId === requestId && !bubble.backgroundTaskNotification && bubble.text.trim()) return bubble.bubbleId;
   }
   return undefined;
 }
@@ -205,6 +213,7 @@ function readBubble(source: CursorVscdbSource, composerId: string, header: Recor
     createdAt: iso(raw.createdAt) || iso(header.createdAt),
     text: text(raw.text).trim(),
     requestId: text(raw.requestId),
+    backgroundTaskNotification: type === USER_BUBBLE && raw.isSimulatedMsg === true && raw.simulatedMsgReason === BACKGROUND_TASK_COMPLETION,
     tool: isRecord(raw.toolFormerData) ? raw.toolFormerData : undefined
   };
 }
