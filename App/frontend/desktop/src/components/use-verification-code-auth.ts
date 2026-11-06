@@ -19,6 +19,24 @@ const invalidCodeBackendMarkers = [
 
 type AuthTranslate = (key: MessageKey, values?: MessageValues) => string;
 
+type AuthRequestFailure = "rateLimited" | "timeout" | "connection" | "server";
+const codeRequestFailureKeys: Record<AuthRequestFailure, MessageKey> = {
+  rateLimited: "login.codeRequestRateLimited",
+  timeout: "login.codeRequestTimeout",
+  connection: "login.codeConnectionFailed",
+  server: "login.codeRequestFailed"
+};
+
+function classifyAuthRequestFailure(error: unknown): AuthRequestFailure | null {
+  if (error instanceof ApiRequestError) {
+    if (error.code === "rate_limited" || error.status === 429) return "rateLimited";
+    if (error.status === 408 || error.status === 504) return "timeout";
+    if (error.status >= 500) return "server";
+  }
+  if (error instanceof TypeError) return "connection";
+  return null;
+}
+
 export type AuthIdentifierValidationReason = "required" | "invalidEmail" | "invalidPhone";
 
 export type AuthIdentifierValidationResult =
@@ -95,6 +113,15 @@ export function resolveAuthErrorMessage(
   }
 
   const normalized = rawMessage.trim().toLowerCase();
+  const failure = classifyAuthRequestFailure(error);
+
+  if (failure === "rateLimited") {
+    return t("login.error.rateLimited");
+  }
+
+  if (failure === "timeout") {
+    return t("login.error.requestTimeout");
+  }
 
   if (
     channel === "email" &&
@@ -124,35 +151,52 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
   const [feedback, setFeedback] = useState<AuthCodeFeedback | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const interactionVersionRef = useRef(0);
+  const sendAttemptRef = useRef<number | null>(null);
+  const resendAllowedAtRef = useRef(0);
   const loginAttemptRef = useRef<number | null>(null);
+  const cooldownFeedbackRef = useRef<AuthCodeFeedback | null>(null);
+
+  const updateCountdown = useCallback(() => {
+    const remaining = Math.max(0, Math.ceil((resendAllowedAtRef.current - Date.now()) / 1000));
+    setCountdown(remaining);
+    if (remaining === 0) {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      const expiredFeedback = cooldownFeedbackRef.current;
+      cooldownFeedbackRef.current = null;
+      if (expiredFeedback) setFeedback(current => current === expiredFeedback ? null : current);
+    }
+  }, []);
 
   useEffect(() => {
+    window.addEventListener("focus", updateCountdown);
+    document.addEventListener("visibilitychange", updateCountdown);
     return () => {
+      window.removeEventListener("focus", updateCountdown);
+      document.removeEventListener("visibilitychange", updateCountdown);
+      interactionVersionRef.current += 1;
       if (timerRef.current) {
         clearInterval(timerRef.current);
       }
     };
-  }, []);
+  }, [updateCountdown]);
 
   function startCountdown(seconds: number) {
-    setCountdown(seconds);
+    // The local API's resend window is at most 60 seconds. Preserve a valid
+    // remaining delay; use the normal window for invalid/zero values.
+    const delay = Number.isSafeInteger(seconds) && seconds > 0
+      ? Math.min(seconds, fallbackResendSeconds)
+      : fallbackResendSeconds;
+    resendAllowedAtRef.current = Date.now() + delay * 1000;
+    setCountdown(delay);
 
     if (timerRef.current) {
       clearInterval(timerRef.current);
     }
 
-    timerRef.current = setInterval(() => {
-      setCountdown((previous) => {
-        if (previous <= 1) {
-          if (timerRef.current) {
-            clearInterval(timerRef.current);
-            timerRef.current = null;
-          }
-          return 0;
-        }
-        return previous - 1;
-      });
-    }, 1000);
+    timerRef.current = setInterval(updateCountdown, 1000);
   }
 
   function isCurrentInteraction(version: number): boolean {
@@ -160,6 +204,7 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
   }
 
   const clearFeedback = useCallback(() => {
+    cooldownFeedbackRef.current = null;
     setFeedback(null);
   }, []);
 
@@ -168,7 +213,10 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
     setSending(false);
     setCountdown(0);
     setLoginPending(false);
+    sendAttemptRef.current = null;
+    resendAllowedAtRef.current = 0;
     loginAttemptRef.current = null;
+    cooldownFeedbackRef.current = null;
     setFeedback(null);
 
     if (timerRef.current) {
@@ -185,13 +233,15 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
       return;
     }
 
-    if (!clients || sending || countdown > 0) {
+    if (!clients || sendAttemptRef.current !== null || sending || Date.now() < resendAllowedAtRef.current) {
       return;
     }
 
+    updateCountdown();
     setSending(true);
     setFeedback(null);
     const interactionVersion = interactionVersionRef.current;
+    sendAttemptRef.current = interactionVersion;
     track({ name: "send_verification_code", params: { page_path: "login_flow", channel }, consentTier: "basic" });
 
     try {
@@ -201,14 +251,28 @@ export function useVerificationCodeAuth(): UseVerificationCodeAuthResult {
       if (!isCurrentInteraction(interactionVersion)) {
         return;
       }
-      startCountdown(result.resendAfterSec > 0 ? result.resendAfterSec : fallbackResendSeconds);
+      startCountdown(result.resendAfterSec);
     } catch (error) {
       if (!isCurrentInteraction(interactionVersion)) {
         return;
       }
-      setFeedback({ text: resolveAuthErrorMessage(error, channel, t, "login.sendCodeFailed"), tone: "error" });
+      const failure = classifyAuthRequestFailure(error);
+      // Failed requests still need a retry buffer to avoid duplicate sends and throttling.
+      if (failure !== null) {
+        startCountdown(error instanceof ApiRequestError ? error.retryAfterSec ?? fallbackResendSeconds : fallbackResendSeconds);
+      }
+      const failureFeedback: AuthCodeFeedback = {
+        text: failure !== null
+          ? t(codeRequestFailureKeys[failure])
+          : resolveAuthErrorMessage(error, channel, t, "login.sendCodeFailed"),
+        tone: "error"
+      };
+      cooldownFeedbackRef.current = failure !== null ? failureFeedback : null;
+      setFeedback(failureFeedback);
+      updateCountdown();
     } finally {
       if (isCurrentInteraction(interactionVersion)) {
+        sendAttemptRef.current = null;
         setSending(false);
       }
     }
