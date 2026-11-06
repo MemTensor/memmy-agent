@@ -156,7 +156,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
   const recoveries = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   const wantsEnabled = (plugin: PluginRecord) => plugin.desiredEnabled ?? ["active", "enabling"].includes(plugin.state);
   const needsGateway = (plugin: PluginRecord) => plugin.manifest.permissions.some(permission => permission.type === "host-service"
-    && permission.services.some(name => ["collector", "recording", "event-sessions", "window-focus"].includes(name)));
+    && permission.services.includes("event-sessions"));
   const cancelRecovery = (id: string) => {
     const recovery = recoveries.get(id); if (!recovery) return;
     recovery.controller.abort();

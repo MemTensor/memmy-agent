@@ -3354,7 +3354,7 @@ export class WebSocketChannel extends BaseChannel {
           const workspace = selected?.ok && selected.context.cwd ? selected.context.cwd : this.workspacePath;
           skills = new SkillsLoader(workspace).listSkills(false).map(({ name, path }) => ({ name, path }));
         }
-        return httpJsonResponse(await invokeNativePluginService(raw, () => this.computerHistory.recorderBusy,
+        return httpJsonResponse(await invokeNativePluginService(raw,
           { history: this.computerHistory, toolNames: this.runtimeToolNames?.() ?? [], skills }));
       } catch (error) { return httpError(409, error instanceof Error ? error.message : "Plugin host service failed"); }
     }

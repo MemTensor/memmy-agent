@@ -229,7 +229,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getPlugin: (id) => pluginRepository.get(id), authHeaders: pluginRegistryAuthHeaders, isEntitlementGranted
     }) },
     { services: ["asr"], invoker: createPluginAsrService({ asr: asrService, audioRoots: pluginAudioRoots }) },
-    { services: ["plugin-context", "skills", "collector", "recording", "window-focus", "event-sessions"], invoker: native.hostServices }
+    { services: ["plugin-context", "skills", "event-sessions"], invoker: native.hostServices }
   ]);
   const staticPluginSkills = createPluginSkillManager({ skillsRoot: join(agentWorkspace, "skills") });
   const pluginSkills = {
