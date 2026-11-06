@@ -1,0 +1,53 @@
+---
+title: Projects and working folders
+description: Choose the folder that holds the material, and keep related tasks in one project.
+icon: FolderOpen
+---
+
+import addScreen from "../../assets/projects-add-full-en.jpg";
+import menuScreen from "../../assets/projects-menu-full-en.jpg";
+import removeScreen from "../../assets/projects-remove-full-en.jpg";
+
+When the same work needs several chats and the same set of files, create a project. A project is one local folder, and its tasks are listed under it.
+
+## Open the materials folder
+
+1. Beside the **Projects** title on the left, choose the **Add project** icon.
+2. In the menu, choose **Open local folder**, then select the materials folder in the system window.
+3. Back in Memmy, confirm that the project name appears under the input, then type the task.
+
+You can also choose **Choose project** under the input on a new task, then pick an existing project or open another folder.
+
+<ProductScreenshot src={addScreen} alt="Full Memmy window with Open local folder in the add-project menu" />
+
+## Organize projects
+
+Hover the project name and choose **…** on the right to open **Project actions**.
+
+<div className="docs-actions-table">
+
+| Action | What it does |
+| --- | --- |
+| **Pin project** | Move a project you use often into the pinned area. |
+| **Show in folder** | Reveal the local folder in the system file manager. |
+| **Mark all as read** | Mark the tasks in this project as read. |
+| **Archive tasks** | Archive that project’s tasks. A running task is not stopped. Find them again from the task-list actions, under archived only. |
+| **Remove project** | Remove the project and permanently delete the tasks in it. The folder and files on disk stay. The confirmation shows how many tasks will be deleted. |
+
+</div>
+
+<ProductScreenSteps steps={[
+  { label: "Project actions", src: menuScreen, alt: "Full Memmy window with pin, reveal, mark as read, archive, and remove for a project", caption: "To the right of the project name are the new-task icon and the … menu. Choosing the name itself expands or collapses the task list." },
+  { label: "Check before removing", src: removeScreen, alt: "Full Memmy window warning that removing the project permanently deletes two tasks", caption: "The confirmation states both the task count and that files on disk stay. Choose Cancel if you do not want to remove it." }
+]} />
+
+<details>
+<summary>The folder will not open, or the material is missing</summary>
+
+Confirm the folder was not moved or deleted, and that an external disk is still connected. Then choose **Open local folder** again. For a single file, you can also add it with **+** beside the input.
+
+</details>
+
+## Related
+
+[Use and preview files](/docs/en/desktop/files)

@@ -13,13 +13,17 @@ cp .env.example .env         # 已预填云服务地址，开箱即用
 bash scripts/dev-start.sh    # 装依赖 → 构建 → 起全套服务
 ```
 
-`scripts/dev-start.sh` 一条命令完成全部：自动安装依赖、构建 Memory 与 memmy-agent、把 `memmy` / `memmy-memory` CLI 安装到 `~/.local/bin`，并同时拉起 Memory、Agent API、Gateway、前端和桌面后端。启动后在弹出的桌面应用里完成账号登录或 BYOK 配置，脚本会在模型配置写好后自动启动 agent 服务。
+`scripts/dev-start.sh` 会安装依赖，构建 memmy-agent 和 Memory CLI，并把 `memmy` / `memmy-memory` 链到 `~/.local/bin`。它直接拉起的是 Agent API、前端和 Electron。Memory 与 Gateway 由 Electron 管理。Agent API 会等到账号或 BYOK 的模型配置写好后再启动。
 
 > `.env` 中 `MEMMY_CLOUD_SERVICE` 默认指向 `https://api.memmy.cn`（只填写域名，不要追加 `/api`，客户端会自动拼接接口路径），复制即连官方云服务——无需自建后端、无需自备 API Key。Windows 请在 Git Bash 中运行；脚本会把 `~/.local/bin` 加入 PATH。
 
 ## 环境要求
 
-Node.js `>=22` + npm。根目录 workspace 包括 `Memory`、`App/backend/local-api-contracts`、`App/backend`、`App/frontend/*`、`App/shell/desktop/interface`、`App/shell/*`。
+本地开发使用 Node.js 22 或更高版本，加上 npm。`App/memmy-agent` 的 `engines` 要求 `>=22`。根目录 `package.json` 的 `engines` 仍写着 `>=20`，本地开发以 22 为准。
+
+Linux CLI 安装器另有门槛：只接受 Node.js 22.23.4 及以上的 22.x、24.22.1 及以上的 24.x，或 26.12.1 及以上的 26.x。其他主版本会被拒绝。这个检查只在 `scripts/install.sh` 里，不改变上面的本地开发要求。
+
+根目录 workspace 包括 `Migrations`、`AgentSourceCore`、`Knowledge`、`Memory`、`App/backend/local-api-contracts`、`App/backend`、`App/frontend/*`、`App/shell/desktop/interface`、`App/shell/*`。
 
 ## 常用命令
 

@@ -5,8 +5,6 @@ icon: PanelsTopLeft
 
 Memmy TUI 是 Memmy 的全屏终端界面。安装桌面端，或只安装 CLI，都可以在终端执行 `memmy` 使用它。
 
-![image.png](../../assets/tui.png)
-
 ## 一、安装 Memmy TUI
 
 ### 方式一：安装 Memmy 桌面端
@@ -36,7 +34,7 @@ source ~/.zshrc
 
 ### 方式二：只安装 Memmy CLI
 
-适用于不需要桌面端的 Linux x64 或 arm64 环境。需要 Node.js `22` 或更高版本，并且系统支持 `systemd --user`。
+适用于不需要桌面端的 Linux x64 或 arm64 环境。安装器只接受 Node.js 22.23.4 及以上的 22.x、24.22.1 及以上的 24.x，或 26.12.1 及以上的 26.x，并且系统要支持 `systemd --user`。其他主版本会被拒绝。
 
 ```plaintext
 curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
@@ -67,7 +65,7 @@ memmy onboard
 memmy status
 ```
 
-- `memmy onboard --defaults`：创建或刷新配置文件和 workspace，非交互式配置。
+- `memmy onboard --defaults`：创建或刷新配置文件和 workspace。配置还不存在，或当前不是交互终端时，这一步不会提问。配置已经存在，并且当前是交互终端时，会询问是否用默认值覆盖。
 
 - `memmy onboard`：配置模型、Provider、Gateway、Memory 和工具，交互式配置。
 
@@ -123,7 +121,7 @@ echo "总结这个项目" | memmy agent
 
 ## 四、发送任务
 
-在 `❯` 后面输入内容，按 `Enter` 发送。TUI 当前没有桌面端工作台的 `Shift + Enter` 换行操作，`Enter` 始终表示提交。
+在 `❯` 后面输入内容，按 `Enter` 发送。TUI 当前没有工作台的 `Shift + Enter` 换行操作，`Enter` 始终表示提交。
 
 长文本可以在终端中自动视觉换行，但不会插入多行内容。需要发送多行文本时，请使用：
 
@@ -145,7 +143,7 @@ printf '第一行\n第二行\n' | memmy agent
 
 如果当前回合来自桌面端或其他 IM 渠道，TUI 不会接管它；请使用 `Enter` 排队。
 
-队列中有任务时，界面会显示排队数量、消息预览和消息来源。
+队列中有任务时，界面会显示排队数量、消息预览和消息来源。预览最多列出 3 条。
 
 ## 五、键盘操作
 
@@ -165,9 +163,9 @@ printf '第一行\n第二行\n' | memmy agent
 | 删除字符 | `Backspace` / `Delete` | `Backspace` / `Delete` | `Backspace` / `Delete` |
 | 停止自己执行的回合并退出 | `Ctrl + C` | `Ctrl + C` | `Ctrl + C` |
 
-在 macOS 上，`⌘` 是 Command 键；Windows/Linux 使用 `Ctrl` 作为主要组合键。`Shift + Enter` 在所有平台上都不会插入换行，而是提交当前消息。
+在 macOS 上，`⌘` 是 Command 键；Windows/Linux 使用 `Ctrl` 作为主要组合键。`Shift + Enter` 在所有平台上都不会插入换行，而是提交当前消息。`Backspace` 和 `Delete` 都删除光标前的一个字符。
 
-也可以输入以下任意命令退出：
+也可以输入以下任意命令退出。它们只离开当前 TUI，不会停止正在执行的回合，包括这个 TUI 自己正在跑的回合：
 
 ```plaintext
 exit
@@ -177,11 +175,9 @@ quit
 :q
 ```
 
-如果任务由其他渠道执行，`Ctrl + C` 只会退出当前 TUI，不会停止其他渠道的任务。
+当前回合属于这个 TUI 时，`Ctrl + C` 会先停止该回合，再退出。回合由其他渠道执行时，`Ctrl + C` 只退出当前 TUI。
 
 ## 六、Slash 命令
-
-![Slash 命令菜单](../../assets/tui-slash-command-menu.png)
 
 TUI 支持 Slash 命令候选菜单。在输入区输入 `/` 即可打开菜单，继续输入命令名称（例如 `/go`）会筛选候选命令。输入空格进入参数或子命令后，候选菜单会关闭。
 
@@ -201,11 +197,15 @@ TUI 支持 Slash 命令候选菜单。在输入区输入 `/` 即可打开菜单�
 
 - `/stop` 只有在当前回合由该 TUI 执行时才显示。
 
+- `/new` 在当前回合由其他渠道执行时不显示。
+
 - `/restart` 不显示，也不能在 TUI 中执行。
 
-- `exit`、`quit`、`/exit`、`/quit`、`:q` 可以退出，但只有 `/quit` 出现在菜单中。
+- `exit`、`quit`、`/exit`、`/quit`、`:q` 可以退出，但只有 `/quit` 出现在菜单中。这些命令不会停止正在执行的回合。
 
-- `/history-dag` 是否出现取决于对应功能是否启用。
+- `/history-dag` 是否出现取决于 `sessionDag.enabled`，该开关默认开启。
+
+- `/dream`、`/dream-log`、`/dream-restore` 只在 `fileMemory.enabled` 为 true 时出现。这个开关默认关闭。
 
 - 初始最多显示 8 个候选项，可继续输入命令前缀筛选其他命令。
 
@@ -215,32 +215,35 @@ TUI 支持 Slash 命令候选菜单。在输入区输入 `/` 即可打开菜单�
 | `/status` | 无 | 查看运行状态、Provider 和渠道状态 |
 | `/model` | 无 | 查看当前模型配置 |
 | `/model list` | 无 | 列出模型预设 |
-| `/model <preset>` | 模型预设名 | 切换模型预设，例如 `/model fast` |
+| `/model <名称>` | 预设名，或只对应一个可用模型的名称 | 切换当前会话的模型。名称对应多个预设时，改用预设名。候选菜单不列出预设标识，补全 `/model` 后自己输入 |
 | `/history` | 无 | 查看会话历史 |
 | `/history <n>` | 消息数量 | 查看最近 `n` 条历史消息 |
 | `/history-dag` | 无 | 查看会话历史 DAG |
-| `/new` | 无 | 停止当前任务并开始新对话 |
+| `/new` | 无 | 停止当前任务并开始新对话。当前回合由其他渠道执行时，菜单中不显示 |
 | `/stop` | 无 | 停止当前由这个 TUI 执行的回合；不会停止其他渠道的任务 |
 | `/restart` | 无 | TUI 不接受此控制命令；请退出后重启 Gateway |
 | `/last-compaction` | 无 | 查看当前会话最近一次上下文压缩摘要 |
-| `/quit` | 无 | 退出 TUI，不停止其他渠道正在执行的回合 |
+| `/quit` | 无 | 退出 TUI，不停止正在执行的回合 |
 | `/goal` | 无 | 查看当前持久目标 |
 | `/goal status` | 无 | 查看持久目标状态 |
 | `/goal help` | 无 | 查看 Goal 子命令帮助 |
 | `/goal <objective>` | 目标内容 | 创建持久目标的简写形式 |
 | `/goal create <objective>` | 目标内容 | 创建持久目标 |
-| `/goal pause` | 无 | 暂停目标 |
-| `/goal resume` | 无 | 恢复目标 |
-| `/goal edit <objective>` | 新目标内容 | 修改目标 |
+| `/goal pause` | 无 | 暂停目标，并停止当前目标回合 |
+| `/goal resume` | 无 | 恢复已暂停、受阻或达到用量上限的目标 |
+| `/goal edit <objective>` | 新目标内容 | 修改目标。正在执行或已完成时不能修改 |
 | `/goal budget <n\|none>` | 数字或 `none` | 设置或清除目标预算 |
 | `/goal clear` | 无 | 清除目标 |
+| `/dream` | 无 | 手动整理记忆。仅 `fileMemory.enabled` 为 true 时出现 |
+| `/dream-log` | 无 | 查看最近一次 Dream 改了什么 |
+| `/dream-restore` | 无 | 把记忆恢复到上一个 Dream 快照 |
 | `/pairing` | 无 | 查看或管理渠道配对 |
 | `/pairing list` | 无 | 查看渠道配对请求 |
 | `/pairing approve <code>` | 配对码 | 批准配对请求 |
 | `/pairing deny <code>` | 配对码 | 拒绝配对请求 |
-| `/pairing revoke <user_id>` | 用户 ID | 撤销用户配对 |
+| `/pairing revoke <user_id>` | 用户 ID，或 `revoke <channel> <user_id>` | 撤销用户配对 |
 
-`/history-dag` 是否可用，取决于对应功能是否在配置中启用。
+`/history-dag` 是否可用，取决于配置里的 `sessionDag.enabled`。默认开启。
 
 ## 七、常见问题
 

@@ -1,0 +1,44 @@
+---
+title: Host-managed Agent
+icon: Shield
+---
+
+This page is for an application that embeds the Agent and approves tools itself. Standalone `memmy serve` does not use these settings. See [OpenAI-Compatible API](/docs/en/reference/openai-api).
+
+The former `MEMMATE_*` settings, the corresponding request header, and the `memmate_permission` request field are no longer recognized. Upgrade the host together with the Agent, and check the protocol below before rollout.
+
+## Environment variables
+
+| Variable | What it does |
+| --- | --- |
+| `AGENT_MANAGED_EXECUTION_REQUIRED` | Set to `1` to run in host-managed mode. Without it, the Agent runs standalone. |
+| `AGENT_RUNTIME_TOKEN` | At least 32 characters. The `x-agent-runtime-token` request header must match it exactly, or the response is 401. |
+| `AGENT_MACOS_SANDBOX` | When set to `1`, the health field `macosSandbox` is `true`. |
+
+## Requests
+
+In managed mode, `POST /v1/chat/completions` must be JSON. Multipart is rejected. The body includes `managed_execution`:
+
+| Field | Requirement |
+| --- | --- |
+| `protocol` | Must be `2`. |
+| `tools` | A non-empty array. Each item needs string `name` and `description`, plus an object `inputSchema`. |
+| `url` | Only `http://127.0.0.1:<port>/authorize`. No username, password, query, or fragment. |
+| `token` | 64 lowercase hex characters. The Agent sends it as `Authorization: Bearer` when it calls this URL. |
+
+A read grant does not cover descendant paths. `read_file`, `list_dir`, `find_files`, `grep`, and `authorize_read_path` include `fileAccessProtocol: 1`. Each path that will actually be read must pass `authorize_read_path` before the read.
+
+When the host returns `decision: "allow"`, `result` must be a string. A denial or execution failure is handled from `decision`, `reason`, or `error.kind` / `error.code`.
+
+## Health check
+
+When `AGENT_MANAGED_EXECUTION_REQUIRED=1`, `GET /health` adds these fields beside `status: "ok"`:
+
+| Field | Value |
+| --- | --- |
+| `permissionProtocol` | `1` |
+| `managedExecutionProtocol` | `2` |
+| `managedExecutionRequired` | `true` |
+| `macosSandbox` | `true` when `AGENT_MACOS_SANDBOX` is `1`, otherwise `false` |
+
+Without host-managed mode, the health check returns only `status`.

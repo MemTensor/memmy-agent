@@ -1,20 +1,92 @@
 ---
-title: Settings
+title: Account and settings
+description: Add a model configuration, choose the model for a task, and adjust desktop preferences.
 icon: Settings
 ---
 
-| Section | Contents |
-| --- | --- |
-| Account | Nickname editing, full contact info, sign out / exit local mode |
-| Models | Switch between platform mode and own-model mode; configure primary / memory summary / skill evolution / Embedding / ASR / image generation models |
-| Tokens | Platform-granted token or BYOK usage stats, low-balance alerts, request more |
-| General | Simplified Chinese / English |
-| Window | Default launch mode (pet / full / last used), close behavior, menu bar icon |
-| Notifications | Update notifications, task completion notifications, sounds |
-| Privacy | Memory improvement program toggle, data agreement |
-| Developer | Log level, open log directory, export redacted diagnostic report |
-| About | Version, check for updates, terms of service |
+Choose the settings icon at the lower left of the workbench. **Model configuration** on the left manages the models you can use. The model for the current task is chosen from **Conversation model** beside the workbench input.
 
-<Callout>
-  Diagnostic reports contain no secrets, tokens, account identifiers, prompts, or task messages.
-</Callout>
+import modelsScreen from "../../assets/settings-models-full-en.jpg";
+import addScreen from "../../assets/settings-add-full-en.jpg";
+import capabilitiesScreen from "../../assets/settings-capabilities-full-en.jpg";
+import taskModelsScreen from "../../assets/settings-task-models-full-en.jpg";
+import conversationScreen from "../../assets/settings-conversation-full-en.jpg";
+import accountScreen from "../../assets/settings-account-full-en.jpg";
+import preferencesScreen from "../../assets/settings-preferences-full-en.jpg";
+import usageScreen from "../../assets/settings-usage-full-en.jpg";
+import diagnosticsScreen from "../../assets/settings-diagnostics-full-en.jpg";
+
+## Choose a model source
+
+After you sign in to a Memmy account, you can use the platform models available on that account, or add your own API key. If you do not want to sign up, choose **Use a custom LLM API Key (no sign-up needed)** on the first welcome screen. Account mode and local API key mode manage model configuration separately.
+
+## Use your own API key
+
+1. Open **Settings → Model configuration** and choose **Add configuration** at the top right.
+2. Enter the **Protocol type**, **API URL**, and **API Key** from the model provider.
+3. Under **Model list**, enter the **Model ID** and choose **Model capability**. For ordinary chat, choose **General text**. If the same service has more than one model, choose **Add model**.
+4. Choose **Test** and fix the connection from the message you get. After the test passes, choose **Save**. The configuration appears in the model library.
+
+<ProductScreenSteps steps={[
+  { label: "Find Add configuration", src: modelsScreen, alt: "Full Memmy window showing the model library and Add configuration", caption: "The model library is above, and model assignments are below. The account and configuration in the picture are samples." },
+  { label: "Enter the connection", src: addScreen, alt: "Full Memmy window showing protocol, URL, API key, and model ID on the configuration form", caption: "The configuration in the picture is a sample. Enter the protocol, URL, model ID, and capability from the provider. The key is masked." },
+  { label: "Choose a capability", src: capabilitiesScreen, alt: "Full Memmy window showing General text, Embedding, ASR, and Image in the capability menu", caption: "Choose the type that matches what the model can do. After you save it, assign it to that job." }
+]} />
+
+## Use this model for tasks
+
+After you save the configuration, open **Model assignments → Agent task models** lower on the same page. Choose the button that shows how many are selected, check the models that can be used, and set the default. Back on the workbench, choose the model for this task under **Conversation model**.
+
+<ProductScreenSteps steps={[
+  { label: "Choose it in Settings", src: taskModelsScreen, alt: "Full Memmy window showing agent_chat and deepseek-v4.1-flash checked under Agent task models", caption: "Under Model assignments, then Agent task models, check the models a task may use. The picture checks agent_chat and deepseek-v4.1-flash. The default stays agent_chat." },
+  { label: "Select it on the workbench", src: conversationScreen, alt: "Memmy workbench with deepseek-v4.1-flash selected in the conversation model menu", caption: "Back on the workbench, choose the model for this task under Conversation model beside the input. The picture selects deepseek-v4.1-flash." }
+]} />
+
+<details>
+<summary>What are the other model assignments for?</summary>
+
+- **Memory summary**: turn a conversation into memory.
+- **Skill evolution**: organize and improve methods that can be reused.
+- **Embedding search**: find related memory. Use the built-in local model, or configure another service, from the options on the page.
+- **Speech recognition ASR**: turn speech into text. Voice input also needs microphone permission.
+- **Image generation model**: create images.
+
+If you are not using speech or image generation yet, leave them unset. Text tasks still work.
+
+</details>
+
+## Account and desktop preferences
+
+<div className="docs-actions-table">
+
+| Sidebar entry | What you can change |
+| --- | --- |
+| **Account** | See account details and sign out. Under **Privacy and improvement**, manage **Share data**. Signing out keeps chats and memory on this computer. |
+| **Preferences** | Interface language, how Memmy starts, what happens after you close the window, and notification and sound settings. |
+| **Token usage** | See model usage. |
+| **Computer use** | See connections, permissions, and settings for the browser and desktop apps. |
+| **About** | See the version, check for updates, and open the log folder or export a diagnostic report. |
+
+</div>
+
+<details>
+<summary>See Account, Preferences, usage, and the diagnostic report</summary>
+
+<ProductScreenSteps steps={[
+  { label: "Account and Share data", src: accountScreen, alt: "Full Memmy window showing a sample account and the Share data switch", caption: "Share data is under Privacy and improvement on the Account page. The switch explains what is collected." },
+  { label: "Startup and windows", src: preferencesScreen, alt: "Full Memmy window showing language, startup, close-window, and memory-service options", caption: "Closing the main window and quitting the app are different. Check the setting that matches the action." },
+  { label: "Token usage", src: usageScreen, alt: "Full Memmy window showing Token usage, custom API key usage, and memory-evolution limits", caption: "Open Token usage on the left. The picture has no local custom API key usage yet. The limits below are for memory evolution." },
+  { label: "Logs and diagnostics", src: diagnosticsScreen, alt: "Full Memmy window showing log and diagnostic buttons in Advanced / developer on About", caption: "When you need to troubleshoot, find logs and diagnostics under About, then Advanced / developer." }
+]} />
+
+</details>
+
+## When a model is unavailable
+
+First check that a connection is saved under **Model configuration**, then confirm **Agent task models** has a usable model selected. If a custom API key fails to connect, check the protocol, URL, model ID, key, provider quota, and network. Test again after you correct them.
+
+If it still fails, write down the error and the steps you took. Export a diagnostic report from **About → Advanced / developer** and include it with the feedback.
+
+## Related
+
+[Data and privacy](/docs/en/security/security) · [FAQ](/docs/en/help/faq)

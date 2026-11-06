@@ -1,0 +1,60 @@
+---
+title: 查看和复用技能
+description: 查看可复用的工作步骤，核对来源，按实际需要修改和使用。
+icon: Sparkles
+---
+
+import listScreen from "../../assets/skills-list-full.jpg";
+import detailScreen from "../../assets/skills-detail-full.jpg";
+import sourceScreen from "../../assets/skills-source-full.jpg";
+import candidateScreen from "../../assets/skills-candidate-full.jpg";
+
+技能（Skill）保存一套可重复使用的做法。Memmy 会整理你本机已有的技能，也会从任务中总结可复用的技能，供后续工作参考。
+
+## 查看步骤和来源
+
+1. 打开「记忆管理 → 技能」。可以输入关键词并按 Enter 搜索。
+2. 点击一条技能，查看「适用场景」和「SKILL.md 内容」，确认步骤适合这次任务。
+3. 有「来源经验」或「证据锚点」时，点击其中的编号，查看对应记录。
+
+<ProductScreenSteps steps={[
+  { label: "找到技能", src: listScreen, alt: "Memmy 完整窗口：技能列表中的已启用与候选状态", caption: "列表显示技能名称、状态和更新时间。图中技能与来源均为虚构工作示例。" },
+  { label: "阅读步骤", src: detailScreen, alt: "Memmy 完整窗口：已启用技能的适用场景与执行步骤", caption: "在详情中向下查看适用场景与具体步骤，再核对来源。" },
+  { label: "核对来源", src: sourceScreen, alt: "Memmy 完整窗口：从技能来源编号打开对应的记忆详情", caption: "点击来源编号后，可以对照当时的提问与回复。核对完成后，关闭详情并回到左侧「技能」。" }
+]} />
+
+## 在任务中复用
+
+做后续工作时，Memmy 会想起用得上的技能，并按其中的做法来做。
+
+「跨Agent接入」中安装的 `memmy-memory` Skill 负责让其他 AI 读写共享记忆；「技能」页管理的是具体工作方法。要连接其他 AI，在「记忆管理 → 跨Agent接入」找到对应工具，按它提供的安装入口操作。
+
+## 修改电脑历史技能
+
+来自电脑历史的技能可能已经自动启用，也可能仍待复核。先阅读详情顶部的提示；显示「修改」按钮时：
+
+1. 点击「修改」，在「修改 Skill 内容」中调整步骤。
+2. 点击「保存」，再检查正文里的改动。保存后会保留来源记录，并按修改后的内容参与召回。
+3. 不想保存这次更改时，点击「返回」。
+
+提示“来源已更新”时，重新核对保留的修订内容，再按页面提示保存。
+
+<details>
+<summary>显示“候选”或“确认并启用这个 Skill”时怎么办？</summary>
+
+候选技能需要先核对步骤和来源。详情中显示「确认并启用这个 Skill」时，确认内容适用后再点击；成功后状态会变为「已启用」。
+
+<ProductScreenshot src={candidateScreen} alt="Memmy 完整窗口：候选技能的确认并启用按钮" caption="这是需要确认的候选状态示例。电脑历史技能可能显示另一套修改与保存提示。" />
+
+</details>
+
+<details>
+<summary>不再需要这条技能</summary>
+
+打开详情，点击底部「删除」，核对后再次点击「确认删除」。不想删除时点击「取消」。
+
+</details>
+
+## 相关说明
+
+[电脑历史记录](/docs/memory/computer-history) · [连接其他 AI 的记忆](/docs/memory/sources)

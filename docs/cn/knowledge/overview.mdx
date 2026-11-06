@@ -1,0 +1,90 @@
+---
+title: 使用知识库
+description: 添加常用资料，开启参与召回，在对话中检索并引用。
+icon: Library
+---
+
+把常用手册、课程资料或项目说明放进知识库，可以在多次任务中反复查阅。知识库需要登录 Memmy 账号，文件会上传至服务端处理和检索。
+
+import createScreen from "../../assets/knowledge-create-full.jpg";
+import uploadScreen from "../../assets/knowledge-upload-full.jpg";
+import processingScreen from "../../assets/knowledge-processing-full.jpg";
+import readyScreen from "../../assets/knowledge-ready-full.jpg";
+import recallOffScreen from "../../assets/knowledge-recall-off-full.jpg";
+import shareScreen from "../../assets/knowledge-share-full.jpg";
+import sharedScreen from "../../assets/knowledge-shared-full.jpg";
+
+## 创建并添加资料
+
+1. 在工作台左侧打开「知识库」，点击知识库列表标题旁的「+」（新建知识库）。
+2. 填写名称，例如“客户支持手册”，点击「确认创建」。
+3. 进入新建的知识库，点击「直接上传 → 本地文件」，选择资料；要一次添加整个文件夹，选择「本地文件夹」。也可以把文件拖进文件区。
+
+可以先下载这份 <a href="/docs-examples/support-handbook.md" download>客户支持手册示例</a> 练习。
+
+<ProductScreenSteps steps={[
+  { label: "创建知识库", src: createScreen, alt: "Memmy 完整窗口：创建个人知识库的名称表单", caption: "填好名称后点击「确认创建」。截图中的知识库、账号和共享者均为示例。" },
+  { label: "选择上传方式", src: uploadScreen, alt: "Memmy 完整窗口：直接上传菜单中的本地文件与本地文件夹", caption: "「直接上传」会先展开菜单，再选择文件或文件夹。" },
+  { label: "查看处理状态", src: processingScreen, alt: "Memmy 完整窗口：文件上传完成后仍显示处理中的状态", caption: "上传完成后还需要处理文件。等待列表中的状态变为「可用」。" }
+]} />
+
+支持 PDF、Word、TXT、Markdown、JSON 和 XML，每个文件最多 100 MB。上传后查看文件的状态：
+
+<div className="docs-actions-table">
+
+| 状态 | 接下来做什么 |
+| --- | --- |
+| **处理中** | 等待解析和索引完成，列表会更新状态。 |
+| **可用** | 资料已处理，可以开启「参与召回」。 |
+| **失败** | 查看文件名下方的错误说明，修正资料或格式后重新上传。 |
+
+</div>
+
+## 开启参与召回
+
+打开知识库右上角的「参与召回」，让它用于相关对话的资料检索。关闭后文件仍保留在库中，可以之后再开启。
+
+<ProductRecallGuide offScreen={recallOffScreen} onScreen={readyScreen} />
+
+## 根据资料完成任务
+
+回到工作台，说明要使用哪份资料，以及希望得到什么结果。例如：
+
+<PromptExample composer={true} prompt="根据“客户支持手册”知识库，把收到一条信息不完整的客户问题后的处理步骤整理成检查清单。说明每一步需要补充什么信息，并引用对应资料。材料没有规定的响应时限和负责人，请标为待确认。" />
+
+<details>
+<summary>没有用到刚上传的资料</summary>
+
+确认文件状态是「可用」，并检查目标知识库的「参与召回」已开启。提问时补充知识库名称、文件名或具体关键词，再核对回答的引用是否来自这份资料。
+
+</details>
+
+## 整理资料
+
+文件较多时，可使用顶部的「搜索文件」按名称查找，或用「新建文件夹」分类。右键点击文件，可选择「移动到…」。
+
+要更新资料，上传新版并确认可用，再移除旧版。文件行右侧的删除按钮会先显示确认提示；删除的是知识库中的云端文件，也会影响该库的其他使用方。
+
+<details>
+<summary>删除整个知识库</summary>
+
+在知识库顶部的「…」（更多操作）中选择「删除知识库」。确认提示会说明：知识库及全部文件将被彻底删除，删除后无法恢复。
+
+</details>
+
+## 共享给他人
+
+1. 打开自己的知识库，点击「共享管理」。
+2. 输入对方的 Memmy 用户 ID、手机号或邮箱，点击「添加」。用户 ID 可以在「账户」页面复制。
+3. 对方在知识库列表的「共享」分组中打开这个库，并自行开启「参与召回」。
+
+收到的库会标明「共享」，以及「仅可查看和参与召回」。要取消时，在「共享管理」里点击「移除」，再确认「确认取消分享」。
+
+<ProductScreenSteps steps={[
+  { label: "共享管理", src: shareScreen, alt: "Memmy 完整窗口：共享管理表单及成员账号输入框", caption: "在自己的知识库中点击「共享管理」。此图没有填写或提交真实账号。" },
+  { label: "对方看到的库", src: sharedScreen, alt: "Memmy 完整窗口：收到的共享知识库仅提供查看、搜索和参与召回", caption: "共享库显示来源人，以及「仅可查看和参与召回」。" }
+]} />
+
+## 相关说明
+
+[使用与预览文件](/docs/desktop/files) · [查看和管理记忆](/docs/memory/overview)

@@ -1,0 +1,44 @@
+---
+title: 宿主管理的 Agent
+icon: Shield
+---
+
+这页只给把 Agent 嵌进自己的应用、并由宿主审批工具的一方。单独运行 `memmy serve` 时不需要这些设置，接口见 [OpenAI 兼容 API](/docs/reference/openai-api)。
+
+旧的 `MEMMATE_*` 设置、对应请求头，以及请求字段 `memmate_permission` 不再被识别。宿主要和 Agent 一起升级，并在上线前核对下面的协议。
+
+## 环境变量
+
+| 变量 | 作用 |
+| --- | --- |
+| `AGENT_MANAGED_EXECUTION_REQUIRED` | 设为 `1` 后，运行时进入宿主管理模式。未设置时按独立运行处理。 |
+| `AGENT_RUNTIME_TOKEN` | 至少 32 个字符。请求头 `x-agent-runtime-token` 必须与它完全一致，否则返回 401。 |
+| `AGENT_MACOS_SANDBOX` | 设为 `1` 时，健康检查里的 `macosSandbox` 为 `true`。 |
+
+## 请求
+
+管理模式下，`POST /v1/chat/completions` 必须是 JSON，不能用 multipart。请求体带 `managed_execution`：
+
+| 字段 | 要求 |
+| --- | --- |
+| `protocol` | 必须是 `2`。 |
+| `tools` | 非空数组。每一项都要有字符串 `name`、`description`，以及对象 `inputSchema`。 |
+| `url` | 只能是 `http://127.0.0.1:<端口>/authorize`，不能带用户名、密码、查询参数或片段。 |
+| `token` | 64 位小写十六进制。Agent 回调这个地址时放在 `Authorization: Bearer` 中。 |
+
+读取路径不会连带授权子路径。`read_file`、`list_dir`、`find_files`、`grep` 和 `authorize_read_path` 会带 `fileAccessProtocol: 1`。每条实际要读的路径都要先通过 `authorize_read_path`，通过之后才读取。
+
+宿主返回 `decision: "allow"` 时必须带字符串 `result`。拒绝或执行失败按返回里的 `decision`、`reason` 或 `error.kind` / `error.code` 处理。
+
+## 健康检查
+
+`AGENT_MANAGED_EXECUTION_REQUIRED=1` 时，`GET /health` 除 `status: "ok"` 外还会返回：
+
+| 字段 | 值 |
+| --- | --- |
+| `permissionProtocol` | `1` |
+| `managedExecutionProtocol` | `2` |
+| `managedExecutionRequired` | `true` |
+| `macosSandbox` | `AGENT_MACOS_SANDBOX` 为 `1` 时是 `true`，否则是 `false` |
+
+未开启宿主管理时，健康检查只有 `status`。
