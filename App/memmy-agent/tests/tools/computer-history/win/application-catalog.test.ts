@@ -34,7 +34,7 @@ describe("Windows display application catalog", () => {
     expect(apps.filter((app) => app.name === "中文编辑器").map((app) => app.id)[0]).not.toBe(apps.filter((app) => app.name === "中文编辑器")[1]!.id);
     expect(apps.find((app) => app.running)).toMatchObject({ allowed: true, name: "中文编辑器", rule: input.applications[0] });
     expect(apps.find((app) => app.executable === installed[1]!.executable)).toMatchObject({ running: false, allowed: false });
-    expect(apps.find((app) => app.executable === installed[2]!.executable)).toMatchObject({ supported: false, allowed: false, running: false });
+    expect(apps.find((app) => app.executable === installed[2]!.executable)).toMatchObject({ supported: true, allowed: false, running: false });
   });
   it("caches display metadata separately and keeps readiness dependent on live bindings", async () => {
     vi.useFakeTimers();

@@ -16,10 +16,10 @@ let canvasWidth = 1920
 let canvasHeight = 1080
 let nativeTimescale: Int32 = 1_000_000_000
 let nativeFrequency: UInt64 = 1_000_000_000
-// AVAssetWriter's MP4 sample durations must fit in a signed 32-bit track tick
-// count. Microseconds cover the full 20-minute limit; nanoseconds overflow at
-// ~2.147 seconds. Keep the host clock and JSONL evidence in nanoseconds.
-let videoTimescale: Int32 = 1_000_000
+// MP4 sample durations are 32-bit track ticks: nanoseconds overflow for a
+// held frame longer than ~4.29 s. Keep the evidence clock in nanoseconds and
+// rescale only the encoded/remuxed track (one tick is less than 17 microseconds).
+let videoTimescale: Int32 = 60_000
 let frameInterval: UInt64 = 66_666_667
 let maximumDuration: UInt64 = 1_200_000_000_000
 let jsonNull = NSNull()
@@ -257,7 +257,8 @@ final class PartEncoder {
     writer.endSession(atSourceTime: mediaTime(end - start)); input.markAsFinished()
     let completed = DispatchSemaphore(value: 0)
     writer.finishWriting { completed.signal() }
-    try require(completed.wait(timeout: .now() + 15) == .success && writer.status == .completed, "part_finalize_failed")
+    try require(completed.wait(timeout: .now() + 15) == .success, "part_finalize_timeout")
+    try require(writer.status == .completed, "part_finalize_failed")
     try syncFile(file)
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
   }
@@ -758,7 +759,8 @@ func remux(_ directory: URL, _ parts: [SealedPart]) throws {
     }
     writer.endSession(atSourceTime: mediaTime(parts.last!.end)); input.markAsFinished()
     let done = DispatchSemaphore(value: 0); writer.finishWriting { done.signal() }
-    try require(done.wait(timeout: .now() + 30) == .success && writer.status == .completed, "remux_finish_failed")
+    try require(done.wait(timeout: .now() + 30) == .success, "remux_finish_timeout")
+    try require(writer.status == .completed, "remux_finish_failed")
     try syncFile(temporary)
     // Verify final sample count and timestamps, not just a nonempty container.
     let (reader, output, _) = try readerFor(temporary, decoded: false)
@@ -973,6 +975,8 @@ func nativeMediaSelfTest(_ directory: URL) throws {
     rect: CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight), scale: 1)
   do {
     let package = try VideoPackage(directory, origin: origin)
+    // The 9.87 s held frame exceeds the MP4 sample-duration limit at a 1 GHz
+    // track timescale. Validate its timing through sealing, remux and recovery.
     for relative in [UInt64(0), 70_000_000, 140_000_000, 10_010_000_000, 10_080_000_000, 10_150_000_000] {
       let blank = relative == 10_080_000_000
       try package.append(PendingCanvas(buffer: blank ? newCanvas() : canvas, ticks: origin + relative, window: blank ? nil : window,

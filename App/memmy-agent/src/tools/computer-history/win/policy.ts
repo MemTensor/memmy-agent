@@ -2,22 +2,31 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { windowsPathKey } from "../core/application-identity.js";
+export { windowsApplicationId } from "../core/application-identity.js";
 
 const decimal = z.string().regex(/^[1-9][0-9]*$/u).refine((value) => BigInt(value) <= 0xffffffffffffffffn);
 const executable = z.string().min(1).max(32768).refine((value) => path.win32.isAbsolute(value)
   && !value.includes("\0") && !value.startsWith("\\\\.\\") && !value.startsWith("\\\\?\\"));
+const browserExecutables = { chrome: "chrome.exe", edge: "msedge.exe" } as const;
+export function browserKind(executable: string): keyof typeof browserExecutables | null {
+  const name = path.win32.basename(executable).toLowerCase();
+  return name === browserExecutables.chrome ? "chrome" : name === browserExecutables.edge ? "edge" : null;
+}
 const selector = z.object({ controlType: z.enum(["Edit", "Document"]), automationId: z.string().min(1).max(256) }).strict();
 export const documentSelector = z.union([selector,
   z.object({ controlType: z.literal("Edit"), automationId: z.literal(""), scope: z.literal("vscode.editor") }).strict(),
   z.object({ controlType: z.literal("Document"), automationId: z.literal(""), scope: z.enum(["word.document", "notepad.document"]) }).strict()]);
 const app = z.object({ pid: z.number().int().min(1).max(0xffffffff), executable,
+  captureText: z.boolean().default(true),
+  browser: z.enum(["chrome", "edge"]).optional(),
   processStart: decimal.optional(), hwnd: decimal.optional(),
   searchFields: z.array(selector.refine((value) => value.controlType === "Edit")).max(32).optional(),
   documentRegions: z.array(documentSelector).max(32).optional(),
   sensitiveAutomationIds: z.array(z.string().min(1).max(256)).max(128).optional(),
-}).strict().refine((value) => value.documentRegions?.every((item) => !("scope" in item)
-  || path.win32.basename(value.executable).toLowerCase() === ({ "vscode.editor": "code.exe", "word.document": "winword.exe",
-    "notepad.document": "notepad.exe" }[item.scope])) ?? true);
+}).strict().refine(value => !value.browser || browserKind(value.executable) === value.browser)
+  .refine(value => value.captureText || (value.documentRegions?.every(item => !("scope" in item)
+  || path.win32.basename(value.executable).toLowerCase() === ({ "vscode.editor": "code.exe", "word.document": "winword.exe", "notepad.document": "notepad.exe" }[item.scope])) ?? true));
 const limits = z.object({
   maxDepth: z.number().int().min(1).max(64).default(24),
   maxNodes: z.number().int().min(1).max(5000).default(400),
@@ -59,29 +68,24 @@ export function readNativePolicy(file: string): { policy: NativePolicy; revision
 }
 
 // Native output uses canonical DOS paths. Windows rules never impersonate a bundle identifier.
-export function pathKey(value: string): string { return path.win32.normalize(value).toLowerCase(); }
-export function windowsApplicationId(value: string): string {
-  return `windows:${crypto.createHash("sha256").update(pathKey(value)).digest("hex")}`;
-}
-const browsers = new Set(["msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe",
-  "iexplore.exe", "chromium.exe", "arc.exe", "librewolf.exe", "waterfox.exe", "thorium.exe", "floorp.exe",
-  "zen.exe", "360se.exe", "360chrome.exe", "qqbrowser.exe", "sogouexplorer.exe", "2345explorer.exe",
-  "liebao.exe", "msedgewebview2.exe", "tor.exe"]);
+export const pathKey = windowsPathKey;
 export function isSystemSurface(executable: string): boolean {
   const name = path.win32.basename(pathKey(executable));
   return ["winlogon.exe", "logonui.exe", "lockapp.exe"].includes(name) || name.endsWith(".scr");
 }
+// Compatibility export: browser identification never denies generic capture.
+export function isUnsupportedBrowser(executable: string): boolean { void executable; return false; }
 export function authorizedRule(policy: NativePolicy, context: { pid: number; executable: string; processStart: string; hwnd: string }): NativeAppRule | null {
   const key = pathKey(context.executable);
-  if (isSystemSurface(key) || browsers.has(path.win32.basename(key)) || policy.deny?.pids?.includes(context.pid)
+  if (isSystemSurface(key) || isUnsupportedBrowser(key) || policy.deny?.pids?.includes(context.pid)
       || policy.deny?.executables?.some((item) => pathKey(item) === key)) return null;
   return policy.applications.find((rule) => rule.pid === context.pid && pathKey(rule.executable) === key
     && (!rule.processStart || rule.processStart === context.processStart) && (!rule.hwnd || rule.hwnd === context.hwnd)) ?? null;
 }
 
 export interface ApplicationBinding { pid: number; executable: string; processStart: string; hwnd?: string }
-export type WindowsApplicationRule = Omit<NativeAppRule, "pid" | "processStart" | "hwnd">;
-// Applied only after app consent/discovery binding. An explicit [] disables defaults.
+export type WindowsApplicationRule = Omit<NativeAppRule, "pid" | "processStart" | "hwnd" | "captureText"> & { captureText?: boolean };
+// Compatibility hints for explicit captureText:false; generic capture needs no selectors.
 export function defaultDocumentRegions(executable: string): NativeAppRule["documentRegions"] {
   switch (path.win32.basename(executable).toLowerCase()) {
     case "winword.exe": return [{ controlType: "Edit", automationId: "Body" },
@@ -97,11 +101,14 @@ export function compileWindowsPolicy(rules: WindowsApplicationRule[], bindings: 
   options: Partial<Omit<NativePolicy, "applications" | "version">> = {}): NativePolicy {
   const applications = bindings.flatMap((binding) => {
     const key = pathKey(binding.executable);
-    if (isSystemSurface(key) || browsers.has(path.win32.basename(key)) || options.deny?.pids?.includes(binding.pid)
+    if (isSystemSurface(key) || isUnsupportedBrowser(key) || options.deny?.pids?.includes(binding.pid)
         || options.deny?.executables?.some((item) => pathKey(item) === key)) return [];
     const rule = rules.find((item) => pathKey(item.executable) === key)
       ?? (options.defaultApplicationBehavior === "observe" ? { executable: binding.executable } : null);
-    return rule ? [{ ...rule, documentRegions: rule.documentRegions ?? defaultDocumentRegions(binding.executable),
+    const kind = browserKind(key);
+    return rule ? [{ ...rule, captureText: rule.captureText ?? true,
+      ...(rule.captureText === false && rule.documentRegions === undefined ? { documentRegions: defaultDocumentRegions(binding.executable) } : {}),
+      ...(kind ? { browser: kind } : {}),
       pid: binding.pid, executable: binding.executable, processStart: binding.processStart,
       ...(binding.hwnd ? { hwnd: binding.hwnd } : {}) }] : [];
   });

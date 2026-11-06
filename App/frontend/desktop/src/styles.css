@@ -14188,6 +14188,22 @@ body.memmy-platform-windows :is(
   border-top: 1px solid var(--ch-border);
 }
 
+.ch__dependent-settings {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.ch__dependent-settings > * + * { border-top: 1px solid var(--ch-border); }
+.ch__dependent-settings:disabled { opacity: 0.45; }
+.ch__dependent-settings > section[aria-label] {
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
+  padding: 0;
+}
+
 .ch__settings-card .ch__recording-setting {
   margin: 0;
   padding: 20px 22px;

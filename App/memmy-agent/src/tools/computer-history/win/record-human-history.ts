@@ -5,6 +5,7 @@ import { WindowsPolicySession } from "./session-policy.js";
 import { resolveWindowsCollector } from "./settings.js";
 import { recorderHealthReporter } from "../mac/recorder-health.js";
 import { checkpointRequest, recorderRotationRequest } from "../core/recorder-checkpoint.js";
+import { contentQuality } from "./capture-quality.js";
 
 export function parseRecorderArgs(argv: string[]): (WindowsRecorderOptions & { settingsFile?: string }) | null {
   if (argv.length === 1 && argv[0] === "--help") return null;
@@ -38,13 +39,17 @@ export async function runWindowsRecorder(argv = process.argv.slice(2)): Promise<
     return;
   }
   const binary = resolveWindowsCollector(options.binary);
-  const policySession = options.settingsFile ? await WindowsPolicySession.create(options.settingsFile, binary) : null;
+  const policySession = options.settingsFile ? await WindowsPolicySession.create(options.settingsFile, binary, options.observationSettingsFile) : null;
   const health = recorderHealthReporter();
   let recorder: WindowsHistoryRecorder;
   try {
     recorder = await WindowsHistoryRecorder.start({ ...options, binary, policyFile: policySession?.file ?? options.policyFile,
       // Report only persisted events. The native Windows collector has no heartbeat protocol.
-      onEvent: (event) => health.report("event_recorded", { timestamp: event.timestamp }),
+      onEvent: (event) => {
+        health.report("event_recorded", { timestamp: event.timestamp });
+        const quality = contentQuality(event);
+        if (quality) console.log("[recorder-quality] " + JSON.stringify(quality));
+      },
     });
   }
   catch (error) { health.close(); await policySession?.dispose(); throw error; }

@@ -218,7 +218,7 @@ describe("buildResponsesBody extra body integration", () => {
     expect(body.parallel_tool_calls).toBe(false);
   });
 
-  it.each([undefined, false, true])("appends configured Responses API tools with strict=%s", strict => {
+  it.each([undefined, true, false])("appends configured Responses API tools while preserving strict=%s", (strict) => {
     const provider = new OpenAICompatProvider({
       apiKey: "test-key",
       defaultModel: "gpt-5",

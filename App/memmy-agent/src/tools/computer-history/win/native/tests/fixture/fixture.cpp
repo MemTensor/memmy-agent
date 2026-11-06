@@ -86,7 +86,12 @@ HWND Child(HWND parent, const wchar_t* cls, const std::wstring& text, DWORD styl
 bool Activate(HWND target) {
   if (target == nullptr) return false;
   if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
+  const DWORD current = GetCurrentThreadId();
+  const DWORD foreground = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+  const bool attached = foreground != 0 && foreground != current && AttachThreadInput(current, foreground, TRUE);
+  BringWindowToTop(target);
   SetForegroundWindow(target);
+  if (attached) AttachThreadInput(current, foreground, FALSE);
   for (int i = 0; i < 20 && GetForegroundWindow() != target; ++i) Sleep(25);
   return GetForegroundWindow() == target;
 }
@@ -101,6 +106,12 @@ void Execute(const std::string& line) {
   if (op == "info") {
     Reply(Identity());
     return;
+  } else if (op == "embed") {
+    const auto parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(std::stoull(arg)));
+    SetWindowLongPtrW(g_windowB, GWL_STYLE, WS_CHILD | WS_VISIBLE);
+    SetParent(g_windowB, parent);
+    MoveWindow(g_windowB, 16, 350, 500, 80, TRUE);
+    ok = IsChild(parent, g_windowB) != FALSE;
   } else if (op == "activate") {
     ok = Activate(arg == "b" ? g_windowB : g_windowA);
   } else if (op == "focus") {

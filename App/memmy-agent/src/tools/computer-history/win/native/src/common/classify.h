@@ -45,7 +45,7 @@ enum class Redaction {
   None,
   SensitiveId,       // explicit sensitive AutomationId (global or per application)
   Password,          // IsPassword = true
-  EditControl,       // ordinary input; value, name and descendants are never read
+  EditControl,       // input withheld by bounded policy or an unavailable document body
   UnknownPassword,   // IsPassword not supported on a content-bearing control
   UnknownStructural  // IsPassword not supported on a container: masked, children checked
 };
@@ -54,7 +54,7 @@ struct NodeDecision {
   Redaction redaction = Redaction::None;
   bool readName = false;
   bool readDocumentText = false;  // TextPattern DocumentRange + visible ranges
-  bool readSearchValue = false;   // ValuePattern, focused exact search selector only
+  bool readSearchValue = false;   // ValuePattern: focused selector or generic non-password Edit
   bool traverseChildren = false;
 };
 

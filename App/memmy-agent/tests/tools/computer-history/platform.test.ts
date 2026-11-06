@@ -51,9 +51,9 @@ describe("Computer History Windows 11 availability", () => {
 
     expect(isComputerHistorySupported()).toBe(true);
     expect(ComputerHistoryTool.enabled()).toBe(true);
-    for (const cls of classes.slice(1)) expect(cls.enabled()).toBe(false);
+    for (const cls of classes.slice(1)) expect(cls.enabled()).toBe(true);
     const registry = new ToolLoader({ testClasses: classes }).loadRegistry();
-    expect(registry.toolNames).toEqual(["computer_history"]);
+    expect(registry.toolNames.sort()).toEqual([...names].sort());
   });
 
   it("respects an explicit opt-out", () => {

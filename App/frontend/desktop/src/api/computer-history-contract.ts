@@ -18,7 +18,7 @@ const WindowsDocumentSelectorSchema = z.union([WindowsSelectorSchema,
   z.object({ controlType: z.literal("Edit"), automationId: z.literal(""), scope: z.literal("vscode.editor") }).strict(),
   z.object({ controlType: z.literal("Document"), automationId: z.literal(""), scope: z.literal("word.document") }).strict()]);
 const WindowsAppRuleSchema = z.object({
-  executable: z.string(), searchFields: z.array(WindowsSelectorSchema).optional(), documentRegions: z.array(WindowsDocumentSelectorSchema).optional(),
+  executable: z.string(), captureText: z.boolean().optional(), searchFields: z.array(WindowsSelectorSchema).optional(), documentRegions: z.array(WindowsDocumentSelectorSchema).optional(),
   sensitiveAutomationIds: z.array(z.string()).optional(),
 }).strict();
 export const WindowsHistorySettingsSchema = z.object({ version: z.literal(1), applications: z.array(WindowsAppRuleSchema), sensitiveAutomationIds: z.array(z.string()).optional(), deny: z.object({ executables: z.array(z.string()).optional() }).strict().optional(),
@@ -39,6 +39,8 @@ export const ComputerHistoryWeChatReaderPreparationSchema = z.object({
 export type ComputerHistoryWeChatReaderPreparation = z.infer<typeof ComputerHistoryWeChatReaderPreparationSchema>;
 
 export const ComputerHistoryCaptureHealthSchema = z.object({
+  content: z.object({ timestamp: z.string(), status: z.enum(["available", "partial", "unavailable"]),
+    reason: z.enum(["text_read", "labels_only", "read_failed", "budget_exceeded"]) }).strict().optional(),
   status: z.enum(["starting", "healthy", "degraded", "reconnecting", "inactive"]),
   lastEventAt: z.string().nullable(),
   lastHeartbeatAt: z.string().nullable(),
@@ -54,7 +56,7 @@ export const ComputerHistoryObservationSettingsSchema = z.object({
     defaultApplicationBehavior: ObservationBehaviorSchema,
     defaultURLBehavior: ObservationBehaviorSchema,
     rules: z.array(z.discriminatedUnion("scope", [
-      z.object({ scope: z.literal("app"), bundleID: z.string().min(1), behavior: ObservationBehaviorSchema }).strict(),
+      z.object({ scope: z.literal("app"), bundleID: z.string().min(1), executable: z.string().optional(), behavior: ObservationBehaviorSchema }).strict(),
       z.object({ scope: z.literal("url"), urlDomain: z.string().min(1), behavior: ObservationBehaviorSchema }).strict(),
     ])),
   }).strict(),
@@ -135,6 +137,7 @@ export const ComputerHistorySnapshotSchema = z.object({
     error: z.string().nullable(),
     narrationError: z.string().nullable(),
     narrationErrorCategory: z.literal("quota_exhausted").nullable().optional(),
+    retentionDeferred: z.boolean().optional(),
     modelSource: z.enum(["account", "byok"]).nullable().optional(),
     permissions: ComputerHistoryPermissionsSchema.optional(),
     captureHealth: ComputerHistoryCaptureHealthSchema.optional(),

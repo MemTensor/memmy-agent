@@ -1,7 +1,8 @@
 export const executable = "C:\\Apps\\Fixture.exe";
 export const context = { pid: 123, executable, hwnd: "18446744073709551615", processStart: "134000000000000001",
   generation: 1, dpi: 96, bounds: { left: 0, top: 0, right: 800, bottom: 600 }, minimized: false };
-export const policyInput = { version: 1, applications: [{ pid: 123, executable, processStart: context.processStart,
+// Explicitly bounded fixtures exercise the retained compatibility mode.
+export const policyInput = { version: 1, applications: [{ pid: 123, executable, captureText: false, processStart: context.processStart,
   hwnd: context.hwnd, searchFields: [{ controlType: "Edit", automationId: "search" }],
   documentRegions: [{ controlType: "Document", automationId: "body" }], sensitiveAutomationIds: ["private"] }] };
 export const root = { key: "0000000000000001", parentKey: null, runtimeId: "1", controlType: "Window", automationId: "root",

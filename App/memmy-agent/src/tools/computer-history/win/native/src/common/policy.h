@@ -1,4 +1,5 @@
 #pragma once
+#include "common/browser.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +24,7 @@ struct ElementSelector {
 };
 
 struct AppRule {
+  bool captureText = true;  // capability-based capture; explicit false retains bounded compatibility
   std::uint32_t pid = 0;
   std::wstring executable;  // absolute path as written; canonicalized at evaluation
   std::optional<std::uint64_t> processStart;  // FILETIME ticks (100 ns since 1601 UTC)
@@ -30,6 +32,7 @@ struct AppRule {
   std::vector<ElementSelector> searchFields;     // Edit only; read only while focused
   std::vector<ElementSelector> documentRegions;  // Document or Edit body regions
   std::vector<std::wstring> sensitiveAutomationIds;
+  browser::Kind browser = browser::Kind::None;  // window-bound adapter, never a bypass
 };
 
 struct Limits {
@@ -80,11 +83,10 @@ struct Decision {
 
 using Canonicalizer = std::function<std::wstring(const std::wstring&)>;
 
-// Deny always wins, then the known-browser gate, then the exact application rules.
+// Deny always wins, then the exact application instance rules. Browser kind is a hint.
 Decision Evaluate(const Policy& policy, const Target& target, const Canonicalizer& canonicalize);
 
-// Basename match against known browser and browser-host executables. Used only to refuse
-// capture, never to grant it.
+// Browser-family identification for optional metadata enrichment.
 bool IsKnownBrowserExecutable(std::wstring_view executablePath);
 
 bool IsSensitiveAutomationId(const Policy& policy, const AppRule& rule, std::wstring_view automationId);

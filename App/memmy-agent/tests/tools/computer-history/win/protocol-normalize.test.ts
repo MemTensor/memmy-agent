@@ -52,7 +52,7 @@ describe("Windows authorization and tree reconstruction", () => {
       { ...focused, automationId: "private", name: undefined, redaction: "sensitive_id" }]) {
       const input = full(focus ? [root, focus] : [root]);
       const blocked = snapshot({ ...input, snapshot: { ...input.snapshot, focusKey: focus?.key ?? null, actions: [actions[1]] } });
-      expect(() => new SnapshotNormalizer().normalizeEvents(blocked, policy, "r")).toThrow("snapshot_invalid");
+      expect(new SnapshotNormalizer().normalizeEvents(blocked, policy, "r").map(item => item.eventType)).toEqual(["accessibility_snapshot"]);
     }
   });
   it.each(["Q", "Control+Alt+Q", "Control+Q", "arbitrary typed text", "Alt+Control+C"])("rejects printable or unknown key labels: %s", (key) => {
@@ -65,13 +65,13 @@ describe("Windows authorization and tree reconstruction", () => {
       injected: false, timestamp: "2026-10-02T00:58:00.000Z" }] } });
     expect(() => new SnapshotNormalizer().normalizeEvents(input, policy, "r")).toThrow();
   });
-  it("binds persistent rules to new instances and makes denial/browser exclusions win", () => {
+  it("binds persistent rules to new instances and respects denial while allowing generic browsers", () => {
     const compiled = compileWindowsPolicy([{ executable }], [{ ...context }]);
     expect(authorizedRule(compiled, context)).not.toBeNull();
     expect(authorizedRule(compiled, { ...context, processStart: "134000000000000002" })).toBeNull();
     expect(authorizedRule(parseNativePolicy({ ...policyInput, deny: { pids: [123] } }), context)).toBeNull();
     const browser = "C:\\Apps\\chrome.exe";
-    expect(authorizedRule(parseNativePolicy({ version: 1, applications: [{ pid: 123, executable: browser }] }), { ...context, executable: browser })).toBeNull();
+    expect(authorizedRule(parseNativePolicy({ version: 1, applications: [{ pid: 123, executable: browser }] }), { ...context, executable: browser })?.captureText).toBe(true);
     expect(() => compileWindowsPolicy([{ executable }], [{ ...context, executable: "C:\\Other.exe" }])).toThrow("policy_invalid");
   });
   it("reconstructs a delta, retains hierarchy and discards old content", () => {

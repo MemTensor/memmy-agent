@@ -122,6 +122,19 @@ describe("shared browser extension entry in Computer History", () => {
     expect(f.client.startComputerHistoryObservation).not.toHaveBeenCalled();
   });
 
+  it("separates browser connection from History capture across stop, pause and resume", async () => {
+    const f = fixture("darwin"); f.connect("chrome");
+    await render(<ComputerHistoryBrowserEnhancement client={f.client} captureState="inactive" />);
+    await act(async () => host.querySelector<HTMLButtonElement>(".ch__browser-enhancement-heading")!.click());
+    expect(browserRow("Google Chrome").textContent).toContain("History 当前未记录，不采集网页活动");
+    await render(<ComputerHistoryBrowserEnhancement client={f.client} captureState="paused" />);
+    expect(browserRow("Google Chrome").textContent).toContain("History 已暂停，不采集网页活动");
+    await render(<ComputerHistoryBrowserEnhancement client={f.client} captureState="recording" />);
+    expect(browserRow("Google Chrome").textContent).toContain("网页采集遵循 History 权限设置");
+    expect(f.client.startComputerHistoryObservation).not.toHaveBeenCalled();
+    expect(f.client.setComputerHistoryWeChatAccess).not.toHaveBeenCalled();
+  });
+
   it.each(["darwin", "win32"] as const)("places the folded enhancement immediately below WeChat on an active %s History page", async platform => {
     const f = fixture(platform, true);
     await render(<ComputerHistorySubPage client={f.client} />);

@@ -575,7 +575,7 @@ export async function run(
     captureScopeApplications: args.onlyApps,
     ...(contextUrl && shouldObserve(loadObservationSettings(args.observationSettings), { browser: true, url: contextUrl })
       ? { contextUrl } : {}),
-    privacy: "Text is retained from observed applications when enabled and the focused control is known not to be a password field. An explicit allow-app narrows text capture. Application and website observation rules apply; credential patterns are redacted.",
+    privacy: "Text is retained from observed applications when enabled, except in password fields. An explicit allow-app narrows text capture. Excluded applications and sites are skipped; credential patterns are redacted.",
   });
   writeMetadata(output, args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow`, startedAt);
 

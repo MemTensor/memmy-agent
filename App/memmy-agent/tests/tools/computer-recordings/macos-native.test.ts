@@ -9,7 +9,7 @@ const directories: string[] = [];
 const { PNG } = createRequire(import.meta.url)("pngjs");
 afterEach(() => { for (const directory of directories.splice(0)) fs.rmSync(directory, { recursive: true, force: true }); });
 
-test.runIf(process.platform === "darwin")("native AVFoundation media preserves color, sample timestamps, sealed fragments and a recoverable prefix", () => {
+test.runIf(process.platform === "darwin")("native AVFoundation media preserves long-held frames, color, sample timestamps, sealed fragments and a recoverable prefix", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-mac-media-native-")); directories.push(directory);
   const source = fileURLToPath(new URL("../../../src/tools/computer-history/mac/task-recorder.swift", import.meta.url));
   const binary = path.join(directory, "task-recorder-test");
@@ -26,6 +26,9 @@ test.runIf(process.platform === "darwin")("native AVFoundation media preserves c
   expect(manifest.parts.map((part: { startMs: number; durationMs: number }) => [part.startMs, part.durationMs])).toEqual([[0, 10010], [10010, 210]]);
   const frames = fs.readFileSync(path.join(media, "frames.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   expect(frames.map((frame) => frame.timeMs)).toEqual([0, 70, 140, 10010, 10080, 10150]);
+  expect(frames.map((frame) => frame.monotonicTicks)).toEqual([
+    "10000000000", "10070000000", "10140000000", "20010000000", "20080000000", "20150000000",
+  ]);
   expect(frames.every((frame) => !frame.qpc && frame.monotonicTicks)).toBe(true);
   expect(frames.map((frame) => frame.monotonicTicks)).toEqual(["10000000000", "10070000000", "10140000000", "20010000000", "20080000000", "20150000000"]);
   expect(frames.map((frame) => frame.blank)).toEqual([false, false, false, false, true, false]);

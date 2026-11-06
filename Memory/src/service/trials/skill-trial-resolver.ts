@@ -146,9 +146,14 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
     if (!memory || memory.memoryLayer !== "Skill") {
       return;
     }
+    const data = memory.properties.internal_info.skill;
+    const revisedAt = isRecord(data) && typeof data.content_revised_at === "string" ? data.content_revised_at : undefined;
+    if (isRecord(data) && data.status === "suspended" && isRecord(data.pending_policy_revisions)) return;
+    // Historical trials remain auditable, but cannot validate rewritten content.
+    if (revisedAt && trial.createdAt <= revisedAt) return;
     const trials = this.deps.repos.runtime
       .listSkillTrials({ skillMemoryId: trial.skillMemoryId, limit: 1000 })
-      .filter((item) => item.outcome !== "unknown");
+      .filter((item) => item.outcome !== "unknown" && (!revisedAt || item.createdAt > revisedAt));
     const attempted = trials.length;
     const passed = trials.filter((item) => item.outcome === "success").length;
     const currentSkill = skillMetaFromMemory(memory);

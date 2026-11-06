@@ -1,6 +1,126 @@
 # Computer History 阶段基线与平台验收
 
-本阶段包含 Windows C++ 采集核心、TypeScript 适配、共享业务服务、Windows 应用授权与页面接入，以及 Windows 安装包接入。本文按日期保留开发基线、受控 fixture、包内组件和真实安装版操作的独立结果；浏览器/Office/WPS 专项适配不在本轮范围内。
+本文按日期保留 Windows C++ 采集核心、共享服务、应用与浏览器适配、包内组件和真实安装版操作的独立结果。当前范围与剩余工作见 [下一阶段实现计划](WINDOWS-NEXT-PHASE-PLAN.md)，各日期记录中的阶段边界分别适用。
+
+## 2026 年 10 月 16 日个人功能分支交付
+
+本 session 的开发已转到 `feature/windows-history-native-core`。该分支从原提交 `48c2ce27` 快进至本 session 使用的集成基线 `b800d024`，随后分批提交当前修改；`integrate/v1.2.3-pxlin-dev` 保持在 `b800d024`，没有向任何远端推送。
+
+- `cedc78ec`：Windows 通用采集、Chrome/Edge 元数据增强、统一规则与产品接入，以及对应功能测试和采集器协议说明。
+- `1f6028cf`：CI 入口、跨平台测试及报告修复，并为个人功能分支补充 Windows History push 验证。
+
+切换前备份并核对了 89 个修改文件，分支切换没有改变其内容。已有完整验证结果继续适用；新增 CI 分支触发规则的专项测试为 4/4 通过。构建产物、用户配置和本地测试证据未纳入提交。以下“集成分支”或“尚未提交”的描述保留为当时的阶段记录。
+
+## 2026 年 10 月 16 日 CI 与既有测试修复
+
+完整 History 验证入口已在本机通过，报告为 `.history-migration/ci-fixes-20261016/computer-history-validation-gAJrnj/results.json`。本轮没有提交、推送或触发远端 CI；以下结果不代表整个仓库或 macOS 原生运行验收。
+
+- 修复 Agent 和前端测试的静态检查错误，更新默认 `captureText:true` 的契约断言、原生报告的必跑用例样例。
+- 将 Windows 的 MJS 打包测试与依赖 Vite 解析的 TypeScript 契约测试分开，排除本地备份工作树；macOS 工作流改为传入绝对报告路径。Windows 测试明确使用 Git Bash 和系统 PowerShell，不再依赖 WindowsApps Bash 或额外安装的 PowerShell 7。
+- 修复模拟 macOS 时使用 Windows 文件权限的测试假设。模拟元数据仅限测试自建目录，实际授权和密码过滤未放宽；目录链接改用 Windows junction，受文件链接权限限制的用例明确跳过。
+- 修正 Windows 状态信息中已不适用的“排除隐私浏览器”标记、Mac Python 候选路径的 POSIX 拼接，以及 PowerShell 5.1 报告的 UTF-8 BOM。采集器遇到另一实例占用时现在报告 `windows_collector_already_running`。
+
+| 检查 | 结果 |
+| --- | --- |
+| 完整入口中的 Agent History 与相关录制测试 | 919 通过，0 失败，18 项平台或权限条件跳过 |
+| 完整入口中的前端测试 | 159 通过，0 失败 |
+| 扩展前端 History 测试 | 290 通过，0 失败 |
+| 契约、工作流专项复测 | 42 通过，0 失败，零跳过 |
+| 扩展打包检查 | 122 通过，0 失败，2 项平台或权限条件跳过 |
+| 真实 TypeScript、Node 入口与生产 EXE | 4/4 通过，零跳过；`native-adapter-final.json` |
+| 类型、Agent/前端构建和相关静态检查 | 通过；前端仍有 2 项既有 lint 警告 |
+
+此前记录的 44 项基线测试失败已在本轮修复。未通过删去测试目录或关闭整类断言来规避这些失败；完整原生桌面能力仍受各日期的真实应用覆盖范围限制。
+
+首次完整验证的原生联调被另一工作区的活动采集器占用，失败报告保留在 `computer-history-validation-bfEZeg`。经用户允许停止该采集后，确认其 API 状态已为 `stopped`、相关采集进程退出，再完成上述复测。另一工作区保持停止采集，Memmy App 没有在本轮新启动。
+
+## 2026 年 10 月 16 日通用采集优先改造
+
+本轮仅修改采集器及其必要的数据校验、摘要取材和说明；保持当前集成分支与既定 upstream 基线。修改前的未提交代码保存在 `.history-migration/generic-first-baseline-20261016`，没有重置此前开发。
+
+### 当前行为
+
+- 原生与产品策略默认 `captureText:true`。浏览器家族名称不再导致拒绝，区域提示不再隐式关闭通用读取；显式 false 保留旧受限模式兼容。
+- 通用读取按实际 TextPattern、ValuePattern 能力覆盖各类控件，支持当前窗口内跨 PID 的托管子树。缺少 Name、Name 等于正文、IsPassword 未提供或单个字段失败不再使通用正文失效。
+- 保留明确密码、MSAA protected 状态、原生密码样式、敏感子树及凭据脱敏。C++ 与 TypeScript 同步放宽内容准入，保留身份、结构、序列和预算校验。缺少安全焦点的按键元数据局部丢弃，已取得的窗口快照保留。
+- 焦点分支和文档优先，可见范围先于有界正文上下文；Control View 不提供正文时，在原预算内尝试 Raw View、UIA LegacyIAccessible 和窗口级 MSAA。MSAA 标签与值保留不同来源，标签不会冒充控件当前值。
+- Chrome/Edge URL 是可选增强；前后取得 URL 时核对页面一致性，冷启动首次读取则与本次已采集的 Document RuntimeId 匹配。未知 URL 保留内容，已知 URL 仍执行网站规则。Windows 当前阶段允许普通、无痕、访客和模式未知的内容；macOS 默认行为不变。
+
+### 采集器验证范围
+
+新的受控窗口用例验证同一窗口中另一进程托管的真实控件，浏览器名称的受控 fixture 验证正文不会被家族策略阻断。Chrome/Edge smoke 使用独立 profile 和合成网页，覆盖换页、滚动、标签页、持久化、摘要取材及密码阴性标记。它们不代表所有软件版本的完整覆盖。
+
+| 检查 | 最终结果 |
+| --- | --- |
+| 原生 CTest | 38/38 通过，零跳过；含真实跨进程子窗口；`.history-migration/generic-first-native-build/release/Testing/Temporary/LastTest.log` |
+| 原生纯逻辑用例 | 59 项通过，0 失败 |
+| Windows 与共享设置、摘要定向回归 | 331 通过、0 失败、5 条件跳过；`.history-migration/generic-first-final-tests.json`。其中 4 项真实 EXE 用例随后单独启用并执行；既有 `private-files.test.ts` 失败未纳入本轮定向范围 |
+| 真实 TypeScript 与生产 EXE 联调 | 4/4 通过，零跳过；`.history-migration/generic-first-ts-native.json` |
+| Chrome | 正文、原 URL、滚动、标签切换、换页、JSONL、摘要输入及密码阴性标记通过；`C:/Users/zephyr/AppData/Local/Temp/memmy-generic-chrome-QMno5w` |
+| Edge | 同类检查通过，原 URL 可用；`C:/Users/zephyr/AppData/Local/Temp/memmy-generic-edge-zUXff2` |
+| 类型、构建与静态检查 | Agent、前端类型检查，Agent 编译、修改范围 ESLint 和 `git diff --check` 通过 |
+
+当前生产 C++ helper 为 909,824 字节，SHA-256 `F8863A02BBAE89E4FE15D1EA7E3C4C872B179D3916334D2C17680A44C208A74B`，已同步至 Agent `dist` 开发运行目录，并与本轮生产构建核对一致。新增的 OLEACC 为 Windows 系统组件。通用接口改造后的旧测试已按新行为更新，明确选择受限模式的兼容用例仍独立保留。
+
+首次源码类型检查误用了带输出的配置，产生了源码目录旁的编译文件；这些仅限本次生成、未被 Git 跟踪且路径在 Agent 目录内的文件已移至 `.history-migration/accidental-ts-emit-20261016`，随后改用 `--noEmit` 和正确的 `tsconfig.build.json`。已确认测试实际加载修改后的 TypeScript，源码旁没有残留的旧编译模块。
+
+Electron 独立测试应用仍未取得正文：默认运行的证据包括 `C:/Users/zephyr/AppData/Local/Temp/memmy-electron-text-Ofg5z1`，加 `--force-renderer-accessibility` 的对照为 `memmy-electron-text-sPaQhP`。UIA、Raw View 与 MSAA 回退仅取得外壳或菜单。通用兼容机制已接入，默认 Electron 正文问题仍需后续针对瓶颈定位，不能计为已解决；本轮也没有新的 VSCode 默认正文通过结论。
+
+以下 10 月 15 日安装包属于上一轮源码，不包含本轮改动。本轮没有重新打包、安装或启动完整 Memmy App。
+
+## 2026 年 10 月 15 日共享规则和通用文本实现
+
+开发基线为主工作区 `integrate/v1.2.3-pxlin-dev`，提交 `b800d024` 加未提交改动。既有 Chrome 和 Edge 共用采集实现保留，本轮继续接入共享应用范围、Windows 管理工具和通用非密码文本读取。
+
+### 已交付的代码
+
+- 共享观察规则支持 Windows 完整 EXE 路径及稳定 ID，兼容 `win32.*`。旧 Windows 配置与共享规则按有效交集迁移，写入前备份，重复读取不重复迁移；规范配置损坏或迁移后丢失不会恢复为广泛记录。
+- Windows 页面兼容 API 与 Agent 状态、读取设置、更新设置工具共用服务。共享规则更新在停止当前采集后确认生效，网站规则和显式高级限制保留。
+- 产品策略默认启用通用非密码正文和编辑控件读取，显式选择器配置仍可保留受限模式。C++ 和 TypeScript 同步检查内容权限、正文状态及混合字段；浏览器不能使用通用文本模式。
+- 归一化记录和摘要分别表达 DocumentRange 上下文、provider 可见范围及当前控件值。`captureHealth.content` 提供最近一次样本的正文质量、原因和时间，状态信号不携带正文。
+
+### 本轮验证
+
+| 检查 | 结果与范围 |
+| --- | --- |
+| 规则、工具与服务等定向回归 | 64 通过，0 失败；`.history-migration/next-phase-focused-final.json` |
+| Windows History 回归 | 222 通过、5 跳过；不含另行执行的 `private-files.test.ts`；`.history-migration/next-phase-win-final.json` |
+| TypeScript 与真实原生组件 | 显式指定本轮 EXE 后 4/4 通过，零跳过，覆盖真实 Node 入口、启停与撤销规则、受控内容过滤；`.history-migration/next-phase-ts-native.json` |
+| 前端相关交互 | 127 通过，0 失败；`.history-migration/next-phase-frontend-tests.json` |
+| Agent 与前端类型检查 | 通过；修改范围 ESLint 通过 |
+| 原生 CTest | 修复受控 fixture 的前台激活后，37/37 通过，零跳过；`.history-migration/next-phase-interactive-native` 与构建目录 CTest 日志；单独执行原生 unit 为 58 项通过 |
+| 原生通用编辑控件 | 普通 Edit、Document 正文和摘要输入通过，密码及敏感标记未泄漏；`.history-migration/native-generic-CUVmHZ` |
+| Word 真实合成文档 | 原生快照、历史 JSONL、摘要输入均包含正文标记；`.history-migration/word-generic-52pdxX` |
+| VSCode 辅助功能 on | 首次快照未就绪，后续原生快照、历史 JSONL、摘要输入包含正文；`.history-migration/code-generic-sNfIpT` |
+| VSCode 默认 auto | 窗口和界面可读，编辑器正文未进入历史和摘要；`.history-migration/code-generic-GLyayq` |
+| Chrome 真实浏览器 | 滚动、标签切换、换页、网站排除、隐私窗口、历史落盘和摘要输入通过；`C:/Users/zephyr/AppData/Local/Temp/memmy-chrome-integration-8bOnJY` |
+| Edge 真实浏览器 | 同类回归通过；`C:/Users/zephyr/AppData/Local/Temp/memmy-edge-integration-bOZBKz` |
+| 源码启动预检 | `demo-start.mjs --check` 通过，Electron 38.4.0、ABI 139；没有启动完整 Memmy App |
+| Windows 安装包 | `1.2.3-rc.7 / x64 / CN / unsigned` 构建成功，包内统一规则、通用文本和 Windows 工具已核对；未执行安装运行 |
+
+这些计数属于各自检查范围，不能直接相加作为独立覆盖场景总数。摘要验证使用实际归一化事件生成的模型输入，未将离线证据检查表述成真实模型回答验收。
+
+### 兼容性与基线失败
+
+独立 Electron 38.4.0 测试应用的窗口存在，但多次采样仍缺少正文；启用该测试应用自身的辅助功能后也未通过。最终失败证据保存在 `C:/Users/zephyr/AppData/Local/Temp/memmy-electron-text-6sWkj7` 等目录，包含合成窗口的原生快照和系统 UIA 诊断。该测试不能代替第二款第三方 Electron 应用覆盖，M4 默认自动接入目标保持未完成。
+
+验证过程中曾尝试窗口级辅助功能请求和透明结构容器遍历，未获得正文覆盖收益，已移除这些尝试，未改变用户日常应用设置。最终代码保留精确进程校验。VSCode 的 `on` 和 `auto` 使用独立测试 profile，不能将前者推广为默认启动可用。
+
+共享验证脚本仍在基线 ESLint 项停止：未修改的四个测试文件合计 6 项 lint 错误。扩大 Agent 测试时，除已按新工具注册行为更新的断言外，42 项失败在保留的未修改集成工作区同样复现；另有 `private-files.test.ts` 的 2 项已知失败也在该基线复现。对照结果为 `.history-migration/next-phase-baseline-failing-tests.json`，不将这些项目排除后的结果写成全量通过。
+
+根目录打包契约测试中，`computer-history-packaging.test.mjs` 在当前目录与保留工作区均出现 suite 加载语法错误；其他已执行的契约断言不能代表整个套件通过。完整 App、安装运行和 Computer Use 联合 Demo 尚未验收。
+
+原生 CTest 首次执行为 18 通过、19 因前台条件跳过；受控 fixture 改为连接实际前台线程后激活自身窗口，同一批测试全部执行并通过。该修复只影响测试窗口，不改变产品采集策略。
+
+初次打包与测试重叠导致依赖文件占用和 npm 安装中断。已结束本次测试进程并恢复依赖，随后按顺序完成打包；打包结束后恢复源码所需的同版本 Electron SQLite 模块，源码预检再次通过。
+
+### 本轮安装产物
+
+完整 Windows 打包于本地时间 2026-10-15 21:43 完成，包含 Memory、Agent、前端、后端、Electron shell 和生产 C++ helper 的构建。产物为 `App/shell/desktop/release/Memmy-1.2.3-rc.7-win32-x64-cn-unsigned.exe`，300,826,470 字节，SHA-256 为 `B78071DD35B5BFBE7776E87D76D67CCE41DF3CF3EB8F63B5182B4C63967E1A8F`。
+
+包内生产 C++ helper 为 893,952 字节，与本轮生产构建哈希一致；分发位置为 `resources/app.asar.unpacked/dist/runtime/memmy-agent/dist/tools/computer-history/win/memmy-history-recorder.exe`。ASAR 中的统一设置、通用文本字段和 Windows 管理工具核对通过，结果保存在 `.history-migration/next-phase-packaged-checks.json`。另有旧 Go helper，不作为当前 C++ 采集核心的证据。
+
+打包日志为 `App/shell/desktop/release/logs/package-win-1.2.3-rc.7-x64-cn-unsigned-20261015-212459.log`。包内原生模块、版本及运行时分发检查通过；构建脚本中的 renderer bootstrap 为 Node 环境检查，不能代表真实界面验收。完整 App 未启动，安装、升级和联合 Demo 仍待另行运行验收。
 
 ## 统一验证入口
 

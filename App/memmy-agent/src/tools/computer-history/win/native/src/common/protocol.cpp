@@ -1,18 +1,20 @@
 #include "common/protocol.h"
 
 #include "common/classify.h"
+#include "common/browser.h"
 #include "common/text.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <set>
+#include <cmath>
 
 namespace memmy::protocol {
 namespace {
 
 constexpr std::string_view kReasons[] = {
     "policy_unavailable", "policy_invalid", "policy_changed", "policy_too_large",
-    "application_denied", "application_not_authorized", "browser_unsupported",
+    "application_denied", "application_not_authorized", "browser_unsupported", "browser_context_unavailable",
     "window_unavailable", "not_top_level", "process_unavailable", "identity_unavailable",
     "not_foreground", "context_changed", "paused",
     "uia_unavailable", "uia_root_unavailable", "uia_root_mismatch", "uia_error",
@@ -80,7 +82,7 @@ bool OnlyKeys(const Json& object, std::initializer_list<std::string_view> allowe
 }
 
 bool ContextFromJson(const Json& json, ContextRecord& out) {
-  if (!OnlyKeys(json, {"hwnd", "pid", "processStart", "executable", "dpi", "bounds", "minimized", "title"})) {
+  if (!OnlyKeys(json, {"hwnd", "pid", "processStart", "executable", "dpi", "bounds", "minimized", "title", "browser"})) {
     return false;
   }
   std::uint64_t pid = 0;
@@ -110,13 +112,33 @@ bool ContextFromJson(const Json& json, ContextRecord& out) {
     if (!GetString(json, "title", 8192, title)) return false;
     out.title = std::move(title);
   }
+  if (json.contains("browser")) {
+    const auto& value = json["browser"];
+    BrowserContext browser;
+    std::string kind, mode;
+    if (!OnlyKeys(value, {"kind", "mode", "url", "documentId", "viewport"}) || !GetString(value, "kind", 16, kind) || browser::FromName(kind) == browser::Kind::None ||
+        !GetString(value, "mode", 16, mode) || (mode != "normal" && mode != "unknown" && mode != "private") || !GetString(value, "url", 65536, browser.url) ||
+        !GetString(value, "documentId", 512, browser.documentId) || browser.documentId.empty() ||
+        !value.contains("viewport") || !value["viewport"].is_array() || value["viewport"].size() != 4) return false;
+    browser.kind = browser::FromName(kind);
+    browser.mode = mode;
+    const auto wide = text::FromUtf8(browser.url);
+    if (!wide || wide->empty() || browser::SanitizeUrl(*wide) != *wide) return false;
+    for (std::size_t i = 0; i < 4; ++i) {
+      if (!value["viewport"][i].is_number()) return false;
+      browser.viewport[i] = value["viewport"][i].get<double>();
+      if (!std::isfinite(browser.viewport[i])) return false;
+    }
+    if (browser.viewport[2] <= 0 || browser.viewport[3] <= 0) return false;
+    out.browser = std::move(browser);
+  }
   return true;
 }
 
 bool NodeFromJson(const Json& json, NodeRecord& node) {
   if (!OnlyKeys(json, {"runtimeId", "controlType", "automationId", "depth", "parent", "focused",
                        "providerOffscreen", "password", "redaction", "name", "text", "visibleText", "value",
-                       "bounds", "missing", "documentStatus", "className"})) {
+                       "bounds", "missing", "documentStatus", "className", "valueSource"})) {
     return false;
   }
   std::string controlType;
@@ -151,6 +173,10 @@ bool NodeFromJson(const Json& json, NodeRecord& node) {
   if (password->is_boolean()) node.password = password->get<bool>();
   if (json.contains("redaction")) {
     if (!GetString(json, "redaction", 64, node.redaction) || !classify::RedactionFromCode(node.redaction)) return false;
+  }
+  if (json.contains("valueSource")) {
+    if (!GetString(json, "valueSource", 32, node.valueSource) ||
+        (node.valueSource != "uia.value" && node.valueSource != "uia.legacy_value" && node.valueSource != "msaa.value" && node.valueSource != "msaa.name")) return false;
   }
   if (json.contains("documentStatus")) {
     if (!GetString(json, "documentStatus", 32, node.documentStatus) ||
@@ -229,8 +255,9 @@ void FinalizeScopedDocument(NodeRecord& node) {
     if (start == std::string::npos) return {};
     return std::string_view(text).substr(start, text.find_last_not_of(" \r\n\t") - start + 1);
   };
-  node.documentStatus = !node.name || !node.text ? "read_failed"
-    : !trim(*node.name).empty() && trim(*node.name) == trim(*node.text) ? "label_only" : "available";
+  // Kept only for explicitly bounded legacy policies. Generic reads do not depend on Name.
+  node.documentStatus = !node.text ? "read_failed"
+    : node.name && !trim(*node.name).empty() && trim(*node.name) == trim(*node.text) ? "label_only" : "available";
   if (node.documentStatus != "available") {
     node.name.reset(); node.text.reset(); node.visibleText.reset(); node.value.reset();
     node.redaction = "edit_control";
@@ -313,6 +340,7 @@ std::string NodeKey(const NodeRecord& node, std::string_view parentKey) {
   FnvOptional(hash, node.text);
   FnvOptional(hash, node.visibleText);
   FnvOptional(hash, node.value);
+  Fnv(hash, node.valueSource);
   Fnv(hash, parentKey);
   char buffer[17];
   std::snprintf(buffer, sizeof(buffer), "%016llx", static_cast<unsigned long long>(hash));
@@ -348,6 +376,8 @@ Json ContextToJson(const ContextRecord& context, std::optional<std::uint64_t> ge
       {"minimized", context.minimized},
   };
   if (context.title) json["title"] = *context.title;
+  if (context.browser) json["browser"] = {{"kind", browser::Name(context.browser->kind)}, {"mode", context.browser->mode}, {"url", context.browser->url},
+    {"documentId", context.browser->documentId}, {"viewport", context.browser->viewport}};
   if (generation) json["generation"] = *generation;
   return json;
 }
@@ -355,6 +385,16 @@ Json ContextToJson(const ContextRecord& context, std::optional<std::uint64_t> ge
 bool SameInstance(const ContextRecord& left, const ContextRecord& right) {
   return left.hwnd == right.hwnd && left.pid == right.pid && left.processStart == right.processStart &&
          left.executable == right.executable;
+}
+
+bool BrowserNodeContentAllowed(const NodeRecord& node, const BrowserContext& browser) {
+  if (node.providerOffscreen || !node.bounds || node.password != false || !node.redaction.empty() ||
+      node.text || node.value || node.visibleText ||
+      !(node.controlType == classify::kText || node.controlType == 50005 || node.controlType == 50000 ||
+        (node.controlType == classify::kDocument && node.depth == 0))) return false;
+  const auto& r = *node.bounds;
+  const auto& v = browser.viewport;
+  return r[2] > 0 && r[3] > 0 && r[0] < v[0] + v[2] && r[1] < v[1] + v[3] && r[0] + r[2] > v[0] && r[1] + r[3] > v[1];
 }
 
 Json NodeToJson(const NodeRecord& node, const std::string* key, const std::string* parentKey) {
@@ -374,6 +414,7 @@ Json NodeToJson(const NodeRecord& node, const std::string* key, const std::strin
   json["password"] = node.password ? Json(*node.password) : Json(nullptr);
   if (!node.redaction.empty()) json["redaction"] = node.redaction;
   if (!node.documentStatus.empty()) json["documentStatus"] = node.documentStatus;
+  if (!node.valueSource.empty()) json["valueSource"] = node.valueSource;
   if (node.className) json["className"] = *node.className;
   if (node.name) json["name"] = *node.name;
   if (node.text) json["text"] = *node.text;
@@ -474,6 +515,7 @@ bool WorkerResponseFromJson(const Json& json, const policy::Policy& policy, cons
   } else if (out.status == "ok") {
     return false;
   }
+
   const auto truncated = json.find("truncated");
   const auto elapsed = json.find("elapsedMs");
   if (truncated == json.end() || !truncated->is_boolean() || elapsed == json.end() || !elapsed->is_number()) return false;
@@ -520,21 +562,27 @@ bool WorkerResponseFromJson(const Json& json, const policy::Policy& policy, cons
     }
     if (node.depth > policy.limits.maxDepth) return false;
     const bool hasContent = node.name || node.text || node.visibleText || node.value;
+    if (!rule.captureText && hasContent && rule.browser != browser::Kind::None && out.context->browser && !BrowserNodeContentAllowed(node, *out.context->browser)) {
+      error = "worker_privacy_violation";
+      return false;
+    }
     if (!node.redaction.empty() && hasContent) {
       error = "worker_privacy_violation";
       return false;
     }
     const bool scoped = IsVsCodeEditorBody(node, out.nodes, rule) || IsWordDocument(node, out.nodes, rule) ||
       IsNotepadDocument(node, out.nodes, rule);
-    if ((!node.documentStatus.empty() && !scoped) || (scoped && hasContent && node.documentStatus != "available")) {
+    const bool generic = rule.captureText;
+    if ((!generic && !node.documentStatus.empty() && !scoped) ||
+        (!generic && scoped && hasContent && node.documentStatus != "available")) {
       error = "worker_privacy_violation";
       return false;
     }
-    if (node.documentStatus == "available") {
+    if (!generic && node.documentStatus == "available") {
       auto checked = node;
       FinalizeScopedDocument(checked);
       if (checked.documentStatus != "available") { error = "worker_privacy_violation"; return false; }
-    } else if (!node.documentStatus.empty() && (hasContent || node.redaction != "edit_control")) {
+    } else if (!generic && !node.documentStatus.empty() && (hasContent || node.redaction != "edit_control")) {
       error = "worker_privacy_violation";
       return false;
     }
@@ -546,7 +594,8 @@ bool WorkerResponseFromJson(const Json& json, const policy::Policy& policy, cons
     }
     // Evaluated without pattern availability: the most restrictive view that still lets an
     // unreadable authorized Document fall back to its independently checked children.
-    blocksChildren.push_back(!Recheck(node, policy, rule, false, scoped).traverseChildren || (scoped && !node.documentStatus.empty()));
+    blocksChildren.push_back(node.redaction == "password" || node.redaction == "sensitive_id" ||
+      !Recheck(node, policy, rule, false, scoped).traverseChildren || (!generic && !node.documentStatus.empty()));
     for (const auto* field : {&node.name, &node.text, &node.visibleText, &node.value}) {
       if (!*field) continue;
       const auto units = text::Utf16Length(**field).value_or(SIZE_MAX);

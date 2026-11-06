@@ -52,7 +52,12 @@ describe("Windows task frame provenance", () => {
     expect(await recover()).toMatchObject({ qpc: { origin: String(origin), frequency: "10000" }, videoIntegrity: "complete", durationMs: 200 });
   });
   it("keeps recordings from before source timestamps were added readable", async () => {
-    writeFrames(frames().map(({ sourceTicks: _source, repeated: _repeat, ...legacy }) => legacy));
+    writeFrames(frames().map((frame) => {
+      const legacy = { ...frame };
+      Reflect.deleteProperty(legacy, "sourceTicks");
+      Reflect.deleteProperty(legacy, "repeated");
+      return legacy;
+    }));
     expect(await recover()).toMatchObject({ videoIntegrity: "complete" });
   });
   it.each(["missing", "future", "before_origin", "false_fresh", "blank"] as const)("rejects %s source provenance instead of admitting it as fresh evidence", async (failure) => {

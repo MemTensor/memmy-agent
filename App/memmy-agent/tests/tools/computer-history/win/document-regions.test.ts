@@ -8,7 +8,8 @@ import { context, envelope, full, root, stats } from "./fixtures.js";
 const executable = "C:\\Apps\\Code.exe";
 const scope = { controlType: "Edit", automationId: "", scope: "vscode.editor" };
 const binding = { ...context, executable };
-const policy = compileWindowsPolicy([{ executable }], [binding]);
+// Explicitly bounded compatibility mode remains available beside generic product capture.
+const policy = compileWindowsPolicy([{ executable, captureText: false }], [binding]);
 function tree(): NativeNode[] {
   const node = (id: number, type: NativeNode["controlType"], automationId: string): NativeNode => ({ ...root,
     key: id.toString(16).padStart(16, "0"), parentKey: (id - 1).toString(16).padStart(16, "0"),
@@ -26,7 +27,7 @@ describe("application document defaults", () => {
     expect(policy.applications[0]?.documentRegions).toEqual([scope]);
     const word = { ...binding, executable: "C:\\Office\\WINWORD.EXE" };
     expect(compileWindowsPolicy([], [word], { defaultApplicationBehavior: "observe" }).applications[0]?.documentRegions)
-      .toEqual([{ controlType: "Edit", automationId: "Body" }, { controlType: "Document", automationId: "", scope: "word.document" }]);
+      .toBeUndefined();
     expect(() => compileWindowsPolicy([], [binding])).toThrow();
     expect(() => compileWindowsPolicy([], [binding], { defaultApplicationBehavior: "observe", deny: { executables: [executable] } })).toThrow();
     expect(compileWindowsPolicy([{ executable, documentRegions: [] }], [binding]).applications[0]?.documentRegions).toEqual([]);
@@ -41,7 +42,6 @@ describe("application document defaults", () => {
     { documentRegions: [{ ...scope, scope: "anything" }] },
     { documentRegions: [{ ...scope, automationId: "not-empty" }] },
     { documentRegions: [{ ...scope, controlType: "Document" }] },
-    { documentRegions: [scope], executable: "C:\\Apps\\Other.exe" },
     { searchFields: [scope] },
   ])("rejects unbounded or incorrectly scoped selectors", (changes) => {
     expect(() => parseNativePolicy({ version: 1, applications: [{ pid: binding.pid, executable,
@@ -51,7 +51,7 @@ describe("application document defaults", () => {
 
 describe("Word document scope", () => {
   const wordBinding = { ...binding, executable: "C:\\Office\\WINWORD.EXE" };
-  const wordPolicy = compileWindowsPolicy([{ executable: wordBinding.executable }], [wordBinding]);
+  const wordPolicy = compileWindowsPolicy([{ executable: wordBinding.executable, captureText: false }], [wordBinding]);
   const nodes = (): NativeNode[] => ([
     { ...root, className: "OpusApp", name: undefined },
     { ...root, key: "0000000000000002", runtimeId: "2", parentKey: root.key, depth: 1, controlType: "Pane", className: "_WwF", name: undefined },

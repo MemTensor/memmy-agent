@@ -89,6 +89,7 @@
     "db:migrate": "npm run db:migrate -w @memmy/backend",
     "test:opencode": "npm run build -w @memmy/agent-source-core && npm run build -w @memmy/local-api-contracts && npm run workspace-bridge:build -w @memmy/backend && npm run integration:build -w @memmy/memory && vitest run tests/opencode-compatibility.test.mjs",
     "test:contracts": "vitest run tests/computer-history-contract.test.ts",
+    "test:history-capability": "node --test tests/history-capability-analysis.test.mjs",
     "test:codex-hooks": "npm run build -w @memmy/agent-source-core && npm run build -w @memmy/local-api-contracts && npm run workspace-bridge:build -w @memmy/backend && npm run integration:build -w @memmy/memory && vitest run tests/codex-hook-lifecycle.test.ts"
   },
   "engines": {

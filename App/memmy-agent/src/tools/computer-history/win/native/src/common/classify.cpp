@@ -76,6 +76,13 @@ NodeDecision Classify(const NodeFacts& facts, const policy::Policy& policy, cons
     decision.redaction = Redaction::Password;
     return decision;
   }
+  if (rule.captureText) {
+    decision.readName = true;
+    decision.readDocumentText = facts.textPatternAvailable;
+    decision.readSearchValue = facts.valuePatternAvailable;
+    decision.traverseChildren = true;
+    return decision;
+  }
   if (facts.controlType == kEdit) {
     if (facts.password == PasswordState::Unknown) {
       decision.redaction = Redaction::UnknownPassword;
@@ -110,7 +117,7 @@ NodeDecision Classify(const NodeFacts& facts, const policy::Policy& policy, cons
   }
   // VS Code mirrors private input into sibling live-region/status labels. The bounded
   // editor adapter authorizes bodies, not arbitrary workbench names (including Text).
-  decision.readName = !policy::HasVsCodeEditorScope(rule);
+  decision.readName = rule.captureText || !policy::HasVsCodeEditorScope(rule);
   if (facts.controlType == kDocument && facts.textPatternAvailable &&
       (policy::MatchesSelector(rule.documentRegions, facts.controlType, facts.automationId) ||
        (facts.scopedDocument && (policy::HasWordDocumentScope(rule) || policy::HasNotepadDocumentScope(rule))))) {

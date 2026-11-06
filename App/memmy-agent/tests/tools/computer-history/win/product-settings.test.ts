@@ -38,7 +38,8 @@ describe("Windows application consent", () => {
     const locked = { ...context, pid: 458, executable: "C:\\Windows\\LockApp.exe" };
     const policy = bindSettings(store, [context, other, browser, locked]);
     expect(authorizedRule(policy, other)).not.toBeNull();
-    for (const denied of [context, browser, locked, { ...other, processStart: "134000000000000003" }]) expect(authorizedRule(policy, denied)).toBeNull();
+    expect(authorizedRule(policy, browser)?.browser).toBe("chrome");
+    for (const denied of [context, locked, { ...other, processStart: "134000000000000003" }]) expect(authorizedRule(policy, denied)).toBeNull();
     expect(applicationCatalog([other, browser, locked], store.read()).find((app) => app.executable === other.executable)?.allowed).toBe(true);
     expect(applicationCatalog([], store.read()).find((app) => app.executable === executable)).toMatchObject({ running: false, allowed: false });
   });
@@ -70,9 +71,9 @@ describe("Windows application consent", () => {
     const settings = parseWindowsSettings({ version: 1, applications: [rule, { executable: "C:\\Apps\\Closed.exe" }] });
     const apps = applicationCatalog([{ ...context, executable: executable.toUpperCase() },
       { pid: 22, executable: "C:\\Apps\\chrome.exe", processStart: "134000000000000003" }], settings);
-    expect(apps.find((app) => app.running && app.allowed)?.rule).toEqual(rule);
+    expect(apps.find((app) => app.running && app.allowed)?.rule).toEqual({ ...rule, captureText: true });
     expect(apps.find((app) => app.name === "Closed.exe")).toMatchObject({ running: false, allowed: true });
-    expect(apps.find((app) => app.name === "chrome.exe")).toMatchObject({ supported: false, allowed: false });
+    expect(apps.find((app) => app.name === "chrome.exe")).toMatchObject({ supported: true, allowed: false });
   });
   it("refreshes instance bindings and stops safely on corrupted consent", async () => {
     vi.useFakeTimers();

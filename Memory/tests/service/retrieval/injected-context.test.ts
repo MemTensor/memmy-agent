@@ -475,8 +475,10 @@ describe("MemoryService / retrieval / injected context", () => {
     });
 
     expect(prepared.hits.length).toBeGreaterThan(1);
-    expect(prepared.sourceMemoryIds.length).toBeGreaterThanOrEqual(prepared.hits.length);
-    expect(prepared.droppedDueToBudget).toEqual([]);
+    expect(prepared.sourceMemoryIds).toEqual([]);
+    expect(prepared.injectedContext.markdown).toBe("");
+    expect(prepared.droppedDueToBudget.length).toBeGreaterThan(0);
+    expect(prepared.droppedDueToBudget.every(item => item.reason === "token_budget")).toBe(true);
 
     expect(db.db.prepare(
       `SELECT turn_id, json_extract(request_json, '$.retrievalMode') AS retrieval_mode
@@ -707,7 +709,7 @@ describe("MemoryService / retrieval / injected context", () => {
     db.close();
   });
 
-  it("falls back to source policy decision guidance for legacy skill recall", async () => {
+  it.each([false, true])("accounts for legacy skill advice sources (failure=%s)", async (failure) => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -752,6 +754,7 @@ describe("MemoryService / retrieval / injected context", () => {
           schema_version: 1,
           policy: {
             title: "Legacy skill source policy",
+            ...(failure ? { experience_type: "failure_avoidance", evidence_polarity: "negative" } : {}),
             trigger: "orthogonal source trigger",
             procedure: "Use only as source guidance for a legacy skill.",
             verification: "The guidance source is included in recall source ids.",
@@ -852,7 +855,7 @@ describe("MemoryService / retrieval / injected context", () => {
     });
 
     expect(recall.hits.map((hit) => hit.id)).toContain(skillId);
-    const guidance = recall.injectedContext.sections.find((section) => section.id === "decision-guidance");
+    const guidance = recall.injectedContext.sections.find((section) => section.id === (failure ? "failure-avoidance" : "decision-guidance"));
     expect(guidance?.content).toContain("prefer source policy guidance for legacy skills");
     expect(guidance?.memoryIds).toContain(policyId);
     expect(recall.sourceMemoryIds).toEqual(expect.arrayContaining([skillId, policyId]));
@@ -862,6 +865,32 @@ describe("MemoryService / retrieval / injected context", () => {
        WHERE id = ?`
     ).get(recall.searchEventId) as { injected_memory_ids_json: string };
     expect(JSON.parse(recallRow.injected_memory_ids_json)).toEqual(expect.arrayContaining([policyId]));
+
+    // A linked policy is injected as advice even though it is not a direct hit.
+    expect(recall.hits.map((hit) => hit.id)).not.toContain(policyId);
+    const ampleEvent = db.db.prepare("SELECT dropped_json FROM recall_events WHERE id = ?")
+      .get(recall.searchEventId) as { dropped_json: string };
+    expect.soft(JSON.parse(ampleEvent.dropped_json)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: policyId })
+    ]));
+    for (const contextBudget of [0, 1]) {
+      const bounded = await service.search({
+        sessionId: session.sessionId,
+        query: "legacy widget fallback skill guide",
+        layers: ["Skill", "L2"], includeInjectedContext: true, contextBudget
+      });
+      expect(bounded.sourceMemoryIds).toEqual([]);
+      const expected = [
+        expect.objectContaining({ id: skillId, kind: "skill", memoryLayer: "Skill", reason: "token_budget" }),
+        expect.objectContaining({ id: policyId, kind: "policy", memoryLayer: "L2", reason: "token_budget" })
+      ];
+      expect.soft(bounded.droppedDueToBudget).toEqual(expect.arrayContaining(expected));
+      const event = db.db.prepare("SELECT dropped_json FROM recall_events WHERE id = ?")
+        .get(bounded.searchEventId) as { dropped_json: string };
+      const dropped = JSON.parse(event.dropped_json);
+      expect.soft(dropped).toEqual(expect.arrayContaining(expected));
+      expect(dropped.filter((item: { id: string }) => item.id === policyId)).toHaveLength(1);
+    }
 
     db.close();
   });

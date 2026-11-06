@@ -1,5 +1,7 @@
-// Legacy Mac observation settings, retained for existing records and imports.
-// Windows capture uses win/settings.ts and never inherits these defaults.
+import path from "node:path";
+import { windowsApplicationAlias, windowsApplicationId, windowsPathKey } from "./application-identity.js";
+
+// Shared application and website observation settings for both desktop platforms.
 //
 // The model has two orthogonal axes rather than one list: an application axis
 // keyed by bundle identifier, and a website axis keyed by bare domain. Each axis
@@ -13,6 +15,8 @@ export type ObservationBehavior = "observe" | "do_not_observe";
 export interface ApplicationRule {
   scope: "app";
   bundleID: string;
+  /** Exact Windows executable; bundleID is its stable windows: identity. */
+  executable?: string;
   behavior: ObservationBehavior;
 }
 
@@ -36,6 +40,7 @@ export interface ObservationSettings {
 
 export interface ObservationSubject {
   bundleId?: string | null;
+  executable?: string | null;
   /** Extra, explicit user consent for personal WeChat chat content. */
   weChatChatAccess?: boolean;
   /** The native recorder recognizes a browser even when URL lookup failed. */
@@ -135,6 +140,7 @@ function sameApplication(ruleId: string, subjectId: string): boolean {
   const subject = subjectId.trim().toLowerCase();
   if (!rule || !subject) return false;
   if (rule === subject) return true;
+  if (/^(windows:|win32\.)/u.test(rule) || /^(windows:|win32\.)/u.test(subject)) return false;
   if (!subject.startsWith(`${rule}.`)) return false;
   return /(helper|agent|service|xpc|renderer|crash|gpu|plugin|screenshot)/iu.test(subject.slice(rule.length + 1));
 }
@@ -150,9 +156,29 @@ function resolveAxis(
   return fallback;
 }
 
+/** Application axis only: native bindings are compiled before a page URL is known. */
+export function applicationObservationDecision(settings: ObservationSettings, subject: ObservationSubject): ObservationDecision {
+  // Browser extension observations identify the browser family, not its EXE.
+  // Without that path, a matching exclusion cannot be ruled out. Path-specific
+  // allows still require an exact executable match below.
+  if (!subject.executable && subject.bundleId?.toLowerCase().startsWith("win32.")
+    && settings.observation.rules.some((rule) => rule.scope === "app" && rule.executable
+      && rule.behavior === "do_not_observe" && sameApplication(windowsApplicationAlias(rule.executable), subject.bundleId!))) {
+    return { observe: false, reason: "application_blocked" };
+  }
+  const appRules = settings.observation.rules.filter((rule): rule is ApplicationRule => rule.scope === "app" && (
+    rule.executable ? !!subject.executable && windowsPathKey(rule.executable) === windowsPathKey(subject.executable)
+      : !!subject.bundleId && sameApplication(rule.bundleID, subject.bundleId)
+        || !!subject.executable && sameApplication(rule.bundleID, windowsApplicationId(subject.executable))));
+  return resolveAxis(appRules, settings.observation.defaultApplicationBehavior) === "observe"
+    ? { observe: true, reason: "observed" }
+    : { observe: false, reason: appRules.length ? "application_blocked" : "application_not_allowed" };
+}
+
 export function evaluateObservation(
   settings: ObservationSettings,
   subject: ObservationSubject,
+  options: { ignorePrivateBrowsing?: boolean; observeUnknownURL?: boolean } = {},
 ): ObservationDecision {
   if (subject.bundleId && SENSITIVE_MESSAGE_APP_BUNDLE_IDS.has(subject.bundleId.toLowerCase())
     && subject.weChatChatAccess !== true) {
@@ -162,19 +188,9 @@ export function evaluateObservation(
     return { observe: false, reason: "system_surface" };
   }
 
-  const { defaultApplicationBehavior, defaultURLBehavior, rules } = settings.observation;
-
-  const appRules = rules.filter(
-    (rule): rule is ApplicationRule =>
-      rule.scope === "app" && Boolean(subject.bundleId) && sameApplication(rule.bundleID, subject.bundleId!),
-  );
-  const appBehavior = resolveAxis(appRules, defaultApplicationBehavior);
-  if (appBehavior === "do_not_observe") {
-    return {
-      observe: false,
-      reason: appRules.length ? "application_blocked" : "application_not_allowed",
-    };
-  }
+  const { defaultURLBehavior, rules } = settings.observation;
+  const appDecision = applicationObservationDecision(settings, subject);
+  if (!appDecision.observe) return appDecision;
 
   // Native apps have no website axis. A browser with an unreadable address
   // cannot prove it is outside a website exclusion. Preserve the user's
@@ -183,7 +199,7 @@ export function evaluateObservation(
   if (!host) {
     const browser = subject.browser || BROWSER_BUNDLE_IDS.has((subject.bundleId ?? "").toLowerCase());
     const websiteExclusions = rules.some((rule) => rule.scope === "url" && rule.behavior === "do_not_observe");
-    return browser && (defaultURLBehavior === "do_not_observe" || websiteExclusions)
+    return !options.observeUnknownURL && browser && (defaultURLBehavior === "do_not_observe" || websiteExclusions)
       ? { observe: false, reason: "url_not_allowed" }
       : { observe: true, reason: "observed" };
   }
@@ -236,11 +252,20 @@ export function parseObservationSettings(input: unknown): ObservationSettings {
     const entry = rule as Record<string, unknown>;
     const behavior = assertBehavior(entry.behavior, `rules[${index}].behavior`);
     if (entry.scope === "app") {
-      const bundleID = entry.bundleID;
+      const executable = entry.executable;
+      if (executable !== undefined && (typeof executable !== "string" || !path.win32.isAbsolute(executable)
+          || executable.includes("\0") || executable.startsWith("\\\\?\\") || executable.startsWith("\\\\.\\"))) {
+        throw new ObservationSettingsError(`rules[${index}].executable must be an absolute Windows path`);
+      }
+      const bundleID = entry.bundleID ?? (typeof executable === "string" ? windowsApplicationId(executable) : undefined);
       if (typeof bundleID !== "string" || !bundleID.trim()) {
         throw new ObservationSettingsError(`rules[${index}].bundleID is required for app rules`);
       }
-      return { scope: "app", bundleID: bundleID.trim(), behavior };
+      if (typeof executable === "string" && bundleID !== windowsApplicationId(executable)) {
+        throw new ObservationSettingsError(`rules[${index}].bundleID does not match executable`);
+      }
+      return { scope: "app", bundleID: bundleID.trim(), behavior,
+        ...(typeof executable === "string" ? { executable: path.win32.normalize(executable) } : {}) };
     }
     if (entry.scope === "url") {
       const urlDomain = entry.urlDomain;

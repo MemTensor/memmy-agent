@@ -42,6 +42,7 @@ function setup(mode = "normal") {
   vi.mocked(spawn).mockImplementation(() => {
     queueMicrotask(() => {
       if (mode === "no-start") return;
+      if (mode === "already-running") { close(4); return; }
       send({ kind: "session.started", collector: { version: "1", pid: child.pid, testHooks: mode === "test-hooks" },
         policyRevision: readNativePolicy(policyFile).revision,
         options: { seconds: 30, rotateSeconds: 600, sampleMs: 1000, inputHooks: false, parentPid: process.pid }, segment: null });
@@ -175,6 +176,38 @@ describe("owned Windows collector lifecycle", () => {
     const test = setup(), recorder = await WindowsHistoryRecorder.start(test.options);
     test.send({ kind: "session.checkpoint", id: request().id, captureSequence: 10, complete: true });
     await expect(recorder.finished).rejects.toThrow("checkpoint_unrequested");
+  });
+  it("reports a competing collector as an occupied session instead of an incomplete recording", async () => {
+    const test = setup("already-running");
+    await expect(WindowsHistoryRecorder.start(test.options)).rejects.toThrow("windows_collector_already_running");
+    expect(fs.readFileSync(test.eventsFile, "utf8")).not.toContain('"eventType":"recording_stopped"');
+  });
+  it.each(["chrome", "edge"] as const)("filters %s websites before persistence and permits the next allowed page", async (browser) => {
+    const test = setup();
+    const chromeExe = browser === "edge" ? "C:\\Apps\\msedge.exe" : "C:\\Apps\\chrome.exe";
+    fs.writeFileSync(test.policyFile, JSON.stringify({ version: 1, applications: [{ pid: context.pid, executable: chromeExe, browser }] }));
+    const observationSettingsFile = path.join(test.directory, "observation.json");
+    fs.writeFileSync(observationSettingsFile, JSON.stringify({ memory: { syncEnabled: false }, observation: {
+      defaultApplicationBehavior: "do_not_observe", defaultURLBehavior: "do_not_observe",
+      rules: [{ scope: "app", bundleID: browser === "edge" ? "win32.msedge" : "win32.chrome", behavior: "observe" },
+        { scope: "url", urlDomain: "gutenberg.org", behavior: "observe" }],
+    } }));
+    const recorder = await WindowsHistoryRecorder.start({ ...test.options, observationSettingsFile });
+    const page = (url: string, name: string) => ({ ...full([
+      { ...root, name: "Book", controlType: "Document", bounds: [0, 80, 800, 520] },
+      { ...text, name, bounds: [10, 100, 700, 25] },
+    ]), context: { ...context, executable: chromeExe, browser: { kind: browser, mode: "normal", url, documentId: "1.2", viewport: [0, 80, 800, 520] } } });
+    test.send(page("https://www.gutenberg.org/ebooks/11", "ALLOWED_BOOK_A"));
+    test.send(page("https://blocked.test/private", "BLOCKED_PAGE_CONTENT"));
+    const blocked = page("https://blocked.test/private", "BLOCKED_PAGE_CONTENT");
+    test.send({ ...blocked, snapshot: { ...blocked.snapshot, mode: "delta", nodes: undefined,
+      added: [], removed: [], unchangedCount: 2 } });
+    expect(recorder.state).toBe("running");
+    test.send(page("https://www.gutenberg.org/ebooks/55", "ALLOWED_BOOK_B"));
+    await recorder.stop();
+    const saved = fs.readFileSync(test.eventsFile, "utf8");
+    expect(saved).toContain("ALLOWED_BOOK_A"); expect(saved).toContain("ALLOWED_BOOK_B");
+    expect(saved).not.toContain("blocked.test"); expect(saved).not.toContain("BLOCKED_PAGE_CONTENT");
   });
   it("publishes content-free health only after a native event is persisted", async () => {
     const test = setup();

@@ -5,6 +5,7 @@ on:
     branches:
       - "pxlin/dev"
       - "integrate/**"
+      - "feature/windows-history-native-core"
   pull_request:
     paths:
       - ".github/workflows/windows-history-native-validation.yml"

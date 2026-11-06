@@ -132,43 +132,19 @@ the content write finishes.
 The collector also re-validates the worker's JSON against the policy (privacy invariants,
 tree shape, budgets) before anything is written.
 
-### Privacy model
+### Current window capture model
 
-- Deny lists win. Known browser executables are always `browser_unsupported` (see below).
-- Each node is classified from metadata only: control type, `IsPassword` (supported or not),
-  AutomationId, focus and pattern availability. `Name` is read only for permitted nodes.
-- `IsPassword = true`, a sensitive AutomationId, or an unknown password state on a
-  content-bearing control blocks the node **and its subtree**.
-- Every `Edit` is excluded with its descendants, so child `Text` cannot mirror input. The
-  two exceptions are an exact `searchFields` selector on the currently focused field
-  (focus, selector and non-password status re-checked live around content reads) and an exact `documentRegions` selector
-  (TextPattern).
-- `Document` text is read only for an exact `documentRegions` selector. Unselected documents
-  contribute their own name and independently checked children.
-- Containers (Window/Pane/Group/…) that do not report `IsPassword` are masked but traversed.
-- Content hosted by another process under the HWND is skipped.
-- Budgets: depth, emitted nodes, visited nodes, total and per-field text (UTF-16 units, no
-  split surrogate pairs), wall clock, and a hard worker kill at `workerTimeoutMs`.
-- Ordinary input values, characters and printable key identities are never recorded. With
-  input hooks enabled, clicks carry physical coordinates, scrolling carries direction/delta,
-  and allowlisted navigation/shortcut keys carry fixed semantic labels. Other printable
-  keys (including AltGr) carry redacted key-press counts only, not character counts. Keyboard
-  metadata requires a non-password, non-sensitive known focused node. Actions share the
-  snapshot's HWND/generation/identity/policy commit, with at most 64 actions and an overflow
-  flag; the asynchronous hook/UIA ordering can still omit activity. A click does not prove
-  its target or effect. `injected` identifies possible software-generated input.
-  Diagnostics carry codes only. Delta `removed` entries are node keys, never text.
+As of 2026-10-16, captureText defaults to true. Applications and browsers share capability-based UIA reads, independent of exact control roles or application-specific ancestor shapes. The authorized foreground HWND and process instance are still checked before and after capture. Hosted descendants may belong to other PIDs; traversal remains scoped to that HWND subtree.
 
-### Browsers (deliberately unsupported)
+Explicit passwords and sensitive AutomationIds prune their subtrees. Missing IsPassword is metadata uncertainty, not a blanket refusal. Positive native password styles remain checked before and after reads. Credential redaction runs before shared history persistence.
 
-This phase cannot distinguish normal from InPrivate/incognito windows reliably. The C#
-prototype reports `privateState=unknown` for both. Known browsers (`msedge.exe`,
-`chrome.exe`, `firefox.exe`, `brave.exe`, `opera.exe`, `vivaldi.exe`, `msedgewebview2.exe`
-and others, matched by basename **only to refuse**) therefore return `browser_unsupported`
-with no content, even when the policy names them exactly. There is no override switch.
-Browsers that are renamed or embedded in other apps (WebView2/Electron hosts under another
-name) are not detected as browsers. They fall under the ordinary rules, where `Edit`
-exclusion still applies. URL adapters and private-state detection are later work.
+Focus branches and documents are prioritized. Provider-visible ranges are read before bounded document context. Missing names or equal Name/Text do not invalidate generic text. Failed TextPattern reads can fall back to ValuePattern, LegacyIAccessible and window-scoped MSAA; failed fields do not discard successful fields. Raw View is attempted within the same total deadline if Control View provides no text. Window-scoped Chromium accessibility requests do not change global system settings or user application profiles.
+
+### Browser metadata enhancement
+
+Browser names never deny generic capture. Chrome and Edge additionally attempt Document URL enrichment; metadata is attached when it matches the captured document identity; URLs available before and after capture must agree. Missing metadata does not block content. Capture includes private, guest and unknown modes in this development stage. Windows observes unknown URLs; recognizable URLs still pass through configured website rules. macOS defaults are unchanged.
+
+Run `node App/memmy-agent/src/tools/computer-history/win/native/tests/integration/browser-smoke.mjs` for owned Chrome synthetic pages, or add `--browser=edge`. This checks page navigation, scrolling, tabs, persistence and summary evidence under the new generic contract. The Electron smoke remains an independent engine-level diagnostic, not third-party application coverage.
 
 ## Build
 
@@ -280,7 +256,7 @@ long-duration or broad application compatibility.
 
 - The TypeScript adapter, shared service and Windows UI are integrated (see
   [product entry](../README.md)). EXE packaging and installer delivery remain pending.
-- Browsers are unsupported (above). There are no URL adapters.
+- Browser URL enhancement currently recognizes Chrome and Edge; other applications use generic capture.
 - No production Office/WPS/VS Code body adapters. Only the generic exact-AutomationId
   `documentRegions` selector exists, validated against a RichEdit document in the fixture.
 - Selectors cannot match on names. Global ValuePattern/TextPattern reads do not exist by design.

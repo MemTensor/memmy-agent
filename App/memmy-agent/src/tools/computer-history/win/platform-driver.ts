@@ -2,18 +2,20 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ComputerHistoryApiError } from "../core/computer-history-api.js";
-import type { HistoryPlatformDriver, HistoryPermissions, RecorderLaunch } from "../core/platform-driver.js";
-import { applicationCatalog, browserNames, discoverApplications, resolveWindowsCollector, WindowsSettingsStore } from "./settings.js";
-import { isSystemSurface, pathKey } from "./policy.js";
-import path from "node:path";
+import type { HistoryPlatformDriver, HistoryPermissions, RecorderLaunch, HistoryContentQuality } from "../core/platform-driver.js";
+import { applicationCatalog, discoverApplications, resolveWindowsCollector, WindowsSettingsStore } from "./settings.js";
+import { isSystemSurface, isUnsupportedBrowser, pathKey } from "./policy.js";
 import crypto from "node:crypto";
 import { collectorGate } from "../core/collector-gate.js";
 import { discoverApplicationCatalog, type CatalogApplication } from "./application-catalog.js";
 import { checkpointId, persistedCheckpoint, recorderRotationRequest, recorderRotationResult } from "../core/recorder-checkpoint.js";
 import { WindowsApplicationIconReader } from "./application-icon.js";
+import { windowsScopeAllows } from "./unified-settings.js";
 
 interface ProcessSession { ready: Promise<void>; closed: Promise<void>; rotate(input: RecorderLaunch): Promise<void> }
 export class WindowsPlatformDriver implements HistoryPlatformDriver {
+  private quality: HistoryContentQuality | undefined;
+  contentQuality() { return this.quality; }
   private readonly sessions = new WeakMap<ChildProcessWithoutNullStreams, ProcessSession>();
   private readonly icons = new WindowsApplicationIconReader();
   private catalog: { expires: number; entries: CatalogApplication[] } | undefined;
@@ -21,7 +23,8 @@ export class WindowsPlatformDriver implements HistoryPlatformDriver {
     private readonly recorderScript = fileURLToPath(new URL("./record-human-history.js", import.meta.url))) {}
   prepare(): void {
     const settings = this.store.read();
-    if (settings.defaultApplicationBehavior !== "observe" && !settings.applications.length) throw new ComputerHistoryApiError(422, "Choose an application to record first");
+    if (settings.defaultApplicationBehavior !== "observe" && !settings.applications.length
+        && !this.store.readObservation()?.observation.rules.some(rule => rule.scope === "app" && rule.behavior === "observe")) throw new ComputerHistoryApiError(422, "Choose an application to record first");
     resolveWindowsCollector(this.binary);
     if (!fs.existsSync(this.recorderScript)) throw new ComputerHistoryApiError(503, "Windows recorder entry is unavailable");
   }
@@ -34,21 +37,23 @@ export class WindowsPlatformDriver implements HistoryPlatformDriver {
       try { entries = await discoverApplicationCatalog(resolveWindowsCollector(this.binary)); } catch { /* EXE names remain available */ }
       this.catalog = { expires: Date.now() + 60000, entries };
     }
-    return { settings, applications: applicationCatalog(bindings, settings, this.catalog.entries), permissions: await this.readPermissions() };
+    return { settings, applications: applicationCatalog(bindings, settings, this.catalog.entries, this.store.readObservation()), permissions: await this.readPermissions() };
   }
   async readPermissions(): Promise<HistoryPermissions> {
     const status: HistoryPermissions = { supported: true, platform: "windows", accessibility: false, inputMonitoring: false, ready: false, reason: "authorization_required" };
     let binary: string;
     try { binary = resolveWindowsCollector(this.binary); if (!fs.existsSync(this.recorderScript)) throw new Error(); }
     catch { return { ...status, reason: "collector_unavailable" }; }
-    let settings;
-    try { settings = this.store.read(); } catch { return { ...status, reason: "settings_invalid" }; }
-    if (settings.defaultApplicationBehavior !== "observe" && !settings.applications.length) return status;
+    let settings, shared;
+    try { settings = this.store.read(); shared = this.store.readObservation(); } catch { return { ...status, reason: "settings_invalid" }; }
+    if (settings.defaultApplicationBehavior !== "observe" && !settings.applications.length
+        && !shared?.observation.rules.some(rule => rule.scope === "app" && rule.behavior === "observe")) return status;
     try {
       const bindings = await discoverApplications(binary);
-      const ready = settings.defaultApplicationBehavior === "observe" || bindings.some((binding) => !isSystemSurface(binding.executable) && !browserNames.has(path.win32.basename(pathKey(binding.executable)))
+      const ready = settings.defaultApplicationBehavior === "observe" || bindings.some((binding) => !isSystemSurface(binding.executable) && !isUnsupportedBrowser(binding.executable)
         && !settings.deny?.executables?.some((exe) => pathKey(exe) === pathKey(binding.executable))
-        && settings.applications.some((rule) => pathKey(rule.executable) === pathKey(binding.executable)));
+        && (shared ? windowsScopeAllows(shared, binding.executable)
+          : settings.applications.some((rule) => pathKey(rule.executable) === pathKey(binding.executable))));
       return { ...status, ready, reason: ready ? "ready" : "no_running_authorized_application" };
     } catch { return { ...status, reason: "discovery_failed" }; }
   }
@@ -56,7 +61,7 @@ export class WindowsPlatformDriver implements HistoryPlatformDriver {
     const configuration = await this.configuration();
     const applications = new Map<string, { bundleId: string; name: string }>();
     for (const app of configuration.applications.filter((item) => item.supported)) {
-      const bundleId = `win32.${path.win32.basename(app.executable, ".exe").toLowerCase()}`;
+      const bundleId = app.id;
       applications.set(bundleId, { bundleId, name: app.name });
     }
     return [...applications.values()];
@@ -66,6 +71,7 @@ export class WindowsPlatformDriver implements HistoryPlatformDriver {
   iconFor(bundleId: string): Promise<string | null> { return this.icons.iconFor(bundleId); }
   launch(input: RecorderLaunch): ChildProcessWithoutNullStreams {
     this.prepare();
+    this.quality = undefined;
     const release = collectorGate.acquire("history");
     let child: ChildProcessWithoutNullStreams;
     try { child = spawn(process.execPath, [this.recorderScript, "--binary", resolveWindowsCollector(this.binary),
@@ -115,6 +121,16 @@ export class WindowsPlatformDriver implements HistoryPlatformDriver {
             const checkpoint = JSON.parse(line.slice("[recorder-checkpoint] ".length));
             if (!persistedCheckpoint.safeParse(checkpoint).success && !(checkpointId.safeParse(checkpoint.id).success
                 && checkpoint.complete === false && Object.keys(checkpoint).every(key => key === "id" || key === "complete"))) throw new Error();
+            continue;
+          }
+          if (line.startsWith("[recorder-quality] ")) {
+            const quality = JSON.parse(line.slice("[recorder-quality] ".length));
+            if (!quality || typeof quality !== "object" || Array.isArray(quality)
+                || !["available", "partial", "unavailable"].includes(quality.status)
+                || !["text_read", "labels_only", "read_failed", "budget_exceeded"].includes(quality.reason)
+                || typeof quality.timestamp !== "string" || !Number.isFinite(Date.parse(quality.timestamp))
+                || Object.keys(quality).length !== 3 || Object.keys(quality).some(key => !["status", "reason", "timestamp"].includes(key))) throw new Error();
+            this.quality = quality;
             continue;
           }
           if (line.startsWith("[recorder-health] ")) {

@@ -51,7 +51,9 @@ describe.skipIf(!enabled)("production C++ to TypeScript adapter", () => {
       expect(records.filter((item) => item.eventType === "recording_started")).toHaveLength(2);
       expect(records.filter((item) => item.eventType === "recording_stopped")).toHaveLength(2);
       expect(records.at(-1).eventType).toBe("recording_stopped");
-      expect(fs.existsSync(path.join(test.directory, "mac-settings.json"))).toBe(false);
+      const shared = JSON.parse(fs.readFileSync(path.join(test.directory, "mac-settings.json"), "utf8"));
+      expect(shared).toEqual(instance.getObservationSettings());
+      expect(shared.observation).toMatchObject({ defaultApplicationBehavior: "do_not_observe", rules: [] });
       fs.writeFileSync(path.join(test.directory, "product-service-result.json"), JSON.stringify({ state: instance.snapshot().observation.state,
         sequences: records.slice(1).map((item) => item.sequence), explicitConsentRevoked: store.read().applications.length === 0 }));
     } finally {
@@ -100,7 +102,7 @@ describe.skipIf(!enabled)("production C++ to TypeScript adapter", () => {
       if (!activated.ok || activated.foreground !== info.hwndA) { testContext.skip(); return; }
       await command("focus search");
       replaceNativePolicy(test.policyFile, parseNativePolicy({ version: 1, applications: [{ pid: info.pid, executable: info.exe,
-        processStart: info.processStart, hwnd: info.hwndA, searchFields: [{ controlType: "Edit", automationId: "1003" }],
+        processStart: info.processStart, hwnd: info.hwndA, captureText: false, searchFields: [{ controlType: "Edit", automationId: "1003" }],
         documentRegions: [{ controlType: "Document", automationId: "1006" }, { controlType: "Edit", automationId: "1006" }],
         sensitiveAutomationIds: ["1007"] }] }));
       const captured: string[] = [];

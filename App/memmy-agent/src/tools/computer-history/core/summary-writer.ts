@@ -28,6 +28,9 @@ const NARRATION_REASONING_EFFORT = "none";
 // Room for what was on screen, not only what was clicked: the window's text is
 // where the substance of a window is, and the click trail alone cannot say it.
 export const MAX_EVIDENCE_CHARS = 12_000;
+// Bump when the durable projection changes so raw-backed archives can be
+// refreshed before retention, without rewriting the user's narrated summary.
+export const RETENTION_EVIDENCE_VERSION = 2;
 const MAX_PRIOR_SUMMARY_CHARS = 2_000;
 const MAX_PRIOR_CONTEXT_TOKENS = 800;
 
@@ -294,8 +297,8 @@ interface HistoryEvent {
   application?: HistoryApplication;
   details?: Record<string, unknown>;
   /** The focused window's accessibility tree: a full snapshot, or a diff from the last. */
-  ax?: { mode?: string; text?: string; windowKey?: string; truncated?: boolean; readFailures?: number };
   accessibility?: { truncated: boolean; nodes: CaptureNode[] };
+  ax?: { mode?: string; text?: string; windowKey?: string; truncated?: boolean; readFailures?: number };
 }
 
 const captureHealthCodes = new Set<string>(RECORDER_HEALTH_CODES);
@@ -593,31 +596,39 @@ function clockTime(timestamp: string | undefined): string {
 
 interface DocumentObservation {
   ref: string;
-  adapter: "vscode.editor" | "word.document" | "notepad.document";
+  adapter: "vscode.editor" | "word.document" | "notepad.document" | "uia.text" | "uia.value" | "uia.legacy_value" | "msaa.value" | "msaa.name";
   label?: { kind: "editor_label" | "document_label"; source: "uia.name"; value: string };
-  provider_focused: boolean;
+  provider_focused?: boolean;
   pixel_visibility: "unverified";
   provider_range_text?: string;
   document_context?: string;
+  field_value?: string;
+  label_text?: string;
   capture_truncated?: true;
 }
 
 function documentObservation(node: CaptureNode, ref: string, truncated: boolean): DocumentObservation | null {
+  if (!node.redaction && (node.valueSource === "uia.value" || node.valueSource === "uia.legacy_value" || node.valueSource === "msaa.value" || node.valueSource === "msaa.name") && typeof node.value === "string") {
+    return { ref, adapter: node.valueSource, pixel_visibility: "unverified",
+      ...(node.valueSource === "msaa.name" ? { label_text: redactSensitive(node.value) } : { field_value: redactSensitive(node.value) }),
+      ...(truncated ? { capture_truncated: true as const } : {}) };
+  }
   const source = node.documentEvidence;
   if (!source || node.redaction || node.documentStatus !== "available" || source.labelSource !== "uia.name"
       || source.textSource !== "uia.document_range" || typeof source.providerFocused !== "boolean") return null;
   const code = source.adapter === "vscode.editor" && source.labelKind === "editor_label" && node.controlType === "Edit"
     && node.documentContext === "vscode.editor";
-  const document = (source.adapter === "word.document" || source.adapter === "notepad.document")
-    && source.labelKind === "document_label" && node.controlType === "Document";
-  if (!code && !document) return null;
+  const word = (source.adapter === "word.document" || source.adapter === "notepad.document") && source.labelKind === "document_label" && node.controlType === "Document";
+  const generic = source.adapter === "uia.text" && source.labelKind === "document_label"
+    && node.documentContext === "uia.document";
+  if (!code && !word && !generic) return null;
   const clean = (value: string) => redactSensitive(value).replace(/\s+/gu, " ").trim();
   const label = typeof node.name === "string" ? clean(node.name) : "";
   return { ref, adapter: source.adapter, provider_focused: source.providerFocused, pixel_visibility: "unverified",
     ...(label ? { label: { kind: source.labelKind, source: source.labelSource, value: label } } : {}),
     ...(typeof node.visibleText === "string" && source.visibleTextSource === "uia.visible_ranges"
       ? { provider_range_text: clean(node.visibleText) } : {}),
-    ...(code && typeof node.text === "string" ? { document_context: clean(node.text) } : {}),
+    ...((code || generic || node.documentContext === "uia.document") && typeof node.text === "string" ? { document_context: clean(node.text) } : {}),
     ...(truncated ? { capture_truncated: true as const } : {}),
   };
 }
@@ -626,8 +637,8 @@ function documentObservation(node: CaptureNode, ref: string, truncated: boolean)
 // itself could detach content from its label or erase its visibility qualifier.
 function renderDocumentObservation(observation: DocumentObservation, budget: number): string {
   const prefix = "    document observation: ";
-  const { provider_range_text: visible, document_context: context, label, ...metadata } = observation;
-  const fields = [visible, context];
+  const { provider_range_text: visible, document_context: context, field_value: field, label_text: labelText, label, ...metadata } = observation;
+  const fields = [visible, context, field, labelText];
   const demands = fields.map((value, index) => Math.min(value?.length ?? 0, index ? MAX_DOCUMENT_CONTEXT_CHARS : MAX_SCREEN_LINE_CHARS));
   let includeLabel = !!label && label.value.length <= 256;
   const render = (allowance: number): string => {
@@ -635,6 +646,8 @@ function renderDocumentObservation(observation: DocumentObservation, budget: num
     return prefix + JSON.stringify({ ...metadata, ...(includeLabel ? { label } : label ? { label_omitted: true } : {}),
       ...(visible !== undefined ? { provider_range_text: sampleText(visible, shares[0]) } : {}),
       ...(context !== undefined ? { document_context: sampleText(context, shares[1]) } : {}),
+      ...(field !== undefined ? { field_value: sampleText(field, shares[2]) } : {}),
+      ...(labelText !== undefined ? { label_text: sampleText(labelText, shares[3]) } : {}),
       ...(fields.some((value, index) => (value?.length ?? 0) > shares[index]) ? { content_sampled: true } : {}),
     });
   };
@@ -790,12 +803,13 @@ export function compactEventEvidence(
   for (const event of events) {
     if (event.eventType === "recording_started" || event.eventType === "recording_stopped") {
       visibleByWindow.clear();
-      if (!event.ax && !event.application?.name && !event.application?.bundleId) continue;
+      if (!event.ax && !event.accessibility && !applicationId(event.application) && !event.application?.name) continue;
     }
     const app = redactSensitive(event.application?.name || applicationId(event.application) || "unknown");
     const windowIdentity = windowsWindowIdentity(event);
     // A generation change starts a new capture arc, not a new physical window.
-    const identity = windowIdentity ? JSON.stringify([windowIdentity, event.details?.generation]) : app;
+    const identity = windowIdentity ? JSON.stringify([windowIdentity, event.details?.generation,
+      event.details?.browser === true ? event.details.url : null, event.details?.browserDocumentId ?? null]) : app;
     if (windowIdentity && !windows.has(windowIdentity)) windows.set(windowIdentity, `W${windows.size + 1}`);
     let arc = arcs.at(-1);
     if (!arc || arc.identity !== identity) {
@@ -803,12 +817,16 @@ export function compactEventEvidence(
       arcs.push(arc);
     }
     arc.to = clockTime(event.timestamp) || arc.to;
+    if (event.details?.browser === true && typeof event.details.url === "string") {
+      const url = redactSensitive(event.details.url);
+      if (!arc.urls.includes(url)) arc.urls.push(url);
+    }
     if (event.accessibility) {
       const shown = shownByApp.get(identity) ?? new Set<string>();
       shownByApp.set(identity, shown);
       const observationKeys = new Set<string>();
       for (const node of event.accessibility.nodes) {
-        if (node.redaction || (node.documentStatus && node.documentStatus !== "available")) continue;
+        if (node.redaction || (node.documentStatus && node.documentStatus !== "available" && node.value === undefined && node.visibleText === undefined)) continue;
         const observation = event.application?.platform === "windows" ? documentObservation(node, "", event.accessibility.truncated) : null;
         if (observation) {
           // Node keys are snapshot-content hashes, not persistent file IDs. Only

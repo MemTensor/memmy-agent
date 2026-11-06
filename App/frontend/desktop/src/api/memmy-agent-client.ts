@@ -131,6 +131,7 @@ export type ComputerHistorySnapshot = {
     error: string | null;
     narrationError: string | null;
     narrationErrorCategory?: "quota_exhausted" | null;
+    retentionDeferred?: boolean;
     modelSource?: "account" | "byok" | null;
     permissions?: ComputerHistoryPermissions;
     captureHealth?: ComputerHistoryCaptureHealth;

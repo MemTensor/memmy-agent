@@ -15,7 +15,7 @@ export function defaultSettingsFile(): string {
 }
 
 /**
- * Persists the legacy Mac observation policy. Windows uses WindowsSettingsStore.
+ * Persists the shared observation policy. Windows uses strict reads at capture boundaries.
  *
  * Reads are forgiving — a missing or corrupt file falls back to the legacy
  * default rather than leaving the recorder without a policy. Writes are strict:
@@ -44,6 +44,14 @@ export class ObservationSettingsStore {
     } catch {
       return structuredClone(DEFAULT_OBSERVATION_SETTINGS);
     }
+  }
+
+  readStrict(): ObservationSettings {
+    if (!fs.existsSync(this.file)) return structuredClone(DEFAULT_OBSERVATION_SETTINGS);
+    try {
+      if (fs.statSync(this.file).size > 256 * 1024) throw new Error();
+      return parseObservationSettings(JSON.parse(fs.readFileSync(this.file, "utf8")));
+    } catch { throw new ObservationSettingsError("invalid Computer History settings file"); }
   }
 
   write(input: unknown): ObservationSettings {

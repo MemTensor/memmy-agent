@@ -192,7 +192,7 @@ class Collector {
       out.status = status;
       out.reason = reason;
       out.response = {};
-      if (out.context) out.context->title.reset();
+      if (out.context) { out.context->title.reset(); out.context->browser.reset(); }
       return false;
     };
 #if MEMMY_HISTORY_TEST_HOOKS
@@ -691,7 +691,8 @@ class Observer {
     KeyedNodes(query.response.nodes, keys, nullptr);
     const std::string identity = std::to_string(query.context->hwnd) + "|" + std::to_string(query.context->pid) + "|" +
                                  std::to_string(query.context->processStart) + "|" + query.policySha + "|" +
-                                 std::to_string(query.generation) + "|" + std::to_string(epoch_);
+                                 std::to_string(query.generation) + "|" + std::to_string(epoch_) + "|" +
+                                 (query.context->browser ? query.context->browser->url + "|" + query.context->browser->documentId : "");
     Baseline candidate = baseline_;
     const Baseline::Diff diff = candidate.Apply(identity, keys, !query.response.truncated);
     const auto focusKey = FocusKey(query.response.nodes, keys);

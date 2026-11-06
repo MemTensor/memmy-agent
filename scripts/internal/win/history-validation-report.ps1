@@ -10,7 +10,7 @@ $passed = @($cases | Where-Object { -not $_.SelectSingleNode('skipped') -and -no
 $summary = [ordered]@{ total = $cases.Count; passed = $passed.Count; failed = $failed.Count; skipped = $skipped.Count;
   skippedTests = @($skipped | ForEach-Object { $_.name }); userInteractive = [Environment]::UserInteractive;
   sessionId = (Get-Process -Id $PID).SessionId; installedApp = $false }
-$summary | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Output -Encoding utf8
+[IO.File]::WriteAllText($Output, (($summary | ConvertTo-Json -Depth 4) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 $line = "Native History: $($summary.passed) passed, $($summary.failed) failed, $($summary.skipped) skipped (total $($summary.total))."
 Write-Host $line
 if ($env:GITHUB_STEP_SUMMARY) { $line | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY }

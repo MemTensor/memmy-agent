@@ -54,7 +54,7 @@ describe("snapshot contract with the desktop client", () => {
     try {
       const result = WindowsHistoryConfigurationSchema.parse(await instance.getWindowsConfiguration());
       expect(result.permissions).toMatchObject({ platform: "windows", ready: true, accessibility: false, inputMonitoring: false });
-      expect(result.applications[0]?.rule).toEqual(rule);
+      expect(result.applications[0]?.rule).toEqual({ ...rule, captureText: true });
       await instance.checkPermissions();
       const snapshot = ComputerHistorySnapshotSchema.parse(clientSnapshot(instance.snapshot()));
       expect(snapshot.observation.permissions?.platform).toBe("windows");

@@ -151,13 +151,16 @@ describe("Windows managed service", () => {
     await service.startObservationWithPermissions();
     await vi.waitFor(() => expect(service.snapshot().observation.state).toBe("failed"));
   });
-  it("preflights explicit consent without creating Mac defaults or a recording", async () => {
+  it("migrates an empty legacy scope without starting a recording or broadening it", async () => {
     const { root, service, store } = setup();
     store.write({ version: 1, applications: [] });
     const before = fs.readdirSync(root, { recursive: true });
     const result = await service.startObservationWithPermissions();
     expect(result.observation).toMatchObject({ state: "stopped", permissions: { platform: "windows", ready: false, reason: "authorization_required", accessibility: false, inputMonitoring: false } });
-    expect(fs.readdirSync(root, { recursive: true })).toEqual(before);
+    expect(fs.readdirSync(root)).toEqual(expect.arrayContaining(before.map(String)));
+    expect(service.getObservationSettings().observation).toMatchObject({ defaultApplicationBehavior: "do_not_observe", rules: [] });
+    expect(fs.existsSync(path.join(root, "windows-settings.json.before-unification.json"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "recordings", "segments"))).toBe(false);
   });
   it("starts a new profile directly without application selection and remains stopped before Start", async () => {
     const { service, store } = setup();
@@ -193,7 +196,7 @@ describe("Windows managed service", () => {
     expect(store.read().applications).toEqual([]);
     const events = fs.readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expect(events.slice(1).map((event) => event.sequence)).toEqual([1, 2, 3, 4]);
-    expect(fs.existsSync(path.join(root, "mac-settings.json"))).toBe(false);
+    expect(service.getObservationSettings().observation.defaultApplicationBehavior).toBe("do_not_observe");
   });
   it("rejects invalid consent without stopping the active child", async () => {
     const { service, store } = setup(); store.write({ version: 1, applications: [{ executable }] });
@@ -201,6 +204,27 @@ describe("Windows managed service", () => {
     await expect(service.updateWindowsSettings({ version: 1, applications: [{ executable: "relative.exe" }] })).rejects.toMatchObject({ status: 422 });
     expect(service.snapshot().observation.state).toBe("running");
     expect(store.read().applications).toHaveLength(1);
+    await service.stopObservation();
+  });
+  it("routes shared settings updates through shutdown and makes the Windows view agree", async () => {
+    const { service } = setup();
+    await service.startObservationWithPermissions();
+    await expect(service.updateObservationSettings({ observation: { rules: [] } })).rejects.toThrow();
+    expect(service.snapshot().observation.state).toBe("running");
+    const next = service.getObservationSettings();
+    next.observation.defaultApplicationBehavior = "do_not_observe";
+    next.observation.rules = [{ scope: "url", urlDomain: "bank.example", behavior: "do_not_observe" }];
+    await service.updateObservationSettings(next);
+    expect(service.snapshot().observation.state).toBe("stopped");
+    expect((await service.getWindowsConfiguration()).settings.defaultApplicationBehavior).toBe("do_not_observe");
+    expect(service.getObservationSettings()).toEqual(next);
+  });
+  it("publishes content-free last-sample quality through the shared snapshot", async () => {
+    const { root, service } = setup();
+    const quality = { timestamp: "2026-10-15T12:00:00.000Z", status: "partial", reason: "labels_only" };
+    fs.appendFileSync(path.join(root, "recorder.mjs"), `\nconsole.log("[recorder-quality] " + JSON.stringify(${JSON.stringify(quality)}));\n`);
+    await service.startObservationWithPermissions();
+    await vi.waitFor(() => expect(service.snapshot().observation.captureHealth?.content).toEqual(quality));
     await service.stopObservation();
   });
   it("reports failed startup and failed shutdown instead of success or a stuck stopping state", async () => {

@@ -169,7 +169,8 @@ function setup(options: { delay?: number; gatewayDelay?: number; apiDelay?: numb
     readStopMemoryServiceOnExitSetting: () => false, armQuitCleanupForceExitTimer: noop,
     recordQuitDiagnostic: noop,
     closeRuntimeForQuit: async (quit: any) => quit.services?.close({ stopMemory: quit.stopMemory }),
-    cleanupBeforeQuit: async () => { await services.close(); }, clearQuitCleanupForceExitTimer: noop, relaunchAfterQuitCleanupIfRequested: noop
+    cleanupBeforeQuit: async () => { await runInContext("closeRuntimeForQuit(quitCleanupContext)", context); },
+    clearQuitCleanupForceExitTimer: noop, relaunchAfterQuitCleanupIfRequested: noop
   });
   runInContext(code, context);
   return {

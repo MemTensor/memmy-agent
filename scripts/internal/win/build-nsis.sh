@@ -860,6 +860,8 @@ verify_packaged_windows_unpacked_artifacts() {
   node "$ROOT_DIR/scripts/internal/win/verify-computer-history-runtime.mjs" \
     "$(to_node_readable_path "$unpacked_runtime/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe")" x64 \
     "$(to_node_readable_path "$ROOT_DIR/App/native-computer-history/apps/OpenComputerHistoryWindows/worker.ps1")"
+  # Authenticode changes the PE headers and appends a certificate, just as it
+  # does for Computer Use above. Only unsigned executables can match byte-for-byte.
   if [ "$PACKAGE_SIGNING" = "unsigned" ]; then
     verify_packaged_file_matches_runtime \
       "$RUNTIME_DIR/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe" \

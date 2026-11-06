@@ -54,8 +54,7 @@ afterEach(async () => {
 });
 
 describe("repairing historical six-hour aggregation", () => {
-  it.each(["com.tencent.xinWeChat", "win32.weixin", "windows:hashed-application"])
-  ("does not send %s WeChat evidence to the History model after its extra permission is off", async (application) => {
+  it.each(["com.tencent.xinWeChat", "win32.weixin", "windows:hashed-application"])("does not send %s WeChat evidence to the History model after its extra permission is off", async (application) => {
     vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
     vi.spyOn(process, "arch", "get").mockReturnValue("arm64");
     const id = `${instantId(new Date())}-10min-summary`;

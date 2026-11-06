@@ -468,7 +468,7 @@ void VerifyFixtureExposesChildren(Fixture& fixture) {
 // ------------------------------------------------------------------------------- policies
 
 Json AppRule(Fixture& fixture) {
-  return {{"pid", fixture.Pid()}, {"executable", fixture.Exe()}};
+  return {{"pid", fixture.Pid()}, {"executable", fixture.Exe()}, {"captureText", false}}; // bounded compatibility fixtures
 }
 
 Json FullRule(Fixture& fixture) {
@@ -771,23 +771,40 @@ void CaseIdentityMismatch() {
                 "application_denied", "deny pid wins");
 }
 
+void CaseGenericCrossProcess() {
+  Fixture parent, child;
+  parent.Start(); child.Start();
+  Expect(child.Command("embed " + parent.HwndA()).value("ok", false), "could not host the other process window");
+  parent.RequireForeground('a');
+  auto rule = FullRule(parent); rule["captureText"] = true;
+  const auto policy = WritePolicy("policy-cross-process", Json::array({rule}));
+  const auto event = Snapshot(g_paths.Recorder(), parent.HwndA(), policy, "snapshot-cross-process");
+  Expect(event["snapshot"]["status"] == "ok", "cross-process snapshot unavailable");
+  const auto content = memmy::DumpJson(event);
+  Expect(content.find(child.S("SECOND")) != std::string::npos, "hosted process content missing");
+  Expect(content.find(parent.S("PASSWORD")) == std::string::npos, "password leaked from host");
+}
+
 void CaseBrowserUnsupported() {
-  // The fixture copied under a browser executable name: authorized exactly, still refused.
+  // A browser-named fixture uses the same generic reader as desktop applications.
   const fs::path dir = g_paths.artifacts / L"browser bin";
   fs::create_directories(dir);
   const fs::path browser = dir / L"msedge.exe";
   fs::copy_file(g_paths.Fixture(), browser, fs::copy_options::overwrite_existing);
   Fixture fixture(browser);
   fixture.Start();
-  fixture.TryActivate('a');  // refusal must not depend on foreground
+  fixture.RequireForeground('a');
   Json rule = FullRule(fixture);
   rule["hwnd"] = fixture.HwndA();
   rule["processStart"] = fixture.ProcessStart();
+  rule["captureText"] = true;
   const fs::path policy = WritePolicy("policy-browser", Json::array({rule}));
   const Json event = Snapshot(g_paths.Recorder(), fixture.HwndA(), policy, "snapshot-browser");
-  ExpectBlocked(event, "browser_unsupported", "browser");
+  Expect(event["snapshot"]["status"] == "ok", "generic browser capture failed");
   Expect(!event["context"].is_null(), "named browser target keeps its identity");
-  Expect(memmy::DumpJson(event).find("FIXTURE-") == std::string::npos, "browser content leaked");
+  const auto content = memmy::DumpJson(event);
+  Expect(content.find("FIXTURE-EDIT-") != std::string::npos, "ordinary field missing");
+  Expect(content.find("FIXTURE-PASSWORD-") == std::string::npos && content.find("FIXTURE-SENSITIVE-") == std::string::npos, "sensitive content leaked");
 }
 
 void CaseSnapshotContent() {
@@ -1849,6 +1866,7 @@ const std::map<std::string, std::function<void()>>& Cases() {
       {"policy_strict", CasePolicyStrict},
       {"identity_mismatch", CaseIdentityMismatch},
       {"browser_unsupported", CaseBrowserUnsupported},
+      {"generic_cross_process", CaseGenericCrossProcess},
       {"snapshot_content", CaseSnapshotContent},
       {"snapshot_not_foreground", CaseSnapshotNotForeground},
       {"race_aba", CaseRaceAba},

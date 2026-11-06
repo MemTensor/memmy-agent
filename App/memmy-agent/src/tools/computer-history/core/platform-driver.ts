@@ -3,6 +3,11 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 // Legacy permission fields remain part of the existing API contract. Platform drivers
 // supply their own checks; these fields are not authorization for Windows capture.
 export type HistoryPermission = "accessibility" | "inputMonitoring";
+export interface HistoryContentQuality {
+  timestamp: string;
+  status: "available" | "partial" | "unavailable";
+  reason: "text_read" | "labels_only" | "read_failed" | "budget_exceeded";
+}
 export interface HistoryPermissions {
   supported: boolean;
   accessibility: boolean;
@@ -20,6 +25,7 @@ export interface RecorderLaunch {
 }
 
 export interface HistoryPlatformDriver {
+  contentQuality?(): HistoryContentQuality | undefined;
   launch(input: RecorderLaunch): ChildProcessWithoutNullStreams;
   readPermissions(request?: HistoryPermission): Promise<HistoryPermissions>;
   openPermission(permission: HistoryPermission, mode: "request" | "settings"): Promise<HistoryPermissions>;

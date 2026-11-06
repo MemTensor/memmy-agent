@@ -15,6 +15,7 @@ const nodeSchema = z.object({ key, parentKey: key.nullable(), runtimeId: z.strin
   automationId: z.string().max(256), depth: count.max(64), focused: z.boolean(), providerOffscreen: z.boolean(),
   className: z.string().max(256).optional(),
   password: z.boolean().nullable(), redaction: z.enum(["sensitive_id", "password", "edit_control", "unknown_password", "unknown_password_structural"]).optional(),
+  valueSource: z.enum(["uia.value", "uia.legacy_value", "msaa.value", "msaa.name"]).optional(),
   documentStatus: z.enum(["available", "label_only", "read_failed"]).optional(),
   name: z.string().max(20000).optional(), text: z.string().max(20000).optional(),
   visibleText: z.string().max(20000).optional(), value: z.string().max(20000).optional(),
@@ -25,6 +26,10 @@ const contextSchema = z.object({ hwnd: decimal, pid: count.min(1).max(0xffffffff
   executable: z.string().min(1).max(32768), dpi: count.max(10000),
   bounds: z.object({ left: z.number().int(), top: z.number().int(), right: z.number().int(), bottom: z.number().int() }).strict(),
   minimized: z.boolean(), title: z.string().max(1024).optional(), generation: count,
+  browser: z.object({ kind: z.enum(["chrome", "edge"]), mode: z.enum(["normal", "unknown", "private"]), url: z.string().min(1).max(16384),
+    documentId: z.string().min(1).max(512),
+    viewport: z.tuple([z.number().finite(), z.number().finite(), z.number().finite().positive(), z.number().finite().positive()]),
+  }).strict().optional(),
 }).strict();
 const stats = z.object({ visited: count, emitted: count, redacted: count, foreignSkipped: count,
   missingProperties: count, workerElapsedMs: time }).strict();

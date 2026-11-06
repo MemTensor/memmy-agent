@@ -1,5 +1,8 @@
 name: OpenAdapt recording export compatibility
 on:
+  push:
+    branches:
+      - "feature/windows-history-native-core"
   pull_request:
     paths:
       - "App/memmy-agent/src/tools/computer-recordings/**"

@@ -4,6 +4,7 @@
 
 #include "common/baseline.h"
 #include "common/classify.h"
+#include "common/browser.h"
 #include "common/cli.h"
 #include "common/json.h"
 #include "common/policy.h"
@@ -261,7 +262,7 @@ TEST(policy_limits_are_range_checked) {
 }
 
 TEST(policy_selectors_are_typed_and_exact) {
-  CHECK(ParseError(PolicyJson(R"(,"searchFields":[{"controlType":"Document","automationId":"q"}])")) ==
+  CHECK(ParseError(PolicyJson(R"(,"captureText":false,"searchFields":[{"controlType":"Document","automationId":"q"}])")) ==
         "selector_type_invalid");
   CHECK(ParseError(PolicyJson(R"(,"documentRegions":[{"controlType":"Text","automationId":"d"}])")) ==
         "selector_type_invalid");
@@ -340,14 +341,14 @@ TEST(deny_wins_over_allow) {
   CHECK(policy::Evaluate(policy, ToolTarget(), Identity).verdict == policy::Verdict::Denied);
 }
 
-TEST(browsers_are_refused_even_when_named) {
+TEST(browsers_use_generic_capture_by_default) {
   const auto policy = MustParse(R"({"version":1,"applications":[{"pid":9,"executable":"C:\\Edge\\msedge.exe"}]})");
   policy::Target target;
   target.pid = 9;
   target.executable = L"C:\\Edge\\MSEDGE.EXE";
   const auto decision = policy::Evaluate(policy, target, Identity);
-  CHECK(decision.verdict == policy::Verdict::BrowserUnsupported);
-  CHECK(std::string(decision.reason) == "browser_unsupported");
+  CHECK(decision.verdict == policy::Verdict::Allowed);
+  CHECK(std::string(decision.reason).empty());
   CHECK(decision.rule != nullptr);
   CHECK(policy::IsKnownBrowserExecutable(L"D:\\x\\chrome.exe"));
   CHECK(policy::IsKnownBrowserExecutable(L"firefox.exe"));
@@ -362,6 +363,7 @@ struct Fixture {
       R"("documentRegions":[{"controlType":"Document","automationId":"doc"},{"controlType":"Edit","automationId":"editor"}],)"
       R"("sensitiveAutomationIds":["Secret-Panel"])",
       R"(,"sensitiveAutomationIds":["global-secret"])"));
+  Fixture() { policy.applications[0].captureText = false; } // bounded compatibility contracts below
   const policy::AppRule& rule() const { return policy.applications[0]; }
   classify::NodeDecision Run(long type, classify::PasswordState password, const wchar_t* id, bool focus = false,
                              bool text = true, bool value = true) const {
@@ -492,6 +494,7 @@ TEST(scoped_editor_policy_is_not_an_empty_id_wildcard) {
   CHECK(parsed.policy && policy::HasVsCodeEditorScope(parsed.policy->applications[0]));
   CHECK(!policy::MatchesSelector(parsed.policy->applications[0].documentRegions, classify::kEdit, L""));
   Json input = *ParseJsonStrict(good, 32);
+  input["applications"][0]["captureText"] = false;
   input["applications"][0]["executable"] = "C:\\Apps\\Other.exe";
   CHECK(!policy::Parse(DumpJson(input)).policy);
   input = *ParseJsonStrict(good, 32);
@@ -549,6 +552,7 @@ TEST(word_scope_requires_class_ancestry_and_correct_application) {
   CHECK(parsed.policy && policy::HasWordDocumentScope(parsed.policy->applications[0]));
   CHECK(!policy::MatchesSelector(parsed.policy->applications[0].documentRegions, classify::kDocument, L""));
   Json input = *ParseJsonStrict(good, 32);
+  input["applications"][0]["captureText"] = false;
   input["applications"][0]["executable"] = "C:\\Apps\\Other.exe";
   CHECK(!policy::Parse(DumpJson(input)).policy);
   input = *ParseJsonStrict(good, 32);
@@ -952,6 +956,128 @@ TEST(argument_quoting_round_trips_through_commandlinetoargvw) {
     wchar_t** argv = CommandLineToArgvW(line.c_str(), &argc);
     CHECK(argv != nullptr && argc == 2 && sample == argv[1]);
     LocalFree(argv);
+  }
+}
+
+TEST(chrome_requires_positive_profile_and_removes_url_secrets) {
+  CHECK(browser::NormalProfile(L"You", L"avatar_button", L""));
+  CHECK(browser::NormalProfile(L"您", L"", L"AvatarToolbarButton"));
+  for (auto name : {L"Incognito", L"Guest", L"Alice", L"Profile 1", L"Privat"})
+    CHECK(!browser::NormalProfile(name, L"avatar_button", L"AvatarToolbarButton"));
+  CHECK(!browser::NormalProfile(L"You", L"page-profile-button", L""));
+  CHECK(browser::PrivateSignal(L"无痕模式"));
+  CHECK(browser::PrivateSignal(L"Guest"));
+  CHECK(browser::SanitizeUrl(L"https://user:secret@example.com/book?id=secret#private") == L"https://example.com/book");
+  CHECK(browser::SanitizeUrl(L"file:///secret").empty());
+  CHECK(browser::SanitizeUrl(L"javascript:alert(1)").empty());
+  CHECK(browser::AddressMatches(L"gutenberg.org/ebooks/11", L"https://www.gutenberg.org/ebooks/11"));
+  CHECK(!browser::AddressMatches(L"gutenberg.org/ebooks/11", L"https://gutenberg.org/ebooks/55"));
+}
+TEST(chrome_content_must_be_visible_names_and_not_document_or_input_ranges) {
+  protocol::BrowserContext page{"https://example.com/", "1.2", {0, 80, 800, 520}};
+  protocol::NodeRecord node;
+  node.controlType = classify::kText; node.password = false; node.name = "Visible book title";
+  node.bounds = std::array<double, 4>{10, 100, 400, 20};
+  CHECK(protocol::BrowserNodeContentAllowed(node, page));
+  node.providerOffscreen = true; CHECK(!protocol::BrowserNodeContentAllowed(node, page)); node.providerOffscreen = false;
+  node.bounds = std::array<double, 4>{10, 900, 400, 20}; CHECK(!protocol::BrowserNodeContentAllowed(node, page));
+  node.bounds = std::array<double, 4>{10, 100, 400, 20};
+  node.text = "hidden full document"; CHECK(!protocol::BrowserNodeContentAllowed(node, page)); node.text.reset();
+  node.controlType = classify::kEdit; CHECK(!protocol::BrowserNodeContentAllowed(node, page));
+}
+TEST(chrome_metadata_hint_does_not_disable_generic_capture) {
+  const auto enabled = MustParse(R"({"version":1,"applications":[{"pid":42,"executable":"C:\\chrome.exe","browser":"chrome"}]})");
+  policy::Target target{42, 1, 1, L"C:\\chrome.exe"};
+  CHECK(policy::Evaluate(enabled, target, [](const auto& p) { return p; }).verdict == policy::Verdict::Allowed);
+  auto legacy = enabled; legacy.applications[0].browser = browser::Kind::None;
+  CHECK(policy::Evaluate(legacy, target, [](const auto& p) { return p; }).verdict == policy::Verdict::Allowed);
+  CHECK(!policy::Parse(R"({"version":1,"applications":[{"pid":42,"executable":"C:\\msedge.exe","browser":"chrome"}]})").policy);
+  CHECK(policy::Parse(R"({"version":1,"applications":[{"pid":42,"executable":"C:\\chrome.exe","browser":"chrome","documentRegions":[{"controlType":"Document","automationId":"body"}]}]})").policy);
+}
+
+TEST(edge_requires_its_own_normal_profile_evidence) {
+  CHECK(browser::NormalProfile(L"用户配置 1 个人资料，请登录", L"view_1009", L"EdgeAvatarToolbarButton", browser::Kind::Edge));
+  CHECK(browser::NormalProfile(L"Profile 1 profile, sign in", L"", L"EdgeAvatarToolbarButton", browser::Kind::Edge));
+  CHECK(!browser::NormalProfile(L"InPrivate 个人资料，请登录", L"", L"EdgeAvatarToolbarButton", browser::Kind::Edge));
+  CHECK(!browser::NormalProfile(L"访客 个人资料，请登录", L"", L"EdgeAvatarToolbarButton", browser::Kind::Edge));
+  CHECK(!browser::NormalProfile(L"Profile 1", L"", L"EdgeAvatarToolbarButton", browser::Kind::Edge));
+  CHECK(!browser::NormalProfile(L"用户配置 1 个人资料，请登录", L"", L"AvatarToolbarButton", browser::Kind::Edge));
+  CHECK(!browser::NormalProfile(L"You", L"avatar_button", L"AvatarToolbarButton", browser::Kind::Edge));
+  CHECK(!browser::NormalProfile(L"用户配置 1 个人资料，请登录", L"", L"EdgeAvatarToolbarButton", browser::Kind::Chrome));
+}
+TEST(edge_policy_cannot_impersonate_another_browser_or_opt_in_firefox) {
+  const auto enabled = MustParse(R"({"version":1,"applications":[{"pid":42,"executable":"C:\\msedge.exe","browser":"edge"}]})");
+  policy::Target target{42, 1, 1, L"C:\\msedge.exe"};
+  CHECK(policy::Evaluate(enabled, target, [](const auto& p) { return p; }).verdict == policy::Verdict::Allowed);
+  auto legacy = enabled; legacy.applications[0].browser = browser::Kind::None;
+  CHECK(policy::Evaluate(legacy, target, [](const auto& p) { return p; }).verdict == policy::Verdict::Allowed);
+  CHECK(!policy::Parse(R"({"version":1,"applications":[{"pid":42,"executable":"C:\\chrome.exe","browser":"edge"}]})").policy);
+  CHECK(!policy::Parse(R"({"version":1,"applications":[{"pid":42,"executable":"C:\\firefox.exe","browser":"firefox"}]})").policy);
+  CHECK(policy::Parse(R"({"version":1,"applications":[{"pid":42,"executable":"C:\\msedge.exe","browser":"edge","searchFields":[{"controlType":"Edit","automationId":"omnibox"}]}]})").policy);
+  CHECK(browser::FromName("edge") == browser::Kind::Edge);
+  CHECK(browser::FromName("firefox") == browser::Kind::None);
+  CHECK(std::string(browser::Name(browser::Kind::Edge)) == "edge");
+}
+TEST(browser_metadata_is_optional_and_does_not_restrict_content) {
+  ResponseFixture f;
+  f.policy.applications[0].captureText = true;
+  f.policy.applications[0].browser = browser::Kind::Edge;
+  auto nodes = Json::array({f.Node("Window",0,-1),f.Node("Custom",1,0,{{"password",nullptr},{"text","BODY_WITHOUT_LABEL"}})});
+  CHECK(f.Validate(f.Response(nodes)) == "ok");
+  nodes[1]["value"] = "FALLBACK_VALUE"; nodes[1]["valueSource"] = "uia.legacy_value";
+  CHECK(f.Validate(f.Response(nodes)) == "ok");
+  nodes[1]["password"] = true;
+  CHECK(f.Validate(f.Response(nodes)) == "worker_privacy_violation");
+}
+
+TEST(generic_text_classification_preserves_password_and_sensitive_gates) {
+  auto p = MustParse(PolicyJson());
+  auto& rule = p.applications[0];
+  rule.captureText = true;
+  classify::NodeFacts facts;
+  facts.controlType = classify::kEdit;
+  facts.password = classify::PasswordState::False;
+  facts.valuePatternAvailable = true;
+  auto decision = classify::Classify(facts, p, rule);
+  CHECK(decision.readName && decision.readSearchValue && decision.traverseChildren);
+  facts.textPatternAvailable = true;
+  CHECK(classify::Classify(facts, p, rule).readDocumentText);
+  facts.password = classify::PasswordState::True;
+  CHECK(!classify::Classify(facts, p, rule).readName);
+  facts.password = classify::PasswordState::Unknown;
+  CHECK(classify::Classify(facts, p, rule).readDocumentText);
+  facts.password = classify::PasswordState::False;
+  rule.sensitiveAutomationIds.push_back(L"private"); facts.automationId = L"private";
+  CHECK(!classify::Classify(facts, p, rule).readSearchValue);
+}
+
+TEST(generic_worker_content_is_validated_independently) {
+  ResponseFixture f;
+  f.policy.applications[0].captureText = true;
+  auto nodes = Json::array({f.Node("Window", 0, -1), f.Node("Document", 1, 0,
+    {{"name", "Draft"}, {"text", "DOCUMENT_CONTEXT"}, {"visibleText", "VISIBLE"}, {"documentStatus", "available"}})});
+  CHECK(f.Validate(f.Response(nodes)) == "ok");
+  auto missing = nodes; missing[1].erase("documentStatus");
+  CHECK(f.Validate(f.Response(missing)) == "ok");
+  auto password = nodes; password[1]["password"] = true;
+  CHECK(f.Validate(f.Response(password)) == "worker_privacy_violation");
+  nodes[1] = f.Node("Edit", 1, 0, {{"name", "Field"}, {"value", "CURRENT_VALUE"}});
+  CHECK(f.Validate(f.Response(nodes)) == "ok");
+  f.policy.applications[0].captureText = false;
+  CHECK(f.Validate(f.Response(nodes)) == "worker_privacy_violation");
+}
+
+TEST(generic_capabilities_are_independent_of_role_and_optional_password_metadata) {
+  auto p = MustParse(PolicyJson());
+  CHECK(p.applications[0].captureText);
+  for (long type : {classify::kCustom, classify::kText, classify::kComboBox, 50029L}) {
+    classify::NodeFacts facts;
+    facts.controlType = type; facts.password = classify::PasswordState::Unknown;
+    facts.textPatternAvailable = true; facts.valuePatternAvailable = true;
+    const auto readable = classify::Classify(facts, p, p.applications[0]);
+    CHECK(readable.readName && readable.readDocumentText && readable.readSearchValue && readable.traverseChildren);
+    facts.password = classify::PasswordState::True;
+    CHECK(Blocks(classify::Classify(facts, p, p.applications[0])));
   }
 }
 

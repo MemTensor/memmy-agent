@@ -22,13 +22,14 @@ export interface CaptureNode {
   text?: string;
   visibleText?: string;
   value?: string;
+  valueSource?: "uia.value" | "uia.legacy_value" | "msaa.value" | "msaa.name";
   redaction?: string;
   documentStatus?: "available" | "label_only" | "read_failed";
   /** Assigned by the validated adapter, not by the native provider. Full text is context, not visibility evidence. */
-  documentContext?: "vscode.editor";
+  documentContext?: "vscode.editor" | "uia.document";
   /** Adapter-verified sources, not a filename or a persistent document identity. */
   documentEvidence?: {
-    adapter: "vscode.editor" | "word.document" | "notepad.document";
+    adapter: "vscode.editor" | "word.document" | "notepad.document" | "uia.text";
     labelKind: "editor_label" | "document_label";
     labelSource: "uia.name";
     textSource: "uia.document_range";

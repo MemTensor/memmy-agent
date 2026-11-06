@@ -34,6 +34,7 @@ vi.mock("../../../../src/tools/computer-history/win/private-files.js", () => ({
 }));
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
 
+
 const physicalPlatform = process.platform;
 let root: string;
 let service: ComputerHistoryDemoService;

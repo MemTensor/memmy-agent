@@ -1,5 +1,17 @@
 # Windows native capture protocol v1
 
+
+## Current generic capture semantics 2026 10 16
+
+The wire version remains 1. `captureText` defaults to true for both native policies and the product compiler. Generic content can appear on any control type. `password:null`, absent Name, equal Name/Text and failed individual fields are accepted; positive passwords, sensitive subtrees, structural errors and size violations remain rejected. Explicit `captureText:false` retains bounded legacy compatibility, to which the older scoped-selector rules below apply.
+
+Browser context is optional and never required for a successful snapshot. If present, mode accepts `normal`, `unknown` or `private`; current enrichment reports `unknown` without inferring privacy mode. A missing URL omits browser context and preserves content. Browser nodes may contain generic text/value fields. Windows persistence ignores private-mode and unknown-URL exclusions for this stage, while retaining application rules, known-URL rules and credential redaction. macOS behavior is unchanged.
+
+Nodes may include `valueSource: "uia.value" | "uia.legacy_value" | "msaa.value" | "msaa.name"`. MSAA names become label_text rather than field_value. The source participates in content keys and is preserved into normalized history and summary observations. Text read failure does not invalidate a successful value fallback. Generic text needs neither a label nor a particular ancestor chain. DocumentRange remains context; provider-visible ranges remain separately marked and do not prove pixel visibility.
+
+The following older browser-normal-mode requirements and Edit/Document-only generic descriptions are historical v1 constraints superseded by this section. Transport, instance identity, tree hierarchy, sequence and budget contracts still apply.
+
+
 Status: **Windows-only, native-side protocol, version 1.** It describes the stream written by
 `memmy-history-recorder.exe`. It is modeled on the C# validation prototype
 (`HistoryProbe`). The [TypeScript adapter](../README.md) validates this native stream and
@@ -79,7 +91,8 @@ result for the same target is counted (`suppressedRepeats`), not re-emitted. Eve
 `unavailable` result is emitted.
 
 **Baseline rules.** A non-truncated `full` snapshot starts a baseline whose identity is the window
-instance (hwnd, pid, processStart), policy revision, foreground/focus generation and pause epoch.
+instance (hwnd, pid, processStart), policy revision, foreground/focus generation and pause epoch;
+browser snapshots also bind the sanitized URL and document runtime ID.
 Any change to these, and any non-`ok` result, starts a new `full` snapshot next time. Truncated
 captures are always `full`, carry only the nodes actually read, and clear the complete baseline:
 they never emit removals or prove that omitted nodes disappeared. The next complete capture is
@@ -113,7 +126,7 @@ Edit controls allow counts but never values. Mouse metadata does not authorize i
 The default stream omits these fields. UIA triggers alone never produce action objects.
 
 ### Context object
-`{hwnd, pid, processStart, executable, dpi, bounds:{left,top,right,bottom}, minimized, title?, generation?}`
+`{hwnd, pid, processStart, executable, dpi, bounds:{left,top,right,bottom}, minimized, title?, generation?, browser?}`
 
 - `pid` is the process that owns the HWND (`GetWindowThreadProcessId`), not a
   `MainWindowHandle` lookup. `processStart` is the process creation `FILETIME` (100 ns ticks
@@ -121,6 +134,12 @@ The default stream omits these fields. UIA triggers alone never produce action o
 - `bounds` are physical pixels (per-monitor DPI aware v2); `dpi` from `GetDpiForWindow`.
 - `title` is present only on `ok` snapshots (read without sending messages to the target).
 - `generation` is the collector's foreground/focus generation at query start.
+- `browser` is optional metadata on successful snapshots:
+  `{kind:"chrome"|"edge", mode:"normal"|"unknown"|"private", url, documentId, viewport:[left,top,width,height]}`.
+  URLs are sanitized HTTP(S). Metadata must match the captured document identity; when a URL
+  exists both before and after reading, the page and URL must agree. Missing or ambiguous
+  metadata preserves generic content. Current enrichment reports mode `unknown` and does not
+  prove or exclude private mode. Ship the helper and adapter together.
 
 ### Node object
 | Field | Presence | Meaning |
@@ -135,12 +154,12 @@ The default stream omits these fields. UIA triggers alone never produce action o
 | `providerOffscreen` | always | Provider `IsOffscreen` flag. **Not proof** of visible pixels. |
 | `password` | always | `true`/`false`, or `null` when the provider does not report `IsPassword` |
 | `redaction` | when masked | `sensitive_id`, `password`, `edit_control`, `unknown_password`, `unknown_password_structural` |
-| `documentStatus` | scoped editor read attempted | `available`, `label_only`, or `read_failed`; participates in the node key when present |
+| `documentStatus` | document text read attempted | `available`, `label_only`, or `read_failed`; participates in the node key when present |
 | `className` | Word scope metadata when available | Bounded UIA class name (256 UTF-16 units); producer emits only `_WwG`, `_WwB`, `_WwF`, `OpusApp`; participates in node key |
 | `name` | when permitted | UIA `Name` |
-| `text` | authorized document region | `TextPattern.DocumentRange` text |
-| `visibleText` | authorized document region | Provider-reported visible ranges, `\n`-joined |
-| `value` | authorized, focused search field | `ValuePattern.Value` |
+| `text` | authorized document region or generic text mode | `TextPattern.DocumentRange` context, not proof of visible text |
+| `visibleText` | authorized document region or generic text mode | Provider-reported visible ranges, `\n`-joined |
+| `value` | focused selected search field or generic non-password Edit | `ValuePattern.Value`; current value, not a transcript of typing |
 | `bounds` | when available | `[left, top, width, height]` physical pixels |
 | `missing` | when non-empty | Property names that failed to read |
 
@@ -192,7 +211,8 @@ policyChanged, unchanged, suppressedRepeats}`, `control {pauses, resumes, reject
 | `policy_changed` | blocked | Policy bytes differed after the query; output discarded |
 | `application_denied` | blocked | Deny list matched (deny wins over allow) |
 | `application_not_authorized` | blocked | No rule matched pid + canonical executable (+ hwnd/processStart if given) |
-| `browser_unsupported` | blocked | Known browser executable (see README); always refused in this phase |
+| `browser_unsupported` | blocked | Known browser without a matching explicit Chrome/Edge adapter; Firefox remains unsupported |
+| `browser_context_unavailable` | blocked | Normal mode, matching address/page URL, stable document or viewport could not be established |
 | `window_unavailable`, `not_top_level`, `process_unavailable`, `identity_unavailable` | blocked | Identity could not be established |
 | `not_foreground` | blocked | Target is not the foreground window |
 | `context_changed` | blocked | Foreground/focus generation, foreground HWND, search focus or instance identity changed before content commit |
@@ -217,7 +237,9 @@ applied. `observe` refuses to start without a valid policy, and each query re-re
 | `applications[].executable` | yes | absolute path (`X:\…` or UNC). It is canonicalized before comparison (case, `/`, 8.3, links). |
 | `applications[].processStart` | no | decimal string; when present it must equal the process creation FILETIME |
 | `applications[].hwnd` | no | decimal string; when present only this top-level window matches |
+| `applications[].browser` | no | `"chrome"` for `chrome.exe`, `"edge"` for `msedge.exe`; incompatible executable or nonempty input/body selectors are invalid. Omission still refuses known browsers. |
 | `applications[].searchFields` | no | `[{controlType:"Edit", automationId}]`; value read only while that exact field has focus |
+| `applications[].captureText` | no | Capability-based generic content on all control roles, including browsers; defaults to true. Explicit false retains bounded compatibility. |
 | `applications[].documentRegions` | no | Exact nonempty-ID selectors, or the bounded VS Code / Word / Notepad selectors below; TextPattern body reads only |
 | `applications[].sensitiveAutomationIds` | no | blocks the element and its subtree (case-insensitive) |
 | `sensitiveAutomationIds` | no | same, for all applications |
@@ -269,9 +291,27 @@ can reject them; mixing old helpers/adapters with the new scope is unsupported a
 
 The product host compiles its default application scope into PID/path/creation-time rules and
 refreshes them as applications open or close. The native collector still rejects every unmatched
-instance. Explicit deny rules, known browsers and login/lock/screensaver executables take
+instance. Explicit deny rules, known browsers without a matching adapter, and login/lock/screensaver executables take
 precedence over all matching application rules. Policies without the new scope field retain the
 32-rule limit and exact-match behavior (`defaultApplicationBehavior` is that application-scope field).
+
+## Generic text mode
+
+Generic capture defaults to true regardless of document-region hints or browser family.
+Content capabilities are queried on all roles. TextPattern fields, ValuePattern fallback,
+UIA LegacyIAccessible, and direct window-scoped MSAA share budgets and normalization.
+A failed field does not invalidate another successful field. Positive password/protected
+states and sensitive subtrees remain blocked; unknown optional metadata is tolerated.
+
+Generic capture keeps nested editor controls and hosted processes in the same HWND subtree.
+Exact duplicate text from equivalent nested document wrappers is removed without merging
+sibling documents or discarding node identity and focus. Focused branches and documents are
+prioritized; Control View can fall back to Raw View within the existing total deadline.
+
+Normalized text preserves document context separately from provider-visible ranges.
+Current values carry their actual source; MSAA names use label_text rather than field_value
+in summary input. No source implies proven pixel visibility or user intent.
+Automatic editor-body exposure is still a provider compatibility question, including Electron.
 
 ## Differences from the C# validation prototype
 
@@ -285,7 +325,7 @@ precedence over all matching application rules. Policies without the new scope f
 | Delta | `{mode, lines}` / `{removed, added}` text lines inside a `detail` string | structured `mode`/`nodes`/`added`/`removed` (keys only) |
 | Content events | `kind` = trigger name, `degraded` for failures | `kind: "snapshot"` with `status` + `reason`; trigger in `trigger.kinds` |
 | Unauthorized targets | silently skipped | `blocked` event with `context: null`, repeats suppressed |
-| Browser | URL/private-state logic with a test `allowUnknownPrivate` switch | all known browsers `browser_unsupported`; no URL, no switch |
+| Browser | URL/private-state logic with a test `allowUnknownPrivate` switch | explicit Chrome/Edge adapters require positive normal-mode and same-window URL evidence; no unknown/private override |
 | Office/VS Code fixture selectors | name/AutomationId fixture lists per app | Word Body + bounded document scope and bounded VS Code editor scope; generic nonempty-ID selectors remain available |
 | Credential regex scrubbing | yes (`password=…` → `[REDACTED]`) | not implemented natively; left to the consumer's redaction |
 | Segment manifest | `.segments.json` sidecar | no sidecar; segment names are deterministic, each starts with `segment.started` |

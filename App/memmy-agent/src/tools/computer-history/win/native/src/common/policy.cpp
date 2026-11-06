@@ -115,7 +115,7 @@ class Parser {
 
   bool Application(const Json& value, const std::string& path, AppRule& rule) {
     if (!Keys(value, path, {"pid", "executable", "processStart", "hwnd", "searchFields", "documentRegions",
-                            "sensitiveAutomationIds"})) {
+                            "sensitiveAutomationIds", "browser", "captureText"})) {
       return false;
     }
     if (!value.contains("pid") || !value.contains("executable")) return Fail("missing_key", path);
@@ -123,6 +123,15 @@ class Parser {
     if (!Integer(value["pid"], path + "/pid", 1, 0xFFFFFFFFull, pid)) return false;
     rule.pid = static_cast<std::uint32_t>(pid);
     if (!AbsolutePath(value["executable"], path + "/executable", rule.executable)) return false;
+    if (value.contains("captureText")) {
+      if (!value["captureText"].is_boolean()) return Fail("capture_text_invalid", path + "/captureText");
+      rule.captureText = value["captureText"].get<bool>();
+    }
+    if (value.contains("browser")) {
+      if (!value["browser"].is_string()) return Fail("browser_invalid", path + "/browser");
+      rule.browser = browser::FromName(value["browser"].get_ref<const std::string&>());
+      if (!browser::MatchesExecutable(rule.browser, rule.executable)) return Fail("browser_invalid", path + "/browser");
+    }
     if (value.contains("processStart")) {
       std::uint64_t start = 0;
       if (!DecimalString(value["processStart"], path + "/processStart", start)) return false;
@@ -143,9 +152,9 @@ class Parser {
       return false;
     }
     for (const auto& selector : rule.documentRegions) {
-      if (selector.vscodeEditor && !HasVsCodeEditorScope(rule)) return Fail("selector_scope_invalid", path + "/documentRegions");
-      if (selector.wordDocument && !HasWordDocumentScope(rule)) return Fail("selector_scope_invalid", path + "/documentRegions");
-      if (selector.notepadDocument && !HasNotepadDocumentScope(rule)) return Fail("selector_scope_invalid", path + "/documentRegions");
+      if (!rule.captureText && selector.vscodeEditor && !HasVsCodeEditorScope(rule)) return Fail("selector_scope_invalid", path + "/documentRegions");
+      if (!rule.captureText && selector.wordDocument && !HasWordDocumentScope(rule)) return Fail("selector_scope_invalid", path + "/documentRegions");
+      if (!rule.captureText && selector.notepadDocument && !HasNotepadDocumentScope(rule)) return Fail("selector_scope_invalid", path + "/documentRegions");
     }
     if (value.contains("sensitiveAutomationIds") &&
         !StringList(value["sensitiveAutomationIds"], path + "/sensitiveAutomationIds", kMaxIdChars,
@@ -323,14 +332,6 @@ Decision Evaluate(const Policy& policy, const Target& target, const Canonicalize
     if (!text::EqualsOrdinalIgnoreCase(canonicalize(rule.executable), target.executable)) continue;
     match = &rule;
     break;
-  }
-  // Private/InPrivate state cannot be determined reliably in this phase, so browsers are
-  // refused even when the policy names them exactly.
-  if (IsKnownBrowserExecutable(target.executable)) {
-    decision.verdict = Verdict::BrowserUnsupported;
-    decision.rule = match;
-    decision.reason = "browser_unsupported";
-    return decision;
   }
   if (match == nullptr) return decision;
   decision.verdict = Verdict::Allowed;

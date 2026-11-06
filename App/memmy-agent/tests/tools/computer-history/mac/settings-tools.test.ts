@@ -56,8 +56,8 @@ describe("Computer History settings tools", () => {
       expect(store.read()).toEqual(before); expect(fs.existsSync(store.filePath)).toBe(false);
     } finally { release(); }
   });
-  it("registers all three tools alongside retrieval", () => {
-    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+  it.each(["darwin", "win32"] as const)("registers all three tools alongside retrieval on %s", (platform) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue(platform);
     vi.spyOn(historyPlatform, "isComputerHistorySupported").mockReturnValue(true);
     vi.stubEnv("MEMMY_COMPUTER_HISTORY", undefined);
     const registry = new ToolLoader({

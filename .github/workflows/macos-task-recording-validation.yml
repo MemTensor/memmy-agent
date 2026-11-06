@@ -1,6 +1,9 @@
 name: macOS task recording validation
 
 on:
+  push:
+    branches:
+      - "feature/windows-history-native-core"
   pull_request:
     paths:
       - ".github/workflows/macos-task-recording-validation.yml"
@@ -40,8 +43,7 @@ jobs:
       - name: Build production native helpers for Apple Silicon and Intel
         run: |
           mkdir -p .recording-ci/helpers
-          cp App/memmy-agent/src/tools/computer-history/mac/*.swift .recording-ci/helpers/
-          cp -R App/memmy-agent/src/tools/computer-history/mac/wechat .recording-ci/helpers/
+          cp -R App/memmy-agent/src/tools/computer-history/mac/. .recording-ci/helpers/
           bash scripts/internal/mac/build-computer-history-helpers.sh .recording-ci/helpers arm64
           bash scripts/internal/mac/build-computer-history-helpers.sh .recording-ci/helpers x64
       - name: Run native media, macOS lifecycle, UI and packaging checks

@@ -35,11 +35,12 @@ struct NodeRecord {
   bool providerOffscreen = false;
   std::optional<bool> password;  // nullopt: provider did not report IsPassword
   std::string redaction;         // empty when content was permitted
-  std::string documentStatus;    // scoped editor only: available | label_only | read_failed
+  std::string documentStatus;    // text attempt: available | label_only (legacy) | read_failed
   std::optional<std::string> name;
   std::optional<std::string> text;
   std::optional<std::string> visibleText;
   std::optional<std::string> value;
+  std::string valueSource;  // uia.value | uia.legacy_value
   std::optional<std::array<double, 4>> bounds;  // left, top, width, height (physical px)
   std::vector<std::string> missing;             // properties that failed to read
 };
@@ -57,6 +58,15 @@ std::string NodeKey(const NodeRecord& node, std::string_view parentKey = {});
 // Parent-dependent keys ensure that changed ancestors also resend unchanged descendants.
 std::vector<std::string> NodeKeys(const std::vector<NodeRecord>& nodes);
 
+struct BrowserContext {
+  std::string url;
+  std::string documentId;
+  std::array<double, 4> viewport{};
+  browser::Kind kind = browser::Kind::Chrome;
+  std::string mode = "unknown";
+};
+bool BrowserNodeContentAllowed(const NodeRecord& node, const BrowserContext& browser);
+
 struct ContextRecord {
   std::uint64_t hwnd = 0;
   std::uint32_t pid = 0;
@@ -66,6 +76,7 @@ struct ContextRecord {
   std::array<std::int32_t, 4> bounds{};  // left, top, right, bottom
   bool minimized = false;
   std::optional<std::string> title;
+  std::optional<BrowserContext> browser;
 };
 
 Json ContextToJson(const ContextRecord& context, std::optional<std::uint64_t> generation);

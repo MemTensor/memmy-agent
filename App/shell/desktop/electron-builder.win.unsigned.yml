@@ -36,7 +36,6 @@ files:
 asar: true
 npmRebuild: false
 asarUnpack:
-  - "dist/runtime/memmy-agent/dist/tools/computer-history/win/memmy-history-recorder.exe"
   - "**/node_modules/open-computer-use/dist/**"
   - "**/plugin-runtime/windows/**"
   - "dist/runtime/memmy-agent/dist/tools/computer-history/win/**"

@@ -21,7 +21,7 @@ function propertyPath(members: Record<string, unknown>): any {
 function fixture(options: {
   running?: boolean; launchDoesNotStart?: boolean; available?: boolean; permission?: number; authorizePermission?: number; locked?: boolean; session?: Record<string, unknown> | null;
   books?: Array<{ id: string; name: string; sheet?: string; values?: unknown; formulas?: unknown; typed?: unknown }>;
-  active?: number | null; selection?: string; areas?: number;
+  active?: number | null; selection?: string; areas?: number; processCount?: number;
   clearError?: boolean; lockAfterWrite?: boolean;
 } = {}) {
   const calls: Array<{ kind: string; book?: string; sheet?: string; address?: string; value?: unknown; ask?: boolean }> = [];
@@ -97,9 +97,20 @@ function fixture(options: {
         NSString: { alloc: { initWithDataEncoding: (value: any) => value } },
         NSUTF8StringEncoding: 4,
         NSWorkspace: { sharedWorkspace: { URLForApplicationWithBundleIdentifier: () => ({ path: options.available === false ? null : "/Applications/Microsoft Excel.app" }) } },
-        NSAppleEventDescriptor: { descriptorWithBundleIdentifier: () => ({ aeDesc: {} }) },
+        NSRunningApplication: { runningApplicationsWithBundleIdentifier: (bundleId: string) => {
+          expect(bundleId).toBe("com.microsoft.Excel");
+          // JXA exposes NSArray.count as a string on macOS.
+          return { count: String(options.processCount ?? (running ? 1 : 0)), objectAtIndex: () => ({ processIdentifier: 4321 }) };
+        } },
+        NSAppleEventDescriptor: {
+          descriptorWithBundleIdentifier: () => ({ aeDesc: { bundleId: "com.microsoft.Excel" } }),
+          descriptorWithProcessIdentifier: (pid: number) => ({ aeDesc: { pid } }),
+        },
         CGSessionCopyCurrentDictionary: () => options.session !== undefined ? options.session : { kCGSSessionOnConsoleKey: true, kCGSessionLoginDoneKey: true, ...(options.locked || options.lockAfterWrite && calls.some(call => call.kind === "write") ? { CGSSessionScreenIsLocked: true } : {}) },
         AEDeterminePermissionToAutomateTarget: (_target: unknown, _eventClass: number, _eventId: number, ask: boolean) => {
+          // Reproduce the real permission API rejecting the bundle-ID descriptor.
+          if ((_target as { bundleId?: string }).bundleId) return -600;
+          expect(_target).toEqual({ pid: 4321 });
           expect(_eventClass).toBe(0x2a2a2a2a);
           expect(_eventId).toBe(0x2a2a2a2a);
           calls.push({ kind: "permission", ask });
@@ -142,6 +153,16 @@ describe("Mac application-wide Excel control", () => {
     const { run, calls } = fixture({ available: false });
     expect(await nativeMacExcelStatus(run)).toEqual({ available: false, connected: false, workbooks: [], activeWorkbookId: null });
     await expect(nativeMacExcelAuthorize(run)).rejects.toThrow("not installed");
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    [0, "excelNotRunning"], [2, "multipleInstances"],
+  ])("does not request permission or access workbooks with %s matching Excel processes", async (processCount, code) => {
+    const { run, calls } = fixture({ processCount: Number(processCount) });
+    await expect(nativeMacExcelAuthorize(run)).rejects.toMatchObject({ code, resultUnknown: false });
+    await expect(nativeMacExcelInvoke({ kind: "write_range", address: "A1", values: [[1]] }, run))
+      .rejects.toMatchObject({ code, resultUnknown: false });
     expect(calls).toEqual([]);
   });
 

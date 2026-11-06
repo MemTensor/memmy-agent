@@ -1,16 +1,34 @@
 # Windows Computer History 产品接入与 TypeScript 适配器
 
+
+## 当前采集行为 2026 年 10 月 16 日
+
+默认对当前窗口按实际内容能力读取，浏览器与其他应用共用通用路径；支持窗口内不同 PID 的托管子树。已知浏览器名称不再导致拒绝，普通、无痕和模式未知均可记录。URL 为可选元数据，前后可确认属于同一页面时附加，识别失败保留正文。已知 URL 仍执行网站规则；未知 URL 在 Windows 当前阶段按观察处理。
+
+任意角色的 TextPattern、ValuePattern 均可读取，前者失败可退回后者和 LegacyIAccessible。缺少名称或名称等于正文不再清除通用正文；字段来源、可见范围与文档上下文继续区分。Control View 不提供正文时有界尝试 Raw View；Chromium/Electron 使用共用窗口级辅助功能请求。该机制不代表所有第三方应用已提供正文。
+
+`captureText` 默认 true；区域配置只作提示，不再隐式关闭通用读取。显式 false 保留旧受限模式。明确密码、敏感子树、凭据脱敏及显式应用排除继续生效。本文后面的历史应用验证不代表新通用路径的完整覆盖，当前证据以 [VALIDATION.md](../VALIDATION.md) 最新日期为准。
+
+
 已接通独立 C++ UIA 采集器、共享 TypeScript 录制/摘要服务，以及 Windows 页面、应用授权和 HTTP 路由。Windows NSIS 构建会编译并分发生产 EXE；实际安装验收结果见 [VALIDATION.md](../VALIDATION.md)。没有新增 npm 依赖，也不需要 .NET。
+
+下一阶段的范围、实现顺序和验收条件见 [Windows Computer History 下一阶段实现计划](../WINDOWS-NEXT-PHASE-PLAN.md)。
 
 ## 产品入口与开发配置
 
 开发环境设置 MEMMY_WINDOWS_HISTORY_BINARY 指向生产版 EXE，并编译 Agent；默认仅查找编译后模块旁的同名文件。新 Windows 配置与 Mac 的默认应用范围对齐：确认开始记录后采集支持的应用，不要求逐项勾选。页面的“应用范围”可排除应用，或切换为“仅选定应用”；保存范围先停止当前记录。组件或发现过程不可用时不启动采集；仅选定模式还要求有已选择且运行中的应用。
 
-Windows 持久配置默认是 `~/.memmy/computer-history/windows-settings.json`。不存在文件时返回 `{version:1, defaultApplicationBehavior:"observe", applications:[]}`，但不会自动开始录制。新增字段可为 `observe`（支持的应用，排除项优先）或 `do_not_observe`（仅选定应用）；已有 v1 配置未包含新字段时保留原白名单，不能在升级时扩大范围。其余 `applications`、`sensitiveAutomationIds`、`deny.executables`、`limits` 格式不变。界面保留精确选择器，默认仍不保留普通 Edit 输入内容。应用专属高级规则最多 32 条，原生实例绑定在默认观察模式下最多 512 条；高级规则可手动配置，修改前应停止记录。
+产品使用共享 `~/.memmy/computer-history/observation-settings.json` 管理应用和网站范围，也支持 `MEMMY_HOME`。Windows 的 `windows-settings.json` 保留内部选择器、预算与迁移标记。首次使用会备份已有文件到旁边的 `.before-unification.json`，将旧 Windows 范围与共享规则的有效交集合并；旧配置缺少默认字段时保留原有仅选定范围。迁移完成后，共享文件丢失或损坏会报告错误，不回退到扩大范围的默认值。新配置不会自行开始录制。
+
+共享应用规则可携带绝对 `executable`，其 `bundleID` 使用对应路径的 `windows:<SHA-256>`；省略该 ID 时由解析器生成。已有 `win32.*` 规则继续兼容，适用的排除规则优先。Windows settings API 是共享范围的兼容视图，保存时保留网站规则；页面和 Agent 工具共用服务。高级选择器规则最多 32 条，原生实例绑定在默认观察模式下最多 512 条。
+
+产品编译的普通应用策略默认启用 `captureText`，读取非密码编辑控件值和正文；显式正文选择器配置保留受限模式，也可显式设置 `captureText:false`。浏览器始终使用独立适配，不能借通用文本读取绕过其范围。旧的直接原生策略省略该字段时仍保留原有受限行为。
 
 `GET /api/computer-history/windows/settings` 返回配置、可选应用与 readiness；`POST` 的请求体为 `{settings: <完整配置>}`。两者要求现有 API token 和 Windows 宿主。可选列表合并本地开始菜单快捷方式、运行进程和已有配置，名称优先使用快捷方式，再使用 EXE 的 FileDescription 或文件名；可以按名称或路径搜索，筛选后保存保留隐藏的选择和高级规则。目录信息缓存 60 秒，发现失败时回退到 EXE 名称；显示目录不读取窗口标题或 UIA 内容、不启动应用、不提供授权实例。每次启动及每两秒刷新，将所选范围绑定到真实 PID、规范路径和创建时间；新打开的应用需等刷新后才能采集。刷新前等待暂停确认；没有可用实例时使用明确拒绝的策略，设置损坏、超过预算或刷新失败会停止采集。
 
-服务沿用十分钟分段、摘要调度、保留/删除和工作流提取。暂停会关闭本次子进程，恢复可继续同一时间段的已正常关闭 JSONL，保持单个 metadata 和连续序号；中断或跨平台文件不能续写。Windows 的 `permissions.platform=windows` 与 `ready/reason` 表示组件和授权就绪，Mac 权限字段保持 false，界面不展示 Mac 系统权限向导。Windows 暂时只有历史检索工具，Mac 的 status/settings 工具不在 Windows 注册。
+服务沿用十分钟分段、摘要调度、保留/删除和工作流提取。暂停会关闭本次子进程，恢复可继续同一时间段的已正常关闭 JSONL，保持单个 metadata 和连续序号；中断或跨平台文件不能续写。Windows 的 `permissions.platform=windows` 与 `ready/reason` 表示组件和范围就绪，Mac 权限字段保持 false，界面不展示 Mac 系统权限向导。Windows 已注册历史检索以及 `computer_history_status`、`computer_history_get_settings`、`computer_history_update_settings`。更新共享规则会先停止当前采集，再写入配置。
+
+`captureHealth.content` 报告最近一次实际落盘样本的正文质量、原因和时间，不包含用户正文。页面显示“正文可用／部分内容／正文暂不可读”；空闲、空白窗口和被排除内容不自动算失败。正文的 DocumentRange、provider 可见范围和控件当前值分别标记，摘要不能把全文当成用户看过或输入过的内容。
 
 ## 入口
 
@@ -36,8 +54,8 @@ node dist/tools/computer-history/core/summarize-history.js --file "D:\history-va
 ## 授权与数据
 
 - 原生协议见 [PROTOCOL.md](native/PROTOCOL.md)。适配器严格校验 UTF-8、消息类型、字段、序号、sessionId、时间顺序和大小上限。启动消息必须对应自己创建的子进程，生产入口拒绝 testHooks 构建。
-- 原生采集始终要求精确实例策略，PID、规范化 EXE 路径和可选 HWND / 创建时间必须匹配。`compileWindowsPolicy()` 将默认观察/仅选定范围绑定当前实例，没有原生通配授权。deny 优先，锁屏/登录/屏保表面和已知浏览器仍然拒绝。改名浏览器和嵌入网页不能仅凭 EXE 名称识别，仍受普通应用的节点过滤约束。
-- Windows 应用使用 `windows:<EXE 路径 SHA-256>` 标识，不伪装为 Mac bundleId。默认应用范围与 Mac 对齐，但 Windows 仍读取独立配置；Mac 的权限布尔值不代表 Windows 就绪。
+- 原生采集始终要求精确实例策略，PID、规范化 EXE 路径和可选 HWND / 创建时间必须匹配。`compileWindowsPolicy()` 将默认观察/仅选定范围绑定当前实例，没有原生通配授权。deny 优先，锁屏/登录/屏保表面始终拒绝。Chrome/Edge 仅通过专属浏览器适配采集，其他已知浏览器仍然拒绝。改名浏览器和嵌入网页不能仅凭 EXE 名称识别，仍受普通应用的节点过滤约束。
+- Windows 应用使用 `windows:<EXE 路径 SHA-256>` 标识，不伪装为 Mac bundleId。应用和网站范围使用共享规则，内部实例策略由 Windows 编译；Mac 的权限布尔值不代表 Windows 就绪。
 - 原生读取前结合 UIA 密码属性与 Win32 HWND 所属 PID、Edit/RichEdit/Windows Forms 类名及 `ES_PASSWORD`。原生密码样式可覆盖 UIA 的非密码 Pane 误报；不确定状态不能放行文本。读取后再次核对原生状态，变为密码或未知时丢弃内容并裁剪子树。没有原生 HWND 的元素仍使用现有 provider 规则。
 - full/delta 先重建为完整树，再独立检查父子层级、重复键、输入框授权、密码状态、敏感标识、子树裁剪与文本预算。无基线的 delta、上下文/策略改变后的 delta、部分结果后的 delta 都会拒绝。阻断快照、暂停和恢复会清空基线。
 - 只有脱敏后的 `human_history_metadata` / `human_event` JSONL 落盘。Windows 节点保存为通用 `accessibility` 结构；Mac 原有 AX 字段及旧导入路径兼容保留。UIA 的触发通知不转换成虚构的点击或键盘动作。真实低级钩子可提供点击位置、滚动方向、导航键及有限快捷键；普通文本键只记录次数，AltGr 的可打印键身份也被清除。不能将这些次数当成字数或 IME 上屏文字。密码、敏感或未知焦点不输出键盘动作。
@@ -49,7 +67,13 @@ node dist/tools/computer-history/core/summarize-history.js --file "D:\history-va
 
 ## 验证
 
-### Word、VS Code 与 Notepad 正文适配
+### Chrome 与 Edge
+
+浏览器共用通用内容读取，专用模块只补充可确认的 Document URL。头像、登录状态、普通模式证明及地址栏一致性不再是采集准入。页面变化造成 URL 不确定时，仅省略 URL。Firefox 等其他浏览器可以尝试通用读取，专属 URL 增强与真实软件覆盖单列后续工作。
+
+### Word、VS Code 与 Notepad 受限兼容模式
+
+本节的固定正文规则仅用于显式 `captureText:false` 的旧受限模式；默认通用采集不依赖这些层级和选择器。以下真实应用结果保留各自测试时间与条件。
 
 应用获准并绑定实际进程后，未自定义正文规则的 `WINWORD.EXE` 默认使用
 `Edit + Body` 与 `{controlType:"Document", automationId:"", scope:"word.document"}`；

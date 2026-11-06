@@ -3,13 +3,12 @@ import { scrubRecord, type HistoryEvent } from "../core/recording.js";
 import { authorizedRule, pathKey, windowsApplicationId, type NativePolicy } from "./policy.js";
 import type { NativeNode, NativeSnapshotEvent } from "./protocol.js";
 import { documentTextIsLabel, isVsCodeEditorBody, isWordDocument, isNotepadDocument } from "./document-regions.js";
+import { sanitizeBrowserUrl } from "../browser-privacy.js";
 import type { RecordingObservation } from "@memmy/local-api-contracts";
 
 const operationRoles = new Set(["Button", "CheckBox", "ComboBox", "Hyperlink", "ListItem", "MenuItem",
   "RadioButton", "Slider", "Spinner", "TabItem", "TreeItem", "SplitButton"]);
 
-const structural = new Set(["Window", "Pane", "Group", "Custom", "MenuBar", "StatusBar", "Tab", "ToolBar",
-  "List", "Tree", "DataGrid", "Header", "Table", "TitleBar", "SemanticZoom", "AppBar"]);
 const fields = ["name", "text", "visibleText", "value"] as const;
 const invalid = (): never => { throw new Error("windows_snapshot_invalid"); };
 
@@ -37,7 +36,7 @@ export class SnapshotNormalizer {
     const events: HistoryEvent[] = [];
     for (const [index, action] of (event.snapshot.actions ?? []).entries()) {
       if (action.type === "key_press" || action.type === "text_input") {
-        if (!focus || focus.password !== false || (focus.redaction && focus.redaction !== "edit_control")) { this.reset(); return invalid(); }
+        if (!focus || focus.password === true || (focus.redaction && focus.redaction !== "edit_control")) continue;
       }
       const age = Date.parse(event.timestamp) - Date.parse(action.timestamp);
       if (age < -1000 || age > 60000) { this.reset(); return invalid(); }
@@ -62,7 +61,10 @@ export class SnapshotNormalizer {
     if (!context || context.minimized) return invalid();
     const rule = authorizedRule(policy, context);
     if (!rule) { this.reset(); throw new Error("windows_application_not_authorized"); }
-    const identity = [context.pid, context.processStart, context.hwnd, pathKey(context.executable), context.generation, revision].join("|");
+    const browser = context.browser && sanitizeBrowserUrl(context.browser.url) === context.browser.url ? context.browser : undefined;
+    const genericCapture = rule.captureText !== false;
+    const identity = [context.pid, context.processStart, context.hwnd, pathKey(context.executable), context.generation, revision,
+      browser?.url ?? "", browser?.documentId ?? ""].join("|");
     const nodes = snapshot.mode === "full" ? new Map<string, NativeNode>() : new Map(this.baseline ?? []);
     if (snapshot.mode === "delta") {
       if (!this.baseline || this.identity !== identity || snapshot.truncated) return invalid();
@@ -96,7 +98,7 @@ export class SnapshotNormalizer {
         if (!parent || node.depth !== parent.depth + 1) return invalid();
       }
       const content = fields.some((field) => node[field] !== undefined);
-      const masked = sensitive.has(node.automationId.toLowerCase()) || node.password !== false;
+      const sensitiveNode = sensitive.has(node.automationId.toLowerCase());
       const adapter = node.controlType === "Edit" && isVsCodeEditorBody(node, nodes, rule) ? "vscode.editor"
         : node.controlType === "Document" && isWordDocument(node, nodes, rule) ? "word.document"
         : node.controlType === "Document" && isNotepadDocument(node, nodes, rule) ? "notepad.document" : undefined;
@@ -104,19 +106,18 @@ export class SnapshotNormalizer {
       const scoped = adapter !== undefined;
       const document = matches(rule.documentRegions, node) || scoped;
       const search = node.controlType === "Edit" && node.focused && matches(rule.searchFields, node);
-      if ((node.documentStatus && !scoped) || (scoped && content && node.documentStatus !== "available")) return invalid();
-      if (node.documentStatus === "available" && (node.name === undefined || node.text === undefined || documentTextIsLabel(node))) return invalid();
-      if (node.documentStatus && node.documentStatus !== "available" && (content || node.redaction !== "edit_control")) return invalid();
-      if ((node.redaction || masked) && content) return invalid();
-      // Input can be echoed into sibling live-region labels outside the Edit subtree.
-      if (boundedEditor && !document && !search && content) return invalid();
-      if (node.controlType === "Edit" && !document && !search && content) return invalid();
-      if ((node.text !== undefined || node.visibleText !== undefined) && !document) return invalid();
-      if (node.value !== undefined && (!search || document)) return invalid();
-      if (sensitive.has(node.automationId.toLowerCase()) || node.password === true
-          || (node.password === null && (node.controlType === "Edit" || !structural.has(node.controlType)))
-          || node.controlType === "Edit" || (scoped && !!node.documentStatus)
-          || ((node.text !== undefined || node.visibleText !== undefined) && document)) blocks.add(node.key);
+      if ((node.redaction || sensitiveNode || node.password === true) && content) return invalid();
+      if (!genericCapture) {
+        if (node.password !== false && content) return invalid();
+        if (node.documentStatus && !scoped || scoped && content && node.documentStatus !== "available") return invalid();
+        if (node.documentStatus === "available" && (node.text === undefined || documentTextIsLabel(node))) return invalid();
+        if (boundedEditor && !document && !search && content) return invalid();
+        if (node.controlType === "Edit" && !document && !search && content) return invalid();
+        if ((node.text !== undefined || node.visibleText !== undefined) && !document) return invalid();
+        if (node.value !== undefined && (!search || document)) return invalid();
+      }
+      if (sensitiveNode || node.password === true || node.redaction === "password" || node.redaction === "sensitive_id"
+          || !genericCapture && (node.controlType === "Edit" || scoped && !!node.documentStatus)) blocks.add(node.key);
       for (const field of fields) {
         const units = node[field]?.length ?? 0;
         if (units > policy.limits.maxNodeTextChars) return invalid();
@@ -135,16 +136,19 @@ export class SnapshotNormalizer {
         name: path.win32.basename(context.executable), executable: context.executable },
       details: { pid: context.pid, processStart: context.processStart, hwnd: context.hwnd,
         generation: context.generation, policyRevision: revision, nativeSessionId: event.sessionId, nativeSequence: event.sequence,
+        ...((browser || rule.browser) ? { browser: true, browserKind: browser?.kind ?? rule.browser, ...(browser ? { url: browser.url, browserDocumentId: browser.documentId } : {}), browserMode: browser?.mode ?? "unknown",
+          windowTitle: context.title, urlSource: `${browser?.kind ?? rule.browser}.uia.document` } : {}),
         sourceMode: snapshot.mode, trigger: event.trigger, truncation: snapshot.truncation, ...(snapshot.actionOverflow ? { actionOverflow: true } : {}) },
       accessibility: { mode: "full", truncated: snapshot.truncated, nodes: [...nodes.values()].map((node) => ({
         key: node.key, parentKey: node.parentKey, controlType: node.controlType,
         providerOffscreen: node.providerOffscreen, ...(node.redaction ? { redaction: node.redaction } : {}),
-        ...(node.documentStatus ? { documentStatus: node.documentStatus } : {}),
-        ...(node.documentStatus === "available" && !node.redaction && adapters.get(node.key) === "vscode.editor"
-          ? { documentContext: "vscode.editor" as const } : {}),
-        ...(node.documentStatus === "available" && !node.redaction && adapters.has(node.key)
+        ...(genericCapture && node.value !== undefined ? { valueSource: node.valueSource ?? "uia.value" as const } : {}),
+        ...((node.text !== undefined || node.visibleText !== undefined) && genericCapture ? { documentStatus: "available" as const } : node.documentStatus ? { documentStatus: node.documentStatus } : {}),
+        ...((node.text !== undefined || node.visibleText !== undefined || node.documentStatus === "available") && !node.redaction && (adapters.get(node.key) === "vscode.editor" || genericCapture)
+          ? { documentContext: adapters.get(node.key) === "vscode.editor" ? "vscode.editor" as const : "uia.document" as const } : {}),
+        ...((node.text !== undefined || node.visibleText !== undefined || node.documentStatus === "available") && !node.redaction && (adapters.has(node.key) || genericCapture)
           ? { documentEvidence: {
-            adapter: adapters.get(node.key)!,
+            adapter: adapters.get(node.key) ?? "uia.text" as const,
             labelKind: adapters.get(node.key) === "vscode.editor" ? "editor_label" as const : "document_label" as const,
             labelSource: "uia.name" as const, textSource: "uia.document_range" as const,
             ...(node.visibleText !== undefined ? { visibleTextSource: "uia.visible_ranges" as const } : {}),

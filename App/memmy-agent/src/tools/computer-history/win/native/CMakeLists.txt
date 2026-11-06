@@ -32,6 +32,7 @@ target_link_options(memmy_history_options INTERFACE
 # Pure logic shared by the recorder, unit tests and the integration harness.
 add_library(memmy_history_core STATIC
   src/common/text.cpp
+  src/common/browser.cpp
   src/common/json.cpp
   src/common/policy.cpp
   src/common/classify.cpp
@@ -40,7 +41,7 @@ add_library(memmy_history_core STATIC
   src/common/cli.cpp
   src/common/protocol.cpp)
 target_include_directories(memmy_history_core PUBLIC src)
-target_link_libraries(memmy_history_core PUBLIC memmy_history_options memmy_nlohmann_json)
+target_link_libraries(memmy_history_core PUBLIC memmy_history_options memmy_nlohmann_json winhttp)
 
 set(MEMMY_RECORDER_WIN_SOURCES
   src/win/identity.cpp
@@ -52,6 +53,7 @@ set(MEMMY_RECORDER_WIN_SOURCES
   src/win/event_output.cpp
   src/win/worker_host.cpp
   src/win/uia_reader.cpp
+  src/win/browser_page.cpp
   src/win/commands.cpp
   src/win/task_video.cpp
   src/main.cpp)
@@ -61,7 +63,7 @@ set(MEMMY_RECORDER_WIN_SOURCES
 function(memmy_add_recorder target test_hooks)
   add_executable(${target} ${MEMMY_RECORDER_WIN_SOURCES})
   target_compile_definitions(${target} PRIVATE MEMMY_HISTORY_TEST_HOOKS=${test_hooks})
-  target_link_libraries(${target} PRIVATE memmy_history_core ole32 oleaut32 uiautomationcore bcrypt shell32 version uuid
+  target_link_libraries(${target} PRIVATE memmy_history_core ole32 oleaut32 oleacc uiautomationcore bcrypt shell32 version uuid
     d3d11 dxgi dwmapi mf mfplat mfreadwrite mfuuid windowsapp windowscodecs)
 endfunction()
 
@@ -112,7 +114,7 @@ if(MEMMY_HISTORY_BUILD_TESTS)
   set(MEMMY_HISTORY_TEST_ARTIFACTS "${CMAKE_BINARY_DIR}/test-artifacts" CACHE PATH
     "Directory for integration test evidence (policies, JSONL output, stderr)")
   set(MEMMY_INTEGRATION_CASES
-    cli_contract policy_strict identity_mismatch browser_unsupported
+    cli_contract policy_strict identity_mismatch browser_unsupported generic_cross_process
     snapshot_content snapshot_not_foreground race_aba race_policy timeout_reap
     commit_races commit_pause commit_control_flood partial_baseline
     observe_lifecycle observe_checkpoint observe_checkpoint_origin observe_unauthorized_foreground observe_policy_corrupt observe_policy_race

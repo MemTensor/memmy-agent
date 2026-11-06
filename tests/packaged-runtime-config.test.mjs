@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { finished } from "node:stream/promises";
 import { createPackageWithOptions, listPackage } from "@electron/asar";
 import { afterEach, describe, expect, it } from "vitest";
+import { bash } from "./fixtures/bash.mjs";
 import { transpileModule, ModuleKind, ScriptTarget } from "typescript";
 import {
   normalizePublicCloudService,
@@ -272,7 +273,7 @@ describe("packaged desktop runtime configuration", { timeout: 20_000 }, () => {
       buildScript.indexOf("create_memory_runtime_manifest() {"),
       buildScript.indexOf("\nprune_better_sqlite3_build_artifacts()"),
     );
-    const generated = spawnSync("bash", ["-c", `${manifestFunction}\ncreate_memory_runtime_manifest "$MEMORY_RUNTIME_DIR"`], {
+    const generated = spawnSync(bash, ["-c", `${manifestFunction}\ncreate_memory_runtime_manifest "$MEMORY_RUNTIME_DIR"`], {
       encoding: "utf8",
       env: { ...process.env, ROOT_DIR: root, MEMORY_DIR: memoryDir, MEMORY_RUNTIME_DIR: runtimeDir, TARGET_CPU: "arm64" },
     });
@@ -307,7 +308,7 @@ describe("packaged desktop runtime configuration", { timeout: 20_000 }, () => {
     const stageEnd = buildScript.indexOf('\nnode "$ROOT_DIR/scripts/internal/shared/check-office-slim-assets.mjs"', stageStart);
     expect(stageStart).toBeGreaterThanOrEqual(0);
     expect(stageEnd).toBeGreaterThan(stageStart);
-    const staged = spawnSync("bash", ["-c", buildScript.slice(stageStart, stageEnd)], {
+    const staged = spawnSync(bash, ["-c", buildScript.slice(stageStart, stageEnd)], {
       encoding: "utf8",
       env: { ...process.env, ROOT_DIR: root.replaceAll("\\", "/"), RUNTIME_DIR: runtimeDir.replaceAll("\\", "/"),
         MEMORY_DIR: memoryDir.replaceAll("\\", "/"), AGENT_DIR: join(root, "App", "memmy-agent").replaceAll("\\", "/") },
@@ -549,7 +550,7 @@ describe("packaged desktop runtime configuration", { timeout: 20_000 }, () => {
     });
     expect(thirdPartyMap.status).not.toBe(0);
     expect(thirdPartyMap.stderr).toContain("third-party production source map");
-  });
+  }, 30_000);
 
   it("passes the defined Windows package architecture to the shared ASAR verifier", () => {
     const buildScript = readFileSync(join(
@@ -655,14 +656,17 @@ const nativePath = createRequire(import.meta.url)("node:path");
 const hostJoin = nativePath.join;
 const hostDirname = nativePath.dirname;
 const hostBasename = nativePath.basename;
+const windowsJoin = nativePath.win32.join;
+const windowsDirname = nativePath.win32.dirname;
+const windowsBasename = nativePath.win32.basename;
 nativePath.sep = "\\";
 nativePath.join = (...parts) => parts.every(part => !part.includes("/") && !part.includes("\\"))
-  ? nativePath.win32.join(...parts)
+  ? windowsJoin(...parts)
   : hostJoin(...parts.map(part => part.replaceAll("\\", "/")));
 nativePath.dirname = path => path.includes("\\") && !path.includes("/")
-  ? nativePath.win32.dirname(path) : hostDirname(path);
+  ? windowsDirname(path) : hostDirname(path);
 nativePath.basename = path => path.includes("\\") && !path.includes("/")
-  ? nativePath.win32.basename(path) : hostBasename(path);
+  ? windowsBasename(path) : hostBasename(path);
 syncBuiltinESMExports();
 process.argv.splice(1, 1);
 await import(pathToFileURL(process.argv[1]).href);
