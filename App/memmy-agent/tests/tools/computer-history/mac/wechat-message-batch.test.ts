@@ -2,10 +2,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-// Consent behavior is covered separately; these fixtures exercise the message protocol.
-vi.mock("../../../../src/tools/computer-history/win/private-files.js", () => ({
-  prepareWindowsWeChatState: () => {}, validateWindowsWeChatConsent: () => true,
-}));
 import {
   normalizeWeChatBatch, WeChatMessageBatchReader, WeChatReaderError,
 } from "../../../../src/tools/computer-history/mac/wechat-message-batch.js";

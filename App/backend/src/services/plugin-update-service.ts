@@ -18,8 +18,12 @@ export function createPluginUpdateService(plugins: PluginService, onUpdated: () 
         const autoUpdate = pluginRules(installed.manifest).autoUpdate;
         if (!latest || !latest.eligibility.canUse || !autoUpdate || installed.state === "pending_approval"
           || plugins.isBusy(installed.id) || compareVersions(latest.manifest.version, installed.version) <= 0) continue;
-        try { await plugins.update(installed.id, latest.manifest.version); await onUpdated(); }
-        catch (error) { console.warn(`Plugin update deferred or failed for ${installed.id}: ${error instanceof Error ? error.message : String(error)}`); }
+        try {
+          await plugins.update(installed.id, latest.manifest.version);
+          if (!stopped) await onUpdated();
+        } catch (error) {
+          if (!stopped) console.warn(`Plugin update deferred or failed for ${installed.id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     })().finally(() => { inFlight = undefined; });
     return inFlight;

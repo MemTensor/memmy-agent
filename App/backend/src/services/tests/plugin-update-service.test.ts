@@ -42,6 +42,25 @@ describe("automatic plugin updates", () => {
     await updates.check(); expect(f.update).not.toHaveBeenCalled();
     f.setBusy(false); await updates.check(); expect(f.update).toHaveBeenCalledTimes(1); await updates.close();
   });
+  it("stops scheduling immediately while close drains an update and skips its publication", async () => {
+    vi.useFakeTimers();
+    const f = fixture(), onUpdated = vi.fn(async () => {});
+    let finish!: () => void;
+    f.update.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({}); }));
+    const updates = createPluginUpdateService(f.plugins, onUpdated);
+    updates.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const closing = updates.close();
+    try {
+      await vi.advanceTimersByTimeAsync(12 * 60 * 60 * 1000);
+      await updates.check();
+      updates.start();
+      expect(f.catalog).toHaveBeenCalledTimes(1);
+      expect(f.update).toHaveBeenCalledTimes(1);
+      finish(); await closing;
+      expect(onUpdated).not.toHaveBeenCalled();
+    } finally { finish(); await closing; }
+  });
   it("leaves a failed update and offline check recoverable", async () => {
     const f = fixture(), updates = createPluginUpdateService(f.plugins);
     f.update.mockRejectedValueOnce(new Error("checksum mismatch")); await updates.check();

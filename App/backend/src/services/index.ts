@@ -305,7 +305,16 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       native.start();
     },
     startUpdates() { pluginUpdates.start(); },
-    async close() { await pluginUpdates.close(); await plugins.shutdown(); await native.close(); }
+    async close() {
+      // Stop scheduling first, then cancel idle/download waits before draining
+      // the update loop. Awaiting that loop first can block shutdown forever.
+      const updatesClosing = pluginUpdates.close();
+      try { await plugins.shutdown(); }
+      finally {
+        await updatesClosing;
+        await native.close();
+      }
+    }
   };
   const pluginToolSignature = () => JSON.stringify(plugins.list()
     .filter((plugin) => plugin.state === "active" && plugin.eligibility?.canUse !== false)
