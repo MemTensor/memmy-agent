@@ -25,6 +25,8 @@ const FIRST_ASSISTANT_TEXT = "已定位到 scripts/package-mac.mjs 第 42 行的
 describe("episode output language", () => {
   it.each([
     { title: "Local Sensitive Logic Exposure", summary: "已修复缓存处理。" },
+    { title: "Cache Entry Has Expired", summary: "缓存已过期。" },
+    { title: "修复缓存", summary: "Cache expired unexpectedly; 缓存。" },
     { title: "修复缓存处理", summary: "Fixed cache handling and verified API responses." }
   ])("does not save a mismatched field and allows retry: %j", async (invalid) => {
     const { db, service } = createTestService();
@@ -37,9 +39,20 @@ describe("episode output language", () => {
     expect(complete).toHaveBeenCalledTimes(1); // No schema repair locking in the wrong language.
     output = { title: "修复缓存处理", summary: "已修复缓存并验证响应。" };
     await titleService.generate(titleJob(episodeId, "final"));
-    expect(repos.runtime.getEpisode(episodeId)!.title).toBe(output.title);
+    expect(repos.runtime.getEpisode(episodeId)).toMatchObject(output);
     await titleService.generate(titleJob(episodeId, "final"));
     expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it("stores a product name as the title alongside its Chinese summary", async () => {
+    const { db, service } = createTestService();
+    const { episodeId } = await completeOneTurn(service);
+    const output = { title: "Google Cloud Vision", summary: "已配置图像识别。" };
+    const { llm, calls } = respondWith(output.title, output.summary);
+    const { repos, titleService } = createTitleService(db, llm, { language: "zh-CN" });
+    await titleService.generate(titleJob(episodeId, "final"));
+    expect(repos.runtime.getEpisode(episodeId)).toMatchObject(output);
+    expect(calls).toHaveLength(1);
   });
 
   it.each([["Password Reset Failed", false], ["修复缓存", true]] as const)(
@@ -93,7 +106,9 @@ describe("episode output language", () => {
     ["zh-CN", "Fixed cache handling and verified API responses."],
     ["zh-CN", "Password Reset Failed"],
     ["zh-CN", "API returned the wrong value for 缓存."],
+    ["zh-CN", "Cache expired unexpectedly; 缓存已过期。"],
     ["en", "Cache 修复缓存配置错误"],
+    ["en", "修复服务端缓存配置，避免用户下次登录失败。 Cache refresh job complete."],
     ["ja", "Repair cache handling"],
     ["en", "修复缓存处理"],
     ["fr", "Fixed the cache and verified responses"]
@@ -110,6 +125,10 @@ describe("episode output language", () => {
     ["zh-CN", "Node.js API"], ["zh-CN", "React Native"],
     ["zh-CN", "React Native Windows"], ["zh-CN", "`npm install typescript`"],
     ["zh-CN", "Microsoft Visual Studio Code"], ["zh-CN", "Adobe After Effects"],
+    ["zh-CN", "Windows Communication Foundation"],
+    ["zh-CN", "Google Cloud Vision；已完成配置。"],
+    ["zh-CN", "缓存失效时会显示 Cache Entry Has Expired 提示。"],
+    ["en", "Show the message ‘缓存已过期。’ when the entry expires."],
     ["en-Abcd", "Ambiguous script"]
   ])("preserves valid or ambiguous output for %s: %s", (language, text) => {
     expect(() => validateEpisodeTitleLanguage(text, language, "title")).not.toThrow();
