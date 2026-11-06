@@ -13,6 +13,7 @@ export { normalizeOutputLanguage } from "./output-language.js";
 
 export * from "./model-catalog-resolver.js";
 export * from "./model-thinking-levels.js";
+export { anthropicRequestModelId } from "./anthropic-model-id.js";
 
 export * from "./memory-runtime.js";
 export * from "./memory-canonical-json.js";
