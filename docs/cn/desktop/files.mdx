@@ -6,9 +6,9 @@ icon: FileText
 
 import previewScreen from "../../assets/files-preview-full.jpg";
 import csvScreen from "../../assets/files-csv-full.jpg";
-import overviewScreen from "../../assets/files-overview-full.jpg";
-import switchScreen from "../../assets/files-switch-full.jpg";
-import treeScreen from "../../assets/files-tree-full.jpg";
+import overviewScreen from "../../assets/files-overview-full.png";
+import switchScreen from "../../assets/files-switch-full.png";
+import treeScreen from "../../assets/files-tree-full.png";
 
 ## 打开生成的文件
 
@@ -25,6 +25,12 @@ import treeScreen from "../../assets/files-tree-full.jpg";
 
 全屏查看后，点击右上角「退出全屏」回到对话与右栏。
 
+## 预览 PPTX
+
+`.pptx` 可以在右栏直接预览，不需要安装 Office 插件。打开幻灯片后，工具栏提供页码、「缩小」、「放大」和「适应宽度」。也可以在文件中搜索。如果提示部分幻灯片元素无法完整显示，用「用默认应用打开」查看原文件。
+
+内置预览只负责查看已经生成的文件。要根据材料创建或修改 Word、Excel、PPT 或 PDF，使用 [Office 插件](/docs/plugins/office)。
+
 ## 查看产物与原始材料
 
 点击右栏左上角的列表图标「概览」。弹出的面板默认列出「产物」，可重新打开任务交付的文件。
@@ -32,9 +38,9 @@ import treeScreen from "../../assets/files-tree-full.jpg";
 要浏览项目中的原始材料，点击面板里的「概览」下拉菜单，切换到「工作空间文件」，再点击文件名。
 
 <ProductScreenSteps steps={[
-  { label: "查看任务产物", src: overviewScreen, alt: "Memmy 完整窗口：概览面板中的两个产物文件", caption: "打开右栏左上角的列表图标，找到「产物」。这里列出任务交付的文件。" },
-  { label: "切换文件视图", src: switchScreen, alt: "Memmy 完整窗口：概览下拉菜单中的工作空间文件选项", caption: "点击弹出面板里的「概览」，选择「工作空间文件」。" },
-  { label: "打开原始材料", src: treeScreen, alt: "Memmy 完整窗口：工作空间文件同时展示原始培训记录与生成文件", caption: "当前项目的材料和结果都在这里。图中的 training-notes.md 是原始材料，其余两份是示例产物。" }
+  { label: "查看任务产物", src: overviewScreen, alt: "概览面板中的两个产物文件", caption: "打开右栏左上角的列表图标，找到「产物」。这里列出任务交付的文件。" },
+  { label: "切换文件视图", src: switchScreen, alt: "概览下拉菜单中的工作空间文件选项", caption: "点击弹出面板里的「概览」，选择「工作空间文件」。" },
+  { label: "打开原始材料", src: treeScreen, alt: "工作空间文件同时展示原始培训记录与生成文件", caption: "当前项目的材料和结果都在这里。图中的 training-notes.md 是原始材料，其余两份是示例产物。" }
 ]} />
 
 ## 修改生成的文件
@@ -52,4 +58,4 @@ import treeScreen from "../../assets/files-tree-full.jpg";
 
 </details>
 
-需要生成 Word、Excel 或 PPT 时，在 [插件](/docs/plugins/overview) 里安装对应插件。
+需要根据材料创建或修改 Word、Excel、PPT 或 PDF 时，安装 [Office 插件](/docs/plugins/office)。只查看已经生成的文件，用上面的内置预览即可。

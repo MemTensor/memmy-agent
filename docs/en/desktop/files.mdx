@@ -6,9 +6,9 @@ icon: FileText
 
 import previewScreen from "../../assets/files-preview-full-en.jpg";
 import csvScreen from "../../assets/files-csv-full-en.jpg";
-import overviewScreen from "../../assets/files-overview-full-en.jpg";
-import switchScreen from "../../assets/files-switch-full-en.jpg";
-import treeScreen from "../../assets/files-tree-full-en.jpg";
+import overviewScreen from "../../assets/files-overview-full-en.png";
+import switchScreen from "../../assets/files-switch-full-en.png";
+import treeScreen from "../../assets/files-tree-full-en.png";
 
 ## Open a generated file
 
@@ -25,6 +25,12 @@ Two buttons at the top right of the preview are used often:
 
 After a full-screen view, choose **Exit full screen** at the top right to return to the chat and side panel.
 
+## Preview a PPTX
+
+A `.pptx` file can be previewed in the side panel without the Office plugin. After the slides open, the toolbar has the page number, **Zoom out**, **Zoom in**, and **Fit width**. You can also search in the file. If it says some slide elements cannot be shown completely, choose **Open with default app** to see the original file.
+
+Built-in preview only shows a file that already exists. To create or revise a Word, Excel, PowerPoint, or PDF file from your material, use the [Office plugin](/docs/en/plugins/office).
+
 ## See results and the original material
 
 Choose the list icon, **Overview**, at the top left of the side panel. The panel lists **Artifacts** first, so you can reopen files the task delivered.
@@ -32,9 +38,9 @@ Choose the list icon, **Overview**, at the top left of the side panel. The panel
 To browse the project’s original material, open the **Overview** menu in that panel, switch to **Workspace files**, and choose a file name.
 
 <ProductScreenSteps steps={[
-  { label: "See task artifacts", src: overviewScreen, alt: "Full Memmy window showing two artifact files in Overview", caption: "Open the list icon at the top left of the side panel and find Artifacts. These are the files the task delivered." },
-  { label: "Switch the file view", src: switchScreen, alt: "Full Memmy window with Workspace files in the Overview menu", caption: "In the panel, open Overview and choose Workspace files." },
-  { label: "Open the original", src: treeScreen, alt: "Full Memmy window showing the original training notes and generated files under Workspace files", caption: "The current project’s material and results are both here. In the sample, the notes file is the original and the other two are generated." }
+  { label: "See task artifacts", src: overviewScreen, alt: "Two artifact files in Overview", caption: "Open the list icon at the top left of the side panel and find Artifacts. These are the files the task delivered." },
+  { label: "Switch the file view", src: switchScreen, alt: "Workspace files in the Overview menu", caption: "In the panel, open Overview and choose Workspace files." },
+  { label: "Open the original", src: treeScreen, alt: "Original training notes and generated files under Workspace files", caption: "The current project’s material and results are both here. In the sample, the notes file is the original and the other two are generated." }
 ]} />
 
 ## Revise the generated file
@@ -52,4 +58,4 @@ In the original task, say what to change and whether to overwrite the file or sa
 
 </details>
 
-To create a Word, Excel, or PowerPoint file, install the matching plugin from [Plugins](/docs/en/plugins/overview).
+To create or revise a Word, Excel, PowerPoint, or PDF file from your material, install the [Office plugin](/docs/en/plugins/office). To look at a file that already exists, use the built-in preview above.

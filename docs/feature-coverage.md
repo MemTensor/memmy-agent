@@ -18,10 +18,10 @@
 | 知识库 | cn/knowledge/overview.mdx | Knowledge/src/ui/page.tsx，pages/knowledge-page.tsx | 登录、处理成功、参与召回；接收共享方只读 |
 | 技能与来源审阅 | cn/memory/learned-skills.mdx | pages/memory/skills-sub-page.tsx、i18n | History 待审阅技能不能当成已验证自动执行能力 |
 | 外部工具和消息渠道 | cn/tools/integrations.mdx、cn/channels/index.mdx | tools 页、integrations 客户端、i18n | 以当前可连接项及权限范围为准 |
-| 插件 | cn/plugins/overview.mdx | plugin-marketplace-section.tsx、official-plugin-catalog.ts、i18n/messages.ts | 文档页称「插件」。产品入口仍是「连接与工具」顶部的「任务插件」。不把目录写成固定的几个场景 |
+| 插件 | cn/plugins/overview.mdx、cn/plugins/office.mdx、cn/plugins/literature-review.mdx | plugin-marketplace-section.tsx、official-plugin-catalog.ts、plugins/office/plugin.json、i18n/messages.ts | 文档页称「插件」。产品入口仍是「连接与工具」顶部的「任务插件」。默认目录声明文献综述、Office、劳动法律 beta；页面以当前卡片为准。Office 不要求登录。文献综述要求登录，并建议自行配置较强模型。 |
 | 模型、账号、隐私 | cn/models/*、cn/desktop/settings.mdx、cn/security/security.mdx | 设置、欢迎页、Knowledge UI 上传/共享 | 不写未确认的积分/套餐数值；本机记忆与云端处理区分 |
 | 终端、MCP、API、源码 | cn/terminal/*、cn/reference/*、cn/development/* | 保留现有工程参考 | 归入开发者区；本轮未重新验证所有接口契约 |
 
-跟着做三篇已撤下。文件任务、电脑历史续接、跨 Agent 续接分别写在 files、computer-history、sources。插件只保留总览，不按单个场景拆页。虚构的培训示例材料在 examples/training-notes.md。
+跟着做现为两页：Office 侧栏名「适配 Office 工具」，文献综述侧栏名「文献综述」。文件任务、电脑历史续接、跨 Agent 续接仍分别写在 files、computer-history、sources。其余插件不按场景拆页。虚构的培训示例材料在 examples/training-notes.md。
 
 网站由独立 Memmy-Web 项目渲染。更新日志由网站维护，必须经过 `prepare-local-docs.mjs` / 远端同步后的 overrides 步骤保留。中文新增页未翻译时，英文页面必须提示正在显示中文内容。

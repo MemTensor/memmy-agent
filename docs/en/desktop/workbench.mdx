@@ -4,10 +4,10 @@ description: State the goal, add material, and continue an existing task.
 icon: LayoutDashboard
 ---
 
-import attachmentScreen from "../../assets/workbench-attachments-full-en.jpg";
-import modelScreen from "../../assets/workbench-model-full-en.jpg";
+import attachmentScreen from "../../assets/workbench-attachments-full-en.png";
+import modelScreen from "../../assets/workbench-model-full-en.png";
 
-On the workbench, create a task and write the result you want. An existing task can be opened from the list on the left so you can add another requirement.
+Choose **New Agent** on the left and write the result you want. An existing task can be opened from the list on the left so you can add another requirement.
 
 ## Send the first request
 
@@ -15,16 +15,16 @@ Say what to do. For example:
 
 <PromptExample composer={true} prompt="Help me plan a 30-minute team meeting about our new customer feedback process." />
 
-Choose **+** at the lower left of the input, then **Upload files** or **Upload folder**. To keep working in one folder, choose **Add project** under **Projects** on the left.
+Choose **+** on the right side of the input. The file you select appears above the text. Check the file name, write what to do with it, then send. To keep working in one folder, choose **Add project** under **Projects** on the left.
 
 <ProductScreenSteps steps={[
-  { label: "Add material", src: attachmentScreen, alt: "Full Memmy workbench with the add-files menu", caption: "+ is at the lower left of the input. Choose files or a folder, then send the request." },
-  { label: "Choose a model", src: modelScreen, alt: "Full Memmy workbench with the conversation model menu", caption: "The lower right of the input shows the conversation model. Choose the model name to switch, or open Manage custom models from the menu." }
+  { label: "Add material", src: attachmentScreen, alt: "feedback.md above the input, with a request to organize that feedback", caption: "feedback.md is already above the text. The request asks to organize this feedback. Confirm the name, then send." },
+  { label: "Choose a model", src: modelScreen, alt: "Conversation model menu open", caption: "The right side of the input shows the conversation model. Choose the model name to switch, or open Manage custom models from the menu." }
 ]} />
 
 ## Use voice, or change the model
 
-**Voice input** turns speech into text. The first time, it needs microphone permission and a working speech-recognition model. For a longer discussion, open **Recording** on the workbench and record or upload audio.
+**Voice input** turns speech into text. The first time, it needs microphone permission and a working speech-recognition model. For a longer discussion, open **Recording** on the left and record or upload audio.
 
 **Conversation model** switches the model for the current task. If the model is unavailable, open **Settings → Model configuration** and check the configuration and quota.
 
@@ -32,7 +32,15 @@ Choose **+** at the lower left of the input, then **Upload files** or **Upload f
 
 The task list on the left can search, rename, pin, and archive. Archive a task you may continue later but do not need right now. Before you delete one, confirm you no longer need it.
 
-Type `/` in the input to see the commands that are available. For an ordinary task, plain language is enough.
+Type `/` in the input to see the commands that are available. A command you choose is inserted into the draft. Check it, then send. For an ordinary task, plain language is enough.
+
+## Answer a follow-up question
+
+When a task needs a choice, the chat shows **Your input is needed**. The card says **Choose one** or **Select all that apply**. Choose **Submit answer** when you are ready. If there are several questions, use **Previous question** and **Next question**, then **Confirm and continue**. You can **Skip**, or **Close without answering**. After you submit, the card shows **Answered**.
+
+## Read the task plan
+
+A running task may show **Task plan** and a count of completed items over the total. The status can be **Active**, **Waiting to continue**, **Completed**, or **Blocked**. When the turn stops, a plan that was active shows **Waiting to continue**. Choose the title to expand the items. The plan is a list of intended steps. It does not mean those steps are already done.
 
 ## Related
 

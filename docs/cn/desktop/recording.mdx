@@ -8,7 +8,7 @@ import entryScreen from "../../assets/recording-entry-full.jpg";
 import listScreen from "../../assets/recording-list-full.jpg";
 import liveScreen from "../../assets/recording-live-full.jpg";
 import transcriptScreen from "../../assets/recording-transcript-full.jpg";
-import attachedScreen from "../../assets/recording-attached-full.jpg";
+import attachedScreen from "../../assets/recording-attached-full.png";
 
 把会议讨论或课程音频交给 Memmy，先查看转写，再整理成可以继续处理的材料。使用录音功能需要登录 Memmy 账号。
 
@@ -40,12 +40,12 @@ import attachedScreen from "../../assets/recording-attached-full.jpg";
 | **添加到会话** | 转写作为 TXT 附件放进当前任务的输入框；补充要求后发送。 |
 | **总结** | 新建任务，并填好总结请求和转写附件；你可以修改要求，再点击发送。 |
 
-<ProductScreenshot src={attachedScreen} alt="Memmy 完整窗口：转写已添加到当前任务的输入框" caption="点击「添加到会话」后，先确认输入框出现转写附件，再说明希望得到什么。" />
+<ProductScreenshot src={attachedScreen} alt="转写已添加到当前任务的输入框" caption="点击「添加到会话」后，先确认输入框出现转写附件，再说明希望得到什么。" />
 
 <details>
 <summary>转写失败怎么办？</summary>
 
-显示「转写失败，录音已保留」时，在该条录音旁点击「重试转写」。如果提示语音转写不可用，检查登录状态、网络和语音识别模型配置，再重试。
+显示「转写失败，录音已保留」时，在该条录音旁点击「重试转写」。如果提示「没有录到有效音频，请稍微说久一点再发送」，说明没有识别到有效语音；录音仍留在列表中，可以说得久一点后再点「重试转写」。如果提示语音转写不可用，检查登录状态、网络和语音识别模型配置，再重试。
 
 </details>
 

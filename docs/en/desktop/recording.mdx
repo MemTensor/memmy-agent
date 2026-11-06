@@ -8,7 +8,7 @@ import entryScreen from "../../assets/recording-entry-full-en.jpg";
 import listScreen from "../../assets/recording-list-full-en.jpg";
 import liveScreen from "../../assets/recording-live-full-en.jpg";
 import transcriptScreen from "../../assets/recording-transcript-full-en.jpg";
-import attachedScreen from "../../assets/recording-attached-full-en.jpg";
+import attachedScreen from "../../assets/recording-attached-full-en.png";
 
 Give Memmy a meeting or a lesson recording. Read the transcript first, then turn it into material you can keep working on. Recording requires a Memmy account.
 
@@ -40,12 +40,12 @@ When it finishes, choose the title in the recording list. Check speakers, names,
 | **Add to conversation** | The transcript is placed in the current task’s input as a TXT attachment. Add your request, then send. |
 | **Summarise** | A new task is created with a summary request and the transcript attached. You can change the request, then send. |
 
-<ProductScreenshot src={attachedScreen} alt="Full Memmy window with a transcript attached to the current task input" caption="After Add to conversation, confirm the transcript attachment is in the input, then say what you want." />
+<ProductScreenshot src={attachedScreen} alt="A transcript attached to the current task input" caption="After Add to conversation, confirm the transcript attachment is in the input, then say what you want." />
 
 <details>
 <summary>Transcription failed</summary>
 
-If it says **Transcription failed; recording kept**, choose **Retry transcription** beside that recording. If speech transcription is unavailable, check that you are signed in, that the network works, and that a speech-recognition model is configured, then try again.
+If it says **Transcription failed; recording kept**, choose **Retry transcription** beside that recording. If it says **No valid audio was recorded. Please speak a little longer and try again.**, no usable speech was recognized. The recording stays in the list. Speak a little longer, then choose **Retry transcription**. If speech transcription is unavailable, check that you are signed in, that the network works, and that a speech-recognition model is configured, then try again.
 
 </details>
 
