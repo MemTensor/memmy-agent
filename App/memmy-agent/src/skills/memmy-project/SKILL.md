@@ -71,7 +71,7 @@ memmy-project session share --off                      # 停止共享，成员�
 memmy-project assist ask --project "<项目名称>" --member <成员名称> --file <请求.json>
 memmy-project assist ask --project "<项目名称>" --member <成员名称> --file <请求.json> --continue <上一次的请求 ID>
 memmy-project assist status <请求 ID>   # 不等待，只看现在到哪一步
-memmy-project assist cancel <请求 ID>   # 撤回或停止你发出的请求
+memmy-project assist cancel <请求 ID>   # 撤回对方还没开始执行的请求，或让对方停下正在执行的请求
 memmy-project assist cancel --project "<项目名称>" --member <成员名称>   # 不记得 ID 时按成员找
 memmy-project assist end --project "<项目名称>" [--member <成员名称>]   # 结束你给成员的限时授权
 ```
@@ -271,7 +271,7 @@ memmy-project session read a1b2c3#12
 
 - 信息在项目任务或知识库里能查到：用检索。
 - 用户自己在本机就能完成：直接在本机做。
-- 用户只是想通知对方一件事（「告诉李四明天发版」），或问对方的进展：不发协助请求。进展用 `session search`，通知不在这里做。
+- 用户只是想通知对方一件事（「告诉李四明天发版」），或问对方自己工作的进展（「李四那边做到哪了」）：不发协助请求。进展用 `session search`，通知不在这里做。
 
 ### 选成员
 
@@ -303,6 +303,8 @@ memmy-project session read a1b2c3#12
 - 输出写明「李四给你的限时授权到 09:06，李四的 Memmy 会直接执行」时，对方不需要再授权：告诉用户「李四的 Memmy 会直接执行，结果回来后我接着分析」。
 - 输出写明「李四目前不在线」时，告诉用户：请求已发出，李四打开 Memmy 后会看到，24 小时内没有处理会自动过期；结果回来后同样会送回这条任务。不要重发，也不要换一位成员。
 - 结果回来时，Memmy 会把它作为一条消息送回这条任务（包在 `<memmy_assist_result>` 里），你在那时接着分析。
+- 结果还没回来、用户问「我请李四查的结果出来了吗」时，运行 `memmy-project assist status <请求 ID>`，告诉用户现在到哪一步；不要重新发请求。用户问的是李四自己在项目里的工作（「李四那边做到哪了」）时，用 `session search`。
+- 用户说「不用等了」「先不管它」时，不运行 `assist cancel`：在 Memmy 里本来就不需要等，请求仍然有效，结果回来会自动送回这条任务。把这一点告诉用户。
 
 ### 结果怎么用
 
@@ -314,12 +316,14 @@ memmy-project session read a1b2c3#12
 - 同一次排查需要再查时，带 `--continue <上一次的请求 ID>` 再发一次：对方在同一个会话里接着做，记得前面查到的内容。
 - 同一件事最多追问一次。
 
-### 停止或换个要求
+### 撤回请求或换个要求
 
-- 用户说「停掉李四那边」「别查了，太慢」「不用等这个了」时，运行 `memmy-project assist cancel <短 id>`。不记得 id 就用 `memmy-project assist cancel --project "<项目名称>" --member <成员名称>`；有两条以上还没结束时命令会列出来，先问用户是哪一条，不要猜。
-- 输出「已停止李四那边的执行」时告诉用户：已经执行的过程留在协助会话里，双方都能看到停在哪一步。不要自动重发。
-- 用户要换成别的要求时，先 `assist cancel`，再用 `assist ask … --continue <短 id>` 发新的要求：新请求接在同一次排查里，李四的 Agent 保留前面的上下文，不必从头查一遍。
-- 输出「你停止了这次执行」时不要重发，也不要再 `assist wait`：这一次已经结束。
+- 用户明确说「撤回给李四的请求」「让李四那边停下来」「这个不用查了」时，运行 `memmy-project assist cancel <请求 ID>`：李四还没开始执行的请求会被撤回，正在执行的会让李四那边停下。分不清用户是不想等了还是要撤回时，先问一句：「要保留请求、结果回来再看，还是现在撤回？」
+- 这条任务里找不到请求 ID 时，用 `memmy-project assist cancel --project "<项目名称>" --member <成员名称>`；有两条以上还没结束时命令会列出来，先问用户是哪一条，不要猜。
+- 输出「已撤回这次协助请求」时，告诉用户已撤回，李四那边的提醒随之消失。
+- 输出「已停止李四那边的执行」时，告诉用户已经执行的过程留在协助会话里，双方都能看到停在哪一步。不要自动重发。
+- 用户要换成别的要求时，先 `assist cancel`，再用 `assist ask … --continue <请求 ID>` 发新的要求：新请求接在同一次排查里，李四的 Agent 保留前面的上下文，不必从头查一遍。
+- 输出「你停止了这次执行」时不要重发：这一次已经结束。
 
 ### 拒绝与失败
 
@@ -362,6 +366,7 @@ memmy-project session read a1b2c3#12
 - 用户说「告诉李四明天发版」「李四那边做到哪了」时，不发 `assist ask`。
 - 对方拒绝或请求过期后，不自动重发。
 - 输出写明对方目前不在线时，不重发、不换成员，这一轮照常结束。
+- 用户说「不用等了」时，不运行 `assist cancel`，请求保留。
 - 在 Memmy 里发出请求后，这一轮直接结束，不运行 `assist wait`。
 - `list` 里李四在任何项目都没有开启接收协助时，不发 `assist ask`，而是请用户让李四在项目设置里打开「接收协助请求」。
 

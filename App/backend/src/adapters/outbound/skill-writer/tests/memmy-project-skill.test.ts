@@ -24,10 +24,23 @@ describe("memmy-project skill", () => {
   });
 
   it("tells an external agent to wait in 90-second rounds without resending", () => {
-    expect(skill).toContain("用 `memmy-project assist wait <请求 ID>` 等待，每次最多 90 秒");
+    expect(skill).toContain("用 `memmy-project assist wait <请求 ID>` 等待结果。每次最多等 90 秒");
     expect(skill).toContain("不要重新发请求");
     expect(skill).toContain("不指定由哪个 Agent 执行");
     expect(skill).not.toContain("--timeout 600");
+  });
+
+  it("keeps stopping the wait apart from withdrawing the request", () => {
+    // 「不用等了」只是停止等待：请求保留，不撤回。
+    expect(skill).toContain("意思是停止等待，不是撤回请求：不运行 `assist cancel`");
+    expect(skill).toContain("「要保留请求、结果回来再看，还是现在撤回？」");
+    // 撤回只认明确的说法，不再把「不用等这个了」「别查了，太慢」当作撤回。
+    expect(skill).toContain("「撤回给李四的请求」「让李四那边停下来」「这个不用查了」");
+    expect(skill).not.toMatch(/不用等这个了|别查了，太慢/u);
+    // 取回结果给出用户可以直接说的话，并与查成员工作进展分开。
+    expect(skill).toContain("说「看看李四的协助结果」即可取回");
+    expect(skill).toContain("而不是你发给李四的协助请求时，用 `session search`");
+    expect(skill).not.toContain("说一声");
   });
 
   it("asks only in a project where the member receives assist requests, and never in another one", () => {
