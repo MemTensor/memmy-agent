@@ -2733,7 +2733,10 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
 .thread-tab {
   display: flex;
   height: 32px;
-  min-width: 50px;
+  /* Keep the icon and both browser action buttons inside the tab when the
+     strip is crowded. The strip itself scrolls horizontally once this
+     structural minimum is reached. */
+  min-width: 76px;
   max-width: 180px;
   flex: 0 1 156px;
   align-items: center;
@@ -2745,6 +2748,7 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   line-height: 22px;
   cursor: pointer;
   user-select: none;
+  overflow: hidden;
   transition: background-color 120ms ease, color 120ms ease;
 }
 

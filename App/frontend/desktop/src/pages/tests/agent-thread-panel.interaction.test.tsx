@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -176,6 +178,15 @@ describe("AgentThreadPanel", () => {
     act(() => document.querySelectorAll<HTMLButtonElement>('.thread-tabs [data-browser-tab]')[0]!.click());
     expect(document.querySelector('webview')).toBe(first);
     expect(document.querySelectorAll('.thread-tabs [data-browser-tab]')[0]?.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it("keeps compressed tabs wide enough for their action buttons", () => {
+    const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+    const threadTabRule = styles.match(/\.thread-tab\s*\{[^}]*\}/s)?.[0] ?? "";
+    expect(threadTabRule).toMatch(/min-width:\s*76px;/);
+    expect(threadTabRule).toMatch(/overflow:\s*hidden;/);
+    expect(styles).toContain(".thread-tabs {\n  display: flex;");
+    expect(styles).toContain("overflow-x: auto;");
   });
 
   it('does not label a blank browser tab or its address about:blank', () => {
