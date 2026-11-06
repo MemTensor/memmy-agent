@@ -20,16 +20,19 @@ export { EventCaptureSessionSchema, PluginManifestSchema } from "@memmy/local-ap
 
 export function createPluginHostHarness(options: {
   root: string; registryUrl: string; platform?: NodeJS.Platform;
+  /** Source checks can use repository skills without building a Host kit. */
+  skillsRoot?: string;
   source: EventCaptureSource; availableTools?: string[]; browser?: BrowserCaptureProvider;
 }) {
   const assetRoot = path.dirname(fileURLToPath(import.meta.url));
+  const skillsRoot = options.skillsRoot ?? path.join(assetRoot, "skills");
   const workspace = path.join(options.root, "workspace"), data = path.join(options.root, "agent-data");
   fs.mkdirSync(workspace, { recursive: true }); fs.mkdirSync(data, { recursive: true });
   const previous = { workspace: process.env.MEMMY_AGENT_WORKSPACE, data: process.env.MEMMY_AGENT_DATA_DIR, cloud: process.env.MEMMY_CLOUD_URL, registry: process.env.MEMMY_PLUGIN_REGISTRY_URL };
   process.env.MEMMY_AGENT_WORKSPACE = workspace; process.env.MEMMY_AGENT_DATA_DIR = data;
   process.env.MEMMY_CLOUD_URL = options.registryUrl; process.env.MEMMY_PLUGIN_REGISTRY_URL = options.registryUrl;
   const store = createAppStateStore({ databasePath: path.join(options.root, "app.sqlite") });
-  const loader = new SkillsLoader(workspace, path.join(assetRoot, "skills"), null,
+  const loader = new SkillsLoader(workspace, skillsRoot, null,
     { pluginDataRoot: path.join(options.root, "plugin-data"), pluginSkillsRoot: path.join(options.root, "plugin-skills"), includePlugins: true });
   loader.availableTools = () => options.availableTools ?? ["read_file", "write_file"];
   const native = createNativePluginServices({ dataRoot: path.join(options.root, "plugin-data"),
@@ -37,7 +40,7 @@ export function createPluginHostHarness(options: {
     // A cross-platform fixture controls the OS version as well as its event source.
     ...(options.platform === "darwin" && process.platform !== "darwin" ? { osRelease: "23.0.0" } : {}),
     toolNames: loader.availableTools, skills: () => loader.listSkills(false).map(({ name, path }) => ({ name, path })),
-    skillCreatorFile: path.join(assetRoot, "skills", "skill-creator", "SKILL.md") });
+    skillCreatorFile: path.join(skillsRoot, "skill-creator", "SKILL.md") });
   let reloads = 0;
   const services = createBackendServices({ appStateStore: store,
     agentAdapterRegistry: createDefaultAgentAdapterRegistry(),
@@ -52,12 +55,14 @@ export function createPluginHostHarness(options: {
       startWeixinLogin: async () => ({ status: "pendingQr" }), pollWeixinLogin: async () => ({ status: "connected" }),
       startFeishuLogin: async () => ({ status: "pendingQr" }), pollFeishuLogin: async () => ({ status: "connected" }),
       reloadMcpConfig: async () => { reloads++; return { ok: true, message: "", requires_restart: false }; },
+      hasActiveTasks: async () => false,
+      tryAcquirePluginUpdateLease: async () => async () => {},
       invokePluginHostService: (pluginId, service, input) => native.invoke({ pluginId, service, input })
     }
   });
   return {
     plugins: services.plugins, store, loader,
-    skillCreatorValidator: path.join(assetRoot, "skills", "skill-creator", "scripts", "quick-validate.py"),
+    skillCreatorValidator: path.join(skillsRoot, "skill-creator", "scripts", "quick-validate.py"),
     reloadCount: () => reloads,
     start: async () => { await services.pluginLifecycle?.start(); await services.plugins.restoreActive(); },
     async close() {

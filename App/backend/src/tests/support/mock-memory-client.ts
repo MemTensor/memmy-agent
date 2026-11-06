@@ -206,6 +206,12 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
+    async recallEvidence(queryId) {
+      failIfNeeded();
+      const serverTime = now();
+      return { recallEventId: randomUUID(), queryId, query: "", hits: [], createdAt: serverTime, serverTime };
+    },
+
     async getMemory(input) {
       failIfNeeded();
       const serverTime = now();
@@ -223,7 +229,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
           updatedAt: serverTime,
           version: 1,
           body: "",
-          createdAt: serverTime,
           sourceMemoryIds: [],
           metadata: {}
         },
@@ -353,6 +358,17 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         offset,
         serverTime: now()
       };
+    },
+
+    async panelTasks() {
+      failIfNeeded();
+      return { tasks: [], page: 1, pageSize: 20, total: 0, totalPages: 1,
+        hasNext: false, hasPrev: false, serverTime: now() };
+    },
+
+    async deletePanelTask(taskId) {
+      failIfNeeded();
+      return { ok: true, id: taskId, deletedMemoryIds: [], serverTime: now() };
     }
   };
 }

@@ -504,7 +504,8 @@ describe("CommandPluginAdapter", () => {
     );
     const profile = launch.args[1] ?? "";
     expect(dependency.pathEntries[0]).toMatch(/texlive/u);
-    expect(dependency.environment.TEXMFHOME).toMatch(/texmf/u);
+    // A TeX distribution can be installed without the optional user texmf tree.
+    if (dependency.environment.TEXMFHOME) expect(dependency.environment.TEXMFHOME).toMatch(/texmf/u);
     expect(profile).toContain(`(allow file-read*`);
     expect(profile).toContain(`(subpath ${JSON.stringify(dependency.readRoots[0])})`);
     expect(profile).toContain(`(subpath ${JSON.stringify(dependency.executableRoots[0])})`);

@@ -6,7 +6,7 @@ import { context, envelope, full, root, stats } from "./fixtures.js";
 
 const binding = { ...context, executable: "C:\\Program Files\\WindowsApps\\Notepad\\Notepad.exe" };
 const scope = { controlType: "Document" as const, automationId: "" as const, scope: "notepad.document" as const };
-const policy = compileWindowsPolicy([{ executable: binding.executable }], [binding]);
+const policy = compileWindowsPolicy([{ executable: binding.executable, captureText: false }], [binding]);
 const tree = (): NativeNode[] => [
   { ...root, automationId: "", className: "Notepad", name: "sample.txt - Notepad" },
   { ...root, automationId: "", key: "0000000000000002", parentKey: root.key, runtimeId: "2", depth: 1,
@@ -19,10 +19,18 @@ const event = (nodes = tree()) => parseNativeEvent({ ...full(nodes), context: bi
 const normalize = (nodes = tree()) => new SnapshotNormalizer().normalize(event(nodes), policy, "revision");
 
 describe("Notepad bounded document capture", () => {
+  it("uses generic body capture by default while keeping bounded capture opt-in", () => {
+    const generic = compileWindowsPolicy([{ executable: binding.executable }], [binding]);
+    expect(generic.applications[0]?.captureText).toBe(true);
+    expect(generic.applications[0]?.documentRegions).toBeUndefined();
+    expect(new SnapshotNormalizer().normalize(event(), generic, "generic")?.accessibility?.nodes.at(-1))
+      .toMatchObject({ text: "NOTEPAD-BODY\r\n", documentContext: "uia.document",
+        documentEvidence: { adapter: "uia.text" } });
+  });
   it("adds a default only after app binding, preserves explicit rules and keeps budgets", () => {
     expect(policy.applications[0]?.documentRegions).toEqual([scope]);
     expect(policy.limits).toMatchObject({ queryBudgetMs: 650, workerTimeoutMs: 1500 });
-    expect(compileWindowsPolicy([{ executable: binding.executable, documentRegions: [] }], [binding])
+    expect(compileWindowsPolicy([{ executable: binding.executable, captureText: false, documentRegions: [] }], [binding])
       .applications[0]?.documentRegions).toEqual([]);
     expect(() => compileWindowsPolicy([], [binding])).toThrow();
     expect(() => parseNativePolicy({ ...policy, applications: [{ ...policy.applications[0], executable: "C:\\Other.exe" }] })).toThrow();
