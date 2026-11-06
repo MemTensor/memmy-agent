@@ -1,0 +1,39 @@
+Upstream declaration (fontkit@2.0.4)
+
+Official npm metadata: https://registry.npmjs.org/fontkit/2.0.4
+Repository: https://github.com/foliojs/fontkit
+Fixed upstream commit: fbf3b9ef21eebd219eb73e666faed573af0fba09
+README: https://raw.githubusercontent.com/foliojs/fontkit/fbf3b9ef21eebd219eb73e666faed573af0fba09/README.md
+Package metadata: https://raw.githubusercontent.com/foliojs/fontkit/fbf3b9ef21eebd219eb73e666faed573af0fba09/package.json
+Published tarball integrity: sha512-syetQadaUEDNdxdugga9CpEYVaQIxOwk7GlwZWWZ19//qW4zE5bknOKeMBDYAASwnpaSHKJITRLMF9m1fp3s6g==
+
+The upstream package license field and the fixed README License section declare MIT.
+Package author field (author metadata only; not a copyright notice): Devon Govett <devongovett@gmail.com>
+Official npm author field (author metadata only; not a copyright notice): {"name":"Devon Govett","email":"devongovett@gmail.com"}
+The inspected upstream package/root and fixed README do not provide a separate LICENSE/LICENCE file or independent copyright notice. No copyright holder or year is inferred from author metadata.
+Human review remains required for the missing publisher copyright details and distribution readiness. This supplement preserves source evidence and is not legal approval.
+
+SPDX MIT standard terms reference
+
+Canonical source: https://spdx.org/licenses/MIT.html
+Fixed SPDX data source: https://raw.githubusercontent.com/spdx/license-list-data/31846481de7ea17d92f2f46fad76abe58b2e9bb0/json/details/MIT.json
+The following is the SPDX standard template, not an upstream LICENSE file. Its <year> and <copyright holders> variables remain unchanged because the inspected upstream sources did not supply values. It does not manufacture the missing publisher notice.
+
+MIT License
+
+Copyright (c) <year> <copyright holders>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.

@@ -470,6 +470,10 @@ export class AgentRunner {
       retryMode: spec.providerRetryMode,
       onRetryWait: spec.retryWaitCallback,
     };
+    if (spec.actualModelContext?.source === "account" && spec.model === "agent_chat"
+      && spec.privateSkillRefs.some(ref => ref.pluginId === "literature-review" && ref.skillId === "literature-review")) {
+      args.taskType = "literature-review";
+    }
     if (spec.temperature != null) args.temperature = spec.temperature;
     if (spec.maxTokens != null) args.maxTokens = spec.maxTokens;
     if (spec.reasoningEffort != null) args.reasoningEffort = spec.reasoningEffort;
@@ -870,27 +874,39 @@ export class AgentRunner {
     const tools = options.toolsOverride === undefined
       ? this.toolDefinitions(spec)
       : options.toolsOverride;
+    const previousRefs = JSON.stringify(spec.privateSkillRefs);
+    const publicMessages = messages;
     try {
-      const previousRefs = JSON.stringify(spec.privateSkillRefs);
-      const publicMessages = messages;
-      messages = await projectPrivateSkillInstructions(publicMessages, spec.privateSkillRefs, spec.tools, spec.abortSignal, spec.sessionKey, !spec.privateSkillRequestStarted);
-      if (spec.privateSkillRefs.length) {
-        const privateMessage = messages[0];
-        spec.privateSkillPromptTokens = estimateMessageTokens(privateMessage);
-        // Reserve private context without ever exposing it to transcript compaction or checkpoints.
-        messages = [privateMessage, ...this.prepareMessagesForModel(spec, publicMessages, {
-          toolsForRequest: tools, reservedPromptTokens: spec.privateSkillPromptTokens
-        })];
-      }
-      spec.privateSkillRequestStarted = true;
-      if (JSON.stringify(spec.privateSkillRefs) !== previousRefs) spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
-    } catch {
-      return new LLMResponse({ content: "Private plugin instructions could not be loaded. Sign in, check connectivity and plugin version, then resume the task. No plugin work was started by this model request.",
-        finishReason: "error", errorKind: "invalid_request", errorCode: "plugin_skill_load_failed", errorShouldRetry: false });
+      messages = await projectPrivateSkillInstructions(publicMessages, spec.privateSkillRefs, spec.tools, spec.abortSignal, spec.sessionKey, !spec.privateSkillRequestStarted,
+        () => spec.retryWaitCallback?.("Reloading private plugin instructions (retry 1 of 1)..."));
+    } catch (error) {
+      if (spec.abortSignal?.aborted) return abortedResponse();
+      const candidate = (error as { code?: string })?.code ?? (error instanceof Error ? error.message : "");
+      const reasons: Record<string, string> = {
+        plugin_skill_access_denied: "Sign in and check plugin access.",
+        plugin_skill_unavailable: "The instruction service could not be reached after one retry. Check connectivity and resume.",
+        plugin_skill_bundle_missing: "The installed plugin's instruction bundle is unavailable. Check the published plugin version.",
+        plugin_skill_invalid: "The instruction bundle failed validation. Update or repair the plugin.",
+        plugin_skill_version_changed: "The installed plugin changed during this turn. Resume in a new turn to reload the current version.",
+        plugin_skill_client_upgrade_required: "Update Memmy to load this plugin's private instructions."
+      };
+      const code = Object.hasOwn(reasons, candidate) ? candidate : "plugin_skill_load_failed";
+      return new LLMResponse({ content: `Private plugin instructions could not be loaded (${code}). ${reasons[code] ?? "Check plugin access, connectivity and version, then resume."} No plugin work was started by this model request.`,
+        finishReason: "error", errorKind: "invalid_request", errorCode: code, errorShouldRetry: false });
     }
     // Keep runtime scope metadata intact while reserving private skill context.
     // Project once after trimming so the real user request remains the anchor.
     messages = withMemmyMemoryTurnContext(messages, spec.memoryTurnContext);
+    if (spec.privateSkillRefs.length) {
+      const privateMessage = messages[0];
+      spec.privateSkillPromptTokens = estimateMessageTokens(privateMessage);
+      // Reserve private context without ever exposing it to transcript compaction or checkpoints.
+      messages = [privateMessage, ...this.prepareMessagesForModel(spec, publicMessages, {
+        toolsForRequest: tools, reservedPromptTokens: spec.privateSkillPromptTokens
+      })];
+    }
+    spec.privateSkillRequestStarted = true;
+    if (JSON.stringify(spec.privateSkillRefs) !== previousRefs) spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
     const inputBudget = this.inputTokenBudget(spec);
     if (inputBudget != null) {
       const estimateResult = estimatePromptTokensChain(provider, spec.model ?? null, messages, tools);

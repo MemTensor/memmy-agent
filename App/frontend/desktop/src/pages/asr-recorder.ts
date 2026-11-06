@@ -91,6 +91,9 @@ export async function transcribeRecording(
     durationMs,
     ...(options.diarization ? { diarization: true } : {})
   });
+  if (!hasTranscribedSpeech(result)) {
+    throw new Error(options.emptyAudioMessage ?? EMPTY_AUDIO_ERROR_MESSAGE);
+  }
   // The recording travels back with the transcript: it is one of the
   // deliverables, and callers cannot re-derive it once the chunks are gone.
   return { ...result, recording, recordingMimeType: encoded.mimeType, durationMs };
@@ -469,6 +472,11 @@ export async function blobToAudioBase64(blob: Blob, emptyAudioMessage = EMPTY_AU
     throw new Error(emptyAudioMessage);
   }
   return encoded;
+}
+
+/** True when the ASR model returned text in either its aggregate or segmented result. */
+export function hasTranscribedSpeech(result: Pick<AsrTranscriptionResponse, "text" | "segments">): boolean {
+  return Boolean(result.text.trim() || result.segments?.some((segment) => segment.text.trim()));
 }
 
 export function mergeVoiceTranscript(current: string, transcript: string): string {

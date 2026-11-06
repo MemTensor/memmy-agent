@@ -166,7 +166,7 @@ describe("Telegram channel", () => {
   });
 
   it("sends text with HTML rendering and button fallback", async () => {
-    const bot = { send_message: vi.fn(async (args: any) => ({ message_id: 1 })) };
+    const bot = { send_message: vi.fn(async (_args: any) => ({ message_id: 1 })) };
     const channel = new TelegramChannel({ app: { bot } });
 
     await channel.send(new OutboundMessage({
@@ -186,8 +186,8 @@ describe("Telegram channel", () => {
 
   it("streams by sending a preview then final HTML edit", async () => {
     const bot = {
-      send_message: vi.fn(async (args: any) => ({ message_id: 10 })),
-      edit_message_text: vi.fn(async (args: any) => undefined),
+      send_message: vi.fn(async (_args: any) => ({ message_id: 10 })),
+      edit_message_text: vi.fn(async (_args: any) => undefined),
     };
     const channel = new TelegramChannel({ app: { bot }, streamEditInterval: 999 });
 
