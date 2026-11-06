@@ -118,6 +118,25 @@ describe("runtime config write lock", () => {
     ).resolves.toBe("recovered");
   });
 
+  it("recovers a stale lock directory using the production defaults", async () => {
+    // Regression for MigrationError: Timed out waiting for the runtime config lock.
+    // A Memmy instance that crashed leaves its proper-lockfile ".lock" directory
+    // behind on Windows; the next launch must reclaim it instead of failing with
+    // migration_lock_timeout inside patchMcpServerConfigInMemmyConfig.
+    const directory = await root();
+    const configPath = path.join(directory, "config.yaml");
+    const lockPath = `${configPath}.lock`;
+    await fs.mkdir(lockPath);
+    // Older than the default stale window (30s) but a realistic time since the
+    // crashed instance's last mtime refresh.
+    const staleTime = new Date(Date.now() - 60_000);
+    await fs.utimes(lockPath, staleTime, staleTime);
+
+    await expect(
+      withRuntimeConfigWriteLock(configPath, async () => "recovered"),
+    ).resolves.toBe("recovered");
+  });
+
   it("always releases after the protected operation rejects", async () => {
     const directory = await root();
     const configPath = path.join(directory, "config.yaml");

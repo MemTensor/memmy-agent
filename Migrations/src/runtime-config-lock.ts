@@ -22,11 +22,26 @@ export type RuntimeConfigLockHandle = {
 const asyncLocks = new AsyncLocalStorage<ReadonlySet<string>>();
 const syncLocks = new Set<string>();
 
+// The lock protects ~/.memmy/config.yaml during boot. The defaults are tuned so a
+// Memmy instance that crashed (and left its proper-lockfile ".lock" directory on
+// disk) does not block the next launch for minutes:
+//   - stale (30s): how long before an orphaned lock dir is considered abandoned
+//     and can be forcibly reclaimed by another process.
+//   - update (5s): how often the live owner refreshes the lock dir's mtime to
+//     prove liveness; six refreshes fit inside the 30s stale window, so a live
+//     owner is never misidentified as stale.
+//   - retries/retryDelay (150 * 300ms ≈ 45s): the retry budget is long enough to
+//     outlast the stale window, so a caller racing against a recently crashed
+//     instance eventually acquires the lock instead of failing with
+//     migration_lock_timeout.
+// Previously stale was 120s with only a ~5s retry budget, which meant a Memmy
+// startup within two minutes of a prior crash deterministically timed out on
+// Windows at patchMcpServerConfigInMemmyConfig → createLocalBackend → boot.
 const DEFAULT_LOCK_OPTIONS: RuntimeConfigLockOptions = {
-  stale: 120_000,
-  update: 10_000,
-  retries: 50,
-  retryDelay: 100,
+  stale: 30_000,
+  update: 5_000,
+  retries: 150,
+  retryDelay: 300,
 };
 
 function isLockContention(error: unknown): boolean {
