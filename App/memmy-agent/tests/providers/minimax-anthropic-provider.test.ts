@@ -27,3 +27,22 @@ describe("MiniMax Anthropic provider", () => {
     expect(provider).toBeInstanceOf(AnthropicProvider);
   });
 });
+
+describe("MiniMax regional endpoints and thinking", () => {
+  it.each([["medium", "adaptive"], ["adaptive", "adaptive"], ["none", "disabled"], ["minimal", "disabled"], ["minimum", "disabled"], ["MINIMAL", "disabled"]])("maps %s to %s", (effort, mode) => {
+    const provider = new AnthropicProvider({ apiKey: "test-key", defaultModel: "MiniMax-M3" });
+    const args = provider.buildKwargs({ messages: [{ role: "user", content: "hi" }], reasoningEffort: effort });
+    expect(args.thinking).toEqual({ type: mode });
+  });
+  it("preserves forced tool choice when thinking is disabled", () => {
+    const provider = new AnthropicProvider({ apiKey: "test-key", defaultModel: "MiniMax-M3" });
+    const args = provider.buildKwargs({
+      messages: [{ role: "user", content: "hi" }],
+      reasoningEffort: "minimal",
+      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }],
+      toolChoice: "required",
+    });
+    expect(args.thinking).toEqual({ type: "disabled" });
+    expect(args.tool_choice).toEqual({ type: "any" });
+  });
+});
