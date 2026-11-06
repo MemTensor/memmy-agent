@@ -1,3 +1,4 @@
+import { budgetInjection } from "./injection-budget.js";
 import { skillInjectionDescription } from "./skill-injection-description.js";
 import type {
   RetrievalQueryExtract,
@@ -653,50 +654,52 @@ export function buildInjectedContext(
       )
     : rendered;
 
-  void budget;
-  const sections: InjectedContext["sections"] = memories.map((section) => section.section);
-  const renderedSections: RenderedInjectedSection[] = [...memories];
-  const sourceMemoryIds: string[] = memories.flatMap((section) => section.section.memoryIds);
-  const droppedDueToBudget: Array<{
-    id: string;
-    kind: MemoryKind;
-    memoryLayer: RecallMemoryLayer;
-    reason: "token_budget";
-    tokenEstimate?: number;
-  }> = [];
-  let used = sections.reduce((sum, section) => sum + (section.tokenEstimate ?? 0), 0);
-  const guidance = decisionGuidanceSection(
-    contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds)
-  );
-  const avoidance = failureAvoidanceSection(
-    contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds)
-  );
-  if (guidance) {
-    const estimate = guidance.tokenEstimate ?? 0;
-    sections.push(guidance);
-    sourceMemoryIds.push(...guidance.memoryIds);
-    used += estimate;
-  }
-  if (avoidance) {
-    sections.push(avoidance);
-    sourceMemoryIds.push(...avoidance.memoryIds);
-    used += avoidance.tokenEstimate ?? 0;
-  }
-
-  const markdown = renderInjectedMarkdown(renderedSections, guidance, avoidance, retrievalMode, options);
-
-  return {
-    injectedContext: {
-      markdown,
-      sections,
-      tokenEstimate: used
-    },
-    sourceMemoryIds: uniq(sourceMemoryIds),
-    droppedDueToBudget
-  };
+  const fixedContextChars = renderInjectedMarkdown([], undefined, undefined, retrievalMode, options).length;
+  return budgetInjection(memories, budget, (selected) => {
+    const sections: InjectedContext["sections"] = selected.map((item) => item.section);
+    const sourceMemoryIds = selected.flatMap((item) => item.section.memoryIds);
+    const sourceMemories = contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds);
+    const guidance = decisionGuidanceSection(sourceMemories);
+    const avoidance = failureAvoidanceSection(sourceMemories);
+    if (guidance) {
+      sections.push(guidance);
+      sourceMemoryIds.push(...guidance.memoryIds);
+    }
+    if (avoidance) {
+      sections.push(avoidance);
+      sourceMemoryIds.push(...avoidance.memoryIds);
+    }
+    return {
+      injectedContext: {
+        markdown: renderInjectedMarkdown(selected, guidance, avoidance, retrievalMode, options),
+        sections
+      },
+      sourceMemoryIds: uniq(sourceMemoryIds)
+    };
+  }, (id) => {
+    const memory = memoryById.get(id);
+    const section = memories.find((item) => item.section.memoryIds.includes(id))?.section;
+    return {
+      id,
+      kind: memory ? kindFromMemory(memory) : section!.kind,
+      memoryLayer: memory ? memory.memoryLayer : section!.memoryLayer,
+      ...(section ? { tokenEstimate: section.tokenEstimate } : {})
+    };
+  }, fixedContextChars);
 }
 
-function buildTimeFilteredInjectedContext(
+function buildTimeFilteredInjectedContext(memories: MemoryRow[], timeZone: string, budget: number) {
+  const byId = new Map(memories.map((memory) => [memory.id, memory]));
+  return budgetInjection(memories, budget,
+    (selected) => renderTimeFilteredInjectedContext(selected, timeZone),
+    (id) => {
+      const memory = byId.get(id)!;
+      return { id, kind: kindFromMemory(memory), memoryLayer: memory.memoryLayer,
+        tokenEstimate: renderTimeFilteredInjectedContext([memory], timeZone).injectedContext.tokenEstimate };
+    });
+}
+
+function renderTimeFilteredInjectedContext(
   memories: MemoryRow[],
   timeZone: string
 ): {
@@ -2045,7 +2048,8 @@ export class RetrievalService {
     const contextPacket = timeFilter
       ? buildTimeFilteredInjectedContext(
           memories.filter((memory) => hits.some((hit) => hit.id === memory.id)),
-          timeZone
+          timeZone,
+          request.contextBudget ?? 1800
         )
       : buildInjectedContext(
           hits,
@@ -2070,10 +2074,13 @@ export class RetrievalService {
     ]);
     const sourceMemoryIds = contextPacket.sourceMemoryIds;
     const hitIds = new Set(hits.flatMap((hit) => hit.memberMemoryIds ?? [hit.id]));
+    const accountedSourceIds = new Set([
+      ...hitIds, ...sourceMemoryIds, ...contextPacket.droppedDueToBudget.map((source) => source.id)
+    ]);
     const dropped = [
       ...contextPacket.droppedDueToBudget,
       ...memories
-        .filter((memory) => !hitIds.has(memory.id))
+        .filter((memory) => !accountedSourceIds.has(memory.id))
         .slice(0, 50)
         .map((memory) => ({
           id: memory.id,
@@ -2082,7 +2089,7 @@ export class RetrievalService {
           reason: "rank_threshold" as const
         })),
       ...(userMemoryRecallEnabled ? userMemoryOutput.memories : [])
-        .filter((memory) => !hitIds.has(memory.id))
+        .filter((memory) => !accountedSourceIds.has(memory.id))
         .slice(0, 50)
         .map((memory) => ({
           id: memory.id,
