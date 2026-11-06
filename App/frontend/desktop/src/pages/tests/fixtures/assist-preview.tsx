@@ -1,12 +1,13 @@
 /**
  * 临时预览页：把成员协助的各处界面用真实组件与样式渲出来，便于对照方案自查。
- * 地址参数 `?view=dialog|dialog-other|board|detail|conversation|chain|chain-memmy|task|task-ask|card|card-running|card-stopped-by-me|conversation-stop|task-stopped|requester|settings|settings-off`，不连接本机接口。
+ * 地址参数 `?view=dialog|dialog-other|board|board-tasks|detail|conversation|chain|chain-memmy|task|task-ask|card|card-running|card-stopped-by-me|conversation-stop|task-stopped|requester|settings|settings-off|project-settings-owner|project-settings-member|project-settings-local`，不连接本机接口。
  * `detail` 与 `conversation` 是同一份协助会话（两轮请求：发起方由 Memmy 发起、执行方由 Memmy 执行，第二轮按限时授权直接执行），
  * 没有发起方记录，就是旧记录的显示。`chain` 是完整链条：DeepSeek Harness 发起、Memmy 执行，两轮（第二轮 --continue）；
  * `chain-memmy` 是 Memmy 发起的完整链条，第二轮收到后的记录还在同步。
  */
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { Link2, ListChecks, RefreshCw, Search, User } from "lucide-react";
 import type { AssistExecution, AssistGrant, AssistInboxItem, AssistRequest, AssistThread, CollabClient } from "../../../api/collab-client.js";
 import { I18nProvider } from "../../../i18n/i18n-provider.js";
 import { CollabAssistDialog } from "../../collab-assist-dialog.js";
@@ -15,7 +16,10 @@ import { CollabAssistConversation } from "../../collab-assist-conversation.js";
 import { AssistMessageCard, parseAssistEnvelope } from "../../collab-assist-message.js";
 import { CollabAssistTaskBar, CollabAssistTaskDock } from "../../collab-assist-task.js";
 import { CollabAssistProjectSettings } from "../../collab-assist-settings.js";
-import { AssistBoardRow } from "../../collab-page.js";
+import { AssistBoardRow, ProjectBoardSettingsDialog } from "../../collab-page.js";
+import { ApiClientsContext } from "../../../app/providers.js";
+import { Button } from "../../../components/button.js";
+import { Select } from "../../../components/Select.js";
 import board from "../../collab-page.module.css";
 import "../../../styles.css";
 
@@ -408,8 +412,17 @@ const MEMMY_CHAIN_SECOND = request({
 
 const MEMMY_CHAIN: AssistThread = { ...CONVERSATION, status: "done", requests: [MEMMY_CHAIN_SECOND, MEMMY_CHAIN_FIRST] };
 
-function fakeClient(options: { receiving?: boolean; defaultAgent?: string; thread?: AssistThread } = {}): CollabClient {
-  const grants: AssistGrant[] = [
+/** 第二位被授权成员：成员协助的限时授权列表要有两行才看得出行距。 */
+const SECOND_GRANTEE = { userId: "2102247370314383363", name: "孙落", mine: false };
+
+function fakeClient(options: {
+  receiving?: boolean;
+  defaultAgent?: string;
+  thread?: AssistThread;
+  /** 项目设置里列出的限时授权，默认只有一条。 */
+  grants?: AssistGrant[];
+} = {}): CollabClient {
+  const grants: AssistGrant[] = options.grants ?? [
     {
       projectId: "p1",
       projectName: "Memmy 内测反馈",
@@ -455,6 +468,14 @@ function fakeClient(options: { receiving?: boolean; defaultAgent?: string; threa
     revokeAssistGrant: async () => ({ grants: [] }),
     assistThreads: async () => ({ threads: THREADS, open: 1, retentionDays: 30, maxThreads: 100, prunedAt: null }),
     hideAssistThread: async (_projectId: string, threadId: string) => ({ threadId, removed: "hidden" as const }),
+    // 项目设置读同步进度、停共享与退出项目都走这几个方法。
+    listProjectTasks: async () => [
+      { projectId: "p1", sessionKey: "s-1", synced: true },
+      { projectId: "p1", sessionKey: "s-2", synced: false },
+      { projectId: "p1", sessionKey: "s-3", synced: false }
+    ],
+    deleteProject: async () => ({ instructions: "saved" as const }),
+    leaveProject: async () => undefined,
     assistThread: async () => ({
       // DeepSeek Harness 发起时没有发起的 Memmy 任务。
       thread: { ...(options.thread ?? CONVERSATION), sourceTask: options.thread?.via === "DeepSeek Harness" ? null : "chat-src" },
@@ -519,49 +540,213 @@ function Preview() {
   const project = { id: "p1", name: "Memmy 内测反馈" };
 
   if (view === "settings" || view === "settings-off") {
-    const settingsClient = fakeClient({ receiving: view === "settings" });
+    // 成员协助这一节单独看：它自己带「协助」的组标题，与项目设置弹窗里的是同一套排布。
+    const settingsClient = fakeClient({
+      receiving: view === "settings",
+      grants: view === "settings"
+        ? [
+          {
+            projectId: "p1",
+            projectName: "Memmy 内测反馈",
+            grantee: REQUESTER,
+            agent: "claude_code",
+            active: true,
+            minutes: 60,
+            expiresAt: GRANT.expiresAt,
+            createdAt: "2026-11-04T08:41:30Z",
+            revokedAt: null
+          },
+          {
+            projectId: "p1",
+            projectName: "Memmy 内测反馈",
+            grantee: SECOND_GRANTEE,
+            agent: "memmy",
+            active: true,
+            minutes: 120,
+            expiresAt: new Date(Date.now() + 96 * 60_000).toISOString(),
+            createdAt: "2026-11-04T09:10:00Z",
+            revokedAt: null
+          }
+        ]
+        : []
+    });
     return (
       <div className={board.page} style={{ minHeight: "100vh", background: "var(--color-canvas-oat, #f4f7f6)", padding: "40px 24px" }}>
-        <div style={{ maxWidth: 560, margin: "0 auto", display: "grid", gap: 12 }}>
+        <div style={{ width: "min(560px, 100%)", margin: "0 auto", display: "grid", alignContent: "start", gap: 12 }}>
           <div style={{ fontSize: 14, fontWeight: 600 }}>项目设置 → 成员协助</div>
-          <div style={{ background: "#fff", borderRadius: 16, border: "1px solid rgba(214,223,220,.6)", padding: "4px 22px" }}>
-            <CollabAssistProjectSettings client={settingsClient} projectId={project.id} />
+          <CollabAssistProjectSettings client={settingsClient} projectId={project.id} />
+        </div>
+      </div>
+    );
+  }
+
+  if (view === "project-settings-owner" || view === "project-settings-member" || view === "project-settings-local") {
+    // 三种状态的项目设置：所有者的已共享、成员的已共享、未共享的本机项目。
+    const local = {
+      id: "local-1",
+      name: "Memmy 内测反馈",
+      rootPath: "/Users/sunq/.memmy/online-projects/Memmy",
+      pinned: false,
+      createdAt: "2026-10-21T03:00:00.000Z"
+    };
+    const owner = view === "project-settings-owner";
+    const member = view === "project-settings-member";
+    // 所有者开了接收协助并给出两条限时授权；成员关着接收协助，所以没有限时授权那一行。
+    const settingsClient = fakeClient({
+      receiving: owner,
+      grants: owner
+        ? [
+          {
+            projectId: "p1",
+            projectName: "Memmy 内测反馈",
+            grantee: REQUESTER,
+            agent: "claude_code",
+            active: true,
+            minutes: 60,
+            expiresAt: GRANT.expiresAt,
+            createdAt: "2026-11-04T08:41:30Z",
+            revokedAt: null
+          },
+          {
+            projectId: "p1",
+            projectName: "Memmy 内测反馈",
+            grantee: SECOND_GRANTEE,
+            agent: "memmy",
+            active: true,
+            minutes: 120,
+            expiresAt: new Date(Date.now() + 96 * 60_000).toISOString(),
+            createdAt: "2026-11-04T09:10:00Z",
+            revokedAt: null
+          }
+        ]
+        : []
+    });
+    return (
+      <div className={board.page} style={{ minHeight: "100vh", background: "var(--color-canvas-oat, #f4f7f6)", padding: "48px 24px" }}>
+        <ApiClientsContext.Provider value={{ clients: null, setClients: () => undefined }}>
+          <ProjectBoardSettingsDialog
+            open
+            project={local}
+            shared={owner || member
+              ? {
+                id: "p1",
+                name: local.name,
+                role: owner ? "owner" : "member",
+                memberCount: 2,
+                sessionCount: 3,
+                createdAt: "2026-10-23T03:00:00.000Z",
+                localProjectId: local.id
+              }
+              : null}
+            collab={settingsClient}
+            shareAvailable
+            taskCount={3}
+            onClose={() => undefined}
+            onShared={() => undefined}
+            onUnshared={() => undefined}
+            onLeft={() => undefined}
+            onPickSessions={() => undefined}
+            onReplayTour={() => undefined}
+            onNotice={() => undefined}
+            onFailed={() => undefined}
+          />
+        </ApiClientsContext.Provider>
+      </div>
+    );
+  }
+
+  if (view === "board") {
+    // 看板分成「任务」「协助」两个 tab：这里展示「协助」tab，几条数据分别是等你确认、还在跑、已完成。
+    const running = thread({ threadId: "th-running", status: "running", lastActiveAt: "2026-11-04T14:44:00Z" }, [
+      request({ threadId: "th-running", title: "确认 409 那次请求的完整返回", reason: "孙起本机复现不了分享弹窗的 409", status: "running", agent: "claude_code", scope: "once", mine: true })
+    ]);
+    return (
+      <div className={board.page} style={{ height: "100vh" }}>
+        <div className={board.scroller}>
+          <div className={board.wrap}>
+            <div className={board.boardTabs} role="tablist" aria-label="看板内容">
+              <button type="button" role="tab" aria-selected="false" className={board.boardTab}>任务</button>
+              <button type="button" role="tab" aria-selected="true" className={`${board.boardTab} ${board.boardTabOn}`}>协助<span className={board.segCount}>1</span></button>
+            </div>
+            <div className={`${board.toolbar} ${board.assistToolbar}`}>
+              <span className={board.assistToolbarHint}>仅发起人和执行人可见</span>
+              <span className={board.grow} />
+              <Button size="sm" variant="ghost" className={board.iconAction}>
+                <RefreshCw size={14} aria-hidden="true" />
+                <span className={board.actionLabel}>刷新</span>
+              </Button>
+              <Button size="sm" variant="ghost" className={board.iconAction}>
+                <ListChecks size={14} aria-hidden="true" />
+                <span className={board.actionLabel}>多选</span>
+              </Button>
+            </div>
+            <ul className={`${board.list} ${board.stream} ${board.flatStream}`}>
+              <AssistBoardRow thread={THREADS[1]!} selecting={false} onOpen={() => undefined} />
+              <AssistBoardRow thread={running} selecting={false} onOpen={() => undefined} />
+              <AssistBoardRow thread={THREADS[0]!} selecting={false} onOpen={() => undefined} />
+            </ul>
+            <div className={board.assistFooter}>
+              <button type="button" className={board.assistFooterToggle}>另有 2 条没有执行的请求（未允许、已撤回或已过期）</button>
+            </div>
           </div>
         </div>
       </div>
     );
   }
 
-  if (view === "board") {
+  if (view === "board-tasks") {
+    // 任务 tab 的工具条（方案 B）：搜索与成员筛选下拉并排，右侧是刷新、多选与关联任务；下面是筛选空的说明卡片。
     return (
       <div className={board.page} style={{ height: "100vh" }}>
         <div className={board.scroller}>
           <div className={board.wrap}>
+            <div className={board.boardTabs} role="tablist" aria-label="看板内容">
+              <button type="button" role="tab" aria-selected="true" className={`${board.boardTab} ${board.boardTabOn}`}>任务</button>
+              <button type="button" role="tab" aria-selected="false" className={board.boardTab}>协助<span className={board.segCount}>1</span></button>
+            </div>
             <div className={board.toolbar}>
-              <div className={board.seg}>
-                <button type="button" className={`${board.segItem} ${board.segItemOn}`}>全部</button>
-                <button type="button" className={board.segItem}>我的</button>
-                <button type="button" className={board.segItem}>成员</button>
-                <button type="button" className={board.segItem}>协助<span className={board.segCount}>1</span></button>
+              <label className={board.searchBox}>
+                <Search size={14} aria-hidden="true" className={board.searchIcon} />
+                <input aria-label="搜索任务标题、问题或成员" placeholder="搜索任务标题、问题或成员" />
+              </label>
+              <Select
+                className={board.memberFilter}
+                buttonClassName={board.memberFilterButton}
+                menuClassName={board.memberFilterMenu}
+                ariaLabel="按成员筛选"
+                value="me"
+                options={[
+                  { value: "all", label: "全部任务" },
+                  { value: "me", label: "我的任务" },
+                  { value: "others", label: "成员任务" }
+                ]}
+                onValueChange={() => undefined}
+              />
+              <span className={board.grow} />
+              <Button size="sm" variant="ghost" className={board.iconAction}>
+                <RefreshCw size={14} aria-hidden="true" />
+                <span className={board.actionLabel}>刷新</span>
+              </Button>
+              <Button size="sm" variant="ghost" className={board.iconAction}>
+                <ListChecks size={14} aria-hidden="true" />
+                <span className={board.actionLabel}>多选</span>
+              </Button>
+              <Button size="sm" variant="primary">
+                <Link2 size={14} aria-hidden="true" />
+                关联任务
+              </Button>
+            </div>
+            <div className={board.filterEmpty}>
+              <span className={board.guideIcon} aria-hidden="true"><User size={15} /></span>
+              <div className={board.guideText}>
+                <b>你还没有任务</b>
+                <span>
+                  {"在侧栏新建任务并打开「共享给成员」，或"}
+                  <button type="button" className={board.guideAction}>关联任务</button>
+                  {"，把其他 Agent 中的任务纳入。"}
+                </span>
               </div>
             </div>
-            <ul className={`${board.list} ${board.stream} ${board.flatStream}`}>
-              <AssistBoardRow thread={THREADS[0]!} selecting={false} onOpen={() => undefined} />
-              <AssistBoardRow thread={THREADS[1]!} selecting={false} onOpen={() => undefined} />
-              <AssistBoardRow
-                thread={thread({ threadId: "th-auto", status: "pending", agent: null, lastActiveAt: new Date().toISOString() }, [request({ threadId: "th-auto", title: "查看 409 那次请求的完整返回", reason: "确认第二次分享请求为什么返回 409", status: "pending", autoRun: true, agent: null, scope: null, grant: { ...GRANT, agent: "memmy" } })])}
-                selecting={false}
-                onOpen={() => undefined}
-              />
-              <li className={`${board.row} ${board.rowOpenable}`}>
-                <span className={`${board.avatar} ${board.avatarSoft}`} style={{ "--member": "#3aa893" } as CSSProperties}>孙</span>
-                <div className={board.rowText}>
-                  <span className={board.rowTitle}>分享弹窗的重复分享提示</span>
-                  <span className={board.rowSummary}>重复点分享时提示文案不对</span>
-                </div>
-                <span className={board.meta}>孙起 · 22:10</span>
-              </li>
-            </ul>
           </div>
         </div>
       </div>

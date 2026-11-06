@@ -140,6 +140,16 @@
   animation: tourEnter 0.3s 0.9s both;
 }
 
+/* 协助那一步：请求发出去之后还要对方允许一次，这行小字把前提提前说清 */
+.chatNote {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--tour-line);
+  color: color-mix(in srgb, var(--tour-ink) 52%, transparent);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 /* 输入框示意：新任务带上被继续任务的引用，底部是所属项目，与实现一致 */
 .compose {
   margin-top: 10px;

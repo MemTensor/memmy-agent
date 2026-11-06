@@ -151,11 +151,15 @@ describe("collab board render isolation", () => {
   it("still re-renders the board when the filter changes", async () => {
     await renderBoard();
     const mounted = frameRenders.count;
-    const segment = Array.from(container.querySelectorAll<HTMLElement>("button"))
-      .find((element) => element.textContent?.trim() === "我的");
-    expect(segment).toBeTruthy();
+    const trigger = container.querySelector<HTMLElement>("[aria-label='按成员筛选']");
+    expect(trigger).toBeTruthy();
 
-    await act(async () => segment!.click());
+    // 成员筛选现在是一个下拉：先点开，再选「我的任务」。
+    await act(async () => trigger!.click());
+    const option = Array.from(container.querySelectorAll<HTMLElement>("[role='option']"))
+      .find((element) => element.textContent?.trim() === "我的任务");
+    expect(option).toBeTruthy();
+    await act(async () => option!.click());
     await flush();
 
     // 交互本身照旧重渲染：被挡住的只有无关状态变化。

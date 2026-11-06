@@ -8,10 +8,10 @@
  * 打开项目看板并在右侧展开这次协助。通知随请求的状态收起：请求在别处处理掉（另一处点了允许、限时授权自动执行、
  * 对方撤回、过期）后，对应的通知不再留着。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { AssistInboxItem, CollabClient } from "../api/collab-client.js";
 import { requestAssistFocus } from "../app/collab-assist-focus.js";
-import { getCollabProjectsSnapshot } from "../app/collab-projects-store.js";
+import { getCollabProjectsSnapshot, subscribeCollabProjects } from "../app/collab-projects-store.js";
 import { useOptionalNotificationCenter } from "../components/notification-center.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { CollabAssistDialog } from "./collab-assist-dialog.js";
@@ -41,6 +41,11 @@ export function CollabAssistHost(props: {
   onOpenTask?: (conversationId: string) => void;
   /** 打开某个本机项目的看板：由外部 Agent 执行的协助在看板右侧展开详情。 */
   onOpenBoard?: (localProjectId: string) => void;
+  /**
+   * 当前正开着看板的本机项目 id（未在看板时为 null）。属于它的待处理请求已经出现在看板的提示条与「协助」数字上，
+   * 不再计入右下角角标：同一个请求不在两处同时催。
+   */
+  boardProjectId?: string | null;
 }) {
   const { t } = useTranslation();
   const notifications = useOptionalNotificationCenter();
@@ -52,6 +57,8 @@ export function CollabAssistHost(props: {
   openBoardRef.current = props.onOpenBoard;
   const [inbox, setInbox] = useState<AssistInboxItem[]>([]);
   const [dialogRequest, setDialogRequest] = useState<AssistInboxItem | null>(null);
+  /** 云端的项目列表：用来把请求的云端 id 对上本机项目，判断它是否正开在看板上。 */
+  const projects = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot).projects ?? [];
   /** 已经提示过的请求 → 那条通知的 id：同一条请求只弹一次，请求处理掉后收起。 */
   const announced = useRef(new Map<string, string | null>());
 
@@ -133,7 +140,15 @@ export function CollabAssistHost(props: {
     return () => clearInterval(timer);
   }, [collab, enabled, poll]);
 
-  const waiting = useMemo(() => inbox.filter(waitingForHer), [inbox]);
+  const waiting = useMemo(() => {
+    const onBoardId = props.boardProjectId;
+    if (!onBoardId) return inbox.filter(waitingForHer);
+    // 收件箱里的 projectId 是云端项目 id，看板记的是本机项目 id：过 projects 里的 localProjectId 对一次。
+    const onBoard = new Set(projects
+      .filter((project) => project.localProjectId === onBoardId)
+      .map((project) => project.id));
+    return inbox.filter((item) => waitingForHer(item) && !onBoard.has(item.projectId));
+  }, [inbox, projects, props.boardProjectId]);
 
   if (!collab || !enabled) return null;
 

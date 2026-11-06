@@ -6,11 +6,13 @@
  * 关闭时云端结束她在这个项目里的限时授权，还在等待的请求以「某某已关闭接收协助请求」结束。
  *
  * 次数限制不做成设置项：同一时间一个、单次最长 15 分钟、每位成员每天最多 20 次，由产品内置。
+ * 这一节自己带「协助」这张卡片（卡片头 + 卡片内的行），项目设置弹窗与预览页看到的是同一套排布。
  */
 import { useCallback, useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, LifeBuoy } from "lucide-react";
 import type { AssistAgent, AssistGrant, CollabClient } from "../api/collab-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import { Button } from "../components/button.js";
 import { agentSourceLogoUrl } from "./agent-source-logos.js";
 import { assistAgentName, grantRemaining } from "./collab-assist-view.js";
 import frame from "./collab-page.module.css";
@@ -63,14 +65,18 @@ export function CollabAssistProjectSettings(props: { client: CollabClient | null
 
   const on = enabled === true;
   return (
-    <div className={`${frame.settingsRow} ${frame.settingsRowStack}`} data-collab-assist-settings="">
-      <div className={frame.settingsRowReceive}>
-        <div className={frame.settingsRowText}>
-          <div className={frame.settingsRowTitle}>{t("collab.settings.assist.title")}</div>
-          <div className={frame.settingsRowDesc}>{t("collab.settings.assist.desc")}</div>
+    <section className={frame.settingsCard} data-collab-assist-settings="">
+      <div className={frame.settingsCardHead}>
+        <span className={frame.settingsCardChip}><LifeBuoy size={14} aria-hidden="true" /></span>
+        <h3 className={frame.settingsCardTitle}>{t("collab.settings.groupAssist")}</h3>
+      </div>
+      <div className={frame.settingsCardRow}>
+        <div className={frame.settingsCardText}>
+          <span className={frame.settingsCardRowTitle}>{t("collab.settings.assist.title")}</span>
+          <span className={frame.settingsCardRowDesc}>{t("collab.settings.assist.desc")}</span>
         </div>
-        <div className={frame.settingsRowControl}>
-          {busy ? <Loader2 size={13} className="animate-spin text-text-ink/40" aria-hidden="true" /> : null}
+        <div className={frame.settingsCardControl}>
+          {busy ? <Loader2 size={13} className={frame.settingsSpinner} aria-hidden="true" /> : null}
           <button
             type="button"
             role="switch"
@@ -82,9 +88,9 @@ export function CollabAssistProjectSettings(props: { client: CollabClient | null
           />
         </div>
       </div>
-      {error ? <div className="text-xs text-status-error" role="alert">{error}</div> : null}
+      {error ? <div className={frame.settingsCardError} role="alert">{error}</div> : null}
       {on ? <CollabAssistGrants client={client} projectId={projectId} /> : null}
-    </div>
+    </section>
   );
 }
 
@@ -137,65 +143,89 @@ export function CollabAssistGrants(props: { client: CollabClient | null; project
   }
 
   const live = grants?.filter((grant) => !grant.expiresAt || new Date(grant.expiresAt).getTime() > now.getTime()) ?? null;
+  // 读中、有授权、没有授权这三种：读中与无授权是「标题 + 一行说明」，有授权时标题在上、列表在下。
+  const title = t("collab.settings.assist.grantsTitle");
   return (
-    <div className="mt-2 border-t border-border-stone/30 pt-2">
-      <div className="text-xs font-semibold text-text-ink/55">{t("collab.settings.assist.grantsTitle")}</div>
+    <>
       {live === null ? (
-        <p className="py-2 text-xs text-text-ink/50">{t("collab.loading")}</p>
-      ) : live.length ? live.map((grant) => (
-        <div key={grant.grantee.userId} className="flex items-center justify-between gap-4 py-2.5">
-          <div className="flex min-w-0 items-start gap-2.5">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-action-sky/15 text-xs font-bold text-action-sky-hover">
-              {Array.from(grant.grantee.name)[0] ?? ""}
-            </span>
-            <div className="min-w-0">
-              <div className="text-sm text-text-ink/80">{grant.grantee.name}</div>
-              <div className="mt-0.5 flex items-center gap-1.5 text-xs text-text-ink/50">
-                <AgentMark sourceId={grant.agent} />
-                {t("settings.assist.grantDetail", {
-                  agent: agentNameOf(agents, grant.agent),
-                  left: grantRemaining(grant.expiresAt, t, now)
-                })}
-              </div>
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <select
-              className="rounded-btn border border-border-stone/60 bg-white px-2 py-1 text-xs text-text-ink/70"
-              value={grant.agent}
-              aria-label={t("settings.assist.changeAgentLabel", { name: grant.grantee.name })}
-              disabled={busy || !client}
-              onChange={(event) => {
-                const agent = event.target.value;
-                if (client) void update(() => client.setAssistGrantAgent(projectId, grant.grantee.userId, agent));
-              }}
-            >
-              {agents.some((agent) => agent.sourceId === grant.agent) ? null : (
-                <option value={grant.agent}>{assistAgentName(grant.agent, grant.agent)}</option>
-              )}
-              {agents.map((agent) => (
-                <option key={agent.sourceId} value={agent.sourceId}>{agent.name}</option>
-              ))}
-            </select>
-            <button
-              type="button"
-              disabled={busy || !client}
-              onClick={() => {
-                if (client) void update(() => client.revokeAssistGrant(projectId, grant.grantee.userId));
-              }}
-              className="rounded-btn border border-status-error/30 bg-white px-2.5 py-1 text-xs text-status-error hover:bg-status-error/5 disabled:opacity-60"
-            >
-              {t("settings.assist.revoke")}
-            </button>
+        <div className={frame.settingsCardRow}>
+          <div className={frame.settingsCardText}>
+            <span className={frame.settingsCardRowTitle}>{title}</span>
+            <span className={frame.settingsCardRowDesc}>{t("collab.loading")}</span>
           </div>
         </div>
-      )) : (
-        <p className="py-2 text-xs text-text-ink/50 leading-relaxed">{t("settings.assist.noGrants")}</p>
+      ) : live.length ? (
+        <div className={`${frame.settingsCardRow} ${frame.settingsCardRowStack}`}>
+          <div className={frame.settingsCardText}>
+            <span className={frame.settingsCardRowTitle}>{title}</span>
+            <div className={frame.grantList}>
+              {live.map((grant) => (
+                <div key={grant.grantee.userId} className={frame.grantRow}>
+                  <div className={frame.grantWho}>
+                    <span className={frame.grantAvatar} aria-hidden="true">{initialOf(grant.grantee.name)}</span>
+                    <div className={frame.grantText}>
+                      <span className={frame.grantName}>{grant.grantee.name}</span>
+                      <span className={frame.grantDetail}>
+                        <AgentMark sourceId={grant.agent} />
+                        {t("settings.assist.grantDetail", {
+                          agent: agentNameOf(agents, grant.agent),
+                          left: grantRemaining(grant.expiresAt, t, now)
+                        })}
+                      </span>
+                    </div>
+                  </div>
+                  <div className={frame.grantActions}>
+                    <select
+                      className={frame.grantSelect}
+                      value={grant.agent}
+                      aria-label={t("settings.assist.changeAgentLabel", { name: grant.grantee.name })}
+                      disabled={busy || !client}
+                      onChange={(event) => {
+                        const agent = event.target.value;
+                        if (client) void update(() => client.setAssistGrantAgent(projectId, grant.grantee.userId, agent));
+                      }}
+                    >
+                      {agents.some((agent) => agent.sourceId === grant.agent) ? null : (
+                        <option value={grant.agent}>{assistAgentName(grant.agent, grant.agent)}</option>
+                      )}
+                      {agents.map((agent) => (
+                        <option key={agent.sourceId} value={agent.sourceId}>{agent.name}</option>
+                      ))}
+                    </select>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className={`${frame.settingsButton} ${frame.settingsDangerButton} ${frame.settingsButtonCompact}`}
+                      disabled={busy || !client}
+                      onClick={() => {
+                        if (client) void update(() => client.revokeAssistGrant(projectId, grant.grantee.userId));
+                      }}
+                    >
+                      {t("settings.assist.revoke")}
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className={frame.settingsCardRow}>
+          <div className={frame.settingsCardText}>
+            <span className={frame.settingsCardRowTitle}>{title}</span>
+            <span className={frame.settingsCardRowDesc}>{t("settings.assist.noGrants")}</span>
+          </div>
+        </div>
       )}
-      <p className="mt-1 text-xs text-text-ink/45 leading-relaxed">{t("settings.assist.limit")}</p>
-      {error ? <div className="mt-1 text-xs text-status-error" role="alert">{error}</div> : null}
-    </div>
+      {error ? <div className={frame.settingsCardError} role="alert">{error}</div> : null}
+    </>
   );
+}
+
+/** 头像上的第一个字：名字为空时退回一个中性符号，不空出一块。 */
+function initialOf(name: string): string {
+  const first = Array.from(name.trim())[0];
+  return first ? first.toUpperCase() : "·";
 }
 
 function agentNameOf(agents: readonly AssistAgent[], sourceId: string): string {
@@ -205,5 +235,5 @@ function agentNameOf(agents: readonly AssistAgent[], sourceId: string): string {
 function AgentMark(props: { sourceId: string | null }) {
   const url = props.sourceId ? agentSourceLogoUrl(props.sourceId) : null;
   if (!url) return null;
-  return <img src={url} alt="" className="h-3.5 w-3.5 shrink-0 rounded-[3px]" />;
+  return <img src={url} alt="" className={frame.grantLogo} />;
 }

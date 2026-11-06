@@ -103,6 +103,13 @@ afterEach(() => {
   container.remove();
 });
 
+/** 等读取限时授权的两三个请求落地并重画。 */
+async function flush(): Promise<void> {
+  for (let index = 0; index < 4; index += 1) {
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+  }
+}
+
 function button(text: string) {
   return [...document.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.trim() === text);
 }
@@ -142,6 +149,10 @@ describe("成员协助的授权弹窗", () => {
     // 本项目没用过的 Agent 收起成一行。
     expect(document.body.textContent).toContain("使用其他 Agent（1）");
     expect(button("Cursor")).toBeUndefined();
+    // 底部一段话讲清执行过程与次数、时长限制：设置里不再重复这一段。
+    expect(document.body.textContent).toContain(
+      "执行过程会显示在 Memmy 的任务里，你可以随时停止。同一时间只执行一个请求，单次最长 15 分钟。"
+    );
 
     await act(async () => button("允许")?.click());
     expect(onDecided).toHaveBeenCalledWith({ action: "allow", agent: "memmy", scope: "once" });
@@ -906,6 +917,32 @@ describe("成员协助的宿主", () => {
     expect(document.body.textContent).not.toContain("结束授权");
   });
 
+  it("does not count requests of the project that is open on the board", async () => {
+    resetCollabProjectsStore();
+    await loadCollabProjects({
+      listProjects: vi.fn().mockResolvedValue({ projects: [{ id: "p1", name: "Memmy 内测反馈", localProjectId: "local-1" }] })
+    } as unknown as CollabClient).catch(() => undefined);
+    // 有生效中的限时授权：不会弹授权弹窗，角标才会出现，正好用来看它是否被排除。
+    const granted = { ...inbox, granted: true, grantAgent: "memmy" as const };
+    const collab = client({ assistInbox: vi.fn().mockResolvedValue({ requests: [granted] }) });
+
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistHost collab={collab} enabled boardProjectId="local-1" />
+      </I18nProvider>
+    ));
+    expect(document.body.textContent).not.toContain("有 1 条协助请求待处理");
+
+    // 不在这个项目的看板上时照旧计入角标。
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistHost collab={collab} enabled boardProjectId={null} />
+      </I18nProvider>
+    ));
+    expect(document.body.textContent).toContain("有 1 条协助请求待处理");
+    resetCollabProjectsStore();
+  });
+
   it("请求在别处处理掉之后，开着的授权弹窗自己关上", async () => {
     vi.useFakeTimers();
     try {
@@ -1010,7 +1047,7 @@ describe("项目设置的成员协助", () => {
 
     const toggle = document.querySelector<HTMLButtonElement>("[role=switch]");
     expect(document.body.textContent).toContain("接收协助请求");
-    expect(document.body.textContent).toContain("开启后，项目里的其他成员可以请你电脑上的 Agent 执行任务，每次请求都会先问你。");
+    expect(document.body.textContent).toContain("成员可以请你电脑上的 Agent 执行任务，每次都会先问你");
     expect(toggle?.getAttribute("aria-checked")).toBe("false");
     expect(document.body.textContent).not.toContain("限时授权");
 
@@ -1022,5 +1059,86 @@ describe("项目设置的成员协助", () => {
     expect(document.body.textContent).not.toContain("今天已执行");
     expect(document.body.textContent).not.toContain("20 次");
     expect(button("结束授权")).toBeTruthy();
+    // 次数与时长限制移到协助请求弹窗里说明，设置这一节不再重复。
+    expect(document.body.textContent).not.toContain("单次最长 15 分钟");
+  });
+
+  it("限时授权一行：首字头像、成员名、换用下拉与结束授权按钮", async () => {
+    const collab = client({
+      assistReceiving: vi.fn().mockResolvedValue({ projectId: "p1", enabled: true }),
+      assistGrants: vi.fn().mockResolvedValue({
+        grants: [{
+          projectId: "p1",
+          projectName: "Memmy 内测反馈",
+          grantee: REQUESTER,
+          agent: "claude_code",
+          active: true,
+          minutes: 60,
+          expiresAt: new Date(Date.now() + 42 * 60_000).toISOString(),
+          createdAt: null,
+          revokedAt: null
+        }],
+        dailyLimit: 20
+      }),
+      assistAgents: vi.fn().mockResolvedValue({
+        agents: [{ sourceId: "claude_code", name: "Claude Code", available: true, group: "used", lastActiveAt: null }],
+        defaultAgent: "claude_code"
+      })
+    });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistProjectSettings client={collab} projectId="p1" />
+      </I18nProvider>
+    ));
+    await flush();
+
+    // 整张卡片自带「协助」标题，不依赖外面的弹窗。
+    expect(document.body.textContent).toContain("协助");
+    expect(document.body.textContent).toContain("孙起");
+    // 头像上只有首字，名字单独一行。
+    expect(document.body.textContent).toContain("孙");
+    expect(document.querySelector("select[aria-label='孙起的请求由哪个 Agent 执行']")).toBeTruthy();
+    const revoke = button("结束授权")!;
+    expect(revoke.tagName).toBe("BUTTON");
+    expect(revoke.className).toContain("settingsDangerButton");
+  });
+
+  it("读取协助设置失败时，错误贴在卡片内那一行下面", async () => {
+    const collab = client({
+      assistReceiving: vi.fn().mockRejectedValue(new Error("boom")),
+      assistGrants: vi.fn().mockResolvedValue({ grants: [], dailyLimit: 20 }),
+      assistAgents: vi.fn().mockResolvedValue({ agents: [], defaultAgent: "memmy" })
+    });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistProjectSettings client={collab} projectId="p1" />
+      </I18nProvider>
+    ));
+    await flush();
+
+    const alert = document.querySelector("[role='alert']");
+    expect(alert?.textContent).toContain("读取成员协助的设置没有完成");
+    expect(alert?.className).toContain("settingsCardError");
+  });
+
+  it("没有限时授权时只写「暂无」，不列任何授权行", async () => {
+    const collab = client({
+      assistReceiving: vi.fn().mockResolvedValue({ projectId: "p1", enabled: true }),
+      assistGrants: vi.fn().mockResolvedValue({ grants: [], dailyLimit: 20 }),
+      assistAgents: vi.fn().mockResolvedValue({ agents: [], defaultAgent: "memmy" })
+    });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistProjectSettings client={collab} projectId="p1" />
+      </I18nProvider>
+    ));
+    await flush();
+
+    expect(document.body.textContent).toContain("限时授权");
+    expect(document.body.textContent).toContain("暂无");
+    expect(button("结束授权")).toBeUndefined();
+    expect(document.body.textContent).not.toContain("暂无限时授权。");
+    // 无授权时行内只给说明，右侧没有控件。
+    expect(document.querySelector("select")).toBeNull();
   });
 });

@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   getLinks: vi.fn(),
   listProjectTasks: vi.fn(),
   readSessionDetail: vi.fn(),
+  listLocalSessions: vi.fn(),
   listMembers: vi.fn(),
   /** 侧栏/看板用的本机任务列表与 dispatch：点开本人任务时要落到会话页。 */
   tasks: [] as Array<{ sessionKey: string; projectId: string | null; title: string; archived?: boolean; updatedAt?: string }>,
@@ -106,6 +107,56 @@ async function flush(): Promise<void> {
   }
 }
 
+/** 成员筛选下拉的触发按钮。 */
+function trigger(): HTMLElement {
+  const element = document.querySelector<HTMLElement>("[aria-label='按成员筛选']");
+  if (!element) throw new Error("工具条里没有成员筛选下拉");
+  return element;
+}
+
+/** 点开下拉并选中一项：触发按钮是 combobox，菜单里是 role=option。 */
+function pickMember(label: string): void {
+  act(() => trigger().click());
+  const option = [...document.querySelectorAll<HTMLElement>("[role='option']")].find((node) => node.textContent?.trim() === label);
+  if (!option) throw new Error(`下拉里没有「${label}」`);
+  act(() => option.click());
+}
+
+/** 在搜索框里输入并回车，发起一次搜索。 */
+async function typeSearch(text: string): Promise<void> {
+  const input = document.querySelector<HTMLInputElement>("input[aria-label='搜索任务标题、问题或成员']")!;
+  await act(async () => input.dispatchEvent(new Event("input", { bubbles: true })));
+  // React 的受控输入要经过原生 setter 才会更新 state。
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    setter.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  });
+}
+
+/**
+ * 筛选空的说明卡片：标题、说明与图标。lucide 只加一个公共的 lucide 类，
+ * 所以按 svg 内部形状分三种：搜索是 cx=11 的圆，单人是一条路径，成员是多条路径。
+ */
+function filterEmptyCard(): { kind?: string; title: string; body: string; iconKind: string } {
+  const card = document.querySelector<HTMLElement>("[data-collab-filter-empty]");
+  if (!card) throw new Error("没有筛选空的说明卡片");
+  const icon = card.querySelector("svg");
+  if (!icon) throw new Error("说明卡片没有图标");
+  const firstPath = icon.querySelector("path")?.getAttribute("d") ?? "";
+  const title = card.querySelector("b");
+  return {
+    kind: card.dataset.collabFilterEmpty,
+    title: title?.textContent ?? "",
+    // 说明就在标题后面那一行 span 里（图标也是 span，按标题找更稳）。
+    body: title?.nextElementSibling?.textContent ?? "",
+    iconKind: icon.querySelector("circle[cx='11']") ? "search" : firstPath.startsWith("M19 21") ? "user" : "users"
+  };
+}
+
 describe("collab task list", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -122,6 +173,8 @@ describe("collab task list", () => {
     mocks.getLinks.mockResolvedValue({ groups: [], sessions: [] });
     mocks.listProjectTasks.mockResolvedValue([]);
     mocks.readSessionDetail.mockResolvedValue({ session: SESSIONS[2], turns: [] });
+    // 空态里的「关联任务」会打开关联弹窗，它先读本机其他 Agent 的任务。
+    mocks.listLocalSessions.mockResolvedValue({ sessions: [], refreshing: false });
     // 默认没有待审核的申请：看板开着的轮询不该改到其它用例的界面。
     mocks.listMembers.mockResolvedValue({
       project: CLOUD_PROJECT,
@@ -219,17 +272,94 @@ describe("collab task list", () => {
     expect(mocks.listSessions).toHaveBeenLastCalledWith(CLOUD_PROJECT.id, expect.objectContaining({ offset: 10, limit: 10 }));
   });
 
-  it("filters by member from the segmented control", async () => {
+  it("filters by member from the dropdown beside the search box", async () => {
     await renderBoard();
-    const segment = Array.from(document.querySelectorAll<HTMLElement>("button"))
-      .find((element) => element.textContent?.trim() === "我的");
-    expect(segment, "筛选胶囊里应有「我的」").toBeTruthy();
-    expect(segment!.getAttribute("aria-pressed")).toBe("false");
+    expect(trigger().textContent?.trim()).toBe("全部任务");
 
-    await act(async () => segment!.click());
+    pickMember("我的任务");
     await flush();
 
     expect(mocks.listSessions).toHaveBeenLastCalledWith(CLOUD_PROJECT.id, expect.objectContaining({ member: "me" }));
+    expect(trigger().textContent?.trim()).toBe("我的任务");
+  });
+
+  it("explains an empty result under the search box, with the query in the title", async () => {
+    mocks.listSessions.mockResolvedValue({ project: CLOUD_PROJECT, sessions: [], total: 0 });
+    await renderBoard();
+
+    await typeSearch("退款回调");
+    await flush();
+
+    const card = filterEmptyCard();
+    expect(card.kind).toBe("search");
+    expect(card.iconKind).toBe("search");
+    expect(card.title).toBe("没有匹配「退款回调」的任务");
+    expect(card.body).toBe("换个关键词试试，或切换上方的筛选。");
+  });
+
+  it("explains an empty 「我的任务」 and offers linking tasks in place", async () => {
+    mocks.listSessions.mockResolvedValue({ project: CLOUD_PROJECT, sessions: [], total: 0 });
+    await renderBoard();
+
+    pickMember("我的任务");
+    await flush();
+
+    const card = filterEmptyCard();
+    expect(card.kind).toBe("me");
+    expect(card.iconKind).toBe("user");
+    expect(card.title).toBe("你还没有任务");
+    expect(card.body).toBe("在侧栏新建任务并打开「共享给成员」，或关联任务，把其他 Agent 中的任务纳入。");
+
+    // 说明里的「关联任务」与工具条上的主按钮打开同一个弹窗。
+    await act(async () => document.querySelector<HTMLElement>("[data-collab-filter-empty] button")!.click());
+    await flush();
+    expect(document.body.textContent).toContain("管理其他 Agent 的任务");
+  });
+
+  it("explains an empty 「成员任务」", async () => {
+    mocks.listSessions.mockResolvedValue({ project: CLOUD_PROJECT, sessions: [], total: 0 });
+    await renderBoard();
+
+    pickMember("成员任务");
+    await flush();
+
+    const card = filterEmptyCard();
+    expect(card.kind).toBe("others");
+    expect(card.iconKind).toBe("users");
+    expect(card.title).toBe("成员还没有任务");
+    expect(card.body).toBe("成员同步任务后，会列在这里。");
+  });
+
+  it("treats a search as the reason the list is empty even when a member filter is on", async () => {
+    mocks.listSessions.mockResolvedValue({ project: CLOUD_PROJECT, sessions: [], total: 0 });
+    await renderBoard();
+
+    pickMember("成员任务");
+    await typeSearch("退款回调");
+    await flush();
+
+    const card = filterEmptyCard();
+    expect(card.kind).toBe("search");
+    expect(card.title).toBe("没有匹配「退款回调」的任务");
+  });
+
+  it("keeps the member filter visible while selecting, but only when it is not 「全部」", async () => {
+    await renderBoard();
+    const selectButton = (label: string) => Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find((entry) => entry.textContent?.trim() === label)!;
+
+    // 全部：选择态把搜索与下拉一起收起来。
+    await act(async () => selectButton("多选").click());
+    expect(document.querySelector("[aria-label='按成员筛选']")).toBeNull();
+    expect(document.querySelector("input[aria-label='搜索任务标题、问题或成员']")).toBeNull();
+    await act(async () => selectButton("取消").click());
+
+    // 筛着成员：下拉留着，否则看不出列表为什么少了。
+    pickMember("我的任务");
+    await flush();
+    await act(async () => selectButton("多选").click());
+    expect(document.querySelector("[aria-label='按成员筛选']")).not.toBeNull();
+    expect(trigger().textContent?.trim()).toBe("我的任务");
   });
 
   it("selects and clears only the current page's own tasks", async () => {

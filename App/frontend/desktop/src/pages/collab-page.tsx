@@ -1,5 +1,5 @@
-import { AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Layers, LifeBuoy, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plug, RefreshCw, Search, Settings, Trash2, UserPlus, X } from "lucide-react";
-import { memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Inbox, Layers, LifeBuoy, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plug, RefreshCw, Search, Settings, Trash2, User, UserPlus, Users, X } from "lucide-react";
+import { memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   createHttpCollabClient,
@@ -55,10 +55,12 @@ import {
   type ProjectInstructions
 } from "../api/projects-client.js";
 import { useOptionalAgentRuntimeBridge } from "../app/agent-runtime-bridge.js";
+import { formatWorkspacePath } from "../app/workspace-path.js";
 import { useApiClients } from "../app/providers.js";
 import { Button } from "../components/button.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
 import { Modal } from "../components/modal.js";
+import { Select, type SelectOption } from "../components/Select.js";
 import type { MessageKey, MessageValues } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
@@ -128,15 +130,21 @@ const EMPTY_PROJECT_INSTRUCTIONS: ProjectInstructions = {
   updatedAt: null
 };
 /**
- * Member filter: anyone, only me, only the other members, or only assists. Assists are not sessions: the
- * session list never receives "assist", which only switches the board to the assist entries.
+ * Member filter inside the tasks tab: anyone, only me, or only the other members. Assists live in their own tab,
+ * so the session list never sees them.
  */
-type MemberFilter = "all" | "me" | "others" | "assist";
+type MemberFilter = "all" | "me" | "others";
 
-/** What the session list is asked for: "all" and "assist" both read every session. */
+/** What the session list is asked for. */
 function sessionMemberParam(member: MemberFilter): { member?: "me" | "others" } {
   return member === "me" || member === "others" ? { member } : {};
 }
+
+/**
+ * 看板的两个 tab：「任务」是项目共享的任务，「协助」是你与成员之间的协助。
+ * 两者分开放：协助只有发起人和执行人看得到，混进任务列表会让两人看到的列表不一样。
+ */
+type BoardTab = "tasks" | "assists";
 
 /** 内容没变就保留原数组，看板不必因为每 5 秒的轮询重画。 */
 function sameAssistThreads(left: readonly AssistThread[], right: readonly AssistThread[]): boolean {
@@ -498,6 +506,11 @@ const CollabBoard = memo(function CollabBoard(props: {
   const snapshot = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
   const [page, setPage] = useState<CollabSessionPage | null>(null);
   const [member, setMember] = useState<MemberFilter>("all");
+  /**
+   * 当前看的是「任务」还是「协助」。两个 tab 各留自己的状态：切回来时成员筛选、搜索词、页码都还在。
+   * 进入看板与换项目都回到「任务」。
+   */
+  const [boardTab, setBoardTab] = useState<BoardTab>("tasks");
   const [query, setQuery] = useState("");
   const [searchDraft, setSearchDraft] = useState("");
   const [pageIndex, setPageIndex] = useState(0);
@@ -916,16 +929,6 @@ const CollabBoard = memo(function CollabBoard(props: {
     }
   }, [applyPage, collab, member, pageIndex, query]);
 
-  const refreshBoard = useCallback(async () => {
-    if (!sharedId || refreshing) return;
-    setRefreshing(true);
-    try {
-      await refreshSessions(sharedId);
-    } finally {
-      setRefreshing(false);
-    }
-  }, [refreshSessions, refreshing, sharedId]);
-
   // While the board is open, keep the list current. An upload polls quickly; otherwise a slower pass picks up
   // a session another member associated, without waiting for a filter or page change.
   useEffect(() => {
@@ -1036,12 +1039,29 @@ const CollabBoard = memo(function CollabBoard(props: {
     }
   }, [collab, sharedId]);
 
+  const refreshBoard = useCallback(async () => {
+    if (!sharedId || refreshing) return;
+    setRefreshing(true);
+    try {
+      // 在「协助」里点刷新只需要重读协助；任务列表本来就在轮询。
+      if (boardTab === "assists") await refreshAssists();
+      else await refreshSessions(sharedId);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [boardTab, refreshAssists, refreshSessions, refreshing, sharedId]);
+
   // 协助与任务一样随看板轮询：窗口在后台时跳过，切回来立刻补一次。
   useEffect(() => {
     setAssistThreads(NO_ASSIST_THREADS);
     setAssistLimit(NO_ASSIST_LIMIT);
     setAssistShowUnrun(false);
     setAssistDetailId(null);
+    // 换项目回到「任务」：上一个项目的筛选、页码与 tab 都不应该跟到新项目里。
+    setBoardTab("tasks");
+    setSelecting(false);
+    setSelected(new Set());
+    setOpenMenuId(null);
     if (!collab || !sharedId) return;
     void refreshAssists();
     const timer = setInterval(() => {
@@ -1065,53 +1085,110 @@ const CollabBoard = memo(function CollabBoard(props: {
       return;
     }
     consumeAssistFocus();
+    // 面板对应的那一行在「协助」里：先切过去，否则它被任务列表盖在后面。
+    switchBoardTab("assists");
     setAssistDetailId(assistFocus.threadId);
-  }, [assistFocus, sharedId, assistThreads, refreshAssists]);
+  }, [assistFocus, sharedId, assistThreads, refreshAssists, boardTab]);
 
   useEffect(() => () => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
 
   const sessions = page?.sessions ?? null;
-  const filtering = Boolean(query) || (member !== "all" && member !== "assist");
+  const filtering = Boolean(query) || member !== "all";
+
+  /**
+   * 筛过之后一条也没有：用一张说明卡片讲清当前为什么是空的。
+   * 搜索优先：有查询词时一律按搜索没匹配来讲，不管成员筛选是什么。
+   * 「我的」那一条里带一个「关联任务」文字按钮，与工具条上的主按钮打开同一个弹窗。
+   */
+  const filterEmpty = useMemo<{ kind: "search" | "me" | "others"; icon: ReactNode; title: string; body: ReactNode }>(() => {
+    if (query) {
+      return {
+        kind: "search",
+        icon: <Search size={15} />,
+        title: t("collab.sessions.filterEmpty.search.title", { query }),
+        body: t("collab.sessions.filterEmpty.search.body")
+      };
+    }
+    if (member === "me") {
+      return {
+        kind: "me",
+        icon: <User size={15} />,
+        title: t("collab.sessions.filterEmpty.mine.title"),
+        body: (
+          <>
+            {t("collab.sessions.filterEmpty.mine.before")}
+            <button type="button" className={styles.guideAction} onClick={() => setPickOpen(true)}>
+              {t("collab.associate")}
+            </button>
+            {t("collab.sessions.filterEmpty.mine.after")}
+          </>
+        )
+      };
+    }
+    return {
+      kind: "others",
+      icon: <Users size={15} />,
+      title: t("collab.sessions.filterEmpty.others.title"),
+      body: t("collab.sessions.filterEmpty.others.body")
+    };
+  }, [member, query, t]);
 
   /**
    * 「协助」里的两组：有执行内容或还在进行的协助照常列出；没有执行过的（未允许、已撤回、已过期）只剩一行请求，默认收起。
+   * 协助列表不受任务搜索词过滤：搜索框只属于「任务」。
    */
-  const assistGroups = useMemo(() => {
-    const matched = assistThreads.filter((thread) => !query || thread.title.toLowerCase().includes(query.toLowerCase()));
-    return {
-      active: matched.filter((thread) => !assistNeverRan(thread)),
-      unrun: matched.filter(assistNeverRan)
-    };
-  }, [assistThreads, query]);
+  const assistGroups = useMemo(() => ({
+    active: assistThreads.filter((thread) => !assistNeverRan(thread)),
+    unrun: assistThreads.filter(assistNeverRan)
+  }), [assistThreads]);
   /** 等你处理的协助：你是执行人，请求在等你授权或确认（按限时授权会自动执行的不算）。 */
   const waitingAssists = useMemo(() => assistThreads.filter(assistWaitsForMe), [assistThreads]);
 
   /**
-   * 列表里的行：「全部」「我的」「成员」只列项目任务——协助只对两个人可见，混进项目共享的任务列表会让两人看到的「全部」不一样，
-   * 也会把任务挤到后面；等你处理的协助在列表上方单独提示。选「协助」时只看协助。
+   * 列表里的行：「任务」列项目任务——协助只对两个人可见，混进项目共享的任务列表会让两人看到的「全部」不一样，
+   * 也会把任务挤到后面；等你处理的协助在列表上方单独提示。「协助」只列协助。
+   *
+   * 协助的先后是「要我做的 → 还在跑的 → 已经结束的」，每组按最近活动倒序：等你处理的最急，已结束的最靠后。
    */
   const boardRows = useMemo<BoardRow[] | null>(() => {
-    if (member === "assist") {
-      return [...assistGroups.active, ...(assistShowUnrun ? assistGroups.unrun : [])]
-        .map((thread) => ({ kind: "assist", at: thread.lastActiveAt ?? thread.createdAt ?? "", thread }));
+    if (boardTab === "assists") {
+      const recent = (thread: AssistThread) => thread.lastActiveAt ?? thread.createdAt ?? "";
+      const rank = (thread: AssistThread) => (assistWaitsForMe(thread) ? 0 : assistIsOpen(thread.status) ? 1 : 2);
+      const ordered = [...assistGroups.active].sort((left, right) => rank(left) - rank(right)
+        || recent(right).localeCompare(recent(left)));
+      return [...ordered, ...(assistShowUnrun ? assistGroups.unrun : [])]
+        .map((thread) => ({ kind: "assist", at: recent(thread), thread }));
     }
     if (sessions === null) return null;
     return sessions.map((session) => ({ kind: "session", at: session.lastActiveAt ?? "", session }));
-  }, [assistGroups, assistShowUnrun, member, sessions]);
+  }, [assistGroups, assistShowUnrun, boardTab, sessions]);
   const assistDetail = assistDetailId ? assistThreads.find((thread) => thread.threadId === assistDetailId) ?? null : null;
   /** 多选能勾的：「协助」里是列出来的、已经结束的协助；其余是本页本人的任务。 */
-  const selectableIds = useMemo(() => (member === "assist"
+  const selectableIds = useMemo(() => (boardTab === "assists"
     ? (boardRows ?? []).flatMap((row) => (row.kind === "assist" && !assistIsOpen(row.thread.status) ? [row.thread.threadId] : []))
-    : (page?.sessions ?? []).filter((session) => session.mine).map((session) => session.id)), [boardRows, member, page]);
+    : (page?.sessions ?? []).filter((session) => session.mine).map((session) => session.id)), [boardRows, boardTab, page]);
   const allPageSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
 
   /**
+   * 切 tab。多选只属于一个列表：切走时退出选择并清空勾选，切回来不会带着上一个列表的勾选。
+   */
+  function switchBoardTab(next: BoardTab) {
+    if (boardTab !== next) {
+      setSelecting(false);
+      setSelected(new Set());
+      setOpenMenuId(null);
+    }
+    setBoardTab(next);
+  }
+
+  /**
    * 点开一行协助：双方都先在右侧打开这次协助的完整会话。由 Memmy 执行或发起时，会话底部再给出
-   * 「在 Memmy 中打开任务」或「打开发起的任务」。
+   * 「在 Memmy 中打开任务」或「打开发起的任务」。打开前先切到「协助」，让面板对应的行在列表里可见。
    */
   function openAssist(thread: AssistThread) {
+    switchBoardTab("assists");
     setAssistDetailId(thread.threadId);
   }
 
@@ -1253,7 +1330,7 @@ const CollabBoard = memo(function CollabBoard(props: {
   async function deleteSelected() {
     if (!collab || !sharedId || !selected.size) return;
     const ids = [...selected];
-    const assists = member === "assist";
+    const assists = boardTab === "assists";
     setConfirmBulkDelete(false);
     setBulkDeleting(true);
     let failed = 0;
@@ -1292,15 +1369,21 @@ const CollabBoard = memo(function CollabBoard(props: {
     setSelected(new Set());
   }, [pageIndex, member, query, selecting]);
 
-  const memberOptions: { value: MemberFilter; label: string; count?: number }[] = [
-    { value: "all", label: t("collab.filter.all") },
-    { value: "me", label: t("collab.filter.you") },
-    { value: "others", label: t("collab.filter.others") },
-    // 只在有协助时出现：没有协助的项目里，这一格没有可看的内容。
-    // 数字只数等你处理的：执行中、已完成的不需要你做什么。
-    ...(assistThreads.length || member === "assist"
-      ? [{ value: "assist" as const, label: t("collab.filter.assist"), count: waitingAssists.length }]
-      : [])
+  const memberOptions = useMemo<SelectOption[]>(() => [
+    { value: "all", label: t("collab.filter.allTasks") },
+    { value: "me", label: t("collab.filter.myTasks") },
+    { value: "others", label: t("collab.filter.memberTasks") }
+  ], [t]);
+
+  /**
+   * 看板的两个 tab：「协助」后面的数字只数等你处理的（执行中、已完成的不需要你做什么），没有就不带数字。
+   * 引导期间 tab 只是演示：当前步骤讲协助时把它当作选中，不改用户真正在看的 tab。
+   */
+  const tourAssistStep = tourActive && COLLAB_TOUR_STEP_KEYS[tourStep ?? 0] === "assist";
+  const shownTab: BoardTab = tourActive ? (tourAssistStep ? "assists" : "tasks") : boardTab;
+  const boardTabs: { value: BoardTab; label: string; count?: number }[] = [
+    { value: "tasks", label: t("collab.tab.tasks") },
+    { value: "assists", label: t("collab.tab.assists"), count: waitingAssists.length }
   ];
 
   // 提示条只在有他人的任务时出现，数字与成员名都取自同一批数据，不加一次请求。
@@ -1313,7 +1396,7 @@ const CollabBoard = memo(function CollabBoard(props: {
     && !contextTipSeen.includes(project.id);
 
   /** 「协助」列表底部：没有执行过的请求默认收起；最近因超过项目上限清理过较早的协助时注明。 */
-  const assistFooter = member === "assist" && (assistGroups.unrun.length || assistLimit.prunedAt) ? (
+  const assistFooter = boardTab === "assists" && (assistGroups.unrun.length || assistLimit.prunedAt) ? (
     <div className={styles.assistFooter}>
       {assistGroups.unrun.length ? (
         <button
@@ -1423,370 +1506,442 @@ const CollabBoard = memo(function CollabBoard(props: {
 
                 {shared ? (
                   <>
-                    <div className={styles.toolbar} data-tour-anchor={COLLAB_TOUR_ANCHORS.toolbar}>
-                      {/* 按成员筛选：原型里的三段胶囊，比下拉少一次点击 */}
-                      <div className={styles.seg} role="group" aria-label={t("collab.filter.label")}>
-                        {memberOptions.map((option) => (
-                          <button
-                            key={option.value}
-                            type="button"
-                            className={`${styles.segItem} ${option.value === member ? styles.segItemOn : ""}`}
-                            aria-pressed={option.value === member}
-                            onClick={() => setMember(option.value)}
-                          >
-                            {option.label}
-                            {option.count ? <span className={styles.segCount}>{option.count}</span> : null}
-                          </button>
-                        ))}
-                      </div>
-                      <span className={styles.grow} />
-                      {/* 搜索属于浏览，选择态收起来；已经带着查询时保留，否则列表被筛住却看不到原因 */}
-                      {selecting && !query ? null : (
-                        <label className={styles.searchBox}>
-                          <Search size={14} aria-hidden="true" className={styles.searchIcon} />
-                          <input
-                            value={searchDraft}
-                            placeholder={t("collab.sessions.searchPlaceholder")}
-                            aria-label={t("collab.sessions.searchPlaceholder")}
-                            onChange={(event) => {
-                              const next = event.target.value;
-                              setSearchDraft(next);
-                              // Clearing shows everything again at once; typing waits for a pause.
-                              if (!next.trim()) setQuery("");
-                            }}
-                            onKeyDown={(event) => {
-                              // 回车确认输入法候选词时不要发起搜索，否则搜的是半成品拼音。
-                              if (event.key === "Enter" && !isComposingKeyboardEvent(event)) setQuery(searchDraft.trim());
-                              if (event.key === "Escape") {
-                                setSearchDraft("");
-                                setQuery("");
-                              }
-                            }}
-                          />
-                          {searchDraft && searchDraft !== query ? (
-                            <button type="button" className={styles.searchGo} onClick={() => setQuery(searchDraft.trim())}>
-                              {t("collab.sessions.searchGo")}
-                            </button>
-                          ) : null}
-                        </label>
-                      )}
-                      {selecting ? (
-                        /* 选择态只留这一组，整组不换行：否则最后一个「删除」会被挤到下一行单挂 */
-                        <span className={styles.selectActions}>
-                          <span className={styles.selectCount}>
-                            {t("collab.sessions.selectedCount", { count: String(selected.size) })}
+                    {/*
+                     * 「任务」与「协助」分两个 tab：协助只有发起人和执行人看得到，混进项目共享的任务列表里会让两人看到的列表不一样。
+                     * 本机未共享的项目没有协助，这一行不出现。
+                     */}
+                    <div
+                      className={styles.boardTabs}
+                      role="tablist"
+                      aria-label={t("collab.tab.label")}
+                      data-tour-anchor={COLLAB_TOUR_ANCHORS.tabs}
+                    >
+                      {boardTabs.map((tab) => (
+                        <button
+                          key={tab.value}
+                          type="button"
+                          role="tab"
+                          aria-selected={shownTab === tab.value}
+                          className={`${styles.boardTab} ${shownTab === tab.value ? styles.boardTabOn : ""}`}
+                          data-tour-anchor={tab.value === "assists" ? COLLAB_TOUR_ANCHORS.assistTab : undefined}
+                          onClick={() => switchBoardTab(tab.value)}
+                        >
+                          {tab.label}
+                          {tab.count ? <span className={styles.segCount}>{tab.count}</span> : null}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* 两个 tab 各自的 panel：任务工具条与列表、协助工具条与列表都在里面 */}
+                    <div
+                      role="tabpanel"
+                      aria-label={t(shownTab === "tasks" ? "collab.tab.tasks" : "collab.tab.assists")}
+                    >
+                      <div
+                        className={`${styles.toolbar} ${shownTab === "assists" ? styles.assistToolbar : ""}`}
+                        data-tour-anchor={COLLAB_TOUR_ANCHORS.toolbar}
+                      >
+                        {shownTab === "tasks" ? (
+                          <>
+                            {/* 搜索属于浏览，选择态收起来；已经带着查询时保留，否则列表被筛住却看不到原因 */}
+                            {selecting && !query ? null : (
+                              <label className={styles.searchBox}>
+                                <Search size={14} aria-hidden="true" className={styles.searchIcon} />
+                                <input
+                                  value={searchDraft}
+                                  placeholder={t("collab.sessions.searchPlaceholder")}
+                                  aria-label={t("collab.sessions.searchPlaceholder")}
+                                  onChange={(event) => {
+                                    const next = event.target.value;
+                                    setSearchDraft(next);
+                                    // Clearing shows everything again at once; typing waits for a pause.
+                                    if (!next.trim()) setQuery("");
+                                  }}
+                                  onKeyDown={(event) => {
+                                    // 回车确认输入法候选词时不要发起搜索，否则搜的是半成品拼音。
+                                    if (event.key === "Enter" && !isComposingKeyboardEvent(event)) setQuery(searchDraft.trim());
+                                    if (event.key === "Escape") {
+                                      setSearchDraft("");
+                                      setQuery("");
+                                    }
+                                  }}
+                                />
+                                {searchDraft && searchDraft !== query ? (
+                                  <button type="button" className={styles.searchGo} onClick={() => setQuery(searchDraft.trim())}>
+                                    {t("collab.sessions.searchGo")}
+                                  </button>
+                                ) : null}
+                              </label>
+                            )}
+                            {/*
+                             * 成员筛选收进下拉，与搜索并排：tab 之下只剩一层浏览条件，不再叠第二排胶囊。
+                             * 与搜索同一规则：选择态收起，但筛着的时候要看得到，否则不知道列表为什么少了。
+                             */}
+                            {selecting && member === "all" ? null : (
+                              <Select
+                                className={styles.memberFilter}
+                                buttonClassName={styles.memberFilterButton}
+                                menuClassName={styles.memberFilterMenu}
+                                ariaLabel={t("collab.filter.label")}
+                                value={member}
+                                options={memberOptions}
+                                onValueChange={(next) => {
+                                  if (next === "all" || next === "me" || next === "others") setMember(next);
+                                }}
+                              />
+                            )}
+                            <span className={styles.grow} />
+                          </>
+                        ) : (
+                          <>
+                            {/* 协助只有你和对方看得到：右上角说明一次；列表本来就短，不给成员筛选与搜索 */}
+                            <span className={styles.assistToolbarHint}>{t("collab.assist.toolbarHint")}</span>
+                            <span className={styles.grow} />
+                          </>
+                        )}
+                        {selecting ? (
+                          /* 选择态只留这一组，整组不换行：否则最后一个「删除」会被挤到下一行单挂 */
+                          <span className={styles.selectActions}>
+                            <span className={styles.selectCount}>
+                              {t("collab.sessions.selectedCount", { count: String(selected.size) })}
+                            </span>
+                            <Button size="sm" variant="ghost" disabled={!selectableIds.length || bulkDeleting} onClick={selectAllMine}>
+                              {t(allPageSelected ? "collab.sessions.deselectAll" : "collab.sessions.selectAll")}
+                            </Button>
+                            <Button size="sm" variant="ghost" disabled={bulkDeleting} onClick={() => setSelecting(false)}>
+                              {t("collab.cancel")}
+                            </Button>
+                            {/* 破坏性操作保留警示色，但用文字按钮，不在工具条里压一块红底 */}
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className={styles.dangerGhost}
+                              disabled={!selected.size || bulkDeleting}
+                              onClick={() => setConfirmBulkDelete(true)}
+                            >
+                              <Trash2 size={14} aria-hidden="true" />
+                              {bulkDeleting ? t("collab.sessions.deleting") : t("collab.session.delete")}
+                            </Button>
                           </span>
-                          <Button size="sm" variant="ghost" disabled={!selectableIds.length || bulkDeleting} onClick={selectAllMine}>
-                            {t(allPageSelected ? "collab.sessions.deselectAll" : "collab.sessions.selectAll")}
-                          </Button>
-                          <Button size="sm" variant="ghost" disabled={bulkDeleting} onClick={() => setSelecting(false)}>
-                            {t("collab.cancel")}
-                          </Button>
-                          {/* 破坏性操作保留警示色，但用文字按钮，不在工具条里压一块红底 */}
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className={styles.dangerGhost}
-                            disabled={!selected.size || bulkDeleting}
-                            onClick={() => setConfirmBulkDelete(true)}
-                          >
-                            <Trash2 size={14} aria-hidden="true" />
-                            {bulkDeleting ? t("collab.sessions.deleting") : t("collab.session.delete")}
-                          </Button>
-                        </span>
-                      ) : (
-                        <>
-                          {/* 刷新属于浏览列表，选择态用不上，放在常态这一支 */}
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className={styles.iconAction}
-                            aria-label={t("collab.sessions.refresh")}
-                            title={t("collab.sessions.refresh")}
-                            disabled={refreshing}
-                            onClick={() => void refreshBoard()}
-                          >
-                            <RefreshCw size={14} aria-hidden="true" />
-                            <span className={styles.actionLabel}>{t("collab.sessions.refresh")}</span>
-                          </Button>
-                          {/* 多选只对能删的生效：本人的任务，或「协助」里已经结束的协助；一条都没有时不显示入口 */}
-                          {selectableIds.length ? (
+                        ) : (
+                          <>
+                            {/* 刷新属于浏览列表，选择态用不上，放在常态这一支 */}
                             <Button
                               size="sm"
                               variant="ghost"
                               className={styles.iconAction}
-                              aria-label={t("collab.sessions.select")}
-                              title={t("collab.sessions.select")}
-                              onClick={() => setSelecting(true)}
+                              aria-label={t("collab.sessions.refresh")}
+                              title={t("collab.sessions.refresh")}
+                              disabled={refreshing}
+                              onClick={() => void refreshBoard()}
                             >
-                              <ListChecks size={14} aria-hidden="true" />
-                              <span className={styles.actionLabel}>{t("collab.sessions.select")}</span>
+                              <RefreshCw size={14} aria-hidden="true" />
+                              <span className={styles.actionLabel}>{t("collab.sessions.refresh")}</span>
                             </Button>
-                          ) : null}
-                          <Button size="sm" variant="primary" data-tour-anchor={COLLAB_TOUR_ANCHORS.associate} onClick={() => setPickOpen(true)}>
-                            <Link2 size={14} aria-hidden="true" />
-                            {t("collab.associate")}
-                          </Button>
+                            {/* 多选只对能删的生效：本人的任务，或「协助」里已经结束的协助；一条都没有时不显示入口 */}
+                            {selectableIds.length ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className={styles.iconAction}
+                                aria-label={t("collab.sessions.select")}
+                                title={t("collab.sessions.select")}
+                                onClick={() => setSelecting(true)}
+                              >
+                                <ListChecks size={14} aria-hidden="true" />
+                                <span className={styles.actionLabel}>{t("collab.sessions.select")}</span>
+                              </Button>
+                            ) : null}
+                            {/* 「关联任务」只属于任务：协助由 Agent 对话发起，不在这里关联 */}
+                            {shownTab === "tasks" ? (
+                              <Button size="sm" variant="primary" data-tour-anchor={COLLAB_TOUR_ANCHORS.associate} onClick={() => setPickOpen(true)}>
+                                <Link2 size={14} aria-hidden="true" />
+                                {t("collab.associate")}
+                              </Button>
+                            ) : null}
+                          </>
+                        )}
+                      </div>
+
+                      {/*
+                       * 引导期间整页都换成引导自己的示例页：真实任务、同步进度与成员提示都不出现。
+                       * 从项目设置里重看时项目里本就有任务，混在一起会分不清哪条是演示、哪条是自己的。
+                       */}
+                      {tourActive ? <CollabTourTaskList step={tourStep ?? 0} projectName={project.name} /> : null}
+
+                      {/* 同步进度与成员提示都是关于任务的：只在「任务」里出现 */}
+                      {!tourActive && boardTab === "tasks" && progress?.running ? (() => {
+                        // 云端每人每项目只留最近 20 个，进度也按这个额度显示，不报会超出上限的条数。
+                        const cappedTotal = Math.min(progress.total, SESSIONS_PER_MEMBER_LIMIT);
+                        const cappedDone = Math.min(progress.completed, cappedTotal);
+                        // 超出额度的那几条还在上传：进度已满，用缓慢呼吸说明后台仍在处理。
+                        const pending = progress.total > cappedTotal && progress.completed >= cappedTotal;
+                        return (
+                          <div className={styles.syncStrip} role="status" aria-live="polite">
+                            <span className={styles.syncText}>
+                              {t("collab.sync.progress", { completed: String(cappedDone), total: String(cappedTotal) })}
+                            </span>
+                            <span className={styles.syncBar} aria-hidden="true">
+                              <span
+                                className={`${styles.syncBarFill} ${pending ? styles.syncBarFillPending : ""}`}
+                                style={{ width: `${cappedTotal ? Math.round((cappedDone / cappedTotal) * 100) : 0}%` }}
+                              />
+                            </span>
+                          </div>
+                        );
+                      })() : null}
+                      {!tourActive && boardTab === "tasks" && showContextTip ? (
+                        // 只有项目里确实有他人任务时才出现：空项目里这句话没有对象，提示也就没有意义。
+                        <div className={styles.contextTip} role="status">
+                          <span className={styles.contextTipIcon} aria-hidden="true"><AtSign size={13} /></span>
+                          <span className={styles.contextTipText}>
+                            {t(
+                              memberLabel ? "collab.contextTip.text" : "collab.contextTip.textAnon",
+                              memberLabel
+                                ? { who: memberLabel, count: String(otherSessionCount) }
+                                : { count: String(otherSessionCount) }
+                            )}
+                          </span>
+                          <button
+                            type="button"
+                            className={styles.contextTipAction}
+                            onClick={() => dismissContextTip(project.id)}
+                          >
+                            {t("collab.contextTip.dismiss")}
+                          </button>
+                        </div>
+                      ) : null}
+                      {/* 等你处理的协助提示留在「任务」里：看任务的时候也能直接接住请求；点了转到「协助」并展开那一条 */}
+                      {boardTab === "tasks" && waitingAssists.length && !tourActive ? (
+                        <div className={styles.assistWaiting} role="status" data-collab-assist-waiting="">
+                          <span className={styles.assistWaitingIcon} aria-hidden="true"><LifeBuoy size={13} /></span>
+                          <span className={styles.assistWaitingText}>
+                            {waitingAssists.length === 1
+                              ? t("collab.assist.waitingOne", { name: waitingAssists[0]!.requester.name, title: waitingAssists[0]!.title })
+                              : t("collab.assist.waitingMany", { count: String(waitingAssists.length) })}
+                          </span>
+                          <button
+                            type="button"
+                            className={styles.assistWaitingAction}
+                            onClick={() => {
+                              if (waitingAssists.length === 1) openAssist(waitingAssists[0]!);
+                              else switchBoardTab("assists");
+                            }}
+                          >
+                            {t("collab.assist.waitingAction")}
+                          </button>
+                        </div>
+                      ) : null}
+                      {boardRows === null ? (
+                        tourActive ? null : <p className={styles.loading}>{t("collab.loading")}</p>
+                      ) : boardRows.length === 0 && boardTab === "assists" ? (
+                        tourActive ? null : (
+                          <>
+                            {assistGroups.unrun.length ? null : (
+                              // 一条协助都没有时把两种发起方式说清楚：从 Agent 对话请人协助，或先让自己能接收请求。
+                              <section className={styles.guide} aria-label={t("collab.assist.empty.title")}>
+                                <b className={styles.guideTitle}>{t("collab.assist.empty.title")}</b>
+                                <p className={styles.guideLead}>{t("collab.assist.empty.lead")}</p>
+                                <ul className={styles.guideList}>
+                                  <li className={styles.guideItem}>
+                                    <span className={styles.guideIcon} aria-hidden="true"><LifeBuoy size={15} /></span>
+                                    <div className={styles.guideText}>
+                                      <b>{t("collab.assist.empty.ask.title")}</b>
+                                      <span>{t("collab.assist.empty.ask.body")}</span>
+                                    </div>
+                                  </li>
+                                  <li className={styles.guideItem}>
+                                    <span className={styles.guideIcon} aria-hidden="true"><Inbox size={15} /></span>
+                                    <div className={styles.guideText}>
+                                      <b>{t("collab.assist.empty.receive.title")}</b>
+                                      <span>
+                                        {t("collab.assist.empty.receive.body")}
+                                        {" "}
+                                        <button type="button" className={styles.guideAction} onClick={() => setSettingsOpen(true)}>
+                                          {t("collab.assist.empty.openSettings")}
+                                        </button>
+                                      </span>
+                                    </div>
+                                  </li>
+                                </ul>
+                              </section>
+                            )}
+                            {assistFooter}
+                          </>
+                        )
+                      ) : boardRows.length === 0 && filtering ? (
+                        tourActive ? null : (
+                        <div className={styles.filterEmpty} data-collab-filter-empty={filterEmpty.kind}>
+                          <span className={styles.guideIcon} aria-hidden="true">{filterEmpty.icon}</span>
+                          <div className={styles.guideText}>
+                            <b>{filterEmpty.title}</b>
+                            <span>{filterEmpty.body}</span>
+                          </div>
+                        </div>
+                        )
+                      ) : boardRows.length === 0 ? (
+                        // An empty project is the one place to explain the board: what it collects and what a
+                        // member can do with it. New projects start here, so it carries the first-run guidance.
+                        tourActive ? null : (
+                        <section className={styles.guide} aria-label={t("collab.sessions.empty.title")}>
+                          <b className={styles.guideTitle}>{t("collab.sessions.empty.title")}</b>
+                          <p className={styles.guideLead}>{t("collab.sessions.empty.lead")}</p>
+                          <ul className={styles.guideList}>
+                            {([
+                              { key: "task", icon: <MessageSquarePlus size={15} aria-hidden="true" /> },
+                              { key: "associate", icon: <Link2 size={15} aria-hidden="true" /> }
+                            ] as const).map((item) => (
+                              <li key={item.key} className={styles.guideItem}>
+                                <span className={styles.guideIcon} aria-hidden="true">{item.icon}</span>
+                                <div className={styles.guideText}>
+                                  <b>{t(`collab.sessions.empty.${item.key}.title` as MessageKey)}</b>
+                                  <span>{t(`collab.sessions.empty.${item.key}.body` as MessageKey)}</span>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        </section>
+                        )
+                      ) : (
+                        tourActive ? null : <>
+                        <ul className={`${styles.list} ${styles.stream} ${styles.flatStream}`}>
+                          {boardRows.map((row) => {
+                            if (row.kind === "assist") {
+                              return (
+                                <AssistBoardRow
+                                  key={`assist-${row.thread.threadId}`}
+                                  thread={row.thread}
+                                  selecting={selecting}
+                                  onOpen={() => openAssist(row.thread)}
+                                  selected={selected.has(row.thread.threadId)}
+                                  onToggle={() => toggleSelected(row.thread.threadId)}
+                                  menuOpen={openMenuId === `assist:${row.thread.threadId}`}
+                                  onMenu={(open) => setOpenMenuId(open ? `assist:${row.thread.threadId}` : null)}
+                                  onDelete={() => setDeletingAssist(row.thread)}
+                                />
+                              );
+                            }
+                            const session = row.session;
+                            // Members see this person's nickname in their own Memmy, so the avatar keeps the nickname.
+                            const name = session.memberName || (session.mine ? t("collab.session.you") : "");
+                            // 旧记录里的摘要可能停在 Agent 的完成通知上，读不出内容就不显示。
+                            const summary = readableSummary(session.lastQuestion);
+                            // 本人的任务也写昵称：自己看到的与成员看到的一致，只有昵称缺失时才退回「你」。
+                            const menuOpen = openMenuId === session.id;
+                            return (
+                              <li
+                                key={session.id}
+                                className={`${styles.row} ${selecting ? styles.rowSelecting : styles.rowOpenable} ${menuOpen ? styles.rowMenuOpen : ""} ${selected.has(session.id) ? styles.rowSelected : ""}`}
+                                onClick={() => {
+                                  if (!selecting) {
+                                    openRow(session);
+                                    return;
+                                  }
+                                  // 选择模式下点击整行就是勾选；他人的任务不可选。
+                                  if (session.mine) toggleSelected(session.id);
+                                }}
+                              >
+                                {selecting && session.mine ? (
+                                  <input
+                                    type="checkbox"
+                                    className={styles.rowCheck}
+                                    checked={selected.has(session.id)}
+                                    aria-label={session.title}
+                                    onClick={(event) => event.stopPropagation()}
+                                    onChange={() => toggleSelected(session.id)}
+                                  />
+                                ) : null}
+                                {/* 头像只用成员自身颜色的浅底与字色，接近原型里的淡色头像 */}
+                                <span
+                                  className={`${styles.avatar} ${styles.avatarSoft}`}
+                                  style={{ "--member": memberColor(name) } as CSSProperties}
+                                  aria-hidden="true"
+                                >
+                                  {Array.from(name)[0] ?? "?"}
+                                </span>
+                                <div className={styles.rowText}>
+                                  <span className={styles.rowTitle}>{session.title}</span>
+                                  {summary ? <span className={styles.rowSummary}>{summary}</span> : null}
+                                </div>
+                                <span className={styles.meta}>
+                                  {[name, stampLabel(taskStamp(session.lastActiveAt), t)].filter(Boolean).join(" · ")}
+                                </span>
+                                {selecting ? null : (
+                                <button
+                                  type="button"
+                                  className={styles.moreButton}
+                                  aria-label={t("collab.session.more")}
+                                  title={t("collab.session.more")}
+                                  aria-expanded={menuOpen}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setOpenMenuId(menuOpen ? null : session.id);
+                                  }}
+                                >
+                                  <MoreHorizontal size={15} aria-hidden="true" />
+                                </button>
+                                )}
+                                {menuOpen ? (
+                                  <>
+                                    {/*
+                                     * The row itself opens the session reader. Every click that belongs to the menu has to
+                                     * stop here, or copying a link also opens the session behind the toast.
+                                     */}
+                                    <button
+                                      type="button"
+                                      className={styles.menuScrim}
+                                      aria-label={t("collab.cancel")}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        setOpenMenuId(null);
+                                      }}
+                                    />
+                                    <div className={styles.menu} role="menu" onClick={(event) => event.stopPropagation()}>
+                                      {/* 任一行都可用，包括他人的只读任务：只读限制作用于正文，不影响在自己这边开新任务 */}
+                                      <button type="button" role="menuitem" className={styles.menuItem} onClick={() => { setOpenMenuId(null); void continueSession(session); }}>
+                                        {t("collab.session.continue")}
+                                      </button>
+                                      <button type="button" role="menuitem" className={styles.menuItem} onClick={() => { setOpenMenuId(null); void copyLink(session); }}>
+                                        {t("collab.session.copyLink")}
+                                      </button>
+                                      {session.mine ? (
+                                        <>
+                                          <div className={styles.menuSeparator} role="separator" />
+                                          <button type="button" role="menuitem" className={`${styles.menuItem} ${styles.menuItemDanger}`} onClick={() => { setOpenMenuId(null); setDeleting(session); }}>
+                                            {t("collab.session.delete")}
+                                          </button>
+                                        </>
+                                      ) : null}
+                                    </div>
+                                  </>
+                                ) : null}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                        {boardTab === "assists" ? assistFooter : total > SESSION_PAGE_SIZE ? (
+                          <nav className={styles.pager} aria-label={t("collab.sessions.pager")}>
+                            <span className={styles.pagerInfo}>
+                              {t("collab.sessions.pageInfo", {
+                                page: String(pageIndex + 1),
+                                pages: String(pageCount),
+                                total: String(total)
+                              })}
+                            </span>
+                            <span className={styles.grow} />
+                            <Button size="sm" variant="ghost" disabled={pageIndex === 0} onClick={() => setPageIndex(pageIndex - 1)}>
+                              {t("collab.sessions.prevPage")}
+                            </Button>
+                            <Button size="sm" variant="ghost" disabled={pageIndex >= pageCount - 1} onClick={() => setPageIndex(pageIndex + 1)}>
+                              {t("collab.sessions.nextPage")}
+                            </Button>
+                          </nav>
+                        ) : total > 0 ? (
+                          <p className={styles.pagerInfo}>{t("collab.sessions.totalOnly", { total: String(total) })}</p>
+                        ) : null}
                         </>
                       )}
                     </div>
-
-                    {/*
-                     * 引导期间整页都换成引导自己的示例页：真实任务、同步进度与成员提示都不出现。
-                     * 从项目设置里重看时项目里本就有任务，混在一起会分不清哪条是演示、哪条是自己的。
-                     */}
-                    {tourActive ? <CollabTourTaskList step={tourStep ?? 0} projectName={project.name} /> : null}
-
-                    {!tourActive && progress?.running ? (() => {
-                      // 云端每人每项目只留最近 20 个，进度也按这个额度显示，不报会超出上限的条数。
-                      const cappedTotal = Math.min(progress.total, SESSIONS_PER_MEMBER_LIMIT);
-                      const cappedDone = Math.min(progress.completed, cappedTotal);
-                      // 超出额度的那几条还在上传：进度已满，用缓慢呼吸说明后台仍在处理。
-                      const pending = progress.total > cappedTotal && progress.completed >= cappedTotal;
-                      return (
-                        <div className={styles.syncStrip} role="status" aria-live="polite">
-                          <span className={styles.syncText}>
-                            {t("collab.sync.progress", { completed: String(cappedDone), total: String(cappedTotal) })}
-                          </span>
-                          <span className={styles.syncBar} aria-hidden="true">
-                            <span
-                              className={`${styles.syncBarFill} ${pending ? styles.syncBarFillPending : ""}`}
-                              style={{ width: `${cappedTotal ? Math.round((cappedDone / cappedTotal) * 100) : 0}%` }}
-                            />
-                          </span>
-                        </div>
-                      );
-                    })() : null}
-                    {!tourActive && showContextTip ? (
-                      // 只有项目里确实有他人任务时才出现：空项目里这句话没有对象，提示也就没有意义。
-                      <div className={styles.contextTip} role="status">
-                        <span className={styles.contextTipIcon} aria-hidden="true"><AtSign size={13} /></span>
-                        <span className={styles.contextTipText}>
-                          {t(
-                            memberLabel ? "collab.contextTip.text" : "collab.contextTip.textAnon",
-                            memberLabel
-                              ? { who: memberLabel, count: String(otherSessionCount) }
-                              : { count: String(otherSessionCount) }
-                          )}
-                        </span>
-                        <button
-                          type="button"
-                          className={styles.contextTipAction}
-                          onClick={() => dismissContextTip(project.id)}
-                        >
-                          {t("collab.contextTip.dismiss")}
-                        </button>
-                      </div>
-                    ) : null}
-                    {member !== "assist" && waitingAssists.length && !tourActive ? (
-                      <div className={styles.assistWaiting} role="status" data-collab-assist-waiting="">
-                        <span className={styles.assistWaitingIcon} aria-hidden="true"><LifeBuoy size={13} /></span>
-                        <span className={styles.assistWaitingText}>
-                          {waitingAssists.length === 1
-                            ? t("collab.assist.waitingOne", { name: waitingAssists[0]!.requester.name, title: waitingAssists[0]!.title })
-                            : t("collab.assist.waitingMany", { count: String(waitingAssists.length) })}
-                        </span>
-                        <button
-                          type="button"
-                          className={styles.assistWaitingAction}
-                          onClick={() => {
-                            if (waitingAssists.length === 1) openAssist(waitingAssists[0]!);
-                            else setMember("assist");
-                          }}
-                        >
-                          {t("collab.assist.waitingAction")}
-                        </button>
-                      </div>
-                    ) : null}
-                    {boardRows === null ? (
-                      tourActive ? null : <p className={styles.loading}>{t("collab.loading")}</p>
-                    ) : boardRows.length === 0 && member === "assist" ? (
-                      tourActive ? null : (
-                        <>
-                          {assistGroups.unrun.length ? null : (
-                            <div className={styles.empty}>
-                              <p>{query ? t("collab.sessions.noMatch.bodyAssist", { query }) : t("collab.assist.boardEmpty")}</p>
-                            </div>
-                          )}
-                          {assistFooter}
-                        </>
-                      )
-                    ) : boardRows.length === 0 && filtering ? (
-                      tourActive ? null : (
-                      // 筛选没结果时只说明当前筛选下没有任务：清除入口在筛选控件本身，不必再给一个按钮。
-                      <div className={styles.empty}>
-                        {query ? (
-                          <>
-                            <b>{t("collab.sessions.noMatch.title")}</b>
-                            <p>{t("collab.sessions.noMatch.body", { query })}</p>
-                          </>
-                        ) : (
-                          <p>{t(member === "me" ? "collab.sessions.noMatch.bodyMe" : "collab.sessions.noMatch.bodyOthers")}</p>
-                        )}
-                      </div>
-                      )
-                    ) : boardRows.length === 0 ? (
-                      // An empty project is the one place to explain the board: what it collects and what a
-                      // member can do with it. New projects start here, so it carries the first-run guidance.
-                      tourActive ? null : (
-                      <section className={styles.guide} aria-label={t("collab.sessions.empty.title")}>
-                        <b className={styles.guideTitle}>{t("collab.sessions.empty.title")}</b>
-                        <p className={styles.guideLead}>{t("collab.sessions.empty.lead")}</p>
-                        <ul className={styles.guideList}>
-                          {([
-                            { key: "task", icon: <MessageSquarePlus size={15} aria-hidden="true" /> },
-                            { key: "associate", icon: <Link2 size={15} aria-hidden="true" /> }
-                          ] as const).map((item) => (
-                            <li key={item.key} className={styles.guideItem}>
-                              <span className={styles.guideIcon} aria-hidden="true">{item.icon}</span>
-                              <div className={styles.guideText}>
-                                <b>{t(`collab.sessions.empty.${item.key}.title` as MessageKey)}</b>
-                                <span>{t(`collab.sessions.empty.${item.key}.body` as MessageKey)}</span>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      </section>
-                      )
-                    ) : (
-                      tourActive ? null : <>
-                      <ul className={`${styles.list} ${styles.stream} ${styles.flatStream}`}>
-                        {boardRows.map((row) => {
-                          if (row.kind === "assist") {
-                            return (
-                              <AssistBoardRow
-                                key={`assist-${row.thread.threadId}`}
-                                thread={row.thread}
-                                selecting={selecting}
-                                onOpen={() => openAssist(row.thread)}
-                                selected={selected.has(row.thread.threadId)}
-                                onToggle={() => toggleSelected(row.thread.threadId)}
-                                menuOpen={openMenuId === `assist:${row.thread.threadId}`}
-                                onMenu={(open) => setOpenMenuId(open ? `assist:${row.thread.threadId}` : null)}
-                                onDelete={() => setDeletingAssist(row.thread)}
-                              />
-                            );
-                          }
-                          const session = row.session;
-                          // Members see this person's nickname in their own Memmy, so the avatar keeps the nickname.
-                          const name = session.memberName || (session.mine ? t("collab.session.you") : "");
-                          // 旧记录里的摘要可能停在 Agent 的完成通知上，读不出内容就不显示。
-                          const summary = readableSummary(session.lastQuestion);
-                          // 本人的任务也写昵称：自己看到的与成员看到的一致，只有昵称缺失时才退回「你」。
-                          const menuOpen = openMenuId === session.id;
-                          return (
-                            <li
-                              key={session.id}
-                              className={`${styles.row} ${selecting ? styles.rowSelecting : styles.rowOpenable} ${menuOpen ? styles.rowMenuOpen : ""} ${selected.has(session.id) ? styles.rowSelected : ""}`}
-                              onClick={() => {
-                                if (!selecting) {
-                                  openRow(session);
-                                  return;
-                                }
-                                // 选择模式下点击整行就是勾选；他人的任务不可选。
-                                if (session.mine) toggleSelected(session.id);
-                              }}
-                            >
-                              {selecting && session.mine ? (
-                                <input
-                                  type="checkbox"
-                                  className={styles.rowCheck}
-                                  checked={selected.has(session.id)}
-                                  aria-label={session.title}
-                                  onClick={(event) => event.stopPropagation()}
-                                  onChange={() => toggleSelected(session.id)}
-                                />
-                              ) : null}
-                              {/* 头像只用成员自身颜色的浅底与字色，接近原型里的淡色头像 */}
-                              <span
-                                className={`${styles.avatar} ${styles.avatarSoft}`}
-                                style={{ "--member": memberColor(name) } as CSSProperties}
-                                aria-hidden="true"
-                              >
-                                {Array.from(name)[0] ?? "?"}
-                              </span>
-                              <div className={styles.rowText}>
-                                <span className={styles.rowTitle}>{session.title}</span>
-                                {summary ? <span className={styles.rowSummary}>{summary}</span> : null}
-                              </div>
-                              <span className={styles.meta}>
-                                {[name, stampLabel(taskStamp(session.lastActiveAt), t)].filter(Boolean).join(" · ")}
-                              </span>
-                              {selecting ? null : (
-                              <button
-                                type="button"
-                                className={styles.moreButton}
-                                aria-label={t("collab.session.more")}
-                                title={t("collab.session.more")}
-                                aria-expanded={menuOpen}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setOpenMenuId(menuOpen ? null : session.id);
-                                }}
-                              >
-                                <MoreHorizontal size={15} aria-hidden="true" />
-                              </button>
-                              )}
-                              {menuOpen ? (
-                                <>
-                                  {/*
-                                   * The row itself opens the session reader. Every click that belongs to the menu has to
-                                   * stop here, or copying a link also opens the session behind the toast.
-                                   */}
-                                  <button
-                                    type="button"
-                                    className={styles.menuScrim}
-                                    aria-label={t("collab.cancel")}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      setOpenMenuId(null);
-                                    }}
-                                  />
-                                  <div className={styles.menu} role="menu" onClick={(event) => event.stopPropagation()}>
-                                    {/* 任一行都可用，包括他人的只读任务：只读限制作用于正文，不影响在自己这边开新任务 */}
-                                    <button type="button" role="menuitem" className={styles.menuItem} onClick={() => { setOpenMenuId(null); void continueSession(session); }}>
-                                      {t("collab.session.continue")}
-                                    </button>
-                                    <button type="button" role="menuitem" className={styles.menuItem} onClick={() => { setOpenMenuId(null); void copyLink(session); }}>
-                                      {t("collab.session.copyLink")}
-                                    </button>
-                                    {session.mine ? (
-                                      <>
-                                        <div className={styles.menuSeparator} role="separator" />
-                                        <button type="button" role="menuitem" className={`${styles.menuItem} ${styles.menuItemDanger}`} onClick={() => { setOpenMenuId(null); setDeleting(session); }}>
-                                          {t("collab.session.delete")}
-                                        </button>
-                                      </>
-                                    ) : null}
-                                  </div>
-                                </>
-                              ) : null}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                      {member === "assist" ? assistFooter : total > SESSION_PAGE_SIZE ? (
-                        <nav className={styles.pager} aria-label={t("collab.sessions.pager")}>
-                          <span className={styles.pagerInfo}>
-                            {t("collab.sessions.pageInfo", {
-                              page: String(pageIndex + 1),
-                              pages: String(pageCount),
-                              total: String(total)
-                            })}
-                          </span>
-                          <span className={styles.grow} />
-                          <Button size="sm" variant="ghost" disabled={pageIndex === 0} onClick={() => setPageIndex(pageIndex - 1)}>
-                            {t("collab.sessions.prevPage")}
-                          </Button>
-                          <Button size="sm" variant="ghost" disabled={pageIndex >= pageCount - 1} onClick={() => setPageIndex(pageIndex + 1)}>
-                            {t("collab.sessions.nextPage")}
-                          </Button>
-                        </nav>
-                      ) : total > 0 ? (
-                        <p className={styles.pagerInfo}>{t("collab.sessions.totalOnly", { total: String(total) })}</p>
-                      ) : null}
-                      </>
-                    )}
                   </>
                 ) : (
                   <LocalProjectSessions
@@ -1900,6 +2055,12 @@ const CollabBoard = memo(function CollabBoard(props: {
             setSettingsOpen(false);
             showToast(t("collab.settings.unshared"));
           }}
+          onLeft={() => {
+            // 退出项目后不再是它的成员：回到项目列表，与其他成员共用过的任务不再显示。
+            setPage(null);
+            setSettingsOpen(false);
+            showToast(t("collab.leave.done"));
+          }}
           taskCount={localTasks.length}
           onPickSessions={() => {
             setSettingsOpen(false);
@@ -1999,8 +2160,8 @@ const CollabBoard = memo(function CollabBoard(props: {
       />
       <ConfirmDialog
         open={confirmBulkDelete}
-        title={t(member === "assist" ? "collab.assist.bulkDeleteTitle" : "collab.sessions.bulkDeleteTitle")}
-        message={member === "assist"
+        title={t(boardTab === "assists" ? "collab.assist.bulkDeleteTitle" : "collab.sessions.bulkDeleteTitle")}
+        message={boardTab === "assists"
           ? t("collab.assist.bulkDeleteMessage", { count: String(selected.size) })
           : t("collab.sessions.bulkDeleteMessage", { count: String(selected.size) })}
         cancelLabel={t("collab.cancel")}
@@ -2579,19 +2740,23 @@ function ProjectInstructionsDialog(props: {
 }
 
 /**
- * The board's settings: the one switch that decides whether this project's sessions leave the computer, and the
- * entry to choosing which of them members can read.
+ * The board's settings: three cards read top to bottom — who the project is shared with, whether this computer
+ * answers assist requests, and where the folder lives. Every row is a title, one line of description and a
+ * switch or a button on the right. Stopping sharing (or leaving, for a member) is one danger button at the
+ * bottom rather than a switch: it removes the cloud project, which cannot be undone.
  */
-function ProjectBoardSettingsDialog(props: {
+export function ProjectBoardSettingsDialog(props: {
   open: boolean;
   project: MemmyAgentProject;
   shared: CollabProject | null;
   collab: CollabClient | null;
-  /** API Key 模式没有云端账号：共享这一行只说清原因，不给开关。 */
+  /** API Key 模式没有云端账号：共享这一组只说清原因，不给开关。 */
   shareAvailable: boolean;
   onClose: () => void;
   onShared: () => void;
   onUnshared: () => void;
+  /** 已经退出这个项目：看板回到项目列表，本机项目与任务都还在。 */
+  onLeft: () => void;
   onPickSessions: () => void;
   /** 重新走一遍首次引导：新建协作项目时自动出现一次，之后只在这里重看。 */
   onReplayTour?: () => void;
@@ -2602,18 +2767,19 @@ function ProjectBoardSettingsDialog(props: {
 }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
-  /** Which switch is running, so a slow cloud says what it is doing instead of only greying the box. */
-  const [action, setAction] = useState<"sharing" | "stopping" | null>(null);
-  /** Asking again before a shared project leaves the cloud, since members lose access. */
-  const [confirmStop, setConfirmStop] = useState(false);
-  /** How many of the project's own sessions the cloud holds, shown as the sync row's detail. */
+  /** Which action is running, so a slow cloud says what it is doing instead of only greying the button. */
+  const [action, setAction] = useState<"sharing" | "stopping" | "leaving" | null>(null);
+  /** Asking again before the cloud project goes away, since members lose access either way. */
+  const [confirm, setConfirm] = useState<"stop" | "leave" | null>(null);
+  /** How many of the project's own sessions the cloud holds, shown as the sync row's value. */
   const [taskStats, setTaskStats] = useState<{ synced: number; total: number } | null>(null);
+  // 本机客户端只在「在文件夹中显示」上用；预览页自己提供一个空的上下文。
   const { clients } = useApiClients();
   const sharedId = props.shared?.id ?? null;
-  const ownedByOther = Boolean(props.shared && props.shared.role !== "owner");
+  const isOwner = props.shared?.role === "owner";
 
   useEffect(() => {
-    if (props.open) setConfirmStop(false);
+    if (props.open) setConfirm(null);
   }, [props.open, sharedId]);
 
   // The sync row says what is already there, so opening the settings reads the project's own sessions once.
@@ -2677,7 +2843,7 @@ function ProjectBoardSettingsDialog(props: {
       try {
         instructions = (await props.collab.deleteProject(sharedId))?.instructions ?? "none";
       } catch (cause) {
-        // Already gone from the cloud: the switch is off either way, so the local record follows.
+        // Already gone from the cloud: the state the person asked for already holds, so the local record follows.
         if (!(cause instanceof ApiRequestError && cause.status === 404)) throw cause;
       }
       removeCollabProject(sharedId);
@@ -2692,6 +2858,92 @@ function ProjectBoardSettingsDialog(props: {
     }
   }
 
+  /** Leaves a project someone else owns: the local project and its tasks stay, as after the owner stops sharing. */
+  async function leaveProject() {
+    if (!props.collab || !sharedId || busy) return;
+    setBusy(true);
+    setAction("leaving");
+    try {
+      try {
+        await props.collab.leaveProject(sharedId);
+      } catch (cause) {
+        // No longer in it: what the person asked for already holds.
+        if (!(cause instanceof ApiRequestError && cause.status === 404)) throw cause;
+      }
+      removeCollabProject(sharedId);
+      await loadCollabProjects(props.collab);
+      props.onLeft();
+    } catch (cause) {
+      props.onFailed(messageOf(cause) || t("collab.leave.failed"));
+    } finally {
+      setBusy(false);
+      setAction(null);
+    }
+  }
+
+  // 加载中不显示值，读完后是「暂无任务」或「已同步 x / y」。
+  const sessionsValue = taskStats === null
+    ? null
+    : taskStats.total === 0
+      ? t("collab.settings.sessionsNone")
+      : t("collab.settings.sessionsSynced", { synced: String(taskStats.synced), total: String(taskStats.total) });
+  const canLeave = Boolean(sharedId) && props.shareAvailable;
+  const dangerLabel = isOwner ? t("appFrame.project.stopSharing") : t("appFrame.project.leave");
+  const confirmTitle = confirm === "leave" ? t("collab.leave.title") : t("collab.settings.stopTitle");
+  const confirmBody = confirm === "leave"
+    ? t("collab.leave.message", { name: props.project.name })
+    : t("appFrame.project.stopSharingMessage", { name: props.project.name });
+  // 页脚只在需要右下角按钮或有进行中的动作时出现：没有它时正文自己收尾。
+  const showFooter = Boolean(confirm) || canLeave || action !== null;
+  // 确认块占满页脚；平时是右下角一个危险按钮，进行中的动作文字在左。
+  const footer = confirm ? (
+    <section className={styles.settingsConfirm} role="alertdialog" aria-label={confirmTitle}>
+      <b>{confirmTitle}</b>
+      <p>{confirmBody}</p>
+      <div className={styles.settingsConfirmButtons}>
+        <Button
+          size="sm"
+          variant="secondary"
+          className={styles.settingsButton}
+          disabled={busy}
+          onClick={() => setConfirm(null)}
+        >
+          {t("collab.cancel")}
+        </Button>
+        {/* 删除云端项目 / 退出项目都是破坏性操作，和侧栏确认框一致用实心 danger */}
+        <Button
+          size="sm"
+          variant="danger"
+          disabled={busy}
+          onClick={() => void (confirm === "leave" ? leaveProject() : stopSharing())}
+        >
+          {dangerLabel}
+        </Button>
+      </div>
+    </section>
+  ) : (
+    <>
+      {action ? (
+        <p className={styles.settingsFooterStatus} role="status">
+          {action === "sharing"
+            ? t("collab.settings.sharing")
+            : action === "stopping" ? t("collab.settings.stopping") : t("collab.settings.leaving")}
+        </p>
+      ) : null}
+      {canLeave ? (
+        <Button
+          size="sm"
+          variant="secondary"
+          className={`${styles.settingsButton} ${styles.settingsDangerButton}`}
+          disabled={busy}
+          onClick={() => setConfirm(isOwner ? "stop" : "leave")}
+        >
+          {dangerLabel}
+        </Button>
+      ) : null}
+    </>
+  );
+
   return (
     <Modal
       open={props.open}
@@ -2699,30 +2951,91 @@ function ProjectBoardSettingsDialog(props: {
       onClose={props.onClose}
       closeLabel={t("common.close")}
       closeContent={<X size={16} aria-hidden="true" />}
-      className={styles.createModal}
+      className={`${styles.createModal} ${styles.settingsModal}`}
       backdropClassName={styles.backdrop}
-      footer={(
-        <>
-          <span />
-          <span className={styles.footerButtons}>
-            {/* 开关改动即时生效，没有可取消的东西 */}
-            <Button onClick={props.onClose}>{t("common.close")}</Button>
-          </span>
-        </>
-      )}
+      // 正文与页脚按这一屏自己的排布：卡片之间 12px，页脚只在需要右下角按钮时出现。
+      bodyClassName={`${styles.settingsBody}${showFooter ? "" : ` ${styles.settingsBodyLast}`}`}
+      footer={showFooter ? footer : undefined}
+      footerClassName={styles.settingsFooter}
     >
-      {/* 行式列表：左侧标题与说明，右侧控件，行间细线；与设置页同一套排布 */}
-      <div className={styles.settingsRows}>
-        <div className={styles.settingsRow}>
-          <div className={styles.settingsRowText}>
-            <div className={styles.settingsRowTitle}>{props.project.name}</div>
-            <div className={`${styles.settingsRowDesc} ${styles.settingsRowPath}`} title={props.project.rootPath}>
-              {props.project.rootPath}
+      <section className={styles.settingsCard}>
+        <div className={styles.settingsCardHead}>
+          <span className={styles.settingsCardChip}><Users size={14} aria-hidden="true" /></span>
+          <h3 className={styles.settingsCardTitle}>{t("collab.settings.groupSharing")}</h3>
+        </div>
+        {!props.shareAvailable ? (
+          // API Key 模式没有云端账号：这一行只说清原因，右侧没有控件。
+          <div className={styles.settingsCardRow}>
+            <div className={styles.settingsCardText}>
+              <span className={styles.settingsCardRowTitle}>{t("collab.create.share")}</span>
+              <span className={styles.settingsCardRowDesc}>{t("collab.settings.shareByokHint")}</span>
             </div>
           </div>
-          <div className={styles.settingsRowControl}>
+        ) : sharedId ? (
+          // 已共享之后开关会让整个云端项目消失，不适合放在这里：只报同步了多少任务。
+          <div className={styles.settingsCardRow}>
+            <div className={styles.settingsCardText}>
+              <span className={styles.settingsCardRowTitle}>{t("collab.settings.sessionsRow")}</span>
+              <span className={styles.settingsCardRowDesc}>{sessionsValue ?? t("collab.loading")}</span>
+            </div>
+            <div className={styles.settingsCardControl}>
+              <Button
+                size="sm"
+                variant="secondary"
+                className={styles.settingsButton}
+                onClick={props.onPickSessions}
+              >
+                {t("collab.settings.pickSessions")}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className={styles.settingsCardRow}>
+            <div className={styles.settingsCardText}>
+              <span className={styles.settingsCardRowTitle}>{t("collab.create.share")}</span>
+              <span className={styles.settingsCardRowDesc}>{t("collab.settings.shareOffHint")}</span>
+            </div>
+            <div className={styles.settingsCardControl}>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={false}
+                aria-label={t("collab.create.share")}
+                disabled={busy || !props.collab}
+                onClick={() => void startSharing()}
+                className={styles.settingsSwitch}
+              />
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* 成员协助：本人在这个项目里是否接收协助请求（默认关闭），开启时列出她给出的限时授权。
+          只在账号模式、已共享的项目里出现；组件自己带「协助」这张卡片。 */}
+      {sharedId && props.shareAvailable ? (
+        <CollabAssistProjectSettings client={props.collab} projectId={sharedId} />
+      ) : null}
+
+      <section className={styles.settingsCard}>
+        <div className={styles.settingsCardHead}>
+          <span className={styles.settingsCardChip}><Folder size={14} aria-hidden="true" /></span>
+          <h3 className={styles.settingsCardTitle}>{t("collab.settings.groupProject")}</h3>
+        </div>
+        <div className={styles.settingsCardRow}>
+          <div className={styles.settingsCardText}>
+            <span className={styles.settingsCardRowTitle}>{t("collab.settings.folder")}</span>
+            <span
+              className={`${styles.settingsCardRowDesc} ${styles.settingsCardPath}`}
+              title={props.project.rootPath}
+            >
+              {formatWorkspacePath(props.project.rootPath)}
+            </span>
+          </div>
+          <div className={styles.settingsCardControl}>
             <Button
               size="sm"
+              variant="secondary"
+              className={styles.settingsButton}
               disabled={!clients?.memmyAgent}
               onClick={() => void clients?.memmyAgent?.revealProject(props.project.id, { timeoutMs: 15_000 })}
             >
@@ -2730,96 +3043,25 @@ function ProjectBoardSettingsDialog(props: {
             </Button>
           </div>
         </div>
-
-        <div className={styles.settingsRow}>
-          <div className={styles.settingsRowText}>
-            <div className={styles.settingsRowTitle}>{t("collab.create.share")}</div>
-            <div className={styles.settingsRowDesc}>
-              {!props.shareAvailable
-                ? t("collab.settings.shareByokHint")
-                : ownedByOther
-                  ? t("collab.settings.memberHint")
-                  : sharedId ? t("collab.settings.shareOnHint") : t("collab.settings.shareOffHint")}
-            </div>
-          </div>
-          <div className={styles.settingsRowControl}>
-            {props.shareAvailable ? (
-              <button
-                type="button"
-                role="switch"
-                aria-checked={Boolean(sharedId)}
-                aria-label={t("collab.create.share")}
-                // Turning sharing off deletes the cloud project, which only its owner may do.
-                disabled={busy || ownedByOther || (!sharedId && !props.collab)}
-                onClick={() => {
-                  if (sharedId) setConfirmStop(true);
-                  else void startSharing();
-                }}
-                className={`${styles.settingsSwitch}${sharedId ? ` ${styles.settingsSwitchOn}` : ""}`}
-              />
-            ) : null}
-          </div>
-        </div>
-
-        {sharedId ? (
-          <div className={styles.settingsRow}>
-            <div className={styles.settingsRowText}>
-              <div className={styles.settingsRowTitle}>{t("collab.settings.sessionsRow")}</div>
-              <div className={styles.settingsRowDesc}>
-                {taskStats === null
-                  ? t("collab.settings.sessionsFallback")
-                  : taskStats.total === 0
-                    ? t("collab.settings.sessionsEmpty")
-                    : t("collab.settings.sessionsHint", {
-                      synced: String(taskStats.synced),
-                      total: String(taskStats.total)
-                    })}
-              </div>
-            </div>
-            <div className={styles.settingsRowControl}>
-              <Button size="sm" onClick={props.onPickSessions}>{t("collab.settings.pickSessions")}</Button>
-            </div>
-          </div>
-        ) : null}
-
-        {/* 成员协助：本人在这个项目里是否接收协助请求（默认关闭），开启时列出她给出的限时授权。
-            只在账号模式、已共享的项目里出现。 */}
-        {sharedId && props.shareAvailable && props.open ? (
-          <CollabAssistProjectSettings client={props.collab} projectId={sharedId} />
-        ) : null}
-
         {sharedId && props.onReplayTour ? (
-          <div className={styles.settingsRow}>
-            <div className={styles.settingsRowText}>
-              <div className={styles.settingsRowTitle}>{t("collab.settings.tour.title")}</div>
-              <div className={styles.settingsRowDesc}>{t("collab.settings.tour.desc")}</div>
+          <div className={styles.settingsCardRow}>
+            <div className={styles.settingsCardText}>
+              <span className={styles.settingsCardRowTitle}>{t("collab.settings.tourLabel")}</span>
+              <span className={styles.settingsCardRowDesc}>{t("collab.settings.tourDesc")}</span>
             </div>
-            <div className={styles.settingsRowControl}>
-              <Button size="sm" onClick={props.onReplayTour}>{t("collab.settings.tour.action")}</Button>
+            <div className={styles.settingsCardControl}>
+              <Button
+                size="sm"
+                variant="secondary"
+                className={styles.settingsButton}
+                onClick={props.onReplayTour}
+              >
+                {t("collab.settings.tour.action")}
+              </Button>
             </div>
           </div>
         ) : null}
-      </div>
-      {action ? (
-        <p className={styles.settingsBusy} role="status">
-          {action === "sharing" ? t("collab.settings.sharing") : t("collab.settings.stopping")}
-        </p>
-      ) : null}
-      {confirmStop && sharedId ? (
-        <section className={styles.stopSharing} role="alertdialog" aria-label={t("collab.settings.stopTitle")}>
-          <b>{t("collab.settings.stopTitle")}</b>
-          <p>{t("appFrame.project.stopSharingMessage", { name: props.project.name })}</p>
-          <div className={styles.footerButtons}>
-            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirmStop(false)}>
-              {t("collab.cancel")}
-            </Button>
-            {/* 删除云端项目是破坏性操作，和侧栏确认框一致用 danger */}
-            <Button size="sm" variant="danger" disabled={busy} onClick={() => void stopSharing()}>
-              {t("appFrame.project.stopSharing")}
-            </Button>
-          </div>
-        </section>
-      ) : null}
+      </section>
     </Modal>
   );
 }

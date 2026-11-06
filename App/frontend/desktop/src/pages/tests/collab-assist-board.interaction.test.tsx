@@ -9,6 +9,7 @@ import type { ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistRequest, AssistThread } from "../../api/collab-client.js";
+import { consumeAssistFocus, getAssistFocus, requestAssistFocus } from "../../app/collab-assist-focus.js";
 import { resetCollabProjectsStore } from "../../app/collab-projects-store.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { CollabPage } from "../collab-page.js";
@@ -119,6 +120,33 @@ function clickText(text: string): void {
   act(() => target.click());
 }
 
+/** 切到某个看板 tab：「协助」后面可能带数字，按前缀找。 */
+function clickTab(label: string): void {
+  const target = [...document.querySelectorAll<HTMLElement>("[role='tab']")]
+    .find((node) => node.textContent?.trim().startsWith(label));
+  if (!target) throw new Error(`没有找到 tab「${label}」`);
+  act(() => target.click());
+}
+
+/** 成员筛选下拉的触发按钮。 */
+function memberFilter(): HTMLElement {
+  const element = document.querySelector<HTMLElement>("[aria-label='按成员筛选']");
+  if (!element) throw new Error("工具条里没有成员筛选下拉");
+  return element;
+}
+
+function memberFilterLabel(): string {
+  return memberFilter().textContent?.trim() ?? "";
+}
+
+/** 点开下拉并选中一项。 */
+function pickMember(label: string): void {
+  act(() => memberFilter().click());
+  const option = [...document.querySelectorAll<HTMLElement>("[role='option']")].find((node) => node.textContent?.trim() === label);
+  if (!option) throw new Error(`下拉里没有「${label}」`);
+  act(() => option.click());
+}
+
 function clickTextIn(scope: string, text: string): void {
   const container = [...document.querySelectorAll(scope)].at(-1);
   const target = container ? [...container.querySelectorAll<HTMLElement>("button")].find((node) => node.textContent?.trim() === text) : null;
@@ -173,24 +201,43 @@ describe("assists on the project board", () => {
     await flush();
   }
 
-  it("keeps assists out of 全部 and only raises the ones waiting for you above the tasks", async () => {
+  it("keeps assists out of the tasks tab and only raises the ones waiting for you above the tasks", async () => {
     const waiting = thread(request("w1", "pending"), { title: "看一下 ~/.memmy 的大小" });
     const done = thread(request("d1", "done"));
     await renderBoard([waiting, done]);
 
-    // 「全部」里只有项目任务。
+    // 默认在「任务」：里面只有项目任务，没有协助行。
+    const selectedTab = () => document.querySelector("[role='tab'][aria-selected='true']")?.textContent;
+    expect(selectedTab()).toBe("任务");
     expect(document.querySelectorAll("[data-collab-assist-row]")).toHaveLength(0);
     expect(document.body.textContent).toContain("分享弹窗的排查记录");
     // 等你授权的那一条单独提示；已完成的不提示。
     const banner = document.querySelector("[data-collab-assist-waiting]");
     expect(banner?.textContent).toContain("孙起请你协助「看一下 ~/.memmy 的大小」，等你处理");
-    // 「协助」上的数字只数等你处理的。
-    const filter = [...document.querySelectorAll("button")].find((node) => node.textContent?.startsWith("协助"));
-    expect(filter?.textContent).toBe("协助1");
+    // 「协助」tab 上的数字只数等你处理的。
+    expect(selectedTab()).toBe("任务");
+    expect([...document.querySelectorAll("[role='tab']")].map((node) => node.textContent)).toEqual(["任务", "协助1"]);
+
+    // 只有一条时，「去处理」直接切到「协助」并展开这一条。
+    clickText("去处理");
+    await flush();
+    expect(selectedTab()).toBe("协助1");
+    expect(document.querySelector("[data-collab-assist-conversation]")?.textContent).toContain("看一下 ~/.memmy 的大小");
+  });
+
+  it("switches to the assists tab without opening a thread when several are waiting", async () => {
+    const first = thread(request("w1", "pending"), { title: "看一下 ~/.memmy 的大小" });
+    const second = thread(request("w2", "confirm"), { title: "另一个要确认的请求" });
+    await renderBoard([first, second]);
 
     clickText("去处理");
     await flush();
-    expect(document.querySelector("[data-collab-assist-conversation]")?.textContent).toContain("看一下 ~/.memmy 的大小");
+    expect(document.querySelector("[role='tab'][aria-selected='true']")?.textContent).toBe("协助2");
+    expect(document.querySelector("[data-collab-assist-conversation]")).toBeNull();
+    // 等你处理的总排在最前。
+    const titles = [...document.querySelectorAll<HTMLElement>("[data-collab-assist-row]")].map((row) => row.textContent ?? "");
+    expect(titles[0]).toContain("看一下 ~/.memmy 的大小");
+    expect(titles[1]).toContain("另一个要确认的请求");
   });
 
   it("does not count an assist that a timed grant will run on its own", async () => {
@@ -205,7 +252,7 @@ describe("assists on the project board", () => {
     const expired = thread(request("e1", "expired"), { title: "过期的请求" });
     await renderBoard([done, rejected, expired], { maxThreads: 100, prunedAt: "2026-11-05T03:00:00Z" });
 
-    clickText("协助");
+    clickTab("协助");
     await flush();
     expect(document.querySelectorAll("[data-collab-assist-row]")).toHaveLength(1);
     expect(document.body.textContent).toContain("较早的协助已按项目上限清理（每个项目最多保留 100 次）");
@@ -221,7 +268,7 @@ describe("assists on the project board", () => {
     await renderBoard([done]);
     mocks.hideAssistThread.mockResolvedValue({ threadId: done.threadId, removed: "hidden" });
 
-    clickText("协助");
+    clickTab("协助");
     await flush();
     act(() => document.querySelector<HTMLElement>("[data-collab-assist-row]")!.click());
     await flush();
@@ -245,7 +292,7 @@ describe("assists on the project board", () => {
     const running = thread(request("x1", "running", { agent: "memmy" }), { title: "还在跑" });
     await renderBoard([done, running]);
     mocks.hideAssistThread.mockResolvedValue({ threadId: done.threadId, removed: "deleted" });
-    clickText("协助");
+    clickTab("协助");
     await flush();
 
     const rows = [...document.querySelectorAll<HTMLElement>("[data-collab-assist-row]")];
@@ -272,7 +319,7 @@ describe("assists on the project board", () => {
     const running = thread(request("x1", "running", { agent: "memmy" }), { title: "还在跑" });
     await renderBoard([first, second, running]);
     mocks.hideAssistThread.mockImplementation(async (_project: string, threadId: string) => ({ threadId, removed: "hidden" }));
-    clickText("协助");
+    clickTab("协助");
     await flush();
 
     clickText("多选");
@@ -294,11 +341,107 @@ describe("assists on the project board", () => {
   it("offers no removal while an assist is still running", async () => {
     const running = thread(request("x1", "running", { agent: "memmy" }));
     await renderBoard([running]);
-    clickText("协助");
+    clickTab("协助");
     await flush();
     act(() => document.querySelector<HTMLElement>("[data-collab-assist-row]")!.click());
     await flush();
     const panel = document.querySelector("[data-collab-assist-conversation]")!;
     expect([...panel.querySelectorAll("button")].some((node) => node.textContent === "删除")).toBe(false);
+  });
+  it("shows the two tabs only for a shared project, and starts on tasks", async () => {
+    // 云端没有这个项目的记录：本机项目没有协助，tab 行不出现，行为与从前一致。
+    mocks.listProjects.mockResolvedValue([]);
+    await renderBoard([]);
+    expect(document.querySelector("[role='tablist']")).toBeNull();
+    expect(document.body.textContent).toContain("这个项目还没有任务");
+  });
+
+  it("shows no number on the assists tab when nothing is waiting for you", async () => {
+    await renderBoard([thread(request("d1", "done"))]);
+    const tabs = [...document.querySelectorAll("[role='tab']")].map((node) => node.textContent);
+    expect(tabs).toEqual(["任务", "协助"]);
+  });
+
+  it("gives the assists tab its own toolbar: a visibility hint, no member filter, no search, no linking", async () => {
+    await renderBoard([thread(request("d1", "done"))]);
+    clickTab("协助");
+    await flush();
+
+    expect(document.body.textContent).toContain("仅发起人和执行人可见");
+    expect(document.querySelector("[aria-label='按成员筛选']")).toBeNull();
+    expect(document.querySelector("input[aria-label='搜索任务标题、问题或成员']")).toBeNull();
+    expect([...document.querySelectorAll("button")].some((node) => node.textContent?.trim() === "关联任务")).toBe(false);
+    // 刷新仍在。
+    expect(document.querySelector("[aria-label='刷新']")).not.toBeNull();
+  });
+
+  it("orders assists waiting for you first, then open ones, then finished, newest first in each group", async () => {
+    const waiting = thread(request("w1", "pending"), { title: "等你授权", lastActiveAt: "2026-10-30T00:00:00.000Z" });
+    const running = thread(request("x1", "running", { agent: "memmy" }), { title: "正在执行", lastActiveAt: "2026-11-02T00:00:00.000Z" });
+    const finishedOld = thread(request("d1", "done"), { title: "较早结束", lastActiveAt: "2026-11-01T00:00:00.000Z" });
+    const finishedNew = thread(request("d2", "done"), { title: "最近结束", lastActiveAt: "2026-11-05T00:00:00.000Z" });
+    await renderBoard([finishedOld, waiting, finishedNew, running]);
+    clickTab("协助");
+    await flush();
+
+    const titles = [...document.querySelectorAll<HTMLElement>("[data-collab-assist-row]")]
+      .map((row) => ["等你授权", "正在执行", "最近结束", "较早结束"].find((title) => row.textContent?.includes(title)));
+    expect(titles).toEqual(["等你授权", "正在执行", "最近结束", "较早结束"]);
+  });
+
+  it("explains both ways to start an assist when there are none, and opens the settings", async () => {
+    await renderBoard([]);
+    clickTab("协助");
+    await flush();
+
+    expect(document.body.textContent).toContain("还没有协助");
+    expect(document.body.textContent).toContain("本机复现不了的问题，可以请项目成员在他的电脑上执行，结果自动回到你的对话。协助只有发起人和执行人看得到。");
+    expect(document.body.textContent).toContain("发起协助");
+    expect(document.body.textContent).toContain("在装有协作组件的 Agent 对话中说明请哪位成员协助");
+    expect(document.body.textContent).toContain("接收协助");
+    expect(document.body.textContent).toContain("在项目设置中开启「接收协助请求」后，成员才能向你发起请求");
+
+    clickText("打开项目设置");
+    await flush();
+    expect(document.body.textContent).toContain("同步的任务");
+  });
+
+  it("keeps the task filter when you leave the tasks tab and come back", async () => {
+    await renderBoard([thread(request("d1", "done"))]);
+    pickMember("成员任务");
+    await flush();
+    expect(memberFilterLabel()).toBe("成员任务");
+
+    clickTab("协助");
+    await flush();
+    expect(document.querySelector("[aria-label='按成员筛选']")).toBeNull();
+
+    clickTab("任务");
+    await flush();
+    expect(memberFilterLabel()).toBe("成员任务");
+  });
+
+  it("leaves selection mode when switching tabs", async () => {
+    const done = thread(request("d1", "done"), { title: "查版本" });
+    await renderBoard([done]);
+    clickTab("协助");
+    await flush();
+    clickText("多选");
+    expect(document.body.textContent).toContain("已选 0 个");
+
+    clickTab("任务");
+    await flush();
+    expect(document.body.textContent).not.toContain("已选 0 个");
+  });
+  it("switches to the assists tab when a notification brings you to a thread", async () => {
+    const done = thread(request("d1", "done"), { title: "查版本" });
+    requestAssistFocus({ projectId: project.id, threadId: done.threadId });
+    await renderBoard([done]);
+    await flush();
+
+    expect(document.querySelector("[role='tab'][aria-selected='true']")?.textContent).toBe("协助");
+    expect(document.querySelector("[data-collab-assist-conversation]")?.textContent).toContain("查版本");
+    expect(getAssistFocus()).toBeNull();
+    consumeAssistFocus();
   });
 });

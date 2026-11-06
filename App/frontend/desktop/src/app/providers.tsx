@@ -15,7 +15,8 @@ export interface ApiClientsContextValue {
   setClients: Dispatch<SetStateAction<AppClients | null>>;
 }
 
-const ApiClientsContext = createContext<ApiClientsContextValue | null>(null);
+/** 导出给预览页：没有走 AppProviders 时也能渲染需要本机客户端的弹窗（客户端为空即可）。 */
+export const ApiClientsContext = createContext<ApiClientsContextValue | null>(null);
 
 /** Handles app providers. */
 export function AppProviders(props: { children: ReactNode }) {

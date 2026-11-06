@@ -4,10 +4,10 @@
  * 沿用记忆管理的产品引导（app/product-tour.tsx）的做法：遮罩挖出目标区域，气泡跟着目标走，
  * 「跳过引导」与最后一步都写入本机记录。与那套引导的差别有两点：
  * 一是这里不换页面，看板就是全部内容；二是新建的协作项目还没有任务，
- * 「通过对话共享」与「继续任务」用两行示例任务来说明，引导结束即消失。
+ * 「通过对话共享」与「继续任务」用两行示例任务来说明，讲到协助那一步换成一行示例协助，引导结束即消失。
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { Link2, MessageSquarePlus, MessagesSquare, MoreHorizontal, UserPlus } from "lucide-react";
+import { LifeBuoy, Link2, MessageSquarePlus, MessagesSquare, MoreHorizontal, UserPlus } from "lucide-react";
 import {
   createDomProductTourAnchorLookup,
   type ProductTourRect,
@@ -28,6 +28,10 @@ export const COLLAB_TOUR_ANCHORS = {
   header: "collab-tour-board-header",
   /** 头部的「邀请」。 */
   invite: "collab-tour-invite",
+  /** 「任务」与「协助」两个 tab 那一行。 */
+  tabs: "collab-tour-tabs",
+  /** tab 行里的「协助」。 */
+  assistTab: "collab-tour-assist-tab",
   /** 筛选与搜索那一行工具条。 */
   toolbar: "collab-tour-toolbar",
   /** 工具条右侧的「关联任务」。 */
@@ -38,6 +42,8 @@ export const COLLAB_TOUR_ANCHORS = {
   sampleContinue: "collab-tour-sample-continue",
   /** 上面那条任务「…」菜单里的「继续任务」。 */
   sampleContinueItem: "collab-tour-sample-continue-item",
+  /** 示例协助：从 Agent 对话请成员协助的那一条。 */
+  sampleAssist: "collab-tour-sample-assist",
   /** 侧栏里当前项目右侧的「＋」。 */
   sidebarNewTask: "collab-tour-sidebar-new-task"
 } as const;
@@ -65,10 +71,10 @@ export function writeCollabTourSeen(storage: Storage | undefined = typeof window
 }
 
 /** 步骤标识，看板据此决定显示哪几行示例任务。 */
-export type CollabTourStepKey = "intro" | "invite" | "associate" | "share" | "continue" | "newTask";
+export type CollabTourStepKey = "intro" | "invite" | "associate" | "share" | "continue" | "assist" | "newTask";
 
 /** 步骤顺序：看板与引导层共用这一份，示例行与高亮不会错位。 */
-export const COLLAB_TOUR_STEP_KEYS: CollabTourStepKey[] = ["intro", "invite", "associate", "share", "continue", "newTask"];
+export const COLLAB_TOUR_STEP_KEYS: CollabTourStepKey[] = ["intro", "invite", "associate", "share", "continue", "assist", "newTask"];
 
 /** 契约：协作引导的一步。 */
 export interface CollabTourStep {
@@ -85,14 +91,16 @@ export interface CollabTourStep {
   bubbleAlign: "start" | "end" | "center";
   /** 带对话或输入框示意的步骤加宽气泡。 */
   wide?: boolean;
-  illustration?: "share" | "continue";
+  illustration?: "share" | "continue" | "assist";
   /** 最后一步的主按钮改为「开始使用」。 */
   last?: boolean;
 }
 
 /**
- * 六步引导的顺序：先说清这个区域与项目里的任务是什么，再把已有的工作带进来（关联或对话共享），
- * 然后接着说下去，最后给出第一条任务该从哪里新建。
+ * 七步引导的顺序：先说清这个区域与项目里的任务是什么，再把已有的工作带进来（关联或对话共享），
+ * 然后接着说下去，再说明可以请成员协助，最后给出第一条任务该从哪里新建。
+ *
+ * 协助放在「继续任务」之后：它同样是「从对话里把工作接着做」的下一种用法，与项目里的任务区分开讲。
  *
  * @param text 当前语言的取值函数。
  * @returns 步骤定义。
@@ -157,6 +165,19 @@ export function createCollabTourSteps(
       bubbleAlign: "end",
       wide: true,
       illustration: "continue"
+    },
+    {
+      key: "assist",
+      title: text("collab.tour.assist.title"),
+      body: text("collab.tour.assist.body"),
+      icon: <LifeBuoy size={15} aria-hidden="true" />,
+      pose: "connect",
+      highlight: COLLAB_TOUR_ANCHORS.assistTab,
+      extras: [COLLAB_TOUR_ANCHORS.sampleAssist],
+      bubbleSide: "below",
+      bubbleAlign: "start",
+      wide: true,
+      illustration: "assist"
     },
     {
       key: "newTask",
@@ -454,6 +475,18 @@ export function CollabTourOverlay(props: {
             <div className={styles.composeFoot}>{props.projectName}</div>
           </div>
         ) : null}
+        {current.illustration === "assist" ? (
+          <div className={styles.chat}>
+            <div className={styles.chatHead}>
+              <MessagesSquare size={13} aria-hidden="true" />
+              {t("collab.tour.share.agent")}
+            </div>
+            <div className={styles.chatAsk}>{t("collab.tour.assist.ask")}</div>
+            <div className={styles.chatAnswer}>{t("collab.tour.assist.answer")}</div>
+            {/* 请求只是发出去了：对方要先允许一次，这里把那一步提前说清 */}
+            <div className={styles.chatNote}>{t("collab.tour.assist.note")}</div>
+          </div>
+        ) : null}
         <div className={styles.footer}>
           <button type="button" className={styles.skip} onClick={props.onSkip}>{t("collab.tour.skip")}</button>
           <span className={styles.footerButtons}>
@@ -474,7 +507,8 @@ export function CollabTourOverlay(props: {
 /**
  * 引导期间的示例任务行。引导期间整页都是引导自己的示例页：新建的协作项目里没有任务，
  * 从项目设置重看时也不拿真实任务充数（它们就在下方一屏之外，混在一起分不清哪条是演示）。
- * 两行用来演示「通过对话共享」与「继续任务」，不可点击，结束引导后随组件一起消失。
+ * 两行用来演示「通过对话共享」与「继续任务」，讲到协助的那一步只留一行示例协助。
+ * 示例行都不可点击，结束引导后随组件一起消失。
  */
 export function CollabTourTaskList(props: {
   step: number;
@@ -526,8 +560,41 @@ export function CollabTourTaskList(props: {
     </li>
   );
 
+  /**
+   * 示例协助行：外观与看板上的协助行一致（图标、协助标签、谁请谁 · Agent · 状态 · 时间），只少一个「…」菜单——
+   * 演示用的行不能删也不能点开。
+   */
+  const sampleAssistRow = () => {
+    const meta = [
+      t("collab.assist.boardRoute", { requester: you, executor: t("collab.tour.sample.assist.member") }),
+      t("collab.tour.share.agent"),
+      t("collab.assist.state.done"),
+      t("collab.tour.sample.assist.time")
+    ].join(" · ");
+    return (
+      <li
+        key="sample-assist"
+        className={boardStyles.row}
+        data-tour-anchor={COLLAB_TOUR_ANCHORS.sampleAssist}
+      >
+        <span className={`${boardStyles.avatar} ${boardStyles.assistIcon}`} aria-hidden="true">
+          <LifeBuoy size={15} />
+        </span>
+        <div className={boardStyles.rowText}>
+          <span className={boardStyles.rowTitle}>
+            <span className={boardStyles.assistTag}>{t("collab.assist.tag")}</span>
+            {t("collab.tour.sample.assist.title")}
+          </span>
+          <span className={boardStyles.rowSummary}>{t("collab.tour.sample.assist.summary")}</span>
+        </div>
+        <span className={boardStyles.meta}>{meta}</span>
+      </li>
+    );
+  };
+
   return (
     <ul className={`${boardStyles.list} ${boardStyles.stream} ${boardStyles.flatStream} ${styles.samples}`} aria-label={t("collab.tour.samplesLabel")}>
+      {key === "assist" ? sampleAssistRow() : null}
       {showShared
         ? sampleRow({
           anchor: COLLAB_TOUR_ANCHORS.sampleShared,
@@ -537,7 +604,7 @@ export function CollabTourTaskList(props: {
           meta: t("collab.tour.sample.mine.meta")
         })
         : null}
-      {sampleRow({
+      {key === "assist" ? null : sampleRow({
         anchor: COLLAB_TOUR_ANCHORS.sampleContinue,
         name: memberName,
         title: t("collab.tour.sample.member.title"),

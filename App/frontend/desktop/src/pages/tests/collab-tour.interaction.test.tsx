@@ -2,7 +2,7 @@
 
 /**
  * 协作项目的首次引导（teach mode）。
- * 断言落在三件事上：第一次建立协作时才出现、六步的顺序与演示内容对得上、完成或跳过都记在本机，
+ * 断言落在三件事上：第一次建立协作时才出现、七步的顺序与演示内容对得上、完成或跳过都记在本机，
  * 以及项目设置里能重新查看。样式与位置不在这里测。
  */
 import { act } from "react";
@@ -147,13 +147,17 @@ describe("collab board teach mode", () => {
     window.localStorage.clear();
   });
 
-  it("走完六步，最后一步把完成记录写在本机", async () => {
+  it("走完七步，最后一步把完成记录写在本机", async () => {
     requestCollabTour("local-1");
     await mount();
 
     // 第一步先说清这个区域与项目里的任务是什么。
     expect(document.body.textContent).toContain("这里是项目看板");
-    expect(document.body.textContent).toContain("1/6");
+    expect(document.body.textContent).toContain("1/7");
+    // 第一步顺带说明看板的两个 tab。
+    expect(document.body.textContent).toContain("「任务」里是项目共享的任务，「协助」里是你与成员之间的协助。");
+    // 引导期间 tab 行是演示：除了讲协助那一步，都按「任务」显示。
+    expect(document.querySelector("[role='tab'][aria-selected='true']")?.textContent).toBe("任务");
     // 第一步没有上一步。
     expect(buttonByText("上一步")).toBeUndefined();
     // 空项目的说明卡片让位给引导：同一件事不在两处讲。
@@ -183,8 +187,27 @@ describe("collab board teach mode", () => {
     expect(document.body.textContent).toContain("继续任务");
     expect(document.body.textContent).toContain("帮我继续这部分工作");
 
+    await click("下一步"); // 请成员协助
+    expect(document.body.textContent).toContain("请成员协助");
+    expect(document.body.textContent).toContain("请李四在他的电脑上复现这个报错");
+    expect(document.body.textContent).toContain("已向李四发送协助请求，对方允许后开始执行。");
+    expect(document.body.textContent).toContain("成员需要先在项目设置中开启「接收协助请求」。");
+    // 这一步只演示一行示例协助：任务示例让位，同一屏不混两种内容。
+    expect(countText("退款回调重复通知")).toBe(1);
+    expect(document.querySelector("[data-tour-anchor='collab-tour-sample-assist']")?.textContent)
+      .toContain("你 → 李四 · Claude Code · 已完成 · 10:42");
+    expect(countText("支付接口联调")).toBe(0);
+    expect(countText("首页改版走查")).toBe(0);
+    // tab 行按协助展示：选中在「协助」，高亮锚点在它上面。
+    expect(document.querySelector("[role='tab'][aria-selected='true']")?.textContent).toBe("协助");
+    expect(document.querySelector("[data-tour-anchor='collab-tour-assist-tab']")).not.toBeNull();
+    expect(document.querySelector("[data-tour-anchor='collab-tour-tabs']")).not.toBeNull();
+
     await click("下一步"); // 新建第一个任务
     expect(document.body.textContent).toContain("新建第一个任务");
+    // 回到任务那一步：tab 重新按「任务」演示。
+    expect(document.querySelector("[role='tab'][aria-selected='true']")?.textContent).toBe("任务");
+    expect(document.body.textContent).toContain("支付接口联调");
 
     await click("开始使用");
     expect(tourDialog()).toBeNull();

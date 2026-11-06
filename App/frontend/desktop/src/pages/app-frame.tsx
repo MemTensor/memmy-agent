@@ -59,6 +59,7 @@ import { agentChatScopeKey, shouldCreateNewAgentDraft } from "../state/agent-com
 import type { AgentTaskView } from "../state/agent-chat-slice.js";
 import { decideTaskDoneNotification } from "../state/task-done-notification.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
+import { formatWorkspacePath } from "../app/workspace-path.js";
 import { WindowsTitlebar } from "../components/windows-titlebar.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { isWindowsDesktopPlatform } from "../utils/window-fullscreen.js";
@@ -2080,6 +2081,8 @@ export function AppFrame(props: AppFrameProps) {
       <CollabAssistHost
         collab={collabClient}
         enabled={collabEnabled && Boolean(state.account.userId)}
+        // 正开着看板时，那个项目的待处理请求已经显示在看板上，不再计入右下角角标。
+        boardProjectId={boardProjectId}
         onOpenTask={(conversationId) => {
           void openAgentTaskInChat({ memmyAgent: clients?.memmyAgent, dispatch, task: { sessionKey: `websocket:${conversationId}` } });
         }}
@@ -3218,15 +3221,8 @@ export function sameWorkspacePath(left: string, right: string): boolean {
   return normalize(left) === normalize(right);
 }
 
-function formatSidebarWorkspacePath(rootPath: string): string {
-  return rootPath
-    .replace(/\\/g, "/")
-    .replace(/^\/Users\/[^/]+/, "~")
-    .replace(/^\/home\/[^/]+/, "~");
-}
-
 function formatSidebarCompactWorkspacePath(rootPath: string, maxWidth = 28): string {
-  const displayPath = formatSidebarWorkspacePath(rootPath).replace(/\/+$/, "");
+  const displayPath = formatWorkspacePath(rootPath).replace(/\/+$/, "");
   if (displayPath.length <= maxWidth) return displayPath;
   const folder = displayPath.split("/").filter(Boolean).pop() ?? displayPath;
   const prefix = displayPath.slice(0, Math.max(4, maxWidth - folder.length - 4));
@@ -3240,7 +3236,7 @@ function filterSidebarWorkspaceProjects(projects: MemmyAgentProject[], query: st
   );
   if (!normalized) return sorted;
   return sorted.filter((project) => {
-    const displayPath = formatSidebarWorkspacePath(project.rootPath).toLocaleLowerCase();
+    const displayPath = formatWorkspacePath(project.rootPath).toLocaleLowerCase();
     return project.name.toLocaleLowerCase().includes(normalized)
       || project.rootPath.toLocaleLowerCase().includes(normalized)
       || displayPath.includes(normalized);
@@ -3309,7 +3305,7 @@ function SidebarWorkspacePickerMenu(props: {
               role="option"
               aria-selected="false"
               className="home-project-picker__option"
-              title={formatSidebarWorkspacePath(project.rootPath)}
+              title={formatWorkspacePath(project.rootPath)}
               onClick={() => props.onSelectProject(project.id)}
             >
               <Folder size={13} className="shrink-0" aria-hidden="true" />
