@@ -41,7 +41,7 @@ function outcomeNotice(
       return {
         variant: "success",
         title: t("collab.assist.outcome.doneTitle", { name }),
-        body: t("collab.assist.outcome.doneBody", { title, via: outcome.via })
+        body: t("collab.assist.outcome.doneBody", { title, via: outcome.via, name })
       };
     case "rejected":
       // 她关闭了接收协助请求时，原因写在 failure 里：照原因说。

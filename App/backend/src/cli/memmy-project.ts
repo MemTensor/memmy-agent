@@ -33,6 +33,7 @@ const USAGE = [
   "  memmy-project assist ask --project <project name> --member <name> --file <request.json> [--continue <request id>]",
   "  memmy-project assist wait <request id> [--timeout <seconds, default 90>]",
   "  memmy-project assist status <request id>",
+  "  memmy-project assist status --project <project name> --member <name>",
   "  memmy-project assist cancel <request id>",
   "  memmy-project assist cancel --project <project name> --member <name>",
   "  memmy-project assist end --project <project name> [--member <name>]",
@@ -593,8 +594,16 @@ async function runAssist(
     return text(waited.text);
   }
   if (action === "status") {
-    const requestId = rest[0]?.trim();
-    if (!requestId) throw new Error("assist status 需要协助请求 ID");
+    let requestId = rest[0]?.trim();
+    if (!requestId) {
+      // 换了对话、手里没有请求 ID：按项目与成员找最近一次发给她的请求。
+      const project = optionString(parsed, "project")?.trim();
+      const member = optionString(parsed, "member")?.trim();
+      if (!project || !member) throw new Error("assist status 用请求 ID，或用 --project 与 --member 查最近一次发给这位成员的请求");
+      const latest = await latestRequestTo(deps, project, member);
+      if (!latest) return `最近 30 天里没有你发给${member}的协助请求。`;
+      requestId = text(latest.id);
+    }
     // 由本机后端写这段话：第一次读到终态时，它就是发起方 Agent 收到的内容，会记进协助会话。
     // 旧版后端没有这个接口时退回读详情、在这里格式化。
     const status = await withRequesterSession(deps, `/api/collab/assist/requests/${encodeURIComponent(requestId)}/status`, {},
@@ -725,6 +734,36 @@ async function openRequestsTo(
     }
   }
   return found;
+}
+
+/**
+ * 本人最近一次发给某位成员的请求（不论是否结束）：用户在新对话里问「看看李四的协助结果」时，Agent 手里没有请求 ID，
+ * 按项目与成员取最近的一次。
+ */
+async function latestRequestTo(
+  deps: MemmyProjectDeps,
+  project: string,
+  member: string
+): Promise<Record<string, unknown> | null> {
+  const projects = await listProjects(deps);
+  if (projects === null) throw new Error("读不到协作项目列表，请确认 Memmy 已登录并运行。");
+  const matched = projects.filter((item) => text(item.id) === project || text(item.name) === project);
+  if (!matched.length) throw new Error(`没有项目「${project}」，或你不是项目成员`);
+  if (matched.length > 1) throw new Error(`有 ${matched.length} 个同名项目，请改用项目 id 指定`);
+  const projectId = text(matched[0]!.id);
+  const result = await localApi(deps, "GET", `/api/collab/projects/${encodeURIComponent(projectId)}/assist/threads`);
+  const threads = Array.isArray(result.threads) ? result.threads.filter(isRecord) : [];
+  let latest: Record<string, unknown> | null = null;
+  for (const thread of threads) {
+    const requests = Array.isArray(thread.requests) ? thread.requests.filter(isRecord) : [];
+    for (const request of requests) {
+      if (request.mine !== true) continue;
+      const executor = isRecord(request.executor) ? request.executor : {};
+      if (text(executor.name) !== member && text(executor.userId) !== member) continue;
+      if (!latest || text(request.createdAt) > text(latest.createdAt)) latest = request;
+    }
+  }
+  return latest;
 }
 
 /** 执行方标识换成名字：命令行与界面用同一套叫法；认不出来时退回标识。 */

@@ -610,6 +610,33 @@ describe("memmy-project assist", () => {
     await expect(run(["assist", "cancel", "r1"], deps(cancelTo({}, 409)))).resolves.toBe("这次请求已经结束，没有可撤回或停止的。");
   });
 
+  it("picks up the latest request to a member when the Agent no longer has its id", async () => {
+    const asked: string[] = [];
+    const fetcher = (async (input: string | URL) => {
+      const path = new URL(input).pathname;
+      asked.push(path);
+      if (path === "/api/collab/projects") return new Response(JSON.stringify({ projects: [{ id: "p1", name: "Memmy 内测反馈" }] }));
+      if (path === "/api/collab/projects/p1/assist/threads") {
+        return new Response(JSON.stringify({ threads: [
+          { threadId: "t1", requests: [{ id: "old-1", mine: true, status: "done", createdAt: "2026-11-05T01:00:00Z", executor: { name: "李四" } }] },
+          { threadId: "t2", requests: [
+            { id: "new-2", mine: true, status: "done", createdAt: "2026-11-06T03:00:00Z", executor: { name: "李四" } },
+            { id: "other", mine: true, status: "done", createdAt: "2026-11-06T04:00:00Z", executor: { name: "王雨" } },
+            { id: "theirs", mine: false, status: "done", createdAt: "2026-11-06T05:00:00Z", executor: { name: "李四" } }
+          ] }
+        ] }));
+      }
+      if (path === "/api/collab/assist/requests/new-2/status") return new Response(JSON.stringify({ text: "已完成：李四的 Memmy 在李四的电脑上执行。" }));
+      return new Response(JSON.stringify({ error: { code: "not_found", message: "Route not found" } }), { status: 404 });
+    }) as typeof fetch;
+    const deps = { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) };
+
+    // 换了对话、手里没有请求 ID：取本人最近一次发给李四的请求。
+    await expect(run(["assist", "status", "--project", "Memmy 内测反馈", "--member", "李四"], deps))
+      .resolves.toBe("已完成：李四的 Memmy 在李四的电脑上执行。");
+    expect(asked).toContain("/api/collab/assist/requests/new-2/status");
+  });
+
   it("finds the request to a member in a project when no id is given", async () => {
     const listing = (requests: Array<Record<string, unknown>>) => (async (input: string | URL) => {
       const path = new URL(input).pathname;

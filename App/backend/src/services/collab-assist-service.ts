@@ -367,6 +367,11 @@ const DELIVERY_REPLY_WAIT_MS = 30 * 60 * 1000;
  * 请求结束后，等外部 Agent 自己取走结果的时间：它正在 `assist wait` 时每 2 秒读一次，取走了就不必再通知。
  */
 const OUTCOME_GRACE_MS = 20_000;
+/**
+ * 对方不在线时，外部 Agent 在本轮里最多等多久（从请求发出算起）：覆盖电脑刚唤醒、重启 Memmy、离开一会儿这类情形。
+ * 更久的离开（开会、下班）在本轮里等不到，再等只会占着用户的对话；结果回来时由 Memmy 通知用户。
+ */
+export const OFFLINE_WAIT_SECONDS = 5 * 60;
 /** 等结果的请求最多记这么多条、这么久：超过 30 天的请求云端已经清掉了。 */
 const MAX_NOTICES = 200;
 const NOTICE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
@@ -770,11 +775,11 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     const executor = request.executor.name;
     const offline = request.executorOffline;
     // 在 Memmy 的任务里发起：不必等，结果回来会自动送回这条任务。外部 Agent 用 wait 反复等待；
-    // 对方不在线时原地等也等不到，这一轮就结束，结果回来时由 Memmy 通知用户。
+    // 对方不在线时先告诉用户，再等一小段时间：她这期间打开 Memmy 就照常处理。
     const next = input.sourceTask
       ? `结果回来后会自动送回这条任务，届时接着分析；现在不需要等待，也不要运行 assist wait。`
       : offline
-        ? `${executor}不在线时不必等待，也不要运行 assist wait：告诉用户这一点，这一轮就结束。结果回来时用户的 Memmy 会通知他；之后用 memmy-project assist status ${short} 取回结果，不要重新发请求。`
+        ? `先告诉用户${executor}目前不在线、你会先等 ${OFFLINE_WAIT_SECONDS / 60} 分钟，再用 memmy-project assist wait ${short} 等待结果，每次最多等 90 秒。`
         : `用 memmy-project assist wait ${short} 等待结果，每次最多等 90 秒。`;
     const until = activeGrant ? clockText(activeGrant.expiresAt, now()) : "";
     const sent = activeGrant && offline
@@ -900,8 +905,11 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
         await recordAgentDelivery(request, result);
         return { request, text: result };
       }
-      // 对方不在线、请求还在等她处理：原地等也等不到，直接说明，让 Agent 结束这一轮。
-      if (Date.now() >= deadline || waitsForOfflineExecutor(request)) {
+      // 对方不在线、发出后已经等满 5 分钟：本轮等不到了，说明后让 Agent 结束这一轮。
+      if (offlineWaitOver(request)) {
+        return { request, text: offlineGiveUpText(request) };
+      }
+      if (Date.now() >= deadline) {
         return { request, text: pendingText(request, now()) };
       }
       await sleep(WAIT_POLL_MS);
@@ -1899,6 +1907,22 @@ export function waitsForOfflineExecutor(request: AssistRequest): boolean {
   return request.executorOffline && (request.status === "pending" || request.status === "confirm");
 }
 
+/** 对方不在线、请求发出后已经等满 {@link OFFLINE_WAIT_SECONDS}：外部 Agent 不再在本轮等下去。 */
+export function offlineWaitOver(request: AssistRequest): boolean {
+  return waitsForOfflineExecutor(request) && (request.waitingSeconds ?? 0) >= OFFLINE_WAIT_SECONDS;
+}
+
+/** 等满 5 分钟对方仍不在线：告诉用户请求还在、之后怎么取回结果，这一轮结束。 */
+export function offlineGiveUpText(request: AssistRequest): string {
+  const executor = request.executor.name;
+  const short = shortId(request.id);
+  return [
+    `还没结束：${executor}在请求发出后 ${OFFLINE_WAIT_SECONDS / 60} 分钟内没有打开 Memmy，请求仍在等${executor}处理，24 小时内有效。`,
+    `告诉用户这一点，这一轮就结束，不要继续等待，也不要重新发请求。${executor}处理完后，用户的 Memmy 会通知他；`
+      + `用户之后在这个对话里问起结果时，运行 memmy-project assist status ${short} 取回结果并接着分析。`
+  ].join("\n");
+}
+
 /** 状态后面补的一句：对方不在线时说明她打开 Memmy 后才会看到。 */
 function offlineNote(request: AssistRequest): string {
   return waitsForOfflineExecutor(request) ? `；${request.executor.name}目前不在线，打开 Memmy 后才会看到这次请求` : "";
@@ -1909,11 +1933,11 @@ export function pendingText(request: AssistRequest, at: Date = new Date()): stri
   const lines = [`还没结束：${statusText(request, at)}。`];
   const steps = stepLines(request);
   if (steps.length) lines.push("已完成：", ...steps);
+  if (offlineWaitOver(request)) return offlineGiveUpText(request);
+  lines.push(`再运行一次 memmy-project assist wait ${shortId(request.id)} 继续等待，不要重新发请求。`);
   if (waitsForOfflineExecutor(request)) {
-    // 对方不在线：不让 Agent 一轮轮地等，结果回来时由用户的 Memmy 通知。
-    lines.push(`${request.executor.name}不在线时不必继续等待：告诉用户这一点，这一轮就结束。结果回来时用户的 Memmy 会通知他；之后用 memmy-project assist status ${shortId(request.id)} 取回结果，不要重新发请求。`);
-  } else {
-    lines.push(`再运行一次 memmy-project assist wait ${shortId(request.id)} 继续等待，不要重新发请求。`);
+    // 对方不在线：最多等到发出后 5 分钟，到时 wait 会说明并让这一轮结束。
+    lines.push(`${request.executor.name}不在线时，最多等到请求发出后 ${OFFLINE_WAIT_SECONDS / 60} 分钟。`);
   }
   return lines.join("\n");
 }

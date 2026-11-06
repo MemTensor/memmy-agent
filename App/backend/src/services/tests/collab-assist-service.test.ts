@@ -1066,7 +1066,7 @@ async function until(check: () => boolean): Promise<void> {
 describe("when the executor is offline", () => {
   const OFFLINE = { status: "pending", agent: null, scope: null, executorOnline: false, mine: true, requester: ME, executor: MEMBER };
 
-  it("says so when sending, and tells an external Agent not to wait", async () => {
+  it("says so when sending, and tells an external Agent to wait a few minutes first", async () => {
     const { cloud } = fakeCloud((path) => {
       if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
       return request(OFFLINE);
@@ -1077,8 +1077,9 @@ describe("when the executor is offline", () => {
 
     expect(created.request.executorOffline).toBe(true);
     expect(created.text).toContain("孙起目前不在线，打开 Memmy 后会看到这次请求；24 小时内没有处理会自动过期。");
-    expect(created.text).toContain("不要运行 assist wait");
-    expect(created.text).not.toContain("每次最多等 90 秒");
+    // 对方不在线也照常等：先告诉用户，再等 5 分钟。
+    expect(created.text).toContain("先告诉用户孙起目前不在线、你会先等 5 分钟");
+    expect(created.text).toContain("assist wait");
   });
 
   it("explains that a timed permission only runs if she comes online before it ends", async () => {
@@ -1086,13 +1087,7 @@ describe("when the executor is offline", () => {
       if (path === "/projects") return { projects: [{ id: "p1", name: "Memmy 内测反馈" }] };
       return { ...request(OFFLINE), activeGrant: { agent: "claude_code", remainingSeconds: 1800, expiresAt: "2026-11-06T07:30:00Z" } };
     });
-    const service = createCollabAssistService({
-      cloud,
-      homeDirectory: home(),
-      projectDirectory: async () => null,
-      agents: async () => [],
-      runner: runner()
-    });
+    const service = createCollabAssistService({ cloud, homeDirectory: home(), projectDirectory: async () => null, agents: async () => [], runner: runner() });
 
     const created = await service.createRequest({ project: "Memmy 内测反馈", member: "孙起", title: "查日志", items: ["看日志"], via: "Codex" });
 
@@ -1100,21 +1095,33 @@ describe("when the executor is offline", () => {
     expect(created.text).toMatch(/孙起给你的限时授权到 (\d{2}:\d{2})，但孙起目前不在线：孙起在 \1 前打开 Memmy，孙起的 Claude Code 会直接执行；之后打开则需要孙起重新授权。/u);
   });
 
-  it("does not hold the Agent for 90 seconds while she is offline", async () => {
-    const { cloud } = fakeCloud(() => ({ request: request(OFFLINE) }));
+  it("keeps the Agent waiting during the first five minutes she is offline", async () => {
+    const { cloud } = fakeCloud(() => ({ request: request({ ...OFFLINE, waitingSeconds: 120 }) }));
+    const service = createCollabAssistService({ cloud, homeDirectory: home(), projectDirectory: async () => null, agents: async () => [], runner: runner() });
+
+    const waited = await service.waitRequest(request().id, { timeoutMs: 1 });
+
+    expect(waited.text).toContain("孙起目前不在线");
+    expect(waited.text).toContain("继续等待，不要重新发请求");
+    expect(waited.text).toContain("最多等到请求发出后 5 分钟");
+  });
+
+  it("ends the Agent's turn once she has stayed offline for five minutes", async () => {
+    const { cloud } = fakeCloud(() => ({ request: request({ ...OFFLINE, waitingSeconds: 301 }) }));
     const service = createCollabAssistService({ cloud, homeDirectory: home(), projectDirectory: async () => null, agents: async () => [], runner: runner() });
 
     const started = Date.now();
     const waited = await service.waitRequest(request().id, { timeoutMs: 90_000 });
 
     expect(Date.now() - started).toBeLessThan(2_000);
-    expect(waited.text).toContain("孙起目前不在线");
-    expect(waited.text).toContain("不必继续等待");
+    expect(waited.text).toContain("孙起在请求发出后 5 分钟内没有打开 Memmy，请求仍在等孙起处理，24 小时内有效。");
+    expect(waited.text).toContain("这一轮就结束");
+    expect(waited.text).toContain("memmy-project assist status A7F3K1");
     expect(waited.text).not.toContain("继续等待，不要重新发请求");
   });
 
   it("keeps waiting as before once she is online", () => {
-    const text = pendingText(toAssistRequest(request({ ...OFFLINE, executorOnline: true })));
+    const text = pendingText(toAssistRequest(request({ ...OFFLINE, executorOnline: true, waitingSeconds: 900 })));
     expect(text).not.toContain("不在线");
     expect(text).toContain("继续等待，不要重新发请求");
   });
