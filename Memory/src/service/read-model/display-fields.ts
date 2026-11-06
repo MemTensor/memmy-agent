@@ -36,6 +36,13 @@ export function evidenceMemoryIds(memory: MemoryRow): string[] {
   ]);
 }
 
+/** Both Skill projections use the display title chosen when the guide was written. */
+export function storedGeneratedSkillTitle(memory: MemoryRow): string | undefined {
+  const internal = memory.properties.internal_info;
+  if (memory.memoryLayer !== "Skill" || internal.generated_by_memory_base !== true || internal.external_evidence_candidate) return undefined;
+  return text(memory.info.title);
+}
+
 /** A title written by generation, not a list/detail fallback clipped from the summary. */
 export function storedGeneratedTitle(memory: MemoryRow): string | undefined {
   const internal = memory.properties.internal_info;

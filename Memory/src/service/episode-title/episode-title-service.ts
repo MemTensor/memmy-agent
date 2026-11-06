@@ -12,6 +12,7 @@
  * `raw_turns.source_memory_ids` holds the memories injected into the turn by
  * retrieval, which belong to earlier tasks.
  */
+import { matchesGeneratedLanguage } from "../../algorithm/generated-language.js";
 import { languageSteeringLine, pinnedPromptLanguage, steeredPromptLanguage, type PromptLanguage } from "../../algorithm/plugin-algorithms.js";
 import type { MemoryLanguage } from "../../config/index.js";
 import type { JsonValue } from "../../contracts/index.js";
@@ -132,10 +133,10 @@ export class EpisodeTitleService {
     }
     const built = this.buildInput(stage, episodeId);
     const previous = episodeTitleMeta(episode);
-    if (!shouldGenerateEpisodeTitle(episode, stage, built.language) || built.input.turns.length === 0) return;
+    if (!shouldGenerateEpisodeTitle(episode, stage, built.language, job.payload.selectionSourceHash) || built.input.turns.length === 0) return;
     // Existing jobs can still carry the pre-language fingerprint after an upgrade.
     if (previous?.sourceHash === built.sourceHash || (previous && !previous.language
-      && previous.sourceHash === stableHash(built.input as unknown as Record<string, unknown>))) return;
+      && previous.sourceHash === stableHash(built.input) && storedTitleMatches(episode, built.language))) return;
 
     const output = await completeStrictJson<EpisodeTitleOutput>({
       llm: this.deps.llm,
@@ -150,7 +151,7 @@ export class EpisodeTitleService {
     validateEpisodeTitleLanguage(output.summary, built.language, "summary");
 
     const current = this.deps.repos.runtime.getEpisode(episodeId);
-    if (!current || !shouldGenerateEpisodeTitle(current, stage, built.language)) return;
+    if (!current || !shouldGenerateEpisodeTitle(current, stage, built.language, job.payload.selectionSourceHash)) return;
     // The episode can gain turns, reopen and close again while the model call is
     // in flight. Writing then would pin a title describing a stale task, and the
     // follow-up job would have been merged into this leased one, so nothing would
@@ -195,9 +196,8 @@ export class EpisodeTitleService {
   isCurrent(episode: EpisodeRecord): boolean {
     const meta = episodeTitleMeta(episode);
     if (meta?.stage !== "final" || meta.sourceTurnCount !== this.deps.repos.runtime.countRawTurnsByEpisode(episode.id)) return false;
-    // Before language was recorded the only freshness signal was the turn count.
-    if (!meta.language) return true;
     const pinned = pinnedPromptLanguage(this.deps.language);
+    if (!meta.language) return storedTitleMatches(episode, pinned ?? this.buildInput("final", episode.id).language);
     if (pinned) return meta.language === pinned;
     return meta.inferredLanguage || meta.language === this.buildInput("final", episode.id).language;
   }
@@ -284,11 +284,12 @@ export class EpisodeTitleService {
   }
 }
 
-/** A late provisional job must never replace a final or manually supplied title. */
-export function shouldGenerateEpisodeTitle(episode: EpisodeRecord, stage: EpisodeTitleStage, language?: PromptLanguage): boolean {
+/** A selection retry can refresh the title it observed when reopening an episode. */
+export function shouldGenerateEpisodeTitle(episode: EpisodeRecord, stage: EpisodeTitleStage, language?: PromptLanguage, selectionSourceHash?: unknown): boolean {
   if (stage === "final") return true;
   const previous = episodeTitleMeta(episode);
-  if (previous?.stage === "provisional") return Boolean(language && previous.language && previous.language !== language);
+  if (episode.status === "open" && previous && previous.sourceHash === selectionSourceHash) return true;
+  if (previous?.stage === "provisional") return Boolean(language && (previous.language ? previous.language !== language : !storedTitleMatches(episode, language)));
   return previous?.stage === "skipped" || (!previous && !episode.title?.trim());
 }
 
@@ -344,35 +345,13 @@ function validateEpisodeTitleOutput(value: unknown): EpisodeTitleOutput {
   };
 }
 
-/** Reject clear script mismatches; short names and shared-script languages are ambiguous. */
 export function validateEpisodeTitleLanguage(text: string, language: PromptLanguage, field: string): void {
-  if (language === "auto") return;
-  const locale = new Intl.Locale(language).maximize();
-  const script = locale.script;
-  if (!script) return;
-  const scripts = script === "Jpan" ? ["Han", "Hiragana", "Katakana"]
-    : script === "Kore" ? ["Hangul", "Han"]
-    : script === "Hans" || script === "Hant" ? ["Han"] : [script];
-  // Strip code, paths, filenames, identifiers and recognizable technical names.
-  const prose = text.replace(/`[^`]*`|https?:\/\/\S+|\b[\w-]+(?:[\\/_.][\w-]+)+\b|\b[A-Z][A-Z\d]+\b|\b\w*[a-z][A-Z]\w*\b/gu, " ");
-  const letters = [...prose.matchAll(/\p{L}/gu)].length;
-  let expected = 0;
-  try {
-    expected = scripts.reduce((count, name) => count + [...prose.matchAll(new RegExp(`\\p{Script=${name}}`, "gu"))].length, 0);
-  } catch {
-    // A valid BCP 47 script may not yet be known to this JS Unicode runtime.
-    return;
-  }
-  const latin = [...prose.matchAll(/\p{Script=Latin}/gu)].length;
-  const proseWords = prose.match(/\b[a-z]{2,}\b/giu) ?? [];
-  const incompatibleScript = letters - latin >= 4 && expected === 0;
-  const englishAction = /\b(?:fix(?:ed)?|repair(?:ed)?|implement(?:ed)?|verif(?:y|ied)|updat(?:e|ed)|resolv(?:e|ed)|add(?:ed)?|remov(?:e|ed))\b/iu.test(prose);
-  const latinSentence = script !== "Latn" && expected === 0
-    && (proseWords.length >= 4 || (proseWords.length >= 3 && (prose.match(/\b[a-z]{2,}\b/gu)?.length ?? 0) >= 2)
-      || (proseWords.length >= 2 && englishAction));
-  const clearEnglish = script === "Latn" && locale.language !== "en" && englishAction
-    && proseWords.length >= 4 && /\b(?:the|and|with|was|were)\b/iu.test(prose);
-  if (incompatibleScript || latinSentence || clearEnglish) {
+  if (!matchesGeneratedLanguage(text, language)) {
     throw new TypeError(`episode ${field} language does not match ${language}; regenerate in the requested language`);
   }
+}
+
+function storedTitleMatches(episode: EpisodeRecord, language: PromptLanguage): boolean {
+  return Boolean(episode.title && episode.summary
+    && matchesGeneratedLanguage(episode.title, language) && matchesGeneratedLanguage(episode.summary, language));
 }

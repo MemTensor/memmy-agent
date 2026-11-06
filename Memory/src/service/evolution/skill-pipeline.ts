@@ -1,3 +1,4 @@
+import { generatedSkillTitle, skillGuideLabel } from "../../algorithm/skill-display.js";
 import { l2ContentRevision } from "./l2-content-revision.js";
 import {
   L2_SKILL_CRYSTALLIZE_PROMPT,
@@ -33,7 +34,8 @@ type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
 type SkillMeta = NonNullable<ReturnType<typeof skillMetaFromMemory>>;
 type SkillDraft = NonNullable<ReturnType<typeof buildSkillDraft>>;
-type SkillEnhancementResult = { ok: true; draft: SkillDraft } | { ok: false; reason: string; error?: unknown };
+type LocalizedSkillDraft = SkillDraft & { displayTitle: string };
+type SkillEnhancementResult = { ok: true; draft: LocalizedSkillDraft } | { ok: false; reason: string; error?: unknown };
 type SkillRebuildLevel = "L0" | "L1" | "L2";
 
 const SKILL_REFUSAL_PREFIXES = [
@@ -150,6 +152,9 @@ export class SkillPipeline {
         ? skill.invocationGuide
         : renderSkillInvocationGuide({
             name: skill.name,
+            displayTitle: skillText(memory.info.title) || skill.invocationGuide.match(/^# (.+)$/m)?.[1],
+            language: skillOutputLanguageFor(this.deps.config.algorithm.skill.outputLanguageMode,
+              steeredPromptLanguage(this.deps.config.language, [activePolicies[0]!.title])),
             procedureJson: nextProcedure,
             policy: activePolicies[0]!
           });
@@ -287,13 +292,13 @@ export class SkillPipeline {
         throw new Error("skill revision: source changed during generation");
       }
       const hashes = { ...storedSkillPolicyContentHashes(row), [policy.id]: skillPolicyContentHash(policy) };
-      const fields = { status: "suspended", invocation_guide: result.draft.invocationGuide,
+      const fields = { status: "suspended", title: result.draft.displayTitle, invocation_guide: result.draft.invocationGuide,
         procedure_json: attachSkillStepPolicySources(result.draft.procedureJson, row, policy.id),
         policy_content_hashes: hashes, policy_content_hash: skillPolicyContentHash(policy),
         trials_attempted: 0, trials_passed: 0, success_rate: 0, beta_posterior: { alpha: 1, beta: 1, mean: 0.5 },
         eta: 0, support: 0, gain: 0, evidence_anchor_ids: [], revision_historical_anchor_ids: historicalIds, verification: verdict };
       const saved = this.deps.repos.memories.updateIfVersion({ ...row, status: "archived",
-        memoryValue: result.draft.invocationGuide, updatedAt: at, info: { ...row.info, status: "suspended", eta: 0 },
+        memoryValue: result.draft.invocationGuide, updatedAt: at, info: { ...row.info, title: result.draft.displayTitle, status: "suspended", eta: 0 },
         properties: { ...row.properties, status: "archived", internal_info: { ...row.properties.internal_info, ...fields,
           skill: { ...data, ...fields } } } }, row.version);
       this.deps.repos.memories.deleteVector(saved.id, "vec");
@@ -467,7 +472,7 @@ export class SkillPipeline {
         throw new Error(`skill verification failed: ${verdict.reason}`);
       }
       const evidenceAnchorIds = evidenceTraces.map((trace) => trace.id).slice(0, 10);
-      const verifiedDraft: SkillDraft = {
+      const verifiedDraft: LocalizedSkillDraft = {
         ...draft,
         sourceTraceIds: evidenceAnchorIds,
         evidenceAnchorIds: uniq([...evidenceAnchorIds, ...draft.evidenceAnchorIds]).slice(0, 10),
@@ -499,6 +504,7 @@ export class SkillPipeline {
         tags: verifiedDraft.tags,
         info: {
           name: verifiedDraft.name,
+          title: verifiedDraft.displayTitle,
           eta: verifiedDraft.eta,
           status: verifiedDraft.status,
           source_memory_ids: verifiedDraft.sourcePolicyIds
@@ -513,6 +519,7 @@ export class SkillPipeline {
           source_world_model_ids: verifiedDraft.sourceWorldModelIds,
           evidence_anchor_ids: verifiedDraft.evidenceAnchorIds,
           name: verifiedDraft.name,
+          title: verifiedDraft.displayTitle,
           invocation_guide: verifiedDraft.invocationGuide,
           procedure_json: verifiedDraft.procedureJson,
           eta: verifiedDraft.eta,
@@ -523,6 +530,7 @@ export class SkillPipeline {
           skill: {
             ...(existingSkill && isRecord(existingSkill.memory.properties.internal_info.skill) ? { content_revised_at: existingSkill.memory.properties.internal_info.skill.content_revised_at } : {}),
             name: verifiedDraft.name,
+            title: verifiedDraft.displayTitle,
             eta: verifiedDraft.eta,
             status: verifiedDraft.status,
             support: verifiedDraft.support,
@@ -1128,10 +1136,12 @@ private async enhanceSkillDraft(
       const skillName = rebuild
         ? existingSkill?.name ?? fallback.name
         : coerceSkillName(result.name, `skill_${policy.id.slice(-6)}`);
-      const displayTitle = skillText(result.display_title ?? result.displayTitle ?? policy.title ?? skillName) || skillName;
+      const displayTitle = generatedSkillTitle(outputLanguage, [skillName, result.name],
+        ...[result.display_title ?? result.displayTitle, existingSkill?.memory.info.title, policy.title, procedureJson.summary].map(skillText));
       const invocationGuide = renderSkillInvocationGuide({
         name: skillName,
         displayTitle,
+        language: outputLanguage,
         procedureJson,
         policy
       });
@@ -1140,6 +1150,7 @@ private async enhanceSkillDraft(
         draft: {
           ...fallback,
           name: skillName,
+          displayTitle,
           invocationGuide,
           procedureJson,
           tags: dedupeCaseInsensitiveStrings([...fallback.tags, ...stringArray(result.tags)])
@@ -1847,11 +1858,13 @@ function coerceSkillName(value: unknown, fallback: string): string {
 function renderSkillInvocationGuide(input: {
   name: string;
   displayTitle?: string;
+  language?: string;
   procedureJson: Record<string, unknown>;
   policy: PolicyMeta;
 }): string {
   const procedure = input.procedureJson;
   const title = skillText(input.displayTitle || input.name);
+  const label = (key: Parameters<typeof skillGuideLabel>[0]) => skillGuideLabel(key, input.language);
   const lines: string[] = [`# ${title}`, ""];
   const retrievalBlurb = firstString(procedure.retrievalBlurb, procedure.retrieval_blurb);
   if (retrievalBlurb) {
@@ -1862,24 +1875,24 @@ function renderSkillInvocationGuide(input: {
     lines.push(summary, "");
   }
   const triggerContext = firstString(procedure.triggerContext, procedure.trigger_context);
-  lines.push("**When to use**", triggerContext || input.policy.trigger.trim() || "(derived from policy)", "");
+  lines.push(`**${label("When to use")}**`, triggerContext || input.policy.trigger.trim() || label("(derived from policy)"), "");
 
   const preconditions = stringArray(procedure.preconditions);
   if (preconditions.length > 0) {
-    lines.push("**Preconditions**");
+    lines.push(`**${label("Preconditions")}**`);
     for (const item of preconditions) lines.push(`- ${item}`);
     lines.push("");
   }
 
   const parameters = Array.isArray(procedure.parameters) ? procedure.parameters : [];
   if (parameters.length > 0) {
-    lines.push("**Parameters**");
+    lines.push(`**${label("Parameters")}**`);
     for (const item of parameters) {
       if (!isRecord(item)) continue;
       const name = firstString(item.name);
       if (!name) continue;
       const type = firstString(item.type) ?? "string";
-      const required = Boolean(item.required) ? " (required)" : "";
+      const required = Boolean(item.required) ? ` (${label("required")})` : "";
       const description = firstString(item.description) ?? "";
       lines.push(`- \`${name}\`: ${type}${required}${description ? ` - ${description}` : ""}`);
     }
@@ -1888,7 +1901,7 @@ function renderSkillInvocationGuide(input: {
 
   const steps = coerceSkillSteps(procedure.steps);
   if (steps.length > 0) {
-    lines.push("**Procedure**");
+    lines.push(`**${label("Procedure")}**`);
     steps.forEach((step, index) => {
       lines.push(`${index + 1}. **${step.title}** - ${step.body}`);
     });
@@ -1897,34 +1910,34 @@ function renderSkillInvocationGuide(input: {
 
   const examples = Array.isArray(procedure.examples) ? procedure.examples : [];
   if (examples.length > 0) {
-    lines.push("**Examples**");
+    lines.push(`**${label("Examples")}**`);
     for (const item of examples) {
       if (!isRecord(item)) continue;
       const exampleInput = firstString(item.input);
       const expected = firstString(item.expected);
       if (!exampleInput && !expected) continue;
-      lines.push(`- Input: \`${exampleInput ?? ""}\``);
-      if (expected) lines.push(`  Expected: ${expected}`);
+      lines.push(`- ${label("Input")}: \`${exampleInput ?? ""}\``);
+      if (expected) lines.push(`  ${label("Expected")}: ${expected}`);
     }
     lines.push("");
   }
 
   const tools = stringArray(procedure.tools);
   if (tools.length > 0) {
-    lines.push("**Tools used**");
+    lines.push(`**${label("Tools used")}**`);
     for (const tool of tools) lines.push(`- \`${tool}\``);
     lines.push("");
   }
 
   const guidance = coerceSkillDecisionGuidance(procedure.decisionGuidance ?? procedure.decision_guidance);
   if (guidance.preference.length > 0 || guidance.antiPattern.length > 0) {
-    lines.push("**Decision guidance**");
+    lines.push(`**${label("Decision guidance")}**`);
     if (guidance.preference.length > 0) {
-      lines.push("Prefer:");
+      lines.push(`${label("Prefer")}:`);
       for (const item of guidance.preference) lines.push(`- ${item}`);
     }
     if (guidance.antiPattern.length > 0) {
-      lines.push("Avoid:");
+      lines.push(`${label("Avoid")}:`);
       for (const item of guidance.antiPattern) lines.push(`- ${item}`);
     }
     lines.push("");

@@ -35,6 +35,35 @@ async function settle(service: ReturnType<typeof setup>["service"]) {
 }
 
 describe("episode selection before creation", () => {
+  it("keeps new and reopened turn assignments when either selection field has the wrong language", async () => {
+    const { llm } = createTurnJudgeLlm();
+    const original = llm.completeJson.bind(llm);
+    let selections = 0;
+    llm.completeJson = async <T extends Record<string, unknown>>(messages: Parameters<typeof original>[0], options: Parameters<typeof original>[1]) => {
+      if (options.operation !== "episode.select.v1") return original<T>(messages, options);
+      expect(messages[0]!.content).toContain("zh-CN");
+      const { candidates } = JSON.parse(messages[1]!.content) as EpisodeSelectionInput;
+      const fields = ++selections === 1 ? { title: "Password Reset Failed", summary: "已修复缓存。" }
+        : { title: "校验缓存", summary: "Fixed the cache and verified responses." };
+      return { episodeId: candidates[0]?.episodeId ?? null, ...fields } as unknown as T;
+    };
+    let generated = 0;
+    llm.complete = async () => JSON.stringify({ title: `修复缓存第${++generated}步`, summary: "已验证缓存。" });
+    const { service, db } = createTestService({ llm, config: { ...turnJudgeConfig(), language: "zh-CN" } });
+    const repos = new Repositories(db.db);
+    const session = openSession(service, "new-and-reopen");
+    const first = await service.completeTurn("new", { sessionId: session.sessionId, query: "请修复缓存", answer: "已完成" });
+    await settle(service);
+    const id = assignedEpisodeId(service, first);
+    expect(repos.runtime.getEpisode(id)).toMatchObject({ title: "修复缓存第1步", summary: "已验证缓存。" });
+    repos.runtime.closeEpisode(id, { closeReason: "end_topic" });
+    const next = await service.completeTurn("resume", { sessionId: session.sessionId, query: "继续验证缓存", answer: "已完成" });
+    await settle(service);
+    expect(assignedEpisodeId(service, next)).toBe(id);
+    expect(repos.runtime.getEpisode(id)).toMatchObject({ status: "open", title: "修复缓存第2步", summary: "已验证缓存。" });
+    expect(selections).toBe(2);
+  });
+
   it("ABA reuses A's ID with exactly two nonempty episodes, even without any summaries", async () => {
     const { service, repos, calls, db } = setup();
     const session = openSession(service, "aba");

@@ -1,3 +1,4 @@
+import { generatedSkillTitle } from "../../src/algorithm/skill-display.js";
 import { describe, expect, it } from "vitest";
 import {
   canJoinCluster,
@@ -17,6 +18,12 @@ import {
   verifyDirectSkillDraft,
   type DirectSkillProcedureJson
 } from "../../src/algorithm/trace-direct-skill.js";
+
+it("keeps the existing display title when a rebuild echoes its proposed invocation name", () => {
+  const names = ["check_cache", "verify"];
+  expect(generatedSkillTitle("zh", names, "verify", "缓存校验", "检查并修复配置")).toBe("缓存校验");
+  expect(() => generatedSkillTitle("zh", names, "check_cache", "verify", "Repair cache handling")).toThrow(/display title/);
+});
 
 const thresholds = { success: 0.5, failure: -0.15 };
 

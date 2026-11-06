@@ -1,7 +1,10 @@
+import { episodeTitleMeta } from "../episode-title/episode-title-service.js";
+import { matchesGeneratedLanguage } from "../../algorithm/generated-language.js";
 import { EpisodeSelectionRequired, selectionInput, selectionKey, selectEpisode, type EpisodeSelectionContext, type EpisodeSelectionResult } from "./episode-selection.js";
 import {
   captureTurnSteps,
   classifyIntent,
+  steeredPromptLanguage,
   classifyTurnFeedback,
   classifyTurnRelation,
   classifyTurnRelationWithLlm,
@@ -505,7 +508,7 @@ export class SessionTurnService {
 
   constructor(private readonly deps: SessionTurnDependencies) {}
 
-  private selectionScope?: { context: EpisodeSelectionContext; results: Map<string, EpisodeSelectionResult>; selectedEpisodeId?: string };
+  private selectionScope?: { context: EpisodeSelectionContext; results: Map<string, EpisodeSelectionResult>; selectedEpisodeId?: string; deferTitleUntilBound?: boolean };
 
   // Acceptance never waits for a model. The original rows and work commit together.
   async withEpisodeSelection<T>(context: EpisodeSelectionContext, operation: () => T): Promise<T> {
@@ -636,11 +639,11 @@ export class SessionTurnService {
       : latest?.status === "open" ? latest : undefined;
     let selection: EpisodeSelectionResult | undefined;
     for (let attempt = 0; attempt < 5; attempt++) {
-      const input = selectionInput(this.deps.repos, session, { userText: raw.userText ?? "", rawTurnId: raw.id });
+      const input = selectionInput(this.deps.repos, session, { userText: raw.userText ?? "", rawTurnId: raw.id }, this.deps.config.language);
       const proposed = requested
-        ? { episodeId: requested.id, title: requested.title || "Task", summary: requested.summary || raw.userText || "Task" }
+        ? { episodeId: requested.id, title: requested.title, summary: requested.summary }
         : await selectEpisode(this.deps.llm, input);
-      if (requested || stableHash(input) === stableHash(selectionInput(this.deps.repos, session, { userText: raw.userText ?? "", rawTurnId: raw.id }))) {
+      if (requested || stableHash(input) === stableHash(selectionInput(this.deps.repos, session, { userText: raw.userText ?? "", rawTurnId: raw.id }, this.deps.config.language))) {
         selection = proposed;
         break;
       }
@@ -674,9 +677,10 @@ export class SessionTurnService {
       const judgment = state.judgment as Parameters<SessionTurnService["applyTurnJudgment"]>[0] | undefined;
       const at = nowIso();
       let legacyRoute: CommittedTurnRoute | undefined;
+      let legacySelectionId: string | undefined;
       if (!state.turnJudge && isRecord(raw.messagePayload?.turn_complete)) {
         const context = { userText: raw.userText ?? "", rawTurnId: raw.id };
-        this.selectionScope = { context, results: new Map([[selectionKey(session, selectionInput(this.deps.repos, session, context)), selection]]) };
+        this.selectionScope = { context, deferTitleUntilBound: true, results: new Map([[selectionKey(session, selectionInput(this.deps.repos, session, context, this.deps.config.language)), selection]]) };
         try {
           if (typeof state.requestedEpisodeId === "string") {
             const episode = this.ensureEpisode(session, state.requestedEpisodeId, raw.createdAt);
@@ -689,6 +693,7 @@ export class SessionTurnService {
               ? saved : this.proposeEpisodeRoute(session, raw.userText ?? "", explicitEndTopicDecision(raw.userText ?? ""), raw.createdAt);
             legacyRoute = this.commitTurnRouteProposal(session, proposal, raw.userText ?? "", "episode.assignment", at, false, raw.createdAt);
           }
+          legacySelectionId = this.selectionScope.selectedEpisodeId;
         } finally { this.selectionScope = undefined; }
       }
       const baseId = judgment?.baseEpisodeId ?? (judgment?.filedByRule === "previous_task_closed"
@@ -710,10 +715,11 @@ export class SessionTurnService {
       } else if (target.status !== "open" && !late) {
         target = this.deps.repos.runtime.reopenEpisode(target.id, { reopenReason: "episode_selection", reopenedAt: at }, at)!;
       }
-      if (!legacyRoute && (!continueBase || selection.episodeId === target.id)) {
+      // Bind evidence before enqueuing a title retry so historical captures inherit the import lane.
+      this.deps.repos.runtime.bindRawTurnEpisode(raw.id, target.id, at);
+      if (legacyRoute ? legacySelectionId === target.id : (!continueBase || selection.episodeId === target.id)) {
         this.writeSelectionTitle(target, selection, at, { rawTurnId: raw.id, userText: raw.userText ?? "" });
       }
-      this.deps.repos.runtime.bindRawTurnEpisode(raw.id, target.id, at);
       // New-task closure must precede feedback application, but evidence freezes
       // below only after the feedback has been persisted.
       if (base && base.id !== target.id && judgment?.relation === "new_task" && !late && base.status === "open") {
@@ -4579,7 +4585,17 @@ export class SessionTurnService {
 
   private writeSelectionTitle(episode: EpisodeRecord, selection: EpisodeSelectionResult, at: string, selectionContext?: EpisodeSelectionContext): EpisodeRecord {
     if (this.selectionScope) this.selectionScope.selectedEpisodeId = episode.id;
+    if (this.selectionScope?.deferTitleUntilBound) return episode;
     const context = selectionContext ?? this.selectionScope!.context;
+    const language = steeredPromptLanguage(this.deps.config.language, [context.userText]);
+    if (!selection.title || !selection.summary || (selection.language && selection.language !== language)
+      || !matchesGeneratedLanguage(selection.title, language) || !matchesGeneratedLanguage(selection.summary, language)) {
+      this.deps.enqueueJob({
+        jobType: "episode_title", userId: episode.userId, sessionId: episode.sessionId, episodeId: episode.id,
+        payload: { stage: "provisional", selectionSourceHash: episodeTitleMeta(episode)?.sourceHash }, createdAt: at
+      });
+      return episode;
+    }
     const current = context.rawTurnId ? this.deps.repos.runtime.getRawTurn(context.rawTurnId) : undefined;
     const before = current ? new Set(this.deps.repos.runtime.completedRawTurnsBefore(current.id).map(t => t.id)) : undefined;
     const coveredUserTurns = episode.rawTurnIds.map(id => this.deps.repos.runtime.getRawTurn(id))
@@ -4592,7 +4608,7 @@ export class SessionTurnService {
       // Selection sees user messages, not the complete assistant outcomes. Never
       // mark it final or suppress the normal final title pass.
       meta: { episodeSelection: { model: this.deps.llm.config.model ?? "", at, episodeId: selection.episodeId },
-        episodeTitle: { stage: "provisional", generatedAt: at, model: this.deps.llm.config.model ?? "",
+        episodeTitle: { stage: "provisional", language, generatedAt: at, model: this.deps.llm.config.model ?? "",
           sourceTurnCount: coveredUserTurns.length, sourceHash: stableHash({ selection, coveredUserTurns }), coveredUserTurns } }
     }, at) ?? episode;
     const session = this.deps.requireSession(episode.sessionId);
@@ -4625,7 +4641,7 @@ export class SessionTurnService {
     if (this.deps.llm.isConfigured()) {
       const scope = this.selectionScope;
       if (!scope) throw new Error("episode creation requires withEpisodeSelection");
-      const input = selectionInput(this.deps.repos, session, scope.context);
+      const input = selectionInput(this.deps.repos, session, scope.context, this.deps.config.language);
       const key = selectionKey(session, input);
       selection = scope.results.get(key);
       if (!selection) throw new EpisodeSelectionRequired(key, input);

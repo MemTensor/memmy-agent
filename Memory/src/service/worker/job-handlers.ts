@@ -213,7 +213,8 @@ export function enqueueJob(
   if (input.jobType === "episode_title") {
     // Title jobs have no target memory. Only a wholly historical episode can
     // inherit the historical lane; mixed or incomplete episodes stay interactive.
-    delete payload.captureOrigin;
+    // An explicit undefined also clears stale import provenance when a queued job is merged.
+    payload.captureOrigin = undefined;
     const episode = input.episodeId ? deps.repos.runtime.getEpisode(input.episodeId) : undefined;
     if (episode && deps.repos.memories.areAllHistoricalCaptureMemories(episode.l1MemoryIds)) {
       payload.captureOrigin = "agent_source_scan";

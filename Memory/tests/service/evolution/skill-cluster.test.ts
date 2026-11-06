@@ -43,7 +43,7 @@ interface DirectSkillCall {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
 }
 
-function createDirectSkillLlm(calls: DirectSkillCall[], displayTitle?: string): LlmClient {
+function createDirectSkillLlm(calls: DirectSkillCall[], displayTitle?: string, summary = DIRECT_SKILL_JSON.summary): LlmClient {
   return {
     config: {
       ...LEGACY_TEST_CONFIG.evolution,
@@ -70,7 +70,7 @@ function createDirectSkillLlm(calls: DirectSkillCall[], displayTitle?: string): 
         } as unknown as T;
       }
       if (options.operation.startsWith("skill.batch_evolve")) {
-        return { ...DIRECT_SKILL_JSON, ...(displayTitle ? { display_title: displayTitle } : {}) } as unknown as T;
+        return { ...DIRECT_SKILL_JSON, summary, ...(displayTitle ? { display_title: displayTitle } : {}) } as unknown as T;
       }
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
@@ -105,9 +105,10 @@ async function runDirectSkillEpisode(input: {
   answer?: string;
   config?: typeof LEGACY_TEST_CONFIG;
   displayTitle?: string;
+  summary?: string;
 }) {
   const calls: DirectSkillCall[] = [];
-  const { db, service } = createTestService({ skillLlm: createDirectSkillLlm(calls, input.displayTitle), config: input.config });
+  const { db, service } = createTestService({ skillLlm: createDirectSkillLlm(calls, input.displayTitle, input.summary), config: input.config });
   const session = service.openSession({
     namespace: { source: "codex", profileId: "jiang", userId: input.userId }
   });
@@ -160,6 +161,20 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(memory.memoryKey).toMatch(/^skill:direct:/);
     expect(memory.memoryValue.split("\n")[0]).toBe("# 使用 Python 填写表格汇总");
   });
+
+  it.each(["Spreadsheet Transformation", "xlsx_python_transform", undefined])(
+    "uses the localized summary on the card and in the guide when the draft title is %s", async displayTitle => {
+      const summary = "用 openpyxl 写入合计并保存工作簿。";
+      const { service, repos } = await runDirectSkillEpisode({ userId: "skill-title-fallback", rTask: 1,
+        config: { ...LEGACY_TEST_CONFIG, language: "zh-CN" }, displayTitle, summary });
+      const [card] = service.panelItems({ layer: "Skill" }).items;
+      expect(card?.title).toBe(summary);
+      const stored = repos.memories.get(card!.id)!;
+      expect(stored.info.name).toBe("xlsx_python_transform");
+      expect(stored.memoryValue.split("\n")[0]).toBe(`# ${summary}`);
+      expect(stored.memoryValue).toContain("**适用场景**");
+    }
+  );
 
   it.each([
     { language: "zh-CN", outputLanguageMode: "follow_policy", expected: "zh" },

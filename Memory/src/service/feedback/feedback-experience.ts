@@ -1045,6 +1045,7 @@ async enhanceFeedbackExperienceDraft(
             role: "system",
             content: FAILURE_EXPERIENCE_SINK_PROMPT.system
           },
+          { role: "system", content: failureExperienceLanguage(this.deps.config.language, [context.userRequest, input.text, context.fullContext]) },
           {
             role: "user",
             content: failureExperienceSinkUserPrompt({
@@ -2265,6 +2266,10 @@ export function normalizeDecisionRepairLlmDraft(value: {
   };
 }
 
+function failureExperienceLanguage(language: MemmyConfig["language"], samples: string[]): string {
+  return languageSteeringLine(normalizeMemoryLanguage(language) ?? steeredPromptLanguage(undefined, samples));
+}
+
 export async function synthesizeFailureExperienceSink(
   input: {
     feedbackText: string;
@@ -2292,8 +2297,7 @@ export async function synthesizeFailureExperienceSink(
       confidence?: unknown;
     }>([
       { role: "system", content: FAILURE_EXPERIENCE_SINK_PROMPT.system },
-      { role: "system", content: languageSteeringLine(normalizeMemoryLanguage(options.language)
-        ?? steeredPromptLanguage(undefined, [input.userRequest, input.feedbackText, input.episodeContext])) },
+      { role: "system", content: failureExperienceLanguage(options.language, [input.userRequest, input.feedbackText, input.episodeContext]) },
       {
         role: "user",
         content: failureExperienceSinkUserPrompt({

@@ -43,7 +43,7 @@ import { kindFromMemory, type EpisodeRecord, type EvolutionJobRecord, type Repos
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import { newId } from "../../utils/id.js";
-import { clip } from "../../utils/text.js";
+import { generatedSkillTitle } from "../../algorithm/skill-display.js";
 import { nowIso } from "../../utils/time.js";
 import { elapsedApiLogMs, recordApiLog } from "../model-audit/model-call-audit.js";
 import { profileIdFromMemory } from "../namespace/namespace-scope.js";
@@ -293,6 +293,8 @@ export class SkillClusterPipeline {
         episode: this.anchorEpisode(batch, job),
         name,
         displayTitle: draft.displayTitle,
+        draftName: draft.name,
+        outputLanguage: draft.outputLanguage,
         procedure: merged,
         existing: existingSkill?.memory,
         successEpisodeIds: batch.filter((item) => item.outcome === "success").map((item) => item.episode_id),
@@ -470,7 +472,7 @@ export class SkillClusterPipeline {
     batch: PackedEpisodeEvidence[];
     existing: DirectSkillProcedureJson | null;
     rebuildScope?: DirectSkillRebuildScope;
-  }): Promise<{ name: string; displayTitle?: string; procedure: DirectSkillProcedureJson; changedSections: string[] }> {
+  }): Promise<{ name: string; outputLanguage: string; displayTitle?: string; procedure: DirectSkillProcedureJson; changedSections: string[] }> {
     const languageSamples = input.batch.flatMap((item) => item.turns.flatMap((turn) => [turn.user, turn.assistant]));
     const steeredLanguage = steeredPromptLanguage(this.deps.config.language, languageSamples);
     const outputLanguage = skillOutputLanguageFor(this.deps.config.algorithm.skill.outputLanguageMode, steeredLanguage);
@@ -521,6 +523,7 @@ export class SkillClusterPipeline {
         : [];
     return {
       name: coerceDirectSkillName(result.name, "direct_skill"),
+      outputLanguage,
       displayTitle: typeof result.display_title === "string" ? result.display_title.trim() || undefined
         : typeof result.displayTitle === "string" ? result.displayTitle.trim() || undefined : undefined,
       procedure,
@@ -534,15 +537,16 @@ export class SkillClusterPipeline {
     episode?: EpisodeRecord;
     name: string;
     displayTitle?: string;
+    draftName: string;
+    outputLanguage: string;
     procedure: DirectSkillProcedureJson;
     existing?: MemoryRow;
     successEpisodeIds: string[];
     at: string;
   }): { memory: MemoryRow; created: boolean; previous?: MemoryRow } {
-    const existingTitle = input.existing?.info.title;
-    const displayTitle = input.displayTitle === input.name ? undefined : input.displayTitle;
-    const title = clip(displayTitle || (typeof existingTitle === "string" && existingTitle) || input.procedure.summary || "", 100);
-    const invocationGuide = renderDirectSkillGuide(input.name, input.procedure, title);
+    const title = generatedSkillTitle(input.outputLanguage, [input.name, input.draftName],
+      input.displayTitle, input.existing?.info.title, input.procedure.summary);
+    const invocationGuide = renderDirectSkillGuide(input.name, input.procedure, title, input.outputLanguage);
     const evidenceAnchorIds = uniqSorted([
       ...((input.existing ? skillMetaFromMemory(input.existing)?.evidenceAnchorIds : []) ?? []),
       ...input.successEpisodeIds
@@ -564,7 +568,7 @@ export class SkillClusterPipeline {
       tags: uniqSorted(["skill", "direct-trace", ...input.procedure.tags, ...input.procedure.tools]),
       info: {
         name: input.name,
-        ...(title ? { title } : {}),
+        title,
         eta: 0.6,
         status: "active",
         source_memory_ids: []
@@ -579,7 +583,7 @@ export class SkillClusterPipeline {
         source_world_model_ids: [],
         evidence_anchor_ids: evidenceAnchorIds,
         name: input.name,
-        ...(title ? { title } : {}),
+        title,
         invocation_guide: invocationGuide,
         procedure_json: input.procedure,
         eta: 0.6,
@@ -587,7 +591,7 @@ export class SkillClusterPipeline {
         gain: 0.4,
         skill: {
           name: input.name,
-          ...(title ? { title } : {}),
+          title,
           eta: 0.6,
           status: "active",
           support: evidenceAnchorIds.length,

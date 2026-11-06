@@ -1,3 +1,4 @@
+import { skillGuideLabel, skillGuideSectionKey } from "./skill-display.js";
 import { SKILL_CRYSTALLIZE_PROMPT } from "./plugin-algorithms.js";
 import { isRecord } from "../utils/json.js";
 
@@ -746,7 +747,7 @@ function packSkillGuideSections(guide: string): string {
       continue;
     }
     sections.push({
-      key: (match[1] ?? "").trim().toLowerCase(),
+      key: skillGuideSectionKey((match[1] ?? "").trim()),
       chunk: chunk.trim()
     });
   }
@@ -773,58 +774,59 @@ function packSkillGuideSections(guide: string): string {
   return ordered.join("\n\n").trim();
 }
 
-export function renderDirectSkillGuide(name: string, procedure: DirectSkillProcedureJson, displayTitle?: string): string {
+export function renderDirectSkillGuide(name: string, procedure: DirectSkillProcedureJson, displayTitle?: string, language?: string): string {
+  const label = (key: Parameters<typeof skillGuideLabel>[0]) => skillGuideLabel(key, language);
   const lines: string[] = [`# ${displayTitle?.trim() || name}`, ""];
   if (procedure.retrievalBlurb) lines.push(procedure.retrievalBlurb, "");
   if (procedure.summary) lines.push(procedure.summary, "");
-  lines.push("**When to use**", procedure.triggerContext || "(from successful RawTurns)", "");
+  lines.push(`**${label("When to use")}**`, procedure.triggerContext || label("(from successful RawTurns)"), "");
   if (procedure.steps.length > 0) {
-    lines.push("**Procedure**");
+    lines.push(`**${label("Procedure")}**`);
     procedure.steps.forEach((step, index) => {
       lines.push(`${index + 1}. **${step.title}** - ${step.body}`);
     });
     lines.push("");
   }
   if (procedure.parameters.length > 0) {
-    lines.push("**Parameters**");
+    lines.push(`**${label("Parameters")}**`);
     for (const item of procedure.parameters) {
       const paramName = skillText(item.name);
       if (!paramName) continue;
       const type = skillText(item.type) || "string";
-      const required = item.required === true ? " (required)" : "";
+      const required = item.required === true ? ` (${label("required")})` : "";
       const description = skillText(item.description);
       lines.push(`- \`${paramName}\`: ${type}${required}${description ? ` - ${description}` : ""}`);
     }
     lines.push("");
   }
   if (procedure.examples.length > 0) {
-    lines.push("**Examples**");
+    lines.push(`**${label("Examples")}**`);
     for (const item of procedure.examples) {
       if (!item.input && !item.expected) continue;
-      lines.push(`- Input: \`${item.input}\``);
-      if (item.expected) lines.push(`  Expected: ${item.expected}`);
+      lines.push(`- ${label("Input")}: \`${item.input}\``);
+      if (item.expected) lines.push(`  ${label("Expected")}: ${item.expected}`);
     }
     lines.push("");
   }
   if (procedure.tools.length > 0) {
-    lines.push("**Tools used**");
+    lines.push(`**${label("Tools used")}**`);
     for (const tool of procedure.tools) lines.push(`- \`${tool}\``);
     lines.push("");
   }
   if (procedure.decisionGuidance.preference.length > 0 || procedure.decisionGuidance.antiPattern.length > 0) {
-    lines.push("**Decision guidance**");
+    lines.push(`**${label("Decision guidance")}**`);
     if (procedure.decisionGuidance.preference.length > 0) {
-      lines.push("Prefer:");
+      lines.push(`${label("Prefer")}:`);
       for (const item of procedure.decisionGuidance.preference) lines.push(`- ${item}`);
     }
     if (procedure.decisionGuidance.antiPattern.length > 0) {
-      lines.push("Avoid:");
+      lines.push(`${label("Avoid")}:`);
       for (const item of procedure.decisionGuidance.antiPattern) lines.push(`- ${item}`);
     }
     lines.push("");
   }
   if (procedure.preconditions.length > 0) {
-    lines.push("**Preconditions**");
+    lines.push(`**${label("Preconditions")}**`);
     for (const item of procedure.preconditions) lines.push(`- ${item}`);
     lines.push("");
   }

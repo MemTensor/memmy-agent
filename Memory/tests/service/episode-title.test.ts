@@ -7,6 +7,7 @@ import {
   episodeTitleMeta,
   validateEpisodeTitleLanguage
 } from "../../src/service/episode-title/episode-title-service.js";
+import { stableHash } from "../../src/utils/id.js";
 import { Repositories, type EvolutionJobRecord } from "../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../fixtures/memory-service-fixture.js";
 
@@ -41,6 +42,24 @@ describe("episode output language", () => {
     expect(complete).toHaveBeenCalledTimes(2);
   });
 
+  it.each([["Password Reset Failed", false], ["修复缓存", true]] as const)(
+    "checks unversioned title %s on the next normal trigger", async (title, compatible) => {
+      const { db, service } = createTestService();
+      const { episodeId } = await completeOneTurn(service);
+      const { llm, calls } = respondWith("修复缓存", "已验证缓存。");
+      const { repos, titleService } = createTitleService(db, llm, { language: "zh-CN" });
+      const sourceHash = stableHash({ stage: "final", omittedTurnCount: 0,
+        turns: [{ index: 1, user: FIRST_USER_TEXT, assistant: FIRST_ASSISTANT_TEXT }] });
+      repos.runtime.updateEpisodeTitle(episodeId, { title, summary: "已验证缓存。",
+        meta: { episodeTitle: { stage: "final", sourceHash, sourceTurnCount: 1 } } });
+      expect(titleService.isCurrent(repos.runtime.getEpisode(episodeId)!)).toBe(compatible);
+      await titleService.generate(titleJob(episodeId, "final"));
+      await titleService.generate(titleJob(episodeId, "final"));
+      expect(calls).toHaveLength(compatible ? 0 : 1);
+      expect(repos.runtime.getEpisode(episodeId)?.title).toBe("修复缓存");
+    }
+  );
+
   it("invalidates freshness on a language switch and rejects an in-flight stale language", async () => {
     const { db, service } = createTestService();
     const { episodeId } = await completeOneTurn(service);
@@ -72,6 +91,9 @@ describe("episode output language", () => {
   it.each([
     ["zh-CN", "Repair cache handling"],
     ["zh-CN", "Fixed cache handling and verified API responses."],
+    ["zh-CN", "Password Reset Failed"],
+    ["zh-CN", "API returned the wrong value for 缓存."],
+    ["en", "Cache 修复缓存配置错误"],
     ["ja", "Repair cache handling"],
     ["en", "修复缓存处理"],
     ["fr", "Fixed the cache and verified responses"]
@@ -87,6 +109,7 @@ describe("episode output language", () => {
     ["ar", "إصلاح التخزين المؤقت"], ["fr", "Réparer le cache API"],
     ["zh-CN", "Node.js API"], ["zh-CN", "React Native"],
     ["zh-CN", "React Native Windows"], ["zh-CN", "`npm install typescript`"],
+    ["zh-CN", "Microsoft Visual Studio Code"], ["zh-CN", "Adobe After Effects"],
     ["en-Abcd", "Ambiguous script"]
   ])("preserves valid or ambiguous output for %s: %s", (language, text) => {
     expect(() => validateEpisodeTitleLanguage(text, language, "title")).not.toThrow();
