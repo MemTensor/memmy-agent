@@ -116,6 +116,35 @@ export function assertLocalViewerRequest(request: IncomingMessage, url: URL): vo
   void url;
 }
 
+/**
+ * Refuse requests that can only originate from a browser page on another origin.
+ *
+ * The Memory service is a machine-local API: every legitimate client (the
+ * desktop app's main process, the CLI, the backend, tests) is a non-browser
+ * HTTP client that sends neither `Origin` nor `Sec-Fetch-*`. A page that
+ * reaches the loopback service from the public web — directly, or through a
+ * DNS rebinding that makes the browser believe it is same-origin — always
+ * carries one of the two, and either alone identifies it. Loopback Origins
+ * (the desktop renderer) stay allowed, matching assertLocalViewerRequest.
+ */
+export function assertNotBrowserCrossOrigin(request: IncomingMessage): void {
+  const origin = header(request, "origin");
+  if (origin) {
+    let parsed: URL;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      throw new MemoryServiceError("forbidden", "request received an invalid Origin header");
+    }
+    if (!isLoopbackHost(parsed.host)) {
+      throw new MemoryServiceError("forbidden", "cross-origin browser requests are not allowed");
+    }
+  }
+  if (header(request, "sec-fetch-site") === "cross-site") {
+    throw new MemoryServiceError("forbidden", "cross-site browser requests are not allowed");
+  }
+}
+
 export async function routeViewerRequest(
   context: ViewerApiContext,
   method: string,
