@@ -15,6 +15,13 @@ afterEach(async () => { for (const close of resources.splice(0).reverse()) await
 
 async function syntheticPage() {
   const { chromium } = await import("playwright");
+  // CI prepares the version pinned by Playwright in an isolated cache. Local
+  // runs can still use the browser already prepared by Memmy below.
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
+    const browser = await chromium.launch({ headless: true });
+    resources.push(() => browser.close());
+    return browser.newPage();
+  }
   const browserDirectory = getPlaywrightBrowsersPath();
   const shellFolder = fs.readdirSync(browserDirectory).find(name => name.startsWith("chromium_headless_shell-"));
   if (!shellFolder) throw new Error("Synthetic History fixture requires the prepared Chromium headless shell");

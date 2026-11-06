@@ -205,14 +205,11 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         stdio: ["pipe", "pipe", "pipe"]
       });
       session.children.set(call.callId, child);
-      // A write callback does not consume the stream's separate error event.
-      // Cancellation or an early plugin exit can close stdin during a reply.
-      let inputError: Error | undefined;
-      child.stdin.on("error", (error: Error) => {
-        inputError = error;
-        terminate(child);
-      });
       child.once("close", () => abortHostServices(session, call.callId));
+      let inputError: Error | undefined;
+      // Writable emits an error as well as invoking the write callback. A
+      // cancelled command can close its pipe while a Host response is in flight.
+      child.stdin.on("error", (error: Error) => { inputError ??= error; terminate(child); });
       if (session.config.inputMode === "stdin-json") child.stdin.write(`${request}\n`);
       if (!session.config.interactive) child.stdin.end();
 
@@ -422,6 +419,7 @@ function hostServiceError(callId: string, requestId: string, code: string, messa
 }
 
 async function writeChildMessage(child: ChildProcessWithoutNullStreams, message: PluginHostServiceResponse): Promise<void> {
+  if (child.killed || child.exitCode !== null || child.signalCode !== null) return;
   await new Promise<void>((resolve, reject) => {
     child.stdin.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve());
   });

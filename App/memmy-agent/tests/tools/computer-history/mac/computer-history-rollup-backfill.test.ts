@@ -1,10 +1,10 @@
+import { privatePosixFixtureMetadata } from "../../../fixtures/posix-private-state.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
 import { instantId } from "../../../../src/tools/computer-history/mac/rollup.js";
-import { mockMacConsentPermissions } from "../private-consent-fixture.js";
 
 let root: string;
 const services: ComputerHistoryDemoService[] = [];
@@ -42,7 +42,7 @@ function legacy(id: string, cited: string[]) {
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "history-rollup-backfill-"));
-  mockMacConsentPermissions(path.join(root, "wechat", "consent.json"));
+  privatePosixFixtureMetadata(root);
   fs.mkdirSync(path.join(root, "histories"));
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });

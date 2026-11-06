@@ -52,7 +52,7 @@ memmy-history-recorder observe --policy FILE [--output FILE] [--seconds N] [--ro
   event. Exit code 0 means `ok` and 3 means refused or unavailable.
 - `observe` records the foreground window while it is authorized. It runs for `--seconds`
   (default **30**, max 86400) and rotates `--output` every `--rotate-seconds` (default 600).
-  Control lines on stdin are `pause`, `resume` and `stop`; stdin EOF stops. With
+  Control lines on stdin are `pause`, `resume`, `stop` and `checkpoint <lowercase UUID>`; stdin EOF stops. With
   `--parent-pid`, the session also ends when that process exits (including forced
   termination). `--input-hooks` adds `WH_KEYBOARD_LL`/`WH_MOUSE_LL` and bounded action
   metadata attached to authorized snapshots; no ordinary typed text is retained.
@@ -63,6 +63,27 @@ memmy-history-recorder observe --policy FILE [--output FILE] [--seconds N] [--ro
 
 Recording never starts implicitly. `observe` requires a valid policy, and only windows that
 policy names are read.
+
+`checkpoint` posts a marker through the hook message loop into the trigger FIFO. It does
+not cancel an in-flight UIA query. The collector processes pending observations before the
+marker (without waiting for debounce), flushes optional native file output, then emits
+`session.checkpoint` with the request ID, envelope sequence and monotonic `captureSequence`.
+Pause and stop retain interruption priority. Markers have a bounded reserve of 16 entries;
+exhaustion, shutdown or a missing marker cannot produce a successful acknowledgement.
+
+The TypeScript adapter consumes this ordered stream, sanitizes and writes all preceding
+observations, appends `recording_checkpoint`, and calls `fsync`. Only then does it acknowledge
+the native session/sequence, capture sequence, recording sequence and exact byte offset.
+Host reads through that offset even if later events have already reached disk. Checkpoint
+records are control evidence, not teaching actions. Missing/invalid markers, sequence errors,
+timeouts and write/flush failures remain incomplete.
+
+`capture.gap` records bounded loss intervals (queue overflow, failed/cancelled reads, rejected
+commits and truncation). The adapter evaluates only the requested fragment interval. A prior
+damaged fragment remains partial; a later healthy interval can independently be complete.
+Sanitized `recording_gap` diagnostics reach the same durable writer before the marker; these
+and checkpoint controls are excluded from teaching actions and semantic summaries.
+Completeness describes the existing authorized capture scope, not additional browser support.
 
 ## Architecture
 

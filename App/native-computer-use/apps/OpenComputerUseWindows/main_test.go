@@ -375,7 +375,7 @@ func TestWindowsFocusGuardErrorsAreDistinctFromOrdinaryActionErrors(t *testing.T
 func TestWindowsRuntimeFocusGuardCoversActionAndSnapshotFailures(t *testing.T) {
 	for _, required := range []string{
 		"GetForegroundWindow", "GetWindowThreadProcessId", "GetLastInputInfo",
-		"$script:focusBefore = Read-FocusState", "Assert-SafeBeforeAction $script:focusBefore $process.Id $hwnd",
+		"$script:focusBefore = Read-ActionFocus", "Assert-SafeBeforeAction $script:focusBefore $process.Id $hwnd",
 		"Assert-SafeAfterAction $script:focusBefore $process.Id $hwnd", "focusGuardYield = $script:focusGuardYield",
 	} {
 		if !strings.Contains(windowsRuntimeScript, required) {
@@ -388,7 +388,7 @@ func TestWindowsRuntimeFocusGuardCoversActionAndSnapshotFailures(t *testing.T) {
 	for _, required := range []string{
 		"$script:dispatched = $true",
 		"$check.inputTick -ne $before.inputTick",
-		"$previousPID -ne $before.processId",
+		"Test-ForegroundRestoreTarget $before.hwnd $before.processId",
 		"Assert-DispatchSafe $hwnd",
 	} {
 		if !strings.Contains(windowsRuntimeScript, required) {
@@ -469,4 +469,14 @@ func findToolDefinition(t *testing.T, name string) toolDefinition {
 	}
 	t.Fatalf("missing tool definition %q", name)
 	return toolDefinition{}
+}
+
+func TestWindowsForegroundTextSessionCompletesAfterObservationEvenOnFailure(t *testing.T) {
+	normalized := strings.ReplaceAll(windowsRuntimeScript, "\r\n", "\n")
+	entry := normalized[strings.Index(normalized, "$operationJson = "):]
+	observation := strings.LastIndex(entry, "$snapshot = Build-Snapshot")
+	cleanup := strings.LastIndex(entry, "Complete-PendingForegroundInput")
+	if observation < 0 || cleanup < observation || !strings.Contains(entry, "} finally {\n    # Observation failures and cancellation must still release the session.") {
+		t.Fatal("Foreground text must retain its session through observation and release it in final cleanup")
+	}
 }

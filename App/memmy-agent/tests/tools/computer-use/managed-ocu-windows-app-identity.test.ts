@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RequestContext } from '../../../src/core/agent-runtime/tools/context.js';
 import { ManagedOcuSession, OCU_TOOLS } from '../../../src/tools/computer-use/managed-ocu-session.js';
+import { MCPToolWrapper } from '../../../src/core/agent-runtime/tools/mcp.js';
 import { InstalledAppIdentityLookupError, NativeAppApprovalDenied, NativeAppApprovalGate, NativeAppApprovalStore }
   from '../../../src/tools/computer-use/native-app-approvals.js';
 
@@ -40,6 +41,42 @@ afterEach(async () => {
 });
 
 describe('Windows localized application identity and approval dispatch', () => {
+  it('keeps an ambiguous Windows name recoverable, without approval or input, then resolves an exact PID', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const f = fixture(undefined, true, vi.fn().mockRejectedValue(new InstalledAppIdentityLookupError('ambiguous')));
+    const candidates = { ...listing, _meta: { memmyComputerUse: { runningApps: { version: 1,
+      apps: [runningApp, { ...runningApp, pid: 2050 }] } } } };
+    f.callTool.mockImplementation(async name => name === 'list_apps' ? candidates : state);
+    const tool = new MCPToolWrapper({}, 'memmy-computer-use', { name: 'get_app_state' }, 30, undefined, f.owner);
+    tool.setContext(context);
+    const stopTurn = vi.fn();
+    const unresolved = await tool.execute({ app: 'Calculator' }, { stopTurn });
+    expect(unresolved).toContain('list_apps');
+    expect(unresolved).toContain('尚未请求应用授权');
+    expect(stopTurn).not.toHaveBeenCalled();
+    expect(f.ask).not.toHaveBeenCalled();
+    expect(f.callTool.mock.calls.map(call => call[0])).toEqual(['list_apps']);
+
+    await f.owner.invoke('list_apps', {}, 30, context);
+    const resolved = await f.owner.invoke('get_app_state', { app: '2049' }, 30, context);
+    expect(resolved._meta.memmyComputerUse).toMatchObject({ targetWindowID: 1001, pid: 2049 });
+    expect(f.ask).toHaveBeenCalledExactlyOnceWith(identity);
+    expect(f.callTool.mock.calls.map(call => call[0])).toEqual(['list_apps', 'list_apps', 'list_apps', 'get_app_state']);
+    expect(f.callTool.mock.calls.at(-1)![1]).toMatchObject({ app: '2049', _memmy_expected_app_id: APP_ID });
+  });
+
+  it('still ends the turn after an actual Windows app approval refusal', async () => {
+    const f = fixture(vi.fn().mockResolvedValue('deny'));
+    const tool = new MCPToolWrapper({}, 'memmy-computer-use', { name: 'get_app_state' }, 30, undefined, f.owner);
+    tool.setContext(context);
+    const stopTurn = vi.fn();
+    const result = await tool.execute({ app: '2049' }, { stopTurn });
+    expect(result).toContain('was not allowed');
+    expect(stopTurn).toHaveBeenCalledExactlyOnceWith(result);
+    expect(f.ask).toHaveBeenCalledExactlyOnceWith(identity);
+    expect(f.callTool.mock.calls.map(call => call[0])).toEqual(['list_apps']);
+  });
+
   it('waits for approval of the native package identity and binds the selected PID to that identity', async () => {
     let approve!: (value: string) => void;
     const ask = vi.fn(() => new Promise<string>(resolve => { approve = resolve; }));

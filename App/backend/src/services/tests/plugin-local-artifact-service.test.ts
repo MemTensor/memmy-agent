@@ -26,7 +26,7 @@ describe("PluginLocalArtifactService", () => {
     expect(hosted.uri).toMatch(/^\/api\/v1\/plugins\/literature-review\/artifacts\/[^/]+\/preview$/);
     expect(hosted.downloadUri).toMatch(/\/download$/);
     const token = hosted.uri.split("/").at(-2)!;
-    await expect(service.open("literature-review", token)).resolves.toMatchObject({ path: realpathSync(output), name: "review.pdf" });
+    await expect(service.open("literature-review", token)).resolves.toMatchObject({ path: realpathSync.native(output), name: "review.pdf" });
   });
 
   it("rejects local files outside approved filesystem roots", async () => {
@@ -90,7 +90,7 @@ describe("PluginLocalArtifactService", () => {
     });
 
     const published = join(workspace, "outputs", "literature-review", "review-1", "review.md");
-    expect(hosted.path).toBe(realpathSync(published));
+    expect(hosted.path).toBe(realpathSync.native(published));
     expect(readFileSync(published, "utf8")).toBe("# Published review");
     expect(readFileSync(output, "utf8")).toBe("# Published review");
   });
@@ -119,7 +119,7 @@ describe("PluginLocalArtifactService", () => {
     }, { conversationId: "websocket:chat-1", callId: "call-1" });
 
     const published = join(workspace, "outputs", "legal-labor", "websocket-chat-1", "企业-用工风险与合规诊断报告.docx");
-    expect(hosted.path).toBe(realpathSync(published));
+    expect(hosted.path).toBe(realpathSync.native(published));
     expect(readFileSync(published, "utf8")).toBe("report");
   });
 

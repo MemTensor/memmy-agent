@@ -1385,6 +1385,7 @@ async function startLocalApi(services: ManagedRuntimeServices | null): Promise<D
       ?? (app.isPackaged ? join(process.resourcesPath, "bundled-plugins") : undefined),
     memoryBaseUrl: memoryControl.baseUrl,
     memoryReady: services?.memory.ready,
+    agentGatewayReady: services?.agentGatewayReady,
     skipAgentMcpReload: Boolean(services),
     runtimeConfigPath: process.env.MEMMY_HOME ? join(process.env.MEMMY_HOME, "runtime.json") : undefined
   });
@@ -6353,12 +6354,12 @@ async function cleanupBeforeQuit(): Promise<void> {
       })
     : Promise.resolve();
   try {
-    await traceQuitCleanup("runtime-services", async () => {
-      await closeRuntimeForQuit(quit);
-    });
+    await traceQuitCleanup("runtime-services", () => closeRuntimeForQuit(quit));
   } finally {
     await nativeAgentShutdown;
   }
+  if (quit.outcome !== "pending") return;
+  quit.phase = "backend-close";
   browserSidebarBridge?.dispose();
   browserSidebarBridge = null;
   embeddedBrowserDriver.dispose();

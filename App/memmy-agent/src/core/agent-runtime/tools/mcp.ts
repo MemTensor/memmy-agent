@@ -1050,6 +1050,8 @@ export async function connectMcpServers(
         refreshTools: async (targetRegistry) => {
           // Discover first so a temporary failure does not discard usable tools or interrupt active calls.
           const tools = await timeoutPromise(liveSession.listTools?.(), 15, `MCP server '${name}' tool refresh timed out`);
+          // Agent initialization replaces its registry after opening MCP. A
+          // later plugin restore must publish into the current registry.
           registerTools(tools, targetRegistry);
         },
         close: async () => {

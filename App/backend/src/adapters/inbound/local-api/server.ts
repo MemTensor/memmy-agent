@@ -141,13 +141,14 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   // The MCP bridge validates with its own x-memmy-mcp-token (the agent has no runtime token), so authenticateRuntimeToken is not attached.
   registerComposioMcpRoutes(app, {
     integrations: options.services.integrations,
-    mcpToken: options.composioMcpToken
+    mcpToken: options.composioMcpToken,
   });
   registerPluginMcpRoutes(app, {
     skillContent: options.services.pluginSkillContent,
     plugins: options.services.plugins,
     progressBus: options.services.progressBus,
-    mcpToken: options.composioMcpToken
+    mcpToken: options.composioMcpToken,
+    refreshTools: options.pluginCapabilitiesChanged
   });
   registerChannelRoutes(app, {
     channels: options.services.channels,

@@ -42,6 +42,8 @@ class HookThread {
   // Round-trips a message through the hook thread so WinEvents already queued for it have been
   // dispatched before the caller compares generations. Fails closed on timeout.
   bool Barrier(DWORD timeoutMs);
+  // Inserts a numbered marker from the hook message loop into the observation FIFO.
+  bool RequestCheckpoint(const std::string& id);
 
   HANDLE QueueEvent() const;
   TriggerQueue& Queue();

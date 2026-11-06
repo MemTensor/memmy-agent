@@ -226,6 +226,7 @@ func emit(_ value: [String: Any], expectedSession: UInt64? = nil) {
   if expectedSession == nil || expectedSession == historySessionId { diagnostics.append(value) }
 }
 func timestamp() -> String { "2026-10-09T12:00:00Z" }
+${production("func timestampAt(", "// Diagnostics never carry")}
 ${production("// Diagnostics never carry", "func modifierNames(")}
 ${production("func accessibilityString(", "func hasSemanticLabel(")}
 ${production("let AX_TREE_MAX_NODES =", "let axObserverCallback:")}

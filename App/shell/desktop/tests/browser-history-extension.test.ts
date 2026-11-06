@@ -222,7 +222,8 @@ describe("isolated passive browser History transport", () => {
   it("ships only isolated http(s) frame scripts and obtains no grant from web page messages", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(extension, "manifest.json"), "utf8"));
     expect(manifest.content_scripts).toEqual([{ matches: ["http://*/*", "https://*/*"], js: ["history-sensor.js", "history-content.js"],
-      all_frames: true, match_about_blank: false, world: "ISOLATED", run_at: "document_start" }]);
+      all_frames: true, match_about_blank: false, world: "ISOLATED", run_at: "document_start" },
+      { matches: ["http://*/*", "https://*/*"], js: ["teaching-page.js"], run_at: "document_start", all_frames: false }]);
     const content = fs.readFileSync(path.join(extension, "history-content.js"), "utf8");
     expect(content).not.toMatch(/(?:addEventListener\(["']message|postMessage\(|\beval\(|new Function)/u);
   });

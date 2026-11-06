@@ -4076,7 +4076,7 @@ function inferMediaKind(media: { url?: string; name?: string; kind?: AgentChatMe
   // Older threads stored Memmy's audio-only recording as video because .webm
   // was classified by extension. Correct those saved messages on hydration.
   const displayName = (media.name || media.path?.split(/[\\/]/).pop() || "").toLowerCase();
-  if (/^录音-\d{4}-\d{2}-\d{2}t[\d-]+z\.webm$/u.test(displayName)) return "audio";
+  if (/^\u5f55\u97f3-\d{4}-\d{2}-\d{2}t[\d-]+z\.webm$/u.test(displayName)) return "audio";
   if (isAgentChatMediaKind(media.kind)) return media.kind;
   if (media.url?.startsWith("data:image/")) return "image";
   if (media.url?.startsWith("data:video/")) return "video";

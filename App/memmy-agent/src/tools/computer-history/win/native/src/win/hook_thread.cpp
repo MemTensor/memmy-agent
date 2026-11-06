@@ -9,6 +9,7 @@ namespace memmy::win {
 namespace {
 
 constexpr UINT kBarrierMessage = WM_APP + 1;
+constexpr UINT kCheckpointMessage = WM_APP + 2;
 
 
 LARGE_INTEGER Now() {
@@ -117,6 +118,15 @@ bool HookThread::Barrier(DWORD timeoutMs) {
     return false;
   }
   return WaitForSingleObject(done.get(), timeoutMs) == WAIT_OBJECT_0;
+}
+
+bool HookThread::RequestCheckpoint(const std::string& id) {
+  const DWORD threadId = state_->threadId_.load();
+  if (!threadId || !state_->enabled_.load()) return false;
+  auto request = std::make_unique<std::string>(id);
+  if (!PostThreadMessageW(threadId, kCheckpointMessage, 0, reinterpret_cast<LPARAM>(request.get()))) return false;
+  request.release();  // The hook loop also disposes requests left behind during shutdown.
+  return true;
 }
 
 HookCounters HookThread::Counters() const {
@@ -288,6 +298,16 @@ void HookThread::Run(std::shared_ptr<State> state, bool foregroundOnly, bool inp
 
   if (ok) {
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+      if (message.hwnd == nullptr && message.message == kCheckpointMessage) {
+        const std::unique_ptr<std::string> id(reinterpret_cast<std::string*>(message.lParam));
+        if (state->enabled_.load() && !state->paused_.load()) {
+          // A saturated checkpoint reserve fails by timeout; it can never acknowledge
+          // a marker that was not inserted. Observation capacity remains bounded.
+          state->queue_.PushCheckpoint(*id, GetTickCount64());
+          SetEvent(state->queueEvent_.get());
+        }
+        continue;
+      }
       if (message.hwnd == nullptr && message.message == kBarrierMessage) {
         const HANDLE done = reinterpret_cast<HANDLE>(message.lParam);
         SetEvent(done);
@@ -309,6 +329,9 @@ void HookThread::Run(std::shared_ptr<State> state, bool foregroundOnly, bool inp
   // Drain barrier handles posted after WM_QUIT so their duplicates are not leaked.
   while (PeekMessageW(&message, nullptr, kBarrierMessage, kBarrierMessage, PM_REMOVE)) {
     CloseHandle(reinterpret_cast<HANDLE>(message.lParam));
+  }
+  while (PeekMessageW(&message, nullptr, kCheckpointMessage, kCheckpointMessage, PM_REMOVE)) {
+    delete reinterpret_cast<std::string*>(message.lParam);
   }
   state->threadId_.store(0);
   callbackState_ = nullptr;

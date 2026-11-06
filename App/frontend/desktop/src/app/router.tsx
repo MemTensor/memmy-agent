@@ -74,6 +74,7 @@ import { WelcomePage } from "../pages/welcome-page.js";
 const MemoryPage = lazy(() => import("../pages/memory-page.js").then(({ MemoryPage }) => ({ default: MemoryPage })));
 const KnowledgePage = lazy(() => import("../pages/knowledge-page.js").then(({ KnowledgePage }) => ({ default: KnowledgePage })));
 const SettingsPage = lazy(() => import("../pages/settings-page.js").then(({ SettingsPage }) => ({ default: SettingsPage })));
+const PluginsPage = lazy(() => import("../pages/plugins-page.js").then(({ PluginsPage }) => ({ default: PluginsPage })));
 const ToolsPage = lazy(() => import("../pages/tools-page.js").then(({ ToolsPage }) => ({ default: ToolsPage })));
 
 function readWorkspaceGuidanceOverlay(step: DeferredGuidanceStep | null): Extract<DeferredGuidanceStep, "product_tour" | "nickname"> | null {
@@ -386,6 +387,8 @@ function renderRoute(path: AppRoutePath) {
       return <ApiKeyOptionalPage />;
     case "/onboarding":
       return <OnboardingPage />;
+    case "/plugins":
+      return <PluginsPage />;
     case "/tools":
       return <ToolsPage />;
     case "/memory":

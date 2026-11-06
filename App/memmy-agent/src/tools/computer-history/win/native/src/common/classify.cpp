@@ -120,7 +120,7 @@ NodeDecision Classify(const NodeFacts& facts, const policy::Policy& policy, cons
   decision.readName = rule.captureText || !policy::HasVsCodeEditorScope(rule);
   if (facts.controlType == kDocument && facts.textPatternAvailable &&
       (policy::MatchesSelector(rule.documentRegions, facts.controlType, facts.automationId) ||
-       (facts.scopedDocument && policy::HasWordDocumentScope(rule)))) {
+       (facts.scopedDocument && (policy::HasWordDocumentScope(rule) || policy::HasNotepadDocumentScope(rule))))) {
     // The authorized body is read as one range; its children would only duplicate it.
     decision.readName = true;
     decision.readDocumentText = true;

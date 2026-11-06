@@ -119,6 +119,7 @@ describe("app state store migrations", () => {
     const secondMigrationCount = getMigrationCount(secondStore.db);
     const settings = secondStore.repositories.bootstrap.getAppSettings();
     const agentSources = secondStore.repositories.agentSources.listSources();
+    const pluginColumns = secondStore.db.prepare("PRAGMA table_info(installed_plugins)").all().map(row => row.name);
     secondStore.close();
 
     expect(onboarding).toMatchObject({
@@ -131,8 +132,10 @@ describe("app state store migrations", () => {
     expect(settings.menuBarIconEnabled).toBe(true);
     expect(settings.stopMemoryServiceOnExit).toBe(false);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(38);
-    expect(secondMigrationCount).toBe(38);
+    // The upstream migrations coexist with native trust and enabled-intent extensions.
+    expect(firstMigrationCount).toBe(40);
+    expect(secondMigrationCount).toBe(40);
+    expect(pluginColumns).toEqual(expect.arrayContaining(["native_execution_allowed", "registry_origin", "desired_enabled"]));
   });
 
   it("preserves the authenticated account when upgrading the legacy 0007 database", () => {

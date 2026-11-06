@@ -19,6 +19,7 @@ const inputSettle = time.Second
 const workerDeadline = 4 * time.Second
 
 var version = "dev"
+var checkpointID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 var appIDPattern = regexp.MustCompile(`^win32\.[a-z0-9._-]{1,128}$`)
 var windowIDPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
 
@@ -104,19 +105,20 @@ func safeKey(vk uint32) (string, uint32) {
 }
 
 type scheduler struct {
-	lastFull time.Time
-	lastPoll time.Time
-	typing   *action
-	typingAt time.Time
-	pending  []action
-	dropped  int
+	lastFull    time.Time
+	lastPoll    time.Time
+	typing      *action
+	typingAt    time.Time
+	pending     []action
+	dropped     int
+	droppedFrom time.Time
 }
 
 func (s *scheduler) add(a action, at time.Time) {
 	if a.Kind == "focus.changed" {
 		if s.typing != nil {
+			s.noteDrop(*s.typing, at)
 			s.typing = nil
-			s.dropped++
 		}
 		a.Kind = "accessibility.changed"
 	}
@@ -155,8 +157,8 @@ func (s *scheduler) add(a action, at time.Time) {
 		}
 	}
 	if len(s.pending) >= 16 {
+		s.noteDrop(s.pending[0], time.Now())
 		s.pending = s.pending[1:]
-		s.dropped++
 	}
 	s.pending = append(s.pending, a)
 }
@@ -166,8 +168,8 @@ func (s *scheduler) next(now time.Time) (action, bool, bool) {
 		a := *s.typing
 		s.typing = nil
 		if len(s.pending) >= 16 {
+			s.noteDrop(s.pending[0], now)
 			s.pending = s.pending[1:]
-			s.dropped++
 		}
 		s.pending = append(s.pending, a)
 	}
@@ -400,4 +402,25 @@ func pureSelfTest() error {
 		return fmt.Errorf("typing not coalesced")
 	}
 	return nil
+}
+
+// A boundary must not leave the last typing burst waiting for its idle timer.
+func (s *scheduler) flushTyping() {
+	if s.typing == nil {
+		return
+	}
+	if len(s.pending) >= 16 {
+		s.noteDrop(s.pending[0], time.Now())
+		s.pending = s.pending[1:]
+	}
+	s.pending = append(s.pending, *s.typing)
+	s.typing = nil
+}
+
+func (s *scheduler) noteDrop(a action, at time.Time) {
+	s.dropped++
+	from := actionTime(a, at)
+	if s.droppedFrom.IsZero() || from.Before(s.droppedFrom) {
+		s.droppedFrom = from
+	}
 }

@@ -34,6 +34,20 @@ beforeEach(() => {
 afterEach(() => fs.rmSync(directory, { recursive: true, force: true }));
 
 describe("Windows task frame provenance", () => {
+  it("validates compacted media time while retaining the original precise source clock", async () => {
+    const file = path.join(directory, "native-media.json");
+    const media = JSON.parse(fs.readFileSync(file, "utf8"));
+    media.durationMs = 30200; media.videoDurationMs = 200;
+    media.idleSpans = [{ startMs: 50, endMs: 30050 }];
+    fs.writeFileSync(file, JSON.stringify(media));
+    const rows = frames().map((frame) => ({ ...frame, videoTimeMs: frame.timeMs }));
+    rows[1]!.timeMs = 30100; rows[1]!.qpc = String(origin + 301000n);
+    writeFrames(rows);
+    expect(await recover()).toMatchObject({ durationMs: 30200, video: { durationMs: 200 }, idleSpans: media.idleSpans, videoIntegrity: "complete" });
+    rows[1]!.videoTimeMs = 150;
+    writeFrames(rows);
+    await expect(recover()).rejects.toThrow("task_frame_clock_invalid");
+  });
   it("recovers display repeats while preserving QPC precision beyond JS integers", async () => {
     expect(await recover()).toMatchObject({ qpc: { origin: String(origin), frequency: "10000" }, videoIntegrity: "complete", durationMs: 200 });
   });

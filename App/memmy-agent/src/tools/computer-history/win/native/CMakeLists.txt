@@ -117,10 +117,10 @@ if(MEMMY_HISTORY_BUILD_TESTS)
     cli_contract policy_strict identity_mismatch browser_unsupported generic_cross_process
     snapshot_content snapshot_not_foreground race_aba race_policy timeout_reap
     commit_races commit_pause commit_control_flood partial_baseline
-    observe_lifecycle observe_unauthorized_foreground observe_policy_corrupt observe_policy_race
+    observe_lifecycle observe_checkpoint observe_checkpoint_origin observe_unauthorized_foreground observe_policy_corrupt observe_policy_race
     observe_ui_hang_recovery observe_eof observe_parent_exit observe_parent_kill
     observe_collector_kill_reaps_worker observe_ctrl_break single_instance rotation_unicode_path
-    output_exists output_segment_failure output_flush_failure stdout_broken input_hooks_lifecycle stop_hotkey task_video_lifecycle task_video_static_frames)
+    output_exists output_segment_failure output_flush_failure stdout_broken input_hooks_lifecycle stop_hotkey task_video_lifecycle task_video_static_frames task_video_idle)
   foreach(case IN LISTS MEMMY_INTEGRATION_CASES)
     add_test(NAME integration.${case}
       COMMAND memmy-history-integration-tests

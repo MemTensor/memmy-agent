@@ -84,4 +84,21 @@ describe("reusing a passed consent check", () => {
     expect(validateWindowsWeChatConsent(file)).toBe(true);
     expect(execFileSync).toHaveBeenCalledTimes(3);
   });
+
+  it("revalidates an ACL-only ChangeTime update even when content metadata is unchanged", () => {
+    const original = fs.lstatSync;
+    let changeTime = original(file, { bigint: true }).ctimeNs;
+    const spy = vi.spyOn(fs, "lstatSync").mockImplementation(((target, options) => {
+      const stat = original(target, options);
+      return String(target) === file && stat ? Object.assign(stat, { ctimeNs: changeTime }) : stat;
+    }) as typeof fs.lstatSync);
+    try {
+      expect(validateWindowsWeChatConsent(file)).toBe(true);
+      expect(validateWindowsWeChatConsent(file)).toBe(true);
+      expect(execFileSync).toHaveBeenCalledTimes(1);
+      changeTime += 1n;
+      expect(validateWindowsWeChatConsent(file)).toBe(true);
+      expect(execFileSync).toHaveBeenCalledTimes(2);
+    } finally { spy.mockRestore(); }
+  });
 });

@@ -10,6 +10,18 @@ const runtimeConfig = {
 };
 
 describe("requestJson", () => {
+  it.each([
+    ["plugin_incompatible", 400, "Missing Host capabilities: memmy.event-checkpoints/v1"],
+    ["plugin_permission_denied", 403, "Plugin permissions need approval"],
+    ["plugin_activation_failed", 409, "Plugin runtime could not start"]
+  ] as const)("preserves %s details from the plugin API", async (code, status, message) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: { code, message, requestId: "plugin-install-test" }
+    }), { status, headers: { "content-type": "application/json" } })));
+    await expect(requestJson({ config: runtimeConfig, path: "/api/v1/plugins/install",
+      schema: z.object({ ok: z.literal(true) }), body: { pluginId: "teach-mode", version: "0.4.1" }
+    })).rejects.toMatchObject({ code, status, message, requestId: "plugin-install-test" });
+  });
   it("preserves a plugin entitlement denial instead of turning it into an unknown error", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       error: { code: "plugin_entitlement_required", message: "Plugin grant missing", requestId: "plugin-test" }

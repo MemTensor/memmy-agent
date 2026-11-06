@@ -17,6 +17,8 @@ enum class TriggerKind : std::uint8_t {
   Show,         // EVENT_OBJECT_SHOW
   Input,        // WH_KEYBOARD_LL key down (no key data retained)
   Pointer,      // WH_MOUSE_LL button up / wheel (no coordinates retained)
+  Checkpoint,   // ordered marker; never coalesced with observations
+  Gap,          // loss interval, emitted even when the observation queue was full
 };
 
 const char* TriggerKindName(TriggerKind kind);
@@ -41,6 +43,10 @@ struct Trigger {
   std::uint64_t generation = 0;
   std::uint64_t tickMs = 0;
   InputAction action;
+  std::string checkpointId;
+  std::uint64_t captureSequence = 0;
+  std::uint64_t lostFromTickMs = 0, lostThroughTickMs = 0;
+  std::uint64_t firstTickMs = 0;  // preserve the oldest notification when coalescing
 };
 
 struct TriggerCounters {
@@ -60,6 +66,8 @@ class TriggerQueue {
 
   // Returns false only when the trigger was dropped because the queue was full.
   bool Push(const Trigger& trigger);
+  // A separate bounded reserve prevents a full observation queue from losing its fence.
+  bool PushCheckpoint(const std::string& id, std::uint64_t tickMs);
   // Moves all queued triggers out. overflowed reports whether any drop happened since the
   // previous drain.
   std::vector<Trigger> Drain(bool& overflowed);
@@ -74,6 +82,9 @@ class TriggerQueue {
   std::deque<Trigger> items_;
   TriggerCounters counters_;
   bool overflowed_ = false;
+  std::size_t checkpoints_ = 0;
+  std::uint64_t sequence_ = 0;
+  std::uint64_t lostFrom_ = 0, lostThrough_ = 0;
 };
 
 }  // namespace memmy

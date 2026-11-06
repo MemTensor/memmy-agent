@@ -33,7 +33,7 @@ void ControlFlood(bool explicitStop) {
   Check(control.TestWaitReader(2000), "reader reached EOF after flood");
   control.Shutdown(2000);
   const auto items = control.Drain();
-  Check(items.size() == 1 && items[0] == (explicitStop ? ControlItem::Stop : ControlItem::Eof),
+  Check(items.size() == 1 && items[0].kind == (explicitStop ? ControlItem::Stop : ControlItem::Eof),
         "terminal control survived full queue");
   SetStdHandle(STD_INPUT_HANDLE, original);
 }
@@ -55,9 +55,33 @@ void PrivacyControlOverflow() {
   while (!control.TestTerminal() && TickMs() < deadline) Sleep(1);
   Check(control.TestTerminal() == ControlItem::Overflow, "privacy command overflow fails closed");
   const auto items = control.Drain();
-  Check(items.size() == 1 && items[0] == ControlItem::Overflow, "overflow outranks queued commands");
+  Check(items.size() == 1 && items[0].kind == ControlItem::Overflow, "overflow outranks queued commands");
   write.reset();
   Check(control.TestWaitReader(2000), "overflow reader cleanup");
+  control.Shutdown(2000);
+  SetStdHandle(STD_INPUT_HANDLE, original);
+}
+
+void CheckpointDoesNotInterrupt() {
+  HANDLE rawRead = nullptr, rawWrite = nullptr;
+  Check(CreatePipe(&rawRead, &rawWrite, nullptr, 0) != FALSE, "checkpoint pipe");
+  UniqueHandle read = Own(rawRead), write = Own(rawWrite);
+  const HANDLE original = GetStdHandle(STD_INPUT_HANDLE);
+  Check(SetStdHandle(STD_INPUT_HANDLE, read.get()) != FALSE, "checkpoint stdin");
+  ControlInput control;
+  Check(control.Start(), "checkpoint reader");
+  const std::string command = "checkpoint 12345678-1234-1234-1234-123456789abc\n";
+  DWORD written = 0;
+  Check(WriteFile(write.get(), command.data(), static_cast<DWORD>(command.size()), &written, nullptr) != FALSE, "write checkpoint");
+  Check(WaitForSingleObject(control.Event(), 2000) == WAIT_OBJECT_0, "checkpoint wakes collector");
+  Check(WaitForSingleObject(control.InterruptEvent(), 0) == WAIT_TIMEOUT, "checkpoint preserves in-flight query");
+  const auto items = control.Drain();
+  Check(items.size() == 1 && items[0].kind == ControlItem::Checkpoint &&
+        items[0].id == "12345678-1234-1234-1234-123456789abc", "checkpoint identity retained");
+  Check(WriteFile(write.get(), "pause\n", 6, &written, nullptr) != FALSE, "write pause");
+  Check(WaitForSingleObject(control.InterruptEvent(), 2000) == WAIT_OBJECT_0, "privacy control still interrupts");
+  write.reset();
+  Check(control.TestWaitReader(2000), "checkpoint reader cleanup");
   control.Shutdown(2000);
   SetStdHandle(STD_INPUT_HANDLE, original);
 }
@@ -67,6 +91,7 @@ int main() {
     ControlFlood(false);
     ControlFlood(true);
     PrivacyControlOverflow();
+    CheckpointDoesNotInterrupt();
     UniqueHandle delayedThread;
     {
       HookThread hooks(4);

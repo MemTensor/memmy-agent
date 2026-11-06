@@ -88,6 +88,15 @@ function normalizeMigrationAlias(db: DatabaseSync, fileName: string): boolean {
 
 /** Checks is migration schema already converged. */
 function isMigrationSchemaAlreadyConverged(db: DatabaseSync, fileName: string): boolean {
+  // The unpublished prototype used a different migration number. Recognize
+  // that exact history without rerunning CREATE TABLE or rewriting its audit.
+  if (fileName === "0026-plugin-host.sql" && hasMigrationRecord(db, "0030-plugin-host.sql")) {
+    return hasColumns(db, "installed_plugins", ["id", "version", "manifest_json", "state", "approved_permissions_json", "config_json", "artifact_hash", "root_path", "last_error", "created_at", "updated_at"]);
+  }
+  if (fileName === "0032-plugin-native-trust.sql") {
+    return hasColumns(db, "installed_plugins", ["native_execution_allowed", "registry_origin"]);
+  }
+
   if (fileName === "0015-asr-model-config.sql") {
     return hasColumns(db, "account_model_config", [
       "asr_provider",

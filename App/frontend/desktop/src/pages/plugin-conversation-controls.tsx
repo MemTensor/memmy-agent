@@ -102,7 +102,7 @@ export function PinnedPluginCommandBar(props: {
         const Icon = target.plugin.id === "legal-labor" && target.command.topbar === true ? Mic : resolveContributionIcon(target.command.icon);
         // The composer recording entry controls its compact card independently
         // of the top-bar page and pending material collection calls.
-        const recording = target.command.topbar === true;
+        const recording = target.command.topbar === true && !target.plugin.manifest.conversation;
         const open = recording ? props.recordingOpen : props.active.has(`${target.plugin.id}:${target.command.capabilityId}`);
         return (
           <button

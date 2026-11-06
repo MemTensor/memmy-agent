@@ -240,7 +240,7 @@ applied. `observe` refuses to start without a valid policy, and each query re-re
 | `applications[].browser` | no | `"chrome"` for `chrome.exe`, `"edge"` for `msedge.exe`; incompatible executable or nonempty input/body selectors are invalid. Omission still refuses known browsers. |
 | `applications[].searchFields` | no | `[{controlType:"Edit", automationId}]`; value read only while that exact field has focus |
 | `applications[].captureText` | no | Capability-based generic content on all control roles, including browsers; defaults to true. Explicit false retains bounded compatibility. |
-| `applications[].documentRegions` | no | Exact nonempty-ID selectors, or the bounded VS Code / Word selectors below; TextPattern body reads only |
+| `applications[].documentRegions` | no | Exact nonempty-ID selectors, or the bounded VS Code / Word / Notepad selectors below; TextPattern body reads only |
 | `applications[].sensitiveAutomationIds` | no | blocks the element and its subtree (case-insensitive) |
 | `sensitiveAutomationIds` | no | same, for all applications |
 | `deny.executables`, `deny.pids` | no | refuse even if an application rule matches |
@@ -258,7 +258,7 @@ With the VS Code scope, generic workbench Names are not collected: search terms 
 sibling status/live-region Text. Only authorized body or explicitly selected search fields may
 carry content. Normal ancestor traversal remains metadata-only.
 
-The other exception is `{controlType:"Document",automationId:"",scope:"word.document"}` for a
+Another exception is `{controlType:"Document",automationId:"",scope:"word.document"}` for a
 bound `WINWORD.EXE`. It requires `Document(_WwG) <- Pane(_WwB) <- Pane(_WwF) <- Window(OpusApp)`
 at depths 3, 2, 1, 0, with readable empty IDs, password=false, unredacted ancestors, and root
 parent=null. Native before/after checks additionally require same-PID HWNDs, matching real
@@ -268,12 +268,21 @@ Both scopes use documentStatus and suppress descendants after a scoped read atte
 read failure. Word draft and print layouts can use the outer Document without a generic empty-ID
 wildcard. Complete text and provider-visible text remain distinct.
 
+`{controlType:"Document",automationId:"",scope:"notepad.document"}` is limited to a bound
+`Notepad.exe` with `Document(RichEditD2DPT) <- Pane(NotepadTextBox) <- Window(Notepad)` at
+depths 2, 1, 0. All three IDs must be successfully read and empty, password=false, with
+unredacted ancestors and root parent=null. Native before/after checks verify same-PID HWNDs,
+actual Win32 classes and parent links back to the original root. Worker and TS independently
+reconstruct the chain. It uses the same documentStatus and descendant suppression rules.
+The provider's generic editor label is preserved as a label, never inferred to be a filename.
+Normalized `documentEvidence.adapter` is `notepad.document`; it is not native authority.
+
 The normalized JSONL adapter may add `documentContext: "vscode.editor"` only after independently
 validating an available VS Code body. This is not an accepted native protocol field. The shared
 summary may use its text under an explicit visibility-unconfirmed document-context label;
 it must not convert that body into provider-visible text or evidence of user actions.
 
-The host supplies Word `Edit + Body` plus `word.document`, and the VS Code scoped default,
+The host supplies Word `Edit + Body` plus `word.document`, the VS Code scope, and the Notepad scope,
 only after app consent/binding, unless documentRegions
 is explicitly supplied (including an empty array).
 

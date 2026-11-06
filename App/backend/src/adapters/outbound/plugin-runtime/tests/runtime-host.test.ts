@@ -212,4 +212,25 @@ describe("PluginRuntimeHost", () => {
     expect(runtimeAdapter.cancel).toHaveBeenCalledWith(expect.any(Object), "run-target");
     expect((await target.next()).value).toMatchObject({ type: "error", code: "plugin_cancelled", retryable: false });
   });
+  it("clears rejected activation promises and can create a fresh worker on retry", async () => {
+    const runtimeAdapter = adapter([]);
+    vi.mocked(runtimeAdapter.activate).mockRejectedValueOnce(new Error("fetch failed"));
+    const host = createPluginRuntimeHost(new PluginAdapterRegistry([runtimeAdapter]));
+    await expect(host.activate(plugin(), {})).rejects.toThrow("fetch failed");
+    await host.activate(plugin(), {});
+    expect(runtimeAdapter.activate).toHaveBeenCalledTimes(2);
+    await host.deactivate(plugin().id);
+  });
+  it("aborts a pending activation without retaining a failed cache entry", async () => {
+    const runtimeAdapter = adapter([]);
+    vi.mocked(runtimeAdapter.activate).mockImplementationOnce(context => new Promise((_resolve, reject) => {
+      context.signal!.addEventListener("abort", () => reject(context.signal!.reason), { once: true });
+    }));
+    const host = createPluginRuntimeHost(new PluginAdapterRegistry([runtimeAdapter]));
+    const pending = host.activate(plugin(), {}); const rejected = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(runtimeAdapter.activate).toHaveBeenCalledOnce());
+    await host.deactivate(plugin().id); await rejected;
+    await host.activate(plugin(), {}); await host.deactivate(plugin().id);
+  });
+
 });

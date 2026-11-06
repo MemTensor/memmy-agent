@@ -676,7 +676,7 @@ export function renderHumanSummary({
   explicitApplications = [],
 }: Omit<RenderOptions, "last">): string {
   const metadata: JsonRecord = records.find((record) => record.recordType === "human_history_metadata") ?? {};
-  const events = records.filter((record) => record.recordType === "human_event");
+  const events = records.filter((record) => record.recordType === "human_event" && record.eventType !== "recording_checkpoint" && record.eventType !== "recording_gap");
   const hasInterruption = records.some(isCaptureInterruptionRecord);
   if (!events.length && !hasInterruption) throw new Error("no human operation events found in the selected recording");
   const interruptionOnly = hasInterruption && !events.some((event) =>

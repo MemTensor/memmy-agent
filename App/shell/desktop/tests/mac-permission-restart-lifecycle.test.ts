@@ -125,7 +125,7 @@ function setup(options: {
   };
   Object.assign(app, {
     isPackaged: true,
-    getPath: vi.fn(() => "/tmp/memmy-quit-test"),
+    getPath: () => "/test/memmy-profile",
     requestSingleInstanceLock: vi.fn(() => options.ownsLock !== false),
     quit: vi.fn(requestQuit),
     relaunch: vi.fn(() => events.push("relaunch")),
@@ -239,7 +239,7 @@ describe("native app-agent shutdown during desktop quit", () => {
     expect(test.events).toContain("quit");
   });
 
-  it("runs native exit cleanup after an earlier cleanup failure and before an ordinary quit", async () => {
+  it("runs bounded service and native cleanup before forcing exit after an earlier cleanup failure", async () => {
     const test = setup({ actualCleanup: true, quitContext: userQuit });
     test.installPreparedRequiredUpdateOnQuit.mockRejectedValueOnce(new Error("update cleanup failed"));
     test.stopComputerUseAgentsOnExitSync.mockImplementation(() => { test.events.push("native-sync"); });

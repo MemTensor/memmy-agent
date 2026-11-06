@@ -16,7 +16,7 @@ export function browserKind(executable: string): keyof typeof browserExecutables
 const selector = z.object({ controlType: z.enum(["Edit", "Document"]), automationId: z.string().min(1).max(256) }).strict();
 export const documentSelector = z.union([selector,
   z.object({ controlType: z.literal("Edit"), automationId: z.literal(""), scope: z.literal("vscode.editor") }).strict(),
-  z.object({ controlType: z.literal("Document"), automationId: z.literal(""), scope: z.literal("word.document") }).strict()]);
+  z.object({ controlType: z.literal("Document"), automationId: z.literal(""), scope: z.enum(["word.document", "notepad.document"]) }).strict()]);
 const app = z.object({ pid: z.number().int().min(1).max(0xffffffff), executable,
   captureText: z.boolean().default(true),
   browser: z.enum(["chrome", "edge"]).optional(),
@@ -26,7 +26,7 @@ const app = z.object({ pid: z.number().int().min(1).max(0xffffffff), executable,
   sensitiveAutomationIds: z.array(z.string().min(1).max(256)).max(128).optional(),
 }).strict().refine(value => !value.browser || browserKind(value.executable) === value.browser)
   .refine(value => value.captureText || (value.documentRegions?.every(item => !("scope" in item)
-  || path.win32.basename(value.executable).toLowerCase() === (item.scope === "vscode.editor" ? "code.exe" : "winword.exe")) ?? true));
+  || path.win32.basename(value.executable).toLowerCase() === ({ "vscode.editor": "code.exe", "word.document": "winword.exe", "notepad.document": "notepad.exe" }[item.scope])) ?? true));
 const limits = z.object({
   maxDepth: z.number().int().min(1).max(64).default(24),
   maxNodes: z.number().int().min(1).max(5000).default(400),
@@ -91,6 +91,7 @@ export function defaultDocumentRegions(executable: string): NativeAppRule["docum
     case "winword.exe": return [{ controlType: "Edit", automationId: "Body" },
       { controlType: "Document", automationId: "", scope: "word.document" }];
     case "code.exe": return [{ controlType: "Edit", automationId: "", scope: "vscode.editor" }];
+    case "notepad.exe": return [{ controlType: "Document", automationId: "", scope: "notepad.document" }];
     default: return undefined;
   }
 }

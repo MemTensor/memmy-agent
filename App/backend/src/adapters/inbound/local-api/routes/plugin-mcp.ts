@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { SkillRefSchema, type PluginSkillContentService } from "../../../../services/plugin-skill-content-service.js";
 /** MCP bridge exposing active plugin capabilities to Memmy Agent. */
 import { createHash, randomUUID } from "node:crypto";
@@ -9,17 +10,20 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { CapabilityCall, CapabilityEvent, InstalledPlugin, JsonSchema, PluginArtifactRef } from "@memmy/local-api-contracts";
 import type { PluginService } from "../../../../services/plugin-service.js";
 import type { ProgressBus } from "../../../../services/progress-bus.js";
+import { capabilityToolName } from "../../../../services/plugin-tool-name.js";
+export { capabilityToolName } from "../../../../services/plugin-tool-name.js";
 
 const MCP_TOKEN_HEADER = "x-memmy-mcp-token";
 const MCP_ROUTE_PATH = "/mcp/plugins";
 const PLUGIN_MCP_KEEPALIVE_MS = 30_000;
 
-export type PluginMcpService = Pick<PluginService, "list" | "invoke" | "cancel"> & Partial<Pick<PluginService, "openArtifact">>;
+export type PluginMcpService = Pick<PluginService, "list" | "invoke" | "cancel"> & Partial<Pick<PluginService, "enable" | "disable" | "openArtifact">>;
 
 export interface RegisterPluginMcpRoutesOptions {
   plugins: PluginMcpService;
   progressBus: ProgressBus;
   mcpToken: string;
+  refreshTools?: () => Promise<void>;
   skillContent?: PluginSkillContentService;
 }
 
@@ -34,7 +38,8 @@ export function buildPluginMcpServer(
   plugins: PluginMcpService,
   progressBus: ProgressBus,
   keepaliveIntervalMs = PLUGIN_MCP_KEEPALIVE_MS,
-  skillContent?: PluginSkillContentService
+  skillContent?: PluginSkillContentService,
+  refreshTools: () => Promise<void> = async () => {}
 ): Server {
   const server = new Server({ name: "memmy-plugins", version: "1.0.0" }, { capabilities: { tools: {} } });
 
@@ -51,10 +56,25 @@ export function buildPluginMcpServer(
         capability.examples?.length ? `\nExamples: ${capability.examples.join("; ")}` : ""
       }`,
       inputSchema: mcpInputSchema(capability.inputSchema, wrapsInput)
-    }))] };
+    })), ...(plugins.list().some(plugin => plugin.manifest.conversation) ? [{ name: "plugin_manage",
+      description: "Query, disable or re-enable an already installed conversation plugin when the user asks. Disabling ends its recordings and withdraws skills; data is retained. Installation, permission approval and uninstall remain in plugin management.",
+      inputSchema: { type: "object" as const, properties: { plugin_id: { type: "string" }, action: { enum: ["status", "enable", "disable"] } }, required: ["plugin_id", "action"], additionalProperties: false } }] : [])] };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    if (request.params.name === "plugin_manage") {
+      const input = request.params.arguments ?? {};
+      const plugin = plugins.list().find(candidate => candidate.id === input.plugin_id && candidate.manifest.conversation);
+      if (!plugin) return toolError("Installed conversation plugin not found");
+      try {
+        if (input.action === "status") return toolResult({ id: plugin.id, state: plugin.state });
+        if (input.action !== "enable" && input.action !== "disable") return toolError("Unknown plugin lifecycle action");
+        const operation = plugins[input.action];
+        if (!operation) return toolError("Plugin lifecycle service is unavailable");
+        const updated = await operation(plugin.id); await refreshTools();
+        return toolResult({ id: updated.id, state: updated.state, retainedUserData: true });
+      } catch (error) { return toolError(error instanceof Error ? error.message : String(error)); }
+    }
     if (request.params.name === "read_plugin_skill" || request.params.name === "resolve_plugin_skill_context") {
       if (!skillContent || extra._meta?.["memmy.dev/cloud-skills"] !== "1") return toolError("plugin_skill_client_upgrade_required");
       try {
@@ -227,6 +247,11 @@ function modelVisiblePluginResult(
 }
 
 export function registerPluginMcpRoutes(app: FastifyInstance, options: RegisterPluginMcpRoutesOptions): void {
+  const refreshContext = new AsyncLocalStorage<{ requested: boolean }>();
+  const requestToolRefresh = async () => {
+    const current = refreshContext.getStore();
+    if (current) current.requested = true;
+  };
   // SDK cancellation is a separate HTTP notification. It must reach the same
   // Server that owns the in-flight tools/call, rather than a fresh stateless
   // Server whose request-controller map is empty.
@@ -251,6 +276,14 @@ export function registerPluginMcpRoutes(app: FastifyInstance, options: RegisterP
       return;
     }
 
+    const refresh = { requested: false };
+    // Reloading the Agent's MCP connections while this tool is awaiting its own
+    // result can close that very connection. Finish the response first.
+    reply.raw.once("finish", () => {
+      if (refresh.requested && options.refreshTools) setImmediate(() => {
+        void options.refreshTools!().catch(error => console.warn("Plugin tool refresh failed", error));
+      });
+    });
     const sessionId = singleHeader(request.headers["mcp-session-id"]);
     if (sessionId && !sessions.has(sessionId)) {
       await reply.code(404).send({ error: "MCP session not found" });
@@ -259,7 +292,7 @@ export function registerPluginMcpRoutes(app: FastifyInstance, options: RegisterP
     let session = sessionId ? sessions.get(sessionId) : undefined;
     if (!session && request.method === "POST" && isInitializeRequest(request.body)) {
       const id = randomUUID();
-      const server = buildPluginMcpServer(options.plugins, options.progressBus, PLUGIN_MCP_KEEPALIVE_MS, options.skillContent);
+      const server = buildPluginMcpServer(options.plugins, options.progressBus, PLUGIN_MCP_KEEPALIVE_MS, options.skillContent, requestToolRefresh);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => id });
       session = { server, transport, active: 0, lastUsed: Date.now() };
       transport.onclose = () => { sessions.delete(id); };
@@ -271,11 +304,11 @@ export function registerPluginMcpRoutes(app: FastifyInstance, options: RegisterP
       current.active += 1;
       reply.hijack();
       reply.raw.once("close", () => { current.active -= 1; current.lastUsed = Date.now(); });
-      await current.transport.handleRequest(request.raw, reply.raw, request.body);
+      await refreshContext.run(refresh, () => current.transport.handleRequest(request.raw, reply.raw, request.body));
       return;
     }
     // Preserve one-shot raw callers that do not initialize an MCP session.
-    const server = buildPluginMcpServer(options.plugins, options.progressBus, PLUGIN_MCP_KEEPALIVE_MS, options.skillContent);
+    const server = buildPluginMcpServer(options.plugins, options.progressBus, PLUGIN_MCP_KEEPALIVE_MS, options.skillContent, requestToolRefresh);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {
@@ -283,7 +316,7 @@ export function registerPluginMcpRoutes(app: FastifyInstance, options: RegisterP
       void server.close();
     });
     await server.connect(transport);
-    await transport.handleRequest(request.raw, reply.raw, request.body);
+    await refreshContext.run(refresh, () => transport.handleRequest(request.raw, reply.raw, request.body));
   };
 
   app.post(MCP_ROUTE_PATH, handler);
@@ -294,22 +327,12 @@ export function registerPluginMcpRoutes(app: FastifyInstance, options: RegisterP
 function capabilityTools(plugins: PluginMcpService): CapabilityTool[] {
   return plugins.list()
     .filter((plugin) => plugin.state === "active" && plugin.eligibility?.canUse !== false)
-    .flatMap((plugin) => plugin.manifest.capabilities.map((capability) => ({
+    .flatMap((plugin) => plugin.manifest.capabilities.filter(capability => capability.agentVisible !== false).map((capability) => ({
       name: capabilityToolName(plugin.id, capability.id),
       plugin,
       capability,
       wrapsInput: capability.inputSchema.type !== "object"
     })));
-}
-
-export function capabilityToolName(pluginId: string, capabilityId: string): string {
-  // The Agent prefixes MCP names with `mcp_plugins_` and caps them at 64
-  // characters. Keep this raw name within 52 characters so the capability ID
-  // remains readable instead of collapsing several tools to `review_update__*`.
-  const digest = createHash("sha256").update(`${pluginId}\0${capabilityId}`).digest("hex").slice(0, 8);
-  const readable = capabilityId.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_");
-  const maxReadableLength = 52 - "plugin__".length - digest.length;
-  return `plugin_${readable.slice(0, maxReadableLength)}_${digest}`;
 }
 
 function mcpInputSchema(schema: JsonSchema, wrapsInput: boolean): Record<string, unknown> {
