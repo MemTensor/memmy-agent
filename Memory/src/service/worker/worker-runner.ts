@@ -366,6 +366,21 @@ export class WorkerRunner {
         continue;
       }
 
+      if (isImportedSkill(memory) && !this.deps.repos.isImportedSkillEligibleForEmbedding(memory)) {
+        this.deps.repos.processing.update(memory.id, {
+          state: "ready_text_only",
+          stage: null,
+          activeJobId: null,
+          attemptCount: 0,
+          retryAction: "retry",
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: at
+        }, ["embedding_pending", "embedding"]);
+        continue;
+      }
+
       if (!this.deps.capture.embedAfterCapture) {
         this.deps.repos.processing.update(memory.id, {
           state: "ready_text_only",
@@ -445,38 +460,53 @@ export class WorkerRunner {
       });
     }
 
-    const retrievalFilter: MemoryFilter = {
-      memoryLayer: ["Skill", "L3"],
-      status: ["activated", "resolving"]
+    const enqueueRetrievalReindex = (memory: MemoryRow): void => {
+      this.deps.repos.memories.reindexFts(memory);
+      if (isL3FieldSnapshotMemory(memory)) return;
+      if (!this.deps.capture.embedAfterCapture || retrievalDocumentIsCurrent(memory)) return;
+      if (isImportedSkill(memory) && !this.deps.repos.isImportedSkillEligibleForEmbedding(memory)) return;
+      if (this.deps.repos.runtime.hasPendingJob(memory.id, "embedding")) return;
+      const sourceHash = retrievalDocumentSourceHash(memory);
+      this.deps.enqueueJob({
+        jobType: "embedding",
+        userId: memory.userId,
+        sessionId: memory.sessionId,
+        targetMemoryId: memory.id,
+        dedupeKey: `embedding:retrieval-v2:${memory.id}:${sourceHash}${externalSkillGeneration(memory) ? `:${externalSkillGeneration(memory)}` : ""}`,
+        payload: {
+          reason: "startup.retrieval_document_v2",
+          retrievalSourceHash: sourceHash, ...externalSkillJobPayload(memory)
+        },
+        maxAttempts: 6,
+        createdAt: at
+      });
+      enqueuedRetrievalReindexes += 1;
     };
-    const retrievalPageSize = Number.isFinite(limit) && limit > 0 ? Math.max(1, Math.floor(limit)) : 10000;
+
+    const retrievalMemories = this.deps.repos.memories.list({
+      memoryLayer: ["Skill", "L3"],
+      status: ["activated", "resolving"],
+      importedSkillsMode: "exclude"
+    }, limit);
+    for (const memory of retrievalMemories) {
+      enqueueRetrievalReindex(memory);
+    }
+
+    const importedSkillFilter: MemoryFilter = {
+      memoryLayer: "Skill",
+      status: ["activated", "resolving"],
+      importedSkillsMode: "only",
+      eligibleImportedSkillsOnly: true
+    };
+    const importedSkillPageSize = Number.isFinite(limit) && limit > 0 ? Math.max(1, Math.floor(limit)) : 10000;
     // FTS repair and enqueue do not change memory ordering. Keep one snapshot
-    // while paging so a concurrent writer cannot move records between pages.
+    // while paging authorized imported Skills so concurrent writes cannot skip rows.
     this.deps.repos.transaction(() => {
-      const total = this.deps.repos.memories.count(retrievalFilter);
-      for (let offset = 0; offset < total; offset += retrievalPageSize) {
-        const retrievalMemories = this.deps.repos.memories.list(retrievalFilter, retrievalPageSize, offset);
-        for (const memory of retrievalMemories) {
-          this.deps.repos.memories.reindexFts(memory);
-          if (isL3FieldSnapshotMemory(memory)) continue;
-          if (!this.deps.capture.embedAfterCapture || retrievalDocumentIsCurrent(memory)) continue;
-          if (!this.deps.repos.isImportedSkillEligibleForEmbedding(memory)) continue;
-          if (this.deps.repos.runtime.hasPendingJob(memory.id, "embedding")) continue;
-          const sourceHash = retrievalDocumentSourceHash(memory);
-          this.deps.enqueueJob({
-            jobType: "embedding",
-            userId: memory.userId,
-            sessionId: memory.sessionId,
-            targetMemoryId: memory.id,
-            dedupeKey: `embedding:retrieval-v2:${memory.id}:${sourceHash}${externalSkillGeneration(memory) ? `:${externalSkillGeneration(memory)}` : ""}`,
-            payload: {
-              reason: "startup.retrieval_document_v2",
-              retrievalSourceHash: sourceHash, ...externalSkillJobPayload(memory)
-            },
-            maxAttempts: 6,
-            createdAt: at
-          });
-          enqueuedRetrievalReindexes += 1;
+      const total = this.deps.repos.memories.count(importedSkillFilter);
+      for (let offset = 0; offset < total; offset += importedSkillPageSize) {
+        const importedSkills = this.deps.repos.memories.list(importedSkillFilter, importedSkillPageSize, offset);
+        for (const memory of importedSkills) {
+          enqueueRetrievalReindex(memory);
         }
       }
     });
@@ -1070,6 +1100,15 @@ export class WorkerRunner {
       if (!current || !this.deps.repos.isImportedSkillEligibleForEmbedding(current)) {
         this.deps.repos.memories.deleteVector(item.memory.id, item.vectorField);
         this.deps.repos.runtime.deleteEmbeddingRetriesForMemory(item.memory.id);
+        this.deps.repos.processing.update(item.memory.id, {
+          state: "ready_text_only",
+          stage: null,
+          activeJobId: null,
+          errorCode: null,
+          errorMessage: null,
+          failedAt: null,
+          updatedAt: this.deps.nowIso()
+        }, ["embedding_pending", "embedding"]);
         return null;
       }
       return this.deps.embeddingJobs.prepareEmbeddingJob(item.job);
@@ -1380,8 +1419,10 @@ export class WorkerRunner {
     claim: EmbeddingRetryClaim,
     results: EmbeddingRetryResult[]
   ): boolean {
+    if (retry.targetKind !== "skill") return false;
     return this.deps.repos.transaction(() => {
       if (!this.isEmbeddingRetryLeaseHeld(retry, claim)) {
+        this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
         results.push({ succeeded: 0, failed: 0, item: null });
         return true;
       }
@@ -1398,6 +1439,7 @@ export class WorkerRunner {
       if (currentText === retry.sourceText) return false;
       const completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, { ...claim, now: this.nowMs() });
       if (!completed) {
+        this.observeWork({ queue: "embedding_retry", retry }, "finished", "fenced");
         results.push({ succeeded: 0, failed: 0, item: null });
         return true;
       }

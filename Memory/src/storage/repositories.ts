@@ -1801,7 +1801,9 @@ export class MemoryRepository {
     try {
       this.db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(memory.id);
       if (!memory.deletedAt && memory.status !== "deleted"
-        && !isIdentityOnlyImportedSkill(memory) && !isL3FieldSnapshotMemory(memory)) {
+        && !isIdentityOnlyImportedSkill(memory)
+        && !hasRestrictedImportedSkillContent(memory)
+        && !isL3FieldSnapshotMemory(memory)) {
         this.db
           .prepare(`INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`)
           .run(memory.id, memory.id, retrievalDocumentForMemory(memory), memory.tags.join(" "));
@@ -4074,8 +4076,12 @@ export class RuntimeRepository {
   /** Returns undefined for recall snapshots whose imported content must be retrieved afresh. */
   sanitizeIdempotencyResponse(key: string, response: unknown, currentAgentId?: string): unknown {
     if (!key.startsWith("memory.search:") && !key.startsWith("turn.start:") && !key.startsWith("memory.add:")) return response;
+    if (key.startsWith("memory.add:") && (!isRecordLike(response) || response.memoryLayer !== "Skill")) return response;
+    if (!this.db.prepare("SELECT 1 FROM memories WHERE memory_layer = 'Skill' LIMIT 1").get()) return response;
     const rows = this.db.prepare(`SELECT DISTINCT m.* FROM memories m JOIN json_tree(?) j ON j.value = m.id
-      WHERE m.memory_layer = 'Skill' AND j.type = 'text'`).all(toJson(response)) as MemorySqlRow[];
+      WHERE m.memory_layer = 'Skill'
+        AND memmy_is_imported_skill(m.properties_json, m.info_json, m.tags_json, m.memory_key) = 1
+        AND j.type = 'text'`).all(toJson(response)) as MemorySqlRow[];
     const revoked = rows.map(memoryFromSql).filter(memory => isImportedSkill(memory)
       && !importedSkillEligibleForRecall(this.db, memory, currentAgentId));
     if (revoked.length === 0) return response;
@@ -7507,6 +7513,33 @@ export class Repositories {
     return importedSkillSourceEligible(this.db, memory);
   }
 
+  /** Returns only Skill vector targets that belong to ineligible imported Skills or plugin registrations. */
+  ineligibleImportedSkillVectorIds(ids: readonly string[]): Set<string> {
+    const out = new Set<string>();
+    const unique = [...new Set(ids)];
+    for (let offset = 0; offset < unique.length; offset += 500) {
+      const batch = unique.slice(offset, offset + 500);
+      if (batch.length === 0) continue;
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM memories
+           WHERE memory_layer = 'Skill'
+             AND id IN (${batch.map(() => "?").join(", ")})`
+        )
+        .all(...batch) as MemorySqlRow[];
+      for (const sqlRow of rows) {
+        const memory = memoryFromSql(sqlRow);
+        if (
+          memory.properties.internal_info.source_kind === "plugin"
+          || (isImportedSkill(memory) && !this.isImportedSkillEligibleForEmbedding(memory))
+        ) {
+          out.add(memory.id);
+        }
+      }
+    }
+    return out;
+  }
+
   /** Call with a freshly loaded row at async and response-cache boundaries. */
   isImportedSkillEligibleForRecall(memory: MemoryRow, currentAgentId?: string): boolean {
     return importedSkillEligibleForRecall(this.db, memory, currentAgentId);
@@ -8496,10 +8529,16 @@ function ineligibleColdCollisionSkillIds(db: Database.Database): string[] {
     .map((row) => row.id);
 }
 
+function filterIncludesSkillLayer(layer: MemoryFilter["memoryLayer"]): boolean {
+  if (layer === undefined) return true;
+  return Array.isArray(layer) ? layer.includes("Skill") : layer === "Skill";
+}
+
 function buildMemoryWhere(filter: MemoryFilter, db?: Database.Database): { where: string; params: SqlValue[] } {
+  const includesSkillLayer = filterIncludesSkillLayer(filter.memoryLayer);
   const clauses = [
     "deleted_at IS NULL",
-    NOT_PLUGIN_REGISTRATION_SQL
+    ...(includesSkillLayer ? [NOT_PLUGIN_REGISTRATION_SQL] : [])
   ];
   const params: SqlValue[] = [];
 
@@ -8517,8 +8556,20 @@ function buildMemoryWhere(filter: MemoryFilter, db?: Database.Database): { where
   addMemoryKindClause(filter.excludedMemoryKinds, true);
   addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
-  addImportedSkillSourceExclusion(filter.excludedImportedSkillSourceAgentId);
-  if (filter.eligibleImportedSkillsOnly) {
+  if (filter.importedSkillsMode === "only") {
+    if (!includesSkillLayer) {
+      clauses.push("0 = 1");
+    } else {
+      clauses.push("memory_layer = 'Skill'");
+      clauses.push("memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1");
+    }
+  } else if (filter.importedSkillsMode === "exclude" && includesSkillLayer) {
+    clauses.push("NOT (memory_layer = 'Skill' AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1)");
+  }
+  if (includesSkillLayer) {
+    addImportedSkillSourceExclusion(filter.excludedImportedSkillSourceAgentId);
+  }
+  if (filter.eligibleImportedSkillsOnly && includesSkillLayer) {
     clauses.push(`CASE WHEN memory_layer = 'Skill'
       AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
       THEN memmy_imported_skill_eligible(memories.properties_json, memories.info_json, memories.tags_json, memories.memory_key, memories.memory_value, memories.status, memories.deleted_at) = 1
@@ -8527,8 +8578,8 @@ function buildMemoryWhere(filter: MemoryFilter, db?: Database.Database): { where
     if (db) {
       const ineligibleIds = ineligibleColdCollisionSkillIds(db);
       if (ineligibleIds.length > 0) {
-        clauses.push(`memories.id NOT IN (${ineligibleIds.map(() => "?").join(", ")})`);
-        params.push(...ineligibleIds);
+        clauses.push("memories.id NOT IN (SELECT value FROM json_each(?))");
+        params.push(JSON.stringify(ineligibleIds));
       }
     }
   }

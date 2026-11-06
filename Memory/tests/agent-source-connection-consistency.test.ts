@@ -9,6 +9,7 @@ import { createSourceRegistry } from "../src/agent-source/adapters/source-regist
 import { createCodexSkillTarget } from "../src/agent-source/integration/codex/index.js";
 import { createWorkbuddySkillTarget } from "../src/agent-source/integration/workbuddy/index.js";
 import { createSkillTargetRegistry } from "../src/agent-source/integration/target-registry.js";
+import { renderMemmyDefaultSkillManifest } from "../src/agent-source/integration/templates/memmy-default.js";
 import { createCapturingEmbedder, createFailingLlm, createMemoryServiceFixture } from "./fixtures/memory-service-fixture.js";
 import { Repositories } from "../src/storage/repositories.js";
 import { agentSkillConnectionKey } from "../src/storage/imported-skill.js";
@@ -905,4 +906,171 @@ it("keeps unique explicit connection events across scans and clear without manuf
   await expect(h.executor.connectionState(h.sourceId)).resolves.toMatchObject({ connectionEvent: second });
   await h.executor.mutateConnection(h.sourceId, "plugin", "DELETE");
   expect(h.service.agentSkillConnectionEvent(h.sourceId)).toMatchObject({ state: "disconnected", kind: "plugin" });
+});
+
+describe("Memory explicit connection failures preserve newer concurrent decisions", () => {
+  const cases = (["skill", "plugin"] as const).flatMap(kind =>
+    [false, true].flatMap(beforeInstalled =>
+      (["timeout_committed", "service_error"] as const).flatMap(failureMode =>
+        (["connect", "disconnect"] as const).map(concurrentAction => ({
+          kind,
+          beforeInstalled,
+          failureMode,
+          concurrentAction
+        }))
+      )
+    )
+  );
+
+  it.each(cases)(
+    "preserves newer $concurrentAction when Memory $kind connect fails ($failureMode, beforeInstalled=$beforeInstalled)",
+    async ({ kind, beforeInstalled, failureMode, concurrentAction }) => {
+      const h = harness(kind, kind === "plugin" ? "opencode" : undefined);
+      if (beforeInstalled) {
+        await h.executor.mutateConnection(h.sourceId, kind, "POST");
+      } else {
+        h.service.reconcileAgentSkills({
+          sourceAgentId: h.sourceId,
+          connectionState: "disconnected",
+          complete: false,
+          skills: []
+        });
+      }
+
+      const realReconcile = h.service.reconcileAgentSkills.bind(h.service);
+      const expectedError = failureMode === "service_error"
+        ? "fixture Memory reconcile failed"
+        : "fixture Memory connect timed out";
+      let intercepted = false;
+      vi.spyOn(h.service, "reconcileAgentSkills").mockImplementation(request => {
+        if (!intercepted && request.connectionState === "connected") {
+          intercepted = true;
+          expect(typeof request.connectionEventId).toBe("string");
+          if (failureMode === "timeout_committed") {
+            realReconcile(request);
+          }
+          // Simulate concurrent decision from the other entrypoint before failure handling runs
+          if (concurrentAction === "connect") {
+            realReconcile({
+              sourceAgentId: h.sourceId,
+              complete: false,
+              connectionState: "connected",
+              connectionKind: kind,
+              skills: []
+            });
+          } else {
+            realReconcile({
+              sourceAgentId: h.sourceId,
+              complete: false,
+              connectionState: "disconnected",
+              connectionKind: kind,
+              disconnected: true,
+              skills: []
+            });
+          }
+          throw new Error(expectedError);
+        }
+        return realReconcile(request);
+      });
+
+      await expect(h.executor.mutateConnection(h.sourceId, kind, "POST")).rejects.toThrow(expectedError);
+
+      const expectConnected = concurrentAction === "connect";
+      const expectedStatus = expectConnected
+        ? (kind === "plugin" ? "plugin_installed" : "skill_installed")
+        : "not_connected";
+
+      expect(await h.target.isInstalled(h.sourceId)).toBe(expectConnected);
+      if (kind === "plugin") expect(await h.target.isPluginInstalled?.()).toBe(expectConnected);
+      expect(h.service.agentSkillConnectionState(h.sourceId)).toBe(expectConnected ? "connected" : "disconnected");
+      await expect(h.executor.connectionState(h.sourceId)).resolves.toMatchObject({
+        connectionState: expectConnected ? "connected" : "disconnected"
+      });
+      expect(await h.status()).toBe(expectedStatus);
+
+      const scanned = await h.scan();
+      if (expectConnected) expect(scanned.status).toBe("activated");
+      else expect(scanned.memory_value).toBe("");
+
+      const restarted = await h.restartExecutor();
+      expect(await h.target.isInstalled(h.sourceId)).toBe(expectConnected);
+      expect((await restarted.list()).sources.find(s => s.sourceId === h.sourceId)?.status).toBe(expectedStatus);
+      await expect(restarted.connectionState(h.sourceId)).resolves.toMatchObject({
+        connectionState: expectConnected ? "connected" : "disconnected"
+      });
+    }
+  );
+
+  it.each(["skill", "plugin"] as const)(
+    "preserves pre-existing legacy %s installation without prior event KV when Memory connect commits and times out",
+    async kind => {
+      const h = harness(kind, kind === "plugin" ? "opencode" : undefined);
+      if (kind === "plugin") await h.target.installPlugin!(h.sourceId);
+      else await h.target.install(renderMemmyDefaultSkillManifest(h.sourceId));
+      expect(h.service.agentSkillConnectionEvent(h.sourceId)).toBeUndefined();
+
+      const realReconcile = h.service.reconcileAgentSkills.bind(h.service);
+      let failedOnce = false;
+      vi.spyOn(h.service, "reconcileAgentSkills").mockImplementation(request => {
+        if (!failedOnce && request.connectionState === "connected") {
+          failedOnce = true;
+          realReconcile(request);
+          throw new Error("fixture legacy Memory connect timed out");
+        }
+        return realReconcile(request);
+      });
+
+      await expect(h.executor.mutateConnection(h.sourceId, kind, "POST")).rejects.toThrow("fixture legacy Memory connect timed out");
+      expect(await h.target.isInstalled(h.sourceId)).toBe(true);
+      if (kind === "plugin") expect(await h.target.isPluginInstalled?.()).toBe(true);
+      expect(h.service.agentSkillConnectionState(h.sourceId)).toBe("connected");
+      expect((await h.scan()).status).toBe("activated");
+    }
+  );
+
+  it("ignores a replayed connectionEventId after a newer disconnect has already committed, including across clearAllData", () => {
+    const h = harness("skill");
+    const first = h.service.reconcileAgentSkills({
+      sourceAgentId: h.sourceId,
+      complete: false,
+      connectionState: "connected",
+      connectionKind: "skill",
+      connectionEventId: "evt-connect-once",
+      skills: []
+    }).connectionEvent;
+    expect(first).toMatchObject({ id: "evt-connect-once", state: "connected", revision: 1 });
+
+    const second = h.service.reconcileAgentSkills({
+      sourceAgentId: h.sourceId,
+      complete: false,
+      connectionState: "disconnected",
+      connectionKind: "skill",
+      disconnected: true,
+      skills: []
+    }).connectionEvent;
+    expect(second).toMatchObject({ state: "disconnected", revision: 2 });
+
+    const replayBeforeClear = h.service.reconcileAgentSkills({
+      sourceAgentId: h.sourceId,
+      complete: false,
+      connectionState: "connected",
+      connectionKind: "skill",
+      connectionEventId: "evt-connect-once",
+      skills: []
+    }).connectionEvent;
+    expect(replayBeforeClear).toEqual(second);
+    expect(h.service.agentSkillConnectionState(h.sourceId)).toBe("disconnected");
+
+    h.service.clearAllData();
+    const replayAfterClear = h.service.reconcileAgentSkills({
+      sourceAgentId: h.sourceId,
+      complete: false,
+      connectionState: "connected",
+      connectionKind: "skill",
+      connectionEventId: "evt-connect-once",
+      skills: []
+    }).connectionEvent;
+    expect(replayAfterClear).toEqual(second);
+    expect(h.service.agentSkillConnectionState(h.sourceId)).toBe("disconnected");
+  });
 });

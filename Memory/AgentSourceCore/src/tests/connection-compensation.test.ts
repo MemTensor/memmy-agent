@@ -99,3 +99,15 @@ it("does not let failed disconnect settlement consume a later committed reconnec
   });
   expect(installed).toBe(true);
 });
+
+it("classifies a failed connect attempt's own committed event as ownCommittedEvent even after intermediate revisions", async () => {
+  let event: ConnectionEvent | undefined = { id: "initial", revision: 1, state: "connected", kind: "skill" };
+  const connection = createConnectionCompensation(async () => event);
+  const connecting = await connection.begin("codex", "connected", "skill");
+  // An intermediate revision happened before connecting's own attemptEventId committed and timed out.
+  event = { id: connecting.attemptEventId, revision: 3, state: "connected", kind: "skill" };
+  const decision = await connection.inspectConnectAttempt(connecting);
+  expect(decision.ownCommittedEvent).toEqual(event);
+  expect(decision.event).toBeUndefined();
+  expect(decision.kind).toBeUndefined();
+});

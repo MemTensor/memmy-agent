@@ -1,8 +1,11 @@
+import { randomUUID } from "node:crypto";
+
 /** Explicit user actions and cleanup share files across both runtimes. */
 export type ConnectionKind = "skill" | "plugin";
 export interface ConnectionEvent { id: string; state: "connected" | "disconnected"; kind?: ConnectionKind; revision?: number }
 export interface ConnectionAction {
   readonly token: number;
+  readonly attemptEventId: string;
   readonly sourceId: string;
   readonly state: "connected" | "disconnected";
   readonly kind: ConnectionKind;
@@ -15,7 +18,13 @@ export interface ConnectionAction {
   startedEventKnown: boolean;
 }
 export interface ConnectionBaseline { action?: ConnectionAction; settled: boolean; event?: ConnectionEvent }
-export interface ConnectionDecision { key: string; kind?: ConnectionKind; event?: ConnectionEvent }
+export interface ConnectionDecision {
+  key: string;
+  kind?: ConnectionKind;
+  event?: ConnectionEvent;
+  ownCommittedEvent?: ConnectionEvent;
+  pendingLocalDisconnect?: boolean;
+}
 
 /** Different IDs alone do not order events, especially delayed HTTP replies. */
 function isNewer(event: ConnectionEvent | undefined, before: ConnectionEvent | undefined): boolean {
@@ -39,8 +48,9 @@ export function createConnectionCompensation(readEvent: (sourceId: string) => Pr
   const read = async (sourceId: string) => observe(sourceId, await readEvent(sourceId));
   const begin = async (sourceId: string, state: ConnectionAction["state"], kind: ConnectionKind): Promise<ConnectionAction> => {
     let finish!: () => void;
-    const action: ConnectionAction = { sourceId, token: ++sequence, state, kind, settled: false, successful: false,
-      startedEventKnown: false, done: new Promise<void>(resolve => { finish = resolve; }), finish: () => finish() };
+    const action: ConnectionAction = { sourceId, token: ++sequence, attemptEventId: randomUUID(), state, kind,
+      settled: false, successful: false, startedEventKnown: false,
+      done: new Promise<void>(resolve => { finish = resolve; }), finish: () => finish() };
     actions.set(sourceId, action);
     try { action.startedEvent = await read(sourceId); action.startedEventKnown = true; }
     catch { /* An unavailable read supplies no new authorization. */ }
@@ -81,7 +91,29 @@ export function createConnectionCompensation(readEvent: (sourceId: string) => Pr
         // observation when it never committed. A later observation at failure
         // settlement must never swallow a newer remote reconnect.
         const boundary = action.event ?? action.startedEvent;
-        if ((!action.event && !action.startedEventKnown) || !isNewer(event, boundary)) return { key };
+        if ((!action.event && !action.startedEventKnown) || !isNewer(event, boundary)) {
+          return ownAction?.state === "connected" ? { key, pendingLocalDisconnect: true } : { key };
+        }
+      }
+      if (ownAction?.state === "connected") {
+        if (event?.id === ownAction.attemptEventId) {
+          if (newerAction && action.successful && !action.event) {
+            return action.state === "connected"
+              ? { key, kind: action.kind }
+              : { key, event: { id: "", state: "disconnected", kind: action.kind } };
+          }
+          return { key, ownCommittedEvent: event };
+        }
+        if (isNewer(event, baseline.event)) {
+          const fallbackKind = newerAction && action.state === "connected" ? action.kind : ownAction.kind;
+          return { key, event, ...(event?.state === "connected" ? { kind: event.kind ?? fallbackKind } : {}) };
+        }
+        if (newerAction && action.successful && !event && !action.event) {
+          return action.state === "connected"
+            ? { key, kind: action.kind }
+            : { key, event: { id: "", state: "disconnected", kind: action.kind } };
+        }
+        return { key };
       }
       if (isNewer(event, baseline.event)) {
         return { key, event, ...(event?.state === "connected" && event.kind ? { kind: event.kind } : {}) };
@@ -92,23 +124,37 @@ export function createConnectionCompensation(readEvent: (sourceId: string) => Pr
       return { key };
     }
   };
+  const afterConnectAttempt = (action: ConnectionAction, fallbackEvent?: ConnectionEvent): ConnectionBaseline => ({
+    action,
+    settled: false,
+    event: fallbackEvent ?? action.startedEvent
+  });
   return {
     begin, record, settle, capture,
     currentAction: (sourceId: string) => actions.get(sourceId),
     after: (action: ConnectionAction): ConnectionBaseline => ({ action, settled: false, event: action.event ?? action.startedEvent }),
+    afterConnectAttempt,
+    inspectConnectAttempt: (action: ConnectionAction, fallbackEvent?: ConnectionEvent) =>
+      desired(action.sourceId, afterConnectAttempt(action, fallbackEvent), action),
     baseline: async (sourceId: string) => attempts.get(sourceId) ?? capture(sourceId),
     async compensate(sourceId: string, baseline: ConnectionBaseline, handlers: {
       remove: Array<() => Promise<void>>;
       install: (kind: ConnectionKind) => Promise<void>;
+      ensureInstalled?: (kind: ConnectionKind) => Promise<void>;
       commit: (decision: ConnectionDecision) => Promise<void>;
     }, ownAction?: ConnectionAction): Promise<void> {
       const latest = () => desired(sourceId, baseline, ownAction);
       let mayHaveRemovedFiles = false;
       for (;;) {
         const decision = await latest();
+        if (decision.pendingLocalDisconnect) {
+          if ((await latest()).key === decision.key) return;
+          continue;
+        }
         if (decision.kind) {
-          if (mayHaveRemovedFiles) {
-            try { await handlers.install(decision.kind); }
+          const restore = mayHaveRemovedFiles ? handlers.install : handlers.ensureInstalled;
+          if (restore) {
+            try { await restore(decision.kind); }
             catch (error) {
               if ((await latest()).key === decision.key) throw error;
               continue;

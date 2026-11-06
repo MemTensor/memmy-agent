@@ -236,7 +236,11 @@ export function createHttpMemoryClient(
     },
 
     async reconcileAgentSkills(input, context) {
-      return request("POST", "reconcileAgentSkills", AgentSkillReconcileOutputSchema, { body: input, context });
+      return request("POST", "reconcileAgentSkills", AgentSkillReconcileOutputSchema, {
+        body: input,
+        context,
+        ...(input.connectionState !== undefined || input.disconnected === true ? { maxRetries: 0 } : {})
+      });
     },
 
     async archiveSkill(skillId, context) {

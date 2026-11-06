@@ -454,4 +454,149 @@ describe("imported Skill embedding asynchronous completion", () => {
     const repos = new Repositories(db.db);
     for (const id of ids) expect(repos.runtime.hasPendingJob(id, "embedding")).toBe(true);
   });
+
+  it("migrates all authorized imported Skills across pages without expanding ordinary Skill/L3 beyond limit, while keeping future writes and failed-job recovery intact", async () => {
+    const embeddedTexts: string[] = [];
+    const { db, service } = createTestService({ llm: createFailingLlm(), embedder: createCapturingEmbedder(embeddedTexts) });
+    const repos = new Repositories(db.db);
+
+    // Seed 4 ordinary non-imported Skills and 4 L3 memories (8 ordinary total > limit=2)
+    const ordinaryIds: string[] = [];
+    for (let i = 1; i <= 4; i++) {
+      const ordinarySkill = service.addMemory({
+        namespace,
+        layer: "Skill",
+        title: `ordinary-skill-${i}`,
+        content: `Ordinary generated skill ${i} instructions.`
+      });
+      const ordinaryL3 = service.addMemory({
+        namespace,
+        layer: "L3",
+        title: `ordinary-l3-${i}`,
+        content: `Ordinary L3 world model fact ${i}.`
+      });
+      ordinaryIds.push(ordinarySkill.id, ordinaryL3.id);
+    }
+
+    // Seed 5 authorized imported Skills (> limit=2, spanning 3 pages) + 1 user-archived + 1 disconnected imported Skill
+    const authorizedImportedIds = service.reconcileAgentSkills({
+      namespace,
+      sourceAgentId: "codex",
+      complete: true,
+      connectionState: "connected",
+      connectionKind: "plugin",
+      skills: [1, 2, 3, 4, 5].map((n) => skill(`authorized-imported-${n}`))
+    }).skills.map((entry) => entry.memoryId!);
+
+    const archivedImportedId = service.reconcileAgentSkills({
+      namespace,
+      sourceAgentId: "cursor",
+      complete: true,
+      connectionState: "connected",
+      connectionKind: "plugin",
+      skills: [skill("archived-imported")]
+    }).skills[0]!.memoryId!;
+    service.archiveMemory(archivedImportedId, namespace);
+
+    const disconnectedImportedId = service.reconcileAgentSkills({
+      namespace,
+      sourceAgentId: "hermes",
+      complete: true,
+      connectionState: "disconnected",
+      connectionKind: "plugin",
+      disconnected: true,
+      skills: [skill("disconnected-imported")]
+    }).skills[0]!.memoryId!;
+
+    // Simulate pre-upgrade historical state: clear retrieval_index metadata, FTS rows, and pending jobs
+    for (const id of [...ordinaryIds, ...authorizedImportedIds]) {
+      const row = repos.memories.get(id)!;
+      const internal = { ...row.properties.internal_info };
+      delete internal.retrieval_index;
+      repos.memories.updateMaintenance({
+        ...row,
+        properties: { ...row.properties, internal_info: internal }
+      });
+      db.db.prepare("DELETE FROM memories_fts WHERE id = ?").run(id);
+      repos.memories.deleteVector(id, "vec");
+    }
+    // Also preserve one already-queued failed embedding job on an ordinary record beyond the first 2 newest rows
+    const oldestOrdinaryId = ordinaryIds[0]!;
+    db.db.prepare("DELETE FROM evolution_jobs WHERE target_memory_id != ?").run(oldestOrdinaryId);
+    db.db.prepare("DELETE FROM memory_processing_state WHERE memory_id != ?").run(oldestOrdinaryId);
+    const existingFailedCount = db.db.prepare(
+      "UPDATE evolution_jobs SET status = 'failed', attempts = 1, last_error = 'transient network error' WHERE target_memory_id = ? AND job_type = 'embedding'"
+    ).run(oldestOrdinaryId).changes;
+    expect(existingFailedCount).toBe(1);
+
+    // Startup pass with small limit = 2
+    const firstStartup = service.reconcileWorkerStartup(2);
+    // 5 authorized imported Skills + at most 2 ordinary Skill/L3 records
+    expect(firstStartup.enqueuedRetrievalReindexes).toBe(7);
+    expect(firstStartup.requeuedJobs).toBeGreaterThanOrEqual(1);
+
+    // Every authorized imported Skill (all 5 across pages) must be queued and FTS-repaired
+    for (const id of authorizedImportedIds) {
+      expect(repos.runtime.hasPendingJob(id, "embedding")).toBe(true);
+      expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories_fts WHERE id = ?").get(id)).toEqual({ n: 1 });
+    }
+    // Ineligible imported Skills must NOT be queued or FTS-indexed as active candidates
+    expect(repos.runtime.hasPendingJob(archivedImportedId, "embedding")).toBe(false);
+    expect(repos.runtime.hasPendingJob(disconnectedImportedId, "embedding")).toBe(false);
+    expect(db.db.prepare("SELECT COUNT(*) AS n FROM memories_fts WHERE id = ?").get(disconnectedImportedId)).toEqual({ n: 0 });
+
+    // Ordinary Skill/L3 records beyond limit=2 must NOT be enqueued for startup.retrieval_document_v2 or FTS-rebuilt
+    const startupReindexOrdinaryJobs = db.db.prepare(
+      `SELECT target_memory_id FROM evolution_jobs
+       WHERE job_type = 'embedding'
+         AND json_extract(payload_json, '$.reason') = 'startup.retrieval_document_v2'
+         AND target_memory_id IN (${ordinaryIds.map(() => "?").join(", ")})`
+    ).all(...ordinaryIds) as Array<{ target_memory_id: string }>;
+    expect(startupReindexOrdinaryJobs).toHaveLength(2);
+    const ftsOrdinaryCount = db.db.prepare(
+      `SELECT COUNT(*) AS n FROM memories_fts WHERE id IN (${ordinaryIds.map(() => "?").join(", ")})`
+    ).get(...ordinaryIds) as { n: number };
+    expect(ftsOrdinaryCount.n).toBe(2);
+
+    // Already-queued failed job on oldestOrdinaryId WAS requeued
+    expect(
+      db.db.prepare("SELECT status FROM evolution_jobs WHERE target_memory_id = ? AND job_type = 'embedding'").get(oldestOrdinaryId)
+    ).toEqual({ status: "queued" });
+
+    // Drain all queued jobs and verify idempotency on subsequent startup
+    await runWorkerRounds(service, 2, 50);
+    for (const id of authorizedImportedIds) {
+      expect(repos.memories.hasVector(id, "vec")).toBe(true);
+    }
+    expect(repos.memories.hasVector(oldestOrdinaryId, "vec")).toBe(true);
+
+    // Second startup with limit=2: 0 imported Skills re-enqueued (complete & idempotent!)
+    const secondStartup = service.reconcileWorkerStartup(2);
+    const secondImportedJobs = db.db.prepare(
+      `SELECT COUNT(*) AS n FROM evolution_jobs
+       WHERE job_type = 'embedding'
+         AND status IN ('queued', 'leased')
+         AND target_memory_id IN (${authorizedImportedIds.map(() => "?").join(", ")})`
+    ).get(...authorizedImportedIds) as { n: number };
+    expect(secondImportedJobs.n).toBe(0);
+    // Repeated startup still inspects only the top limit=2 newest ordinary rows (already migrated), never backfilling older history
+    expect(secondStartup.enqueuedRetrievalReindexes).toBe(0);
+
+    // Future new ordinary Skill & L3 records continue to enqueue and embed normally
+    const futureSkill = service.addMemory({
+      namespace,
+      layer: "Skill",
+      title: "future-generated-skill",
+      content: "Future generated skill body."
+    });
+    const futureL3 = service.addMemory({
+      namespace,
+      layer: "L3",
+      title: "future-l3-record",
+      content: "Future L3 world model summary."
+    });
+    await runWorkerRounds(service, 2, 50);
+    expect(repos.memories.hasVector(futureSkill.id, "vec")).toBe(true);
+    expect(repos.memories.hasVector(futureL3.id, "vec")).toBe(true);
+  });
 });

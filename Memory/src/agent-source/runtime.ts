@@ -848,6 +848,94 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     }
   }
 
+  function hasSupersedingDecision(decision: {
+    kind?: "skill" | "plugin";
+    event?: ConnectionEvent;
+    pendingLocalDisconnect?: boolean;
+  }): boolean {
+    return Boolean(decision.kind || decision.event || decision.pendingLocalDisconnect);
+  }
+
+  async function reconcileSupersededConnect(
+    sourceId: string,
+    attemptedKind: "skill" | "plugin",
+    before: Awaited<ReturnType<typeof readSkillInstallationState>> | undefined,
+    action: ConnectionAction,
+    fallbackEvent?: ConnectionEvent
+  ): Promise<void> {
+    const target = integrationRegistry.get(sourceId)!;
+    const state = await readState();
+    let owned = state.sources[sourceId];
+    const saveLatest = async () => {
+      let latest: PersistedSourceState | undefined;
+      do { latest = state.sources[sourceId]; await persist(state); }
+      while (state.sources[sourceId] !== latest);
+    };
+    const installDesired = async (desiredKind: "skill" | "plugin") => {
+      if (desiredKind === "plugin") {
+        if (!target.installPlugin) throw new Error("Cannot restore explicitly connected plugin");
+        await target.installPlugin(sourceId);
+      } else {
+        await target.install(renderMemmyDefaultSkillManifest(sourceId));
+      }
+    };
+    const remove = [async () => {
+      const current = await readSkillInstallationState(target, sourceId, () => undefined);
+      const shouldRemovePlugin = Boolean(target.uninstallPlugin)
+        && (attemptedKind === "plugin" || before?.pluginInstalled === true || current.pluginInstalled === true);
+      if (shouldRemovePlugin) {
+        await target.uninstallPlugin!(sourceId);
+        if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
+      } else {
+        await target.uninstall(sourceId);
+      }
+    }];
+    try {
+      await compensation.compensate(sourceId, compensation.afterConnectAttempt(action, fallbackEvent), {
+        remove,
+        install: installDesired,
+        ensureInstalled: async desiredKind => {
+          const current = await readSkillInstallationState(target, sourceId, () => undefined);
+          if (desiredKind === "plugin") {
+            if (current.pluginInstalled !== true || !current.skillInstalled) {
+              await installDesired("plugin");
+            }
+            return;
+          }
+          if (before?.pluginInstalled === false && current.pluginInstalled === true && target.uninstallPlugin) {
+            await target.uninstallPlugin(sourceId);
+            if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
+            await installDesired("skill");
+            return;
+          }
+          if (!current.skillInstalled) await installDesired("skill");
+        },
+        commit: async decision => {
+          const current = state.sources[sourceId];
+          if (decision.kind || decision.event?.state === "disconnected") {
+            const next: PersistedSourceState = { ...(current ?? emptySourceState()) };
+            if (decision.kind) {
+              next.status = decision.kind === "plugin" ? "plugin_installed" : "skill_installed";
+              delete next.autoInjectSuppressed;
+              delete next.suppressedRevision;
+            } else {
+              next.status = "not_connected";
+              next.autoInjectSuppressed = true;
+              if (typeof decision.event?.revision === "number") {
+                next.suppressedRevision = decision.event.revision;
+              }
+            }
+            await persist({ ...state, sources: { ...state.sources, [sourceId]: next } });
+            if (state.sources[sourceId] === current) state.sources[sourceId] = owned = next;
+          }
+          if (state.sources[sourceId] !== owned) await saveLatest();
+        }
+      }, action);
+    } finally {
+      if (state.sources[sourceId] !== owned) await saveLatest();
+    }
+  }
+
   async function mutateConnection(
     sourceId: string, kind: "plugin" | "skill", method: "POST" | "DELETE",
     installType: "manual" | "auto_inject" = "manual", isAutomaticInstallAllowed?: () => boolean
@@ -885,11 +973,16 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
     const target = integrationRegistry.get(sourceId);
     if (!target) throw new MemoryServiceError("invalid_argument", `Agent source ${sourceId} cannot be connected automatically`);
-    const notifyConnection = (connectionState: "connected" | "disconnected") => options.service.reconcileAgentSkills({
+    const notifyConnection = (
+      connectionState: "connected" | "disconnected",
+      connectionKind: "skill" | "plugin" = kind,
+      connectionEventId?: string
+    ) => options.service.reconcileAgentSkills({
       sourceAgentId: sourceId,
       complete: false,
       connectionState,
-      connectionKind: kind,
+      connectionKind,
+      ...(connectionEventId ? { connectionEventId } : {}),
       disconnected: connectionState === "disconnected",
       skills: []
     });
@@ -920,17 +1013,47 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
           throw new AggregateError([installError, authorizationError].filter(Boolean), "Automatic integration canceled; installed files removed.");
         }
       }
-      if (installError) throw installError;
-      if (installationBefore) {
+      if (installError) {
+        if (action && hasSupersedingDecision(await compensation.inspectConnectAttempt(action))) {
+          await reconcileSupersededConnect(sourceId, kind, installationBefore, action);
+        }
+        throw installError;
+      }
+      if (
+        action
+        && (
+          compensation.currentAction(sourceId) !== action
+          || hasSupersedingDecision(await compensation.inspectConnectAttempt(action))
+        )
+      ) {
+        await reconcileSupersededConnect(sourceId, kind, installationBefore, action);
+        throw new Error("Agent connection was superseded by a newer connection action.");
+      }
+      if (installationBefore && action) {
+        let notification: Awaited<ReturnType<typeof notifyConnection>>;
         try {
-          const notification = await notifyConnection("connected");
-          compensation.record(action, notification.connectionEvent);
+          notification = await notifyConnection("connected", kind, action.attemptEventId);
         } catch (error) {
-          if (!installationBefore.skillInstalled && installationBefore.pluginInstalled === false) {
+          let fallbackEvent = action.startedEvent;
+          const initialDecision = await compensation.inspectConnectAttempt(action, fallbackEvent);
+          if (hasSupersedingDecision(initialDecision)) {
+            await reconcileSupersededConnect(sourceId, kind, installationBefore, action, fallbackEvent);
+            throw error;
+          }
+          const freshInstall = !installationBefore.skillInstalled && installationBefore.pluginInstalled === false;
+          const ownEvent = initialDecision.ownCommittedEvent;
+          const shouldCompensateDisconnect = (freshInstall && action.startedEvent?.state !== "connected")
+            || Boolean(ownEvent && action.startedEvent?.state === "disconnected");
+          if (shouldCompensateDisconnect) {
             try {
-              const notification = await notifyConnection("disconnected");
+              const notification = await notifyConnection("disconnected", kind);
               compensation.record(action, notification.connectionEvent);
+              if (notification.connectionEvent) fallbackEvent = notification.connectionEvent;
             } catch (compensationError) {
+              if (hasSupersedingDecision(await compensation.inspectConnectAttempt(action, fallbackEvent))) {
+                await reconcileSupersededConnect(sourceId, kind, installationBefore, action, fallbackEvent);
+                throw error;
+              }
               const state = await readState();
               state.sources[sourceId] = {
                 ...(state.sources[sourceId] ?? emptySourceState()),
@@ -940,10 +1063,32 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
               throw new AggregateError([error, compensationError],
                 "Agent connection result is uncertain. Integration retained so disconnection can be retried.");
             }
+          } else if (ownEvent && action.startedEvent?.state === "connected" && action.startedEvent.kind && action.startedEvent.kind !== kind) {
+            try {
+              const restored = await notifyConnection("connected", action.startedEvent.kind);
+              compensation.record(action, restored.connectionEvent);
+              if (restored.connectionEvent) fallbackEvent = restored.connectionEvent;
+            } catch {
+              // Keep the existing connected authorization if restoring prior kind fails.
+            }
+          }
+          if (hasSupersedingDecision(await compensation.inspectConnectAttempt(action, fallbackEvent))) {
+            await reconcileSupersededConnect(sourceId, kind, installationBefore, action, fallbackEvent);
+            throw error;
           }
           await rollbackSkillInstallation(target, sourceId, kind, installationBefore);
+          if (hasSupersedingDecision(await compensation.inspectConnectAttempt(action, fallbackEvent))) {
+            await reconcileSupersededConnect(sourceId, kind, installationBefore, action, fallbackEvent);
+          }
           throw error;
         }
+        if (notification.connectionEvent && notification.connectionEvent.id !== action.attemptEventId) {
+          if (hasSupersedingDecision(await compensation.inspectConnectAttempt(action))) {
+            await reconcileSupersededConnect(sourceId, kind, installationBefore, action);
+          }
+          throw new Error("Agent connection was superseded by a newer connection action.");
+        }
+        compensation.record(action, notification.connectionEvent);
       }
     } else {
       let preparationError: Error | undefined;
@@ -994,10 +1139,14 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     }
     try {
       const state = await readState();
+      const expectedStatus = kind === "plugin" ? "plugin_installed" : "skill_installed";
+      if (action && compensation.currentAction(sourceId) !== action) {
+        return { ok: true, sourceId, status: state.sources[sourceId]?.status ?? expectedStatus };
+      }
       const stored = state.sources[sourceId] ?? emptySourceState();
       const nextState: PersistedSourceState = {
         ...stored,
-        status: kind === "plugin" ? "plugin_installed" : "skill_installed"
+        status: expectedStatus
       };
       delete nextState.autoInjectSuppressed;
       delete nextState.suppressedRevision;
@@ -1006,6 +1155,10 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       // Check before replacing the cached source: another local removal may
       // have published retryable suppression while this durable write waited.
       if (installType === "auto_inject") await guard();
+      if (action && compensation.currentAction(sourceId) !== action) {
+        await persist(state);
+        return { ok: true, sourceId, status: state.sources[sourceId]?.status ?? expectedStatus };
+      }
       state.sources[sourceId] = nextState;
       logger.info("connection.installed", { sourceId, kind });
       return { ok: true, sourceId, status: state.sources[sourceId].status };

@@ -1285,7 +1285,7 @@ describe("standalone Agent source executor", () => {
       expect(reconcileAgentSkills).not.toHaveBeenCalled();
       await executor.mutateConnection("codex", kind, "POST");
       expect(reconcileAgentSkills).toHaveBeenLastCalledWith({ sourceAgentId: "codex", complete: false,
-        connectionState: "connected", connectionKind: kind, disconnected: false, skills: [] });
+        connectionEventId: expect.any(String), connectionState: "connected", connectionKind: kind, disconnected: false, skills: [] });
       await executor.mutateConnection("codex", kind, "DELETE");
       expect(reconcileAgentSkills).toHaveBeenLastCalledWith({ sourceAgentId: "codex", complete: false,
         connectionState: "disconnected", connectionKind: kind, disconnected: true, skills: [] });

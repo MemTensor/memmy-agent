@@ -78,15 +78,9 @@ export class EmbeddingMaintenance {
 
   private entries(): EmbeddingMaintenanceEntry[] {
     const entries = this.deps.repos.vectors.maintenanceEntries();
-    const ids = [...new Set(entries.map(entry => entry.id))];
-    const eligible = new Map<string, boolean>();
-    // Bound SQLite parameters and read lifecycle facts without loading any vectors.
-    for (let offset = 0; offset < ids.length; offset += 500) {
-      for (const memory of this.deps.repos.memories.getMany(ids.slice(offset, offset + 500), { includeVectors: false })) {
-        eligible.set(memory.id, this.deps.repos.isImportedSkillEligibleForEmbedding(memory));
-      }
-    }
-    return [...entries.filter(entry => eligible.get(entry.id) === true),
+    const vecIds = entries.filter(entry => entry.vectorField === "vec").map(entry => entry.id);
+    const ineligible = vecIds.length > 0 ? this.deps.repos.ineligibleImportedSkillVectorIds(vecIds) : new Set<string>();
+    return [...entries.filter(entry => !ineligible.has(entry.id)),
       ...this.deps.repos.userMemories.embeddingMaintenanceEntries(this.deps.userId)];
   }
 

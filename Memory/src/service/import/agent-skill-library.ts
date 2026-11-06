@@ -80,6 +80,8 @@ export interface AgentSkillReconcileRequest extends RequestEnvelope {
   /** Only an explicit connection event changes a persisted disconnect. */
   connectionState?: AgentSkillConnectionState;
   connectionKind?: "skill" | "plugin";
+  /** Caller-generated attempt identifier so a timed-out connect recognizes its own commit. */
+  connectionEventId?: string;
 }
 
 export interface AgentSkillConnectionEvent {
@@ -247,17 +249,39 @@ export class AgentSkillLibrary {
     }
   }
 
+  private seenConnectionEventIds(sourceAgentId: string): string[] {
+    const value = this.deps.repos.runtime.getKv(`${agentSkillConnectionKey(sourceAgentId)}:seen`)?.value;
+    return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+  }
+
+  private rememberConnectionEventId(sourceAgentId: string, eventId: string, seen: string[], at: string): void {
+    const next = [...seen.filter(entry => entry !== eventId), eventId].slice(-64);
+    this.deps.repos.runtime.setKv(`${agentSkillConnectionKey(sourceAgentId)}:seen`, next, at);
+  }
+
   private recordConnection(request: AgentSkillReconcileRequest, at: string): void {
     const explicit = request.connectionState ?? (request.disconnected === true ? "disconnected" : undefined);
     if (explicit) {
-      this.deps.repos.runtime.setKv(agentSkillConnectionKey(request.sourceAgentId), explicit, at);
       if (request.connectionState) {
-        const revision = (this.connectionEvent(request.sourceAgentId)?.revision ?? 0) + 1;
+        const current = this.connectionEvent(request.sourceAgentId);
+        const requestedId = request.connectionEventId?.trim() || undefined;
+        const seen = requestedId ? this.seenConnectionEventIds(request.sourceAgentId) : [];
+        if (requestedId && (current?.id === requestedId || seen.includes(requestedId))) {
+          return;
+        }
+        this.deps.repos.runtime.setKv(agentSkillConnectionKey(request.sourceAgentId), explicit, at);
+        const revision = (current?.revision ?? 0) + 1;
         if (!Number.isSafeInteger(revision)) throw new Error("Agent connection event revision is exhausted");
+        const id = requestedId ?? newId("agent_connection");
         this.deps.repos.runtime.setKv(`${agentSkillConnectionKey(request.sourceAgentId)}:event`, {
-          id: newId("agent_connection"), state: request.connectionState, revision,
+          id, state: request.connectionState, revision,
           ...(request.connectionKind === "skill" || request.connectionKind === "plugin" ? { kind: request.connectionKind } : {})
         }, at);
+        if (requestedId) {
+          this.rememberConnectionEventId(request.sourceAgentId, id, seen, at);
+        }
+      } else {
+        this.deps.repos.runtime.setKv(agentSkillConnectionKey(request.sourceAgentId), explicit, at);
       }
     } else if (this.connectionState(request.sourceAgentId) === undefined && this.isDisconnected(request.sourceAgentId)) {
       this.deps.repos.runtime.setKv(agentSkillConnectionKey(request.sourceAgentId), "disconnected", at);

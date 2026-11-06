@@ -1609,6 +1609,7 @@ function agentSkillReconcileRequest(request: RequestEnvelope & Record<string, un
     disconnected: request.disconnected === true,
     connectionState: request.connectionState === "connected" || request.connectionState === "disconnected" ? request.connectionState : undefined,
     connectionKind: request.connectionKind === "skill" || request.connectionKind === "plugin" ? request.connectionKind : undefined,
+    ...(text(request.connectionEventId)?.trim() ? { connectionEventId: text(request.connectionEventId)!.trim() } : {}),
     registrationsComplete: request.registrationsComplete === true,
     skills: records(request.skills, "skills").map((item) => ({
       sourceSkillId: required(item, "sourceSkillId", "skills"),

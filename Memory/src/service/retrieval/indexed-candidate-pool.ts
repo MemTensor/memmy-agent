@@ -46,7 +46,7 @@ export class IndexedCandidatePool {
     const baseFilter: MemoryFilter = {
       memoryLayer: input.layers,
       status: ["activated", "resolving"],
-      eligibleImportedSkillsOnly: true
+      ...(input.layers.includes("Skill") ? { eligibleImportedSkillsOnly: true } : {})
     };
     const scopedFilter = input.layers.includes("L1") && input.projectId !== undefined
       ? { ...baseFilter, workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
@@ -64,7 +64,7 @@ export class IndexedCandidatePool {
     const baseFilter: MemoryFilter = {
       memoryLayer: input.layers,
       status: ["activated", "resolving"],
-      eligibleImportedSkillsOnly: true
+      ...(input.layers.includes("Skill") ? { eligibleImportedSkillsOnly: true } : {})
     };
     const scopedFilter = input.layers.includes("L1") && input.projectId !== undefined
       ? { ...baseFilter, workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
@@ -96,12 +96,12 @@ export class IndexedCandidatePool {
     const queryVector = input.queryVector && input.queryVector.length > 0 ? input.queryVector : undefined;
     const commonFilter: MemoryFilter = {
       status: ["activated", "resolving"],
-      eligibleImportedSkillsOnly: true,
       ...(input.tags?.length ? { tags: input.tags } : {})
     };
     const skillFilter: MemoryFilter = {
       ...commonFilter,
       memoryLayer: "Skill",
+      eligibleImportedSkillsOnly: true,
       ...(input.targetSkillId ? { ids: [input.targetSkillId] } : {}),
       ...(input.currentAgentId ? { excludedImportedSkillSourceAgentId: input.currentAgentId } : {})
     };

@@ -636,6 +636,7 @@ export const AgentSkillReconcileInputSchema = RuntimeRequestFieldsSchema.extend(
   disconnected: z.boolean().optional(),
   connectionState: z.enum(["connected", "disconnected"]).optional(),
   connectionKind: z.enum(["skill", "plugin"]).optional(),
+  connectionEventId: NonEmptyStringSchema.optional(),
   skills: z.array(AgentSkillReconcileSkillSchema),
   registrations: z.array(AgentSkillReconcileRegistrationSchema).optional(),
   registrationsComplete: z.boolean().optional()

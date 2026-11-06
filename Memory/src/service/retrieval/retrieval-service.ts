@@ -1877,6 +1877,7 @@ export class RetrievalService {
 
   private currentImportedHits(hits: RecallHit[], currentAgentId?: string): RecallHit[] {
     return hits.filter(hit => {
+      if (hit.memoryLayer !== "Skill") return true;
       const memory = this.deps.repos.memories.getIncludingDeleted(hit.id);
       if (!memory || !isImportedSkill(memory)) return true;
       return this.deps.repos.isImportedSkillEligibleForRecall(memory, currentAgentId)

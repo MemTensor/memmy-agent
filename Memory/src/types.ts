@@ -196,6 +196,8 @@ export interface MemoryFilter {
   excludedImportedSkillSourceAgentId?: string;
   /** Apply source eligibility before candidate LIMITs, independently of requester installations. */
   eligibleImportedSkillsOnly?: boolean;
+  /** Restricts Skill queries to imported Agent skills only or excludes them. */
+  importedSkillsMode?: "only" | "exclude";
 }
 
 export interface RecallHit {
