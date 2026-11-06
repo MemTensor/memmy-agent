@@ -38,7 +38,7 @@ function makeChannel(): WebSocketChannel {
   return channel;
 }
 
-function makeWebuiChannel(): WebSocketChannel {
+function makeWebuiChannelFixture(): { channel: WebSocketChannel; workspace: string } {
   const root = tmpRoot();
   const workspace = path.join(root, "workspace");
   fs.mkdirSync(workspace, { recursive: true });
@@ -52,7 +52,11 @@ function makeWebuiChannel(): WebSocketChannel {
   );
   channel.handleMessage = vi.fn(async () => undefined) as any;
   channel.hydrateAfterSubscribe = vi.fn(async () => undefined) as any;
-  return channel;
+  return { channel, workspace };
+}
+
+function makeWebuiChannel(): WebSocketChannel {
+  return makeWebuiChannelFixture().channel;
 }
 
 function makeConnection() {
@@ -213,6 +217,36 @@ describe("WebSocket message envelopes with media paths", () => {
 
     expect(channel.handleMessage).toHaveBeenCalledTimes(1);
     expect(connection.send).not.toHaveBeenCalled();
+  });
+
+  it("accepts a saved recording transcript and reads only safe text for its title", async () => {
+    const { channel, workspace } = makeWebuiChannelFixture();
+    const recordings = path.join(workspace, "recordings");
+    fs.mkdirSync(recordings, { recursive: true });
+    const transcript = path.join(recordings, "录音转写.txt");
+    fs.writeFileSync(transcript, "[00:01] 【说话人 1】孙老师，早上好。", "utf8");
+    const connection = makeConnection();
+
+    await channel.dispatchEnvelope(connection, "client-1", {
+      type: "message",
+      chat_id: "abc123",
+      content: "",
+      media_paths: [transcript],
+    });
+
+    expect((channel.handleMessage as any).mock.calls[0][0].media).toEqual([fs.realpathSync(transcript)]);
+    expect(channel.readWebuiTitleText(transcript)).toContain("孙老师，早上好");
+    expect(connection.send).not.toHaveBeenCalled();
+
+    const pdf = path.join(recordings, "report.pdf");
+    fs.writeFileSync(pdf, "%PDF-1.7\nbody", "utf8");
+    expect(channel.readWebuiTitleText(pdf)).toBeNull();
+    const outside = path.join(path.dirname(workspace), "outside.txt");
+    fs.writeFileSync(outside, "private", "utf8");
+    expect(channel.readWebuiTitleText(outside)).toBeNull();
+    const linked = path.join(recordings, "linked.txt");
+    fs.symlinkSync(outside, linked);
+    expect(channel.readWebuiTitleText(linked)).toBeNull();
   });
 
   it("rejects media_paths outside the websocket media directory", async () => {

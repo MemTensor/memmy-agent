@@ -13,7 +13,7 @@ import type { SecretStore } from "../secret-store.js";
 
 export interface AccountSessionRepository {
   get(): AccountSessionView;
-  /** Reads the cloud-issued grants held by the active account, e.g. `plugin:<pluginId>`. */
+  /** Reads effective grants: cloud-issued grants plus products available to every signed-in account. */
   getEntitlements(): string[];
   /** Reads the explicit channel used to create the active login session. */
   getAuthChannel(): AccountChannel | null;
@@ -90,8 +90,12 @@ export function createAccountSessionRepository(db: DatabaseSync, secretStore: Se
 
     getEntitlements() {
       const row = getActiveAccountRow(db);
-      if (!row?.user_id || !row.raw_profile_json) return [];
-      return readEntitlements(parseRawProfile(row.raw_profile_json)?.entitlements);
+      if (!row?.user_id || !row.nickname) return [];
+      // Match the cloud PluginEntitlements policy, including older/offline profiles
+      // that predate its entitlements field. Legal and other private grants remain
+      // exclusively cloud-issued; logout removes this account-wide product grant.
+      const grants = readEntitlements(parseRawProfile(row.raw_profile_json ?? "{}")?.entitlements);
+      return [...new Set([...grants, "plugin:literature-review"])];
     },
 
     getAuthChannel() {

@@ -184,7 +184,15 @@ class SessionDagQueue {
   private async process(): Promise<void> {
     while (!this.closed) {
       const turn = this.store.claimNextTurn();
-      if (!turn) return;
+      if (!turn) {
+        // An early wake must not strand retries whose persisted deadline is still ahead.
+        const nextRetryAt = this.store.listTurns(["retry"]).reduce((next, retry) => {
+          const at = Date.parse(retry.next_retry_at ?? "");
+          return Number.isFinite(at) ? Math.min(next, at) : next;
+        }, Number.POSITIVE_INFINITY);
+        if (Number.isFinite(nextRetryAt)) this.scheduleRetry(Math.max(0, nextRetryAt - Date.now()));
+        return;
+      }
       const builder = this.manager.createBuilder(
         this.sessionKey,
         this.store,
