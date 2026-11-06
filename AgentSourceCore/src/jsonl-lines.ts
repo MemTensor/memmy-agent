@@ -8,12 +8,14 @@ export type JsonObject = { readonly [key: string]: JsonValue };
 /**
  * Streams valid object rows from a JSONL file.
  * Malformed and non-object rows are skipped without interrupting the stream.
+ * Cancellation throws AbortError before any further record is emitted.
  *
  * @param filePath JSONL file path.
  * @param signal Optional abort signal.
  * @returns The JSON objects parsed line by line.
  */
 export async function* readJsonlObjects(filePath: string, signal?: AbortSignal, onInvalidRecord?: (reason: string) => void): AsyncIterable<JsonObject> {
+  throwIfAborted(signal, filePath);
   const stream = createReadStream(filePath);
   const maxRecordBytes = 64 * 1024 * 1024;
   let segments: Buffer[] = [];
@@ -59,6 +61,7 @@ export async function* readJsonlObjects(filePath: string, signal?: AbortSignal, 
       const buffer = chunk as Buffer;
       let start = 0;
       while (start <= buffer.length) {
+        throwIfAborted(signal, filePath);
         const newline = buffer.indexOf(0x0a, start);
         if (newline < 0) {
           append(buffer.subarray(start));
@@ -71,6 +74,7 @@ export async function* readJsonlObjects(filePath: string, signal?: AbortSignal, 
         start = newline + 1;
       }
     }
+    throwIfAborted(signal, filePath);
     const parsed = parseSegments();
     if (parsed) yield parsed;
   } finally {
