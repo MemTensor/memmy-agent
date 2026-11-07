@@ -18,12 +18,14 @@ export function assertLocalAgentSourceRequest(request: IncomingMessage, kind: st
 }
 
 export function isAgentSourceScanPath(path: string): boolean {
-  return path === "/api/v1/agent-sources" || path === "/api/v1/agent-sources/scan" || path.startsWith("/api/v1/agent-sources/scan/");
+  return /^\/api\/v1\/agent-sources\/[^/]+\/connection-state$/.test(path) || path === "/api/v1/agent-sources" || path === "/api/v1/agent-sources/scan" || path.startsWith("/api/v1/agent-sources/scan/");
 }
 
 /** Shared by the local-token API and the existing local Viewer API. */
 export async function routeAgentSourceScan(executor: AgentSourceExecutor, method: string, url: URL, body: unknown) {
   const path = url.pathname;
+  const connection = path.match(/^\/api\/v1\/agent-sources\/([^/]+)\/connection-state$/);
+  if (method === "GET" && connection) return { body: await executor.connectionState(decodeURIComponent(connection[1]!)) };
   if (method === "GET" && path === "/api/v1/agent-sources") return { body: await executor.list() };
   if (method === "POST" && path === "/api/v1/agent-sources/scan") {
     scanControlInput(body);

@@ -490,6 +490,15 @@ export const agentActions = {
     return { type: "agent/newChatCreated", chatId };
   },
 
+  pluginConversationStarted(input: {
+    chatId: string;
+    title: string;
+    target: WebuiSessionTarget;
+    createdAt: string;
+  }): AppAction {
+    return { type: "agent/pluginConversationStarted", ...input };
+  },
+
   transientSendFailed(chatId: string): AppAction {
     return { type: "agent/transientSendFailed", chatId };
   },

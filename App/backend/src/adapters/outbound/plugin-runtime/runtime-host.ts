@@ -71,9 +71,10 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Plugin
       const activeCall: ActiveCall = { call, interactions: new Map(), cancelRequested: false };
       current.calls.set(call.callId, activeCall);
       let terminal = false;
+      let iterator: AsyncIterator<CapabilityEvent> | undefined;
       try {
         await applyCapabilityControl(current, capability.control, call);
-        const iterator = current.adapter.invoke(current.session, call)[Symbol.asyncIterator]();
+        iterator = current.adapter.invoke(current.session, call)[Symbol.asyncIterator]();
         for (;;) {
           const item = await nextBeforeDeadline(iterator, call.deadline, () =>
             current.adapter.cancel?.(current.session, call.callId)
@@ -111,11 +112,17 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Plugin
         yield activeCall.cancelRequested
           ? runtimeError("plugin_cancelled", "Plugin call was cancelled")
           : runtimeError(
-              isTimeout(error) ? "plugin_timeout" : "plugin_runtime_error",
-              error instanceof Error ? error.message : String(error)
+              (error as { code?: unknown })?.code === "plugin_no_progress" ? "plugin_no_progress" : isTimeout(error) ? "plugin_timeout" : "plugin_runtime_error",
+              error instanceof Error ? error.message : String(error),
+              call.pluginId === "literature-review" && typeof asRecord(call.input).taskId === "string"
+                ? { taskId: asRecord(call.input).taskId as string, runId: call.callId } : undefined
             );
       } finally {
         current.calls.delete(call.callId);
+        // Breaking after a terminal event must still run the adapter's cleanup.
+        // An outstanding next() on a faulty adapter must not delay timeout delivery.
+        if (terminal) await iterator?.return?.();
+        else void iterator?.return?.().catch(() => undefined);
       }
     },
 
@@ -231,8 +238,8 @@ function isTimeout(error: unknown): boolean {
   return (error as { code?: unknown })?.code === "plugin_timeout";
 }
 
-function runtimeError(code: string, message: string): CapabilityEvent {
-  return { type: "error", code, message, retryable: code === "plugin_timeout" || code === "plugin_runtime_error" };
+function runtimeError(code: string, message: string, recovery?: { taskId: string; runId: string }): CapabilityEvent {
+  return { type: "error", code, message, retryable: code === "plugin_timeout" || code === "plugin_runtime_error", ...(recovery ? { recovery } : {}) };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

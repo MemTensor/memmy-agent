@@ -53,6 +53,7 @@ export function normalizeBrowserCdpCommandOptions(input: unknown): {
   return { ...(target ? { target } : {}), ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number }) };
 }
 
+/** Accept raw reads and our own output, but never allow safety options to be weakened. */
 export function normalizeBrowserCdpReadCall(method: unknown, input: unknown): {
   method: BrowserCdpReadMethod; params: Record<string, unknown> } {
   if (typeof method !== 'string' || !BROWSER_CDP_READ_METHODS.includes(method as BrowserCdpReadMethod)
@@ -64,7 +65,7 @@ export function normalizeBrowserCdpReadCall(method: unknown, input: unknown): {
     case 'Accessibility.getFullAXTree':
     case 'Page.getLayoutMetrics': noParams(); return { method, params: {} };
     case 'DOM.getDocument': {
-      if (Object.keys(params).some(key => !['depth'].includes(key))
+      if (Object.keys(params).some(key => key !== 'depth' && (key !== 'pierce' || params[key] !== false))
         || (params.depth !== undefined && (!Number.isInteger(params.depth)
           || (params.depth as number) < 0 || (params.depth as number) > 3))) {
         throw new Error('CDP DOM depth is unavailable');
@@ -72,18 +73,22 @@ export function normalizeBrowserCdpReadCall(method: unknown, input: unknown): {
       return { method, params: { depth: params.depth ?? 1, pierce: false } };
     }
     case 'Page.captureScreenshot': {
-      if (Object.keys(params).some(key => key !== 'format')
+      if (Object.keys(params).some(key => key !== 'format'
+        && (key !== 'captureBeyondViewport' || params[key] !== false))
         || (params.format !== undefined && params.format !== 'png' && params.format !== 'jpeg')) {
         throw new Error('CDP screenshot parameters are unavailable');
       }
       return { method, params: { format: params.format ?? 'png', captureBeyondViewport: false } };
     }
     case 'Runtime.evaluate': {
-      if (Object.keys(params).some(key => key !== 'expression')
+      const safetyParams: Record<string, boolean> = {
+        throwOnSideEffect: true, returnByValue: true, awaitPromise: false, userGesture: false,
+      };
+      if (Object.keys(params).some(key => key !== 'expression'
+        && (!Object.hasOwn(safetyParams, key) || params[key] !== safetyParams[key]))
         || typeof params.expression !== 'string' || !params.expression
         || params.expression.length > 20_000) throw new Error('CDP expression is unavailable');
-      return { method, params: { expression: params.expression,
-        throwOnSideEffect: true, returnByValue: true, awaitPromise: false, userGesture: false } };
+      return { method, params: { expression: params.expression, ...safetyParams } };
     }
     default: throw new Error('CDP method is unavailable');
   }

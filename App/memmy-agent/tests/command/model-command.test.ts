@@ -191,8 +191,28 @@ describe("model command", () => {
     const out = await cmdModel(ctx(loop, "/model"));
     expect(out.content).toContain("Current model: `openai / base-model`");
     expect(out.content).toContain("Current preset: `base`");
+    expect(out.content).toContain("Provider: `openai`");
+    expect(out.content).toContain("Model: `base-model`");
+    expect(out.content).toContain("Endpoint: `chat (https://api.openai.com/v1)`");
     expect(out.content).toContain("Available presets: `base`, `fast`");
+    expect(out.content).not.toContain("test-key");
     expect(out.metadata).toEqual({ renderAs: "text" });
+  });
+
+  it("removes credentials and URL parameters from the current BYOK endpoint", async () => {
+    const loop = makeLoop();
+    const configPath = process.env.MEMMY_CONFIG!;
+    fs.writeFileSync(configPath, fs.readFileSync(configPath, "utf8").replace(
+      "https://api.openai.com/v1",
+      "https://endpoint-user:endpoint-password@api.openai.com/v1?token=url-token#url-fragment",
+    ));
+
+    const out = await cmdModel(ctx(loop, "/model"));
+
+    expect(out.content).toContain("Endpoint: `chat (https://api.openai.com/v1)`");
+    for (const secret of ["endpoint-user", "endpoint-password", "url-token", "url-fragment", "test-key"]) {
+      expect(out.content).not.toContain(secret);
+    }
   });
 
   it("lists preset to Provider/model mappings", async () => {
@@ -210,6 +230,12 @@ describe("model command", () => {
 
     expect(status.content).toContain("Current model: `memmy_account / General text`");
     expect(status.content).toContain("Current preset: `platform`");
+    expect(status.content).toContain("Provider: `memmy_account`");
+    expect(status.content).toContain("Model: `General text`");
+    expect(status.content).toContain("Endpoint: `platform`");
+    expect(status.content).not.toContain("account.example.test");
+    expect(status.content).not.toContain("agent_chat");
+    expect(status.content).not.toContain("account-secret");
     expect(list.content).toContain("`platform` -> `memmy_account / General text`");
     expect(list.content).toContain("`fast` -> `openai / openai/gpt-4.1`");
     expect(list.content).not.toContain("`base`");
@@ -233,6 +259,62 @@ describe("model command", () => {
     expect(loop.model).toBe("base-model");
     expect(loop.contextWindowTokens).toBe(1000);
     expect(mirrorUpdated).toHaveBeenCalledWith(context.key);
+  });
+
+  it("switches to the available preset with an exact model name", async () => {
+    const loop = makeLoop();
+    const context = ctx(loop, "/model openai/gpt-4.1", "openai/gpt-4.1", true);
+
+    const out = await cmdModel(context);
+    const status = await cmdModel(ctx(loop, "/model", "", context.session));
+
+    expect(out.content).toContain("Switched this Session to `fast`.");
+    expect(context.session?.metadata.modelPreset).toBe("fast");
+    expect(loop.sessions.reload(context.key)?.metadata.modelPreset).toBe("fast");
+    expect(status.content).toContain("Current preset: `fast`");
+    expect(status.content).toContain("Model: `openai/gpt-4.1`");
+    expect(loop.modelPreset).toBe("base");
+    expect(loop.model).toBe("base-model");
+  });
+
+  it("prefers an exact preset name over a matching model name", async () => {
+    const loop = makeLoop();
+    const configPath = process.env.MEMMY_CONFIG!;
+    fs.writeFileSync(configPath, fs.readFileSync(configPath, "utf8").replace("model: openai/gpt-4.1", "model: base"));
+    const context = ctx(loop, "/model base", "base", true);
+
+    const out = await cmdModel(context);
+
+    expect(out.content).toContain("Switched this Session to `base`.");
+    expect(context.session?.metadata.modelPreset).toBe("base");
+  });
+
+  it("does not change selection when a model name matches multiple available presets", async () => {
+    const loop = makeLoop();
+    const configPath = process.env.MEMMY_CONFIG!;
+    fs.writeFileSync(configPath, fs.readFileSync(configPath, "utf8").replace("model: openai/gpt-4.1", "model: base-model"));
+    const context = ctx(loop, "/model base-model", "base-model", true);
+
+    const out = await cmdModel(context);
+
+    expect(out.content).toContain("model_selection_ambiguous");
+    expect(out.content).toContain("Use a preset name: `base`, `fast`");
+    expect(context.session?.metadata.modelPreset).toBeUndefined();
+    expect(context.session?.metadata.modelSelection).toBeUndefined();
+    expect(loop.sessions.reload(context.key)?.metadata.modelPreset).toBeUndefined();
+    expect(loop.modelPreset).toBe("base");
+    expect(loop.model).toBe("base-model");
+  });
+
+  it("does not select model names outside the current account assignments", async () => {
+    const loop = makeLoop("account");
+    const context = ctx(loop, "/model base-model", "base-model", true);
+
+    const out = await cmdModel(context);
+
+    expect(out.content).toContain("model_selection_unavailable");
+    expect(context.session?.metadata.modelPreset).toBeUndefined();
+    expect(context.session?.metadata.modelSelection).toBeUndefined();
   });
 
   it("publishes a safe request-scoped selection update for websocket TUI switches", async () => {
@@ -300,13 +382,13 @@ describe("model command", () => {
     const out = await router.dispatch(ctx(loop, "/model fast", "", true));
     expect(out?.content).toContain("Switched this Session");
     expect(loop.modelPreset).toBe("base");
-    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/model", arg_hint: "[list|preset]" })]));
-    expect(buildHelpText()).toContain("/model [list|preset]");
+    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/model", arg_hint: "[list|preset|model]" })]));
+    expect(buildHelpText()).toContain("/model [list|preset|model]");
   });
 
   it("appears in help and command palette", () => {
-    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/model", arg_hint: "[list|preset]" })]));
-    expect(buildHelpText()).toContain("/model [list|preset]");
+    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/model", arg_hint: "[list|preset|model]" })]));
+    expect(buildHelpText()).toContain("/model [list|preset|model]");
   });
 });
 

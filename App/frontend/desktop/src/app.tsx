@@ -20,12 +20,12 @@ import { usePluginUi } from "./app/plugin-ui-context.js";
 import { AgentSourceScanReconciler } from "./app/agent-source-scan-reconciler.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
-import { CampaignPromptHost } from "./components/campaign-prompt-host.js";
 import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
 import { HistoryLaunchPromptHost } from "./components/history-launch-prompt-host.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
 import { NotificationCenterProvider } from "./components/notification-center.js";
 import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
+import { TaskTokenGiftPromptHost } from "./components/task-token-gift-prompt-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -47,6 +47,7 @@ import { MemmyAgentRequestError, type MemmyAgentClient } from "./api/memmy-agent
 import { getRuntimeConfig } from "./api/runtime-config.js";
 import { readHistoryPermissionSetup } from "./pages/memory/computer-history-permission-state.js";
 import { shouldReturnToWeChatSettings } from "./pages/memory/computer-history-wechat-permission-state.js";
+import { ActiveRecordingBar } from "./pages/memory/task-recordings.js";
 import { readLocalNickname } from "./app/nickname.js";
 import { useTranslation } from "./i18n/use-translation.js";
 import {
@@ -344,8 +345,10 @@ function RuntimeApp() {
         <NotificationCenterProvider>
         <AgentSourceScanReconciler />
           <AppRouter onRetry={retry} />
+          <ActiveRecordingBar client={clients?.memmyAgent ?? null} />
+<TaskTokenGiftPromptHost />
+
           <HistoryLaunchPromptHost />
-          <CampaignPromptHost />
           <TokenCreditToastHost />
           <GithubStarPromptHost />
           {state.invitationToast ? (

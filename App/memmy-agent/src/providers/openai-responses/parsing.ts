@@ -158,6 +158,26 @@ export async function consumeSdkStream(
   let usage: Record<string, any> = {};
   let reasoning: string | null = null;
   const toolItems = new Map<string, any>();
+  const toolAliases = new Map<string, string>();
+  const toolItemFor = (event: any): any => {
+    const metadata = event.item ?? event;
+    const callId = metadata.call_id;
+    const itemId = metadata.id ?? event.item_id;
+    const aliases = [
+      callId ? `call:${callId}` : null,
+      itemId ? `item:${itemId}` : null,
+      Number.isInteger(event.output_index) ? `index:${event.output_index}` : null,
+    ].filter((alias): alias is string => alias !== null);
+    const key = aliases.map((alias) => toolAliases.get(alias)).find(Boolean) ?? aliases[0];
+    if (!key) throw new RuntimeError("Response function call is missing an identifier");
+    const item = toolItems.get(key) ?? { arguments: "", name: "" };
+    if (callId) item.call_id = callId;
+    if (itemId) item.id = itemId;
+    if (metadata.name) item.name = metadata.name;
+    toolItems.set(key, item);
+    for (const alias of aliases) toolAliases.set(alias, key);
+    return item;
+  };
   const contentCb = callbacks.onContentDelta;
   const toolCb = callbacks.onToolCallDelta;
   const signal = callbacks.signal ?? null;
@@ -172,29 +192,19 @@ export async function consumeSdkStream(
       text += event.delta ?? "";
       if (contentCb && !signal?.aborted) await contentCb(event.delta ?? "");
     } else if (type === "response.output_item.added" && event.item?.type === "function_call") {
-      toolItems.set(event.item.call_id, {
-        call_id: event.item.call_id,
-        id: event.item.id,
-        name: event.item.name,
-        arguments: event.item.arguments ?? "",
-      });
+      const item = toolItemFor(event);
+      item.arguments = event.item.arguments ?? item.arguments;
       if (toolCb && !signal?.aborted) await toolCb({ call_id: event.item.call_id, name: event.item.name, arguments_delta: "" });
     } else if (type === "response.function_call_arguments.delta") {
-      const item = toolItems.get(event.call_id) ?? { call_id: event.call_id, id: "fc_0", name: "" };
+      const item = toolItemFor(event);
       item.arguments = `${item.arguments ?? ""}${event.delta ?? ""}`;
-      toolItems.set(event.call_id, item);
-      if (toolCb && !signal?.aborted) await toolCb({ call_id: event.call_id, name: item.name, arguments_delta: event.delta ?? "" });
+      if (toolCb && !signal?.aborted) await toolCb({ call_id: item.call_id, name: item.name, arguments_delta: event.delta ?? "" });
     } else if (type === "response.function_call_arguments.done") {
-      const item = toolItems.get(event.call_id) ?? { call_id: event.call_id, id: "fc_0", name: "" };
+      const item = toolItemFor(event);
       item.arguments = event.arguments ?? item.arguments ?? "";
-      toolItems.set(event.call_id, item);
     } else if (type === "response.output_item.done" && event.item?.type === "function_call") {
-      toolItems.set(event.item.call_id, {
-        call_id: event.item.call_id,
-        id: event.item.id,
-        name: event.item.name,
-        arguments: event.item.arguments ?? toolItems.get(event.item.call_id)?.arguments ?? "",
-      });
+      const item = toolItemFor(event);
+      item.arguments = event.item.arguments ?? item.arguments ?? "";
     } else if (type === "response.completed") {
       finish = mapFinishReason(event.response?.status);
       const u = event.response?.usage;

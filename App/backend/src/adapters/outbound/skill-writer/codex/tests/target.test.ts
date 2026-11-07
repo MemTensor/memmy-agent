@@ -1,3 +1,4 @@
+import "../../tests/isolated-target-home.js";
 /** Target tests. */
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";

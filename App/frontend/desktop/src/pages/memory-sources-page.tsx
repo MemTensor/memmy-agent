@@ -1518,9 +1518,9 @@ function SourceStatusBadge(props: { source: Pick<AgentSourceView, "sourceId" | "
 const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes", "deepseek_harness"]);
 const HOOK_AGENT_SOURCE_IDS = new Set(["codex", "claude_code", "cursor"]);
 
-export function visibleAgentSources<T extends Pick<AgentSourceView, "builtin" | "available" | "dataPath">>(sources: readonly T[]): T[] {
+export function visibleAgentSources<T extends Pick<AgentSourceView, "builtin" | "available" | "dataPath" | "status">>(sources: readonly T[]): T[] {
   return sources.filter((source) => source.builtin
-    ? source.available
+    ? source.available || source.status === "skill_installed" || source.status === "plugin_installed"
     : source.dataPath !== MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH
   );
 }

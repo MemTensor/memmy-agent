@@ -4,7 +4,6 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GoalRuntime,
-  GoalRuntimeError,
   goalTurnTokens,
   sanitizeGoalInboxMetadata,
   type GoalRuntimeCallbacks,

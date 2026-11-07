@@ -276,6 +276,8 @@ export abstract class LLMProvider {
   }
 
   abstract chat(args: {
+    /** Host task context, consumed only by the account gateway transport. */
+    taskType?: "literature-review";
     messages: Record<string, any>[];
     tools?: Record<string, any>[] | null;
     model?: string | null;
@@ -368,6 +370,9 @@ export abstract class LLMProvider {
   }
 
   static isTransientResponse(response: LLMResponse): boolean {
+    // A rejected tool definition cannot be repaired by retrying the same body,
+    // even when a proxy mistakenly supplies x-should-retry=true.
+    if (/invalid schema for (?:function|tool)|invalid[_ ](?:function|tool)[_ ](?:parameters|schema)/i.test(response.content ?? "")) return false;
     if (
       response.errorCategory === "quota_exhausted"
       || response.errorCategory === "image_input_unsupported"

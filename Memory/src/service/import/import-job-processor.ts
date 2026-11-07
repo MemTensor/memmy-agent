@@ -1,3 +1,6 @@
+import { dirname, basename } from "node:path";
+import { frontmatterString, parseSkillFrontmatter } from "@memmy/agent-source-core";
+import { hasImportedSkillSourceEvidence, importedSkillContentHash, normalizeSkillName } from "../../storage/imported-skill.js";
 import { traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import type { EvolutionJobRecord,SessionRecord } from "../../storage/repositories.js";
 import type {
@@ -14,10 +17,13 @@ import type {
 } from "../../types.js";
 import { stableHash } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
+import { normalizeAgentIdKey } from "../../utils/agent-source-id.js";
+import { sanitizeMemmyProtocolText } from "../../utils/memmy-context-tags.js";
 import { clip, firstLine } from "../../utils/text.js";
 import { turnJudgeJobFlags } from "../evolution/turn-judge.js";
 import { isObservationMemory, observationJobPayload } from "../observation-memory-state.js";
 import { externalSkillJobPayload } from "../evidence/history-skill-policy.js";
+import { importedSkillInfoFields, importedSkillInternalFields, isImportedSkillObservation, skillInternalFields, type ImportedSkillMemoryAddOptions } from "./memory-import-pipeline.js";
 
 
 
@@ -81,6 +87,8 @@ export interface ImportJobProcessorDeps {
     toolCalls: TraceMeta["toolCalls"]; reflection: { text: string | null; alpha: number }; value: number; priority: number;
   }): string;
   buildMemory(input: Record<string, unknown>): MemoryRow;
+  repairManualSkillsForSource(sourceAgentId: string, at: string): void;
+  upsertImportedSkill(memory: MemoryRow, at: string, options?: ImportedSkillMemoryAddOptions): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
   kindFromMemory(memory: MemoryRow): string;
   namespaceIdFromMemory(memory: MemoryRow): string;
   enqueueJob(input: EnqueueInput): EvolutionJobRecord;
@@ -98,13 +106,9 @@ export interface ImportJobProcessorDeps {
     get(id: string): MemoryRow | undefined;
     getIncludingDeleted(id: string): MemoryRow | undefined;
     getByKeyIncludingDeleted(layer: MemoryLayer, key: string): MemoryRow | undefined;
+    getByKey(layer: MemoryLayer, key: string): MemoryRow | undefined;
+    updateMaintenance(memory: MemoryRow): MemoryRow;
     upsertByKey(memory: MemoryRow): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
-    archivePriorReadOnlySkillVersions(input: {
-      sourceAgentId: string;
-      sourceSkillIdentity: string;
-      currentMemoryId: string;
-      at: string;
-    }): MemoryRow[];
     deleteVector(id: string, field: "vec_summary"): void;
     hasVector(id: string, field: "vec_summary"): boolean;
     listPendingAgentSourceImportSummaries(limit: number, ids?: readonly string[]): MemoryRow[];
@@ -148,7 +152,11 @@ export class ImportJobProcessor {
   } {
     const d = this.deps;
     d.assertMemoryAddEnabled();
+    const readOnlySkill = isImportedSkillObservation(request);
+    const skillContent = request.layer === "Skill" ? request.content : undefined;
     request = d.sanitizeMemoryAddRequest(request);
+    const fallbackTitleContent = request.content;
+    if (readOnlySkill && skillContent !== undefined) request = { ...request, content: skillContent };
     const startedAt = Date.now();
     const receivedAt = d.nowIso();
     if (!request.content?.trim()) throw d.createError("invalid_argument", "memory.add requires content");
@@ -161,7 +169,6 @@ export class ImportJobProcessor {
     const kind = kindForLayer(layer);
     const at = d.normalizeMemoryAddCreatedAt(request.createdAt, request.timeZone) ?? receivedAt;
     const importTrace = layer === "L1" ? d.memoryAddImportTrace(request, at) : null;
-    const readOnlySkill = layer === "Skill";
     const sourceAgentId = readOnlySkill
       ? request.sourceAgentId?.trim() || request.source?.trim() || context.namespace.source?.trim()
       : undefined;
@@ -170,31 +177,26 @@ export class ImportJobProcessor {
     }
     const agentSourceImport = Boolean(importTrace && d.isAgentSourceImportMemoryAdd(request));
     const importTitle = agentSourceImport && importTrace ? d.titleFromImportTrace(importTrace) : undefined;
+    const explicitSkillTitle = Boolean(request.title?.trim() && normalizeSkillName(request.title));
+    const parsedName = layer === "Skill" ? frontmatterString(parseSkillFrontmatter(request.content).data, "name") : undefined;
+    const sourceTitle = layer === "Skill" ? (parsedName && normalizeSkillName(parsedName) ? parsedName : undefined)
+      || (request.sourceSkillId?.trim() ? basename(request.sourceSkillId.trim())
+        : request.sourceSkillPath?.trim() ? basename(dirname(request.sourceSkillPath.trim())) : undefined) : undefined;
+    const fallbackTitle = firstLine(fallbackTitleContent).slice(0, 120);
+    const legacySkillTitle = !explicitSkillTitle
+      ? request.title?.trim() || fallbackTitle || "Untitled memory" : undefined;
     const title = importTitle
       ?? (agentSourceImport
         ? `${request.source?.trim() || "Agent"} conversation`
-        : request.title?.trim() || firstLine(request.content).slice(0, 120) || "Untitled memory");
+        : (layer === "Skill" && !explicitSkillTitle ? sourceTitle : request.title?.trim())
+          || (layer === "Skill" && !normalizeSkillName(fallbackTitle) ? "" : fallbackTitle) || "Untitled memory");
     const importSummary = importTrace ? stringFromRecord(importTrace, "summary") || IMPORT_SUMMARY_QUEUED_TAG : undefined;
     const tags = d.memoryAddTags(request, importTrace !== null, importTrace ? stringArray(importTrace.tags) : []);
-    const memoryKey = d.memoryAddKey(request, layer, title);
-    const deletedReadOnlySkill = readOnlySkill
-      ? d.memories.getByKeyIncludingDeleted(layer, memoryKey)
-      : undefined;
-    if (deletedReadOnlySkill?.status === "deleted" || deletedReadOnlySkill?.deletedAt) {
-      const item = d.memories.toListItem(deletedReadOnlySkill);
-      return {
-        id: item.id,
-        kind: item.kind,
-        memoryLayer: item.memoryLayer,
-        status: "deleted",
-        title: item.title,
-        summary: item.summary,
-        tags: item.tags,
-        createdAt: deletedReadOnlySkill.createdAt,
-        serverTime: d.nowIso()
-      };
-    }
-    const memory = d.buildMemory({
+    const skillKeySource = sourceAgentId || request.source?.trim() || context.namespace.source?.trim() || "";
+    const keyRequest = layer === "Skill" ? { ...request, sourceAgentId: skillKeySource,
+      ...(readOnlySkill ? { sourceSkillId: request.sourceSkillId?.trim() || request.turnId?.trim() || undefined } : {}) } : request;
+    const memoryKey = d.memoryAddKey(keyRequest, layer, title);
+    let memory = d.buildMemory({
       userId: session?.userId ?? context.userId,
       conversationId: session?.conversationId,
       sessionId: session?.id ?? request.sessionId,
@@ -217,51 +219,22 @@ export class ImportJobProcessor {
         source: request.source ?? "manual",
         turn_id: request.turnId,
         time_zone: request.timeZone,
-        ...(readOnlySkill ? {
-          name: title,
-          eta: 0.5,
-          support: 1,
-          gain: 0,
-          skill_status: "active",
-          source_memory_ids: []
-        } : {})
+        ...(layer === "Skill" ? importedSkillInfoFields(title) : {})
       },
       internal: {
         source: request.source ?? "manual", title, summary: importSummary ?? firstLine(request.content), turn_id: request.turnId, time_zone: request.timeZone,
-        ...(readOnlySkill ? {
-          read_only: true,
-          source_agent_id: sourceAgentId,
-          source_skill_id: request.sourceSkillId?.trim() || request.turnId?.trim() || undefined,
-          source_skill_path: request.sourceSkillPath?.trim() || undefined,
-          source_skill_version: request.sourceSkillVersion?.trim() || undefined,
-          source_content_hash: request.sourceContentHash?.trim() || stableHash(request.content),
-          imported_at: receivedAt,
-          name: title,
-          invocation_guide: request.content,
-          procedure_json: { summary: request.content },
-          eta: 0.5,
-          support: 1,
-          gain: 0,
-          source_policy_ids: [],
-          source_world_model_ids: [],
-          evidence_anchor_ids: [],
-          skill: {
-            name: title,
-            eta: 0.5,
-            status: "active",
-            support: 1,
-            gain: 0,
-            source_policy_ids: [],
-            source_world_model_ids: [],
-            evidence_anchor_ids: [],
-            invocation_guide: request.content,
-            procedure_json: { summary: request.content },
-            trials_attempted: 0,
-            trials_passed: 0,
-            success_rate: 0,
-            beta_posterior: { alpha: 1, beta: 1, mean: 0.5 }
-          }
-        } : {}),
+        ...(readOnlySkill ? importedSkillInternalFields({
+          sourceAgentId: sourceAgentId!,
+          sourceSkillId: request.sourceSkillId?.trim() || request.turnId?.trim() || undefined,
+          sourceSkillPath: request.sourceSkillPath?.trim() || undefined,
+          sourceSkillVersion: request.sourceSkillVersion?.trim() || undefined,
+          sourceContentHash: request.sourceContentHash?.trim() || importedSkillContentHash(request.content),
+          importedAt: receivedAt,
+          title,
+          content: request.content
+        }) : {}),
+        ...(layer === "Skill" && !readOnlySkill ? { ...skillInternalFields(title), read_only: false, source_kind: "manual" } : {}),
+        ...(readOnlySkill && request.createdAt !== undefined ? { source_modified_at: at } : {}),
         ...(importTrace ? { plugin_algorithm: "memory.add.import_async.v2", trace: importTrace } : {})
       },
       createdAt: at
@@ -298,6 +271,12 @@ export class ImportJobProcessor {
           return { duplicateMemory: existing } as const;
         }
       }
+      if (layer === "Skill" && !readOnlySkill) {
+        d.repairManualSkillsForSource(skillKeySource, receivedAt);
+        memory = this.prepareManualSkillUpsert(
+          memory, skillContent ?? request.content, skillKeySource, request.turnId, legacySkillTitle
+        );
+      }
       const existingByKey = memory.memoryKey
         ? d.memories.getByKeyIncludingDeleted(layer, memory.memoryKey)
         : undefined;
@@ -311,37 +290,17 @@ export class ImportJobProcessor {
         repairPlaceholderImportSummary(d, existingByKey, receivedAt);
         return { upsert: { memory: existingByKey, created: false, previous: existingByKey }, changeSeq: 0, duplicateMemory: existingByKey } as const;
       }
-      const upsert = d.memories.upsertByKey(memory);
+      const upsert = readOnlySkill ? d.upsertImportedSkill(memory, receivedAt, { titleProvided: explicitSkillTitle, tagsProvided: request.tags !== undefined }) : d.memories.upsertByKey(memory);
       const inserted = upsert.memory;
+      if (readOnlySkill) {
+        return { upsert, changeSeq: 0, duplicateMemory: undefined };
+      }
       const changeSeq = d.runtime.appendChange({
         memoryId: inserted.id, namespaceId: d.namespaceIdFromMemory(inserted), kind: d.kindFromMemory(inserted),
         op: upsert.created ? "created" : "updated", entityId: inserted.id, userId: inserted.userId,
         changeType: upsert.created ? "create" : "update", before: upsert.previous, after: inserted,
         source: "memory.add", createdAt: at
       });
-      if (readOnlySkill && upsert.created) {
-        const sourceSkillIdentity = request.sourceSkillId?.trim() || request.sourceSkillPath?.trim();
-        if (sourceAgentId && sourceSkillIdentity) {
-          for (const archived of d.memories.archivePriorReadOnlySkillVersions({
-            sourceAgentId,
-            sourceSkillIdentity,
-            currentMemoryId: inserted.id,
-            at
-          })) {
-            d.runtime.appendChange({
-              memoryId: archived.id,
-              kind: "skill",
-              op: "archived",
-              entityId: archived.id,
-              userId: archived.userId,
-              changeType: "read_only_skill_superseded",
-              after: archived,
-              source: "memory.add",
-              createdAt: at
-            });
-          }
-        }
-      }
       if (importTrace) {
         const existing = d.processing.get(inserted.id);
         const contentChanged = Boolean(!upsert.created && upsert.previous?.contentHash && upsert.previous.contentHash !== inserted.contentHash);
@@ -386,10 +345,73 @@ export class ImportJobProcessor {
     const item = d.memories.toListItem(inserted);
     const response = { id: item.id, kind: item.kind, memoryLayer: item.memoryLayer, status: item.status, title: item.title,
       summary: item.summary, tags: item.tags, createdAt: inserted.createdAt, serverTime: d.nowIso() };
-    if (!d.isAgentSourceImportMemoryAdd(request)) d.recordApiLog?.("memory_add", {
-      sessionId: request.sessionId, turnId: request.turnId, layer, source: request.source, tags: request.tags, content: request.content
-    }, { stored: 1, details: [{ role: item.kind, action: "stored", summary: item.summary, content: request.content, traceId: item.id }] }, Date.now() - startedAt, true, response.serverTime, inserted.agentId);
+    const loggedContent = readOnlySkill ? inserted.memoryValue : request.content;
+    if (inserted.status !== "deleted" && !d.isAgentSourceImportMemoryAdd(request)) d.recordApiLog?.("memory_add", {
+      sessionId: request.sessionId, turnId: request.turnId, layer, source: request.source, tags: request.tags, content: loggedContent
+    }, { stored: 1, details: [{ role: item.kind, action: "stored", summary: item.summary, content: loggedContent, traceId: item.id }] }, Date.now() - startedAt, true, response.serverTime, inserted.agentId);
     return response;
+  }
+
+  /** Legacy aliases prove continuity only within the same native Skill scope. */
+  private prepareManualSkillUpsert(
+    memory: MemoryRow,
+    rawContent: string,
+    sourceAgentId: string,
+    turnId?: string,
+    legacyTitle?: string
+  ): MemoryRow {
+    const d = this.deps;
+    const namespace = d.namespaceIdFromMemory(memory);
+    const source = normalizeAgentIdKey(String(memory.properties.internal_info.source ?? ""));
+    const compatible = (candidate: MemoryRow) => candidate.properties.internal_info.source_kind === "manual"
+      && candidate.properties.internal_info.read_only !== true && !hasImportedSkillSourceEvidence(candidate)
+      && d.namespaceIdFromMemory(candidate) === namespace
+      && normalizeAgentIdKey(String(candidate.properties.internal_info.source ?? "")) === source;
+    const key = memory.memoryKey!;
+    const occupied = d.memories.getByKey("Skill", key) ?? d.memories.getByKeyIncludingDeleted("Skill", key);
+    if (occupied && !compatible(occupied)) {
+      memory = { ...memory, memoryKey: `${key}:namespace:${stableHash(namespace).slice(0, 20)}` };
+    }
+    const title = String(memory.info.title);
+    const titles = new Set([title]);
+    if (legacyTitle) titles.add(legacyTitle);
+    const keys = new Set([memory.memoryKey!]);
+    if (key.startsWith("manual:")) {
+      for (const content of new Set([memory.memoryValue, rawContent])) {
+        for (const candidateTitle of titles) {
+          keys.add(`manual:${stableHash(`Skill:${candidateTitle}:${content}`).slice(0, 20)}`);
+          for (const agent of new Set([normalizeAgentIdKey(sourceAgentId), ""])) {
+            keys.add(`manual:${stableHash(["Skill", agent, candidateTitle, importedSkillContentHash(content)]).slice(0, 20)}`);
+          }
+        }
+        // Old tool calls copied an ordinary turn id into source_skill_id.
+        // A genuine directory row still fails the native compatibility guard.
+        if (turnId?.trim() && !/^skill:\S/.test(turnId.trim())) {
+          for (const hash of [stableHash(content), importedSkillContentHash(content)]) {
+            keys.add(`skill.import:${stableHash([sourceAgentId, turnId.trim(), hash]).slice(0, 20)}`);
+          }
+        }
+      }
+    }
+    let previous = [...keys].map(alias => d.memories.getByKey("Skill", alias)).find(candidate =>
+      candidate && candidate.status !== "deleted" && !candidate.deletedAt && compatible(candidate)
+      && titles.has(String(candidate.info.title))
+      && sanitizeMemmyProtocolText(candidate.memoryValue) === memory.memoryValue);
+    if (!previous) return memory;
+    if (previous.memoryKey !== memory.memoryKey) {
+      previous = d.memories.updateMaintenance({ ...previous, memoryKey: memory.memoryKey });
+    }
+    const priorSkill = isRecord(previous.properties.internal_info.skill) ? previous.properties.internal_info.skill : {};
+    const initialSkill = isRecord(memory.properties.internal_info.skill) ? memory.properties.internal_info.skill : {};
+    const status = previous.status;
+    return {
+      ...previous, ...memory, status,
+      info: { ...previous.info, ...memory.info, eta: priorSkill.eta ?? previous.info.eta ?? memory.info.eta },
+      properties: { ...previous.properties, ...memory.properties, status,
+        internal_info: { ...memory.properties.internal_info, ...previous.properties.internal_info,
+          title: memory.info.title, name: title, summary: memory.info.summary,
+          skill: { ...initialSkill, ...priorSkill, name: title, status: status === "archived" ? "archived" : priorSkill.status ?? "active" } } }
+    };
   }
 
   memoryProcessingStatus(memoryIds: readonly string[], request: RequestEnvelope = {}): { items: MemoryProcessingRecord[]; serverTime: string } {

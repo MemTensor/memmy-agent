@@ -43,4 +43,15 @@ describe("Computer History menu bar indicator", () => {
     expect(publish).toHaveBeenLastCalledWith({ enabled: false, recording: false });
     expect(client.getComputerHistoryObservationStatus).toHaveBeenCalledOnce();
   });
+  it("persists opt-out when stopped outside the History page", async () => {
+    const publish = vi.fn();
+    Object.defineProperty(window, "memmy", { configurable: true, value: {
+      platform: "darwin", setComputerHistoryTrayIndicator: publish,
+    } });
+    const client = { getComputerHistoryObservationStatus: vi.fn().mockResolvedValue({ state: "stopped" }) } as unknown as MemmyAgentClient;
+    await act(async () => root.render(<Indicator client={client} />));
+    expect(window.localStorage.getItem("memmy.computerHistory.trayIndicatorEnabled")).toBe("false");
+    expect(publish).toHaveBeenLastCalledWith({ enabled: false, recording: false });
+  });
+
 });

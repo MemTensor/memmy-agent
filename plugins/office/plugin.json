@@ -2,7 +2,7 @@
   "apiVersion": "memmy/v1",
   "id": "office",
   "name": "Office",
-  "version": "0.2.3",
+  "version": "0.2.6",
   "rules": {
     "distribution": "public",
     "installation": "manual",
@@ -61,15 +61,6 @@
       "name": "Office XLSX",
       "description": "Create, inspect, edit, render and deliver XLSX files through the Office plugin.",
       "entry": "skills/office-xlsx/SKILL.md"
-    }
-  ],
-  "scenarios": [
-    {
-      "id": "office",
-      "name": "制作办公文档",
-      "description": "创建或修改 Word、Excel、PPT 和 PDF",
-      "icon": "FileText",
-      "prompt": "使用 Office 插件帮我制作办公文档。先根据我的需求确定文件格式，再生成、检查并交付文件。"
     }
   ],
   "capabilities": [
