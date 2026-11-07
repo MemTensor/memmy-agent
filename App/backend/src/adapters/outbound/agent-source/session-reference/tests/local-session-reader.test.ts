@@ -114,7 +114,9 @@ describe("local session reader", () => {
     const reader = createLocalSessionReader({
       registry: createSourceRegistry([fakeAdapter("codex", "Codex", messages)]),
       snapshotTtlMs: 15_000,
-      now: () => clock
+      now: () => clock,
+      // 说不清有没有变的存储：过期后照旧先答旧列表、后台再扫。摘要能确定的存储见另一个测试。
+      storeDigest: async () => null
     });
 
     expect(await reader.available({})).toMatchObject({ refreshing: false, sessions: [{ conversationId: "c-1" }] });

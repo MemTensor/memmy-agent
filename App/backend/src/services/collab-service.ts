@@ -2213,6 +2213,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         if (!projects.length) return total;
         // The Memory service only holds the other agents' sessions; Memmy's own tasks must still sync without it.
         // A cached list is enough here: forcing a rescan every minute would re-walk every agent's history.
+        // The reader now checks each store's digest before reading it, so this call costs a few stat calls and only
+        // reads the stores that actually changed.
         const local = await listLocalSessions({ limit: MAX_LOCAL_SESSIONS })
           .then((listing) => listing.sessions)
           .catch(() => []);
