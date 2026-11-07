@@ -36,6 +36,7 @@ import { createLocalSessionReader } from "./adapters/outbound/agent-source/sessi
 import { createBuiltinAgentSourceRegistry } from "./services/builtin-agent-source-registry.js";
 import { defaultCollabHome, refreshCollabAgentSkills } from "./services/collab-added-agents.js";
 import { createCollabAgentAccessService } from "./services/collab-agent-access-service.js";
+import { createSessionScanOffload } from "./services/collab-session-scan-offload.js";
 import { createProjectDirectoryService } from "./services/project-directory-service.js";
 import type { PluginService } from "./services/plugin-service.js";
 import {
@@ -330,7 +331,9 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         adapters: async () => {
           const allowed = new Set(await collabAgentAccess.readableSourceIds());
           return collabAgentRegistry.list().filter((adapter) => allowed.has(adapter.descriptor.sourceId));
-        }
+        },
+        // 读一份存储是几秒的同步解析：挪到别的线程去读，同时进来的发消息、切页面、同步就不必等它读完。
+        offloadScan: createSessionScanOffload()
       }),
       agentAccess: () => collabAgentAccess.read(),
       ...(process.env.MEMMY_SESSION_LINK_BASE_URL?.trim() ? { linkBaseUrl: process.env.MEMMY_SESSION_LINK_BASE_URL.trim() } : {}),
