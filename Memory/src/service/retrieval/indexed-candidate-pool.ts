@@ -3,6 +3,7 @@ import type {
   SeededChannelScores
 } from "../../algorithm/plugin-algorithms.js";
 import {
+  importedSkillBodyPatternTerms,
   isMemoryReadyForRetrieval
 } from "../../algorithm/plugin-algorithms.js";
 import {
@@ -14,6 +15,7 @@ import type {
   MemoryLayer,
   MemoryRow
 } from "../../types.js";
+import { isImportedSkill, normalizeSkillName } from "../../storage/imported-skill.js";
 import { deduplicateCrossAccountMemoryCandidates } from "./cross-account-candidate-dedup.js";
 
 export function dedupeStrings(values: readonly string[]): string[] {
@@ -43,7 +45,8 @@ export class IndexedCandidatePool {
   }): number {
     const baseFilter: MemoryFilter = {
       memoryLayer: input.layers,
-      status: ["activated", "resolving"]
+      status: ["activated", "resolving"],
+      ...(input.layers.includes("Skill") ? { eligibleImportedSkillsOnly: true } : {})
     };
     const scopedFilter = input.layers.includes("L1") && input.projectId !== undefined
       ? { ...baseFilter, workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
@@ -60,7 +63,8 @@ export class IndexedCandidatePool {
     if (input.layers.length === 0) return false;
     const baseFilter: MemoryFilter = {
       memoryLayer: input.layers,
-      status: ["activated", "resolving"]
+      status: ["activated", "resolving"],
+      ...(input.layers.includes("Skill") ? { eligibleImportedSkillsOnly: true } : {})
     };
     const scopedFilter = input.layers.includes("L1") && input.projectId !== undefined
       ? { ...baseFilter, workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
@@ -89,69 +93,116 @@ export class IndexedCandidatePool {
     memories: MemoryRow[];
     channelScoresByMemory: ReadonlyMap<string, SeededChannelScores>;
   }> {
-    const routeTasks: Array<Promise<MemorySearchIdHit[]>> = [];
     const queryVector = input.queryVector && input.queryVector.length > 0 ? input.queryVector : undefined;
-    const layers = input.layers;
-    const addRoute = (run: () => MemorySearchIdHit[]): void => {
-      routeTasks.push(Promise.resolve().then(run));
+    const commonFilter: MemoryFilter = {
+      status: ["activated", "resolving"],
+      ...(input.tags?.length ? { tags: input.tags } : {})
     };
-
-    for (const layer of layers) {
-      const filter: MemoryFilter = {
-        memoryLayer: layer,
-        status: ["activated", "resolving"],
-        ...(layer === "L1" && input.projectId !== undefined
-          ? { workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
-          : {}),
-        ...(input.tags?.length ? { tags: input.tags } : {})
+    const skillFilter: MemoryFilter = {
+      ...commonFilter,
+      memoryLayer: "Skill",
+      eligibleImportedSkillsOnly: true,
+      ...(input.targetSkillId ? { ids: [input.targetSkillId] } : {}),
+      ...(input.currentAgentId ? { excludedImportedSkillSourceAgentId: input.currentAgentId } : {})
+    };
+    const importedBodyTerms = importedSkillBodyPatternTerms(input.compiledQuery);
+    const collectRoutes = (layers: readonly MemoryLayer[], extraPool: number): Array<Promise<MemorySearchIdHit[]>> => {
+      const routeTasks: Array<Promise<MemorySearchIdHit[]>> = [];
+      const addRoute = (run: () => MemorySearchIdHit[]): void => {
+        routeTasks.push(Promise.resolve().then(run));
       };
-      const vectorPool = this.retrievalVectorPoolSize(layer, input.config);
-      const keywordPool = this.retrievalKeywordPoolSize(layer, input.config);
+      for (const layer of layers) {
+        const filter: MemoryFilter = layer === "Skill" ? skillFilter : {
+          ...commonFilter,
+          memoryLayer: layer,
+          ...(layer === "L1" && input.projectId !== undefined
+            ? { workMemoryUserId: input.userId, workMemoryProjectId: input.projectId }
+            : {})
+        };
+        const vectorPool = this.retrievalVectorPoolSize(layer, input.config) + extraPool;
+        const keywordPool = this.retrievalKeywordPoolSize(layer, input.config) + extraPool;
 
-      if (queryVector) {
-        if (layer === "L1") {
-          addRoute(() => this.searchTraceVectorRoutes(queryVector, filter, vectorPool, input.compiledQuery, input.config));
-        } else {
-          addRoute(() => this.deps.repos.memories.searchVectorIds(queryVector, "vec", filter, vectorPool));
+        if (queryVector) {
+          if (layer === "L1") {
+            addRoute(() => this.searchTraceVectorRoutes(queryVector, filter, vectorPool, input.compiledQuery, input.config));
+          } else {
+            addRoute(() => this.deps.repos.memories.searchVectorIds(queryVector, "vec", filter, vectorPool));
+          }
+        }
+
+        if (input.compiledQuery.ftsMatch) {
+          addRoute(() => this.deps.repos.memories.searchFtsIds(input.compiledQuery.ftsMatch, filter, keywordPool));
+        }
+        if (input.compiledQuery.patternTerms.length > 0) {
+          addRoute(() => this.deps.repos.memories.searchPatternIds(input.compiledQuery.patternTerms, filter, keywordPool, layer === "Skill"));
+        }
+        if (layer === "Skill" && importedBodyTerms.length > 0) {
+          // Both imported routes share actual coverage, so a time-ranked legacy
+          // pattern hit cannot overwrite the body route's relevance evidence.
+          if (input.compiledQuery.patternTerms.length > 0) {
+            addRoute(() => this.deps.repos.memories.searchImportedSkillPatternIds(importedBodyTerms, filter, keywordPool));
+          }
+          addRoute(() => this.deps.repos.memories.searchImportedSkillBodyIds(importedBodyTerms, filter, keywordPool));
+        }
+        if (layer === "L1" && input.compiledQuery.structuralFragments.length > 0) {
+          addRoute(() => this.deps.repos.memories.searchStructuralIds(
+            input.compiledQuery.structuralFragments,
+            filter,
+            Math.max(input.config.tier2TopK, 10)
+          ));
         }
       }
+      return routeTasks;
+    };
 
-      if (input.compiledQuery.ftsMatch) {
-        addRoute(() => this.deps.repos.memories.searchFtsIds(input.compiledQuery.ftsMatch, filter, keywordPool));
-      }
-      if (input.compiledQuery.patternTerms.length > 0) {
-        addRoute(() => this.deps.repos.memories.searchPatternIds(input.compiledQuery.patternTerms, filter, keywordPool));
-      }
-      if (layer === "L1" && input.compiledQuery.structuralFragments.length > 0) {
-        addRoute(() => this.deps.repos.memories.searchStructuralIds(
-          input.compiledQuery.structuralFragments,
-          filter,
-          Math.max(input.config.tier2TopK, 10)
-        ));
-      }
-    }
-
-    if (input.targetSkillId && layers.includes("Skill")) {
-      routeTasks.push(Promise.resolve([{ id: input.targetSkillId, score: 1, channel: "vec" }]));
+    const routeTasks = collectRoutes(input.layers, 0);
+    if (input.targetSkillId && input.layers.includes("Skill")) {
+      const target = this.deps.repos.memories.list(skillFilter, 1)[0];
+      if (target) routeTasks.push(Promise.resolve([{ id: target.id, score: 1, channel: "vec" }]));
     }
     if (routeTasks.length === 0) {
       return { memories: [], channelScoresByMemory: new Map() };
     }
 
-    const routeHits = await Promise.all(routeTasks);
-    const flattenedHits = routeHits.flat();
-    const candidateIds = dedupeStrings(flattenedHits.map((hit) => hit.id));
     const channelScoresByMemory = new Map<string, SeededChannelScores>();
-    for (const hit of flattenedHits) {
-      if (!hit.channel) continue;
-      const scores = channelScoresByMemory.get(hit.id) ?? {};
-      scores[hit.channel] = Math.max(scores[hit.channel] ?? -Infinity, hit.score);
-      channelScoresByMemory.set(hit.id, scores);
-    }
-    const readyMemories = this.deps.repos.memories.getMany(candidateIds).filter((memory) =>
+    const seenIds = new Set<string>();
+    const loadHits = async (tasks: Array<Promise<MemorySearchIdHit[]>>): Promise<MemoryRow[]> => {
+      const flattenedHits = (await Promise.all(tasks)).flat();
+      for (const hit of flattenedHits) {
+        if (!hit.channel) continue;
+        const scores = channelScoresByMemory.get(hit.id) ?? {};
+        scores[hit.channel] = Math.max(scores[hit.channel] ?? -Infinity, hit.score);
+        channelScoresByMemory.set(hit.id, scores);
+      }
+      const newIds = dedupeStrings(flattenedHits.map((hit) => hit.id)).filter((id) => !seenIds.has(id));
+      for (const id of newIds) seenIds.add(id);
+      return this.deps.repos.memories.getMany(newIds).filter((memory) =>
         this.isMemoryReadyForRetrieval(memory) &&
         this.isSkillVisibleToAgent(memory, input.currentAgentId)
       );
+    };
+
+    const takenNames = new Set<string>();
+    const grouped = this.groupImportedSkillsByName(await loadHits(routeTasks), channelScoresByMemory, skillFilter, takenNames);
+    let readyMemories = grouped.memories;
+    // Same-name copies dropped by grouping would otherwise leave the Skill
+    // layer short; widen the Skill queries by the number dropped so far until
+    // a round drops nothing or the queries return no new records.
+    let removed = grouped.removed;
+    let lastRemoved = grouped.removed;
+    while (lastRemoved > 0 && input.layers.includes("Skill")) {
+      const seenBefore = seenIds.size;
+      const refill = this.groupImportedSkillsByName(
+        await loadHits(collectRoutes(["Skill"], removed)),
+        channelScoresByMemory,
+        skillFilter,
+        takenNames
+      );
+      readyMemories = [...readyMemories, ...refill.memories];
+      if (seenIds.size === seenBefore) break;
+      removed += refill.removed;
+      lastRemoved = refill.removed;
+    }
     return deduplicateCrossAccountMemoryCandidates({
       memories: readyMemories,
       repos: this.deps.repos,
@@ -160,10 +211,68 @@ export class IndexedCandidatePool {
     });
   }
 
+  /**
+   * Imported skills that share a normalized name are one group and yield one
+   * candidate: none when the current Agent already has a skill of that name,
+   * otherwise the group's most recently modified current version (looked up
+   * across all sources, not only among these candidates). The chosen record
+   * takes the best channel scores of the group's candidates.
+   */
+  private groupImportedSkillsByName(
+    memories: readonly MemoryRow[],
+    channelScoresByMemory: Map<string, SeededChannelScores>,
+    filter: MemoryFilter,
+    takenNames: Set<string>
+  ): { memories: MemoryRow[]; removed: number } {
+    const currentAgentId = filter.excludedImportedSkillSourceAgentId;
+    const named = memories.filter((memory) => isImportedSkill(memory) && importedSkillName(memory));
+    if (named.length === 0) return { memories: [...memories], removed: 0 };
+    const installed = currentAgentId ? this.deps.repos.listInstalledSkillNamesForAgent(currentAgentId) : new Set<string>();
+    const names = dedupeStrings(named.map((memory) => importedSkillName(memory)!))
+      .filter((name) => !installed.has(name) && !takenNames.has(name));
+    const latest = this.deps.repos.memories.latestImportedSkillsByName(names, filter);
+    const groupScores = new Map<string, SeededChannelScores>();
+    for (const memory of named) {
+      const name = importedSkillName(memory)!;
+      const merged = { ...(groupScores.get(name) ?? {}) };
+      for (const [channel, score] of Object.entries(channelScoresByMemory.get(memory.id) ?? {})) {
+        const key = channel as keyof SeededChannelScores;
+        merged[key] = Math.max(merged[key] ?? -Infinity, score as number);
+      }
+      groupScores.set(name, merged);
+    }
+    const kept: MemoryRow[] = [];
+    let removed = 0;
+    for (const memory of memories) {
+      const name = isImportedSkill(memory) ? importedSkillName(memory) : undefined;
+      if (!name) {
+        kept.push(memory);
+        continue;
+      }
+      if (installed.has(name) || takenNames.has(name)) {
+        removed += 1;
+        continue;
+      }
+      const chosenId = latest.get(name) ?? memory.id;
+      const eligible = this.deps.repos.memories.list({ ...filter, ids: [chosenId, memory.id] }, 2)
+        .filter(candidate => this.isMemoryReadyForRetrieval(candidate) && this.isSkillVisibleToAgent(candidate, currentAgentId));
+      const usable = eligible.find(candidate => candidate.id === chosenId) ?? eligible[0];
+      if (!usable) {
+        removed += 1;
+        continue;
+      }
+      takenNames.add(name);
+      channelScoresByMemory.set(usable.id, groupScores.get(name) ?? channelScoresByMemory.get(usable.id) ?? {});
+      kept.push(usable);
+    }
+    return { memories: kept, removed };
+  }
+
   private isSkillVisibleToAgent(memory: MemoryRow, currentAgentId?: string): boolean {
     if (memory.memoryLayer !== "Skill") return true;
     const internal = memory.properties.internal_info;
-    if (internal.read_only !== true) return true;
+    if (!isImportedSkill(memory)) return true;
+    if (!this.deps.repos.isImportedSkillEligibleForEmbedding(memory)) return false;
     const sourceAgentId = typeof internal.source_agent_id === "string"
       ? internal.source_agent_id.trim()
       : "";
@@ -252,4 +361,11 @@ export class IndexedCandidatePool {
 
 function normalizeAgentId(value: string): string {
   return value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+function importedSkillName(memory: MemoryRow): string | undefined {
+  const internal = memory.properties.internal_info;
+  if (typeof internal.normalized_name === "string" && internal.normalized_name) return internal.normalized_name;
+  const name = typeof internal.name === "string" ? internal.name : typeof memory.info.title === "string" ? memory.info.title : "";
+  return normalizeSkillName(name) || undefined;
 }

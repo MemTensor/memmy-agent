@@ -1,3 +1,5 @@
+import { createConnectionCompensation, type ConnectionAction, type ConnectionEvent } from "@memmy/agent-source-core";
+import type { AgentSkillReconcileSkill } from "../service/import/agent-skill-library.js";
 import { nextScanGeneration } from "./scan-version.js";
 import { matchesScanExecution, compareScanVersions, type ScanVersion, type ScanLifecycle, type ScanControlInput } from "@memmy/agent-source-core/scan-state";
 import { readLegacyScanState } from "./legacy-state.js";
@@ -9,7 +11,7 @@ import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/p
 import { once } from "node:events";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { loadMemmyConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
@@ -51,7 +53,12 @@ import {
   legacyTurnId,
   legacyImportTurnIdFromMessages,
   legacyTurnRequestId,
-  type ScanStore
+  readAgentSkillInventory,
+  readClaudeCodePluginSkills,
+  readCodexPluginSkills,
+  sharedSkillRootsForAgent,
+  type ScanStore,
+  type AgentSkillInventory
 } from "@memmy/agent-source-core";
 import { openMemoryAgentSourceScanStore, readScanRequestedMode, type MemoryAgentSourceScanStore } from "./scan-store.js";
 import { createWorkbuddySourceAdapter } from "./adapters/workbuddy/index.js";
@@ -68,6 +75,7 @@ import {
   createSkillTargetRegistry,
   type SkillTargetRegistry
 } from "./integration/target-registry.js";
+import { readSkillInstallationState, rollbackSkillInstallation } from "./integration/skill-directory.js";
 import { renderMemmyDefaultSkillManifest } from "./integration/templates/memmy-default.js";
 import { createWorkbuddySkillTarget } from "./integration/workbuddy/index.js";
 import type {
@@ -114,6 +122,7 @@ export interface AgentSourceScanState {
 export interface ScanControlResult { ok: true; outcome: "applied" | "already_terminal" | "conflict"; snapshot: AgentSourceScanState }
 
 export interface AgentSourceExecutor {
+  connectionState(sourceId: string): Promise<{ connectionState: "connected" | "disconnected" | null; connectionEvent?: ConnectionEvent }>;
   list(): Promise<{ executorAvailable: true; sources: AgentSourceView[] }>;
   clearAllData(): Promise<ReturnType<MemoryService["clearAllData"]>>;
   startScan(input: unknown): Promise<{ accepted: true; jobId: string; attemptId?: string; attemptStartedAt?: string; version?: ScanVersion }>;
@@ -135,6 +144,7 @@ export interface AgentSourceExecutor {
 interface PersistedSourceState {
   status: AgentConnectionStatus;
   autoInjectSuppressed?: boolean;
+  suppressedRevision?: number;
   messageCount: number;
   lastScannedAt: string | null;
   latestSeenAt: string | null;
@@ -170,6 +180,7 @@ export interface CreateAgentSourceExecutorOptions {
 
 export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOptions): AgentSourceExecutor {
   const registry = options.sourceRegistry ?? createBuiltinSourceRegistry();
+  const resolveAgentSkillRoot = options.resolveAgentSkillRoot ?? agentRootDirectory;
   const configPath = options.configPath ?? join(
     process.env.MEMMY_HOME?.trim() || join(homedir(), ".memmy"),
     "config.yaml"
@@ -177,6 +188,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
   const integrationRegistry = options.integrationRegistry ?? createBuiltinIntegrationRegistry(configPath);
   const statePath = options.statePath ?? join(dirname(configPath), "memory-service", "agent-sources.json");
   const scanStoreDirectory = options.scanStoreDirectory ?? join(dirname(statePath), "agent-source-scans");
+  const compensation = createConnectionCompensation(async sourceId => options.service.agentSkillConnectionEvent?.(sourceId));
   let statePromise: Promise<PersistedState> | undefined;
   const generation = nextScanGeneration(scanStoreDirectory);
   let sequence = 0;
@@ -234,19 +246,27 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       const stored = state.sources[adapter.descriptor.sourceId];
       const available = await adapter.detect();
       const target = integrationRegistry.get(adapter.descriptor.sourceId);
-      const installed = target
-        ? await target.isInstalled(adapter.descriptor.sourceId).catch((error) => {
-            logger.warn("connection.status_read_failed", {
-              sourceId: adapter.descriptor.sourceId,
-              ...memoryErrorFields(error)
-            });
-            return false;
+      const reportStatusError = (error: unknown) => logger.warn("connection.status_read_failed", {
+        sourceId: adapter.descriptor.sourceId,
+        ...memoryErrorFields(error)
+      });
+      const installation = target
+        ? await readSkillInstallationState(target, adapter.descriptor.sourceId, reportStatusError).catch((error) => {
+            reportStatusError(error);
+            return undefined;
           })
-        : false;
+        : undefined;
+      const event = options.service.agentSkillConnectionEvent?.(adapter.descriptor.sourceId);
+      const cleanupPending = stored?.autoInjectSuppressed === true
+        && stored.status !== "not_connected"
+        && !isSuppressionSuperseded(stored.suppressedRevision, event);
+      const status = cleanupPending || installation?.pluginInstalled || installation?.skillInstalled
+        ? connectionStatus(adapter.descriptor.sourceId)
+        : "not_connected";
       return {
         ...adapter.descriptor,
         available,
-        status: installed ? connectionStatus(adapter.descriptor.sourceId) : "not_connected",
+        status,
         messageCount: stored?.messageCount ?? 0,
         lastScannedAt: stored?.lastScannedAt ?? null,
         syncBoundaryAt: stored?.syncBoundaryAt ?? null
@@ -400,10 +420,14 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       // Legacy waitForProcessing requests/options no longer change scan completion.
       // Processing belongs to durable background jobs, independently of this scan.
       const available: SourceAdapter[] = [];
+      // detect() looks for conversation data; an Agent can have skills before it
+      // has any conversations, so its skills are still imported.
+      const skillOnly: SourceAdapter[] = [];
       for (const adapter of adapters) {
         await waitWhilePaused(signal);
         signal.throwIfAborted();
         if (await adapter.detect()) available.push(adapter);
+        else if (resolveAgentSkillRoot(adapter.descriptor.sourceId)) skillOnly.push(adapter);
         else if (request.sourceId !== "all") throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
       }
       for (const adapter of available) {
@@ -470,12 +494,16 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
           options.scheduleWorker,
           options.memoryAddAnalytics,
           persistentScanMode(mode),
+          () => skillsDisconnected(sourceId, state.sources[sourceId]),
           signal,
           () => waitWhilePaused(signal)
         );
         await checkpoint();
         const sourceErrorCount = store.resultSummary(sourceId).errors;
         const sourceErrors = store.errorDetails(sourceId);
+        // Skill import errors are reported with the source, but a skill that keeps
+        // failing must not hold back the conversation watermark.
+        const conversationScanSucceeded = store.conversationErrorCount(sourceId) === 0 && !result.hasUncommittedSkips;
         failureCount += sourceErrorCount;
         for (const detail of sourceErrors.map((item) => `${item.conversationId}: ${item.reason}`)) {
           if (failures.length >= 1000) break;
@@ -483,7 +511,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         }
         const now = new Date().toISOString();
         signal.throwIfAborted();
-        if (sourceErrorCount === 0 && !result.hasUncommittedSkips) {
+        if (conversationScanSucceeded) {
           // Raw records and required jobs are durable now; model outcomes cannot invalidate this checkpoint.
           // Cancellation may retain committed batches. Keep source-wide completion below
           // publication so an interrupted scan can safely replay the remaining conversations.
@@ -491,17 +519,17 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         }
         const nextSourceState: PersistedSourceState = {
           ...stored,
-          ...(sourceErrorCount === 0 && !result.hasUncommittedSkips ? { recoveryPending: false, syncBoundaryAt: stored.syncBoundaryAt ?? result.latestSeenAt } : {}),
+          ...(conversationScanSucceeded ? { recoveryPending: false, syncBoundaryAt: stored.syncBoundaryAt ?? result.latestSeenAt } : {}),
           messageCount: checkpoints.messageCount(sourceId),
-          ...(sourceErrorCount === 0 && !result.hasUncommittedSkips
+          ...(conversationScanSucceeded
             ? { lastScannedAt: now }
             : stored.lastScannedAt ? { lastScannedAt: stored.lastScannedAt } : {}),
-          ...(sourceErrorCount === 0 && !result.hasUncommittedSkips && preparedContentHashes.has(sourceId)
+          ...(conversationScanSucceeded && preparedContentHashes.has(sourceId)
             ? { contentHash: preparedContentHashes.get(sourceId) }
             : stored.contentHash ? { contentHash: stored.contentHash } : {}),
           // An unfinished recent turn keeps the watermark at its latest activity,
           // so the next incremental scan re-reads its conversation and captures it.
-          latestSeenAt: stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0 && !result.hasUncommittedSkips
+          latestSeenAt: conversationScanSucceeded
             ? (result.retryFrom ?? result.latestSeenAt ?? stored.latestSeenAt)
             : stored.latestSeenAt
         };
@@ -532,9 +560,33 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         });
         setScan({ ...scan, progress: { sourceId, phase: "done", current: store.count(sourceId), total: store.count(sourceId), message: `Imported ${result.written} memories and ${skillResult.written} skills` } });
       }
+      for (const adapter of skillOnly) {
+        await waitWhilePaused(signal);
+        signal.throwIfAborted();
+        const skillResult = await ingestAgentSkills(
+          options.service,
+          adapter.descriptor.sourceId,
+          store,
+          checkpoint,
+          options.resolveAgentSkillRoot,
+          options.scheduleWorker,
+          options.memoryAddAnalytics,
+          persistentScanMode(request.mode),
+          () => skillsDisconnected(adapter.descriptor.sourceId, state.sources[adapter.descriptor.sourceId]),
+          signal,
+          () => waitWhilePaused(signal)
+        );
+        failureCount += skillResult.errorCount;
+        for (const detail of skillResult.errors) {
+          if (failures.length >= 1000) break;
+          failures.push(detail);
+        }
+      }
       // A source disappearing between attempts must not erase its unresolved failures.
       for (const sourceId of store.unresolvedSourceIds()) {
         if (scan.results?.some((result) => result.sourceId === sourceId)) continue;
+        // Skill-only sources were just imported again and reported their current errors.
+        if (skillOnly.some((adapter) => adapter.descriptor.sourceId === sourceId)) continue;
         const summary = store.resultSummary(sourceId);
         const errors = store.errorDetails(sourceId);
         failureCount += summary.errors;
@@ -696,13 +748,223 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     signal.throwIfAborted();
   }
 
+  /** Explicit connection events take precedence over legacy local state. */
+  async function skillsDisconnected(sourceId: string, stored: PersistedSourceState | undefined): Promise<boolean> {
+    const connectionState = options.service.agentSkillConnectionState?.(sourceId);
+    if (connectionState) return connectionState === "disconnected";
+    return isUserDisconnected(stored) || options.service.agentSkillsDisconnected(sourceId);
+  }
+
+  async function connectionState(sourceId: string): Promise<{ connectionState: "connected" | "disconnected" | null; connectionEvent?: ConnectionEvent }> {
+    registry.require(sourceId);
+    const state = await readState();
+    const explicit = options.service.agentSkillConnectionState?.(sourceId);
+    const event = options.service.agentSkillConnectionEvent?.(sourceId);
+    const connectionEvent = event ? { connectionEvent: event } : {};
+    const stored = state.sources[sourceId];
+    // A pending local removal can outlive a failed notification, leaving stale
+    // connected KV. Only a completed removal or a strictly newer committed
+    // reconnect revision may supersede the pending local removal.
+    const pendingRemoval = Boolean(
+      stored?.autoInjectSuppressed
+      && stored.status !== "not_connected"
+      && !(event?.state === "connected" && isSuppressionSuperseded(stored.suppressedRevision, event))
+    );
+    if (pendingRemoval || (stored?.autoInjectSuppressed && !explicit)) {
+      return { connectionState: "disconnected", ...connectionEvent };
+    }
+    return { connectionState: explicit ?? (await options.service.agentSkillsDisconnected?.(sourceId) ? "disconnected" : null), ...connectionEvent };
+  }
+
+  async function automaticConnectionAllowed(sourceId: string): Promise<boolean> {
+    return (await connectionState(sourceId)).connectionState !== "disconnected";
+  }
+
+  async function reconcileInstallationRemoval(sourceId: string, kind: "skill" | "plugin", action?: ConnectionAction): Promise<void> {
+    const baseline = action ? compensation.after(action) : await compensation.baseline(sourceId);
+    const target = integrationRegistry.get(sourceId)!;
+    const state = await readState();
+    const stored = state.sources[sourceId];
+    const pendingLocalRemoval = !action && stored?.autoInjectSuppressed && stored.status !== "not_connected";
+    const baselineRevision = action
+      ? (typeof action.event?.revision === "number"
+        ? action.event.revision
+        : action.startedEventKnown ? (action.startedEvent?.revision ?? 0) : stored?.suppressedRevision)
+      : (baseline.event?.revision ?? 0);
+    let owned: PersistedSourceState = {
+      ...(stored ?? emptySourceState()),
+      status: kind === "plugin" ? "plugin_installed" : "skill_installed",
+      autoInjectSuppressed: true,
+      ...(typeof baselineRevision === "number" ? { suppressedRevision: baselineRevision } : {})
+    };
+    state.sources[sourceId] = owned;
+    const save = async (snapshot: PersistedState) => {
+      try { await persist(snapshot); }
+      catch (error) {
+        if (action) throw new Error(`Skill sharing is stopped. Cleanup state could not be saved. Retry removal. ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+        throw error;
+      }
+    };
+    const saveLatest = async () => {
+      let latest: PersistedSourceState | undefined;
+      do { latest = state.sources[sourceId]; await save(state); }
+      while (state.sources[sourceId] !== latest);
+    };
+    const remove = kind === "plugin" && target.uninstallPlugin
+      ? [() => target.uninstallPlugin!(sourceId), ...(!target.pluginUninstallIncludesSkills ? [() => target.uninstall(sourceId)] : [])]
+      : [() => target.uninstall(sourceId)];
+    try {
+      if (!action || owned.suppressedRevision !== stored?.suppressedRevision) await save(state);
+      await compensation.compensate(sourceId, baseline, {
+        remove,
+        install: async desiredKind => {
+          if (desiredKind === "plugin") {
+            if (!target.installPlugin) throw new Error("Cannot restore explicitly connected plugin");
+            await target.installPlugin(sourceId);
+          } else await target.install(renderMemmyDefaultSkillManifest(sourceId));
+        },
+        commit: async decision => {
+          const current = state.sources[sourceId];
+          if (current === owned || decision.kind || decision.event?.state === "disconnected") {
+            const next = { ...(current ?? owned) };
+            if (decision.kind) {
+              next.status = decision.kind === "plugin" ? "plugin_installed" : "skill_installed";
+              delete next.autoInjectSuppressed;
+              delete next.suppressedRevision;
+            } else if (!pendingLocalRemoval || decision.event?.state === "disconnected") {
+              next.status = "not_connected";
+              next.autoInjectSuppressed = true;
+              const settledRevision = decision.event?.revision ?? owned.suppressedRevision;
+              if (typeof settledRevision === "number") next.suppressedRevision = settledRevision;
+            }
+            await save({ ...state, sources: { ...state.sources, [sourceId]: next } });
+            if (state.sources[sourceId] === current) state.sources[sourceId] = owned = next;
+          }
+          if (state.sources[sourceId] !== owned) await saveLatest();
+        }
+      }, action);
+    } finally {
+      if (state.sources[sourceId] !== owned) await saveLatest();
+    }
+  }
+
+  function hasSupersedingDecision(decision: {
+    kind?: "skill" | "plugin";
+    event?: ConnectionEvent;
+    pendingLocalDisconnect?: boolean;
+  }): boolean {
+    return Boolean(decision.kind || decision.event || decision.pendingLocalDisconnect);
+  }
+
+  async function reconcileSupersededConnect(
+    sourceId: string,
+    attemptedKind: "skill" | "plugin",
+    before: Awaited<ReturnType<typeof readSkillInstallationState>> | undefined,
+    action: ConnectionAction,
+    fallbackEvent?: ConnectionEvent
+  ): Promise<void> {
+    const target = integrationRegistry.get(sourceId)!;
+    const state = await readState();
+    let owned = state.sources[sourceId];
+    const saveLatest = async () => {
+      let latest: PersistedSourceState | undefined;
+      do { latest = state.sources[sourceId]; await persist(state); }
+      while (state.sources[sourceId] !== latest);
+    };
+    const installDesired = async (desiredKind: "skill" | "plugin") => {
+      if (desiredKind === "plugin") {
+        if (!target.installPlugin) throw new Error("Cannot restore explicitly connected plugin");
+        await target.installPlugin(sourceId);
+      } else {
+        await target.install(renderMemmyDefaultSkillManifest(sourceId));
+      }
+    };
+    const remove = [async () => {
+      const current = await readSkillInstallationState(target, sourceId, () => undefined);
+      const shouldRemovePlugin = Boolean(target.uninstallPlugin)
+        && (attemptedKind === "plugin" || before?.pluginInstalled === true || current.pluginInstalled === true);
+      if (shouldRemovePlugin) {
+        await target.uninstallPlugin!(sourceId);
+        if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
+      } else {
+        await target.uninstall(sourceId);
+      }
+    }];
+    try {
+      await compensation.compensate(sourceId, compensation.afterConnectAttempt(action, fallbackEvent), {
+        remove,
+        install: installDesired,
+        ensureInstalled: async desiredKind => {
+          const current = await readSkillInstallationState(target, sourceId, () => undefined);
+          if (desiredKind === "plugin") {
+            if (current.pluginInstalled !== true || !current.skillInstalled) {
+              await installDesired("plugin");
+            }
+            return;
+          }
+          if (before?.pluginInstalled === false && current.pluginInstalled === true && target.uninstallPlugin) {
+            await target.uninstallPlugin(sourceId);
+            if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
+            await installDesired("skill");
+            return;
+          }
+          if (!current.skillInstalled) await installDesired("skill");
+        },
+        commit: async decision => {
+          const current = state.sources[sourceId];
+          if (decision.kind || decision.event?.state === "disconnected") {
+            const next: PersistedSourceState = { ...(current ?? emptySourceState()) };
+            if (decision.kind) {
+              next.status = decision.kind === "plugin" ? "plugin_installed" : "skill_installed";
+              delete next.autoInjectSuppressed;
+              delete next.suppressedRevision;
+            } else {
+              next.status = "not_connected";
+              next.autoInjectSuppressed = true;
+              if (typeof decision.event?.revision === "number") {
+                next.suppressedRevision = decision.event.revision;
+              }
+            }
+            await persist({ ...state, sources: { ...state.sources, [sourceId]: next } });
+            if (state.sources[sourceId] === current) state.sources[sourceId] = owned = next;
+          }
+          if (state.sources[sourceId] !== owned) await saveLatest();
+        }
+      }, action);
+    } finally {
+      if (state.sources[sourceId] !== owned) await saveLatest();
+    }
+  }
+
   async function mutateConnection(
+    sourceId: string, kind: "plugin" | "skill", method: "POST" | "DELETE",
+    installType: "manual" | "auto_inject" = "manual", isAutomaticInstallAllowed?: () => boolean
+  ): Promise<unknown> {
+    const action = installType === "manual" ? await compensation.begin(sourceId, method === "POST" ? "connected" : "disconnected", kind) : undefined;
+    let successful = false;
+    try {
+      if (installType === "auto_inject" && method === "POST") await compensation.capture(sourceId);
+      const result = await mutateConnectionOperation(sourceId, kind, method, installType, isAutomaticInstallAllowed, action);
+      successful = true;
+      return result;
+    } finally { await compensation.settle(action, successful); }
+  }
+
+  async function mutateConnectionOperation(
     sourceId: string,
     kind: "plugin" | "skill",
     method: "POST" | "DELETE",
     installType: "manual" | "auto_inject" = "manual",
-    isAutomaticInstallAllowed?: () => boolean
+    isAutomaticInstallAllowed?: () => boolean,
+    action?: ConnectionAction
   ): Promise<unknown> {
+    const guard = async () => {
+      if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) throw new Error("Automatic integration permission revoked");
+      if (!(await automaticConnectionAllowed(sourceId))) throw new Error("Automatic integration blocked by disconnection or pending cleanup");
+      if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) throw new Error("Automatic integration permission revoked");
+    };
+    if (installType === "auto_inject" && method === "POST") await guard();
+    if (installType === "auto_inject" && method === "DELETE") return reconcileInstallationRemoval(sourceId, kind);
     if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
     const adapter = registry.require(sourceId);
     if (method === "POST" && !(await adapter.detect())) {
@@ -711,42 +973,205 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
     const target = integrationRegistry.get(sourceId);
     if (!target) throw new MemoryServiceError("invalid_argument", `Agent source ${sourceId} cannot be connected automatically`);
+    const notifyConnection = (
+      connectionState: "connected" | "disconnected",
+      connectionKind: "skill" | "plugin" = kind,
+      connectionEventId?: string
+    ) => options.service.reconcileAgentSkills({
+      sourceAgentId: sourceId,
+      complete: false,
+      connectionState,
+      connectionKind,
+      ...(connectionEventId ? { connectionEventId } : {}),
+      disconnected: connectionState === "disconnected",
+      skills: []
+    });
     if (method === "POST") {
       if (!(await target.resolveRootDirectory())) {
         throw new MemoryServiceError("not_found", `${adapter.descriptor.displayName} is not installed`);
       }
       if (isAutomaticInstallAllowed && !isAutomaticInstallAllowed()) return;
-      if (kind === "plugin") {
-        if (!target.installPlugin) {
-          throw new MemoryServiceError("invalid_argument", `${adapter.descriptor.displayName} does not support automatic Hook or plugin installation`);
+      const installationBefore = installType === "auto_inject"
+        ? undefined
+        : await readSkillInstallationState(target, sourceId);
+      if (installType === "auto_inject") await guard();
+      let installError: unknown;
+      try {
+        if (kind === "plugin") {
+          if (!target.installPlugin) {
+            throw new MemoryServiceError("invalid_argument", `${adapter.descriptor.displayName} does not support automatic Hook or plugin installation`);
+          }
+          await target.installPlugin(sourceId);
+        } else {
+          await target.install(renderMemmyDefaultSkillManifest(sourceId));
         }
-        await target.installPlugin(sourceId);
-      } else {
-        await target.install(renderMemmyDefaultSkillManifest(sourceId));
+      } catch (error) { installError = error; }
+      if (installType === "auto_inject") {
+        try { await guard(); } catch (authorizationError) {
+          try { await reconcileInstallationRemoval(sourceId, kind); }
+          catch (cleanupError) { throw new AggregateError([installError, authorizationError, cleanupError].filter(Boolean), "Automatic integration could not be confirmed. Cleanup failed. Retry removal."); }
+          throw new AggregateError([installError, authorizationError].filter(Boolean), "Automatic integration canceled; installed files removed.");
+        }
+      }
+      if (installError) {
+        if (action && hasSupersedingDecision(await compensation.inspectConnectAttempt(action))) {
+          await reconcileSupersededConnect(sourceId, kind, installationBefore, action);
+        }
+        throw installError;
+      }
+      if (
+        action
+        && (
+          compensation.currentAction(sourceId) !== action
+          || hasSupersedingDecision(await compensation.inspectConnectAttempt(action))
+        )
+      ) {
+        await reconcileSupersededConnect(sourceId, kind, installationBefore, action);
+        throw new Error("Agent connection was superseded by a newer connection action.");
+      }
+      if (installationBefore && action) {
+        let notification: Awaited<ReturnType<typeof notifyConnection>>;
+        try {
+          notification = await notifyConnection("connected", kind, action.attemptEventId);
+        } catch (error) {
+          let fallbackEvent = action.startedEvent;
+          const initialDecision = await compensation.inspectConnectAttempt(action, fallbackEvent);
+          if (hasSupersedingDecision(initialDecision)) {
+            await reconcileSupersededConnect(sourceId, kind, installationBefore, action, fallbackEvent);
+            throw error;
+          }
+          const freshInstall = !installationBefore.skillInstalled && installationBefore.pluginInstalled === false;
+          const ownEvent = initialDecision.ownCommittedEvent;
+          const shouldCompensateDisconnect = (freshInstall && action.startedEvent?.state !== "connected")
+            || Boolean(ownEvent && action.startedEvent?.state === "disconnected");
+          if (shouldCompensateDisconnect) {
+            try {
+              const notification = await notifyConnection("disconnected", kind);
+              compensation.record(action, notification.connectionEvent);
+              if (notification.connectionEvent) fallbackEvent = notification.connectionEvent;
+            } catch (compensationError) {
+              if (hasSupersedingDecision(await compensation.inspectConnectAttempt(action, fallbackEvent))) {
+                await reconcileSupersededConnect(sourceId, kind, installationBefore, action, fallbackEvent);
+                throw error;
+              }
+              const state = await readState();
+              state.sources[sourceId] = {
+                ...(state.sources[sourceId] ?? emptySourceState()),
+                status: kind === "plugin" ? "plugin_installed" : connectionStatus(sourceId)
+              };
+              await persist(state);
+              throw new AggregateError([error, compensationError],
+                "Agent connection result is uncertain. Integration retained so disconnection can be retried.");
+            }
+          } else if (ownEvent && action.startedEvent?.state === "connected" && action.startedEvent.kind && action.startedEvent.kind !== kind) {
+            try {
+              const restored = await notifyConnection("connected", action.startedEvent.kind);
+              compensation.record(action, restored.connectionEvent);
+              if (restored.connectionEvent) fallbackEvent = restored.connectionEvent;
+            } catch {
+              // Keep the existing connected authorization if restoring prior kind fails.
+            }
+          }
+          if (hasSupersedingDecision(await compensation.inspectConnectAttempt(action, fallbackEvent))) {
+            await reconcileSupersededConnect(sourceId, kind, installationBefore, action, fallbackEvent);
+            throw error;
+          }
+          await rollbackSkillInstallation(target, sourceId, kind, installationBefore);
+          if (hasSupersedingDecision(await compensation.inspectConnectAttempt(action, fallbackEvent))) {
+            await reconcileSupersededConnect(sourceId, kind, installationBefore, action, fallbackEvent);
+          }
+          throw error;
+        }
+        if (notification.connectionEvent && notification.connectionEvent.id !== action.attemptEventId) {
+          if (hasSupersedingDecision(await compensation.inspectConnectAttempt(action))) {
+            await reconcileSupersededConnect(sourceId, kind, installationBefore, action);
+          }
+          throw new Error("Agent connection was superseded by a newer connection action.");
+        }
+        compensation.record(action, notification.connectionEvent);
       }
     } else {
-      if (kind === "plugin" && target.uninstallPlugin) {
-        await target.uninstallPlugin(sourceId);
-        if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
-      } else {
-        await target.uninstall(sourceId);
+      let preparationError: Error | undefined;
+      try {
+        const state = await readState();
+        const previous = state.sources[sourceId];
+        const startedRevision = action?.startedEventKnown
+          ? (action.startedEvent?.revision ?? 0)
+          : previous?.suppressedRevision;
+        const prepared: PersistedSourceState = {
+          ...(previous ?? emptySourceState()),
+          status: kind === "plugin" ? "plugin_installed" : connectionStatus(sourceId),
+          autoInjectSuppressed: true,
+          ...(typeof startedRevision === "number" ? { suppressedRevision: startedRevision } : {})
+        };
+        if (typeof startedRevision !== "number") delete prepared.suppressedRevision;
+        state.sources[sourceId] = prepared;
+        await persist(state);
+      } catch (error) {
+        preparationError = error instanceof Error ? error : new Error(String(error));
+      }
+      try {
+        const notification = await notifyConnection("disconnected");
+        compensation.record(action, notification.connectionEvent);
+      } catch (error) {
+        if (preparationError) {
+          const reason = error instanceof Error ? error.message : String(error);
+          throw new AggregateError([preparationError, error],
+            `Agent disconnection could not be confirmed. Cleanup state could not be saved. Retry removal. ${preparationError.message} ${reason}`);
+        }
+        throw error;
+      }
+      if (preparationError) {
+        throw new Error(`Skill sharing is stopped. Cleanup state could not be saved. Retry removal. ${preparationError.message}`,
+          { cause: preparationError });
+      }
+      try {
+        await reconcileInstallationRemoval(sourceId, kind, action);
+        const state = await readState();
+        const status = state.sources[sourceId]?.status ?? "not_connected";
+        logger.info(status === "not_connected" ? "connection.removed" : "connection.installed", { sourceId, kind });
+        return { ok: true, sourceId, status };
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Skill sharing is stopped. Cleanup state")) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`Skill sharing is stopped. Integration cleanup failed. Retry removal. ${reason}`, { cause: error });
       }
     }
-    const state = await readState();
-    const stored = state.sources[sourceId] ?? emptySourceState();
-    const nextState: PersistedSourceState = {
-      ...stored,
-      status: method === "POST" ? connectionStatus(sourceId) : "not_connected"
-    };
-    if (method === "DELETE") {
-      nextState.autoInjectSuppressed = true;
-    } else if (installType === "manual") {
+    try {
+      const state = await readState();
+      const expectedStatus = kind === "plugin" ? "plugin_installed" : "skill_installed";
+      if (action && compensation.currentAction(sourceId) !== action) {
+        return { ok: true, sourceId, status: state.sources[sourceId]?.status ?? expectedStatus };
+      }
+      const stored = state.sources[sourceId] ?? emptySourceState();
+      const nextState: PersistedSourceState = {
+        ...stored,
+        status: expectedStatus
+      };
       delete nextState.autoInjectSuppressed;
+      delete nextState.suppressedRevision;
+      const next = { ...state, sources: { ...state.sources, [sourceId]: nextState } };
+      await persist(next);
+      // Check before replacing the cached source: another local removal may
+      // have published retryable suppression while this durable write waited.
+      if (installType === "auto_inject") await guard();
+      if (action && compensation.currentAction(sourceId) !== action) {
+        await persist(state);
+        return { ok: true, sourceId, status: state.sources[sourceId]?.status ?? expectedStatus };
+      }
+      state.sources[sourceId] = nextState;
+      logger.info("connection.installed", { sourceId, kind });
+      return { ok: true, sourceId, status: state.sources[sourceId].status };
+    } catch (error) {
+      if (installType === "auto_inject") {
+        try { await guard(); } catch (authorizationError) {
+          try { await reconcileInstallationRemoval(sourceId, kind); }
+          catch (cleanupError) { throw new AggregateError([error, authorizationError, cleanupError], "Automatic integration could not be confirmed. Cleanup failed. Retry removal."); }
+          throw new AggregateError([error, authorizationError], "Automatic integration canceled; installed files removed.");
+        }
+      }
+      throw error;
     }
-    state.sources[sourceId] = nextState;
-    await persist(state);
-    logger.info(method === "POST" ? "connection.installed" : "connection.removed", { sourceId, kind });
-    return { ok: true, sourceId, status: state.sources[sourceId].status };
   }
 
   function scheduleAutomation(delay: number, startup: boolean): void {
@@ -776,17 +1201,19 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     const refreshTarget = integrationRegistry.get("opencode");
     if (registry.get("opencode") && refreshTarget?.isInstalledHookCurrent) {
       const stateBeforeRefresh = await readState();
-      if (!stateBeforeRefresh.sources.opencode?.autoInjectSuppressed
-        && (stateBeforeRefresh.sources.opencode?.status === "plugin_installed" || await refreshTarget.isInstalled("opencode"))) {
+      const opencodeStored = stateBeforeRefresh.sources.opencode;
+      const opencodeEvent = options.service.agentSkillConnectionEvent?.("opencode");
+      const opencodePendingRemoval = Boolean(
+        opencodeStored?.autoInjectSuppressed
+        && opencodeStored.status !== "not_connected"
+        && !(opencodeEvent?.state === "connected" && isSuppressionSuperseded(opencodeStored.suppressedRevision, opencodeEvent))
+      );
+      if (!opencodePendingRemoval
+        && (opencodeStored?.status === "plugin_installed" || await refreshTarget.isInstalled("opencode"))) {
         try {
           if (!(await refreshTarget.isInstalledHookCurrent())) {
-            const latestState = await readState();
-            if (isCurrent() && !latestState.sources.opencode?.autoInjectSuppressed) {
+            if (isCurrent() && await automaticConnectionAllowed("opencode")) {
               await mutateConnection("opencode", "plugin", "POST", "auto_inject", isCurrent);
-              const installedState = await readState();
-              if (installedState.sources.opencode?.autoInjectSuppressed) {
-                await mutateConnection("opencode", "plugin", "DELETE", "auto_inject");
-              }
             }
           }
         } catch (error) {
@@ -796,19 +1223,13 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
     }
 
     if (config.autoInjectSkill) {
-      const state = await readState();
       const discovered = await list();
       for (const source of discovered.sources) {
         if (!canInstall()) return;
-        if (!source.available || source.status !== "not_connected" || state.sources[source.sourceId]?.autoInjectSuppressed === true) continue;
+        if (!source.available || source.status !== "not_connected") continue;
         try {
           const kind = agentConnectionKind(source.sourceId);
           await mutateConnection(source.sourceId, kind, "POST", "auto_inject", canInstall);
-          const currentState = await readState();
-          if (currentState.sources[source.sourceId]?.autoInjectSuppressed === true) {
-            await mutateConnection(source.sourceId, kind, "DELETE", "auto_inject");
-          }
-
         } catch (error) {
           logger.warn("connection.auto_install_failed", { sourceId: source.sourceId, ...memoryErrorFields(error) });
         }
@@ -838,7 +1259,10 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       const current = await readState();
       const sources = Object.fromEntries(Object.entries(current.sources).map(([sourceId, source]) => [sourceId, {
         status: source.status,
-        ...(source.autoInjectSuppressed === true ? { autoInjectSuppressed: true } : {}),
+        ...(source.autoInjectSuppressed === true ? {
+          autoInjectSuppressed: true,
+          ...(typeof source.suppressedRevision === "number" ? { suppressedRevision: source.suppressedRevision } : {})
+        } : {}),
         messageCount: 0,
         lastScannedAt: null,
         latestSeenAt: null
@@ -873,6 +1297,7 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
 
   return {
     list,
+    connectionState,
     clearAllData,
     startScan,
     scanStatus: snapshot,
@@ -1553,120 +1978,140 @@ async function ingestAgentSkills(
     "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
   >,
   scanMode?: MemoryDesktopAddScanMode,
+  isDisconnected: () => Promise<boolean> = async () => false,
   signal?: AbortSignal,
   waitIfPaused: () => Promise<void> = async () => undefined
 ): Promise<{ written: number; memoryIdCount: number; errorCount: number; errors: string[] }> {
+  // Each scan reads every skill again; errors of an earlier attempt no longer apply.
+  store.resolveSkillErrors(sourceId);
   const root = resolveAgentSkillRoot(sourceId);
   if (!root) return { written: 0, memoryIdCount: 0, errorCount: 0, errors: [] };
-  const skillsRoot = join(root, "skills");
   const errors: string[] = [];
   let written = 0;
   let memoryIdCount = 0;
   let errorCount = 0;
-  const pendingIds: string[] = [];
-  const flush = (force = false) => {
-    if (pendingIds.length === 0 || (!force && pendingIds.length < 100)) return;
-    service.enqueuePendingImportSummaries(INITIAL_SCAN_MESSAGE_LIMIT, pendingIds.splice(0));
-    scheduleWorker?.();
+  const reportScanErrors = (scanErrors: ReadonlyArray<{ path: string; reason: string }>) => {
+    for (const skillError of scanErrors) {
+      errorCount += 1;
+      errors.push(`skill:${skillError.path}: ${skillError.reason}`);
+      recordScanItemSkip(store, sourceId, `skill:${skillError.path}`, skillError.reason);
+    }
   };
-  for await (const filePath of findSkillFiles(skillsRoot, checkpoint)) {
-    await checkpoint();
-    const sourceSkillId = relative(skillsRoot, dirname(filePath)).replaceAll("\\", "/");
-    const addAnalyticsBase = {
+
+  let rootExists = false;
+  let rootComplete = true;
+  try {
+    rootExists = (await stat(root)).isDirectory();
+  } catch (error) {
+    const missing = error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
+    if (!missing) {
+      rootComplete = false;
+      reportScanErrors([{ path: root, reason: error instanceof Error ? error.message : String(error) }]);
+    }
+  }
+  const inventories: Array<{ prefix: string; inventory: AgentSkillInventory }> = [];
+  if (rootExists) {
+    inventories.push({ prefix: "", inventory: await readAgentSkillInventory(join(root, "skills"), { checkpoint }) });
+    // An absent Agent cannot load skills from the shared directory.
+    for (const shared of sharedSkillRootsForAgent(sourceId, homedir())) {
+      inventories.push({ prefix: `shared:${shared.id}/`, inventory: await readAgentSkillInventory(shared.root, { checkpoint }) });
+    }
+  }
+  const skills: AgentSkillReconcileSkill[] = [];
+  for (const { prefix, inventory } of inventories) {
+    reportScanErrors(inventory.errors);
+    for (const skill of inventory.items) {
+      if (skill.frontmatterError || skill.policyError) {
+        logger.warn("skill.metadata_unreadable", {
+          sourceId,
+          sourceSkillPath: skill.sourceSkillPath,
+          ...(skill.frontmatterError ? { frontmatterError: skill.frontmatterError } : {}),
+          ...(skill.policyError ? { policyError: skill.policyError } : {})
+        });
+      }
+      skills.push({
+        sourceSkillId: `${prefix}${skill.sourceSkillId}`,
+        sourceSkillPath: skill.sourceSkillPath,
+        title: skill.name ?? basename(skill.sourceSkillId),
+        content: skill.content,
+        contentHash: skill.contentHash,
+        modifiedAt: skill.modifiedAt,
+        ...(skill.version ? { version: skill.version } : {}),
+        ...(skill.description ? { description: skill.description } : {}),
+        disableModelInvocation: skill.disableModelInvocation,
+        ...(skill.allowImplicitInvocation === undefined ? {} : { allowImplicitInvocation: skill.allowImplicitInvocation }),
+        ...(skill.policyError ? { policyError: skill.policyError } : {}),
+        ...(skill.frontmatterError ? { frontmatterError: skill.frontmatterError } : {}),
+        hasSupportingFiles: skill.hasSupportingFiles
+      });
+    }
+  }
+  const plugins = !rootExists
+    ? { complete: rootComplete, items: [], errors: [] }
+    : sourceId === "claude_code" ? await readClaudeCodePluginSkills(root, { checkpoint })
+      : sourceId === "codex" ? await readCodexPluginSkills(root, { checkpoint }) : undefined;
+  if (plugins) reportScanErrors(plugins.errors);
+
+  await checkpoint();
+  await waitIfPaused();
+  signal?.throwIfAborted();
+  const startedAt = Date.now();
+  let result;
+  try {
+    const disconnected = await isDisconnected();
+    result = service.reconcileAgentSkills({
+      sourceAgentId: sourceId,
+      complete: rootComplete && inventories.every(({ inventory }) => inventory.complete),
+      disconnected,
+      skills,
+      ...(plugins ? {
+        registrations: plugins.items.map((plugin) => ({
+          sourceSkillId: plugin.sourceSkillId,
+          sourceSkillPath: plugin.sourceSkillPath,
+          name: plugin.name,
+          pluginId: plugin.pluginId
+        })),
+        registrationsComplete: plugins.complete
+      } : {})
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    recordScanItemSkip(store, sourceId, "skills", reason);
+    return { written, memoryIdCount, errorCount: errorCount + 1, errors: [...errors, `skills: ${reason}`] };
+  }
+  const contentHashes = new Map(skills.map((skill) => [skill.sourceSkillId, skill.contentHash]));
+  for (const item of result.skills) {
+    const analyticsBase = {
       adapterId: `agent-source:${sourceId}`,
-      conversationId: `skill:${sourceSkillId}`,
-      turnId: `skill:${sourceSkillId}`,
+      conversationId: `skill:${item.sourceSkillId}`,
+      turnId: `skill:${item.sourceSkillId}:${contentHashes.get(item.sourceSkillId) ?? ""}`,
       layer: "Skill" as const,
       ...(scanMode ? { scanMode } : {})
     };
-    const addStartedAt = Date.now();
-    await checkpoint();
-    try {
-      const content = await readFile(filePath, "utf8");
-      const contentHash = createHash("sha256").update(content).digest("hex");
-      const requestId = `agent-source-skill:${sourceId}:${sourceSkillId}:${contentHash}`;
-      const fileStat = await stat(filePath);
-      const turnId = `skill:${sourceSkillId}:${contentHash}`;
-      addAnalyticsBase.turnId = turnId;
-      await waitIfPaused();
-      signal?.throwIfAborted();
-      const added = service.addMemory({
-        requestId,
-        adapterId: `agent-source:${sourceId}`,
-        content,
-        layer: "Skill",
-        title: frontmatterValue(content, "name") ?? sourceSkillId,
-        tags: ["agent-source", "cross-agent-skill", sourceId],
-        source: sourceId,
-        turnId,
-        createdAt: fileStat.mtime.toISOString(),
-        sourceAgentId: sourceId,
-        sourceSkillId,
-        sourceSkillPath: filePath,
-        sourceSkillVersion: frontmatterValue(content, "version") ?? contentHash,
-        sourceContentHash: contentHash,
-        deferProcessing: true
-      });
-      if (added.duplicate !== true && added.status !== "deleted") {
-        memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
-        memoryAddAnalytics?.trackAddSucceeded({
-          ...addAnalyticsBase,
-          durationMs: Date.now() - addStartedAt,
-          storedCount: 1
-        });
-      }
-      if (!added.duplicate && added.status !== "deleted") written += 1;
-      memoryIdCount += 1;
-      store.saveResult({ sourceId, conversationId: `skill:${sourceSkillId}`, memoryId: added.id });
-      if (added.status !== "deleted") {
-        store.saveImportMemory(sourceId, added.id);
-        pendingIds.push(added.id);
-        flush();
-      }
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      const reason = error instanceof Error ? error.message : String(error);
+    if (item.outcome === "failed") {
       errorCount += 1;
-      if (errors.length < 1000) errors.push(`skill:${sourceSkillId}: ${reason}`);
-      recordScanItemSkip(
-        store,
-        sourceId,
-        `skill:${sourceSkillId}`,
-        reason
-      );
-      memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
-      memoryAddAnalytics?.trackAddFailed({
-        ...addAnalyticsBase,
-        durationMs: Date.now() - addStartedAt,
-        error
-      });
+      errors.push(`skill:${item.sourceSkillId}: ${item.error ?? "skill import failed"}`);
+      recordScanItemSkip(store, sourceId, `skill:${item.sourceSkillId}`, item.error ?? "skill import failed");
+      memoryAddAnalytics?.trackAddStarted(analyticsBase);
+      memoryAddAnalytics?.trackAddFailed({ ...analyticsBase, durationMs: Date.now() - startedAt, error: new Error(item.error ?? "skill import failed") });
+      continue;
+    }
+    if (!item.memoryId) continue;
+    written += 1;
+    memoryIdCount += 1;
+    store.saveResult({ sourceId, conversationId: `skill:${item.sourceSkillId}`, memoryId: item.memoryId });
+    if (item.outcome === "created" || item.outcome === "updated") {
+      memoryAddAnalytics?.trackAddStarted(analyticsBase);
+      memoryAddAnalytics?.trackAddSucceeded({ ...analyticsBase, durationMs: Date.now() - startedAt, storedCount: 1 });
     }
   }
-  await checkpoint();
-  flush(true);
+  if (result.skills.some((item) => item.outcome === "created" || item.outcome === "updated")) scheduleWorker?.();
   return { written, memoryIdCount, errorCount, errors };
 }
 
-async function* findSkillFiles(root: string, checkpoint: () => Promise<void>): AsyncGenerator<string> {
-  yield* visit(root, 0);
-
-  async function* visit(directory: string, depth: number): AsyncGenerator<string> {
-    await checkpoint();
-    let entries;
-    try {
-      entries = await readdir(directory, { withFileTypes: true });
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") return;
-      throw error;
-    }
-    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-      await checkpoint();
-      if (entry.name === "memmy-memory" || entry.name === "node_modules" || entry.name === ".git") continue;
-      const path = join(directory, entry.name);
-      if (entry.isFile() && entry.name.toLowerCase() === "skill.md") yield path;
-      else if (depth < 2 && entry.isDirectory()) yield* visit(path, depth + 1);
-    }
-  }
+/** The user removed this Agent's connection; its skills stop being shared. */
+function isUserDisconnected(source: PersistedSourceState | undefined): boolean {
+  return source?.autoInjectSuppressed === true;
 }
 
 function agentRootDirectory(sourceId: string): string | null {
@@ -1683,15 +2128,6 @@ function agentRootDirectory(sourceId: string): string | null {
     case "qwenwork": return resolveQwenworkHomeDirectory();
     default: return null;
   }
-}
-
-function frontmatterValue(content: string, key: string): string | undefined {
-  if (!content.startsWith("---")) return undefined;
-  const end = content.indexOf("\n---", 3);
-  if (end < 0) return undefined;
-  return content.slice(3, end)
-    .match(new RegExp(`^${key}:\\s*["']?([^\\n"']+)["']?\\s*$`, "im"))?.[1]
-    ?.trim();
 }
 
 function persistentScanMode(value: string | undefined): MemoryDesktopAddScanMode | undefined {
@@ -1751,7 +2187,12 @@ async function loadState(path: string): Promise<PersistedState> {
       const status = source.status === "skill_installed" || source.status === "plugin_installed" ? source.status : "not_connected";
       return [sourceId, {
         status,
-        ...(source.autoInjectSuppressed === true ? { autoInjectSuppressed: true } : {}),
+        ...(source.autoInjectSuppressed === true ? {
+          autoInjectSuppressed: true,
+          ...(typeof source.suppressedRevision === "number" && Number.isSafeInteger(source.suppressedRevision) && source.suppressedRevision >= 0
+            ? { suppressedRevision: source.suppressedRevision }
+            : {})
+        } : {}),
         messageCount: typeof source.messageCount === "number" && Number.isFinite(source.messageCount) ? Math.max(0, Math.floor(source.messageCount)) : 0,
         lastScannedAt: typeof source.lastScannedAt === "string" ? source.lastScannedAt : null,
         latestSeenAt: typeof source.latestSeenAt === "string" ? source.latestSeenAt : null,
@@ -1858,6 +2299,12 @@ async function writeState(path: string, state: PersistedState, signal?: AbortSig
   } finally {
     await rm(temporary, { force: true });
   }
+}
+
+function isSuppressionSuperseded(suppressedRevision: number | undefined, event: ConnectionEvent | undefined): boolean {
+  return typeof suppressedRevision === "number"
+    && typeof event?.revision === "number"
+    && event.revision > suppressedRevision;
 }
 
 function connectionStatus(sourceId: string): AgentConnectionStatus {

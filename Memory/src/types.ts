@@ -192,6 +192,12 @@ export interface MemoryFilter {
   excludedMemoryKinds?: MemoryKind[];
   workMemoryUserId?: string;
   workMemoryProjectId?: string | null;
+  /** Leaves out skills imported from this Agent (compared after normalizing the Agent id). */
+  excludedImportedSkillSourceAgentId?: string;
+  /** Apply source eligibility before candidate LIMITs, independently of requester installations. */
+  eligibleImportedSkillsOnly?: boolean;
+  /** Restricts Skill queries to imported Agent skills only or excludes them. */
+  importedSkillsMode?: "only" | "exclude";
 }
 
 export interface RecallHit {

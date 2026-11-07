@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { Trash2 } from "./memory-prototype-icons.js";
 import { toErrorMessage } from "./remote-state.js";
 
 export interface MemoryDrawerDeleteActionProps {
   onDelete: () => Promise<void>;
+  /** Another action shown before the delete button, such as archive. */
+  secondaryAction?: ReactNode;
 }
 
 export function MemoryDrawerDeleteAction(props: MemoryDrawerDeleteActionProps) {
@@ -36,6 +38,7 @@ export function MemoryDrawerDeleteAction(props: MemoryDrawerDeleteActionProps) {
     <footer className="memory-drawer__footer">
       <div className="memory-delete-action">
         <div className="memory-delete-action__controls">
+          {props.secondaryAction}
           <button
             type="button"
             className={`memory-delete-button${confirming ? " memory-delete-button--confirming" : ""}`}

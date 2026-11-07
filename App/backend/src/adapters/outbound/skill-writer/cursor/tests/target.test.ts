@@ -1,3 +1,4 @@
+import "../../tests/isolated-target-home.js";
 /** Target tests. */
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

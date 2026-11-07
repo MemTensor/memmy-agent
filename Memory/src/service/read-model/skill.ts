@@ -5,6 +5,7 @@
  * authorization, session lifecycle, and persistence policy; this projection
  * receives those capabilities through SkillReadModelDeps instead.
  */
+import { isImportedSkill } from "../../storage/imported-skill.js";
 import type {
   EpisodeRecord,
   RawTurnRecord,
@@ -109,6 +110,8 @@ export interface SkillRuntimeRepository {
 
 export interface SkillReadModelDeps {
   repositories: {
+    projectMemoryForRead?(memory: MemoryRow): MemoryRow;
+    isImportedSkillEligibleForEmbedding?(memory: MemoryRow): boolean;
     memories: SkillMemoryRepository;
     runtime: SkillRuntimeRepository;
   };
@@ -215,7 +218,8 @@ export class SkillReadModel {
     const filter: MemoryFilter = {
       memoryLayer: "Skill",
       status: ["activated", "resolving"],
-      tags: input.tags
+      tags: input.tags,
+      eligibleImportedSkillsOnly: true
     };
     const poolLimit = Math.max(limit + cursor + 1, limit, 50);
     const memories = input.q?.trim()
@@ -223,7 +227,13 @@ export class SkillReadModel {
           this.deps.repositories.memories.search(input.q, filter, poolLimit).map((hit) => hit.id)
         )
       : this.deps.repositories.memories.list(filter, poolLimit);
-    const page = memories.slice(cursor, cursor + limit);
+    const page = memories
+      .slice(cursor, cursor + limit)
+      .map((memory) =>
+        this.deps.repositories.projectMemoryForRead
+          ? this.deps.repositories.projectMemoryForRead(memory)
+          : memory
+      );
     const nextCursor = memories.length > cursor + limit ? String(cursor + limit) : undefined;
     const items = page.map((memory) => this.deps.repositories.memories.toListItem(memory));
     return {
@@ -243,10 +253,17 @@ export class SkillReadModel {
 
   getSkill(skillId: string, request: RequestEnvelope = {}): SkillDetail {
     this.deps.assertMemorySearchEnabled();
-    const memory = this.deps.repositories.memories.get(skillId);
-    if (!memory || memory.memoryLayer !== "Skill") {
+    const rawMemory = this.deps.repositories.memories.get(skillId);
+    if (
+      !rawMemory
+      || rawMemory.memoryLayer !== "Skill"
+      || (isImportedSkill(rawMemory) && rawMemory.properties.internal_info.source_kind === "plugin")
+    ) {
       throw this.deps.createError("not_found", `skill not found: ${skillId}`);
     }
+    const memory = this.deps.repositories.projectMemoryForRead
+      ? this.deps.repositories.projectMemoryForRead(rawMemory)
+      : rawMemory;
     this.deps.assertMemoryInScope(memory, request.namespace);
     const detail = this.deps.detailFromMemory(memory);
     const skill = this.deps.skillMetaFromMemory(memory);
@@ -309,11 +326,22 @@ export class SkillReadModel {
     }
 
     const skill = this.deps.repositories.memories.get(skillId);
-    if (!skill || skill.memoryLayer !== "Skill") {
+    if (
+      !skill
+      || skill.memoryLayer !== "Skill"
+      || (isImportedSkill(skill) && skill.properties.internal_info.source_kind === "plugin")
+    ) {
       throw this.deps.createError("not_found", `skill not found: ${skillId}`);
     }
     if (skill.status !== "activated" && skill.status !== "resolving") {
       throw this.deps.createError("conflict", `skill is not invokable in status ${skill.status}`);
+    }
+    if (
+      isImportedSkill(skill)
+      && this.deps.repositories.isImportedSkillEligibleForEmbedding
+      && !this.deps.repositories.isImportedSkillEligibleForEmbedding(skill)
+    ) {
+      throw this.deps.createError("conflict", "imported Skill is not invokable");
     }
     if (skill.status !== "activated" && skill.properties.internal_info.external_evidence_candidate) {
       throw this.deps.createError("conflict", "observed Skill candidate requires review before use");

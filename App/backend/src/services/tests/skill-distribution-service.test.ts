@@ -1,11 +1,19 @@
 /** Skill distribution service tests. */
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createSkillTargetRegistry } from "../../adapters/outbound/skill-writer/target-registry.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../../adapters/outbound/skill-writer/types.js";
 import { createSkillDistributionService } from "../skill-distribution-service.js";
+
+import { createCodexSkillTarget } from "../../adapters/outbound/skill-writer/codex/index.js";
+import { createClaudeCodeSkillTarget } from "../../adapters/outbound/skill-writer/claude-code/index.js";
+import { createCursorSkillTarget } from "../../adapters/outbound/skill-writer/cursor/index.js";
+import { createOpencodeSkillTarget } from "../../adapters/outbound/skill-writer/opencode/index.js";
+import { createOpenclawSkillTarget } from "../../adapters/outbound/skill-writer/openclaw/index.js";
+import { createHermesSkillTarget } from "../../adapters/outbound/skill-writer/hermes/index.js";
+import { createDeepseekHarnessSkillTarget } from "../../adapters/outbound/skill-writer/deepseek-harness/index.js";
 
 describe("skill distribution service", () => {
   it("scans other Agent skills as source-attributed immutable versions", async () => {
@@ -296,4 +304,60 @@ it.each(["skill", "plugin"])("checks revocation after asynchronous root resoluti
   release("/synthetic");
   await expect(pending).rejects.toThrow("revoked");
   expect(installed).toBe(false);
+});
+
+const pluginPresenceCases = [
+  ["codex", createCodexSkillTarget, "hooks/memmy-memory-resume-hook.mjs", "hooks.json"],
+  ["claude_code", createClaudeCodeSkillTarget, "hooks/memmy-memory-resume-hook.mjs", "settings.json"],
+  ["cursor", createCursorSkillTarget, "hooks/memmy-memory-resume-hook.mjs", "hooks.json"],
+  ["opencode", createOpencodeSkillTarget, "plugins/memmy-memory.js", "opencode.json"],
+  ["openclaw", createOpenclawSkillTarget, "extensions/memmy-memory/index.mjs", "openclaw.json"],
+  ["hermes", createHermesSkillTarget, "plugins/memmy-memory/plugin.yaml", "config.yaml"],
+  ["deepseek_harness", createDeepseekHarnessSkillTarget, "profiles/node_modules/@memmy/memmy-memory/index.mjs", "cordis.patch.yml"]
+] as const;
+
+describe("official plugin installation presence", () => {
+  it.each(pluginPresenceCases)("%s distinguishes old plugin files from unrelated configuration", async (_id, createTarget, pluginPath, configFile) => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-plugin-presence-"));
+    try {
+      const target = createTarget({ rootDirectory, memmyConfigPath: join(rootDirectory, "memmy.json") });
+      writeFileSync(join(rootDirectory, configFile), "{}");
+      expect(await target.isPluginInstalled?.()).toBe(false);
+      const filePath = join(rootDirectory, pluginPath);
+      mkdirSync(join(filePath, ".."), { recursive: true });
+      writeFileSync(filePath, "old Memmy plugin version");
+      expect(await target.isPluginInstalled?.()).toBe(true);
+    } finally { rmSync(rootDirectory, { recursive: true, force: true }); }
+  });
+
+  it.each(pluginPresenceCases)("%s propagates unreadable installation paths before mutation", async (_id, createTarget, pluginPath) => {
+    const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-plugin-permission-"));
+    const directory = join(rootDirectory, pluginPath, "..");
+    try {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(rootDirectory, pluginPath), "old plugin");
+      chmodSync(directory, 0);
+      const target = createTarget({ rootDirectory, memmyConfigPath: join(rootDirectory, "memmy.json") });
+      await expect(target.isPluginInstalled?.()).rejects.toMatchObject({ code: "EACCES" });
+    } finally {
+      chmodSync(directory, 0o700);
+      rmSync(rootDirectory, { recursive: true, force: true });
+    }
+  });
+});
+
+
+it.each(["skill", "plugin"] as const)("preserves custom target integrations when plugin presence is unknown during %s rollback", async (kind) => {
+  const rootDirectory = mkdtempSync(join(tmpdir(), "memmy-custom-plugin-presence-"));
+  const removed: string[] = [];
+  try {
+    const service = createSkillDistributionService({ targetRegistry: createSkillTargetRegistry([
+      createFakeTarget({ resolveRootDirectory: () => rootDirectory,
+        installPlugin() {}, uninstall() { removed.push("skill"); }, uninstallPlugin() { removed.push("plugin"); } })
+    ]) });
+    const before = await service.readInstallationState!("cursor");
+    expect(before).toEqual({ skillInstalled: false, pluginInstalled: undefined });
+    await service.rollbackInstallation!("cursor", kind, before);
+    expect(removed).toEqual([]);
+  } finally { rmSync(rootDirectory, { recursive: true, force: true }); }
 });

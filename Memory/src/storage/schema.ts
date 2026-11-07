@@ -501,6 +501,14 @@ const statements = [
     ON memory_change_log (namespace_id, seq)`,
   `CREATE INDEX IF NOT EXISTS idx_memory_change_log_created
     ON memory_change_log (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_change_log_memory_seq
+    ON memory_change_log (memory_id, seq DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_memories_legacy_skill_disconnect
+    ON memories (memory_layer, json_extract(properties_json, '$.internal_info.source_agent_id'))
+    WHERE memory_layer = 'Skill'
+      AND json_extract(properties_json, '$.internal_info.read_only') = 1
+      AND (json_extract(properties_json, '$.internal_info.archive_reason') = 'disconnected'
+        OR json_extract(properties_json, '$.internal_info.source_state') = 'disconnected')`,
 
   `CREATE TABLE IF NOT EXISTS idempotency_keys (
     key TEXT PRIMARY KEY,
