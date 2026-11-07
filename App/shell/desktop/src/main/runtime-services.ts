@@ -1,8 +1,10 @@
+import { probeMemoryAuthentication } from "./memory-auth.js";
 import { bindScreenCaptureIpc, type ScreenCaptureHandler } from './desktop-screen-capture.js';
 import { bindComputerUseWindowCaptureIpc } from './computer-use-window-capture.js';
 import { bindComputerUseOnboardingIpc, type ComputerUseOnboarding } from './computer-use-onboarding.js';
 import { mutateRuntimeConfig } from "@memmy/migrations";
 import type { EmbeddedExecutorEventSink } from './embedded-browser-driver.js';
+import { resolveMemoryConnection, sameHttpOrigin } from "@memmy/local-api-contracts";
 import { BROWSER_PROFILE_CLEAR_REQUEST, BROWSER_ACCESS_RESULT, BROWSER_DOWNLOAD_RESULT, BROWSER_CAPABILITY_RESULT, EMBEDDED_BROWSER_EVENT, EMBEDDED_BROWSER_RESULT, NATIVE_APP_ACCESS_RESULT,
   isBrowserAccessRequest, isBrowserDownloadRequest, isBrowserCapabilityRequest, isBrowserProfileClearResult, isComputerUseSurfaceAction, isComputerUseSurfaceMessage, isNativeAppAccessRequest, type AgentGatewayStartupIssue,
   type BrowserCapabilityRequest,
@@ -129,6 +131,8 @@ export interface PackagedRuntimeConfig {
   agentWorkspace: string;
   memoryDatabasePath: string;
   memoryBaseUrl: string;
+  /** An override for another origin can be probed, but cannot take over this installation. */
+  externalMemoryOrigin?: boolean;
   memoryToken: string;
   memoryListenHost: string;
   memoryListenPort: number;
@@ -472,20 +476,22 @@ export async function preparePackagedRuntimeConfig(
     setMissing(storage, "mode", "local");
     setMissing(storage, "backend", "sqlite");
     setMissing(storage, "sqlitePath", memoryDatabasePath);
-    setMissing(storage, "endpoint", DEFAULT_MEMORY_URL);
-    const memoryUrl = parseHttpUrl(
-      stringValue(env.MEMMY_MEMORY_URL) ?? stringValue(env.MEMORY_SERVICE_URL) ??
-        stringValue(storage.endpoint) ?? DEFAULT_MEMORY_URL,
-      "Memory endpoint"
-    );
+    const legacyEndpoint = stringValue(memmyMemory.endpoint);
+    setMissing(storage, "endpoint", legacyEndpoint ?? DEFAULT_MEMORY_URL);
+    const fileEndpoint = stringValue(storage.endpoint) ?? DEFAULT_MEMORY_URL;
+    const legacyToken = stringValue(memmyMemory.token);
+    if (legacyToken && (!legacyEndpoint || sameHttpOrigin(fileEndpoint, legacyEndpoint))) {
+      setMissing(storage, "token", legacyToken);
+    }
+    const connection = resolveMemoryConnection(fileEndpoint, stringValue(storage.token), env);
+    const memoryUrl = parseHttpUrl(connection.endpoint, "Memory endpoint");
     // The unified scan API requires a local principal. Persist the credential
     // before starting either client or server so legacy tokenless installations
     // and Hooks reading the shared config use the same token on the next start.
     // Remote services and explicit credentials remain owned by their operator.
     if (shouldWriteConfig && storage.mode === "local" && storage.backend === "sqlite"
       && ["127.0.0.1", "localhost", "::1"].includes(listenHostFromUrl(memoryUrl))
-      && !stringValue(env.MEMMY_MEMORY_TOKEN) && !stringValue(env.MEMORY_SERVICE_TOKEN)
-      && !stringValue(storage.token)) {
+      && sameHttpOrigin(connection.endpoint, fileEndpoint) && !connection.token) {
       storage.token = secretFactory();
     }
     setMissing(websocket, "host", LOCAL_HOST);
@@ -536,15 +542,9 @@ export async function preparePackagedRuntimeConfig(
     ]);
   }
 
-  const memoryEndpoint = stringValue(env.MEMMY_MEMORY_URL) ??
-    stringValue(env.MEMORY_SERVICE_URL) ??
-    stringValue(storage.endpoint) ??
-    DEFAULT_MEMORY_URL;
-  const memoryUrl = parseHttpUrl(memoryEndpoint, "Memory endpoint");
-  const memoryToken = stringValue(env.MEMMY_MEMORY_TOKEN) ??
-    stringValue(env.MEMORY_SERVICE_TOKEN) ??
-    stringValue(storage.token) ??
-    "";
+  const fileEndpoint = stringValue(storage.endpoint) ?? DEFAULT_MEMORY_URL;
+  const connection = resolveMemoryConnection(fileEndpoint, stringValue(storage.token), env);
+  const memoryUrl = parseHttpUrl(connection.endpoint, "Memory endpoint");
   const agentWebsocketHost = stringValue(websocket.host) ?? LOCAL_HOST;
   const agentWebsocketPort = numberValue(websocket.port) ?? DEFAULT_AGENT_WEBSOCKET_PORT;
   const gatewayHealthHost = stringValue(gateway.host) ?? LOCAL_HOST;
@@ -556,7 +556,8 @@ export async function preparePackagedRuntimeConfig(
     agentWorkspace,
     memoryDatabasePath,
     memoryBaseUrl: normalizeBaseUrl(memoryUrl),
-    memoryToken,
+    externalMemoryOrigin: !sameHttpOrigin(connection.endpoint, fileEndpoint),
+    memoryToken: connection.token ?? "",
     memoryListenHost: listenHostFromUrl(memoryUrl),
     memoryListenPort: listenPortFromUrl(memoryUrl),
     agentGatewayBaseUrl: `http://${clientHost(agentWebsocketHost)}:${agentWebsocketPort}`,
@@ -903,12 +904,22 @@ export async function ensureMemoryService(
   shouldStop?: () => boolean
 ): Promise<void> {
   if (shouldStop?.()) return;
+  if (!runtimeConfig.memoryToken) throw new Error("Memory authentication requires a credential for the selected endpoint");
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
-  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const healthHeaders = {};
   let probe = await probeMemoryService(healthUrl, healthHeaders);
+  if (runtimeConfig.externalMemoryOrigin) {
+    if (probe === "starting") await waitForCompatibleMemoryService(healthUrl, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS);
+    else if (probe !== "ready") throw new Error(`Overridden Memory endpoint is ${probe}: ${healthUrl}`);
+    if (await probeMemoryAuthentication(runtimeConfig.memoryBaseUrl, runtimeConfig.memoryToken) !== "authenticated") {
+      throw new Error("Overridden Memory endpoint rejected authentication");
+    }
+    return;
+  }
   if ((options.platform ?? process.platform) === "win32"
     && options.offlineMemoryRuntimeDirectory
     && hasPreviousMemoryRuntimeMarker(runtimeConfig.configPath)
+    && await desktopOwnsMemoryInstallation(runtimeConfig.configPath, options.runtimeExecutable)
     && (probe === "ready" || probe === "unreachable")) {
     const lock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
     if (lock) {
@@ -919,7 +930,8 @@ export async function ensureMemoryService(
         await memoryVerificationEntry(runtimeConfig, entries),
         healthUrl,
         healthHeaders,
-        lock
+        lock,
+        options.runtimeExecutable
       );
       const remainingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
       if (remainingLock && remainingLock.pid !== lock.pid) {
@@ -947,7 +959,15 @@ export async function ensureMemoryService(
     probe = await probeMemoryService(healthUrl, healthHeaders);
   }
   if (probe === "ready") {
-    if (!(await stopOlderBundledMemoryRuntime(runtimeConfig, options, shouldStop))) return;
+    const authentication = await probeMemoryAuthentication(runtimeConfig.memoryBaseUrl, runtimeConfig.memoryToken);
+    if (authentication === "mismatch" || authentication === "starting") {
+      throw new Error(`Memory authentication is ${authentication}; refusing to replace its owner`);
+    }
+    if (!(await stopOlderBundledMemoryRuntime(runtimeConfig, options, shouldStop))) {
+      if (authentication === "authenticated") return;
+      const lock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+      await replaceLegacyMemoryOwner(runtimeConfig, await memoryVerificationEntry(runtimeConfig, entries), lock, options.runtimeExecutable);
+    }
   }
   if (probe === "incompatible") {
     throw new Error(`Memory protocol at ${healthUrl} is incompatible with Desktop protocol ${SUPPORTED_MEMORY_PROTOCOL_VERSION}; upgrade Desktop or Memory`);
@@ -967,7 +987,8 @@ export async function ensureMemoryService(
         await memoryVerificationEntry(runtimeConfig, entries),
         healthUrl,
         healthHeaders,
-        existingLock
+        existingLock,
+        options.runtimeExecutable
       );
       if (existingReady && !(await stopOlderBundledMemoryRuntime(runtimeConfig, options, shouldStop))) return;
     }
@@ -988,7 +1009,6 @@ export async function ensureMemoryService(
       children,
       options,
       onRestartRequested,
-      true,
       shouldStop
     );
     return;
@@ -1002,7 +1022,6 @@ export async function ensureMemoryService(
     children,
     options,
     onRestartRequested,
-    false,
     shouldStop
   );
 }
@@ -1056,10 +1075,10 @@ async function stopOlderBundledMemoryRuntime(
     || running.endpoint !== runtimeConfig.memoryBaseUrl
     || running.serviceVersion !== installed.version
     || running.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
-    || !isPackagedMemoryServiceProcess(lock.pid, installed.entrypoint, serviceHome, true)) return false;
+    || !isPackagedMemoryServiceProcess(lock.pid, installed.entrypoint, serviceHome, options.runtimeExecutable)) return false;
 
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
-  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const healthHeaders = {};
   try {
     const response = await fetch(healthUrl, { headers: healthHeaders, cache: "no-store", signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
     const health: unknown = await response.json();
@@ -1220,16 +1239,15 @@ async function startManagedMemoryService(
   children: ManagedChild[],
   options: StartManagedRuntimeServicesOptions,
   onRestartRequested?: () => void,
-  requireCompatible = false,
   shouldStop?: () => boolean
 ): Promise<void> {
   if (shouldStop?.()) return;
   const healthUrl = runtimeConfig.memoryBaseUrl + "/api/v1/health";
-  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const healthHeaders = {};
   // A service can release its lock, or stop responding altogether, while the
   // health waiter runs. Either way this Desktop instance then takes over.
   const existingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
-  if (existingLock && await adoptOrRecoverMemoryOwner(runtimeConfig, entry, healthUrl, healthHeaders, existingLock)) {
+  if (existingLock && await adoptOrRecoverMemoryOwner(runtimeConfig, entry, healthUrl, healthHeaders, existingLock, options.runtimeExecutable)) {
     return;
   }
   if (shouldStop?.()) return;
@@ -1268,15 +1286,9 @@ async function startManagedMemoryService(
   }
   children.push(memoryChild);
   try {
-    if (requireCompatible) {
-      await waitForCompatibleMemoryService(
-        healthUrl,
-        healthHeaders,
-        MEMORY_STARTUP_TIMEOUT_MS,
-        memoryChild
-      );
-    } else {
-      await waitForHttpService("memory", healthUrl, memoryChild, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS);
+    await waitForCompatibleMemoryService(healthUrl, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS, memoryChild);
+    if (await probeMemoryAuthentication(runtimeConfig.memoryBaseUrl, runtimeConfig.memoryToken) !== "authenticated") {
+      throw new Error("Memory started without the expected authentication; update the runtime or check its credential configuration");
     }
   } catch (error) {
     const lockOwner = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
@@ -1288,6 +1300,9 @@ async function startManagedMemoryService(
     await stopManagedChild(memoryChild).catch(() => undefined);
     removeManagedChild(children, memoryChild);
     await waitForExistingMemoryService(healthUrl, healthHeaders, lockOwner);
+    if (await probeMemoryAuthentication(runtimeConfig.memoryBaseUrl, runtimeConfig.memoryToken) !== "authenticated") {
+      throw new Error("Existing Memory service authentication could not be verified");
+    }
   }
 }
 async function runBundledMemoryCli(
@@ -1403,8 +1418,11 @@ async function restartManagedMemoryService(
   options: StartManagedRuntimeServicesOptions,
   onRestartRequested?: () => void
 ): Promise<void> {
+  if (runtimeConfig.externalMemoryOrigin) {
+    return restartExternalMemoryService({ baseUrl: runtimeConfig.memoryBaseUrl, token: runtimeConfig.memoryToken });
+  }
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
-  const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
+  const healthHeaders = {};
   const managedMemory = children.filter((child) => child.name === "memory" && isManagedChildRunning(child));
   const installed = options.offlineMemoryRuntimeDirectory
     ? await readInstalledMemoryRuntime(runtimeConfig.configPath)
@@ -1538,7 +1556,7 @@ export async function restartExternalMemoryService(input: {
 }): Promise<void> {
   const baseUrl = normalizeBaseUrl(parseHttpUrl(input.baseUrl, "Memory service URL"));
   const healthUrl = `${baseUrl}/api/v1/health`;
-  const healthHeaders = memoryAuthHeaders(input.token);
+  const healthHeaders = {};
   const probe = await probeHttpService(healthUrl, healthHeaders);
   if (probe !== "ready") {
     throw new Error(probe === "unexpected"
@@ -1546,9 +1564,15 @@ export async function restartExternalMemoryService(input: {
       : `Memory service is not running: ${healthUrl}`);
   }
 
+  if (await probeMemoryAuthentication(baseUrl, input.token) !== "authenticated") {
+    throw new Error("Memory endpoint rejected authentication before restart");
+  }
   await requestMemoryServiceShutdown(input);
   await waitForHttpServiceStop(healthUrl, healthHeaders);
-  await waitForHttpServiceReady("memory", healthUrl, healthHeaders);
+  await waitForCompatibleMemoryService(healthUrl, healthHeaders, MEMORY_STARTUP_TIMEOUT_MS);
+  if (await probeMemoryAuthentication(baseUrl, input.token) !== "authenticated") {
+    throw new Error("Restarted Memory service authentication could not be verified");
+  }
 }
 
 async function requestMemoryServiceShutdown(input: { baseUrl: string; token: string }): Promise<void> {
@@ -2311,7 +2335,7 @@ async function probeHttpService(url: string, headers: Record<string, string> = {
   }
 }
 
-async function probeMemoryService(url: string, headers: Record<string, string> = {}): Promise<HttpProbeResult | "incompatible"> {
+async function probeMemoryService(url: string, headers: Record<string, string> = {}): Promise<HttpProbeResult | "incompatible" | "starting"> {
   try {
     const response = await fetch(url, {
       cache: "no-store",
@@ -2321,6 +2345,7 @@ async function probeMemoryService(url: string, headers: Record<string, string> =
     if (!response.ok) return "unexpected";
     const body: unknown = await response.json();
     if (!isRecord(body) || typeof body.ok !== "boolean") return "unexpected";
+    if (body.status === "starting" || body.status === "upgrading") return "starting";
     // `ok` also reflects model health. A degraded dev-start service still owns
     // this endpoint and must be reused instead of starting a second listener.
     return body.protocolVersion === SUPPORTED_MEMORY_PROTOCOL_VERSION ? "ready" : "incompatible";
@@ -2337,7 +2362,7 @@ async function waitForCompatibleMemoryService(
   lock?: MemoryServerLock
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  let lastProbe: HttpProbeResult | "incompatible" = "unreachable";
+  let lastProbe: HttpProbeResult | "incompatible" | "starting" = "unreachable";
   while (Date.now() < deadline) {
     if (child?.exitDescription) {
       throw new Error(
@@ -2427,13 +2452,13 @@ async function adoptOrRecoverMemoryOwner(
   memoryEntry: string,
   healthUrl: string,
   healthHeaders: Record<string, string>,
-  lock: MemoryServerLock
+  lock: MemoryServerLock,
+  desktopExecutable: string | undefined
 ): Promise<boolean> {
   let progress = sampleMemoryOwnerProgress(lock.pid, runtimeConfig.memoryDatabasePath);
   for (let window = 0; window < MEMORY_OWNER_PROGRESS_WINDOWS; window += 1) {
     try {
       await waitForExistingMemoryService(healthUrl, healthHeaders, lock);
-      return true;
     } catch (error) {
       // An owner that released the database, or a new one that replaced it,
       // is left to the caller: it starts or adopts a service of its own.
@@ -2442,13 +2467,59 @@ async function adoptOrRecoverMemoryOwner(
       const current = sampleMemoryOwnerProgress(lock.pid, runtimeConfig.memoryDatabasePath);
       if (!hasMemoryOwnerProgressed(progress, current)) {
         console.warn(`Stopping unresponsive Memory owner pid ${lock.pid}: ${errorMessage(error)}`);
+        if (!(await desktopOwnsMemoryInstallation(runtimeConfig.configPath, desktopExecutable))) {
+          throw new Error("Refusing to stop an independently installed Memory service; use its own installer");
+        }
         await stopLockedMemoryService(runtimeConfig, memoryEntry);
         return false;
       }
       progress = current;
+      continue;
     }
+    const authentication = await probeMemoryAuthentication(runtimeConfig.memoryBaseUrl, runtimeConfig.memoryToken);
+    if (authentication === "authenticated") return true;
+    if (authentication === "mismatch" || authentication === "starting") {
+      throw new Error(`Memory authentication is ${authentication}; refusing to replace its owner`);
+    }
+    await replaceLegacyMemoryOwner(runtimeConfig, memoryEntry, lock, desktopExecutable);
+    return false;
   }
   throw new Error(`Memory service pid ${lock.pid} kept working on the database without becoming ready at ${healthUrl}`);
+}
+
+async function desktopOwnsMemoryInstallation(configPath: string, desktopExecutable = process.execPath): Promise<boolean> {
+  const pointer = join(dirname(configPath), "memory-service", "current.json");
+  if (!existsSync(pointer)) return true; // Direct Desktop child; caller must verify its bundled entry and live lock.
+  const installed = await readInstalledMemoryRuntime(configPath);
+  return installed?.runtimeExecutable === resolve(desktopExecutable);
+}
+
+async function replaceLegacyMemoryOwner(
+  runtimeConfig: PackagedRuntimeConfig,
+  memoryEntry: string,
+  lock: MemoryServerLock | null | undefined,
+  desktopExecutable: string | undefined
+): Promise<void> {
+  const serviceHome = join(dirname(runtimeConfig.configPath), "memory-service");
+  const state = await readFile(join(serviceHome, "runtime.json"), "utf8")
+    .then((text) => JSON.parse(text) as unknown).catch(() => undefined);
+  if (!lock || lock.pid === process.pid || !isRecord(state) || state.pid !== lock.pid
+    || state.endpoint !== runtimeConfig.memoryBaseUrl
+    || typeof state.configPath !== "string" || resolve(state.configPath) !== resolve(runtimeConfig.configPath)
+    || typeof state.sqlitePath !== "string" || resolve(state.sqlitePath) !== resolve(runtimeConfig.memoryDatabasePath)
+    || !(await desktopOwnsMemoryInstallation(runtimeConfig.configPath, desktopExecutable))
+    || !isPackagedMemoryServiceProcess(lock.pid, memoryEntry, serviceHome, desktopExecutable)) {
+    throw new Error("Memory authentication is unverified; refusing to restart an unverified owner. Upgrade that service with its own installer");
+  }
+  // Graceful shutdown only after verifying ownership, readiness and the same DB lock.
+  const current = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+  if (current?.pid !== lock.pid) throw new Error("Memory ownership changed before authentication upgrade");
+  await requestMemoryServiceShutdown({ baseUrl: runtimeConfig.memoryBaseUrl, token: runtimeConfig.memoryToken });
+  await waitForHttpServiceStop(`${runtimeConfig.memoryBaseUrl}/api/v1/health`, {}, MEMORY_RESTART_STOP_TIMEOUT_MS);
+  if (!(await waitForProcessExit(lock.pid, MEMORY_RESTART_STOP_TIMEOUT_MS))
+    || readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) {
+    throw new Error("Memory owner has not released its database after authentication upgrade");
+  }
 }
 
 async function memoryVerificationEntry(
@@ -2567,11 +2638,14 @@ function isPackagedMemoryServiceProcess(
   pid: number,
   memoryEntry: string,
   serviceHome: string,
-  exactEntryOnly = false
+  desktopExecutable = process.execPath
 ): boolean {
   const identity = readProcessIdentity(pid);
-  return identity !== undefined
-    && matchesMemoryServiceCommandLine(identity.commandLine, memoryEntry, serviceHome, exactEntryOnly);
+  if (!identity) return false;
+  const command = normalizeProcessPath(identity.commandLine.trimStart());
+  const executable = normalizeProcessPath(resolve(desktopExecutable));
+  return (command.startsWith(executable + " ") || command.startsWith(`"${executable}" `))
+    && matchesMemoryServiceCommandLine(identity.commandLine, memoryEntry, serviceHome, true);
 }
 
 /**

@@ -1023,7 +1023,7 @@ if [ -d "$ROOT_DIR/Memory/AgentSourceCore/dist/src" ]; then
 fi
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
 cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
-cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"
+cp -R "$MEMORY_DIR/dist/adapters" "$RUNTIME_DIR/memory/adapters"
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
 node "$ROOT_DIR/scripts/internal/shared/check-office-slim-assets.mjs" "$RUNTIME_DIR/memmy-agent"
 package_step_start "Build Computer History native helpers"

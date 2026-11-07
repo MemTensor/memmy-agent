@@ -1003,7 +1003,7 @@ cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 mkdir -p "$RUNTIME_DIR/memory/dist"
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
 cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
-cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"
+cp -R "$MEMORY_DIR/dist/adapters" "$RUNTIME_DIR/memory/adapters"
 package_step_start "Create Windows Memory runtime manifest"
 create_memory_runtime_manifest
 

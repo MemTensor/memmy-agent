@@ -51,6 +51,7 @@ rm -rf "$WORK_DIR"
 mkdir -p "$STAGE_DIR" "$OUT_DIR"
 
 rm -rf "$CLI_DIR/dist/build"
+npm run build --workspace @memmy/agent-source-core
 npx tsc -p "$CLI_DIR/tsconfig.json"
 
 mkdir -p "$STAGE_DIR/dist/cli"
@@ -61,8 +62,8 @@ cp -R "$CLI_DIR/skills" "$STAGE_DIR/dist/cli/skills"
 MEMMY_MEMORY_VERSION="$VERSION" MEMORY_PACKAGE_JSON="$MEMORY_ROOT/package.json" STAGE_PACKAGE_JSON="$STAGE_DIR/package.json" node --input-type=module <<'NODE'
 import { readFileSync, writeFileSync } from "node:fs";
 const root = JSON.parse(readFileSync(process.env.MEMORY_PACKAGE_JSON, "utf8"));
-const dependencies = {};
-for (const name of ["yaml", "jsonc-parser", "better-sqlite3"]) {
+const dependencies = { ...JSON.parse(readFileSync("./AgentSourceCore/package.json", "utf8")).dependencies };
+for (const name of ["yaml", "jsonc-parser", "better-sqlite3", "dotenv", "zod"]) {
   if (root.dependencies?.[name]) {
     dependencies[name] = root.dependencies[name];
   }
@@ -81,6 +82,12 @@ NODE
   cd "$STAGE_DIR"
   npm install --omit=dev --no-audit --no-fund
 )
+
+# The CLI shares the Memory connection resolver with Desktop via this private workspace.
+CORE_STAGE="$STAGE_DIR/node_modules/@memmy/agent-source-core"
+mkdir -p "$CORE_STAGE/dist"
+cp "$MEMORY_ROOT/AgentSourceCore/package.json" "$CORE_STAGE/"
+cp -R "$MEMORY_ROOT/AgentSourceCore/dist/src" "$CORE_STAGE/dist/"
 
 if [[ "$TARGET" == windows-* ]]; then
   cat > "$STAGE_DIR/memmy-memory.cmd" <<'EOF'

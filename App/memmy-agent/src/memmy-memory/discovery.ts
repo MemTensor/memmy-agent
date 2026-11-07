@@ -85,16 +85,20 @@ export function discoverMemmyMemoryConnection(options: MemmyMemoryDiscoveryOptio
     runtime.baseUrl ??
     storage.endpoint ??
     DEFAULT_MEMOS_MEMORY_URL;
-  const token =
-    env.MEMMY_MEMORY_TOKEN ??
-    env.MEMORY_SERVICE_TOKEN ??
-    runtime.token ??
-    readTokenFile(runtime.tokenFile, homeDir) ??
-    storage.token ??
-    null;
+  const endpoint = normalizeMemmyMemoryBaseUrl(String(baseUrl));
+  const configuredEndpoint = normalizeMemmyMemoryBaseUrl(storage.endpoint);
+  const runtimeEndpoint = normalizeMemmyMemoryBaseUrl(runtime.url ?? runtime.baseUrl ?? configuredEndpoint);
+  let token = env.MEMMY_MEMORY_TOKEN?.trim() || env.MEMORY_SERVICE_TOKEN?.trim();
+  if (!token && runtimeEndpoint === endpoint) {
+    const inline = typeof runtime.token === "string" ? runtime.token.trim() : "";
+    token = inline || readTokenFile(runtime.tokenFile, homeDir) || undefined;
+  }
+  if (!token && configuredEndpoint === endpoint && typeof storage.token === "string") {
+    token = storage.token.trim();
+  }
 
   return {
-    baseUrl: normalizeMemmyMemoryBaseUrl(String(baseUrl)),
+    baseUrl: endpoint,
     token: token ? String(token) : null,
     source: env.MEMMY_MEMORY_URL || env.MEMORY_SERVICE_URL
       ? "env"

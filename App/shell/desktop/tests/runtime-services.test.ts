@@ -138,7 +138,7 @@ describe("packaged desktop runtime config", () => {
         agentWorkspace: "/memmy/workspace",
         memoryDatabasePath: "/memmy/memory.sqlite",
         memoryBaseUrl: "http://127.0.0.1:18960",
-        memoryToken: "",
+        memoryToken: "fixture-secret",
         memoryListenHost: "127.0.0.1",
         memoryListenPort: 18960,
         agentGatewayBaseUrl: "http://127.0.0.1:18980",
@@ -173,6 +173,10 @@ describe("packaged desktop runtime config", () => {
       "    response.writeHead(200, { 'content-type': 'application/json' });",
       "    response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));",
       "    return;",
+      "  }",
+      "  if (request.url === '/api/v1/auth/check') {",
+      "    response.writeHead(request.headers.authorization === 'Bearer ' + process.env.MEMMY_MEMORY_TOKEN ? 200 : 401);",
+      "    response.end(JSON.stringify({ authenticated: true, authVersion: 1 })); return;",
       "  }",
       "  response.writeHead(404);",
       "  response.end();",
@@ -217,7 +221,7 @@ describe("packaged desktop runtime config", () => {
       agentWorkspace: join(home, "workspace"),
       memoryDatabasePath: join(home, "memory.sqlite"),
       memoryBaseUrl: "http://127.0.0.1:" + port,
-      memoryToken: "",
+      memoryToken: "fixture-secret",
       memoryListenHost: "127.0.0.1",
       memoryListenPort: port,
       agentGatewayBaseUrl: "http://127.0.0.1:18980",
@@ -365,13 +369,18 @@ describe("packaged desktop runtime config", () => {
 
     const startServer = async () => {
       activeServer = createServer((request, response) => {
-        expect(request.headers.authorization).toBe("Bearer memory-token");
+        if (request.url === "/api/v1/auth/check") {
+          response.writeHead(request.headers.authorization === "Bearer memory-token" ? 200 : 401);
+          response.end(JSON.stringify({ authenticated: true, authVersion: 1 })); return;
+        }
         if (request.method === "GET" && request.url === "/api/v1/health") {
+          expect(request.headers.authorization).toBeUndefined();
           response.writeHead(200, { "content-type": "application/json" });
-          response.end(JSON.stringify({ ok: true }));
+          response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));
           return;
         }
         if (request.method === "POST" && request.url === "/api/v1/admin/shutdown") {
+          expect(request.headers.authorization).toBe("Bearer memory-token");
           shutdownRequests += 1;
           response.writeHead(200, { "content-type": "application/json" });
           response.end(JSON.stringify({ accepted: true }));
@@ -528,6 +537,53 @@ describe("packaged desktop runtime config", () => {
     expect(recordValue(recordValue(await readYaml(configPath), "memmyMemory"), "storage")).not.toHaveProperty("token");
   });
 
+  it("probes two origins with only the credentials configured for each", async () => {
+    const root = await makeTempRoot();
+    async function listener(token: string) {
+      const requests: [string | undefined, string | undefined][] = [];
+      const server = createServer((req, res) => {
+        requests.push([req.url, req.headers.authorization]);
+        const health = req.url === "/api/v1/health";
+        const authenticated = req.headers.authorization === `Bearer ${token}`;
+        res.writeHead(health || authenticated ? 200 : 401, { "content-type": "application/json" });
+        res.end(JSON.stringify(health ? { ok: true, protocolVersion: 1 } : { authenticated, authVersion: 1 }));
+      });
+      testServers.push(server);
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      return { endpoint: `http://127.0.0.1:${address.port}`, requests };
+    }
+    const a = await listener("file-a");
+    const b = await listener("legacy-b");
+    const configPath = join(root, "config.yaml");
+    await writeFile(configPath, YAML.stringify({ memmyMemory: { endpoint: a.endpoint, token: "file-a" } }));
+    const probe = async (env: NodeJS.ProcessEnv) => {
+      const config = await preparePackagedRuntimeConfig({ env: { MEMMY_HOME: root, ...env } });
+      await ensureMemoryService({ memoryEntry: "unused", agentEntry: "unused" }, config, [], {
+        appPath: root, appDatabaseFile: join(root, "app.sqlite"), resourcesPath: root, logDirectory: root, logLevel: "info"
+      });
+    };
+    await expect(probe({ MEMMY_MEMORY_URL: b.endpoint })).rejects.toThrow(/credential/);
+    expect(b.requests).toEqual([]);
+    const legacy = { MEMORY_SERVICE_URL: b.endpoint, MEMORY_SERVICE_TOKEN: "legacy-b" };
+    await probe({ ...legacy, MEMMY_MEMORY_URL: a.endpoint });
+    await probe(legacy);
+    for (const [service, token] of [[a, "file-a"], [b, "legacy-b"]] as const) {
+      expect(service.requests).toEqual([["/api/v1/health", undefined], ["/api/v1/auth/check", undefined],
+        ["/api/v1/auth/check", `Bearer ${token}`]]);
+    }
+    // An unreachable environment override must not start a local child or reconfigure A.
+    const unavailable = createServer();
+    await new Promise<void>(resolve => unavailable.listen(0, "127.0.0.1", resolve));
+    const address = unavailable.address();
+    if (!address || typeof address === "string") throw new Error("expected TCP address");
+    await new Promise<void>(resolve => unavailable.close(() => resolve()));
+    await expect(probe({ MEMMY_MEMORY_URL: `http://127.0.0.1:${address.port}`, MEMMY_MEMORY_TOKEN: "external" }))
+      .rejects.toThrow(/overridden Memory endpoint is unreachable/i);
+    expect(await readYaml(configPath)).toMatchObject({ memmyMemory: { storage: { endpoint: a.endpoint, token: "file-a" } } });
+  });
+
   it("does not provision a local token when the endpoint is overridden to a remote service", async () => {
     const memmyHome = await makeTempRoot();
     const runtime = await preparePackagedRuntimeConfig({
@@ -582,7 +638,11 @@ describe("packaged desktop runtime config", () => {
       sqlitePath: databasePath
     }));
 
-    const server = createServer((_request, response) => {
+    const server = createServer((request, response) => {
+      if (request.url === "/api/v1/auth/check") {
+        response.writeHead(request.headers.authorization === "Bearer fixture-secret" ? 200 : 401);
+        response.end(JSON.stringify({ authenticated: true, authVersion: 1 })); return;
+      }
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));
     });
@@ -597,7 +657,7 @@ describe("packaged desktop runtime config", () => {
         agentWorkspace: join(root, "workspace"),
         memoryDatabasePath: databasePath,
         memoryBaseUrl: `http://127.0.0.1:${port}`,
-        memoryToken: "",
+        memoryToken: "fixture-secret",
         memoryListenHost: "127.0.0.1",
         memoryListenPort: port,
         agentGatewayBaseUrl: "http://127.0.0.1:18980",
@@ -621,7 +681,11 @@ describe("packaged desktop runtime config", () => {
   it("reuses a compatible degraded Memory service started by dev-start", async () => {
     const root = await makeTempRoot();
     const databasePath = join(root, "memory.sqlite");
-    const server = createServer((_request, response) => {
+    const server = createServer((request, response) => {
+      if (request.url === "/api/v1/auth/check") {
+        response.writeHead(request.headers.authorization === "Bearer fixture-secret" ? 200 : 401);
+        response.end(JSON.stringify({ authenticated: true, authVersion: 1 })); return;
+      }
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
         ok: false,
@@ -643,7 +707,7 @@ describe("packaged desktop runtime config", () => {
         agentWorkspace: join(root, "workspace"),
         memoryDatabasePath: databasePath,
         memoryBaseUrl: `http://127.0.0.1:${address.port}`,
-        memoryToken: "",
+        memoryToken: "fixture-secret",
         memoryListenHost: "127.0.0.1",
         memoryListenPort: address.port,
         agentGatewayBaseUrl: "http://127.0.0.1:18980",

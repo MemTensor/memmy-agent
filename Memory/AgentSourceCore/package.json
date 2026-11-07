@@ -20,6 +20,10 @@
       "types": "./dist/src/index.d.ts",
       "default": "./dist/src/index.js"
     },
+    "./memory-connection": {
+      "types": "./dist/src/memory-connection.d.ts",
+      "default": "./dist/src/memory-connection.js"
+    },
     "./scan-state": {
       "types": "./dist/src/scan-state.d.ts",
       "default": "./dist/src/scan-state.js"
