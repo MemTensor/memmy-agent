@@ -30,12 +30,16 @@ export interface CursorVscdbSource {
   mainComposerIds(): Iterable<string>;
   /** Parsed `cursorDiskKV` row `composerData:{composerId}`. */
   composerData(composerId: string): unknown;
+  /** Parsed header-index chunk from cursorDiskKV. */
+  conversationHeaderChunk?(composerId: string, index: number): unknown;
   /** Parsed `cursorDiskKV` row `bubbleId:{composerId}:{bubbleId}`. */
   bubble(composerId: string, bubbleId: string): unknown;
 }
 
 const USER_BUBBLE = 1;
 const ASSISTANT_BUBBLE = 2;
+// Cursor's SimulatedMsgReason.BACKGROUND_TASK_COMPLETION.
+const BACKGROUND_TASK_COMPLETION = 3;
 
 interface CursorBubble {
   bubbleId: string;
@@ -43,6 +47,7 @@ interface CursorBubble {
   createdAt: string;
   text: string;
   requestId: string;
+  backgroundTaskNotification: boolean;
   tool?: Record<string, unknown>;
 }
 
@@ -59,7 +64,8 @@ export async function* readCursorComposer(
   signal?.throwIfAborted();
   const data = source.composerData(composerId);
   if (!isRecord(data) || isRecord(data.subagentInfo)) return;
-  const headers = Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+  const headers = readConversationHeaders(source, composerId, data);
+  if (!headers) return;
   const composerStatus = text(data.status);
 
   let current: CursorBubble[] = [];
@@ -109,6 +115,11 @@ export async function* readCursorComposer(
     if (!isRecord(header)) continue;
     const bubble = readBubble(source, composerId, header);
     if (!bubble) continue;
+    // Close the real turn before the notification and ignore its replies until the next user turn.
+    if (bubble.backgroundTaskNotification) {
+      yield* finish(false);
+      continue;
+    }
     // A user bubble with no typed text is an injected context message, not a new turn.
     if (bubble.type === USER_BUBBLE && bubble.text.trim()) {
       yield* finish(false);
@@ -135,11 +146,12 @@ export function resolveCursorTurnId(
   if (!requestId) return undefined;
   const data = source.composerData(composerId);
   if (!isRecord(data)) return undefined;
-  const headers = Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+  const headers = readConversationHeaders(source, composerId, data);
+  if (!headers) return undefined;
   for (const header of headers) {
     if (!isRecord(header) || header.type !== USER_BUBBLE) continue;
     const bubble = readBubble(source, composerId, header);
-    if (bubble?.requestId === requestId && bubble.text.trim()) return bubble.bubbleId;
+    if (bubble?.requestId === requestId && !bubble.backgroundTaskNotification && bubble.text.trim()) return bubble.bubbleId;
   }
   return undefined;
 }
@@ -155,6 +167,39 @@ export async function readCursorSourceTurn(
   return selectSourceTurn(readCursorComposer(source, expected.conversationId), { conversationId: expected.conversationId, turnId });
 }
 
+/** A declared chunk log is authoritative; never fall back to a partial inline index. */
+function readConversationHeaders(
+  source: CursorVscdbSource,
+  composerId: string,
+  data: Record<string, unknown>
+): unknown[] | undefined {
+  if (data.headerLog == null) {
+    return Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+  }
+  const log = data.headerLog;
+  if (!isRecord(log)) return undefined;
+  const { chunkSize, chunkCount, count } = log;
+  if (typeof chunkSize !== "number" || !Number.isSafeInteger(chunkSize) || chunkSize <= 0
+    || typeof chunkCount !== "number" || !Number.isSafeInteger(chunkCount) || chunkCount < 0
+    || typeof count !== "number" || !Number.isSafeInteger(count) || count < 0
+    || chunkCount > 65_536 // Cursor's maximum number of header chunks.
+    || !source.conversationHeaderChunk) return undefined;
+  const headers: unknown[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < chunkCount; index++) {
+    const chunk = source.conversationHeaderChunk(composerId, index);
+    if (!Array.isArray(chunk) || headers.length + chunk.length > count) return undefined;
+    for (const header of chunk) {
+      if (!isRecord(header) || typeof header.bubbleId !== "string" || !header.bubbleId || seen.has(header.bubbleId)) {
+        return undefined;
+      }
+      seen.add(header.bubbleId);
+      headers.push(header);
+    }
+  }
+  return headers.length === count ? headers : undefined;
+}
+
 function readBubble(source: CursorVscdbSource, composerId: string, header: Record<string, unknown>): CursorBubble | undefined {
   const bubbleId = text(header.bubbleId);
   if (!bubbleId) return undefined;
@@ -168,6 +213,7 @@ function readBubble(source: CursorVscdbSource, composerId: string, header: Recor
     createdAt: iso(raw.createdAt) || iso(header.createdAt),
     text: text(raw.text).trim(),
     requestId: text(raw.requestId),
+    backgroundTaskNotification: type === USER_BUBBLE && raw.isSimulatedMsg === true && raw.simulatedMsgReason === BACKGROUND_TASK_COMPLETION,
     tool: isRecord(raw.toolFormerData) ? raw.toolFormerData : undefined
   };
 }
