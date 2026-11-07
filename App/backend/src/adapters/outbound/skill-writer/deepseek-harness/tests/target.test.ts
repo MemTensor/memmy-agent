@@ -104,6 +104,33 @@ describe("DeepSeek Harness skill target", () => {
     await expect(target.isInstalled("deepseek_harness")).resolves.toBe(false);
   });
 
+  it("rejects malformed plugin config and accepts a structurally valid legacy config", async () => {
+    const rootDirectory = createRoot();
+    const target = createDeepseekHarnessSkillTarget({ rootDirectory, memmyConfigPath: join(rootDirectory, "config.yaml") });
+    await target.installPlugin!("deepseek_harness");
+    const configPath = join(installedPluginDirectory(rootDirectory), "memmy-memory-config.json");
+    const installed = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(true);
+
+    const legacy = { ...installed };
+    delete legacy.bridge_integrity;
+    writeFileSync(configPath, JSON.stringify(legacy));
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(true);
+
+    for (const malformed of ["{}", "[]", "null", "not-json"]) {
+      writeFileSync(configPath, malformed);
+      await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+    }
+    writeFileSync(configPath, JSON.stringify({ ...legacy, endpoint: "" }));
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+    writeFileSync(configPath, JSON.stringify({ ...legacy, token: 7 }));
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+    writeFileSync(configPath, JSON.stringify({ ...legacy, userId: 7 }));
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+    writeFileSync(configPath, JSON.stringify({ ...legacy, bridge_integrity: "1:not-a-digest" }));
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+  });
+
   it("restores an empty patch after uninstall", async () => {
     const rootDirectory = createRoot();
     const patchPath = join(rootDirectory, "cordis.patch.yml");

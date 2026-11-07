@@ -80,16 +80,13 @@ export function createDeepseekHarnessSkillTarget(
       const manifest = await readTextFile(join(pluginDirectory, "package.json"));
       if (index !== DEEPSEEK_HARNESS_PLUGIN_INDEX || client !== DEEPSEEK_HARNESS_PLUGIN_CLIENT
         || manifest !== JSON.stringify(createDeepseekHarnessPluginPackageManifest(), null, 2) + "\n") return false;
-      const config = await readTextFile(configPath);
-      let integrity: unknown;
-      try {
-        integrity = JSON.parse(config)?.bridge_integrity;
-      } catch {
-        return false;
-      }
+      const config = parseDeepseekHarnessPluginConfig(await readTextFile(configPath));
+      if (!config) return false;
       const bridge = await readTextFile(bridgePath);
       // Older installs have no recorded digest. Their installing runtime can still verify them.
-      return integrity === undefined ? bridge === await loadMemmyWorkspaceBridgeRuntimeAsset() : integrity === bridgeIntegrity(bridge);
+      return config.bridgeIntegrity === undefined
+        ? bridge === await loadMemmyWorkspaceBridgeRuntimeAsset()
+        : config.bridgeIntegrity === bridgeIntegrity(bridge);
     },
 
     async installPlugin() {
@@ -139,6 +136,28 @@ function parseManifest(text: string): { name?: string; type?: string; exports?: 
   } catch {
     return null;
   }
+}
+
+function parseDeepseekHarnessPluginConfig(text: string): { bridgeIntegrity?: string } | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isRecord(value)
+    || typeof value.memmy_config_path !== "string" || !value.memmy_config_path.trim()
+    || typeof value.endpoint !== "string" || !value.endpoint.trim()
+    || typeof value.token !== "string") return null;
+  if (("userId" in value && typeof value.userId !== "string")
+    || ("workspaceHostId" in value && typeof value.workspaceHostId !== "string")) return null;
+  if ("bridge_integrity" in value
+    && (typeof value.bridge_integrity !== "string" || !/^\d+:[0-9a-f]{64}$/u.test(value.bridge_integrity))) return null;
+  return typeof value.bridge_integrity === "string" ? { bridgeIntegrity: value.bridge_integrity } : {};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 async function isNonemptyFile(path: string): Promise<boolean> {
