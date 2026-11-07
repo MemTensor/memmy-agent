@@ -1,26 +1,29 @@
 /** Bootstrap service tests. */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AppStateStore } from "../../infrastructure/app-state-store/index.js";
 import { createBootstrapService } from "../bootstrap-service.js";
 
 describe("BootstrapService", () => {
-  it("includes the remote lottery status in bootstrap for logged-out clients", async () => {
-    const lotteryStatus = {
+  it.each(["signed-out", "signed-in"] as const)("does not poll or emit the retired lottery during repeated %s bootstrap", async (session) => {
+    const getLotteryStatus = vi.fn(async () => ({
       shouldShow: true,
-      startAt: 1790121600000,
-      endAt: 1790812800000,
-      serverNow: 1790456789000,
-      landingUrl: "https://memmy.cn/activity/mid-autumn"
-    };
-    const service = createBootstrapService(createUnauthenticatedOptions({
-      async getLotteryStatus() {
-        return lotteryStatus;
-      }
+      startAt: 1000,
+      endAt: 3000,
+      serverNow: 2000,
+      landingUrl: "https://legacy-activity.example.invalid/activity/"
     }));
+    const options = session === "signed-in"
+      ? createAuthenticatedAccountOptions({ getLotteryStatus })
+      : createUnauthenticatedOptions({ getLotteryStatus });
+    const service = createBootstrapService(options);
 
-    await expect(service.getBootstrap()).resolves.toMatchObject({
-      lotteryStatus
-    });
+    const first = await service.getBootstrap();
+    const refreshed = await service.getBootstrap();
+
+    expect(getLotteryStatus).not.toHaveBeenCalled();
+    expect(first).not.toHaveProperty("lotteryStatus");
+    expect(refreshed).not.toHaveProperty("lotteryStatus");
+    expect(first).toHaveProperty("promotions");
   });
 
   it("refreshes token usage from cloud for authenticated account sessions", async () => {

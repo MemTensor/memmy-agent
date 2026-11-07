@@ -20,12 +20,9 @@ import { usePluginUi } from "./app/plugin-ui-context.js";
 import { AgentSourceScanReconciler } from "./app/agent-source-scan-reconciler.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
-import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
-import { HistoryLaunchPromptHost } from "./components/history-launch-prompt-host.js";
+import { AccountNotificationHosts } from "./components/account-notification-hosts.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
 import { NotificationCenterProvider } from "./components/notification-center.js";
-import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
-import { TaskTokenGiftPromptHost } from "./components/task-token-gift-prompt-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -346,11 +343,7 @@ function RuntimeApp() {
         <AgentSourceScanReconciler />
           <AppRouter onRetry={retry} />
           <ActiveRecordingBar client={clients?.memmyAgent ?? null} />
-<TaskTokenGiftPromptHost />
-
-          <HistoryLaunchPromptHost />
-          <TokenCreditToastHost />
-          <GithubStarPromptHost />
+          <AccountNotificationHosts />
           {state.invitationToast ? (
           <InviteResultToast
             key={state.invitationToast.id}
