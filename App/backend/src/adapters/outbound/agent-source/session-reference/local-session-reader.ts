@@ -107,6 +107,25 @@ export class LocalSessionReadError extends Error {
   }
 }
 
+/** One agent store a scan should read, and the store it must read it from. */
+export interface LocalSessionScanRequest {
+  sourceId: string;
+  /** The store this source was seen at; a reader that only has the source id must refuse a store it does not own. */
+  dataPath: string;
+  /** How many of that source's most recent sessions to read. */
+  limit: number;
+}
+
+/**
+ * Reads the given stores somewhere else and answers with what it read, keyed by source id.
+ *
+ * <p>A source it does not answer for is read on this thread as usual, so a reader that cannot keep up leaves the
+ * result unchanged and only gives back the responsiveness it was meant to save.</p>
+ */
+export type LocalSessionScanOffload = (
+  requests: readonly LocalSessionScanRequest[]
+) => Promise<ReadonlyMap<string, readonly LocalSession[]>>;
+
 export interface CreateLocalSessionReaderDeps {
   registry: SourceRegistry;
   /** When set, each scan reads this list instead of `registry.list()`, so added agents can be loaded from disk. */
@@ -116,6 +135,11 @@ export interface CreateLocalSessionReaderDeps {
   now?: () => number;
   /** 判断某份存储有没有变的廉价摘要；默认浅层 stat 一遍，测试里可以换成假的。 */
   storeDigest?: StoreDigest;
+  /**
+   * 把读盘交给别的线程。读一份存储是几秒的同步解析，留在调用方线程上会把同时到达的请求一起堵住；
+   * 没交出去、或者交出去没读成的源，照旧在本线程读。
+   */
+  offloadScan?: LocalSessionScanOffload;
 }
 
 /** Creates the local session reader. */
@@ -162,32 +186,57 @@ export function createLocalSessionReader(deps: CreateLocalSessionReaderDeps): Lo
     return list.map((adapter) => adapter.descriptor.sourceId).join(",");
   }
 
+  /**
+   * 读这几份存储：先问别的线程能不能代读，回来的用它，没回来的在本线程读。
+   *
+   * <p>代读没答的源不能当成「读了但一个会话也没有」：前者要自己补读，后者就是空列表。</p>
+   */
+  async function readStores(list: readonly SourceAdapter[]): Promise<ReadonlyMap<string, readonly LocalSession[]>> {
+    if (!list.length || !deps.offloadScan) {
+      return new Map();
+    }
+    try {
+      return await deps.offloadScan(list.map((adapter) => ({
+        sourceId: adapter.descriptor.sourceId,
+        dataPath: adapter.descriptor.dataPath,
+        limit: sessionsPerSource
+      })));
+    } catch {
+      // 代读整段挂了就全留在本线程：结果一样，只是慢回原来的样子。
+      return new Map();
+    }
+  }
+
   function scan(list: readonly SourceAdapter[], digests: Map<string, string | null>): Promise<LocalSession[]> {
-    loading ??= Promise.all(list.map(async (adapter) => {
+    loading ??= (async () => {
+      /** 摘要对得上、已经在上次扫描里的源不必再读。 */
+      const pending: SourceAdapter[] = [];
+      for (const adapter of list) {
         const sourceId = adapter.descriptor.sourceId;
         const digest = digests.get(sourceId) ?? null;
         const cached = perSource.get(sourceId);
-        if (cached && digest !== null && cached.digest === digest) {
-          return cached.sessions;
+        if (!cached || digest === null || cached.digest !== digest) {
+          pending.push(adapter);
         }
-        const sessions = await readRecentSessions(adapter, sessionsPerSource);
-        perSource.set(sourceId, { digest, sessions });
-        return sessions;
-      }))
-      .then(() => {
-        // 掉出扫描范围的 Agent 不留旧数据：关掉的 Agent 再打开时应该从头读一遍。
-        const visible = new Set(list.map((adapter) => adapter.descriptor.sourceId));
-        for (const sourceId of perSource.keys()) {
-          if (!visible.has(sourceId)) perSource.delete(sourceId);
-        }
-        const sessions = list.flatMap((adapter) => perSource.get(adapter.descriptor.sourceId)?.sessions ?? []);
-        snapshot = { loadedAt: now(), sessions };
-        snapshotSources = sourceKey(list);
-        return sessions;
-      })
-      .finally(() => {
-        loading = null;
-      });
+      }
+      const offloaded = await readStores(pending);
+      for (const adapter of pending) {
+        const sourceId = adapter.descriptor.sourceId;
+        const sessions = offloaded.get(sourceId) ?? await readRecentSessions(adapter, sessionsPerSource);
+        perSource.set(sourceId, { digest: digests.get(sourceId) ?? null, sessions: [...sessions] });
+      }
+      // 掉出扫描范围的 Agent 不留旧数据：关掉的 Agent 再打开时应该从头读一遍。
+      const visible = new Set(list.map((adapter) => adapter.descriptor.sourceId));
+      for (const sourceId of perSource.keys()) {
+        if (!visible.has(sourceId)) perSource.delete(sourceId);
+      }
+      const sessions = list.flatMap((adapter) => perSource.get(adapter.descriptor.sourceId)?.sessions ?? []);
+      snapshot = { loadedAt: now(), sessions };
+      snapshotSources = sourceKey(list);
+      return sessions;
+    })().finally(() => {
+      loading = null;
+    });
     return loading;
   }
 
