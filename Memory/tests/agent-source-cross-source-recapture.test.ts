@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, type MemoryDb } from "../src/index.js";
 import { createCodexSourceAdapter } from "../src/agent-source/adapters/codex/index.js";
 import { createCursorSourceAdapter } from "../src/agent-source/adapters/cursor/index.js";
@@ -52,7 +52,7 @@ function writeCursor(root: string, at: string) {
   return { storageRoot, globalStateDbPath, transcript };
 }
 
-function writeCodex(root: string, thread: string, at: string, texts = [{ query, answer }]) {
+function writeCodex(root: string, thread: string, at: string, texts = [{ query, answer }], timestamped = true) {
   const sessionsRoot = join(root, "codex", "sessions");
   mkdirSync(sessionsRoot, { recursive: true });
   const events: object[] = [{ timestamp: at, type: "session_meta", payload: {
@@ -72,19 +72,21 @@ function writeCodex(root: string, thread: string, at: string, texts = [{ query, 
       { timestamp: timestamp(3000), type: "event_msg", payload: { type: "task_complete", turn_id: turnId } }
     );
   }
-  writeFileSync(join(sessionsRoot, `rollout-${thread}.jsonl`), events.map(row => JSON.stringify(row)).join("\n") + "\n");
+  const filename = timestamped ? `rollout-${at.slice(0, 19).replace(/:/gu, "-")}-${thread}.jsonl` : `rollout-${thread}.jsonl`;
+  writeFileSync(join(sessionsRoot, filename), events.map(row => JSON.stringify(row)).join("\n") + "\n");
   return sessionsRoot;
 }
 
-function writeImportLedger(root: string, transcript: string) {
-  // Model the ledger link described by #691. v1.2.7 does not read this file.
+function writeImportLedger(root: string, transcript: string, legacy = false) {
+  // Use the actual Cursor import protocol reported in PR #832's review.
   const path = join(root, "codex", "external_agent_session_imports.json");
   const record = {
     source_path: transcript,
-    content_hash: createHash("sha256").update(readFileSync(transcript)).digest("hex"),
+    [legacy ? "content_hash" : "content_sha256"]: createHash("sha256").update(readFileSync(transcript)).digest("hex"),
     imported_thread_id: importedThreadId
   };
-  writeFileSync(path, JSON.stringify({ version: 1, imports: [record] }, null, 2));
+  writeFileSync(path, JSON.stringify(legacy ? { version: 1, imports: [record] }
+    : { records: [record], detected_connector_records: [] }, null, 2));
   return path;
 }
 
@@ -111,13 +113,14 @@ async function scan(executor: ReturnType<typeof createAgentSourceExecutor>, sour
   return executor.scanStatus();
 }
 
-async function reproduce(name: string, options: { turnJudge?: boolean; incremental?: boolean; extraText?: boolean; split?: boolean } = {}) {
+async function reproduce(name: string, options: { turnJudge?: boolean; incremental?: boolean; extraText?: boolean; split?: boolean; legacyLedger?: boolean; plainFilename?: boolean } = {}) {
   const calls: Parameters<typeof createBatchReflectionLlm>[0] = [];
   const base = options.turnJudge ? DEFAULT_MEMMY_CONFIG : LEGACY_TEST_CONFIG;
   const config = { ...base, userId: "bug819-local-user", algorithm: {
     ...base.algorithm, l3FieldCognition: { ...base.algorithm.l3FieldCognition, enabled: false }
   } };
   const { root, service, db } = fixture.createTestService({ config, llm: createBatchReflectionLlm(calls) });
+  const completeSourceTurn = vi.spyOn(service, "completeSourceTurn");
   // Deterministic activation boundary in this isolated database only.
   db.db.prepare("UPDATE runtime_kv SET value_json = ? WHERE key = 'source_turn_capture_activated_at'")
     .run(JSON.stringify("2026-10-01T00:00:00.000Z"));
@@ -149,9 +152,28 @@ async function reproduce(name: string, options: { turnJudge?: boolean; increment
     writeCodex(root, importedThreadId, options.incremental ? "2026-11-03T10:00:00.000Z" : "2020-02-01T10:00:00.000Z",
       options.split ? [{ query, answer: "I will remember your preference for sweets." },
         { query: "And chocolate cake.", answer: "Your chocolate cake preference is also noted." }]
-        : [{ query: options.extraText ? `Imported Cursor conversation context.\n\n${query}` : query, answer }]);
-    const ledgerPath = writeImportLedger(root, cursor.transcript);
+        : [{ query: options.extraText ? `Imported Cursor conversation context.\n\n${query}` : query, answer }], !options.plainFilename);
+    const ledgerPath = writeImportLedger(root, cursor.transcript, options.legacyLedger);
+    const importedMessages = [];
+    for await (const message of createCodexSourceAdapter({ sessionsRoot }).scan({})) {
+      if (message.conversationId === importedThreadId) importedMessages.push(message);
+    }
+    const expectedImport = {
+      sourcePath: cursor.transcript,
+      contentHash: createHash("sha256").update(readFileSync(cursor.transcript)).digest("hex"),
+      importedThreadId
+    };
+    expect(importedMessages.length).toBeGreaterThan(0);
+    for (const message of importedMessages) {
+      expect(message.rawMeta.externalImport).toEqual(expectedImport);
+    }
+    // Native staging puts the complete turn on its final message only.
+    expect(importedMessages.at(-1)?.rawMeta.sourceTurn).toEqual(expect.objectContaining({ externalImport: expectedImport }));
     const codexScan = await scan(executor, "codex", options.incremental ? "incremental" : "full");
+    const capturedImports = completeSourceTurn.mock.calls.map(([request]) => request)
+      .filter(request => request.sourceTurn.conversationId === importedThreadId);
+    expect(capturedImports.length).toBeGreaterThan(0);
+    for (const request of capturedImports) expect(request.sourceTurn.externalImport).toEqual(expectedImport);
     const afterCodex = snapshot(db);
     const expectedNewMemories = options.split || options.extraText ? (options.split ? 2 : 1) : 0;
     expect(afterCodex.l1).toBe(beforeCopy.l1 + expectedNewMemories);
@@ -164,6 +186,12 @@ async function reproduce(name: string, options: { turnJudge?: boolean; increment
       expect(new Set(afterCodex.qaHashes).size).toBe(1);
     }
     if (options.extraText) expect(new Set(afterCodex.qaHashes).size).toBe(2);
+    if (options.incremental) {
+      await scan(executor, "codex", "incremental");
+      const afterIncrementalRescan = snapshot(db);
+      expect(afterIncrementalRescan.l1).toBe(afterCodex.l1);
+      expect(afterIncrementalRescan.summaryJobs).toHaveLength(afterCodex.summaryJobs.length);
+    }
     await scan(executor, "cursor");
     await scan(executor, "codex");
     const afterRescan = snapshot(db);
@@ -208,4 +236,6 @@ describe("bug819 / #691: avoid cross-source recapture", () => {
   it("reuses an import timestamped later than an established Codex watermark", async () => reproduce("incremental", { incremental: true }));
   it("keeps a changed exchange eligible for capture", async () => reproduce("extra-context", { extraText: true }));
   it("keeps separate Codex turns eligible for capture", async () => reproduce("split-turns", { split: true }));
+  it("recognizes timestamped rollouts with the legacy ledger", async () => reproduce("timestamped-legacy-ledger", { legacyLedger: true }));
+  it("recognizes the actual ledger with plain rollout filenames", async () => reproduce("records-plain-filename", { plainFilename: true }));
 });
