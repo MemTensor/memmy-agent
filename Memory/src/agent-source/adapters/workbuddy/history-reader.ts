@@ -10,6 +10,8 @@ export interface RawWorkbuddyMessage {
   workspacePath: string | null;
   eventType: string;
   toolName?: string;
+  /** The title WorkBuddy generated for the conversation, once it has written one. */
+  sessionTitle?: string;
 }
 
 export async function* readWorkbuddyHistory(
@@ -18,13 +20,30 @@ export async function* readWorkbuddyHistory(
 ): AsyncIterable<RawWorkbuddyMessage> {
   const fallbackConversationId = basename(filePath, ".jsonl");
   let lineNumber = 0;
+  // WorkBuddy writes `ai-title` when it names the conversation and keeps it for the rest of the file,
+  // so remembering the latest one gives every message the title that was current when it arrived.
+  let sessionTitle = "";
   for await (const record of readJsonlObjects(filePath, signal)) {
     lineNumber += 1;
+    const generatedTitle = workbuddyGeneratedTitle(record);
+    if (generatedTitle) {
+      sessionTitle = generatedTitle;
+      continue;
+    }
     const message = toRawWorkbuddyMessage(record, fallbackConversationId, lineNumber);
     if (message) {
-      yield message;
+      yield sessionTitle ? { ...message, sessionTitle } : message;
     }
   }
+}
+
+/** WorkBuddy's own title record: `{"type":"ai-title","aiTitle":"…"}`. */
+function workbuddyGeneratedTitle(record: Record<string, unknown>): string | null {
+  if (record.type !== "ai-title") {
+    return null;
+  }
+  const title = firstString(record.aiTitle, record.title);
+  return title ? title.replace(/\s+/gu, " ").trim() : null;
 }
 
 export function extractWorkbuddyUserMessage(record: Record<string, unknown>, fallbackConversationId: string, lineNumber: number): RawWorkbuddyMessage | null {

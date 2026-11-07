@@ -160,6 +160,7 @@ function toConversationMessage(sourceId: string, rawMessage: RawHermesStateDbMes
     createdAt: rawMessage.createdAt,
     workspacePath: rawMessage.workspacePath,
     gitRoot: rawMessage.gitRoot,
+    ...(rawMessage.sessionTitle ? { sessionTitle: rawMessage.sessionTitle } : {}),
     rawMeta: rawMessage.rawMeta
   };
 }

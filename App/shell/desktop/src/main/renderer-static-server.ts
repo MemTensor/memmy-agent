@@ -9,6 +9,9 @@ const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".ico": "image/x-icon",
   ".js": "text/javascript; charset=utf-8",
+  // pdf.js ships its renderer worker as .mjs. A module worker is rejected
+  // unless this response is a JavaScript MIME type, which fails every PDF preview.
+  ".mjs": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".map": "application/json; charset=utf-8",
   ".png": "image/png",

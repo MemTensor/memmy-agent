@@ -10,6 +10,7 @@ import {
   patchChannelConfigInMemmyConfig,
   patchMcpServerConfigInMemmyConfig,
   readAgentGatewayBootstrapSecret,
+  readBundledPluginPreferences,
   readConfiguredAgentTimeZone,
   readRuntimeMemmyConfigState,
   resolveDefaultMemmyConfigPath,
@@ -61,6 +62,21 @@ describe("memmy runtime config current contract", () => {
     await expect(readRuntimeMemmyConfigState(file())).resolves.toMatchObject({ status: "missing" });
     await expect(readRuntimeMemmyConfigState(file(""))).resolves.toMatchObject({ status: "empty" });
     await expect(readRuntimeMemmyConfigState(file("agents: ["))).resolves.toMatchObject({ status: "invalid_yaml" });
+  });
+
+  it("reads only explicit bundled plugin enablement and preserves state on invalid config", async () => {
+    await expect(readBundledPluginPreferences(file({}), ["literature-review"]))
+      .resolves.toEqual({});
+    await expect(readBundledPluginPreferences(file({
+      plugins: { "literature-review": { enabled: false } }
+    }), ["literature-review"])).resolves.toEqual({
+      "literature-review": { enabled: false }
+    });
+    await expect(readBundledPluginPreferences(file("plugins:\n  literature-review:\n    enabled: maybe\n"), [
+      "literature-review"
+    ])).resolves.toBeNull();
+    await expect(readBundledPluginPreferences(file("plugins: ["), ["literature-review"]))
+      .resolves.toBeNull();
   });
 
   it("derives the canonical BYOK context and exact Provider endpoint snapshot", async () => {

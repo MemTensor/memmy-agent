@@ -117,6 +117,7 @@ describe("HomePage attachment drops", () => {
 
 async function dropFiles(files: File[]) {
   const composer = document.querySelector<HTMLElement>(".agent-composer-shell");
+  // Focus is what the drop handler restores.
   const input = composer?.querySelector<HTMLTextAreaElement>("textarea");
   if (!composer || !input) {
     throw new Error("Missing attachment drop composer");

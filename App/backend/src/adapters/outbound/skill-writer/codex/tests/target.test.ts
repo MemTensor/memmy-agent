@@ -35,6 +35,9 @@ describe("codex skill target", () => {
     expect(resumeSkillFile).toContain("name: memmy-resume");
     expect(resumeSkillFile).toContain("disable-model-invocation: true");
     expect(resumeSkillFile).toContain("--source codex");
+    // Codex's sandbox blocks the command's connection to Memmy, so its session skill says how to run it outside.
+    const sessionSkillFile = readFileSync(join(rootDirectory, "skills", "memmy-project", "SKILL.md"), "utf8");
+    expect(sessionSkillFile).toContain("用 escalated permissions（沙箱外权限）重新运行同一条命令");
     await expect(target.isInstalled("codex")).resolves.toBe(true);
   });
 
@@ -356,7 +359,7 @@ describe("codex skill target", () => {
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/v1/sessions/open") {
-        writeJsonResponse(response, 200, { sessionId: "memmy-session-1", status: "open" });
+        writeJsonResponse(response, 200, { sessionId: "memmy-project-1", status: "open" });
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/v1/turns/start") {
@@ -438,7 +441,7 @@ describe("codex skill target", () => {
       expect(requests[2]?.body).toMatchObject({
         adapterId: "memmy-codex-hook",
         requestId: "codex-start:turn-stop-1",
-        sessionId: "memmy-session-1",
+        sessionId: "memmy-project-1",
         turnId: "turn-stop-1",
         query: "请继续完成数据分析报告"
       });
@@ -446,7 +449,7 @@ describe("codex skill target", () => {
         adapterId: "memmy-codex-hook",
         channel: "hook",
         sourceTurn: expect.objectContaining({ conversationId: "codex-session-1", turnId: "turn-stop-1" }),
-        sessionId: "memmy-session-1",
+        sessionId: "memmy-project-1",
         query: "请继续完成数据分析报告",
         answer: "已经完成数据分析报告",
         status: "succeeded",

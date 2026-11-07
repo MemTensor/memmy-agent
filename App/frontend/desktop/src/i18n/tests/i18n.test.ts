@@ -67,6 +67,17 @@ describe("desktop i18n helpers", () => {
     expect(messageCatalogs["en-US"]["appFrame.task.rename"]).toBe("Rename task");
   });
 
+  it("keeps the built-in recording capability scenario-neutral", () => {
+    expect(messageCatalogs["zh-CN"]["recording.page.title"]).toBe("录音");
+    expect(messageCatalogs["zh-CN"]["recording.page.defaultTitle"]).toBe("录音记录");
+    expect(messageCatalogs["zh-CN"]["plugin.ui.audio.recordingFile"]).toBe("录音-{stamp}");
+    expect(messageCatalogs["zh-CN"]["plugin.ui.audio.transcriptFile"]).toBe("录音转写-{stamp}");
+    expect(messageCatalogs["en-US"]["recording.page.title"]).toBe("Recording");
+    expect(messageCatalogs["en-US"]["recording.page.defaultTitle"]).toBe("Recording");
+    expect(messageCatalogs["en-US"]["plugin.ui.audio.recordingFile"]).toBe("recording-{stamp}");
+    expect(messageCatalogs["en-US"]["plugin.ui.audio.transcriptFile"]).toBe("recording-transcript-{stamp}");
+  });
+
   it("keeps account verification errors localized per language", () => {
     expect(messageCatalogs["zh-CN"]["login.error.invalidCode"]).toBe("验证码错误");
     expect(messageCatalogs["zh-CN"]["login.error.invalidPhone"]).toBe("手机号格式错误");

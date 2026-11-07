@@ -28,6 +28,37 @@ function createAccountService(options: TestAccountServiceOptions) {
 }
 
 describe("AccountService", () => {
+  it("keeps cloud grants across nickname edits but removes them on authoritative cloud refresh", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-account-grants-"));
+    const store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
+    let grants = ["plugin:legal-labor"];
+    const profile = cloudProfile();
+    store.repositories.accountSession.upsert({
+      uuid: "test-account", cloudUuid: "test-credential", profile
+    });
+    const service = createAccountService({
+      accountSessionRepository: store.repositories.accountSession,
+      cloudClient: {
+        ...createCloudClientStub(),
+        async getAccountInfo() {
+          return { ...profile, rawProfile: { ...profile.rawProfile, entitlements: grants } };
+        }
+      }
+    });
+    try {
+      await service.getSession();
+      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor"]);
+      await service.updateProfile({ nickname: "Legal Test" });
+      expect(store.repositories.accountSession.getEntitlements()).toEqual(["plugin:legal-labor"]);
+      expect(store.repositories.accountSession.get()).toMatchObject({ profile: { nickname: "Legal Test" } });
+      grants = [];
+      await service.getSession();
+      expect(store.repositories.accountSession.getEntitlements()).toEqual([]);
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it("treats a logged-out lottery reward lookup as no reward", async () => {
     let cloudCalls = 0;
     const service = createAccountService({

@@ -6,6 +6,7 @@ import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { readCodexRollout, type RawCodexMessage } from "./rollout-reader.js";
 import { discoverCodexSessions } from "./session-discovery.js";
+import { readCodexThreadTitles } from "./session-titles.js";
 
 const CODEX_SOURCE_ID = "codex";
 
@@ -52,6 +53,8 @@ export function createCodexSourceAdapter(deps: CreateCodexSourceAdapterDeps = {}
         maxSessions: options.maxScanTargets
       });
       options.onProgress?.({ sourceId: descriptor.sourceId, phase: "discover", current: sessions.length, total: sessions.length });
+      // Titles live in one index beside the session files, so they are read once per scan.
+      const titles = await readCodexThreadTitles(sessionsRoot);
 
       let emittedMessages = 0;
       for (const [sessionIndex, session] of sessions.entries()) {
@@ -78,7 +81,7 @@ export function createCodexSourceAdapter(deps: CreateCodexSourceAdapterDeps = {}
           options.onProgress?.({ sourceId: descriptor.sourceId, phase: "redact", current: emittedMessages, total: emittedMessages + 1 });
           emittedMessages += 1;
           options.onProgress?.({ sourceId: descriptor.sourceId, phase: "emit", current: emittedMessages, total: emittedMessages });
-          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot);
+          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot, titles.get(rawMessage.conversationId) ?? null);
         }
       }
 
@@ -91,7 +94,8 @@ function toConversationMessage(
   sourceId: string,
   rawMessage: RawCodexMessage,
   workspacePath: string | null,
-  gitRoot: string | null
+  gitRoot: string | null,
+  sessionTitle: string | null
 ): ConversationMessage {
   return {
     messageId: rawMessage.messageId,
@@ -103,6 +107,7 @@ function toConversationMessage(
     workspacePath,
     gitRoot,
     ordinal: rawMessage.ordinal,
+    ...(sessionTitle ? { sessionTitle } : {}),
     rawMeta: rawMessage.rawMeta
   };
 }

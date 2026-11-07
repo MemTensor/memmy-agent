@@ -59,7 +59,8 @@ export interface AgentTaskStateCoordinator {
 export type ProjectMutationOperation =
   | {
       kind: "create";
-      input: { mode: "blank" | "existing"; path: string; name?: string };
+      /** `allowShared` gives a directory another project already uses its own record, so sessions stay apart. */
+      input: { mode: "blank" | "existing"; path: string; name?: string; allowShared?: boolean };
     }
   | {
       kind: "update";
@@ -586,7 +587,8 @@ export function isAgentRuntimeBridgeRoute(path: AppRoutePath): boolean {
     || path === "/tools"
     || path === "/settings"
     || path === "/memory"
-    || path === "/memory-sources";
+    || path === "/memory-sources"
+    || path === "/plugin";
 }
 
 /** Confirm reducer consumption, independently of whether a notification is shown. */

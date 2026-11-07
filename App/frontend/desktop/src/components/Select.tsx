@@ -29,6 +29,8 @@ export interface SelectProps {
   menuClassName?: string;
   labelClassName?: string;
   placement?: "top" | "bottom";
+  /** Optional title shown on the trigger; defaults to the selected option label. */
+  title?: string;
   /** Optional footer rendered below options; receives a close helper. */
   menuFooter?: (api: { close: () => void }) => ReactNode;
   /** Optional panel shown beside the menu while an option is hovered or focused. */
@@ -158,7 +160,7 @@ export function Select(props: SelectProps) {
         aria-haspopup="listbox"
         aria-label={props.ariaLabel}
         aria-labelledby={props.label ? `${labelId} ${controlId}` : undefined}
-        title={selectedOption?.label}
+        title={props.title ?? selectedOption?.label}
         disabled={props.disabled}
         onClick={() => setOpen((value) => !value)}
         onKeyDown={handleKeyDown}

@@ -1,0 +1,300 @@
+/*
+ * 看板右侧的协助详情：面板外框沿用只读任务面板（collab-page.module.css 的 reader*），
+ * 这里只画面板里的内容，以及任务页与详情共用的确认卡片。颜色只用现有的薄荷绿主题变量。
+ */
+
+.route {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agentLogo {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-stone, #cce0db) 70%, transparent);
+}
+
+.agentLogo img {
+  width: 12px;
+  height: 12px;
+}
+
+.agentMark {
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--color-accent-deep, #2f8f7f);
+}
+
+.attempt {
+  border: 1px solid color-mix(in srgb, var(--color-border-stone, #d6dfdc) 55%, transparent);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.attemptHead {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 0;
+  background: color-mix(in srgb, var(--color-canvas-oat, #f3f8f7) 70%, transparent);
+  color: #2a3a37;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attemptTitle {
+  flex: 1;
+  min-width: 0;
+}
+
+.attemptToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: #8a9a96;
+  font-weight: 500;
+}
+
+.attemptBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px 14px;
+}
+
+.field {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.key {
+  color: #8a9a96;
+  font-size: 12px;
+  line-height: 1.9;
+}
+
+.value {
+  min-width: 0;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 82%, transparent);
+}
+
+.reason {
+  margin: 0 0 2px;
+  color: #5f716c;
+}
+
+.items {
+  margin: 0;
+  padding-left: 18px;
+  list-style: decimal;
+}
+
+.step {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 12.5px;
+}
+
+.stepDone,
+.stepWaiting {
+  display: inline-flex;
+  flex: none;
+  margin-top: 5px;
+}
+
+.stepDone {
+  color: var(--color-status-success, #2dc999);
+}
+
+.stepWaiting {
+  color: #8a9a96;
+}
+
+.stepText {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+
+.resultRow {
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.resultRow dt {
+  color: #5f716c;
+}
+
+.resultRow dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.reply {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.file {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone, #d6dfdc) 70%, transparent);
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.fileSize {
+  color: #8a9a96;
+}
+
+.failure {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: #8a6414;
+  font-size: 12.5px;
+}
+
+.error {
+  margin: 0;
+  color: var(--color-status-error, #f87b8e);
+  font-size: 12.5px;
+}
+
+.foot {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px 12px 22px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-stone, #d6dfdc) 45%, transparent);
+}
+
+.footNote {
+  color: #8a9a96;
+  font-size: 12px;
+}
+
+.grow {
+  flex: 1;
+}
+
+.button {
+  padding: 5px 13px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone, #cce0db) 80%, transparent);
+  border-radius: 8px;
+  background: #fff;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 72%, transparent);
+  font: inherit;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.buttonPrimary {
+  border-color: var(--color-action-sky, #5cbfae);
+  background: var(--color-action-sky, #5cbfae);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* 确认卡片：同一次排查里她授权过、现在没有生效中的限时授权，后续请求先问她。 */
+.confirm {
+  border: 1px solid color-mix(in srgb, #e4b44a 40%, transparent);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.confirmHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, #e4b44a 14%, white);
+  color: #8a6414;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.confirmBody {
+  padding: 12px 14px 4px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 80%, transparent);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+/* 「限时直接执行」的时长：放在按钮上方一行，默认 1 小时。 */
+.confirmDuration {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 14px 0;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 55%, transparent);
+}
+
+.confirmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px 12px;
+}
+
+.spin {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--color-action-sky, #5cbfae) 25%, transparent);
+  border-top-color: var(--color-action-sky, #5cbfae);
+  animation: assistDetailSpin 0.8s linear infinite;
+}
+
+@keyframes assistDetailSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}

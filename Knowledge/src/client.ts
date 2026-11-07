@@ -22,7 +22,15 @@ export interface KnowledgeRecallResult {
   evidence: KnowledgeEvidence[];
 }
 export interface KnowledgeRecallClient {
-  recall(query: string, signal?: AbortSignal): Promise<KnowledgeRecallResult>;
+  /**
+   * `workspace` 是会话的工作目录：本地后端据此找出会话所属的协作项目，把项目关联的知识库一并检索。
+   * 非项目目录或未关联知识库时，与只传 query 完全一样。
+   */
+  recall(
+    query: string,
+    workspace?: string | null,
+    signal?: AbortSignal,
+  ): Promise<KnowledgeRecallResult>;
 }
 export const unavailableSettings = (
   authenticated = false,
@@ -35,7 +43,7 @@ export const unavailableSettings = (
 });
 
 /** Sends only a user's Memmy login credential to the developer-configured backend. */
-export class ManagedKnowledgeClient implements KnowledgeRecallClient {
+export class ManagedKnowledgeClient {
   constructor(private readonly options: ManagedKnowledgeOptions) {}
   async request(
     path: string,
@@ -225,8 +233,13 @@ export class ManagedKnowledgeClient implements KnowledgeRecallClient {
       return unavailableSettings(true);
     }
   }
+  /**
+   * 云端检索。`projectId` 是协作项目：云端校验成员身份后，把该项目关联的知识库并入本次检索范围。
+   * 不传时只查本人的知识库设置。
+   */
   async recall(
     query: string,
+    projectId?: string | null,
     signal?: AbortSignal,
   ): Promise<KnowledgeRecallResult> {
     const session = this.options.getSession();
@@ -235,16 +248,23 @@ export class ManagedKnowledgeClient implements KnowledgeRecallClient {
     const settings = await this.settings(signal);
     if (!this.sameSession(session) || signal.aborted)
       return { enabled: false, evidence: [] };
-    if (!settings.enabled || !settings.serviceAvailable)
+    // 个人总开关与项目关联是两件事：开关关着但这一轮属于某个项目时，仍要问一次云端，
+    // 由它按项目关联的库决定有没有可检索的内容。服务不可用才直接返回。
+    if (!settings.serviceAvailable || (!settings.enabled && !projectId))
       return { enabled: false, evidence: [] };
     const result = record(
-      await this.request("/recall", "POST", { query }, signal),
+      await this.request(
+        "/recall",
+        "POST",
+        projectId ? { query, projectId } : { query },
+        signal,
+      ),
     );
     const current = await this.settings(signal);
     if (
       !this.sameSession(session) ||
       signal.aborted ||
-      !current.enabled ||
+      (!current.enabled && !projectId) ||
       JSON.stringify(current.bases) !== JSON.stringify(settings.bases)
     )
       return { enabled: false, evidence: [] };

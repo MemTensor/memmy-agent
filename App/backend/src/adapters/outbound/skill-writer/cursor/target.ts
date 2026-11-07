@@ -7,8 +7,10 @@ import { isInstalledMemmyHookCurrent, memmyHookRevisionField } from "../hook-rev
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
 import {
   removeMemmyResumeSkillDirectory,
+  removeMemmyProjectSkillDirectory,
   removeMemmySkillDirectory,
   replaceMemmyResumeSkillDirectory,
+  replaceMemmyProjectSkillDirectory,
   replaceMemmySkillDirectory
 } from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
@@ -48,12 +50,14 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
     async install(manifest) {
       await mkdir(cursorRootDirectory, { recursive: true });
       await replaceMemmySkillDirectory(cursorRootDirectory, manifest);
+      await replaceMemmyProjectSkillDirectory(cursorRootDirectory);
       await replaceMemmyResumeSkillDirectory(cursorRootDirectory, CURSOR_TARGET_ID);
     },
 
     async uninstall(_targetId) {
       await removeMemmyResumeSkillDirectory(cursorRootDirectory);
       await removeMemmySkillDirectory(cursorRootDirectory);
+      await removeMemmyProjectSkillDirectory(cursorRootDirectory);
     },
 
     async isInstalled(_targetId) {
@@ -96,6 +100,7 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
 
       const manifest = renderMemmyPluginSkillManifest(_targetId);
       await replaceMemmySkillDirectory(cursorRootDirectory, manifest);
+      await replaceMemmyProjectSkillDirectory(cursorRootDirectory);
       await replaceMemmyResumeSkillDirectory(cursorRootDirectory, CURSOR_TARGET_ID);
       await writeFileAtomically(
         hookConfigPath,
@@ -111,6 +116,7 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
       await rm(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, WORKSPACE_BRIDGE_FILE_NAME), { force: true });
       await removeMemmyResumeSkillDirectory(cursorRootDirectory);
       await removeMemmySkillDirectory(cursorRootDirectory);
+      await removeMemmyProjectSkillDirectory(cursorRootDirectory);
     }
   };
 }

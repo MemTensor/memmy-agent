@@ -42,7 +42,7 @@ describe("memory retrieval indexes", () => {
           created: false,
           memory: {
             id: first.id,
-            userId: "global-key-user-a",
+            userId: "__memmy_device_memory__",
             memoryLayer: layer,
             memoryKey: "shared-memory-key",
             memoryValue: `${layer} second value`

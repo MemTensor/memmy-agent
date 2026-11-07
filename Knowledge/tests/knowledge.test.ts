@@ -130,6 +130,30 @@ it("honors selected scope changes while recalling", async () => {
   });
   expect(await client.recall("问题")).toEqual({ enabled: false, evidence: [] });
 });
+it("still asks the cloud for a project's bases when the personal switch is off", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const off = { ...settings, enabled: false };
+  const fetcher = vi.fn(async (url: unknown, init?: RequestInit) => {
+    if (String(url).endsWith("/recall")) {
+      bodies.push(JSON.parse(String(init?.body)));
+      return reply({ enabled: true, evidence });
+    }
+    return reply(off);
+  });
+  const client = new ManagedKnowledgeClient({
+    baseUrl: "https://cloud.example",
+    getSession: () => session,
+    fetcher,
+  });
+  // 个人开关关着、只靠项目关联：客户端不能提前返回空，否则项目的库永远检索不到。
+  expect(await client.recall("问题", "project-1")).toEqual({ enabled: true, evidence });
+  expect(bodies).toEqual([{ query: "问题", projectId: "project-1" }]);
+  // 没有项目时，开关关着就不必请求。
+  bodies.length = 0;
+  expect(await client.recall("问题")).toEqual({ enabled: false, evidence: [] });
+  expect(bodies).toEqual([]);
+});
+
 it("keeps recall isolated from Memory and removes only its own context", async () => {
   const client = { recall: vi.fn(async () => ({ enabled: true, evidence })) };
   const hook = new KnowledgeRecall(client);
@@ -499,4 +523,109 @@ it("passes created time through for files and folders", async () => {
   } finally {
     await app.close();
   }
+});
+
+describe("项目关联的知识库", () => {
+  it("local client sends the workspace so the backend can find the project", async () => {
+    const folder = await fs.mkdtemp(path.join(os.tmpdir(), "memmy-knowledge-"));
+    folders.push(folder);
+    const runtime = path.join(folder, "runtime.json");
+    await fs.writeFile(
+      runtime,
+      JSON.stringify({ baseUrl: "http://127.0.0.1:1234", localToken: "local-token" }),
+    );
+    const fetcher = vi.fn(
+      async () => new Response(JSON.stringify({ enabled: true, evidence })),
+    );
+    const client = createLocalKnowledgeClient(runtime, fetcher);
+    await client.recall("问题", "/Users/me/project");
+    const [, init] = fetcher.mock.calls[0] as unknown as [unknown, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      query: "问题",
+      workspace: "/Users/me/project",
+    });
+    // 没有工作目录时请求体与以前完全一样，旧后端也能照常处理。
+    await client.recall("问题");
+    const [, plain] = fetcher.mock.calls[1] as unknown as [unknown, RequestInit];
+    expect(JSON.parse(String(plain.body))).toEqual({ query: "问题" });
+  });
+
+  it("recall asks the cloud with the project that owns the workspace", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetcher = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith("/recall")) {
+        bodies.push(JSON.parse(String(init?.body)));
+        return reply({ enabled: true, evidence });
+      }
+      return reply(settings);
+    });
+    const app = Fastify();
+    const seen: string[] = [];
+    registerKnowledgeRoutes(app, {
+      baseUrl: "https://cloud.example",
+      getSession: () => session,
+      fetcher,
+      authenticate: async () => undefined,
+      projectForWorkspace: async (workspace) => {
+        seen.push(workspace);
+        return workspace === "/Users/me/project" ? "project-1" : null;
+      },
+    });
+    const call = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", url: "/api/knowledge/recall", payload });
+
+    expect((await call({ query: "问题", workspace: "/Users/me/project" })).statusCode).toBe(200);
+    expect(bodies[0]).toEqual({ query: "问题", projectId: "project-1" });
+
+    await call({ query: "问题", workspace: "/Users/me/elsewhere" });
+    expect(bodies[1]).toEqual({ query: "问题" });
+
+    await call({ query: "问题" });
+    expect(bodies[2]).toEqual({ query: "问题" });
+    expect(seen).toEqual(["/Users/me/project", "/Users/me/elsewhere"]);
+  });
+
+  it("a failing project lookup still recalls the person's own bases", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetcher = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith("/recall")) {
+        bodies.push(JSON.parse(String(init?.body)));
+        return reply({ enabled: true, evidence });
+      }
+      return reply(settings);
+    });
+    const app = Fastify();
+    registerKnowledgeRoutes(app, {
+      baseUrl: "https://cloud.example",
+      getSession: () => session,
+      fetcher,
+      authenticate: async () => undefined,
+      projectForWorkspace: async () => {
+        throw new Error("links unreadable");
+      },
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/knowledge/recall",
+      payload: { query: "问题", workspace: "/Users/me/project" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(bodies[0]).toEqual({ query: "问题" });
+  });
+
+  it("rejects a recall body that carries anything else", async () => {
+    const app = Fastify();
+    registerKnowledgeRoutes(app, {
+      baseUrl: "https://cloud.example",
+      getSession: () => session,
+      fetcher: vi.fn(),
+      authenticate: async () => undefined,
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/knowledge/recall",
+      payload: { query: "问题", projectId: "project-1" },
+    });
+    expect(response.statusCode).toBe(400);
+  });
 });

@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const { service } = createTestService();
+  const { service,db } = createTestService();
   const namespace = (userId: string) => ({ source: "cursor", profileId: "default", userId });
   server = createMemoryHttpServer({
     service,
@@ -35,15 +35,21 @@ async function fixture() {
   if (!address || typeof address === "string") throw new Error("expected TCP address");
   const endpoint = `http://127.0.0.1:${address.port}`;
   return {
-    service,
+    service,db,
     endpoint,
-    addTask(userId: string, label: string) {
+    async addTask(userId: string, label: string) {
       const session = service.openSession({ namespace: namespace(userId) });
-      return service.completeTurn(`turn-${label}`, {
+      const turn = await service.completeTurn(`turn-${label}`, {
         sessionId: session.sessionId,
         query: `issue 409 ${label}`,
         answer: `Completed ${label}`
-      }).episodeId;
+      });
+      // Represent pre-decoupling rows; new writes intentionally use the device owner.
+      for (const [table, id] of [["sessions", turn.sessionId], ["episodes", turn.episodeId],
+        ["raw_turns", turn.rawTurnId], ["memories", turn.l1MemoryId]]) {
+        if (id) db.db.prepare(`UPDATE ${table} SET user_id=? WHERE id=?`).run(userId, id);
+      }
+      return turn.episodeId;
     },
     panel(token: string, getUserId: () => string) {
       return createPanelService({
@@ -65,9 +71,9 @@ const ctx = { adapterId: "runtime", userId: "stale-caller-user", timeZone: "+08:
 describe("desktop task identity / issue 409", () => {
   it("keeps local and account tasks visible across login, account switching and logout, matching the viewer", async () => {
     const f = await fixture();
-    const localIds = Array.from({ length: 21 }, (_, i) => f.addTask("local-user", `local-task-${i}`));
-    const accountId = f.addTask("account-user", "account-task");
-    const previousAccountId = f.addTask("previous-account", "previous-task");
+    const localIds = await Promise.all(Array.from({ length: 21 }, (_, i) => f.addTask("local-user", `local-task-${i}`)));
+    const accountId = await f.addTask("account-user", "account-task");
+    const previousAccountId = await f.addTask("previous-account", "previous-task");
     const expectedIds = [...localIds, accountId, previousAccountId].sort();
     let currentUser = "local-user";
     const panel = f.panel("local-panel-token", () => currentUser);
@@ -97,14 +103,15 @@ describe("desktop task identity / issue 409", () => {
 
     // Displaying local data must not migrate the original task ownership.
     for (const [userId, total] of [["local-user", 21], ["account-user", 1], ["previous-account", 1]] as const) {
-      expect(f.service.panelTasks({ namespace: { userId } }).total).toBe(total);
+      expect(f.service.panelTasks({ namespace: { userId } }).total).toBe(23);
+      expect(f.db.db.prepare("SELECT count(*) FROM episodes WHERE user_id=?").pluck().get(userId)).toBe(total);
     }
   });
 
   it("preserves Memory service authentication and token-bound user scopes", async () => {
     const f = await fixture();
-    const localId = f.addTask("local-user", "local-scope-task");
-    const accountId = f.addTask("account-user", "account-scope-task");
+    const localId = await f.addTask("local-user", "local-scope-task");
+    const accountId = await f.addTask("account-user", "account-scope-task");
     for (const token of ["scoped-panel-token", "cloud-panel-token"]) {
       const panel = f.panel(token, () => "account-user");
       const result = await panel.tasks({}, ctx);

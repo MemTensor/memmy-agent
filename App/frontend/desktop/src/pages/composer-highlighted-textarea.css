@@ -1,0 +1,38 @@
+.composer-rich-input {
+  position: relative;
+}
+.composer-rich-input--highlighted {
+  width: 100%;
+  border-radius: var(--radius-composer);
+}
+.composer-rich-input__backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  padding: 1rem 1.25rem 3rem;
+  border-radius: inherit;
+  color: transparent;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  pointer-events: none;
+}
+.composer-rich-input__backdrop .composer-slash-chip {
+  border-radius: 4px;
+  padding: 1px 0;
+  background: color-mix(in srgb, var(--color-accent-neon-mint) 34%, var(--color-background-paper));
+  color: var(--color-action-sky-hover);
+  line-height: 1.6;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  box-shadow:
+    4px 0 0 color-mix(in srgb, var(--color-accent-neon-mint) 34%, var(--color-background-paper)),
+    -4px 0 0 color-mix(in srgb, var(--color-accent-neon-mint) 34%, var(--color-background-paper));
+}
+.composer-rich-input__field--highlighted {
+  position: relative;
+  z-index: 1;
+  background: transparent !important;
+}

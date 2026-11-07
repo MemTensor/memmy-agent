@@ -43,6 +43,7 @@ import {
   resolveComposerCommandDraft,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
+  queuedMediaToPendingAttachment,
   thinkingPayloadForSend,
   toReadableAsrError,
   updateAgentComposerOverlayHeight,
@@ -91,6 +92,7 @@ describe("HomePage", () => {
     );
 
     expect(html).toContain("分配一个任务或提问任何问题...");
+    expect(html).toContain('class="thread-toolbar__button" aria-label="展开右栏"');
     expect(html).toContain("添加图片和文件");
     expect(html).toContain("语音输入");
     expect(html).toContain("发送");
@@ -331,14 +333,14 @@ describe("HomePage", () => {
     expect(source).toContain("const activeConversationTitle = state.agent.currentSessionKey");
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
-    expect(source).toContain("topBar={hasActiveConversation ? (");
+    expect(source).toContain("topBar={hasConversationShell ? (");
     expect(source).toContain("<AgentThreadToolbar");
     expect(source).toContain("title={activeConversationTitleDisplay}");
     expect(source).toContain("titleTrailing={activeImTitleDisplay ? <ImChannelTitleIcon");
     expect(source).not.toContain("selectedDraftProject?.name");
-    expect(source).toContain("topBarBorder={hasActiveConversation}");
-    expect(source).toContain("topBarInset={hasActiveConversation ? false : undefined}");
-    expect(source).toContain("windowsTitlebarSafe={hasActiveConversation}");
+    expect(source).toContain("topBarBorder={hasConversationShell}");
+    expect(source).toContain("topBarInset={hasConversationShell ? false : undefined}");
+    expect(source).toContain("windowsTitlebarSafe={hasConversationShell}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
@@ -638,7 +640,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm rounded-card-lg bg-background-paper');
     expect(source).not.toContain("agent-composer-input--command-selected");
     expect(styles).not.toContain("padding-left: 86px;");
     expect(source).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
@@ -671,9 +673,10 @@ describe("HomePage", () => {
     expect(styles).toContain("container-name: agent-workspace;");
     expect(source).toContain("const threadPanel = useAgentThreadPanel({");
     expect(source).toContain("className={`agent-workspace-layout ${threadPanelMotionClass}`}");
-    expect(source).toContain('style={{ "--thread-panel-offset": `${threadPanel.offset}px` } as CSSProperties}');
-    expect(source).toContain("topBarStyle={hasActiveConversation ? { right: threadPanel.offset } : undefined}");
-    expect(source).toContain("sidePanel={sidePanelMounted ? (\n        <AgentThreadPanel");
+    expect(source).toContain('style={{ "--thread-panel-offset": `${features.sidePanelWidth ?? threadPanel.offset}px` } as CSSProperties}');
+    expect(source).toContain("topBarStyle={{ right: features.sidePanelWidth ?? threadPanel.offset }}");
+    expect(source).toContain("topBarClassName={`thread-topbar ${threadPanelMotionClass}`}");
+    expect(source).toContain("sidePanel={features.sidePanel ?? (sidePanelMounted ? (\n        <AgentThreadPanel");
     expect(source).toContain("<AgentThreadPanel");
     expect(styles).toMatch(/body\.memmy-thread-panel-fullscreen \.app-frame-main\s*\{[^}]*isolation:\s*auto;/s);
     expect(styles).toMatch(/body\.memmy-thread-panel-fullscreen \.app-frame-content-topbar\.thread-topbar\s*\{[^}]*display:\s*none;/s);
@@ -681,6 +684,7 @@ describe("HomePage", () => {
     expect(source).not.toContain("<SlidersHorizontal");
     expect(conversationColumnRule).toContain("margin-right: var(--thread-panel-offset, 0px);");
     expect(conversationColumnRule).toContain("transition: margin-right 200ms cubic-bezier(0, 0, 0.2, 1);");
+    expect(styles).toMatch(/\.agent-workspace-layout > \.home-empty-screen\s*\{[^}]*margin-right: var\(--thread-panel-offset, 0px\);/s);
     expect(styles).toMatch(/\.thread-panel-motion--closing[^{]*\{[^}]*transition-duration:\s*150ms;[^}]*cubic-bezier\(0\.4, 0, 1, 1\)/s);
     expect(styles).toMatch(/\.thread-panel\s*\{[^}]*position:\s*absolute;[^}]*z-index:\s*20;/s);
   });
@@ -688,7 +692,7 @@ describe("HomePage", () => {
   it("lets expanded conversation text use the full width above the action footer", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const composerStart = source.indexOf('className="agent-conversation-composer"');
-    const textareaStart = source.indexOf("<textarea", composerStart);
+    const textareaStart = source.indexOf("<ComposerHighlightedTextarea", composerStart);
     const toolbarStart = source.indexOf('className="agent-composer-toolbar"', textareaStart);
     const textareaSource = source.slice(textareaStart, toolbarStart);
 
@@ -705,12 +709,12 @@ describe("HomePage", () => {
 
     const shell = window.document.createElement("div");
     shell.className = "agent-composer-shell agent-composer-shell--expanded";
-    const textarea = window.document.createElement("textarea");
-    textarea.className = "agent-composer-input--conversation";
-    shell.append(textarea);
+    const editor = window.document.createElement("textarea");
+    editor.className = "agent-composer-input--conversation";
+    shell.append(editor);
     window.document.body.append(shell);
 
-    expect(window.getComputedStyle(textarea).paddingRight).toBe("16px");
+    expect(window.getComputedStyle(editor).paddingRight).toBe("16px");
   });
 
   it("keeps the single-line conversation composer on a 76px field with the first line 12px from the top", () => {
@@ -723,13 +727,13 @@ describe("HomePage", () => {
     composer.className = "agent-conversation-composer";
     const shell = window.document.createElement("div");
     shell.className = "agent-composer-shell agent-composer-shell--expanded";
-    const textarea = window.document.createElement("textarea");
-    textarea.className = "agent-composer-input--single agent-composer-input--conversation py-3 text-sm";
-    shell.append(textarea);
+    const editor = window.document.createElement("textarea");
+    editor.className = "agent-composer-input--single agent-composer-input--conversation py-3 text-sm";
+    shell.append(editor);
     composer.append(shell);
     window.document.body.append(composer);
 
-    const computed = window.getComputedStyle(textarea);
+    const computed = window.getComputedStyle(editor);
     expect(computed.height).toBe("76px");
     expect(computed.fontSize).toBe("15px");
     expect(computed.lineHeight).toBe("26.25px");
@@ -744,7 +748,7 @@ describe("HomePage", () => {
     expect(source).toContain("useLayoutEffect(() => {\n    if (!inputRef.current) {\n      return;\n    }\n    resizeComposerInput(inputRef.current);\n  }, [input, hasActiveConversation]);");
   });
 
-  it("applies the composer single-line treatment only while the textarea is one line", () => {
+  it("applies the composer single-line treatment only while the input is one line", () => {
     vi.stubGlobal("window", {
       getComputedStyle: () => ({
         lineHeight: "24px",
@@ -753,7 +757,7 @@ describe("HomePage", () => {
       })
     });
 
-    const element = { clientHeight: 48, scrollHeight: 48 } as HTMLTextAreaElement;
+    const element = { clientHeight: 48, scrollHeight: 48 } as HTMLElement;
     expect(isSingleLineComposerInput(element)).toBe(true);
 
     Object.defineProperty(element, "scrollHeight", { value: 76 });
@@ -1359,6 +1363,34 @@ describe("HomePage", () => {
     expect(track).toHaveBeenCalledWith({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
   });
 
+  it("resends an edited queue attachment by its saved path without reuploading", async () => {
+    const image = queuedMediaToPendingAttachment({
+      kind: "image", name: "screenshot.png", url: "http://agent.local/media/screenshot", path: "/media/websocket/webui/screenshot.png",
+    }, "queued-id", 0);
+    const file = queuedMediaToPendingAttachment({
+      kind: "file", name: "notes.pdf", path: "/media/websocket/webui/notes.pdf",
+    }, "queued-id", 1);
+    const uploadAgentMedia = vi.fn(async () => []);
+    const submitMessage = vi.fn(async () => ({ status: "queued" as const }));
+    expect(await submitAgentComposerMessage({
+      chatId: "chat-1",
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(), submitMessage },
+      content: "改后的说明",
+      pendingAttachments: [image, file],
+      uploadAgentMedia,
+      dispatch: vi.fn(),
+      track: vi.fn(),
+      clearComposer: vi.fn(),
+    })).toBe(true);
+    expect(uploadAgentMedia).not.toHaveBeenCalled();
+    expect(submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      media: [
+        expect.objectContaining({ path: "/media/websocket/webui/screenshot.png", kind: "image" }),
+        expect.objectContaining({ path: "/media/websocket/webui/notes.pdf", kind: "file" }),
+      ],
+    }), 1);
+  });
+
   it("keeps a new project target on the optimistic task action", async () => {
     const dispatch = vi.fn();
     const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
@@ -1590,22 +1622,25 @@ describe("HomePage", () => {
     });
   });
 
-  it("anchors composer popovers above the queue and keeps Goal next to the composer", () => {
+  it("keeps the queue above pending cards and Goal next to the composer", () => {
     const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
     const flowStart = source.indexOf('<div className="agent-composer-flow">');
     const slashStart = source.indexOf("{slashMenuOpen && (", flowStart);
     const stackStart = source.indexOf('<div className="agent-composer-stack">', slashStart);
-    const queueStart = source.indexOf("<AgentQueuedMessageList", stackStart);
+    const queueStart = source.indexOf("<AgentQueuedMessageList", flowStart);
+    const pluginCardsStart = source.indexOf('className="conversation-feature-cards agent-confirmation-dock"', flowStart);
     const goalStart = source.indexOf("<AgentGoalBar", stackStart);
     const shellStart = source.indexOf('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"', stackStart);
 
     expect(flowStart).toBeGreaterThan(0);
     expect(slashStart).toBeGreaterThan(flowStart);
     expect(stackStart).toBeGreaterThan(slashStart);
-    expect(queueStart).toBeGreaterThan(stackStart);
+    expect(queueStart).toBeGreaterThan(flowStart);
+    expect(pluginCardsStart).toBeGreaterThan(queueStart);
+    expect(stackStart).toBeGreaterThan(pluginCardsStart);
     expect(goalStart).toBeGreaterThan(queueStart);
     expect(shellStart).toBeGreaterThan(goalStart);
-    expect(source).toContain('ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full"');
+    expect(source).toContain('ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full"');
     expect(source).toContain('ref={composerOverlayRef} className="agent-conversation-composer"');
     expect(source).toContain("updateAgentComposerOverlayHeight(panel, composer, measuredHeight)");
     expect(source).toContain('if (typeof ResizeObserver !== "undefined") return;');
@@ -1960,7 +1995,7 @@ describe("HomePage", () => {
     expect(dataTransferHasAttachmentFiles(null)).toBe(false);
   });
 
-  it("wires pasted attachments into both composer textareas", () => {
+  it("wires pasted attachments into both composer inputs", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
     expect(source).toContain("function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>)");

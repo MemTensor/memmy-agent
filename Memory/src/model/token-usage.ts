@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { isBudgetedMemoryUsage } from "@memmy/agent-source-core";
 import type { ActualModelContext } from "../contracts/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
+import { withoutJobLeaseGuard } from "../storage/job-lease-context.js";
 
 export type MemoryLlmModelRole = "memory_summary" | "memory_evolution";
 export type MemoryTokenUsageKind = MemoryLlmModelRole | "embedding";
@@ -200,6 +201,12 @@ export class HttpByokTokenUsageRecorder implements MemoryTokenUsageSink {
   }
 
   record(event: MemoryModelUsageEvent): MemoryTokenUsageRecordStatus {
+    // A model request can consume tokens even when its task lease is lost.
+    // Accounting and the delivery/probe timers it starts outlive that task.
+    return withoutJobLeaseGuard(() => this.recordUsage(event));
+  }
+
+  private recordUsage(event: MemoryModelUsageEvent): MemoryTokenUsageRecordStatus {
     const context = event.actualModelContext;
     if (!context || context.source !== "byok" || context.capability !== event.kind || isEmptyUsage(event.usage)) {
       return "skipped";

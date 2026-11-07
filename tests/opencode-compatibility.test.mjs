@@ -7,7 +7,7 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 import { createOpencodeSkillTarget as backend } from "../App/backend/src/adapters/outbound/skill-writer/opencode/target.ts";
 import { createOpencodeSkillTarget as memory } from "../Memory/src/agent-source/integration/opencode/target.ts";
 import { readOpencodeDatabase } from "../Memory/src/agent-source/adapters/opencode/db-reader.ts";
-import { selectSourceTurn } from "../AgentSourceCore/src/source-turn.ts";
+import { selectSourceTurn } from "../Memory/AgentSourceCore/src/source-turn.ts";
 
 const roots = [];
 afterEach(() => {

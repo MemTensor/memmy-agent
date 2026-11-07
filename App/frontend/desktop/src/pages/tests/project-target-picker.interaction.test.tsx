@@ -37,6 +37,14 @@ describe("ProjectTargetPicker interactions", () => {
     document.body.replaceChildren();
   });
 
+  it("shows the project name after a rename, not the folder name", () => {
+    // 项目名与目录名可以不同（重命名后就是这种情况），触发器要跟项目名走。
+    renderPicker(root, { initialTarget: { kind: "project", projectId: "two" } });
+
+    expect(getTrigger().textContent).toContain("Playground");
+    expect(getTrigger().textContent).not.toContain("sandbox");
+  });
+
   it("filters by path and keeps new-project available to the keyboard", () => {
     const onChooseOther = vi.fn();
     renderPicker(root, { initialTarget: { kind: "standalone" }, onChooseOther });

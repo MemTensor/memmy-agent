@@ -30,6 +30,14 @@ const cursorSource = createSource({
 });
 
 describe("Agent source scan errors", () => {
+  it("explains old-service upgrades and connection failures in both languages", () => {
+    const upgrade = new ApiRequestError("internal route missing", 503, "memory_scan_upgrade_required");
+    expect(formatAgentSourceScanRequestError(upgrade, undefined, translator("zh-CN"))).toContain("更新并重启");
+    expect(formatAgentSourceScanRequestError(upgrade, undefined, translator("en-US"))).toContain("Update and restart");
+    const offline = new ApiRequestError("connection refused", 503, "memory_layer_unavailable");
+    expect(formatAgentSourceScanRequestError(offline, cursorSource, translator("zh-CN"))).toContain("无法连接扫描服务");
+    expect(formatAgentSourceScanRequestError(offline, cursorSource, translator("en-US"))).toContain("scanning service is unavailable");
+  });
   it("shows a localized path-not-found message without Node.js details", () => {
     const results = [
       failedScan(

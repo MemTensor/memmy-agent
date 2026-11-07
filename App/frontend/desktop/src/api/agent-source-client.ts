@@ -4,6 +4,9 @@ import {
   AgentSourceScanJobResponseSchema,
   AgentSourceScanInputSchema,
   AgentSourceScanStatusResponseSchema,
+  AgentSourceScanControlResponseSchema,
+  type AgentSourceScanControlResponse,
+  type ScanControlInput,
   ScanResultPageSchema,
   AgentSourceViewSchema,
   ManagedAgentSourceImportResultSchema,
@@ -25,10 +28,10 @@ import { requestJson } from "./http.js";
 export interface AgentSourceClient {
   listSources(): Promise<AgentSourceView[]>;
   startScan(input?: AgentSourceScanInput): Promise<AgentSourceScanJobResponse>;
-  getScanStatus(): Promise<AgentSourceScanStatusResponse>;
+  getScanStatus(options?: { signal?: AbortSignal }): Promise<AgentSourceScanStatusResponse>;
   getScanResults(jobId: string, cursor?: string, limit?: number): Promise<ScanResultPage>;
-  stopScan(): Promise<void>;
-  cancelScan(): Promise<void>;
+  stopScan(input?: ScanControlInput): Promise<AgentSourceScanControlResponse | void>;
+  cancelScan(input?: ScanControlInput): Promise<AgentSourceScanControlResponse | void>;
   addManualSource(input: AddManualInput): Promise<AgentSourceView>;
   syncManagedSource(sourceId: string): Promise<ManagedAgentSourceImportResult>;
   removeSource(sourceId: string): Promise<void>;
@@ -58,11 +61,12 @@ export function createHttpAgentSourceClient(config: RuntimeConfig): AgentSourceC
       });
     },
 
-    async getScanStatus() {
+    async getScanStatus(options) {
       return requestJson({
         config,
         path: "/api/agent-sources/scan/status",
-        schema: AgentSourceScanStatusResponseSchema
+        schema: AgentSourceScanStatusResponseSchema,
+        init: options?.signal ? { signal: options.signal } : undefined
       });
     },
 
@@ -83,20 +87,22 @@ export function createHttpAgentSourceClient(config: RuntimeConfig): AgentSourceC
       return response.conflicts;
     },
 
-    async stopScan() {
-      await requestJson({
+    async stopScan(input) {
+      return requestJson({
         config,
         path: "/api/agent-sources/scan/stop",
-        schema: OkResponseSchema,
+        schema: AgentSourceScanControlResponseSchema,
+        body: input ?? {},
         init: { method: "POST" }
       });
     },
 
-    async cancelScan() {
-      await requestJson({
+    async cancelScan(input) {
+      return requestJson({
         config,
         path: "/api/agent-sources/scan/cancel",
-        schema: OkResponseSchema,
+        schema: AgentSourceScanControlResponseSchema,
+        body: input ?? {},
         init: { method: "POST" }
       });
     },

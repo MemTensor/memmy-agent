@@ -89,6 +89,7 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
         planType: "mock",
         hasFinishedGuide: false,
         improvementProgramGranted: false,
+        entitlements: null,
         region: null,
         registeredAt,
         rawProfile: {
@@ -259,6 +260,7 @@ function createDefaultProfile(registeredAt: string): CloudAccountProfile {
     planType: "mock",
     hasFinishedGuide: false,
     improvementProgramGranted: false,
+    entitlements: null,
     region: null,
     registeredAt,
     rawProfile: {
