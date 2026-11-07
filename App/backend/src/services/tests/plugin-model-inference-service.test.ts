@@ -3,6 +3,56 @@ import { describe, expect, it, vi } from "vitest";
 import { createPluginModelInferenceService } from "../plugin-model-inference-service.js";
 
 describe("plugin model inference Host service", () => {
+  it.each(["selection", "headers", "body"])("settles a %s stall even when the implementation ignores AbortSignal", async phase => {
+    vi.useFakeTimers();
+    try {
+      const never = () => new Promise<never>(() => {});
+      const fetch = vi.fn(phase === "headers" ? never : async () => ({ ok: true, text: never }) as unknown as Response);
+      const service = createPluginModelInferenceService({ resolveModel: phase === "selection" ? never : async () => resolved(), fetch: fetch as typeof globalThis.fetch, maxAttempts: 1 });
+      const pending = service.invoke({ pluginId: "literature-review", callId: "stall", conversationId: "v", service: "model-inference",
+        input: { messages: [{ role: "user", content: "Write" }], timeoutMs: 1000, maxAttempts: 1 } });
+      const assertion = expect(pending).rejects.toMatchObject({ code: "model_inference_timeout", retryable: true });
+      await vi.advanceTimersByTimeAsync(1000);
+      await assertion;
+      expect(fetch).toHaveBeenCalledTimes(phase === "selection" ? 0 : 1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("settles cancellation without waiting for an uncooperative transport", async () => {
+    const controller = new AbortController();
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { release = resolve; });
+    const fetch = vi.fn(async () => { release(); return new Promise<Response>(() => {}); });
+    const service = createPluginModelInferenceService({ resolveModel: async () => resolved(), fetch: fetch as typeof globalThis.fetch });
+    const pending = service.invoke({ pluginId: "literature-review", callId: "cancel-stall", conversationId: "v", service: "model-inference", signal: controller.signal,
+      input: { messages: [{ role: "user", content: "Write" }], maxAttempts: 1 } });
+    const assertion = expect(pending).rejects.toMatchObject({ code: "plugin_call_cancelled", retryable: false });
+    await started; controller.abort(); await assertion;
+  });
+
+  it.each([
+    ["literature-review", "memmy-account", "agent_chat", true],
+    ["other-plugin", "memmy-account", "agent_chat", false],
+    ["literature-review", "openai-chat-completions", "agent_chat", false],
+    ["literature-review", "memmy-account", "qwen3.8-flash", false]
+  ])("routes only official review inference: %s %s %s", async (pluginId, protocol, modelName, routed) => {
+    const model = resolved();
+    if (!model.ok) throw new Error("fixture");
+    model.context.protocol = protocol as typeof model.context.protocol;
+    model.context.model = String(modelName);
+    const fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("X-Agent-Task")).toBe(routed ? "literature-review" : null);
+      expect(JSON.parse(String(init?.body)).model).toBe(modelName);
+      return new Response(JSON.stringify({ model: "review-test-model",
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }));
+    });
+    const service = createPluginModelInferenceService({ resolveModel: async () => model, fetch: fetch as typeof globalThis.fetch });
+    const result = await service.invoke({ pluginId: String(pluginId), callId: "route", conversationId: "v", service: "model-inference",
+      input: { messages: [{ role: "user", content: "Write" }] } });
+    if (routed) expect(result).toMatchObject({ model: { model: "review-test-model" } });
+  });
+
   it.each([
     { code: 40308, data: null, message: "quota insufficient" },
     { error: { code: "40309", type: "insufficient_quota" } }

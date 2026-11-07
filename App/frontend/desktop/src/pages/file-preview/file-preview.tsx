@@ -19,8 +19,6 @@ import {
   Code2,
   ExternalLink,
   Eye,
-  FileOutput,
-  FolderSearch,
   Maximize2,
   Minimize2,
   Search,
@@ -42,6 +40,7 @@ import {
   type DocxTextSpan,
   type XlsxSheet
 } from "../../lib/office-preview.js";
+import { ThreadFileIcon } from "../agent-thread-file-icon.js";
 import { XlsxPreview } from "./xlsx-preview.js";
 import type { FilePreviewResource, FilePreviewViewState } from "./file-preview-types.js";
 
@@ -164,6 +163,9 @@ export function FilePreview(props: FilePreviewProps): ReactNode {
     && /\.(?:csv|tsv)$/i.test(props.resource.name)
   ) {
     return searchable(<TextPreview blob={state.blob} name={props.resource.name} code={false} />);
+  }
+  if (loadedFileType.kind === "archive") {
+    return <PreviewStatus label={t("filePreview.unavailable")} resource={props.resource} />;
   }
   if (loadedFileType.kind === "generic") {
     return <GenericFilePreview blob={state.blob} resource={props.resource} />;
@@ -443,16 +445,19 @@ function scrollRangeWithinPreview(boundary: HTMLElement | null, range: Range): v
 
 function PreviewStatus(props: { label: string; resource?: FilePreviewResource }) {
   const { t } = useTranslation();
+  const name = props.resource?.name;
   return (
-    <div className="workspace-artifact-preview-empty">
-      <FileOutput size={28} />
-      <strong>{props.label}</strong>
-      {props.resource ? (
-        <div className="file-preview__fallback-actions">
-          {props.resource.open ? <button type="button" onClick={() => void props.resource?.open?.()}><ExternalLink size={13} />{t("filePreview.open")}</button> : null}
-          {props.resource.reveal ? <button type="button" onClick={() => void props.resource?.reveal?.()}><FolderSearch size={13} />{t("filePreview.reveal")}</button> : null}
-          {props.resource.download ? <button type="button" onClick={() => void props.resource?.download?.()}>{t("filePreview.download")}</button> : null}
-        </div>
+    <div className="thread-preview__placeholder" role="status">
+      {name ? (
+        <span className="thread-preview__placeholder-icon"><ThreadFileIcon name={name} /></span>
+      ) : null}
+      {name ? <span className="thread-preview__placeholder-name">{name}</span> : null}
+      <span className="thread-preview__placeholder-message">{props.label}</span>
+      {props.resource?.open ? (
+        <button type="button" className="thread-preview__retry" onClick={() => void props.resource?.open?.()}>
+          <ExternalLink size={14} aria-hidden="true" />
+          <span>{t("filePreview.open")}</span>
+        </button>
       ) : null}
     </div>
   );

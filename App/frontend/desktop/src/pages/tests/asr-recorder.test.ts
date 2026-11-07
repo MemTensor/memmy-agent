@@ -1,6 +1,7 @@
 /** Asr recorder tests. */
 import { describe, expect, it, vi } from "vitest";
 import {
+  hasTranscribedSpeech,
   MicrophonePermissionError,
   ensureMicrophoneAccess,
   isMicrophonePermissionDenial,
@@ -64,5 +65,13 @@ describe("ASR recorder microphone access", () => {
   it("识别 getUserMedia 权限拒绝错误", () => {
     expect(isMicrophonePermissionDenial(new DOMException("Permission denied", "NotAllowedError"))).toBe(true);
     expect(isMicrophonePermissionDenial(new Error("network offline"))).toBe(false);
+  });
+});
+
+describe("ASR recorder response handling", () => {
+  it("uses the model transcript rather than microphone volume to identify speech", () => {
+    expect(hasTranscribedSpeech({ text: "", segments: [] })).toBe(false);
+    expect(hasTranscribedSpeech({ text: "  ", segments: [{ text: "你好", startMs: 0 }] })).toBe(true);
+    expect(hasTranscribedSpeech({ text: "正常转写", segments: [] })).toBe(true);
   });
 });

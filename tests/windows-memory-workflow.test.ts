@@ -76,6 +76,8 @@ describe("Windows Memory validation workflow", () => {
 describe.skipIf(!hasPowerShell)("Windows session preflight behavior", () => {
   const activeOutput = " USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME\n>runneradmin           console             2  Active      none   9/7/2026 7:15 AM";
 
+  // Each case launches a fresh PowerShell process. Allow its existing 10s child
+  // deadline to settle, plus bounded runner/assertion overhead on cold hosts.
   it.each([
     { name: "accepts the active session using the direct query even when the wrapper fails", output: activeOutput, exitCode: 0, accepted: true },
     { name: "rejects a failed native query despite apparently active output", output: activeOutput, exitCode: 1, accepted: false },
@@ -108,7 +110,7 @@ describe.skipIf(!hasPowerShell)("Windows session preflight behavior", () => {
     });
     expect(result.error).toBeUndefined();
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(accepted ? 0 : 1);
-  });
+  }, 15_000);
 });
 
 

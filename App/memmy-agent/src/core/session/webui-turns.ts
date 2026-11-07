@@ -17,7 +17,9 @@ export const WEBUI_TITLE_METADATA_KEY = "title";
 export const WEBUI_TITLE_USER_EDITED_METADATA_KEY = "titleUserEdited";
 export { WEBUI_PROJECT_ID_METADATA_KEY, WEBUI_WORKSPACE_CWD_METADATA_KEY };
 export const TITLE_MAX_CHARS = 60;
-export const TITLE_GENERATION_MAX_TOKENS = 96;
+// Account models may spend output tokens on reasoning even when asked not to.
+// Leave enough room for the visible title after that reasoning.
+export const TITLE_GENERATION_MAX_TOKENS = 256;
 export const TITLE_GENERATION_REASONING_EFFORT = "none";
 export const websocketTurnWallStartTimes = new Map<string, number>();
 
@@ -105,11 +107,25 @@ export async function maybeGenerateWebuiTitle({ sessions, sessionKey, provider, 
       retryMode: "standard",
     };
     response = await provider.chatWithRetry(args);
-  } catch {
+  } catch (error) {
+    console.warn("WebUI title generation request failed", {
+      errorName: error instanceof Error ? error.name : typeof error,
+    });
     return false;
   }
   const title = cleanGeneratedTitle(response?.content);
-  if (!title || title.toLowerCase().startsWith("error")) return false;
+  if (!title || title.toLowerCase().startsWith("error")) {
+    console.warn("WebUI title generation returned no usable title", {
+      finishReason: response?.finishReason ?? null,
+      errorStatusCode: response?.errorStatusCode ?? null,
+      errorKind: response?.errorKind ?? null,
+      errorCategory: response?.errorCategory ?? null,
+      errorCode: response?.errorCode ?? null,
+      completionTokens: response?.usage?.completion_tokens ?? null,
+      reasoningTokens: response?.usage?.completion_tokens_details?.reasoning_tokens ?? null,
+    });
+    return false;
+  }
   session.metadata[WEBUI_TITLE_METADATA_KEY] = title;
   sessions.save(session);
   return true;
