@@ -2422,6 +2422,15 @@ export class RuntimeRepository {
     return row ? sourceTurnCaptureFromSql(row) : undefined;
   }
 
+  findSourceTurnCaptureByContentHash(scope: SourceTurnCaptureScope, contentHash: string): SourceTurnCaptureRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source <> @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND content_hash = @contentHash
+      ORDER BY created_at ASC LIMIT 1`
+    ).get({ ...scope, contentHash }) as Record<string, unknown> | undefined;
+    return row ? sourceTurnCaptureFromSql(row) : undefined;
+  }
+
   latestSourceTurnCapture(scope: SourceTurnCaptureScope): SourceTurnCaptureRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM source_turn_captures
       WHERE source = @source AND profile_id = @profileId
