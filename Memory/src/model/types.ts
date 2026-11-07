@@ -7,6 +7,8 @@ export interface LlmMessage {
 
 export interface LlmCompletionOptions {
   operation: string;
+  /** Stable business conversation identity, also used by background workers. */
+  sessionId?: string;
   thinkingMode?: "inherit" | "enabled" | "disabled";
   temperature?: number;
   maxTokens?: number;

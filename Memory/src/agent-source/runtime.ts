@@ -1762,6 +1762,11 @@ async function ingestStagedTurns(
         title: titleForTurn(sourceId, turn.messages), tags: ["agent-source", sourceId], source: sourceId,
         turnId: addAnalyticsBase.turnId, createdAt: turn.messages[0]!.createdAt, deferProcessing: true
       });
+      // Recovery belongs to an explicit history scan, not ordinary duplicate
+      // imports or incremental synchronization with unchanged configuration.
+      if (added.duplicate && (scanMode === "initial_subset" || scanMode === "full")) {
+        service.retryFailedMemoryProcessingOnScan?.(added.id);
+      }
       if (!added.duplicate) {
         memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
         memoryAddAnalytics?.trackAddSucceeded({

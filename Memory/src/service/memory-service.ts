@@ -3,6 +3,8 @@ import { isImportedSkill } from "../storage/imported-skill.js";
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
 import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { canRetryMemoryProcessing } from "./import/processing-retry-policy.js";
 import {
   assertJsonValue,
   canonicalJson,
@@ -201,6 +203,7 @@ import {
 } from "./retrieval/retrieval-service.js";
 import {
   SessionTurnService,
+  allowsLegacyHistoryCapture,
   rawTurnSummary as sessionRawTurnSummary,
   repairEvidenceValueDiff as sessionRepairEvidenceValueDiff
 } from "./session/session-turn-service.js";
@@ -218,6 +221,7 @@ import {
 } from "./turn/turn-normalization.js";
 import {
   createWorkerJobHandlers,
+  sanitizeProcessingError,
   type ClosedEpisodeTrigger,
   type EnqueueJobInput
 } from "./worker/job-handlers.js";
@@ -368,6 +372,7 @@ export class MemoryService {
   };
   private persistRecoveredListener?: () => void;
   private capturePendingListener?: () => void;
+  private readonly fallbackSessionId = randomUUID();
   private closing = false;
   private stopping?: Promise<void>;
   private viewerEndpoint?: string;
@@ -700,7 +705,9 @@ export class MemoryService {
             ? this.sessionTurns.assignEpisode(job)
             : job.jobType === "episode_finalize"
               ? this.sessionTurns.finalizeAssignment(job)
-              : this.workerHandlers.processJob(job)
+              : this.workerHandlers.processJob(job),
+          // Jobs without a conversation use stable correlation IDs across retries.
+          job.sessionId ?? job.targetMemoryId ?? job.episodeId ?? job.id
         )
       },
       embeddingJobs: this.embeddingJobs
@@ -901,6 +908,7 @@ export class MemoryService {
       modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
       {
         modelRole,
+        fallbackSessionId: this.fallbackSessionId,
         usageRecorder: this.modelUsageSink
       }
     );
@@ -1145,8 +1153,8 @@ export class MemoryService {
     }
   }
 
-  private withModelTaskContext<T>(operation: () => T): T {
-    return this.modelTasks.run(operation);
+  private withModelTaskContext<T>(operation: () => T, sessionId?: string): T {
+    return this.modelTasks.run(operation, sessionId);
   }
 
   private memoryAddEnabled(): boolean {
@@ -1760,7 +1768,7 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.summary ?? "" },
       () => this.sessionTurns.compactSession(sessionId, this.withTimeZone(request))
-    )));
+    ), sessionId));
   }
 
   async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
@@ -1781,7 +1789,7 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    const response = await this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
+    const response = await this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)), request.sessionId);
     return this.retrieval.refreshImportedSkillResponse(response, request, "turn_start");
   }
 
@@ -1807,7 +1815,16 @@ export class MemoryService {
           userId: request.namespace?.userId ?? this.config.userId
         }
       }), () => { recoveredEvolutionScheduled = true; })
-    )));
+    ), request.sessionId ?? (request.sourceTurn
+      ? `${request.sourceTurn.source}:${request.sourceTurn.profileId}:${request.sourceTurn.conversationId}` : undefined)));
+    // Full scans are an explicit recovery action. Hooks and incremental scans
+    // must not repeatedly restart a terminal failure without user intervention.
+    if (allowsLegacyHistoryCapture(request) && response.status === "existing") {
+      const ids = response.result?.l1MemoryIds ?? (response.legacyImportMemoryId ? [response.legacyImportMemoryId] : []);
+      for (const id of ids) {
+        if (this.retryFailedMemoryProcessingOnScan(id)) recoveredEvolutionScheduled = true;
+      }
+    }
     serviceLogger.info("source_turn.complete", {
       source: request.sourceTurn?.source,
       profileId: request.sourceTurn?.profileId,
@@ -1830,7 +1847,7 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.query, turnId },
       () => this.sessionTurns.completeTurn(turnId, this.withTimeZone(request))
-    )));
+    ), request.sessionId));
   }
 
   async observeTool(input: ToolObserveRequest): Promise<{
@@ -3612,14 +3629,47 @@ export class MemoryService {
     job?: JobRef;
     serverTime: string;
   } {
+    const result = this.repos.transaction(() => this.retryMemoryProcessingInTransaction(memoryId, request));
+    if (result.accepted) this.notifyProcessingRecovery();
+    return result;
+  }
+
+  /** Memory work and its dependent Episode work commit or roll back together. */
+  private retryMemoryProcessingInTransaction(memoryId: string, request: RequestEnvelope = {}) {
     // The existing operation validates memory ownership before touching its raw work.
     const result = this.importJobs.retryMemoryProcessing(memoryId, request);
     const memory = this.repos.memories.get(memoryId);
     const rawId = memory ? rawTurnIdFromMemory(memory) : undefined;
     const retried = rawId ? this.repos.runtime.requeueFailedEpisodeAssignments(nowIso(), rawId) : [];
     for (const { before, after } of retried) this.workerHandlers.appendJobChange(after, "queued", before);
-    if (retried.length) this.capturePendingListener?.();
     return retried.length ? { ...result, accepted: true, job: result.job ?? jobToRef(retried[0]!.after) } : result;
+  }
+
+  retryFailedMemoryProcessingOnScan(memoryId: string): boolean {
+    let accepted: boolean;
+    try {
+      accepted = this.repos.transaction(() => {
+        if (!this.memoryAddEnabled()) return false;
+        const memory = this.repos.memories.get(memoryId);
+        const processing = this.repos.processing.get(memoryId);
+        if (!memory || !processing || !canRetryMemoryProcessing(memory, processing)) return false;
+        return this.retryMemoryProcessingInTransaction(memoryId).accepted;
+      });
+    } catch (error) {
+      // Capture is already committed; recovery failure must not fail the scan turn.
+      serviceLogger.warn("source_turn.scan_retry_failed", { memoryId, error: sanitizeProcessingError(error) });
+      return false;
+    }
+    if (accepted) this.notifyProcessingRecovery();
+    return accepted;
+  }
+
+  private notifyProcessingRecovery(): void {
+    try { this.capturePendingListener?.(); }
+    catch (error) {
+      // A notification cannot undo committed work or turn acceptance into failure.
+      serviceLogger.warn("processing.retry_notification_failed", { error: sanitizeProcessingError(error) });
+    }
   }
 
   private embeddingMaintenance(): EmbeddingMaintenance {
