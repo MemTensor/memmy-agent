@@ -7,6 +7,7 @@ import type { SourceRegistry } from "@memmy/agent-source-readers/adapters/source
 import type { ConversationMessage, SourceAdapter } from "@memmy/agent-source-readers/adapters/types";
 import { rankLocalSessions } from "./local-session-rank.js";
 import { createSessionGrouper, type LocalSessionGroup, type SessionGrouper } from "./session-group.js";
+import { createStoreDigest, type StoreDigest } from "./store-digest.js";
 
 export type { LocalSessionGroup } from "./session-group.js";
 
@@ -18,6 +19,10 @@ const DEFAULT_SESSIONS_PER_SOURCE = 30;
 const RECENT_SCAN_FACTORS = [1, 2, 4] as const;
 /** A wider window used only when the recent list comes up short. */
 const WIDE_SESSIONS_PER_SOURCE = 200;
+/**
+ * 快照多久算旧。它现在只决定「多久拿摘要核对一次」——核对是几毫秒的 stat，不用再读盘，所以保持在 15 秒：
+ * 弹窗拿到的列表依旧不会超过这个时长，而每分钟的后台同步也不会因此重新扫一遍。
+ */
 const DEFAULT_SNAPSHOT_TTL_MS = 15_000;
 const DEFAULT_AVAILABLE_LIMIT = 50;
 const MAX_AVAILABLE_LIMIT = 500;
@@ -107,6 +112,8 @@ export interface CreateLocalSessionReaderDeps {
   sessionsPerSource?: number;
   snapshotTtlMs?: number;
   now?: () => number;
+  /** 判断某份存储有没有变的廉价摘要；默认浅层 stat 一遍，测试里可以换成假的。 */
+  storeDigest?: StoreDigest;
 }
 
 /** Creates the local session reader. */
@@ -114,6 +121,11 @@ export function createLocalSessionReader(deps: CreateLocalSessionReaderDeps): Lo
   const sessionsPerSource = deps.sessionsPerSource ?? DEFAULT_SESSIONS_PER_SOURCE;
   const snapshotTtlMs = deps.snapshotTtlMs ?? DEFAULT_SNAPSHOT_TTL_MS;
   const now = deps.now ?? Date.now;
+  const storeDigest = deps.storeDigest ?? createStoreDigest();
+  /** 每份存储上次扫描时的摘要与结果：摘要没变就不用再读一遍。 */
+  const perSource = new Map<string, { digest: string | null; sessions: LocalSession[] }>();
+  /** 快照里装的是哪几个 Agent，权限变了会变。 */
+  let snapshotSources = "";
   let snapshot: { loadedAt: number; sessions: LocalSession[] } | null = null;
   let loading: Promise<LocalSession[]> | null = null;
 
@@ -122,11 +134,53 @@ export function createLocalSessionReader(deps: CreateLocalSessionReaderDeps): Lo
     return deps.adapters ? deps.adapters() : deps.registry.list();
   }
 
-  function scan(): Promise<LocalSession[]> {
-    loading ??= adapters().then((list) => Promise.all(list.map((adapter) => readRecentSessions(adapter, sessionsPerSource))))
-      .then((perSource) => {
-        const sessions = perSource.flat();
+  /**
+   * 扫描前先取各份存储的摘要：摘要对不上的才真去读盘。摘要比扫描早一步拿到，所以扫描期间刚写进来的内容
+   * 会让下次摘要对不上、多扫一遍，不会反过来漏掉。
+   */
+  async function currentDigests(list: readonly SourceAdapter[]): Promise<Map<string, string | null>> {
+    const digests = new Map<string, string | null>();
+    // 一个个来：一份摘要只值几毫秒，串行做占不满 I/O 线程池，也不跟真正的请求抢。
+    for (const adapter of list) {
+      digests.set(adapter.descriptor.sourceId, await storeDigest(adapter.descriptor.dataPath));
+    }
+    return digests;
+  }
+
+  /** 摘要变了，或者压根说不清有没有变的存储。 */
+  function staleSources(list: readonly SourceAdapter[], digests: Map<string, string | null>): SourceAdapter[] {
+    return list.filter((adapter) => {
+      const cached = perSource.get(adapter.descriptor.sourceId);
+      const digest = digests.get(adapter.descriptor.sourceId) ?? null;
+      return !cached || digest === null || cached.digest !== digest;
+    });
+  }
+
+  function sourceKey(list: readonly SourceAdapter[]): string {
+    return list.map((adapter) => adapter.descriptor.sourceId).join(",");
+  }
+
+  function scan(list: readonly SourceAdapter[], digests: Map<string, string | null>): Promise<LocalSession[]> {
+    loading ??= Promise.all(list.map(async (adapter) => {
+        const sourceId = adapter.descriptor.sourceId;
+        const digest = digests.get(sourceId) ?? null;
+        const cached = perSource.get(sourceId);
+        if (cached && digest !== null && cached.digest === digest) {
+          return cached.sessions;
+        }
+        const sessions = await readRecentSessions(adapter, sessionsPerSource);
+        perSource.set(sourceId, { digest, sessions });
+        return sessions;
+      }))
+      .then(() => {
+        // 掉出扫描范围的 Agent 不留旧数据：关掉的 Agent 再打开时应该从头读一遍。
+        const visible = new Set(list.map((adapter) => adapter.descriptor.sourceId));
+        for (const sourceId of perSource.keys()) {
+          if (!visible.has(sourceId)) perSource.delete(sourceId);
+        }
+        const sessions = list.flatMap((adapter) => perSource.get(adapter.descriptor.sourceId)?.sessions ?? []);
         snapshot = { loadedAt: now(), sessions };
+        snapshotSources = sourceKey(list);
         return sessions;
       })
       .finally(() => {
@@ -138,16 +192,24 @@ export function createLocalSessionReader(deps: CreateLocalSessionReaderDeps): Lo
   /**
    * Scanning every agent takes seconds, so an expired snapshot is still answered at once while a new scan runs
    * behind it. Only the first request, or one that asks for `fresh`, waits for the scan.
+   *
+   * 过期之后先花几毫秒比对摘要：本机什么都没变就当这份快照刚校验过，一次盘都不用读。
    */
   async function allSessions(fresh: boolean): Promise<{ sessions: LocalSession[]; refreshing: boolean }> {
     if (snapshot && now() - snapshot.loadedAt < snapshotTtlMs) {
       return { sessions: snapshot.sessions, refreshing: false };
     }
+    const list = await adapters();
+    const digests = await currentDigests(list);
+    if (snapshot && snapshotSources === sourceKey(list) && !staleSources(list, digests).length) {
+      snapshot.loadedAt = now();
+      return { sessions: snapshot.sessions, refreshing: false };
+    }
     if (snapshot && !fresh) {
-      void scan();
+      void scan(list, digests);
       return { sessions: snapshot.sessions, refreshing: true };
     }
-    return { sessions: await scan(), refreshing: false };
+    return { sessions: await scan(list, digests), refreshing: false };
   }
 
   return {
