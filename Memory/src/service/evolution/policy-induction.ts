@@ -1,3 +1,5 @@
+// Statistics replay adapted from yxyi123, PR #740 (660b3b9c).
+import { numericTraces, revisePolicyStatistics, withRevisionHistory } from "./revision-stats.js";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { l2SupportRelation } from "./l2-content-revision.js";
 import {
@@ -53,6 +55,7 @@ export interface PolicyInductionDeps {
   config: MemmyConfig;
   repos: Repositories;
   nowIso: () => string;
+  episodeRevision(episodeId: string): string;
   skillLlm: LlmClient;
   embedder: Embedder;
   traceMeta(memory: MemoryRow | null | undefined): TraceMeta | null;
@@ -148,12 +151,21 @@ export class PolicyInductionEngine {
       // A restored candidate pool can contain thousands of synchronous skips.
       // Let health, foreground requests and shutdown run between buckets.
       await yieldToEventLoop();
-      const bucket = uniq(
-        pendingCandidates
-          .filter((candidate) => candidate.candidateKey === signature)
-          .map((candidate) => candidate.sourceMemoryId)
-      )
-        .map((traceId) => eligibleById.get(traceId))
+      // Generating a Policy for one signature takes a model round trip. Evidence for the next
+      // signature can expire meanwhile, so reload it here instead of reusing the snapshot taken
+      // before the loop: a version guard alone would compare two equally stale readings.
+      const currentCandidates = this.deps.repos.runtime.listPendingCandidatePool({
+        userId: source.userId,
+        now: this.deps.nowIso(),
+        limit: 2000
+      }).filter((candidate) => candidate.candidateKey === signature);
+      const currentEligible = new Map(this.deps.repos.memories
+        .getMany(uniq(currentCandidates.map((candidate) => candidate.sourceMemoryId)))
+        .map((memory) => this.deps.traceMeta(memory))
+        .filter((trace): trace is TraceMeta => Boolean(trace && this.isTraceEligibleForL2(trace)))
+        .map((trace) => [trace.id, trace]));
+      const bucket = uniq(currentCandidates.map((candidate) => candidate.sourceMemoryId))
+        .map((traceId) => currentEligible.get(traceId))
         .filter((trace): trace is TraceMeta => Boolean(trace));
       const distinctEpisodeCount = uniq(
         bucket
@@ -229,7 +241,12 @@ export class PolicyInductionEngine {
         currentSupport: existingPolicy?.support
       });
 
+      const evidenceRevision = () => stableHash(JSON.stringify(bucket.map(trace => [trace.id,
+        this.deps.repos.memories.get(trace.id)?.version,
+        trace.episodeId ? this.deps.episodeRevision(trace.episodeId) : undefined])));
+      const beforeGeneration = evidenceRevision();
       const enhancement = await this.enhancePolicyDraft(signature, promptEvidenceTraces, fallbackDraft);
+      if (evidenceRevision() !== beforeGeneration) throw new Error("policy evidence changed during generation; retry");
       if (!enhancement.ok) {
         logEvolutionDecision(job, "l2_induction", enhancement.reason, {
           sourceMemoryId: source.id,
@@ -600,6 +617,11 @@ export class PolicyInductionEngine {
   }
 
   recomputePolicyStats(policyId: string, at: string, triggerEpisodeId?: string): MemoryRow | undefined {
+    const run = () => this.recomputePolicyStatsInTransaction(policyId, at, triggerEpisodeId);
+    return this.deps.repos.transaction(run);
+  }
+
+  private recomputePolicyStatsInTransaction(policyId: string, at: string, triggerEpisodeId?: string): MemoryRow | undefined {
     const memory = this.deps.repos.memories.get(policyId);
     if (!memory || memory.memoryLayer !== "L2") return undefined;
     const policy = policyMetaFromMemory(memory);
@@ -609,7 +631,7 @@ export class PolicyInductionEngine {
     const linkedTraceIds = new Set([
       ...(unifiedEvidence ? policy.sourceTraceIds : []),
       ...this.deps.repos.runtime
-        .listTracePolicyLinks({ l2MemoryId: policy.id, limit: 1000 })
+        .listTracePolicyLinks({ l2MemoryId: policy.id, limit: -1 })
         .filter((link) => !unifiedEvidence || link.relation === l2SupportRelation(memory))
         .map((link) => link.l1MemoryId)
     ]);
@@ -625,7 +647,7 @@ export class PolicyInductionEngine {
 
     const linkedTraces = allTraces.filter((trace) => linkedTraceIds.has(trace.id));
     const evidenceTraces = linkedTraces;
-    if (evidenceTraces.length === 0) {
+    if (unifiedEvidence && evidenceTraces.length === 0) {
       const archived = this.deps.repos.memories.update(updatePolicyStats(memory, {
         support: 0,
         gain: policy.gain,
@@ -659,7 +681,7 @@ export class PolicyInductionEngine {
       : evidenceTraces;
     const successfulEpisodeCount = new Set(gainTraces.map((trace) => trace.episodeId).filter(Boolean)).size;
     const gainReferenceTraces = this.l2GainReferenceTraces(gainTraces, triggerEpisodeId);
-    const stats = buildPolicyDraft({
+    const unifiedStats = buildPolicyDraft({
       signature: policy.signature,
       evidenceTraces: gainTraces,
       allTraces: gainReferenceTraces,
@@ -676,6 +698,21 @@ export class PolicyInductionEngine {
       currentGain: policy.gain,
       currentSupport: policy.schemaVersion === 2 ? numberOr(rawPolicy.successful_episode_count, 0) : policy.support
     });
+    const result = !unifiedEvidence ? revisePolicyStatistics(memory, {
+      evidence: numericTraces(evidenceTraces), reference: numericTraces(gainReferenceTraces),
+      parameters: {
+        minSupport: this.deps.config.algorithm.l2Induction.minEpisodesForActivation,
+        minGain: this.deps.config.algorithm.l2Induction.minGain,
+        archiveGain: this.deps.config.algorithm.l2Induction.archiveGain,
+        tauSoftmax: this.deps.config.algorithm.l2Induction.tauSoftmax,
+        gainEmaAlpha: this.deps.config.algorithm.l2Induction.gainEmaAlpha
+      }
+    }, triggerEpisodeId ?? `governance:${stableHash(JSON.stringify(numericTraces(evidenceTraces)))}`) : undefined;
+    if (!unifiedEvidence && !result) return memory;
+    const stats = result ? { ...result,
+      sourceEpisodeIds: uniq(evidenceTraces.map(trace => trace.episodeId).filter((id): id is string => Boolean(id))),
+      sourceTraceIds: evidenceTraces.map(trace => trace.id)
+    } : unifiedStats;
 
     if (evidenceAware) {
       stats.support = new Set(evidenceTraces.map((trace) => trace.episodeId || trace.id)).size;
@@ -692,7 +729,7 @@ export class PolicyInductionEngine {
     const calculatedStatus = policy.schemaVersion === 2 &&
       (!successEligible || successfulEpisodeCount < Math.min(2, this.deps.config.algorithm.l2Induction.minEpisodesForActivation)) && stats.status === "active"
       ? "candidate" : stats.status;
-    const nextStatus: PolicyLifecycleStatus = policy.status === "active" && calculatedStatus !== "active"
+    const nextStatus: PolicyLifecycleStatus = !result && policy.status === "active" && calculatedStatus !== "active"
       ? "verification_required"
       : calculatedStatus;
     const next = updatePolicyStats(memory, {
@@ -717,7 +754,7 @@ export class PolicyInductionEngine {
         ...eligibility,
         evidence_event_count: evidenceTraces.length,
         successful_episode_count: successfulEpisodeCount,
-        pending_conflict_count: this.deps.repos.runtime.listTracePolicyLinks({ l2MemoryId: policy.id, limit: 10000 })
+        pending_conflict_count: this.deps.repos.runtime.listTracePolicyLinks({ l2MemoryId: policy.id, limit: -1 })
           .filter((link) => link.relation === "refutes_pending").length,
         gain_status: gainTraces.length ? "computed" : "not_computed"
       };
@@ -726,7 +763,7 @@ export class PolicyInductionEngine {
       next.properties.internal_info = { ...next.properties.internal_info, ...counters,
         policy: { ...(next.properties.internal_info.policy as Record<string, unknown>), ...counters } };
     }
-    const saved = this.deps.repos.memories.update(next);
+    const saved = this.deps.repos.memories.update(result ? withRevisionHistory(next, "policy_revision_history", result.history) : next);
     for (const episodeId of stats.sourceEpisodeIds) {
       this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "L2", saved.id, at);
     }
@@ -738,7 +775,7 @@ export class PolicyInductionEngine {
       op: "updated",
       entityId: saved.id,
       userId: saved.userId,
-      changeType: "policy_stats_update",
+      changeType: stats.support === 0 ? "policy_evidence_invalidated" : "policy_stats_update",
       before: previous,
       after: saved,
       source: "worker.l2_association.v7",
@@ -762,7 +799,7 @@ export class PolicyInductionEngine {
           createdAt: at
         });
       }
-      this.deps.onSkillRewardDrift(savedPolicy, at);
+      if (result || stats.support > 0) this.deps.onSkillRewardDrift(savedPolicy, at);
     }
     return saved;
   }

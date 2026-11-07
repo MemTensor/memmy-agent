@@ -635,12 +635,38 @@ export class MemoryRepository {
     return this.updateRow(memory, false);
   }
 
+  /** Restore only a Span retired by its generator; user-deleted memories stay deleted. */
+  restoreRetiredSpan(memory: MemoryRow): MemoryRow | undefined {
+    const previous = this.getIncludingDeleted(memory.id);
+    const oldSpan = previous?.properties.internal_info.span;
+    const nextSpan = memory.properties.internal_info.span;
+    if (!previous?.deletedAt || previous.status !== "deleted"
+      || previous.memoryLayer !== "L1" || memory.memoryLayer !== "L1"
+      || kindFromMemory(previous) !== "span" || kindFromMemory(memory) !== "span"
+      || !isRecordLike(oldSpan) || !isRecordLike(nextSpan)
+      || oldSpan.source_trace_id !== nextSpan.source_trace_id
+      || oldSpan.tool_call_start !== nextSpan.tool_call_start
+      || oldSpan.tool_call_end !== nextSpan.tool_call_end) return undefined;
+    const marked = oldSpan.retired_by === "worker.span_big_turn.v1"
+      && oldSpan.retired_at === previous.deletedAt;
+    if (!marked) {
+      // Older automatic retirements predate the durable marker. Require the matching
+      // deletion version; missing/pruned history is not permission to restore a row.
+      const lastChange = this.db.prepare(`SELECT change_type, source, version FROM memory_change_log
+        WHERE memory_id = ? ORDER BY seq DESC LIMIT 1`).get(memory.id) as
+        { change_type: string; source: string; version: number | null } | undefined;
+      if (lastChange?.change_type !== "span_retired" || lastChange.source !== "worker.span_big_turn.v1"
+        || lastChange.version !== previous.version) return undefined;
+    }
+    return this.updateRow({ ...memory, deletedAt: undefined, createdAt: previous.createdAt, version: previous.version }, true, undefined, true);
+  }
+
   updateIfVersion(memory: MemoryRow, expectedVersion: number): MemoryRow {
     return this.db.transaction(() => this.updateRow(memory, true, expectedVersion))();
   }
 
-  private updateRow(memory: MemoryRow, bumpVersion: boolean, expectedVersion?: number): MemoryRow {
-    const existing = this.get(memory.id);
+  private updateRow(memory: MemoryRow, bumpVersion: boolean, expectedVersion?: number, restoreDeleted = false): MemoryRow {
+    const existing = restoreDeleted ? this.getIncludingDeleted(memory.id) : this.get(memory.id);
     if (!existing) {
       throw new Error(`memory not found: ${memory.id}`);
     }
@@ -1309,6 +1335,13 @@ export class MemoryRepository {
     return this.searchLikeIds(fragments, filter, limit, false, "structural");
   }
 
+  listSpansForTrace(traceId: string): MemoryRow[] {
+    const rows = this.db.prepare(`SELECT id FROM memories
+      WHERE memory_layer = 'L1' AND deleted_at IS NULL AND status != 'deleted'
+        AND json_extract(properties_json, '$.internal_info.span.source_trace_id') = ?`).all(traceId) as Array<{ id: string }>;
+    return this.getMany(rows.map(row => row.id));
+  }
+
   archive(id: string, updatedAt = nowIso()): MemoryRow | undefined {
     const memory = this.get(id);
     if (!memory) {
@@ -1319,7 +1352,9 @@ export class MemoryRepository {
       status: "archived",
       properties: {
         ...memory.properties,
-        status: "archived"
+        status: "archived",
+        internal_info: { ...memory.properties.internal_info,
+          ...(memory.memoryLayer === "Skill" ? { skill_manually_archived: true } : {}) }
       },
       updatedAt
     });
@@ -2327,10 +2362,12 @@ export class RuntimeRepository {
   reopenEpisode(episodeId: string, metaPatch: Record<string, unknown> = {}, at = nowIso()): EpisodeRecord | undefined {
     const episode = this.getEpisode(episodeId);
     if (!episode) return undefined;
-    const { reward: _staleReward, ...baseMeta } = episode.meta;
+    const { reward: _staleReward, closeReason, abandonReason, rewardDirty: _rewardDirty, ...baseMeta } = episode.meta;
     const meta = {
       ...baseMeta,
-      ...metaPatch
+      ...metaPatch,
+      processingGeneration: Number(episode.meta.processingGeneration ?? 0) + 1,
+      previousClosure: { closedAt: episode.closedAt, closeReason, abandonReason }
     };
     this.db
       .prepare(
@@ -3492,11 +3529,15 @@ export class RuntimeRepository {
     return Number(row?.seq ?? 0);
   }
 
-  listChanges(userId?: string, limit = 50, cursor?: number, namespaceId?: string): ChangeLogRecord[] {
+  listChanges(userId?: string, limit = 50, cursor?: number, namespaceId?: string, memoryId?: string): ChangeLogRecord[] {
     void userId;
     void namespaceId;
     const clauses = ["1=1"];
     const params: SqlValue[] = [];
+    if (memoryId) {
+      clauses.push("memory_id = ?");
+      params.push(memoryId);
+    }
     if (cursor) {
       clauses.push("seq > ?");
       params.push(cursor);

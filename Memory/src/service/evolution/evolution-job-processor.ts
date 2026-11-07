@@ -1,3 +1,4 @@
+import { episodeInputRevision } from "./episode-revision.js";
 import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   policyMetaFromMemory,
@@ -120,6 +121,7 @@ export class EvolutionJobProcessor {
     this.policy = new PolicyInductionEngine({
       get config() { return owner.deps.config; },
       repos: deps.repos,
+      episodeRevision: id => episodeInputRevision(deps.repos, id, true),
       nowIso,
       get skillLlm() { return owner.deps.skillLlm; },
       get embedder() { return owner.deps.embedder; },
