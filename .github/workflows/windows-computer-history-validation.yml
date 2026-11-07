@@ -14,6 +14,12 @@ on:
       - "App/native-computer-use/**"
       - "App/memmy-agent/src/tools/computer-history/**"
       - "App/memmy-agent/tests/tools/computer-history/**"
+      - "App/memmy-agent/src/core/session/webui-title.ts"
+      - "App/memmy-agent/src/integrations/channels/websocket.ts"
+      - "App/memmy-agent/src/entrypoints/cli/commands.ts"
+      - "App/memmy-agent/tests/core/session/webui-title.test.ts"
+      - "App/memmy-agent/tests/integrations/channels/websocket-envelope-media.test.ts"
+      - "App/memmy-agent/tests/integrations/channels/websocket-media-route.test.ts"
       - "App/memmy-agent/scripts/copy-build-assets.mjs"
       - "App/shell/desktop/electron-builder.win*.yml"
       - "scripts/internal/win/build-nsis.sh"
@@ -257,6 +263,10 @@ jobs:
             'App/memmy-agent/tests/tools/computer-history/win/native-event-adapter.test.ts'
             'App/memmy-agent/tests/tools/computer-history/win/native-recording-privacy.test.ts'
             'App/memmy-agent/tests/tools/computer-history/win/browser-authority-publisher.test.ts'
+            # Exercise saved-recording titles and media range routing on Windows.
+            'App/memmy-agent/tests/core/session/webui-title.test.ts'
+            'App/memmy-agent/tests/integrations/channels/websocket-envelope-media.test.ts'
+            'App/memmy-agent/tests/integrations/channels/websocket-media-route.test.ts'
           )
           foreach ($test in $tests) {
             if (-not (Test-Path -LiteralPath $test -PathType Leaf)) { throw "Missing History test: $test" }

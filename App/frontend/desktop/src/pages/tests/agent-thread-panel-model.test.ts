@@ -45,7 +45,7 @@ describe("thread panel model", () => {
     for (const extension of ["tex", "bib", "sty"]) expect(threadPreviewKind(`review.${extension}`)).toBe("code");
   });
 
-  it("opens supported files in the thread panel and leaves unsupported files to the system app", () => {
+  it("opens supported and unsupported files in the thread panel", () => {
     expect(threadTabForInAppPreview({
       name: "示例公司00000_年报测试.md",
       path: "/work/示例公司00000_年报测试.md",
@@ -59,8 +59,13 @@ describe("thread panel model", () => {
     expect(threadTabForInAppPreview({ name: "notes.md", url: "http://127.0.0.1/api/media/notes" })?.id).toBe("file:http://127.0.0.1/api/media/notes");
     expect(threadTabForInAppPreview({ name: "交付物.xlsx", path: "/work/交付物.xlsx" })).toMatchObject({ name: "交付物.xlsx", type: "file" });
     expect(threadTabForInAppPreview({ name: "report.pdf", path: "/work/report.pdf" })).toMatchObject({ name: "report.pdf", type: "file" });
+
     expect(threadTabForInAppPreview({ name: "archive.zip", path: "/work/archive.zip" })).toBeNull();
     expect(threadTabForInAppPreview({ name: "deck.pptx", url: "http://127.0.0.1/api/media/deck" })).toMatchObject({ name: "deck.pptx", type: "file" });
+
+
+    expect(threadTabForInAppPreview({ name: "archive.zip", path: "/work/archive.zip" })).toMatchObject({ name: "archive.zip", type: "file" });
+
   });
 
   it("collects delivered assistant files, not files merely linked or edited", () => {

@@ -78,7 +78,10 @@ streams the ZIP, checks its size/SHA-256, checks every extracted file against th
 manifest, refuses unsafe paths/symlinks/unexpected files, and atomically caches
 it under `plugin-runtimes/office` beside `plugin-data`. Concurrent activations
 share the installation. The verified cache works offline; corruption triggers a
-clean reinstall. Downloads retry three times. Cache contents are read-only to
+clean reinstall. Downloads make at most three attempts, each with a 10-minute overall limit and a
+30-second timeout when no download bytes arrive. The Host logs installation stages
+and downloaded byte counts (without signed URLs) to diagnose slow installations.
+Cache contents are read-only to
 the plugin. Runtime releases are separate from MPP releases; to roll a cached
 runtime forward, remove its `<target>.json` cache pointer before reactivation.
 

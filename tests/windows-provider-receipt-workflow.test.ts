@@ -31,8 +31,20 @@ describe('Windows provider receipt workflow', () => {
     expect(workflow.permissions).toEqual({ contents: 'read' });
     expect(workflow.on.pull_request.paths).toContain('App/native-computer-use/**');
     expect(workflow.on.pull_request.paths).toContain('tests/windows-provider-receipt-workflow.test.ts');
+
     expect(workflow.on.pull_request.paths).toContain('App/shell/desktop/src/main/windows-launch-at-login.ts');
     expect(workflow.on.pull_request.paths).toContain('App/shell/desktop/tests/windows-launch-at-login*.test.ts');
+
+
+    expect(workflow.on.pull_request.paths).toEqual(expect.arrayContaining([
+      'App/memmy-agent/src/core/session/webui-title.ts',
+      'App/memmy-agent/src/integrations/channels/websocket.ts',
+      'App/memmy-agent/src/entrypoints/cli/commands.ts',
+      'App/memmy-agent/tests/core/session/webui-title.test.ts',
+      'App/memmy-agent/tests/integrations/channels/websocket-envelope-media.test.ts',
+      'App/memmy-agent/tests/integrations/channels/websocket-media-route.test.ts',
+    ]));
+
     expect(steps.find(entry => entry.uses === 'actions/checkout@v4')?.with).toMatchObject({
       repository: '${{ steps.source.outputs.repository }}', ref: '${{ steps.source.outputs.sha }}',
       'persist-credentials': false,
@@ -69,6 +81,42 @@ describe('Windows provider receipt workflow', () => {
     expect(steps.indexOf(step('provider-receipt')!)).toBeGreaterThan(steps.indexOf(history!));
     expect(steps.indexOf(step('provider-receipt')!)).toBeGreaterThan(steps.indexOf(computerUse!));
   });
+
+
+
+  it('runs saved-recording title and media regressions with all existing Windows History contracts', () => {
+    const contracts = step('history-contracts')!;
+    const script = contracts.run as string;
+    const testArray = script.match(/\$tests\s*=\s*@\(([\s\S]*?)\n\s*\)/);
+    expect(testArray).not.toBeNull();
+    const selected = [...(testArray?.[1] ?? '').matchAll(/^\s*'([^']+)'\s*$/gm)]
+      .map(match => match[1]);
+    expect(selected).toEqual(expect.arrayContaining([
+      'App/memmy-agent/tests/tools/computer-history/win/application-icon.test.ts',
+      'App/memmy-agent/tests/tools/computer-history/win/win11.test.ts',
+      'App/memmy-agent/tests/tools/computer-history/platform.test.ts',
+      'App/memmy-agent/tests/tools/computer-history/mac/summary-writer.test.ts',
+      'App/memmy-agent/tests/tools/computer-history/browser-privacy.test.ts',
+      'App/memmy-agent/tests/tools/computer-history/browser-semantic-history.test.ts',
+      'App/memmy-agent/tests/tools/computer-history/browser-history-bridge.test.ts',
+      'App/memmy-agent/tests/tools/computer-history/win/native-event-adapter.test.ts',
+      'App/memmy-agent/tests/tools/computer-history/win/native-recording-privacy.test.ts',
+      'App/memmy-agent/tests/tools/computer-history/win/browser-authority-publisher.test.ts',
+      'App/memmy-agent/tests/core/session/webui-title.test.ts',
+      'App/memmy-agent/tests/integrations/channels/websocket-envelope-media.test.ts',
+      'App/memmy-agent/tests/integrations/channels/websocket-media-route.test.ts',
+    ]));
+    expect(new Set(selected).size).toBe(selected.length);
+    const afterArray = script.slice((testArray?.index ?? 0) + (testArray?.[0].length ?? 0));
+    expect(afterArray).not.toMatch(/^\s*\$tests\s*=/m);
+    expect(afterArray).toMatch(/foreach \(\$test in \$tests\)/);
+    expect(afterArray).toContain('Test-Path -LiteralPath $test -PathType Leaf');
+    expect(afterArray).toMatch(/^\s*node node_modules\/vitest\/vitest\.mjs run @tests\s*\n\s*if \(\$LASTEXITCODE -ne 0\) \{ throw 'History platform contracts failed' \}/m);
+    expect(contracts.if).toBeUndefined();
+    expect(contracts['continue-on-error']).toBeUndefined();
+    expect(steps.indexOf(contracts)).toBeLessThan(steps.indexOf(step('provider-receipt')!));
+  });
+
   it('binds both receipt formats to all checks, exact source, clean index and provider identity', () => {
     const script = step('provider-receipt')?.run ?? '';
     for (const value of ['RECEIPT_ALLOWED', 'results[id]?.outcome', 'results[id]?.conclusion',
@@ -79,6 +127,7 @@ describe('Windows provider receipt workflow', () => {
       expect(script).toContain(value);
     }
   });
+
   it('executes Windows Electron startup integration without accepting skipped tests before issuing a receipt', () => {
     const contracts = step('history-contracts');
     expect(contracts?.run).toContain('App/shell/desktop/tests/windows-launch-at-login.test.ts');
@@ -89,6 +138,9 @@ describe('Windows provider receipt workflow', () => {
     expect(contracts?.['continue-on-error']).not.toBe(true);
     expect(step('provider-receipt')?.run).toContain("'history-contracts'");
   });
+
+
+
   it('uploads immutable canonical and explicitly named legacy artifacts only after the producer succeeds', () => {
     const uploads = steps.filter(entry => entry.uses === 'actions/upload-artifact@v4');
     expect(uploads).toHaveLength(2);

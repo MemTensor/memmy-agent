@@ -726,6 +726,11 @@ describe("standalone Agent source executor", () => {
       io[0]!.release();
       await pendingCompletion;
       pendingCompletion = undefined;
+
+
+
+      expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
+
       expect(addMemory).toHaveBeenCalledTimes(1);
       expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-1"]);
       expect(scheduleWorker).toHaveBeenCalledTimes(1);
@@ -743,6 +748,11 @@ describe("standalone Agent source executor", () => {
       io[1]!.release();
       await pendingCompletion;
       pendingCompletion = undefined;
+
+
+
+      expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
+
       expect(addMemory).toHaveBeenCalledTimes(2);
       expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-2"]);
       expect(scheduleWorker).toHaveBeenCalledTimes(2);
@@ -1215,6 +1225,11 @@ async function waitForAutomaticScanCompletion(
       expect(status.error).toBeNull();
       return;
     }
+
+
+
+    if (performance.now() >= deadline) throw new Error("automatic scan did not complete before the I/O deadline");
+
     await yieldToIO();
   }
 }

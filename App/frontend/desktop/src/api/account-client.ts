@@ -5,6 +5,8 @@ import {
   AccountSessionViewSchema,
   LotteryRewardAckInputSchema,
   LotteryRewardSchema,
+  TaskTokenGiftNoticeSchema,
+  TaskTokenGiftAckInputSchema,
   OkResponseSchema,
   SendCodeInputSchema,
   SendCodeResponseSchema,
@@ -20,6 +22,8 @@ import {
   type AccountSessionView,
   type LotteryReward,
   type LotteryRewardAckInput,
+  type TaskTokenGiftNotice,
+  type TaskTokenGiftAckInput,
   type OkResponse,
   type RuntimeConfig,
   type SendCodeInput,
@@ -69,6 +73,8 @@ export interface AccountClient {
   getInvitation(): Promise<AccountInvitationView>;
   getLotteryReward(): Promise<LotteryReward>;
   ackLotteryReward(input: LotteryRewardAckInput): Promise<OkResponse>;
+  ensureTaskTokenGift(): Promise<TaskTokenGiftNotice>;
+  ackTaskTokenGift(input: TaskTokenGiftAckInput): Promise<OkResponse>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
   logout(): Promise<OkResponse>;
@@ -138,6 +144,15 @@ export function createHttpAccountClient(config: RuntimeConfig): AccountClient {
         init: { method: "POST" },
         body: LotteryRewardAckInputSchema.parse(input)
       });
+    },
+
+    async ensureTaskTokenGift() {
+      return requestJson({ config, path: "/api/account/task-token-gift/ensure", schema: TaskTokenGiftNoticeSchema, init: { method: "POST" } });
+    },
+
+    async ackTaskTokenGift(input) {
+      return requestJson({ config, path: "/api/account/task-token-gift/ack", schema: OkResponseSchema,
+        init: { method: "POST" }, body: TaskTokenGiftAckInputSchema.parse(input) });
     },
 
     async updateProfile(input) {
