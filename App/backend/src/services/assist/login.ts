@@ -17,7 +17,7 @@ import { join } from "node:path";
 
 import type { AssistStep } from "./acp-client.js";
 import { adaptersDirectory, installedAdapterPath, adapterFor } from "./adapters.js";
-import { ASSIST_COMMAND_ENV, findExecutable } from "./executables.js";
+import { ASSIST_COMMAND_ENV, findExecutable, shellLaunch } from "./executables.js";
 import { qwenWorkEngine } from "./recipes.js";
 import { assistEnv } from "./shell-env.js";
 
@@ -95,7 +95,12 @@ export function assistLoginCommand(
 /** 适配器装出来的 codex 可执行文件：先看 .bin，再退回包内的 bin。 */
 function bundledCodexExecutable(home: string | undefined, env: NodeJS.ProcessEnv): string | null {
   const binDir = join(adaptersDirectory(home), "node_modules", ".bin");
-  for (const candidate of [join(binDir, "codex"), join(binDir, "codex.cmd")]) {
+  // Windows 上 npm 给每个 bin 同时装出 `codex.cmd`（批处理）与一个给 posix shell 用的同名无后缀脚本，
+  // 后者在 Windows 上跑不起来，所以先找 .cmd。macOS / Linux 上本来就只有无后缀那一个。
+  const candidates = process.platform === "win32"
+    ? [join(binDir, "codex.cmd"), join(binDir, "codex.exe"), join(binDir, "codex")]
+    : [join(binDir, "codex")];
+  for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
   }
   const installed = installedAdapterFor("codex", home);
@@ -215,7 +220,13 @@ function waitForLogin(
       return;
     }
     // 不接标准输入：登录靠浏览器完成，要求有人在终端里粘贴东西的 Agent 不在这里代为登录。
-    const child = spawn(login.command, login.args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    // Windows 上登录命令常是 `.cmd`（适配器与 npm 装出来的 CLI），同样要交给 cmd.exe（见 ./executables）。
+    const launch = shellLaunch(login.command, login.args, { env });
+    const child = spawn(launch.command, launch.args, {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})
+    });
     let settled = false;
     const settle = (outcome: AssistSignInOutcome): void => {
       if (settled) return;
@@ -249,7 +260,12 @@ function runToEnd(
   timeoutMs: number
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    const launch = shellLaunch(command, args, { env });
+    const child = spawn(launch.command, launch.args, {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})
+    });
     let output = "";
     let settled = false;
     const finish = (error: Error | null): void => {

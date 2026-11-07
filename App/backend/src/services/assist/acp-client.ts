@@ -10,6 +10,7 @@
  * 失败与越界都由它自己处理，结果由它写在回答里。</p>
  */
 
+import { shellLaunch } from "./executables.js";
 import { ASSIST_TRANSCRIPT_PART_BYTES, clipBytes, type AssistTranscriptItem } from "./transcript.js";
 
 /** 执行过程中的一步：做了什么、结果是什么。 */
@@ -399,10 +400,14 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
    */
   let prompting = false;
 
-  const child = spawn(options.command, [...options.args], {
+  // Windows 上多数 npm 装的 CLI 只提供 `.cmd`，Node 直接 spawn 会 ENOENT；交给 cmd.exe 解释。
+  // 其他平台 shellLaunch 原样返回，启动方式与原来一模一样。
+  const launch = shellLaunch(options.command, [...options.args]);
+  const child = spawn(launch.command, launch.args, {
     cwd: options.cwd,
     env: { ...process.env, ...options.env },
-    stdio: ["pipe", "pipe", "pipe"]
+    stdio: ["pipe", "pipe", "pipe"],
+    ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})
   });
 
   const finish = (error?: AcpError, result?: AcpRunResult) => {

@@ -7,7 +7,7 @@
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 import { readCodexRollout } from "@memmy/agent-source-readers/adapters/codex/rollout-reader";
 import { readClaudeCodeTranscript } from "@memmy/agent-source-readers/adapters/claude-code/transcript-reader";
 import { readDeepseekHarnessSession } from "@memmy/agent-source-readers/adapters/deepseek-harness/session-reader";
@@ -41,24 +41,42 @@ const MAX_CANDIDATES = 40;
 const MATCH_SNIPPET_CHARS = 24;
 const SKIP_DIRECTORIES = new Set(["node_modules", ".git", "dist", "build", ".venv", "venv", "__pycache__"]);
 
-const HOME_DIRECTORIES = (): string[] => [
-  homedir(),
-  process.env.APPDATA ?? "",
-  process.env.LOCALAPPDATA ?? ""
-].filter(Boolean).map((entry) => entry.replace(/\/+$/u, ""));
+/** 可以注入用户目录与平台，测试里用 Windows 风格的路径验证，不必真的跑在 Windows 上。 */
+export interface ConfigDirectoryOptions {
+  homeDirectories?: readonly string[];
+  platform?: NodeJS.Platform;
+}
+
+/**
+ * 该平台的路径操作：Windows 用反斜杠，拿 `/` 拼路径或比较前缀会全部落空，所以两边都要按平台走。
+ */
+function pathApiFor(platform: NodeJS.Platform): typeof posix {
+  return platform === "win32" ? win32 : posix;
+}
+
+const userDirectories = (injected?: readonly string[]): string[] =>
+  (injected ?? [homedir(), process.env.APPDATA ?? "", process.env.LOCALAPPDATA ?? ""])
+    .filter(Boolean)
+    // 去尾部分隔符时两种斜杠都要认，Windows 的 `%APPDATA%` 末尾是反斜杠。
+    .map((entry) => entry.replace(/[/\\]+$/u, ""));
 
 /**
  * 该 Agent 的配置目录：技能目录落在用户目录下的第一级目录时，取那一级（`~/.proma/default-skills` → `~/.proma`），
  * 否则取技能目录的上一级。搜索以它为界，不会扫整个磁盘。
  */
-export function configDirectoryFor(skillDirectory: string): string {
-  const directory = resolve(skillDirectory);
-  for (const home of HOME_DIRECTORIES()) {
-    if (!directory.startsWith(`${home}/`)) continue;
-    const [first] = directory.slice(home.length + 1).split("/");
-    if (first) return join(home, first);
+export function configDirectoryFor(skillDirectory: string, options: ConfigDirectoryOptions = {}): string {
+  const platform = options.platform ?? process.platform;
+  const paths = pathApiFor(platform);
+  const directory = paths.resolve(skillDirectory);
+  for (const home of userDirectories(options.homeDirectories)) {
+    // 用相对路径判断层级：`..` 开头或仍是绝对路径（Windows 上换了盘符）就不在这个用户目录下。
+    // 换成按字符串比前缀，Windows 的 `C:\Users\xxx` 与 `/` 永远对不上，整个循环会走空。
+    const inside = paths.relative(home, directory);
+    if (!inside || inside.startsWith("..") || paths.isAbsolute(inside)) continue;
+    const [first] = inside.split(paths.sep);
+    if (first) return paths.join(home, first);
   }
-  return dirname(directory);
+  return paths.dirname(directory);
 }
 
 /**

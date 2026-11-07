@@ -7,6 +7,8 @@ import {
   mainCheckoutOf
 } from "../session-group.js";
 import type { SourceAdapter } from "@memmy/agent-source-readers/adapters/types";
+import { isSameWorkspace } from "../local-session-rank.js";
+import type { LocalSession } from "../local-session-reader.js";
 
 describe("local session groups", () => {
   it("groups by working directory, named after the folder", () => {
@@ -50,6 +52,28 @@ describe("local session groups", () => {
     const grouper = createSessionGrouper(adapter("cursor"));
     expect(grouper({ workspacePath: null, conversationId: "composer-1" })).toBeNull();
     expect(grouper({ workspacePath: "/w/MemOS_Product", conversationId: "composer-2" })).toMatchObject({ label: "MemOS_Product" });
+  });
+
+  it("reads Windows paths the same way, so a session keeps its project and folder", () => {
+    // Windows 的路径是反斜杠：按 `/` 取末段会拿到整串路径，拼 `/` 比前缀则永远不成立。
+    const projects = [
+      { id: "p-memos", name: "MemOS产品", roots: ["C:\\work\\MemOS_Product"] },
+      { id: "p-lenovo", name: "联想", roots: ["C:\\work\\MemOS_Product\\企业合作项目\\联想\\lenovo_chat"] }
+    ];
+    expect(codexProjectGroup(projects, "C:\\work\\MemOS_Product\\企业合作项目\\联想\\lenovo_chat\\docs")).toMatchObject({ id: "p-lenovo" });
+    expect(codexProjectGroup(projects, "C:\\work\\MemOS_Product_Doc")).toBeNull();
+    // 末尾的反斜杠要去掉，否则同一个目录会得到两个不同的分组 id；路径本身保持原样。
+    expect(directoryGroup("C:\\work\\MemOS_Product\\")).toEqual({
+      id: "C:\\work\\MemOS_Product",
+      label: "MemOS_Product",
+      path: "C:\\work\\MemOS_Product"
+    });
+  });
+
+  it("ranks Windows sessions ran in the asking directory first", () => {
+    const session = { workspacePath: "C:\\work\\MemOS_Product\\docs", conversationId: "c-1" } as LocalSession;
+    expect(isSameWorkspace(session, "C:\\work\\MemOS_Product\\")).toBe(true);
+    expect(isSameWorkspace(session, "C:\\work\\MemOS_Product_Doc")).toBe(false);
   });
 });
 

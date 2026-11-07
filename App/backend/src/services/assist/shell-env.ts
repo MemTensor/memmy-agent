@@ -12,7 +12,7 @@
  */
 import { execFileSync } from "node:child_process";
 
-import { LOOKUP_DIRS } from "./executables.js";
+import { joinPathList, lookupDirs, splitPathList } from "./executables.js";
 
 /** 包住 PATH 的定界标记：rc 文件打印的内容不会包含它。 */
 const PATH_MARKER = "__MEMMY_ASSIST_PATH__";
@@ -111,19 +111,40 @@ export function resetLoginShellPathCache(): void {
 /**
  * 协助查找命令用的 PATH：登录 shell 的 PATH 在前，进程自己的 PATH 其次，最后补常见目录，去重后合并。
  * 登录 shell 在前是因为用户实际用的是它那一份（nvm / fnm 的 node 就在里面）。
+ *
+ * <p>分隔符与常见目录都按平台来：Windows 用 `;` 且没有登录 shell（{@link readLoginShellPath} 直接返回 null），
+ * 这时只剩进程 PATH 与 Windows 自己的常见目录。原来固定用 `:` 拼接，在 Windows 上会把整条 PATH
+ * 变成一段没人认得的字符串，比不补更糟。</p>
  */
-export function assistSearchPath(basePath: string | undefined, loginPath: string | null): string {
+export function assistSearchPath(
+  basePath: string | undefined,
+  loginPath: string | null,
+  options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv } = {}
+): string {
+  const platform = options.platform ?? process.platform;
   const dirs: string[] = [];
   const push = (value: string | undefined): void => {
-    for (const dir of (value ?? "").split(":")) {
-      // 目录名里可能有空格，只跳过空串，不做 trim。
+    for (const dir of splitPathList(value, platform)) {
       if (dir && !dirs.includes(dir)) dirs.push(dir);
     }
   };
   push(loginPath ?? undefined);
   push(basePath);
-  push(LOOKUP_DIRS.join(":"));
-  return dirs.join(":");
+  // Windows 的常见目录要看 LOCALAPPDATA / ProgramFiles 这些变量，因此把 env 传下去。
+  push(joinPathList(lookupDirs(platform, options.env ?? process.env), platform));
+  return joinPathList(dirs, platform);
+}
+
+/**
+ * 取进程 PATH 的值。
+ *
+ * <p>Windows 的环境块里这个键通常写作 `Path`；被复制成普通对象后就不再有任何大小写不敏感的代理，
+ * 只读 {@code env.PATH} 会真的读不到，补 PATH 时就把原有的一整条弄丢了。</p>
+ */
+function pathValue(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.PATH !== undefined) return env.PATH;
+  const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === "path");
+  return key === undefined ? undefined : env[key];
 }
 
 /**
@@ -132,5 +153,12 @@ export function assistSearchPath(basePath: string | undefined, loginPath: string
  */
 export function assistEnv(base: NodeJS.ProcessEnv = process.env, options: LoginShellPathOptions = {}): NodeJS.ProcessEnv {
   const loginPath = loginShellPath({ ...options, env: base });
-  return { ...base, PATH: assistSearchPath(base.PATH, loginPath) };
+  const platform = options.platform ?? process.platform;
+  const env: NodeJS.ProcessEnv = { ...base, PATH: assistSearchPath(pathValue(base), loginPath, { platform, env: base }) };
+  // 原来那份 `Path` 要删掉：同时留两份会在子进程的环境块里出现两个同名变量，
+  // Windows 取哪一条不由我们决定，可能正好取到没补过的那一份。
+  for (const key of Object.keys(env)) {
+    if (key !== "PATH" && key.toLowerCase() === "path") delete env[key];
+  }
+  return env;
 }

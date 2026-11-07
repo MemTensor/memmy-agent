@@ -191,4 +191,16 @@ describe("record matching helpers", () => {
     // 不在用户目录下时取上一级，不猜更深的位置。
     expect(configDirectoryFor("/opt/tools/foo/skills")).toBe("/opt/tools/foo");
   });
+
+  it("takes the first folder under the user's home on Windows as well", () => {
+    // Windows 的路径是反斜杠：按 `/` 比较前缀会全都落空，扫描范围会缩到技能目录自己这一层，读不到会话文件。
+    const windows = { platform: "win32" as const, homeDirectories: ["C:\\Users\\xxx"] };
+    expect(configDirectoryFor("C:\\Users\\xxx\\.proma\\default-skills", windows)).toBe("C:\\Users\\xxx\\.proma");
+    expect(configDirectoryFor("D:\\tools\\skills", windows)).toBe("D:\\tools");
+    // `%APPDATA%` 末尾带反斜杠：去尾分隔符时两种斜杠都要处理，否则第一级会取到空串。
+    expect(configDirectoryFor("C:\\Users\\xxx\\AppData\\Roaming\\Qoder\\skills", {
+      platform: "win32",
+      homeDirectories: ["C:\\Users\\xxx\\AppData\\Roaming\\"]
+    })).toBe("C:\\Users\\xxx\\AppData\\Roaming\\Qoder");
+  });
 });

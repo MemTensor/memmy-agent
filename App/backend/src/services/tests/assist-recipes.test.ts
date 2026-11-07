@@ -8,6 +8,7 @@ import {
   assistAgentName,
   assistRecipe,
   assistRunnable,
+  defaultQwenWorkAppDirs,
   qwenWorkEngine
 } from "../assist/recipes.js";
 
@@ -107,6 +108,13 @@ describe("assistRunnable", () => {
       PATH: bin,
       [ASSIST_COMMAND_ENV("pi")]: "pi-missing-command-xyz"
     } as NodeJS.ProcessEnv)).toBe(false);
+  });
+
+  it("does not guess where QwenWork lives on Windows", () => {
+    // Windows 上的安装位置与包内层级都没核实过：宁可给空列表让它退回 PATH 上找 qoderclicn，
+    // 也不要指一个错的目录（失败原因会说不清楚）。
+    expect(defaultQwenWorkAppDirs("win32")).toEqual([]);
+    expect(defaultQwenWorkAppDirs("darwin")).toContain("/Applications/QwenWorkCN.app");
   });
 
   it("never lists an agent Memmy has no recipe for", () => {

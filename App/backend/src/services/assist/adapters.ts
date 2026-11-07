@@ -14,6 +14,8 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { findExecutable, shellLaunch } from "./executables.js";
+
 /** 需要适配器的 Agent：npm 包、要执行的可执行文件名、以及最小可用版本。 */
 export interface AssistAdapter {
   sourceId: string;
@@ -60,8 +62,17 @@ export function adapterFor(sourceId: string): AssistAdapter | null {
 
 /** 已经装好的适配器：node_modules/.bin 里的那个文件在就算装好。 */
 export function installedAdapterPath(adapter: AssistAdapter, home?: string): string | null {
-  const candidate = join(adaptersDirectory(home), "node_modules", ".bin", adapter.bin);
-  return existsSync(candidate) ? candidate : null;
+  const binDir = join(adaptersDirectory(home), "node_modules", ".bin");
+  // Windows 上 npm 给每个 bin 装出 `名字.cmd`（批处理）与一个给 posix shell 用的同名脚本；
+  // 后者在 Windows 上跑不起来，所以先找 `.cmd`。macOS / Linux 只有一个普通文件，保持原样。
+  const names = process.platform === "win32"
+    ? [`${adapter.bin}.cmd`, `${adapter.bin}.exe`, adapter.bin]
+    : [adapter.bin];
+  for (const name of names) {
+    const candidate = join(binDir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 /**
@@ -95,15 +106,26 @@ export async function ensureAdapter(
 /**
  * `npm install --prefix <目录> <包>`：装进 Memmy 自己的目录，不动用户的全局 npm。
  * npm 不存在（打包后的应用不带 Node）时给出可以直接读懂的原因。
+ *
+ * <p>Windows 上 npm 是 `npm.cmd`，Node 不能直接拉起，走 {@link shellLaunch} 交给 cmd.exe；
+ * 解析不到时把命令名原样交给 cmd，让它用自己的 PATH 与 PATHEXT 去查。macOS / Linux 保持原来的
+ * 直接 spawn，行为不变。</p>
  */
 function runNpmInstall(adapter: AssistAdapter, directory: string, env: NodeJS.ProcessEnv): Promise<string | null> {
   return new Promise((resolve) => {
-    const child = spawn("npm", [
+    const args = [
       "install",
       "--prefix", directory,
       "--no-audit", "--no-fund", "--loglevel=error",
       adapter.package
-    ], { env, stdio: ["ignore", "pipe", "pipe"] });
+    ];
+    const npm = process.platform === "win32" ? findExecutable("npm", env) : null;
+    const launch = shellLaunch(npm ?? "npm", args, { always: process.platform === "win32", env });
+    const child = spawn(launch.command, launch.args, {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})
+    });
 
     let stderr = "";
     child.stderr.setEncoding("utf8");

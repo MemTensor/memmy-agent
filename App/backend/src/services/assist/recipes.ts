@@ -120,8 +120,15 @@ export interface AssistRunnableOptions extends Pick<DeepSeekHarnessOptions, "app
   qwenWorkAppDirs?: readonly string[];
 }
 
-/** QwenWork 桌面端应用包的默认位置。 */
-export function defaultQwenWorkAppDirs(): string[] {
+/**
+ * QwenWork 桌面端应用包的默认位置。
+ *
+ * <p>目前只知道 macOS 的结构（`.app` 包）。Windows 上的安装位置与包内层级未经核实，不猜：
+ * 返回空数组，`qwenWorkEngine` 会退回 PATH 上找 `qoderclicn`，都找不到时失败原因说的是
+ * 「没有找到它的引擎，确认 QwenWork 装在这台电脑上」——比指一个错的目录更清楚。</p>
+ */
+export function defaultQwenWorkAppDirs(platform: NodeJS.Platform = process.platform): string[] {
+  if (platform === "win32") return [];
   return ["/Applications/QwenWorkCN.app", join(homedir(), "Applications", "QwenWorkCN.app")];
 }
 

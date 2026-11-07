@@ -5,6 +5,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   deepSeekHarnessLaunch,
+  defaultHarnessAppDirs,
   readDefaultModel,
   resolveDeepSeekHarness
 } from "../assist/deepseek-harness.js";
@@ -206,6 +207,15 @@ describe("deepSeekHarnessLaunch", () => {
     expect(launch.ok).toBe(true);
     if (!launch.ok) return;
     expect(launch.args).toEqual(["acp"]);
+  });
+});
+
+describe("defaultHarnessAppDirs", () => {
+  it("does not guess where the desktop app lives on Windows", () => {
+    // Windows 的桌面版不是 `.app` 结构、包内 dsh 的路径也未核实：给空列表，让上层退回命令行 dsh，
+    // 失败原因说的是「没有找到桌面版，也没有找到 dsh 命令行」，不会指错目录。
+    expect(defaultHarnessAppDirs("win32")).toEqual([]);
+    expect(defaultHarnessAppDirs("darwin")).toContain("/Applications/DeepSeek Harness.app");
   });
 });
 

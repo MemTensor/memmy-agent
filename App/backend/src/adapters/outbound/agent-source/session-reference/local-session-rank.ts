@@ -1,5 +1,6 @@
 /** Orders local sessions for the association picker. */
 import type { LocalSession } from "./local-session-reader.js";
+import { isSameOrInside } from "./session-group.js";
 
 /** What the person is doing when they ask for candidates. */
 export interface LocalSessionRankContext {
@@ -51,8 +52,8 @@ export function isSameWorkspace(session: LocalSession, cwd: string | null): bool
   if (!cwd || !session.workspacePath) {
     return false;
   }
-  const base = cwd.replace(/\/+$/u, "");
-  return session.workspacePath === base || session.workspacePath.startsWith(`${base}/`);
+  // Windows 的路径是反斜杠，不能直接拼 `/` 比前缀。
+  return isSameOrInside(session.workspacePath, cwd);
 }
 
 /** Last activity as epoch milliseconds; unknown times sort last. */

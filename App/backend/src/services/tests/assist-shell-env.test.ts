@@ -123,6 +123,29 @@ describe("assistSearchPath", () => {
     expect(dirs[0]).toBe("/usr/bin");
     expect(dirs).toContain("/opt/homebrew/bin");
   });
+
+  it("joins with semicolons on Windows and still merges the process PATH with the usual places", () => {
+    // Windows 没有登录 shell（loginPath 一直是 null），拼错分隔符会把整条 PATH 弄成一段没人认得的字符串。
+    const merged = assistSearchPath("C:\\Windows;C:\\tools", null, {
+      platform: "win32",
+      env: {
+        LOCALAPPDATA: "C:\\Users\\q sun\\AppData\\Local",
+        APPDATA: "C:\\Users\\q sun\\AppData\\Roaming"
+      } as NodeJS.ProcessEnv
+    });
+    const dirs = merged.split(";");
+    expect(dirs[0]).toBe("C:\\Windows");
+    expect(dirs[1]).toBe("C:\\tools");
+    expect(dirs).toContain("C:\\Users\\q sun\\AppData\\Roaming\\npm");
+    // 用 `:` 切的时候 `C:\Windows;C:\tools` 会是一段，分开才对。
+    expect(dirs).not.toContain("C:\\Windows;C:\\tools");
+    expect(merged).not.toContain("/opt/homebrew/bin");
+  });
+
+  it("does not leave macOS directories in a Windows PATH", () => {
+    const dirs = assistSearchPath("", null, { platform: "win32", env: {} as NodeJS.ProcessEnv }).split(";");
+    expect(dirs.every((dir) => dir !== "/usr/bin")).toBe(true);
+  });
 });
 
 describe("assistEnv", () => {
@@ -147,5 +170,28 @@ describe("assistEnv", () => {
       }
     );
     expect((env.PATH ?? "").split(":")[0]).toBe("/Users/example/.nvm/versions/node/v22/bin");
+  });
+
+  it("does not lose the process PATH when the key is spelled `Path`", () => {
+    // Windows 的环境块里写的是 `Path`：复制成普通对象后 env.PATH 读不到，只看 env.PATH 会把整条 PATH 丢掉。
+    const env = assistEnv(
+      { Path: "C:\\Windows", APPDATA: "C:\\Users\\q sun\\AppData\\Roaming" } as NodeJS.ProcessEnv,
+      { platform: "win32", env: {} as NodeJS.ProcessEnv }
+    );
+    expect((env.PATH ?? "").split(";")[0]).toBe("C:\\Windows");
+    // 不留第二份同名键：子进程里两个 `Path` 谁生效不由我们决定。
+    expect(env.Path).toBeUndefined();
+  });
+
+  it("produces a usable PATH on Windows, where there is no login shell to read", () => {
+    const env = assistEnv(
+      { PATH: "C:\\Windows", APPDATA: "C:\\Users\\q sun\\AppData\\Roaming" } as NodeJS.ProcessEnv,
+      { platform: "win32", env: {} as NodeJS.ProcessEnv }
+    );
+    const dirs = (env.PATH ?? "").split(";");
+    expect(dirs[0]).toBe("C:\\Windows");
+    expect(dirs).toContain("C:\\Users\\q sun\\AppData\\Roaming\\npm");
+    // 其余变量原样保留。
+    expect(env.APPDATA).toBe("C:\\Users\\q sun\\AppData\\Roaming");
   });
 });

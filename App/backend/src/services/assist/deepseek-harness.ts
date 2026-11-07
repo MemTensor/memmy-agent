@@ -25,7 +25,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
-import { ASSIST_COMMAND_ENV, findExecutable } from "./executables.js";
+import { ASSIST_COMMAND_ENV, findExecutable, shellLaunch } from "./executables.js";
 
 /** 与内置来源的标识一致，协作项目的执行方就按它记录。 */
 export const DEEPSEEK_HARNESS_SOURCE_ID = "deepseek_harness";
@@ -58,8 +58,15 @@ export type DeepSeekHarnessResolution =
     }
   | { ok: false; reason: string };
 
-/** 桌面版的默认位置。 */
-export function defaultHarnessAppDirs(): string[] {
+/**
+ * 桌面版的默认位置。
+ *
+ * <p>只认 macOS 的 `.app` 包：Windows 桌面版的可执行文件位置与资源布局都没有核实过（不是 `.app`
+ * 结构，包内 dsh 的路径也不同），不猜。Windows 上返回空数组，{@link resolveDeepSeekHarness} 会直接
+ * 去找命令行 `dsh`，都没找到时失败原因说的是「没有找到桌面版，也没有找到 dsh 命令行」。</p>
+ */
+export function defaultHarnessAppDirs(platform: NodeJS.Platform = process.platform): string[] {
+  if (platform === "win32") return [];
   return ["/Applications/DeepSeek Harness.app", join(homedir(), "Applications", "DeepSeek Harness.app")];
 }
 
@@ -222,11 +229,14 @@ function versionCacheKey(command: string): string {
 
 function readVersion(command: string, env: NodeJS.ProcessEnv): number[] | null {
   try {
-    const output = execFileSync(command, ["--version"], {
+    // Windows 上命令行 dsh 可能是 `dsh.cmd`，execFile 不能直接跑批处理，同样交给 cmd.exe。
+    const launch = shellLaunch(command, ["--version"], { env });
+    const output = execFileSync(launch.command, launch.args, {
       encoding: "utf8",
       timeout: VERSION_TIMEOUT_MS,
       env,
-      stdio: ["ignore", "pipe", "ignore"]
+      stdio: ["ignore", "pipe", "ignore"],
+      ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})
     });
     const match = /(\d+)\.(\d+)\.(\d+)/u.exec(String(output));
     if (!match) return null;

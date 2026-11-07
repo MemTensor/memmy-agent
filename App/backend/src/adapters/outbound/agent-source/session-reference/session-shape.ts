@@ -8,6 +8,7 @@
  */
 import type { SourceAdapter } from "@memmy/agent-source-readers/adapters/types";
 import type { LocalSession, LocalSessionTurn } from "./local-session-reader.js";
+import { directoryName } from "./session-group.js";
 import type { SessionGrouper } from "./session-group.js";
 
 export const TITLE_MAX_CHARS = 40;
@@ -154,7 +155,7 @@ function pickTitle(
   if (usable) {
     return oneLine(usable, TITLE_MAX_CHARS);
   }
-  const folder = (workspacePath ?? "").replace(/\/+$/u, "").split("/").filter(Boolean).pop();
+  const folder = directoryName(workspacePath ?? "");
   const date = Number.isNaN(Date.parse(updatedAt))
     ? ""
     : new Date(updatedAt).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });

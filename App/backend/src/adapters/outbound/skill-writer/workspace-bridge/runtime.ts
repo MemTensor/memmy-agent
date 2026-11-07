@@ -833,7 +833,9 @@ async function readJson(url: URL): Promise<unknown> {
  * in which case the caller falls back to comparing directories.</p>
  */
 async function codexProjectIdFor(directory: string, codexHome: string): Promise<string | null> {
-  const target = directory.replace(/[/\\]+$/u, "");
+  // 目录来自本机存储，Windows 上是反斜杠：比较层级前统一成 `/`，否则 `C:\a\b` 与 `C:\a\b/` 永远对不上。
+  const normalize = (value: string): string => value.replace(/\\/gu, "/").replace(/\/+$/u, "");
+  const target = normalize(directory);
   if (!target) return null;
   let names: string[];
   try {
@@ -855,7 +857,7 @@ async function codexProjectIdFor(directory: string, codexHome: string): Promise<
     ).all() as Array<{ id: string; path: string }>;
     let best: { id: string; length: number } | null = null;
     for (const row of rows) {
-      const root = String(row.path ?? "").replace(/[/\\]+$/u, "");
+      const root = normalize(String(row.path ?? ""));
       if (!root) continue;
       if (target !== root && !target.startsWith(`${root}/`)) continue;
       if (!best || root.length > best.length) best = { id: String(row.id), length: root.length };

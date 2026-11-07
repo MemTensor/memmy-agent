@@ -3,7 +3,7 @@
  * project: Codex projects, Cursor workspaces, WorkBuddy workspaces, and the working directory everywhere else.
  */
 import { readdirSync, readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import type { SourceAdapter } from "@memmy/agent-source-readers/adapters/types";
@@ -28,6 +28,33 @@ export interface CodexProject {
 
 /** WorkBuddy runs one-off tasks in ~/WorkBuddy/<date-time>; they are not a workspace. */
 const WORKBUDDY_PLAYGROUND = /\/WorkBuddy\/\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\/?$/u;
+
+/**
+ * 这些路径都来自本机存储，Windows 上是反斜杠：判断层级、取末段前统一成 `/` 再比，
+ * 同一段逻辑两个平台都对，也不必按平台分岔。
+ */
+function withForwardSlashes(path: string): string {
+  return trimSeparators(path).replace(/\\/gu, "/");
+}
+
+/** 去掉尾部分隔符；末尾是反斜杠时同样要去掉，否则同一个目录会得到两个不同的 id。 */
+export function trimSeparators(path: string): string {
+  return path.replace(/[/\\]+$/u, "");
+}
+
+/** 末级目录名（或文件名）。 */
+export function directoryName(path: string): string {
+  const normalized = withForwardSlashes(path);
+  return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+
+/** Whether the target is the base directory itself or something under it. */
+export function isSameOrInside(target: string, base: string): boolean {
+  const left = withForwardSlashes(target);
+  const right = withForwardSlashes(base);
+  return left === right || left.startsWith(`${right}/`);
+}
+
 const CODE_WORKSPACE_SUFFIX = ".code-workspace";
 /** Cursor's id for chats opened without a folder. */
 const CURSOR_EMPTY_WINDOW = "empty-window";
@@ -57,11 +84,11 @@ export function createSessionGrouper(adapter: SourceAdapter): SessionGrouper {
 
 /** One group per working directory, named after the folder. */
 export function directoryGroup(path: string | null): LocalSessionGroup | null {
-  const trimmed = path?.replace(/\/+$/u, "");
+  const trimmed = trimSeparators(path ?? "");
   if (!trimmed) {
     return null;
   }
-  return { id: trimmed, label: basename(trimmed) || trimmed, path: trimmed };
+  return { id: trimmed, label: directoryName(trimmed) || trimmed, path: trimmed };
 }
 
 /** Cursor 3 saves multi-folder workspaces as <name>.code-workspace; the name is what Cursor shows. */
@@ -81,8 +108,8 @@ export function codexProjectGroup(projects: readonly CodexProject[], path: strin
   let best: { project: CodexProject; length: number } | null = null;
   for (const project of projects) {
     for (const root of project.roots) {
-      const base = root.replace(/\/+$/u, "");
-      if ((path === base || path.startsWith(`${base}/`)) && base.length > (best?.length ?? -1)) {
+      const base = trimSeparators(root);
+      if (isSameOrInside(path, base) && base.length > (best?.length ?? -1)) {
         best = { project, length: base.length };
       }
     }

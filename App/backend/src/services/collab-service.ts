@@ -7,7 +7,7 @@
  */
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 import { loadCollabAgents, submittedConversationId } from "./collab-added-agents.js";
 import { locateRecordFile, readRecordFile, type RecordBinding } from "./collab-record-file.js";
 import type { ApiErrorCode } from "./error-envelope.js";
@@ -2662,6 +2662,18 @@ export function isAssistResult(content: string): boolean {
 }
 
 /**
+ * 一个 Memmy 任务文件的会话 id：`key` 里带着时用它，否则按文件名推（`websocket_xxx.jsonl` → `xxx`）。
+ * 取末段必须用 `basename`：Windows 上这个路径是全反斜杠的，按 `/` 切分会把整串路径当成文件名。
+ * `platform` 只为让测试能在 macOS 上验证 Windows 的取法，实际调用都用本机平台。
+ */
+export function conversationIdFor(key: string, path: string, platform: NodeJS.Platform = process.platform): string {
+  const fromKey = key.replace(/^websocket:/u, "");
+  if (fromKey) return fromKey;
+  const paths = platform === "win32" ? win32 : posix;
+  return paths.basename(path).replace(/^websocket_/u, "").replace(/\.jsonl$/u, "");
+}
+
+/**
  * Reads one of Memmy's task session files: a metadata line first, then user, assistant and tool records that
  * group into turns the same way the board shows them.
  */
@@ -2723,7 +2735,7 @@ async function readSessionRecords(path: string): Promise<MemmySessionRecords | n
   if (current) turns.push(current);
   if (!turns.length && !title) return null;
 
-  const conversationId = key.replace(/^websocket:/u, "") || path.split("/").pop()!.replace(/^websocket_/u, "").replace(/\.jsonl$/u, "");
+  const conversationId = conversationIdFor(key, path);
   return {
     conversationId,
     projectId,
