@@ -681,7 +681,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       if (!isCurrent()) return;
       setEditorTest({
         status: result.ok ? "success" : "error",
-        message: result.ok ? t("settings.modelWorkspace.testSuccess") : t("settings.modelWorkspace.testFailed")
+        message: result.ok ? t("settings.modelWorkspace.testSuccess") : ("message" in result && typeof result.message === "string" && result.message) || t("settings.modelWorkspace.testFailed")
       });
     } catch {
       if (!isCurrent()) return;
@@ -1396,6 +1396,10 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             )}
             </div>
           </div>
+          {(editorCredentials?.protocol === "openai-chat-completions" || editorCredentials?.protocol === "anthropic-messages")
+            && editorModels.some(model => model.capabilities.includes("chat")) && (
+            <p className="text-xs text-text-ink/55">{t("settings.modelWorkspace.chatTestNotice")}</p>
+          )}
           {formError && <p className="text-xs text-status-error" role="alert">{formError}</p>}
           {editorTest.message && (
             <p

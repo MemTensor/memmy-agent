@@ -15,8 +15,8 @@ describe("TokenDetailPage", () => {
     expect(html).toContain("welcome-login-card");
     expect(html).not.toContain("30,000,000");
     expect(html).toContain("—");
-    expect(html).toContain("额外赠送 2,200 万记忆处理 Token");
-    expect(html).toContain("可发起约 30 次完整 Agent 对话");
+    expect(html).toContain("另有 2,200 万记忆处理 Token，不计入任务额度");
+    expect(html).toContain("可用于 Agent 对话和完整任务");
     expect(html).toContain("可自动整理 5000+ 条历史对话为记忆");
     expect(html).toContain("覆盖全功能");
     expect(html).toContain("请输入手机号");

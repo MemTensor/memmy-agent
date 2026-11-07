@@ -27,8 +27,8 @@ export type PluginTranscriptionState =
  *
  * A 30-minute interview takes minutes to transcribe. The recording card hands
  * its audio over the moment the interview stops so the user can move on, which
- * means the card unmounts while ASR is still running — so the job lives here,
- * with the page, and the upload card waits on it by the audio's stored path.
+ * means the card unmounts while ASR is still running. The page owns the job;
+ * the upload card observes it by audio path without blocking submission.
  */
 export interface PluginTranscriptionJob {
   state: PluginTranscriptionState;

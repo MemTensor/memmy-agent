@@ -10,6 +10,7 @@ import {
   IntegrationToolResultSchema,
   InvitationResultSchema,
   LotteryRewardSchema,
+  TaskTokenGiftNoticeSchema,
   LotteryStatusSchema,
   OkResponseSchema,
   PromotionFlagsSchema,
@@ -56,6 +57,8 @@ import type {
   GetTokenUsageInput,
   GrantTokensInput,
   AckLotteryRewardInput,
+  AckTaskTokenGiftInput,
+  TaskTokenGiftInput,
   ReleaseCheckResult,
   RequestTokenQuotaInput,
   TokenQuotaApplyResult,
@@ -69,6 +72,8 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
+// Code delivery can include an upstream SMS/email provider round trip.
+const CLOUD_VERIFICATION_TIMEOUT_MS = 10_000;
 const CLOUD_SOCIAL_LOGIN_TIMEOUT_MS = 20_000;
 const CLOUD_COMPOSIO_ROUTER_TIMEOUT_MS = 60_000;
 /** fun-asr uses the same asynchronous file job for chat clips and long recordings. */
@@ -114,7 +119,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     },
 
     async sendEmailCode(input: SendEmailCodeInput): Promise<void> {
-      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/sendEmailVerification", {
+      await requestBoolean(fetchImpl, baseUrl, Math.max(timeoutMs, CLOUD_VERIFICATION_TIMEOUT_MS), "/api/agentUser/sendEmailVerification", {
         body: {
           email: input.email,
           zhEnv: input.zhEnv
@@ -126,18 +131,19 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     },
 
     async sendPhoneCode(input: SendPhoneCodeInput): Promise<void> {
-      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/sendPhoneVerification", {
+      await requestBoolean(fetchImpl, baseUrl, Math.max(timeoutMs, CLOUD_VERIFICATION_TIMEOUT_MS), "/api/agentUser/sendPhoneVerification", {
         body: {
           phoneNumber: input.phoneNumber,
           zhEnv: input.zhEnv
         },
         lang: langFromZhEnv(input.zhEnv),
-        deviceId
+        deviceId,
+        toError: toCloudPhoneVerificationError
       });
     },
 
     async login(input: CloudLoginInput): Promise<CloudLoginResult> {
-      const data = await requestCloudData<Record<string, unknown>>(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/login", {
+      const data = await requestCloudData<Record<string, unknown>>(fetchImpl, baseUrl, Math.max(timeoutMs, CLOUD_VERIFICATION_TIMEOUT_MS), "/api/agentUser/login", {
         body: {
           ...(input.email ? { email: input.email } : {}),
           ...(input.phoneNumber ? { phoneNumber: input.phoneNumber } : {}),
@@ -147,7 +153,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         },
         lang: "zh",
         deviceId,
-        ...(input.email ? { toError: toCloudEmailVerificationError } : {})
+        toError: input.email ? toCloudEmailVerificationError : toCloudPhoneVerificationError
       });
 
       return toCloudLoginResult(data);
@@ -465,6 +471,18 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         lang: "zh",
         bearerCredential: input.uuid
       });
+    },
+    async ensureTaskTokenGift(input: TaskTokenGiftInput) {
+      const data = await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/quota/launchGift/ensure", {
+        body: {}, lang: "zh", bearerCredential: input.uuid
+      });
+      return TaskTokenGiftNoticeSchema.parse(data);
+    },
+
+    async ackTaskTokenGift(input: AckTaskTokenGiftInput): Promise<void> {
+      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/quota/launchGift/ack", {
+        body: { grantId: input.grantId }, lang: "zh", bearerCredential: input.uuid
+      });
     }
   };
 }
@@ -525,6 +543,7 @@ async function requestCloudData<T>(
   options: CloudRequestOptions
 ): Promise<T> {
   const method = options.method ?? "POST";
+  const signal = AbortSignal.timeout(timeoutMs);
   const response = await fetchImpl(`${baseUrl}${path}`, {
     method,
     headers: {
@@ -536,9 +555,11 @@ async function requestCloudData<T>(
       "x-agent-region": normalizeAgentRegion(process.env.MEMMY_APP_EDITION)
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    signal: AbortSignal.timeout(timeoutMs)
+    signal
   });
-  const envelope = await readCloudEnvelope(response);
+  const envelope = await readCloudEnvelope(response).catch((error: unknown) => {
+    throw signal.aborted ? signal.reason : error;
+  });
 
   if (!response.ok || envelope.code !== 0) {
     throw options.toError?.(response.status, envelope) ?? new Error(envelope.message || `Cloud request failed with HTTP ${response.status}`);
@@ -572,7 +593,8 @@ async function readCloudEnvelope(response: Response): Promise<CloudEnvelope> {
       message: typeof value.message === "string" ? value.message : undefined,
       data: "data" in value ? value.data : null
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) throw error;
     return {
       code: response.ok ? 0 : response.status,
       message: response.ok ? "ok" : `Cloud request failed with HTTP ${response.status}`,
@@ -992,7 +1014,14 @@ function toCloudEmailVerificationError(status: number, envelope: CloudEnvelope):
     : classifyCloudError(status, envelope.code);
   const message = envelope.message || `Cloud email verification request failed with HTTP ${status}`;
 
-  return Object.assign(new Error(message), { code });
+  return Object.assign(new Error(message), { code, status });
+}
+
+/** Keeps phone HTTP/business throttling recognizable by the local API. */
+function toCloudPhoneVerificationError(status: number, envelope: CloudEnvelope): Error {
+  return Object.assign(new Error(envelope.message || `Cloud phone verification request failed with HTTP ${status}`), {
+    code: classifyCloudError(status, envelope.code), status
+  });
 }
 
 /**

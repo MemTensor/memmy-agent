@@ -4,7 +4,7 @@ import { ModelHttpError } from "../src/model/http.js";
 import { createLlmClient } from "../src/model/llm.js";
 import { MemoryModelTaskRouter } from "../src/model/task-routing.js";
 import { classifyProcessingError } from "../src/service/worker/job-handlers.js";
-import { addAgentSourceImport, createMemoryServiceFixture } from "./fixtures/memory-service-fixture.js";
+import { addAgentSourceImport, createMemoryServiceFixture, LEGACY_TEST_CONFIG } from "./fixtures/memory-service-fixture.js";
 
 const fixture = createMemoryServiceFixture();
 afterEach(async () => { await fixture.cleanup(); vi.unstubAllGlobals(); });
@@ -34,6 +34,42 @@ function mockProvider() {
 }
 
 describe("OpenCode Go memory requests", () => {
+  it("keeps turn-start conversation headers while refreshing imported Skill recall", async () => {
+    const seen = mockProvider();
+    const { service } = fixture.createTestService({
+      llm: createLlmClient(config()),
+      config: { ...LEGACY_TEST_CONFIG, algorithm: { ...LEGACY_TEST_CONFIG.algorithm,
+        enableQueryRewrite: true,
+        session: { ...LEGACY_TEST_CONFIG.algorithm.session, turnJudge: true },
+        retrieval: { ...LEGACY_TEST_CONFIG.algorithm.retrieval, llmFilterEnabled: false }
+      } }
+    });
+    const namespace = { source: "codex", profileId: "default", userId: "go-turn-start-user" };
+    const skillId = service.reconcileAgentSkills({ namespace, sourceAgentId: "hermes", complete: true, skills: [{
+      sourceSkillId: "quartzdeploy", sourceSkillPath: "/fixture/quartzdeploy/SKILL.md", title: "quartzdeploy",
+      content: "---\nname: quartzdeploy\ndescription: Validate quartzdeploy before release.\n---\nCheck the quartzdeploy release logs.",
+      contentHash: "go-turn-start-fixture", modifiedAt: "2026-11-07T00:00:00.000Z"
+    }] }).skills[0]!.memoryId!;
+    await service.runWorkerOnce(10);
+    seen.length = 0;
+    const sessions = ["a", "b"].map(sessionKey => service.openSession({ namespace: { ...namespace, sessionKey } }).sessionId);
+    const turnHeaders: string[] = [];
+    for (const [index, sessionId] of [sessions[0]!, sessions[1]!, sessions[0]!].entries()) {
+      const before = seen.length;
+      const turn = await service.startTurn({ namespace, sessionId, turnId: `go-turn-${index}`,
+        query: "Validate quartzdeploy before release.", layers: ["Skill"] });
+      expect(turn.hits.map(hit => hit.id)).toContain(skillId);
+      expect(turn.injectedContext.markdown).toContain("Validate quartzdeploy before release.");
+      const headers = seen.slice(before).map(h => h.get("x-opencode-session"));
+      expect(headers.length).toBeGreaterThan(0);
+      expect(headers[0]).toBeTruthy();
+      expect(new Set(headers).size).toBe(1);
+      turnHeaders.push(headers[0]!);
+    }
+    expect(turnHeaders[0]).not.toBe(turnHeaders[1]);
+    expect(turnHeaders[0]).toBe(turnHeaders[2]);
+  });
+
   it("propagates real worker session identities without mixing concurrent conversations", async () => {
     const seen = mockProvider();
     const { service, db } = fixture.createTestService({ llm: createLlmClient(config()) });

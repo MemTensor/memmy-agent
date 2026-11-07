@@ -78,7 +78,7 @@ describe("WindowsTitlebar", () => {
     expect(styles).toMatch(/\.windows-titlebar\s*\{[^}]*background:\s*var\(--color-sidebar-bg\);/s);
     expect(styles).toMatch(/\.sidebar-shell--windows-titlebar \.sidebar-shell__body\s*\{[^}]*background:\s*var\(--color-sidebar-bg\);/s);
     expect(styles).toMatch(/\.sidebar-shell--windows-titlebar\s*\{[^}]*--mk-modal-top:\s*var\(--codex-toolbar-height\);/s);
-    expect(styles).toMatch(/body\.memmy-platform-windows :is\([\s\S]*\.modal-backdrop,[\s\S]*\.mk-modal-backdrop,[\s\S]*\.memory-drawer-backdrop,[\s\S]*\.memory-plugin-conflict-modal__backdrop,[\s\S]*\.token-exhausted-modal__backdrop,[\s\S]*\.search-palette-backdrop,[\s\S]*\.campaign-intro-backdrop,[\s\S]*\.history-launch-backdrop,[\s\S]*\.ch-source-dialog__backdrop[\s\S]*\)\s*\{[^}]*top:\s*var\(--codex-toolbar-height\);[^}]*backdrop-filter:\s*none;/);
+    expect(styles).toMatch(/body\.memmy-platform-windows :is\([\s\S]*\.modal-backdrop,[\s\S]*\.mk-modal-backdrop,[\s\S]*\.memory-drawer-backdrop,[\s\S]*\.memory-plugin-conflict-modal__backdrop,[\s\S]*\.token-exhausted-modal__backdrop,[\s\S]*\.search-palette-backdrop,[\s\S]*\.history-launch-backdrop,[\s\S]*\.ch-source-dialog__backdrop[\s\S]*\)\s*\{[^}]*top:\s*var\(--codex-toolbar-height\);[^}]*backdrop-filter:\s*none;/);
     expect(styles).toMatch(/\.sidebar-shell--windows-titlebar:not\(\.sidebar-shell--hidden\) :is\(\.app-frame-main, \.memory-page-main\)\s*\{[^}]*border-top-left-radius:\s*var\(--radius-card\);/s);
     expect(styles).not.toContain(".windows-titlebar__docs");
     expect(styles).toMatch(/\.windows-titlebar__wordmark\s*\{[^}]*font-weight:\s*800;/s);

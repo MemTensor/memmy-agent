@@ -61,6 +61,7 @@ describe("HttpMemoryClient", () => {
   });
   it("only defines path templates for the final memory HTTP APIs", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
+      "/api/v1/agent-sources/:sourceId/connection-state",
       "/api/v1/agent-sources",
       "/api/v1/agent-sources/scan",
       "/api/v1/agent-sources/scan/status",
@@ -81,6 +82,9 @@ describe("HttpMemoryClient", () => {
       "/api/v1/memory/search",
       "/api/v1/models/embedding/infer",
       "/api/v1/memory/add",
+      "/api/v1/agent-skills/reconcile",
+      "/api/v1/skills/archive",
+      "/api/v1/skills/reactivate",
       "/api/v1/memory/:id",
       "/api/v1/memory/:id",
       "/api/v1/evidence/skills/:id/approve",
@@ -143,6 +147,59 @@ describe("HttpMemoryClient", () => {
     failed = true;
     await expect(client.updateObservedSkill("skill 1", input)).rejects.toThrow();
     expect(calls).toHaveLength(2);
+  });
+
+  it("does not auto-retry explicit reconcileAgentSkills connection mutations while keeping retries for passive skill scans", async () => {
+    const calls: Array<{ body: Record<string, unknown> }> = [];
+    let passiveFailuresRemaining = 0;
+    let failConnection = false;
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", timeoutMs: 500, maxRetries: 2 }, {
+      fetchImpl: (async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        calls.push({ body });
+        if (failConnection) throw new TypeError("socket hang up after commit");
+        if (passiveFailuresRemaining > 0) {
+          passiveFailuresRemaining -= 1;
+          throw new TypeError("transient scan network glitch");
+        }
+        return new Response(JSON.stringify({
+          sourceAgentId: String(body.sourceAgentId ?? "codex"),
+          skills: [],
+          archived: 0,
+          registrations: 0,
+          serverTime: now()
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch
+    });
+
+    failConnection = true;
+    await expect(client.reconcileAgentSkills({
+      sourceAgentId: "codex",
+      complete: false,
+      connectionState: "connected",
+      connectionKind: "skill",
+      connectionEventId: "evt-connect-1",
+      skills: []
+    })).rejects.toThrow();
+    expect(calls).toHaveLength(1);
+
+    await expect(client.reconcileAgentSkills({
+      sourceAgentId: "codex",
+      complete: false,
+      connectionState: "disconnected",
+      disconnected: true,
+      skills: []
+    })).rejects.toThrow();
+    expect(calls).toHaveLength(2);
+
+    failConnection = false;
+    passiveFailuresRemaining = 1;
+    await expect(client.reconcileAgentSkills({
+      sourceAgentId: "codex",
+      complete: true,
+      skills: []
+    })).resolves.toMatchObject({ sourceAgentId: "codex" });
+    expect(calls).toHaveLength(4);
   });
 
   it("calls every final runtime path and parses schema-valid responses", async () => {

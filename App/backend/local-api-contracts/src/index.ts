@@ -13,6 +13,7 @@ export { normalizeOutputLanguage } from "./output-language.js";
 
 export * from "./model-catalog-resolver.js";
 export * from "./model-thinking-levels.js";
+export { anthropicRequestModelId } from "./anthropic-model-id.js";
 
 export * from "./memory-runtime.js";
 export * from "./memory-canonical-json.js";
@@ -702,6 +703,22 @@ export const LotteryRewardAckInputSchema = z.object({
     drawId: z.string().min(1).optional()
 });
 export type LotteryRewardAckInput = z.infer<typeof LotteryRewardAckInputSchema>;
+
+/** Already-granted task Token benefit awaiting acknowledgement. */
+export const TaskTokenGiftNoticeSchema = z.discriminatedUnion("hasGift", [
+    z.object({ hasGift: z.literal(false), audience: z.enum(["new", "existing"]).optional() }),
+    z.object({
+        hasGift: z.literal(true),
+        grantId: z.string().min(1),
+        audience: z.enum(["new", "existing"]),
+        tokenAmount: z.number().int().positive(),
+        totalTokens: z.number().int().nonnegative()
+    })
+]);
+export type TaskTokenGiftNotice = z.infer<typeof TaskTokenGiftNoticeSchema>;
+
+export const TaskTokenGiftAckInputSchema = z.object({ grantId: z.string().min(1) });
+export type TaskTokenGiftAckInput = z.infer<typeof TaskTokenGiftAckInputSchema>;
 
 export const AppBootstrapResponseSchema = z.object({
     app: AppSettingsDtoSchema,

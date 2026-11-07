@@ -14,12 +14,14 @@ import {
 } from "./plugin-marketplace-section.js";
 import { writeSettingsTabHash } from "./settings-nav.js";
 import { isNewerPluginVersion } from "./plugin-version.js";
+import { resolveLanguage } from "../i18n/messages.js";
+import { officialPluginCatalog } from "./official-plugin-catalog.js";
 
 /** Live marketplace: installed state is always read back from the plugin host. */
 export function PluginMarketplace() {
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   const [catalog, setCatalog] = useState<PluginCatalogEntry[] | null>(null);
   const [installed, setInstalled] = useState<InstalledPlugin[]>([]);
   const [loading, setLoading] = useState(true);
@@ -32,6 +34,11 @@ export function PluginMarketplace() {
   const [officialModelReady, setOfficialModelReady] = useState<boolean | undefined>(undefined);
   const busy = useRef(false);
   const generation = useRef(0);
+  const hostCompletion = useRef<{
+    matches: (plugins: InstalledPlugin[]) => boolean;
+    resolve: (failed: boolean) => void;
+    failed: (plugins: InstalledPlugin[]) => boolean;
+  } | null>(null);
 
   const refresh = useCallback(async () => {
     if (!clients) return;
@@ -93,31 +100,62 @@ export function PluginMarketplace() {
     return () => { generation.current += 1; window.clearInterval(interval); };
   }, [refresh]);
 
+  const hasHostTransition = installed.some(plugin => plugin.state === "enabling" || plugin.state === "disabling" || plugin.update);
   useEffect(() => {
-    if (!clients || !busyId) return;
-    let disposed = false;
+    if (!clients || (!busyId && !hasHostTransition)) return;
+    let disposed = false, reading = false;
     const timer = window.setInterval(() => {
-      void clients.plugins.list().then(plugins => { if (!disposed) setInstalled(plugins); }, () => undefined);
+      if (reading) return;
+      reading = true;
+      void clients.plugins.list().then(plugins => {
+        if (disposed) return;
+        setInstalled(plugins);
+        // The Host may have committed the lifecycle change while the original
+        // HTTP response is still waiting (e.g. for Agent tool publication).
+        const completion = hostCompletion.current;
+        if (completion?.matches(plugins)) completion.resolve(false);
+        else if (completion?.failed(plugins)) completion.resolve(true);
+      }, () => undefined).finally(() => { reading = false; });
     }, 1_000);
     return () => { disposed = true; window.clearInterval(timer); };
-  }, [clients, busyId]);
+  }, [clients, busyId, hasHostTransition]);
 
-  async function mutate(plugin: MarketplacePlugin, operation: () => Promise<unknown>) {
+  async function mutate(plugin: MarketplacePlugin, operation: () => Promise<unknown>,
+    matches: (plugins: InstalledPlugin[]) => boolean) {
     if (!clients || loading || busy.current || error) return;
     busy.current = true;
     setBusyId(plugin.id);
     setActionError(null);
     setActionErrorPluginId(null);
     let failed = false;
+    const completion = {
+      matches,
+      failed: (records: InstalledPlugin[]) => records.some(record => record.id === plugin.id
+        && record.state === "failed" && !record.update
+        && (plugin.installed?.state !== "failed" || record.updatedAt !== plugin.installed.updatedAt)),
+      resolve: (_failed: boolean) => {}
+    };
+    const committed = new Promise<{ failed: boolean; fromHost: boolean }>(resolve => {
+      completion.resolve = failed => resolve({ failed, fromHost: true });
+    });
+    hostCompletion.current = completion;
     try {
-      try { await operation(); } catch { failed = true; }
-      // Read back even after partial failure (e.g. installed but activation failed).
-      await refresh();
+      // Observe both channels. Late rejection of the original request is handled
+      // even when polling has already confirmed the committed result.
+      const outcome = await Promise.race([
+        operation().then(() => ({ failed: false, fromHost: false }), () => ({ failed: true, fromHost: false })),
+        committed
+      ]);
+      failed = outcome.failed;
+      // A confirmed Host result must not wait on another HTTP read to clear busy.
+      const refreshed = refresh();
+      if (!outcome.fromHost) await refreshed;
       if (failed) {
         setActionError(t("plugins.ui.couldNotCompleteTheActionForPleaseTry", { name: plugin.name }));
         setActionErrorPluginId(plugin.id);
       }
     } finally {
+      if (hostCompletion.current === completion) hostCompletion.current = null;
       notifyPluginChange();
       setBusyId(null);
       busy.current = false;
@@ -130,7 +168,7 @@ export function PluginMarketplace() {
     await clients!.plugins.enable(plugin.id);
   }
 
-  const plugins = marketplacePlugins(catalog, installed);
+  const plugins = marketplacePlugins(catalog, installed, language);
 
   return <>
     {modelError && <p role="alert" className="mb-4 text-sm text-text-ink/60">{modelError}</p>}
@@ -150,7 +188,7 @@ export function PluginMarketplace() {
       void mutate(plugin, async () => {
         const installedPlugin = await clients!.plugins.install(plugin.id, plugin.version);
         await activateOfficialPlugin(installedPlugin);
-      });
+      }, records => records.some(record => record.id === plugin.id && record.state === "active" && record.version === plugin.version));
     }}
     onUpdate={(plugin) => {
       if (!plugin.installable || !plugin.installed || !plugin.version || !isNewerPluginVersion(plugin.version, plugin.installed.version)) return;
@@ -160,14 +198,17 @@ export function PluginMarketplace() {
           await clients!.plugins.approvePermissions(updated.id, updated.manifest.permissions);
           if (plugin.installed?.state === "active") await clients!.plugins.enable(updated.id);
         }
-      });
+      }, records => records.some(record => record.id === plugin.id && record.version === plugin.version
+        && !record.update && record.state === plugin.installed!.state));
     }}
     onEnable={(plugin) => {
       const installedPlugin = plugin.installed;
       if (!installedPlugin) return;
-      void mutate(plugin, () => activateOfficialPlugin(installedPlugin));
+      void mutate(plugin, () => activateOfficialPlugin(installedPlugin),
+        records => records.some(record => record.id === plugin.id && record.state === "active"));
     }}
-    onUninstall={(plugin) => void mutate(plugin, () => clients!.plugins.uninstall(plugin.id))}
+    onUninstall={(plugin) => void mutate(plugin, () => clients!.plugins.uninstall(plugin.id),
+      records => !records.some(record => record.id === plugin.id))}
     onAddToChat={(plugin) => {
       const command = pluginComposerCommand(plugin);
       if (command) {
@@ -189,7 +230,7 @@ export function PluginMarketplace() {
 }
 
 /** Merge the remote catalog with Host state, including plugins missing from that catalog. */
-export function marketplacePlugins(catalog: PluginCatalogEntry[] | null, installed: InstalledPlugin[]): MarketplacePlugin[] {
+export function marketplacePlugins(catalog: PluginCatalogEntry[] | null, installed: InstalledPlugin[], language = "en-US"): MarketplacePlugin[] {
   const installedById = new Map(installed.map((plugin) => [plugin.id, plugin]));
   const listed = new Set((catalog ?? []).map((entry) => entry.manifest.id));
   const plugins = (catalog ?? []).filter((entry) => entry.eligibility.visible
@@ -217,7 +258,16 @@ export function marketplacePlugins(catalog: PluginCatalogEntry[] | null, install
       installable: false, eligibility: local.eligibility, installed: local
     });
   }
-  return plugins;
+  if (resolveLanguage(language) !== "zh-CN") return plugins;
+  // Registry manifests describe runtime tools in English. Use the official UI
+  // copy for these plugins, including when only the installed record is available.
+  const localized = new Map(officialPluginCatalog({ language, installed: [] })
+    .filter((plugin) => plugin.id === "literature-review" || plugin.id === "office")
+    .map((plugin) => [plugin.id, plugin]));
+  return plugins.map((plugin) => {
+    const presentation = localized.get(plugin.id);
+    return presentation ? { ...plugin, name: presentation.name, description: presentation.description } : plugin;
+  });
 }
 
 function pluginCategory(pluginId: string): MarketplacePlugin["category"] {

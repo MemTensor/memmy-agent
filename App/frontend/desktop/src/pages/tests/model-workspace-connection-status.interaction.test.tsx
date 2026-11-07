@@ -77,6 +77,75 @@ describe("ModelWorkspaceSection connection test status", () => {
     expect(container.textContent).not.toContain("未测试");
   });
 
+  it("shows the specific failure, blocks saving, and unlocks save after a successful retry", async () => {
+    const seedConfig = createSeedConfig();
+    const configClient = {
+      getModelConfig: vi.fn(async () => seedConfig),
+      saveModelCatalog: vi.fn(async () => seedConfig),
+      testModelConfig: vi.fn()
+        .mockResolvedValueOnce({ ok: false, message: "认证或访问被拒绝（HTTP 401）", checkedAt: "2026-08-12T00:00:00.000Z" })
+        .mockResolvedValueOnce({ ok: true, message: "连接成功", checkedAt: "2026-08-12T00:00:01.000Z" })
+    };
+    await renderWorkspace(seedConfig, configClient);
+    act(() => getButtonByLabel("编辑 openai 配置").click());
+    expect(container.textContent).toContain("可能消耗少量额度");
+    await act(async () => { getButtonByText("测试").click(); await Promise.resolve(); });
+    expect(container.textContent).toContain("认证或访问被拒绝（HTTP 401）");
+    expect(getButtonByLabel("保存").disabled).toBe(true);
+    await act(async () => { getButtonByText("重新连接").click(); await Promise.resolve(); });
+    expect(container.textContent).not.toContain("HTTP 401");
+    expect(getButtonByLabel("保存").disabled).toBe(false);
+    await act(async () => { getButtonByLabel("保存").click(); await Promise.resolve(); });
+    expect(configClient.saveModelCatalog).toHaveBeenCalledTimes(1);
+    expect(configClient.testModelConfig).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["anthropic/claude-sonnet-test", "claude-sonnet-test"])(
+    "tests and saves the original Anthropic ID %s and invalidates changed credentials", async modelId => {
+      const seedConfig = createSeedConfig();
+      const provider = seedConfig.catalog.providers[0]!;
+      provider.provider = "custom";
+      provider.endpoints[0]!.protocol = "anthropic-messages";
+      const model = { ...provider.models[0]!, provider: "custom" as const,
+        protocol: "anthropic-messages" as const, model: modelId, custom: true };
+      provider.models = [model];
+      seedConfig.catalog.effectiveCandidates.byok = [model];
+      Object.assign(seedConfig, { provider: "custom", protocol: "anthropic-messages", model: modelId });
+      const configClient = {
+        getModelConfig: vi.fn(async () => seedConfig),
+        saveModelCatalog: vi.fn(async (_input: unknown) => seedConfig),
+        testModelConfig: vi.fn(async (input: { apiKey?: string; model?: string }) => ({
+          ok: input.apiKey !== "invalid-test-key",
+          message: input.apiKey === "invalid-test-key" ? "认证或访问被拒绝（HTTP 401）" : "连接成功",
+          checkedAt: "2026-11-05T00:00:00.000Z"
+        }))
+      };
+      await renderWorkspace(seedConfig, configClient);
+      act(() => getButtonByLabel("编辑 custom 配置").click());
+      await act(async () => { getButtonByText("测试").click(); await Promise.resolve(); });
+      expect(getButtonByText("连接成功")).toBeDefined();
+      expect(configClient.testModelConfig.mock.calls[0]![0]).toMatchObject({ model: modelId });
+      const keyInput = container.querySelector<HTMLInputElement>('input[type="password"]')!;
+      const changeKey = (value: string) => act(() => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(keyInput, value);
+        keyInput.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      changeKey("invalid-test-key");
+      expect(getButtonByLabel("保存").disabled).toBe(true);
+      await act(async () => { getButtonByText("测试").click(); await Promise.resolve(); });
+      expect(container.textContent).toContain("HTTP 401");
+      expect(getButtonByLabel("保存").disabled).toBe(true);
+      changeKey("fake-test-key");
+      expect(container.textContent).not.toContain("HTTP 401");
+      expect(getButtonByLabel("保存").disabled).toBe(true);
+      await act(async () => { getButtonByText("测试").click(); await Promise.resolve(); });
+      expect(getButtonByLabel("保存").disabled).toBe(false);
+      await act(async () => { getButtonByLabel("保存").click(); await Promise.resolve(); });
+      expect(configClient.testModelConfig).toHaveBeenCalledTimes(3);
+      expect(configClient.saveModelCatalog).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(configClient.saveModelCatalog.mock.calls[0]![0])).toContain(modelId);
+    });
+
   it("does not restore a cached result for changed connection details or malformed storage", () => {
     const original = createModelWorkspace(createSeedConfig()).spaces.byok.connections[0]!;
     writeConnectionTestState(original, "success", window.sessionStorage);

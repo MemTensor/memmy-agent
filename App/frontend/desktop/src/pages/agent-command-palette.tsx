@@ -95,7 +95,12 @@ export function resolveContributionIcon(name: string | undefined): LucideIcon {
   return (name ? iconByName[name] : undefined) ?? Activity;
 }
 
-const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; description: MessageKey; hideArgHint?: boolean }> = {
+const localizedCommandKeys: Record<string, { title: MessageKey; description: MessageKey; argHint?: MessageKey; hideArgHint?: boolean }> = {
+  "/literature-review": {
+    title: "plugins.ui.literatureReview",
+    description: "plugins.command.literatureReviewDescription",
+    argHint: "plugins.command.literatureReviewTopicHint"
+  },
   "/new": {
     title: "home.command.newTitle",
     description: "home.command.newDescription"
@@ -114,7 +119,8 @@ const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; descripti
   },
   "/model": {
     title: "home.command.modelTitle",
-    description: "home.command.modelDescription"
+    description: "home.command.modelDescription",
+    hideArgHint: true
   },
   "/history": {
     title: "home.command.historyTitle",
@@ -157,7 +163,7 @@ export function localizeSlashCommands(
   t: SlashCommandTranslator
 ): MemmyAgentSlashCommand[] {
   return commands.map((command) => {
-    const keys = localizedBuiltinCommandKeys[command.command];
+    const keys = localizedCommandKeys[command.command];
     if (!keys) {
       return command;
     }
@@ -167,6 +173,7 @@ export function localizeSlashCommands(
     return {
       ...command,
       ...(language === "zh-CN" ? { title: t(keys.title), description: t(keys.description) } : {}),
+      ...(language === "zh-CN" && keys.argHint ? { argHint: t(keys.argHint) } : {}),
       ...(keys.hideArgHint ? { argHint: "" } : {})
     };
   });
@@ -247,19 +254,11 @@ export function buildVisibleSlashCommands(
 export function filterSlashCommands(
   commands: SlashCommandPaletteItem[],
   query: string,
-  recentCommands: string[],
-  modelPresets: ReadonlyArray<{ name: string; available: boolean }> = []
+  recentCommands: string[]
 ): SlashCommandPaletteItem[] {
   const normalizedQuery = query.toLowerCase().replace(/[\t ]+/g, " ");
   const descendants = commands.flatMap((parent) => {
-    const suffixes = [...(SUBCOMMANDS[parent.command.toLowerCase()] ?? [])];
-    if (parent.command.toLowerCase() === "/model") {
-      for (const preset of modelPresets) {
-        if (preset.available && !/\s/.test(preset.name) && preset.name.toLowerCase() !== "list") {
-          suffixes.push([preset.name, ""]);
-        }
-      }
-    }
+    const suffixes = SUBCOMMANDS[parent.command.toLowerCase()] ?? [];
     return suffixes.map(([suffix, argHint]) => ({
       ...parent, command: `${parent.command} ${suffix}`, argHint
     }));

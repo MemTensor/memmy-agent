@@ -28,6 +28,63 @@ function fixture() {
   directories.push(rootDirectory);
   return { rootDirectory, memmyConfigPath: join(rootDirectory, "memmy.yaml") };
 }
+type ConnectionMemoryStub = Pick<
+  MemoryService,
+  "reconcileAgentSkills" | "agentSkillConnectionEvent" | "agentSkillConnectionState" | "agentSkillsDisconnected"
+>;
+function createConnectionMemoryStub(): ConnectionMemoryStub {
+  type StoredEvent = NonNullable<ReturnType<MemoryService["agentSkillConnectionEvent"]>>;
+  const eventsBySource = new Map<string, StoredEvent>();
+  const seenBySource = new Map<string, Set<string>>();
+  let sequence = 0;
+  const normalize = (sourceId: string) => sourceId.trim().toLowerCase();
+  return {
+    reconcileAgentSkills(request) {
+      const sourceAgentId = normalize(request.sourceAgentId);
+      const nextState = request.connectionState ?? (request.disconnected === true ? "disconnected" : undefined);
+      let connectionEvent: StoredEvent | undefined;
+      if (nextState === "connected" || nextState === "disconnected") {
+        const current = eventsBySource.get(sourceAgentId);
+        const requestedId = request.connectionEventId?.trim() || undefined;
+        let seen = seenBySource.get(sourceAgentId);
+        if (!seen) {
+          seen = new Set<string>();
+          seenBySource.set(sourceAgentId, seen);
+        }
+        if (requestedId && (current?.id === requestedId || seen.has(requestedId))) {
+          connectionEvent = current;
+        } else {
+          const revision = (current?.revision ?? 0) + 1;
+          connectionEvent = {
+            id: requestedId ?? `connection-event-${++sequence}`,
+            state: nextState,
+            ...(request.connectionKind ? { kind: request.connectionKind } : {}),
+            revision
+          };
+          eventsBySource.set(sourceAgentId, connectionEvent);
+          if (requestedId) seen.add(requestedId);
+        }
+      }
+      return {
+        sourceAgentId,
+        skills: [],
+        archived: 0,
+        registrations: 0,
+        serverTime: new Date().toISOString(),
+        ...(connectionEvent ? { connectionEvent } : {})
+      };
+    },
+    agentSkillConnectionEvent(sourceId) {
+      return eventsBySource.get(normalize(sourceId));
+    },
+    agentSkillConnectionState(sourceId) {
+      return eventsBySource.get(normalize(sourceId))?.state;
+    },
+    agentSkillsDisconnected(sourceId) {
+      return eventsBySource.get(normalize(sourceId))?.state === "disconnected";
+    }
+  };
+}
 function newProcess(home: string, payload: Record<string, unknown>): Promise<{ executed: number }> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [fixtureProcess, "dispatch", JSON.stringify(payload)], {
@@ -245,8 +302,9 @@ describe.each([
       if (++updates === 2) { entered(); await gate; if (fail) throw new Error("trust failed"); }
     } });
     const service = createSkillDistributionService({ targetRegistry: backendRegistry([target]) });
+    const memoryStub = createConnectionMemoryStub();
     const executor = createAgentSourceExecutor({
-      service: {} as MemoryService, configPath: f.memmyConfigPath, statePath: join(f.rootDirectory, "state.json"),
+      service: memoryStub as unknown as MemoryService, configPath: f.memmyConfigPath, statePath: join(f.rootDirectory, "state.json"),
       sourceRegistry: createSourceRegistry([{
         descriptor: { sourceId: "codex", displayName: "Codex", builtin: true, dataPath: f.rootDirectory },
         detect: async () => true, async *scan() {}
@@ -268,7 +326,10 @@ describe.each([
       const hooks = JSON.parse(readFileSync(join(f.rootDirectory, "hooks.json"), "utf8")).hooks;
       for (const event of events) expect(hooks[event]).toHaveLength(1);
       for (const skill of ["memmy-memory", "memmy-resume"]) expect(existsSync(join(f.rootDirectory, "skills", skill, "SKILL.md"))).toBe(true);
+      expect(existsSync(join(f.rootDirectory, "hooks", "memmy-resume-hook.mjs"))).toBe(true);
       if (name === "Memory") {
+        expect(memoryStub.agentSkillConnectionState("codex")).toBe("connected");
+        await expect(executor.connectionState("codex")).resolves.toMatchObject({ connectionState: "connected" });
         const state = JSON.parse(readFileSync(join(f.rootDirectory, "state.json"), "utf8")).sources.codex;
         expect(state.status).not.toBe("not_connected");
         expect(state.autoInjectSuppressed).toBeUndefined();
@@ -276,6 +337,14 @@ describe.each([
       }
       await remove();
       expect(await createTarget(f).isInstalled("codex")).toBe(false);
+      expect(existsSync(join(f.rootDirectory, "hooks", "memmy-resume-hook.mjs"))).toBe(false);
+      expect(existsSync(join(f.rootDirectory, "hooks", "memmy-memory-config.json"))).toBe(false);
+      for (const skill of ["memmy-memory", "memmy-resume"]) expect(existsSync(join(f.rootDirectory, "skills", skill))).toBe(false);
+      if (name === "Memory") {
+        expect(memoryStub.agentSkillConnectionState("codex")).toBe("disconnected");
+        await expect(executor.connectionState("codex")).resolves.toMatchObject({ connectionState: "disconnected" });
+        expect((await executor.list()).sources[0]!.status).toBe("not_connected");
+      }
       for (const event of events) expect(await newProcess(f.rootDirectory, { hook_event_name: event })).toEqual({ executed: 0 });
     } finally { release(); await executor.dispose(); }
   });
