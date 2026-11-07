@@ -9,6 +9,7 @@ import { createSkillTargetRegistry } from "../../src/agent-source/integration/ta
 import { importedSkillContentHash } from "../../src/storage/imported-skill.js";
 import { buildUserMemory } from "../../src/service/user-memory/user-memory.js";
 import { Repositories } from "../../src/storage/repositories.js";
+import { stableHash } from "../../src/utils/id.js";
 import { createCapturingEmbedder, createFailingLlm, createMemoryServiceFixture, LEGACY_TEST_CONFIG } from "../fixtures/memory-service-fixture.js";
 const fixture = createMemoryServiceFixture();
 const closers: Array<() => Promise<void>> = [];
@@ -20,6 +21,21 @@ const config = { ...LEGACY_TEST_CONFIG, algorithm: { ...LEGACY_TEST_CONFIG.algor
   retrieval: { ...LEGACY_TEST_CONFIG.algorithm.retrieval, llmFilterEnabled: true,
     llmFilterMinCandidates: 1, llmFilterMaxKeep: 10, skillInjectionMode: "full" as const } } };
 type Service = ReturnType<typeof fixture.createTestService>["service"];
+type AddMemoryResponse = ReturnType<Service["addMemory"]>;
+function skillAddFixture(repos: Repositories, id: string, summary = marker): AddMemoryResponse {
+  const item = repos.memories.toListItem(repos.memories.get(id)!);
+  return {
+    id: item.id,
+    kind: item.kind,
+    memoryLayer: item.memoryLayer,
+    status: item.status,
+    title: item.title,
+    summary,
+    tags: item.tags,
+    createdAt: item.createdAt,
+    serverTime: item.updatedAt
+  };
+}
 function observation() {
   const content = `---\nname: synthetic-workflow\ndescription: synthetic workflow marker\n---\nPerform ${marker} synthetic workflow marker.`;
   return { sourceSkillId: "synthetic-workflow", sourceSkillPath: "/fixture/synthetic-workflow/SKILL.md", title: "synthetic-workflow", content,
@@ -91,12 +107,13 @@ describe("imported Skill asynchronous recall and response copies", () => {
     const h = await harness(); const id = imported(h.service); const repos = new Repositories(h.db.db);
     const request = { namespace, adapterId: "fixture", requestId: "late", query: "synthetic workflow marker", layers: ["Skill"] as const };
     const recalled = await h.service.search(request as any);
-    repos.runtime.saveIdempotency("memory.add:fixture:old", "old", { id, summary: marker, details: [{ traceId: id, summary: marker }] });
+    const oldSkillAdd = skillAddFixture(repos, id);
+    repos.runtime.saveIdempotency("memory.add:fixture:old", "old", { ...oldSkillAdd, details: [{ traceId: id, summary: marker }] });
     const pending = gate(); const result = h.service.idempotent("memory.search", request, request, async () => { pending.enter(); await pending.released; return recalled; });
     await pending.entered; revoke(h.service, id, "delete"); pending.release();
     expect(JSON.stringify(await result)).not.toContain(marker);
     expect(h.db.db.prepare("SELECT COUNT(*) AS n FROM idempotency_keys WHERE response_json LIKE ?").get(`%${marker}%`)).toEqual({ n: 0 });
-    expect(repos.runtime.getIdempotency("memory.add:fixture:old")?.response).toMatchObject({ id });
+    expect(repos.runtime.getIdempotency("memory.add:fixture:old")?.response).toMatchObject({ id, memoryLayer: "Skill", summary: "" });
   });
   it("revalidates before a fallback model sees candidates revoked during the primary filter", async () => {
     const pending = gate();
@@ -128,9 +145,24 @@ describe("imported Skill asynchronous recall and response copies", () => {
     expect(repos.runtime.getIdempotency("memory.search:fixture:old")).toBeUndefined();
     repos.runtime.saveIdempotency("turn.start:fixture:late", "late", response);
     expect(repos.runtime.getIdempotency("turn.start:fixture:late")).toBeUndefined();
-    const manual = { id: "manual-fixture", summary: marker };
+    const manual: AddMemoryResponse = service.addMemory({
+      namespace,
+      layer: "Skill",
+      title: "Manual fixture",
+      content: marker,
+      deferProcessing: true
+    });
     repos.runtime.saveIdempotency("memory.add:fixture:manual", "manual", manual);
     expect(repos.runtime.getIdempotency("memory.add:fixture:manual")?.response).toEqual(manual);
+    const nonSkill: AddMemoryResponse = service.addMemory({
+      namespace,
+      layer: "L1",
+      title: "Manual L1 fixture",
+      content: marker,
+      deferProcessing: true
+    });
+    repos.runtime.saveIdempotency("memory.add:fixture:l1", "l1", nonSkill);
+    expect(repos.runtime.getIdempotency("memory.add:fixture:l1")?.response).toEqual(nonSkill);
     expect(db.db.prepare("SELECT COUNT(*) AS n FROM idempotency_keys WHERE response_json LIKE ?").get(`%${id}%`)).toEqual({ n: 0 });
   });
 
@@ -161,15 +193,62 @@ describe("imported Skill asynchronous recall and response copies", () => {
 
   it("repairs already-stored deleted add and recall snapshots at worker startup", async () => {
     const { service, db } = fixture.createTestService({ config: structuredClone(config), llm: { ...createFailingLlm(), isConfigured: () => false } });
-    const id = imported(service);
+    const repos = new Repositories(db.db);
+    const legacyAddRequest = {
+      namespace,
+      adapterId: "fixture",
+      requestId: "startup",
+      layer: "Skill" as const,
+      source: "hermes",
+      sourceAgentId: "hermes",
+      sourceSkillId: "synthetic-workflow",
+      sourceSkillPath: "/fixture/synthetic-workflow/SKILL.md",
+      content: `---\nname: synthetic-workflow\ndescription: ${marker} synthetic workflow marker\n---\nPerform ${marker} synthetic workflow marker.`,
+      deferProcessing: true
+    };
+    const legacyAdd: AddMemoryResponse = service.addMemory(legacyAddRequest);
+    expect(legacyAdd.memoryLayer).toBe("Skill");
+    expect(legacyAdd.summary).toContain(marker);
+    const id = legacyAdd.id;
     const response = await service.search({ namespace, query: "synthetic workflow marker", layers: ["Skill"] });
+    expect(JSON.stringify(response)).toContain(marker);
+    const l1Request = {
+      namespace,
+      adapterId: "fixture",
+      requestId: "startup-l1",
+      layer: "L1" as const,
+      title: "Manual L1 startup control",
+      content: "Preserve non-skill add summary across startup",
+      deferProcessing: true
+    };
+    const l1Add: AddMemoryResponse = await service.idempotent("memory.add", l1Request, l1Request, () => service.addMemory(l1Request));
+    const l1ReferencingSkill: AddMemoryResponse = service.addMemory({
+      namespace,
+      layer: "L1",
+      title: "Manual L1 referencing deleted skill id",
+      content: "Preserve non-skill add response even when referencing skill id",
+      tags: [id],
+      deferProcessing: true
+    });
     revoke(service, id, "delete");
+    const legacyAddHash = stableHash({ operation: "memory.add", fingerprint: legacyAddRequest });
     const insert = db.db.prepare("INSERT INTO idempotency_keys (key, request_hash, response_json, created_at) VALUES (?, ?, ?, ?)");
     insert.run("memory.search:fixture:startup", "search", JSON.stringify(response), "2026-11-01T00:00:00Z");
-    insert.run("memory.add:fixture:startup", "add", JSON.stringify({ id, summary: marker }), "2026-11-01T00:00:00Z");
+    insert.run("memory.add:fixture:startup", legacyAddHash, JSON.stringify(legacyAdd), "2026-11-01T00:00:00Z");
+    insert.run("memory.add:fixture:startup-l1-ref", "l1-ref", JSON.stringify(l1ReferencingSkill), "2026-11-01T00:00:00Z");
     service.reconcileWorkerStartup();
+    expect(repos.runtime.getIdempotency("memory.search:fixture:startup")).toBeUndefined();
     expect(db.db.prepare("SELECT COUNT(*) AS n FROM idempotency_keys WHERE response_json LIKE ?").get(`%${marker}%`)).toEqual({ n: 0 });
-    expect(new Repositories(db.db).runtime.getIdempotency("memory.add:fixture:startup")?.response).toMatchObject({ id, summary: "" });
+    expect(repos.runtime.getIdempotency("memory.add:fixture:startup")?.response).toEqual({ ...legacyAdd, summary: "" });
+    let reranAdd = false;
+    const replayed = await service.idempotent("memory.add", legacyAddRequest, legacyAddRequest, () => {
+      reranAdd = true;
+      return service.addMemory(legacyAddRequest);
+    });
+    expect(reranAdd).toBe(false);
+    expect(replayed).toEqual({ ...legacyAdd, summary: "", duplicate: true });
+    expect(repos.runtime.getIdempotency("memory.add:fixture:startup-l1")?.response).toEqual(l1Add);
+    expect(repos.runtime.getIdempotency("memory.add:fixture:startup-l1-ref")?.response).toEqual(l1ReferencingSkill);
   });
 
   it.each(["delete", "disconnect"])("revalidates public turn-start after search completed before %s", async transition => {
