@@ -26,7 +26,7 @@ export async function* streamDeepseekHarnessSession(
 ): AsyncIterable<RawDeepseekHarnessMessage> {
   const events = await loadDeepseekHarnessEvents(filePath, signal);
   if (!events.some((event) => event.type === "session")) {
-    const fallbackId = basename(filePath).replace(/\.jsonl(?:\.zstd)?$/u, "");
+    const fallbackId = basename(filePath).replace(/\.jsonl(?:\.zstd)?(?:\.bak-\d+)?$/u, "");
     for await (const message of readDeepseekHarnessEvents([{ type: "session", id: fallbackId }, ...events], signal)) {
       yield withWorkspace(message);
     }

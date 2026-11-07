@@ -123,6 +123,20 @@ export function resolveDeepseekHarnessSessionsDirectory(options: ResolveAgentPat
   return createAgentPathRuntime(options).pathApi.join(resolveDeepseekHarnessHomeDirectory(options), "sessions");
 }
 
+/** Candidate history roots; explicit DSH_HOME stays exclusive (including test profiles). */
+export function resolveDeepseekHarnessSessionDirectories(options: ResolveAgentPathOptions = {}): string[] {
+  const runtime = createAgentPathRuntime(options);
+  const cli = resolveDeepseekHarnessSessionsDirectory(options);
+  if (runtime.environment.DSH_HOME?.trim()) return [cli];
+  const platform = options.platform ?? process.platform;
+  const config = platform === "win32"
+    ? resolveConfiguredDirectory(runtime.environment.APPDATA, runtime.pathApi.join(runtime.homeDirectory, "AppData", "Roaming"), runtime)
+    : platform === "darwin"
+      ? runtime.pathApi.join(runtime.homeDirectory, "Library", "Application Support")
+      : resolveConfiguredDirectory(runtime.environment.XDG_CONFIG_HOME, runtime.pathApi.join(runtime.homeDirectory, ".config"), runtime);
+  return [...new Set([cli, runtime.pathApi.join(config, "dsh-desktop", "harness", "sessions")])];
+}
+
 export function resolveWorkbuddyHomeDirectory(options: ResolveAgentPathOptions = {}): string {
   const runtime = createAgentPathRuntime(options);
   return resolveConfiguredDirectory(

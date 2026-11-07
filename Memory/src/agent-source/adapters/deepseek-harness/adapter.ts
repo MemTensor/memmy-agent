@@ -1,6 +1,6 @@
 import { access } from "node:fs/promises";
 import { join } from "node:path";
-import { resolveDeepseekHarnessHomeDirectory, resolveDeepseekHarnessSessionsDirectory } from "../../agent-paths.js";
+import { resolveDeepseekHarnessHomeDirectory, resolveDeepseekHarnessSessionsDirectory, resolveDeepseekHarnessSessionDirectories } from "../../agent-paths.js";
 import { streamConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
@@ -22,6 +22,9 @@ export function createDeepseekHarnessSourceAdapter(
   const sessionsRoot = deps.sessionsRoot ?? (deps.rootDirectory
     ? join(rootDirectory, "sessions")
     : resolveDeepseekHarnessSessionsDirectory());
+  const sessionsRoots = deps.sessionsRoot || deps.rootDirectory
+    ? [sessionsRoot]
+    : resolveDeepseekHarnessSessionDirectories();
   const descriptor = deps.descriptor ?? Object.freeze({
     sourceId: SOURCE_ID,
     displayName: "DeepSeek Harness",
@@ -32,19 +35,23 @@ export function createDeepseekHarnessSourceAdapter(
   return {
     descriptor,
     async detect() {
-      try {
-        await access(rootDirectory);
-        return true;
-      } catch (error) {
-        if (isNodeError(error) && error.code === "ENOENT") return false;
-        throw error;
+      for (const directory of sessionsRoots) {
+        try { await access(directory); return true; }
+        catch (error) {
+          if (isNodeError(error) && (error.code === "ENOENT" || error.code === "ENOTDIR")) continue;
+          throw error;
+        }
       }
+      return false;
     },
     async *scan(options: ScanOptions) {
       options.signal?.throwIfAborted();
       options.onProgress?.({ sourceId: SOURCE_ID, phase: "discover", current: 0, total: 1 });
       const sessions = await discoverDeepseekHarnessSessions({
         root: sessionsRoot,
+        roots: sessionsRoots,
+        includeBackups: true,
+        signal: options.signal,
         order: options.order === "recent_first" ? "recent_first" : "path_asc",
         maxSessions: options.maxScanTargets
       });
