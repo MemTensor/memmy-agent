@@ -24,8 +24,11 @@ describe("DeepSeek Harness target configuration", () => {
     const installed = JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>;
     await expect(target.isInstalledHookCurrent!()).resolves.toBe(true);
 
-    const legacy = { ...installed };
-    delete legacy.bridge_integrity;
+    const legacy = {
+      memmy_config_path: installed.memmy_config_path,
+      endpoint: installed.endpoint,
+      token: installed.token
+    };
     await writeFile(configPath, JSON.stringify(legacy));
     await expect(target.isInstalledHookCurrent!()).resolves.toBe(true);
 

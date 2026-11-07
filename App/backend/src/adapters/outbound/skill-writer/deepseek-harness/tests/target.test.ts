@@ -112,8 +112,11 @@ describe("DeepSeek Harness skill target", () => {
     const installed = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
     await expect(target.isInstalledHookCurrent!()).resolves.toBe(true);
 
-    const legacy = { ...installed };
-    delete legacy.bridge_integrity;
+    const legacy = {
+      memmy_config_path: installed.memmy_config_path,
+      endpoint: installed.endpoint,
+      token: installed.token
+    };
     writeFileSync(configPath, JSON.stringify(legacy));
     await expect(target.isInstalledHookCurrent!()).resolves.toBe(true);
 
