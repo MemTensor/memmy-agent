@@ -47,6 +47,7 @@ import {
   type AgentAttachmentClassification,
 } from "../lib/agent-attachment.js";
 import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode.js";
+import { mergeLiveLines, type AsrLiveLine } from "../lib/asr-live-transcription.js";
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
@@ -982,7 +983,31 @@ export function HomePage() {
   const queueSteerLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
-  const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
+  const liveVoiceLinesRef = useRef<AsrLiveLine[]>([]);
+  const liveVoiceScopeRef = useRef<string | null>(null);
+  const liveVoiceRangeRef = useRef<VoiceTranscriptRange | null>(null);
+  const asrRecorder = useAsrRecorder(clients?.asr, {
+    emptyAudioMessage: t("home.asrEmptyAudio"),
+    live: {
+      onLine: (line) => {
+        const scopeKey = liveVoiceScopeRef.current;
+        if (!scopeKey) return;
+        const lines = mergeLiveLines(liveVoiceLinesRef.current, line);
+        const text = lines.map((item) => item.text.trim()).filter(Boolean).join(" ");
+        liveVoiceLinesRef.current = lines;
+        setComposerDraftForScope(scopeKey, (current) => {
+          const updated = replaceVoiceTranscript(current, liveVoiceRangeRef.current, text);
+          liveVoiceRangeRef.current = updated.range;
+          return updated.value;
+        });
+        if (scopeKey === chatScopeKey) {
+          window.requestAnimationFrame(() => {
+            if (inputRef.current) resizeComposerInput(inputRef.current);
+          });
+        }
+      }
+    }
+  });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   useEffect(() => { setTaskRecording(null); }, [chatScopeKey]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
@@ -2810,8 +2835,13 @@ export function HomePage() {
    */
   function startVoiceInput() {
     inputRef.current?.focus();
+    const scopeKey = chatScopeKey;
+    liveVoiceLinesRef.current = [];
+    liveVoiceScopeRef.current = scopeKey;
+    liveVoiceRangeRef.current = null;
     void asrRecorder.start().catch((error: unknown) => {
-      setCurrentComposerMediaError(toReadableAsrError(error, t));
+      setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t));
+      if (liveVoiceScopeRef.current === scopeKey) liveVoiceScopeRef.current = null;
     });
   }
 
@@ -2819,19 +2849,31 @@ export function HomePage() {
    * Ends voice input on the main interface and merges in the transcribed text.
    */
   async function finishVoiceInput() {
+    const scopeKey = liveVoiceScopeRef.current ?? chatScopeKey;
     try {
       const transcript = await asrRecorder.finishAndTranscribe();
-      setCurrentComposerDraft((current) => mergeVoiceTranscript(current, transcript.text));
+      setComposerDraftForScope(scopeKey, (current) => replaceVoiceTranscript(
+        current,
+        liveVoiceRangeRef.current,
+        transcript.text
+      ).value);
+      liveVoiceLinesRef.current = [];
+      liveVoiceScopeRef.current = null;
+      liveVoiceRangeRef.current = null;
       setSlashMenuDismissed(false);
       setSelectedCommandIndex(0);
-      window.requestAnimationFrame(() => {
-        if (inputRef.current) {
-          resizeComposerInput(inputRef.current);
-          inputRef.current.focus();
-        }
-      });
+      if (scopeKey === chatScopeKey) {
+        window.requestAnimationFrame(() => {
+          if (inputRef.current) {
+            resizeComposerInput(inputRef.current);
+            inputRef.current.focus();
+          }
+        });
+      }
     } catch (error: unknown) {
-      setCurrentComposerMediaError(toReadableAsrError(error, t));
+      liveVoiceScopeRef.current = null;
+      liveVoiceRangeRef.current = null;
+      setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t));
     }
   }
 
@@ -3550,6 +3592,29 @@ export function HomePage() {
       </div>
     </AppFrame>
   );
+}
+
+export interface VoiceTranscriptRange {
+  start: number;
+  text: string;
+}
+
+/** Replaces only the exact provisional range previously inserted by voice input. */
+export function replaceVoiceTranscript(
+  current: string,
+  previous: VoiceTranscriptRange | null,
+  next: string
+): { value: string; range: VoiceTranscriptRange | null } {
+  const nextText = next.trim();
+  if (!nextText) return { value: current, range: previous };
+  if (previous && current.slice(previous.start, previous.start + previous.text.length) === previous.text) {
+    return {
+      value: `${current.slice(0, previous.start)}${nextText}${current.slice(previous.start + previous.text.length)}`,
+      range: { start: previous.start, text: nextText }
+    };
+  }
+  const value = mergeVoiceTranscript(current, nextText);
+  return { value, range: { start: value.length - nextText.length, text: nextText } };
 }
 
 export function ChatModelSelector(props: {

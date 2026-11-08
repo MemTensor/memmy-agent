@@ -40,6 +40,7 @@ import {
   requestNewSessionReset,
   requestAgentRestart,
   requestAgentStop,
+  replaceVoiceTranscript,
   resolveComposerCommandDraft,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
@@ -589,14 +590,29 @@ describe("HomePage", () => {
     const startVoiceInput = source.slice(startVoiceInputStart, finishVoiceInputStart);
     const finishVoiceInput = source.slice(finishVoiceInputStart, toggleVoiceInputStart);
 
-    expect(startVoiceInput).toContain("setCurrentComposerMediaError(toReadableAsrError(error, t))");
-    expect(finishVoiceInput).toContain("setCurrentComposerMediaError(toReadableAsrError(error, t))");
+    expect(startVoiceInput).toContain("setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t))");
+    expect(finishVoiceInput).toContain("setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t))");
     expect(startVoiceInput).not.toContain("agentActions.failed");
     expect(finishVoiceInput).not.toContain("agentActions.failed");
+    expect(source).toContain("mergeLiveLines(liveVoiceLinesRef.current, line)");
+    expect(source).toContain("setComposerDraftForScope(scopeKey");
+    expect(source).toContain("replaceVoiceTranscript(current, liveVoiceRangeRef.current, text)");
+    expect(finishVoiceInput).toContain("liveVoiceScopeRef.current ?? chatScopeKey");
     expect(source).toContain("MicrophonePermissionError");
     expect(source).toContain("microphonePermissionDeniedMessageKey");
     expect(source).toContain("asr.error.microphonePermissionDenied.mac");
     expect(source).toContain("asr.error.microphonePermissionDenied.windows");
+  });
+
+  it("replaces provisional voice text without duplicating the final transcript", () => {
+    const partial = replaceVoiceTranscript("已有内容", null, "你");
+    expect(partial).toEqual({ value: "已有内容\n你", range: { start: 5, text: "你" } });
+    expect(replaceVoiceTranscript(partial.value, partial.range, "你好").value).toBe("已有内容\n你好");
+    expect(replaceVoiceTranscript("已有内容\n你，继续输入", partial.range, "你好").value).toBe("已有内容\n你好，继续输入");
+  });
+
+  it("never replaces matching user text when the provisional range was removed", () => {
+    expect(replaceVoiceTranscript("你好", { start: 3, text: "你好" }, "最终结果").value).toBe("你好\n最终结果");
   });
 
   it("uses the send button disabled state when handling Enter submit", () => {
