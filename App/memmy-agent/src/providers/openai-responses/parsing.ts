@@ -60,21 +60,22 @@ export async function* iterSse(response: Response): AsyncGenerator<any> {
 export function parseResponseOutput(
   response: any,
   provider: string | null = null,
+  scope?: string,
 ): LLMResponse {
   const data =
     typeof response?.toJSON === "function"
       ? response.toJSON()
       : response;
-  const output = data.output ?? [];
+  const output = Array.isArray(data?.output) ? data.output : [];
   const text = output
     .filter((item: any) => item.type === "message")
     .flatMap((item: any) => item.content ?? [])
-    .filter((c: any) => c.type === "output_text" || c.text)
-    .map((c: any) => c.text ?? "")
+    .filter((c: any) => c.type === "output_text" || c.type === "refusal" || c.text)
+    .map((c: any) => c.text ?? c.refusal ?? "")
     .join("");
   const reasoning = output
     .filter((item: any) => item.type === "reasoning")
-    .flatMap((item: any) => item.summary ?? [])
+    .flatMap((item: any) => [...(item.summary ?? []), ...(item.content ?? [])])
     .map((item: any) => item.text ?? "")
     .join("");
   const calls = output
@@ -95,7 +96,7 @@ export function parseResponseOutput(
   const error = data.error && typeof data.error === "object" ? data.error : {};
   const errorType = normalizeResponseErrorToken(error.type ?? data.type);
   const errorCode = normalizeResponseErrorToken(error.code ?? data.code);
-  const isError = data.status === "failed" || data.status === "cancelled";
+  const isError = !["completed", "incomplete"].includes(data.status) || !Array.isArray(data.output) || !!data.error;
   const errorCategory = isError
     ? classifyQuotaExhaustion({
         provider,
@@ -109,9 +110,10 @@ export function parseResponseOutput(
   return new LLMResponse({
     content: text || null,
     toolCalls: calls,
-    finishReason: mapFinishReason(data.status),
+    finishReason: isError ? "error" : mapFinishReason(data.status),
     usage,
     reasoningContent: reasoning || null,
+    protocolState: scope && Array.isArray(output) ? { version: 1, protocol: "responses", scope, items: output } : null,
     errorType: isError ? errorType : null,
     errorCode: isError ? errorCode : null,
     errorCategory,
@@ -149,14 +151,18 @@ export async function consumeSdkStream(
   stream: AsyncIterable<any>,
   callbacks: {
     onContentDelta?: (delta: string) => Promise<void> | void;
+    onThinkingDelta?: (delta: string) => Promise<void> | void;
     onToolCallDelta?: (delta: Record<string, any>) => Promise<void> | void;
     signal?: AbortSignal | null;
   } = {},
-): Promise<[string, ToolCallRequest[], string, Record<string, any>, string | null]> {
+): Promise<[string, ToolCallRequest[], string, Record<string, any>, string | null, Record<string, any>[]]> {
   let text = "";
   let finish = "stop";
   let usage: Record<string, any> = {};
   let reasoning: string | null = null;
+  let terminal = false;
+  let output: Record<string, any>[] | null = null;
+  const rawItems = new Map<number, Record<string, any>>();
   const toolItems = new Map<string, any>();
   const toolAliases = new Map<string, string>();
   const toolItemFor = (event: any): any => {
@@ -184,13 +190,19 @@ export async function consumeSdkStream(
   for await (const event of stream) {
     if (signal?.aborted) throw createProviderAbortError();
     const type = event.type;
+    if (type === "response.output_item.done" && event.item && Number.isInteger(event.output_index)) {
+      rawItems.set(event.output_index, structuredClone(event.item));
+    }
     if (type === "error" || type === "response.failed") {
       const error = event.error ?? event.response?.error ?? event.message ?? "unknown error";
       throw new RuntimeError(`Response failed: ${errorSummary(error)}`, error);
     }
-    if (type === "response.output_text.delta") {
+    if (type === "response.output_text.delta" || type === "response.refusal.delta") {
       text += event.delta ?? "";
       if (contentCb && !signal?.aborted) await contentCb(event.delta ?? "");
+    } else if (type === "response.reasoning_text.delta" || type === "response.reasoning_summary_text.delta") {
+      reasoning = (reasoning ?? "") + (event.delta ?? "");
+      await callbacks.onThinkingDelta?.(event.delta ?? "");
     } else if (type === "response.output_item.added" && event.item?.type === "function_call") {
       const item = toolItemFor(event);
       item.arguments = event.item.arguments ?? item.arguments;
@@ -205,7 +217,15 @@ export async function consumeSdkStream(
     } else if (type === "response.output_item.done" && event.item?.type === "function_call") {
       const item = toolItemFor(event);
       item.arguments = event.item.arguments ?? item.arguments ?? "";
-    } else if (type === "response.completed") {
+    } else if (type === "response.completed" || type === "response.incomplete") {
+      terminal = true;
+      if (!["completed", "incomplete"].includes(event.response?.status) || event.response?.error) {
+        throw new RuntimeError("Response did not complete", event.response?.error ?? event.response);
+      }
+      if (type === "response.incomplete" && event.response?.incomplete_details?.reason !== "max_output_tokens") {
+        throw new RuntimeError("Response did not complete", event.response);
+      }
+      output = Array.isArray(event.response?.output) ? event.response.output : null;
       finish = mapFinishReason(event.response?.status);
       const u = event.response?.usage;
       if (u) {
@@ -220,17 +240,36 @@ export async function consumeSdkStream(
       }
       const summaries = (event.response?.output ?? [])
         .filter((item: any) => item.type === "reasoning")
-        .flatMap((item: any) => item.summary ?? [])
+        .flatMap((item: any) => [...(item.summary ?? []), ...(item.content ?? [])])
         .map((item: any) => item.text ?? "")
         .join("");
-      reasoning = summaries || null;
+      reasoning = summaries || reasoning;
+    }
+  }
+  if (!terminal) throw new RuntimeError("Responses stream ended before its terminal event");
+  if (!output?.length) output = [...rawItems.entries()].sort(([a], [b]) => a - b).map(([, item]) => item);
+  const finalText = output.filter(item => item.type === "message")
+    .flatMap(item => item.content ?? []).map(block => block.text ?? block.refusal ?? "").join("");
+  if (finalText.startsWith(text) && finalText.length > text.length) {
+    await contentCb?.(finalText.slice(text.length));
+    text = finalText;
+  }
+  for (const item of output) {
+    if (item.type === "function_call") {
+      const tracked = toolItemFor({ item });
+      if (!String(item.arguments ?? "").startsWith(tracked.arguments ?? "")) {
+        throw new RuntimeError("Final function arguments differ from streamed arguments");
+      }
+      const remaining = String(item.arguments ?? "").slice(String(tracked.arguments ?? "").length);
+      if (remaining) await toolCb?.({ call_id: item.call_id, name: item.name, arguments_delta: remaining });
+      Object.assign(tracked, item);
     }
   }
   const calls = [...toolItems.values()].map((item) => {
     const args = parseToolArguments(item.arguments);
     return new ToolCallRequest({ id: `${item.call_id ?? "call_0"}|${item.id ?? "fc_0"}`, name: item.name, arguments: args });
   });
-  return [text, calls, finish, usage, reasoning];
+  return [text, calls, finish, usage, reasoning, output];
 }
 
 export class RuntimeError extends Error {

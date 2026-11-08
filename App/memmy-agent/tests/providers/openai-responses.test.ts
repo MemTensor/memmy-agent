@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { OpenAICompatProvider } from "../../src/providers/openai-compat-provider.js";
 import { findByName } from "../../src/providers/registry.js";
 import {
@@ -104,14 +104,14 @@ describe("OpenAI Responses convertMessages", () => {
     expect(items[0].role).toBe("user");
   });
 
-  it("uses the last system message as instructions", () => {
+  it("preserves all system messages as instructions", () => {
     const [instructions] = convertMessages([
       { role: "system", content: "first" },
       { role: "system", content: "second" },
       { role: "user", content: "x" },
     ]);
 
-    expect(instructions).toBe("second");
+    expect(instructions).toBe("first\n\nsecond");
   });
 
   it("converts user messages", () => {
@@ -548,6 +548,26 @@ describe("OpenAI Responses consumeSdkStream", () => {
     expect(usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
   });
 
+  it("delivers terminal-only text and tool output while preserving opaque items", async () => {
+    const onContentDelta = vi.fn();
+    const onToolCallDelta = vi.fn();
+    const output = [
+      { type: "reasoning", id: "rs", encrypted_content: "opaque", summary: [] },
+      { type: "message", id: "msg", content: [{ type: "output_text", text: "Hello" }] },
+      { type: "function_call", id: "fc", call_id: "call", name: "lookup", arguments: '{"key":1}' },
+    ];
+    const [text, calls, , , , items] = await consumeSdkStream(streamFrom([
+      { type: "response.output_text.delta", delta: "Hel" },
+      ...output.map((item, output_index) => ({ type: "response.output_item.done", item, output_index })),
+      { type: "response.completed", response: { status: "completed", output: [] } },
+    ]), { onContentDelta, onToolCallDelta });
+    expect(text).toBe("Hello");
+    expect(onContentDelta.mock.calls.flat().join("")).toBe("Hello");
+    expect(calls[0].id).toBe("call|fc");
+    expect(calls[0].arguments).toEqual({ key: 1 });
+    expect(items).toEqual(output);
+  });
+
   it("extracts reasoning summaries", async () => {
     const [, , , , reasoning] = await consumeSdkStream(streamFrom([
       { type: "response.completed", response: { status: "completed", usage: null, output: [{ type: "reasoning", summary: [{ type: "summary_text", text: "thinking..." }] }] } },
@@ -610,15 +630,15 @@ describe("OpenAI Responses consumeSdkStream", () => {
 describe("OpenAI chat completions reasoning effort", () => {
   const tool = [{ type: "function", function: { name: "read_file" } }];
 
-  it("sends reasoning_effort none when gpt-6-sol is called with tools", () => {
+  it("preserves requested reasoning when Chat tools are present", () => {
     const kwargs = chatKwargs("gpt-6-sol", tool, "medium");
 
-    expect(kwargs.reasoning_effort).toBe("none");
+    expect(kwargs.reasoning_effort).toBe("medium");
     expect(kwargs.tools).toEqual(tool);
   });
 
-  it("sends reasoning_effort none when tools are present and no effort was requested", () => {
-    expect(chatKwargs("gpt-6-astra", tool, null).reasoning_effort).toBe("none");
+  it("does not silently disable reasoning when no effort was requested", () => {
+    expect(chatKwargs("gpt-6-astra", tool, null).reasoning_effort).toBeUndefined();
   });
 
   it("keeps reasoning_effort when gpt-6-sol is called without tools", () => {

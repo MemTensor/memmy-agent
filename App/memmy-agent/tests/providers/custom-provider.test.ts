@@ -87,12 +87,12 @@ describe("custom provider", () => {
     expect(kwargs.reasoning_effort).toBe("medium");
   });
 
-  it("sends reasoning_effort none for custom chat completions gpt models when thinking is off", () => {
+  it("preserves explicit thinking choices for custom Chat endpoints", () => {
     const tools = [{ type: "function", function: { name: "read_file" } }];
 
-    expect(chatKwargs("gpt-6-sol", { tools }).reasoning_effort).toBe("none");
+    expect(chatKwargs("gpt-6-sol", { tools }).reasoning_effort).toBeUndefined();
     expect(chatKwargs("gpt-6-sol", { reasoningEffort: "none", tools }).reasoning_effort).toBe("none");
-    expect(chatKwargs("gpt-4o", { tools }).reasoning_effort).toBe("none");
+    expect(chatKwargs("gpt-4o", { tools }).reasoning_effort).toBeUndefined();
     expect(chatKwargs("gpt-4o", { tools }).max_tokens).toBe(1024);
     expect(chatKwargs("gpt-4o", { tools })).not.toHaveProperty("max_completion_tokens");
     expect(chatKwargs("qwen-max", { tools })).not.toHaveProperty("reasoning_effort");
