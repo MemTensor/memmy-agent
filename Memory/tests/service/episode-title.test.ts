@@ -26,7 +26,12 @@ describe("episode output language", () => {
   it.each([
     { title: "Local Sensitive Logic Exposure", summary: "已修复缓存处理。" },
     { title: "Cache Entry Has Expired", summary: "缓存已过期。" },
+    { title: "Session Token Was Lost", summary: "会话令牌已丢失。" },
+    { title: "Cache Synchronization", summary: "已同步缓存。" },
+    { title: "Token Rotation", summary: "已轮换令牌。" },
     { title: "修复缓存", summary: "Cache expired unexpectedly; 缓存。" },
+    { title: "修复缓存", summary: "缓存已过期。Cache expired unexpectedly." },
+    { title: "记录诊断", summary: "已完成缓存检查。The cache has expired. 已通知用户。" },
     { title: "修复缓存处理", summary: "Fixed cache handling and verified API responses." }
   ])("does not save a mismatched field and allows retry: %j", async (invalid) => {
     const { db, service } = createTestService();
@@ -44,10 +49,15 @@ describe("episode output language", () => {
     expect(complete).toHaveBeenCalledTimes(2);
   });
 
-  it("stores a product name as the title alongside its Chinese summary", async () => {
+  it.each([
+    { title: "Google Cloud Vision", summary: "已配置图像识别。" },
+    { title: "Azure App Configuration", summary: "已更新连接字符串。" },
+    { title: "配置服务", summary: "Azure App Configuration；已更新连接字符串。" },
+    { title: "配置服务", summary: "已更新连接字符串。Azure App Configuration" },
+    { title: "缓存文案", summary: "提示“Cache Entry Has Expired”。" }
+  ])("stores product names and quoted messages verbatim: %j", async output => {
     const { db, service } = createTestService();
     const { episodeId } = await completeOneTurn(service);
-    const output = { title: "Google Cloud Vision", summary: "已配置图像识别。" };
     const { llm, calls } = respondWith(output.title, output.summary);
     const { repos, titleService } = createTitleService(db, llm, { language: "zh-CN" });
     await titleService.generate(titleJob(episodeId, "final"));
@@ -105,12 +115,16 @@ describe("episode output language", () => {
     ["zh-CN", "Repair cache handling"],
     ["zh-CN", "Fixed cache handling and verified API responses."],
     ["zh-CN", "Password Reset Failed"],
+    ["zh-CN", "“Session Token Was Lost”"],
+    ["zh-CN", "Key Rotation"],
+    ["zh-CN", "提示“Cache Entry Has Expired”。The cache has expired."],
     ["zh-CN", "API returned the wrong value for 缓存."],
     ["zh-CN", "Cache expired unexpectedly; 缓存已过期。"],
     ["en", "Cache 修复缓存配置错误"],
     ["en", "修复服务端缓存配置，避免用户下次登录失败。 Cache refresh job complete."],
     ["ja", "Repair cache handling"],
     ["en", "修复缓存处理"],
+    ["en", "缓存。过期。"],
     ["fr", "Fixed the cache and verified responses"]
   ])("rejects obvious mismatch for %s: %s", (language, text) => {
     expect(() => validateEpisodeTitleLanguage(text, language, "title")).toThrow(/language/);
@@ -126,6 +140,10 @@ describe("episode output language", () => {
     ["zh-CN", "React Native Windows"], ["zh-CN", "`npm install typescript`"],
     ["zh-CN", "Microsoft Visual Studio Code"], ["zh-CN", "Adobe After Effects"],
     ["zh-CN", "Windows Communication Foundation"],
+    ["zh-CN", "Windows Update"],
+    ["zh-CN", "Azure Database Migration Service"],
+    ["zh-CN", "提示「Cache Entry Has Expired」。"],
+    ["zh-CN", '提示 "Cache Entry Has Expired".'],
     ["zh-CN", "Google Cloud Vision；已完成配置。"],
     ["zh-CN", "缓存失效时会显示 Cache Entry Has Expired 提示。"],
     ["en", "Show the message ‘缓存已过期。’ when the entry expires."],
