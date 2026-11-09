@@ -208,6 +208,9 @@ describe("HomePage", () => {
     expect(source).not.toContain('sendMessage({ chatId: state.agent.currentChatId, content: "/model');
     expect(styles).toContain(".agent-model-selector .agent-model-selector__menu");
     expect(styles).toContain(".agent-model-selector__menu .select-control__aside");
+    const thinkingAsideRule = styles.match(/\.agent-model-selector__menu \.select-control__aside\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(thinkingAsideRule).toContain("top: auto !important");
+    expect(thinkingAsideRule).toContain("bottom: 0");
     expect(styles).not.toContain(".agent-model-selector-with-thinking");
     expect(styles).toContain(".agent-thinking-control");
     expect(styles).toContain("top: calc(100% + 6px)");
