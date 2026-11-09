@@ -42,6 +42,7 @@ describe("thread panel model", () => {
     expect(threadPreviewKind("notes.md")).toBe("markdown");
     expect(threadPreviewKind("brief.docx")).toBe("document");
     expect(threadPreviewKind("sheet.XLSX")).toBe("document");
+    expect(threadPreviewKind("archive.zip")).toBe("unsupported");
     for (const extension of ["tex", "bib", "sty"]) expect(threadPreviewKind(`review.${extension}`)).toBe("code");
   });
 
@@ -60,12 +61,11 @@ describe("thread panel model", () => {
     expect(threadTabForInAppPreview({ name: "交付物.xlsx", path: "/work/交付物.xlsx" })).toMatchObject({ name: "交付物.xlsx", type: "file" });
     expect(threadTabForInAppPreview({ name: "report.pdf", path: "/work/report.pdf" })).toMatchObject({ name: "report.pdf", type: "file" });
 
-    expect(threadTabForInAppPreview({ name: "archive.zip", path: "/work/archive.zip" })).toBeNull();
     expect(threadTabForInAppPreview({ name: "deck.pptx", url: "http://127.0.0.1/api/media/deck" })).toMatchObject({ name: "deck.pptx", type: "file" });
-
-
-    expect(threadTabForInAppPreview({ name: "archive.zip", path: "/work/archive.zip" })).toMatchObject({ name: "archive.zip", type: "file" });
-
+    expect(threadTabForInAppPreview({ name: "archive.zip", path: "/work/archive.zip" })).toEqual({
+      id: "file:/work/archive.zip", name: "archive.zip", path: "/work/archive.zip", type: "file",
+    });
+    expect(threadTabForInAppPreview({ name: "archive.zip" })).toBeNull();
   });
 
   it("collects delivered assistant files, not files merely linked or edited", () => {

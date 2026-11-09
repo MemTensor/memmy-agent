@@ -145,6 +145,8 @@ describe("BYOK displayed, tested and saved credentials", () => {
     });
   }
   async function saveAndWait(button: HTMLButtonElement, navigates = false) {
+    const saveIndex = server.saveCatalog.mock.results.length;
+    const writes = server.write.mock.calls.length;
     const dispatchIndex = mocks.dispatch.mock.calls.length;
 
     await click(button);
