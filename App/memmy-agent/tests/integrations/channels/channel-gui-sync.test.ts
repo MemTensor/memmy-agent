@@ -9,7 +9,7 @@ import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
 import { SessionManager } from "../../../src/core/session/manager.js";
 import { GuiSessionProjection, toGuiChatId } from "../../../src/entrypoints/frontend-bridge/gui-session-projection.js";
 import { GuiTranscriptMirror } from "../../../src/entrypoints/frontend-bridge/gui-transcript-sync.js";
-import { readTranscriptLines } from "../../../src/entrypoints/frontend-bridge/transcript.js";
+import { readTranscriptLines, replayTranscriptToUiMessages } from "../../../src/entrypoints/frontend-bridge/transcript.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 import { LLMResponse } from "../../../src/providers/base.js";
 
@@ -76,7 +76,7 @@ describe.each([
   ["slack", "chat-slack"],
   ["weixin", "chat-weixin"],
 ])("%s canonical GUI synchronization", (channelName, chatId) => {
-  it("keeps IM A, GUI B, and IM C in one canonical history with route-specific delivery", async () => {
+  it("keeps IM messages and Goal prompts in one canonical GUI history", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-channel-gui-sync-"));
     roots.push(root);
     process.env.MEMMY_AGENT_DATA_DIR = root;
@@ -170,6 +170,16 @@ describe.each([
     const answerC = await nextFinalOutbound(bus, websocket);
     expect(answerC).toMatchObject({ channel: channelName, chatId, content: "answer C" });
 
+    const goalPrompt = "Use Computer Use to read the calculator";
+    const goalCommand = `/goal ${goalPrompt}`;
+    vi.spyOn(loop, "scheduleGoalWork").mockImplementation(() => undefined);
+    await bus.publishInbound(new InboundMessage({
+      channel: channelName, chatId, senderId: "user", content: goalCommand,
+      metadata: { message_id: "goal-request" },
+    }));
+    const goalReply = await nextFinalOutbound(bus, websocket);
+    expect(goalReply).toMatchObject({ channel: channelName, chatId, content: "Goal created." });
+
     loop.stop();
     await runTask;
 
@@ -181,6 +191,8 @@ describe.each([
       ["assistant", "answer B"],
       ["user", "IM C"],
       ["assistant", "answer C"],
+      ["user", goalCommand],
+      ["assistant", goalReply.content],
     ]);
     expect(modelCalls).toHaveLength(2);
     expect(modelCalls[1]).toContain("GUI B");
@@ -193,7 +205,25 @@ describe.each([
 
     const transcript = readTranscriptLines(`websocket:${guiChatId}`);
     expect(transcript.filter((record) => record.event === "user").map((record) => record.text))
-      .toEqual(["IM A", "GUI B", "IM C"]);
+      .toEqual(["IM A", "GUI B", "IM C", goalCommand]);
+    const goalTurnId = transcript.find((record) => record.event === "user" && record.text === goalCommand)?.turn_id;
+    expect(goalTurnId).toBeTruthy();
+    const goalRecords = transcript.filter((record) => record.turn_id === goalTurnId);
+    expect(replayTranscriptToUiMessages(goalRecords)).toMatchObject([
+      { role: "user", content: goalCommand },
+    ]);
+
+    for (const record of goalRecords) {
+      await websocket.consumeTranscriptRecord(record, canonicalSessionKey);
+    }
+    expect(sent.filter((event) => event.turn_id === goalTurnId && ["user", "message"].includes(event.event)))
+      .toMatchObject([
+        { event: "user", text: goalCommand, source: { kind: "im", channel: channelName } },
+      ]);
+    expect(sent).toContainEqual(expect.objectContaining({
+      event: "goal_state", chat_id: guiChatId,
+      goal_state: expect.objectContaining({ status: "active", objective: goalPrompt }),
+    }));
     expect(transcript.filter((record) => record.event === "delta").map((record) => record.text))
       .toEqual([]);
     expect(

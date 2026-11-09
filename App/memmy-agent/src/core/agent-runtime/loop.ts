@@ -91,6 +91,7 @@ import {
   type GoalState,
   type GoalStatus,
 } from "../session/goal-state.js";
+import { goalObjectiveFromCommand } from "../session/webui-user-content.js";
 import { finishWebuiTurn, markWebuiSession, maybeGenerateWebuiTitle, publishTurnRunStatus, publishWebuiThreadSessionUpdated, shouldPublishWebuiRunStatus, WEBUI_LANGUAGE_METADATA_KEY } from "../session/webui-turns.js";
 import { startAgentRecording, finishAgentRecording } from "../../tools/computer-recordings/agent-lifecycle.js";
 import { renderTemplate } from "../../utils/prompt-templates.js";
@@ -5105,12 +5106,19 @@ export class AgentLoop {
       const commandState = await this.stateCommand(ctx);
       if (commandState === "shortcut") {
         if (ctx.mirrorTurn && ctx.outbound?.content) {
-          this.guiTranscriptMirror?.final(
-            ctx.mirrorTurn,
-            ctx.outbound.content,
-            null,
-            ctx.outbound.metadata?.agentUi,
-          );
+          if (isGuiImChannel(ctx.msg.channel) && ctx.msg.role === "user" && !ctx.msg.internal) {
+            if (goalObjectiveFromCommand(ctx.msg.content)) {
+              this.guiTranscriptMirror?.user(ctx.mirrorTurn, ctx.msg.content, ctx.msg.media);
+            }
+          }
+          if (ctx.outbound.metadata?.webuiGoalCreateAck !== true) {
+            this.guiTranscriptMirror?.final(
+              ctx.mirrorTurn,
+              ctx.outbound.content,
+              null,
+              ctx.outbound.metadata?.agentUi,
+            );
+          }
         }
         return ctx.outbound;
       }
