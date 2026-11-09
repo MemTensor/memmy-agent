@@ -371,12 +371,16 @@
   background: var(--collab-active);
 }
 
-/* 多选里的删除：保留警示色，用文字按钮，避免整块红底压住工具条 */
-.dangerGhost {
+/*
+ * 多选里的删除、协助工具条里的「全部停止」：保留警示色，用文字按钮，避免整块红底压住工具条。
+ * 类名写两遍是为了提高优先级：全局 .button-ghost 在 styles.css 里、加载在这份模块样式之后，
+ * 只写一个类会被它的灰色盖掉，按钮看起来就是普通次要按钮。
+ */
+.dangerGhost.dangerGhost {
   color: var(--color-status-error, #c4413b);
 }
 
-.dangerGhost:hover:not(:disabled) {
+.dangerGhost.dangerGhost:hover:not(:disabled) {
   color: var(--color-status-error, #c4413b);
   background: color-mix(in srgb, var(--color-status-error) 10%, transparent);
 }

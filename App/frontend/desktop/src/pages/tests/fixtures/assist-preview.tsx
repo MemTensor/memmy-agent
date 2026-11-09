@@ -673,6 +673,8 @@ function Preview() {
             <div className={`${board.toolbar} ${board.assistToolbar}`}>
               <span className={board.assistToolbarHint}>仅发起人和执行人可见</span>
               <span className={board.grow} />
+              {/* 并行执行之后可能同时有多条在跑：条数就是会停的条数。 */}
+              <Button size="sm" variant="ghost" className={board.dangerGhost}>全部停止（1）</Button>
               <Button size="sm" variant="ghost" className={board.iconAction}>
                 <RefreshCw size={14} aria-hidden="true" />
                 <span className={board.actionLabel}>刷新</span>

@@ -566,6 +566,9 @@ const CollabBoard = memo(function CollabBoard(props: {
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  /** 「全部停止」：并行执行之后执行方可能同时有多条在跑，确认一次全部停掉。 */
+  const [confirmStopAll, setConfirmStopAll] = useState(false);
+  const [stoppingAll, setStoppingAll] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   /** 成员首次进入时的单行提示：按项目记录已读，同一个项目只出现一次。 */
@@ -1145,6 +1148,17 @@ const CollabBoard = memo(function CollabBoard(props: {
   }), [assistThreads]);
   /** 等你处理的协助：你是执行人，请求在等你授权或确认（按限时授权会自动执行的不算）。 */
   const waitingAssists = useMemo(() => assistThreads.filter(assistWaitsForMe), [assistThreads]);
+  /**
+   * 「全部停止」要停的请求：本人是执行人、这次排查正在执行的最新一次请求。
+   * 发起方不需要这个入口——她只能停自己那一条；一条都没有时工具条里不出现按钮。
+   */
+  const stopAllRequests = useMemo(() => assistThreads.flatMap((thread) => {
+    if (!thread.executor.mine || thread.status !== "running") return [];
+    const latest = thread.requests[0];
+    // 停的是最新一次请求：列表状态与那次请求对不上就不算在内，免得点了才发现已经结束。
+    if (!latest || latest.status !== "running") return [];
+    return [latest.id];
+  }), [assistThreads]);
 
   /**
    * 列表里的行：「任务」列项目任务——协助只对两个人可见，混进项目共享的任务列表会让两人看到的「全部」不一样，
@@ -1362,6 +1376,35 @@ const CollabBoard = memo(function CollabBoard(props: {
       ? t("collab.sessions.bulkDeletePartial", { deleted: String(deleted), failed: String(failed) })
       : t("collab.sessions.bulkDeleted", { count: String(deleted) }));
     await refreshSessions(sharedId);
+  }
+
+  /**
+   * 「全部停止」：停掉自己是执行人、正在执行的每一条协助。
+   * 同时发出而不是排队逐条发——这个入口就是给「已经跑起来的太多、要立刻收」用的，排队等于让最后一条继续跑。
+   * 单条失败（如对方刚好自己停了、云端回了 409）不影响其余，最后汇总一次结果。
+   */
+  async function stopAllAssists() {
+    if (!collab || stoppingAll) return;
+    const ids = stopAllRequests;
+    setConfirmStopAll(false);
+    // 弹窗开着的时候对方可能已经自己停了：没有可停的就直接收掉弹窗，不报一句「已停止 0 个」。
+    if (!ids.length) {
+      await refreshAssists();
+      return;
+    }
+    setStoppingAll(true);
+    try {
+      const settled = await Promise.allSettled(ids.map((id) => collab.stopAssist(id)));
+      const failed = settled.filter((result) => result.status === "rejected").length;
+      const stopped = ids.length - failed;
+      showToast(failed
+        ? t("collab.assist.stopAllPartial", { count: String(stopped), failed: String(failed) })
+        : t("collab.assist.stopAllDone", { count: String(stopped) }));
+    } finally {
+      setStoppingAll(false);
+    }
+    // 直接重读协助：refreshBoard 带「正在刷新」守卫，用户刚点过刷新时会把这一次吞掉，按钮就要多留一个轮询周期。
+    await refreshAssists();
   }
 
   useEffect(() => {
@@ -1597,6 +1640,24 @@ const CollabBoard = memo(function CollabBoard(props: {
                             {/* 协助只有你和对方看得到：右上角说明一次；列表本来就短，不给成员筛选与搜索 */}
                             <span className={styles.assistToolbarHint}>{t("collab.assist.toolbarHint")}</span>
                             <span className={styles.grow} />
+                            {/*
+                             * 并行执行之后可能同时有多条在跑：全部停止把逐条点「停止」变成一次。
+                             * 只在本人是执行人、确实有在跑的协助时出现；一条都没有就不摆一个歇在那里的按钮。
+                             * 破坏性操作保留警示色，但用文字按钮，不在工具条里压一块红底。
+                             */}
+                            {!selecting && stopAllRequests.length ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className={styles.dangerGhost}
+                                disabled={stoppingAll}
+                                onClick={() => setConfirmStopAll(true)}
+                              >
+                                {stoppingAll
+                                  ? t("collab.assist.stopAllBusy")
+                                  : t("collab.assist.stopAll", { count: String(stopAllRequests.length) })}
+                              </Button>
+                            ) : null}
                           </>
                         )}
                         {selecting ? (
@@ -2170,6 +2231,17 @@ const CollabBoard = memo(function CollabBoard(props: {
         icon={null}
         onCancel={() => setConfirmBulkDelete(false)}
         onConfirm={() => void deleteSelected()}
+      />
+      <ConfirmDialog
+        open={confirmStopAll && stopAllRequests.length > 0}
+        title={t("collab.assist.stopAllTitle")}
+        message={t("collab.assist.stopAllMessage", { count: String(stopAllRequests.length) })}
+        cancelLabel={t("collab.cancel")}
+        confirmLabel={t("collab.assist.stop")}
+        confirmVariant="danger"
+        icon={null}
+        onCancel={() => setConfirmStopAll(false)}
+        onConfirm={() => void stopAllAssists()}
       />
       <ConfirmDialog
         open={deletingAssist !== null}

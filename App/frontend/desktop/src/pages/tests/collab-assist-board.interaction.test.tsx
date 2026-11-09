@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   assistThreads: vi.fn(),
   assistThread: vi.fn(),
   hideAssistThread: vi.fn(),
+  stopAssist: vi.fn(),
   assistAgents: vi.fn().mockResolvedValue({ agents: [], defaultAgent: null }),
   dispatch: vi.fn()
 }));
@@ -336,6 +337,86 @@ describe("assists on the project board", () => {
     expect(mocks.hideAssistThread).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).toContain("已从你的列表中移除 2 次协助");
     expect(document.querySelectorAll("[data-collab-assist-row]")).toHaveLength(1);
+  });
+
+  /** 工具条里的「全部停止」：条数就是会停的条数，没有就不出现。 */
+  function stopAllButton(): HTMLElement | null {
+    return [...document.querySelectorAll<HTMLElement>("button")]
+      .find((node) => node.textContent?.trim().startsWith("全部停止")) ?? null;
+  }
+
+  it("offers stop all only for assists running on this computer, with their count", async () => {
+    const running = thread(request("x1", "running", { agent: "memmy" }), { title: "还在跑一" });
+    const alsoRunning = thread(request("x2", "running", { agent: "claude_code" }), { title: "还在跑二" });
+    // 这一条是对方电脑上在跑：我是发起方，详情里有自己的「停止」，不进「全部停止」。
+    const theirs = thread(request("x3", "running", { agent: "memmy" }), { title: "对方电脑上在跑", executor: REQUESTER, mine: true });
+    await renderBoard([running, alsoRunning, theirs]);
+    clickTab("协助");
+    await flush();
+
+    expect(stopAllButton()?.textContent?.trim()).toBe("全部停止（2）");
+  });
+
+  it("shows no stop all button when nothing is running on this computer", async () => {
+    const done = thread(request("d1", "done"), { title: "查版本" });
+    const waiting = thread(request("w1", "pending"), { title: "等你授权" });
+    await renderBoard([done, waiting]);
+    clickTab("协助");
+    await flush();
+
+    expect(document.body.textContent).toContain("仅发起人和执行人可见");
+    expect(stopAllButton()).toBeNull();
+  });
+
+  it("stops every running assist after confirming, then refreshes the board", async () => {
+    const first = thread(request("x1", "running", { agent: "memmy" }), { title: "还在跑一" });
+    const second = thread(request("x2", "running", { agent: "claude_code" }), { title: "还在跑二" });
+    await renderBoard([first, second]);
+    mocks.stopAssist.mockImplementation(async (id: string) => request(id, "stopped"));
+    clickTab("协助");
+    await flush();
+    const readsBefore = mocks.assistThreads.mock.calls.length;
+
+    clickText("全部停止（2）");
+    expect(document.querySelector("[role='dialog']")?.textContent).toContain("停止所有正在进行的协助");
+    expect(document.querySelector("[role='dialog']")?.textContent)
+      .toContain("将停止 2 个正在进行的协助。发起方会看到你停止了这次执行，已经跑出的过程会保留。");
+
+    // 确认之后两条都已经停了：看板重读后回到没有在跑的状态，按钮随之消失。
+    mocks.assistThreads.mockResolvedValue({
+      threads: [
+        thread(request("x1", "stopped"), { title: "还在跑一" }),
+        thread(request("x2", "stopped"), { title: "还在跑二" })
+      ],
+      open: 0, retentionDays: 30, maxThreads: 100, prunedAt: null
+    });
+    clickTextIn("[role='dialog']", "停止");
+    await flush();
+
+    expect(mocks.stopAssist.mock.calls).toEqual([["x1"], ["x2"]]);
+    expect(mocks.assistThreads.mock.calls.length).toBeGreaterThan(readsBefore);
+    expect(document.body.textContent).toContain("已停止 2 个正在进行的协助");
+    expect(stopAllButton()).toBeNull();
+  });
+
+  it("keeps stopping the rest when one of them was already stopped by the other side", async () => {
+    const first = thread(request("x1", "running", { agent: "memmy" }), { title: "还在跑一" });
+    const second = thread(request("x2", "running", { agent: "claude_code" }), { title: "还在跑二" });
+    await renderBoard([first, second]);
+    // 对方刚好自己停了：云端返回 409，这一条跳过，剩下的照常停。
+    mocks.stopAssist.mockImplementation(async (id: string) => {
+      if (id === "x1") throw new Error("409");
+      return request(id, "stopped");
+    });
+    clickTab("协助");
+    await flush();
+
+    clickText("全部停止（2）");
+    clickTextIn("[role='dialog']", "停止");
+    await flush();
+
+    expect(mocks.stopAssist.mock.calls).toEqual([["x1"], ["x2"]]);
+    expect(document.body.textContent).toContain("已停止 1 个，1 个没有停成功");
   });
 
   it("offers no removal while an assist is still running", async () => {
