@@ -255,4 +255,19 @@ describe("runAcpAgent cancellation", () => {
     expect(error).toBeInstanceOf(AcpError);
     expect((error as AcpError).kind).toBe("cancelled");
   });
+
+  it("stops an Agent that never answers when the time is up", async () => {
+    // 挂住的请求不能一直占着：到点自己也结束，理由两边都看得到。
+    const error = await runAcpAgent({
+      command: process.execPath,
+      args: ["-e", "process.stdin.resume();"],
+      cwd: process.cwd(),
+      prompt: "慢慢来",
+      timeoutMs: 100
+    }).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(AcpError);
+    expect((error as AcpError).kind).toBe("timeout");
+    expect((error as AcpError).message).toContain("已停止");
+  });
 });

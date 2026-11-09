@@ -175,11 +175,65 @@ export interface AssistSignInOptions extends AssistSignInLookupOptions {
 }
 
 /**
+ * 正在进行的登录：同一个 Agent 被几轮执行同时需要登录时只开一次浏览器。
+ * 不同排查的请求现在会同时执行，同一个 Agent 的登录命令开两份会互相抢同一份凭据。
+ *
+ * 这份登录不挂在某一轮的 signal 上：一轮被停了不该把还在等的另一轮一起判成已取消。
+ * 用引用计数，等到最后一轮也不再等时才把它结束。
+ */
+interface SignInBatch {
+  promise: Promise<AssistSignInOutcome>;
+  controller: AbortController;
+  waiters: number;
+}
+const signingIn = new Map<string, SignInBatch>();
+
+/**
  * 替人发起一次登录并等它结束。返回结果由调用方决定后续文案（这里不改请求状态）。
  * 可以是 "ok" 的三种情况：已经登录（不必再开登录页）、登录进程正常退出、命令不支持。
+ *
+ * <p>同一个 Agent 已经有登录在等：直接等那一次的结果，不再开第二个登录页。</p>
  */
 export async function signIn(options: AssistSignInOptions): Promise<AssistSignInOutcome> {
   if (options.signal.aborted) return "cancelled";
+  let batch = signingIn.get(options.sourceId);
+  if (!batch) {
+    const controller = new AbortController();
+    const promise = startSignIn({ ...options, signal: controller.signal })
+      .finally(() => signingIn.delete(options.sourceId));
+    batch = { promise, controller, waiters: 0 };
+    signingIn.set(options.sourceId, batch);
+  }
+  batch.waiters += 1;
+  try {
+    // 等同一份登录结果，但自己先被停止时不再继续等。
+    return await raceAbort(batch.promise, options.signal);
+  } finally {
+    batch.waiters -= 1;
+    // 最后一轮也不再等了：登录页不必留着。
+    if (batch.waiters <= 0) batch.controller.abort();
+  }
+}
+
+/** 等一个已有的登录结果，但调用方自己停止时立即返回「已取消」。 */
+function raceAbort(pending: Promise<AssistSignInOutcome>, signal: AbortSignal): Promise<AssistSignInOutcome> {
+  return new Promise<AssistSignInOutcome>((resolve) => {
+    const onAbort = (): void => resolve("cancelled");
+    signal.addEventListener("abort", onAbort, { once: true });
+    void pending.then(
+      (outcome) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(outcome);
+      },
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve("failed");
+      }
+    );
+  });
+}
+
+async function startSignIn(options: AssistSignInOptions): Promise<AssistSignInOutcome> {
   const env = assistEnv(options.env ?? process.env);
   const signedIn = await assistSignedIn(options.sourceId, {
     ...pickLookup(options),

@@ -64,6 +64,24 @@ describe("assist adapters", () => {
     expect(await ensureAdapter("cursor", { home: home() })).toBeNull();
   });
 
+  it("installs once when several executions need the same adapter at the same time", async () => {
+    const root = home();
+    let announced = 0;
+    // 不同排查的请求会同时执行：两个人恰好都选了这个 Agent 时，不能装两次到同一个 node_modules。
+    const installs = [0, 1, 2].map(() => ensureAdapter("codex", {
+      home: root,
+      env: { PATH: "" },
+      onInstalling: () => { announced += 1; }
+    }));
+    const results = await Promise.all(installs);
+
+    // 三份拿到的必须是同一个结论，而不是各装一遍。
+    expect(results[0]).toEqual(results[1]);
+    expect(results[1]).toEqual(results[2]);
+    // 只让界面看到一次「准备运行组件」。
+    expect(announced).toBe(1);
+  });
+
   it("keeps adapters beside the rest of the assist state", () => {
     expect(adaptersDirectory("/tmp/example-home")).toBe("/tmp/example-home/assist/adapters");
   });

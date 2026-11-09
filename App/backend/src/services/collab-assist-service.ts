@@ -246,6 +246,7 @@ export interface AssistExecution {
   threadId: string;
   projectId: string;
   agent: string;
+  /** `queued` 是真实在等：同一次排查里前一个请求还没结束。不同排查之间同时执行。 */
   status: "queued" | "running" | "done" | "failed";
   steps: AssistStep[];
   /** 完整执行过程：本机正在执行时比云端（按 1.5 秒节流推送）更新。 */
@@ -261,8 +262,9 @@ export interface AssistExecution {
 }
 
 export interface AssistSettings {
-  /** 一次只执行一个请求，其余排队：与产品内置的频率限制一致。 */
+  /** 正在真正执行的数量：不同排查（thread）之间并行，可以同时有多个。 */
   running: number;
+  /** 在等同一次排查里前一个请求结束的数量。 */
   queued: number;
 }
 
@@ -679,8 +681,13 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
   const running = new Map<string, AbortController>();
   /** 每个执行中的请求什么时候开始跑：轮询用它区分「收件箱快照里还没有的新执行」与「已被停止的早先执行」。 */
   const runningAt = new Map<string, number>();
-  const queue: string[] = [];
-  let active: string | null = null;
+  /**
+   * 按排查（thread）调度：每个排查自己的等待队列，以及它正在跑的那一个请求。
+   * 不同排查并行执行；同一次排查内一次只跑一个——后续请求要接回同一条 Agent 会话（session/load 之后 prompt），
+   * 同一条会话被两个进程同时用会互相污染。
+   */
+  const waiting = new Map<string, string[]>();
+  const activeThread = new Map<string, string>();
   let polling = false;
 
   function requireAccount(): void {
@@ -1247,7 +1254,9 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
   }
 
   function settings(): AssistSettings {
-    return { running: running.size, queued: queue.length };
+    let queued = 0;
+    for (const pending of waiting.values()) queued += pending.length;
+    return { running: running.size, queued };
   }
 
   /**
@@ -1390,18 +1399,22 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
   }
 
   /**
-   * 执行方开始跑一条已经允许的请求：一次只跑一个，其余排队。
-   * 同一请求重复调用只跑一次。
+   * 执行方开始跑一条已经允许的请求：不同排查并行，同一次排查里的后续请求排在它后面。
+   * 立刻就能开始的直接是执行中，不必先显示成「排队」；同一请求重复调用只跑一次。
    */
   async function startExecution(request: AssistRequest): Promise<void> {
     if (request.status !== "running") return;
-    if (running.has(request.id) || queue.includes(request.id)) return;
+    const threadId = threadKeyOf(request);
+    // 已在跑、正被拉起（已经从队列取出、execute 还没开始）或已在等待的，只跑一次。
+    if (running.has(request.id) || activeThread.get(threadId) === request.id || isWaiting(request.id, threadId)) return;
+    // 这一次排查已经有请求在跑或在等：如实标成排队，前面那个结束后自动开始。
+    const blocked = activeThread.has(threadId) || (waiting.get(threadId)?.length ?? 0) > 0;
     executions.set(request.id, {
       requestId: request.id,
       threadId: request.threadId,
       projectId: request.projectId,
       agent: request.agent ?? "",
-      status: "queued",
+      status: blocked ? "queued" : "running",
       steps: [],
       transcript: [],
       conversationId: null,
@@ -1409,24 +1422,45 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
       finishedAt: null,
       failure: null
     });
-    queue.push(request.id);
-    void drain();
+    const pending = waiting.get(threadId) ?? [];
+    if (!waiting.has(threadId)) waiting.set(threadId, pending);
+    pending.push(request.id);
+    drainThread(threadId);
   }
 
-  /** 队列一次只跑一个：同一时间只执行一个请求，其余排在后面。 */
-  async function drain(): Promise<void> {
-    if (active) return;
-    const next = queue.shift();
-    if (!next) return;
-    active = next;
-    try {
-      await execute(next);
-    } catch {
-      // execute 自己会把失败写回云端；这里只保证队列继续。
-    } finally {
-      active = null;
-      void drain();
+  /**
+   * 一次排查的并发键。threadId 是云端给的：同一次排查的后续请求带着同一个值；取不到时按请求自己算，互不影响。
+   */
+  function threadKeyOf(request: { id: string; threadId?: string }): string {
+    return request.threadId || request.id;
+  }
+
+  function isWaiting(requestId: string, threadId: string): boolean {
+    return waiting.get(threadId)?.includes(requestId) ?? false;
+  }
+
+  /**
+   * 让一次排查继续跑它队列里的下一个。同一次排查同时只有一个在跑：
+   * 不同排查各有自己的 activeThread，所以它们之间是并行的。
+   */
+  function drainThread(threadId: string): void {
+    if (activeThread.has(threadId)) return;
+    const pending = waiting.get(threadId);
+    const next = pending?.shift();
+    if (!next) {
+      waiting.delete(threadId);
+      return;
     }
+    activeThread.set(threadId, next);
+    void execute(next)
+      .catch(() => {
+        // execute 自己会把失败写回云端；这里只保证这次排查的队列继续。
+      })
+      .finally(() => {
+        activeThread.delete(threadId);
+        if (waiting.get(threadId)?.length) drainThread(threadId);
+        else waiting.delete(threadId);
+      });
   }
 
   async function execute(requestId: string): Promise<void> {

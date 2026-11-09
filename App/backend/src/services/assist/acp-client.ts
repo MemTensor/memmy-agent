@@ -38,7 +38,7 @@ export interface AcpRunOptions {
   onSession?: (sessionId: string) => void;
   /** 停止执行：杀掉子进程，prompt 以 cancelled 结束。 */
   signal?: AbortSignal;
-  /** 单次请求的最长时间：与产品内置的 15 分钟一致。 */
+  /** 单次请求的最长时间。不传时这一轮没有上限：协助执行由 ./runner 给出默认的 15 分钟。 */
   timeoutMs?: number;
   /** Agent 的名字，只用于拼给人看的原因（例如「Cursor 返回错误：…」）；默认「Agent」。 */
   agentName?: string;

@@ -76,6 +76,13 @@ export function installedAdapterPath(adapter: AssistAdapter, home?: string): str
 }
 
 /**
+ * 正在装的适配器：同一次安装被几轮执行同时需要时只跑一次。
+ * 不同排查的请求现在会同时执行，两个人恰好都选了这个 Agent 时，两次 npm install 装进同一个
+ * node_modules 会互相破坏，因此按「目录 + 包」合并成一次。
+ */
+const installing = new Map<string, Promise<AdapterInstallResult>>();
+
+/**
  * 确保这个 Agent 的适配器可用：已经装好就直接用，否则装一次。
  * 只有需要适配器的 Agent 才会走到这里；原生 ACP 的 Agent 返回 null 表示不需要。
  */
@@ -90,11 +97,28 @@ export async function ensureAdapter(
 
   const env = options.env ?? process.env;
   const directory = adaptersDirectory(options.home);
-  // 先让界面知道这一刻在做什么：装一次可能要十几秒，静默等待会让人以为卡住了。
-  options.onInstalling?.();
 
+  const key = `${directory}:${adapter.package}`;
+  let installation = installing.get(key);
+  if (!installation) {
+    // 先让界面知道这一刻在做什么：装一次可能要十几秒，静默等待会让人以为卡住了。
+    // 只在真的要装时说一次：同时等同一份安装的其余几轮不必重复提示。
+    options.onInstalling?.();
+    installation = runInstall(adapter, directory, env, options.home).finally(() => installing.delete(key));
+    installing.set(key, installation);
+  }
+  return await installation;
+}
+
+/** 真正跑一次安装，装完再看一次可执行文件在不在。 */
+async function runInstall(
+  adapter: AssistAdapter,
+  directory: string,
+  env: NodeJS.ProcessEnv,
+  home?: string
+): Promise<AdapterInstallResult> {
   const failure = await runNpmInstall(adapter, directory, env);
-  const executable = installedAdapterPath(adapter, options.home);
+  const executable = installedAdapterPath(adapter, home);
   if (executable) return { executable, installed: true };
   return {
     executable: null,

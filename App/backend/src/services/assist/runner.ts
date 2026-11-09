@@ -10,7 +10,7 @@
  * <p>没登录不再直接失败：先由 Memmy 用这个 Agent 引擎自带的登录命令在她电脑上打开浏览器（见 ./login），
  * 登录完成后用同样的参数重跑一次，只重试一次。</p>
  */
-import { AcpError, runAcpAgent, type AcpRunOptions } from "./acp-client.js";
+import { ACP_TIMEOUT_MS, AcpError, runAcpAgent, type AcpRunOptions } from "./acp-client.js";
 import { ensureAdapter } from "./adapters.js";
 import { DEEPSEEK_HARNESS_SOURCE_ID, deepSeekHarnessLaunch } from "./deepseek-harness.js";
 import { signIn, type AssistSignInOutcome } from "./login.js";
@@ -48,6 +48,9 @@ interface AssistLaunch {
 }
 
 export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): AssistRunner {
+  // 单次执行的上限：没配时按产品内置的 15 分钟，与 Memmy 自己执行那边一致。
+  // 并行化之后这条不能少：挂住的请求不会再挡住别人，但它自己必须能结束。
+  const timeoutMs = options.timeoutMs ?? ACP_TIMEOUT_MS;
   /**
    * 协助用的环境变量：打包后的 Memmy 进程 PATH 只有系统默认目录，要补上用户登录 shell 的那一份
    * （见 ./shell-env），否则 Homebrew / nvm 装的 npm、node 与各 Agent 的命令行都找不到。
@@ -121,7 +124,7 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
           ...(input.onTranscript ? { onTranscript: input.onTranscript } : {}),
           onSession: input.onSession,
           signal: input.signal,
-          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs })
+          timeoutMs
         });
       };
 

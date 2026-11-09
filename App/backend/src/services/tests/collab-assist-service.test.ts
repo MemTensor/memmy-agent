@@ -414,6 +414,119 @@ describe("createCollabAssistService", () => {
     expect(calls.some((call) => call.path.endsWith("/result"))).toBe(false);
   });
 
+  it("runs requests of different investigations at the same time", async () => {
+    const version = request({ id: "a7f3k111-1111-1111-1111-111111111111", threadId: "thread-1" });
+    const logs = request({ id: "b8e4l222-2222-2222-2222-222222222222", threadId: "thread-2", title: "查另一件事的日志" });
+    const { calls, cloud } = fakeCloud((path) => {
+      if (path === "/assist/inbox") {
+        return {
+          requests: [
+            { ...version, granted: false, grantAgent: null, usedToday: 0 },
+            { ...logs, granted: false, grantAgent: null, usedToday: 0 }
+          ],
+          dailyLimit: 20
+        };
+      }
+      const asked = [version, logs].find((item) => path.endsWith(item.id));
+      return { request: asked ?? version };
+    });
+    const started: string[] = [];
+    const gates = new Map<string, () => void>();
+    let inFlight = 0;
+    let most = 0;
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => "/tmp",
+      agents: async () => [],
+      runner: {
+        async run(input) {
+          started.push(input.request.id);
+          inFlight += 1;
+          most = Math.max(most, inFlight);
+          // 卡住不结束：两条都在跑的时候才能看出并发。
+          await new Promise<void>((resolve) => gates.set(input.request.id, resolve));
+          inFlight -= 1;
+          return { reply: `${input.request.threadId} 好了`, steps: [], sessionId: `s-${input.request.threadId}` };
+        }
+      }
+    });
+
+    await service.pollNow();
+    await until(() => started.length === 2, "两条请求都开始执行");
+
+    // 不同排查互不排队：两条同时在跑，都不显示成排队。
+    expect(most).toBe(2);
+    expect(service.settings()).toEqual({ running: 2, queued: 0 });
+    expect(service.executions().map((item) => item.status)).toEqual(["running", "running"]);
+
+    for (const release of gates.values()) release();
+    await until(() => calls.filter((call) => call.path.endsWith("/result")).length === 2, "两条结果都回传");
+    expect(service.executions().map((item) => item.status)).toEqual(["done", "done"]);
+    expect(service.settings()).toEqual({ running: 0, queued: 0 });
+  });
+
+  it("waits for the previous request of the same investigation before starting the next", async () => {
+    // 同一次排查的第二次请求：请求 id 不同，thread 相同，要接回同一条 Agent 会话。
+    const first = request({ id: "a7f3k111-1111-1111-1111-111111111111", threadId: "thread-1", attempt: 1 });
+    const second = request({ id: "b8e4l222-2222-2222-2222-222222222222", threadId: "thread-1", attempt: 2, title: "接着看这一处" });
+    const { calls, cloud } = fakeCloud((path) => {
+      if (path === "/assist/inbox") {
+        return {
+          requests: [
+            { ...first, granted: false, grantAgent: null, usedToday: 0 },
+            { ...second, granted: false, grantAgent: null, usedToday: 0 }
+          ],
+          dailyLimit: 20
+        };
+      }
+      const asked = [first, second].find((item) => path.endsWith(item.id));
+      return { request: asked ?? first };
+    });
+    const started: Array<{ id: string; sessionId?: string }> = [];
+    const gates = new Map<string, () => void>();
+    let inFlight = 0;
+    let most = 0;
+    const service = createCollabAssistService({
+      cloud,
+      homeDirectory: home(),
+      projectDirectory: async () => "/tmp",
+      agents: async () => [],
+      runner: {
+        async run(input) {
+          started.push({ id: input.request.id, ...(input.sessionId ? { sessionId: input.sessionId } : {}) });
+          inFlight += 1;
+          most = Math.max(most, inFlight);
+          input.onSession("chat-1");
+          await new Promise<void>((resolve) => gates.set(input.request.id, resolve));
+          inFlight -= 1;
+          return { reply: "ok", steps: [], sessionId: "chat-1" };
+        }
+      }
+    });
+
+    await service.pollNow();
+    await until(() => started.length === 1, "第一条先开始");
+
+    // 同一次排查里一次只跑一个：第二条在等，如实显示成排队。
+    const status = new Map(service.executions().map((item) => [item.requestId, item.status]));
+    expect(started.map((item) => item.id)).toEqual([first.id]);
+    expect(status.get(first.id)).toBe("running");
+    expect(status.get(second.id)).toBe("queued");
+    expect(service.settings()).toEqual({ running: 1, queued: 1 });
+
+    // 第一条结束后，第二条自动开始，并接回第一条留下的会话。
+    gates.get(first.id)?.();
+    await until(() => started.length === 2, "第二条接着开始");
+    expect(started).toEqual([{ id: first.id }, { id: second.id, sessionId: "chat-1" }]);
+    // 两条从未同时跑。
+    expect(most).toBe(1);
+
+    gates.get(second.id)?.();
+    await until(() => calls.filter((call) => call.path.endsWith("/result")).length === 2, "两条结果都回传");
+    expect(service.settings()).toEqual({ running: 0, queued: 0 });
+  });
+
   it("accepts the short id the command line shows, for waiting and for continuing", async () => {
     const full = request().id;
     const { calls, cloud } = fakeCloud((path) => {
@@ -1054,13 +1167,13 @@ describe("stopping a run from either side", () => {
   });
 });
 
-/** 等到条件成立（执行是异步拉起来的），最多等一秒。 */
-async function until(check: () => boolean): Promise<void> {
-  for (let index = 0; index < 100; index += 1) {
-    if (check()) return;
+/** 等到条件成立（执行是异步拉起来的），最多等两秒。并发调度不能用固定等待时间。 */
+async function until(check: () => boolean, description = "等待", ms = 2_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`等待${description}超时`);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error("等待超时");
 }
 
 describe("when the executor is offline", () => {

@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -163,6 +163,57 @@ describe("signIn", () => {
     const running = attempt("setTimeout(() => process.exit(0), 5000);", { signal: controller.signal });
     controller.abort();
     expect((await running).outcome).toBe("cancelled");
+  });
+
+  it("opens the login page once when two executions need the same agent at the same time", async () => {
+    const dir = workdir();
+    const marker = join(dir, "login-ran");
+    const command = script(dir, "login.js", `#!${process.execPath}\nrequire("node:fs").appendFileSync("${marker}", "x");setTimeout(() => process.exit(0), 200);`);
+    const env = {
+      PATH: "/usr/bin:/bin",
+      [ASSIST_LOGIN_ENV("codex")]: command
+    } as NodeJS.ProcessEnv;
+    const steps: string[] = [];
+    const both = [new AbortController(), new AbortController()].map((controller) => signIn({
+      sourceId: "codex",
+      name: "Codex",
+      env,
+      onStep: (step) => steps.push(step.text),
+      signal: controller.signal,
+      timeoutMs: 5_000
+    }));
+    const outcomes = await Promise.all(both);
+
+    expect(outcomes).toEqual(["ok", "ok"]);
+    // 两份凭据开两个登录页会互相抢同一个账号：只该跑一次。
+    expect(readFileSync(marker, "utf8")).toBe("x");
+    expect(steps).toHaveLength(1);
+  });
+
+  it("keeps waiting for the shared login after the other execution is stopped", async () => {
+    const dir = workdir();
+    const command = script(dir, "login.js", `#!${process.execPath}\nsetTimeout(() => process.exit(0), 300);`);
+    const env = {
+      PATH: "/usr/bin:/bin",
+      [ASSIST_LOGIN_ENV("codex")]: command
+    } as NodeJS.ProcessEnv;
+    const stopping = new AbortController();
+    const staying = new AbortController();
+    const outcomeOf = (signal: AbortSignal) => signIn({
+      sourceId: "codex",
+      name: "Codex",
+      env,
+      onStep: () => undefined,
+      signal,
+      timeoutMs: 5_000
+    });
+    const stopped = outcomeOf(stopping.signal);
+    const stayingOutcome = outcomeOf(staying.signal);
+    stopping.abort();
+
+    // 一轮被停不能把还在等的另一轮一起判成已取消。
+    expect(await stopped).toBe("cancelled");
+    expect(await stayingOutcome).toBe("ok");
   });
 
   it("only prompts to log in when there is no login command to run", async () => {
