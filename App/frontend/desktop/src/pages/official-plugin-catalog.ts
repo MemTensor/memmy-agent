@@ -36,7 +36,7 @@ export function officialPluginCatalog(options: {
     },
     {
       id: "office", category: "office",
-      name: "Office",
+      name: resolveLanguage(options.language) === "zh-CN" ? "office" : "Office",
       description: t("plugins.catalog.createAndEditWordExcelAndPowerPointFiles"),
       ...OFFICIAL_PLUGIN_POLICIES["office"],
       version: installedOf("office")?.version,

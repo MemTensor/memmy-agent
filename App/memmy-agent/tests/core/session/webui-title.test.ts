@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
 import { SessionManager } from "../../../src/core/session/manager.js";
 import { WebuiTitleService } from "../../../src/core/session/webui-title.js";
-import { WEBUI_TITLE_METADATA_KEY, WEBUI_TITLE_USER_EDITED_METADATA_KEY } from "../../../src/core/session/webui-turns.js";
+import { TITLE_GENERATION_MAX_TOKENS, WEBUI_TITLE_METADATA_KEY, WEBUI_TITLE_USER_EDITED_METADATA_KEY } from "../../../src/core/session/webui-turns.js";
 import type { LLMRuntime } from "../../../src/utils/llm-runtime.js";
 
 const roots: string[] = [];
@@ -89,7 +89,7 @@ describe("WebuiTitleService", () => {
     expect(prepare).not.toHaveBeenCalled();
     service.onUserMessagePersisted("chat-1");
     await scheduled[0];
-    expect(prepare).toHaveBeenCalledExactlyOnceWith({ maxTokens: 96, thinkingEnabled: false });
+    expect(prepare).toHaveBeenCalledExactlyOnceWith({ maxTokens: TITLE_GENERATION_MAX_TOKENS, thinkingEnabled: false });
     if (fails) {
       expect(p.chatWithRetry).not.toHaveBeenCalled();
       expect(sessions.loadSession("websocket:chat-1")?.metadata).not.toHaveProperty(WEBUI_TITLE_METADATA_KEY);
@@ -130,6 +130,7 @@ describe("WebuiTitleService", () => {
     expect(saved?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("UI 标题生成改造");
     expect(provider.chatWithRetry).toHaveBeenCalledTimes(1);
     const request = provider.chatWithRetry.mock.calls[0]?.[0];
+    expect(request.maxTokens).toBeGreaterThanOrEqual(256);
     expect(request.messages[1].content).toContain("请帮我拆解 UI 53 的标题生成改造");
     expect(request.messages[1].content).not.toContain("这里是长回答");
     expect(recorder.recordAgentChatUsage).toHaveBeenCalledWith(expect.objectContaining({

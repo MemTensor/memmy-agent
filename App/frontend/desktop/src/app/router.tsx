@@ -36,7 +36,7 @@ import {
   type DeferredGuidanceStep
 } from "./routes.js";
 import { persistNickname } from "./nickname.js";
-import { isCampaignPromptSessionReady, isCampaignPromptSurfaceReady } from "./campaign-prompt-state.js";
+import { isWorkspacePromptSessionReady, isWorkspacePromptSurfaceReady } from "./workspace-prompt-readiness.js";
 import { useGuidanceProgress } from "./use-guidance-progress.js";
 import { useOptionalApiClients } from "./providers.js";
 import { useAppState } from "../state/app-state.js";
@@ -88,10 +88,10 @@ export function AppRouter(props: { onRetry: () => void }) {
   const { language } = useTranslation();
   const prevPathRef = useRef<AppRoutePath | null>(null);
   const { deferredGuidanceStep } = useGuidanceProgress();
-  const guidanceWorkspaceReady = state.navigation.windowVisible !== false && isCampaignPromptSurfaceReady({
+  const guidanceWorkspaceReady = state.navigation.windowVisible !== false && isWorkspacePromptSurfaceReady({
     startupStatus: state.startup.status,
     currentPath: state.navigation.currentPath,
-  }) && isCampaignPromptSessionReady({
+  }) && isWorkspacePromptSessionReady({
     userMode: state.bootstrap?.app.userMode,
     accountUserId: state.account.userId,
     byokConfigured: Boolean(state.modelConfig?.catalog?.modelAssignments.byok.agent.candidates.length),

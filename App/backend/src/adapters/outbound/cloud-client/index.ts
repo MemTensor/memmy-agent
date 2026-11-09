@@ -3,6 +3,7 @@ export type {
   GetModelCapabilityCatalogInput,
   ModelCapabilityCatalogResult,
   AckLotteryRewardInput,
+  AckTaskTokenGiftInput,
   CheckReleaseInput,
   CloudAsrTranscriptionInput,
   CloudAsrTranscriptionResult,
@@ -33,6 +34,7 @@ export type {
   SendPhoneCodeInput,
   SendTelemetryInput,
   TokenUsageSnapshot,
+  TaskTokenGiftInput,
   UpdateAccountGuideInput,
   UpdateCloudAccountProfileInput
 } from "./types.js";

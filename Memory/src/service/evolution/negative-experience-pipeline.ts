@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
 import type { MemmyConfig } from "../../config/index.js";
+import { traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
+import { createMemoryLogger } from "../../logging/logger.js";
 import type {
   DecisionRepairRecord,
   EpisodeRecord,
@@ -17,6 +20,9 @@ import {
 } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { synthesizeFailureExperienceSink } from "../feedback/feedback-experience.js";
+import { upsertL2Candidate, type L2CandidateSignal } from "./l2-candidate-service.js";
+
+const pipelineLogger = createMemoryLogger("pipeline");
 
 export type NegativeExperienceSource =
   | "episode_reward"
@@ -75,6 +81,10 @@ export class NegativeExperiencePipeline {
       job.payload.source === "value_distribution"
       && !this.deps.config.algorithm.feedback.valueDistributionRepairEnabled
     ) return;
+    if (this.deps.config.algorithm.l2Induction.mode === "unified") {
+      this.enqueueUnifiedCandidates(job);
+      return;
+    }
     const draft = await this.buildDraft(job);
     if (!draft || !isActionableNegativeExperience(draft)) return;
 
@@ -252,6 +262,108 @@ export class NegativeExperiencePipeline {
           reason: "negative_experience",
           contentHash: upsert.memory.contentHash
         },
+        createdAt: job.createdAt
+      });
+    }
+  }
+
+  private enqueueUnifiedCandidates(job: EvolutionJobRecord): void {
+    const source = negativeExperienceSource(job.payload.source);
+    const episode = job.episodeId ? this.deps.repos.runtime.getEpisode(job.episodeId) : undefined;
+    if (!source || !episode || episode.userId !== job.userId) return;
+    const feedbackId = text(job.payload.feedbackId);
+    const repairId = text(job.payload.repairId);
+    const feedback = feedbackId ? this.deps.repos.runtime.getFeedback(feedbackId) : undefined;
+    const repair = repairId ? this.deps.repos.runtime.getDecisionRepair(repairId) : undefined;
+    if (feedbackId && (!feedback || feedback.userId !== job.userId || feedback.episodeId !== episode.id)) return;
+    if (repairId && (!repair || repair.userId !== job.userId || repair.episodeId !== episode.id)) return;
+
+    const sources = episode.l1MemoryIds.flatMap((id) => {
+      const memory = this.deps.repos.memories.get(id);
+      const trace = memory ? traceMetaFromMemory(memory) : null;
+      if (!memory || !trace || memory.userId !== job.userId || memory.deletedAt ||
+          memory.status === "deleted" || memory.status === "archived") return [];
+      const raw = trace.rawTurnId ? this.deps.repos.runtime.getRawTurn(trace.rawTurnId) : undefined;
+      if (raw && (raw.deletedAt || raw.redactedAt || raw.userId !== job.userId)) return [];
+      if ((trace.episodeId ?? raw?.episodeId) !== episode.id) return [];
+      return [{ memory, trace }];
+    }).filter(({ memory }) => source !== "negative_feedback" || memory.id === feedback?.l1MemoryId);
+    // Explicit feedback without its own L1 must not borrow another turn's L1.
+    if (sources.length === 0 || (feedback && !sources.some(({ memory }) => memory.id === feedback.l1MemoryId)) ||
+        (source === "negative_feedback" && !feedback)) {
+      pipelineLogger.info("l2.candidate.skipped_no_l1", {
+        route: "negative", source, episodeId: episode.id, feedbackId, repairId, jobId: job.id
+      });
+      return;
+    }
+    const sourceIds = new Set(sources.map(({ memory }) => memory.id));
+    const rawIds = new Set(sources.map(({ trace }) => trace.rawTurnId).filter(Boolean));
+    const rawTurns = this.deps.repos.runtime.listRawTurnsByEpisode(episode.id)
+      .filter((turn) => turn.userId === job.userId && !turn.deletedAt && !turn.redactedAt &&
+        (rawIds.has(turn.id) || turn.sourceMemoryIds.some((id) => sourceIds.has(id))));
+    const sourceBasis = sourceBasisFor(source, feedback);
+    const rewardReason = text(job.payload.rewardReason)
+      ?? text(episode.rewardDetail.reason)
+      ?? text(isRecord(episode.meta.reward) ? episode.meta.reward.reason : undefined);
+    const signal: L2CandidateSignal = {
+      eventId: text(job.payload.sourceEventId) ?? job.id,
+      route: "negative",
+      feedbackId: feedback?.id,
+      repairId: repair?.id,
+      polarity: "negative",
+      sourceBasis,
+      confidenceCap: sourceBasis === "implicit_failure_analysis"
+        ? this.deps.config.algorithm.negativeExperience.implicitConfidenceCap
+        : 1,
+      evidenceStrength: clamp(feedback?.magnitude ?? Math.abs(episode.rTask ?? 0), 0, 1),
+      repairValidated: repair?.validated,
+      text: [
+        `Negative evidence source: ${source}; basis: ${sourceBasis}.`,
+        feedback?.rationale ? `Feedback: ${clip(feedback.rationale, 2400)}` : "",
+        rewardReason ? `Reward assessment: ${clip(rewardReason, 1600)}` : "",
+        text(job.payload.issue) ? `Reported issue: ${clip(text(job.payload.issue)!, 1200)}` : "",
+        repair ? [
+          `Repair proposal (${repair.validated ? "validated" : "unvalidated; do not infer a successful repair"}):`,
+          `Issue: ${clip(repair.issue, 1200)}`,
+          `Prefer: ${clip(repair.preference ?? repair.suggestion, 1200)}`,
+          repair.antiPattern ? `Avoid: ${clip(repair.antiPattern, 1200)}` : ""
+        ].filter(Boolean).join("\n") : ""
+      ].filter(Boolean).join("\n\n")
+    };
+    let targetMemory: MemoryRow | undefined;
+    const candidateVersions: string[] = [];
+    for (const { memory, trace } of sources) {
+      // Keep each L1's vector input local to that L1. The Episode batch supplies the union.
+      const rawEvidence = rawTurns
+        .filter((turn) => turn.id === trace.rawTurnId || turn.sourceMemoryIds.includes(memory.id))
+        .map((turn) => [
+          `Source turn ${turn.id}:`,
+          turn.userText ? `User: ${clip(turn.userText, 700)}` : "",
+          turn.assistantText ? `Agent: ${clip(turn.assistantText, 900)}` : "",
+          turn.toolCalls.length ? `Observed tool calls: ${clip(JSON.stringify(turn.toolCalls), 1600)}` : "",
+          turn.toolResults.length ? `Observed tool results: ${clip(JSON.stringify(turn.toolResults), 1600)}` : ""
+        ].filter(Boolean).join("\n"));
+      const candidate = upsertL2Candidate(this.deps.repos, {
+        sourceMemoryId: memory.id,
+        userId: job.userId,
+        episodeId: episode.id,
+        route: "negative",
+        signal: { ...signal, text: [signal.text, ...rawEvidence].join("\n\n") },
+        at: job.createdAt
+      });
+      if (!candidate || candidate.status !== "pending") continue;
+      targetMemory ??= memory;
+      candidateVersions.push(`${candidate.sourceMemoryId}:${candidate.sourceVersion}`);
+    }
+    if (targetMemory) {
+      this.deps.enqueueJob({
+        jobType: "l2_induction",
+        userId: job.userId,
+        sessionId: targetMemory.sessionId ?? episode.sessionId,
+        episodeId: episode.id,
+        targetMemoryId: targetMemory.id,
+        dedupeKey: `l2.unified.negative:${createHash("sha256").update(candidateVersions.sort().join("\n")).digest("hex")}`,
+        payload: { unified: true, reason: "negative.experience", source, sourceEventId: signal.eventId },
         createdAt: job.createdAt
       });
     }

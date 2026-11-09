@@ -12,6 +12,7 @@ import pptxgen from "pptxgenjs";
 import Ajv from "ajv";
 import { manifest } from "../scripts/manifest.mjs";
 import { parseDelimited } from "./delimited.mjs";
+import { diagnoseCjkFonts, selectCjkFont } from "./cjk-fonts.mjs";
 
 const NS = {
   w: "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -268,7 +269,9 @@ async function create(input) {
   const file = path.join(task.directory, name);
   if (input.format === "docx" || input.format === "pdf") {
     if (!input.title && !input.paragraphs?.length) throw fail("empty_document", "Provide title or paragraphs");
-    const doc = new Document({ styles: { default: { document: { run: { font: "Arial", size: 22 }, paragraph: { spacing: { after: 160, line: 276 } } } } },
+    const cjkFont = await selectCjkFont([input.title ?? "", ...(input.paragraphs ?? [])].join("\n"));
+    const font = cjkFont ? { ascii: "Arial", hAnsi: "Arial", cs: "Arial", eastAsia: cjkFont.familyName } : "Arial";
+    const doc = new Document({ styles: { default: { document: { run: { font, size: 22 }, paragraph: { spacing: { after: 160, line: 276 } } } } },
       sections: [{ properties: { page: { margin: { top: 1080, bottom: 1080, left: 1080, right: 1080 } } }, children: [
         ...(input.title ? [new Paragraph({ text: input.title, heading: HeadingLevel.TITLE })] : []),
         ...(input.paragraphs ?? []).map(text => new Paragraph({ text }))
@@ -524,6 +527,11 @@ async function handle(call) {
     }
     case "office_create": return await create(input);
     case "office_execute": {
+      // Probe in this already sandboxed parent, never in the restricted code child.
+      if (process.env.MEMMY_OFFICE_TRACE === "1") {
+        try { console.error("Office CJK font diagnostic: " + JSON.stringify(await diagnoseCjkFonts())); }
+        catch { console.error('Office CJK font diagnostic: {"probeFailed":true}'); }
+      }
       if (input.inputFiles?.length && !input.sourceTaskId) throw fail("invalid_input", "inputFiles require sourceTaskId");
       const task = await newTask();
       const executionDirectory = path.join(task.directory, "execution");

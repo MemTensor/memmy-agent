@@ -5136,6 +5136,31 @@ describe("agent chat slice", () => {
     expect(state.blankDraftActive).toBe(false);
   });
 
+  it("keeps a plugin-only conversation selected across an empty canonical snapshot", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/newChatRequested" });
+    state = agentReducer(state, {
+      type: "agent/pluginConversationStarted",
+      chatId: "chat-plugin",
+      title: "诊断指引",
+      target: { kind: "standalone" },
+      createdAt: "2026-11-04T12:00:00.000Z"
+    });
+
+    expect(state.currentChatId).toBe("chat-plugin");
+    expect(state.messages).toEqual([]);
+    expect(state.tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ chatId: "chat-plugin", title: "诊断指引" })
+    ]));
+
+    state = agentReducer(state, {
+      type: "agent/sessionSnapshotApplied",
+      snapshot: { sessions: [], projects: [], projectRegistryState: "ready", sidebarState: state.sidebarState }
+    });
+
+    expect(state.currentChatId).toBe("chat-plugin");
+    expect(state.blankDraftActive).toBe(false);
+  });
+
   it("switching from running chat to idle chat clears active isSending without stopping the old chat", () => {
     let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });

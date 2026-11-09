@@ -7,6 +7,8 @@ import {
   ScanResultPageSchema,
   OkResponseSchema,
   AddMemoryOutputSchema,
+  AgentSkillReconcileOutputSchema,
+  SkillArchiveStateOutputSchema,
   ApiErrorBodySchema,
   CloseSessionOutputSchema,
   CompleteTurnOutputSchema,
@@ -117,19 +119,21 @@ export function createHttpMemoryClient(
           throw new MemoryLayerError("memory_scan_upgrade_required", 503,
             "The running Memory service does not support unified scanning. Update and restart that service, then try again.");
         }
-        if (response.status >= 500) {
-          throw new MemoryLayerError("memory_layer_unavailable", 503, "memory layer 5xx");
-        }
-
         const rawBody = await response.json().catch(() => undefined);
         const parsed = ApiErrorBodySchema.safeParse(rawBody);
         if (parsed.success) {
-          throw new MemoryLayerError(parsed.data.error.code, response.status, parsed.data.error.message);
+          throw new MemoryLayerError(
+            parsed.data.error.code,
+            response.status,
+            parsed.data.error.message,
+            undefined,
+            parsed.data.error.requestId
+          );
         }
         throw new MemoryLayerError(
           response.status >= 500 ? "memory_layer_unavailable" : "internal",
-          response.status,
-          "memory layer returned an unrecognized error response",
+          response.status >= 500 ? 503 : response.status,
+          response.status >= 500 ? "memory layer 5xx" : "memory layer returned an unrecognized error response",
           rawBody
         );
       },
@@ -147,6 +151,7 @@ export function createHttpMemoryClient(
 
   return {
     agentSources: {
+      connectionState: (sourceId) => request("GET", "agentSourceConnectionState", z.object({ connectionState: z.enum(["connected", "disconnected"]).nullable(), connectionEvent: z.object({ id: z.string().min(1), revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), state: z.enum(["connected", "disconnected"]), kind: z.enum(["skill", "plugin"]).optional() }).optional() }), { params: { sourceId }, maxRetries: 0 }),
       list: () => request("GET", "agentSources", MemoryAgentSourceListSchema),
       start: (input) => request("POST", "agentSourceScan", AgentSourceScanJobResponseSchema, { body: input, maxRetries: 0 }),
       status: () => request("GET", "agentSourceStatus", MemoryAgentSourceScanStateSchema),
@@ -228,6 +233,22 @@ export function createHttpMemoryClient(
 
     async addMemory(input, context) {
       return request("POST", "addMemory", AddMemoryOutputSchema, { body: input, context });
+    },
+
+    async reconcileAgentSkills(input, context) {
+      return request("POST", "reconcileAgentSkills", AgentSkillReconcileOutputSchema, {
+        body: input,
+        context,
+        ...(input.connectionState !== undefined || input.disconnected === true ? { maxRetries: 0 } : {})
+      });
+    },
+
+    async archiveSkill(skillId, context) {
+      return request("POST", "archiveSkill", SkillArchiveStateOutputSchema, { body: { skillId }, context });
+    },
+
+    async reactivateSkill(skillId, context) {
+      return request("POST", "reactivateSkill", SkillArchiveStateOutputSchema, { body: { skillId }, context });
     },
 
     async getMemory(input, context) {

@@ -62,7 +62,9 @@ describe("L3 failure handling", () => {
     expect(l3FailureHandling(job({ jobType: "reward" }), networkError()).kind).toBe("default");
   });
 
-  it("suspends on used-up quota (40309) and leaves a bad key to the queue's configuration hold", () => {
+  it("suspends on current and legacy quota codes and leaves a bad key to the queue's configuration hold", () => {
+    expect(l3FailureHandling(job(), new ModelHttpError("quota", "p", 429, "40308", "", undefined,
+      "insufficient_quota", "quota_exhausted")).kind).toBe("suspend");
     expect(l3FailureHandling(job(), new ModelHttpError("quota", "p", 403, "40309", "")).kind).toBe("suspend");
     expect(l3FailureHandling(job(), new Error("401 unauthorized: invalid api key")).kind).toBe("default");
   });

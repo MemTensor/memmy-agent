@@ -430,6 +430,7 @@ export const StartTurnInputSchema = RuntimeRequestFieldsSchema.extend({
   query: NonEmptyStringSchema,
   turnId: NonEmptyStringSchema.optional(),
   contextHints: UnknownRecordSchema.optional(),
+  /** Estimated recalled-context token limit; fixed task instructions are exempt. Default: 1800. */
   contextBudget: z.number().int().nonnegative().optional()
 });
 export type StartTurnInput = z.infer<typeof StartTurnInputSchema>;
@@ -523,6 +524,7 @@ export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   episodeId: z.string().optional(),
   turnId: z.string().optional(),
   layers: z.array(MemoryLayerSchema).optional(),
+  recordEvent: z.boolean().optional(),
   verbose: z.boolean().optional()
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;
@@ -594,6 +596,77 @@ export const AddMemoryInputSchema = RuntimeRequestFieldsSchema.extend({
   sourceContentHash: z.string().optional()
 });
 export type AddMemoryInput = z.infer<typeof AddMemoryInputSchema>;
+
+/** One SKILL.md found in a source Agent's skill directories. */
+export const AgentSkillReconcileSkillSchema = z.object({
+  sourceSkillId: NonEmptyStringSchema,
+  sourceSkillPath: NonEmptyStringSchema,
+  title: NonEmptyStringSchema,
+  content: z.string(),
+  contentHash: NonEmptyStringSchema,
+  modifiedAt: IsoTimeSchema,
+  version: z.string().optional(),
+  description: z.string().optional(),
+  disableModelInvocation: z.boolean().optional(),
+  allowImplicitInvocation: z.boolean().optional(),
+  policyError: z.string().optional(),
+  frontmatterError: z.string().optional(),
+  hasSupportingFiles: z.boolean().optional()
+});
+
+/** A skill shipped in an enabled plugin of the source Agent; only its identity is sent. */
+export const AgentSkillReconcileRegistrationSchema = z.object({
+  sourceSkillId: NonEmptyStringSchema,
+  sourceSkillPath: NonEmptyStringSchema,
+  name: NonEmptyStringSchema,
+  pluginId: z.string().optional()
+});
+
+/** Definition for agent skill reconcile input: everything one scan found for one source Agent. */
+export const AgentSkillConnectionEventSchema = z.object({
+  id: NonEmptyStringSchema,
+  revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  state: z.enum(["connected", "disconnected"]),
+  kind: z.enum(["skill", "plugin"]).optional()
+});
+
+export const AgentSkillReconcileInputSchema = RuntimeRequestFieldsSchema.extend({
+  sourceAgentId: NonEmptyStringSchema,
+  complete: z.boolean(),
+  disconnected: z.boolean().optional(),
+  connectionState: z.enum(["connected", "disconnected"]).optional(),
+  connectionKind: z.enum(["skill", "plugin"]).optional(),
+  connectionEventId: NonEmptyStringSchema.optional(),
+  skills: z.array(AgentSkillReconcileSkillSchema),
+  registrations: z.array(AgentSkillReconcileRegistrationSchema).optional(),
+  registrationsComplete: z.boolean().optional()
+});
+export type AgentSkillReconcileInput = z.infer<typeof AgentSkillReconcileInputSchema>;
+
+/** Schema for agent skill reconcile output. */
+export const AgentSkillReconcileOutputSchema = z.object({
+  sourceAgentId: NonEmptyStringSchema,
+  connectionEvent: AgentSkillConnectionEventSchema.optional(),
+  skills: z.array(z.object({
+    sourceSkillId: NonEmptyStringSchema,
+    outcome: z.enum(["created", "updated", "unchanged", "deleted_by_user", "failed"]),
+    memoryId: z.string().optional(),
+    error: z.string().optional()
+  })),
+  archived: z.number(),
+  registrations: z.number(),
+  serverTime: IsoTimeSchema
+});
+export type AgentSkillReconcileOutput = z.infer<typeof AgentSkillReconcileOutputSchema>;
+
+/** Schema for skill archive and reactivate output. */
+export const SkillArchiveStateOutputSchema = z.object({
+  ok: z.literal(true),
+  id: NonEmptyStringSchema,
+  status: MemoryStatusSchema,
+  serverTime: IsoTimeSchema
+});
+export type SkillArchiveStateOutput = z.infer<typeof SkillArchiveStateOutputSchema>;
 
 /** Schema for add memory output. */
 export const AddMemoryOutputSchema = z.object({
@@ -999,6 +1072,8 @@ export const ApiErrorCodeSchema = z.enum([
   "rate_limited",
   "internal",
   "memory_layer_unavailable",
+  "memory_starting",
+  "memory_upgrading",
   "memory_scan_upgrade_required",
   "missing_idempotency_key",
   "idempotency_body_mismatch",
@@ -1020,7 +1095,8 @@ export const ApiErrorBodySchema = z.object({
   error: z.object({
     code: ApiErrorCodeSchema,
     message: z.string(),
-    requestId: NonEmptyStringSchema
+    requestId: NonEmptyStringSchema.optional(),
+    upstreamRequestId: NonEmptyStringSchema.optional()
   })
 });
 export type ApiErrorBody = z.infer<typeof ApiErrorBodySchema>;

@@ -20,6 +20,21 @@ describe("agent-model-error", () => {
     expect(formatAgentModelError("actual upstream error", t, { modelError: { category, detail: "actual upstream error" } }).title)
       .not.toBe("agent.error.modelCatalogUnavailable");
   });
+
+  it("distinguishes a tool schema rejection from a model timeout and preserves the function name", () => {
+    const detail = "400 Invalid schema for function 'mcp_plugins_plugin_review_cancel_4fe426b5': allOf is not allowed";
+    expect(formatAgentModelError(`Error: ${detail}`, t)).toEqual({ title: "agent.error.toolSchemaInvalid", detail: `Error: ${detail}` });
+    expect(formatAgentModelError("Error: request timed out", t).title).toBe("agent.error.modelTimeout");
+    expect(formatAgentModelError("localized", t, { modelError: { category: "model_failed", detail, failedProvider: "custom", failedModel: "test" } })).toEqual({ title: "agent.error.toolSchemaInvalid", detail: `custom/test: ${detail}` });
+  });
+
+  it("presents private instruction failures separately from model errors, including historical messages", () => {
+    const detail = "Private plugin instructions could not be loaded. Sign in, check connectivity and plugin version, then resume the task. No plugin work was started by this model request.";
+    expect(isAgentModelErrorContent(detail)).toBe(true);
+    expect(formatAgentModelError(detail, t)).toEqual({ title: "agent.error.pluginInstructionsFailed", detail });
+    expect(formatAgentModelError("localized", t, { modelError: { category: "model_failed", detail: "plugin_skill_access_denied" } }).title).toBe("agent.error.pluginInstructionsFailed");
+    expect(formatRetryWaitStatus("Reloading private plugin instructions (retry 1 of 1)...", t)).toBe("agent.error.pluginInstructionsRetrying");
+  });
   it("detects provider error messages", () => {
     expect(isAgentModelErrorContent("Error: 503 upstream connect error")).toBe(true);
     expect(isAgentModelErrorContent("Error calling LLM: missing key")).toBe(true);
@@ -126,6 +141,13 @@ describe("agent-model-error", () => {
     expect(formatAgentModelError("Error calling LLM: code 40309\nraw provider detail", t)).toEqual({
       title: "当前模型 Token 余额不足，请更换模型后重试",
       detail: "Error calling LLM: code 40309\nraw provider detail"
+    });
+  });
+
+  it("classifies the current legacy 40308 before the generic 403 auth branch", () => {
+    expect(formatAgentModelError("Error calling LLM: code 40308\nraw provider detail", t)).toEqual({
+      title: "当前模型 Token 余额不足，请更换模型后重试",
+      detail: "Error calling LLM: code 40308\nraw provider detail"
     });
   });
 

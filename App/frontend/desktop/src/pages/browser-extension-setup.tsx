@@ -3,9 +3,10 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { ExternalBrowserSettings } from "./external-browser-settings.js";
 
 /** Both settings surfaces use the same installer, live bridge and persisted installation. */
-export function BrowserExtensionSetup({ client, platform }: {
+export function BrowserExtensionSetup({ client, platform, connectedLabel }: {
   client?: MemmyAgentClient | null;
   platform?: string;
+  connectedLabel?: string;
 }) {
   const { t } = useTranslation();
   return (
@@ -31,7 +32,7 @@ export function BrowserExtensionSetup({ client, platform }: {
             chrome: t("settings.computerUse.chrome"),
             edge: t("settings.computerUse.edge"),
             description: t("settings.computerUse.extensionDescription"),
-            connected: t("settings.computerUse.extensionReady"),
+            connected: connectedLabel ?? t("settings.computerUse.extensionReady"),
             disconnected: t("settings.computerUse.notConnected"),
             notInstalled: t("settings.computerUse.extensionNotInstalled"),
             install: t("settings.computerUse.extensionOpenFolder"),

@@ -1,7 +1,10 @@
+import { createHash } from "node:crypto";
+import { skillMetaFromMemory } from "../../../src/algorithm/plugin-algorithms.js";
+import { Repositories } from "../../../src/storage/repositories.js";
 import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { insertActiveSkillMemoryForTest } from "../../fixtures/evolution-fixture.js";
-import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import { createFailingLlm, createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
 
 const {
   cleanup,
@@ -126,4 +129,28 @@ describe("MemoryService / trials / skill trial", () => {
     });
     db.close();
   });
+
+  it("records failed imported-skill trials while preserving its fixed eta and activation state", async () => {
+    const { db, service } = createTestService({ llm: createFailingLlm() });
+    const namespace = { source: "claude_code", profileId: "default", userId: "imported-trial-user" };
+    const content = "Review sqlite migrations before applying them.";
+    const source = { sourceSkillId: "migration-review", sourceSkillPath: "/synthetic/migration-review/SKILL.md", title: "migration-review", content,
+      contentHash: createHash("sha256").update(content).digest("hex"), modifiedAt: "2026-01-01T00:00:00Z" };
+    const reconcile = () => service.reconcileAgentSkills({ namespace, sourceAgentId: "codex", skills: [source], complete: true });
+    const skillId = reconcile().skills[0]!.memoryId!;
+    const session = service.openSession({ namespace });
+    const trial = await service.useSkill(skillId, { sessionId: session.sessionId });
+    const repos = new Repositories(db.db);
+    const storedTrial = repos.runtime.getSkillTrial(trial.trialId)!;
+    expect(storedTrial.rawTurnId).toBeTruthy();
+    await service.feedback({ sessionId: session.sessionId, rawTurnId: storedTrial.rawTurnId!, channel: "explicit",
+      polarity: "negative", magnitude: 1, rationale: "The migration checklist did not resolve the failure." });
+    await runWorkerRounds(service, 2, 100);
+    expect(repos.runtime.getSkillTrial(trial.trialId)).toMatchObject({ status: "fail", outcome: "failure" });
+    expect(skillMetaFromMemory(repos.memories.get(skillId)!)?.eta).toBe(0.5);
+    expect(repos.memories.get(skillId)?.status).toBe("activated");
+    expect(reconcile().skills[0]?.outcome).toBe("unchanged");
+    expect(skillMetaFromMemory(repos.memories.get(skillId)!)?.eta).toBe(0.5);
+  });
+
 });

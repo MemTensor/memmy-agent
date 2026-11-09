@@ -1,14 +1,20 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
+import { mockMacConsentPermissions } from "../private-consent-fixture.js";
 
-afterEach(() => vi.unstubAllEnvs());
+beforeEach(() => {
+  vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+  vi.spyOn(process, "arch", "get").mockReturnValue("arm64");
+});
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("personal WeChat History setup boundary", () => {
   it("does not launch connection without consent and reports a missing local reader honestly", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-wechat-service-"));
+    mockMacConsentPermissions(path.join(directory, "wechat", "consent.json"));
     vi.stubEnv("MEMMY_SQLCIPHER_LIBRARY", path.join(directory, "missing-sqlcipher.dylib"));
     const service = new ComputerHistoryDemoService({
       historyDirectory: path.join(directory, "histories"),

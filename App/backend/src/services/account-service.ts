@@ -5,6 +5,7 @@ import {
   AccountProfileViewSchema,
   AccountSessionViewSchema,
   LotteryRewardSchema,
+  TaskTokenGiftNoticeSchema,
   SendCodeResponseSchema,
   SocialLoginStatusResponseSchema,
   StartSocialLoginResponseSchema,
@@ -15,6 +16,8 @@ import {
   type AccountSessionView,
   type LotteryReward,
   type LotteryRewardAckInput,
+  type TaskTokenGiftNotice,
+  type TaskTokenGiftAckInput,
   type SendCodeInput,
   type SendCodeResponse,
   type SocialLoginStatusInput,
@@ -33,6 +36,7 @@ import type { BootstrapRepository } from "../infrastructure/app-state-store/repo
 import type { MemmyConfigWriter, RuntimeProjectionResult } from "../infrastructure/memmy-config/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { OkResponse } from "@memmy/local-api-contracts";
+import { VerificationRequestError, toVerificationRequestError } from "./verification-request-error.js";
 
 const RESEND_WINDOW_MS = 60_000;
 
@@ -44,6 +48,8 @@ export interface AccountService {
   getInvitation(): Promise<AccountInvitationView>;
   getLotteryReward(): Promise<LotteryReward>;
   ackLotteryReward(input: LotteryRewardAckInput): Promise<OkResponse>;
+  ensureTaskTokenGift(): Promise<TaskTokenGiftNotice>;
+  ackTaskTokenGift(input: TaskTokenGiftAckInput): Promise<OkResponse>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
   logout(): Promise<OkResponse>;
@@ -72,17 +78,26 @@ export interface CreateAccountServiceOptions {
 /** Creates create account service. */
 export function createAccountService(options: CreateAccountServiceOptions): AccountService {
   const now = options.now ?? (() => new Date());
+  const pendingCodeRequests = new Map<string, Promise<SendCodeResponse>>();
+  // Independent from successful-send records; survives renderer navigation while this service runs.
+  const failedCodeRetryAt = new Map<string, number>();
 
-  return {
-    async sendCode(input) {
-      assertExpectedAccountChannel(input.channel, options.accountChannel);
-      const key = toCodeKey(input);
-      const sentAt = options.accountSessionRepository.getLastCodeSentAt(key);
-      const remaining = getRemainingResendSeconds(sentAt, now());
-      if (remaining > 0) {
-        return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: remaining });
-      }
+  async function sendCodeRequest(input: SendCodeInput, key: string): Promise<SendCodeResponse> {
+    const time = now().getTime();
+    for (const [address, retryAt] of failedCodeRetryAt) {
+      if (retryAt <= time) failedCodeRetryAt.delete(address);
+    }
+    const retryAt = failedCodeRetryAt.get(key);
+    if (retryAt !== undefined) {
+      throw new VerificationRequestError("Please wait before requesting another code", 429, Math.ceil((retryAt - time) / 1000));
+    }
+    const sentAt = options.accountSessionRepository.getLastCodeSentAt(key);
+    const remaining = getRemainingResendSeconds(sentAt, now());
+    if (remaining > 0) {
+      return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: remaining });
+    }
 
+    try {
       if (input.channel === "email") {
         await options.cloudClient.sendEmailCode({
           email: requireAddress(input.email, "email"),
@@ -94,10 +109,36 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
           zhEnv: input.locale === "zh"
         });
       }
+    } catch (error) {
+      // A failed response does not prove delivery failed. Keep the resend window
+      // to avoid sending another code while the first one may still arrive.
+      const failure = toVerificationRequestError(error, RESEND_WINDOW_MS / 1000);
+      if (!failure) throw error;
+      failedCodeRetryAt.set(key, now().getTime() + RESEND_WINDOW_MS);
+      throw failure;
+    }
 
-      const sentAtNow = now().toISOString();
-      options.accountSessionRepository.markCodeSent(key, sentAtNow);
-      return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: 60 });
+    // Record only cloud-confirmed success, not a failed attempt or handset delivery.
+    options.accountSessionRepository.markCodeSent(key, now().toISOString());
+    return SendCodeResponseSchema.parse({ ok: true, resendAfterSec: RESEND_WINDOW_MS / 1000 });
+  }
+
+  return {
+    async sendCode(input) {
+      assertExpectedAccountChannel(input.channel, options.accountChannel);
+      const key = toCodeKey(input);
+      const pending = pendingCodeRequests.get(key);
+      if (pending) {
+        return pending;
+      }
+
+      const request = sendCodeRequest(input, key);
+      pendingCodeRequests.set(key, request);
+      try {
+        return await request;
+      } finally {
+        pendingCodeRequests.delete(key);
+      }
     },
 
     async verifyCode(input) {
@@ -108,7 +149,7 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         verificationCode: input.verificationCode,
         loginSource: input.loginSource,
         ...(input.invitationCode ? { invitationCode: input.invitationCode } : {})
-      });
+      }).catch((error: unknown) => { throw toVerificationRequestError(error) ?? error; });
       return finalizeCloudLogin(loginResult, input.channel, options);
     },
 
@@ -166,6 +207,24 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         uuid,
         ...(input.drawId ? { drawId: input.drawId } : {})
       });
+      return { ok: true };
+    },
+
+    async ensureTaskTokenGift() {
+      const uuid = options.accountSessionRepository.getCloudUuid();
+      if (!uuid) return { hasGift: false };
+      try {
+        return TaskTokenGiftNoticeSchema.parse(await options.cloudClient.ensureTaskTokenGift({ uuid }));
+      } catch {
+        // Older cloud deployments may not yet support this optional benefit.
+        return { hasGift: false };
+      }
+    },
+
+    async ackTaskTokenGift(input) {
+      const uuid = options.accountSessionRepository.getCloudUuid();
+      if (!uuid) throw Object.assign(new Error("Account session is not authenticated"), { code: "unauthorized" as const });
+      await options.cloudClient.ackTaskTokenGift({ uuid, grantId: input.grantId });
       return { ok: true };
     },
 
@@ -386,7 +445,8 @@ function isUnauthorized(error: unknown): boolean {
 /** Handles to code key. */
 function toCodeKey(input: SendCodeInput): string {
   const address = input.channel === "email" ? requireAddress(input.email, "email") : requireAddress(input.phoneNumber, "phoneNumber");
-  return `${input.channel}:${address}`;
+  // Match the persisted throttle identity without altering the cloud payload.
+  return `${input.channel}:${address.trim().toLowerCase()}`;
 }
 
 /**

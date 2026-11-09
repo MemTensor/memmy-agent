@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useComputerHistoryModelSync } from "../computer-history-model-sync.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -21,6 +21,8 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root.unmount()); host.remove(); delete window.memmy; vi.useRealTimers(); vi.restoreAllMocks(); });
 
+describe.each(["darwin", "win32"])("History model synchronization on %s", (platform) => {
+  beforeEach(() => Object.defineProperty(window, "memmy", { configurable: true, value: { platform } }));
 it("refreshes summary configuration without following task selections and stops on unmount", async () => {
   const client = { refreshComputerHistoryModel: vi.fn().mockResolvedValue({}) };
   const render = (taskPreset: string, revision = "account-v1") => act(async () => {
@@ -81,7 +83,7 @@ it("refreshes the same summary assignment on Windows 11", async () => {
   expect(client.refreshComputerHistoryModel).toHaveBeenCalledWith();
 });
 
-it.each(["win32", "linux", undefined])("never syncs or retries History on an unsupported/unknown host: %s", async (platform) => {
+it.each(["linux", undefined])("never syncs or retries History on an unsupported/unknown host: %s", async (platform) => {
   Object.defineProperty(window, "memmy", { configurable: true, value: platform ? { platform } : undefined });
   const client = { refreshComputerHistoryModel: vi.fn().mockRejectedValue(new Error("unsupported")) };
   await act(async () => root.render(<Harness client={client} enabled revision="v1"/>));
@@ -89,4 +91,6 @@ it.each(["win32", "linux", undefined])("never syncs or retries History on an uns
   await act(async () => window.dispatchEvent(new Event("focus")));
   await act(async () => root.render(<Harness client={client} enabled revision="v2"/>));
   expect(client.refreshComputerHistoryModel).not.toHaveBeenCalled();
+});
+
 });

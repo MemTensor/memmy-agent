@@ -11,7 +11,7 @@ const RETRY_GIVING_UP_PATTERN = /Model request failed after \d+ retries, giving 
 const RETRY_ATTEMPT_PATTERN = /Model request failed, retrying attempt (\d+) in (\d+)s\.\.\./;
 const RETRY_WAIT_PATTERN = /Retry attempt (\d+): Model request still waiting to retry in (\d+)s\.\.\./;
 const PERSISTENT_RETRY_STOPPED_PATTERN = /Persistent retry stopped after \d+ identical errors\./;
-const LEGACY_QUOTA_CODE_PATTERN = /\b40309\b/;
+const LEGACY_QUOTA_CODE_PATTERN = /\b(?:40308|40309)\b/;
 
 export function isAgentModelErrorContent(content: string): boolean {
   const text = content.trim();
@@ -21,6 +21,7 @@ export function isAgentModelErrorContent(content: string): boolean {
   if (text === PERSISTED_MODEL_ERROR_PLACEHOLDER) {
     return true;
   }
+  if (/^Private plugin instructions could not be loaded/i.test(text)) return true;
   return MODEL_ERROR_PREFIX.test(text);
 }
 
@@ -30,6 +31,7 @@ export function isRetryWaitGivingUp(text: string): boolean {
 
 export function formatRetryWaitStatus(text: string, t: Translate): string {
   const trimmed = text.trim();
+  if (trimmed === "Reloading private plugin instructions (retry 1 of 1)...") return t("agent.error.pluginInstructionsRetrying");
   if (RETRY_GIVING_UP_PATTERN.test(trimmed)) {
     return t("agent.error.givingUp");
   }
@@ -102,6 +104,17 @@ export function formatAgentModelError(content: string, t: Translate, options?: A
   const classificationText = modelFailureDetail ?? text;
   const normalized = classificationText.replace(/^Error(?: calling LLM)?:\s*/i, "").trim();
   const haystack = `${classificationText}\n${normalized}`.toLowerCase();
+
+  if (/private plugin instructions could not be loaded|plugin_skill_(?:load_failed|access_denied|unavailable|bundle_missing|invalid|version_changed|client_upgrade_required)/.test(haystack)) {
+    return { title: t("agent.error.pluginInstructionsFailed"), detail: modelFailureDetail ?? (text || null) };
+  }
+
+  if (/invalid schema for (?:function|tool)|invalid[_ ](?:function|tool)[_ ](?:parameters|schema)/i.test(haystack)) {
+    return { title: t("agent.error.toolSchemaInvalid"), detail: failureDetail ?? (text || null) };
+  }
+  if (/timeout|timed out|超时/.test(haystack)) {
+    return { title: t("agent.error.modelTimeout"), detail: failureDetail ?? (text || null) };
+  }
 
   if (LEGACY_QUOTA_CODE_PATTERN.test(text)) {
     return { title: t(ERROR_NOTICE_KEYS.agent.quotaExhausted), detail: text };

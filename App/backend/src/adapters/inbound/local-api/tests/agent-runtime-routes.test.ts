@@ -30,6 +30,8 @@ describe("agent runtime local api routes", () => {
       { method: "POST", url: "/api/v1/memory/memory-1/processing/retry", payload: {} },
       { method: "GET", url: "/api/v1/memory/memory-1" },
       { method: "DELETE", url: "/api/v1/memory/memory-1" },
+      { method: "POST", url: "/api/v1/skills/skill-1/archive", payload: {} },
+      { method: "POST", url: "/api/v1/skills/skill-1/reactivate", payload: {} },
       { method: "GET", url: "/api/v1/memory/recalls/turn-1" },
       { method: "GET", url: "/api/v1/memory/logs?tools=memory_add,memory_search&limit=20&offset=0" },
       { method: "GET", url: "/api/v1/panel/overview" },
@@ -338,6 +340,12 @@ function createServer(overrides: Record<string, unknown> = {}, timeZone?: string
           models: memoryModels(),
           reloadedAt: now()
         };
+      },
+      async archiveSkill(skillId: string) {
+        return { ok: true as const, id: skillId, status: "archived" as const, serverTime: now() };
+      },
+      async reactivateSkill(skillId: string) {
+        return { ok: true as const, id: skillId, status: "activated" as const, serverTime: now() };
       },
       async getMemoryProcessingStatus(memoryIds: string[]) {
         return {

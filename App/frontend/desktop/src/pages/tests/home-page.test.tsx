@@ -613,7 +613,9 @@ describe("HomePage", () => {
     expect(agentChatScopeKey(null, 3)).toBe("draft-3");
     expect(hasActiveAgentConversation("chat-1", 1)).toBe(true);
     expect(hasActiveAgentConversation("chat-1", 0)).toBe(false);
+    expect(hasActiveAgentConversation("chat-1", 0, true)).toBe(true);
     expect(hasActiveAgentConversation(null, 1)).toBe(false);
+    expect(hasActiveAgentConversation(null, 0, true)).toBe(false);
   });
 
   it("keeps composer drafts isolated by chat scope", () => {
@@ -657,7 +659,7 @@ describe("HomePage", () => {
     const styles = readFileSync(stylesSourcePath, "utf8");
     const conversationColumnRule = styles.match(/\.agent-workspace-layout > \.agent-conversation-panel\s*\{[^}]*\}/)?.[0] ?? "";
 
-    expect(source).toContain('className="home-empty-column"');
+    expect(source).toContain('className="home-empty-column home-empty-input"');
     expect(styles).toMatch(/\.home-empty-column\s*{[^}]*width:\s*clamp\(min\(100%,\s*40rem\),\s*62cqw,\s*var\(--home-column-max,\s*50rem\)\);/s);
     expect(styles).toMatch(/\.home-empty-column\s*{[^}]*max-width:\s*min\(\s*100%,\s*max\(calc\(100cqw - 2 \* var\(--agent-column-min-gap,\s*80px\)\),\s*min\(100%,\s*20rem\)\)\s*\);/s);
     expect(styles).toMatch(/\.agent-conversation-content\s*{[^}]*--agent-conversation-track:\s*min\(832px,\s*100cqw\);[^}]*width:\s*calc\(var\(--agent-conversation-track\) - 2 \* var\(--agent-conversation-inset\)\);/s);
@@ -1173,12 +1175,13 @@ describe("HomePage", () => {
     expect(html).toContain('data-testid="agent-file-icon-docx"');
     expect(html).toContain('data-testid="agent-file-icon-xlsx"');
     expect(html).toContain('data-testid="agent-file-icon-pptx"');
-    expect(html).toContain('data-testid="agent-file-icon-file"');
     expect(html).toContain("agent-attachment-card__file-tile--pdf");
     expect(html).toContain("agent-attachment-card__file-tile--docx");
     expect(html).toContain("agent-attachment-card__file-tile--xlsx");
     expect(html).toContain("agent-attachment-card__file-tile--pptx");
-    expect(html).toContain("agent-attachment-card__file-tile--file");
+    expect(html).toContain('data-neutral-file-kind="text"');
+    expect(html).toContain('data-neutral-file-kind="data"');
+    expect(html).toContain('data-neutral-file-kind="sheet"');
     expect(html).toContain('aria-label="PDF file"');
     expect(html).toContain('aria-label="Word document"');
     expect(html).toContain('aria-label="Spreadsheet file"');
