@@ -39,3 +39,14 @@ export function ThreadFolderIcon() {
     </svg>
   );
 }
+
+export function NeutralFileTileIcon(props: { name: string }) {
+  const kind = threadFileKind(props.name);
+  if (kind === "file") return null;
+  return (
+    <svg className={`agent-neutral-file-icon thread-file-icon thread-file-icon--${kind}`} viewBox="0 0 16 16" aria-hidden="true" data-neutral-file-kind={kind}>
+      <rect width="16" height="16" rx="4" fill="var(--thread-file-color)" />
+      <g fill="#ffffff" transform="translate(0 -1.6)">{GLYPHS[kind]}</g>
+    </svg>
+  );
+}

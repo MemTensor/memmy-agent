@@ -16,7 +16,7 @@ const controls = vi.hoisted(() => {
   }> = [];
   const wrappers: Array<{ destroy: ReturnType<typeof vi.fn> }> = [];
   const ports: Array<{ terminate: ReturnType<typeof vi.fn> }> = [];
-  const getDocument = vi.fn(() => {
+  const getDocument = vi.fn((_options: unknown) => {
     let resolveLoading!: (value: unknown) => void;
     let rejectLoading!: (error: Error) => void;
     let resolveDestroy!: () => void;
@@ -70,6 +70,7 @@ describe("PDF preview Worker ownership", () => {
       await Promise.resolve();
     });
     container.remove();
+    vi.unstubAllEnvs();
     vi.unstubAllGlobals();
   });
 
@@ -86,6 +87,25 @@ describe("PDF preview Worker ownership", () => {
       await new Promise(resolve => setTimeout(resolve, 0));
     });
   };
+
+  it("loads bundled CJK resources with the owned Worker and an isolated data copy", async () => {
+    vi.stubEnv("BASE_URL", "/desktop/");
+    const data = new Uint8Array([1, 2, 3]);
+    await show(data.buffer);
+    const resourceRoot = new URL("/desktop/pdfjs/", document.baseURI).href;
+    expect(controls.getDocument).toHaveBeenCalledWith(expect.objectContaining({
+      cMapUrl: `${resourceRoot}cmaps/`,
+      cMapPacked: true,
+      standardFontDataUrl: `${resourceRoot}standard_fonts/`,
+      wasmUrl: `${resourceRoot}wasm/`,
+      useWorkerFetch: true,
+      worker: controls.wrappers[0],
+      data: new Uint8Array([1, 2, 3])
+    }));
+    const options = controls.getDocument.mock.calls[0]?.[0] as { data: Uint8Array };
+    expect(options.data.buffer).not.toBe(data.buffer);
+    expect([...data]).toEqual([1, 2, 3]);
+  });
 
   it("waits for document shutdown before releasing the external wrapper and port on unmount", async () => {
     await show();

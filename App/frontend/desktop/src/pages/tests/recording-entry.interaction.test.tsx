@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import {
   formatRecordingTitleTimestamp,
+  RecordingEntryCard,
   RecordingEntryPage,
   type RecordingArchiveEntry,
   type RecordingEntrySession
@@ -244,5 +245,24 @@ describe("RecordingEntryPage", () => {
     await render(session());
 
     expect(container.querySelectorAll(".recording-page__list-action--retry")).toHaveLength(0);
+  });
+});
+
+describe("RecordingEntryCard", () => {
+  it("does not repeat a failed recording's ASR error when reopened, but shows a new start error", async () => {
+    const container = document.createElement("div"); document.body.append(container);
+    const root = createRoot(container);
+    const failed = { ...entry, status: "failed" as const };
+    const render = (value: RecordingEntrySession) => act(async () => root.render(
+      <I18nProvider language="zh-CN"><RecordingEntryCard session={value}
+        onClose={vi.fn()} onOpenList={vi.fn()} /></I18nProvider>
+    ));
+    try {
+      await render(session({ live: failed, error: "API接口错误: ASR upstream request failed" }));
+      expect(container.querySelector(".recording-entry-card")).not.toBeNull();
+      expect(container.textContent).not.toContain("ASR upstream request failed");
+      await render(session({ live: null, error: "无法访问麦克风" }));
+      expect(container.textContent).toContain("无法访问麦克风");
+    } finally { await act(async () => root.unmount()); container.remove(); }
   });
 });
