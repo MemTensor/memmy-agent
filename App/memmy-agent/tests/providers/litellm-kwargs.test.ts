@@ -604,6 +604,7 @@ describe("OpenAI-compatible request kwargs", () => {
   it("coerces DeepSeek content and backfills thinking history when required", () => {
     const provider = new OpenAICompatProvider({ apiKey: "sk", defaultModel: "deepseek-v4-pro", spec: findByName("deepseek") });
     const kwargs = provider.buildKwargs({
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"], reasoningEffort: "high" },
       messages: [
         { role: "user", content: [{ type: "text", text: "hello " }, { type: "text", text: "world" }] },
         { role: "assistant", content: "", tool_calls: [{ id: "tc1", type: "function", function: { name: "web_search", arguments: "{}" } }] },
@@ -668,6 +669,7 @@ describe("OpenAI-compatible request kwargs", () => {
   it("keeps DeepSeek and non-DeepSeek content coercion rules separate", () => {
     const content = [{ type: "text", text: "hello " }, { type: "text", text: "world" }];
     const deepseek = providerFor("deepseek", "deepseek-chat").buildKwargs({
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       messages: [{ role: "user", content }],
       model: "deepseek-chat",
       maxTokens: 1024,

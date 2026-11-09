@@ -288,9 +288,23 @@ function RuntimeApp() {
         dispatch(appActions.eventStatusChanged("connecting"));
 
         events = createEventsConnection(runtimeConfig);
+        let modelRefreshVersion = 0;
+        const refreshModelView = async () => {
+          const version = ++modelRefreshVersion;
+          try {
+            const config = await clients.config.getModelConfig();
+            if (isActive && version === modelRefreshVersion) dispatch(appActions.modelConfigUpdated(config));
+          } catch (error) {
+            console.warn("Model capability view refresh failed", error);
+          }
+        };
         events.addEventListener("app.connected", () => {
           dispatch(appActions.eventStatusChanged("connected"));
           void reconcileAgentSourceScanStatus(clients.agentSources);
+          void refreshModelView();
+        });
+        events.addEventListener("model_catalog.updated", (event) => {
+          if (parseSseEvent(event)?.type === "model_catalog.updated") void refreshModelView();
         });
         events.addEventListener("app.heartbeat", () => {
           dispatch(appActions.eventStatusChanged("heartbeat"));

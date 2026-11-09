@@ -90,6 +90,10 @@ describe("desktop i18n helpers", () => {
   });
 
   it("keeps governed error notices aligned in Chinese and English", () => {
+    expect(messageCatalogs["zh-CN"]["agent.error.modelCatalogUnavailable"])
+      .toBe("未获取到模型信息，请重启客户端");
+    expect(messageCatalogs["en-US"]["agent.error.modelCatalogUnavailable"])
+      .toBe("Model information could not be retrieved. Please restart the app.");
     expect(messageCatalogs["zh-CN"]["agent.error.quotaExceeded"])
       .toBe("当前模型 Token 余额不足，请更换模型后重试");
     expect(messageCatalogs["en-US"]["agent.error.quotaExceeded"])

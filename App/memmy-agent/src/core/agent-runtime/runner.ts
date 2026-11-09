@@ -10,9 +10,7 @@ import path from "node:path";
 import { LLMProvider, LLMResponse, ToolCallRequest } from "../../providers/base.js";
 import {
   coversInputModalities,
-  hasDeclaredInputModalities,
   requiredInputModalities,
-  resolveModelInputModalities,
 } from "../../providers/model-input-capabilities.js";
 import type { ActualModelContext } from "@memmy/local-api-contracts";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
@@ -149,6 +147,8 @@ type PendingImageBatch = {
 };
 
 export class AgentRunSpec {
+  modelCapabilities?: import("../../providers/turn-model-capabilities.js").TurnModelCapabilities;
+  capabilityCatalogState?: import("../../providers/model-capability-catalog.js").RuntimeModelCapabilityCatalogState;
   privateSkillRefs: PluginSkillRef[];
   privateSkillRequestStarted = false;
   privateSkillPromptTokens = 0;
@@ -159,7 +159,7 @@ export class AgentRunSpec {
   provider?: LLMProvider;
   model?: string | null;
   maxIterations: number;
-  maxTokens: number;
+  maxTokens: number | undefined;
   temperature: number | null;
   reasoningEffort?: string | null;
   maxToolResultChars: number;
@@ -197,6 +197,8 @@ export class AgentRunSpec {
   finalResponseContinuation?: ((ctx: { finalContent: string; messages: Record<string, any>[] }) => string | null) | null;
 
   constructor(init: {
+    modelCapabilities?: import("../../providers/turn-model-capabilities.js").TurnModelCapabilities;
+    capabilityCatalogState?: import("../../providers/model-capability-catalog.js").RuntimeModelCapabilityCatalogState;
     privateSkillRefs?: unknown;
     onPrivateSkillRefsChanged?: (refs: PluginSkillRef[]) => void;
     messages?: Record<string, any>[];
@@ -248,7 +250,9 @@ export class AgentRunSpec {
     this.tools = init.tools;
     this.model = init.model ?? null;
     this.maxIterations = init.maxIterations ?? 200;
-    this.maxTokens = init.maxTokens ?? 4096;
+    this.modelCapabilities = init.modelCapabilities;
+    this.capabilityCatalogState = init.capabilityCatalogState;
+    this.maxTokens = init.modelCapabilities ? init.modelCapabilities.maxTokens : init.maxTokens ?? 4096;
     this.temperature = init.temperature ?? 0.7;
     this.reasoningEffort = init.reasoningEffort ?? null;
     this.maxToolResultChars = init.maxToolResultChars ?? 100_000;
@@ -452,6 +456,7 @@ export class AgentRunner {
 
   private buildRequestArgs(spec: AgentRunSpec, messages: Record<string, any>[], tools: Record<string, any>[] | null): Record<string, any> {
     const args: Record<string, any> = {
+      ...(spec.modelCapabilities ? { modelCapabilities: spec.modelCapabilities, capabilityCatalogState: spec.capabilityCatalogState } : {}),
       messages: messages.map((message) => {
         const providerMessage = { ...message };
         delete providerMessage.finish_reason;
@@ -631,6 +636,7 @@ export class AgentRunner {
     spec: AgentRunSpec,
     actualProvider: string | null | undefined,
   ): boolean {
+    if (spec.modelCapabilities?.mode === "provider-fallback") return false;
     const provider = spec.provider ?? this.provider;
     if (
       !provider
@@ -734,19 +740,14 @@ export class AgentRunner {
     const messagesForModel = this.prepareImageMessages(this.applyToolResultBudget(spec, messages), imageTextState);
     const model = spec.actualModelContext?.model ?? spec.model;
     const required = requiredInputModalities(messagesForModel);
-    const declared = spec.actualModelContext?.inputModalities;
-    const supported = resolveModelInputModalities(model, declared);
+    const declared = spec.modelCapabilities?.inputModalities ?? spec.actualModelContext?.inputModalities;
+    const supported = declared ?? [];
     const missing = required.filter((modality) => !supported.includes(modality));
     const canUseAccountFallback = missing.length === 1
       && missing[0] === "image"
       && this.canRunAccountImageTextFallback(spec, null);
-    // A BYOK model ID we have never reviewed may well be multimodal, and BYOK has no
-    // image2text fallback to fall back on, so let the user's own endpoint answer rather
-    // than refusing the request here. Custom models always declare modalities, so a
-    // declaration is authoritative and must not defer.
-    const deferToProvider = spec.actualModelContext?.source === "byok"
-      && !declared
-      && !hasDeclaredInputModalities(model);
+    // Unknown capabilities defer to the Provider; only an explicit declaration can reject input locally.
+    const deferToProvider = spec.modelCapabilities?.mode === "provider-fallback" || !declared;
 
     let initialResponse: LLMResponse | null = null;
     if (deferToProvider || coversInputModalities(supported, required)) {
@@ -1493,10 +1494,11 @@ export class AgentRunner {
   }
 
   private inputTokenBudget(spec: AgentRunSpec): number | null {
+    if (spec.modelCapabilities && (!spec.modelCapabilities.contextWindowTokens || !spec.modelCapabilities.maxTokens)) return null;
     if (!spec.contextWindowTokens) return null;
     const generation = ((spec.provider ?? this.provider) as any)?.generation;
     const providerMaxTokens = generation?.maxTokens ?? 4096;
-    const maxOutput = Number.isInteger(spec.maxTokens)
+    const maxOutput = typeof spec.maxTokens === "number" && Number.isInteger(spec.maxTokens)
       ? spec.maxTokens
       : Number.isInteger(providerMaxTokens)
         ? Number(providerMaxTokens)

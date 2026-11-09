@@ -7,6 +7,8 @@ import { LLMResponse } from "../../src/providers/base.js";
 import fs from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import type { RuntimeModelCapabilityCatalogState } from "../../src/providers/model-capability-catalog.js";
+import { writeSegmentNarrative } from "../../src/tools/computer-history/mac/summary-writer.js";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -37,6 +39,66 @@ function selection(provider: OpenAICompatProvider, overrides: Record<string, unk
 }
 
 describe("History summary runtime", () => {
+  it.each(["10min", "6h"] as const)("preserves %s narration with an 8192-token catalog model and a 1800-token task", async (window) => {
+    const provider = new OpenAICompatProvider({ apiBase: "https://cloud.example/api/agentExternal/v1", defaultModel: "memory_summary" });
+    const chat = vi.spyOn(provider, "chat").mockResolvedValue(new LLMResponse({
+      content: '{"title":"t","description":"d","body":"b"}',
+    }));
+    const resolver = historySummaryRuntime(selection(provider), {}, {
+      load: async () => ({ mode: "catalog", catalog: {
+        catalogVersion: 1, models: { memory_summary: {
+          inputModalities: ["text"], contextWindowTokens: 8192, maxTokens: 4096,
+        } },
+      } }),
+    });
+    expect(await writeSegmentNarrative(resolver, {
+      applications: [], evidence: "Observed document review.", window,
+    })).toEqual({ title: "t", description: "d", body: "b" });
+    expect(chat).toHaveBeenCalledOnce();
+    const args = chat.mock.calls[0][0];
+    expect(args.modelCapabilities).toMatchObject({ maxTokens: 4096, taskMaxTokens: 1800 });
+    expect(provider.buildKwargs(args).max_tokens).toBe(1800);
+  });
+
+  it("reads each task's catalog and isolates always-on official thinking from concurrent tasks", async () => {
+    const provider = new OpenAICompatProvider({ apiBase: "https://cloud.example/api/agentExternal/v1", defaultModel: "memory_summary",
+      extraBody: { vendorFlag: true } });
+    let state: RuntimeModelCapabilityCatalogState = { mode: "catalog", catalog: {
+      catalogVersion: 21, models: { memory_summary: { inputModalities: ["text"], contextWindowTokens: 128000, maxTokens: 16384,
+        thinking: { switchable: false, defaultEnabled: true, levels: [] } } }
+    } };
+    const load = vi.fn(async () => state);
+    const captured = historySummaryRuntime(selection(provider), {}, { load })();
+    const first = await captured.prepare!({ maxTokens: 1800, thinkingEnabled: false });
+    expect(load).toHaveBeenCalledOnce();
+    expect(first.modelCapabilities).toMatchObject({ catalogVersion: 21, maxTokens: 16384, taskMaxTokens: 1800, thinkingEnabled: true });
+    expect((first.provider as OpenAICompatProvider).extraBody).toMatchObject({ enable_thinking: true, thinking: { type: "enabled" }, vendorFlag: true });
+    state = { mode: "catalog", catalog: { catalogVersion: 22, models: {} } };
+    const second = await captured.prepare!({ maxTokens: 1800, thinkingEnabled: false });
+    expect(second.modelCapabilities).toMatchObject({ catalogVersion: 22, thinkingEnabled: false });
+    expect((second.provider as OpenAICompatProvider).extraBody.enable_thinking).toBe(false);
+    expect((first.provider as OpenAICompatProvider).extraBody.enable_thinking).toBe(true);
+    expect(first.modelCapabilities?.catalogVersion).toBe(21);
+    const body = (first.provider as OpenAICompatProvider).buildKwargs({ messages: [{ role: "user", content: "Text evidence" }],
+      modelCapabilities: first.modelCapabilities });
+    expect(body.extra_body).toMatchObject({ enable_thinking: true, thinking: { type: "enabled" } });
+    expect(body.max_tokens).toBe(1800);
+  });
+
+  it("keeps BYOK accounting active for prepared fallback requests", async () => {
+    const options = usageOptions();
+    const provider = new OpenAICompatProvider({ apiBase: "https://custom.example/v1", defaultModel: "gpt-4o" });
+    const chat = vi.spyOn(provider, "chat").mockResolvedValue(new LLMResponse({ content: "summary", usage: { prompt_tokens: 7 } }));
+    const runtime = historySummaryRuntime(selection(provider, { provider: "openai", source: "byok",
+      providerConfig: { apiBase: "https://custom.example/v1" } }), options, {
+      load: async () => ({ mode: "provider-fallback", catalog: null })
+    })();
+    const prepared = await runtime.prepare!({ maxTokens: 1800, thinkingEnabled: false });
+    await prepared.provider.chatWithRetry({ messages: [{ role: "user", content: "Text evidence" }],
+      modelCapabilities: prepared.modelCapabilities, capabilityCatalogState: prepared.capabilityCatalogState });
+    expect(chat.mock.calls[0][0].modelCapabilities).toMatchObject({ mode: "provider-fallback", taskMaxTokens: 1800, reasoningEffort: "none" });
+    expect(options.fetchImpl.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true);
+  });
   it("bypasses BYOK accounting and budget for official account summaries", async () => {
     const options = usageOptions();
     const provider = new OpenAICompatProvider({ apiBase: "https://cloud.example/api/agentExternal/v1" });

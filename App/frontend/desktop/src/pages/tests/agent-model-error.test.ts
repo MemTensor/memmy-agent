@@ -13,6 +13,14 @@ const t = (key: string, values?: Record<string, string | number>) => {
 };
 
 describe("agent-model-error", () => {
+  it.each(["model_failed", "quota_exhausted", "image_input_unsupported"] as const)("wraps only explicitly marked catalog fallback failures (%s)", (category) => {
+    expect(formatAgentModelError("actual upstream error", t, { modelError: {
+      origin: "model_catalog_fallback", category, detail: "actual upstream error"
+    } })).toEqual({ title: "agent.error.modelCatalogUnavailable", detail: null });
+    expect(formatAgentModelError("actual upstream error", t, { modelError: { category, detail: "actual upstream error" } }).title)
+      .not.toBe("agent.error.modelCatalogUnavailable");
+  });
+
   it("distinguishes a tool schema rejection from a model timeout and preserves the function name", () => {
     const detail = "400 Invalid schema for function 'mcp_plugins_plugin_review_cancel_4fe426b5': allOf is not allowed";
     expect(formatAgentModelError(`Error: ${detail}`, t)).toEqual({ title: "agent.error.toolSchemaInvalid", detail: `Error: ${detail}` });
@@ -27,7 +35,6 @@ describe("agent-model-error", () => {
     expect(formatAgentModelError("localized", t, { modelError: { category: "model_failed", detail: "plugin_skill_access_denied" } }).title).toBe("agent.error.pluginInstructionsFailed");
     expect(formatRetryWaitStatus("Reloading private plugin instructions (retry 1 of 1)...", t)).toBe("agent.error.pluginInstructionsRetrying");
   });
-
   it("detects provider error messages", () => {
     expect(isAgentModelErrorContent("Error: 503 upstream connect error")).toBe(true);
     expect(isAgentModelErrorContent("Error calling LLM: missing key")).toBe(true);

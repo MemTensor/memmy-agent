@@ -1,5 +1,4 @@
 import { CronSchedule } from "../cron/types.js";
-import { getModelTokenDefaults } from "../providers/model-token-defaults.js";
 import { PROVIDERS, findByName } from "../providers/registry.js";
 import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { normalizeTimeZoneOffset, systemUtcOffset } from "../utils/time-zone.js";
@@ -102,9 +101,6 @@ export type ModelEndpointProtocol =
   | "bedrock-converse";
 
 const MODEL_CAPABILITIES = ["agent", "memory_summary", "memory_evolution", "embedding", "asr", "image_generation"] as const;
-const TEXT_GENERATION_CAPABILITIES: ReadonlySet<ModelCapability> = new Set([
-  "agent", "memory_summary", "memory_evolution",
-]);
 const ENDPOINT_PROTOCOLS = [
   "openai-chat-completions", "openai-responses", "anthropic-messages", "gemini-generate-content",
   "openai-embeddings", "dashscope-input-audio-chat", "openai-images",
@@ -226,6 +222,11 @@ export class InlineFallbackConfig extends Base {
 export type FallbackCandidate = string | InlineFallbackConfig;
 
 export class ModelPresetConfig extends Base {
+  #explicitTokenFields: Set<string>;
+  setExplicitTokenSetting(field: "maxTokens" | "contextWindowTokens", value: number): void {
+    this[field] = value;
+    this.#explicitTokenFields.add(field);
+  }
   endpoint: string;
   model: string;
   provider: string;
@@ -240,6 +241,7 @@ export class ModelPresetConfig extends Base {
 
   constructor(init: Dict) {
     super(init);
+    this.#explicitTokenFields = new Set(["maxTokens", "contextWindowTokens"].filter((field) => Object.hasOwn(init, field)));
     delete (this as Dict).label;
     this.endpoint = init.endpoint;
     this.model = init.model;
@@ -253,15 +255,11 @@ export class ModelPresetConfig extends Base {
     if (!this.capabilities.length || this.capabilities.some((capability) => !MODEL_CAPABILITIES.includes(capability))) {
       throw new ValueError(`modelPreset capabilities must contain only ${MODEL_CAPABILITIES.join(", ")}`);
     }
-    const mappedDefaults = this.source === "byok"
-      && this.capabilities.some((capability) => TEXT_GENERATION_CAPABILITIES.has(capability))
-      ? getModelTokenDefaults(this.model)
-      : null;
-    this.maxTokens = pick(init, ["maxTokens"], mappedDefaults?.maxTokens ?? DEFAULT_MAX_TOKENS);
+    this.maxTokens = pick(init, ["maxTokens"], DEFAULT_MAX_TOKENS);
     this.contextWindowTokens = pick(
       init,
       ["contextWindowTokens"],
-      mappedDefaults?.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS,
+      DEFAULT_CONTEXT_WINDOW_TOKENS,
     );
     this.temperature = pick(init, ["temperature"], 0.7);
     this.reasoningEffort = pick(init, ["reasoningEffort"], null);
@@ -284,9 +282,18 @@ export class ModelPresetConfig extends Base {
     };
   }
 
+  get explicitTokenSettings(): { maxTokens?: number; contextWindowTokens?: number } {
+    return {
+      ...(this.#explicitTokenFields.has("maxTokens") ? { maxTokens: this.maxTokens } : {}),
+      ...(this.#explicitTokenFields.has("contextWindowTokens") ? { contextWindowTokens: this.contextWindowTokens } : {}),
+    };
+  }
+
   override toObject(): Dict {
     return omitUndefined({
       ...this,
+      maxTokens: this.explicitTokenSettings.maxTokens,
+      contextWindowTokens: this.explicitTokenSettings.contextWindowTokens,
       ownerAccountId: this.ownerAccountId ?? undefined,
       inputModalities: this.inputModalities ?? undefined,
     });
@@ -367,6 +374,11 @@ export class ModelAssignmentsConfig extends Base {
 }
 
 export class AgentDefaults extends Base {
+  #explicitTokenFields: Set<string>;
+  setExplicitTokenSetting(field: "maxTokens" | "contextWindowTokens", value: number): void {
+    this[field] = value;
+    this.#explicitTokenFields.add(field);
+  }
   workspace = "~/.memmy/workspace";
   modelPreset: string | null = null;
   model = "anthropic/claude-opus-4-5";
@@ -395,6 +407,7 @@ export class AgentDefaults extends Base {
 
   constructor(init: Dict = {}) {
     super();
+    this.#explicitTokenFields = new Set(["maxTokens", "contextWindowTokens"].filter((field) => Object.hasOwn(init, field)));
     this.workspace = pick(init, ["workspace"], this.workspace);
     this.modelPreset = pick(init, ["modelPreset"], null);
     this.model = pick(init, ["model"], this.model);
@@ -440,14 +453,21 @@ export class AgentDefaults extends Base {
     this.dream = init.dream instanceof DreamConfig ? init.dream : new DreamConfig(init.dream ?? {});
   }
 
-  override toObject(): Dict {
+  get explicitTokenSettings(): { maxTokens?: number; contextWindowTokens?: number } {
     return {
+      ...(this.#explicitTokenFields.has("maxTokens") ? { maxTokens: this.maxTokens } : {}),
+      ...(this.#explicitTokenFields.has("contextWindowTokens") ? { contextWindowTokens: this.contextWindowTokens } : {}),
+    };
+  }
+
+  override toObject(): Dict {
+    return omitUndefined({
       workspace: this.workspace,
       modelPreset: this.modelPreset,
       model: this.model,
       provider: this.provider,
-      maxTokens: this.maxTokens,
-      contextWindowTokens: this.contextWindowTokens,
+      maxTokens: this.explicitTokenSettings.maxTokens,
+      contextWindowTokens: this.explicitTokenSettings.contextWindowTokens,
       contextBlockLimit: this.contextBlockLimit,
       temperature: this.temperature,
       fallbackModels: this.fallbackModels,
@@ -467,7 +487,7 @@ export class AgentDefaults extends Base {
       maxMessages: this.maxMessages,
       consolidationRatio: this.consolidationRatio,
       dream: this.dream.toObject(),
-    };
+    });
   }
 }
 

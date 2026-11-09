@@ -65,6 +65,9 @@ export interface AgentModelErrorFormatOptions {
 }
 
 export function formatAgentModelError(content: string, t: Translate, options?: AgentModelErrorFormatOptions): AgentModelErrorPresentation {
+  if (options?.modelError?.origin === "model_catalog_fallback") {
+    return { title: t("agent.error.modelCatalogUnavailable"), detail: null };
+  }
   const failedAt = [options?.modelError?.failedProvider, options?.modelError?.failedModel]
     .filter((value): value is string => Boolean(value))
     .join("/");
