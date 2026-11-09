@@ -1,3 +1,5 @@
+import { responsesState } from "../protocol-preference.js";
+
 export function splitToolCallId(toolCallId: any): [string, string | null] {
   if (typeof toolCallId !== "string" || !toolCallId) return ["call_0", null];
   const idx = toolCallId.indexOf("|");
@@ -5,7 +7,7 @@ export function splitToolCallId(toolCallId: any): [string, string | null] {
   return [toolCallId.slice(0, idx) || "call_0", toolCallId.slice(idx + 1) || null];
 }
 
-export function convertMessages(messages: Record<string, any>[]): [string, Record<string, any>[]] {
+export function convertMessages(messages: Record<string, any>[], scope?: string): [string, Record<string, any>[]] {
   let instructions = "";
   const items: Record<string, any>[] = [];
   const usedIds = new Set<string>();
@@ -22,15 +24,24 @@ export function convertMessages(messages: Record<string, any>[]): [string, Recor
   };
   for (const [idx, msg] of messages.entries()) {
     if (msg.role === "system") {
-      instructions = Array.isArray(msg.content)
+      const instruction = Array.isArray(msg.content)
         ? msg.content
           .filter((block) => block?.type === "text" || block?.type === "input_text")
           .map((block) => String(block.text ?? ""))
           .join("\n\n")
         : String(msg.content ?? "");
+      instructions = [instructions, instruction].filter(Boolean).join("\n\n");
     } else if (msg.role === "user") {
       items.push(convertUserMessage(msg.content));
     } else if (msg.role === "assistant") {
+      const state = scope ? responsesState(msg.memmy_protocol_state, scope) : null;
+      if (state) {
+        for (const item of state.items) {
+          items.push(structuredClone(item));
+          if (typeof item.id === "string") usedIds.add(item.id);
+        }
+        continue;
+      }
       if (typeof msg.content === "string" && msg.content) {
         items.push({
           type: "message",

@@ -706,10 +706,6 @@ function writeStopOutput() {
 }
 
 function writeTurnStartOutput(started) {
-  if (MODE === "cursor") {
-    writeAllowOutput();
-    return;
-  }
   const injected = started && started.injectedContext && typeof started.injectedContext === "object"
     ? normalizeText(started.injectedContext.markdown)
     : normalizeText(started && started.injectedContext);
@@ -717,13 +713,19 @@ function writeTurnStartOutput(started) {
     writeAllowOutput();
     return;
   }
-  writeResumeContextOutput([
+  const context = [
     '<memmy_memory_context source="turn_start">',
     "The following is historical memory context. Use it as supporting context, not as a new user request.",
     "",
     injected,
     "</memmy_memory_context>"
-  ].join("\n"));
+  ].join("\n");
+  if (MODE === "cursor") {
+    // Per-prompt recall must continue the turn; explicit resume commands use the blocking output below.
+    process.stdout.write(JSON.stringify({ continue: true, additional_context: context }));
+    return;
+  }
+  writeResumeContextOutput(context);
 }
 
 function writeResultOutput(message) {

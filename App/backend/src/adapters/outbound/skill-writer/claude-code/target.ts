@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { createNodeHookCommand } from "../hook-command.js";
 import { isInstalledMemmyHookCurrent, memmyHookRevisionField } from "../hook-revision.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
-import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import { pathExists, removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
@@ -77,6 +77,15 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       await removeMemmySkillDirectory(root);
     },
 
+    async isLegacySkillInstalled() {
+      if ((await readTextFile(join(rootDirectory, TARGET_FILE_NAME))).includes(LEGACY_CLI_START_MARKER)) return true;
+      for (const fileName of LEGACY_TARGET_FILE_NAMES) {
+        const content = await readTextFile(join(rootDirectory, fileName));
+        if (content.includes(START_MARKER) || content.includes(LEGACY_CLI_START_MARKER)) return true;
+      }
+      return false;
+    },
+
     async isInstalled(_targetId) {
       const root = await this.resolveRootDirectory();
       if (!root) {
@@ -97,6 +106,15 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
         bridgePath: join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
         configPath: join(hookDirectory, HOOK_CONFIG_FILE_NAME)
       });
+    },
+
+    async isPluginInstalled() {
+      if (await pathExists(join(rootDirectory, HOOK_DIRECTORY_NAME, HOOK_SCRIPT_FILE_NAME))
+        || await pathExists(join(rootDirectory, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME))) return true;
+      const config = await readJsonConfig(join(rootDirectory, SETTINGS_FILE_NAME));
+      const hooks = isRecord(config.hooks) ? config.hooks : {};
+      return Object.values(hooks).some((entries) => Array.isArray(entries) &&
+        entries.some((entry) => isRecord(entry) && Array.isArray(entry.hooks) && entry.hooks.some(isMemmyResumeHook)));
     },
 
     async installPlugin(_targetId) {
@@ -131,7 +149,7 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       await removeLegacyAgentInstructions(root);
       await writeFileAtomically(
         filePath,
-        upsertMarkerBlock(await readTextFile(filePath), renderMemmySkillBootstrapManifest(manifest))
+        upsertMarkerBlock(removeLegacyMarkerBlock(await readTextFile(filePath)), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
       await writeFileAtomically(
@@ -207,7 +225,7 @@ function upsertMarkerBlock(existing: string, manifest: SkillManifest): string {
 }
 
 function removeMarkerBlock(existing: string): string {
-  return existing.replace(createMarkerBlockPattern(START_MARKER), "");
+  return existing.replace(new RegExp(createMarkerBlockPattern(START_MARKER), "gm"), "");
 }
 
 async function removeLegacyAgentInstructions(rootDirectory: string): Promise<void> {
@@ -237,7 +255,7 @@ async function isSameFile(leftPath: string, rightPath: string): Promise<boolean>
 }
 
 function removeLegacyMarkerBlock(existing: string): string {
-  return existing.replace(createMarkerBlockPattern(LEGACY_CLI_START_MARKER, LEGACY_CLI_END_MARKER), "");
+  return existing.replace(new RegExp(createMarkerBlockPattern(LEGACY_CLI_START_MARKER, LEGACY_CLI_END_MARKER), "gm"), "");
 }
 
 async function upsertClaudeCodeHookSettings(filePath: string, hookScriptPath: string): Promise<void> {
@@ -353,7 +371,7 @@ function renderMarkerBlock(manifest: SkillManifest): string {
 }
 
 function createMarkerBlockPattern(startMarker: string, endMarker = END_MARKER): RegExp {
-  return new RegExp(`${escapeRegExp(startMarker)}\\n[\\s\\S]*?${escapeRegExp(endMarker)}\\n?`, "m");
+  return new RegExp(`${escapeRegExp(startMarker)}\\r?\\n[\\s\\S]*?${escapeRegExp(endMarker)}(?:\\r?\\n)?`, "m");
 }
 
 async function writeFileAtomically(filePath: string, content: string): Promise<void> {

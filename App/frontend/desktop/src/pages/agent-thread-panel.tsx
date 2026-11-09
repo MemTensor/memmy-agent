@@ -305,6 +305,7 @@ const EMPTY_BROWSER_SESSION: BrowserSession = {
 export function AgentThreadPanel(props: {
   controller: AgentThreadPanelController;
   messages: AgentChatMessage[];
+  conversationId?: string | null;
   workspaceRoot: string | null;
   previewContext: ThreadPreviewContext;
   recordingSession?: RecordingEntrySession;

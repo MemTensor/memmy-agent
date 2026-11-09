@@ -38,13 +38,19 @@ vi.mock("../../state/model-workspace.js", () => ({
   createModelWorkspace: () => ({}),
   getTaskModelCandidates: () => [
     { id: "openai-1", source: "byok", provider: "openai", model: "local-review-model" },
-    { id: "custom-1", source: "byok", provider: "custom", model: "local-review-model" }
+    { id: "custom-1", source: "byok", provider: "custom", model: "local-review-model" },
+    { id: "no-thinking", source: "byok", provider: "custom", model: "no-thinking-model" }
   ],
   resolveModelSelection: () => ({
     candidateId: "custom-1",
     candidate: { id: "custom-1", source: "byok", provider: "custom", model: "local-review-model" }
   }),
-  resolveThinkingConfigForModel: () => ({
+  resolveThinkingConfigForModel: (_workspace: unknown, candidate: { id: string } | null) => !candidate || candidate.id === "no-thinking" ? null : candidate.id === "openai-1" ? ({
+    switchable: true,
+    defaultEnabled: true,
+    levels: ["low", "high"],
+    defaultLevel: "high"
+  }) : ({
     switchable: true,
     defaultEnabled: true,
     levels: ["low", "medium", "high"],
@@ -70,7 +76,7 @@ describe("AgentModelSelector thinking popover", () => {
     document.body.replaceChildren();
   });
 
-  it("shows thinking settings beside the selected model row only after that row is hovered", () => {
+  it("shows each hovered model's thinking settings without changing the selection", () => {
     act(() => root.render(
       <AgentModelSelector mode="byok" scopeKey="draft-new-task" disabled={false} />
     ));
@@ -83,6 +89,12 @@ describe("AgentModelSelector thinking popover", () => {
 
     const options = container.querySelectorAll<HTMLButtonElement>('[role="option"]');
     act(() => options[0]?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+    expect(container.querySelector(".select-control__aside")).not.toBeNull();
+    expect(container.querySelectorAll(".thinking-level-option")).toHaveLength(2);
+    expect(options[0]?.getAttribute("aria-selected")).toBe("false");
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+
+    act(() => options[2]?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
     expect(container.querySelector(".select-control__aside")).toBeNull();
 
     act(() => options[1]?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
@@ -99,5 +111,27 @@ describe("AgentModelSelector thinking popover", () => {
 
     act(() => trigger?.click());
     expect(container.querySelector(".select-control__aside")).toBeNull();
+  });
+
+  it.each(["switch", "level"])("selects the hovered model before applying a %s change", (control) => {
+    const onDefaultModelSelected = vi.fn();
+    act(() => root.render(
+      <AgentModelSelector mode="byok" scopeKey="draft-new-task" disabled={false}
+        onDefaultModelSelected={onDefaultModelSelected} />
+    ));
+    act(() => container.querySelector<HTMLButtonElement>('[role="combobox"]')?.click());
+    act(() => container.querySelector<HTMLButtonElement>('[role="option"]')?.focus());
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+    act(() => container.querySelector<HTMLButtonElement>(
+      control === "switch" ? '[role="switch"]' : ".thinking-level-option"
+    )?.click());
+    expect(mocks.dispatch.mock.calls).toEqual([
+      [{ type: "agent/pendingModelPresetUpdated", scopeKey: "draft-new-task", preset: "openai-1" }],
+      [control === "switch"
+        ? { type: "agent/thinkingToggled", scopeKey: "draft-new-task", enabled: false }
+        : { type: "agent/thinkingLevelChanged", scopeKey: "draft-new-task", level: "low" }]
+    ]);
+    expect(onDefaultModelSelected).toHaveBeenCalledWith("openai-1");
+    expect(container.querySelector('[role="listbox"]')).not.toBeNull();
   });
 });

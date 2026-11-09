@@ -70,6 +70,44 @@ describe("heartbeat service config", () => {
 });
 
 describe("HeartbeatService", () => {
+  it("prepares once per heartbeat and keeps the decision snapshot through evaluation", async () => {
+    const root = workspace();
+    writeHeartbeat(root);
+    let version = 21;
+    const chatWithRetry = vi.fn(async (_args: any) => decision("run", "check"));
+    const provider = { chatWithRetry } as any;
+    const prepare = vi.fn(async () => ({ provider, model: "gpt-4o", modelCapabilities: Object.freeze({
+      mode: "catalog" as const, catalogVersion: version, maxTokens: 16384, contextWindowTokens: 128000
+    }) }));
+    const evaluateResponse = vi.fn(async (_response: string, _tasks: string, _provider: unknown, _model: string, runtime?: LLMRuntime) => {
+      expect(runtime?.modelCapabilities).toBe(chatWithRetry.mock.calls.at(-1)![0].modelCapabilities);
+      return false;
+    });
+    const service = new HeartbeatService({ workspace: root,
+      llmRuntime: () => ({ provider, model: "gpt-4o", prepare }),
+      onExecute: async () => { version++; return "Actionable result"; }, evaluateResponse });
+    await service.tick();
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(chatWithRetry.mock.calls[0][0].modelCapabilities.catalogVersion).toBe(21);
+    expect(evaluateResponse).toHaveBeenCalledOnce();
+    await service.tick();
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(chatWithRetry.mock.calls[1][0].modelCapabilities.catalogVersion).toBe(22);
+  });
+
+  it("does not execute or notify when runtime preparation fails", async () => {
+    const root = workspace();
+    writeHeartbeat(root);
+    const provider = { chatWithRetry: vi.fn() } as any;
+    const onExecute = vi.fn();
+    const onNotify = vi.fn();
+    const service = new HeartbeatService({ workspace: root, onExecute, onNotify,
+      llmRuntime: () => ({ provider, model: "gpt-4o", prepare: async () => { throw new Error("Catalog unavailable"); } }) });
+    await service.tick();
+    expect(provider.chatWithRetry).not.toHaveBeenCalled();
+    expect(onExecute).not.toHaveBeenCalled();
+    expect(onNotify).not.toHaveBeenCalled();
+  });
   it("starts idempotently", async () => {
     const service = new HeartbeatService({
       workspace: workspace(),

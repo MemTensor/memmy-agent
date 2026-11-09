@@ -39,17 +39,17 @@ describe("desktop i18n helpers", () => {
 
   it("localizes the Token gift details in Chinese and English", () => {
     expect(messageCatalogs["zh-CN"]["welcome.gift.detail.subtitle"])
-      .toBe("额外赠送 2,200 万记忆处理 Token");
+      .toBe("另有 2,200 万记忆处理 Token，不计入任务额度");
     expect(messageCatalogs["zh-CN"]["welcome.gift.detail.bullet.conversations"])
-      .toBe("可发起约 30 次完整 Agent 对话");
+      .toBe("可用于 Agent 对话和完整任务");
     expect(messageCatalogs["zh-CN"]["welcome.gift.detail.bullet.memories"])
       .toBe("可自动整理 5000+ 条历史对话为记忆");
     expect(messageCatalogs["zh-CN"]["welcome.gift.detail.bullet.features"])
       .toBe("覆盖全功能");
     expect(messageCatalogs["en-US"]["welcome.gift.detail.subtitle"])
-      .toBe("Includes an extra 22M tokens for memory processing");
+      .toBe("Plus 22M memory-processing tokens, separate from task tokens");
     expect(messageCatalogs["en-US"]["welcome.gift.detail.bullet.conversations"])
-      .toBe("Start about 30 complete Agent conversations");
+      .toBe("Use task tokens for Agent conversations and full tasks");
     expect(messageCatalogs["en-US"]["welcome.gift.detail.bullet.memories"])
       .toBe("Automatically organize 5,000+ historical conversations into memories");
     expect(messageCatalogs["en-US"]["welcome.gift.detail.bullet.features"])
@@ -90,6 +90,10 @@ describe("desktop i18n helpers", () => {
   });
 
   it("keeps governed error notices aligned in Chinese and English", () => {
+    expect(messageCatalogs["zh-CN"]["agent.error.modelCatalogUnavailable"])
+      .toBe("未获取到模型信息，请重启客户端");
+    expect(messageCatalogs["en-US"]["agent.error.modelCatalogUnavailable"])
+      .toBe("Model information could not be retrieved. Please restart the app.");
     expect(messageCatalogs["zh-CN"]["agent.error.quotaExceeded"])
       .toBe("当前模型 Token 余额不足，请更换模型后重试");
     expect(messageCatalogs["en-US"]["agent.error.quotaExceeded"])

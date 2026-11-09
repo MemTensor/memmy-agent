@@ -18,13 +18,15 @@ export class ApiRequestError extends Error {
   readonly code: ApiErrorCode | null;
   readonly requestId: string | null;
   readonly upstreamRequestId: string | null;
+  readonly retryAfterSec: number | null;
 
   constructor(
     message: string,
     status: number,
     code: ApiErrorCode | null = null,
     requestId: string | null = null,
-    upstreamRequestId: string | null = null
+    upstreamRequestId: string | null = null,
+    retryAfterSec: number | null = null
   ) {
     super(message);
     this.name = "ApiRequestError";
@@ -32,6 +34,7 @@ export class ApiRequestError extends Error {
     this.code = code;
     this.requestId = requestId;
     this.upstreamRequestId = upstreamRequestId;
+    this.retryAfterSec = retryAfterSec;
   }
 }
 
@@ -62,6 +65,10 @@ export async function requestJson<T>(input: RequestJsonInput<T>): Promise<T> {
 }
 
 async function toApiRequestError(response: Response, path: string): Promise<ApiRequestError> {
+  // The local verification API emits Retry-After as integer seconds.
+  const header = response.headers.get("retry-after");
+  const seconds = header !== null && /^\d+$/.test(header) ? Number(header) : NaN;
+  const retryAfterSec = Number.isSafeInteger(seconds) ? seconds : null;
   const rawBody = await readJsonSafely(response);
   const parsedError = ApiErrorBodySchema.safeParse(rawBody);
 
@@ -71,11 +78,12 @@ async function toApiRequestError(response: Response, path: string): Promise<ApiR
       response.status,
       parsedError.data.error.code,
       parsedError.data.error.requestId ?? null,
-      parsedError.data.error.upstreamRequestId ?? null
+      parsedError.data.error.upstreamRequestId ?? null,
+      retryAfterSec
     );
   }
 
-  return new ApiRequestError(`Request ${path} failed with status ${response.status}`, response.status);
+  return new ApiRequestError(`Request ${path} failed with status ${response.status}`, response.status, null, null, null, retryAfterSec);
 }
 
 /**

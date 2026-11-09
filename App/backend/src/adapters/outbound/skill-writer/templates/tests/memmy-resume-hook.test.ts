@@ -25,6 +25,123 @@ describe("memmy resume hook stop capture", () => {
     }
   });
 
+  describe.each([
+    ["desktop", renderMemmyResumeHookScript],
+    ["memory CLI", renderCliHook],
+  ])("%s turn-start recall", (_label, render) => {
+    it.each(["cursor", "claude-code", "codex"] as const)("delivers recalled context through the %s output without blocking", async (mode) => {
+      tempDir = mkdtempSync(join(tmpdir(), "memmy-turn-start-context-"));
+      let injectedContext: unknown;
+      const queries: unknown[] = [];
+      const server = createServer(async (request, response) => {
+        const body = await requestBody(request);
+        response.setHeader("content-type", "application/json");
+        if (request.url === "/api/v1/health") {
+          response.end(JSON.stringify({ features: { l3WorldModelProtocolVersions: [2] } }));
+        } else if (request.url === "/api/v1/sessions/open") {
+          response.end(JSON.stringify({ sessionId: "recall-session" }));
+        } else if (request.url === "/api/v1/turns/start") {
+          queries.push(body.query);
+          response.end(JSON.stringify({ turnId: body.turnId, injectedContext }));
+        } else {
+          response.statusCode = 404;
+          response.end("{}");
+        }
+      });
+      await listen(server);
+      try {
+        const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+        const source = mode === "claude-code" ? "claude_code" : mode;
+        const script = installHookFixture(tempDir, source, mode, endpoint, runtimeAsset, render);
+        const memories = [
+          { value: { markdown: '  项目约定：发布前运行 "npm run typecheck"。\n保留中文与换行。  ' },
+            text: '项目约定：发布前运行 "npm run typecheck"。\n保留中文与换行。' },
+          { value: "兼容字符串召回结果", text: "兼容字符串召回结果" },
+          { value: { markdown: "长记忆🧠".repeat(2000) + "末尾标记" }, text: "长记忆🧠".repeat(2000) + "末尾标记" },
+        ];
+        for (const [index, memory] of memories.entries()) {
+          injectedContext = memory.value;
+          const result = await runHook(script, {
+            hook_event_name: mode === "cursor" ? "beforeSubmitPrompt" : "UserPromptSubmit",
+            session_id: "host-recall", conversation_id: "host-recall",
+            generation_id: `generation-${index}`, prompt: "发布前要做什么？", cwd: tempDir,
+            ...(mode === "cursor" ? { cursor_version: "3.24.12" } : {}),
+          }, tempDir);
+          expect(result.status).toBe(0);
+          expect(result.stderr).toBe("");
+          const context = [
+            '<memmy_memory_context source="turn_start">',
+            "The following is historical memory context. Use it as supporting context, not as a new user request.",
+            "", memory.text, "</memmy_memory_context>",
+          ].join("\n");
+          expect(JSON.parse(result.stdout)).toEqual(mode === "cursor"
+            ? { continue: true, additional_context: context }
+            : { hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: context } });
+        }
+        expect(queries).toEqual(memories.map(() => "发布前要做什么？"));
+      } finally {
+        await close(server);
+      }
+    }, 30000);
+
+    it("allows Cursor to continue without reusing stale recall when context is empty or the service fails", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "memmy-cursor-recall-fallback-"));
+      const replies = [
+        { injectedContext: { markdown: "previous-turn-only" } },
+        { injectedContext: { markdown: " \n " } },
+        { injectedContext: "" },
+        { injectedContext: null },
+        {},
+      ];
+      let requests = 0;
+      const server = createServer(async (request, response) => {
+        await requestBody(request);
+        response.setHeader("content-type", "application/json");
+        if (request.url === "/api/v1/health") {
+          response.end(JSON.stringify({ features: { l3WorldModelProtocolVersions: [2] } }));
+        } else if (request.url === "/api/v1/sessions/open") {
+          response.end(JSON.stringify({ sessionId: "recall-session" }));
+        } else if (request.url === "/api/v1/turns/start") {
+          const index = requests++;
+          if (index < replies.length) {
+            response.end(JSON.stringify({ turnId: `turn-${index}`, ...replies[index] }));
+          } else if (index === replies.length) {
+            response.statusCode = 503;
+            response.end(JSON.stringify({ error: { message: "Recall unavailable" } }));
+          } else {
+            response.end("invalid-json");
+          }
+        } else {
+          response.statusCode = 404;
+          response.end("{}");
+        }
+      });
+      await listen(server);
+      try {
+        const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+        const script = installHookFixture(tempDir, "cursor", "cursor", endpoint, runtimeAsset, render);
+        for (let index = 0; index < replies.length + 2; index += 1) {
+          const result = await runHook(script, {
+            hook_event_name: "beforeSubmitPrompt", cursor_version: "3.24.12",
+            session_id: "host-recall", conversation_id: "host-recall", generation_id: `turn-${index}`,
+            prompt: "What should I check?", cwd: tempDir,
+          }, tempDir);
+          expect(result.status).toBe(0);
+          if (index === 0) {
+            expect(JSON.parse(result.stdout).additional_context).toContain("previous-turn-only");
+          } else {
+            expect(JSON.parse(result.stdout)).toEqual({ continue: true });
+          }
+          if (index < replies.length) expect(result.stderr).toBe("");
+          else expect(result.stderr).toContain("start_failed");
+        }
+        expect(requests).toBe(replies.length + 2);
+      } finally {
+        await close(server);
+      }
+    }, 30000);
+  });
+
   it.each([
     ["desktop", renderMemmyResumeHookScript],
     ["memory CLI", renderCliHook],

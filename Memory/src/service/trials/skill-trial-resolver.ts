@@ -4,6 +4,7 @@ import {
   traceMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
 import { createMemoryLogger } from "../../logging/logger.js";
+import { isImportedSkill } from "../../storage/imported-skill.js";
 import { isRecord } from "../../utils/json.js";
 import {
   type MemmyConfig
@@ -151,7 +152,7 @@ pendingTrialsForFeedback(feedback: FeedbackRecord): SkillTrialRecord[] {
 updateSkillTrialStats(trial: SkillTrialRecord, at: string, recoveredMemory?: MemoryRow): void {
     const startedAt = performance.now();
     const memory = recoveredMemory ?? this.deps.repos.memories.get(trial.skillMemoryId);
-    if (!memory || memory.memoryLayer !== "Skill") {
+    if (!memory || memory.memoryLayer !== "Skill" || isImportedSkill(memory)) {
       return;
     }
     const data = memory.properties.internal_info.skill;

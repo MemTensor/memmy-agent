@@ -183,4 +183,23 @@ describe("History Skill post-editing", () => {
     await act(async () => finishB());
     expect(container.querySelector("textarea")).toBeNull();
   });
+
+  it("archives an active Skill and reactivates an archived one from the drawer", async () => {
+    const active = { ...skillPanelDetailFixture, item: { ...skillPanelDetailFixture.item, status: "activated" as const } };
+    const archived = { ...active, item: { ...active.item, status: "archived" as const } };
+    const getMemory = vi.fn().mockResolvedValueOnce(active).mockResolvedValueOnce(archived).mockResolvedValue(active);
+    const archiveSkill = vi.fn(async (id: string) => ({ ok: true as const, id, status: "archived" as const, serverTime: "2026-10-28T00:00:00Z" }));
+    const reactivateSkill = vi.fn(async (id: string) => ({ ok: true as const, id, status: "activated" as const, serverTime: "2026-10-28T00:00:00Z" }));
+    const client = createMemoryRuntimeClientStub({ getMemory, archiveSkill, reactivateSkill,
+      listPanelItems: vi.fn(async () => panelItemsOutput([active.item])),
+      listMemoryLogs: vi.fn(async () => ({ logs: [], total: 0, limit: 500, offset: 0, serverTime: "2026-10-28T00:00:00Z" })) });
+    await act(async () => root.render(<AppStateProvider><I18nProvider language="zh-CN"><SkillsSubPage
+      client={client} openRequest={{ id: active.item.id, requestId: 1 }} onOpenMemoryReference={vi.fn()} /></I18nProvider></AppStateProvider>));
+
+    await act(async () => button("归档").click());
+    expect(archiveSkill).toHaveBeenCalledWith(active.item.id);
+    await act(async () => button("重新启用").click());
+    expect(reactivateSkill).toHaveBeenCalledWith(active.item.id);
+    expect(button("归档")).toBeTruthy();
+  });
 });

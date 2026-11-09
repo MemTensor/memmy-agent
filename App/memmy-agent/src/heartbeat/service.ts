@@ -3,7 +3,7 @@ import path from "node:path";
 import { type LLMProvider, type LLMResponse } from "../providers/base.js";
 import { evaluateResponse as defaultEvaluateResponse } from "../utils/evaluator.js";
 import { currentTimeStr } from "../utils/helpers.js";
-import { type LLMRuntimeResolver, staticLlmRuntime } from "../utils/llm-runtime.js";
+import { type LLMRuntime, type LLMRuntimeResolver, staticLlmRuntime } from "../utils/llm-runtime.js";
 
 export const HEARTBEAT_TOOL = [
   {
@@ -39,6 +39,7 @@ type HeartbeatEvaluator = (
   tasks: string,
   provider: LLMProvider,
   model: string,
+  runtime?: LLMRuntime,
 ) => MaybePromise<boolean | Record<string, any>>;
 
 export interface HeartbeatServiceOptions {
@@ -134,8 +135,9 @@ export class HeartbeatService {
     }
   }
 
-  async decide(content: string): Promise<[string, string]> {
-    const llm = this.llmRuntime();
+  async decide(content: string, preparedRuntime?: LLMRuntime): Promise<[string, string]> {
+    const captured = preparedRuntime ?? this.llmRuntime();
+    const llm = !preparedRuntime && captured.prepare ? await captured.prepare() : captured;
     const messages = [
       {
         role: "system",
@@ -149,7 +151,8 @@ export class HeartbeatService {
           content,
       },
     ];
-    const args = { messages, tools: HEARTBEAT_TOOL, model: llm.model };
+    const args = { messages, tools: HEARTBEAT_TOOL, model: llm.model,
+      ...(llm.modelCapabilities ? { modelCapabilities: llm.modelCapabilities, capabilityCatalogState: llm.capabilityCatalogState } : {}) };
     const provider: any = llm.provider;
     const response: LLMResponse =
       typeof provider.chatWithRetry === "function" ? await provider.chatWithRetry(args) : await provider.chat(args);
@@ -244,7 +247,9 @@ export class HeartbeatService {
     if (!content) return;
 
     try {
-      const [action, tasks] = await this.decide(content);
+      const captured = this.llmRuntime();
+      const llm = captured.prepare ? await captured.prepare() : captured;
+      const [action, tasks] = await this.decide(content, llm);
       if (action !== "run") return;
 
       const execute = this.onExecute;
@@ -253,8 +258,7 @@ export class HeartbeatService {
       if (!response) return;
       if (!HeartbeatService.isDeliverable(response)) return;
 
-      const llm = this.llmRuntime();
-      const verdict = await this.evaluateHeartbeatResponse(response, tasks, llm.provider, llm.model);
+      const verdict = await this.evaluateHeartbeatResponse(response, tasks, llm.provider, llm.model, llm);
       if (evaluatorAllowsNotify(verdict)) {
         const notify = this.onNotify;
         if (notify) await notify(response);

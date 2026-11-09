@@ -10,9 +10,7 @@ import path from "node:path";
 import { LLMProvider, LLMResponse, ToolCallRequest } from "../../providers/base.js";
 import {
   coversInputModalities,
-  hasDeclaredInputModalities,
   requiredInputModalities,
-  resolveModelInputModalities,
 } from "../../providers/model-input-capabilities.js";
 import type { ActualModelContext } from "@memmy/local-api-contracts";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
@@ -149,6 +147,8 @@ type PendingImageBatch = {
 };
 
 export class AgentRunSpec {
+  modelCapabilities?: import("../../providers/turn-model-capabilities.js").TurnModelCapabilities;
+  capabilityCatalogState?: import("../../providers/model-capability-catalog.js").RuntimeModelCapabilityCatalogState;
   privateSkillRefs: PluginSkillRef[];
   privateSkillRequestStarted = false;
   privateSkillPromptTokens = 0;
@@ -159,7 +159,7 @@ export class AgentRunSpec {
   provider?: LLMProvider;
   model?: string | null;
   maxIterations: number;
-  maxTokens: number;
+  maxTokens: number | undefined;
   temperature: number | null;
   reasoningEffort?: string | null;
   maxToolResultChars: number;
@@ -197,6 +197,8 @@ export class AgentRunSpec {
   finalResponseContinuation?: ((ctx: { finalContent: string; messages: Record<string, any>[] }) => string | null) | null;
 
   constructor(init: {
+    modelCapabilities?: import("../../providers/turn-model-capabilities.js").TurnModelCapabilities;
+    capabilityCatalogState?: import("../../providers/model-capability-catalog.js").RuntimeModelCapabilityCatalogState;
     privateSkillRefs?: unknown;
     onPrivateSkillRefsChanged?: (refs: PluginSkillRef[]) => void;
     messages?: Record<string, any>[];
@@ -248,7 +250,9 @@ export class AgentRunSpec {
     this.tools = init.tools;
     this.model = init.model ?? null;
     this.maxIterations = init.maxIterations ?? 200;
-    this.maxTokens = init.maxTokens ?? 4096;
+    this.modelCapabilities = init.modelCapabilities;
+    this.capabilityCatalogState = init.capabilityCatalogState;
+    this.maxTokens = init.modelCapabilities ? init.modelCapabilities.maxTokens : init.maxTokens ?? 4096;
     this.temperature = init.temperature ?? 0.7;
     this.reasoningEffort = init.reasoningEffort ?? null;
     this.maxToolResultChars = init.maxToolResultChars ?? 100_000;
@@ -452,6 +456,7 @@ export class AgentRunner {
 
   private buildRequestArgs(spec: AgentRunSpec, messages: Record<string, any>[], tools: Record<string, any>[] | null): Record<string, any> {
     const args: Record<string, any> = {
+      ...(spec.modelCapabilities ? { modelCapabilities: spec.modelCapabilities, capabilityCatalogState: spec.capabilityCatalogState } : {}),
       messages: messages.map((message) => {
         const providerMessage = { ...message };
         delete providerMessage.finish_reason;
@@ -471,6 +476,10 @@ export class AgentRunner {
       retryMode: spec.providerRetryMode,
       onRetryWait: spec.retryWaitCallback,
     };
+    if (spec.actualModelContext?.source === "account" && spec.model === "agent_chat"
+      && spec.privateSkillRefs.some(ref => ref.pluginId === "literature-review" && ref.skillId === "literature-review")) {
+      args.taskType = "literature-review";
+    }
     if (spec.temperature != null) args.temperature = spec.temperature;
     if (spec.maxTokens != null) args.maxTokens = spec.maxTokens;
     if (spec.reasoningEffort != null) args.reasoningEffort = spec.reasoningEffort;
@@ -627,6 +636,7 @@ export class AgentRunner {
     spec: AgentRunSpec,
     actualProvider: string | null | undefined,
   ): boolean {
+    if (spec.modelCapabilities?.mode === "provider-fallback") return false;
     const provider = spec.provider ?? this.provider;
     if (
       !provider
@@ -730,19 +740,14 @@ export class AgentRunner {
     const messagesForModel = this.prepareImageMessages(this.applyToolResultBudget(spec, messages), imageTextState);
     const model = spec.actualModelContext?.model ?? spec.model;
     const required = requiredInputModalities(messagesForModel);
-    const declared = spec.actualModelContext?.inputModalities;
-    const supported = resolveModelInputModalities(model, declared);
+    const declared = spec.modelCapabilities?.inputModalities ?? spec.actualModelContext?.inputModalities;
+    const supported = declared ?? [];
     const missing = required.filter((modality) => !supported.includes(modality));
     const canUseAccountFallback = missing.length === 1
       && missing[0] === "image"
       && this.canRunAccountImageTextFallback(spec, null);
-    // A BYOK model ID we have never reviewed may well be multimodal, and BYOK has no
-    // image2text fallback to fall back on, so let the user's own endpoint answer rather
-    // than refusing the request here. Custom models always declare modalities, so a
-    // declaration is authoritative and must not defer.
-    const deferToProvider = spec.actualModelContext?.source === "byok"
-      && !declared
-      && !hasDeclaredInputModalities(model);
+    // Unknown capabilities defer to the Provider; only an explicit declaration can reject input locally.
+    const deferToProvider = spec.modelCapabilities?.mode === "provider-fallback" || !declared;
 
     let initialResponse: LLMResponse | null = null;
     if (deferToProvider || coversInputModalities(supported, required)) {
@@ -871,27 +876,40 @@ export class AgentRunner {
     const tools = options.toolsOverride === undefined
       ? this.toolDefinitions(spec)
       : options.toolsOverride;
+    const previousRefs = JSON.stringify(spec.privateSkillRefs);
+    const publicMessages = messages;
     try {
-      const previousRefs = JSON.stringify(spec.privateSkillRefs);
-      const publicMessages = messages;
-      messages = await projectPrivateSkillInstructions(publicMessages, spec.privateSkillRefs, spec.tools, spec.abortSignal, spec.sessionKey, !spec.privateSkillRequestStarted);
-      if (spec.privateSkillRefs.length) {
-        const privateMessage = messages[0];
-        spec.privateSkillPromptTokens = estimateMessageTokens(privateMessage);
-        // Reserve private context without ever exposing it to transcript compaction or checkpoints.
-        messages = [privateMessage, ...this.prepareMessagesForModel(spec, publicMessages, {
-          toolsForRequest: tools, reservedPromptTokens: spec.privateSkillPromptTokens
-        })];
-      }
-      spec.privateSkillRequestStarted = true;
-      if (JSON.stringify(spec.privateSkillRefs) !== previousRefs) spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
-    } catch {
-      return new LLMResponse({ content: "Private plugin instructions could not be loaded. Sign in, check connectivity and plugin version, then resume the task. No plugin work was started by this model request.",
-        finishReason: "error", errorKind: "invalid_request", errorCode: "plugin_skill_load_failed", errorShouldRetry: false });
+      messages = await projectPrivateSkillInstructions(publicMessages, spec.privateSkillRefs, spec.tools, spec.abortSignal, spec.sessionKey, !spec.privateSkillRequestStarted,
+        () => spec.retryWaitCallback?.("Reloading private plugin instructions (retry 1 of 1)..."));
+    } catch (error) {
+      if (spec.abortSignal?.aborted) return abortedResponse();
+      const candidate = (error as { code?: string })?.code ?? (error instanceof Error ? error.message : "");
+      const reasons: Record<string, string> = {
+        plugin_skill_access_denied: "Sign in and check plugin access.",
+        plugin_skill_unavailable: "The instruction service could not be reached after one retry. Check connectivity and resume.",
+        plugin_skill_bundle_missing: "The installed plugin's instruction bundle is unavailable. Check the published plugin version.",
+        plugin_skill_invalid: "The instruction bundle failed validation. Update or repair the plugin.",
+        plugin_skill_version_changed: "The installed plugin changed during this turn. Resume in a new turn to reload the current version.",
+        plugin_skill_client_upgrade_required: "Update Memmy to load this plugin's private instructions."
+      };
+      const code = Object.hasOwn(reasons, candidate) ? candidate : "plugin_skill_load_failed";
+      return new LLMResponse({ content: `Private plugin instructions could not be loaded (${code}). ${reasons[code] ?? "Check plugin access, connectivity and version, then resume."} No plugin work was started by this model request.`,
+        finishReason: "error", errorKind: "invalid_request", errorCode: code, errorShouldRetry: false });
     }
+    if (spec.privateSkillRefs.length) {
+      const privateMessage = messages[0];
+      spec.privateSkillPromptTokens = estimateMessageTokens(privateMessage);
+      // Reserve private context without ever exposing it to transcript compaction or checkpoints.
+      messages = [privateMessage, ...this.prepareMessagesForModel(spec, publicMessages, {
+        toolsForRequest: tools, reservedPromptTokens: spec.privateSkillPromptTokens
+      })];
+    }
+    spec.privateSkillRequestStarted = true;
+    if (JSON.stringify(spec.privateSkillRefs) !== previousRefs) spec.onPrivateSkillRefsChanged?.(spec.privateSkillRefs);
     // Keep runtime scope metadata intact while reserving private skill context.
     // Project once after trimming so the real user request remains the anchor.
     messages = withMemmyMemoryTurnContext(messages, spec.memoryTurnContext);
+
     const inputBudget = this.inputTokenBudget(spec);
     if (inputBudget != null) {
       const estimateResult = estimatePromptTokensChain(provider, spec.model ?? null, messages, tools);
@@ -1076,6 +1094,7 @@ export class AgentRunner {
       toolCalls: response.toolCalls.map((call) => call.toOpenAIToolCall()),
       reasoningContent: response.reasoningContent,
       thinkingBlocks: response.thinkingBlocks,
+      protocolState: response.protocolState,
       finishReason: response.finishReason,
     });
   }
@@ -1475,10 +1494,11 @@ export class AgentRunner {
   }
 
   private inputTokenBudget(spec: AgentRunSpec): number | null {
+    if (spec.modelCapabilities && (!spec.modelCapabilities.contextWindowTokens || !spec.modelCapabilities.maxTokens)) return null;
     if (!spec.contextWindowTokens) return null;
     const generation = ((spec.provider ?? this.provider) as any)?.generation;
     const providerMaxTokens = generation?.maxTokens ?? 4096;
-    const maxOutput = Number.isInteger(spec.maxTokens)
+    const maxOutput = typeof spec.maxTokens === "number" && Number.isInteger(spec.maxTokens)
       ? spec.maxTokens
       : Number.isInteger(providerMaxTokens)
         ? Number(providerMaxTokens)
@@ -2014,6 +2034,7 @@ export class AgentRunner {
           messages.push(buildAssistantMessage(clean, {
             reasoningContent: response.reasoningContent,
             thinkingBlocks: response.thinkingBlocks,
+            protocolState: response.protocolState,
             finishReason: response.finishReason,
           }));
           messages.push(withMemmyMemoryPrompt(buildLengthRecoveryMessage(), spec.memoryTurnContext, "length_recovery"));
@@ -2026,6 +2047,7 @@ export class AgentRunner {
         ? buildAssistantMessage(clean, {
           reasoningContent: response.reasoningContent,
           thinkingBlocks: response.thinkingBlocks,
+          protocolState: response.protocolState,
           finishReason: response.finishReason,
         })
         : null;
@@ -2322,6 +2344,7 @@ function buildAssistantMessage(
     toolCalls?: Record<string, any>[];
     reasoningContent?: string | null;
     thinkingBlocks?: Record<string, any>[] | null;
+    protocolState?: Record<string, any> | null;
     finishReason?: string | null;
   } = {},
 ): Record<string, any> {
@@ -2329,6 +2352,7 @@ function buildAssistantMessage(
   if (opts.toolCalls?.length) message.tool_calls = opts.toolCalls;
   if (opts.reasoningContent) message.reasoning_content = opts.reasoningContent;
   if (opts.thinkingBlocks?.length) message.thinking_blocks = opts.thinkingBlocks;
+  if (opts.protocolState) message.memmy_protocol_state = opts.protocolState;
   if (typeof opts.finishReason === "string" && opts.finishReason.length > 0) message.finish_reason = opts.finishReason;
   return message;
 }

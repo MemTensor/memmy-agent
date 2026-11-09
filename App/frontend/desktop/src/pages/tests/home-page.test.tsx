@@ -203,12 +203,14 @@ describe("HomePage", () => {
     expect(selectorSource).toContain("agentActions.pendingModelPresetUpdated");
     expect(selectorSource).toContain("AgentThinkingControl");
     expect(selectorSource).toContain("resolveThinkingConfigForModel");
-    expect(selectorSource).toContain("optionAside={(option) => (");
-    expect(selectorSource).toContain("option.value === resolved.candidateId && thinkingConfig");
+    expect(selectorSource).toContain("thinkingConfig={thinkingConfig}");
     expect(selectorSource).not.toContain("localStorage");
     expect(source).not.toContain('sendMessage({ chatId: state.agent.currentChatId, content: "/model');
     expect(styles).toContain(".agent-model-selector .agent-model-selector__menu");
     expect(styles).toContain(".agent-model-selector__menu .select-control__aside");
+    const thinkingAsideRule = styles.match(/\.agent-model-selector__menu \.select-control__aside\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(thinkingAsideRule).toContain("top: auto !important");
+    expect(thinkingAsideRule).toContain("bottom: 0");
     expect(styles).not.toContain(".agent-model-selector-with-thinking");
     expect(styles).toContain(".agent-thinking-control");
     expect(styles).toContain("top: calc(100% + 6px)");
@@ -224,8 +226,12 @@ describe("HomePage", () => {
     expect(source).not.toContain("agent-conversation-model-error");
   });
 
-  it("组帧时按模型思考表解析开关与默认档位", () => {
+  it("只发送用户显式思考选择，默认值由 Runtime 依据本轮目录解析", () => {
     const workspace = createModelWorkspace(null);
+    workspace.catalog.capabilityCatalog = { catalogVersion: 21, models: {
+      "gpt-5.4": { inputModalities: ["text"], contextWindowTokens: 128000, maxTokens: 8192,
+        thinking: { switchable: true, defaultEnabled: true, levels: ["low", "medium", "high"], defaultLevel: "medium" } }
+    } };
     const candidate: ModelCandidate = {
       id: "gpt-54",
       source: "byok",
@@ -239,19 +245,16 @@ describe("HomePage", () => {
       available: true
     };
 
-    expect(thinkingPayloadForSend(workspace, candidate, undefined)).toEqual({
-      thinkingEnabled: true,
-      thinkingLevel: "medium"
-    });
+    expect(thinkingPayloadForSend(workspace, candidate, undefined)).toEqual({});
     expect(thinkingPayloadForSend(workspace, candidate, { enabled: false })).toEqual({
-      thinkingEnabled: false,
-      thinkingLevel: null
+      thinkingEnabled: false
     });
     expect(thinkingPayloadForSend(workspace, candidate, { enabled: true, level: "high" })).toEqual({
       thinkingEnabled: true,
       thinkingLevel: "high"
     });
     expect(thinkingPayloadForSend(workspace, { ...candidate, model: "unlisted-model" }, undefined)).toEqual({});
+    expect(thinkingPayloadForSend(workspace, candidate, { level: "retired-level" })).toEqual({ thinkingLevel: "retired-level" });
   });
 
   it("hides the agent status line after the websocket is connected", () => {
@@ -613,7 +616,9 @@ describe("HomePage", () => {
     expect(agentChatScopeKey(null, 3)).toBe("draft-3");
     expect(hasActiveAgentConversation("chat-1", 1)).toBe(true);
     expect(hasActiveAgentConversation("chat-1", 0)).toBe(false);
+    expect(hasActiveAgentConversation("chat-1", 0, true)).toBe(true);
     expect(hasActiveAgentConversation(null, 1)).toBe(false);
+    expect(hasActiveAgentConversation(null, 0, true)).toBe(false);
   });
 
   it("keeps composer drafts isolated by chat scope", () => {
@@ -657,7 +662,7 @@ describe("HomePage", () => {
     const styles = readFileSync(stylesSourcePath, "utf8");
     const conversationColumnRule = styles.match(/\.agent-workspace-layout > \.agent-conversation-panel\s*\{[^}]*\}/)?.[0] ?? "";
 
-    expect(source).toContain('className="home-empty-column"');
+    expect(source).toContain('className="home-empty-column home-empty-input"');
     expect(styles).toMatch(/\.home-empty-column\s*{[^}]*width:\s*clamp\(min\(100%,\s*40rem\),\s*62cqw,\s*var\(--home-column-max,\s*50rem\)\);/s);
     expect(styles).toMatch(/\.home-empty-column\s*{[^}]*max-width:\s*min\(\s*100%,\s*max\(calc\(100cqw - 2 \* var\(--agent-column-min-gap,\s*80px\)\),\s*min\(100%,\s*20rem\)\)\s*\);/s);
     expect(styles).toMatch(/\.agent-conversation-content\s*{[^}]*--agent-conversation-track:\s*min\(832px,\s*100cqw\);[^}]*width:\s*calc\(var\(--agent-conversation-track\) - 2 \* var\(--agent-conversation-inset\)\);/s);
@@ -1173,12 +1178,13 @@ describe("HomePage", () => {
     expect(html).toContain('data-testid="agent-file-icon-docx"');
     expect(html).toContain('data-testid="agent-file-icon-xlsx"');
     expect(html).toContain('data-testid="agent-file-icon-pptx"');
-    expect(html).toContain('data-testid="agent-file-icon-file"');
     expect(html).toContain("agent-attachment-card__file-tile--pdf");
     expect(html).toContain("agent-attachment-card__file-tile--docx");
     expect(html).toContain("agent-attachment-card__file-tile--xlsx");
     expect(html).toContain("agent-attachment-card__file-tile--pptx");
-    expect(html).toContain("agent-attachment-card__file-tile--file");
+    expect(html).toContain('data-neutral-file-kind="text"');
+    expect(html).toContain('data-neutral-file-kind="data"');
+    expect(html).toContain('data-neutral-file-kind="sheet"');
     expect(html).toContain('aria-label="PDF file"');
     expect(html).toContain('aria-label="Word document"');
     expect(html).toContain('aria-label="Spreadsheet file"');

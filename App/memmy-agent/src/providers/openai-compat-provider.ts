@@ -1,3 +1,4 @@
+import { chatExceptions, protocolScope, protocolPreferenceKey, rejectsProtocol, responsesState } from "./protocol-preference.js";
 import { requestTiming } from "../utils/request-timing.js";
 import crypto from "crypto";
 import OpenAI from "openai";
@@ -7,6 +8,7 @@ import {
   isProviderAbortError,
   LLMProvider,
   LLMResponse,
+  GenerationSettings,
   providerAbortOptions,
   ToolCallRequest,
 } from "./base.js";
@@ -16,12 +18,8 @@ import {
   convertTools,
   parseResponseOutput,
 } from "./openai-responses/index.js";
-import {
-  chatCompletionsModelForcesNoneReasoning,
-  customModelUsesMaxCompletionTokens,
-} from "./custom-provider.js";
+import { customModelUsesMaxCompletionTokens } from "./custom-provider.js";
 import { memmyAccountNoneThinkingStyle } from "./memmy-account.js";
-import { getModelInputModalities } from "./model-input-capabilities.js";
 import { OPENROUTER_ATTRIBUTION_HEADERS } from "./openrouter-attribution.js";
 import {
   classifyQuotaExhaustion,
@@ -39,6 +37,7 @@ const ALLOWED_MSG_KEYS = new Set([
   "name",
   "reasoning_content",
   "extra_content",
+  "memmy_protocol_state",
 ]);
 const STANDARD_TC_KEYS = new Set(["id", "call_id", "type", "index", "function", "name", "arguments"]);
 const STANDARD_FN_KEYS = new Set(["name", "arguments"]);
@@ -57,9 +56,12 @@ const GATEWAY_REASONING_STYLE_MAP: Record<string, (effort: string) => Record<str
   reasoning_effort: (effort) => ({ reasoning: { effort } }),
 };
 const OPENAI_COMPAT_REQUEST_TIMEOUT_S = 300.0;
+// These Chat parameters have no equivalent Responses semantics.
+const CHAT_ONLY_PARAMETERS = [
+  "stop", "frequency_penalty", "presence_penalty", "logprobs", "top_logprobs", "logit_bias",
+  "seed", "modalities", "audio", "prediction", "functions", "function_call",
+];
 
-export const RESPONSES_FAILURE_THRESHOLD = 3;
-export const RESPONSES_PROBE_INTERVAL_S = 300;
 
 export function floatEnv(name: string, defaultValue: number): number {
   const raw = process.env[name];
@@ -71,6 +73,8 @@ export function floatEnv(name: string, defaultValue: number): number {
 export function openaiCompatTimeoutS(): number {
   return floatEnv("MEMMY_AGENT_OPENAI_COMPAT_TIMEOUT_S", OPENAI_COMPAT_REQUEST_TIMEOUT_S);
 }
+
+type ProtocolAttempt = { accepted: boolean; completed: boolean };
 
 type ChatArgs = Parameters<LLMProvider["chat"]>[0] & {
   onContentDelta?: (delta: string) => Promise<void> | void;
@@ -106,8 +110,6 @@ export class OpenAICompatProvider extends LLMProvider {
   private readonly explicitNoAuth: boolean;
   private readonly independent: boolean;
   isLocal: boolean;
-  responsesFailures: Record<string, number> = {};
-  responsesTrippedAt: Record<string, number> = {};
 
   constructor(
     apiKeyOrInit:
@@ -148,9 +150,6 @@ export class OpenAICompatProvider extends LLMProvider {
 
     this.defaultModel = this.model ?? "gpt-4o";
     const name = specName(this.spec);
-    if (this.apiType !== "auto" && name !== "openai" && name !== "custom") {
-      this.apiType = "auto";
-    }
     if (this.apiKey && this.spec?.envKey && !this.independent) this.setupEnv(this.apiKey, this.apiBase);
 
     const effectiveBase = this.apiBase || resolveDefaultApiBase(this.spec);
@@ -298,7 +297,7 @@ export class OpenAICompatProvider extends LLMProvider {
 
   static handleError(error: any, spec: any = null, apiBase: string | null = null): LLMResponse {
     const response = error?.response;
-    const headers = response?.headers ?? {};
+    const headers = error?.headers ?? response?.headers ?? {};
     const body = error?.body ?? error?.doc ?? response?.text ?? error?.message ?? "";
     const shouldRetryHeader = headerValue(headers, "x-should-retry");
     const shouldRetry =
@@ -489,12 +488,13 @@ export class OpenAICompatProvider extends LLMProvider {
   sanitizeMessages(
     messages: Record<string, any>[],
     model = this.getDefaultModel(),
+    inputModalities?: readonly string[] | null,
   ): Record<string, any>[] {
     const sanitized = LLMProvider.sanitizeRequestMessages(messages, ALLOWED_MSG_KEYS);
     const idMap = new Map<string, string>();
     const pendingToolIds = new Map<string, string[]>();
     const forceStringContent = specName(this.spec) === "deepseek"
-      && !getModelInputModalities(model).includes("image");
+      && inputModalities != null && !inputModalities.includes("image");
     const normalizeToolIds = this.shouldNormalizeToolCallIds();
 
     const mapId = (value: any): any => {
@@ -613,7 +613,7 @@ export class OpenAICompatProvider extends LLMProvider {
     }
     if (this.spec?.stripModelPrefix) modelName = modelName.split("/").at(-1) ?? modelName;
 
-    const reasoningEffort = args.reasoningEffort ?? null;
+    const reasoningEffort = args.modelCapabilities ? args.modelCapabilities.reasoningEffort ?? null : args.reasoningEffort ?? null;
     const semanticEffort =
       typeof reasoningEffort === "string"
         ? reasoningEffort.toLowerCase() === "minimum"
@@ -622,19 +622,21 @@ export class OpenAICompatProvider extends LLMProvider {
         : null;
     let wireEffort = reasoningEffort;
     if (specName(this.spec) === "dashscope" && semanticEffort === "minimal") wireEffort = "minimum";
-    const maxTokens = Math.max(1, args.maxTokens ?? this.generation.maxTokens);
+    const maxTokens = LLMProvider.requestMaxTokens(args, this.generation);
     const temperature = args.temperature ?? this.generation.temperature;
     const kwargs: Record<string, any> = {
       model: modelName,
-      messages: this.sanitizeMessages(messages, modelName),
+      messages: this.sanitizeMessages(messages, modelName, args.modelCapabilities ? args.modelCapabilities.inputModalities ?? null : undefined),
     };
 
     if (OpenAICompatProvider.supportsTemperature(modelName, reasoningEffort))
       kwargs.temperature = temperature;
     const useMaxCompletionTokens = Boolean(this.spec?.supportsMaxCompletionTokens)
       || (specName(this.spec) === "custom" && customModelUsesMaxCompletionTokens(modelName));
-    if (useMaxCompletionTokens) kwargs.max_completion_tokens = maxTokens;
-    else kwargs.max_tokens = maxTokens;
+    if (maxTokens !== undefined) {
+      if (useMaxCompletionTokens) kwargs.max_completion_tokens = Math.max(1, maxTokens);
+      else kwargs.max_tokens = Math.max(1, maxTokens);
+    }
 
     for (const [pattern, overrides] of this.spec?.modelOverrides ?? []) {
       if (modelName.toLowerCase().includes(String(pattern).toLowerCase())) {
@@ -643,18 +645,22 @@ export class OpenAICompatProvider extends LLMProvider {
       }
     }
 
-    const chatCompletionsGptWithTools = this.apiType === "chatCompletions"
-      && Boolean(tools?.length)
-      && chatCompletionsModelForcesNoneReasoning(modelName);
-    const providerName = specName(this.spec);
-    const thinkingOff = !wireEffort || semanticEffort === "none";
-    const forceNoneReasoningEffort = chatCompletionsGptWithTools && (
-      providerName === "openai" || (providerName === "custom" && thinkingOff)
+    if (args.modelCapabilities) {
+      delete kwargs.max_tokens;
+      delete kwargs.max_completion_tokens;
+      if (maxTokens !== undefined) kwargs[useMaxCompletionTokens ? "max_completion_tokens" : "max_tokens"] = Math.max(1, maxTokens);
+    }
+    const forceCatalogToolCompatibility = Boolean(
+      args.modelCapabilities
+      && this.apiType === "chatCompletions"
+      && tools?.length
+      && specName(this.spec) === "openai"
+      && (/gpt-/i.test(modelName) || /(?:^|\/)o[134](?:-|$)/i.test(modelName)),
     );
-    if (forceNoneReasoningEffort) kwargs.reasoning_effort = "none";
-    else if (wireEffort && semanticEffort !== "none") kwargs.reasoning_effort = wireEffort;
-    if (reasoningEffort !== null) {
-      const thinkingEnabled = semanticEffort !== "none" && semanticEffort !== "minimal";
+    if (forceCatalogToolCompatibility) kwargs.reasoning_effort = "none";
+    else if (wireEffort && (semanticEffort !== "none" || this.apiType === "chatCompletions")) kwargs.reasoning_effort = wireEffort;
+    if (reasoningEffort !== null || args.modelCapabilities?.thinkingEnabled !== undefined) {
+      const thinkingEnabled = args.modelCapabilities?.thinkingEnabled ?? (semanticEffort !== "none" && semanticEffort !== "minimal");
       const styles = thinkingStylesFor(this.spec, modelName);
       const memmyStyle = memmyAccountNoneThinkingStyle(
         specName(this.spec),
@@ -666,6 +672,9 @@ export class OpenAICompatProvider extends LLMProvider {
       for (const style of styles) {
         const extra = thinkingExtraBody(style, thinkingEnabled);
         if (extra) kwargs.extra_body = deepMerge(kwargs.extra_body ?? {}, extra);
+      }
+      if (semanticEffort === "none" && !styles.length && !this.spec?.gatewayReasoningStyle) {
+        kwargs.reasoning_effort = wireEffort;
       }
       const gatewayStyle = this.spec?.gatewayReasoningStyle ?? "";
       if (gatewayStyle && modelThinkingStyle(modelName) && semanticEffort) {
@@ -696,81 +705,81 @@ export class OpenAICompatProvider extends LLMProvider {
       }
     }
 
+    if (specName(this.spec) !== "memmy_account") {
+      for (const message of kwargs.messages) delete message.memmy_protocol_state;
+    }
     if (Object.keys(this.extraBody).length) {
       kwargs.extra_body = deepMerge(kwargs.extra_body ?? {}, this.extraBody);
     }
     return kwargs;
   }
 
-  shouldUseResponsesApi(
-    model: string | null = null,
-    reasoningEffort: string | null = null,
-  ): boolean {
-    const apiType = this.apiType;
-    const activeSpec = this.spec;
-    const effectiveBase = this.effectiveBase;
-    const name = specName(activeSpec);
-    if (apiType === "chatCompletions") return false;
-    if (name && !["openai", "github_copilot"].includes(name)) return false;
-    if (apiType === "responses") return true;
-    if (name !== "github_copilot" && !isDirectOpenAIBase(effectiveBase)) return false;
-    const modelName = String(model ?? this.defaultModel).toLowerCase();
-    const wants = Boolean(
-      (reasoningEffort && reasoningEffort.toLowerCase() !== "none") ||
-      ["gpt-5", "o1", "o3", "o4"].some((token) => modelName.includes(token)),
-    );
-    return wants && this.responsesCircuitAllowsProbe(model, reasoningEffort);
-  }
-
-  responsesCircuitAllowsProbe(
-    model: string | null = null,
-    reasoningEffort: string | null = null,
-  ): boolean {
-    const key = responsesCircuitKey(model, this.defaultModel, reasoningEffort);
-    const failures = this.responsesFailures[key] ?? 0;
-    if (failures >= RESPONSES_FAILURE_THRESHOLD) {
-      const tripped = this.responsesTrippedAt[key] ?? 0;
-      if (Date.now() / 1000 - tripped < RESPONSES_PROBE_INTERVAL_S) return false;
+  shouldUseResponsesApi(model: string | null = null, reasoningEffort: string | null = null): boolean {
+    if (specName(this.spec) === "memmy_account") return false;
+    if (this.apiType !== "auto") return this.apiType === "responses";
+    if (this.isLocal) return false;
+    // Copilot has its own provider contract, rather than a generic OpenAI-compatible endpoint.
+    if (specName(this.spec) === "github_copilot") {
+      return Boolean((reasoningEffort && reasoningEffort !== "none")
+        || ["gpt-5", "o1", "o3", "o4"].some(token => String(model ?? this.defaultModel).includes(token)));
     }
     return true;
   }
 
-  recordResponsesFailure(model: string | null = null, reasoningEffort: string | null = null): void {
-    const key = responsesCircuitKey(model, this.defaultModel, reasoningEffort);
-    const count = (this.responsesFailures[key] ?? 0) + 1;
-    this.responsesFailures[key] = count;
-    if (count >= RESPONSES_FAILURE_THRESHOLD) {
-      this.responsesTrippedAt[key] = Date.now() / 1000;
+  private responsesScope(args: ChatArgs): string {
+    const headers = Object.fromEntries(Object.entries(this.defaultHeaders)
+      .filter(([name]) => !["x-session-affinity", "x-request-id", "traceparent", "tracestate"].includes(name.toLowerCase()))
+      .map(([name, value]) => [name.toLowerCase(), value]));
+    return protocolScope({ version: 1, base: this.effectiveBase?.replace(/\/+$/, ""),
+      model: this.normalizeModel(args.model ?? this.defaultModel), key: this.apiKeyForClient, headers });
+  }
+
+  private async negotiate(args: ChatArgs, streaming: boolean, operation: (responses: boolean, attempt: ProtocolAttempt) => Promise<LLMResponse>): Promise<LLMResponse> {
+    const imageInputError = this.imageInputUnsupportedResponse(args);
+    if (imageInputError) return imageInputError;
+    await this.ensureClient();
+    const scope = this.responsesScope(args);
+    const pinned = args.messages.some(message => message.role === "assistant" && responsesState(message.memmy_protocol_state, scope));
+    if (pinned && this.apiType === "chatCompletions" && specName(this.spec) !== "memmy_account") {
+      return new LLMResponse({ content: "This conversation requires Responses to preserve its reasoning and tool state.",
+        finishReason: "error", errorShouldRetry: false });
     }
-  }
-
-  recordResponsesSuccess(model: string | null = null, reasoningEffort: string | null = null): void {
-    const key = responsesCircuitKey(model, this.defaultModel, reasoningEffort);
-    delete this.responsesFailures[key];
-    delete this.responsesTrippedAt[key];
-  }
-
-  static shouldFallbackFromResponsesError(error: any): boolean {
-    const status =
-      error?.statusCode ??
-      error?.statusCode ??
-      error?.response?.statusCode ??
-      error?.response?.status;
-    if (![400, 404, 422].includes(Number(status))) return false;
-    const body = String(
-      error?.body ?? error?.doc ?? error?.response?.text ?? error?.message ?? "",
-    ).toLowerCase();
-    return [
-      "responses",
-      "response api",
-      "max_output_tokens",
-      "instructions",
-      "previous_response",
-      "unsupported",
-      "not supported",
-      "unknown parameter",
-      "unrecognized request argument",
-    ].some((marker) => body.includes(marker));
+    const automatic = this.apiType === "auto" && !this.isLocal
+      && !["memmy_account", "github_copilot"].includes(specName(this.spec));
+    const key = protocolPreferenceKey(scope, { ...flattenChatExtraBody(this.buildKwargs(args)), stream: streaming });
+    const chatOnlyParameters = CHAT_ONLY_PARAMETERS.some(key => this.extraBody[key] != null)
+      || (this.extraBody.n != null && this.extraBody.n !== 1);
+    const reasoningEffort = args.modelCapabilities ? args.modelCapabilities.reasoningEffort ?? null : args.reasoningEffort ?? null;
+    let useResponses = pinned || (this.shouldUseResponsesApi(args.model, reasoningEffort)
+      && !(automatic && chatOnlyParameters)
+      && !(automatic && chatExceptions.has(key)));
+    for (let index = 0; index < 2; index++) {
+      const attempt: ProtocolAttempt = { accepted: false, completed: false };
+      try {
+        if (args.signal?.aborted) throw createProviderAbortError();
+        const result = await operation(useResponses, attempt);
+        if (!useResponses && index === 1 && attempt.completed && result.finishReason !== "error" && !args.signal?.aborted) {
+          chatExceptions.remember(key);
+        }
+        if (result.finishReason === "error" && (attempt.accepted || index === 1)) result.errorShouldRetry = false;
+        return result;
+      } catch (error) {
+        if (isProviderAbortError(error)) throw error;
+        if (automatic && !chatOnlyParameters && !pinned && !attempt.accepted && index === 0 && !args.signal?.aborted && rejectsProtocol(error, useResponses)) {
+          if (!useResponses) chatExceptions.forget(key);
+          useResponses = !useResponses;
+          continue;
+        }
+        const result = OpenAICompatProvider.handleError(error, this.spec, this.apiBase);
+        if (error instanceof Error && error.message === "stream_idle_timeout") {
+          result.content = `Error calling LLM: stream stalled for more than ${Number(process.env.MEMMY_AGENT_STREAM_IDLE_TIMEOUT_S ?? "90")} seconds`;
+          result.errorKind = "timeout";
+        }
+        if (attempt.accepted || index === 1) result.errorShouldRetry = false;
+        return result;
+      }
+    }
+    throw new Error("Unreachable protocol attempt");
   }
 
   buildResponsesBody(args: ChatArgs): Record<string, any> {
@@ -779,29 +788,32 @@ export class OpenAICompatProvider extends LLMProvider {
     const sanitizedMessages = this.sanitizeMessages(
       LLMProvider.sanitizeEmptyContent(args.messages),
       modelName,
+      args.modelCapabilities ? args.modelCapabilities.inputModalities ?? null : undefined,
     );
-    const [instructions, input] = convertMessages(sanitizedMessages);
-    const reasoningEffort = args.reasoningEffort ?? null;
+    const [instructions, input] = convertMessages(sanitizedMessages, this.responsesScope(args));
+    const reasoningEffort = args.modelCapabilities ? args.modelCapabilities.reasoningEffort ?? null : args.reasoningEffort ?? null;
     let body: Record<string, any> = {
       model: modelName,
       instructions: instructions || null,
       input,
-      max_output_tokens: Math.max(1, args.maxTokens ?? this.generation.maxTokens),
       store: false,
       stream: false,
     };
+    const maxTokens = LLMProvider.requestMaxTokens(args, this.generation);
+    if (maxTokens !== undefined) body.max_output_tokens = Math.max(1, maxTokens);
     if (OpenAICompatProvider.supportsTemperature(modelName, reasoningEffort))
       body.temperature = args.temperature ?? this.generation.temperature;
-    if (reasoningEffort && reasoningEffort.toLowerCase() !== "none") {
-      body.reasoning = { effort: reasoningEffort };
-      body.include = ["reasoning.encrypted_content"];
-    }
+    body.include = ["reasoning.encrypted_content"];
+    if (reasoningEffort) body.reasoning = { effort: reasoningEffort };
     const tools = args.tools ?? null;
     if (tools?.length) {
       body.tools = convertTools(tools);
       body.tool_choice = args.toolChoice ?? "auto";
     }
     if (Object.keys(this.extraBody).length) body = mergeResponsesExtraBody(body, this.extraBody);
+    if (body.tool_choice?.type === "function" && body.tool_choice.function) {
+      body.tool_choice = { type: "function", name: body.tool_choice.function.name };
+    }
     return body;
   }
 
@@ -925,11 +937,13 @@ export class OpenAICompatProvider extends LLMProvider {
 
     let content: string | null = null;
     let reasoningContent: string | null = null;
+    let protocolState: Record<string, any> | null = null;
     let finishReason = "stop";
     const rawToolCalls: any[] = [];
     for (const choice of choices) {
       const choiceMap = OpenAICompatProvider.maybeMapping(choice) ?? {};
       const msg = OpenAICompatProvider.maybeMapping(choiceMap.message ?? choice?.message) ?? {};
+      protocolState = responsesState(msg.memmy_protocol_state) ?? protocolState;
       if (choiceMap.finish_reason) finishReason = String(choiceMap.finish_reason);
       if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
         rawToolCalls.push(...msg.tool_calls);
@@ -955,6 +969,7 @@ export class OpenAICompatProvider extends LLMProvider {
       finishReason,
       usage: OpenAICompatProvider.extractUsage(response),
       reasoningContent,
+      protocolState,
     });
   }
 
@@ -978,6 +993,7 @@ export class OpenAICompatProvider extends LLMProvider {
     >();
     let finishReason = "stop";
     let usage: Record<string, any> = {};
+    let protocolState: Record<string, any> | null = null;
 
     const accumToolCall = (toolCall: any, idxHint: number) => {
       const index = Number(getValue(toolCall, "index") ?? idxHint);
@@ -1026,6 +1042,7 @@ export class OpenAICompatProvider extends LLMProvider {
       const choice = OpenAICompatProvider.maybeMapping(choices[0]) ?? {};
       if (choice.finish_reason) finishReason = String(choice.finish_reason);
       const delta = OpenAICompatProvider.maybeMapping(choice.delta) ?? {};
+      protocolState = responsesState(delta.memmy_protocol_state) ?? protocolState;
       const text = OpenAICompatProvider.extractTextContent(delta.content);
       if (text) contentParts.push(text);
       const reasoning = OpenAICompatProvider.extractTextContent(
@@ -1058,6 +1075,7 @@ export class OpenAICompatProvider extends LLMProvider {
       finishReason,
       usage,
       reasoningContent: reasoningParts.join("") || null,
+      protocolState,
     });
   }
 
@@ -1065,6 +1083,18 @@ export class OpenAICompatProvider extends LLMProvider {
     if (this.client) return this.client;
     this.buildClient();
     return this.client;
+  }
+
+  withExtraBody(extraBody: Record<string, any>): OpenAICompatProvider {
+    const scoped = new OpenAICompatProvider({
+      apiKey: this.apiKey, apiBase: this.apiBase, defaultModel: this.defaultModel,
+      spec: this.spec, extraHeaders: this.extraHeaders, extraBody,
+      apiType: this.apiType, inheritProviderDefaults: !this.independent,
+    });
+    scoped.client = this.client;
+    scoped.defaultHeaders = { ...this.defaultHeaders };
+    scoped.generation = new GenerationSettings(this.generation);
+    return scoped;
   }
 
   getDefaultModel(): string {
@@ -1097,11 +1127,11 @@ export class OpenAICompatProvider extends LLMProvider {
   }
 
   private imageInputUnsupportedResponse(args: ChatArgs): LLMResponse | null {
-    const model = args.model ?? this.getDefaultModel();
     if (
       specName(this.spec) !== "deepseek"
       || !LLMProvider.containsImageInput(args.messages)
-      || getModelInputModalities(model).includes("image")
+      || args.modelCapabilities?.inputModalities == null
+      || args.modelCapabilities?.inputModalities?.includes("image")
     ) {
       return null;
     }
@@ -1116,88 +1146,55 @@ export class OpenAICompatProvider extends LLMProvider {
     });
   }
 
-  async chat(args: ChatArgs): Promise<LLMResponse> {
-    const imageInputError = this.imageInputUnsupportedResponse(args);
-    if (imageInputError) return imageInputError;
-    await this.ensureClient();
-    const model = args.model ?? this.getDefaultModel();
-    const reasoningEffort = args.reasoningEffort ?? null;
-    try {
-      if (args.signal?.aborted) throw createProviderAbortError();
-      if (this.shouldUseResponsesApi(model, reasoningEffort)) {
-        try {
-          const body = this.buildResponsesBody(args);
-          const options = providerAbortOptions(args.signal);
-          const response = options
-            ? await this.client.responses.create(body, options as any)
-            : await this.client.responses.create(body);
-          this.recordResponsesSuccess(model, reasoningEffort);
-          return parseResponseOutput(response, specName(this.spec));
-        } catch (responsesError) {
-          if (isProviderAbortError(responsesError)) throw responsesError;
-          if (specName(this.spec) === "github_copilot" || this.apiType === "responses")
-            throw responsesError;
-          if (!OpenAICompatProvider.shouldFallbackFromResponsesError(responsesError))
-            throw responsesError;
-          this.recordResponsesFailure(model, reasoningEffort);
-        }
-      }
-      const kwargs = flattenChatExtraBody(this.buildKwargs(args));
-      if (args.signal?.aborted) throw createProviderAbortError();
-      const options = providerAbortOptions(args.signal);
-      const response = options
-        ? await this.client.chat.completions.create(kwargs as any, options as any)
-        : await this.client.chat.completions.create(kwargs as any);
-      return this.parseResponse(response);
-    } catch (error) {
-      if (isProviderAbortError(error)) throw error;
-      return OpenAICompatProvider.handleError(error, this.spec, this.apiBase);
+  private requestOptions(args: ChatArgs): Record<string, any> | undefined {
+    const abort = providerAbortOptions(args.signal);
+    if (specName(this.spec) === "memmy_account" && args.taskType === "literature-review"
+      && (args.model ?? this.getDefaultModel()) === "agent_chat") {
+      return { ...abort, headers: { "X-Agent-Task": "literature-review" } };
     }
+    return abort;
+  }
+
+  async chat(args: ChatArgs): Promise<LLMResponse> {
+    return this.negotiate(args, false, async (responses, attempt) => {
+      const body = responses ? this.buildResponsesBody(args) : flattenChatExtraBody(this.buildKwargs(args));
+      const options = this.requestOptions(args);
+      const api = responses ? this.client.responses : this.client.chat.completions;
+      const pending = options ? api.create(body, options) : api.create(body);
+      // APIPromise resolves only after parsing the body. Record acceptance at headers,
+      // so a subsequent body-read failure cannot replay an already accepted generation.
+      if (typeof pending.asResponse === "function") {
+        await pending.asResponse();
+        attempt.accepted = true;
+      }
+      const response = await pending;
+      attempt.accepted = true;
+      if (responses) return parseResponseOutput(response, specName(this.spec), this.responsesScope(args));
+      attempt.completed = Array.isArray(response?.choices) && response.choices.length > 0
+        && response.choices.every((choice: any) => ["stop", "tool_calls", "function_call"].includes(choice.finish_reason))
+        && !response.error;
+      return this.parseResponse(response);
+    });
   }
 
   async chatStream(args: ChatArgs): Promise<LLMResponse> {
-    const imageInputError = this.imageInputUnsupportedResponse(args);
-    if (imageInputError) return imageInputError;
-    await this.ensureClient();
-    const model = args.model ?? this.getDefaultModel();
-    const reasoningEffort = args.reasoningEffort ?? null;
-    const idleTimeoutS = Number(process.env.MEMMY_AGENT_STREAM_IDLE_TIMEOUT_S ?? "90");
-    const onContentDelta = args.onContentDelta;
-    const onThinkingDelta = args.onThinkingDelta;
-    const onToolCallDelta = args.onToolCallDelta;
-    try {
-      if (args.signal?.aborted) throw createProviderAbortError();
-      if (this.shouldUseResponsesApi(model, reasoningEffort)) {
-        try {
-          const body = { ...this.buildResponsesBody(args), stream: true };
-          const options = providerAbortOptions(args.signal);
-          const stream = options
-            ? await this.client.responses.create(body as any, options as any)
-            : await this.client.responses.create(body as any);
-          const [content, toolCalls, finishReason, usage, reasoningContent] =
-            await consumeSdkStream(timedAsyncIterable(stream, idleTimeoutS), {
-              onContentDelta,
-              onToolCallDelta,
-              signal: args.signal ?? null,
-            });
-          this.recordResponsesSuccess(model, reasoningEffort);
-          return new LLMResponse({
-            content: content || null,
-            toolCalls,
-            finishReason,
-            usage,
-            reasoningContent,
+    return this.negotiate(args, true, async (responses, attempt) => {
+      const idleTimeoutS = Number(process.env.MEMMY_AGENT_STREAM_IDLE_TIMEOUT_S ?? "90");
+      const onContentDelta = args.onContentDelta;
+      const onThinkingDelta = args.onThinkingDelta;
+      const onToolCallDelta = args.onToolCallDelta;
+      if (responses) {
+        const body = { ...this.buildResponsesBody(args), stream: true };
+        const options = this.requestOptions(args);
+        const stream = options ? await this.client.responses.create(body, options) : await this.client.responses.create(body);
+        attempt.accepted = true;
+        const [content, toolCalls, finishReason, usage, reasoningContent, items] =
+          await consumeSdkStream(timedAsyncIterable(stream, idleTimeoutS), {
+            onContentDelta, onThinkingDelta, onToolCallDelta, signal: args.signal ?? null,
           });
-        } catch (responsesError) {
-          if (isProviderAbortError(responsesError)) throw responsesError;
-          if (specName(this.spec) === "github_copilot" || this.apiType === "responses")
-            throw responsesError;
-          if (!OpenAICompatProvider.shouldFallbackFromResponsesError(responsesError))
-            throw responsesError;
-          this.recordResponsesFailure(model, reasoningEffort);
-        }
+        return new LLMResponse({ content: content || null, toolCalls, finishReason, usage, reasoningContent,
+          protocolState: { version: 1, protocol: "responses", scope: this.responsesScope(args), items } });
       }
-
       const kwargs: Record<string, any> = flattenChatExtraBody({
         ...this.buildKwargs(args),
         stream: true,
@@ -1207,11 +1204,12 @@ export class OpenAICompatProvider extends LLMProvider {
         kwargs.extra_body = { ...(kwargs.extra_body ?? {}), tool_stream: true };
       }
       if (args.signal?.aborted) throw createProviderAbortError();
-      const options = providerAbortOptions(args.signal);
+      const options = this.requestOptions(args);
       requestTiming("model.http_start");
       const stream = options
         ? await this.client.chat.completions.create(kwargs as any, options as any)
         : await this.client.chat.completions.create(kwargs as any);
+      attempt.accepted = true;
       requestTiming("model.http_headers");
       const chunks: any[] = [];
       for await (const chunk of timedAsyncIterable(stream, idleTimeoutS)) {
@@ -1253,19 +1251,13 @@ export class OpenAICompatProvider extends LLMProvider {
           }
         }
       }
-      return OpenAICompatProvider.parseChunks(chunks, this.spec);
-    } catch (error) {
-      if (isProviderAbortError(error)) throw error;
-      if ((error as Error).message === "stream_idle_timeout") {
-        return new LLMResponse({
-          content: `Error calling LLM: stream stalled for more than ${idleTimeoutS} seconds`,
-          finishReason: "error",
-          errorKind: "timeout",
-        });
-      }
-      return OpenAICompatProvider.handleError(error, this.spec, this.apiBase);
-    }
+      const result = OpenAICompatProvider.parseChunks(chunks, this.spec);
+      attempt.completed = chunks.some(chunk => chunk?.choices?.some((choice: any) =>
+        ["stop", "tool_calls", "function_call"].includes(choice.finish_reason)));
+      return result;
+    });
   }
+
 }
 
 function sessionAffinity(): string {
@@ -1458,22 +1450,6 @@ export function isLocalEndpoint(spec: any, apiBase?: string | null): boolean {
   return false;
 }
 
-export function isDirectOpenAIBase(apiBase?: string | null): boolean {
-  if (!apiBase) return true;
-  const normalized = apiBase.trim().toLowerCase().replace(/\/+$/, "");
-  return normalized.includes("api.openai.com") && !normalized.includes("openrouter");
-}
-
-export function responsesCircuitKey(
-  model: string | null | undefined,
-  defaultModel: string,
-  reasoningEffort: string | null | undefined,
-): string {
-  const modelName = String(model ?? defaultModel).toLowerCase();
-  const effort = typeof reasoningEffort === "string" ? reasoningEffort.toLowerCase() : "";
-  return `${modelName}:${effort}`;
-}
-
 export function deepMerge(
   base: Record<string, any>,
   override: Record<string, any>,
@@ -1514,16 +1490,31 @@ export function mergeResponsesExtraBody(
   body: Record<string, any>,
   extraBody: Record<string, any>,
 ): Record<string, any> {
-  const regularExtra = Object.fromEntries(
-    Object.entries(extraBody).filter(([key]) => !["include", "tools"].includes(key)),
-  );
+  const { include, tools, response_format, max_tokens, max_completion_tokens, reasoning_effort, ...regularExtra } = extraBody;
+  if (regularExtra.n === 1) delete regularExtra.n;
+  if (regularExtra.stream_options?.include_usage != null) {
+    const { include_usage: _includeUsage, ...options } = regularExtra.stream_options;
+    if (Object.keys(options).length) regularExtra.stream_options = options;
+    else delete regularExtra.stream_options;
+  }
+  if (response_format != null) {
+    const format = response_format.type === "json_schema"
+      ? { ...response_format.json_schema, type: "json_schema" } : response_format;
+    regularExtra.text = { format, ...regularExtra.text };
+  }
+  const maxTokens = max_completion_tokens ?? max_tokens;
+  if (maxTokens != null && regularExtra.max_output_tokens == null) regularExtra.max_output_tokens = maxTokens;
+  if (reasoning_effort != null) regularExtra.reasoning = deepMerge({ effort: reasoning_effort }, regularExtra.reasoning ?? {});
   const merged = deepMerge(body, regularExtra);
-  if ("include" in extraBody) merged.include = mergeUniqueList(body.include, extraBody.include);
+  if ("include" in extraBody) merged.include = mergeUniqueList(body.include, include);
   if ("tools" in extraBody) {
+    const extraTools = Array.isArray(tools)
+      ? tools.flatMap(tool => tool?.type === "function" && tool.function ? convertTools([tool]) : [tool])
+      : tools;
     merged.tools =
-      Array.isArray(body.tools) && Array.isArray(extraBody.tools)
-        ? [...body.tools, ...extraBody.tools]
-        : extraBody.tools;
+      Array.isArray(body.tools) && Array.isArray(extraTools)
+        ? [...body.tools, ...extraTools]
+        : extraTools;
   }
   return merged;
 }
