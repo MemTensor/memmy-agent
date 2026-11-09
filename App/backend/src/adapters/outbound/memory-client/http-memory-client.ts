@@ -29,6 +29,8 @@ import {
   PanelItemsOutputSchema,
   PanelOverviewOutputSchema,
   PanelTasksOutputSchema,
+  TaskExperienceProcessingSchema,
+  RetryTaskExperienceProcessingSchema,
   OpenSessionOutputSchema,
   SearchOutputSchema,
   StartTurnOutputSchema,
@@ -332,6 +334,19 @@ export function createHttpMemoryClient(
 
     async panelTasks(input, context) {
       return request("GET", "panelTasks", PanelTasksOutputSchema, { query: input, context });
+    },
+
+    async taskExperienceProcessing(taskId, context) {
+      return request("GET", "taskExperienceProcessing", TaskExperienceProcessingSchema, {
+        params: { id: taskId }, context, maxRetries: 0
+      });
+    },
+
+    async retryTaskExperienceProcessing(taskId, context) {
+      // A lost response must not silently start another paid recovery round.
+      return request("POST", "retryTaskExperienceProcessing", RetryTaskExperienceProcessingSchema, {
+        params: { id: taskId }, body: {}, context, maxRetries: 0
+      });
     },
 
     async deletePanelTask(taskId, context) {

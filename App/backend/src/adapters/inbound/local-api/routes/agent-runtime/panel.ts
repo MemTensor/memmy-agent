@@ -46,6 +46,24 @@ export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRout
     })
   );
 
+  app.get(
+    "/api/v1/panel/tasks/:id/experience-processing",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+      return reply.send(await deps.services.panel.taskExperienceProcessing(id, runtimeContextFromRequest(request, deps.timeZone)));
+    })
+  );
+
+  app.post(
+    "/api/v1/panel/tasks/:id/experience-processing/retry",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+      return reply.send(await deps.services.panel.retryTaskExperienceProcessing(id, runtimeContextFromRequest(request, deps.timeZone)));
+    })
+  );
+
   app.delete(
     "/api/v1/panel/tasks/:id",
     { preHandler: deps.authenticateRuntimeToken },

@@ -25,6 +25,8 @@ import {
   PanelOverviewOutputSchema,
   PanelTasksInputSchema,
   PanelTasksOutputSchema,
+  TaskExperienceProcessingSchema,
+  RetryTaskExperienceProcessingSchema,
   SearchInputSchema,
   SearchOutputSchema,
   StartTurnInputSchema,
@@ -54,6 +56,8 @@ import {
   type PanelOverviewOutput,
   type PanelTasksInput,
   type PanelTasksOutput,
+  type TaskExperienceProcessing,
+  type RetryTaskExperienceProcessing,
   type SearchInput,
   type SearchOutput,
   type StartTurnInput,
@@ -67,12 +71,7 @@ import { z } from "zod";
 const ApproveObservedSkillOutputSchema = z.object({ id: z.string(), status: z.literal("activated"), serverTime: z.string() });
 const UpdateObservedSkillOutputSchema = ApproveObservedSkillOutputSchema.extend({ version: z.number().int().positive() });
 
-const TaskExperienceProcessingSchema = z.object({
-  episodeId: z.string(), state: z.enum(["complete", "pending", "queued", "running", "failed", "blocked"]),
-  pendingCount: z.number().int().nonnegative(), canRetry: z.boolean(), jobId: z.string().optional(),
-  errorCode: z.enum(["invalid_model_output", "model_or_processing_failed", "task_changed"]).optional(), serverTime: z.string()
-});
-export type TaskExperienceProcessing = z.infer<typeof TaskExperienceProcessingSchema>;
+export type { TaskExperienceProcessing } from "@memmy/local-api-contracts";
 
 export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/health",
@@ -133,7 +132,7 @@ export interface MemoryRuntimeClient {
   listPanelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
   deletePanelTask(id: string): Promise<DeletePanelTaskOutput>;
   taskExperienceProcessing?(id: string): Promise<TaskExperienceProcessing>;
-  retryTaskExperienceProcessing?(id: string): Promise<TaskExperienceProcessing & { accepted: boolean }>;
+  retryTaskExperienceProcessing?(id: string): Promise<RetryTaskExperienceProcessing>;
 }
 
 export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRuntimeClient {
@@ -278,7 +277,7 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
     },
     async retryTaskExperienceProcessing(id) {
       return requestJson({ config, path: `/api/v1/panel/tasks/${encodeURIComponent(id)}/experience-processing/retry`,
-        schema: TaskExperienceProcessingSchema.extend({ accepted: z.boolean() }), body: {} });
+        schema: RetryTaskExperienceProcessingSchema, body: {} });
     },
     async deletePanelTask(id) {
       return requestJson({

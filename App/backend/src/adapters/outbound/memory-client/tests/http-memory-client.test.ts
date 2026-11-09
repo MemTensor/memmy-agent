@@ -12,6 +12,33 @@ afterEach(async () => {
 });
 
 describe("HttpMemoryClient", () => {
+  it("preserves task scope and does not replay an ambiguous experience recovery POST", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture", timeoutMs: 500, maxRetries: 3 }, {
+      fetchImpl: (async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify({ error: { code: "internal", message: "response lost", requestId: "test" } }), { status: 503 });
+      }) as typeof fetch
+    });
+    await expect(client.retryTaskExperienceProcessing("task/one", { userId: "owner", timeZone: "+08:00" })).rejects.toMatchObject({ status: 503 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://memory.test/api/v1/panel/tasks/task%2Fone/experience-processing/retry");
+    expect(calls[0]?.init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({});
+    const headers = new Headers(calls[0]?.init?.headers);
+    expect(headers.get("x-memmy-user-id")).toBe("owner");
+    expect(headers.get("x-memmy-time-zone")).toBe("+08:00");
+    expect(headers.get("authorization")).toBe("Bearer fixture");
+  });
+
+  it("rejects malformed experience status and retry responses", async () => {
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture", timeoutMs: 500, maxRetries: 0 }, {
+      fetchImpl: (async () => new Response(JSON.stringify({ episodeId: "task", state: "complete", pendingCount: -1, canRetry: true }), { status: 200 })) as typeof fetch
+    });
+    await expect(client.taskExperienceProcessing("task")).rejects.toMatchObject({ name: "ZodError" });
+    await expect(client.retryTaskExperienceProcessing("task")).rejects.toMatchObject({ name: "ZodError" });
+  });
+
   it("recognizes a healthy older service without desktop scan endpoints and does not retry its 404", async () => {
     const calls: string[] = [];
     const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture", timeoutMs: 500, maxRetries: 2 }, {
@@ -99,6 +126,8 @@ describe("HttpMemoryClient", () => {
       "/api/v1/panel/analysis",
       "/api/v1/panel/items",
       "/api/v1/panel/tasks",
+      "/api/v1/panel/tasks/:id/experience-processing",
+      "/api/v1/panel/tasks/:id/experience-processing/retry",
       "/api/v1/panel/tasks/:id"
     ]);
     expect(

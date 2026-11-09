@@ -32,6 +32,8 @@ import type {
   PanelOverviewOutput,
   PanelTasksInput,
   PanelTasksOutput,
+  TaskExperienceProcessing,
+  RetryTaskExperienceProcessing,
   OpenSessionInput,
   OpenSessionOutput,
   SearchInput,
@@ -118,6 +120,8 @@ export interface MemoryClient {
   panelAnalysis(context?: MemoryRequestContext): Promise<PanelAnalysisOutput>;
   panelItems(input: PanelItemsInput, context?: MemoryRequestContext): Promise<PanelItemsOutput>;
   panelTasks(input: PanelTasksInput, context?: MemoryRequestContext): Promise<PanelTasksOutput>;
+  taskExperienceProcessing(taskId: string, context?: MemoryRequestContext): Promise<TaskExperienceProcessing>;
+  retryTaskExperienceProcessing(taskId: string, context?: MemoryRequestContext): Promise<RetryTaskExperienceProcessing>;
   deletePanelTask(taskId: string, context?: MemoryRequestContext): Promise<DeletePanelTaskOutput>;
   memoryApiLogs(input: MemoryApiLogsInput, context?: MemoryRequestContext): Promise<MemoryApiLogsOutput>;
 }

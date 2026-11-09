@@ -980,6 +980,20 @@ export const PanelTasksOutputSchema = z.object({
 });
 export type PanelTasksOutput = z.infer<typeof PanelTasksOutputSchema>;
 
+/** Shared response for task experience generation across desktop and Memory. */
+export const TaskExperienceProcessingSchema = z.object({
+  episodeId: z.string(),
+  state: z.enum(["complete", "pending", "queued", "running", "failed", "blocked"]),
+  pendingCount: z.number().int().nonnegative(),
+  canRetry: z.boolean(),
+  jobId: z.string().optional(),
+  errorCode: z.enum(["invalid_model_output", "model_or_processing_failed", "task_changed"]).optional(),
+  serverTime: z.string()
+});
+export type TaskExperienceProcessing = z.infer<typeof TaskExperienceProcessingSchema>;
+export const RetryTaskExperienceProcessingSchema = TaskExperienceProcessingSchema.extend({ accepted: z.boolean() });
+export type RetryTaskExperienceProcessing = z.infer<typeof RetryTaskExperienceProcessingSchema>;
+
 /** Schema for deleting a task from the memory panel. */
 export const DeletePanelTaskOutputSchema = z.object({
   ok: z.literal(true),
