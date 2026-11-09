@@ -30,6 +30,21 @@ describe("unified L2 strict operation contract", () => {
       { operation: "create", l1_ids: ["l1"], new_l2: lesson }
     ] }, ["l1"], new Map([["l2", 2]]))).toHaveLength(2);
   });
+  it("identifies exactly which sources and operations conflict with ignore", () => {
+    try {
+      validateL2ExtractionResult({ operations: [
+        { operation: "create", l1_ids: ["l1"], new_l2: lesson },
+        { operation: "ignore", l1_ids: ["l1", "l2"] },
+        { operation: "ignore", l1_ids: ["l3"] }
+      ] }, ["l1", "l2", "l3"], new Map());
+      expect.fail("overlapping ignore must be rejected");
+    } catch (error) {
+      expect(error).toMatchObject({ diagnostic: {
+        code: "conflicting_source_decisions", path: "operations",
+        conflictingSourceIds: ["l1"], conflictingOperationIndexes: [0, 1]
+      } });
+    }
+  });
   it.each([
     { operations: [] },
     { operations: [{ operation: "ignore", l1_ids: ["invented"] }] },
@@ -110,6 +125,66 @@ describe("unified L2 extraction persistence", () => {
     expect(JSON.stringify(snapshot)).not.toContain("PRIVATE_DEBUG_VALUE");
     expect(snapshot).not.toHaveProperty("operations");
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(0);
+  });
+
+  it("retains earlier format feedback when a later decision has overlapping ignore", async () => {
+    admit();
+    const historical = row("old", "L2");
+    const policy = historical.properties.internal_info.policy as Record<string, unknown>;
+    policy.decision_guidance = { anti_pattern: ["Do not round intermediate totals"] };
+    policy.expected_outcome = "Totals agree";
+    policy.exclusions = ["Unverified inputs"];
+    repos.memories.insert(historical);
+    const storedHistorical = repos.memories.get("old");
+    respond.mockReset()
+      .mockResolvedValueOnce({ operations: [{ operation: "create", l1_ids: ["l1"],
+        new_l2: { ...lesson, verification_note: "PRIVATE_REJECTED_TEXT" } }] })
+      .mockResolvedValueOnce({ operations: [
+        { operation: "create", l1_ids: ["l1"], new_l2: lesson },
+        { operation: "ignore", l1_ids: ["l1"] }
+      ] })
+      .mockResolvedValueOnce({ operations: [{ operation: "create", l1_ids: ["l1"], new_l2: lesson }] });
+    await pipeline().induce(job());
+    const third = respond.mock.calls[2]![0];
+    const feedback = third.slice(3).map((m: { content: string }) => m.content).join(" ");
+    expect(feedback).toContain('"extraFields":["verification_note"]');
+    expect(feedback).toContain('"conflictingSourceIds":["l1"]');
+    expect(feedback).not.toContain("PRIVATE_REJECTED_TEXT");
+    // Historical boundaries remain input evidence; they are not silently removed to make generation easier.
+    expect(JSON.parse(third[2].content).HISTORICAL_L2_CANDIDATES[0]).toMatchObject({
+      decision_guidance: policy.decision_guidance, expected_outcome: "Totals agree", explicit_exclusions: ["Unverified inputs"]
+    });
+    expect(repos.memories.get("old")).toEqual(storedHistorical);
+    expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(2);
+    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
+    expect(respond).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps diagnostics across worker restart and manual recovery without renewing automatic budget", async () => {
+    admit();
+    respond.mockResolvedValue({ operations: [{ operation: "create", l1_ids: ["l1"],
+      new_l2: { ...lesson, expected_outcome: "PRIVATE_REJECTED_VALUE" } }] });
+    await expect(pipeline().induce(job())).rejects.toThrow("explicit experience retry required");
+    await expect(pipeline().induce({ ...job(), id: "worker-replay" })).rejects.toThrow("explicit experience retry required");
+    expect(respond).toHaveBeenCalledTimes(3);
+    respond.mockResolvedValueOnce({ operations: [{ operation: "create", l1_ids: ["l1"], new_l2: lesson }] });
+    repos.runtime.createSession({ id: "s", userId: "u", source: "codex", profileId: "default", status: "closed", meta: {}, openedAt: AT, updatedAt: AT });
+    repos.runtime.createEpisode({ id: "e", sessionId: "s", userId: "u", status: "closed", l1MemoryIds: ["l1"],
+      rawTurnIds: [], feedbackIds: [], decisionRepairIds: [], l2PolicyIds: [], l3WorldModelIds: [], skillMemoryIds: [],
+      turnCount: 1, rewardDetail: {}, pipelineStatus: "idle", meta: {}, openedAt: AT, closedAt: AT, updatedAt: AT });
+    let recovery = job();
+    retryL2Extraction({ repos, enabled: true, enqueueJob: input => (recovery = { ...job(), id: "manual-recovery", payload: input.payload ?? {} }) }, repos.runtime.getEpisode("e")!, AT);
+    await pipeline().induce(recovery);
+    const messages = respond.mock.calls[3]![0];
+    expect(messages.slice(3).map((m: { content: string }) => m.content).join(" "))
+      .toContain('"extraFields":["expected_outcome"]');
+    expect(JSON.stringify(messages)).not.toContain("PRIVATE_REJECTED_VALUE");
+    expect(respond).toHaveBeenCalledTimes(4);
+    const saved = JSON.parse((db.db.prepare("SELECT value_json FROM runtime_kv WHERE key LIKE 'l2.extract.snapshot.%'").get() as { value_json: string }).value_json);
+    expect(saved.previousRounds[0].attempts).toHaveLength(3);
+    expect(saved.attempts).toHaveLength(1);
+    expect(saved.status).toBe("committed");
+    expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
   });
 
   it("does not multiply a batch's three model attempts on automatic worker replay", async () => {

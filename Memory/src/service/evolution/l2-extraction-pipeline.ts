@@ -15,7 +15,7 @@ import { clip } from "../../utils/text.js";
 import { profileIdFromMemory, projectIdFromMemory } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { listL2Candidates, markL2CandidatesProcessed, type L2Candidate } from "./l2-candidate-service.js";
-import { L2_EXTRACTION_SYSTEM_PROMPT, L2ExtractionValidationError, L2ExtractionExhaustedError, validateL2ExtractionResult, type L2ExtractionDiagnostic, type L2ExtractionOperation, type NewL2Lesson } from "./l2-extraction-contract.js";
+import { L2_EXTRACTION_SYSTEM_PROMPT, L2_LESSON_FIELDS, L2ExtractionValidationError, L2ExtractionExhaustedError, validateL2ExtractionResult, type L2ExtractionDiagnostic, type L2ExtractionOperation, type NewL2Lesson } from "./l2-extraction-contract.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 
 export interface UnifiedL2ExtractionDeps {
@@ -344,10 +344,16 @@ export class UnifiedL2ExtractionPipeline {
         }))) },
         { role: "user", content: input }
       ];
-      if (diagnostic) messages.push({ role: "user", content:
-        `The previous decision was rejected: ${JSON.stringify(diagnostic)}. Regenerate the complete operations JSON for the original input. ` +
+      // Retain the bounded diagnostic history for this exact input, including a prior
+      // explicit recovery round. Fixing one error must not hide earlier format errors.
+      // Never replay rejected lesson text or values as model instructions.
+      const diagnostics = [...history.flatMap(entry => isRecord(entry) && Array.isArray(entry.attempts) ? entry.attempts : []), ...attempts]
+        .flatMap(entry => isRecord(entry) && isRecord(entry.diagnostic) ? [entry.diagnostic] : []).slice(-3);
+      if (diagnostics.length) messages.push({ role: "user", content:
+        `Previous decisions for this same input were rejected: ${JSON.stringify(diagnostics)}. Regenerate the complete operations JSON for the original input, addressing all reported errors together. ` +
         "Every L1 ID must have a decision; use ignore only when its evidence is not reusable. Do not drop IDs or invent lessons to pass validation. " +
-        "Every create/revise lesson requires exactly type,title,applicability,content,verification,exclusions; the last two may be empty strings."
+        "For conflictingSourceIds, choose ignore OR evidence-backed operations, never both. Do not discard a valid lesson merely to remove a conflict. " +
+        `Every create/revise lesson requires exactly ${L2_LESSON_FIELDS.join(",")}; the last two may be empty strings. Historical candidate metadata is input context, not extra output fields.`
       });
       const attempt: Attempt = { jobId: job.id, at: this.now(), outcome: "started" };
       attempts.push(attempt); save();
