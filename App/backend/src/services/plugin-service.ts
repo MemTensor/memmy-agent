@@ -220,13 +220,13 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       return options.repository.list().map((plugin) => withActivity({ ...publicPlugin(plugin), eligibility: eligibility(plugin.manifest) }));
     },
     async catalog() {
-      const listed = await options.registry.list?.() ?? [];
+      const listed = await waitForPluginPromise(options.registry.list?.(shutdown.signal) ?? Promise.resolve([]), shutdown.signal);
       const manifests = new Map(listed.map((manifest) => [manifest.id, manifest]));
       const privatePluginIds = [...new Set(options.catalogPluginIds?.() ?? [])]
         .filter((pluginId) => !manifests.has(pluginId));
-      const privateReleases = await Promise.allSettled(
-        privatePluginIds.map((pluginId) => options.registry.resolve(pluginId))
-      );
+      const privateReleases = await waitForPluginPromise(Promise.allSettled(
+        privatePluginIds.map((pluginId) => options.registry.resolve(pluginId, undefined, shutdown.signal))
+      ), shutdown.signal);
       for (const result of privateReleases) {
         if (result.status === "fulfilled") {
           manifests.set(result.value.manifest.id, result.value.manifest);
@@ -326,7 +326,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         try {
           await waitUntilIdle();
           const previous = required(id);
-          const release = await waitForPluginPromise(options.registry.resolve(id, version), shutdown.signal);
+          const release = await waitForPluginPromise(options.registry.resolve(id, version, shutdown.signal), shutdown.signal);
           const manifest = PluginManifestSchema.parse(release.manifest);
           compatible(manifest);
           if (missingFeatures(manifest).length) throw pluginError("plugin_incompatible", `Missing Host capabilities: ${missingFeatures(manifest).join(", ")}`);

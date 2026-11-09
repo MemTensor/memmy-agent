@@ -29,21 +29,21 @@ export function createHttpPluginRegistry(options: CreateHttpPluginRegistryOption
   const fetchFn = options.fetchFn ?? fetch.bind(globalThis);
 
   return {
-    async list() {
+    async list(signal) {
       const response = await fetchFn(new URL("/api/v1/plugins", baseUrl), {
         headers: { accept: "application/json", ...options.authHeaders?.() },
-        redirect: "error", signal: AbortSignal.timeout(15_000)
+        redirect: "error", signal: registryRequestSignal(signal)
       });
       if (!response.ok) throw new Error(`Plugin catalog request failed with ${response.status}`);
       return z.array(PluginManifestSchema).parse(JSON.parse(await readLimitedText(response)));
     },
-    async resolve(pluginId, version) {
+    async resolve(pluginId, version, signal) {
       const url = new URL(`/api/v1/plugins/${encodeURIComponent(pluginId)}`, baseUrl);
       if (version) url.searchParams.set("version", version);
       const response = await fetchFn(url, {
         headers: { accept: "application/json", ...options.authHeaders?.() },
         redirect: "error",
-        signal: AbortSignal.timeout(15_000)
+        signal: registryRequestSignal(signal)
       });
       if (response.status === 401 || response.status === 403) {
         throw Object.assign(new Error(`Plugin release is not available for this account: ${pluginId}`), {
@@ -73,6 +73,11 @@ export function createHttpPluginRegistry(options: CreateHttpPluginRegistryOption
       };
     }
   };
+}
+
+function registryRequestSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(15_000);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 function assertAllowedProtocol(url: URL): void {

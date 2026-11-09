@@ -25,6 +25,25 @@ const release = {
 };
 
 describe("HttpPluginRegistry", () => {
+  it.each(["list", "resolve"] as const)("cancels an in-flight %s request on Host shutdown", async operation => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const fetchFn = vi.fn<typeof fetch>(async (_input, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        requestSignal!.addEventListener("abort", () => reject(requestSignal!.reason), { once: true });
+      });
+    });
+    const registry = createHttpPluginRegistry({ baseUrl: "https://registry.example", fetchFn });
+    const pending = operation === "list" ? registry.list!(controller.signal)
+      : registry.resolve(release.manifest.id, "1.0.0", controller.signal);
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(requestSignal?.aborted).toBe(false);
+    controller.abort();
+    expect(requestSignal?.aborted).toBe(true);
+    await rejected;
+  });
+
   it("resolves the local registry's relative download URL against its origin", async () => {
     const fetchFn = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
       ...release, artifact: { ...release.artifact, url: "/api/v1/plugins/com.example.review/artifact?version=1.0.0" }
@@ -55,7 +74,7 @@ describe("HttpPluginRegistry", () => {
   });
 
   it("resolves a plugin by id and version without accepting a client URL", async () => {
-    const fetchFn = vi.fn(async () => new Response(JSON.stringify(release), {
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(release), {
       headers: { "content-type": "application/json" }
     }));
     const registry = createHttpPluginRegistry({ baseUrl: "https://registry.example", fetchFn: fetchFn as typeof fetch });

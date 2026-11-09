@@ -98,6 +98,29 @@ async function setup() {
 }
 
 describe("Backend plugin lifecycle shutdown", () => {
+  it("cancels a pending catalog request before draining automatic updates", async () => {
+    const f = await setup();
+    const entered = deferred(), finish = deferred();
+    let requestSignal: AbortSignal | undefined;
+    f.catalog.mockImplementationOnce(async (signal?: AbortSignal) => {
+      requestSignal = signal;
+      entered.resolve();
+      await finish.promise;
+      return [];
+    });
+    let closing: Promise<void> | undefined;
+    f.lifecycle.startUpdates();
+    try {
+      await entered.promise;
+      closing = f.lifecycle.close();
+      expect(await settlesWithin(closing)).toBe(true);
+      expect(requestSignal?.aborted).toBe(true);
+      expect(native.close).toHaveBeenCalledOnce();
+      expect(f.runtimeHost.activate).toHaveBeenCalledTimes(1);
+      expect(f.reloadMcpConfig).not.toHaveBeenCalled();
+    } finally { finish.resolve(); await (closing ?? f.lifecycle.close()); }
+  });
+
   it("closes while idle and prevents further update scheduling", async () => {
     const f = await setup();
     await f.lifecycle.close();

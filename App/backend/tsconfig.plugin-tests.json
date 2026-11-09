@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "noEmit": true,
+    "incremental": false,
+    "lib": ["ES2024", "DOM"],
+    "paths": {
+      "@memmy/local-api-contracts": ["./local-api-contracts/src/index.ts"],
+      "memmy-agent": ["../memmy-agent/src/index.ts"],
+      "memmy-agent/*": ["../memmy-agent/src/*"]
+    }
+  },
+  "include": [
+    "src/services/tests/plugin-lifecycle-shutdown.test.ts",
+    "src/services/tests/plugin-service.test.ts",
+    "src/adapters/outbound/plugin-registry/tests/http-plugin-registry.test.ts",
+    "src/tests/backend-shutdown.test.ts",
+    "src/tests/index.test.ts",
+    "src/tests/mock-client-contracts.test.ts"
+  ],
+  "exclude": []
+}

@@ -66,6 +66,7 @@ try {
   node("agent-types", agent, [tsc, "-p", "tsconfig.json", "--noEmit"]);
   node("agent-build", agent, [tsc, "-p", "tsconfig.build.json"]);
   node("backend-types", root, [tsc, "-p", "App/backend/tsconfig.json", "--noEmit"]);
+  node("plugin-regression-types", root, [tsc, "-p", "App/backend/tsconfig.plugin-tests.json", "--noEmit"]);
   node("frontend-types", frontend, [tsc, "-p", "tsconfig.json", "--noEmit"]);
   node("agent-lint", agent, [path.join(agent, "node_modules/eslint/bin/eslint.js"),
     "src/tools/computer-history/**/*.ts", "tests/tools/computer-history/**/*.ts",
@@ -80,6 +81,8 @@ try {
   node("backend-lint", path.join(root, "App/backend"), [path.join(root, "node_modules/eslint/bin/eslint.js"),
     "src/services/plugin-service.ts", "src/services/plugin-update-service.ts", "src/services/index.ts",
     "src/services/tests/plugin-service.test.ts", "src/services/tests/plugin-update-service.test.ts",
+    "src/services/tests/plugin-lifecycle-shutdown.test.ts", "src/tests/backend-shutdown.test.ts",
+    "src/adapters/outbound/plugin-registry/**/*.ts",
     "src/adapters/outbound/memmy-agent-admin-client/**/*.ts"]);
   // Full Agent regression includes Provider, MCP, runtime admission, History and recording.
   // The real Chromium journey owns a browser process tree. Run it separately so
@@ -92,8 +95,14 @@ try {
   for (let shard = 1; shard <= 4; shard++) {
     tests(`agent-full-${shard}-of-4`, agent, [`--exclude=${browserJourney}`, `--shard=${shard}/4`]);
   }
-  tests("plugin-host", root, ["App/backend/src/services/tests/plugin-service.test.ts",
+  tests("plugin-host", root, ["--config=App/backend/vitest.config.ts",
+    "App/backend/src/services/tests/plugin-service.test.ts",
     "App/backend/src/services/tests/plugin-update-service.test.ts",
+    "App/backend/src/services/tests/plugin-lifecycle-shutdown.test.ts",
+    "App/backend/src/tests/backend-shutdown.test.ts",
+    "App/backend/src/tests/mock-client-contracts.test.ts",
+    "App/backend/src/adapters/outbound/memory-client/tests/mock-memory-client.test.ts",
+    "App/backend/src/adapters/outbound/plugin-registry/tests",
     "App/backend/src/services/tests/plugin-native-host-services.test.ts",
     "App/backend/src/adapters/outbound/memmy-agent-admin-client/tests"]);
   const packaging = JSON.parse(fs.readFileSync(path.join(root, "package.json"))).scripts["test:packaging-guards"];

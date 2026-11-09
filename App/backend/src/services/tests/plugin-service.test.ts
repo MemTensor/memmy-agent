@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PluginManifestSchema } from "@memmy/local-api-contracts";
 import { createPluginUpdateService } from "../plugin-update-service.js";
 import { AgentTaskActivity } from "../../../../memmy-agent/src/core/agent-runtime/task-activity.js";
 import { reconcileEntitledPlugins } from "../plugin-entitlement-reconcile-service.js";
@@ -236,10 +237,10 @@ describe("PluginService", () => {
     const { service, artifactManager } = createContext([legalRelease], undefined, () => true,
       () => granted ? ["legal-labor"] : [], () => granted);
     await service.install("legal-labor");
-    expect(service.list()[0].eligibility?.visible).toBe(true);
+    expect(service.list()[0]!.eligibility?.visible).toBe(true);
 
     granted = false;
-    expect(service.list()[0].eligibility).toEqual({
+    expect(service.list()[0]!.eligibility).toEqual({
       visible: false, canInstall: false, canUse: false, reason: "entitlement_required"
     });
     expect(await service.catalog()).toEqual([]);
@@ -247,8 +248,8 @@ describe("PluginService", () => {
     expect(artifactManager.remove).not.toHaveBeenCalled();
 
     granted = true;
-    expect(service.list()[0].eligibility?.visible).toBe(true);
-    expect((await service.catalog())[0].manifest.id).toBe("legal-labor");
+    expect(service.list()[0]!.eligibility?.visible).toBe(true);
+    expect((await service.catalog())[0]!.manifest.id).toBe("legal-labor");
     expect(artifactManager.install).toHaveBeenCalledTimes(1);
   });
 
@@ -275,6 +276,20 @@ describe("PluginService", () => {
     );
 
     expect((await service.catalog()).map((entry) => entry.manifest.id)).toEqual(["office"]);
+  });
+
+  it("cancels private release discovery when shutdown interrupts the catalog", async () => {
+    const { service, registry } = createContext([], undefined, {}, () => ["private-review"]);
+    const releasePending = Promise.withResolvers<PluginRelease>();
+    const resolving = vi.spyOn(registry, "resolve").mockReturnValue(releasePending.promise);
+    const catalog = service.catalog();
+    const rejected = expect(catalog).rejects.toMatchObject({ name: "AbortError" });
+    try {
+      await vi.waitFor(() => expect(resolving).toHaveBeenCalledOnce());
+      await service.shutdown();
+      expect(resolving.mock.calls[0]?.[2]?.aborted).toBe(true);
+      await rejected;
+    } finally { releasePending.resolve(release); await service.shutdown(); }
   });
 
   it("adds entitled private releases to the catalog and keeps them visible after uninstall", async () => {
@@ -335,7 +350,7 @@ describe("PluginService", () => {
     const { service, artifactManager, runtimeHost } = createContext([literature], undefined, () => authenticated);
     const reconcile = () => reconcileEntitledPlugins({ plugins: service, entitlements: [],
       userUninstalledIds: new Set(store!.repositories.plugins.listUserUninstalledIds()) });
-    expect((await service.catalog())[0].eligibility.reason).toBe("login_required");
+    expect((await service.catalog())[0]!.eligibility.reason).toBe("login_required");
     await expect(service.install("literature-review")).rejects.toThrow(/access denied/);
     await reconcile();
     expect(service.list()).toHaveLength(0);
@@ -352,7 +367,7 @@ describe("PluginService", () => {
     authenticated = false;
     await reconcile();
     expect(runtimeHost.deactivate).not.toHaveBeenCalled();
-    expect(service.list()[0].eligibility?.canUse).toBe(false);
+    expect(service.list()[0]!.eligibility?.canUse).toBe(false);
     await expect(service.invoke({ callId: "new", pluginId: "literature-review", capabilityId: "run",
       conversationId: "chat", input: { topic: "memory" } })[Symbol.asyncIterator]().next()).rejects.toThrow(/access denied/);
     expect((await call.next()).value).toMatchObject({ type: "result" });
@@ -532,7 +547,7 @@ describe("PluginService", () => {
     expect((await updated).version).toBe("2.0.0");
     expect((await duplicate).version).toBe("2.0.0");
     expect(artifactManager.install).toHaveBeenCalledTimes(1);
-    expect(resolveSpy).toHaveBeenCalledWith(release.manifest.id, "2.0.0");
+    expect(resolveSpy).toHaveBeenCalledWith(release.manifest.id, "2.0.0", expect.any(AbortSignal));
     expect(service.get(release.manifest.id)).toMatchObject({ state: "active", activeCallCount: 0 });
     expect(service.get(release.manifest.id).update).toBeUndefined();
   });
@@ -563,8 +578,8 @@ describe("PluginService", () => {
   it("defers automatic activation when a whole Agent task starts during download", async () => {
     let agentBusy = false;
     const activity = vi.fn(async () => agentBusy);
-    const next = { manifest: { ...release.manifest, version: "2.0.0", rules: { autoUpdate: true } } };
-    const initial = { ...release, manifest: { ...release.manifest, rules: { autoUpdate: true } } };
+    const initial = { manifest: PluginManifestSchema.parse({ ...release.manifest, rules: { autoUpdate: true } }) };
+    const next = { manifest: { ...initial.manifest, version: "2.0.0" } };
     const { service, artifactManager, runtimeHost } = createContext([initial, next], undefined, undefined, undefined, undefined, activity);
     await service.install(release.manifest.id, "1.0.0");
     service.configure(release.manifest.id, { config: { database: "crossref" }, secrets: { "api-key": "secret" } });
@@ -727,7 +742,7 @@ describe("PluginService", () => {
       agentBusy = false;
       await vi.advanceTimersByTimeAsync(1_000);
       expect((await update).version).toBe("2.0.0");
-      expect(resolve).toHaveBeenCalledExactlyOnceWith(release.manifest.id, "2.0.0");
+      expect(resolve).toHaveBeenCalledExactlyOnceWith(release.manifest.id, "2.0.0", expect.any(AbortSignal));
       expect(artifactManager.install).toHaveBeenCalledOnce();
     } finally { vi.useRealTimers(); }
   });

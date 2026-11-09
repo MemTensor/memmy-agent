@@ -17,8 +17,8 @@ export interface PluginRelease {
 }
 
 export interface PluginRegistry {
-  list?(): Promise<PluginManifest[]>;
-  resolve(pluginId: string, version?: string): Promise<PluginRelease>;
+  list?(signal?: AbortSignal): Promise<PluginManifest[]>;
+  resolve(pluginId: string, version?: string, signal?: AbortSignal): Promise<PluginRelease>;
 }
 
 export { createHttpPluginRegistry, type CreateHttpPluginRegistryOptions } from "./http-plugin-registry.js";
@@ -34,16 +34,16 @@ export function createCompositePluginRegistry(
   fallback?: PluginRegistry
 ): PluginRegistry {
   return {
-    async list() {
-      const entries = [...await primary.list?.() ?? [], ...await fallback?.list?.() ?? []];
+    async list(signal) {
+      const entries = [...await primary.list?.(signal) ?? [], ...await fallback?.list?.(signal) ?? []];
       return [...new Map(entries.map((manifest) => [manifest.id, manifest])).values()];
     },
-    async resolve(pluginId, version) {
+    async resolve(pluginId, version, signal) {
       try {
-        return await primary.resolve(pluginId, version);
+        return await primary.resolve(pluginId, version, signal);
       } catch (error) {
         if (!fallback || (error as { code?: unknown })?.code !== "not_found") throw error;
-        return fallback.resolve(pluginId, version);
+        return fallback.resolve(pluginId, version, signal);
       }
     }
   };
