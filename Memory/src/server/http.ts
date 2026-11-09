@@ -109,6 +109,8 @@ export const API_ROUTES = [
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
   "DELETE /api/v1/panel/tasks/:id",
+  "GET /api/v1/panel/tasks/:id/experience-processing",
+  "POST /api/v1/panel/tasks/:id/experience-processing/retry",
   ...VIEWER_API_ROUTES
 ] as const;
 
@@ -1161,6 +1163,19 @@ async function routeRequest(
         ),
       (result) => ({ hit_count: hitCountFromGetResponse(result) }),
     );
+  }
+
+  const taskExperience = match(path, /^\/api\/v1\/panel\/tasks\/([^/]+)\/experience-processing(\/retry)?$/);
+  if (taskExperience && method === "GET" && !taskExperience[2]) {
+    requireMemoryRead(principal);
+    return service.taskExperienceProcessing(decodeMatchSegment(taskExperience, 1), envelopeWithPrincipal({}, principal));
+  }
+  if (taskExperience && method === "POST" && taskExperience[2]) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(asObject(body, "task.experience.retry"), principal) as RequestEnvelope;
+    const result = service.retryTaskExperienceProcessing(decodeMatchSegment(taskExperience, 1), request);
+    if (result.accepted) autoWorker.schedule();
+    return result;
   }
 
   const panelTaskDelete = match(path, /^\/api\/v1\/panel\/tasks\/([^/]+)$/);

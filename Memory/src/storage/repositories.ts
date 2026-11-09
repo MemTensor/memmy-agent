@@ -4389,6 +4389,14 @@ export class RuntimeRepository {
     return rows.map(jobFromSql);
   }
 
+  /** Recovery must query the selected user/episode, not a globally limited job page. */
+  listL2JobsForEpisode(userId: string, episodeId: string): EvolutionJobRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM evolution_jobs
+      WHERE user_id = ? AND episode_id = ? AND job_type IN ('l2_induction', 'l2_association')
+      ORDER BY created_at DESC, rowid DESC`).all(userId, episodeId) as SqlJobRow[];
+    return rows.map(jobFromSql);
+  }
+
   countJobsByStatus(): Record<JobStatus, number> {
     const rows = this.db
       .prepare(`SELECT status, COUNT(*) AS count FROM evolution_jobs GROUP BY status`)

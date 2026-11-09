@@ -1,3 +1,4 @@
+import { retryL2Extraction } from "../../src/service/evolution/l2-extraction-recovery.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG } from "../../src/config/index.js";
 import type { Embedder, LlmClient } from "../../src/model/types.js";
@@ -78,6 +79,47 @@ describe("unified L2 extraction persistence", () => {
     config.algorithm.capture.embedAfterCapture = false;
   });
   afterEach(() => db?.close());
+
+  it("feeds missing fields and uncovered IDs back to the model before accepting a corrected batch", async () => {
+    admit();
+    const { verification: _verification, ...incompleteLesson } = lesson;
+    respond.mockReset()
+      .mockResolvedValueOnce({ operations: [{ operation: "create", l1_ids: ["l1"], new_l2: incompleteLesson }] })
+      .mockResolvedValueOnce({ operations: [] })
+      .mockResolvedValueOnce({ operations: [{ operation: "create", l1_ids: ["l1"], new_l2: lesson }] });
+    await pipeline().induce(job());
+    expect(respond).toHaveBeenCalledTimes(3);
+    const second = respond.mock.calls[1]![0];
+    const third = respond.mock.calls[2]![0];
+    expect(second.slice(3).map((m: { content: string }) => m.content).join(" ")).toContain('"missingFields":["verification"]');
+    expect(third.slice(3).map((m: { content: string }) => m.content).join(" ")).toContain('"missingSourceIds":["l1"]');
+    expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
+    const snapshot = JSON.parse((db.db.prepare("SELECT value_json FROM runtime_kv WHERE key LIKE 'l2.extract.snapshot.%'").get() as { value_json: string }).value_json);
+    expect(snapshot.attempts.map((a: { outcome: string }) => a.outcome)).toEqual(["invalid", "invalid", "valid"]);
+    expect(snapshot.attempts[0].diagnostic).toMatchObject({ path: "operations[0].new_l2", missingFields: ["verification"] });
+  });
+
+  it("records extra field names without saving rejected lesson text", async () => {
+    admit();
+    respond.mockResolvedValue({ operations: [{ operation: "create", l1_ids: ["l1"],
+      new_l2: { ...lesson, title: "PRIVATE_REJECTED_MODEL_TEXT", debug: "PRIVATE_DEBUG_VALUE" } }] });
+    await expect(pipeline().induce(job())).rejects.toThrow("invalid lesson fields");
+    const snapshot = JSON.parse((db.db.prepare("SELECT value_json FROM runtime_kv WHERE key LIKE 'l2.extract.snapshot.%'").get() as { value_json: string }).value_json);
+    expect(snapshot.attempts[0].diagnostic).toMatchObject({ extraFields: ["debug"], missingFields: [] });
+    expect(JSON.stringify(snapshot)).not.toContain("PRIVATE_REJECTED_MODEL_TEXT");
+    expect(JSON.stringify(snapshot)).not.toContain("PRIVATE_DEBUG_VALUE");
+    expect(snapshot).not.toHaveProperty("operations");
+    expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(0);
+  });
+
+  it("does not multiply a batch's three model attempts on automatic worker replay", async () => {
+    admit(); respond.mockResolvedValue({ operations: [] });
+    await expect(pipeline().induce(job())).rejects.toThrow("incomplete L1 coverage");
+    await expect(pipeline().induce({ ...job(), id: "automatic-replay", attempts: 2 })).rejects.toThrow();
+    expect(respond).toHaveBeenCalledTimes(3);
+    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(0);
+  });
 
   it("deduplicates identical documents without dropping candidates and reuses vectors after model failure", async () => {
     admit();
@@ -279,7 +321,13 @@ describe("unified L2 extraction persistence", () => {
     expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
     respond.mockResolvedValue({ operations: [{ operation: "create", l1_ids: ["l1"], new_l2: lesson }] });
     embed.mockImplementation(async (texts: string[]) => texts.map(() => [1, 0]));
-    await pipeline().induce(job());
+    repos.runtime.createSession({ id: "s", userId: "u", source: "codex", profileId: "default", status: "closed", meta: {}, openedAt: AT, updatedAt: AT });
+    repos.runtime.createEpisode({ id: "e", sessionId: "s", userId: "u", status: "closed", l1MemoryIds: ["l1"],
+      rawTurnIds: [], feedbackIds: [], decisionRepairIds: [], l2PolicyIds: [], l3WorldModelIds: [], skillMemoryIds: [],
+      turnCount: 1, rewardDetail: {}, pipelineStatus: "idle", meta: {}, openedAt: AT, closedAt: AT, updatedAt: AT });
+    let recovery = job();
+    retryL2Extraction({ repos, enabled: true, enqueueJob: input => (recovery = { ...job(), id: "manual", payload: input.payload ?? {} }) }, repos.runtime.getEpisode("e")!, AT);
+    await pipeline().induce(recovery);
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
     expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
     await pipeline().induce(job());
@@ -298,6 +346,7 @@ describe("unified L2 extraction persistence", () => {
     expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
     await pipeline().induce(job());
     expect(repos.memories.get("old")!.info.content_revision).toBe(2);
+    expect(respond).toHaveBeenCalledTimes(1); // Reuse the validated decision after the transaction rolled back.
     expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
   });
 

@@ -1,3 +1,4 @@
+import { L2ExtractionExhaustedError } from "../evolution/l2-extraction-contract.js";
 import { isImportedSkill } from "../../storage/imported-skill.js";
 import { ModelHttpError } from "../../model/http.js";
 /**
@@ -1171,7 +1172,7 @@ export class WorkerRunner {
     const classification = classifyProcessingError(error);
     const quotaExhausted = isQuotaProcessingErrorCode(classification.code);
     const configurationBlocked = classification.retryAction === "open_settings" && !quotaExhausted;
-    const forceDeadLetter = l3Handling.kind === "dead_letter" || quotaExhausted
+    const forceDeadLetter = error instanceof L2ExtractionExhaustedError || l3Handling.kind === "dead_letter" || quotaExhausted
       || classification.retryAction === "none"
       || error instanceof UnknownJobPolicyError
       || isTerminalL3WorldModelError(error)

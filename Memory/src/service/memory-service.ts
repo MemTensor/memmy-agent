@@ -1,3 +1,4 @@
+import { l2ProcessingState, retryL2Extraction } from "./evolution/l2-extraction-recovery.js";
 import { AgentSkillLibrary, type AgentSkillReconcileRequest, type AgentSkillReconcileResult } from "./import/agent-skill-library.js";
 import { isImportedSkill } from "../storage/imported-skill.js";
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
@@ -3604,6 +3605,31 @@ export class MemoryService {
     serverTime: string;
   } {
     return this.importJobs.memoryProcessingStatus(memoryIds, request);
+  }
+
+  private experienceRecoveryEpisode(id: string, request: RequestEnvelope) {
+    const episode = this.requireEpisode(id);
+    // The local desktop token can inspect its local panel. An explicit user scope
+    // must never be widened by the panel's legacy no-op authorization helper.
+    if (request.namespace?.userId && request.namespace.userId !== episode.userId) {
+      throw new MemoryServiceError("forbidden", "episode belongs to another user");
+    }
+    return episode;
+  }
+
+  taskExperienceProcessing(id: string, request: RequestEnvelope = {}) {
+    this.assertMemorySearchEnabled();
+    const episode = this.experienceRecoveryEpisode(id, request);
+    return { ...l2ProcessingState(this.repos, episode, this.config.algorithm.l2Induction.mode === "unified" && this.config.algorithm.l2Induction.useLlm), serverTime: nowIso() };
+  }
+
+  retryTaskExperienceProcessing(id: string, request: RequestEnvelope = {}) {
+    this.assertMemoryAddEnabled();
+    const episode = this.experienceRecoveryEpisode(id, request);
+    const result = retryL2Extraction({ repos: this.repos, enabled: this.config.algorithm.l2Induction.mode === "unified" && this.config.algorithm.l2Induction.useLlm,
+      enqueueJob: input => this.enqueueJob(input) }, episode, nowIso());
+    if (result.accepted) this.capturePendingListener?.();
+    return { ...result, serverTime: nowIso() };
   }
 
   retryMemoryProcessing(memoryId: string, request: RequestEnvelope = {}): {

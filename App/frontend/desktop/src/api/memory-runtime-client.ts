@@ -67,6 +67,13 @@ import { z } from "zod";
 const ApproveObservedSkillOutputSchema = z.object({ id: z.string(), status: z.literal("activated"), serverTime: z.string() });
 const UpdateObservedSkillOutputSchema = ApproveObservedSkillOutputSchema.extend({ version: z.number().int().positive() });
 
+const TaskExperienceProcessingSchema = z.object({
+  episodeId: z.string(), state: z.enum(["complete", "pending", "queued", "running", "failed", "blocked"]),
+  pendingCount: z.number().int().nonnegative(), canRetry: z.boolean(), jobId: z.string().optional(),
+  errorCode: z.enum(["invalid_model_output", "model_or_processing_failed", "task_changed"]).optional(), serverTime: z.string()
+});
+export type TaskExperienceProcessing = z.infer<typeof TaskExperienceProcessingSchema>;
+
 export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/health",
   "POST /api/v1/admin/reload-config",
@@ -88,6 +95,8 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/panel/analysis",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
+  "GET /api/v1/panel/tasks/:id/experience-processing",
+  "POST /api/v1/panel/tasks/:id/experience-processing/retry",
   "DELETE /api/v1/panel/tasks/:id"
 ] as const;
 
@@ -123,6 +132,8 @@ export interface MemoryRuntimeClient {
   listPanelItems(input: PanelItemsInput): Promise<PanelItemsOutput>;
   listPanelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
   deletePanelTask(id: string): Promise<DeletePanelTaskOutput>;
+  taskExperienceProcessing?(id: string): Promise<TaskExperienceProcessing>;
+  retryTaskExperienceProcessing?(id: string): Promise<TaskExperienceProcessing & { accepted: boolean }>;
 }
 
 export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRuntimeClient {
@@ -262,6 +273,13 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
       return requestJson({ config, path: withQuery("/api/v1/panel/tasks", PanelTasksInputSchema.parse(input)), schema: PanelTasksOutputSchema });
     },
 
+    async taskExperienceProcessing(id) {
+      return requestJson({ config, path: `/api/v1/panel/tasks/${encodeURIComponent(id)}/experience-processing`, schema: TaskExperienceProcessingSchema });
+    },
+    async retryTaskExperienceProcessing(id) {
+      return requestJson({ config, path: `/api/v1/panel/tasks/${encodeURIComponent(id)}/experience-processing/retry`,
+        schema: TaskExperienceProcessingSchema.extend({ accepted: z.boolean() }), body: {} });
+    },
     async deletePanelTask(id) {
       return requestJson({
         config,

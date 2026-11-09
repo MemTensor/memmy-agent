@@ -12,7 +12,7 @@ describe("memory runtime client", () => {
   });
 
   it("declares the memory runtime endpoints exposed under /api/v1", () => {
-    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(21);
+    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(23);
     expect(MEMORY_RUNTIME_ENDPOINTS).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
@@ -34,8 +34,22 @@ describe("memory runtime client", () => {
       "GET /api/v1/panel/analysis",
       "GET /api/v1/panel/items",
       "GET /api/v1/panel/tasks",
+      "GET /api/v1/panel/tasks/:id/experience-processing",
+      "POST /api/v1/panel/tasks/:id/experience-processing/retry",
       "DELETE /api/v1/panel/tasks/:id"
     ]);
+  });
+
+  it("reads and retries only the selected task's experience processing", async () => {
+    const result = { episodeId: "e/1", state: "queued", pendingCount: 2, canRetry: false, accepted: true, serverTime: "2026-11-10T00:00:00Z" };
+    const fetchMock = vi.fn(async (_url: URL, _init?: RequestInit) => new Response(JSON.stringify(result), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpMemoryRuntimeClient(runtimeConfig);
+    await client.taskExperienceProcessing!("e/1");
+    await expect(client.retryTaskExperienceProcessing!("e/1")).resolves.toMatchObject({ accepted: true, pendingCount: 2 });
+    expect(fetchMock.mock.calls[0]![0].pathname).toBe("/api/v1/panel/tasks/e%2F1/experience-processing");
+    expect(fetchMock).toHaveBeenLastCalledWith(new URL("/api/v1/panel/tasks/e%2F1/experience-processing/retry", runtimeConfig.baseUrl),
+      expect.objectContaining({ method: "POST", body: "{}" }));
   });
 
   it("saves observed Skill content with the original version through PATCH", async () => {
