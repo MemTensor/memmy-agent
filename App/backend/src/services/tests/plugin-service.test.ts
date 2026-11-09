@@ -927,8 +927,32 @@ describe("PluginService", () => {
     expect(service.get(release.manifest.id).state).toBe("active");
   });
 
-  it("recovers an installation interrupted while enabling", async () => {
-    const { service, runtimeHost } = createContext();
+  it.each(["success", "failure"])("shares concurrent activation and permits recovery after %s", async (outcome) => {
+    const { service, runtimeHost, skillManager } = createContext();
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, { config: { database: "crossref" }, secrets: { "api-key": "secret" } });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    let finish!: () => void, fail!: (error: Error) => void;
+    vi.mocked(runtimeHost.activate).mockImplementationOnce(() => new Promise<void>((resolve, reject) => {
+      finish = resolve; fail = reject;
+    }));
+    const a = service.enable(release.manifest.id), b = service.enable(release.manifest.id);
+    const results = Promise.allSettled([a, b]);
+    await vi.waitFor(() => expect(runtimeHost.activate).toHaveBeenCalledTimes(1));
+    expect(service.get(release.manifest.id).state).toBe("enabling");
+    if (outcome === "success") finish(); else fail(new Error("runtime unavailable"));
+    expect((await results).map(result => result.status)).toEqual(outcome === "success"
+      ? ["fulfilled", "fulfilled"] : ["rejected", "rejected"]);
+    expect(skillManager.activate).toHaveBeenCalledTimes(1);
+    expect(skillManager.deactivate).toHaveBeenCalledTimes(outcome === "success" ? 0 : 1);
+    expect(service.get(release.manifest.id).state).toBe(outcome === "success" ? "active" : "failed");
+    await service.enable(release.manifest.id);
+    expect(service.get(release.manifest.id).state).toBe("active");
+    expect(runtimeHost.activate).toHaveBeenCalledTimes(outcome === "success" ? 1 : 2);
+  });
+
+  it.each(["success", "failure"])("restores an interrupted activation after restart with %s", async (outcome) => {
+    const { service, runtimeHost, registry, artifactManager, skillManager } = createContext();
     await service.install(release.manifest.id);
     service.configure(release.manifest.id, {
       config: { database: "crossref" },
@@ -940,10 +964,19 @@ describe("PluginService", () => {
     store!.repositories.plugins.setDesiredEnabled(release.manifest.id, true);
     store!.repositories.plugins.setState(release.manifest.id, "enabling");
 
-    await service.restoreActive();
+    // A fresh service has no in-memory activation promise, only persisted state.
+    const restarted = createPluginService({ repository: store!.repositories.plugins,
+      secretStore: store!.secretStore, registry, runtimeHost, artifactManager, skillManager });
+    if (outcome === "failure") vi.mocked(runtimeHost.activate).mockRejectedValueOnce(new Error("runtime unavailable"));
+    await restarted.restoreActive();
 
     expect(runtimeHost.activate).toHaveBeenCalledOnce();
-    expect(service.get(release.manifest.id).state).toBe("active");
-    expect(service.get(release.manifest.id).desiredEnabled).toBe(true);
+    expect(restarted.get(release.manifest.id).desiredEnabled).toBe(true);
+    expect(restarted.get(release.manifest.id).state).toBe(outcome === "success" ? "active" : "failed");
+    if (outcome === "failure") {
+      expect(restarted.get(release.manifest.id).lastError).toContain("runtime unavailable");
+      await restarted.enable(release.manifest.id);
+      expect(restarted.get(release.manifest.id).state).toBe("active");
+    }
   });
 });

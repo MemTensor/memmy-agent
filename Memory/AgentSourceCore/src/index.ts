@@ -333,4 +333,7 @@ function hashMetaString(meta: Readonly<Record<string, unknown>>, key: string): s
   const value = meta[key];
   return typeof value === "string" ? value : undefined;
 }
+export * from "./skill-inventory.js";
 export * from "./codex-file-rollback.js";
+
+export { createConnectionCompensation, type ConnectionAction, type ConnectionEvent } from "./connection-compensation.js";

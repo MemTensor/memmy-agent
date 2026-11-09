@@ -6,6 +6,7 @@ import {
   AddMemoryInputSchema,
   AddMemoryOutputSchema,
   DeleteMemoryOutputSchema,
+  SkillArchiveStateOutputSchema,
   DeletePanelTaskOutputSchema,
   GetMemoryOutputSchema,
   MemoryApiLogsInputSchema,
@@ -90,6 +91,14 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "DELETE /api/v1/panel/tasks/:id"
 ] as const;
 
+/** Skill status after an archive or reactivate from the panel. */
+export interface SkillArchiveState {
+  ok: true;
+  id: string;
+  status: "activated" | "resolving" | "archived" | "deleted";
+  serverTime: string;
+}
+
 export interface MemoryRuntimeClient {
   health(signal?: AbortSignal): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
@@ -102,6 +111,8 @@ export interface MemoryRuntimeClient {
   getMemory(id: string): Promise<GetMemoryOutput>;
   deleteMemory(id: string): Promise<DeleteMemoryOutput>;
   approveObservedSkill?(id: string): Promise<{ id: string; status: "activated"; serverTime: string }>;
+  archiveSkill?(id: string): Promise<SkillArchiveState>;
+  reactivateSkill?(id: string): Promise<SkillArchiveState>;
   updateObservedSkill?(id: string, input: { body: string; expectedVersion: number }): Promise<{ id: string; status: "activated"; version: number; serverTime: string }>;
   recallEvidence(queryId: string): Promise<RecallEvidenceOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
@@ -179,6 +190,16 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
         schema: DeleteMemoryOutputSchema,
         init: { method: "DELETE" }
       });
+    },
+
+    async archiveSkill(id) {
+      return requestJson({ config, path: `/api/v1/skills/${encodeURIComponent(id)}/archive`,
+        schema: SkillArchiveStateOutputSchema, body: {} });
+    },
+
+    async reactivateSkill(id) {
+      return requestJson({ config, path: `/api/v1/skills/${encodeURIComponent(id)}/reactivate`,
+        schema: SkillArchiveStateOutputSchema, body: {} });
     },
 
     async approveObservedSkill(id) {

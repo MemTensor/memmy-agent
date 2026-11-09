@@ -562,8 +562,19 @@ export class MCPToolWrapper extends Tool {
   async resolvePluginSkillInstructions(ref: PluginSkillRef, signal?: AbortSignal | null, sessionKey?: string | null): Promise<string> {
     if (this.serverName !== "plugins" || this.originalName !== "read_plugin_skill") throw new Error("plugin_skill_loader_unavailable");
     const expected = PluginSkillRefSchema.parse(ref);
-    const result = await this.session.callTool("resolve_plugin_skill_context", { ref: expected }, this.toolTimeout,
-      { "memmy.dev/cloud-skills": "1" }, signal);
+    let result: any;
+    try {
+      result = await this.session.callTool("resolve_plugin_skill_context", { ref: expected }, this.toolTimeout,
+        { "memmy.dev/cloud-skills": "1" }, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // No private text or raw transport error is sent into the transcript.
+      throw Object.assign(new Error("plugin_skill_unavailable"), { code: "plugin_skill_unavailable", retryable: true });
+    }
+    const loadError = result?._meta?.["memmy.dev/private-skill-error"];
+    if (result?.isError && ["plugin_skill_access_denied", "plugin_skill_unavailable", "plugin_skill_bundle_missing", "plugin_skill_invalid", "plugin_skill_version_changed"].includes(loadError?.code)) {
+      throw Object.assign(new Error(loadError.code), { code: loadError.code, retryable: loadError.code === "plugin_skill_unavailable" && loadError.retryable === true });
+    }
     const envelope = result?._meta?.["memmy.dev/private-skill-context"];
     const actual = PluginSkillRefSchema.safeParse(envelope?.ref);
     if (actual.success && envelope.reloadRequired === true && actual.data.pluginId === expected.pluginId && actual.data.skillId === expected.skillId) {

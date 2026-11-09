@@ -57,7 +57,7 @@ MEMMY_LEGAL_CN_BASE_URL=https://memmy.cn MEMMY_LEGAL_INTL_BASE_URL=https://memmy
 npm --prefix App/memmy-agent run build
 ```
 
-组件测试页位于 `App/frontend/desktop/v124-migration-preview.html`。启动该目录的 Vite 后访问 `/v124-migration-preview.html`。它仅用于开发验收，不是生产业务入口。
+迁移时曾使用独立组件预览页进行开发验收；该页面已从 `v1.2.5` 移除。验收截图保留如下。
 
 ![回答收进 1.2.4 原过程区后的实际组件截图](validation/v124-question-history.png)
 

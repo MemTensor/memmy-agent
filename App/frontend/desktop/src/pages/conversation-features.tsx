@@ -12,14 +12,21 @@ import { useAppState } from "../state/app-state.js";
 import { appActions } from "../state/app-actions.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { answeredUnresolvedPluginInteraction, pendingPluginInteraction, pluginInteractionCompletedLabel, pluginInteractionWaitingLabel } from "../app/plugin-interaction-waiting-label.js";
+import { pendingAgentQuestion } from "./agent-question-card.js";
 import { PluginCapabilityHost, RecordingBarPortalContext, selectVisiblePluginCalls, isActiveLegalWorkflowCard } from "./plugin-capability-host.js";
 import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { canUseAccountRecording, useRecordingEntry, RecordingEntryCard, type RecordingArchiveEntry } from "./recording-entry.js";
-import { type SlashCommandPaletteItem } from "./agent-command-palette.js";
+import { localizeSlashCommands, type SlashCommandPaletteItem } from "./agent-command-palette.js";
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
 import type { UploadedAgentMedia } from "../api/memmy-agent-client.js";
 
 const NO_CALLS: PluginUiCall[] = [];
+const LEGAL_BUTTON_ONLY_COMMANDS = new Set(["/legal-guide", "/legal-record"]);
+
+/** These legal actions stay available as composer buttons, not slash commands. */
+function isLegalButtonOnlyCommand(plugin: InstalledPlugin, command: PluginCommandContribution): boolean {
+  return plugin.id === "legal-labor" && LEGAL_BUTTON_ONLY_COMMANDS.has(command.command);
+}
 
 /** A handed-over interview already has one pending row keyed by its audio path. */
 export function recordingArchiveMaterials(entry: RecordingArchiveEntry): PluginRecordingMaterial[] {
@@ -33,11 +40,10 @@ export function conversationFeaturePanelOverlays(width: number | null | undefine
   return width != null && width > 0 && width < SHARED_ROW_PRIMARY_RESERVE + SHARED_ROW_MIN_PANE_WIDTH;
 }
 
-export function recordingShortcutOpen(compactOpen: boolean,
-  pluginRecording: Pick<RecordingPanelSession, "status"> | null | undefined, pluginRecordingHidden: boolean): boolean {
-  // A completed interview may remain in the right panel, but this shortcut
-  // has already switched back to controlling the independent recording card.
-  return compactOpen || Boolean(pluginRecording && pluginRecording.status !== "done" && !pluginRecordingHidden);
+export function recordingShortcutOpen(compactOpen: boolean): boolean {
+  // The composer shortcut owns only the independent card. The plugin recorder
+  // keeps its own controls in the recording panel throughout the workflow.
+  return compactOpen;
 }
 
 function PersistentPluginRecorder(props: {
@@ -61,6 +67,7 @@ export function useConversationFeatures(options: {
   onOpenArtifact?(artifact: PluginArtifactRef): boolean;
   onSend(text: string): Promise<boolean>;
   onOpenRecording(): void;
+  onEnsureConversation?(title: string): Promise<string | null>;
 }) {
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
@@ -174,41 +181,47 @@ export function useConversationFeatures(options: {
       .map((command) => ({ plugin,
         command: plugin.id === "legal-labor" && command.command === "/legal-guide"
           ? { ...command, capabilityId: "guide-open" } : command }))), [plugins]);
-  const commandItems: SlashCommandPaletteItem[] = targets.map(({ command }) => ({
+  const slashTargets = useMemo(() => targets.filter(({ plugin, command }) =>
+    !isLegalButtonOnlyCommand(plugin, command)), [targets]);
+  const commandItems: SlashCommandPaletteItem[] = localizeSlashCommands(slashTargets.map(({ command }) => ({
     command: command.command, title: command.name, description: command.description ?? "",
     icon: command.icon ?? "activity", argHint: command.argHint ?? "", synthetic: true
-  }));
+  })), language, t);
 
   const legalFlowCardOpen = prepared.some((call) => isActiveLegalWorkflowCard(call)
     && !ui?.hiddenCallIds.has(call.callId) && !ui?.dismissedCallIds.has(call.callId));
+  const chatId = state.agent.currentChatId;
+  const activeTurnId = chatId ? state.agent.activeTurnIdByChatId[chatId] ?? null : null;
+  // This question is drawn under the shortcuts. They have to leave until it is answered.
+  const nativeLegalQuestionOpen = chatId !== null
+    && state.agent.stopInFlightByChatId[chatId] !== true
+    && calls.some((call) => call.pluginId === "legal-labor")
+    && pendingAgentQuestion(options.agentMessages ?? [], activeTurnId) !== null;
+  const legalQuestionOwnsComposer = legalFlowCardOpen || nativeLegalQuestionOpen;
+  const presented = legalQuestionOwnsComposer
+    ? prepared.filter((call) => !(call.pluginId === "legal-labor" && call.capabilityId === "guide-open"))
+    : prepared;
   const toggleCompactRecording = () => {
     setError(null);
-    if (legalFlowCardOpen) return;
+    if (legalQuestionOwnsComposer) return;
     if (!recordingAuthenticated) { dispatch(appActions.navigate("/welcome")); return; }
-    const owner = normalizePluginConversationId(conversationId)!;
-    const pluginRecorder = pluginRecordings.get(owner);
-    if (pluginRecorder && pluginRecorder.status !== "done") {
-      setHiddenRecordings((current) => {
-        const next = new Set(current);
-        if (next.has(owner)) next.delete(owner); else next.add(owner);
-        return next;
-      });
-      return;
-    }
     recording.toggleCompact();
   };
   const invoke = async (plugin: InstalledPlugin, command: PluginCommandContribution, args = "") => {
     // This shortcut is a Host recorder, not a material-collect capability call.
     if (plugin.id === "legal-labor" && command.command === "/legal-record") { toggleCompactRecording(); return; }
-    if (legalFlowCardOpen && plugin.id === "legal-labor") return;
+    if (legalQuestionOwnsComposer && plugin.id === "legal-labor") return;
     if (!clients?.plugins) return;
-    setHiddenRecordings((current) => { const next = new Set(current); next.delete(normalizePluginConversationId(conversationId)!); return next; });
     if (command.agentSkillId) { latest.current.onDraft(plugin.manifest.conversation
       ? `$${command.agentSkillId}${args ? ` ${args}` : ""}` : `${command.command} ${args}`); return; }
+    const invocationConversationId = state.agent.currentChatId ?? state.agent.currentSessionKey
+      ?? await latest.current.onEnsureConversation?.(command.name);
+    if (!invocationConversationId) return;
+    setHiddenRecordings((current) => { const next = new Set(current); next.delete(normalizePluginConversationId(invocationConversationId)!); return next; });
     setError(null);
     try {
       await pressPinnedPluginCommand({ calls, pluginId: plugin.id, capabilityId: command.capabilityId,
-        conversationId, dismissedCallIds: ui?.dismissedCallIds,
+        conversationId: invocationConversationId, dismissedCallIds: ui?.dismissedCallIds,
         pinnedCapabilities: new Set(targets.filter(({ command }) => command.pinned).map(({ plugin, command }) => `${plugin.id}:${command.capabilityId}`)),
         opening: ui?.openingCommands ?? invocationFlights.current,
         toggleVisibility: (callId) => ui?.setHiddenCallIds((current) => {
@@ -218,14 +231,14 @@ export function useConversationFeatures(options: {
           return next;
         }),
         open: () => clients.plugins.invoke(plugin.id, command.capabilityId, {
-          conversationId, input: { command: command.command, arguments: args }, origin: "user"
+          conversationId: invocationConversationId, input: { command: command.command, arguments: args }, origin: "user"
         })
       });
-    } catch (cause) { setError({ conversationId, message: cause instanceof Error ? cause.message : String(cause) }); }
+    } catch (cause) { setError({ conversationId: invocationConversationId, message: cause instanceof Error ? cause.message : String(cause) }); }
   };
   const runCommand = (text: string): boolean => {
     const [name, ...args] = text.trim().split(/\s+/u);
-    const target = targets.find(({ command }) => command.command.toLowerCase() === name?.toLowerCase());
+    const target = slashTargets.find(({ command }) => command.command.toLowerCase() === name?.toLowerCase());
     if (!target || target.command.agentSkillId) return false;
     void invoke(target.plugin, target.command, args.join(" "));
     return true;
@@ -261,8 +274,8 @@ export function useConversationFeatures(options: {
         if (normalizePluginConversationId(call.conversationId) !== normalizePluginConversationId(conversationId)) return;
         if (!await latest.current.onSend(buildLegalDiagnosisContinuation(call))) throw new Error(t("home.media.error.sendFailed"));
       }} /> : null;
-  const cards = <><div ref={setRecordingBar} />{host(prepared, "flow")}{host(prepared, "pinned")}
-    {recording.compactOpen && !legalFlowCardOpen ? <RecordingEntryCard session={recording.session}
+  const cards = <><div ref={setRecordingBar} />{host(presented, "flow")}{host(presented, "pinned")}
+    {recording.compactOpen && !legalQuestionOwnsComposer ? <RecordingEntryCard session={recording.session}
       disabled={!clients?.asr} onClose={recording.closeCompact} onOpenList={() => openRecording()} /> : null}
     {error?.conversationId === conversationId ? <div role="alert" className="text-sm text-red-600">{error.message}</div> : null}</>;
   // Microphone owners stay mounted while navigation only moves/hides their control bar.
@@ -285,10 +298,10 @@ export function useConversationFeatures(options: {
   const pinnedCapabilities = new Set(targets.filter(({ command }) => command.pinned)
     .map(({ plugin, command }) => `${plugin.id}:${command.capabilityId}`));
   const pinnedTargets = state.agent.currentChatId
-    ? selectPinnedCommandsForLegalWorkflow(selectConversationPinnedCommands(targets, calls), legalFlowCardOpen)
+    ? selectPinnedCommandsForLegalWorkflow(selectConversationPinnedCommands(targets, calls), legalQuestionOwnsComposer)
     : [];
   const shortcuts = <PinnedPluginCommandBar targets={pinnedTargets} disabled={!clients}
-    recordingOpen={recordingShortcutOpen(recording.compactOpen, pluginRecording, hiddenRecordings.has(recordingOwner))}
+    recordingOpen={recordingShortcutOpen(recording.compactOpen)}
     active={selectOpenPinnedCapabilities(prepared, ui?.dismissedCallIds, pinnedCapabilities, ui?.hiddenCallIds)}
     onRecordingPress={toggleCompactRecording} onPress={({ plugin, command }) => void invoke(plugin, command)} />;
   const conversationCommand = targets.find(({ plugin, command }) => plugin.manifest.conversation && command.topbar);
@@ -331,6 +344,7 @@ export function useConversationFeatures(options: {
   };
   return { plugins, conversationShortcut, cards, recorders, shortcuts, scenarios, recording, openRecording, closeSidePanel, closePluginRecording,
     pluginRecordingSession: pluginRecording && !hiddenRecordings.has(recordingOwner) ? pluginRecording : null, capabilityLabels,
+    hasConversationActivity: Boolean(state.agent.currentChatId && calls.length),
     processInteraction,
     capturePendingInputRelease,
     pendingKey: pending ? `${pending.call.callId}:${pluginInteractionSignature(pending.call)}` : null,
@@ -338,7 +352,7 @@ export function useConversationFeatures(options: {
     sidePanel: content ? <div className={`conversation-feature-sidepanel${sidePanelOverlay ? " conversation-feature-sidepanel--overlay" : ""}`}
       style={{ width: sidePanelOverlay ? "100%" : featurePanelWidth }}>{content}</div> : null,
     sidePanelWidth: content ? sidePanelOverlay ? 0 : featurePanelWidth : null,
-    agentPrompt: (text: string) => buildAgentRoutedPluginPrompt(text, targets), recordingAuthenticated, runCommand, commandItems,
+    agentPrompt: (text: string) => buildAgentRoutedPluginPrompt(text, slashTargets), recordingAuthenticated, runCommand, commandItems,
     waiting: Boolean(pending), pendingAgentTurnId: pending?.call.origin === "agent" ? pending.call.turnId : null,
     signIn: () => dispatch(appActions.navigate("/welcome")) };
 }

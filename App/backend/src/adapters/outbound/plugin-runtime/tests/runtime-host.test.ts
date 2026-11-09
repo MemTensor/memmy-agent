@@ -66,6 +66,28 @@ async function collect(iterable: AsyncIterable<CapabilityEvent>): Promise<Capabi
 }
 
 describe("PluginRuntimeHost", () => {
+  it("preserves no-progress diagnostics and review recovery coordinates", async () => {
+    const runtimeAdapter = adapter([]);
+    runtimeAdapter.invoke = async function* () { throw Object.assign(new Error("No runtime activity"), { code: "plugin_no_progress" }); };
+    const installed = plugin(); installed.id = "literature-review"; installed.manifest.id = installed.id;
+    installed.manifest.capabilities[0]!.inputSchema = { type: "object" };
+    const host = createPluginRuntimeHost(new PluginAdapterRegistry([runtimeAdapter]));
+    await host.activate(installed, {});
+    expect(await collect(host.invoke({ callId: "stalled", pluginId: installed.id, capabilityId: "echo", conversationId: "v", input: { taskId: "review-fixture" } }))).toEqual([
+      { type: "error", code: "plugin_no_progress", message: "No runtime activity", retryable: false, recovery: { taskId: "review-fixture", runId: "stalled" } }
+    ]);
+  });
+
+  it("runs adapter cleanup after the terminal event", async () => {
+    let cleaned = false;
+    const runtimeAdapter = adapter([]);
+    runtimeAdapter.invoke = async function* () { try { yield { type: "result", output: { text: "done" } }; } finally { cleaned = true; } };
+    const host = createPluginRuntimeHost(new PluginAdapterRegistry([runtimeAdapter]));
+    await host.activate(plugin(), {});
+    await collect(host.invoke({ callId: "done", pluginId: "com.example.echo", capabilityId: "echo", conversationId: "v", input: { text: "hello" } }));
+    expect(cleaned).toBe(true);
+  });
+
   it("validates input and output without sharing plugin schema ids", async () => {
     const runtimeAdapter = adapter([
       { type: "progress", current: 1, total: 1 },

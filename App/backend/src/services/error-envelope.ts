@@ -1,6 +1,7 @@
 /** Error envelope module. */
 import { ZodError } from "zod";
 import { ApiErrorCodeSchema, type ApiErrorCode } from "@memmy/local-api-contracts";
+import { VerificationRequestError } from "./verification-request-error.js";
 import { MemoryLayerError, MemoryLayerNetworkError } from "../adapters/outbound/memory-client/index.js";
 import type { FastifyReply, FastifyRequest, RouteHandlerMethod } from "fastify";
 
@@ -51,6 +52,7 @@ interface ErrorEnvelope {
   code: ApiErrorCode;
   status: number;
   message: string;
+  retryAfterSec?: number;
   upstreamRequestId?: string;
 }
 
@@ -63,6 +65,9 @@ export function withErrorEnvelope<Reply>(
       return await handler(request, reply);
     } catch (error) {
       const envelope = toErrorEnvelope(error);
+      if (envelope.retryAfterSec !== undefined) {
+        reply.header("Retry-After", String(envelope.retryAfterSec));
+      }
       return reply.code(envelope.status).send({
         error: {
           code: envelope.code,
@@ -77,6 +82,9 @@ export function withErrorEnvelope<Reply>(
 
 /** Handles to error envelope. */
 function toErrorEnvelope(error: unknown): ErrorEnvelope {
+  if (error instanceof VerificationRequestError) {
+    return { code: error.code, status: error.status, message: error.message, retryAfterSec: error.retryAfterSec };
+  }
   if (error instanceof ZodError) {
     return {
       code: "invalid_argument",

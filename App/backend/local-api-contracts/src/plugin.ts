@@ -378,7 +378,8 @@ export const CapabilityEventSchema = z.discriminatedUnion("type", [
     type: z.literal("error"),
     code: z.string().trim().min(1),
     message: z.string().trim().min(1),
-    retryable: z.boolean()
+    retryable: z.boolean(),
+    recovery: z.object({ taskId: z.string().min(1), runId: z.string().min(1) }).optional()
   })
 ]);
 export type CapabilityEvent = z.infer<typeof CapabilityEventSchema>;

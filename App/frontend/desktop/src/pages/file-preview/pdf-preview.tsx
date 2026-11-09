@@ -30,6 +30,7 @@ import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import "pdfjs-dist/web/pdf_viewer.css";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { computePdfDisplayScale, highlightPdfTextLayer, nextPdfMatchIndex } from "./pdf-preview-state.js";
+import { getPdfPreviewResourceOptions } from "./pdf-preview-resources.js";
 import type { FilePreviewViewState } from "./file-preview-types.js";
 
 // Fallback if the dedicated worker fails to boot. The primary path below
@@ -83,6 +84,7 @@ export function PdfPreview(props: PdfPreviewProps): ReactNode {
     const port = new PdfJsWorker();
     const worker = PDFWorker.create({ port });
     const loadingTask = getDocument({
+      ...getPdfPreviewResourceOptions(window.document.baseURI, import.meta.env.BASE_URL),
       data: new Uint8Array(props.data.slice(0)),
       worker
     });
@@ -219,10 +221,18 @@ export function PdfPreview(props: PdfPreviewProps): ReactNode {
   }, [changePage, matchIndex, matches]);
 
   if (failed) {
-    return <div className="workspace-artifact-preview-empty"><strong>{t("filePreview.failed")}</strong></div>;
+    return (
+      <div className="thread-preview__placeholder" role="status">
+        <span className="thread-preview__placeholder-message">{t("filePreview.failed")}</span>
+      </div>
+    );
   }
   if (!document) {
-    return <div className="workspace-artifact-preview-empty"><strong>{t("filePreview.loading")}</strong></div>;
+    return (
+      <div className="thread-preview__placeholder" role="status">
+        <span className="thread-preview__placeholder-message">{t("filePreview.loading")}</span>
+      </div>
+    );
   }
 
   const effectiveScale = fit === null ? scale : undefined;

@@ -11,3 +11,10 @@ App/native-computer-use/apps/OpenComputerUseWindows/version.go text eol=lf
 App/native-computer-use/packages/OpenComputerUseKit/Sources/OpenComputerUseKit/OpenComputerUseVersion.swift text eol=lf
 # The browser sensor generator emits LF on every platform.
 App/shell/desktop/extensions/memmy-browser/history-sensor.js text eol=lf
+# Preserve the exact upstream evidence bytes verified by the notice collector.
+/plugins/office/licenses/fontkit-2.0.4/NOTICE-SUPPLEMENT.txt -text
+/plugins/office/licenses/fontkit-2.0.4/SPDX-MIT-template.txt -text
+/plugins/office/licenses/fontkit-2.0.4/SPDX-MIT.json -text
+/plugins/office/licenses/fontkit-2.0.4/upstream-README.md -text
+/plugins/office/licenses/fontkit-2.0.4/upstream-npm-metadata.json -text
+/plugins/office/licenses/fontkit-2.0.4/upstream-package.json -text

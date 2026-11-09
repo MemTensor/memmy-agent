@@ -133,8 +133,8 @@ describe("app state store migrations", () => {
     expect(settings.stopMemoryServiceOnExit).toBe(false);
     expect(agentSources).toEqual([]);
     // The upstream migrations coexist with native trust and enabled-intent extensions.
-    expect(firstMigrationCount).toBe(40);
-    expect(secondMigrationCount).toBe(40);
+    expect(firstMigrationCount).toBe(41);
+    expect(secondMigrationCount).toBe(41);
     expect(pluginColumns).toEqual(expect.arrayContaining(["native_execution_allowed", "registry_origin", "desired_enabled"]));
   });
 

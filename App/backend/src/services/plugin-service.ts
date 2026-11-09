@@ -100,6 +100,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
   const eligibility = (manifest: PluginRecord["manifest"]) => pluginEligibility(manifest, options.isAuthenticated?.() ?? false, isEntitlementGranted);
   const activeCalls = new Map<string, number>();
   const suspended = new Set<string>();
+  const enabling = new Map<string, Promise<InstalledPlugin>>();
   const updates = new Map<string, { status: "waiting" | "installing"; version?: string; promise: Promise<InstalledPlugin> }>();
   const idleWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   let closing = false;
@@ -498,6 +499,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     },
 
     async enable(id) {
+      if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
       suspended.delete(id);
       const plugin = required(id);
       compatible(plugin.manifest);
@@ -667,19 +669,29 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
   return { ...service,
     install: (id, version) => serial(id, () => service.install(id, version)),
     update: (id, version) => service.update(id, version),
-    enable: async id => {
-      // A successful restore can still be refreshing the Agent catalog. A
-      // duplicate enable must not tear down that already active worker.
-      if (options.repository.get(id)?.state === "active") return serial(id, () => service.enable(id));
-      const previous = recoveries.get(id); cancelRecovery(id);
-      await previous?.promise;
-      return serial(id, () => service.enable(id));
+    enable: id => {
+      // Join before entering the lifecycle queue so concurrent callers share
+      // failures as well as successes instead of silently starting a retry.
+      const inFlight = enabling.get(id);
+      if (inFlight) return inFlight;
+      const attempt = (async () => {
+        // An active worker may still be refreshing its restored tool catalog.
+        if (options.repository.get(id)?.state === "active") return serial(id, () => service.enable(id));
+        const previous = recoveries.get(id); cancelRecovery(id);
+        await previous?.promise;
+        return serial(id, () => service.enable(id));
+      })();
+      enabling.set(id, attempt);
+      void attempt.finally(() => { if (enabling.get(id) === attempt) enabling.delete(id); }).catch(() => undefined);
+      return attempt;
     },
     disable: async id => {
+      enabling.delete(id);
       options.repository.setDesiredEnabled(id, false); cancelRecovery(id);
       return serial(id, () => service.disable(id));
     },
     uninstall: async id => {
+      enabling.delete(id);
       options.repository.setDesiredEnabled(id, false); cancelRecovery(id);
       return serial(id, () => service.uninstall(id));
     },

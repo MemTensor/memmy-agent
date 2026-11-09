@@ -274,6 +274,7 @@ function applyCorsHeaders(
   }
 
   reply.header("access-control-allow-origin", origin);
+  reply.header("access-control-expose-headers", "Retry-After");
   return true;
 }
 

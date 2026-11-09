@@ -12,6 +12,12 @@ import type { BackendServices } from "../services/index.js";
 import { createMockCloudClient } from "./support/mock-cloud-client.js";
 import { createMockMemoryClient } from "./support/mock-memory-client.js";
 
+// SSE shutdown should not depend on the automatic updater reaching a remote catalog.
+vi.mock("../adapters/outbound/plugin-registry/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../adapters/outbound/plugin-registry/index.js")>();
+  return { ...actual, createHttpPluginRegistry: () => actual.createInMemoryPluginRegistry([]) };
+});
+
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>(done => { resolve = done; });

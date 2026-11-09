@@ -4,12 +4,10 @@ import { AppBootstrapResponseSchema } from "@memmy/local-api-contracts";
 import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HistoryLaunchPromptHost } from "../../components/history-launch-prompt-host.js";
 import type { NicknameModalProps } from "../../components/nickname-modal.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { appActions } from "../../state/app-actions.js";
 import { createInitialAppState, type AppState } from "../../state/app-reducer.js";
-import { readHistoryLaunchPromptState, setHistoryLaunchPromptOpen } from "../history-launch-prompt-state.js";
 import type { ProductTourGuideProps } from "../product-tour.js";
 import { AppRouter } from "../router.js";
 import {
@@ -126,7 +124,7 @@ function completedBootstrap() {
 describe.each([
   { name: "macOS", platform: "darwin", osRelease: "25.0.0" },
   { name: "Windows 11", platform: "win32", osRelease: "10.0.26100" },
-])("Router guidance and History notice on $name", ({ platform, osRelease }) => {
+])("Router guidance on $name", ({ platform, osRelease }) => {
   let container: HTMLDivElement;
   let root: Root;
   let originalUrl: string;
@@ -156,7 +154,6 @@ describe.each([
 
   afterEach(() => {
     act(() => root?.unmount());
-    setHistoryLaunchPromptOpen(false);
     document.body.replaceChildren();
     window.history.replaceState(null, "", originalUrl);
     Reflect.deleteProperty(window, "memmy");
@@ -167,7 +164,6 @@ describe.each([
     await act(async () => {
       root.render(<StrictMode><I18nProvider language="zh-CN">
         <AppRouter onRetry={vi.fn()} />
-        <HistoryLaunchPromptHost />
       </I18nProvider></StrictMode>);
     });
   }
@@ -178,7 +174,7 @@ describe.each([
     await act(async () => button!.click());
   }
 
-  it.each(["finish", "skip"])("offers History immediately after tour %s and nickname submission", async (choice) => {
+  it.each(["finish", "skip"])("finishes guidance after tour %s and nickname submission", async (choice) => {
     writeDeferredGuidanceStep(window.sessionStorage, "product_tour");
     await renderRouter();
     expect(container.querySelector("[data-test-tour]")).not.toBeNull();
@@ -199,7 +195,7 @@ describe.each([
     expect(readGuidanceCompleted(window.localStorage)).toBe(true);
     expect(readDeferredGuidanceStep(window.sessionStorage)).toBeNull();
     expect(container.querySelector("[data-test-nickname-submit]")).toBeNull();
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("电脑历史记录");
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it("restores the product tour after restarting with empty session storage", async () => {
@@ -214,10 +210,9 @@ describe.each([
 
     expect(container.querySelector("[data-test-tour]")).not.toBeNull();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(readHistoryLaunchPromptState(window.localStorage).shown).toBe(false);
     await click("[data-test-tour-skip]");
     await click("[data-test-nickname-submit]");
-    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
   describe.each([
@@ -242,12 +237,11 @@ describe.each([
         expect(document.querySelector('[role="dialog"]')).toBeNull();
         expect(context.dispatch).not.toHaveBeenCalled();
         expect(readDeferredGuidanceStep(window.sessionStorage)).toBe(step);
-        expect(readHistoryLaunchPromptState(window.localStorage).shown).toBe(false);
       },
     );
   });
 
-  it("removes the old tour and offers History when another window completes guidance", async () => {
+  it("removes the old tour when another window completes guidance", async () => {
     writeDeferredGuidanceStep(window.sessionStorage, "product_tour");
     await renderRouter();
     expect(container.querySelector("[data-test-tour]")).not.toBeNull();
@@ -262,7 +256,7 @@ describe.each([
 
     expect(window.sessionStorage.getItem("memmy.deferredGuidanceStep")).toBe("product_tour");
     expect(container.querySelector("[data-test-tour]")).toBeNull();
-    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(context.dispatch).not.toHaveBeenCalled();
   });
 
@@ -289,7 +283,6 @@ describe.each([
     expect(readDeferredGuidanceStep(window.sessionStorage)).toBe("improvement");
     expect(container.querySelector("[data-test-tour]")).toBeNull();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(readHistoryLaunchPromptState(window.localStorage).shown).toBe(false);
 
     // Follow the requested route as the real app reducer would. The Home mock
     // omits its consent dialog, so the unfinished choice must stay pending here.
@@ -323,7 +316,7 @@ describe.each([
     await click("[data-test-tour-skip]");
     await click("[data-test-nickname-submit]");
     expect(context.updateProfile).not.toHaveBeenCalled();
-    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(context.state.bootstrap!.privacy.allowMemoryImprovementUpload).toBe(false);
   });
 
@@ -339,19 +332,7 @@ describe.each([
       expect(document.querySelector('[role="dialog"]')).toBeNull();
       expect(context.dispatch).not.toHaveBeenCalled();
       expect(readDeferredGuidanceStep(window.sessionStorage)).toBe(step);
-      expect(readHistoryLaunchPromptState(window.localStorage).shown).toBe(false);
     },
   );
 
-  it("does not consume the ready History notice while hidden and offers it when shown", async () => {
-    context.state.navigation.windowVisible = false;
-    await renderRouter();
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(readHistoryLaunchPromptState(window.localStorage).shown).toBe(false);
-
-    context.state.navigation.windowVisible = true;
-    await renderRouter();
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("电脑历史记录");
-    expect(readHistoryLaunchPromptState(window.localStorage).shown).toBe(true);
-  });
 });

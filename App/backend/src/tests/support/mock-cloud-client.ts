@@ -251,6 +251,14 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
 
     async ackLotteryReward() {
       return undefined;
+    },
+
+    async ensureTaskTokenGift() {
+      return { hasGift: false };
+    },
+
+    async ackTaskTokenGift() {
+      return undefined;
     }
   };
 }
