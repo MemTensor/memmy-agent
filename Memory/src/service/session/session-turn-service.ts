@@ -1599,6 +1599,31 @@ export class SessionTurnService {
         if (session) this.prepareScannedL3Session(request, session, sourceTurn.completedAt, onBatchesFrozen);
         return { status: "existing", result: responseResult };
       }
+      // A copied dialogue can arrive under another native agent source with a new
+      // conversation and turn id. Reuse the original capture before opening a
+      // session or running another capture decision.
+      const crossSource = identity.externalImport
+        ? this.deps.repos.runtime.findSourceTurnCaptureByContentHash(scope, contentHash)
+        : undefined;
+      if (crossSource) {
+        const result = crossSource.response.result;
+        if (crossSource.response.legacyImportMemoryId) {
+          return { status: "existing", legacyImportMemoryId: crossSource.response.legacyImportMemoryId };
+        }
+        if (!result) return { ...crossSource.response };
+        const assigned = this.deps.repos.runtime.getRawTurn(result.rawTurnId);
+        const responseResult = {
+          ...result,
+          episodeId: assigned?.episodeId,
+          assignmentStatus: assigned?.episodeId ? "assigned" as const : "pending" as const,
+          duplicate: true,
+          scheduledEvolution: false,
+          jobs: []
+        };
+        return crossSource.response.status === "rejected"
+          ? { ...crossSource.response, result: responseResult }
+          : { status: "existing", result: responseResult };
+      }
       const activation = this.deps.repos.runtime.getKv("source_turn_capture_activated_at")?.value;
       if (typeof activation !== "string" || !Number.isFinite(Date.parse(activation))) {
         return { status: "pending", reason: "source_capture_activation_unresolved" };

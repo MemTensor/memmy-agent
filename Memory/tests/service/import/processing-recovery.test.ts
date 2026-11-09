@@ -22,6 +22,47 @@ function setup() {
 }
 
 describe("recovery after repairing model configuration", () => {
+  it("batches polling lookups without loading vectors or changing stored diagnostics", () => {
+    const { service, added, repos } = setup();
+    const owner = service as unknown as { repos: Repositories };
+    const get = vi.spyOn(owner.repos.memories, "get");
+    const getMany = vi.spyOn(owner.repos.memories, "getMany");
+    const before = repos.processing.get(added.id);
+    const items = service.memoryProcessingStatus(Array(400).fill(added.id), { namespace }).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]?.retryAction).toBe("retry");
+    expect(get).not.toHaveBeenCalled();
+    expect(getMany).toHaveBeenCalledExactlyOnceWith([added.id], { includeVectors: false });
+    expect(repos.processing.get(added.id)).toEqual(before);
+  });
+
+  it.each(["work_memory", "span"] as const)("preserves embedding retries for L1 %s records without trace metadata", async kind => {
+    const { service, added, repos } = setup();
+    const memory = repos.memories.get(added.id)!;
+    const { trace: _trace, plugin_algorithm: _algorithm, ...internal } = memory.properties.internal_info;
+    repos.memories.update({ ...memory, memoryValue: "Completed quartzdeploy validation.", tags: [],
+      info: { ...memory.info, summary: "Completed quartzdeploy validation." },
+      properties: { ...memory.properties, internal_info: { ...internal, memory_kind: kind } } });
+    repos.processing.update(added.id, { stage: "embedding", retryAction: "retry", errorCode: "transient_provider_error" });
+    const result = service.retryMemoryProcessing(added.id, { namespace });
+    expect(result.accepted).toBe(true);
+    expect(result.processing.state).toBe("embedding_pending");
+    await service.runWorkerOnce(1, { targetMemoryIds: [added.id] });
+    expect(repos.processing.get(added.id)?.state).toBe("ready");
+  });
+
+  it("honours the caller's tenant when recovering scan failures", () => {
+    const { service, added, repos } = setup();
+    const memory = repos.memories.get(added.id)!;
+    repos.memories.update({ ...memory, properties: { ...memory.properties, internal_info: {
+      ...memory.properties.internal_info, external_evidence: { source: "fixture", namespace: { ...namespace, tenantId: "owner" } }
+    } } });
+    const before = repos.processing.get(added.id);
+    expect(service.retryFailedMemoryProcessingOnScan(added.id, { namespace: { ...namespace, tenantId: "other" } })).toBe(false);
+    expect(repos.processing.get(added.id)).toEqual(before);
+    expect(service.retryFailedMemoryProcessingOnScan(added.id, { namespace: { ...namespace, tenantId: "owner" } })).toBe(true);
+  });
+
   it.each(["summary", "embedding"] as const)("manually recovers a historical generic request error at %s without replacing the memory", async stage => {
     const { db, service, added, repos } = setup();
     repos.processing.update(added.id, { stage });

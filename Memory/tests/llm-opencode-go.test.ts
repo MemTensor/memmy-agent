@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, type LlmConfig } from "../src/config/index.js";
 import { ModelHttpError } from "../src/model/http.js";
+import { openCodeGoLlmHeaders } from "../src/model/opencode-go.js";
 import { createLlmClient } from "../src/model/llm.js";
 import { MemoryModelTaskRouter } from "../src/model/task-routing.js";
 import { classifyProcessingError } from "../src/service/worker/job-handlers.js";
@@ -34,6 +35,19 @@ function mockProvider() {
 }
 
 describe("OpenCode Go memory requests", () => {
+  it.each([undefined, { "X-OpenCode-Session": "ses_user_override" }])(
+    "keeps no-session searches stable and respects explicit headers: %j", async extraHeaders => {
+      const seen = mockProvider();
+      const { service } = fixture.createTestService({ llm: createLlmClient(config({ extraHeaders })),
+        config: { ...LEGACY_TEST_CONFIG, algorithm: { ...LEGACY_TEST_CONFIG.algorithm, enableQueryRewrite: true } } });
+      for (let i = 0; i < 2; i++) await service.search({ query: "Validate the release.", layers: ["Skill"] });
+      expect(seen.length).toBeGreaterThanOrEqual(2);
+      expect(seen[0]!.get("x-opencode-session")).toBeTruthy();
+      expect(new Set(seen.map(h => h.get("x-opencode-session"))).size).toBe(1);
+      if (extraHeaders) expect(seen[0]!.get("x-opencode-session")).toBe("ses_user_override");
+    }
+  );
+
   it("keeps turn-start conversation headers while refreshing imported Skill recall", async () => {
     const seen = mockProvider();
     const { service } = fixture.createTestService({
@@ -41,7 +55,7 @@ describe("OpenCode Go memory requests", () => {
       config: { ...LEGACY_TEST_CONFIG, algorithm: { ...LEGACY_TEST_CONFIG.algorithm,
         enableQueryRewrite: true,
         session: { ...LEGACY_TEST_CONFIG.algorithm.session, turnJudge: true },
-        retrieval: { ...LEGACY_TEST_CONFIG.algorithm.retrieval, llmFilterEnabled: false }
+        retrieval: { ...LEGACY_TEST_CONFIG.algorithm.retrieval, llmFilterEnabled: true, llmFilterMinCandidates: 1 }
       } }
     });
     const namespace = { source: "codex", profileId: "default", userId: "go-turn-start-user" };
@@ -53,6 +67,16 @@ describe("OpenCode Go memory requests", () => {
     await service.runWorkerOnce(10);
     seen.length = 0;
     const sessions = ["a", "b"].map(sessionKey => service.openSession({ namespace: { ...namespace, sessionKey } }).sessionId);
+    await Promise.all(sessions.map(sessionId => service.search({ namespace, sessionId,
+      query: "Validate quartzdeploy before release.", layers: ["Skill"] })));
+    const searchHeaders = seen.map(h => h.get("x-opencode-session"));
+    for (const sessionId of sessions) {
+      const expected = openCodeGoLlmHeaders(config(), sessionId)["x-opencode-session"];
+      // Query rewriting and hit filtering both use the owning business session.
+      expect(searchHeaders.filter(header => header === expected).length).toBeGreaterThanOrEqual(2);
+    }
+    expect(new Set(searchHeaders)).toEqual(new Set(sessions.map(sessionId => openCodeGoLlmHeaders(config(), sessionId)["x-opencode-session"])));
+    seen.length = 0;
     const turnHeaders: string[] = [];
     for (const [index, sessionId] of [sessions[0]!, sessions[1]!, sessions[0]!].entries()) {
       const before = seen.length;
@@ -64,6 +88,7 @@ describe("OpenCode Go memory requests", () => {
       expect(headers.length).toBeGreaterThan(0);
       expect(headers[0]).toBeTruthy();
       expect(new Set(headers).size).toBe(1);
+      expect(headers[0]).toBe(openCodeGoLlmHeaders(config(), sessionId)["x-opencode-session"]);
       turnHeaders.push(headers[0]!);
     }
     expect(turnHeaders[0]).not.toBe(turnHeaders[1]);

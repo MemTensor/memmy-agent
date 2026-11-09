@@ -16,7 +16,7 @@ export function panelListItemFromMemory(
   memory: MemoryRow,
   processing?: MemoryProcessingRecord
 ): MemoryListItem {
-  const processingView = processingWithRetryAction(memory, processing);
+  const processingView = processing ? processingWithRetryAction(memory, processing) : undefined;
   const spanGoal = panelSpanGoalForMemory(memory);
   const observationSummary = observedActivitySummary(memory);
   const observation = isRecord(memory.properties.internal_info.observation_memory)

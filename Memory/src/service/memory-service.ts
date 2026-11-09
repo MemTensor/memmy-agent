@@ -1819,10 +1819,10 @@ export class MemoryService {
       ? `${request.sourceTurn.source}:${request.sourceTurn.profileId}:${request.sourceTurn.conversationId}` : undefined)));
     // Full scans are an explicit recovery action. Hooks and incremental scans
     // must not repeatedly restart a terminal failure without user intervention.
-    if (allowsLegacyHistoryCapture(request) && response.status === "existing") {
+    if (isExplicitHistoryRecovery(request) && response.status === "existing") {
       const ids = response.result?.l1MemoryIds ?? (response.legacyImportMemoryId ? [response.legacyImportMemoryId] : []);
       for (const id of ids) {
-        if (this.retryFailedMemoryProcessingOnScan(id)) recoveredEvolutionScheduled = true;
+        if (this.retryFailedMemoryProcessingOnScan(id, request)) recoveredEvolutionScheduled = true;
       }
     }
     serviceLogger.info("source_turn.complete", {
@@ -1859,7 +1859,7 @@ export class MemoryService {
     syncCursor?: string;
     serverTime: string;
   }> {
-    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.observeTool(this.withTimeZone(input))));
+    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.observeTool(this.withTimeZone(input)), input.sessionId));
   }
 
 
@@ -1875,14 +1875,14 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: input.task ?? "" },
       () => this.sessionTurns.subagentStart(this.withTimeZone(input))
-    )));
+    ), input.sessionId));
   }
 
   async subagentComplete(input: SubagentCompleteRequest): Promise<CompleteTurnResponse> {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: input.summary ?? "Subagent completed" },
       () => this.sessionTurns.subagentComplete(this.withTimeZone(input))
-    )));
+    ), input.sessionId));
   }
 
   async repairSuggestion(input: RepairSuggestionRequest): Promise<{
@@ -1898,7 +1898,7 @@ export class MemoryService {
     reason?: string;
     sourceMemoryIds: string[];
   }> {
-    return this.withModelTaskContext(() => this.sessionTurns.repairSuggestion(this.withTimeZone(input)));
+    return this.withModelTaskContext(() => this.sessionTurns.repairSuggestion(this.withTimeZone(input)), input.sessionId);
   }
 
   async search(request: InternalMemorySearchRequest): Promise<{
@@ -1924,7 +1924,7 @@ export class MemoryService {
     verbose: boolean;
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.retrieval.search(this.withTimeZone(request)));
+    return this.withModelTaskContext(() => this.retrieval.search(this.withTimeZone(request)), request.sessionId);
   }
 
 
@@ -2665,7 +2665,7 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.retrieval.worldModelQuery(this.withTimeZone(input)));
+    return this.withModelTaskContext(() => this.retrieval.worldModelQuery(this.withTimeZone(input)), input.sessionId);
   }
 
   listSkills(input: RequestEnvelope & {
@@ -2738,7 +2738,7 @@ export class MemoryService {
   }
 
   async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
-    return this.withModelTaskContext(() => this.feedbackExperience.feedback(request));
+    return this.withModelTaskContext(() => this.feedbackExperience.feedback(request), request.sessionId);
   }
 
   private async createRevisionDecisionRepairFromJob(job: EvolutionJobRecord): Promise<void> {
@@ -3645,7 +3645,7 @@ export class MemoryService {
     return retried.length ? { ...result, accepted: true, job: result.job ?? jobToRef(retried[0]!.after) } : result;
   }
 
-  retryFailedMemoryProcessingOnScan(memoryId: string): boolean {
+  retryFailedMemoryProcessingOnScan(memoryId: string, request: RequestEnvelope = {}): boolean {
     let accepted: boolean;
     try {
       accepted = this.repos.transaction(() => {
@@ -3653,7 +3653,10 @@ export class MemoryService {
         const memory = this.repos.memories.get(memoryId);
         const processing = this.repos.processing.get(memoryId);
         if (!memory || !processing || !canRetryMemoryProcessing(memory, processing)) return false;
-        return this.retryMemoryProcessingInTransaction(memoryId).accepted;
+        const scopedRequest = { ...request, namespace: request.namespace ?? {
+          source: request.source ?? memory.agentId ?? "memmy", profileId: "default", userId: this.config.userId
+        } };
+        return this.retryMemoryProcessingInTransaction(memoryId, scopedRequest).accepted;
       });
     } catch (error) {
       // Capture is already committed; recovery failure must not fail the scan turn.
@@ -4737,4 +4740,9 @@ function sourceObservationSummary(content: string, title: string): string {
   const section = heading < 0 ? "" : lines.slice(heading + 1).join("\n").split(/^#{1,6}\s/mu)[0]?.trim();
   return (section || content.split(/\r?\n/u).map((line) => line.replace(/^\s*#{1,6}\s+/u, "").trim())
     .find((line) => Boolean(line && line !== title)) || title).slice(0, 2_000);
+}
+
+/** Full/initial history backfills are user-requested recovery; hooks and incremental scans do not set this flag. */
+function isExplicitHistoryRecovery(request: SourceTurnCompleteRequest): boolean {
+  return allowsLegacyHistoryCapture(request);
 }

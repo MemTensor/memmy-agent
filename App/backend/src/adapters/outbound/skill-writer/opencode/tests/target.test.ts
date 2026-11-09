@@ -245,6 +245,7 @@ describe("opencode skill target", () => {
       const targetUrl = url instanceof Request ? new URL(url.url) : url instanceof URL ? url : new URL(String(url));
       const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
       requests.push({ path: targetUrl.pathname, body });
+      if (targetUrl.pathname === "/api/v1/sessions/open") return jsonResponse({ sessionId: "memmy-tool-session" });
       if (targetUrl.pathname === "/api/v1/memory/search") {
         if (body.verbose !== true) return jsonResponse({ injectedContext: "service context only" });
         return jsonResponse({
@@ -258,13 +259,14 @@ describe("opencode skill target", () => {
     try {
       const result = await hooks.tool.memmy_memory_search.execute(
         { query: "memmy", layers: ["L1"] },
-        { sessionID: "tool-session" }
+        { sessionID: "tool-session", agent: "build" }
       );
       expect(requests.find((request) => request.path === "/api/v1/memory/search")?.body).toMatchObject({
         query: "memmy",
         layers: ["L1"],
         source: "opencode",
-        verbose: true
+        verbose: true,
+        sessionId: "memmy-tool-session"
       });
       expect(result).toContain("Recovered from snippet");
       expect(result).toContain("[L1] OpenCode memory (memory-1)");

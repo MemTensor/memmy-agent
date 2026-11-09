@@ -5,8 +5,9 @@ const OPENCODE_GO_HOST = "opencode.ai";
 // Official Go endpoints; custom gateways are identified by sourceProvider.
 const OPENCODE_GO_PATH = /^\/(?:zen|inference)\/go(?:\/|$)/;
 
-/** Only Go connections need these defaults; custom headers are case-insensitive. */
-export function openCodeGoHeaders(config: LlmConfig, sessionId: string): Record<string, string> {
+/** Go chat/LLM requests need these defaults; embedding endpoints are outside this contract.
+ * Explicit headers are case-insensitive. */
+export function openCodeGoLlmHeaders(config: LlmConfig, sessionId: string): Record<string, string> {
   const explicit = config.extraHeaders ?? {};
   if (!isOpenCodeGo(config)) return explicit;
   const names = new Set(Object.keys(explicit).map(name => name.toLowerCase()));

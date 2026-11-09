@@ -105,6 +105,7 @@ export interface ImportJobProcessorDeps {
   ): void;
   memories: {
     get(id: string): MemoryRow | undefined;
+    getMany(ids: string[], options?: { includeVectors?: boolean }): MemoryRow[];
     getIncludingDeleted(id: string): MemoryRow | undefined;
     getByKeyIncludingDeleted(layer: MemoryLayer, key: string): MemoryRow | undefined;
     getByKey(layer: MemoryLayer, key: string): MemoryRow | undefined;
@@ -418,10 +419,14 @@ export class ImportJobProcessor {
   memoryProcessingStatus(memoryIds: readonly string[], request: RequestEnvelope = {}): { items: MemoryProcessingRecord[]; serverTime: string } {
     const ids = dedupeStrings(memoryIds).slice(0, 10_000);
     void request;
-    const items = this.deps.processing.getMany(ids).map(processing => {
+    const records = this.deps.processing.getMany(ids);
+    const recoveryIds = records.filter(isManualRecoveryCandidate).map(processing => processing.memoryId);
+    const memoriesById = new Map(this.deps.memories.getMany(recoveryIds, { includeVectors: false })
+      .map(memory => [memory.id, memory]));
+    const items = records.map(processing => {
       if (!isManualRecoveryCandidate(processing)) return processing;
-      const memory = this.deps.memories.get(processing.memoryId);
-      return memory ? (processingWithRetryAction(memory, processing) ?? processing) : processing;
+      const memory = memoriesById.get(processing.memoryId);
+      return memory ? processingWithRetryAction(memory, processing) : processing;
     });
     return { items, serverTime: this.deps.nowIso() };
   }

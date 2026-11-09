@@ -1,5 +1,5 @@
 /** Adapter tests. */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -20,6 +20,77 @@ afterEach(() => {
 });
 
 describe("codex source adapter", () => {
+  const threadId = "01a1b5c6-fa7d-7d73-ad9d-a1d1c6280d18";
+  const contentHash = "0".repeat(64);
+
+  it.each(["records", "imports"])("recognizes timestamped rollouts from the %s ledger", async field => {
+    const fixture = createFixture();
+    const record = { source_path: "cursor/agent-transcripts/example.txt", imported_thread_id: threadId,
+      [field === "records" ? "content_sha256" : "content_hash"]: contentHash };
+    writeFileSync(join(tempDir!, "external_agent_session_imports.json"), JSON.stringify({ [field]: [record], detected_connector_records: [] }));
+    const source = readFileSync(fixture.rolloutPath, "utf8").split("\n");
+    source[0] = JSON.stringify({ type: "session_meta", payload: { id: threadId, cwd: fixture.workspacePath } });
+    const timestampedPath = join(fixture.sessionsRoot, `rollout-2026-11-07T19-31-18-${threadId}.jsonl`);
+    renameSync(fixture.rolloutPath, timestampedPath);
+    writeFileSync(timestampedPath, source.join("\n"));
+
+    await expect(discoverCodexSessions({ root: fixture.sessionsRoot })).resolves.toEqual([
+      expect.objectContaining({ sessionFilePath: timestampedPath, externalImport: {
+        sourcePath: record.source_path, importedThreadId: threadId, contentHash
+      } })
+    ]);
+  });
+
+  it("uses session_meta.id over a conflicting filename and accepts metadata without cwd", async () => {
+    const fixture = createFixture();
+    writeFileSync(fixture.rolloutPath, JSON.stringify({ type: "session_meta", payload: { id: threadId } }));
+    writeFileSync(join(tempDir!, "external_agent_session_imports.json"), JSON.stringify({ records: [{
+      source_path: "cursor/example.txt", imported_thread_id: threadId, content_sha256: contentHash
+    }] }));
+    await expect(discoverCodexSessions({ root: fixture.sessionsRoot })).resolves.toEqual([
+      expect.objectContaining({ workspacePath: null, externalImport: {
+        sourcePath: "cursor/example.txt", importedThreadId: threadId, contentHash
+      } })
+    ]);
+  });
+
+  it.each([false, true])("uses the UUID filename suffix when session metadata has no id (plain=%s)", async plain => {
+    const fixture = createFixture();
+    // This fixture has cwd in session_meta but no id, as in older rollouts.
+    const filenameThreadId = "019e72be-500b-7f02-9400-112c5a194e5c";
+    if (plain) renameSync(fixture.rolloutPath, join(fixture.sessionsRoot, `rollout-${filenameThreadId}.jsonl`));
+    writeFileSync(join(tempDir!, "external_agent_session_imports.json"), JSON.stringify({ records: [{
+      source_path: "cursor/example.txt", imported_thread_id: filenameThreadId, content_sha256: contentHash
+    }] }));
+    const sessions = await discoverCodexSessions({ root: fixture.sessionsRoot });
+    expect(sessions[0]?.externalImport).toEqual({ sourcePath: "cursor/example.txt", importedThreadId: filenameThreadId, contentHash });
+    expect(sessions[0]?.workspacePath).toBe(fixture.workspacePath);
+  });
+
+  it("prefers native records/content_sha256 and ignores invalid and connector-only entries", async () => {
+    const fixture = createFixture();
+    const filenameThreadId = "019e72be-500b-7f02-9400-112c5a194e5c";
+    const record = { source_path: "cursor/native.txt", imported_thread_id: filenameThreadId,
+      content_sha256: contentHash, content_hash: "legacy-hash" };
+    const ledgerPath = join(tempDir!, "external_agent_session_imports.json");
+    writeFileSync(ledgerPath, JSON.stringify({ records: [null, {}, { ...record, source_path: "" },
+      { ...record, imported_thread_id: "" }, record], imports: [{ ...record, source_path: "cursor/legacy.txt" }] }));
+    expect((await discoverCodexSessions({ root: fixture.sessionsRoot }))[0]?.externalImport).toEqual({
+      sourcePath: record.source_path, importedThreadId: filenameThreadId, contentHash
+    });
+    writeFileSync(ledgerPath, JSON.stringify({ records: [], detected_connector_records: [record] }));
+    expect((await discoverCodexSessions({ root: fixture.sessionsRoot }))[0]?.externalImport).toBeUndefined();
+  });
+
+  it.each(["{", "null", '{"records":{}}'])("still discovers sessions with an unreadable ledger: %s", async ledger => {
+    const fixture = createFixture();
+    writeFileSync(join(tempDir!, "external_agent_session_imports.json"), ledger);
+    const sessions = await discoverCodexSessions({ root: fixture.sessionsRoot });
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.workspacePath).toBe(fixture.workspacePath);
+    expect(sessions[0]?.externalImport).toBeUndefined();
+  });
+
   it("reads user, assistant, and tool response items", async () => {
     const fixture = createFixture();
 

@@ -1,7 +1,7 @@
 /** Session discovery module. */
 import { existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { readJsonlObjects } from "../jsonl-lines.js";
 import { readDirectoryIfExists } from "../read-directory.js";
 
@@ -10,6 +10,7 @@ export interface CodexSessionFile {
   sessionFilePath: string;
   workspacePath: string | null;
   gitRoot: string | null;
+  externalImport?: { sourcePath: string; contentHash?: string; importedThreadId: string };
 }
 
 export interface DiscoverCodexSessionsOptions {
@@ -22,18 +23,50 @@ export interface DiscoverCodexSessionsOptions {
 /** Handles discover codex sessions. */
 export async function discoverCodexSessions(options: DiscoverCodexSessionsOptions): Promise<CodexSessionFile[]> {
   const files = await listRolloutFiles(options.root, options.order ?? "path_asc", options.maxSessions);
+  const imports = await readCodexImportLedger(join(dirname(options.root), "external_agent_session_imports.json"));
   const sessions: CodexSessionFile[] = [];
 
   for (const filePath of files) {
-    const workspacePath = await readFirstCwd(filePath);
+    const { workspacePath, threadId } = await readSessionMetadata(filePath);
+    const externalImport = imports.get(threadId);
     sessions.push({
       sessionFilePath: filePath,
       workspacePath,
-      gitRoot: workspacePath ? findGitRoot(workspacePath) : null
+      gitRoot: workspacePath ? findGitRoot(workspacePath) : null,
+      ...(externalImport ? { externalImport } : {})
     });
   }
 
   return sessions;
+}
+
+async function readCodexImportLedger(path: string): Promise<Map<string, { sourcePath: string; contentHash?: string; importedThreadId: string }>> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (!isRecord(parsed)) return new Map();
+    // records/content_sha256 is the native ledger protocol; accept the
+    // imports/content_hash shape for compatibility as well.
+    const records = Array.isArray(parsed.records) ? parsed.records : Array.isArray(parsed.imports) ? parsed.imports : [];
+    const imports = new Map<string, { sourcePath: string; contentHash?: string; importedThreadId: string }>();
+    for (const entry of records) {
+      if (!isRecord(entry) || typeof entry.source_path !== "string" || !entry.source_path.trim()
+        || typeof entry.imported_thread_id !== "string" || !entry.imported_thread_id.trim()) continue;
+      const contentHash = typeof entry.content_sha256 === "string" ? entry.content_sha256 : entry.content_hash;
+      imports.set(entry.imported_thread_id.trim(), {
+        sourcePath: entry.source_path,
+        ...(typeof contentHash === "string" ? { contentHash } : {}),
+        importedThreadId: entry.imported_thread_id.trim()
+      });
+    }
+    return imports;
+  } catch {
+    return new Map();
+  }
+}
+
+function rolloutThreadId(filePath: string): string {
+  const name = basename(filePath).replace(/^rollout-/u, "").replace(/\.jsonl$/u, "");
+  return name.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu)?.[0] ?? name;
 }
 
 /** Handles list rollout files. */
@@ -71,22 +104,27 @@ async function listRolloutFiles(
     .map((file) => file.path);
 }
 
-async function readFirstCwd(filePath: string): Promise<string | null> {
+async function readSessionMetadata(filePath: string): Promise<{ workspacePath: string | null; threadId: string }> {
+  let workspacePath: string | null = null;
+  let threadId = rolloutThreadId(filePath);
+  let foundSessionMetadata = false;
   try {
     for await (const record of readJsonlObjects(filePath)) {
-      if (typeof record.cwd === "string") {
-        return record.cwd;
+      const payload = isRecord(record.payload) ? record.payload : undefined;
+      if (record.type === "session_meta") {
+        if (typeof payload?.id === "string" && payload.id.trim()) threadId = payload.id.trim();
+        foundSessionMetadata = true;
       }
-
-      if (isRecord(record.payload) && typeof record.payload.cwd === "string") {
-        return record.payload.cwd;
+      if (workspacePath === null) {
+        if (typeof record.cwd === "string") workspacePath = record.cwd;
+        else if (typeof payload?.cwd === "string") workspacePath = payload.cwd;
       }
+      if (foundSessionMetadata && workspacePath !== null) break;
     }
   } catch {
-    return null;
+    // Keep filename fallback and any metadata recovered before a corrupt line.
   }
-
-  return null;
+  return { workspacePath, threadId };
 }
 
 function findGitRoot(workspacePath: string): string | null {

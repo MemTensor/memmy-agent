@@ -1,6 +1,6 @@
 import { get_encoding } from "tiktoken";
 import { randomUUID } from "node:crypto";
-import { openCodeGoHeaders } from "./opencode-go.js";
+import { openCodeGoLlmHeaders } from "./opencode-go.js";
 import { MEMORY_SUMMARY_MAX_TOKENS, type LlmConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { resolveMemoryAgentRegion } from "./agent-region.js";
@@ -118,7 +118,7 @@ class HttpLlmClient implements LlmClient {
   }
 
   private providerHeaders(options: LlmCompletionOptions): Record<string, string> {
-    return openCodeGoHeaders(this.config,
+    return openCodeGoLlmHeaders(this.config,
       options.sessionId ?? this.options.fallbackSessionId ?? PROCESS_FALLBACK_SESSION_ID);
   }
 

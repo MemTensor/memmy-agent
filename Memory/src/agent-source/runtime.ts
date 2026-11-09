@@ -1765,7 +1765,7 @@ async function ingestStagedTurns(
       // Recovery belongs to an explicit history scan, not ordinary duplicate
       // imports or incremental synchronization with unchanged configuration.
       if (added.duplicate && (scanMode === "initial_subset" || scanMode === "full")) {
-        service.retryFailedMemoryProcessingOnScan?.(added.id);
+        service.retryFailedMemoryProcessingOnScan(added.id, { source: sourceId, namespace: { source: sourceId, profileId: "default" } });
       }
       if (!added.duplicate) {
         memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);

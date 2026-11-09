@@ -620,9 +620,9 @@ export function classifyProcessingError(error: unknown): {
   if (error instanceof EmbeddingInputLimitError) {
     return { code: "model_input_too_long", retryAction: "none" };
   }
+  const providerCode = error instanceof ModelHttpError ? error.errorCode?.toLowerCase().replace(/[\s_-]/g, "") : undefined;
+  const providerType = error instanceof ModelHttpError ? error.errorType?.toLowerCase().replace(/[\s_-]/g, "") : undefined;
   if (error instanceof ModelHttpError) {
-    const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
-    const providerType = error.errorType?.toLowerCase().replace(/[\s_-]/g, "");
     if (error.errorCategory === "quota_exhausted" || providerCode === "40308" || providerCode === "40309" ||
       providerCode === "insufficientquota" || providerType === "insufficientquota") {
       return { code: QUOTA_PROCESSING_ERROR_CODE, retryAction: "open_settings" };
@@ -659,8 +659,6 @@ export function classifyProcessingError(error: unknown): {
   // Shared HTTP 400 configuration/quota failures must not fan out into one
   // request per item when an embedding batch is rejected.
   if (error instanceof ModelHttpError) {
-    const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
-    const providerType = error.errorType?.toLowerCase().replace(/[\s_-]/g, "");
     if (providerCode === "missingsessionid" || providerType === "missingsessionid" ||
       /(?:missing|required|absent).{0,100}x-opencode-session|x-opencode-session.{0,100}(?:missing|required|absent)/s.test(normalized)) {
       return { code: "model_configuration", retryAction: "open_settings" };
