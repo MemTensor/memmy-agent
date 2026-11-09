@@ -96,7 +96,7 @@ function setup(archiveEta?: number, valueDistributionRepairEnabled = false) {
   const embedder = createCapturingEmbedder([]);
   embedder.embedOne = async (text) => text.includes("member B") ? [0.8, 0.6, 0] : [1, 0, 0];
   embedder.embed = async (texts) => texts.map((text) => text.includes("TLS new") ? [0, 1, 0] : [1, 0, 0]);
-  const config = structuredClone(LEGACY_TEST_CONFIG);
+  const config: typeof DEFAULT_MEMMY_CONFIG = structuredClone(LEGACY_TEST_CONFIG);
   config.algorithm.retrieval.smartSeed = false;
   config.algorithm.retrieval.llmFilterEnabled = false;
   config.algorithm.retrieval.relativeThresholdFloor = 0;
@@ -106,7 +106,7 @@ function setup(archiveEta?: number, valueDistributionRepairEnabled = false) {
   config.algorithm.l3Abstraction.useLlm = false;
   config.algorithm.feedback.valueDistributionRepairEnabled = valueDistributionRepairEnabled;
   if (valueDistributionRepairEnabled) config.algorithm.feedback.cooldownMs = 0;
-  const base = fixture.createTestService({ llm, skillLlm: llm, config, embedder });
+  const base = fixture.createTestService({ llm, skillLlm: llm, config, embedder, configLoader: () => ({ config }) });
   return { ...base, state, config, repos: new Repositories(base.db.db) };
 }
 type Context = ReturnType<typeof setup>;
@@ -146,19 +146,34 @@ function snapshot(context: Context, prepared: Prepared) {
 }
 
 describe("MEMMY-647 current baseline acceptance", () => {
-  it.each([1, 3])("normal lifecycle withdraws and restores positive contribution (%i sources)", async count => {
-    const c = setup(); c.config.algorithm.reward.feedbackWindowSec = 1; const p = await prepare(c);
-    const members = [p];
+  it.each([
+    { count: 1, mode: "legacy", association: false },
+    { count: 1, mode: "unified", association: false },
+    { count: 3, mode: "legacy", association: true },
+    { count: 3, mode: "unified", association: true }
+  ] as const)("normal lifecycle withdraws and restores positive contribution ($count sources, $mode, real association=$association)", async ({ count, mode, association }) => {
+    const c = setup(); c.config.algorithm.reward.feedbackWindowSec = 1;
+    const members = [await prepare(c)];
     for (let i = 1; i < count; i++) members.push(await prepare(c, `member ${i}`));
+    const p = members.at(-1)!;
     for (const item of members) {
       makeTraceEligibleForL2(c.db, item.first.l1MemoryId);
       setTraceSignatureAndVectorForTest(c.db, item.first.l1MemoryId, "python|pytest|_|_", [1, 0, 0]);
     }
     const source = c.repos.memories.get(p.first.l1MemoryId)!;
     const common = { userId: p.namespace.userId, sessionId: p.session.sessionId, agentId: source.agentId ?? "codex", profileId: p.namespace.profileId };
-    insertActivePolicyMemory(c.db, { ...common, id: "647-transition-policy", appId: "647-test", sourceTraceId: p.first.l1MemoryId, sourceEpisodeId: p.first.episodeId });
+    insertActivePolicyMemory(c.db, { ...common, id: "647-transition-policy", appId: "647-test", sourceTraceId: members[0]!.first.l1MemoryId, sourceEpisodeId: members[0]!.first.episodeId });
     insertActiveSkillMemoryForTest(c.db, { ...common, id: "647-transition-skill", sourcePolicyIds: ["647-transition-policy"] });
-    for (const item of members) insertTracePolicyLinkForTest(c.db, { userId: p.namespace.userId, l1MemoryId: item.first.l1MemoryId, l2MemoryId: "647-transition-policy" });
+    for (const item of association ? members.slice(0, -1) : members) insertTracePolicyLinkForTest(c.db, { userId: p.namespace.userId, l1MemoryId: item.first.l1MemoryId, l2MemoryId: "647-transition-policy" });
+    if (association) {
+      const job = enqueue(c, p, "l2_association", {}, p.first.l1MemoryId);
+      await executeQueued(c, job);
+      expect(c.repos.runtime.listTracePolicyLinks({ l1MemoryId: p.first.l1MemoryId, limit: -1 }))
+        .toEqual(expect.arrayContaining([expect.objectContaining({ l2MemoryId: "647-transition-policy", relation: "matches_signature" })]));
+    } else {
+      c.config.algorithm.l2Induction.mode = mode;
+      expect(c.service.reloadConfig({ restartFailedProcessing: false }).requiresRestart).toBe(false);
+    }
     const drain = async () => { for (let i = 0; i < 45; i++) { vi.setSystemTime(Date.now() + 1_000); await c.service.runWorkerOnce(40); } };
     const close = async () => {
       vi.setSystemTime(Date.now() + 3 * 60 * 60 * 1000);
@@ -170,6 +185,8 @@ describe("MEMMY-647 current baseline acceptance", () => {
     expect(c.repos.runtime.getEpisode(p.first.episodeId)).toMatchObject({ status: "closed", rTask: 0.9 });
     expect(read().policy.support).toBe(count);
     const success = read();
+    c.config.algorithm.l2Induction.mode = mode;
+    expect(c.service.reloadConfig({ restartFailedProcessing: false }).requiresRestart).toBe(false);
     const reopen = async (reward: number) => {
       c.state.reward = reward; c.state.selectedEpisodeId = p.first.episodeId; c.state.relation = "revision";
       const turn = await c.service.completeTurn(`revision-${++sequence}`, { sessionId: p.session.sessionId,
@@ -181,11 +198,14 @@ describe("MEMMY-647 current baseline acceptance", () => {
       expect(c.repos.runtime.getEpisode(p.first.episodeId)?.rTask).toBe(reward);
     };
     await reopen(-0.9);
-    evidence(`review-transition-${count}`, { success, failure: read(), episode: c.repos.runtime.getEpisode(p.first.episodeId) });
+    evidence(`systematic-transition-${count}-${mode}`, { success, failure: read(), episode: c.repos.runtime.getEpisode(p.first.episodeId) });
     expect.soft(read().policy.support).toBe(count - 1);
     expect.soft(read().policy.sourceEpisodeIds).not.toContain(p.first.episodeId);
     expect.soft(read().skill.eta).not.toBe(success.skill.eta);
-    if (count === 1) expect.soft(read().policy.status).toBe("quarantined");
+    if (count === 1) {
+      expect.soft(read().policy.status).toBe("quarantined");
+      expect.soft(read().skill.eta).toBeCloseTo(0.8);
+    }
     await reopen(0.9);
     expect(read().policy.sourceEpisodeIds).toContain(p.first.episodeId);
     expect(read().policy.support).toBe(count);
