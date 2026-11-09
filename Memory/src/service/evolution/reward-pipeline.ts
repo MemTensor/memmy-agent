@@ -1,5 +1,5 @@
 import { episodeInputRevision, jobRevisionIsCurrent } from "./episode-revision.js";
-import { l2SupportRelation } from "./l2-content-revision.js";
+import { isCurrentPolicySupport } from "./policy-evidence.js";
 import {
   REWARD_R_HUMAN_PROMPT,
   backpropagateTraces,
@@ -349,11 +349,13 @@ export class RewardPipeline {
         retireSourceSpans(this.deps.repos, saved.id, [], at, this.deps.namespaceIdFromMemory);
       }
       if (savedTrace) {
+        for (const policy of this.deps.repos.memories.listByDerivedSource(saved.userId, "L2", saved.id)) {
+          affectedPolicyIds.add(policy.id);
+        }
         for (const policyId of new Set(this.deps.repos.runtime.listTracePolicyLinks({ l1MemoryId: saved.id, limit: -1 })
           .filter((link) => {
             const target = this.deps.repos.memories.get(link.l2MemoryId);
-            return target && (this.deps.config.algorithm.l2Induction.mode === "legacy"
-              || link.relation === l2SupportRelation(target));
+            return target && target.userId === saved.userId && isCurrentPolicySupport(target, link.relation);
           }).map((link) => link.l2MemoryId))) {
           affectedPolicyIds.add(policyId);
         }

@@ -446,3 +446,28 @@ describe("MEMMY-647 crystallization contribution and rebuild order", () => {
     expect(history(s).externallyArchived).toBe(true);
   });
 });
+
+
+describe("policy content revision boundaries", () => {
+  it("does not replace an earlier crystallization slot when new lesson content has no replay history", () => {
+    const original = policy();
+    const first = crystallize(undefined, original);
+    const revised = structuredClone(original);
+    Object.assign(revised.properties.internal_info.policy as object, { content_revision: 2, gain: 0.4 });
+    const second = crystallize(first, revised);
+    const history = second.properties.internal_info.skill_revision_history as ReturnType<typeof reviseSkillPolicy>["history"];
+    const events = history.events.filter(event => event.type === "crystallization");
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ policyEventId: "legacy", gain: 0.8 });
+    expect(events[1]).toMatchObject({ policyEventId: "revision:2:legacy", gain: 0.4 });
+  });
+  it("does not erase a recorded contribution from old content when new content loses its support", () => {
+    const original = policy();
+    const s = saveSkill(skill(), reviseSkillPolicy(skill(), original, options.archiveEta));
+    const revised = structuredClone(original);
+    Object.assign(revised.properties.internal_info.policy as object, { content_revision: 2, support: 0, gain: 0.2 });
+    const result = reviseSkillPolicy(s, revised, options.archiveEta);
+    expect(result.eta).toBe(skillMetaFromMemory(s)!.eta);
+    expect(result.history.events.find(event => event.id === "policy:policy-1:legacy")).not.toHaveProperty("disabled");
+  });
+});

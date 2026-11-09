@@ -7,25 +7,39 @@ import {
 import type { MemmyConfig } from "../../config/index.js";
 import type { ChangeLogRecord } from "../../storage/repositories.js";
 import type { MemoryRow } from "../../types.js";
-import { stableHash, stableStringify } from "../../utils/id.js";
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "../../utils/json.js";
+import { l2ContentRevision } from "./l2-content-revision.js";
 
 /** Only the inputs used by the numerical estimator; no conversation or embeddings. */
 export type NumericTrace = Pick<TraceMemoryMeta, "id" | "episodeId" | "value">;
 type PolicyStatus = NonNullable<ReturnType<typeof policyMetaFromMemory>>["status"];
-type PolicyState = { gain: number; support: number; status: PolicyStatus };
-type PolicyInput = { evidence: NumericTrace[]; reference: NumericTrace[]; parameters: {
+type PolicyState = { gain: number; support: number; status: PolicyStatus; successfulSupport?: number };
+type PolicyInput = { evidence: NumericTrace[]; reference: NumericTrace[];
+  /** Full evidence can include valid negative lessons; only evidence above updates numeric success gain. */
+  supportingEvidence?: NumericTrace[]; schemaVersion?: number; ruleFallback?: boolean;
+  parameters: {
   minSupport: number; minGain: number; archiveGain: number; tauSoftmax: number; gainEmaAlpha: number;
 } };
 type PolicyUpdate = { type?: "update"; id: string; sources?: string[]; dependencies?: string[]; input: PolicyInput; gain: number; support?: number };
 type PolicyCheckpoint = { type: "checkpoint"; id: string; state: PolicyState; rawGain: number; gain: number; support: number };
 type PolicyEvent = PolicyUpdate | PolicyCheckpoint;
 export interface PolicyRevisionHistory {
-  version: 1; base: PolicyState; events: PolicyEvent[]; inputHash: string; lastEventId: string; revising?: boolean; latestInput?: PolicyInput; last?: PolicyState; externallyArchived?: boolean;
+  version: 1; contentRevision?: number; base: PolicyState; events: PolicyEvent[]; inputHash: string; lastEventId: string; revising?: boolean; latestInput?: PolicyInput; last?: PolicyState; externallyArchived?: boolean;
 }
 
 export function numericTraces(traces: TraceMemoryMeta[]): NumericTrace[] {
   return traces.map(({ id, episodeId, value }) => ({ id, episodeId, value })).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export function policyRevisionHistory(memory: MemoryRow): PolicyRevisionHistory | undefined {
+  const history = memory.properties.internal_info.policy_revision_history as PolicyRevisionHistory | undefined;
+  return history?.version === 1 && (history.contentRevision ?? 1) === l2ContentRevision(memory) ? history : undefined;
+}
+
+function inputRows(input: PolicyInput): NumericTrace[] {
+  return [...input.evidence, ...input.reference, ...(input.supportingEvidence ?? [])];
 }
 
 export function revisePolicyStatistics(memory: MemoryRow, input: PolicyInput, sourceId: string) {
@@ -33,13 +47,15 @@ export function revisePolicyStatistics(memory: MemoryRow, input: PolicyInput, so
   const storedPolicy = memory.properties.internal_info.policy;
   const storedRawGain = isRecord(storedPolicy) ? storedPolicy.raw_gain : undefined;
   const currentRawGain = typeof storedRawGain === "number" && Number.isFinite(storedRawGain) ? storedRawGain : policy.gain;
-  const inputHash = stableHash(stableStringify(input));
-  const old = memory.properties.internal_info.policy_revision_history as PolicyRevisionHistory | undefined;
-  const current = { gain: policy.gain, support: policy.support, status: policy.status };
-  const intervention = old?.version === 1 && old.last && stableStringify(old.last) !== stableStringify(current);
-  if (old?.version === 1 && old.inputHash === inputHash && !intervention) return undefined;
+  const inputHash = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+  const old = policyRevisionHistory(memory);
+  const current: PolicyState = { gain: policy.gain, support: policy.support, status: policy.status,
+    ...(input.supportingEvidence ? { successfulSupport: isRecord(storedPolicy) && typeof storedPolicy.successful_episode_count === "number" ? storedPolicy.successful_episode_count : 0 } : {}) };
+  const intervention = old?.version === 1 && old.last && !isDeepStrictEqual(old.last, current);
+  const sameInput = old?.latestInput ? isDeepStrictEqual(old.latestInput, input) : old?.inputHash === inputHash;
+  if (sameInput && !intervention) return undefined;
   const history: PolicyRevisionHistory = old?.version === 1 ? structuredClone(old) : {
-    version: 1, base: { gain: policy.gain, support: policy.support, status: policy.status }, events: [], inputHash: "", lastEventId: sourceId
+    version: 1, contentRevision: l2ContentRevision(memory), base: current, events: [], inputHash: "", lastEventId: sourceId
   };
   if (history.last && policy.status !== history.last.status) history.externallyArchived = policy.status === "archived";
   const checkpoint: PolicyCheckpoint | undefined = intervention ? {
@@ -49,7 +65,7 @@ export function revisePolicyStatistics(memory: MemoryRow, input: PolicyInput, so
   if (checkpoint) history.events.push(checkpoint);
   const updates = history.events.filter((event): event is PolicyUpdate => event.type !== "checkpoint");
   // Detect interventions even on a duplicate input, without adding another evidence update.
-  if (history.inputHash === inputHash && checkpoint) {
+  if (sameInput && checkpoint) {
     history.last = { ...current };
     history.lastEventId = checkpoint.id;
     history.revising = false;
@@ -57,43 +73,45 @@ export function revisePolicyStatistics(memory: MemoryRow, input: PolicyInput, so
   }
   const latest = history.latestInput ?? updates.at(-1)?.input;
   const group = (trace: NumericTrace) => trace.episodeId ?? `trace:${trace.id}`;
-  const knownGroups = new Set(latest ? [...latest.evidence, ...latest.reference].map(group) : []);
-  const addedGroups = latest ? [...new Set([...input.evidence, ...input.reference].map(group))].filter(id => !knownGroups.has(id)) : [];
-  let prior = updates.find(event => event.id === sourceId || event.sources?.includes(sourceId));
+  const knownGroups = new Set(latest ? inputRows(latest).map(group) : []);
+  const addedGroups = [...new Set(inputRows(input).map(group))].filter(id => !knownGroups.has(id));
+  const eventKey = (source: string) => l2ContentRevision(memory) === 1 ? source : `r${l2ContentRevision(memory)}:${source}`;
+  let prior = updates.find(event => event.id === eventKey(sourceId) || event.sources?.includes(sourceId));
   if (prior && addedGroups.some(id => id !== sourceId)) {
-    sourceId = addedGroups.length === 1 ? addedGroups[0]! : `evidence:${stableHash(stableStringify(addedGroups.sort()))}`;
+    sourceId = addedGroups.length === 1 ? addedGroups[0]! : `evidence:${createHash("sha256").update(JSON.stringify(addedGroups.sort())).digest("hex")}`;
     prior = undefined;
   }
   const changedGroups = new Set<string>();
   if (latest) {
-    for (const id of new Set([...latest.evidence, ...latest.reference, ...input.evidence, ...input.reference].map(group))) {
+    for (const id of new Set([...inputRows(latest), ...inputRows(input)].map(group))) {
       const subset = (value: PolicyInput) => ({ evidence: value.evidence.filter(trace => group(trace) === id),
-        reference: value.reference.filter(trace => group(trace) === id) });
-      if (stableStringify(subset(latest)) !== stableStringify(subset(input))) changedGroups.add(id);
+        reference: value.reference.filter(trace => group(trace) === id), supportingEvidence: value.supportingEvidence?.filter(trace => group(trace) === id) });
+      if (!isDeepStrictEqual(subset(latest), subset(input))) changedGroups.add(id);
     }
   }
   // Correct changed evidence wherever an earlier aggregate actually used that source.
   // Do not silently mark a snapshot as handled while ignoring another member's revision.
   for (const event of updates) {
-    event.dependencies ??= [...new Set([...event.input.evidence, ...event.input.reference].map(group))];
+    event.dependencies ??= [...new Set(inputRows(event.input).map(group))];
     for (const id of changedGroups) {
       // The first update attributed to B keeps the preceding A checkpoint intact.
       // Revisions of an already recorded update replace its historical dependency.
       if (id === sourceId && !prior) continue;
-      const present = [...event.input.evidence, ...event.input.reference].some(trace => group(trace) === id);
+      const present = inputRows(event.input).some(trace => group(trace) === id);
       if (!present && !event.dependencies.includes(id) && !(event === prior && id === sourceId)) continue;
       const replace = (before: NumericTrace[], current: NumericTrace[]) => [
         ...before.filter(trace => group(trace) !== id), ...current.filter(trace => group(trace) === id)
       ].sort((a,b) => a.id.localeCompare(b.id));
       event.input.evidence = replace(event.input.evidence, input.evidence);
       event.input.reference = replace(event.input.reference, input.reference);
+      if (event.input.supportingEvidence) event.input.supportingEvidence = replace(event.input.supportingEvidence, input.supportingEvidence ?? input.evidence);
     }
   }
   if (prior) {
     if (sourceId.startsWith("governance:")) prior.input = input;
     else prior.input.parameters = input.parameters;
   } else {
-    history.events.push({ id: sourceId, sources: [sourceId, ...addedGroups], input, gain: 0 });
+    history.events.push({ id: eventKey(sourceId), sources: [sourceId, ...addedGroups], input, gain: 0 });
   }
   let state = history.base;
   let rawGain = state.gain;
@@ -106,16 +124,24 @@ export function revisePolicyStatistics(memory: MemoryRow, input: PolicyInput, so
       state = { ...event.state };
       rawGain = event.rawGain;
     } else if (!event.input.evidence.length) {
-      state = { ...state, support: 0, status: "quarantined" };
+      const support = new Set((event.input.supportingEvidence ?? []).map(group)).size;
+      const status = support === 0 ? "quarantined"
+        : event.input.schemaVersion !== 2 && state.status === "active" ? "active" : "candidate";
+      state = { ...state, support, status, ...(event.input.supportingEvidence ? { successfulSupport: 0 } : {}) };
     } else {
       const result = buildPolicyDraft({ signature: policy.signature, ...event.input.parameters,
         evidenceTraces: toTraces(event.input.evidence), allTraces: toTraces(event.input.reference),
-        currentGain: state.gain, currentSupport: state.support,
+        currentGain: state.gain, currentSupport: event.input.supportingEvidence ? state.successfulSupport ?? 0 : state.support,
         currentStatus: state.status === "active" ? "active" : state.status === "archived" ? "archived" : "candidate"
       });
       rawGain = result.rawGain;
-      state = { gain: result.gain, support: result.support,
-        status: state.status === "active" && result.status !== "active" ? "verification_required" : result.status };
+      const successfulSupport = new Set(event.input.evidence.map(group)).size;
+      let status: PolicyStatus = result.status;
+      if (event.input.schemaVersion === 2 && (event.input.ruleFallback || successfulSupport < Math.min(2, event.input.parameters.minSupport)) && status === "active") status = "candidate";
+      if (state.status === "active" && status !== "active") status = "verification_required";
+      state = { gain: result.gain,
+        support: event.input.supportingEvidence ? new Set(event.input.supportingEvidence.map(group)).size : result.support,
+        status, ...(event.input.supportingEvidence ? { successfulSupport } : {}) };
     }
     event.gain = state.gain;
     event.support = state.support;
@@ -125,7 +151,7 @@ export function revisePolicyStatistics(memory: MemoryRow, input: PolicyInput, so
   history.revising = Boolean(prior) && !checkpoint;
   history.latestInput = input;
   history.inputHash = inputHash;
-  history.lastEventId = prior ? checkpoint?.id ?? prior.id : sourceId;
+  history.lastEventId = prior ? checkpoint?.id ?? prior.id : eventKey(sourceId);
   return { ...state, rawGain, history };
 }
 
@@ -149,7 +175,7 @@ function skillHistory(memory: MemoryRow): SkillHistory {
     const history = structuredClone(saved);
     if (externallyArchived || saved.externallyArchived !== undefined) history.externallyArchived = externallyArchived;
     const current = { eta: skill.eta, status: skill.status, trialsAttempted: skill.trialsAttempted, trialsPassed: skill.trialsPassed };
-    if (saved.last && stableStringify(saved.last) !== stableStringify(current)) {
+    if (saved.last && !isDeepStrictEqual(saved.last, current)) {
       // An explicit intervention or a legacy writer establishes a fixed checkpoint.
       // Keep it in order instead of undoing it when earlier evidence is revised.
       history.events.push({ id: `checkpoint:${history.events.length}`, type: "checkpoint", state: current });
@@ -225,7 +251,7 @@ export function recoverLegacySkillTrialHistory(memory: MemoryRow, trialId: strin
         const { feedbackId: _beforeFeedback, resolvedAt: _beforeAt, ...before } = change.before;
         const { feedbackId: _afterFeedback, resolvedAt: _afterAt, ...after } = change.after;
         if (typeof change.entityId === "string" && before.id === change.entityId && before.skillMemoryId === memory.id
-          && stableStringify(before) === stableStringify(after)) continue;
+          && isDeepStrictEqual(before, after)) continue;
       }
       if (known.has(`trial:${change.entityId}`)) break;
       // A retained outcome revision cannot be mistaken for an original settlement.
@@ -279,19 +305,30 @@ export function recoverLegacySkillTrialHistory(memory: MemoryRow, trialId: strin
 
 export function reviseSkillPolicy(memory: MemoryRow, policyMemory: MemoryRow, archiveEta: number) {
   const policy = policyMetaFromMemory(policyMemory)!;
-  const policyHistory = policyMemory.properties.internal_info.policy_revision_history as PolicyRevisionHistory | undefined;
+  const policyHistory = policyRevisionHistory(policyMemory);
   const history = skillHistory(memory);
   // Legacy callers also get a stable effective-input key, not a new job-based event.
-  const eventId = policyHistory?.lastEventId ?? "legacy";
+  const eventId = policyHistory?.lastEventId ?? (l2ContentRevision(policyMemory) === 1 ? "legacy" : `revision:${l2ContentRevision(policyMemory)}:legacy`);
   const id = `policy:${policy.id}:${eventId}`;
   for (const event of history.events) {
     if (event.type === "trial" || event.type === "checkpoint" || event.policyId !== policy.id) continue;
+    // The pre-history writer recorded one replaceable aggregate as "legacy". Adopt
+    // that recorded slot into the first history event instead of adding another drift.
+    if (event.policyEventId === "legacy" && l2ContentRevision(policyMemory) === 1 && policyHistory?.events.length
+      && !history.events.slice(history.events.indexOf(event) + 1).some(later => later.type === "checkpoint")) {
+      event.policyEventId = policyHistory.events[0]!.id;
+      if (event.type === "policy") event.id = `policy:${policy.id}:${event.policyEventId}`;
+    }
     const replacement = policyHistory?.events.find(item => item.id === event.policyEventId);
     if (replacement) {
       event.gain = replacement.gain;
       if (replacement.type !== "checkpoint" && replacement.input.evidence.length === 0) event.disabled = true;
       else delete event.disabled;
       if (event.type === "crystallization") event.support = replacement.support ?? event.support;
+    } else if ((!policyHistory && event.policyEventId === eventId) || (event.policyEventId === "legacy" && l2ContentRevision(policyMemory) === 1 && policy.support === 0)) {
+      event.gain = policy.gain;
+      if (policy.support === 0) event.disabled = true; else delete event.disabled;
+      if (event.type === "crystallization") event.support = policy.support;
     }
   }
   // A newly discovered intervention can precede a new independent update in the
@@ -310,7 +347,8 @@ export function reviseSkillPolicy(memory: MemoryRow, policyMemory: MemoryRow, ar
   }
   const gain = policyHistory?.events.find(event => event.id === eventId)?.gain ?? policy.gain;
   const existing = history.events.find(event => event.id === id);
-  const disabled = policy.support === 0;
+  const currentEvent = policyHistory?.events.find(event => event.id === eventId);
+  const disabled = currentEvent && currentEvent.type !== "checkpoint" ? currentEvent.input.evidence.length === 0 : policy.support === 0;
   if (existing?.type === "policy") { existing.gain = gain; if (disabled) existing.disabled = true; else delete existing.disabled; }
   // Crystallization already used this Policy contribution, including revisions
   // of earlier inputs represented by its later aggregate. Only a new source
@@ -362,11 +400,11 @@ export function withRevisionHistory(memory: MemoryRow, key: "policy_revision_his
 export function reviseSkillCrystallization(previous: MemoryRow | undefined, next: MemoryRow, policyMemory: MemoryRow, options: { minEtaForRetrieval: number; minSupport: number }) {
   const history = skillHistory(previous ?? next);
   const policy = policyMetaFromMemory(policyMemory)!;
-  const policyHistory = policyMemory.properties.internal_info.policy_revision_history as PolicyRevisionHistory | undefined;
+  const policyHistory = policyRevisionHistory(policyMemory);
   // The draft uses today's aggregate gain. A revision may have been triggered
   // by an earlier source, so bind it to the final aggregate rather than that
   // source's historical intermediate value.
-  const eventId = policyHistory?.events.at(-1)?.id ?? policyHistory?.lastEventId ?? "legacy";
+  const eventId = policyHistory?.events.at(-1)?.id ?? policyHistory?.lastEventId ?? (l2ContentRevision(policyMemory) === 1 ? "legacy" : `revision:${l2ContentRevision(policyMemory)}:legacy`);
   const nextSkill = skillMetaFromMemory(next)!;
   const event: SkillEvent = { id: `crystallization:${policy.id}:${eventId}`, type: "crystallization", policyId: policy.id,
     policyEventId: eventId, gain: policy.gain, support: policy.support, minEta: options.minEtaForRetrieval,

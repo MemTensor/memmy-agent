@@ -1,16 +1,16 @@
 // Contribution identity/replay adapted from yxyi123, PR #740 (660b3b9c).
 import type { EvolutionJobRecord, Repositories } from "../../storage/repositories.js";
-import { stableHash, stableStringify } from "../../utils/id.js";
+import { createHash } from "node:crypto";
 
 /** Content identity, deliberately excluding derived scores, timestamps and job IDs. */
 export function episodeInputRevision(repos: Pick<Repositories, "memories" | "runtime">, episodeId: string, includeReward = false): string {
   const episode = repos.runtime.getEpisode(episodeId);
   if (!episode) return "missing";
-  return stableHash(stableStringify({
+  return createHash("sha256").update(JSON.stringify({
     generation: episode.meta.processingGeneration ?? 0,
     status: episode.status,
     mission: episode.meta.canonicalGoal ?? episode.meta.initialUserText,
-    turns: repos.runtime.listRawTurnsByEpisode(episodeId, 10000),
+    turns: repos.runtime.listRawTurnsByEpisode(episodeId, -1),
     traces: episode.l1MemoryIds.map(id => {
       const memory = repos.memories.get(id);
       return memory && { id, status: memory.status,
@@ -18,7 +18,7 @@ export function episodeInputRevision(repos: Pick<Repositories, "memories" | "run
     }).map(memory => memory && { ...memory, trace: scoringTraceInput(memory.trace) }),
     feedback: episode.feedbackIds.map(id => repos.runtime.getFeedback(id)),
     ...(includeReward ? { rTask: episode.rTask, rewardDetail: episode.rewardDetail } : {})
-  }));
+  })).digest("hex");
 }
 
 function scoringTraceInput(value: unknown): unknown {

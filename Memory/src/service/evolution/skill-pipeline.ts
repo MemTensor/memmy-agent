@@ -30,6 +30,7 @@ import { skillBetaPosterior,skillSuccessRate } from "../read-model/skill.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 
+import { isDeepStrictEqual } from "node:util";
 import { reviseSkillCrystallization, reviseSkillPolicy, withRevisionHistory } from "./revision-stats.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
@@ -899,11 +900,11 @@ private capSkillEvidenceTrace(trace: TraceMeta): TraceMeta {
 
   applySkillRewardDriftForPolicy(policy: PolicyMeta, at: string): void {
     const skills = this.deps.repos.memories
-      .list({ memoryLayer: "Skill" }, 1000)
+      .listByDerivedSource(policy.memory.userId, "Skill", policy.id)
       .map(skillMetaFromMemory)
       .filter((skill): skill is NonNullable<ReturnType<typeof skillMetaFromMemory>> =>
         Boolean(skill &&
-          skill.sourcePolicyIds.includes(policy.id))
+          skill.sourcePolicyIds.includes(policy.id) && !isReadOnlySkillMemory(skill.memory))
       );
     for (const skill of skills) {
       const raw = skill.memory.properties.internal_info.skill;
@@ -914,7 +915,7 @@ private capSkillEvidenceTrace(trace: TraceMeta): TraceMeta {
       // Nothing moved and no event was recorded: keep the version stable so unrelated
       // crystallization jobs do not fail their evidence check for an empty update.
       if (eta === skill.eta && status === skill.status
-        && stableStringify(revised.history) === stableStringify(skill.memory.properties.internal_info.skill_revision_history)) {
+        && isDeepStrictEqual(revised.history, skill.memory.properties.internal_info.skill_revision_history)) {
         continue;
       }
       const previous = skill.memory;

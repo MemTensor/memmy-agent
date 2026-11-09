@@ -78,6 +78,8 @@ function setup(archiveEta?: number, valueDistributionRepairEnabled = false) {
         if (state.rewardRelease) await state.rewardRelease.promise;
         output = { goal_achievement: state.reward, process_quality: state.reward, user_satisfaction: state.reward, reason: "fixed diagnostic reward" };
       }
+      // This fixture isolates existing Skill statistics; text rebuilding has its own lifecycle suite.
+      if (options.operation.startsWith("skill.")) output = { skip: true };
       if (options.operation === "span.big_turn.v1") output = { spans: state.spans };
       if (options.operation === "failure.experience.sink.v5") {
         const variant = state.variant ? "Validate the certificate and secure endpoint before declaring nginx ready." : "Check nginx TLS certificate verification before reporting completion.";
@@ -148,10 +150,13 @@ function snapshot(context: Context, prepared: Prepared) {
 describe("MEMMY-647 current baseline acceptance", () => {
   it.each([
     { count: 1, mode: "legacy", association: false },
+    { count: 1, mode: "unified", association: false, missingLink: true },
     { count: 1, mode: "unified", association: false },
     { count: 3, mode: "legacy", association: true },
     { count: 3, mode: "unified", association: true }
-  ] as const)("normal lifecycle withdraws and restores positive contribution ($count sources, $mode, real association=$association)", async ({ count, mode, association }) => {
+  ] as const)("normal lifecycle withdraws and restores positive contribution ($count sources, $mode, real association=$association, missing link=$missingLink)", async (scenario) => {
+    const { count, mode, association } = scenario;
+    const missingLink = "missingLink" in scenario && scenario.missingLink;
     const c = setup(); c.config.algorithm.reward.feedbackWindowSec = 1;
     const members = [await prepare(c)];
     for (let i = 1; i < count; i++) members.push(await prepare(c, `member ${i}`));
@@ -164,7 +169,7 @@ describe("MEMMY-647 current baseline acceptance", () => {
     const common = { userId: p.namespace.userId, sessionId: p.session.sessionId, agentId: source.agentId ?? "codex", profileId: p.namespace.profileId };
     insertActivePolicyMemory(c.db, { ...common, id: "647-transition-policy", appId: "647-test", sourceTraceId: members[0]!.first.l1MemoryId, sourceEpisodeId: members[0]!.first.episodeId });
     insertActiveSkillMemoryForTest(c.db, { ...common, id: "647-transition-skill", sourcePolicyIds: ["647-transition-policy"] });
-    for (const item of association ? members.slice(0, -1) : members) insertTracePolicyLinkForTest(c.db, { userId: p.namespace.userId, l1MemoryId: item.first.l1MemoryId, l2MemoryId: "647-transition-policy" });
+    for (const item of missingLink ? [] : association ? members.slice(0, -1) : members) insertTracePolicyLinkForTest(c.db, { userId: p.namespace.userId, l1MemoryId: item.first.l1MemoryId, l2MemoryId: "647-transition-policy" });
     if (association) {
       const job = enqueue(c, p, "l2_association", {}, p.first.l1MemoryId);
       await executeQueued(c, job);

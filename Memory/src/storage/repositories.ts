@@ -718,6 +718,14 @@ export class MemoryRepository {
     if (!existing) {
       throw new Error(`memory not found: ${memory.id}`);
     }
+    if (memory.memoryLayer === "Skill" && memory.status !== "archived" && memory.properties.internal_info.skill_manually_archived === true) {
+      const internal = memory.properties.internal_info;
+      const history = internal.skill_revision_history;
+      memory = { ...memory, properties: { ...memory.properties, internal_info: { ...internal,
+        skill_manually_archived: false,
+        ...(isRecordLike(history) ? { skill_revision_history: { ...history, externallyArchived: false } } : {})
+      } } };
+    }
     const prepared = prepareMemoryForStorage(memory);
     const updated = {
       ...prepared.memory,
@@ -1330,6 +1338,16 @@ export class MemoryRepository {
          LIMIT ? OFFSET ?`
       )
       .all(...built.params, limit, offset) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  /** All direct consumers, including archived consumers that can recover after a verdict correction. */
+  listByDerivedSource(userId: string, layer: "L2" | "Skill", sourceId: string): MemoryRow[] {
+    const path = layer === "L2" ? "$.internal_info.policy.source_trace_ids" : "$.internal_info.skill.source_policy_ids";
+    const rows = this.db.prepare(`SELECT * FROM memories
+      WHERE user_id = ? AND memory_layer = ? AND deleted_at IS NULL
+      AND EXISTS (SELECT 1 FROM json_each(properties_json, ?) WHERE value = ?)
+      ORDER BY id`).all(userId, layer, path, sourceId) as MemorySqlRow[];
     return this.hydrateMany(rows.map(memoryFromSql));
   }
 

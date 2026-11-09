@@ -1,4 +1,5 @@
 import { episodeInputRevision } from "./episode-revision.js";
+import { policyEvidenceSnapshot } from "./policy-evidence.js";
 import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   policyMetaFromMemory,
@@ -364,23 +365,7 @@ export class EvolutionJobProcessor {
         item.policy?.status === "active"
       )
       .map(({ memory, policy }) => {
-        const unifiedEvidence = this.deps.config.algorithm.l2Induction.mode === "unified" || policy.schemaVersion === 2;
-        const linkedTraceIds = new Set(this.deps.repos.runtime.listTracePolicyLinks({
-          l2MemoryId: policy.id,
-          limit: 1000
-        }).filter((link) => !unifiedEvidence || link.relation === l2SupportRelation(memory)).map((link) => link.l1MemoryId));
-        const candidateTraceIds = Array.from(new Set([
-          ...policy.sourceTraceIds,
-          ...linkedTraceIds
-        ]));
-        const validTraces = this.deps.repos.memories
-          .getMany(candidateTraceIds)
-          .map((candidate) => this.deps.traceMeta(candidate))
-          .filter((trace): trace is TraceMeta => Boolean(
-            trace && (unifiedEvidence
-              ? trace.userId === memory.userId && this.policy.isPolicyEvidenceValid(trace, policy)
-              : this.policy.isTraceEligibleForL2(trace))
-          ));
+        const { linkedTraceIds, validTraces } = policyEvidenceSnapshot(this.deps.repos, memory, this.policy.isAcceptedSuccessEvidence.bind(this.policy));
         return { memory, policy, linkedTraceIds, validTraces };
       });
   }
@@ -389,9 +374,10 @@ export class EvolutionJobProcessor {
     if (memory.memoryLayer === "L1") {
       this.deps.repos.runtime.invalidateUnifiedL2Source(memory.id, memory.userId, at);
       const policyIds = Array.from(new Set(
-        this.deps.repos.runtime
-          .listTracePolicyLinks({ l1MemoryId: memory.id, limit: 1000 })
-          .map((link) => link.l2MemoryId)
+        [...this.deps.repos.memories.listByDerivedSource(memory.userId, "L2", memory.id).map(policy => policy.id),
+          ...this.deps.repos.runtime.listTracePolicyLinks({ l1MemoryId: memory.id, limit: -1 })
+            .filter(link => link.userId === memory.userId && this.deps.repos.memories.get(link.l2MemoryId)?.userId === memory.userId)
+            .map(link => link.l2MemoryId)]
       ));
       for (const policyId of policyIds) {
         const updated = this.policy.recomputePolicyStats(policyId, at);
