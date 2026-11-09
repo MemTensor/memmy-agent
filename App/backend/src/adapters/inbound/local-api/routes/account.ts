@@ -7,6 +7,8 @@ import {
   AvatarOptionSchema,
   LotteryRewardAckInputSchema,
   LotteryRewardSchema,
+  TaskTokenGiftNoticeSchema,
+  TaskTokenGiftAckInputSchema,
   OkResponseSchema,
   SendCodeInputSchema,
   SendCodeResponseSchema,
@@ -140,6 +142,23 @@ export function registerAccountRoutes(app: FastifyInstance, options: RegisterAcc
       const input = LotteryRewardAckInputSchema.parse(request.body);
       const response = OkResponseSchema.parse(await options.account.ackLotteryReward(input));
       return reply.send(response);
+    })
+  );
+
+  app.post(
+    "/api/account/task-token-gift/ensure",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => {
+      return reply.send(TaskTokenGiftNoticeSchema.parse(await options.account.ensureTaskTokenGift()));
+    })
+  );
+
+  app.post(
+    "/api/account/task-token-gift/ack",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const input = TaskTokenGiftAckInputSchema.parse(request.body);
+      return reply.send(OkResponseSchema.parse(await options.account.ackTaskTokenGift(input)));
     })
   );
 

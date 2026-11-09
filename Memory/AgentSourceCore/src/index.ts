@@ -1,5 +1,7 @@
 export * from "./source-turn.js";
 export * from "./codex-source-turn.js";
+export * from "./codex-executable.js";
+export * from "./codex-installation.js";
 export * from "./cursor-source-turn.js";
 export * from "./claude-code-source-turn.js";
 export * from "./openclaw-source-turn.js";
@@ -331,3 +333,7 @@ function hashMetaString(meta: Readonly<Record<string, unknown>>, key: string): s
   const value = meta[key];
   return typeof value === "string" ? value : undefined;
 }
+export * from "./skill-inventory.js";
+export * from "./codex-file-rollback.js";
+
+export { createConnectionCompensation, type ConnectionAction, type ConnectionEvent } from "./connection-compensation.js";

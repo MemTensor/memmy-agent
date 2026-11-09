@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import JSZip from "jszip";
 import { parseDelimited } from "../src/delimited.mjs";
+import { writeMetadataFont } from "./helpers/cjk-font-fixture.mjs";
 
 const executable = resolve(import.meta.dirname, "../dist/runtime/main.cjs");
 async function environment(t) {
@@ -14,11 +15,11 @@ async function environment(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return { root, data: join(root, "data") };
 }
-function call(data, capabilityId, input, extraEnv = {}) {
+function call(data, capabilityId, input, extraEnv = {}, observeStderr = () => {}) {
   return new Promise((ok, reject) => {
     const child = spawn(process.execPath, [executable], { env: { PATH: "/usr/bin:/bin", MEMMY_PLUGIN_DATA_DIR: data, ...extraEnv }, stdio: ["pipe", "pipe", "pipe"] });
     let output = "", errors = "";
-    child.stdout.on("data", b => output += b); child.stderr.on("data", b => errors += b);
+    child.stdout.on("data", b => output += b); child.stderr.on("data", b => { errors += b; observeStderr(b.toString()); });
     child.once("error", reject);
     child.once("close", code => {
       if (code) { reject(new Error(errors)); return; }
@@ -37,6 +38,80 @@ test("missing runtime is explicit and does not pass rendering", async t => {
   const doc = (await call(data, "office_create", { format: "docx", name: "report.docx", paragraphs: ["Runtime missing"] })).output;
   assert.equal((await call(data, "office_render", { taskId: doc.taskId, file: doc.file })).code, "office_dependency_missing");
   assert.equal((await call(data, "office_deliver", { taskId: doc.taskId, file: doc.file, revision: "fake", reviewedPages: [1], reviewNotes: "fake" })).code, "stale_review");
+});
+
+test("generated Han documents require a Host font before creating DOCX or PDF", async t => {
+  const { data } = await environment(t);
+  for (const format of ["docx", "pdf"]) {
+    const result = await call(data, "office_create", {
+      format, name: `missing-font.${format}`, paragraphs: ["中文内容：文档生成、预览与交付。"]
+    });
+    assert.equal(result.type, "error", JSON.stringify(result));
+    assert.equal(result.code, "office_cjk_font_missing");
+  }
+});
+
+test("generated Han DOCX declares the covering Host face without changing Latin fonts", async t => {
+  const { data, root } = await environment(t);
+  const latin = await writeMetadataFont(join(root, "latin.ttf"), "CJK In Name Only", "Latin");
+  const covering = await writeMetadataFont(join(root, "han.ttf"), "Owned Han Coverage", "中文内容");
+  const result = await call(data, "office_create", { format: "docx", name: "han.docx", title: "中文", paragraphs: ["Latin 内容"] }, {
+    MEMMY_OFFICE_CJK_FONTS: JSON.stringify([latin, covering])
+  });
+  assert.equal(result.type, "result", JSON.stringify(result));
+  const zip = await JSZip.loadAsync(await readFile(join(data, "tasks", result.output.taskId, result.output.file)));
+  const styles = await zip.file("word/styles.xml").async("string");
+  assert.match(styles, /w:eastAsia="Owned Han Coverage"/);
+  for (const name of ["ascii", "hAnsi", "cs"]) assert.match(styles, new RegExp(`w:${name}="Arial"`));
+  const document = await zip.file("word/document.xml").async("string");
+  assert.match(document, /中文/); assert.match(document, /Latin 内容/);
+});
+
+test("generated Han PDF uses the covered source font and still requires a real renderer", async t => {
+  const { data, root } = await environment(t);
+  const covering = await writeMetadataFont(join(root, "han.ttf"), "Owned PDF Han", "中文");
+  const result = await call(data, "office_create", { format: "pdf", name: "han.pdf", paragraphs: ["中文"] }, {
+    MEMMY_OFFICE_CJK_FONTS: JSON.stringify([covering])
+  });
+  assert.equal(result.type, "error"); assert.equal(result.code, "office_dependency_missing");
+  const tasks = await readdir(join(data, "tasks")); assert.equal(tasks.length, 1);
+  const zip = await JSZip.loadAsync(await readFile(join(data, "tasks", tasks[0], "source.docx")));
+  assert.match(await zip.file("word/styles.xml").async("string"), /w:eastAsia="Owned PDF Han"/);
+});
+
+test("execute trace probes Host font metadata in the parent without widening the code child's read access", async t => {
+  const { data, root } = await environment(t);
+  const font = await writeMetadataFont(join(root, "private-font.ttf"), "Private Fixture Family", "中文内容文档生成预览与交付");
+  let stderr = "";
+  const result = await call(data, "office_execute", {
+    code: `await fs.readFile(${JSON.stringify(font)}); return {files:[]};`
+  }, { MEMMY_OFFICE_TRACE: "1", MEMMY_OFFICE_CJK_FONTS: JSON.stringify([font]) }, value => stderr += value);
+  assert.equal(result.code, "office_execution_failed");
+  assert.match(result.message, /Access|permission/i);
+  const line = stderr.split("\n").find(value => value.startsWith("Office CJK font diagnostic: "));
+  assert.ok(line, "the existing execute call should expose its bounded parent diagnostic");
+  const report = JSON.parse(line.slice("Office CJK font diagnostic: ".length));
+  assert.equal(report.hostFileCount, 1);
+  assert.equal(report.files[0].cmap.coveringFaces, 1);
+  for (const forbidden of [font, root, "Private Fixture Family", "中文"]) assert.equal(line.includes(forbidden), false);
+});
+
+test("execute trace with no Host fonts preserves normal code results", async t => {
+  const { data } = await environment(t);
+  let stderr = "";
+  const result = await call(data, "office_execute", { code: `
+    const document = new docx.Document({sections:[{children:[new docx.Paragraph("Trace without Host fonts")]}]});
+    await fs.writeFile(path.join(workspace,"trace.docx"),await docx.Packer.toBuffer(document));
+    return {files:["trace.docx"]};
+  ` }, { MEMMY_OFFICE_TRACE: "1" }, value => stderr += value);
+  assert.equal(result.type, "result", JSON.stringify(result));
+  assert.deepEqual(result.output.files, ["trace.docx"]);
+  const line = stderr.split("\n").find(value => value.startsWith("Office CJK font diagnostic: "));
+  assert.ok(line);
+  const diagnostic = JSON.parse(line.slice("Office CJK font diagnostic: ".length));
+  assert.equal(diagnostic.hostFileCount, 0); assert.deepEqual(diagnostic.files, []);
+  const inspected = await call(data, "office_inspect", { taskId: result.output.taskId, file: "trace.docx" });
+  assert.match(inspected.output.text, /Trace without Host fonts/);
 });
 
 test("exact replacement across Word formatting runs preserves unrelated parts", async t => {

@@ -45,7 +45,7 @@ import {
   getConfigPath,
 } from "../../config/loader.js";
 import { Config } from "../../config/schema.js";
-import { getCliHistoryPath, getDataDir, getWorkspacePath } from "../../config/paths.js";
+import { getCliHistoryPath, getDataDir, getWorkspacePath, getWorkspaceStatePath } from "../../config/paths.js";
 import { CronService } from "../../cron/service.js";
 import { CronJob, CronPayload } from "../../cron/types.js";
 import { HeartbeatService } from "../../heartbeat/service.js";
@@ -270,8 +270,9 @@ export function modelDisplay(config: Config): [string, string] {
 
 export function syncRuntimeWorkspaceTemplates(config: Config): string {
   const workspacePath = getWorkspacePath(config.agents.defaults.workspace);
-  fs.mkdirSync(workspacePath, { recursive: true });
-  syncWorkspaceTemplates(workspacePath, CLI_TEMPLATES_DIR, {
+  const statePath = getWorkspaceStatePath(workspacePath);
+  fs.mkdirSync(statePath, { recursive: true });
+  syncWorkspaceTemplates(statePath, CLI_TEMPLATES_DIR, {
     fileMemoryEnabled: config.fileMemory.enabled,
   });
   return workspacePath;
@@ -1161,6 +1162,7 @@ export async function gateway({
     cronService: cron,
     projectStore,
   });
+  loop.startL3UserProjectSync?.();
   reportStartupStage("agent-loop-created");
   if (loop.sessions instanceof SessionManager) {
     loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, canonicalWorkspace);
@@ -1260,6 +1262,7 @@ export async function gateway({
         llmRuntime: (preset) => loop.llmRuntime(preset),
         scheduleBackground: (promise) => loop.scheduleBackground(promise),
         tokenUsageRecorder: createByokTokenUsageRecorder(loaded),
+        readMediaText: (filePath) => webuiChannel.readWebuiTitleText(filePath),
       }),
     );
     if (webuiChannel.guiSessionProjection && loop.sessions instanceof SessionManager) {

@@ -141,6 +141,11 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
+    async freezeScanSessions() {
+      failIfNeeded();
+      return { batches: 0 };
+    },
+
     async completeSourceTurn(input) {
       failIfNeeded();
       const l1MemoryId = randomUUID();
@@ -199,6 +204,27 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         createdAt: input.createdAt ?? serverTime,
         serverTime
       };
+    },
+
+    async reconcileAgentSkills(input) {
+      failIfNeeded();
+      return {
+        sourceAgentId: input.sourceAgentId,
+        skills: input.skills.map((skill) => ({ sourceSkillId: skill.sourceSkillId, outcome: "created" as const, memoryId: randomUUID() })),
+        archived: 0,
+        registrations: input.registrations?.length ?? 0,
+        serverTime: now()
+      };
+    },
+
+    async archiveSkill(skillId) {
+      failIfNeeded();
+      return { ok: true as const, id: skillId, status: "archived" as const, serverTime: now() };
+    },
+
+    async reactivateSkill(skillId) {
+      failIfNeeded();
+      return { ok: true as const, id: skillId, status: "activated" as const, serverTime: now() };
     },
 
     async getMemory(input) {

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { AnthropicProvider } from "../../../src/providers/anthropic-provider.js";
 import { LLMProvider, LLMResponse, ToolCallRequest } from "../../../src/providers/base.js";
 import { evaluateResponse } from "../../../src/utils/evaluator.js";
 import { redirectLibLogging, redirectedLoggers } from "../../../src/utils/logging-bridge.js";
@@ -28,6 +29,24 @@ class EvalProvider extends LLMProvider {
 }
 
 describe("prompt templates and evaluator", () => {
+  it.each(["catalog", "provider-fallback"] as const)("keeps %s capabilities on evaluator retries while retaining its explicit output limit", async (mode) => {
+    const provider = new EvalProvider(new LLMResponse({ content: "ok" }));
+    const modelCapabilities = Object.freeze({ mode, maxTokens: 16384, contextWindowTokens: 128000 });
+    await evaluateResponse("Task result", "Task", provider, "gpt-4o", { provider, model: "gpt-4o", modelCapabilities });
+    expect(provider.lastArgs.modelCapabilities).toMatchObject({ mode, maxTokens: 16384, taskMaxTokens: 256 });
+    expect(modelCapabilities.maxTokens).toBe(16384);
+  });
+  it("uses the Anthropic notification verdict with always-on thinking and a short output allowance", async () => {
+    const provider = new AnthropicProvider({ apiKey: "test", defaultModel: "claude-opus-4-7" });
+    const create = vi.fn(async () => ({ content: [{ type: "tool_use", id: "eval", name: "evaluate_notification", input: { should_notify: false } }], stop_reason: "tool_use" }));
+    provider.client = { messages: { create } };
+    const modelCapabilities = { mode: "catalog" as const, maxTokens: 8192, thinkingEnabled: true, reasoningEffort: "high" };
+    await expect(evaluateResponse("Routine result", "Task", provider, "claude-opus-4-7", { provider, model: "claude-opus-4-7", modelCapabilities })).resolves.toBe(false);
+    expect(create).toHaveBeenCalledOnce();
+    const body = (create.mock.calls[0] as unknown as [Record<string, any>])[0];
+    expect(body.max_tokens).toBe(8192);
+    expect(body.thinking.budget_tokens).toBe(8192 - 256);
+  });
   it("renders evaluator template branches and variables", () => {
     const system = renderTemplate("agent/evaluator.md", { part: "system", strip: true });
     const user = renderTemplate("agent/evaluator.md", { part: "user", task_context: "check build", response: "all good" });

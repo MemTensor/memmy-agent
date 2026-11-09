@@ -44,6 +44,17 @@ const requiredFiles = [
 ];
 if (platform === "darwin") requiredFiles.push("dist/native/memmy-pip.node", "dist/native/menu-bar-appearance.node");
 if (platform === "win32") {
+  const historyPrefix = "dist/runtime/memmy-agent/dist/tools/computer-history/win/";
+  requiredFiles.push(`${historyPrefix}memmy-history-recorder.exe`, `${historyPrefix}memmy-history-recorder.NOTICES.md`);
+  if (entries.some((entry) => entry.startsWith(`${historyPrefix}native/`))) {
+    throw new Error("Packaged ASAR contains Computer History native build/test sources");
+  }
+  const binary = readFileSync(join(`${asarPath}.unpacked`, historyPrefix, "memmy-history-recorder.exe"));
+  const peOffset = binary.length >= 64 ? binary.readUInt32LE(60) : -1;
+  if (binary.toString("ascii", 0, 2) !== "MZ" || peOffset < 64 || peOffset + 6 > binary.length
+      || binary.toString("ascii", peOffset, peOffset + 4) !== "PE\0\0" || binary.readUInt16LE(peOffset + 4) !== 0x8664) {
+    throw new Error("Packaged Computer History helper must be an unpacked Windows x64 PE executable");
+  }
   requiredFiles.push(
     "dist/main/computer-use-window-capture.js",
     "dist/runtime/memmy-agent/dist/tools/computer-use/managed-ocu-session.js",

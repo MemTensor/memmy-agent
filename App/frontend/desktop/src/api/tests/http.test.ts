@@ -10,6 +10,14 @@ const runtimeConfig = {
 };
 
 describe("requestJson", () => {
+  it.each([["17", 17], ["0", 0], ["-1", null], ["NaN", null], ["1.5", null], ["", null]] as const)("reads retry-after %s safely", async (header, expected) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: { code: "rate_limited", message: "retry later", requestId: "req-1" }
+    }), { status: 429, headers: { "retry-after": header } })));
+    await expect(requestJson({ config: runtimeConfig, path: "/api/account/send-code", schema: z.object({ ok: z.literal(true) }) }))
+      .rejects.toMatchObject({ status: 429, retryAfterSec: expected });
+  });
+
   it("preserves a plugin entitlement denial instead of turning it into an unknown error", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       error: { code: "plugin_entitlement_required", message: "Plugin grant missing", requestId: "plugin-test" }
@@ -19,6 +27,31 @@ describe("requestJson", () => {
         status: 403, code: "plugin_entitlement_required", requestId: "plugin-test"
       });
   });
+
+  it.each(["req-1", undefined])("preserves retry timing and upstream tracing together with local request id %s", async (requestId) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: { code: "rate_limited", message: "retry later", requestId, upstreamRequestId: "upstream-req-1" }
+    }), { status: 429, headers: { "retry-after": "17" } })));
+
+    await expect(requestJson({ config: runtimeConfig, path: "/api/account/send-code", schema: z.object({ ok: z.literal(true) }) }))
+      .rejects.toMatchObject({
+        status: 429,
+        code: "rate_limited",
+        requestId: requestId ?? null,
+        upstreamRequestId: "upstream-req-1",
+        retryAfterSec: 17
+      });
+  });
+
+  it("preserves retry timing when an error response has no JSON envelope", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("Gateway timeout", {
+      status: 504, headers: { "retry-after": "17" }
+    })));
+
+    await expect(requestJson({ config: runtimeConfig, path: "/api/account/send-code", schema: z.object({ ok: z.literal(true) }) }))
+      .rejects.toMatchObject({ status: 504, code: null, requestId: null, upstreamRequestId: null, retryAfterSec: 17 });
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -32,7 +65,8 @@ describe("requestJson", () => {
             error: {
               code: "memory_layer_unavailable",
               message: "Memory layer unavailable",
-              requestId: "req-1"
+              requestId: "req-1",
+              upstreamRequestId: "memory-req-1"
             }
           }),
           { status: 503, headers: { "content-type": "application/json" } }
@@ -51,6 +85,7 @@ describe("requestJson", () => {
       status: 503,
       code: "memory_layer_unavailable",
       requestId: "req-1",
+      upstreamRequestId: "memory-req-1",
       message: "Memory layer unavailable"
     } satisfies Partial<ApiRequestError>);
   });

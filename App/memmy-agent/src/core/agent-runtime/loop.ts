@@ -1,3 +1,4 @@
+import { computerUseRequestContext } from "./computer-use-request-context.js";
 import { agentTaskActivity } from "./task-activity.js";
 import { OUTPUT_FEEDBACK_KEY, OutputDelivery, clearOutputDelivery, DELIVERY_NOT_CONFIRMED, hasOutputObligations } from "./tools/output-location.js";
 import { requestTiming } from "../../utils/request-timing.js";
@@ -18,7 +19,7 @@ import {
 import { CommandContext, CommandRouter } from "../../command/router.js";
 import { registerBuiltinCommands } from "../../command/builtin.js";
 import { Config, ModelPresetConfig } from "../../config/schema.js";
-import { getWorkspacePath } from "../../config/paths.js";
+import { getWorkspacePath, getWorkspaceStatePath } from "../../config/paths.js";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { CronService } from "../../cron/service.js";
 import { makeProvider } from "../../providers/factory.js";
@@ -30,11 +31,14 @@ import {
   type ModelSelectionInput,
   type ResolvedModelSelection,
 } from "../../providers/model-catalog.js";
-import { getModelThinkingConfig } from "@memmy/local-api-contracts";
+import { CloudModelCapabilitySchema, CloudModelThinkingConfigSchema } from "@memmy/local-api-contracts";
+import { createRuntimeModelCapabilityCatalog, type RuntimeModelCapabilityCatalogState } from "../../providers/model-capability-catalog.js";
+import { resolveTurnModelCapabilities } from "../../providers/turn-model-capabilities.js";
 import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
 
 type UserFacingModelErrorCategory = ProviderErrorCategory | "model_failed";
 type UserFacingModelError = {
+  origin?: "model_catalog_fallback";
   category: UserFacingModelErrorCategory;
   detail?: string;
   presetId?: string;
@@ -54,6 +58,7 @@ function userFacingModelError(
 ): UserFacingModelError {
   return {
     category,
+    ...(selection?.turnCapabilities?.mode === "provider-fallback" ? { origin: "model_catalog_fallback" as const } : {}),
     ...(detail ? { detail } : {}),
     ...(selection ? {
       presetId: selection.presetId,
@@ -87,6 +92,7 @@ import {
   type GoalStatus,
 } from "../session/goal-state.js";
 import { finishWebuiTurn, markWebuiSession, maybeGenerateWebuiTitle, publishTurnRunStatus, publishWebuiThreadSessionUpdated, shouldPublishWebuiRunStatus, WEBUI_LANGUAGE_METADATA_KEY } from "../session/webui-turns.js";
+import { startAgentRecording, finishAgentRecording } from "../../tools/computer-recordings/agent-lifecycle.js";
 import { renderTemplate } from "../../utils/prompt-templates.js";
 import { imageGenerationPrompt } from "../../utils/image-generation-intent.js";
 import { LLMRuntime } from "../../utils/llm-runtime.js";
@@ -352,6 +358,7 @@ export class TurnContext {
 }
 
 type AgentLoopInit = {
+  modelCapabilityCatalog?: ReturnType<typeof createRuntimeModelCapabilityCatalog> | null;
   bus?: MessageBus;
   config?: Config;
   provider?: any;
@@ -472,36 +479,6 @@ function firstString(...values: any[]): string | null {
 
 function turnMetadata(turnId: string | null | undefined): Record<string, string> {
   return turnId ? { turnId, turn_id: turnId } : {};
-}
-
-function computerUseRequestContext(message: InboundMessage, turnId?: string | null): {
-  messageId: string | null; metadata: Record<string, any>;
-} {
-  const rawId = message.metadata?.message_id ?? message.metadata?.messageId;
-  const nativeId = typeof rawId === 'string' && rawId.trim() && rawId.length <= 512
-    ? rawId.trim() : typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId > 0 ? String(rawId) : null;
-  // GUI source is supplied by the accepted channel boundary, not envelope
-  // metadata. Recover an older durable GUI request's validated UUID, retaining
-  // its original identity rather than substituting a generated execution turn.
-  const source = message.turnSource;
-  const guiSource = message.channel === 'websocket' && source?.channel === 'websocket'
-    && (source.kind === 'gui' || source.kind === 'tui');
-  const requestId = message.metadata?.client_request_id;
-  const messageId = nativeId ?? (guiSource && typeof requestId === 'string'
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) ? requestId : null);
-  let reason = 'interactive-user-message';
-  if (message.internal || message.role !== 'user') reason = 'internal-message';
-  else if (['system', 'cron'].includes(message.channel)
-    || ['subagent', 'goal-runtime', 'system', 'cron'].includes(message.senderId.toLowerCase())) reason = 'background-source';
-  else if (message.channel === 'websocket' && !guiSource) reason = 'gui-source-unverified';
-  else if (message.metadata?.computerUseInteractive === false) reason = 'background-context';
-  else if (!messageId) reason = 'user-message-id-missing';
-  return { messageId, metadata: { ...message.metadata,
-    ...(source ? { turn_source: source } : {}), ...turnMetadata(turnId),
-    ...(messageId ? { message_id: messageId } : {}),
-    computerUseInteractive: reason === 'interactive-user-message',
-    computerUseInteractiveReason: reason,
-  } };
 }
 
 function restoredComputerUseMetadata(metadata: Record<string, any>): Record<string, any> {
@@ -772,19 +749,17 @@ function thinkingFieldsFromMetadata(metadata: Record<string, unknown> | null | u
 
 export function reasoningEffortFromTurnMetadata(
   metadata: Record<string, unknown> | null | undefined,
-  model: string | null | undefined,
+  _model: string | null | undefined,
 ): string | undefined {
-  if (typeof metadata?.thinking_enabled !== "boolean") return undefined;
-  const config = metadata.model_provider === "custom" ? null : getModelThinkingConfig(model);
-  const enabled = config && !config.switchable ? true : metadata.thinking_enabled;
-  if (!enabled) return "none";
-  if (typeof metadata.thinking_level === "string" && metadata.thinking_level.trim()) {
+  if (metadata?.thinking_enabled === false) return "none";
+  if (typeof metadata?.thinking_level === "string" && metadata.thinking_level.trim()) {
     return metadata.thinking_level;
   }
-  return "medium";
+  return undefined;
 }
 
 export class AgentLoop {
+  private readonly modelCapabilityCatalog: ReturnType<typeof createRuntimeModelCapabilityCatalog> | null;
   bus: MessageBus;
   config: Config;
   toolsConfig: Config["tools"];
@@ -889,6 +864,10 @@ export class AgentLoop {
     this.defaultSelectionSignature = defaultSelectionSignature(Array.isArray(this.providerSignature) ? this.providerSignature : null);
     this.runtimeModelPublisher = init.runtimeModelPublisher ?? null;
     this.modelSelectionResolver = init.modelSelectionResolver ?? null;
+    // An injected standalone Provider owns its configuration; managed model selections use the public catalog.
+    this.modelCapabilityCatalog = init.modelCapabilityCatalog !== undefined
+      ? init.modelCapabilityCatalog
+      : init.provider && !init.modelSelectionResolver ? null : createRuntimeModelCapabilityCatalog();
     this.extraHooks = [...(init.hooks ?? [])];
     this.bus = init.bus ?? new MessageBus();
     const initConfig = init.config ?? new Config();
@@ -935,8 +914,9 @@ export class AgentLoop {
     const rawPresets = init.modelPresets ?? this.config.modelPresets;
     this.modelPresets = Object.fromEntries(Object.entries(rawPresets).map(([name, preset]) => [name, preset instanceof ModelPresetConfig ? preset : new ModelPresetConfig(preset)]));
     this.unifiedSession = init.unifiedSession ?? defaults.unifiedSession;
+    const stateWorkspace = getWorkspaceStatePath(this.workspace);
     this.sessions = init.sessionManager ?? new SessionManager(
-      init.sessionDir ?? path.join(this.workspace, "sessions"),
+      init.sessionDir ?? path.join(stateWorkspace, "sessions"),
       { legacyWebuiWorkspaceCwd: this.workspace },
     );
     this.goalRuntime = new GoalRuntime({
@@ -954,7 +934,7 @@ export class AgentLoop {
       ?? path.join(this.workspace, "sessions");
     this.terminalTurnLock = new TerminalSessionTurnLock(terminalControlRoot);
     this.terminalRunControl = new TerminalRunControl(terminalControlRoot);
-    this.cronService = init.cronService ?? new CronService(path.join(this.workspace, "cron", "jobs.json"));
+    this.cronService = init.cronService ?? new CronService(path.join(stateWorkspace, "cron", "jobs.json"));
     this.sessionDagQueue = init.sessionDagQueue ?? this.createSessionDagQueue();
     this.execSessionManager = new ExecSessionManager();
     this.fileStateStore = new FileStateStore();
@@ -1008,9 +988,21 @@ export class AgentLoop {
       dagQueue: this.sessionDagQueue,
       dagCatchupTimeoutMs: this.config.sessionDag.compactionCatchupTimeoutMs,
     });
-    this.autoCompact = new AutoCompact(this.sessions, this.consolidator, init.sessionTtlMinutes ?? defaults.sessionTtlMinutes);
+    this.autoCompact = new AutoCompact(this.sessions, this.consolidator, init.sessionTtlMinutes ?? defaults.sessionTtlMinutes,
+      this.modelCapabilityCatalog ? async (sessionKey) => {
+        const session = this.sessions.loadSession(sessionKey);
+        const selected = this.resolveTurnModelSelection(this.persistedSessionSelection(session));
+        if (!selected) throw new SessionWorkspaceError("model_selection_unavailable");
+        const prepared = await this.prepareTurnModelSelection(selected, {});
+        return this.consolidator.withProviderSnapshot(prepared.snapshot.provider, prepared.model,
+          prepared.snapshot.contextWindowTokens, prepared.turnCapabilities, prepared.capabilityCatalogState);
+      } : undefined);
     this.dream = this.fileMemoryEnabled
       ? new Dream({
+          resolveRuntime: () => {
+            const runtime = this.llmRuntime();
+            return runtime.prepare ? runtime.prepare() : Promise.resolve(runtime);
+          },
           toolResultCompressionEnabled: this.toolResultCompressionEnabled,
           store: this.context.memory,
           provider: this.provider,
@@ -1042,7 +1034,7 @@ export class AgentLoop {
   }
 
   llmRuntime(modelPreset?: string | null): LLMRuntime {
-    if (!this.modelSelectionResolver && modelPreset === undefined) {
+    if (!this.modelCapabilityCatalog && !this.modelSelectionResolver && modelPreset === undefined) {
       this.refreshProviderSnapshot();
       return new LLMRuntime(this.provider, this.model ?? "");
     }
@@ -1050,7 +1042,20 @@ export class AgentLoop {
       ...(modelPreset !== undefined ? { requestedPreset: modelPreset } : {}),
     });
     if (!selection) throw new SessionWorkspaceError("model_selection_unavailable");
-    return new LLMRuntime(selection.snapshot.provider, selection.snapshot.model);
+    return new LLMRuntime({
+      provider: selection.snapshot.provider, model: selection.snapshot.model,
+      ...(this.modelCapabilityCatalog ? { prepare: async (options: { maxTokens?: number; thinkingEnabled?: boolean } = {}) => {
+        const prepared = await this.prepareTurnModelSelection(selection,
+          options.thinkingEnabled !== undefined ? { thinking_enabled: options.thinkingEnabled } : {});
+        const capabilities = prepared.turnCapabilities!;
+        return new LLMRuntime({
+          provider: prepared.snapshot.provider, model: prepared.model,
+          modelCapabilities: Object.freeze({ ...capabilities,
+            ...(options.maxTokens !== undefined ? { taskMaxTokens: options.maxTokens } : {}) }),
+          capabilityCatalogState: prepared.capabilityCatalogState,
+        });
+      } } : {}),
+    });
   }
 
   static fromConfig(config: Config, bus: MessageBus = new MessageBus(), extra: AgentLoopInit = {}): AgentLoop {
@@ -1173,12 +1178,14 @@ export class AgentLoop {
         modelPreset: selection.preset,
         modelProvider: selection.provider,
         actualModelContext: persistedModelSelection(selection),
+        modelCapabilities: selection.turnCapabilities,
+        capabilityCatalogState: selection.capabilityCatalogState,
       }),
     };
   }
 
   private projectReadonlySkillRoots(): readonly string[] {
-    const roots = [path.join(this.workspace, "skills"), BUILTIN_SKILLS_DIR]
+    const roots = [path.join(getWorkspaceStatePath(this.workspace), "skills"), BUILTIN_SKILLS_DIR]
       .flatMap((root) => {
         try {
           return fs.statSync(root).isDirectory() ? [fs.realpathSync(root)] : [];
@@ -1293,6 +1300,13 @@ export class AgentLoop {
     };
     void initialization.then(clearInitialization, clearInitialization);
     return initialization;
+  }
+
+  /** Long-running service only: keep Memory's copy of the desktop project list current. */
+  startL3UserProjectSync(): void {
+    const projectStore = this.projectStore;
+    if (!projectStore) return;
+    this.memmyMemoryIntegration.startL3UserProjectSync?.(() => projectStore.snapshot());
   }
 
   async closeRuntimeTools(): Promise<void> {
@@ -1830,11 +1844,12 @@ export class AgentLoop {
   }
 
   replayTokenBudget(modelSelection: ResolvedModelSelection | null = null): number {
+    if (modelSelection?.turnCapabilities && (!modelSelection.turnCapabilities.contextWindowTokens || !modelSelection.turnCapabilities.maxTokens)) return 0;
     const contextWindowTokens = modelSelection?.snapshot.contextWindowTokens
       ?? this.contextWindowTokens;
     const provider = modelSelection?.snapshot.provider ?? this.provider;
     if (contextWindowTokens <= 0) return 0;
-    const reserved = Number(provider?.generation?.maxTokens ?? 4096);
+    const reserved = Number(modelSelection?.turnCapabilities?.maxTokens ?? provider?.generation?.maxTokens ?? 4096);
     const budget = contextWindowTokens
       - Math.max(1, reserved)
       - CONTEXT_SAFETY_BUFFER_TOKENS;
@@ -2619,6 +2634,39 @@ export class AgentLoop {
     } catch {
       return null;
     }
+  }
+
+  private async prepareTurnModelSelection(selection: ResolvedModelSelection, metadata: Record<string, any>, signal?: AbortSignal | null): Promise<ResolvedModelSelection> {
+    if (!this.modelCapabilityCatalog) return selection;
+    const state = await this.modelCapabilityCatalog.load(signal ?? undefined);
+    const preset = this.config.modelPresets[selection.presetId];
+    const raw = preset as unknown as Record<string, any> | undefined;
+    const configuration = selection.capabilityConfig ?? {
+      ...(raw?.custom === true || preset?.provider === "custom" ? { customConfig: {
+        ...preset.explicitTokenSettings,
+        ...(preset.inputModalities ? { inputModalities: CloudModelCapabilitySchema.shape.inputModalities.parse(preset.inputModalities) } : {}),
+        ...(raw?.thinking ? { thinking: CloudModelThinkingConfigSchema.parse(raw.thinking) } : {}),
+      } } : {}),
+      explicitGeneration: { ...this.config.agents.defaults.explicitTokenSettings, ...preset?.explicitTokenSettings, reasoningEffort: preset?.reasoningEffort },
+      agentReasoningEffort: this.config.agents.defaults.reasoningEffort,
+    };
+    const capabilities = resolveTurnModelCapabilities({
+      state, model: selection.model,
+      providerReasoningEffort: selection.snapshot.provider?.generation?.reasoningEffort,
+      ...configuration,
+      // The frontend sends only explicit choices; resolve defaults from this turn's catalog.
+      sessionThinking: {
+        ...(typeof metadata.thinking_enabled === "boolean" ? { enabled: metadata.thinking_enabled } : {}),
+        ...(typeof metadata.thinking_level === "string" ? { level: metadata.thinking_level } : {}),
+      },
+    });
+    return Object.freeze({
+      ...selection,
+      inputModalities: capabilities.inputModalities as ResolvedModelSelection["inputModalities"],
+      snapshot: Object.freeze({ ...selection.snapshot, contextWindowTokens: capabilities.contextWindowTokens ?? 0 }),
+      turnCapabilities: capabilities,
+      capabilityCatalogState: state,
+    });
   }
 
   private persistedSessionSelection(session: Session | null): ModelSelectionInput {
@@ -3676,6 +3724,7 @@ export class AgentLoop {
       JSON.stringify(message.tool_calls ?? null),
       message.reasoning_content ?? null,
       JSON.stringify(message.thinking_blocks ?? null),
+      JSON.stringify(message.memmy_protocol_state ?? null),
     ];
   }
 
@@ -3857,6 +3906,11 @@ export class AgentLoop {
       outputUserText?: string | null;
     } = {},
   ): Promise<AgentLoopResult> {
+    if (this.modelCapabilityCatalog && !modelSelection?.turnCapabilities) {
+      const selected = modelSelection ?? this.resolveTurnModelSelection({});
+      if (!selected) throw new SessionWorkspaceError("model_selection_unavailable");
+      modelSelection = await this.prepareTurnModelSelection(selected, metadata, abortSignal);
+    }
     if (!modelSelection) this.refreshProviderSnapshot();
     this.syncSubagentRuntimeLimits();
     const activeProvider = modelSelection?.snapshot.provider ?? this.provider;
@@ -3928,6 +3982,8 @@ export class AgentLoop {
     } : {}, sessionWorkspace, outputUserText);
     const result = await this.runner.run(
       new AgentRunSpec({
+        modelCapabilities: modelSelection?.turnCapabilities,
+        capabilityCatalogState: modelSelection?.capabilityCatalogState,
         messages: initialMessages,
         finalResponseContinuation: (response) => taskPlanContinuation(response) ?? deliveryContinuation(response),
         privateSkillRefs: session?.metadata?.privatePluginSkillRefs,
@@ -3942,7 +3998,7 @@ export class AgentLoop {
         maxIterationsFinalPrompt: renderTemplate("agent/max-iterations-final-response.md", { strip: true }),
         maxTokens: activeProvider?.generation?.maxTokens ?? this.config.agents.defaults.maxTokens,
         temperature: activeProvider?.generation?.temperature ?? this.config.agents.defaults.temperature,
-        reasoningEffort: reasoningEffortFromTurnMetadata(metadata, activeModel)
+        reasoningEffort: modelSelection?.turnCapabilities ? modelSelection.turnCapabilities.reasoningEffort : reasoningEffortFromTurnMetadata(metadata, activeModel)
           ?? activeProvider?.generation?.reasoningEffort
           ?? this.config.agents.defaults.reasoningEffort,
         maxToolResultChars: this.maxToolResultChars,
@@ -4101,7 +4157,7 @@ export class AgentLoop {
       msg.metadata ?? {},
       "model_preset",
     );
-    const modelSelection = this.resolveTurnModelSelection({
+    let modelSelection = this.resolveTurnModelSelection({
       ...(hasRequestedPreset
         ? {
             requestedPreset: typeof msg.metadata?.model_preset === "string"
@@ -4111,12 +4167,15 @@ export class AgentLoop {
         : this.persistedSessionSelection(existingSession)),
     });
     if (!modelSelection) throw new SessionWorkspaceError("model_selection_unavailable");
+    modelSelection = await this.prepareTurnModelSelection(modelSelection, msg.metadata ?? {}, ctx.abortSignal);
     ctx.modelSelection = modelSelection;
-    ctx.consolidator = this.modelSelectionResolver
+    ctx.consolidator = this.modelSelectionResolver || modelSelection.turnCapabilities
       ? this.consolidator.withProviderSnapshot(
           modelSelection.snapshot.provider,
           modelSelection.snapshot.model,
           modelSelection.snapshot.contextWindowTokens,
+          modelSelection.turnCapabilities,
+          modelSelection.capabilityCatalogState,
         )
       : this.consolidator;
     msg = ctx.msg = new InboundMessage({
@@ -4260,13 +4319,17 @@ export class AgentLoop {
       const hasReservedInbox = this.goalRuntime.inbox(ctx.sessionKey)
         .some((entry) => entry.turnId === ctx.turnId);
       if (goal || hasReservedInbox) {
+        const request = computerUseRequestContext(ctx.msg);
+        const turnSource = sharedTurnSource(ctx.msg);
         const persisted = await this.goalRuntime.persistGoalUserTurn(
           ctx.sessionKey,
           ctx.turnId,
           {
             channel: ctx.msg.channel,
             chatId: ctx.msg.chatId,
-            ...(sharedTurnSource(ctx.msg) ? { source: sharedTurnSource(ctx.msg)! } : {}),
+            ...(turnSource ? { source: turnSource } : {}),
+            ...(turnSource && request.messageId && request.metadata.computerUseInteractive === true
+              ? { computerUseMessageId: request.messageId } : {}),
           },
           (session, entry) => {
             const source = entry
@@ -4362,7 +4425,7 @@ export class AgentLoop {
         : {}),
       modelSelection: ctx.modelSelection,
     });
-    const toolRequest = computerUseRequestContext(ctx.msg, ctx.turnId);
+    const toolRequest = computerUseRequestContext(ctx.msg, ctx.turnId, this.goalRuntime, ctx.sessionKey);
     this.setToolContext(
       ctx.msg.channel,
       ctx.msg.chatId,
@@ -4490,7 +4553,7 @@ export class AgentLoop {
       session: ctx.session,
       channel: ctx.msg.channel,
       chatId: ctx.msg.chatId,
-      ...computerUseRequestContext(ctx.msg, ctx.turnId),
+      ...computerUseRequestContext(ctx.msg, ctx.turnId, this.goalRuntime, ctx.sessionKey),
       sessionKey: ctx.sessionKey,
       pendingQueue: ctx.pendingQueue,
       abortSignal: ctx.abortSignal,
@@ -4704,7 +4767,7 @@ export class AgentLoop {
       msg.metadata ?? {},
       "model_preset",
     );
-    const modelSelection = this.resolveTurnModelSelection({
+    let modelSelection = this.resolveTurnModelSelection({
       ...(hasRequestedPreset
         ? {
             requestedPreset: typeof msg.metadata?.model_preset === "string"
@@ -4714,11 +4777,14 @@ export class AgentLoop {
         : this.persistedSessionSelection(existingSession)),
     });
     if (!modelSelection) throw new SessionWorkspaceError("model_selection_unavailable");
-    const scopedConsolidator = this.modelSelectionResolver
+    modelSelection = await this.prepareTurnModelSelection(modelSelection, msg.metadata ?? {}, abortSignal);
+    const scopedConsolidator = this.modelSelectionResolver || modelSelection.turnCapabilities
       ? this.consolidator.withProviderSnapshot(
           modelSelection.snapshot.provider,
           modelSelection.snapshot.model,
           modelSelection.snapshot.contextWindowTokens,
+          modelSelection.turnCapabilities,
+          modelSelection.capabilityCatalogState,
         )
       : this.consolidator;
     msg = new InboundMessage({
@@ -5378,6 +5444,7 @@ export class AgentLoop {
       : null;
     const publishRunStatus = shouldPublishWebuiRunStatus(effectiveMsg);
     let didPublishRunning = false;
+    let taskRecordingId: string | null = null;
     let goalTurnResult: { goalId: string; goalOutcome: GoalStatus } | null = null;
     if (slot) {
       let dequeuedDescriptor: QueueMessageDescriptor | null = null;
@@ -5421,6 +5488,11 @@ export class AgentLoop {
             }
           }
           if (publishRunStatus) {
+            taskRecordingId = await startAgentRecording({ runId: turnId, chatId: String(effectiveMsg.chatId),
+              messageId: String(effectiveMsg.metadata?.client_request_id ?? turnId), metadata: effectiveMsg.metadata ?? {},
+              notify: (payload) => this.bus.publishOutbound(new OutboundMessage({ channel: effectiveMsg.channel, chatId: effectiveMsg.chatId,
+                content: "", metadata: { ...(effectiveMsg.metadata ?? {}), taskRecordingStatus: payload } })) });
+            if (isCancelled()) return;
             await publishTurnRunStatus(this.bus, effectiveMsg, "running");
             didPublishRunning = true;
           }
@@ -5555,6 +5627,7 @@ export class AgentLoop {
       }
       throw error;
     } finally {
+      await finishAgentRecording(taskRecordingId, effectiveAbortSignal?.aborted === true || isCancelled());
       releaseComputerUseInterrupt?.();
       const surfaceScope = { sessionKey, channel: effectiveMsg.channel, chatId: effectiveMsg.chatId };
       await closeNativeSurfacesForTurn({ ...surfaceScope, turnId });
@@ -5696,6 +5769,13 @@ export class AgentLoop {
   }
 
   private async runMessageLoop(startedAt: number): Promise<void> {
+    if (this.modelCapabilityCatalog) {
+      try {
+        await this.modelCapabilityCatalog.load();
+      } catch {
+        console.warn("Model catalog unavailable at startup; turns will coordinate synchronization with the local Backend");
+      }
+    }
     await this.initializeRuntimeTools();
     this.reportStartupStage("runtime-tools-ready", startedAt);
     if (!this.running || this.runtimeToolsClosed) return;

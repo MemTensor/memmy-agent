@@ -175,6 +175,24 @@ describe("MemoryService / read model / panel", () => {
       reflectionDone: true
     });
 
+    // Initial zeros must not masquerade as completed scores. A zero reward is valid.
+    for (const [id, trace, expected] of [
+      ["pending", {}, { valuePending: true, alphaPending: true }],
+      ["reflected", { reflection: "IRRELEVANT", reflection_scored_at: at }, { valuePending: true }],
+      ["scored-zero", { reflection: "IRRELEVANT", r_human: 0 }, {}]
+    ] as const) {
+      repos.memories.insert({
+        ...memory, id, contentHash: id, memoryKey: id,
+        properties: { ...memory.properties, internal_info: {
+          memory_layer: "L1", memory_kind: "trace", schema_version: 1,
+          value: 0, alpha: 0, trace: { value: 0, alpha: 0, ...trace }
+        } }
+      });
+      const output = service.panelItems({ userId: memory.userId, layer: "L1" });
+      const metrics = PanelItemsOutputSchema.parse(output).items.find(item => item.id === id)?.metrics;
+      expect(metrics).toEqual({ value: 0, alpha: 0, reflectionDone: "reflection" in trace, ...expected });
+    }
+
     const spanMemory: MemoryRow = {
       ...memory,
       id: "span_panel_goal",
@@ -191,12 +209,17 @@ describe("MemoryService / read model / panel", () => {
     };
     repos.memories.insert(spanMemory);
 
-    expect(service.panelItems({
-      userId: "user-panel-reflection-metric",
-      layer: "L1"
-    }).items.find((candidate) => candidate.id === spanMemory.id)?.metadata).toMatchObject({
-      spanGoal: "Run the panel span regression"
-    });
+    const panel = service.panelItems({ userId: memory.userId, layer: "L1", limit: 2 });
+    expect(panel.total).toBe(4);
+    expect(panel.totalPages).toBe(2);
+    expect(panel.items).toHaveLength(2);
+    expect(panel.items.every(item => item.kind !== "span")).toBe(true);
+    const searched = service.panelItems({ userId: memory.userId, layer: "L1", q: "span_panel_goal" });
+    expect(searched.total).toBe(0);
+    expect(searched.items).toEqual([]);
+    // Filtering is limited to the panel: underlying recall candidates remain intact.
+    expect(repos.memories.get(spanMemory.id)?.id).toBe(spanMemory.id);
+    expect(repos.memories.search("span_panel_goal", { memoryLayer: "L1" }).map(hit => hit.id)).toContain(spanMemory.id);
     db.close();
   });
 

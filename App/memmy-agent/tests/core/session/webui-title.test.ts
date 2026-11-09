@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
 import { SessionManager } from "../../../src/core/session/manager.js";
 import { WebuiTitleService } from "../../../src/core/session/webui-title.js";
-import { WEBUI_TITLE_METADATA_KEY, WEBUI_TITLE_USER_EDITED_METADATA_KEY } from "../../../src/core/session/webui-turns.js";
+import { TITLE_GENERATION_MAX_TOKENS, WEBUI_TITLE_METADATA_KEY, WEBUI_TITLE_USER_EDITED_METADATA_KEY } from "../../../src/core/session/webui-turns.js";
+import type { LLMRuntime } from "../../../src/utils/llm-runtime.js";
 
 const roots: string[] = [];
 
@@ -35,19 +36,24 @@ function createService({
   sessions,
   provider = titleProvider("需求范围整理"),
   recorder = { recordAgentChatUsage: vi.fn(async () => true) },
+  runtime,
+  readMediaText,
 }: {
   sessions: SessionManager;
   provider?: any;
   recorder?: any;
+  runtime?: LLMRuntime;
+  readMediaText?: (filePath: string) => string | null;
 }): { bus: MessageBus; service: WebuiTitleService; scheduled: Promise<any>[]; provider: any; recorder: any } {
   const bus = new MessageBus();
   const scheduled: Promise<any>[] = [];
   const service = new WebuiTitleService({
     bus,
     sessions,
-    llmRuntime: () => ({ provider, model: "openai/gpt-4.1-mini" } as any),
+    llmRuntime: () => runtime ?? ({ provider, model: "openai/gpt-4.1-mini" } as any),
     scheduleBackground: (promise) => scheduled.push(promise),
     tokenUsageRecorder: recorder,
+    readMediaText,
   });
   return { bus, service, scheduled, provider, recorder };
 }
@@ -69,6 +75,29 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 describe("WebuiTitleService", () => {
+  it.each([false, true])("prepares catalog parameters before requesting a title; preparation failure=%s", async (fails) => {
+    const sessions = new SessionManager(sessionRoot());
+    createSession(sessions);
+    const p = titleProvider("Prepared title");
+    const modelCapabilities = { mode: "provider-fallback" as const, maxTokens: 96, reasoningEffort: "none" };
+    const prepare = vi.fn(async () => {
+      if (fails) throw new Error("Catalog coordination unavailable");
+      return { provider: p, model: "gpt-4o", modelCapabilities };
+    });
+    const { service, scheduled } = createService({ sessions, provider: p, runtime: { provider: p, model: "gpt-4o", prepare } });
+    service.trackUserMessage({ chatId: "chat-1", content: "hello", metadata: { webui: true } });
+    expect(prepare).not.toHaveBeenCalled();
+    service.onUserMessagePersisted("chat-1");
+    await scheduled[0];
+    expect(prepare).toHaveBeenCalledExactlyOnceWith({ maxTokens: TITLE_GENERATION_MAX_TOKENS, thinkingEnabled: false });
+    if (fails) {
+      expect(p.chatWithRetry).not.toHaveBeenCalled();
+      expect(sessions.loadSession("websocket:chat-1")?.metadata).not.toHaveProperty(WEBUI_TITLE_METADATA_KEY);
+    } else {
+      expect(p.chatWithRetry.mock.calls[0][0].modelCapabilities).toBe(modelCapabilities);
+      expect(sessions.loadSession("websocket:chat-1")?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("Prepared title");
+    }
+  });
   it("only records pending title context before the user message is persisted", () => {
     const sessions = new SessionManager(sessionRoot());
     const provider = titleProvider("不会立即调用");
@@ -101,6 +130,7 @@ describe("WebuiTitleService", () => {
     expect(saved?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("UI 标题生成改造");
     expect(provider.chatWithRetry).toHaveBeenCalledTimes(1);
     const request = provider.chatWithRetry.mock.calls[0]?.[0];
+    expect(request.maxTokens).toBeGreaterThanOrEqual(256);
     expect(request.messages[1].content).toContain("请帮我拆解 UI 53 的标题生成改造");
     expect(request.messages[1].content).not.toContain("这里是长回答");
     expect(recorder.recordAgentChatUsage).toHaveBeenCalledWith(expect.objectContaining({
@@ -116,6 +146,69 @@ describe("WebuiTitleService", () => {
       sessionUpdated: true,
       sessionUpdateScope: "metadata",
     });
+  });
+
+  it("generates a title from a safe text excerpt for a file-only first message", async () => {
+    const sessions = new SessionManager(sessionRoot());
+    const sessionKey = "websocket:chat-file-only";
+    const mediaPath = "/safe/录音转写.txt";
+    const session = sessions.getOrCreate(sessionKey);
+    session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(sessions.root);
+    session.addMessage("user", "", { media: [mediaPath] });
+    sessions.save(session);
+    const provider = titleProvider("孙老师早上问候录音");
+    const readMediaText = vi.fn(() => "[00:01] 【说话人 1】孙老师，早上好。");
+    const { service, scheduled } = createService({ sessions, provider, readMediaText });
+
+    service.trackUserMessage({ chatId: "chat-file-only", content: "", mediaPaths: [mediaPath], metadata: { webui: true } });
+    service.onUserMessagePersisted("chat-file-only");
+    await scheduled[0];
+
+    expect(readMediaText).toHaveBeenCalledExactlyOnceWith(mediaPath);
+    expect(provider.chatWithRetry.mock.calls[0]?.[0].messages[1].content)
+      .toContain("孙老师，早上好");
+    expect(sessions.loadSession(sessionKey)?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("孙老师早上问候录音");
+  });
+
+  it("keeps user text authoritative when the first message also has a file", async () => {
+    const sessions = new SessionManager(sessionRoot());
+    const sessionKey = createSession(sessions, "chat-text-file", "请总结今天的客户访谈");
+    const session = sessions.getOrCreate(sessionKey);
+    session.messages[0]!.media = ["/safe/录音转写.txt"];
+    sessions.save(session);
+    const provider = titleProvider("客户访谈总结");
+    const readMediaText = vi.fn(() => "不应进入标题提示词");
+    const { service, scheduled } = createService({ sessions, provider, readMediaText });
+
+    service.trackUserMessage({ chatId: "chat-text-file", content: "请总结今天的客户访谈",
+      mediaPaths: ["/safe/录音转写.txt"], metadata: { webui: true } });
+    service.onUserMessagePersisted("chat-text-file");
+    await scheduled[0];
+
+    expect(readMediaText).not.toHaveBeenCalled();
+    const prompt = provider.chatWithRetry.mock.calls[0]?.[0].messages[1].content;
+    expect(prompt).toContain("请总结今天的客户访谈");
+    expect(prompt).not.toContain("不应进入标题提示词");
+  });
+
+  it("leaves an attachment-only session untitled when no safe text can be read", async () => {
+    const sessions = new SessionManager(sessionRoot());
+    const sessionKey = "websocket:chat-binary-only";
+    const session = sessions.getOrCreate(sessionKey);
+    session.metadata.webui = true;
+    session.addMessage("user", "", { media: ["/safe/report.pdf"] });
+    sessions.save(session);
+    const provider = titleProvider("不应生成");
+    const { service, scheduled } = createService({ sessions, provider, readMediaText: () => null });
+
+    service.trackUserMessage({ chatId: "chat-binary-only", content: "", mediaPaths: ["/safe/report.pdf"], metadata: { webui: true } });
+    service.onUserMessagePersisted("chat-binary-only");
+    await scheduled[0];
+
+    expect(provider.chatWithRetry).not.toHaveBeenCalled();
+    expect(sessions.loadSession(sessionKey)?.metadata[WEBUI_TITLE_METADATA_KEY]).toBeUndefined();
   });
 
   it("stores only the visible title when the title model answers with a think block (#432)", async () => {

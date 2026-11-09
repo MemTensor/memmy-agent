@@ -251,6 +251,10 @@ class HttpLlmClient implements LlmClient {
         continue;
       }
 
+      if (truncated && options.requireCompleteJson) {
+        throw new Error("LLM JSON output remained truncated after length retry");
+      }
+
       if (parseError === undefined && parsed !== undefined) {
         if (jsonAttempt > 1) {
           logger.info("json.recovered", {
@@ -348,8 +352,9 @@ class HttpLlmClient implements LlmClient {
       memmyAccount
     });
     const model = this.config.model ?? "";
+    const usesCompletionTokenLimit = !memmyAccount && isOpenAiReasoningModel(modelSlug(model));
     const usesEnableThinking = memmyAccount || thinkingUsesEnableThinking(this.config.vendor ?? "", base, model);
-    const omitTemperature = isKimiImmutableTemperatureModel(model) ||
+    const omitTemperature = usesCompletionTokenLimit || isKimiImmutableTemperatureModel(model) ||
       (thinking.enabled && !memmyAccount && shouldOmitOpenAiCompatibleTemperature(this.config.vendor ?? "", base, model));
     const omitJsonMode = thinking.enabled && (usesEnableThinking || isAlibabaCompatibleEndpoint(base));
     const thinkingBudget = thinking.enabled && usesEnableThinking
@@ -374,11 +379,14 @@ class HttpLlmClient implements LlmClient {
         },
         timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
         maxRetries: options.maxRetries ?? this.config.maxRetries,
+        ...(memmyAccount ? { businessEnvelope: "memmy_account" as const } : {}),
         body: {
           model: this.config.model,
           messages,
           ...(!omitTemperature ? { temperature: options.temperature ?? this.config.temperature } : {}),
-          max_tokens: options.maxTokens ?? this.config.maxTokens,
+          ...(usesCompletionTokenLimit
+            ? { max_completion_tokens: options.maxTokens ?? this.config.maxTokens }
+            : { max_tokens: options.maxTokens ?? this.config.maxTokens }),
           stream: false,
           ...thinking.fields,
           ...(thinkingBudget !== undefined ? { thinking_budget: thinkingBudget } : {}),

@@ -1,3 +1,4 @@
+import "../../tests/isolated-target-home.js";
 /** Target tests. */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -740,3 +741,27 @@ function createManifest(targetId: string): SkillManifest {
 function readTargetFile(rootDirectory: string): string {
   return readFileSync(join(rootDirectory, "workspace", "AGENTS.md"), "utf8");
 }
+
+
+describe("legacy instruction cleanup through direct target entrypoints", () => {
+  it.each(["skill", "plugin"] as const)("removes every recognized block through %s removal", async (kind) => {
+    const { rootDirectory } = createFixture();
+    const target = createOpenclawSkillTarget({ rootDirectory, memmyConfigPath: join(rootDirectory, "memmy.json"), workspaceDirectory: join(rootDirectory, "workspace") });
+    const files = ["workspace/AGENTS.md"];
+    for (const fileName of files) {
+      const filePath = join(rootDirectory, fileName);
+      mkdirSync(join(filePath, ".."), { recursive: true });
+      const old = "<!-- memmy-memory cli : start -->\nold CLI\n<!-- memmy-memory cli : end -->\n";
+      const current = "<!-- memmy:start v=1 -->\ncurrent instructions\n<!-- memmy:end v=1 -->\n";
+      writeFileSync(filePath, `User before.\n${old}${old.replaceAll("\n", "\r\n")}${current}${current.replaceAll("\n", "\r\n")}User after.\n`);
+    }
+    const remove = () => kind === "plugin" ? target.uninstallPlugin!(target.targetId) : target.uninstall(target.targetId);
+    await remove();
+    await remove();
+    for (const fileName of files) {
+      expect(readFileSync(join(rootDirectory, fileName), "utf8")).toBe("User before.\nUser after.\n");
+    }
+    expect(await target.isInstalled(target.targetId)).toBe(false);
+    expect(await target.isLegacySkillInstalled?.()).toBe(false);
+  });
+});

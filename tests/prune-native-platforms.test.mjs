@@ -66,7 +66,7 @@ describe("packaged node-pty target selection", () => {
       if (kind === "scope") link = scopes.at(-1);
       if (kind === "root") link = join(newRoot(), "runtime-link");
       if (kind !== "root") rmSync(link, { recursive: true });
-      symlinkSync(kind === "root" ? root : external, link, "dir");
+      symlinkSync(kind === "root" ? root : external, link, process.platform === "win32" ? "junction" : "dir");
       await expect(pruneNodePtyPlatforms({
         platform: "darwin", arch: "arm64", runtimeRoot: kind === "root" ? link : root,
       })).rejects.toThrow(/symbolic link/u);
@@ -80,7 +80,7 @@ describe("packaged node-pty target selection", () => {
     const external = newRoot();
     const externalScope = join(external, "node_modules", "@lydell");
     populateScope(externalScope);
-    symlinkSync(external, join(root, "memmy-agent", "node_modules", "linked-package"), "dir");
+    symlinkSync(external, join(root, "memmy-agent", "node_modules", "linked-package"), process.platform === "win32" ? "junction" : "dir");
     await pruneNodePtyPlatforms({ platform: "darwin", arch: "arm64", runtimeRoot: root });
     expect(existsSync(join(externalScope, "node-pty-linux-x64"))).toBe(true);
     expect(existsSync(join(scopes[0], "node-pty-linux-x64"))).toBe(false);
@@ -94,8 +94,13 @@ describe("packaged node-pty target selection", () => {
     expect(JSON.parse(result.stdout).removedPackages).toHaveLength(15);
     for (const path of ["../scripts/internal/mac/build-dmg.sh", "../scripts/internal/win/build-nsis.sh"]) {
       const source = readFileSync(new URL(path, import.meta.url), "utf8");
+      // Windows invokes the signing wrapper from the main packaging flow;
+      // the npx command inside its earlier declaration is not execution order.
+      const signingWrapperCall = source.lastIndexOf('\nrun_electron_builder_with_signing_recovery "$@"');
+      const packageCall = signingWrapperCall >= 0 ? signingWrapperCall : source.lastIndexOf("npx electron-builder");
       expect(source.indexOf("prune-native-platforms.mjs")).toBeGreaterThan(-1);
-      expect(source.indexOf("prune-native-platforms.mjs")).toBeLessThan(source.lastIndexOf("npx electron-builder"));
+      expect(packageCall).toBeGreaterThan(-1);
+      expect(source.indexOf("prune-native-platforms.mjs")).toBeLessThan(packageCall);
     }
   });
 
@@ -153,7 +158,7 @@ describe("other bounded native dependency layouts", () => {
     const external = newRoot();
     writeFileSync(join(external, "keep.txt"), "external-data");
     rmSync(join(paths.tui, "native", "win32"), { recursive: true });
-    symlinkSync(external, join(paths.tui, "native", "win32"), "dir");
+    symlinkSync(external, join(paths.tui, "native", "win32"), process.platform === "win32" ? "junction" : "dir");
     await expect(pruneNodePtyPlatforms({ platform: "darwin", arch: "arm64", runtimeRoot: root }))
       .rejects.toThrow(/symbolic link/u);
     expect(readFileSync(join(external, "keep.txt"), "utf8")).toBe("external-data");

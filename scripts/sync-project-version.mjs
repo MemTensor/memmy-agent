@@ -77,7 +77,7 @@ async function updateJson(relativePath, update) {
   const json = JSON.parse(currentText);
   update(json);
   const nextText = `${JSON.stringify(json, null, 2)}\n`;
-  if (nextText === currentText) return;
+  if (nextText === currentText.replaceAll("\r\n", "\n")) return;
   if (checkOnly) {
     staleFiles.push(relativePath);
     return;
@@ -88,7 +88,7 @@ async function updateJson(relativePath, update) {
 async function updateText(relativePath, nextText) {
   const absolutePath = join(root, relativePath);
   const currentText = await readFile(absolutePath, "utf8");
-  if (nextText === currentText) return;
+  if (nextText === currentText.replaceAll("\r\n", "\n")) return;
   if (checkOnly) {
     staleFiles.push(relativePath);
     return;

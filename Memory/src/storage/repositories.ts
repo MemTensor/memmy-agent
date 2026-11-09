@@ -1,4 +1,26 @@
+import {
+  agentSkillInstallationsKey,
+  agentSkillConnectionKey,
+  isImportedSkill,
+  hasImportedSkillSourceEvidence,
+  isUnverifiedLegacySkillCollision,
+  importedSkillMayEmbed,
+  type ImportedSkillEligibilityMemory,
+  currentImportedSkillVersion,
+  importedSkillArchiveReason,
+  importedSkillName,
+  importedSkillSourceIdentity,
+  importedSkillSourceState,
+  hasRestrictedImportedSkillContent,
+  hasUnobservedCodexSkillPolicy,
+  isIdentityOnlyImportedSkill,
+  normalizeSkillName,
+  stripImportedSkillBody,
+  type AgentSkillInstallation,
+  type AgentSkillInstallations
+} from "./imported-skill.js";
 import { MAIN_DEADLINE, MAIN_TIMED, MAIN_LEASED, RETRY_DEADLINE, RETRY_LEASED } from "./queue-deadline-schema.js";
+import { L2_EXTRACTION_OPERATION_PREFIXES, L2_EXTRACTION_SNAPSHOT_PREFIXES } from "./l2-extraction-keys.js";
 import type { EmbeddingMaintenanceEntry } from "./sqlite-vec-store.js";
 import { sameEmbeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../model/embedding-identity.js";
 import type Database from "better-sqlite3";
@@ -59,10 +81,19 @@ import {
   type VectorSearchCandidate
 } from "./sqlite-vec-store.js";
 import { QueueSchedulingStore, type SchedulingMetadata } from "./queue-scheduling-store.js";
-import { mainQueueEligibility, retryQueueEligibility, type QueueEligibilityOptions } from "./queue-eligibility.js";
+import {
+  l3ProfileHeldSql,
+  mainQueueEligibility,
+  retryQueueEligibility,
+  scopedJobReadySql,
+  type QueueEligibilityOptions
+} from "./queue-eligibility.js";
 import { compactHistoryChangePayload, compactHistoryChangeRow } from "./history-change-snapshot.js";
+import { L3FieldRepository } from "./l3-field-repository.js";
+import { isL3FieldSnapshotMemory } from "../service/l3-field/snapshot-memory.js";
 
 type SqlValue = string | number | Buffer | null;
+const importedSkillFunctions = new WeakSet<Database.Database>();
 const BUNDLE_TABLES = [
   "memories",
   "memory_capture_claims",
@@ -86,6 +117,10 @@ const BUNDLE_TABLES = [
   "api_logs",
   "memory_change_log",
   "l3_world_model_project_environment_state",
+  "l3_units",
+  "l3_unit_batches",
+  "l3_items",
+  "l3_user_projects",
   "evolution_jobs",
   "embedding_retry_queue",
   "memory_processing_state",
@@ -353,7 +388,11 @@ export type L3WorldModelBatchTrigger =
   | "token_compaction"
   | "token_compaction_attempt"
   | "session_close"
-  | "episode_idle_close";
+  | "episode_idle_close"
+  /** A finished agent-source scan pass; new L3 only (scans stay out of the old pipeline). */
+  | "scan_pass"
+  /** A Session that went quiet without a close (its idle flush); new L3 only. */
+  | "session_idle";
 
 export type L3WorldModelTargetField = Exclude<L3WorldModelFieldName, "project_environment_profile">;
 
@@ -586,7 +625,33 @@ export class MemoryRepository {
   constructor(
     private readonly db: Database.Database,
     private readonly vectors: SqliteVecStore
-  ) {}
+  ) {
+    if (!importedSkillFunctions.has(db)) {
+      db.function("memmy_imported_skill_agent_id", { deterministic: true }, value => normalizeAgentIdKey(String(value ?? "")));
+      db.function("memmy_is_imported_skill", { deterministic: true }, (properties, info, tags, memoryKey) => {
+        const parsed = parseJson(String(properties ?? "{}"), {}) as MemoryRow["properties"];
+        const parsedInfo = parseJson(String(info ?? "{}"), {}) as MemoryRow["info"];
+        return Number(isImportedSkill({
+          memoryLayer: "Skill",
+          properties: { ...parsed, internal_info: parsed.internal_info ?? {} },
+          tags: [...asStringArray(parseJson(String(tags ?? "[]"), [])), ...asStringArray(parsed.tags), ...asStringArray(parsedInfo.tags)],
+          memoryKey: typeof memoryKey === "string" ? memoryKey : undefined
+        }));
+      });
+      db.function("memmy_imported_skill_eligible", { deterministic: true }, (properties, info, tags, memoryKey, body, status, deletedAt) => {
+        const parsed = parseJson(String(properties ?? "{}"), {}) as MemoryRow["properties"];
+        const parsedInfo = parseJson(String(info ?? "{}"), {}) as MemoryRow["info"];
+        return Number(importedSkillMayEmbed({
+          memoryLayer: "Skill", memoryValue: String(body ?? ""), status: String(status) as MemoryStatus,
+          deletedAt: typeof deletedAt === "string" ? deletedAt : undefined,
+          properties: { ...parsed, internal_info: parsed.internal_info ?? { memory_layer: "Skill" } },
+          tags: [...asStringArray(parseJson(String(tags ?? "[]"), [])), ...asStringArray(parsed.tags), ...asStringArray(parsedInfo.tags)],
+          memoryKey: typeof memoryKey === "string" ? memoryKey : undefined
+        }));
+      });
+      importedSkillFunctions.add(db);
+    }
+  }
 
   insert(memory: MemoryRow): MemoryRow {
     const prepared = prepareMemoryForStorage(memory);
@@ -618,7 +683,11 @@ export class MemoryRepository {
     return this.updateRow(memory, false);
   }
 
-  private updateRow(memory: MemoryRow, bumpVersion: boolean): MemoryRow {
+  updateIfVersion(memory: MemoryRow, expectedVersion: number): MemoryRow {
+    return this.db.transaction(() => this.updateRow(memory, true, expectedVersion))();
+  }
+
+  private updateRow(memory: MemoryRow, bumpVersion: boolean, expectedVersion?: number): MemoryRow {
     const existing = this.get(memory.id);
     if (!existing) {
       throw new Error(`memory not found: ${memory.id}`);
@@ -626,9 +695,9 @@ export class MemoryRepository {
     const prepared = prepareMemoryForStorage(memory);
     const updated = {
       ...prepared.memory,
-      version: bumpVersion ? memory.version + 1 : existing.version
+      version: bumpVersion ? (expectedVersion ?? memory.version) + 1 : existing.version
     };
-    this.db
+    const write = this.db
       .prepare(
         `UPDATE memories
          SET timeline = @timeline,
@@ -650,9 +719,10 @@ export class MemoryRepository {
              version = @version,
              updated_at = @updatedAt,
              deleted_at = @deletedAt
-         WHERE id = @id`
+         WHERE id = @id AND (@expectedVersion IS NULL OR version = @expectedVersion)`
       )
-      .run(memoryToSql(updated));
+      .run({ ...memoryToSql(updated), expectedVersion: expectedVersion ?? null });
+    if (write.changes !== 1) throw new Error(`memory version changed: ${memory.id}`);
     const mergedVectors = mergeMemoryVectors(
       attachedMemoryVectorEntries(existing),
       prepared.vectorUpdates
@@ -795,6 +865,348 @@ export class MemoryRepository {
     return rows.map((row) => this.hydrate(memoryFromSql(row)));
   }
 
+  /** Raw old writer rows, including deleted manuals; deliberately independent of source classification. */
+  listLegacyReadOnlySkills(limit: number, offset = 0, sourceAgentId?: string): MemoryRow[] {
+    const rows = this.db.prepare(`SELECT * FROM memories
+      WHERE memory_layer = 'Skill' AND json_extract(properties_json, '$.internal_info.read_only') = 1
+      ${sourceAgentId === undefined ? "" : `AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?`}
+      ORDER BY created_at, id LIMIT ? OFFSET ?`).all(
+        ...(sourceAgentId === undefined ? [] : [normalizeAgentIdKey(sourceAgentId)]), limit, offset
+      ) as MemorySqlRow[];
+    return rows.map(row => this.hydrate(memoryFromSql(row)));
+  }
+
+  /** All imported (read-only) Skill records of one source Agent, deleted ones included. */
+  listImportedSkillsForSource(sourceAgentId: string): MemoryRow[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM memories
+       WHERE memory_layer = 'Skill'
+         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+         AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?
+       ORDER BY created_at, id`
+    ).all(normalizeAgentIdKey(sourceAgentId)) as MemorySqlRow[];
+    return rows.map((row) => this.hydrate(memoryFromSql(row)));
+  }
+
+  /** Candidates include already-repaired R9 rows whose false edge survives only in history. */
+  listImportedSkillsWithLegacyCollisionHistory(
+    limit: number,
+    cursor: { createdAt: string; id: string } | number = 0,
+    sourceAgentId?: string
+  ): MemoryRow[] {
+    const keyset = typeof cursor === "object" && cursor !== null ? cursor : undefined;
+    const offset = typeof cursor === "number" ? cursor : 0;
+    const rows = this.db.prepare(`SELECT m.* FROM memories m
+      WHERE m.memory_layer = 'Skill'
+        AND memmy_is_imported_skill(m.properties_json, m.info_json, m.tags_json, m.memory_key) = 1
+        ${sourceAgentId === undefined ? "" : `AND ${importedSkillAgentIdSql("json_extract(m.properties_json, '$.internal_info.source_agent_id')")} = ?`}
+        ${keyset === undefined ? "" : "AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))"}
+        AND (json_type(m.properties_json, '$.internal_info.superseded_by_skill_id') IS NOT NULL
+          OR json_extract(m.properties_json, '$.internal_info.source_review_required') = 1
+          OR (json_extract(m.properties_json, '$.internal_info.source_kind') = 'skill'
+            AND json_extract(m.properties_json, '$.internal_info.source_skill_id') = json_extract(m.properties_json, '$.internal_info.turn_id'))
+          OR EXISTS (SELECT 1 FROM memory_change_log h WHERE h.memory_id = m.id
+            AND h.change_type IN ('legacy_manual_supersession_repaired', 'read_only_skill_superseded')))
+      ORDER BY m.created_at, m.id LIMIT ? OFFSET ?`).all(
+        ...(sourceAgentId === undefined ? [] : [normalizeAgentIdKey(sourceAgentId)]),
+        ...(keyset === undefined ? [] : [keyset.createdAt, keyset.createdAt, keyset.id]),
+        limit,
+        offset
+      ) as MemorySqlRow[];
+    return rows.map(row => this.hydrate(memoryFromSql(row)));
+  }
+
+  /** Pure historical projection; never relabel ambiguous source-shaped rows as manual. */
+  resolveLegacyImportedSkillVersion(memory: MemoryRow): MemoryRow {
+    const previous = memory.properties.internal_info;
+    if (isUnverifiedLegacySkillCollision(memory)) {
+      const peers = this.listImportedSkillsForSource(String(previous.source_agent_id ?? ""))
+        .filter(peer => peer.id !== memory.id && !isUnverifiedLegacySkillCollision(peer)
+          && importedSkillSourceIdentity(peer) === importedSkillSourceIdentity(memory)
+          && (peer.properties.internal_info.superseded_by_skill_id === memory.id
+            || this.db.prepare(`SELECT 1 FROM memory_change_log WHERE memory_id = ?
+              AND json_extract(after_json, '$.properties.internal_info.superseded_by_skill_id') = ? LIMIT 1`)
+              .get(peer.id, memory.id)));
+      const current = currentImportedSkillVersion(peers.map(peer => this.resolveLegacyImportedSkillVersion(peer)));
+      const missing = current && (importedSkillArchiveReason(current) === "source_missing"
+        || current.properties.internal_info.source_state === "source_missing");
+      const status = memory.status === "deleted" || memory.deletedAt ? memory.status : "archived";
+      const internal = { ...previous, source_review_required: true,
+        source_state: missing ? "source_missing" : previous.source_state === "source_missing" ? "source_missing" : "source_review_pending",
+        archive_reason: importedSkillArchiveReason(memory) === "user" ? "user" : "source_review_pending" };
+      return { ...memory, status, properties: { ...memory.properties, status, internal_info: internal } };
+    }
+    const untrustedEdge = (row: MemoryRow): MemoryRow | undefined => {
+      const targetId = row.properties.internal_info.superseded_by_skill_id;
+      const target = typeof targetId === "string" ? this.getIncludingDeleted(targetId) : undefined;
+      return target && target.memoryLayer === "Skill"
+        && (!hasImportedSkillSourceEvidence(target) || isUnverifiedLegacySkillCollision(target)) ? target : undefined;
+    };
+    const successor = untrustedEdge(memory);
+    // Unknown/empty/genuine successor markers retain their historical meaning.
+    if (!successor && typeof previous.superseded_by_skill_id === "string") return memory;
+    const snapshot = (json: string | null): MemoryRow | undefined => {
+      const value: unknown = json === null ? undefined : parseJson(json, undefined);
+      if (!isRecord(value) || value.id !== memory.id || value.memoryLayer !== "Skill"
+        || !isRecord(value.properties) || !isRecord(value.properties.internal_info)) return undefined;
+      const row = value as unknown as MemoryRow;
+      const fields = row.properties.internal_info;
+      if (normalizeAgentIdKey(String(fields.source_agent_id ?? "")) !== normalizeAgentIdKey(String(previous.source_agent_id ?? ""))
+        || importedSkillSourceIdentity(row) !== importedSkillSourceIdentity(memory)
+        || fields.imported_at !== previous.imported_at
+        || typeof fields.source_content_hash === "string" && typeof previous.source_content_hash === "string"
+          && fields.source_content_hash !== previous.source_content_hash) return undefined;
+      return row;
+    };
+    let provedCollision = Boolean(successor);
+    let observed: MemoryRow | undefined;
+    let laterAbsence: MemoryRow | undefined;
+    let userArchived = false;
+    let pendingUserSnapshot: MemoryRow | undefined;
+    let sourceObservationBarrier = false;
+    // Iteration uses (memory_id, seq) and stops at the nearest real observation.
+    // User archive/restore and previous repair events never establish presence.
+    for (const change of this.db.prepare(`SELECT change_type, source, before_json, after_json
+      FROM memory_change_log WHERE memory_id = ? ORDER BY seq DESC`).iterate(memory.id) as Iterable<{
+        change_type: string; source: string; before_json: string | null; after_json: string | null;
+      }>) {
+      const after = snapshot(change.after_json);
+      const before = snapshot(change.before_json);
+      const afterEdge = after && untrustedEdge(after);
+      const beforeEdge = before && untrustedEdge(before);
+      if (pendingUserSnapshot && (!after || !Number.isFinite(after.version) || !Number.isFinite(pendingUserSnapshot.version))) {
+        sourceObservationBarrier = true;
+        break;
+      }
+      if (pendingUserSnapshot && after && after.version <= pendingUserSnapshot.version) {
+        // Follow a neutral user/present snapshot to the event that produced it.
+        // A missing version may hide a later real source observation: do not
+        // carry an older absence across that pruned segment of the chain.
+        if (after.version < pendingUserSnapshot.version) { sourceObservationBarrier = true; break; }
+        pendingUserSnapshot = undefined;
+      }
+      if (after && (change.change_type === "create" || change.change_type === "update")
+        && (change.source === "memory.add" || change.source === "agent_skill.reconcile")) {
+        if (!provedCollision) return memory;
+        if (!afterEdge) observed = after;
+        else sourceObservationBarrier = true;
+        break;
+      }
+      if (after && change.change_type === "agent_skill_source_missing") laterAbsence ??= after;
+      if (!provedCollision && !afterEdge && !beforeEdge) continue;
+      provedCollision = true;
+      if (laterAbsence) { observed = laterAbsence; break; }
+      // R9 repair and archive logs can contain the bad pre-repair row but an
+      // invented after.source_state=present. Only its earlier side is evidence.
+      const candidates = change.change_type === "read_only_skill_superseded" ? [before]
+        : change.change_type === "legacy_manual_supersession_repaired" || beforeEdge && !afterEdge ? [before]
+          : [after, before];
+      for (const candidate of candidates) {
+        if (!candidate || untrustedEdge(candidate)) continue;
+        const reason = importedSkillArchiveReason(candidate);
+        if (reason === "user") {
+          userArchived = true;
+          if (typeof candidate.properties.internal_info.superseded_by_skill_id !== "string"
+            && (candidate.properties.internal_info.source_state === "present"
+              || candidate.properties.internal_info.source_state === undefined)) {
+            // R9 could synthesize present while archiving a repaired collision.
+            // Preserve the archive, but trace source facts independently.
+            pendingUserSnapshot = candidate;
+            continue;
+          }
+        }
+        if (reason === "source_review_pending" || reason === "scan_pending") continue;
+        observed = candidate;
+        break;
+      }
+      if (observed) break;
+    }
+    if (!provedCollision) return memory;
+    if (pendingUserSnapshot) sourceObservationBarrier = true;
+    const internal = { ...previous };
+    const currentReason = importedSkillArchiveReason(memory);
+    delete internal.superseded_by_skill_id;
+    if (currentReason === "superseded") delete internal.archive_reason;
+    if (userArchived && (currentReason === undefined || currentReason === "superseded")) internal.archive_reason = "user";
+    if (observed) {
+      const restored = observed.properties.internal_info;
+      const reason = importedSkillArchiveReason(observed);
+      if (typeof restored.superseded_by_skill_id === "string" && !untrustedEdge(observed)) {
+        internal.superseded_by_skill_id = restored.superseded_by_skill_id;
+      }
+      if (!userArchived && (currentReason === undefined || currentReason === "superseded") && reason !== undefined) internal.archive_reason = reason;
+      // A no-pointer R9 archive may have overwritten the source state itself.
+      // The proven false-edge chain permits replacing that synthesized value.
+      if (internal.source_state === undefined || !successor && internal.source_state === "present") {
+        if (restored.source_state !== undefined) internal.source_state = restored.source_state;
+        else if (reason === "source_missing") internal.source_state = "source_missing";
+        else if (!successor) internal.source_state = "source_review_pending";
+      }
+    } else if (sourceObservationBarrier && userArchived
+      || !successor && internal.source_state === "present" && !sourceObservationBarrier) {
+      internal.source_state = "source_review_pending";
+    }
+    const manualMissing = successor && !isUnverifiedLegacySkillCollision(successor)
+      && (importedSkillArchiveReason(successor) === "source_missing" || successor.properties.internal_info.source_state === "source_missing");
+    const laterSourceEpoch = successor && typeof previous.imported_at === "string"
+      && Number.isFinite(Date.parse(previous.imported_at)) && Number.isFinite(Date.parse(successor.updatedAt))
+      && Date.parse(previous.imported_at) > Date.parse(successor.updatedAt);
+    if (internal.source_state === undefined && manualMissing && !sourceObservationBarrier && !laterSourceEpoch && (!observed
+      || Number.isFinite(Date.parse(successor!.updatedAt)) && Number.isFinite(Date.parse(observed.updatedAt))
+        && Date.parse(successor!.updatedAt) >= Date.parse(observed.updatedAt))) internal.source_state = "source_missing";
+    return { ...memory, properties: { ...memory.properties, internal_info: internal } };
+  }
+
+  /** Seeds each installed source identity from its current version before the first scan. */
+  legacyInstalledSkillsForAgent(sourceAgentId: string): AgentSkillInstallations {
+    const groups = new Map<string, MemoryRow[]>();
+    for (const raw of this.listImportedSkillsForSource(sourceAgentId)) {
+      const memory = this.resolveLegacyImportedSkillVersion(raw);
+      const identity = importedSkillSourceIdentity(memory);
+      const versions = groups.get(identity) ?? [];
+      versions.push(memory);
+      groups.set(identity, versions);
+    }
+    const skills: AgentSkillInstallation[] = [];
+    const registrations: AgentSkillInstallation[] = [];
+    for (const [sourceSkillId, versions] of groups) {
+      const current = currentImportedSkillVersion(versions);
+      if (!current || importedSkillArchiveReason(current) === "source_missing"
+        || current.properties.internal_info.source_state === "source_missing") continue;
+      const normalizedName = importedSkillName(current);
+      if (!normalizedName) continue;
+      const entries = current.properties.internal_info.source_kind === "plugin" ? registrations : skills;
+      entries.push({ sourceSkillId, normalizedName });
+    }
+    return { version: 1, skills, registrations };
+  }
+
+  /** The same pure inventory projection is used by cold readers and transactional repair. */
+  resolvedSkillInstallationsForAgent(sourceAgentId: string, legacyManuals: readonly MemoryRow[] = []): AgentSkillInstallations {
+    const saved = this.db.prepare("SELECT value_json FROM runtime_kv WHERE key = ?")
+      .get(agentSkillInstallationsKey(sourceAgentId)) as { value_json: string } | undefined;
+    const stored = saved ? parseJson(saved.value_json, undefined) as AgentSkillInstallations | undefined : undefined;
+    if (stored?.version !== 1) return this.legacyInstalledSkillsForAgent(sourceAgentId);
+    const versions = this.listImportedSkillsForSource(sourceAgentId);
+    const manuals = new Map<string, MemoryRow>();
+    const addManual = (memory: MemoryRow) => {
+      if (memory.memoryLayer === "Skill" && !hasImportedSkillSourceEvidence(memory)) manuals.set(memory.id, memory);
+    };
+    for (const manual of legacyManuals) addManual(manual);
+    const oldManuals = this.db.prepare(`SELECT * FROM memories
+      WHERE memory_layer = 'Skill' AND json_extract(properties_json, '$.internal_info.read_only') = 1
+        AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 0
+        AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?`)
+      .all(normalizeAgentIdKey(sourceAgentId)) as MemorySqlRow[];
+    for (const row of oldManuals) addManual(this.hydrate(memoryFromSql(row)));
+    for (const version of versions) {
+      const successorId = version.properties.internal_info.superseded_by_skill_id;
+      const successor = typeof successorId === "string" ? this.getIncludingDeleted(successorId) : undefined;
+      if (successor) addManual(successor);
+    }
+    const affected = new Set<string>();
+    for (const manual of manuals.values()) {
+      for (const identity of [manual.id, manual.memoryKey, importedSkillSourceIdentity(manual)]) if (identity) affected.add(identity);
+    }
+    const groups = new Map<string, MemoryRow[]>();
+    for (const raw of versions) {
+      const identity = importedSkillSourceIdentity(raw);
+      if (manuals.has(String(raw.properties.internal_info.superseded_by_skill_id ?? ""))) affected.add(identity);
+      const resolved = this.resolveLegacyImportedSkillVersion(raw);
+      if (isUnverifiedLegacySkillCollision(raw)) { affected.add(identity); continue; }
+      if (JSON.stringify(resolved.properties.internal_info) !== JSON.stringify(raw.properties.internal_info)) affected.add(identity);
+      const group = groups.get(identity) ?? [];
+      group.push(resolved);
+      groups.set(identity, group);
+    }
+    const skills = new Map(stored.skills.map(entry => [entry.sourceSkillId, entry]));
+    const missing = (memory: MemoryRow) => importedSkillArchiveReason(memory) === "source_missing"
+      || memory.properties.internal_info.source_state === "source_missing";
+    for (const identity of affected) {
+      const group = groups.get(identity) ?? [];
+      const current = currentImportedSkillVersion(group);
+      if (current && !missing(current)) {
+        const normalizedName = importedSkillName(current);
+        if (normalizedName && current.properties.internal_info.source_kind !== "plugin") {
+          skills.set(identity, { sourceSkillId: identity, normalizedName });
+        }
+      } else if (current && missing(current) || group.length === 0 || group.every(missing)) {
+        // Equal manual/file titles do not validate a contaminated entry. Only
+        // resolved source evidence can retain it; unrelated inventory is kept.
+        skills.delete(identity);
+      }
+      // History-only/deleted groups without absence evidence do not disprove a
+      // separately recorded installation. Preserve their existing inventory.
+    }
+    return { version: 1, skills: [...skills.values()], registrations: stored.registrations };
+  }
+
+  /** Most recently modified current imported skill satisfying the request filter. */
+  latestImportedSkillsByName(names: readonly string[], filter: MemoryFilter = {}): Map<string, string> {
+    const result = new Map<string, string>();
+    if (names.length === 0) return result;
+    const built = buildMemoryWhere({ ...filter, memoryLayer: "Skill", status: ["activated", "resolving"], eligibleImportedSkillsOnly: true }, this.db);
+    const rows = this.db.prepare(
+      `SELECT id, json_extract(properties_json, '$.internal_info.normalized_name') AS normalizedName,
+         json_extract(properties_json, '$.internal_info.name') AS name, json_extract(info_json, '$.title') AS title
+       FROM memories
+       WHERE ${built.where}
+         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+         AND trim(COALESCE(json_extract(properties_json, '$.internal_info.source_agent_id'), '')) != ''
+       ORDER BY COALESCE(json_extract(properties_json, '$.internal_info.source_modified_at'), timeline, created_at) DESC, id`
+    ).all(...built.params) as Array<{ id: string; normalizedName: unknown; name: unknown; title: unknown }>;
+    const wanted = new Set(names.map(normalizeSkillName));
+    for (const row of rows) {
+      const rawName = [row.normalizedName, row.name, row.title].find(value => typeof value === "string" && value.trim());
+      const name = typeof rawName === "string" ? normalizeSkillName(rawName) : "";
+      if (!wanted.has(name) || result.has(name)) continue;
+      const memory = this.get(row.id);
+      if (memory && importedSkillSourceEligible(this.db, memory)) result.set(name, row.id);
+    }
+    return result;
+  }
+
+  /** Live imported Skill records whose retrieval representation version differs from the given one. */
+  listImportedSkillsByRetrievalVersion(version: number, mode: "below" | "at", limit: number): MemoryRow[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM memories
+       WHERE memory_layer = 'Skill'
+         AND deleted_at IS NULL
+         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+         AND COALESCE(json_extract(properties_json, '$.internal_info.retrieval_representation_version'), 0) ${mode === "below" ? "<" : "BETWEEN 1 AND"} ?
+       ORDER BY created_at, id
+       LIMIT ?`
+    ).all(version, limit) as MemorySqlRow[];
+    return rows.map((row) => this.hydrate(memoryFromSql(row)));
+  }
+
+  /** Imported Skill records not yet carrying the given import state version, deleted ones included. */
+  listImportedSkillsBelowStateVersion(version: number, limit: number): MemoryRow[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM memories
+       WHERE memory_layer = 'Skill'
+         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+         AND COALESCE(json_extract(properties_json, '$.internal_info.import_state_version'), 0) < ?
+       ORDER BY created_at, id
+       LIMIT ?`
+    ).all(version, limit) as MemorySqlRow[];
+    return rows.map((row) => this.hydrate(memoryFromSql(row)));
+  }
+
+  /**
+   * Rewrites the body and metadata of a row that is already soft-deleted;
+   * update() only touches live rows. Status, times and version stay as they are.
+   */
+  rewriteDeletedRow(memory: MemoryRow): void {
+    const sql = memoryToSql(prepareMemoryForStorage(memory).memory);
+    this.db.prepare(
+      `UPDATE memories
+       SET memory_value = @memoryValue, info_json = @infoJson, properties_json = @propertiesJson
+       WHERE id = @id AND (deleted_at IS NOT NULL OR status = 'deleted')`
+    ).run({ id: sql.id, memoryValue: sql.memoryValue, infoJson: sql.infoJson, propertiesJson: sql.propertiesJson });
+    this.db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(memory.id);
+  }
+
   archivePriorReadOnlySkillVersions(input: {
     sourceAgentId: string;
     sourceSkillIdentity: string;
@@ -807,15 +1219,15 @@ export class MemoryRepository {
          AND id != ?
          AND deleted_at IS NULL
          AND status IN ('activated', 'resolving')
-         AND json_extract(properties_json, '$.internal_info.read_only') = 1
-         AND json_extract(properties_json, '$.internal_info.source_agent_id') = ?
+         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+         AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?
          AND COALESCE(
            json_extract(properties_json, '$.internal_info.source_skill_id'),
            json_extract(properties_json, '$.internal_info.source_skill_path')
          ) = ?`
     ).all(
       input.currentMemoryId,
-      input.sourceAgentId,
+      normalizeAgentIdKey(input.sourceAgentId),
       input.sourceSkillIdentity
     ) as MemorySqlRow[];
     return rows.map((row) => {
@@ -840,7 +1252,7 @@ export class MemoryRepository {
     });
   }
 
-  getMany(ids: string[]): MemoryRow[] {
+  getMany(ids: string[], options: { includeVectors?: boolean } = {}): MemoryRow[] {
     if (ids.length === 0) {
       return [];
     }
@@ -848,10 +1260,10 @@ export class MemoryRepository {
     const rows = this.db
       .prepare(`SELECT * FROM memories WHERE id IN (${placeholders}) AND deleted_at IS NULL`)
       .all(...ids) as MemorySqlRow[];
-    const vectors = this.vectors.getMany(rows.map((row) => row.id));
+    const vectors = options.includeVectors === false ? undefined : this.vectors.getMany(rows.map((row) => row.id));
     const byId = new Map(rows.map((row) => {
       const memory = memoryFromSql(row);
-      attachMemoryVectors(memory, vectors.get(row.id) ?? []);
+      if (vectors) attachMemoryVectors(memory, vectors.get(row.id) ?? []);
       return [row.id, memory];
     }));
     return ids.map((id) => byId.get(id)).filter((row): row is MemoryRow => Boolean(row));
@@ -882,7 +1294,7 @@ export class MemoryRepository {
   }
 
   list(filter: MemoryFilter = {}, limit = 50, offset = 0): MemoryRow[] {
-    const built = buildMemoryWhere(filter);
+    const built = buildMemoryWhere(filter, this.db);
     const rows = this.db
       .prepare(
         `SELECT *
@@ -898,7 +1310,8 @@ export class MemoryRepository {
   listStats(): MemoryStatsRow[] {
     const rows = this.db
       .prepare(
-        `SELECT conversation_id,
+        `SELECT id,
+                conversation_id,
                 session_id,
                 agent_id,
                 app_id,
@@ -909,9 +1322,11 @@ export class MemoryRepository {
                 ${memoryDisplayedSourceSql("json_extract(info_json, '$.source')")} AS info_source,
                 json_extract(properties_json, '$.internal_info.source') AS internal_source
          FROM memories
-         WHERE deleted_at IS NULL`
+         WHERE deleted_at IS NULL
+           AND ${NOT_PLUGIN_REGISTRATION_SQL}`
       )
       .all() as Array<{
+        id: string;
         conversation_id: string | null;
         session_id: string | null;
         agent_id: string | null;
@@ -924,6 +1339,7 @@ export class MemoryRepository {
         internal_source: unknown;
       }>;
     return rows.map((row) => ({
+      id: row.id,
       conversationId: row.conversation_id ?? undefined,
       sessionId: row.session_id ?? undefined,
       agentId: row.agent_id ?? undefined,
@@ -1079,7 +1495,7 @@ export class MemoryRepository {
   }
 
   count(filter: MemoryFilter = {}): number {
-    const built = buildMemoryWhere(filter);
+    const built = buildMemoryWhere(filter, this.db);
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS count
@@ -1094,7 +1510,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const poolLimit = Math.min(Math.max(limit + offset, limit), 500);
     const rows = this.db
       .prepare(
@@ -1139,7 +1555,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const searchBuilt = buildMemorySearchWhere(query, true);
     if (!searchBuilt.where || limit <= 0) {
       return [];
@@ -1162,7 +1578,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const needles = searchNeedles(query);
     if (needles.length === 0) {
       return this.count(filter);
@@ -1190,7 +1606,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const anyTag = buildAnyTagWhere(options.anyOfTags);
     const identity = options.identity ?? vectorEmbeddingIdentity(query);
     const candidateWindow = VECTOR_SEARCH_WINDOW;
@@ -1229,7 +1645,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     const row = this.db
       .prepare(
         `SELECT 1 AS ok
@@ -1257,7 +1673,7 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
+    }, this.db);
     try {
       const rows = this.db
         .prepare(
@@ -1276,8 +1692,16 @@ export class MemoryRepository {
     }
   }
 
-  searchPatternIds(terms: string[], filter: MemoryFilter = {}, limit = 20): MemorySearchIdHit[] {
-    return this.searchLikeIds(terms, filter, limit, true, "pattern");
+  searchPatternIds(terms: string[], filter: MemoryFilter = {}, limit = 20, excludeImportedSkills = false): MemorySearchIdHit[] {
+    return this.searchLikeIds(terms, filter, limit, true, "pattern", false, excludeImportedSkills);
+  }
+
+  searchImportedSkillBodyIds(terms: string[], filter: MemoryFilter = {}, limit = 20): MemorySearchIdHit[] {
+    return this.searchLikeIds(terms, { ...filter, memoryLayer: "Skill" }, limit, false, "pattern", true);
+  }
+
+  searchImportedSkillPatternIds(terms: string[], filter: MemoryFilter = {}, limit = 20): MemorySearchIdHit[] {
+    return this.searchLikeIds(terms, { ...filter, memoryLayer: "Skill" }, limit, true, "pattern", true);
   }
 
   searchStructuralIds(fragments: string[], filter: MemoryFilter = {}, limit = 20): MemorySearchIdHit[] {
@@ -1325,6 +1749,7 @@ export class MemoryRepository {
          FROM memories
          WHERE deleted_at IS NULL
            AND status != 'deleted'
+           AND ${NOT_PLUGIN_REGISTRATION_SQL}
          GROUP BY memory_layer`
       )
       .all() as Array<{ layer: MemoryLayer; count: number }>;
@@ -1343,6 +1768,7 @@ export class MemoryRepository {
         `SELECT status, COUNT(*) AS count
          FROM memories
          WHERE deleted_at IS NULL
+           AND ${NOT_PLUGIN_REGISTRATION_SQL}
          GROUP BY status`
       )
       .all() as Array<{ status: MemoryStatus; count: number }>;
@@ -1374,7 +1800,10 @@ export class MemoryRepository {
   reindexFts(memory: MemoryRow): void {
     try {
       this.db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(memory.id);
-      if (!memory.deletedAt && memory.status !== "deleted") {
+      if (!memory.deletedAt && memory.status !== "deleted"
+        && !isIdentityOnlyImportedSkill(memory)
+        && !hasRestrictedImportedSkillContent(memory)
+        && !isL3FieldSnapshotMemory(memory)) {
         this.db
           .prepare(`INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`)
           .run(memory.id, memory.id, retrievalDocumentForMemory(memory), memory.tags.join(" "));
@@ -1399,7 +1828,9 @@ export class MemoryRepository {
     filter: MemoryFilter,
     limit: number,
     includeTags: boolean,
-    channel: "pattern" | "structural"
+    channel: "pattern" | "structural",
+    importedSkillOnly = false,
+    excludeImportedSkills = false
   ): MemorySearchIdHit[] {
     const normalized = terms
       .map((term) => term.trim().toLowerCase())
@@ -1409,24 +1840,31 @@ export class MemoryRepository {
     const built = buildMemoryWhere({
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
-    });
-    const termColumns = normalized.map((term) => likeColumnsForTerm(term, includeTags));
+    }, this.db);
+    const termColumns = normalized.map((term) => importedSkillOnly && !includeTags
+      ? ["lower(memories.memory_value) LIKE ? ESCAPE '\\'"]
+      : likeColumnsForTerm(term, includeTags));
     const clauses = termColumns.map((columns) => `(${columns.join(" OR ")})`);
     const params = normalized.flatMap((term, index) => {
       const pattern = `%${escapeLikePattern(term)}%`;
       return termColumns[index]!.map(() => pattern);
     });
+    // Only imported Skill routes use coverage; preserve legacy ranking elsewhere.
+    const coverage = clauses.map(clause => `CASE WHEN ${clause} THEN 1.0 ELSE 0.0 END`).join(" + ");
+    const imported = "memmy_is_imported_skill(memories.properties_json, memories.info_json, memories.tags_json, memories.memory_key)";
     const rows = this.db
       .prepare(
-        `SELECT memories.id AS id
+        `SELECT memories.id AS id ${importedSkillOnly ? `, (${coverage}) / ${normalized.length} AS coverage` : ""}
          FROM memories
          WHERE ${built.where}
+           ${importedSkillOnly ? `AND ${imported} = 1` : ""}
+           ${excludeImportedSkills ? `AND (memories.memory_layer != 'Skill' OR ${imported} = 0)` : ""}
            AND (${clauses.join(" OR ")})
-         ORDER BY memories.updated_at DESC, memories.id DESC
+         ORDER BY ${importedSkillOnly ? "coverage DESC," : ""} memories.updated_at DESC, memories.id DESC
          LIMIT ?`
       )
-      .all(...built.params, ...params, limit) as Array<{ id: string }>;
-    return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel }));
+      .all(...(importedSkillOnly ? params : []), ...built.params, ...params, limit) as Array<{ id: string; coverage?: number }>;
+    return rows.map((row, index) => ({ id: row.id, score: row.coverage ?? 1 / (index + 1), channel }));
   }
 }
 
@@ -1981,6 +2419,15 @@ export class RuntimeRepository {
         AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND turn_id = @turnId
       ORDER BY created_at ASC, user_id ASC LIMIT 1`
     ).get({ ...scope, turnId }) as Record<string, unknown> | undefined;
+    return row ? sourceTurnCaptureFromSql(row) : undefined;
+  }
+
+  findSourceTurnCaptureByContentHash(scope: SourceTurnCaptureScope, contentHash: string): SourceTurnCaptureRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source <> @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND content_hash = @contentHash
+      ORDER BY created_at ASC LIMIT 1`
+    ).get({ ...scope, contentHash }) as Record<string, unknown> | undefined;
     return row ? sourceTurnCaptureFromSql(row) : undefined;
   }
 
@@ -2755,6 +3202,18 @@ export class RuntimeRepository {
       .all(rawTurnId, rawTurnId) as Array<{ id: string }>).map(r => r.id);
   }
 
+  /** An L1 of a new-L3 batch whose summary is still being written (the batch waits for it), if any. */
+  unsummarizedL3BatchL1(batchId: string): string | undefined {
+    return this.db.prepare(
+      `SELECT batch_l1.value FROM l3_unit_batches AS unit_batch, json_each(unit_batch.l1_memory_ids_json) AS batch_l1
+       JOIN memory_processing_state AS l1_state ON l1_state.memory_id = batch_l1.value
+       JOIN memories AS batch_memory ON batch_memory.id = l1_state.memory_id
+       WHERE unit_batch.id = ? AND l1_state.state IN ('summary_pending', 'summarizing')
+         AND batch_memory.deleted_at IS NULL AND batch_memory.status != 'deleted'
+       LIMIT 1`
+    ).pluck().get(batchId) as string | undefined;
+  }
+
   hasUnassignedTurns(sessionId: string): boolean {
     return Boolean(this.db.prepare(`SELECT 1 FROM raw_turns WHERE session_id = ? AND deleted_at IS NULL AND redacted_at IS NULL
       AND (episode_id IS NULL OR json_extract(message_payload_json, '$.episode_assignment.status') IN ('pending', 'selected', 'applying')) LIMIT 1`).get(sessionId));
@@ -3340,6 +3799,28 @@ export class RuntimeRepository {
     return event;
   }
 
+  listRecallEvents(input: {
+    userId?: string;
+    limit?: number;
+  } = {}): RecallEventRecord[] {
+    const clauses = ["1=1"];
+    const params: SqlValue[] = [];
+    if (input.userId) {
+      clauses.push("user_id = ?");
+      params.push(input.userId);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM recall_events
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(...params, input.limit ?? 10_000) as SqlRecallEventRow[];
+    return rows.map(recallEventFromSql);
+  }
+
   getRecallEvent(id: string): RecallEventRecord | undefined {
     const row = this.db
       .prepare(`SELECT * FROM recall_events WHERE id = ?`)
@@ -3389,6 +3870,111 @@ export class RuntimeRepository {
       .prepare(`UPDATE recall_events SET outcome = ? WHERE id = ?`)
       .run(outcome, id);
     return this.getRecallEvent(id);
+  }
+
+  /**
+   * Removes a deleted imported skill's body from the copies kept outside the
+   * memory row: embedding retries (all states), change and audit log payloads,
+   * search logs and recall snapshots. Ids, times and event structure are kept.
+   */
+  scrubImportedSkillCopies(memoryId: string): {
+    retries: number;
+    changeLogs: number;
+    auditLogs: number;
+    apiLogs: number;
+    recallEvents: number;
+  } {
+    this.invalidateImportedSkillResponseCopies(memoryId);
+    const retries = this.deleteEmbeddingRetriesForMemory(memoryId);
+    let changeLogs = 0;
+    // Embedding retry changes are logged under the retry id with the skill id
+    // as targetId and the embedded text as sourceText.
+    for (const row of this.db.prepare(
+      `SELECT seq, before_json, after_json FROM memory_change_log
+       WHERE memory_id = ? OR entity_id = ?
+          OR json_extract(after_json, '$.targetId') = ?
+          OR json_extract(before_json, '$.targetId') = ?`
+    ).all(memoryId, memoryId, memoryId, memoryId) as Array<{ seq: number; before_json: string | null; after_json: string | null }>) {
+      this.db.prepare(`UPDATE memory_change_log SET before_json = ?, after_json = ? WHERE seq = ?`)
+        .run(redactSkillBodyJson(row.before_json), redactSkillBodyJson(row.after_json), row.seq);
+      changeLogs += 1;
+    }
+    let auditLogs = 0;
+    for (const row of this.db.prepare(
+      `SELECT id, before_json, after_json FROM audit_logs WHERE target_id = ?`
+    ).all(memoryId) as Array<{ id: string; before_json: string | null; after_json: string | null }>) {
+      this.db.prepare(`UPDATE audit_logs SET before_json = ?, after_json = ? WHERE id = ?`)
+        .run(redactSkillBodyJson(row.before_json), redactSkillBodyJson(row.after_json), row.id);
+      auditLogs += 1;
+    }
+    const needle = `%${escapeLikePattern(memoryId)}%`;
+    let apiLogs = 0;
+    for (const row of this.db.prepare(
+      `SELECT id, tool_name, input_json, output_json FROM api_logs
+       WHERE tool_name IN ('memory_search', 'memory_add') AND output_json LIKE ? ESCAPE '\\'`
+    ).all(needle) as Array<{ id: number; tool_name: string; input_json: string; output_json: string }>) {
+      const output = parseJsonRecord(row.output_json);
+      if (row.tool_name === "memory_add") {
+        // Both add writers emit one memory per log. Its input content belongs
+        // to that single details.traceId, including legacy Skill imports.
+        const details = Array.isArray(output.details) ? output.details : [];
+        if (!details.some(detail => isRecordLike(detail) && detail.traceId === memoryId)) continue;
+        this.db.prepare(`UPDATE api_logs SET input_json = ?, output_json = ? WHERE id = ?`)
+          .run(redactSkillBodyJson(row.input_json), redactSkillBodyJson(row.output_json), row.id);
+        apiLogs += 1;
+        continue;
+      }
+      let changed = false;
+      for (const key of ["candidates", "filtered", "droppedByLlm"]) {
+        const entries = output[key];
+        if (!Array.isArray(entries)) continue;
+        entries.forEach((entry, index) => {
+          if (isRecordLike(entry) && entry.refId === memoryId) {
+            entries[index] = redactSkillBody(entry);
+            changed = true;
+          }
+        });
+      }
+      if (!changed) continue;
+      this.db.prepare(`UPDATE api_logs SET output_json = ? WHERE id = ?`).run(JSON.stringify(output), row.id);
+      apiLogs += 1;
+    }
+    let recallEvents = 0;
+    for (const row of this.db.prepare(
+      `SELECT id, request_json FROM recall_events WHERE request_json LIKE ? ESCAPE '\\'`
+    ).all(needle) as Array<{ id: string; request_json: string }>) {
+      const request = parseJsonRecord(row.request_json);
+      const evidence = isRecordLike(request.recallEvidence) ? request.recallEvidence : undefined;
+      if (!evidence) continue;
+      let changed = false;
+      if (Array.isArray(evidence.hits)) {
+        const hits = evidence.hits;
+        hits.forEach((hit, index) => {
+          const memberIds = isRecordLike(hit) && Array.isArray(hit.memberMemoryIds) ? hit.memberMemoryIds : [];
+          if (isRecordLike(hit) && (hit.id === memoryId || memberIds.includes(memoryId))) {
+            hits[index] = redactSkillBody(hit);
+            changed = true;
+          }
+        });
+      }
+      if (Array.isArray(evidence.sections)) {
+        for (const section of evidence.sections) {
+          if (isRecordLike(section) && Array.isArray(section.memoryIds) && section.memoryIds.includes(memoryId)) {
+            section.content = "";
+            changed = true;
+          }
+        }
+      }
+      if (!changed) continue;
+      this.db.prepare(`UPDATE recall_events SET request_json = ? WHERE id = ?`).run(JSON.stringify(request), row.id);
+      recallEvents += 1;
+    }
+    return { retries, changeLogs, auditLogs, apiLogs, recallEvents };
+  }
+
+  deleteEmbeddingRetriesForMemory(memoryId: string): number {
+    assertCurrentJobLease();
+    return this.db.prepare(`DELETE FROM embedding_retry_queue WHERE target_id = ?`).run(memoryId).changes;
   }
 
   appendChange(change: Omit<ChangeLogRecord, "seq">): number {
@@ -3468,7 +4054,52 @@ export class RuntimeRepository {
     }));
   }
 
-  saveIdempotency(key: string, requestHash: string, response: unknown, createdAt = nowIso()): void {
+  /** Invalidates recall snapshots and strips old add summaries without rerunning writes. */
+  invalidateImportedSkillResponseCopies(memoryId: string): void {
+    for (const row of this.db.prepare(`SELECT DISTINCT k.key, k.response_json FROM idempotency_keys k,
+      json_tree(k.response_json) j WHERE j.type = 'text' AND j.value = ?`).all(memoryId) as Array<{ key: string; response_json: string }>) {
+      if (row.key.startsWith("memory.search:") || row.key.startsWith("turn.start:")) {
+        this.db.prepare("DELETE FROM idempotency_keys WHERE key = ?").run(row.key);
+      } else if (row.key.startsWith("memory.add:")) {
+        this.db.prepare("UPDATE idempotency_keys SET response_json = ? WHERE key = ?")
+          .run(JSON.stringify(redactSkillBody(JSON.parse(row.response_json))), row.key);
+      }
+    }
+  }
+
+  /** Repairs snapshots already persisted by older releases, including current-state tombstones. */
+  repairImportedSkillResponseCopies(): void {
+    const rows = this.db.prepare(`SELECT DISTINCT k.key, k.response_json FROM idempotency_keys k,
+      json_tree(k.response_json) j JOIN memories m ON m.id = j.value
+      WHERE m.memory_layer = 'Skill' AND j.type = 'text'
+        AND (k.key LIKE 'memory.search:%' OR k.key LIKE 'turn.start:%' OR k.key LIKE 'memory.add:%')`)
+      .all() as Array<{ key: string; response_json: string }>;
+    for (const row of rows) {
+      const parsed = parseJson(row.response_json, undefined);
+      const response = this.sanitizeIdempotencyResponse(row.key, parsed);
+      if (response === undefined) this.db.prepare("DELETE FROM idempotency_keys WHERE key = ?").run(row.key);
+      else if (response !== parsed) this.db.prepare("UPDATE idempotency_keys SET response_json = ? WHERE key = ?").run(toJson(response), row.key);
+    }
+  }
+
+  /** Returns undefined for recall snapshots whose imported content must be retrieved afresh. */
+  sanitizeIdempotencyResponse(key: string, response: unknown, currentAgentId?: string): unknown {
+    if (!key.startsWith("memory.search:") && !key.startsWith("turn.start:") && !key.startsWith("memory.add:")) return response;
+    if (key.startsWith("memory.add:") && (!isRecordLike(response) || response.memoryLayer !== "Skill")) return response;
+    if (!this.db.prepare("SELECT 1 FROM memories WHERE memory_layer = 'Skill' LIMIT 1").get()) return response;
+    const rows = this.db.prepare(`SELECT DISTINCT m.* FROM memories m JOIN json_tree(?) j ON j.value = m.id
+      WHERE m.memory_layer = 'Skill'
+        AND memmy_is_imported_skill(m.properties_json, m.info_json, m.tags_json, m.memory_key) = 1
+        AND j.type = 'text'`).all(toJson(response)) as MemorySqlRow[];
+    const revoked = rows.map(memoryFromSql).filter(memory => isImportedSkill(memory)
+      && !importedSkillEligibleForRecall(this.db, memory, currentAgentId));
+    if (revoked.length === 0) return response;
+    return key.startsWith("memory.add:") ? redactSkillBody(response) : undefined;
+  }
+
+  saveIdempotency(key: string, requestHash: string, response: unknown, createdAt = nowIso(), currentAgentId?: string): void {
+    response = this.sanitizeIdempotencyResponse(key, response, currentAgentId);
+    if (response === undefined) return;
     this.db
       .prepare(
         `INSERT INTO idempotency_keys (key, request_hash, response_json, created_at, expires_at)
@@ -3480,17 +4111,21 @@ export class RuntimeRepository {
       .run(key, requestHash, toJson(response), createdAt);
   }
 
-  getIdempotency(key: string): { requestHash: string; response: unknown } | undefined {
+  getIdempotency(key: string, currentAgentId?: string): { requestHash: string; response: unknown } | undefined {
     const row = this.db
       .prepare(`SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?`)
       .get(key) as { request_hash: string; response_json: string } | undefined;
     if (!row) {
       return undefined;
     }
-    return {
-      requestHash: row.request_hash,
-      response: parseJson(row.response_json, undefined)
-    };
+    const parsed = parseJson(row.response_json, undefined);
+    const response = this.sanitizeIdempotencyResponse(key, parsed, currentAgentId);
+    if (response === undefined) {
+      this.db.prepare("DELETE FROM idempotency_keys WHERE key = ?").run(key);
+      return undefined;
+    }
+    if (response !== parsed) this.db.prepare("UPDATE idempotency_keys SET response_json = ? WHERE key = ?").run(toJson(response), key);
+    return { requestHash: row.request_hash, response };
   }
 
   enqueueJob(job: EvolutionJobRecord): EvolutionJobRecord {
@@ -3726,8 +4361,9 @@ export class RuntimeRepository {
         : `AND job_type IN (${jobTypes.map(() => "?").join(", ")})`
       : "";
     const excluded = options?.excludedJobTypes?.length ? options.excludedJobTypes : undefined;
+    // Same rule as leasing: excluding an L3's update jobs also keeps its profile jobs out.
     const excludeFilter = excluded
-      ? `AND job_type NOT IN (${excluded.map(() => "?").join(", ")})`
+      ? `AND job_type NOT IN (${excluded.map(() => "?").join(", ")}) ${l3ProfileHeldSql(excluded)}`
       : "";
     const jobTypeParams = [
       ...(jobTypes && jobTypes.length > 0 ? jobTypes : []),
@@ -3739,17 +4375,18 @@ export class RuntimeRepository {
     const retryTargetFilter = targets ? `AND target_id IN (${targets.map(() => "?").join(", ")})` : "";
     const future = options?.futureAfterMs;
     const futureIso = future === undefined ? undefined : new Date(future).toISOString();
-    const mainParams = [...jobTypeParams, ...(targets ?? []), ...(futureIso ? [futureIso] : [])];
+    // A job its scope still holds back is not a reason to wake, neither by its runAfter nor by its lease running out.
+    const mainParams = [nowIso(), ...jobTypeParams, ...(targets ?? []), ...(futureIso ? [futureIso] : [])];
     const queuedJob = this.db
       .prepare(`SELECT ${MAIN_DEADLINE} AS run_after
         FROM evolution_jobs INDEXED BY worker_main_deadline
-        WHERE ${MAIN_TIMED} ${jobTypeFilter} ${excludeFilter} ${targetFilter}
+        WHERE ${MAIN_TIMED} AND ${scopedJobReadySql()} ${jobTypeFilter} ${excludeFilter} ${targetFilter}
           ${futureIso ? `AND ${MAIN_DEADLINE} > ?` : ""}
         ORDER BY ${MAIN_DEADLINE} ASC LIMIT 1`)
       .get(...mainParams) as { run_after: string } | undefined;
     const leasedJob = this.db
       .prepare(`SELECT leased_until FROM evolution_jobs INDEXED BY worker_main_lease_deadline
-        WHERE ${MAIN_LEASED} ${jobTypeFilter} ${excludeFilter} ${targetFilter}
+        WHERE ${MAIN_LEASED} AND ${scopedJobReadySql()} ${jobTypeFilter} ${excludeFilter} ${targetFilter}
           ${futureIso ? "AND leased_until > ?" : ""}
         ORDER BY leased_until ASC LIMIT 1`)
       .get(...mainParams) as { leased_until: string } | undefined;
@@ -4032,6 +4669,33 @@ export class RuntimeRepository {
     return result.changes > 0 ? this.getJob(id) : undefined;
   }
 
+  /**
+   * Puts a failed job this run still holds back in the queue to run after `runAfter`. A refunded
+   * attempt means the run did not count as a failure (waiting for a configuration fix);
+   * `minMaxAttempts` raises the failure limit. Returns undefined when the run lost its lease.
+   */
+  rescheduleFailedJob(id: string, input: {
+    runAfter: string;
+    error: string;
+    refundAttempt?: boolean;
+    minMaxAttempts?: number;
+    at?: string;
+  }, claim?: EvolutionJobRecord): EvolutionJobRecord | undefined {
+    const at = input.at ?? nowIso();
+    const where = this.jobClaimWhere(claim, at);
+    const result = this.db.prepare(`UPDATE evolution_jobs SET status = 'queued', leased_until = NULL,
+      lease_owner = NULL, lease_token = NULL, available_at = ?, blocked_reason = NULL, last_error = ?,
+      failure_count = failure_count + CASE WHEN ? THEN 0 ELSE 1 END,
+      attempts = CASE WHEN ? THEN MAX(0, attempts - 1) ELSE attempts END,
+      max_attempts = MAX(max_attempts, ?), updated_at = ?,
+      payload_json = json_set(payload_json, '$.runAfter', ?)
+      WHERE id = ? AND ${where.sql}`).run(
+      input.runAfter, input.error, input.refundAttempt ? 1 : 0, input.refundAttempt ? 1 : 0,
+      input.minMaxAttempts ?? 0, at, input.runAfter, id, ...where.params
+    );
+    return result.changes > 0 ? this.getJob(id) : undefined;
+  }
+
   /** Waiting for a dependency is not a model failure and does not consume an attempt. */
   deferProcessingJob(id: string, runAfter: string, at = nowIso(), claim?: EvolutionJobRecord): EvolutionJobRecord | undefined {
     const where = this.jobClaimWhere(claim, at);
@@ -4266,6 +4930,14 @@ export class RuntimeRepository {
              WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
           ).run(at, batchId, targetField);
           updateL3WorldModelBatchTerminalOutcome(this.db, batchId, at);
+        }
+      }
+      if (status === "dead_letter" && row.job_type === "l3_unit_update") {
+        const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+        if (typeof payload.batchId === "string") {
+          this.db.prepare(
+            `UPDATE l3_unit_batches SET status = 'failed', updated_at = ? WHERE id = ? AND status = 'queued'`
+          ).run(at, payload.batchId);
         }
       }
       if (status === "dead_letter" && row.job_type === "project_environment_profile") {
@@ -5090,8 +5762,11 @@ export class RuntimeRepository {
     now?: string;
     limit?: number;
   }): CandidatePoolRecord[] {
-    const clauses = ["status = 'pending'", "(expires_at IS NULL OR expires_at >= ?)"];
+    const clauses = ["status = 'pending'", "(expires_at IS NULL OR expires_at >= ?)",
+      "COALESCE(json_extract(evidence_json, '$.schemaVersion'), 0) != 2"];
     const params: SqlValue[] = [input.now ?? nowIso()];
+    // Preserve the legacy shared candidate pool. Unified candidates use the
+    // separately scoped listUnifiedL2Candidates method below.
     if (input.candidateKey) {
       clauses.push("candidate_key = ?");
       params.push(input.candidateKey);
@@ -5106,6 +5781,106 @@ export class RuntimeRepository {
       )
       .all(...params, input.limit ?? 1000) as SqlCandidatePoolRow[];
     return rows.map(candidatePoolFromSql);
+  }
+
+  getUnifiedL2Candidate(id: string, userId: string): CandidatePoolRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l2_candidate_pool
+       WHERE id = ? AND user_id = ? AND json_extract(evidence_json, '$.schemaVersion') = 2`
+    ).get(id, userId) as SqlCandidatePoolRow | undefined;
+    return row ? candidatePoolFromSql(row) : undefined;
+  }
+
+  /** Keep a completed candidate completed on replay, and reopen it only for changed source evidence. */
+  upsertUnifiedL2Candidate(input: Omit<CandidatePoolRecord, "status" | "expiresAt">): void {
+    this.db.prepare(
+      `INSERT INTO l2_candidate_pool (
+        id, user_id, session_id, source_memory_id, candidate_key, candidate_value,
+        score, status, evidence_json, created_at, updated_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL)
+      ON CONFLICT(id) DO UPDATE SET
+        session_id = excluded.session_id,
+        candidate_key = excluded.candidate_key,
+        candidate_value = excluded.candidate_value,
+        score = excluded.score,
+        status = CASE
+          WHEN json_extract(l2_candidate_pool.evidence_json, '$.sourceVersion') =
+               json_extract(excluded.evidence_json, '$.sourceVersion')
+          THEN l2_candidate_pool.status ELSE 'pending' END,
+        evidence_json = excluded.evidence_json,
+        updated_at = excluded.updated_at,
+        expires_at = NULL
+      WHERE l2_candidate_pool.user_id = excluded.user_id
+        AND l2_candidate_pool.source_memory_id = excluded.source_memory_id`
+    ).run(input.id, input.userId, input.sessionId ?? null, input.sourceMemoryId,
+      input.candidateKey, input.candidateValue, input.score, toJson(input.evidence),
+      input.createdAt, input.updatedAt);
+  }
+
+  listUnifiedL2Candidates(input: {
+    userId: string;
+    episodeId: string | null;
+    limit?: number;
+  }): CandidatePoolRecord[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM l2_candidate_pool
+       WHERE user_id = ? AND status = 'pending'
+         AND json_extract(evidence_json, '$.schemaVersion') = 2
+         AND json_extract(evidence_json, '$.episodeId') IS ?
+       ORDER BY created_at ASC, id ASC LIMIT ?`
+    ).all(input.userId, input.episodeId, input.limit ?? -1) as SqlCandidatePoolRow[];
+    return rows.map(candidatePoolFromSql);
+  }
+
+  markUnifiedL2CandidateProcessed(input: {
+    id: string;
+    userId: string;
+    sourceVersion: string;
+    operations: unknown;
+    at: string;
+  }): boolean {
+    const result = this.db.prepare(
+      `UPDATE l2_candidate_pool
+       SET status = 'promoted', updated_at = ?,
+           evidence_json = json_set(evidence_json, '$.processedAt', ?, '$.operations', json(?))
+       WHERE id = ? AND user_id = ? AND status = 'pending'
+         AND json_extract(evidence_json, '$.schemaVersion') = 2
+         AND json_extract(evidence_json, '$.sourceVersion') = ?`
+    ).run(input.at, input.at, toJson(input.operations ?? null), input.id, input.userId, input.sourceVersion);
+    return result.changes === 1;
+  }
+
+  /** Remove withdrawn source text while retaining committed-operation idempotency tombstones. */
+  invalidateUnifiedL2Source(sourceMemoryId: string, userId: string, at = nowIso()): {
+    candidates: number;
+    snapshots: number;
+    operations: number;
+  } {
+    return this.db.transaction(() => {
+      const candidates = this.db.prepare(
+        `DELETE FROM l2_candidate_pool WHERE source_memory_id = ? AND user_id = ?
+         AND json_extract(evidence_json, '$.schemaVersion') = 2`
+      ).run(sourceMemoryId, userId).changes;
+      const snapshots = this.db.prepare(
+        `UPDATE runtime_kv
+         SET value_json = json_set(json_remove(value_json, '$.input', '$.operations'), '$.sourceInvalidatedAt', ?),
+             updated_at = ?
+         WHERE (${L2_EXTRACTION_SNAPSHOT_PREFIXES.map(() => "key LIKE ?").join(" OR ")})
+           AND json_extract(json_extract(value_json, '$.scope'), '$[0]') = ?
+           AND EXISTS (SELECT 1 FROM json_each(value_json, '$.input.L1_RECORDS') AS source
+                       WHERE json_extract(source.value, '$.id') = ?)`
+      ).run(at, at, ...L2_EXTRACTION_SNAPSHOT_PREFIXES.map(prefix => `${prefix}%`), userId, sourceMemoryId).changes;
+      const operations = this.db.prepare(
+        `UPDATE runtime_kv
+         SET value_json = json_set(json_remove(value_json, '$.operation'), '$.sourceInvalidatedAt', ?),
+             updated_at = ?
+         WHERE (${L2_EXTRACTION_OPERATION_PREFIXES.map(() => "key LIKE ?").join(" OR ")})
+           AND EXISTS (SELECT 1 FROM memories WHERE id = ? AND user_id = ?)
+           AND EXISTS (SELECT 1 FROM json_each(value_json, '$.operation.l1_ids') AS source
+                       WHERE source.value = ?)`
+      ).run(at, at, ...L2_EXTRACTION_OPERATION_PREFIXES.map(prefix => `${prefix}%`), sourceMemoryId, userId, sourceMemoryId).changes;
+      return { candidates, snapshots, operations };
+    })();
   }
 
   pruneCandidatePool(now = nowIso()): number {
@@ -5369,6 +6144,10 @@ export class RuntimeRepository {
       }>
     };
     this.db.transaction(() => {
+      const keptL3Units = this.existingL3Units(tables, conflictStrategy);
+      // Unfinished work of a kept unit that this database does not have: its Sessions' traces must be
+      // frozen again here, so their cursors are moved back below the first trace no batch here covers.
+      const droppedL3Work: Array<{ sessionId: string; startTraceSeq: number }> = [];
       const hadRuntimeData = Boolean(this.db.prepare(`SELECT EXISTS(
         SELECT 1 FROM memories UNION ALL SELECT 1 FROM sessions UNION ALL
         SELECT 1 FROM raw_turns UNION ALL SELECT 1 FROM source_turn_captures
@@ -5378,6 +6157,21 @@ export class RuntimeRepository {
         for (const row of rows) {
           const defaults = applyBundleDefaults(table, deserializeBundleRow(row));
           const normalized = table === "memory_change_log" ? compactHistoryChangeRow(defaults) : defaults;
+          const l3UnitKey = keptL3Units.size > 0 ? bundleRowL3UnitKey(table, normalized) : null;
+          if (l3UnitKey && keptL3Units.has(l3UnitKey)) {
+            if (table === "l3_unit_batches" && normalized.status !== "applied" && typeof normalized.id === "string" &&
+                !this.rowExists("l3_unit_batches", ["id"], [normalized.id]) &&
+                typeof normalized.session_id === "string" && typeof normalized.start_trace_seq === "number" &&
+                typeof normalized.end_trace_seq === "number") {
+              const unfrozen = this.firstUnfrozenL3Trace(normalized.session_id, normalized.start_trace_seq, normalized.end_trace_seq);
+              if (unfrozen !== null) droppedL3Work.push({ sessionId: normalized.session_id, startTraceSeq: unfrozen });
+            }
+            if (table === "l3_units") {
+              result.conflicts.push({ table, primaryKey: "unit_key", sourceId: l3UnitKey, targetId: l3UnitKey, action: "skipped" });
+            }
+            result.skipped[table] = (result.skipped[table] ?? 0) + 1;
+            continue;
+          }
           const identity = bundleIdentity(table, normalized);
           if (identity) {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
@@ -5435,10 +6229,33 @@ export class RuntimeRepository {
           }
         }
       }
+      const rewind = this.db.prepare(
+        `UPDATE l3_world_model_session_cursors SET last_scheduled_seq = MIN(last_scheduled_seq, ?) WHERE session_id = ?`
+      );
+      for (const work of droppedL3Work) rewind.run(work.startTraceSeq - 1, work.sessionId);
     })();
     this.scheduleLogTablesPrune();
     this.scheduleHistoryLogCompaction(true);
     return result;
+  }
+
+  /**
+   * Row-by-row conflict handling cannot keep an L3 unit consistent (an old item could stay active
+   * next to its imported successor), so a unit that already exists here is kept whole: the bundle's
+   * rows for it (unit, items, batches, jobs, snapshot) are all skipped, as re-importing one's own
+   * backup skips every other existing row. With conflictStrategy "error" the import fails instead.
+   */
+  private existingL3Units(tables: Record<string, unknown>, conflictStrategy: "skip" | "replace" | "error"): Set<string> {
+    const rows = Array.isArray(tables.l3_units) ? tables.l3_units as Array<Record<string, unknown>> : [];
+    const exists = this.db.prepare(`SELECT 1 FROM l3_units WHERE unit_key = ?`).pluck();
+    const kept = new Set<string>();
+    for (const row of rows) {
+      const unitKey = deserializeBundleRow(row).unit_key;
+      if (typeof unitKey !== "string" || !exists.get(unitKey)) continue;
+      if (conflictStrategy === "error") throw new Error(`import conflict: l3 unit already exists: ${unitKey}`);
+      kept.add(unitKey);
+    }
+    return kept;
   }
 
   private mergeSourceTurnActivation(
@@ -5465,6 +6282,28 @@ export class RuntimeRepository {
     return existing ? "replaced" : "inserted";
   }
 
+
+  /**
+   * The first trace in [start, end] that no batch of this database froze, or null when all were
+   * (an earlier import of the same bundle refroze them). A batch counts only if it froze the turn now
+   * at that position: a replace import can put another turn there, which a batch reading its frozen
+   * ids would leave out.
+   */
+  private firstUnfrozenL3Trace(sessionId: string, start: number, end: number): number | null {
+    const covered = this.db.prepare(
+      `SELECT EXISTS(
+         SELECT 1 FROM l3_world_model_input_traces t JOIN l3_unit_batches b
+           ON b.session_id = t.session_id AND b.start_trace_seq <= t.trace_seq AND b.end_trace_seq >= t.trace_seq
+         WHERE t.session_id = ? AND t.trace_seq = ?
+           AND EXISTS(SELECT 1 FROM json_each(b.l1_memory_ids_json) WHERE value = t.l1_memory_id)
+           AND EXISTS(SELECT 1 FROM json_each(b.raw_turn_ids_json) WHERE value = t.raw_turn_id)
+       )`
+    ).pluck();
+    for (let seq = start; seq <= end; seq += 1) {
+      if (!covered.get(sessionId, seq)) return seq;
+    }
+    return null;
+  }
   private rowExists(table: BundleTableName, columns: string[], values: Array<string | number>): boolean {
     const tableColumns = this.tableColumns(table);
     if (columns.length === 0 || columns.some((column) => !tableColumns.includes(column))) {
@@ -5567,10 +6406,44 @@ export class L3WorldModelScopeWorkspaceConflictError extends Error {
 }
 
 export class L3WorldModelRepository {
+  /** When it returns a machine id, frozen batches go to the new L3 (field cognition) instead. */
+  private fieldCognitionMachineId?: () => string | null;
+
   constructor(
     private readonly db: Database.Database,
-    private readonly memories: MemoryRepository
+    private readonly memories: MemoryRepository,
+    private readonly l3Field?: L3FieldRepository
   ) {}
+
+  routeBatchesToFieldCognition(machineId: () => string | null): void {
+    this.fieldCognitionMachineId = machineId;
+  }
+
+  /** v2 Sessions holding captured turns that were never frozen into a batch, with their last activity. */
+  sessionsWithUnfrozenTurns(): Array<{ sessionId: string; open: boolean; lastActivityAt: string }> {
+    return (this.db.prepare(
+      `SELECT s.id AS sessionId, s.status = 'open' AS open, t.last_at AS lastActivityAt FROM sessions AS s
+       JOIN (SELECT session_id, MAX(trace_seq) AS last_seq, MAX(created_at) AS last_at
+             FROM l3_world_model_input_traces GROUP BY session_id) AS t
+         ON t.session_id = s.id
+       LEFT JOIN l3_world_model_session_cursors AS c ON c.session_id = s.id
+       WHERE json_extract(s.meta_json, '$.l3_world_model_protocol_version') = 2
+         AND t.last_seq > COALESCE(c.last_scheduled_seq, 0)`
+    ).all() as Array<{ sessionId: string; open: number; lastActivityAt: string }>)
+      .map((row) => ({ ...row, open: row.open === 1 }));
+  }
+
+  /**
+   * New L3 only: hand a closed task's turns to L3. Called wherever a task closes, so a conversation that
+   * simply stops (idle, or the user ended the topic) still reaches L3; what is already frozen is skipped.
+   * With the switch off nothing changes.
+   */
+  freezeClosedTask(input: { sessionId: string; episodeId: string; trigger: L3WorldModelBatchTrigger; at?: string }): void {
+    if (!this.l3Field || !this.fieldCognitionMachineId?.()) return;
+    const row = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(input.sessionId) as SqlSessionRow | undefined;
+    if (!row || sessionFromSql(row).meta.l3_world_model_protocol_version !== 2) return;
+    this.freezeBatches({ sessionId: input.sessionId, trigger: input.trigger, episodeId: input.episodeId, at: input.at });
+  }
 
   getScope(userId: string, projectId?: string | null): L3WorldModelScopeRecord | undefined {
     const row = this.db.prepare(
@@ -5659,6 +6532,34 @@ export class L3WorldModelRepository {
       episodeId: input.episodeId ?? undefined,
       createdAt
     };
+  }
+
+  /** Register retained native-scan history on its existing IDs when its Session first adopts v2. */
+  backfillSourceInputTraces(sessionId: string): number {
+    const session = this.requireV2Session(sessionId);
+    // Keep L1 outermost: resolve each retained raw-turn reference by ID, not every L1 per raw turn.
+    // A migrated capture ledger may retain the submitting account; the Session, raw turn and L1
+    // keep the original owner. Match native identity plus raw/session IDs without rewriting provenance.
+    const rows = this.db.prepare(
+      `SELECT DISTINCT r.id AS rawTurnId, r.episode_id AS episodeId, r.created_at AS createdAt, m.id AS l1MemoryId
+       FROM memories m
+       CROSS JOIN raw_turns r ON r.id IN (json_extract(m.info_json, '$.raw_turn_id'), json_extract(m.properties_json, '$.internal_info.trace.raw_turn_id'))
+         AND r.session_id = m.session_id AND r.user_id = m.user_id
+       CROSS JOIN source_turn_captures c ON c.source = ? AND c.profile_id = ?
+         AND c.namespace_key = ? AND c.conversation_id = ? AND c.turn_id = r.turn_id
+         AND c.raw_turn_id = r.id AND c.session_id = r.session_id
+       WHERE m.session_id = ? AND m.user_id = ? AND m.memory_layer = 'L1'
+         AND r.deleted_at IS NULL AND r.redacted_at IS NULL
+         AND m.deleted_at IS NULL AND m.status != 'deleted'
+         AND json_extract(m.properties_json, '$.internal_info.capture_decision.status') IS NOT 'rejected'
+         AND NOT EXISTS (SELECT 1 FROM l3_world_model_input_traces t WHERE t.session_id = r.session_id AND t.l1_memory_id = m.id)
+       ORDER BY r.created_at, r.id, m.created_at, m.id`
+    ).all(session.source, session.profileId, session.meta.source_namespace_key ?? null,
+      session.conversationId ?? session.hostSessionKey ?? null, session.id, session.userId) as Array<{
+      rawTurnId: string; episodeId: string | null; createdAt: string; l1MemoryId: string;
+    }>;
+    for (const row of rows) this.registerInputTrace({ sessionId, ...row });
+    return rows.length;
   }
 
   traceHead(sessionId: string): L3WorldModelTraceHeadResponse {
@@ -5956,13 +6857,20 @@ export class L3WorldModelRepository {
   }
 
   insertImmutableJob(job: EvolutionJobRecord): EvolutionJobRecord {
-    if (job.jobType !== "l3_world_model_update" && job.jobType !== "project_environment_profile") {
+    if (
+      job.jobType !== "l3_world_model_update" &&
+      job.jobType !== "project_environment_profile" &&
+      job.jobType !== "l3_unit_update"
+    ) {
       throw new TypeError("immutable L3 job must use an L3 World Model job type");
     }
     if (!job.dedupeKey) {
       throw new TypeError("immutable L3 job requires dedupeKey");
     }
-    if (job.jobType === "l3_world_model_update" && (!job.scopeKey || job.scopeSeq === undefined)) {
+    if (
+      (job.jobType === "l3_world_model_update" || job.jobType === "l3_unit_update") &&
+      (!job.scopeKey || job.scopeSeq === undefined)
+    ) {
       throw new TypeError("L3 field update job requires scopeKey and scopeSeq");
     }
     if (job.jobType === "project_environment_profile" && (job.scopeKey || job.scopeSeq !== undefined)) {
@@ -5995,6 +6903,43 @@ export class L3WorldModelRepository {
     return job;
   }
 
+  /** One new-L3 batch per chunk, run in order per machine through the l3_unit_update FIFO. */
+  private freezeL3UnitBatch(
+    session: SessionRecord,
+    machineId: string,
+    trigger: L3WorldModelBatchTrigger,
+    chunk: readonly L3WorldModelInputTraceRecord[],
+    at: string
+  ): string {
+    const batch = this.l3Field!.freezeUnitBatch({
+      userId: session.userId,
+      machineId,
+      sessionId: session.id,
+      trigger,
+      startTraceSeq: chunk[0]!.traceSeq,
+      endTraceSeq: chunk.at(-1)!.traceSeq,
+      l1MemoryIds: chunk.map((trace) => trace.l1MemoryId),
+      rawTurnIds: [...new Set(chunk.map((trace) => trace.rawTurnId))],
+      at
+    });
+    this.insertImmutableJob({
+      id: newId("job"),
+      jobType: "l3_unit_update",
+      status: "queued",
+      dedupeKey: `l3_unit_update:${batch.id}`,
+      userId: session.userId,
+      sessionId: session.id,
+      scopeKey: batch.machineUnitKey,
+      scopeSeq: batch.scopeSeq,
+      payload: { batchId: batch.id },
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: at,
+      updatedAt: at
+    });
+    return batch.id;
+  }
+
   private freezeBatchesInTransaction(input: {
     sessionId: string;
     trigger: L3WorldModelBatchTrigger;
@@ -6003,6 +6948,11 @@ export class L3WorldModelRepository {
     at?: string;
   }): FreezeL3WorldModelBatchesResult {
     const session = this.requireV2Session(input.sessionId);
+    // Scanned history only ever goes to the new L3. While it is off (switched off after the scan), the
+    // turns wait without moving the cursor, so they reach the new L3 once it is on again.
+    if (session.meta.work_memory_disabled === true && !(this.l3Field && this.fieldCognitionMachineId?.())) {
+      return { scheduled: false, batchIds: [], targetCount: 0 };
+    }
     const at = input.at ?? nowIso();
     this.db.prepare(
       `INSERT INTO l3_world_model_session_cursors (session_id, last_scheduled_seq, updated_at)
@@ -6059,6 +7009,21 @@ export class L3WorldModelRepository {
     }
 
     const chunks = splitL3TracesByRawTurn(traces, 20);
+    const fieldMachineId = this.l3Field ? this.fieldCognitionMachineId?.() ?? null : null;
+    if (fieldMachineId) {
+      const batchIds = chunks.map((chunk) => this.freezeL3UnitBatch(session, fieldMachineId, input.trigger, chunk, at));
+      this.db.prepare(
+        `UPDATE l3_world_model_session_cursors
+         SET last_scheduled_seq = ?, updated_at = ? WHERE session_id = ?`
+      ).run(endTraceSeq, at, session.id);
+      return {
+        scheduled: true,
+        throughL1MemoryId: traces.at(-1)?.l1MemoryId,
+        throughTraceSeq: endTraceSeq,
+        batchIds,
+        targetCount: batchIds.length
+      };
+    }
     const scope = this.ensureScope(session.userId, session.projectId, at);
     const batchIds: string[] = [];
     let targetCount = 0;
@@ -6531,6 +7496,7 @@ export class Repositories {
   readonly processing: MemoryProcessingRepository;
   readonly runtime: RuntimeRepository;
   readonly l3WorldModels: L3WorldModelRepository;
+  readonly l3Field: L3FieldRepository;
   readonly projectEnvironments: ProjectEnvironmentRepository;
   readonly vectors: SqliteVecStore;
 
@@ -6541,8 +7507,79 @@ export class Repositories {
     this.userMemories = new UserMemoryRepository(db);
     this.processing = new MemoryProcessingRepository(db);
     this.runtime = new RuntimeRepository(db);
-    this.l3WorldModels = new L3WorldModelRepository(db, this.memories);
+    this.l3Field = new L3FieldRepository(db, this.memories);
+    this.l3WorldModels = new L3WorldModelRepository(db, this.memories, this.l3Field);
     this.projectEnvironments = new ProjectEnvironmentRepository(db, this.l3WorldModels, this.runtime);
+  }
+
+  /** Explicit authorization wins; legacy row evidence remains authoritative until migrated. */
+  isAgentSkillSourceDisconnected(sourceAgentId: string): boolean {
+    return agentSkillSourceDisconnected(this.db, sourceAgentId);
+  }
+
+  /** Shared source gate for candidates and all embedding queues; reload after await. */
+  isImportedSkillEligibleForEmbedding(memory: MemoryRow): boolean {
+    return importedSkillSourceEligible(this.db, memory);
+  }
+
+  /** Returns only Skill vector targets that belong to ineligible imported Skills or plugin registrations. */
+  ineligibleImportedSkillVectorIds(ids: readonly string[]): Set<string> {
+    const out = new Set<string>();
+    const unique = [...new Set(ids)];
+    for (let offset = 0; offset < unique.length; offset += 500) {
+      const batch = unique.slice(offset, offset + 500);
+      if (batch.length === 0) continue;
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM memories
+           WHERE memory_layer = 'Skill'
+             AND id IN (${batch.map(() => "?").join(", ")})`
+        )
+        .all(...batch) as MemorySqlRow[];
+      for (const sqlRow of rows) {
+        const memory = memoryFromSql(sqlRow);
+        if (
+          memory.properties.internal_info.source_kind === "plugin"
+          || (isImportedSkill(memory) && !this.isImportedSkillEligibleForEmbedding(memory))
+        ) {
+          out.add(memory.id);
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Call with a freshly loaded row at async and response-cache boundaries. */
+  isImportedSkillEligibleForRecall(memory: MemoryRow, currentAgentId?: string): boolean {
+    return importedSkillEligibleForRecall(this.db, memory, currentAgentId);
+  }
+
+  /** Projects cold imported skills without mutating SQLite, redacting restricted bodies. */
+  projectMemoryForRead(memory: MemoryRow): MemoryRow {
+    if (!isImportedSkill(memory)) return memory;
+    const resolved = hasImportedSkillCollisionHistory(this.db, memory)
+      ? this.memories.resolveLegacyImportedSkillVersion(memory)
+      : memory;
+    const sourceAgentId = String(resolved.properties.internal_info.source_agent_id ?? "");
+    const sourceState = importedSkillSourceState(resolved);
+    if (agentSkillSourceDisconnected(this.db, sourceAgentId)
+      || hasRestrictedImportedSkillContent(resolved)
+      || hasUnobservedCodexSkillPolicy(resolved)
+      || isUnverifiedLegacySkillCollision(resolved)
+      || sourceState === "disconnected"
+      || sourceState === "invocation_policy"
+      || sourceState === "policy_unknown"
+      || sourceState === "scan_pending"
+      || sourceState === "source_review_pending") {
+      return stripImportedSkillBody(resolved, memory.updatedAt);
+    }
+    return resolved;
+  }
+
+  /** Scanned installation identity survives deleting its imported memory. */
+  listInstalledSkillNamesForAgent(sourceAgentId: string): Set<string> {
+    const inventory = this.memories.resolvedSkillInstallationsForAgent(sourceAgentId);
+    return new Set([...inventory.skills, ...inventory.registrations].map(entry => entry.normalizedName));
   }
 
   transaction<T>(fn: () => T): T {
@@ -6563,10 +7600,29 @@ export class Repositories {
     this.db.pragma("foreign_keys = OFF");
     try {
       return this.db.transaction(() => {
+        // Clearing memory must not grant a source authorization. Before removing
+        // unmigrated rows, promote their disconnect evidence to the independent
+        // authority that this operation already preserves. Explicit reconnects win.
+        const legacySources = this.db.prepare(`SELECT DISTINCT
+            ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} AS sourceAgentId
+          FROM memories WHERE memory_layer = 'Skill'
+            AND json_extract(properties_json, '$.internal_info.read_only') = 1
+            AND (json_extract(properties_json, '$.internal_info.archive_reason') = 'disconnected'
+              OR json_extract(properties_json, '$.internal_info.source_state') = 'disconnected')`)
+          .all() as Array<{ sourceAgentId: string | null }>;
+        for (const { sourceAgentId } of legacySources) {
+          if (!sourceAgentId) continue;
+          const key = agentSkillConnectionKey(sourceAgentId);
+          const explicit = this.runtime.getKv(key)?.value;
+          if (explicit !== "connected" && explicit !== "disconnected" && this.isAgentSkillSourceDisconnected(sourceAgentId)) {
+            this.runtime.setKv(key, "disconnected");
+          }
+        }
         const cleared: Record<string, number> = {};
         for (const table of tables) {
           if (table === "runtime_kv") {
-            cleared[table] = this.db.prepare(`DELETE FROM runtime_kv WHERE key != 'source_turn_capture_activated_at'`).run().changes;
+            cleared[table] = this.db.prepare(`DELETE FROM runtime_kv WHERE key != 'source_turn_capture_activated_at'
+              AND key NOT LIKE 'agent-skill-connection:%'`).run().changes;
           } else {
             cleared[table] = this.db.prepare(`DELETE FROM "${table}"`).run().changes;
           }
@@ -7110,10 +8166,28 @@ function listMetricsForMemory(memory: MemoryRow): MemoryListItem["metrics"] | un
     return undefined;
   }
 
+  // Capture/import initializes both scores to zero before reflection and reward.
+  // Preserve genuine zero results: reward evidence and reflection are independent.
+  const isTrace = kindFromMemory(memory) === "trace";
+  const rewardRecorded = numberMetric(trace.r_human) !== undefined
+    || numberMetric(internal.r_human) !== undefined
+    || numberMetric(memory.info.r_human) !== undefined;
+  const reflectionRecorded = Boolean(reflection)
+    || typeof trace.reflection_scored_at === "string";
+  // Older plugin imports discarded r_human. Missing historical evidence must not
+  // hide a completed zero. New imports explicitly preserve null for no reward.
+  const legacyImport = recordValue(internal.legacy_import);
+  const historicalReflectedImport = Boolean(reflection)
+    && ["openclaw", "hermes", "dsh"].includes(String(legacyImport.source))
+    && typeof legacyImport.source_id === "string"
+    && trace.r_human === undefined;
+
   return {
     ...(value === undefined ? {} : { value }),
     ...(alpha === undefined ? {} : { alpha }),
-    reflectionDone: Boolean(reflection)
+    reflectionDone: Boolean(reflection),
+    ...(isTrace && value === 0 && !rewardRecorded && !historicalReflectedImport ? { valuePending: true } : {}),
+    ...(isTrace && alpha === 0 && !reflectionRecorded && !rewardRecorded ? { alphaPending: true } : {})
   };
 }
 
@@ -7362,6 +8436,11 @@ function normalizedAgentIdSql(column: string): string {
   return `lower(replace(replace(TRIM(${column}), '-', '_'), ' ', '_'))`;
 }
 
+/** Imported-source matching shares the exact canonical TypeScript normalization. */
+function importedSkillAgentIdSql(column: string): string {
+  return `memmy_imported_skill_agent_id(${column})`;
+}
+
 /** Keep the narrow stats projection and panel filters aligned with panelSourceForMemory. */
 function memoryDisplayedSourceSql(fallback: string): string {
   const candidate = "$.internal_info.external_evidence_candidate";
@@ -7432,8 +8511,44 @@ function layerWeight(layer: MemoryLayer): number {
   }
 }
 
-function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlValue[] } {
-  const clauses = ["deleted_at IS NULL"];
+// Plugin skill registrations only record which skills an Agent already has;
+// they are never listed, counted or searched as memories.
+const NOT_PLUGIN_REGISTRATION_SQL = "NOT (memory_layer = 'Skill' AND COALESCE(json_extract(properties_json, '$.internal_info.source_kind'), '') = 'plugin')";
+
+function ineligibleColdCollisionSkillIds(db: Database.Database): string[] {
+  const candidates = db
+    .prepare(
+      `SELECT memories.*
+       FROM memories
+       WHERE memories.deleted_at IS NULL
+         AND memories.memory_layer = 'Skill'
+         AND memories.status IN ('activated', 'resolving')
+         AND EXISTS (
+           SELECT 1 FROM memory_change_log AS h
+           WHERE h.memory_id = memories.id
+             AND h.change_type IN ('legacy_manual_supersession_repaired', 'read_only_skill_superseded')
+         )`
+    )
+    .all() as MemorySqlRow[];
+  if (candidates.length === 0) return [];
+  const repo = new MemoryRepository(db, new SqliteVecStore(db));
+  return candidates
+    .map(memoryFromSql)
+    .filter((row) => isImportedSkill(row) && !importedSkillMayEmbed(repo.resolveLegacyImportedSkillVersion(row)))
+    .map((row) => row.id);
+}
+
+function filterIncludesSkillLayer(layer: MemoryFilter["memoryLayer"]): boolean {
+  if (layer === undefined) return true;
+  return Array.isArray(layer) ? layer.includes("Skill") : layer === "Skill";
+}
+
+function buildMemoryWhere(filter: MemoryFilter, db?: Database.Database): { where: string; params: SqlValue[] } {
+  const includesSkillLayer = filterIncludesSkillLayer(filter.memoryLayer);
+  const clauses = [
+    "deleted_at IS NULL",
+    ...(includesSkillLayer ? [NOT_PLUGIN_REGISTRATION_SQL] : [])
+  ];
   const params: SqlValue[] = [];
 
   addValueClause("user_id", filter.userId);
@@ -7445,15 +8560,52 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addRangeClause("created_at", "<", filter.createdAtLt);
   addArrayClause("memory_layer", filter.memoryLayer);
   addArrayClause("status", filter.status);
-  addArrayClause("id", filter.ids);
+  addArrayClause("memories.id", filter.ids);
   addMemoryKindClause(filter.memoryKind);
+  addMemoryKindClause(filter.excludedMemoryKinds, true);
   addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
+  if (filter.importedSkillsMode === "only") {
+    if (!includesSkillLayer) {
+      clauses.push("0 = 1");
+    } else {
+      clauses.push("memory_layer = 'Skill'");
+      clauses.push("memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1");
+    }
+  } else if (filter.importedSkillsMode === "exclude" && includesSkillLayer) {
+    clauses.push("NOT (memory_layer = 'Skill' AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1)");
+  }
+  if (includesSkillLayer) {
+    addImportedSkillSourceExclusion(filter.excludedImportedSkillSourceAgentId);
+  }
+  if (filter.eligibleImportedSkillsOnly && includesSkillLayer) {
+    clauses.push(`CASE WHEN memory_layer = 'Skill'
+      AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+      THEN memmy_imported_skill_eligible(memories.properties_json, memories.info_json, memories.tags_json, memories.memory_key, memories.memory_value, memories.status, memories.deleted_at) = 1
+        AND NOT (${agentSkillSourceDisconnectedSql("json_extract(memories.properties_json, '$.internal_info.source_agent_id')")})
+      ELSE 1 END`);
+    if (db) {
+      const ineligibleIds = ineligibleColdCollisionSkillIds(db);
+      if (ineligibleIds.length > 0) {
+        clauses.push("memories.id NOT IN (SELECT value FROM json_each(?))");
+        params.push(JSON.stringify(ineligibleIds));
+      }
+    }
+  }
 
   return {
     where: clauses.join(" AND "),
     params
   };
+
+  function addImportedSkillSourceExclusion(sourceAgentId: string | undefined): void {
+    const normalized = sourceAgentId ? normalizeAgentIdKey(sourceAgentId) : undefined;
+    if (!normalized) return;
+    clauses.push(`NOT (memory_layer = 'Skill'
+      AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
+      AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?)`);
+    params.push(normalized);
+  }
 
   function addValueClause(column: string, value: string | undefined): void {
     if (value === undefined) {
@@ -7498,7 +8650,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     params.push(...values);
   }
 
-  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined): void {
+  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined, exclude = false): void {
     if (value === undefined) return;
     const values = Array.isArray(value) ? value : [value];
     if (values.length === 0) return;
@@ -7512,7 +8664,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
         ELSE 'trace'
       END
     )`;
-    clauses.push(`${expression} IN (${values.map(() => "?").join(", ")})`);
+    clauses.push(`${expression} ${exclude ? "NOT IN" : "IN"} (${values.map(() => "?").join(", ")})`);
     params.push(...values);
   }
 
@@ -8442,6 +9594,31 @@ interface BundleIdentity {
   values: Array<string | number>;
 }
 
+/** The new-L3 unit a bundle row belongs to, for the tables that hold one unit's state. */
+function bundleRowL3UnitKey(table: string, row: Record<string, unknown>): string | null {
+  const record = (value: unknown): Record<string, unknown> => {
+    const parsed = typeof value === "string" ? parseJson<unknown>(value, {}) : value;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  };
+  const text = (value: unknown) => (typeof value === "string" && value ? value : null);
+  switch (table) {
+    case "l3_units":
+    case "l3_items":
+      return text(row.unit_key);
+    case "l3_unit_batches":
+      return text(row.machine_unit_key);
+    case "evolution_jobs": {
+      if (row.job_type === "l3_unit_update") return text(row.scope_key);
+      const payload = record(row.payload_json);
+      return row.job_type === "project_environment_profile" && payload.mode === "l3_field" ? text(payload.unitKey) : null;
+    }
+    case "memories":
+      return text(record(record(record(row.properties_json).internal_info).l3_field).unit_key);
+    default:
+      return null;
+  }
+}
+
 function bundleIdentity(
   table: BundleTableName,
   row: Record<string, unknown>
@@ -8455,7 +9632,9 @@ function bundleIdentity(
     l3_world_model_input_traces: ["session_id", "trace_seq"],
     l3_world_model_evidence_batches: ["id"],
     l3_world_model_batch_targets: ["batch_id", "target_field"],
-    l3_world_model_project_environment_state: ["user_id", "project_id"]
+    l3_world_model_project_environment_state: ["user_id", "project_id"],
+    l3_units: ["unit_key"],
+    l3_user_projects: ["user_id", "root_path"]
   };
   const newColumns = newTableIdentityColumns[table];
   if (newColumns) {
@@ -8548,9 +9727,15 @@ function normalizeRedactedL3WorldModelBundle(
     .filter((row) => terminalBatchIds.has(String(row.batch_id)));
   tables.evolution_jobs = (tables.evolution_jobs ?? []).filter((row) => {
     const jobType = row.job_type;
-    if (jobType !== "l3_world_model_update" && jobType !== "project_environment_profile") return true;
+    if (
+      jobType !== "l3_world_model_update" &&
+      jobType !== "project_environment_profile" &&
+      jobType !== "l3_unit_update"
+    ) return true;
     return row.status === "succeeded" || row.status === "dead_letter";
   });
+  // Unfinished unit batches depend on raw text that a redacted bundle no longer carries.
+  tables.l3_unit_batches = (tables.l3_unit_batches ?? []).filter((row) => row.status === "applied");
   tables.l3_world_model_project_environment_state = (
     tables.l3_world_model_project_environment_state ?? []
   ).map((row) => ({
@@ -8608,6 +9793,13 @@ function deserializeBundleRow(row: Record<string, unknown>): Record<string, unkn
 }
 
 function applyBundleDefaults(table: BundleTableName, row: Record<string, unknown>): Record<string, unknown> {
+  if (table === "evolution_jobs" || table === "embedding_retry_queue") {
+    // A queue position belongs to the database it was taken in: an imported row is numbered on
+    // insert, after what is already queued here, instead of colliding with (or, on replace,
+    // displacing) a local row that holds the same number.
+    const { enqueue_seq: _sourcePosition, ...rest } = row;
+    return rest;
+  }
   if (table === "sessions" && row.last_seen_at === undefined) {
     return {
       ...row,
@@ -8739,7 +9931,7 @@ function evolutionJobPrioritySql(): string {
              WHEN job_type = 'l2_association' THEN 40
              WHEN job_type = 'l2_induction' THEN 50
              WHEN job_type = 'project_environment_profile' THEN 55
-             WHEN job_type IN ('l3_abstraction', 'l3_world_model_update') THEN 60
+             WHEN job_type IN ('l3_abstraction', 'l3_world_model_update', 'l3_unit_update') THEN 60
              WHEN job_type = 'skill_crystallization' THEN 70
              WHEN job_type = 'skill_cluster_assign' THEN 72
              WHEN job_type = 'skill_batch_evolve' THEN 73
@@ -8800,4 +9992,111 @@ export function jobToRef(job: EvolutionJobRecord): JobRef {
     status: job.status,
     targetMemoryId: job.targetMemoryId
   };
+}
+
+/** SQL and row consumers share connection precedence without recursive SQLite calls. */
+function agentSkillSourceDisconnectedSql(sourceAgentIdExpression: string): string {
+  const normalized = importedSkillAgentIdSql(sourceAgentIdExpression);
+  return `CASE (SELECT CASE WHEN json_valid(value_json) THEN json_extract(value_json, '$') END
+    FROM runtime_kv WHERE key = 'agent-skill-connection:' || ${normalized})
+    WHEN 'connected' THEN 0 WHEN 'disconnected' THEN 1
+    ELSE EXISTS(SELECT 1 FROM memories AS source_connection_evidence
+      WHERE source_connection_evidence.memory_layer = 'Skill'
+        AND json_extract(source_connection_evidence.properties_json, '$.internal_info.read_only') = 1
+        AND ${importedSkillAgentIdSql("json_extract(source_connection_evidence.properties_json, '$.internal_info.source_agent_id')")} = ${normalized}
+        AND (json_extract(source_connection_evidence.properties_json, '$.internal_info.archive_reason') = 'disconnected'
+          OR json_extract(source_connection_evidence.properties_json, '$.internal_info.source_state') = 'disconnected')) END`;
+}
+
+function agentSkillSourceDisconnected(db: Database.Database, sourceAgentId: string): boolean {
+  const row = db.prepare(`SELECT ${agentSkillSourceDisconnectedSql("@sourceAgentId")} AS disconnected`)
+    .get({ sourceAgentId }) as { disconnected: number };
+  return row.disconnected === 1;
+}
+
+function hasImportedSkillCollisionHistory(db: Database.Database, memory: MemoryRow): boolean {
+  const internal = memory.properties.internal_info;
+  if (typeof internal.superseded_by_skill_id === "string" || internal.source_review_required === true) return true;
+  if (internal.source_kind === "skill" && typeof internal.source_skill_id === "string" && internal.source_skill_id === internal.turn_id) {
+    return true;
+  }
+  return Boolean(
+    db.prepare(
+      `SELECT 1 FROM memory_change_log
+       WHERE memory_id = ? AND change_type IN ('legacy_manual_supersession_repaired', 'read_only_skill_superseded')
+       LIMIT 1`
+    ).get(memory.id)
+  );
+}
+
+function importedSkillSourceEligible(db: Database.Database, memory: ImportedSkillEligibilityMemory): boolean {
+  if (!isImportedSkill(memory)) return true;
+  if (!importedSkillMayEmbed(memory)) return false;
+  if (agentSkillSourceDisconnected(db, String(memory.properties.internal_info.source_agent_id ?? ""))) return false;
+  if ("id" in memory && typeof (memory as Partial<MemoryRow>).id === "string" && hasImportedSkillCollisionHistory(db, memory as MemoryRow)) {
+    const resolved = new MemoryRepository(db, new SqliteVecStore(db)).resolveLegacyImportedSkillVersion(memory as MemoryRow);
+    if (!importedSkillMayEmbed(resolved)) return false;
+  }
+  return true;
+}
+
+function importedSkillEligibleForRecall(db: Database.Database, memory: MemoryRow, currentAgentId?: string): boolean {
+  if (!isImportedSkill(memory)) return true;
+  const internal = memory.properties.internal_info;
+  const sourceAgentId = typeof internal.source_agent_id === "string" ? internal.source_agent_id.trim() : "";
+  if (!importedSkillSourceEligible(db, memory)) return false;
+  if (!currentAgentId) return true;
+  if (normalizeAgentIdKey(sourceAgentId) === normalizeAgentIdKey(currentAgentId)) return false;
+  const installations = new MemoryRepository(db, new SqliteVecStore(db)).resolvedSkillInstallationsForAgent(currentAgentId);
+  return ![...installations.skills, ...installations.registrations].some(entry => entry.normalizedName === importedSkillName(memory));
+}
+
+const SKILL_BODY_KEYS = new Set([
+  "memoryValue",
+  "memory_value",
+  "invocation_guide",
+  "invocationGuide",
+  "procedure_json",
+  "procedureJson",
+  "content",
+  "snippet",
+  "sourceText",
+  "source_text",
+  "summary",
+  "description",
+  "skill_description",
+  "blurb",
+  "retrievalBlurb",
+  "retrieval_previous",
+  "steps",
+  "trigger"
+]);
+
+/** Blanks every skill-body field of a value, at any depth. */
+function redactSkillBody<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => redactSkillBody(item)) as T;
+  if (!isRecordLike(value)) return value;
+  const next: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    next[key] = SKILL_BODY_KEYS.has(key) ? (typeof child === "string" ? "" : null) : redactSkillBody(child);
+  }
+  return next as T;
+}
+
+function redactSkillBodyJson(json: string | null): string | null {
+  if (json === null) return null;
+  try {
+    return JSON.stringify(redactSkillBody(JSON.parse(json) as unknown));
+  } catch {
+    return json;
+  }
+}
+
+function parseJsonRecord(json: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return isRecordLike(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }

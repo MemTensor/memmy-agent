@@ -8,7 +8,8 @@ import { applySidebarRecordingAction, sidebarRecordingStatus } from "./recording
 import { pendingAgentQuestion, AgentQuestionCard, AgentQuestionActiveRequestContext } from "./agent-question-card.js";
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
-import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
+import type { AgentGatewayStartupIssue, RecordingStart } from "@memmy/local-api-contracts";
+import { AgentTaskRecordingOption, TaskRecordingsPanel } from "./memory/task-recordings.js";
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
@@ -313,6 +314,7 @@ export interface SubmitAgentComposerMessageInput {
   ensureChatSubscription?: (chatId: string) => void;
   content: string;
   displayContent?: string;
+  taskRecording?: RecordingStart;
   language?: MemmyAgentUiLanguage;
   pendingAttachments: PendingAttachment[];
   uploadAgentMedia: (attachments: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
@@ -373,8 +375,12 @@ export function isAgentConversationAtBottom(element: Pick<HTMLElement, "scrollTo
   return element.scrollTop + element.clientHeight >= element.scrollHeight - AGENT_CONVERSATION_BOTTOM_EPSILON_PX;
 }
 
-export function hasActiveAgentConversation(currentChatId: string | null, messageCount: number): boolean {
-  return Boolean(currentChatId) && messageCount > 0;
+export function hasActiveAgentConversation(
+  currentChatId: string | null,
+  messageCount: number,
+  hasFeatureActivity = false
+): boolean {
+  return Boolean(currentChatId) && (messageCount > 0 || hasFeatureActivity);
 }
 
 export function shouldAcceptAgentStatusResult(input: {
@@ -679,11 +685,11 @@ export function thinkingPayloadForSend(
 ): { thinkingEnabled?: boolean; thinkingLevel?: string | null } {
   const config = resolveThinkingConfigForModel(workspace, candidate);
   if (!config) return {};
-  const thinkingEnabled = resolveThinkingEnabled(config, sessionThinking?.enabled);
-  const thinkingLevel = thinkingEnabled
-    ? resolveThinkingLevel(config, sessionThinking?.level)
-    : null;
-  return { thinkingEnabled, thinkingLevel };
+  // Runtime resolves defaults and validates saved choices against its own turn snapshot.
+  return {
+    ...(sessionThinking?.enabled !== undefined ? { thinkingEnabled: sessionThinking.enabled } : {}),
+    ...(sessionThinking?.level !== undefined ? { thinkingLevel: sessionThinking.level } : {})
+  };
 }
 
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
@@ -785,6 +791,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     webui: true,
     queue_surface: "chat_composer",
     client_request_id: clientRequestId,
+    ...(input.taskRecording ? { task_recording: input.taskRecording } : {}),
     ...(capturedTarget ? { target: capturedTarget } : {}),
     ...(input.language ? { language: input.language } : {}),
     ...(confirmedModelPreset !== undefined ? { model_preset: confirmedModelPreset } : {}),
@@ -810,6 +817,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
       chatId,
       content: text,
       clientRequestId,
+      ...(input.taskRecording ? { taskRecording: input.taskRecording } : {}),
       ...(capturedTarget ? { target: capturedTarget } : {}),
       ...(input.language ? { language: input.language } : {}),
       ...(confirmedModelPreset !== undefined ? { modelPreset: confirmedModelPreset } : {}),
@@ -925,6 +933,7 @@ export function HomePage() {
   const slashCommandsRetryTimerRef = useRef<number | null>(null);
   const slashCommandsAttemptRef = useRef(0);
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
+  const [taskRecording, setTaskRecording] = useState<RecordingStart | null>(null);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [selectedComposerCommandsByScope, setSelectedComposerCommandsByScope] = useState<Record<string, typeof COMPOSER_GOAL_COMMAND>>({});
   const [recentSlashCommands, setRecentSlashCommands] = useState<string[]>(() => readRecentSlashCommands());
@@ -967,12 +976,14 @@ export function HomePage() {
   const stopRequestLocksRef = useRef<Set<string>>(new Set());
   const goalMutationLocksRef = useRef<Set<string>>(new Set());
   const messageSendLocksRef = useRef<Set<string>>(new Set());
+  const pluginConversationCreationRef = useRef<Promise<string | null> | null>(null);
   const queueRemoveLocksRef = useRef<Set<string>>(new Set());
   const queueSteerLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+  useEffect(() => { setTaskRecording(null); }, [chatScopeKey]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const pendingModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey];
@@ -1061,22 +1072,81 @@ export function HomePage() {
     && isSteerableCurrentTurn(currentActiveTurnSource, Boolean(isCurrentGoalActive))
     && !currentQueuedMessages.some((item) => item.status === "steering")
   );
-  const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
-  const isOpeningConversation = Boolean(state.agent.currentChatId && state.agent.isLoadingHistory && !hasActiveConversation);
-  const hasConversationShell = hasActiveConversation || isOpeningConversation;
+  const hasMessageConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
+  const isOpeningConversation = Boolean(state.agent.currentChatId && state.agent.isLoadingHistory && !hasMessageConversation);
+  const hasBaseConversationShell = hasMessageConversation || isOpeningConversation;
   const [blankThreadPanelEnabled, setBlankThreadPanelEnabled] = useState(false);
   const threadPanel = useAgentThreadPanel({
     scopeKey: chatScopeKey,
     containerRef: workspaceLayoutRef,
-    enabled: hasConversationShell || blankThreadPanelEnabled,
+    enabled: hasBaseConversationShell || blankThreadPanelEnabled,
   });
   const [sidePanelMounted, setSidePanelMounted] = useState(false);
   const [recordingTabVisible, setRecordingTabVisible] = useState(false);
+  const ensurePluginConversation = useCallback((title: string): Promise<string | null> => {
+    if (state.agent.currentChatId) return Promise.resolve(state.agent.currentChatId);
+    if (pluginConversationCreationRef.current) return pluginConversationCreationRef.current;
+    const readyConnection = connection;
+    const expectedGeneration = readyConnection?.getReadyGeneration() ?? null;
+    if (!readyConnection || expectedGeneration === null || resolvedConversationModel.unavailable) {
+      return Promise.resolve(null);
+    }
+    const draftScope = chatScopeKey;
+    const selectionEpoch = state.agent.chatSelectionEpoch;
+    const flight = (async () => {
+      setIsCreatingChat(true);
+      try {
+        const created = await readyConnection.newChat(
+          expectedGeneration,
+          5000,
+          resolvedConversationModel.candidateId ?? undefined,
+          crypto.randomUUID()
+        );
+        if (chatSelectionEpochRef.current !== selectionEpoch) return null;
+        ensureChatSubscription(created.chatId);
+        threadPanel.promoteScope(draftScope, created.chatId);
+        // A plugin-only chat has no Agent message yet, so it is absent from the
+        // canonical session snapshot. Keep an optimistic task row for it; without
+        // one the next sidebar refresh reopens the blank draft and hides the card.
+        dispatch(agentActions.pluginConversationStarted({
+          chatId: created.chatId,
+          title,
+          target: draftTarget,
+          createdAt: new Date().toISOString()
+        }));
+        dispatch(agentActions.pendingModelPresetUpdated(created.chatId, created.modelPreset));
+        taskStateCoordinator.refreshTaskState({
+          expectedChatId: created.chatId,
+          reason: "new-chat",
+          state: state.agent
+        });
+        return created.chatId;
+      } catch (error) {
+        dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+          source: "new-chat",
+          message: error instanceof MemmyAgentMessageRejectedError
+            ? `${error.detail}:${error.reason}`
+            : readableError(error),
+          scopeKey: draftScope
+        })));
+        return null;
+      } finally {
+        setIsCreatingChat(false);
+      }
+    })();
+    pluginConversationCreationRef.current = flight;
+    void flight.finally(() => {
+      if (pluginConversationCreationRef.current === flight) pluginConversationCreationRef.current = null;
+    });
+    return flight;
+  }, [chatScopeKey, connection, dispatch, ensureChatSubscription, resolvedConversationModel.candidateId,
+    resolvedConversationModel.unavailable, state.agent, taskStateCoordinator, threadPanel.promoteScope, draftTarget]);
   const features = useConversationFeatures({
     scopeKey: chatScopeKey, sharedRowWidth: workspaceRowWidth,
     agentMessages: state.agent.messages,
     onDraft: (text) => setCurrentComposerDraft(text),
     onStageFiles: (files) => attachMediaFilesToScope(chatScopeKey, files),
+    onStageExistingFiles: (files) => attachExistingMediaToScope(chatScopeKey, files),
     onOpenArtifact: (artifact) => {
       if (!artifact.path) return false;
       const tab = threadTabForInAppPreview({ name: artifact.name, path: artifact.path });
@@ -1089,6 +1159,7 @@ export function HomePage() {
       setSidePanelMounted(true);
       threadPanel.openTab({ id: "recording:main", type: "recording", name: t("recording.page.title") });
     },
+    onEnsureConversation: ensurePluginConversation,
     onSend: (text) => submitAgentComposerMessage({
       chatId: state.agent.currentChatId, target: state.agent.currentChatId ? null : draftTarget,
       connection, ensureChatSubscription, content: text, pendingAttachments: [], language,
@@ -1097,6 +1168,12 @@ export function HomePage() {
       chatSelectionEpoch: state.agent.chatSelectionEpoch, getChatSelectionEpoch: () => chatSelectionEpochRef.current,
     }),
   });
+  const hasActiveConversation = hasActiveAgentConversation(
+    state.agent.currentChatId,
+    state.agent.messages.length,
+    features.hasConversationActivity
+  );
+  const hasConversationShell = hasActiveConversation || isOpeningConversation;
   const pluginRecordingTabScopeRef = useRef<string | null>(null);
   const pluginRecordingOpen = Boolean(features.pluginRecordingSession);
   useEffect(() => {
@@ -1773,7 +1850,7 @@ export function HomePage() {
   const modeVisibleSlashCommands = selectedComposerCommand
     ? filterGoalModeSlashCommands(visibleSlashCommands, Boolean(state.agent.currentChatId))
     : visibleSlashCommands;
-  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands, state.agent.modelPresets);
+  const filteredSlashCommands = slashQuery == null ? [] : filterSlashCommands(modeVisibleSlashCommands, slashQuery, recentSlashCommands);
   const slashMenuOpen = filteredSlashCommands.length > 0;
   const displayConnectionStatus = state.agent.recoveryKind === "initial"
     ? "connecting"
@@ -1990,6 +2067,7 @@ export function HomePage() {
         connection,
         ensureChatSubscription,
         content: features.agentPrompt(input) ?? input,
+        taskRecording: taskRecording ?? undefined,
         displayContent: features.agentPrompt(input) ? input : selectedComposerCommand ? composerInput : undefined,
         language,
         pendingAttachments,
@@ -2037,7 +2115,7 @@ export function HomePage() {
       });
       if (!submitted) {
         dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
-      }
+      } else setTaskRecording(null);
     } catch (error) {
       dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
       throw error;
@@ -2793,7 +2871,16 @@ export function HomePage() {
         event.preventDefault();
         const command = filteredSlashCommands[selectedCommandIndex] ?? filteredSlashCommands[0];
         if (command) {
-          selectSlashCommand(command);
+          const isExactModelCommand = (command.command === "/model" || command.command === "/model list")
+            && composerInput.trim() === command.command;
+          if (event.key === "Enter" && !event.shiftKey && isExactModelCommand
+            && composerPrimaryAction === "send" && !composerSendDisabled) {
+            rememberSlashCommand(command.command);
+            setSlashMenuDismissed(true);
+            void sendMessage();
+          } else {
+            selectSlashCommand(command);
+          }
         }
         return;
       }
@@ -2921,6 +3008,30 @@ export function HomePage() {
       setComposerMediaErrorForScope(scopeKey, error instanceof Error ? error.message : String(error));
       return false;
     }
+  }
+
+  /**
+   * Stages files that are already stored by the gateway.
+   *
+   * Recording transcripts live in the workspace's recordings folder. Reusing
+   * their paths avoids an identical upload into the private media cache (and
+   * the random cache prefix that comes with it).
+   */
+  async function attachExistingMediaToScope(scopeKey: string, media: UploadedAgentMedia[]): Promise<boolean> {
+    const seenSourceKeys = new Set((pendingAttachmentsRef.current[scopeKey] ?? []).map((item) => item.sourceKey));
+    const nextPending: PendingAttachment[] = [];
+    for (const item of media) {
+      if (item.kind !== "file" && item.kind !== "image") continue;
+      const pending = uploadedMediaToPendingAttachment(item);
+      if (seenSourceKeys.has(pending.sourceKey)) continue;
+      seenSourceKeys.add(pending.sourceKey);
+      nextPending.push(pending);
+    }
+    if (!nextPending.length) return false;
+    setPendingAttachmentsForScope(scopeKey, (current) => [...current, ...nextPending]);
+    setComposerMediaErrorForScope(scopeKey, null);
+    track({ name: "agent_media_attached", params: { page_path: "/main", media_type: mediaTypeForAnalytics(nextPending) }, consentTier: "basic" });
+    return true;
   }
 
   async function updatePendingImageEncoding(scopeKey: string, id: string, file: File): Promise<boolean> {
@@ -3052,6 +3163,7 @@ export function HomePage() {
           }}
           controller={threadPanel}
           messages={state.agent.messages}
+          conversationId={state.agent.currentChatId}
           workspaceRoot={activeTask?.cwd.trim() || workspaceEnvironment.data?.snapshot.cwd || null}
           previewContext={{
             artifactClient: sessionArtifactClient,
@@ -3076,16 +3188,17 @@ export function HomePage() {
             <span className="sr-only">{t("home.history.loading")}</span>
           </section>
         ) : !hasActiveConversation ? (
-        <section className="app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full">
-          <div className="conversation-feature-cards agent-confirmation-dock">{features.cards}</div>
-          <div className="text-center mb-8">
+        <section className="app-frame-page-content home-empty-screen h-full">
+          <div className="home-empty-brand text-center">
+            <div className="conversation-feature-cards agent-confirmation-dock">{features.cards}</div>
             <div className="home-empty-brand-mascot flex justify-center">
               <Memmy pose="think" size={165} className="memmy-bob" />
             </div>
             <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
           </div>
-          <div className="home-empty-column">
+          <div className="home-empty-column home-empty-input">
             <AgentOperationErrorSlot message={agentError} />
+            {state.agent.currentChatId && <TaskRecordingsPanel client={clients?.memmyAgent ?? null} chatId={state.agent.currentChatId} connection={connection} />}
             <div className="home-empty-composer-stack">
               <div
                 className="relative home-empty-composer agent-composer-shell rounded-card-lg"
@@ -3160,6 +3273,7 @@ export function HomePage() {
                   >
                     {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
                   </button>
+                  <AgentTaskRecordingOption client={clients?.memmyAgent ?? null} value={taskRecording} disabled={isCreatingChat || messageSendInFlight} onChange={setTaskRecording} />
                   <ComposerSubmitButton
                     isSending={isCurrentAgentRunning}
                     disabled={composerSubmitDisabled}
@@ -3193,6 +3307,8 @@ export function HomePage() {
                 />
               </div>
             </div>
+          </div>
+          <div className="home-empty-column home-empty-footer">
             <HomeStarterActions scenarios={features.scenarios} onSelect={selectHomeStarter} />
             <div className="home-empty-status-area">
               {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
@@ -3331,6 +3447,7 @@ export function HomePage() {
                   </p>
                 ) : null}
                 <AgentOperationErrorSlot message={agentError} />
+                {state.agent.currentChatId && <TaskRecordingsPanel client={clients?.memmyAgent ?? null} chatId={state.agent.currentChatId} connection={connection} />}
                 <div className="agent-composer-stack">
                   <div ref={setQuestionDockTarget} className="agent-question-dock">
                     {pendingNativeCard ? <AgentQuestionCard key={pendingNativeCard.requestId} card={pendingNativeCard}
@@ -3409,6 +3526,7 @@ export function HomePage() {
                         >
                           {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
                         </button>
+                        <AgentTaskRecordingOption client={clients?.memmyAgent ?? null} value={taskRecording} disabled={isCreatingChat || messageSendInFlight} onChange={setTaskRecording} />
                         <ComposerSubmitButton
                           isSending={composerPrimaryAction === "stop"}
                           disabled={composerSubmitDisabled}
@@ -4061,6 +4179,28 @@ export function queuedMediaToPendingAttachment(
     status: "ready" as const,
     originalBytes: 0,
     reusedMedia: { ...media, path: media.path, name: fileName, kind: media.kind ?? "file" as const },
+  };
+  return media.kind === "image"
+    ? { ...base, kind: "image", previewUrl: media.url ?? "" }
+    : { ...base, kind: "file", extension: fileName.includes(".") ? fileName.slice(fileName.lastIndexOf(".")) : "" };
+}
+
+/**
+ * Turns a gateway-owned file into a composer attachment without another upload.
+ *
+ * Only images and documents are composer attachment types. Audio recordings
+ * reach the conversation through their text transcript instead.
+ */
+export function uploadedMediaToPendingAttachment(media: UploadedAgentMedia): PendingAttachment {
+  if (media.kind === "audio") throw new Error("Audio cannot be attached directly to the composer");
+  const fileName = media.name || "attachment";
+  const base = {
+    id: randomPendingAttachmentId(media.kind),
+    sourceKey: `stored:${media.path}`,
+    fileName,
+    status: "ready" as const,
+    originalBytes: media.bytes,
+    reusedMedia: { ...media, path: media.path, name: fileName },
   };
   return media.kind === "image"
     ? { ...base, kind: "image", previewUrl: media.url ?? "" }

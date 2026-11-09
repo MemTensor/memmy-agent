@@ -2,6 +2,9 @@
 import type {
   AddMemoryInput,
   AddMemoryOutput,
+  AgentSkillReconcileInput,
+  AgentSkillReconcileOutput,
+  SkillArchiveStateOutput,
   CloseSessionInput,
   CloseSessionOutput,
   DeleteMemoryInput,
@@ -61,6 +64,7 @@ export interface UpdateObservedSkillOutput extends ApproveObservedSkillOutput {
 }
 
 export interface AgentSourceScanClient {
+  connectionState(sourceId: string): Promise<{ connectionState: "connected" | "disconnected" | null; connectionEvent?: { id: string; revision?: number; state: "connected" | "disconnected"; kind?: "skill" | "plugin" } }>;
   list(): Promise<import("@memmy/local-api-contracts").MemoryAgentSourceList>;
   start(input: import("@memmy/local-api-contracts").AgentSourceScanInput): Promise<import("@memmy/local-api-contracts").AgentSourceScanJobResponse>;
   status(): Promise<import("@memmy/local-api-contracts").MemoryAgentSourceScanState>;
@@ -84,10 +88,15 @@ export interface MemoryClient {
   completeTurn(input: CompleteTurnInput & { turnId: string }, context?: MemoryRequestContext): Promise<CompleteTurnOutput>;
 
   completeSourceTurn(input: SourceTurnCompleteInput, context?: MemoryRequestContext): Promise<SourceTurnCompleteOutput>;
+  /** Freeze what an import added to these scanned Sessions into L3 batches. */
+  freezeScanSessions(source: string, sessionIds: string[], context?: MemoryRequestContext): Promise<{ batches: number }>;
 
   search(input: SearchInput, context?: MemoryRequestContext): Promise<SearchOutput>;
   embeddingInference?(input: EmbeddingInferenceInput, options?: { signal?: AbortSignal }): Promise<EmbeddingInferenceOutput>;
   addMemory(input: AddMemoryInput, context?: MemoryRequestContext): Promise<AddMemoryOutput>;
+  reconcileAgentSkills(input: AgentSkillReconcileInput, context?: MemoryRequestContext): Promise<AgentSkillReconcileOutput>;
+  archiveSkill(skillId: string, context?: MemoryRequestContext): Promise<SkillArchiveStateOutput>;
+  reactivateSkill(skillId: string, context?: MemoryRequestContext): Promise<SkillArchiveStateOutput>;
   getMemory(input: { memoryId: string }, context?: MemoryRequestContext): Promise<GetMemoryOutput>;
   deleteMemory(input: DeleteMemoryInput & { memoryId: string }, context?: MemoryRequestContext): Promise<DeleteMemoryOutput>;
   approveObservedSkill(memoryId: string, context?: MemoryRequestContext): Promise<ApproveObservedSkillOutput>;

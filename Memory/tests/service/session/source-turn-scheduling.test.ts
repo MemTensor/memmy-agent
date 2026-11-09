@@ -257,6 +257,7 @@ describe("native source-turn historical scheduling through MemoryService", () =>
       toolCalls: [], toolResults: [] };
     const executor = createAgentSourceExecutor({
       service: h.service, configPath: join(h.root, "config.yaml"), statePath: join(h.root, "source-state.json"),
+      resolveAgentSkillRoot: () => null,
       sourceRegistry: createSourceRegistry([{
         descriptor: { sourceId: "codex", displayName: "Codex fixture", builtin: true, dataPath: h.root },
         async detect() { return true; },

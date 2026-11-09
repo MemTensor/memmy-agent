@@ -542,7 +542,7 @@ function MemoryListState(input: { props: MemoriesSubPageViewProps }) {
     return <MemoryStateBox message={props.state.message} tone="error" />;
   }
 
-  const visibleItems = props.state.data.items;
+  const visibleItems = props.state.data.items.filter((item) => item.kind !== "span");
 
   return (
     <>
@@ -582,7 +582,7 @@ function MemoryListState(input: { props: MemoriesSubPageViewProps }) {
                   {item.kind === "observed_activity" && <span className="memory-pill">{t("memory.memories.observedActivity")}</span>}
                   {skippedObservation && <span className="memory-pill">{t("memory.memories.observationSkipped")}</span>}
                   <span>{formatDateTime(item.createdAt)}</span>
-                  {item.kind !== "observed_activity" && <span className="memory-card__score">{formatMemoryScore(item.metrics)}</span>}
+                  {item.kind !== "observed_activity" && formatMemoryScore(item.metrics) && <span className="memory-card__score">{formatMemoryScore(item.metrics)}</span>}
                   {processingStatus && (
                     <span className={`memory-pill memory-pill--processing${processingStatus === "failed" ? " memory-pill--failed" : ""}`}>
                       {t(item.kind === "observed_activity" && item.processing?.errorCode === "summary_model_unconfigured"
@@ -800,6 +800,8 @@ function MemoryProcessingFailureCard(props: {
   // Background processing keeps its normal progress indicator, even when a
   // previous attempt failed. Only an explicit manual retry needs this feedback.
   const retryInProgress = feedback?.status === "running";
+  const quotaExhausted = processing?.errorCode === "quota_exhausted" ||
+    processing?.errorCode === "40308" || processing?.errorCode === "40309";
   if (
     processing?.state !== "failed" &&
     !retryInProgress &&
@@ -822,7 +824,7 @@ function MemoryProcessingFailureCard(props: {
     ? t("memory.memories.processing.retrySucceeded")
     : retryInProgress
       ? t("memory.memories.processing.retrying")
-      : processing?.errorCode === "40309"
+      : quotaExhausted
         ? t(ERROR_NOTICE_KEYS.memory.quotaExhausted)
         : settingsRequired && processing?.state !== "failed"
           ? t("memory.memories.processing.needsSettings")
@@ -849,7 +851,7 @@ function MemoryProcessingFailureCard(props: {
         </ErrorNoticeDetail>
       ) : null}
       <div className="memory-processing-failure__actions">
-        {(settingsRequired || processing?.errorCode === "40309") && props.onOpenSettings && !retryDisabled && (
+        {(settingsRequired || quotaExhausted) && props.onOpenSettings && !retryDisabled && (
           <button type="button" className="memory-processing-action" onClick={props.onOpenSettings}>
             <Settings2 size={14} />
             {t("memory.memories.processing.openSettings")}
@@ -1142,12 +1144,10 @@ function formatDateTime(value: string): string {
   return formatUserDateTime(value);
 }
 
-function formatMemoryScore(metrics: MemoryDetailOutput["item"]["metrics"] | undefined): string {
-  return `V ${formatScoreNumber(metrics?.value)} · α ${formatScoreNumber(metrics?.alpha)}`;
-}
-
-function formatScoreNumber(value: number | undefined): string {
-  return value === undefined ? "-" : value.toFixed(2);
+function formatMemoryScore(metrics: MemoryDetailOutput["item"]["metrics"] | undefined): string | null {
+  if (!metrics?.reflectionDone || metrics.valuePending || metrics.alphaPending
+    || metrics.value === undefined || metrics.alpha === undefined) return null;
+  return `V ${metrics.value.toFixed(2)} · α ${metrics.alpha.toFixed(2)}`;
 }
 
 function memoryProcessingStatus(item: Pick<PanelItemsOutput["items"][number], "processing">): MemoryProcessingStatus | null {

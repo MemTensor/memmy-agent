@@ -1521,7 +1521,7 @@ export class SessionTurnService {
     };
   }
 
-  completeSourceTurn(request: SourceTurnCompleteRequest): SourceTurnCompleteResponse {
+  completeSourceTurn(request: SourceTurnCompleteRequest, onEvolutionScheduled?: () => void): SourceTurnCompleteResponse {
     const identity = request.sourceTurn;
     if (!identity || ![identity.source, identity.profileId, identity.conversationId, identity.turnId,
       identity.startedAt, identity.completedAt, identity.completionEvidence].every((value) => typeof value === "string" && value.trim())) {
@@ -1563,7 +1563,9 @@ export class SessionTurnService {
       reasoningSummary: normalized.reasoningSummary ?? null,
       toolCalls: normalizeCompleteTurnToolCalls(normalized), toolResults: normalizeCompleteTurnToolResults(normalized)
     });
-    return this.deps.repos.transaction(() => {
+    let recoveredWorkScheduled = false;
+    const onBatchesFrozen = () => { recoveredWorkScheduled = true; };
+    const response = this.deps.repos.transaction<SourceTurnCompleteResponse>(() => {
       // Native captures belong to the local source conversation, not the cloud account
       // currently sending them. Check before opening a Session or scheduling any work.
       const existing = this.deps.repos.runtime.getSourceTurnCapture(scope, identity.turnId);
@@ -1593,7 +1595,34 @@ export class SessionTurnService {
         if (existing.response.status === "rejected") {
           return { ...existing.response, result: responseResult };
         }
+        const session = this.deps.repos.runtime.getSession(result.sessionId);
+        if (session) this.prepareScannedL3Session(request, session, sourceTurn.completedAt, onBatchesFrozen);
         return { status: "existing", result: responseResult };
+      }
+      // A copied dialogue can arrive under another native agent source with a new
+      // conversation and turn id. Reuse the original capture before opening a
+      // session or running another capture decision.
+      const crossSource = identity.externalImport
+        ? this.deps.repos.runtime.findSourceTurnCaptureByContentHash(scope, contentHash)
+        : undefined;
+      if (crossSource) {
+        const result = crossSource.response.result;
+        if (crossSource.response.legacyImportMemoryId) {
+          return { status: "existing", legacyImportMemoryId: crossSource.response.legacyImportMemoryId };
+        }
+        if (!result) return { ...crossSource.response };
+        const assigned = this.deps.repos.runtime.getRawTurn(result.rawTurnId);
+        const responseResult = {
+          ...result,
+          episodeId: assigned?.episodeId,
+          assignmentStatus: assigned?.episodeId ? "assigned" as const : "pending" as const,
+          duplicate: true,
+          scheduledEvolution: false,
+          jobs: []
+        };
+        return crossSource.response.status === "rejected"
+          ? { ...crossSource.response, result: responseResult }
+          : { status: "existing", result: responseResult };
       }
       const activation = this.deps.repos.runtime.getKv("source_turn_capture_activated_at")?.value;
       if (typeof activation !== "string" || !Number.isFinite(Date.parse(activation))) {
@@ -1656,13 +1685,13 @@ export class SessionTurnService {
         gapEpisode = candidate;
         targetSessionId = before.sessionId;
       }
-      const resolved = this.resolveSourceSession({ ...request, namespace }, sourceTurn, scope, targetSessionId);
+      const resolved = this.resolveSourceSession({ ...request, namespace }, sourceTurn, scope, targetSessionId, onBatchesFrozen);
       if ("status" in resolved && resolved.status === "pending") {
         return resolved.reason === "source_session_closed"
           ? detachLegacyHistory(resolved.reason)
           : resolved;
       }
-      const session = resolved as SessionRecord;
+      const session = this.prepareScannedL3Session(request, resolved as SessionRecord, sourceTurn.completedAt, onBatchesFrozen);
       // A scan may be the first completion of a Hook Session opened by another account.
       // Keep the Session owner and all persisted capture references consistent.
       namespace.userId = session.userId;
@@ -1723,6 +1752,11 @@ export class SessionTurnService {
       });
       return response;
     });
+    // The observer only records request-local work; acceptance publishes after its outer transaction commits.
+    if (recoveredWorkScheduled) onEvolutionScheduled?.();
+    return recoveredWorkScheduled && response.result
+      ? { ...response, result: { ...response.result, scheduledEvolution: true } }
+      : response;
   }
 
   private adoptLegacyImport(
@@ -1787,6 +1821,8 @@ export class SessionTurnService {
       },
       timeZone: request.timeZone
     }, { createNew: true, at: sourceTurn.startedAt });
+    // Select the scan protocol before completeTurn registers its first retained input.
+    this.prepareScannedL3Session(request, this.deps.repos.runtime.getSession(opened.sessionId)!, sourceTurn.completedAt);
     const withoutEpisode = { ...normalized };
     delete withoutEpisode.episodeId;
     const result = this.completeTurn(sourceTurn.turnId, {
@@ -1901,7 +1937,8 @@ export class SessionTurnService {
     request: SourceTurnCompleteRequest,
     identity: SourceTurnIdentity,
     scope: SourceTurnCaptureScope,
-    mappedSessionId?: string
+    mappedSessionId?: string,
+    onBatchesFrozen?: () => void
   ): SessionRecord | { status: "pending"; reason: string } {
     const namespace = normalizeNamespace(request.namespace);
     const inScope = (candidate: SessionRecord): boolean =>
@@ -1915,23 +1952,44 @@ export class SessionTurnService {
       (!namespace.tenantId || candidate.meta.source_namespace_key === scope.namespaceKey);
     const canStartAfter = (candidate: SessionRecord): boolean => candidate.status === "closed" &&
       Date.parse(identity.startedAt) >= Date.parse(candidate.closedAt ?? candidate.updatedAt);
+    let sourceCandidates: SessionRecord[] | undefined;
+    const candidatesInScope = () => sourceCandidates ??=
+      this.deps.repos.runtime.sourceConversationSessions(scope).filter(inScope);
+    const recoverClosedCandidates = () => {
+      if (request.channel !== "agent_source_scan" || !this.deps.memoryAddEnabled() || !this.deps.l3FieldActive()) return;
+      // The latest Session can remain open while older Sessions still need their retained inputs.
+      for (const candidate of candidatesInScope()) {
+        if (candidate.status !== "open") this.prepareScannedL3Session(request, candidate, identity.completedAt, onBatchesFrozen);
+      }
+    };
     if (mappedSessionId) {
       const mapped = this.deps.repos.runtime.getSession(mappedSessionId);
       if (!mapped) return { status: "pending", reason: "source_session_missing" };
       if (!inScope(mapped)) throw new MemoryServiceError("forbidden", "source_session_scope_conflict");
-      if (mapped.status === "open") return mapped;
+      if (mapped.status === "open") {
+        const live = this.hookTakeoverOfScannedSession(request, mapped, inScope);
+        if (live) return live;
+        recoverClosedCandidates();
+        return mapped;
+      }
+      this.prepareScannedL3Session(request, mapped, identity.completedAt, onBatchesFrozen);
       if (!canStartAfter(mapped)) return { status: "pending", reason: "source_session_closed" };
     }
     if (request.sessionId) {
       const supplied = this.deps.repos.runtime.getSession(request.sessionId);
       if (!supplied) return { status: "pending", reason: "source_session_missing" };
       if (!inScope(supplied)) throw new MemoryServiceError("forbidden", "source_session_scope_conflict");
-      if (supplied.status === "open") return supplied;
+      if (supplied.status === "open") {
+        recoverClosedCandidates();
+        return supplied;
+      }
+      this.prepareScannedL3Session(request, supplied, identity.completedAt, onBatchesFrozen);
       if (!canStartAfter(supplied)) return { status: "pending", reason: "source_session_closed" };
     }
-    const candidates = this.deps.repos.runtime.sourceConversationSessions(scope).filter(inScope);
+    const candidates = candidatesInScope();
     const open = candidates.filter((candidate) => candidate.status === "open");
     if (open.length > 1) return { status: "pending", reason: "source_session_ambiguous" };
+    recoverClosedCandidates();
     if (candidates.some((candidate) => candidate.status !== "open" && !canStartAfter(candidate))) {
       return { status: "pending", reason: "source_session_closed" };
     }
@@ -1947,6 +2005,54 @@ export class SessionTurnService {
       timeZone: request.timeZone
     }, { createNew: true, at: identity.startedAt });
     return this.deps.repos.runtime.getSession(opened.sessionId)!;
+  }
+
+  /** Adopt a scanner-created Session once, including turns deduplicated before the v2 capture path. */
+  private prepareScannedL3Session(
+    request: SourceTurnCompleteRequest,
+    session: SessionRecord,
+    at: string,
+    onBatchesFrozen?: () => void
+  ): SessionRecord {
+    if (request.channel !== "agent_source_scan" || !this.deps.memoryAddEnabled() || !this.deps.l3FieldActive() ||
+        session.meta.l3_world_model_protocol_version === 2) return session;
+    // Explicit Hook Sessions retain their protocol. Auto-created source Sessions
+    // carry this namespace marker and use the native conversation id as their host key.
+    if (typeof session.meta.source_namespace_key !== "string" ||
+        session.hostSessionKey !== request.sourceTurn.conversationId) return session;
+    const updated = this.deps.repos.runtime.updateSessionMeta(session.id, {
+      l3_world_model_protocol_version: 2,
+      work_memory_disabled: true
+    }, at)!;
+    const backfilled = this.deps.repos.l3WorldModels.backfillSourceInputTraces(session.id);
+    if (backfilled > 0) {
+      if (updated.status === "open") {
+        this.deps.armWorkMemoryIdleFlush(session.id,
+          this.deps.repos.l3WorldModels.latestInputTraceCreatedAt(session.id) ?? at);
+      } else {
+        const frozen = this.deps.repos.l3WorldModels.freezeBatches({ sessionId: session.id, trigger: "session_close", at });
+        if (frozen.batchIds.length > 0) onBatchesFrozen?.();
+      }
+    }
+    return updated;
+  }
+
+  /**
+   * A conversation first seen by a scan, then continued live under a Hook: the Hook's own Session
+   * takes over, so its turns, compaction, close and Work Memory all act on one Session. The scan's
+   * Session is closed, which freezes what it still holds into L3.
+   */
+  private hookTakeoverOfScannedSession(
+    request: SourceTurnCompleteRequest,
+    mapped: SessionRecord,
+    inScope: (candidate: SessionRecord) => boolean
+  ): SessionRecord | undefined {
+    if (request.channel !== "hook" || !request.sessionId || request.sessionId === mapped.id) return undefined;
+    if (mapped.meta.work_memory_disabled !== true) return undefined;
+    const live = this.deps.repos.runtime.getSession(request.sessionId);
+    if (!live || live.status !== "open" || !inScope(live)) return undefined;
+    this.closeSession(mapped.id);
+    return live;
   }
 
   completeTurn(

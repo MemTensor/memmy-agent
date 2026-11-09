@@ -20,7 +20,9 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   }
 }
 
-describe("Computer History real child lifecycle", () => {
+// Windows terminates a Node child on SIGTERM without running its POSIX signal
+// handler. The Windows driver has separate stdin/ack/close lifecycle coverage.
+describe.skipIf(process.platform === "win32")("Computer History POSIX real child lifecycle", () => {
   it("rejects Start during Stop, drains the child, and can restart then shut down", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-history-child-process-"));
     const recorderScript = path.join(directory, "synthetic-recorder.cjs");

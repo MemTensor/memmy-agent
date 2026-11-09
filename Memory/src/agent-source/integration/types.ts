@@ -23,7 +23,13 @@ export interface SkillTarget {
   install(manifest: SkillManifest): Promise<void>;
   uninstall(targetId: string): Promise<void>;
   isInstalled(targetId: string): Promise<boolean>;
+  /** Older CLI instructions also establish an existing integration for rollback. */
+  isLegacySkillInstalled?(): Promise<boolean>;
+  /** Detects any installed plugin version without requiring current contents. */
+  isPluginInstalled?(): Promise<boolean>;
   installPlugin?(targetId: string): Promise<void>;
+  /** Plugin removal already includes instructions and skill cleanup in one critical section. */
+  readonly pluginUninstallIncludesSkills?: boolean;
   uninstallPlugin?(targetId: string): Promise<void>;
   isInstalledHookCurrent?(): Promise<boolean>;
   detectMemoryPluginConflict?(): Promise<MemoryPluginConflict | null>;

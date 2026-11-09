@@ -9,6 +9,7 @@ import type { BackendServices } from "../../../services/index.js";
 import { registerAccountRoutes } from "./routes/account.js";
 import { registerTokenQuotaRoutes } from "./routes/token-quota.js";
 import { registerAppConfigRoutes } from "./routes/app-config.js";
+import { registerModelCapabilityCatalogRoutes } from "./routes/model-capability-catalog.js";
 import { registerAgentSourceRoutes } from "./routes/agent-sources.js";
 import { registerAgentRuntimeRoutes } from "./routes/agent-runtime/index.js";
 import { registerAsrRoutes } from "./routes/asr.js";
@@ -125,6 +126,10 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     appConfig: options.services.appConfig,
     authenticateRuntimeToken
   });
+  registerModelCapabilityCatalogRoutes(app, {
+    modelCapabilityCatalog: options.services.modelCapabilityCatalog,
+    authenticateRuntimeToken
+  });
   registerAccountRoutes(app, {
     account: options.services.account,
     appConfig: options.services.appConfig,
@@ -185,9 +190,8 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   app.get<{ Querystring: EventsQuerystring }>("/api/events", async (request, reply) => {
     // EventSource cannot reliably carry custom headers, so the SSE channel validates the same runtime token via a query parameter.
     const { token } = request.query;
-    if (!token || !(await options.permissionManager.verifyRuntimeToken(token))) {
-      return reply.code(401).send({ error: "unauthorized" });
-    }
+    const authorized = token && await options.permissionManager.verifyRuntimeToken(token);
+    if (!authorized) return reply.code(401).send({ error: "unauthorized" });
 
     startSse(reply, heartbeatIntervalMs, getSingleHeaderValue(request.headers.origin), options.services.progressBus, registerEventStream);
   });
@@ -274,6 +278,7 @@ function applyCorsHeaders(
   }
 
   reply.header("access-control-allow-origin", origin);
+  reply.header("access-control-expose-headers", "Retry-After");
   return true;
 }
 
@@ -378,6 +383,9 @@ function startSse(
       payload: event
     });
   });
+  const unsubscribeModelCatalog = progressBus.on("model_catalog.updated", (payload) => {
+    send({ id: randomUUID(), type: "model_catalog.updated", timestamp: new Date().toISOString(), payload });
+  });
   for (const payload of progressBus.pendingPluginEvents()) {
     send({ id: randomUUID(), type: "plugin.capability_event", timestamp: new Date().toISOString(), payload });
   }
@@ -395,6 +403,7 @@ function startSse(
     unsubscribeScanProgress();
     unsubscribeScanCompleted();
     unsubscribePluginCapability();
+    unsubscribeModelCatalog();
     unregister();
   };
 

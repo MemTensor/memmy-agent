@@ -83,7 +83,11 @@ export class CreateGoalTool extends GoalTool {
         sessionKey: this.sessionKey(),
         objective: params.objective ?? "",
         ...(params.token_budget === undefined ? {} : { tokenBudget: params.token_budget }),
-        route: { channel, chatId, ...(source ? { source } : {}) },
+        route: { channel, chatId, ...(source ? { source } : {}),
+          ...(source && context?.messageId && context.metadata.computerUseInteractive === true
+            && context.metadata.computerUseInteractiveReason === 'interactive-user-message'
+            ? { computerUseMessageId: context.messageId } : {}),
+        },
         turnId,
       });
       return `Goal created.\n${formatGoal(goal)}`;

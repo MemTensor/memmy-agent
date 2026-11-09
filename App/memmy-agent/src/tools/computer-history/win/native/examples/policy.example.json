@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "applications": [
+    {
+      "pid": 12345,
+      "executable": "C:\\Program Files\\Example\\Example.exe",
+      "processStart": "134353330812549066",
+      "hwnd": "1704818",
+      "searchFields": [
+        { "controlType": "Edit", "automationId": "SearchBox" }
+      ],
+      "documentRegions": [
+        { "controlType": "Document", "automationId": "Body" }
+      ],
+      "sensitiveAutomationIds": ["ApiKeyPanel"]
+    }
+  ],
+  "deny": {
+    "executables": ["C:\\Program Files\\KeePassXC\\KeePassXC.exe"],
+    "pids": []
+  },
+  "sensitiveAutomationIds": ["PasswordReveal"],
+  "limits": {
+    "maxDepth": 24,
+    "maxNodes": 400,
+    "maxVisited": 2000,
+    "maxTextChars": 12000,
+    "maxNodeTextChars": 2048,
+    "queryBudgetMs": 650,
+    "workerTimeoutMs": 1500
+  }
+}

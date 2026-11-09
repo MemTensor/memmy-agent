@@ -26,6 +26,7 @@ export interface AgentSourceScanCompletedEvent {
 
 /** Contract for progress bus event map. */
 export interface ProgressBusEventMap {
+  "model_catalog.updated": { catalogVersion: number };
   "agent_source.scan_progress": AgentSourceScanProgressEvent;
   "agent_source.scan_completed": AgentSourceScanCompletedEvent;
   "plugin.capability_event": PluginCapabilityEventPayload;

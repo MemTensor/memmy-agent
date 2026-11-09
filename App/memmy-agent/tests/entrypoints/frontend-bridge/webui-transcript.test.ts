@@ -219,6 +219,17 @@ describe("webui transcript replay", () => {
     });
   });
 
+  it.each(["model_catalog_fallback", "unrecognized"])("only preserves the known catalog error origin %s during replay", (origin) => {
+    const messages = replayTranscriptToUiMessages([{
+      event: "message", chat_id: "t-catalog-failed", text: "Provider failure",
+      model_error: { category: "model_failed", detail: "Raw Provider error", origin }
+    }]);
+    expect(messages[0]?.model_error).toEqual({
+      category: "model_failed", detail: "Raw Provider error",
+      ...(origin === "model_catalog_fallback" ? { origin } : {})
+    });
+  });
+
   it("replays image errors without losing the internal failure source", () => {
     const messages = replayTranscriptToUiMessages([{
       event: "message",

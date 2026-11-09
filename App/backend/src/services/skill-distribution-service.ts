@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { readSkillInstallationState, rollbackSkillInstallation, type SkillInstallationState } from "../adapters/outbound/skill-writer/skill-directory.js";
 import { renderMemmyDefaultSkillManifest } from "../adapters/outbound/skill-writer/templates/memmy-default.js";
 import type { MemoryPluginConflict } from "../adapters/outbound/skill-writer/types.js";
 import type { SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
@@ -21,9 +22,11 @@ export interface ScannedAgentSkill {
 /** Contract for skill distribution service. */
 export interface SkillDistributionService {
   listSkills?(sourceId: string): Promise<ScannedAgentSkill[]>;
-  install(sourceId: string, beforeInstall?: () => void): Promise<void>;
+  readInstallationState?(sourceId: string): Promise<SkillInstallationState>;
+  rollbackInstallation?(sourceId: string, kind: "skill" | "plugin", before: SkillInstallationState): Promise<void>;
+  install(sourceId: string, beforeInstall?: () => void | Promise<void>): Promise<void>;
   uninstall(sourceId: string): Promise<void>;
-  installPlugin(sourceId: string, beforeInstall?: () => void): Promise<void>;
+  installPlugin(sourceId: string, beforeInstall?: () => void | Promise<void>): Promise<void>;
   uninstallPlugin(sourceId: string): Promise<void>;
   isInstalledHookCurrent?(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts?(): Promise<MemoryPluginConflict[]>;
@@ -39,6 +42,14 @@ export function createSkillDistributionService(
   options: CreateSkillDistributionServiceOptions
 ): SkillDistributionService {
   return {
+    async readInstallationState(sourceId) {
+      return readSkillInstallationState(options.targetRegistry.require(sourceId), sourceId);
+    },
+
+    async rollbackInstallation(sourceId, kind, before) {
+      await rollbackSkillInstallation(options.targetRegistry.require(sourceId), sourceId, kind, before);
+    },
+
     async listSkills(sourceId) {
       const target = options.targetRegistry.get(sourceId);
       const root = await target?.resolveRootDirectory();
@@ -72,7 +83,7 @@ export function createSkillDistributionService(
         throw new AgentSourceUnavailableError(target.displayName);
       }
 
-      beforeInstall?.();
+      await beforeInstall?.();
       await target.install(renderMemmyDefaultSkillManifest(sourceId));
     },
 
@@ -90,7 +101,7 @@ export function createSkillDistributionService(
         throw new AgentSourceUnavailableError(target.displayName);
       }
 
-      beforeInstall?.();
+      await beforeInstall?.();
       await target.installPlugin(sourceId);
     },
 
@@ -101,7 +112,7 @@ export function createSkillDistributionService(
       }
 
       await target.uninstallPlugin(sourceId);
-      await target.uninstall(sourceId);
+      if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
     },
 
     async isInstalledHookCurrent(sourceId) {
