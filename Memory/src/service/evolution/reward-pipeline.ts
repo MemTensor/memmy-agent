@@ -179,6 +179,11 @@ export class RewardPipeline {
           source: "worker.reward.skip.v7",
           createdAt: savedEpisode.updatedAt
         });
+        if (this.deps.repos.runtime.getSkillClusterForEpisode(savedEpisode.id)) {
+          this.deps.enqueueJob({ jobType: "skill_cluster_assign", userId: savedEpisode.userId,
+            sessionId: savedEpisode.sessionId, episodeId: savedEpisode.id,
+            payload: { reason: "reward.skipped" }, createdAt: savedEpisode.updatedAt });
+        }
       }
       return;
     }
@@ -407,7 +412,8 @@ export class RewardPipeline {
     if (
       rewardedEpisode &&
       typeof rewardedEpisode.rTask === "number" &&
-      this.deps.config.algorithm.skill.directFromTrace
+      (this.deps.config.algorithm.skill.directFromTrace
+        || this.deps.repos.runtime.getSkillClusterForEpisode(rewardedEpisode.id))
     ) {
       this.deps.enqueueJob({
         jobType: "skill_cluster_assign",

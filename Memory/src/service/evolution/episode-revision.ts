@@ -48,6 +48,13 @@ export function jobRevisionIsCurrent(repos: Pick<Repositories, "memories" | "run
   // Explicit feedback and repair events survive an Episode lifecycle transition.
   // Their worker re-reads current context and retries if that context changes while generating.
   if (job.jobType === "negative_experience" && job.payload.source !== "episode_reward") return true;
+  // Cluster assignment reads current evidence and validates it across every
+  // await. Other consumers enriching the same closed generation must not cause
+  // its maintenance job to be silently discarded before it can read that data.
+  if (job.jobType === "skill_cluster_assign" && job.episodeId && typeof job.payload.episodeGeneration === "number") {
+    const episode = repos.runtime.getEpisode(job.episodeId);
+    return Boolean(episode?.status === "closed" && (episode.meta.processingGeneration ?? 0) === job.payload.episodeGeneration);
+  }
   // Reflection can finish between enqueue and execution. Both reward phases read
   // the latest inputs at start, then verify that captured snapshot before writing.
   if (job.jobType === "reward" && job.payload.afterRewardRepair !== true && job.episodeId && typeof job.payload.episodeGeneration === "number") {

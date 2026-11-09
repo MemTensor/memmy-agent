@@ -68,6 +68,8 @@ function harness() {
     const turn = await service.completeTurn(`review-turn-${index}`, { sessionId: session.sessionId,
       query: "Review this code carefully", answer: "Reviewed this code" });
     expect(turn.episodeId).toBeDefined();
+    // Production schedules clustering only after the episode has closed.
+    db.db.prepare("UPDATE episodes SET status = 'closed' WHERE id = ?").run(turn.episodeId!);
     repos.runtime.updateEpisodeReward(turn.episodeId!, { rTask: 0.5, rewardDetail: { source: "review" } });
     return enqueueJob({ jobType: "skill_cluster_assign", userId: "review-user", sessionId: session.sessionId, episodeId: turn.episodeId, payload: {} });
   }
