@@ -1,3 +1,4 @@
+import { computerUseRequestContext } from "./computer-use-request-context.js";
 import { agentTaskActivity } from "./task-activity.js";
 import { OUTPUT_FEEDBACK_KEY, OutputDelivery, clearOutputDelivery, DELIVERY_NOT_CONFIRMED, hasOutputObligations } from "./tools/output-location.js";
 import { requestTiming } from "../../utils/request-timing.js";
@@ -473,36 +474,6 @@ function firstString(...values: any[]): string | null {
 
 function turnMetadata(turnId: string | null | undefined): Record<string, string> {
   return turnId ? { turnId, turn_id: turnId } : {};
-}
-
-function computerUseRequestContext(message: InboundMessage, turnId?: string | null): {
-  messageId: string | null; metadata: Record<string, any>;
-} {
-  const rawId = message.metadata?.message_id ?? message.metadata?.messageId;
-  const nativeId = typeof rawId === 'string' && rawId.trim() && rawId.length <= 512
-    ? rawId.trim() : typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId > 0 ? String(rawId) : null;
-  // GUI source is supplied by the accepted channel boundary, not envelope
-  // metadata. Recover an older durable GUI request's validated UUID, retaining
-  // its original identity rather than substituting a generated execution turn.
-  const source = message.turnSource;
-  const guiSource = message.channel === 'websocket' && source?.channel === 'websocket'
-    && (source.kind === 'gui' || source.kind === 'tui');
-  const requestId = message.metadata?.client_request_id;
-  const messageId = nativeId ?? (guiSource && typeof requestId === 'string'
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) ? requestId : null);
-  let reason = 'interactive-user-message';
-  if (message.internal || message.role !== 'user') reason = 'internal-message';
-  else if (['system', 'cron'].includes(message.channel)
-    || ['subagent', 'goal-runtime', 'system', 'cron'].includes(message.senderId.toLowerCase())) reason = 'background-source';
-  else if (message.channel === 'websocket' && !guiSource) reason = 'gui-source-unverified';
-  else if (message.metadata?.computerUseInteractive === false) reason = 'background-context';
-  else if (!messageId) reason = 'user-message-id-missing';
-  return { messageId, metadata: { ...message.metadata,
-    ...(source ? { turn_source: source } : {}), ...turnMetadata(turnId),
-    ...(messageId ? { message_id: messageId } : {}),
-    computerUseInteractive: reason === 'interactive-user-message',
-    computerUseInteractiveReason: reason,
-  } };
 }
 
 function restoredComputerUseMetadata(metadata: Record<string, any>): Record<string, any> {
@@ -4270,13 +4241,17 @@ export class AgentLoop {
       const hasReservedInbox = this.goalRuntime.inbox(ctx.sessionKey)
         .some((entry) => entry.turnId === ctx.turnId);
       if (goal || hasReservedInbox) {
+        const request = computerUseRequestContext(ctx.msg);
+        const turnSource = sharedTurnSource(ctx.msg);
         const persisted = await this.goalRuntime.persistGoalUserTurn(
           ctx.sessionKey,
           ctx.turnId,
           {
             channel: ctx.msg.channel,
             chatId: ctx.msg.chatId,
-            ...(sharedTurnSource(ctx.msg) ? { source: sharedTurnSource(ctx.msg)! } : {}),
+            ...(turnSource ? { source: turnSource } : {}),
+            ...(turnSource && request.messageId && request.metadata.computerUseInteractive === true
+              ? { computerUseMessageId: request.messageId } : {}),
           },
           (session, entry) => {
             const source = entry
@@ -4372,7 +4347,7 @@ export class AgentLoop {
         : {}),
       modelSelection: ctx.modelSelection,
     });
-    const toolRequest = computerUseRequestContext(ctx.msg, ctx.turnId);
+    const toolRequest = computerUseRequestContext(ctx.msg, ctx.turnId, this.goalRuntime, ctx.sessionKey);
     this.setToolContext(
       ctx.msg.channel,
       ctx.msg.chatId,
@@ -4500,7 +4475,7 @@ export class AgentLoop {
       session: ctx.session,
       channel: ctx.msg.channel,
       chatId: ctx.msg.chatId,
-      ...computerUseRequestContext(ctx.msg, ctx.turnId),
+      ...computerUseRequestContext(ctx.msg, ctx.turnId, this.goalRuntime, ctx.sessionKey),
       sessionKey: ctx.sessionKey,
       pendingQueue: ctx.pendingQueue,
       abortSignal: ctx.abortSignal,
