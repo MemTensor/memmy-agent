@@ -9,7 +9,7 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / read model / memory detail", () => {
-  it("omits incomplete L1 trace payloads from memory detail", () => {
+  it("omits incomplete L1 trace payloads from memory detail", async () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",
@@ -17,11 +17,11 @@ describe("MemoryService / read model / memory detail", () => {
       userId: "detail-trace-user"
     };
     const session = service.openSession({ namespace });
-    const complete = service.completeTurn("turn-detail-empty-trace", {
+    const complete = (await service.completeTurn("turn-detail-empty-trace", {
       sessionId: session.sessionId,
       query: "remember incomplete detail trace",
       answer: "detail payload should not include empty trace ids"
-    });
+    }));
     const row = db.db.prepare(
       `SELECT info_json, properties_json
        FROM memories

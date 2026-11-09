@@ -94,6 +94,9 @@ export class MemmyMemoryTool extends Tool {
 
   async execute(params: JsonRecord = {}): Promise<string> {
     const sessionKey = this.requestContext.get()?.sessionKey ?? null;
+    const turnId = this.runtime.currentTurnId(sessionKey) ?? "unscoped";
+    const currentUserRequest = this.runtime.currentUserText(sessionKey)
+      ?? (typeof params.query === "string" ? params.query : "");
     const context = this.runtime.memoryAnalyticsContext?.(sessionKey) ?? {};
     const entrypoint =
       context.entrypoint === MEMORY_ANALYTICS_ENTRYPOINTS.desktop
@@ -103,7 +106,7 @@ export class MemmyMemoryTool extends Tool {
     if (!op) {
       try {
         const result = await this.spec.execute(this.client, params, this.runtime, sessionKey);
-        return formatMemmyToolResult(this.spec.name, result, params, this.runtime, sessionKey);
+        return formatMemmyToolResult(this.spec.name, result, currentUserRequest, turnId);
       } catch (error) {
         return `Error: ${error instanceof Error ? error.message : String(error)}`;
       }
@@ -120,7 +123,7 @@ export class MemmyMemoryTool extends Tool {
         success: true,
         hit_count: op.hitCount(result),
       });
-      return formatMemmyToolResult(this.spec.name, result, params, this.runtime, sessionKey);
+      return formatMemmyToolResult(this.spec.name, result, currentUserRequest, turnId);
     } catch (error) {
       this.runtime.trackMemoryAnalytics?.(op.failed, {
         ...base,
@@ -234,18 +237,14 @@ function compact<T extends JsonRecord>(value: T): T {
 function formatMemmyToolResult(
   toolName: string,
   result: any,
-  params: JsonRecord,
-  runtime: MemmyMemoryToolRuntime,
-  sessionKey: string | null,
+  currentUserRequest: string,
+  turnId: string,
 ): string {
-  const currentUserRequest = runtime.currentUserText(sessionKey)
-    ?? (typeof params.query === "string" ? params.query : "")
-    ?? "";
   if (toolName === "memmy_memory_search") {
-    return renderMemmyContextPacket(markdownFromSearchResult(result), "tool_search", currentUserRequest);
+    return renderMemmyContextPacket(markdownFromSearchResult(result), "tool_search", currentUserRequest, turnId);
   }
   if (toolName === "memmy_memory_get") {
-    return renderMemmyContextPacket(markdownFromMemoryDetail(result), "tool_get", currentUserRequest);
+    return renderMemmyContextPacket(markdownFromMemoryDetail(result), "tool_get", currentUserRequest, turnId);
   }
   return extractCurrentUserRequestText(JSON.stringify(result, null, 2));
 }

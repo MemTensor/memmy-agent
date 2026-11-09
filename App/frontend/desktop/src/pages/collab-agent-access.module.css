@@ -1,0 +1,234 @@
+/*
+ * 协作项目授权：弹窗、Agent 胶囊、设置里的授权行与 Agent 行。
+ * 尺寸与间距照着原型（460px 弹窗、28px 内边距、38px 行高）来，别随手改。
+ */
+
+:global(.modal).dialog {
+  width: min(460px, calc(100vw - 32px));
+}
+
+/* 与看板弹窗一致：一层浅遮罩，不做整窗模糊。 */
+:global(.modal-backdrop).backdrop {
+  background: rgba(17, 29, 28, 0.12);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ---------- 顶部：吉祥物 + 标题 + 一句说明 ---------- */
+
+.top {
+  padding: 8px 28px 0;
+  text-align: center;
+}
+
+.mascot {
+  margin: 0 auto 8px;
+  display: block;
+}
+
+.title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text-ink, #111d1c);
+  line-height: 1.4;
+}
+
+.lead {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 55%, transparent);
+  line-height: 1.6;
+}
+
+/* ---------- 能力清单 ---------- */
+
+.caps {
+  margin: 16px 28px 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-canvas-oat, #f4f7f6) 55%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-stone, #d6dfdc) 30%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.cap {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 13px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 78%, transparent);
+}
+
+.cap > svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--color-action-sky-hover, #3f9a8a);
+}
+
+/* ---------- Agent 胶囊 ---------- */
+
+.head {
+  margin: 16px 28px 8px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 50%, transparent);
+}
+
+.chips {
+  margin: 0 28px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone, #d6dfdc) 60%, transparent);
+  background: var(--color-background-paper, #fff);
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 70%, transparent);
+}
+
+.chipLogo {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+
+.chipMark,
+.rowMark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-action-sky, #7cc3b4) 22%, transparent);
+  color: var(--color-action-sky-hover, #3f9a8a);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* ---------- 逐个安装的结果 ---------- */
+
+.rows {
+  margin: 16px 28px 0;
+  border: 1px solid var(--color-border-stone, #d6dfdc);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+.row + .row {
+  border-top: 1px solid color-mix(in srgb, var(--color-border-stone, #d6dfdc) 60%, transparent);
+}
+
+.rowLogo {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: contain;
+  flex: none;
+}
+
+.rowName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 80%, transparent);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.statusOk {
+  color: #1f9e78;
+}
+
+.statusErr {
+  color: #d2566b;
+}
+
+.statusWait {
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 40%, transparent);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- 一句可以直接照着说的话 ---------- */
+
+.example {
+  margin: 14px 28px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border-stone, #d6dfdc);
+  background: color-mix(in srgb, var(--color-canvas-oat, #f4f7f6) 60%, transparent);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 70%, transparent);
+}
+
+.exampleAsk {
+  display: block;
+  width: fit-content;
+  margin-top: 6px;
+  padding: 5px 10px;
+  border-radius: 9px 9px 2px 9px;
+  background: color-mix(in srgb, var(--color-action-sky, #7cc3b4) 16%, transparent);
+  color: var(--color-action-sky-hover, #3f9a8a);
+  font-weight: 600;
+}
+
+/* ---------- 说明与错误 ---------- */
+
+.note {
+  margin: 14px 28px 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 50%, transparent);
+}
+
+.error {
+  margin: 12px 28px 0;
+  font-size: 12px;
+  color: #d2566b;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  width: 100%;
+}

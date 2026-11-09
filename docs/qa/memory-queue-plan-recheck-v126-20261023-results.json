@@ -1,0 +1,215 @@
+{
+  "codeRevision": "02a300e304d492cf32a7b1c507b73310e9e9061b",
+  "targetCommit": "b04f5c88c2000a1c7a936230a70401178aca4842",
+  "package": {
+    "exitCode": 0,
+    "elapsedSeconds": 210.254,
+    "commit": "02a300e304d492cf32a7b1c507b73310e9e9061b"
+  },
+  "dmgPath": "/private/tmp/memmy-queue-final-20261023/accepted/Memmy-1.2.3-arm64-02a300e3.dmg",
+  "dmgSha256": "8ce459793ec7fb108058b04cc0b33c760d6381963e1e6f1e9fb079f561b66ef6",
+  "runtime": {
+    "version": "2.1.6",
+    "buildId": "72dcf73d5d1b64c2e7db7b26262f0227d520900b7d68525ca11c5e495622f3a2",
+    "schemaVersion": 13,
+    "protocolVersion": 1,
+    "target": "darwin-arm64",
+    "entrypoint": "dist/src/server/index.js",
+    "viewer": "dist/viewer/index.html"
+  },
+  "identity": {
+    "memoryModulesCompared": 230,
+    "memoryIdenticalToPriorValidatedPackage": true,
+    "asarModulesCompared": 5
+  },
+  "repositoryChecks": [
+    {
+      "name": "lint",
+      "command": [
+        "npm",
+        "run",
+        "lint"
+      ],
+      "exitCode": 0,
+      "elapsedSeconds": 7.841,
+      "startedAtEpoch": 1792745886.0027
+    },
+    {
+      "name": "typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "exitCode": 0,
+      "elapsedSeconds": 40.041,
+      "startedAtEpoch": 1792745893.843649
+    },
+    {
+      "name": "root-test",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "exitCode": 0,
+      "elapsedSeconds": 133.594,
+      "startedAtEpoch": 1792745933.884634
+    }
+  ],
+  "backendAfterShutdownFix": {
+    "testFiles": 121,
+    "passed": 992,
+    "typecheck": 0,
+    "lint": 0
+  },
+  "rootTestComponents": {
+    "release": {
+      "passed": 30,
+      "skipped": 5
+    },
+    "packagingGuards": {
+      "passed": 124,
+      "skipped": 1
+    },
+    "contracts": 8,
+    "Memory": {
+      "passed": 2150,
+      "skipped": 1,
+      "executions": 2
+    },
+    "Migrations": {
+      "passed": 279,
+      "skipped": 1
+    },
+    "AgentSourceCore": 62,
+    "Knowledge": 48,
+    "BackendBeforeShutdownFix": 987,
+    "LocalContracts": 44,
+    "Frontend": 2505,
+    "Desktop": {
+      "passed": 1287,
+      "skipped": 126
+    },
+    "tui": 5,
+    "AgentSeparate": {
+      "passed": 7260,
+      "skipped": 80
+    }
+  },
+  "packagedCloudProbe": {
+    "counts": {
+      "interactive": 12,
+      "repair_retry": 9,
+      "import": 6,
+      "evolution": 6,
+      "maintenance": 3
+    },
+    "peakJobs": 4,
+    "peakRequests": 2,
+    "peakEmbeddingRequests": 1,
+    "badQueued": 0,
+    "elapsedMs": 654.79
+  },
+  "live": {
+    "historyBefore": 13000,
+    "historyAfter": 13000,
+    "backlogBefore": 11915,
+    "backlogAfter": 11870,
+    "nativeReadyMs": 12369.12,
+    "summaryStartObservedMs": 2175.45,
+    "scanSeconds": 315.984,
+    "scanMessages": 26000,
+    "scanResult": "Imported 0 memories and 0 skills",
+    "passed": true,
+    "healthSamples": 153,
+    "healthMedianMs": 21.17,
+    "healthP95Ms": 111.5,
+    "healthMaxMs": 662.95
+  },
+  "shutdown": {
+    "portsOpen": {
+      "19100": false,
+      "54477": false
+    },
+    "cleanup": [
+      "[quit] prepared-update:start",
+      "[quit] prepared-update:finished elapsedMs=0",
+      "[quit] runtime-services:start",
+      "[quit] runtime-services:finished elapsedMs=1146",
+      "[quit] native-history-agent:start",
+      "[quit] native-history-agent:finished elapsedMs=24",
+      "[quit] backend:start",
+      "[quit] backend:finished elapsedMs=3",
+      "[quit] renderer:start",
+      "[quit] renderer:finished elapsedMs=1",
+      "[quit] analytics:start",
+      "[quit] analytics:finished elapsedMs=0"
+    ],
+    "forcedTimeout": false
+  },
+  "retention": {
+    "passed": true,
+    "rawCount": 13005,
+    "rawSha256": "8f8b8f63113ed26940719943da49a46bd60a62a6e55ec69992b76d87e68d3e65",
+    "sourceCount": 13000,
+    "sourceIdentitySha256": "60beb096e1eff5d8829701cc462a09efe693a3b8f95abd6471323e7aca717a34",
+    "seedSha256": "1d2893b8ef0b58080a795382b9c2468d6ad3ec145242de414886696a35c0d106",
+    "quickCheck": {
+      "quick_check": "ok"
+    }
+  },
+  "nativeAfterRestart": {
+    "id": "trace_0b5aab651dcfccfc3f23",
+    "processing": {
+      "state": "ready",
+      "stage": null,
+      "error_code": null
+    },
+    "vectors": [
+      {
+        "vector_field": "vec_summary",
+        "embedding_model": "stage8-embedding-384",
+        "embedding_dim": 384
+      }
+    ],
+    "passed": true
+  },
+  "seedVectorBytes": [
+    {
+      "profile": "/private/tmp/memmy-queue-rereview-before-schema13",
+      "dimension": 384,
+      "bytes": 1536,
+      "sha256": "a98f5ec30cd21611c4db6e7db17a7a7a289ce4b9f3a4b77c7394170091332291"
+    },
+    {
+      "profile": "/private/tmp/memmy-queue-stage8-profile",
+      "dimension": 384,
+      "bytes": 1536,
+      "sha256": "a98f5ec30cd21611c4db6e7db17a7a7a289ce4b9f3a4b77c7394170091332291"
+    }
+  ],
+  "localModelEvidence": {
+    "runtimeIdentity": "all 230 Memory modules identical to final package",
+    "firstAttempt": "60 second timeout; preserved",
+    "retryPassed": true,
+    "retryElapsedMs": 64438.73,
+    "peak": 1,
+    "vectors": [
+      {
+        "vector_field": "vec_summary",
+        "embedding_model": "text-embedding-nomic-embed-text-v1.5",
+        "embedding_provider": "openai_compatible",
+        "embedding_dim": 768,
+        "n": 2
+      }
+    ]
+  },
+  "limits": [
+    "Mac arm64 only; Windows and Intel not validated",
+    "Cloud model scheduling uses controlled handlers, not a real cloud quota",
+    "No fixed seconds SLO; a running task can hold the provider permit across multiple HTTP requests",
+    "No independent background cap of 3; shared global cap is 4 per prose section 7.3",
+    "No exact full-queue runnable census or per-resource distinct waiting population; metric bases are explicit"
+  ],
+  "noPushOrPr": true
+}

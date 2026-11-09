@@ -1,0 +1,200 @@
+import { mkdtempSync, existsSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { describe, expect, it, vi } from "vitest";
+import { MemoryDb } from "../../src/storage/db.js";
+import Database from "better-sqlite3";
+import { getLoadablePath } from "sqlite-vec";
+import { migrate, getSchemaVersion, SCHEMA_VERSION, SCHEMA_MIGRATION_ID } from "../../src/storage/schema.js";
+import { Repositories } from "../../src/storage/repositories.js";
+
+// A fixed v13 snapshot from the PR base; no current-schema downgrade is involved.
+const V13_SCHEMA = readFileSync(new URL("../fixtures/schema-v13.sql", import.meta.url), "utf8");
+function createV13Database(path: string): Database.Database {
+  const db = new Database(path);
+  try {
+    db.loadExtension(getLoadablePath());
+    db.pragma("foreign_keys = ON");
+    db.exec(V13_SCHEMA);
+    expect(getSchemaVersion(db).version).toBe(13);
+    expect(db.prepare("SELECT 1 FROM sqlite_master WHERE name='idx_memories_panel_created'").get()).toBeUndefined();
+    return db;
+  } catch (error) { db.close(); throw error; }
+}
+
+describe("panel index migration", () => {
+  it("indexes only pending observations, preserving order and membership across writes and v14 reopen", () => {
+    const root = mkdtempSync(join(tmpdir(), "panel-observation-index-"));
+    const path = join(root, "memory.sqlite");
+    let db = new MemoryDb({path});
+    try {
+      const insert=db.db.prepare(`INSERT INTO memories(id,timeline,user_id,memory_value,memory_layer,status,properties_json,created_at,updated_at,deleted_at)
+        VALUES(?, 'synthetic', 'local', 'body', ?, ?, ?, '2026-10-29', '2026-10-29', ?)`);
+      const add=(id:string, schema?:number, status="activated", deleted:string|null=null, kind="observed_activity", layer="L1") => insert.run(id,layer,status,JSON.stringify({internal_info:{memory_kind:kind,external_evidence:{source:"computer_history"},...(schema===undefined?{}:{observation_memory:{schema_version:schema}})}}),deleted);
+      for(let i=0;i<131;i++) add(`pending-${String(i).padStart(3,"0")}`);
+      for(let i=0;i<200;i++) add(`processed-${i}`,1);
+      add("deleted",0,"activated","2026-10-29");add("archived",0,"archived");add("resolving",0,"resolving");add("trace",0,"activated",null,"trace");add("other-layer",0,"activated",null,"observed_activity","L2");
+      const sql=`SELECT id FROM memories WHERE deleted_at IS NULL AND status='activated' AND memory_layer='L1'
+        AND json_extract(properties_json,'$.internal_info.memory_kind')='observed_activity'
+        AND json_type(properties_json,'$.internal_info.external_evidence')='object'
+        AND COALESCE(json_extract(properties_json,'$.internal_info.observation_memory.schema_version'),0)<1
+        ORDER BY created_at DESC,id DESC LIMIT ?`;
+      const ids=()=>db.db.prepare(sql).pluck().all(100);
+      const before=ids();expect(before).toHaveLength(100);
+      db.db.exec("DROP INDEX idx_memories_panel_observation_pending");
+      expect(ids()).toEqual(before);
+      db.close();db=new MemoryDb({path}); // An already-v14 library also installs the additive index.
+      const plan=db.db.prepare("EXPLAIN QUERY PLAN "+sql).all(100) as {detail:string}[];
+      expect(plan.some(row=>row.detail.includes("idx_memories_panel_observation_pending"))).toBe(true);
+      expect(plan.some(row=>row.detail.includes("TEMP B-TREE"))).toBe(false);
+      expect(ids()).toEqual(before);
+      db.db.prepare("UPDATE memories SET properties_json=json_set(properties_json,'$.internal_info.observation_memory.schema_version',1) WHERE id=?").run(before[0]);
+      expect(ids()).not.toContain(before[0]);
+      db.db.prepare("UPDATE memories SET properties_json=json_set(properties_json,'$.internal_info.observation_memory.schema_version',0) WHERE id='processed-0'").run();
+      expect(ids()).toContain("processed-0");
+      db.db.prepare("UPDATE memories SET deleted_at='2026-10-29' WHERE id='processed-0'").run();
+      expect(ids()).not.toContain("processed-0");
+    } finally { if(db.db.open) db.close();rmSync(root,{recursive:true,force:true}); }
+  });
+
+  it("upgrades an independent v13 library without changing queue claims or retry counters", () => {
+    const root = mkdtempSync(join(tmpdir(), "panel-queue-v13-"));
+    const path = join(root, "memory.sqlite");
+    let raw: Database.Database | undefined;
+    let db: MemoryDb | undefined;
+    const capture = (connection: Database.Database) => ({
+      jobs: connection.prepare("SELECT * FROM evolution_jobs ORDER BY id").all(),
+      retries: connection.prepare("SELECT * FROM embedding_retry_queue ORDER BY id").all(),
+      deadlines: connection.prepare("SELECT * FROM worker_deadline_revision ORDER BY singleton").all()
+    });
+    try {
+      raw = createV13Database(path);
+      const repos = new Repositories(raw), at = "2026-10-28T00:00:00.000Z";
+      repos.runtime.enqueueJob({id:"preserved-claim",jobType:"reflection",status:"queued",userId:"synthetic",attempts:0,maxAttempts:3,payload:{},createdAt:at,updatedAt:at});
+      expect(repos.runtime.leaseQueuedJobs(1)).toMatchObject([{id:"preserved-claim",status:"leased",leaseCount:1,leaseRecoveryCount:0}]);
+      repos.runtime.enqueueEmbeddingRetry({targetKind:"trace",targetId:"retry-source",vectorField:"vec_summary",sourceText:"synthetic",now:Date.parse(at)});
+      expect(repos.runtime.claimDueEmbeddingRetries({now:Date.parse(at),workerId:"synthetic-worker",leaseUntil:Date.parse(at)+60_000}))
+        .toMatchObject([{status:"in_progress",claimedBy:"synthetic-worker",attempts:0,leaseCount:1,leaseRecoveryCount:0}]);
+      const before = capture(raw);
+      raw.close(); raw = undefined;
+      db = new MemoryDb({path});
+      expect(db.schemaVersion().version).toBe(SCHEMA_VERSION);
+      expect(capture(db.db)).toEqual(before);
+      const backup = new MemoryDb({path:`${path}.pre-v${SCHEMA_VERSION}.bak`,readonly:true});
+      try { expect(backup.schemaVersion().version).toBe(13); expect(capture(backup.db)).toEqual(before); }
+      finally { backup.close(); }
+      migrate(db.db);
+      expect(capture(db.db)).toEqual(before);
+    } finally {
+      if (raw?.open) raw.close();
+      if (db?.db.open) db.close();
+      rmSync(root, {recursive:true,force:true});
+    }
+  });
+
+  it("backs up an old file library and can reopen and repeat without changing facts", () => {
+    const root = mkdtempSync(join(tmpdir(), "panel-migration-"));
+    const path = join(root, "memory.sqlite");
+    let db: MemoryDb | undefined;
+    try {
+      db = new MemoryDb({ path });
+      db.db.prepare("DELETE FROM schema_migrations").run();
+      db.db.prepare("INSERT INTO schema_migrations VALUES ('009_token_usage_outbox', 9, '2026-10-01', 'old')").run();
+      db.db.prepare("DROP INDEX idx_memories_panel_created").run();
+      db.db
+        .prepare(
+          "INSERT INTO runtime_kv (key, value_json, updated_at) VALUES ('panel-test-fact', '\"kept\"', '2026-10-01')"
+        )
+        .run();
+      db.close();
+      db = new MemoryDb({ path });
+      expect(existsSync(`${path}.pre-v${SCHEMA_VERSION}.bak`)).toBe(true);
+      expect(db.schemaVersion()).toEqual({ version: SCHEMA_VERSION, lastMigrationId: SCHEMA_MIGRATION_ID });
+      migrate(db.db);
+      expect(db.db.prepare("SELECT value_json FROM runtime_kv WHERE key = 'panel-test-fact'").pluck().get()).toBe(
+        '"kept"'
+      );
+      const plan = db.db
+        .prepare(
+          "EXPLAIN QUERY PLAN SELECT id FROM memories WHERE deleted_at IS NULL AND memory_layer = 'L1' ORDER BY created_at DESC, updated_at DESC, id DESC LIMIT 20"
+        )
+        .all() as { detail: string }[];
+      expect(plan.some((row) => row.detail.includes("idx_memories_panel_created"))).toBe(true);
+      expect(plan.some((row) => row.detail.includes("TEMP B-TREE"))).toBe(false);
+      const backup = new MemoryDb({ path: `${path}.pre-v${SCHEMA_VERSION}.bak`, readonly: true });
+      expect(backup.schemaVersion().version).toBe(9);
+      expect(backup.db.prepare("SELECT value_json FROM runtime_kv WHERE key = 'panel-test-fact'").pluck().get()).toBe(
+        '"kept"'
+      );
+      backup.close();
+    } finally {
+      if (db?.db.open) db.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back index creation failures and safely retries", () => {
+    const db = new MemoryDb({ path: ":memory:" });
+    try {
+      db.db.prepare("DROP INDEX idx_memories_panel_created").run();
+      db.db.prepare("DELETE FROM schema_migrations").run();
+      db.db.prepare("INSERT INTO schema_migrations VALUES ('009_token_usage_outbox', 9, '2026-10-01', 'old')").run();
+      const prepare = db.db.prepare.bind(db.db);
+      const fail = vi.spyOn(db.db, "prepare").mockImplementation((sql) => {
+        if (sql.includes("CREATE INDEX IF NOT EXISTS idx_memories_panel_status_created"))
+          throw new Error("database or disk is full");
+        return prepare(sql);
+      });
+      expect(() => migrate(db.db)).toThrow("database or disk is full");
+      fail.mockRestore();
+      expect(db.schemaVersion().version).toBe(9);
+      expect(
+        db.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'idx_memories_panel_created'").get()
+      ).toBeUndefined();
+      migrate(db.db);
+      expect(db.schemaVersion().version).toBe(SCHEMA_VERSION);
+    } finally {
+      db.close();
+    }
+  });
+  it("leaves the old schema usable after a real SQLITE_FULL and retries with space", () => {
+    const db = createV13Database(":memory:");
+    try {
+      const insert = db
+        .prepare(`INSERT INTO memories(id,timeline,user_id,memory_value,memory_layer,created_at,updated_at)
+        VALUES(?, 'now','user',?,'L1','now','now')`);
+      db.transaction(() => {
+        for (let i = 0; i < 1500; i++) insert.run(`id-${i}`, "x".repeat(500));
+      })();
+      const pages = Number(db.pragma("page_count", { simple: true }));
+      db.pragma(`max_page_count=${pages}`);
+      expect(() => migrate(db)).toThrow(/full/);
+      expect(getSchemaVersion(db).version).toBe(13);
+      expect(db.prepare("SELECT count(*) FROM memories").pluck().get()).toBe(1500);
+      db.pragma(`max_page_count=${pages + 1000}`);
+      migrate(db);
+      expect(getSchemaVersion(db).version).toBe(SCHEMA_VERSION);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("refuses a partial preexisting backup and retries after it is moved aside", () => {
+    const root = mkdtempSync(join(tmpdir(), "panel-backup-"));
+    const path = join(root, "memory.sqlite");
+    try {
+      createV13Database(path).close();
+      writeFileSync(`${path}.pre-v${SCHEMA_VERSION}.bak`, "incomplete backup");
+      expect(() => new MemoryDb({ path })).toThrow();
+      const original = new MemoryDb({ path, readonly: true });
+      expect(original.schemaVersion().version).toBe(13);
+      original.close();
+      rmSync(`${path}.pre-v${SCHEMA_VERSION}.bak`);
+      const retry = new MemoryDb({ path });
+      expect(retry.schemaVersion().version).toBe(SCHEMA_VERSION);
+      retry.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

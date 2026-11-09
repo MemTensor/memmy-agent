@@ -1,0 +1,201 @@
+/* Shared file icons need their own dimensions for native images and SVG fallbacks. */
+.file-type-icon {
+  --file-icon-glyph: var(--file-icon-glyph-generic);
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  box-sizing: border-box;
+  min-width: 0;
+  overflow: visible;
+  background: transparent;
+  color: inherit;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.file-type-icon > svg {
+  display: block;
+  flex: none;
+  width: auto;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: visible;
+  shape-rendering: geometricPrecision;
+}
+
+.file-type-icon__native-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.file-type-icon--inline {
+  width: var(--file-icon-inline-size);
+  min-width: var(--file-icon-inline-size);
+  max-width: var(--file-icon-inline-size);
+  height: var(--file-icon-inline-size);
+  min-height: var(--file-icon-inline-size);
+  max-height: var(--file-icon-inline-size);
+  flex-basis: var(--file-icon-inline-size);
+  border-radius: var(--file-icon-inline-radius);
+  background: transparent;
+}
+
+.file-type-icon--inline > svg {
+  height: var(--file-icon-inline-size);
+}
+
+.file-type-icon--row {
+  width: var(--file-icon-row-size);
+  min-width: var(--file-icon-row-size);
+  max-width: var(--file-icon-row-size);
+  height: var(--file-icon-row-size);
+  min-height: var(--file-icon-row-size);
+  max-height: var(--file-icon-row-size);
+  flex-basis: var(--file-icon-row-size);
+  border-radius: var(--file-icon-row-radius);
+}
+
+.file-type-icon--row > svg {
+  height: var(--file-icon-row-size);
+}
+
+.file-type-icon--card {
+  width: var(--file-icon-card-size);
+  min-width: var(--file-icon-card-size);
+  max-width: var(--file-icon-card-size);
+  height: var(--file-icon-card-size);
+  min-height: var(--file-icon-card-size);
+  max-height: var(--file-icon-card-size);
+  flex-basis: var(--file-icon-card-size);
+  border-radius: var(--file-icon-card-radius);
+}
+
+.file-type-icon--card:not(.file-type-icon--folder) {
+  --file-icon-card-size: 40px;
+}
+
+.file-type-icon--card > svg {
+  height: var(--file-icon-card-size);
+}
+
+.file-type-icon__paper {
+  fill: var(--file-icon-paper);
+}
+
+.file-type-icon__fold {
+  fill: var(--file-icon-paper-fold);
+}
+
+.file-type-icon__fold-edge {
+  fill: none;
+  stroke: var(--file-icon-paper-fold-edge);
+  stroke-width: 0.5;
+}
+
+.file-type-icon__glyph {
+  color: var(--file-icon-glyph);
+}
+
+.file-type-icon--card .file-type-icon__glyph {
+  color: #ffffff;
+  stroke-width: 1.7;
+  transform: translateY(-2px) scale(1.2);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.file-type-icon__format-label {
+  fill: currentColor;
+  color: var(--file-icon-glyph);
+  font-family: var(--font-sans);
+  font-size: 5.2px;
+  font-weight: 700;
+  letter-spacing: 0.35px;
+}
+
+.file-type-icon--card .file-type-icon__paper {
+  fill: var(--file-icon-glyph);
+}
+
+.file-type-icon--card .file-type-icon__fold {
+  fill: #ffffff;
+  opacity: 0.24;
+}
+
+.file-type-icon--card .file-type-icon__fold-edge {
+  stroke: #ffffff;
+  opacity: 0.35;
+}
+
+.file-type-icon--card .file-type-icon__format-label {
+  color: #ffffff;
+  font-size: 6.5px;
+  letter-spacing: 0.25px;
+}
+
+.file-type-icon--pdf { --file-icon-glyph: var(--file-icon-glyph-pdf); }
+.file-type-icon--word { --file-icon-glyph: var(--file-icon-glyph-word); }
+.file-type-icon--spreadsheet { --file-icon-glyph: var(--file-icon-glyph-spreadsheet); }
+.file-type-icon--presentation { --file-icon-glyph: var(--file-icon-glyph-presentation); }
+.file-type-icon--markdown { --file-icon-glyph: var(--file-icon-glyph-markdown); }
+.file-type-icon--text { --file-icon-glyph: var(--file-icon-glyph-text); }
+.file-type-icon--code { --file-icon-glyph: var(--file-icon-glyph-code); }
+.file-type-icon--image { --file-icon-glyph: var(--file-icon-glyph-image); }
+.file-type-icon--video { --file-icon-glyph: var(--file-icon-glyph-video); }
+.file-type-icon--audio { --file-icon-glyph: var(--file-icon-glyph-audio); }
+.file-type-icon--archive { --file-icon-glyph: var(--file-icon-glyph-archive); }
+
+.file-type-icon--card.file-type-icon--markdown { --file-icon-glyph: #7051c5; }
+.file-type-icon--card[data-file-extension=".tex"] { --file-icon-glyph: #128274; }
+.file-type-icon--card[data-file-extension=".bib"] { --file-icon-glyph: #b66a14; }
+.file-type-icon--card[data-file-extension=".sty"] { --file-icon-glyph: #5965a8; }
+
+.file-type-icon--folder {
+  background: transparent;
+}
+
+.file-type-icon--folder.file-type-icon--inline {
+  background: transparent;
+}
+
+.file-type-icon--folder > svg {
+  width: 100%;
+  height: auto;
+}
+
+.file-type-icon__folder-shadow {
+  fill: var(--file-icon-shadow);
+  transform: translate(0.6px, 0.6px);
+}
+
+.file-type-icon__folder-back {
+  fill: var(--file-icon-folder-back);
+  stroke: var(--file-icon-folder-edge);
+  stroke-linejoin: round;
+  stroke-width: 0.7;
+}
+
+.file-type-icon__folder-paper {
+  fill: var(--file-icon-folder-paper);
+  stroke: var(--file-icon-paper-edge);
+  stroke-width: 0.8;
+}
+
+.file-type-icon__folder-front {
+  fill: var(--file-icon-folder-front);
+  stroke: var(--file-icon-folder-edge);
+  stroke-linejoin: round;
+  stroke-width: 0.7;
+}
+
+.file-type-icon__folder-highlight {
+  fill: none;
+  stroke: var(--file-icon-folder-highlight);
+  stroke-linecap: round;
+  stroke-width: 1.1;
+}

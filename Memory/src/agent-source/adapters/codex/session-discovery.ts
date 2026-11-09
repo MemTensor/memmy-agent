@@ -56,7 +56,7 @@ async function listRolloutFiles(
         continue;
       }
 
-      if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(entry.name)) {
+      if (entry.isFile() && entry.name.startsWith("rollout-") && (entry.name.indexOf(".jsonl") === entry.name.length - 6) && !/\.jsonl\.bak-/u.test(entry.name)) {
         const fileStat = await stat(path);
         files.push({ path, mtimeMs: fileStat.mtimeMs });
       }

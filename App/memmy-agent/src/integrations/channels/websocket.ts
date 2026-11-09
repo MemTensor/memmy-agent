@@ -1,3 +1,4 @@
+import { agentTaskActivity } from "../../core/agent-runtime/task-activity.js";
 import { historySummaryRuntime } from "../../providers/history-summary-runtime.js";
 import crypto from "node:crypto";
 import * as childProcess from "node:child_process";
@@ -17,12 +18,20 @@ import {
 import { requestMcpReload } from "../../core/agent-runtime/tools/mcp.js";
 import { BaseChannel, type ChannelHandleMessageOptions } from "./base.js";
 import { CronNotificationOutbox } from "./cron-notification-outbox.js";
+import { AssistRunRecorder } from "./webui-assist-run.js";
+import { renderAssistRequestSection } from "../../assist-request/index.js";
 import {
   OUTBOUND_META_AGENT_UI,
   OutboundMessage,
   parseTurnSource,
   type TurnSource,
 } from "../../core/runtime-messages/index.js";
+import {
+  respondToAgentQuestion,
+  isAgentQuestionPending,
+  type AgentQuestionAnswer,
+  type AgentQuestionResponse,
+} from "../../core/agent-runtime/tools/ask-question.js";
 import { builtinCommandPalette } from "../../command/builtin.js";
 import { loadConfig } from "../../config/loader.js";
 import {
@@ -37,6 +46,7 @@ import type {
 } from "../../core/agent-runtime/goal-runtime.js";
 import type {
   RemoveQueuedWebuiMessageResult,
+  ReorderQueuedMessageResult,
   SteerQueuedMessageResult,
   StopExpectedTurnResult,
   WebuiQueueMessageDescriptor,
@@ -45,9 +55,11 @@ import type {
 import { getDataDir, getMediaDir, getStandaloneTaskWorkspacesDir, getWorkspacePath } from "../../config/paths.js";
 import type { CronService } from "../../cron/service.js";
 import { goalStateWsBlob, type GoalStatus } from "../../core/session/goal-state.js";
+import { taskPlanStateWsBlob } from "../../core/session/task-plan-state.js";
 import {
   readWebuiSessionBinding,
   Session,
+  WebuiSessionBindingError,
   WEBUI_PROJECT_ID_METADATA_KEY,
   WEBUI_WORKSPACE_CWD_METADATA_KEY,
 } from "../../core/session/manager.js";
@@ -82,6 +94,13 @@ import {
   type WebuiProject,
   type WebuiSessionTarget,
 } from "../../entrypoints/frontend-bridge/projects.js";
+import {
+  listWorkspaceFiles,
+  readWorkspaceFile,
+  resolveWorkspaceFile,
+  WorkspaceFilesError,
+  type WorkspaceFilesRootKind,
+} from "../../entrypoints/frontend-bridge/workspace-files.js";
 import {
   GuiSessionProjection,
   GuiSessionProjectionError,
@@ -129,7 +148,7 @@ type WorkspaceEnvironmentContextResult =
   | { ok: false; response: HttpLikeResponse };
 type RuntimeModelNameResolver = (() => string | null | undefined) | null;
 type RuntimeToolNamesResolver = (() => string[] | null | undefined) | null;
-type WebuiMediaKind = "image" | "video" | "file";
+type WebuiMediaKind = "image" | "video" | "audio" | "file";
 type WebuiArtifactKind = WebuiMediaKind | "directory";
 type WebuiMediaAttachment = {
   kind: WebuiMediaKind;
@@ -173,7 +192,7 @@ type ResolvedArtifactPath = {
   mediaUrl?: string;
 };
 type WebuiUploadClassification = {
-  kind: "image" | "file";
+  kind: "image" | "file" | "audio";
   mime: string;
   extension: string;
 };
@@ -186,6 +205,7 @@ type WebuiQueuedMessage = {
   queue_surface?: "chat_composer" | null;
   turn_admission?: "steer";
   turn_id?: string;
+  user_event_on_consume?: boolean;
 };
 type ClientSurface = "gui" | "tui";
 type InflightWebuiMessageRequest = {
@@ -219,6 +239,11 @@ type WebSocketChannelOptions = {
     sessionKey: string,
     clientRequestId: string,
   ) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>;
+  reorderQueuedWebuiMessages?: (
+    sessionKey: string,
+    orderedIds: string[],
+    expectedRevision: number,
+  ) => ReorderQueuedMessageResult | Promise<ReorderQueuedMessageResult>;
   steerQueuedWebuiMessage?: (
     sessionKey: string,
     clientRequestId: string,
@@ -247,6 +272,7 @@ export type WebuiMessageDigestInput = {
   expectedTurnId: string | null;
   thinkingEnabled?: boolean;
   thinkingLevel?: string | null;
+  interruptPendingTurnId?: string | null;
 };
 
 export function computeWebuiMessageDigest(input: WebuiMessageDigestInput): string {
@@ -262,6 +288,7 @@ export function computeWebuiMessageDigest(input: WebuiMessageDigestInput): strin
     expected_turn_id: input.expectedTurnId,
     thinking_enabled: input.thinkingEnabled ?? null,
     thinking_level: input.thinkingLevel ?? null,
+    ...(input.interruptPendingTurnId ? { interrupt_pending_turn_id: input.interruptPendingTurnId } : {}),
   })).digest("hex");
 }
 
@@ -269,6 +296,7 @@ const CHAT_ID_RE = /^[A-Za-z0-9_:-]{1,64}$/;
 const API_KEY_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
 const WEBUI_LANGUAGE_VALUES = new Set<WebuiLanguage>(["zh-CN", "en-US"]);
 const TURN_CONTENT_EVENTS = new Set([
+  "agent_question_response",
   "context_compaction",
   "delta",
   "file_edit",
@@ -294,6 +322,44 @@ const MCP_PRESET_ACTIONS_BY_PATH: Record<string, string> = {
   "/api/settings/mcp-presets/tools": "tools",
   "/api/settings/mcp-presets/reload": "reload",
 };
+
+function normalizeAgentQuestionResponse(
+  requestId: unknown,
+  value: unknown,
+  cancelled?: unknown,
+): AgentQuestionResponse | null {
+  if (typeof requestId !== "string" || !UUID_RE.test(requestId)) return null;
+  if (cancelled === true) return Array.isArray(value) && value.length === 0 ? { requestId, answers: [], cancelled: true } : null;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 4) return null;
+  const answers: AgentQuestionAnswer[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const item = raw as Record<string, unknown>;
+    const questionId = typeof item.question_id === "string"
+      ? item.question_id.trim()
+      : typeof item.questionId === "string"
+        ? item.questionId.trim()
+        : "";
+    const rawSelected = Array.isArray(item.selected_option_ids)
+      ? item.selected_option_ids
+      : Array.isArray(item.selectedOptionIds)
+        ? item.selectedOptionIds
+        : null;
+    if (!questionId || questionId.length > 64 || !rawSelected || rawSelected.length > 8) return null;
+    const selectedOptionIds = rawSelected.map((entry) => typeof entry === "string" ? entry.trim() : "");
+    if (selectedOptionIds.some((entry) => !entry || entry.length > 64)) return null;
+    const rawOtherText = item.other_text ?? item.otherText;
+    if (rawOtherText != null && typeof rawOtherText !== "string") return null;
+    const otherText = typeof rawOtherText === "string" ? rawOtherText.trim() : "";
+    if (otherText.length > 2_000) return null;
+    answers.push({
+      questionId,
+      selectedOptionIds,
+      ...(otherText ? { otherText } : {}),
+    });
+  }
+  return { requestId, answers };
+}
 
 const MAX_WEBUI_UPLOAD_BODY_BYTES = 256 * 1024 * 1024;
 // Control characters and the escaped path separators are intentional filename exclusions.
@@ -321,6 +387,21 @@ const TEXT_MIME_BY_EXTENSION: Record<string, string> = {
   ".ini": "text/plain",
   ".cfg": "text/plain",
 };
+const CODE_TEXT_EXTENSIONS = new Set([
+  ".astro", ".bib", ".c", ".cc", ".cjs", ".cpp", ".css", ".cts", ".go", ".gql",
+  ".graphql", ".h", ".hpp", ".java", ".jsx", ".mjs", ".mts", ".properties", ".py",
+  ".rb", ".rs", ".sh", ".sql", ".svelte", ".tex", ".ts", ".tsx", ".vue",
+]);
+const AUDIO_MIME_BY_EXTENSION: Record<string, string> = {
+  ".aac": "audio/aac",
+  ".flac": "audio/flac",
+  ".m4a": "audio/mp4",
+  ".mp3": "audio/mpeg",
+  ".ogg": "audio/ogg",
+  ".opus": "audio/opus",
+  ".wav": "audio/wav",
+  ".webm": "audio/webm",
+};
 const FILE_MIME_ALLOWED = new Set([
   ...Object.values(DOCUMENT_MIME_BY_EXTENSION),
   ...Object.values(TEXT_MIME_BY_EXTENSION),
@@ -332,7 +413,31 @@ const DATA_URL_MIME_RE = /^data:([^;]+);base64,/i;
 const MAX_ISSUED_TOKENS = 10_000;
 const MAX_HTTP_JSON_BODY_BYTES = 64 * 1024;
 const MAX_ARTIFACT_STAGING_BYTES = 100 * 1024 * 1024;
+/** Upload target that keeps the file in the default workspace's recordings folder. */
+const WEBUI_RECORDINGS_TARGET = "recordings";
+const WEBUI_RECORDINGS_DIR = "recordings";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** 成员协助里由 Memmy 执行的那一轮，派发时用这个发送方：与人在界面里发的消息区分开。 */
+const ASSIST_RUN_CLIENT_ID = "memmy-assist";
+
+/**
+ * 协助任务上记的请求信息：界面据此说明「这是谁的请求」。只留已知字段，每个都限长度，
+ * 不认识的一律丢掉，避免把任意内容写进会话。
+ */
+function assistRunMetadata(value: unknown): Record<string, string | number> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const out: Record<string, string | number> = {};
+  for (const key of ["requestId", "threadId", "cloudProjectId", "requesterName", "requesterId", "via", "title"]) {
+    const item = raw[key];
+    if (typeof item === "string" && item.trim()) out[key] = item.trim().slice(0, 200);
+  }
+  // 交给模型、不在任务里显示的要求（结果的写法）：由协助钩子放进系统提示词。
+  if (typeof raw.context === "string" && raw.context.trim()) out.context = raw.context.trim().slice(0, 2_000);
+  if (typeof raw.attempt === "number" && Number.isSafeInteger(raw.attempt) && raw.attempt > 0) out.attempt = raw.attempt;
+  return out.requestId ? out : null;
+}
 
 export function stripTrailingSlash(value: string): string {
   if (!value) return "/";
@@ -482,10 +587,39 @@ export function sniffImageMime(bytes: Uint8Array): string | null {
   return null;
 }
 
+function isAudioOnlyWebm(filePath: string, bytes?: Buffer): boolean {
+  if (path.extname(filePath).toLowerCase() !== ".webm") return false;
+  let header: Buffer;
+  if (bytes) {
+    header = bytes.subarray(0, 4096);
+  } else {
+    try {
+      const fd = fs.openSync(filePath, "r");
+      try {
+        header = Buffer.alloc(4096);
+        header = header.subarray(0, fs.readSync(fd, header, 0, header.length, 0));
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return false;
+    }
+  }
+  const trackHeader = header.toString("latin1");
+  return /A_(?:OPUS|VORBIS)/u.test(trackHeader)
+    && !/V_(?:VP8|VP9|AV1|MPEG4|THEORA)/u.test(trackHeader);
+}
+
+function mediaMimeForPath(filePath: string, bytes?: Buffer): string {
+  if (isAudioOnlyWebm(filePath, bytes)) return "audio/webm";
+  return String(lookupMime(path.basename(filePath)) || "application/octet-stream");
+}
+
 function mediaKindForPath(filePath: string): WebuiMediaKind {
-  const mime = String(lookupMime(path.basename(filePath)) || "");
+  const mime = mediaMimeForPath(filePath);
   if (mime.startsWith("image/")) return "image";
   if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
   return "file";
 }
 
@@ -707,6 +841,11 @@ export class WebSocketChannel extends BaseChannel {
   activeTurnIdByChatId = new Map<string, string>();
   activeTurnSourceByChatId = new Map<string, TurnSource>();
   connectionSurface = new Map<any, ClientSurface>();
+  /**
+   * 成员协助里由 Memmy 执行的几轮，按任务 id 记着：本机后端据此读取进度、停止执行。
+   * 每一轮由一个服务端连接订阅，与界面收到同一份事件。
+   */
+  private readonly assistRuns = new Map<string, { recorder: AssistRunRecorder; connection: any }>();
   mediaSecret = crypto.randomBytes(32);
   settingsRestartSections = new Set<string>();
   sessionManager: any = null;
@@ -751,6 +890,7 @@ export class WebSocketChannel extends BaseChannel {
   activeGoalStopHandler: WebSocketChannelOptions["activeGoalStopHandler"] = undefined;
   getWebuiQueueSnapshot: WebSocketChannelOptions["getWebuiQueueSnapshot"] = undefined;
   removeQueuedWebuiMessage: WebSocketChannelOptions["removeQueuedWebuiMessage"] = undefined;
+  reorderQueuedWebuiMessages: WebSocketChannelOptions["reorderQueuedWebuiMessages"] = undefined;
   steerQueuedWebuiMessage: WebSocketChannelOptions["steerQueuedWebuiMessage"] = undefined;
   stopExpectedTurn: WebSocketChannelOptions["stopExpectedTurn"] = undefined;
   goalControlConnections = new Map<string, Set<any>>();
@@ -785,6 +925,7 @@ export class WebSocketChannel extends BaseChannel {
     this.activeGoalStopHandler = options.activeGoalStopHandler ?? config?.activeGoalStopHandler;
     this.getWebuiQueueSnapshot = options.getWebuiQueueSnapshot ?? config?.getWebuiQueueSnapshot;
     this.removeQueuedWebuiMessage = options.removeQueuedWebuiMessage ?? config?.removeQueuedWebuiMessage;
+    this.reorderQueuedWebuiMessages = options.reorderQueuedWebuiMessages ?? config?.reorderQueuedWebuiMessages;
     this.steerQueuedWebuiMessage = options.steerQueuedWebuiMessage ?? config?.steerQueuedWebuiMessage;
     this.stopExpectedTurn = options.stopExpectedTurn ?? config?.stopExpectedTurn;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
@@ -968,6 +1109,7 @@ export class WebSocketChannel extends BaseChannel {
       queue_surface: descriptor.queueSurface,
       ...(descriptor.turnAdmission ? { turn_admission: descriptor.turnAdmission } : {}),
       ...(descriptor.turnId ? { turn_id: descriptor.turnId } : {}),
+      ...(descriptor.turnAdmission === "steer" ? { user_event_on_consume: true } : {}),
     };
   }
 
@@ -1109,6 +1251,7 @@ export class WebSocketChannel extends BaseChannel {
       chat_id: chatId,
       text: typeof message.content === "string" ? visibleWebuiUserContent(message.content) : "",
       client_request_id: clientRequestId,
+      ...(message.webui_queue_steer_recovery ? { queue_steer_repaired: true } : {}),
     };
     const source = parseTurnSource(message.turn_source);
     if (source) wire.source = source;
@@ -1234,6 +1377,17 @@ export class WebSocketChannel extends BaseChannel {
     await this.sendGoalState(chatId, blob);
   }
 
+  async maybePushTaskPlanState(chatId: string): Promise<void> {
+    if (!this.sessionManager) return;
+    const sessionKey = this.canonicalSessionKeyForChatId(chatId);
+    if (!sessionKey) return;
+    const row = this.readSessionFile(sessionKey);
+    const metadata = row && typeof row.metadata === "object" ? row.metadata : {};
+    const blob = taskPlanStateWsBlob(metadata);
+    if (!blob.plan_id) return;
+    await this.sendTaskPlanState(chatId, blob);
+  }
+
   async maybePushTurnRunWallClock(chatId: string): Promise<void> {
     const terminalRun = this.terminalRunStateForChatId(chatId);
     const startedAt = websocketTurnWallStartedAt(chatId)
@@ -1303,6 +1457,7 @@ export class WebSocketChannel extends BaseChannel {
 
   async hydrateAfterSubscribe(chatId: string): Promise<void> {
     await this.maybePushActiveGoalState(chatId);
+    await this.maybePushTaskPlanState(chatId);
     await this.maybePushTurnRunWallClock(chatId);
   }
 
@@ -1580,6 +1735,190 @@ export class WebSocketChannel extends BaseChannel {
     });
   }
 
+  /**
+   * 成员协助：在项目下新建一条任务，把另一位成员的请求作为第一条消息交给 Memmy 执行。
+   *
+   * <p>任务先建好再派发：项目绑定、标题（用请求标题，模型不再另起）和协助标记都写在会话上，界面据此把它
+   * 显示成一条普通的项目任务。派发走与界面完全相同的路径（{@link dispatchEnvelope} 的 `message`），由一个
+   * 服务端连接订阅这条任务，执行方在界面里打开它看到的就是同一轮。</p>
+   *
+   * <p>带 `chat_id` 时是同一次排查的后续请求：续在同一条任务里，Memmy 记得前面查到的内容。</p>
+   */
+  async handleAssistRunStart(request: any): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    if (!this.sessionManager) return httpError(503, "session manager unavailable");
+    let decoded: any;
+    try {
+      decoded = JSON.parse(requestBodyText(request));
+    } catch {
+      return httpError(400, "body must be JSON");
+    }
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return httpError(400, "body must be an object");
+    const content = typeof decoded.content === "string" ? decoded.content.trim() : "";
+    // 送回发起方的结果里带着完整回复（云端上限 64KB），请求本身也可能较长：按 80,000 字放行。
+    if (!content || content.length > 80_000) return httpError(400, "content is required");
+    const title = typeof decoded.title === "string" ? decoded.title.trim().slice(0, 120) : "";
+    const projectId = typeof decoded.project_id === "string" && UUID_RE.test(decoded.project_id)
+      ? decoded.project_id
+      : null;
+    const assist = assistRunMetadata(decoded.assist);
+    // 「deliver」：把协助结果送回发起方已有的任务，只续发，不建任务，也不改任务上的协助标记。
+    const deliver = decoded.mode === "deliver";
+
+    const continuing = typeof decoded.chat_id === "string"
+      && UUID_RE.test(decoded.chat_id)
+      && this.sessionManager.get(`websocket:${decoded.chat_id}`)
+      ? decoded.chat_id as string
+      : null;
+    if (deliver && !continuing) return httpJsonResponse({ error: "chat_not_found" }, { status: 404 });
+    const chatId = continuing ?? crypto.randomUUID();
+    const sessionKey = `websocket:${chatId}`;
+    if (continuing) {
+      if (this.assistRuns.get(chatId)?.recorder.finished === false) {
+        return httpJsonResponse({ error: "run_in_progress" }, { status: 409 });
+      }
+      if (assist && !deliver) {
+        const session = this.sessionManager.get(sessionKey) as Session;
+        session.metadata.assistRequest = assist;
+        this.sessionManager.save(session, { fsync: true });
+      }
+    } else {
+      let binding: { projectId: string | null; cwd: string };
+      try {
+        binding = this.assistRunBinding(projectId);
+      } catch (error) {
+        const status = error instanceof WebuiProjectError ? error.status : 422;
+        return httpJsonResponse({ error: this.webuiBindingErrorReason(error) }, { status });
+      }
+      const session = new Session({ key: sessionKey });
+      session.metadata.webui = true;
+      session.metadata[WEBUI_PROJECT_ID_METADATA_KEY] = binding.projectId;
+      session.metadata[WEBUI_WORKSPACE_CWD_METADATA_KEY] = binding.cwd;
+      if (title) {
+        session.metadata.title = title;
+        session.metadata.titleUserEdited = true;
+      }
+      if (assist) session.metadata.assistRequest = assist;
+      this.sessionManager.save(session, { fsync: true });
+    }
+
+    const clientRequestId = crypto.randomUUID();
+    const recorder = new AssistRunRecorder({ chatId, clientRequestId });
+    const connection = this.assistRunConnection(recorder);
+    this.rememberAssistRun(chatId, recorder, connection);
+    this.attachConnection(connection, chatId);
+    await this.dispatchEnvelope(connection, ASSIST_RUN_CLIENT_ID, {
+      type: "message",
+      chat_id: chatId,
+      content,
+      webui: true,
+      client_request_id: clientRequestId,
+      turn_admission: "queue",
+    });
+    // 新任务出现在侧栏与项目里：界面收到这条通知会重新读取任务列表。
+    this.queueGlobalSessionUpdated(chatId, "metadata");
+    const snapshot: Record<string, unknown> = { ...recorder.snapshot() };
+    // 这一轮实际交给模型、不在任务里显示的那段系统提示词：协助会话里与提示词分开显示。
+    const hidden = !deliver && assist && typeof assist.context === "string" ? renderAssistRequestSection(assist.context) : "";
+    if (hidden) snapshot.prompt_context = hidden;
+    return httpJsonResponse(snapshot, { status: recorder.status === "failed" ? 409 : 202 });
+  }
+
+  handleAssistRunRead(request: any, chatId: string): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const run = this.assistRuns.get(chatId);
+    if (!run) return httpJsonResponse({ error: "run_not_found" }, { status: 404 });
+    const snapshot = run.recorder.snapshot();
+    // 回答若没有经由事件送达（例如只落进了会话），收尾后从会话里补上最后一条回答。
+    if (run.recorder.finished && !snapshot.reply) snapshot.reply = this.lastAssistantReply(`websocket:${chatId}`);
+    return httpJsonResponse(snapshot);
+  }
+
+  async handleAssistRunStop(request: any, chatId: string): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    const run = this.assistRuns.get(chatId);
+    if (!run) return httpJsonResponse({ error: "run_not_found" }, { status: 404 });
+    if (!run.recorder.finished) {
+      // 与界面里点「停止」同一条路径：停下当前这一轮，订阅方收到 stop_result。
+      await this.dispatchEnvelope(run.connection, ASSIST_RUN_CLIENT_ID, { type: "stop", chat_id: chatId });
+      // 还在排队、没有开始的那一轮不会有 stop_result，这里直接落定。
+      run.recorder.finish("stopped");
+    }
+    return httpJsonResponse(run.recorder.snapshot());
+  }
+
+  private assistRunBinding(projectId: string | null): { projectId: string | null; cwd: string } {
+    if (!projectId) return { projectId: null, cwd: this.createStandaloneTaskCwd() };
+    const store = this.requireProjectStore();
+    if (store.snapshot().state === "corrupt") throw new WebuiProjectError("project_registry_corrupt", 503);
+    if (store.isDeleting(projectId)) throw new WebuiProjectError("project_removed", 409);
+    const project = store.getActive(projectId);
+    if (!project) throw new WebuiProjectError("project_not_found", 404);
+    let cwd: string;
+    try {
+      cwd = assertWebuiWorkspaceAvailable(project.rootPath);
+    } catch {
+      throw new WebuiProjectError("project_unavailable", 422);
+    }
+    return { projectId: project.id, cwd };
+  }
+
+  /** 订阅协助任务的服务端连接：收到的每个事件交给记录器，这一轮结束后退订。 */
+  private assistRunConnection(recorder: AssistRunRecorder): any {
+    const connection = {
+      remoteAddress: null,
+      send: (raw: string) => {
+        try {
+          recorder.consume(JSON.parse(raw));
+        } catch {
+          // 不是 JSON 的推送与这一轮无关。
+        }
+      },
+      close: () => undefined,
+    };
+    const unsubscribe = recorder.onChange(() => {
+      if (!recorder.finished) return;
+      unsubscribe();
+      this.safeCleanupConnection(connection);
+      // 界面没有订阅这条任务时收不到这一轮的结束事件：广播一次，让侧栏与项目里的「进行中」状态及时消失。
+      this.queueGlobalSessionUpdated(recorder.chatId, "metadata");
+    });
+    return connection;
+  }
+
+  /** 记住这一轮；结束超过一小时的不再保留，总数也有上限。 */
+  private rememberAssistRun(chatId: string, recorder: AssistRunRecorder, connection: any): void {
+    const previous = this.assistRuns.get(chatId);
+    if (previous && previous.connection !== connection) this.safeCleanupConnection(previous.connection);
+    this.assistRuns.set(chatId, { recorder, connection });
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const [key, run] of this.assistRuns) {
+      if (run.recorder.finished && (run.recorder.finishedAt ?? 0) < cutoff) this.assistRuns.delete(key);
+    }
+    while (this.assistRuns.size > 50) {
+      const oldest = this.assistRuns.keys().next().value;
+      if (oldest === undefined) break;
+      const run = this.assistRuns.get(oldest);
+      if (run && !run.recorder.finished) break;
+      this.assistRuns.delete(oldest);
+    }
+  }
+
+  private lastAssistantReply(sessionKey: string): string {
+    const session = this.sessionManager?.get?.(sessionKey) as Session | null;
+    const messages = Array.isArray(session?.messages) ? session!.messages : [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message?.role === "user") break;
+      if (message?.role === "assistant" && typeof message.content === "string" && message.content.trim()) {
+        return message.content.trim();
+      }
+    }
+    return "";
+  }
+
   handleWebuiSidebarStateUpdate(request: any): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     let decoded: any;
@@ -1664,10 +2003,11 @@ export class WebSocketChannel extends BaseChannel {
       const body = this.parseProjectBody(request);
       const keys = Object.keys(body);
       if (
-        keys.some((key) => !["mode", "path", "name"].includes(key))
+        keys.some((key) => !["mode", "path", "name", "allowShared"].includes(key))
         || typeof body.path !== "string"
         || (body.mode !== "blank" && body.mode !== "existing")
         || (body.name != null && typeof body.name !== "string")
+        || (body.allowShared != null && typeof body.allowShared !== "boolean")
       ) {
         throw new WebuiProjectError("project_request_invalid", 400);
       }
@@ -1680,7 +2020,9 @@ export class WebSocketChannel extends BaseChannel {
           return false;
         }
       });
-      const project = this.requireProjectStore().add(body.path, body.mode, body.name);
+      const project = this.requireProjectStore().add(body.path, body.mode, body.name, {
+        allowShared: body.allowShared === true
+      });
       return httpJsonResponse(
         { project, snapshot: this.webuiSessionSnapshot() },
         { status: existing ? 200 : 201 },
@@ -1816,7 +2158,13 @@ export class WebSocketChannel extends BaseChannel {
       const diff = await readWorkspaceFileDiff(environment, relativePath);
       return diff ? httpJsonResponse(diff) : httpError(404, "changed file not found");
     } catch (error) {
-      if (error instanceof WorkspaceEnvironmentError) return httpError(error.status, error.code);
+      if (error instanceof WorkspaceEnvironmentError) {
+        return httpJsonResponse({
+          code: error.code,
+          message: error.code,
+          ...(error.worktreePath ? { worktreePath: error.worktreePath } : {}),
+        }, { status: error.status });
+      }
       throw error;
     }
   }
@@ -2117,6 +2465,160 @@ export class WebSocketChannel extends BaseChannel {
     return this.workspaceEnvironmentResponse(request, result.context, view);
   }
 
+  handleWorkspaceFiles(
+    request: HttpRequestLike,
+    key: string,
+    view: "listing" | "file" | "open" | "reveal" = "listing",
+  ): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const expectedMethod = view === "open" || view === "reveal" ? "POST" : "GET";
+    if ((request.method ?? "GET").toUpperCase() !== expectedMethod) return httpError(405, "method not allowed");
+    if (!this.sessionManager) return httpError(503, "session manager unavailable");
+
+    try {
+      const decodedKey = decodeGuiSessionApiKey(key);
+      if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
+      let resolved: ResolvedGuiSession;
+      try {
+        resolved = this.resolveGuiSession(decodedKey);
+      } catch (error) {
+        if (error instanceof GuiSessionProjectionError && error.code === "session_binding_invalid") {
+          return httpJsonResponse(
+            { code: "workspace_missing", message: "workspace_missing" },
+            { status: 422 },
+          );
+        }
+        if (error instanceof GuiSessionProjectionError) return httpError(error.status, error.code);
+        return httpError(404, "session not found");
+      }
+      const session = this.sessionManager.get?.(resolved.canonicalSessionKey) as Session | null;
+      if (!session) return httpError(404, "session not found");
+      const binding = readWebuiSessionBinding(session);
+
+      let rootPath = binding.cwd;
+      let rootKind: WorkspaceFilesRootKind = "task";
+      let rootLabel = path.basename(binding.cwd) || "Task files";
+      if (binding.projectId !== null) {
+        const project = this.activeProject(binding.projectId);
+        rootPath = project.rootPath;
+        rootKind = "project";
+        rootLabel = project.name;
+      }
+      return this.workspaceFilesResponse(request, rootPath, rootKind, rootLabel, view);
+    } catch (error) {
+      if (error instanceof WorkspaceFilesError) {
+        return httpJsonResponse(
+          { code: error.code, message: error.message },
+          { status: error.status },
+        );
+      }
+      if (error instanceof WebuiSessionBindingError) {
+        return httpJsonResponse(
+          { code: error.code, message: error.message },
+          { status: 422 },
+        );
+      }
+      if (error instanceof WebuiProjectError) return this.projectErrorResponse(error);
+      return httpJsonResponse(
+        { code: "workspace_files_unavailable", message: "workspace files unavailable" },
+        { status: 500 },
+      );
+    }
+  }
+
+  handleProjectWorkspaceFiles(
+    request: HttpRequestLike,
+    rawId: string,
+    view: "listing" | "file" | "open" | "reveal" = "listing",
+  ): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const expectedMethod = view === "open" || view === "reveal" ? "POST" : "GET";
+    if ((request.method ?? "GET").toUpperCase() !== expectedMethod) return httpError(405, "method not allowed");
+    try {
+      const id = decodeApiKey(rawId);
+      if (!id) throw new WebuiProjectError("project_not_found", 404);
+      const project = this.activeProject(id);
+      const rootPath = assertWebuiWorkspaceAvailable(project.rootPath);
+      if (rootPath !== project.rootPath) {
+        throw new WebuiProjectError("project_directory_unavailable", 422);
+      }
+      return this.workspaceFilesResponse(request, rootPath, "project", project.name, view);
+    } catch (error) {
+      if (error instanceof WorkspaceFilesError) {
+        return httpJsonResponse(
+          { code: error.code, message: error.message },
+          { status: error.status },
+        );
+      }
+      if (error instanceof WebuiProjectError) return this.projectErrorResponse(error);
+      return httpJsonResponse(
+        { code: "workspace_files_unavailable", message: "workspace files unavailable" },
+        { status: 500 },
+      );
+    }
+  }
+
+  private workspaceFilesResponse(
+    request: HttpRequestLike,
+    rootPath: string,
+    rootKind: WorkspaceFilesRootKind,
+    rootLabel: string,
+    view: "listing" | "file" | "open" | "reveal",
+  ): HttpLikeResponse {
+    const [, query] = parseRequestPath(String(request.path ?? ""));
+    const relativePath = queryFirst(query, "path") ?? "";
+    if (view === "listing") {
+      return httpJsonResponse(listWorkspaceFiles(rootPath, {
+        rootKind,
+        rootLabel,
+        relativePath,
+      }));
+    }
+
+    if (view === "open") {
+      const file = resolveWorkspaceFile(rootPath, relativePath);
+      const result = openPathWithSystemDefault(file.absolutePath);
+      return result.ok
+        ? httpJsonResponse({ ok: true })
+        : httpJsonResponse({ code: "workspace_file_open_failed", message: result.message }, { status: 500 });
+    }
+    if (view === "reveal") {
+      const file = resolveWorkspaceFile(rootPath, relativePath);
+      try {
+        revealFileInSystemManager(file.absolutePath);
+        return httpJsonResponse({ ok: true });
+      } catch {
+        return httpJsonResponse(
+          { code: "workspace_file_reveal_failed", message: "workspace_file_reveal_failed" },
+          { status: 500 },
+        );
+      }
+    }
+    const file = readWorkspaceFile(rootPath, relativePath);
+    const extension = path.extname(file.name).toLowerCase();
+    const mime = DOCUMENT_MIME_BY_EXTENSION[extension]
+      ?? TEXT_MIME_BY_EXTENSION[extension]
+      ?? (CODE_TEXT_EXTENSIONS.has(extension) ? "text/plain" : String(lookupMime(file.name) || "application/octet-stream"));
+    const contentType = mime.startsWith("text/") || [
+      "application/json",
+      "application/javascript",
+      "application/xml",
+    ].includes(mime)
+      ? `${mime}; charset=utf-8`
+      : mime;
+    return {
+      status: 200,
+      headers: {
+        "content-type": contentType,
+        "content-length": String(file.size),
+        "cache-control": "no-store",
+        "content-security-policy": "default-src 'none'; sandbox",
+        "x-content-type-options": "nosniff",
+      },
+      body: file.body,
+    };
+  }
+
   handleWebuiThreadGet(request: any, key: string): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     const [, query] = parseRequestPath(String(request?.path ?? ""));
@@ -2150,6 +2652,7 @@ export class WebSocketChannel extends BaseChannel {
     }
     const data = buildWebuiThreadResponse(resolved.guiSessionKey, {
       surface,
+      isQuestionPending: (requestId) => isAgentQuestionPending(requestId, resolved.guiChatId),
       sessionMessages,
       augmentUserMedia: (paths: string[]) => this.augmentTranscriptUserMedia(paths, resolved.canonicalSessionKey),
       augmentAssistantMedia: (paths: string[]) => paths.flatMap((p) => this.webuiMediaAttachmentForPath(p, resolved.canonicalSessionKey) ?? []),
@@ -2215,13 +2718,34 @@ export class WebSocketChannel extends BaseChannel {
     if (!workspace) return httpError(404, "session not found");
     const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
     if (!resolved) return httpError(404, "artifact not found");
+    const workspaceRoot = realpathIfExists(workspace);
+    const relativePath = resolved.kind !== "directory" && isPathInside(resolved.path, workspaceRoot)
+      ? path.relative(workspaceRoot, resolved.path).split(path.sep).join("/")
+      : null;
     return httpJsonResponse({
       ok: true,
       path: resolved.path,
       name: path.basename(expandHomePath(artifactRequest.path)) || path.basename(resolved.path),
       kind: resolved.kind,
+      ...(relativePath ? { relative_path: relativePath } : {}),
       ...(resolved.mediaUrl ? { media_url: resolved.mediaUrl } : {}),
     });
+  }
+
+  /** Renew a saved recording's playback URL without requiring a chat session. */
+  handleWebuiRecordingResolve(request: HttpRequestLike): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    let rawPath: unknown;
+    try {
+      rawPath = JSON.parse(requestBodyText(request)).path;
+    } catch {
+      return httpError(400, "missing path");
+    }
+    if (typeof rawPath !== "string" || !rawPath.trim()) return httpError(400, "missing path");
+    const resolved = this.resolveWorkspaceRecordingPath(rawPath);
+    if (!resolved?.mediaUrl) return httpError(404, "recording not found");
+    return httpJsonResponse({ media_url: resolved.mediaUrl });
   }
 
   handleArtifactReveal(request: HttpRequestLike): HttpLikeResponse {
@@ -2280,6 +2804,10 @@ export class WebSocketChannel extends BaseChannel {
 
     const files = form.getAll("files");
     if (!files.length) return httpError(400, "missing files");
+    // Parallel to `files`: a recording asks to be kept in the default
+    // workspace, where the user can find it in the file tree, instead of the
+    // private media cache.
+    const targets = form.getAll("targets").map((value) => typeof value === "string" ? value : "");
 
     const mediaDir = path.join(getMediaDir("websocket"), "webui");
     fs.mkdirSync(mediaDir, { recursive: true });
@@ -2291,7 +2819,7 @@ export class WebSocketChannel extends BaseChannel {
     };
 
     try {
-      for (const entry of files) {
+      for (const [index, entry] of files.entries()) {
         if (typeof entry === "string" || typeof (entry as any).arrayBuffer !== "function") {
           return failUpload(httpError(400, "invalid file"));
         }
@@ -2302,12 +2830,19 @@ export class WebSocketChannel extends BaseChannel {
         const classification = classifyWebuiUploadAttachment(originalName, declaredMime, bytes);
         if (!classification) return failUpload(httpError(415, "unsupported attachment mime"));
         const safeOriginalName = safeFilename(originalName).replace(/\.[^.]*$/, "") + classification.extension;
-        const filename = `${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}-${safeOriginalName}`;
-        const target = path.join(mediaDir, filename);
-        fs.writeFileSync(target, bytes);
+        const inWorkspace = targets[index] === WEBUI_RECORDINGS_TARGET;
+        let target: string;
+        if (inWorkspace) {
+          const recordingsDir = path.join(this.workspacePath, WEBUI_RECORDINGS_DIR);
+          fs.mkdirSync(recordingsDir, { recursive: true });
+          target = availableFilePath(recordingsDir, safeOriginalName);
+        } else {
+          target = path.join(mediaDir, `${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}-${safeOriginalName}`);
+        }
+        fs.writeFileSync(target, bytes, inWorkspace ? { flag: "wx" } : undefined);
         const real = fs.realpathSync(target);
         savedPaths.push(real);
-        const url = this.signMediaPath(real);
+        const url = inWorkspace ? this.signWorkspaceMediaPath(real) : this.signMediaPath(real);
         if (!url) return failUpload(httpError(500, "failed to sign attachment"));
         saved.push({
           path: real,
@@ -2327,6 +2862,44 @@ export class WebSocketChannel extends BaseChannel {
       attachments: saved,
       images: saved.filter((item) => item.kind === "image"),
     });
+  }
+
+  /** Delete only files created in the default workspace's recordings folder. */
+  handleWebuiRecordingDelete(request: HttpRequestLike): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    let input: unknown;
+    try { input = JSON.parse(requestBodyText(request)); }
+    catch { return httpError(400, "invalid JSON body"); }
+    const paths = input && typeof input === "object" && !Array.isArray(input)
+      ? (input as { paths?: unknown }).paths : null;
+    if (!Array.isArray(paths) || paths.length === 0 || paths.length > 8
+      || paths.some((item) => typeof item !== "string" || !path.isAbsolute(item))) {
+      return httpError(400, "invalid recording paths");
+    }
+    const root = realpathIfExists(path.join(this.workspacePath, WEBUI_RECORDINGS_DIR));
+    const targets = new Set<string>();
+    for (const requested of paths as string[]) {
+      const candidate = path.resolve(requested);
+      if (candidate === root || !isPathInside(candidate, root)) return httpError(403, "path is outside recordings");
+      try {
+        const stat = fs.lstatSync(candidate);
+        if (stat.isSymbolicLink() || !stat.isFile()) return httpError(403, "invalid recording file");
+        const real = fs.realpathSync(candidate);
+        if (!isPathInside(real, root)) return httpError(403, "path is outside recordings");
+        targets.add(real);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          return httpError(500, "could not inspect recording file");
+        }
+      }
+    }
+    try {
+      for (const target of targets) fs.unlinkSync(target);
+    } catch {
+      return httpError(500, "could not delete recording file");
+    }
+    return httpJsonResponse({ ok: true, deleted: targets.size });
   }
 
   private discardInflightForProject(projectId: string): void {
@@ -2443,6 +3016,51 @@ export class WebSocketChannel extends BaseChannel {
         }
       })
       .sort();
+  }
+
+  /**
+   * Moves every session of one project to another project that runs in the same folder. Used when a shared
+   * project is deleted: its sessions become ordinary local tasks of the local project already using that folder.
+   */
+  async handleSessionReassignProject(request: HttpRequestLike): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    try {
+      const body = this.parseProjectBody(request);
+      const keys = Object.keys(body);
+      if (
+        keys.some((key) => !["fromProjectId", "toProjectId"].includes(key))
+        || typeof body.fromProjectId !== "string"
+        || typeof body.toProjectId !== "string"
+        || body.fromProjectId === body.toProjectId
+      ) {
+        throw new WebuiProjectError("project_request_invalid", 400);
+      }
+      const store = this.requireProjectStore();
+      const from = store.getActive(body.fromProjectId);
+      const to = store.getActive(body.toProjectId);
+      if (!from || !to) throw new WebuiProjectError("project_not_found", 404);
+      // A session records the folder it ran in, so it can only move to a project on the same folder.
+      if (from.rootPath !== to.rootPath) throw new WebuiProjectError("project_request_invalid", 400);
+      if (!this.sessionManager) return httpError(503, "session services unavailable");
+
+      const moved: string[] = [];
+      for (const key of this.projectSessionKeys(from.id)) {
+        const session = this.sessionManager.get(key) as Session | null;
+        if (!session) continue;
+        session.metadata = { ...session.metadata, webuiProjectId: to.id, webuiWorkspaceCwd: to.rootPath };
+        this.sessionManager.save(session, { fsync: true });
+        try {
+          this.queueGlobalSessionUpdated(toGuiChatId(key), "metadata");
+        } catch {
+          // A key the GUI cannot project is still moved on disk.
+        }
+        moved.push(key);
+      }
+      return httpJsonResponse({ moved: moved.length, project: to });
+    } catch (error) {
+      return this.projectErrorResponse(error);
+    }
   }
 
   private async removeProjectSessions(projectId: string): Promise<string[]> {
@@ -2681,6 +3299,8 @@ export class WebSocketChannel extends BaseChannel {
     rawPath: string,
     sessionWorkspace: string,
   ): ResolvedArtifactPath | null {
+    const recording = this.resolveWorkspaceRecordingPath(rawPath);
+    if (recording) return recording;
     const allowed = this.resolveAllowedArtifactPath(rawPath, sessionWorkspace);
     if (allowed) {
       if (allowed.kind === "directory") {
@@ -2700,6 +3320,27 @@ export class WebSocketChannel extends BaseChannel {
     }
     const staged = this.stageArtifactPath(expanded);
     return staged ? { path: staged.path, kind: artifactKindForFile(staged.path), mediaUrl: staged.url } : null;
+  }
+
+  /**
+   * A saved recording is served from the workspace in place.
+   *
+   * Staging would copy the audio into the media cache every time the
+   * recording is reopened after a restart.
+   */
+  private resolveWorkspaceRecordingPath(rawPath: string): ResolvedArtifactPath | null {
+    const expanded = expandHomePath(rawPath);
+    if (!path.isAbsolute(expanded)) return null;
+    let resolved: string;
+    try {
+      resolved = fs.realpathSync(expanded);
+      if (!fs.statSync(resolved).isFile()) return null;
+    } catch {
+      return null;
+    }
+    if (!isPathInside(resolved, realpathIfExists(path.join(this.workspacePath, WEBUI_RECORDINGS_DIR)))) return null;
+    const mediaUrl = this.signWorkspaceMediaPath(resolved);
+    return mediaUrl ? { path: resolved, kind: artifactKindForFile(resolved), mediaUrl } : null;
   }
 
   stageArtifactPath(rawPath: string): SignedMediaPath | null {
@@ -2918,7 +3559,12 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/channels/feishu/login/start") return this.handleChannelAdmin(request, "feishu-login-start");
     channelAdminMatch = got.match(/^\/api\/channels\/feishu\/login\/([^/]+)$/);
     if (channelAdminMatch) return this.handleChannelAdmin(request, "feishu-login-poll", decodeURIComponent(channelAdminMatch[1]));
+    if (got === "/api/runtime/task-activity") {
+      if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+      return httpJsonResponse({ busy: agentTaskActivity.busy || Boolean(this.terminalRunControl?.hasActiveRuns()) });
+    }
     if (got === "/api/sessions") return this.handleSessionsList(request);
+    if (got === "/api/sessions/reassign-project") return this.handleSessionReassignProject(request);
     if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
@@ -2945,10 +3591,20 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/webui/sidebar-state") return this.handleWebuiSidebarState(request);
     if (got === "/api/webui/sidebar-state/update") return this.handleWebuiSidebarStateUpdate(request);
     if (got === "/api/webui/seed-chat") return this.handleWebuiSeedChat(request);
+    if (got === "/api/webui/assist/runs") return this.handleAssistRunStart(request);
+    const assistRunMatch = got.match(/^\/api\/webui\/assist\/runs\/([^/]+)(\/stop)?$/);
+    if (assistRunMatch) {
+      const assistChatId = decodeURIComponent(assistRunMatch[1]!);
+      return assistRunMatch[2]
+        ? this.handleAssistRunStop(request, assistChatId)
+        : this.handleAssistRunRead(request, assistChatId);
+    }
     if (got === "/api/webui/artifacts/resolve") return this.handleArtifactResolve(request);
+    if (got === "/api/webui/recordings/resolve") return this.handleWebuiRecordingResolve(request);
     if (got === "/api/webui/artifacts/reveal") return this.handleArtifactReveal(request);
     if (got === "/api/webui/artifacts/open") return this.handleArtifactOpen(request);
     if (got === "/api/webui/media/upload") return this.handleWebuiMediaUpload(request);
+    if (got === "/api/webui/recordings/delete") return this.handleWebuiRecordingDelete(request);
     if (got === "/api/settings/update") return this.handleSettingsUpdate(request);
     if (got === "/api/settings/model-configurations/create") return this.handleSettingsModelConfigurationCreate(request);
     if (got === "/api/settings/provider/update") return this.handleSettingsProviderUpdate(request);
@@ -2967,6 +3623,14 @@ export class WebSocketChannel extends BaseChannel {
     if (match) return this.handleWorkspaceEnvironment(request, match[1], "diff");
     match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/branch$/);
     if (match) return this.handleWorkspaceEnvironment(request, match[1], "branch");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/workspace\/file\/open$/);
+    if (match) return this.handleWorkspaceFiles(request, match[1], "open");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/workspace\/file\/reveal$/);
+    if (match) return this.handleWorkspaceFiles(request, match[1], "reveal");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/workspace\/file$/);
+    if (match) return this.handleWorkspaceFiles(request, match[1], "file");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/workspace\/files$/);
+    if (match) return this.handleWorkspaceFiles(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/webui-thread$/);
     if (match) return this.handleWebuiThreadGet(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/last-compaction$/);
@@ -2981,6 +3645,14 @@ export class WebSocketChannel extends BaseChannel {
     if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "diff");
     match = got.match(/^\/api\/projects\/([^/]+)\/environment\/branch$/);
     if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "branch");
+    match = got.match(/^\/api\/projects\/([^/]+)\/workspace\/file\/open$/);
+    if (match) return this.handleProjectWorkspaceFiles(request, match[1], "open");
+    match = got.match(/^\/api\/projects\/([^/]+)\/workspace\/file\/reveal$/);
+    if (match) return this.handleProjectWorkspaceFiles(request, match[1], "reveal");
+    match = got.match(/^\/api\/projects\/([^/]+)\/workspace\/file$/);
+    if (match) return this.handleProjectWorkspaceFiles(request, match[1], "file");
+    match = got.match(/^\/api\/projects\/([^/]+)\/workspace\/files$/);
+    if (match) return this.handleProjectWorkspaceFiles(request, match[1]);
     match = got.match(/^\/api\/projects\/([^/]+)\/reveal$/);
     if (match) return this.handleProjectReveal(request, match[1]);
     match = got.match(/^\/api\/projects\/([^/]+)$/);
@@ -2992,8 +3664,10 @@ export class WebSocketChannel extends BaseChannel {
         return this.handleProjectDelete(request, match[1]);
       }
     }
+    match = got.match(/^\/api\/media\/ws\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
+    if (match) return this.handleWorkspaceMediaFetch(match[1], match[2]);
     match = got.match(/^\/api\/media\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
-    if (match) return this.handleMediaFetch(match[1], match[2]);
+    if (match) return this.handleMediaFetch(match[1], match[2], request);
     if (got === this.expectedPath() && isWebsocketUpgrade(request)) {
       const clientId = (queryFirst(query, "client_id") ?? "").slice(0, 128);
       if (!this.isAllowed(clientId)) return connectionRespond(connection, 403, "Forbidden");
@@ -3496,12 +4170,20 @@ export class WebSocketChannel extends BaseChannel {
         && envelope.expected_turn_id.length <= 128
         ? envelope.expected_turn_id.trim()
         : undefined;
-    if (!turnAdmission || expectedTurnId === undefined) {
+    const interruptPendingTurnId = envelope.interrupt_pending_turn_id == null
+      ? null
+      : typeof envelope.interrupt_pending_turn_id === "string"
+        && envelope.interrupt_pending_turn_id.trim().length > 0
+        && envelope.interrupt_pending_turn_id.length <= 128
+        ? envelope.interrupt_pending_turn_id.trim()
+        : undefined;
+    if (!turnAdmission || expectedTurnId === undefined || interruptPendingTurnId === undefined) {
       await this.sendWebuiRequestError(connection, {
         chatId,
         clientRequestId,
         detail: "message_request_rejected",
-        reason: !turnAdmission ? "turn_admission_invalid" : "expected_turn_id_invalid",
+        reason: !turnAdmission ? "turn_admission_invalid"
+          : expectedTurnId === undefined ? "expected_turn_id_invalid" : "interrupt_pending_turn_id_invalid",
       });
       return;
     }
@@ -3573,6 +4255,7 @@ export class WebSocketChannel extends BaseChannel {
           expectedTurnId,
           thinkingEnabled: typeof envelope.thinking_enabled === "boolean" ? envelope.thinking_enabled : undefined,
           thinkingLevel: typeof envelope.thinking_level === "string" ? envelope.thinking_level : undefined,
+          interruptPendingTurnId,
         })
       : null;
     if (existing && clientRequestId) {
@@ -3689,6 +4372,9 @@ export class WebSocketChannel extends BaseChannel {
       metadata.webui_request_digest = digest;
     }
     if (queueSurface) metadata.webui_queue_surface = queueSurface;
+    if (interruptPendingTurnId && queueSurface && this.connectionSurface.get(connection) !== "tui") {
+      metadata.webui_interrupt_pending_turn_id = interruptPendingTurnId;
+    }
     if (language) metadata.webui_language = language;
     const mcpPresets: any[] = normalizeMcpPresetMentions(envelope.mcp_presets);
     if (!mcpPresets.length) mcpPresets.push(...normalizeMentionList(envelope.mcp_presets));
@@ -3743,6 +4429,44 @@ export class WebSocketChannel extends BaseChannel {
 
   async dispatchEnvelope(connection: any, clientId: string, envelope: Record<string, any>): Promise<void> {
     const type = envelope.type;
+    if (type === "agent_question_response") {
+      const chatId = typeof envelope.chat_id === "string" && isValidGuiChatId(envelope.chat_id)
+        ? envelope.chat_id
+        : "";
+      const response = normalizeAgentQuestionResponse(envelope.request_id, envelope.answers, envelope.cancelled);
+      if (
+        !chatId
+        || !response
+        || !this.connectionChats.get(connection)?.has(chatId)
+      ) {
+        await this.safeSendTo(connection, {
+          event: "agent_question_response_result",
+          chat_id: chatId,
+          request_id: typeof envelope.request_id === "string" ? envelope.request_id : "",
+          ok: false,
+          error: "invalid_request",
+        });
+        return;
+      }
+      const result = respondToAgentQuestion({ chatId, response });
+      if (result.ok) {
+        await this.sendTurnPayload(chatId, {
+          event: "agent_question_response",
+          chat_id: chatId,
+          request_id: response.requestId,
+          answers: response.answers,
+          ...(response.cancelled === true ? { cancelled: true } : {}),
+        });
+      }
+      await this.safeSendTo(connection, {
+        event: "agent_question_response_result",
+        chat_id: chatId,
+        request_id: response.requestId,
+        ok: result.ok,
+        ...(!result.ok ? { error: result.error } : {}),
+      });
+      return;
+    }
     if (type === "cron_delivery_ack") {
       const deliveryId = envelope.delivery_id;
       if ((this.connectionSurface.get(connection) ?? "gui") !== "gui"
@@ -3764,6 +4488,41 @@ export class WebSocketChannel extends BaseChannel {
         return;
       }
       await this.sendWebuiQueueSnapshot(connection, chatId);
+      return;
+    }
+    if (type === "queue_reorder") {
+      const chatId = typeof envelope.chat_id === "string" && isValidGuiChatId(envelope.chat_id)
+        ? envelope.chat_id : "";
+      const requestId = typeof envelope.request_id === "string" && UUID_RE.test(envelope.request_id)
+        ? envelope.request_id : "";
+      const orderedIds = Array.isArray(envelope.ordered_ids) ? envelope.ordered_ids : [];
+      const expectedRevision = envelope.expected_revision;
+      const sessionKey = chatId ? this.canonicalSessionKeyForChatId(chatId) : null;
+      if (!chatId || !requestId || !sessionKey || !this.connectionChats.get(connection)?.has(chatId)
+        || !this.reorderQueuedWebuiMessages
+        || orderedIds.length < 2 || orderedIds.length > 100
+        || !orderedIds.every((id: unknown) => typeof id === "string" && UUID_RE.test(id))
+        || typeof expectedRevision !== "number" || !Number.isSafeInteger(expectedRevision)
+        || expectedRevision < 0) {
+        await this.safeSendTo(connection, {
+          event: "queue_reorder_result", chat_id: chatId, request_id: requestId,
+          ok: false, outcome: "invalid_request",
+        });
+        return;
+      }
+      let outcome: ReorderQueuedMessageResult["outcome"] = "stale";
+      try {
+        outcome = (await this.reorderQueuedWebuiMessages(sessionKey, orderedIds, expectedRevision)).outcome;
+      } catch (error) {
+        console.warn("[websocket] queue reorder failed", { sessionKey, error });
+      }
+      for (const target of this.queueEventConnections(chatId)) {
+        await this.sendWebuiQueueSnapshot(target, chatId);
+      }
+      await this.safeSendTo(connection, {
+        event: "queue_reorder_result", chat_id: chatId, request_id: requestId,
+        ok: outcome === "reordered", outcome,
+      });
       return;
     }
     if (type === "queue_remove") {
@@ -3932,6 +4691,7 @@ export class WebSocketChannel extends BaseChannel {
             chat_id: chatId,
             client_request_id: clientRequestId,
             turn_id: result.turnId,
+            user_event_on_consume: true,
           };
           for (const target of new Set([connection, ...(inflight?.connections ?? [])])) {
             await this.safeSendTo(target, steered);
@@ -4136,6 +4896,7 @@ export class WebSocketChannel extends BaseChannel {
       await this.sendRunStatusSnapshot(connection, chatId);
       await this.sendWebuiQueueSnapshot(connection, chatId);
       await this.maybePushActiveGoalState(chatId);
+    await this.maybePushTaskPlanState(chatId);
       return;
     }
     if (type === "status") {
@@ -4335,7 +5096,6 @@ export class WebSocketChannel extends BaseChannel {
     sessionKey?: string | null,
   ): WebuiMediaAttachment | null {
     const name = path.basename(filePath) || "attachment";
-    const kind = mediaKindForPath(filePath);
     const workspace = sessionKey
       ? this.artifactSessionWorkspace(sessionKey) ?? this.workspacePath
       : this.workspacePath;
@@ -4344,6 +5104,7 @@ export class WebSocketChannel extends BaseChannel {
     const signed = this.signOrStageMediaPath(filePath, workspace);
     const resolvedFilePath = resolved?.path ?? null;
     if (!signed && !resolvedFilePath) return null;
+    const kind = mediaKindForPath(resolvedFilePath ?? signed!.path);
     return {
       kind,
       name: signed?.name ?? name,
@@ -4352,7 +5113,7 @@ export class WebSocketChannel extends BaseChannel {
     };
   }
 
-  handleMediaFetch(sig: string, payload: string): HttpLikeResponse {
+  handleMediaFetch(sig: string, payload: string, request?: Pick<HttpRequestLike, "headers">): HttpLikeResponse {
     const expected = crypto.createHmac("sha256", this.mediaSecret).update(payload).digest().subarray(0, 16);
     let provided: Buffer;
     try {
@@ -4373,16 +5134,82 @@ export class WebSocketChannel extends BaseChannel {
     const candidate = path.resolve(mediaRoot, normalizeLocalPath(rel));
     if (!pathIsInside(candidate, mediaRoot)) return httpError(404, "not found");
     if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) return httpError(404, "not found");
-    const mime = String(lookupMime(candidate) || "application/octet-stream");
+    const mime = mediaMimeForPath(candidate);
+    const size = fs.statSync(candidate).size;
+    const range = getHeader(request?.headers, "range");
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      const suffix = match && !match[1];
+      const start = match ? (suffix ? Math.max(0, size - Number(match[2])) : Number(match[1])) : NaN;
+      const requestedEnd = match ? (suffix || !match[2] ? size - 1 : Number(match[2])) : NaN;
+      if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd)
+        || start < 0 || start >= size || requestedEnd < start) {
+        return { status: 416, headers: { "content-range": `bytes */${size}` }, body: Buffer.alloc(0) };
+      }
+      const end = Math.min(size - 1, requestedEnd, start + 2 * 1024 * 1024 - 1);
+      const body = Buffer.alloc(end - start + 1);
+      const descriptor = fs.openSync(candidate, "r");
+      try { fs.readSync(descriptor, body, 0, body.length, start); }
+      finally { fs.closeSync(descriptor); }
+      return { status: 206, headers: {
+        "content-type": DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) || mime.startsWith("audio/") ? mime : "application/octet-stream",
+        "accept-ranges": "bytes", "content-range": `bytes ${start}-${end}/${size}`,
+        "cache-control": "private, no-store", "x-content-type-options": "nosniff",
+      }, body };
+    }
+
+    const body = fs.readFileSync(candidate);
     return {
       status: 200,
       headers: {
-        "content-type": DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) ? mime : "application/octet-stream",
+        "content-type": DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) || mime.startsWith("audio/") ? mime : "application/octet-stream",
         "cache-control": "private, max-age=31536000, immutable",
         "x-content-type-options": "nosniff",
       },
-      body: fs.readFileSync(candidate),
+      body,
     };
+  }
+
+  /** Signs a file kept in the default workspace, such as a saved recording. */
+  signWorkspaceMediaPath(absPath: string): string | null {
+    let rel: string;
+    try {
+      const workspaceRoot = comparablePath(this.workspacePath);
+      const candidate = comparablePath(absPath);
+      if (!pathIsInside(candidate, workspaceRoot) || candidate === workspaceRoot) return null;
+      rel = path.relative(workspaceRoot, candidate);
+    } catch {
+      return null;
+    }
+    const payload = b64urlEncode(rel.split(path.sep).join("/"));
+    return `/api/media/ws/${b64urlEncode(this.workspaceMediaMac(payload))}/${payload}`;
+  }
+
+  handleWorkspaceMediaFetch(sig: string, payload: string): HttpLikeResponse {
+    const expected = this.workspaceMediaMac(payload);
+    let provided: Buffer;
+    try {
+      provided = b64urlDecode(sig);
+    } catch {
+      return httpError(401, "invalid signature");
+    }
+    if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+      return httpError(401, "invalid signature");
+    }
+    let rel: string;
+    try {
+      rel = b64urlDecode(payload).toString("utf8");
+    } catch {
+      return httpError(400, "invalid payload");
+    }
+    const workspaceRoot = comparablePath(this.workspacePath);
+    const candidate = path.resolve(workspaceRoot, normalizeLocalPath(rel));
+    if (!pathIsInside(candidate, workspaceRoot)) return httpError(404, "not found");
+    return mediaFileResponse(candidate, "private, no-cache");
+  }
+
+  private workspaceMediaMac(payload: string): Buffer {
+    return crypto.createHmac("sha256", this.mediaSecret).update(`workspace:${payload}`).digest().subarray(0, 16);
   }
 
   override async send(message: OutboundMessage): Promise<void> {
@@ -4654,6 +5481,15 @@ export class WebSocketChannel extends BaseChannel {
       );
       return;
     }
+    if (message.metadata?.taskPlanStateSync) {
+      await this.sendTaskPlanState(
+        message.chatId,
+        typeof message.metadata.taskPlanState === "object"
+          ? message.metadata.taskPlanState
+          : taskPlanStateWsBlob(),
+      );
+      return;
+    }
     if (message.metadata?.runStatusEvent) {
       await this.sendRunStatus(message.chatId, String(message.metadata.runStatus), {
         startedAt: numberOrNull(message.metadata.startedAt),
@@ -4886,6 +5722,14 @@ export class WebSocketChannel extends BaseChannel {
 
   async sendGoalState(chatId: string, blob: Record<string, any>): Promise<void> {
     await this.broadcast(chatId, { event: "goal_state", chat_id: chatId, goal_state: blob });
+  }
+
+  async sendTaskPlanState(chatId: string, blob: Record<string, any>): Promise<void> {
+    await this.broadcast(chatId, {
+      event: "task_plan_state",
+      chat_id: chatId,
+      task_plan_state: blob,
+    });
   }
 
   async sendRunStatus(chatId: string, status: string, {
@@ -5341,6 +6185,7 @@ function corsHeadersForRequest(config: WebSocketConfig, request: { headers?: htt
       "x-memmy-agent-auth",
       MCP_VALUES_HEADER,
     ].join(", "),
+    "access-control-expose-headers": "Content-Range, Accept-Ranges",
     "access-control-max-age": "600",
   };
 }
@@ -5389,6 +6234,38 @@ function boundedNumber(value: any, min: number, max: number, field: string): num
     throw new Error(`${field} must be between ${min} and ${max}`);
   }
   return parsed;
+}
+
+/** Serves a resolved media file with the headers every media route shares. */
+function mediaFileResponse(filePath: string, cacheControl = "private, max-age=31536000, immutable"): HttpLikeResponse {
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return httpError(404, "not found");
+  const body = fs.readFileSync(filePath);
+  const mime = mediaMimeForPath(filePath, body);
+  return {
+    status: 200,
+    headers: {
+      "content-type": DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) || mime.startsWith("audio/") ? mime : "application/octet-stream",
+      "cache-control": cacheControl,
+      "x-content-type-options": "nosniff",
+    },
+    body,
+  };
+}
+
+/**
+ * A path in `dir` for `name` that does not overwrite an existing file.
+ *
+ * Saved files keep the name the user will look for; a clash gets ` (2)`,
+ * ` (3)` and so on before the extension.
+ */
+function availableFilePath(dir: string, name: string): string {
+  const extension = path.extname(name);
+  const stem = name.slice(0, name.length - extension.length) || "attachment";
+  let candidate = path.join(dir, name);
+  for (let copy = 2; fs.existsSync(candidate); copy += 1) {
+    candidate = path.join(dir, `${stem} (${copy})${extension}`);
+  }
+  return candidate;
 }
 
 function safeFilename(name: string): string {
@@ -5453,6 +6330,13 @@ function classifyWebuiUploadAttachment(name: string, declaredMime: string, bytes
 
   const fileClassification = classifyFileAttachmentByName(name);
   if (!fileClassification) return null;
+  if (fileClassification.kind === "audio") {
+    // Browsers disagree on the media type of the same recording and file
+    // pickers often report none at all, so the extension and the container
+    // signature decide; the declared type only has to not contradict them.
+    if (declaredMime && !declaredMime.startsWith("audio/") && declaredMime !== "application/octet-stream") return null;
+    return fileBytesMatchClassification(fileClassification, bytes) ? fileClassification : null;
+  }
   const isDocument = Boolean(DOCUMENT_MIME_BY_EXTENSION[fileClassification.extension]);
   if (declaredMime && isDocument && declaredMime !== fileClassification.mime) return null;
   if (declaredMime && !isDocument && !FILE_MIME_ALLOWED.has(declaredMime) && !declaredMime.startsWith("text/")) return null;
@@ -5477,6 +6361,14 @@ function classifySavedWebuiAttachment(filePath: string, bytes: Buffer): WebuiUpl
 
 function classifyFileAttachmentByName(name: string): WebuiUploadClassification | null {
   const extension = path.extname(name).toLowerCase();
+  const audioMime = AUDIO_MIME_BY_EXTENSION[extension];
+  if (audioMime) {
+    return {
+      kind: "audio",
+      mime: audioMime,
+      extension,
+    };
+  }
   const mime = DOCUMENT_MIME_BY_EXTENSION[extension] ?? TEXT_MIME_BY_EXTENSION[extension];
   if (!mime) return null;
   return {
@@ -5487,10 +6379,44 @@ function classifyFileAttachmentByName(name: string): WebuiUploadClassification |
 }
 
 function fileBytesMatchClassification(classification: WebuiUploadClassification, bytes: Buffer): boolean {
+  if (classification.kind === "audio") return looksLikeAudio(classification.extension, bytes);
   if (classification.kind !== "file") return true;
   if (classification.extension === ".pdf") return looksLikePdf(bytes);
   if (DOCUMENT_MIME_BY_EXTENSION[classification.extension]) return looksLikeZip(bytes);
   return looksLikeText(bytes);
+}
+
+/**
+ * Checks the container signature of an audio upload.
+ *
+ * The extension picks the media type, so without this an attacker could hand
+ * any payload an audio name and have it stored under a media type the rest of
+ * the pipeline trusts.
+ */
+function looksLikeAudio(extension: string, bytes: Buffer): boolean {
+  const tag = (offset: number, value: string): boolean =>
+    bytes.length >= offset + value.length && bytes.subarray(offset, offset + value.length).toString("ascii") === value;
+
+  switch (extension) {
+    case ".wav":
+      return tag(0, "RIFF") && tag(8, "WAVE");
+    case ".flac":
+      return tag(0, "fLaC");
+    case ".ogg":
+    case ".opus":
+      return tag(0, "OggS");
+    case ".m4a":
+      return tag(4, "ftyp");
+    case ".webm":
+      return bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3;
+    case ".mp3":
+      // ID3-tagged, or a bare MPEG frame sync.
+      return tag(0, "ID3") || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0);
+    case ".aac":
+      return tag(0, "ADIF") || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0);
+    default:
+      return false;
+  }
 }
 
 function looksLikePdf(bytes: Buffer): boolean {

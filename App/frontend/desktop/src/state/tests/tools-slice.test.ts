@@ -47,6 +47,14 @@ describe("tools-slice", () => {
     expect(selectConnectionForIntegration(ready, github)).toEqual(connection);
   });
 
+  it("轮询结果未变化时保留原状态，连接变化时更新", () => {
+    const ready = toolsReducer(initialToolsState, { type: "tools/loadSuccess", connections: [connection] });
+    expect(toolsReducer(ready, { type: "tools/connectionsUpdated", connections: [{ ...connection }] })).toBe(ready);
+    const changed = toolsReducer(ready, { type: "tools/connectionsUpdated", connections: [{ ...connection, status: "EXPIRED" }] });
+    expect(changed).not.toBe(ready);
+    expect(changed.connections[0]?.status).toBe("EXPIRED");
+  });
+
   it("保存当前打开工具的 surface 和 slug", () => {
     const open = toolsReducer(initialToolsState, { type: "tools/openToolModal", surface: "integration", slug: "github" });
     const closed = toolsReducer(open, { type: "tools/closeModal" });

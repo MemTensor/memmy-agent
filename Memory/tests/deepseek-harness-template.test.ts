@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createDeepseekHarnessPluginPackageManifest,
+  DEEPSEEK_HARNESS_PLUGIN_CLIENT,
   DEEPSEEK_HARNESS_PLUGIN_INDEX
 } from "../src/agent-source/integration/templates/memmy-deepseek-harness-plugin.js";
 
@@ -23,11 +24,18 @@ describe("DeepSeek Harness plugin compatibility", () => {
       type: "module",
       dsh: {
         client: {
-          platform: "web",
-          inject: ["@deepseek-ai/dsh-client-ui-conversation"]
+          platform: "web"
         }
       }
     });
+    expect(JSON.stringify(createDeepseekHarnessPluginPackageManifest())).not.toContain("dsh-client-ui-conversation");
+  });
+
+  it("keeps the optional client UI out of the web boot dependency chain", () => {
+    expect(DEEPSEEK_HARNESS_PLUGIN_CLIENT).toContain("const inject = [];");
+    expect(DEEPSEEK_HARNESS_PLUGIN_CLIENT).toContain("if (!registry || typeof registry.register !== \"function\") return;");
+    expect(DEEPSEEK_HARNESS_PLUGIN_CLIENT).toContain("return null;");
+    expect(DEEPSEEK_HARNESS_PLUGIN_CLIENT).not.toContain("requires uiConversation.events");
   });
 
   it.each([

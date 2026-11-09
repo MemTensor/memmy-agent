@@ -20,12 +20,14 @@ export interface AgentAttachmentCardProps {
   kind: "image" | "file";
   name: string;
   mime?: string;
+  filePath?: string;
   previewUrl?: string;
   subline?: string;
   busyLabel?: string;
   title?: string;
   removable?: boolean;
   removeLabel?: string;
+  leading?: ReactNode;
   thumbnailOverlay?: ReactNode;
   onRemove?: () => void;
   onClick?: () => void;
@@ -124,7 +126,7 @@ export function AgentAttachmentCard(props: AgentAttachmentCardProps) {
   ].filter(Boolean).join(" ");
   const mainContent = (
     <>
-      {props.kind === "image" ? (
+      {props.leading ? props.leading : props.kind === "image" ? (
         <span className="agent-attachment-card__preview">
           {props.previewUrl ? (
             <img

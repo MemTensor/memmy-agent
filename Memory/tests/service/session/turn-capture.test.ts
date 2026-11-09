@@ -1,3 +1,4 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -23,21 +24,21 @@ describe("MemoryService / session / turn capture", () => {
   it.each([false, undefined])("stores a completed degraded turn and respects recallApplied=%s", async (recallApplied) => {
     const { db, service } = createTestService();
     const session = service.openSession({ namespace: { source: "memmy-agent", profileId: "deadline", userId: "deadline-user" } });
-    const seed = service.completeTurn("seed", { sessionId: session.sessionId, query: "Inspect the SQLite schema", answer: "The schema has a sessions table." });
+    const seed = (await service.completeTurn("seed", { sessionId: session.sessionId, query: "Inspect the SQLite schema", answer: "The schema has a sessions table." }));
     const started = await service.startTurn({ sessionId: session.sessionId, turnId: "degraded", query: "Implement the SQLite deadline fix" });
     db.db.prepare("UPDATE recall_events SET injected_memory_ids_json = ? WHERE id = ?")
       .run(JSON.stringify([seed.l1MemoryId]), started.searchEventId);
     const request = { adapterId: "memmy-agent", requestId: "deadline-complete", sessionId: session.sessionId,
       query: "Implement the SQLite deadline fix", answer: "Implemented and verified the deadline.", sourceMemoryIds: [],
       ...(recallApplied === false ? { recallApplied } : {}) };
-    const completed = service.completeTurn("degraded", request);
+    const completed = (await service.completeTurn("degraded", request));
     if (recallApplied === false) expect(completed.l1MemoryIds).toHaveLength(1);
     const row = db.db.prepare("SELECT source_memory_ids_json, user_text, assistant_text FROM raw_turns WHERE id = ?")
       .get(completed.rawTurnId) as { source_memory_ids_json: string; user_text: string; assistant_text: string };
     expect(JSON.parse(row.source_memory_ids_json)).toEqual(recallApplied === false ? [] : [seed.l1MemoryId]);
     expect(row.user_text).toBe(request.query);
     expect(row.assistant_text).toBe(request.answer);
-    expect(service.completeTurn("degraded", request)).toMatchObject({ duplicate: true, rawTurnId: completed.rawTurnId });
+    expect((await service.completeTurn("degraded", request))).toMatchObject({ duplicate: true, rawTurnId: completed.rawTurnId });
     expect(db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns WHERE session_id = ? AND turn_id = ?").get(session.sessionId, "degraded")).toEqual({ count: 1 });
     db.close();
   });
@@ -126,7 +127,7 @@ describe("MemoryService / session / turn capture", () => {
       retrieval_mode: "turn_start"
     });
 
-    const completed = service.completeTurn("turn-start-readonly", {
+    const completed = (await service.completeTurn("turn-start-readonly", {
       adapterId: "memmy-cursor-hook",
       requestId: "cursor-complete:readonly",
       sessionId: session.sessionId,
@@ -134,7 +135,7 @@ describe("MemoryService / session / turn capture", () => {
       answer: "The complete user and assistant turn is now safe to persist.",
       status: "succeeded",
       sourceMemoryIds: started.sourceMemoryIds
-    });
+    }));
 
     expect(completed.l1MemoryIds).toHaveLength(1);
     expect(counts()).toMatchObject({
@@ -159,7 +160,7 @@ describe("MemoryService / session / turn capture", () => {
       status: string;
     };
     expect(completedRawTurn).toMatchObject({
-      episode_id: completed.episodeId,
+      episode_id: assignedEpisodeId(service, completed),
       user_text: "Implement the sqlite persistence transaction after inspecting the schema.",
       assistant_text: "The complete user and assistant turn is now safe to persist.",
       status: "succeeded"
@@ -211,11 +212,11 @@ describe("MemoryService / session / turn capture", () => {
        ORDER BY created_at ASC, turn_id ASC`
     ).all(session.sessionId)).toEqual([]);
 
-    const completed = service.completeTurn("turn-replacement", {
+    const completed = (await service.completeTurn("turn-replacement", {
       sessionId: session.sessionId,
       query: "For that sqlite migration, inspect the schema first.",
       answer: "I inspected the schema before changing the sqlite migration."
-    });
+    }));
 
     expect(completed.l1MemoryIds).toHaveLength(1);
     expect(memoryCount()).toBe(beforeMemories + 1);
@@ -238,7 +239,7 @@ describe("MemoryService / session / turn capture", () => {
     db.close();
   });
 
-  it("rejects cancelled and structurally incomplete completions without writing anything", () => {
+  it("rejects cancelled and structurally incomplete completions without writing anything", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -256,22 +257,22 @@ describe("MemoryService / session / turn capture", () => {
       jobs: count("evolution_jobs")
     };
 
-    expect(() => service.completeTurn("turn-cancelled", {
+    await expect(async () => (await service.completeTurn("turn-cancelled", {
       sessionId: session.sessionId,
       query: "Cancel this request.",
       answer: "A partial answer",
       status: "cancelled"
-    })).toThrow("cancelled turns are not persisted");
-    expect(() => service.completeTurn("turn-user-only", {
+    }))).rejects.toThrow("cancelled turns are not persisted");
+    await expect(async () => (await service.completeTurn("turn-user-only", {
       sessionId: session.sessionId,
       query: "This request has no final assistant response.",
       answer: ""
-    })).toThrow("requires a non-empty user query and assistant result");
-    expect(() => service.completeTurn("turn-assistant-only", {
+    }))).rejects.toThrow("requires a non-empty user query and assistant result");
+    await expect(async () => (await service.completeTurn("turn-assistant-only", {
       sessionId: session.sessionId,
       query: "",
       answer: "This answer has no user query."
-    })).toThrow("requires a non-empty user query and assistant result");
+    }))).rejects.toThrow("requires a non-empty user query and assistant result");
 
     expect({
       episodes: count("episodes"),
@@ -282,7 +283,7 @@ describe("MemoryService / session / turn capture", () => {
     db.close();
   });
 
-  it("persists explicit failed turns with their failure result", () => {
+  it("persists explicit failed turns with their failure result", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -292,12 +293,12 @@ describe("MemoryService / session / turn capture", () => {
       }
     });
 
-    const completed = service.completeTurn("turn-failed", {
+    const completed = (await service.completeTurn("turn-failed", {
       sessionId: session.sessionId,
       query: "Run the deployment.",
       answer: "Deployment failed: connection timed out.",
       status: "failed"
-    });
+    }));
 
     expect(completed.l1MemoryIds).toHaveLength(1);
     const raw = db.db.prepare(
@@ -331,11 +332,11 @@ describe("MemoryService / session / turn capture", () => {
         userId: "turn-observed-route-user"
       }
     });
-    const first = service.completeTurn("turn-observed-route-first", {
+    const first = (await service.completeTurn("turn-observed-route-first", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS",
       answer: "Use port 443."
-    });
+    }));
     await service.startTurn({
       turnId: "turn-observed-route-split",
       sessionId: session.sessionId,
@@ -351,36 +352,36 @@ describe("MemoryService / session / turn capture", () => {
     expect(observed.rawTurnId).toMatch(/^raw_/u);
     expect(db.db.prepare(
       "SELECT episode_id FROM raw_turns WHERE id = ?"
-    ).get(observed.rawTurnId)).toEqual({ episode_id: first.episodeId });
+    ).get(observed.rawTurnId)).toEqual({ episode_id: assignedEpisodeId(service, first) });
 
-    const completed = service.completeTurn("turn-observed-route-split", {
+    const completed = (await service.completeTurn("turn-observed-route-split", {
       sessionId: session.sessionId,
       query: "new task: summarize the hiring plan",
       answer: "The hiring plan is summarized."
-    });
+    }));
     expect(completed.rawTurnId).toBe(observed.rawTurnId);
-    expect(completed.episodeId).not.toBe(first.episodeId);
-    expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
+    expect(assignedEpisodeId(service, completed)).not.toBe(assignedEpisodeId(service, first));
+    expect(completed.closedEpisodeIds).toEqual([assignedEpisodeId(service, first)]);
     expect(db.db.prepare(
       "SELECT episode_id FROM raw_turns WHERE id = ?"
-    ).get(observed.rawTurnId)).toEqual({ episode_id: completed.episodeId });
+    ).get(observed.rawTurnId)).toEqual({ episode_id: assignedEpisodeId(service, completed) });
     expect(db.db.prepare(
       "SELECT DISTINCT episode_id FROM artifacts WHERE raw_turn_id = ?"
-    ).all(observed.rawTurnId)).toEqual([{ episode_id: completed.episodeId }]);
+    ).all(observed.rawTurnId)).toEqual([{ episode_id: assignedEpisodeId(service, completed) }]);
     const episodeRows = db.db.prepare(
       "SELECT id, raw_turn_ids_json FROM episodes WHERE id IN (?, ?) ORDER BY id"
-    ).all(first.episodeId, completed.episodeId) as Array<{
+    ).all(assignedEpisodeId(service, first), assignedEpisodeId(service, completed)) as Array<{
       id: string;
       raw_turn_ids_json: string;
     }>;
-    const firstRow = episodeRows.find((row) => row.id === first.episodeId);
-    const completedRow = episodeRows.find((row) => row.id === completed.episodeId);
+    const firstRow = episodeRows.find((row) => row.id === assignedEpisodeId(service, first));
+    const completedRow = episodeRows.find((row) => row.id === assignedEpisodeId(service, completed));
     expect(JSON.parse(firstRow!.raw_turn_ids_json)).not.toContain(observed.rawTurnId);
     expect(JSON.parse(completedRow!.raw_turn_ids_json)).toContain(observed.rawTurnId);
     db.close();
   });
 
-  it("uses plugin capture normalizer limits from service config", () => {
+  it("uses plugin capture normalizer limits from service config", async () => {
     const root = createTestRoot("mindock-memory-capture-normalizer-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -392,6 +393,7 @@ describe("MemoryService / session / turn capture", () => {
         ...DEFAULT_MEMMY_CONFIG,
         algorithm: {
           ...DEFAULT_MEMMY_CONFIG.algorithm,
+        session: { ...DEFAULT_MEMMY_CONFIG.algorithm.session, turnJudge: false },
           capture: {
             ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
             maxTextChars: 220,
@@ -441,7 +443,7 @@ describe("MemoryService / session / turn capture", () => {
       }],
       createdAtIso: "2026-01-01T00:00:00.000Z"
     })[0]!;
-    const complete = service.completeTurn("turn-capture-normalizer", {
+    const complete = (await service.completeTurn("turn-capture-normalizer", {
       sessionId: session.sessionId,
       query: longUser,
       answer: "short assistant response",
@@ -451,7 +453,7 @@ describe("MemoryService / session / turn capture", () => {
         output: longOutput,
         success: true
       }]
-    });
+    }));
 
     const row = db.db.prepare(
       `SELECT properties_json
@@ -493,7 +495,7 @@ describe("MemoryService / session / turn capture", () => {
       query: "Run pwd in the terminal."
     });
 
-    const complete = service.completeTurn("turn-complete-tools", {
+    const complete = (await service.completeTurn("turn-complete-tools", {
       sessionId: session.sessionId,
       query: "Run pwd in the terminal.",
       answer: "The command completed.",
@@ -530,7 +532,7 @@ describe("MemoryService / session / turn capture", () => {
         outputTokens: 5
       },
       tags: ["trace", "turn", "memmy", "openclaw"]
-    });
+    }));
 
     const rawTurn = db.db.prepare(
       `SELECT tool_calls_json, tool_results_json, usage_json
@@ -612,12 +614,12 @@ describe("MemoryService / session / turn capture", () => {
     expect(traceMeta.tool_calls?.map((call) => call.id)).toEqual(["call-bash", "call-node"]);
     expect(traceMeta.step_index).toBe(0);
     expect(traceMeta.sub_step_total).toBe(1);
-    const episodeDetail = service.getMemory(complete.episodeId);
+    const episodeDetail = service.getMemory(assignedEpisodeId(service, complete));
     expect(episodeDetail.kind).toBe("episode");
     if (episodeDetail.kind !== "episode") {
       throw new Error("expected episode detail");
     }
-    expect(episodeDetail.id).toBe(complete.episodeId);
+    expect(episodeDetail.id).toBe(assignedEpisodeId(service, complete));
     expect(episodeDetail.timeline.rawTurns?.map((turn) => turn.rawTurnId)).toContain(complete.rawTurnId);
     expect(episodeDetail.timeline.items.map((item) => item.id)).toContain(complete.l1MemoryId);
 
@@ -643,12 +645,13 @@ describe("MemoryService / session / turn capture", () => {
         action: "stored",
         sourceAgent: "memmy-agent",
         traceId: complete.l1MemoryId,
-        episodeId: complete.episodeId,
+        episodeId: assignedEpisodeId(service, complete),
         query: "Run pwd in the terminal.",
         agent: "The command completed."
       })
     ]);
-    expect(memoryAddOutput.details[0]?.summary).toMatch(/^RawTurn:/);
+    // No summary has been generated yet; internal body markers are not summaries.
+    expect(memoryAddOutput.details[0]?.summary).toBe("");
 
     db.close();
   });
@@ -716,7 +719,7 @@ describe("MemoryService / session / turn capture", () => {
     db.close();
   });
 
-  it("sanitizes memmy recall outputs before storing completed turns", () => {
+  it("sanitizes memmy recall outputs before storing completed turns", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -726,7 +729,7 @@ describe("MemoryService / session / turn capture", () => {
       }
     });
 
-    const complete = service.completeTurn("turn-memmy-sanitize", {
+    const complete = (await service.completeTurn("turn-memmy-sanitize", {
       sessionId: session.sessionId,
       query: [
         '<memmy_memory_context source="turn_start">',
@@ -755,7 +758,7 @@ describe("MemoryService / session / turn capture", () => {
           output: '<memmy_memory_context source="tool_search">\nHistorical User: old task\n</memmy_memory_context>'
         }
       ]
-    });
+    }));
 
     const rawTurn = db.db.prepare(
       `SELECT user_text, assistant_text, tool_calls_json, tool_results_json
@@ -813,7 +816,7 @@ describe("MemoryService / session / turn capture", () => {
       "",
       "这个文件的内容是什么？"
     ].join("\n");
-    const complete = service.completeTurn("turn-attachment-summary", {
+    const complete = (await service.completeTurn("turn-attachment-summary", {
       sessionId: session.sessionId,
       query,
       answer: "这个附件是一个 **HYPRE 2.31.0 源码集合**，包含并行求解器实现。",
@@ -823,7 +826,7 @@ describe("MemoryService / session / turn capture", () => {
         output: "set(HYPRE_VERSION 2.31.0)",
         success: true
       }]
-    });
+    }));
 
     await service.runWorkerOnce(20);
 
@@ -848,7 +851,7 @@ describe("MemoryService / session / turn capture", () => {
     db.close();
   });
 
-  it("does not store empty turns", () => {
+  it("does not store empty turns", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -858,11 +861,11 @@ describe("MemoryService / session / turn capture", () => {
       }
     });
 
-    expect(() => service.completeTurn("turn-empty-capture", {
+    await expect(async () => (await service.completeTurn("turn-empty-capture", {
       sessionId: session.sessionId,
       query: "",
       answer: ""
-    })).toThrow("requires a non-empty user query and assistant result");
+    }))).rejects.toThrow("requires a non-empty user query and assistant result");
     const emptyMemories = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
@@ -884,27 +887,27 @@ describe("MemoryService / session / turn capture", () => {
         userId: "chitchat-capture-user"
       }
     });
-    const task = service.completeTurn("turn-before-chitchat", {
+    const task = (await service.completeTurn("turn-before-chitchat", {
       sessionId: session.sessionId,
       query: "Configure nginx TLS",
       answer: "Use port 443 and verify the certificate chain."
-    });
+    }));
 
     const prepared = await service.startTurn({
       turnId: "turn-chitchat-capture",
       sessionId: session.sessionId,
       query: "谢谢"
     });
-    const completed = service.completeTurn("turn-chitchat-capture", {
+    const completed = (await service.completeTurn("turn-chitchat-capture", {
       sessionId: session.sessionId,
       query: "谢谢",
       answer: "不客气。"
-    });
+    }));
 
     expect(prepared.status).toContain("intent:chitchat:retrieval_skipped");
     expect(completed.l1MemoryId).toBe("");
     expect(completed.l1MemoryIds).toEqual([]);
-    const episode = service.getMemory(task.episodeId);
+    const episode = service.getMemory(assignedEpisodeId(service, task));
     if (episode.kind !== "episode") {
       throw new Error("expected episode detail");
     }
@@ -921,13 +924,13 @@ describe("MemoryService / session / turn capture", () => {
       sessionId: session.sessionId,
       query: "继续配置证书续期"
     });
-    const resumed = service.completeTurn("turn-after-chitchat", {
+    const resumed = (await service.completeTurn("turn-after-chitchat", {
       sessionId: session.sessionId,
       query: "继续配置证书续期",
       answer: "可以使用自动续期任务。"
-    });
+    }));
     expect(resumed.l1MemoryIds).toHaveLength(1);
-    const resumedEpisode = service.getMemory(task.episodeId);
+    const resumedEpisode = service.getMemory(assignedEpisodeId(service, task));
     if (resumedEpisode.kind !== "episode") {
       throw new Error("expected episode detail");
     }
@@ -937,7 +940,7 @@ describe("MemoryService / session / turn capture", () => {
     ]);
   });
 
-  it("excludes chitchat completed without a preceding turn start from L1 capture", () => {
+  it("excludes chitchat completed without a preceding turn start from L1 capture", async () => {
     const { service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -947,15 +950,15 @@ describe("MemoryService / session / turn capture", () => {
       }
     });
 
-    const completed = service.completeTurn("turn-direct-chitchat", {
+    const completed = (await service.completeTurn("turn-direct-chitchat", {
       sessionId: session.sessionId,
       query: "谢谢",
       answer: "不客气。"
-    });
+    }));
 
     expect(completed.l1MemoryId).toBe("");
     expect(completed.l1MemoryIds).toEqual([]);
-    const episode = service.getMemory(completed.episodeId);
+    const episode = service.getMemory(assignedEpisodeId(service, completed));
     if (episode.kind !== "episode") {
       throw new Error("expected episode detail");
     }
@@ -979,7 +982,7 @@ describe("MemoryService / session / turn capture", () => {
       workspaceId: "workspace-structural"
     });
 
-    const complete = service.completeTurn("turn-error", {
+    const complete = (await service.completeTurn("turn-error", {
       sessionId: session.sessionId,
       query: "安装 psycopg2 失败",
       answer: "需要先处理 native dependency 缺失。",
@@ -989,7 +992,7 @@ describe("MemoryService / session / turn capture", () => {
         output: "error: pg_config executable not found",
         success: false
       }]
-    });
+    }));
 
     const detail = service.getMemory(complete.l1MemoryId);
     const properties = detail.metadata.properties as {
@@ -1029,11 +1032,11 @@ describe("MemoryService / session / turn capture", () => {
         userId: "user-align"
       }
     });
-    const complete = service.completeTurn("turn-align-source", {
+    const complete = (await service.completeTurn("turn-align-source", {
       sessionId: session.sessionId,
       query: "检查 memory service 设计对齐",
       answer: "已经生成 L1 trace 作为 compact 输入。"
-    });
+    }));
 
     const before = await service.observeTool({
       sessionId: session.sessionId,
@@ -1098,14 +1101,14 @@ describe("MemoryService / session / turn capture", () => {
       toolCalls: [{ name: "read_file" }]
     });
 
-    const observedComplete = service.completeTurn("turn-tool-observe", {
+    const observedComplete = (await service.completeTurn("turn-tool-observe", {
       sessionId: session.sessionId,
       query: "读取设计文档里的工具观察链路",
       answer: "read_file 返回 ok，工具观察已写入 raw turn。",
       reasoningSummary: "Validated observed tool payload before completing the turn.",
       usage: { inputTokens: 12, outputTokens: 8 },
       sourceMemoryIds: [complete.l1MemoryId]
-    });
+    }));
     expect(observedComplete.rawTurnId).toBe(before.rawTurnId);
     expect(observedComplete.l1MemoryIds).toHaveLength(1);
 
@@ -1175,12 +1178,12 @@ describe("MemoryService / session / turn capture", () => {
     };
     expect(observedDetail.refs?.rawTurn?.reasoningSummary).toContain("Validated observed tool payload");
 
-    const compact = service.compactSession(session.sessionId, {
+    const compact = (await service.compactSession(session.sessionId, {
       summary: "compact summary for design alignment",
       sourceMemoryIds: [complete.l1MemoryId],
       sourceTurnIds: [complete.turnId],
       tokenEstimate: 64
-    });
+    }));
     if (!compact.rawTurnId || !compact.l1MemoryId) {
       throw new Error("expected compactSession to create raw turn and L1 memory");
     }
@@ -1253,10 +1256,10 @@ describe("MemoryService / session / turn capture", () => {
     ).get(compact.rawTurnId) as { target_memory_id: string | null; payload_json: string } | undefined;
     expect(compactL3Job).toBeUndefined();
 
-    const compactWithoutL1 = service.compactSession(session.sessionId, {
+    const compactWithoutL1 = (await service.compactSession(session.sessionId, {
       summary: "compact summary without l1 materialization",
       createL1: false
-    });
+    }));
     expect(compactWithoutL1.l1MemoryId).toBeUndefined();
     expect(compactWithoutL1.rawTurnId).toMatch(/^raw_/);
     expect(compactWithoutL1.rawTurnId).not.toBe(compact.rawTurnId);
@@ -1275,12 +1278,12 @@ describe("MemoryService / session / turn capture", () => {
     ).get(compactWithoutL1.rawTurnId) as { seq: number };
     expect(compactWithoutL1.changeSeq).toBe(compactWithoutL1LatestChange.seq);
 
-    const start = service.subagentStart({
+    const start = (await service.subagentStart({
       sessionId: session.sessionId,
       subagentId: "researcher",
       task: "summarize memory-service-branch design",
       metadata: { source: "memory-service-branch" }
-    });
+    }));
     expect(start.rawTurnId).toMatch(/^raw_/);
     expect(start.changeSeq).toBeGreaterThan(0);
     expect(start.syncCursor.startsWith("cur_")).toBe(true);
@@ -1296,22 +1299,22 @@ describe("MemoryService / session / turn capture", () => {
       op: "created",
       source: "subagent.start"
     });
-    const secondStart = service.subagentStart({
+    const secondStart = (await service.subagentStart({
       sessionId: session.sessionId,
       subagentId: "researcher",
       task: "run a second alignment scan",
       metadata: { source: "memory-service-branch" }
-    });
+    }));
     expect(secondStart.rawTurnId).toMatch(/^raw_/);
     expect(secondStart.rawTurnId).not.toBe(start.rawTurnId);
     expect(secondStart.changeSeq).toBeGreaterThan(start.changeSeq);
-    const subagentComplete = service.subagentComplete({
+    const subagentComplete = (await service.subagentComplete({
       sessionId: session.sessionId,
       subagentId: "researcher",
       result: "subagent completed alignment scan",
       summary: "alignment scan done",
       metadata: { source: "memory-service-branch" }
-    });
+    }));
     expect(subagentComplete.changeSeq).toBeGreaterThan(start.changeSeq);
     expect(subagentComplete.syncCursor.startsWith("cur_")).toBe(true);
     const subagentRow = db.db.prepare(

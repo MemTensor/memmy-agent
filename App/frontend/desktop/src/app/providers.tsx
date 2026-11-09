@@ -7,6 +7,7 @@ import { AppStateProvider, useAppState } from "../state/app-state.js";
 import { ThemeProvider } from "../theme/theme-provider.js";
 import { useWindowFullScreenSync } from "../utils/window-fullscreen.js";
 import { resolveDesktopDisplayLanguage } from "./account-channel.js";
+import { PluginUiProvider } from "./plugin-ui-context.js";
 
 /** Contract for api clients context value. */
 export interface ApiClientsContextValue {
@@ -14,16 +15,19 @@ export interface ApiClientsContextValue {
   setClients: Dispatch<SetStateAction<AppClients | null>>;
 }
 
-const ApiClientsContext = createContext<ApiClientsContextValue | null>(null);
+/** 导出给预览页：没有走 AppProviders 时也能渲染需要本机客户端的弹窗（客户端为空即可）。 */
+export const ApiClientsContext = createContext<ApiClientsContextValue | null>(null);
 
 /** Handles app providers. */
 export function AppProviders(props: { children: ReactNode }) {
   return (
     <AppStateProvider>
       <ApiClientsProvider>
-        <TaskBusProvider>
-          <VisualProviders>{props.children}</VisualProviders>
-        </TaskBusProvider>
+        <PluginUiProvider>
+          <TaskBusProvider>
+            <VisualProviders>{props.children}</VisualProviders>
+          </TaskBusProvider>
+        </PluginUiProvider>
       </ApiClientsProvider>
     </AppStateProvider>
   );

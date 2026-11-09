@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, FolderOpen, LoaderCircle, RotateCw, Save } from "lucide-react";
+import { Download, ExternalLink, FolderOpen, LoaderCircle, RotateCw, Save } from "lucide-react";
 import type {
   MemmyAgentClient,
   WorkspaceEnvironmentScope,
   WorkspaceEnvironmentState,
 } from "../api/memmy-agent-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
-import { AgentMessageContent, type AgentArtifactClient } from "./agent-message-content.js";
+import { AgentMessageContent, saveAttachmentFile, type AgentArtifactClient } from "./agent-message-content.js";
 import { ThreadFileIcon } from "./agent-thread-file-icon.js";
 import {
   joinThreadPath,
@@ -20,8 +20,14 @@ import { canEditWorkspacePreview } from "./editable-code-editor-options.js";
 import { EditableCodePreview, type PreviewEditorControls } from "./editable-code-preview.js";
 import { isLineOrientedDiff, WorkspaceDiffView, workspaceDiffStats, workspaceFileLineCount, WorkspaceSourceView } from "./workspace-diff-view.js";
 
+import type { FilePreviewResource } from "./file-preview/file-preview-types.js";
+import { FilePreview } from "./file-preview/file-preview.js";
+
 export const THREAD_TEXT_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
+export const THREAD_PDF_PREVIEW_MAX_BYTES = 20 * 1024 * 1024;
+export const THREAD_OFFICE_PREVIEW_MAX_BYTES = 25 * 1024 * 1024;
 export const THREAD_CSV_PREVIEW_MAX_ROWS = 500;
+export const THREAD_LIVE_EDIT_RETRY_DELAYS_MS = [250, 1_000, 2_000, 4_000] as const;
 
 type ThreadPreviewState =
   | { status: "loading" }
@@ -29,6 +35,8 @@ type ThreadPreviewState =
   | { status: "unsupported" }
   | { status: "too-large" }
   | { status: "unavailable" }
+  | { status: "ready"; kind: "document"; resource: FilePreviewResource }
+  | { status: "ready"; kind: "paged-text"; text: string; start: number; end: number; total: number; url: string }
   | { status: "ready"; kind: "pdf" | "html"; objectUrl: string }
   | { status: "ready"; kind: "image" | "video"; url: string }
   | { status: "ready"; kind: "markdown" | "code" | "text" | "csv"; text: string }
@@ -47,18 +55,31 @@ export type ThreadPreviewContext = {
   fetchFn?: typeof fetch;
 };
 
-export function ThreadTabPreview(props: { tab: ThreadPanelTab; context: ThreadPreviewContext }) {
+export function ThreadTabPreview(props: { tab: Extract<ThreadPanelTab, { type: "file" | "change" }>; context: ThreadPreviewContext; revision?: string }) {
   const { t } = useTranslation();
   const [attempt, setAttempt] = useState(0);
   const [result, setResult] = useState<LoadResult>({ state: { status: "loading" }, path: null });
+  const [loadedVersion, setLoadedVersion] = useState(0);
+  const [downloadState, setDownloadState] = useState<"idle" | "saving" | "saved">("idle");
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const { tab, context } = props;
+  const currentTabId = useRef(tab.id);
+  currentTabId.current = tab.id;
   const environmentRevision = tab.type === "change" ? context.environment?.snapshot.revision ?? "" : "";
 
   useEffect(() => {
     let cancelled = false;
     let objectUrl: string | undefined;
-    setResult({ state: { status: "loading" }, path: null });
-    const load = tab.type === "change" ? loadChangePreview(tab, context) : loadFilePreview(tab, context);
+    const abortController = new AbortController();
+    setResult((current) => current.state.status === "ready" && current.state.kind !== "pdf" && current.state.kind !== "html"
+      ? current
+      : { state: { status: "loading" }, path: null });
+    setDownloadState("idle");
+    setDownloadError(null);
+    const load = loadPreviewDuringLiveEdit(
+      () => tab.type === "change" ? loadChangePreview(tab, context, abortController.signal) : loadFilePreview(tab, context, abortController.signal),
+      abortController.signal,
+    );
     load
       .then((next) => {
         if (cancelled) {
@@ -67,16 +88,18 @@ export function ThreadTabPreview(props: { tab: ThreadPanelTab; context: ThreadPr
         }
         objectUrl = next.objectUrl;
         setResult(next);
+        setLoadedVersion((value) => value + 1);
       })
       .catch(() => {
         if (!cancelled) setResult({ state: { status: "error" }, path: null });
       });
     return () => {
       cancelled = true;
+      abortController.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
     // Change previews reload when Git status arrives. File edits keep their own draft.
-  }, [tab.id, attempt, environmentRevision]);
+  }, [tab, attempt, environmentRevision, props.revision]);
 
   const filePath = result.path ?? (tab.type === "change" ? tab.absolutePath ?? tab.path : tab.path ?? null);
   const fileActions = Boolean(context.artifactClient && filePath);
@@ -93,6 +116,41 @@ export function ThreadTabPreview(props: { tab: ThreadPanelTab; context: ThreadPr
     draftsRef.current.delete(path);
   }, []);
   const saveShortcut = /mac/iu.test(window.memmy?.platform ?? navigator.platform) ? "⌘S" : "Ctrl+S";
+  const canDownload = tab.type === "file" && Boolean(tab.url || tab.path);
+
+  const download = async () => {
+    if (tab.type !== "file" || downloadState === "saving") return;
+    const requestedTabId = tab.id;
+    setDownloadState("saving");
+    setDownloadError(null);
+    let url = tab.url;
+    let name = tab.name;
+    if (tab.path && context.artifactClient) {
+      try {
+        const resolved = await context.artifactClient.resolveArtifact(normalizeThreadPath(tab.path));
+        url = resolved.media_url ?? url;
+        name = resolved.name ?? name;
+      } catch {
+        // A still-valid URL can outlive a local temporary path.
+      }
+    }
+    if (currentTabId.current !== requestedTabId) return;
+    if (!url) {
+      setDownloadState("idle");
+      setDownloadError(t("home.threadPanel.preview.downloadFailed"));
+      return;
+    }
+    const saved = await saveAttachmentFile(url, name);
+    if (currentTabId.current !== requestedTabId) return;
+    if (saved.status === "saved") {
+      setDownloadState("saved");
+    } else if (saved.status === "failed") {
+      setDownloadState("idle");
+      setDownloadError(saved.error || t("home.threadPanel.preview.downloadFailed"));
+    } else {
+      setDownloadState("idle");
+    }
+  };
 
   return (
     <div className="thread-preview">
@@ -102,6 +160,18 @@ export function ThreadTabPreview(props: { tab: ThreadPanelTab; context: ThreadPr
           <span className="thread-preview__title" title={filePath ?? tab.name}>{tab.name}</span>
         </div>
         <div className="thread-preview__actions">
+          {canDownload ? (
+            <button
+              type="button"
+              className="thread-preview__action"
+              aria-label={t("home.threadPanel.preview.download")}
+              title={t("home.threadPanel.preview.download")}
+              disabled={downloadState === "saving"}
+              onClick={() => void download()}
+            >
+              <Download size={16} aria-hidden="true" />
+            </button>
+          ) : null}
           {editorControls && (editorControls.dirty || editorControls.saving) ? (
             <button
               type="button"
@@ -144,11 +214,17 @@ export function ThreadTabPreview(props: { tab: ThreadPanelTab; context: ThreadPr
           ) : null}
         </div>
       </div>
+      {downloadError ? <p role="alert" className="thread-preview__notice">{downloadError}</p> : null}
+      {downloadState !== "idle" ? <p role="status" className="thread-preview__notice">{t(
+        downloadState === "saving" ? "home.threadPanel.preview.savingDownload" : "home.threadPanel.preview.downloadSaved",
+      )}</p> : null}
       <div className="thread-preview__body">
         <ThreadPreviewBody
+          fetchFn={context.fetchFn}
           name={tab.name}
           path={filePath ?? tab.name}
           state={result.state}
+          loadedVersion={loadedVersion}
           artifactClient={context.artifactClient}
           onPreviewFile={context.onPreviewFile}
           onRetry={() => setAttempt((value) => value + 1)}
@@ -164,10 +240,46 @@ export function ThreadTabPreview(props: { tab: ThreadPanelTab; context: ThreadPr
   );
 }
 
+/**
+ * Editors commonly save by replacing the destination atomically, leaving a
+ * short interval where resolve/fetch cannot see the file. WorkBuddy uses the
+ * same shape of protection: debounce the first read and retry with a small
+ * backoff instead of turning that transient window into a moved/deleted error.
+ */
+export async function loadPreviewDuringLiveEdit<T>(
+  load: () => Promise<T>,
+  signal?: AbortSignal,
+  delays: readonly number[] = THREAD_LIVE_EDIT_RETRY_DELAYS_MS,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    if (signal?.aborted) throw new DOMException("Preview load aborted", "AbortError");
+    if (attempt > 0) await waitForPreviewRetry(delays[attempt - 1]!, signal);
+    try {
+      return await load();
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+function waitForPreviewRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(resolve, delayMs);
+    signal?.addEventListener("abort", () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("Preview load aborted", "AbortError"));
+    }, { once: true });
+  });
+}
+
 function ThreadPreviewBody(props: {
+  fetchFn?: typeof fetch;
   name: string;
   path: string;
   state: ThreadPreviewState;
+  loadedVersion: number;
   artifactClient: AgentArtifactClient | null;
   onPreviewFile?: (file: { name: string; path?: string; url?: string }) => boolean;
   onRetry: () => void;
@@ -216,6 +328,10 @@ function ThreadPreviewBody(props: {
     );
   }
   switch (state.kind) {
+    case "document":
+      return <FilePreview resource={state.resource} />;
+    case "paged-text":
+      return <PagedTextPreview key={props.path} initial={state} name={props.name} fetchFn={props.fetchFn} />;
     case "pdf":
       return <iframe className="thread-preview__frame" src={state.objectUrl} title={props.name} />;
     case "html":
@@ -265,7 +381,7 @@ function ThreadPreviewBody(props: {
       if (canEditWorkspacePreview(props.path, props.workspaceRoot)) {
         return (
           <EditableCodePreview
-            key={props.path}
+            key={`${props.path}:${props.loadedVersion}`}
             path={props.path}
             workspaceRoot={props.workspaceRoot ?? ""}
             diskText={state.text}
@@ -283,6 +399,78 @@ function ThreadPreviewBody(props: {
         </div>
       );
   }
+}
+
+const TEXT_PAGE_BYTES = 256 * 1024;
+type TextPage = { status: "ready"; kind: "paged-text"; text: string; start: number; end: number; total: number; url: string };
+
+async function readTextPage(url: string, offset: number, fetchFn: typeof fetch = fetch, signal?: AbortSignal): Promise<TextPage | Response> {
+  const response = await fetchFn(url, { cache: "no-store", headers: { Range: `bytes=${offset}-${offset + TEXT_PAGE_BYTES + 2}` }, signal });
+  // A readable empty file cannot satisfy a byte range. Only the initial
+  // request with an explicit zero total should enter the normal empty preview.
+  if (offset === 0 && response.status === 416 && response.headers.get("content-range")?.trim() === "bytes */0") {
+    return { status: "ready", kind: "paged-text", text: "", start: 0, end: 0, total: 0, url };
+  }
+  if (!response.ok) throw new Error(`preview request failed: ${response.status}`);
+  if (response.status !== 206) return response;
+  const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get("content-range") ?? "");
+  if (!range) throw new Error("Missing text range metadata");
+  const blob = await readPreviewResponse(response, TEXT_PAGE_BYTES + 3, signal);
+  if (!blob) throw new Error("Text range exceeded the requested preview size");
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let first = 0;
+  while (first < Math.min(3, bytes.length) && (bytes[first]! & 0xc0) === 0x80) first++;
+  let end = Math.min(bytes.length, first + TEXT_PAGE_BYTES);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let text: string | undefined;
+  for (let trim = 0; trim <= 3 && end >= first; trim++, end--) {
+    try { text = decoder.decode(bytes.subarray(first, end)); break; } catch { /* retry a complete UTF-8 boundary */ }
+  }
+  if (text === undefined) throw new Error("Invalid UTF-8 preview");
+  return { status: "ready", kind: "paged-text", text, start: Number(range[1]) + first,
+    end: Number(range[1]) + end, total: Number(range[3]), url };
+}
+
+function PagedTextPreview(props: { initial: TextPage; name: string; fetchFn?: typeof fetch }) {
+  const { t } = useTranslation();
+  const [page, setPage] = useState(props.initial);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const textRef = useRef<HTMLPreElement>(null);
+  const showTail = useRef(false);
+  const requestRef = useRef<AbortController | null>(null);
+  useEffect(() => () => requestRef.current?.abort(), []);
+  useEffect(() => {
+    if (textRef.current) textRef.current.scrollTop = showTail.current ? textRef.current.scrollHeight : 0;
+  }, [page]);
+  const load = async (offset: number) => {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setLoading(true); setFailed(false);
+    try {
+      const next = await readTextPage(page.url, offset, props.fetchFn, controller.signal);
+      if (next instanceof Response) throw new Error("Range preview unavailable");
+      showTail.current = offset > 0 && next.end >= next.total;
+      setPage(next);
+    } catch { if (!controller.signal.aborted) setFailed(true); }
+    finally {
+      if (requestRef.current === controller) requestRef.current = null;
+      if (!controller.signal.aborted) setLoading(false);
+    }
+  };
+  return <div className="thread-preview__paged">
+    <div className="thread-preview__text-pager" role="group" aria-label={t("home.threadPanel.preview.pages")}>
+      <button type="button" disabled={loading || page.start === 0} onClick={() => void load(0)}>{t("home.threadPanel.preview.firstPage")}</button>
+      <button type="button" disabled={loading || page.start === 0} onClick={() => void load(Math.max(0, page.start - TEXT_PAGE_BYTES))}>{t("home.threadPanel.preview.previousPage")}</button>
+      <span>{page.start}–{page.end} / {page.total} B</span>
+      <button type="button" disabled={loading || page.end >= page.total} onClick={() => void load(page.end)}>{t("home.threadPanel.preview.nextPage")}</button>
+      <button type="button" disabled={loading || page.end >= page.total} onClick={() => void load(Math.max(0, page.total - TEXT_PAGE_BYTES))}>{t("home.threadPanel.preview.lastPage")}</button>
+    </div>
+    {failed ? <p role="alert">{t("home.threadPanel.preview.unavailable")}</p> : null}
+    {loading ? <p role="status">{t("home.threadPanel.preview.loading")}</p> : null}
+    <pre ref={textRef} className="thread-preview__text-page" aria-label={props.name}>{page.text}</pre>
+  </div>;
 }
 
 function ThreadCsvTable(props: { text: string; delimiter: string }) {
@@ -352,6 +540,7 @@ export function parseDelimitedRows(text: string, delimiter: string, limit: numbe
 async function loadFilePreview(
   tab: { name: string; path?: string; url?: string },
   context: ThreadPreviewContext,
+  signal: AbortSignal,
 ): Promise<LoadResult> {
   const kind = threadPreviewKind(tab.name);
   let path = tab.path ?? null;
@@ -361,16 +550,46 @@ async function loadFilePreview(
     path = resolved.path;
     mediaUrl = resolved.media_url ?? mediaUrl;
   }
+  if ((kind === "document" || kind === "pdf") && mediaUrl) {
+    const url = mediaUrl;
+    const limit = kind === "pdf" ? THREAD_PDF_PREVIEW_MAX_BYTES : THREAD_OFFICE_PREVIEW_MAX_BYTES;
+    const blob = await fetchPreviewBlob(url, limit, signal, context.fetchFn);
+    if (!blob) return { state: { status: "too-large" }, path };
+    const resource: FilePreviewResource = {
+      id: path ?? url,
+      name: tab.name,
+      path: path ?? undefined,
+      load: async () => blob,
+      open: path && context.artifactClient ? () => context.artifactClient!.openArtifact(path!) : undefined,
+      reveal: path && context.artifactClient ? () => context.artifactClient!.revealArtifact(path!) : undefined,
+    };
+    return { state: { status: "ready", kind: "document", resource }, path };
+  }
+  if (kind === "document") return { state: { status: "unavailable" }, path };
   if (kind === "unsupported") return { state: { status: "unsupported" }, path };
   if (!mediaUrl) return { state: { status: "unavailable" }, path };
   if (kind === "image" || kind === "video") return { state: { status: "ready", kind, url: mediaUrl }, path };
 
-  const blob = await fetchBlob(mediaUrl, context.fetchFn);
+  // Large raw text stays bounded in both network reads and rendering. Smaller
+  // files retain the existing full-file preview/editor behavior.
+  if (["code", "text", "markdown", "csv"].includes(kind)) {
+    const first = await readTextPage(mediaUrl, 0, context.fetchFn, signal);
+    if (!(first instanceof Response)) {
+      if (first.total > THREAD_TEXT_PREVIEW_MAX_BYTES) return { state: first, path };
+      if (first.end >= first.total) return { state: { status: "ready", kind: kind as "code" | "text" | "markdown" | "csv", text: first.text }, path };
+    } else {
+      const blob = await readPreviewResponse(first, THREAD_TEXT_PREVIEW_MAX_BYTES, signal);
+      if (!blob) return { state: { status: "too-large" }, path };
+      return { state: { status: "ready", kind: kind as "code" | "text" | "markdown" | "csv", text: await blob.text() }, path };
+    }
+  }
+  const limit = kind === "pdf" ? THREAD_PDF_PREVIEW_MAX_BYTES : THREAD_TEXT_PREVIEW_MAX_BYTES;
+  const blob = await fetchPreviewBlob(mediaUrl, limit, signal, context.fetchFn);
+  if (!blob) return { state: { status: "too-large" }, path };
   if (kind === "pdf") {
     const objectUrl = URL.createObjectURL(new Blob([blob], { type: "application/pdf" }));
     return { state: { status: "ready", kind: "pdf", objectUrl }, path, objectUrl };
   }
-  if (blob.size > THREAD_TEXT_PREVIEW_MAX_BYTES) return { state: { status: "too-large" }, path };
   const text = await blob.text();
   if (kind === "html") {
     const objectUrl = URL.createObjectURL(new Blob([text], { type: "text/html;charset=utf-8" }));
@@ -382,6 +601,7 @@ async function loadFilePreview(
 async function loadChangePreview(
   tab: Extract<ThreadPanelTab, { type: "change" }>,
   context: ThreadPreviewContext,
+  signal: AbortSignal,
 ): Promise<LoadResult> {
   const snapshot = context.environment?.snapshot ?? null;
   const base = snapshot?.cwd || context.workspaceRoot || "";
@@ -394,7 +614,7 @@ async function loadChangePreview(
     try {
       const diff = await context.agentClient.readWorkspaceEnvironmentDiff(context.sessionScope, relative);
       if (shouldShowLineDiff(tab.name, diff.diff)) {
-        const fileText = await readWorkspaceText(absolute, context);
+        const fileText = await readWorkspaceText(absolute, context, signal);
         return { state: { status: "ready", kind: "diff", diff: diff.diff, fileText }, path: absolute };
       }
       untracked = diff.unavailable_reason === "untracked_diff_unavailable";
@@ -405,13 +625,13 @@ async function loadChangePreview(
 
   const previewKind = threadPreviewKind(tab.name);
   if (previewKind !== "code" && previewKind !== "text" && previewKind !== "markdown" && previewKind !== "html" && previewKind !== "csv") {
-    return loadFilePreview({ name: tab.name, path: absolute }, context);
+    return loadFilePreview({ name: tab.name, path: absolute }, context, signal);
   }
   if (!context.artifactClient) return { state: { status: "unavailable" }, path: absolute };
   const resolved = await context.artifactClient.resolveArtifact(absolute);
   if (!resolved.media_url) return { state: { status: "unavailable" }, path: resolved.path };
-  const blob = await fetchBlob(resolved.media_url, context.fetchFn);
-  if (blob.size > THREAD_TEXT_PREVIEW_MAX_BYTES) return { state: { status: "too-large" }, path: resolved.path };
+  const blob = await fetchPreviewBlob(resolved.media_url, THREAD_TEXT_PREVIEW_MAX_BYTES, signal, context.fetchFn);
+  if (!blob) return { state: { status: "too-large" }, path: resolved.path };
   return {
     state: { status: "ready", kind: "source", text: await blob.text(), lineKind: untracked ? "addition" : "context", notice: !untracked },
     path: resolved.path,
@@ -434,21 +654,52 @@ function previewChangeStats(
   return { added: tab.added, deleted: tab.deleted };
 }
 
-async function readWorkspaceText(absolute: string, context: ThreadPreviewContext): Promise<string | null> {
+async function readWorkspaceText(absolute: string, context: ThreadPreviewContext, signal: AbortSignal): Promise<string | null> {
   if (!context.artifactClient) return null;
   try {
     const resolved = await context.artifactClient.resolveArtifact(absolute);
     if (!resolved.media_url) return null;
-    const blob = await fetchBlob(resolved.media_url, context.fetchFn);
-    if (blob.size > THREAD_TEXT_PREVIEW_MAX_BYTES) return null;
+    const blob = await fetchPreviewBlob(resolved.media_url, THREAD_TEXT_PREVIEW_MAX_BYTES, signal, context.fetchFn);
+    if (!blob) return null;
     return blob.text();
   } catch {
     return null;
   }
 }
 
-async function fetchBlob(url: string, fetchFn: typeof fetch = fetch): Promise<Blob> {
-  const response = await fetchFn(url, { cache: "no-store" });
+async function fetchPreviewBlob(url: string, limit: number, signal: AbortSignal, fetchFn: typeof fetch = fetch): Promise<Blob | null> {
+  const response = await fetchFn(url, { cache: "no-store", signal });
   if (!response.ok) throw new Error(`preview request failed: ${response.status}`);
-  return response.blob();
+  return readPreviewResponse(response, limit, signal);
+}
+
+/** Reads at most limit bytes, even when Content-Length is absent or incorrect. */
+export async function readPreviewResponse(response: Response, limit: number, signal?: AbortSignal): Promise<Blob | null> {
+  signal?.throwIfAborted();
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    await response.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  if (!response.body) return new Blob();
+  const reader = response.body.getReader();
+  const chunks: ArrayBuffer[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) return null;
+      const copy = new Uint8Array(value.byteLength);
+      copy.set(value);
+      chunks.push(copy.buffer);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  signal?.throwIfAborted();
+  return new Blob(chunks);
 }
