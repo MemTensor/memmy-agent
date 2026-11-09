@@ -20,7 +20,7 @@ describe("prototype page structure alignment", () => {
 
   it("aligns account entry pages with the prototype auth shell", () => {
     expect(source("pages/welcome-page.tsx")).toContain("h-screen flex flex-col bg-canvas-oat relative overflow-hidden");
-    expect(source("pages/welcome-page.tsx")).toContain('dispatch(appActions.navigate("/token-detail"))');
+    expect(source("pages/welcome-page.tsx")).not.toContain('dispatch(appActions.navigate("/token-detail"))');
     expect(source("pages/token-detail-page.tsx")).toContain("h-screen flex flex-col bg-canvas-oat relative overflow-hidden");
     expect(source("pages/token-detail-page.tsx")).toContain("bg-gradient-to-br from-action-sky to-action-sky-hover");
     expect(source("pages/token-detail-page.tsx")).toContain("formatTokenGiftAmount(agentChatTokenTotal)");

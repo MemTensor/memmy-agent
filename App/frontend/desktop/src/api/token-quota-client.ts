@@ -2,6 +2,7 @@ import {
   TokenQuotaApplyResultSchema,
   TokenQuotaEligibilitySchema,
   type RuntimeConfig,
+  type RequestTokenQuotaInput,
   type TokenQuotaApplyResult,
   type TokenQuotaEligibility
 } from "@memmy/local-api-contracts";
@@ -11,7 +12,7 @@ export interface TokenQuotaClient {
   /** Gets token quota eligibility for the current account. */
   getEligibility(): Promise<TokenQuotaEligibility>;
   /** Submits a reason and creates a token quota request. */
-  requestQuota(reason: string): Promise<TokenQuotaApplyResult>;
+  requestQuota(input: string | RequestTokenQuotaInput): Promise<TokenQuotaApplyResult>;
 }
 
 /** Creates a token quota client backed by the local API. */
@@ -28,11 +29,11 @@ export function createHttpTokenQuotaClient(
       });
     },
 
-    async requestQuota(reason: string) {
+    async requestQuota(input: string | RequestTokenQuotaInput) {
       return request({
         config,
         path: "/api/token-quota/request",
-        body: { reason },
+        body: typeof input === "string" ? { reason: input } : input,
         schema: TokenQuotaApplyResultSchema
       });
     }

@@ -10,6 +10,7 @@ import {
   KnowledgeError,
   MAX_UPLOAD_REQUEST_BYTES,
   record,
+  requiredText,
   text,
 } from "./types.js";
 
@@ -55,7 +56,7 @@ export function registerKnowledgeRoutes(
               ? described.status
               : 500,
           )
-          .send({ error: described.message });
+          .send({ error: described.message, ...(error instanceof KnowledgeError && error.code ? { code: error.code } : {}) });
       });
       scoped.get("/settings", () => client.settings());
       scoped.put("/settings", async (request) => {
@@ -70,9 +71,17 @@ export function registerKnowledgeRoutes(
       });
       scoped.post("/bases", async (request) => {
         const body = record(request.body);
-        if (Object.keys(body).some((key) => key !== "name"))
+        if (Object.keys(body).some((key) => !["name", "description", "visibility"].includes(key)))
           throw new KnowledgeError("仅支持创建当前账户的知识库");
-        return parseSettings(await client.request("/bases", "POST", body));
+        if ("visibility" in body && body.visibility !== "PRIVATE")
+          throw new KnowledgeError("知识库可见性无效");
+        const input = {
+          name: requiredText(body.name, "知识库名称", 200),
+          ...("description" in body ? { description: requiredText(body.description, "知识库描述", 2000) } : {}),
+          ...("visibility" in body ? { visibility: "PRIVATE" } : {}),
+        };
+        const result = await client.request("/bases", "POST", input);
+        return { ...parseSettings(result), ...mutationFields(result) };
       });
       scoped.patch<{ Params: { id: string } }>("/bases/:id", async (request) => {
         const body = record(request.body);
@@ -90,26 +99,26 @@ export function registerKnowledgeRoutes(
           ),
         );
       });
-      scoped.delete<{ Params: { id: string } }>("/bases/:id", async (request) =>
-        parseSettings(
-          await client.request(
-            `/bases/${encodeURIComponent(request.params.id)}`,
-            "DELETE",
-          ),
-        ),
-      );
+      scoped.delete<{ Params: { id: string } }>("/bases/:id", async (request) => {
+        const result = await client.request(`/bases/${encodeURIComponent(request.params.id)}`, "DELETE");
+        return { ...parseSettings(result), ...mutationFields(result) };
+      });
       scoped.get<{ Params: { id: string } }>("/bases/:id/members", async (request) => {
         const data = record(await client.request(`/bases/${encodeURIComponent(request.params.id)}/members`));
         return { members: Array.isArray(data.members) ? data.members : [] };
       });
       scoped.post<{ Params: { id: string } }>("/bases/:id/members", async (request) => {
         const body = record(request.body);
-        if (Object.keys(body).some((key) => key !== "userId") || !text(body.userId).trim()) throw new KnowledgeError("用户 ID 无效");
-        return client.request(`/bases/${encodeURIComponent(request.params.id)}/members`, "POST", { userId: text(body.userId).trim() });
+        if (Object.keys(body).some((key) => !["userId", "memberEmail", "role"].includes(key))
+            || ("userId" in body) === ("memberEmail" in body)
+            || ("role" in body && body.role !== "EDITOR")) throw new KnowledgeError("共享成员参数无效");
+        const key = "userId" in body ? "userId" : "memberEmail";
+        const input = { [key]: requiredText(body[key], "共享成员", 320), ...("role" in body ? { role: "EDITOR" } : {}) };
+        return mutationFields(await client.request(`/bases/${encodeURIComponent(request.params.id)}/members`, "POST", input));
       });
       scoped.delete<{ Params: { id: string; memberId: string } }>("/bases/:id/members/:memberId", async (request) => {
-        await client.request(`/bases/${encodeURIComponent(request.params.id)}/members/${encodeURIComponent(request.params.memberId)}`, "DELETE");
-        return { ok: true };
+        const result = await client.request(`/bases/${encodeURIComponent(request.params.id)}/members/${encodeURIComponent(request.params.memberId)}`, "DELETE");
+        return { ok: true, ...mutationFields(result) };
       });
       scoped.get<{
         Params: { id: string };
@@ -159,12 +168,12 @@ export function registerKnowledgeRoutes(
             raw.byteLength === 0
           )
             throw new KnowledgeError("文件参数无效");
-          await client.request(
+          const result = await client.request(
             `/bases/${encodeURIComponent(request.params.id)}/files`,
             "POST",
             { raw, contentType },
           );
-          return { ok: true };
+          return { ok: true, ...mutationFields(result) };
         },
       );
       scoped.patch<{ Params: { id: string; fileId: string } }>(
@@ -254,18 +263,20 @@ export function registerKnowledgeRoutes(
       scoped.delete<{ Params: { folderId: string } }>(
         "/folders/:folderId",
         async (request) => {
+          if (request.body !== undefined && (request.body === null || typeof request.body !== "object" || Array.isArray(request.body)))
+            throw new KnowledgeError("目录参数无效");
           const body = record(request.body);
           if (Object.keys(body).some((key) => key !== "mode"))
             throw new KnowledgeError("目录参数无效");
-          const mode = text(body.mode);
+          const mode = "mode" in body ? text(body.mode) : "all";
           if (mode !== "out" && mode !== "all")
             throw new KnowledgeError("目录参数无效");
-          await client.request(
+          const result = await client.request(
             `/folders/${encodeURIComponent(request.params.folderId)}`,
             "DELETE",
             { mode },
           );
-          return { ok: true };
+          return { ok: true, ...mutationFields(result) };
         },
       );
       scoped.delete<{ Params: { id: string; fileId: string } }>(
@@ -274,12 +285,12 @@ export function registerKnowledgeRoutes(
           const body = record(request.body);
           if (Object.keys(body).some((key) => key !== "page"))
             throw new KnowledgeError("文件参数无效");
-          await client.request(
+          const result = await client.request(
             `/bases/${encodeURIComponent(request.params.id)}/files/${encodeURIComponent(request.params.fileId)}`,
             "DELETE",
             body,
           );
-          return { ok: true };
+          return { ok: true, ...mutationFields(result) };
         },
       );
       scoped.post("/recall", async (request) => {
@@ -299,4 +310,39 @@ export function registerKnowledgeRoutes(
 
 function headerText(value: string | string[] | undefined): string {
   return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
+}
+
+/** Preserve documented mutation fields without forwarding upstream credentials or internals. */
+function mutationFields(input: unknown): Record<string, unknown> {
+  const data = record(input), result: Record<string, unknown> = {};
+  const invalid = () => new KnowledgeError("知识库服务返回格式无效", 502);
+  const number = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  for (const key of ["baseId", "name", "createdAt", "fileId", "fileName", "status", "userId"]) {
+    if (!(key in data)) continue;
+    if (typeof data[key] !== "string") throw invalid();
+    result[key] = data[key];
+  }
+  for (const key of ["ok", "deleted", "removed"]) {
+    if (!(key in data)) continue;
+    if (typeof data[key] !== "boolean") throw invalid();
+    result[key] = data[key];
+  }
+  for (const key of ["sizeBytes", "releasedBaseCount", "releasedBytes", "deletedFileCount", "deletedFiles"]) {
+    if (!(key in data)) continue;
+    if (!number(data[key])) throw invalid();
+    result[key] = data[key];
+  }
+  for (const key of ["entitlement", "storageUsage", "memberUsage", "entitlementUsage"]) {
+    if (!(key in data)) continue;
+    const usage = record(data[key]);
+    const keys = key === "entitlementUsage" ? ["baseCount", "baseLimit", "storageBytes"] : ["used", "limit"];
+    if (!keys.every(field => number(usage[field]))) throw invalid();
+    result[key] = Object.fromEntries(keys.map(field => [field, usage[field]]));
+  }
+  if ("member" in data) {
+    const member = record(data.member);
+    if (typeof member.memberId !== "string" || member.role !== "EDITOR" || typeof member.joinedAt !== "string") throw invalid();
+    result.member = { memberId: member.memberId, role: member.role, joinedAt: member.joinedAt };
+  }
+  return result;
 }

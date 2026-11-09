@@ -14,7 +14,7 @@ export function creditDisplayBuckets(buckets: CreditBucket[], grants?: CreditsGr
   return grants ? grants.map(grant => ({
     id: grant.grantId, invitation: grant.sourceType === "INVITATION", usageKnown: grant.used !== undefined || (grant.status !== "EXPIRED" && grant.status !== "REVOKED"),
     used: grant.used === undefined ? creditMinor(grant.granted) - creditMinor(grant.remaining) - creditMinor(grant.reserved) : creditMinor(grant.used), granted: creditMinor(grant.granted),
-    remaining: creditMinor(grant.remaining) + creditMinor(grant.reserved),
+    remaining: creditMinor(grant.remaining), reserved: creditMinor(grant.reserved),
     grantedAt: grant.grantedAt, expiresAt: grant.expiresAt, label: grant.sourceName
-  })) : buckets.map(bucket => ({ ...bucket, invitation: bucket.id.startsWith("invite:"), usageKnown: true, used: creditMinor((bucket.granted - bucket.remaining).toFixed(2)), granted: creditMinor(bucket.granted.toFixed(2)), remaining: creditMinor(bucket.remaining.toFixed(2)), label: undefined }));
+  })) : buckets.map(bucket => ({ ...bucket, invitation: bucket.id.startsWith("invite:"), usageKnown: true, used: creditMinor((bucket.granted - bucket.remaining).toFixed(2)), granted: creditMinor(bucket.granted.toFixed(2)), remaining: creditMinor(bucket.remaining.toFixed(2)), reserved: 0n, label: undefined }));
 }

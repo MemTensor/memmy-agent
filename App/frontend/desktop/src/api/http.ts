@@ -1,3 +1,4 @@
+import { requestCreditsExhaustedPrompt } from "../app/credits-exhausted-prompt.js";
 import { ApiErrorBodySchema, type ApiErrorCode, type RuntimeConfig } from "@memmy/local-api-contracts";
 import { userTimeZone } from "../lib/user-time-zone.js";
 
@@ -47,7 +48,9 @@ export async function requestJson<T>(input: RequestJsonInput<T>): Promise<T> {
   });
 
   if (!response.ok) {
-    throw await toApiRequestError(response, input.path);
+    const error = await toApiRequestError(response, input.path);
+    if (error.code === "CREDIT_INSUFFICIENT") requestCreditsExhaustedPrompt();
+    throw error;
   }
 
   return input.schema.parse(await response.json());

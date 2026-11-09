@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CreditsCheckinRequestSchema, CreditsRedemptionRequestSchema, CreditsInvitationsQuerySchema, CreditsPlansQuerySchema, CreditsGrantsQuerySchema, CreditsLedgerQuerySchema, CreditsUsageQuerySchema, CreditsUsageExportQuerySchema } from "@memmy/local-api-contracts";
+import { CreditsApplicationRequestSchema, CreditsCheckinRequestSchema, CreditsRedemptionRequestSchema, CreditsInvitationsQuerySchema, CreditsPlansQuerySchema, CreditsGrantsQuerySchema, CreditsLedgerQuerySchema, CreditsUsageQuerySchema, CreditsUsageExportQuerySchema } from "@memmy/local-api-contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { CreditsService } from "../../../../services/credits-service.js";
 import { withErrorEnvelope } from "../../../../services/error-envelope.js";
@@ -12,6 +12,8 @@ export function registerCreditsRoutes(app: FastifyInstance, options: {
     reply.header("Cache-Control", "no-store");
     return options.authenticateRuntimeToken(request, reply);
   } };
+  app.post("/api/credits/plan-applications", auth, withErrorEnvelope(async request =>
+    options.credits.submitApplication(CreditsApplicationRequestSchema.parse(request.body))));
   app.get("/api/credits/plans", auth, withErrorEnvelope(async request =>
     options.credits.plans(CreditsPlansQuerySchema.parse(request.query))));
   app.get("/api/credits/plan-applications/latest", auth, withErrorEnvelope(async request => {

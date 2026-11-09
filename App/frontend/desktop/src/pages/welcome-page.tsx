@@ -3,7 +3,6 @@ import type { AccountLoginResultView, OnboardingStateDto, SocialLoginProvider } 
 import { Gift, Key } from "lucide-react";
 import { useEffect, useState } from "react";
 import { resolveDesktopAccountChannel } from "../app/account-channel.js";
-import { isCreditsPreviewMode } from "../app/credits-preview-mode.js";
 import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
 import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
@@ -22,7 +21,6 @@ import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
-import { formatTokenGiftAmount } from "./token-gift.js";
 
 /** Handles welcome page. */
 export function WelcomePage() {
@@ -40,9 +38,7 @@ export function WelcomePage() {
   const [pendingAccountOnboarding, setPendingAccountOnboarding] = useState<Partial<OnboardingStateDto> | null>(null);
   const channel = resolveDesktopAccountChannel();
   const invitationEnabled = state.bootstrap?.promotions?.invitation?.enabled === true;
-  const agentChatTokenTotal = state.bootstrap?.promotions?.agentChatTokenTotal;
-  const creditsPreview = isCreditsPreviewMode();
-  const showLoginBanner = creditsPreview || ((state.bootstrap?.promotions?.loginBanner ?? true) && (agentChatTokenTotal ?? 0) > 0);
+  const showLoginBanner = state.bootstrap?.promotions?.loginBanner ?? true;
 
   // Handles use effect.
   useEffect(() => {
@@ -218,19 +214,16 @@ export function WelcomePage() {
             <div className="welcome-login-card shadow-lg overflow-hidden">
             {/* Welcome page module. */}
             {showLoginBanner && (
-              <button
-                type="button"
-                onClick={() => dispatch(appActions.navigate("/token-detail"))}
-                aria-label={t(creditsPreview ? "credits.welcome.gift" : "welcome.gift.expand")}
-                className="welcome-login-card__banner w-full flex items-center gap-2.5 text-left cursor-pointer"
+              <div
+                className="welcome-login-card__banner w-full flex items-center gap-2.5 text-left"
               >
                 <span className="w-6 h-6 rounded-full bg-action-sky/15 flex items-center justify-center text-action-sky shrink-0">
                   <Gift size={14} strokeWidth={2.2} />
                 </span>
                 <span className="text-sm text-text-ink/70">
-                  {creditsPreview ? t("credits.welcome.gift") : t("welcome.gift", { count: formatTokenGiftAmount(agentChatTokenTotal) })}
+                  {t("credits.welcome.gift")}
                 </span>
-              </button>
+              </div>
             )}
 
             <div className={`welcome-login-card__body px-6${showLoginBanner ? " welcome-login-card__body--with-banner" : " welcome-login-card__body--no-banner"}`}>

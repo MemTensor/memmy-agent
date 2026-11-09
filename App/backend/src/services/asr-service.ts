@@ -92,6 +92,7 @@ async function transcribeWithAccount(
 
   return AsrTranscriptionResponseSchema.parse({
     text: result.text,
+    ...(result.creditSettlement ? { creditSettlement: result.creditSettlement } : {}),
     modelId: context.model,
     provider: context.provider,
     source: context.source,

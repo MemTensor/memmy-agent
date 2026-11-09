@@ -531,6 +531,23 @@ describe("MemoriesSubPage", () => {
     expect(doneHtml).not.toContain("反思生成中");
   });
 
+  it("保留结果未知的记忆并禁止立即重复请求", () => {
+    const processing = {
+      memoryId: memoryListItemFixture.id, state: "failed" as const, stage: "summary" as const,
+      activeJobId: null, attemptCount: 1, manualRetryCount: 0, retryAction: "none" as const,
+      errorCode: "CREDIT_CALL_UNCERTAIN", errorMessage: "provider outcome unknown",
+      failedAt: "2026-06-03T09:30:00.000Z", updatedAt: "2026-06-03T09:30:00.000Z"
+    };
+    const html = renderMemories({
+      status: "ready", data: panelItemsOutput([{ ...memoryListItemFixture, processing }]),
+      detail: { status: "ready", data: { ...memoryDetailFixture, item: { ...memoryDetailFixture.item, processing } } }
+    }, "zh-CN", { onRetryProcessing: vi.fn(), onOpenSettings: vi.fn() });
+    expect(html).toContain("调用结果尚待核实");
+    expect(html).toContain("不会自动重复请求");
+    expect(html).not.toContain("立即重试");
+    expect(html).not.toContain("稍后将自动重试");
+  });
+
   it("展示结构化失败原因，并提供设置与立即重试操作", () => {
     const processing = {
       memoryId: memoryListItemFixture.id,

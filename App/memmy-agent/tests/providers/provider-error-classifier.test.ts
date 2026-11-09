@@ -33,6 +33,8 @@ function imageFacts(overrides: Partial<ImageInputErrorFacts> = {}): ImageInputEr
 describe("classifyQuotaExhaustion", () => {
   it.each([
     facts({ provider: "memmy_account", errorCode: "40309" }),
+    facts({ provider: "memmy_account", errorCode: "40308" }),
+    facts({ provider: "memmy_account", errorCode: "CREDIT_INSUFFICIENT" }),
     facts({ provider: "openai", errorCode: "credit_balance_exhausted" }),
     facts({ provider: "openai", errorCode: "organization_spend_limit_exceeded" }),
     facts({ provider: "openai", errorCode: "project_spend_limit_exceeded" }),

@@ -3,6 +3,7 @@ import {
   AccountInvitationViewSchema,
   AccountLoginResultViewSchema,
   AccountProfileViewSchema,
+  CreditAccountStateSchema,
   AccountSessionViewSchema,
   LotteryRewardSchema,
   SendCodeResponseSchema,
@@ -418,6 +419,7 @@ function getRemainingResendSeconds(sentAt: string | null, now: Date): number {
  */
 function toSessionProfileInput(profile: CloudAccountProfile): AccountSessionProfileInput {
   return {
+    ...CreditAccountStateSchema.parse(profile),
     userId: profile.userId,
     email: profile.email,
     phoneNumber: profile.phoneNumber,

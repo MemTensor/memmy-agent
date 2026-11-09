@@ -8,6 +8,7 @@ import { ThemeProvider } from "../theme/theme-provider.js";
 import { useWindowFullScreenSync } from "../utils/window-fullscreen.js";
 import { resolveDesktopDisplayLanguage } from "./account-channel.js";
 import { isCreditsPreviewMode } from "./credits-preview-mode.js";
+import { CreditAccountContext, useCreditAccountState } from "./use-credit-account.js";
 
 /** Contract for api clients context value. */
 export interface ApiClientsContextValue {
@@ -22,12 +23,19 @@ export function AppProviders(props: { children: ReactNode }) {
   return (
     <AppStateProvider>
       <ApiClientsProvider>
-        <TaskBusProvider>
-          <VisualProviders>{props.children}</VisualProviders>
-        </TaskBusProvider>
+        <CreditAccountProvider>
+          <TaskBusProvider>
+            <VisualProviders>{props.children}</VisualProviders>
+          </TaskBusProvider>
+        </CreditAccountProvider>
       </ApiClientsProvider>
     </AppStateProvider>
   );
+}
+
+function CreditAccountProvider(props: { children: ReactNode }) {
+  const account = useCreditAccountState();
+  return <CreditAccountContext.Provider value={account}>{props.children}</CreditAccountContext.Provider>;
 }
 
 /** Handles api clients provider. */

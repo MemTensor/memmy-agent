@@ -1,6 +1,10 @@
 /** Http cloud client module. */
 import {
   AccountInvitationViewSchema,
+  CreditAccountStateSchema,
+  DesktopLegalAgreementsSchema,
+  DesktopLegalPageSchema,
+  DesktopPromotionsSchema,
   ASR_PROVIDER,
   AuthorizeIntegrationResponseSchema,
   resolveCloudServiceBaseUrl,
@@ -14,6 +18,7 @@ import {
   OkResponseSchema,
   PromotionFlagsSchema,
   QWEN_ASR_MODEL_ID,
+  TokenQuotaApplyResultSchema,
   TokenQuotaEligibilitySchema,
   TokenUsageDtoSchema,
   type AuthorizeIntegrationResponse,
@@ -70,6 +75,7 @@ import type {
 const DEFAULT_TIMEOUT_MS = 5_000;
 const CLOUD_SOCIAL_LOGIN_TIMEOUT_MS = 20_000;
 const CLOUD_COMPOSIO_ROUTER_TIMEOUT_MS = 60_000;
+const CLOUD_CREDITS_EXPORT_TIMEOUT_MS = 120_000;
 const CLOUD_COMPOSIO_UNAVAILABLE_MESSAGE = "工具连接服务暂时不可用";
 const CLOUD_COMPOSIO_SERVICE_UNAVAILABLE_CODE = 60020;
 const CLOUD_COMPOSIO_TOOLKIT_UNSUPPORTED_CODE = 60021;
@@ -96,11 +102,11 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
   const deviceId = options.deviceId;
 
   return {
-    async postCreditReward(input) {
+    async postCredits(input) {
       return requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, `/api/credits/v1/${input.resource}`, {
         body: input.body, lang: "zh", bearerCredential: input.uuid, deviceId,
         toError: (status, envelope) => Object.assign(new Error(envelope.message || "Credits request failed"), {
-          code: envelope.businessCode && ["BUSINESS_REQUEST_REUSED", "CHECKIN_ALREADY_CLAIMED", "VOUCHER_INVALID", "VOUCHER_ALREADY_REDEEMED", "VOUCHER_EXPIRED", "VOUCHER_EXHAUSTED", "VOUCHER_INELIGIBLE", "REWARD_RATE_LIMITED"].includes(envelope.businessCode) ? envelope.businessCode : status === 401 ? "unauthorized" : status === 409 ? "conflict" : status === 429 ? "rate_limited" : status < 500 ? "invalid_argument" : "internal"
+          code: envelope.businessCode && ["ALREADY_PRO", "INVALID_APPLICATION", "ACCOUNT_NOT_REGISTERED", "BUSINESS_REQUEST_REUSED", "CHECKIN_ALREADY_CLAIMED", "VOUCHER_INVALID", "VOUCHER_ALREADY_REDEEMED", "VOUCHER_EXPIRED", "VOUCHER_EXHAUSTED", "VOUCHER_INELIGIBLE", "REWARD_RATE_LIMITED"].includes(envelope.businessCode) ? envelope.businessCode : status === 401 ? "unauthorized" : status === 409 ? "conflict" : status === 429 ? "rate_limited" : status < 500 ? "invalid_argument" : "internal"
         })
       });
     },
@@ -109,7 +115,8 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
       const path = `/api/credits/v1/${input.resource}${query.size ? `?${query}` : ""}`;
       if (input.resource === "usage/download") {
         const response = await fetchImpl(`${baseUrl}${path}`, {
-          method: "GET", headers: { authorization: `Bearer ${input.uuid}` }, signal: AbortSignal.timeout(timeoutMs), redirect: "error"
+          method: "GET", headers: { authorization: `Bearer ${input.uuid}` },
+          signal: AbortSignal.timeout(Math.max(timeoutMs, CLOUD_CREDITS_EXPORT_TIMEOUT_MS)), redirect: "error"
         });
         if (!response.ok) throw Object.assign(new Error("Credits export download failed"), {
           code: response.status === 401 ? "unauthorized" : response.status === 400 ? "invalid_argument" : "internal"
@@ -270,43 +277,39 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     },
 
     async grantImprovementProgramTokens(input: GrantTokensInput): Promise<TokenUsageSnapshot> {
-      await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/quota/updateTokenTotal", {
-        body: {
-          // This client method is dedicated to the improvement-program benefit. Keep the
-          // idempotency key internal so callers cannot accidentally request a generic grant.
-          grantKey: "improvement_program"
-        },
+      await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/improvement-program/reward", {
+        body: {},
         lang: "zh",
-        bearerCredential: input.uuid
+        bearerCredential: input.uuid,
+        toError: legacyQuotaError
       });
 
       const data = await requestCloudData<Record<string, unknown>>(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/info", {
         method: "GET",
         lang: "zh",
-        bearerCredential: input.uuid
+        bearerCredential: input.uuid,
+        toError: legacyQuotaError
       });
 
       return toAgentUserInfoTokenUsageSnapshot(data);
     },
 
     async requestTokenQuota(input: RequestTokenQuotaInput): Promise<TokenQuotaApplyResult> {
-      const data = await requestCloudData<Record<string, unknown>>(
+      const { uuid, ...body } = input;
+      const data = await requestCloudData<unknown>(
         fetchImpl,
         baseUrl,
         timeoutMs,
         "/api/agentUser/quota/apply",
         {
-          body: { reason: input.reason },
+          body,
           lang: "zh",
-          bearerCredential: input.uuid
+          bearerCredential: uuid,
+          toError: legacyQuotaError
         }
       );
 
-      const status = String(data.status);
-      return {
-        requestId: String(data.requestId ?? ""),
-        status: (["pending", "approved", "rejected"].includes(status) ? status : "pending") as TokenQuotaApplyResult["status"]
-      };
+      return TokenQuotaApplyResultSchema.parse(data);
     },
 
     async getTokenQuotaEligibility(
@@ -320,7 +323,8 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         {
           method: "GET",
           lang: "zh",
-          bearerCredential: input.uuid
+          bearerCredential: input.uuid,
+          toError: legacyQuotaError
         }
       );
 
@@ -402,12 +406,17 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     },
 
     async transcribeAudio(input: CloudAsrTranscriptionInput): Promise<CloudAsrTranscriptionResult> {
+      const form = new FormData();
+      const audio = input.audioBase64.replace(/^data:[^,]+;base64,/, "");
+      form.set("file", new Blob([new Uint8Array(Buffer.from(audio, "base64"))], { type: input.mimeType }), "recording");
+      form.set("model", "asr"); form.set("responseFormat", "json");
       const data = await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/agentAsr/transcriptions", {
-        body: {
-          audioBase64: input.audioBase64,
-          mimeType: input.mimeType,
-          ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs })
-        },
+        body: form,
+        toError: (status, envelope) => Object.assign(new Error(envelope.message || "ASR request failed"), {
+          code: envelope.businessCode === "CREDIT_INSUFFICIENT" || envelope.code === 40308 ? "CREDIT_INSUFFICIENT"
+            : envelope.businessCode === "CREDIT_BALANCE_RESERVED" ? "CREDIT_BALANCE_RESERVED"
+            : status === 401 ? "unauthorized" : status === 400 ? "invalid_argument" : "internal"
+        }),
         lang: "zh",
         bearerCredential: input.uuid
       });
@@ -451,6 +460,21 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
       }
     },
 
+    async getDesktopContent(query) {
+      const search = new URLSearchParams({ locale: query.locale, clientVersion: query.clientVersion });
+      const read = (path: string) => requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, path,
+        { method: "GET", lang: query.locale === "zh-CN" ? "zh" : "en" });
+      // Keep old terms/data and flag endpoints intact. Missing publication config or an old cloud is empty.
+      const [agreements, promotions, ...pages] = await Promise.all([
+        read(`/api/memmy/desktop/legal/agreements?${search}`).then(data => DesktopLegalAgreementsSchema.parse(data).items).catch(() => []),
+        read(`/api/memmy/desktop/promotions?${search}&region=${query.region}`).then(data => DesktopPromotionsSchema.parse(data).items).catch(() => []),
+        ...(["CREDIT_RULES", "CREDIT_HELP"] as const).map(pageCode =>
+          read(`/api/memmy/desktop/legal/page?${search}&pageCode=${pageCode}`)
+            .then(data => ({ ...DesktopLegalPageSchema.parse(data), pageCode })).catch(() => null))
+      ]);
+      return { locale: query.locale, agreements, promotions, pages: pages.filter(page => page !== null) };
+    },
+
     async getLotteryStatus(): Promise<LotteryStatus | undefined> {
       try {
         const data = await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/memmy/lottery/status", {
@@ -485,7 +509,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
 
 interface CloudRequestOptions {
   method?: "GET" | "POST" | "PUT" | "DELETE";
-  body?: Record<string, unknown>;
+  body?: Record<string, unknown> | FormData;
   lang: "zh" | "en";
   bearerCredential?: string;
   composioMachineToken?: string;
@@ -543,14 +567,14 @@ async function requestCloudData<T>(
   const response = await fetchImpl(`${baseUrl}${path}`, {
     method,
     headers: {
-      ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+      ...(options.body === undefined || options.body instanceof FormData ? {} : { "content-type": "application/json" }),
       lang: options.lang,
       ...(options.bearerCredential ? { authorization: `Bearer ${options.bearerCredential}` } : {}),
       ...(options.composioMachineToken ? { "x-memmy-composio-token": options.composioMachineToken } : {}),
       ...(options.deviceId ? { "x-memmy-device-id": options.deviceId } : {}),
       "x-agent-region": normalizeAgentRegion(process.env.MEMMY_APP_EDITION)
     },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    body: options.body instanceof FormData ? options.body : options.body === undefined ? undefined : JSON.stringify(options.body),
     signal: AbortSignal.timeout(timeoutMs)
   });
   const envelope = await readCloudEnvelope(response);
@@ -560,6 +584,14 @@ async function requestCloudData<T>(
   }
 
   return envelope.data as T;
+}
+
+function legacyQuotaError(status: number, envelope: CloudEnvelope): Error {
+  const code = envelope.businessCode;
+  return Object.assign(new Error(envelope.message || "Quota request failed"), {
+    code: code && ["LEGACY_QUOTA_RETIRED", "PLAN_APPLICATION_NOT_ELIGIBLE", "BUSINESS_REQUEST_REUSED", "REWARD_NOT_CONFIGURED"].includes(code)
+      ? code : classifyCloudError(status, envelope.code)
+  });
 }
 
 function socialLoginTimeoutMs(timeoutMs: number): number {
@@ -617,7 +649,8 @@ function toCloudAccountProfile(data: Record<string, unknown>): CloudAccountProfi
   delete rawProfile.invitationResult;
 
   return {
-    userId: readString(data.id) ?? "unknown",
+    ...CreditAccountStateSchema.parse(data),
+    userId: readString(data.id) ?? readString(data.userId) ?? "unknown",
     email,
     phoneNumber,
     nickname,
@@ -910,6 +943,8 @@ function toCloudAsrTranscriptionResult(value: unknown): CloudAsrTranscriptionRes
   const record = asRecord(value);
   return {
     text: readString(record.text) ?? "",
+    ...(typeof record.userId === "string" && typeof record.callId === "string" && Number.isSafeInteger(record.accountVersion)
+      ? { creditSettlement: { userId: record.userId, callId: record.callId, accountVersion: record.accountVersion as number } } : {}),
     modelId: QWEN_ASR_MODEL_ID,
     provider: ASR_PROVIDER
   };

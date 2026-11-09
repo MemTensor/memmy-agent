@@ -46,7 +46,7 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
   let fallbackProfile: CloudAccountProfile | null = null;
 
   return {
-    async postCreditReward() { throw new Error("Reward response must be provided by the test"); },
+    async postCredits() { throw new Error("Reward response must be provided by the test"); },
     async getCredits() { throw new Error("Credits response must be provided by the test"); },
     async health() {
       return (

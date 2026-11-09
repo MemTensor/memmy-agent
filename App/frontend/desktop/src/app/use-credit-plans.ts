@@ -22,7 +22,8 @@ export function useCreditPlans(live: boolean, language: "zh-CN" | "en-US") {
   useEffect(() => {
     if (!live || !client) return;
     let cancelled = false;
-    setResult(null); setError(false);
+    // Keep the current account snapshot during refresh so an open questionnaire is not unmounted.
+    setError(false);
     void Promise.all([client.plans({ region, language }), client.latestApplication()]).then(([plans, latest]) => {
       if (!cancelled) setResult({ userId, client, language, plans, latest });
     }).catch(() => { if (!cancelled) setError(true); });

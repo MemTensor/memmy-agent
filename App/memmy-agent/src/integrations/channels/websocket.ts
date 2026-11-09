@@ -4749,6 +4749,11 @@ export class WebSocketChannel extends BaseChannel {
     const targets = proactiveCron
       ? this.guiNotificationConnections()
       : message.chatId === "*" ? [...this.connectionChats.keys()] : [...(this.subscriptions.get(message.chatId) ?? [])];
+    if (message.metadata?.creditSettlement) {
+      await this.sendTurnPayload(message.chatId, { event: "credits.changed", chat_id: message.chatId,
+        metadata: { creditSettlement: message.metadata.creditSettlement } }, { appendTranscript: false, targets });
+      return;
+    }
     const wireText = this.rewriteLocalMarkdownImages(message.content, `websocket:${message.chatId}`);
     const turnId = this.turnIdFromMetadata(message.metadata);
     const publicMetadata = { ...(message.metadata ?? {}) };

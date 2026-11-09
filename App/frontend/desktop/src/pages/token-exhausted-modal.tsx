@@ -1,4 +1,5 @@
 /** Token exhausted modal module. */
+import { useLayoutEffect, useRef, type KeyboardEvent } from "react";
 import { Coins, Gift } from "lucide-react";
 import { Memmy } from "../components/mascot/memmy.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -16,8 +17,35 @@ export function TokenExhaustedModal(props: TokenExhaustedModalProps) {
   const { t } = useTranslation();
   const showApplyMore = Boolean((props.showApplyMore ?? true) && props.onApplyMore);
 
+  const dialogRef = useRef<HTMLElement>(null);
+  const dismissRef = useRef(props.onLater);
+  dismissRef.current = props.onLater;
+
+  useLayoutEffect(() => {
+    if (props.embedded) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    dialogRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      dismissRef.current();
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.body.style.overflow = overflow;
+      document.removeEventListener("keydown", onKey, true);
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [props.embedded]);
+
+
   const dialog = (
       <section
+        ref={dialogRef}
+        onKeyDown={props.embedded ? undefined : trapFocus}
         className="token-exhausted-modal animate-in fade-in zoom-in-95 duration-200"
         role="dialog"
         aria-modal={props.embedded ? undefined : true}
@@ -72,4 +100,20 @@ export function TokenExhaustedModal(props: TokenExhaustedModalProps) {
       {dialog}
     </div>
   );
+}
+
+function trapFocus(event: KeyboardEvent<HTMLElement>) {
+  if (event.key !== "Tab") return;
+  const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), a[href]'));
+  const first = items[0];
+  const last = items.at(-1);
+  if (!first || !last) {
+    event.preventDefault();
+  } else if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }

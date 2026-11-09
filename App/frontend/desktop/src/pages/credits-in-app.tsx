@@ -24,8 +24,9 @@ import { creditDisplayBuckets, creditMinor, creditUsagePercent, formatCreditAmou
 import { useCreditDemo } from "../app/use-credit-demo.js";
 import { AppFrame } from "./app-frame.js";
 import { writeSettingsTabHash, type SettingsTabId } from "./settings-nav.js";
-import { CreditsUsageLedger, CreditBalanceActivity } from "./credits-usage-ledger.js";
+import { CreditsUsageLedger } from "./credits-usage-ledger.js";
 import { CreditsRedeemForm } from "./credits-redeem-form.js";
+import { CreditsPublishedContent } from "./credits-published-content.js";
 import type { AppRoutePath } from "../app/routes.js";
 import usageStyles from "./settings-token-usage.module.css";
 
@@ -96,7 +97,7 @@ export function CreditSourceDetails(props: { source: CreditSource; buckets: Cred
     return expiryA - expiryB || Date.parse(a.grantedAt) - Date.parse(b.grantedAt);
   });
   // Expiry clears the live balance; issued minus consumed and still-held credits is what expired.
-  const remaining = buckets.reduce((sum, bucket) => sum + (expired && props.grants ? bucket.granted - bucket.used - bucket.remaining : bucket.remaining), 0n);
+  const remaining = buckets.reduce((sum, bucket) => sum + (expired && props.grants ? bucket.granted - bucket.used - bucket.remaining - bucket.reserved : bucket.remaining), 0n);
   const pageSize = props.pageSize;
   const totalPages = Math.max(1, Math.ceil(buckets.length / pageSize));
   const currentPage = Math.min(page, totalPages);
@@ -294,9 +295,8 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
           </div>
           <div className={usageStyles.balanceHeroBody}>
             <div className={usageStyles.balanceAmount}>
-              <strong>{account.summary ? formatCreditAmount(account.summary.account.balance, language) : formatCredits(pool.totalRemaining, language)}</strong>
+              <strong>{account.summary ? formatCreditAmount(account.summary.account.spendable, language) : formatCredits(pool.totalRemaining, language)}</strong>
               <span>{t("credits.balance.total")}</span>
-              {account.summary && <small>{t("credits.live.spendable")}: {formatCreditAmount(account.summary.account.spendable, language)} · {t("credits.live.held")}: {formatCreditAmount(account.summary.account.held, language)}</small>}
               <button type="button" className={usageStyles.balanceRefresh} onClick={refreshBalance} disabled={refreshing} aria-label={t(refreshing ? "credits.refreshing" : "credits.refresh")} title={refreshedAt ? t("credits.refreshed", {time:formatStamp(refreshedAt)}) : t("credits.refresh")}>
                 <RefreshCw size={15} className={refreshing ? usageStyles.creditsRefreshSpin : undefined} aria-hidden="true" />
               </button>
@@ -311,7 +311,7 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
         </div>
       </section>
 
-      {props.invitationContent}
+      {props.invitationContent && <div id="credits-invitations">{props.invitationContent}</div>}
 
       <section className={usageStyles.usageSection}>
         <div className={usageStyles.sectionHead}>
@@ -328,8 +328,8 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
         </div>
       </section>
 
-      {account.live && <CreditBalanceActivity />}
       <CreditsUsageLedger live={account.live} />
+      {account.live && <CreditsPublishedContent />}
     </div>
   );
 }

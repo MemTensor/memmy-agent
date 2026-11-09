@@ -26,6 +26,23 @@ afterEach(() => {
 });
 
 describe("durable BYOK token usage delivery", () => {
+  it.each(["home", "env", "option"])("uses the current profile runtime with %s precedence", async (source) => {
+    const root = createRoot();
+    for (const [file, port] of [["runtime.json", 18110], ["env.json", 18120], ["option.json", 18130]] as const) {
+      writeFileSync(join(root, file), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}`, localToken: "profile-token" }));
+    }
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ ok: true }));
+    const { recorder, outbox } = createRecorder(fetchMock, {
+      runtimeConfig: undefined,
+      runtimeConfigPath: source === "option" ? join(root, "option.json") : undefined,
+      env: { MEMMY_HOME: root, ...(source !== "home" ? { MEMMY_RUNTIME_CONFIG_PATH: join(root, "env.json") } : {}) }
+    });
+    recorder.record(usageEvent());
+    await waitFor(() => fetchMock.mock.calls.length === 1 && !outbox.hasPending());
+    const port = source === "home" ? 18110 : source === "env" ? 18120 : 18130;
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(`http://127.0.0.1:${port}/api/app/byok-token-usage/events`);
+  });
+
   it("persists then sends the original payload and deletes after { ok: true }", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ ok: true }));
     const { recorder, outbox, ledger } = createRecorder(fetchMock);

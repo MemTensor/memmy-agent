@@ -1,3 +1,4 @@
+import { isCreditModelError } from "../../model/http.js";
 import {
   DEFAULT_DIRECT_SKILL_CLUSTERING,
   DIRECT_SKILL_META_PROMPT,
@@ -324,6 +325,7 @@ export class SkillClusterPipeline {
         nowIso()
       );
     } catch (error) {
+      if (isCreditModelError(error)) throw error;
       rejectReason = error instanceof Error ? error.message : String(error);
       logEvolutionDecision(job, "skill_batch_evolve", "llm-failed", {
         clusterId: cluster.id,
@@ -667,6 +669,7 @@ export class SkillClusterPipeline {
         const content = typeof result.meta_skill_content === "string" ? result.meta_skill_content.trim() : "";
         if (content) nextMd = content;
       } catch (error) {
+        if (isCreditModelError(error)) throw error;
         logEvolutionDecision(job, "skill_batch_evolve", "meta_update_failed", {
           clusterId: cluster.id,
           error: error instanceof Error ? error.message : String(error)

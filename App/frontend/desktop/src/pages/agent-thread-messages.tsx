@@ -1,3 +1,5 @@
+import { isAgentCreditsError } from "../app/credits-exhausted-prompt.js";
+import { AgentCreditsLimitNotice } from "./credits-status-notice.js";
 /**
  * Agent chat message rendering.
  *
@@ -982,6 +984,8 @@ function AgentModelErrorNotice(props: {
   const { title, detail } = formatAgentModelError(props.content, t, {
     modelError: props.modelError
   });
+
+  if (isAgentCreditsError(props.content, props.modelError)) return <AgentCreditsLimitNotice />;
 
   return (
     <div className="agent-model-error-notice" role="alert">

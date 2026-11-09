@@ -72,9 +72,9 @@ it("protects reward writes, preserves retry bodies and rejects account spoofing"
   let uuid: string | null = "account-a";
   const result = { claimed: true, alreadyClaimed: false, businessDate: "2026-11-03",
     grant: { grantId: "1", amount: "100.00", expiresAt: "2026-12-03T10:00:00+08:00" }, balance: "1100.00", accountVersion: 2 };
-  const postCreditReward = vi.fn(async () => result);
+  const postCredits = vi.fn(async () => result);
   const app = Fastify(); apps.push(app);
-  registerCreditsRoutes(app, { credits: createCreditsService({ ...createMockCloudClient(), postCreditReward }, { getCloudUuid: () => uuid } as never),
+  registerCreditsRoutes(app, { credits: createCreditsService({ ...createMockCloudClient(), postCredits }, { getCloudUuid: () => uuid } as never),
     authenticateRuntimeToken: async (req, reply) => { if (req.headers["x-memmy-local-token"] !== "runtime") return reply.code(401).send({}); } });
   const write = (resource: string, payload: unknown, authenticated = true) => app.inject({ method: "POST", url: `/api/credits/${resource}`, payload: payload as never,
     headers: authenticated ? { "x-memmy-local-token": "runtime" } : {} });
@@ -83,9 +83,28 @@ it("protects reward writes, preserves retry bodies and rejects account spoofing"
   expect((await write("redemptions", { requestId: "same" })).statusCode).toBe(400);
   expect((await write("check-ins", { requestId: "same" })).json()).toEqual(result);
   expect((await write("check-ins", { requestId: "same" })).json()).toEqual(result);
-  expect(postCreditReward).toHaveBeenLastCalledWith({ uuid: "account-a", resource: "check-ins", body: { requestId: "same" } });
-  postCreditReward.mockImplementationOnce(async () => { uuid = "account-b"; return result; });
+  expect(postCredits).toHaveBeenLastCalledWith({ uuid: "account-a", resource: "check-ins", body: { requestId: "same" } });
+  postCredits.mockImplementationOnce(async () => { uuid = "account-b"; return result; });
   expect((await write("check-ins", { requestId: "next" })).statusCode).toBe(401);
   uuid = null;
   expect((await write("check-ins", { requestId: "no-session" })).statusCode).toBe(401);
+});
+
+it("authenticates application writes and rejects forged identity or invalid questionnaire fields", async () => {
+  let uuid="account-a";
+  const result={applicationId:"1",status:"APPROVED",plan:"PRO",submittedAt:"2026-11-04T10:00:00+08:00",processedAt:"2026-11-04T10:00:00+08:00",failureReason:null};
+  const postCredits=vi.fn(async () => result);
+  const app=Fastify();apps.push(app);
+  registerCreditsRoutes(app,{credits:createCreditsService({...createMockCloudClient(),postCredits},{getCloudUuid:()=>uuid} as never),
+    authenticateRuntimeToken:async(req,reply)=>{if(req.headers['x-memmy-local-token']!=='runtime')return reply.code(401).send({});}});
+  const body={requestId:'app-1',formType:'CN_ZH',formVersion:'v1',answers:{organization:'个人',role:'',useCases:['CODING'],upgradeReason:'增加知识库容量',usageFrequency:'',additionalContact:''}};
+  const write=(payload:unknown,auth=true)=>app.inject({method:'POST',url:'/api/credits/plan-applications',payload:payload as never,headers:auth?{'x-memmy-local-token':'runtime'}:{}});
+  expect((await write(body,false)).statusCode).toBe(401);
+  expect((await write({...body,userId:8})).statusCode).toBe(400);
+  expect((await write({...body,answers:{...body.answers,useCases:[]}})).statusCode).toBe(400);
+  expect(postCredits).not.toHaveBeenCalled();
+  expect((await write(body)).json()).toEqual(result);
+  expect(postCredits).toHaveBeenLastCalledWith({uuid:'account-a',resource:'plan-applications',body});
+  postCredits.mockImplementationOnce(async()=>{uuid='account-b';return result;});
+  expect((await write(body)).statusCode).toBe(401);
 });

@@ -242,12 +242,12 @@ function NameField({
 }
 
 function fileStatus(status: string, zh: boolean) {
+  if (/fail|error|失败|无效/i.test(status))
+    return { cls: "mk-dot-fail", label: zh ? "失败" : "Failed" };
   if (/available|可用|success|completed|done/i.test(status))
     return { cls: "mk-dot-ok", label: zh ? "可用" : "Available" };
   if (/处理中|上传中|pending|running|processing|uploading/i.test(status))
     return { cls: "mk-dot-busy", label: zh ? "处理中" : "Processing" };
-  if (/fail|error|失败|无效/i.test(status))
-    return { cls: "mk-dot-fail", label: zh ? "失败" : "Failed" };
   return { cls: "", label: status };
 }
 
@@ -373,6 +373,12 @@ export function KnowledgePage({
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [limitToast, setLimitToast] = useState(0);
+  useEffect(() => {
+    if (!limitToast) return;
+    const timer = setTimeout(() => setLimitToast(0), 4000);
+    return () => clearTimeout(timer);
+  }, [limitToast]);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameName, setRenameName] = useState("");
@@ -618,9 +624,7 @@ export function KnowledgePage({
         if (
           !uploadingRef.current &&
           (value.files.some((file) =>
-            /处理中|上传中|pending|running|processing|uploading/i.test(
-              file.status,
-            ),
+            fileStatus(file.status, zh).cls === "mk-dot-busy",
           ) ||
             (refresh > 0 && polls++ < 6))
         )
@@ -1355,21 +1359,24 @@ export function KnowledgePage({
             type="button"
             className="mk-new-btn"
             data-window-drag-exclusion="knowledge-create"
-            disabled={!settings || !settings.serviceAvailable || quotaReached}
-            aria-label={
-              quotaReached
-                ? t(`已达可创建上限（${ownedBases.length}/${maxBases}）`, `Limit reached (${ownedBases.length}/${maxBases})`)
-                : t("新建知识库", "New knowledge base")
-            }
-            title={
-              quotaReached
-                ? t(`已达可创建上限（${ownedBases.length}/${maxBases}）`, `Limit reached (${ownedBases.length}/${maxBases})`)
-                : t("新建知识库", "New knowledge base")
-            }
-            onClick={() => setCreateOpen(true)}
+            disabled={!settings || !settings.serviceAvailable}
+            aria-label={t("新建知识库", "New knowledge base")}
+            title={t("新建知识库", "New knowledge base")}
+            onClick={() => {
+              if (quotaReached) {
+                setLimitToast((value) => value + 1);
+                return;
+              }
+              setCreateOpen(true);
+            }}
           >
             <I d={IC.plus} size={16} />
           </button>
+          {limitToast > 0 && quotaReached && (
+            <div className="mk-limit-toast" key={limitToast} role="alert">
+              {t(`知识库数量已达上限（${ownedBases.length}/${maxBases}）`, `Knowledge base limit reached (${ownedBases.length}/${maxBases})`)}
+            </div>
+          )}
         </div>
         {settings && settings.bases.length > 3 && (
           <div className="mk-side-search">
@@ -2417,6 +2424,8 @@ const styles = `
 .mk-cover{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:16px;height:16px;color:var(--mk-ter)}
 .mk-cover svg{display:block;width:16px;height:16px}
 
+.mk-limit-toast{position:fixed;z-index:10003;top:8px;left:50%;transform:translateX(-50%);display:inline-flex;align-items:center;gap:8px;width:max-content;max-width:calc(100vw - 32px);padding:9px 14px;border:1px solid color-mix(in srgb,var(--mk-line-strong) 72%,transparent);border-radius:12px;background:color-mix(in srgb,#fff 96%,var(--mk-side));box-shadow:0 8px 24px rgba(27,42,39,.1);color:var(--mk-ink);font-size:12px;font-weight:500;line-height:18px;pointer-events:none}
+.mk-limit-toast::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:var(--mk-err)}
 /* ---------- 二级侧边栏 ---------- */
 .mk-side{width:244px;flex:0 0 auto;background:var(--mk-side);border-right:var(--codex-sidebar-divider-width,0.8px) solid var(--color-sidebar-divider,var(--mk-line));box-shadow:none;display:flex;flex-direction:column;min-height:0;padding-top:24px}
 .mk-resize{position:relative;z-index:35;align-self:stretch;flex:0 0 8px;width:8px;margin-right:-4px;margin-left:-4px;cursor:col-resize;touch-action:none;background:transparent;outline:none;box-shadow:none}

@@ -1,6 +1,6 @@
 /** Isolated examples in the existing app shells; no billing or task mutations. */
-import { useState, useMemo, type ReactNode } from "react";
-import { AlertTriangle, CircleAlert, Plus, Mic, Send } from "lucide-react";
+import { useState, useMemo } from "react";
+import { Plus, Mic, Send } from "lucide-react";
 import type { PanelItemsOutput } from "@memmy/local-api-contracts";
 import { KnowledgePage as KnowledgeManagement } from "@memmy/knowledge/ui";
 import { Button } from "../components/button.js";
@@ -8,7 +8,7 @@ import { Select } from "../components/Select.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
-import { useCreditDemo } from "../app/use-credit-demo.js";
+import { AgentCreditsLimitNotice, MemoryCreditsPausedNotice } from "./credits-status-notice.js";
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
 import { AppFrame } from "./app-frame.js";
 import { AgentThreadMessages } from "./agent-thread-messages.js";
@@ -19,31 +19,6 @@ import styles from "./credits-error-previews.module.css";
 function useCopy() {
   const { language } = useTranslation();
   return (cn: string, en: string) => language.startsWith("zh") ? cn : en;
-}
-
-function CreditNotice({ label, title, children }: {
-  label: string; title: string; children: ReactNode;
-}) {
-  return <section className={`agent-model-error-notice ${styles.notice}`} role="alert" aria-label={label}>
-    <AlertTriangle size={16} className="agent-model-error-notice__icon" aria-hidden="true" />
-    <div className={styles.noticeBody}>
-      <h2 className="agent-model-error-notice__title">{title}</h2>
-      {children}
-    </div>
-  </section>;
-}
-
-function AgentLimitNotice() {
-  const text = useCopy();
-  const { demo } = useCreditDemo();
-  const message = demo.plan === "pro"
-    ? text("积分不足，当前任务已暂停。可查看积分来源或切换自有模型后继续", "Not enough credits. This task is paused. Check your credits or switch to your own model to continue.")
-    : text("积分不足，当前任务已暂停。可申请升级，权益开通后再继续任务", "Not enough credits. This task is paused. Apply for an upgrade and continue after it is activated.");
-  return <div className={styles.limitLine} role="alert" aria-label={text("Agent 任务积分不足", "Agent task out of credits")}>
-    <span className={styles.limitMessage}><CircleAlert size={16} aria-hidden="true" />
-      {message}
-    </span>
-  </div>;
 }
 
 export function CreditsLimitsPage() {
@@ -81,7 +56,7 @@ export function CreditsLimitsPage() {
     <div className="credits-empty-demo">
       <div className="credits-empty-demo__thread"><div className="credits-empty-demo__column">
         <AgentThreadMessages chatScopeKey="credits-error-preview" messages={messages}
-          afterMessageId="preview-partial" afterMessageContent={<AgentLimitNotice key={errorAttempt} />} />
+          afterMessageId="preview-partial" afterMessageContent={<AgentCreditsLimitNotice key={errorAttempt} />} />
       </div></div>
       <div className={styles.composerDock}>
         <div className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto">
@@ -130,9 +105,7 @@ export function CreditsMemoryPausedPage() {
   }));
   const visible = items.filter(item => (!query || `${item.title} ${item.summary}`.includes(query)) && (!source || ["memmy", "memmy-agent", "memmy_agent"].includes(source)));
   if (page !== "memories") return <MemoryPage initialSubPage={page}/>;
-  const notice = <CreditNotice label={text("记忆服务暂停", "Memory service paused")} title={text("积分不足，记忆加工已暂停", "Memory processing paused: not enough credits")}>
-    <p className={styles.description}>{text("原始内容和已完成记忆保留。积分恢复，或记忆服务改用已配置的自有 API Key 模型后，将自动继续。", "Source material and completed memories are saved. Processing resumes automatically when credits return or the memory service switches to a configured own API key model.")}</p>
-  </CreditNotice>;
+  const notice = <MemoryCreditsPausedNotice />;
   const content = <><MemoriesSubPageView state={{status:"ready",data:{items:visible,page:1,pageSize:20,total:visible.length,totalPages:1,hasNext:false,hasPrev:false,serverTime:now.toISOString()}}}
     notice={notice} query={query} sourceAgent={source} onQueryChange={setQuery} onSourceAgentChange={setSource} onSearch={()=>undefined} onRefresh={()=>undefined}
     onPageChange={()=>undefined} onOpenDetail={item=>setOpened(`${item.title}\n\n${item.summary}`)} onDeleteDetail={async()=>undefined} onCloseDetail={()=>setOpened(null)}/>

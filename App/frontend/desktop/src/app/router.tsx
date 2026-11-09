@@ -1,3 +1,5 @@
+import { writeSettingsTabHash } from "../pages/settings-nav.js";
+import { useCreditAccount } from "./use-credit-account.js";
 /** Router module. */
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -72,11 +74,10 @@ import { CreditsCheckinPage, CreditsSourceDetailPage } from "../pages/credits-in
 import { CreditsPlansPage, CreditsRedeemPage } from "../pages/credits-commerce.js";
 import { CreditsLimitsPage, CreditsMemoryPausedPage, CreditsKnowledgeLimitPage } from "../pages/credits-error-previews.js";
 import { creditErrorScenario, isCreditsPreviewMode } from "./credits-preview-mode.js";
-import { CREDITS_EXHAUSTED_PROMPT_EVENT, hasCreditsExhaustedPreview } from "./credits-exhausted-prompt.js";
-import { creditCycleWindow } from "./credits-preview-quota.js";
+import { useCreditsExhaustedPrompt, hasCreditsExhaustedPreview } from "./credits-exhausted-prompt.js";
 import { useCreditDemo } from "./use-credit-demo.js";
-import { getCreditUpgradeFormUrl } from "./credit-upgrade.js";
 import { CreditsExhaustedModal } from "../components/credits-exhausted-modal.js";
+import { creditCycleWindow } from "./credits-preview-quota.js";
 
 // These pages are not needed to show the startup, sign-in, or chat screens.
 const MemoryPage = lazy(() => import("../pages/memory-page.js").then(({ MemoryPage }) => ({ default: MemoryPage })));
@@ -112,20 +113,17 @@ export function AppRouter(props: { onRetry: () => void }) {
   const isPetWindowContext = isPetWindow(state.navigation.currentPath);
   const creditsPreview = isCreditsPreviewMode();
   const creditDemo = useCreditDemo(creditsPreview);
-  const [showCreditsExhausted, setShowCreditsExhausted] = useState(() =>
-    typeof window !== "undefined" && hasCreditsExhaustedPreview(window.location?.search ?? "")
-  );
-  useEffect(() => {
-    if (!creditsPreview) return;
-    const show = () => {
-      if (state.bootstrap?.app.userMode === "account" && !isPetWindowContext) setShowCreditsExhausted(true);
-    };
-    window.addEventListener(CREDITS_EXHAUSTED_PROMPT_EVENT, show);
-    return () => window.removeEventListener(CREDITS_EXHAUSTED_PROMPT_EVENT, show);
-  }, [creditsPreview, isPetWindowContext, state.bootstrap?.app.userMode]);
+  const creditAccount = useCreditAccount();
+  const creditsExhausted = useCreditsExhaustedPrompt({
+    enabled: state.bootstrap?.app.userMode === "account" && !isPetWindowContext,
+    userId: state.account.userId,
+    balance: creditAccount.live ? creditAccount.summary?.account.balance : undefined,
+    spendable: creditAccount.live ? creditAccount.summary?.account.spendable : undefined,
+    preview: typeof window !== "undefined" && hasCreditsExhaustedPreview(window.location?.search ?? "")
+  });
 
   function dismissCreditsExhausted() {
-    setShowCreditsExhausted(false);
+    creditsExhausted.dismiss();
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     url.searchParams.delete("credits-exhausted");
@@ -361,19 +359,22 @@ export function AppRouter(props: { onRetry: () => void }) {
         />
       )}
       {petGuideRequest && <PetGuideModal onChoice={handlePetGuideChoice} />}
-      {showCreditsExhausted && state.bootstrap?.app.userMode === "account" && !isPetWindowContext && (
+      {creditsExhausted.open && state.bootstrap?.app.userMode === "account" && !isPetWindowContext && (
         <CreditsExhaustedModal
-          plan={creditDemo.demo.plan}
-          nextReset={creditCycleWindow(creditDemo.demo, creditDemo.now).end}
-          upgradeUrl={getCreditUpgradeFormUrl(import.meta.env.MEMMY_APP_EDITION, language)}
+          plan={creditAccount.live ? creditAccount.summary ? creditAccount.summary.plan.code === "PRO" ? "pro" : "free" : null : creditDemo.demo.plan}
+          nextReset={creditAccount.live ? creditAccount.summary ? new Date(creditAccount.summary.plan.cycleEnd) : null : creditCycleWindow(creditDemo.demo, creditDemo.now).end}
+          onApplyMore={() => {
+            dismissCreditsExhausted();
+            dispatch(appActions.navigate("/plans"));
+          }}
           onUseOwnModel={() => {
             dismissCreditsExhausted();
-            window.location.hash = "#model-config";
+            writeSettingsTabHash("model");
             dispatch(appActions.navigate("/settings"));
           }}
           onViewDetails={() => {
             dismissCreditsExhausted();
-            window.location.hash = "#token-usage";
+            writeSettingsTabHash("tokens");
             dispatch(appActions.navigate("/settings"));
           }}
           onDismiss={dismissCreditsExhausted}

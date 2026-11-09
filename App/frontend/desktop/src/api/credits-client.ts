@@ -1,5 +1,5 @@
 import {
-  CreditsPlansSchema, CreditsApplicationSchema, type CreditsPlansQuery,
+  type CreditsApplicationRequest, CreditsPlansSchema, CreditsApplicationSchema, type CreditsPlansQuery,
   CreditsCheckinSchema, CreditsRedemptionSchema, CreditsInvitationSummarySchema, CreditsInvitationsPageSchema, type CreditsInvitationsQuery,
   CreditsSummarySchema, CreditsGrantsPageSchema, CreditsLedgerPageSchema,
   CreditsUsagePageSchema, CreditsUsageDetailSchema, CreditsUsageExportSchema, CreditsUsageDownloadSchema,
@@ -16,6 +16,7 @@ export function createHttpCreditsClient(config: RuntimeConfig) {
     return `/api/credits/${resource}${search.size ? `?${search}` : ""}`;
   }
   return {
+    submitApplication: (body: CreditsApplicationRequest) => requestJson({ config, path: path("plan-applications"), body, schema: CreditsApplicationSchema.unwrap() }),
     checkin: (requestId: string) => requestJson({ config, path: path("check-ins"), body: { requestId }, schema: CreditsCheckinSchema }),
     redeem: (requestId: string, code: string) => requestJson({ config, path: path("redemptions"), body: { requestId, code }, schema: CreditsRedemptionSchema }),
     invitationSummary: () => requestJson({ config, path: path("invitations/summary"), schema: CreditsInvitationSummarySchema }),

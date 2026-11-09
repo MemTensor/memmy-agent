@@ -1,3 +1,4 @@
+import { isCreditModelError } from "../../model/http.js";
 import type {
   RetrievalQueryExtract,
   RetrievalResult
@@ -2464,6 +2465,7 @@ export class RetrievalService {
       try {
         result = await completeFilter(filterLlm, usesSummaryLlm);
       } catch (primaryError) {
+        if (isCreditModelError(primaryError)) throw primaryError;
         const evolutionFallback = usesSummaryLlm &&
           this.deps.skillLlm.isConfigured() &&
           this.deps.skillLlm !== filterLlm
@@ -2530,6 +2532,7 @@ export class RetrievalService {
         status: kept.length === hits.length ? ["llm_filter:llm_kept_all"] : ["llm_filter:llm_filtered"]
       };
     } catch (error) {
+      if (isCreditModelError(error)) throw error;
       pipelineLogger.warn("fallback.used", {
         operation: `${RETRIEVAL_FILTER_PROMPT.id}.v${RETRIEVAL_FILTER_PROMPT.version}`,
         pipeline: "retrieval.filter",
@@ -2581,6 +2584,7 @@ export class RetrievalService {
       });
       return [raw];
     } catch (error) {
+      if (isCreditModelError(error)) throw error;
       pipelineLogger.warn("fallback.used", {
         operation: "retrieval.query_rewrite.v1",
         pipeline: "retrieval.query_rewrite",
@@ -2642,6 +2646,7 @@ export class RetrievalService {
         ...(timeFilter ? { timeFilter } : {})
       };
     } catch (error) {
+      if (isCreditModelError(error)) throw error;
       pipelineLogger.warn("fallback.used", {
         operation: `${RETRIEVAL_QUERY_EXTRACT_PROMPT.id}.v${RETRIEVAL_QUERY_EXTRACT_PROMPT.version}`,
         pipeline: "retrieval.query_extract",
@@ -2762,6 +2767,7 @@ export class RetrievalService {
     try {
       return await this.deps.withTimeout(this.deps.embedder.embedOne(query, "query"), QUERY_VECTOR_TIMEOUT_MS);
     } catch (error) {
+      if (isCreditModelError(error)) throw error;
       pipelineLogger.warn("fallback.used", {
         operation: "retrieval.query_embedding",
         pipeline: "retrieval.query_vector",

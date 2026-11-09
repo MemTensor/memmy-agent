@@ -1,3 +1,4 @@
+import { isAgentCreditsError, requestCreditsExhaustedPrompt } from "../app/credits-exhausted-prompt.js";
 /**
  * memmy-agent WebUI gateway client.
  *
@@ -2969,6 +2970,16 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   }
 
   private emitEvent(event: MemmyAgentWsEvent): void {
+    if (event.event === "message" && !event.replayed && isAgentCreditsError(event.content ?? event.text ?? "", event.model_error)) {
+      requestCreditsExhaustedPrompt();
+    }
+    if (event.event === "credits.changed") {
+      const detail = event.metadata?.creditSettlement as { userId?: unknown; accountVersion?: unknown } | undefined;
+      if (typeof window !== "undefined" && typeof detail?.userId === "string" && Number.isSafeInteger(detail.accountVersion)) {
+        window.dispatchEvent(new CustomEvent("credits.changed", { detail }));
+      }
+      return;
+    }
     this.input.onEvent?.(event);
   }
 }

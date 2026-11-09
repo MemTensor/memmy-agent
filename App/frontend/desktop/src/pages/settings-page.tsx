@@ -421,10 +421,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [invitationInfo, setInvitationInfo] = useState<AccountInvitationView | null>(null);
   const [invitationLoadStatus, setInvitationLoadStatus] =
     useState<"idle" | "loading" | "ready" | "error">("idle");
-  const invitationAccountRef = useRef(state.account.userId);
-  invitationAccountRef.current = state.account.userId;
-  const [creditInvitation, setCreditInvitation] = useState<Awaited<ReturnType<NonNullable<typeof creditsClient>["invitationSummary"]>> | null>(null);
-  const [invitationRecords, setInvitationRecords] = useState<Awaited<ReturnType<NonNullable<typeof creditsClient>["invitations"]>> | null>(null);
   const [invitationReloadVersion, setInvitationReloadVersion] = useState(0);
   const preserveSuccessfulTestHydrateRef = useRef(false);
   const appSettings = bootstrap?.app;
@@ -531,9 +527,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const showInvitationBanner = invitationEnabled
     && (invitationLoadStatus !== "ready" || invitationInfo?.enabled === true);
   const canApplyMoreByPromotion = bootstrap?.promotions?.applyMore ?? true;
-  const quotaRequestPending = quotaEligibility?.state === "pending";
-  const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== "available";
-  const applyMoreButtonLabel = quotaRequestPending ? t("settings.token.applyMore.pending") : t("settings.token.applyMore");
+  const quotaUsesPlanUpgrade = quotaEligibility !== null && "deprecated" in quotaEligibility;
+  const quotaRequestPending = quotaEligibility !== null && "state" in quotaEligibility && quotaEligibility.state === "pending";
+  const quotaApplicationBlocked = isQuotaApplicationBlocked(quotaEligibility);
+  const applyMoreButtonLabel = quotaRequestPending ? t("settings.token.applyMore.pending")
+    : quotaUsesPlanUpgrade ? t("credits.upgrade") : t("settings.token.applyMore");
   const quotaEligibilityMessage = resolveQuotaEligibilityMessage(quotaEligibility, language);
   const quotaEligibilityText = quotaEligibilityMessage
     ? t(quotaEligibilityMessage.key, quotaEligibilityMessage.values)
@@ -651,7 +649,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     if (!accountClient || !isAccountMode || !hasAccountSession || !invitationEnabled) {
       setInvitationInfo(null);
       setInvitationLoadStatus("idle");
-      setCreditInvitation(null); setInvitationRecords(null);
       return () => {
         cancelled = true;
       };
@@ -660,10 +657,9 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     setInvitationLoadStatus("loading");
     const accountKey =
       state.account.email || state.account.phoneNumber || state.account.registeredAt || "account";
-    setCreditInvitation(null); setInvitationRecords(null); setInvitationInfo(null);
+    setInvitationInfo(null);
     const load = creditsClient && !creditsPreview
-      ? Promise.all([creditsClient.invitationSummary(), creditsClient.invitations()]).then(([summary, records]) => {
-          if (!cancelled) { setCreditInvitation(summary); setInvitationRecords(records); }
+      ? creditsClient.invitationSummary().then(summary => {
           return { enabled: true, invitationCode: summary.invitationCode, usedInviteSlotsToday: summary.todayRewarded, remainingInvitesToday: summary.todayRemaining, dailySuccessLimit: summary.rule.dailyLimit, dailyLimitReached: summary.todayRemaining === 0 };
         })
       : requestAccountInvitation(accountClient, accountKey);
@@ -713,7 +709,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     /** Pending requests refresh on window focus instead of fixed-interval polling. */
     const handleWindowFocus = () => {
       void refreshQuotaEligibility().then(async (nextEligibility) => {
-        if (!nextEligibility || nextEligibility.state === "pending" || !configClient) {
+        if (!nextEligibility || "deprecated" in nextEligibility || nextEligibility.state === "pending" || !configClient) {
           return;
         }
 
@@ -1293,17 +1289,28 @@ export function SettingsPageView(props: SettingsPageViewProps) {
    * Returns early when the text is too short; disables the button during submission; on success shows the success state and clears the input.
    */
   async function handleSubmitFeedback() {
-    if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting) {
+    if (quotaApplicationBlocked || (!quotaUsesPlanUpgrade && !canSubmitFeedback(feedbackText)) || feedbackSubmitting) {
       return;
     }
     setFeedbackSubmitting(true);
     setFeedbackError(null);
     try {
-      const result = await tokenQuotaClient?.requestQuota(feedbackText);
-      if (result?.status === "pending") {
+      if (!tokenQuotaClient) throw new Error(t("settings.token.applyMore.error"));
+      const result = await tokenQuotaClient.requestQuota(quotaUsesPlanUpgrade ? {
+        requestId: crypto.randomUUID(),
+        region: import.meta.env.MEMMY_APP_EDITION === "intl" ? "INTL" : "CN",
+        language
+      } : feedbackText);
+      if ("deprecated" in result) {
+        await openExternalUrl(result.formUrl);
+        setShowApplyMore(false);
+        setFeedbackText("");
+        return;
+      }
+      if (result.status === "pending") {
         setQuotaEligibility((current) => ({
           state: "pending",
-          requestCount: Math.min(5, (current?.requestCount ?? 0) + 1),
+          requestCount: Math.min(5, (current && "requestCount" in current ? current.requestCount : 0) + 1),
           maxRequestCount: 5,
           nextAllowedAtEpochMs: null,
           latestRequestStatus: "pending",
@@ -1324,12 +1331,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       setFeedbackText("");
     } catch (error) {
       const nextEligibility = await refreshQuotaEligibility();
-      if (nextEligibility && nextEligibility.state !== "available") {
+      if (isQuotaApplicationBlocked(nextEligibility)) {
         setFeedbackSubmitted(false);
         setFeedbackText("");
         return;
       }
-      if (isPendingQuotaRequestError(error)) {
+      if (!quotaUsesPlanUpgrade && (!nextEligibility || !("deprecated" in nextEligibility)) && isPendingQuotaRequestError(error)) {
         setQuotaEligibility({
           state: "pending",
           requestCount: 1,
@@ -1473,14 +1480,13 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   }
 
   const invitationCard = isAccountMode && (showGiftQuota || !!creditsClient) && showInvitationBanner ? (
-    <>
     <div
       className={`${usageStyles.invitationCard} border ${
         inviteDailyLimitReached
           ? "bg-text-ink/[0.05] border-border-stone/50"
           : "bg-action-sky/6 border-action-sky/15"
       }`}
-      style={creditsPreview ? { marginBottom: 24 } : undefined}
+      style={creditsPreview || !!creditsClient ? { marginBottom: 24 } : undefined}
     >
       <span
         className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center ${
@@ -1502,7 +1508,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               ? t("settings.token.invite.loading")
               : inviteDailyLimitReached
                 ? t("settings.token.invite.dailyLimit")
-                : creditInvitation ? t("credits.invite.liveRule", { inviter: creditInvitation.rule.inviterReward, invitee: creditInvitation.rule.inviteeReward, days: creditInvitation.rule.validDays, remaining: creditInvitation.todayRemaining, limit: creditInvitation.rule.dailyLimit }) : creditsPreview ? t("credits.invite.body") : invitationRewardBody}
+                : creditsPreview || !!creditsClient ? t("credits.invite.body") : invitationRewardBody}
         </p>
       </div>
       {displayInviteCode ? (
@@ -1556,20 +1562,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         </button>
       ) : null}
     </div>
-    {invitationOwner === state.account.userId && invitationRecords && invitationRecords.items.length > 0 && <div className="text-xs text-text-ink/70 space-y-2" aria-label={t("credits.invite.title")}>
-      {invitationRecords.items.map((record, index) => <p key={`${record.inviteeMask}:${record.registeredAt}:${index}`}>
-        {record.inviteeMask} · {new Date(record.registeredAt).toLocaleDateString()} · {t(`credits.invite.status.${record.status}`)} · +{record.inviterGrant} / +{record.inviteeGrant}
-      </p>)}
-      {invitationRecords.hasMore && <button type="button" onClick={() => {
-        const cursor = invitationRecords.nextCursor;
-        const userId = state.account.userId;
-        if (!cursor || !creditsClient) return;
-        void creditsClient.invitations({ cursor }).then(page => {
-          setInvitationRecords(current => current?.nextCursor === cursor && invitationAccountRef.current === userId ? { ...page, items: [...current.items, ...page.items] } : current);
-        }).catch(() => setInvitationLoadStatus("error"));
-      }}>{t("credits.detail.nextPage")}</button>}
-    </div>}
-    </>
   ) : null;
 
   const confirmDialog = confirm ? resolveAccountConfirmDialog(t) : null;
@@ -1819,7 +1811,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                 >
                   {applyMoreButtonLabel}
                 </button>
-              ) : canApplyMoreByPromotion && isTokenLow && (!quotaEligibility || quotaEligibility.state === "available") ? (
+              ) : canApplyMoreByPromotion && isTokenLow && !quotaApplicationBlocked ? (
                 <button
                   type="button"
                   onClick={openApplyMore}
@@ -2070,6 +2062,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                 <p className="py-6 text-center text-sm text-status-success">
                   {t("settings.token.applyMore.success")}
                 </p>
+              ) : quotaUsesPlanUpgrade ? (
+                <div className="space-y-2 py-6 text-center text-sm">
+                  <p>{t("settings.token.applyMore.upgradeQuestionnaire")}</p>
+                  {feedbackError && <p className="text-status-error">{feedbackError}</p>}
+                </div>
               ) : (
                 <div className="space-y-2">
                   <textarea
@@ -2117,10 +2114,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                   <button
                     type="button"
                     onClick={() => void handleSubmitFeedback()}
-                    disabled={quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting}
+                    disabled={quotaApplicationBlocked || (!quotaUsesPlanUpgrade && !canSubmitFeedback(feedbackText)) || feedbackSubmitting}
                     className="flex-1 py-3 text-sm text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors font-semibold cursor-pointer shadow-md disabled:opacity-40 disabled:cursor-not-allowed"
                   >
-                    {t("settings.token.applyMore.submit")}
+                    {t(quotaUsesPlanUpgrade ? "settings.token.applyMore.openQuestionnaire" : "settings.token.applyMore.submit")}
                   </button>
                 </>
               )}
@@ -3694,16 +3691,15 @@ function resolveInitialModelMode(userMode: AppSettingsDto["userMode"] | undefine
  * @returns True when the UI should switch to the "request pending" state.
  */
 export function isPendingQuotaRequestError(error: unknown): boolean {
-  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : null;
-  if (code === "conflict") {
-    return true;
-  }
-
   if (!(error instanceof Error)) {
     return false;
   }
 
   return /\u5f85\u5ba1\u6279|\u91cd\u590d\u63d0\u4ea4|\u5df2\u6709.*\u7533\u8bf7|pending|duplicate/i.test(error.message);
+}
+
+export function isQuotaApplicationBlocked(eligibility: TokenQuotaEligibility | null): boolean {
+  return eligibility !== null && ("deprecated" in eligibility ? !eligibility.eligible : eligibility.state !== "available");
 }
 
 /**
@@ -3717,9 +3713,11 @@ export function resolveQuotaEligibilityMessage(
   eligibility: TokenQuotaEligibility | null,
   language: "zh-CN" | "en-US"
 ): QuotaEligibilityMessage | null {
-  if (!eligibility || eligibility.state === "available") {
-    return null;
+  if (!eligibility) return null;
+  if ("deprecated" in eligibility) {
+    return { key: eligibility.eligible ? "settings.token.applyMore.upgradeQuestionnaire" : "settings.token.applyMore.upgradeNotNeeded" };
   }
+  if (eligibility.state === "available") return null;
   if (eligibility.state === "pending") {
     return { key: "settings.token.applyMore.pendingDesc" };
   }

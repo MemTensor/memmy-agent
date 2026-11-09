@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { createContext, useCallback, useContext, useRef } from "react";
 import type { CreditsGrant, CreditsSummary } from "@memmy/local-api-contracts";
 import type { CreditsClient } from "../api/credits-client.js";
 import { useOptionalApiClients } from "./providers.js";
@@ -24,7 +24,16 @@ export async function readCreditGrants(client: CreditsClient, cancelled = () => 
 
 const accountVersion = (data: { summary: CreditsSummary }) => data.summary.account.version;
 
+export const CreditAccountContext = createContext<ReturnType<typeof useCreditAccountState>>({
+  live: false, loading: false, error: null, summary: null, grants: [], reload: () => {}
+});
+
 export function useCreditAccount() {
+  return useContext(CreditAccountContext);
+}
+
+/** Keep one account snapshot across page changes and all balance consumers. */
+export function useCreditAccountState() {
   const { state } = useAppState();
   const { clients } = useOptionalApiClients();
   const live = !isCreditsPreviewMode() && state.bootstrap?.app.userMode === "account";
@@ -42,7 +51,7 @@ export function useCreditAccount() {
   }, [client, userId]);
   const version = latest.current?.userId === userId && latest.current.client === client ? latest.current.summary.account.version : -1;
   const result = useCreditRefresh(load, live && !!client, userId, version, accountVersion);
-  const reload = useCallback(() => window.dispatchEvent(new Event("memmy:credits-refresh")), []);
+  const reload = useCallback(() => { window.dispatchEvent(new Event("memmy:credits-refresh")); }, []);
   return { live, loading: live && (result.loading || (!result.data && !result.error)), error: result.error,
     summary: result.data?.summary ?? null, grants: result.data?.grants ?? [], reload };
 }

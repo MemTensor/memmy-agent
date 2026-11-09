@@ -140,14 +140,11 @@ export class ManagedKnowledgeClient implements KnowledgeRecallClient {
         ms,
       });
       throw new KnowledgeError(
-        response.status === 401 || response.status === 403
+        response.status === 401
           ? "请重新登录 Memmy"
           : `[HTTP ${response.status}] ${serverMessage || fallback}`,
-        response.status === 401 || response.status === 403
-          ? 401
-          : response.status === 404
-            ? 404
-            : 502,
+        response.status,
+        typeof serverCode === "string" ? serverCode : undefined,
       );
     }
     let parsed: Record<string, unknown>;

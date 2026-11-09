@@ -2763,3 +2763,20 @@ function fileArtifact(path: string, name = "deck.pptx", mediaUrl?: string) {
     ...(mediaUrl ? { media_url: mediaUrl } : {})
   };
 }
+
+describe("PRD credit exhaustion notice", () => {
+  it("keeps partial output and renders the neutral limit line without token copy or raw error details", () => {
+    vi.stubEnv("MEMMY_APP_EDITION", "cn");
+    const html = renderToString(<I18nProvider><AgentThreadMessages messages={[
+      {id:"user", role:"user", content:"继续任务"},
+      {id:"partial", role:"assistant", content:"已经完成的部分"},
+      {id:"error", role:"assistant", content:"Error calling LLM: CREDIT_INSUFFICIENT", modelError:{category:"quota_exhausted", source:"account", detail:"raw diagnostic"}}
+    ]}/></I18nProvider>);
+    expect(html).toContain("已经完成的部分");
+    expect(html).toContain("您已达到使用上限，升级套餐或购买积分后可恢复任务");
+    expect(html).not.toContain("Token 余额不足");
+    expect(html).not.toContain("raw diagnostic");
+    expect(html).not.toContain('class="agent-model-error-notice"');
+    vi.unstubAllEnvs();
+  });
+});

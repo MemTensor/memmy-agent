@@ -12,7 +12,7 @@ export const CreditsSummarySchema = z.object({
   knowledgeEntitlement: z.object({ baseLimit: z.number().int(), storageBytes: z.number().int(), membersPerBase: z.number().int() })
 });
 export const CreditsGrantSchema = z.object({
-  grantId: id, sourceType: z.enum(["PLAN", "CHECK_IN", "INVITATION", "REDEMPTION", "MIGRATION", "ADJUSTMENT"]),
+  grantId: id, sourceType: z.enum(["PLAN", "CHECK_IN", "INVITATION", "REDEMPTION", "MIGRATION", "ADJUSTMENT", "IMPROVEMENT"]),
   sourceId: z.string(), sourceName: z.string(), granted: amount, remaining: amount, reserved: amount, used: amount.optional(),
   grantedAt: stamp, expiresAt: stamp.nullable(), status: z.enum(["AVAILABLE", "EXHAUSTED", "EXPIRED", "REVOKED"])
 });
@@ -67,9 +67,12 @@ export const CreditsUsageSchema = z.object({
   status: z.literal("SETTLED"), businessDate: z.string(), callCount: z.number().int().positive(), startedAt: stamp, settledAt: stamp,
   requestContent: z.string().nullable(), requestContentStatus: z.enum(["AVAILABLE", "UNAVAILABLE", "EXPIRED"])
 });
-export const CreditsUsagePageSchema = z.object({ items: z.array(CreditsUsageSchema), nextCursor: z.string().nullable(), hasMore: z.boolean() });
+export const CreditsUsagePageSchema = z.object({ items: z.array(CreditsUsageSchema), nextCursor: z.string().nullable(), hasMore: z.boolean(), total: z.number().int().nonnegative().optional() });
 export const CreditsUsageDetailSchema = CreditsUsageSchema.extend({ pricingVersion: z.string().nullable(),
-  cachedTokens: z.number().int().nonnegative(), audioSeconds: z.string().nullable(), chargeCredits: amount, absorbedCredits: amount, settlementStatus: z.literal("SETTLED"), remainingCredits: amount.nullable() });
+  settlementVersion: z.number().int().nonnegative().nullable().default(null),
+  cachedTokens: z.number().int().nonnegative(), audioSeconds: z.string().nullable(), chargeCredits: amount, absorbedCredits: amount, settlementStatus: z.literal("SETTLED"), remainingCredits: amount.nullable(),
+  inputCredits: amount.nullable().default(null), outputCredits: amount.nullable().default(null),
+  checkpoints: z.array(z.object({ sequence: z.number().int().nonnegative(), usageTokens: z.number().int().nonnegative(), chargedCredits: amount })).default([]) });
 export const CreditsUsageExportSchema = z.object({ exportId: z.string(), fileName: z.string(), downloadUrl: z.string(), rowCount: z.number().int().nonnegative(), expiresAt: stamp });
 export const CreditsUsageDownloadSchema = z.object({ csv: z.string() });
 export type CreditsUsageQuery = z.infer<typeof CreditsUsageQuerySchema>;
@@ -86,3 +89,21 @@ export const CreditsInvitationSummarySchema = z.object({ invitationCode: z.strin
 export const CreditsInvitationsQuerySchema = z.object({ status: z.enum(["PENDING", "QUALIFIED", "REWARDED", "REJECTED"]).optional(), cursor: z.string().max(4096).optional(), limit: z.coerce.number().int().min(1).max(100).optional() }).strict();
 export const CreditsInvitationsPageSchema = z.object({ items: z.array(z.object({ inviteeMask: z.string(), registeredAt: stamp, qualifiedAt: stamp.nullable(), inviterGrant: amount, inviteeGrant: amount, status: z.enum(["PENDING", "QUALIFIED", "REWARDED", "REJECTED"]) })), nextCursor: z.string().nullable(), hasMore: z.boolean() });
 export type CreditsInvitationsQuery = z.infer<typeof CreditsInvitationsQuerySchema>;
+
+export const CreditApplicationRoles = ["PRODUCT", "ENGINEERING", "RESEARCH", "LEGAL", "MANAGEMENT", "OTHER"] as const;
+export const CreditApplicationUseCases = ["KNOWLEDGE", "WRITING", "RESEARCH", "CODING", "LEGAL", "LEARNING", "OTHER"] as const;
+export const CreditApplicationFrequencies = ["DAILY", "WEEKLY", "OCCASIONAL", "EVALUATING"] as const;
+export const CreditsApplicationRequestSchema = z.object({
+  requestId: z.string().regex(/^[A-Za-z0-9_:-]{1,128}$/),
+  formType: z.enum(["CN_ZH", "CN_EN", "INTL_ZH", "INTL_EN"]),
+  formVersion: z.literal("v1"),
+  answers: z.object({
+    organization: z.string().trim().min(1).max(200),
+    role: z.union([z.enum(CreditApplicationRoles), z.literal("")]),
+    useCases: z.array(z.enum(CreditApplicationUseCases)).min(1).max(7).refine(values => new Set(values).size === values.length),
+    upgradeReason: z.string().trim().min(1).max(4000),
+    usageFrequency: z.union([z.enum(CreditApplicationFrequencies), z.literal("")]),
+    additionalContact: z.string().trim().max(320)
+  }).strict()
+}).strict();
+export type CreditsApplicationRequest = z.infer<typeof CreditsApplicationRequestSchema>;

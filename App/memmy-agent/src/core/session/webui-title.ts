@@ -178,6 +178,7 @@ export class WebuiTitleService {
       ],
       tools: null,
       model,
+      billingOperation: "GENERATE_TITLE" as const,
       maxTokens: TITLE_GENERATION_MAX_TOKENS,
       temperature: 0.2,
       reasoningEffort: TITLE_GENERATION_REASONING_EFFORT,

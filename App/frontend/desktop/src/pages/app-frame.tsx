@@ -348,7 +348,7 @@ export function AppFrame(props: AppFrameProps) {
   const creditDemo = useCreditDemo(creditAccountMenu && !creditAccount.live);
   const creditPool = creditAccountMenu && !creditAccount.live ? describeCreditPool(creditDemo.demo, creditDemo.now) : null;
   const creditQuota = creditAccount.live
-    ? { plan: creditAccount.summary?.plan.code.toLowerCase(), balance: creditAccount.summary?.account.balance }
+    ? { plan: creditAccount.summary?.plan.code.toLowerCase(), balance: creditAccount.summary?.account.spendable }
     : creditPool ? { plan: creditPool.plan, balance: creditPool.totalRemaining } : null;
   const profileMeta = creditQuota?.plan
     ? (t(creditQuota.plan === "pro" ? "plan.pro.name" : "plan.free.name"))
@@ -1710,10 +1710,6 @@ export function AppFrame(props: AppFrameProps) {
                     }) ?? "—"}
                   </strong>
                 </span>
-                {creditAccount.summary && (["plan", "reward"] as const).map(source => <span key={source}>
-                  <span>{t(`credits.source.${source}`)}</span>
-                  <strong>{formatCreditAmount(creditAccount.summary!.balanceBySource[source], language)}</strong>
-                </span>)}
               </button>
               <button
                 type="button"
@@ -1728,7 +1724,7 @@ export function AppFrame(props: AppFrameProps) {
             </div>
           </div>
           <div className="app-frame-sidebar-menu__divider" />
-          {creditAccount.live && (creditAccount.error || creditAccount.loading) && <p role={creditAccount.error ? "alert" : "status"}>{t(creditAccount.error === "auth" ? "credits.live.auth" : creditAccount.error ? creditAccount.summary ? "credits.live.stale" : "credits.live.error" : "credits.live.loading")}</p>}
+          {creditAccount.live && (creditAccount.error || (creditAccount.loading && !creditAccount.summary)) && <p role={creditAccount.error ? "alert" : "status"}>{t(creditAccount.error === "auth" ? "credits.live.auth" : creditAccount.error ? creditAccount.summary ? "credits.live.stale" : "credits.live.error" : "credits.live.loading")}</p>}
           {(
             <button type="button" className="app-frame-sidebar-menu__item app-frame-sidebar-menu__quota-upgrade" role="menuitem" onClick={openCreditPlans}>
               <span className="app-frame-sidebar-menu__item-icon"><ArrowUpRight size={13} /></span>
@@ -1821,9 +1817,9 @@ export function AppFrame(props: AppFrameProps) {
           onLearnMore={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}
           showGift={
             state.bootstrap?.promotions?.improvementGift === true
-            && (state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0) > 0
+            && Number(state.bootstrap?.promotions?.improvementGiftRewardCredits ?? 0) > 0
           }
-          giftTokens={state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0}
+          giftCredits={state.bootstrap?.promotions?.improvementGiftRewardCredits ?? "0.00"}
         />
       )}
       <SearchPalette

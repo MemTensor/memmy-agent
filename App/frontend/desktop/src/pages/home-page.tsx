@@ -1838,19 +1838,9 @@ export function HomePage() {
       })));
       return;
     }
-    if (
-      resolvedConversationModel.candidate?.source === "platform"
-      && isAccountTokenQuotaExhausted(state.bootstrap)
-    ) {
-      if (creditsPreview) {
-        requestCreditsExhaustedPrompt();
-        return;
-      }
-      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
-        source: "send",
-        message: "agent.error.quotaExceeded",
-        ...(state.agent.currentChatId ? { chatId: state.agent.currentChatId } : { scopeKey: chatScopeKey })
-      })));
+    if (creditsPreview && resolvedConversationModel.candidate?.source === "platform"
+      && isAccountTokenQuotaExhausted(state.bootstrap)) {
+      requestCreditsExhaustedPrompt();
       return;
     }
     const sendScopeKey = chatScopeKey;

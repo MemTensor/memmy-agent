@@ -11,6 +11,7 @@ afterEach(async () => {
   root = undefined;
   document.body.innerHTML = "";
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 it("shows management only, with recall off by default and no exposed saved secret", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -312,6 +313,56 @@ it("keeps long file names inside the name column and exposes the full name on ho
   expect(styles).toContain(
     ".mk-fname-wrap:hover .mk-fname-tooltip{opacity:1;visibility:visible;",
   );
+});
+
+it.each([
+  ["zh", "处理中", "失败", "可用"],
+  ["en", "Processing", "Failed", "Available"],
+])("shows processing failures and stops polling them (%s)", async (language, processing, failed, available) => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.useFakeTimers();
+  const reason = "文档内容超过解析长度上限，请拆分文件后重新上传";
+  let fileRequests = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: URL) => {
+    const path = String(url);
+    if (path.includes("/files")) {
+      fileRequests++;
+      return new Response(JSON.stringify({
+        files: [
+          { id: "large", name: "large.txt", status: fileRequests === 1 ? "PROCESSING" : "PROCESSING_FAILED", message: fileRequests === 1 ? "" : reason },
+          { id: "ready", name: "ready.txt", status: "AVAILABLE", message: "" },
+        ],
+        total: 2,
+        page: 1,
+      }));
+    }
+    if (path.includes("/folders")) return new Response(JSON.stringify({ folders: [] }));
+    if (path.includes("/members")) return new Response(JSON.stringify({ members: [] }));
+    return new Response(JSON.stringify({
+      authenticated: true,
+      enabled: true,
+      serviceAvailable: true,
+      bases: [{ id: "base-1", name: "资料库", selected: true }],
+    }));
+  }));
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(<KnowledgePage connection={{ baseUrl: "http://localhost:1234", localToken: "local-test" }} language={language} />);
+  });
+  expect(fileRequests).toBe(1);
+  expect(container.querySelector(".mk-dot-busy")?.textContent).toBe(processing);
+  expect(container.querySelector(".mk-dot-ok")?.textContent).toBe(available);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(fileRequests).toBe(2);
+  expect(container.querySelector(".mk-dot-fail")?.textContent).toBe(failed);
+  expect(container.querySelector(".mk-dot-busy")).toBeNull();
+  expect(container.querySelector(".mk-fsub")?.textContent).toBe(reason);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+  expect(fileRequests).toBe(2);
 });
 
 it("removes a knowledge base from the list without waiting for delete to finish", async () => {
@@ -675,3 +726,20 @@ it("resizes the knowledge list from the divider and keeps the new button inside 
   expect(side?.contains(button ?? null)).toBe(true);
   expect(window.localStorage.getItem("memmy.knowledge.list-width")).toBe("304");
 });
+
+for (const maxBases of [10, 50]) {
+  it(`keeps create enabled at ${maxBases}, shows the limit toast, and sends no create request`, async () => {
+    const container = await renderKnowledge({
+      authenticated: true, enabled: true, serviceAvailable: true, maxBases,
+      bases: Array.from({ length: maxBases }, (_, i) => ({ id: `base-${i}`, name: `知识库${i}`, selected: false })),
+    });
+    const create = container.querySelector<HTMLButtonElement>(".mk-new-btn")!;
+    expect(create.disabled).toBe(false);
+    for (let i = 0; i < 2; i++) {
+      await act(async () => { create.click(); });
+      expect(container.querySelector('.mk-limit-toast[role="alert"]')?.textContent).toBe(`知识库数量已达上限（${maxBases}/${maxBases}）`);
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    }
+    expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+}

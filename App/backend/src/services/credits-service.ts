@@ -1,5 +1,5 @@
 import {
-  CreditsPlansSchema, CreditsApplicationSchema, type CreditsPlansQuery,
+  type CreditsApplicationRequest, CreditsPlansSchema, CreditsApplicationSchema, type CreditsPlansQuery,
   CreditsCheckinSchema, CreditsRedemptionSchema, CreditsInvitationSummarySchema, CreditsInvitationsPageSchema, type CreditsInvitationsQuery,
   CreditsSummarySchema, CreditsGrantsPageSchema, CreditsLedgerPageSchema,
   CreditsUsagePageSchema, CreditsUsageDetailSchema, CreditsUsageExportSchema, CreditsUsageDownloadSchema,
@@ -19,14 +19,15 @@ export function createCreditsService(cloud: CloudClient, accounts: AccountSessio
     if (accounts.getCloudUuid() !== uuid) throw Object.assign(new Error("Account session changed"), { code: "unauthorized" });
     return result;
   }
-  async function write(resource: "check-ins" | "redemptions", body: { requestId: string; code?: string }) {
+  async function write(resource: "check-ins" | "redemptions" | "plan-applications", body: { requestId: string; code?: string } | CreditsApplicationRequest) {
     const uuid = accounts.getCloudUuid();
     if (!uuid) throw Object.assign(new Error("Account session is not authenticated"), { code: "unauthorized" });
-    const result = await cloud.postCreditReward({ uuid, resource, body });
+    const result = await cloud.postCredits({ uuid, resource, body });
     if (accounts.getCloudUuid() !== uuid) throw Object.assign(new Error("Account session changed"), { code: "unauthorized" });
     return result;
   }
   return {
+    async submitApplication(body: CreditsApplicationRequest) { return CreditsApplicationSchema.unwrap().parse(await write("plan-applications", body)); },
     async plans(query: CreditsPlansQuery) { return CreditsPlansSchema.parse(await read("plans", query)); },
     async latestApplication() { return CreditsApplicationSchema.parse(await read("plan-applications/latest")); },
     async usage(query: CreditsUsageQuery) { return CreditsUsagePageSchema.parse(await read("usage", query)); },

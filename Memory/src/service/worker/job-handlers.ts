@@ -596,19 +596,32 @@ export function classifyProcessingError(error: unknown): {
   code: string;
   retryAction: "retry" | "open_settings" | "none";
 } {
+  const creditCode = error instanceof ModelHttpError ? error.errorCode?.toUpperCase() : undefined;
   if (error instanceof EmbeddingInputLimitError) {
     return { code: "model_input_too_long", retryAction: "none" };
   }
-  if (error instanceof ModelHttpError && error.errorCode === "40309") {
-    return { code: "40309", retryAction: "open_settings" };
+  if (creditCode === "CREDIT_BALANCE_RESERVED") {
+    return { code: "CREDIT_BALANCE_RESERVED", retryAction: "retry" };
+  }
+  if (creditCode === "CREDIT_CALL_UNCERTAIN") {
+    return { code: "CREDIT_CALL_UNCERTAIN", retryAction: "none" };
+  }
+  if (["CREDIT_INSUFFICIENT", "40308", "40309"].includes(creditCode ?? "")) {
+    return { code: "PAUSED_CREDIT", retryAction: "retry" };
   }
   const hasStructuredCode = error instanceof ModelHttpError && error.errorCode !== undefined;
   const message = error instanceof ModelHttpError
     ? `${error.message}\n${error.detail}`
     : error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
-  if (!hasStructuredCode && /\b40309\b/.test(normalized)) {
-    return { code: "40309", retryAction: "open_settings" };
+  if (!hasStructuredCode && /\bcredit_call_uncertain\b/.test(normalized)) {
+    return { code: "CREDIT_CALL_UNCERTAIN", retryAction: "none" };
+  }
+  if (!hasStructuredCode && /\bcredit_balance_reserved\b/.test(normalized)) {
+    return { code: "CREDIT_BALANCE_RESERVED", retryAction: "retry" };
+  }
+  if (!hasStructuredCode && /\b(?:40308|40309|credit_insufficient)\b/.test(normalized)) {
+    return { code: "PAUSED_CREDIT", retryAction: "retry" };
   }
   // Providers can report shared model/account failures as HTTP 400. Classify
   // their reason before generic 4xx handling, which permits item isolation.
