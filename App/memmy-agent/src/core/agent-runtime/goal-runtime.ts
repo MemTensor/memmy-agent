@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isProjectableCanonicalSessionKey, toGuiChatId } from "../../entrypoints/frontend-bridge/gui-session-projection.js";
 import {
   InboundMessage,
   OutboundMessage,
@@ -457,12 +458,15 @@ export class GoalRuntime {
     return result.value;
   }
 
-  private goalStateEffect(route: GoalRoute | null, state: AgentGoalState): (() => Promise<void>) | null {
+  private goalStateEffect(sessionKey: string, route: GoalRoute | null, state: AgentGoalState): (() => Promise<void>) | null {
     if (!this.bus || !route) return null;
+    const destination = route.channel !== "websocket" && isProjectableCanonicalSessionKey(sessionKey)
+      ? { channel: "websocket", chatId: toGuiChatId(sessionKey) }
+      : route;
     return async () => {
       await this.bus!.publishOutbound(new OutboundMessage({
-        channel: route.channel,
-        chatId: route.chatId,
+        channel: destination.channel,
+        chatId: destination.chatId,
         content: "",
         metadata: { goalStateSync: true, goalState: state },
       }));
@@ -557,7 +561,7 @@ export class GoalRuntime {
               settling: false,
             });
           },
-          effect: this.goalStateEffect(input.route, publicGoalState(goal)),
+          effect: this.goalStateEffect(session.key, input.route, publicGoalState(goal)),
         };
       });
     } finally {
@@ -585,7 +589,7 @@ export class GoalRuntime {
             const lease = this.leases.get(sessionKey);
             if (lease?.goalId === goalId) lease.settling = true;
           },
-          effect: this.goalStateEffect(readGoalRoute(session.metadata), publicGoalState(updated)),
+          effect: this.goalStateEffect(session.key, readGoalRoute(session.metadata), publicGoalState(updated)),
         };
       });
     } finally {
@@ -617,7 +621,7 @@ export class GoalRuntime {
         session.metadata[GOAL_STATE_KEY] = updated;
         return {
           value: updated,
-          effect: this.goalStateEffect(readGoalRoute(session.metadata), publicGoalState(updated)),
+          effect: this.goalStateEffect(session.key, readGoalRoute(session.metadata), publicGoalState(updated)),
         };
       });
       this.callbacks.invalidateGoalWork?.(sessionKey);
@@ -653,7 +657,7 @@ export class GoalRuntime {
         session.metadata[GOAL_STATE_KEY] = updated;
         return {
           value: updated,
-          effect: this.goalStateEffect(readGoalRoute(session.metadata), publicGoalState(updated)),
+          effect: this.goalStateEffect(session.key, readGoalRoute(session.metadata), publicGoalState(updated)),
         };
       });
       this.callbacks.scheduleGoalWork?.(sessionKey, goal);
@@ -682,7 +686,7 @@ export class GoalRuntime {
         session.metadata[GOAL_STATE_KEY] = updated;
         return {
           value: updated,
-          effect: this.goalStateEffect(readGoalRoute(session.metadata), publicGoalState(updated)),
+          effect: this.goalStateEffect(session.key, readGoalRoute(session.metadata), publicGoalState(updated)),
         };
       });
     } finally {
@@ -723,7 +727,7 @@ export class GoalRuntime {
         session.metadata[GOAL_STATE_KEY] = updated;
         return {
           value: updated,
-          effect: this.goalStateEffect(readGoalRoute(session.metadata), publicGoalState(updated)),
+          effect: this.goalStateEffect(session.key, readGoalRoute(session.metadata), publicGoalState(updated)),
         };
       });
       if (goal.status === "budget_limited" && willCancel) {
@@ -768,7 +772,7 @@ export class GoalRuntime {
           session.metadata[GOAL_STATE_KEY] = updated;
           return {
             value: updated,
-            effect: this.goalStateEffect(readGoalRoute(session.metadata), publicGoalState(updated)),
+            effect: this.goalStateEffect(session.key, readGoalRoute(session.metadata), publicGoalState(updated)),
           };
         });
         this.callbacks.invalidateGoalWork?.(sessionKey);
@@ -791,7 +795,7 @@ export class GoalRuntime {
         delete session.metadata[GOAL_ROUTE_KEY];
         return {
           value: undefined,
-          effect: this.goalStateEffect(route, publicGoalState(null)),
+          effect: this.goalStateEffect(session.key, route, publicGoalState(null)),
         };
       });
       this.callbacks.invalidateGoalWork?.(sessionKey);
@@ -910,7 +914,7 @@ export class GoalRuntime {
           }
           this.turnSettlements.set(input.sessionKey, records);
         },
-        effect: this.goalStateEffect(readGoalRoute(session.metadata), state),
+        effect: this.goalStateEffect(session.key, readGoalRoute(session.metadata), state),
       };
     });
   }
