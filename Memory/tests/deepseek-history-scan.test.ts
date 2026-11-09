@@ -33,7 +33,7 @@ describe('DSH history roots and backup scan',()=>{
  it('honors explicit sessionsRoot even when default home is absent',async()=>{const p=await mkdtemp(join(tmpdir(),'memmy-dsh-root-'));dirs.push(p);const a=createDeepseekHarnessSourceAdapter({rootDirectory:join(p,'missing'),sessionsRoot:p});expect(await a.detect()).toBe(true);});
 });
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { MemoryDb } from '../src/index.js';
 import { createAgentSourceExecutor } from '../src/agent-source/runtime.js';
 import { createSourceRegistry } from '../src/agent-source/adapters/source-registry.js';
@@ -61,3 +61,40 @@ describe('DSH backup through SQLite and Memory worker',()=>{
  writeTurn(root,'pending',true,4070959300000);await runScan(next);expect(captureCount(reopened)).toEqual({count:3});
  },30000);
 });
+
+// PR791 regression: an older partial snapshot must not erase a completed turn.
+describe('PR791 complete live turn with an incomplete backup', () => {
+ it.each(['path_asc', 'recent_first'] as const)('imports one completed turn with %s order', async order => {
+  const llm=createBatchReflectionLlm([]);
+  const {root,service,db}=serviceFixture.createTestService({llm});
+  writeTurn(root,'overlap',false,4070959200000);
+  writeTurn(root,'overlap',true,4070959200000,false);
+  const adapter=createDeepseekHarnessSourceAdapter({sessionsRoot:join(root,'dsh')});
+  const scan=createAgentSourceExecutor({service,sourceRegistry:createSourceRegistry([{...adapter,scan: options => adapter.scan({...options,order:order==='path_asc'?'source_default':order})}]),configPath:join(root,'config.yaml'),statePath:join(root,'state.json'),scanStoreDirectory:join(root,'scans'),resolveAgentSkillRoot:()=>null});
+  executors.push(scan);
+  await runScan(scan);
+  expect(captureCount(db)).toEqual({count:1});
+  await settleCaptureWork(service);
+  expect(savedMemories(db)).toHaveLength(1);
+ },30000);
+ it('imports the same completed live turn without a backup', async () => {
+  const {root,service,db}=serviceFixture.createTestService({llm:createBatchReflectionLlm([])});
+  writeTurn(root,'overlap',true,4070959200000,false);
+  await runScan(makeExecutor(root,service));
+  expect(captureCount(db)).toEqual({count:1});
+ },30000);
+});
+
+import Database from 'better-sqlite3';
+it('retries a persisted incomplete DSH job after the final assistant message ID changes',async()=>{
+ const {root,service,db}=serviceFixture.createTestService({llm:createBatchReflectionLlm([])});
+ writeTurn(root,'retry',false,4070959200000);
+ const scan=makeExecutor(root,service);await runScan(scan);expect(captureCount(db)).toEqual({count:0});await scan.dispose();
+ const path=join(root,'scans',readdirSync(join(root,'scans')).find(x=>x.endsWith('.sqlite'))!);
+ const staged=new Database(path);staged.prepare("UPDATE scan_meta SET phase='failed'").run();staged.close();
+ writeTurn(root,'retry',true,4070959200000,false);
+ const live=join(root,'dsh','retry','session.v4.jsonl');
+ const changed=events.map((e,i)=>i===0?{...e,id:'retry'}:i===3?{...e,time:4070959200000+i*1000,data:{message:{id:'a-final',content:[{type:'text',text:'491 test answer'}]}}}:{...e,time:4070959200000+i*1000});
+ writeFileSync(live,changed.map(e=>JSON.stringify(e)).join('\n'));
+ await runScan(makeExecutor(root,service));expect(captureCount(db)).toEqual({count:1});
+},30000);

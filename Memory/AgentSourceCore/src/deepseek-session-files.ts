@@ -23,7 +23,7 @@ const ZSTD_FRAME_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
  * History scans may additionally opt into rotated backups; live plugins must not.
  */
 export async function discoverDeepseekHarnessSessions(options: {
-  root: string;
+  root?: string;
   roots?: string[];
   includeBackups?: boolean;
   signal?: AbortSignal;
@@ -33,7 +33,7 @@ export async function discoverDeepseekHarnessSessions(options: {
   const byDirectory = new Map<string, { path: string; version: number; compressed: boolean; mtimeMs: number }>();
   const backups: Array<{ path: string; mtimeMs: number }> = [];
   const seenDirectories = new Set<string>();
-  const directories = [...new Set(options.roots ?? [options.root])];
+  const directories = [...new Set([...(options.root ? [options.root] : []), ...(options.roots ?? [])])];
   for (let index = 0; index < directories.length; index += 1) {
     options.signal?.throwIfAborted();
     const directory = directories[index]!;
@@ -76,11 +76,13 @@ export async function discoverDeepseekHarnessSessions(options: {
       });
     }
   }
-  return [...byDirectory.values(), ...backups]
-    .sort((left, right) => options.order === "recent_first"
+  const compare = (left: { path: string; mtimeMs: number }, right: { path: string; mtimeMs: number }) =>
+    options.order === "recent_first"
       ? right.mtimeMs - left.mtimeMs || right.path.localeCompare(left.path)
-      : left.path.localeCompare(right.path))
-    .slice(0, options.maxSessions ?? (byDirectory.size + backups.length))
+      : left.path.localeCompare(right.path);
+  // Limited callers must not lose live sessions to a directory's many rotations.
+  return [...[...byDirectory.values()].sort(compare), ...backups.sort(compare)]
+    .slice(0, options.maxSessions)
     .map((file) => ({ sessionFilePath: file.path, gitRoot: null }));
 }
 

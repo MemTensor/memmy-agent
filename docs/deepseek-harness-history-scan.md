@@ -15,3 +15,13 @@ The reader accepts `session.jsonl`, `session.vN.jsonl`, their `.zstd` forms, and
 Multiple default roots share sorting and scan limits, and aliased directories are visited once. Completed source turns retain their native identity across live and backup files so the existing capture store can deduplicate them. Incomplete turns remain incomplete. Existing records older than the incremental watermark require the existing full-history scan; do not delete user databases or scan state to force backfill.
 
 Verification for MEMMY-491 includes platform path fixtures, compressed backup decoding, live generation selection, real Memory service/SQLite processing, repeated scans, restart deduplication, and full-history backfill. Path fixtures are not a substitute for Windows/Linux real-machine acceptance. Synthetic model stubs do not validate a remote model provider.
+
+## PR791 snapshot reconciliation
+
+The scanner resolves copies of the same native turn before staging. A completed snapshot can supersede a compatible incomplete prefix; incompatible complete content or cancelled/conflicting evidence remains non-importable. It never constructs a synthetic answer from different snapshots. Retry staging removes obsolete DSH-only message IDs only after receiving a complete snapshot membership list. Other agents retain their staging behavior.
+
+Scan targets count session directories, not rotations. Limited discovery prioritizes live generations, and a selected directory retains its backups so unique historical turns are not discarded. Message limits select whole conversations, so the first conversation can exceed the soft message limit instead of losing its ending evidence.
+
+Incremental scans also inspect rotations: a turn may rotate before the next poll. A bounded process-local cache (128 files / 16 MiB serialized rows) reuses unchanged decoded files, invalidated by device/inode/size/mtime/ctime. Restarting discards the cache. This deliberately avoids a fullHistory-only backup switch that would miss newly rotated conversations. Old turns before the watermark still require a full scan.
+
+Headerless files use a canonical directory-derived identity, independent of generation or backup suffix. Explicit native session IDs remain unchanged. Older headerless imports with filename-only IDs are ambiguous across directories; this change does not attempt an unsafe automatic reassignment of those legacy records. Configuration roots are additive if both root and roots are supplied. Explicit DSH_HOME remains exclusive of default Desktop/CLI roots.

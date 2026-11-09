@@ -23,3 +23,11 @@ describe('DSH rotated session history',()=>{
  it('deduplicates aliased and overlapping roots, applies one global limit',async()=>{const p=await fixture();const a=join(p,'a');const b=join(p,'b');await mkdir(a);await mkdir(b);await writeFile(join(a,'session.jsonl'),'');await writeFile(join(b,'session.jsonl'),'');const alias=join(p,'alias');await symlink(a,alias,'dir');expect(await discoverDeepseekHarnessSessions({root:p,roots:[a,alias,p,join(p,'missing')]})).toHaveLength(2);expect(await discoverDeepseekHarnessSessions({root:p,roots:[a,b],maxSessions:1})).toHaveLength(1);});
  it('honors cancellation before scanning or reading',async()=>{const p=await fixture();const c=new AbortController();c.abort();await expect(discoverDeepseekHarnessSessions({root:p,signal:c.signal})).rejects.toThrow();await expect(loadDeepseekHarnessEvents(join(p,'session.jsonl'),c.signal)).rejects.toThrow();});
 });
+
+it('prioritizes live generations under a file limit and accepts additive root options', async () => {
+ const p=await fixture();const a=join(p,'a');const b=join(p,'b');await mkdir(a);await mkdir(b);
+ await writeFile(join(a,'session.v4.jsonl'),'');await writeFile(join(a,'session.v1.jsonl.bak-1'),'');await writeFile(join(b,'session.v4.jsonl'),'');
+ const files=await discoverDeepseekHarnessSessions({root:a,roots:[b],includeBackups:true,maxSessions:2});
+ expect(files.map(x=>x.sessionFilePath)).toEqual([join(a,'session.v4.jsonl'),join(b,'session.v4.jsonl')]);
+ expect(await discoverDeepseekHarnessSessions({roots:[b]})).toHaveLength(1);
+});
