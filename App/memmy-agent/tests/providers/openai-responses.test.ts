@@ -511,6 +511,7 @@ describe("OpenAI Responses consumeSdkStream", () => {
       { call_id: "c1", name: "write_file", arguments_delta: "" },
       { call_id: "c1", name: "write_file", arguments_delta: '{"path":"a.txt","content":"' },
       { call_id: "c1", name: "write_file", arguments_delta: "hello\\n" },
+      { call_id: "c1", name: "write_file", arguments_delta: '"}' },
     ]);
   });
 
@@ -565,7 +566,21 @@ describe("OpenAI Responses consumeSdkStream", () => {
     expect(onContentDelta.mock.calls.flat().join("")).toBe("Hello");
     expect(calls[0].id).toBe("call|fc");
     expect(calls[0].arguments).toEqual({ key: 1 });
+    expect(onToolCallDelta.mock.calls.map(([delta]) => delta.arguments_delta).join("")).toBe('{"key":1}');
     expect(items).toEqual(output);
+  });
+
+  it("delivers missing tool arguments once across done and completed events", async () => {
+    const item = { type: "function_call", id: "fc", call_id: "call", name: "write_file", arguments: '{"path":"a.txt","content":"hello"}' };
+    const onToolCallDelta = vi.fn();
+    await consumeSdkStream(streamFrom([
+      { type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } },
+      { type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc", delta: '{"path":' },
+      { type: "response.function_call_arguments.done", output_index: 0, item_id: "fc", arguments: item.arguments },
+      { type: "response.output_item.done", output_index: 0, item },
+      { type: "response.completed", response: { status: "completed", output: [item] } },
+    ]), { onToolCallDelta });
+    expect(onToolCallDelta.mock.calls.map(([delta]) => delta.arguments_delta).join("")).toBe(item.arguments);
   });
 
   it("extracts reasoning summaries", async () => {

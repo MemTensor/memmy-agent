@@ -187,6 +187,17 @@ export async function consumeSdkStream(
   const contentCb = callbacks.onContentDelta;
   const toolCb = callbacks.onToolCallDelta;
   const signal = callbacks.signal ?? null;
+  const completeArguments = async (item: any, argumentsValue: unknown) => {
+    if (signal?.aborted) throw createProviderAbortError();
+    const finalArguments = String(argumentsValue ?? item.arguments ?? "");
+    const previous = String(item.arguments ?? "");
+    if (!finalArguments.startsWith(previous)) {
+      throw new RuntimeError("Final function arguments differ from streamed arguments");
+    }
+    const remaining = finalArguments.slice(previous.length);
+    if (remaining) await toolCb?.({ call_id: item.call_id, name: item.name, arguments_delta: remaining });
+    item.arguments = finalArguments;
+  };
   for await (const event of stream) {
     if (signal?.aborted) throw createProviderAbortError();
     const type = event.type;
@@ -205,18 +216,18 @@ export async function consumeSdkStream(
       await callbacks.onThinkingDelta?.(event.delta ?? "");
     } else if (type === "response.output_item.added" && event.item?.type === "function_call") {
       const item = toolItemFor(event);
-      item.arguments = event.item.arguments ?? item.arguments;
       if (toolCb && !signal?.aborted) await toolCb({ call_id: event.item.call_id, name: event.item.name, arguments_delta: "" });
+      await completeArguments(item, event.item.arguments);
     } else if (type === "response.function_call_arguments.delta") {
       const item = toolItemFor(event);
       item.arguments = `${item.arguments ?? ""}${event.delta ?? ""}`;
       if (toolCb && !signal?.aborted) await toolCb({ call_id: item.call_id, name: item.name, arguments_delta: event.delta ?? "" });
     } else if (type === "response.function_call_arguments.done") {
       const item = toolItemFor(event);
-      item.arguments = event.arguments ?? item.arguments ?? "";
+      await completeArguments(item, event.arguments);
     } else if (type === "response.output_item.done" && event.item?.type === "function_call") {
       const item = toolItemFor(event);
-      item.arguments = event.item.arguments ?? item.arguments ?? "";
+      await completeArguments(item, event.item.arguments);
     } else if (type === "response.completed" || type === "response.incomplete") {
       terminal = true;
       if (!["completed", "incomplete"].includes(event.response?.status) || event.response?.error) {
@@ -257,11 +268,7 @@ export async function consumeSdkStream(
   for (const item of output) {
     if (item.type === "function_call") {
       const tracked = toolItemFor({ item });
-      if (!String(item.arguments ?? "").startsWith(tracked.arguments ?? "")) {
-        throw new RuntimeError("Final function arguments differ from streamed arguments");
-      }
-      const remaining = String(item.arguments ?? "").slice(String(tracked.arguments ?? "").length);
-      if (remaining) await toolCb?.({ call_id: item.call_id, name: item.name, arguments_delta: remaining });
+      await completeArguments(tracked, item.arguments);
       Object.assign(tracked, item);
     }
   }

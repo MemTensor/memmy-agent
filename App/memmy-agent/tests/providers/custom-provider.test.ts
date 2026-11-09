@@ -3,10 +3,7 @@ import { Config } from "../../src/config/schema.js";
 import { AnthropicProvider } from "../../src/providers/anthropic-provider.js";
 import { BedrockProvider } from "../../src/providers/bedrock-provider.js";
 import { makeProvider } from "../../src/providers/factory.js";
-import {
-  chatCompletionsModelForcesNoneReasoning,
-  customModelUsesMaxCompletionTokens,
-} from "../../src/providers/custom-provider.js";
+import { customModelUsesMaxCompletionTokens } from "../../src/providers/custom-provider.js";
 import { OpenAICompatProvider } from "../../src/providers/openai-compat-provider.js";
 import { findByName } from "../../src/providers/registry.js";
 
@@ -59,13 +56,6 @@ describe("custom provider", () => {
     expect(customModelUsesMaxCompletionTokens("deepseek-v4")).toBe(false);
     expect(customModelUsesMaxCompletionTokens("qwen-max")).toBe(false);
     expect(customModelUsesMaxCompletionTokens("gpt-4o")).toBe(false);
-  });
-
-  it("treats gpt- names and o-series names as chat completions reasoning models", () => {
-    expect(chatCompletionsModelForcesNoneReasoning("gpt-4o")).toBe(true);
-    expect(chatCompletionsModelForcesNoneReasoning("gpt-6-sol")).toBe(true);
-    expect(chatCompletionsModelForcesNoneReasoning("o3-mini")).toBe(true);
-    expect(chatCompletionsModelForcesNoneReasoning("qwen-max")).toBe(false);
   });
 
   it("sends max_completion_tokens only for matching custom chat models", () => {

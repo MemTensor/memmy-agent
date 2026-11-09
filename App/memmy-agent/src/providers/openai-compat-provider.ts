@@ -17,10 +17,7 @@ import {
   convertTools,
   parseResponseOutput,
 } from "./openai-responses/index.js";
-import {
-  chatCompletionsModelForcesNoneReasoning,
-  customModelUsesMaxCompletionTokens,
-} from "./custom-provider.js";
+import { customModelUsesMaxCompletionTokens } from "./custom-provider.js";
 import { memmyAccountNoneThinkingStyle } from "./memmy-account.js";
 import { getModelInputModalities } from "./model-input-capabilities.js";
 import { OPENROUTER_ATTRIBUTION_HEADERS } from "./openrouter-attribution.js";
@@ -59,6 +56,11 @@ const GATEWAY_REASONING_STYLE_MAP: Record<string, (effort: string) => Record<str
   reasoning_effort: (effort) => ({ reasoning: { effort } }),
 };
 const OPENAI_COMPAT_REQUEST_TIMEOUT_S = 300.0;
+// These Chat parameters have no equivalent Responses semantics.
+const CHAT_ONLY_PARAMETERS = [
+  "stop", "frequency_penalty", "presence_penalty", "logprobs", "top_logprobs", "logit_bias",
+  "seed", "modalities", "audio", "prediction", "functions", "function_call",
+];
 
 
 export function floatEnv(name: string, defaultValue: number): number {
@@ -295,7 +297,7 @@ export class OpenAICompatProvider extends LLMProvider {
 
   static handleError(error: any, spec: any = null, apiBase: string | null = null): LLMResponse {
     const response = error?.response;
-    const headers = response?.headers ?? {};
+    const headers = error?.headers ?? response?.headers ?? {};
     const body = error?.body ?? error?.doc ?? response?.text ?? error?.message ?? "";
     const shouldRetryHeader = headerValue(headers, "x-should-retry");
     const shouldRetry =
@@ -708,10 +710,6 @@ export class OpenAICompatProvider extends LLMProvider {
     return true;
   }
 
-  static shouldFallbackFromResponsesError(error: any): boolean {
-    return rejectsProtocol(error, true);
-  }
-
   private responsesScope(args: ChatArgs): string {
     const headers = Object.fromEntries(Object.entries(this.defaultHeaders)
       .filter(([name]) => !["x-session-affinity", "x-request-id", "traceparent", "tracestate"].includes(name.toLowerCase()))
@@ -733,7 +731,8 @@ export class OpenAICompatProvider extends LLMProvider {
     const automatic = this.apiType === "auto" && !this.isLocal
       && !["memmy_account", "github_copilot"].includes(specName(this.spec));
     const key = protocolPreferenceKey(scope, { ...flattenChatExtraBody(this.buildKwargs(args)), stream: streaming });
-    const chatOnlyParameters = this.extraBody.stop != null || (this.extraBody.n != null && this.extraBody.n !== 1);
+    const chatOnlyParameters = CHAT_ONLY_PARAMETERS.some(key => this.extraBody[key] != null)
+      || (this.extraBody.n != null && this.extraBody.n !== 1);
     let useResponses = pinned || (this.shouldUseResponsesApi(args.model, args.reasoningEffort)
       && !(automatic && chatOnlyParameters)
       && !(automatic && chatExceptions.has(key)));
@@ -789,6 +788,9 @@ export class OpenAICompatProvider extends LLMProvider {
       body.tool_choice = args.toolChoice ?? "auto";
     }
     if (Object.keys(this.extraBody).length) body = mergeResponsesExtraBody(body, this.extraBody);
+    if (body.tool_choice?.type === "function" && body.tool_choice.function) {
+      body.tool_choice = { type: "function", name: body.tool_choice.function.name };
+    }
     return body;
   }
 
@@ -1123,7 +1125,14 @@ export class OpenAICompatProvider extends LLMProvider {
       const body = responses ? this.buildResponsesBody(args) : flattenChatExtraBody(this.buildKwargs(args));
       const options = this.requestOptions(args);
       const api = responses ? this.client.responses : this.client.chat.completions;
-      const response = options ? await api.create(body, options) : await api.create(body);
+      const pending = options ? api.create(body, options) : api.create(body);
+      // APIPromise resolves only after parsing the body. Record acceptance at headers,
+      // so a subsequent body-read failure cannot replay an already accepted generation.
+      if (typeof pending.asResponse === "function") {
+        await pending.asResponse();
+        attempt.accepted = true;
+      }
+      const response = await pending;
       attempt.accepted = true;
       if (responses) return parseResponseOutput(response, specName(this.spec), this.responsesScope(args));
       attempt.completed = Array.isArray(response?.choices) && response.choices.length > 0
@@ -1406,12 +1415,6 @@ export function isLocalEndpoint(spec: any, apiBase?: string | null): boolean {
   return false;
 }
 
-export function isDirectOpenAIBase(apiBase?: string | null): boolean {
-  if (!apiBase) return true;
-  const normalized = apiBase.trim().toLowerCase().replace(/\/+$/, "");
-  return normalized.includes("api.openai.com") && !normalized.includes("openrouter");
-}
-
 export function deepMerge(
   base: Record<string, any>,
   override: Record<string, any>,
@@ -1452,16 +1455,31 @@ export function mergeResponsesExtraBody(
   body: Record<string, any>,
   extraBody: Record<string, any>,
 ): Record<string, any> {
-  const regularExtra = Object.fromEntries(
-    Object.entries(extraBody).filter(([key]) => !["include", "tools"].includes(key)),
-  );
+  const { include, tools, response_format, max_tokens, max_completion_tokens, reasoning_effort, ...regularExtra } = extraBody;
+  if (regularExtra.n === 1) delete regularExtra.n;
+  if (regularExtra.stream_options?.include_usage != null) {
+    const { include_usage: _includeUsage, ...options } = regularExtra.stream_options;
+    if (Object.keys(options).length) regularExtra.stream_options = options;
+    else delete regularExtra.stream_options;
+  }
+  if (response_format != null) {
+    const format = response_format.type === "json_schema"
+      ? { ...response_format.json_schema, type: "json_schema" } : response_format;
+    regularExtra.text = { format, ...regularExtra.text };
+  }
+  const maxTokens = max_completion_tokens ?? max_tokens;
+  if (maxTokens != null && regularExtra.max_output_tokens == null) regularExtra.max_output_tokens = maxTokens;
+  if (reasoning_effort != null) regularExtra.reasoning = deepMerge({ effort: reasoning_effort }, regularExtra.reasoning ?? {});
   const merged = deepMerge(body, regularExtra);
-  if ("include" in extraBody) merged.include = mergeUniqueList(body.include, extraBody.include);
+  if ("include" in extraBody) merged.include = mergeUniqueList(body.include, include);
   if ("tools" in extraBody) {
+    const extraTools = Array.isArray(tools)
+      ? tools.flatMap(tool => tool?.type === "function" && tool.function ? convertTools([tool]) : [tool])
+      : tools;
     merged.tools =
-      Array.isArray(body.tools) && Array.isArray(extraBody.tools)
-        ? [...body.tools, ...extraBody.tools]
-        : extraBody.tools;
+      Array.isArray(body.tools) && Array.isArray(extraTools)
+        ? [...body.tools, ...extraTools]
+        : extraTools;
   }
   return merged;
 }
