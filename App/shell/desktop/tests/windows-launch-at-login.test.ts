@@ -91,6 +91,22 @@ describe("Windows launch at login", () => {
     expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, (path) => path === launcherPath)).toBe(false);
   });
 
+  it("reads the executable fallback as one path when the install directory has spaces", () => {
+    const executablePath = "D:\\Example Apps\\Memmy.exe";
+    const getLoginItemSettings = vi.fn(({ path }: { path: string }) => ({
+      openAtLogin: true,
+      executableWillLaunchAtLogin: path === `"${executablePath}"`,
+      launchItems: []
+    }));
+
+    expect(getWindowsLaunchAtLogin(
+      { getLoginItemSettings, setLoginItemSettings: vi.fn() },
+      { ...packagedWindowsEnvironment, executablePath },
+      () => false
+    )).toBe(true);
+    expect(getLoginItemSettings).toHaveBeenCalledWith({ path: `"${executablePath}"`, args: [] });
+  });
+
   it.each([true, false])("writes and re-reads the effective Windows startup state: %s", (enabled) => {
     const getLoginItemSettings = vi.fn(() => ({
       openAtLogin: enabled,
@@ -152,6 +168,26 @@ describe("Windows launch at login", () => {
       expect(setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({
         path: scriptHostPath,
         args: [launcherPath],
+        openAtLogin: true,
+        enabled: true
+      });
+    });
+
+    it("replaces an enabled legacy command with the executable if the script is missing", () => {
+      const getLoginItemSettings = vi.fn(({ path, args }: { path: string; args: string[] }) => ({
+        openAtLogin: path === packagedWindowsEnvironment.executablePath || args[0] === legacyItem.args[0],
+        executableWillLaunchAtLogin: true,
+        launchItems: [legacyItem]
+      }));
+      const setLoginItemSettings = vi.fn();
+
+      expect(repairWindowsLaunchAtLogin(
+        { getLoginItemSettings, setLoginItemSettings }, packagedWindowsEnvironment, appUserModelId, () => false
+      )).toBe("repaired");
+      expect(getLoginItemSettings).toHaveBeenNthCalledWith(1, { path: scriptHostPath, args: legacyItem.args });
+      expect(setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({
+        path: packagedWindowsEnvironment.executablePath,
+        args: [],
         openAtLogin: true,
         enabled: true
       });

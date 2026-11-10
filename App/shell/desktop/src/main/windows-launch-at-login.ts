@@ -36,6 +36,24 @@ export interface WindowsLaunchAtLoginEnvironment {
 
 export type WindowsPathExists = (path: string) => boolean;
 
+function readWindowsLoginItemSettings(application: WindowsLoginItemApplication, command: WindowsLoginItemOptions) {
+  // Electron parses the lookup path as a command line when it enumerates Run entries.
+  const path = /[ \t]/.test(command.path) ? `"${command.path}"` : command.path;
+  return application.getLoginItemSettings({ ...command, path });
+}
+
+function resolveWindowsLoginLauncher(environment: WindowsLaunchAtLoginEnvironment) {
+  const localAppDataPath = environment.localAppDataPath?.trim();
+  const systemRootPath = environment.systemRootPath?.trim();
+  if (!localAppDataPath || !systemRootPath) {
+    return undefined;
+  }
+  return {
+    scriptHostPath: windowsPath.join(systemRootPath, "System32", "wscript.exe"),
+    launcherPath: windowsPath.join(localAppDataPath, "Memmy", "launcher", "MemmyLauncher.vbs")
+  };
+}
+
 /**
  * Resolves the command Windows should run after the user signs in.
  *
@@ -47,21 +65,15 @@ export const resolveWindowsLoginItemCommand = (
   environment: WindowsLaunchAtLoginEnvironment,
   pathExists: WindowsPathExists = existsSync
 ): WindowsLoginItemOptions => {
-  const localAppDataPath = environment.localAppDataPath?.trim();
-  const systemRootPath = environment.systemRootPath?.trim();
-  if (!localAppDataPath || !systemRootPath) {
-    return { path: environment.executablePath, args: [] };
-  }
-
-  const launcherPath = windowsPath.join(localAppDataPath, "Memmy", "launcher", "MemmyLauncher.vbs");
-  if (!pathExists(launcherPath)) {
+  const launcher = resolveWindowsLoginLauncher(environment);
+  if (!launcher || !pathExists(launcher.launcherPath)) {
     return { path: environment.executablePath, args: [] };
   }
 
   return {
-    path: windowsPath.join(systemRootPath, "System32", "wscript.exe"),
+    path: launcher.scriptHostPath,
     // Electron's Windows login-item writer applies AddQuoteForArg to each argument.
-    args: [launcherPath]
+    args: [launcher.launcherPath]
   };
 };
 
@@ -75,22 +87,24 @@ export const repairWindowsLaunchAtLogin = (
   if (environment.platform !== "win32" || !environment.isPackaged) {
     return;
   }
-  const command = resolveWindowsLoginItemCommand(environment, pathExists);
-  const [launcherPath] = command.args;
-  if (!launcherPath) {
+  const launcher = resolveWindowsLoginLauncher(environment);
+  if (!launcher) {
     return;
   }
-  const legacyArgs = [`"${launcherPath}"`];
   // openAtLogin compares the command against this app's per-user Run value.
-  const legacy = application.getLoginItemSettings({ path: command.path, args: legacyArgs });
+  const legacy = readWindowsLoginItemSettings(application, {
+    path: launcher.scriptHostPath,
+    args: [`"${launcher.launcherPath}"`]
+  });
   if (!legacy.openAtLogin || !legacy.launchItems.some((item) => (
     item.scope === "user" && item.name.toLowerCase() === appUserModelId.toLowerCase() && item.enabled
   ))) {
     return;
   }
+  const command = resolveWindowsLoginItemCommand(environment, pathExists);
   application.setLoginItemSettings({ ...command, openAtLogin: true, enabled: true });
   // Electron's setter returns void even if the registry write did not take effect.
-  return application.getLoginItemSettings(command).openAtLogin ? "repaired" : "write-unconfirmed";
+  return readWindowsLoginItemSettings(application, command).openAtLogin ? "repaired" : "write-unconfirmed";
 };
 
 /** Reads whether the packaged Windows launch command will effectively run at login. */
@@ -104,7 +118,7 @@ export const getWindowsLaunchAtLogin = (
   }
 
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
-  const settings = application.getLoginItemSettings(command);
+  const settings = readWindowsLoginItemSettings(application, command);
   if (!settings.openAtLogin) {
     return false;
   }
