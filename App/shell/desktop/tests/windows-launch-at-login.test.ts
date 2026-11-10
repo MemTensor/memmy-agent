@@ -95,6 +95,7 @@ describe("Windows launch at login", () => {
   it("reads the executable fallback as one path when the install directory has spaces", () => {
     const executablePath = "D:\\Example Apps\\Memmy.exe";
     const getLoginItemSettings = vi.fn(({ path }: { path: string }) => ({
+      openAtLogin: false,
       launchItems: path === `"${executablePath}"`
         ? [{ name: appUserModelId, scope: "user", path: executablePath, args: [], enabled: true }]
         : []
@@ -108,9 +109,27 @@ describe("Windows launch at login", () => {
     expect(getLoginItemSettings).toHaveBeenCalledWith({ path: `"${executablePath}"`, args: [] });
   });
 
+  it("uses the owned entry's approval when Electron confirms a command with differently parsed args", () => {
+    const getLoginItemSettings = vi.fn(() => ({
+      openAtLogin: true,
+      launchItems: [{
+        name: appUserModelId,
+        scope: "user",
+        path: scriptHostPath,
+        args: [`"${launcherPath}"`],
+        enabled: true
+      }]
+    }));
+
+    expect(getWindowsLaunchAtLogin(
+      { getLoginItemSettings, setLoginItemSettings: vi.fn() }, packagedWindowsEnvironment, () => true
+    )).toBe(true);
+  });
+
   it("still recognizes the enabled executable entry when the launcher is restored", () => {
     const executablePath = packagedWindowsEnvironment.executablePath;
     const getLoginItemSettings = vi.fn(({ path }: { path: string }) => ({
+      openAtLogin: false,
       launchItems: path === executablePath
         ? [{ name: appUserModelId, scope: "user", path: executablePath, args: [], enabled: true }]
         : []
@@ -166,7 +185,7 @@ describe("Windows launch at login", () => {
       })).mockReturnValueOnce({
         openAtLogin: false,
         executableWillLaunchAtLogin: true,
-        launchItems: [legacyItem]
+        launchItems: [{ ...legacyItem, args: legacyItem.args.map((arg) => arg.toLowerCase().replaceAll("\\", "/")) }]
       }).mockReturnValueOnce({
         openAtLogin: false,
         executableWillLaunchAtLogin: true,
@@ -191,8 +210,9 @@ describe("Windows launch at login", () => {
 
     it("replaces an enabled legacy command with the executable if the script is missing", () => {
       const getLoginItemSettings = vi.fn()
-        .mockReturnValueOnce({ launchItems: [legacyItem] })
+        .mockReturnValueOnce({ openAtLogin: false, launchItems: [legacyItem] })
         .mockReturnValueOnce({
+          openAtLogin: false,
           launchItems: [{ ...legacyItem, path: packagedWindowsEnvironment.executablePath, args: [] }]
         });
       const setLoginItemSettings = vi.fn();

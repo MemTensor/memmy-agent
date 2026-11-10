@@ -27,7 +27,7 @@ const variableNames = new Set([
   "latestPetWindowLayout", "petMascotScreenAnchor", "startupRendererCleanup", "STARTUP_RENDERER_TIMEOUT_MS",
   "isStartupFailureReported", "localBackend", "computerUseSurfaceWindows", "browserSidebarBridge",
   "embeddedBrowserHistoryStore", "embeddedBrowserDriver", "browserWebviewDownloads",
-  "browserWebviewExtensions", "disposeBrowserWebviewPermissions"
+  "browserWebviewExtensions", "disposeBrowserWebviewPermissions", "localTestProfile"
 ]);
 const selected = source.statements.filter(statement => {
   if (ts.isFunctionDeclaration(statement)) return functionNames.has(statement.name?.text ?? "");
@@ -47,7 +47,7 @@ const code = ts.transpileModule([
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
 }).outputText;
 
-function setup(options: { delay?: number; gatewayDelay?: number; apiDelay?: number; externalGateway?: boolean; reload?: () => Promise<{ ok: boolean; message: string; requires_restart: boolean }>; error?: Error; apiError?: Error; cleanupHangs?: boolean; platform?: string; mode?: "full" | "pet"; gatewayIssue?: "model_config_invalid" } = {}) {
+function setup(options: { delay?: number; gatewayDelay?: number; apiDelay?: number; externalGateway?: boolean; reload?: () => Promise<{ ok: boolean; message: string; requires_restart: boolean }>; error?: Error; apiError?: Error; cleanupHangs?: boolean; platform?: string; mode?: "full" | "pet"; gatewayIssue?: "model_config_invalid"; repairLoginItem?: () => void } = {}) {
   vi.useFakeTimers();
   vi.setSystemTime(0);
   const events: string[] = [];
@@ -118,6 +118,8 @@ function setup(options: { delay?: number; gatewayDelay?: number; apiDelay?: numb
     showPackagedStartupError: () => { events.push("error-dialog"); },
     resolveCurrentDesktopEdition: () => "cn", initLogger: noop, forceLightWindowChrome: noop,
     installPreparedRequiredUpdateBeforeBoot: async () => false,
+    currentWindowsLaunchAtLoginEnvironment: () => ({}),
+    repairWindowsLaunchAtLogin: options.repairLoginItem ?? noop,
     registerIpcHandlers: noop, installBundledCliIfNeeded: async () => {}, startPackagedRendererServerIfNeeded: async () => {},
     createDesktopScreenCapture: noop, createComputerUseOnboarding: noop, captureComputerUseWindow: noop,
     createComputerUsePIPScreenPermissionGuide: () => ({ request: noop, dispose: noop }),
@@ -193,6 +195,20 @@ describe("desktop startup lifecycle", () => {
     await vi.waitFor(() => expect(test.services.startBrowserPreparation).toHaveBeenCalledTimes(1));
     expect(test.services.startAgentGateway).toHaveBeenCalledTimes(1);
     expect(test.splash()).toBeNull();
+  });
+
+  it("continues Windows startup when login item repair fails", async () => {
+    const repairLoginItem = vi.fn(() => {
+      throw Object.assign(new Error("fixture error details"), { code: "EACCES" });
+    });
+    const test = setup({ repairLoginItem });
+
+    await test.start();
+
+    expect(repairLoginItem).toHaveBeenCalledOnce();
+    expect(test.events).toContain("boot:windows-login-item-repair-failed:access-denied");
+    expect(test.events.join("\n")).not.toContain("fixture error details");
+    expect(test.main()).not.toBeNull();
   });
 
   it("awaits the local MCP bridge configuration before starting the Agent and waits again before showing a window", async () => {

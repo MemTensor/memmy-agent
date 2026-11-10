@@ -14,6 +14,7 @@ interface WindowsLoginItemWriteOptions extends WindowsLoginItemOptions {
 
 export interface WindowsLoginItemApplication {
   getLoginItemSettings(options: WindowsLoginItemOptions): {
+    openAtLogin: boolean;
     launchItems: Array<{
       name: string;
       scope: string;
@@ -39,19 +40,29 @@ export type WindowsPathExists = (path: string) => boolean;
 function findWindowsLoginItem(
   application: WindowsLoginItemApplication,
   appUserModelId: string,
-  command: WindowsLoginItemOptions
+  command: WindowsLoginItemOptions,
+  allowExactCommandFallback = false
 ) {
   // Electron parses the lookup path as a command line when it enumerates Run entries.
   const path = /[ \t]/.test(command.path) ? `"${command.path}"` : command.path;
-  const { launchItems } = application.getLoginItemSettings({ ...command, path });
+  const { launchItems, openAtLogin } = application.getLoginItemSettings({ ...command, path });
   const expectedName = appUserModelId.toLowerCase();
   const expectedPath = normalizeWindowsCommandPath(command.path);
-  return launchItems.find((item) => (
+  const item = launchItems.find((item) => (
     item.scope === "user" && item.name.toLowerCase() === expectedName
     && normalizeWindowsCommandPath(item.path) === expectedPath
-    && item.args.length === command.args.length
-    && item.args.every((argument, index) => argument === command.args[index])
   ));
+  if (!item) return;
+
+  // The only argument we use is a script path. Keep literal quotes significant
+  // so the broken legacy command cannot be confused with its corrected form.
+  const argsMatch = item.args.length === command.args.length && command.args.every((argument, index) => (
+    normalizeWindowsCommandPath(item.args[index]!) === normalizeWindowsCommandPath(argument)
+  ));
+  // Electron compares the exact Run value for this app in openAtLogin. For
+  // settings readback, it can confirm the command even if parsing its args
+  // differs. The enabled flag still has to come from our own entry.
+  return argsMatch || (allowExactCommandFallback && openAtLogin) ? item : undefined;
 }
 
 function resolveWindowsLoginLauncher(environment: WindowsLaunchAtLoginEnvironment) {
@@ -130,13 +141,13 @@ export const getWindowsLaunchAtLogin = (
   }
 
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
-  const item = findWindowsLoginItem(application, environment.appUserModelId, command);
+  const item = findWindowsLoginItem(application, environment.appUserModelId, command, true);
   if (item || command.path === environment.executablePath) {
     return item?.enabled ?? false;
   }
   // A direct executable entry can still be active after the launcher is restored.
   const fallback = { path: environment.executablePath, args: [] };
-  return findWindowsLoginItem(application, environment.appUserModelId, fallback)?.enabled ?? false;
+  return findWindowsLoginItem(application, environment.appUserModelId, fallback, true)?.enabled ?? false;
 };
 
 /** Writes the packaged Windows login item and returns the effective system state. */
