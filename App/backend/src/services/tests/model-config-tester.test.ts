@@ -132,6 +132,19 @@ describe("model config tester", () => {
     expect(init.method).toBe("GET"); expect(init.body).toBeUndefined();
   });
 
+  it.each([true, false])("tests ASR connection through its configured model list (listed: %s)", async listed => {
+    const fetch = vi.fn(async () => json({ data: [{ id: listed ? "qwen-audio-3.0-asr-flash" : "another-model" }] }));
+    const result = await createHttpModelConfigTester({ fetch }).test(input({
+      provider: "qwen", protocol: "dashscope-input-audio-chat", capability: "asr",
+      apiBase: "https://asr-gateway.example/v1/", modelId: "qwen-audio-3.0-asr-flash",
+      extraHeaders: { authorization: "Bearer endpoint-key" }
+    }));
+    expect(result).toMatchObject({ ok: true, modelListed: listed });
+    expect(fetch).toHaveBeenCalledExactlyOnceWith("https://asr-gateway.example/v1/models", expect.objectContaining({
+      method: "GET", headers: { authorization: "Bearer endpoint-key" }
+    }));
+  });
+
   it("preserves the Gemini list protocol and model name matching", async () => {
     const fetch = vi.fn(async () => json({ models: [{ name: "models/gemini-test" }] }));
     const result = await createHttpModelConfigTester({ fetch }).test(input({ protocol: "gemini-generate-content", apiBase: "https://google.example/v1beta/", modelId: "gemini-test" }));
@@ -143,7 +156,7 @@ describe("model config tester", () => {
     expect((await createHttpModelConfigTester({ fetch: async () => json(completion) }).test(input({ protocol: "openai-embeddings", capability: "embedding" }))).ok).toBe(false);
   });
 
-  it.each(["dashscope-input-audio-chat", "dashscope-multimodal-generation", "memmy-account", "bedrock-converse"] as ModelEndpointProtocol[])(
+  it.each(["dashscope-multimodal-generation", "memmy-account", "bedrock-converse"] as ModelEndpointProtocol[])(
     "keeps unsupported protocol %s free of requests", async protocol => {
       const fetch = vi.fn();
       expect((await createHttpModelConfigTester({ fetch }).test(input({ protocol }))).ok).toBe(false);

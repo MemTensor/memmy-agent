@@ -37,41 +37,55 @@ export async function handOverRecording(input: {
   diarization?: boolean;
   emptyAudioMessage?: string;
 }): Promise<HandedOverRecording> {
-  const stamp = recordingStamp(new Date().toISOString());
-  const format = recordingFormat(input.stopped.recordingMimeType);
-  // The interview reaches the plugin as text, so the transcript is what the
-  // upload card's row stands for — named now, while the file itself is still
-  // minutes away.
-  const transcriptName = `${input.t("plugin.ui.audio.transcriptFile", { stamp })}.txt`;
-  const [audio] = await input.uploadFiles([{
-    blob: input.stopped.recording,
-    name: `${input.t("plugin.ui.audio.recordingFile", { stamp })}${format.extension}`,
-    kind: "audio",
-    mime: format.mime,
-    target: "recordings"
-  }]);
-  if (!audio) throw new Error(input.t("plugin.ui.responseFailed"));
+  try {
+    const stamp = recordingStamp(new Date().toISOString());
+    const format = recordingFormat(input.stopped.recordingMimeType);
+    // The interview reaches the plugin as text, so the transcript is what the
+    // upload card's row stands for — named now, while the file itself is still
+    // minutes away.
+    const transcriptName = `${input.t("plugin.ui.audio.transcriptFile", { stamp })}.txt`;
+    const [audio] = await input.uploadFiles([{
+      blob: input.stopped.recording,
+      name: `${input.t("plugin.ui.audio.recordingFile", { stamp })}${format.extension}`,
+      kind: "audio",
+      mime: format.mime,
+      target: "recordings"
+    }]);
+    if (!audio) throw new Error(input.t("plugin.ui.responseFailed"));
 
-  const job = input.startTranscription(audio.path, async (): Promise<PluginRecordingTranscript> => {
-    const result = await transcribeRecording(input.asrClient, input.stopped.recording, input.stopped.durationMs, {
-      ...(input.diarization ? { diarization: true } : {}),
-      ...(input.emptyAudioMessage ? { emptyAudioMessage: input.emptyAudioMessage } : {})
+    const job = input.startTranscription(audio.path, async (): Promise<PluginRecordingTranscript> => {
+      const result = await transcribeRecording(input.asrClient, input.stopped.recording, input.stopped.durationMs, {
+        sessionId: input.stopped.sessionId,
+        liveText: input.stopped.liveText,
+        liveError: input.stopped.liveError,
+        ...(input.diarization ? { diarization: true } : {}),
+        ...(input.emptyAudioMessage ? { emptyAudioMessage: input.emptyAudioMessage } : {})
+      });
+      const transcript = { text: result.text, segments: result.segments ?? [], transcribedAt: result.transcribedAt };
+      // Keeping the text as a file is a convenience for the user, not part of the
+      // transcription: failing to store it must not throw away a finished pass
+      // and send the job round its retries again.
+      let transcriptFile: UploadedAgentMedia | undefined;
+      try {
+        [transcriptFile] = await input.uploadFiles([{
+          blob: new Blob([formatTranscript(result, input.t)], { type: "text/plain" }),
+          name: transcriptName,
+          kind: "file",
+          mime: "text/plain",
+          target: "recordings"
+        }]);
+      } catch { /* The transcript is still delivered as text. */ }
+      return transcriptFile ? { ...transcript, transcriptFile } : transcript;
     });
-    const transcript = { text: result.text, segments: result.segments ?? [], transcribedAt: result.transcribedAt };
-    // Keeping the text as a file is a convenience for the user, not part of the
-    // transcription: failing to store it must not throw away a finished pass
-    // and send the job round its retries again.
-    let transcriptFile: UploadedAgentMedia | undefined;
-    try {
-      [transcriptFile] = await input.uploadFiles([{
-        blob: new Blob([formatTranscript(result, input.t)], { type: "text/plain" }),
-        name: transcriptName,
-        kind: "file",
-        mime: "text/plain",
-        target: "recordings"
-      }]);
-    } catch { /* The transcript is still delivered as text. */ }
-    return transcriptFile ? { ...transcript, transcriptFile } : transcript;
-  });
-  return { audio, job, transcriptName };
+    // Retain the snapshot through retries, and release it on success or explicit skip.
+    if (input.stopped.sessionId) {
+      const sessionId = input.stopped.sessionId;
+      void job.wait().then(() => input.asrClient.release(sessionId)).catch(() => undefined);
+    }
+    return { audio, job, transcriptName };
+  } catch (error) {
+    // No job owns the snapshot when storing or handing over the recording failed.
+    if (input.stopped.sessionId) void input.asrClient.release(input.stopped.sessionId).catch(() => undefined);
+    throw error;
+  }
 }

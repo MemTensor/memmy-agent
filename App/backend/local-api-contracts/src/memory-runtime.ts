@@ -1083,6 +1083,7 @@ export const ApiErrorCodeSchema = z.enum([
   "agent_source_unavailable",
   "composio_not_configured",
   "toolkit_unsupported",
+  "model_selection_unavailable",
   "model_config_changed",
   "config_write_busy",
   "account_model_preset_conflict",

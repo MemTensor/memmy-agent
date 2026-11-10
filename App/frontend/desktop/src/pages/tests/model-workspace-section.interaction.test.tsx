@@ -2,6 +2,7 @@
 
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  type ModelConfigInput,
   type ModelConfigView
 } from "@memmy/local-api-contracts";
 import { act } from "react";
@@ -255,8 +256,11 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
     }
   );
 
-  it("inherits the embedding connection type when adding bge-m3", async () => {
-    const seedConfig = createEmbeddingSeedConfig();
+  it.each([
+    { createConfig: createEmbeddingSeedConfig, modelId: "bge-m3", label: "Embedding", capability: "embedding", protocol: "openai-embeddings" },
+    { createConfig: createAsrSeedConfig, modelId: "qwen-audio-3.0-asr-flash", label: "ASR", capability: "asr", protocol: "dashscope-input-audio-chat" }
+  ])("tests and saves an added $capability model with its existing protocol", async ({ createConfig, modelId, label, capability, protocol }) => {
+    const seedConfig = createConfig();
     const configClient = {
       getModelConfig: vi.fn(async () => seedConfig),
       saveModelCatalog: vi.fn(async () => seedConfig),
@@ -281,23 +285,25 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
 
     const modelInput = container.querySelector<HTMLInputElement>('input[placeholder="输入模型 ID"]')!;
     act(() => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(modelInput, "bge-m3");
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(modelInput, modelId);
       modelInput.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    expect(container.querySelector(".model-capability-select")?.textContent).toContain("Embedding");
+    expect(container.querySelector(".model-capability-select")?.textContent).toContain(label);
 
     act(() => container.querySelector<HTMLButtonElement>('button[aria-label="添加模型"]')!.click());
     expect(container.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.disabled).toBe(true);
     await act(async () => {
       [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "测试")!.click();
     });
+    expect(container.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.disabled).toBe(false);
     act(() => container.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.click());
 
     await vi.waitFor(() => expect(configClient.saveModelCatalog).toHaveBeenCalledTimes(1));
     const input = configClient.saveModelCatalog.mock.calls[0]![0];
-    const bgeModel = input.providers[0]?.models.find((model) => model.model === "bge-m3");
-    expect(input.providers[0]?.endpoints[0]?.protocol).toBe("openai-embeddings");
-    expect(bgeModel?.capabilities).toEqual(["embedding"]);
+    const addedModel = input.providers[0]?.models.find((model) => model.model === modelId);
+    expect(input.providers[0]?.endpoints[0]?.protocol).toBe(protocol);
+    expect(addedModel?.capabilities).toEqual([capability]);
+    expect(input.modelAssignments).toEqual(seedConfig.catalog.modelAssignments);
   });
 
   it("shows the platform local Embedding option for BYOK", () => {
@@ -339,6 +345,35 @@ describe("ModelWorkspaceSection BYOK connection deletion", () => {
 
     expect(getAssignmentCombobox("Embedding 检索").textContent).toContain("未配置");
     expect(getAssignmentCombobox("Embedding 检索").textContent).not.toContain("本地 Embedding");
+  });
+
+  it("keeps optional BYOK ASR unconfigured until the user explicitly selects it", async () => {
+    const seedConfig = createAsrSeedConfig();
+    const configClient = {
+      getModelConfig: vi.fn(async () => seedConfig),
+      saveModelCatalog: vi.fn(async (input: ModelConfigInput) => ({
+        ...seedConfig,
+        catalog: { ...seedConfig.catalog, modelAssignments: input.modelAssignments }
+      })),
+      testModelConfig: vi.fn()
+    };
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <ModelWorkspaceSection mode="byok" seedConfig={seedConfig} configClient={configClient} />
+        </I18nProvider>
+      );
+      await Promise.resolve();
+    });
+
+    const asrSelect = getAssignmentCombobox("语音识别 ASR");
+    expect(asrSelect.textContent).toContain("未配置");
+    act(() => asrSelect.click());
+    await act(async () => getOption("qwen3-asr-flash")!.click());
+
+    await vi.waitFor(() => expect(configClient.saveModelCatalog).toHaveBeenCalledTimes(1));
+    expect(configClient.saveModelCatalog.mock.calls[0]![0].modelAssignments.byok.asr).toBe("preset-1");
   });
 
   it("persists the built-in local Embedding as a distinct account assignment", async () => {
@@ -432,6 +467,22 @@ function createEmbeddingSeedConfig(): ModelProviderConfig {
   model.capabilities = ["embedding"];
   seed.catalog.modelAssignments.byok.agent = { candidates: [], default: null };
   seed.catalog.modelAssignments.byok.embedding = model.presetId;
+  seed.catalog.effectiveCandidates.byok = [model];
+  seed.model = model.model;
+  return seed;
+}
+
+function createAsrSeedConfig(): ModelProviderConfig {
+  const seed = createSeedConfig(1);
+  const provider = seed.catalog.providers[0]!;
+  const endpoint = provider.endpoints[0]!;
+  const model = provider.models[0]!;
+  endpoint.protocol = "dashscope-input-audio-chat";
+  model.protocol = "dashscope-input-audio-chat";
+  model.model = "qwen3-asr-flash";
+  model.capabilities = ["asr"];
+  seed.catalog.modelAssignments.byok.agent = { candidates: [], default: null };
+  seed.catalog.modelAssignments.byok.asr = null;
   seed.catalog.effectiveCandidates.byok = [model];
   seed.model = model.model;
   return seed;

@@ -1,4 +1,5 @@
 /** Model config tester module. */
+import { mergeProviderHeaders } from "../shared/provider-headers.js";
 import { anthropicRequestModelId } from "@memmy/local-api-contracts";
 import type {
   ModelConfigTestInput,
@@ -95,7 +96,7 @@ function chatProbe(input: ResolvedModelConfigTestInput): ConnectionProbe | null 
       || /(?:^|\/)(?:gpt-[56]|o[134])(?:[-.\/]|$)/iu.test(input.modelId);
     return {
       url: resourceUrl(input.apiBase, "chat/completions"),
-      headers: probeHeaders({ "Content-Type": "application/json",
+      headers: mergeProviderHeaders({ "Content-Type": "application/json",
         ...(input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : {}) }, input.extraHeaders),
       body: { model: input.modelId, messages, stream: false,
         [modernTokens ? "max_completion_tokens" : "max_tokens"]: 64 },
@@ -112,7 +113,7 @@ function chatProbe(input: ResolvedModelConfigTestInput): ConnectionProbe | null 
   if (input.protocol === "anthropic-messages") {
     return {
       url: versionedModelsUrl(input.apiBase, "v1").replace(/\/models$/u, "/messages"),
-      headers: probeHeaders({ "Content-Type": "application/json",
+      headers: mergeProviderHeaders({ "Content-Type": "application/json",
         ...(input.apiKey ? { "x-api-key": input.apiKey } : {}),
         "anthropic-version": ANTHROPIC_VERSION }, input.extraHeaders),
       body: { model: anthropicRequestModelId(input.modelId), messages, max_tokens: 64, stream: false },
@@ -131,7 +132,7 @@ function listProbe(input: ResolvedModelConfigTestInput): ConnectionProbe | null 
   if (input.protocol === "anthropic-messages") {
     return {
       url: versionedModelsUrl(input.apiBase, "v1"),
-      headers: probeHeaders({
+      headers: mergeProviderHeaders({
         ...(input.apiKey ? { "x-api-key": input.apiKey } : {}),
         "anthropic-version": ANTHROPIC_VERSION
       }, input.extraHeaders),
@@ -142,7 +143,7 @@ function listProbe(input: ResolvedModelConfigTestInput): ConnectionProbe | null 
   if (input.protocol === "gemini-generate-content") {
     return {
       url: versionedModelsUrl(input.apiBase, "v1beta"),
-      headers: probeHeaders(input.apiKey ? { "x-goog-api-key": input.apiKey } : {}, input.extraHeaders),
+      headers: mergeProviderHeaders(input.apiKey ? { "x-goog-api-key": input.apiKey } : {}, input.extraHeaders),
       isValidBody: isGoogleModelsBody,
       listedModels: googleModelIds
     };
@@ -150,7 +151,7 @@ function listProbe(input: ResolvedModelConfigTestInput): ConnectionProbe | null 
   if (supportsOpenAiModelList(input.protocol)) {
     return {
       url: resourceUrl(input.apiBase, "models"),
-      headers: probeHeaders(input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : {}, input.extraHeaders),
+      headers: mergeProviderHeaders(input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : {}, input.extraHeaders),
       isValidBody: isOpenAiModelsBody,
       listedModels: openAiModelIds
     };
@@ -158,14 +159,6 @@ function listProbe(input: ResolvedModelConfigTestInput): ConnectionProbe | null 
   return null;
 }
 
-function probeHeaders(defaults: Record<string, string>, extra: Record<string, string> = {}): Record<string, string> {
-  const headers = { ...defaults };
-  for (const [key, value] of Object.entries(extra)) {
-    for (const existing of Object.keys(headers)) if (existing.toLowerCase() === key.toLowerCase()) delete headers[existing];
-    headers[key] = value;
-  }
-  return headers;
-}
 
 function redactProbeSecrets(message: string, input: ResolvedModelConfigTestInput): string {
   for (const secret of [input.apiKey, ...Object.values(input.extraHeaders ?? {})]) message = redactSecret(message, secret);
@@ -176,7 +169,8 @@ function supportsOpenAiModelList(protocol: ModelEndpointProtocol): boolean {
   return protocol === "openai-chat-completions"
     || protocol === "openai-responses"
     || protocol === "openai-embeddings"
-    || protocol === "openai-images";
+    || protocol === "openai-images"
+    || protocol === "dashscope-input-audio-chat";
 }
 
 function isOpenAiModelsBody(body: unknown): boolean {

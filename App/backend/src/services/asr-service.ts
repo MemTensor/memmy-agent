@@ -1,6 +1,9 @@
 /** Asr service module. */
+import { mergeProviderHeaders } from "../shared/provider-headers.js";
+import { randomUUID } from "node:crypto";
 import {
   AsrTranscriptionResponseSchema,
+  canonicalCatalogProviderId,
   type ActualModelContext,
   type AppSettingsDto,
   type AsrTranscriptionInput,
@@ -12,7 +15,16 @@ import type { AccountSessionRepository } from "../infrastructure/app-state-store
 import type { BootstrapRepository } from "../infrastructure/app-state-store/repositories/bootstrap-repo.js";
 import type { MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 
+export interface AsrSelectionSnapshot {
+  context: Readonly<ActualModelContext>;
+  provider: Readonly<ResolvedProviderSnapshot>;
+  cloudUuid: string | null;
+}
+
 export interface AsrService {
+  prepare(): Promise<{ sessionId: string }>;
+  getSession(sessionId: string): AsrSelectionSnapshot;
+  release(sessionId: string): void;
   transcribe(input: AsrTranscriptionInput): Promise<AsrTranscriptionResponse>;
 }
 
@@ -41,15 +53,40 @@ export function createAsrService(options: CreateAsrServiceOptions): AsrService {
   const timeoutMs = options.timeoutMs ?? DEFAULT_ASR_TIMEOUT_MS;
   const now = options.now ?? (() => new Date().toISOString());
 
+  // Credentials stay in the backend. A recording carries only this opaque ID.
+  const sessions = new Map<string, { snapshot: AsrSelectionSnapshot; expiresAt: number }>();
+  const resolve = async (): Promise<AsrSelectionSnapshot> => {
+    const mode = options.bootstrapRepository.getAppSettings().userMode;
+    if (mode !== "account" && mode !== "byok") {
+      throw Object.assign(new Error("ASR requires account or BYOK mode"), { code: "invalid_argument" });
+    }
+    const resolved = await requireAsrSelection(options, mode);
+    return structuredClone({ context: resolved.context, provider: resolved.provider,
+      cloudUuid: options.accountSessionRepository?.getCloudUuid() ?? null });
+  };
+  const getSession = (id: string): AsrSelectionSnapshot => {
+    const session = sessions.get(id);
+    if (!session || session.expiresAt <= Date.now()) {
+      sessions.delete(id);
+      throw Object.assign(new Error("ASR recording session expired; its model configuration cannot be recovered"), { code: "model_config_changed" });
+    }
+    return session.snapshot;
+  };
   return {
+    async prepare() {
+      for (const [id, session] of sessions) if (session.expiresAt <= Date.now()) sessions.delete(id);
+      const snapshot = await resolve();
+      if (sessions.size >= 32) throw Object.assign(new Error("Too many active ASR recordings"), { code: "rate_limited" });
+      const sessionId = randomUUID();
+      sessions.set(sessionId, { snapshot, expiresAt: Date.now() + 3 * 60 * 60 * 1_000 });
+      return { sessionId };
+    },
+    getSession,
+    release(id) { sessions.delete(id); },
     async transcribe(input) {
-      const userMode = options.bootstrapRepository.getAppSettings().userMode;
-      if (userMode !== "account" && userMode !== "byok") {
-        throw Object.assign(new Error("ASR requires account or BYOK mode"), { code: "invalid_argument" as const });
-      }
-      const resolved = await requireAsrSelection(options, userMode);
+      const resolved = input.sessionId ? getSession(input.sessionId) : await resolve();
       if (resolved.context.source === "account") {
-        return transcribeWithAccount(input, options, resolved.context, now);
+        return transcribeWithAccount(input, options, resolved.context, now, resolved.cloudUuid);
       }
       if (resolved.context.protocol !== "dashscope-input-audio-chat") {
         throw modelSelectionUnavailable(resolved.context);
@@ -71,9 +108,9 @@ async function transcribeWithAccount(
   input: AsrTranscriptionInput,
   options: CreateAsrServiceOptions,
   context: Readonly<ActualModelContext>,
-  now: () => string
+  now: () => string,
+  uuid: string | null
 ): Promise<AsrTranscriptionResponse> {
-  const uuid = options.accountSessionRepository?.getCloudUuid();
   if (!uuid) {
     throw Object.assign(new Error("Cloud account is not authenticated"), { code: "unauthorized" as const });
   }
@@ -91,10 +128,12 @@ async function transcribeWithAccount(
     throw withActualModelContext(error, context);
   }
 
+  const actualProvider = canonicalCatalogProviderId(result.provider === "aliyun" ? "dashscope" : result.provider);
+  if (!actualProvider) throw withActualModelContext(new Error("Cloud ASR returned an unknown provider"), context);
   return AsrTranscriptionResponseSchema.parse({
     text: result.text,
-    modelId: context.model,
-    provider: context.provider,
+    modelId: result.modelId,
+    provider: actualProvider,
     source: context.source,
     transcribedAt: now(),
     ...(result.segments?.length ? { segments: result.segments } : {})
@@ -110,45 +149,49 @@ async function transcribeWithByok(
   timeoutMs: number,
   now: () => string
 ): Promise<AsrTranscriptionResponse> {
-  const response = await fetchImpl(toChatCompletionsUrl(provider.apiBase), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {}),
-      ...provider.extraHeaders
-    },
-    body: JSON.stringify({
-      model: context.model,
-      stream: false,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_audio",
-              input_audio: {
-                data: toAudioDataUrl(input)
+  try {
+    const response = await fetchImpl(toChatCompletionsUrl(provider.apiBase), {
+      method: "POST",
+      redirect: "error",
+      headers: mergeProviderHeaders({
+        "content-type": "application/json",
+        ...(provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {})
+      }, provider.extraHeaders),
+      body: JSON.stringify({
+        ...provider.extraBody,
+        model: context.model,
+        stream: false,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_audio",
+                input_audio: {
+                  data: toAudioDataUrl(input)
+                }
               }
-            }
-          ]
+            ]
+          }
+        ],
+        asr_options: {
+          enable_itn: false
         }
-      ],
-      asr_options: {
-        enable_itn: false
-      },
-      ...provider.extraBody
-    }),
-    signal: AbortSignal.timeout(timeoutMs)
-  });
+      }),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
 
-  const text = await readDashScopeTranscript(response, context);
-  return AsrTranscriptionResponseSchema.parse({
-    text,
-    modelId: context.model,
-    provider: context.provider,
-    source: context.source,
-    transcribedAt: now()
-  });
+    const text = await readDashScopeTranscript(response, context);
+    return AsrTranscriptionResponseSchema.parse({
+      text, modelId: context.model, provider: context.provider, source: context.source, transcribedAt: now()
+    });
+  } catch (caught) {
+    const error = withActualModelContext(caught, context);
+    for (const secret of [provider.apiKey, ...Object.values(provider.extraHeaders)]) {
+      if (secret) error.message = error.message.split(secret).join("[REDACTED]");
+    }
+    throw error;
+  }
 }
 
 /**
@@ -209,18 +252,19 @@ async function readDashScopeTranscript(
   response: Response,
   context: Readonly<ActualModelContext>
 ): Promise<string> {
-  const value = await readJson(response);
-  if (!response.ok) {
+  const body = await response.text();
+  let value: unknown;
+  try { value = JSON.parse(body); } catch { value = null; }
+  const text = readChoiceMessageContent(value);
+  const upstreamCode = readErrorCode(value);
+  const upstreamMessage = readErrorMessage(value);
+  if (!response.ok || asRecord(value).error || (text === null && (upstreamCode || upstreamMessage))) {
     throw withActualModelContext(Object.assign(
-      new Error(readErrorMessage(value) ?? `ASR request failed with HTTP ${response.status}`),
-      { code: classifyHttpError(response.status) }
+      new Error(`ASR ${context.model} HTTP ${response.status}${upstreamCode ? ` (${upstreamCode})` : ""}: ${upstreamMessage ?? ((value === null ? body.trim().slice(0, 800) : "") || response.statusText)}`),
+      { code: upstreamCode === "model_not_found" ? "model_selection_unavailable" : classifyHttpError(response.status) }
     ), context);
   }
-
-  const text = readChoiceMessageContent(value);
-  if (text === null) {
-    throw Object.assign(new Error("ASR response missing transcript text"), { code: "internal" as const });
-  }
+  if (text === null) throw Object.assign(new Error(`ASR ${context.model} HTTP ${response.status}: response missing transcript text (choices[0].message.content)`), { code: "internal" as const });
 
   return text;
 }
@@ -231,20 +275,6 @@ function withActualModelContext(
 ): Error {
   const normalized = error instanceof Error ? error : new Error(String(error));
   return Object.assign(normalized, { actualModelContext: context });
-}
-
-/**
- * Safely reads a JSON response.
- *
- * @param response Fetch response.
- * @returns The JSON object, or null.
- */
-async function readJson(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -274,6 +304,14 @@ function readErrorMessage(value: unknown): string | null {
     return error.message;
   }
   return typeof record.message === "string" && record.message.trim() ? record.message : null;
+}
+
+/** Reads a stable upstream error code when one is present. */
+function readErrorCode(value: unknown): string | null {
+  const record = asRecord(value);
+  const error = asRecord(record.error);
+  const code = error.code ?? record.code;
+  return typeof code === "string" && code.trim() ? code : null;
 }
 
 /**

@@ -31,7 +31,7 @@ const MIME_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
 };
 
 export interface CreatePluginAsrServiceOptions {
-  asr: AsrService;
+  asr: Pick<AsrService, "transcribe">;
   /** Host-owned upload roots a plugin may read audio from. */
   audioRoots: readonly string[];
 }

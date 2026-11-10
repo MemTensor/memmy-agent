@@ -180,8 +180,10 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     cloudClient: options.cloudClient
   });
   const asrStreamService = createAsrStreamService({
+    getSession: asrService.getSession,
     bootstrapRepository: options.appStateStore.repositories.bootstrap,
     accountSessionRepository: options.appStateStore.repositories.accountSession,
+    memmyConfigWriter,
     cloudBaseUrl: resolveCloudClientConfig(process.env).baseUrl
   });
   const agentWorkspace = resolveAgentWorkspace(process.env);

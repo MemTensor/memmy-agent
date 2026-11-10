@@ -1,5 +1,5 @@
 /** Asr service tests. */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
@@ -107,8 +107,8 @@ describe("asr service", () => {
       })
     ).resolves.toEqual({
       text: "BASE64:云端识别",
-      modelId: "account-asr",
-      provider: "memmy_account",
+      modelId: "qwen3-asr-flash",
+      provider: "dashscope",
       source: "account",
       transcribedAt: "2026-06-15T10:05:00.000Z"
     });
@@ -142,7 +142,7 @@ describe("asr service", () => {
       mimeType: "audio/wav",
       durationMs: 1200
     })).rejects.toMatchObject({
-      message: "invalid api key",
+      message: "ASR qwen3-asr-flash HTTP 403: invalid api key",
       code: "forbidden",
       actualModelContext: {
         presetId: "byok-asr",
@@ -157,6 +157,140 @@ describe("asr service", () => {
     });
     fixture.dispose();
   });
+
+  it("reports an unavailable configured model as a model selection error", async () => {
+    const fixture = catalogFixture("byok");
+    const service = createAsrService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "byok" }) },
+      accountSessionRepository: {
+        get: () => ({ authenticated: false }) as any,
+        getCloudUuid: () => null
+      },
+      memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+      cloudClient: { transcribeAudio: async () => { throw new Error("cloud path should not be used"); } },
+      fetch: async () => new Response(JSON.stringify({
+        error: { code: "model_not_found", message: "Service temporarily unavailable" }
+      }), { status: 503, headers: { "content-type": "application/json" } })
+    });
+
+    await expect(service.transcribe({ audioBase64: "UklGRg==", mimeType: "audio/wav" })).rejects.toMatchObject({
+      message: "ASR qwen3-asr-flash HTTP 503 (model_not_found): Service temporarily unavailable",
+      code: "model_selection_unavailable"
+    });
+    fixture.dispose();
+  });
+  it("rejects a successful proxy response without transcript text and identifies the model", async () => {
+    const fixture = catalogFixture("byok");
+    const service = createAsrService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "byok" }) },
+      memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+      cloudClient: { transcribeAudio: async () => { throw new Error("unexpected Cloud"); } },
+      fetch: async () => Response.json({ status_name: "Success", status_message: "Success.", usage: { completion_tokens: 0 } })
+    });
+    try {
+      await expect(service.transcribe({ audioBase64: "UklGRg==", mimeType: "audio/wav" })).rejects.toMatchObject({
+        code: "internal",
+        message: "ASR qwen3-asr-flash HTTP 200: response missing transcript text (choices[0].message.content)",
+        actualModelContext: { model: "qwen3-asr-flash" }
+      });
+    } finally { fixture.dispose(); }
+  });
+
+  it("redacts credentials while preserving upstream failure details", async () => {
+    const fixture = catalogFixture("byok");
+    const service = createAsrService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "byok" }) },
+      memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+      cloudClient: { transcribeAudio: async () => { throw new Error("unexpected Cloud"); } },
+      fetch: async () => Response.json({ error: { code: "permission_denied", message: "rejected endpoint-secret" } }, { status: 403 })
+    });
+    try {
+      await expect(service.transcribe({ audioBase64: "UklGRg==", mimeType: "audio/wav" })).rejects.toThrow("ASR qwen3-asr-flash HTTP 403 (permission_denied): rejected [REDACTED]");
+    } finally { fixture.dispose(); }
+  });
+
+  it.each(["Authorization", "authorization", "AUTHORIZATION"])("honors the configured %s header without duplicate credentials", async (headerName) => {
+    const fixture = catalogFixture("byok");
+    const config = YAML.parse(readFileSync(fixture.configPath, "utf8"));
+    config.providers.dashscope.endpoints.asr.extraHeaders[headerName] = "Bearer explicit-credential";
+    writeFileSync(fixture.configPath, YAML.stringify(config));
+    let headers: Record<string, string> = {};
+    const service = createAsrService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "byok" }) },
+      memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+      cloudClient: { transcribeAudio: async () => { throw new Error("unexpected Cloud"); } },
+      fetch: async (_url, init) => { headers = init!.headers as Record<string, string>; return Response.json({ choices: [{ message: { content: "transcript" } }] }); }
+    });
+    try {
+      await service.transcribe({ audioBase64: "UklGRg==", mimeType: "audio/wav" });
+      expect(Object.keys(headers).filter(key => key.toLowerCase() === "authorization")).toEqual([headerName]);
+      expect(new Headers(headers).get("authorization")).toBe("Bearer explicit-credential");
+    } finally { fixture.dispose(); }
+  });
+
+  it.each([
+    { status: 200, body: JSON.stringify({ error: { code: "quota_exceeded", message: "quota exhausted" } }), expected: "HTTP 200 (quota_exceeded): quota exhausted" },
+    { status: 400, body: JSON.stringify({ code: "InvalidParameter", message: "invalid audio" }), expected: "HTTP 400 (InvalidParameter): invalid audio" },
+    { status: 502, body: "upstream proxy unavailable", expected: "HTTP 502: upstream proxy unavailable" }
+  ])("preserves upstream failure details with HTTP $status", async ({ status, body, expected }) => {
+    const fixture = catalogFixture("byok");
+    const service = createAsrService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "byok" }) },
+      memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+      cloudClient: { transcribeAudio: async () => { throw new Error("unexpected Cloud"); } },
+      fetch: async () => new Response(body, { status })
+    });
+    try {
+      await expect(service.transcribe({ audioBase64: "UklGRg==", mimeType: "audio/wav" })).rejects.toThrow(expected);
+    } finally { fixture.dispose(); }
+  });
+  it("redacts network exceptions as well as provider response errors", async () => {
+    const fixture = catalogFixture("byok");
+    const service = createAsrService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "byok" }) },
+      memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+      cloudClient: { transcribeAudio: async () => { throw new Error("unexpected Cloud"); } },
+      fetch: async () => { throw new Error("network rejected endpoint-secret"); }
+    });
+    try {
+      await expect(service.transcribe({ audioBase64: "UklGRg==", mimeType: "audio/wav" })).rejects.toMatchObject({ message: "network rejected [REDACTED]", actualModelContext: expect.objectContaining({ model: "qwen3-asr-flash" }) });
+    } finally { fixture.dispose(); }
+  });
+
+  it("pins model, URL, HTTP protocol and key across live capture and fallback", async () => {
+    const fixture = catalogFixture("byok");
+    const original = YAML.parse(readFileSync(fixture.configPath, "utf8"));
+    original.providers.dashscope.endpoints.asr.extraBody.model = "must-not-override-selected-model";
+    writeFileSync(fixture.configPath, YAML.stringify(original));
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const service = createAsrService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "byok" }) },
+      memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+      cloudClient: { transcribeAudio: async () => { throw new Error("unexpected Cloud"); } },
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), init });
+        return Response.json({ choices: [{ message: { content: "same recording" } }] });
+      }
+    });
+    try {
+      const { sessionId } = await service.prepare();
+      const snapshot = service.getSession(sessionId);
+      const changed = YAML.parse(readFileSync(fixture.configPath, "utf8"));
+      changed.modelPresets["byok-asr"].model = "different-model";
+      changed.providers.dashscope.endpoints.asr.apiKey = "different-key";
+      changed.providers.dashscope.endpoints.asr.apiBase = "https://different.invalid/v1";
+      writeFileSync(fixture.configPath, YAML.stringify(changed));
+      await service.transcribe({ sessionId, audioBase64: "UklGRg==", mimeType: "audio/wav" });
+      expect(calls[0]?.url).toBe(snapshot.provider.apiBase + "/chat/completions");
+      expect(calls[0]?.init?.headers).toMatchObject({ Authorization: "Bearer endpoint-secret" });
+      expect(JSON.parse(String(calls[0]?.init?.body)).model).toBe("qwen3-asr-flash");
+      expect(calls[0]?.init?.redirect).toBe("error");
+      service.release(sessionId);
+      await expect(service.transcribe({ sessionId, audioBase64: "UklGRg==", mimeType: "audio/wav" })).rejects.toMatchObject({ code: "model_config_changed" });
+      expect(calls).toHaveLength(1);
+    } finally { fixture.dispose(); }
+  });
+
 });
 
 function catalogFixture(mode: "account" | "byok"): { configPath: string; dispose(): void } {

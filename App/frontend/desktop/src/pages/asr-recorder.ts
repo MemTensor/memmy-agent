@@ -3,7 +3,6 @@ import { ASR_MAX_AUDIO_BYTES, type AsrTranscriptionResponse } from "@memmy/local
 import type { AsrClient } from "../api/asr-client.js";
 import { formatMessage, type MessageKey, zhCNMessages } from "../i18n/messages.js";
 import {
-  createChunkedLiveTranscriber,
   type AsrLiveLine,
   type AsrLiveTranscriber
 } from "../lib/asr-live-transcription.js";
@@ -48,13 +47,17 @@ export interface AsrRecorder {
   pause(): void;
   resume(): void;
   cancel(): void;
-  /** Stops capture and returns the recording without transcribing it. */
+  /** Stops capture, finalizes the live result, and returns the recording for background work. */
   stop(): Promise<AsrStoppedRecording>;
   finishAndTranscribe(options?: AsrTranscribeOptions): Promise<AsrRecordingTranscription>;
 }
 
-/** A recording that has stopped but not yet been transcribed. */
+/** A stopped recording and the result of its optional realtime pass. */
 export interface AsrStoppedRecording {
+  sessionId?: string;
+  /** Present only after the live stream completed successfully. */
+  liveText?: string;
+  liveError?: Error;
   recording: Blob;
   recordingMimeType: string;
   durationMs: number | undefined;
@@ -77,35 +80,50 @@ export async function transcribeRecording(
   asrClient: AsrClient,
   recording: Blob,
   durationMs: number | undefined,
-  options: { diarization?: boolean; emptyAudioMessage?: string } = {}
+  options: { diarization?: boolean; emptyAudioMessage?: string; signal?: AbortSignal } & Pick<AsrStoppedRecording, "sessionId" | "liveText" | "liveError"> = {}
 ): Promise<AsrRecordingTranscription> {
-  if (recording.size > ASR_MAX_AUDIO_BYTES) {
-    // Fail here with the recording still in hand rather than letting the
-    // gateway reject the payload after a long upload.
-    throw new Error(formatMessage(zhCNMessages["asr.error.audioTooLarge"]));
+  options.signal?.throwIfAborted();
+  if (options.liveText && !options.liveError && !options.diarization) {
+    return { text: options.liveText, transcribedAt: new Date().toISOString(), recording,
+      recordingMimeType: recording.type || "audio/webm", durationMs };
   }
-  const encoded = await blobToAudioBase64(recording, options.emptyAudioMessage);
-  const result = await asrClient.transcribe({
-    audioBase64: encoded.audioBase64,
-    mimeType: encoded.mimeType,
-    durationMs,
-    ...(options.diarization ? { diarization: true } : {})
-  });
-  if (!hasTranscribedSpeech(result)) {
-    throw new Error(options.emptyAudioMessage ?? EMPTY_AUDIO_ERROR_MESSAGE);
+  try {
+    if (recording.size > ASR_MAX_AUDIO_BYTES) {
+      // Fail here with the recording still in hand rather than letting the
+      // gateway reject the payload after a long upload.
+      throw Object.assign(new Error(formatMessage(zhCNMessages["asr.error.audioTooLarge"])), { code: "audio_too_large" });
+    }
+    const encoded = await blobToAudioBase64(recording, options.emptyAudioMessage);
+    options.signal?.throwIfAborted();
+    const result = await asrClient.transcribe({
+      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      audioBase64: encoded.audioBase64,
+      mimeType: encoded.mimeType,
+      durationMs,
+      ...(options.diarization ? { diarization: true } : {})
+    }, options.signal);
+    options.signal?.throwIfAborted();
+    if (!hasTranscribedSpeech(result)) {
+      throw Object.assign(new Error(options.emptyAudioMessage ?? EMPTY_AUDIO_ERROR_MESSAGE), { code: "empty_audio" });
+    }
+    return { ...result, recording, recordingMimeType: encoded.mimeType, durationMs };
+  } catch (caught) {
+    options.signal?.throwIfAborted();
+    const httpError = caught instanceof Error ? caught : new Error(String(caught));
+    const error = new Error(options.liveError
+      ? `Realtime ASR: ${options.liveError.message}\nHTTP ASR: ${httpError.message}` : httpError.message, { cause: httpError });
+    error.name = "AsrTranscriptionError";
+    throw error;
   }
-  // The recording travels back with the transcript: it is one of the
-  // deliverables, and callers cannot re-derive it once the chunks are gone.
-  return { ...result, recording, recordingMimeType: encoded.mimeType, durationMs };
 }
 
 /** A finished recording together with its transcript. */
-export interface AsrRecordingTranscription extends AsrTranscriptionResponse {
+export type AsrRecordingTranscription = Pick<AsrTranscriptionResponse, "text" | "transcribedAt" | "segments"> & {
   /** The audio as captured, for callers that have to keep or upload the original. */
   recording: Blob;
   recordingMimeType: string;
   durationMs: number | undefined;
-}
+};
 
 export interface EncodedAudio {
   audioBase64: string;
@@ -126,13 +144,7 @@ export interface AsrRecorderOptions {
     onLine(line: AsrLiveLine): void;
     /** Receives a 0..1 loudness reading per captured block, for the waveform. */
     onLevel?(level: number): void;
-    onError?(error: Error): void;
   };
-}
-
-/** The live stream is best-effort; a timeout must not read like a lost recording. */
-export function isLiveAsrTimeout(error: Error): boolean {
-  return /\btime(?:out|d out)\b/i.test(error.message);
 }
 
 export interface MicrophoneAccessBridge {
@@ -166,6 +178,43 @@ export function microphonePermissionDeniedMessageKey(
     : "asr.error.microphonePermissionDenied.mac";
 }
 
+/** Classifies the final failure without exposing provider responses in the UI. */
+export function asrErrorMessageKey(error: unknown): MessageKey {
+  // HTTP is the last attempt; an earlier realtime failure must not hide its cause.
+  const failure = error instanceof Error && error.name === "AsrTranscriptionError" && error.cause
+    ? error.cause : error;
+  if (failure instanceof MicrophonePermissionError || isMicrophonePermissionDenial(failure)) {
+    return microphonePermissionDeniedMessageKey();
+  }
+  if (isAsrModelNotConfiguredError(failure)) return "home.asrNotConfigured";
+  const code = failure && typeof failure === "object" && "code" in failure ? failure.code : null;
+  const message = failure instanceof Error ? failure.message : String(failure);
+  switch (code) {
+    case "empty_audio": return "asr.error.emptyAudio";
+    case "audio_too_large": return "asr.error.audioTooLarge";
+    case "model_selection_unavailable":
+      return /Assigned ASR model is unavailable/i.test(message)
+        ? "home.asrNotConfigured" : "home.asrModelUnavailable";
+    case "unauthorized":
+    case "forbidden": return "home.asrAccessDenied";
+    case "rate_limited": return "home.asrRateLimited";
+    case "invalid_argument": return "home.asrInvalidConfiguration";
+    case "internal": return "home.asrServiceUnavailable";
+  }
+  if ((failure instanceof Error && failure.name === "TimeoutError") || /timed? ?out|timeout/i.test(message)) {
+    return "home.asrTimeout";
+  }
+  if (/failed to fetch|network|connection refused|econnrefused|enotfound|socket hang up/i.test(message)) {
+    return "home.asrConnectionFailed";
+  }
+  return "home.asrFailed";
+}
+
+export function isAsrModelNotConfiguredError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ASR (?:model catalog|model|client) is not configured|ASR requires account or BYOK mode/i.test(message);
+}
+
 export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOptions = {}): AsrRecorder {
   const [status, setStatus] = useState<AsrRecorderStatus>("idle");
   const [error, setError] = useState<Error | null>(null);
@@ -176,6 +225,17 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
   const tapRef = useRef<PcmTap | null>(null);
   const liveRef = useRef<AsrLiveTranscriber | null>(null);
   const pausedRef = useRef(false);
+  const pausedAtRef = useRef<number | null>(null);
+  const pausedDurationRef = useRef(0);
+  const generationRef = useRef(0);
+  const transcriptionAbortRef = useRef<AbortController | null>(null);
+  const sessionRef = useRef<string | null>(null);
+  const liveFailureRef = useRef<Error | null>(null);
+  const releaseSession = useCallback(() => {
+    const id = sessionRef.current;
+    sessionRef.current = null;
+    if (id) void asrClient?.release(id).catch(() => undefined);
+  }, [asrClient]);
   // Held in a ref so a caller passing fresh handler closures each render does
   // not restart the recording.
   const liveOptionsRef = useRef(options.live);
@@ -184,26 +244,34 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
   const releaseLiveCapture = useCallback(() => {
     liveRef.current?.cancel();
     liveRef.current = null;
-    void tapRef.current?.close();
+    void tapRef.current?.close().catch(() => undefined);
     tapRef.current = null;
   }, []);
 
   const cancel = useCallback(() => {
+    generationRef.current += 1;
+    transcriptionAbortRef.current?.abort();
+    transcriptionAbortRef.current = null;
+    releaseSession();
     stopRecorderSilently(recorderRef.current);
     recorderRef.current = null;
     chunksRef.current = [];
     startedAtRef.current = null;
     releaseLiveCapture();
     pausedRef.current = false;
+    pausedAtRef.current = null;
+    pausedDurationRef.current = 0;
     stopStream(streamRef.current);
     streamRef.current = null;
     setStatus("idle");
-  }, [releaseLiveCapture]);
+  }, [releaseLiveCapture, releaseSession]);
 
   useEffect(() => cancel, [cancel]);
 
   const start = useCallback(async () => {
     cancel();
+    const generation = generationRef.current;
+    liveFailureRef.current = null;
     setError(null);
 
     try {
@@ -218,74 +286,101 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       }
 
       setStatus("checkingPermission");
+      const { sessionId } = await asrClient.prepare();
+      if (generation !== generationRef.current) { void asrClient.release(sessionId).catch(() => undefined); return; }
+      sessionRef.current = sessionId;
       await ensureMicrophoneAccess(getMicrophoneAccessBridge(), (status) => {
-        if (status === "requestingPermission") {
+        if (generation === generationRef.current && status === "requestingPermission") {
           setStatus("requestingPermission");
         }
       });
+      if (generation !== generationRef.current) return;
       setStatus("starting");
-      let stream: MediaStream;
-      try {
-        // Mono at speech sample rate: a stereo track doubles the payload for no
-        // recognition benefit, and diarization requires a single channel.
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, sampleRate: 16_000, echoCancellation: true, noiseSuppression: true }
-        });
-      } catch (mediaError) {
-        if (isMicrophonePermissionDenial(mediaError)) {
-          throw new MicrophonePermissionError("denied");
+      let captureRequested = false;
+      const acquireStream = async (): Promise<MediaStream> => {
+        assertCurrentRecording(generation);
+        captureRequested = true;
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, sampleRate: 16_000, echoCancellation: true, noiseSuppression: true }
+          });
+        } catch (mediaError) {
+          if (isMicrophonePermissionDenial(mediaError)) throw new MicrophonePermissionError("denied");
+          throw mediaError;
         }
-        throw mediaError;
-      }
-      const recorder = new MediaRecorder(stream, pickRecorderOptions());
-      chunksRef.current = [];
-      streamRef.current = stream;
-      recorderRef.current = recorder;
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
+        if (generation !== generationRef.current) {
+          stopStream(stream);
+          throw new DOMException("Recording cancelled", "AbortError");
         }
+        streamRef.current = stream;
+        return stream;
       };
-      recorder.start();
-      startedAtRef.current = Date.now();
-      pausedRef.current = false;
+      let captureStarted = false;
       const live = liveOptionsRef.current;
       if (live) {
-        // The streaming relay is the path that shows words while they are
-        // still being spoken. It is only reachable in account mode; when the
-        // relay refuses the connection the segmented HTTP path takes over for
-        // this recording so the panel is never simply blank.
-        const streamed = createStreamLiveTranscriber(() => asrClient.openStream(), {
+        // Try the native streaming path first in either account or BYOK mode.
+        // If its handshake or session fails, the MediaRecorder copy remains
+        // intact and finishAndTranscribe performs the existing full HTTP pass.
+        const streamed = createStreamLiveTranscriber(() => asrClient.openStream(sessionId), {
           sampleRate: PCM_TAP_SAMPLE_RATE,
-          onLine: (line) => liveOptionsRef.current?.onLine(line),
+          onLine: (line) => { if (generation === generationRef.current) liveOptionsRef.current?.onLine(line); },
           onError: (liveError) => {
-            liveOptionsRef.current?.onError?.(liveError);
+            if (generation !== generationRef.current) return;
+            liveFailureRef.current = liveError;
             if (liveRef.current !== streamed) return;
-            const fallback = createChunkedLiveTranscriber(asrClient, {
-              sampleRate: PCM_TAP_SAMPLE_RATE,
-              onLine: (line) => liveOptionsRef.current?.onLine(line),
-              onError: (segmentError) => liveOptionsRef.current?.onError?.(segmentError)
-            });
-            liveRef.current = fallback;
+            streamed.cancel();
+            liveRef.current = null;
           }
         });
-        const transcriber = streamed;
-        liveRef.current = transcriber;
-        tapRef.current = createPcmTap(stream, {
+        liveRef.current = streamed;
+        const tapStarting = createPcmTap(acquireStream, {
+          onError: (tapError) => {
+            if (generation !== generationRef.current) return;
+            liveFailureRef.current = tapError;
+            streamed.cancel();
+            if (liveRef.current === streamed) liveRef.current = null;
+          },
           sampleRate: PCM_TAP_SAMPLE_RATE,
-          // Read through the ref, not the captured binding: when the stream
-          // falls back to segmented HTTP mid-recording the ref is swapped, and
-          // the audio has to follow it or the fallback never hears anything.
+          // Read through the ref so a failed stream stops receiving PCM while
+          // the complete MediaRecorder copy remains available for HTTP fallback.
           onSamples: (samples) => {
-            if (!pausedRef.current) liveRef.current?.push(samples);
+            if (generation === generationRef.current && captureStarted) liveRef.current?.push(samples);
           },
           onLevel: (level) => {
-            if (!pausedRef.current) liveOptionsRef.current?.onLevel?.(level);
+            if (generation === generationRef.current && !pausedRef.current) liveOptionsRef.current?.onLevel?.(level);
           }
+        }).then(async (tap) => {
+          if (generation !== generationRef.current) { await tap.close().catch(() => undefined); return; }
+          tapRef.current = tap;
+        }).catch((caught: unknown) => {
+          if (generation !== generationRef.current) return;
+          if (captureRequested && !streamRef.current) throw caught;
+          liveFailureRef.current = caught instanceof Error ? caught : new Error(String(caught));
+          streamed.cancel();
+          if (liveRef.current === streamed) liveRef.current = null;
         });
+        // Start both captures together so a successful realtime pass includes the opening speech.
+        await tapStarting;
       }
+      if (generation !== generationRef.current) return;
+      const stream = streamRef.current ?? await acquireStream();
+      assertCurrentRecording(generation);
+      const recorder = new MediaRecorder(stream, pickRecorderOptions());
+      const chunks: Blob[] = [];
+      chunksRef.current = chunks;
+      recorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.start();
+      captureStarted = true;
+      startedAtRef.current = Date.now();
+      pausedRef.current = false;
       setStatus("recording");
     } catch (caught) {
+      if (generation !== generationRef.current) return;
+      releaseSession();
       const nextError = caught instanceof Error ? caught : new Error(String(caught));
       stopRecorderSilently(recorderRef.current);
       recorderRef.current = null;
@@ -298,14 +393,14 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       setStatus("error");
       throw nextError;
     }
-  }, [asrClient, cancel, releaseLiveCapture]);
+  }, [asrClient, cancel, releaseLiveCapture, releaseSession]);
 
   const pause = useCallback(() => {
     const recorder = recorderRef.current;
     if (!recorder || recorder.state !== "recording") return;
     recorder.pause();
-    // The tap keeps delivering blocks while paused; dropping them here keeps
-    // the paused stretch out of both the waveform and the live segments.
+    tapRef.current?.setPaused(true);
+    pausedAtRef.current = Date.now();
     pausedRef.current = true;
     setStatus("paused");
   }, []);
@@ -314,6 +409,9 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
     const recorder = recorderRef.current;
     if (!recorder || recorder.state !== "paused") return;
     recorder.resume();
+    tapRef.current?.setPaused(false);
+    if (pausedAtRef.current !== null) pausedDurationRef.current += Date.now() - pausedAtRef.current;
+    pausedAtRef.current = null;
     pausedRef.current = false;
     setStatus("recording");
   }, []);
@@ -328,30 +426,40 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       throw new Error("No active recording");
     }
 
+    const generation = generationRef.current;
     try {
       setStatus("transcribing");
-      const { recording: blob, durationMs } = await stopCapture(recorder);
+      const { recording: blob, durationMs, liveText, liveError, sessionId } = await stopCapture(recorder);
       // The recording is already complete at this point. Notify the caller
       // before size checks and encoding so it can keep the audio visible even
       // when the final ASR request will be rejected.
       transcribeOptions.onRecordingReady?.(blob, blob.type || "audio/webm", durationMs);
+      assertCurrentRecording(generation);
+      const controller = new AbortController();
+      transcriptionAbortRef.current = controller;
       const result = await transcribeRecording(asrClient, blob, durationMs, {
-        ...(transcribeOptions.diarization ? { diarization: true } : {}),
-        ...(options.emptyAudioMessage ? { emptyAudioMessage: options.emptyAudioMessage } : {})
+        signal: controller.signal,
+        sessionId, liveText, liveError, diarization: transcribeOptions.diarization,
+        emptyAudioMessage: options.emptyAudioMessage
       });
+      assertCurrentRecording(generation);
+      transcriptionAbortRef.current = null;
+      releaseSession();
       chunksRef.current = [];
       setStatus("idle");
       return result;
     } catch (caught) {
+      if (generation !== generationRef.current) throw caught;
       const nextError = caught instanceof Error ? caught : new Error(String(caught));
       setError(nextError);
       setStatus("error");
+      releaseSession();
       releaseLiveCapture();
       stopStream(streamRef.current);
       streamRef.current = null;
       throw nextError;
     }
-  }, [asrClient, options.emptyAudioMessage, releaseLiveCapture]);
+  }, [asrClient, options.emptyAudioMessage, releaseLiveCapture, releaseSession]);
 
   /**
    * Stops the microphone and returns the recording without transcribing it.
@@ -364,40 +472,67 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
   const stop = useCallback(async (): Promise<AsrStoppedRecording> => {
     const recorder = recorderRef.current;
     if (!recorder) throw new Error("No active recording");
+    const generation = generationRef.current;
     try {
+      setStatus("transcribing");
       const stopped = await stopCapture(recorder);
+      sessionRef.current = null; // The handover owns this snapshot until HTTP transcription completes.
       chunksRef.current = [];
       setStatus("idle");
       return stopped;
     } catch (caught) {
+      if (generation !== generationRef.current) throw caught;
       const nextError = caught instanceof Error ? caught : new Error(String(caught));
       setError(nextError);
       setStatus("error");
+      releaseSession();
       releaseLiveCapture();
       stopStream(streamRef.current);
       streamRef.current = null;
       throw nextError;
     }
-  }, [releaseLiveCapture]);
+  }, [releaseLiveCapture, releaseSession]);
 
   /** Ends capture and the live pass, leaving the recording in hand. */
   async function stopCapture(recorder: MediaRecorder): Promise<AsrStoppedRecording> {
-    const durationMs = startedAtRef.current ? Math.max(0, Date.now() - startedAtRef.current) : undefined;
-    const blob = await stopRecorder(recorder, chunksRef.current);
-    recorderRef.current = null;
-    // Close the tap before the final pass so no further live segments are
-    // started, but let the tail of what was already captured finish: those
-    // lines are what the user is reading while the diarized pass runs.
-    await tapRef.current?.close();
-    tapRef.current = null;
+    const generation = generationRef.current;
+    const sessionId = sessionRef.current;
+    const stream = streamRef.current;
+    const tap = tapRef.current;
     const live = liveRef.current;
-    liveRef.current = null;
-    await live?.finish();
-    pausedRef.current = false;
-    stopStream(streamRef.current);
+    const durationMs = startedAtRef.current !== null
+      ? Math.max(0, (pausedAtRef.current ?? Date.now()) - startedAtRef.current - pausedDurationRef.current) : undefined;
+    recorderRef.current = null;
+    // Stop both captures now; waiting for MediaRecorder.onstop first captures extra realtime-only audio.
+    const tapClosing = tap?.close().then(() => undefined, (error: unknown) =>
+      error instanceof Error ? error : new Error(String(error)));
+    const blob = await stopRecorder(recorder, chunksRef.current);
+    const tapError = await tapClosing;
+    assertCurrentRecording(generation);
+    if (tapError) {
+      liveFailureRef.current = tapError;
+      live?.cancel();
+    }
+    tapRef.current = null;
+    stopStream(stream);
     streamRef.current = null;
     startedAtRef.current = null;
-    return { recording: blob, recordingMimeType: blob.type || "audio/webm", durationMs };
+    pausedRef.current = false;
+    const liveResult = await live?.finish();
+    assertCurrentRecording(generation);
+    liveRef.current = null;
+    return {
+      recording: blob,
+      recordingMimeType: blob.type || "audio/webm",
+      durationMs,
+      ...(sessionId ? { sessionId } : {}),
+      ...(liveFailureRef.current ? { liveError: liveFailureRef.current } : {}),
+      ...(liveResult?.text ? { liveText: liveResult.text } : {})
+    };
+  }
+
+  function assertCurrentRecording(generation: number) {
+    if (generation !== generationRef.current) throw new DOMException("Recording cancelled", "AbortError");
   }
 
   return {
@@ -463,13 +598,13 @@ export function isMicrophonePermissionDenial(error: unknown): boolean {
 
 export async function blobToAudioBase64(blob: Blob, emptyAudioMessage = EMPTY_AUDIO_ERROR_MESSAGE): Promise<EncodedAudio> {
   if (blob.size <= 0) {
-    throw new Error(emptyAudioMessage);
+    throw Object.assign(new Error(emptyAudioMessage), { code: "empty_audio" });
   }
 
   const dataUrl = await readBlobAsDataUrl(blob);
   const encoded = parseAudioDataUrl(dataUrl, blob.type);
   if (!encoded.audioBase64.trim()) {
-    throw new Error(emptyAudioMessage);
+    throw Object.assign(new Error(emptyAudioMessage), { code: "empty_audio" });
   }
   return encoded;
 }
@@ -482,8 +617,7 @@ export function hasTranscribedSpeech(result: Pick<AsrTranscriptionResponse, "tex
 export function mergeVoiceTranscript(current: string, transcript: string): string {
   const next = transcript.trim();
   if (!next) return current;
-  const existing = current.trim();
-  return existing ? `${existing}\n${next}` : next;
+  return current ? `${current}${current.endsWith("\n") ? "" : "\n"}${next}` : next;
 }
 
 /**

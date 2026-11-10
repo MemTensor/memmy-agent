@@ -24,7 +24,7 @@ import { enUSMessages, zhCNMessages } from "../i18n/messages.js";
 import { mergeLiveLines, type AsrLiveLine } from "../lib/asr-live-transcription.js";
 import type { RecordingPanelTranscript } from "./interview-recording-panel.js";
 import { formatClock, RecordingPlayer, TranscriptTurns } from "./interview-recording-panel.js";
-import { blobToAudioBase64, isLiveAsrTimeout, useAsrRecorder } from "./asr-recorder.js";
+import { asrErrorMessageKey, blobToAudioBase64, useAsrRecorder } from "./asr-recorder.js";
 import { pushWaveformLevel } from "../lib/audio-pcm-tap.js";
 import { persistRecording } from "../lib/recording-deliverables.js";
 import { removeRecordingArchiveEntry, saveRecordingArchiveEntry, useRecordingArchive } from "../lib/recording-archive.js";
@@ -276,12 +276,7 @@ export function useRecordingEntry(
   const recorder = useAsrRecorder(asrClient, {
     live: {
       onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVE_BARS)),
-      onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
-      // Same reasoning as the plugin's recording card: a failed live segment
-      // or a streaming connection that never opens must not look like nothing
-      // happened. Only the first message is kept, so a doomed fallback that
-      // keeps retrying every few seconds does not overwrite it with a repeat.
-      onError: (liveError) => setError((current) => current ?? (isLiveAsrTimeout(liveError) ? t("plugin.ui.audio.liveTimeout") : liveError.message))
+      onLine: (line) => setLines((current) => mergeLiveLines(current, line))
     }
   });
 
@@ -361,7 +356,7 @@ export function useRecordingEntry(
     setError(null);
     if (transcriptionJobs && uploadFiles && asrClient && archiveOptions?.sessionKey && archiveOptions.onHandedOver) {
       void handOver(transcriptionJobs, uploadFiles)
-        .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : null))
+        .catch((caught: unknown) => setError(t(asrErrorMessageKey(caught))))
         .finally(() => { finishInFlight.current = false; setFinishPending(false); });
       return;
     }
@@ -426,7 +421,7 @@ export function useRecordingEntry(
           setRecordings((current) => current.map((row) => row.id === id ? { ...row, status: "failed" } : row));
           setLive((current) => current?.id === id ? { ...current, status: "failed" } : current);
         }
-        setError(caught instanceof Error ? caught.message : null);
+        setError(t(asrErrorMessageKey(caught)));
       } finally {
         finishInFlight.current = false;
         setFinishPending(false);
@@ -448,7 +443,7 @@ export function useRecordingEntry(
     viewRef.current = "live";
     setView("live");
     void recorder.start().catch((caught: unknown) => {
-      setError(caught instanceof Error ? caught.message : null);
+      setError(t(asrErrorMessageKey(caught)));
       viewRef.current = "list";
       setView("list");
     }).finally(() => { startInFlight.current = false; });
@@ -498,7 +493,7 @@ export function useRecordingEntry(
           setView("transcript");
         }
       } catch (caught) {
-        setError(caught instanceof Error ? caught.message : null);
+        setError(t(asrErrorMessageKey(caught)));
         viewRef.current = "list";
         setView("list");
       }
@@ -560,7 +555,7 @@ export function useRecordingEntry(
       } catch (caught) {
         // The row goes back to "failed" on its own, since it was never moved
         // out of that status. Only the message needs saying.
-        setError(caught instanceof Error ? caught.message : null);
+        setError(t(asrErrorMessageKey(caught)));
       } finally {
         finish();
         setRetrying((current) => {
@@ -648,7 +643,7 @@ export function useRecordingEntry(
     recordings: allRecordings,
     opened,
     deliverables,
-    error: !asrClient ? t("plugin.ui.audio.unavailable") : error ?? recorder.error?.message ?? null,
+    error: !asrClient ? t("plugin.ui.audio.unavailable") : error ?? (recorder.error ? t(asrErrorMessageKey(recorder.error)) : null),
     start,
     pause: () => recorder.pause(),
     resume: () => recorder.resume(),
@@ -1010,7 +1005,7 @@ function LiveView(props: { session: RecordingEntrySession }): ReactNode {
         {session.lines.length === 0
           ? <p className="recording-panel__empty">{t("recording.page.listening")}</p>
           : session.lines.map((line) => (
-            <p key={`${line.startMs}:${line.text}`} className="recording-panel__line">
+            <p key={line.sentenceId} className="recording-panel__line">
               <span className="recording-panel__line-time">{formatClock(line.startMs)}</span>
               <span>{line.text}</span>
             </p>

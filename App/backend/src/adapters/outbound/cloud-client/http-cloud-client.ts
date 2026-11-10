@@ -2,7 +2,6 @@
 import {
   AccountInvitationViewSchema,
   ModelCapabilityCatalogSchema,
-  ASR_PROVIDER,
   AuthorizeIntegrationResponseSchema,
   resolveCloudServiceBaseUrl,
   IntegrationCapabilitiesResponseSchema,
@@ -15,7 +14,6 @@ import {
   LotteryStatusSchema,
   OkResponseSchema,
   PromotionFlagsSchema,
-  QWEN_ASR_MODEL_ID,
   TokenQuotaEligibilitySchema,
   TokenUsageDtoSchema,
   type AsrTranscriptSegment,
@@ -947,10 +945,13 @@ function toOkResponse(value: unknown): OkResponse {
 function toCloudAsrTranscriptionResult(value: unknown): CloudAsrTranscriptionResult {
   const record = asRecord(value);
   const segments = readAsrSegments(record.segments);
+  const modelId = readString(record.modelId);
+  const provider = readString(record.provider);
+  if (!modelId || !provider) throw new Error("Cloud ASR response is missing the actual model identity");
   return {
     text: readString(record.text) ?? "",
-    modelId: QWEN_ASR_MODEL_ID,
-    provider: ASR_PROVIDER,
+    modelId,
+    provider,
     ...(segments ? { segments } : {})
   };
 }
