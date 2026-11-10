@@ -464,7 +464,7 @@ export function upsertModelConnection(
       ? preset.presetId === entry.presetId
       : preset.model === entry.model && fromCapabilities(preset.capabilities) === entry.capabilities[0]
   )));
-  const reservedPresetIds = new Set(matchedPresets.map((preset) => preset?.presetId));
+  const reservedPresetIds = new Set(matchedPresets.flatMap((preset) => preset ? [preset.presetId] : []));
   const reusedPresetIds = new Set<string>();
   if (previousProvider && previousEndpointId) {
     previousProvider.endpoints = previousProvider.endpoints.filter((item) => item.endpointId !== previousEndpointId);
