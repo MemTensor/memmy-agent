@@ -183,7 +183,7 @@ describe("Windows launch at login", () => {
 
       expect(repairWindowsLaunchAtLogin(
         { getLoginItemSettings, setLoginItemSettings }, packagedWindowsEnvironment, appUserModelId, () => false
-      )).toBe("repaired");
+      )).toBe("repaired-fallback");
       expect(getLoginItemSettings).toHaveBeenNthCalledWith(1, { path: scriptHostPath, args: legacyItem.args });
       expect(setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({
         path: packagedWindowsEnvironment.executablePath,
@@ -205,6 +205,24 @@ describe("Windows launch at login", () => {
 
       expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, appUserModelId, () => true))
         .toBe("write-unconfirmed");
+    });
+
+    it("preserves the disabled app entry when another enabled entry has the same command", () => {
+      const application = {
+        getLoginItemSettings: vi.fn(() => ({
+          openAtLogin: true,
+          executableWillLaunchAtLogin: true,
+          launchItems: [
+            { ...legacyItem, name: "example.other" },
+            { ...legacyItem, enabled: false }
+          ]
+        })),
+        setLoginItemSettings: vi.fn()
+      };
+
+      expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, appUserModelId, () => true))
+        .toBeUndefined();
+      expect(application.setLoginItemSettings).not.toHaveBeenCalled();
     });
 
     it.each([

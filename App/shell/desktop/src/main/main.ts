@@ -526,6 +526,8 @@ async function boot(): Promise<void> {
         const result = repairWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment(), WINDOWS_APP_USER_MODEL_ID);
         if (result === "repaired") {
           void writePackagedStartupLog("boot:windows-login-item-repaired");
+        } else if (result === "repaired-fallback") {
+          void writePackagedStartupLog("boot:windows-login-item-repaired:executable-fallback");
         } else if (result === "write-unconfirmed") {
           void writePackagedStartupLog("boot:windows-login-item-repair-failed:write-unconfirmed");
         }

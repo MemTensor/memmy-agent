@@ -83,7 +83,7 @@ export const repairWindowsLaunchAtLogin = (
   environment: WindowsLaunchAtLoginEnvironment,
   appUserModelId: string,
   pathExists: WindowsPathExists = existsSync
-): "repaired" | "write-unconfirmed" | undefined => {
+): "repaired" | "repaired-fallback" | "write-unconfirmed" | undefined => {
   if (environment.platform !== "win32" || !environment.isPackaged) {
     return;
   }
@@ -91,7 +91,9 @@ export const repairWindowsLaunchAtLogin = (
   if (!launcher) {
     return;
   }
-  // openAtLogin compares the command against this app's per-user Run value.
+  // Electron uses the AppUserModelID as the default Run value name and compares
+  // that value with the requested command for openAtLogin. Check that same
+  // entry's approval state, since another Run entry can use the same command.
   const legacy = readWindowsLoginItemSettings(application, {
     path: launcher.scriptHostPath,
     args: [`"${launcher.launcherPath}"`]
@@ -104,7 +106,10 @@ export const repairWindowsLaunchAtLogin = (
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
   application.setLoginItemSettings({ ...command, openAtLogin: true, enabled: true });
   // Electron's setter returns void even if the registry write did not take effect.
-  return readWindowsLoginItemSettings(application, command).openAtLogin ? "repaired" : "write-unconfirmed";
+  if (!readWindowsLoginItemSettings(application, command).openAtLogin) {
+    return "write-unconfirmed";
+  }
+  return command.args.length ? "repaired" : "repaired-fallback";
 };
 
 /** Reads whether the packaged Windows launch command will effectively run at login. */
