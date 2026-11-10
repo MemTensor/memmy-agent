@@ -66,6 +66,7 @@ Closed tasks may be resumed. No candidates or an empty userText means null.
 Candidates contain an existing summary and user messages absent from that summary, or only user messages when no summary is available.
 Do not require assistant replies. Do not invent their contents or claim the new request has been completed.
 Return an updated task title (at most 30 characters) and summary (at most 180 characters) for the selected or new task.
+Write both fields in the requested language. Describe the task and preserve product names verbatim.
 Summarize existing information and the new request; preserve concrete task anchors.
 ${languageSteeringLine(input.language)}` },
     { role: "user", content: JSON.stringify(input) }

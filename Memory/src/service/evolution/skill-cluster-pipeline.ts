@@ -546,7 +546,7 @@ export class SkillClusterPipeline {
   }): { memory: MemoryRow; created: boolean; previous?: MemoryRow } {
     const title = generatedSkillTitle(input.outputLanguage, [input.name, input.draftName],
       input.displayTitle, input.existing?.info.title, input.procedure.summary);
-    const invocationGuide = renderDirectSkillGuide(input.name, input.procedure, title, input.outputLanguage);
+    const invocationGuide = renderDirectSkillGuide(title, input.procedure);
     const evidenceAnchorIds = uniqSorted([
       ...((input.existing ? skillMetaFromMemory(input.existing)?.evidenceAnchorIds : []) ?? []),
       ...input.successEpisodeIds
@@ -583,7 +583,6 @@ export class SkillClusterPipeline {
         source_world_model_ids: [],
         evidence_anchor_ids: evidenceAnchorIds,
         name: input.name,
-        title,
         invocation_guide: invocationGuide,
         procedure_json: input.procedure,
         eta: 0.6,
@@ -591,7 +590,6 @@ export class SkillClusterPipeline {
         gain: 0.4,
         skill: {
           name: input.name,
-          title,
           eta: 0.6,
           status: "active",
           support: evidenceAnchorIds.length,

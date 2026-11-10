@@ -1,3 +1,4 @@
+import { DIRECT_SKILL_SOURCE } from "../../algorithm/trace-direct-skill.js";
 import type { MemoryRow } from "../../types.js";
 import { asStringArray, isRecord } from "../../utils/json.js";
 import { clip, semanticUserText } from "../../utils/text.js";
@@ -37,9 +38,9 @@ export function evidenceMemoryIds(memory: MemoryRow): string[] {
 }
 
 /** Both Skill projections use the display title chosen when the guide was written. */
-export function storedGeneratedSkillTitle(memory: MemoryRow): string | undefined {
+export function storedBatchSkillTitle(memory: MemoryRow): string | undefined {
   const internal = memory.properties.internal_info;
-  if (memory.memoryLayer !== "Skill" || internal.generated_by_memory_base !== true || internal.external_evidence_candidate) return undefined;
+  if (memory.memoryLayer !== "Skill" || internal.source !== DIRECT_SKILL_SOURCE) return undefined;
   return text(memory.info.title);
 }
 

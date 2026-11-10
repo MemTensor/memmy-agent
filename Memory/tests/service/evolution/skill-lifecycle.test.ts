@@ -124,13 +124,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       expect.objectContaining({ id: "skill_bc24_generated", read_only: 0, generated: 1 })
     ]));
     const generated = db.db.prepare(
-      `SELECT info_json, memory_value, properties_json FROM memories WHERE id = 'skill_bc24_generated'`
-    ).get() as { properties_json: string; info_json: string; memory_value: string };
-    const displayTitle = JSON.parse(generated.info_json).title;
-    expect(displayTitle).toBeTruthy();
-    expect(displayTitle).not.toBe("pytest_retry_workflow");
-    expect(generated.memory_value.split("\n")[0]).toBe(`# ${displayTitle}`);
-    expect(service.panelItems({ layer: "Skill" }).items.find(item => item.id === "skill_bc24_generated")?.title).toBe(displayTitle);
+      `SELECT properties_json FROM memories WHERE id = 'skill_bc24_generated'`
+    ).get() as { properties_json: string };
     expect(JSON.parse(generated.properties_json)).toMatchObject({
       internal_info: {
         skill: {

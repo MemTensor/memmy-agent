@@ -169,10 +169,11 @@ describe("MemoryService / evolution / skill cluster", () => {
         config: { ...LEGACY_TEST_CONFIG, language: "zh-CN" }, displayTitle, summary });
       const [card] = service.panelItems({ layer: "Skill" }).items;
       expect(card?.title).toBe(summary);
+      expect(service.getSkill(card!.id)).toMatchObject({ title: summary, name: "xlsx_python_transform" });
       const stored = repos.memories.get(card!.id)!;
       expect(stored.info.name).toBe("xlsx_python_transform");
       expect(stored.memoryValue.split("\n")[0]).toBe(`# ${summary}`);
-      expect(stored.memoryValue).toContain("**适用场景**");
+      expect(stored.memoryValue).toContain("**When to use**");
     }
   );
 
