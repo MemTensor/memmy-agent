@@ -106,7 +106,9 @@ export async function transcribeRecording(
     if (!hasTranscribedSpeech(result)) {
       throw Object.assign(new Error(options.emptyAudioMessage ?? EMPTY_AUDIO_ERROR_MESSAGE), { code: "empty_audio" });
     }
-    return { ...result, recording, recordingMimeType: encoded.mimeType, durationMs };
+    const text = result.text.trim() ? result.text
+      : result.segments!.map((segment) => segment.text.trim()).filter(Boolean).join(" ");
+    return { ...result, text, recording, recordingMimeType: encoded.mimeType, durationMs };
   } catch (caught) {
     options.signal?.throwIfAborted();
     const httpError = caught instanceof Error ? caught : new Error(String(caught));

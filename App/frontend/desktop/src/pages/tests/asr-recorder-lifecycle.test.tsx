@@ -48,6 +48,17 @@ afterEach(async () => { await act(async () => root.unmount()); vi.unstubAllGloba
 async function start() { await act(async () => { await recorder.start(); }); }
 async function stream() { await start(); await act(async () => { tap.options.onSamples(new Int16Array(1600)); socket.open(); }); }
 describe("complete recording fallback", () => {
+  it("returns text to composer callers when HTTP supplies only transcript segments", async () => {
+    tap.fail = true;
+    vi.mocked(client.transcribe).mockResolvedValueOnce({
+      text: "  ", segments: [{ text: "第一句" }, { text: " " }, { text: "第二句" }],
+      modelId: "selected", provider: "dashscope", source: "byok", transcribedAt: new Date().toISOString()
+    });
+    await start();
+    await act(async () => {
+      await expect(recorder.finishAndTranscribe()).resolves.toMatchObject({ text: "第一句 第二句" });
+    });
+  });
   it("releases the microphone when the recorder constructor rejects", async () => {
     vi.stubGlobal("MediaRecorder", class extends Recorder { constructor() { super(); throw new Error("unsupported format"); } });
     await act(async () => { await expect(recorder.start()).rejects.toThrow("unsupported format"); });
