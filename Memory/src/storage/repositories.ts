@@ -1351,6 +1351,17 @@ export class MemoryRepository {
     return this.hydrateMany(rows.map(memoryFromSql));
   }
 
+  /** Complete, owner-scoped reference set; unrelated recent memories must not evict task evidence. */
+  listTracesForEpisodes(userId: string, episodeIds: string[]): MemoryRow[] {
+    if (episodeIds.length === 0) return [];
+    const rows = this.db.prepare(`SELECT * FROM memories
+      WHERE user_id = ? AND memory_layer = 'L1' AND status = 'activated' AND deleted_at IS NULL
+        AND json_extract(properties_json, '$.internal_info.trace.episode_id')
+          IN (SELECT value FROM json_each(?))
+      ORDER BY id`).all(userId, toJson([...new Set(episodeIds)])) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
   listStats(): MemoryStatsRow[] {
     const rows = this.db
       .prepare(

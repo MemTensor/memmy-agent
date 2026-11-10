@@ -1,5 +1,6 @@
 import { assertL2RecoveryCurrent } from "./l2-extraction-recovery.js";
 import { l2SupportRelation, revisedL2Memory } from "./l2-content-revision.js";
+import { policyRevisionHistory } from "./revision-stats.js";
 import { embeddingTextForMemory, updateMemoryVectorField } from "../embedding/embedding-pipeline.js";
 import { l2EmbeddingSpace, l2VectorCacheKey, readL2VectorCache } from "../embedding/l2-vector-cache.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -485,7 +486,12 @@ export class UnifiedL2ExtractionPipeline {
     const policy = isRecord(memory.properties.internal_info.policy) ? memory.properties.internal_info.policy : {};
     const traceIds = [...new Set([...(meta?.sourceTraceIds ?? []), ...sources.map((source) => source.sourceMemoryId)])];
     const episodeIds = [...new Set([...(meta?.sourceEpisodeIds ?? []), ...sources.flatMap((source) => source.episodeId ? [source.episodeId] : [])])];
-    const support = Math.max(meta?.support ?? 0, episodeIds.length);
+    // Once statistics have a history, their writer owns support as well as gain.
+    // Prewriting support here would look like an independent intervention on replay.
+    // Keep the original first-write/fallback initialization for pre-history records.
+    const statisticsOwnSupport = this.deps.recomputePolicyStats && !this.isPendingFallback(memory)
+      && policyRevisionHistory(memory);
+    const support = statisticsOwnSupport ? meta?.support ?? 0 : Math.max(meta?.support ?? 0, episodeIds.length);
     const specialIds = [...new Set([...strings(policy.special_source_trace_ids),
       ...sources.filter((source) => source.routes.some((route) => route !== "ordinary")).map((source) => source.sourceMemoryId)])];
     const successfulIds = [...new Set([...strings(policy.successful_source_trace_ids),

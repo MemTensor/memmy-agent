@@ -10,7 +10,6 @@ import {
   classifyFeedbackText,
   cosine,
   policyMetaFromMemory,
-  policyStatusAfterGain,
   skillMetaFromMemory,
   traceMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
@@ -45,6 +44,7 @@ import { isRecord } from "../../utils/json.js";
 import { clip } from "../../utils/text.js";
 import { nowIso } from "../../utils/time.js";
 import { updatePolicyStats } from "../evolution/policy-induction.js";
+import { revisePolicyFeedback, withRevisionHistory } from "../evolution/revision-stats.js";
 import { upsertL2Candidate, type L2CandidateSignal } from "../evolution/l2-candidate-service.js";
 import {
   namespaceForMemory,
@@ -1669,32 +1669,22 @@ applyRecallOutcome(
         const policy = policyMetaFromMemory(next);
         if (policy) {
           const direction = outcome === "positive" ? 1 : -1;
-          const nextGain = clampNumber(
-            policy.gain + direction * 0.02 * clampNumber(feedback.magnitude, 0, 1),
-            -1,
-            1
-          );
-          const status = policyStatusAfterGain({
-            currentStatus: policy.status === "active"
-              ? "active"
-              : policy.status === "candidate"
-                ? "candidate"
-                : "archived",
-            support: policy.support,
-            gain: nextGain,
+          const revised = revisePolicyFeedback(next, {
+            id: `recall-feedback:${JSON.stringify([event.id, feedback.id])}`,
+            delta: direction * 0.02 * clampNumber(feedback.magnitude, 0, 1),
             minSupport: this.deps.config.algorithm.l2Induction.minEpisodesForInduction,
             minGain: this.deps.config.algorithm.l2Induction.minGain,
             archiveGain: this.deps.config.algorithm.l2Induction.archiveGain
           });
-          next = updatePolicyStats(next, {
-            support: policy.support,
-            gain: nextGain,
-            rawGain: nextGain,
-            status,
+          next = withRevisionHistory(updatePolicyStats(next, {
+            support: revised.support,
+            gain: revised.gain,
+            rawGain: revised.rawGain,
+            status: revised.status,
             sourceEpisodeIds: policy.sourceEpisodeIds,
             sourceTraceIds: policy.sourceTraceIds,
             updatedAt: at
-          });
+          }), "policy_revision_history", revised.history);
         }
       }
       const saved = this.deps.repos.memories.update(next);

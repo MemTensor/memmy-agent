@@ -1,6 +1,6 @@
 import { l2SupportRelation } from "./l2-content-revision.js";
 // Statistics replay adapted from yxyi123, PR #740 (660b3b9c).
-import { numericTraces, revisePolicyStatistics, withRevisionHistory } from "./revision-stats.js";
+import { numericTraces, policyRevisionHistory, revisePolicyStatistics, withRevisionHistory } from "./revision-stats.js";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { isCurrentPolicyEvidence, isCurrentPolicySupport, policyEvidenceSnapshot, policyUsesSpecialEvidence } from "./policy-evidence.js";
 import {
@@ -227,7 +227,7 @@ export class PolicyInductionEngine {
       const fallbackDraft = buildPolicyDraft({
         signature,
         evidenceTraces: bucket,
-        allTraces: this.l2GainReferenceTraces(bucket, sourceTrace.episodeId),
+        allTraces: this.l2GainReferenceTraces(bucket, source.userId),
         minSupport: this.deps.config.algorithm.l2Induction.minEpisodesForActivation,
         minGain: this.deps.config.algorithm.l2Induction.minGain,
         archiveGain: this.deps.config.algorithm.l2Induction.archiveGain,
@@ -630,7 +630,11 @@ export class PolicyInductionEngine {
     const policy = policyMetaFromMemory(memory);
     if (!policy) return undefined;
     const evidenceAware = policyUsesSpecialEvidence(policy);
-    const { links, validTraces: evidenceTraces } = policyEvidenceSnapshot(this.deps.repos, memory, this.isAcceptedSuccessEvidence.bind(this));
+    const { links, linkedTraceIds, validTraces: evidenceTraces } = policyEvidenceSnapshot(this.deps.repos, memory, this.isAcceptedSuccessEvidence.bind(this));
+    // A withdrawn source keeps its identity through its retained support link.
+    // Neither the caller nor the current verdict decides which task owns evidence.
+    const sourceTraces = this.deps.repos.memories.getMany([...new Set([...policy.sourceTraceIds, ...linkedTraceIds])])
+      .map(traceMetaFromMemory).filter((trace): trace is TraceMeta => Boolean(trace && trace.userId === memory.userId));
     // Old records can retain canonical sources without reverse links. Preserve their
     // provenance before removing invalid sources so later success can restore them.
     for (const source of this.deps.repos.memories.getMany(policy.sourceTraceIds)) {
@@ -647,8 +651,13 @@ export class PolicyInductionEngine {
       ? evidenceTraces.filter((trace) => (policy.schemaVersion !== 2 || successfulIds.has(trace.id)) && trace.value > 0 && Boolean(trace.episodeId))
       : evidenceTraces;
     const successfulEpisodeCount = new Set(gainTraces.map((trace) => trace.episodeId).filter(Boolean)).size;
-    const gainReferenceTraces = this.l2GainReferenceTraces(gainTraces, triggerEpisodeId);
+    const gainReferenceTraces = this.l2GainReferenceTraces(sourceTraces, memory.userId);
+    const history = policyRevisionHistory(memory);
+    const auditChanges = history?.events.some(event => event.type === "checkpoint" && !event.automaticSupport)
+      ? this.deps.repos.runtime.listChanges(memory.userId, -1, undefined, undefined, memory.id)
+      : undefined;
     const result = revisePolicyStatistics(memory, {
+      sourceGroups: uniq(sourceTraces.map(trace => trace.episodeId ?? `trace:${trace.id}`)).sort(),
       evidence: numericTraces(gainTraces), reference: numericTraces(gainReferenceTraces),
       ...(evidenceAware ? { supportingEvidence: numericTraces(evidenceTraces), ...(policy.schemaVersion !== undefined ? { schemaVersion: policy.schemaVersion } : {}),
         ruleFallback: rawPolicy.generation_method === "rule_fallback" } : {}),
@@ -659,7 +668,7 @@ export class PolicyInductionEngine {
         tauSoftmax: this.deps.config.algorithm.l2Induction.tauSoftmax,
         gainEmaAlpha: this.deps.config.algorithm.l2Induction.gainEmaAlpha
       }
-    }, triggerEpisodeId ?? `governance:${createHash("sha256").update(JSON.stringify(numericTraces(evidenceTraces))).digest("hex")}`);
+    }, triggerEpisodeId, auditChanges);
     const stats = { gain: result?.gain ?? policy.gain, support: result?.support ?? policy.support,
       rawGain: result?.rawGain ?? numberOr(rawPolicy.raw_gain, policy.gain), status: result?.status ?? policy.status,
       sourceEpisodeIds: uniq(evidenceTraces.flatMap(trace => trace.episodeId ? [trace.episodeId] : [])),
@@ -740,31 +749,19 @@ export class PolicyInductionEngine {
     return saved;
   }
 
-  private l2GainReferenceTraces(evidenceTraces: TraceMeta[], triggerEpisodeId?: string): TraceMeta[] {
+  private l2GainReferenceTraces(sourceTraces: TraceMeta[], userId: string): TraceMeta[] {
     const episodeIds = new Set(
-      evidenceTraces
+      sourceTraces
         .map((trace) => trace.episodeId)
         .filter((episodeId): episodeId is string => Boolean(episodeId))
     );
-    if (triggerEpisodeId) {
-      episodeIds.add(triggerEpisodeId);
-    }
-
     const byId = new Map<string, TraceMeta>();
-    for (const trace of evidenceTraces) {
-      byId.set(trace.id, trace);
-    }
-
-    if (episodeIds.size === 0) {
-      return [...byId.values()];
-    }
-
-    for (const trace of this.deps.repos.memories
-      .list({ memoryLayer: "L1", status: "activated" }, 2000)
-      .map((memory) => this.deps.traceMeta(memory))
-      .filter((trace): trace is TraceMeta =>
-        Boolean(trace && trace.episodeId && episodeIds.has(trace.episodeId) && Number.isFinite(trace.value))
-      )) {
+    const candidates = [...sourceTraces, ...this.deps.repos.memories.listTracesForEpisodes(userId, [...episodeIds])
+      .map(traceMetaFromMemory).filter((trace): trace is TraceMeta => Boolean(trace))];
+    for (const trace of candidates) {
+      if (trace.userId !== userId || trace.memory.status !== "activated" || trace.memory.deletedAt || !Number.isFinite(trace.value)) continue;
+      const raw = trace.rawTurnId ? this.deps.repos.runtime.getRawTurn(trace.rawTurnId) : undefined;
+      if (raw && (raw.deletedAt || raw.redactedAt || raw.userId !== userId)) continue;
       byId.set(trace.id, trace);
     }
 
@@ -880,6 +877,11 @@ export function updatePolicyStats(memory: MemoryRow, input: {
     source_trace_ids: input.sourceTraceIds
   };
 
+  // Derive display confidence from the new gain in the same write. Explicit
+  // model confidence remains authoritative and is never replaced by a fallback.
+  const nextConfidence = policyMetaFromMemory({ ...memory, properties: { ...memory.properties,
+    internal_info: { ...memory.properties.internal_info, policy: nextPolicy } } })?.confidence;
+
   // Older unstructured lessons have no separately stored procedure. Keep their
   // prose intact instead of wrapping the previous rendered body on every refresh.
   const body = currentPolicy?.schemaVersion === 2 || typeof internalPolicy.procedure !== "string" ? memory.memoryValue : currentPolicy
@@ -892,7 +894,7 @@ export function updatePolicyStats(memory: MemoryRow, input: {
         support: input.support,
         gain: input.gain,
         rawGain: input.rawGain,
-        confidence: currentPolicy.confidence,
+        confidence: nextConfidence ?? currentPolicy.confidence,
         sourceTraceIds: input.sourceTraceIds
       })
     : memory.memoryValue;
@@ -906,7 +908,7 @@ export function updatePolicyStats(memory: MemoryRow, input: {
       support: input.support,
       gain: input.gain,
       raw_gain: input.rawGain,
-      policy_confidence: currentPolicy?.confidence,
+      policy_confidence: nextConfidence,
       status: input.status,
       source_memory_ids: input.sourceTraceIds
     },
@@ -918,7 +920,7 @@ export function updatePolicyStats(memory: MemoryRow, input: {
         support: input.support,
         gain: input.gain,
         raw_gain: input.rawGain,
-        policy_confidence: currentPolicy?.confidence,
+        policy_confidence: nextConfidence,
         status: input.status,
         source_memory_ids: input.sourceTraceIds
       },
@@ -929,7 +931,7 @@ export function updatePolicyStats(memory: MemoryRow, input: {
         support: input.support,
         gain: input.gain,
         raw_gain: input.rawGain,
-        policy_confidence: currentPolicy?.confidence,
+        policy_confidence: nextConfidence,
         status: input.status,
         source_episode_ids: input.sourceEpisodeIds,
         source_trace_ids: input.sourceTraceIds,
