@@ -7,14 +7,13 @@ interface WindowsLoginItemOptions {
 }
 
 interface WindowsLoginItemWriteOptions extends WindowsLoginItemOptions {
+  name: string;
   openAtLogin: boolean;
   enabled: boolean;
 }
 
 export interface WindowsLoginItemApplication {
   getLoginItemSettings(options: WindowsLoginItemOptions): {
-    openAtLogin: boolean;
-    executableWillLaunchAtLogin: boolean;
     launchItems: Array<{
       name: string;
       scope: string;
@@ -29,6 +28,7 @@ export interface WindowsLoginItemApplication {
 export interface WindowsLaunchAtLoginEnvironment {
   platform: string;
   isPackaged: boolean;
+  appUserModelId: string;
   executablePath: string;
   localAppDataPath?: string;
   systemRootPath?: string;
@@ -36,10 +36,22 @@ export interface WindowsLaunchAtLoginEnvironment {
 
 export type WindowsPathExists = (path: string) => boolean;
 
-function readWindowsLoginItemSettings(application: WindowsLoginItemApplication, command: WindowsLoginItemOptions) {
+function findWindowsLoginItem(
+  application: WindowsLoginItemApplication,
+  appUserModelId: string,
+  command: WindowsLoginItemOptions
+) {
   // Electron parses the lookup path as a command line when it enumerates Run entries.
   const path = /[ \t]/.test(command.path) ? `"${command.path}"` : command.path;
-  return application.getLoginItemSettings({ ...command, path });
+  const { launchItems } = application.getLoginItemSettings({ ...command, path });
+  const expectedName = appUserModelId.toLowerCase();
+  const expectedPath = normalizeWindowsCommandPath(command.path);
+  return launchItems.find((item) => (
+    item.scope === "user" && item.name.toLowerCase() === expectedName
+    && normalizeWindowsCommandPath(item.path) === expectedPath
+    && item.args.length === command.args.length
+    && item.args.every((argument, index) => argument === command.args[index])
+  ));
 }
 
 function resolveWindowsLoginLauncher(environment: WindowsLaunchAtLoginEnvironment) {
@@ -81,7 +93,6 @@ export const resolveWindowsLoginItemCommand = (
 export const repairWindowsLaunchAtLogin = (
   application: WindowsLoginItemApplication,
   environment: WindowsLaunchAtLoginEnvironment,
-  appUserModelId: string,
   pathExists: WindowsPathExists = existsSync
 ): "repaired" | "repaired-fallback" | "write-unconfirmed" | undefined => {
   if (environment.platform !== "win32" || !environment.isPackaged) {
@@ -91,25 +102,21 @@ export const repairWindowsLaunchAtLogin = (
   if (!launcher) {
     return;
   }
-  // Electron uses the AppUserModelID as the default Run value name and compares
-  // that value with the requested command for openAtLogin. Check that same
-  // entry's approval state, since another Run entry can use the same command.
-  const legacy = readWindowsLoginItemSettings(application, {
+  // Older versions used Electron's default Run value name, the AppUserModelID.
+  const legacy = findWindowsLoginItem(application, environment.appUserModelId, {
     path: launcher.scriptHostPath,
     args: [`"${launcher.launcherPath}"`]
   });
-  if (!legacy.openAtLogin || !legacy.launchItems.some((item) => (
-    item.scope === "user" && item.name.toLowerCase() === appUserModelId.toLowerCase() && item.enabled
-  ))) {
+  if (!legacy?.enabled) {
     return;
   }
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
-  application.setLoginItemSettings({ ...command, openAtLogin: true, enabled: true });
+  application.setLoginItemSettings({ ...command, name: environment.appUserModelId, openAtLogin: true, enabled: true });
   // Electron's setter returns void even if the registry write did not take effect.
-  if (!readWindowsLoginItemSettings(application, command).openAtLogin) {
+  if (!findWindowsLoginItem(application, environment.appUserModelId, command)?.enabled) {
     return "write-unconfirmed";
   }
-  return command.args.length ? "repaired" : "repaired-fallback";
+  return command.path === launcher.scriptHostPath ? "repaired" : "repaired-fallback";
 };
 
 /** Reads whether the packaged Windows launch command will effectively run at login. */
@@ -123,17 +130,13 @@ export const getWindowsLaunchAtLogin = (
   }
 
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
-  const settings = readWindowsLoginItemSettings(application, command);
-  if (!settings.openAtLogin) {
-    return false;
+  const item = findWindowsLoginItem(application, environment.appUserModelId, command);
+  if (item || command.path === environment.executablePath) {
+    return item?.enabled ?? false;
   }
-
-  const matchingItem = settings.launchItems.find((item) => (
-    normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(command.path)
-    && item.args.length === command.args.length
-    && item.args.every((argument, index) => argument === command.args[index])
-  ));
-  return matchingItem?.enabled ?? settings.executableWillLaunchAtLogin;
+  // A direct executable entry can still be active after the launcher is restored.
+  const fallback = { path: environment.executablePath, args: [] };
+  return findWindowsLoginItem(application, environment.appUserModelId, fallback)?.enabled ?? false;
 };
 
 /** Writes the packaged Windows login item and returns the effective system state. */
@@ -149,6 +152,7 @@ export const setWindowsLaunchAtLogin = (
 
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
   application.setLoginItemSettings({
+    name: environment.appUserModelId,
     openAtLogin: enabled,
     enabled,
     ...command

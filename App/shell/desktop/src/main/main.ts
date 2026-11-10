@@ -523,20 +523,21 @@ async function boot(): Promise<void> {
     if (isQuitting) return;
     if (process.platform === "win32" && !localTestProfile) {
       try {
-        const result = repairWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment(), WINDOWS_APP_USER_MODEL_ID);
+        const result = repairWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment());
         if (result === "repaired") {
-          void writePackagedStartupLog("boot:windows-login-item-repaired");
+          await writePackagedStartupLog("boot:windows-login-item-repaired");
         } else if (result === "repaired-fallback") {
-          void writePackagedStartupLog("boot:windows-login-item-repaired:executable-fallback");
+          await writePackagedStartupLog("boot:windows-login-item-repaired:executable-fallback");
         } else if (result === "write-unconfirmed") {
-          void writePackagedStartupLog("boot:windows-login-item-repair-failed:write-unconfirmed");
+          await writePackagedStartupLog("boot:windows-login-item-repair-failed:write-unconfirmed");
         }
       } catch (error) {
         // Use fixed reasons because exception text can contain local paths.
         const code = (error as NodeJS.ErrnoException | null)?.code;
         const reason = code === "EACCES" || code === "EPERM" ? "access-denied" : "unexpected-error";
-        void writePackagedStartupLog(`boot:windows-login-item-repair-failed:${reason}`);
+        await writePackagedStartupLog(`boot:windows-login-item-repair-failed:${reason}`);
       }
+      if (isQuitting) return;
     }
     bootStage = "cli";
     showSplashWindow(); // Only show the splash on a normal boot (the update-handoff exit branch already returned above)
@@ -6300,6 +6301,7 @@ function currentWindowsLaunchAtLoginEnvironment(): WindowsLaunchAtLoginEnvironme
   return {
     platform: process.platform,
     isPackaged: app.isPackaged,
+    appUserModelId: WINDOWS_APP_USER_MODEL_ID,
     executablePath: process.execPath,
     localAppDataPath: process.env.LOCALAPPDATA,
     systemRootPath: process.env.SystemRoot ?? process.env.WINDIR
