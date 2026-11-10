@@ -66,6 +66,15 @@ function findWindowsLoginItem(
   return argsMatch || (allowExactCommandFallback && openAtLogin) ? item : undefined;
 }
 
+function writeWindowsLoginItem(
+  application: WindowsLoginItemApplication,
+  appUserModelId: string,
+  command: WindowsLoginItemOptions,
+  enabled: boolean
+): void {
+  application.setLoginItemSettings({ ...command, name: appUserModelId, openAtLogin: enabled, enabled });
+}
+
 function resolveWindowsLoginLauncher(environment: WindowsLaunchAtLoginEnvironment) {
   const localAppDataPath = environment.localAppDataPath?.trim();
   const systemRootPath = environment.systemRootPath?.trim();
@@ -123,7 +132,7 @@ export const repairWindowsLaunchAtLogin = (
     return;
   }
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
-  application.setLoginItemSettings({ ...command, name: environment.appUserModelId, openAtLogin: true, enabled: true });
+  writeWindowsLoginItem(application, environment.appUserModelId, command, true);
   // Electron's setter returns void even if the registry write did not take effect.
   if (!findWindowsLoginItem(application, environment.appUserModelId, command, true)?.enabled) {
     return "write-unconfirmed";
@@ -142,12 +151,12 @@ export const getWindowsLaunchAtLogin = (
   }
 
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
-  const item = findWindowsLoginItem(application, environment.appUserModelId, command, true);
-  if (item || command.path === environment.executablePath) {
-    return item?.enabled ?? false;
-  }
   // A direct executable entry can still be active after the launcher is restored.
   const fallback = { path: environment.executablePath, args: [] };
+  if (command.path !== fallback.path) {
+    const launcherItem = findWindowsLoginItem(application, environment.appUserModelId, command, true);
+    if (launcherItem) return launcherItem.enabled;
+  }
   return findWindowsLoginItem(application, environment.appUserModelId, fallback, true)?.enabled ?? false;
 };
 
@@ -163,12 +172,7 @@ export const setWindowsLaunchAtLogin = (
   }
 
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
-  application.setLoginItemSettings({
-    name: environment.appUserModelId,
-    openAtLogin: enabled,
-    enabled,
-    ...command
-  });
+  writeWindowsLoginItem(application, environment.appUserModelId, command, enabled);
   return getWindowsLaunchAtLogin(application, environment, pathExists);
 };
 
