@@ -92,6 +92,18 @@ describe("Windows launch at login", () => {
     expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, (path) => path === launcherPath)).toBe(false);
   });
 
+  it("does not report startup enabled when only an unrelated entry matches the command", () => {
+    const getLoginItemSettings = vi.fn(() => ({
+      openAtLogin: false,
+      executableWillLaunchAtLogin: true,
+      launchItems: [{ name: "example.other", scope: "machine", path: scriptHostPath, args: [launcherPath], enabled: true }]
+    }));
+
+    expect(getWindowsLaunchAtLogin(
+      { getLoginItemSettings, setLoginItemSettings: vi.fn() }, packagedWindowsEnvironment, () => true
+    )).toBe(false);
+  });
+
   it("reads the executable fallback as one path when the install directory has spaces", () => {
     const executablePath = "D:\\Example Apps\\Memmy.exe";
     const getLoginItemSettings = vi.fn(({ path }: { path: string }) => ({
@@ -232,8 +244,8 @@ describe("Windows launch at login", () => {
 
     it("reports a write that Electron did not persist", () => {
       const application: WindowsLoginItemApplication = {
-        getLoginItemSettings: vi.fn(() => ({
-          openAtLogin: true,
+        getLoginItemSettings: vi.fn(({ args }) => ({
+          openAtLogin: args[0] === legacyItem.args[0],
           executableWillLaunchAtLogin: true,
           launchItems: [legacyItem]
         })),
@@ -242,6 +254,16 @@ describe("Windows launch at login", () => {
 
       expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true))
         .toBe("write-unconfirmed");
+    });
+
+    it("accepts exact command confirmation for the repaired entry when Electron parses its args differently", () => {
+      const getLoginItemSettings = vi.fn()
+        .mockReturnValueOnce({ openAtLogin: false, launchItems: [legacyItem] })
+        .mockReturnValueOnce({ openAtLogin: true, launchItems: [legacyItem] });
+
+      expect(repairWindowsLaunchAtLogin(
+        { getLoginItemSettings, setLoginItemSettings: vi.fn() }, packagedWindowsEnvironment, () => true
+      )).toBe("repaired");
     });
 
     it("preserves the disabled app entry when another enabled entry has the same command", () => {

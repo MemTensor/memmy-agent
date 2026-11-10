@@ -60,8 +60,9 @@ function findWindowsLoginItem(
     normalizeWindowsCommandPath(item.args[index]!) === normalizeWindowsCommandPath(argument)
   ));
   // Electron compares the exact Run value for this app in openAtLogin. For
-  // settings readback, it can confirm the command even if parsing its args
-  // differs. The enabled flag still has to come from our own entry.
+  // readback, it can confirm the command even if parsing its args differs.
+  // The enabled flag still has to come from our own entry: a shared executable
+  // can have unrelated enabled entries.
   return argsMatch || (allowExactCommandFallback && openAtLogin) ? item : undefined;
 }
 
@@ -124,7 +125,7 @@ export const repairWindowsLaunchAtLogin = (
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
   application.setLoginItemSettings({ ...command, name: environment.appUserModelId, openAtLogin: true, enabled: true });
   // Electron's setter returns void even if the registry write did not take effect.
-  if (!findWindowsLoginItem(application, environment.appUserModelId, command)?.enabled) {
+  if (!findWindowsLoginItem(application, environment.appUserModelId, command, true)?.enabled) {
     return "write-unconfirmed";
   }
   return command.path === launcher.scriptHostPath ? "repaired" : "repaired-fallback";
