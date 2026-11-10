@@ -492,6 +492,53 @@ describe("canonical model workspace adapter", () => {
     expect(saved.modelAssignments.account.agent).toEqual({ candidates: [keepId], default: keepId });
   });
 
+  it.each(["model entries", "model names"] as const)(
+    "saves a connection after removing its first model and adding another (%s)",
+    async (inputFormat) => {
+      const file = catalogFixture();
+      const connectionInput = {
+        provider: "openai",
+        endpoint: "https://models.example.invalid/v1",
+        protocol: "openai-chat-completions" as const,
+        apiKey: "fixture-key"
+      };
+      const catalogApi = {
+        read: () => readModelConfigCatalog(file),
+        write: (input: ModelConfigInput) => writeModelConfigCatalog(file, input)
+      };
+      const empty = await catalogApi.read();
+      const original = upsertModelConnection(createModelWorkspace(empty), "byok", {
+        ...connectionInput,
+        models: ["example-removed", "example-kept"]
+      });
+      const base = await persistModelCatalogMutation(modelConfigInput(original.workspace), catalogApi, empty);
+      const workspace = createModelWorkspace(base);
+      const connection = workspace.spaces.byok.connections[0]!;
+      const removedId = connection.presetIds["example-removed"]!;
+      const keptId = connection.presetIds["example-kept"]!;
+
+      const edited = upsertModelConnection(workspace, "byok", {
+        ...connectionInput,
+        id: connection.id,
+        models: ["example-kept", "example-added"],
+        ...(inputFormat === "model entries" ? {
+          modelEntries: [
+            { presetId: keptId, model: "example-kept", capability: "chat" },
+            { model: "example-added", capability: "chat" }
+          ]
+        } : {})
+      });
+      expect(edited.error).toBeNull();
+
+      const saved = await persistModelCatalogMutation(modelConfigInput(edited.workspace), catalogApi, base);
+      const models = saved.providers[0]!.models;
+      expect(models.map((model) => model.model).sort()).toEqual(["example-added", "example-kept"]);
+      expect(models.find((model) => model.model === "example-kept")?.presetId).toBe(keptId);
+      expect(models.find((model) => model.model === "example-added")?.presetId).not.toBe(keptId);
+      expect(models.map((model) => model.presetId)).not.toContain(removedId);
+    }
+  );
+
   it("真实 Backend catalog：从账号空间删除共享 DashScope 配置并清理双空间引用", async () => {
     const file = catalogFixture();
     const empty = await readModelConfigCatalog(file);
