@@ -5,8 +5,10 @@ import { Window } from "happy-dom";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { MemmyAgentMessageRejectedError } from "../../api/memmy-agent-client.js";
+import { enUSMessages, zhCNMessages } from "../../i18n/messages.js";
 import { createModelWorkspace, type ModelCandidate } from "../../state/model-workspace.js";
 import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
+import { agentActions, createAgentOperationError } from "../../state/app-actions.js";
 import { agentReducer, initialAgentState } from "../../state/agent-chat-slice.js";
 import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
@@ -40,6 +42,8 @@ import {
   requestNewSessionReset,
   requestAgentRestart,
   requestAgentStop,
+  replaceVoiceTranscript,
+  trackVoiceTranscriptEdit,
   resolveComposerCommandDraft,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
@@ -592,14 +596,27 @@ describe("HomePage", () => {
     const startVoiceInput = source.slice(startVoiceInputStart, finishVoiceInputStart);
     const finishVoiceInput = source.slice(finishVoiceInputStart, toggleVoiceInputStart);
 
-    expect(startVoiceInput).toContain("setCurrentComposerMediaError(toReadableAsrError(error, t))");
-    expect(finishVoiceInput).toContain("setCurrentComposerMediaError(toReadableAsrError(error, t))");
+    expect(startVoiceInput).toContain('setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error), "asr")');
+    expect(finishVoiceInput).toContain('setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error), "asr")');
     expect(startVoiceInput).not.toContain("agentActions.failed");
     expect(finishVoiceInput).not.toContain("agentActions.failed");
-    expect(source).toContain("MicrophonePermissionError");
-    expect(source).toContain("microphonePermissionDeniedMessageKey");
+    expect(source).toContain("mergeLiveLines(liveVoiceLinesRef.current, line)");
+    expect(source).toContain("setComposerDraftForScope(scopeKey");
+    expect(source).toContain("replaceVoiceTranscript(current, liveVoiceRangeRef.current, text)");
+    expect(finishVoiceInput).toContain("liveVoiceScopeRef.current ?? chatScopeKey");
     expect(source).toContain("asr.error.microphonePermissionDenied.mac");
     expect(source).toContain("asr.error.microphonePermissionDenied.windows");
+  });
+
+  it("replaces provisional voice text without duplicating the final transcript", () => {
+    const partial = replaceVoiceTranscript("已有内容", null, "你");
+    expect(partial).toEqual({ value: "已有内容\n你", range: { start: 5, text: "你" } });
+    expect(replaceVoiceTranscript(partial.value, partial.range, "你好").value).toBe("已有内容\n你好");
+    expect(replaceVoiceTranscript("已有内容\n你，继续输入", partial.range, "你好").value).toBe("已有内容\n你好，继续输入");
+  });
+
+  it("never replaces matching user text when the provisional range was removed", () => {
+    expect(replaceVoiceTranscript("你好", { start: 3, text: "你好" }, "最终结果").value).toBe("你好\n最终结果");
   });
 
   it("uses the send button disabled state when handling Enter submit", () => {
@@ -1236,20 +1253,65 @@ describe("HomePage", () => {
     expect(agentErrorText("home.modelSelector.unavailable")).toBe("当前模型或连接已失效，无法继续调用，需要切换模型。");
     expect(agentErrorText("message_request_rejected:model_selection_unavailable")).toBe("当前模型或连接已失效，无法继续调用，需要切换模型。");
     expect(agentErrorText("asr.error.microphonePermissionDenied.mac")).toBe(
-      "麦克风权限未开启。请到 系统设置 › 隐私与安全性 › 麦克风 中开启 Memmy"
+      "请在系统设置的麦克风权限中开启 Memmy"
     );
     expect(agentErrorText("asr.error.microphonePermissionDenied.windows")).toBe(
-      "麦克风权限未开启。请到 设置 › 隐私和安全性 › 麦克风 中开启 Memmy"
+      "请在系统设置的麦克风权限中开启 Memmy"
     );
     expect(agentErrorText("plain error")).toBe("操作未完成，请重试");
     expect(agentErrorText("request_timeout")).toBe("请求超时，请重试");
     expect(agentErrorText(null)).toBeNull();
   });
 
+  it.each([
+    "Realtime ASR: upstream: Unexpected server response: 404\nHTTP ASR: ASR qwen3-asr-flash-realtime HTTP 200: response missing transcript text",
+    "HTTP ASR: ASR selected-model HTTP 503: service unavailable"
+  ])("hides ASR failure details in the operation notice and toast: %s", (detail) => {
+    const error = Object.assign(new Error(detail), { name: "AsrTranscriptionError" });
+    const notice = createAgentOperationError({ source: "asr", message: toReadableAsrError(error), scopeKey: "draft-new-task" });
+    const state = agentReducer(initialAgentState, agentActions.operationFailed("chat", notice));
+    const visible = state.operationErrorNotice!;
+    const message = agentErrorText(visible.message, undefined, visible.source);
+    expect(message).toBe("语音识别失败，请重试");
+    expect(agentErrorText(detail, undefined, "asr")).toBe(message);
+    const html = renderToString(<AgentOperationErrorSlot message={message} />);
+    expect(html).not.toContain(detail);
+    expect(html).toContain("语音识别失败，请重试");
+    expect(html).not.toContain("操作未完成");
+    expect(agentErrorText("home.asrAccessDenied", undefined, "asr")).toBe(agentErrorText("home.asrAccessDenied"));
+  });
+
   it("shows a dedicated message when voice input has no ASR model configured", () => {
-    expect(toReadableAsrError(new Error("Assigned ASR model is unavailable"))).toBe("home.asrNotConfigured");
-    expect(agentErrorText("home.asrNotConfigured")).toBe("未配置 ASR 模型，请先配置后再使用语音输入");
-    expect(agentErrorText("语音识别失败：ASR model catalog is not configured")).toBe("未配置 ASR 模型，请先配置后再使用语音输入");
+    expect(toReadableAsrError(Object.assign(new Error("Assigned ASR model is unavailable"), {
+      code: "model_selection_unavailable"
+    }))).toBe("home.asrNotConfigured");
+    expect(agentErrorText("home.asrNotConfigured")).toBe("请先在模型配置中选择语音模型");
+    expect(agentErrorText("语音识别失败：ASR model catalog is not configured")).toBe("请先在模型配置中选择语音模型");
+  });
+
+  it("shows the model selection message when the configured ASR model is unavailable", () => {
+    expect(toReadableAsrError(Object.assign(new Error(
+      'Configured ASR model "gpt-4o-mini-realtime-preview" is unavailable from the selected provider'
+    ), {
+      code: "model_selection_unavailable"
+    }))).toBe("home.asrModelUnavailable");
+    expect(agentErrorText("home.asrModelUnavailable")).toBe(
+      "语音模型不可用，请检查模型设置"
+    );
+  });
+
+  it.each([
+    ["unauthorized", "home.asrAccessDenied"],
+    ["forbidden", "home.asrAccessDenied"],
+    ["rate_limited", "home.asrRateLimited"],
+    ["invalid_argument", "home.asrInvalidConfiguration"],
+    ["internal", "home.asrServiceUnavailable"]
+  ])("maps ASR error code %s to %s", (code, message) => {
+    expect(toReadableAsrError(Object.assign(new Error("upstream failed"), { code }))).toBe(message);
+  });
+
+  it("shows a connection-specific message when the ASR endpoint cannot be reached", () => {
+    expect(toReadableAsrError(new TypeError("Failed to fetch"))).toBe("home.asrConnectionFailed");
   });
 
   it("keeps the model unavailable reason when a tombstone blocks new-chat creation", async () => {
@@ -2239,3 +2301,40 @@ class MemoryStorage implements SlashCommandStorageLike {
     this.values.delete(key);
   }
 }
+
+
+describe("voice transcript editing", () => {
+  it("preserves existing indentation and trailing whitespace during partial and final replacement", () => {
+    const existing = "  user draft  \n\n";
+    const partial = replaceVoiceTranscript(existing, null, "hello");
+    expect(partial.value).toBe(existing + "hello");
+    expect(replaceVoiceTranscript(partial.value, partial.range, "hello world").value).toBe(existing + "hello world");
+  });
+  it("tracks insertion before the live range and preserves text after it", () => {
+    const initial = replaceVoiceTranscript("note", null, "hello");
+    const edited = "new " + initial.value + " tail";
+    // Apply the two independent user edits in order, as textarea events do.
+    const moved = trackVoiceTranscriptEdit(initial.value, "new " + initial.value, initial.range);
+    const range = trackVoiceTranscriptEdit("new " + initial.value, edited, moved);
+    expect(replaceVoiceTranscript(edited, range, "hello world").value).toBe("new note\nhello world tail");
+  });
+  it("does not reinsert deleted voice text or overwrite a user correction", () => {
+    const initial = replaceVoiceTranscript("note", null, "hello");
+    for (const edit of ["note\n", "note\ncorrected"]) {
+      const range = trackVoiceTranscriptEdit(initial.value, edit, initial.range);
+      expect(replaceVoiceTranscript(edit, range, "new transcript").value).toBe(edit);
+    }
+  });
+});
+
+
+it.each([zhCNMessages, enUSMessages])("translates wrapped ASR failures without provider details in either language", (messages) => {
+  const error = Object.assign(new Error("Realtime ASR: private URL; HTTP ASR: private provider response", {
+    cause: Object.assign(new Error("private provider response"), { code: "unauthorized" })
+  }), { name: "AsrTranscriptionError" });
+  const message = agentErrorText(toReadableAsrError(error), (key) => messages[key], "asr");
+  expect(message).toBe(messages["home.asrAccessDenied"]);
+  const html = renderToString(<AgentOperationErrorSlot message={message} />);
+  expect(html).not.toContain("private");
+  expect(html).not.toContain("HTTP ASR");
+});

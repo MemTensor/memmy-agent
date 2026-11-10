@@ -1,6 +1,4 @@
 import type {
-  AsrModelId,
-  AsrProvider,
   AsrTranscriptSegment,
   AuthorizeIntegrationResponse,
   AccountInvitationView,
@@ -257,8 +255,8 @@ export interface CloudAsrTranscriptionInput {
 /** Contract for cloud asr transcription result. */
 export interface CloudAsrTranscriptionResult {
   text: string;
-  modelId: AsrModelId;
-  provider: AsrProvider;
+  modelId: string;
+  provider: string;
   /** Present only when diarization was requested and the upstream model returned it. */
   segments?: AsrTranscriptSegment[];
 }

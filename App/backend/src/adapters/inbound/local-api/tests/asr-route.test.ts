@@ -14,6 +14,26 @@ afterEach(async () => {
 });
 
 describe("asr local api route", () => {
+  it("authenticates configuration snapshots and exposes only their opaque id", async () => {
+    const sessionId = "e39b2c0e-7aa8-4d15-8897-676e53fd47e8";
+    const prepare = vi.fn(async () => ({ sessionId }));
+    const release = vi.fn();
+    const transcribe = vi.fn(async () => ({ text: "hello", modelId: "chosen", provider: "dashscope", source: "byok", transcribedAt: new Date().toISOString() }));
+    app = createServer(transcribe as never, { prepare, release });
+    expect((await app.inject({ method: "POST", url: "/api/asr/sessions" })).statusCode).toBe(401);
+    expect(prepare).not.toHaveBeenCalled();
+    const headers = { "x-memmy-local-token": "test-token" };
+    const response = await app.inject({ method: "POST", url: "/api/asr/sessions", headers });
+    expect(response.statusCode).toBe(200); expect(response.json()).toEqual({ sessionId });
+    const result = await app.inject({ method: "POST", url: "/api/asr/transcriptions", headers,
+      payload: { sessionId, audioBase64: "UklGRg==", mimeType: "audio/wav" } });
+    expect(result.statusCode).toBe(200); expect(transcribe).toHaveBeenCalledWith(expect.objectContaining({ sessionId }));
+    expect((await app.inject({ method: "DELETE", url: `/api/asr/sessions/${sessionId}` })).statusCode).toBe(401);
+    expect(release).not.toHaveBeenCalled();
+    expect((await app.inject({ method: "DELETE", url: `/api/asr/sessions/${sessionId}`, headers })).statusCode).toBe(200);
+    expect(release).toHaveBeenCalledWith(sessionId);
+  });
+
   it("accepts a recording far larger than fastify's default body limit", async () => {
     // An interview has to reach the route as one request, and Fastify's 1 MiB
     // default only fits a couple of minutes of speech.
@@ -90,12 +110,12 @@ describe("asr local api route", () => {
   });
 });
 
-function createServer(transcribe: BackendServices["asr"]["transcribe"]): FastifyInstance {
+function createServer(transcribe: BackendServices["asr"]["transcribe"], session: Partial<BackendServices["asr"]> = {}): FastifyInstance {
   return createLocalApiServer({
     permissionManager: createPermissionManager(),
     services: {
       progressBus: createProgressBus(),
-      asr: { transcribe }
+      asr: { transcribe, ...session }
     } as unknown as BackendServices,
     heartbeatIntervalMs: 20
   });

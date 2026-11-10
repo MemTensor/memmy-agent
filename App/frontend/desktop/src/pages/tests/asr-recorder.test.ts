@@ -1,6 +1,7 @@
 /** Asr recorder tests. */
 import { describe, expect, it, vi } from "vitest";
 import {
+  asrErrorMessageKey,
   hasTranscribedSpeech,
   MicrophonePermissionError,
   ensureMicrophoneAccess,
@@ -74,4 +75,44 @@ describe("ASR recorder response handling", () => {
     expect(hasTranscribedSpeech({ text: "  ", segments: [{ text: "你好", startMs: 0 }] })).toBe(true);
     expect(hasTranscribedSpeech({ text: "正常转写", segments: [] })).toBe(true);
   });
+});
+
+
+describe("ASR error presentation", () => {
+  it.each([
+    ["empty_audio", "asr.error.emptyAudio"],
+    ["audio_too_large", "asr.error.audioTooLarge"],
+    ["unauthorized", "home.asrAccessDenied"],
+    ["forbidden", "home.asrAccessDenied"],
+    ["rate_limited", "home.asrRateLimited"],
+    ["invalid_argument", "home.asrInvalidConfiguration"],
+    ["internal", "home.asrServiceUnavailable"]
+  ])("classifies the HTTP fallback code %s instead of the earlier network error", (code, key) => {
+    const cause = Object.assign(new Error("private provider details"), { code });
+    const error = Object.assign(new Error("Realtime ASR: network failure; HTTP ASR: private details", { cause }), {
+      name: "AsrTranscriptionError"
+    });
+    expect(asrErrorMessageKey(error)).toBe(key);
+  });
+
+  it.each([
+    [new DOMException("expired", "TimeoutError"), "home.asrTimeout"],
+    [new Error("request timed out"), "home.asrTimeout"],
+    [new TypeError("Failed to fetch"), "home.asrConnectionFailed"],
+    [new Error("HTTP 200: missing choices[0].message.content"), "home.asrFailed"],
+    [new Error("provider URL and private response"), "home.asrFailed"],
+    [null, "home.asrFailed"]
+  ])("returns a safe key for %s", (error, key) => {
+    expect(asrErrorMessageKey(error)).toBe(key);
+  });
+
+  it("keeps microphone settings guidance", () => {
+    expect(asrErrorMessageKey(new MicrophonePermissionError("denied"))).toBe(microphonePermissionDeniedMessageKey());
+  });
+});
+
+
+it("reports an upstream model rejection as unavailable rather than unconfigured", () => {
+  const error = Object.assign(new Error("ASR selected-model HTTP 404 (model_not_found)"), { code: "model_selection_unavailable" });
+  expect(asrErrorMessageKey(error)).toBe("home.asrModelUnavailable");
 });

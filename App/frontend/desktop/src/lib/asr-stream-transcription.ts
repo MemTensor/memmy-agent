@@ -14,8 +14,8 @@
  * whole recording anyway; the diarized pass over the finished recording is
  * what produces speaker labels.
  */
-import { AsrStreamEventSchema, type AsrStreamEvent } from "@memmy/local-api-contracts";
-import type { AsrLiveLine, AsrLiveTranscriber } from "./asr-live-transcription.js";
+import { AsrStreamEventSchema } from "@memmy/local-api-contracts";
+import { mergeLiveLines, type AsrLiveLine, type AsrLiveTranscriber, type AsrLiveTranscriptionResult } from "./asr-live-transcription.js";
 
 export interface AsrStreamTranscriberOptions {
   /** Sample rate of the PCM being pushed; sent to the recognizer on start. */
@@ -27,6 +27,7 @@ export interface AsrStreamTranscriberOptions {
 /** Minimal WebSocket surface, so tests can stand in a fake. */
 export interface StreamSocket {
   readonly readyState: number;
+  readonly bufferedAmount?: number;
   binaryType: string;
   /** Mirrors the DOM signature; the transcriber only ever passes a string or an ArrayBuffer. */
   send(data: string | ArrayBuffer): void;
@@ -38,7 +39,7 @@ export interface StreamSocket {
 }
 
 /** Opens the relay socket; the ASR client supplies this so the URL and token stay in one place. */
-export type StreamSocketOpener = () => StreamSocket;
+export type StreamSocketOpener = () => StreamSocket | Promise<StreamSocket>;
 
 /** `WebSocket.OPEN`, spelled out so the fake in tests need not carry the constant. */
 const OPEN = 1;
@@ -68,121 +69,113 @@ export function createStreamLiveTranscriber(
   openSocket: StreamSocketOpener,
   options: AsrStreamTranscriberOptions
 ): AsrLiveTranscriber {
+  const maxBytes = 256 * 1024;
   let socket: StreamSocket | null = null;
-  let cancelled = false;
-  let finished = false;
-  // PCM captured before the socket opens is held so the first block of speech
-  // is not lost to the handshake.
+  let connecting = false;
+  let terminal = false;
+  let finishRequested = false;
+  let pendingBytes = 0;
   const pending: Int16Array[] = [];
-  let resolveFinished: (() => void) | null = null;
-  const finishedPromise = new Promise<void>((resolve) => {
-    resolveFinished = resolve;
-  });
-
+  let lines: AsrLiveLine[] = [];
+  const finals = new Set<number>();
+  let readyTimer: ReturnType<typeof setTimeout> | undefined;
+  let finishTimer: ReturnType<typeof setTimeout> | undefined;
+  let resolve!: (result: AsrLiveTranscriptionResult | null) => void;
+  const completion = new Promise<AsrLiveTranscriptionResult | null>((done) => { resolve = done; });
+  const settle = (result: AsrLiveTranscriptionResult | null, reason: string) => {
+    if (terminal) return;
+    terminal = true;
+    clearTimeout(readyTimer);
+    clearTimeout(finishTimer);
+    pending.length = 0;
+    pendingBytes = 0;
+    resolve(result);
+    try { socket?.close(1000, reason); } catch { /* The full recording is independent of this socket. */ }
+  };
   const fail = (message: string) => {
-    if (cancelled) return;
+    if (terminal) return;
+    settle(null, "fallback");
     options.onError?.(new Error(message));
   };
-
-  const settle = () => {
-    finished = true;
-    resolveFinished?.();
+  const send = (data: string | ArrayBuffer) => {
+    if (terminal) return;
+    if ((socket?.bufferedAmount ?? 0) > maxBytes) { fail("Live ASR send buffer exceeded"); return; }
+    try { socket?.send(data); } catch (error) { fail(error instanceof Error ? error.message : String(error)); }
   };
-
-  const connect = () => {
-    if (socket || cancelled) return;
-    const next = openSocket();
+  const attach = (next: StreamSocket) => {
+    if (terminal) { next.close(); return; }
     socket = next;
     next.binaryType = "arraybuffer";
-    next.addEventListener("open", () => {
-      if (cancelled) {
-        next.close();
-        return;
-      }
-      next.send(JSON.stringify({ type: "start", sampleRate: options.sampleRate }));
-      for (const block of pending) next.send(toArrayBuffer(block));
+    let started = false;
+    const onOpen = () => {
+      if (started) return;
+      started = true;
+      if (terminal) { next.close(); return; }
+      send(JSON.stringify({ type: "start", sampleRate: options.sampleRate }));
+      for (const block of pending) send(toArrayBuffer(block));
       pending.length = 0;
-      if (finishRequested) next.send(JSON.stringify({ type: "finish" }));
-    });
+      pendingBytes = 0;
+      if (finishRequested) send(JSON.stringify({ type: "finish" }));
+    };
+    next.addEventListener("open", onOpen);
     next.addEventListener("message", (event) => {
-      if (cancelled) return;
-      if (typeof event.data !== "string") return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(event.data);
-      } catch {
+      if (terminal || typeof event.data !== "string") return;
+      let value: unknown;
+      try { value = JSON.parse(event.data); } catch { return; }
+      const parsed = AsrStreamEventSchema.safeParse(value);
+      if (!parsed.success) return;
+      const frame = parsed.data;
+      if (frame.type === "error") { fail(frame.message); return; }
+      if (frame.type === "ready") { clearTimeout(readyTimer); return; }
+      if (frame.type === "finished") {
+        if (!finishRequested) { fail("Live ASR finished before recording stopped"); return; }
+        if (!lines.length || lines.some((line) => !finals.has(line.sentenceId))) {
+          fail("Live ASR did not return a complete final transcript"); return;
+        }
+        settle({ text: lines.map((line) => line.text).join(" ") }, "done");
         return;
       }
-      const result = AsrStreamEventSchema.safeParse(parsed);
-      if (!result.success) return;
-      handleEvent(result.data);
+      clearTimeout(readyTimer); // Older Cloud relays confirm acceptance through their first result.
+      const text = frame.text.trim();
+      if (!text || (frame.type === "partial" && finals.has(frame.sentenceId))) return;
+      const line = { sentenceId: frame.sentenceId, text, startMs: frame.beginMs, endMs: frame.endMs ?? frame.beginMs };
+      lines = mergeLiveLines(lines, line);
+      if (frame.type === "sentence") finals.add(frame.sentenceId);
+      options.onLine(line);
     });
-    next.addEventListener("close", () => {
-      // A close without `finished` is the relay or the Cloud giving up. The
-      // recording itself keeps going: the finished recording is transcribed
-      // again in full, so nothing is permanently lost.
-      if (!finished && !cancelled) fail("live transcription stream closed");
-      settle();
-    });
-    next.addEventListener("error", () => {
-      if (!finished) fail("live transcription stream failed");
-    });
+    next.addEventListener("error", () => fail("Live ASR connection failed"));
+    next.addEventListener("close", () => fail("Live ASR closed before its final result"));
+    if (next.readyState === OPEN) onOpen();
   };
-
-  let finishRequested = false;
-
-  const handleEvent = (event: AsrStreamEvent) => {
-    switch (event.type) {
-      case "partial":
-      case "sentence": {
-        const text = event.text.trim();
-        if (!text) return;
-        options.onLine({ startMs: event.beginMs, endMs: event.endMs ?? event.beginMs, text });
-        return;
-      }
-      case "finished":
-        settle();
-        socket?.close(1000, "done");
-        return;
-      case "error":
-        fail(event.message);
-        settle();
-        return;
-      default:
-        return;
-    }
+  const connect = () => {
+    connecting = true;
+    readyTimer = setTimeout(() => fail("Live ASR handshake timed out"), 8_000);
+    try {
+      const opened = openSocket();
+      if ("then" in opened) void opened.then(attach, (error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+      else attach(opened);
+    } catch (error) { fail(error instanceof Error ? error.message : String(error)); }
   };
-
   return {
     push(samples) {
-      if (cancelled || samples.length === 0) return;
-      if (!socket) connect();
-      const current = socket;
-      if (current && current.readyState === OPEN) {
-        current.send(toArrayBuffer(samples));
-      } else {
-        pending.push(samples.slice());
-      }
+      if (terminal || finishRequested || !samples.length) return;
+      if (!connecting) connect();
+      if (terminal) return;
+      if (socket?.readyState === OPEN) send(toArrayBuffer(samples));
+      else if (pendingBytes + samples.byteLength > maxBytes) fail("Live ASR audio buffer exceeded");
+      else { pending.push(samples.slice()); pendingBytes += samples.byteLength; }
     },
-
     async finish() {
-      if (cancelled) return;
-      finishRequested = true;
-      if (!socket) {
-        // Nothing was ever pushed; there is nothing to wait for.
-        settle();
-        return;
+      if (!terminal && !finishRequested) {
+        finishRequested = true;
+        if (!connecting) settle(null, "empty");
+        else {
+          finishTimer = setTimeout(() => fail("Live ASR final result timed out"), 10_000);
+          if (socket?.readyState === OPEN) send(JSON.stringify({ type: "finish" }));
+        }
       }
-      if (socket.readyState === OPEN) socket.send(JSON.stringify({ type: "finish" }));
-      await finishedPromise;
+      return completion;
     },
-
-    cancel() {
-      cancelled = true;
-      pending.length = 0;
-      settle();
-      socket?.close(1000, "cancelled");
-      socket = null;
-    }
+    cancel() { settle(null, "cancelled"); }
   };
 }

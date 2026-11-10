@@ -155,7 +155,7 @@ describe("InterviewRecordingPanel", () => {
   });
 
   it("puts the recorder in the column, above the words it produces", () => {
-    render({ session: session({ lines: [{ offsetMs: 3_000, text: "测试测试。" }] }), bar: <div data-testid="recorder-bar">录音条</div> });
+    render({ session: session({ lines: [{ sentenceId: 1, startMs: 3_000, endMs: 4_000, text: "测试测试。" }] }), bar: <div data-testid="recorder-bar">录音条</div> });
 
     const pane = container.querySelector(".workspace-artifact-preview-pane");
     expect(pane).not.toBeNull();
@@ -168,6 +168,26 @@ describe("InterviewRecordingPanel", () => {
     expect(bar!.compareDocumentPosition(body!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // The live lines are the transcript for a recording that is still running.
     expect(body!.textContent).toContain("测试测试。");
+  });
+
+  it("keeps each live sentence node when timestamps coincide and partial text changes", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const lines = [
+        { sentenceId: 1, startMs: 0, endMs: 0, text: "first" },
+        { sentenceId: 2, startMs: 0, endMs: 0, text: "second" }
+      ];
+      render({ session: session({ lines }) });
+      const before = [...container.querySelectorAll(".recording-panel__line")];
+      render({ session: session({ lines: [{ ...lines[0]!, text: "first revised" }, lines[1]!] }) });
+      const after = [...container.querySelectorAll(".recording-panel__line")];
+      expect(after).toHaveLength(2);
+      expect(after[0]).toBe(before[0]);
+      expect(after[1]).toBe(before[1]);
+      expect(after[0]?.textContent).toContain("first revised");
+      expect(after[1]?.textContent).toContain("second");
+      expect(error).not.toHaveBeenCalled();
+    } finally { error.mockRestore(); }
   });
 
   it("opens the column with only the recorder in it before a recording starts", () => {

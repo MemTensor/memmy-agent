@@ -183,7 +183,7 @@ function LiveLines(props: { lines: AsrLiveLine[]; pending: boolean; pendingLabel
   return (
     <div className="recording-panel__lines">
       {props.lines.map((line) => (
-        <p key={line.startMs} className="recording-panel__line">
+        <p key={line.sentenceId} className="recording-panel__line">
           <span className="recording-panel__line-time">{formatClock(line.startMs)}</span>
           <span>{line.text}</span>
         </p>

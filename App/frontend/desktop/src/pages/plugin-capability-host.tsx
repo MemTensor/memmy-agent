@@ -47,7 +47,7 @@ import type {
 import type { AsrClient } from "../api/asr-client.js";
 import type { UploadAgentMediaInput, UploadedAgentMedia } from "../api/memmy-agent-client.js";
 import type { PluginsClient } from "../api/plugins-client.js";
-import { asrRecordingTimeRemainingMs, isLiveAsrTimeout, useAsrRecorder } from "./asr-recorder.js";
+import { asrErrorMessageKey, asrRecordingTimeRemainingMs, useAsrRecorder } from "./asr-recorder.js";
 import { normalizePluginConversationId, usePluginChatFeedback, usePluginQuestionDrafts, useRecordLegalQuestionAnswer, usePluginRecordingMaterials, usePluginTranscriptions, type PluginChatFeedback, type PluginRecordingMaterial, type PluginUiCall } from "../app/plugin-ui-context.js";
 import { handOverRecording } from "../lib/recording-handover.js";
 import { PLUGIN_TRANSCRIPTION_ATTEMPTS, type PluginRecordingTranscript, type PluginTranscriptionJob, type PluginTranscriptionState } from "../lib/plugin-transcription-jobs.js";
@@ -894,17 +894,10 @@ function AudioRecordCard(props: {
   const [lines, setLines] = useState<AsrLiveLine[]>([]);
   const [transcript, setTranscript] = useState<RecordingPanelTranscript | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  // Live transcription (streaming, or its segmented-HTTP fallback) can fail
-  // without the recording itself failing — the diarized pass at the end still
-  // has its own shot. Silently dropping that failure left the card looking
-  // idle with no lines and no explanation; this is the only place its message
-  // reaches the user.
-  const [liveError, setLiveError] = useState<string | null>(null);
   const recorder = useAsrRecorder(props.asrClient, {
     live: {
       onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
-      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVE_BARS)),
-      onError: (liveErr) => setLiveError((current) => current ?? (isLiveAsrTimeout(liveErr) ? t("plugin.ui.audio.liveTimeout") : liveErr.message))
+      onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVE_BARS))
     }
   });
   const answered = props.status === "answered";
@@ -1069,7 +1062,6 @@ function AudioRecordCard(props: {
     setLines([]);
     setLevels([]);
     setTranscript(null);
-    setLiveError(null);
     finishedRef.current = false;
     void recorder.start().catch(() => undefined).finally(() => { starting.current = false; });
   };
@@ -1118,12 +1110,10 @@ function AudioRecordCard(props: {
   const error = !props.asrClient
     ? t("plugin.ui.audio.unavailable")
     : recorder.error && !answered
-      ? recorder.error.message
-      : liveError && !answered
-        ? liveError
-        : props.status === "error"
-          ? t("plugin.ui.responseFailed")
-          : null;
+      ? t(asrErrorMessageKey(recorder.error))
+      : props.status === "error"
+        ? t("plugin.ui.responseFailed")
+        : null;
 
   const bar = (
     <div className={`recording-bar${props.interview ? " recording-bar--interview" : ""}${recorder.isRecording ? " recording-bar--live" : ""}`}>

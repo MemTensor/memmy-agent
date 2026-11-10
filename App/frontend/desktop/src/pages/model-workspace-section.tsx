@@ -1138,6 +1138,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             value={space.assignments.asr}
             options={asrOptions}
             onChange={updateAssignment}
+            preserveUnassigned
           />
           <div className="h-px bg-border-stone/30" />
           <AssignmentRow

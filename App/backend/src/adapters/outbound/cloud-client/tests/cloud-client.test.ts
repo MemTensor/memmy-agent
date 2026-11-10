@@ -821,7 +821,7 @@ describe("cloud client", () => {
     ]);
   });
 
-  it("posts account-mode ASR transcription requests to Playground with bearer token", async () => {
+  it("preserves the actual cloud ASR model and provider instead of fixed defaults", async () => {
     const requests: Array<{ path: string; body: unknown; authorization: string | undefined }> = [];
     server = createServer(async (request, response) => {
       requests.push({
@@ -835,8 +835,8 @@ describe("cloud client", () => {
         message: "ok",
         data: {
           text: "你好，Memmy",
-          modelId: "qwen3-asr-flash",
-          provider: "aliyun"
+          modelId: "whisper-1",
+          provider: "openai"
         }
       });
     });
@@ -856,8 +856,8 @@ describe("cloud client", () => {
 
     expect(result).toEqual({
       text: "你好，Memmy",
-      modelId: "qwen3-asr-flash",
-      provider: "aliyun"
+      modelId: "whisper-1",
+      provider: "openai"
     });
     expect(requests).toEqual([
       {
@@ -870,6 +870,18 @@ describe("cloud client", () => {
         authorization: "Bearer cloud.login.uuid"
       }
     ]);
+  });
+
+  it("rejects missing cloud model identity instead of inventing a model label", async () => {
+    server = createServer((_request, response) => {
+      sendJson(response, { code: 0, message: "ok", data: { text: "transcript" } });
+    });
+    await listen(server);
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Mock cloud server did not bind");
+    const client = createHttpCloudClient({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 1000 });
+    await expect(client.transcribeAudio({ uuid: "account", audioBase64: "UklGRg==", mimeType: "audio/wav" }))
+      .rejects.toThrow("missing the actual model identity");
   });
 
   it("http client waits out a diarized transcription instead of applying the short default timeout", async () => {
@@ -905,6 +917,7 @@ describe("cloud client", () => {
       diarization: true
     });
 
+    expect(result.modelId).toBe("qwen-audio-3.0-asr-flash-filetrans");
     expect(result.segments).toEqual([
       { text: "甲说", speakerId: 0, startMs: 0, endMs: 500 },
       { text: "乙说", speakerId: 1, startMs: 500, endMs: 900 }

@@ -13,13 +13,21 @@
  * a matching status so a dropped microphone never leaves an upstream task
  * hanging on the Cloud.
  */
-import { AsrStreamControlSchema, AsrStreamEventSchema } from "@memmy/local-api-contracts";
+import {
+  AsrStreamControlSchema,
+  AsrStreamEventSchema,
+  type ActualModelContext,
+  type ResolvedProviderSnapshot
+} from "@memmy/local-api-contracts";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer } from "ws";
 import type { AccountSessionRepository } from "../infrastructure/app-state-store/repositories/account-session-repo.js";
 import type { BootstrapRepository } from "../infrastructure/app-state-store/repositories/bootstrap-repo.js";
 import type { AppSettingsDto } from "@memmy/local-api-contracts";
+import type { MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
+import { createDashScopeAsrStreamAdapter, isQwenAsrRealtimeModel } from "./dashscope-asr-stream-adapter.js";
+import { createOpenAiRealtimeAsrStreamAdapter } from "./openai-realtime-asr-stream-adapter.js";
 
 export interface AsrStreamService {
   /**
@@ -34,9 +42,14 @@ export interface AsrStreamService {
   close(): Promise<void>;
 }
 
+import type { AsrSelectionSnapshot } from "./asr-service.js";
+
 export interface CreateAsrStreamServiceOptions {
+  getSession?: (sessionId: string) => AsrSelectionSnapshot;
   bootstrapRepository: Pick<BootstrapRepository, "getAppSettings"> | { getAppSettings(): Pick<AppSettingsDto, "userMode"> };
-  accountSessionRepository: Pick<AccountSessionRepository, "getCloudUuid">;
+  accountSessionRepository: Pick<AccountSessionRepository, "getCloudUuid"> & Partial<Pick<AccountSessionRepository, "get">>;
+  /** Current model catalog; required for the selected BYOK ASR provider. */
+  memmyConfigWriter?: Pick<MemmyConfigWriter, "resolveAssignedModel">;
   /** Cloud API base URL, e.g. `https://test-api.memmy.cn` (no `/api` suffix). */
   cloudBaseUrl: string;
   /** Overrides the upstream socket constructor; tests use it. */
@@ -55,6 +68,8 @@ const CLOUD_STREAM_PATH = "/api/agentAsr/stream";
 const CLOSE_NORMAL = 1000;
 const CLOSE_POLICY = 1008;
 const CLOSE_UPSTREAM_GONE = 1011;
+const MAX_BUFFERED_BYTES = 256 * 1024;
+type QueuedFrame = { data: Buffer; binary: boolean };
 
 /**
  * Creates the live ASR stream relay.
@@ -63,16 +78,18 @@ const CLOSE_UPSTREAM_GONE = 1011;
  * @returns The relay service.
  */
 export function createAsrStreamService(options: CreateAsrStreamServiceOptions): AsrStreamService {
-  const server = new WebSocketServer({ noServer: true });
+  const server = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   const bridges = new Set<WebSocket>();
-  const connectUpstream = options.connectUpstream ?? ((url, headers) => new WebSocket(url, { headers }));
+  const connectUpstream = options.connectUpstream ?? ((url, headers) => new WebSocket(url, { headers, handshakeTimeout: 3_000 }));
 
   return {
     handleUpgrade(request, socket, head) {
       server.handleUpgrade(request, socket, head, (downstream) => {
         bridges.add(downstream);
+        // Oversized/malformed frames may fail before asynchronous model resolution attaches the adapter.
+        downstream.on("error", () => downstream.close());
         downstream.once("close", () => bridges.delete(downstream));
-        bridge(downstream, options, connectUpstream);
+        bridge(downstream, options, connectUpstream, new URL(request.url ?? "/", "http://localhost").searchParams.get("sessionId"));
       });
     },
 
@@ -101,17 +118,77 @@ export function toCloudStreamUrl(cloudBaseUrl: string): string {
 function bridge(
   downstream: WebSocket,
   options: CreateAsrStreamServiceOptions,
-  connectUpstream: NonNullable<CreateAsrStreamServiceOptions["connectUpstream"]>
+  connectUpstream: NonNullable<CreateAsrStreamServiceOptions["connectUpstream"]>,
+  sessionId: string | null
 ): void {
   const userMode = options.bootstrapRepository.getAppSettings().userMode;
-  if (userMode !== "account") {
-    // BYOK has no Cloud relay to lean on, and there is no BYOK streaming
-    // transport yet; the segmented HTTP path is what that mode gets.
-    sendEvent(downstream, { type: "error", message: "Live transcription requires account mode" });
-    downstream.close(CLOSE_POLICY, "account mode required");
+  if (userMode !== "account" && userMode !== "byok") {
+    sendEvent(downstream, { type: "error", message: "Live transcription requires account or BYOK mode" });
+    downstream.close(CLOSE_POLICY, "unsupported mode");
     return;
   }
-  const uuid = options.accountSessionRepository.getCloudUuid();
+  const resolver = options.memmyConfigWriter?.resolveAssignedModel;
+  if (!resolver && !options.getSession) {
+    if (userMode === "account") bridgeAccount(downstream, options, connectUpstream);
+    else {
+      sendEvent(downstream, { type: "error", message: "ASR model catalog is not configured" });
+      downstream.close(CLOSE_POLICY, "model catalog unavailable");
+    }
+    return;
+  }
+
+  const queued: QueuedFrame[] = [];
+  let downstreamClosed = false;
+  let queuedBytes = 0;
+  const queueFrame = (raw: WebSocket.RawData, isBinary: boolean) => {
+    if (downstreamClosed) return;
+    const data = toBuffer(raw);
+    queuedBytes += data.length;
+    if (queuedBytes > MAX_BUFFERED_BYTES) {
+      sendEvent(downstream, { type: "error", message: "ASR configuration or connection timed out" });
+      downstreamClosed = true;
+      downstream.close(CLOSE_POLICY, "audio buffer exceeded");
+      return;
+    }
+    queued.push({ data, binary: isBinary });
+  };
+  const markClosed = () => { downstreamClosed = true; };
+  downstream.on("message", queueFrame);
+  downstream.on("close", markClosed);
+
+  void (async () => {
+    const session = options.accountSessionRepository.get?.();
+    const activeAccountId = session?.authenticated ? session.profile.userId : null;
+    const snapshot = options.getSession
+      ? options.getSession(sessionId ?? "") : undefined;
+    const resolved = snapshot ?? await resolver!({ mode: userMode, activeAccountId, capability: "asr" });
+    if ("ok" in resolved && !resolved.ok) throw new Error("Assigned ASR model is unavailable");
+    if (downstreamClosed) return;
+    downstream.off("message", queueFrame);
+    downstream.off("close", markClosed);
+    if (resolved.context.source === "account") {
+      bridgeAccount(downstream, options, connectUpstream, queued, snapshot?.cloudUuid);
+      return;
+    }
+    if (resolved.context.protocol !== "dashscope-input-audio-chat") {
+      throw new Error(`Realtime ASR does not support protocol ${resolved.context.protocol}`);
+    }
+    bridgeCustom(downstream, resolved.context, resolved.provider, connectUpstream, queued);
+  })().catch((error: unknown) => {
+    if (downstreamClosed || downstream.readyState !== WebSocket.OPEN) return;
+    sendEvent(downstream, { type: "error", message: error instanceof Error ? error.message : String(error) });
+    downstream.close(CLOSE_POLICY, "ASR stream unavailable");
+  });
+}
+
+function bridgeAccount(
+  downstream: WebSocket,
+  options: CreateAsrStreamServiceOptions,
+  connectUpstream: NonNullable<CreateAsrStreamServiceOptions["connectUpstream"]>,
+  initialFrames: readonly QueuedFrame[] = [],
+  credential?: string | null
+): void {
+  const uuid = credential === undefined ? options.accountSessionRepository.getCloudUuid() : credential;
   if (!uuid) {
     sendEvent(downstream, { type: "error", message: "Cloud account is not authenticated" });
     downstream.close(CLOSE_POLICY, "unauthenticated");
@@ -124,18 +201,25 @@ function bridge(
   });
   // Frames that arrive before the upstream handshake completes are held, in
   // order, so the first block of speech is not lost to a race.
-  const queued: Array<{ data: Buffer; binary: boolean }> = [];
+  const queued: QueuedFrame[] = [...initialFrames];
   let upstreamOpen = false;
+  let bufferedBytes = queued.reduce((size, frame) => size + frame.data.length, 0);
 
   const forwardUp = (data: Buffer, binary: boolean) => {
-    if (upstreamOpen) upstream.send(data, { binary });
-    else queued.push({ data, binary });
+    if (upstream.bufferedAmount + bufferedBytes + data.length > MAX_BUFFERED_BYTES) {
+      sendEvent(downstream, { type: "error", message: "ASR stream cannot keep up with audio" });
+      downstream.close(CLOSE_UPSTREAM_GONE, "audio buffer exceeded");
+      return;
+    }
+    if (upstreamOpen && upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary });
+    else { queued.push({ data, binary }); bufferedBytes += data.length; }
   };
 
   upstream.on("open", () => {
     upstreamOpen = true;
     for (const frame of queued) upstream.send(frame.data, { binary: frame.binary });
     queued.length = 0;
+    bufferedBytes = 0;
   });
 
   downstream.on("message", (raw, isBinary) => {
@@ -184,6 +268,55 @@ function bridge(
       upstream.close(CLOSE_NORMAL, "downstream error");
     }
   });
+}
+
+function bridgeCustom(
+  downstream: WebSocket,
+  context: Readonly<ActualModelContext>,
+  provider: Readonly<ResolvedProviderSnapshot>,
+  connectUpstream: NonNullable<CreateAsrStreamServiceOptions["connectUpstream"]>,
+  initialFrames: readonly QueuedFrame[]
+): void {
+  const queued: QueuedFrame[] = [...initialFrames];
+  const base = new URL(provider.apiBase);
+  if (!["http:", "https:"].includes(base.protocol)) throw new Error("Invalid ASR provider URL");
+  const dashscope = context.provider === "dashscope"
+    || /(^|\.)dashscope(?:-intl|-us)?\.aliyuncs\.com$/.test(base.hostname)
+    || /\.maas\.aliyuncs\.com$/.test(base.hostname)
+    || isQwenAsrRealtimeModel(context.model);
+  const openai = context.provider === "openai" || context.provider === "custom";
+  if (!dashscope && !openai) throw new Error(`No realtime adapter for ASR provider ${context.provider}`);
+  const adapter = (dashscope ? createDashScopeAsrStreamAdapter : createOpenAiRealtimeAsrStreamAdapter)({
+    context,
+    provider,
+    connect: connectUpstream,
+    emit: (event) => {
+      if (event.type === "error") {
+        for (const secret of [provider.apiKey, ...Object.values(provider.extraHeaders)]) {
+          if (secret) event.message = event.message.split(secret).join("[REDACTED]");
+        }
+      }
+      sendEvent(downstream, event);
+    },
+    done: (code, reason) => {
+      if (downstream.readyState === WebSocket.OPEN) downstream.close(code, reason);
+    }
+  });
+
+  const handleFrame = (data: Buffer, binary: boolean) => {
+    if (binary) {
+      adapter.audio(data);
+      return;
+    }
+    const parsed = AsrStreamControlSchema.safeParse(safeJson(data.toString("utf8")));
+    if (parsed.success) adapter.control(parsed.data);
+    else sendEvent(downstream, { type: "error", message: "invalid control frame" });
+  };
+
+  downstream.on("message", (raw, isBinary) => handleFrame(toBuffer(raw), isBinary));
+  downstream.on("close", () => adapter.close());
+  downstream.on("error", () => adapter.close());
+  for (const frame of queued) handleFrame(frame.data, frame.binary);
 }
 
 function sendEvent(socket: WebSocket, event: unknown): void {

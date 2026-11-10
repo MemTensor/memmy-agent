@@ -148,7 +148,7 @@ describe("RecordingEntryPage", () => {
       view: "live",
       status: "recording",
       elapsedMs: 1_000,
-      lines: [{ startMs: 0, text: "我们社保在北京参保" }]
+      lines: [{ sentenceId: 1, startMs: 0, endMs: 0, text: "我们社保在北京参保" }]
     }));
 
     expect(container.textContent).toContain("正在录音");

@@ -54,7 +54,7 @@ export const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
 
 export type AgentConnectionStatus = "idle" | "bootstrapping" | "connecting" | "connected" | "reconnecting" | "error";
 export type AgentOperationSurface = "chat" | "sidebar";
-export type AgentOperationErrorSource = "sessions" | "sidebar" | "history" | "new-chat" | "send" | "gateway-command" | "recovery" | "queue";
+export type AgentOperationErrorSource = "sessions" | "sidebar" | "history" | "new-chat" | "send" | "asr" | "gateway-command" | "recovery" | "queue";
 export interface AgentOperationError {
   id: string;
   source: AgentOperationErrorSource;
