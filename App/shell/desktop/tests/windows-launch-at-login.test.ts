@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   getWindowsLaunchAtLogin,
+  repairWindowsLaunchAtLogin,
   resolveWindowsLoginItemCommand,
   setWindowsLaunchAtLogin,
   type WindowsLoginItemApplication
@@ -18,17 +19,18 @@ const packagedWindowsEnvironment = {
   platform: "win32",
   isPackaged: true,
   executablePath: "D:\\Apps\\Memmy\\Memmy.exe",
-  localAppDataPath: "C:\\Users\\Lee User\\AppData\\Local",
+  localAppDataPath: "C:\\Example Data\\测试",
   systemRootPath: "C:\\Windows"
 } as const;
+const launcherPath = "C:\\Example Data\\测试\\Memmy\\launcher\\MemmyLauncher.vbs";
+const scriptHostPath = "C:\\Windows\\System32\\wscript.exe";
+const appUserModelId = "example.app";
 
 describe("Windows launch at login", () => {
   it("uses the installed launch proxy so login startup follows the normal Windows launch chain", () => {
-    const launcherPath = "C:\\Users\\Lee User\\AppData\\Local\\Memmy\\launcher\\MemmyLauncher.vbs";
-
     expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, (path) => path === launcherPath)).toEqual({
-      path: "C:\\Windows\\System32\\wscript.exe",
-      args: [`"${launcherPath}"`]
+      path: scriptHostPath,
+      args: [launcherPath]
     });
   });
 
@@ -44,6 +46,8 @@ describe("Windows launch at login", () => {
       openAtLogin: true,
       executableWillLaunchAtLogin: true,
       launchItems: [{
+        name: appUserModelId,
+        scope: "user",
         path: "d:/apps/memmy/memmy.exe",
         args: [],
         enabled: true
@@ -62,17 +66,20 @@ describe("Windows launch at login", () => {
   });
 
   it("does not mistake another wscript startup entry for an enabled Memmy launch item", () => {
-    const launcherPath = "C:\\Users\\Lee User\\AppData\\Local\\Memmy\\launcher\\MemmyLauncher.vbs";
     const getLoginItemSettings = vi.fn(() => ({
       openAtLogin: true,
       executableWillLaunchAtLogin: true,
       launchItems: [{
-        path: "C:\\Windows\\System32\\wscript.exe",
-        args: ["\"C:\\Other\\startup.vbs\""],
+        name: "example.other",
+        scope: "user",
+        path: scriptHostPath,
+        args: ["C:\\Example\\other.vbs"],
         enabled: true
       }, {
-        path: "C:\\Windows\\System32\\wscript.exe",
-        args: [`"${launcherPath}"`],
+        name: appUserModelId,
+        scope: "user",
+        path: scriptHostPath,
+        args: [launcherPath],
         enabled: false
       }]
     }));
@@ -89,6 +96,8 @@ describe("Windows launch at login", () => {
       openAtLogin: enabled,
       executableWillLaunchAtLogin: enabled,
       launchItems: [{
+        name: appUserModelId,
+        scope: "user",
         path: packagedWindowsEnvironment.executablePath,
         args: [],
         enabled
@@ -109,6 +118,60 @@ describe("Windows launch at login", () => {
     });
   });
 
+  describe("legacy launch item repair", () => {
+    const legacyItem = {
+      name: appUserModelId,
+      scope: "user",
+      path: scriptHostPath,
+      args: [`"${launcherPath}"`],
+      enabled: true
+    };
+
+    it("replaces an enabled legacy command once, using the unquoted script path", () => {
+      const getLoginItemSettings = vi.fn(() => ({
+        openAtLogin: false,
+        executableWillLaunchAtLogin: true,
+        launchItems: [{ ...legacyItem, args: [launcherPath] }]
+      })).mockReturnValueOnce({
+        openAtLogin: true,
+        executableWillLaunchAtLogin: true,
+        launchItems: [legacyItem]
+      });
+      const setLoginItemSettings = vi.fn();
+      const application = { getLoginItemSettings, setLoginItemSettings };
+
+      repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, appUserModelId, () => true);
+      repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, appUserModelId, () => true);
+
+      expect(getLoginItemSettings).toHaveBeenCalledWith({ path: scriptHostPath, args: legacyItem.args });
+      expect(setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({
+        path: scriptHostPath,
+        args: [launcherPath],
+        openAtLogin: true,
+        enabled: true
+      });
+    });
+
+    it.each([
+      ["disabled", { ...legacyItem, enabled: false }],
+      ["owned by another app", { ...legacyItem, name: "example.other" }],
+      ["machine-wide", { ...legacyItem, scope: "machine" }]
+    ] as const)("does not rewrite a legacy item that is %s", (_label, launchItem) => {
+      const application = {
+        getLoginItemSettings: vi.fn(() => ({
+          openAtLogin: true,
+          executableWillLaunchAtLogin: true,
+          launchItems: [launchItem]
+        })),
+        setLoginItemSettings: vi.fn()
+      };
+
+      repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, appUserModelId, () => true);
+
+      expect(application.setLoginItemSettings).not.toHaveBeenCalled();
+    });
+  });
+
   it("does not register a login item outside packaged Windows builds", () => {
     const application: WindowsLoginItemApplication = {
       getLoginItemSettings: vi.fn(),
@@ -117,6 +180,7 @@ describe("Windows launch at login", () => {
 
     expect(getWindowsLaunchAtLogin(application, { ...packagedWindowsEnvironment, platform: "darwin" })).toBe(false);
     expect(setWindowsLaunchAtLogin(application, { ...packagedWindowsEnvironment, isPackaged: false }, true)).toBe(false);
+    repairWindowsLaunchAtLogin(application, { ...packagedWindowsEnvironment, isPackaged: false }, appUserModelId);
     expect(application.getLoginItemSettings).not.toHaveBeenCalled();
     expect(application.setLoginItemSettings).not.toHaveBeenCalled();
   });

@@ -16,6 +16,8 @@ export interface WindowsLoginItemApplication {
     openAtLogin: boolean;
     executableWillLaunchAtLogin: boolean;
     launchItems: Array<{
+      name: string;
+      scope: string;
       path: string;
       args: string[];
       enabled: boolean;
@@ -58,8 +60,35 @@ export const resolveWindowsLoginItemCommand = (
 
   return {
     path: windowsPath.join(systemRootPath, "System32", "wscript.exe"),
-    args: [`"${launcherPath}"`]
+    // Electron quotes Windows arguments when it serializes the Run entry.
+    args: [launcherPath]
   };
+};
+
+/** Repairs an enabled login item written by versions that pre-quoted the script path. */
+export const repairWindowsLaunchAtLogin = (
+  application: WindowsLoginItemApplication,
+  environment: WindowsLaunchAtLoginEnvironment,
+  appUserModelId: string,
+  pathExists: WindowsPathExists = existsSync
+): void => {
+  if (environment.platform !== "win32" || !environment.isPackaged) {
+    return;
+  }
+  const command = resolveWindowsLoginItemCommand(environment, pathExists);
+  const [launcherPath] = command.args;
+  if (!launcherPath) {
+    return;
+  }
+  const legacyArgs = [`"${launcherPath}"`];
+  // openAtLogin compares the command against this app's per-user Run value.
+  const legacy = application.getLoginItemSettings({ path: command.path, args: legacyArgs });
+  if (!legacy.openAtLogin || !legacy.launchItems.some((item) => (
+    item.scope === "user" && item.name.toLowerCase() === appUserModelId.toLowerCase() && item.enabled
+  ))) {
+    return;
+  }
+  application.setLoginItemSettings({ ...command, openAtLogin: true, enabled: true });
 };
 
 /** Reads whether the packaged Windows launch command will effectively run at login. */

@@ -167,6 +167,7 @@ import {
 } from "./windows-cli-path.js";
 import {
   getWindowsLaunchAtLogin,
+  repairWindowsLaunchAtLogin,
   setWindowsLaunchAtLogin,
   type WindowsLaunchAtLoginEnvironment
 } from "./windows-launch-at-login.js";
@@ -520,6 +521,13 @@ async function boot(): Promise<void> {
     }
 
     if (isQuitting) return;
+    if (process.platform === "win32" && !localTestProfile) {
+      try {
+        repairWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment(), WINDOWS_APP_USER_MODEL_ID);
+      } catch {
+        void writePackagedStartupLog("boot:windows-login-item-repair-failed");
+      }
+    }
     bootStage = "cli";
     showSplashWindow(); // Only show the splash on a normal boot (the update-handoff exit branch already returned above)
     registerIpcHandlers();
