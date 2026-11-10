@@ -523,9 +523,15 @@ async function boot(): Promise<void> {
     if (isQuitting) return;
     if (process.platform === "win32" && !localTestProfile) {
       try {
-        repairWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment(), WINDOWS_APP_USER_MODEL_ID);
-      } catch {
-        void writePackagedStartupLog("boot:windows-login-item-repair-failed");
+        const result = repairWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment(), WINDOWS_APP_USER_MODEL_ID);
+        if (result === "write-unconfirmed") {
+          void writePackagedStartupLog("boot:windows-login-item-repair-failed:write-unconfirmed");
+        }
+      } catch (error) {
+        // Use fixed reasons because exception text can contain local paths.
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        const reason = code === "EACCES" || code === "EPERM" ? "access-denied" : "unexpected-error";
+        void writePackagedStartupLog(`boot:windows-login-item-repair-failed:${reason}`);
       }
     }
     bootStage = "cli";

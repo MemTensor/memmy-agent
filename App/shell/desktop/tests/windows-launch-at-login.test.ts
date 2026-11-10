@@ -136,11 +136,16 @@ describe("Windows launch at login", () => {
         openAtLogin: true,
         executableWillLaunchAtLogin: true,
         launchItems: [legacyItem]
+      }).mockReturnValueOnce({
+        openAtLogin: true,
+        executableWillLaunchAtLogin: true,
+        launchItems: [{ ...legacyItem, args: [launcherPath] }]
       });
       const setLoginItemSettings = vi.fn();
       const application = { getLoginItemSettings, setLoginItemSettings };
 
-      repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, appUserModelId, () => true);
+      expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, appUserModelId, () => true))
+        .toBe("repaired");
       repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, appUserModelId, () => true);
 
       expect(getLoginItemSettings).toHaveBeenCalledWith({ path: scriptHostPath, args: legacyItem.args });
@@ -150,6 +155,20 @@ describe("Windows launch at login", () => {
         openAtLogin: true,
         enabled: true
       });
+    });
+
+    it("reports a write that Electron did not persist", () => {
+      const application: WindowsLoginItemApplication = {
+        getLoginItemSettings: vi.fn(({ args }) => ({
+          openAtLogin: args[0] === legacyItem.args[0],
+          executableWillLaunchAtLogin: true,
+          launchItems: [legacyItem]
+        })),
+        setLoginItemSettings: vi.fn()
+      };
+
+      expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, appUserModelId, () => true))
+        .toBe("write-unconfirmed");
     });
 
     it.each([

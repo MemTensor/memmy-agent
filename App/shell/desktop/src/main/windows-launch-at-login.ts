@@ -60,7 +60,7 @@ export const resolveWindowsLoginItemCommand = (
 
   return {
     path: windowsPath.join(systemRootPath, "System32", "wscript.exe"),
-    // Electron quotes Windows arguments when it serializes the Run entry.
+    // Electron's Windows login-item writer applies AddQuoteForArg to each argument.
     args: [launcherPath]
   };
 };
@@ -71,7 +71,7 @@ export const repairWindowsLaunchAtLogin = (
   environment: WindowsLaunchAtLoginEnvironment,
   appUserModelId: string,
   pathExists: WindowsPathExists = existsSync
-): void => {
+): "repaired" | "write-unconfirmed" | undefined => {
   if (environment.platform !== "win32" || !environment.isPackaged) {
     return;
   }
@@ -89,6 +89,8 @@ export const repairWindowsLaunchAtLogin = (
     return;
   }
   application.setLoginItemSettings({ ...command, openAtLogin: true, enabled: true });
+  // Electron's setter returns void even if the registry write did not take effect.
+  return application.getLoginItemSettings(command).openAtLogin ? "repaired" : "write-unconfirmed";
 };
 
 /** Reads whether the packaged Windows launch command will effectively run at login. */
