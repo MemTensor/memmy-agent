@@ -124,9 +124,10 @@ describe("Office MPP end to end", () => {
       if (id === "office_review_page") expect((result.content as Array<{ type: string }>).some(c => c.type === "image")).toBe(true);
       return output;
     };
-    if (managed) expect(installationStages).toContain("installed");
+    // Enable returns while the runtime installs; the first native call waits for it.
     const status = await call("office_status", {});
     expect(status.ready, JSON.stringify(status)).toBe(true);
+    if (managed) expect(installationStages).toContain("installed");
     const advanced = await call("office_execute", { code: `
       const document = new docx.Document({sections:[{children:[new docx.Table({rows:[new docx.TableRow({children:[new docx.TableCell({children:[new docx.Paragraph("Advanced template table")]})]})]})]}]});
       await fs.writeFile(path.join(workspace, "table.docx"), await docx.Packer.toBuffer(document));

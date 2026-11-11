@@ -174,6 +174,7 @@ export function createOfficeRuntimeInstaller(options: OfficeRuntimeInstallerOpti
       options.onProgress?.("extracting");
       await mkdir(content);
       await extractOfficeRuntime(archive, content, manifest);
+      options.onProgress?.("verifying");
       await verifyRoot(content, manifest);
       await writeFile(join(content, ".memmy-runtime.json"), JSON.stringify(manifest));
       const parent = join(cache, target); await mkdir(parent, { recursive: true });

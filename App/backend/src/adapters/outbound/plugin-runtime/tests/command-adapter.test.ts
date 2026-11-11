@@ -9,7 +9,8 @@ import {
   buildPluginSandboxLaunch,
   createCommandPluginAdapter,
   resolveCommandRuntimeDependencies,
-  resolvePluginEnvironment
+  resolvePluginEnvironment,
+  type CreateCommandPluginAdapterOptions
 } from "../command-adapter.js";
 import type { PluginRuntimeContext } from "../types.js";
 
@@ -473,14 +474,62 @@ describe("CommandPluginAdapter", () => {
 
   it("resolves the default runtime route against the registry origin, including bases with /api", async () => {
     const pluginContext = context();
+    pluginContext.plugin.id = pluginContext.plugin.manifest.id = "office";
     vi.stubEnv("MEMMY_PLUGIN_REGISTRY_URL", "http://127.0.0.1:19391/api");
     vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
     vi.stubEnv("MEMMY_OFFICE_RUNTIME_CATALOG_URL", "");
     delete process.env.MEMMY_OFFICE_RUNTIME_CATALOG_URL;
     const fetchFn = vi.fn(async (_input: unknown) => new Response("not provisioned", { status: 404 })); vi.stubGlobal("fetch", fetchFn);
     pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, runtimeDependencies: ["office"] };
-    await expect(createCommandPluginAdapter({ platform: "win32", pluginDataRoot: join(root!, "plugin-data") }).activate(pluginContext)).rejects.toThrow(/HTTP 404/);
+    const adapter = createCommandPluginAdapter({ platform: "win32", pluginDataRoot: join(root!, "plugin-data") });
+    const session = await adapter.activate(pluginContext);
+    expect(fetchFn).not.toHaveBeenCalled();
+    const status = adapter.invoke(session, { callId: "status", pluginId: "office", capabilityId: "office_status", conversationId: "test", input: {} })[Symbol.asyncIterator]();
+    expect((await status.next()).value).toMatchObject({ type: "progress", phase: "runtime-preparation", runtimeStage: "preparing", message: "Preparing Office runtime…", cancellable: true });
+    await expect(status.next()).rejects.toMatchObject({ code: "plugin_runtime_error", message: expect.stringContaining("Retry") });
     expect(String(fetchFn.mock.calls[0]?.[0])).toBe(`http://127.0.0.1:19391/api/v1/plugins/office/runtimes/win32-${process.arch}`);
+    await adapter.deactivate(session);
+  });
+
+  it("enables Office before preparation, shares the download, and grants renderer access on the prepared call", async () => {
+    const ctx = context();
+    ctx.plugin.id = ctx.plugin.manifest.id = "office";
+    ctx.plugin.manifest.runtime.config = { ...ctx.plugin.manifest.runtime.config, runtimeDependencies: ["office"] };
+    vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+    const runtimeRoot = realpathSync(root!);
+    const renderer = join(runtimeRoot, "runtime/plugin");
+    const tools = { soffice: renderer, pdfinfo: renderer, pdftoppm: renderer, pdftotext: renderer };
+    let finish!: () => void;
+    const ensure = vi.fn(() => new Promise<{ root: string; version: string; tools: typeof tools }>(resolve => {
+      finish = () => resolve({ root: runtimeRoot, version: "test", tools });
+    }));
+    const spawnFn = vi.fn(spawn);
+    const buildLaunch = vi.fn<NonNullable<CreateCommandPluginAdapterOptions["buildLaunch"]>>(async () => ({
+      command: process.execPath, args: ["-e", "console.log(JSON.stringify({tools:JSON.parse(process.env.MEMMY_OFFICE_TOOLS||'{}')}))"], cwd: root!
+    }));
+    const adapter = createCommandPluginAdapter({ platform: "darwin", officeRuntimeInstaller: { ensure }, buildLaunch, spawnFn });
+    const session = await adapter.activate(ctx);
+    expect(ensure).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(ensure).toHaveBeenCalledTimes(1));
+    const call = { callId: "create", pluginId: "office", capabilityId: "office_create", conversationId: "test", input: { format: "xlsx" } };
+    expect(await collect(adapter.invoke(session, call))).toEqual([{ type: "result", output: { tools: {} } }]);
+    const renderCall = { ...call, callId: "render", capabilityId: "office_render" };
+    const waiting = adapter.invoke(session, renderCall)[Symbol.asyncIterator]();
+    const cancelled = adapter.invoke(session, { ...renderCall, callId: "cancelled" })[Symbol.asyncIterator]();
+    expect((await waiting.next()).value).toMatchObject({ type: "progress", cancellable: true });
+    expect((await cancelled.next()).value).toMatchObject({ type: "progress", cancellable: true });
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+    await adapter.cancel!(session, "cancelled");
+    await expect(cancelled.next()).rejects.toMatchObject({ code: "plugin_cancelled" });
+    const result = waiting.next();
+    finish();
+    expect((await result).value).toEqual({ type: "result", output: { tools } });
+    await waiting.next();
+    expect(buildLaunch.mock.calls.at(-1)?.[3]).toMatchObject({
+      executableRoots: [runtimeRoot]
+    });
+    expect(ensure).toHaveBeenCalledTimes(1);
+    await adapter.deactivate(session);
   });
 
   it("keeps plugin CLR/PowerShell variables out of the privileged Windows launcher", async () => {

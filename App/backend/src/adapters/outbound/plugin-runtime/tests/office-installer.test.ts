@@ -24,8 +24,10 @@ async function fixture() {
     if (String(input).endsWith("win32-x64")) { catalogs++; return Response.json(manifest); }
     downloads++; return new Response(corrupt ? new Uint8Array(bytes.length) : bytes);
   }) as typeof fetch;
-  const installer = createOfficeRuntimeInstaller({ cacheRoot, catalogUrl: "https://registry.example/runtimes/{target}", fetchFn });
-  return { cacheRoot, installer, manifest, counts: () => ({ downloads, catalogs }), setOffline: () => { offline = true; }, setCorrupt: () => { corrupt = true; } };
+  const progress: Array<{ stage: string; bytes?: number; total?: number }> = [];
+  const installer = createOfficeRuntimeInstaller({ cacheRoot, catalogUrl: "https://registry.example/runtimes/{target}", fetchFn,
+    onProgress: (stage, bytes, total) => progress.push({ stage, bytes, total }) });
+  return { cacheRoot, installer, manifest, progress, counts: () => ({ downloads, catalogs }), setOffline: () => { offline = true; }, setCorrupt: () => { corrupt = true; } };
 }
 describe("Host Office runtime installation", () => {
   it("installs once across concurrent callers, verifies every tool, and reuses its cache offline", async () => {
@@ -33,6 +35,9 @@ describe("Host Office runtime installation", () => {
     const [a, b] = await Promise.all([f.installer.ensure("win32", "x64"), f.installer.ensure("win32", "x64")]);
     expect(a).toEqual(b); expect(f.counts()).toEqual({ downloads: 1, catalogs: 1 });
     expect(await readFile(a.tools.soffice!, "utf8")).toBe("fixture-soffice");
+    const downloaded = f.progress.findIndex(event => event.stage === "downloading" && event.bytes === f.manifest.archive.bytes && event.total === event.bytes);
+    expect(downloaded).toBeGreaterThanOrEqual(0);
+    expect(f.progress.slice(downloaded).map(event => event.stage)).toEqual(["downloading", "extracting", "verifying", "installed"]);
     f.setOffline(); expect(await f.installer.ensure("win32", "x64")).toEqual(a);
   });
   it("repairs a corrupted file instead of trusting a completion marker", async () => {
