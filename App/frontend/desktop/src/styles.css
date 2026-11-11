@@ -1195,7 +1195,9 @@ body.memmy-window-fullscreen {
 
 .agent-model-selector__menu .select-control__aside {
   position: absolute;
+  top: auto !important;
   right: 100%;
+  bottom: 0;
   z-index: 130;
   width: min(260px, calc(100vw - 48px));
   padding-right: 8px;

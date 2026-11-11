@@ -1,5 +1,6 @@
 /** User-facing copy for governed Agent and memory-processing errors. */
 export const zhCNErrorNoticeMessages = {
+  "agent.error.modelCatalogUnavailable": "未获取到模型信息，请重启客户端",
   "agent.error.modelFailed": "模型请求失败，请稍后重试",
   "agent.error.toolSchemaInvalid": "工具定义与模型接口不兼容，请更新插件或检查工具配置",
   "agent.error.modelTimeout": "等待模型响应超时，请检查模型服务后继续",
@@ -52,6 +53,7 @@ export const zhCNErrorNoticeMessages = {
 } as const;
 
 export const enUSErrorNoticeMessages = {
+  "agent.error.modelCatalogUnavailable": "Model information could not be retrieved. Please restart the app.",
   "agent.error.modelFailed": "The model request failed. Please try again later.",
   "agent.error.toolSchemaInvalid": "A tool definition is incompatible with the model API. Update the plugin or check tool settings.",
   "agent.error.modelTimeout": "The model response timed out. Check the model service, then continue.",

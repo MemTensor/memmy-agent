@@ -271,6 +271,8 @@ export class SubagentManager {
     modelPreset?: string | null;
     modelProvider?: string | null;
     actualModelContext?: ActualModelContext | null;
+    modelCapabilities?: import("../../providers/turn-model-capabilities.js").TurnModelCapabilities;
+    capabilityCatalogState?: import("../../providers/model-capability-catalog.js").RuntimeModelCapabilityCatalogState;
     computerUseAuthorization?: SubagentComputerUseAuthorization | null;
     outputLocation?: OutputDelivery;
   }, label: string | null = null, originChannel = "cli", originChatId = "direct", sessionKey: string | null = null, originMessageId: string | null = null, temperature: number | null = null): Promise<string> {
@@ -296,6 +298,8 @@ export class SubagentManager {
             ...args.actualModelContext,
             capabilities: Object.freeze([...args.actualModelContext.capabilities]),
           }),
+      modelCapabilities: args.modelCapabilities,
+      capabilityCatalogState: args.capabilityCatalogState,
       turnId,
     };
     const status = new SubagentStatus({
@@ -423,6 +427,9 @@ export class SubagentManager {
       const model = origin.model ?? this.model;
       const contextWindowTokens = origin.contextWindowTokens ?? this.contextWindowTokens;
       const result = await this.runner.run(new AgentRunSpec({
+        modelCapabilities: origin.modelCapabilities,
+        capabilityCatalogState: origin.capabilityCatalogState,
+        reasoningEffort: origin.modelCapabilities?.reasoningEffort,
         messages,
         provider,
         tools,

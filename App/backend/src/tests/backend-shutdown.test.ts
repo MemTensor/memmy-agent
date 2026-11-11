@@ -11,6 +11,10 @@ import { createProgressBus } from "../services/progress-bus.js";
 import type { BackendServices } from "../services/index.js";
 import { createMockCloudClient } from "./support/mock-cloud-client.js";
 import { createMockMemoryClient } from "./support/mock-memory-client.js";
+import { createModelCapabilityCatalogSyncService } from "../services/model-capability-catalog-sync-service.js";
+import { createAppConfigService } from "../services/app-config-service.js";
+import { createMemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
+import { readModelCapabilityCatalog } from "../infrastructure/model-capability-catalog/index.js";
 
 // SSE shutdown should not depend on the automatic updater reaching a remote catalog.
 vi.mock("../adapters/outbound/plugin-registry/index.js", async (importOriginal) => {
@@ -50,13 +54,14 @@ function connections() {
   }
   return { open, body: (response: IncomingMessage) => bodies.get(response)!, destroy() { for (const response of responses) response.destroy(); for (const request of requests) request.destroy(); agent.destroy(); } };
 }
-function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, executeRouterTool: BackendServices["integrations"]["executeRouterTool"] = async () => ({ data: { saved: true } })) {
+function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, executeRouterTool: BackendServices["integrations"]["executeRouterTool"] = async () => ({ data: { saved: true } }), overrides: Partial<BackendServices> = {}) {
   const progressBus = createProgressBus();
   const unsubscribers: ReturnType<typeof vi.fn>[] = [];
   const subscribedEvents: string[] = [];
   const services = {
     bootstrap: { async getBootstrap() { throw new Error("unused"); } },
     integrations: { executeRouterTool },
+    ...overrides,
     progressBus: { ...progressBus, on: ((...args: Parameters<typeof progressBus.on>) => {
       subscribedEvents.push(args[0]);
       const unsubscribe = vi.fn(progressBus.on(...args)); unsubscribers.push(unsubscribe); return unsubscribe;
@@ -66,11 +71,88 @@ function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, exec
     permissionManager: { verifyRuntimeToken } as unknown as PermissionManager,
     composioMcpToken: "shutdown-test-mcp", services, heartbeatIntervalMs: 60_000,
   });
-  return { app, unsubscribers, subscribedEvents };
+  return { app, progressBus, unsubscribers, subscribedEvents };
 }
 async function listen(app: FastifyInstance) { return app.listen({ host: "127.0.0.1", port: 0 }); }
 
 describe("local backend graceful shutdown", () => {
+  it("publishes committed catalog changes over SSE and serves the new view without changing user configuration", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-catalog-events-"));
+    const filePath = join(root, "models.json");
+    const writer = createMemmyConfigWriter({ configPath: join(root, "config.yaml") });
+    const appConfig = createAppConfigService({
+      bootstrapRepository: {} as Parameters<typeof createAppConfigService>[0]["bootstrapRepository"],
+      memmyConfigWriter: writer,
+      getModelCapabilityCatalog: () => readModelCapabilityCatalog(filePath)
+    });
+    const { app, progressBus } = api(undefined, undefined, { appConfig });
+    const clients = connections();
+    // Real model configuration from the original client tables at b9e5a37a.
+    const catalog = { catalogVersion: 1, models: { "gpt-5.4-mini": {
+      inputModalities: ["text" as const, "image" as const], contextWindowTokens: 400000, maxTokens: 128000,
+      thinking: { switchable: true, defaultEnabled: true, levels: ["low" as const, "medium" as const, "high" as const], defaultLevel: "medium" as const }
+    } } };
+    const getModelCapabilityCatalog = vi.fn<Parameters<typeof createModelCapabilityCatalogSyncService>[0]["cloudClient"]["getModelCapabilityCatalog"]>()
+      .mockResolvedValue({ status: "updated", catalog });
+    const sync = createModelCapabilityCatalogSyncService({
+      cloudClient: { getModelCapabilityCatalog }, getCloudUuid: () => "isolated-test-account", filePath,
+      onUpdated: updated => progressBus.emit("model_catalog.updated", { catalogVersion: updated.catalogVersion })
+    });
+    const base = await listen(app);
+    try {
+      const initial = await appConfig.getModelConfig();
+      const stream = await clients.open(`${base}/api/events?token=test-token`);
+      let body = "";
+      let notify = () => {};
+      stream.on("data", chunk => { body += String(chunk); notify(); });
+      for (const version of [1, 2]) {
+        const updated = version === 1 ? catalog : { catalogVersion: 2, models: {} };
+        getModelCapabilityCatalog.mockResolvedValueOnce({ status: "updated", catalog: updated });
+        const received = new Promise<void>(resolve => {
+          notify = () => { if (body.includes(`"catalogVersion":${version}`)) resolve(); };
+        });
+        expect((await sync.sync()).status).toBe("updated");
+        expect(await settlesWithin(received, 1000)).toBe(true);
+        // Read immediately after the event, as the renderer does; the committed file must already be visible.
+        const response = await app.inject({ method: "GET", url: "/api/app/model-config", headers: { "x-memmy-local-token": "test-token" } });
+        expect(response.statusCode).toBe(200);
+        const { capabilityCatalog, ...config } = response.json();
+        expect(capabilityCatalog).toEqual(updated);
+        expect(config).toEqual(initial);
+      }
+      getModelCapabilityCatalog.mockResolvedValueOnce({ status: "not-modified" });
+      expect((await sync.sync()).status).toBe("not-modified");
+      // Use an ordered stream marker to count all notifications preceding it.
+      progressBus.emit("model_catalog.updated", { catalogVersion: 3 });
+      await vi.waitFor(() => expect(body).toContain('"catalogVersion":3'));
+      expect(body.match(/event: model_catalog.updated/g)).toHaveLength(3);
+      expect(await writer.readModelConfig!()).toEqual(initial);
+    } finally {
+      await sync.stop();
+      clients.destroy();
+      await app.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it("delivers model catalog refresh notifications over the authenticated event stream", async () => {
+    const { app, progressBus } = api();
+    const clients = connections();
+    const base = await listen(app);
+    try {
+      const stream = await clients.open(`${base}/api/events?token=test-token`);
+      let body = "";
+      const received = new Promise<void>(resolve => stream.on("data", chunk => {
+        body += String(chunk);
+        if (body.includes('"type":"model_catalog.updated"')) resolve();
+      }));
+      progressBus.emit("model_catalog.updated", { catalogVersion: 22 });
+      expect(await settlesWithin(received, 1000)).toBe(true);
+      expect(body).toContain('"payload":{"catalogVersion":22}');
+    } finally {
+      clients.destroy();
+      await app.close();
+    }
+  });
   it("closes with two connected renderer event streams and idle keepalive without client cancellation", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-backend-shutdown-"));
     const clients = connections();
@@ -110,8 +192,8 @@ describe("local backend graceful shutdown", () => {
       expect(JSON.parse(await clients.body(response))).toEqual({ saved: true });
       expect(await settlesWithin(shutdown)).toBe(true);
       expect(writeFinished).toBe(true);
-      expect(subscribedEvents).toEqual(["agent_source.scan_progress", "agent_source.scan_completed", "plugin.capability_event"]);
-      expect(unsubscribers).toHaveLength(3);
+      expect(subscribedEvents).toEqual(["agent_source.scan_progress", "agent_source.scan_completed", "plugin.capability_event", "model_catalog.updated"]);
+      expect(unsubscribers).toHaveLength(4);
       for (const unsubscribe of unsubscribers) expect(unsubscribe).toHaveBeenCalledOnce();
     } finally { release.resolve(); clients.destroy(); await (shutdown ?? app.close()); }
   });
@@ -128,8 +210,8 @@ describe("local backend graceful shutdown", () => {
       authorize.resolve();
       expect((await stream).statusCode).toBe(200);
       expect(await settlesWithin(shutdown)).toBe(true);
-      expect(subscribedEvents).toEqual(["agent_source.scan_progress", "agent_source.scan_completed", "plugin.capability_event"]);
-      expect(unsubscribers).toHaveLength(3);
+      expect(subscribedEvents).toEqual(["agent_source.scan_progress", "agent_source.scan_completed", "plugin.capability_event", "model_catalog.updated"]);
+      expect(unsubscribers).toHaveLength(4);
       for (const unsubscribe of unsubscribers) expect(unsubscribe).toHaveBeenCalledOnce();
     } finally { authorize.resolve(); clients.destroy(); await (shutdown ?? app.close()); }
   });

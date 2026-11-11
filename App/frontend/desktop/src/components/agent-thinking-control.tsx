@@ -12,6 +12,8 @@ export interface AgentThinkingControlProps {
   scopeKey: string;
   thinkingConfig: ModelThinkingConfig | null;
   disabled: boolean;
+  /** Select an unselected model only when its thinking settings are edited. */
+  onActivate?: () => void;
 }
 
 /** Thinking settings shown inside the open model menu. */
@@ -34,7 +36,10 @@ export function AgentThinkingControl(props: AgentThinkingControlProps) {
           type="button"
           role="switch"
           aria-checked={enabled}
-          onClick={() => dispatch(agentActions.thinkingToggled(props.scopeKey, !enabled))}
+          onClick={() => {
+            props.onActivate?.();
+            dispatch(agentActions.thinkingToggled(props.scopeKey, !enabled));
+          }}
           disabled={props.disabled}
           className="thinking-toggle"
         >
@@ -53,7 +58,10 @@ export function AgentThinkingControl(props: AgentThinkingControlProps) {
               key={option}
               type="button"
               aria-pressed={currentLevel === option}
-              onClick={() => dispatch(agentActions.thinkingLevelChanged(props.scopeKey, option))}
+              onClick={() => {
+                props.onActivate?.();
+                dispatch(agentActions.thinkingLevelChanged(props.scopeKey, option));
+              }}
               disabled={props.disabled}
               className={`thinking-level-option ${currentLevel === option ? "thinking-level-option--selected" : ""}`}
             >

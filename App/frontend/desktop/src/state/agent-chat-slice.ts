@@ -4276,6 +4276,7 @@ function normalizeModelError(value: unknown): MemmyAgentModelError | undefined {
   ) return undefined;
   return {
     category: record.category,
+    ...(record.origin === "model_catalog_fallback" ? { origin: "model_catalog_fallback" as const } : {}),
     ...(typeof record.detail === "string" ? { detail: record.detail } : {}),
     ...(typeof record.presetId === "string" ? { presetId: record.presetId } : {}),
     ...(record.source === "account" || record.source === "byok" ? { source: record.source } : {}),

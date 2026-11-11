@@ -9,6 +9,7 @@ import type { BackendServices } from "../../../services/index.js";
 import { registerAccountRoutes } from "./routes/account.js";
 import { registerTokenQuotaRoutes } from "./routes/token-quota.js";
 import { registerAppConfigRoutes } from "./routes/app-config.js";
+import { registerModelCapabilityCatalogRoutes } from "./routes/model-capability-catalog.js";
 import { registerAgentSourceRoutes } from "./routes/agent-sources.js";
 import { registerAgentRuntimeRoutes } from "./routes/agent-runtime/index.js";
 import { registerAsrRoutes } from "./routes/asr.js";
@@ -123,6 +124,10 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   });
   registerAppConfigRoutes(app, {
     appConfig: options.services.appConfig,
+    authenticateRuntimeToken
+  });
+  registerModelCapabilityCatalogRoutes(app, {
+    modelCapabilityCatalog: options.services.modelCapabilityCatalog,
     authenticateRuntimeToken
   });
   registerAccountRoutes(app, {
@@ -379,6 +384,9 @@ function startSse(
       payload: event
     });
   });
+  const unsubscribeModelCatalog = progressBus.on("model_catalog.updated", (payload) => {
+    send({ id: randomUUID(), type: "model_catalog.updated", timestamp: new Date().toISOString(), payload });
+  });
   for (const payload of progressBus.pendingPluginEvents()) {
     send({ id: randomUUID(), type: "plugin.capability_event", timestamp: new Date().toISOString(), payload });
   }
@@ -396,6 +404,7 @@ function startSse(
     unsubscribeScanProgress();
     unsubscribeScanCompleted();
     unsubscribePluginCapability();
+    unsubscribeModelCatalog();
     unregister();
   };
 

@@ -137,11 +137,12 @@ const REPLAY_EXTRA_KEYS = [
   "name",
   "reasoning_content",
   "thinking_blocks",
+  "memmy_protocol_state",
   "extra_content",
 ] as const;
 
 function hasAssistantReplayState(message: Record<string, any>): boolean {
-  return "tool_calls" in message || "reasoning_content" in message || "thinking_blocks" in message;
+  return "tool_calls" in message || "reasoning_content" in message || "thinking_blocks" in message || "memmy_protocol_state" in message;
 }
 
 function synthesizeContent(message: Record<string, any>, includeTimestamps: boolean): Record<string, any> | null {
@@ -192,6 +193,7 @@ function sanitizeCrossProviderReplay(
   const sanitized = { ...message };
   delete sanitized.reasoning_content;
   delete sanitized.thinking_blocks;
+  delete sanitized.memmy_protocol_state;
   delete sanitized.extra_content;
   if (Array.isArray(sanitized.tool_calls)) {
     sanitized.tool_calls = sanitized.tool_calls.map((call: Record<string, any>) => {

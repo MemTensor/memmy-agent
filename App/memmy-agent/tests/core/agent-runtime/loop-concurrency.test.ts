@@ -415,6 +415,7 @@ describe("AgentLoop concurrent chat turns", () => {
       bus: new MessageBus(),
       config: new Config({ memmyMemory: { enabled: false } }),
       provider: providers["preset-a"],
+      modelCapabilityCatalog: null,
       workspace,
       modelSelectionResolver: ({ requestedPreset }) => requestedPreset
         ? selections[requestedPreset] ?? null

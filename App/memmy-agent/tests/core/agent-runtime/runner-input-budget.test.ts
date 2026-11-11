@@ -148,6 +148,7 @@ describe("AgentRunner model input budget", () => {
     const result = await new AgentRunner(llm as any).run(new AgentRunSpec({
       messages: [{ role: "user", content: "Describe this" }, ...exchange("legacy", [{ type: "image", mimeType: "image/png", data: PNG }])],
       provider: llm as any, model: "deepseek-v4-pro", actualModelContext: { source: "account", provider: "memmy_account", model: "deepseek-v4-pro" } as any,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"], contextWindowTokens: 10_000, maxTokens: 100 },
       contextWindowTokens: 10_000, maxTokens: 100, contextBlockLimit: 1_000,
     }));
     expect(result.content).toBe("done");

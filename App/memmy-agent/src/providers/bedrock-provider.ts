@@ -38,15 +38,6 @@ function deepMerge(base: Record<string, any>, override: Record<string, any>): Re
   return merged;
 }
 
-function headerGet(headers: any, name: string): any {
-  if (!headers) return null;
-  if (typeof headers.get === "function") return headers.get(name) ?? headers.get(name.toLowerCase());
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === name.toLowerCase()) return value;
-  }
-  return null;
-}
-
 function nextOrNull<T>(iterator: Iterator<T>): T | null {
   const next = iterator.next();
   return next.done ? null : next.value;
@@ -332,23 +323,27 @@ export class BedrockProvider extends LLMProvider {
     temperature?: number;
     reasoningEffort?: string | null;
     toolChoice?: string | Record<string, any> | null;
+    modelCapabilities?: import("./turn-model-capabilities.js").TurnModelCapabilities;
   }): Record<string, any> {
     const modelId = BedrockProvider.stripPrefix(args.model ?? this.defaultModel);
-    let [system, messages] = this.convertMessages(LLMProvider.sanitizeEmptyContent(args.messages));
-    if (!messages.length) messages = [{ role: "user", content: [{ text: "(empty)" }] }];
+    const [system, convertedMessages] = this.convertMessages(LLMProvider.sanitizeEmptyContent(args.messages));
+    const messages = convertedMessages.length ? convertedMessages : [{ role: "user", content: [{ text: "(empty)" }] }];
 
     const kwargs: Record<string, any> = {
       modelId,
       messages,
-      inferenceConfig: { maxTokens: Math.max(1, args.maxTokens ?? this.generation.maxTokens) },
+      inferenceConfig: {},
     };
+    const maxTokens = LLMProvider.requestMaxTokens(args, this.generation);
+    if (maxTokens !== undefined) kwargs.inferenceConfig.maxTokens = Math.max(1, maxTokens);
     if (system.length) kwargs.system = system;
     if (BedrockProvider.supportsTemperature(modelId)) kwargs.inferenceConfig.temperature = args.temperature ?? this.generation.temperature;
 
     let additional: Record<string, any> = {};
-    const reasoningEffort = args.reasoningEffort ?? this.generation.reasoningEffort;
+    const reasoningEffort = LLMProvider.requestReasoningEffort(args, this.generation);
     if (BedrockProvider.usesAdaptiveThinkingOnly(modelId)) {
-      const thinking = BedrockProvider.adaptiveThinking(reasoningEffort);
+      const thinking = BedrockProvider.adaptiveThinking(reasoningEffort
+        ?? (args.modelCapabilities?.thinkingEnabled === true ? "adaptive" : undefined));
       if (thinking) additional.thinking = thinking;
     }
     if (this.extraBodyFields) additional = deepMerge(additional, this.extraBodyFields);

@@ -1,3 +1,4 @@
+import { computerUseRequestContext } from "../core/agent-runtime/computer-use-request-context.js";
 import { spawn, type SpawnOptions } from "node:child_process";
 import { OutboundMessage } from "../core/runtime-messages/events.js";
 import {
@@ -15,6 +16,7 @@ import {
   resolveModelSelection,
   type ResolvedModelSelection,
 } from "../providers/model-catalog.js";
+import { isGuiImChannel } from "../entrypoints/frontend-bridge/gui-session-projection.js";
 import { handlePairingCommand } from "../integrations/channel-auth/store.js";
 import { buildStatusContent, type RuntimeStatusSnapshot } from "../utils/helpers.js";
 import { fetchSearchUsage } from "../utils/searchusage.js";
@@ -510,16 +512,22 @@ export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage> {
     const objective = command === "create" ? argument : rawArgs;
     const turnId = String(ctx.turnId ?? ctx.msg.metadata?.turn_id ?? "").trim();
     if (!turnId) throw new GoalRuntimeError("goal_route_unavailable");
+    const request = computerUseRequestContext(ctx.msg);
     const goal = await runtime.create({
       sessionKey: ctx.key,
       objective,
-      route: { channel: ctx.msg.channel, chatId: ctx.msg.chatId },
+      route: { channel: ctx.msg.channel, chatId: ctx.msg.chatId,
+        ...(ctx.msg.turnSource ? { source: ctx.msg.turnSource } : {}),
+        ...(ctx.msg.turnSource && request.messageId && request.metadata.computerUseInteractive === true
+          ? { computerUseMessageId: request.messageId } : {}),
+      },
       turnId,
     });
     ctx.loop.scheduleGoalWork?.(ctx.key, goal);
-    return reply(ctx, `Goal created.\n${goalStatusText(goal)}`, {
+    const fromIm = isGuiImChannel(ctx.msg.channel);
+    return reply(ctx, fromIm ? "Goal created." : `Goal created.\n${goalStatusText(goal)}`, {
       renderAs: "text",
-      ...(ctx.msg.channel === "websocket" && ctx.msg.metadata?.webui === true
+      ...(fromIm || (ctx.msg.channel === "websocket" && ctx.msg.metadata?.webui === true)
         ? { webuiGoalCreateAck: true }
         : {}),
     });

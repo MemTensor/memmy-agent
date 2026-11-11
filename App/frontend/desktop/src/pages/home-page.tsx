@@ -11,7 +11,7 @@ import { applySidebarRecordingAction, sidebarRecordingStatus } from "./recording
 import { pendingAgentQuestion, AgentQuestionCard, AgentQuestionActiveRequestContext } from "./agent-question-card.js";
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
-import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
+import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
@@ -687,11 +687,11 @@ export function thinkingPayloadForSend(
 ): { thinkingEnabled?: boolean; thinkingLevel?: string | null } {
   const config = resolveThinkingConfigForModel(workspace, candidate);
   if (!config) return {};
-  const thinkingEnabled = resolveThinkingEnabled(config, sessionThinking?.enabled);
-  const thinkingLevel = thinkingEnabled
-    ? resolveThinkingLevel(config, sessionThinking?.level)
-    : null;
-  return { thinkingEnabled, thinkingLevel };
+  // Runtime resolves defaults and validates saved choices against its own turn snapshot.
+  return {
+    ...(sessionThinking?.enabled !== undefined ? { thinkingEnabled: sessionThinking.enabled } : {}),
+    ...(sessionThinking?.level !== undefined ? { thinkingLevel: sessionThinking.level } : {})
+  };
 }
 
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {

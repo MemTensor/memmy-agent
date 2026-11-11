@@ -50,6 +50,7 @@ import {
   suppressBundledPlugins
 } from "./services/bundled-plugin-bootstrap-service.js";
 import { reconcileEntitledPlugins } from "./services/plugin-entitlement-reconcile-service.js";
+import type { ModelCapabilityCatalogSyncService } from "./services/model-capability-catalog-sync-service.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
@@ -71,6 +72,8 @@ export interface CreateLocalBackendOptions {
   runtimeConfigPath?: string;
   /** Memmy config path. Required unless MEMMY_CONFIG is set. */
   memmyConfigPath?: string;
+  /** Defaults to ~/.memmy/models.json; isolated installations and tests may override it. */
+  modelCapabilityCatalogPath?: string;
   /** Memory service address exposed to desktop and browser-debug clients. */
   memoryBaseUrl?: string;
   /** Resolves when the managed Memory service is ready for startup config reload. */
@@ -108,6 +111,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
   let pluginLifecycle: import("./services/index.js").BackendServices["pluginLifecycle"];
   let pluginService: PluginService | null = null;
+  let modelCapabilityCatalog: ModelCapabilityCatalogSyncService | null = null;
 
   try {
     if (options.desktopInstallFingerprint) {
@@ -180,6 +184,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       agentAdapterRegistry,
       memoryClient,
       cloudClient,
+      modelCapabilityCatalogPath: options.modelCapabilityCatalogPath,
       permissionManager,
       bootstrapScenario: options.bootstrapScenario,
       memmyConfigWriter,
@@ -197,6 +202,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     pluginService = services.plugins;
     pluginLifecycle = services.pluginLifecycle;
+    modelCapabilityCatalog = services.modelCapabilityCatalog;
+    modelCapabilityCatalog.start();
     await pluginLifecycle?.start();
     if (bundledCatalog) {
       const failures = await suppressBundledPlugins({
@@ -320,6 +327,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         return appStateStore.repositories.bootstrap.recordLastLaunchMode(mode);
       },
       async close() {
+        await services.modelCapabilityCatalog.stop();
         try {
           await boundServer.close();
         } finally {
@@ -330,6 +338,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       }
     };
   } catch (error) {
+    await modelCapabilityCatalog?.stop();
     await server?.close().catch(() => undefined);
     if (pluginLifecycle) await pluginLifecycle.close();
     else await pluginService?.shutdown();

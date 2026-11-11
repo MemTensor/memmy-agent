@@ -174,6 +174,7 @@ function publicModelErrorContext(value: unknown): Record<string, string> {
   const fields = ["presetId", "provider", "model", "capability"] as const;
   if (fields.some((field) => typeof context[field] !== "string" || !String(context[field]).trim())) return {};
   return {
+    ...(context.origin === "model_catalog_fallback" ? { origin: "model_catalog_fallback" } : {}),
     presetId: String(context.presetId),
     source: context.source,
     provider: String(context.provider),

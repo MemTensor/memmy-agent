@@ -5,6 +5,7 @@ import type {
   AuthorizeIntegrationResponse,
   AccountInvitationView,
   HealthStatus,
+  ModelCapabilityCatalog,
   IntegrationCapabilitiesResponse,
   IntegrationConnectionsResponse,
   LegalAgreementUrls,
@@ -24,6 +25,15 @@ export interface CloudHealth {
   checkedAt: string;
   message?: string;
 }
+
+export interface GetModelCapabilityCatalogInput {
+  uuid: string;
+  catalogVersion?: number;
+}
+
+export type ModelCapabilityCatalogResult =
+  | { status: "not-modified" }
+  | { status: "updated"; catalog: ModelCapabilityCatalog };
 
 export interface SendEmailCodeInput {
   email: string;
@@ -254,6 +264,7 @@ export interface CloudAsrTranscriptionResult {
 }
 
 export interface CloudClient {
+  getModelCapabilityCatalog(input: GetModelCapabilityCatalogInput): Promise<ModelCapabilityCatalogResult>;
   health(): Promise<CloudHealth>;
   sendEmailCode(input: SendEmailCodeInput): Promise<void>;
   sendPhoneCode(input: SendPhoneCodeInput): Promise<void>;
