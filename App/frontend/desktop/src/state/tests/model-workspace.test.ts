@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
-  getModelThinkingConfig,
   type ModelConfigInput,
   type ModelConfigView,
   type ModelEndpointProtocol
@@ -1223,29 +1222,51 @@ describe("canonical model workspace adapter", () => {
     });
   });
 
-  it("OpenAI Chat Completions 的 gpt-6 不提供目录思考，Responses 仍提供", () => {
+  it("保留 Chat Completions 的 GPT 思考控件适配，Responses 使用云端配置", () => {
     const chat = openaiThinkingWorkspace("openai-chat-completions", "gpt-6-sol");
     const responses = openaiThinkingWorkspace("openai-responses", "gpt-6-sol");
     const chatCandidate = getTaskModelCandidates(chat, "byok").find((item) => item.model === "gpt-6-sol")!;
     const responsesCandidate = getTaskModelCandidates(responses, "byok").find((item) => item.model === "gpt-6-sol")!;
 
     expect(resolveThinkingConfigForModel(chat, chatCandidate)).toBeNull();
-    expect(resolveThinkingConfigForModel(responses, responsesCandidate)).toEqual(getModelThinkingConfig("gpt-6-sol"));
+    expect(resolveThinkingConfigForModel(responses, responsesCandidate)).toEqual(responses.catalog.capabilityCatalog!.models["gpt-6-sol"].thinking);
   });
 
-  it("OpenAI Chat Completions 的 gpt-4o 不提供目录思考，Responses 仍按目录", () => {
+  it.each(["o1", "o3", "o4-mini"])("保留 %s 的 Chat Completions 适配，自定义配置仍优先", (model) => {
+    const workspace = openaiThinkingWorkspace("openai-chat-completions", model);
+    const thinking = { switchable: true, defaultEnabled: true, levels: ["high"] as const, defaultLevel: "high" as const };
+    workspace.catalog.capabilityCatalog!.models[model]!.thinking = { ...thinking, levels: [...thinking.levels] };
+    const candidate = getTaskModelCandidates(workspace, "byok").find((item) => item.model === model)!;
+    expect(resolveThinkingConfigForModel(workspace, candidate)).toBeNull();
+    const entry = workspace.spaces.byok.connections[0]!.modelEntries[0]!;
+    entry.custom = true;
+    entry.thinking = { ...thinking, levels: [...thinking.levels] };
+    expect(resolveThinkingConfigForModel(workspace, candidate)).toEqual(entry.thinking);
+  });
+
+  it("云端省略思考配置时不从源码表补齐", () => {
     const chat = openaiThinkingWorkspace("openai-chat-completions", "gpt-4o");
     const responses = openaiThinkingWorkspace("openai-responses", "gpt-4o");
     const chatCandidate = getTaskModelCandidates(chat, "byok").find((item) => item.model === "gpt-4o")!;
     const responsesCandidate = getTaskModelCandidates(responses, "byok").find((item) => item.model === "gpt-4o")!;
 
     expect(resolveThinkingConfigForModel(chat, chatCandidate)).toBeNull();
-    expect(resolveThinkingConfigForModel(responses, responsesCandidate)).toEqual(getModelThinkingConfig("gpt-4o"));
+    expect(resolveThinkingConfigForModel(responses, responsesCandidate)).toBeNull();
+    delete responses.catalog.capabilityCatalog;
+    expect(resolveThinkingConfigForModel(responses, { ...responsesCandidate, model: "gpt-6-sol" })).toBeNull();
+  });
+
+  it("同名自定义模型没有思考配置时不套入云端配置，且云端能力不进入保存请求", () => {
+    const workspace = openaiThinkingWorkspace("openai-responses", "gpt-6-sol");
+    const candidate = getTaskModelCandidates(workspace, "byok")[0]!;
+    workspace.spaces.byok.connections[0]!.modelEntries[0]!.custom = true;
+    expect(resolveThinkingConfigForModel(workspace, candidate)).toBeNull();
+    expect(modelConfigInput(workspace)).not.toHaveProperty("capabilityCatalog");
   });
 });
 
 function openaiThinkingWorkspace(protocol: ModelEndpointProtocol, model: string) {
-  return upsertModelConnection(createModelWorkspace(null), "byok", {
+  const workspace = upsertModelConnection(createModelWorkspace(null), "byok", {
     provider: "openai",
     endpoint: "https://api.openai.com/v1",
     protocol,
@@ -1257,4 +1278,9 @@ function openaiThinkingWorkspace(protocol: ModelEndpointProtocol, model: string)
       capabilities: ["chat", "memorySummary", "memoryEvolution"]
     }]
   }).workspace;
+  workspace.catalog.capabilityCatalog = { catalogVersion: 21, models: {
+    [model]: { inputModalities: ["text"], contextWindowTokens: 128000, maxTokens: 8192,
+      ...(model === "gpt-6-sol" ? { thinking: { switchable: true, defaultEnabled: true, levels: ["high"], defaultLevel: "high" } } : {}) }
+  } };
+  return workspace;
 }

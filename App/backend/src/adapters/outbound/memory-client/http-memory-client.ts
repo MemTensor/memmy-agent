@@ -7,6 +7,8 @@ import {
   ScanResultPageSchema,
   OkResponseSchema,
   AddMemoryOutputSchema,
+  AgentSkillReconcileOutputSchema,
+  SkillArchiveStateOutputSchema,
   ApiErrorBodySchema,
   CloseSessionOutputSchema,
   CompleteTurnOutputSchema,
@@ -149,6 +151,7 @@ export function createHttpMemoryClient(
 
   return {
     agentSources: {
+      connectionState: (sourceId) => request("GET", "agentSourceConnectionState", z.object({ connectionState: z.enum(["connected", "disconnected"]).nullable(), connectionEvent: z.object({ id: z.string().min(1), revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), state: z.enum(["connected", "disconnected"]), kind: z.enum(["skill", "plugin"]).optional() }).optional() }), { params: { sourceId }, maxRetries: 0 }),
       list: () => request("GET", "agentSources", MemoryAgentSourceListSchema),
       start: (input) => request("POST", "agentSourceScan", AgentSourceScanJobResponseSchema, { body: input, maxRetries: 0 }),
       status: () => request("GET", "agentSourceStatus", MemoryAgentSourceScanStateSchema),
@@ -230,6 +233,22 @@ export function createHttpMemoryClient(
 
     async addMemory(input, context) {
       return request("POST", "addMemory", AddMemoryOutputSchema, { body: input, context });
+    },
+
+    async reconcileAgentSkills(input, context) {
+      return request("POST", "reconcileAgentSkills", AgentSkillReconcileOutputSchema, {
+        body: input,
+        context,
+        ...(input.connectionState !== undefined || input.disconnected === true ? { maxRetries: 0 } : {})
+      });
+    },
+
+    async archiveSkill(skillId, context) {
+      return request("POST", "archiveSkill", SkillArchiveStateOutputSchema, { body: { skillId }, context });
+    },
+
+    async reactivateSkill(skillId, context) {
+      return request("POST", "reactivateSkill", SkillArchiveStateOutputSchema, { body: { skillId }, context });
     },
 
     async getMemory(input, context) {

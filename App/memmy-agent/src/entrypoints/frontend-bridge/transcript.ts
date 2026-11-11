@@ -544,6 +544,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   }
 
   function modelError(value: any): {
+    origin?: "model_catalog_fallback";
     category: "quota_exhausted" | "image_input_unsupported" | "image_analysis_failed" | "model_failed";
     detail?: string;
     presetId?: string;
@@ -561,6 +562,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       || value.category === "model_failed"
       ? {
           category: value.category,
+          ...(value.origin === "model_catalog_fallback" ? { origin: "model_catalog_fallback" as const } : {}),
           ...(typeof value.detail === "string" ? { detail: value.detail } : {}),
           ...(typeof value.presetId === "string" ? { presetId: value.presetId } : {}),
           ...(value.source === "account" || value.source === "byok" ? { source: value.source } : {}),

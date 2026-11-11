@@ -5,7 +5,7 @@ import { InstalledPluginSchema } from "@memmy/local-api-contracts";
 import { expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { PluginUiProvider, usePluginUi, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import { PluginCapabilityHost, selectVisiblePluginCalls, selectRegionPluginCalls } from "../plugin-capability-host.js";
+import { FileInputCard, PluginCapabilityHost, selectVisiblePluginCalls, selectRegionPluginCalls } from "../plugin-capability-host.js";
 import { InterviewRecordingPanel } from "../interview-recording-panel.js";
 import { pressPinnedPluginCommand } from "../home-page.js";
 
@@ -300,7 +300,7 @@ it.each([false, true])("automatically lists saved recording files, scopes them t
   } finally { await act(async () => root.unmount()); container.remove(); }
 });
 
-it("lets the user submit while a staged recording is still transcribing, then continues with its transcript", async () => {
+it("holds submission while a staged recording is transcribing, then sends its transcript", async () => {
   const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
   let ui!: ReturnType<typeof usePluginUi>;
   const respond = vi.fn(async () => undefined);
@@ -330,12 +330,13 @@ it("lets the user submit while a staged recording is still transcribing, then co
     const submit = container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__footer button")!;
     expect(submit.disabled).toBe(false);
     await act(async () => submit.click());
-    // Pressing it does not send a gap where the interview should be.
+    // Raw audio never travels from this card; the row is flagged instead.
     expect(respond).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("完成后会自动继续");
+    expect(container.querySelector(".diagnostic-upload-card__transcription--blocked")).not.toBeNull();
     await act(async () => finish());
-    // The plugin never saw this recording, so its transcript arrives as the
-    // file itself — not also as attached text, which would double it.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => submit.click());
+    expect(respond).toHaveBeenCalledTimes(1);
     expect(respond).toHaveBeenCalledWith(plugin.id, call.callId, "files", {
       files: [transcriptFile], recordingDeliverables: [audio, transcriptFile]
     });
@@ -408,10 +409,87 @@ it("keeps a lightweight retry action after automatic transcription retries are s
     expect(actions[0]?.disabled).toBe(false);
     await act(async () => actions[0]!.click());
     expect(attempt).toHaveBeenCalledTimes(4);
+    await act(async () => container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__footer button")!.click());
     expect(respond).toHaveBeenCalledWith(plugin.id, call.callId, "files", {
       files: [], transcripts: { [audio.path]: { text: "现场访谈内容", segments: [] } },
       recordingDeliverables: [transcriptFile]
     });
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});
+
+it("blocks submission after failed transcription until the recording is removed", async () => {
+  const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
+  let ui!: ReturnType<typeof usePluginUi>;
+  const respond = vi.fn(async () => undefined);
+  const generate = vi.fn();
+  const uploaded = { kind: "file" as const, path: "/media/material.txt", name: "material.txt",
+    mime: "text/plain" as const, bytes: 8, url: "/material" };
+  const uploadFiles = vi.fn(async () => [uploaded]);
+  const audio = { kind: "audio" as const, path: "/media/failed.webm", name: "访谈录音.webm",
+    mime: "audio/webm" as const, bytes: 10, url: "/audio" };
+  const request = { interactionId: "files", type: "file-input" as const,
+    payload: { title: "补充诊断材料", multiple: true } };
+  function Page() { ui = usePluginUi(); return <FileInputCard conversationId="chat-failed" pluginId="legal-labor"
+    request={request} diagnosticUpload title="补充诊断材料" description={null} disabled={false} status="idle"
+    onStatus={vi.fn()} onRespond={respond} onUploadFiles={uploadFiles} onGenerateDiagnosis={generate} />; }
+  try {
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="zh-CN"><Page /></I18nProvider></PluginUiProvider>));
+    await act(async () => {
+      ui.startTranscription(audio.path, async () => { throw new Error("ASR down"); });
+      ui.addRecordingMaterials("legal-labor", "chat-failed", [{ ...audio, collected: true, pending: true }]);
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(picker, "files", { value: [new File(["material"], "material.txt", { type: "text/plain" })] });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.textContent).toContain("转写失败（已自动重试 3 次）");
+    const scroll = vi.fn();
+    container.querySelector<HTMLLIElement>(".diagnostic-upload-card__file")!.scrollIntoView = scroll;
+    await act(async () => container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__footer button")!.click());
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(uploadFiles).not.toHaveBeenCalled();
+    expect(respond).not.toHaveBeenCalled();
+    expect(container.querySelector(".diagnostic-upload-card__transcription--failed")?.textContent).toContain("请重试或移除");
+    await act(async () => container.querySelector<HTMLButtonElement>(`[aria-label="移除文件 ${audio.name}"]`)!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__footer button")!.click());
+    expect(uploadFiles).toHaveBeenCalledTimes(1);
+    expect(respond).toHaveBeenCalledWith("files", { files: [uploaded] });
+    expect(generate).toHaveBeenCalledTimes(1);
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});
+
+it("waits for the user to resubmit once transcription finishes and starts one report", async () => {
+  const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
+  let ui!: ReturnType<typeof usePluginUi>;
+  let finish!: (transcript: { text: string; segments: []; transcribedAt: string }) => void;
+  const attempt = () => new Promise<{ text: string; segments: []; transcribedAt: string }>((resolve) => { finish = resolve; });
+  const respond = vi.fn(async () => undefined);
+  const generate = vi.fn();
+  const audio = { kind: "audio" as const, path: "/media/pending.webm", name: "访谈录音.webm",
+    mime: "audio/webm" as const, bytes: 10, url: "/audio" };
+  function Page() { ui = usePluginUi(); return <FileInputCard conversationId="chat-pending" pluginId="legal-labor"
+    request={{ interactionId: "files", type: "file-input", payload: { title: "补充诊断材料", multiple: true } }}
+    diagnosticUpload title="补充诊断材料" description={null} disabled={false} status="idle"
+    onStatus={vi.fn()} onRespond={respond} onUploadFiles={vi.fn()} onGenerateDiagnosis={generate} />; }
+  try {
+    await act(async () => root.render(<PluginUiProvider><I18nProvider language="zh-CN"><Page /></I18nProvider></PluginUiProvider>));
+    await act(async () => {
+      ui.startTranscription(audio.path, attempt);
+      ui.addRecordingMaterials("legal-labor", "chat-pending", [{ ...audio, collected: true, pending: true, pendingAudio: audio }]);
+    });
+    expect(container.textContent).toContain("正在转写…完成后才能生成报告");
+    const submit = container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__footer button")!;
+    await act(async () => submit.click());
+    expect(respond).not.toHaveBeenCalled();
+    expect(generate).not.toHaveBeenCalled();
+    expect(container.querySelector(".diagnostic-upload-card__transcription--blocked")?.getAttribute("role")).toBe("alert");
+    await act(async () => finish({ text: "稍后完成", segments: [], transcribedAt: "2026-11-02T00:00:00Z" }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    // Finishing does not submit by itself; the user presses once more.
+    expect(respond).not.toHaveBeenCalled();
+    await act(async () => submit.click());
+    expect(respond).toHaveBeenCalledWith("files", { files: [], transcripts: { [audio.path]: { text: "稍后完成", segments: [] } }, recordingDeliverables: [audio] });
+    expect(generate).toHaveBeenCalledTimes(1);
   } finally { await act(async () => root.unmount()); container.remove(); }
 });
 
@@ -439,7 +517,7 @@ it("keeps the microphone owner mounted while its composer bar is occluded", asyn
   } finally { act(() => root.unmount()); container.remove(); dock.remove(); }
 });
 
-it("keeps Agent plugin files out of automatic delivery cards", async () => {
+it("does not show a diagnosis report until the assistant delivers it", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -454,8 +532,8 @@ it("keeps Agent plugin files out of automatic delivery cards", async () => {
       <PluginCapabilityHost region="flow" calls={[report]} plugins={[plugin]}
         client={{ getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn() }} />
     </I18nProvider></PluginUiProvider>));
-    expect(container.querySelector(".legal-delivery-card")).toBeNull();
-    expect(container.textContent).not.toContain("企业-诊断报告");
+    expect(container.querySelector(".agent-delivered-files")).toBeNull();
+    expect(container.textContent ?? "").not.toContain("企业-诊断报告");
   } finally {
     act(() => root.unmount());
     container.remove();

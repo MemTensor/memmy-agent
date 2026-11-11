@@ -1,4 +1,4 @@
-import type { LLMRuntimeResolver } from "../../../utils/llm-runtime.js";
+import type { LLMRuntime, LLMRuntimeResolver } from "../../../utils/llm-runtime.js";
 import type { MemmyOutputLanguage } from "../../../memmy-memory/discovery.js";
 import { normalizeOutputLanguage } from "@memmy/local-api-contracts";
 import { redactSensitive } from "./summarize-history.js";
@@ -160,6 +160,16 @@ export async function writeSegmentNarrative(
     return null;
   }
 
+  let runtime: LLMRuntime;
+  try {
+    const captured = request.modelPreset ? llmRuntime(request.modelPreset) : llmRuntime();
+    runtime = captured.prepare ? await captured.prepare({ maxTokens: MAX_TOKENS, thinkingEnabled: false }) : captured;
+  } catch (error) {
+    request.onError?.(error instanceof Error ? error.message : String(error));
+    return null;
+  }
+  const capabilities = runtime.modelCapabilities;
+
   const span = request.window === "6h" ? "six-hour grouping interval" : "ten-minute grouping interval";
   const priorCandidates = (request.priorSummaries ?? []).slice(-2)
     .map((summary) => summary.slice(0, MAX_PRIOR_SUMMARY_CHARS).trim())
@@ -241,11 +251,8 @@ export async function writeSegmentNarrative(
   }
 
   try {
-    // Pass nothing when no preset was asked for. Coercing that to null reads as
-    // "resolve the preset named null", which the gateway's resolver cannot do —
-    // it answered model_selection_unavailable and narration silently gave up.
-    const runtime = request.modelPreset ? llmRuntime(request.modelPreset) : llmRuntime();
     const response = await runtime.provider.chatWithRetry({
+      ...(capabilities ? { modelCapabilities: capabilities, capabilityCatalogState: runtime.capabilityCatalogState } : {}),
       messages: messages(),
       tools: null,
       model: runtime.model,

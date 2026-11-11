@@ -20,12 +20,12 @@ import { usePluginUi } from "./app/plugin-ui-context.js";
 import { AgentSourceScanReconciler } from "./app/agent-source-scan-reconciler.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
-import { CampaignPromptHost } from "./components/campaign-prompt-host.js";
 import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
 import { HistoryLaunchPromptHost } from "./components/history-launch-prompt-host.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
 import { NotificationCenterProvider } from "./components/notification-center.js";
 import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
+import { TaskTokenGiftPromptHost } from "./components/task-token-gift-prompt-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -288,9 +288,23 @@ function RuntimeApp() {
         dispatch(appActions.eventStatusChanged("connecting"));
 
         events = createEventsConnection(runtimeConfig);
+        let modelRefreshVersion = 0;
+        const refreshModelView = async () => {
+          const version = ++modelRefreshVersion;
+          try {
+            const config = await clients.config.getModelConfig();
+            if (isActive && version === modelRefreshVersion) dispatch(appActions.modelConfigUpdated(config));
+          } catch (error) {
+            console.warn("Model capability view refresh failed", error);
+          }
+        };
         events.addEventListener("app.connected", () => {
           dispatch(appActions.eventStatusChanged("connected"));
           void reconcileAgentSourceScanStatus(clients.agentSources);
+          void refreshModelView();
+        });
+        events.addEventListener("model_catalog.updated", (event) => {
+          if (parseSseEvent(event)?.type === "model_catalog.updated") void refreshModelView();
         });
         events.addEventListener("app.heartbeat", () => {
           dispatch(appActions.eventStatusChanged("heartbeat"));
@@ -346,8 +360,9 @@ function RuntimeApp() {
         <AgentSourceScanReconciler />
           <AppRouter onRetry={retry} />
           <ActiveRecordingBar client={clients?.memmyAgent ?? null} />
+<TaskTokenGiftPromptHost />
+
           <HistoryLaunchPromptHost />
-          <CampaignPromptHost />
           <TokenCreditToastHost />
           <GithubStarPromptHost />
           {state.invitationToast ? (

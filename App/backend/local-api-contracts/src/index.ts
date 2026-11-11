@@ -1,6 +1,7 @@
 /** Memmy local API contract. */
 import { z } from "zod";
 import { ModelThinkingConfigSchema } from "./model-thinking-levels.js";
+import { ModelCapabilityCatalogSchema } from "./model-capability-catalog.js";
 import { PluginCapabilityEventPayloadSchema } from "./plugin.js";
 export * from "@memmy/agent-source-core/scan-state";
 export { resolveMemoryConnection, sameHttpOrigin } from "@memmy/agent-source-core/memory-connection";
@@ -13,7 +14,9 @@ import { normalizeOutputLanguage } from "./output-language.js";
 export { normalizeOutputLanguage } from "./output-language.js";
 
 export * from "./model-catalog-resolver.js";
+export * from "./model-capability-catalog.js";
 export * from "./model-thinking-levels.js";
+export { anthropicRequestModelId } from "./anthropic-model-id.js";
 
 export * from "./memory-runtime.js";
 export * from "./memory-canonical-json.js";
@@ -704,6 +707,22 @@ export const LotteryRewardAckInputSchema = z.object({
 });
 export type LotteryRewardAckInput = z.infer<typeof LotteryRewardAckInputSchema>;
 
+/** Already-granted task Token benefit awaiting acknowledgement. */
+export const TaskTokenGiftNoticeSchema = z.discriminatedUnion("hasGift", [
+    z.object({ hasGift: z.literal(false), audience: z.enum(["new", "existing"]).optional() }),
+    z.object({
+        hasGift: z.literal(true),
+        grantId: z.string().min(1),
+        audience: z.enum(["new", "existing"]),
+        tokenAmount: z.number().int().positive(),
+        totalTokens: z.number().int().nonnegative()
+    })
+]);
+export type TaskTokenGiftNotice = z.infer<typeof TaskTokenGiftNoticeSchema>;
+
+export const TaskTokenGiftAckInputSchema = z.object({ grantId: z.string().min(1) });
+export type TaskTokenGiftAckInput = z.infer<typeof TaskTokenGiftAckInputSchema>;
+
 export const AppBootstrapResponseSchema = z.object({
     app: AppSettingsDtoSchema,
     onboarding: OnboardingStateDtoSchema,
@@ -1207,6 +1226,7 @@ export type MemoryRuntimeModelSettings = z.infer<typeof MemoryRuntimeModelSettin
 
 /** Schema for model config view. */
 export const ModelConfigViewSchema = z.object({
+    capabilityCatalog: ModelCapabilityCatalogSchema.optional(),
     /** Write-response-only aliases, resolved by the server using real credentials. */
     endpointAliases: z.record(z.string(), z.record(z.string(), z.string())).optional(),
     configRevision: z.string().min(1),
@@ -1796,7 +1816,15 @@ export const PluginCapabilitySnapshotSseEventSchema = z.object({
     })
 });
 
+export const ModelCapabilityCatalogUpdatedSseEventSchema = z.object({
+    id: z.string(),
+    type: z.literal("model_catalog.updated"),
+    timestamp: z.string().datetime(),
+    payload: z.object({ catalogVersion: z.number().int().positive().safe() })
+});
+
 export const SseEventSchema = z.discriminatedUnion("type", [
+    ModelCapabilityCatalogUpdatedSseEventSchema,
     ConnectedSseEventSchema,
     HeartbeatSseEventSchema,
     ScanProgressSseEventSchema,

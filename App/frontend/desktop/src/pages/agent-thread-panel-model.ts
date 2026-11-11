@@ -329,7 +329,8 @@ export function threadTabForInAppPreview(file: { name: string; path?: string; ur
   const candidates = [file.name, file.path, file.url]
     .map((value) => (value ? threadFileName(value) : ""))
     .filter(Boolean);
-  const name = candidates.find((candidate) => threadPreviewKind(candidate) !== "unsupported");
+  const name = candidates.find((candidate) => threadPreviewKind(candidate) !== "unsupported")
+    ;
   if (!name || (!file.path && !file.url)) return null;
   if (file.path) {
     return {

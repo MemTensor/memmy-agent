@@ -1,5 +1,7 @@
 import type { KeyboardEventHandler, MouseEventHandler, ReactNode } from "react";
 import { X } from "lucide-react";
+import { NeutralFileTileIcon } from "./agent-thread-file-icon.js";
+import { threadFileKind } from "./agent-thread-panel-model.js";
 
 export type AgentFileDisplayKind = "pdf" | "docx" | "xlsx" | "pptx" | "file";
 
@@ -124,6 +126,7 @@ export function AgentAttachmentCard(props: AgentAttachmentCardProps) {
     "agent-attachment-card__meta",
     props.error ? "agent-attachment-card__meta--error" : ""
   ].filter(Boolean).join(" ");
+  const visual = resolveAgentFileVisual(props.name, props.mime);
   const mainContent = (
     <>
       {props.leading ? props.leading : props.kind === "image" ? (
@@ -145,7 +148,13 @@ export function AgentAttachmentCard(props: AgentAttachmentCardProps) {
           ) : null}
         </span>
       ) : (
-        <AgentFileIconTile name={props.name} mime={props.mime} size="md" />
+        visual.kind === "file" && threadFileKind(props.name) !== "file" ? (
+          <span className="agent-attachment-card__file-tile agent-attachment-card__file-tile--md" aria-label={visual.label}>
+            <NeutralFileTileIcon name={props.name} />
+          </span>
+        ) : (
+          <AgentFileIconTile name={props.name} mime={props.mime} size="md" />
+        )
       )}
       <span className="agent-attachment-card__body">
         <span className="agent-attachment-card__name">

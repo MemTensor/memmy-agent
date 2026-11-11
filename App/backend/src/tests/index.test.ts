@@ -13,6 +13,7 @@ import { createLocalBackend, readMemoryLayerConfig, type LocalBackend } from "..
 import { createAppStateStore } from "../infrastructure/app-state-store/index.js";
 import { createMockCloudClient } from "./support/mock-cloud-client.js";
 import { createMockMemoryClient } from "./support/mock-memory-client.js";
+import { readModelCapabilityCatalog, writeModelCapabilityCatalog } from "../infrastructure/model-capability-catalog/index.js";
 
 let tempDir: string | undefined;
 let backend: LocalBackend | undefined;
@@ -56,6 +57,77 @@ afterEach(async () => {
 });
 
 describe("local api", () => {
+  it.each([
+    { hasLocal: false, cloudFails: false },
+    { hasLocal: true, cloudFails: false },
+    { hasLocal: true, cloudFails: true },
+    { hasLocal: false, cloudFails: true }
+  ])("synchronizes the model catalog during startup and continues after failure: %j", async ({ hasLocal, cloudFails }) => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-catalog-startup-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const filePath = join(tempDir, "models.json");
+    const catalog = {
+      catalogVersion: 21,
+      models: { "gpt-4o": { inputModalities: ["text" as const, "image" as const], contextWindowTokens: 128000, maxTokens: 16384 } }
+    };
+    if (hasLocal) await writeModelCapabilityCatalog(catalog, filePath);
+    const store = createAppStateStore({ databasePath });
+    try {
+      store.repositories.accountSession.upsert({
+        uuid: "catalog-test-account",
+        cloudUuid: "catalog-test-credential",
+        profile: {
+          userId: "catalog-test-user", nickname: "Catalog test", email: "catalog@example.test",
+          phoneNumber: null, avatarUrl: null, planType: "free", hasFinishedGuide: true,
+          region: null, registeredAt: null, rawProfile: {}
+        }
+      });
+    } finally {
+      store.close();
+    }
+    const getModelCapabilityCatalog = vi.fn<CloudClient["getModelCapabilityCatalog"]>(async () => {
+      if (cloudFails) throw new Error("Cloud unavailable");
+      return { status: "updated", catalog: { ...catalog, catalogVersion: 22 } };
+    });
+    backend = await createLocalBackend({
+      databasePath,
+      memmyConfigPath: join(tempDir, "config.yaml"),
+      modelCapabilityCatalogPath: filePath,
+      runtimeConfigPath: join(tempDir, "runtime.json"),
+      localToken: "test-token",
+      memoryClient: createMockMemoryClient(),
+      cloudClient: { ...createMockCloudClient(), getModelCapabilityCatalog }
+    });
+    await vi.waitFor(() => expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({
+      uuid: "catalog-test-credential", ...(hasLocal ? { catalogVersion: 21 } : {})
+    }));
+    await vi.waitFor(async () => expect(await readModelCapabilityCatalog(filePath)).toEqual(
+      cloudFails ? hasLocal ? catalog : null : { ...catalog, catalogVersion: 22 }
+    ));
+    const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/bootstrap`, {
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+    expect(response.status).toBe(200);
+    const modelView = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+    expect(modelView.status).toBe(200);
+    const view = await modelView.json() as { capabilityCatalog?: unknown };
+    if (cloudFails && !hasLocal) expect(view).not.toHaveProperty("capabilityCatalog");
+    else expect(view.capabilityCatalog).toEqual(cloudFails ? catalog : { ...catalog, catalogVersion: 22 });
+    expect(YAML.parse(readFileSync(join(tempDir, "config.yaml"), "utf8"))).not.toHaveProperty("catalogVersion");
+    const rejectedRefresh = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-catalog/refresh`, { method: "POST" });
+    expect(rejectedRefresh.status).toBe(401);
+    if (!cloudFails) {
+      const refreshed = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-catalog/refresh`, {
+        method: "POST", headers: { "x-memmy-local-token": "test-token" }
+      });
+      expect(refreshed.status).toBe(200);
+      expect(await refreshed.json()).toEqual({ status: "synced", hasValidCatalog: true, catalogVersion: 22 });
+      expect(getModelCapabilityCatalog).toHaveBeenCalledTimes(2);
+    }
+  });
+
   it("requires an explicit Memmy config path instead of using the user's home directory", async () => {
     const previousMemmyConfig = process.env.MEMMY_CONFIG;
     delete process.env.MEMMY_CONFIG;

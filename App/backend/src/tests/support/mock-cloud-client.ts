@@ -46,6 +46,10 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
   let fallbackProfile: CloudAccountProfile | null = null;
 
   return {
+    async getModelCapabilityCatalog() {
+      throw new Error("Model catalog response is not configured in this test");
+    },
+
     async health() {
       return (
         options.health ?? {
@@ -239,6 +243,14 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
     },
 
     async ackLotteryReward() {
+      return undefined;
+    },
+
+    async ensureTaskTokenGift() {
+      return { hasGift: false };
+    },
+
+    async ackTaskTokenGift() {
       return undefined;
     }
   };

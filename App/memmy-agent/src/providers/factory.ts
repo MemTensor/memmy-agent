@@ -57,9 +57,8 @@ function providerInit(
     ...effective,
     apiBase: endpoint?.apiBase ?? config.getApiBase(model, { preset }),
     defaultModel: model,
-    apiType: protocol === "openai-responses"
-      ? "responses"
-      : protocol === "openai-chat-completions" ? "chatCompletions" : "auto",
+    // The catalog's default Chat tag identifies OpenAI compatibility, not a request to disable negotiation.
+    apiType: protocol === "openai-responses" ? "responses" : "auto",
     spec,
   };
 }

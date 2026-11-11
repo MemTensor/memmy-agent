@@ -152,22 +152,41 @@ describe("FilePreview", () => {
       load: async () => new Blob([new Uint8Array([0, 1, 2, 3])], { type: "application/octet-stream" })
     });
 
-    expect(container.textContent).toContain("暂不支持");
+    expect(container.querySelector(".thread-preview__placeholder-name")?.textContent).toBe("payload.unknown");
+    expect(container.textContent).toContain("此格式暂不支持应用内预览");
+    expect(container.querySelector(".workspace-artifact-preview-empty")).toBeNull();
   });
 
   it("offers a system-open fallback for unsupported files", async () => {
     const open = vi.fn();
     await render({
       id: "archive",
-      name: "bundle.zip",
+      name: "bundle.rar",
       open,
-      load: async () => new Blob(["zip"], { type: "application/zip" })
+      load: async () => new Blob(["rar"], { type: "application/vnd.rar" })
     });
 
-    expect(container.textContent).toContain("暂不支持");
+    expect(container.querySelector(".thread-preview__placeholder")).not.toBeNull();
+    expect(container.textContent).toContain("此格式暂不支持应用内预览");
+    expect(container.querySelector(".workspace-artifact-preview-empty")).toBeNull();
     const button = [...container.querySelectorAll("button")].find((item) => item.textContent?.includes("系统应用"))!;
     act(() => button.click());
     expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an unpreviewable archive with the current preview placeholder", async () => {
+    await render({
+      id: "bundle",
+      name: "bundle.zip",
+      open: vi.fn(),
+      load: async () => new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], { type: "application/zip" })
+    });
+
+    expect(container.querySelector(".thread-preview__placeholder")).not.toBeNull();
+    expect(container.querySelector(".thread-preview__placeholder-name")?.textContent).toBe("bundle.zip");
+    expect(container.textContent).toContain("此格式暂不支持应用内预览");
+    expect(container.querySelector(".workspace-artifact-preview-empty")).toBeNull();
+    expect(container.querySelector(".workspace-artifact-file-list")).toBeNull();
   });
 
   async function render(resource: FilePreviewResource) {

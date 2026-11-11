@@ -63,7 +63,7 @@ export class AzureOpenAIProvider extends LLMProvider {
     messages: Record<string, any>[],
     tools: Record<string, any>[] | null = null,
     model: string | null = null,
-    maxTokens = 4096,
+    maxTokens: number | null = 4096,
     temperature = 0.7,
     reasoningEffort: string | null = null,
     toolChoice: string | Record<string, any> | null = null,
@@ -74,7 +74,7 @@ export class AzureOpenAIProvider extends LLMProvider {
       model: deployment,
       instructions: instructions || null,
       input: inputItems,
-      max_output_tokens: Math.max(1, maxTokens),
+      ...(maxTokens !== null ? { max_output_tokens: Math.max(1, maxTokens) } : {}),
       store: false,
       stream: false,
     };
@@ -112,6 +112,7 @@ export class AzureOpenAIProvider extends LLMProvider {
           maxTokens?: number;
           temperature?: number;
           reasoningEffort?: string | null;
+          modelCapabilities?: import("./turn-model-capabilities.js").TurnModelCapabilities;
           toolChoice?: string | Record<string, any> | null;
           signal?: AbortSignal | null;
         }
@@ -130,9 +131,9 @@ export class AzureOpenAIProvider extends LLMProvider {
       args.messages,
       args.tools ?? null,
       args.model ?? null,
-      args.maxTokens ?? 4096,
+      "modelCapabilities" in args && args.modelCapabilities ? LLMProvider.requestMaxTokens(args, this.generation) ?? null : args.maxTokens ?? 4096,
       args.temperature ?? 0.7,
-      args.reasoningEffort ?? null,
+      "modelCapabilities" in args && args.modelCapabilities ? args.modelCapabilities.reasoningEffort ?? null : args.reasoningEffort ?? null,
       args.toolChoice ?? null,
     );
     try {
@@ -157,6 +158,7 @@ export class AzureOpenAIProvider extends LLMProvider {
           maxTokens?: number;
           temperature?: number;
           reasoningEffort?: string | null;
+          modelCapabilities?: import("./turn-model-capabilities.js").TurnModelCapabilities;
           toolChoice?: string | Record<string, any> | null;
           onContentDelta?: (delta: string) => Promise<void> | void;
           onThinkingDelta?: (delta: string) => Promise<void> | void;
@@ -182,9 +184,9 @@ export class AzureOpenAIProvider extends LLMProvider {
       args.messages,
       args.tools ?? null,
       args.model ?? null,
-      args.maxTokens ?? 4096,
+      args.modelCapabilities ? LLMProvider.requestMaxTokens(args, this.generation) ?? null : args.maxTokens ?? 4096,
       args.temperature ?? 0.7,
-      args.reasoningEffort ?? null,
+      args.modelCapabilities ? args.modelCapabilities.reasoningEffort ?? null : args.reasoningEffort ?? null,
       args.toolChoice ?? null,
     );
     body.stream = true;

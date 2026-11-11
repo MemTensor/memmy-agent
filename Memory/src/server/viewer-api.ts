@@ -27,6 +27,7 @@ export const VIEWER_API_ROUTES = [
   "GET /api/v1/skills",
   "POST /api/v1/traces/delete",
   "POST /api/v1/skills/archive",
+  "POST /api/v1/skills/reactivate",
   "POST /api/v1/world-models/:id/archive",
   "GET /api/v1/analytics",
   "GET /api/v1/api-logs",
@@ -295,6 +296,12 @@ export async function routeViewerRequest(
   if (method === "POST" && path === "/api/v1/skills/archive") {
     const skillId = requiredString(record(body).skillId, "skillId");
     return { body: context.service.archiveMemory(skillId, envelope) };
+  }
+  if (method === "POST" && path === "/api/v1/skills/reactivate") {
+    const skillId = requiredString(record(body).skillId, "skillId");
+    const result = context.service.reactivateSkill(skillId, envelope);
+    context.scheduleWorker();
+    return { body: result };
   }
   const worldModelArchive = path.match(/^\/api\/v1\/world-models\/([^/]+)\/archive$/);
   if (method === "POST" && worldModelArchive?.[1]) {

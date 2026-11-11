@@ -1,4 +1,5 @@
 import "./agent-confirmation-dock.css";
+import { ReviewRecovery, reviewRecovery } from "./review-recovery.js";
 import { createContext, useContext, useState } from "react";
 import { ChevronRight, MessageCircleQuestionMark } from "lucide-react";
 import type { CapabilityEvent, InstalledPlugin } from "@memmy/local-api-contracts";
@@ -31,8 +32,9 @@ export function PluginToolActivity(props: { toolCallId?: string | null }) {
   const terminal = call?.events.some((event) => event.type === "result" || event.type === "error");
   const progress = terminal ? undefined : call?.events.slice().reverse().find((event) => event.type === "progress");
   const tasks = terminal ? undefined : call?.events.slice().reverse().find((event) => event.type === "task-list");
-  if (!records.length && !interactions.length && !progress && !tasks) return null;
+  if (!records.length && !interactions.length && !progress && !tasks && !(call && reviewRecovery(call))) return null;
   return <>
+    {call ? <ReviewRecovery key={call.callId} call={call} /> : null}
     {progress || tasks ? <div className="plugin-tool-activity">
       {progress?.type === "progress" && progress.message ? <p role="status">{progress.message}</p> : null}
       {tasks?.type === "task-list" ? <ul>{tasks.tasks.map((task) => <li key={task.id}>

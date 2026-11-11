@@ -81,6 +81,7 @@ describe("createMockMemoryClient", () => {
     expect(Object.keys(client).sort()).toEqual([
       "addMemory",
       "approveObservedSkill",
+      "archiveSkill",
       "closeSession",
       "completeTurn",
       "completeSourceTurn",
@@ -96,6 +97,8 @@ describe("createMockMemoryClient", () => {
       "panelAnalysis",
       "panelItems",
       "panelOverview",
+      "reactivateSkill",
+      "reconcileAgentSkills",
       "reloadConfig",
       "retryMemoryProcessing",
       "runWorker",

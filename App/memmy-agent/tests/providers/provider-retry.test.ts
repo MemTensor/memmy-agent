@@ -53,6 +53,14 @@ function imageMessage() {
 }
 
 describe("chatWithRetry", () => {
+  it("does not retry an invalid tool schema even if the proxy marks it retryable", async () => {
+    const failure = new LLMResponse({ content: "400 Invalid schema for function 'review_cancel': schema must not have allOf; upstream timeout", finishReason: "error", errorStatusCode: 400, errorShouldRetry: true });
+    const provider = new ScriptedProvider([failure, new LLMResponse({ content: "unexpected retry" })]);
+    expect(await provider.chatWithRetry({ messages: userMessages(), retryMode: "persistent" })).toBe(failure);
+    expect(provider.calls).toBe(1);
+    expect(provider.delays).toEqual([]);
+  });
+
   it("retries a transient error and then succeeds", async () => {
     const provider = new ScriptedProvider([
       new LLMResponse({ content: "429 rate limit", finishReason: "error" }),

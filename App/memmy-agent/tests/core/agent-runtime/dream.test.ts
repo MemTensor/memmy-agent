@@ -42,6 +42,47 @@ afterEach(() => {
 });
 
 describe("Dream run", () => {
+  it.each(["stop", "error"])("uses one prepared runtime for both phases after a %s response and prepares again for the next run", async (finishReason) => {
+    const store = makeStore();
+    store.appendHistory("First task");
+    const p = provider();
+    let version = 21;
+    p.chatWithRetry.mockImplementation(async () => { version++; return { content: "analysis", finishReason }; });
+    const resolveRuntime = vi.fn(async () => ({ provider: p, model: "gpt-4o", modelCapabilities: Object.freeze({
+      mode: "catalog" as const, catalogVersion: version, maxTokens: 16384, contextWindowTokens: 128000
+    }) }));
+    const dream = new Dream({ store, provider: p, model: "old-model", resolveRuntime });
+    const runner = { run: vi.fn(async (_spec: any) => runResult()) };
+    dream.runner = runner as any;
+    expect(await dream.run()).toBe(true);
+    expect(resolveRuntime).toHaveBeenCalledOnce();
+    expect(p.chatWithRetry.mock.calls[0][0]).toMatchObject({ model: "gpt-4o", modelCapabilities: { catalogVersion: 21 } });
+    expect(runner.run.mock.calls[0][0].modelCapabilities).toBe(p.chatWithRetry.mock.calls[0][0].modelCapabilities);
+    expect(runner.run.mock.calls[0][0].contextWindowTokens).toBe(128000);
+    expect(runner.run.mock.calls[0][0].messages[1].content).toContain("## Analysis Result\nanalysis");
+    store.appendHistory("Second task");
+    await dream.run();
+    expect(resolveRuntime).toHaveBeenCalledTimes(2);
+    expect(runner.run.mock.calls[1][0].modelCapabilities.catalogVersion).toBe(22);
+  });
+
+  it.each(["preparation", "provider"])("keeps history and cursor when %s fails", async (failure) => {
+    const store = makeStore();
+    store.appendHistory("Keep this task");
+    const cursor = store.getLastDreamCursor();
+    const memory = store.readMemory();
+    const p = provider();
+    p.chatWithRetry.mockRejectedValue(new Error("Provider request failed"));
+    const dream = new Dream({ store, provider: p, model: "gpt-4o",
+      ...(failure === "preparation" ? { resolveRuntime: async () => { throw new Error("Catalog coordination unavailable"); } } : {}) });
+    const runner = { run: vi.fn() };
+    dream.runner = runner as any;
+    expect(await dream.run()).toBe(false);
+    expect(runner.run).not.toHaveBeenCalled();
+    expect(store.getLastDreamCursor()).toBe(cursor);
+    expect(store.readMemory()).toBe(memory);
+    expect(store.readUnprocessedHistory(cursor)).toHaveLength(1);
+  });
   it("does nothing when there is no unprocessed history", async () => {
     const store = makeStore();
     const p = provider();

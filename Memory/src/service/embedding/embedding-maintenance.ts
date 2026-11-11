@@ -77,7 +77,10 @@ export class EmbeddingMaintenance {
   private get key(): string { return `embedding-maintenance:${this.deps.userId}`; }
 
   private entries(): EmbeddingMaintenanceEntry[] {
-    return [...this.deps.repos.vectors.maintenanceEntries(),
+    const entries = this.deps.repos.vectors.maintenanceEntries();
+    const vecIds = entries.filter(entry => entry.vectorField === "vec").map(entry => entry.id);
+    const ineligible = vecIds.length > 0 ? this.deps.repos.ineligibleImportedSkillVectorIds(vecIds) : new Set<string>();
+    return [...entries.filter(entry => !ineligible.has(entry.id)),
       ...this.deps.repos.userMemories.embeddingMaintenanceEntries(this.deps.userId)];
   }
 

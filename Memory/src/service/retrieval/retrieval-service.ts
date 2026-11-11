@@ -1,3 +1,5 @@
+import { importedSkillDescription, importedSkillSourceDir, isImportedSkill } from "../../storage/imported-skill.js";
+import { budgetInjection } from "./injection-budget.js";
 import { skillInjectionDescription } from "./skill-injection-description.js";
 import type {
   RetrievalQueryExtract,
@@ -339,7 +341,7 @@ export function mergeSameTurnRecallHits(
           retrievalRoute: memory.memoryLayer === "L1" ? "l1" as const : "agent_memory" as const
         }]
       } : {}),
-      ...(memory?.memoryLayer === "Skill" && internal?.read_only === true
+      ...(memory && isImportedSkill(memory) && internal
         ? {
             readOnly: true,
             ...(typeof internal.source_agent_id === "string" ? { sourceAgentId: internal.source_agent_id } : {}),
@@ -653,50 +655,52 @@ export function buildInjectedContext(
       )
     : rendered;
 
-  void budget;
-  const sections: InjectedContext["sections"] = memories.map((section) => section.section);
-  const renderedSections: RenderedInjectedSection[] = [...memories];
-  const sourceMemoryIds: string[] = memories.flatMap((section) => section.section.memoryIds);
-  const droppedDueToBudget: Array<{
-    id: string;
-    kind: MemoryKind;
-    memoryLayer: RecallMemoryLayer;
-    reason: "token_budget";
-    tokenEstimate?: number;
-  }> = [];
-  let used = sections.reduce((sum, section) => sum + (section.tokenEstimate ?? 0), 0);
-  const guidance = decisionGuidanceSection(
-    contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds)
-  );
-  const avoidance = failureAvoidanceSection(
-    contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds)
-  );
-  if (guidance) {
-    const estimate = guidance.tokenEstimate ?? 0;
-    sections.push(guidance);
-    sourceMemoryIds.push(...guidance.memoryIds);
-    used += estimate;
-  }
-  if (avoidance) {
-    sections.push(avoidance);
-    sourceMemoryIds.push(...avoidance.memoryIds);
-    used += avoidance.tokenEstimate ?? 0;
-  }
-
-  const markdown = renderInjectedMarkdown(renderedSections, guidance, avoidance, retrievalMode, options);
-
-  return {
-    injectedContext: {
-      markdown,
-      sections,
-      tokenEstimate: used
-    },
-    sourceMemoryIds: uniq(sourceMemoryIds),
-    droppedDueToBudget
-  };
+  const fixedContextChars = renderInjectedMarkdown([], undefined, undefined, retrievalMode, options).length;
+  return budgetInjection(memories, budget, (selected) => {
+    const sections: InjectedContext["sections"] = selected.map((item) => item.section);
+    const sourceMemoryIds = selected.flatMap((item) => item.section.memoryIds);
+    const sourceMemories = contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds);
+    const guidance = decisionGuidanceSection(sourceMemories);
+    const avoidance = failureAvoidanceSection(sourceMemories);
+    if (guidance) {
+      sections.push(guidance);
+      sourceMemoryIds.push(...guidance.memoryIds);
+    }
+    if (avoidance) {
+      sections.push(avoidance);
+      sourceMemoryIds.push(...avoidance.memoryIds);
+    }
+    return {
+      injectedContext: {
+        markdown: renderInjectedMarkdown(selected, guidance, avoidance, retrievalMode, options),
+        sections
+      },
+      sourceMemoryIds: uniq(sourceMemoryIds)
+    };
+  }, (id) => {
+    const memory = memoryById.get(id);
+    const section = memories.find((item) => item.section.memoryIds.includes(id))?.section;
+    return {
+      id,
+      kind: memory ? kindFromMemory(memory) : section!.kind,
+      memoryLayer: memory ? memory.memoryLayer : section!.memoryLayer,
+      ...(section ? { tokenEstimate: section.tokenEstimate } : {})
+    };
+  }, fixedContextChars);
 }
 
-function buildTimeFilteredInjectedContext(
+function buildTimeFilteredInjectedContext(memories: MemoryRow[], timeZone: string, budget: number) {
+  const byId = new Map(memories.map((memory) => [memory.id, memory]));
+  return budgetInjection(memories, budget,
+    (selected) => renderTimeFilteredInjectedContext(selected, timeZone),
+    (id) => {
+      const memory = byId.get(id)!;
+      return { id, kind: kindFromMemory(memory), memoryLayer: memory.memoryLayer,
+        tokenEstimate: renderTimeFilteredInjectedContext([memory], timeZone).injectedContext.tokenEstimate };
+    });
+}
+
+function renderTimeFilteredInjectedContext(
   memories: MemoryRow[],
   timeZone: string
 ): {
@@ -846,6 +850,10 @@ function renderInjectedSnippet(
     const name = skill?.name || hit.title || "Skill";
     const guide = skill?.invocationGuide || hit.snippet;
     const summaryChars = options.skillSummaryChars ?? MEMORY_PACKET_SKILL_SUMMARY_CHARS;
+    // Keep the imported source description authoritative; otherwise select
+    // useful prose without treating the guide title or raw YAML as a summary.
+    const importedDescription = memory && isImportedSkill(memory) ? importedSkillDescription(memory) : undefined;
+    const sourceDir = memory && isImportedSkill(memory) ? importedSkillSourceDir(memory) : undefined;
     if (options.skillInjectionMode === "full") {
       const fullMax = options.skillFullMaxChars ?? MEMORY_PACKET_SKILL_FULL_MAX_CHARS;
       return {
@@ -859,7 +867,8 @@ function renderInjectedSnippet(
           "",
           ...labeledInjectedBlock("Name", name),
           "",
-          ...labeledInjectedBlock("Guide", clipSkillGuide(guide.trim() || "(not provided)", fullMax))
+          ...labeledInjectedBlock("Guide", clipSkillGuide(guide.trim() || "(not provided)", fullMax)),
+          ...(sourceDir ? ["", `source dir: ${sourceDir}`] : [])
         ].join("\n")
       };
     }
@@ -871,7 +880,12 @@ function renderInjectedSnippet(
       "",
       ...labeledInjectedBlock("Name", name),
       "",
-      ...labeledInjectedBlock("Description", skillInjectionDescription({ name, guide, retrievalBlurb: skill?.retrievalBlurb, triggerContext: skill?.triggerContext, maxChars: summaryChars }))
+      ...labeledInjectedBlock("Description", importedDescription
+        ? clipSkillDescription(importedDescription, summaryChars)
+        : skillInjectionDescription({
+          name, guide, retrievalBlurb: skill?.retrievalBlurb,
+          triggerContext: skill?.triggerContext, maxChars: summaryChars
+        }))
     ];
     return {
       refKind: "skill",
@@ -1850,6 +1864,54 @@ export class RetrievalService {
     return this.candidatePool.isMemoryReadyForRetrieval(memory);
   }
 
+  /** Re-read imported rows after awaited work. Other memory classes retain their snapshot semantics. */
+  private currentImportedMemories(memories: MemoryRow[], currentAgentId?: string): MemoryRow[] {
+    return memories.flatMap(memory => {
+      if (!isImportedSkill(memory)) return [memory];
+      const current = this.deps.repos.memories.get(memory.id);
+      return current && current.memoryValue === memory.memoryValue
+        && this.deps.repos.isImportedSkillEligibleForRecall(current, currentAgentId)
+        && this.isMemoryReadyForRetrieval(current) ? [current] : [];
+    });
+  }
+
+  private currentImportedHits(hits: RecallHit[], currentAgentId?: string): RecallHit[] {
+    return hits.filter(hit => {
+      if (hit.memoryLayer !== "Skill") return true;
+      const memory = this.deps.repos.memories.getIncludingDeleted(hit.id);
+      if (!memory || !isImportedSkill(memory)) return true;
+      return this.deps.repos.isImportedSkillEligibleForRecall(memory, currentAgentId)
+        && this.isMemoryReadyForRetrieval(memory);
+    });
+  }
+
+  /** Also covers a turn route or idempotency writer finishing after search itself. */
+  refreshImportedSkillResponse<T>(response: T, request: RequestEnvelope & {
+    query?: string; contextBudget?: number; contextHints?: Record<string, unknown>;
+  }, retrievalMode: RetrievalMode = "search"): T {
+    if (!isRecord(response) || !Array.isArray(response.hits)) return response;
+    const originalHits = response.hits as RecallHit[];
+    const currentAgentId = this.deps.resolveContext(request).namespace.source;
+    const hits = this.currentImportedHits(originalHits, currentAgentId);
+    if (hits.length === originalHits.length) return response;
+    const candidateIds = Array.isArray(response.candidateMemoryIds) ? response.candidateMemoryIds as string[]
+      : typeof response.searchEventId === "string"
+        ? this.deps.repos.runtime.getRecallEvent(response.searchEventId)?.candidateMemoryIds ?? [] : [];
+    const ids = uniq([...candidateIds, ...hits.flatMap(hit => hit.memberMemoryIds ?? [hit.id])]);
+    const memories = this.currentImportedMemories(this.deps.repos.memories.getMany(ids), currentAgentId);
+    const contextPacket = buildInjectedContext(hits, request.contextBudget ?? 1800,
+      contextMemoriesForRecallHits(hits, memories), retrievalMode, request.contextHints, request.query,
+      { ...this.retrievalTuningConfig(), timeZone: resolveTimeZone(request.timeZone) });
+    const removed = new Set(originalHits.filter(hit => !hits.includes(hit)).map(hit => hit.id));
+    return { ...response, hits,
+      ...(Array.isArray(response.candidateMemoryIds) ? { candidateMemoryIds: response.candidateMemoryIds.filter(id => !removed.has(String(id))) } : {}),
+      sourceMemoryIds: contextPacket.sourceMemoryIds,
+      injectedContext: isRecord(response.injectedContext) && response.injectedContext.markdown === ""
+        ? emptyInjectedContext() : contextPacket.injectedContext,
+      droppedDueToBudget: contextPacket.droppedDueToBudget
+    } as T;
+  }
+
   private defaultRetrievalLimit(retrievalMode: RetrievalMode): number {
     if (retrievalMode === "turn_start") return this.deps.turnStartRetrievalLimit();
     const retrieval = this.deps.config.algorithm.retrieval;
@@ -1996,7 +2058,7 @@ export class RetrievalService {
           targetSkillId: request.targetSkillId,
           currentAgentId: context.namespace.source
         });
-    const memories = retrievalOutput.memories.filter((memory) =>
+    let memories = this.currentImportedMemories(retrievalOutput.memories, context.namespace.source).filter((memory) =>
       !memoryUsesStalePolicy(memory, stalePolicyIds)
     );
     const allowedMemoryIds = new Set(memories.map((memory) => memory.id));
@@ -2023,9 +2085,11 @@ export class RetrievalService {
           excludeSourceTurnIds: recentRawTurnIds
         })
       : { hits: [] as RecallHit[], memories: [] as UserMemoryRecord[] };
+    memories = this.currentImportedMemories(memories, context.namespace.source);
+    const currentRetrievalHits = this.currentImportedHits(retrieval.hits, context.namespace.source);
     const agentHits = onboardingFirstReportHit || timeFilter
-      ? retrieval.hits
-      : filterL1TraceSpanRecallHits(retrieval.hits, memories);
+      ? currentRetrievalHits
+      : filterL1TraceSpanRecallHits(currentRetrievalHits, memories);
     const merged = mergeSameTurnRecallHits(
       agentHits, memories, userMemoryRecallEnabled ? userMemoryOutput.hits : []
     );
@@ -2034,7 +2098,10 @@ export class RetrievalService {
       ? { hits: retrieval.hits, status: ["first_report_handoff:latest_only"] }
       : timeFilter
       ? { hits: retrieval.hits, status: ["time_filter:l1"] }
-      : await this.filterRecallHits(queryVectorText, merged.hits);
+      : await this.filterRecallHits(queryVectorText, merged.hits, context.namespace.source);
+    memories = this.currentImportedMemories(memories, context.namespace.source);
+    merged.hits = this.currentImportedHits(merged.hits, context.namespace.source);
+    filteredHits.hits = this.currentImportedHits(filteredHits.hits, context.namespace.source);
     // Only set when the filter step actually ran; the two shortcuts above never
     // reach it. Pair it with the recorded status to tell a filter that returned
     // early on too few candidates from one that ranked them.
@@ -2045,7 +2112,8 @@ export class RetrievalService {
     const contextPacket = timeFilter
       ? buildTimeFilteredInjectedContext(
           memories.filter((memory) => hits.some((hit) => hit.id === memory.id)),
-          timeZone
+          timeZone,
+          request.contextBudget ?? 1800
         )
       : buildInjectedContext(
           hits,
@@ -2070,10 +2138,13 @@ export class RetrievalService {
     ]);
     const sourceMemoryIds = contextPacket.sourceMemoryIds;
     const hitIds = new Set(hits.flatMap((hit) => hit.memberMemoryIds ?? [hit.id]));
+    const accountedSourceIds = new Set([
+      ...hitIds, ...sourceMemoryIds, ...contextPacket.droppedDueToBudget.map((source) => source.id)
+    ]);
     const dropped = [
       ...contextPacket.droppedDueToBudget,
       ...memories
-        .filter((memory) => !hitIds.has(memory.id))
+        .filter((memory) => !accountedSourceIds.has(memory.id))
         .slice(0, 50)
         .map((memory) => ({
           id: memory.id,
@@ -2082,7 +2153,7 @@ export class RetrievalService {
           reason: "rank_threshold" as const
         })),
       ...(userMemoryRecallEnabled ? userMemoryOutput.memories : [])
-        .filter((memory) => !hitIds.has(memory.id))
+        .filter((memory) => !accountedSourceIds.has(memory.id))
         .slice(0, 50)
         .map((memory) => ({
           id: memory.id,
@@ -2405,10 +2476,11 @@ export class RetrievalService {
     };
   }
 
-  private async filterRecallHits(query: string, hits: RecallHit[]): Promise<{
+  private async filterRecallHits(query: string, hits: RecallHit[], currentAgentId?: string): Promise<{
     hits: RecallHit[];
     status: string[];
   }> {
+    hits = this.currentImportedHits(hits, currentAgentId);
     const config = this.deps.config.algorithm.retrieval;
     const usesSummaryLlm = this.deps.llm.isConfigured();
     const filterLlm = usesSummaryLlm
@@ -2437,36 +2509,40 @@ export class RetrievalService {
 
     try {
       const bodyChars = Math.max(120, config.llmFilterCandidateBodyChars);
-      const candidates = hits.map((hit, index) =>
-        `${index + 1}. ${describeRetrievalFilterCandidate(hit, bodyChars)}`
-      ).join("\n");
-      const completeFilter = (llm: LlmClient, isSummaryLlm: boolean) => llm.completeJson<{
-        selected?: unknown;
-        ranked?: unknown;
-        sufficient?: unknown;
-      }>(
-        [
+      const completeFilter = (llm: LlmClient, isSummaryLlm: boolean): Promise<{ selected?: unknown; ranked?: unknown; sufficient?: unknown }> => {
+        hits = this.currentImportedHits(hits, currentAgentId);
+        if (hits.length === 0) return Promise.resolve({ selected: [] });
+        const candidates = hits.map((hit, index) =>
+          `${index + 1}. ${describeRetrievalFilterCandidate(hit, bodyChars)}`
+        ).join("\n");
+        return llm.completeJson<{
+          selected?: unknown;
+          ranked?: unknown;
+          sufficient?: unknown;
+        }>(
+          [
+            {
+              role: "system",
+              content: RETRIEVAL_FILTER_PROMPT.system
+            },
+            {
+              role: "user",
+              content: `QUERY: ${clip(query, 500)}\n\nCANDIDATES:\n${candidates}`
+            }
+          ],
           {
-            role: "system",
-            content: RETRIEVAL_FILTER_PROMPT.system
-          },
-          {
-            role: "user",
-            content: `QUERY: ${clip(query, 500)}\n\nCANDIDATES:\n${candidates}`
+            operation: `retrieval.${RETRIEVAL_FILTER_PROMPT.id}.v${RETRIEVAL_FILTER_PROMPT.version}`,
+            thinkingMode: "disabled",
+            temperature: 0,
+            timeoutMs: RETRIEVAL_FILTER_TIMEOUT_MS,
+            maxRetries: 0,
+            maxTokens: isSummaryLlm
+              ? MEMORY_SUMMARY_MAX_TOKENS
+              : Math.min(2048, Math.max(160, hits.length * 8 + 80)),
+            jsonMode: true
           }
-        ],
-        {
-          operation: `retrieval.${RETRIEVAL_FILTER_PROMPT.id}.v${RETRIEVAL_FILTER_PROMPT.version}`,
-          thinkingMode: "disabled",
-          temperature: 0,
-          timeoutMs: RETRIEVAL_FILTER_TIMEOUT_MS,
-          maxRetries: 0,
-          maxTokens: isSummaryLlm
-            ? MEMORY_SUMMARY_MAX_TOKENS
-            : Math.min(2048, Math.max(160, hits.length * 8 + 80)),
-          jsonMode: true
-        }
-      );
+        );
+      };
       let result;
       try {
         result = await completeFilter(filterLlm, usesSummaryLlm);
@@ -2823,4 +2899,9 @@ export class RetrievalService {
       serverTime: nowIso()
     });
   }
+}
+
+function clipSkillDescription(description: string, maxChars: number): string {
+  const text = description.replace(/\s+/g, " ").trim();
+  return text.length > maxChars ? `${text.slice(0, Math.max(0, maxChars - 1))}…` : text;
 }
