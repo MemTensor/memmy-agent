@@ -181,7 +181,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         }
       }
       if (platform === "win32") env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
-        ? await Promise.all((options.fileInputRoots ?? []).map(root => realpath(root))) : []);
+        ? await resolveExistingInputRoots(options.fileInputRoots ?? []) : []);
       const launch = await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies);
       const withTexlive = async (tex: ResolvedCommandRuntimeDependencies) => {
         const combined = {
@@ -851,6 +851,24 @@ async function filesystemRules(
     rules.push({ path: pluginDataPath, writable: true });
   }
   return rules;
+}
+
+/**
+ * Resolve Host-owned file-input roots without making an optional root a
+ * prerequisite for plugin activation. A fresh installation may not have
+ * created the media directory until the first upload or recording. Missing
+ * roots are omitted; other filesystem errors remain fatal.
+ */
+async function resolveExistingInputRoots(roots: readonly string[]): Promise<string[]> {
+  const resolved = await Promise.all(roots.map(async root => {
+    try {
+      return await realpath(root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }));
+  return resolved.filter((root): root is string => root !== null);
 }
 
 function approvedHostService(context: PluginRuntimeContext, service: string): boolean {

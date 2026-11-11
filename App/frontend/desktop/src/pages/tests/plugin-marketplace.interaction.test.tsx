@@ -241,6 +241,15 @@ describe("live marketplace controller", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("refreshes immediately when another lifecycle operation publishes a plugin change", async () => {
+    records = [{ ...pending, state: "enabling" }];
+    await render();
+    records = [{ ...records[0], state: "active" }];
+    await act(async () => window.dispatchEvent(new Event("memmy:plugin-change")));
+    expect(addToChatButton()).not.toBeNull();
+    expect(container.textContent).not.toContain("正在处理");
+  });
+
   it("shows installed plugins when the remote catalog is empty", async () => {
     records = [{ ...pending, state: "active" }, legal];
     clients.plugins.catalog.mockResolvedValueOnce([]);

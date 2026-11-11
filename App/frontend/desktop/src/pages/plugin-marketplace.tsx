@@ -1,4 +1,4 @@
-import { notifyPluginChange } from "../lib/plugin-change-event.js";
+import { notifyPluginChange, PLUGIN_CHANGE_EVENT } from "../lib/plugin-change-event.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { InstalledPlugin, PluginCatalogEntry } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
@@ -40,11 +40,11 @@ export function PluginMarketplace() {
     failed: (plugins: InstalledPlugin[]) => boolean;
   } | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (options: { preserveActionError?: boolean } = {}) => {
     if (!clients) return;
     const current = ++generation.current;
     setLoading(true);
-    setActionError(null);
+    if (!options.preserveActionError) setActionError(null);
     let installedRead = 0;
     async function loadInstalled() {
       const read = ++installedRead;
@@ -98,6 +98,16 @@ export function PluginMarketplace() {
     void refresh();
     const interval = window.setInterval(() => { if (!busy.current) void refresh(); }, 30_000);
     return () => { generation.current += 1; window.clearInterval(interval); };
+  }, [refresh]);
+
+  // Plugin lifecycle can finish in the Host after the original enable request
+  // has returned (or after another surface changed it).  The marketplace must
+  // refresh on the local change signal instead of waiting for navigation or
+  // the 30-second background refresh interval.
+  useEffect(() => {
+    const onPluginChange = () => { void refresh({ preserveActionError: true }); };
+    window.addEventListener(PLUGIN_CHANGE_EVENT, onPluginChange);
+    return () => window.removeEventListener(PLUGIN_CHANGE_EVENT, onPluginChange);
   }, [refresh]);
 
   const hasHostTransition = installed.some(plugin => plugin.state === "enabling" || plugin.state === "disabling" || plugin.update);
