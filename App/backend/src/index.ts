@@ -58,6 +58,7 @@ export { trackAnalyticsEvent } from "./analytics/analytics-transport.js";
 export { createHttpMemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
+const MCP_BRIDGE_CONFIG_RETRY_DELAY_MS = 5_000;
 
 export interface CreateLocalBackendOptions {
   databasePath: string;
@@ -263,21 +264,44 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     }
 
     // Write the Composio MCP bridge into the agent config (tools.mcpServers.composio), so the agent connects to the local MCP server based on it.
-    await memmyConfigWriter.patchMcpServerConfig("composio", {
-      type: "streamableHttp",
-      url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/composio`,
-      headers: { "x-memmy-mcp-token": composioMcpToken },
-      toolTimeout: 60
-    });
-    await memmyConfigWriter.patchMcpServerConfig("plugins", {
-      type: "streamableHttp",
-      url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
-      headers: { "x-memmy-mcp-token": composioMcpToken },
-      // Interaction capabilities can legitimately wait while the user reads a
-      // long card or leaves the app in the background. Non-interactive command
-      // work remains bounded by the plugin runtime's own timeout.
-      toolTimeout: 7 * 24 * 60 * 60
-    });
+    // These values are derived from this launch (random port + token) and can be
+    // rewritten on a later launch or agent reload, so a failed write must not
+    // abort boot: a leftover config.yaml lock previously surfaced as
+    // "Memmy 启动失败" (migration_lock_timeout).
+    const writeMcpBridgeConfig = async () => {
+      await memmyConfigWriter.patchMcpServerConfig("composio", {
+        type: "streamableHttp",
+        url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/composio`,
+        headers: { "x-memmy-mcp-token": composioMcpToken },
+        toolTimeout: 60
+      });
+      await memmyConfigWriter.patchMcpServerConfig("plugins", {
+        type: "streamableHttp",
+        url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
+        headers: { "x-memmy-mcp-token": composioMcpToken },
+        // Interaction capabilities can legitimately wait while the user reads a
+        // long card or leaves the app in the background. Non-interactive command
+        // work remains bounded by the plugin runtime's own timeout.
+        toolTimeout: 7 * 24 * 60 * 60
+      });
+    };
+    try {
+      await writeMcpBridgeConfig();
+    } catch (error) {
+      console.warn(
+        `MCP bridge config write skipped during backend startup: ${error instanceof Error ? error.message : String(error)}`
+      );
+      // Retry once after the boot-critical path so a transient lock (e.g. a
+      // crashed previous instance) still converges to a fresh bridge config.
+      const retryTimer = setTimeout(() => {
+        void writeMcpBridgeConfig().catch((retryError: unknown) => {
+          console.warn(
+            `MCP bridge config retry failed after backend startup: ${retryError instanceof Error ? retryError.message : String(retryError)}`
+          );
+        });
+      }, MCP_BRIDGE_CONFIG_RETRY_DELAY_MS);
+      retryTimer.unref?.();
+    }
     const memmyAgentAdminClient = options.memmyAgentAdminClient;
     if (memmyAgentAdminClient && !options.skipAgentMcpReload) {
       // The bridge config must be written first, but MCP connections must not delay the first window.

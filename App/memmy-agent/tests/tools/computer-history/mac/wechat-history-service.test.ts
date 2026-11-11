@@ -3,11 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
+import { isPersonalWeChatHistorySupported } from "../../../../src/tools/computer-history/platform.js";
 
 afterEach(() => vi.unstubAllEnvs());
 
 describe("personal WeChat History setup boundary", () => {
-  it("does not launch connection without consent and reports a missing local reader honestly", async () => {
+  it.skipIf(!isPersonalWeChatHistorySupported())("does not launch connection without consent and reports a missing local reader honestly", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-wechat-service-"));
     vi.stubEnv("MEMMY_SQLCIPHER_LIBRARY", path.join(directory, "missing-sqlcipher.dylib"));
     const service = new ComputerHistoryDemoService({
