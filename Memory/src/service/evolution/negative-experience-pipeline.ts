@@ -415,7 +415,7 @@ export class NegativeExperiencePipeline {
       agentResponse: rawTurns.at(-1)?.assistantText?.trim() ?? "",
       episodeContext,
       allowedTraceIds: episodeTraceIds
-    }, { llm: this.deps.skillLlm });
+    }, { llm: this.deps.skillLlm, language: this.deps.config.language });
     if (!sink) return undefined;
     const antiPattern = sink.avoid.join("\n");
     const preference = sink.prefer.join("\n");

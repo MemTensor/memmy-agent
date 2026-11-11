@@ -22,7 +22,6 @@ import {
   embeddingRetryTargetKindForMemory,
   embeddingRetryVectorFieldForMemory
 } from "../embedding/embedding-pipeline.js";
-import { episodeTitleIsCurrent } from "../episode-title/episode-title-service.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
 import { observationMemoryState } from "../observation-memory-state.js";
 import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
@@ -99,6 +98,7 @@ export interface WorkerJobProcessors {
 
 export interface WorkerJobHandlerDeps {
   repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime" | "l3WorldModels">;
+  episodeTitleIsCurrent(episode: EpisodeRecord): boolean;
   capture: { synthReflection: boolean };
   reward: { feedbackWindowSec: number };
   nowIso(): string;
@@ -213,7 +213,8 @@ export function enqueueJob(
   if (input.jobType === "episode_title") {
     // Title jobs have no target memory. Only a wholly historical episode can
     // inherit the historical lane; mixed or incomplete episodes stay interactive.
-    delete payload.captureOrigin;
+    // An explicit undefined also clears stale import provenance when a queued job is merged.
+    payload.captureOrigin = undefined;
     const episode = input.episodeId ? deps.repos.runtime.getEpisode(input.episodeId) : undefined;
     if (episode && deps.repos.memories.areAllHistoricalCaptureMemories(episode.l1MemoryIds)) {
       payload.captureOrigin = "agent_source_scan";
@@ -419,7 +420,7 @@ export function enqueueEpisodeTitle(
   at: string,
   stage: "provisional" | "final"
 ): EvolutionJobRecord[] {
-  if (episodeTitleIsCurrent(episode, deps.repos.runtime.countRawTurnsByEpisode(episode.id))) return [];
+  if (deps.episodeTitleIsCurrent(episode)) return [];
   return [enqueueJob(deps, {
     jobType: "episode_title",
     userId: episode.userId,

@@ -52,7 +52,7 @@ import {
   type WorkspaceUri
 } from "../contracts/index.js";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
-import { displayFieldsForMemory, isTraceMemory, storedTraceSummary } from "../service/read-model/display-fields.js";
+import { displayFieldsForMemory, isTraceMemory, storedBatchSkillTitle, storedTraceSummary } from "../service/read-model/display-fields.js";
 import type {
   ProjectEnvironmentKind,
   ProjectEnvironmentStateRecord
@@ -8968,6 +8968,8 @@ export function titleFromValue(value: string): string {
 }
 
 function listTitleForMemory(memory: MemoryRow): string {
+  const displayTitle = storedBatchSkillTitle(memory);
+  if (displayTitle) return truncateTitle(displayTitle);
   const internal = memory.properties.internal_info;
   if (internal.memory_kind === "work_memory" && typeof internal.work_topic === "string" && internal.work_topic.trim()) {
     return internal.work_topic.trim();

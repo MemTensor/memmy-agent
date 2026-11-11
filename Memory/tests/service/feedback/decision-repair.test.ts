@@ -10,7 +10,8 @@ import {
   createMemoryServiceFixture
 } from "../../fixtures/memory-service-fixture.js";
 import { createDecisionRepairEvolutionLlm } from "./decision-repair-llm-stub.js";
-import { normalizeFailureExperienceSinkDraft } from "../../../src/service/feedback/feedback-experience.js";
+import { normalizeFailureExperienceSinkDraft, synthesizeFailureExperienceSink } from "../../../src/service/feedback/feedback-experience.js";
+import { languageSteeringLine } from "../../../src/algorithm/plugin-algorithms.js";
 
 const {
   cleanup,
@@ -107,6 +108,19 @@ function createDecisionRepairLlm(
 }
 
 describe("MemoryService / feedback / decision repair", () => {
+  it.each(["zh-CN", "en-US", "zh-TW", "ja-JP", "fr-FR"])("preserves the configured failure sink locale %s", async (language) => {
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
+    await synthesizeFailureExperienceSink({
+      feedbackText: "结果未通过验收",
+      userRequest: "修复 API",
+      agentResponse: "已修改",
+      episodeContext: "验证失败",
+      allowedTraceIds: []
+    }, { llm: createDecisionRepairLlm(calls), language });
+    expect(calls[0]?.messages.filter((message) => message.role === "system")
+      .some((message) => message.content.includes(languageSteeringLine(language)))).toBe(true);
+  });
+
   it("quarantines an incomplete failure sink result instead of copying source text", () => {
     expect(normalizeFailureExperienceSinkDraft({
       title: "",

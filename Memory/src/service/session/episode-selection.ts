@@ -1,17 +1,19 @@
+import { languageSteeringLine, steeredPromptLanguage, type PromptLanguage } from "../../algorithm/plugin-algorithms.js";
+import { matchesGeneratedLanguage } from "../../algorithm/generated-language.js";
 import type { RawTurnRecord, Repositories, SessionRecord } from "../../storage/repositories.js";
 import type { LlmClient } from "../../model/types.js";
 import { stableHash } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
 
 export interface EpisodeSelectionContext { userText: string; rawTurnId?: string; turnId?: string }
-export interface EpisodeSelectionResult { episodeId: string | null; title: string; summary: string }
+export interface EpisodeSelectionResult { episodeId: string | null; title?: string; summary?: string; language?: PromptLanguage }
 export interface EpisodeCandidate {
   episodeId: string;
   title: string;
   summary: string;
   users: Array<{ rawTurnId: string; text: string }>;
 }
-export interface EpisodeSelectionInput { userText: string; candidates: EpisodeCandidate[] }
+export interface EpisodeSelectionInput { userText: string; candidates: EpisodeCandidate[]; language: PromptLanguage }
 
 export class EpisodeSelectionRequired extends Error {
   constructor(readonly key: string, readonly input: EpisodeSelectionInput) {
@@ -19,7 +21,7 @@ export class EpisodeSelectionRequired extends Error {
   }
 }
 
-export function selectionInput(repos: Repositories, session: SessionRecord, context: EpisodeSelectionContext): EpisodeSelectionInput {
+export function selectionInput(repos: Repositories, session: SessionRecord, context: EpisodeSelectionContext, configuredLanguage?: string): EpisodeSelectionInput {
   const current = context.rawTurnId ? repos.runtime.getRawTurn(context.rawTurnId)
     : context.turnId ? repos.runtime.getRawTurnBySessionTurn(session.id, context.turnId) : undefined;
   const before = current ? new Set(repos.runtime.completedRawTurnsBefore(current.id).map(t => t.id)) : undefined;
@@ -43,7 +45,8 @@ export function selectionInput(repos: Repositories, session: SessionRecord, cont
         .map(t => ({ rawTurnId: t.id, text: t.userText! }))
     };
   }).filter((candidate): candidate is EpisodeCandidate => Boolean(candidate)).sort((a, b) => a.episodeId.localeCompare(b.episodeId));
-  return { userText: context.userText || current?.userText || "", candidates };
+  const userText = context.userText || current?.userText || "";
+  return { userText, candidates, language: steeredPromptLanguage(configuredLanguage, [userText]) };
 }
 
 export function selectionKey(session: SessionRecord, input: EpisodeSelectionInput): string {
@@ -62,13 +65,22 @@ Similar topics alone are not enough. Ambiguous references mean no match (null).
 Closed tasks may be resumed. No candidates or an empty userText means null.
 Candidates contain an existing summary and user messages absent from that summary, or only user messages when no summary is available.
 Do not require assistant replies. Do not invent their contents or claim the new request has been completed.
-Return an updated task title (at most 30 characters) and summary (at most 180 characters) for the selected or new task, in the user's language.
-Summarize existing information and the new request; preserve concrete task anchors.` },
+Return an updated task title (at most 30 characters) and summary (at most 180 characters) for the selected or new task.
+Write both fields in the requested language. Describe the task and preserve product names verbatim.
+Summarize existing information and the new request; preserve concrete task anchors.
+${languageSteeringLine(input.language)}` },
     { role: "user", content: JSON.stringify(input) }
   ], { operation: "episode.select.v1", temperature: 0, maxTokens: 1024 });
   if ((value.episodeId !== null && (typeof value.episodeId !== "string" || !input.candidates.some(c => c.episodeId === value.episodeId))) ||
       typeof value.title !== "string" || !value.title.trim() || typeof value.summary !== "string" || !value.summary.trim()) {
     throw new TypeError("invalid episode selection: expected a candidate ID or null and non-empty title/summary");
   }
-  return { episodeId: value.episodeId as string | null, title: value.title.trim().slice(0, 30), summary: value.summary.trim().slice(0, 180) };
+  const episodeId = value.episodeId as string | null;
+  const title = value.title.trim().slice(0, 30);
+  const summary = value.summary.trim().slice(0, 180);
+  // Routing and presentation have independent outcomes. A title retry should
+  // never strand an otherwise valid turn assignment.
+  return matchesGeneratedLanguage(title, input.language) && matchesGeneratedLanguage(summary, input.language)
+    ? { episodeId, title, summary, language: input.language }
+    : { episodeId, language: input.language };
 }
