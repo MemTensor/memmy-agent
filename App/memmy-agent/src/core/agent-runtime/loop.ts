@@ -1,8 +1,11 @@
+import { computerUseRequestContext } from "./computer-use-request-context.js";
 import { agentTaskActivity } from "./task-activity.js";
+import { OUTPUT_FEEDBACK_KEY, OutputDelivery, clearOutputDelivery, DELIVERY_NOT_CONFIRMED, hasOutputObligations } from "./tools/output-location.js";
 import { requestTiming } from "../../utils/request-timing.js";
 import { initializeDesktopScreenCapture } from '../../tools/computer-use/desktop-screen-capture.js';
 import { closeNativeSurfacesForTurn, registerComputerUseTurnInterrupt } from '../../tools/computer-use/surface-preview.js';
 import fs from "node:fs";
+import type { MemmyMemoryReplaySnapshot } from "../../memmy-memory/protocol.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -363,6 +366,7 @@ type AgentLoopInit = {
   providerRetryMode?: string;
   toolHintMaxLength?: number;
   maxToolResultChars?: number;
+  toolResultCompressionEnabled?: boolean;
   maxMessages?: number;
   unifiedSession?: boolean;
   timezone?: string | null;
@@ -469,36 +473,6 @@ function firstString(...values: any[]): string | null {
 
 function turnMetadata(turnId: string | null | undefined): Record<string, string> {
   return turnId ? { turnId, turn_id: turnId } : {};
-}
-
-function computerUseRequestContext(message: InboundMessage, turnId?: string | null): {
-  messageId: string | null; metadata: Record<string, any>;
-} {
-  const rawId = message.metadata?.message_id ?? message.metadata?.messageId;
-  const nativeId = typeof rawId === 'string' && rawId.trim() && rawId.length <= 512
-    ? rawId.trim() : typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId > 0 ? String(rawId) : null;
-  // GUI source is supplied by the accepted channel boundary, not envelope
-  // metadata. Recover an older durable GUI request's validated UUID, retaining
-  // its original identity rather than substituting a generated execution turn.
-  const source = message.turnSource;
-  const guiSource = message.channel === 'websocket' && source?.channel === 'websocket'
-    && (source.kind === 'gui' || source.kind === 'tui');
-  const requestId = message.metadata?.client_request_id;
-  const messageId = nativeId ?? (guiSource && typeof requestId === 'string'
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) ? requestId : null);
-  let reason = 'interactive-user-message';
-  if (message.internal || message.role !== 'user') reason = 'internal-message';
-  else if (['system', 'cron'].includes(message.channel)
-    || ['subagent', 'goal-runtime', 'system', 'cron'].includes(message.senderId.toLowerCase())) reason = 'background-source';
-  else if (message.channel === 'websocket' && !guiSource) reason = 'gui-source-unverified';
-  else if (message.metadata?.computerUseInteractive === false) reason = 'background-context';
-  else if (!messageId) reason = 'user-message-id-missing';
-  return { messageId, metadata: { ...message.metadata,
-    ...(source ? { turn_source: source } : {}), ...turnMetadata(turnId),
-    ...(messageId ? { message_id: messageId } : {}),
-    computerUseInteractive: reason === 'interactive-user-message',
-    computerUseInteractiveReason: reason,
-  } };
 }
 
 function restoredComputerUseMetadata(metadata: Record<string, any>): Record<string, any> {
@@ -817,6 +791,7 @@ export class AgentLoop {
   providerRetryMode: string;
   toolHintMaxLength: number;
   maxToolResultChars: number;
+  toolResultCompressionEnabled: boolean;
   maxMessages: number;
   unifiedSession: boolean;
   backgroundTasks: Array<Promise<any>> = [];
@@ -913,8 +888,9 @@ export class AgentLoop {
     this.providerRetryMode = init.providerRetryMode ?? defaults.providerRetryMode;
     this.toolHintMaxLength = init.toolHintMaxLength ?? defaults.toolHintMaxLength;
     this.maxToolResultChars = init.maxToolResultChars ?? defaults.maxToolResultChars;
+    this.toolResultCompressionEnabled = init.toolResultCompressionEnabled ?? defaults.toolResultCompressionEnabled;
     const requestedMaxMessages = init.maxMessages ?? defaults.maxMessages;
-    const normalizedMaxMessages = requestedMaxMessages > 0 ? requestedMaxMessages : 120;
+    const normalizedMaxMessages = requestedMaxMessages > 0 ? requestedMaxMessages : 80;
     this.maxMessages = normalizedMaxMessages;
     this.defaultModelPreset = new ModelPresetConfig({
       endpoint: "default",
@@ -973,6 +949,7 @@ export class AgentLoop {
       maxIterations: this.maxIterations,
       maxConcurrent: defaults.maxConcurrentSubagents,
       maxToolResultChars: this.maxToolResultChars,
+      toolResultCompressionEnabled: this.toolResultCompressionEnabled,
       llmWallTimeoutForSession: (sessionKey) => runnerWallLlmTimeoutS(this.sessions, sessionKey),
       lifecycleHook: () => this.lifecycleHook(),
       computerUseTools: () => [...this.tools].map(([, tool]) => tool)
@@ -1006,6 +983,7 @@ export class AgentLoop {
     this.autoCompact = new AutoCompact(this.sessions, this.consolidator, init.sessionTtlMinutes ?? defaults.sessionTtlMinutes);
     this.dream = this.fileMemoryEnabled
       ? new Dream({
+          toolResultCompressionEnabled: this.toolResultCompressionEnabled,
           store: this.context.memory,
           provider: this.provider,
           model: this.model ?? "",
@@ -2499,7 +2477,11 @@ export class AgentLoop {
   }
 
   syncSubagentRuntimeLimits(): void {
-    if (this.subagents) (this.subagents as any).maxIterations = this.maxIterations;
+    if (this.subagents) {
+      this.subagents.maxIterations = this.maxIterations;
+      this.subagents.toolResultCompressionEnabled = this.toolResultCompressionEnabled;
+    }
+    if (this.dream) this.dream.toolResultCompressionEnabled = this.toolResultCompressionEnabled;
   }
 
   buildModelPresetSnapshot(name: string): Record<string, any> {
@@ -2762,6 +2744,12 @@ export class AgentLoop {
     if (waits.length) await Promise.allSettled(waits);
     const subagents = this.subagents as any;
     const subCancelled = subagents?.cancelBySession ? await subagents.cancelBySession(key) : subagents?.cancel_by_session ? await subagents.cancel_by_session(key) : 0;
+    // Stopping also ends an unfinished file task, unless a retained task is still running it.
+    const session = this.sessions.get(key);
+    if (!retained.length && hasOutputObligations(session?.metadata)) {
+      clearOutputDelivery(session!.metadata);
+      this.sessions.save(session!);
+    }
     return cancelled + Number(subCancelled || 0);
   }
 
@@ -2824,6 +2812,8 @@ export class AgentLoop {
     return {
       role: "user",
       content: this.context.buildUserContent(content, media),
+      ...(msg.internal || msg.channel === "system" || msg.senderId === "subagent"
+        ? { internal_context: "runtime_notification" } : {}),
       ...(clientRequestId
         ? { client_request_id: clientRequestId }
         : {}),
@@ -3066,6 +3056,7 @@ export class AgentLoop {
     if (!content.trim()) return false;
     ctx.session!.addMessage("user", content, {
       internal_context: "goal_continuation",
+      turn_id: ctx.turnId,
       ...(sharedTurnSource(ctx.msg) ? { turn_source: sharedTurnSource(ctx.msg) } : {}),
     });
     this.sessions.save(ctx.session!, { fsync: true });
@@ -3525,6 +3516,7 @@ export class AgentLoop {
   ): void {
     let lastAssistantIdx: number | null = null;
     for (const message of messages.slice(skip)) {
+      if (message[OUTPUT_FEEDBACK_KEY]) continue;
       const entry = { ...message };
       delete entry.webui_queue_steer_origin;
       const role = entry.role;
@@ -3532,9 +3524,9 @@ export class AgentLoop {
       if (role === "assistant" && !content && !entry.tool_calls?.length) continue;
       if (role === "tool") {
         const maxChars = resolveToolResultMaxChars(entry.name, this.maxToolResultChars, SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME);
-        if (typeof content === "string" && content.length > maxChars) entry.content = truncateText(content, maxChars);
+        if (this.toolResultCompressionEnabled && typeof content === "string" && content.length > maxChars) entry.content = truncateText(content, maxChars);
         else if (Array.isArray(content)) {
-          const filtered = this.sanitizePersistedBlocks(content, { shouldTruncateText: true, maxTextChars: maxChars });
+          const filtered = this.sanitizePersistedBlocks(content, { shouldTruncateText: this.toolResultCompressionEnabled, maxTextChars: maxChars });
           if (!filtered.length) continue;
           entry.content = filtered;
         }
@@ -3808,6 +3800,7 @@ export class AgentLoop {
       midTurnContext = null,
       consolidator = null,
       onTokenCompactionEvent = null,
+      outputUserText = null,
     }: {
       onProgress?: any;
       onStream?: any;
@@ -3832,6 +3825,8 @@ export class AgentLoop {
       midTurnContext?: MidTurnContextDescriptor | null;
       consolidator?: Consolidator | null;
       onTokenCompactionEvent?: TokenCompactionEventCallback | null;
+      /** The live user message of this turn; null for system, subagent and internal turns. */
+      outputUserText?: string | null;
     } = {},
   ): Promise<AgentLoopResult> {
     if (!modelSelection) this.refreshProviderSnapshot();
@@ -3891,6 +3886,18 @@ export class AgentLoop {
     const hook = this.extraHooks.length ? new CompositeAgentHook([loopHook, ...this.extraHooks]) : loopHook;
     const taskPlanContinuation = createTaskPlanContinuation(() => activeSessionKey
       ? this.taskPlanRuntime.get(activeSessionKey) : null);
+    const requestIndex = initialMessages.length - 1;
+    const originalRequestContent = structuredClone(initialMessages[requestIndex]?.content);
+    const turnMemory: { snapshot: MemmyMemoryReplaySnapshot | null } = { snapshot: null };
+    const deliveryKey = session?.key ?? null;
+    // Subagents keep using this after the turn ends: always the session's current metadata.
+    const outputLocation = new OutputDelivery(deliveryKey ? {
+      metadata: () => (this.sessions.get(deliveryKey) ?? session!).metadata,
+      save: () => {
+        const current = this.sessions.get(deliveryKey);
+        if (current) this.sessions.save(current);
+      },
+    } : {}, sessionWorkspace, outputUserText);
     const result = await this.runner.run(
       new AgentRunSpec({
         messages: initialMessages,
@@ -3911,8 +3918,10 @@ export class AgentLoop {
           ?? activeProvider?.generation?.reasoningEffort
           ?? this.config.agents.defaults.reasoningEffort,
         maxToolResultChars: this.maxToolResultChars,
+        toolResultCompressionEnabled: this.toolResultCompressionEnabled,
         toolResultMaxCharsByName: SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME,
         workspace: sessionWorkspace,
+        outputLocation,
         sessionKey: activeSessionKey,
         hostProjectId,
         contextWindowTokens: activeContextWindowTokens,
@@ -3931,6 +3940,7 @@ export class AgentLoop {
         hook,
         concurrentTools: true,
         injectionCallback: ({ limit = 3 } = {}) => this.drainPendingQueue(pendingQueue, limit, session?.key ?? sessionKey, msg => {
+          if (!msg.internal && msg.channel !== "system") outputLocation.addUserText(msg.content);
           const request = computerUseRequestContext(msg, turnId);
           // A real user steer replaces the blocked/approved message scope.
           // Automatic subagent notices never confer a new user authorization.
@@ -3939,6 +3949,18 @@ export class AgentLoop {
         }),
         internalTurnContext,
         actualModelContext: modelSelection ? persistedModelSelection(modelSelection) : null,
+        memoryContextCallback: (ownerTurnId, content) => {
+          turnMemory.snapshot = {
+            turnId: ownerTurnId,
+            // Preserve the existing rule that saved images become path placeholders.
+            content: this.sanitizePersistedBlocks(structuredClone(content)),
+          };
+          const owner = session?.messages.findLast((message) => message.role === "user" && message.turn_id === ownerTurnId);
+          if (owner) {
+            owner.memmy_memory = structuredClone(turnMemory.snapshot);
+            this.sessions.save(session!);
+          }
+        },
         onMaxFinalizationStarting,
         currentTurnMessageStartIndex: midTurnContext?.transcriptStartIndex ?? null,
         beforeFollowupModelRequest: midTurnContext && session && consolidator
@@ -3952,6 +3974,13 @@ export class AgentLoop {
           : null,
       }),
     );
+    // Normal turns were persisted early; system turns are saved by their existing saveTurn path.
+    const request = result.messages?.[requestIndex];
+    if (turnMemory.snapshot && request?.role === "user") {
+      request.memmy_memory = turnMemory.snapshot;
+      request.turn_id = turnMemory.snapshot.turnId;
+      request.content = originalRequestContent;
+    }
     const rawUsage = result.usage ?? result.response?.usage;
     const usage = normalizeUsageRecord(rawUsage);
     if (activeSessionKey) {
@@ -4012,7 +4041,7 @@ export class AgentLoop {
       ? errorCategory ?? "model_failed"
       : null;
     const messageTool = (tools ?? this.tools).get("message");
-    if (messageTool instanceof MessageTool && messageTool.sentInTurn) {
+    if (messageTool instanceof MessageTool && messageTool.sentInTurn && !finalContent?.startsWith(DELIVERY_NOT_CONFIRMED)) {
       if (stopReason !== "maxIterations" && (!hadInjections || stopReason === "emptyFinalResponse")) return null;
     }
     return new OutboundMessage({
@@ -4203,13 +4232,17 @@ export class AgentLoop {
       const hasReservedInbox = this.goalRuntime.inbox(ctx.sessionKey)
         .some((entry) => entry.turnId === ctx.turnId);
       if (goal || hasReservedInbox) {
+        const request = computerUseRequestContext(ctx.msg);
+        const turnSource = sharedTurnSource(ctx.msg);
         const persisted = await this.goalRuntime.persistGoalUserTurn(
           ctx.sessionKey,
           ctx.turnId,
           {
             channel: ctx.msg.channel,
             chatId: ctx.msg.chatId,
-            ...(sharedTurnSource(ctx.msg) ? { source: sharedTurnSource(ctx.msg)! } : {}),
+            ...(turnSource ? { source: turnSource } : {}),
+            ...(turnSource && request.messageId && request.metadata.computerUseInteractive === true
+              ? { computerUseMessageId: request.messageId } : {}),
           },
           (session, entry) => {
             const source = entry
@@ -4226,12 +4259,12 @@ export class AgentLoop {
                   turnSource: parseTurnSource(entry.metadata.turn_source),
                 })
               : ctx.msg;
-            this.appendUserMessage(source, session, {}, entry?.receivedAt);
+            this.appendUserMessage(source, session, { turn_id: ctx.turnId }, entry?.receivedAt);
           },
         );
         ctx.userPersistedEarly = Boolean(persisted.entry || ctx.msg.content.trim() || ctx.msg.media.length);
       } else {
-        ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!);
+        ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!, { turn_id: ctx.turnId });
         requestTiming("agent.user_persisted");
       }
     }
@@ -4305,7 +4338,7 @@ export class AgentLoop {
         : {}),
       modelSelection: ctx.modelSelection,
     });
-    const toolRequest = computerUseRequestContext(ctx.msg, ctx.turnId);
+    const toolRequest = computerUseRequestContext(ctx.msg, ctx.turnId, this.goalRuntime, ctx.sessionKey);
     this.setToolContext(
       ctx.msg.channel,
       ctx.msg.chatId,
@@ -4425,6 +4458,7 @@ export class AgentLoop {
       failedProvider,
       failedModel,
     ] = await this.runAgentLoop(ctx.initialMessages, {
+      outputUserText: ctx.msg.internal || ctx.msg.channel === "system" || ctx.msg.metadata?.injectedEvent ? null : ctx.msg.content,
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
       onStreamEnd: ctx.onStreamEnd,
@@ -4432,7 +4466,7 @@ export class AgentLoop {
       session: ctx.session,
       channel: ctx.msg.channel,
       chatId: ctx.msg.chatId,
-      ...computerUseRequestContext(ctx.msg, ctx.turnId),
+      ...computerUseRequestContext(ctx.msg, ctx.turnId, this.goalRuntime, ctx.sessionKey),
       sessionKey: ctx.sessionKey,
       pendingQueue: ctx.pendingQueue,
       abortSignal: ctx.abortSignal,
@@ -5049,6 +5083,8 @@ export class AgentLoop {
               this.clearPendingUserTurn(session);
               this.clearRuntimeCheckpoint(session);
             }
+            // An explicit cancel ends the file task; it is not reported as undelivered later.
+            clearOutputDelivery(session.metadata);
             this.sessions.save(session, { fsync: sessionKey.startsWith("cli:") });
           }
         }

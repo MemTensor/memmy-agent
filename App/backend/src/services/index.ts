@@ -11,7 +11,7 @@ import {
   createBuiltinOnboardingInsightSamplers,
   createSourceRegistryOnboardingConversationWindowReader
 } from "../adapters/outbound/agent-source/onboarding-insight-samplers.js";
-import type { SourceRegistry } from "../adapters/outbound/agent-source/source-registry.js";
+import type { SourceRegistry } from "@memmy/agent-source-readers/adapters/source-registry";
 import { createHttpMemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 import type { MemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/index.js";
 import type { SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
@@ -121,6 +121,7 @@ export interface CreateBackendServicesOptions {
   cloudClient: CloudClient;
   permissionManager: PermissionManager;
   bootstrapScenario?: BootstrapScenario;
+  timeZone?: string;
   sourceRegistry?: SourceRegistry;
   ingestionService?: IngestionService;
   skillDistributionService?: SkillDistributionService;
@@ -320,7 +321,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserMode: resolveAnalyticsUserMode,
     }),
     memoryAddAnalytics,
-    scanStoreDirectory: join(dirname(options.appStateStore.databasePath), "agent-source-scans"),
   });
   const toolConnectionAnalytics = createToolConnectionAnalytics({
     getUserId: resolveAnalyticsUserId,
@@ -332,6 +332,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     agentAdapterRegistry: options.agentAdapterRegistry,
     bootstrap: createBootstrapService({
       ...options,
+      getMemoryUserId: resolveMemoryUserId,
       scanPreferencesStore: options.scanPreferencesStore
     }),
     appConfig: createAppConfigService({
@@ -415,6 +416,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       memoryClient: options.memoryClient
     }),
     memoryDetail: createMemoryDetailService({
+      getUserId: resolveMemoryUserId,
       memoryClient: options.memoryClient
     }),
     panel: createPanelService({

@@ -47,6 +47,88 @@ describe("Memory structured logger", () => {
     expect(line).toContain("[redacted]");
   });
 
+  it.each([
+    ["info", "job.started"],
+    ["info", "job.succeeded"],
+    ["error", "job.failed"],
+    ["info", "embedding_retry.succeeded"],
+    ["warn", "embedding_retry.retry_scheduled"],
+    ["error", "embedding_retry.failed"]
+  ] as const)("preserves scheduling identity in %s %s output", (level, event) => {
+    process.env.MEMMY_LOG_LEVEL = "info";
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    createMemoryLogger("worker")[level](event, {
+      jobId: "job-1",
+      retryId: "retry-1",
+      queueLane: "repair_retry",
+      enqueueSeq: 17,
+      attempt: 1,
+      maxAttempts: 3,
+      errorMessage: "Authorization: Bearer abc.def",
+      apiKey: "secret-value",
+      content: "private memory content"
+    });
+
+    const stream = level === "info" ? stdout : stderr;
+    const otherStream = level === "info" ? stderr : stdout;
+    expect(stream).toHaveBeenCalledTimes(1);
+    expect(otherStream).not.toHaveBeenCalled();
+    const record = JSON.parse(String(stream.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(Object.keys(record)).toEqual(["timestamp", "level", "message"]);
+    expect(record.level).toBe(level);
+    expect(record.message).toContain("queueLane=repair_retry");
+    expect(record.message).toContain("enqueueSeq=17");
+    expect(record.message).not.toContain("abc.def");
+    expect(record.message).not.toContain("secret-value");
+    expect(record.message).not.toContain("private memory content");
+  });
+
+  it("includes the actual scheduler and WRR weights in drain output", () => {
+    process.env.MEMMY_LOG_LEVEL = "info";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const laneWeights = { interactive: 4, repair_retry: 3, import: 2, evolution: 2, maintenance: 1 };
+
+    createMemoryLogger("worker").info("drain.completed", {
+      algorithm: "wrr",
+      laneWeights,
+      leased: 4,
+      succeeded: 4,
+      failed: 0,
+      embeddingRetriesLeased: 2,
+      embeddingRetriesSucceeded: 2,
+      embeddingRetriesFailed: 0
+    });
+
+    const record = JSON.parse(String(write.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(Object.keys(record)).toEqual(["timestamp", "level", "message"]);
+    expect(record.message).toContain("algorithm=wrr");
+    expect(record.message).toContain("laneWeights=interactive:4|repair_retry:3|import:2|evolution:2|maintenance:1");
+    expect(record.message).toContain("leased=4, succeeded=4, failed=0");
+    expect(record.message).toContain("embeddingRetriesLeased=2");
+  });
+
+  it("keeps legacy drain output concise and sanitizes scheduler fields", () => {
+    process.env.MEMMY_LOG_LEVEL = "info";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const logger = createMemoryLogger("worker");
+    logger.info("drain.completed", { algorithm: "legacy", leased: 1 });
+    logger.info("drain.completed", {
+      algorithm: "wrr",
+      laneWeights: { interactive: 4, apiKey: "nested-secret" },
+      content: "private memory content"
+    });
+
+    const legacy = JSON.parse(String(write.mock.calls[0]?.[0])) as Record<string, unknown>;
+    expect(legacy.message).toContain("algorithm=legacy");
+    expect(legacy.message).not.toContain("laneWeights=");
+    const sanitized = String(write.mock.calls[1]?.[0]);
+    expect(sanitized).toContain("[redacted]");
+    expect(sanitized).not.toContain("nested-secret");
+    expect(sanitized).not.toContain("private memory content");
+  });
+
   it("honors MEMMY_LOG_LEVEL", () => {
     process.env.MEMMY_LOG_LEVEL = "warn";
     const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
@@ -116,9 +198,11 @@ describe("Memory structured logger", () => {
       ["memory-service", "initialized"],
       ["memory-service", "config.reloaded"],
       ["memory-service", "service.starting"],
+      ["memory-service", "service.startup_stage"],
       ["memory-service", "service.listening"],
       ["memory-service", "service.fatal"],
-      ["memory-service", "config.endpoint_write_failed"]
+      ["memory-service", "config.endpoint_write_failed"],
+      ["storage", "storage.startup_stage"]
     ];
 
     for (const [component, event] of events) {
@@ -127,6 +211,8 @@ describe("Memory structured logger", () => {
         delayMs: 100,
         errorMessage: "test error",
         path: "/health",
+        phase: "storage.opening",
+        elapsedMs: 42,
         status: 200
       });
     }
@@ -135,6 +221,8 @@ describe("Memory structured logger", () => {
     expect(output).toContain("HTTP request succeeded");
     expect(output).toContain("HTTP request rejected");
     expect(output).toContain("HTTP request failed");
+    expect(output).toContain("Memory service startup stage");
+    expect(output).toContain("Memory storage startup stage");
     expect(output).not.toMatch(/[\u3400-\u9fff]/u);
   });
 });

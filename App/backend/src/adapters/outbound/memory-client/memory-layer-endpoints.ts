@@ -1,6 +1,13 @@
 /** Definition for memory layer paths. */
 
 export const MEMORY_LAYER_PATHS = Object.freeze({
+  agentSources: "/api/v1/agent-sources",
+  agentSourceScan: "/api/v1/agent-sources/scan",
+  agentSourceStatus: "/api/v1/agent-sources/scan/status",
+  agentSourceResults: "/api/v1/agent-sources/scan/jobs/:jobId/results",
+  agentSourcePause: "/api/v1/agent-sources/scan/stop",
+  agentSourceCancel: "/api/v1/agent-sources/scan/cancel",
+
   health: "/api/v1/health",
   reloadConfig: "/api/v1/admin/reload-config",
   memoryTokenBudget: "/api/v1/admin/memory-token-budget",
@@ -24,9 +31,19 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   memoryProcessingStatus: "/api/v1/memory/processing/status",
   retryMemoryProcessing: "/api/v1/memory/:id/processing/retry",
   memoryApiLogs: "/api/v1/memory/logs",
+  panelMemory: "/api/v1/panel/memory/:memoryId",
   panelOverview: "/api/v1/panel/overview",
   panelAnalysis: "/api/v1/panel/analysis",
   panelItems: "/api/v1/panel/items",
+  panelLogs: "/api/v1/panel/logs",
+  panelLogDetail: "/api/v1/panel/logs/:id",
+  panelStats: "/api/v1/panel/stats",
+  panelOverviewStats: "/api/v1/panel/overview-stats",
+  panelBrowse: "/api/v1/panel/browse",
+  panelTaskSummaries: "/api/v1/panel/task-summaries",
+  panelTaskCheck: "/api/v1/panel/task-details/:id/check",
+  panelTaskDetail: "/api/v1/panel/task-details/:id",
+  panelTaskField: "/api/v1/panel/task-details/:id/turns/:turnId/field",
   panelTasks: "/api/v1/panel/tasks",
   deletePanelTask: "/api/v1/panel/tasks/:id"
 } as const);

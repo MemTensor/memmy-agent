@@ -26,25 +26,25 @@ describe("memmy memory server entrypoint", () => {
       await cleanup;
       await originalClose(server);
     });
-    const listen = vi.spyOn(memoryHttp, "listenMemoryHttpServer");
+    const create = vi.spyOn(memoryHttp, "createMemoryHttpServer");
     const running = main(["--config", configPath, "--host", "127.0.0.1", "--port", "0"]);
     try {
       const endpoint = await waitForWrittenEndpoint(configPath);
-      const response = await fetch(`${endpoint}/api/v1/system/restart`, {
-        method: "POST",
-        headers: { "x-memmy-viewer": "1", "content-type": "application/json" },
-        body: "{}",
-      });
+      const response = await waitForResponse(`${endpoint}/api/v1/system/restart`, 202, {
+          method: "POST",
+          headers: { "x-memmy-viewer": "1", "content-type": "application/json" },
+          body: "{}",
+        });
       expect(response.status).toBe(202);
       await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
-      listen.mock.calls[0]![0].onShutdownRequested?.();
+      create.mock.calls[0]![0].onShutdownRequested?.();
       finishCleanup();
       await running;
-      expect(listen).toHaveBeenCalledOnce();
+      expect(create).toHaveBeenCalledOnce();
       expect(["SIGINT", "SIGTERM", "exit"].map((signal) => process.listenerCount(signal))).toEqual(listeners);
       expect(existsSync(join(root, "memory-service", "service.lock"))).toBe(false);
     } finally {
-      listen.mock.calls[0]?.[0].onShutdownRequested?.();
+      create.mock.calls[0]?.[0].onShutdownRequested?.();
       finishCleanup();
       await running;
       vi.restoreAllMocks();
@@ -157,4 +157,15 @@ async function waitForWrittenEndpoint(configPath: string): Promise<string> {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
   }
   throw new Error("Memory server did not write its bound endpoint");
+}
+
+async function waitForResponse(url: string, status: number, init: RequestInit): Promise<Response> {
+  const deadline = Date.now() + 5_000;
+  let response: Response | undefined;
+  while (Date.now() < deadline) {
+    response = await fetch(url, init);
+    if (response.status === status) return response;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`endpoint did not return ${status}; received ${response?.status ?? "no response"}`);
 }

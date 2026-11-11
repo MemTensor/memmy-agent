@@ -21,6 +21,15 @@ import {
 } from "./exec-session.js";
 import { isPathInside } from "./path-utils.js";
 import { wrapCommand } from "./sandbox.js";
+import { castParameterAliases, normalizeParameterAliases, OUTPUT_LIMIT_ALIASES, OUTPUT_LIMIT_DESCRIPTION } from "./parameter-aliases.js";
+
+const EXEC_ALIASES = [
+  ["command", "cmd"],
+  ["cwd", "working_dir", "workingDir", "workdir"],
+  ["timeout", "timeout_s", "timeoutS"],
+  ["yield_time_ms", "yieldTimeMs"],
+  ...OUTPUT_LIMIT_ALIASES,
+] as const;
 
 let isWindows = process.platform === "win32";
 
@@ -39,6 +48,7 @@ export class ExecToolConfig {
   timeoutS = 60;
   pathAppend = "";
   sandbox = "";
+  // Additional parent variables beyond the platform and selected runtime defaults.
   allowedEnvKeys: string[] = [];
   allowPatterns: string[] = [];
   denyPatterns: string[] = [];
@@ -95,6 +105,10 @@ const BENIGN_DEVICE_PATHS = new Set([
   "/dev/stderr",
   "/dev/tty",
 ]);
+
+// Keep the selected tool search order and environment identity in non-login shells.
+// Other variables, including interpreter hooks and secrets, require explicit opt-in.
+const UNIX_RUNTIME_ENV_KEYS = ["PATH", "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL"];
 
 const WINDOWS_ENV_KEYS = [
   "APPDATA",
@@ -265,7 +279,7 @@ export class ExecTool extends Tool {
       "Prefer read_file/find_files/grep for inspection and apply_patch/write_file/edit_file for file changes instead of cat, shell find/grep, echo, or sed. " +
       "Use -y or --yes flags to avoid interactive prompts. " +
       "For long-running or interactive commands, pass yield_time_ms; if the command keeps running, exec returns a session_id that can be polled or written to with write_stdin. " +
-      "Output is truncated at 10 000 chars; timeout defaults to 60s."
+      "Output defaults to 10 000 UTF-16 code units, controlled by max_output_chars (not tokens); timeout defaults to 60s."
     );
   }
 
@@ -277,21 +291,29 @@ export class ExecTool extends Tool {
     return {
       type: "object",
       properties: {
-        command: { type: "string" },
-        cmd: { type: "string" },
-        cwd: { type: "string" },
-        working_dir: { type: "string" },
-        workdir: { type: "string" },
-        timeout: { type: "integer", minimum: 1, maximum: ExecTool.MAX_TIMEOUT },
-        timeout_s: { type: "integer", minimum: 1, maximum: ExecTool.MAX_TIMEOUT },
-        timeoutS: { type: "integer", minimum: 1, maximum: ExecTool.MAX_TIMEOUT },
-        shell: { type: "string" },
-        login: { type: "boolean" },
-        yield_time_ms: { type: "integer", minimum: 0, maximum: MAX_YIELD_MS },
-        max_output_chars: { type: "integer", minimum: 1000, maximum: MAX_OUTPUT_CHARS },
-        max_output_tokens: { type: "integer", minimum: 1000, maximum: MAX_OUTPUT_CHARS },
+        command: { type: "string", minLength: 1, description: "Required non-blank shell command to execute." },
+        cwd: { type: "string", description: "Working directory, absolute or relative to the workspace; defaults to the workspace." },
+        timeout: { type: "integer", minimum: 1, maximum: ExecTool.MAX_TIMEOUT, description: "Execution timeout in seconds; defaults to the configured timeout (normally 60)." },
+        shell: { type: ["string", "null"] },
+        login: { type: ["boolean", "null"] },
+        yield_time_ms: { type: "integer", minimum: 0, maximum: MAX_YIELD_MS, description: "Milliseconds to wait before returning a running session; omit for one-shot execution." },
+        max_output_chars: { type: "integer", minimum: 1000, maximum: MAX_OUTPUT_CHARS, description: OUTPUT_LIMIT_DESCRIPTION },
       },
+      required: ["command"],
     };
+  }
+
+  castParams(params: Record<string, any>): Record<string, any> {
+    return castParameterAliases(params, EXEC_ALIASES, (value) => super.castParams(value));
+  }
+
+  validateParams(params: Record<string, any>): string[] {
+    if (!params || typeof params !== "object" || Array.isArray(params)) return super.validateParams(params);
+    const normalized = normalizeParameterAliases(params, EXEC_ALIASES);
+    if (normalized.error) return [normalized.error];
+    const errors = super.validateParams(normalized.params);
+    if (errors.length) return errors;
+    return normalized.params.command.trim() ? [] : ["command must not be blank."];
   }
 
   static extractAbsolutePaths(command: string): string[] {
@@ -384,7 +406,7 @@ export class ExecTool extends Tool {
       LANG: process.env.LANG ?? "C.UTF-8",
       TERM: process.env.TERM ?? "dumb",
     };
-    for (const key of this.allowedEnvKeys) {
+    for (const key of [...UNIX_RUNTIME_ENV_KEYS, ...this.allowedEnvKeys]) {
       const value = process.env[key];
       if (value != null) env[key] = value;
     }
@@ -513,21 +535,32 @@ export class ExecTool extends Tool {
     max_output_tokens?: number | null;
     maxOutputTokens?: number | null;
   } = {}, context?: ToolExecutionContext): Promise<string> {
-    const command = firstNonEmptyString(params.command, params.cmd);
-    if (!command) return "Error: Missing command. Provide command or cmd.";
+    params = this.castParams(params);
+    if (params && typeof params === "object" && !Array.isArray(params)) {
+      const aliasError = normalizeParameterAliases(params, EXEC_ALIASES).error;
+      if (aliasError) return `Error: ${aliasError}`;
+      // Preserve the direct-call timeout cap; compare aliases before capping so
+      // two distinct oversized timeouts cannot silently become equal.
+      if (Number.isInteger(params.timeout) && params.timeout! > ExecTool.MAX_TIMEOUT) {
+        params = { ...params, timeout: ExecTool.MAX_TIMEOUT };
+      }
+    }
+    const errors = this.validateParams(params);
+    if (errors.length) return `Error: ${errors.join("; ")}`;
+    const command = params.command!;
     const signal = context?.abortSignal ?? null;
-    const maxOutputParam = params.max_output_chars ?? params.maxOutputChars ?? params.max_output_tokens ?? params.maxOutputTokens;
+    const maxOutputParam = params.max_output_chars;
     const prepared = await this.prepareCommand(
       command,
-      firstNonEmptyString(params.cwd, params.working_dir, params.workingDir, params.workdir),
-      params.timeout ?? params.timeout_s ?? params.timeoutS,
+      firstNonEmptyString(params.cwd),
+      params.timeout,
       firstNonEmptyString(params.shell),
       params.login,
     );
     if (typeof prepared === "string") return prepared;
 
     const maxOutputChars = clampSessionInt(maxOutputParam, ExecTool.DEFAULT_OUTPUT_CHARS, 1000, MAX_OUTPUT_CHARS);
-    if (params.yield_time_ms != null || params.yieldTimeMs != null) {
+    if (params.yield_time_ms != null) {
       try {
         throwIfAborted(signal);
         const [sessionId, poll] = await this.sessionManager.start({
@@ -537,11 +570,14 @@ export class ExecTool extends Tool {
           timeout: prepared.timeout,
           shellProgram: prepared.shellProgram,
           login: prepared.login,
-          yieldTimeMs: clampSessionInt(params.yield_time_ms ?? params.yieldTimeMs, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS),
+          yieldTimeMs: clampSessionInt(params.yield_time_ms, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS),
           maxOutputChars: clampSessionInt(maxOutputParam, DEFAULT_MAX_OUTPUT_CHARS, 1000, MAX_OUTPUT_CHARS),
           decoderOptions: this.outputDecoderOptions(),
           abortSignal: signal,
         });
+        if (!poll.done) {
+          context?.trackOutputProducer?.(() => this.sessionManager.get(sessionId)?.finished === false);
+        }
         return formatSessionPoll(sessionId, poll);
       } catch (error) {
         if (isToolAbortError(error)) throw error;

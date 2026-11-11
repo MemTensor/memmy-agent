@@ -5,13 +5,13 @@ import type { LlmMessage } from "../../../src/model/types.js";
 import { closeMemoryHttpServer } from "../../../src/server/http.js";
 import { observationMemoryState } from "../../../src/service/observation-memory-state.js";
 import { Repositories } from "../../../src/storage/repositories.js";
-import { createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
+import { createMemoryServiceFixture, runWorkerRoundsWithDueRetries } from "../../fixtures/memory-service-fixture.js";
 
 const { cleanup, createTestMemoryService } = createMemoryServiceFixture();
 const servers: Server[] = [];
 afterEach(async () => {
   for (const server of servers.splice(0)) await closeMemoryHttpServer(server);
-  cleanup();
+  await cleanup();
 });
 
 const namespace = { source: "memmy", profileId: "default", userId: "history-recovery-user" };
@@ -49,7 +49,9 @@ describe("History recovery across runtime lifecycle", () => {
       startedAt: "2026-10-19T10:00:00.000Z", endedAt: "2026-10-19T10:10:00.000Z" };
     const rows = sourceRecordIds.map((sourceRecordId, index) => service.syncExternalEvidence({ ...baseEvidence, sourceRecordId,
       content: `**Production constraint**: The A17 order review for source ${index} must retain locked production orders.` }));
-    await runWorkerRounds(service, 3);
+    // Lifecycle recovery starts from exhausted failures; make only these retries
+    // due explicitly instead of bypassing the production backoff rule.
+    await runWorkerRoundsWithDueRetries(service, db, rows.map(row => row.id), 3);
     for (const row of rows) {
       expect(service.memoryProcessingStatus([row.id]).items[0]).toMatchObject({
         state: "failed", stage: "summary", attemptCount: 3, manualRetryCount: 0,

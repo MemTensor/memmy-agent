@@ -14,6 +14,8 @@ export interface AgentToolProgressEvent {
   name?: string;
   arguments?: unknown;
   result?: unknown;
+  display_text?: string;
+  output_file?: { path: string; name: string; sizeBytes: number; contentType?: string; complete: boolean; untrusted: boolean };
   error?: unknown;
   files?: unknown[];
   embeds?: unknown[];

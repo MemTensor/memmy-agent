@@ -1,6 +1,9 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { setImmediate as yieldToIO } from "node:timers/promises";
+import { setImmediate as yieldToIO, setTimeout as waitForIO } from "node:timers/promises";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -57,7 +60,80 @@ describe("standalone Agent source executor", () => {
     } finally { await executor.dispose(); }
   });
 
-  it("also waits for a canceled scan when a replacement scan starts before disposal", async () => {
+  it("preserves explicit OpenCode removal suppression when clearing memory", async () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    const statePath = join(root, "agent-sources.json");
+    writeFileSync(configPath, JSON.stringify({ memmyMemory: { agentAccess: {
+      autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: true
+    } } }));
+    writeFileSync(statePath, JSON.stringify({ version: 2, sources: { opencode: {
+      status: "not_connected", autoInjectSuppressed: true, messageCount: 4, lastScannedAt: null, latestSeenAt: null
+    } } }));
+    const installPlugin = vi.fn(async () => {});
+    const detect = vi.fn(async () => true);
+    const executor = createAgentSourceExecutor({
+      service: { clearAllData: vi.fn(() => ({ ok: true })) } as unknown as MemoryService,
+      configPath, statePath, initialScanDelayMs: 0, scheduledScanIntervalMs: 10,
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "opencode", displayName: "OpenCode", builtin: true, dataPath: root },
+        detect, async *scan() {}
+      }]),
+      integrationRegistry: createSkillTargetRegistry([{
+        targetId: "opencode", displayName: "OpenCode", async resolveRootDirectory() { return root; },
+        async install() {}, async uninstall() {}, async isInstalled() { return false; }, installPlugin
+      }])
+    });
+    try {
+      await executor.clearAllData();
+      expect(JSON.parse(readFileSync(statePath, "utf8")).sources.opencode).toMatchObject({
+        status: "not_connected", autoInjectSuppressed: true, messageCount: 0
+      });
+      executor.startAutomation();
+      await vi.waitFor(() => expect(detect).toHaveBeenCalled());
+      await waitForIO(20);
+      expect(installPlugin).not.toHaveBeenCalled();
+    } finally { await executor.dispose(); }
+  });
+
+  it("does not refresh OpenCode after clearing begins during freshness lookup", async () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    const statePath = join(root, "agent-sources.json");
+    writeFileSync(configPath, JSON.stringify({ memmyMemory: { agentAccess: {
+      autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: false
+    } } }));
+    writeFileSync(statePath, JSON.stringify({ version: 2, sources: { opencode: {
+      status: "plugin_installed", messageCount: 0, lastScannedAt: null, latestSeenAt: null
+    } } }));
+    let finishLookup!: (current: boolean) => void;
+    const freshness = new Promise<boolean>((resolve) => { finishLookup = resolve; });
+    const isInstalledHookCurrent = vi.fn(() => freshness);
+    const installPlugin = vi.fn(async () => {});
+    const executor = createAgentSourceExecutor({
+      service: { clearAllData: vi.fn(() => ({ ok: true })) } as unknown as MemoryService,
+      configPath, statePath, initialScanDelayMs: 0, scheduledScanIntervalMs: 10,
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "opencode", displayName: "OpenCode", builtin: true, dataPath: root },
+        detect: async () => true, async *scan() {}
+      }]),
+      integrationRegistry: createSkillTargetRegistry([{
+        targetId: "opencode", displayName: "OpenCode", async resolveRootDirectory() { return root; },
+        async install() {}, async uninstall() {}, async isInstalled() { return true; },
+        installPlugin, isInstalledHookCurrent
+      }])
+    });
+    try {
+      executor.startAutomation();
+      await vi.waitFor(() => expect(isInstalledHookCurrent).toHaveBeenCalledOnce());
+      const clearing = executor.clearAllData();
+      finishLookup(false);
+      await clearing;
+      expect(installPlugin).not.toHaveBeenCalled();
+    } finally { finishLookup(true); await executor.dispose(); }
+  });
+
+  it("waits for cancellation to release its writer before allowing a replacement", async () => {
     const root = tempRoot();
     let finishFirst!: () => void;
     let finishSecond!: () => void;
@@ -67,7 +143,7 @@ describe("standalone Agent source executor", () => {
       .mockImplementationOnce(async () => { await first; return true; })
       .mockImplementationOnce(async () => { await second; return true; });
     const executor = createAgentSourceExecutor({
-      service: {} as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,} as MemoryService,
       configPath: join(root, "config.yaml"),
       sourceRegistry: createSourceRegistry([{
         descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: root },
@@ -78,15 +154,16 @@ describe("standalone Agent source executor", () => {
     try {
       await executor.startScan({ sourceId: "fixture-agent" });
       await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(1));
-      await executor.cancelScan();
+      const cancellation = executor.cancelScan();
+      await expect(executor.startScan({ sourceId: "fixture-agent" })).rejects.toThrow("Canceling");
+      finishFirst();
+      await cancellation;
       await executor.startScan({ sourceId: "fixture-agent" });
       await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(2));
       let completed = false;
       const disposal = Promise.resolve(executor.dispose()).then(() => { completed = true; });
-      finishSecond();
-      await new Promise((done) => setTimeout(done, 20));
       expect(completed).toBe(false);
-      finishFirst();
+      finishSecond();
       await disposal;
     } finally {
       finishFirst();
@@ -107,7 +184,7 @@ describe("standalone Agent source executor", () => {
     };
     const addMemory = vi.fn();
     const executor = createAgentSourceExecutor({
-      service: { addMemory } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       sourceRegistry: createSourceRegistry([adapter]),
     });
@@ -138,7 +215,7 @@ describe("standalone Agent source executor", () => {
     const detection = new Promise<void>((done) => { finishDetection = done; });
     const detect = vi.fn(async () => { await detection; return true; });
     const executor = createAgentSourceExecutor({
-      service: {} as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,} as MemoryService,
       configPath,
       initialScanDelayMs: 0,
       sourceRegistry: createSourceRegistry([{
@@ -185,7 +262,7 @@ describe("standalone Agent source executor", () => {
       .mockReturnValue({ id: "memory-1", duplicate: true });
     const enqueuePendingImportSummaries = vi.fn();
     const scheduleWorker = vi.fn();
-    const service = { addMemory, enqueuePendingImportSummaries } as unknown as MemoryService;
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries } as unknown as MemoryService;
     const adapter: SourceAdapter = {
       descriptor: {
         sourceId: "fixture-agent",
@@ -259,6 +336,152 @@ describe("standalone Agent source executor", () => {
     });
   });
 
+  it("clears import checkpoints so ordinary single-source and all-source scans reimport deleted history", async () => {
+    const root = tempRoot();
+    const statePath = join(root, "agent-sources.json");
+    const checkpointPath = `${statePath}.checkpoints.sqlite`;
+    const scanStoreDirectory = join(root, "agent-source-scans");
+    writeFileSync(statePath, JSON.stringify({ version: 2, legacyRecoveryChecked: true, sources: {
+      alpha: { status: "plugin_installed", messageCount: 4, lastScannedAt: "2026-08-27T01:00:00.000Z", latestSeenAt: "2026-08-27T01:00:00.000Z", contentHash: "old-hash" }
+    } }));
+    let imported: Array<{ sourceId: string; memoryId: string }> = [];
+    let sequence = 0;
+    const addMemory = vi.fn((input: { source: string }) => {
+      const memoryId = `memory-${++sequence}`;
+      imported.push({ sourceId: input.source, memoryId });
+      return { id: memoryId, duplicate: false };
+    });
+    const clearMemory = vi.fn(() => {
+      const memories = imported.length;
+      imported = [];
+      return { ok: true as const, cleared: { memories }, clearedAt: new Date().toISOString(), serverTime: new Date().toISOString() };
+    });
+    const enqueuePendingImportSummaries = vi.fn();
+    const scanOptions: Array<{ sourceId: string; options: Parameters<SourceAdapter["scan"]>[0] }> = [];
+    const createAdapter = (sourceId: string): SourceAdapter => ({
+      descriptor: { sourceId, displayName: sourceId, builtin: true, dataPath: join(root, sourceId) },
+      detect: async () => true,
+      async *scan(options) {
+        scanOptions.push({ sourceId, options });
+        yield* completeTurn(`${sourceId}-conversation`, "2026-08-28T01:00:00.000Z").map((message) => ({
+          ...message,
+          sourceId,
+          content: `${sourceId}: ${message.content}`
+        }));
+      }
+    });
+    const executor = createAgentSourceExecutor({
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, clearAllData: clearMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"),
+      statePath,
+      scanStoreDirectory,
+      sourceRegistry: createSourceRegistry([createAdapter("alpha"), createAdapter("beta")])
+    });
+
+    try {
+      await executor.startScan({ sourceId: "alpha", mode: "full" });
+      await waitForScan(executor);
+      expect(addMemory).toHaveBeenCalledTimes(1);
+      expect(scanOptions[0]?.options).toMatchObject({ fullHistory: true, order: "source_default" });
+      expect(scanOptions[0]?.options.since).toBeUndefined();
+      expect(existsSync(checkpointPath)).toBe(true);
+      expect(readdirSync(scanStoreDirectory).some((name) => name.endsWith(".sqlite"))).toBe(true);
+
+      await executor.clearAllData();
+      expect(clearMemory).toHaveBeenCalledOnce();
+      expect(imported).toEqual([]);
+      expect(executor.scanStatus()).toMatchObject({ running: false, status: "idle", progress: null });
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
+        version: 2,
+        legacyRecoveryChecked: true,
+        sources: { alpha: { status: "plugin_installed", messageCount: 0, lastScannedAt: null, latestSeenAt: null } }
+      });
+      expect(JSON.parse(readFileSync(statePath, "utf8")).sources.alpha).not.toHaveProperty("recoveryPending");
+      expect(existsSync(checkpointPath)).toBe(false);
+      expect(readdirSync(scanStoreDirectory)).toEqual(["state-generation.json"]);
+
+      await executor.startScan({ sourceId: "alpha" });
+      await waitForScan(executor);
+      expect(addMemory).toHaveBeenCalledTimes(2);
+      expect(scanOptions[1]?.options).toMatchObject({ fullHistory: true, order: "recent_first" });
+      expect(scanOptions[1]?.options.since).toBeUndefined();
+
+      await executor.clearAllData();
+      scanOptions.length = 0;
+      await executor.startScan({ sourceId: "all" });
+      await waitForScan(executor);
+      expect(scanOptions.map(({ sourceId }) => sourceId)).toEqual(["alpha", "beta"]);
+      expect(addMemory).toHaveBeenCalledTimes(4);
+      expect(scanOptions.map(({ sourceId, options }) => ({ sourceId, fullHistory: options.fullHistory, since: options.since }))).toEqual([
+        { sourceId: "alpha", fullHistory: true, since: undefined },
+        { sourceId: "beta", fullHistory: true, since: undefined }
+      ]);
+    } finally {
+      await executor.dispose();
+    }
+  });
+
+  it("stops an active scan and rejects new scans until clearing has removed its writers", async () => {
+    const root = tempRoot();
+    let releaseDetection!: () => void;
+    let markDetectionStarted!: () => void;
+    const detectionStarted = new Promise<void>((resolve) => { markDetectionStarted = resolve; });
+    const blockedDetection = new Promise<void>((resolve) => { releaseDetection = resolve; });
+    let firstDetection = true;
+    const scan = vi.fn(async function* (options: Parameters<SourceAdapter["scan"]>[0]) {
+      yield* completeTurn("fixture-agent-conversation", "2026-08-28T01:00:00.000Z");
+      void options;
+    });
+    const addMemory = vi.fn(() => ({ id: "memory-after-clear", duplicate: false }));
+    const cleared = { ok: true as const, cleared: { memories: 1 }, clearedAt: "2026-08-28T01:00:00.000Z", serverTime: "2026-08-28T01:00:00.000Z" };
+    let finishClear!: (result: typeof cleared) => void;
+    const clearingMemory = new Promise<typeof cleared>((resolve) => { finishClear = resolve; });
+    const clearMemory = vi.fn(() => clearingMemory);
+    const executor = createAgentSourceExecutor({
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, clearAllData: clearMemory } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"),
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: root },
+        async detect() {
+          if (firstDetection) {
+            firstDetection = false;
+            markDetectionStarted();
+            await blockedDetection;
+          }
+          return true;
+        },
+        scan
+      }])
+    });
+
+    try {
+      await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
+      await detectionStarted;
+      const clearing = executor.clearAllData();
+      await expect(executor.startScan({ sourceId: "fixture-agent" })).rejects.toThrow("Clearing Memory data");
+      expect(clearMemory).not.toHaveBeenCalled();
+      releaseDetection();
+      await vi.waitFor(() => expect(clearMemory).toHaveBeenCalledOnce());
+      await expect(executor.startScan({ sourceId: "fixture-agent" })).rejects.toThrow("Clearing Memory data");
+      finishClear(cleared);
+      await clearing;
+      expect(clearMemory).toHaveBeenCalledOnce();
+      expect(scan).toHaveBeenCalledOnce();
+      expect(scan.mock.calls[0]?.[0].signal?.aborted).toBe(true);
+      expect(addMemory).not.toHaveBeenCalled();
+      expect(executor.scanStatus()).toMatchObject({ running: false, status: "idle", progress: null });
+
+      await executor.startScan({ sourceId: "fixture-agent" });
+      await waitForScan(executor);
+      expect(scan).toHaveBeenCalledTimes(2);
+      expect(addMemory).toHaveBeenCalledOnce();
+    } finally {
+      releaseDetection();
+      finishClear(cleared);
+      await executor.dispose();
+    }
+  });
+
   it("uses an injected Agent Skill root without reading the developer home", async () => {
     const root = tempRoot();
     const skillRoot = join(root, "isolated-agent-root");
@@ -286,7 +509,7 @@ describe("standalone Agent source executor", () => {
       }
     };
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -332,7 +555,7 @@ describe("standalone Agent source executor", () => {
       }
     };
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -384,7 +607,7 @@ describe("standalone Agent source executor", () => {
       }
     };
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory: vi.fn(),
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -397,15 +620,10 @@ describe("standalone Agent source executor", () => {
     await waitForProgress(executor);
     await executor.pauseScan();
     await executor.cancelScan();
-    expect(executor.scanStatus()).toEqual({
-      running: false,
-      jobId: null,
-      sourceId: null,
-      mode: null,
-      progress: null,
-      startedAt: null,
-      completedAt: null,
-      error: null
+    expect(executor.scanStatus()).toMatchObject({
+      running: false, status: "cancelled", jobId: expect.any(String), attemptId: expect.any(String),
+      version: { generation: expect.any(Number), sequence: expect.any(Number) }, progress: null,
+      completedAt: null, error: null
     });
   });
 
@@ -437,7 +655,10 @@ describe("standalone Agent source executor", () => {
         builtin: true,
         dataPath: join(root, "history")
       },
-      detect: async () => true,
+      // Adapter I/O can span multiple event-loop turns without advancing scan deadlines.
+      detect: () => new Promise<boolean>((resolve) => {
+        setImmediate(() => setImmediate(() => resolve(true)));
+      }),
       async *scan() {
         sequence += 1;
         const pending = io[sequence - 1];
@@ -471,7 +692,7 @@ describe("standalone Agent source executor", () => {
     const enqueuePendingImportSummaries = vi.fn();
     const scheduleWorker = vi.fn();
     const executor = createAgentSourceExecutor({
-      service: { addMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
       configPath,
       statePath: join(root, "agent-sources.json"),
       sourceRegistry: createSourceRegistry([adapter]),
@@ -505,7 +726,11 @@ describe("standalone Agent source executor", () => {
       io[0]!.release();
       await pendingCompletion;
       pendingCompletion = undefined;
+
+
+
       expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
+
       expect(addMemory).toHaveBeenCalledTimes(1);
       expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-1"]);
       expect(scheduleWorker).toHaveBeenCalledTimes(1);
@@ -523,7 +748,11 @@ describe("standalone Agent source executor", () => {
       io[1]!.release();
       await pendingCompletion;
       pendingCompletion = undefined;
+
+
+
       expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
+
       expect(addMemory).toHaveBeenCalledTimes(2);
       expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-2"]);
       expect(scheduleWorker).toHaveBeenCalledTimes(2);
@@ -540,7 +769,7 @@ describe("standalone Agent source executor", () => {
     const root = tempRoot();
     const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: false }));
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -576,7 +805,7 @@ describe("standalone Agent source executor", () => {
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
     const root = tempRoot();
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory: vi.fn(() => {
           throw new Error("write failed");
         }),
@@ -606,7 +835,7 @@ describe("standalone Agent source executor", () => {
     const root = tempRoot();
     const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: true }));
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
@@ -628,17 +857,18 @@ describe("standalone Agent source executor", () => {
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
     const root = tempRoot();
     const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: false }));
+    const turns = [
+      completeTurn("conversation-old", "2026-08-28T01:00:00.000Z"),
+      completeTurn("conversation-new", "2026-08-28T02:00:00.000Z")
+    ];
     const executor = createAgentSourceExecutor({
-      service: {
+      service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
       statePath: join(root, "agent-sources.json"),
-      sourceRegistry: createSourceRegistry([createFixtureAdapter(root, [
-        completeTurn("conversation-old", "2026-08-28T01:00:00.000Z"),
-        completeTurn("conversation-new", "2026-08-28T02:00:00.000Z")
-      ])]),
+      sourceRegistry: createSourceRegistry([createFixtureAdapter(root, turns)]),
       memoryAddAnalytics: createAddAnalyticsRecorder(events)
     });
 
@@ -650,9 +880,14 @@ describe("standalone Agent source executor", () => {
     await executor.startScan({ sourceId: "fixture-agent", mode: "incremental" });
     await waitForScan(executor);
 
+    expect(events).toEqual([]);
+    expect(addMemory).toHaveBeenCalledTimes(2);
+    turns.push(completeTurn("conversation-latest", "2026-08-28T03:00:00.000Z"));
+    await executor.startScan({ sourceId: "fixture-agent", mode: "incremental" });
+    await waitForScan(executor);
     expect(events.map((event) => event.payload.conversationId)).toEqual([
-      "conversation-new",
-      "conversation-new"
+      "conversation-latest",
+      "conversation-latest"
     ]);
     await executor.dispose();
   });
@@ -665,7 +900,7 @@ describe("standalone Agent source executor", () => {
     writeFileSync(skillPath, "---\nname: sample-skill\nversion: 1\n---\n\nUse the sample procedure.\n");
     vi.stubEnv("CODEX_HOME", codexRoot);
     const addMemory = vi.fn(() => ({ id: "skill-memory-1" }));
-    const service = {
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
       addMemory,
       enqueuePendingImportSummaries: vi.fn()
     } as unknown as MemoryService;
@@ -704,7 +939,7 @@ describe("standalone Agent source executor", () => {
     }
     vi.stubEnv("CODEX_HOME", codexRoot);
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
-    const service = {
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
       addMemory: vi.fn((input: { sourceSkillId?: string }) => {
         if (input.sourceSkillId === "duplicate-skill") return { id: "dup", duplicate: true, status: "activated" };
         if (input.sourceSkillId === "deleted-skill") return { id: "gone", status: "deleted" };
@@ -762,7 +997,7 @@ describe("standalone Agent source executor", () => {
       detect: async () => true,
       async *scan() {}
     };
-    const service = {
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit,
       addMemory: vi.fn(),
       enqueuePendingImportSummaries: vi.fn()
     } as unknown as MemoryService;
@@ -785,6 +1020,41 @@ describe("standalone Agent source executor", () => {
     expect(readFileSync(join(cursorRoot, "hooks.json"), "utf8")).not.toContain("memmy-resume-hook.mjs");
     expect((await executor.list()).sources[0]?.status).toBe("not_connected");
     expect(JSON.parse(readFileSync(statePath, "utf8")).sources.cursor.autoInjectSuppressed).toBe(true);
+
+    // Reverse acceptance in a fresh process: stored removal must suppress
+    // automatic installation and leave no command for a new native event.
+    const hookSettings = readFileSync(join(cursorRoot, "hooks.json"), "utf8");
+    const moduleUrl = (relative: string) => new URL(relative, import.meta.url).href;
+    const childScript = `
+      import { readFileSync } from "node:fs";
+      import { createAgentSourceExecutor } from ${JSON.stringify(moduleUrl("../src/agent-source/runtime.ts"))};
+      import { createSourceRegistry } from ${JSON.stringify(moduleUrl("../src/agent-source/adapters/source-registry.ts"))};
+      import { createCursorSkillTarget } from ${JSON.stringify(moduleUrl("../src/agent-source/integration/cursor/index.ts"))};
+      import { createSkillTargetRegistry } from ${JSON.stringify(moduleUrl("../src/agent-source/integration/target-registry.ts"))};
+      let writes = 0;
+      const executor = createAgentSourceExecutor({
+        service: { addMemory() { writes += 1; }, completeSourceTurn() { writes += 1; } },
+        configPath: ${JSON.stringify(configPath)}, statePath: ${JSON.stringify(statePath)},
+        initialScanDelayMs: 0, scheduledScanIntervalMs: 10,
+        sourceRegistry: createSourceRegistry([{ descriptor: { sourceId: "cursor", displayName: "Cursor", builtin: true, dataPath: ${JSON.stringify(cursorRoot)} }, detect: async () => true, async *scan() {} }]),
+        integrationRegistry: createSkillTargetRegistry([createCursorSkillTarget({ rootDirectory: ${JSON.stringify(cursorRoot)}, memmyConfigPath: ${JSON.stringify(configPath)} })])
+      });
+      executor.startAutomation();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const settings = JSON.parse(readFileSync(${JSON.stringify(join(cursorRoot, "hooks.json"))}, "utf8"));
+      const commands = Object.values(settings.hooks ?? {}).flat().filter(entry => String(entry.command ?? "").includes("memmy-resume-hook"));
+      const status = (await executor.list()).sources[0]?.status;
+      await executor.dispose();
+      console.log(JSON.stringify({ writes, hookCommands: commands.length, status }));
+    `;
+    const fresh = spawnSync(process.execPath, ["--import", fileURLToPath(new URL("../../node_modules/tsx/dist/loader.mjs", import.meta.url)),
+      "--input-type=module", "--eval", childScript], {
+      env: { ...process.env, MEMMY_HOME: root, MEMMY_MEMORY_HOME: join(root, "memory-service") },
+      encoding: "utf8", timeout: 10_000
+    });
+    expect(fresh.status, fresh.stderr).toBe(0);
+    expect(JSON.parse(fresh.stdout.trim().split("\n").at(-1)!)).toEqual({ writes: 0, hookCommands: 0, status: "not_connected" });
+    expect(readFileSync(join(cursorRoot, "hooks.json"), "utf8")).toBe(hookSettings);
 
     await executor.mutateConnection("cursor", "plugin", "POST", "auto_inject");
     expect(JSON.parse(readFileSync(statePath, "utf8")).sources.cursor.autoInjectSuppressed).toBe(true);
@@ -949,12 +1219,17 @@ async function waitForAutomaticScanCompletion(
 ): Promise<void> {
   const deadline = performance.now() + 2_000;
   for (;;) {
+    if (performance.now() >= deadline) throw new Error("automatic scan did not complete before the I/O deadline");
     const status = executor.scanStatus();
     if (status.jobId !== previousJobId && status.completedAt !== null && !status.running) {
       expect(status.error).toBeNull();
       return;
     }
+
+
+
     if (performance.now() >= deadline) throw new Error("automatic scan did not complete before the I/O deadline");
+
     await yieldToIO();
   }
 }

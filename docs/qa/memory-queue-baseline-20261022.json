@@ -1,0 +1,100 @@
+{
+  "baseline": "upstream/v1.2.6@3a5f5c44bd5cc557a529c2c715ce3f08cbb9fa93",
+  "method": "real SQLite and WorkerRunner; local substitute business/model handlers",
+  "observations": [
+    {
+      "scenario": "10000_import_backlog",
+      "seededImports": 10000,
+      "rounds": 50,
+      "completedImports": 200,
+      "remainingImports": 9800,
+      "retryLeased": 0,
+      "reflectionStarted": 0,
+      "maintenanceStarted": 0,
+      "retryDirectClaimControl": true,
+      "reflectionDirectClaimControl": true,
+      "nativeTaskControl": "runs next round",
+      "elapsedMs": 542
+    },
+    {
+      "scenario": "retry_free_capacity_control",
+      "leased": 1,
+      "succeeded": 1
+    },
+    {
+      "scenario": "startup_repair_priority_control",
+      "startupBacklog": 10000,
+      "firstClaim": "reflection",
+      "leased": 1
+    },
+    {
+      "scenario": "onboarding_priority_control",
+      "firstClaim": "onboarding-first-report"
+    },
+    {
+      "scenario": "new_imports_overtake_old",
+      "rounds": 25,
+      "newerCompleted": 25,
+      "oldestAttempts": 0
+    },
+    {
+      "scenario": "retry_order_control",
+      "firstClaim": "newer-memory",
+      "olderRetry": "pending"
+    },
+    {
+      "scenario": "priority_cohort_underfill",
+      "limit": 4,
+      "leased": 1,
+      "otherRunnable": 3
+    },
+    {
+      "scenario": "multiple_entries_concurrency",
+      "calls": 2,
+      "perCallLimit": 4,
+      "peakHandlers": 8
+    },
+    {
+      "scenario": "summary_batch_barrier",
+      "limit": 8,
+      "finished": 3,
+      "active": 1,
+      "unstartedButLeased": 4,
+      "fifthStarted": false
+    },
+    {
+      "scenario": "serial_prefetch_expiry",
+      "actualStarted": 1,
+      "leased": 4,
+      "elapsedClockSeconds": 61,
+      "reclaimable": 4
+    },
+    {
+      "scenario": "stale_execution_overwrite",
+      "newExecution": "succeeded",
+      "afterOldFailure": "failed",
+      "leaseGenerationGuard": false
+    },
+    {
+      "scenario": "generic_failure_backoff",
+      "attempts": [
+        1,
+        2,
+        3
+      ],
+      "clockAdvancedMs": 0,
+      "terminal": "dead_letter"
+    },
+    {
+      "scenario": "restart_valid_leases",
+      "validMainLease": "requeued",
+      "validRetryLease": "pending",
+      "remainingSecondsBeforeRecovery": 600
+    },
+    {
+      "scenario": "embedding_existing_claim_guard",
+      "staleCompletionRejected": true,
+      "currentOwner": "B"
+    }
+  ]
+}

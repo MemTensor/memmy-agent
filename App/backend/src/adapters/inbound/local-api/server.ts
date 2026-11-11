@@ -42,9 +42,6 @@ export interface CreateLocalApiServerOptions {
   composioMcpToken: string;
   heartbeatIntervalMs?: number;
   allowedOrigins?: readonly string[];
-  scanProcess?: {
-    databasePath: string;
-  };
   pluginCapabilitiesChanged?: () => Promise<void>;
 }
 
@@ -57,6 +54,25 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   const app = Fastify({ logger: false });
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const authenticateRuntimeToken = createRuntimeTokenPreHandler(options.permissionManager);
+  const eventStreams = new Set<() => void>();
+  let closing = false;
+  const registerEventStream = (stop: () => void) => {
+    // Authentication may finish after preClose has already drained existing streams.
+    if (closing) stop();
+    else eventStreams.add(stop);
+    return () => { eventStreams.delete(stop); };
+  };
+  app.addHook("preClose", async () => {
+    closing = true;
+    // The renderer closes after this server; do not wait for its EventSource to
+    // disconnect. End only our notification streams, preserving ordinary writes.
+    for (const stop of eventStreams) stop();
+  });
+  app.addHook("onResponse", async () => {
+    // A request already running at preClose can become idle after Fastify's
+    // initial idle sweep. Preserve its response, then retire the idle socket.
+    if (closing) app.server.closeIdleConnections();
+  });
 
   if (options.knowledge) {
     registerKnowledgeRoutes(app, { ...options.knowledge, authenticate: authenticateRuntimeToken });
@@ -98,7 +114,7 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     progressBus: options.services.progressBus,
     permissionManager: options.permissionManager,
     authenticateRuntimeToken,
-    scanProcess: options.scanProcess
+    scanClient: options.services.memoryClient?.agentSources
   });
   registerAppConfigRoutes(app, {
     appConfig: options.services.appConfig,
@@ -168,7 +184,7 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
       return reply.code(401).send({ error: "unauthorized" });
     }
 
-    startSse(reply, heartbeatIntervalMs, getSingleHeaderValue(request.headers.origin), options.services.progressBus);
+    startSse(reply, heartbeatIntervalMs, getSingleHeaderValue(request.headers.origin), options.services.progressBus, registerEventStream);
   });
 
   // The live ASR stream is a WebSocket, which Fastify's router never sees: an
@@ -281,7 +297,8 @@ function startSse(
   reply: FastifyReply,
   heartbeatIntervalMs: number,
   origin: string | undefined,
-  progressBus: BackendServices["progressBus"]
+  progressBus: BackendServices["progressBus"],
+  registerEventStream: (stop: () => void) => () => void
 ): void {
   // SSE is a long-lived response, so we take over the raw response to prevent Fastify from automatically ending the request.
   reply.hijack();
@@ -363,14 +380,23 @@ function startSse(
     [JSON.stringify([pluginId, capabilityId, callId, conversationId]), { pluginId, capabilityId, callId, conversationId }])).values()];
   send({ id: randomUUID(), type: "plugin.capability_snapshot", timestamp: new Date().toISOString(), payload: { calls: pendingCalls } });
 
+  let cleanedUp = false;
+  let unregister = () => {};
   const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
     // Clean up the heartbeat timer promptly after the client disconnects, avoiding orphaned tasks lingering in the background.
     clearInterval(interval);
     unsubscribeScanProgress();
     unsubscribeScanCompleted();
     unsubscribePluginCapability();
+    unregister();
   };
 
   reply.raw.once("close", cleanup);
   reply.raw.once("error", cleanup);
+  unregister = registerEventStream(() => {
+    cleanup();
+    reply.raw.end();
+  });
 }

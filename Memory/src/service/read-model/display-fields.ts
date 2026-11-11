@@ -1,9 +1,28 @@
 import type { MemoryRow } from "../../types.js";
 import { asStringArray, isRecord } from "../../utils/json.js";
+import { clip, semanticUserText } from "../../utils/text.js";
 
-const PLACEHOLDER_LINE = /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|建立索引中|索引建立中|索引已建立|反思生成中)$/i;
+const PLACEHOLDER_LINE = /^(user|assistant|system|tool|developer|摘要排队中|摘要整理中|摘要总结中|建立索引中|索引建立中|索引已建立|反思生成中)$/i;
 const INTERNAL_LINE = /^(RawTurn|TraceStep|Alpha|Value|Priority|Reflection|Signature|Vec Summary|Vec Action|Trigger|Procedure|Verification|Boundary|Support|Gain|Raw gain|Confidence|Evidence):/i;
 const DRAFT_TITLE = /^Policy:\s+/i;
+
+/** Undefined kind is the legacy L1 trace representation. */
+export function isTraceMemory(memory: MemoryRow): boolean {
+  return memory.memoryLayer === "L1" && (!memory.properties.internal_info.memory_kind || memory.properties.internal_info.memory_kind === "trace");
+}
+
+/** A missing stored summary must never be manufactured from source evidence. */
+export function storedTraceSummary(memory: MemoryRow): string | undefined {
+  const internal = memory.properties.internal_info;
+  const trace = isRecord(internal.trace) ? internal.trace : {};
+  for (const value of [memory.info.summary, internal.summary, trace.summary]) {
+    if (typeof value !== "string") continue;
+    const cleaned = value.replace(/^\s*Summary:\s*/i, "").replace(/^\s*#{1,6}\s+/, "").trim();
+    const first = cleaned.split(/\r?\n/).find(line => line.trim())?.trim();
+    if (first && !PLACEHOLDER_LINE.test(first) && first !== "处理失败") return cleaned;
+  }
+  return undefined;
+}
 
 export function evidenceMemoryIds(memory: MemoryRow): string[] {
   const internal = memory.properties.internal_info;
@@ -56,11 +75,7 @@ export function waitingSourceText(memory: MemoryRow, evidence: readonly MemoryRo
   const sources = memory.memoryLayer === "L2" ? evidence : [memory];
   for (const source of sources) {
     const user = userSentence(source);
-    if (user) return user;
-  }
-  for (const source of sources) {
-    const line = readableLine(source.memoryValue);
-    if (line) return line;
+    if (user) return clip(user, 120);
   }
   return undefined;
 }
@@ -84,30 +99,40 @@ export function displayFieldsForMemory(
 function userSentence(memory: MemoryRow): string | undefined {
   const trace = memory.properties.internal_info.trace;
   if (isRecord(trace)) {
-    const fromTrace = firstContentLine(text(trace.userText) ?? text(trace.user_text) ?? "");
-    if (fromTrace) return fromTrace;
+    const userText = [trace.userText, trace.user_text].find((value): value is string =>
+      typeof value === "string" && Boolean(value.trim()));
+    // A present but context-only query must not fall back to the same raw body.
+    if (userText) return firstContentLine(semanticUserText(userText));
   }
-  let inUserSection = false;
-  for (const raw of memory.memoryValue.split(/\r?\n/)) {
-    const role = roleMarker(raw);
-    if (role) {
-      inUserSection = role === "user";
+  // Also handle unstructured legacy bodies that start with an envelope; role
+  // headings inside that envelope are source data, not conversation boundaries.
+  const body = semanticUserText(memory.memoryValue.replace(/^\s*Summary:[ \t]*/i, ""));
+  const lines = body.split(/\r?\n/);
+  let hasRole = false;
+  let fence = "";
+  for (const [index, raw] of lines.entries()) {
+    const marker = raw.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (marker) {
+      if (!fence) fence = marker[1]!;
+      else if (marker[1]![0] === fence[0] && marker[1]!.length >= fence.length) fence = "";
       continue;
     }
-    if (!inUserSection) continue;
-    const line = readableLine(raw);
-    if (line) return line;
+    if (fence) continue;
+    const role = roleMarker(raw);
+    if (!role) continue;
+    hasRole = true;
+    if (role === "user") {
+      // Strip envelopes before splitting role sections: browser context can
+      // itself contain headings such as "## assistant" or "## user".
+      const userLines = semanticUserText(lines.slice(index + 1).join("\n")).split(/\r?\n/);
+      const nextRole = userLines.findIndex((line) => Boolean(roleMarker(line)));
+      return firstContentLine((nextRole < 0 ? userLines : userLines.slice(0, nextRole)).join("\n"));
+    }
   }
-  return undefined;
-}
-
-function readableLine(value: string): string | undefined {
-  for (const raw of value.split(/\r?\n/)) {
-    if (roleMarker(raw)) continue;
-    const line = firstContentLine(raw.replace(/^\s*Summary:\s*/i, ""));
-    if (line) return line;
-  }
-  return undefined;
+  if (hasRole) return undefined;
+  // Legacy unstructured memories have no role sections. Clean the whole value,
+  // not each line, so a rejected block cannot leak through the next line.
+  return firstContentLine(body);
 }
 
 function firstContentLine(value: string): string | undefined {

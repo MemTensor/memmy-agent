@@ -146,7 +146,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         `Memory config reload failed during desktop startup: ${error instanceof Error ? error.message : String(error)}`
       );
     });
-    const scanProcess = options.memoryClient ? undefined : { databasePath: appStateStore.databasePath };
     const cloudConfig = resolveCloudClientConfig(process.env);
     const cloudClient = options.cloudClient ?? createDefaultCloudClient(
       cloudConfig,
@@ -174,6 +173,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       cloudClient,
       permissionManager,
       bootstrapScenario: options.bootstrapScenario,
+      timeZone: configuredTimeZone,
       memmyConfigWriter,
       memmyConfigPath,
       scanPreferencesStore,
@@ -252,7 +252,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       composioMcpToken,
       timeZone: configuredTimeZone,
       heartbeatIntervalMs: options.heartbeatIntervalMs,
-      scanProcess,
       pluginCapabilitiesChanged: () => reloadAgentMcp(options.memmyAgentAdminClient)
     });
     await server.listen({ host: "127.0.0.1", port: 0 });

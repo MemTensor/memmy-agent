@@ -9,7 +9,7 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / bundle", () => {
-  it("redacts in-flight L3 evidence while full bundles preserve recoverable runtime state", () => {
+  it("redacts in-flight L3 evidence while full bundles preserve recoverable runtime state", async () => {
     const first = createTestService();
     const namespace = {
       source: "codex",
@@ -24,11 +24,11 @@ describe("MemoryService / bundle", () => {
       workspaceHostId: "a".repeat(64),
       namespace,
     });
-    const firstTurn = first.service.completeTurn("bundle-l3-turn-1", {
+    const firstTurn = (await first.service.completeTurn("bundle-l3-turn-1", {
       sessionId: opened.sessionId,
       query: "Keep project edits inside the configured module boundary.",
       answer: "The edit stayed inside the configured module.",
-    });
+    }));
     first.service.l3WorldModelBoundary(opened.sessionId, {
       requestId: "53126537-2c75-48be-91f5-d32a6d93f6f7",
       adapterId: "codex-memory",
@@ -37,11 +37,11 @@ describe("MemoryService / bundle", () => {
       trigger: "token_compaction",
       throughL1MemoryId: firstTurn.l1MemoryId,
     });
-    first.service.completeTurn("bundle-l3-turn-2", {
+    (await first.service.completeTurn("bundle-l3-turn-2", {
       sessionId: opened.sessionId,
       query: "A later turn has not reached a boundary yet.",
       answer: "It remains an unfrozen trace.",
-    });
+    }));
 
     const full = first.service.exportBundle({ includeRawText: true });
     expect(full.tables.l3_world_model_evidence_batches).toHaveLength(1);
@@ -95,7 +95,7 @@ describe("MemoryService / bundle", () => {
     };
     const sessionA = service.openSession({ namespace: namespaceA });
     const sessionB = service.openSession({ namespace: namespaceB });
-    const completeA = service.completeTurn("turn-export-a", {
+    const completeA = (await service.completeTurn("turn-export-a", {
       sessionId: sessionA.sessionId,
       query: "scoped export memory alpha",
       answer: "stored only in export namespace alpha",
@@ -103,12 +103,12 @@ describe("MemoryService / bundle", () => {
         kind: "file",
         uri: "file:///tmp/export-alpha.txt"
       }]
-    });
-    const completeB = service.completeTurn("turn-export-b", {
+    }));
+    const completeB = (await service.completeTurn("turn-export-b", {
       sessionId: sessionB.sessionId,
       query: "scoped export memory beta",
       answer: "stored only in export namespace beta"
-    });
+    }));
     await service.runWorkerOnce(20);
     const recallA = await service.search({
       namespace: namespaceA,

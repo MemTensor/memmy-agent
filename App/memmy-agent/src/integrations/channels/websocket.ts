@@ -2614,7 +2614,13 @@ export class WebSocketChannel extends BaseChannel {
         const bytes = Buffer.from(await file.arrayBuffer());
         const originalName = typeof file.name === "string" && file.name.trim() ? file.name : "attachment";
         const classification = classifyWebuiUploadAttachment(originalName, declaredMime, bytes);
-        if (!classification) return failUpload(httpError(415, "unsupported attachment mime"));
+        if (!classification) {
+          const extension = path.extname(originalName).toLowerCase();
+          const message = TEXT_MIME_BY_EXTENSION[extension] && !looksLikeText(bytes)
+            ? "invalid_text_content: file is binary or uses an unsupported text encoding"
+            : "unsupported attachment mime";
+          return failUpload(httpError(415, message));
+        }
         const safeOriginalName = safeFilename(originalName).replace(/\.[^.]*$/, "") + classification.extension;
         const inWorkspace = targets[index] === WEBUI_RECORDINGS_TARGET;
         let target: string;
@@ -3399,7 +3405,7 @@ export class WebSocketChannel extends BaseChannel {
     match = got.match(/^\/api\/media\/ws\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
     if (match) return this.handleWorkspaceMediaFetch(match[1], match[2], request);
     match = got.match(/^\/api\/media\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/);
-    if (match) return this.handleMediaFetch(match[1], match[2]);
+    if (match) return this.handleMediaFetch(match[1], match[2], request);
     if (got === this.expectedPath() && isWebsocketUpgrade(request)) {
       const clientId = (queryFirst(query, "client_id") ?? "").slice(0, 128);
       if (!this.isAllowed(clientId)) return connectionRespond(connection, 403, "Forbidden");
@@ -4892,7 +4898,7 @@ export class WebSocketChannel extends BaseChannel {
     };
   }
 
-  handleMediaFetch(sig: string, payload: string): HttpLikeResponse {
+  handleMediaFetch(sig: string, payload: string, request?: Pick<HttpRequestLike, "headers">): HttpLikeResponse {
     const expected = crypto.createHmac("sha256", this.mediaSecret).update(payload).digest().subarray(0, 16);
     let provided: Buffer;
     try {
@@ -4913,8 +4919,31 @@ export class WebSocketChannel extends BaseChannel {
     const candidate = path.resolve(mediaRoot, normalizeLocalPath(rel));
     if (!pathIsInside(candidate, mediaRoot)) return httpError(404, "not found");
     if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) return httpError(404, "not found");
+    const mime = mediaMimeForPath(candidate);
+    const size = fs.statSync(candidate).size;
+    const range = getHeader(request?.headers, "range");
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      const suffix = match && !match[1];
+      const start = match ? (suffix ? Math.max(0, size - Number(match[2])) : Number(match[1])) : NaN;
+      const requestedEnd = match ? (suffix || !match[2] ? size - 1 : Number(match[2])) : NaN;
+      if (!match || (!match[1] && !match[2]) || !Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd)
+        || start < 0 || start >= size || requestedEnd < start) {
+        return { status: 416, headers: { "content-range": `bytes */${size}` }, body: Buffer.alloc(0) };
+      }
+      const end = Math.min(size - 1, requestedEnd, start + 2 * 1024 * 1024 - 1);
+      const body = Buffer.alloc(end - start + 1);
+      const descriptor = fs.openSync(candidate, "r");
+      try { fs.readSync(descriptor, body, 0, body.length, start); }
+      finally { fs.closeSync(descriptor); }
+      return { status: 206, headers: {
+        "content-type": DISPLAY_MEDIA_RESPONSE_MIMES.has(mime) || mime.startsWith("audio/") ? mime : "application/octet-stream",
+        "accept-ranges": "bytes", "content-range": `bytes ${start}-${end}/${size}`,
+        "cache-control": "private, no-store", "x-content-type-options": "nosniff",
+      }, body };
+    }
+
     const body = fs.readFileSync(candidate);
-    const mime = mediaMimeForPath(candidate, body);
     return {
       status: 200,
       headers: {
@@ -5941,6 +5970,7 @@ function corsHeadersForRequest(config: WebSocketConfig, request: { headers?: htt
       "x-memmy-agent-auth",
       MCP_VALUES_HEADER,
     ].join(", "),
+    "access-control-expose-headers": "Content-Range, Accept-Ranges",
     "access-control-max-age": "600",
   };
 }
@@ -6223,6 +6253,16 @@ function looksLikeZip(bytes: Buffer): boolean {
 
 function looksLikeText(bytes: Buffer): boolean {
   const sample = bytes.subarray(0, Math.min(bytes.length, 64 * 1024));
+  // UTF-16 text legitimately contains zero bytes; validate BOM-marked text
+  // after decoding rather than treating it as a binary payload.
+  const encoding = sample[0] === 0xff && sample[1] === 0xfe ? "utf-16le"
+    : sample[0] === 0xfe && sample[1] === 0xff ? "utf-16be" : null;
+  if (encoding) {
+    try {
+      const text = new TextDecoder(encoding, { fatal: true }).decode(bytes);
+      return !/[\u0000-\u0008\u000e-\u001f]/u.test(text);
+    } catch { return false; }
+  }
   return !sample.includes(0);
 }
 

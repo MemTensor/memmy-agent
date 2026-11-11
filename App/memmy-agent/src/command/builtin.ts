@@ -1,3 +1,4 @@
+import { computerUseRequestContext } from "../core/agent-runtime/computer-use-request-context.js";
 import { spawn, type SpawnOptions } from "node:child_process";
 import { OutboundMessage } from "../core/runtime-messages/events.js";
 import {
@@ -20,6 +21,7 @@ import { buildStatusContent, type RuntimeStatusSnapshot } from "../utils/helpers
 import { fetchSearchUsage } from "../utils/searchusage.js";
 import { buildHistoryDagPayload, renderHistoryDagSummary, SessionDagStore } from "../session-dag/index.js";
 import { GoalRuntimeError } from "../core/agent-runtime/goal-runtime.js";
+import { clearOutputDelivery, hasOutputObligations } from "../core/agent-runtime/tools/output-location.js";
 import { publicGoalState, type GoalState } from "../core/session/goal-state.js";
 import {
   GOAL_COMMAND_SUBCOMMANDS,
@@ -182,8 +184,11 @@ export async function cmdStop(ctx: CommandContext): Promise<OutboundMessage> {
       return reply(ctx, `Could not pause Goal: ${code}`);
     }
   }
+  // cancelActiveTasks also ends an unfinished file delivery; say so when nothing else was running.
+  const pendingDelivery = Boolean(ctx.loop?.cancelActiveTasks) && hasOutputObligations(ctx.loop?.sessions?.get?.(ctx.key)?.metadata);
   const total = ctx.loop?.cancelActiveTasks ? await ctx.loop.cancelActiveTasks(ctx.key) : 0;
-  return reply(ctx, total ? `Stopped ${total} task(s).` : "No active task to stop.");
+  if (total) return reply(ctx, `Stopped ${total} task(s).`);
+  return reply(ctx, pendingDelivery ? "Ended the unfinished file delivery." : "No active task to stop.");
 }
 
 export async function cmdRestart(ctx: CommandContext): Promise<OutboundMessage> {
@@ -257,6 +262,8 @@ export async function cmdNew(ctx: CommandContext): Promise<OutboundMessage> {
     const snapshot = (session.messages ?? []).slice(session.lastConsolidated ?? 0);
     await ctx.loop?.emitSessionEnd?.(session, session.key ?? ctx.key, "reset");
     session.clear?.();
+    // A new conversation starts with no pending files and the default output directory.
+    clearOutputDelivery(session.metadata, { keepDirectory: false });
     ctx.loop?.sessions?.save?.(session);
     ctx.loop?.sessions?.invalidate?.(session.key);
     if (snapshot.length) ctx.loop?.scheduleBackground?.(ctx.loop?.consolidator?.archive?.(snapshot));
@@ -504,10 +511,15 @@ export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage> {
     const objective = command === "create" ? argument : rawArgs;
     const turnId = String(ctx.turnId ?? ctx.msg.metadata?.turn_id ?? "").trim();
     if (!turnId) throw new GoalRuntimeError("goal_route_unavailable");
+    const request = computerUseRequestContext(ctx.msg);
     const goal = await runtime.create({
       sessionKey: ctx.key,
       objective,
-      route: { channel: ctx.msg.channel, chatId: ctx.msg.chatId },
+      route: { channel: ctx.msg.channel, chatId: ctx.msg.chatId,
+        ...(ctx.msg.turnSource ? { source: ctx.msg.turnSource } : {}),
+        ...(ctx.msg.turnSource && request.messageId && request.metadata.computerUseInteractive === true
+          ? { computerUseMessageId: request.messageId } : {}),
+      },
       turnId,
     });
     ctx.loop.scheduleGoalWork?.(ctx.key, goal);

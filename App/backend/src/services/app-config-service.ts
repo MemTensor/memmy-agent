@@ -30,7 +30,7 @@ import type { BootstrapRepository } from "../infrastructure/app-state-store/repo
 import type { MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 import type { ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
-import { createHttpModelConfigTester, type ModelConfigTester } from "./model-config-tester.js";
+import { createHttpModelConfigTester, type ModelConfigTester, type ResolvedModelConfigTestInput } from "./model-config-tester.js";
 
 export interface AppConfigService {
   updateSettings(input: PatchAppSettingsInput): Promise<AppSettingsDto>;
@@ -89,10 +89,6 @@ const BUILT_IN_AVATARS = AvatarOptionSchema.array().parse([
     kind: "video"
   }
 ]);
-/** Type definition for normalized model config input. */
-/** Type definition for resolved model config test input. */
-type ResolvedModelConfigTestInput = ModelConfigTestInput & { apiKey: string };
-
 /** Creates create app config service. */
 export function createAppConfigService(options: CreateAppConfigServiceOptions): AppConfigService {
   const modelConfigTester = options.modelConfigTester ?? createHttpModelConfigTester();
@@ -264,21 +260,23 @@ async function resolveModelConfigTestInput(
   configWriter: MemmyConfigWriter | undefined
 ): Promise<ResolvedModelConfigTestInput> {
   const directApiKey = input.apiKey?.trim();
-  if (directApiKey) {
-    return { ...input, apiKey: directApiKey };
-  }
-
   const provider = canonicalCatalogProviderId(input.provider);
   if (!provider || !input.endpointId) {
+    if (directApiKey) return { ...input, apiKey: directApiKey };
     throw Object.assign(new Error("Model config test requires a Provider endpoint"), { code: "invalid_argument" as const });
   }
 
-  const storedApiKey = await configWriter?.readEndpointApiKey?.(provider, input.endpointId);
-  if (!storedApiKey) {
+  const endpoint = await configWriter?.readEndpointRequestOptions?.(provider, input.endpointId);
+  const independent = endpoint?.inheritProviderDefaults === false
+    && endpoint.protocol === input.protocol
+    && endpoint.apiBase.replace(/\/+$/u, "") === input.apiBase.replace(/\/+$/u, "");
+  const storedApiKey = directApiKey ?? endpoint?.apiKey ?? await configWriter?.readEndpointApiKey?.(provider, input.endpointId);
+  if (!storedApiKey && !independent) {
     throw Object.assign(new Error("Model config API Key is not configured"), { code: "invalid_argument" as const });
   }
 
-  return { ...input, apiKey: storedApiKey };
+  return { ...input, apiKey: storedApiKey ?? "",
+    ...(independent && endpoint.extraHeaders ? { extraHeaders: endpoint.extraHeaders } : {}) };
 }
 
 /** Reads get authenticated cloud account. */

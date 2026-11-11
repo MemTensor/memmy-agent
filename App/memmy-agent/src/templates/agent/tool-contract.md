@@ -42,6 +42,7 @@ records general tool contracts and less obvious usage patterns.
 - Use `edit_file` only for small exact replacements in a single file, with `old_text` copied from `read_file`. With no selector, the text must match once. To handle multiple matches, choose only one of `occurrence` (1-based match index), `line_hint` (nearest 1-based start line; ties fail), or `replace_all=true` (all matches). These three selectors are mutually exclusive; omit unused selectors or use `null` for `occurrence`/`line_hint`.
 - `expected_replacements` is an independent count assertion, compatible with every selection mode; it does not select a match. For example, use `occurrence=2, expected_replacements=1` for the second match, or `replace_all=true, expected_replacements=3` for all three matches.
 - If `edit_file` uses `old_text=""` to create a missing file or fill an empty/whitespace-only file, omit selectors and leave `replace_all` false. In this mode, `expected_replacements` may be omitted/null or set to `1`, including a no-op.
+- Use only the canonical snake_case fields declared in the `edit_file` schema. The runtime accepts legacy camelCase aliases for compatibility; do not send aliases in new calls. `old_text` and `new_text` are required strings, and an explicit `new_text=""` deletes the selected text.
 - Use `write_file` for new files or intentional full-file rewrites, not routine local edits.
 - If a write tool returns `No changes made`, do not repeat the same tool call with identical arguments. Re-read the target and change the arguments or editing strategy.
 - If `apply_patch` or `edit_file` fails, reread with `force=true`, narrow the context, and try a smaller patch instead of switching to shell `sed` or `echo`.
@@ -115,3 +116,8 @@ records general tool contracts and less obvious usage patterns.
 - Use `cron` for scheduled reminders or recurring tasks; do not run `memmy cron`, and do not run it through `exec`.
 - For heartbeat tasks, update `HEARTBEAT.md` according to the agent instructions.
 - When the user expects an actual notification, do not only write the reminder into a memory file.
+
+## Execution Parameters
+
+- Use only the declared fields for `exec`: `command` is required; use `cwd`, `timeout` (seconds), `shell`, `login`, `yield_time_ms`, and `max_output_chars` as needed. Conflicting aliases are rejected before execution; correct the arguments before retrying.
+- For `exec` and `write_stdin`, `max_output_chars` limits retained output in UTF-16 code units (JavaScript string length), not tokens. It defaults to 10,000; truncation notices and status metadata are additional.
