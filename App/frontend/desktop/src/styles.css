@@ -2733,19 +2733,24 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
 .thread-tab {
   display: flex;
   height: 32px;
-  min-width: 50px;
+  min-width: 60px;
   max-width: 180px;
   flex: 0 1 156px;
   align-items: center;
   gap: 6px;
   padding: 0 8px;
   border-radius: 8px;
+  overflow: hidden;
   color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
   font-size: 14px;
   line-height: 22px;
   cursor: pointer;
   user-select: none;
   transition: background-color 120ms ease, color 120ms ease;
+}
+
+.thread-tab--browser {
+  min-width: 80px;
 }
 
 .thread-tab:hover,

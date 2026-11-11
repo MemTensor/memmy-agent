@@ -48,11 +48,17 @@ afterEach(async () => {
   for (const service of services.splice(0)) await service.shutdown();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe("repairing historical six-hour aggregation", () => {
   it("does not send WeChat evidence to the History model after its extra permission is off", async () => {
+    // Simulate Apple Silicon macOS so isPersonalWeChatHistorySupported() returns true.
+    const platProcess = Object.create(process);
+    Object.defineProperty(platProcess, 'platform', { value: 'darwin', enumerable: true, configurable: true });
+    Object.defineProperty(platProcess, 'arch', { value: 'arm64', enumerable: true, configurable: true });
+    vi.stubGlobal('process', platProcess);
     const id = `${instantId(new Date())}-10min-summary`;
     fs.writeFileSync(historyFile(id),
       '---\ntitle: WeChat\nsource_type: captured\nsummary_state: pending\nstatus: completed\napplications: ["com.tencent.xinWeChat"]\n---\n\n## Memory summary\n\nWeChat message: meeting at ten.\n');

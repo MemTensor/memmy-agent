@@ -4,10 +4,15 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 describe("personal WeChat History setup boundary", () => {
   it("does not launch connection without consent and reports a missing local reader honestly", async () => {
+    // Simulate Apple Silicon macOS so isPersonalWeChatHistorySupported() returns true.
+    const platProcess = Object.create(process);
+    Object.defineProperty(platProcess, 'platform', { value: 'darwin', enumerable: true, configurable: true });
+    Object.defineProperty(platProcess, 'arch', { value: 'arm64', enumerable: true, configurable: true });
+    vi.stubGlobal('process', platProcess);
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-wechat-service-"));
     vi.stubEnv("MEMMY_SQLCIPHER_LIBRARY", path.join(directory, "missing-sqlcipher.dylib"));
     const service = new ComputerHistoryDemoService({
