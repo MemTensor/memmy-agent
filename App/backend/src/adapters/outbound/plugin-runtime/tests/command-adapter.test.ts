@@ -73,6 +73,22 @@ async function collect(iterable: AsyncIterable<CapabilityEvent>): Promise<Capabi
 }
 
 describe("CommandPluginAdapter", () => {
+  it.each(["linux", "darwin", "win32"] as const)("passes only approved canonical input roots on %s", async platform => {
+    const ctx = context();
+    const uploads = join(root!, "uploads"); mkdirSync(uploads);
+    const permission = { type: "host-service" as const, services: ["file-input"] };
+    ctx.plugin.manifest.permissions = [permission];
+    const adapter = createCommandPluginAdapter({ platform, fileInputRoots: [uploads],
+      buildLaunch: async () => ({ command: process.execPath, args: [], cwd: root! }) });
+    const denied = await adapter.activate(ctx);
+    try { expect(JSON.parse(denied.env.MEMMY_PLUGIN_INPUT_ROOTS)).toEqual([]); }
+    finally { await adapter.deactivate(denied); }
+    ctx.plugin.approvedPermissions = [permission];
+    const granted = await adapter.activate(ctx);
+    try { expect(JSON.parse(granted.env.MEMMY_PLUGIN_INPUT_ROOTS)).toEqual([realpathSync(uploads)]); }
+    finally { await adapter.deactivate(granted); }
+  });
+
   it("stops a silent plugin independently of its blocked event loop", async () => {
     const adapter = createCommandPluginAdapter({ buildLaunch: async () => ({ command: process.execPath, args: ["-e", "while(true) {}"], cwd: root! }) });
     const ctx = context("ndjson");

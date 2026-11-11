@@ -8,6 +8,9 @@ afterEach(() => vi.unstubAllEnvs());
 
 describe("personal WeChat History setup boundary", () => {
   it("does not launch connection without consent and reports a missing local reader honestly", async () => {
+    // Simulate Apple Silicon macOS so isPersonalWeChatHistorySupported() returns true on CI.
+    const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+    const archSpy = vi.spyOn(process, 'arch', 'get').mockReturnValue('arm64');
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-wechat-service-"));
     vi.stubEnv("MEMMY_SQLCIPHER_LIBRARY", path.join(directory, "missing-sqlcipher.dylib"));
     const service = new ComputerHistoryDemoService({
@@ -27,6 +30,8 @@ describe("personal WeChat History setup boundary", () => {
         enabled: false, connection: "disabled",
       });
     } finally {
+      platformSpy.mockRestore();
+      archSpy.mockRestore();
       await service.shutdown();
       fs.rmSync(directory, { recursive: true, force: true });
     }

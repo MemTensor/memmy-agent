@@ -1,34 +1,41 @@
 /**
- * Creates the VBS script that launches the Windows update helper hidden.
+ * Creates the PowerShell script that launches the Windows update helper hidden.
  *
- * @param command The PowerShell helper launch command and arguments.
- * @returns The VBS script content.
+ * Windows Script Host can be absent on machines where the optional VBScript
+ * feature was removed, so the update helper must not go through a .vbs launcher.
+ *
+ * @param command The helper launch command and arguments.
+ * @returns The PowerShell script content.
  */
 const createWindowsUpdateLauncherScript = (command: string[]): string => {
-  const shellCommand = command.map(quoteWindowsShellArgument).join(" ");
-  return `Set shell = CreateObject("WScript.Shell")
-shell.Run "${escapeVbsString(shellCommand)}", 0, False
-Set fso = CreateObject("Scripting.FileSystemObject")
-On Error Resume Next
-fso.DeleteFile WScript.ScriptFullName, True
+  const argumentList = command.map((value) => `'${escapePowerShellString(value)}'`).join(", ");
+  return `$ErrorActionPreference = 'Continue'
+$arguments = @(${argumentList})
+$launcherPath = $PSCommandPath
+try {
+  $startArguments = @{ FilePath = $arguments[0]; WindowStyle = 'Hidden' }
+  if ($arguments.Length -gt 1) {
+    $startArguments['ArgumentList'] = $arguments[1..($arguments.Length - 1)]
+  }
+  Start-Process @startArguments
+} catch {
+} finally {
+  Remove-Item -LiteralPath $launcherPath -Force -ErrorAction SilentlyContinue
+}
 `;
 };
 
 /**
- * Creates a Windows Script Host compatible launcher file.
+ * Creates a Windows PowerShell compatible launcher file.
  *
- * Windows Script Host may decode a BOM-less UTF-8 VBS file with the active
- * system code page, corrupting non-ASCII update paths before PowerShell starts.
+ * Windows PowerShell 5 decodes a BOM-less script with the active system code page,
+ * corrupting non-ASCII update paths before the helper starts.
  */
 export const createWindowsUpdateLauncherFile = (command: string[]): Buffer => {
   const script = createWindowsUpdateLauncherScript(command);
-  return Buffer.from(`\uFEFF${script}`, "utf16le");
+  return Buffer.from(`﻿${script}`, "utf16le");
 };
 
-const quoteWindowsShellArgument = (value: string): string => {
-  return `"${value.replace(/"/g, "\\\"")}"`;
-};
-
-const escapeVbsString = (value: string): string => {
-  return value.replace(/"/g, "\"\"");
+const escapePowerShellString = (value: string): string => {
+  return value.replaceAll("'", "''");
 };

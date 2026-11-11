@@ -23,17 +23,44 @@ const packagedWindowsEnvironment = {
 } as const;
 
 describe("Windows launch at login", () => {
-  it("uses the installed launch proxy so login startup follows the normal Windows launch chain", () => {
-    const launcherPath = "C:\\Users\\Lee User\\AppData\\Local\\Memmy\\launcher\\MemmyLauncher.vbs";
+  const launcherPath = "C:\\Users\\Lee User\\AppData\\Local\\Memmy\\launcher\\MemmyLauncher.ps1";
+  const powerShellPath = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+  const launcherArguments = [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-WindowStyle",
+    "Hidden",
+    "-File",
+    `"${launcherPath}"`
+  ];
 
-    expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, (path) => path === launcherPath)).toEqual({
-      path: "C:\\Windows\\System32\\wscript.exe",
-      args: [`"${launcherPath}"`]
+  const installedLaunchPaths = new Set([launcherPath, powerShellPath]);
+  const installedPathExists = (path: string): boolean => installedLaunchPaths.has(path);
+
+  it("uses the installed PowerShell launch proxy so login startup follows the normal Windows launch chain", () => {
+    expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, installedPathExists)).toEqual({
+      path: powerShellPath,
+      args: launcherArguments
     });
+  });
+
+  it("never registers wscript or the VBScript launcher at login", () => {
+    const command = resolveWindowsLoginItemCommand(packagedWindowsEnvironment, installedPathExists);
+
+    expect(command.path.toLowerCase()).not.toContain("wscript");
+    expect(command.args.join(" ")).not.toContain(".vbs");
   });
 
   it("falls back to the packaged executable when the launch proxy is unavailable", () => {
     expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, () => false)).toEqual({
+      path: packagedWindowsEnvironment.executablePath,
+      args: []
+    });
+  });
+
+  it("falls back to the packaged executable when PowerShell is unavailable", () => {
+    expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, (path) => path === launcherPath)).toEqual({
       path: packagedWindowsEnvironment.executablePath,
       args: []
     });
@@ -61,18 +88,17 @@ describe("Windows launch at login", () => {
     });
   });
 
-  it("does not mistake another wscript startup entry for an enabled Memmy launch item", () => {
-    const launcherPath = "C:\\Users\\Lee User\\AppData\\Local\\Memmy\\launcher\\MemmyLauncher.vbs";
+  it("does not mistake another PowerShell startup entry for an enabled Memmy launch item", () => {
     const getLoginItemSettings = vi.fn(() => ({
       openAtLogin: true,
       executableWillLaunchAtLogin: true,
       launchItems: [{
-        path: "C:\\Windows\\System32\\wscript.exe",
-        args: ["\"C:\\Other\\startup.vbs\""],
+        path: powerShellPath,
+        args: ["\"C:\\Other\\startup.ps1\""],
         enabled: true
       }, {
-        path: "C:\\Windows\\System32\\wscript.exe",
-        args: [`"${launcherPath}"`],
+        path: powerShellPath,
+        args: launcherArguments,
         enabled: false
       }]
     }));
@@ -81,7 +107,7 @@ describe("Windows launch at login", () => {
       setLoginItemSettings: vi.fn()
     };
 
-    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, (path) => path === launcherPath)).toBe(false);
+    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, installedPathExists)).toBe(false);
   });
 
   it.each([true, false])("writes and re-reads the effective Windows startup state: %s", (enabled) => {

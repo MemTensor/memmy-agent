@@ -24,7 +24,7 @@ function securityState(file: string): string | null {
   try {
     const own = fs.lstatSync(file, { bigint: true });
     const parent = fs.lstatSync(path.dirname(file), { bigint: true });
-    return [own.dev, own.ino, own.size, own.mtimeNs, own.ctimeNs, own.birthtimeNs,
+    return [own.dev, own.ino, own.size, own.mode, own.mtimeNs, own.ctimeNs, own.birthtimeNs,
       parent.dev, parent.ino, parent.ctimeNs].join(":");
   } catch {
     return null;
