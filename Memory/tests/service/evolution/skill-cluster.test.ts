@@ -43,7 +43,7 @@ interface DirectSkillCall {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
 }
 
-function createDirectSkillLlm(calls: DirectSkillCall[]): LlmClient {
+function createDirectSkillLlm(calls: DirectSkillCall[], displayTitle?: string, summary = DIRECT_SKILL_JSON.summary): LlmClient {
   return {
     config: {
       ...LEGACY_TEST_CONFIG.evolution,
@@ -70,7 +70,7 @@ function createDirectSkillLlm(calls: DirectSkillCall[]): LlmClient {
         } as unknown as T;
       }
       if (options.operation.startsWith("skill.batch_evolve")) {
-        return { ...DIRECT_SKILL_JSON } as unknown as T;
+        return { ...DIRECT_SKILL_JSON, summary, ...(displayTitle ? { display_title: displayTitle } : {}) } as unknown as T;
       }
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
@@ -104,9 +104,11 @@ async function runDirectSkillEpisode(input: {
   query?: string;
   answer?: string;
   config?: typeof LEGACY_TEST_CONFIG;
+  displayTitle?: string;
+  summary?: string;
 }) {
   const calls: DirectSkillCall[] = [];
-  const { db, service } = createTestService({ skillLlm: createDirectSkillLlm(calls), config: input.config });
+  const { db, service } = createTestService({ skillLlm: createDirectSkillLlm(calls, input.displayTitle, input.summary), config: input.config });
   const session = service.openSession({
     namespace: { source: "codex", profileId: "jiang", userId: input.userId }
   });
@@ -147,6 +149,34 @@ async function runDirectSkillEpisode(input: {
 }
 
 describe("MemoryService / evolution / skill cluster", () => {
+  it("stores a separate localized title without changing the invocation name or key", async () => {
+    const { db, repos } = await runDirectSkillEpisode({
+      userId: "localized-skill", rTask: 1, displayTitle: "使用 Python 填写表格汇总",
+      config: { ...LEGACY_TEST_CONFIG, language: "zh-CN" }
+    });
+    const row = db.db.prepare("SELECT id FROM memories WHERE memory_layer = 'Skill'").get() as { id: string };
+    const memory = repos.memories.get(row.id)!;
+    expect(memory.info.title).toBe("使用 Python 填写表格汇总");
+    expect(memory.info.name).toBe("xlsx_python_transform");
+    expect(memory.memoryKey).toMatch(/^skill:direct:/);
+    expect(memory.memoryValue.split("\n")[0]).toBe("# 使用 Python 填写表格汇总");
+  });
+
+  it.each(["Spreadsheet Transformation", "xlsx_python_transform", undefined])(
+    "uses the localized summary on the card and in the guide when the draft title is %s", async displayTitle => {
+      const summary = "用 openpyxl 写入合计并保存工作簿。";
+      const { service, repos } = await runDirectSkillEpisode({ userId: "skill-title-fallback", rTask: 1,
+        config: { ...LEGACY_TEST_CONFIG, language: "zh-CN" }, displayTitle, summary });
+      const [card] = service.panelItems({ layer: "Skill" }).items;
+      expect(card?.title).toBe(summary);
+      expect(service.getSkill(card!.id)).toMatchObject({ title: summary, name: "xlsx_python_transform" });
+      const stored = repos.memories.get(card!.id)!;
+      expect(stored.info.name).toBe("xlsx_python_transform");
+      expect(stored.memoryValue.split("\n")[0]).toBe(`# ${summary}`);
+      expect(stored.memoryValue).toContain("**When to use**");
+    }
+  );
+
   it.each([
     { language: "zh-CN", outputLanguageMode: "follow_policy", expected: "zh" },
     { language: "en-US", outputLanguageMode: "follow_policy", expected: "en" },
@@ -197,6 +227,7 @@ describe("MemoryService / evolution / skill cluster", () => {
     };
     expect(properties.internal_info?.source).toBe(DIRECT_SKILL_SOURCE);
     expect(properties.internal_info?.evidence_anchor_ids).toEqual([complete.episodeId]);
+    expect(skill!.memory_value.split("\n")[0]).toBe(`# ${DIRECT_SKILL_JSON.summary}`);
     expect(skill!.memory_value).toContain("openpyxl");
     expect(calls.map((item) => item.operation)).toContain("skill.batch_evolve.crystallize");
     expect(calls.map((item) => item.operation)).toContain("skill.batch_evolve.meta");

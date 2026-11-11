@@ -1,5 +1,6 @@
-import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
+import { assignedEpisodeId, settleCaptureAssignments } from "../../fixtures/memory-service-fixture.js";
 import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
+import { createTurnJudgeLlm } from "../session/turn-judge-llm.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryDb, type LlmClient } from "../../../src/index.js";
@@ -210,6 +211,29 @@ describe("MemoryService / feedback / experience", () => {
     expect(negativePolicy.decision_guidance?.anti_pattern?.join("\n")).toContain("filename");
     expect(negativePolicy.decision_guidance?.preference?.join("\n")).toContain("issuer and CUSIP");
     db.close();
+  });
+
+  it("steers neutral feedback with negative guidance through the legacy negative refiner in the configured locale", async () => {
+    const calls: Parameters<typeof createFeedbackRefinerLlm>[0] = [];
+    const model = createFeedbackRefinerLlm(calls);
+    const complete = model.completeJson.bind(model);
+    model.completeJson = async <T extends Record<string, unknown>>(messages: Parameters<typeof complete>[0], options: Parameters<typeof complete>[1]) => {
+      const result = await complete<T>(messages, options);
+      if (options.operation !== "failure.experience.sink.v5") return result;
+      const localized = messages.some(m => m.role === "system" && m.content.includes("zh-CN"));
+      return { ...result, title: localized ? "验证证书" : "Validate Certificates" };
+    };
+    const { service } = createTestService({ llm: createTurnJudgeLlm().llm, skillLlm: model,
+      config: { ...LEGACY_TEST_CONFIG, language: "zh-CN", algorithm: { ...LEGACY_TEST_CONFIG.algorithm,
+        feedback: { ...LEGACY_TEST_CONFIG.algorithm.feedback, useLlm: true } } } });
+    const session = service.openSession({ namespace: { source: "codex", profileId: "default", userId: "locale-feedback" } });
+    const turn = await service.completeTurn("negative-guidance", { sessionId: session.sessionId, query: "测试 TLS", answer: "已测试。" });
+    await settleCaptureAssignments(service);
+    await service.feedback({ sessionId: session.sessionId, episodeId: assignedEpisodeId(service, turn), l1MemoryId: turn.l1MemoryId,
+      channel: "explicit", polarity: "neutral", magnitude: 1, rationale: "不要跳过 TLS 证书验证，必须先测试。" });
+    for (let i = 0; i < 3; i++) await service.runWorkerOnce(40);
+    expect(calls.some(call => call.options.operation === "failure.experience.sink.v5")).toBe(true);
+    expect(service.panelItems({ layer: "L2" }).items.map(item => item.title)).toContain("验证证书");
   });
 
   it("uses configured model feedback refiner for feedback-derived experience policies", async () => {

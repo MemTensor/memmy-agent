@@ -773,8 +773,8 @@ function packSkillGuideSections(guide: string): string {
   return ordered.join("\n\n").trim();
 }
 
-export function renderDirectSkillGuide(name: string, procedure: DirectSkillProcedureJson): string {
-  const lines: string[] = [`# ${name}`, ""];
+export function renderDirectSkillGuide(displayTitle: string, procedure: DirectSkillProcedureJson): string {
+  const lines: string[] = [`# ${displayTitle}`, ""];
   if (procedure.retrievalBlurb) lines.push(procedure.retrievalBlurb, "");
   if (procedure.summary) lines.push(procedure.summary, "");
   lines.push("**When to use**", procedure.triggerContext || "(from successful RawTurns)", "");

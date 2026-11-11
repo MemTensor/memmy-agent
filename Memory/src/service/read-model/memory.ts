@@ -1,6 +1,6 @@
 import type { MemoryDetailItem, MemoryProcessingRecord, MemoryRow } from "../../types.js";
 import { kindFromMemory } from "../../storage/repositories.js";
-import { displayFieldsForMemory, isTraceMemory, observedActivitySummary, storedTraceSummary } from "./display-fields.js";
+import { displayFieldsForMemory, isTraceMemory, observedActivitySummary, storedBatchSkillTitle, storedTraceSummary } from "./display-fields.js";
 import { policyMetaFromMemory, skillMetaFromMemory, traceMetaFromMemory, worldModelMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import { panelSourceForMemory, panelTagsForMemory } from "./panel.js";
 import { isRecord } from "../../utils/json.js";
@@ -22,6 +22,8 @@ export function detailTitleForMemory(memory: MemoryRow): string {
     const topic = stringFromMaybeRecord(memory.properties.internal_info, "work_topic");
     if (topic) return truncateDetailTitle(topic);
   }
+  const displayTitle = storedBatchSkillTitle(memory);
+  if (displayTitle) return truncateDetailTitle(displayTitle);
   const trace = traceMetaFromMemory(memory); const policy = policyMetaFromMemory(memory); const worldModel = worldModelMetaFromMemory(memory); const skill = skillMetaFromMemory(memory);
   const generatedTitle = firstDetailDisplayString(stringFromMaybeRecord(memory.info, "title"), stringFromMaybeRecord(memory.properties.internal_info, "title"));
   const title = firstDetailDisplayString(

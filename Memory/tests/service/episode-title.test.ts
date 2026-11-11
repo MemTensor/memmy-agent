@@ -4,8 +4,10 @@ import { DEFAULT_MEMMY_CONFIG, type LlmClient, type MemoryDb, type MemoryService
 import {
   EpisodeTitleService,
   episodeTitleDisplayState,
-  episodeTitleMeta
+  episodeTitleMeta,
+  validateEpisodeTitleLanguage
 } from "../../src/service/episode-title/episode-title-service.js";
+import { stableHash } from "../../src/utils/id.js";
 import { Repositories, type EvolutionJobRecord } from "../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../fixtures/memory-service-fixture.js";
 
@@ -19,6 +21,108 @@ afterEach(() => {
 
 const FIRST_USER_TEXT = "帮我把打包脚本里的架构判断改成从 process.arch 读取，现在写死了 arm64。";
 const FIRST_ASSISTANT_TEXT = "已定位到 scripts/package-mac.mjs 第 42 行的硬编码，改为读取 process.arch 后 x64 构建可以正常产出。";
+
+describe("episode output language", () => {
+  it.each([
+    { title: "Local Sensitive Logic Exposure", summary: "已修复缓存处理。" },
+    { title: "Configuration Manager", summary: "已完成配置。" },
+    { title: "Build Pipeline", summary: "已修复构建。" },
+    { title: "修复缓存", summary: "Cache expired unexpectedly; 缓存。" },
+    { title: "修复缓存", summary: "缓存已过期。Cache expired unexpectedly." },
+    { title: "记录诊断", summary: "已完成缓存检查。The cache has expired. 已通知用户。" },
+    { title: "修复缓存处理", summary: "Fixed cache handling and verified API responses." }
+  ])("does not save a mismatched field and allows retry: %j", async (invalid) => {
+    const { db, service } = createTestService();
+    const { episodeId } = await completeOneTurn(service);
+    let output = invalid;
+    const complete = vi.fn(async () => JSON.stringify(output));
+    const { repos, titleService } = createTitleService(db, titleLlm(complete), { language: "zh-CN" });
+    await expect(titleService.generate(titleJob(episodeId, "final"))).rejects.toThrow(/language/);
+    expect(episodeTitleMeta(repos.runtime.getEpisode(episodeId)!)).toBeUndefined();
+    expect(complete).toHaveBeenCalledTimes(1); // No schema repair locking in the wrong language.
+    output = { title: "修复缓存处理", summary: "已修复缓存并验证响应。" };
+    await titleService.generate(titleJob(episodeId, "final"));
+    expect(repos.runtime.getEpisode(episodeId)).toMatchObject(output);
+    await titleService.generate(titleJob(episodeId, "final"));
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { title: "配置 Configuration Manager", summary: "已在 Configuration Manager 中更新配置。" },
+    { title: "缓存文案", summary: "提示“Cache Entry Has Expired”。" },
+    { title: "核对接口地址", summary: "检查 https://example.org/api?cache=true 后重试。" }
+  ])("stores product names and quoted messages verbatim: %j", async output => {
+    const { db, service } = createTestService();
+    const { episodeId } = await completeOneTurn(service);
+    const { llm, calls } = respondWith(output.title, output.summary);
+    const { repos, titleService } = createTitleService(db, llm, { language: "zh-CN" });
+    await titleService.generate(titleJob(episodeId, "final"));
+    expect(repos.runtime.getEpisode(episodeId)).toMatchObject(output);
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each([["Password Reset Failed", false], ["修复缓存", true]] as const)(
+    "checks unversioned title %s on the next normal trigger", async (title, compatible) => {
+      const { db, service } = createTestService();
+      const { episodeId } = await completeOneTurn(service);
+      const { llm, calls } = respondWith("修复缓存", "已验证缓存。");
+      const { repos, titleService } = createTitleService(db, llm, { language: "zh-CN" });
+      const sourceHash = stableHash({ stage: "final", omittedTurnCount: 0,
+        turns: [{ index: 1, user: FIRST_USER_TEXT, assistant: FIRST_ASSISTANT_TEXT }] });
+      repos.runtime.updateEpisodeTitle(episodeId, { title, summary: "已验证缓存。",
+        meta: { episodeTitle: { stage: "final", sourceHash, sourceTurnCount: 1 } } });
+      expect(titleService.isCurrent(repos.runtime.getEpisode(episodeId)!)).toBe(compatible);
+      await titleService.generate(titleJob(episodeId, "final"));
+      await titleService.generate(titleJob(episodeId, "final"));
+      expect(calls).toHaveLength(compatible ? 0 : 1);
+      expect(repos.runtime.getEpisode(episodeId)?.title).toBe("修复缓存");
+    }
+  );
+
+  it("invalidates freshness on a language switch and rejects an in-flight stale language", async () => {
+    const { db, service } = createTestService();
+    const { episodeId } = await completeOneTurn(service);
+    const repos = new Repositories(db.db);
+    let language = "zh-CN";
+    let output = { title: "修复缓存处理", summary: "已修复缓存并验证响应。" };
+    const llm = titleLlm(async () => JSON.stringify(output));
+    const titleService = new EpisodeTitleService({
+      repos, llm, get language() { return language; },
+      nowIso: () => "2026-02-02T03:04:05.000Z", namespaceIdFromSession: session => session.id
+    });
+    await titleService.generate(titleJob(episodeId, "final"));
+    expect(titleService.isCurrent(repos.runtime.getEpisode(episodeId)!)).toBe(true);
+    language = "en";
+    expect(titleService.isCurrent(repos.runtime.getEpisode(episodeId)!)).toBe(false);
+    output = { title: "Repair cache handling", summary: "Fixed cache handling and verified responses." };
+    await titleService.generate(titleJob(episodeId, "final"));
+    expect(repos.runtime.getEpisode(episodeId)!.title).toBe(output.title);
+    language = "zh-CN";
+    let release!: (value: string) => void;
+    llm.complete = () => new Promise<string>(resolve => { release = resolve; });
+    const pending = titleService.generate(titleJob(episodeId, "final"));
+    language = "ja";
+    release(JSON.stringify({ title: "修复缓存处理", summary: "已修复缓存" }));
+    await expect(pending).rejects.toThrow(/input changed/);
+    expect(repos.runtime.getEpisode(episodeId)!.title).toBe(output.title);
+  });
+
+  it.each([
+    ["zh-CN", "Node.js API"], ["zh-CN", "提示“Cache Entry Has Expired”。The cache has expired."],
+    ["en", "修复缓存处理"], ["ja", "Repair cache handling"]
+  ])("rejects a wrong-script field for %s: %s", (language, text) => {
+    expect(() => validateEpisodeTitleLanguage(text, language, "summary")).toThrow(/language/);
+  });
+
+  it.each([
+    ["zh-TW", "修復快取"], ["zh-CN", "修复 Node.js API 缓存"],
+    ["en", "Repair Node.js API cache"], ["ja", "キャッシュを修復"],
+    ["ko", "캐시 수정"], ["fr", "Réparer le cache API"],
+    ["en", "Show the message ‘缓存已过期。’ when the entry expires."]
+  ])("preserves localized prose for %s: %s", (language, text) => {
+    expect(() => validateEpisodeTitleLanguage(text, language, "title")).not.toThrow();
+  });
+});
 
 function titleLlm(
   complete: LlmClient["complete"],
@@ -227,6 +331,22 @@ describe("episode title generation", () => {
 
     expect(calls).toHaveLength(1);
     expect(repos.runtime.getEpisode(episodeId)!.title).toBe("单轮任务标题");
+  });
+
+  it("regenerates once in a new language and preserves the final title against late provisional jobs", async () => {
+    const { db, service } = createTestService();
+    const { episodeId } = await completeOneTurn(service);
+    const en = respondWith("Fix packaging", "Use the detected architecture.");
+    const zh = respondWith("修复打包", "按运行架构选择依赖。");
+    const english = createTitleService(db, en.llm, { language: "en-US" });
+    const chinese = createTitleService(db, zh.llm, { language: "zh-CN" });
+    await english.titleService.generate(titleJob(episodeId, "final"));
+    await chinese.titleService.generate(titleJob(episodeId, "final"));
+    await chinese.titleService.generate(titleJob(episodeId, "final"));
+    await english.titleService.generate(titleJob(episodeId, "provisional"));
+    expect(zh.calls).toHaveLength(1);
+    expect(en.calls).toHaveLength(1);
+    expect(english.repos.runtime.getEpisode(episodeId)!.title).toBe("修复打包");
   });
 
   it("leaves the columns empty and marks the episode waiting when no model is configured", async () => {

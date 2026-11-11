@@ -43,6 +43,7 @@ import { kindFromMemory, type EpisodeRecord, type EvolutionJobRecord, type Repos
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import { newId } from "../../utils/id.js";
+import { generatedSkillTitle } from "../../algorithm/skill-display.js";
 import { nowIso } from "../../utils/time.js";
 import { elapsedApiLogMs, recordApiLog } from "../model-audit/model-call-audit.js";
 import { profileIdFromMemory } from "../namespace/namespace-scope.js";
@@ -291,6 +292,9 @@ export class SkillClusterPipeline {
         cluster,
         episode: this.anchorEpisode(batch, job),
         name,
+        displayTitle: draft.displayTitle,
+        draftName: draft.name,
+        outputLanguage: draft.outputLanguage,
         procedure: merged,
         existing: existingSkill?.memory,
         successEpisodeIds: batch.filter((item) => item.outcome === "success").map((item) => item.episode_id),
@@ -468,7 +472,7 @@ export class SkillClusterPipeline {
     batch: PackedEpisodeEvidence[];
     existing: DirectSkillProcedureJson | null;
     rebuildScope?: DirectSkillRebuildScope;
-  }): Promise<{ name: string; procedure: DirectSkillProcedureJson; changedSections: string[] }> {
+  }): Promise<{ name: string; outputLanguage: string; displayTitle?: string; procedure: DirectSkillProcedureJson; changedSections: string[] }> {
     const languageSamples = input.batch.flatMap((item) => item.turns.flatMap((turn) => [turn.user, turn.assistant]));
     const steeredLanguage = steeredPromptLanguage(this.deps.config.language, languageSamples);
     const outputLanguage = skillOutputLanguageFor(this.deps.config.algorithm.skill.outputLanguageMode, steeredLanguage);
@@ -484,6 +488,10 @@ export class SkillClusterPipeline {
       {
         role: "system",
         content: languageSteeringLine(outputLanguage)
+      },
+      {
+        role: "system",
+        content: "Return display_title as a separate readable localized title in the requested output language. Keep name as the stable snake_case invocation identifier."
       },
       {
         role: "user",
@@ -515,6 +523,9 @@ export class SkillClusterPipeline {
         : [];
     return {
       name: coerceDirectSkillName(result.name, "direct_skill"),
+      outputLanguage,
+      displayTitle: typeof result.display_title === "string" ? result.display_title.trim() || undefined
+        : typeof result.displayTitle === "string" ? result.displayTitle.trim() || undefined : undefined,
       procedure,
       changedSections
     };
@@ -525,12 +536,17 @@ export class SkillClusterPipeline {
     cluster: SkillClusterRecord;
     episode?: EpisodeRecord;
     name: string;
+    displayTitle?: string;
+    draftName: string;
+    outputLanguage: string;
     procedure: DirectSkillProcedureJson;
     existing?: MemoryRow;
     successEpisodeIds: string[];
     at: string;
   }): { memory: MemoryRow; created: boolean; previous?: MemoryRow } {
-    const invocationGuide = renderDirectSkillGuide(input.name, input.procedure);
+    const title = generatedSkillTitle(input.outputLanguage, [input.name, input.draftName],
+      input.displayTitle, input.existing?.info.title, input.procedure.summary);
+    const invocationGuide = renderDirectSkillGuide(title, input.procedure);
     const evidenceAnchorIds = uniqSorted([
       ...((input.existing ? skillMetaFromMemory(input.existing)?.evidenceAnchorIds : []) ?? []),
       ...input.successEpisodeIds
@@ -552,6 +568,7 @@ export class SkillClusterPipeline {
       tags: uniqSorted(["skill", "direct-trace", ...input.procedure.tags, ...input.procedure.tools]),
       info: {
         name: input.name,
+        title,
         eta: 0.6,
         status: "active",
         source_memory_ids: []
