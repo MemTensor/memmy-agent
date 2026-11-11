@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { constants, accessSync, realpathSync } from 'node:fs';
+import { constants, accessSync, lstatSync, realpathSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -104,8 +104,18 @@ function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
       }
     });
     socket.on('error', error => {
-      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) finish();
-      else finish(error);
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      if (!connected && code === 'ENOENT') { finish(); return; }
+      if (!connected && code === 'ECONNREFUSED') {
+        // ECONNREFUSED on a regular (non-socket) file means a stale path that
+        // was never a live agent socket; treat it as an error rather than a
+        // clean shutdown so callers can distinguish the two cases.
+        let isSocket = false;
+        try { isSocket = lstatSync(agent.socketPath).isSocket(); } catch { /* path disappeared between connect and check */ }
+        if (isSocket) finish(); else finish(error);
+        return;
+      }
+      finish(error);
     });
     socket.on('close', () => finish(accepted ? undefined : new Error('Native agent closed without confirming shutdown')));
   });

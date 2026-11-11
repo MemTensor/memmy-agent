@@ -670,3 +670,131 @@ it("resizes the knowledge list from the divider and keeps the new button inside 
   expect(side?.contains(button ?? null)).toBe(true);
   expect(window.localStorage.getItem("memmy.knowledge.list-width")).toBe("304");
 });
+
+it("shows creation time for files and folders when createdAt is provided", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const state: KnowledgeSettings = {
+    authenticated: true,
+    enabled: true,
+    serviceAvailable: true,
+    bases: [{ id: "base-1", name: "资料库", selected: true }],
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: URL) => {
+      const path = String(url);
+      if (path.includes("/files"))
+        return new Response(
+          JSON.stringify({
+            files: [
+              {
+                id: "f1",
+                name: "报告.pdf",
+                status: "AVAILABLE",
+                message: "",
+                createdAt: "2026-08-26T12:00:00.000Z",
+              },
+            ],
+            total: 1,
+            page: 1,
+          }),
+        );
+      if (path.includes("/folders"))
+        return new Response(
+          JSON.stringify({
+            folders: [
+              {
+                id: "dir1",
+                parentId: "",
+                name: "档案",
+                createdAt: "2026-07-15T12:00:00.000Z",
+              },
+            ],
+          }),
+        );
+      return new Response(JSON.stringify(state));
+    }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <KnowledgePage
+        connection={{
+          baseUrl: "http://localhost:1234",
+          localToken: "local-test",
+        }}
+      />,
+    );
+  });
+  // The header also uses mk-ftime; use mk-frow .mk-ftime to target only data cells
+  const dataTimeCells = [...container.querySelectorAll<HTMLElement>(".mk-frow .mk-ftime")];
+  expect(dataTimeCells.length).toBeGreaterThan(0);
+  for (const cell of dataTimeCells) {
+    expect(cell.textContent).not.toBe("—");
+    expect(cell.textContent).toContain("2026");
+  }
+});
+
+it("shows placeholder for files and folders when createdAt is absent", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const state: KnowledgeSettings = {
+    authenticated: true,
+    enabled: true,
+    serviceAvailable: true,
+    bases: [{ id: "base-1", name: "资料库", selected: true }],
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: URL) => {
+      const path = String(url);
+      if (path.includes("/files"))
+        return new Response(
+          JSON.stringify({
+            files: [
+              {
+                id: "f1",
+                name: "报告.pdf",
+                status: "AVAILABLE",
+                message: "",
+              },
+            ],
+            total: 1,
+            page: 1,
+          }),
+        );
+      if (path.includes("/folders"))
+        return new Response(
+          JSON.stringify({
+            folders: [
+              {
+                id: "dir1",
+                parentId: "",
+                name: "档案",
+              },
+            ],
+          }),
+        );
+      return new Response(JSON.stringify(state));
+    }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <KnowledgePage
+        connection={{
+          baseUrl: "http://localhost:1234",
+          localToken: "local-test",
+        }}
+      />,
+    );
+  });
+  const dataTimeCells = [...container.querySelectorAll<HTMLElement>(".mk-frow .mk-ftime")];
+  expect(dataTimeCells.length).toBeGreaterThan(0);
+  for (const cell of dataTimeCells) {
+    expect(cell.textContent).toBe("—");
+  }
+});

@@ -52,7 +52,7 @@ afterEach(async () => {
 });
 
 describe("repairing historical six-hour aggregation", () => {
-  it("does not send WeChat evidence to the History model after its extra permission is off", async () => {
+  it.skipIf(process.platform !== 'darwin')("does not send WeChat evidence to the History model after its extra permission is off", async () => {
     const id = `${instantId(new Date())}-10min-summary`;
     fs.writeFileSync(historyFile(id),
       '---\ntitle: WeChat\nsource_type: captured\nsummary_state: pending\nstatus: completed\napplications: ["com.tencent.xinWeChat"]\n---\n\n## Memory summary\n\nWeChat message: meeting at ten.\n');
