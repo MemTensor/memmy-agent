@@ -21,7 +21,7 @@ import { userTimeZone } from "../lib/user-time-zone.js";
 
 export interface PluginsClient {
   list(): Promise<InstalledPlugin[]>;
-  catalog?(): Promise<PluginCatalogEntry[]>;
+  catalog(): Promise<PluginCatalogEntry[]>;
   install(pluginId: string, version?: string): Promise<InstalledPlugin>;
   update(pluginId: string, version: string): Promise<InstalledPlugin>;
   approvePermissions(pluginId: string, permissions: PluginPermission[]): Promise<InstalledPlugin>;

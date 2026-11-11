@@ -204,10 +204,13 @@ class HttpLlmClient implements LlmClient {
     let jsonAttempt = 0;
 
     while (true) {
+      const remaining = options.deadlineMs === undefined ? undefined : options.deadlineMs - Date.now();
+      if (remaining !== undefined && remaining <= 0) throw new Error("LLM interactive deadline exceeded");
       jsonAttempt += 1;
       const withJsonHint = jsonMessages(messages, lastError, previousWasTruncated, previousRetryWasCapped);
       const result = await this.completeResult(withJsonHint, {
         ...options,
+        ...(remaining !== undefined ? { timeoutMs: Math.min(options.timeoutMs ?? this.config.timeoutMs, remaining) } : {}),
         maxTokens,
         jsonMode: true
       });

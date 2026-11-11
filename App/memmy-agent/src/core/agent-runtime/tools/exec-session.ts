@@ -308,6 +308,9 @@ export class ExecSession {
       const resolvedShell = shellProgram;
       const args: string[] = [];
       const shellName = resolvedShell.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+      // Bash can treat Node's piped stdin as a remote shell and source .bashrc.
+      // Non-login sessions must preserve the explicitly selected runtime PATH.
+      if (!login && ["bash", "bash.exe"].includes(shellName)) args.push("--norc");
       if (login && ["bash", "bash.exe", "zsh", "zsh.exe"].includes(shellName)) args.push("-l");
       args.push("-c", command);
       this.process = spawnProcess(resolvedShell, args, { cwd, env, detached: true });

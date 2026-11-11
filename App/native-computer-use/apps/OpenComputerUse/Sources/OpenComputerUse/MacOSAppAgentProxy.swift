@@ -7,7 +7,7 @@ import MemmyComputerUseKit
 private let appAgentCommand = "__memmy-computer-use-app-agent"
 private let appAgentDisableEnvironmentKey = "OPEN_COMPUTER_USE_DISABLE_APP_AGENT_PROXY"
 private let appAgentProcessStartDate = Date()
-private let appAgentProtocolRevision = 2
+private let appAgentProtocolRevision = 3
 
 enum MacOSAppAgentProxy {
     static func isAgentInvocation(arguments: [String]) -> Bool {
@@ -435,7 +435,13 @@ private final class AppAgentConnection: @unchecked Sendable {
             return
         }
         writer.accept()
-        while readAgentLine(file) != nil {}
+        while let line = readAgentLine(file) {
+            guard line.utf8.count <= 512,
+                  let request = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  request["kind"] as? String == "checkpoint", let id = request["id"] as? String,
+                  UUID(uuidString: id)?.uuidString.lowercased() == id else { continue }
+            DispatchQueue.main.sync { checkpointHistoryRecorder(id: id) }
+        }
         DispatchQueue.main.sync { stopHistoryRecorder() }
     }
 
@@ -671,6 +677,24 @@ private final class AppAgentSocketClient: @unchecked Sendable {
         guard response["ok"] as? Bool == true else {
             throw ComputerUseError.message("Memmy Computer Use.app rejected the History connection.")
         }
+        // A separate descriptor avoids a stdio lock deadlock between the
+        // blocking event reader and controls travelling over the same socket.
+        let controlFD = dup(fileno(file))
+        guard controlFD >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        let controls = HistoryControlInput(fileDescriptor: STDIN_FILENO, onCheckpoint: { id in
+            let data = Data(("{\"kind\":\"checkpoint\",\"id\":\"\(id)\"}\n").utf8)
+            data.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                var position = 0
+                while position < raw.count {
+                    let count = Darwin.write(controlFD, base.advanced(by: position), raw.count - position)
+                    if count < 0 && errno == EINTR { continue }
+                    guard count > 0 else { _ = shutdown(controlFD, SHUT_WR); return }
+                    position += count
+                }
+            }
+        }, onEnd: { _ = shutdown(controlFD, SHUT_WR) }, onClose: { _ = Darwin.close(controlFD) })
+        defer { controls.cancel() }
         while let eventLine = readAgentLine(file) {
             FileHandle.standardOutput.write(Data((eventLine + "\n").utf8))
         }

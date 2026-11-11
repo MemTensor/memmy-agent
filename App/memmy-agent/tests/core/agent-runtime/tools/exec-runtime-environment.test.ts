@@ -23,6 +23,10 @@ describe.skipIf(process.platform === "win32")("exec selected Unix runtime", () =
     fs.mkdirSync(selectedBin);
     fs.mkdirSync(fallbackBin);
     manager = new ExecSessionManager();
+    // A piped Bash session can read .bashrc even with login=false. Give the
+    // fixture its own startup file so preserving PATH is tested on cold CI too.
+    vi.stubEnv("HOME", root);
+    fs.writeFileSync(path.join(root, ".bashrc"), `export PATH=${shellQuote(fallbackBin)}:"$PATH"\n`);
 
     const probe = path.join(root, "probe.mjs");
     fs.writeFileSync(probe, `

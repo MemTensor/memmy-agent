@@ -235,6 +235,11 @@ function BrowserContext($root,[string]$title,[string]$windowId,[int]$processId,[
   return $context
 }
 
+function SnapshotResult($lines,$targets,[bool]$truncated,[int]$failures) {
+  # PowerShell 5.1's @($genericObjectList) binder throws ArgumentException.
+  # Materialize the array explicitly, including empty target lists.
+  return @{text=[string]::Join("`n",$lines);truncated=$truncated;readFailures=$failures;targets=$targets.ToArray()}
+}
 function Snapshot($root,[DateTime]$deadline,$walker=$null) {
   $queue=New-Object System.Collections.Queue;$queue.Enqueue(@{node=$root;secure=$false})
   if ($null -eq $walker) {$walker=[System.Windows.Automation.TreeWalker]::ControlViewWalker}
@@ -285,9 +290,7 @@ function Snapshot($root,[DateTime]$deadline,$walker=$null) {
     } catch {$failures++}
   }
   if ($queue.Count -gt 0) {$truncated=$true}
-  # PowerShell 5.1's array-subexpression binder throws for List[object], even
-  # when empty. That discarded every full snapshot while action reads worked.
-  return @{text=[string]::Join("`n",$lines);truncated=$truncated;readFailures=$failures;targets=$targets.ToArray()}
+  return SnapshotResult $lines $targets $truncated $failures
 }
 
 if ($SelfTest) {
@@ -349,6 +352,14 @@ if ($SelfTest) {
     }
   }
   # No AutomationElement, desktop window, hooks or listener is created here.
+  $snapshotLines=New-Object 'System.Collections.Generic.List[string]'
+  [void]$snapshotLines.Add('Public fixture')
+  $snapshotTargets=New-Object 'System.Collections.Generic.List[object]'
+  $emptySnapshot=SnapshotResult $snapshotLines $snapshotTargets $false 0
+  if ($emptySnapshot.text -ne 'Public fixture' -or $emptySnapshot.targets.Count -ne 0) {throw 'Empty snapshot serialization failed'}
+  [void]$snapshotTargets.Add(@{runtimeId='public-button';target=@{role='AXButton';title='Save'}})
+  $serializedSnapshot=SnapshotResult $snapshotLines $snapshotTargets $true 2 | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+  if ($serializedSnapshot.targets.Count -ne 1 -or $serializedSnapshot.targets[0].target.title -ne 'Save' -or -not $serializedSnapshot.truncated -or $serializedSnapshot.readFailures -ne 2) {throw 'Snapshot target serialization failed'}
   if ((Url 'https://user:secret@example.com/path?token=secret#fragment') -ne 'https://example.com/path') {throw 'URL sanitization failed'}
   if (Url 'chrome://settings') {throw 'Non-web URL accepted'}
   if (ConsentAllowed '') {throw 'Missing consent accepted'}
@@ -356,7 +367,7 @@ if ($SelfTest) {
   if (IsWeChatProcess 'win32.chrome') {throw 'Unrelated app excluded as WeChat'}
   if ((Clean ('a'*1500) 1000).Length -ne 1000) {throw 'Text budget failed'}
   if (-not (NormalProfile 'You' 'avatar_button' '') -or -not (NormalProfile '您' '' 'AvatarToolbarButton')) {throw 'Explicit normal proof failed'}
-  foreach ($label in @('Guest','Incógnito','Privat','Alice','Profile 1','You are browsing privately')) {if (NormalProfile $label 'avatar_button' '') {throw 'Unknown profile accepted'}}
+  foreach ($label in @('Guest','InPrivate','无痕','Incógnito','Privat','Alice','Profile 1','You are browsing privately','Example - Google Chrome')) {if (NormalProfile $label 'avatar_button' '') {throw 'Unknown profile accepted'}}
   if (NormalProfile 'You' 'page-profile-button' '') {throw 'Page label accepted'}
   $one=New-Object 'System.Collections.Generic.HashSet[string]';[void]$one.Add('https://example.com/')
   $empty=New-Object 'System.Collections.Generic.HashSet[string]'

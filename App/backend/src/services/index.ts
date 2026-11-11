@@ -1,5 +1,9 @@
+import type { AccountChannel, InstalledPlugin } from "@memmy/local-api-contracts";
+import { MEMMY_VERSION } from "../project-version.js";
+import { createGeneratedPluginSkills } from "./plugin-generated-skills.js";
+import { createPluginNativeHostServices } from "./plugin-native-host-services.js";
+import { createPluginUpdateService } from "./plugin-update-service.js";
 import { createPluginSkillContentService, type PluginSkillContentService } from "./plugin-skill-content-service.js";
-import type { AccountChannel } from "@memmy/local-api-contracts";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { resolveCloudClientConfig, resolvePluginRegistryBaseUrl } from "../config/service-urls.js";
@@ -72,16 +76,7 @@ import {
   createSkillDistributionService,
   type SkillDistributionService
 } from "./skill-distribution-service.js";
-import { readCollabAgentAccess } from "./collab-agent-access.js";
 import { createTurnService, type TurnService } from "./turn-service.js";
-import {
-  createProjectInstructionsService,
-  type ProjectInstructionsService
-} from "./project-instructions-service.js";
-import {
-  createCollabInstructionsService,
-  type CollabInstructionsService
-} from "./collab-instructions-service.js";
 import { createPluginService, type PluginRuntimeHost, type PluginService } from "./plugin-service.js";
 import { createPluginLocalArtifactService } from "./plugin-local-artifact-service.js";
 import { createPluginModelInferenceService } from "./plugin-model-inference-service.js";
@@ -90,8 +85,11 @@ import { createPluginAsrService } from "./plugin-asr-service.js";
 import { createPluginAssetKeyService } from "./plugin-asset-key-service.js";
 import { createPluginHostServiceRouter } from "./plugin-host-service-router.js";
 import { resolvePluginModelSelection } from "./plugin-model-policy.js";
+import { createModelCapabilityCatalogSyncService, type ModelCapabilityCatalogSyncService } from "./model-capability-catalog-sync-service.js";
+import { readModelCapabilityCatalog } from "../infrastructure/model-capability-catalog/index.js";
 
 export interface BackendServices {
+  modelCapabilityCatalog: ModelCapabilityCatalogSyncService;
   memoryClient: MemoryClient;
   agentAdapterRegistry: AgentAdapterRegistry;
   bootstrap: BootstrapService;
@@ -118,31 +116,29 @@ export interface BackendServices {
   asrStream: AsrStreamService;
   /** Token quota. */
   tokenQuota: TokenQuotaService;
-  /** 本机项目的项目指令：按文件夹归属，只属于这台电脑。 */
-  projectInstructions: ProjectInstructionsService;
-  /** 协作项目指令的本机缓存：按云端项目 id 归属，只读于任务注入。 */
-  collabInstructions: CollabInstructionsService;
   /** Third-party plugins. */
   plugins: PluginService;
-  /** 给其他 Agent 写技能的入口：协作项目的 `memmy-project` 由授权状态决定装与不装。 */
-  skillDistribution: SkillDistributionService;
+  pluginLifecycle?: { start(): Promise<void>; startUpdates(): void; close(): Promise<void> };
   pluginSkillContent?: PluginSkillContentService;
 }
 
 export interface CreateBackendServicesOptions {
+  modelCapabilityCatalogPath?: string;
   appStateStore: AppStateStore;
   agentAdapterRegistry: AgentAdapterRegistry;
   memoryClient: MemoryClient;
   cloudClient: CloudClient;
   permissionManager: PermissionManager;
   bootstrapScenario?: BootstrapScenario;
-  timeZone?: string;
   sourceRegistry?: SourceRegistry;
   ingestionService?: IngestionService;
   skillDistributionService?: SkillDistributionService;
   skillTargetRegistry?: SkillTargetRegistry;
   progressBus?: ProgressBus;
   pluginRegistry?: PluginRegistry;
+  /** Platform injection for embedders and the artifact conformance harness. */
+  pluginPlatform?: NodeJS.Platform;
+  trustedNativeRegistryOrigins?: readonly string[];
   pluginArtifactManager?: PluginArtifactManager;
   /** Canonical resource roots trusted to provide immutable bundled plugin archives. */
   trustedBundledPluginRoots?: readonly string[];
@@ -157,6 +153,7 @@ export interface CreateBackendServicesOptions {
   memmyConfigPath?: string;
   /** Memmy agent admin client. */
   memmyAgentAdminClient?: MemmyAgentAdminClient;
+  agentGatewayReady?: Promise<void>;
   /** Memmy agent admin bootstrap secret. */
   memmyAgentAdminBootstrapSecret?: string | null;
   /** Verification channel supported by the current desktop package. */
@@ -222,24 +219,39 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       ? (input, inferenceOptions) => options.memoryClient.embeddingInference!(input, inferenceOptions)
       : undefined
   });
+  const memmyAgentAdminClient = options.memmyAgentAdminClient
+    ?? createHttpMemmyAgentAdminClient({ bootstrapSecret: options.memmyAgentAdminBootstrapSecret });
+  const pluginDataRoot = join(dirname(options.appStateStore.databasePath), "plugin-data");
+  const generated = createGeneratedPluginSkills(pluginDataRoot,
+    join(dirname(options.appStateStore.databasePath), "plugin-skills", "active.json"), join(agentWorkspace, "skills"));
+  const native = createPluginNativeHostServices({ repository: pluginRepository, admin: memmyAgentAdminClient,
+    dataRoot: pluginDataRoot, legacyDataRoot: join(resolveAgentDataRoot(process.env), "plugin-data"), generated, language: () => options.appStateStore.repositories.bootstrap.getAppSettings().language });
   const pluginHostServices = options.pluginHostServices ?? createPluginHostServiceRouter([
     { services: ["model-inference", "embedding-inference"], invoker: pluginModelInference },
     { services: ["asset-key"], invoker: createPluginAssetKeyService({
       baseUrl: resolveCloudClientConfig(process.env).baseUrl,
-      getPlugin: (id) => pluginRepository.get(id),
-      authHeaders: pluginRegistryAuthHeaders,
-      isEntitlementGranted
+      getPlugin: (id) => pluginRepository.get(id), authHeaders: pluginRegistryAuthHeaders, isEntitlementGranted
     }) },
-    {
-      services: ["asr"],
-      invoker: createPluginAsrService({ asr: asrService, audioRoots: pluginAudioRoots })
-    }
+    { services: ["asr"], invoker: createPluginAsrService({ asr: asrService, audioRoots: pluginAudioRoots }) },
+    { services: ["plugin-context", "skills", "event-sessions"], invoker: native.hostServices }
   ]);
-  const memmyAgentAdminClient =
-    options.memmyAgentAdminClient ??
-    createHttpMemmyAgentAdminClient({ bootstrapSecret: options.memmyAgentAdminBootstrapSecret });
+  const staticPluginSkills = createPluginSkillManager({ skillsRoot: join(agentWorkspace, "skills") });
+  const pluginSkills = {
+    async activate(plugin: import("../adapters/outbound/plugin-runtime/types.js").PluginRuntimeRecord) {
+      await generated.assertStaticNames(plugin.id, (plugin.manifest.skills ?? []).map(skill => skill.id));
+      await staticPluginSkills.activate(plugin);
+    },
+    deactivate: (id: string) => staticPluginSkills.deactivate(id)
+  };
   const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([
-    createMcpPluginAdapter(),
+    createMcpPluginAdapter({ platform: options.pluginPlatform, pluginDataRoot,
+      trustedNativeOrigins: options.trustedNativeRegistryOrigins ?? [new URL(resolveCloudClientConfig(process.env).baseUrl).origin], hostServices: pluginHostServices, onExit(id, expected) {
+      if (expected) return;
+      void pluginRuntimeHost.deactivate(id).catch(() => undefined);
+      const record = pluginRepository.get(id);
+      if (record && ["active", "enabling"].includes(record.state)) pluginRepository.setState(id, "failed", "Plugin process exited");
+      void Promise.allSettled([native.release(id), pluginSkills.deactivate(id)]);
+    } }),
     createHttpPluginAdapter(),
     createCommandPluginAdapter({
       allowedNetworkHosts: options.commandPluginNetworkAllowlist ?? resolveCommandPluginNetworkAllowlist(process.env),
@@ -252,8 +264,12 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   const plugins = createPluginService({
     repository: pluginRepository,
     hasActiveAgentTasks: async signal => {
-      if (!memmyAgentAdminClient.hasActiveTasks) throw new Error("Agent task activity is unavailable; update the runtime and retry");
+      if (!memmyAgentAdminClient.hasActiveTasks) throw new Error("Agent task activity is unavailable; update deferred until the runtime is updated and retry");
       return memmyAgentAdminClient.hasActiveTasks(signal);
+    },
+    tryAcquireAgentUpdateLease: async signal => {
+      if (!memmyAgentAdminClient.tryAcquirePluginUpdateLease) throw new Error("Agent update coordination is unavailable; update deferred");
+      return memmyAgentAdminClient.tryAcquirePluginUpdateLease(signal);
     },
     secretStore: options.appStateStore.secretStore,
     registry: options.pluginRegistry ?? unavailablePluginRegistry,
@@ -264,8 +280,12 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       authOrigin: resolvePluginRegistryBaseUrl(process.env),
       authHeaders: pluginRegistryAuthHeaders
     }),
+    skillManager: pluginSkills,
+    hostVersion: MEMMY_VERSION, platform: options.pluginPlatform, hasResourceLease: native.isBusy,
+    releaseResources: native.release, activateGeneratedSkills: id => generated.activate(id),
+    gatewayReady: options.agentGatewayReady,
+    onRestored: () => memmyAgentAdminClient.reloadMcpConfig(),
     onSkillContentInvalidated: (id) => pluginSkillContent.clear(id),
-    skillManager: createPluginSkillManager({ skillsRoot: join(resolveAgentWorkspace(process.env), "skills") }),
     localArtifactService: createPluginLocalArtifactService({
       pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data"),
       resolveWorkspace: async (conversationId) => {
@@ -281,6 +301,25 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     isEntitlementGranted,
     catalogPluginIds: () => entitledPluginIds(accountSessionRepository.getEntitlements())
   });
+  const pluginUpdates = createPluginUpdateService(plugins, () => memmyAgentAdminClient.reloadMcpConfig());
+  const pluginLifecycle = {
+    async start() {
+      await generated.reset();
+      for (const plugin of pluginRepository.list()) await pluginSkills.deactivate(plugin.id);
+      native.start();
+    },
+    startUpdates() { pluginUpdates.start(); },
+    async close() {
+      // Stop scheduling first, then cancel idle/download waits before draining
+      // the update loop. Awaiting that loop first can block shutdown forever.
+      const updatesClosing = pluginUpdates.close();
+      try { await plugins.shutdown(); }
+      finally {
+        await updatesClosing;
+        await native.close();
+      }
+    }
+  };
   const pluginToolSignature = () => JSON.stringify(plugins.list()
     .filter((plugin) => plugin.state === "active" && plugin.eligibility?.canUse !== false)
     .map((plugin) => [plugin.id, plugin.version, plugin.manifest.capabilities])
@@ -295,9 +334,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   const skillDistributionService =
     options.skillDistributionService ??
     createSkillDistributionService({
-      targetRegistry: skillTargetRegistry,
-      // 协作项目单独授权：没授权时启动也不写 `memmy-project`，关掉的 Agent 同样跳过。
-      projectSkillPermission: () => readCollabAgentAccess()
+      targetRegistry: skillTargetRegistry
     });
   const resolveAnalyticsUserId = () => {
     const session = accountSessionRepository.get();
@@ -345,14 +382,20 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   });
 
   return {
+    modelCapabilityCatalog: createModelCapabilityCatalogSyncService({
+      cloudClient: options.cloudClient,
+      getCloudUuid: () => accountSessionRepository.getCloudUuid(),
+      filePath: options.modelCapabilityCatalogPath,
+      onUpdated: (catalog) => progressBus.emit("model_catalog.updated", { catalogVersion: catalog.catalogVersion })
+    }),
     memoryClient: options.memoryClient,
     agentAdapterRegistry: options.agentAdapterRegistry,
     bootstrap: createBootstrapService({
       ...options,
-      getMemoryUserId: resolveMemoryUserId,
       scanPreferencesStore: options.scanPreferencesStore
     }),
     appConfig: createAppConfigService({
+      getModelCapabilityCatalog: () => readModelCapabilityCatalog(options.modelCapabilityCatalogPath),
       bootstrapRepository: options.appStateStore.repositories.bootstrap,
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession,
@@ -407,6 +450,11 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     agentSources,
     agentSourceAutoInject: createAgentSourceAutoInjectService({
       agentSources,
+      isScanAllowed: () => {
+        const permission = options.scanPreferencesStore?.getScanPermission()
+          ?? options.appStateStore.repositories.bootstrap.getOnboardingState().scanPermission;
+        return permission === "scan_only" || permission === "scan_and_write_skill";
+      },
       permissionManager: options.permissionManager,
       isAutoInjectSuppressed: (sourceId) => options.appStateStore.repositories.agentSources.isAutoInjectSuppressed(sourceId),
       getScanPreferences: () => options.scanPreferencesStore?.getScanPreferences()
@@ -433,7 +481,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       memoryClient: options.memoryClient
     }),
     memoryDetail: createMemoryDetailService({
-      getUserId: resolveMemoryUserId,
       memoryClient: options.memoryClient
     }),
     panel: createPanelService({
@@ -451,18 +498,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession
     }),
-    projectInstructions: createProjectInstructionsService({
-      // 与 Memmy 任务、其他 Agent 的钩子读同一份文件：配置目录下的 project-instructions.json。
-      memmyConfigPath: options.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml")
-    }),
-    collabInstructions: createCollabInstructionsService({
-      // 与协作项目的注入钩子读同一份文件：配置目录下的 collab-project-instructions.json。
-      // 它与上面的本机项目指令文件互不读写，只靠装配处各自接好。
-      memmyConfigPath: options.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml")
-    }),
-    plugins,
-    pluginSkillContent,
-    skillDistribution: skillDistributionService
+    plugins, pluginLifecycle, pluginSkillContent
   };
 }
 
@@ -492,7 +528,7 @@ function resolveAgentDataRoot(env: NodeJS.ProcessEnv): string {
 export { createBootstrapService };
 export type { BootstrapScenario, BootstrapService };
 
-export function createCatalogAgentTaskModelResolver(
+function createCatalogAgentTaskModelResolver(
   appStateStore: AppStateStore,
   memmyConfigWriter: MemmyConfigWriter
 ): OnboardingInsightAgentTaskModelResolver {

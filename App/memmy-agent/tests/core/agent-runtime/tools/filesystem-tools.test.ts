@@ -42,6 +42,28 @@ afterEach(() => {
 });
 
 describe("ReadFileTool", () => {
+  it.each([["", "none"], ["\n", "LF"], ["\r\n", "CRLF"], ["\r", "CR"]])(
+    "distinguishes an actual %j file ending from the displayed line separator",
+    async (ending, label) => {
+      const root = workspace(), file = path.join(root, "ending.txt");
+      await fs.writeFile(file, "Invoice: TRIAL-20261024-FIXED" + ending);
+      const result = await new ReadFileTool({ workspace: root }).execute({ path: file });
+      expect(result).toContain("1| Invoice: TRIAL-20261024-FIXED");
+      expect(result).toContain(`[Final newline: ${label}]`);
+      expect(result).not.toMatch(/^2\|/m);
+    },
+  );
+
+  it("reports the final newline only when the selected text reaches EOF", async () => {
+    const root = workspace(), file = path.join(root, "ending.txt");
+    await fs.writeFile(file, "first\r\nlast\r\n");
+    const reader = new ReadFileTool({ workspace: root });
+    const first = await reader.execute({ path: file, limit: 1 });
+    expect(first).toContain("Use offset=2 to continue");
+    expect(first).not.toContain("Final newline:");
+    expect(await reader.execute({ path: file, offset: 2 })).toContain("[Final newline: CRLF]");
+  });
+
   it("reads files with line numbers", async () => {
     const root = workspace();
     const file = await sampleFile(root);

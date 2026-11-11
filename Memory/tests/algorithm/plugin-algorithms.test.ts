@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { MemoryRow } from "../../src/types.js";
 import type { LlmClient } from "../../src/model/types.js";
 import { attachMemoryVectors } from "../../src/storage/memory-vector-state.js";
@@ -761,6 +761,31 @@ describe("plugin algorithm parity helpers", () => {
       confidence: 0.55
     });
     expect(decision.signals).toContain("arbitration_override");
+  });
+
+  it("shares one deadline across relation classification and arbitration, with no transport retries", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: Array<{ operation: string; timeoutMs?: number; maxRetries?: number }> = [];
+      const llm = relationLlm([]);
+      llm.completeJson = async <T extends Record<string, unknown>>(_messages: unknown, options: typeof calls[number]): Promise<T> => {
+        calls.push(options);
+        if (calls.length === 1) {
+          await new Promise(resolve => setTimeout(resolve, 70));
+          return { relation: "new_task", confidence: 0.5, reason: "weak split" } as unknown as T;
+        }
+        return new Promise<T>(() => {}); // A broken transport must not hold the caller.
+      };
+      const pending = classifyTurnRelationWithLlm({ prevUserText: "Configure nginx TLS for the service",
+        prevAssistantText: "Use port 443 and verify the certificate chain.",
+        newUserText: "Can you also cover database certificate rotation?", prevTags: ["nginx"] }, { llm, timeoutMs: 100 });
+      await vi.advanceTimersByTimeAsync(100);
+      expect((await pending).relation).toBe("follow_up");
+      expect(calls).toEqual([
+        expect.objectContaining({ operation: "relation.classify.v1", timeoutMs: 100, maxRetries: 0 }),
+        expect.objectContaining({ operation: "relation.arbitration.v1", timeoutMs: 30, maxRetries: 0 }),
+      ]);
+    } finally { vi.useRealTimers(); }
   });
 
   it("falls back to weak relation heuristics when the plugin-style LLM classifier is malformed", async () => {

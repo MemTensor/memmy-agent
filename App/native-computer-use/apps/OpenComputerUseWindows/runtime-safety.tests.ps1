@@ -24,6 +24,8 @@ function Case([string]$name, [scriptblock]$test) {
 }
 function Reset-TestState {
     $script:focusGuardYield = $false
+    $script:foregroundRestoreAttempted = $false
+    $script:pendingForegroundInput = $null
     $script:dispatched = $false
     $script:focusBefore = $null
     $script:targetProcessId = 500
@@ -314,7 +316,10 @@ Case "Real input is confined to explicit foreground input; no attachment, root-e
         }
     }
     foreach ($definition in $definitions | Where-Object { $_.Body.Extent.Text.Contains("::SetForegroundWindow(") }) {
-        Assert (@("Assert-SafeAfterAction", "Reveal-Window", "Set-ForegroundWindowTo").Contains($definition.Name)) "Foreground mutation escaped explicit reveal/strict undo/foreground click"
+        Assert (@("Restore-PreviousForeground", "Reveal-Window", "Set-ForegroundWindowTo").Contains($definition.Name)) "Foreground mutation escaped explicit reveal/strict undo/foreground click"
+    }
+    foreach ($definition in $definitions | Where-Object { [regex]::IsMatch($_.Body.Extent.Text, '\bRestore-PreviousForeground\b') }) {
+        Assert ($definition.Name -eq 'Assert-SafeAfterAction') "Foreground undo escaped its identity/input checks"
     }
     $entry = $source.Substring($source.IndexOf('$operationJson = '))
     Assert ([regex]::Matches($entry, '\bSend-ForegroundClick\b').Count -eq 1 -and $entry.Contains('if ($operation.foreground -eq $true) {')) "The foreground click is not gated by an explicit request"
@@ -754,7 +759,7 @@ function Reset-ForegroundDesktop {
         lastInputAt = $script:testEpochMilliseconds - 100000; held = $false; buttonHeld = $false
         pointer = @(5, 6); restoredPointer = $null; topAtPoint = [IntPtr]202; bounds = $script:expectedWindowBounds
         claims = 0; clicks = 0; activations = New-Object 'Collections.Generic.List[long]'; onStep = @()
-        typed = New-Object 'Collections.Generic.List[string]'; focusInside = $true }
+        typed = New-Object 'Collections.Generic.List[string]'; focusInside = $true; previousRestorable = $true }
 }
 function Send-RealText([string]$text) { $script:desk.typed.Add($text); $script:desk.tick++; $true }
 function Send-RealKeys([uint16[]]$modifiers, [uint16]$key, [bool]$extended) {
@@ -763,6 +768,7 @@ function Send-RealKeys([uint16[]]$modifiers, [uint16]$key, [bool]$extended) {
 function Test-ForegroundKeyboardFocus([IntPtr]$hwnd) { $script:desk.focusInside -and $script:desk.foreground -eq $hwnd }
 function Invoke-ForegroundTestTyping([string]$text, [string]$key) {
     try { Send-ForegroundKeyboard ([IntPtr]101) $text $key; return $null } catch { return $_.Exception.Message }
+    finally { Complete-PendingForegroundInput }
 }
 function Invoke-UserInput { $script:desk.tick++; $script:desk.lastInputAt = $script:testEpochMilliseconds }
 function Read-ForegroundClickState {
@@ -776,6 +782,7 @@ function Wait-ForegroundClickStep([int]$milliseconds) {
 function Test-ForegroundInputHeld { $script:desk.held }
 function Test-ForegroundButtonHeld { $script:desk.buttonHeld }
 function Test-ForegroundOwner([IntPtr]$hwnd, [int]$processId) { $true }
+function Test-ForegroundRestoreTarget([IntPtr]$hwnd, [int]$processId) { $script:desk.previousRestorable }
 function Read-PointerPosition { $script:desk.pointer }
 function Restore-PointerPosition([int]$x, [int]$y) { $script:desk.restoredPointer = @($x, $y) }
 function Get-TopWindowAtPoint([int]$x, [int]$y) { $script:desk.topAtPoint }
@@ -967,6 +974,56 @@ Case "A key chord is pressed with its modifiers in one real input and an active 
     $rejected = $false
     try { [void](Get-ForegroundKeyChord "hyper+a") } catch { $rejected = $true }
     Assert $rejected "An unknown modifier was accepted"
+}
+Case "Explicit foreground recovery from no active window sends one key and does not restore HWND zero" {
+    Reset-ForegroundDesktop
+    $script:desk.foreground = [IntPtr]::Zero; $script:desk.foregroundPid = 0
+    $script:operation | Add-Member NoteProperty tool 'press_key'
+    $script:operation | Add-Member NoteProperty foreground $true
+    $initial = Read-ActionFocus
+    Assert ($initial.hwnd -eq [IntPtr]::Zero) "Explicit recovery failed before the foreground session"
+    $failure = Invoke-ForegroundTestTyping '' 'ESC'
+    Assert ($null -eq $failure -and $script:desk.typed.Count -eq 1) "Recovery did not send exactly one key: $failure"
+    Assert (($script:desk.activations -join ',') -eq '101' -and $script:desk.foreground -eq [IntPtr]101) "Recovery tried to activate HWND zero"
+    Assert ($script:foregroundClick -eq 'notNeeded') "Recovery claimed to restore a nonexistent foreground"
+}
+Case "Recovery from no active window still waits for ongoing user input" {
+    Reset-ForegroundDesktop
+    $script:desk.foreground = [IntPtr]::Zero; $script:desk.foregroundPid = 0
+    Invoke-UserInput; $script:desk.onStep = @({ Invoke-UserInput })
+    $failure = Invoke-ForegroundTestTyping '' 'ESC'
+    Assert ($null -ne $failure -and $script:focusGuardYield -and -not $script:dispatched) "Zero foreground bypassed user input protection"
+    Assert ($script:desk.activations.Count -eq 0 -and $script:desk.typed.Count -eq 0) "Recovery interrupted the user's input"
+}
+Case "Foreground input does not reactivate a non-restorable floating editor" {
+    Reset-ForegroundDesktop; $script:desk.previousRestorable = $false
+    $failure = Invoke-ForegroundTestTyping '' 'ESC'
+    Assert ($null -eq $failure -and $script:desk.typed.Count -eq 1) "Explicit key was not sent: $failure"
+    Assert (($script:desk.activations -join ',') -eq '101' -and $script:foregroundClick -eq 'notReturned') "The floating editor was reactivated"
+}
+Case "Foreground text stays active through observation and its session completes only once" {
+    Reset-ForegroundDesktop
+    Send-ForegroundKeyboard ([IntPtr]101) "A`tB`nC" ''
+    Assert ($script:desk.foreground -eq [IntPtr]101 -and $null -ne $script:pendingForegroundInput) "Text handed back before its result could be observed"
+    Assert ($script:desk.typed.Count -eq 1 -and $script:desk.typed[0] -eq "A`tB`nC") "Text was split or replayed"
+    Complete-PendingForegroundInput; Complete-PendingForegroundInput
+    Assert (($script:desk.activations -join ',') -eq '101,700' -and $null -eq $script:pendingForegroundInput) "Session cleanup repeated or lost the previous window"
+}
+Case "A failed observation still releases its pending text session" {
+    Reset-ForegroundDesktop
+    try { Send-ForegroundKeyboard ([IntPtr]101) 'text' ''; throw 'Snapshot failed' }
+    catch { Assert ($_.Exception.Message -eq 'Snapshot failed') "Unexpected input error" }
+    finally { Complete-PendingForegroundInput }
+    Assert ($script:desk.foreground -eq [IntPtr]700 -and $null -eq $script:pendingForegroundInput) "Observation failure leaked the foreground session"
+    Assert ($script:desk.typed.Count -eq 1) "Cleanup replayed input"
+}
+Case "User typing in the target while its result is observed prevents automatic hand-back" {
+    Reset-ForegroundDesktop
+    Send-ForegroundKeyboard ([IntPtr]101) 'text' ''
+    Invoke-UserInput
+    Complete-PendingForegroundInput
+    Assert ($script:desk.foreground -eq [IntPtr]101 -and $script:foregroundClick -eq 'keptForUser') "Observation cleanup stole the user's foreground"
+    Assert (($script:desk.activations -join ',') -eq '101') "Cleanup activated the previous window after user input"
 }
 
 $failed = @($results | Where-Object { -not $_.passed })

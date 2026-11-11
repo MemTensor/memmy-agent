@@ -53,6 +53,12 @@ vi.mock("../infrastructure/memmy-config/index.js", async (importOriginal) => {
   };
 });
 
+// Local API fixtures own their Cloud and Memory clients; keep plugin discovery local too.
+vi.mock("../adapters/outbound/plugin-registry/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../adapters/outbound/plugin-registry/index.js")>();
+  return { ...actual, createHttpPluginRegistry: () => actual.createInMemoryPluginRegistry([]) };
+});
+
 let tempDir: string | undefined;
 let backend: LocalBackend | undefined;
 let integrationServer: ReturnType<typeof createServer> | undefined;
@@ -993,6 +999,7 @@ describe("local api", () => {
     backend = await createTempBackend({
       memoryClient: createMockMemoryClient({
         health: {
+          ...await createMockMemoryClient().health(),
           ok: false,
           version: "test-0.0.0",
           uptimeMs: 0,
@@ -1701,7 +1708,7 @@ function createRecordingCloudClient() {
 
     async deleteIntegrationConnection(input: { machineComposioToken?: string; id: string }): Promise<{ ok: true }> {
       calls.push(`deleteIntegrationConnection:${input.machineComposioToken ?? "no-machine-token"}:${input.id}`);
-      return { ok: true };
+      return { ok: true as const };
     }
   };
 }

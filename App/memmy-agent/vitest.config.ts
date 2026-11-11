@@ -56,6 +56,8 @@ export default defineConfig({
   resolve: {
     alias: {
       "memmy-agent": fileURLToPath(new URL("./src/index.ts", import.meta.url)),
+      // Repository tests must use current contracts even when App builds are skipped.
+      "@memmy/local-api-contracts": fileURLToPath(new URL("../backend/local-api-contracts/src/index.ts", import.meta.url)),
     },
   },
 });

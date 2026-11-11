@@ -1,4 +1,5 @@
 import { InstalledPluginSchema, type InstalledPlugin } from "@memmy/local-api-contracts";
+import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginService } from "../../../../services/plugin-service.js";
@@ -41,10 +42,11 @@ const plugin = InstalledPluginSchema.parse({
 
 function createService(): PluginService {
   return {
+    catalog: vi.fn(async () => []), isBusy: () => false, suspend: vi.fn(async () => undefined),
     list: vi.fn(() => [plugin]),
     get: vi.fn(() => plugin),
     readUi: vi.fn(async (_id, slot) => `<main>${slot}</main>`),
-    openArtifact: vi.fn(async () => ({ path: new URL(import.meta.url).pathname, name: "report.txt", mediaType: "text/plain" })),
+    openArtifact: vi.fn(async () => ({ path: fileURLToPath(import.meta.url), name: "report.txt", mediaType: "text/plain" })),
     install: vi.fn(async () => plugin),
     update: vi.fn(async () => plugin),
     configure: vi.fn(() => plugin),
@@ -81,6 +83,22 @@ function createApp(
 }
 
 describe("plugin routes", () => {
+  it("keeps declared status polling out of chat events and rejects hidden state changes", async () => {
+    const service = createService(), onEvent = vi.fn();
+    const capture = structuredClone(plugin);
+    capture.manifest.skills = [{ id: "capture-start", name: "Capture", description: "Capture authorized events", entry: "skills/capture/SKILL.md" }];
+    capture.manifest.conversation = { recordingCapabilityId: "run", recordingSkillId: "capture-start" };
+    vi.mocked(service.get).mockReturnValue(capture);
+    app = createApp(service, onEvent);
+    const url = `/api/v1/plugins/${plugin.id}/capabilities/run/invoke`;
+    const response = await app.inject({ method: "POST", url, payload: { conversationId: "chat-a", origin: "user", background: true, input: { action: "status" } } });
+    expect(response.statusCode).toBe(200); expect(onEvent).not.toHaveBeenCalled();
+    const hiddenStart = await app.inject({ method: "POST", url, payload: { conversationId: "chat-a", origin: "user", background: true, input: { action: "start" } } });
+    expect(hiddenStart.statusCode).toBe(400);
+    expect((await app.inject({ method: "POST", url, payload: { conversationId: "chat-a", origin: "user", input: { action: "stop" } } })).statusCode).toBe(200);
+    expect(onEvent).toHaveBeenCalled();
+  });
+
   it("installs and manages plugins by id", async () => {
     const plugins = createService();
     const refreshAgentTools = vi.fn(async () => undefined);

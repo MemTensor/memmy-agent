@@ -24,15 +24,7 @@ import {
 } from "./infrastructure/memmy-config/agent-access.js";
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
-import { createBackendServices, createCatalogAgentTaskModelResolver, type BootstrapScenario } from "./services/index.js";
-import { migrateLegacyCollabInstructions } from "./services/collab-instructions-service.js";
-import { createCollabCloudRequest, createCollabService } from "./services/collab-service.js";
-import { createLocalSessionReader } from "./adapters/outbound/agent-source/session-reference/local-session-reader.js";
-import { createBuiltinAgentSourceRegistry } from "./services/builtin-agent-source-registry.js";
-import { defaultCollabHome, refreshCollabAgentSkills } from "./services/collab-added-agents.js";
-import { createCollabAgentAccessService } from "./services/collab-agent-access-service.js";
-import { createSessionScanOffload } from "./services/collab-session-scan-offload.js";
-import { createProjectDirectoryService } from "./services/project-directory-service.js";
+import { createBackendServices, type BootstrapScenario } from "./services/index.js";
 import type { PluginService } from "./services/plugin-service.js";
 import {
   resolveCloudClientConfig,
@@ -58,6 +50,7 @@ import {
   suppressBundledPlugins
 } from "./services/bundled-plugin-bootstrap-service.js";
 import { reconcileEntitledPlugins } from "./services/plugin-entitlement-reconcile-service.js";
+import type { ModelCapabilityCatalogSyncService } from "./services/model-capability-catalog-sync-service.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
@@ -66,9 +59,6 @@ export { trackAnalyticsEvent } from "./analytics/analytics-transport.js";
 export { createHttpMemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
-const MCP_BRIDGE_CONFIG_RETRY_DELAY_MS = 5_000;
-/** New sessions of associated groups reach the project within about a minute. */
-const COLLAB_SYNC_INTERVAL_MS = 60_000;
 
 export interface CreateLocalBackendOptions {
   databasePath: string;
@@ -82,10 +72,14 @@ export interface CreateLocalBackendOptions {
   runtimeConfigPath?: string;
   /** Memmy config path. Required unless MEMMY_CONFIG is set. */
   memmyConfigPath?: string;
+  /** Defaults to ~/.memmy/models.json; isolated installations and tests may override it. */
+  modelCapabilityCatalogPath?: string;
   /** Memory service address exposed to desktop and browser-debug clients. */
   memoryBaseUrl?: string;
   /** Resolves when the managed Memory service is ready for startup config reload. */
   memoryReady?: Promise<void>;
+  /** Optional deferred Agent readiness; never awaited before the first window. */
+  agentGatewayReady?: Promise<void>;
   /** Desktop install fingerprint. */
   desktopInstallFingerprint?: string;
   /** Login channel supported by the current desktop package. */
@@ -115,20 +109,9 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   }
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
-  let collabSyncTimer: ReturnType<typeof setInterval> | undefined;
+  let pluginLifecycle: import("./services/index.js").BackendServices["pluginLifecycle"];
   let pluginService: PluginService | null = null;
-  let mcpBridgeRetryTimer: ReturnType<typeof setTimeout> | undefined;
-  let mcpBridgeClosed = false;
-  let committingMcpBridgeWrite: Promise<void> | undefined;
-
-  async function stopMcpBridgeWrites(): Promise<void> {
-    mcpBridgeClosed = true;
-    clearTimeout(mcpBridgeRetryTimer);
-    mcpBridgeRetryTimer = undefined;
-    // Only drain a mutation already inside its commit guard. A pending lock or
-    // Agent reload must not hold shutdown open; pre-commit writes reject below.
-    await committingMcpBridgeWrite?.catch(() => undefined);
-  }
+  let modelCapabilityCatalog: ModelCapabilityCatalogSyncService | null = null;
 
   try {
     if (options.desktopInstallFingerprint) {
@@ -146,9 +129,15 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     await ensureMemoryScanPreferences(
       memmyConfigPath,
-      appStateStore.repositories.bootstrap.getScanPreferences()
+      appStateStore.repositories.bootstrap.getScanPreferences(),
+      appStateStore.repositories.bootstrap.getOnboardingState().scanPermission
     );
     const scanPreferencesStore = createMemoryScanPreferencesStore(memmyConfigPath);
+    // Recover a permission save interrupted between config publication and DB update.
+    const scanPermission = scanPreferencesStore.getScanPermission();
+    if (scanPermission !== undefined && scanPermission !== appStateStore.repositories.bootstrap.getOnboardingState().scanPermission) {
+      appStateStore.repositories.bootstrap.updateOnboarding({ scanPermission });
+    }
 
     const permissionManager = createPermissionManager({
       appStateStore,
@@ -195,14 +184,15 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       agentAdapterRegistry,
       memoryClient,
       cloudClient,
+      modelCapabilityCatalogPath: options.modelCapabilityCatalogPath,
       permissionManager,
       bootstrapScenario: options.bootstrapScenario,
-      timeZone: configuredTimeZone,
       memmyConfigWriter,
       memmyConfigPath,
       scanPreferencesStore,
       accountChannel: options.accountChannel,
       memmyAgentAdminClient: options.memmyAgentAdminClient,
+      agentGatewayReady: options.agentGatewayReady,
       memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath),
       pluginRegistry: configuredPluginRegistry(process.env, bundledCatalog?.registry, (): Record<string, string> => {
         const cloudUuid = appStateStore.repositories.accountSession.getCloudUuid();
@@ -211,6 +201,10 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       trustedBundledPluginRoots: bundledCatalog ? [bundledCatalog.trustedArtifactRoot] : undefined
     });
     pluginService = services.plugins;
+    pluginLifecycle = services.pluginLifecycle;
+    modelCapabilityCatalog = services.modelCapabilityCatalog;
+    modelCapabilityCatalog.start();
+    await pluginLifecycle?.start();
     if (bundledCatalog) {
       const failures = await suppressBundledPlugins({
         plugins: services.plugins,
@@ -261,110 +255,16 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     const localToken = await permissionManager.getRuntimeToken();
     const composioMcpToken = `mmt_${randomBytes(32).toString("base64url")}`;
     await removeLegacyKnowledgeCredentials(memmyConfigPath);
-    // 老版本把协作项目的云端指令镜像在本机项目指令文件里。搬到协作侧自己的文件后从老文件删掉，
-    // 否则同一段指令会被两个钩子各注入一次。
-    const legacyInstructions = await services.projectInstructions.snapshot();
-    const legacyCloudEntries = Object.entries(legacyInstructions.projects)
-      .filter(([, entry]) => entry.origin === "cloud" && Boolean(entry.cloudProjectId))
-      .map(([directory, entry]) => ({ directory, text: entry.text, cloudProjectId: entry.cloudProjectId }));
-    if (legacyCloudEntries.length) {
-      const moved = await migrateLegacyCollabInstructions({
-        collabInstructions: services.collabInstructions,
-        legacyEntries: legacyCloudEntries,
-        forgetLegacy: (directory) => services.projectInstructions.forget(directory)
-      });
-      if (moved) console.log(`Moved ${moved} cloud project instruction(s) out of the local project instructions file`);
-    }
-    // Knowledge bases and online projects both act as the signed-in Memmy account.
-    const getCloudAccount = () => {
-      const account = appStateStore.repositories.accountSession;
-      const session = account.get();
-      const credential = account.getCloudUuid();
-      if (!session.authenticated || !credential) return null;
-      return {
-        accountId: session.profile.userId,
-        credential,
-        // Shown on the person's own sessions, so members see the same name everywhere.
-        memberName: session.profile.nickname
-      };
-    };
-    /** Reads the login mode on every call: switching between account and API Key takes effect without a restart. */
-    const userMode = () => appStateStore.repositories.bootstrap.getAppSettings().userMode;
-    /**
-     * 协作项目只在账号模式可用。API Key 模式（byok）不连接云端，但上一次登录留下的凭据还在这台机器上，
-     * 不在这里挡住的话，项目与成员会在纯本地环境里出现。知识库不按这条处理：它有自己的账号会话语义。
-     */
-    const getCollabAccount = () => (userMode() === "byok" ? null : getCloudAccount());
-    /**
-     * 用户添加的 Agent 只装 memmy-project，Memmy 不读它们的任务记录，所以这里只用内置来源；
-     * 启动时顺手把它们的技能刷到当前版本。
-     */
-    const collabHome = defaultCollabHome();
-    const collabAgentRegistry = createBuiltinAgentSourceRegistry();
-    /**
-     * 在其他 Agent 中使用协作项目的授权。读取任务、安装 `memmy-project` 都看这一份：
-     * 未授权时本机任务读取器一个适配器也不给，根本就不去扫它们的记录。
-     */
-    const collabAgentAccess = createCollabAgentAccessService({
-      homeDirectory: collabHome,
-      skillDistributionService: services.skillDistribution,
-      sourceRegistry: collabAgentRegistry
-    });
-    // 用户自己添加的 Agent 不在授权范围里：添加它们本身就是那一下授权，启动时照旧刷到当前版本。
-    void refreshCollabAgentSkills({ homeDirectory: collabHome }).then((updated) => {
-      if (updated > 0) console.log(`Refreshed the memmy-project skill of ${updated} added agent(s)`);
-    }).catch((error: unknown) => {
-      console.warn(`Refreshing added agents' skills did not complete: ${error instanceof Error ? error.message : String(error)}`);
-    });
-    // 内置 Agent 看协作项目的授权：授权还在时给新出现的 Agent 补装，未授权时什么也不写。
-    void collabAgentAccess.read()
-      .then(async (access) => (access.granted ? await collabAgentAccess.install() : null))
-      .then((result) => {
-        const failed = result?.results.filter((item) => !item.ok) ?? [];
-        if (failed.length) console.warn(`memmy-project install did not complete for: ${failed.map((item) => item.sourceId).join(", ")}`);
-      })
-      .catch((error: unknown) => {
-        console.warn(`Installing memmy-project at startup did not complete: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    const collab = createCollabService({
-      cloudBaseUrl: cloudConfig.baseUrl,
-      getAccount: getCollabAccount,
-      userMode,
-      // The backend reads this machine's agent sessions itself, so association works without the Memory service.
-      localSessions: createLocalSessionReader({
-        registry: collabAgentRegistry,
-        // 未授权时一个都不读；关掉的 Agent 也不进入扫描范围，而不是读完再筛。
-        adapters: async () => {
-          const allowed = new Set(await collabAgentAccess.readableSourceIds());
-          return collabAgentRegistry.list().filter((adapter) => allowed.has(adapter.descriptor.sourceId));
-        },
-        // 读一份存储是几秒的同步解析：挪到别的线程去读，同时进来的发消息、切页面、同步就不必等它读完。
-        offloadScan: createSessionScanOffload()
-      }),
-      agentAccess: () => collabAgentAccess.read(),
-      ...(process.env.MEMMY_SESSION_LINK_BASE_URL?.trim() ? { linkBaseUrl: process.env.MEMMY_SESSION_LINK_BASE_URL.trim() } : {}),
-      // 协作项目的指令存在协作侧自己的文件里，与本机项目的项目指令互不影响。
-      collabInstructions: services.collabInstructions,
-      // 只在一个方向上写：停止共享时把背景与规范写回创建者的本机项目。
-      projectInstructions: services.projectInstructions
-    });
-    // Groups associated with an online project pick up new sessions, and associated sessions their new turns.
-    collabSyncTimer = setInterval(() => {
-      // API Key 模式不连接云端：没有账号就没有可同步的协作项目，定时任务也就不必去试。
-      if (userMode() === "byok") return;
-      void collab.syncLinkedSessions().catch((error: unknown) => {
-        console.warn(`Online project sync did not complete: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    }, COLLAB_SYNC_INTERVAL_MS);
-    collabSyncTimer.unref();
     server = createLocalApiServer({
       knowledge: {
         baseUrl: cloudConfig.baseUrl,
-        getSession: getCloudAccount
+        getSession: () => {
+          const account = appStateStore.repositories.accountSession;
+          const session = account.get();
+          const credential = account.getCloudUuid();
+          return session.authenticated && credential ? { accountId: session.profile.userId, credential } : null;
+        }
       },
-      collab,
-      collabAgentAccess,
-      projectDirectory: createProjectDirectoryService(),
       permissionManager,
       services,
       composioMcpToken,
@@ -379,67 +279,33 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       throw new Error("Local API did not bind to a TCP port");
     }
 
-    const writeMcpBridgeServer = async (name: string, config: Record<string, unknown>): Promise<boolean> => {
-      if (mcpBridgeClosed) return false;
-      const writing: Promise<void> = memmyConfigWriter.patchMcpServerConfig(name, config, {
-        beforeCommit() {
-          if (mcpBridgeClosed) throw new Error("Backend closed before MCP bridge configuration commit");
-          committingMcpBridgeWrite = writing;
-        }
-      });
-      try {
-        await writing;
-        return !mcpBridgeClosed;
-      } finally {
-        if (committingMcpBridgeWrite === writing) committingMcpBridgeWrite = undefined;
-      }
-    };
-    const writeMcpBridgeConfig = async (): Promise<boolean> => {
-      if (!await writeMcpBridgeServer("composio", {
-        type: "streamableHttp",
-        url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/composio`,
-        headers: { "x-memmy-mcp-token": composioMcpToken },
-        toolTimeout: 60
-      })) return false;
-      return writeMcpBridgeServer("plugins", {
-        type: "streamableHttp",
-        url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
-        headers: { "x-memmy-mcp-token": composioMcpToken },
-        // User interactions may outlive the command runtime's own timeout.
-        toolTimeout: 7 * 24 * 60 * 60
-      });
-    };
-    const requestMcpReload = () => {
-      const client = options.memmyAgentAdminClient;
-      if (!client || options.skipAgentMcpReload || mcpBridgeClosed) return;
-      // Both bridge entries must be current, while Agent connectivity must not
-      // delay the first window or shutdown.
+    // Write the Composio MCP bridge into the agent config (tools.mcpServers.composio), so the agent connects to the local MCP server based on it.
+    await memmyConfigWriter.patchMcpServerConfig("composio", {
+      type: "streamableHttp",
+      url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/composio`,
+      headers: { "x-memmy-mcp-token": composioMcpToken },
+      toolTimeout: 60
+    });
+    await memmyConfigWriter.patchMcpServerConfig("plugins", {
+      type: "streamableHttp",
+      url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
+      headers: { "x-memmy-mcp-token": composioMcpToken },
+      // Interaction capabilities can legitimately wait while the user reads a
+      // long card or leaves the app in the background. Non-interactive command
+      // work remains bounded by the plugin runtime's own timeout.
+      toolTimeout: 7 * 24 * 60 * 60
+    });
+    const memmyAgentAdminClient = options.memmyAgentAdminClient;
+    if (memmyAgentAdminClient && !options.skipAgentMcpReload) {
+      // The bridge config must be written first, but MCP connections must not delay the first window.
       void Promise.resolve()
-        .then(() => mcpBridgeClosed ? undefined : client.reloadMcpConfig())
+        .then(() => memmyAgentAdminClient.reloadMcpConfig())
         .then((result) => {
-          if (result && !mcpBridgeClosed && !result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
+          if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
         })
         .catch((error: unknown) => {
-          if (!mcpBridgeClosed) console.warn(`Agent MCP reload unavailable during backend startup: ${error instanceof Error ? error.message : String(error)}`);
+          console.warn(`Agent MCP reload unavailable during backend startup: ${error instanceof Error ? error.message : String(error)}`);
         });
-    };
-    let initialBridgeConfigWritten = false;
-    try {
-      initialBridgeConfigWritten = await writeMcpBridgeConfig();
-    } catch (error) {
-      // This fallback covers only the launch-specific MCP entries. Earlier
-      // startup migrations and scan-preference writes retain their own errors.
-      console.warn(`MCP bridge config write skipped during backend startup: ${error instanceof Error ? error.message : String(error)}`);
-      mcpBridgeRetryTimer = setTimeout(() => {
-        mcpBridgeRetryTimer = undefined;
-        if (mcpBridgeClosed) return;
-        void writeMcpBridgeConfig()
-          .then((written) => { if (written) requestMcpReload(); })
-          .catch((retryError: unknown) => {
-            if (!mcpBridgeClosed) console.warn(`MCP bridge config retry failed after backend startup: ${retryError instanceof Error ? retryError.message : String(retryError)}`);
-          });
-      }, MCP_BRIDGE_CONFIG_RETRY_DELAY_MS);
-      mcpBridgeRetryTimer.unref?.();
     }
 
     const runtimeConfig = RuntimeConfigSchema.parse({
@@ -449,17 +315,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memory: options.memoryBaseUrl ? { baseUrl: options.memoryBaseUrl } : undefined
     });
     await writeRuntimeConfigFile(runtimeConfig, options.runtimeConfigPath ?? resolveDefaultRuntimeConfigPath());
-    if (initialBridgeConfigWritten) requestMcpReload();
-    // Agents connected before this build keep their old skill unless it is rewritten; do it in the background
-    // so the first window is not delayed.
-    void Promise.resolve()
-      .then(() => services.agentSources.refreshInstalledSkills())
-      .then((refreshed) => {
-        if (refreshed.length) console.info(`Memmy skill refreshed for: ${refreshed.join(", ")}`);
-      })
-      .catch((error: unknown) => {
-        console.warn(`Memmy skill refresh did not complete: ${error instanceof Error ? error.message : String(error)}`);
-      });
+    pluginLifecycle?.startUpdates();
     const boundServer = server;
     const boundPluginService = services.plugins;
     return {
@@ -471,21 +327,21 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         return appStateStore.repositories.bootstrap.recordLastLaunchMode(mode);
       },
       async close() {
-        clearInterval(collabSyncTimer);
-        await stopMcpBridgeWrites();
+        await services.modelCapabilityCatalog.stop();
         try {
           await boundServer.close();
         } finally {
-          await boundPluginService.shutdown();
+          if (pluginLifecycle) await pluginLifecycle.close();
+          else await boundPluginService.shutdown();
           appStateStore.close();
         }
       }
     };
   } catch (error) {
-    clearInterval(collabSyncTimer);
-    await stopMcpBridgeWrites();
+    await modelCapabilityCatalog?.stop();
     await server?.close().catch(() => undefined);
-    await pluginService?.shutdown();
+    if (pluginLifecycle) await pluginLifecycle.close();
+    else await pluginService?.shutdown();
     appStateStore.close();
     throw error;
   }
@@ -497,7 +353,7 @@ function configuredPluginRegistry(
   authHeaders?: () => Record<string, string>
 ): PluginRegistry | undefined {
   const baseUrl = resolvePluginRegistryBaseUrl(env);
-  const remoteRegistry = baseUrl ? createHttpPluginRegistry({ baseUrl, authHeaders }) : undefined;
+  const remoteRegistry = baseUrl ? createHttpPluginRegistry({ baseUrl, authHeaders, trustedNativeOrigin: resolveCloudClientConfig(env).baseUrl }) : undefined;
   // Explicit remote distribution must never fall back to a locally bundled package.
   if (env.MEMMY_PLUGIN_REGISTRY_URL?.trim()) return remoteRegistry;
   return bundledRegistry ? createCompositePluginRegistry(bundledRegistry, remoteRegistry) : remoteRegistry;

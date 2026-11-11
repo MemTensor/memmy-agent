@@ -143,3 +143,48 @@ describe("McpPluginAdapter", () => {
     await expect(adapter.activate(pluginContext)).rejects.toThrow(/cannot request network/);
   });
 });
+
+function nativeContext(): PluginRuntimeContext {
+  const value = context();
+  const permission = { type: "host-service" as const, services: ["native-execution", "event-sessions"] };
+  value.plugin.manifest.permissions = [permission]; value.plugin.approvedPermissions = [permission];
+  value.plugin.manifest.runtime = { adapter: "mcp", config: { transport: "stdio", command: "index.js", interpreter: "node", sandbox: "none", capabilityTools: { search: "search_papers" } } };
+  value.plugin.nativeExecutionAllowed = true; value.plugin.registryOrigin = "https://official.example";
+  value.plugin.artifactHash = "a".repeat(64); value.rootPath = "/fixture"; value.plugin.rootPath = "/fixture";
+  value.secrets = {}; return value;
+}
+
+describe("native MCP Host policy and reverse calls", () => {
+  it("requires the Host origin policy, release digest and user permission together", async () => {
+    const client = { connect: vi.fn(async () => undefined), close: vi.fn(async () => undefined), listTools: async () => ({ tools: [{ name: "search_papers" }] }), callTool: async () => ({}) };
+    const adapter = createMcpPluginAdapter({ platform: "win32", trustedNativeOrigins: ["https://official.example"], createClient: () => client, createTransport: () => ({}) });
+    for (const mutate of [
+      (value: PluginRuntimeContext) => { value.plugin.registryOrigin = "https://untrusted.example"; },
+      (value: PluginRuntimeContext) => { value.plugin.nativeExecutionAllowed = false; value.plugin.manifest.runtime.config!.nativeExecutionAllowed = true; },
+      (value: PluginRuntimeContext) => { value.plugin.artifactHash = null; },
+      (value: PluginRuntimeContext) => { value.plugin.approvedPermissions = []; }
+    ]) {
+      const value = nativeContext(); mutate(value); await expect(adapter.activate(value)).rejects.toThrow("trusted official release");
+    }
+    expect(client.connect).not.toHaveBeenCalled();
+    const session = await adapter.activate(nativeContext()); expect(client.connect).toHaveBeenCalledOnce(); await adapter.deactivate!(session);
+  });
+  it("binds reverse requests to an active real call and keeps business event arrays as result data", async () => {
+    let reverse!: (request: any) => Promise<{ result: unknown }>;
+    const invoke = vi.fn(async () => ({ events: [], marker: "business-data" }));
+    const request = (id: string) => ({ method: "memmy/host-service" as const, params: { service: "event-sessions", callId: id, input: { action: "status", conversationId: "forged-chat" } } });
+    const client = { connect: async () => undefined, close: async () => undefined,
+      setRequestHandler: (_schema: unknown, handler: typeof reverse) => { reverse = handler; },
+      listTools: async () => ({ tools: [{ name: "search_papers" }] }),
+      callTool: async () => {
+        await expect(reverse(request("forged-call"))).rejects.toThrow("active conversation");
+        return { structuredContent: (await reverse(request("real-call"))).result };
+      } };
+    const adapter = createMcpPluginAdapter({ platform: "win32", trustedNativeOrigins: ["https://official.example"], hostServices: { invoke }, createClient: () => client, createTransport: () => ({}) });
+    const session = await adapter.activate(nativeContext());
+    const events = await collect(adapter.invoke(session, { callId: "real-call", pluginId: "com.example.mcp", capabilityId: "search", conversationId: "websocket:real-chat", modelPreset: "selected-preset", input: {} }));
+    expect(invoke).toHaveBeenCalledOnce(); expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ pluginId: "com.example.mcp", callId: "real-call", conversationId: "websocket:real-chat", modelPreset: "selected-preset" }));
+    expect(events).toEqual([{ type: "result", output: { events: [], marker: "business-data" } }]);
+    await expect(reverse(request("real-call"))).rejects.toThrow("active conversation"); await adapter.deactivate!(session);
+  });
+});
