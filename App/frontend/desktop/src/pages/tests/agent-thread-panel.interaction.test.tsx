@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -85,6 +87,53 @@ const readyEnvironment = {
 describe("AgentThreadPanel", () => {
   let container: HTMLDivElement;
   let root: Root;
+
+  it("reserves a structural minimum for both guest actions without claiming browser geometry", async () => {
+    Object.defineProperty(window, "memmy", { configurable: true, value: { selectEmbeddedBrowserTab: vi.fn() } });
+    render({ messages: [], context: emptyContext() });
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="浏览器"]')!.click());
+    await readyWebview(document.querySelector("webview")!, 739, "https://example.invalid/guest", "Guest");
+    const tab = document.querySelector<HTMLElement>(".thread-tabs [data-browser-tab]")!;
+    const actions = tab.querySelectorAll(".thread-tab__close");
+    expect(actions).toHaveLength(2);
+    const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+    const rule = (selector: string) => styles.slice(styles.indexOf(`${selector} {`)).split("}", 1)[0]!;
+    const pixels = (body: string, property: string) => Number(new RegExp(`(?:^|[;\\n])\\s*${property}:\\s*(\\d+)px`).exec(body)?.[1]);
+    const tabRule = rule(".thread-tab");
+    const fixedIcon = Number(tab.querySelector(".thread-tab__icon svg")!.getAttribute("width"));
+    const fixedActions = actions.length * pixels(rule(".thread-tab__close"), "width");
+    const padding = Number(/padding:\s*0\s+(\d+)px/.exec(tabRule)?.[1]);
+    const structuralContentEnd = padding + fixedIcon + fixedActions + (tab.children.length - 1) * pixels(tabRule, "gap");
+
+    // This is a CSS/DOM contract guard, not a physical layout assertion in happy-dom.
+    expect(pixels(tabRule, "min-width")).toBeGreaterThanOrEqual(structuralContentEnd);
+    expect(tabRule).toMatch(/overflow:\s*hidden;/);
+    expect(rule(".thread-tabs")).toMatch(/overflow-x:\s*auto;/);
+  });
+
+  it("keeps crowded guest copy and close actions attached to their target without activating a neighbor", async () => {
+    const copy = vi.fn(async () => undefined);
+    Object.defineProperty(window, "memmy", { configurable: true, value: {
+      selectEmbeddedBrowserTab: vi.fn(), copyEmbeddedBrowserTabMention: copy,
+    } });
+    render({ messages: [], context: emptyContext() });
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="浏览器"]')!.click());
+    for (let index = 0; index < 6; index++) {
+      if (index) act(() => document.querySelector<HTMLButtonElement>('[aria-label="新建标签页"]')!.click());
+      await readyWebview(document.querySelectorAll("webview")[index]!, 7390 + index, `https://example.invalid/guest-${index}`, `Guest ${index}`);
+    }
+    const tabs = [...document.querySelectorAll<HTMLElement>(".thread-tabs [data-browser-tab]")];
+    const before = tabs.map(tab => tab.dataset.threadTabId);
+    const active = before.at(-1);
+    const target = tabs[2]!;
+    await act(async () => { target.querySelector<HTMLButtonElement>('[aria-label="复制标签页引用"]')!.click(); });
+    expect(copy).toHaveBeenCalledWith(7392);
+    expect(document.querySelector<HTMLElement>('.thread-tabs [aria-selected="true"]')?.dataset.threadTabId).toBe(active);
+    act(() => target.querySelector<HTMLButtonElement>('[aria-label^="关闭 "]')!.click());
+    expect([...document.querySelectorAll<HTMLElement>(".thread-tabs [data-browser-tab]")].map(tab => tab.dataset.threadTabId))
+      .toEqual(before.filter(id => id !== before[2]));
+    expect(document.querySelector<HTMLElement>('.thread-tabs [aria-selected="true"]')?.dataset.threadTabId).toBe(active);
+  });
 
   beforeEach(() => {
     layoutWidth = LAYOUT_WIDTH;
