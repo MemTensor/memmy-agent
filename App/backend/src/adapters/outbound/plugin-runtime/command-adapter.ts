@@ -180,7 +180,9 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
           env.TEMP = temporary; env.TMP = temporary;
         }
       }
-      if (platform === "win32") env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
+      // Expose the same Host-approved roots on every platform, so command
+      // plugins can reject unauthorized paths before filesystem lookups.
+      env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
         ? await Promise.all((options.fileInputRoots ?? []).map(root => realpath(root))) : []);
       const launch = await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies);
       const withTexlive = async (tex: ResolvedCommandRuntimeDependencies) => {

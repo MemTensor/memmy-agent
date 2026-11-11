@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { constants, accessSync, realpathSync } from 'node:fs';
+import { constants, accessSync, realpathSync, statSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -104,8 +104,16 @@ function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
       }
     });
     socket.on('error', error => {
-      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) finish();
-      else finish(error);
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes(code)) {
+        // On Linux, connecting to a regular file at the socket path also gives
+        // ECONNREFUSED. A non-socket file is a corrupt/stale state that must be
+        // rejected rather than silently ignored.
+        try {
+          if (!statSync(agent.socketPath).isSocket()) { finish(error); return; }
+        } catch { /* File not found or not stat-able: treat as harmless. */ }
+        finish();
+      } else finish(error);
     });
     socket.on('close', () => finish(accepted ? undefined : new Error('Native agent closed without confirming shutdown')));
   });

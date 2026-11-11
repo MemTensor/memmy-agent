@@ -14,6 +14,29 @@ import { createAppStateStore } from "../infrastructure/app-state-store/index.js"
 import { createMockCloudClient } from "./support/mock-cloud-client.js";
 import { createMockMemoryClient } from "./support/mock-memory-client.js";
 
+const mcpBridgeWriteFailure = vi.hoisted(() => ({ remainingFailures: 0 }));
+
+vi.mock("../infrastructure/memmy-config/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../infrastructure/memmy-config/index.js")>();
+  return {
+    ...actual,
+    createMemmyConfigWriter: (options: Parameters<typeof actual.createMemmyConfigWriter>[0]) => {
+      const writer = actual.createMemmyConfigWriter(options);
+      return {
+        ...writer,
+        async patchMcpServerConfig(serverName: string, serverConfig: Record<string, unknown>) {
+          if (mcpBridgeWriteFailure.remainingFailures > 0) {
+            mcpBridgeWriteFailure.remainingFailures -= 1;
+            // Mirrors the MigrationError raised when the runtime config lock stays held.
+            throw new Error(`Timed out waiting for the runtime config lock: ${options?.configPath ?? "config.yaml"}`);
+          }
+          return writer.patchMcpServerConfig(serverName, serverConfig);
+        }
+      };
+    }
+  };
+});
+
 let tempDir: string | undefined;
 let backend: LocalBackend | undefined;
 let integrationServer: ReturnType<typeof createServer> | undefined;
@@ -293,6 +316,53 @@ describe("local api", () => {
       expect(unhandledRejections).toEqual([]);
     } finally {
       process.off("unhandledRejection", onUnhandledRejection);
+      warn.mockRestore();
+    }
+  });
+
+  it("boots normally and keeps existing config when the MCP bridge config write hits the runtime config lock", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-mcp-bridge-lock-"));
+    const memmyConfigPath = join(tempDir, "config.yaml");
+    const legacyCustom = { type: "stdio", command: "legacy-tool", args: ["--existing"] };
+    writeFileSync(memmyConfigPath, YAML.stringify({
+      memmyMemory: { domain: "keep" },
+      tools: {
+        mcpServers: {
+          legacyCustom
+        }
+      }
+    }), "utf8");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // Both bridge writes fail on this launch, as when another instance holds config.yaml.lock.
+    mcpBridgeWriteFailure.remainingFailures = 2;
+
+    try {
+      backend = await createLocalBackend({
+        databasePath: join(tempDir, "app.sqlite"),
+        runtimeConfigPath: join(tempDir, "runtime.json"),
+        localToken: "test-token",
+        memoryClient: createMockMemoryClient(),
+        cloudClient: createMockCloudClient(),
+        memmyConfigPath,
+        skipAgentMcpReload: true
+      });
+
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("MCP bridge config write skipped during backend startup")
+      ));
+
+      const config = YAML.parse(readFileSync(memmyConfigPath, "utf8"));
+      expect(config.tools.mcpServers.legacyCustom).toEqual(legacyCustom);
+      expect(config.tools.mcpServers.composio).toBeUndefined();
+      expect(config.memmyMemory).toMatchObject({ domain: "keep" });
+
+      const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/bootstrap`, {
+        headers: { "x-memmy-local-token": "test-token" }
+      });
+      expect(response.status).toBe(200);
+      expect(AppBootstrapResponseSchema.safeParse(await response.json()).success).toBe(true);
+    } finally {
+      mcpBridgeWriteFailure.remainingFailures = 0;
       warn.mockRestore();
     }
   });
