@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,6 +15,7 @@ import {
   resultText,
   shortId,
   stopText,
+  sweepAssistRuns,
   toAssistRequest,
   type AssistRunner
 } from "../collab-assist-service.js";
@@ -427,7 +429,8 @@ describe("createCollabAssistService", () => {
           dailyLimit: 20
         };
       }
-      const asked = [version, logs].find((item) => path.endsWith(item.id));
+      // 执行前那次读取会带 `?attachments=true`，所以按包含 id 匹配，不按结尾。
+      const asked = [version, logs].find((item) => path.includes(item.id));
       return { request: asked ?? version };
     });
     const started: string[] = [];
@@ -480,7 +483,7 @@ describe("createCollabAssistService", () => {
           dailyLimit: 20
         };
       }
-      const asked = [first, second].find((item) => path.endsWith(item.id));
+      const asked = [first, second].find((item) => path.includes(item.id));
       return { request: asked ?? first };
     });
     const started: Array<{ id: string; sessionId?: string }> = [];
@@ -1330,5 +1333,192 @@ describe("telling the requester when an external Agent's request ends", () => {
 
     await service.pollNow();
     expect(await service.outcomes()).toEqual([]);
+  });
+});
+
+/**
+ * 请求附带的文本与脚本：执行前落盘成执行方 Agent 能读到的文件。
+ * 由 Memmy 执行时写进 media 目录（在文件与 shell 工具的白名单内）并保留；由外部 Agent 执行时写进
+ * 工作目录下的 .memmy-assist 并在这轮结束后删掉。
+ */
+describe("请求附带文件的落盘", () => {
+  const ID = "a7f3k111-1111-1111-1111-111111111111";
+  const SCRIPT = "#!/bin/sh\nset -eu\necho hi\n";
+
+  function sha(text: string): string {
+    return createHash("sha256").update(text, "utf8").digest("hex");
+  }
+
+  const attached = (overrides: Record<string, unknown> = {}) => request({
+    status: "running",
+    agent: "memmy",
+    attachments: [{ name: "probe.sh", content: SCRIPT, sha256: sha(SCRIPT), note: "排查脚本，用 sh 运行，把输出贴回结果" }],
+    ...overrides
+  });
+
+  function serviceWith(root: string, cloud: ReturnType<typeof fakeCloud>["cloud"], run?: AssistRunner) {
+    return createCollabAssistService({
+      cloud,
+      homeDirectory: root,
+      projectDirectory: async () => root,
+      agents: async () => [],
+      progressIntervalMs: 0,
+      runner: run ?? {
+        async run(input) {
+          input.onSession("chat-9");
+          return { reply: "好", steps: [], sessionId: "chat-9" };
+        }
+      }
+    });
+  }
+
+  /**
+   * 单条请求详情的契约：默认不带附件正文（轮询每 2 秒一次，不能反复传 2MB），
+   * 只有带 `?attachments=true` 的那次才带 `content`。测试据此才能真的盖到「拿到正文才落盘」。
+   */
+  function detailCloud(payload: Record<string, unknown>, seen: { withAttachments?: boolean } = {}) {
+    return fakeCloud((path) => {
+      if (path === "/assist/inbox") return { requests: [{ ...payload, granted: false }] };
+      if (path.startsWith("/assist/requests/")) {
+        const withAttachments = path.includes("attachments=true");
+        seen.withAttachments = withAttachments;
+        const attachments = Array.isArray(payload.attachments) ? payload.attachments : null;
+        return { request: { ...payload, attachments: withAttachments ? attachments : null } };
+      }
+      return { request: payload };
+    });
+  }
+
+  it("由 Memmy 执行：写进 media 目录、脚本可执行、提示词给出目录与用途说明，执行后保留", async () => {
+    const root = home();
+    const detail = { withAttachments: false };
+    const { cloud } = detailCloud(attached(), detail);
+    let prompt = "";
+    let duringRun = "";
+    const service = serviceWith(root, cloud, {
+      async run(input) {
+        prompt = input.prompt;
+        // 执行前文件已经在了：外部 Agent 也只认自己的 cwd，落盘必须在跑之前。
+        duringRun = readFileSync(join(root, "media", "assist", "runs", ID, "probe.sh"), "utf8");
+        return { reply: "好", steps: [], sessionId: "chat-9" };
+      }
+    });
+
+    await service.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // 执行前那次读取必须显式要正文，否则 `attachments` 永远是 null、脚本永远落不下。
+    expect(detail.withAttachments).toBe(true);
+    expect(duringRun).toBe(SCRIPT);
+    const file = join(root, "media", "assist", "runs", ID, "probe.sh");
+    expect(readFileSync(file, "utf8")).toBe(SCRIPT);
+    // 脚本置为可执行：对方不必自己 chmod。
+    expect(statSync(file).mode & 0o777).toBe(0o700);
+    expect(prompt).toContain(`随请求附带的 1 个文件已放在 ${join(root, "media", "assist", "runs", ID)}：`);
+    expect(prompt).toContain("- probe.sh：排查脚本，用 sh 运行，把输出贴回结果。运行时直接用这个文件，不要改写内容，也不要另写一份代替它。");
+    // 指纹在落盘时已经核对过，提示词里不再出现：执行方 Agent 用不上它。
+    expect(prompt).not.toContain("sha256");
+    // Memmy 执行时随请求的保留期一起清。
+    expect(existsSync(join(root, "media", "assist", "runs", ID))).toBe(true);
+  });
+
+  it("由外部 Agent 执行：写进工作目录下的 .memmy-assist，结束后删掉", async () => {
+    const root = home();
+    const external = attached({ agent: "claude_code" });
+    const seenRequest = { withAttachments: false };
+    const { cloud } = detailCloud(external, seenRequest);
+    let duringRun = "";
+    const service = serviceWith(root, cloud, {
+      async run(input) {
+        duringRun = readFileSync(join(root, ".memmy-assist", ID, "probe.sh"), "utf8");
+        expect(input.cwd).toBe(root);
+        return { reply: "好", steps: [], sessionId: "ext-1" };
+      }
+    });
+
+    await service.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(seenRequest.withAttachments).toBe(true);
+    expect(duringRun).toBe(SCRIPT);
+    expect(existsSync(join(root, ".memmy-assist", ID))).toBe(false);
+  });
+
+  it("指纹对不上时这次执行失败，不跑 Agent", async () => {
+    const root = home();
+    const corrupt = attached({
+      attachments: [{ name: "probe.sh", content: SCRIPT, sha256: "0".repeat(64) }]
+    });
+    const seen = { withAttachments: false };
+    const { calls, cloud } = detailCloud(corrupt, seen);
+    let ran = false;
+    const service = serviceWith(root, cloud, {
+      async run() {
+        ran = true;
+        return { reply: "好", steps: [], sessionId: "chat-9" };
+      }
+    });
+
+    await service.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(seen.withAttachments).toBe(true);
+    expect(ran).toBe(false);
+    const result = calls.find((call) => call.path.endsWith("/result"))?.body as Record<string, unknown>;
+    expect(String(result.failure)).toContain("附件在传输中损坏");
+  });
+
+  it("文件名不安全时这次执行失败，不静默改名", async () => {
+    const root = home();
+    const unsafe = attached({ attachments: [{ name: "../probe.sh", content: SCRIPT, sha256: sha(SCRIPT) }] });
+    const seen = { withAttachments: false };
+    const { calls, cloud } = detailCloud(unsafe, seen);
+    let ran = false;
+    const service = serviceWith(root, cloud, {
+      async run() {
+        ran = true;
+        return { reply: "好", steps: [], sessionId: "chat-9" };
+      }
+    });
+
+    await service.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(seen.withAttachments).toBe(true);
+    expect(ran).toBe(false);
+    const result = calls.find((call) => call.path.endsWith("/result"))?.body as Record<string, unknown>;
+    expect(String(result.failure)).toContain("附件的文件名不安全");
+  });
+});
+
+/**
+ * 由 Memmy 执行时附件写在 media 目录里、不在本轮结束后删；弹窗里承诺「执行结束 24 小时后删除」，
+ * 这条清理必须真的会跑，并且不能删到手正在执行的那几个目录。
+ */
+describe("sweepAssistRuns", () => {
+  it("removes run directories older than 24 hours and keeps the fresh ones", async () => {
+    const root = home();
+    const runs = join(root, "media", "assist", "runs");
+    const old = join(runs, "old-1");
+    const fresh = join(runs, "fresh-1");
+    const running = join(runs, "running-1");
+    mkdirSync(old, { recursive: true });
+    mkdirSync(fresh, { recursive: true });
+    mkdirSync(running, { recursive: true });
+    // 25 小时前；正在执行的那一个也做旧，验证 keep 真的起作用。
+    const past = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    utimesSync(old, past, past);
+    utimesSync(running, past, past);
+
+    const removed = await sweepAssistRuns({ home: root, keep: new Set(["running-1"]) });
+
+    expect(removed).toEqual(["old-1"]);
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(running)).toBe(true);
+  });
+
+  it("returns quietly when there is nothing to sweep", async () => {
+    await expect(sweepAssistRuns({ home: home() })).resolves.toEqual([]);
   });
 });

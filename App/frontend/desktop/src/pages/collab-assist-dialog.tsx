@@ -10,12 +10,14 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Folder } from "lucide-react";
-import type { AssistAgent, AssistGrantMinutes, AssistInboxItem, AssistScope, CollabClient } from "../api/collab-client.js";
+import type { AssistAgent, AssistGrantMinutes, AssistInboxItem, AssistRequest, AssistScope, CollabClient } from "../api/collab-client.js";
 import { Button } from "../components/button.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { Modal } from "../components/modal.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { agentSourceLogoUrl } from "./agent-source-logos.js";
+import { AssistAttachments } from "./collab-assist-attachments.js";
+import { AssistItems } from "./collab-assist-items.js";
 import { DEFAULT_GRANT_MINUTES, GrantDurationPicker, assistWaitedText } from "./collab-assist-view.js";
 import styles from "./collab-assist-dialog.module.css";
 
@@ -37,6 +39,8 @@ export function CollabAssistDialog(props: {
   const [minutes, setMinutes] = useState<AssistGrantMinutes>(DEFAULT_GRANT_MINUTES);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 收件箱不带附件正文：拿到带正文的详情后替换显示用的请求。 */
+  const [detail, setDetail] = useState<AssistRequest | null>(null);
   const durationRef = useRef<HTMLDivElement | null>(null);
   const { collab, open, request } = props;
 
@@ -73,8 +77,27 @@ export function CollabAssistDialog(props: {
     };
   }, [collab, open, request]);
 
+  // 收件箱里的请求不带附件正文：弹窗打开时按需拉一次详情。拉不到就不显示附件区，不弹错误打扰她。
+  useEffect(() => {
+    setDetail(null);
+    if (!open || !collab || !request || request.attachments !== null) return;
+    let cancelled = false;
+    void collab.assistRequest(request.id, { withAttachments: true })
+      .then((full) => {
+        if (!cancelled) setDetail(full);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [collab, open, request]);
+
   if (!request) return null;
+  const shown = detail && detail.id === request.id ? detail : request;
+  const attachments = shown.attachments ?? [];
   const requester = request.requester.name;
+  // 发起方用的 Agent 写在请求里（如 Codex、Memmy）；旧请求没有或为空时退回「Agent」，弹窗里能看出这次是谁发起的。
+  const via = request.via?.trim() || t("collab.assist.executorFallback");
   const chosen = agents?.find((item) => item.sourceId === agent) ?? null;
   const agentName = chosen?.name ?? t("collab.assist.executorFallback");
   const waited = assistWaitedText(request.waitingSeconds, t);
@@ -122,9 +145,13 @@ export function CollabAssistDialog(props: {
       <div className={styles.top}>
         <Memmy pose="shield" size={56} className={styles.mascot} />
         <h2 className={styles.title}>{t("collab.assist.title", { name: requester })}</h2>
-        <p className={styles.lead}>
-          {t("collab.assist.lead", { name: requester, issue: request.reason, via: request.via })}
-        </p>
+        {/* 标题下面直接是背景：谁在请求已在标题里，为什么请求由背景说明，不再加一句复述的引导语。 */}
+        {shown.reason ? (
+          <p className={styles.reason}>
+            <span className={styles.reasonKey}>{t("collab.assist.reasonKey")}</span>
+            {shown.reason}
+          </p>
+        ) : null}
       </div>
 
       <div className={styles.sect}>
@@ -132,15 +159,23 @@ export function CollabAssistDialog(props: {
           <Folder size={13} aria-hidden="true" />
           {/* 请求等了一段时间才被看到（比如她刚上线）：写明多久前发起，旧了她可以直接拒绝。 */}
           {waited
-            ? t("collab.assist.fromProjectWaited", { project: request.projectName, waited })
-            : t("collab.assist.fromProject", { project: request.projectName })}
+            ? t("collab.assist.fromProjectWaited", { name: requester, via, project: request.projectName, waited })
+            : t("collab.assist.fromProject", { name: requester, via, project: request.projectName })}
         </div>
         <div className={styles.todo}>
-          <ol>
-            {request.items.map((item) => <li key={item}>{item}</li>)}
-          </ol>
+          {/* 这次排查的一句话标题：编号事项只列步骤，先让她知道这次到底要做什么。 */}
+          {shown.title ? <p className={styles.todoTitle}>{shown.title}</p> : null}
+          <AssistItems items={shown.items} />
         </div>
       </div>
+
+      {/* 随请求附带的文本与脚本：在「由谁执行」之前，让她先看要跑的是什么 */}
+      {attachments.length ? (
+        <div className={styles.sect}>
+          <div className={styles.sectKey}>{t("collab.assist.attachments")}</div>
+          <AssistAttachments attachments={attachments} />
+        </div>
+      ) : null}
 
       <div className={styles.sect}>
         <div className={styles.sectKey}>{t("collab.assist.byWhom")}</div>

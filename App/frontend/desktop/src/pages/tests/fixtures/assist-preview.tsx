@@ -1,6 +1,6 @@
 /**
  * 临时预览页：把成员协助的各处界面用真实组件与样式渲出来，便于对照方案自查。
- * 地址参数 `?view=dialog|dialog-other|board|board-tasks|detail|conversation|chain|chain-memmy|task|task-ask|card|card-running|card-stopped-by-me|conversation-stop|task-stopped|requester|settings|settings-off|project-settings-owner|project-settings-member|project-settings-local`，不连接本机接口。
+ * 地址参数 `?view=dialog|dialog-other|dialog-attachments|board|board-tasks|detail|conversation|conversation-attachments|chain|chain-memmy|task|task-ask|task-long|card|card-running|card-stopped-by-me|conversation-stop|task-stopped|requester|settings|settings-off|project-settings-owner|project-settings-member|project-settings-local`，不连接本机接口。
  * `detail` 与 `conversation` 是同一份协助会话（两轮请求：发起方由 Memmy 发起、执行方由 Memmy 执行，第二轮按限时授权直接执行），
  * 没有发起方记录，就是旧记录的显示。`chain` 是完整链条：DeepSeek Harness 发起、Memmy 执行，两轮（第二轮 --continue）；
  * `chain-memmy` 是 Memmy 发起的完整链条，第二轮收到后的记录还在同步。
@@ -39,6 +39,8 @@ function request(overrides: Partial<AssistRequest> = {}): AssistRequest {
     title: "收集 Cursor 任务读取相关的信息",
     reason: "关联任务弹窗里看不到 Cursor 的任务",
     items: ITEMS,
+    /** 列表与收件箱不带附件正文；预览里默认没有附件。 */
+    attachments: null,
     status: "pending",
     agent: "claude_code",
     scope: "once",
@@ -207,7 +209,7 @@ const CONV_FIRST = request({
     '<memmy_assist_request request="conv-1" from="孙起" via="Memmy" attempt="1">',
     "孙起正在排查一个问题，需要这台电脑上的信息。",
     "这件事发生在协作项目「Memmy 内测反馈」里。",
-    "起因：分享弹窗的问题在孙起本机复现不了",
+    "背景：分享弹窗的问题在孙起本机复现不了",
     "",
     "要做的事：查看分享弹窗相关的日志与版本",
     "- 查看 Memmy 与 macOS 的版本",
@@ -423,6 +425,8 @@ function fakeClient(options: {
   thread?: AssistThread;
   /** 项目设置里列出的限时授权，默认只有一条。 */
   grants?: AssistGrant[];
+  /** 详情接口返回的请求：默认是已完成的那一份；带附件正文的预览用它。 */
+  detail?: AssistRequest;
 } = {}): CollabClient {
   const grants: AssistGrant[] = options.grants ?? [
     {
@@ -458,7 +462,7 @@ function fakeClient(options: {
       ],
       defaultAgent: options.defaultAgent ?? "memmy"
     }),
-    assistRequest: async () => request(DONE_FIELDS),
+    assistRequest: async () => options.detail ?? request(DONE_FIELDS),
     decideAssist: async () => request(DONE_FIELDS),
     stopAssist: async () => request(DONE_FIELDS),
     noteAssist: async () => undefined,
@@ -495,6 +499,66 @@ const REQUEST_MESSAGE = [
   "",
   "要做的事：查看系统与 Memmy 版本",
   "- 列出 ~/.memmy 下最近修改的 3 个文件名",
+  "</memmy_assist_request>"
+].join("\n");
+
+/* 附件与长正文的预览数据：一个要原样执行的脚本、一个作为输入的 JSON；事项超过三条且有续行。 */
+const PROBE_SCRIPT = [
+  "#!/bin/sh",
+  "set -eu",
+  "# 收集 Memmy、Cursor 与系统的版本，以及 ~/.memmy 的占用",
+  "sw_vers",
+  "defaults read /Applications/Cursor.app/Contents/Info.plist CFBundleShortVersionString",
+  "du -sh ~/.memmy",
+  "ls -lt ~/.memmy | head -3"
+].join("\n");
+const CASES_JSON = [
+  "{",
+  "  \"since\": \"2026-11-01\",",
+  "  \"sessions\": [\"composer-1\", \"composer-2\"]",
+  "}"
+].join("\n");
+const ATTACHMENTS: NonNullable<AssistRequest["attachments"]> = [
+  {
+    name: "scan-probe.sh",
+    content: PROBE_SCRIPT,
+    sha256: "9f2c1d4b7a5e8f0c3b2a19d84e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f",
+    note: "排查脚本，在终端用 bash 运行，把完整输出贴回结果"
+  },
+  {
+    name: "cases.json",
+    content: CASES_JSON,
+    sha256: "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+    note: "scan-probe.sh 读取的会话清单，不需要单独处理"
+  }
+];
+const LONG_REASON = "孙起本机复现不了分享弹窗的问题。\n已经确认不是账号权限，剩下要在你的电脑上跑一遍同一份脚本，把两边版本对齐。";
+const LONG_ITEMS = [
+  "先原样跑 scan-probe.sh，不要改写内容",
+  "再看 cases.json 里的两个会话是否都读到会话头\n- composer-1 应该是新键\n- composer-2 可能是旧键",
+  "把结果贴回本次协助，说明哪一边的版本不一致",
+  "如果日志里有 40901，把当天前后 20 行一起附上",
+  "最后确认 ~/.memmy 的总大小"
+];
+
+const LONG_REQUEST_MESSAGE = [
+  '<memmy_assist_request request="r-5" from="孙起" via="Codex" attempt="1">',
+  "孙起正在排查一个问题，需要这台电脑上的信息。",
+  "这件事发生在协作项目「Memmy 内测反馈」里。",
+  "背景：孙起本机复现不了分享弹窗的问题",
+  "  已经确认不是账号权限，剩下要在你的电脑上跑一遍同一份脚本。",
+  "",
+  "要做的事：在对方电脑上原样跑一遍排查脚本",
+  "- 先原样跑 scan-probe.sh，不要改写内容",
+  "- 再看 cases.json 里的两个会话是否都读到会话头",
+  "  - composer-1 应该是新键",
+  "  - composer-2 可能是旧键",
+  "- 把结果贴回本次协助",
+  "- 如果日志里有 40901，把当天前后 20 行一起附上",
+  "- 最后确认 ~/.memmy 的总大小",
+  "随请求附带的 2 个文件已放在 /Users/sunq/.memmy/media/assist/runs/r-5：",
+  "- scan-probe.sh：排查脚本，在终端用 bash 运行，把完整输出贴回结果。运行时直接用这个文件，不要改写内容，也不要另写一份代替它。",
+  "- cases.json：scan-probe.sh 读取的会话清单，不需要单独处理。",
   "</memmy_assist_request>"
 ].join("\n");
 
@@ -757,6 +821,70 @@ function Preview() {
     );
   }
 
+  if (view === "conversation-attachments") {
+    // 附件与长正文：这里的请求来自 thread 详情，带附件正文；事项超过三条，默认收起。
+    const detailed = request({
+      ...CONV_FIRST,
+      id: "att-1",
+      threadId: "th-att",
+      attempt: 1,
+      reason: LONG_REASON,
+      items: LONG_ITEMS,
+      attachments: ATTACHMENTS,
+      // 执行方 Agent 收到的提示词：附件紧跟在要做的事后面，逐个写清是什么、怎么用。
+      prompt: [
+        '<memmy_assist_request request="att-1" from="孙起" via="Memmy" attempt="1">',
+        "孙起正在排查一个问题，需要这台电脑上的信息。",
+        "这件事发生在协作项目「Memmy 内测反馈」里。",
+        "背景：孙起本机复现不了分享弹窗的问题。",
+        "  已经确认不是账号权限，剩下要在你的电脑上跑一遍同一份脚本，把两边版本对齐。",
+        "",
+        "要做的事：查看分享弹窗相关的日志与版本",
+        "- 先原样跑 scan-probe.sh，不要改写内容",
+        "- 再看 cases.json 里的两个会话是否都读到会话头",
+        "  - composer-1 应该是新键",
+        "  - composer-2 可能是旧键",
+        "- 把结果贴回本次协助，说明哪一边的版本不一致",
+        "- 如果日志里有 40901，把当天前后 20 行一起附上",
+        "- 最后确认 ~/.memmy 的总大小",
+        "",
+        "随请求附带的 2 个文件已放在 /Users/sunq/.memmy/media/assist/runs/att-1：",
+        "- scan-probe.sh：排查脚本，在终端用 bash 运行，把完整输出贴回结果。运行时直接用这个文件，不要改写内容，也不要另写一份代替它。",
+        "- cases.json：scan-probe.sh 读取的会话清单，不需要单独处理。",
+        "</memmy_assist_request>"
+      ].join("\n"),
+      status: "done",
+      agent: "memmy",
+      scope: "once",
+      reply: "两边版本一致，两个会话都读到了会话头。",
+      resultItems: [{ key: "版本", value: "Memmy 1.2.6 · Cursor 2.1.4" }],
+      decidedAt: minutesAgo(3),
+      finishedAt: minutesAgo(1)
+    });
+    const attachedThread = thread({
+      threadId: "th-att",
+      title: detailed.title,
+      via: "Memmy",
+      agent: "memmy",
+      status: "done",
+      attempt: 1,
+      mine: true,
+      requester: { ...REQUESTER, mine: true },
+      executor: { ...EXECUTOR, mine: false }
+    }, [detailed]);
+    return (
+      <div style={{ minHeight: "100vh", background: "#fff" }}>
+        <CollabAssistConversation
+          thread={attachedThread}
+          collab={fakeClient({ thread: attachedThread })}
+          sourceTaskAvailable={() => true}
+          onOpenTask={() => undefined}
+          onClose={() => undefined}
+        />
+      </div>
+    );
+  }
+
   if (view === "detail" || view === "conversation" || view === "chain" || view === "chain-memmy") {
     const shown = view === "chain" ? CHAIN : view === "chain-memmy" ? MEMMY_CHAIN : CONVERSATION;
     return (
@@ -918,6 +1046,39 @@ function Preview() {
         <AssistMessageCard envelope={parseAssistEnvelope(REQUEST_MESSAGE)!} />
         <AssistantText>最近修改的 3 个文件是 collab-assist.json、config.yaml 与 runtime.json。</AssistantText>
       </TaskFrame>
+    );
+  }
+
+  if (view === "task-long") {
+    // 任务页的请求卡片：多行事项与附件段，默认显示前三条，其余可展开。
+    return (
+      <TaskFrame>
+        <AssistMessageCard envelope={parseAssistEnvelope(LONG_REQUEST_MESSAGE)!} />
+      </TaskFrame>
+    );
+  }
+
+  // dialog-attachments：收件箱不带附件正文，弹窗打开时按需拉一次详情，拿到带正文的这份。
+  if (view === "dialog-attachments") {
+    const detailed = request({
+      ...DONE_FIELDS,
+      status: "pending",
+      scope: null,
+      grant: null,
+      items: LONG_ITEMS,
+      reason: LONG_REASON,
+      attachments: ATTACHMENTS
+    });
+    return (
+      <div style={{ minHeight: "100vh", background: "var(--color-canvas-oat, #f4f7f6)" }}>
+        <CollabAssistDialog
+          open
+          request={{ ...inboxItem, items: LONG_ITEMS, reason: LONG_REASON, attachments: null }}
+          collab={fakeClient({ detail: detailed })}
+          onDecided={() => undefined}
+          onClose={() => undefined}
+        />
+      </div>
     );
   }
 

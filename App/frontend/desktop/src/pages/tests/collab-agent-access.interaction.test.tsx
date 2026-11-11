@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { act } from "react";
+import styles from "../collab-agent-access.module.css";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollabAgentAccessView, CollabClient } from "../../api/collab-client.js";
@@ -95,6 +96,17 @@ describe("collab agent access dialog", () => {
 
     await act(async () => button("完成")?.click());
     expect(onDecided).toHaveBeenCalledWith(true, expect.arrayContaining([{ sourceId: "codex", name: "Codex", ok: true }]));
+  });
+
+  it("keeps the footer reachable when the agent list is taller than the window", async () => {
+    // 装过十几个 Agent 时正文比窗口高：正文区必须自己滚动，底部按钮不能跟着被顶出窗口。
+    // happy-dom 算不出真实布局，这里守住「正文区与底部分别拿到可滚动 / 固定的类」这件事。
+    await render(client());
+    const body = document.querySelector(".modal-body");
+    const footer = document.querySelector(".modal-footer");
+    // 正文区与底部分别拿到独立样式：前者滚动，后者固定。
+    expect(body?.className).toContain(styles.body);
+    expect(footer?.className).toContain(styles.footer);
   });
 
   it("closes without granting when the person chooses not now", async () => {

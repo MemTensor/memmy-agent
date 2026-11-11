@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -22,6 +22,24 @@ function installFake(homeDirectory: string, bin: string): string {
   const path = join(binDir, bin);
   writeFileSync(path, "#!/bin/sh\nexit 0\n");
   return path;
+}
+
+/**
+ * 造一个真实 npm 的布局：`.bin/<名字>` 是指向包内 `dist/index.js` 的软链接，
+ * 目标文件的可执行位由 `mode` 决定。缺执行位正是线上踩到的那次失败。
+ */
+function installLinked(homeDirectory: string, bin: string, mode: number): { bin: string; target: string } {
+  const root = adaptersDirectory(homeDirectory);
+  const packageDir = join(root, "node_modules", "@agentclientprotocol", "claude-agent-acp", "dist");
+  mkdirSync(packageDir, { recursive: true });
+  const target = join(packageDir, "index.js");
+  writeFileSync(target, "#!/usr/bin/env node\n");
+  chmodSync(target, mode);
+  const binDir = join(root, "node_modules", ".bin");
+  mkdirSync(binDir, { recursive: true });
+  const link = join(binDir, bin);
+  symlinkSync(join("..", "@agentclientprotocol", "claude-agent-acp", "dist", "index.js"), link);
+  return { bin: link, target };
 }
 
 describe("assist adapters", () => {
@@ -49,6 +67,25 @@ describe("assist adapters", () => {
     // 已经装好就不该再打扰界面。
     expect(announced).toBe(false);
     expect(installedAdapterPath(adapterFor("claude_code")!, root)).toBe(bin);
+  });
+
+  it("gives back the executable bit when npm left the target without it", async () => {
+    // 线上就是这样失败的：`.bin` 里的软链接在，但它指向的 dist/index.js 是 -rw-r--r--，
+    // spawn 直接 EACCES，界面写「无法启动这个 Agent」。同一次安装只是补个执行位，不该重装。
+    if (process.platform === "win32") return;
+    const root = home();
+    const { bin, target } = installLinked(root, "claude-agent-acp", 0o644);
+    let announced = false;
+
+    const result = await ensureAdapter("claude_code", {
+      home: root,
+      onInstalling: () => { announced = true; }
+    });
+
+    expect(result).toEqual({ executable: bin, installed: false });
+    expect(announced).toBe(false);
+    // 补的是软链接指向的真实文件，不是链接本身。
+    expect(statSync(target).mode & 0o111).not.toBe(0);
   });
 
   it("says plainly that it cannot install when there is no npm on this machine", async () => {

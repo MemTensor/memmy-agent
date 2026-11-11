@@ -4,7 +4,25 @@
  */
 
 :global(.modal).dialog {
+  display: flex;
+  flex-direction: column;
   width: min(460px, calc(100vw - 32px));
+  /* Agent 多的时候（装十个很常见）正文比窗口高：正文区单独滚动，底部「拒绝 / 允许」始终可见。
+     减去遮罩的上下内边距；Windows 上遮罩从标题栏下方开始，再减一个工具栏高度。 */
+  max-height: calc(100dvh - 48px - var(--codex-toolbar-height, 0px));
+}
+
+/* 正文区自己滚动，头部与底部不动：滚到底就能看到按钮，不会把按钮顶出窗口。 */
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.footer {
+  flex: 0 0 auto;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-stone, #d6dfdc) 35%, transparent);
 }
 
 /* 与看板弹窗一致：一层浅遮罩，不做整窗模糊。 */

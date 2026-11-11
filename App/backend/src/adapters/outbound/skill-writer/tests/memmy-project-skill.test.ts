@@ -26,8 +26,37 @@ describe("memmy-project skill", () => {
   it("tells an external agent to wait in 90-second rounds without resending", () => {
     expect(skill).toContain("用 `memmy-project assist wait <请求 ID>` 等待结果。每次最多等 90 秒");
     expect(skill).toContain("不要重新发请求");
+    // 由哪一位执行由对方选；要指定跑什么则改成脚本附件，不贴进正文。
     expect(skill).toContain("不指定由哪个 Agent 执行");
     expect(skill).not.toContain("--timeout 600");
+  });
+
+  it("points an agent at attachments for anything that must run as-is", () => {
+    // 发起方 Agent 否则会继续把脚本压进正文，附件永远用不上。
+    expect(skill).toContain("\"attachments\": [");
+    // 每个附件都要写清是什么、怎么用：对方的 Agent 只拿到一个目录里的几个文件，没有说明只能按文件名猜。
+    expect(skill).toContain("每项写 `path` 与 `note`");
+    expect(skill).toContain("对方的 Agent 只能从 `note` 知道文件的用途");
+    expect(skill).toContain("\"note\": \"排查脚本，");
+    expect(skill).toContain("由你自己写文件生成，不要让用户手工准备");
+    expect(skill).toContain("要指定对方跑什么，就写成脚本文件放进 `attachments`，不要贴进正文");
+    expect(skill).toContain("正文只写要拿到什么结果和必要的判断依据");
+    expect(skill).toContain("不放密钥、令牌与内部地址");
+    // 旧说法「对方的 Agent 自己决定怎么查」会把脚本赶回正文。
+    expect(skill).not.toContain("不写具体命令：对方的 Agent 自己决定怎么查");
+  });
+
+  it("states the attachment limits and the widened body limits", () => {
+    expect(skill).toContain("附件最多 8 个、合计 2MB");
+    expect(skill).toContain("只收文本与脚本");
+    expect(skill).toContain(".sh .bash .zsh .py .js .mjs .cjs .rb");
+    expect(skill).toContain(".txt .md .json .csv .log .yaml .yml .xml .toml .ini .cfg");
+    expect(skill).toContain("脚本单个 256KB、文本单个 1MB");
+    expect(skill).toContain("PDF、PPT、图片、压缩包不收");
+    // 正文上限与后端一致：reason 2000 字，items 最多 20 条、每条 4000 字。
+    expect(skill).toContain("最多 2000 字");
+    expect(skill).toContain("最多 20 条、每条 4000 字");
+    expect(skill).not.toContain("最多 10 条");
   });
 
   it("keeps stopping the wait apart from withdrawing the request", () => {

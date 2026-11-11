@@ -3,7 +3,7 @@
  *
  * 协助相关的两条消息由 Memmy 自己写进任务，正文包在标签里：
  * - `<memmy_assist_request>`：执行方任务的第一条消息（及同一次排查的后续请求），显示成请求卡片——
- *   谁的哪个 Agent 请求、第几次、起因、要做的事。交给模型的格式要求不在这条消息里。
+ *   谁的哪个 Agent 请求、第几次、背景、要做的事。交给模型的格式要求不在这条消息里。
  * - `<memmy_assist_result>`：结果回来后送回发起方任务的那条消息，显示成结果卡片。
  *
  * 模型读到的是完整原文；界面只把它换成卡片，不改写消息本身。
@@ -12,6 +12,7 @@ import { useState } from "react";
 import { CheckCircle2, CircleAlert } from "lucide-react";
 import { useTranslation } from "../i18n/use-translation.js";
 import { AssistAgentLogo, assistAgentName } from "./collab-assist-view.js";
+import { AssistItems } from "./collab-assist-items.js";
 import { readAssistRequestBody, readAssistResultBody, type AssistEnvelope } from "./collab-assist-protocol.js";
 
 export { parseAssistEnvelope, type AssistEnvelope } from "./collab-assist-protocol.js";
@@ -37,10 +38,15 @@ function AssistRequestMessage(props: { envelope: AssistEnvelope }) {
         {attempt > 1 ? <span>· {t("collab.assist.attemptLabel", { attempt: String(attempt) })}</span> : null}
       </div>
       <div className={styles.requestBody}>
-        {body.reason ? <p>{t("collab.assist.detail.reason", { reason: body.reason })}</p> : null}
+        {body.reason ? (
+          <p className={styles.requestReason}>
+            <span className={styles.requestReasonKey}>{t("collab.assist.reasonKey")}</span>
+            {body.reason}
+          </p>
+        ) : null}
         <div className={styles.requestKey}>{t("collab.assist.cardTodo")}</div>
         {body.title ? <p>{body.title}</p> : null}
-        {body.items.length ? <ol>{body.items.map((item) => <li key={item}>{item}</li>)}</ol> : null}
+        <AssistItems items={body.items} />
       </div>
     </div>
   );

@@ -12,12 +12,29 @@ export interface AssistPromptInput {
   projectName: string;
   /** 要做的事的标题。 */
   title: string;
-  /** 起因：为什么请对方的电脑协助。 */
+  /** 背景：为什么请对方的电脑协助。 */
   reason?: string;
   /** 逐条要做的事。 */
   items: readonly string[];
   /** 同一次排查里前面几次的结论：续跑时不必重新交代。 */
   earlier?: readonly string[];
+  /**
+   * 随请求附带的文本与脚本：执行前已经落在执行方 Agent 能读到的目录里，这里给出目录、文件名与发起方写的用途说明。
+   * 脚本要原样执行，提示词里写明不要改写内容。
+   */
+  attachments?: readonly AssistPromptAttachment[];
+  /** 附件所在的目录（绝对路径）：提示词里给出它，执行方 Agent 才知道文件在哪。 */
+  attachmentsDirectory?: string;
+}
+
+/** 一个已落盘的附件：路径是执行方 Agent 实际能读到的那个。 */
+export interface AssistPromptAttachment {
+  name: string;
+  path: string;
+  /** 发起方写的用途说明：这个文件是什么、要怎么用。旧请求没有，按文件类型给一句通用的。 */
+  note?: string;
+  /** 脚本类：提示词里写明要原样执行，不要改写内容。 */
+  executable?: boolean;
 }
 
 /**
@@ -62,17 +79,63 @@ function requestBody(input: AssistPromptInput): string[] {
   const lines: string[] = [];
   lines.push(`${input.requesterName}正在排查一个问题，需要这台电脑上的信息。`);
   if (input.projectName) lines.push(`这件事发生在协作项目「${input.projectName}」里。`);
-  if (input.reason) lines.push(`起因：${input.reason}`);
+  if (input.reason) pushFolded(lines, "背景：", input.reason);
   lines.push("");
-  lines.push(`要做的事：${input.title}`);
-  for (const item of input.items) lines.push(`- ${item}`);
+  pushFolded(lines, "要做的事：", input.title);
+  for (const item of input.items) pushFolded(lines, "- ", item);
+  // 附件紧跟在要做的事后面：事项里提到的文件，接着就能看到它是什么、怎么用。
+  if (input.attachments?.length) {
+    lines.push("");
+    const directory = input.attachmentsDirectory ?? directoryOf(input.attachments[0]!.path);
+    lines.push(`随请求附带的 ${input.attachments.length} 个文件已放在 ${directory}：`);
+    for (const attachment of input.attachments) lines.push(`- ${attachment.name}：${attachmentLine(attachment)}`);
+  }
   if (input.earlier?.length) {
     lines.push("");
     lines.push("同一次排查里，前面已经完成的几次：");
-    for (const summary of input.earlier) lines.push(`- ${summary}`);
+    for (const summary of input.earlier) pushFolded(lines, "- ", summary);
     lines.push("这次接着上次的结果继续，不必重复前面的步骤。");
   }
   return lines;
+}
+
+/** 脚本都要加的一句：发起方带脚本，就是要对方跑这一份，而不是让对方的 Agent 看懂意图后自己重写。 */
+const SCRIPT_AS_IS = "运行时直接用这个文件，不要改写内容，也不要另写一份代替它。";
+
+/**
+ * 一个附件在提示词里的说明：发起方写的用途，脚本再加上「原样运行」。
+ * 没有用途说明的旧请求按类型给一句通用的，让它到要做的事里找用法。说明按一行写：附件段里的续行界面不读。
+ */
+function attachmentLine(attachment: AssistPromptAttachment): string {
+  const note = attachment.note?.replace(/\s+/gu, " ").trim();
+  const what = note
+    ? sentence(note)
+    : attachment.executable
+      ? "发起方附带的脚本，用法见上面要做的事。"
+      : "发起方附带的资料，用法见上面要做的事。";
+  return attachment.executable ? `${what}${SCRIPT_AS_IS}` : what;
+}
+
+/** 补上句末标点：后面还要接「运行时直接用这个文件……」。 */
+function sentence(value: string): string {
+  return /[。！？.!?]$/u.test(value) ? value : `${value}。`;
+}
+
+/**
+ * 多行内容按界面认的协议写：第一行带前缀，其余行缩进两个空格。
+ * 界面（`collab-assist-protocol`）先看前导空格再 trim，把缩进行接回上一条；
+ * 不这么写，正文放宽后一条多行事项在卡片上只剩第一行。
+ */
+function pushFolded(lines: string[], prefix: string, value: string): void {
+  const [first = "", ...rest] = value.split(/\r?\n/u);
+  lines.push(`${prefix}${first}`);
+  for (const line of rest) lines.push(`  ${line}`);
+}
+
+/** 从附件路径里取目录：只为旧调用不传 attachmentsDirectory 时兜底。 */
+function directoryOf(path: string): string {
+  const at = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return at > 0 ? path.slice(0, at) : path;
 }
 
 /** 从回答里取「结果」那一段：`- 名称：内容` 的逐项说明。 */

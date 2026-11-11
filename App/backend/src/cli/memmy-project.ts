@@ -7,9 +7,10 @@
  * Only Node built-ins are imported: the desktop build copies this one file next to its launcher.
  */
 import { readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const RUNTIME_TOKEN_HEADER = "x-memmy-local-token";
@@ -582,10 +583,12 @@ async function runAssist(
     }, session?.sourceId === "memmy" ? undefined : session);
     const requestId = isRecord(created.request) ? text(created.request.id) : "";
     const sent = typeof created.text === "string" ? created.text : `已发送协助请求 ${requestId}。`;
-    if (!wait || !requestId) return sent;
+    // 正文很长又没带附件：对方多半得自己重写一做，提一句就好，不拦着发。
+    const hint = longBodyHint(request);
+    if (!wait || !requestId) return `${sent}${hint}`;
     // --wait 在本轮里等结果：等待期间可以继续做别的，结果回来再接着分析。
     const waited = await waitForAssist(deps, requestId, waitTimeoutMs(parsed), session);
-    return `${sent}\n\n${text(waited.text)}`;
+    return `${sent}${hint}\n\n${text(waited.text)}`;
   }
   if (action === "wait") {
     const requestId = rest[0]?.trim();
@@ -826,9 +829,15 @@ function formatAssistStatus(request: Record<string, unknown>): string {
 }
 
 /**
- * 读取协助请求文件：`{ title, reason?, items: [] }`。内容由发起方的 Agent 写，这里只校验形状。
+ * 读取协助请求文件：`{ title, reason?, items: [], attachments?: [{ path, note }] }`。
+ * 内容由发起方的 Agent 写，这里只校验形状；附件在这里就读成正文与指纹：只收文本与脚本，内联随请求一起提交。
  */
-async function readAssistFile(file: string): Promise<{ title: string; reason?: string; items: string[] }> {
+async function readAssistFile(file: string): Promise<{
+  title: string;
+  reason?: string;
+  items: string[];
+  attachments?: AssistFileAttachment[];
+}> {
   const raw = await readFile(file, "utf8").catch(() => null);
   if (raw === null) throw new Error(`找不到请求文件：${file}`);
   let parsed: unknown;
@@ -845,7 +854,93 @@ async function readAssistFile(file: string): Promise<{ title: string; reason?: s
     : [];
   if (!title) throw new Error("请求文件需要 title：一句话说明要做的事");
   if (!items.length) throw new Error("请求文件需要 items：逐条列出要做的事");
-  return { title, ...(reason ? { reason } : {}), items };
+  const attachments = await readAssistAttachments(parsed.attachments);
+  return {
+    title,
+    ...(reason ? { reason } : {}),
+    items,
+    ...(attachments.length ? { attachments } : {})
+  };
+}
+
+/** 附件只收脚本与文本：脚本 256KB、文本 1MB，最多 8 个、合计 2MB。 */
+const ATTACHMENT_SCRIPT_EXTENSIONS: readonly string[] = [".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".rb"];
+const ATTACHMENT_TEXT_EXTENSIONS: readonly string[] = [
+  ".txt", ".md", ".json", ".csv", ".log", ".yaml", ".yml", ".xml", ".toml", ".ini", ".cfg"
+];
+const ATTACHMENT_SCRIPT_BYTES = 256 * 1024;
+const ATTACHMENT_TEXT_BYTES = 1024 * 1024;
+const ATTACHMENT_TOTAL_BYTES = 2 * 1024 * 1024;
+const ATTACHMENT_MAX_COUNT = 8;
+/** 附件说明的上限：一两句话，与云端一致。 */
+const ATTACHMENT_NOTE_CHARS = 500;
+
+/** 随请求提交的一个附件：原文、指纹，以及发起方写的用途说明。 */
+interface AssistFileAttachment {
+  name: string;
+  content: string;
+  sha256: string;
+  /** 这个文件是什么、对方要怎么用：对方的 Agent 只能从这里知道它的用途。 */
+  note: string;
+}
+
+/** 请求文件里附件应有的写法：报错时原样给出，发起方的 Agent 照着改。 */
+const ATTACHMENT_SHAPE_HINT = "{ \"path\": \"本机文件路径\", \"note\": \"这个文件是什么、对方要怎么用\" }";
+
+/**
+ * 把请求文件里列出的附件读成内联附件：`name` 用文件名，`content` 是 UTF-8 原文，`sha256` 供对方落盘后核对，
+ * `note` 是发起方写的用途说明。只收文本与脚本：要对方原样执行的东西就应该是这两类，PDF、图片这类对方也读不到原文。
+ *
+ * <p>`note` 必填：对方的 Agent 拿到的只是一个目录里的几个文件，不说清楚是什么、怎么用，它只能靠文件名猜。</p>
+ */
+async function readAssistAttachments(value: unknown): Promise<AssistFileAttachment[]> {
+  const entries = Array.isArray(value) ? value : [];
+  if (!entries.length) return [];
+  if (entries.length > ATTACHMENT_MAX_COUNT) throw new Error(`一次最多带 ${ATTACHMENT_MAX_COUNT} 个附件`);
+  const attachments: AssistFileAttachment[] = [];
+  let total = 0;
+  for (const entry of entries) {
+    const path = isRecord(entry) ? text(entry.path).trim() : text(entry).trim();
+    if (!path) throw new Error(`attachments 的每一项写成 ${ATTACHMENT_SHAPE_HINT}`);
+    const note = isRecord(entry) ? text(entry.note).replace(/\s+/gu, " ").trim() : "";
+    if (!note) {
+      throw new Error(`附件 ${basename(path)} 缺少 note：用一句话写清这个文件是什么、对方要怎么用，写成 ${ATTACHMENT_SHAPE_HINT}`);
+    }
+    if ([...note].length > ATTACHMENT_NOTE_CHARS) {
+      throw new Error(`附件 ${basename(path)} 的 note 不超过 ${ATTACHMENT_NOTE_CHARS} 字`);
+    }
+    const extension = extname(path).toLowerCase();
+    const executable = ATTACHMENT_SCRIPT_EXTENSIONS.includes(extension);
+    if (!executable && !ATTACHMENT_TEXT_EXTENSIONS.includes(extension)) {
+      throw new Error(`附件只收文本与脚本（.md/.json/.sh 等），不支持 ${extension || "无扩展名的文件"}：${path}`);
+    }
+    const bytes = await readFile(path).catch(() => null);
+    if (bytes === null) throw new Error(`找不到附件文件：${path}`);
+    const limit = executable ? ATTACHMENT_SCRIPT_BYTES : ATTACHMENT_TEXT_BYTES;
+    if (bytes.byteLength > limit) {
+      throw new Error(`附件超过 ${Math.round(limit / 1024)}KB：${basename(path)}`);
+    }
+    total += bytes.byteLength;
+    if (total > ATTACHMENT_TOTAL_BYTES) throw new Error("附件合计不能超过 2MB");
+    const content = bytes.toString("utf8");
+    attachments.push({
+      name: basename(path),
+      content,
+      sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+      note
+    });
+  }
+  return attachments;
+}
+
+/**
+ * 正文偏长又没有附件时提醒一句：这时候对方多半得自己重写一遍要做的事。只提示，不拦着发。
+ */
+function longBodyHint(request: { reason?: string; items: string[]; attachments?: unknown[] }): string {
+  if (request.attachments?.length) return "";
+  const bytes = Buffer.byteLength([request.reason ?? "", ...request.items].join("\n"), "utf8");
+  if (bytes <= 2 * 1024) return "";
+  return "\n\n这条请求正文较长；如果有要原样执行的脚本，写成文件放进请求文件的 attachments（每项写 path 与 note），对方能原样执行、也能核对。";
 }
 
 async function main(): Promise<void> {

@@ -49,12 +49,26 @@
   line-height: 1.4;
 }
 
-.lead {
-  margin: 6px 0 0;
+/* 背景：单独成块，左侧一道竖线，紧接标题（标题居中，背景左对齐）。
+ * 「背景」是行内标签而不是左栏：正文换行后回到左边缘，不会整段缩进到标签右侧。 */
+.reason {
+  margin: 12px 0 0;
+  padding: 6px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--color-action-sky, #5cbfae) 55%, transparent);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in srgb, var(--color-canvas-oat, #f3f8f7) 55%, transparent);
   font-size: 12.5px;
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 60%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 82%, transparent);
   line-height: 1.7;
   text-align: left;
+  /* 背景可以是多行：保留发起方写的换行。 */
+  white-space: pre-wrap;
+}
+
+.reasonKey {
+  margin-right: 8px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 50%, transparent);
 }
 
 .sect {
@@ -84,6 +98,14 @@
   margin: 0;
   padding-left: 18px;
   list-style: decimal;
+}
+
+/* 这次排查的一句话标题：加粗、可与正文同色，多行时保留发起方写的换行。 */
+.todoTitle {
+  margin: 0 0 6px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 80%, transparent);
+  white-space: pre-wrap;
 }
 
 /* 执行方：两列，与原型一致；已关联的 Agent 各占一格。 */
