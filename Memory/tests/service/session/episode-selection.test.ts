@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { selectionInput, type EpisodeSelectionInput } from "../../../src/service/session/episode-selection.js";
 import { stableHash } from "../../../src/utils/id.js";
-import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import { createBatchReflectionLlm, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 import { createTurnJudgeLlm, openSession, turnJudgeConfig, l1For } from "./turn-judge-llm.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
@@ -35,6 +35,33 @@ async function settle(service: ReturnType<typeof setup>["service"]) {
 }
 
 describe("episode selection before creation", () => {
+  it.each(["turn-judge", "batch-reflection"] as const)(
+    "%s task responses follow the configured language over the input language", async model => {
+      for (const language of ["en-US", "zh-CN"] as const) {
+        const llm = model === "turn-judge" ? createTurnJudgeLlm().llm : createBatchReflectionLlm([]);
+        const { service, db } = createTestService({ llm, config: { ...turnJudgeConfig(false), language } });
+        const repos = new Repositories(db.db);
+        const session = openSession(service, `${model}-${language}`);
+        const english = language === "en-US";
+        const expected = english
+          ? { title: "Test task title", summary: "Test task summary." }
+          : { title: "测试任务标题", summary: "测试任务摘要。" };
+        const saved = await service.completeTurn("configured-language", {
+          sessionId: session.sessionId, query: english ? "请修复缓存" : "Fix the cache", answer: "Done"
+        });
+        await settle(service);
+        const episodeId = assignedEpisodeId(service, saved);
+        expect(repos.runtime.getEpisode(episodeId)).toMatchObject(expected);
+        expect(db.db.prepare("SELECT count(*) AS n FROM evolution_jobs WHERE job_type='episode_title'").get()).toEqual({ n: 0 });
+        service.closeSession(session.sessionId);
+        await settle(service);
+        expect(repos.runtime.getEpisode(episodeId)).toMatchObject(expected);
+        expect(db.db.prepare("SELECT status FROM evolution_jobs WHERE job_type='episode_title'").all())
+          .toEqual([{ status: "succeeded" }]);
+      }
+    }
+  );
+
   it("keeps new and reopened turn assignments when either selection field has the wrong language", async () => {
     const { llm } = createTurnJudgeLlm();
     const original = llm.completeJson.bind(llm);
