@@ -108,7 +108,7 @@ await service.release(owner);const released=service.list(owner,'basic-release')[
 const releasedBytes=contents(active.id);await releasePage.locator('#query').fill('AFTER_DISABLE_EXCLUDED');await delay(400);
 check('disableRevokedAndPartial',released.state==='failed'&&released.availability==='partial'&&released.error==='capture_plugin_stopped'&&!service.isBusy(owner)&&await releasePage.locator('#memmy-teaching-recording').count()===0);
 check('disablePreservesAndFreezes',releasedBytes.includes('BEFORE_DISABLE_PRESERVED')&&contents(active.id)===releasedBytes&&!releasedBytes.includes('AFTER_DISABLE_EXCLUDED'));
-const second=await launch('profile-2');await wait(()=>bridge.listTeachingProfiles().length===2,'two profiles');
+await launch('profile-2');await wait(()=>bridge.listTeachingProfiles().length===2,'two profiles');
 await rejected('multipleProfilesRequireSelection',()=>service.start(owner,'basic-select','Select profile',true,{name:browserName}),/browser_capture_profile_selection_required/);
 const profileId=bridge.listTeachingProfiles()[0].connectionId;
 const selected=await service.start(owner,'basic-select-explicit','Explicit profile selection',true,{name:browserName,connection_id:profileId});
