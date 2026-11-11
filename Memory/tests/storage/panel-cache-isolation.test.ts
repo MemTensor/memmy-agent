@@ -1,5 +1,5 @@
-import {afterEach,expect,it} from "vitest";
-import {mkdtempSync,rmSync,writeFileSync} from "node:fs";
+import {afterAll,afterEach,beforeAll,expect,it} from "vitest";
+import {copyFileSync,mkdtempSync,rmSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {MemoryDb} from "../../src/storage/db.js";
@@ -8,11 +8,23 @@ import {fillPanelCacheBatch,panelMemoryStats} from "../../src/storage/panel-cach
 import {sourceVersion,SOURCE_CHANGE_RETENTION} from "../../src/storage/source-changes.js";
 import {Repositories} from "../../src/storage/repositories.js";
 const roots:string[]=[];const closes:Array<()=>void>=[];
+let schemaRoot:string;let schemaPath:string;let schemaVersion:number;
+beforeAll(()=>{
+ schemaRoot=mkdtempSync(join(tmpdir(),'panel-isolation-schema-'));schemaPath=join(schemaRoot,'empty.sqlite');
+ const source=new MemoryDb({path:schemaPath});
+ try {schemaVersion=source.schemaVersion().version;source.db.pragma('wal_checkpoint(TRUNCATE)');} finally {source.close();}
+});
+afterAll(()=>{if(schemaRoot)rmSync(schemaRoot,{recursive:true,force:true});});
 afterEach(()=>{for(const close of closes.splice(0).reverse())close();for(const root of roots.splice(0))rmSync(root,{recursive:true,force:true});});
 function fixture() {
  const root=mkdtempSync(join(tmpdir(),'panel-isolation-'));roots.push(root);
- const path=root+'/memory.sqlite';const source=new MemoryDb({path});closes.push(()=>source.close());
- const add=(id:string)=>source.db.prepare("INSERT INTO memories(id,user_id,timeline,memory_value,memory_layer,created_at,updated_at) VALUES(?,'u','now','body','L1','2026-11-03','2026-11-03')").run(id);
+ // Reuse only empty schema setup; each case still opens its own real source and cache.
+ const path=root+'/memory.sqlite';copyFileSync(schemaPath,path);const source=new MemoryDb({path});closes.push(()=>source.close());
+ expect(source.schemaVersion().version).toBe(schemaVersion);
+ expect(source.db.prepare('SELECT count(*) FROM memories').pluck().get()).toBe(0);
+ expect(sourceVersion(source.db).seq).toBe(0);
+ const insert=source.db.prepare("INSERT INTO memories(id,user_id,timeline,memory_value,memory_layer,created_at,updated_at) VALUES(?,'u','now','body','L1','2026-11-03','2026-11-03')");
+ const add=(id:string)=>insert.run(id);
  const open=()=>{const reader=openCacheFixture(path);closes.push(()=>reader.source.db.open&&reader.close());return reader;};
  return {source,add,open,path};
 }

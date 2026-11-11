@@ -877,6 +877,12 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
+  private getIncludingDeletedForDisplay(id: string): MemoryRow | undefined {
+    const row = this.db.prepare(`SELECT ${DISPLAY_MEMORY_COLUMNS} FROM memories WHERE id = ?`)
+      .get(id) as MemorySqlRow | undefined;
+    return row ? memoryFromSql(row) : undefined;
+  }
+
   /** Read-only display data; do not use as input to storage updates. */
   getForDisplay(id: string): MemoryRow | undefined {
     return this.getManyForDisplay([id])[0];
@@ -1013,15 +1019,15 @@ export class MemoryRepository {
   }
 
   /** All imported (read-only) Skill records of one source Agent, deleted ones included. */
-  listImportedSkillsForSource(sourceAgentId: string): MemoryRow[] {
+  listImportedSkillsForSource(sourceAgentId: string, options: { displayOnly?: boolean } = {}): MemoryRow[] {
     const rows = this.db.prepare(
-      `SELECT * FROM memories
+      `SELECT ${options.displayOnly ? DISPLAY_MEMORY_COLUMNS : "*"} FROM memories
        WHERE memory_layer = 'Skill'
          AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
          AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?
        ORDER BY created_at, id`
     ).all(normalizeAgentIdKey(sourceAgentId)) as MemorySqlRow[];
-    return rows.map((row) => this.hydrate(memoryFromSql(row)));
+    return rows.map((row) => options.displayOnly ? memoryFromSql(row) : this.hydrate(memoryFromSql(row)));
   }
 
   /** Candidates include already-repaired R9 rows whose false edge survives only in history. */
@@ -1053,17 +1059,17 @@ export class MemoryRepository {
   }
 
   /** Pure historical projection; never relabel ambiguous source-shaped rows as manual. */
-  resolveLegacyImportedSkillVersion(memory: MemoryRow): MemoryRow {
+  resolveLegacyImportedSkillVersion(memory: MemoryRow, options: { displayOnly?: boolean } = {}): MemoryRow {
     const previous = memory.properties.internal_info;
     if (isUnverifiedLegacySkillCollision(memory)) {
-      const peers = this.listImportedSkillsForSource(String(previous.source_agent_id ?? ""))
+      const peers = this.listImportedSkillsForSource(String(previous.source_agent_id ?? ""), options)
         .filter(peer => peer.id !== memory.id && !isUnverifiedLegacySkillCollision(peer)
           && importedSkillSourceIdentity(peer) === importedSkillSourceIdentity(memory)
           && (peer.properties.internal_info.superseded_by_skill_id === memory.id
             || this.db.prepare(`SELECT 1 FROM memory_change_log WHERE memory_id = ?
               AND json_extract(after_json, '$.properties.internal_info.superseded_by_skill_id') = ? LIMIT 1`)
               .get(peer.id, memory.id)));
-      const current = currentImportedSkillVersion(peers.map(peer => this.resolveLegacyImportedSkillVersion(peer)));
+      const current = currentImportedSkillVersion(peers.map(peer => this.resolveLegacyImportedSkillVersion(peer, options)));
       const missing = current && (importedSkillArchiveReason(current) === "source_missing"
         || current.properties.internal_info.source_state === "source_missing");
       const status = memory.status === "deleted" || memory.deletedAt ? memory.status : "archived";
@@ -1074,7 +1080,9 @@ export class MemoryRepository {
     }
     const untrustedEdge = (row: MemoryRow): MemoryRow | undefined => {
       const targetId = row.properties.internal_info.superseded_by_skill_id;
-      const target = typeof targetId === "string" ? this.getIncludingDeleted(targetId) : undefined;
+      const target = typeof targetId === "string"
+        ? options.displayOnly ? this.getIncludingDeletedForDisplay(targetId) : this.getIncludingDeleted(targetId)
+        : undefined;
       return target && target.memoryLayer === "Skill"
         && (!hasImportedSkillSourceEvidence(target) || isUnverifiedLegacySkillCollision(target)) ? target : undefined;
     };
@@ -8435,7 +8443,7 @@ export class Repositories {
   projectMemoryForRead(memory: MemoryRow): MemoryRow {
     if (!isImportedSkill(memory)) return memory;
     const resolved = hasImportedSkillCollisionHistory(this.db, memory)
-      ? this.memories.resolveLegacyImportedSkillVersion(memory)
+      ? this.memories.resolveLegacyImportedSkillVersion(memory, { displayOnly: true })
       : memory;
     const sourceAgentId = String(resolved.properties.internal_info.source_agent_id ?? "");
     const sourceState = importedSkillSourceState(resolved);

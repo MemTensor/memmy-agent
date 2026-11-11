@@ -33,7 +33,7 @@ const scenarios: Array<{
 ];
 
 describe("panel score projection evidence", () => {
-  it("preserves complete Skill policy evidence without hydrating or returning inline vectors", () => {
+  it("keeps Skill lists narrow while authoritative display reads retain vector-free policy evidence", () => {
     const db = new MemoryDb({ path: ":memory:" });
     const at = "2026-11-01T00:00:00Z";
     try {
@@ -45,7 +45,7 @@ describe("panel score projection evidence", () => {
         properties: { internal_info: { memory_layer: "Skill", memory_kind: "skill", source_kind: "skill",
           read_only: true, source_agent_id: "hermes", source_skill_id: "policy", source_state: "scan_pending",
           import_state_version: 2, source_invocation_policy: { disableModelInvocation: true },
-          source_content_hash: "synthetic-content-hash" } }
+          source_content_hash: "synthetic-content-hash", unrelated_debug: "unrelated-skill-secret" } }
       });
       // Old libraries can still have vectors inline rather than in the vector table.
       db.db.prepare(`UPDATE memories SET info_json=json_set(info_json,'$.embedding',json('[1,2]')),
@@ -57,12 +57,14 @@ describe("panel score projection evidence", () => {
       });
       try {
         const projected = repos.memories.getManyForPanel([canonical.id])[0]!;
-        expect(projected).toEqual(canonical);
-        expect(projected.properties.internal_info).toMatchObject({
+        expect(canonical.properties.internal_info).toMatchObject({
           read_only: true, source_state: "scan_pending", source_invocation_policy: { disableModelInvocation: true }
         });
+        expect(JSON.stringify(projected)).not.toContain("unrelated-skill-secret");
         expect(projected.info).not.toHaveProperty("embedding");
         expect(projected.properties.internal_info.skill).not.toHaveProperty("vec");
+        expect(canonical.info).not.toHaveProperty("embedding");
+        expect(canonical.properties.internal_info.skill).not.toHaveProperty("vec");
         expect(vectors).not.toHaveBeenCalled();
       } finally { vectors.mockRestore(); }
     } finally { db.close(); }
