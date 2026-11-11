@@ -18,16 +18,18 @@ export interface CollabProjectsSnapshot {
   error: string | null;
   /** Set when the sidebar asks for the new-project dialog; the frame opens it once and clears the flag. */
   createPending: boolean;
+  /** 新建弹窗打开时「与成员共享」是否默认开启；目前只有新功能介绍的最后一页会要求开启。 */
+  createShareDefault: boolean;
   /**
    * A local project whose Memmy sessions should be chosen right after sharing started. The board opens that picker
    * once and clears the flag, so a project that was just shared asks which of its own sessions go to the cloud.
    */
   taskPickerFor: string | null;
   /**
-   * 刚创建并开启协作、或刚在项目设置里开启协作的项目：看板据此走一遍首次引导，读完即清掉。
-   * 只在「刚建立协作」这一个时机触发，打开其他协作项目不再弹引导。
+   * 刚开启共享的项目：看板回到这个项目、项目设置与选择任务的弹窗都关上之后，若还没有授权
+   * 「在其他 Agent 中使用协作项目」，就询问一次；读完即清掉。
    */
-  tourFor: string | null;
+  accessPromptFor: string | null;
   /**
    * 看板顶部的一次性提示文案（已本地化）：例如新建项目时勾了共享但云端不可用。看板显示几秒后自行清除。
    */
@@ -47,8 +49,9 @@ let snapshot: CollabProjectsSnapshot = {
   loading: false,
   error: null,
   createPending: false,
+  createShareDefault: false,
   taskPickerFor: null,
-  tourFor: null,
+  accessPromptFor: null,
   notice: null,
   maxOwnedProjects: null
 };
@@ -198,13 +201,14 @@ export function markCollabProjectBound(projectId: string, localProjectId: string
   });
 }
 
-export function requestCreateProject(): void {
-  update({ createPending: true });
+/** Opens the new-project dialog; `share` also turns sharing on when the dialog appears. */
+export function requestCreateProject(options?: { share?: boolean }): void {
+  update({ createPending: true, createShareDefault: options?.share === true });
 }
 
 /** Clears the request the frame just acted on, so navigating back does not reopen the dialog. */
 export function consumeCreateProjectRequest(): void {
-  if (snapshot.createPending) update({ createPending: false });
+  if (snapshot.createPending) update({ createPending: false, createShareDefault: false });
 }
 
 /** Asks the board to open the project-session picker for a project whose sharing just started. */
@@ -218,17 +222,17 @@ export function consumeTaskPickerRequest(): void {
 }
 
 /**
- * 让看板在一个刚建立协作的项目上走一遍首次引导。
+ * 让看板在刚开启共享的项目上，询问一次「在其他 Agent 中使用协作项目」的授权。
  *
  * @param localProjectId 本机项目 id：协作项目只是本机项目加上云端记录，看板按本机 id 找项目。
  */
-export function requestCollabTour(localProjectId: string): void {
-  update({ tourFor: localProjectId });
+export function requestCollabAccessPrompt(localProjectId: string): void {
+  update({ accessPromptFor: localProjectId });
 }
 
-/** Clears the tour request the board just acted on. */
-export function consumeCollabTourRequest(): void {
-  if (snapshot.tourFor) update({ tourFor: null });
+/** Clears the access-prompt request the board just acted on. */
+export function consumeCollabAccessPromptRequest(): void {
+  if (snapshot.accessPromptFor) update({ accessPromptFor: null });
 }
 
 /**
@@ -245,8 +249,9 @@ export function clearCollabProjects(): void {
     loading: false,
     error: null,
     createPending: false,
+    createShareDefault: false,
     taskPickerFor: null,
-    tourFor: null,
+    accessPromptFor: null,
     notice: null,
     maxOwnedProjects: null
   });
@@ -262,8 +267,9 @@ export function resetCollabProjectsStore(): void {
     loading: false,
     error: null,
     createPending: false,
+    createShareDefault: false,
     taskPickerFor: null,
-    tourFor: null,
+    accessPromptFor: null,
     notice: null,
     maxOwnedProjects: null
   };

@@ -712,7 +712,6 @@ function Preview() {
             onUnshared={() => undefined}
             onLeft={() => undefined}
             onPickSessions={() => undefined}
-            onReplayTour={() => undefined}
             onNotice={() => undefined}
             onFailed={() => undefined}
           />

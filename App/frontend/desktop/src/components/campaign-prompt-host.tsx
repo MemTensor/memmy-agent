@@ -13,6 +13,7 @@ import {
   shouldOfferCampaignPrompt
 } from "../app/campaign-prompt-state.js";
 import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
+import { hasCollabLaunchPromptClaimedThisRun, isCollabLaunchPromptOpen } from "../app/collab-launch-prompt-state.js";
 import { HISTORY_LAUNCH_VISIBILITY_EVENT, areOtherPromptsDeferredForHistoryLaunch, isHistoryLaunchPromptOpen } from "../app/history-launch-prompt-state.js";
 import { useGuidanceDone } from "../app/use-guidance-progress.js";
 import { useOptionalUpdateCoordinator } from "../app/update-coordinator.js";
@@ -66,6 +67,7 @@ export function CampaignPromptHost() {
 
   useEffect(() => {
     if (open || offeredRef.current || appVersion === "0.0.0" || isHistoryLaunchPromptOpen()
+      || isCollabLaunchPromptOpen() || hasCollabLaunchPromptClaimedThisRun()
       || areOtherPromptsDeferredForHistoryLaunch(typeof window === "undefined" ? undefined : window.sessionStorage)) {
       return;
     }

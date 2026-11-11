@@ -68,7 +68,6 @@ import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integ
 import { CollabCreateProjectDialog } from "./collab-create-project-dialog.js";
 import { CollabJoinProjectDialog } from "./collab-join-project-dialog.js";
 import { CollabAssistHost } from "./collab-assist-host.js";
-import { COLLAB_TOUR_ANCHORS } from "./collab-tour.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
 import { writeMemorySubPage } from "./memory-sub-page-storage.js";
 import { SearchPalette } from "../components/search-palette.js";
@@ -539,6 +538,8 @@ export function AppFrame(props: AppFrameProps) {
 
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
+  /** 新建弹窗打开时「与成员共享」的初始状态：只有新功能介绍的最后一页会要求默认开启。 */
+  const [createProjectShare, setCreateProjectShare] = useState(false);
   const [joinProjectOpen, setJoinProjectOpen] = useState(false);
   /** The online project the person is about to leave, while the confirmation is open. */
   const [leaveOnlineProjectId, setLeaveOnlineProjectId] = useState<string | null>(null);
@@ -547,9 +548,10 @@ export function AppFrame(props: AppFrameProps) {
   const createPending = collabSnapshot.createPending;
   useEffect(() => {
     if (!createPending) return;
+    setCreateProjectShare(collabSnapshot.createShareDefault);
     setCreateProjectOpen(true);
     consumeCreateProjectRequest();
-  }, [createPending]);
+  }, [createPending, collabSnapshot.createShareDefault]);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
@@ -2092,6 +2094,8 @@ export function AppFrame(props: AppFrameProps) {
         open={joinProjectOpen}
         onCreateProject={() => {
           setJoinProjectOpen(false);
+          // 从「加入项目」切过来的是普通新建：不预先打开共享。
+          setCreateProjectShare(false);
           setCreateProjectOpen(true);
         }}
         onClose={() => setJoinProjectOpen(false)}
@@ -2115,6 +2119,7 @@ export function AppFrame(props: AppFrameProps) {
         open={createProjectOpen}
         // API Key 模式不连接云端：新建弹窗里不出现「与成员共享」，项目就只建在本机。
         shareAvailable={collabEnabled}
+        defaultShare={createProjectShare}
         onClose={() => setCreateProjectOpen(false)}
         onCreated={(localProjectId) => {
           setCreateProjectOpen(false);
@@ -2606,7 +2611,6 @@ function ProjectTreeSection(props: {
                     onOpenBoard={() => props.onOpenProjectBoard?.(node.project.id)}
                     onContextMenu={(event) => props.onProjectContextMenu(event, node.project.id)}
                     onNewTask={() => props.onNewProjectTask(node.project.id)}
-                    boardOpen={props.openBoardProjectId === node.project.id}
                   />
                   <div
                     className={`app-frame-collapsible${projectCollapsed ? " is-collapsed" : ""}`}
@@ -2803,8 +2807,6 @@ function ProjectRow(props: {
   onOpenBoard: () => void;
   onContextMenu: (event: MouseEvent) => void;
   onNewTask: () => void;
-  /** 看板正停在这个项目上：协作引导的最后一步指向这一行的「＋」。 */
-  boardOpen?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -2871,7 +2873,6 @@ function ProjectRow(props: {
         <TaskIconButton
           label={t("appFrame.project.newTask")}
           tooltip={false}
-          tourAnchor={props.boardOpen ? COLLAB_TOUR_ANCHORS.sidebarNewTask : undefined}
           onClick={props.onNewTask}
         >
           <MessageSquarePlus size={14} />
@@ -3162,8 +3163,6 @@ function TaskIconButton(props: {
   danger?: boolean;
   /** Floating tooltip; keep false for self-evident icons revealed on row hover. */
   tooltip?: boolean;
-  /** 产品引导的锚点：带引导时用来定位这个按钮，平常不传。 */
-  tourAnchor?: string;
   children: ReactNode;
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
@@ -3177,7 +3176,6 @@ function TaskIconButton(props: {
     <button
       type="button"
       aria-label={props.label}
-      data-tour-anchor={props.tourAnchor}
       onClick={(event) => {
         event.stopPropagation();
         props.onClick(event);

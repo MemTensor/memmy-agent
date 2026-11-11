@@ -7,6 +7,7 @@ import {
   isCampaignPromptSurfaceReady,
 } from "../app/campaign-prompt-state.js";
 import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
+import { hasCollabLaunchPromptClaimedThisRun, isCollabLaunchPromptOpen } from "../app/collab-launch-prompt-state.js";
 import {
   deferOtherPromptsForHistoryLaunch,
   markHistoryLaunchPromptActioned,
@@ -52,6 +53,8 @@ export function HistoryLaunchPromptHost() {
       return;
     }
     if (!surfaceReady || !sessionReady) return;
+    // The 1.2.7 announcement owns this run's one large prompt; History keeps its turn for the next launch.
+    if (isCollabLaunchPromptOpen() || hasCollabLaunchPromptClaimedThisRun()) return;
 
     offeredRef.current = true;
     const storage = localStorage();

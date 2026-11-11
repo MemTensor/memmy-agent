@@ -291,4 +291,67 @@ describe("new project dialog", () => {
     expect(onShareLimitReached).not.toHaveBeenCalled();
     expect(onCreated).toHaveBeenCalledWith("local-1");
   });
+
+  it("starts with sharing off unless the opener asks for it", async () => {
+    expect(shareSwitch().getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("starts with sharing on when the announcement's last page asks for it", async () => {
+    // 另起一个根：默认弹窗已经挂在原来的根上，同一个根不能先卸再画。
+    await act(async () => root.unmount());
+    const sharedRoot = createRoot(container);
+    await act(async () => {
+      sharedRoot.render(
+        <I18nProvider language="zh-CN">
+          <CreateProjectModal
+            open
+            defaultShare
+            collab={collab()}
+            onClose={vi.fn()}
+            onCreated={onCreated}
+            onShared={vi.fn()}
+            onBound={vi.fn()}
+            onBindFailed={vi.fn()}
+            onShareFailed={onShareFailed}
+            onShareLimitReached={onShareLimitReached}
+          />
+        </I18nProvider>
+      );
+    });
+    await flush();
+
+    expect(shareSwitch().getAttribute("aria-checked")).toBe("true");
+    // 默认开启也只是一次预选：真正提交时才连云端。
+    expect(mocks.createProject).not.toHaveBeenCalled();
+    await act(async () => sharedRoot.unmount());
+  });
+
+  it("leaves the sharing row out when sharing is unavailable, even if the opener asked for it", async () => {
+    await act(async () => root.unmount());
+    const bareRoot = createRoot(container);
+    await act(async () => {
+      bareRoot.render(
+        <I18nProvider language="zh-CN">
+          <CreateProjectModal
+            open
+            shareAvailable={false}
+            defaultShare
+            collab={collab()}
+            onClose={vi.fn()}
+            onCreated={onCreated}
+            onShared={vi.fn()}
+            onBound={vi.fn()}
+            onBindFailed={vi.fn()}
+            onShareFailed={onShareFailed}
+            onShareLimitReached={onShareLimitReached}
+          />
+        </I18nProvider>
+      );
+    });
+    await flush();
+
+    // API Key 模式没有云端账号：默认共享不成立，那一行整行不出现。
+    expect(document.querySelector(".modal-body [role='switch']")).toBeNull();
+    await act(async () => bareRoot.unmount());
+  });
 });

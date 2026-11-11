@@ -101,7 +101,6 @@ describe("项目设置弹窗", () => {
     onUnshared: vi.fn(),
     onLeft: vi.fn(),
     onPickSessions: vi.fn(),
-    onReplayTour: vi.fn(),
     onNotice: vi.fn(),
     onFailed: vi.fn()
   };
@@ -292,7 +291,7 @@ describe("项目设置弹窗", () => {
     expect(document.body.textContent).not.toContain("已同步");
   });
 
-  it("文件夹按 ~ 缩写显示，引导行在项目卡片里", async () => {
+  it("文件夹按 ~ 缩写显示，项目卡片里不再有重看引导的一行", async () => {
     await render();
 
     expect(document.body.textContent).toContain("文件夹");
@@ -302,14 +301,12 @@ describe("项目设置弹窗", () => {
     // 路径说明一行省略，完整路径放在 title 上。
     const path = document.querySelector("[title='/Users/sunq/.memmy/online-projects/Memmy']");
     expect(path?.textContent).toBe("~/.memmy/online-projects/Memmy");
-    expect(document.body.textContent).toContain("再看一遍协作项目的首次引导");
+    // 协作项目的首次引导已删除，设置里不再有重看那一行。
+    expect(document.body.textContent).not.toContain("再看一遍协作项目的首次引导");
+    expect(button("重新查看")).toBeUndefined();
 
     const reveal = button("在文件夹中显示")!;
     expect(reveal.tagName).toBe("BUTTON");
-    const replay = button("重新查看")!;
-    expect(replay.tagName).toBe("BUTTON");
-    await act(async () => replay.click());
-    expect(handlers.onReplayTour).toHaveBeenCalled();
   });
 
   it("限时授权：没有授权写「暂无」，有授权列出成员与换用、结束", async () => {
