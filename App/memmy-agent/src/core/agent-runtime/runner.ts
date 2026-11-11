@@ -909,7 +909,6 @@ export class AgentRunner {
     // Keep runtime scope metadata intact while reserving private skill context.
     // Project once after trimming so the real user request remains the anchor.
     messages = withMemmyMemoryTurnContext(messages, spec.memoryTurnContext);
-
     const inputBudget = this.inputTokenBudget(spec);
     if (inputBudget != null) {
       const estimateResult = estimatePromptTokensChain(provider, spec.model ?? null, messages, tools);

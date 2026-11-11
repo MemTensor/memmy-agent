@@ -176,11 +176,17 @@ export interface MemoryStatsRow {
 }
 
 export interface MemoryFilter {
+  /** Request-local exclusions; applied before candidate windows and LIMIT. */
+  excludedIds?: readonly string[];
   userId?: string;
   sessionId?: string;
   conversationId?: string;
   agentId?: string;
   excludedAgentIds?: string[];
+  /** Panel producer filtering only; ordinary ownership/retrieval filters keep their semantics. */
+  panelSource?: boolean;
+  /** Management reads only: reject revoked declared sources before pagination. */
+  panelVisible?: boolean;
   appId?: string;
   createdAtGte?: IsoTime;
   createdAtLt?: IsoTime;

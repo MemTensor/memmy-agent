@@ -1,3 +1,4 @@
+import { finished } from "node:stream/promises";
 import {
   existsSync,
   mkdtempSync,
@@ -868,6 +869,7 @@ async function createAsarFixture(
   }
   if (includeEnv) writeFileSync(join(source, ".env.production"), "TOKEN=decoy\n");
   const output = await createPackageWithOptions(source, asar, { unpackDir: "dist/renderer", unpack: "**/*.{node,exe}" });
+  // The ASAR API returns its stream before buffered writes have finished.
   await finished(output);
   return asar;
 }

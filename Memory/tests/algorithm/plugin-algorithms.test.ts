@@ -1553,6 +1553,206 @@ describe("plugin algorithm parity helpers", () => {
     }).ok).toBe(true);
   });
 
+  it("does not leak JSON tool arguments into the evidence tool whitelist", () => {
+    const evidence = {
+      ...trace("trace-json-tool-input", "episode-json-tool-input", 0.8, [1, 0]),
+      toolCalls: [
+        { name: "execute_code", input: '{"code":"print(1)"}' },
+        { name: "execute_code", input: '{ "code": "print(2)" }' },
+        { name: "skill_manage", input: '{"operations":[{"op":"list"}]}' }
+      ]
+    };
+
+    expect(Array.from(extractToolNamesFromTraces([evidence])).sort()).toEqual([
+      "execute_code",
+      "skill_manage"
+    ]);
+  });
+
+  it("accepts a tool-grounded English draft for Chinese evidence", () => {
+    const source = policy("p-cross-language", "执行代码并检查输出结果", [1, 0], 0.5);
+    source.signature = "code|inspect|execute_code";
+    const base = buildSkillDraft({ policy: source, minGain: 0.02, minSupport: 1 })!;
+    const evidence = {
+      ...trace("trace-cross-language", "episode-cross-language", 0.8, [1, 0]),
+      userText: "请执行代码并检查输出结果",
+      agentText: "使用执行代码工具完成任务",
+      summary: "执行代码并检查结果",
+      reflection: null,
+      toolCalls: [{ name: "execute_code", input: '{"code":"print(1)"}' }]
+    };
+    const verdict = verifySkillDraft({
+      draft: {
+        ...base,
+        name: "code_output_inspect",
+        invocationGuide: "Run the code and inspect its output before completing the task.",
+        procedureJson: {
+          ...base.procedureJson,
+          summary: "Run code and inspect the generated output.",
+          steps: [{ title: "Execute", body: "Run the requested code with execute_code and inspect the output." }],
+          tools: ["execute_code"]
+        }
+      },
+      evidenceTraces: [evidence]
+    });
+
+    expect(verdict).toMatchObject({
+      ok: true,
+      draftLanguage: "en",
+      evidenceLanguage: "zh",
+      resonance: 0
+    });
+  });
+
+  it("rejects an ungrounded cross-language draft with a distinct reason", () => {
+    const source = policy("p-cross-language-ungrounded", "整理中文会议记录", [1, 0], 0.5);
+    source.signature = "meeting|notes|_";
+    const base = buildSkillDraft({ policy: source, minGain: 0.02, minSupport: 1 })!;
+    const evidence = {
+      ...trace("trace-cross-language-ungrounded", "episode-cross-language-ungrounded", 0.8, [1, 0]),
+      userText: "整理中文会议记录",
+      agentText: "提取行动项和结论",
+      summary: "会议记录整理",
+      reflection: null,
+      toolCalls: []
+    };
+    const verdict = verifySkillDraft({
+      draft: {
+        ...base,
+        name: "weather_forecast_publish",
+        invocationGuide: "Publish a weather forecast for the requested city.",
+        procedureJson: {
+          ...base.procedureJson,
+          summary: "Publish an unrelated weather forecast.",
+          steps: [{ title: "Forecast", body: "Publish tomorrow's weather forecast." }],
+          tools: []
+        }
+      },
+      evidenceTraces: [evidence]
+    });
+
+    expect(verdict).toMatchObject({
+      ok: false,
+      reason: "cross_language_unverifiable",
+      draftLanguage: "en",
+      evidenceLanguage: "zh"
+    });
+  });
+
+  it("rejects invented skill step evidence ids", () => {
+    const source = policy("p-invalid-evidence-id", "执行代码并检查输出结果", [1, 0], 0.5);
+    source.signature = "code|inspect|execute_code";
+    const base = buildSkillDraft({ policy: source, minGain: 0.02, minSupport: 1 })!;
+    const evidence = {
+      ...trace("trace-real-evidence", "episode-real-evidence", 0.8, [1, 0]),
+      userText: "请执行代码并检查输出结果",
+      agentText: "使用执行代码工具完成任务",
+      summary: "执行代码并检查结果",
+      toolCalls: [{ name: "execute_code" }]
+    };
+    const verdict = verifySkillDraft({
+      draft: {
+        ...base,
+        procedureJson: {
+          ...base.procedureJson,
+          steps: [{ title: "执行", body: "执行代码并检查结果", evidenceIds: ["trace-invented"] }],
+          tools: ["execute_code"]
+        }
+      },
+      evidenceTraces: [evidence]
+    });
+
+    expect(verdict).toMatchObject({
+      ok: false,
+      reason: "invalid_evidence_ids:trace-invented"
+    });
+  });
+
+  it("treats Chinese evidence mixed with English technical terms as Chinese", () => {
+    const source = policy("p-mixed-zh", "更新 README 安装步骤", [1, 0], 0.5);
+    const base = buildSkillDraft({ policy: source, minGain: 0.02, minSupport: 1 })!;
+    const evidence = {
+      ...trace("trace-mixed-zh", "episode-mixed-zh", 0.8, [1, 0]),
+      userText: "帮我把 README 里的安装步骤更新一下，加上 Node 版本要求",
+      agentText: "已经更新 README，补充了 Node 版本要求和安装命令",
+      summary: "更新 README 安装步骤",
+      reflection: null,
+      toolCalls: []
+    };
+    const verdict = verifySkillDraft({
+      draft: {
+        ...base,
+        procedureJson: {
+          ...base.procedureJson,
+          summary: "Update the installation section and document the required runtime version.",
+          steps: [{ title: "Update docs", body: "Add the runtime version requirement to the install section." }],
+          tools: []
+        }
+      },
+      evidenceTraces: [evidence]
+    });
+
+    expect(verdict).toMatchObject({
+      ok: false,
+      draftLanguage: "en",
+      evidenceLanguage: "zh",
+      reason: "cross_language_unverifiable"
+    });
+  });
+
+  it("does not accept a cross-language draft on declared tools, step ids, or trailing-dot words alone", () => {
+    const source = policy("p-cross-language-loose", "执行代码并检查输出结果", [1, 0], 0.5);
+    const base = buildSkillDraft({ policy: source, minGain: 0.02, minSupport: 1 })!;
+    const evidence = {
+      ...trace("trace-cross-language-loose", "episode-cross-language-loose", 0.8, [1, 0]),
+      userText: "请执行代码并检查 output.",
+      agentText: "已完成，e.g. 打印结果",
+      summary: "执行代码",
+      reflection: null,
+      toolCalls: [{ name: "execute_code", input: '{"code":"print(1)"}' }]
+    };
+    const draftWith = (summary: string, tools: string[], steps: Array<Record<string, unknown>>) => ({
+      ...base,
+      procedureJson: { ...base.procedureJson, summary, steps, tools }
+    });
+
+    expect(verifySkillDraft({
+      draft: draftWith("Deploy the database cluster and rotate certificates weekly.", ["execute_code"], [
+        { title: "Deploy", body: "Deploy the cluster.", evidence_ids: ["trace-cross-language-loose"] }
+      ]),
+      evidenceTraces: [evidence]
+    }).reason).toBe("cross_language_unverifiable");
+    expect(verifySkillDraft({
+      draft: draftWith("Bake a cake and verify the output, e.g. the frosting.", [], []),
+      evidenceTraces: [evidence]
+    }).reason).toBe("cross_language_unverifiable");
+    expect(verifySkillDraft({
+      draft: draftWith("Use execute_code to run the snippet and read its printed result.", ["execute_code"], [
+        { title: "Run", body: "Call execute_code with the snippet.", evidence_ids: ["trace-cross-language-loose"] }
+      ]),
+      evidenceTraces: [evidence]
+    }).ok).toBe(true);
+  });
+
+  it("extracts commands only from shell-like tools and explicit JSON command fields", () => {
+    const evidence = {
+      ...trace("trace-shell-json-input", "episode-shell-json-input", 0.8, [1, 0]),
+      toolCalls: [
+        { name: "shell", input: '{"command":"apk add openssl-dev"}' },
+        { name: "execute_command", input: { cmd: "pytest -q" } },
+        { name: "notebook", input: "python analysis.py" }
+      ]
+    };
+
+    expect(Array.from(extractToolNamesFromTraces([evidence])).sort()).toEqual([
+      "apk",
+      "execute_command",
+      "notebook",
+      "pytest",
+      "shell"
+    ]);
+  });
+
   it("builds plugin-style episode rollup candidates for multi-trace Tier-2 recall", () => {
     const result = retrievePluginMemories({
       query: "python pytest failure",

@@ -23,7 +23,8 @@ import {
   createCapturingEmbedder,
   createBatchReflectionLlm,
   createMemoryServiceFixture,
-  runWorkerRounds
+  runWorkerRounds,
+  settleCaptureAssignments
 } from "../../fixtures/memory-service-fixture.js";
 
 const {
@@ -36,6 +37,52 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / evolution / policy induction", () => {
+  it.each(["delete", "redact", "replace"] as const)("rejects late L2 output after evidence %s", async (change) => {
+    const calls: Array<{ messages: Array<{ role: string; content: string }>; options: { operation: string } }> = [];
+    const skillLlm = createCapturingL2Llm(calls);
+    const originalComplete = skillLlm.completeJson.bind(skillLlm);
+    let changeEvidence: () => void = () => { throw new Error("Evidence not prepared"); };
+    let changed = false;
+    skillLlm.completeJson = async <T extends Record<string, unknown>>(
+      messages: Parameters<LlmClient["completeJson"]>[0],
+      options: Parameters<LlmClient["completeJson"]>[1]
+    ): Promise<T> => {
+      const result = await originalComplete<T>(messages, options);
+      if (options.operation === "l2.induction.v4" && !changed) {
+        changed = true;
+        changeEvidence();
+      }
+      return result;
+    };
+    const { db, service } = createTestService({
+      llm: createBatchReflectionLlm([], "pytest workflow fails around sqlite migration output", "reflection-batch", "pytest failure workflow"),
+      skillLlm,
+      embedder: createCapturingEmbedder([])
+    });
+    const session = service.openSession({ namespace: { source: "codex", profileId: "default", userId: "late-l2" } });
+    const turn = await service.completeTurn("late-turn", {
+      sessionId: session.sessionId,
+      query: "pytest failure workflow",
+      answer: "run focused tests and inspect migration output",
+      toolCalls: [{ name: "shell", input: { cmd: "npm test" }, output: "ok", success: true }]
+    });
+    await settleCaptureAssignments(service);
+    const episodeId = assignedEpisodeId(service, turn);
+    changeEvidence = () => {
+      if (change === "delete") service.deleteMemory(turn.l1MemoryId);
+      else if (change === "redact") service.redactRawTurn(turn.rawTurnId);
+      else db.db.prepare("UPDATE memories SET memory_value='replacement evidence',version=version+1 WHERE id=?").run(turn.l1MemoryId);
+    };
+    await addPositiveFeedbackForTurn(service, session.sessionId, turn);
+    service.closeSession(session.sessionId);
+    for (let i = 0; i < 8 && !changed; i++) await service.runWorkerOnce(50);
+    expect(changed).toBe(true);
+    expect(calls.some(call => call.options.operation === "l2.induction.v4")).toBe(true);
+    expect(db.db.prepare("SELECT id FROM memories WHERE memory_layer='L2'").all()).toEqual([]);
+    expect(db.db.prepare("SELECT id FROM trace_policy_links").all()).toEqual([]);
+    expect(db.db.prepare("SELECT l2_policy_ids_json AS ids FROM episodes WHERE id=?").get(episodeId)).toEqual({ ids: "[]" });
+  });
+
   it("lets the event loop serve foreground work while an induction bucket is skipped", async () => {
     const { db, service } = createTestService();
     const userId = "induction-fairness";
@@ -654,7 +701,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const policies = db.db.prepare(
       `SELECT memory_key, info_json
        FROM memories
-       WHERE user_id = 'shared-key-user'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'L2'
        ORDER BY memory_key`
     ).all() as Array<{ memory_key: string; info_json: string }>;
@@ -978,7 +1025,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const row = db.db.prepare(
       `SELECT properties_json
        FROM memories
-       WHERE user_id = 'user-l2-support-subset'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'L2'
        LIMIT 1`
     ).get() as { properties_json: string } | undefined;
@@ -1080,18 +1127,18 @@ describe("MemoryService / evolution / policy induction", () => {
     const l2Count = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'L2'`
-    ).get(userId) as { count: number };
+       WHERE 1=1 AND memory_layer = 'L2'`
+    ).get() as { count: number };
     expect(l2Count.count).toBe(0);
     const skippedRows = db.db.prepare(
       `SELECT after_json
        FROM memory_change_log
-       WHERE user_id = ?
+       WHERE 1=1
          AND kind = 'policy'
          AND op = 'skipped'
          AND change_type = 'l2_induction_skipped'
        ORDER BY seq DESC`
-    ).all(userId) as Array<{ after_json: string }>;
+    ).all() as Array<{ after_json: string }>;
     const skippedReasons = skippedRows.map((row) => {
       const after = JSON.parse(row.after_json) as { reason?: string };
       return after.reason;
@@ -1101,10 +1148,10 @@ describe("MemoryService / evolution / policy induction", () => {
     const job = db.db.prepare(
       `SELECT status, attempts, last_error
        FROM evolution_jobs
-       WHERE user_id = ? AND job_type = 'l2_induction'
+       WHERE 1=1 AND job_type = 'l2_induction'
        ORDER BY created_at DESC
        LIMIT 1`
-    ).get(userId) as { status: string; attempts: number; last_error: string | null };
+    ).get() as { status: string; attempts: number; last_error: string | null };
     expect(job).toMatchObject({
       status: "succeeded",
       attempts: 1,
@@ -1113,7 +1160,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const downstreamCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
-       WHERE user_id = ?
+       WHERE 1=1
          AND (
            job_type IN ('l3_abstraction', 'skill_crystallization')
            OR (
@@ -1121,7 +1168,7 @@ describe("MemoryService / evolution / policy induction", () => {
              AND json_extract(payload_json, '$.reason') = 'l2.upserted'
            )
          )`
-    ).get(userId) as { count: number };
+    ).get() as { count: number };
     expect(downstreamCount.count).toBe(0);
 
     db.close();
@@ -1212,23 +1259,23 @@ describe("MemoryService / evolution / policy induction", () => {
     const l2Rows = db.db.prepare(
       `SELECT id
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'L2'`
-    ).all(userId) as Array<{ id: string }>;
+       WHERE 1=1 AND memory_layer = 'L2'`
+    ).all() as Array<{ id: string }>;
     expect(l2Rows).toHaveLength(1);
     const skippedCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memory_change_log
-       WHERE user_id = ?
+       WHERE 1=1
          AND change_type = 'l2_induction_skipped'`
-    ).get(userId) as { count: number };
+    ).get() as { count: number };
     expect(skippedCount.count).toBe(0);
     const job = db.db.prepare(
       `SELECT status, attempts, last_error
        FROM evolution_jobs
-       WHERE user_id = ? AND job_type = 'l2_induction'
+       WHERE 1=1 AND job_type = 'l2_induction'
        ORDER BY created_at DESC
        LIMIT 1`
-    ).get(userId) as { status: string; attempts: number; last_error: string | null };
+    ).get() as { status: string; attempts: number; last_error: string | null };
     expect(job).toMatchObject({
       status: "succeeded",
       attempts: 1,
@@ -1237,7 +1284,7 @@ describe("MemoryService / evolution / policy induction", () => {
     const downstreamJobs = db.db.prepare(
       `SELECT job_type
        FROM evolution_jobs
-       WHERE user_id = ?
+       WHERE 1=1
          AND (
            job_type = 'l3_abstraction'
            OR (
@@ -1247,7 +1294,7 @@ describe("MemoryService / evolution / policy induction", () => {
            )
          )
        ORDER BY job_type`
-    ).all(userId, l2Rows[0]!.id) as Array<{ job_type: string }>;
+    ).all(l2Rows[0]!.id) as Array<{ job_type: string }>;
     expect(downstreamJobs.map((item) => item.job_type)).toEqual(["embedding"]);
 
     db.close();

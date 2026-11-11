@@ -168,6 +168,7 @@ import {
 } from "./windows-cli-path.js";
 import {
   getWindowsLaunchAtLogin,
+  repairWindowsLaunchAtLogin,
   setWindowsLaunchAtLogin,
   type WindowsLaunchAtLoginEnvironment
 } from "./windows-launch-at-login.js";
@@ -5901,6 +5902,12 @@ app.whenReady().then(async () => {
   if (windowsUpgradeLockPath && existsSync(windowsUpgradeLockPath)) {
     app.exit(0);
     return;
+  }
+
+  try {
+    repairWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment());
+  } catch (error) {
+    void writePackagedStartupLog(`windows-login-item-repair-failed:${formatStartupError(error)}`);
   }
 
   installMacQuitEventObserver();

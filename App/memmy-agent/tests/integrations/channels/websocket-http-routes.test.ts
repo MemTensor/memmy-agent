@@ -1026,6 +1026,16 @@ describe("WebSocket HTTP route helpers", () => {
     expect(keys).toEqual(new Set(["websocket:alpha", "websocket:beta"]));
   });
 
+  it("returns an empty session list without synthesizing a phantom WebUI chat", async () => {
+    const manager = seedMany(tmpRoot(), ["cli:direct", "slack:C123", "lark:oc_abc"]);
+    const channel = makeChannel({ sessionManager: manager });
+    const port = await startChannel(channel);
+    const listing = await fetch(`http://127.0.0.1:${port}/api/sessions`, { headers: await authHeaders(port) });
+    expect(listing.status).toBe(200);
+    const body = await listing.json() as { sessions: unknown[] };
+    expect(body.sessions).toEqual([]);
+  });
+
   it("uses session message timestamps for WebUI thread messages when transcripts omit time", () => {
     const root = tmpRoot();
     process.env.MEMMY_AGENT_DATA_DIR = root;

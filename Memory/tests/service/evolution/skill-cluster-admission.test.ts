@@ -113,8 +113,8 @@ describe("Skill cluster assignment/evolution admission", () => {
     const same = h.controller.tryAcquire(requirements(assignWithoutSession));
     const different = h.controller.tryAcquire(requirements(other));
     same?.release(); different?.release(); owner.release();
-    expect(requirements(evolveWithoutSession).scopeKeys).toContain(JSON.stringify(["user_project", "review-user", "project-A"]));
-    expect(requirements(assignWithoutSession).scopeKeys).toContain(JSON.stringify(["user_project", "review-user", "project-A"]));
+    expect(requirements(evolveWithoutSession).scopeKeys).toContain(JSON.stringify(["user_project", "project-A"]));
+    expect(requirements(assignWithoutSession).scopeKeys).toContain(JSON.stringify(["user_project", "project-A"]));
     expect(same).toBeUndefined();
     expect(different).toBeDefined();
   });

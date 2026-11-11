@@ -16,6 +16,10 @@ permissions:
 jobs:
   request:
     if: ${{ github.repository == 'MemTensor/memmy-agent' && github.ref == 'refs/heads/main' }}
+    # Draft visibility needs push access; the request producer still permits only GET.
+    permissions:
+      contents: write
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

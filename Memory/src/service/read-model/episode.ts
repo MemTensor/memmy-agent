@@ -10,7 +10,9 @@
  */
 import { importedSkillSourceDir, isImportedSkill } from "../../storage/imported-skill.js";
 import { episodeTitleDisplayState } from "../episode-title/episode-title-service.js";
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
 import type {
+  DecisionRepairRecord,
   EpisodeRecord,
   FeedbackRecord,
   RawTurnRecord,
@@ -64,7 +66,8 @@ export type MemoryDetailResponse = MemoryDetailItem & {
   etag: string;
 };
 
-export type MemoryGetResponse = MemoryDetailResponse | (EpisodeDetailItem & {
+type UserMemoryDetailResponse = Omit<MemoryDetailItem, "memoryLayer"> & { memoryLayer: "UserMemory" };
+export type MemoryGetResponse = MemoryDetailResponse | (UserMemoryDetailResponse & { item: UserMemoryDetailResponse; refs: Record<string, unknown>; etag: string }) | (EpisodeDetailItem & {
   item: EpisodeDetailItem;
   refs: Record<string, unknown>;
   etag: string;
@@ -85,9 +88,11 @@ export interface EpisodeReadModelRepositories {
   projectMemoryForRead?(memory: MemoryRow): MemoryRow;
   isImportedSkillEligibleForEmbedding?(memory: MemoryRow): boolean;
   memories: {
-    get(id: string): MemoryRow | undefined;
-    getMany(ids: readonly string[]): MemoryRow[];
-    list(filter: { memoryLayer?: MemoryLayer[]; tags?: string[] }, limit: number, cursor: number): MemoryRow[];
+    visibleEvidenceIds(ids: readonly string[],local?:boolean): Set<string>;
+    effectiveEpisodeL1Ids(episodes: Array<{id: string; userId?: string; sessionId?:string; l1MemoryIds: string[]}>,local?:boolean): Map<string, Set<string>>;
+    getForDisplay(id: string): MemoryRow | undefined;
+    getManyForDisplay(ids: readonly string[]): MemoryRow[];
+    listForDisplay(filter: { memoryLayer?: MemoryLayer[]; tags?: string[] }, limit: number, cursor: number): MemoryRow[];
     toListItem(memory: MemoryRow): MemoryListItem;
   };
   processing: {
@@ -98,6 +103,7 @@ export interface EpisodeReadModelRepositories {
     l1MemoryIdsForRawTurn(rawTurnId: string): string[];
     getEpisode(id: string): EpisodeRecord | undefined;
     getFeedback(id: string): FeedbackRecord | undefined;
+    getDecisionRepair(id: string): DecisionRepairRecord | undefined;
     listEpisodesForSession(sessionId: string): EpisodeRecord[];
     getRawTurn(id: string): RawTurnRecord | undefined;
     listRawTurnsByEpisode(episodeId: string, limit?: number): RawTurnRecord[];
@@ -126,7 +132,15 @@ export interface EpisodeReadModelRepositories {
  * normally delegates these functions to the existing authorization, namespace,
  * and memory-detail helpers.
  */
+export interface EpisodeReadAccess {
+  memory(memory: MemoryRow): boolean;
+  rawTurn(raw: RawTurnRecord): boolean;
+  episode(episode: EpisodeRecord): boolean;
+}
+
 export interface EpisodeReadModelDependencies {
+  localMemory?: boolean;
+  readAccess?: EpisodeReadAccess;
   repos: EpisodeReadModelRepositories;
   assertMemorySearchEnabled(): void;
   resolveContext(request: RequestEnvelope): unknown;
@@ -135,6 +149,8 @@ export interface EpisodeReadModelDependencies {
   assertSessionInScope(session: SessionRecord, namespace?: RuntimeNamespace): void;
   assertEpisodeInScope(episode: EpisodeRecord, namespace?: RuntimeNamespace): void;
   assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void;
+  assertPanelMemoryInScope?(memory:MemoryRow,namespace?:RuntimeNamespace):void;
+  assertPanelEpisodeInScope?(episode:EpisodeRecord,namespace?:RuntimeNamespace):void;
   namespaceForSession(session: SessionRecord): RuntimeNamespace;
   readableMemoryIdKind(id: string): "trace" | "policy" | "world" | "skill" | "episode" | "raw" | "unknown";
   invalidArgument(message: string): Error;
@@ -154,7 +170,49 @@ export interface EpisodeReadModelDependencies {
 export class EpisodeReadModel {
   constructor(private readonly deps: EpisodeReadModelDependencies) {}
 
-  timeline(input: TimelineRequest): EpisodeTimelineDetail {
+  withLocality(localMemory: boolean, readAccess?: EpisodeReadAccess): EpisodeReadModel {
+    return new EpisodeReadModel({ ...this.deps, localMemory, readAccess });
+  }
+
+  private memoryVisible(memory: MemoryRow): boolean {
+    return this.deps.readAccess?.memory(memory) ?? true;
+  }
+
+  private rawVisible(raw: RawTurnRecord): boolean {
+    return this.deps.readAccess?.rawTurn(raw) ?? true;
+  }
+
+  private episodeVisible(episode: EpisodeRecord): boolean {
+    return this.deps.readAccess?.episode(episode) ?? true;
+  }
+
+  private referencesVisible(record: { episodeId?: string; rawTurnId?: string; l1MemoryId?: string }): boolean {
+    if (!this.deps.readAccess) return true;
+    const proofs: boolean[] = [];
+    if (record.episodeId) {
+      const episode = this.deps.repos.runtime.getEpisode(record.episodeId);
+      proofs.push(Boolean(episode && this.episodeVisible(episode)));
+    }
+    if (record.rawTurnId) {
+      const raw = this.deps.repos.runtime.getRawTurn(record.rawTurnId);
+      proofs.push(Boolean(raw && this.rawVisible(raw)));
+    }
+    if (record.l1MemoryId) {
+      const memory = this.deps.repos.memories.getForDisplay(record.l1MemoryId);
+      proofs.push(Boolean(memory && this.memoryVisible(memory)));
+    }
+    return proofs.length > 0 && proofs.every(Boolean);
+  }
+
+  private visibleMemoryIds(ids: unknown): string[] {
+    return Array.isArray(ids) ? ids.filter((id): id is string => {
+      if (typeof id !== "string") return false;
+      const memory = this.deps.repos.memories.getForDisplay(id);
+      return Boolean(memory && this.memoryVisible(memory));
+    }) : [];
+  }
+
+  timeline(input: TimelineRequest,panelRead=false): EpisodeTimelineDetail {
     this.deps.assertMemorySearchEnabled();
     // Preserve the current service's context-resolution side effect/validation.
     void this.deps.resolveContext(input);
@@ -170,7 +228,8 @@ export class EpisodeReadModel {
     }
     if (input.episodeId) {
       scopedEpisode = this.deps.requireEpisode(input.episodeId);
-      this.deps.assertEpisodeInScope(scopedEpisode, input.namespace);
+      if (!this.episodeVisible(scopedEpisode)) throw this.deps.notFound("Episode is unavailable");
+      (panelRead ? this.deps.assertPanelEpisodeInScope ?? this.deps.assertEpisodeInScope : this.deps.assertEpisodeInScope)(scopedEpisode, input.namespace);
       if (input.sessionId && scopedEpisode.sessionId !== input.sessionId) {
         throw this.deps.invalidArgument("episode does not belong to session");
       }
@@ -180,31 +239,36 @@ export class EpisodeReadModel {
       ? [scopedEpisode]
       : scopedSession
         ? this.deps.repos.runtime.listEpisodesForSession(scopedSession.id)
+            .filter(episode => this.episodeVisible(episode))
             .sort((a, b) => Date.parse(a.openedAt) - Date.parse(b.openedAt) || a.id.localeCompare(b.id))
         : undefined;
     let items = timelineEpisodes
-      ? this.timelineItemsFromEpisodes(timelineEpisodes, layers, input.tags, limit, cursor)
+      ? this.timelineItemsFromEpisodes(timelineEpisodes, layers, input.tags, limit, cursor,panelRead)
       : this.deps.repos.memories
-          .list({ memoryLayer: layers, tags: input.tags }, limit, cursor)
+          .listForDisplay({ memoryLayer: layers, tags: input.tags }, limit, cursor)
+          .filter(memory => this.memoryVisible(memory))
           .map((memory) => this.deps.repos.memories.toListItem(memory));
     let rawTurns = timelineEpisodes
       ? timelineEpisodes
-          .flatMap((episode) => this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, limit))
+          .flatMap((episode) => this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, limit)
+            .filter(turn=>(!panelRead || (!turn.redactedAt && turn.sessionId===episode.sessionId))
+              && (panelRead || this.deps.localMemory || (!turn.deletedAt && !turn.redactedAt && turn.userId === episode.userId))
+              && this.rawVisible(turn)))
           .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id.localeCompare(b.id))
           .slice(0, limit)
           .map((turn) => this.deps.rawTurnSummary(turn))
       : undefined;
 
     if (scopedSession && !scopedEpisode) {
-      const pending = this.deps.repos.runtime.listUnassignedRawTurnsBySession(scopedSession.id);
+      const pending = this.deps.repos.runtime.listUnassignedRawTurnsBySession(scopedSession.id).filter(turn => this.rawVisible(turn));
       rawTurns = [...(rawTurns ?? []), ...pending.map(turn => this.deps.rawTurnSummary(turn))]
         .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)).slice(0, limit);
       const ids = dedupeStrings([
         ...(timelineEpisodes ?? []).flatMap(episode => timelineMemoryIdsForEpisode(episode, new Set(layers))),
         ...pending.flatMap(turn => this.deps.repos.runtime.l1MemoryIdsForRawTurn(turn.id))
       ]);
-      items = this.deps.repos.memories.getMany(ids)
-        .filter(memory => layers.includes(memory.memoryLayer) && this.deps.memoryMatchesTags(memory, input.tags))
+      items = this.deps.repos.memories.getManyForDisplay(ids)
+        .filter(memory => layers.includes(memory.memoryLayer) && this.deps.memoryMatchesTags(memory, input.tags) && this.memoryVisible(memory))
         .sort((a, b) => this.deps.traceSortKey(a) - this.deps.traceSortKey(b) || a.id.localeCompare(b.id))
         .slice(cursor, cursor + limit).map(memory => this.deps.repos.memories.toListItem(memory));
     }
@@ -224,29 +288,35 @@ export class EpisodeReadModel {
     layers: readonly MemoryLayer[],
     tags: string[] | undefined,
     limit: number,
-    cursor: number
+    cursor: number,
+    panelRead=false
   ): MemoryListItem[] {
     const layerSet = new Set(layers);
-    const memoryIds = dedupeStrings(episodes.flatMap((episode) => timelineMemoryIdsForEpisode(episode, layerSet)));
+    const effective = this.deps.repos.memories.effectiveEpisodeL1Ids([...episodes],panelRead || this.deps.localMemory);
+    const memoryIds = dedupeStrings(episodes.flatMap(episode => timelineMemoryIdsForEpisode({
+      ...episode, l1MemoryIds: [...(effective.get(episode.id) ?? [])]
+    }, layerSet)));
     const layerFilter = new Set(layers);
     return this.deps.repos.memories
-      .getMany(memoryIds)
+      .getManyForDisplay(memoryIds)
       .filter((memory) => layerFilter.has(memory.memoryLayer))
+      .filter((memory) => this.memoryVisible(memory))
+      .filter((memory) => panelRead || this.deps.localMemory || episodes.some(episode => episode.userId === memory.userId))
       .filter((memory) => this.deps.memoryMatchesTags(memory, tags))
       .sort((a, b) => this.deps.traceSortKey(a) - this.deps.traceSortKey(b) || a.id.localeCompare(b.id))
       .slice(cursor, cursor + limit)
       .map((memory) => this.deps.repos.memories.toListItem(memory));
   }
 
-  getMemory(id: string, request: RequestEnvelope = {}): MemoryGetResponse {
+  getMemory(id: string, request: RequestEnvelope = {},panelRead=false): MemoryGetResponse {
     this.deps.assertMemorySearchEnabled();
     const idKind = this.deps.readableMemoryIdKind(id);
-    if (idKind === "episode") return this.getEpisodeMemory(id, request);
+    if (idKind === "episode") return this.getEpisodeMemory(id, request,panelRead);
     if (idKind === "raw") {
       throw this.deps.invalidArgument("raw turn ids are internal; use the containing trace_ or episode_ id");
     }
 
-    const rawMemory = this.deps.repos.memories.get(id);
+    const rawMemory = this.deps.repos.memories.getForDisplay(id);
     if (
       !rawMemory
       || (isImportedSkill(rawMemory) && rawMemory.properties.internal_info.source_kind === "plugin")
@@ -256,9 +326,10 @@ export class EpisodeReadModel {
     const memory = this.deps.repos.projectMemoryForRead
       ? this.deps.repos.projectMemoryForRead(rawMemory)
       : rawMemory;
-    this.deps.assertMemoryInScope(memory, request.namespace);
+    if (!this.memoryVisible(memory)) throw this.deps.notFound("Memory is unavailable");
+    (panelRead ? this.deps.assertPanelMemoryInScope ?? this.deps.assertMemoryInScope : this.deps.assertMemoryInScope)(memory, request.namespace);
     const detail = this.deps.detailFromMemory(memory, this.deps.repos.processing.get(memory.id));
-    const refs = this.refsForMemory(memory);
+    const refs = this.refsForMemory(memory,panelRead);
     const item = this.deps.memoryDetailWithLayerPayload(detail, memory);
     // An imported skill whose directory holds scripts or references points
     // there, so an Agent on the same machine can open them. Output only; the
@@ -271,17 +342,31 @@ export class EpisodeReadModel {
     if (sourceDir && typeof item.body === "string" && item.body.trim().length > 0) {
       item.body = `${item.body}\n\nsource dir: ${sourceDir}`;
     }
+    if (this.deps.readAccess) {
+      item.sourceMemoryIds = this.visibleMemoryIds(item.sourceMemoryIds);
+      for (const [key, fields] of [["policy", ["evidenceMemoryIds"]], ["worldModel", ["sourceMemoryIds"]],
+        ["skill", ["sourcePolicyIds", "sourceWorldModelIds"]]] as const) {
+        const payload = item[key];
+        if (payload && typeof payload === "object") for (const field of fields) {
+          const record = payload as Record<string, unknown>;
+          record[field] = this.visibleMemoryIds(record[field]);
+        }
+      }
+      const trace = item.trace as { rawTurnId?: string; episodeId?: string } | undefined;
+      if (trace && !this.referencesVisible(trace)) delete item.trace;
+    }
     if (memory.properties.internal_info.memory_kind === "span") {
       const span = memory.properties.internal_info.span as {
         raw_turn_id: string;
         tool_call_start: number;
         tool_call_end: number;
       };
-      const rawTurn = this.deps.repos.runtime.getRawTurn(span.raw_turn_id)!;
+      const rawTurn = this.deps.repos.runtime.getRawTurn(span.raw_turn_id);
       item.metadata.spanDetail = {
         toolCallStart: span.tool_call_start,
         toolCallEnd: span.tool_call_end,
-        toolCalls: rawTurn.toolCalls.slice(span.tool_call_start, span.tool_call_end + 1)
+        toolCalls: rawTurn && !rawTurn.deletedAt && !rawTurn.redactedAt && this.rawVisible(rawTurn) && (panelRead || this.deps.localMemory ? !memory.sessionId || rawTurn.sessionId===memory.sessionId : rawTurn.userId===memory.userId)
+          ? rawTurn.toolCalls.slice(span.tool_call_start, span.tool_call_end + 1) : []
       };
     }
     return {
@@ -294,13 +379,39 @@ export class EpisodeReadModel {
     };
   }
 
-  getEpisodeMemory(id: string, request: RequestEnvelope = {}): EpisodeDetailItem & {
+  getEpisodeMemory(id: string, request: RequestEnvelope = {},panelRead=false): EpisodeDetailItem & {
     item: EpisodeDetailItem;
     refs: Record<string, unknown>;
     etag: string;
   } {
-    const episode = this.deps.requireEpisode(id);
-    this.deps.assertEpisodeInScope(episode, request.namespace);
+    const stored = this.deps.requireEpisode(id);
+    if (!this.episodeVisible(stored)) throw this.deps.notFound("Episode is unavailable");
+    (panelRead ? this.deps.assertPanelEpisodeInScope ?? this.deps.assertEpisodeInScope : this.deps.assertEpisodeInScope)(stored, request.namespace);
+    const effectiveL1 = [...(this.deps.repos.memories.effectiveEpisodeL1Ids([stored],panelRead || this.deps.localMemory).get(id) ?? [])];
+    const live = new Set(this.deps.repos.memories.getManyForDisplay([
+      ...effectiveL1, ...stored.l2PolicyIds, ...stored.l3WorldModelIds, ...stored.skillMemoryIds
+    ]).filter(memory => memory.status !== "deleted" && !memory.deletedAt
+      && this.memoryVisible(memory) && (panelRead || this.deps.localMemory || memory.userId === stored.userId)).map(memory => memory.id));
+    const episode = {...stored,
+      l1MemoryIds: effectiveL1.filter(id => live.has(id)),
+      l2PolicyIds: [...new Set(stored.l2PolicyIds.filter(id => live.has(id)))],
+      l3WorldModelIds: [...new Set(stored.l3WorldModelIds.filter(id => live.has(id)))],
+      skillMemoryIds: [...new Set(stored.skillMemoryIds.filter(id => live.has(id)))],
+      ...(this.deps.readAccess ? {
+        rawTurnIds: stored.rawTurnIds.filter(id => {
+          const raw = this.deps.repos.runtime.getRawTurn(id);
+          return Boolean(raw && this.rawVisible(raw));
+        }),
+        feedbackIds: stored.feedbackIds.filter(id => {
+          const feedback = this.deps.repos.runtime.getFeedback(id);
+          return Boolean(feedback && this.referencesVisible(feedback));
+        }),
+        decisionRepairIds: stored.decisionRepairIds.filter(id => {
+          const repair = this.deps.repos.runtime.getDecisionRepair(id);
+          return Boolean(repair && this.referencesVisible(repair));
+        })
+      } : {})
+    };
     const session = this.deps.requireSession(episode.sessionId);
     const namespace = request.namespace ?? this.deps.namespaceForSession(session);
     const timeline = this.timeline({
@@ -309,7 +420,7 @@ export class EpisodeReadModel {
       episodeId: id,
       layers: ["L1", "L2", "L3", "Skill"],
       limit: 100
-    });
+    },panelRead);
     const sourceMemoryIds = dedupeStrings([
       ...episode.l1MemoryIds,
       ...episode.l2PolicyIds,
@@ -342,44 +453,69 @@ export class EpisodeReadModel {
     };
   }
 
-  refsForMemory(memory: MemoryRow): Record<string, unknown> {
+  private effectivePolicyLinks(links: TracePolicyLinkRecord[],panelRead=false, owner?: string): TracePolicyLinkRecord[] {
+    const local = panelRead || this.deps.localMemory;
+    const memories = this.deps.repos.memories.getManyForDisplay([...new Set(links.flatMap(link => [link.l1MemoryId,link.l2MemoryId]))]);
+    const byId = new Map(memories.filter(memory => memory.status !== "deleted" && !memory.deletedAt && this.memoryVisible(memory)).map(memory => [memory.id,memory]));
+    const visible = this.deps.repos.memories.visibleEvidenceIds(links.map(link => link.l1MemoryId),local);
+    const seen = new Set<string>();
+    return links.filter(link => {
+      const trace=byId.get(link.l1MemoryId), policy=byId.get(link.l2MemoryId);
+      if (!trace || !policy || (!local && trace.userId !== policy.userId) || !visible.has(trace.id)) return false;
+      if (!local && (trace.userId !== owner || link.userId !== owner)) return false;
+      const internal=policy.properties.internal_info;
+      const policyMeta=internal.policy as {source_trace_ids?:unknown} | undefined;
+      const sources=policyMeta?.source_trace_ids ?? internal.source_trace_ids;
+      if (Array.isArray(sources) && !sources.includes(trace.id)) return false;
+      const key=`${trace.id}:${policy.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    });
+  }
+
+  refsForMemory(memory: MemoryRow,panelRead=false): Record<string, unknown> {
+    const local = panelRead || this.deps.localMemory;
     if (memory.memoryLayer === "L1") {
       if (memory.properties.internal_info.memory_kind === "work_memory") {
         return {};
       }
       const rawTurnId = this.deps.rawTurnIdFromMemory(memory);
-      const rawTurn = rawTurnId ? this.deps.repos.runtime.getRawTurn(rawTurnId) : undefined;
+      const candidate = rawTurnId ? this.deps.repos.runtime.getRawTurn(rawTurnId) : undefined;
+      const rawTurn = candidate && !candidate.deletedAt && !candidate.redactedAt && this.rawVisible(candidate) && (local ? !memory.sessionId || candidate.sessionId===memory.sessionId : candidate.userId===memory.userId) ? candidate : undefined;
       const episodeId = rawTurn?.episodeId ?? this.deps.episodeIdFromMemory(memory);
-      const episode = episodeId ? this.deps.repos.runtime.getEpisode(episodeId) : undefined;
+      const episodeCandidate = episodeId ? this.deps.repos.runtime.getEpisode(episodeId) : undefined;
+      const episode = episodeCandidate && this.episodeVisible(episodeCandidate) && (local || episodeCandidate.userId === memory.userId) ? episodeCandidate : undefined;
       return {
         rawTurn: rawTurn ? this.deps.rawTurnSummary(rawTurn) : undefined,
         episode: episode ? episodeRef(episode) : undefined,
-        policyLinks: this.deps.repos.runtime.listTracePolicyLinks({
-          userId: memory.userId,
+        policyLinks: this.effectivePolicyLinks(this.deps.repos.runtime.listTracePolicyLinks({
+          userId: local ? undefined : memory.userId,
           l1MemoryId: memory.id,
           limit: 50
-        }).map(policyLinkRef)
+        }),panelRead,memory.userId).map(policyLinkRef)
       };
     }
     if (memory.memoryLayer === "L2") {
       return {
-        policyLinks: this.deps.repos.runtime.listTracePolicyLinks({
-          userId: memory.userId,
+        policyLinks: this.effectivePolicyLinks(this.deps.repos.runtime.listTracePolicyLinks({
+          userId: local ? undefined : memory.userId,
           l2MemoryId: memory.id,
           limit: 100
-        }).map(policyLinkRef)
+        }),panelRead,memory.userId).map(policyLinkRef)
       };
     }
     if (memory.memoryLayer === "Skill") {
       return {
         skillTrials: this.deps.repos.runtime.listSkillTrials({
-          userId: memory.userId,
+          userId: local ? undefined : memory.userId,
           skillMemoryId: memory.id,
           limit: 100
-        }).map((trial) => skillTrialRef(
-          trial,
-          trial.episodeId ? this.deps.repos.runtime.getEpisode(trial.episodeId) : undefined
-        ))
+        }).filter(trial => (local || trial.userId === memory.userId)
+          && (!this.deps.readAccess || trial.userId !== DEVICE_MEMORY_OWNER || this.referencesVisible(trial))).map((trial) => {
+          const episode = trial.episodeId ? this.deps.repos.runtime.getEpisode(trial.episodeId) : undefined;
+          return local || (!episode || (episode.userId === memory.userId && this.episodeVisible(episode)))
+            ? skillTrialRef(trial, episode) : skillTrialRef({ ...trial, episodeId: undefined });
+        })
       };
     }
     return {};

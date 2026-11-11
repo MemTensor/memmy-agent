@@ -20,6 +20,13 @@ export interface StorageBackend {
   readonly id: StorageBackendCapabilities["backendId"];
   readonly kind: StorageBackendKind;
   readonly mode: StorageMode;
+  /**
+   * Path of the file-backed SQLite database this backend owns, when it has one.
+   * Callers that need a second connection (read-only maintenance workers) must
+   * use this rather than a constructor option, because production services are
+   * wired with a pre-built backend and never see the raw `db` handle.
+   */
+  readonly sqlitePath?: string;
   capabilities(): StorageBackendCapabilities;
   repositories(): Repositories;
   close(): void;
@@ -39,10 +46,14 @@ export class SqliteStorageBackend implements StorageBackend {
   readonly id = "sqlite-local" as const;
   readonly kind = "sqlite" as const;
 
+  readonly sqlitePath: string;
+
   constructor(
     readonly db: MemoryDb,
     readonly mode: StorageMode = "local"
-  ) {}
+  ) {
+    this.sqlitePath = db.path;
+  }
 
   capabilities(): StorageBackendCapabilities {
     return sqliteBackendCapabilities(this.db);

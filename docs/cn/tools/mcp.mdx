@@ -35,7 +35,7 @@ tools:
     enabled: true
     timeout: 60
   imageGeneration:
-    enabled: false
+    enabled: true
 ```
 
-内置工具覆盖文件系统、shell、Web 搜索与抓取、MCP、定时任务、消息发送、图像生成、长任务、自省、运行时状态和上下文管理。
+内置工具包括读写文件、搜索、shell、Web 搜索与抓取、浏览器、电脑历史、定时任务、发消息、图像生成、Goal、任务计划、子任务、补丁和 Agent 来源。图像生成默认开启。MCP server 另外接入；未单独配置 `mcpServers` 时，默认还有电脑操控 server `open-computer-use`。

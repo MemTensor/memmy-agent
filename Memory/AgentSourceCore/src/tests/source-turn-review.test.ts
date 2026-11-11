@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSourceTurnRequest,
+  readCursorComposer,
   readCursorSourceTurn,
   readOpenclawSourceTurn,
   readOpencodeSourceTurn,
@@ -53,6 +54,36 @@ describe("review regressions for native source turns", () => {
     expect(buildSourceTurnRequest(turn, "hook").sourceTurn.profileId).toBe("build");
     expect(buildSourceTurnRequest(turn, "agent_source_scan").sourceTurn.profileId).toBe("build");
     expect(buildSourceTurnRequest(turn, "hook", "work").sourceTurn.profileId).toBe("work");
+  });
+
+  it("excludes a Cursor background task and its replies while preserving adjacent user turns", async () => {
+    const notification = "<system_notification>Task finished</system_notification>";
+    const bubbles: Record<string, Record<string, unknown>> = {
+      user: { type: 1, text: "Calculate the flow", requestId: "first" },
+      answer: { type: 2, text: "18 L/min" },
+      notice: { type: 1, text: notification, requestId: "background", isSimulatedMsg: true, simulatedMsgReason: 3 },
+      tool: { type: 2, toolFormerData: { name: "read", status: "completed" } },
+      followup: { type: 2, text: "The task finished." },
+      quote: { type: 1, text: notification },
+      explanation: { type: 2, text: "That is a notification." },
+      plan: { type: 1, text: "Execute plan", isSimulatedMsg: true, simulatedMsgReason: 1 },
+      done: { type: 2, text: "Plan executed." }
+    };
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => ["c"],
+      composerData: () => ({
+        fullConversationHeadersOnly: Object.entries(bubbles).map(([bubbleId, bubble]) => ({ bubbleId, type: bubble.type }))
+      }),
+      bubble: (_composerId, id) => ({ ...bubbles[id], createdAt: t })
+    };
+
+    const ids = [];
+    for await (const message of readCursorComposer(source, "c")) ids.push(message.messageId);
+    expect(ids).toEqual(["user", "answer", "quote", "explanation", "plan", "done"]);
+    const real = await readCursorSourceTurn(source, { conversationId: "c", requestId: "first" });
+    expect(real.turn).toMatchObject({ answer: "18 L/min", toolCalls: [], completionEvidence: "assistant_text:answer" });
+    const background = await readCursorSourceTurn(source, { conversationId: "c", requestId: "background" });
+    expect(background).toEqual({ turn: null, reason: "identity_unresolved" });
   });
 
   it("keeps a generating Cursor composer with progress text pending", async () => {

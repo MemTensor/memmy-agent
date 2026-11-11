@@ -34,8 +34,11 @@ describe("standalone scan HTTP responsiveness", () => {
     const root = tempRoot();
     let requestDuringScan!: () => Promise<void>;
     let check!: Promise<void>;
+
     let lastPhase = "discovery";
-let phaseActionsStarted!: () => void;
+
+
+    let phaseActionsStarted!: () => void;
     const phaseActionsReady = new Promise<void>((resolve) => { phaseActionsStarted = resolve; });
 
     let closeObserved = false;
@@ -105,10 +108,13 @@ let phaseActionsStarted!: () => void;
     };
     try {
       const { jobId } = await executor.startScan({ sourceId: "codex", mode: "full" });
+
       await vi.waitFor(() => {
         expect(check, `Waiting for ${phase}; last phase: ${lastPhase}; scan: ${JSON.stringify(executor.scanStatus())}`).toBeDefined();
       }, { timeout: PHASE_SETUP_TIMEOUT_MS });
-await phaseActionsReady;
+
+
+      await phaseActionsReady;
 
       await check;
       await executor.dispose();
@@ -145,6 +151,7 @@ await phaseActionsReady;
       resolveAgentSkillRoot: () => {
         if (!firstJob) return null;
         firstJob = false;
+
         const cancellation = executor.cancelScan();
         replacement = executor.startScan({ sourceId: "codex", mode: "full" }).then(
           () => { throw new Error("replacement must wait for cancellation"); },

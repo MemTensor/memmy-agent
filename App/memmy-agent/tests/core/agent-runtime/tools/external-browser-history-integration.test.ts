@@ -65,6 +65,28 @@ async function harness(browser: "chrome" | "edge" = "chrome") {
   return { service, bridge, socket, connection, connectionId, messages, context, payload, emit, records, send, settle, settingsFile };
 }
 
+async function awaitObservedBrowserInput(bridge: ExternalBrowserBridge, targetName: string, interact: () => Promise<void>) {
+  let received!: () => void;
+  const input = new Promise<void>(resolve => { received = resolve; });
+  // The service subscribes first and appends synchronously before this completion signal.
+  const unsubscribe = bridge.subscribeBrowserHistory(payload => {
+    const event = payload as { action?: string; target?: { name?: string } };
+    if (event?.action === "input" && event.target?.name === targetName) received();
+  });
+  const cleanup = () => {
+    unsubscribe();
+    const index = resources.indexOf(cleanup);
+    if (index >= 0) resources.splice(index, 1);
+  };
+  resources.push(cleanup);
+  try {
+    await interact();
+    await input;
+  } finally {
+    cleanup();
+  }
+}
+
 describe("browser History bridge to canonical event stream", () => {
   it.each(["chrome", "edge"] as const)("records %s semantics without an Agent claim and rejects revoked/private/protected capture", async browser => {
     const h = await harness(browser);
@@ -173,8 +195,8 @@ describe("browser History bridge to canonical event stream", () => {
     await vi.waitFor(() => expect(h.records().some(event => event.details.action === "click" && event.details.phase === "observed")).toBe(true));
     const article = h.records().find(event => event.details.action === "click" && event.details.phase === "observed");
     expect(article.details.target.name.length).toBeLessThanOrEqual(200);
-    await page.fill("input[name=cardNumber]", "4111 1111 1111 1111");
-    await vi.waitFor(() => expect(h.records().some(event => event.details.action === "input")).toBe(true));
+    await awaitObservedBrowserInput(h.bridge, "Card number", () => page.fill("input[name=cardNumber]", "4111 1111 1111 1111"));
+    expect(h.records().some(event => event.details.action === "input")).toBe(true);
     expect(JSON.stringify(h.records())).not.toContain("4111 1111 1111 1111");
   }, 20_000);
 
@@ -202,8 +224,8 @@ describe("browser History bridge to canonical event stream", () => {
     const checkboxAttempt = h.records().find(event => event.details.phase === "attempt" && event.details.target?.role === "checkbox");
     expect(checkboxAttempt.details.interactionId).toBe(checked.details.interactionId);
     expect(reusableHumanActions(h.records()).filter(step => step.includes("checkbox"))).toHaveLength(1);
-    await page.getByPlaceholder("Company").fill("Fixture Company");
-    await vi.waitFor(() => expect(h.records().some(event => event.details.action === "input")).toBe(true));
+    await awaitObservedBrowserInput(h.bridge, "Company", () => page.getByPlaceholder("Company").fill("Fixture Company"));
+    expect(h.records().some(event => event.details.action === "input")).toBe(true);
     expect(h.records().find(event => event.details.action === "input").details.after.target.value).toBe("Fixture Company");
     const evidence = JSON.stringify(h.records());
     for (const secret of ["hidden-business-secret", "script-only-secret", "style-only-secret", "never-raw-password", "123456"]) expect(evidence).not.toContain(secret);

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryDb } from "../../../src/storage/db.js";
 import { Repositories, type EvolutionJobRecord } from "../../../src/storage/repositories.js";
 import { WorkerRunner, type WorkerRunnerDeps } from "../../../src/service/worker/worker-runner.js";
-import { WorkerConcurrencyController, type WorkerProviderDescriptor } from "../../../src/service/worker/worker-concurrency.js";
+import { WorkerConcurrencyController, workerCapacityKey, type WorkerProviderDescriptor } from "../../../src/service/worker/worker-concurrency.js";
 import { WorkerAdmissionWaitSet } from "../../../src/service/worker/worker-admission-wait-set.js";
 import { createCapturingEmbedder } from "../../fixtures/memory-service-fixture.js";
 
@@ -76,8 +76,11 @@ function blockedBacklog(h: ReturnType<typeof harness>, count = 1000) {
   const provider = [{ key: "blocked-local", limit: 1 }];
   const held = h.concurrency.tryAcquire({ resourceClass: "summary", providers: provider, scopeKeys: [] })!;
   let prepared = 0;
+  const preparedById = new Map<string, number>();
   h.deps.prepareExecution = work => {
     prepared++;
+    const id = work.queue === "main" ? work.job.id : work.retry.id;
+    preparedById.set(id, (preparedById.get(id) ?? 0) + 1);
     return { providers: work.queue === "main" && work.job.jobType === "trace_summary" ? provider : [],
       run: operation => operation() };
   };
@@ -86,7 +89,33 @@ function blockedBacklog(h: ReturnType<typeof harness>, count = 1000) {
     h.job("late-database");
     h.db.db.prepare("UPDATE evolution_jobs SET queue_lane='import'").run();
   });
-  return { held, prepared: () => prepared, count };
+  return { held, prepared: () => prepared, distinctPrepared: () => preparedById.size,
+    preparedCounts: () => new Map(preparedById), count };
+}
+
+function preparationStats(backlog: ReturnType<typeof blockedBacklog>, liveIds: readonly string[]) {
+  const counts = backlog.preparedCounts(), live = new Set(liveIds);
+  let blockedSeen = 0, blockedIncorrect = 0;
+  const blockedFailures: Array<{ id: string; count: number }> = [];
+  for (let i = 0; i < backlog.count; i++) {
+    const id = `blocked-${i}`, count = counts.get(id) ?? 0;
+    if (count > 0) blockedSeen++;
+    if (count !== 1) {
+      blockedIncorrect++;
+      if (blockedFailures.length < 20) blockedFailures.push({ id, count });
+    }
+  }
+  const unexpectedIds = [...counts.keys()].filter(id => {
+    if (live.has(id)) return false;
+    const index = /^blocked-(0|[1-9]\d*)$/.exec(id)?.[1];
+    return index === undefined || Number(index) >= backlog.count;
+  });
+  const liveCounts = liveIds.map(id => ({ id, count: counts.get(id) ?? 0 }));
+  return { blockedExpected: backlog.count, blockedSeen, blockedIncorrect, blockedFailures,
+    liveExpected: liveIds.length, liveSeen: liveCounts.filter(item => item.count > 0).length,
+    livePreparationAttempts: liveCounts.reduce((sum, item) => sum + item.count, 0),
+    liveRetries: liveCounts.filter(item => item.count > 1).slice(0, 20),
+    unexpectedCount: unexpectedIds.length, unexpectedIds: unexpectedIds.slice(0, 20) };
 }
 
 describe("continuous worker event-loop fairness", () => {
@@ -323,16 +352,32 @@ describe("continuous worker event-loop fairness", () => {
         const id = `live-${i}`; enqueued.set(id, performance.now());
         h.job(id, "user_memory_embedding"); h.runner.notifyWorkAvailable();
       }
+      // Sample a complete pass even on slower runners, then observe the idle
+      // window so that repeated scans still count against the read budgets.
+      await vi.waitFor(() => {
+        expect(backlog.distinctPrepared()).toBe(count + enqueued.size);
+        expect(h.processed).toHaveLength(enqueued.size);
+      }, { timeout: 60_000, interval: 100 });
       await new Promise(resolve => setTimeout(resolve, 2000));
+      const preparations = preparationStats(backlog, [...enqueued.keys()]);
       const sample = { backlog: count, added: enqueued.size, started: waits.length, notStarted: enqueued.size - waits.length,
-        meanWaitMs: waits.reduce((a,b) => a+b, 0) / waits.length, maxWaitMs: Math.max(...waits), pageCalls, rowsRead, candidateChecks: inspections.mock.calls.length };
+        meanWaitMs: waits.reduce((a,b) => a+b, 0) / waits.length, maxWaitMs: Math.max(...waits), pageCalls, rowsRead, candidateChecks: inspections.mock.calls.length,
+        preparations };
       console.log("CONTINUOUS_ARRIVALS", JSON.stringify(sample));
       expect(waits).toHaveLength(49);
       expect(Math.max(...waits)).toBeLessThan(1000);
       expect(rowsRead).toBeLessThanOrEqual(count + 49 + 200);
       expect(inspections.mock.calls.length).toBeLessThanOrEqual(count + 49 + 200);
       expect(pageCalls).toBeLessThan(count / 64 * 12 + 2000);
-      expect(backlog.prepared()).toBeLessThanOrEqual(count + 49);
+      // Related permit releases may re-admit a parked live arrival. The stable
+      // Provider-blocked set must still be discovered completely and prepared
+      // exactly once per ID, independently of those legitimate live retries.
+      const diagnostic = JSON.stringify(preparations);
+      expect(preparations.blockedSeen, diagnostic).toBe(count);
+      expect(preparations.blockedIncorrect, diagnostic).toBe(0);
+      expect(preparations.liveSeen, diagnostic).toBe(49);
+      expect(preparations.unexpectedCount, diagnostic).toBe(0);
+      expect(backlog.prepared()).toBeLessThanOrEqual(inspections.mock.calls.length);
       expect(backlog.prepared()).toBeGreaterThan(49);
     } finally { abort.abort(); h.runner.notifyWorkAvailable(); await run; backlog.held.release(); }
     // A later finite request starts from durable FIFO, not the cancelled scan.
@@ -340,7 +385,64 @@ describe("continuous worker event-loop fairness", () => {
     const resumed = await h.runner.runWorkerOnce(Math.min(3, count));
     expect(resumed.jobs.map(job => job.jobId)).toEqual(Array.from({ length: Math.min(3, count) }, (_, i) => `blocked-${i}`));
     h.expectClean();
-  }, 30_000);
+  }, 120_000);
+
+  it("re-admits a live arrival after its embedding permit is released without re-preparing Provider-blocked rows", async () => {
+    const h = harness(), backlog = blockedBacklog(h, 128), abort = new AbortController();
+    h.db.db.prepare("DELETE FROM evolution_jobs WHERE id='late-database'").run();
+    const liveIds = ["live-first", "live-second"] as const;
+    for (const id of liveIds) h.job(id, "user_memory_embedding");
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const started: string[] = [], denials = new Map<string, string[]>();
+    let preparingId = "";
+    const prepare = h.deps.prepareExecution!;
+    h.deps.prepareExecution = work => {
+      preparingId = work.queue === "main" ? work.job.id : work.retry.id;
+      return prepare(work);
+    };
+    const acquire = h.concurrency.tryAcquire.bind(h.concurrency);
+    vi.spyOn(h.concurrency, "tryAcquire").mockImplementation((requirements, jobs, shared, onBlocked) =>
+      acquire(requirements, jobs, shared, resource => {
+        const reasons = denials.get(preparingId) ?? [];
+        reasons.push(resource); denials.set(preparingId, reasons); onBlocked?.(resource);
+      }));
+    const process = h.deps.jobHandlers.processJob;
+    h.deps.jobHandlers.processJob = async job => {
+      started.push(job.id);
+      if (job.id === liveIds[0]) await firstGate;
+      await process(job);
+    };
+    const run = h.runner.runWorkerOnce(100, {}, { continuous: true, signal: abort.signal });
+    const expectBlockedOnce = () => {
+      const stats = preparationStats(backlog, liveIds), diagnostic = JSON.stringify(stats);
+      expect(stats.blockedSeen, diagnostic).toBe(backlog.count);
+      expect(stats.blockedIncorrect, diagnostic).toBe(0);
+      expect(stats.unexpectedCount, diagnostic).toBe(0);
+      return stats;
+    };
+    try {
+      await vi.waitFor(() => {
+        expect(started).toEqual([liveIds[0]]);
+        expect(denials.get(liveIds[1])).toContain(workerCapacityKey("embedding_request"));
+        expectBlockedOnce();
+      }, { timeout: 5000, interval: 1 });
+      await h.concurrency.runRequest({ local: false, providers: [{ key: "unrelated", limit: 1 }] }, async () => {});
+      for (let i = 0; i < 4; i++) await nextTurn();
+      expect(started).toEqual([liveIds[0]]);
+      expectBlockedOnce();
+      releaseFirst();
+      await vi.waitFor(() => expect(h.processed).toEqual(liveIds), { timeout: 5000, interval: 1 });
+      const stats = expectBlockedOnce();
+      expect(stats.liveSeen, JSON.stringify(stats)).toBe(2);
+      console.log("RELATED_PERMIT_RETRY", JSON.stringify(stats));
+      abort.abort(); h.runner.notifyWorkAvailable();
+      const result = await run;
+      expect(result.succeeded).toBe(2);
+      expect(result.jobs.map(job => job.jobId)).toEqual(liveIds);
+    } finally { releaseFirst(); abort.abort(); h.runner.notifyWorkAvailable(); await run; backlog.held.release(); }
+    h.expectClean();
+  }, 15_000);
 
   it.each(["available", "runAfter", "expiredLease"] as const)("discovers a new delayed row behind the retained cursor when %s becomes due", async boundary => {
     const h = harness(), backlog = blockedBacklog(h, 100), abort = new AbortController();

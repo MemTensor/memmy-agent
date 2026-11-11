@@ -110,7 +110,7 @@ describe("MemoryService / feedback / experience", () => {
     const created = db.db.prepare(
       `SELECT id, memory_value, properties_json
        FROM memories
-       WHERE user_id = 'user-feedback-experience'
+       WHERE user_id = '__memmy_device_memory__'
          AND memory_layer = 'L2'`
     ).all() as Array<{ id: string; memory_value: string; properties_json: string }>;
     expect(created).toHaveLength(1);
@@ -148,7 +148,7 @@ describe("MemoryService / feedback / experience", () => {
     const beforeWorker = db.db.prepare(
       `SELECT id, properties_json
        FROM memories
-       WHERE user_id = 'user-feedback-experience'
+       WHERE user_id = '__memmy_device_memory__'
          AND memory_layer = 'L2'`
     ).all() as Array<{ id: string; properties_json: string }>;
     expect(beforeWorker).toHaveLength(1);
@@ -166,7 +166,7 @@ describe("MemoryService / feedback / experience", () => {
     const policies = db.db.prepare(
       `SELECT id, properties_json
        FROM memories
-       WHERE user_id = 'user-feedback-experience'
+       WHERE user_id = '__memmy_device_memory__'
          AND memory_layer = 'L2'`
     ).all() as Array<{ id: string; properties_json: string }>;
     expect(policies).toHaveLength(2);
@@ -281,7 +281,7 @@ describe("MemoryService / feedback / experience", () => {
     const row = db.db.prepare(
       `SELECT properties_json
        FROM memories
-       WHERE user_id = 'user-feedback-refiner'
+       WHERE user_id = '__memmy_device_memory__'
          AND memory_layer = 'L2'
        LIMIT 1`
     ).get() as { properties_json: string } | undefined;
@@ -308,7 +308,7 @@ describe("MemoryService / feedback / experience", () => {
     const skillRow = db.db.prepare(
       `SELECT id, properties_json
        FROM memories
-       WHERE user_id = 'user-feedback-refiner'
+       WHERE user_id = '__memmy_device_memory__'
          AND memory_layer = 'Skill'
        LIMIT 1`
     ).get() as { id: string; properties_json: string } | undefined;

@@ -121,11 +121,14 @@ describe("MemoryService / read model / panel", () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);
     const at = new Date().toISOString();
+    const session=service.openSession({namespace:{userId:"user-panel-reflection-metric",source:"codex",profileId:"default"}});
+    repos.runtime.insertRawTurn({id:"raw_panel_reflection_metric",sessionId:session.sessionId,turnId:"reflection-metric",
+      userId:"user-panel-reflection-metric",toolCalls:[],toolResults:[],sourceMemoryIds:[],usage:{},status:"completed",createdAt:at});
     const memory: MemoryRow = {
       id: "trace_panel_reflection_metric",
       timeline: at,
       userId: "user-panel-reflection-metric",
-      sessionId: "session-panel-reflection-metric",
+      sessionId: session.sessionId,
       agentId: "codex",
       appId: "workspace-panel-reflection-metric",
       memoryType: "LongTermMemory",

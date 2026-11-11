@@ -10,6 +10,27 @@ const enabledPreferences: ScanPreferences = {
 };
 
 describe("agent source auto inject service", () => {
+  it("refuses an outdated DSH update when permission is revoked during freshness checking", async () => {
+    const calls: string[] = [];
+    let allowed = true;
+    const service = createAgentSourceAutoInjectService({
+      isScanAllowed: () => allowed,
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() { return [source("deepseek_harness", "plugin_installed", true)]; },
+        async isInstalledHookCurrent() { allowed = false; return false; }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => enabledPreferences
+    });
+
+    await expect(service.runOnce()).resolves.toMatchObject({
+      installed: [],
+      failed: [{ sourceId: "deepseek_harness", reason: "Automatic integration permission revoked" }]
+    });
+    expect(calls).toEqual([]);
+  });
+
   it("skips when auto inject is disabled", async () => {
     const calls: string[] = [];
     const service = createAgentSourceAutoInjectService({
@@ -187,6 +208,25 @@ describe("agent source auto inject service", () => {
       failed: []
     });
     expect(calls).toEqual(["plugin:cursor:auto_inject"]);
+  });
+
+  it.each([
+    { enabled: true, current: true, installs: 0 },
+    { enabled: true, current: false, installs: 1 },
+    { enabled: false, current: false, installs: 0 }
+  ])("updates installed DSH according to auto-inject and freshness: %o", async ({ enabled, current, installs }) => {
+    const calls: string[] = [];
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() { return [source("deepseek_harness", "plugin_installed", true)]; },
+        async isInstalledHookCurrent() { return current; }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => ({ ...enabledPreferences, autoInjectSkill: enabled })
+    });
+    await service.runOnce();
+    expect(calls).toEqual(installs ? ["plugin:deepseek_harness:auto_inject"] : []);
   });
 
   it("leaves a current hook in place and still installs a newly found agent", async () => {

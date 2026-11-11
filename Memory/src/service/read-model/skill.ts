@@ -63,6 +63,10 @@ export interface SkillUsageStats {
 
 export interface SkillMemoryRepository {
   get(id: string): MemoryRow | undefined;
+  getManyForDisplay(ids: readonly string[]): MemoryRow[];
+  listForDisplay(filter: MemoryFilter, limit?: number, offset?: number): MemoryRow[];
+  searchPanelIds(query: string, filter: MemoryFilter, limit?: number): Array<{ id: string }>;
+  getForDisplay(id: string): MemoryRow | undefined;
   getMany(ids: string[]): MemoryRow[];
   list(filter: MemoryFilter, limit?: number, offset?: number): MemoryRow[];
   search(query: string, filter: MemoryFilter, limit?: number): Array<{ id: string }>;
@@ -223,10 +227,10 @@ export class SkillReadModel {
     };
     const poolLimit = Math.max(limit + cursor + 1, limit, 50);
     const memories = input.q?.trim()
-      ? this.deps.repositories.memories.getMany(
-          this.deps.repositories.memories.search(input.q, filter, poolLimit).map((hit) => hit.id)
+      ? this.deps.repositories.memories.getManyForDisplay(
+          this.deps.repositories.memories.searchPanelIds(input.q, filter, poolLimit).map((hit) => hit.id)
         )
-      : this.deps.repositories.memories.list(filter, poolLimit);
+      : this.deps.repositories.memories.listForDisplay(filter, poolLimit);
     const page = memories
       .slice(cursor, cursor + limit)
       .map((memory) =>
@@ -253,7 +257,7 @@ export class SkillReadModel {
 
   getSkill(skillId: string, request: RequestEnvelope = {}): SkillDetail {
     this.deps.assertMemorySearchEnabled();
-    const rawMemory = this.deps.repositories.memories.get(skillId);
+    const rawMemory = this.deps.repositories.memories.getForDisplay(skillId);
     if (
       !rawMemory
       || rawMemory.memoryLayer !== "Skill"
@@ -465,7 +469,6 @@ function namespaceIdFromMemory(
   const namespace = namespaceForMemory(memory);
   return [
     namespace.tenantId,
-    namespace.userId,
     namespace.projectId ?? namespace.workspaceId,
     namespace.source,
     namespace.profileId
