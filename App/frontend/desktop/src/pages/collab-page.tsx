@@ -805,7 +805,7 @@ const CollabBoard = memo(function CollabBoard(props: {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- runtimeConfig 的身份每渲染都可能变化，改看它的地址
+    // Depend on the stable address instead of the client object's per-render identity.
   }, [instructionsDirectory, runtimeBaseUrl, sharedId, sharedInstructions]);
 
   /**
