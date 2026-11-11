@@ -114,10 +114,10 @@ describe("PluginService", () => {
     const { service, artifactManager } = createContext([legalRelease], undefined, () => true,
       () => granted ? ["legal-labor"] : [], () => granted);
     await service.install("legal-labor");
-    expect(service.list()[0].eligibility?.visible).toBe(true);
+    expect(service.list()[0]?.eligibility?.visible).toBe(true);
 
     granted = false;
-    expect(service.list()[0].eligibility).toEqual({
+    expect(service.list()[0]?.eligibility).toEqual({
       visible: false, canInstall: false, canUse: false, reason: "entitlement_required"
     });
     expect(await service.catalog()).toEqual([]);
@@ -125,8 +125,8 @@ describe("PluginService", () => {
     expect(artifactManager.remove).not.toHaveBeenCalled();
 
     granted = true;
-    expect(service.list()[0].eligibility?.visible).toBe(true);
-    expect((await service.catalog())[0].manifest.id).toBe("legal-labor");
+    expect(service.list()[0]?.eligibility?.visible).toBe(true);
+    expect((await service.catalog())[0]?.manifest.id).toBe("legal-labor");
     expect(artifactManager.install).toHaveBeenCalledTimes(1);
   });
 
@@ -213,7 +213,7 @@ describe("PluginService", () => {
     const { service, artifactManager, runtimeHost } = createContext([literature], undefined, () => authenticated);
     const reconcile = () => reconcileEntitledPlugins({ plugins: service, entitlements: [],
       userUninstalledIds: new Set(store!.repositories.plugins.listUserUninstalledIds()) });
-    expect((await service.catalog())[0].eligibility.reason).toBe("login_required");
+    expect((await service.catalog())[0]?.eligibility.reason).toBe("login_required");
     await expect(service.install("literature-review")).rejects.toThrow(/access denied/);
     await reconcile();
     expect(service.list()).toHaveLength(0);
@@ -230,7 +230,7 @@ describe("PluginService", () => {
     authenticated = false;
     await reconcile();
     expect(runtimeHost.deactivate).not.toHaveBeenCalled();
-    expect(service.list()[0].eligibility?.canUse).toBe(false);
+    expect(service.list()[0]?.eligibility?.canUse).toBe(false);
     await expect(service.invoke({ callId: "new", pluginId: "literature-review", capabilityId: "run",
       conversationId: "chat", input: { topic: "memory" } })[Symbol.asyncIterator]().next()).rejects.toThrow(/access denied/);
     expect((await call.next()).value).toMatchObject({ type: "result" });
