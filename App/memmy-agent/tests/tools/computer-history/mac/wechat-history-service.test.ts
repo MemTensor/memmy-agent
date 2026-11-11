@@ -6,7 +6,7 @@ import { ComputerHistoryDemoService } from "../../../../src/tools/computer-histo
 
 afterEach(() => vi.unstubAllEnvs());
 
-describe("personal WeChat History setup boundary", () => {
+describe.skipIf(process.platform !== 'darwin')("personal WeChat History setup boundary", () => {
   it("does not launch connection without consent and reports a missing local reader honestly", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-wechat-service-"));
     vi.stubEnv("MEMMY_SQLCIPHER_LIBRARY", path.join(directory, "missing-sqlcipher.dylib"));

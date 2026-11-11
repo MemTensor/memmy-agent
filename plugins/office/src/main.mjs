@@ -577,6 +577,17 @@ async function handle(call) {
     }
     case "office_import": {
       if (!path.isAbsolute(input.path)) throw fail("invalid_path", "Upload path must be absolute");
+      // Check authorisation before lstat so that paths outside approved roots
+      // always yield EPERM regardless of whether the file exists in the sandbox.
+      const inputRoots = JSON.parse(process.env.MEMMY_PLUGIN_INPUT_ROOTS ?? "[]").filter(Boolean);
+      if (inputRoots.length > 0) {
+        const absolute = path.resolve(input.path);
+        const approved = inputRoots.some(root => {
+          const rel = path.relative(root, absolute);
+          return !path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`);
+        });
+        if (!approved) throw Object.assign(new Error("Operation not permitted"), { code: "EPERM" });
+      }
       await regular(input.path);
       if (await canonicalPath(input.path) !== input.path) throw fail("unsafe_file", "Upload cannot traverse symbolic links");
       const format = ext(input.path);
