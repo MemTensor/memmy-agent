@@ -118,3 +118,16 @@ describe("build runtime assets", () => {
     if (process.platform !== "win32") expect(fs.statSync(tmuxScript).mode & 0o111).not.toBe(0);
   }, 60_000);
 });
+
+// Keep shared-dist build cases in one file so Vitest file parallelism cannot race them.
+describe("document skill CLIs", () => {
+  it("preserves Office source CLIs without distributing their skills by default", () => {
+    const skills = ["docx", "pptx", "xlsx"];
+    const sources = skills.map((skill) => fs.readFileSync(path.join(root, "src/skills", skill, "SKILL.md"), "utf8"));
+    execFileSync(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "--ignore-scripts", "build"], { cwd: root, env: buildEnv, stdio: "pipe" });
+    for (const [index, skill] of skills.entries()) {
+      expect(fs.existsSync(path.join(root, "dist/skills", skill))).toBe(false);
+      expect(fs.readFileSync(path.join(root, "src/skills", skill, "SKILL.md"), "utf8")).toBe(sources[index]);
+    }
+  }, 60_000);
+});
