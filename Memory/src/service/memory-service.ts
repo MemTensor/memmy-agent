@@ -1743,16 +1743,17 @@ export class MemoryService {
 
   /**
    * A scan or hosted import finished: freeze the scanned Sessions it touched. Capturing a scanned turn
-   * keeps the conversation's earlier owner even after an account switch, so the same rule applies
-   * here: the caller's own Sessions, and scanned Sessions of the caller's source.
+   * keeps the conversation's earlier owner even after an account switch. Device ownership is not
+   * source authority: every Session must still match the caller's source and profile.
    */
   freezeScanSessions(request: L3ScanSessionsFreezeRequest): L3ScanSessionsFreezeResponse {
     const namespace = normalizeNamespace(request.namespace);
     const owned = request.sessionIds.filter((id) => {
       const session = this.repos.runtime.getSession(id);
       if (!session) return false;
-      return session.userId === namespace.userId ||
-        (session.meta.work_memory_disabled === true && session.source === namespace.source);
+      if (session.source !== namespace.source || session.profileId !== namespace.profileId) return false;
+      return session.userId === namespace.userId || session.userId === request.namespace.userId ||
+        session.meta.work_memory_disabled === true;
     });
     return { batches: this.freezeScannedL3Sessions(owned), serverTime: nowIso() };
   }

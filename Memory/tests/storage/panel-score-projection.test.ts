@@ -33,6 +33,41 @@ const scenarios: Array<{
 ];
 
 describe("panel score projection evidence", () => {
+  it("preserves complete Skill policy evidence without hydrating or returning inline vectors", () => {
+    const db = new MemoryDb({ path: ":memory:" });
+    const at = "2026-11-01T00:00:00Z";
+    try {
+      const repos = new Repositories(db.db);
+      repos.memories.insert({
+        id: "skill-policy-projection", timeline: at, userId: "test-owner", memoryType: "SkillMemory",
+        memoryLayer: "Skill", memoryValue: "Restricted source content", status: "activated", visibility: "private",
+        version: 1, createdAt: at, updatedAt: at, tags: ["agent-source"], info: { title: "policy" },
+        properties: { internal_info: { memory_layer: "Skill", memory_kind: "skill", source_kind: "skill",
+          read_only: true, source_agent_id: "hermes", source_skill_id: "policy", source_state: "scan_pending",
+          import_state_version: 2, source_invocation_policy: { disableModelInvocation: true },
+          source_content_hash: "synthetic-content-hash" } }
+      });
+      // Old libraries can still have vectors inline rather than in the vector table.
+      db.db.prepare(`UPDATE memories SET info_json=json_set(info_json,'$.embedding',json('[1,2]')),
+        properties_json=json_set(properties_json,'$.internal_info.skill.vec',json('[3,4]')) WHERE id=?`)
+        .run("skill-policy-projection");
+      const canonical = repos.memories.getForDisplay("skill-policy-projection")!;
+      const vectors = vi.spyOn(SqliteVecStore.prototype, "getMany").mockImplementation(() => {
+        throw new Error("Panel projection must not hydrate vectors");
+      });
+      try {
+        const projected = repos.memories.getManyForPanel([canonical.id])[0]!;
+        expect(projected).toEqual(canonical);
+        expect(projected.properties.internal_info).toMatchObject({
+          read_only: true, source_state: "scan_pending", source_invocation_policy: { disableModelInvocation: true }
+        });
+        expect(projected.info).not.toHaveProperty("embedding");
+        expect(projected.properties.internal_info.skill).not.toHaveProperty("vec");
+        expect(vectors).not.toHaveBeenCalled();
+      } finally { vectors.mockRestore(); }
+    } finally { db.close(); }
+  });
+
   it.each(scenarios)("preserves $name without loading vectors or unrelated metadata", scenario => {
     const db = new MemoryDb({ path: ":memory:" });
     const at = "2026-11-01T00:00:00Z";

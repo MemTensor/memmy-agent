@@ -47,9 +47,8 @@ const columns = `id, timeline, user_id, conversation_id, session_id, agent_id, a
   memory_type, status, visibility, memory_key, memory_value, tags_json,
   memory_layer, content_hash, version, created_at, updated_at, deleted_at`;
 
-export const PANEL_MEMORY_COLUMNS = `${columns},
-  json_object(${objectFields("info_json", "$", infoFields)}) AS info_json,
-  json_object('tags', json_extract(properties_json, '$.tags'), 'internal_info', json_object(
+const panelInfo = `json_object(${objectFields("info_json", "$", infoFields)})`;
+const panelProperties = `json_object('tags', json_extract(properties_json, '$.tags'), 'internal_info', json_object(
     ${objectFields("properties_json", "$.internal_info", internalFields)},
     'observation_memory', json_extract(properties_json, '$.internal_info.observation_memory'),
     ${Object.entries(nestedFields)
@@ -57,7 +56,7 @@ export const PANEL_MEMORY_COLUMNS = `${columns},
         ([key, fields]) => `'${key}', ${nestedObject(key, fields)}`
       )
       .join(", ")}
-  )) AS properties_json`;
+  ))`;
 
 // Legacy imports can still have inline vectors. Remove them inside SQLite,
 // before parsing or returning display details; never load the vector store.
@@ -74,6 +73,16 @@ const vectorPaths = [
 export const DISPLAY_MEMORY_COLUMNS = `${columns},
   json_remove(info_json, ${vectorPaths}) AS info_json,
   json_remove(properties_json, ${vectorPaths}) AS properties_json`;
+
+// Imported Skill read policy uses source identity, inventory and invocation
+// evidence. A display-only allowlist must not erase those inputs before the
+// cold-read redactor runs. Keep complete vector-free Skill metadata, while all
+// other layers retain their narrow projection.
+export const PANEL_MEMORY_COLUMNS = `${columns},
+  CASE WHEN memory_layer = 'Skill' THEN json_remove(info_json, ${vectorPaths})
+    ELSE ${panelInfo} END AS info_json,
+  CASE WHEN memory_layer = 'Skill' THEN json_remove(properties_json, ${vectorPaths})
+    ELSE ${panelProperties} END AS properties_json`;
 
 export const DISPLAY_USER_MEMORY_COLUMNS = `id, source_turn_id, user_id, memory_types_json, content,
   normalized_user_text_hash, source_turn_refs_json, status, replaces_memory_id, replaced_by_memory_id,

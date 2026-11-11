@@ -551,8 +551,8 @@ export class PanelReadModel {
     }
     ensurePanelCache(this.deps.repos.db,["memories"]);
     const filter: MemoryFilter = {
-      // Derived spans remain searchable by recall, but are not panel records.
-      excludedMemoryKinds: ["span"],
+      // panelVisible uses the indexed facts, which already exclude derived spans.
+      // Keep counts and pages on that same projection without reparsing source JSON.
       panelSource: true,
       panelVisible: true,
       memoryLayer: input.layer,

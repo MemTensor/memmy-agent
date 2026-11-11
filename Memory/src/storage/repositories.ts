@@ -7273,8 +7273,9 @@ export class L3WorldModelRepository {
   backfillSourceInputTraces(sessionId: string): number {
     const session = this.requireV2Session(sessionId);
     // Keep L1 outermost: resolve each retained raw-turn reference by ID, not every L1 per raw turn.
-    // A migrated capture ledger may retain the submitting account; the Session, raw turn and L1
-    // keep the original owner. Match native identity plus raw/session IDs without rewriting provenance.
+    // A migrated capture ledger may retain the submitting account, while an old Session can contain
+    // retained account-owned turns and new device-owned turns. Require each raw/L1 pair to have the
+    // same allowed owner and native identity; never rewrite the Session or capture provenance.
     const rows = this.db.prepare(
       `SELECT DISTINCT r.id AS rawTurnId, r.episode_id AS episodeId, r.created_at AS createdAt, m.id AS l1MemoryId
        FROM memories m
@@ -7283,14 +7284,14 @@ export class L3WorldModelRepository {
        CROSS JOIN source_turn_captures c ON c.source = ? AND c.profile_id = ?
          AND c.namespace_key = ? AND c.conversation_id = ? AND c.turn_id = r.turn_id
          AND c.raw_turn_id = r.id AND c.session_id = r.session_id
-       WHERE m.session_id = ? AND m.user_id = ? AND m.memory_layer = 'L1'
+       WHERE m.session_id = ? AND m.user_id IN (?, ?) AND m.memory_layer = 'L1'
          AND r.deleted_at IS NULL AND r.redacted_at IS NULL
          AND m.deleted_at IS NULL AND m.status != 'deleted'
          AND json_extract(m.properties_json, '$.internal_info.capture_decision.status') IS NOT 'rejected'
          AND NOT EXISTS (SELECT 1 FROM l3_world_model_input_traces t WHERE t.session_id = r.session_id AND t.l1_memory_id = m.id)
        ORDER BY r.created_at, r.id, m.created_at, m.id`
     ).all(session.source, session.profileId, session.meta.source_namespace_key ?? null,
-      session.conversationId ?? session.hostSessionKey ?? null, session.id, session.userId) as Array<{
+      session.conversationId ?? session.hostSessionKey ?? null, session.id, session.userId, DEVICE_MEMORY_OWNER) as Array<{
       rawTurnId: string; episodeId: string | null; createdAt: string; l1MemoryId: string;
     }>;
     for (const row of rows) this.registerInputTrace({ sessionId, ...row });

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, MemoryDb } from "../../../src/index.js";
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
@@ -30,8 +31,8 @@ function setup(enabled = true, l3MachineProbe: () => Promise<never> | Promise<un
   return { db, service, repos, home, project };
 }
 
-function open(service: ReturnType<typeof setup>["service"], sessionKey: string, workspace?: string) {
-  const namespace = { source: "codex", profileId: "default", sessionKey, userId: "u1" };
+function open(service: ReturnType<typeof setup>["service"], sessionKey: string, workspace?: string, userId = "u1") {
+  const namespace = { source: "codex", profileId: "default", sessionKey, userId };
   const opened = service.openSession({
     l3WorldModelProtocolVersion: 2,
     l3WorldModelTransition: "resume_only",
@@ -52,6 +53,37 @@ function evidence() {
 }
 
 describe("new L3 session context", () => {
+
+  it("shares device knowledge across account changes while retaining readable historical units", () => {
+    const { service, repos, project } = setup();
+    const first = open(service, "device-before-switch", project, "account-a");
+    expect(first.opened.userId).toBe(DEVICE_MEMORY_OWNER);
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
+    repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "device uses pnpm", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
+    service.l3WorldModelContext(first.opened.sessionId, first.request);
+    const deviceProject = repos.db.prepare(`SELECT unit_key FROM l3_units WHERE kind = 'project' AND user_id = ?`).get(DEVICE_MEMORY_OWNER) as { unit_key: string };
+    repos.l3Field.insertItem({ unitKey: deviceProject.unit_key, kind: "project_constraint", content: "device runs tests", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
+
+    // Model a retained pre-upgrade Session and its units; no owner migration is performed.
+    const historical = open(service, "historical-session", project, "historical-account");
+    repos.db.prepare(`UPDATE sessions SET user_id = ? WHERE id = ?`).run("historical-account", historical.opened.sessionId);
+    const oldMachine = repos.l3Field.ensureMachineUnit({ userId: "historical-account", machineId: MACHINE_ID });
+    repos.l3Field.insertItem({ unitKey: oldMachine.unitKey, kind: "env_fact", content: "historical machine fact", evidence: evidence(), evidenceAt: "2026-09-01T00:00:00.000Z" });
+    const oldContext = service.l3WorldModelContext(historical.opened.sessionId, {
+      ...historical.request, namespace: { ...historical.namespace, userId: "account-b" }
+    });
+    expect(oldContext.renderedContext).toContain("historical machine fact");
+    expect(oldContext.renderedContext).not.toContain("device uses pnpm");
+
+    const next = open(service, "device-after-switch", project, "account-b");
+    expect(next.opened.userId).toBe(DEVICE_MEMORY_OWNER);
+    const current = service.l3WorldModelContext(next.opened.sessionId, next.request);
+    expect(current.renderedContext).toContain("device uses pnpm");
+    expect(current.renderedContext).toContain("device runs tests");
+    expect(current.renderedContext).not.toContain("historical machine fact");
+    expect(repos.runtime.getSession(historical.opened.sessionId)!.userId).toBe("historical-account");
+    expect(repos.l3Field.getUnit(oldMachine.unitKey)!.userId).toBe("historical-account");
+  });
 
   it("shares the main project's context with linked worktrees across Agent locations", () => {
     const { service, repos, home, project } = setup();
@@ -83,7 +115,7 @@ describe("new L3 session context", () => {
   it("reads without writing while memory writes are off, showing only what already exists", () => {
     const { db, service, repos, home, project } = setup();
     const { opened, request } = open(service, "read-only", project);
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "pnpm -> 未安装", evidence: evidence(), evidenceAt: new Date().toISOString() });
     repos.db.prepare(`DELETE FROM l3_units WHERE kind = 'project'`).run();
     const config = structuredClone(DEFAULT_MEMMY_CONFIG);
@@ -110,7 +142,7 @@ describe("new L3 session context", () => {
     await service.stop();
     finish({ os: "darwin", osVersion: "15", arch: "arm64", shell: "/bin/zsh", tools: {} });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    const machine = repos.l3Field.getUnit(repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID }).unitKey)!;
+    const machine = repos.l3Field.getUnit(repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID }).unitKey)!;
     expect(machine.profileFingerprint ?? null).toBeNull();
   });
 
@@ -119,7 +151,7 @@ describe("new L3 session context", () => {
     const { opened, request } = open(service, "machine-only");
     expect(service.l3WorldModelContext(opened.sessionId, request)).toMatchObject({ renderedContext: "", memoryId: null });
 
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "本机用 pnpm 9", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
     repos.l3Field.refreshSnapshot(machine.unitKey);
     const context = service.l3WorldModelContext(opened.sessionId, request);
@@ -132,7 +164,7 @@ describe("new L3 session context", () => {
   it("names the project and its source, and shows machine and project knowledge together", () => {
     const { service, repos, project } = setup();
     const { opened, request } = open(service, "with-project", project);
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "本机用 pnpm 9", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
     service.l3WorldModelContext(opened.sessionId, request);
     const unit = repos.db.prepare(`SELECT unit_key FROM l3_units WHERE kind = 'project'`).get() as { unit_key: string };
@@ -150,7 +182,7 @@ describe("new L3 session context", () => {
 
   it("shows a snapshot on the world model page and keeps it out of full-text search", () => {
     const { service, repos, db } = setup();
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "本机用 pnpm 9", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
     const snapshot = repos.l3Field.refreshSnapshot(machine.unitKey);
     const { request } = open(service, "panel");
@@ -162,7 +194,7 @@ describe("new L3 session context", () => {
 
   it("deleting a snapshot resets its unit, and the next session starts it afresh", () => {
     const { service, repos } = setup();
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     const item = repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "本机用 pnpm 9", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
     const snapshot = repos.l3Field.refreshSnapshot(machine.unitKey);
     const { opened, request } = open(service, "delete");
@@ -181,7 +213,7 @@ describe("new L3 session context", () => {
 
   it("does not inject a unit whose snapshot the user archived, and keeps it archived when it is rewritten", () => {
     const { service, repos } = setup();
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "本机用 pnpm 9", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
     const snapshot = repos.l3Field.refreshSnapshot(machine.unitKey);
     const { opened, request } = open(service, "archive");
@@ -196,7 +228,7 @@ describe("new L3 session context", () => {
   it("moves a project's context version when the machine snapshot is archived, so clients drop the cached machine part", () => {
     const { service, repos, project } = setup();
     const { opened, request } = open(service, "archive-machine", project);
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "本机用 pnpm 9", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
     service.l3WorldModelContext(opened.sessionId, request);
     const unit = repos.db.prepare(`SELECT unit_key FROM l3_units WHERE kind = 'project'`).get() as { unit_key: string };
@@ -215,7 +247,7 @@ describe("new L3 session context", () => {
 
   it("deletes a snapshot and resets its unit together, or neither", () => {
     const { service, repos } = setup();
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     const item = repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "本机用 pnpm 9", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
     const snapshot = repos.l3Field.refreshSnapshot(machine.unitKey);
     const { request } = open(service, "atomic-delete");
@@ -231,7 +263,7 @@ describe("new L3 session context", () => {
     let finishProbe: (probe: unknown) => void = () => undefined;
     const probe = () => new Promise((resolve) => { finishProbe = resolve; });
     const { service, repos } = setup(true, probe);
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "本机用 pnpm 9", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
     const snapshot = repos.l3Field.refreshSnapshot(machine.unitKey);
     const { request } = open(service, "probe-race");
@@ -245,7 +277,7 @@ describe("new L3 session context", () => {
   it("moves the project version when the machine is reset, and keeps refreshing a project rebuilt after a reset", () => {
     const { service, repos, project } = setup();
     const { opened, request } = open(service, "versions", project);
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "本机用 pnpm 9", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
     service.l3WorldModelContext(opened.sessionId, request);
     const unitKey = (repos.db.prepare(`SELECT unit_key FROM l3_units WHERE kind = 'project'`).get() as { unit_key: string }).unit_key;
@@ -271,7 +303,7 @@ describe("new L3 session context", () => {
 
   it("on startup drops items inactive for over 15 days and never queues embeddings for snapshots", () => {
     const { service, repos, db } = setup();
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     const old = repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "旧", evidence: evidence(), evidenceAt: "2026-01-01T00:00:00.000Z" });
     const recent = repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "新", evidence: evidence(), evidenceAt: "2026-01-01T00:00:00.000Z" });
     repos.l3Field.inactivateItem(old.id, { at: new Date(Date.now() - 16 * 86_400_000).toISOString() });
@@ -289,7 +321,7 @@ describe("new L3 session context", () => {
 
   it("keeps the old L3 when the switch is off", () => {
     const { service, repos } = setup(false);
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     repos.l3Field.insertItem({ unitKey: machine.unitKey, kind: "env_fact", content: "本机用 pnpm 9", evidence: evidence(), evidenceAt: "2026-10-01T00:00:00.000Z" });
     repos.l3Field.refreshSnapshot(machine.unitKey);
     const { opened, request } = open(service, "flag-off");
