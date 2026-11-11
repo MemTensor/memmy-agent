@@ -30,6 +30,39 @@ describe("memmy memory discovery", () => {
     fs.writeFileSync(configPath, "memmyMemory:\n  storage:\n    token: new-shared-token\n");
     expect(discoverMemmyMemoryConnection(options).token).toBe("new-shared-token");
   });
+  it.each(["http://new.test:18081", "https://new.test:18080", "http://old.test:18080"])("does not send credentials from %s to the selected service", async (oldEndpoint) => {
+    const root = tempRoot();
+    const configPath = path.join(root, "config.yaml");
+    const endpoint = "http://new.test:18080";
+    fs.writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint, token: "new-token" } } }));
+    const options = { homeDir: root, env: { MEMMY_CONFIG: configPath, MEMMY_MEMORY_URL: endpoint, MEMORY_SERVICE_URL: oldEndpoint, MEMORY_SERVICE_TOKEN: "old-token" } };
+    const sent: (string | null)[] = [];
+    const client = new MemmyMemoryClient(discoverMemmyMemoryConnection(options), async (_url, init) => {
+      sent.push(new Headers(init?.headers).get("authorization"));
+      return new Response("{}");
+    });
+    await client.get("/api/v1/memory/example");
+    expect(sent).toEqual(["Bearer new-token"]);
+  });
+
+  it("refreshes a rotated token after 401 without replaying writes, including equivalent origins", async () => {
+    const root = tempRoot();
+    const configPath = path.join(root, "config.yaml");
+    const write = (token: string) => fs.writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint: "https://MEMORY.test:443/", token } } }));
+    write("first");
+    const discover = () => discoverMemmyMemoryConnection({ homeDir: root, env: { MEMMY_CONFIG: configPath, MEMMY_MEMORY_URL: "https://memory.test" } });
+    const sent: (string | null)[] = [];
+    const client = new MemmyMemoryClient(discover(), async (_url, init) => {
+      sent.push(new Headers(init?.headers).get("authorization"));
+      return new Response("{}", { status: sent.length === 1 ? 401 : 200 });
+    }, discover);
+    await expect(client.post("/write")).rejects.toMatchObject({ status: 401 });
+    expect(sent).toHaveLength(1);
+    write("rotated");
+    await client.post("/write");
+    expect(sent).toEqual(["Bearer first", "Bearer rotated"]);
+  });
+
   it("reads the App's resolved language from the same config and notices changes without a restart", () => {
     const root = tempRoot();
     const configPath = path.join(root, "config.yaml");

@@ -322,16 +322,20 @@ describe("MemoryService / REST contract", () => {
 
   it("reconciles an Agent's skills over HTTP, including identity-only registrations and version rollback", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ service, auth: { localServiceToken: "reconcile-test-token" } });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const anonymous = await fetch(`http://127.0.0.1:${address.port}/api/v1/agent-skills/reconcile`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: "{}"
+      });
+      expect(anonymous.status).toBe(401);
       const namespace = { source: "claude_code", profileId: "default", userId: "reconcile-http-user" };
       const post = async (body: Record<string, unknown>) => {
         const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/agent-skills/reconcile`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", authorization: "Bearer reconcile-test-token" },
           body: JSON.stringify({ namespace, ...body })
         });
         expect(response.status).toBe(200);

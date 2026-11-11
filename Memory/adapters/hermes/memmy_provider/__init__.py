@@ -5,6 +5,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,19 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _same_http_origin(target, configured):
+    def origin(value):
+        url = urlsplit(value)
+        if url.scheme not in ("http", "https") or not url.hostname:
+            return None
+        return (url.scheme, url.hostname.encode("idna").decode("ascii"), url.port if url.port is not None else (443 if url.scheme == "https" else 80))
+    try:
+        target_origin = origin(target)
+        return target_origin is not None and target_origin == origin(configured)
+    except (ValueError, UnicodeError):
+        return False
+
+
 def _connection():
     metadata = Path(__file__).resolve().parents[1] / "memmy-memory-config.json"
     config_path = os.environ.get("MEMMY_CONFIG", "").strip()
@@ -31,10 +45,13 @@ def _connection():
     config = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
     storage = (config or {}).get("memmyMemory", {}).get("storage", {})
     configured = (storage.get("endpoint") or "http://127.0.0.1:18960").rstrip("/")
-    endpoint = (os.environ.get("MEMMY_MEMORY_URL", "").strip() or configured).rstrip("/")
-    token = os.environ.get("MEMMY_MEMORY_TOKEN", "").strip() or os.environ.get("MEMORY_SERVICE_TOKEN", "").strip()
-    if not token and endpoint == configured:
-        token = (storage.get("token") or "").strip()
+    aliases = (("MEMMY_MEMORY_URL", "MEMMY_MEMORY_TOKEN"), ("MEMORY_SERVICE_URL", "MEMORY_SERVICE_TOKEN"))
+    endpoint = next((os.environ[key].strip() for key, _ in aliases if os.environ.get(key, "").strip()), configured).rstrip("/")
+    for url_key, token_key in aliases:
+        token = os.environ.get(token_key, "").strip()
+        if token and _same_http_origin(endpoint, os.environ.get(url_key, "").strip() or configured):
+            return endpoint, token
+    token = (storage.get("token") or "").strip() if _same_http_origin(endpoint, configured) else ""
     return endpoint, token
 
 

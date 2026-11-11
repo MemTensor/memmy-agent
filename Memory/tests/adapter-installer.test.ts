@@ -58,6 +58,42 @@ describe("thin HTTP agent adapters", () => {
     }
   });
 
+  it.each(["http://memory.test:18081", "https://memory.test:18080", "http://other.test:18080"])("rejects legacy credentials belonging to %s", async (oldEndpoint) => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    const endpoint = "http://memory.test:18080";
+    writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint, token: "new-token" } } }));
+    const { readAdapterConnection } = await import(new URL("../adapters/connection.js", import.meta.url).href);
+    try {
+      vi.stubEnv("MEMMY_CONFIG", configPath);
+      vi.stubEnv("MEMMY_MEMORY_URL", endpoint);
+      vi.stubEnv("MEMMY_MEMORY_TOKEN", "");
+      vi.stubEnv("MEMORY_SERVICE_URL", oldEndpoint);
+      vi.stubEnv("MEMORY_SERVICE_TOKEN", "old-token");
+      expect(await readAdapterConnection(pathToFileURL(join(root, "index.js")))).toEqual({ endpoint, token: "new-token" });
+      vi.stubEnv("MEMMY_MEMORY_TOKEN", "explicit-token");
+      expect((await readAdapterConnection(pathToFileURL(join(root, "index.js")))).token).toBe("explicit-token");
+      vi.stubEnv("MEMMY_MEMORY_URL", "");
+      vi.stubEnv("MEMMY_MEMORY_TOKEN", "");
+      expect(await readAdapterConnection(pathToFileURL(join(root, "index.js")))).toEqual({ endpoint: oldEndpoint, token: "old-token" });
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("matches equivalent HTTP origins for unpaired environment tokens", async () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint: "https://MEMORY.test:443/base", token: "file-token" } } }));
+    const { readAdapterConnection } = await import(new URL("../adapters/connection.js", import.meta.url).href);
+    try {
+      vi.stubEnv("MEMMY_CONFIG", configPath);
+      vi.stubEnv("MEMMY_MEMORY_URL", "https://memory.test/");
+      vi.stubEnv("MEMMY_MEMORY_TOKEN", "");
+      vi.stubEnv("MEMORY_SERVICE_URL", "");
+      vi.stubEnv("MEMORY_SERVICE_TOKEN", "unpaired-token");
+      expect((await readAdapterConnection(pathToFileURL(join(root, "index.js")))).token).toBe("unpaired-token");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("plans a DSH adapter install without invoking the host CLI", async () => {
     const root = tempRoot();
     const runtime = fixtureRuntime(root);

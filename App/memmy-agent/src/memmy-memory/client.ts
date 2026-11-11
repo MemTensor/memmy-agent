@@ -5,6 +5,7 @@ import {
   L3WorldModelBoundaryResponseSchema,
   L3WorldModelTraceHeadResponseSchema,
   MemoryHealthSnapshotSchema,
+  sameHttpOrigin,
   SessionL3WorldModelContextResponseSchema,
   l3WorldModelGetTransport,
   type L3UserProjectsReplaceRequest,
@@ -85,7 +86,7 @@ export class MemmyMemoryClient {
     headers["x-memmy-time-zone"] = this.timeZone;
     if (!this.token && this.rediscover) {
       const connection = this.rediscover();
-      if (connection.baseUrl === this.baseUrl) this.token = connection.token ?? null;
+      if (sameHttpOrigin(this.baseUrl, connection.baseUrl)) this.token = connection.token ?? null;
     }
     const requestToken = this.token;
     if (requestToken) headers.authorization = `Bearer ${requestToken}`;

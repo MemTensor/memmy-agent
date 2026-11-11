@@ -57,6 +57,8 @@ export interface MemoryLayerConfig {
 export interface CreateHttpMemoryClientOptions {
   /** Fetch impl. */
   fetchImpl?: typeof fetch;
+  /** Refresh credentials for the pinned service before sending each request. */
+  resolveToken?: () => string | undefined;
 }
 
 type PathKey = keyof typeof MEMORY_LAYER_PATHS;
@@ -97,13 +99,14 @@ export function createHttpMemoryClient(
       async () => {
         const timeoutSignal = AbortSignal.timeout(requestOptions.timeoutMs ?? config.timeoutMs);
         const hasBody = requestOptions.body !== undefined;
+        const token = options.resolveToken ? options.resolveToken() : config.token;
         const response = await fetchWithMappedNetworkErrors(fetchImpl, url, {
           method,
           headers: {
             ...(hasBody ? { "content-type": "application/json" } : {}),
             "x-memmy-time-zone": normalizeTimeZoneOffset(requestOptions.context?.timeZone),
             ...(requestOptions.context?.userId ? { "x-memmy-user-id": requestOptions.context.userId } : {}),
-            authorization: `Bearer ${config.token}`
+            ...(token ? { authorization: `Bearer ${token}` } : {})
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
           signal: combineAbortSignals(timeoutSignal, requestOptions.signal)
