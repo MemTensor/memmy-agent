@@ -8,7 +8,7 @@
     "memmy-memory": "./dist/src/cli/index.js"
   },
   "scripts": {
-    "build": "npm run build -w @memmy/agent-source-core && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && npm run viewer:build && tsc -p tsconfig.json && npm run integration:build:dist && npm run copy-cli-assets",
+    "build": "npm run build -w @memmy/agent-source-readers && npm run build -w @memmy/agent-source-core && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && npm run viewer:build && tsc -p tsconfig.json && npm run integration:build:dist && npm run copy-cli-assets",
     "postbuild": "node src/cli/scripts/set-executable.mjs dist/src/cli/index.js",
     "copy-cli-assets": "node src/cli/scripts/copy-assets.mjs",
     "dev": "tsx src/server/index.ts",
@@ -19,10 +19,10 @@
     "preserve:dev": "npm run integration:build",
     "worker:run": "node dist/src/cli/index.js raw POST /worker/run",
     "test": "vitest run --reporter=dot --maxWorkers=2",
-    "typecheck": "npm run build -w @memmy/agent-source-core && tsc -p tsconfig.json --noEmit && tsc -p viewer/tsconfig.json --noEmit",
+    "typecheck": "npm run build -w @memmy/agent-source-readers && npm run build -w @memmy/agent-source-core && tsc -p tsconfig.json --noEmit && tsc -p viewer/tsconfig.json --noEmit",
     "viewer:build": "vite build --config viewer/vite.config.ts",
     "viewer:dev": "vite --config viewer/vite.config.ts --host 127.0.0.1",
-    "pretest": "npm run build -w @memmy/agent-source-core && npm run viewer:build && npm run integration:build",
+    "pretest": "npm run build -w @memmy/agent-source-readers && npm run build -w @memmy/agent-source-core && npm run viewer:build && npm run integration:build",
     "integration:build": "node src/agent-source/integration/workspace-bridge/build-runtime.mjs",
     "integration:build:dist": "node src/agent-source/integration/workspace-bridge/build-runtime.mjs --dist",
     "package:npm": "node src/cli/npm/build-package.mjs",

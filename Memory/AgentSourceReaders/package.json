@@ -15,6 +15,6 @@
   },
   "dependencies": {
     "@memmy/agent-source-core": "0.0.0",
-    "better-sqlite3": "^12.6.3"
+    "better-sqlite3": "^13.0.3"
   }
 }
