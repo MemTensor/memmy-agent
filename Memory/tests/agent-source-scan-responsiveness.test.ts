@@ -154,8 +154,6 @@ await phaseActionsReady;
             return executor.startScan({ sourceId: "codex", mode: "full" });
           }
         );
-void executor.cancelScan();
-        replacement = executor.startScan({ sourceId: "codex", mode: "full" });
         void replacement.catch(() => undefined);
         replacementStarted();
 

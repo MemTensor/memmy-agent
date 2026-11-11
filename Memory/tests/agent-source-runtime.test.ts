@@ -387,7 +387,8 @@ describe("standalone Agent source executor", () => {
       .mockReturnValue({ id: "memory-1", duplicate: true });
     const enqueuePendingImportSummaries = vi.fn();
     const scheduleWorker = vi.fn();
-    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries } as unknown as MemoryService;
+    const retryFailedMemoryProcessingOnScan = vi.fn(() => false);
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries, retryFailedMemoryProcessingOnScan } as unknown as MemoryService;
     const adapter: SourceAdapter = {
       descriptor: {
         sourceId: "fixture-agent",
@@ -438,6 +439,7 @@ describe("standalone Agent source executor", () => {
     await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
     await waitForScan(executor);
     expect(addMemory).toHaveBeenCalledTimes(1);
+    expect(retryFailedMemoryProcessingOnScan).not.toHaveBeenCalled();
     expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({
       adapterId: "agent-source:fixture-agent",
       source: "fixture-agent",
@@ -450,6 +452,11 @@ describe("standalone Agent source executor", () => {
     await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
     await waitForScan(executor);
     expect(addMemory).toHaveBeenCalledTimes(2);
+    expect(executor.scanStatus().error).toBeNull();
+    expect(retryFailedMemoryProcessingOnScan).toHaveBeenCalledOnce();
+    expect(retryFailedMemoryProcessingOnScan).toHaveBeenCalledWith("memory-1", {
+      source: "fixture-agent", namespace: { source: "fixture-agent", profileId: "default" }
+    });
     expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
       version: 2,
       sources: {
@@ -960,9 +967,11 @@ expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progr
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
     const root = tempRoot();
     const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: true }));
+    const retryFailedMemoryProcessingOnScan = vi.fn(() => false);
     const executor = createAgentSourceExecutor({
       service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
+        retryFailedMemoryProcessingOnScan,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
@@ -975,6 +984,10 @@ expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progr
     await waitForScan(executor);
 
     expect(addMemory).toHaveBeenCalledTimes(1);
+    expect(executor.scanStatus().error).toBeNull();
+    expect(retryFailedMemoryProcessingOnScan).toHaveBeenCalledWith("memory-1", {
+      source: "fixture-agent", namespace: { source: "fixture-agent", profileId: "default" }
+    });
     expect(events).toEqual([]);
     await executor.dispose();
   });
