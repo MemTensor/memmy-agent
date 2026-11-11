@@ -26,7 +26,11 @@ it('keeps every persistent panel table outside the source and enforces readonly 
  expect(source.db.prepare('SELECT count(*) FROM memories').pluck().get()).toBe(2);
 });
 it('resumes a committed partial build, catches concurrent insert/update/delete and preserves source data',()=>{
- const {source,add,open}=fixture();for(let i=0;i<300;i++)add(`m-${String(i).padStart(4,'0')}`);
+ const {source,add,open}=fixture();
+ // Seed setup in one commit while retaining all 300 real row-trigger events.
+ source.db.transaction(()=>{for(let i=0;i<300;i++)add(`m-${String(i).padStart(4,'0')}`);})();
+ expect(source.db.prepare('SELECT count(*) FROM memories').pluck().get()).toBe(300);
+ expect(source.db.prepare("SELECT count(*) FROM source_changes WHERE entity_type='memories' AND operation='insert'").pluck().get()).toBe(300);
  let reader=open();reader.ingest();expect(fillPanelCacheBatch(reader.source.db,'memories',32)).toBe(32);reader.close();
  source.db.exec("DELETE FROM memories WHERE id='m-0000';UPDATE memories SET memory_layer='Skill' WHERE id='m-0001'");add('a-before-cursor');
  reader=open();expect(reader.cache.prepare('SELECT count(*) FROM panel_memory_facts').pluck().get()).toBe(32);reader.prepare(['memories']);
