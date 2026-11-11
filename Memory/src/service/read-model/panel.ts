@@ -9,12 +9,14 @@ import {
 import { panelDateKey, panelRoundDecimal } from "./model-costs.js";
 import { observedActivitySummary } from "./display-fields.js";
 import { externalEvidenceSourceMatchesMemory } from "../external-evidence-source.js";
+import { processingWithRetryAction } from "../import/processing-retry-policy.js";
 
 export function panelListItemFromMemory(
   item: MemoryListItem,
   memory: MemoryRow,
   processing?: MemoryProcessingRecord
 ): MemoryListItem {
+  const processingView = processing ? processingWithRetryAction(memory, processing) : undefined;
   const spanGoal = panelSpanGoalForMemory(memory);
   const observationSummary = observedActivitySummary(memory);
   const observation = isRecord(memory.properties.internal_info.observation_memory)
@@ -22,7 +24,7 @@ export function panelListItemFromMemory(
   return {
     ...item,
     ...(observationSummary ? { summary: observationSummary } : {}),
-    processing,
+    processing: processingView,
     metadata: {
       ...(item.metadata ?? {}),
       source: panelSourceForMemory(memory),
@@ -31,7 +33,7 @@ export function panelListItemFromMemory(
         : {}),
       ...(spanGoal ? { spanGoal } : {})
     },
-    tags: panelTagsForMemory(memory, processing)
+    tags: panelTagsForMemory(memory, processingView)
   };
 }
 

@@ -4734,7 +4734,7 @@ function optionalMetaString(meta: Record<string, unknown>, key: string): string 
 }
 
 /** Historical backfill is limited to initial and full scans. Hooks cannot opt in. */
-function allowsLegacyHistoryCapture(request: SourceTurnCompleteRequest): boolean {
+export function allowsLegacyHistoryCapture(request: SourceTurnCompleteRequest): boolean {
   return request.channel === "agent_source_scan" && request.captureLegacyHistory === true;
 }
 
