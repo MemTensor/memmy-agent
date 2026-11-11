@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import YAML from "yaml";
 import { assertHostedUbuntuRunner, planUbuntuMirror, recoverUbuntuMirror } from "../scripts/internal/linux/ci-ubuntu-mirror.mjs";
 
 const source = `Types: deb
@@ -74,5 +76,29 @@ describe("signed Ubuntu CI mirror recovery", () => {
     expect(() => assertHostedUbuntuRunner({ ...input, platform: "darwin" })).toThrow();
     expect(() => assertHostedUbuntuRunner({ ...input, environment: { ...input.environment, RUNNER_ENVIRONMENT: "self-hosted" } })).toThrow();
     expect(() => assertHostedUbuntuRunner({ ...input, osRelease: 'ID=ubuntu\nVERSION_ID="22.04"\n' })).toThrow();
+  });
+  it("uses the same verified mirror before native apt without weakening platform checks", () => {
+    const workflow = YAML.parse(readFileSync(new URL("../.github/workflows/computer-use-native.yml", import.meta.url), "utf8"));
+    const job = workflow.jobs.native;
+    expect(job.strategy.matrix.runner).toEqual(["ubuntu-24.04", "ubuntu-24.04-arm", "macos-26", "windows-2025"]);
+    const index = name => job.steps.findIndex(step => step.name === name);
+    const mirror = index("Verify a signed Ubuntu mirror for native desktop checks");
+    const desktop = index("Prepare an isolated Linux desktop session");
+    expect(job.steps.findIndex(step => step.uses?.startsWith("actions/setup-node@"))).toBeLessThan(mirror);
+    expect(mirror).toBeLessThan(desktop);
+    expect(job.steps[mirror]).toMatchObject({
+      if: "runner.os == 'Linux' && runner.environment == 'github-hosted'",
+      run: "node scripts/internal/linux/ci-ubuntu-mirror.mjs",
+    });
+    expect(job.steps[desktop].if).toBe("runner.os == 'Linux'");
+    expect(job.steps[desktop].run.trim().split("\n")).toEqual([
+      "sudo apt-get update", "sudo apt-get install -y dbus-x11 xvfb",
+      "bash scripts/internal/linux/install-computer-use-deps.sh",
+      "bash scripts/internal/linux/install-computer-use-deps.sh",
+    ]);
+    expect(job.steps[index("Check Linux MCP and desktop backend")].run).toContain("dbus-run-session -- xvfb-run -a node");
+    expect(job.steps[index("Check Windows runtime fixtures with native PowerShell 5.1")].shell).toBe("powershell");
+    expect(job.steps[index("Test Memmy macOS native source")].run).toContain("swift test");
+    expect(job["continue-on-error"]).toBeUndefined();
   });
 });
