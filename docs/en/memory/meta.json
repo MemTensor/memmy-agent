@@ -1,5 +1,11 @@
 {
   "title": "Memory",
   "icon": "Brain",
-  "pages": ["overview", "sources", "skills", "memory-cli"]
+  "pages": [
+    "overview",
+    "computer-history",
+    "sources",
+    "learned-skills",
+    "memory-cli"
+  ]
 }

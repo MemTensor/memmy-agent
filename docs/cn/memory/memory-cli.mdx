@@ -17,3 +17,18 @@ memmy-memory delete <id>
 默认连接 `http://127.0.0.1:18960`。可用 `--url`、`--token`、`--config`、`--source`、`--user-id` 指定目标服务、认证、调用来源和用户命名空间。
 
 另支持 `reload-config`、`session open/close`、`turn start/complete` 和 `raw` 调用。
+
+服务管理：
+
+```bash
+memmy-memory install
+memmy-memory upgrade
+memmy-memory stop
+memmy-memory service start
+memmy-memory service stop
+memmy-memory service status
+memmy-memory service repair-launcher
+memmy-memory serve
+```
+
+`install` 安装并启动独立 Memory 服务，`upgrade` 升级服务和已安装的 Agent 适配器，`stop` 停止后台服务。`service repair-launcher` 修复旧的 Windows 启动项。`serve` 只说明如何连接外部 Memory 服务，不会在本机再监听一个端口。

@@ -562,6 +562,7 @@ export async function readCursorHookSourceTurn(input: {
       composerData: (composerId) => parse(`composerData:${composerId}`),
       // Newer Cursor versions keep the header list in its own rows and leave `composerData` empty.
       conversationHeaders: (composerId) => parseChunks(`composerConvHeaders:${composerId}:`),
+      conversationHeaderChunk: (composerId, index) => parse(`composerConvHeaders:${composerId}:${String(index).padStart(6, "0")}`),
       bubble: (composerId, bubbleId) => parse(`bubbleId:${composerId}:${bubbleId}`)
     };
     return await readCursorSourceTurn(source, input);

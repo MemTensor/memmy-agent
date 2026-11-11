@@ -15,4 +15,4 @@ icon: Layers
 | Memory Service | The local-first memory foundation; entry point `Memory/src/server/index.ts`, default `:18960` |
 | Local Backend | Backend for the desktop local API: SQLite app state, permissions, Cloud/Memory clients, source scanning, Skill writing, Fastify routes |
 | Agent Source | Read adapter for external Agent history + optional Skill install target |
-| Dream | Memory consolidation mechanism, triggered manually or on a schedule |
+| Dream | Memory consolidation. Available when `fileMemory.enabled` is true; that switch defaults to off. Trigger it with `/dream`, or let `agents.defaults.dream` run it on a schedule, every 2 hours by default |

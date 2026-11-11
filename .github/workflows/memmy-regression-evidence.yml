@@ -42,6 +42,8 @@ jobs:
           npm run build -w @memmy/migrations
           npm run build -w @memmy/agent-source-core
           npm run build -w @memmy/local-api-contracts
+      - name: Build Agent test dependencies
+        run: npm --prefix App/memmy-agent run pretest
       - name: Run card regression and performance proxy tests
         run: >-
           node node_modules/vitest/vitest.mjs run

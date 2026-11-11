@@ -35,7 +35,7 @@ tools:
     enabled: true
     timeout: 60
   imageGeneration:
-    enabled: false
+    enabled: true
 ```
 
-Built-in tools cover the filesystem, shell, web search and fetching, MCP, scheduled tasks, message sending, image generation, long-running tasks, introspection, runtime status, and context management.
+Built-in tools include file read and write, search, shell, web search and fetch, browser, computer history, scheduled tasks, messaging, image generation, Goal, task plans, subagents, patches, and Agent sources. Image generation is on by default. MCP servers are connected separately; when `mcpServers` is left unset, Memmy also registers the computer-use server `open-computer-use`.

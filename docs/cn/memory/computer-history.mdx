@@ -1,0 +1,101 @@
+---
+title: 电脑历史记录
+description: 把应用和网站上的活动整理成摘要，用来接着刚才的工作、找回文件，或把刚做完的流程留成技能。
+icon: History
+---
+
+import confirmScreen from "../../assets/computer-history-confirm-full.jpg";
+import scopeScreen from "../../assets/computer-history-scope-full.jpg";
+import permissionScreen from "../../assets/computer-history-permission-full.jpg";
+import restartScreen from "../../assets/computer-history-restart-full.jpg";
+import runningScreen from "../../assets/computer-history-running-full.jpg";
+import feedScreen from "../../assets/computer-history-feed-full.jpg";
+import breakOn from "../../assets/history-help-break-on.jpg";
+import breakOff from "../../assets/history-help-break-off.jpg";
+import fileOn from "../../assets/history-help-file-on.jpg";
+import fileOff from "../../assets/history-help-file-off.jpg";
+import skillOn from "../../assets/history-help-skill-on.jpg";
+import skillOff from "../../assets/history-help-skill-off.jpg";
+
+电脑历史记录把你在应用和网站中的活动整理成摘要。之后的任务可以接着刚才的工作、找回刚看过的文件，或把刚做完的流程整理成技能。
+
+它从你开启后才开始记录。你可以选择哪些应用和网站参与，并随时查看、暂停或删除记录。支持 macOS 和 Windows 11。
+
+完成首次设置后，在支持的设备上主动打开「记忆管理」时，可能会先看到一次「电脑历史记录」介绍。点击「去开启」会进入下面的设置。点击「关闭」，或点在介绍外面，这次介绍就不再出现；之后仍可从「记忆管理 → 电脑历史记录」手动开启。
+
+## 开始记录
+
+1. 打开「记忆管理 → 电脑历史记录」。首次使用点击「去开启」；已有记录时，打开右侧「开启电脑历史记录」开关。
+2. 阅读说明并点击「确认开启」，选择应用和网站范围，再点击「继续并开启」。
+3. macOS 若提示辅助功能未开启，点击「去开启」并完成系统授权。出现「退出并重启」时，按提示让权限生效。
+4. 回到页面，确认显示「采集中」。
+
+以下以 macOS 界面为例，可切换步骤并放大查看完整窗口。
+
+<ProductScreenSteps steps={[
+  { label: "确认记录内容", src: confirmScreen, alt: "Memmy 完整窗口：确认开启电脑历史记录", caption: "开启前会说明记录内容、模型处理和清除范围。阅读后再点击「确认开启」。" },
+  { label: "选择范围", src: scopeScreen, alt: "Memmy 完整窗口：选择应用和网站的记录范围", caption: "应用和网站各自选择「排除」或「仅包含」，再添加具体来源。图中应用与域名为示例。" },
+  { label: "系统授权", src: permissionScreen, alt: "Memmy 完整窗口：macOS 辅助功能授权入口", caption: "在辅助功能一行点击「去开启」，按应用提示到系统设置中授权。" },
+  { label: "重启生效", src: restartScreen, alt: "Memmy 完整窗口：辅助功能已开启后的重启提示", caption: "看到「已开启」后，如果仍要求重启，点击「退出并重启」。这一步用于让新权限生效。" }
+]} />
+
+## 它能帮你做什么
+
+<HistoryHelpCompare items={[
+  { title: "接着刚才的工作", body: "休息回来后，直接问离开前在做什么，不必自己回忆开过哪些应用和文件。", on: breakOn, off: breakOff, onAlt: "有电脑历史记录时，回答上次休假前在改产品发布演示稿，并在钉钉里核对活动数据和反馈。", offAlt: "没有电脑历史记录时，同一问题只能请你补充之前用的项目或应用。" },
+  { title: "找回刚看过的文件", body: "用你记得的说法指一份文件，它会根据记录找出对应来源。", on: fileOn, off: fileOff, onAlt: "有电脑历史记录时，对上今天早上在钉钉里打开的第四季度产品发布计划。", offAlt: "没有电脑历史记录时，同一问题还要你补充文档标题、应用或项目。" },
+  { title: "把刚做完的流程留成技能", body: "做完一套操作后，让它对照最近的步骤，整理成下次能直接用的技能。", on: skillOn, off: skillOff, onAlt: "有电脑历史记录时，按最近的视频上传操作写成一份技能。", offAlt: "没有电脑历史记录时，需要你自己把上传流程里的步骤、工具和决定发过去。" }
+]} />
+
+## 找回刚才的工作
+
+使用电脑一段时间后，向下找到「历史记录」。按日期查看摘要；将鼠标移到条目上，点击标题旁的文档图标可打开完整记录。
+
+<ProductScreenSteps steps={[
+  { label: "确认正在记录", src: runningScreen, alt: "Memmy 完整窗口：电脑历史正在采集", caption: "「采集中」和右侧开关表示当前正在记录。权限一行用于调整应用和网站范围。" },
+  { label: "查看历史摘要", src: feedScreen, alt: "Memmy 完整窗口：按日期查看电脑历史摘要", caption: "摘要下方标出涉及的应用；鼠标移入后，标题旁显示打开、保留和删除操作。图中内容为虚构示例。" }
+]} />
+
+可以这样说：
+
+- 我上次休假前在忙什么？
+- 我今天看的那份规划文件是什么来着？
+- 我刚刚完成了视频上传流程。下次可以把这个技巧运用起来。
+
+找到对应资料后，可以继续让它列出待办或起草下一步。摘要不完整时，补充原文件或网址。
+
+## 调整记录范围
+
+在页面「权限」一行点击「选择」或「已选中 N 项」，重新调整应用和网站规则。选择「仅包含」时，只记录列表中的来源；选择「排除」时，跳过列表中的来源。保存后按新的范围记录。
+
+图片、声音和无法读取的内容不会被完整记录。原生记录可能包含前台浏览器的无痕窗口；需要排除的网站应加入排除范围。
+
+<details>
+<summary>网页增强和微信聊天</summary>
+
+「网页历史记录增强」通过浏览器插件补充网页控件和操作变化，与电脑操控共用插件，遵循电脑历史的记录设置。
+
+「允许读取微信聊天」需要单独开启。普通电脑历史的授权不等于授权直接读取微信聊天数据，请先阅读该选项的完整说明。
+
+</details>
+
+## 暂停或删除
+
+关闭记录开关会停止采集，已有记录保留。
+
+- **删除一条**：将鼠标移到条目上，点击标题旁的垃圾桶图标并确认。正在记录的片段需先停止。
+- **清除今天或全部历史**：点击「清除历史」，选择范围并确认。
+
+清除历史也会删除对应记忆和相关技能，无法撤销。若提示仍在删除中，请等待完成；失败时会自动重试。
+
+## 没有新摘要？
+
+检查状态是否为「采集中」、系统权限是否生效、应用是否在记录范围内。已有活动但摘要仍在整理时稍后再看；模型不可用或额度不足时，到「设置 → 模型配置」检查配置。
+
+## 内容存在哪里？
+
+原始记录保存在本机。生成摘要时，相关内容交给当前配置的模型处理：在线模型会接收所需内容，平台模型由 Memmy 服务处理。
+
+## 相关说明
+
+[数据与隐私](/docs/security/security)

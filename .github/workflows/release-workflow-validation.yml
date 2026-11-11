@@ -1,0 +1,42 @@
+name: Release workflow validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-workflow-validation.yml"
+      - ".github/workflows/github-draft-release-v2.yml"
+      - "tests/release-workflow.test.ts"
+      - ".github/workflows/main-sync.yml"
+      - ".github/main-sync.json"
+      - "scripts/main-sync/**"
+      - "tests/main-sync*"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/release-workflow-validation.yml"
+      - ".github/workflows/github-draft-release-v2.yml"
+      - "tests/release-workflow.test.ts"
+      - ".github/workflows/main-sync.yml"
+      - ".github/main-sync.json"
+      - "scripts/main-sync/**"
+      - "tests/main-sync*"
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: Release workflow contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install contract-test dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Test release workflow contracts
+        run: npm run test:release-workflow

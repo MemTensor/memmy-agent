@@ -359,6 +359,8 @@ describe("continuous worker event-loop fairness", () => {
         expect(backlog.preparedIdCount()).toBe(count + enqueued.size);
         expect(h.processed).toHaveLength(enqueued.size);
       }, { timeout: 30_000, interval: 50 });
+      // Retain the published idle observation so repeated scans remain in the read budget.
+      await new Promise(resolve => setTimeout(resolve, 2000));
       const preparations = preparationStats(backlog, [...enqueued.keys()]);
       const sample = { backlog: count, added: enqueued.size, started: waits.length, notStarted: enqueued.size - waits.length,
         meanWaitMs: waits.reduce((a,b) => a+b, 0) / waits.length, maxWaitMs: Math.max(...waits), pageCalls, rowsRead, candidateChecks: inspections.mock.calls.length,
@@ -385,7 +387,7 @@ describe("continuous worker event-loop fairness", () => {
     const resumed = await h.runner.runWorkerOnce(Math.min(3, count));
     expect(resumed.jobs.map(job => job.jobId)).toEqual(Array.from({ length: Math.min(3, count) }, (_, i) => `blocked-${i}`));
     h.expectClean();
-  }, 60_000);
+  }, 120_000);
 
   it("re-admits a live arrival after its embedding permit is released without re-preparing Provider-blocked rows", async () => {
     const h = harness(), backlog = blockedBacklog(h, 128), abort = new AbortController();

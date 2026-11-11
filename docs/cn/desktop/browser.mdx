@@ -1,0 +1,48 @@
+---
+title: 搜索资料与使用网页
+description: 给出网址或检索目标，让 Memmy 查阅网页并整理有来源的结果。
+icon: Globe
+---
+
+import browserChat from "../../assets/browser-chat-full.jpg";
+import connectScreen from "../../assets/browser-connect-full.png";
+
+查产品资料、比较方案或整理网页内容时，可以直接把问题或网址交给 Memmy。需要已有登录状态时，先连接受支持的浏览器。
+
+## 连接 Chrome 或 Edge
+
+1. 在 Memmy 打开「设置 → 电脑操控」，找到 Google Chrome 或 Microsoft Edge。
+2. 点击「安装」，按指引开启浏览器的开发者模式，把 Memmy 扩展拖到扩展页。
+3. 回到 Memmy，看到「已连接，可操作此浏览器中的网页」后，在对话里说明要处理哪个页面。
+
+<ProductScreenshot src={connectScreen} alt="Memmy 设置中的电脑操控：Google Chrome 与 Microsoft Edge" caption="在「设置 → 电脑操控」找到这两个浏览器。图中 Chrome 尚未安装扩展，点击「安装」；Edge 暂时无法读取状态，点击「管理」到浏览器里查看。" />
+
+下方可以试点「安装」和「查看演示」，也可以切换查看连接成功后的样子。
+
+<ProductBrowserGuide />
+
+如果显示“已安装，打开浏览器即可连接”，先打开对应浏览器；若扩展已停用，到浏览器扩展管理页启用。公司管理策略可能限制扩展安装，无法完成时可改用内置浏览器访问允许的网站。
+
+## 从一个明确的问题开始
+
+<PromptExample composer={true} prompt="用浏览器打开 https://example.com/plans，比较两档方案的价格、席位和支持方式。" />
+
+如果已经打开目标网页，提供网址，或使用浏览器面板中的「复制标签页引用」把当前页面加入请求。说明要看哪个部分，可以减少无关查阅。
+
+## 使用内置浏览器
+
+Memmy 可以在工作台的浏览器面板中打开网页。通过地址栏、标签页以及前进后退按钮查看当前内容。网页内需要登录或人工操作时，先按页面提示完成，再告诉 Memmy 继续。
+
+<ProductScreenshot src={browserChat} alt="Memmy 用内置浏览器打开定价页，并比较两档方案" caption="图中页面和网址为示例。左边是上面那条任务，右边是内置浏览器打开的页面。" />
+
+网页访问、填写表单和下载等操作的权限，可以在浏览器设置中管理。授权前查看目标网站和请求的操作范围。
+
+## 检查资料与下载
+
+要求结果附来源链接，并核对发布时间、原文和适用条件。浏览器中的登录、付费或权限限制可能阻止读取，提供其他可访问来源后再继续。
+
+浏览器设置中可以查看或更改「下载位置」，也可以选择每次下载前询问保存位置。下载完成后，打开文件确认内容。
+
+## 相关说明
+
+[操作电脑应用](/docs/desktop/computer-use) · [连接外部工具](/docs/tools/integrations)

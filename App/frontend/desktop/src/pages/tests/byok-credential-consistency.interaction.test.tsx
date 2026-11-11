@@ -148,12 +148,14 @@ describe("BYOK displayed, tested and saved credentials", () => {
     const saveIndex = server.saveCatalog.mock.results.length;
     const writes = server.write.mock.calls.length;
     const dispatchIndex = mocks.dispatch.mock.calls.length;
+
     await click(button);
     await vi.waitFor(() => expect(server.saveCatalog.mock.results.length).toBeGreaterThan(saveIndex));
     // A new preset is created before its assignment is saved. Wait for this
     // complete catalog mutation, rather than the first backend write or an old navigation.
     await act(async () => { await Promise.all(server.saveCatalog.mock.results.slice(saveIndex).map((result) => result.value)); });
     expect(server.write.mock.calls.length).toBeGreaterThan(writes);
+
     if (navigates) {
       await vi.waitFor(() => expect(mocks.dispatch.mock.calls.slice(dispatchIndex).map(([action]) => action))
         .toContainEqual(expect.objectContaining({ type: "navigation/changed" })));

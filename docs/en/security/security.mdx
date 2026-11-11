@@ -1,19 +1,31 @@
 ---
-title: Security & Privacy
+title: Data and privacy
+description: Where local memory lives, what a model call sends, and how connections and data controls work.
 icon: Lock
 ---
 
-Memmy's security boundary is built on **local execution** and **explicit authentication**:
+Memmy keeps memory and configuration on this computer by default. When you connect another Agent’s history, Memmy reads the chat records available on this computer and organizes them. When you use a cloud model, the content needed for that model request is sent to the model service you chose. If you use your own API key, also read that provider’s data policy.
 
-- The desktop local API only accepts requests from the local machine, `file://`, or controlled origins by default, verified with `x-memmy-local-token`.
-- Due to EventSource limitations, SSE passes the same runtime token via a query parameter.
-- The Composio MCP bridge uses a separate `x-memmy-mcp-token`.
-- Memory HTTP can be protected with a bearer token (`MEMMY_MEMORY_TOKEN` / `MEMORY_SERVICE_TOKEN`).
-- Config supports `${ENV_NAME}` environment variable references, keeping API Keys out of config files.
-- The Memory client must connect to a real Memory Layer or discover a local SQLite source — otherwise startup fails rather than silently showing fake data.
+## Where do memory and history live?
 
-## Where Your Data Lives
+Configuration, the workspace, and the memory database are under `~/.memmy` on this computer by default. One memory can be deleted at the bottom of its details. Export and clear are at the bottom of **Memory → Cross-Agent access**, under **Data management**.
 
-Everything defaults to `~/.memmy`: config, workspace, the Memory SQLite database, and runtime files. Desktop app state is maintained by the local backend in a local SQLite database.
+Clearing local memory also clears the import deduplication cache and the sync-progress record. It does not delete model configuration, API keys, or account information. Export anything you want to keep before you clear.
 
-Scanning and ingestion happen entirely locally, with memories written to local SQLite. Participation in the "memory improvement program" is explicitly controlled by a toggle in privacy settings.
+## What changes when another Agent is connected?
+
+**First scan** organizes recent history. **Sync new** reads conversations added after that. Scanning itself does not change the original Agent’s configuration. Installing a Hook, plugin, or Skill adds the connector to that Agent. Removing the connector does not automatically delete history that was already imported.
+
+## Share data
+
+Under **Settings → Account → Privacy and improvement**, you can turn **Share data** on or off. The page explains the anonymous activity data collected while it is on. After you turn it off, a basic anonymous startup count remains. Use the explanation currently shown beside the switch.
+
+## Computer History
+
+Computer History is turned on separately, and you can set which apps and websites it records. Raw activity stays on this computer. When a summary is created, the needed content is sent to the model you selected. Turning the switch off stops later recording. Deleting existing history also deletes the matching memories and related skills.
+
+## Knowledge bases and external services
+
+Knowledge base files are uploaded for processing and search. After you share a base, the people you authorize can open that material. Deleting a file also affects the people it is shared with.
+
+After you connect an external service, what Memmy can access is limited by that connection and by the service account’s permissions. You can see the connection status in **Connections & Tools**, and disconnect it when you no longer need it.

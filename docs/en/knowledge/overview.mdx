@@ -1,0 +1,90 @@
+---
+title: Use a knowledge base
+description: Add material you look up often, turn on Recall, and cite it in chat.
+icon: Library
+---
+
+Put handbooks, course material, or project notes in a knowledge base when you need to look them up across many tasks. A knowledge base requires a Memmy account. Files are uploaded for processing and search.
+
+import createScreen from "../../assets/knowledge-create-full-en.jpg";
+import uploadScreen from "../../assets/knowledge-upload-full-en.jpg";
+import processingScreen from "../../assets/knowledge-processing-full-en.jpg";
+import readyScreen from "../../assets/knowledge-ready-full-en.jpg";
+import recallOffScreen from "../../assets/knowledge-recall-off-full-en.jpg";
+import shareScreen from "../../assets/knowledge-share-full-en.jpg";
+import sharedScreen from "../../assets/knowledge-shared-full-en.jpg";
+
+## Create a base and add files
+
+1. In the workbench sidebar, open **Knowledge**, then choose **+** beside the knowledge base list (**New knowledge base**).
+2. Enter a name, such as “Customer support handbook”, and choose **Create**.
+3. Open the new base, choose **Upload files → Local files**, and select the material. To add a whole folder at once, choose **Folder**. You can also drag files into the file area.
+
+You can download this <a href="/docs-examples/support-handbook-en.md" download>sample customer support handbook</a> to practice.
+
+<ProductScreenSteps steps={[
+  { label: "Create a base", src: createScreen, alt: "Full Memmy window showing the new knowledge base name form", caption: "Enter a name, then choose Create. The bases, account, and people in the picture are samples." },
+  { label: "Choose how to upload", src: uploadScreen, alt: "Full Memmy window showing Local files and Folder in the upload menu", caption: "Upload files opens a menu. Then choose files or a folder." },
+  { label: "Watch the status", src: processingScreen, alt: "Full Memmy window showing a file still processing after upload", caption: "Upload is not the last step. Wait until the list says Available." }
+]} />
+
+PDF, Word, TXT, Markdown, JSON, and XML are supported, up to 100 MB each. After upload, read the file status:
+
+<div className="docs-actions-table">
+
+| Status | What to do next |
+| --- | --- |
+| **Processing** | Wait for parsing and indexing. The list updates the status. |
+| **Available** | The file is ready. You can turn on **Recall**. |
+| **Failed** | Read the error under the file name, fix the file or format, and upload it again. |
+
+</div>
+
+## Turn on Recall
+
+Turn on **Recall** at the top right of the knowledge base so related chats can search it. Turning it off keeps the files in the base. You can turn it on later.
+
+<ProductRecallGuide offScreen={recallOffScreen} onScreen={readyScreen} />
+
+## Finish a task from the material
+
+Return to the workbench. Say which material to use and what result you want. For example:
+
+<PromptExample composer={true} prompt="Using the “Customer support handbook” knowledge base, turn the steps for an incomplete customer question into a checklist. For each step, say what information still needs to be collected, and cite the material. The material does not set a response deadline or an owner. Mark those as to be confirmed." />
+
+<details>
+<summary>The new file was not used</summary>
+
+Confirm the file status is **Available**, and that **Recall** is on for that knowledge base. In the question, add the knowledge base name, file name, or a specific keyword, then check that the citations come from this material.
+
+</details>
+
+## Organize the files
+
+When there are many files, use **Search files** at the top, or **New folder** to group them. Right-click a file and choose **Move to…**.
+
+To update material, upload the new version, wait until it is **Available**, then remove the old one. Delete on the right of a file row asks you to confirm first. It deletes the cloud file in the knowledge base and affects other people using that base.
+
+<details>
+<summary>Delete a whole knowledge base</summary>
+
+Open **…** (**More**) at the top of the knowledge base and choose **Delete knowledge base**. The confirmation says the base and all of its files will be permanently deleted and cannot be restored.
+
+</details>
+
+## Share with someone else
+
+1. Open a knowledge base you own and choose **Sharing**.
+2. Enter the other person’s Memmy user ID, phone number, or email, then choose **Add**. They can copy the user ID from **Account**.
+3. They open it under **Shared** in the knowledge list and turn on **Recall** themselves.
+
+A shared base is marked **Shared** and says **View and recall only**. To stop sharing, choose **Remove** in **Sharing**, then confirm **Unshare**.
+
+<ProductScreenSteps steps={[
+  { label: "Sharing", src: shareScreen, alt: "Full Memmy window showing the Sharing form and member account field", caption: "Choose Sharing in a knowledge base you own. This picture does not enter or submit a real account." },
+  { label: "What they see", src: sharedScreen, alt: "Full Memmy window showing a shared knowledge base with view, search, and Recall only", caption: "A shared base shows who shared it, and that it is view and recall only." }
+]} />
+
+## Related
+
+[Use and preview files](/docs/en/desktop/files) · [View and manage memory](/docs/en/memory/overview)

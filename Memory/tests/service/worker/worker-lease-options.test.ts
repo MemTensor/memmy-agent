@@ -1,5 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryDb } from "../../../src/storage/db.js";
 import { Repositories } from "../../../src/storage/repositories.js";
@@ -20,7 +21,7 @@ function deferred() {
   return { promise, resolve };
 }
 function harness(leases: WorkerLeaseOptions, processJob: WorkerRunnerDeps["jobHandlers"]["processJob"], algorithm: "legacy" | "wrr" = "wrr") {
-  const root = mkdtempSync("/private/tmp/memmy-lease-options-"), db = new MemoryDb({ path: join(root, "memory.sqlite") });
+  const root = mkdtempSync(join(tmpdir(), "memmy-lease-options-")), db = new MemoryDb({ path: join(root, "memory.sqlite") });
   const repos = new Repositories(db.db), bad = () => { throw new Error("Unexpected dependency"); };
   const deps: WorkerRunnerDeps = { repos, leases, scheduling: { algorithm },
     embedder: createCapturingEmbedder([]), capture: { embedAfterCapture: true }, embeddingRetryWorkerId: "lease-options",

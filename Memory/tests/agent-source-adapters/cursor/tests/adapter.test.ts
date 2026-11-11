@@ -9,6 +9,7 @@ import { sourceTurnFailureReason, sourceTurnFromMessages } from "@memmy/agent-so
 import { createCursorSourceAdapter } from "../../../../src/agent-source/adapters/cursor/index.js";
 import { readCursorVscdb } from "../../../../src/agent-source/adapters/cursor/vscdb-reader.js";
 import { discoverCursorWorkspaces } from "../../../../src/agent-source/adapters/cursor/workspace-discovery.js";
+import { readCursorHookSourceTurn } from "../../../../src/agent-source/integration/workspace-bridge/runtime.js";
 
 let tempDir: string | undefined;
 
@@ -40,6 +41,25 @@ describe("cursor source adapter", () => {
     expect(turn?.toolCalls).toEqual([
       expect.objectContaining({ id: "call-read-1", name: "read_file_v2", status: "completed", output: "file body" })
     ]);
+  });
+
+  it("captures the same cross-chunk turn from the Hook and scan and skips a damaged index", async () => {
+    const { stateDbPath } = createCursorGlobalStateFixture({ chunked: true });
+    const hook = () => readCursorHookSourceTurn({
+      conversationId: "composer-1", requestId: "generation-1", globalStateDbPath: stateDbPath
+    });
+    const scanned = sourceTurnFromMessages(await collect(readCursorVscdb(stateDbPath)));
+    expect(scanned).toMatchObject({ turnId: "bubble-user-1", answer: "I can help with the Cursor global storage format." });
+    expect((await hook()).turn).toEqual(scanned);
+
+    const db = new DatabaseSync(stateDbPath);
+    try {
+      db.prepare("DELETE FROM cursorDiskKV WHERE key = ?").run("composerConvHeaders:composer-1:000001");
+    } finally {
+      db.close();
+    }
+    expect((await hook()).turn).toBeNull();
+    expect(await collect(readCursorVscdb(stateDbPath))).toEqual([]);
   });
 
   it("keeps a turn without a closing assistant text unsubmitted so the scan can retry it", async () => {
@@ -181,7 +201,7 @@ function createCursorWorkspaceFixture(): {
 
 /** Mirrors Cursor globalStorage: a composerHeaders row plus composerData and bubble rows. */
 function createCursorGlobalStateFixture(
-  options: { closingAssistantText?: string; isSubagent?: boolean; chunkedHeaders?: number } = {}
+  options: { closingAssistantText?: string; isSubagent?: boolean; chunkedHeaders?: number; chunked?: boolean } = {}
 ): {
   storageRoot: string;
   stateDbPath: string;
@@ -230,28 +250,19 @@ function createCursorGlobalStateFixture(
     db.exec("CREATE TABLE composerHeaders (composerId TEXT PRIMARY KEY, isSubagent INTEGER, subagentTypeName TEXT)");
     db.prepare("INSERT INTO composerHeaders (composerId, isSubagent, subagentTypeName) VALUES (?, ?, ?)")
       .run("composer-1", options.isSubagent ? 1 : 0, options.isSubagent ? "explore" : "");
-    db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
-      "composerData:composer-1",
-      JSON.stringify({
-        composerId: "composer-1",
-        // Newer Cursor versions leave the inline list empty and write composerConvHeaders rows instead.
-        fullConversationHeadersOnly: options.chunkedHeaders
-          ? []
-          : bubbles.map((bubble) => ({
-            bubbleId: bubble.bubbleId,
-            type: bubble.type,
-            createdAt: bubble.createdAt
-          }))
-      })
-    );
-    if (options.chunkedHeaders) {
-      const headers = bubbles.map((bubble) => ({ bubbleId: bubble.bubbleId, type: bubble.type, createdAt: bubble.createdAt }));
-      const size = Math.ceil(headers.length / options.chunkedHeaders);
-      for (let index = 0; index < options.chunkedHeaders; index += 1) {
-        db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
-          `composerConvHeaders:composer-1:${String(index).padStart(6, "0")}`,
-          JSON.stringify(headers.slice(index * size, (index + 1) * size))
-        );
+    const headers = bubbles.map(({ bubbleId, type, createdAt }) => ({ bubbleId, type, createdAt }));
+    const chunkCount = options.chunked ? 2 : options.chunkedHeaders ?? 0;
+    const size = options.chunked ? 2 : chunkCount ? Math.ceil(headers.length / chunkCount) : 0;
+    const insert = db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)");
+    insert.run("composerData:composer-1", JSON.stringify({
+      composerId: "composer-1",
+      fullConversationHeadersOnly: chunkCount ? [] : headers,
+      ...(options.chunked ? { headerLog: { chunkSize: size, chunkCount, count: headers.length } } : {})
+    }));
+    if (chunkCount) {
+      for (let index = 0; index < chunkCount; index += 1) {
+        insert.run(`composerConvHeaders:composer-1:${String(index).padStart(6, "0")}`,
+          JSON.stringify(headers.slice(index * size, (index + 1) * size)));
       }
     }
     for (const bubble of bubbles) {

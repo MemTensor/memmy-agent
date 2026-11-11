@@ -263,18 +263,19 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force origin "refs/tags/v*:refs/tags/v*"
+          # Match the client's character ordering, including 1.2.401 before 1.2.5.
           latest_existing="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
             | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
-            | sort -V \
+            | LC_ALL=C sort \
             | tail -n 1 \
             || true)"
-          if [[ -n "$latest_existing" ]] && [[ "$(printf '%s\n%s\n' "$latest_existing" "$TAG" | sort -V | tail -n 1)" != "$TAG" ]]; then
-            echo "::error title=Release version is not newer::$TAG must be newer than the latest stable tag $latest_existing. Manual recovery: choose the next stable SemVer version and update the release branch." >&2
+          if [[ -n "$latest_existing" ]] && [[ "$(printf '%s\n%s\n' "$latest_existing" "$TAG" | LC_ALL=C sort | tail -n 1)" != "$TAG" ]]; then
+            echo "::error title=Release version is not newer::$TAG must follow the latest stable tag $latest_existing in project character order. Manual recovery: choose a newer project version using the same character ordering as the client and update the release branch." >&2
             exit 1
           fi
           previous_tag="$({ git tag --list 'v[0-9]*.[0-9]*.[0-9]*'; printf '%s\n' "$TAG"; } \
             | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
-            | sort -Vu \
+            | LC_ALL=C sort -u \
             | awk -v current="$TAG" '$0 == current { print previous; exit } { previous=$0 }')"
           if [[ -n "$previous_tag" ]]; then
             git cat-file -e "$previous_tag^{commit}"
@@ -528,20 +529,15 @@ jobs:
             }
           }
 
-          function versionKey(tag) {
-            const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(tag);
-            return match ? match.slice(1).map(Number) : [0, 0, 0];
-          }
-
           const files = git(["ls-tree", "-r", "--name-only", target, ".github/release-notes"])
             .split(/\r?\n/)
             .filter(Boolean)
             .filter((file) => /^\.github\/release-notes\/v\d+\.\d+\.\d+\.md$/.test(file))
             .filter((file) => path.basename(file, ".md") !== currentTag)
             .sort((left, right) => {
-              const a = versionKey(path.basename(left, ".md"));
-              const b = versionKey(path.basename(right, ".md"));
-              return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+              const a = path.basename(left, ".md");
+              const b = path.basename(right, ".md");
+              return a === b ? 0 : a < b ? -1 : 1;
             })
             .slice(-3);
 
@@ -897,6 +893,7 @@ jobs:
             release-assets/SHA256SUMS.txt
 
       - name: Create draft release and upload every asset
+        id: draft
         if: ${{ steps.release.outputs.create_draft == 'true' }}
         env:
           TAG: ${{ steps.release.outputs.tag }}
@@ -936,10 +933,42 @@ jobs:
             exit 1
           fi
           trap - EXIT
+
+          # Identity lookup failures must preserve the fully uploaded Draft.
+          # Existing tags are bound to source by the preceding and final tag checks.
+          if ! release_id="$(
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --json databaseId,tagName,isDraft,isPrerelease,targetCommitish \
+              | node -e '
+                const fs = require("node:fs");
+                let identity;
+                try {
+                  identity = JSON.parse(fs.readFileSync(0, "utf8"));
+                } catch {
+                  console.error("Draft Release identity JSON is invalid");
+                  process.exit(1);
+                }
+                if (identity === null || typeof identity !== "object" || Array.isArray(identity)
+                  || !Number.isSafeInteger(identity.databaseId) || identity.databaseId <= 0
+                  || identity.isDraft !== true || identity.isPrerelease !== false
+                  || identity.tagName !== process.env.TAG
+                  || (process.env.TAG_PREEXISTS !== "true"
+                    && identity.targetCommitish !== process.env.TARGET_SHA)) {
+                  console.error("Draft Release identity does not match the requested tag, state or source");
+                  process.exit(1);
+                }
+                process.stdout.write(String(identity.databaseId));
+              '
+          )"; then
+            echo "::error title=Draft Release identity lookup failed::The fully uploaded Release was preserved. Verify its numeric ID, Draft state, tag and source before recovering synchronization." >&2
+            exit 1
+          fi
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
       - name: Verify completed draft for synchronization
         id: sync-source
         if: ${{ steps.release.outputs.create_draft == 'true' }}
         env:
+          SYNC_RELEASE_ID: ${{ steps.draft.outputs.release_id }}
           SYNC_TAG: ${{ steps.release.outputs.tag }}
           SYNC_SOURCE_SHA: ${{ steps.release.outputs.target_sha }}
           SYNC_CONTROLLER_SHA: ${{ github.workflow_sha }}
