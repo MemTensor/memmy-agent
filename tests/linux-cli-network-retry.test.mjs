@@ -10,7 +10,7 @@ const wrapper = path.join(root, "scripts/internal/linux/run-installer-with-netwo
 const roots = [];
 afterEach(() => { for (const directory of roots.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 
-function runFixture({ failures = 0, message = "Temporary failure resolving 'ports.ubuntu.com'", exit = 42, teeFails = false } = {}) {
+function runFixture({ failures = 0, message = "Temporary failure resolving 'ports.ubuntu.com'", exit = 42, teeFails = false, hosted = false, mirrorExit = 0 } = {}) {
   const directory = mkdtempSync(path.join(tmpdir(), "memmy-installer-network-"));
   roots.push(directory);
   const bin = path.join(directory, "bin");
@@ -24,6 +24,7 @@ function runFixture({ failures = 0, message = "Temporary failure resolving 'port
   tool("timeout", 'printf "timeout %s\\n" "$*" >> "$CALLS"\nwhile [[ "$1" == --* ]]; do shift; done\nshift\nexec "$@"');
   tool("getent", 'printf "getent %s\\n" "$*" >> "$CALLS"\nexit 2');
   tool("sleep", 'printf "sleep %s\\n" "$*" >> "$CALLS"');
+  if (hosted) tool("node", 'printf "node %s\\n" "$*" >> "$CALLS"\nexit "$MIRROR_EXIT"');
   if (teeFails) tool("tee", 'cat >/dev/null\nexit 73');
   const installer = path.join(directory, "installer.sh");
   writeFileSync(installer, `#!/bin/bash
@@ -41,15 +42,30 @@ printf '%s\\n' 'The real installer completed.'
   const result = spawnSync("/bin/bash", [wrapper, installer], {
     encoding: "utf8",
     env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH, RUNNER_TEMP: directory,
+      GITHUB_ACTIONS: hosted ? "true" : "false", RUNNER_ENVIRONMENT: hosted ? "github-hosted" : "self-hosted",
+      EXPECTED_ARCH: "x64", MIRROR_EXIT: String(mirrorExit),
       COUNT: path.join(directory, "count"), CALLS: path.join(directory, "calls"), INSTALLED: path.join(directory, "installed"),
       FAILURES: String(failures), FAILURE_MESSAGE: message, FAILURE_EXIT: String(exit) },
   });
-  return { ...result, directory, attempts: Number(readFileSync(path.join(directory, "count"), "utf8")),
+  return { ...result, directory, attempts: existsSync(path.join(directory, "count")) ? Number(readFileSync(path.join(directory, "count"), "utf8")) : 0,
     installed: existsSync(path.join(directory, "installed")),
     calls: existsSync(path.join(directory, "calls")) ? readFileSync(path.join(directory, "calls"), "utf8") : "" };
 }
 
 describe("Linux CI installer network recovery", () => {
+  it("recovers the hosted Ubuntu mirror before a slow failed installation", () => {
+    const result = runFixture({ hosted: true });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.attempts).toBe(1);
+    expect(result.calls).toContain("getent ahosts azure.archive.ubuntu.com");
+    expect(result.calls.match(/^node .*ci-ubuntu-mirror\.mjs$/gm)).toHaveLength(1);
+  });
+  it("fails closed before installing when signed mirror recovery fails", () => {
+    const result = runFixture({ hosted: true, mirrorExit: 1 });
+    expect(result.status).toBe(1);
+    expect(result.attempts).toBe(0);
+    expect(result.installed).toBe(false);
+  });
   it("accepts only a successful real installation after transient DNS failures", () => {
     const result = runFixture({ failures: 2 });
     expect(result.status, result.stderr).toBe(0);
