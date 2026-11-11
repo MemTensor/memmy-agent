@@ -16,6 +16,7 @@ on:
       - "tests/linux-cli-packaging.test.mjs"
       - "tests/linux-computer-use-deps.test.mjs"
       - "tests/linux-cli-network-retry.test.mjs"
+      - "tests/linux-ci-ubuntu-mirror.test.mjs"
       - "scripts/internal/shared/check-open-computer-use.mjs"
       - "package.json"
       - "package-lock.json"
@@ -33,6 +34,7 @@ on:
       - "tests/linux-cli-packaging.test.mjs"
       - "tests/linux-computer-use-deps.test.mjs"
       - "tests/linux-cli-network-retry.test.mjs"
+      - "tests/linux-ci-ubuntu-mirror.test.mjs"
       - "scripts/internal/shared/check-open-computer-use.mjs"
       - "package.json"
       - "package-lock.json"
@@ -213,7 +215,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-installer-failure-${{ matrix.architecture }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/memmy-linux-installer.*/
+          path: |
+            ${{ runner.temp }}/memmy-linux-installer.*/
+            ${{ runner.temp }}/memmy-linux-mirror.*/
           if-no-files-found: warn
 
   upload:
