@@ -12,6 +12,21 @@ afterEach(async () => {
 });
 
 describe("HttpMemoryClient", () => {
+  it("refreshes credentials before requests and never falls back to a stale token", async () => {
+    const sent: (string | null)[] = [];
+    let token: string | undefined;
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "stale", timeoutMs: 500, maxRetries: 0 }, {
+      resolveToken: () => token,
+      fetchImpl: (async (_url, init) => {
+        sent.push(new Headers(init?.headers).get("authorization"));
+        return new Response(JSON.stringify({ status: "pending", reason: "source_episode_closed" }));
+      }) as typeof fetch
+    });
+    const input = { sourceTurn: { source: "codex", profileId: "default", conversationId: "session", turnId: "turn", startedAt: "2099-01-01T00:00:00.000Z", completedAt: "2099-01-01T00:01:00.000Z", completionEvidence: "final_answer:turn" }, channel: "agent_source_scan" as const, query: "Test", answer: "Done" };
+    for (token of [undefined, "initialized", "rotated", undefined]) await client.completeSourceTurn(input);
+    expect(sent).toEqual([null, "Bearer initialized", "Bearer rotated", null]);
+  });
+
   it("recognizes a healthy older service without desktop scan endpoints and does not retry its 404", async () => {
     const calls: string[] = [];
     const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "fixture", timeoutMs: 500, maxRetries: 2 }, {

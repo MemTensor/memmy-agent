@@ -43,6 +43,7 @@ describe("Memory lifecycle runtime", () => {
     ].join("\n"));
 
     await expect(readRuntimeConfig(configUrl, true)).resolves.toEqual({
+      configUrl: configUrl.href,
       endpoint: "http://127.0.0.1:18888",
       token: "test-token",
       userId: "installed-owner",

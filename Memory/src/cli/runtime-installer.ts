@@ -1,3 +1,6 @@
+import { ensureLocalMemoryToken } from "../config/local-token.js";
+import { loadCliMemoryConfig } from "./config.js";
+import { probeMemoryAuthentication } from "./auth-probe.js";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { chmod, copyFile, cp, mkdir, open, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
@@ -26,6 +29,7 @@ export interface MemoryReleaseManifest {
 
 export interface MemoryRuntimeInstallOptions {
   home?: string;
+  configPath?: string;
   version?: string;
   latest?: boolean;
   dryRun?: boolean;
@@ -42,6 +46,7 @@ export interface MemoryRuntimeInstallOptions {
   /** Maximum time to wait for the newly activated service to report its version. */
   healthCheckTimeoutMs?: number;
   endpoint?: string;
+  token?: string;
   agents?: string[];
   /** Desktop uses a newer compatible installation instead of replacing it with its bundled copy. */
   preferInstalledCompatible?: boolean;
@@ -54,6 +59,7 @@ export interface InstalledRuntimePointer extends RuntimeBuildIdentity {
   runtimeDir: string;
   entrypoint: string;
   runtimeExecutable?: string;
+  configPath?: string;
   activatedAt: string;
 }
 
@@ -85,6 +91,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     runtimeDir,
     entrypoint: join(runtimeDir, "dist", "src", "server", "index.js"),
     runtimeExecutable: options.nodeExecutable ?? process.execPath,
+    configPath: resolveHome(options.configPath ?? join(home, "config.yaml")),
     activatedAt: new Date().toISOString()
   };
   const launcher = launcherPaths(home);
@@ -105,6 +112,8 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     // Decide after acquiring the lock: a concurrent installer may have changed
     // the pointer while this installer was resolving its release.
     const previous = await currentInstalledRuntime(home);
+    pointer.configPath = resolveHome(options.configPath ?? previous?.configPath ?? join(home, "config.yaml"));
+    await ensureLocalMemoryToken(pointer.configPath, !options.skipServiceRegistration, options);
     const versionComparison = previous ? compareVersions(manifest.version, previous.version) : 1;
     if (previous && options.preferInstalledCompatible && previous.protocolVersion === MEMORY_PROTOCOL_VERSION
       && (versionComparison < 0 || (versionComparison === 0
@@ -147,12 +156,27 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
 
     const switching = !previous || previous.runtimeDir !== runtimeDir;
     const repairLegacyTask = Boolean(options.skipServiceRegistration && previous && isLegacyWindowsTask(home));
+    let previousAuthenticated = false;
+    if (previous && !options.skipServiceRegistration && !options.skipHealthCheck) {
+      // A generic activation timeout may roll back only to a runtime proven safe before stopping it.
+      const previousConfig = previous.configPath ?? join(home, "config.yaml");
+      const previousEndpoint = loadMemmyConfig(previousConfig, {}).config.storage.endpoint;
+      if (previousEndpoint) {
+        previousAuthenticated = await waitForRuntimeHealth(previousEndpoint, previous.version, 1_000, previous.buildId, previousConfig)
+          .then(() => true, () => false);
+      }
+    }
     if (!options.skipServiceRegistration || repairLegacyTask) {
       // End an already running .cmd task as well as any surviving legacy service.
       if (process.platform === "win32") await stopInstalledMemoryService(home);
-      else if (switching && previous) stopUserService();
+      else if (previous) stopUserService();
     }
-    if (switching) await waitForServiceOwnerExit(serviceHome);
+    if (switching || !options.skipServiceRegistration || repairLegacyTask) {
+      const previousState = runtimeStateDirectory(home, previous);
+      await waitForServiceOwnerExit(previousState);
+      const nextState = runtimeStateDirectory(home, pointer);
+      if (nextState !== previousState) await waitForServiceOwnerExit(nextState);
+    }
     await writeJsonAtomic(currentPath, pointer);
     await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable!);
     if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
@@ -161,24 +185,32 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     if (!options.skipHealthCheck) {
       try {
         await waitForRuntimeHealth(
-          options.endpoint ?? "http://127.0.0.1:18960",
+          options.endpoint ?? loadMemmyConfig(pointer.configPath, {}).config.storage.endpoint ?? "http://127.0.0.1:18960",
           manifest.version,
           healthCheckTimeoutMs,
-          identity.buildId
+          identity.buildId,
+          pointer.configPath,
+          options.token
         );
       } catch (error) {
-        if (!options.skipServiceRegistration && previous) {
+        if (!options.skipServiceRegistration) {
           if (process.platform === "win32") await stopInstalledMemoryService(home);
           else stopUserService();
+        }
+        if (error instanceof MemoryAuthenticationError) {
+          // Do not reactivate an unverified older runtime after an auth failure.
+          throw error;
         }
         if (previous && identity.schemaVersion && (!previous.schemaVersion || previous.schemaVersion < identity.schemaVersion)) {
           // The failed process may already have committed its DB migration.
           // Keep the new pointer; rolling back code could strand that database.
           throw new Error(`Memory activation failed; kept the runtime supporting schema ${identity.schemaVersion} to avoid a schema downgrade`, { cause: error });
         } else if (previous) {
+          // A custom config switch must not restore a tokenless previous launcher.
+          await ensureLocalMemoryToken(previous.configPath ?? join(home, "config.yaml"), !options.skipServiceRegistration);
           await writeJsonAtomic(currentPath, previous);
           await writeStableLauncher(home, serviceHome, previous.runtimeExecutable ?? process.execPath);
-          if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
+          if (previousAuthenticated) registerAndStartUserService(home, serviceHome);
         } else {
           await cleanupFailedFirstInstall({
             currentPath,
@@ -231,7 +263,10 @@ export async function startInstalledMemoryService(home = "~/.memmy"): Promise<Re
     const pointer = await currentInstalledRuntime(resolvedHome);
     if (!pointer) throw new Error("Memory is not installed");
     await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion, pointer);
+    await ensureLocalMemoryToken(pointer.configPath ?? join(resolvedHome, "config.yaml"), true);
     if (process.platform === "win32") await stopInstalledMemoryService(resolvedHome);
+    else stopUserService();
+    await waitForServiceOwnerExit(runtimeStateDirectory(resolvedHome, pointer));
     await writeStableLauncher(resolvedHome, serviceHome, pointer.runtimeExecutable ?? process.execPath);
     registerAndStartUserService(resolvedHome, serviceHome);
     return { ok: true, action: "start", ...pointer };
@@ -332,7 +367,7 @@ export async function stopInstalledMemoryService(
 ): Promise<Record<string, unknown>> {
   const resolvedHome = resolveHome(home);
   const runtimeState = await readJsonFile<MemoryRuntimeState>(
-    join(resolvedHome, "memory-service", "runtime.json")
+    join(runtimeStateDirectory(resolvedHome, await currentInstalledRuntime(resolvedHome)), "runtime.json")
   );
   (dependencies.stopUserService ?? stopUserService)();
 
@@ -342,10 +377,10 @@ export async function stopInstalledMemoryService(
 
   const endpoint = loopbackEndpoint(runtimeState.endpoint);
   const configPath = runtimeState.configPath ?? join(resolvedHome, "config.yaml");
-  const token = loadMemmyConfig(configPath).config.storage.token ?? "";
+  const token = loadCliMemoryConfig(configPath, endpoint).config.token;
   const request = dependencies.fetch ?? fetch;
   const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
-  const probe = await probeMemoryRuntime(endpoint, headers, request);
+  const probe = await probeMemoryRuntime(endpoint, request);
   if (probe === "unexpected") {
     throw new Error(`refusing to stop an unexpected service at ${endpoint}`);
   }
@@ -367,7 +402,7 @@ export async function stopInstalledMemoryService(
     } catch (error) {
       shutdownError = error;
     }
-    const stopped = await waitForMemoryRuntimeStop(endpoint, headers, request);
+    const stopped = await waitForMemoryRuntimeStop(endpoint, request);
     if (!stopped) {
       throw shutdownError instanceof Error
         ? shutdownError
@@ -379,12 +414,10 @@ export async function stopInstalledMemoryService(
 
 async function probeMemoryRuntime(
   endpoint: string,
-  headers: Record<string, string>,
   request: typeof fetch
 ): Promise<"stopped" | "memory" | "unexpected"> {
   try {
     const response = await request(`${endpoint}/api/v1/health`, {
-      headers,
       signal: AbortSignal.timeout(1_000)
     });
     if (!response.ok) return "unexpected";
@@ -397,15 +430,18 @@ async function probeMemoryRuntime(
 
 async function waitForMemoryRuntimeStop(
   endpoint: string,
-  headers: Record<string, string>,
   request: typeof fetch
 ): Promise<boolean> {
   const deadline = Date.now() + SERVICE_STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await probeMemoryRuntime(endpoint, headers, request) === "stopped") return true;
+    if (await probeMemoryRuntime(endpoint, request) === "stopped") return true;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
   }
   return false;
+}
+
+function runtimeStateDirectory(home: string, pointer?: InstalledRuntimePointer): string {
+  return join(pointer?.configPath ? dirname(pointer.configPath) : home, "memory-service");
 }
 
 async function waitForServiceOwnerExit(serviceHome: string): Promise<void> {
@@ -444,18 +480,44 @@ async function reuseInstalledRuntime(
 ): Promise<Record<string, unknown>> {
   if (options.dryRun) return { ok: true, reused: true, dryRun: true, ...pointer };
   await validateRuntime(pointer.runtimeDir, pointer.version, pointer.target, pointer.protocolVersion, pointer);
+  const configPath = resolveHome(options.configPath ?? pointer.configPath ?? join(home, "config.yaml"));
+  // A registered service may still hold a tokenless pre-upgrade config in memory.
+  // Reuse its code only after a normal service-manager restart, never an anonymous fallback.
+  if (!options.skipServiceRegistration && process.platform !== "win32") {
+    stopUserService();
+  }
   const repairLegacyTask = Boolean(options.skipServiceRegistration && isLegacyWindowsTask(home));
   if (process.platform === "win32" && (!options.skipServiceRegistration || repairLegacyTask)) await stopInstalledMemoryService(home);
+  if (!options.skipServiceRegistration || repairLegacyTask) {
+    await waitForServiceOwnerExit(runtimeStateDirectory(home, pointer));
+    if (configPath !== (pointer.configPath ?? join(home, "config.yaml"))) {
+      await waitForServiceOwnerExit(join(dirname(configPath), "memory-service"));
+    }
+  }
+  if (pointer.configPath !== configPath) {
+    pointer = { ...pointer, configPath };
+    await writeJsonAtomic(join(serviceHome, "current.json"), pointer);
+  }
   await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable ?? options.nodeExecutable ?? process.execPath);
   if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
   else if (repairLegacyTask) tryRepairLegacyWindowsTaskRegistration(home, serviceHome);
   if (!options.skipHealthCheck) {
-    await waitForRuntimeHealth(
-      options.endpoint ?? "http://127.0.0.1:18960",
-      pointer.version,
-      healthCheckTimeoutMs,
-      pointer.buildId
-    );
+    try {
+      await waitForRuntimeHealth(
+        options.endpoint ?? loadMemmyConfig(configPath, {}).config.storage.endpoint ?? "http://127.0.0.1:18960",
+        pointer.version,
+        healthCheckTimeoutMs,
+        pointer.buildId,
+        configPath,
+        options.token
+      );
+    } catch (error) {
+      if (error instanceof MemoryAuthenticationError && !options.skipServiceRegistration) {
+        if (process.platform === "win32") await stopInstalledMemoryService(home);
+        else stopUserService();
+      }
+      throw error;
+    }
   }
   return { ok: true, reused: true, ...pointer };
 }
@@ -664,7 +726,9 @@ async function writeStableLauncher(home: string, serviceHome: string, nodeExecut
     "try {",
     "if (windows) mkdirSync(logs, { recursive: true });",
     `const pointer = JSON.parse(readFileSync(${JSON.stringify(join(serviceHome, "current.json"))}, "utf8"));`,
-    `const env = { ...process.env, MEMMY_HOME: ${JSON.stringify(home)}, MEMMY_CONFIG: ${JSON.stringify(join(home, "config.yaml"))}, MEMMY_EMBEDDING_MODEL_ROOT: path.join(pointer.runtimeDir, "embedding-models") };`,
+    `const env = { ...process.env, MEMMY_HOME: ${JSON.stringify(home)}, MEMMY_CONFIG: pointer.configPath || ${JSON.stringify(join(home, "config.yaml"))}, MEMMY_EMBEDDING_MODEL_ROOT: path.join(pointer.runtimeDir, "embedding-models") };`,
+    "delete env.MEMMY_MEMORY_TOKEN;",
+    "delete env.MEMORY_SERVICE_TOKEN;",
     "const handles = [];",
     "let child;",
     "try {",
@@ -819,11 +883,15 @@ function runLifecycle(command: string, args: string[], allowFailure = false): vo
   }
 }
 
+class MemoryAuthenticationError extends Error {}
+
 async function waitForRuntimeHealth(
   endpoint: string,
   expectedVersion: string,
   timeoutMs: number,
-  expectedBuildId?: string
+  expectedBuildId?: string,
+  configPath?: string,
+  explicitToken?: string
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "service did not respond";
@@ -840,8 +908,16 @@ async function waitForRuntimeHealth(
           && health.protocolVersion === MEMORY_PROTOCOL_VERSION
           && (health.serviceVersion === expectedVersion || health.version === expectedVersion)
           && (!expectedBuildId || health.buildId === expectedBuildId)
-        ) return;
-        if (health.protocolVersion !== MEMORY_PROTOCOL_VERSION) {
+          && health.status !== "starting" && health.status !== "upgrading"
+        ) {
+          const token = explicitToken || loadCliMemoryConfig(configPath, endpoint).config.token || "";
+          const authentication = await probeMemoryAuthentication(endpoint, token).catch((cause) => {
+            throw new MemoryAuthenticationError("Memory activation rejected: service authentication could not be verified", { cause });
+          });
+          if (authentication === "authenticated") return;
+          if (authentication !== "starting") throw new MemoryAuthenticationError(`Memory activation rejected: service authentication is ${authentication}`);
+          lastError = "service is still starting";
+        } else if (health.protocolVersion !== MEMORY_PROTOCOL_VERSION) {
           lastError = `service reported protocol ${String(health.protocolVersion)}`;
         } else {
           lastError = `service reported version ${String(health.serviceVersion ?? health.version)}, build ${String(health.buildId)}`;
@@ -850,6 +926,7 @@ async function waitForRuntimeHealth(
         lastError = `health returned HTTP ${response.status}`;
       }
     } catch (error) {
+      if (error instanceof MemoryAuthenticationError) throw error;
       lastError = error instanceof Error ? error.message : String(error);
     }
     const delayMs = Math.min(250, Math.max(0, deadline - Date.now()));

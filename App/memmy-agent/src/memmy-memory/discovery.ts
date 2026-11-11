@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
-import { normalizeOutputLanguage } from "@memmy/local-api-contracts";
+import { normalizeOutputLanguage, resolveMemoryConnection, sameHttpOrigin } from "@memmy/local-api-contracts";
 import type { MemmyMemoryConnection } from "./types.js";
 
 export const DEFAULT_MEMOS_MEMORY_URL = "http://127.0.0.1:18960";
@@ -79,22 +79,26 @@ export function discoverMemmyMemoryConnection(options: MemmyMemoryDiscoveryOptio
   const storage = memmyMemory.storage && typeof memmyMemory.storage === "object" ? memmyMemory.storage as Record<string, any> : {};
 
   const baseUrl =
-    env.MEMMY_MEMORY_URL ??
-    env.MEMORY_SERVICE_URL ??
-    runtime.url ??
-    runtime.baseUrl ??
-    storage.endpoint ??
+    env.MEMMY_MEMORY_URL?.trim() ||
+    env.MEMORY_SERVICE_URL?.trim() ||
+    runtime.url ||
+    runtime.baseUrl ||
+    storage.endpoint ||
     DEFAULT_MEMOS_MEMORY_URL;
-  const token =
-    env.MEMMY_MEMORY_TOKEN ??
-    env.MEMORY_SERVICE_TOKEN ??
-    runtime.token ??
-    readTokenFile(runtime.tokenFile, homeDir) ??
-    storage.token ??
-    null;
+  const endpoint = normalizeMemmyMemoryBaseUrl(String(baseUrl));
+  const configuredEndpoint = normalizeMemmyMemoryBaseUrl(storage.endpoint);
+  const runtimeEndpoint = normalizeMemmyMemoryBaseUrl(runtime.url ?? runtime.baseUrl ?? configuredEndpoint);
+  let { token } = resolveMemoryConnection(configuredEndpoint, undefined, env, endpoint);
+  if (!token && sameHttpOrigin(endpoint, runtimeEndpoint)) {
+    const inline = typeof runtime.token === "string" ? runtime.token.trim() : "";
+    token = inline || readTokenFile(runtime.tokenFile, homeDir) || undefined;
+  }
+  if (!token && sameHttpOrigin(endpoint, configuredEndpoint) && typeof storage.token === "string") {
+    token = storage.token.trim();
+  }
 
   return {
-    baseUrl: normalizeMemmyMemoryBaseUrl(String(baseUrl)),
+    baseUrl: endpoint,
     token: token ? String(token) : null,
     source: env.MEMMY_MEMORY_URL || env.MEMORY_SERVICE_URL
       ? "env"

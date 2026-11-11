@@ -79,7 +79,7 @@ describe("memmy-memory CLI setup commands", () => {
     expect(existsSync(dbPath)).toBe(false);
   });
 
-  it("generates an authentication token only when explicitly requested", async () => {
+  it("generates an authentication token by default", async () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     createAllAgentRoots(root);
@@ -91,8 +91,7 @@ describe("memmy-memory CLI setup commands", () => {
         "--home", root,
         "--config", configPath,
         "--db", join(root, "memory.sqlite"),
-        "--skip-agent-skills",
-        "--generate-token-if-missing"
+        "--skip-agent-skills"
       ]
     });
 

@@ -1,3 +1,5 @@
+import { upgradeMemoryCli } from "../src/cli/setup.js";
+import { parse as parseYaml } from "yaml";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,6 +24,61 @@ afterEach(() => {
 });
 
 describe("standalone Memory runtime installer", () => {
+  it("persists and reuses a custom configuration path and token", async () => {
+    const root = tempRoot(); const home = join(root, "home"), configPath = join(root, "custom.yaml");
+    const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
+    const flags = { home, runtimeDirectory, skipServiceRegistration: true, skipHealthCheck: true };
+    await installMemoryRuntime({ ...flags, configPath });
+    const original = readFileSync(configPath, "utf8");
+    expect(original).toMatch(/token: [a-f0-9]{64}/);
+    expect(await installMemoryRuntime({ ...flags, preferInstalledCompatible: true })).toMatchObject({ configPath });
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+    expect(existsSync(join(home, "config.yaml"))).toBe(false);
+  });
+  it("imports legacy settings before initializing the first shared credential during upgrade", async () => {
+    const root = tempRoot(), home = join(root, "home");
+    const legacy = join(root, ".openclaw", "memos-plugin");
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, "config.yaml"), "hub: {enabled: false}\n");
+    const result = await upgradeMemoryCli({
+      home, legacyRoot: root, nonInteractive: true, runtimeDirectory: createRuntimeDirectory(root, "2.1.0"),
+      skipServiceRegistration: true, skipHealthCheck: true
+    });
+    expect(result.migration).toMatchObject({ configSource: "openclaw" });
+    expect(parseYaml(readFileSync(join(home, "config.yaml"), "utf8")).memmyMemory).toMatchObject({
+      migratedFrom: "openclaw", storage: { token: expect.stringMatching(/^[a-f0-9]{64}$/) }
+    });
+  });
+  it("waits for the old service lock in its custom config directory before switching", async () => {
+    const root = tempRoot(), home = join(root, "home");
+    const configPath = join(root, "custom", "config.yaml");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true };
+    await installMemoryRuntime({ ...flags, configPath, runtimeDirectory: createRuntimeDirectory(root, "2.1.0") });
+    const state = join(root, "custom", "memory-service");
+    mkdirSync(state, { recursive: true });
+    const lock = join(state, "service.lock");
+    writeFileSync(lock, JSON.stringify({ pid: process.pid }));
+    const switching = installMemoryRuntime({ ...flags, configPath: join(home, "new.yaml"), runtimeDirectory: createRuntimeDirectory(root, "2.1.1") });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect((await currentInstalledRuntime(home))?.version).toBe("2.1.0");
+    rmSync(lock);
+    await switching;
+    expect((await currentInstalledRuntime(home))?.version).toBe("2.1.1");
+  });
+  it.each(["anonymous", "mismatch", "unsupported", "malformed"])("does not reactivate an older runtime after %s authentication", async mode => {
+    const root = tempRoot(), home = join(root, "home");
+    const flags = { home, skipServiceRegistration: true, skipHealthCheck: true };
+    await installMemoryRuntime({ ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.0") });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/health")) return new Response(JSON.stringify({ ok: true, protocolVersion: 1, serviceVersion: "2.1.1" }));
+      if (mode === "malformed") return new Response("invalid", { status: new Headers(init?.headers).has("authorization") ? 200 : 401 });
+      return new Response("{}", { status: mode === "anonymous" ? 200 : mode === "mismatch" ? 401 : 404 });
+    });
+    try {
+      await expect(installMemoryRuntime({ ...flags, runtimeDirectory: createRuntimeDirectory(root, "2.1.1"), skipHealthCheck: false, healthCheckTimeoutMs: 1_000 })).rejects.toThrow(mode === "malformed" ? "could not be verified" : `authentication is ${mode}`);
+      expect(await currentInstalledRuntime(home)).toMatchObject({ version: "2.1.1" });
+    } finally { fetchSpy.mockRestore(); }
+  });
   it("maps all supported release targets", () => {
     expect(runtimeTarget("darwin", "arm64")).toBe("darwin-arm64");
     expect(runtimeTarget("darwin", "x64")).toBe("darwin-x64");
@@ -126,7 +183,7 @@ describe("standalone Memory runtime installer", () => {
     expect(readFileSync(pointer!.entrypoint, "utf8")).toContain("runtime fixture");
     const launcher = readFileSync(join(home, "bin", "memmy-memory-service.cjs"), "utf8");
     expect(launcher).toContain(`MEMMY_HOME: ${JSON.stringify(home)}`);
-    expect(launcher).toContain(`MEMMY_CONFIG: ${JSON.stringify(join(home, "config.yaml"))}`);
+    expect(launcher).toContain(`MEMMY_CONFIG: pointer.configPath || ${JSON.stringify(join(home, "config.yaml"))}`);
     expect(launcher).toContain("MEMMY_EMBEDDING_MODEL_ROOT");
     expect(JSON.parse(readFileSync(join(home, "memory-service", "installation.json"), "utf8"))).toMatchObject({
       agents: ["openclaw", "hermes"]
@@ -176,6 +233,28 @@ describe("standalone Memory runtime installer", () => {
     expect(launcher).not.toContain("/desktop/electron");
   }, 15_000);
 
+  it("requires a credential for the activation endpoint before accepting a different origin", async () => {
+    const root = tempRoot();
+    const options = { home: join(root, "home"), runtimeDirectory: createRuntimeDirectory(root, "2.1.0"),
+      endpoint: "https://other.invalid", skipServiceRegistration: true };
+    const headers: (string | null)[] = [];
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const bearer = new Headers(init?.headers).get("authorization");
+      headers.push(bearer);
+      if (String(url).endsWith("/health")) return Response.json({ ok: true, protocolVersion: 1, serviceVersion: "2.1.0" });
+      return Response.json({ authenticated: true, authVersion: 1 }, { status: bearer ? 200 : 401 });
+    });
+    try {
+      await expect(installMemoryRuntime(options)).rejects.toThrow("authentication");
+      expect(headers).toEqual([null]);
+      headers.length = 0;
+      await installMemoryRuntime({ ...options, preferInstalledCompatible: true, token: "explicit-test-token" });
+      expect(headers).toEqual([null, null, "Bearer explicit-test-token"]);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
   it("holds the installer lock until a reused runtime finishes activation", async () => {
     const root = tempRoot();
     const home = join(root, "home");
@@ -185,7 +264,8 @@ describe("standalone Memory runtime installer", () => {
     const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
     let releaseHealth!: () => void;
     const healthReady = new Promise<void>((resolve) => { releaseHealth = resolve; });
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/auth/check")) return new Response(JSON.stringify({ authenticated: true, authVersion: 1 }), { status: new Headers(init?.headers).has("authorization") ? 200 : 401 });
       resolveStarted();
       await healthReady;
       return { ok: true, json: async () => ({ ok: true, protocolVersion: 1, serviceVersion: "2.1.0" }) } as Response;
@@ -367,7 +447,8 @@ describe("standalone Memory runtime installer", () => {
       resolveStarted = resolve;
     });
     const startedAt = Date.now();
-    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/auth/check")) return new Response(JSON.stringify({ authenticated: true, authVersion: 1 }), { status: new Headers(init?.headers).has("authorization") ? 200 : 401 });
       resolveStarted();
       const ready = Date.now() - startedAt >= 16_000;
       return {
@@ -559,25 +640,16 @@ describe("standalone Memory runtime installer", () => {
     const home = join(root, "home");
     const configPath = join(home, "config.yaml");
     mkdirSync(join(home, "memory-service"), { recursive: true });
-    writeFileSync(configPath, [
-      "memmyMemory:",
-      "  storage:",
-      "    mode: local",
-      "    backend: sqlite",
-      `    sqlitePath: ${JSON.stringify(join(home, "memory-service", "memory.sqlite"))}`,
-      "    token: service-token",
-      ""
-    ].join("\n"));
-
     let shutdownRequests = 0;
     const server = createServer((request, response) => {
-      expect(request.headers.authorization).toBe("Bearer service-token");
       if (request.method === "GET" && request.url === "/api/v1/health") {
+        expect(request.headers.authorization).toBeUndefined();
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));
         return;
       }
       if (request.method === "POST" && request.url === "/api/v1/admin/shutdown") {
+        expect(request.headers.authorization).toBe("Bearer service-token");
         shutdownRequests += 1;
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ ok: true }));
@@ -589,6 +661,17 @@ describe("standalone Memory runtime installer", () => {
     await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port");
+    writeFileSync(configPath, [
+      "memmyMemory:",
+      "  storage:",
+      "    mode: local",
+      "    backend: sqlite",
+      `    sqlitePath: ${JSON.stringify(join(home, "memory-service", "memory.sqlite"))}`,
+      `    endpoint: http://127.0.0.1:${address.port}`,
+      "    token: service-token",
+      ""
+    ].join("\n"));
+
     writeFileSync(join(home, "memory-service", "runtime.json"), JSON.stringify({
       pid: 12345,
       endpoint: `http://127.0.0.1:${address.port}`,

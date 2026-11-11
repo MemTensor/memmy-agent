@@ -1,6 +1,9 @@
 /** Src module. */
 import { RuntimeConfigSchema, type AccountChannel, type AppSettingsDto, type LastLaunchMode, type RuntimeConfig } from "@memmy/local-api-contracts";
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import YAML from "yaml";
+import { DEFAULT_MEMORY_URL, MEMORY_CONNECTION_ENV_ALIASES, resolveMemoryConnection, sameHttpOrigin } from "@memmy/agent-source-core/memory-connection";
 import { removeLegacyKnowledgeCredentials } from "@memmy/knowledge";
 import type { AddressInfo } from "node:net";
 import { createDefaultAgentAdapterRegistry, type AgentAdapterRegistry } from "./adapters/outbound/agent-adapter/index.js";
@@ -143,7 +146,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       appStateStore,
       runtimeToken: options.localToken
     });
-    const memoryClient = options.memoryClient ?? createDefaultMemoryClient(process.env);
+    const memoryClient = options.memoryClient ?? createDefaultMemoryClient(process.env, memmyConfigPath);
     const memmyConfigWriter = createMemmyConfigWriter({
       configPath: memmyConfigPath,
       accountChannel: options.accountChannel
@@ -402,15 +405,30 @@ function tryGetInstallationId(appStateStore: ReturnType<typeof createAppStateSto
   }
 }
 
-export function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig | null {
-  const baseUrl = (env.MEMMY_MEMORY_LAYER_URL ?? env.MEMMY_MEMORY_URL ?? env.MEMORY_SERVICE_URL)?.trim();
-  if (!baseUrl) {
-    return null;
-  }
+const MEMORY_LAYER_ENV_ALIASES = [
+  ["MEMMY_MEMORY_LAYER_URL", "MEMMY_MEMORY_LAYER_TOKEN"],
+  ...MEMORY_CONNECTION_ENV_ALIASES
+] as const;
 
+export function readMemoryLayerConfig(env: NodeJS.ProcessEnv, configPath = env.MEMMY_CONFIG): MemoryLayerConfig | null {
+  const baseUrl = MEMORY_LAYER_ENV_ALIASES.map(([url]) => env[url]?.trim()).find(Boolean);
+  if (!baseUrl) return null;
+
+  let fileEndpoint = DEFAULT_MEMORY_URL;
+  let fileToken: string | undefined;
+  if (configPath) {
+    try {
+      const memory = YAML.parse(readFileSync(configPath, "utf8"))?.memmyMemory;
+      fileEndpoint = memory?.storage?.endpoint || memory?.endpoint || DEFAULT_MEMORY_URL;
+      fileToken = memory?.storage?.token || memory?.token;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  const { token } = resolveMemoryConnection(fileEndpoint, fileToken, env, baseUrl, MEMORY_LAYER_ENV_ALIASES);
   return {
     baseUrl,
-    token: env.MEMMY_MEMORY_LAYER_TOKEN ?? env.MEMMY_MEMORY_TOKEN ?? env.MEMORY_SERVICE_TOKEN ?? "",
+    token: token ?? "",
     timeoutMs: Number.parseInt(env.MEMMY_MEMORY_LAYER_TIMEOUT_MS ?? String(DEFAULT_MEMORY_LAYER_TIMEOUT_MS), 10),
     maxRetries: Number.parseInt(env.MEMMY_MEMORY_LAYER_MAX_RETRIES ?? "3", 10)
   };
@@ -422,10 +440,15 @@ export function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig
  * Memory is a process boundary: Desktop always talks to it over HTTP and never
  * reads the service-owned SQLite database.
  */
-function createDefaultMemoryClient(env: NodeJS.ProcessEnv): MemoryClient {
-  const memoryLayerConfig = readMemoryLayerConfig(env);
+function createDefaultMemoryClient(env: NodeJS.ProcessEnv, configPath: string): MemoryClient {
+  const memoryLayerConfig = readMemoryLayerConfig(env, configPath);
   if (memoryLayerConfig) {
-    return createHttpMemoryClient(memoryLayerConfig);
+    return createHttpMemoryClient(memoryLayerConfig, {
+      resolveToken: () => {
+        const current = readMemoryLayerConfig(env, configPath);
+        return current && sameHttpOrigin(memoryLayerConfig.baseUrl, current.baseUrl) ? current.token : undefined;
+      }
+    });
   }
 
   throw new Error("MEMMY_MEMORY_LAYER_URL is required");

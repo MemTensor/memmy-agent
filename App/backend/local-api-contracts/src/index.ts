@@ -4,6 +4,7 @@ import { ModelThinkingConfigSchema } from "./model-thinking-levels.js";
 import { ModelCapabilityCatalogSchema } from "./model-capability-catalog.js";
 import { PluginCapabilityEventPayloadSchema } from "./plugin.js";
 export * from "@memmy/agent-source-core/scan-state";
+export { resolveMemoryConnection, sameHttpOrigin } from "@memmy/agent-source-core/memory-connection";
 
 export const ScanVersionSchema = z.object({ generation: z.number().int().nonnegative(), sequence: z.number().int().nonnegative() });
 export const ScanLifecycleSchema = z.enum(["idle", "running", "paused", "completed", "failed", "cancelled"]);

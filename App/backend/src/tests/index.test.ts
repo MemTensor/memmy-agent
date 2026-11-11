@@ -574,6 +574,43 @@ describe("local api", () => {
     });
   });
 
+  it("ignores empty credential aliases instead of hiding the active service token", () => {
+    expect(readMemoryLayerConfig({ MEMMY_MEMORY_URL: "http://127.0.0.1:18960", MEMMY_MEMORY_LAYER_TOKEN: " ", MEMMY_MEMORY_TOKEN: "", MEMORY_SERVICE_TOKEN: "configured-token" })).toMatchObject({ token: "configured-token" });
+  });
+
+  it.each(["MEMMY_MEMORY_LAYER_URL", "MEMMY_MEMORY_URL", "MEMORY_SERVICE_URL"])("uses only matching credentials for %s", (urlKey) => {
+    tempDir = mkdtempSync(join(tmpdir(), "memory-origin-"));
+    const configPath = join(tempDir, "config.yaml");
+    writeFileSync(configPath, "memmyMemory: { storage: { endpoint: 'https://NEW.test:443', token: new-token } }");
+    const env = {
+      MEMMY_CONFIG: configPath,
+      [urlKey]: "https://new.test/",
+      MEMORY_SERVICE_TOKEN: "old-token",
+      ...(urlKey !== "MEMORY_SERVICE_URL" ? { MEMORY_SERVICE_URL: "https://old.test" } : {}),
+      MEMMY_MEMORY_LAYER_TOKEN: "",
+      MEMMY_MEMORY_TOKEN: ""
+    };
+    expect(readMemoryLayerConfig(env)?.token).toBe(urlKey === "MEMORY_SERVICE_URL" ? "old-token" : "new-token");
+    // A token without its own URL belongs to the file origin, not whichever URL won precedence.
+    expect(readMemoryLayerConfig({ MEMMY_CONFIG: configPath, MEMMY_MEMORY_URL: "http://other.test", MEMMY_MEMORY_LAYER_TOKEN: "unpaired-file-token" })?.token).toBe("");
+    expect(readMemoryLayerConfig({ ...env, MEMMY_MEMORY_LAYER_URL: "https://layer.test", MEMMY_MEMORY_LAYER_TOKEN: "layer-token" })?.token).toBe("layer-token");
+  });
+
+  it("rereads initialized and rotated file credentials while rejecting cross-origin fallback", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memory-token-refresh-"));
+    const configPath = join(tempDir, "config.yaml");
+    const env = { MEMMY_CONFIG: configPath, MEMMY_MEMORY_LAYER_URL: "http://memory.test" };
+    expect(readMemoryLayerConfig(env)?.token).toBe("");
+    for (const token of ["initialized", "rotated"]) {
+      writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint: "http://MEMORY.test:80/", token } } }));
+      expect(readMemoryLayerConfig(env)?.token).toBe(token);
+    }
+    for (const endpoint of ["https://memory.test", "http://other.test", "http://memory.test:81"]) {
+      writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint, token: "unrelated" } } }));
+      expect(readMemoryLayerConfig(env)?.token).toBe("");
+    }
+  });
+
   it("accepts Memory service URL aliases for the writable Memory Layer client", () => {
     expect(readMemoryLayerConfig({
       MEMMY_MEMORY_URL: " http://127.0.0.1:18960 ",

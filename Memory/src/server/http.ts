@@ -71,6 +71,7 @@ const workerLogger = createMemoryLogger("worker");
 export const API_ROUTES = [
   "GET /health",
   "GET /api/v1/health",
+  "GET /api/v1/auth/check",
   "POST /api/v1/admin/reload-config",
   "GET /api/v1/admin/memory-token-budget",
   "POST /api/v1/admin/shutdown",
@@ -217,7 +218,12 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         return;
       }
       const viewerRequest = isViewerApiRequest(request, url);
-      if (viewerRequest) assertLocalViewerRequest(request, url);
+      // Node fetch also sends Sec-Fetch-Mode: cors. That header alone does not
+      // identify a browser or require a loopback Host for authenticated clients.
+      const browserLogRead = request.method === "GET" && url.pathname === "/api/v1/memory/logs" &&
+        (request.headers.origin !== undefined || request.headers["sec-fetch-site"] !== undefined ||
+          request.headers["sec-fetch-dest"] !== undefined);
+      if (viewerRequest || browserLogRead) assertLocalViewerRequest(request, url);
       if (viewerRequest && request.method === "GET" && url.pathname === "/api/v1/events") {
         streamViewerEvents({
           service: options.service,
@@ -229,10 +235,13 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         }, request, response, url);
         return;
       }
-      const principal = {
-        ...(viewerRequest ? viewerPrincipal() : authenticate(request, url, options)),
-        timeZone: requestTimeZone(request, options.timeZone)
-      };
+      const timeZone = requestTimeZone(request, options.timeZone);
+      const authenticated = viewerRequest ? undefined : authenticate(request, url, options);
+      if (request.method === "GET" && url.pathname === "/api/v1/auth/check") {
+        if (authenticated?.kind !== "local") throw new MemoryServiceError("unauthorized", "local service token required");
+        writeJson(response, 200, { authenticated: true, authVersion: 1 });
+        return;
+      }
       const body = await readJson(request);
       if (viewerRequest) {
         const viewerResult = await routeViewerRequest({
@@ -240,7 +249,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           configPath: options.configPath,
           routes: API_ROUTES,
           scheduleWorker: autoWorker.schedule,
-          timeZone: principal.timeZone,
+          timeZone,
           viewerCli: options.viewerCli,
           restartService: options.onRestartRequested,
           agentSources
@@ -260,6 +269,13 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           return;
         }
       }
+      // Viewer-only routes returned above. Shared UI operations are explicit;
+      // all other service routes must authenticate the request's credentials.
+      const principal = {
+        ...(authenticated ?? (isSharedViewerRoute(request.method, url.pathname)
+          ? viewerPrincipal() : authenticate(request, url, options))),
+        timeZone
+      };
       if (isAgentSourceScanPath(url.pathname)) {
         assertLocalAgentSourceRequest(request, principal.kind);
         const scanResult = await routeAgentSourceScan(agentSources, request.method, url, body);
@@ -1065,7 +1081,7 @@ async function routeRequest(
       timeZone: principal.timeZone,
       includeRawText: url.searchParams.get("includeRawText") === "true",
       includeAudit: url.searchParams.get("includeAudit") === "true"
-    });
+    }, { includeApiLogs: canReadRawLogs(principal) });
   }
 
   if (method === "DELETE" && path === "/api/v1/admin/data") {
@@ -1106,7 +1122,7 @@ async function routeRequest(
   }
 
   if (method === "GET" && path === "/api/v1/memory/logs") {
-    requirePanelRead(principal);
+    if (!canReadRawLogs(principal)) throw new MemoryServiceError("forbidden", "raw logs require administrator access");
     return service.apiLogs({
       tools: parseApiLogTools(url.searchParams.get("tools")),
       sourceAgent: url.searchParams.get("sourceAgent") ?? undefined,
@@ -1479,7 +1495,7 @@ function authenticate(
       scopes: scoped.scopes ?? ["memory:read", "memory:write"]
     };
   }
-  if (!localToken && (!auth || auth.allowAnonymous === true)) {
+  if (!localToken && auth?.allowAnonymous === true) {
     return {
       kind: "anonymous",
       namespace: namespaceFromRequest(request, url),
@@ -1487,6 +1503,12 @@ function authenticate(
     };
   }
   throw new MemoryServiceError("unauthorized", "invalid memory service token", 401, requestIdFromHeaders(request));
+}
+
+function isSharedViewerRoute(method: string, path: string): boolean {
+  if (method === "DELETE" && (path === "/api/v1/admin/data" || /^\/api\/v1\/panel\/tasks\/[^/]+$/.test(path))) return true;
+  // The Viewer opens and deletes individual memories and reads /memory/logs.
+  return (method === "GET" || method === "DELETE") && /^\/api\/v1\/memory\/[^/]+$/.test(path);
 }
 
 function viewerPrincipal(): AuthPrincipal {
@@ -1557,6 +1579,12 @@ function requireMemoryWrite(principal: AuthPrincipal): void {
 
 function requirePanelRead(principal: AuthPrincipal): void {
   requireAnyScope(principal, ["panel:read", "panel:write", "memory:read", "memory:write", "admin:read", "admin:write"]);
+}
+
+function canReadRawLogs(principal: AuthPrincipal): boolean {
+  if (principal.kind === "local" || principal.kind === "viewer") return true;
+  return principal.kind === "scoped" && (principal.scopes.includes("*") ||
+    hasScope(principal, "admin:read") || hasScope(principal, "admin:write"));
 }
 
 function requireAdminWrite(principal: AuthPrincipal): void {

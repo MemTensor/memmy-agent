@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { installAgentAdapters } from "../src/cli/adapter-installer.js";
 import type { InstalledRuntimePointer } from "../src/cli/runtime-installer.js";
 
@@ -13,6 +14,7 @@ describe("thin HTTP agent adapters", () => {
   it("installs and configures OpenClaw and Hermes without shipping another Core", async () => {
     const root = tempRoot();
     const runtime = fixtureRuntime(root);
+    runtime.configPath = join(root, "custom", "config.yaml");
     mkdirSync(join(root, ".openclaw"), { recursive: true });
     mkdirSync(join(root, ".hermes"), { recursive: true });
     writeFileSync(join(root, ".openclaw", "openclaw.json"), "{\n  // keep user comments\n  \"plugins\": {}\n}\n");
@@ -26,9 +28,70 @@ describe("thin HTTP agent adapters", () => {
     expect(openClawConfig).toContain("keep user comments");
     expect(openClawConfig).toContain('"memory": "memmy-memory"');
     expect(existsSync(join(root, ".openclaw", "plugins", "memmy-memory", "index.js"))).toBe(true);
+    for (const directory of [join(root, ".openclaw/plugins/memmy-memory"), join(root, ".hermes/plugins/memmy")]) {
+      expect(JSON.parse(readFileSync(join(directory, "memmy-memory-config.json"), "utf8"))).toEqual({ memmy_config_path: runtime.configPath });
+    }
     const hermes = parseYaml(readFileSync(join(root, ".hermes", "config.yaml"), "utf8")) as Record<string, any>;
     expect(hermes).toMatchObject({ model: "test-model", memory: { provider: "memmy" } });
     expect(existsSync(join(root, ".hermes", "plugins", "memmy", "memmy_provider", "__init__.py"))).toBe(true);
+  });
+
+  it("reads the selected config on each request and only shares its token with its configured endpoint", async () => {
+    const root = tempRoot();
+    const configPath = join(root, "shared.yaml");
+    writeFileSync(join(root, "memmy-memory-config.json"), JSON.stringify({ memmy_config_path: configPath }));
+    const { readAdapterConnection } = await import(new URL("../adapters/connection.js", import.meta.url).href);
+    const connection = () => readAdapterConnection(pathToFileURL(join(root, "index.js")));
+    try {
+      for (const key of ["MEMMY_CONFIG", "MEMMY_MEMORY_URL", "MEMMY_MEMORY_TOKEN", "MEMORY_SERVICE_TOKEN"]) vi.stubEnv(key, "");
+      const endpoint = "http://127.0.0.1:18080";
+      for (const token of ["first", "rotated"]) {
+        writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint, token } } }));
+        expect(await connection()).toEqual({ endpoint, token });
+      }
+      vi.stubEnv("MEMMY_MEMORY_URL", "http://127.0.0.1:18081");
+      expect((await connection()).token).toBeFalsy();
+      vi.stubEnv("MEMMY_MEMORY_TOKEN", "other-endpoint-token");
+      expect((await connection()).token).toBe("other-endpoint-token");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each(["http://memory.test:18081", "https://memory.test:18080", "http://other.test:18080"])("rejects legacy credentials belonging to %s", async (oldEndpoint) => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    const endpoint = "http://memory.test:18080";
+    writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint, token: "new-token" } } }));
+    const { readAdapterConnection } = await import(new URL("../adapters/connection.js", import.meta.url).href);
+    try {
+      vi.stubEnv("MEMMY_CONFIG", configPath);
+      vi.stubEnv("MEMMY_MEMORY_URL", endpoint);
+      vi.stubEnv("MEMMY_MEMORY_TOKEN", "");
+      vi.stubEnv("MEMORY_SERVICE_URL", oldEndpoint);
+      vi.stubEnv("MEMORY_SERVICE_TOKEN", "old-token");
+      expect(await readAdapterConnection(pathToFileURL(join(root, "index.js")))).toEqual({ endpoint, token: "new-token" });
+      vi.stubEnv("MEMMY_MEMORY_TOKEN", "explicit-token");
+      expect((await readAdapterConnection(pathToFileURL(join(root, "index.js")))).token).toBe("explicit-token");
+      vi.stubEnv("MEMMY_MEMORY_URL", "");
+      vi.stubEnv("MEMMY_MEMORY_TOKEN", "");
+      expect(await readAdapterConnection(pathToFileURL(join(root, "index.js")))).toEqual({ endpoint: oldEndpoint, token: "old-token" });
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("matches equivalent HTTP origins for unpaired environment tokens", async () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint: "https://MEMORY.test:443/base", token: "file-token" } } }));
+    const { readAdapterConnection } = await import(new URL("../adapters/connection.js", import.meta.url).href);
+    try {
+      vi.stubEnv("MEMMY_CONFIG", configPath);
+      vi.stubEnv("MEMMY_MEMORY_URL", "https://memory.test/");
+      vi.stubEnv("MEMMY_MEMORY_TOKEN", "");
+      vi.stubEnv("MEMORY_SERVICE_URL", "");
+      vi.stubEnv("MEMORY_SERVICE_TOKEN", "unpaired-token");
+      expect((await readAdapterConnection(pathToFileURL(join(root, "index.js")))).token).toBe("unpaired-token");
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it("plans a DSH adapter install without invoking the host CLI", async () => {

@@ -408,6 +408,30 @@ describe("local Viewer API", () => {
     expect(eventId(resumed)).not.toBe(firstEventId);
   });
 
+  it("exports device logs only to authorized callers, even when raw text is requested", async () => {
+    const namespace = { source: "test", profileId: "project" };
+    const fixture = await startFixture({ auth: {
+      localServiceToken: "local", cloudAccessTokens: { cloud: namespace },
+      scopedApiKeys: { reader: { namespace, scopes: ["memory:read"] }, admin: { namespace, scopes: ["admin:read"] } }
+    } });
+    fixture.db.db.prepare("INSERT INTO api_logs (tool_name, input_json, called_at) VALUES ('memory_search', ?, ?)")
+      .run(JSON.stringify({ marker: "synthetic-export-secret" }), new Date().toISOString());
+    for (const token of ["reader", "cloud", "admin", "local"]) {
+      for (const raw of [false, true]) {
+        const response = await fetch(`${fixture.baseUrl}/api/v1/admin/export?includeRawText=${raw}`, {
+          headers: { authorization: "Bearer " + token }
+        });
+        expect(response.status).toBe(200);
+        const bundle = await response.json();
+        expect(bundle.tables).toHaveProperty("memories");
+        const allowed = token === "admin" || token === "local";
+        expect(Object.hasOwn(bundle.tables, "api_logs")).toBe(allowed);
+        expect(bundle.manifest.tables.includes("api_logs")).toBe(allowed);
+        expect(JSON.stringify(bundle).includes("synthetic-export-secret")).toBe(allowed);
+      }
+    }
+  });
+
   it("exports and clears data through the authenticated service boundary", async () => {
     const fixture = await startFixture();
     fixture.service.addMemory({ content: "clear through HTTP", source: "viewer-test", layer: "L1" });
@@ -616,6 +640,7 @@ describe("local Viewer API", () => {
 });
 
 async function startFixture(options: {
+  auth?: Parameters<typeof createMemoryHttpServer>[0]["auth"];
   loadConfigFromDisk?: boolean;
   llm?: LlmClient;
   skillLlm?: LlmClient;
@@ -650,6 +675,7 @@ async function startFixture(options: {
     fetchAppMemoryBudget: async () => null
   });
   const server = createMemoryHttpServer({
+    auth: options.auth ?? { allowAnonymous: true },
     service,
     configPath,
     viewerCli: options.viewerCli,

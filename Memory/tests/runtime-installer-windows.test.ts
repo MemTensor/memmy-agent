@@ -386,7 +386,8 @@ describe("Windows standalone Memory service", () => {
     expect(commands.indexOf("/End")).toBeLessThan(commands.indexOf("/Create"));
     expect(commands.indexOf("/Create")).toBeLessThan(commands.indexOf("/Run"));
     if (action !== "upgrade") expect(fs.readFileSync(pointerPath, "utf8")).toBe(pointer);
-    expect(fs.readFileSync(join(home, "config.yaml"), "utf8")).toBe("# preserve config\n");
+    const config = fs.readFileSync(join(home, "config.yaml"), "utf8");
+    expect(config).toMatch(/token: [a-f0-9]{64}/);
     expect(fs.readFileSync(join(home, "memory.sqlite"), "utf8")).toBe("preserve data");
   });
 

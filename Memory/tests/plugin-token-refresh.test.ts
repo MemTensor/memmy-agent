@@ -1,0 +1,23 @@
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { afterEach, expect, it, vi } from "vitest";
+import { loadRuntimeL3, readRuntimeConfig, type RuntimeSession } from "../src/agent-source/integration/workspace-bridge/runtime.js";
+const roots: string[] = [];
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+it("refreshes an existing plugin session's shared credential without changing its identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "plugin-token-refresh-")); roots.push(root);
+  const configPath = join(root, "config.yaml"), snapshot = join(root, "plugin.json");
+  await writeFile(snapshot, JSON.stringify({ memmy_config_path: configPath, token: "stale-snapshot" }));
+  await writeFile(configPath, "memmyMemory:\n  userId: original-owner\n  storage:\n    endpoint: http://127.0.0.1:18960\n");
+  const session: RuntimeSession = { protocol: "v2", sessionId: "existing-session", projectId: "project", sessionKey: "key", source: "codex", adapterId: "adapter", profileId: "default", workspaceRoot: null, config: await readRuntimeConfig(pathToFileURL(snapshot)) };
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ renderedContext: "", memoryVersion: 1 })));
+  await writeFile(configPath, "memmyMemory:\n  userId: changed-owner\n  storage:\n    endpoint: http://127.0.0.1:18960\n    token: initialized-token\n");
+  const result = await loadRuntimeL3(session);
+  expect(new Headers(fetchSpy.mock.calls[0]![1]!.headers).get("authorization")).toBe("Bearer initialized-token");
+  expect(result.config.userId).toBe("original-owner"); expect(result.sessionId).toBe("existing-session");
+  fetchSpy.mockClear();
+  await writeFile(configPath, "memmyMemory:\n  storage:\n    endpoint: http://127.0.0.1:19999\n    token: another-service\n");
+  await expect(loadRuntimeL3(session)).rejects.toThrow("endpoint changed"); expect(fetchSpy).not.toHaveBeenCalled();
+});

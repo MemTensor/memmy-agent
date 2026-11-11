@@ -133,6 +133,7 @@ describe("MemoryService budget reconcile lifecycle", () => {
     const pending = deferred<{ dailyUsed: number; lifetimeUsed: number }>();
     const { service, db } = createService(() => pending.promise);
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 60_000,
       workerPostHealthDelayMs: 60_000
