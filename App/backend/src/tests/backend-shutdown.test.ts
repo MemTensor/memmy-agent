@@ -56,16 +56,19 @@ function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, exec
       const unsubscribe = vi.fn(progressBus.on(...args)); unsubscribers.push(unsubscribe); return unsubscribe;
     }) }
   } as unknown as BackendServices;
+  const unexpectedPermission = (method: string): never => {
+    throw new Error(`Unexpected permission call: ${method}`);
+  };
   const permissionManager: PermissionManager = {
     verifyRuntimeToken,
-    async getRuntimeToken() { return "test-token"; },
-    async getScanPermission() { return "scan_only"; },
-    async setScanPermission() {},
-    async canDetectAgentSources() { return true; },
-    async canScanAgentSource() { return true; },
+    async getRuntimeToken() { return unexpectedPermission("getRuntimeToken"); },
+    async getScanPermission() { return unexpectedPermission("getScanPermission"); },
+    async setScanPermission() { return unexpectedPermission("setScanPermission"); },
+    async canDetectAgentSources() { return unexpectedPermission("canDetectAgentSources"); },
+    async canScanAgentSource() { return unexpectedPermission("canScanAgentSource"); },
     async canWriteAgentSkill() { return false; },
-    async canSearchMemory() { return true; },
-    async revokeAgentSource() {}
+    async canSearchMemory() { return unexpectedPermission("canSearchMemory"); },
+    async revokeAgentSource() { return unexpectedPermission("revokeAgentSource"); }
   };
   const app = createLocalApiServer({
     permissionManager,
