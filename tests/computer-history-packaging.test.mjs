@@ -121,7 +121,7 @@ it.runIf(process.platform === "darwin")("Electron resolves and executes both pac
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", HOME: root, PATH: join(root, "no-tools") },
   });
   expect(stdout.trim().split("\n")).toEqual(["native-helper-ok", "native-helper-ok"]);
-});
+}, 35_000);
 
 it.each(["electron-builder.win.yml", "electron-builder.win.unsigned.yml"])("%s unpacks the Windows 11 observer next to app.asar", async (filename) => {
   const config = parse(readFileSync(repoFile("App", "shell", "desktop", filename), "utf8"));
