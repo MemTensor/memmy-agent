@@ -1005,7 +1005,7 @@ function ThreadTabs(props: {
             data-browser-tab=""
             data-thread-tab-id={item.key}
             data-thread-tab-index={index}
-            className={`thread-tab${active ? " thread-tab--active" : ""}`}
+            className={`thread-tab thread-tab--browser${active ? " thread-tab--active" : ""}`}
             title={tab.url && !isBlankBrowserUrl(tab.url) ? tab.url : label}
             onClick={() => props.onActivateBrowser(tab.id)}
             onAuxClick={(event) => {

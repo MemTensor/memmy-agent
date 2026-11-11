@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { constants, accessSync, realpathSync } from 'node:fs';
+import { constants, accessSync, realpathSync, statSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -104,8 +104,27 @@ function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
       }
     });
     socket.on('error', error => {
-      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) finish();
-      else finish(error);
+      if (!connected) {
+        const errCode = (error as NodeJS.ErrnoException).code ?? '';
+        if (errCode === 'ENOENT') { finish(); return; }
+        if (errCode === 'ECONNREFUSED') {
+          // On macOS a regular file at the socket path produces ENOTSOCK rather than ECONNREFUSED,
+          // but on Linux both a stale regular file and a just-exited valid socket yield ECONNREFUSED.
+          // Distinguish the two by stat-checking: a real (but dead) socket resolves safely; anything
+          // else (regular file, or the socket vanished between connect and stat) rejects or resolves.
+          try {
+            if (statSync(agent.socketPath).isSocket()) { finish(); return; }
+          } catch (statError) {
+            // Socket was cleaned up between the connection attempt and the stat — safe to resolve.
+            if ((statError as NodeJS.ErrnoException).code === 'ENOENT') { finish(); return; }
+            finish(statError instanceof Error ? statError : new Error('Unexpected stat error'));
+            return;
+          }
+          finish(new Error(`Stale non-socket file at agent socket path: ${agent.socketPath}`));
+          return;
+        }
+      }
+      finish(error);
     });
     socket.on('close', () => finish(accepted ? undefined : new Error('Native agent closed without confirming shutdown')));
   });
