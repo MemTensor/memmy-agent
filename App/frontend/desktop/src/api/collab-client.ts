@@ -351,9 +351,20 @@ const AssistRequestSchema = z.object({
   /** 发起方的 Agent 名称（如 Codex、Memmy）。 */
   via: z.string(),
   title: z.string(),
-  /** 起因：一句话说明为什么请对方协助，弹窗与通知里会引用它。 */
+  /** 背景：为什么请对方协助。弹窗、卡片与通知里都会显示它。 */
   reason: z.string(),
   items: z.array(z.string()),
+  /**
+   * 随请求附带的文本与脚本：列表、收件箱与发件箱里服务端不带正文（null），只有详情与 thread 带 `content`。
+   * 旧云端没有这个字段，按 null 读，界面按「没有附件」处理。
+   */
+  attachments: z.array(z.object({
+    name: z.string(),
+    content: z.string().optional(),
+    sha256: z.string().optional(),
+    /** 发起方写的用途说明；旧云端没有这个字段。 */
+    note: z.string().optional()
+  })).nullish().transform((value) => value ?? null),
   status: AssistStatusSchema,
   agent: z.string().nullable(),
   scope: AssistScopeSchema,
@@ -671,7 +682,8 @@ export interface CollabClient {
    * 给出 `requester` 时，默认项是她给这位成员选过的 Agent，没有就是 Memmy。
    */
   assistAgents(projectId: string, requester?: string): Promise<AssistAgentChoice>;
-  assistRequest(requestId: string): Promise<AssistRequest>;
+  /** 一条请求的详情。`withAttachments` 为真时要附件正文（界面预览附件、执行前落盘用）；默认不带。 */
+  assistRequest(requestId: string, options?: { withAttachments?: boolean }): Promise<AssistRequest>;
   /** 允许或拒绝。允许时要写清由哪个 Agent 执行、这次授权到什么程度；限时授权带时长。 */
   decideAssist(requestId: string, decision: {
     action: "allow" | "reject";
@@ -1153,10 +1165,12 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
       return { agents: result.agents.filter((agent) => agent.available), defaultAgent: result.defaultAgent };
     },
 
-    async assistRequest(requestId) {
+    async assistRequest(requestId, options) {
+      // 附件正文默认不带（轮询每 2 秒一次，不能反复传 2MB）：要预览附件时显式要一次。
+      const query = options?.withAttachments ? "?attachments=true" : "";
       return (await requestJson({
         config,
-        path: `/api/collab/assist/requests/${encodeURIComponent(requestId)}`,
+        path: `/api/collab/assist/requests/${encodeURIComponent(requestId)}${query}`,
         schema: z.object({ request: AssistRequestSchema })
       })).request;
     },

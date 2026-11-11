@@ -1,0 +1,40 @@
+/* 协助请求「要做的事」的列表与折叠行：样式随页面主题走，密度与各处的正文一致。 */
+
+.items {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  list-style: decimal;
+  /* 每条事项可以多行：保留发起方写的换行与缩进。 */
+  white-space: pre-wrap;
+}
+
+.items li + li {
+  margin-top: 2px;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 45%, transparent);
+}
+
+.toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-action-sky-hover, #3aa893);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.toggle:hover {
+  text-decoration: underline;
+}
+
+.size {
+  margin-left: auto;
+  white-space: nowrap;
+}

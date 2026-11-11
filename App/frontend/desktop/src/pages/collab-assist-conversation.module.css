@@ -43,9 +43,22 @@
   font-weight: 650;
 }
 
+/* 背景单独成块：左侧一道竖线，与下方的事项分开。「背景」是行内标签，正文换行回到左边缘。 */
 .requestReason {
-  margin: 0;
+  margin: 4px 0 8px;
+  padding: 5px 9px;
+  border-left: 2px solid color-mix(in srgb, var(--color-action-sky, #5cbfae) 50%, transparent);
+  border-radius: 0 7px 7px 0;
+  background: color-mix(in srgb, var(--color-canvas-oat, #f3f8f7) 50%, transparent);
   color: var(--collab-ink-2, #2a3a37);
+  /* 背景可以是多行：保留发起方写的换行。 */
+  white-space: pre-wrap;
+}
+
+.requestReasonKey {
+  margin-right: 7px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 50%, transparent);
+  font-size: 12px;
 }
 
 .requestItems {
@@ -56,6 +69,11 @@
 
 .requestItems li + li {
   margin-top: 2px;
+}
+
+/* 请求附带的文本与脚本：在请求正文下面，紧凑一行式。 */
+.requestAttachments {
+  margin-top: 6px;
 }
 
 /* 执行方的决定：一行居中的说明，两侧细线 */

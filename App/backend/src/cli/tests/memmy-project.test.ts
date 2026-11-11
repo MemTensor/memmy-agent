@@ -677,3 +677,92 @@ describe("memmy-project assist", () => {
     await expect(run(["assist", "nope"], {})).rejects.toThrow(/未知命令/u);
   });
 });
+
+/**
+ * `assist ask` 的附件：请求文件里列本地路径，这里读成正文与指纹，内联随请求一起提交；
+ * 只收文本与脚本，正文偏长又没带附件时提示一句。
+ */
+describe("memmy-project assist ask 的附件", () => {
+  function workdir(): string {
+    const root = mkdtempSync(join(tmpdir(), "memmy-assist-files-"));
+    roots.push(root);
+    return root;
+  }
+
+  function requestFile(root: string, value: unknown): string {
+    const path = join(root, "request.json");
+    writeFileSync(path, JSON.stringify(value));
+    return path;
+  }
+
+  function askFetcher(seen: { body?: Record<string, unknown> }) {
+    return (async (_input: string | URL, init?: RequestInit) => {
+      seen.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ request: { id: "abc-1" }, text: "已发送协助请求 abc-1。" }));
+    }) as typeof fetch;
+  }
+
+  it("reads the listed local files into inline attachments with a sha256 and the note", async () => {
+    const root = workdir();
+    const script = join(root, "probe.sh");
+    writeFileSync(script, "#!/bin/sh\necho hi\n");
+    const seen: { body?: Record<string, unknown> } = {};
+    const output = await run(
+      ["assist", "ask", "--project", "Memmy 内测反馈", "--member", "王雨", "--file", requestFile(root, { title: "原样跑一遍", items: ["跑脚本"], attachments: [{ path: script, note: "排查脚本，\n用 sh 运行" }] })],
+      { fetch: askFetcher(seen), runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }), env: {} }
+    );
+
+    expect(output).toContain("已发送协助请求 abc-1");
+    const attachments = seen.body?.attachments as Array<Record<string, string>>;
+    expect(attachments).toHaveLength(1);
+    // 说明压成一行：它写进对方提示词里附件那一行。
+    expect(attachments[0]).toMatchObject({ name: "probe.sh", content: "#!/bin/sh\necho hi\n", note: "排查脚本， 用 sh 运行" });
+    expect(attachments[0]!.sha256).toMatch(/^[a-f0-9]{64}$/u);
+    // 有附件时不再提示「把脚本写进 attachments」。
+    expect(output).not.toContain("这条请求正文较长");
+  });
+
+  it("rejects files that are neither text nor script", async () => {
+    const root = workdir();
+    const slides = join(root, "slides.pptx");
+    writeFileSync(slides, "x");
+    await expect(run(
+      ["assist", "ask", "--project", "P", "--member", "王雨", "--file", requestFile(root, { title: "看材料", items: ["看一遍"], attachments: [{ path: slides, note: "复盘材料" }] })],
+      { fetch: askFetcher({}), runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }), env: {} }
+    )).rejects.toThrow(/附件只收文本与脚本.*不支持 \.pptx/u);
+  });
+
+  it("says a missing attachment file is missing", async () => {
+    const root = workdir();
+    await expect(run(
+      ["assist", "ask", "--project", "P", "--member", "王雨", "--file", requestFile(root, { title: "原样跑一遍", items: ["跑脚本"], attachments: [{ path: join(root, "nope.sh"), note: "排查脚本" }] })],
+      { fetch: askFetcher({}), runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }), env: {} }
+    )).rejects.toThrow(/找不到附件文件/u);
+  });
+
+  it("refuses an attachment without a note and says how to write it", async () => {
+    // 对方的 Agent 只拿到一个目录里的几个文件：不说清是什么、怎么用，它只能按文件名猜。
+    const root = workdir();
+    const script = join(root, "probe.sh");
+    writeFileSync(script, "#!/bin/sh\necho hi\n");
+    for (const attachments of [[script], [{ path: script }], [{ path: script, note: "  " }]]) {
+      await expect(run(
+        ["assist", "ask", "--project", "P", "--member", "王雨", "--file", requestFile(root, { title: "原样跑一遍", items: ["跑脚本"], attachments })],
+        { fetch: askFetcher({}), runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }), env: {} }
+      )).rejects.toThrow(/附件 probe\.sh 缺少 note.*"path".*"note"/u);
+    }
+  });
+
+  it("hints at attachments when the body is long and none were given", async () => {
+    const root = workdir();
+    const seen: { body?: Record<string, unknown> } = {};
+    const output = await run(
+      ["assist", "ask", "--project", "P", "--member", "王雨", "--file", requestFile(root, { title: "长正文", reason: "原".repeat(1_500), items: ["第一条"] })],
+      { fetch: askFetcher(seen), runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }), env: {} }
+    );
+
+    expect(seen.body?.attachments).toBeUndefined();
+    expect(output).toContain("这条请求正文较长");
+    expect(output).toContain("对方能原样执行、也能核对");
+  });
+});

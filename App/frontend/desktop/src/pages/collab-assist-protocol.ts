@@ -23,23 +23,67 @@ export function parseAssistEnvelope(content: string): AssistEnvelope | null {
   return { kind: match[1] as "request" | "result", attrs, lines: match[3]!.split(/\r?\n/u) };
 }
 
-/** 请求正文里的起因、要做的事与逐条事项。 */
+/** 续行按协议缩进两个空格：去掉这两个空格，其余缩进原样保留。 */
+const CONTINUATION = /^ {2}/u;
+/** 逐条事项以后的内容（前面几次的结论、附件说明）不算进这次要做的事。 */
+const TRAILER_PREFIXES = ["同一次排查里，前面已经完成的几次", "随请求附带的"] as const;
+
+/**
+ * 请求正文里的背景、要做的事与逐条事项。
+ *
+ * <p>多行事项按协议写成「第一行 `- 内容`、续行缩进两个空格」，所以先看原始行的前导空格再 trim：
+ * 两个空格以上开头的行是续行，接回上一条（缩进的 `- ` 也算续行，嵌套列表不会被拆成同级事项）。
+ * 正文放宽到每条 4000 字、保留换行之后，这一步决定卡片上会不会只剩每条的第一行。</p>
+ */
 export function readAssistRequestBody(lines: readonly string[]): { reason: string; title: string; items: string[] } {
   let reason = "";
   let title = "";
   const items: string[] = [];
-  let inEarlier = false;
+  let inTrailer = false;
+  /** 续行接到哪里：当前是多行事项、多行背景、多行标题，还是什么都没得接。 */
+  let target: "item" | "reason" | "title" | null = null;
   for (const raw of lines) {
+    // 先看前导空格：续行的判断不能等到 trim 之后。
+    const continuation = CONTINUATION.test(raw);
     const line = raw.trim();
-    if (line.startsWith("同一次排查里，前面已经完成的几次")) {
-      inEarlier = true;
+    if (continuation && !inTrailer) {
+      // 去掉共同的 2 空格前缀，其余缩进原样保留；段内空行（只有两个空格）也要留住。
+      const content = raw.replace(CONTINUATION, "");
+      if (target === "item" && items.length) {
+        items[items.length - 1] += `\n${content}`;
+        continue;
+      }
+      if (target === "reason") {
+        reason += `\n${content}`;
+        continue;
+      }
+      if (target === "title") {
+        title += `\n${content}`;
+        continue;
+      }
+    }
+    if (!line) continue;
+    // 这一段之后不再有要做的事：判断在归属之前，附件与前面几次的条目不会被当成同级事项。
+    if (TRAILER_PREFIXES.some((prefix) => line.startsWith(prefix))) {
+      inTrailer = true;
+      target = null;
       continue;
     }
-    if (line.startsWith("起因：")) reason = line.slice(3).trim();
-    else if (line.startsWith("要做的事：")) {
+    // 「背景：」是现在的写法；「起因：」是旧写法，已经写进任务里的消息还要能读出来。
+    if (line.startsWith("背景：")) {
+      reason = line.slice(3).trim();
+      target = "reason";
+    } else if (line.startsWith("起因：")) {
+      reason = line.slice(3).trim();
+      target = "reason";
+    } else if (line.startsWith("要做的事：")) {
       title = line.slice(5).trim();
-      inEarlier = false;
-    } else if (line.startsWith("- ") && !inEarlier) items.push(line.slice(2).trim());
+      inTrailer = false;
+      target = "title";
+    } else if (line.startsWith("- ") && !inTrailer) {
+      items.push(line.slice(2).trim());
+      target = "item";
+    }
   }
   return { reason, title, items };
 }
@@ -65,4 +109,3 @@ export function readAssistResultBody(lines: readonly string[]): { reply: string;
   }
   return { reply: reply.join("\n").trim(), items };
 }
-

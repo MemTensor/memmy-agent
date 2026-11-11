@@ -71,6 +71,8 @@ process.stdin.on("data", (data) => {
       reply(message.id, { configOptions: [] });
     } else if (message.method === "authenticate") {
       if (mode === "auth-hangs") return; // 一直不回应：实测 QwenWork 就是这样
+      // Codex（codex-acp）的第一个登录方法是 API Key：没配密钥时不说「需要登录」，而是报 -32603。
+      if (mode === "auth-method-fails") return fail(message.id, -32603, "Internal error: CODEX_API_KEY or OPENAI_API_KEY is not set");
       if (process.env.FAKE_AUTHED) fs.writeFileSync(process.env.FAKE_AUTHED, "1");
       reply(message.id, {});
     } else if (message.method === "session/prompt") {
@@ -161,6 +163,19 @@ describe("authenticate 按需调用", () => {
     const { error, calls: seen } = await run("no-auth-methods");
     expect((error as AcpError).kind).toBe("unauthenticated");
     expect(seen).not.toContain("authenticate");
+  });
+
+  it("still reports needing login when the login method itself fails for another reason", async () => {
+    // 2026-11-11 实测 Codex：session/new 回 -32000「Authentication required」，顺手试的第一个登录方法是 API Key，
+    // 没配密钥就回 -32603「Internal error: CODEX_API_KEY or OPENAI_API_KEY is not set」。这条不带「登录」字样，
+    // 旧逻辑把它当成普通失败抛出，上层就不会替她发起 codex login。会话已经明说要登录，结论不该变。
+    const { error, calls: seen } = await run("auth-method-fails");
+    expect(error).toBeInstanceOf(AcpError);
+    expect((error as AcpError).kind).toBe("unauthenticated");
+    expect((error as AcpError).message).toContain("需要先登录");
+    expect(seen.filter((call) => call === "authenticate")).toHaveLength(1);
+    // 登录没成功就不再建第二次会话。
+    expect(seen.filter((call) => call === "session/new")).toHaveLength(1);
   });
 });
 

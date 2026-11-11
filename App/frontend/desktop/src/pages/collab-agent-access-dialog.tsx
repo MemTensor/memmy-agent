@@ -138,6 +138,9 @@ export function CollabAgentAccessDialog(props: {
       onClose={busy ? undefined : props.onClose}
       closeLabel={t("common.close")}
       className={styles.dialog}
+      /* Agent 可能很多（十几个都装过）：正文区单独滚动，底部按钮不被顶出窗口。 */
+      bodyClassName={styles.body}
+      footerClassName={styles.footer}
       backdropClassName={styles.backdrop}
       footer={phase === "ask" ? (
         <div className={styles.actions}>

@@ -10,7 +10,7 @@
  * 回传给双方，并说明是哪个 Agent 的运行组件没准备好。</p>
  */
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { accessSync, chmodSync, constants as fsConstants, existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -60,7 +60,15 @@ export function adapterFor(sourceId: string): AssistAdapter | null {
   return ASSIST_ADAPTERS.find((adapter) => adapter.sourceId === sourceId) ?? null;
 }
 
-/** 已经装好的适配器：node_modules/.bin 里的那个文件在就算装好。 */
+/**
+ * 已经装好的适配器：node_modules/.bin 里的那个文件在、而且能执行，才算装好。
+ *
+ * <p>「在」不等于「能跑」：`.bin` 里是一个指向包内 `dist/index.js` 的软链接，而 npm 只在部分情况下
+ * 才给目标文件加可执行位。实测同一个包、同样的 npm（10.9.8），在干净目录里装出来是 `-rwxr-xr-x`，
+ * 在已有旧 `package-lock.json` 的目录里（`npm install` 认为 up to date、不重写文件）却是
+ * `-rw-r--r--`；此时直接 spawn 这个软链接就报 EACCES，表现为「无法启动这个 Agent」。所以这里补一次
+ * 可执行位：补得上就照常使用，补不上（例如文件系统只读）才当作没装好，让它走重装。</p>
+ */
 export function installedAdapterPath(adapter: AssistAdapter, home?: string): string | null {
   const binDir = join(adaptersDirectory(home), "node_modules", ".bin");
   // Windows 上 npm 给每个 bin 装出 `名字.cmd`（批处理）与一个给 posix shell 用的同名脚本；
@@ -70,9 +78,26 @@ export function installedAdapterPath(adapter: AssistAdapter, home?: string): str
     : [adapter.bin];
   for (const name of names) {
     const candidate = join(binDir, name);
-    if (existsSync(candidate)) return candidate;
+    if (existsSync(candidate) && ensureExecutable(candidate)) return candidate;
   }
   return null;
+}
+
+/**
+ * 保证这个可执行文件能被执行：软链接顺着找到真实文件，没有执行位就补一个。
+ * 返回是否可用——Windows 上没有可执行位这回事，直接算可用。
+ */
+function ensureExecutable(path: string): boolean {
+  if (process.platform === "win32") return true;
+  try {
+    const target = realpathSync(path);
+    if ((statSync(target).mode & 0o111) === 0) chmodSync(target, 0o755);
+    accessSync(target, fsConstants.X_OK);
+    return true;
+  } catch {
+    // 补不上（只读文件系统、没有权限、软链接断了）：当作没装好，交给重装。
+    return false;
+  }
 }
 
 /**

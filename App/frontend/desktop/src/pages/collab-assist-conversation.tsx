@@ -16,6 +16,8 @@ import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { AgentMessageContent } from "./agent-message-content.js";
 import { ConfirmCard } from "./collab-assist-detail.js";
+import { AssistAttachments } from "./collab-assist-attachments.js";
+import { AssistItems } from "./collab-assist-items.js";
 import { agentSourceIdOf, AssistMessageCard, parseAssistEnvelope } from "./collab-assist-message.js";
 import {
   AssistAgentLogo,
@@ -427,10 +429,19 @@ function AssistRound(props: {
         </span>
         <div className={styles.requestBubble}>
           <strong className={styles.requestTitle}>{request.title}</strong>
-          {request.reason ? <p className={styles.requestReason}>{t("collab.assist.detail.reason", { reason: request.reason })}</p> : null}
-          <ol className={styles.requestItems}>
-            {request.items.map((item) => <li key={item}>{item}</li>)}
-          </ol>
+          {request.reason ? (
+            <p className={styles.requestReason}>
+              <span className={styles.requestReasonKey}>{t("collab.assist.reasonKey")}</span>
+              {request.reason}
+            </p>
+          ) : null}
+          <AssistItems items={request.items} />
+          {/* 这里的请求来自 thread 详情，带附件正文：直接列出，紧凑一行式。 */}
+          {request.attachments?.length ? (
+            <div className={styles.requestAttachments}>
+              <AssistAttachments attachments={request.attachments} />
+            </div>
+          ) : null}
         </div>
       </div>
 

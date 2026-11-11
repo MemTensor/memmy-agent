@@ -19,7 +19,18 @@ const RequestIdSchema = z.string().regex(/^[A-Za-z0-9-]{1,36}$/u, "协助请求 
 /** 成员既可以是账号 id，也可以是名字：命令行用名字，界面用 id。 */
 const MemberSchema = z.string().trim().min(1).max(100);
 const AgentSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/u, "执行方无效");
-const ItemsSchema = z.array(z.string().trim().min(1).max(500)).min(1).max(10);
+const ItemsSchema = z.array(z.string().trim().min(1).max(4_000)).min(1).max(20);
+/**
+ * 随请求一起提交的附件：只有文本与脚本，内联传输（不走上传接口）。
+ * 单个说明里不重复按文本类/脚本类分别卡上限，按最宽的文本类算，总大小由云端与发起方一侧把关。
+ */
+const AssistAttachmentSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  content: z.string(),
+  sha256: z.string().trim().max(128).optional(),
+  /** 这个文件是什么、对方要怎么用：写进执行方 Agent 的提示词。 */
+  note: z.string().trim().max(500).optional()
+}).strict();
 /** 发起方在哪个 Agent 的哪一条会话里发起：本机据此读出发起方一侧的记录。路径只接受记录文件本身（服务里再校验文件名）。 */
 const RequesterSessionSchema = z.object({
   sourceId: z.enum(["memmy", "deepseek_harness"]),
@@ -30,8 +41,10 @@ const CreateRequestSchema = z.object({
   project: z.string().trim().min(1).max(100),
   member: MemberSchema,
   title: z.string().trim().min(1).max(200),
-  reason: z.string().trim().max(500).optional(),
+  reason: z.string().trim().max(2_000).optional(),
   items: ItemsSchema,
+  /** 随请求附带的文本与脚本：最多 8 个，内联带上正文。 */
+  attachments: z.array(AssistAttachmentSchema).max(8).optional(),
   /** 发起方的 Agent 名称：弹窗里要说明是谁的 Agent 在请求。 */
   via: z.string().trim().max(40).optional(),
   /** 同一次排查的续跑：带上上一次请求的 id（完整或 6 位短 id）。 */
@@ -65,6 +78,13 @@ const EndAssistSchema = z.object({
   member: MemberSchema.optional()
 }).strict();
 
+/**
+ * 发一条协助请求的请求体上限：正文最宽到 32KB，附件最多 8 个、合计 2MB，留出 JSON 转义的余量取 4MB。
+ * Fastify 默认 1MiB，不在这条路由上单独放宽，带附件的请求会先被 413 拒掉；与云端
+ * `MAX_ASSIST_WRITE_REQUEST_BYTES` 对齐。
+ */
+const ASSIST_MAX_REQUEST_BYTES = 4 * 1024 * 1024;
+
 export function registerCollabAssistRoutes(app: FastifyInstance, options: RegisterCollabAssistRoutesOptions): void {
   const guard = { preHandler: options.authenticateRuntimeToken };
 
@@ -81,7 +101,7 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
   }));
 
   // 发起方：发一条请求，或续跑同一次排查（带 thread）。
-  app.post("/api/collab/assist/requests", guard, withErrorEnvelope(async (request, reply) => {
+  app.post("/api/collab/assist/requests", { ...guard, bodyLimit: ASSIST_MAX_REQUEST_BYTES }, withErrorEnvelope(async (request, reply) => {
     const input = CreateRequestSchema.parse(request.body ?? {});
     const created = await options.assist.createRequest({
       project: input.project,
@@ -89,6 +109,7 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
       title: input.title,
       ...(input.reason === undefined ? {} : { reason: input.reason }),
       items: input.items,
+      ...(input.attachments === undefined ? {} : { attachments: input.attachments }),
       ...(input.via === undefined ? {} : { via: input.via }),
       ...(input.thread === undefined ? {} : { thread: input.thread }),
       ...(input.sourceTask === undefined ? {} : { sourceTask: input.sourceTask }),
@@ -98,8 +119,14 @@ export function registerCollabAssistRoutes(app: FastifyInstance, options: Regist
   }));
 
   // 一条请求的当前状态：界面刷新卡片、命令行 `assist status` 都用它。
-  app.get<{ Params: { requestId: string } }>("/api/collab/assist/requests/:requestId", guard, withErrorEnvelope(async (request, reply) =>
-    reply.send({ request: await options.assist.requestStatus(RequestIdSchema.parse((request.params as { requestId: string }).requestId)) })));
+  // 附件正文默认不带（轮询每 2 秒一次，一次可达 2MB）；界面预览附件、执行前落盘时才带 `attachments=true` 要一次。
+  // 同时认 `1`：命令行里手写 query 时更省事。
+  app.get<{ Params: { requestId: string } }>("/api/collab/assist/requests/:requestId", guard, withErrorEnvelope(async (request, reply) => {
+    const requestId = RequestIdSchema.parse((request.params as { requestId: string }).requestId);
+    const query = (request.query ?? {}) as { attachments?: string };
+    const withAttachments = query.attachments === "true" || query.attachments === "1";
+    return reply.send({ request: await options.assist.requestStatus(requestId, withAttachments ? { withAttachments: true } : {}) });
+  }));
 
   // 命令行 `assist status`：当前状态的一段文字；第一次读到终态时把这段文字记为发起方收到的内容。
   // 界面刷新卡片用上面的 GET，不经过这里，免得把界面的读取当成 Agent 收到了结果。

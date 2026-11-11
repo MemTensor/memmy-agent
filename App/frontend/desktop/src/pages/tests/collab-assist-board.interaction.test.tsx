@@ -91,7 +91,7 @@ const session = {
 function request(id: string, status: AssistRequest["status"], overrides: Partial<AssistRequest> = {}): AssistRequest {
   return {
     id, projectId: project.id, projectName: project.name, threadId: `t-${id}`, attempt: 1, via: "DeepSeek Harness",
-    title: `协助 ${id}`, reason: "", items: ["看版本"], status, agent: status === "done" ? "memmy" : null, scope: null, grant: null,
+    title: `协助 ${id}`, reason: "", items: ["看版本"], attachments: null, status, agent: status === "done" ? "memmy" : null, scope: null, grant: null,
     steps: [], reply: "", resultItems: [], files: [], failure: null, requester: REQUESTER, executor: ME, mine: false,
     createdAt: "2026-11-05T04:00:00.000Z", decidedAt: null, finishedAt: status === "done" ? "2026-11-05T04:02:00.000Z" : null,
     sourceTask: null, autoRun: false, decidedMinutes: null, deliveredAt: null,

@@ -574,6 +574,15 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
         // 有用它给的第一个登录方法试一次，成功后再建一次会话。
         try {
           await authenticate();
+        } catch (authFailure) {
+          // 登录方法本身失败，结论仍是「需要登录」：会话已经明说要登录，这一步只是顺手一试。
+          // 实测 Codex：第一个方法是 API Key，没配密钥时回 -32603「CODEX_API_KEY or OPENAI_API_KEY is not set」，
+          // 不带「登录」字样；若把它原样抛出，上层就不会替她发起浏览器登录，只留下一句看不懂的失败。
+          // 只有被停止时保留「已停止」。
+          if (authFailure instanceof AcpError && authFailure.kind === "cancelled") throw authFailure;
+          throw unauthenticated(error);
+        }
+        try {
           opened = await openSession();
         } catch (retry) {
           throw isAuthenticationError(retry) ? unauthenticated(retry) : retry;

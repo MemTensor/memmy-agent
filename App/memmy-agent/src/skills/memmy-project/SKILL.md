@@ -288,12 +288,17 @@ memmy-project session read a1b2c3#12
 {
   "title": "查看分享弹窗相关的日志与版本",
   "reason": "分享弹窗的问题在本机复现不了",
-  "items": ["查看 Memmy 与 macOS 的版本", "找出 Memmy 后台日志里最近与分享相关的报错"]
+  "items": ["运行 scan-probe.sh，把完整输出原样贴回来", "找出 Memmy 后台日志里最近与分享相关的报错"],
+  "attachments": [
+    { "path": "/tmp/scan-probe.sh", "note": "排查脚本，读取 Memmy 与 macOS 的版本，在终端用 bash 运行" }
+  ]
 }
 ```
 
-- `title` 写要做的事；`reason` 写为什么需要对方协助；`items` 每条写一个要拿到的结果，最多 10 条。
-- 不写具体命令：对方的 Agent 自己决定怎么查。不放密钥、令牌与内部地址。
+- `attachments` 列出随请求带给对方的文件，每项写 `path` 与 `note`：`path` 是本机文件路径，由你自己写文件生成，不要让用户手工准备；`note` 用一句话写清这个文件是什么、对方要怎么用，如「排查脚本，在终端用 bash 运行，把完整输出贴回来」「scan-probe.sh 读取的会话清单，不需要单独处理」。对方的 Agent 只能从 `note` 知道文件的用途，缺少 `note` 的附件发不出去。不需要附件时整项省略。
+- 附件最多 8 个、合计 2MB；只收文本与脚本（脚本 `.sh .bash .zsh .py .js .mjs .cjs .rb`，文本 `.txt .md .json .csv .log .yaml .yml .xml .toml .ini .cfg`）；脚本单个 256KB、文本单个 1MB。PDF、PPT、图片、压缩包不收。
+- `title` 写要做的事；`reason` 写为什么需要对方协助，最多 2000 字；`items` 每条写一个要拿到的结果，最多 20 条、每条 4000 字。
+- 要指定对方跑什么，就写成脚本文件放进 `attachments`，不要贴进正文；正文只写要拿到什么结果和必要的判断依据。不放密钥、令牌与内部地址。
 - 不指定由哪个 Agent 执行：由对方选。
 
 ### 发出后怎么等
@@ -362,7 +367,7 @@ memmy-project session read a1b2c3#12
 ### 协助的行为检查
 
 - 用户说「让李四看看他的版本」时，不在本机运行 `sw_vers` 一类命令，而是发 `assist ask`。
-- 请求文件里不写由哪个 Agent 执行，也不写具体命令。
+- 请求文件里不写由哪个 Agent 执行；要指定跑什么就把它写成脚本放进 `attachments`，不要贴进正文。
 - 用户说「告诉李四明天发版」「李四那边做到哪了」时，不发 `assist ask`。
 - 对方拒绝或请求过期后，不自动重发。
 - 输出写明对方目前不在线时，不重发、不换成员，这一轮照常结束。

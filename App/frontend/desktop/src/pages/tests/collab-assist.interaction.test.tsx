@@ -33,6 +33,7 @@ function request(overrides: Partial<AssistRequest> = {}): AssistRequest {
     title: "收集 Cursor 任务读取相关的信息",
     reason: "关联任务弹窗里看不到 Cursor 的任务",
     items: ["查看 Memmy、Cursor 与系统的版本"],
+    attachments: null,
     status: "pending",
     agent: null,
     scope: null,
@@ -125,6 +126,8 @@ function client(overrides: Partial<CollabClient> = {}): CollabClient {
       defaultAgent: "memmy"
     }),
     decideAssist: vi.fn().mockResolvedValue(request({ status: "running" })),
+    // 弹窗打开时拉一次详情拿附件正文：默认返回没有附件的那一份。
+    assistRequest: vi.fn().mockResolvedValue(request()),
     stopAssist: vi.fn().mockResolvedValue(request({ status: "stopped" })),
     noteAssist: vi.fn().mockResolvedValue(undefined),
     revokeAssistGrant: vi.fn().mockResolvedValue({ grants: [] }),
@@ -149,10 +152,9 @@ describe("成员协助的授权弹窗", () => {
     // 本项目没用过的 Agent 收起成一行。
     expect(document.body.textContent).toContain("使用其他 Agent（1）");
     expect(button("Cursor")).toBeUndefined();
-    // 底部一段话讲清执行过程与次数、时长限制：设置里不再重复这一段。
-    expect(document.body.textContent).toContain(
-      "执行过程会显示在 Memmy 的任务里，你可以随时停止。同一时间只执行一个请求，单次最长 15 分钟。"
-    );
+    // 底部只说清执行过程在哪里看、可以随时停：次数与时长属于设置里的规则，不在授权弹窗里重复。
+    expect(document.body.textContent).toContain("执行过程会显示在 Memmy 项目的协助里，可以随时停止。");
+    expect(document.body.textContent).not.toContain("单次最长 15 分钟");
 
     await act(async () => button("允许")?.click());
     expect(onDecided).toHaveBeenCalledWith({ action: "allow", agent: "memmy", scope: "once" });
@@ -217,6 +219,33 @@ describe("成员协助的授权弹窗", () => {
 
     await act(async () => button("拒绝")?.click());
     expect(onDecided).toHaveBeenCalledWith({ action: "reject" });
+  });
+
+  it("收件箱不带附件正文时，打开弹窗拉一次详情：附件与长事项都看得到", async () => {
+    const items = ["第一条", "第二条", "第三条", "第四条", "第五条"];
+    const detailed = request({
+      items,
+      attachments: [{ name: "scan-probe.sh", content: "#!/bin/sh\necho hi", sha256: "9f2c" }]
+    });
+    const collab = client({ assistRequest: vi.fn().mockResolvedValue(detailed) });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistDialog open request={{ ...inbox, items }} collab={collab} onDecided={() => undefined} onClose={() => undefined} />
+      </I18nProvider>
+    ));
+    await flush();
+
+    // 弹窗拿到的是收件箱里的那份（attachments 为 null），按需拉一次带附件正文的详情。
+    expect(collab.assistRequest).toHaveBeenCalledWith("r1", { withAttachments: true });
+    expect(document.body.textContent).toContain("scan-probe.sh");
+    // 默认只看前三条，其余收起。
+    expect(document.body.textContent).toContain("第一条");
+    expect(document.body.textContent).not.toContain("第四条");
+    await act(async () => button("展开其余 2 条")?.click());
+    expect(document.body.textContent).toContain("第四条");
+    // 预览展开的是附件原文。
+    await act(async () => button("预览")?.click());
+    expect(document.body.textContent).toContain("#!/bin/sh");
   });
 });
 
@@ -342,7 +371,7 @@ describe("执行方的协助任务", () => {
       </I18nProvider>
     ));
     expect(document.body.textContent).toContain("孙起的 Claude Code 请求· 第 2 次");
-    expect(document.body.textContent).toContain("起因：本机复现不了");
+    expect(document.body.textContent).toContain("背景本机复现不了");
     expect(document.body.textContent).toContain("查看 Memmy 与 macOS 的版本");
     expect(document.body.textContent).not.toContain("memmy_assist_request");
     expect(parseAssistEnvelope("普通的一句话")).toBeNull();

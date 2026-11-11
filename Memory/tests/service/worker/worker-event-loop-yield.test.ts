@@ -89,7 +89,8 @@ function blockedBacklog(h: ReturnType<typeof harness>, count = 1000) {
     h.job("late-database");
     h.db.db.prepare("UPDATE evolution_jobs SET queue_lane='import'").run();
   });
-  return { held, prepared: () => prepared, preparedCounts: () => new Map(preparedById), count };
+  return { held, prepared: () => prepared, preparedIdCount: () => preparedById.size,
+    preparedCounts: () => new Map(preparedById), count };
 }
 
 function preparationStats(backlog: ReturnType<typeof blockedBacklog>, liveIds: readonly string[]) {
@@ -351,7 +352,13 @@ describe("continuous worker event-loop fairness", () => {
         const id = `live-${i}`; enqueued.set(id, performance.now());
         h.job(id, "user_memory_embedding"); h.runner.notifyWorkAvailable();
       }
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // A complete discovery pass can outlast a fixed sleep on a busy runner.
+      // Wait for every distinct row and live handler before checking scan work;
+      // the live-arrival latency limit below remains independent of this wait.
+      await vi.waitFor(() => {
+        expect(backlog.preparedIdCount()).toBe(count + enqueued.size);
+        expect(h.processed).toHaveLength(enqueued.size);
+      }, { timeout: 30_000, interval: 50 });
       const preparations = preparationStats(backlog, [...enqueued.keys()]);
       const sample = { backlog: count, added: enqueued.size, started: waits.length, notStarted: enqueued.size - waits.length,
         meanWaitMs: waits.reduce((a,b) => a+b, 0) / waits.length, maxWaitMs: Math.max(...waits), pageCalls, rowsRead, candidateChecks: inspections.mock.calls.length,
@@ -378,7 +385,7 @@ describe("continuous worker event-loop fairness", () => {
     const resumed = await h.runner.runWorkerOnce(Math.min(3, count));
     expect(resumed.jobs.map(job => job.jobId)).toEqual(Array.from({ length: Math.min(3, count) }, (_, i) => `blocked-${i}`));
     h.expectClean();
-  }, 30_000);
+  }, 60_000);
 
   it("re-admits a live arrival after its embedding permit is released without re-preparing Provider-blocked rows", async () => {
     const h = harness(), backlog = blockedBacklog(h, 128), abort = new AbortController();

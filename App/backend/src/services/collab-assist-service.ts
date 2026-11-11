@@ -15,9 +15,9 @@
  * 换一台电脑照常能看到自己等待中的请求。</p>
  */
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, extname, isAbsolute, join } from "node:path";
 
 import type { AssistStep } from "./assist/acp-client.js";
 import { AcpError } from "./assist/acp-client.js";
@@ -101,6 +101,20 @@ export interface AssistMember {
   mine: boolean;
 }
 
+/**
+ * 随请求附带的文本或脚本。发起方把正文内联带上来（不走上传），执行方执行前落盘成文件。
+ * 列表与收件箱接口不返回正文（`attachments` 为 null），只有详情带 `content`。
+ */
+export interface AssistAttachment {
+  name: string;
+  /** 文件内容原文（文本或脚本）。列表/收件箱接口不返回它，只有详情返回。 */
+  content?: string;
+  /** 发起方算出的 sha256（十六进制小写），执行方落盘后比对。可为空。 */
+  sha256?: string;
+  /** 发起方写的用途说明：这个文件是什么、要怎么用。写进执行方 Agent 的提示词；旧请求没有。 */
+  note?: string;
+}
+
 /** 一条协助请求，与云端返回的结构一致。 */
 export interface AssistRequest {
   id: string;
@@ -113,6 +127,8 @@ export interface AssistRequest {
   title: string;
   reason: string;
   items: string[];
+  /** 附带的文本与脚本：列表与收件箱里为 null（不带正文），详情里是数组。旧云端没有这个字段，按 null 读。 */
+  attachments: AssistAttachment[] | null;
   status: AssistStatus;
   agent: string | null;
   scope: AssistScope | null;
@@ -459,6 +475,8 @@ export interface CollabAssistService {
     title: string;
     reason?: string;
     items: string[];
+    /** 随请求附带的文本与脚本：原样放进请求体，由云端存下。 */
+    attachments?: Array<{ name: string; content: string; sha256?: string; note?: string }>;
     thread?: string;
     /** 发起方的 Agent 名称；不给时按 Memmy 计。 */
     via?: string;
@@ -469,8 +487,8 @@ export interface CollabAssistService {
   }): Promise<{ request: AssistRequest; threadId: string; text: string; activeGrant: { agent: string; expiresAt: string } | null }>;
   /** 等结果，返回给命令行打印的一段文字。 */
   waitRequest(requestId: string, options?: { timeoutMs?: number; requesterSession?: AssistRequesterSession }): Promise<{ request: AssistRequest; text: string }>;
-  /** 一条请求的当前状态。 */
-  requestStatus(requestId: string): Promise<AssistRequest>;
+  /** 一条请求的当前状态；`withAttachments` 只在需要附件正文时传（界面按需拉详情），默认不带。 */
+  requestStatus(requestId: string, options?: { withAttachments?: boolean }): Promise<AssistRequest>;
   /** 命令行 `assist status`：当前状态的一段文字；第一次读到终态时把这段文字记为发起方收到的内容。 */
   agentStatus(requestId: string, options?: { requesterSession?: AssistRequesterSession }): Promise<{ request: AssistRequest; text: string }>;
   /** 结束协助：结束本人对这个项目里的成员的限时授权。 */
@@ -599,6 +617,7 @@ export function toAssistRequest(value: unknown): AssistRequest {
     title: text(raw.title),
     reason: text(raw.reason),
     items: Array.isArray(raw.items) ? raw.items.map((item) => text(item)) : [],
+    attachments: toAttachments(raw.attachments),
     status: (text(raw.status) || "pending") as AssistStatus,
     agent: typeof raw.agent === "string" ? raw.agent : null,
     scope: toScope(raw.scope),
@@ -634,6 +653,130 @@ export function toAssistRequest(value: unknown): AssistRequest {
     ...("origin" in raw ? { origin: Array.isArray(raw.origin) ? toTranscript(raw.origin) : null } : {}),
     ...("followup" in raw ? { followup: Array.isArray(raw.followup) ? toTranscript(raw.followup) : null } : {})
   };
+}
+
+/** 云端返回的附件列表：列表里是 null（不带正文），旧云端没有这个字段，两者都按 null 读。 */
+function toAttachments(value: unknown): AssistAttachment[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.map((item) => {
+    const raw = record(item);
+    return {
+      name: text(raw.name),
+      ...(typeof raw.content === "string" ? { content: raw.content } : {}),
+      ...(typeof raw.sha256 === "string" && raw.sha256 ? { sha256: raw.sha256 } : {}),
+      ...(typeof raw.note === "string" && raw.note.trim() ? { note: raw.note.trim() } : {})
+    };
+  });
+}
+
+/** 脚本类附件：落盘后置为可执行。 */
+const SCRIPT_ATTACHMENT_EXTENSIONS: ReadonlySet<string> = new Set([
+  ".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".rb"
+]);
+
+/**
+ * 附件的文件名清干净：去掉路径分隔符与 `..`。清完与原名不同就当作不安全，直接让这次执行失败，
+ * 不静默改名——发起方算的指纹对的是原名，改名后两边对不上。
+ */
+function safeAttachmentName(name: string): string {
+  const cleaned = name.replace(/[\\/]/gu, "").replace(/\.\./gu, "").trim();
+  if (!cleaned || cleaned !== name) throw new AssistError("invalid_argument", "附件的文件名不安全");
+  return name;
+}
+
+/**
+ * 执行前把附件落盘：由 Memmy 执行时写进 media 目录（与 memmy-agent 的 `getMediaDir()` 对齐——
+ * 它在文件与 shell 工具的白名单内，不改沙箱就能读）；由外部 Agent 执行时写进这次工作目录下的
+ * `.memmy-assist/<请求 id>`（外部 Agent 的沙箱只认自己的 cwd）。没有附件时返回空，不建目录。
+ */
+async function prepareAssistAttachments(input: {
+  request: AssistRequest;
+  requestId: string;
+  agent: string;
+  cwd: string;
+  /** 与 memmy-agent 的 getDataDir() 同口径：MEMMY_HOME，或 ~/.memmy。 */
+  home: string;
+}): Promise<{
+  dir: string | null;
+  files: Array<{ name: string; path: string; note?: string; executable?: boolean }>;
+}> {
+  const attachments = input.request.attachments ?? [];
+  if (!attachments.length) return { dir: null, files: [] };
+  const dir = input.agent === MEMMY_SOURCE_ID
+    ? join(input.home, "media", "assist", "runs", input.requestId)
+    : join(input.cwd, ".memmy-assist", input.requestId);
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    throw new AssistError("internal", `没能建立附件目录 ${dir}：${messageOf(error)}`);
+  }
+  const files: Array<{ name: string; path: string; note?: string; executable?: boolean }> = [];
+  for (const attachment of attachments) {
+    const name = safeAttachmentName(attachment.name);
+    if (attachment.content === undefined) {
+      throw new AssistError("invalid_argument", `附件缺少内容：${name}`);
+    }
+    const path = join(dir, name);
+    try {
+      await writeFile(path, attachment.content, { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+      throw new AssistError("internal", `附件 ${name} 没能写入：${messageOf(error)}`);
+    }
+    // 落盘后重算指纹：与发起方算的不一致，说明正文在传输里被改过，这次执行不跑。
+    const sha256 = createHash("sha256").update(attachment.content, "utf8").digest("hex");
+    if (attachment.sha256 && attachment.sha256.toLowerCase() !== sha256) {
+      throw new AssistError("conflict", `附件在传输中损坏：${name}`);
+    }
+    const executable = SCRIPT_ATTACHMENT_EXTENSIONS.has(extname(name).toLowerCase());
+    if (executable) {
+      await chmod(path, 0o700).catch((error: unknown) => {
+        throw new AssistError("internal", `附件 ${name} 没能设为可执行：${messageOf(error)}`);
+      });
+    }
+    // 指纹已在上面核对过，提示词里不再给它：执行方 Agent 用不上。用途说明照发起方写的带过去。
+    files.push({ name, path, ...(attachment.note ? { note: attachment.note } : {}), ...(executable ? { executable } : {}) });
+  }
+  return { dir, files };
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** 由 Memmy 执行时附件目录的保留期：执行结束 24 小时后清掉。与请求在云端的保留期一致。 */
+const ASSIST_RUNS_RETENTION_MS = 24 * 60 * 60 * 1000;
+/** 清理运行目录每小时最多一次：不用跟着 5 秒一次的轮询跑。 */
+const ASSIST_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * 清理 `<home>/media/assist/runs` 下过了保留期的运行目录（目录名就是请求 id）。
+ * 由 Memmy 执行时附件不在这轮结束后删（保留给双方在短时间内核对），24 小时后随请求一起清；
+ * 正在执行的那几个必须传 {@code keep}，否则会被删掉。目录不存在、读失败一律安静返回。
+ */
+export async function sweepAssistRuns(options: {
+  home: string;
+  /** 正在执行、不能删的请求 id。 */
+  keep?: ReadonlySet<string>;
+  /** 保留时长，默认 24 小时。 */
+  retentionMs?: number;
+  /** 现在的时间，默认此刻。 */
+  now?: number;
+}): Promise<string[]> {
+  const root = join(options.home, "media", "assist", "runs");
+  const cutoff = (options.now ?? Date.now()) - (options.retentionMs ?? ASSIST_RUNS_RETENTION_MS);
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => null);
+  if (!entries) return [];
+  const removed: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (options.keep?.has(entry.name)) continue;
+    const path = join(root, entry.name);
+    const info = await stat(path).catch(() => null);
+    if (!info || info.mtimeMs >= cutoff) continue;
+    await rm(path, { recursive: true, force: true }).catch(() => undefined);
+    removed.push(entry.name);
+  }
+  return removed;
 }
 
 /** 云端返回的一次排查。 */
@@ -748,6 +891,7 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     title: string;
     reason?: string;
     items: string[];
+    attachments?: Array<{ name: string; content: string; sha256?: string; note?: string }>;
     thread?: string;
     via?: string;
     sourceTask?: string;
@@ -763,6 +907,7 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
         title: input.title,
         ...(input.reason ? { reason: input.reason } : {}),
         items: input.items,
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
         ...(previous ? { thread: previous } : {}),
         ...(input.via ? { via: input.via } : {}),
         ...(input.sourceTask ? { sourceTask: input.sourceTask } : {})
@@ -885,9 +1030,11 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     throw new AssistError("not_found", `找不到协助请求 ${key}，请改用完整的请求 id`);
   }
 
-  async function readRequest(requestId: string): Promise<AssistRequest> {
+  async function readRequest(requestId: string, options: { withAttachments?: boolean } = {}): Promise<AssistRequest> {
     const id = await resolveRequestId(requestId);
-    const data = await cloud(`/assist/requests/${encodeURIComponent(id)}`);
+    // 附件正文默认不带：轮询每 2 秒一次，不能反复传 2MB。只有执行前那次要落盘读取才显式要。
+    const query = options.withAttachments ? "?attachments=true" : "";
+    const data = await cloud(`/assist/requests/${encodeURIComponent(id)}${query}`);
     return toAssistRequest(data.request);
   }
 
@@ -923,8 +1070,8 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
     }
   }
 
-  async function requestStatus(requestId: string): Promise<AssistRequest> {
-    return readRequest(requestId);
+  async function requestStatus(requestId: string, options: { withAttachments?: boolean } = {}): Promise<AssistRequest> {
+    return readRequest(requestId, options);
   }
 
   async function agentStatus(requestId: string, options_: { requesterSession?: AssistRequesterSession } = {}): Promise<{ request: AssistRequest; text: string }> {
@@ -1463,11 +1610,25 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
       });
   }
 
+  /**
+   * 同一次排查里前面几次的结论：续跑时带上，执行方 Agent 不必重头查。
+   * 取不到（第一次、旧云端、网络）就返回空，不影响这次执行。
+   */
+  async function earlierAttempts(request: AssistRequest): Promise<string[]> {
+    if (request.attempt <= 1 || !request.threadId) return [];
+    const data = await cloud(`/projects/${encodeURIComponent(request.projectId)}/assist/threads/${encodeURIComponent(request.threadId)}`);
+    return toAssistThread(data.thread).requests
+      .filter((item) => item.attempt < request.attempt && item.reply)
+      .sort((left, right) => left.attempt - right.attempt)
+      .map((item) => `第 ${item.attempt} 次：${item.reply.slice(0, 200)}`);
+  }
+
   async function execute(requestId: string): Promise<void> {
     const state_ = await loadState();
     const execution = executions.get(requestId);
     if (!execution) return;
-    const request = await readRequest(requestId).catch(() => null);
+    // 执行前要把附件落盘，这一处显式要正文；其余读取（轮询、状态、发件箱）都不带。
+    const request = await readRequest(requestId, { withAttachments: true }).catch(() => null);
     if (!request || request.status !== "running") {
       executions.delete(requestId);
       return;
@@ -1512,13 +1673,39 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
 
     const sessionKey = threadSessionKey(request.threadId || requestId, agent);
     const previousSession = state_.sessions[sessionKey] ?? state_.sessions[requestId];
-    const prompt = assistPrompt({
-      requesterName: request.requester.name,
-      projectName: request.projectName,
-      title: request.title,
-      ...(request.reason ? { reason: request.reason } : {}),
-      items: request.items
-    }, agent === MEMMY_SOURCE_ID ? { envelope: { requestId: request.id, via: request.via, attempt: request.attempt } } : {});
+    // 执行前把附件落盘成执行方 Agent 能读到的文件。没有附件时整段跳过，不建目录。
+    let prompt = "";
+    let attachmentsDir: string | null = null;
+    try {
+      const prepared = await prepareAssistAttachments({ request, requestId, agent, cwd, home });
+      attachmentsDir = prepared.dir;
+      const earlier = await earlierAttempts(request).catch(() => []);
+      prompt = assistPrompt({
+        requesterName: request.requester.name,
+        projectName: request.projectName,
+        title: request.title,
+        ...(request.reason ? { reason: request.reason } : {}),
+        items: request.items,
+        ...(earlier.length ? { earlier } : {}),
+        ...(prepared.files.length ? { attachments: prepared.files } : {}),
+        ...(prepared.dir ? { attachmentsDirectory: prepared.dir } : {})
+      }, agent === MEMMY_SOURCE_ID ? { envelope: { requestId: request.id, via: request.via, attempt: request.attempt } } : {});
+    } catch (error) {
+      // 附件没准备好就不开始执行：直接告诉发起方原因，不让请求停在「执行中」。
+      const failure = error instanceof AssistError
+        ? error.message
+        : `附件没有准备好：${error instanceof Error ? error.message : String(error)}`;
+      execution.status = "failed";
+      execution.failure = failure;
+      execution.finishedAt = now().toISOString();
+      running.delete(requestId);
+      runningAt.delete(requestId);
+      if (attachmentsDir && agent !== MEMMY_SOURCE_ID) {
+        await rm(attachmentsDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+      await finish(request, { status: "failed", reply: "", items: [], failure }).catch(() => undefined);
+      return;
+    }
     // 执行开始时先记下交给 Agent 的提示词：双方在协助会话里看到她的 Agent 收到了什么。
     // Memmy 执行时格式要求不在消息里，先按约定写一份，运行时回报实际注入的那段后再覆盖。
     await cloud(progressPath, {
@@ -1599,6 +1786,16 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
       await finish(request, { status: stopped ? null : "failed", reply: "", items: [], failure, transcript: execution.transcript }).catch(() => undefined);
     } finally {
       if (pushTimer) clearTimeout(pushTimer);
+      // 外部 Agent 只认自己的 cwd：执行结束就把附件目录删掉，不论成功或失败。
+      // 由 Memmy 执行时留在 media 目录里，由 sweepAssistRuns 按目录时间清。
+      if (attachmentsDir && agent !== MEMMY_SOURCE_ID) {
+        await rm(attachmentsDir, { recursive: true, force: true }).catch(() => undefined);
+      } else if (attachmentsDir) {
+        // 清理按目录时间算保留期，而附件是在执行前写下的：结束时刷新一次，
+        // 才是「执行结束 24 小时后删除」，而不是「开始执行 24 小时后」。
+        const at = new Date();
+        await utimes(attachmentsDir, at, at).catch(() => undefined);
+      }
       execution.finishedAt = now().toISOString();
       running.delete(requestId);
       runningAt.delete(requestId);
@@ -1636,12 +1833,28 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
    * 一轮轮询：收件箱里有生效中的限时授权的直接开始执行；要她授权的留给界面。
    * 失败只记日志，不让定时器挂掉。
    */
+  /** 上次清理附件运行目录的时间：一小时最多一次。 */
+  let lastSweepAt = 0;
+
+  /**
+   * 清理 `<home>/media/assist/runs`：由 Memmy 执行时附件写进这里、不在本轮结束后删，
+   * 24 小时后（与请求的保留期一致）清掉。正在执行的那几个目录必须留着。
+   */
+  async function sweepRuns(options: { force?: boolean } = {}): Promise<void> {
+    const at = Date.now();
+    if (!options.force && at - lastSweepAt < ASSIST_SWEEP_INTERVAL_MS) return;
+    lastSweepAt = at;
+    await sweepAssistRuns({ home, keep: new Set(running.keys()) }).catch(() => undefined);
+  }
+
   async function poll(): Promise<void> {
     if (polling) return;
     if (options.userMode?.() === "byok") return;
     polling = true;
     const snapshotAt = Date.now();
     try {
+      // 附件运行目录的过期清理：一小时最多一次，正在执行的那几个跳过。
+      await sweepRuns().catch(() => undefined);
       // 发起方的结果送回与是否接收协助请求无关：自己发出的请求照常拿回结果。
       await deliverResults().catch(() => undefined);
       await watchOutcomes().catch(() => undefined);
@@ -1749,6 +1962,8 @@ export function createCollabAssistService(options: CollabAssistServiceOptions): 
   function start(): () => void {
     const timer = setInterval(() => void poll(), pollMs);
     timer.unref?.();
+    // 启动时先清一次：昨天甚至更早留下的运行目录不必等下一个整点。
+    void sweepRuns({ force: true });
     void poll();
     return () => clearInterval(timer);
   }

@@ -32,6 +32,15 @@ const GRANT_MINUTE_KEYS: Record<AssistGrantMinutes, MessageKey> = {
   240: "collab.assist.grantMinutes.240"
 };
 
+/**
+ * 一段正文的人读规模：事项、附件都用它。小于 1KB 写字节数，否则保留一位小数。
+ * 按 UTF-8 字节算：中文一个字三个字节，跟附件上传时算的是同一个口径。
+ */
+export function assistTextSize(text: string): string {
+  const bytes = new TextEncoder().encode(text).length;
+  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+}
+
 /** 一档时长的说法：30 分钟、1 小时……；不是四档之一时按分钟写。 */
 export function grantDurationLabel(minutes: number | null, t: Translate): string {
   if (minutes && minutes in GRANT_MINUTE_KEYS) return t(GRANT_MINUTE_KEYS[minutes as AssistGrantMinutes]);

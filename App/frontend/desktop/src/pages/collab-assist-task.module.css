@@ -126,6 +126,23 @@
 
 .requestBody p {
   margin: 0;
+  /* 背景可以是多行：保留发起方写的换行。 */
+  white-space: pre-wrap;
+}
+
+/* 背景单独成块：左侧一道竖线，与下方的「要做的事」分开。「背景」是行内标签，正文换行回到左边缘。 */
+.requestBody .requestReason {
+  margin: 0 0 8px;
+  padding: 5px 9px;
+  border-left: 2px solid color-mix(in srgb, var(--color-action-sky, #5cbfae) 50%, transparent);
+  border-radius: 0 7px 7px 0;
+  background: color-mix(in srgb, var(--color-canvas-oat, #f3f8f7) 50%, transparent);
+}
+
+.requestReasonKey {
+  margin-right: 7px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 50%, transparent);
+  font-size: 12px;
 }
 
 .requestKey {
@@ -138,6 +155,11 @@
   margin: 2px 0 0;
   padding-left: 18px;
   list-style: decimal;
+}
+
+/* 一条事项可以多行：正文保留发起方写的换行与缩进。 */
+.requestBody ol li {
+  white-space: pre-wrap;
 }
 
 .resultRows {

@@ -37,8 +37,9 @@ jobs:
         run: |
           npm ci
           npm install --prefix App/memmy-agent --ignore-scripts --no-audit --no-fund
-      - name: Build shared test contracts
+      - name: Build shared test dependencies
         run: |
+          npm run build -w @memmy/migrations
           npm run build -w @memmy/agent-source-core
           npm run build -w @memmy/local-api-contracts
       - name: Run card regression and performance proxy tests
