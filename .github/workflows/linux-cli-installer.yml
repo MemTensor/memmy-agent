@@ -15,6 +15,7 @@ on:
       - "App/backend/**"
       - "tests/linux-cli-packaging.test.mjs"
       - "tests/linux-computer-use-deps.test.mjs"
+      - "tests/linux-cli-network-retry.test.mjs"
       - "scripts/internal/shared/check-open-computer-use.mjs"
       - "package.json"
       - "package-lock.json"
@@ -31,6 +32,7 @@ on:
       - "App/backend/**"
       - "tests/linux-cli-packaging.test.mjs"
       - "tests/linux-computer-use-deps.test.mjs"
+      - "tests/linux-cli-network-retry.test.mjs"
       - "scripts/internal/shared/check-open-computer-use.mjs"
       - "package.json"
       - "package-lock.json"
@@ -104,6 +106,7 @@ jobs:
 
   install-smoke:
     needs: build
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -141,8 +144,8 @@ jobs:
           [[ "$actual_arch" == "$EXPECTED_ARCH" ]]
           export MEMMY_VERSION="$VERSION"
           export MEMMY_RELEASE_BASE_URL="file://$PWD/release-assets"
-          bash release-assets/install.sh
-          bash release-assets/install.sh
+          bash scripts/internal/linux/run-installer-with-network-retries.sh release-assets/install.sh
+          bash scripts/internal/linux/run-installer-with-network-retries.sh release-assets/install.sh
           ocu_arch="$EXPECTED_ARCH"
           [[ "$ocu_arch" != "x64" ]] || ocu_arch="amd64"
           node scripts/internal/shared/check-open-computer-use.mjs \
@@ -198,13 +201,20 @@ jobs:
           systemctl --user is-active --quiet memmy-gateway.service
           grep -Fq 'MEMMY_SMOKE_SECRET="linux-smoke-' "$HOME/.memmy/systemd/gateway.env"
           gateway_pid_before_update="$(systemctl --user show memmy-gateway.service --property=MainPID --value)"
-          bash release-assets/install.sh
+          bash scripts/internal/linux/run-installer-with-network-retries.sh release-assets/install.sh
           gateway_pid_after_update="$(systemctl --user show memmy-gateway.service --property=MainPID --value)"
           [[ "$gateway_pid_after_update" != "$gateway_pid_before_update" ]]
           systemctl --user is-active --quiet memmy-gateway.service
           curl --fail --silent --show-error http://127.0.0.1:18970/health >/dev/null
           "$MEMMY_BIN_DIR/memmy-memory" health >/dev/null
           systemctl --user stop memmy-gateway.service
+      - name: Preserve failed installer attempt logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-installer-failure-${{ matrix.architecture }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memmy-linux-installer.*/
+          if-no-files-found: warn
 
   upload:
     if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.upload_to_release == true) }}
