@@ -21,6 +21,7 @@ import { callTimeoutMs, isCapabilityEvent } from "./shared.js";
 import type { PluginAdapter, PluginHostServiceInvoker, PluginRuntimeContext, PluginSession } from "./types.js";
 import { createOfficeRuntimeInstaller, type OfficeRuntimeInstaller } from "./office-installer.js";
 import { resolvePluginRegistryBaseUrl } from "../../../config/service-urls.js";
+import { BackgroundRuntime, type RuntimePreparationProgress } from "./background-runtime.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
@@ -64,6 +65,10 @@ interface CommandPluginSession extends PluginSession {
   children: Map<string, ChildProcessWithoutNullStreams>;
   hostServiceControllers: Map<string, Set<AbortController>>;
   approvedHostServices: Set<string>;
+  office?: BackgroundRuntime<ResolvedCommandRuntimeDependencies>;
+  withOfficeRuntime: (runtime: ResolvedCommandRuntimeDependencies) => Promise<{ launch: SandboxLaunch; env: Record<string, string> }>;
+  preparations: Map<string, AbortController>;
+  closed: boolean;
 }
 
 export interface CreateCommandPluginAdapterOptions {
@@ -144,8 +149,17 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       if (deniedHost) throw Object.assign(new Error(`Command plugin network host is not in the host allowlist: ${deniedHost}`), {
         code: "plugin_permission_denied"
       });
-      const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies, platform,
-        options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller ?? defaultOfficeInstaller(options.pluginDataRoot));
+      const preparesOfficeInBackground = context.plugin.id === "office" && config.runtimeDependencies.includes("office");
+      let officeProgress: RuntimePreparationProgress = officeRuntimeProgress("waiting");
+      const createOfficeInstaller = () => options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller
+        ?? defaultOfficeInstaller(options.pluginDataRoot, (stage, bytes, total) => {
+          officeProgress = officeRuntimeProgress(stage, bytes, total);
+        });
+      const eagerDependencies = config.runtimeDependencies.filter(dependency => dependency !== "office" || !preparesOfficeInBackground);
+      const runtimeDependencies = await resolveCommandRuntimeDependencies(
+        eagerDependencies, platform, eagerDependencies.includes("office") ? createOfficeInstaller() : undefined
+      );
+
       const env = resolvePluginEnvironment(
         config.env,
         config.secretEnv,
@@ -170,9 +184,34 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       }
       if (platform === "win32") env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
         ? await Promise.all((options.fileInputRoots ?? []).map(root => realpath(root))) : []);
+      const launch = await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies);
+      const withOfficeRuntime = async (runtime: ResolvedCommandRuntimeDependencies) => {
+        const combined = {
+          pathEntries: [...runtimeDependencies.pathEntries, ...runtime.pathEntries],
+          readRoots: [...runtimeDependencies.readRoots, ...runtime.readRoots],
+          executableRoots: [...runtimeDependencies.executableRoots, ...runtime.executableRoots],
+          environment: { ...runtimeDependencies.environment, ...runtime.environment }
+        };
+        return {
+          launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0, combined),
+          env: { ...env, ...runtime.environment, PATH: resolvePluginEnvironment(config.env, config.secretEnv,
+            context.secrets, combined.pathEntries, combined.environment).PATH! }
+        };
+      };
+      const office = preparesOfficeInBackground ? new BackgroundRuntime(
+        () => {
+          officeProgress = officeRuntimeProgress("waiting");
+          return resolveOfficeRuntime(platform, createOfficeInstaller());
+        },
+        () => officeProgress
+      ) : undefined;
       return {
         pluginId: context.plugin.id,
-        launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies),
+        launch,
+        office,
+        withOfficeRuntime,
+        preparations: new Map(),
+        closed: false,
         config,
         pluginConfig: context.config,
         env,
@@ -186,6 +225,10 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async *invoke(rawSession, call) {
       const session = asCommandSession(rawSession);
+      const expiresAt = Date.now() + callTimeoutMs(session.config.timeoutMs, call.deadline);
+      const { launch, env } = session.office
+        ? yield* prepareOfficeInvocation(session, call, expiresAt)
+        : { launch: session.launch, env: session.env };
       const request = JSON.stringify({
         callId: call.callId,
         pluginId: call.pluginId,
@@ -196,11 +239,11 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
         config: session.pluginConfig,
         hostServiceBudget: { maxRequests: MAX_HOST_SERVICE_REQUESTS_PER_CALL }
       });
-      const args = session.launch.args.map((arg) => applyPlaceholders(arg, call));
+      const args = launch.args.map((arg) => applyPlaceholders(arg, call));
       if (session.config.inputMode === "argument-json") args.push(request);
-      const child = spawnFn(session.launch.command, args, {
-        cwd: session.launch.cwd,
-        env: session.launch.windowsAppContainer ? windowsLauncherEnvironment(session.env) : session.env,
+      const child = spawnFn(launch.command, args, {
+        cwd: launch.cwd,
+        env: launch.windowsAppContainer ? windowsLauncherEnvironment(env) : env,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"]
       });
@@ -229,7 +272,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
         timedOut = true;
         terminate(child);
-      }, callTimeoutMs(session.config.timeoutMs, call.deadline));
+      }, Math.max(1, expiresAt - Date.now()));
       try {
         let terminal: CapabilityEvent | null = null;
         let jsonOutput: Buffer | null = null;
@@ -340,6 +383,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async cancel(rawSession, callId) {
       const session = asCommandSession(rawSession);
+      session.preparations.get(callId)?.abort();
       abortHostServices(session, callId);
       const child = session.children.get(callId);
       if (child) {
@@ -350,6 +394,9 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
 
     async deactivate(rawSession) {
       const session = asCommandSession(rawSession);
+      session.closed = true;
+      session.office?.stopScheduling();
+      for (const controller of session.preparations.values()) controller.abort();
       const children = [...session.children.values()];
       for (const callId of session.children.keys()) abortHostServices(session, callId);
       for (const child of children) terminate(child);
@@ -357,6 +404,53 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       session.children.clear();
     }
   };
+}
+
+async function* prepareOfficeInvocation(
+  session: CommandPluginSession, call: CapabilityCall, expiresAt: number
+): AsyncGenerator<CapabilityEvent, { launch: SandboxLaunch; env: Record<string, string> }> {
+  const controller = new AbortController();
+  session.preparations.set(call.callId, controller);
+  try {
+    if (session.closed) controller.abort();
+    let office = session.office?.ready;
+    if (session.office && needsOfficeRuntime(call) && !controller.signal.aborted) {
+      office = yield* session.office.wait(controller.signal, expiresAt);
+      if (!office) throw Object.assign(new Error("Could not prepare the Office runtime. Retry the Office operation to try again."),
+        { code: "plugin_runtime_error" });
+    }
+    // Keep the prepared sandbox and environment local to this call.
+    const prepared = office ? await session.withOfficeRuntime(office) : { launch: session.launch, env: session.env };
+    if (controller.signal.aborted) throw Object.assign(new Error("Plugin call was cancelled"), { code: "plugin_cancelled" });
+    if (Date.now() >= expiresAt) throw Object.assign(new Error("Plugin call timed out"), { code: "plugin_timeout" });
+    return prepared;
+  } finally {
+    session.preparations.delete(call.callId);
+  }
+}
+
+/** Match the official Office capability inputs that require the native tools or CJK fonts. */
+function needsOfficeRuntime(call: CapabilityCall): boolean {
+  const input = call.input as Record<string, unknown> | undefined;
+  switch (call.capabilityId) {
+    case "office_edit":
+    case "office_review_page":
+      return false;
+    case "office_import":
+      return typeof input?.path === "string" && /\.pdf$/iu.test(input.path);
+    case "office_inspect":
+    case "office_deliver":
+      return typeof input?.file === "string" && /\.pdf$/iu.test(input.file);
+    case "office_create":
+      if (input?.format === "pdf") return true;
+      return input?.format === "docx" && [input.title, ...(Array.isArray(input.paragraphs) ? input.paragraphs : [])]
+        .some(value => typeof value === "string" && /\p{Script=Han}/u.test(value));
+    case "office_convert":
+      return !(input?.format === "xlsx" && typeof input.file === "string" && /\.(csv|tsv)$/iu.test(input.file));
+    default:
+      // Status, render, and arbitrary Office scripts may require native tools.
+      return true;
+  }
 }
 
 async function respondToHostServiceRequest(
@@ -620,13 +714,35 @@ export async function resolveOfficeRuntime(platform: NodeJS.Platform = process.p
   return result;
 }
 
-function defaultOfficeInstaller(pluginDataRoot?: string): OfficeRuntimeInstaller | undefined {
+function officeRuntimeProgress(stage: string, bytes = 0, total?: number): RuntimePreparationProgress {
+  const phase = "runtime-preparation";
+  switch (stage) {
+    case "downloading":
+    case "retrying":
+      return { current: bytes, total, phase, runtimeStage: "downloading", message: "Downloading Office runtime…" };
+    case "extracting":
+      return { current: 0, phase, runtimeStage: "extracting", message: "Extracting Office runtime…" };
+    case "verifying":
+      return { current: 0, phase, runtimeStage: "verifying", message: "Verifying Office runtime…" };
+    default:
+      return { current: 0, phase, runtimeStage: "preparing", message: "Preparing Office runtime…" };
+  }
+}
+
+function defaultOfficeInstaller(
+  pluginDataRoot?: string,
+  onProgress?: (stage: string, bytes?: number, total?: number) => void
+): OfficeRuntimeInstaller | undefined {
+
   if (!pluginDataRoot) return undefined;
   const registry = resolvePluginRegistryBaseUrl(process.env);
   const catalogUrl = process.env.MEMMY_OFFICE_RUNTIME_CATALOG_URL
     ?? (registry ? new URL("/api/v1/plugins/office/runtimes/{target}", registry).href : undefined);
   if (!catalogUrl) return undefined;
-  return createOfficeRuntimeInstaller({ cacheRoot: process.env.MEMMY_OFFICE_RUNTIME_CACHE ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "office"), catalogUrl });
+  return createOfficeRuntimeInstaller({
+    cacheRoot: process.env.MEMMY_OFFICE_RUNTIME_CACHE ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "office"),
+    catalogUrl, onProgress
+  });
 }
 
 interface FilesystemRule {
