@@ -1,5 +1,6 @@
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { l2SupportRelation } from "./l2-content-revision.js";
+import { l2SharesComparisonScope } from "./l2-comparison-scope.js";
 import {
   L2_INDUCTION_PROMPT,
   buildPolicyDraft,
@@ -618,22 +619,24 @@ export class PolicyInductionEngine {
     if (!policy) return undefined;
     const unifiedEvidence = this.deps.config.algorithm.l2Induction.mode === "unified" || policy.schemaVersion === 2;
 
+    const links = this.deps.repos.runtime.listTracePolicyLinks({ l2MemoryId: policy.id, limit: 1000 });
+    const currentSupportLinks = links.filter((link) => link.relation === l2SupportRelation(memory));
     const linkedTraceIds = new Set([
       ...(unifiedEvidence ? policy.sourceTraceIds : []),
-      ...this.deps.repos.runtime
-        .listTracePolicyLinks({ l2MemoryId: policy.id, limit: 1000 })
-        .filter((link) => !unifiedEvidence || link.relation === l2SupportRelation(memory))
-        .map((link) => link.l1MemoryId)
+      ...(unifiedEvidence ? currentSupportLinks : links).map((link) => link.l1MemoryId)
     ]);
 
     const allTraces = this.deps.repos.memories
       .getMany([...linkedTraceIds])
       .map((memory) => this.deps.traceMeta(memory))
-      .filter((trace): trace is TraceMeta =>
-        Boolean(trace && (unifiedEvidence
-          ? trace.userId === memory.userId && this.isPolicyEvidenceValid(trace, policy)
-          : this.isTraceEligibleForL2(trace)))
-      );
+      .filter((trace): trace is TraceMeta => {
+        if (!trace) return false;
+        if (!unifiedEvidence) return this.isTraceEligibleForL2(trace);
+        // Source IDs alone retain same-owner evidence; an attributed current link is required to bridge owners.
+        const ownerMatches = trace.userId === memory.userId || (l2SharesComparisonScope(trace.memory, memory) &&
+          currentSupportLinks.some((link) => link.l1MemoryId === trace.id && link.l2MemoryId === memory.id && link.userId === trace.userId));
+        return ownerMatches && this.isPolicyEvidenceValid(trace, policy);
+      });
 
     const linkedTraces = allTraces.filter((trace) => linkedTraceIds.has(trace.id));
     const evidenceTraces = linkedTraces;

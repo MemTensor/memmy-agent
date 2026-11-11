@@ -14,6 +14,7 @@ import { clip } from "../../utils/text.js";
 import { profileIdFromMemory, projectIdFromMemory } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { listL2Candidates, markL2CandidatesProcessed, type L2Candidate } from "./l2-candidate-service.js";
+import { l2ComparisonScope, l2SharesComparisonScope } from "./l2-comparison-scope.js";
 import { L2_EXTRACTION_SYSTEM_PROMPT, validateL2ExtractionResult, type L2ExtractionOperation, type NewL2Lesson } from "./l2-extraction-contract.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 
@@ -162,7 +163,7 @@ export class UnifiedL2ExtractionPipeline {
   private now(): string { return this.deps.nowIso?.() ?? new Date().toISOString(); }
 
   private async processScope(job: EvolutionJobRecord, scope: string, candidates: L2Candidate[]): Promise<void> {
-    const leaseKey = `l2.extract.lease.v1:${digest(scope)}`;
+    const leaseKey = `l2.extract.lease.v1:${digest(l2ComparisonScope(candidates[0]!.memory))}`;
     const owner = `${job.id}:${randomUUID()}`;
     this.deps.repos.transaction(() => {
       const previous = this.deps.repos.runtime.getKv(leaseKey)?.value;
@@ -188,7 +189,7 @@ export class UnifiedL2ExtractionPipeline {
         renew();
         // Rebuild the index after every committed batch. New candidates are immediately visible
         // through full-text vectors; legacy retrieval vectors are never used for comparison.
-        const historical = this.listHistorical(remaining[0]!.memory, scope);
+        const historical = this.listHistorical(remaining[0]!.memory);
         const vectors = await this.vectors(historical.map(l2ComparisonText), "document", renew);
         renew();
         const batch = await this.nextBatch(remaining, historical, vectors, renew);
@@ -209,12 +210,12 @@ export class UnifiedL2ExtractionPipeline {
     }
   }
 
-  private listHistorical(source: MemoryRow, scope: string): MemoryRow[] {
+  private listHistorical(source: MemoryRow): MemoryRow[] {
     const result: MemoryRow[] = [];
     // Pagination avoids silently omitting older policies from the comparison corpus.
     for (let offset = 0; ; offset += 500) {
       const page = this.deps.repos.memories.list({ userId: source.userId, memoryLayer: "L2", status: ["activated", "resolving"] }, 500, offset);
-      result.push(...page.filter((memory) => validL2(memory) && scopeOf(memory) === scope));
+      result.push(...page.filter((memory) => validL2(memory) && l2SharesComparisonScope(memory, source)));
       if (page.length < 500) break;
     }
     return result;
@@ -351,7 +352,8 @@ export class UnifiedL2ExtractionPipeline {
       this.assertSourcesCurrent(batch.sources);
       for (const target of batch.targets) {
         const current = this.deps.repos.memories.get(target.id);
-        if (!current || !validL2(current) || scopeOf(current) !== scope || digest(l2ComparisonRecord(current)) !== digest(target)) {
+        if (!current || !validL2(current) || !l2SharesComparisonScope(current, batch.sources[0]!.memory)
+          || digest(l2ComparisonRecord(current)) !== digest(target)) {
           throw new Error(`l2 extraction: target changed during extraction: ${target.id}`);
         }
       }
@@ -389,7 +391,7 @@ export class UnifiedL2ExtractionPipeline {
     const saved = this.deps.repos.memories.updateIfVersion(updated, operation.target_l2.version);
     // appendChange retains before/after content and evidence under existing history retention.
     for (const source of sources.filter((source) => operation.l1_ids.includes(source.sourceMemoryId))) {
-      this.deps.repos.runtime.insertTracePolicyLink({ userId: saved.userId, l1MemoryId: source.sourceMemoryId,
+      this.deps.repos.runtime.insertTracePolicyLink({ userId: source.userId, l1MemoryId: source.sourceMemoryId,
         l2MemoryId: saved.id, relation: l2SupportRelation(saved), createdAt: at });
       if (source.episodeId) this.deps.repos.runtime.appendEpisodeDerivedMemory(source.episodeId, "L2", saved.id, at);
     }
