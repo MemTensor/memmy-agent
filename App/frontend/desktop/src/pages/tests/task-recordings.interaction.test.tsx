@@ -38,10 +38,40 @@ beforeEach(() => { window.memmy = { platform: "win32" } as typeof window.memmy; 
 afterEach(() => { act(() => root.unmount()); document.body.replaceChildren(); Reflect.deleteProperty(window, "memmy"); });
 async function consent() {
   const boxes = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
-  expect(boxes).toHaveLength(2);
-  await act(async () => { boxes[0]!.click(); boxes[1]!.click(); });
+  const consentBoxes = boxes.filter((box) => !box.parentElement?.textContent?.includes("静止 10 秒"));
+  expect(consentBoxes).toHaveLength(2);
+  await act(async () => { consentBoxes[0]!.click(); consentBoxes[1]!.click(); });
 }
 describe("task recording product controls", () => {
+  it("maps timeline events to compact video time and labels omitted idle duration", async () => {
+    const {value, api} = client();
+    const compact = { ...session, durationMs:40000, idleSpans:[{startMs:10000,endMs:35000}], video:{...session.video!,durationMs:15000} };
+    api.list.mockResolvedValue({recordings:[compact]});
+    api.events.mockResolvedValue({events:[{id:'1',sequence:1,timeMs:36000,timestamp:'2026-10-13T00:00:36Z',origin:'native',type:'mouse_click',window:null}],nextCursor:null});
+    await render(<TaskRecordingsPanel client={value} human />);
+    expect(document.body.textContent).toContain('可回看 · 0:15');
+    expect(document.body.textContent).toContain('已省略静止等待 0:25');
+    await act(async () => button('视频回看').click());
+    const event=document.querySelector<HTMLButtonElement>('.task-recordings__timeline button')!;
+    expect(event.textContent).toContain('0:11');
+    await act(async () => event.click());
+    expect(document.querySelector('video')!.currentTime).toBe(11);
+    await act(async () => button('关闭').click());
+    api.events.mockResolvedValue({events:[{id:'1',sequence:1,timeMs:25000,timestamp:'2026-10-13T00:00:25Z',origin:'native',type:'mouse_click',window:null}],nextCursor:null});
+    await act(async () => button('视频回看').click());
+    await act(async () => document.querySelector<HTMLButtonElement>('.task-recordings__timeline button')!.click());
+    expect(document.querySelector('video')!.currentTime).toBe(9.999);
+  });
+  it("allows continuous Windows video by switching off automatic idle skipping", async () => {
+    const {value, api} = client();
+    await render(<TaskRecordingsPanel client={value} human />);
+    await act(async () => button('开始示范录制').click());
+    const idle=[...document.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find(x=>x.parentElement?.textContent?.includes('静止 10 秒'))!;
+    expect(idle.checked).toBe(true);
+    await act(async()=>idle.click());
+    await consent(); await act(async()=>button('开始录制').click());
+    expect(api.start.mock.calls[0]![0]).toMatchObject({skipIdle:false});
+  });
   it("requires application selection and raw-video consent before starting a human demonstration", async () => {
     const { value, api } = client();
     await render(<TaskRecordingsPanel client={value} human />);
@@ -52,7 +82,7 @@ describe("task recording product controls", () => {
     expect(button("开始录制").disabled).toBe(true);
     await consent(); expect(button("开始录制").disabled).toBe(false);
     await act(async () => button("开始录制").click());
-    expect(api.start).toHaveBeenCalledExactlyOnceWith({ title: "任务录制", applications: ["C:\\Apps\\Fixture.exe"], consent: true });
+    expect(api.start).toHaveBeenCalledExactlyOnceWith({ title: "任务录制", applications: ["C:\\Apps\\Fixture.exe"], consent: true, skipIdle: true });
   });
   it.each(["win32", "darwin"])("keeps Agent recording consent on one submitted message on %s without starting capture from the composer", async (platform) => {
     window.memmy = { platform } as typeof window.memmy;

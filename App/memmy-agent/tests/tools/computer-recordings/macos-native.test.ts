@@ -21,8 +21,8 @@ test.runIf(process.platform === "darwin")("native AVFoundation media preserves l
   expect(JSON.parse(execFileSync(binary, ["--self-test", "--output-dir", media], { encoding: "utf8", timeout: 60_000 })))
     .toEqual({ nativeMediaTests: "passed", parts: 2, frames: 6 });
   const manifest = JSON.parse(fs.readFileSync(path.join(media, "native-media.json"), "utf8"));
-  expect(manifest).toMatchObject({ platform: "macos", complete: false, durationMs: 10220, width: 1920, height: 1080,
-    clock: { kind: "mach_host", origin: "10000000000", frequency: "1000000000" } });
+  expect(manifest).toMatchObject({ platform: "macos", complete: false, durationMs: 10220, width: 1920, height: 1080 });
+  expect(manifest.clock).toEqual({ kind: "mach_host", origin: "10000000000", frequency: "1000000000" });
   expect(manifest.parts.map((part: { startMs: number; durationMs: number }) => [part.startMs, part.durationMs])).toEqual([[0, 10010], [10010, 210]]);
   const frames = fs.readFileSync(path.join(media, "frames.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   expect(frames.map((frame) => frame.timeMs)).toEqual([0, 70, 140, 10010, 10080, 10150]);
@@ -30,6 +30,7 @@ test.runIf(process.platform === "darwin")("native AVFoundation media preserves l
     "10000000000", "10070000000", "10140000000", "20010000000", "20080000000", "20150000000",
   ]);
   expect(frames.every((frame) => !frame.qpc && frame.monotonicTicks)).toBe(true);
+  expect(frames.map((frame) => frame.monotonicTicks)).toEqual(["10000000000", "10070000000", "10140000000", "20010000000", "20080000000", "20150000000"]);
   expect(frames.map((frame) => frame.blank)).toEqual([false, false, false, false, true, false]);
   expect(manifest.gaps).toEqual([{ startMs: 10080, endMs: 10150, reason: "paused" }]);
   for (const name of ["0000_before.png", "0000_after.png"]) {
@@ -39,4 +40,7 @@ test.runIf(process.platform === "darwin")("native AVFoundation media preserves l
     const bottom = (1080 - 1) * 1920 * 4;
     expect(png.data[bottom]).toBeLessThan(40); expect(png.data[bottom + 2]).toBeGreaterThan(200);
   }
+  const timing = path.join(directory, "timing"); fs.mkdirSync(timing);
+  expect(JSON.parse(execFileSync(binary, ["--self-test-timing", "--output-dir", timing], { encoding: "utf8", timeout: 60_000 })))
+    .toEqual({ nativeTimingTests: "passed", cases: 6 });
 }, 180_000);

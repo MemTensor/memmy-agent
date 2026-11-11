@@ -2,15 +2,19 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { RecordingSessionSchema, RecordingEventSchema, RecordingStartSchema,
+import { RecordingSessionSchema, RecordingEventSchema, RecordingFrameSchema, RecordingStartSchema,
+  type OperationEvidence,
   type RecordingSession, type RecordingEvent, type RecordingStart, type RecordingExportResult,
   type RecordingConfiguration, type RecordingPermission } from "@memmy/local-api-contracts";
 import { collectorGate, type CollectorGate } from "../computer-history/core/collector-gate.js";
+import { buildRecordingOperationEvidence } from "../computer-use/operation-evidence.js";
+import { writeJsonAtomic } from "../../utils/atomic-json.js";
+export { writeJsonAtomic } from "../../utils/atomic-json.js";
 
 export class RecordingError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
-export type RecordingResult = Pick<RecordingSession, "durationMs" | "video" | "parts" | "gaps" | "qpc" | "clock" | "videoIntegrity" | "timelineCompleteness" | "error"> & {
+export type RecordingResult = Pick<RecordingSession, "durationMs" | "video" | "parts" | "gaps" | "qpc" | "clock" | "idleSpans" | "videoIntegrity" | "timelineCompleteness" | "error"> & {
   endReason?: RecordingSession["taskEndReason"];
 };
 export interface TaskRecordingHandle {
@@ -19,28 +23,23 @@ export interface TaskRecordingHandle {
   resume(): Promise<void>;
   stop(): Promise<RecordingResult>;
   timeMs(): number;
+  idleStatus?(): { paused: boolean; videoTimeMs: number } | undefined;
 }
 export interface TaskRecordingDriver {
   configuration?(): Promise<RecordingConfiguration>;
   openPermission?(permission: RecordingPermission, mode: "request" | "settings"): Promise<RecordingConfiguration>;
-  start(input: { directory: string; applications: string[]; onEvent: (event: Omit<RecordingEvent, "id" | "sequence">) => void }): Promise<TaskRecordingHandle>;
+  start(input: { directory: string; applications: string[]; skipIdle?: boolean; target?: NativeTaskTarget;
+    onEvent: (event: Omit<RecordingEvent, "id" | "sequence">) => void }): Promise<TaskRecordingHandle>;
   recover(directory: string): Promise<RecordingResult>;
   exportFlow(directory: string, session: RecordingSession, events: RecordingEvent[], destination: string): Promise<string[]>;
 }
+export type NativeTaskTarget = { pid: number; processStart: string; hwnd: string };
 interface ActiveRecording {
   session: RecordingSession; release: () => void; handle: TaskRecordingHandle | null;
   fd: number; sequence: number; start: Promise<void>; operation: Promise<unknown>; settling: Promise<void> | null; persistFailed: boolean;
 }
 const terminal = (state: RecordingSession["state"]) => state === "ready" || state === "failed";
 const recordingId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
-export function writeJsonAtomic(file: string, value: unknown): void {
-  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
-  try {
-    const fd = fs.openSync(temporary, "wx", 0o600);
-    try { fs.writeFileSync(fd, JSON.stringify(value, null, 2)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    fs.renameSync(temporary, file);
-  } finally { fs.rmSync(temporary, { force: true }); }
-}
 export function readLines<T>(file: string, parse: (value: unknown) => T, maxBytes = 64 * 1024 * 1024): T[] {
   const info = fs.lstatSync(file);
   if (!info.isFile() || info.isSymbolicLink() || info.size > maxBytes) throw new RecordingError(422, "recording_index_invalid");
@@ -80,6 +79,8 @@ export class RecordingSessionService {
     if (this.active?.session.id === id) {
       const snapshot = structuredClone(this.active.session);
       if (this.active.handle && (snapshot.state === "recording" || snapshot.state === "paused")) snapshot.durationMs = Math.min(1_200_000, this.active.handle.timeMs());
+      const idle = this.active.handle?.idleStatus?.();
+      if (idle) { snapshot.idlePaused = idle.paused; snapshot.recordedDurationMs = idle.videoTimeMs; }
       return snapshot;
     }
     const failed = this.failedManifests.get(id); if (failed) return structuredClone(failed);
@@ -137,6 +138,21 @@ export class RecordingSessionService {
     return sessions.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   async get(id: string): Promise<RecordingSession> { await this.initialized; return this.read(id); }
+  private writeOperationEvidence(session: RecordingSession): OperationEvidence {
+    const directory = this.folder(session.id), eventsFile = path.join(directory, "events.jsonl"), framesFile = path.join(directory, "frames.jsonl");
+    const events = readLines(eventsFile, (value) => RecordingEventSchema.parse(value));
+    const frames = fs.existsSync(framesFile) ? readLines(framesFile, (value) => RecordingFrameSchema.parse(value)) : [];
+    const evidence = buildRecordingOperationEvidence({ session, events, frames, eventsText: fs.readFileSync(eventsFile, "utf8"),
+      framesText: fs.existsSync(framesFile) ? fs.readFileSync(framesFile, "utf8") : "" });
+    writeJsonAtomic(path.join(directory, "operation-evidence.json"), evidence);
+    return evidence;
+  }
+  async evidence(id: string): Promise<OperationEvidence> {
+    const session = await this.get(id);
+    if (!terminal(session.state)) throw new RecordingError(409, "recording_busy");
+    try { return this.writeOperationEvidence(session); }
+    catch { throw new RecordingError(422, "recording_evidence_index_invalid"); }
+  }
   async configuration(): Promise<RecordingConfiguration> {
     if (!this.options.driver.configuration) throw new RecordingError(400, "recording_configuration_unavailable");
     return this.options.driver.configuration();
@@ -158,7 +174,7 @@ export class RecordingSessionService {
     this.attemptedAgentMessages.add(hash);
     return true;
   }
-  async start(input: RecordingStart, agent: RecordingSession["agent"] = null): Promise<RecordingSession> {
+  async start(input: RecordingStart, agent: RecordingSession["agent"] = null, target?: NativeTaskTarget): Promise<RecordingSession> {
     await this.initialized;
     if (this.options.supported === false) throw new RecordingError(400, "task_recording_requires_supported_desktop");
     if (this.closing) throw new RecordingError(409, "recording_shutting_down");
@@ -182,7 +198,7 @@ export class RecordingSessionService {
     this.active = active;
     active.start = (async () => {
       try {
-        active.handle = await this.options.driver.start({ directory: this.folder(session.id), applications: session.applications,
+        active.handle = await this.options.driver.start({ directory: this.folder(session.id), applications: session.applications, skipIdle: parsed.data.skipIdle, ...(target ? { target } : {}),
           onEvent: (event) => this.append(active, event) });
         session.state = "recording"; this.save(session);
         void active.handle.finished.then((result) => this.settle(active, result), (error) => this.settleFailure(active, error)).catch(() => {});
@@ -219,6 +235,9 @@ export class RecordingSessionService {
         if (active.persistFailed) { active.session.state = "failed"; active.session.error = "recording_metadata_write_failed"; }
         if (active.fd >= 0) { fs.fsyncSync(active.fd); fs.closeSync(active.fd); active.fd = -1; }
         this.save(active.session);
+        // Extraction is retryable via /evidence and must not change a sealed
+        // video's lifecycle result when indexes are unavailable or damaged.
+        try { this.writeOperationEvidence(active.session); } catch { /* retain original capture evidence */ }
       } catch {
         active.session.state = "failed"; active.session.error = "recording_metadata_write_failed"; active.session.timelineCompleteness = "partial";
         this.failedManifests.set(active.session.id, structuredClone(active.session));
@@ -281,7 +300,9 @@ export class RecordingSessionService {
     await this.get(id);
     if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new RecordingError(400, "recording_cursor_invalid");
     const records = readLines(path.join(this.folder(id), "events.jsonl"), (v) => RecordingEventSchema.parse(v));
-    const remaining = records.filter((event) => event.sequence > after);
+    // Provider snapshots feed extraction; they are not user inputs and must
+    // not crowd the player's action timeline or consume its page size.
+    const remaining = records.filter((event) => event.sequence > after && !event.observation);
     const events = remaining.slice(0, limit);
     return { events, nextCursor: remaining.length > limit ? events.at(-1)!.sequence : null };
   }

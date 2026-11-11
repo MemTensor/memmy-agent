@@ -14,6 +14,14 @@ macOS 最低版本为 12.3，支持 Apple Silicon 和 Intel。首次使用时，
 
 视频保留原始可见画面，可能包含输入内容。默认仅本地保存，无音频，不额外上传模型，不参与历史摘要。应用选择与确认文案独立于旧历史的“不保存截图”承诺。
 
+## 自动省略静止等待（Windows）
+
+录制确认页默认开启“画面静止 10 秒后自动暂停写入，变化时继续录制”，也可关闭以保留连续视频。比较的是经过授权与窗口身份校验的完整输出画布；窗口切换、位置／DPI／授权变化和任意像素变化都会重新开始计时。每次变化后保留前 10 秒，之后立即封存当前分片，只继续监测，不编码重复画面；首个变化画面立即恢复写入新分片。手动暂停仍由用户控制，不会被自动变化恢复。macOS 暂不提供此选项。
+
+这不是会话停止：Agent、画面检测及输入／CU 事件记录继续运行。20 分钟上限仍按实际执行时间计算。结束时会省略仍在等待的尾段。回看显示缩短后的视频时长和省略的等待时长，活跃状态显示“画面静止，等待变化”。
+
+原始 `timeMs`、QPC 和事件时间不改写。新增可选 `idleSpans` 保存被省略的执行时间区间，帧的 `videoTimeMs` 与分片起止使用视频呈现时间；播放器将事件时间转换后定位；静止等待中的事件定位到省略区间前最后保留的画面，避免跳到之后才出现的新画面。缺口和离线导出仍使用原始执行时间。旧录制缺少这些字段时保持原来的连续时间轴。静止区间本身不作为采集故障，采集／授权失败仍单独标记。
+
 ## 采集和存储
 
 `win/native/src/win/task_video.cpp` 使用 Windows Graphics Capture、D3D11 与 Media Foundation。它在既有原生 helper 中新增 `record-task` 模式，与原有 hooks、UIA、窗口身份检查和单实例 lease 共用进程。既有 `observe` 的 v1 协议及默认行为不变。桌面包不增加 Python、OpenAdapt Capture 或 FFmpeg 运行依赖。
@@ -124,3 +132,15 @@ node scripts/internal/shared/validate-computer-history.mjs
 Windows 原生构建与测试沿用 `scripts/internal/win/history-recorder-native.ps1` 及 CTest。Flow 兼容性工作流为 `.github/workflows/openadapt-recording-compat.yml`；Windows 工作流为 `.github/workflows/windows-computer-history-validation.yml`。
 
 macOS 打包沿用 `scripts/internal/mac/build-dmg.sh`，构建及安装后验证会检查 `human-recorder`、`app-icon` 和 `task-recorder` 三个原生可执行文件；缺少 helper 时报告安装错误，禁止在客户机器上临时编译 Swift。
+
+## Plugin access
+
+These Host-owned drivers provide owner-scoped task recordings, media, evidence and
+resource cleanup to approved native plugins. They share the collector gate with
+Computer History. Conversation event capture uses the existing History stream and
+its own durable snapshots; it does not start a second video recorder.
+
+The Windows task recorder is built from `computer-history/win/native` by
+`scripts/internal/win/build-plugin-native-recorder.mjs` during Windows packaging.
+Its runtime requires no system Node or compiler. Teaching orchestration, prompts,
+application adapters and dedicated acceptance tools belong to the plugin repository.

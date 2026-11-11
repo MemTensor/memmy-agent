@@ -35,6 +35,8 @@ export interface HistoryPlatformDriver {
   prepare?(): void;
   ready?(child: ChildProcessWithoutNullStreams): Promise<void>;
   stop?(child: ChildProcessWithoutNullStreams): Promise<void>;
+  /** Change the durable output at a native fence without restarting capture. */
+  rotate?(child: ChildProcessWithoutNullStreams, input: RecorderLaunch): Promise<void>;
 }
 
 export function historyPermissionsReady(status: HistoryPermissions): boolean {

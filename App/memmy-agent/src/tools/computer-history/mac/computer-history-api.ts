@@ -21,7 +21,7 @@ export class ComputerHistoryDemoService extends SharedService {
           const child = spawn(process.execPath, [
             recorderScript, "--title", title, "--out", eventsFile, "--no-screenshots", "--capture-search-text", "--capture-text",
             "--observation-settings", observationSettingsFile,
-          ], { env: process.env, stdio: ["pipe", "pipe", "pipe"] });
+          ], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, stdio: ["pipe", "pipe", "pipe"] });
           // The legacy wrapper exits after its native helper has stopped.
           // Its lifecycle permits rotation at exit, before stdout pipe close.
           child.once("exit", release);

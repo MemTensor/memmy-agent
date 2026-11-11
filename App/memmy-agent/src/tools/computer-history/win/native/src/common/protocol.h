@@ -49,6 +49,7 @@ struct NodeRecord {
 // Parents must precede the node, be readable and have successfully read AutomationIds.
 bool IsVsCodeEditorBody(const NodeRecord& node, const std::vector<NodeRecord>& preceding, const policy::AppRule& rule);
 bool IsWordDocument(const NodeRecord& node, const std::vector<NodeRecord>& preceding, const policy::AppRule& rule);
+bool IsNotepadDocument(const NodeRecord& node, const std::vector<NodeRecord>& preceding, const policy::AppRule& rule);
 void FinalizeScopedDocument(NodeRecord& node);
 
 // Stable content key (FNV-1a 64, hex) over identity and content fields. Focus, bounds and the

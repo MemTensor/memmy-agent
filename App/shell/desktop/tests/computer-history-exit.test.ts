@@ -118,6 +118,7 @@ function setupCleanup(platform: string, drain: () => Promise<void>) {
   const stop = vi.fn(drain);
   const services = { agentGateway, close: async () => { calls.push("services"); } };
   const diagnostic = vi.fn();
+  const permissionGuide = { dispose: vi.fn() };
   const context = createContext({
     process: { platform, env: {} }, app: { isPackaged: false },
     runtimeServices: services,
@@ -130,7 +131,7 @@ function setupCleanup(platform: string, drain: () => Promise<void>) {
     stopTaskRecordingBeforeExit: async () => {},
     stopComputerUseAgentForPermissionRestart: async () => {},
     browserSidebarBridge: null, embeddedBrowserDriver: { dispose: vi.fn() }, computerUseSurfaceWindows: null,
-    pipScreenPermissionGuide: null,
+    pipScreenPermissionGuide: permissionGuide,
     stopComputerHistoryBeforeExit: stop,
     stopPackagedRendererServer: async () => { calls.push("renderer"); },
     sendAppExitEventBeforeQuit: async () => { calls.push("analytics"); },
@@ -138,7 +139,7 @@ function setupCleanup(platform: string, drain: () => Promise<void>) {
     console: { info: vi.fn(), warn: vi.fn() }
   });
   runInContext(cleanupCode, context);
-  return { calls, stop, context, agentGateway, diagnostic, cleanup: () => context.cleanup() as Promise<void> };
+  return { calls, stop, context, agentGateway, diagnostic, permissionGuide, cleanup: () => context.cleanup() as Promise<void> };
 }
 
 describe("production Desktop cleanup ordering", () => {
@@ -151,6 +152,8 @@ describe("production Desktop cleanup ordering", () => {
     finish(); await cleanup;
     expect(test.calls).toEqual(["services", "backend", "renderer", "analytics"]);
     expect(test.context.runtimeServices).toBeNull();
+    expect(test.permissionGuide.dispose).toHaveBeenCalledOnce();
+    expect(test.context.pipScreenPermissionGuide).toBeNull();
   });
 
   it("continues process cleanup when the drain fails", async () => {

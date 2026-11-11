@@ -2,8 +2,12 @@ import path from "node:path";
 import { scrubRecord, type HistoryEvent } from "../core/recording.js";
 import { authorizedRule, pathKey, windowsApplicationId, type NativePolicy } from "./policy.js";
 import type { NativeNode, NativeSnapshotEvent } from "./protocol.js";
-import { documentTextIsLabel, isVsCodeEditorBody, isWordDocument } from "./document-regions.js";
+import { documentTextIsLabel, isVsCodeEditorBody, isWordDocument, isNotepadDocument } from "./document-regions.js";
 import { sanitizeBrowserUrl } from "../browser-privacy.js";
+import type { RecordingObservation } from "@memmy/local-api-contracts";
+
+const operationRoles = new Set(["Button", "CheckBox", "ComboBox", "Hyperlink", "ListItem", "MenuItem",
+  "RadioButton", "Slider", "Spinner", "TabItem", "TreeItem", "SplitButton"]);
 
 const fields = ["name", "text", "visibleText", "value"] as const;
 const invalid = (): never => { throw new Error("windows_snapshot_invalid"); };
@@ -14,6 +18,17 @@ export class SnapshotNormalizer {
   private identity: string | null = null;
   private frameNodes: Map<string, NativeNode> | null = null;
   reset(): void { this.baseline = null; this.identity = null; this.frameNodes = null; }
+  /** Only validated, non-sensitive control labels/geometry; never field values or document bodies. */
+  operationObservation(): RecordingObservation {
+    const eligible = [...(this.frameNodes?.values() ?? [])].filter((node) => operationRoles.has(node.controlType)
+      && node.password === false && !node.redaction && !node.providerOffscreen && !node.documentStatus);
+    return { source: "windows_uia", truncated: !this.baseline || eligible.length > 256,
+      nodes: eligible.slice(0, 256).map((node) => ({ key: node.key, role: node.controlType, focused: node.focused,
+        ...(node.name ? { name: scrubRecord(node.name).slice(0, 240) } : {}),
+        ...(node.automationId ? { automation_id: scrubRecord(node.automationId).slice(0, 256) } : {}),
+        ...(node.bounds && node.bounds[2] > 0 && node.bounds[3] > 0 ? { bounds: node.bounds } : {}),
+      })) };
+  }
   normalizeEvents(event: NativeSnapshotEvent, policy: NativePolicy, revision: string): HistoryEvent[] {
     const normalized = this.normalize(event, policy, revision);
     if (!normalized || event.snapshot.status !== "ok") return [];
@@ -71,6 +86,9 @@ export class SnapshotNormalizer {
     let roots = 0;
     let total = 0;
     const blocks = new Set<string>();
+    // Authority is recomputed for each full/delta frame, once per node. Rendering
+    // reuses that result instead of walking the same ancestry several more times.
+    const adapters = new Map<string, "vscode.editor" | "word.document" | "notepad.document">();
     const boundedEditor = rule.documentRegions?.some((selector) => "scope" in selector && selector.scope === "vscode.editor");
     for (const node of nodes.values()) {
       if (node.depth > policy.limits.maxDepth) return invalid();
@@ -81,7 +99,11 @@ export class SnapshotNormalizer {
       }
       const content = fields.some((field) => node[field] !== undefined);
       const sensitiveNode = sensitive.has(node.automationId.toLowerCase());
-      const scoped = isVsCodeEditorBody(node, nodes, rule) || isWordDocument(node, nodes, rule);
+      const adapter = node.controlType === "Edit" && isVsCodeEditorBody(node, nodes, rule) ? "vscode.editor"
+        : node.controlType === "Document" && isWordDocument(node, nodes, rule) ? "word.document"
+        : node.controlType === "Document" && isNotepadDocument(node, nodes, rule) ? "notepad.document" : undefined;
+      if (adapter) adapters.set(node.key, adapter);
+      const scoped = adapter !== undefined;
       const document = matches(rule.documentRegions, node) || scoped;
       const search = node.controlType === "Edit" && node.focused && matches(rule.searchFields, node);
       if ((node.redaction || sensitiveNode || node.password === true) && content) return invalid();
@@ -122,12 +144,12 @@ export class SnapshotNormalizer {
         providerOffscreen: node.providerOffscreen, ...(node.redaction ? { redaction: node.redaction } : {}),
         ...(genericCapture && node.value !== undefined ? { valueSource: node.valueSource ?? "uia.value" as const } : {}),
         ...((node.text !== undefined || node.visibleText !== undefined) && genericCapture ? { documentStatus: "available" as const } : node.documentStatus ? { documentStatus: node.documentStatus } : {}),
-        ...((node.text !== undefined || node.visibleText !== undefined || node.documentStatus === "available") && !node.redaction && (isVsCodeEditorBody(node, nodes, rule) || genericCapture)
-          ? { documentContext: isVsCodeEditorBody(node, nodes, rule) ? "vscode.editor" as const : "uia.document" as const } : {}),
-        ...((node.text !== undefined || node.visibleText !== undefined || node.documentStatus === "available") && !node.redaction && (isVsCodeEditorBody(node, nodes, rule) || isWordDocument(node, nodes, rule) || genericCapture)
+        ...((node.text !== undefined || node.visibleText !== undefined || node.documentStatus === "available") && !node.redaction && (adapters.get(node.key) === "vscode.editor" || genericCapture)
+          ? { documentContext: adapters.get(node.key) === "vscode.editor" ? "vscode.editor" as const : "uia.document" as const } : {}),
+        ...((node.text !== undefined || node.visibleText !== undefined || node.documentStatus === "available") && !node.redaction && (adapters.has(node.key) || genericCapture)
           ? { documentEvidence: {
-            adapter: isVsCodeEditorBody(node, nodes, rule) ? "vscode.editor" as const : isWordDocument(node, nodes, rule) ? "word.document" as const : "uia.text" as const,
-            labelKind: isVsCodeEditorBody(node, nodes, rule) ? "editor_label" as const : "document_label" as const,
+            adapter: adapters.get(node.key) ?? "uia.text" as const,
+            labelKind: adapters.get(node.key) === "vscode.editor" ? "editor_label" as const : "document_label" as const,
             labelSource: "uia.name" as const, textSource: "uia.document_range" as const,
             ...(node.visibleText !== undefined ? { visibleTextSource: "uia.visible_ranges" as const } : {}),
             providerFocused: node.focused,

@@ -176,7 +176,8 @@ function reconnectHarness(options: { alarms?: Map<string, Record<string, unknown
     }, set: save } },
     alarms: { get: async (name: string) => alarms.get(name), create: createAlarm,
       onAlarm: { addListener(listener: typeof onAlarm) { onAlarm = listener; } } },
-    tabs: { query: async () => [], onRemoved: events, onUpdated: events, onActivated: events,
+    webNavigation: { onCommitted: events, onCreatedNavigationTarget: events },
+    tabs: { query: async () => [], onRemoved: events, onUpdated: events, onActivated: events, onCreated: events,
       get: async () => ({ id: 7, active: false, windowId: 1, url: "https://example.test/page" }) },
     windows: { onRemoved: events, onFocusChanged: { addListener(listener: () => void) { focusListeners.push(listener); } }, get: async () => ({ focused: false }) },
     debugger: { onDetach: events, onEvent: events, attach: async () => undefined, detach: async () => undefined,
@@ -191,9 +192,9 @@ function reconnectHarness(options: { alarms?: Map<string, Record<string, unknown
     navigator: { userAgent: options.browser === "edge" ? "Edg/154" : "Chrome/154" },
     URL, Date, setTimeout, clearTimeout, setInterval, clearInterval,
     importScripts: (file: string) => {
-      if (options.historyImportFailure) throw new Error("Simulated History script failure");
+      if (options.historyImportFailure && file === "browser-history-background.js") throw new Error("Simulated History script failure");
       vm.runInContext(fs.readFileSync(path.join(extension, file), "utf8"), context);
-      if (options.historyInitializeFailure) vm.runInContext("installMemmyBrowserHistoryBackground = () => { throw new Error('Simulated History init failure'); }", context);
+      if (options.historyInitializeFailure && file === "browser-history-background.js") vm.runInContext("installMemmyBrowserHistoryBackground = () => { throw new Error('Simulated History init failure'); }", context);
     } });
   vm.runInContext(fs.readFileSync(path.join(extension, "background.js"), "utf8"), context);
   return { context, alarms, saved, save, reload, createAlarm, sockets, sent,
@@ -550,7 +551,7 @@ describe("external browser page discovery", () => {
     try {
       const test = discoveryHarness({ browser, boot: true });
       await vi.advanceTimersByTimeAsync(0);
-      expect(test.sent).toContainEqual({ type: "hello", browser, extensionVersion: "1.0.12", capabilities: ["openTab", "playwright", "browserHistory"] });
+      expect(test.sent).toContainEqual({ type: "hello", browser, extensionVersion: "1.2.2", capabilities: ["openTab", "playwright", "browserHistory"] });
       expect(test.attaches).toEqual([]);
       expect(test.sent).toContainEqual(expect.objectContaining({ type: "claim", browser, tabId: 7 }));
       expect((await test.message({ action: "status" })).controllableTabCount).toBe(1);
@@ -897,7 +898,7 @@ describe("Chrome and Edge extension packaging", () => {
       });
     }
     for (const file of ["manifest.json", "background.js", "popup.html", "popup.js", "auth.html", "auth.js",
-      "browser-history-background.js", "history-content.js", "history-sensor.js"]) {
+      "teaching-recorder.js", "teaching-page.js", "browser-history-background.js", "history-content.js", "history-sensor.js"]) {
       expect(fs.existsSync(path.join(extension, file))).toBe(true);
     }
   });
@@ -905,7 +906,7 @@ describe("Chrome and Edge extension packaging", () => {
   it("uses a deterministic browser ID and limits extension privileges", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(extension, "manifest.json"), "utf8"));
     expect(manifest.manifest_version).toBe(3);
-    expect(manifest.version).toBe("1.0.12");
+    expect(manifest.version).toBe("1.2.2");
     const id = [...createHash("sha256").update(Buffer.from(manifest.key, "base64"))
       .digest().subarray(0, 16)].flatMap(value => [value >> 4, value & 15])
       .map(value => String.fromCharCode(97 + value)).join("");
@@ -915,6 +916,8 @@ describe("Chrome and Edge extension packaging", () => {
     expect(manifest.host_permissions).toEqual(["http://127.0.0.1/*", "http://*/*", "https://*/*"]);
     expect(manifest.permissions).toContain("alarms");
     expect(manifest.permissions).toContain("scripting");
+    expect(manifest.permissions).toContain("webNavigation");
+    expect(manifest.content_scripts).toContainEqual({matches: ["http://*/*", "https://*/*"], js: ["teaching-page.js"], run_at: "document_start", all_frames: false});
     expect(manifest.permissions).not.toContain("history");
     expect(manifest.permissions).not.toContain("cookies");
   });
@@ -988,6 +991,7 @@ describe("Chrome and Edge extension packaging", () => {
         onEvent: { addListener(callback: typeof onEvent) { onEvent = callback; } },
         sendCommand: async (_target: unknown, method: string, params: Record<string, unknown>) => {
           if (method === 'DOM.resolveNode') return { object: { objectId: 'input-1' } };
+          if (method === 'Runtime.callFunctionOn') return { result: { value: String(params.functionDeclaration).includes("return this.type") ? "text" : true } };
           if (method === 'Input.insertText') {
             inserted.push(String(params.text));
             if (inserted.length === 1) {

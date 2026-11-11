@@ -5,6 +5,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as settings from "../../../../src/tools/computer-history/win/settings.js";
 import { WindowsComputerHistoryService } from "../../../../src/tools/computer-history/win/computer-history-api.js";
+import { WindowsPlatformDriver } from "../../../../src/tools/computer-history/win/platform-driver.js";
+import { ApplicationIconReader } from "../../../../src/tools/computer-history/mac/application-icon.js";
+import { WindowsApplicationIconReader } from "../../../../src/tools/computer-history/win/application-icon.js";
 import { context, executable } from "./fixtures.js";
 
 const roots: string[] = [];
@@ -39,6 +42,88 @@ afterEach(async () => {
 });
 
 describe("Windows managed service", () => {
+  it("uses the Windows icon reader for Windows History application IDs", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.spyOn(os, "release").mockReturnValue("10.0.26100");
+    const windowsIcon = vi.spyOn(WindowsApplicationIconReader.prototype, "iconFor")
+      .mockResolvedValue("data:image/png;base64,AAA");
+    const macIcon = vi.spyOn(ApplicationIconReader.prototype, "iconFor")
+      .mockResolvedValue(null);
+    const { service } = setup();
+
+    await expect(service.applicationIcon("win32.explorer"))
+      .resolves.toBe("data:image/png;base64,AAA");
+    expect(windowsIcon).toHaveBeenCalledWith("win32.explorer");
+    expect(macIcon).not.toHaveBeenCalled();
+  });
+
+  it("hands Unicode output paths to the same managed process and validates the rotation acknowledgement", async () => {
+    const {root, store} = setup([
+      'import fs from "node:fs";import readline from "node:readline";',
+      'console.log(JSON.stringify({kind:"recorder.state",state:"running"}));',
+      'readline.createInterface({input:process.stdin}).on("line",line=>{',
+      'if(line==="stop"){console.log(JSON.stringify({kind:"recorder.state",state:"stopped"}));process.exit(0);}',
+      'const request=JSON.parse(line);fs.writeFileSync(process.argv[process.argv.indexOf("--out")+1]+".request",JSON.stringify(request));',
+      'console.log("[recorder-rotation] "+JSON.stringify({id:request.id,complete:true}));});',
+    ].join("\n"));
+    store.write({version: 1, applications: [{executable}]});
+    const driver = new WindowsPlatformDriver(store, path.join(root,"native.exe"), path.join(root,"recorder.mjs"));
+    const first = {title: "First", eventsFile: path.join(root,"events.jsonl"), observationSettingsFile: path.join(root,"mac-settings.json")};
+    const child = driver.launch(first); await driver.ready(child);
+    const next = {...first, title: "下一段 📝", eventsFile: path.join(root,"中文 📝","events.jsonl")};
+    await driver.rotate(child,next);
+    expect(JSON.parse(fs.readFileSync(first.eventsFile+".request","utf8"))).toMatchObject({kind:"rotate",eventsFile:next.eventsFile,title:next.title});
+    expect(child.exitCode).toBeNull(); await driver.stop(child);
+  });
+  it("uses the durable marker offset even when later events reach disk before the acknowledgement", async () => {
+    const { service, store } = setup([
+      'import fs from "node:fs"; import readline from "node:readline";',
+      'const file=process.argv[process.argv.indexOf("--out")+1];let sequence=0;',
+      'const append=(eventType,text)=>fs.appendFileSync(file,JSON.stringify({recordType:"human_event",eventType,sequence:++sequence,timestamp:new Date().toISOString(),details:{text}})+"\\n");',
+      'append("recording_started");console.log(JSON.stringify({kind:"recorder.state",state:"running"}));',
+      'readline.createInterface({input:process.stdin}).on("line",line=>{',
+      'if(line==="stop"){console.log(JSON.stringify({kind:"recorder.state",state:"stopped"}));process.exit(0);}',
+      'const input=JSON.parse(line);append("accessibility_snapshot","BEFORE_MARKER");append("recording_checkpoint");',
+      'const fd=fs.openSync(file,"r+");fs.fsyncSync(fd);fs.closeSync(fd);const bytes=fs.statSync(file).size;',
+      'const result={id:input.id,complete:true,rangeEvaluated:true,through:input.through??new Date().toISOString(),issues:[],',
+      'watermark:{nativeSessionId:"a".repeat(32),nativeSequence:sequence,captureSequence:sequence,recordingSequence:sequence,bytes}};',
+      'append("accessibility_snapshot","AFTER_MARKER");console.log("[recorder-checkpoint] "+JSON.stringify(result));});',
+    ].join("\n"));
+    store.write({ version: 1, applications: [{ executable }] });
+    const capture = await service.acquireEventCapture();
+    const point = await capture.checkpoint({ from: new Date().toISOString() });
+    expect(point).toMatchObject({ running: true, complete: true, rangeEvaluated: true, boundaryConfirmed: true });
+    const stream = point.streams.at(-1)!, bytes = fs.readFileSync(stream.file);
+    expect(bytes.length).toBeGreaterThan(stream.size);
+    expect(bytes.subarray(0, stream.size).toString()).toContain("BEFORE_MARKER");
+    expect(bytes.subarray(0, stream.size).toString()).not.toContain("AFTER_MARKER");
+    expect(point.limitations.join(" ")).not.toContain("observer is still starting");
+    await capture.release();
+  });
+  it("shares the Windows driver with plugin subscribers and accepts conservative persisted checkpoints", async () => {
+    const { service, store } = setup([
+      'import fs from "node:fs"; import readline from "node:readline";',
+      'const file=process.argv[process.argv.indexOf("--out")+1];',
+      'fs.appendFileSync(file,JSON.stringify({recordType:"human_event",eventType:"recording_started",timestamp:new Date().toISOString()})+"\\n");',
+      'console.log(JSON.stringify({kind:"recorder.state",state:"running"}));',
+      'readline.createInterface({input:process.stdin}).on("line",line=>{',
+      'if(line==="stop"){console.log(JSON.stringify({kind:"recorder.state",state:"stopped"}));process.exit(0);}',
+      'const input=JSON.parse(line);fs.appendFileSync(file,JSON.stringify({recordType:"human_event",eventType:"accessibility_snapshot",timestamp:new Date().toISOString()})+"\\n");',
+      'const fd=fs.openSync(file,"r+");fs.fsyncSync(fd);fs.closeSync(fd);',
+      'console.log("[recorder-checkpoint] "+JSON.stringify({id:input.id,complete:false}));});',
+    ].join("\n"));
+    store.write({ version: 1, applications: [{ executable }] });
+    const first = await service.acquireEventCapture();
+    const second = await service.acquireEventCapture();
+    const point = await first.checkpoint({ from: new Date().toISOString() });
+    expect(point).toMatchObject({ running: true, complete: false, rangeEvaluated: false });
+    expect(fs.readFileSync(point.streams.at(-1)!.file, "utf8")).toContain("accessibility_snapshot");
+    expect(service.snapshot().observation.state).toBe("stopped");
+    await first.release();
+    expect((await second.checkpoint()).running).toBe(true);
+    await second.release();
+    expect(service.recorderBusy).toBe(false);
+  });
   it("accepts persisted-event health alongside lifecycle status and updates capture coverage", async () => {
     const { root, service, store } = setup();
     const script = path.join(root, "recorder.mjs");
@@ -49,6 +134,15 @@ describe("Windows managed service", () => {
     expect(service.snapshot().observation.state).toBe("running");
     await service.stopObservation();
     expect(service.snapshot().observation.state).toBe("stopped");
+  });
+  it("applies the content-free message limit per line when checkpoint/health responses arrive in a batch", async () => {
+    const { root, service, store } = setup();
+    fs.appendFileSync(path.join(root, "recorder.mjs"), '\nprocess.stdout.write(Array(100).fill("[recorder-health] "+JSON.stringify({code:"event_recorded",timestamp:new Date().toISOString()})+"\\n").join(""));');
+    store.write({ version: 1, applications: [{ executable }] });
+    await service.startObservationWithPermissions();
+    await vi.waitFor(() => expect(service.snapshot().observation.captureHealth?.lastEventAt).toEqual(expect.any(String)));
+    expect(service.snapshot().observation.state).toBe("running");
+    await service.stopObservation();
   });
   it("rejects content-bearing payloads on the content-free health channel", async () => {
     const { root, service, store } = setup();

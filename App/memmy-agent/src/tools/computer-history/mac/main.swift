@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // Source-only diagnostics. Packaged Memmy runs human-recorder.swift in the
 // Memmy Computer Use.app process, using its LaunchServices permission identity.
@@ -21,5 +22,9 @@ do {
 }
 signal(SIGTERM) { _ in stopHistoryRecorder(); exit(0) }
 signal(SIGINT) { _ in stopHistoryRecorder(); exit(0) }
+let controls = isatty(STDIN_FILENO) == 0 ? HistoryControlInput(fileDescriptor: STDIN_FILENO,
+  onCheckpoint: { id in DispatchQueue.main.async { checkpointHistoryRecorder(id: id) } },
+  onEnd: { DispatchQueue.main.async { CFRunLoopStop(CFRunLoopGetMain()) } }) : nil
 CFRunLoopRun()
+controls?.cancel()
 stopHistoryRecorder()

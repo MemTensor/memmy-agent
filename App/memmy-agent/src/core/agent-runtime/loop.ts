@@ -32,7 +32,7 @@ import {
   type ResolvedModelSelection,
 } from "../../providers/model-catalog.js";
 import { CloudModelCapabilitySchema, CloudModelThinkingConfigSchema } from "@memmy/local-api-contracts";
-import { createRuntimeModelCapabilityCatalog, type RuntimeModelCapabilityCatalogState } from "../../providers/model-capability-catalog.js";
+import { createRuntimeModelCapabilityCatalog } from "../../providers/model-capability-catalog.js";
 import { resolveTurnModelCapabilities } from "../../providers/turn-model-capabilities.js";
 import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
 
@@ -971,6 +971,7 @@ export class AgentLoop {
     });
     this.runner = new AgentRunner();
     this.tools = this.createToolRegistry("init", this.workspace);
+    this.context.skills.availableTools = () => this.tools.toolNames;
     this.commands = new CommandRouter();
     registerBuiltinCommands(this.commands);
     this.consolidator = new Consolidator({
@@ -1186,7 +1187,8 @@ export class AgentLoop {
   }
 
   private projectReadonlySkillRoots(): readonly string[] {
-    const roots = [path.join(getWorkspaceStatePath(this.workspace), "skills"), BUILTIN_SKILLS_DIR]
+    const roots = [path.join(getWorkspaceStatePath(this.workspace), "skills"), BUILTIN_SKILLS_DIR,
+      ...this.context.skills.listSkills(false).filter(entry => entry.source === "plugin").map(entry => path.dirname(entry.path))]
       .flatMap((root) => {
         try {
           return fs.statSync(root).isDirectory() ? [fs.realpathSync(root)] : [];
@@ -5025,7 +5027,7 @@ export class AgentLoop {
     sessionKey?: string,
     options: Parameters<AgentLoop["processMessageTurn"]>[2] = {},
   ): Promise<OutboundMessage | null> {
-    return agentTaskActivity.run(() => this.processMessageTurn(message, sessionKey, options));
+    return agentTaskActivity.run(() => this.processMessageTurn(message, sessionKey, options), options.abortSignal);
   }
 
   private async processMessageTurn(
@@ -5197,13 +5199,17 @@ export class AgentLoop {
       const controller = new AbortController();
       const relayAbort = () => controller.abort(signal?.reason);
       signal?.addEventListener("abort", relayAbort, { once: true });
-      await this.terminalRunControl.create(sessionKey, turnId);
-      const stopOwner = this.terminalRunControl.startOwner(sessionKey, turnId, controller);
+      let stopOwner: (() => Promise<void>) | undefined;
       try {
+        await this.terminalRunControl.create(sessionKey, turnId, controller.signal);
+        stopOwner = this.terminalRunControl.startOwner(sessionKey, turnId, controller);
         return await runOperation(controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) throw createTaskCancelledError();
+        throw error;
       } finally {
         signal?.removeEventListener("abort", relayAbort);
-        await stopOwner();
+        await stopOwner?.();
       }
     }, signal);
   }

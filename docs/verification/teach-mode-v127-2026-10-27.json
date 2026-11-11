@@ -1,0 +1,256 @@
+{
+  "schema": "memmy.teach-mode-official-1.2.7-integration/v1",
+  "recordedAt": "2026-10-27T02:41:56.631732+00:00",
+  "result": "merged_and_example_replayed_with_known_limitations",
+  "merge": {
+    "at": "2026-10-27T02:10:15.391042+00:00",
+    "branch": "pxlin/dev",
+    "before": "a2b1b7c6af8849c381bcfcf515efed314d98ca17",
+    "officialBranch": "MemTensor/memmy-agent:1.2.7",
+    "officialCommit": "0ad113488878e52ba08498a3f3d32de5b68b1505",
+    "commonAncestor": "74b26fc78ebd14a784981ba8e83bebf878c20865",
+    "officialTreeMatchesCommonAncestor": true,
+    "backupBranch": "backup/teach-before-1.2.7-20261027",
+    "packageVersion": "1.2.4",
+    "mergeExitCode": 0,
+    "mergeOutput": "Merged without conflicts; source tree unchanged. Per-command existing Codex commit identity supplied.",
+    "after": "c04392b01e590439cad186e6928b18284d3bae6f",
+    "parents": [
+      "a2b1b7c6af8849c381bcfcf515efed314d98ca17",
+      "0ad113488878e52ba08498a3f3d32de5b68b1505"
+    ],
+    "sourceTreeUnchanged": true,
+    "regression": {
+      "passed": 457,
+      "failed": 2,
+      "knownFailures": [
+        "Windows History icon reader",
+        "Control-only window creates empty summary"
+      ],
+      "preexistingProof": "Merged source tree is byte-identical to before merge; the same two tests are recorded in docs/verification/teach-mode-macos-sync-2026-10-26.json."
+    }
+  },
+  "branch": "Jovianix/memmy-agent:pxlin/dev",
+  "versionCaveat": "The official branch is named 1.2.7, but its tree equals the common ancestor and the actual package version remains 1.2.4. The merge adds ancestry, with no source changes.",
+  "plugin": {
+    "repository": "Jovianix/teach-mode",
+    "branch": "main",
+    "sourceCommit": "11df9450bc1b1c84e3b41ca0b296ac14772439ba",
+    "version": "0.4.1",
+    "typecheck": "passed",
+    "testsPassed": 53,
+    "build": "passed",
+    "liveRuntime": "Retained the previously installed 0.4.1 plugin to test Host compatibility; a fresh plugin build was validated separately.",
+    "installedManifests": [
+      {
+        "version": "0.4.1",
+        "installationDirectory": "f115847dd03467cd368f9be448e62abc400d2f7d4bde4077a94d7de8e731fce2",
+        "manifestSha256": "65019882cf5df0a0cc6acda01ecaed525676049f2b7438266d296dca1e8293df"
+      }
+    ]
+  },
+  "builds": {
+    "memory": "passed",
+    "agent": "passed",
+    "agentFullTypecheck": "passed",
+    "desktopFrontendBackendInterfaces": "passed",
+    "teachBrowserHostVerification": "passed",
+    "environmentNotes": [
+      "Desktop build required existing legal-site/edition environment configuration; supplied for this build without source edits.",
+      "Plugin ZIP build was retried outside the sandbox because the sandbox denied its git metadata subprocess."
+    ]
+  },
+  "targetedRegression": {
+    "passed": 457,
+    "failed": 2,
+    "groups": [
+      {
+        "name": "Agent capture/history/plugin/managed observation",
+        "passed": 220,
+        "failed": 2
+      },
+      {
+        "name": "Browser recorder/page/history/packaging",
+        "passed": 156,
+        "failed": 0
+      },
+      {
+        "name": "Conversation recording UI",
+        "passed": 9,
+        "failed": 0
+      },
+      {
+        "name": "Backend generated skills/native services/routes/MCP",
+        "passed": 19,
+        "failed": 0
+      },
+      {
+        "name": "Teach Mode plugin",
+        "passed": 53,
+        "failed": 0
+      }
+    ],
+    "additionalCheck": "Node plugin release-validation test file passed; excluded from the 457 case count.",
+    "preExistingFailures": [
+      {
+        "test": "uses the Windows icon reader for Windows History application IDs",
+        "symptom": "Expected a data image; received null."
+      },
+      {
+        "test": "writes no summary for a window with only lifecycle/checkpoint records (marker=true)",
+        "symptom": "An empty history summary file is still created."
+      }
+    ],
+    "baselineEvidence": "docs/verification/teach-mode-macos-sync-2026-10-26.json; merged source tree equals the pre-merge tree."
+  },
+  "windowsExample": {
+    "sourceCommit": "c04392b01e590439cad186e6928b18284d3bae6f",
+    "runtime": "D:/memmy-v127-integration-20261027",
+    "model": "qwen3.8-max-0902",
+    "modelPreserved": true,
+    "sourcePage": "https://ins.sjtu.edu.cn/people/xuzhiqin/publications.html",
+    "demonstration": {
+      "entry": 1,
+      "file": "deliverables/publication-1-v127.md",
+      "savedThroughBrowser": true,
+      "inputMatchesDisk": true
+    },
+    "recording": {
+      "sessionId": "8ca9c85a-66b5-4b17-9f87-511f88a55df6",
+      "state": "ready",
+      "availability": "partial",
+      "eventCount": 30,
+      "gap": "browser_capture_boundary_unconfirmed",
+      "verifiedEvidence": {
+        "sessionId": "8ca9c85a-66b5-4b17-9f87-511f88a55df6",
+        "eventsHashMatches": true,
+        "proofHashMatches": true,
+        "eventCount": 30,
+        "availability": "partial",
+        "captureGaps": [
+          "browser_capture_boundary_unconfirmed"
+        ],
+        "failedInitialSessionExcluded": true
+      }
+    },
+    "fixtureCorrection": "Initial empty failed fragment was excluded. The fresh test profile defaulted to denying all apps; corrected it to allow only task-authorized Chrome before taking a new recording. Previous and everyday profiles were not changed.",
+    "generation": {
+      "skill": "copy-publications-v127-1027",
+      "sha256": "7abafe61a591624775cc5c8d7ca69fd5d94c5878c285f324154d136cf4bd2d80",
+      "passed": true,
+      "checks": {
+        "sourceSessionMatches": true,
+        "sourceHashMatches": true,
+        "selectedEventsUnchanged": true,
+        "recordingAvailabilityAccurate": true,
+        "generationRetainsNotRun": true,
+        "savedThroughHostPlugin": true,
+        "hasObservedSteps": true,
+        "qwenModel": true,
+        "generationCompleted": true
+      },
+      "startedAt": "2026-10-27T02:30:21.561Z",
+      "finishedAt": "2026-10-27T02:36:30.406Z",
+      "modelParameterRetry": "The first save draft used the wrong limitations type. Qwen corrected it and saved successfully without controller edits to the draft."
+    },
+    "replay": {
+      "passed": true,
+      "checks": {
+        "sourceReadInNewNativeWindow": true,
+        "saveInSameNewNativeWindow": true,
+        "explicitGeneratedSkillInvocation": true,
+        "independentNewConversation": true,
+        "newWindowAfterSkillGeneration": true,
+        "qwenModelPreserved": true,
+        "remainingFileInitiallyAbsent": true,
+        "firstDocumentUnchanged": true,
+        "generatedSkillUnchanged": true,
+        "liveBrowserRead": true,
+        "realBrowserInputAndSave": true,
+        "browserEnteredTextMatchesDisk": true,
+        "noDirectFinalFileWrites": true,
+        "notebookSavedExactlyOnce": true,
+        "outputReadByAgent": true,
+        "agentReadbackContainsFourTitles": true,
+        "independentContentVerification": true
+      },
+      "conversationId": "c2a54688-c6c4-40f8-a718-d231bcaed166",
+      "startedAt": "2026-10-27T02:37:34.274Z",
+      "finishedAt": "2026-10-27T02:41:38.752Z",
+      "userPromptCount": 1,
+      "unassistedExecution": true,
+      "recordingControllerActions": [
+        "Initial new browser window setup and identity verification",
+        "Foreground/tab display management",
+        "Task-specific session permission approvals; no remaining publication fields supplied"
+      ],
+      "outputSha256": "1dc7926acc2c6f8d067b4d2c79ebb97ae3ec111c2f1e9ff50f0db099ff5f15ed"
+    },
+    "remainingEntries": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "output": "deliverables/publications-2-5-v127.md",
+    "contentVerified": true,
+    "contentChecks": [
+      {
+        "index": 2,
+        "title": true,
+        "authors": true,
+        "year": true,
+        "paperLink": true,
+        "sourcePage": true
+      },
+      {
+        "index": 3,
+        "title": true,
+        "authors": true,
+        "year": true,
+        "paperLink": true,
+        "sourcePage": true
+      },
+      {
+        "index": 4,
+        "title": true,
+        "authors": true,
+        "year": true,
+        "paperLink": true,
+        "sourcePage": true
+      },
+      {
+        "index": 5,
+        "title": true,
+        "authors": true,
+        "year": true,
+        "paperLink": true,
+        "sourcePage": true
+      },
+      {
+        "sourcePage": true,
+        "demoFirstEntryNotRepeated": true
+      },
+      {
+        "documentOrderPreserved": true,
+        "fourDistinctEntries": true
+      }
+    ],
+    "saveMethod": "Qwen read the live page, entered the four entries through browser_type, clicked the notebook Save button once, and read the saved file through read_file. Controller did not supply the remaining publication fields or write the final file."
+  },
+  "limits": [
+    "The recording remains partial because a navigation boundary was unconfirmed. Successful replay does not turn it into complete capture.",
+    "Two established History tests remain failing; unrelated source fixes were not mixed into this merge.",
+    "Windows native binaries were reused; this was not a fresh Windows native build.",
+    "Physical macOS acceptance was not run in this Windows/WSL test.",
+    "No new OBS recording was requested or produced for this retest."
+  ],
+  "safety": {
+    "regularInstallationUnchanged": true,
+    "previousDevelopmentProfileRetained": true,
+    "firstDocumentUnchanged": true,
+    "generatedSkillUnchangedDuringReplay": true,
+    "noDirectFinalFileWrites": true
+  },
+  "artifactDirectory": "/home/zephyr/work/memmy-v127-integration-20261027"
+}

@@ -61,6 +61,8 @@ jobs:
           if ($PSVersionTable.PSVersion.Major -ne 5) { throw 'These fixtures must use Windows PowerShell 5.1.' }
           & ./App/native-computer-use/apps/OpenComputerUseWindows/runtime-safety.tests.ps1 | Tee-Object -FilePath ocu-windows-fixtures.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./App/native-computer-use/apps/OpenComputerUseWindows/focus-recovery.tests.ps1 | Tee-Object -FilePath ocu-windows-focus-fixtures.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build Memmy Computer Use for macOS
         if: runner.os == 'macOS'
         run: |
@@ -98,6 +100,7 @@ jobs:
           path: |
             ocu-native-result.json
             ocu-windows-fixtures.json
+            ocu-windows-focus-fixtures.json
           if-no-files-found: warn
       - name: Record validation boundary
         if: always()

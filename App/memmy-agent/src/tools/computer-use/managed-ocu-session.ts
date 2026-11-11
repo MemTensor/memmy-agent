@@ -192,6 +192,14 @@ export class ManagedOcuSession {
     this.targetWindows.set(key, windowID);
     while (this.targetWindows.size > 256) this.targetWindows.delete(this.targetWindows.keys().next().value!);
   }
+  private forgetUnavailableWindow(key: string, windowID: number): void {
+    if (this.targetWindows.get(key) === windowID) this.targetWindows.delete(key);
+    if (this.modelTargetWindows.get(key) === windowID) this.modelTargetWindows.delete(key);
+    const observationKey = this.windowKey(key, windowID);
+    this.modelObservations.delete(observationKey);
+    for (const [imageKey, image] of this.windowsImageObservations)
+      if (image.targetKey === observationKey) this.windowsImageObservations.delete(imageKey);
+  }
   private windowKey(targetKey: string, windowID: number | undefined): string {
     return windowID === undefined ? targetKey : JSON.stringify([targetKey, windowID]);
   }
@@ -488,6 +496,13 @@ export class ManagedOcuSession {
               const label = code === 'not-found' ? '未找到这个已安装应用'
                 : code === 'ambiguous' ? '找到多个匹配应用，无法确定操作对象'
                   : code === 'blocked' ? '这个应用不允许通过电脑操作使用' : '未能读取已安装应用的身份';
+              // A Windows name can match several running processes. No target
+              // operation or permission decision has occurred: allow discovery
+              // with list_apps and an exact PID instead of ending the user turn.
+              if (this.platform === 'win32' && code === 'ambiguous') return {
+                isError: true, _meta: { memmyComputerUse: { noActionDispatched: true } },
+                content: [{ type: 'text', text: `${label}，本次应用操作未执行，尚未请求应用授权。请调用 list_apps，使用返回的准确进程 ID 观察候选窗口并确认目标文档；不要猜测当前前台窗口或发送输入。诊断编号：${diagnostic.id}。` }],
+              };
               throw new NativeAppApprovalDenied(`${label}，本次应用操作未执行。诊断编号：${diagnostic.id}。`);
             }
           }
@@ -615,6 +630,13 @@ export class ManagedOcuSession {
             result = await this.observeAfterYield(name, target, timeout,
               new OcuUserYielded(yielded.dispatched, !idle), signal, windowID, authorizedAppId);
           }
+        }
+        const nativeWindow = result?._meta?.memmyComputerUse;
+        if (this.platform === 'win32' && nativeWindow?.targetWindowUnavailable === true
+          && isWindowsWindowID(nativeWindow.requestedWindowID) && nativeWindow.requestedWindowID === windowID) {
+          // A closed dialog cannot remain the default for later observations.
+          // Forget only that binding; never choose another window or replay input.
+          this.forgetUnavailableWindow(targetKey, nativeWindow.requestedWindowID);
         }
         const returnedWindowID = mcpTargetWindowId(result, this.platform);
         if (windowBoundPlatform && protectedTool && result?.isError !== true

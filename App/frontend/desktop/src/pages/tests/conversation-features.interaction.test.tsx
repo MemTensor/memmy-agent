@@ -12,7 +12,7 @@ import type { AgentChatMessage } from "../../state/agent-chat-slice.js";
 const mocks = vi.hoisted(() => ({
   chatId: null as string | null,
   invoke: vi.fn(async () => ({ callId: "guide-call" })),
-  list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(),
+  list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(), draft: vi.fn(),
   openArtifact: vi.fn(() => true),
   ensureConversation: vi.fn(async (_title: string) => "created-chat" as string | null),
   send: vi.fn(async () => true), sending: false,
@@ -59,11 +59,10 @@ describe("conversation feature integration", () => {
   let features: ReturnType<typeof useConversationFeatures>;
   function Harness() {
     ui = usePluginUi();
-    features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: vi.fn(),
-      onStageFiles: mocks.stageFiles, onStageExistingFiles: mocks.stageExistingFiles, onOpenArtifact: mocks.openArtifact,
-      onSend: mocks.send, onOpenRecording: mocks.openRecording, onEnsureConversation: mocks.ensureConversation });
-
-    return <>{features.recorders}<nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
+    features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: mocks.draft,
+      onStageFiles: mocks.stageFiles, onStageExistingFiles: mocks.stageExistingFiles, onOpenArtifact: mocks.openArtifact, onSend: mocks.send, onOpenRecording: mocks.openRecording,
+      onEnsureConversation: mocks.ensureConversation });
+    return <>{features.recorders}<header>{features.conversationShortcut}</header><nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
   }
   const render = (language = "zh-CN") => root.render(<I18nProvider language={language}><PluginUiProvider><Harness /></PluginUiProvider></I18nProvider>);
   const button = (name: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === name);
@@ -80,6 +79,27 @@ describe("conversation feature integration", () => {
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   });
   afterEach(async () => { await act(async () => root.unmount()); container.remove(); localStorage.clear(); });
+
+  it("keeps Teach Mode shortcuts on the Agent skill path across plugin state refreshes", async () => {
+    const teach = { id: "teach-mode", state: "active", manifest: { conversation: {}, capabilities: [], commands: [
+      { command: "/teach", name: "Teach Mode", capabilityId: "teach", agentSkillId: "teach-mode", pinned: true, topbar: true }
+    ] } };
+    mocks.chatId = "teach-chat";
+    mocks.list.mockResolvedValue([teach]);
+    await act(async () => render());
+    await act(async () => container.querySelector<HTMLButtonElement>("header button")!.click());
+    expect(mocks.draft).toHaveBeenLastCalledWith("$teach-mode");
+    await act(async () => button("Teach Mode")!.click());
+    expect(mocks.draft).toHaveBeenCalledTimes(2);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(container.querySelector(".recording-entry-card")).toBeNull();
+    expect(features.runCommand("/teach")).toBe(false);
+    expect(features.agentPrompt("/teach copy papers")).toBe("$teach-mode copy papers");
+    mocks.list.mockResolvedValue([{ ...teach, state: "disabled" }]);
+    await act(async () => { window.dispatchEvent(new Event("memmy:plugins-changed")); });
+    expect(container.querySelector("header button")).toBeNull();
+    expect(button("Teach Mode")).toBeUndefined();
+  });
 
   it.each([
     ["zh-CN", "文献综述", "创建或继续基于文献证据的文献综述。", "<主题>"],

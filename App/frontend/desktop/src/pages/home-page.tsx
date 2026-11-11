@@ -1,3 +1,6 @@
+import { PluginConversationRecording } from "./plugin-conversation-recording.js";
+import type { RecordingStart } from "@memmy/local-api-contracts";
+import { AgentTaskRecordingOption, TaskRecordingsPanel } from "./memory/task-recordings.js";
 import { ComposerHighlightedTextarea } from "./composer-highlighted-textarea.js";
 import { useQuestionDockLayout } from "./use-question-dock-layout.js";
 import { PluginCapabilityLabelsContext } from "./plugin-tool-activity.js";
@@ -8,8 +11,7 @@ import { applySidebarRecordingAction, sidebarRecordingStatus } from "./recording
 import { pendingAgentQuestion, AgentQuestionCard, AgentQuestionActiveRequestContext } from "./agent-question-card.js";
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
-import type { AgentGatewayStartupIssue, RecordingStart } from "@memmy/local-api-contracts";
-import { AgentTaskRecordingOption, TaskRecordingsPanel } from "./memory/task-recordings.js";
+import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
@@ -3125,6 +3127,7 @@ export function HomePage() {
           key={chatScopeKey}
           title={activeConversationTitleDisplay}
           titleTrailing={activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
+          actions={features.conversationShortcut}
           messages={state.agent.messages}
           panelOpen={threadPanel.phase === "open"}
           onOpenPanel={threadPanel.open}
@@ -3232,6 +3235,9 @@ export function HomePage() {
                     />
                   </div>
                 ) : null}
+                <PluginConversationRecording client={clients?.plugins} config={clients?.runtimeConfig} plugins={features.plugins}
+                  conversationId={state.agent.currentChatId ?? state.agent.currentSessionKey ?? null}
+                  onPrompt={(text) => { setCurrentComposerDraft(text); inputRef.current?.focus(); }} />
                 <ComposerHighlightedTextarea
                   textareaRef={inputRef}
                   highlightedCommands={slashCommandsWithLocal.map((command) => command.command)}
@@ -3374,6 +3380,9 @@ export function HomePage() {
           <div ref={composerOverlayRef} className="agent-conversation-composer">
             <div className="agent-conversation-content agent-conversation-content--composer agent-conversation-column">
               <div className="agent-composer-flow">
+                <PluginConversationRecording client={clients?.plugins} config={clients?.runtimeConfig} plugins={features.plugins}
+                  conversationId={state.agent.currentChatId ?? state.agent.currentSessionKey ?? null}
+                  onPrompt={(text) => { setCurrentComposerDraft(text); inputRef.current?.focus(); }} />
                 <AgentQueuedMessageList
                   items={currentQueuedMessages}
                   label={t("home.queue.label")}

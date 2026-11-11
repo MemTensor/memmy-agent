@@ -14,6 +14,7 @@ const ROUTE_PAGE_TITLES: Record<AppRoutePath, string> = {
   "/main": "Home",
   "/pet": "Pet",
   "/tools": "Tools",
+  "/plugins": "Plugins",
   "/memory": "Memory",
   "/knowledge": "Knowledge",
   "/memory-sources": "Memory Sources",

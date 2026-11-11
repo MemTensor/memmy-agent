@@ -71,6 +71,14 @@ public static class OCUWin32 {
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll")] private static extern uint WTSGetActiveConsoleSessionId();
+    [DllImport("user32.dll")] private static extern IntPtr GetThreadDesktop(uint thread);
+    [DllImport("user32.dll", EntryPoint="GetUserObjectInformationW", ExactSpelling=true, SetLastError=true)]
+    private static extern bool GetDesktopInputState(IntPtr desktop, int index, out int receivingInput, uint size, out uint needed);
+    [DllImport("wtsapi32.dll", EntryPoint="WTSQuerySessionInformationW", ExactSpelling=true, SetLastError=true)]
+    private static extern bool QuerySessionInformation(IntPtr server, uint session, int information, out IntPtr buffer, out uint bytes);
+    [DllImport("wtsapi32.dll")] private static extern void WTSFreeMemory(IntPtr buffer);
     [DllImport("user32.dll")] private static extern IntPtr GetShellWindow();
     [DllImport("user32.dll", EntryPoint="GetWindowLongW")] private static extern int GetWindowLong(IntPtr hwnd, int index);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string className, string title);
@@ -152,6 +160,38 @@ public static class OCUWin32 {
         IntPtr foreground = GetForegroundWindow();
         IntPtr hosted = HostedAppWindowIn(foreground);
         return hosted != IntPtr.Zero ? hosted : foreground;
+    }
+
+    // A missing foreground HWND is normal during activation, not proof of an
+    // unlocked desktop. Check the session and this thread's input desktop instead.
+    public static bool IsInputDesktopActive() {
+        uint session;
+        using (var process = System.Diagnostics.Process.GetCurrentProcess()) { session = (uint)process.SessionId; }
+        if (session == 0) return false;
+        IntPtr buffer = IntPtr.Zero;
+        uint bytes = 0;
+        bool queried = QuerySessionInformation(IntPtr.Zero, session, 8, out buffer, out bytes); // WTSConnectState
+        try {
+            if (queried) {
+                if (buffer == IntPtr.Zero || bytes < 4 || Marshal.ReadInt32(buffer) != 0) return false; // WTSActive
+            } else if (WTSGetActiveConsoleSessionId() != session) {
+                // The physical console still works when Remote Desktop Services is disabled.
+                return false;
+            }
+        } finally { if (buffer != IntPtr.Zero) WTSFreeMemory(buffer); }
+        IntPtr desktop = GetThreadDesktop(GetCurrentThreadId());
+        int receivingInput;
+        uint needed;
+        return desktop != IntPtr.Zero && GetDesktopInputState(desktop, 6, out receivingInput, 4, out needed)
+            && needed == 4 && receivingInput != 0; // UOI_IO; false on lock/UAC or another desktop
+    }
+
+    // Owned modal dialogs can be restored, but floating/non-activating tool
+    // windows (including Office's OLE chart editor) are not hand-back targets.
+    public static bool CanRestoreForegroundWindow(IntPtr hwnd) {
+        IntPtr shown = ActivationWindow(hwnd);
+        return IsWindow(hwnd) && IsWindowVisible(hwnd) && IsWindowEnabled(hwnd) && IsTargetRootWindow(hwnd)
+            && !IsIconic(shown) && !IsSuspendedAppWindow(hwnd) && (GetWindowLong(shown, -20) & 0x08000080) == 0;
     }
 
     public static IntPtr[] WindowsForProcess(uint pid) {
@@ -544,23 +584,35 @@ function Assert-ReceiverBelongsToTarget([IntPtr]$receiver, [switch]$CleanupOnly)
     }
 }
 
-function Read-FocusState {
-    $foreground = [OCUWin32]::ForegroundAppWindow()
-    $foregroundProcessId = [uint32]0
-    if ($foreground -eq [IntPtr]::Zero -or
-        [OCUWin32]::GetWindowThreadProcessId($foreground, [ref]$foregroundProcessId) -eq 0 -or $foregroundProcessId -eq 0) {
+function Test-InteractiveDesktop { [OCUWin32]::IsInputDesktopActive() }
+function Assert-InteractiveDesktop {
+    if (-not (Test-InteractiveDesktop)) {
+        throw "Computer Use requires this session's unlocked input desktop. No observation or input was sent."
+    }
+}
+
+function Read-FocusState([switch]$AllowUnknown) {
+    $state = Read-ForegroundClickState
+    if (-not $AllowUnknown -and ($state.hwnd -eq [IntPtr]::Zero -or $state.processId -eq 0)) {
         throw "Computer Use could not verify the foreground window. No further action was sent."
     }
-    $lastInput = New-Object OCUWin32+LASTINPUTINFO
-    $lastInput.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($lastInput)
-    if (-not [OCUWin32]::GetLastInputInfo([ref]$lastInput)) {
-        throw "Computer Use could not verify recent Windows input. No further action was sent."
-    }
-    $tick = [OCUWin32]::GetTickCount()
-    [pscustomobject]@{ hwnd = $foreground; processId = $foregroundProcessId
-        inputTick = $lastInput.dwTime; tick = $tick
-        idleMilliseconds = [OCUWin32]::InputIdleMilliseconds($tick, $lastInput.dwTime) }
+    return $state
 }
+
+function Read-ActionFocus {
+    $foregroundInput = $operation.foreground -eq $true -and
+        @("click", "type_text", "press_key").Contains([string]$operation.tool)
+    Read-FocusState -AllowUnknown:$foregroundInput
+}
+
+function Test-ForegroundRestoreTarget([IntPtr]$hwnd, [int]$processId) {
+    return $processId -gt 0 -and [OCUWin32]::CanRestoreForegroundWindow($hwnd) -and
+        (Test-ForegroundOwner $hwnd $processId)
+}
+function Restore-PreviousForeground([IntPtr]$hwnd) {
+    [OCUWin32]::SetForegroundWindow([OCUWin32]::ActivationWindow($hwnd))
+}
+function Wait-ForegroundRestoreStep { Start-Sleep -Milliseconds 25 }
 
 function Test-TargetForeground($focus, [int]$targetProcessId, [IntPtr]$targetWindow) {
     if ($focus.processId -ne $targetProcessId) { return $false }
@@ -592,25 +644,44 @@ function Assert-DispatchSafe([IntPtr]$receiver) {
 }
 
 function Assert-SafeAfterAction($before, [int]$targetProcessId, [IntPtr]$targetWindow) {
-    $after = Read-FocusState
+    $after = Read-FocusState -AllowUnknown
     if ((Test-TargetForeground $after $targetProcessId $targetWindow) -and $after.inputTick -ne $before.inputTick) {
         Yield-UserInput "You used the target window during Computer Use. An action may have been sent; observe its result before continuing."
+    }
+    if ($after.hwnd -eq [IntPtr]::Zero) {
+        $script:focusChangedByApp = $true
+        return
     }
     if ($after.hwnd -eq $before.hwnd -or $after.processId -ne $targetProcessId) { return }
     $script:focusChangedByApp = $true
     # Undo a provider's foreground side effect only if every identity/input
     # check still matches. Never activate the target as an input fallback.
-    if ($after.inputTick -ne $before.inputTick -or -not [OCUWin32]::IsWindow($before.hwnd)) { return }
-    $previousPID = [uint32]0
-    if ([OCUWin32]::GetWindowThreadProcessId($before.hwnd, [ref]$previousPID) -eq 0 -or
-        $previousPID -ne $before.processId) { return }
-    $check = Read-FocusState
+    if ($after.inputTick -ne $before.inputTick -or
+        -not (Test-ForegroundRestoreTarget $before.hwnd $before.processId)) { return }
+    $check = Read-FocusState -AllowUnknown
     if ($check.hwnd -ne $after.hwnd -or $check.processId -ne $targetProcessId -or $check.inputTick -ne $before.inputTick) { return }
-    $previousPID = [uint32]0
-    if (-not [OCUWin32]::IsWindow($before.hwnd) -or
-        [OCUWin32]::GetWindowThreadProcessId($before.hwnd, [ref]$previousPID) -eq 0 -or $previousPID -ne $before.processId) { return }
+    if (-not (Test-ForegroundRestoreTarget $before.hwnd $before.processId)) { return }
+    if ($script:foregroundRestoreAttempted) { return }
     Assert-OperationDeadline
-    if ([OCUWin32]::SetForegroundWindow([OCUWin32]::ActivationWindow($before.hwnd))) { $script:focusChangedByApp = $false }
+    # This guard also runs from finally. One action gets one hand-back attempt.
+    $script:foregroundRestoreAttempted = $true
+    if (-not (Restore-PreviousForeground $before.hwnd)) { return }
+    # SetForegroundWindow can succeed before Office finishes activation. Confirm
+    # the actual HWND/PID twice; never retry activation or claim an empty foreground.
+    $stable = $false
+    foreach ($attempt in 1..4) {
+        Assert-OperationDeadline
+        $restored = Read-FocusState -AllowUnknown
+        if ($restored.inputTick -ne $before.inputTick) { return }
+        if ($restored.hwnd -eq $before.hwnd -and $restored.processId -eq $before.processId) {
+            if ($stable) { $script:focusChangedByApp = $false; return }
+            $stable = $true
+        } else {
+            $stable = $false
+            if ($restored.hwnd -ne [IntPtr]::Zero -and $restored.hwnd -ne $after.hwnd) { return }
+        }
+        if ($attempt -lt 4) { Wait-ForegroundRestoreStep }
+    }
 }
 
 function New-Frame($x, $y, $width, $height) {
@@ -889,9 +960,14 @@ function Send-MouseClick([IntPtr]$hwnd, [int]$screenX, [int]$screenY, [string]$b
 # Native boundaries of explicit foreground input. They are separate so the
 # safety tests can drive a simulated desktop and confine real input here.
 function Read-ForegroundClickState {
+    Assert-InteractiveDesktop
     $foreground = [OCUWin32]::ForegroundAppWindow()
     $foregroundProcessId = [uint32]0
-    if ($foreground -ne [IntPtr]::Zero) { [void][OCUWin32]::GetWindowThreadProcessId($foreground, [ref]$foregroundProcessId) }
+    if ($foreground -ne [IntPtr]::Zero -and
+        ([OCUWin32]::GetWindowThreadProcessId($foreground, [ref]$foregroundProcessId) -eq 0 -or $foregroundProcessId -eq 0)) {
+        $foreground = [IntPtr]::Zero
+        $foregroundProcessId = [uint32]0
+    }
     $lastInput = New-Object OCUWin32+LASTINPUTINFO
     $lastInput.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($lastInput)
     if (-not [OCUWin32]::GetLastInputInfo([ref]$lastInput)) {
@@ -978,10 +1054,16 @@ function Assert-ForegroundClickReady([string]$readiness) {
 # comes back. A held button, or another app now in front, is their choice.
 function Get-ForegroundClickReturn($session) {
     $state = Read-ForegroundClickState
+    if ($session.deferredText -and $state.inputTick -ne $session.inputTick) { return "leaveForUser" }
+    if ($session.previous.hwnd -eq [IntPtr]::Zero) {
+        if (($state.hwnd -ne [IntPtr]::Zero -and $state.processId -ne $script:targetProcessId) -or
+            (Test-ForegroundButtonHeld)) { return "leaveForUser" }
+        return "noPreviousWindow"
+    }
     if ($state.hwnd -eq $session.previous.hwnd) { return "alreadyReturned" }
     if ($state.hwnd -eq [IntPtr]::Zero) { return "waiting" }
     if ($state.processId -ne $script:targetProcessId -or (Test-ForegroundButtonHeld)) { return "leaveForUser" }
-    if (-not (Test-ForegroundOwner $session.previous.hwnd $session.previous.processId)) { return "previousGone" }
+    if (-not (Test-ForegroundRestoreTarget $session.previous.hwnd $session.previous.processId)) { return "previousGone" }
     return "restore"
 }
 
@@ -1004,6 +1086,7 @@ function Complete-ForegroundClick($session) {
     $lastAttempt = $null
     while ($true) {
         $decision = Get-ForegroundClickReturn $session
+        if ($decision -eq "noPreviousWindow") { return "notNeeded" }
         if ($decision -eq "leaveForUser") { return "keptForUser" }
         if ($decision -eq "previousGone") { return "notReturned" }
         $now = Get-EpochMilliseconds
@@ -1012,8 +1095,9 @@ function Complete-ForegroundClick($session) {
         if ($decision -eq "restore" -and $attempts -lt 2 -and ($null -eq $lastAttempt -or $now - $lastAttempt -ge 250)) {
             # The user's own input since the click revokes the right to set the foreground.
             $beforeClaim = Read-ForegroundClickState
+            if ($session.deferredText -and $beforeClaim.inputTick -ne $session.inputTick) { return "keptForUser" }
             [void](Send-ForegroundClaim)
-            [void](Wait-OwnInputSettled $beforeClaim)
+            $session.inputTick = (Wait-OwnInputSettled $beforeClaim).inputTick
             Set-ForegroundWindowTo $session.previous.hwnd
             $attempts++
             $lastAttempt = $now
@@ -1033,7 +1117,7 @@ function Start-ForegroundSession([IntPtr]$hwnd) {
         $start = Wait-ForegroundClickPause
     }
     [pscustomobject]@{ previous = $start; pointer = $null; inputTick = $start.inputTick
-        alreadyActive = $alreadyActive; activated = $false; clickSent = $false }
+        alreadyActive = $alreadyActive; activated = $false; clickSent = $false; deferredText = $false }
 }
 
 function Enter-ForegroundSession($session, [IntPtr]$hwnd) {
@@ -1109,6 +1193,7 @@ function Get-ForegroundKeyChord([string]$key) {
 function Send-ForegroundKeyboard([IntPtr]$hwnd, [string]$text, [string]$key) {
     $chord = if ($key) { Get-ForegroundKeyChord $key } else { $null }
     $session = Start-ForegroundSession $hwnd
+    $deferHandBack = $false
     try {
         Enter-ForegroundSession $session $hwnd
         if (-not (Test-ForegroundKeyboardFocus $hwnd)) {
@@ -1122,9 +1207,23 @@ function Send-ForegroundKeyboard([IntPtr]$hwnd, [string]$text, [string]$key) {
         $sent = if ($null -ne $chord) { Send-RealKeys $chord.modifiers $chord.key $chord.extended } else { Send-RealText $text }
         $session.inputTick = (Wait-OwnInputSettled $beforeInput).inputTick
         if (-not $sent) { throw "Windows did not accept the whole keyboard input." }
+        # Excel can drop queued Unicode input when another app takes the
+        # foreground. Keep it through the result observation, then hand back.
+        $deferHandBack = $null -eq $chord
     } finally {
-        try { $script:foregroundClick = Complete-ForegroundClick $session } catch { $script:foregroundClick = "notReturned" }
+        if ($deferHandBack) { $session.deferredText = $true; $script:pendingForegroundInput = $session }
+        else {
+            try { $script:foregroundClick = Complete-ForegroundClick $session } catch { $script:foregroundClick = "notReturned" }
+        }
     }
+}
+
+function Complete-PendingForegroundInput {
+    $session = $script:pendingForegroundInput
+    $script:pendingForegroundInput = $null
+    if ($null -eq $session) { return }
+    try { $script:foregroundClick = Complete-ForegroundClick $session }
+    catch { $script:foregroundClick = "notReturned" }
 }
 
 function Send-Drag([IntPtr]$hwnd, [int]$fromX, [int]$fromY, [int]$toX, [int]$toY) {
@@ -1878,7 +1977,7 @@ function Get-SelectedText($root, $TextLimit = $script:DefaultTextLimit, $focused
 function Build-Snapshot([string]$query, $TextLimit = $script:DefaultTextLimit,
     [int]$MaxTreeNodes = $script:AccessibilityTreeMaxNodeCount, [int]$MaxTreeDepth = $script:AccessibilityTreeMaxDepth,
     $WindowID = $null, [int]$ExpectedPID = 0) {
-    [void](Read-FocusState)
+    [void](Read-FocusState -AllowUnknown)
     $process = Resolve-App $query $ExpectedPID
     $hwnd = Resolve-TargetWindow $process $WindowID -AllowDisabled
     $element = Get-RootElement $process $hwnd
@@ -2326,6 +2425,7 @@ $script:requestedPID = 0
 $script:availableWindows = @()
 $script:focusBefore = $null
 $script:focusChangedByApp = $false
+$script:foregroundRestoreAttempted = $false
 $script:targetWindow = [IntPtr]::Zero
 $script:pointCaptureGroup = $null
 $script:pointReceiverRoot = [IntPtr]::Zero
@@ -2336,6 +2436,7 @@ $script:pendingReleases = @{}
 $script:targetElementValidated = $false
 $script:pointerDelivery = $null
 $script:foregroundClick = $null
+$script:pendingForegroundInput = $null
 
 try {
     if ($operation.tool -eq "list_apps") {
@@ -2365,7 +2466,7 @@ try {
         $script:targetWindow = $hwnd
         $script:targetProcessId = [int]$process.Id
         $script:expectedWindowBounds = $windowBounds
-        $script:focusBefore = Read-FocusState
+        $script:focusBefore = Read-ActionFocus
         Assert-SafeBeforeAction $script:focusBefore $process.Id $hwnd
         try {
             $root = Get-RootElement $process $hwnd
@@ -2393,7 +2494,7 @@ try {
                         $script:pointerDelivery = "foreground_input"
                         Send-ForegroundClick $hwnd $point.x $point.y ([string]$operation.mouse_button) $clickCount
                         # The click's own input and hand-back are not the user taking over.
-                        $script:focusBefore = Read-FocusState
+                        $script:focusBefore = Read-FocusState -AllowUnknown
                         $handled = $true
                     } elseif ($clickMethod -ne "app_post" -and $null -ne $element -and
                         $operation.mouse_button -ne "right" -and $operation.mouse_button -ne "middle") {
@@ -2443,11 +2544,11 @@ try {
                     Send-Drag $hwnd ([int][math]::Round($windowBounds.x + [double]$operation.from_x)) ([int][math]::Round($windowBounds.y + [double]$operation.from_y)) ([int][math]::Round($windowBounds.x + [double]$operation.to_x)) ([int][math]::Round($windowBounds.y + [double]$operation.to_y))
                 }
                 "type_text" {
-                    if ($operation.foreground -eq $true) { Send-ForegroundKeyboard $hwnd $operation.text $null; $script:focusBefore = Read-FocusState }
+                    if ($operation.foreground -eq $true) { Send-ForegroundKeyboard $hwnd $operation.text $null; $script:focusBefore = Read-FocusState -AllowUnknown }
                     else { Invoke-TypeText $hwnd $operation.text }
                 }
                 "press_key" {
-                    if ($operation.foreground -eq $true) { Send-ForegroundKeyboard $hwnd $null $operation.key; $script:focusBefore = Read-FocusState }
+                    if ($operation.foreground -eq $true) { Send-ForegroundKeyboard $hwnd $null $operation.key; $script:focusBefore = Read-FocusState -AllowUnknown }
                     else { Send-Key $hwnd $operation.key }
                 }
                 "set_value" {
@@ -2477,6 +2578,12 @@ try {
         targetWindowUnavailable = $script:targetWindowUnavailable
         requestedWindowID = $script:requestedWindowID; pid = $script:requestedPID
         availableWindows = @($script:availableWindows); focusChangedByApp = $script:focusChangedByApp }
+} finally {
+    # Observation failures and cancellation must still release the session.
+    if ($null -ne $script:pendingForegroundInput) {
+        Complete-PendingForegroundInput
+        if ($response.ok) { $response.foregroundClick = $script:foregroundClick }
+    }
 }
 
 $response | ConvertTo-Json -Depth 50 -Compress

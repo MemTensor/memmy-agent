@@ -3,6 +3,7 @@
 #include "common/policy.h"
 #include "common/protocol.h"
 #include "common/text.h"
+#include "common/idle_video_timeline.h"
 #include "win/hook_thread.h"
 #include "win/identity.h"
 #include "win/system.h"
@@ -343,6 +344,24 @@ struct TaskVideo::Impl {
       WindowCapture capture; capture.Init();
       std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kWidth) * kHeight * 4);
       std::vector<std::uint8_t> sourcePixels(pixels.size());
+      bool skipIdle = false;
+      if (std::filesystem::exists(directory / L"recording-options.json")) {
+        const auto options = LoadJson(directory / L"recording-options.json");
+        if (!options.is_object() || options.size() != 2 || options.at("version") != 1
+          || (options.at("idleTimeoutMs") != 0 && options.at("idleTimeoutMs") != 10000)) throw std::runtime_error("recording_options_invalid");
+        skipIdle = options.at("idleTimeoutMs") == 10000;
+      }
+      IdleVideoTimeline timeline(skipIdle);
+      std::vector<std::uint8_t> lastPixels(pixels.size());
+      std::string lastIdentity;
+      const auto persistIdle = [&] {
+        if (!skipIdle) return;
+        Json spans = Json::array();
+        for (const auto& [start, end] : timeline.Spans()) spans.push_back({{"startMs", start}, {"endMs", end}});
+        AtomicJson(directory / L"idle-spans.json", {{"version", 1}, {"spans", spans},
+          {"activeStartMs", timeline.IdleStart() ? Json(*timeline.IdleStart()) : Json(nullptr)}});
+      };
+      persistIdle();
       std::optional<protocol::ContextRecord> sourceWindow;
       Json sourceTransform = nullptr;
       std::string sourcePolicy;
@@ -353,8 +372,10 @@ struct TaskVideo::Impl {
         capture.Close();
       };
       Encoder encoder;
+      bool encoderOpen = true;
       unsigned part = 1, partFrame = 0;
-      std::uint64_t frameIndex = 0, partStart = origin, previous = origin;
+      std::uint64_t frameIndex = 0, previous = origin;
+      double partStart = 0;
       auto file = directory / L"parts" / PartName(part, L"mp4"); encoder.Open(file);
       std::string gapReason = "unavailable"; double gapStart = 0;
       HMONITOR recordingMonitor = nullptr; std::uint32_t recordingDpi = 0;
@@ -363,14 +384,18 @@ struct TaskVideo::Impl {
         if (!gapReason.empty()) WriteAll(gapFile.get(), DumpJson({{"startMs", gapStart}, {"endMs", now}, {"reason", gapReason}}) + "\n");
         gapReason = std::move(reason); gapStart = now;
       };
-      const auto seal = [&](std::uint64_t end) {
-        encoder.Close(static_cast<LONGLONG>(Elapsed(end, partStart, frequency) * 10000));
+      const auto seal = [&](double end) {
+        std::fprintf(stderr, "[task-video] sealing part=%u durationMs=%.3f frames=%u\n", part, end - partStart, partFrame);
+        std::fflush(stderr);
+        encoder.Close(static_cast<LONGLONG>((end - partStart) * 10000));
         if (!FlushFileBuffers(indexFile.get()) || !FlushFileBuffers(gapFile.get())) throw std::runtime_error("index_flush_failed");
         auto sealed = Own(CreateFileW(file.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
         if (!sealed || !FlushFileBuffers(sealed.get())) throw std::runtime_error("video_flush_failed");
         sealed.reset();
-        AtomicJson(directory / L"parts" / PartName(part, L"json"), {{"index", part}, {"startMs", Elapsed(partStart, origin, frequency)},
-          {"durationMs", Elapsed(end, partStart, frequency)}, {"bytes", std::filesystem::file_size(file)}, {"sha256", Sha256Hex(Read(file, 64 * 1024 * 1024))}});
+        AtomicJson(directory / L"parts" / PartName(part, L"json"), {{"index", part}, {"startMs", partStart},
+          {"durationMs", end - partStart}, {"bytes", std::filesystem::file_size(file)}, {"sha256", Sha256Hex(Read(file, 64 * 1024 * 1024))}});
+        std::fprintf(stderr, "[task-video] sealed part=%u\n", part);
+        std::fflush(stderr);
       };
       encoder.Push(pixels, 0);
       WriteAll(indexFile.get(), DumpJson({{"index", 0}, {"timeMs", 0}, {"qpc", std::to_string(origin)}, {"partId", "part-000001"},
@@ -437,25 +462,45 @@ struct TaskVideo::Impl {
           if (tick <= previous && frameIndex != 0) tick = previous + 1;
           const double now = Elapsed(tick, origin, frequency);
           gap(captured ? "" : reason, now);
-          if (Elapsed(tick, partStart, frequency) >= 10000 && partFrame > 0) {
-            seal(tick); ++part; partFrame = 0; partStart = tick;
-            file = directory / L"parts" / PartName(part, L"mp4"); encoder.Open(file);
+          const auto identity = DumpJson(window) + DumpJson(transform) + (captured ? std::to_string(sourceGeneration) + sourcePolicy : reason);
+          const bool changed = identity != lastIdentity || pixels != lastPixels;
+          const auto wasIdle = timeline.IdleStart();
+          const auto oldSpanCount = timeline.Spans().size();
+          const bool write = timeline.Observe(now, changed || paused.load());
+          if (timeline.IdleStart() != wasIdle || timeline.Spans().size() != oldSpanCount) persistIdle();
+          if (changed) { lastPixels = pixels; lastIdentity = identity; }
+          if (!write && encoderOpen) {
+            // Seal the captured prefix now, rather than leaving an unfinished MP4
+            // open throughout a potentially long model wait.
+            seal(timeline.VideoTime(now)); encoderOpen = false;
           }
-          encoder.Push(pixels, static_cast<LONGLONG>(Elapsed(tick, partStart, frequency) * 10000));
-          const std::string partId = "part-" + text::ToUtf8(PartName(part, L""));
-          Json indexed = {{"index", frameIndex}, {"timeMs", now}, {"qpc", std::to_string(tick)},
-            {"partId", partId.substr(0, partId.size() - 1)}, {"partFrame", partFrame}, {"window", window}, {"blank", !captured},
-            {"transform", transform}, {"repeated", repeated}};
-          if (captured) indexed["sourceTicks"] = std::to_string(sourceTick);
-          WriteAll(indexFile.get(), DumpJson(indexed) + "\n");
-          previous = tick; ++frameIndex; ++partFrame;
+          if (write) {
+            const auto videoTime = timeline.VideoTime(now);
+            if (!encoderOpen || (videoTime - partStart >= 10000 && partFrame > 0 && timeline.CanRotate(now))) {
+              if (encoderOpen) seal(videoTime);
+              ++part; partFrame = 0; partStart = videoTime;
+              file = directory / L"parts" / PartName(part, L"mp4"); encoder.Open(file);
+              encoderOpen = true;
+            }
+            encoder.Push(pixels, static_cast<LONGLONG>((videoTime - partStart) * 10000));
+            const std::string partId = "part-" + text::ToUtf8(PartName(part, L""));
+            Json indexed = {{"index", frameIndex}, {"timeMs", now}, {"qpc", std::to_string(tick)},
+              {"partId", partId.substr(0, partId.size() - 1)}, {"partFrame", partFrame}, {"window", window}, {"blank", !captured},
+              {"transform", transform}, {"repeated", repeated}};
+            if (captured) indexed["sourceTicks"] = std::to_string(sourceTick);
+            if (skipIdle) indexed["videoTimeMs"] = videoTime;
+            WriteAll(indexFile.get(), DumpJson(indexed) + "\n");
+            previous = tick; ++frameIndex; ++partFrame;
+          }
         }
         const double used = Elapsed(QpcTicks(), begin, frequency);
         WaitForSingleObject(wake.get(), used < 1000.0 / kFps ? static_cast<DWORD>(std::ceil(1000.0 / kFps - used)) : 0);
       }
       capture.Close();
       const auto end = std::max(std::min(QpcTicks(), origin + static_cast<std::uint64_t>(durationLimit * static_cast<double>(frequency) / 1000)), previous + 1);
-      gap("", Elapsed(end, origin, frequency)); seal(end);
+      const auto elapsed = Elapsed(end, origin, frequency);
+      timeline.Finish(elapsed); persistIdle();
+      gap("", elapsed); if (encoderOpen) seal(timeline.VideoTime(elapsed));
       AtomicJson(directory / L"native-completion.json", {{"durationMs", Elapsed(end, origin, frequency)}, {"complete", true}, {"partCount", part}});
       completed.store(true);
     } catch (...) { failed.store(true); SetEvent(ready.get()); }
@@ -516,7 +561,9 @@ int TaskVideo::Finalize(const std::wstring& folder) {
     Json parts = Json::array(), gaps = Json::array();
     bool complete = std::filesystem::exists(directory / L"native-completion.json");
     double duration = complete ? LoadJson(directory / L"native-completion.json").at("durationMs").get<double>() : 0;
-    for (unsigned index = 1; index <= 121; ++index) {
+    // Every idle transition can seal an extra partial chunk in addition to
+    // the normal ten-second chunks within the twenty-minute source limit.
+    for (unsigned index = 1; index <= 241; ++index) {
       try {
       const auto sidecar = directory / L"parts" / PartName(index, L"json");
       if (!std::filesystem::exists(sidecar)) break;
@@ -537,7 +584,7 @@ int TaskVideo::Finalize(const std::wstring& folder) {
     if (complete && LoadJson(directory / L"native-completion.json").at("partCount").get<std::size_t>() != parts.size()) complete = false;
     // Retain only index rows from sealed parts. An unfinished MP4 tail is never treated as playable.
     const std::string indexBytes = Read(directory / L"frames.jsonl", 64 * 1024 * 1024);
-    std::string verified; std::size_t offset = 0; double lastFrame = 0;
+    std::string verified; std::size_t offset = 0; double lastFrame = 0, lastVerifiedFrame = 0;
     while (offset < indexBytes.size()) {
       const auto newline = indexBytes.find('\n', offset); if (newline == std::string::npos) { complete = false; break; }
       const auto row = ParseJsonStrict(std::string_view(indexBytes).substr(offset, newline - offset), 16); if (!row) { complete = false; break; }
@@ -545,11 +592,33 @@ int TaskVideo::Finalize(const std::wstring& folder) {
       lastFrame = std::max(lastFrame, row->at("timeMs").get<double>());
       std::optional<std::uint64_t> number;
       if (partId.size() == 11 && partId.starts_with("part-") && partId.substr(5).find_first_not_of("0123456789") == std::string::npos) number = std::stoull(partId.substr(5));
-      if (!number || *number > parts.size()) { complete = false; } else verified.append(indexBytes, offset, newline - offset + 1);
+      if (!number || *number > parts.size()) { complete = false; } else {
+        verified.append(indexBytes, offset, newline - offset + 1);
+        lastVerifiedFrame = row->at("timeMs").get<double>();
+      }
       offset = newline + 1;
     }
     const double sealedEnd = parts.back().at("startMs").get<double>() + parts.back().at("durationMs").get<double>();
-    if (!complete) gaps.push_back({{"startMs", sealedEnd}, {"endMs", std::max({sealedEnd, lastFrame, duration})}, {"reason", "missing_tail"}});
+    const bool compact = std::filesystem::exists(directory / L"idle-spans.json");
+    Json idleSpans = Json::array();
+    if (compact) {
+      const auto idle = LoadJson(directory / L"idle-spans.json");
+      if (idle.at("version") != 1 || !idle.at("spans").is_array()) throw std::runtime_error("idle_clock_invalid");
+      idleSpans = idle.at("spans");
+      if (!idle.at("activeStartMs").is_null()) {
+        const auto start = idle.at("activeStartMs").get<double>();
+        duration = std::max({duration, lastFrame, start});
+        if (duration > start) idleSpans.push_back({{"startMs", start}, {"endMs", duration}});
+      }
+      double previousEnd = 0;
+      for (const auto& span : idleSpans) {
+        const auto start = span.at("startMs").get<double>(), end = span.at("endMs").get<double>();
+        if (!std::isfinite(start) || !std::isfinite(end) || start < previousEnd || end <= start || end > 1200200) throw std::runtime_error("idle_clock_invalid");
+        previousEnd = end;
+      }
+    }
+    const auto sourceEnd = compact ? lastVerifiedFrame : sealedEnd;
+    if (!complete) gaps.push_back({{"startMs", sourceEnd}, {"endMs", std::max({sourceEnd, lastFrame, duration})}, {"reason", "missing_tail"}});
     duration = std::max(duration, lastFrame);
     {
       const auto temporary = directory / L"frames.verified.jsonl";
@@ -563,9 +632,14 @@ int TaskVideo::Finalize(const std::wstring& folder) {
       std::istringstream stream(Read(directory / L"gaps.jsonl")); std::string line;
       while (std::getline(stream, line)) { const auto row = ParseJsonStrict(line, 8); if (row) gaps.push_back(*row); }
     }
-    AtomicJson(directory / L"native-media.json", {{"version", 1}, {"durationMs", duration}, {"qpcOrigin", clock.at("qpcOrigin")},
-      {"qpcFrequency", clock.at("qpcFrequency")}, {"width", kWidth}, {"height", kHeight}, {"complete", false},
-      {"error", "task_merge_incomplete"}, {"gaps", gaps}, {"parts", parts}});
+    const auto media = [&](bool done, Json error) {
+      Json value = {{"version", 1}, {"durationMs", duration}, {"qpcOrigin", clock.at("qpcOrigin")},
+        {"qpcFrequency", clock.at("qpcFrequency")}, {"width", kWidth}, {"height", kHeight}, {"complete", done},
+        {"error", error}, {"gaps", gaps}, {"parts", parts}};
+      if (compact) { value["idleSpans"] = idleSpans; value["videoDurationMs"] = sealedEnd; }
+      return value;
+    };
+    AtomicJson(directory / L"native-media.json", media(false, "task_merge_incomplete"));
     const auto temporary = directory / L"recording.partial.mp4";
     if (Reparse(temporary) || Reparse(directory / L"recording.mp4")) throw std::runtime_error("invalid_file");
     std::filesystem::remove(temporary);
@@ -599,9 +673,7 @@ int TaskVideo::Finalize(const std::wstring& folder) {
     }
     check_hresult(writer->Finalize()); writer = nullptr;
     if (!MoveFileExW(temporary.c_str(), (directory / L"recording.mp4").c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) throw std::runtime_error("merge_rename_failed");
-    AtomicJson(directory / L"native-media.json", {{"version", 1}, {"durationMs", duration}, {"qpcOrigin", clock.at("qpcOrigin")},
-      {"qpcFrequency", clock.at("qpcFrequency")}, {"width", kWidth}, {"height", kHeight}, {"complete", complete},
-      {"error", complete ? Json(nullptr) : Json("recording_interrupted")}, {"gaps", gaps}, {"parts", parts}});
+    AtomicJson(directory / L"native-media.json", media(complete, complete ? Json(nullptr) : Json("recording_interrupted")));
     return 0;
   } catch (...) { Diagnostic("task_finalize_failed"); return 5; }
 }

@@ -37,15 +37,16 @@ const powershell = process.platform === "win32" ? "powershell.exe" : "pwsh";
 const hasPowerShell = spawnSync(powershell, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { windowsHide: true }).status === 0;
 describe.skipIf(!hasPowerShell)("CTest evidence reporting", () => {
   it.each([
-    { name: "records desktop skips separately from passing tests", failed: false, skipMandatory: false, accepted: true },
-    { name: "fails when a native case fails", failed: true, skipMandatory: false, accepted: false },
-    { name: "fails when metadata validation is skipped", failed: false, skipMandatory: true, accepted: false },
-  ])("$name", ({ failed, skipMandatory, accepted }) => {
+    { name: "records desktop skips separately from passing tests", failed: false, skippedCase: null, accepted: true },
+    { name: "fails when a native case fails", failed: true, skippedCase: null, accepted: false },
+    { name: "fails when metadata validation is skipped", failed: false, skippedCase: "win.metadata", accepted: false },
+    { name: "fails when video integrity validation is skipped", failed: false, skippedCase: "task_video.media_integrity", accepted: false },
+  ])("$name", ({ failed, skippedCase, accepted }) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "history-ci-report-"));
     try {
       const report = path.join(directory, "results.xml"), output = path.join(directory, "summary.json");
       fs.writeFileSync(report, `<testsuite>${["unit", "win.boundaries", "win.metadata", "integration.cli_contract", "task_video.media_integrity"].map((name) =>
-        `<testcase name="${name}">${skipMandatory && name === "win.metadata" ? "<skipped/>" : ""}</testcase>`).join("")}
+        `<testcase name="${name}">${name === skippedCase ? "<skipped/>" : ""}</testcase>`).join("")}
         <testcase name="integration.snapshot_content"><skipped/></testcase>
         <testcase name="integration.other">${failed ? "<failure/>" : ""}</testcase></testsuite>`);
       const result = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-File", path.join(root, "scripts/internal/win/history-validation-report.ps1"),
@@ -54,7 +55,7 @@ describe.skipIf(!hasPowerShell)("CTest evidence reporting", () => {
       expect(result.error).toBeUndefined();
       expect(result.status, result.stdout + result.stderr).toBe(accepted ? 0 : 1);
       const summary = JSON.parse(fs.readFileSync(output, "utf8"));
-      expect(summary.total).toBe(7); expect(summary.skipped).toBe(skipMandatory ? 2 : 1);
+      expect(summary.total).toBe(7); expect(summary.skipped).toBe(skippedCase ? 2 : 1);
       expect(summary.failed).toBe(failed ? 1 : 0);
       expect(summary.skippedTests).toContain("integration.snapshot_content");
       expect(summary.passed + summary.failed + summary.skipped).toBe(summary.total);

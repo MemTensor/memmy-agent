@@ -499,9 +499,11 @@ class Observer {
     return std::max(settled, lastQueryEnd_ + kMinIntervalMs);
   }
 
-  void MarkPending(const char* kind) {
+  void MarkPending(const char* kind, std::uint64_t capturedTick = 0) {
     const std::uint64_t now = TickMs();
-    if (!pending_) pendingSince_ = now;
+    const auto from = capturedTick ? std::min(now, capturedTick) : now;
+    if (!pending_) pendingSince_ = from;
+    else pendingSince_ = std::min(pendingSince_, from);
     pending_ = true;
     lastTriggerTick_ = now;
     pendingKinds_.insert(kind);
@@ -522,10 +524,43 @@ class Observer {
     lastBlockedKey_.clear();
   }
 
+  void CaptureGap(const char* code, std::uint64_t fromTick, std::uint64_t throughTick = 0) {
+    if (video_) return;  // Task recording retains its existing action/coverage counters.
+    const auto now = TickMs();
+    const auto utc = NowFileTime();
+    const auto timestamp = [&](std::uint64_t tick) {
+      return protocol::FormatUtcTimestamp(utc - (now - std::min(now, tick)) * 10000);
+    };
+    Json event = session_.Envelope("capture.gap");
+    event["code"] = code;
+    event["from"] = timestamp(fromTick);
+    event["through"] = timestamp(throughTick ? throughTick : now);
+    Emit(std::move(event));
+  }
+
+  void Checkpoint(const std::string& id, std::uint64_t captureSequence, bool complete) {
+    std::string error;
+    if (!output_.FlushPending(error)) {
+      outputFailed_ = true;
+      failedChannel_ = "file";
+      failureCode_ = error;
+      return;  // Never publish a successful fence after a failed write/flush.
+    }
+    Json event = session_.Envelope("session.checkpoint");
+    event["id"] = id;
+    event["captureSequence"] = captureSequence;
+    event["complete"] = complete && !outputFailed_;
+    Emit(std::move(event));
+  }
+
   // Returns false when the session must stop.
   bool HandleControl() {
-    for (const ControlItem item : control_.Drain()) {
+    for (const auto& message : control_.Drain()) {
+      const auto item = message.kind;
       switch (item) {
+        case ControlItem::Checkpoint:
+          if (video_ || paused_ || !hooks_.RequestCheckpoint(message.id)) Checkpoint(message.id, 0, false);
+          break;
         case ControlItem::Pause: {
           const bool already = paused_;
           if (!paused_) {
@@ -595,13 +630,14 @@ class Observer {
   }
 
   void RunQuery() {
+    const auto captureFrom = pendingSince_;
     Json trigger = {{"kinds", Json(std::vector<std::string>(pendingKinds_.begin(), pendingKinds_.end()))},
                     {"count", pendingCount_}};
     const auto actions = std::move(pendingActions_);
     bool actionOverflow = pendingActionOverflow_;
     ClearPending();
     const std::uint64_t hwnd = ForegroundWindow();
-    std::vector<HANDLE> cancel = {stop_.get(), control_.Event()};
+    std::vector<HANDLE> cancel = {stop_.get(), control_.InterruptEvent()};
     if (parent_) cancel.push_back(parent_.get());
     ++counters_.started;
     QueryOutcome query = collector_->Query(hwnd, cancel.data(), static_cast<DWORD>(cancel.size()));
@@ -610,6 +646,7 @@ class Observer {
     if (outputFailed_) return;
 
     if (query.status == "cancelled") {
+      CaptureGap("query_cancelled", captureFrom);
       if (video_) unsupportedActions_ += actions.size();
       // A control command or stop arrived mid-query; its handler decides what happens next.
       ++counters_.cancelled;
@@ -618,6 +655,8 @@ class Observer {
       return;
     }
     if (query.status != "ok") {
+      if (query.status == "unavailable" || query.reason == "context_changed" || query.reason == "policy_changed")
+        CaptureGap("query_unavailable", captureFrom);
       if (video_) unsupportedActions_ += actions.size();
       // Any refusal or failure ends the delta chain; the next success is a full baseline.
       baseline_.Reset();
@@ -646,6 +685,8 @@ class Observer {
     }
 
     lastBlockedKey_.clear();
+    if (query.response.truncated) CaptureGap("snapshot_truncated", captureFrom);
+    if (actionOverflow) CaptureGap("action_overflow", captureFrom);
     std::vector<std::string> keys;
     KeyedNodes(query.response.nodes, keys, nullptr);
     const std::string identity = std::to_string(query.context->hwnd) + "|" + std::to_string(query.context->pid) + "|" +
@@ -661,8 +702,16 @@ class Observer {
     const bool keyboardAllowed = focus != query.response.nodes.end() && focus->password == std::optional<bool>(false) &&
                                  (focus->redaction.empty() || focus->redaction == "edit_control");
     for (const auto& item : actions) {
-      if (item.hwnd != query.context->hwnd || item.generation != query.generation) continue;
       const auto& action = item.action;
+      // A click can itself move focus inside this HWND. Its pointer evidence
+      // remains valid, but keyboard evidence must still match the exact focus
+      // generation so a later field cannot authorize earlier secret input.
+      const bool pointer = action.kind == ActionKind::MouseClick || action.kind == ActionKind::Scroll;
+      if (item.hwnd != query.context->hwnd || (!pointer && item.generation != query.generation)) {
+        if (ActionInScope(item.hwnd)) CaptureGap("action_context_changed", item.tickMs);
+        if (video_) { ++unsupportedActions_; actionOverflow = true; }
+        continue;
+      }
       Json detail = {{"timestamp", protocol::FormatUtcTimestamp(action.timestamp)}, {"injected", action.injected}};
       if (action.kind == ActionKind::MouseClick) {
         detail["type"] = "mouse_click";
@@ -690,6 +739,7 @@ class Observer {
       ++counters_.unchanged;
       return;
     }
+    const auto approvedCount = approvedActions.size();
     Json body = OkBody(query, diff.full ? "full" : "delta", focusKey);
     if (command_.inputHooks) { body["actions"] = std::move(approvedActions); body["actionOverflow"] = actionOverflow; }
     if (diff.full) {
@@ -705,7 +755,9 @@ class Observer {
     event["snapshot"] = std::move(body);
     const std::string line = DumpJson(event) + "\n";
     if (!collector_->Commit(query, cancel.data(), static_cast<DWORD>(cancel.size()))) {
+      if (video_) unsupportedActions_ += approvedCount;
       session_.DiscardEnvelope();
+      CaptureGap("query_commit_rejected", captureFrom);
       ResetCaptureState();
       if (query.status == "cancelled") {
         ++counters_.cancelled;
@@ -730,6 +782,16 @@ class Observer {
       baseline_ = std::move(candidate);
       lastFocusKey_ = focusKey;
     }
+  }
+
+  bool ActionInScope(std::uint64_t hwnd) {
+    const auto file = ReadPolicyFile(policyPath_);
+    const auto parsed = file.ok ? policy::Parse(file.bytes) : policy::Parse("");
+    if (!parsed.policy) return true;  // Failed policy reads must still report lost task input.
+    std::string reason;
+    const auto context = ReadWindowContext(hwnd, reason);
+    if (!context) return true;
+    return policy::Evaluate(*parsed.policy, ToTarget(*context), CanonicalizePath).rule != nullptr;
   }
 
   void Loop() {
@@ -785,15 +847,29 @@ class Observer {
       const auto triggers = hooks_.Queue().Drain(overflowed);
       if (!paused_) {
         for (const auto& trigger : triggers) {
-          MarkPending(TriggerKindName(trigger.kind));
+          if (trigger.lostFromTickMs) {
+            CaptureGap("queue_overflow", trigger.lostFromTickMs, trigger.lostThroughTickMs);
+            if (command_.inputHooks) pendingActionOverflow_ = true;
+            MarkPending("queue_overflow", trigger.lostFromTickMs);
+          }
+          if (trigger.kind == TriggerKind::Gap) continue;
+          if (trigger.kind == TriggerKind::Checkpoint) {
+            // Complete everything before this marker, even when debounce has not elapsed.
+            // Later triggers in this drain cannot be folded into the preceding query.
+            if (pending_) RunQuery();
+            if (!outputFailed_) Checkpoint(trigger.checkpointId, trigger.captureSequence, !pending_);
+            continue;
+          }
+          MarkPending(TriggerKindName(trigger.kind), trigger.firstTickMs ? trigger.firstTickMs : trigger.tickMs);
           if (trigger.action.kind != ActionKind::None) {
+            // Returning to Memmy's stop/finish controls is outside the selected
+            // applications. It must not make their recording look incomplete.
+            if (video_ && !ActionInScope(trigger.hwnd)) continue;
             if (video_ && trigger.action.kind == ActionKind::Unsupported) { ++unsupportedActions_; pendingActionOverflow_ = true; }
             if (pendingActions_.size() < 64) pendingActions_.push_back(trigger);
             else pendingActionOverflow_ = true;
           }
         }
-        if (overflowed && command_.inputHooks) pendingActionOverflow_ = true;
-        if (overflowed) MarkPending("queue_overflow");
       }
       MaybeRotate();
       if (outputFailed_) continue;

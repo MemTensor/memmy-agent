@@ -18,6 +18,8 @@ const PermissionsSchema = z.array(PluginPermissionSchema);
 export interface PluginRecord extends InstalledPlugin {
   artifactHash: string | null;
   rootPath: string | null;
+  nativeExecutionAllowed?: boolean;
+  registryOrigin?: string | null;
 }
 
 export interface SavePluginInput {
@@ -25,6 +27,9 @@ export interface SavePluginInput {
   state: PluginState;
   artifactHash?: string | null;
   rootPath?: string | null;
+  nativeExecutionAllowed?: boolean;
+  registryOrigin?: string | null;
+  desiredEnabled?: boolean;
 }
 
 export interface PluginRepository {
@@ -34,6 +39,7 @@ export interface PluginRepository {
   get(id: string): PluginRecord | null;
   save(input: SavePluginInput): PluginRecord;
   setState(id: string, state: PluginState, lastError?: string | null): PluginRecord;
+  setDesiredEnabled(id: string, enabled: boolean): PluginRecord;
   setConfig(id: string, config: Record<string, unknown>): PluginRecord;
   setApprovedPermissions(id: string, permissions: PluginPermission[]): PluginRecord;
   recordCall(input: PluginCallLogInput): void;
@@ -61,6 +67,9 @@ interface PluginRow {
   config_json: string;
   artifact_hash: string | null;
   root_path: string | null;
+  native_execution_allowed: number;
+  registry_origin: string | null;
+  desired_enabled: number;
   last_error: string | null;
   created_at: string;
   updated_at: string;
@@ -96,14 +105,17 @@ export function createPluginRepository(db: DatabaseSync): PluginRepository {
       return withPluginTransaction(db, () => {
         db.prepare(
           `INSERT INTO installed_plugins (
-            id, version, manifest_json, state, artifact_hash, root_path, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            id, version, manifest_json, state, artifact_hash, root_path, native_execution_allowed, registry_origin, desired_enabled, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             version = excluded.version,
             manifest_json = excluded.manifest_json,
             state = excluded.state,
             artifact_hash = excluded.artifact_hash,
             root_path = excluded.root_path,
+            native_execution_allowed = excluded.native_execution_allowed,
+            registry_origin = excluded.registry_origin,
+            desired_enabled = COALESCE(?, installed_plugins.desired_enabled),
             last_error = NULL,
             updated_at = excluded.updated_at`
         ).run(
@@ -113,13 +125,23 @@ export function createPluginRepository(db: DatabaseSync): PluginRepository {
           state,
           input.artifactHash ?? null,
           input.rootPath ?? null,
+          input.nativeExecutionAllowed ? 1 : 0,
+          input.registryOrigin ?? null,
+          (input.desiredEnabled ?? (state === "active" || state === "enabling")) ? 1 : 0,
           now,
-          now
+          now,
+          input.desiredEnabled === undefined ? null : Number(input.desiredEnabled)
         );
-        // A successful install restores the user's default installation choice.
         db.prepare("DELETE FROM plugin_uninstall_preferences WHERE plugin_id = ?").run(manifest.id);
         return getRequired(manifest.id);
       });
+    },
+
+    setDesiredEnabled(id, enabled) {
+      const result = db.prepare("UPDATE installed_plugins SET desired_enabled = ?, updated_at = ? WHERE id = ?")
+        .run(Number(enabled), new Date().toISOString(), id);
+      if (!result.changes) getRequired(id);
+      return getRequired(id);
     },
 
     setState(id, state, lastError = null) {
@@ -200,6 +222,9 @@ const SELECT_PLUGIN = `SELECT
   config_json,
   artifact_hash,
   root_path,
+  native_execution_allowed,
+  registry_origin,
+  desired_enabled,
   last_error,
   created_at,
   updated_at
@@ -216,11 +241,13 @@ function toPluginRecord(row: PluginRow): PluginRecord {
     version: row.version,
     manifest: PluginManifestSchema.parse(JSON.parse(row.manifest_json)),
     state: row.state,
+    desiredEnabled: row.desired_enabled === 1,
     approvedPermissions: PermissionsSchema.parse(JSON.parse(row.approved_permissions_json)),
     config: ConfigSchema.parse(JSON.parse(row.config_json)),
     lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   });
-  return { ...installed, artifactHash: row.artifact_hash, rootPath: row.root_path };
+  return { ...installed, artifactHash: row.artifact_hash, rootPath: row.root_path,
+    nativeExecutionAllowed: row.native_execution_allowed === 1, registryOrigin: row.registry_origin };
 }

@@ -25,7 +25,7 @@ import type {
   UpdateAccountGuideInput,
   UpdateCloudAccountProfileInput
 } from "../../adapters/outbound/cloud-client/types.js";
-import type { LegalAgreementUrls, LotteryStatus, PromotionFlags } from "@memmy/local-api-contracts";
+import { ASR_PROVIDER, QWEN_ASR_MODEL_ID, type LegalAgreementUrls, type LotteryStatus, type PromotionFlags } from "@memmy/local-api-contracts";
 
 export interface CreateMockCloudClientOptions {
   health?: CloudHealth;
@@ -46,6 +46,15 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
   let fallbackProfile: CloudAccountProfile | null = null;
 
   return {
+    async ensureInvitationCode() {
+      return { enabled: false, invitationCode: null, usedInviteSlotsToday: 0, dailySuccessLimit: 0,
+        remainingInvitesToday: 0, dailyLimitReached: false };
+    },
+
+    async transcribeAudio() {
+      return { text: "", modelId: QWEN_ASR_MODEL_ID, provider: ASR_PROVIDER };
+    },
+
     async getModelCapabilityCatalog() {
       throw new Error("Model catalog response is not configured in this test");
     },
@@ -78,6 +87,7 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
           uuid: "mock-cloud-uuid",
           accountUuid: existingProfile.userId,
           isNewUser: false,
+          invitationResult: { status: input.invitationCode ? "not_new_user" : "not_provided" },
           profile: existingProfile
         };
       }
@@ -114,6 +124,7 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
         uuid: "mock-cloud-uuid",
         accountUuid: profile.userId,
         isNewUser: true,
+        invitationResult: { status: input.invitationCode ? "pending" : "not_provided" },
         profile
       };
     },
@@ -354,6 +365,7 @@ function createDefaultTokenUsage(): TokenUsageSnapshot {
     usedTokens: 0,
     remainingTokens: 30_000_000,
     expiresAt: null,
-    lastSyncedAt: null
+    lastSyncedAt: null,
+    sceneUsages: []
   };
 }

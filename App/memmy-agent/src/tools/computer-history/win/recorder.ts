@@ -10,6 +10,9 @@ import { RecordingWriter, type HistoryEvent } from "../core/recording.js";
 import { readNativePolicy, replaceNativePolicy, type NativePolicy } from "./policy.js";
 import { NativeStreamReader, type NativeEvent } from "./protocol.js";
 import { SnapshotNormalizer } from "./normalize.js";
+import { CaptureCoverageGaps } from "../core/coverage-gaps.js";
+import { checkpointRequest, recorderRotationRequest, type PersistedCheckpoint } from "../core/recorder-checkpoint.js";
+import type { CaptureRange } from "../core/event-capture-source.js";
 
 export type RecorderState = "starting" | "running" | "pausing" | "paused" | "resuming" | "stopping" | "stopped" | "failed";
 export interface WindowsRecorderOptions {
@@ -41,7 +44,7 @@ export class WindowsHistoryRecorder {
   private stateValue: RecorderState = "starting";
   private readonly reader = new NativeStreamReader();
   private readonly normalizer = new SnapshotNormalizer();
-  private readonly writer: RecordingWriter;
+  private writer: RecordingWriter;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly ready = deferred<void>();
   private readonly done = deferred<void>();
@@ -57,6 +60,12 @@ export class WindowsHistoryRecorder {
   private closeTimer: NodeJS.Timeout | null = null;
   private diagnosticBytes = 0;
   private policyUpdate = false;
+  private nativeStartedAt = 0;
+  private lastCaptureSequence = 0;
+  private readonly coverage = new CaptureCoverageGaps();
+  private readonly checkpoints = new Map<string, { ack: Deferred<PersistedCheckpoint>; timer: NodeJS.Timeout; range?: CaptureRange;
+    rotation?: { eventsFile: string; title: string } }>();
+  private readonly abandonedCheckpoints = new Set<string>();
   readonly finished: Promise<void>;
 
   static async start(options: WindowsRecorderOptions): Promise<WindowsHistoryRecorder> {
@@ -127,6 +136,7 @@ export class WindowsHistoryRecorder {
           || event.options.sampleMs !== (this.options.sampleMs ?? 1000)
           || event.policyRevision !== readNativePolicy(this.options.policyFile).revision) throw new Error("windows_protocol_start_invalid");
       this.started = true;
+      this.nativeStartedAt = Date.parse(event.timestamp);
       clearTimeout(this.startupTimer);
       this.stateValue = "running";
       this.persist({ eventType: "recording_started", timestamp: event.timestamp, details: { source: "windows_uia", nativeSessionId: event.sessionId } });
@@ -135,12 +145,75 @@ export class WindowsHistoryRecorder {
     }
     switch (event.kind) {
       case "session.started": throw new Error("windows_protocol_duplicate_start");
+      case "capture.gap":
+        if (Date.parse(event.through) < Date.parse(event.from) || Date.parse(event.through) > Date.parse(event.timestamp) + 1)
+          throw new Error("windows_protocol_gap_invalid");
+        this.persist({ eventType: "recording_gap", timestamp: event.timestamp, details: { nativeSessionId: event.sessionId,
+          nativeSequence: event.sequence, code: event.code, from: event.from, through: event.through } });
+        this.coverage.add(event.code, Date.parse(event.from), Date.parse(event.through));
+        return;
+      case "session.checkpoint": {
+        const request = this.checkpoints.get(event.id);
+        if (!request) {
+          if (this.abandonedCheckpoints.has(event.id)) return;
+          throw new Error("windows_checkpoint_unrequested");
+        }
+        if (!event.captureSequence) {
+          if (event.complete) throw new Error("windows_checkpoint_sequence_invalid");
+          clearTimeout(request.timer); this.checkpoints.delete(event.id);
+          request.ack.reject(new Error("windows_checkpoint_unavailable"));
+          return;
+        }
+        if (event.captureSequence <= this.lastCaptureSequence) throw new Error("windows_checkpoint_sequence_invalid");
+        this.lastCaptureSequence = event.captureSequence;
+        // Without an interval this is a starting fence, not a lifetime health verdict.
+        const from = request.range ? Date.parse(request.range.from) : Date.parse(event.timestamp);
+        const through = request.range?.through ?? event.timestamp;
+        const issues = this.coverage.within(from, Date.parse(through));
+        if (from < this.nativeStartedAt || Date.parse(through) > Date.parse(event.timestamp)) issues.push("session_boundary_unconfirmed");
+        if (!event.complete) issues.push("native_checkpoint_incomplete");
+        if (this.stateValue !== "running") issues.push("capture_not_running");
+        let position: { bytes: number; recordingSequence: number };
+        try {
+          position = this.writer.checkpoint({ eventType: "recording_checkpoint", timestamp: event.timestamp,
+            details: { checkpointId: event.id, nativeSessionId: event.sessionId, nativeSequence: event.sequence,
+              captureSequence: event.captureSequence } });
+        } catch { throw new Error("windows_recording_flush_failed"); }
+        if (request.rotation) {
+          if (!event.complete) throw new Error("windows_rotation_checkpoint_incomplete");
+          // Switch synchronously at the native marker, before parsing any later
+          // snapshot in the same stdout chunk. No hook or UIA worker is restarted.
+          const next = new RecordingWriter(request.rotation.eventsFile, { recordingId: crypto.randomUUID(),
+            title: request.rotation.title, platform: "windows" }, true);
+          try {
+            this.writer.complete({ eventType: "recording_stopped", timestamp: event.timestamp,
+              details: { reason: "segment_rotation", nativeSessionId: event.sessionId, collectorContinues: true } });
+            this.writer.close(); this.writer = next;
+            this.persist({ eventType: "recording_started", timestamp: event.timestamp,
+              details: { source: "windows_uia", nativeSessionId: event.sessionId, collectorContinues: true } });
+            // The native process continues emitting deltas. Keep its baseline;
+            // normalization already writes a complete sanitized tree per event.
+          } catch { next.close(); throw new Error("windows_recording_rotation_failed"); }
+        }
+        clearTimeout(request.timer); this.checkpoints.delete(event.id);
+        request.ack.resolve({ id: event.id, complete: issues.length === 0, rangeEvaluated: true, through,
+          watermark: { nativeSessionId: event.sessionId, nativeSequence: event.sequence,
+            captureSequence: event.captureSequence, ...position }, issues });
+        return;
+      }
       case "snapshot": {
         if (!this.options.inputHooks && event.snapshot.status === "ok" && event.snapshot.actions?.length) throw new Error("windows_protocol_unrequested_actions");
         if (this.stateValue === "paused") throw new Error("windows_protocol_capture_while_paused");
         if (this.stateValue !== "running") { this.normalizer.reset(); return; }
         const { policy, revision } = readNativePolicy(this.options.policyFile);
         const normalized = this.normalizer.normalizeEvents(event, policy, revision);
+        // Keep compatibility with collectors that emit snapshots without explicit gaps.
+        if (event.snapshot.status === "ok" && (event.snapshot.truncated || event.snapshot.actionOverflow))
+          this.coverage.add("snapshot_incomplete", Date.parse(event.timestamp) - event.snapshot.elapsedMs, Date.parse(event.timestamp));
+        if (event.snapshot.status === "unavailable")
+          this.coverage.add("query_unavailable", Date.parse(event.timestamp) - event.snapshot.elapsedMs, Date.parse(event.timestamp));
+        if (normalized.some(record => record.accessibility?.nodes.some(node => node.documentStatus === "read_failed")))
+          this.coverage.add("document_read_failed", Date.parse(event.timestamp) - event.snapshot.elapsedMs, Date.parse(event.timestamp));
         for (const record of normalized) {
           // Keep the in-memory native baseline while discarding excluded content.
           // The next frame may be a delta, even while this site remains excluded.
@@ -158,6 +231,7 @@ export class WindowsHistoryRecorder {
         if (!this.pending || this.pending.kind !== event.kind
             || (event.kind === "session.paused" ? event.alreadyPaused : event.alreadyRunning)) throw new Error("windows_control_ack_invalid");
         this.stateValue = event.kind === "session.paused" ? "paused" : "running";
+        this.coverage.add("capture_paused", Date.parse(event.timestamp));
         this.normalizer.reset();
         const pending = this.pending;
         this.persist({ eventType: event.kind === "session.paused" ? "recording_paused" : "recording_resumed", timestamp: event.timestamp });
@@ -169,6 +243,7 @@ export class WindowsHistoryRecorder {
       case "segment.started": throw new Error("windows_protocol_raw_segment_unexpected");
       case "error":
         this.normalizer.reset();
+        this.coverage.add("native_error", Date.parse(event.timestamp));
         if (event.fatal) throw new Error("windows_collector_fatal");
         return;
       case "session.stopped":
@@ -184,10 +259,46 @@ export class WindowsHistoryRecorder {
     }
   }
   private rejectPending(error: Error): void {
+    for (const [id, request] of this.checkpoints) {
+      clearTimeout(request.timer); this.abandonCheckpoint(id); request.ack.reject(error);
+    }
+    this.checkpoints.clear();
     if (!this.pending) return;
     clearTimeout(this.pending.timer);
     this.pending.ack.reject(error);
     this.pending = null;
+  }
+  private abandonCheckpoint(id: string): void {
+    this.abandonedCheckpoints.add(id);
+    if (this.abandonedCheckpoints.size > 64) this.abandonedCheckpoints.delete(this.abandonedCheckpoints.values().next().value!);
+  }
+  checkpoint(input: { kind: "checkpoint"; id: string } & Partial<CaptureRange>): Promise<PersistedCheckpoint> {
+    const command = checkpointRequest.parse(input);
+    return this.requestCheckpoint(command);
+  }
+  rotate(input: { kind: "rotate"; id: string; eventsFile: string; title: string }): Promise<void> {
+    const command = recorderRotationRequest.parse(input);
+    if (this.checkpoints.has(command.id)) return Promise.reject(new Error("windows_checkpoint_limit"));
+    if (!path.isAbsolute(command.eventsFile) || path.resolve(command.eventsFile).toLowerCase() === path.resolve(this.writer.file).toLowerCase()
+        || path.resolve(command.eventsFile).toLowerCase() === path.resolve(this.options.policyFile).toLowerCase()) return Promise.reject(new Error("windows_recording_path_invalid"));
+    if ([...this.checkpoints.values()].some(request => request.rotation)) return Promise.reject(new Error("windows_rotation_in_progress"));
+    return this.requestCheckpoint({ kind: "checkpoint", id: command.id }, command).then(() => undefined);
+  }
+  private requestCheckpoint(command: { kind: "checkpoint"; id: string } & Partial<CaptureRange>,
+    rotation?: { eventsFile: string; title: string }): Promise<PersistedCheckpoint> {
+    if (this.stateValue !== "running" || this.policyUpdate || this.pending) return Promise.reject(new Error("windows_recorder_state_invalid"));
+    const existing = this.checkpoints.get(command.id);
+    if (existing) return existing.ack.promise;
+    if (this.checkpoints.size >= 16 || this.abandonedCheckpoints.has(command.id)) return Promise.reject(new Error("windows_checkpoint_limit"));
+    const ack = deferred<PersistedCheckpoint>();
+    const timer = setTimeout(() => {
+      this.checkpoints.delete(command.id); this.abandonCheckpoint(command.id);
+      ack.reject(new Error("windows_checkpoint_timeout"));
+    }, this.options.commandTimeoutMs ?? 9000);
+    this.checkpoints.set(command.id, { ack, timer, ...(rotation ? { rotation } : {}),
+      ...(command.from ? { range: { from: command.from, ...(command.through ? { through: command.through } : {}) } } : {}) });
+    this.child.stdin.write(`checkpoint ${command.id}\n`, error => { if (error) this.fail("windows_control_write_failed"); });
+    return ack.promise;
   }
   private fail(code: string): void {
     if (this.failure || this.closed) return;
@@ -233,6 +344,7 @@ export class WindowsHistoryRecorder {
     if (this.stateValue === "paused") return Promise.resolve();
     if (this.stateValue !== "running" || this.pending) return Promise.reject(new Error("windows_recorder_state_invalid"));
     this.stateValue = "pausing";
+    this.rejectPending(new Error("windows_collector_pausing"));
     this.normalizer.reset();
     return this.command("session.paused");
   }

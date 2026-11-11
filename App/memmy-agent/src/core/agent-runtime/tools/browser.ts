@@ -220,7 +220,10 @@ function narrowBrowserToolDefinition(tool: any): BrowserToolDefinition {
       description: 'Memmy, Chrome and Edge pages: accept an alert/confirm/prompt this action opens. Dialogs are otherwise dismissed and reported as dialogs in the result. Set it only after seeing that report and only when the task requires accepting.' };
   }
   if (['browser_click', 'browser_type', 'browser_select_option'].includes(definition.name)) {
-    definition.description += ' For connected Memmy, Chrome and Edge pages, prefer the exact element reference from the latest snapshot. Unique CSS selectors, text=substring and CSS selectors ending in :has-text("substring") are supported. Multiple matches require a more precise target or an explicit >> nth=N suffix. Actions wait for the target to be usable and return a fresh observation for verifying the result. A stale, hidden or covered target requires a fresh snapshot; do not infer the selected-tab state from a locator error.';
+    definition.description += ' For Memmy in-app and connected Chrome/Edge tabs, prefer the exact ax-N or [ax-N] reference from the latest snapshot. Unique CSS selectors, text=substring and CSS selectors ending in :has-text("substring") are also supported. Multiple matches require a more precise target or an explicit >> nth=N suffix. Actions wait for the target to be usable and return a fresh observation for verifying the result. A stale, hidden or covered target requires a fresh snapshot; do not infer the selected-tab state from a locator error. Use observed references or selectors; do not guess field names or URL paths.';
+  }
+  if (definition.name === 'browser_type') {
+    definition.description += ' In connected Chrome/Edge tabs, native date/time fields use their canonical value format (date: YYYY-MM-DD); the tool verifies the resulting value. Use browser_select_option for native dropdowns. If a field rejects the requested value, inspect it and correct the input before proceeding.';
   }
   if (definition.name === "browser_navigate") {
     const localPathDescription =

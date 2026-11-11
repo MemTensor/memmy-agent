@@ -63,6 +63,8 @@ const char* TriggerKindName(TriggerKind kind) {
     case TriggerKind::Show: return "show";
     case TriggerKind::Input: return "input";
     case TriggerKind::Pointer: return "pointer";
+    case TriggerKind::Checkpoint: return "checkpoint";
+    case TriggerKind::Gap: return "gap";
   }
   return "unknown";
 }
@@ -71,26 +73,58 @@ TriggerQueue::TriggerQueue(std::size_t capacity) : capacity_(capacity == 0 ? 1 :
 
 bool TriggerQueue::Push(const Trigger& trigger) {
   std::lock_guard lock(mutex_);
+  Trigger item = trigger;
+  item.captureSequence = ++sequence_;
+  item.firstTickMs = trigger.firstTickMs ? trigger.firstTickMs : trigger.tickMs;
   if (!items_.empty() && trigger.action.kind == ActionKind::None && items_.back().action.kind == ActionKind::None &&
       items_.back().kind == trigger.kind && items_.back().hwnd == trigger.hwnd && items_.back().generation == trigger.generation) {
-    items_.back() = trigger;
+    item.firstTickMs = items_.back().firstTickMs;
+    items_.back() = std::move(item);
     ++counters_.coalesced;
     return true;
   }
-  if (items_.size() >= capacity_) {
+  if (items_.size() - checkpoints_ >= capacity_) {
     ++counters_.dropped;
     overflowed_ = true;
+    if (!lostFrom_) lostFrom_ = trigger.tickMs;
+    lostThrough_ = trigger.tickMs;
     return false;
   }
-  items_.push_back(trigger);
+  items_.push_back(std::move(item));
   ++counters_.accepted;
+  return true;
+}
+
+bool TriggerQueue::PushCheckpoint(const std::string& id, std::uint64_t tickMs) {
+  std::lock_guard lock(mutex_);
+  if (checkpoints_ >= 16) return false;
+  Trigger marker;
+  marker.kind = TriggerKind::Checkpoint;
+  marker.tickMs = tickMs;
+  marker.checkpointId = id;
+  marker.captureSequence = ++sequence_;
+  marker.lostFromTickMs = lostFrom_;
+  marker.lostThroughTickMs = lostThrough_;
+  lostFrom_ = lostThrough_ = 0;
+  items_.push_back(std::move(marker));
+  ++checkpoints_;
   return true;
 }
 
 std::vector<Trigger> TriggerQueue::Drain(bool& overflowed) {
   std::lock_guard lock(mutex_);
   std::vector<Trigger> out(items_.begin(), items_.end());
+  if (lostFrom_) {
+    Trigger gap;
+    gap.kind = TriggerKind::Gap;
+    gap.captureSequence = sequence_;
+    gap.lostFromTickMs = lostFrom_;
+    gap.lostThroughTickMs = lostThrough_;
+    out.push_back(std::move(gap));
+  }
   items_.clear();
+  checkpoints_ = 0;
+  lostFrom_ = lostThrough_ = 0;
   overflowed = overflowed_;
   overflowed_ = false;
   return out;
@@ -100,6 +134,8 @@ void TriggerQueue::Clear() {
   std::lock_guard lock(mutex_);
   counters_.discarded += items_.size();
   items_.clear();
+  checkpoints_ = 0;
+  lostFrom_ = lostThrough_ = 0;
   overflowed_ = false;
 }
 

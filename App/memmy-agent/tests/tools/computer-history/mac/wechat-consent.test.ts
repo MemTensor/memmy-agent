@@ -84,6 +84,7 @@ describe("WeChat History consent", () => {
     fs.writeFileSync(keyFile, "private fixture");
     vi.mocked(prepareWindowsWeChatState).mockClear();
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.mocked(prepareWindowsWeChatState).mockClear(); // Only revocation must avoid preparation.
     privacy.available = false;
     privacy.private = false;
     expect(consent.revoke().enabled).toBe(false);

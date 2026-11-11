@@ -7,7 +7,8 @@ import { convertFlowAction } from "../../../src/tools/computer-recordings/openad
 import { flowFixture, sampleEvent, sampleFrames, sampleSession } from "./flow-fixture.js";
 import type { RecordingFrame } from "@memmy/local-api-contracts";
 const roots: string[] = [];
-const root = () => { const directory = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-flow-export-")); roots.push(directory); return directory; };
+// macOS /var is an OS alias; fixtures must supply the canonical root used by the product.
+const root = () => { const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "memmy-flow-export-"))); roots.push(directory); return directory; };
 afterEach(() => { for (const directory of roots.splice(0)) fs.rmSync(directory, { recursive: true, force: true }); });
 describe("OpenAdapt Flow export", () => {
   it("writes the real upstream layout with verified frames and no execution admission", async () => {

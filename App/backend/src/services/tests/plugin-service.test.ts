@@ -1,7 +1,11 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PluginManifestSchema } from "@memmy/local-api-contracts";
+import { createPluginUpdateService } from "../plugin-update-service.js";
+import { AgentTaskActivity } from "../../../../memmy-agent/src/core/agent-runtime/task-activity.js";
 import { reconcileEntitledPlugins } from "../plugin-entitlement-reconcile-service.js";
 import { createInMemoryPluginRegistry, type PluginRelease } from "../../adapters/outbound/plugin-registry/index.js";
 import { createAppStateStore, type AppStateStore } from "../../infrastructure/app-state-store/index.js";
@@ -10,6 +14,7 @@ import {
   type PluginArtifactManager,
   type PluginRuntimeHost
 } from "../plugin-service.js";
+import type { CreatePluginServiceOptions } from "../plugin-service.js";
 import type { PluginLocalArtifactService } from "../plugin-local-artifact-service.js";
 
 let root: string | undefined;
@@ -53,10 +58,11 @@ const release = {
 function createContext(
   releases: PluginRelease[] = [release],
   localArtifactService?: PluginLocalArtifactService,
-  isAuthenticated?: () => boolean,
+  lifecycleOrAuthenticated: Partial<CreatePluginServiceOptions> | (() => boolean) = {},
   catalogPluginIds?: () => readonly string[],
   isEntitlementGranted?: (entitlement: string) => boolean,
-  hasActiveAgentTasks?: (signal: AbortSignal) => Promise<boolean>
+  hasActiveAgentTasks?: (signal: AbortSignal) => Promise<boolean>,
+  tryAcquireAgentUpdateLease?: CreatePluginServiceOptions["tryAcquireAgentUpdateLease"]
 ) {
   root = mkdtempSync(join(tmpdir(), "memmy-plugin-service-"));
   store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
@@ -96,15 +102,132 @@ function createContext(
       artifactManager,
       skillManager,
       localArtifactService,
-      isAuthenticated,
+      ...(typeof lifecycleOrAuthenticated === "object" ? lifecycleOrAuthenticated : { isAuthenticated: lifecycleOrAuthenticated }),
       catalogPluginIds,
       isEntitlementGranted,
-      hasActiveAgentTasks
+      hasActiveAgentTasks,
+      tryAcquireAgentUpdateLease: tryAcquireAgentUpdateLease ?? (hasActiveAgentTasks
+        ? async signal => await hasActiveAgentTasks(signal) ? null : async () => {}
+        : undefined)
     })
   };
 }
 
 describe("PluginService", () => {
+  it("installs a plugin requiring the implemented ordered event checkpoints", async () => {
+    const checkpointRelease: PluginRelease = { manifest: { ...release.manifest,
+      requiredHostCapabilities: ["memmy.event-checkpoints/v1"] } };
+    const { service, artifactManager } = createContext([checkpointRelease]);
+    await expect(service.install(checkpointRelease.manifest.id)).resolves.toMatchObject({
+      state: "pending_approval", version: "1.0.0"
+    });
+    expect(artifactManager.install).toHaveBeenCalledOnce();
+  });
+  const gatewayRelease: PluginRelease = { manifest: { ...release.manifest,
+    permissions: [...release.manifest.permissions, { type: "host-service", services: ["event-sessions"] }] } };
+  async function persistedFailure(options: Partial<CreatePluginServiceOptions> = {}) {
+    const context = createContext([gatewayRelease], undefined, options);
+    const { service } = context;
+    await service.install(release.manifest.id);
+    service.configure(release.manifest.id, { config: { database: "crossref" }, secrets: { "api-key": "secret" } });
+    await service.approvePermissions(release.manifest.id, gatewayRelease.manifest.permissions);
+    store!.repositories.plugins.setDesiredEnabled(release.manifest.id, true);
+    store!.repositories.plugins.setState(release.manifest.id, "failed", "fetch failed");
+    return context;
+  }
+  it("keeps the first window unblocked and restores a desired failed worker after real Gateway readiness", async () => {
+    const gateway = Promise.withResolvers<void>(), onRestored = vi.fn(async () => undefined);
+    const { service, runtimeHost } = await persistedFailure({ gatewayReady: gateway.promise, onRestored });
+    try {
+      await service.restoreActive();
+      expect(runtimeHost.activate).not.toHaveBeenCalled();
+      expect(service.get(release.manifest.id)).toMatchObject({ desiredEnabled: true, state: "enabling" });
+      gateway.resolve();
+      await vi.waitFor(() => expect(service.get(release.manifest.id).state).toBe("active"));
+      expect(runtimeHost.activate).toHaveBeenCalledOnce(); expect(onRestored).toHaveBeenCalledOnce();
+    } finally { await service.shutdown(); }
+  });
+  it("retries only transient connection failures with a finite attempt count", async () => {
+    const { service, runtimeHost } = await persistedFailure({ gatewayReady: Promise.resolve(), restoreRetryDelaysMs: [1, 1] });
+    try {
+      vi.mocked(runtimeHost.activate).mockRejectedValueOnce(new Error("MCP initialize: fetch failed"));
+      await service.restoreActive();
+      await vi.waitFor(() => expect(service.get(release.manifest.id).state).toBe("active"));
+      expect(runtimeHost.activate).toHaveBeenCalledTimes(2);
+      vi.mocked(runtimeHost.activate).mockReset().mockRejectedValue(new Error("ECONNREFUSED"));
+      await service.restoreActive();
+      await vi.waitFor(() => expect(runtimeHost.activate).toHaveBeenCalledTimes(3));
+      expect(service.get(release.manifest.id)).toMatchObject({ state: "failed", desiredEnabled: true });
+    } finally { await service.shutdown(); }
+  });
+  it("replaces a cancelled deferred recovery when the user enables again before Gateway readiness", async () => {
+    const gateway = Promise.withResolvers<void>();
+    const { service, runtimeHost } = await persistedFailure({ gatewayReady: gateway.promise });
+    try {
+      await service.restoreActive();
+      expect((await service.enable(release.manifest.id)).state).toBe("enabling");
+      expect(runtimeHost.activate).not.toHaveBeenCalled();
+      gateway.resolve();
+      await vi.waitFor(() => expect(service.get(release.manifest.id).state).toBe("active"));
+      expect(runtimeHost.activate).toHaveBeenCalledOnce();
+    } finally { await service.shutdown(); }
+  });
+  it("keeps an active worker on duplicate enable while its restored tools are being refreshed", async () => {
+    const refresh = Promise.withResolvers<void>();
+    const { service, runtimeHost } = await persistedFailure({ gatewayReady: Promise.resolve(), onRestored: () => refresh.promise });
+    try {
+      await service.restoreActive();
+      await vi.waitFor(() => expect(service.get(release.manifest.id).state).toBe("active"));
+      expect((await service.enable(release.manifest.id)).state).toBe("active");
+      expect(runtimeHost.activate).toHaveBeenCalledOnce();
+      expect(runtimeHost.deactivate).not.toHaveBeenCalled();
+    } finally { refresh.resolve(); await service.shutdown(); }
+  });
+  it("retains pending approval across restart even when the user still wants the plugin enabled", async () => {
+    const { service, runtimeHost } = await persistedFailure({ gatewayReady: Promise.resolve() });
+    try {
+      store!.repositories.plugins.setState(release.manifest.id, "pending_approval");
+      await service.restoreActive();
+      expect(service.get(release.manifest.id)).toMatchObject({ state: "pending_approval", desiredEnabled: true });
+      expect(runtimeHost.activate).not.toHaveBeenCalled();
+    } finally { await service.shutdown(); }
+  });
+  it.each(["disable", "uninstall"] as const)("cancels a deferred recovery on %s and never resurrects it", async action => {
+    const gateway = Promise.withResolvers<void>();
+    const { service, runtimeHost } = await persistedFailure({ gatewayReady: gateway.promise });
+    try {
+      await service.restoreActive();
+      await service[action](release.manifest.id);
+      gateway.resolve(); await service.restoreActive();
+      expect(runtimeHost.activate).not.toHaveBeenCalled();
+      if (action === "disable") expect(service.get(release.manifest.id)).toMatchObject({ state: "disabled", desiredEnabled: false });
+      else expect(service.list()).toEqual([]);
+    } finally { await service.shutdown(); }
+  });
+  it("discards an in-flight activation when the user disables the recovering plugin", async () => {
+    const activation = Promise.withResolvers<void>();
+    const { service, runtimeHost } = await persistedFailure({ gatewayReady: Promise.resolve() });
+    try {
+      vi.mocked(runtimeHost.activate).mockImplementationOnce(() => activation.promise);
+      await service.restoreActive();
+      await vi.waitFor(() => expect(runtimeHost.activate).toHaveBeenCalledOnce());
+      const disabled = service.disable(release.manifest.id);
+      expect(service.get(release.manifest.id).desiredEnabled).toBe(false);
+      activation.resolve(); await disabled;
+      expect(service.get(release.manifest.id)).toMatchObject({ state: "disabled", desiredEnabled: false });
+      await service.restoreActive(); expect(runtimeHost.activate).toHaveBeenCalledOnce();
+    } finally { activation.resolve(); await service.shutdown(); }
+  });
+  it("does not retry permission failures or block shutdown on an unstarted Gateway", async () => {
+    const { service, runtimeHost } = await persistedFailure({ gatewayReady: Promise.resolve(), restoreRetryDelaysMs: [1, 1] });
+    vi.mocked(runtimeHost.activate).mockRejectedValue(Object.assign(new Error("permission denied"), { code: "plugin_permission_denied" }));
+    await service.restoreActive();
+    await vi.waitFor(() => expect(service.get(release.manifest.id).state).toBe("failed"));
+    await service.shutdown(); expect(runtimeHost.activate).toHaveBeenCalledOnce();
+    const deferred = await persistedFailure({ gatewayReady: new Promise<void>(() => undefined) });
+    await deferred.service.restoreActive(); await deferred.service.shutdown();
+    expect(deferred.runtimeHost.activate).not.toHaveBeenCalled();
+  });
   it("hides a legacy private install after revocation and restores visibility when regranted", async () => {
     let granted = true;
     const legalRelease: PluginRelease = { manifest: {
@@ -114,10 +237,10 @@ describe("PluginService", () => {
     const { service, artifactManager } = createContext([legalRelease], undefined, () => true,
       () => granted ? ["legal-labor"] : [], () => granted);
     await service.install("legal-labor");
-    expect(service.list()[0].eligibility?.visible).toBe(true);
+    expect(service.list()[0]!.eligibility?.visible).toBe(true);
 
     granted = false;
-    expect(service.list()[0].eligibility).toEqual({
+    expect(service.list()[0]!.eligibility).toEqual({
       visible: false, canInstall: false, canUse: false, reason: "entitlement_required"
     });
     expect(await service.catalog()).toEqual([]);
@@ -125,8 +248,8 @@ describe("PluginService", () => {
     expect(artifactManager.remove).not.toHaveBeenCalled();
 
     granted = true;
-    expect(service.list()[0].eligibility?.visible).toBe(true);
-    expect((await service.catalog())[0].manifest.id).toBe("legal-labor");
+    expect(service.list()[0]!.eligibility?.visible).toBe(true);
+    expect((await service.catalog())[0]!.manifest.id).toBe("legal-labor");
     expect(artifactManager.install).toHaveBeenCalledTimes(1);
   });
 
@@ -153,6 +276,20 @@ describe("PluginService", () => {
     );
 
     expect((await service.catalog()).map((entry) => entry.manifest.id)).toEqual(["office"]);
+  });
+
+  it("cancels private release discovery when shutdown interrupts the catalog", async () => {
+    const { service, registry } = createContext([], undefined, {}, () => ["private-review"]);
+    const releasePending = Promise.withResolvers<PluginRelease>();
+    const resolving = vi.spyOn(registry, "resolve").mockReturnValue(releasePending.promise);
+    const catalog = service.catalog();
+    const rejected = expect(catalog).rejects.toMatchObject({ name: "AbortError" });
+    try {
+      await vi.waitFor(() => expect(resolving).toHaveBeenCalledOnce());
+      await service.shutdown();
+      expect(resolving.mock.calls[0]?.[2]?.aborted).toBe(true);
+      await rejected;
+    } finally { releasePending.resolve(release); await service.shutdown(); }
   });
 
   it("adds entitled private releases to the catalog and keeps them visible after uninstall", async () => {
@@ -213,7 +350,7 @@ describe("PluginService", () => {
     const { service, artifactManager, runtimeHost } = createContext([literature], undefined, () => authenticated);
     const reconcile = () => reconcileEntitledPlugins({ plugins: service, entitlements: [],
       userUninstalledIds: new Set(store!.repositories.plugins.listUserUninstalledIds()) });
-    expect((await service.catalog())[0].eligibility.reason).toBe("login_required");
+    expect((await service.catalog())[0]!.eligibility.reason).toBe("login_required");
     await expect(service.install("literature-review")).rejects.toThrow(/access denied/);
     await reconcile();
     expect(service.list()).toHaveLength(0);
@@ -230,7 +367,7 @@ describe("PluginService", () => {
     authenticated = false;
     await reconcile();
     expect(runtimeHost.deactivate).not.toHaveBeenCalled();
-    expect(service.list()[0].eligibility?.canUse).toBe(false);
+    expect(service.list()[0]!.eligibility?.canUse).toBe(false);
     await expect(service.invoke({ callId: "new", pluginId: "literature-review", capabilityId: "run",
       conversationId: "chat", input: { topic: "memory" } })[Symbol.asyncIterator]().next()).rejects.toThrow(/access denied/);
     expect((await call.next()).value).toMatchObject({ type: "result" });
@@ -410,12 +547,12 @@ describe("PluginService", () => {
     expect((await updated).version).toBe("2.0.0");
     expect((await duplicate).version).toBe("2.0.0");
     expect(artifactManager.install).toHaveBeenCalledTimes(1);
-    expect(resolveSpy).toHaveBeenCalledWith(release.manifest.id, "2.0.0");
+    expect(resolveSpy).toHaveBeenCalledWith(release.manifest.id, "2.0.0", expect.any(AbortSignal));
     expect(service.get(release.manifest.id)).toMatchObject({ state: "active", activeCallCount: 0 });
     expect(service.get(release.manifest.id).update).toBeUndefined();
   });
 
-  it("blocks new calls during installation and preserves the old active version on download failure", async () => {
+  it("keeps serving the old version during download and preserves it on download failure", async () => {
     const next = { manifest: { ...release.manifest, version: "2.0.0" } };
     const { service, artifactManager } = createContext([release, next]);
     await service.install(release.manifest.id, "1.0.0");
@@ -427,13 +564,122 @@ describe("PluginService", () => {
     const update = service.update(release.manifest.id, "2.0.0");
     const failed = expect(update).rejects.toThrow("download failed");
     await vi.waitFor(() => expect(rejectDownload).toBeDefined());
-    await expect(service.invoke({
+    const call = service.invoke({
       callId: "new", pluginId: release.manifest.id, capabilityId: "run", conversationId: "chat", input: {}
-    })[Symbol.asyncIterator]().next()).rejects.toThrow(/being installed/);
+    })[Symbol.asyncIterator]();
+    await expect(call.next()).resolves.toMatchObject({ value: { type: "result" } });
+    await call.return?.();
     rejectDownload(new Error("download failed"));
     await failed;
     expect(service.get(release.manifest.id)).toMatchObject({ version: "1.0.0", state: "active" });
     expect(service.get(release.manifest.id).update).toBeUndefined();
+  });
+
+  it("defers automatic activation when a whole Agent task starts during download", async () => {
+    let agentBusy = false;
+    const activity = vi.fn(async () => agentBusy);
+    const initial = { manifest: PluginManifestSchema.parse({ ...release.manifest, rules: { autoUpdate: true } }) };
+    const next = { manifest: { ...initial.manifest, version: "2.0.0" } };
+    const { service, artifactManager, runtimeHost } = createContext([initial, next], undefined, undefined, undefined, undefined, activity);
+    await service.install(release.manifest.id, "1.0.0");
+    service.configure(release.manifest.id, { config: { database: "crossref" }, secrets: { "api-key": "secret" } });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    let finishDownload!: () => void;
+    const downloaded = new Promise<void>(resolve => { finishDownload = resolve; });
+    vi.mocked(artifactManager.install).mockImplementationOnce(async () => {
+      await downloaded; return { artifactHash: null, rootPath: null };
+    });
+    const updates = createPluginUpdateService(service);
+    const updating = updates.check();
+    try {
+      await vi.waitFor(() => expect(artifactManager.install).toHaveBeenCalledTimes(2));
+      agentBusy = true;
+      finishDownload();
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(service.get(release.manifest.id)).toMatchObject({ version: "1.0.0", state: "active" });
+      expect(runtimeHost.deactivate).not.toHaveBeenCalled();
+    } finally {
+      agentBusy = false; finishDownload(); await updating; await updates.close();
+    }
+    expect(service.get(release.manifest.id).version).toBe("2.0.0");
+    expect(runtimeHost.deactivate).toHaveBeenCalledTimes(1);
+    await service.shutdown();
+  });
+
+  it.each([false, true])("holds task admission through activation and rollback (fails=%s)", async fails => {
+    const activity = new AgentTaskActivity();
+    const leaseReleased = vi.fn();
+    const next = { manifest: { ...release.manifest, version: "2.0.0" } };
+    const { service, runtimeHost } = createContext([release, next], undefined, undefined, undefined, undefined,
+      async () => activity.busy, async () => {
+        const unblock = activity.tryBlockTasks();
+        return unblock ? async () => { unblock(); leaseReleased(); } : null;
+      });
+    await service.install(release.manifest.id, "1.0.0");
+    service.configure(release.manifest.id, { config: { database: "crossref" }, secrets: { "api-key": "secret" } });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    let activate!: () => void;
+    const activating = new Promise<void>(resolve => { activate = resolve; });
+    vi.mocked(runtimeHost.activate).mockImplementationOnce(async () => {
+      await activating;
+      if (fails) throw new Error("activation failed");
+    });
+    const update = service.update(release.manifest.id, "2.0.0");
+    const completed = fails ? expect(update).rejects.toThrow("activation failed") : expect(update).resolves.toMatchObject({ version: "2.0.0" });
+    await vi.waitFor(() => expect(runtimeHost.activate).toHaveBeenCalledTimes(2));
+    const run = vi.fn(async () => service.get(release.manifest.id).version);
+    const task = activity.run(run);
+    expect(run).not.toHaveBeenCalled();
+    activate(); await completed;
+    expect(await task).toBe(fails ? "1.0.0" : "2.0.0");
+    expect(leaseReleased).toHaveBeenCalledOnce();
+    await service.shutdown();
+  });
+
+  it("cancels a downloaded update waiting on a new task without acquiring admission", async () => {
+    let busy = false;
+    const lease = vi.fn(async () => async () => {});
+    const next = { manifest: { ...release.manifest, version: "2.0.0" } };
+    const { service, artifactManager, runtimeHost } = createContext([release, next], undefined, undefined, undefined, undefined,
+      async () => busy, lease);
+    await service.install(release.manifest.id, "1.0.0");
+    vi.mocked(artifactManager.install).mockImplementationOnce(async () => {
+      busy = true; return { artifactHash: "next", rootPath: "/test/staged-update" };
+    });
+    const update = service.update(release.manifest.id, "2.0.0");
+    const rejected = expect(update).rejects.toThrow();
+    await vi.waitFor(() => expect(artifactManager.install).toHaveBeenCalledTimes(2));
+    await service.shutdown(); await rejected;
+    expect(lease).not.toHaveBeenCalled();
+    expect(runtimeHost.activate).not.toHaveBeenCalled();
+    expect(artifactManager.remove).toHaveBeenCalledWith(expect.objectContaining({ rootPath: "/test/staged-update" }));
+    expect(service.get(release.manifest.id).version).toBe("1.0.0");
+  });
+
+  it("keeps a recording acquired during download and lets disable release it before updating", async () => {
+    let leased = false;
+    const next = { manifest: { ...release.manifest, version: "2.0.0" } };
+    const { service, artifactManager, runtimeHost } = createContext([release, next], undefined, {
+      hasResourceLease: () => leased,
+      releaseResources: async () => { leased = false; }
+    });
+    await service.install(release.manifest.id, "1.0.0");
+    service.configure(release.manifest.id, { config: { database: "crossref" }, secrets: { "api-key": "secret" } });
+    await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    await service.enable(release.manifest.id);
+    vi.mocked(artifactManager.install).mockImplementationOnce(async () => {
+      leased = true; return { artifactHash: null, rootPath: null };
+    });
+    const update = service.update(release.manifest.id, "2.0.0");
+    await vi.waitFor(() => expect(leased).toBe(true));
+    expect(service.get(release.manifest.id).version).toBe("1.0.0");
+    expect(runtimeHost.deactivate).not.toHaveBeenCalled();
+    await service.disable(release.manifest.id);
+    expect(await update).toMatchObject({ version: "2.0.0", state: "disabled" });
+    expect(runtimeHost.activate).toHaveBeenCalledTimes(1);
+    await service.shutdown();
   });
 
   it.each(["return", "error", "shutdown"] as const)("releases a queued update when a call ends via %s", async (ending) => {
@@ -496,7 +742,7 @@ describe("PluginService", () => {
       agentBusy = false;
       await vi.advanceTimersByTimeAsync(1_000);
       expect((await update).version).toBe("2.0.0");
-      expect(resolve).toHaveBeenCalledExactlyOnceWith(release.manifest.id, "2.0.0");
+      expect(resolve).toHaveBeenCalledExactlyOnceWith(release.manifest.id, "2.0.0", expect.any(AbortSignal));
       expect(artifactManager.install).toHaveBeenCalledOnce();
     } finally { vi.useRealTimers(); }
   });
@@ -512,6 +758,32 @@ describe("PluginService", () => {
     expect(resolve).not.toHaveBeenCalled();
     expect(service.get(release.manifest.id).version).toBe("1.0.0");
     expect(service.get(release.manifest.id).update).toBeUndefined();
+  });
+
+  it("waits for a teaching lease without blocking disable from releasing it", async () => {
+    vi.useFakeTimers();
+    try {
+      let leased = true;
+      const next = { manifest: { ...release.manifest, version: "2.0.0" } };
+      const { service, artifactManager } = createContext([release, next], undefined, {
+        hasResourceLease: () => leased,
+        releaseResources: async () => { leased = false; }
+      });
+      await service.install(release.manifest.id, "1.0.0");
+      service.configure(release.manifest.id, { config: { database: "crossref" }, secrets: { "api-key": "secret" } });
+      await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+      await service.enable(release.manifest.id);
+      vi.mocked(artifactManager.install).mockClear();
+      const update = service.update(release.manifest.id, "2.0.0");
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(artifactManager.install).not.toHaveBeenCalled();
+      expect(service.get(release.manifest.id).update?.status).toBe("waiting");
+      await service.disable(release.manifest.id);
+      expect(leased).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await update).toMatchObject({ version: "2.0.0", state: "disabled" });
+      expect(artifactManager.install).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
   });
 
   it("cancels whole-task waiting on shutdown without downloading", async () => {
@@ -558,8 +830,8 @@ describe("PluginService", () => {
   });
 
   it("rewrites result paths to the copies published in the conversation workspace", async () => {
-    const sourcePath = "/plugin-data/review-1/outputs/review.md";
-    const publishedPath = "/workspace/outputs/com.example.review/review-1/review.md";
+    const sourcePath = join(tmpdir(), "plugin-data", "review-1", "outputs", "review.md");
+    const publishedPath = join(tmpdir(), "workspace", "outputs", "com.example.review", "review-1", "review.md");
     const localArtifactService: PluginLocalArtifactService = {
       host: vi.fn(async (_plugin, artifact) => ({ ...artifact, path: publishedPath })),
       open: vi.fn(async () => ({ path: sourcePath, name: "review.md", mediaType: "text/markdown" })),
@@ -573,7 +845,7 @@ describe("PluginService", () => {
           id: "review",
           name: "review.md",
           mediaType: "text/markdown",
-          uri: "file:///plugin-data/review-1/outputs/review.md"
+          uri: pathToFileURL(sourcePath).href
         }
       };
       yield { type: "result", output: { data: { outputs: [{ path: sourcePath }] } } };
@@ -680,14 +952,14 @@ describe("PluginService", () => {
       finish = resolve; fail = reject;
     }));
     const a = service.enable(release.manifest.id), b = service.enable(release.manifest.id);
-    await Promise.resolve();
-    expect(service.get(release.manifest.id).state).toBe("enabling");
-    expect(runtimeHost.activate).toHaveBeenCalledTimes(1);
     const results = Promise.allSettled([a, b]);
+    await vi.waitFor(() => expect(runtimeHost.activate).toHaveBeenCalledTimes(1));
+    expect(service.get(release.manifest.id).state).toBe("enabling");
     if (outcome === "success") finish(); else fail(new Error("runtime unavailable"));
     expect((await results).map(result => result.status)).toEqual(outcome === "success"
       ? ["fulfilled", "fulfilled"] : ["rejected", "rejected"]);
-    expect(skillManager.activate).toHaveBeenCalledTimes(outcome === "success" ? 1 : 0);
+    expect(skillManager.activate).toHaveBeenCalledTimes(1);
+    expect(skillManager.deactivate).toHaveBeenCalledTimes(outcome === "success" ? 0 : 1);
     expect(service.get(release.manifest.id).state).toBe(outcome === "success" ? "active" : "failed");
     await service.enable(release.manifest.id);
     expect(service.get(release.manifest.id).state).toBe("active");
@@ -702,6 +974,9 @@ describe("PluginService", () => {
       secrets: { "api-key": "secret" }
     });
     await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    // enable() persists the user's intent before starting activation. Simulate
+    // that interrupted transition, rather than an explicitly disabled plugin.
+    store!.repositories.plugins.setDesiredEnabled(release.manifest.id, true);
     store!.repositories.plugins.setState(release.manifest.id, "enabling");
 
     // A fresh service has no in-memory activation promise, only persisted state.
@@ -711,6 +986,7 @@ describe("PluginService", () => {
     await restarted.restoreActive();
 
     expect(runtimeHost.activate).toHaveBeenCalledOnce();
+    expect(restarted.get(release.manifest.id).desiredEnabled).toBe(true);
     expect(restarted.get(release.manifest.id).state).toBe(outcome === "success" ? "active" : "failed");
     if (outcome === "failure") {
       expect(restarted.get(release.manifest.id).lastError).toContain("runtime unavailable");

@@ -3,16 +3,13 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import JSZip from "jszip";
 import crypto from "node:crypto";
-import { RecordingFrameSchema, type RecordingEvent, type RecordingFrame, type RecordingSession } from "@memmy/local-api-contracts";
+import { OperationEvidenceSchema, RecordingFrameSchema, type RecordingEvent, type RecordingFrame, type RecordingSession } from "@memmy/local-api-contracts";
 import { readLines, writeJsonAtomic, RecordingError } from "./session-service.js";
+import { buildRecordingOperationEvidence, recordingActionEvents, recordingFramePair, sameRecordingWindow } from "../computer-use/operation-evidence.js";
+import { enrichOperationVisualEvidence } from "./operation-visual-evidence.js";
 
-const sameWindow = (a: RecordingFrame["window"], b: RecordingFrame["window"]) => {
-  if (!a || !b || a.pid !== b.pid || a.processStart !== b.processStart || JSON.stringify(a.bounds) !== JSON.stringify(b.bounds)) return false;
-  if ("hwnd" in a && "hwnd" in b) return a.hwnd === b.hwnd && a.dpi === b.dpi && a.executable.toLowerCase() === b.executable.toLowerCase();
-  return "windowId" in a && "windowId" in b && a.windowId === b.windowId && a.bundleId === b.bundleId && a.scale === b.scale && a.executable === b.executable;
-};
 export function convertFlowAction(event: RecordingEvent, frame: RecordingFrame, width: number, height: number): Record<string, unknown> {
-  if (!sameWindow(event.window, frame.window) || !frame.transform || frame.blank) throw new Error("unverified_window");
+  if (!sameRecordingWindow(event.window, frame.window) || !frame.transform || frame.blank) throw new Error("unverified_window");
   const action = event.action;
   if (event.type === "text_input") throw new Error("text_not_retained");
   if (event.type === "key_press" && action?.key) {
@@ -42,6 +39,9 @@ export async function exportOpenAdaptFlow(input: {
 }): Promise<string[]> {
   const { directory, destination, session, events } = input;
   const frames = fs.existsSync(path.join(directory, "frames.jsonl")) ? readLines(path.join(directory, "frames.jsonl"), (value) => RecordingFrameSchema.parse(value)) : [];
+  const evidence = buildRecordingOperationEvidence({ session, events, frames,
+    eventsText: events.map((event) => JSON.stringify(event)).join("\n") + "\n",
+    framesText: fs.existsSync(path.join(directory, "frames.jsonl")) ? fs.readFileSync(path.join(directory, "frames.jsonl"), "utf8") : "" });
   const missing: string[] = [];
   const converted: Record<string, unknown>[] = [];
   const requests: { i: number; phase: "before" | "after"; frameId: number; partId: string; partFrame: number }[] = [];
@@ -49,18 +49,19 @@ export async function exportOpenAdaptFlow(input: {
   if (session.videoIntegrity !== "complete") missing.push("video_incomplete");
   if (session.timelineCompleteness !== "complete") missing.push("input_timeline_incomplete");
   if (events.some((event) => event.type === "unsupported_input")) missing.push("unsupported_native_actions");
-  const nativeEvents = events.filter((event) => event.origin === "native").sort((a, b) => a.timeMs - b.timeMs || a.sequence - b.sequence);
+  if (evidence.unresolvedEvents.some((event) => event.reason === "unsupported_or_incomplete_input")
+    && !missing.includes("unsupported_native_actions")) missing.push("unsupported_native_actions");
+  const nativeEvents = recordingActionEvents(events);
   if (!nativeEvents.length) missing.push("no_supported_native_actions");
   if (nativeEvents.length > 1000) throw new RecordingError(422, "export_action_limit_exceeded");
   const width = session.video?.width ?? 1920, height = session.video?.height ?? 1080;
   for (const event of nativeEvents) {
-    const before = frames.findLast((frame) => !frame.repeated && frame.timeMs <= event.timeMs);
-    const after = frames.find((frame) => !frame.repeated && frame.timeMs > event.timeMs);
+    const { before, after, missing: frameError } = recordingFramePair(event, frames, session);
     try {
-      if (!before || !after || event.timeMs - before.timeMs > 200 || after.timeMs - event.timeMs > 200) throw new Error("necessary_frame_missing");
-      if (before.blank || after.blank || !sameWindow(before.window, after.window) || !sameWindow(before.window, event.window)) throw new Error("frame_identity_mismatch");
-      if (session.gaps.some((gap) => gap.startMs <= after.timeMs && gap.endMs >= before.timeMs)) throw new Error("frame_crosses_gap");
+      if (frameError || !before || !after) throw new Error(frameError ?? "necessary_frame_missing");
       const action = convertFlowAction(event, before, width, height);
+      const step = evidence.steps.find((step) => step.evidence.eventIds.includes(event.id));
+      if (step?.anchor?.structural) action.structural = step.anchor.structural;
       const i = converted.length;
       converted.push({ i, ...action, t: event.timeMs / 1000, viewport_before: [width, height], viewport_after: [width, height] });
       requests.push({ i, phase: "before", frameId: before.index, partId: before.partId, partFrame: before.partFrame },
@@ -83,10 +84,12 @@ export async function exportOpenAdaptFlow(input: {
     videoIntegrity: session.videoIntegrity, timelineCompleteness: session.timelineCompleteness, taskEndReason: session.taskEndReason,
     coordinateSpace: "window_pixels", missing, conversions: provenance, gaps: session.gaps,
     qpc: session.qpc, clock: session.clock ?? (session.qpc ? { kind: "qpc", ...session.qpc } : null), platform: session.platform, sourceParts: session.parts,
+    idleSpans: session.idleSpans ?? [], sourceTimeMeaning: "elapsed execution time; video presentation time omits idle spans",
     sourceEventsSha256: crypto.createHash("sha256").update(fs.readFileSync(path.join(destination, "memmy-source-events.jsonl"))).digest("hex"),
     afterFrameMeaning: "next verified sampled frame; not a settled-state or business-success assertion",
   });
-  if (complete) {
+  let templates: string[] = [];
+  if (complete && requests.length) {
     writeJsonAtomic(path.join(destination, "frame-requests.json"), requests);
     await input.extract();
     for (const request of requests) {
@@ -97,9 +100,12 @@ export async function exportOpenAdaptFlow(input: {
       try { if (fs.readSync(fd, header, 0, 24, 0) !== 24) throw new Error(); } finally { fs.closeSync(fd); }
       if (header.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a" || header.readUInt32BE(16) !== width || header.readUInt32BE(20) !== height) throw new Error("export_frame_invalid");
     }
+    templates = enrichOperationVisualEvidence({ evidence, directory: destination, width, height,
+      assets: provenance.filter((item) => typeof item.flowIndex === "number").map((item) => ({ eventId: String(item.eventId), i: Number(item.flowIndex) })) });
   }
+  writeJsonAtomic(path.join(destination, "operation-evidence.json"), OperationEvidenceSchema.parse(evidence));
   const archive = new JSZip();
-  for (const name of ["meta.json", "events.jsonl", "memmy-source-events.jsonl", "memmy-export-manifest.json"]) archive.file(name, fs.createReadStream(path.join(destination, name)));
+  for (const name of ["meta.json", "events.jsonl", "memmy-source-events.jsonl", "memmy-export-manifest.json", "operation-evidence.json", ...templates]) archive.file(name, fs.createReadStream(path.join(destination, name)));
   if (complete) for (const request of requests) {
     const name = `frames/${String(request.i).padStart(4, "0")}_${request.phase}.png`;
     archive.file(name, fs.createReadStream(path.join(destination, name)));

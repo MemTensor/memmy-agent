@@ -30,6 +30,14 @@ describe("PluginManifestSchema", () => {
     expect(PluginManifestSchema.parse(manifest)).toEqual(manifest);
   });
 
+  it("binds conversation recording to declared capabilities and skills without a surface", () => {
+    const skill = { id: "record-and-replay", name: "Record", description: "Record events", entry: "skills/record-and-replay/SKILL.md" };
+    const conversation = { recordingCapabilityId: "review", recordingSkillId: "record-and-replay" };
+    expect(PluginManifestSchema.parse({ ...manifest, skills: [skill], conversation }).conversation).toEqual(conversation);
+    expect(() => PluginManifestSchema.parse({ ...manifest, skills: [skill], conversation: { ...conversation, recordingCapabilityId: "missing" } })).toThrow("Unknown conversation capability");
+    expect(() => PluginManifestSchema.parse({ ...manifest, skills: [skill], conversation: { ...conversation, creatorSkillId: "missing" } })).toThrow("Unknown conversation skill");
+  });
+
   it("accepts a Host-owned cancellation control declaration", () => {
     const parsed = PluginManifestSchema.parse({
       ...manifest,

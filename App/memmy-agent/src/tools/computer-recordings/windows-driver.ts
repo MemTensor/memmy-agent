@@ -3,20 +3,21 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { z } from "zod";
-import { RecordingFrameSchema, RecordingGapSchema, WindowsRecordingWindowSchema, type RecordingEvent, type RecordingSession } from "@memmy/local-api-contracts";
+import { RecordingFrameSchema, RecordingGapSchema, RecordingIdleSpansSchema, recordingVideoTime, WindowsRecordingWindowSchema, type RecordingEvent, type RecordingSession } from "@memmy/local-api-contracts";
 import { WindowsSettingsStore, discoverApplications, resolveWindowsCollector } from "../computer-history/win/settings.js";
 import { ObservationSettingsStore } from "../computer-history/core/settings-store.js";
 import { windowsScopeAllows } from "../computer-history/win/unified-settings.js";
-import { authorizedRule, compileWindowsPolicy, pathKey, readNativePolicy } from "../computer-history/win/policy.js";
+import { authorizedRule, compileWindowsPolicy, pathKey, readNativePolicy, type ApplicationBinding } from "../computer-history/win/policy.js";
 import { parseNativeEvent } from "../computer-history/win/protocol.js";
 import { SnapshotNormalizer } from "../computer-history/win/normalize.js";
-import { RecordingError, readLines, type RecordingResult, type TaskRecordingDriver, type TaskRecordingHandle } from "./session-service.js";
+import { RecordingError, readLines, type RecordingResult, type TaskRecordingDriver, type TaskRecordingHandle, type NativeTaskTarget } from "./session-service.js";
 import { exportOpenAdaptFlow } from "./openadapt-export.js";
 
 const decimal = z.string().regex(/^[0-9]+$/u).max(20);
 const taskEnvelope = z.object({ qpcOrigin: decimal, qpcFrequency: decimal.refine((v) => BigInt(v) > 0n), qpc: decimal,
   actionQpc: z.array(decimal).max(64), unsupportedActions: z.number().int().nonnegative() }).strict();
 const mediaSchema = z.object({ version: z.literal(1), durationMs: z.number().finite().nonnegative().max(1_200_200), qpcOrigin: decimal, qpcFrequency: decimal.refine((v) => BigInt(v) > 0n),
+  idleSpans: RecordingIdleSpansSchema.optional(), videoDurationMs: z.number().finite().positive().max(1_200_200).optional(),
   width: z.literal(1920), height: z.literal(1080), complete: z.boolean(), error: z.string().nullable(), gaps: z.array(RecordingGapSchema),
   parts: z.array(z.object({ index: z.number().int().min(1).max(999999), startMs: z.number().nonnegative(), durationMs: z.number().nonnegative(),
     bytes: z.number().int().positive(), sha256: z.string().regex(/^[0-9a-f]{64}$/u) }).strict()),
@@ -38,6 +39,14 @@ export function nativeTaskEvent(value: unknown) {
   const count = event.kind === "snapshot" && event.snapshot.status === "ok" ? (event.snapshot.actions?.length ?? 0) : 0;
   if (clock.actionQpc.length !== count || clock.actionQpc.some((qpc) => BigInt(qpc) < BigInt(clock.qpcOrigin) || BigInt(qpc) > BigInt(clock.qpc))) throw new Error("task_action_clock_invalid");
   return { event, clock };
+}
+export function scopeTaskBindings(bindings: ApplicationBinding[], target?: NativeTaskTarget): ApplicationBinding[] {
+  if (!target) return bindings;
+  if (!Number.isInteger(target.pid) || target.pid < 1 || target.pid > 0xffffffff || !/^[1-9][0-9]{0,19}$/u.test(target.hwnd)
+    || BigInt(target.hwnd) > 0xffffffffffffffffn) throw new RecordingError(422, "recording_target_invalid");
+  const binding = bindings.find(item => item.pid === target.pid && item.processStart === target.processStart);
+  if (!binding) throw new RecordingError(422, "recording_target_changed");
+  return [{ ...binding, hwnd: target.hwnd }];
 }
 export class WindowsTaskRecordingDriver implements TaskRecordingDriver {
   constructor(private readonly binary?: string, private readonly store = new WindowsSettingsStore(undefined, new ObservationSettingsStore())) {}
@@ -67,10 +76,11 @@ export class WindowsTaskRecordingDriver implements TaskRecordingDriver {
     // while processes are being listed. Recheck immediately before writing/spawning.
     const settings = this.authorizedSettings(choices);
     const policy = compileWindowsPolicy(input.applications.map((executable) => settings.applications.find((r) => pathKey(r.executable) === pathKey(executable)) ?? { executable }),
-      bindings, { sensitiveAutomationIds: settings.sensitiveAutomationIds, deny: settings.deny, limits: settings.limits });
+      scopeTaskBindings(bindings, input.target), { sensitiveAutomationIds: settings.sensitiveAutomationIds, deny: settings.deny, limits: settings.limits });
     if (!policy.applications.length || choices.some((choice) => !policy.applications.some((app) => pathKey(app.executable) === choice))) throw new RecordingError(422, "recording_application_unavailable");
     const policyFile = path.join(input.directory, "policy.json");
     fs.writeFileSync(policyFile, JSON.stringify(policy), { flag: "wx", mode: 0o600 });
+    fs.writeFileSync(path.join(input.directory, "recording-options.json"), JSON.stringify({ version: 1, idleTimeoutMs: input.skipIdle === false ? 0 : 10000 }), { flag: "wx", mode: 0o600 });
     const child = spawn(binary, ["record-task", "--policy", policyFile, "--output-dir", input.directory, "--seconds", "1200",
       "--sample-ms", "200", "--parent-pid", String(process.pid), "--input-hooks"], { windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"] });
     const handle = new NativeTaskHandle(child, input.onEvent, policyFile, () => this.finishFiles(input.directory));
@@ -104,7 +114,9 @@ export class WindowsTaskRecordingDriver implements TaskRecordingDriver {
       if ((frame.repeated && !frame.sourceTicks) || (frame.sourceTicks && (!frame.window || BigInt(frame.sourceTicks) < BigInt(media.qpcOrigin)
         || BigInt(frame.sourceTicks) > BigInt(frame.qpc) || (!frame.repeated && frame.sourceTicks !== frame.qpc)))) throw new Error("task_frame_source_clock_invalid");
       const expectedMs = Number(BigInt(frame.qpc) - BigInt(media.qpcOrigin)) * 1000 / Number(media.qpcFrequency);
-      if (!part || Math.abs(expectedMs - frame.timeMs) > 2 || frame.timeMs < part.startMs - 2 || frame.timeMs > part.startMs + part.durationMs + 2
+      const videoMs = frame.videoTimeMs ?? frame.timeMs;
+      if (!part || Math.abs(expectedMs - frame.timeMs) > 2 || Math.abs(videoMs - recordingVideoTime(frame.timeMs, media.idleSpans)) > 2
+        || videoMs < part.startMs - 2 || videoMs > part.startMs + part.durationMs + 2
         || frame.partFrame !== (counts.get(frame.partId) ?? 0)) throw new Error("task_frame_clock_invalid");
       counts.set(frame.partId, frame.partFrame + 1);
       if (frame.window && !authorizedRule(policy, frame.window)) throw new Error("task_frame_window_invalid");
@@ -112,11 +124,14 @@ export class WindowsTaskRecordingDriver implements TaskRecordingDriver {
         || frame.transform.offsetX + frame.transform.sourceWidth * frame.transform.scale > 1921
         || frame.transform.offsetY + frame.transform.sourceHeight * frame.transform.scale > 1081)) throw new Error("task_frame_transform_invalid");
     }
-    if (frames.some((frame, index) => frame.index !== index || (index > 0 && frame.timeMs <= frames[index - 1]!.timeMs)
+    if (frames.some((frame, index) => frame.index !== index || (index > 0 && (frame.timeMs <= frames[index - 1]!.timeMs
+      || (frame.videoTimeMs ?? frame.timeMs) <= (frames[index - 1]!.videoTimeMs ?? frames[index - 1]!.timeMs)))
       || !parts.some((part) => part.mediaId === frame.partId) || (frame.blank ? frame.window !== null || frame.transform !== null : !frame.window || !frame.transform))) throw new Error("task_frame_index_invalid");
     const playable = fs.existsSync(path.join(directory, "recording.mp4")) && fs.statSync(path.join(directory, "recording.mp4")).size > 0;
-    return { durationMs: media.durationMs, qpc: { origin: media.qpcOrigin, frequency: media.qpcFrequency },
-      video: playable ? { mediaId: "recording", width: 1920, height: 1080, fps: 15, audio: false } : null,
+    if (media.idleSpans?.some((span) => span.endMs > media.durationMs + 2)
+      || (media.complete && media.videoDurationMs !== undefined && Math.abs(media.videoDurationMs - recordingVideoTime(media.durationMs, media.idleSpans)) > 2)) throw new Error("task_idle_clock_invalid");
+    return { durationMs: media.durationMs, qpc: { origin: media.qpcOrigin, frequency: media.qpcFrequency }, idleSpans: media.idleSpans,
+      video: playable ? { mediaId: "recording", width: 1920, height: 1080, fps: 15, audio: false, durationMs: media.videoDurationMs } : null,
       parts, gaps: media.gaps, videoIntegrity: media.complete && playable ? "complete" : parts.length ? "partial" : "missing",
       timelineCompleteness: media.complete ? "complete" : "partial", error: media.error };
   }
@@ -169,6 +184,16 @@ class NativeTaskHandle implements TaskRecordingHandle {
     child.once("close", (code) => { void this.closed(code); });
   }
   timeMs(): number { return this.lastMs + Math.max(0, performance.now() - this.anchor); }
+  idleStatus(): { paused: boolean; videoTimeMs: number } | undefined {
+    const file = path.join(path.dirname(this.policyFile), "idle-spans.json");
+    try {
+      if (fs.lstatSync(file).isSymbolicLink() || fs.statSync(file).size > 4 * 1024 * 1024) return undefined;
+      const value = z.object({ version: z.literal(1), spans: RecordingIdleSpansSchema, activeStartMs: z.number().finite().nonnegative().nullable() }).strict()
+        .parse(JSON.parse(fs.readFileSync(file, "utf8")));
+      const now = this.timeMs();
+      return { paused: value.activeStartMs !== null, videoTimeMs: recordingVideoTime(value.activeStartMs === null ? now : Math.min(now, value.activeStartMs), value.spans) };
+    } catch { return undefined; }
+  }
   private fail(): void {
     this.failure = true; this.startup.reject(new Error("task_recording_start_or_protocol_failed"));
     if (this.pending) { clearTimeout(this.pending.timer); this.pending.ack.reject(new Error("task_recording_control_failed")); this.pending = null; }
@@ -204,6 +229,8 @@ class NativeTaskHandle implements TaskRecordingHandle {
       const { title: _title, generation: _generation, minimized: _minimized, ...context } = event.context;
       void _title; void _generation; void _minimized;
       const window = WindowsRecordingWindowSchema.parse(context);
+      this.onEvent({ timeMs: event.monotonicMs, qpc: clock.qpc, timestamp: event.timestamp,
+        origin: "native", type: "accessibility_snapshot", window, observation: this.normalizer.operationObservation() });
       if (event.snapshot.actionOverflow) {
         this.overflow = true;
         this.onEvent({ timeMs: event.monotonicMs, timestamp: event.timestamp, origin: "control", type: "input_overflow", window: null });

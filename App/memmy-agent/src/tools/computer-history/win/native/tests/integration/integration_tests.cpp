@@ -9,6 +9,7 @@
 
 #include "common/cli.h"
 #include "common/json.h"
+#include "common/protocol.h"
 #include "common/text.h"
 
 #include <windows.h>
@@ -80,6 +81,29 @@ void WriteFileBytes(const fs::path& path, const std::string& bytes) {
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
   if (!out) Fail("could not write " + U8(path.wstring()));
+}
+
+void WriteLivePolicy(const fs::path& path, const std::string& bytes) {
+  // The recorder holds a read lease through each authorized sample. Wait only
+  // for that lease, then exclude readers until the complete revision is written.
+  // Keep capture running so the test still exercises revocation without pause.
+  const auto deadline = GetTickCount64() + 5000;
+  HANDLE file = INVALID_HANDLE_VALUE;
+  for (;;) {
+    file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) break;
+    const auto error = GetLastError();
+    if (error != ERROR_SHARING_VIOLATION || GetTickCount64() >= deadline) {
+      Fail("could not update live policy " + U8(path.wstring()) + ": " + std::to_string(error));
+    }
+    Sleep(10);
+  }
+  DWORD written = 0;
+  const bool complete = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr)
+    && written == bytes.size() && FlushFileBuffers(file);
+  const auto error = complete ? ERROR_SUCCESS : GetLastError();
+  CloseHandle(file);
+  Expect(complete, "could not write live policy " + U8(path.wstring()) + ": " + std::to_string(error));
 }
 
 std::string ReadFileBytes(const fs::path& path) {
@@ -1132,6 +1156,78 @@ fs::path ObservePolicy(Fixture& fixture, const std::string& name, Json extra = J
   return WritePolicy(name, Json::array({FullRule(fixture)}), std::move(extra));
 }
 
+void CaseObserveCheckpoint() {
+  Fixture fixture;
+  fixture.Start();
+  fixture.RequireForeground('a');
+  const fs::path policy = ObservePolicy(fixture, "checkpoint-policy",
+    {{"limits", {{"queryBudgetMs", 2000}, {"workerTimeoutMs", 4000}}}});
+  Gate gate(Nonce() + "-checkpoint");
+  Observe observe;
+  observe.Start(g_paths.TestHooks(), {L"observe", L"--policy", policy.wstring(), L"--seconds", L"60",
+    L"--sample-ms", L"300", L"--test-commit-gate", gate.name});
+  gate.AwaitReady();
+  const std::string id = "12345678-1234-1234-1234-123456789abc";
+  observe.Send("checkpoint " + id);
+  Sleep(200);
+  for (const auto& line : observe.Proc().Lines()) {
+    const auto event = ParseLine(line);
+    Expect(event["kind"] != "session.checkpoint", "marker overtook the in-flight commit");
+    Expect(event["kind"] != "capture.gap", "checkpoint cancelled the in-flight commit");
+  }
+  gate.Release();
+  const auto before = observe.Wait("snapshot", 8000, [](const Json& e) { return IsSnapshot(e, "ok"); });
+  const auto marker = observe.Wait("session.checkpoint", 8000);
+  Expect(marker["id"] == id && marker["complete"] == true && marker["captureSequence"] > 0,
+    "ordered checkpoint carries its identity and capture ordinal");
+  Expect(marker["sequence"] > before["sequence"], "snapshot must precede its marker");
+  const std::string nextId = "12345678-1234-1234-1234-123456789abd";
+  fixture.Command("set-message " + fixture.S("AFTER-CHECKPOINT"));
+  observe.Send("checkpoint " + nextId);
+  const auto next = observe.Wait("session.checkpoint", 8000);
+  Expect(next["id"] == nextId && next["captureSequence"] > marker["captureSequence"], "monotonic capture markers");
+  observe.Send("pause"); observe.Wait("session.paused", 5000);
+  observe.Send("checkpoint " + id);
+  const auto paused = observe.Wait("session.checkpoint", 5000);
+  Expect(paused["complete"] == false && paused["captureSequence"] == 0, "paused collector cannot confirm coverage");
+  observe.Send("stop"); observe.Wait("session.stopped", 5000);
+  Expect(observe.Finish(5000, "observe-checkpoint") == 0, "checkpoint collector exit");
+  ValidateStream(observe.Proc().Lines(), "observe checkpoint");
+}
+
+void CaseObserveCheckpointOrigin() {
+  Fixture fixture;
+  fixture.Start();
+  fixture.RequireForeground('a');
+  const fs::path policy = ObservePolicy(fixture, "checkpoint-origin-policy",
+    {{"limits", {{"queryBudgetMs", 500}, {"workerTimeoutMs", 1500}}}});
+  Gate gate(Nonce() + "-checkpoint-origin");
+  Observe observe;
+  observe.Start(g_paths.TestHooks(), {L"observe", L"--policy", policy.wstring(), L"--seconds", L"60",
+    L"--sample-ms", L"300", L"--input-hooks", L"--test-commit-gate", gate.name});
+  gate.AwaitReady();
+  fixture.Command("input navigation");
+  Sleep(200);  // Hook dispatch continues while the collector commit is blocked.
+  FILETIME cutoffTime{}; GetSystemTimeAsFileTime(&cutoffTime);
+  const auto cutoff = memmy::protocol::FormatUtcTimestamp(
+    (static_cast<std::uint64_t>(cutoffTime.dwHighDateTime) << 32) | cutoffTime.dwLowDateTime);
+  Sleep(200);
+  fixture.Command("input navigation");
+  fixture.Command("freeze 5000");
+  Sleep(200);
+  gate.Release();
+  observe.Send("checkpoint 12345678-1234-1234-1234-123456789abc");
+  const auto gap = observe.Wait("capture.gap", 8000, [](const Json& e) { return e["code"] == "query_unavailable"; });
+  Expect(gap["from"].get<std::string>() <= cutoff,
+    "queued observation loss must retain capture time before the cutoff, not dequeue time after it");
+  const auto failed = observe.Wait("snapshot", 5000, [](const Json& e) { return IsSnapshot(e, "unavailable"); });
+  const auto kinds = failed["trigger"]["kinds"].get<std::vector<std::string>>();
+  Expect(std::find(kinds.begin(), kinds.end(), "input") != kinds.end(), "failure must cover queued real input");
+  observe.Send("stop"); observe.Wait("session.stopped", 5000);
+  Expect(observe.Finish(5000, "observe-checkpoint-origin") == 0, "checkpoint origin exit");
+  ValidateStream(observe.Proc().Lines(), "observe checkpoint origin");
+}
+
 void CaseObserveLifecycle() {
   Fixture fixture;
   fixture.Start();
@@ -1637,6 +1733,89 @@ void CaseTaskVideoLifecycle() {
   Expect(captured > 10, "actual window pixels were sampled");
 }
 
+void CaseTaskVideoIdle() {
+  Fixture fixture; fixture.Start(); fixture.RequireForeground('a');
+  Json rule = FullRule(fixture); rule["processStart"] = fixture.ProcessStart(); rule["hwnd"] = fixture.HwndA();
+  const auto policy = WritePolicy("task-idle", Json::array({rule}));
+  const auto directory = g_paths.artifacts / L"task-video"; fs::create_directory(directory);
+  WriteFileBytes(directory / L"recording-options.json", R"({"version":1,"idleTimeoutMs":10000})");
+  Observe recording;
+  recording.Proc().Start(g_paths.Recorder(), {L"record-task", L"--policy", policy.wstring(), L"--output-dir", directory.wstring(),
+    L"--seconds", L"60", L"--sample-ms", L"200", L"--input-hooks"});
+  if (!recording.TryWait("session.started", 12000)) {
+    recording.Proc().Save("task-start-failed");
+    if (recording.Proc().Stderr().find("task_video_start_failed") != std::string::npos) Skip("Windows Graphics Capture / hardware D3D device unavailable");
+    Fail("task recorder failed to acknowledge startup");
+  }
+  const auto waitInForeground = [&](DWORD milliseconds, const std::string& phase) {
+    for (DWORD elapsed = 0; elapsed < milliseconds; elapsed += 100) {
+      fixture.ExpectForeground('a', phase); Sleep(100);
+    }
+    fixture.ExpectForeground('a', phase);
+  };
+  fixture.Command("set-message idle-first");
+  // An all-blank recording can become idle without ever capturing the fixture.
+  // Establish actual capture before attributing a later failure to idle recovery.
+  bool capturedPrefix = false;
+  for (unsigned attempt = 0; attempt < 50 && !capturedPrefix; ++attempt) {
+    fixture.ExpectForeground('a', "before the first authorized idle-test frame");
+    const auto bytes = ReadFileBytes(directory / L"frames.jsonl");
+    const auto newline = bytes.find_last_of('\n');
+    if (newline != std::string::npos) {
+      for (const auto& line : SplitLines(bytes.substr(0, newline + 1))) {
+        if (line.empty()) continue;
+        const auto frame = ParseLine(line);
+        if (!frame.at("blank").get<bool>() && !frame.value("repeated", false)
+            && frame.at("window").at("hwnd") == fixture.HwndA()) { capturedPrefix = true; break; }
+      }
+    }
+    if (!capturedPrefix) {
+      // WGC may deliver its first static image after a newer blank display tick.
+      // Drive a fresh fixture image during startup, then leave it fully static
+      // for the idle assertions below; keep the fresh-frame requirement intact.
+      fixture.Command("set-message idle-first-" + std::to_string(attempt));
+      Sleep(100);
+    }
+  }
+  Expect(capturedPrefix, "idle test requires an actual authorized captured frame before waiting");
+  waitInForeground(16000, "during the initial idle wait");
+  const auto idle = ParseLine(ReadFileBytes(directory / L"idle-spans.json"));
+  Expect(idle.at("activeStartMs").is_number(), "static image automatically suspends encoding after 10 seconds");
+  Expect(fs::exists(directory / L"parts/000001.json"), "captured prefix is durably sealed during idle wait");
+  // Check the current tail too: the old test accepted a previously rotated
+  // prefix even when Finalize was stuck on an unsealed short second part.
+  for (const auto& entry : fs::directory_iterator(directory / L"parts")) {
+    if (entry.path().extension() == L".mp4") {
+      auto metadata = entry.path(); metadata.replace_extension(L".json");
+      Expect(fs::exists(metadata), "every captured part is durably sealed during idle wait");
+    }
+  }
+  const auto before = ReadFileBytes(directory / L"frames.jsonl"); waitInForeground(1000, "during idle file stability check");
+  Expect(before == ReadFileBytes(directory / L"frames.jsonl"), "no frames written during idle wait");
+  fixture.Command("set-message idle-image-changed"); waitInForeground(2200, "after the idle image changes");
+  const auto resumed = ParseLine(ReadFileBytes(directory / L"idle-spans.json"));
+  Expect(resumed.at("activeStartMs").is_null() && resumed.at("spans").size() == 1, "image change resumes capture automatically");
+  Expect(ReadFileBytes(directory / L"frames.jsonl").size() > before.size(), "changed frame immediately reaches the video index");
+  // Ending while idle must omit the final waiting period as well.
+  waitInForeground(12500, "during the final idle wait");
+  recording.Send("stop"); recording.Wait("session.stopped", 5000);
+  Expect(recording.Finish(5000, "task-idle-recording") == 0, "idle capture stops within bound");
+  Expect(RunToEnd(g_paths.Recorder(), {L"finalize-task", L"--output-dir", directory.wstring()}, "task-idle-finalize").exitCode == 0, "idle video remux");
+  const auto media = ParseLine(ReadFileBytes(directory / L"native-media.json"));
+  const auto source = media.at("durationMs").get<double>(), video = media.at("videoDurationMs").get<double>();
+  double skipped = 0;
+  for (const auto& span : media.at("idleSpans")) skipped += span.at("endMs").get<double>() - span.at("startMs").get<double>();
+  Expect(media.at("complete").get<bool>() && media.at("idleSpans").size() == 2, "complete video with two idle intervals");
+  Expect(skipped > 8500 && std::abs(source - skipped - video) < 2, "video duration omits waiting without changing source clock");
+  double lastSource = -1, lastVideo = -1;
+  for (const auto& line : SplitLines(ReadFileBytes(directory / L"frames.jsonl"))) {
+    if (line.empty()) continue;
+    const auto frame = ParseLine(line);
+    const auto time = frame.at("timeMs").get<double>(), presentation = frame.value("videoTimeMs", time);
+    Expect(time > lastSource && presentation > lastVideo, "source and presentation clocks remain strictly ordered");
+    lastSource = time; lastVideo = presentation;
+  }
+}
 void CaseTaskVideoStaticFrames() {
   Fixture fixture; fixture.Start(); fixture.RequireForeground('a');
   Json rule = FullRule(fixture); rule["processStart"] = fixture.ProcessStart(); rule["hwnd"] = fixture.HwndA();
@@ -1667,8 +1846,8 @@ void CaseTaskVideoStaticFrames() {
   recording.Send("resume"); recording.Wait("session.resumed", 5000); hold("resumed-static", false, 1500);
   fixture.RequireForeground('b'); hold("unauthorized", true, 800); fixture.ExpectForeground('b', "during unauthorized recording");
   const auto returnedAt = now(); fixture.RequireForeground('a'); hold("returned-static", false, 1500, returnedAt);
-  WriteFileBytes(policy, memmy::DumpJson({{"version", 1}, {"applications", Json::array()}})); hold("revoked", true, 800);
-  const auto restoredAt = now(); WriteFileBytes(policy, memmy::DumpJson(allowed)); hold("restored-static", false, 1500, restoredAt);
+  WriteLivePolicy(policy, memmy::DumpJson({{"version", 1}, {"applications", Json::array()}})); hold("revoked", true, 800);
+  const auto restoredAt = now(); WriteLivePolicy(policy, memmy::DumpJson(allowed)); hold("restored-static", false, 1500, restoredAt);
   recording.Send("stop"); recording.Wait("session.stopped", 5000);
   Expect(recording.Finish(5000, "task-static-recording") == 0, "static capture stopped within bound");
   Expect(RunToEnd(g_paths.Recorder(), {L"finalize-task", L"--output-dir", directory.wstring()}, "task-static-finalize").exitCode == 0, "static task remux");
@@ -1721,6 +1900,8 @@ const std::map<std::string, std::function<void()>>& Cases() {
       {"partial_baseline", CasePartialBaseline},
       {"timeout_reap", CaseTimeoutReap},
       {"observe_lifecycle", CaseObserveLifecycle},
+      {"observe_checkpoint", CaseObserveCheckpoint},
+      {"observe_checkpoint_origin", CaseObserveCheckpointOrigin},
       {"observe_unauthorized_foreground", CaseObserveUnauthorizedForeground},
       {"observe_policy_corrupt", CaseObservePolicyCorrupt},
       {"observe_policy_race", CaseObservePolicyRace},
@@ -1740,6 +1921,7 @@ const std::map<std::string, std::function<void()>>& Cases() {
       {"stop_hotkey", CaseStopHotkey},
       {"task_video_lifecycle", CaseTaskVideoLifecycle},
       {"task_video_static_frames", CaseTaskVideoStaticFrames},
+      {"task_video_idle", CaseTaskVideoIdle},
   };
   return cases;
 }
