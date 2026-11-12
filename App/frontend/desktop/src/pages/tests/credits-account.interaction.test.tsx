@@ -316,7 +316,7 @@ it.each([
   expect(host.textContent).toContain(`已使用 ${used} / 250.00`);
 });
 
-it("keeps the original account menu and shows spendable balance", async () => {
+it("keeps the original account menu and shows the account balance, not spendable", async () => {
   const { AppFrame } = await vi.importActual<typeof import("../app-frame.js")>("../app-frame.js");
   const client = fixture();
   function MenuHarness() {
@@ -332,13 +332,14 @@ it("keeps the original account menu and shows spendable balance", async () => {
   const trigger = host.querySelector<HTMLButtonElement>('[data-account-menu-trigger="true"]'); expect(trigger).not.toBeNull();
   await act(async () => trigger!.click());
   const menu = document.querySelector('[role="menu"]');
-  expect(menu?.textContent).toContain("免费版"); expect(menu?.textContent).toContain("1,214.56");
-  expect(menu?.textContent).not.toContain("1,234.56");
+  // Spendable drops to 0 under every in-flight hold; the menu label says "balance", so it shows balance.
+  expect(menu?.textContent).toContain("免费版"); expect(menu?.textContent).toContain("1,234.56");
+  expect(menu?.textContent).not.toContain("1,214.56");
   expect(menu?.textContent).not.toContain("套餐积分"); expect(menu?.textContent).not.toContain("平台奖励积分");
   let resolveRefresh!: (value: typeof summary) => void;
   client.summary.mockImplementationOnce(() => new Promise(resolve => { resolveRefresh = resolve; }));
   await click("刷新积分余额");
-  expect(menu?.textContent).toContain("1,214.56");
+  expect(menu?.textContent).toContain("1,234.56");
   expect(menu?.textContent).not.toContain("正在读取积分");
   expect(menu?.textContent).not.toContain("—");
   await act(async () => resolveRefresh({ ...summary, account: { balance: "83.27", held: "0.00", spendable: "83.27", version: 3 } }));

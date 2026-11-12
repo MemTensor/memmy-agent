@@ -348,7 +348,8 @@ export function AppFrame(props: AppFrameProps) {
   const creditDemo = useCreditDemo(creditAccountMenu && !creditAccount.live);
   const creditPool = creditAccountMenu && !creditAccount.live ? describeCreditPool(creditDemo.demo, creditDemo.now) : null;
   const creditQuota = creditAccount.live
-    ? { plan: creditAccount.summary?.plan.code.toLowerCase(), balance: creditAccount.summary?.account.spendable }
+    // The menu is labelled "balance"; spendable (balance minus in-flight holds) swings to 0 on every call.
+    ? { plan: creditAccount.summary?.plan.code.toLowerCase(), balance: creditAccount.summary?.account.balance }
     : creditPool ? { plan: creditPool.plan, balance: creditPool.totalRemaining } : null;
   const profileMeta = creditQuota?.plan
     ? (t(creditQuota.plan === "pro" ? "plan.pro.name" : "plan.free.name"))

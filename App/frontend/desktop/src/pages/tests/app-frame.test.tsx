@@ -479,6 +479,9 @@ describe("AppFrame", () => {
     expect(appFrameSource).not.toContain("triggerDeferredImprovementProgram");
     expect(appFrameSource).not.toContain("DeferredImprovementPending");
     expect(appFrameSource).toContain("function handleFirstSidebarInteraction()");
+    // The account menu is labelled "balance", so it must not show spendable, which drops to 0 under every in-flight hold.
+    expect(appFrameSource).toContain("balance: creditAccount.summary?.account.balance }");
+    expect(appFrameSource).not.toContain("balance: creditAccount.summary?.account.spendable");
     expect(appFrameSource).not.toContain("if (targetPath === state.navigation.currentPath)");
     // App frame tests.
     // Handles expect.
