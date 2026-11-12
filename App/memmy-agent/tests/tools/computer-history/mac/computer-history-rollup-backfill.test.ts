@@ -4,7 +4,6 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
 import { instantId } from "../../../../src/tools/computer-history/mac/rollup.js";
-import { isPersonalWeChatHistorySupported } from "../../../../src/tools/computer-history/platform.js";
 
 let root: string;
 const services: ComputerHistoryDemoService[] = [];
@@ -53,7 +52,10 @@ afterEach(async () => {
 });
 
 describe("repairing historical six-hour aggregation", () => {
-  it.skipIf(!isPersonalWeChatHistorySupported())("does not send WeChat evidence to the History model after its extra permission is off", async () => {
+  it("does not send WeChat evidence to the History model after its extra permission is off", async () => {
+    // Simulate Apple Silicon macOS so isPersonalWeChatHistorySupported() returns true on CI.
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+    vi.spyOn(process, 'arch', 'get').mockReturnValue('arm64');
     const id = `${instantId(new Date())}-10min-summary`;
     fs.writeFileSync(historyFile(id),
       '---\ntitle: WeChat\nsource_type: captured\nsummary_state: pending\nstatus: completed\napplications: ["com.tencent.xinWeChat"]\n---\n\n## Memory summary\n\nWeChat message: meeting at ten.\n');
