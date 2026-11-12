@@ -4710,6 +4710,8 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
 }
 
 .agent-model-error-notice {
+  display: flex;
+  flex-direction: column;
   max-width: min(100%, 32rem);
   padding: 20px;
   border: 1px solid color-mix(in srgb, var(--color-status-error) 22%, transparent);
@@ -4769,6 +4771,7 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
 
 .error-notice-detail__toggle {
   display: inline-flex;
+  align-self: flex-start;
   align-items: center;
   gap: 4px;
   margin: 12px 0 0 30px;
@@ -7121,6 +7124,7 @@ body.memmy-platform-windows .memory-drawer-backdrop__close {
 
 .memory-processing-failure__actions {
   display: flex;
+  flex-shrink: 0;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 14px;
