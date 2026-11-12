@@ -1,18 +1,83 @@
 ---
-title: 桌宠模式
-description: 桌宠是透明置顶的小窗入口，适合随手发任务、不打断当前工作。
+title: 使用桌宠
+description: 从屏幕角落发起任务、查看回复，需要时展开到完整工作台。
 icon: Cat
 ---
 
-## 交互
+桌宠是 Memmy 的小窗入口。点击它就能输入要求，也可以查看任务进度和未读回复。
 
-- 单击展开输入气泡，`Enter` 发送，支持录音转写。
-- 双击退出桌宠，打开完整工作台。
-- 左键拖动移动窗口；右键菜单可打开完整模式。
-- 运行中或有未读完成任务时显示数字徽标，点击展开 mini 任务列表（最多 6 个）。
+import idleScreen from "../../assets/pet-idle-full.jpg";
+import inputScreen from "../../assets/pet-input-full.jpg";
+import tasksScreen from "../../assets/pet-tasks-full.jpg";
+import answerScreen from "../../assets/pet-answer-full.jpg";
+import runningScreen from "../../assets/pet-running-full.jpg";
+import menuScreen from "../../assets/pet-menu-full.jpg";
+import preferencesScreen from "../../assets/settings-preferences-full.jpg";
 
-## 会话续接
+## 打开桌宠
 
-- 有运行中任务时续接同一 session；最近 5 分钟内完成的任务也会续接。
-- 点击「新会话」后，下次发送创建新 session。
-- 桌宠和完整模式共享 WebUI thread，切换后上下文不丢。
+点击系统菜单栏或托盘中的 Memmy 图标，选择「桌宠模式」。桌宠出现后，可以拖动它调整位置。
+
+## 发起或继续对话
+
+点击桌宠，在「想跟我说什么？」输入框中写下要求，点击发送箭头。收到回复后，可以在下方继续输入；内容较长时，点击「展开查看完整对话」。
+
+<div className="docs-pet-window">
+
+<ProductScreenSteps steps={[
+  { label: "输入要求", src: inputScreen, alt: "Memmy 桌宠完整独立窗口：文字输入框、语音按钮和发送箭头", caption: "点击桌宠展开输入框。示例文字尚未发送。" },
+  { label: "查看回复", src: answerScreen, alt: "Memmy 桌宠完整独立窗口：课程反馈示例回复与展开查看完整对话按钮", caption: "回复在桌宠上方，下方可继续提问。图中的任务与回复均为虚构示例。" }
+]} />
+
+</div>
+
+<details>
+<summary>使用语音输入</summary>
+
+配置语音识别模型并授予麦克风权限后，点击输入框中的麦克风「点击说话」。录音时可以暂停、继续；点击「结束并发送」后，Memmy 会先转写，再发送识别出的内容。
+
+</details>
+
+## 查看任务和未读回复
+
+桌宠旁的数字表示未读会话数。点击数字可打开最近任务列表，再点击任务查看对应回复。正在运行的任务另有顶部进度提示。
+
+任务处理过程中，气泡提供「新对话」和「停止」：想另起话题时点击「新对话」；要中止当前任务时点击「停止」。
+
+<div className="docs-pet-window">
+
+<ProductScreenSteps steps={[
+  { label: "进度和未读数", src: idleScreen, alt: "Memmy 桌宠完整独立窗口：顶部任务进度提示与未读数字", caption: "顶部提示正在进行的任务，数字角标提示未读会话。" },
+  { label: "选择任务", src: tasksScreen, alt: "Memmy 桌宠完整独立窗口：最近任务列表与完整模式入口", caption: "点击任务切换查看；列表中也可以返回完整模式。" },
+  { label: "新对话或停止", src: runningScreen, alt: "Memmy 桌宠完整独立窗口：正在处理的任务及新对话、停止按钮", caption: "两个按钮分别用于另起话题和中止当前任务。" }
+]} />
+
+</div>
+
+## 切换到完整工作台
+
+双击桌宠，或在右键菜单中点击「返回完整模式」。回复气泡里的「展开查看完整对话」也会打开工作台，继续查看对应任务。
+
+右键菜单的「关闭桌宠」会隐藏小窗，Memmy 仍在后台运行。需要时，可以从菜单栏或托盘图标再次选择「桌宠模式」。
+
+<details>
+<summary>查看桌宠右键菜单</summary>
+
+<div className="docs-pet-window">
+
+<ProductScreenshot src={menuScreen} alt="Memmy 桌宠完整独立窗口：返回完整模式和关闭桌宠的右键菜单" caption="右键点击桌宠后选择需要的操作。" />
+
+</div>
+
+</details>
+
+## 调整启动方式
+
+打开「设置 → 偏好 → 启动与窗口」。在「默认启动模式」选择桌宠模式；在「关闭主窗口时」选择关闭窗口后希望采取的行为，例如缩到桌宠模式。
+
+<details>
+<summary>查看设置位置</summary>
+
+<ProductScreenshot src={preferencesScreen} alt="Memmy 完整设置窗口：偏好页的默认启动模式和关闭主窗口时选项" caption="默认启动模式决定下次如何打开；关闭主窗口时的选项决定关窗后的行为。" />
+
+</details>

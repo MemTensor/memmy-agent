@@ -1,5 +1,7 @@
 {
-  "title": "概念",
+  "title": "了解 Memmy",
   "icon": "Boxes",
-  "pages": ["architecture", "end-to-end-flow", "features"]
+  "pages": [
+    "architecture"
+  ]
 }

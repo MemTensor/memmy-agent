@@ -13,6 +13,7 @@ on:
       - "scripts/internal/mac/**"
       - "scripts/internal/win/build-memmy-computer-use.sh"
       - "tests/ocu-dev-install.test.mjs"
+      - "tests/linux-ci-ubuntu-mirror.test.mjs"
       - "scripts/internal/win/build-nsis.sh"
   workflow_dispatch:
 
@@ -69,6 +70,9 @@ jobs:
       - name: Test Memmy macOS native source
         if: runner.os == 'macOS'
         run: swift test --package-path App/native-computer-use -c release
+      - name: Verify a signed Ubuntu mirror for native desktop checks
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: node scripts/internal/linux/ci-ubuntu-mirror.mjs
       - name: Prepare an isolated Linux desktop session
         if: runner.os == 'Linux'
         run: |
@@ -98,6 +102,7 @@ jobs:
           path: |
             ocu-native-result.json
             ocu-windows-fixtures.json
+            ${{ runner.temp }}/memmy-linux-mirror.*/
           if-no-files-found: warn
       - name: Record validation boundary
         if: always()

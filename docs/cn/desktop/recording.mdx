@@ -1,0 +1,54 @@
+---
+title: 录音与转写
+description: 录下讨论或上传已有音频，把转写整理成摘要、结论和待办。
+icon: Mic
+---
+
+import entryScreen from "../../assets/recording-entry-full.jpg";
+import listScreen from "../../assets/recording-list-full.jpg";
+import liveScreen from "../../assets/recording-live-full.jpg";
+import transcriptScreen from "../../assets/recording-transcript-full.jpg";
+import attachedScreen from "../../assets/recording-attached-full.png";
+
+把会议讨论或课程音频交给 Memmy，先查看转写，再整理成可以继续处理的材料。使用录音功能需要登录 Memmy 账号。
+
+## 打开录音
+
+1. 在左侧点击「录音」，右栏打开录音列表。同一行的「开始」可以直接开始录音。
+2. 在录音列表中查看已保存的录音，也可以「上传录音」或「开始录音」。
+
+<ProductScreenSteps steps={[
+  { label: "1. 从左侧打开", src: entryScreen, alt: "Memmy 完整窗口：左侧录音入口和开始按钮", caption: "「录音」在左侧「知识库」下面。点这一行打开录音列表；右侧的「开始」直接开始录音。图中的对话为示例。" },
+  { label: "2. 查看录音列表", src: listScreen, alt: "Memmy 完整窗口：右栏中的录音列表", caption: "列表里是已经保存的录音。右上角可以上传已有音频，或开始新的录音。" }
+]} />
+
+## 录下讨论，查看转写
+
+首次录音时，按系统提示允许使用麦克风。录音中可以「暂停」和「继续」；讨论结束后，点击「结束并转写」。已有音频上传后也会进入转写流程。
+
+转写完成后，在录音列表点击标题查看内容。检查发言人、姓名、数字和关键决定；有原音频时可回听核对。实时转写可能不完整，应以结束后的结果为准。
+
+<ProductScreenSteps steps={[
+  { label: "录音过程中", src: liveScreen, alt: "Memmy 完整窗口：录音中的实时文字、暂停和结束并转写", caption: "录音中可以「暂停」。讨论结束后点击「结束并转写」。画面中的文字会随识别结果更新。" },
+  { label: "查看完整转写", src: transcriptScreen, alt: "Memmy 完整窗口：按发言人展示的培训讨论转写", caption: "完成后查看带时间的转写内容。右上角的「添加到会话」和「总结」决定接下来怎么使用。" }
+]} />
+
+## 把转写用于任务
+
+| 点击什么 | 会发生什么 |
+| --- | --- |
+| **添加到会话** | 转写作为 TXT 附件放进当前任务的输入框；补充要求后发送。 |
+| **总结** | 新建任务，并填好总结请求和转写附件；你可以修改要求，再点击发送。 |
+
+<ProductScreenshot src={attachedScreen} alt="转写已添加到当前任务的输入框" caption="点击「添加到会话」后，先确认输入框出现转写附件，再说明希望得到什么。" />
+
+<details>
+<summary>转写失败怎么办？</summary>
+
+显示「转写失败，录音已保留」时，在该条录音旁点击「重试转写」。如果提示「没有录到有效音频，请稍微说久一点再发送」，说明没有识别到有效语音；录音仍留在列表中，可以说得久一点后再点「重试转写」。如果提示语音转写不可用，检查登录状态、网络和语音识别模型配置，再重试。
+
+</details>
+
+## 相关说明
+
+[对话与任务](/docs/desktop/workbench) · [使用与预览文件](/docs/desktop/files)

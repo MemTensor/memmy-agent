@@ -1338,7 +1338,7 @@ def _load_runtime() -> Dict[str, str]:
     return {
         "baseUrl": base_url,
         "token": token,
-        "userId": _clean_text(app.get("userId")) or _clean_text(memory.get("userId")) or _clean_text(plugin_config.get("userId")) or "local-user",
+        "userId": "__memmy_device_memory__",
         "workspaceHostId": _clean_text(plugin_config.get("workspaceHostId")),
     }
 
@@ -1449,7 +1449,7 @@ def _runtime_envelope(runtime: Dict[str, Any], session_key: str, project_id: Opt
     namespace = {
         "source": "hermes",
         "profileId": "default",
-        "userId": _clean_text(runtime.get("userId")) or "local-user",
+        "userId": "__memmy_device_memory__",
         "sessionKey": session_key,
     }
     if project_id:
@@ -1546,7 +1546,8 @@ def _read_hermes_source_turn(session_id: str, user_content: str) -> Optional[Dic
             + "FROM messages WHERE session_id = ? ORDER BY id ASC",
             (session_id,),
         ).fetchall()]
-        cwd_row = conn.execute("SELECT cwd FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        session_columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        cwd_row = conn.execute("SELECT cwd FROM sessions WHERE id = ?", (session_id,)).fetchone() if "cwd" in session_columns else None
         cwd = _clean_text(cwd_row["cwd"]) if cwd_row else ""
     finally:
         conn.close()

@@ -43,6 +43,8 @@ import {
   resolveComposerCommandDraft,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
+  queuedMediaToPendingAttachment,
+  uploadedMediaToPendingAttachment,
   thinkingPayloadForSend,
   toReadableAsrError,
   updateAgentComposerOverlayHeight,
@@ -91,6 +93,7 @@ describe("HomePage", () => {
     );
 
     expect(html).toContain("分配一个任务或提问任何问题...");
+    expect(html).toContain('class="thread-toolbar__button" aria-label="展开右栏"');
     expect(html).toContain("添加图片和文件");
     expect(html).toContain("语音输入");
     expect(html).toContain("发送");
@@ -331,14 +334,14 @@ describe("HomePage", () => {
     expect(source).toContain("const activeConversationTitle = state.agent.currentSessionKey");
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
-    expect(source).toContain("topBar={hasActiveConversation ? (");
+    expect(source).toContain("topBar={hasConversationShell ? (");
     expect(source).toContain("<AgentThreadToolbar");
     expect(source).toContain("title={activeConversationTitleDisplay}");
     expect(source).toContain("titleTrailing={activeImTitleDisplay ? <ImChannelTitleIcon");
     expect(source).not.toContain("selectedDraftProject?.name");
-    expect(source).toContain("topBarBorder={hasActiveConversation}");
-    expect(source).toContain("topBarInset={hasActiveConversation ? false : undefined}");
-    expect(source).toContain("windowsTitlebarSafe={hasActiveConversation}");
+    expect(source).toContain("topBarBorder={hasConversationShell}");
+    expect(source).toContain("topBarInset={hasConversationShell ? false : undefined}");
+    expect(source).toContain("windowsTitlebarSafe={hasConversationShell}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");
@@ -610,7 +613,9 @@ describe("HomePage", () => {
     expect(agentChatScopeKey(null, 3)).toBe("draft-3");
     expect(hasActiveAgentConversation("chat-1", 1)).toBe(true);
     expect(hasActiveAgentConversation("chat-1", 0)).toBe(false);
+    expect(hasActiveAgentConversation("chat-1", 0, true)).toBe(true);
     expect(hasActiveAgentConversation(null, 1)).toBe(false);
+    expect(hasActiveAgentConversation(null, 0, true)).toBe(false);
   });
 
   it("keeps composer drafts isolated by chat scope", () => {
@@ -654,7 +659,7 @@ describe("HomePage", () => {
     const styles = readFileSync(stylesSourcePath, "utf8");
     const conversationColumnRule = styles.match(/\.agent-workspace-layout > \.agent-conversation-panel\s*\{[^}]*\}/)?.[0] ?? "";
 
-    expect(source).toContain('className="home-empty-column"');
+    expect(source).toContain('className="home-empty-column home-empty-input"');
     expect(styles).toMatch(/\.home-empty-column\s*{[^}]*width:\s*clamp\(min\(100%,\s*40rem\),\s*62cqw,\s*var\(--home-column-max,\s*50rem\)\);/s);
     expect(styles).toMatch(/\.home-empty-column\s*{[^}]*max-width:\s*min\(\s*100%,\s*max\(calc\(100cqw - 2 \* var\(--agent-column-min-gap,\s*80px\)\),\s*min\(100%,\s*20rem\)\)\s*\);/s);
     expect(styles).toMatch(/\.agent-conversation-content\s*{[^}]*--agent-conversation-track:\s*min\(832px,\s*100cqw\);[^}]*width:\s*calc\(var\(--agent-conversation-track\) - 2 \* var\(--agent-conversation-inset\)\);/s);
@@ -671,9 +676,10 @@ describe("HomePage", () => {
     expect(styles).toContain("container-name: agent-workspace;");
     expect(source).toContain("const threadPanel = useAgentThreadPanel({");
     expect(source).toContain("className={`agent-workspace-layout ${threadPanelMotionClass}`}");
-    expect(source).toContain('style={{ "--thread-panel-offset": `${threadPanel.offset}px` } as CSSProperties}');
-    expect(source).toContain("topBarStyle={hasActiveConversation ? { right: threadPanel.offset } : undefined}");
-    expect(source).toContain("sidePanel={sidePanelMounted ? (\n        <AgentThreadPanel");
+    expect(source).toContain('style={{ "--thread-panel-offset": `${features.sidePanelWidth ?? threadPanel.offset}px` } as CSSProperties}');
+    expect(source).toContain("topBarStyle={{ right: features.sidePanelWidth ?? threadPanel.offset }}");
+    expect(source).toContain("topBarClassName={`thread-topbar ${threadPanelMotionClass}`}");
+    expect(source).toContain("sidePanel={features.sidePanel ?? (sidePanelMounted ? (\n        <AgentThreadPanel");
     expect(source).toContain("<AgentThreadPanel");
     expect(styles).toMatch(/body\.memmy-thread-panel-fullscreen \.app-frame-main\s*\{[^}]*isolation:\s*auto;/s);
     expect(styles).toMatch(/body\.memmy-thread-panel-fullscreen \.app-frame-content-topbar\.thread-topbar\s*\{[^}]*display:\s*none;/s);
@@ -681,6 +687,7 @@ describe("HomePage", () => {
     expect(source).not.toContain("<SlidersHorizontal");
     expect(conversationColumnRule).toContain("margin-right: var(--thread-panel-offset, 0px);");
     expect(conversationColumnRule).toContain("transition: margin-right 200ms cubic-bezier(0, 0, 0.2, 1);");
+    expect(styles).toMatch(/\.agent-workspace-layout > \.home-empty-screen\s*\{[^}]*margin-right: var\(--thread-panel-offset, 0px\);/s);
     expect(styles).toMatch(/\.thread-panel-motion--closing[^{]*\{[^}]*transition-duration:\s*150ms;[^}]*cubic-bezier\(0\.4, 0, 1, 1\)/s);
     expect(styles).toMatch(/\.thread-panel\s*\{[^}]*position:\s*absolute;[^}]*z-index:\s*20;/s);
   });
@@ -688,7 +695,7 @@ describe("HomePage", () => {
   it("lets expanded conversation text use the full width above the action footer", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const composerStart = source.indexOf('className="agent-conversation-composer"');
-    const textareaStart = source.indexOf("<textarea", composerStart);
+    const textareaStart = source.indexOf("<ComposerHighlightedTextarea", composerStart);
     const toolbarStart = source.indexOf('className="agent-composer-toolbar"', textareaStart);
     const textareaSource = source.slice(textareaStart, toolbarStart);
 
@@ -1168,12 +1175,13 @@ describe("HomePage", () => {
     expect(html).toContain('data-testid="agent-file-icon-docx"');
     expect(html).toContain('data-testid="agent-file-icon-xlsx"');
     expect(html).toContain('data-testid="agent-file-icon-pptx"');
-    expect(html).toContain('data-testid="agent-file-icon-file"');
     expect(html).toContain("agent-attachment-card__file-tile--pdf");
     expect(html).toContain("agent-attachment-card__file-tile--docx");
     expect(html).toContain("agent-attachment-card__file-tile--xlsx");
     expect(html).toContain("agent-attachment-card__file-tile--pptx");
-    expect(html).toContain("agent-attachment-card__file-tile--file");
+    expect(html).toContain('data-neutral-file-kind="text"');
+    expect(html).toContain('data-neutral-file-kind="data"');
+    expect(html).toContain('data-neutral-file-kind="sheet"');
     expect(html).toContain('aria-label="PDF file"');
     expect(html).toContain('aria-label="Word document"');
     expect(html).toContain('aria-label="Spreadsheet file"');
@@ -1357,6 +1365,63 @@ describe("HomePage", () => {
     expect(clearComposer).toHaveBeenCalledTimes(1);
     expect(onNewChatMessageSent).toHaveBeenCalledWith("chat-new");
     expect(track).toHaveBeenCalledWith({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
+  });
+
+  it("resends an edited queue attachment by its saved path without reuploading", async () => {
+    const image = queuedMediaToPendingAttachment({
+      kind: "image", name: "screenshot.png", url: "http://agent.local/media/screenshot", path: "/media/websocket/webui/screenshot.png",
+    }, "queued-id", 0);
+    const file = queuedMediaToPendingAttachment({
+      kind: "file", name: "notes.pdf", path: "/media/websocket/webui/notes.pdf",
+    }, "queued-id", 1);
+    const uploadAgentMedia = vi.fn(async () => []);
+    const submitMessage = vi.fn(async () => ({ status: "queued" as const }));
+    expect(await submitAgentComposerMessage({
+      chatId: "chat-1",
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(), submitMessage },
+      content: "改后的说明",
+      pendingAttachments: [image, file],
+      uploadAgentMedia,
+      dispatch: vi.fn(),
+      track: vi.fn(),
+      clearComposer: vi.fn(),
+    })).toBe(true);
+    expect(uploadAgentMedia).not.toHaveBeenCalled();
+    expect(submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      media: [
+        expect.objectContaining({ path: "/media/websocket/webui/screenshot.png", kind: "image" }),
+        expect.objectContaining({ path: "/media/websocket/webui/notes.pdf", kind: "file" }),
+      ],
+    }), 1);
+  });
+
+  it("sends a stored recording transcript by path without uploading a cache copy", async () => {
+    const transcript = uploadedMediaToPendingAttachment({
+      kind: "file", name: "录音转写-2026-11-03T02-00-00-000Z.txt",
+      path: "/workspace/recordings/录音转写-2026-11-03T02-00-00-000Z.txt",
+      url: "/api/media/ws/transcript", mime: "text/plain", bytes: 24,
+    });
+    const uploadAgentMedia = vi.fn(async () => []);
+    const submitMessage = vi.fn(async () => ({ status: "accepted" as const }));
+
+    expect(await submitAgentComposerMessage({
+      chatId: "chat-1",
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(), submitMessage },
+      content: "请看录音转写",
+      pendingAttachments: [transcript],
+      uploadAgentMedia,
+      dispatch: vi.fn(),
+      track: vi.fn(),
+      clearComposer: vi.fn(),
+    })).toBe(true);
+
+    expect(uploadAgentMedia).not.toHaveBeenCalled();
+    expect(submitMessage).toHaveBeenCalledWith(expect.objectContaining({
+      media: [expect.objectContaining({
+        path: "/workspace/recordings/录音转写-2026-11-03T02-00-00-000Z.txt",
+        name: "录音转写-2026-11-03T02-00-00-000Z.txt",
+      })],
+    }), 1);
   });
 
   it("keeps a new project target on the optimistic task action", async () => {
@@ -1590,22 +1655,25 @@ describe("HomePage", () => {
     });
   });
 
-  it("anchors composer popovers above the queue and keeps Goal next to the composer", () => {
+  it("keeps the queue above pending cards and Goal next to the composer", () => {
     const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
     const flowStart = source.indexOf('<div className="agent-composer-flow">');
     const slashStart = source.indexOf("{slashMenuOpen && (", flowStart);
     const stackStart = source.indexOf('<div className="agent-composer-stack">', slashStart);
-    const queueStart = source.indexOf("<AgentQueuedMessageList", stackStart);
+    const queueStart = source.indexOf("<AgentQueuedMessageList", flowStart);
+    const pluginCardsStart = source.indexOf('className="conversation-feature-cards agent-confirmation-dock"', flowStart);
     const goalStart = source.indexOf("<AgentGoalBar", stackStart);
     const shellStart = source.indexOf('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"', stackStart);
 
     expect(flowStart).toBeGreaterThan(0);
     expect(slashStart).toBeGreaterThan(flowStart);
     expect(stackStart).toBeGreaterThan(slashStart);
-    expect(queueStart).toBeGreaterThan(stackStart);
+    expect(queueStart).toBeGreaterThan(flowStart);
+    expect(pluginCardsStart).toBeGreaterThan(queueStart);
+    expect(stackStart).toBeGreaterThan(pluginCardsStart);
     expect(goalStart).toBeGreaterThan(queueStart);
     expect(shellStart).toBeGreaterThan(goalStart);
-    expect(source).toContain('ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full"');
+    expect(source).toContain('ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full"');
     expect(source).toContain('ref={composerOverlayRef} className="agent-conversation-composer"');
     expect(source).toContain("updateAgentComposerOverlayHeight(panel, composer, measuredHeight)");
     expect(source).toContain('if (typeof ResizeObserver !== "undefined") return;');

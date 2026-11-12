@@ -832,8 +832,9 @@ export class GoalRuntime {
     return this.workReservations.has(sessionKey);
   }
 
-  ownsWorkReservation(sessionKey: string, turnId: string): boolean {
-    return this.workReservations.get(sessionKey)?.turnId === turnId;
+  ownsWorkReservation(sessionKey: string, turnId: string, kind?: GoalWorkReservation["kind"]): boolean {
+    const reservation = this.workReservations.get(sessionKey);
+    return reservation?.turnId === turnId && (kind === undefined || reservation.kind === kind);
   }
 
   releaseWork(sessionKey: string, turnId: string): void {
@@ -1154,6 +1155,26 @@ export class GoalRuntime {
       inbox[index] = updated;
       session.metadata[GOAL_TURN_INBOX_KEY] = inbox;
       return { value: updated };
+    });
+  }
+
+  async reorderInboxEntries(
+    sessionKey: string,
+    orderedIds: readonly string[],
+    queuedAtById: ReadonlyMap<string, string>,
+  ): Promise<void> {
+    await this.mutate(sessionKey, (session) => {
+      const inbox = parseInbox(session.metadata[GOAL_TURN_INBOX_KEY]);
+      const entries = new Map(inbox.filter((entry) => entry.turnId === null && orderedIds.includes(String(entry.metadata.client_request_id)))
+        .map((entry) => [String(entry.metadata.client_request_id), entry]));
+      let next = 0;
+      session.metadata[GOAL_TURN_INBOX_KEY] = inbox.map((entry) => {
+        if (entry.turnId !== null || !entries.has(String(entry.metadata.client_request_id))) return entry;
+        const id = orderedIds[next++]!;
+        const selected = entries.get(id)!;
+        return { ...selected, metadata: { ...selected.metadata, queued_at: queuedAtById.get(id)! } };
+      });
+      return { value: undefined };
     });
   }
 

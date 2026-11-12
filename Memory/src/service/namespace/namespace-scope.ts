@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "./memory-owner.js";
 import type { MemoryRow, RuntimeNamespace, SessionOpenRequest } from "../../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../../types.js";
 import type { RawTurnRecord, SessionRecord } from "../../storage/repositories.js";
@@ -15,7 +16,7 @@ export function normalizeNamespace(namespace?: RuntimeNamespace): RuntimeNamespa
     workspaceId: namespace?.workspaceId,
     workspacePath: namespace?.workspacePath,
     sessionKey: namespace?.sessionKey,
-    userId: namespace?.userId ?? "local-user",
+    userId: DEVICE_MEMORY_OWNER,
     tenantId: namespace?.tenantId
   };
 }
@@ -41,11 +42,11 @@ export function resolveV2WorkspaceIdentityForOpenRequest(
 }
 
 export function namespaceForSession(session: SessionRecord): RuntimeNamespace {
-  return { source: session.source, profileId: session.profileId, profileLabel: session.profileLabel, projectId: session.projectId, workspaceId: session.workspaceId, workspacePath: session.workspacePath, sessionKey: session.hostSessionKey, userId: session.userId };
+  return { source: session.source, profileId: session.profileId, profileLabel: session.profileLabel, projectId: session.projectId, workspaceId: session.workspaceId, workspacePath: session.workspacePath, sessionKey: session.hostSessionKey, userId: DEVICE_MEMORY_OWNER };
 }
 
 export function namespaceForMemory(memory: MemoryRow): RuntimeNamespace {
-  return { source: memory.agentId ?? DEFAULT_NAMESPACE_SOURCE, profileId: profileIdFromMemory(memory) ?? "default", projectId: projectIdFromMemory(memory), workspaceId: memory.appId, userId: memory.userId };
+  return { source: memory.agentId ?? DEFAULT_NAMESPACE_SOURCE, profileId: profileIdFromMemory(memory) ?? "default", projectId: projectIdFromMemory(memory), workspaceId: memory.appId, userId: DEVICE_MEMORY_OWNER };
 }
 
 export function projectIdFromMemory(memory: MemoryRow): string | undefined {
@@ -65,5 +66,5 @@ export function profileIdFromMemory(memory: MemoryRow): string | undefined {
 }
 
 export function namespaceForRawTurn(rawTurn: RawTurnRecord): RuntimeNamespace {
-  return { source: DEFAULT_NAMESPACE_SOURCE, profileId: "default", sessionKey: rawTurn.sessionId, userId: rawTurn.userId };
+  return { source: DEFAULT_NAMESPACE_SOURCE, profileId: "default", sessionKey: rawTurn.sessionId, userId: DEVICE_MEMORY_OWNER };
 }

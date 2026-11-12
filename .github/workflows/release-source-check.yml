@@ -1,0 +1,122 @@
+name: Release source inclusion
+
+on:
+  push:
+    branches:
+      - "release/**"
+      - "v[0-9]*"
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: Release branch to check; blank checks all release/vX.Y.Z branches
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    if: ${{ github.repository == 'MemTensor/memmy-agent' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.pairs.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: pairs
+        name: Freeze remote release and source pairs
+        shell: node {0}
+        env:
+          CHECK_EVENT_NAME: ${{ github.event_name }}
+          CHECK_REF_NAME: ${{ github.ref_name }}
+          CHECK_EVENT_SHA: ${{ github.sha }}
+          CHECK_RELEASE_BRANCH: ${{ inputs.release_branch }}
+        run: |
+          const { execFileSync } = require('node:child_process');
+          const fs = require('node:fs');
+          const { pathToFileURL } = require('node:url');
+          const path = require('node:path');
+          (async () => {
+            const { selectReleaseSourcePairs } = await import(pathToFileURL(path.resolve('scripts/check-release-source.mjs')).href);
+            const rows = execFileSync('git', ['-c', 'protocol.ext.allow=never', 'ls-remote', '--refs', 'origin', 'refs/heads/release/v*', 'refs/heads/v*'], { encoding: 'utf8', timeout: 30000 });
+            const heads = new Map(rows.trim().split(/\r?\n/).filter(Boolean).map(row => {
+              const [sha, ref] = row.split(/\s+/); return [ref.replace(/^refs\/heads\//, ''), sha];
+            }));
+            const include = selectReleaseSourcePairs(heads, { eventName: process.env.CHECK_EVENT_NAME,
+              refName: process.env.CHECK_REF_NAME, eventSha: process.env.CHECK_EVENT_SHA,
+              releaseBranch: process.env.CHECK_RELEASE_BRANCH || undefined });
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'matrix=' + JSON.stringify({ include }) + '\n');
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '### Pinned release/source pairs\n\n```json\n' + JSON.stringify(include, null, 2) + '\n```\n');
+          })().catch(error => { console.error(error.message); process.exitCode = 1; });
+  inclusion:
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
+    name: Source included in ${{ matrix.releaseBranch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: controller
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.candidateSha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test source guard behavior
+        run: node --test controller/tests/check-release-source.node.mjs
+      - name: Require the current source in the pinned release candidate
+        env:
+          CHECK_RELEASE_BRANCH: ${{ matrix.releaseBranch }}
+          CHECK_SOURCE_BRANCH: ${{ matrix.sourceBranch }}
+          CHECK_SOURCE_SHA: ${{ matrix.sourceSha }}
+          CHECK_CANDIDATE_SHA: ${{ matrix.candidateSha }}
+        run: |
+          node controller/scripts/check-release-source.mjs --cwd candidate --remote origin \
+            --release-branch "$CHECK_RELEASE_BRANCH" --source-branch "$CHECK_SOURCE_BRANCH" \
+            --source-sha "$CHECK_SOURCE_SHA" --candidate-sha "$CHECK_CANDIDATE_SHA" \
+            > "$RUNNER_TEMP/release-source-check.json"
+      - name: Record exact source-check evidence
+        if: ${{ always() }}
+        shell: node {0}
+        run: |
+          const fs = require('node:fs'), path = require('node:path');
+          const report = path.join(process.env.RUNNER_TEMP, 'release-source-check.json');
+          if (fs.existsSync(report)) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            '### Release source inclusion\n\n```json\n' + fs.readFileSync(report, 'utf8') + '\n```\n');
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: release-source-${{ matrix.sourceBranch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-source-check.json
+          if-no-files-found: warn
+          retention-days: 14
+  decision:
+    name: Release source inclusion
+    if: ${{ always() && github.repository == 'MemTensor/memmy-agent' }}
+    needs: [inventory, inclusion]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every source check to succeed
+        env:
+          INVENTORY_RESULT: ${{ needs.inventory.result }}
+          INCLUSION_RESULT: ${{ needs.inclusion.result }}
+        run: test "$INVENTORY_RESULT" = success && test "$INCLUSION_RESULT" = success

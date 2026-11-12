@@ -1,11 +1,13 @@
 import os from "node:os";
 import path from "node:path";
+import { stat } from "node:fs/promises";
 import { OutboundMessage } from "../../runtime-messages/events.js";
 import { getWorkspacePath } from "../../../config/paths.js";
 import { stripThink } from "../../../utils/helpers.js";
 import { isPathInside } from "./path-utils.js";
 import { RequestContext, RequestContextStore } from "./context.js";
 import { Tool } from "./base.js";
+import { publishedFilesFromPluginResult } from "../artifact-delivery-continuation.js";
 
 export type MessageSendCallback = (message: OutboundMessage) => Promise<void> | void;
 
@@ -32,6 +34,7 @@ export class MessageTool extends Tool {
   sentInTurn = false;
   private turnMedia: string[] = [];
   private recordChannelDelivery = false;
+  private pendingPluginFiles = false;
 
   constructor({
     suppress = false,
@@ -76,12 +79,10 @@ export class MessageTool extends Tool {
     return (
       "Proactively send a message to a user/channel, optionally with file attachments. " +
       "Use this for reminders, cross-channel delivery, or explicit proactive sends. " +
-      "Do not use this for the normal reply in the current chat: answer naturally instead. " +
-      "When a file is the task's final deliverable, attach it to the current conversation " +
-      "through the message tool's media parameter by default. " +
-      "When generate_image creates images in the current chat, use the message tool " +
-      "with the artifact paths in the media parameter to deliver the images to the user. " +
-      "For proactive attachment delivery, use the 'media' parameter with file paths. " +
+      "Do not use this for a text-only normal reply in the current chat: answer naturally instead. " +
+      "Use the media parameter to attach existing files when sending them. " +
+      "When generate_image creates images in the current chat, attach the generated artifact paths in media. " +
+      "Do not include local file paths in cross-channel delivery text. " +
       "Do NOT use read_file to send files - that only reads content for your own analysis."
     );
   }
@@ -135,6 +136,21 @@ export class MessageTool extends Tool {
   startTurn(): void {
     this.sentInTurn = false;
     this.turnMedia = [];
+    this.pendingPluginFiles = false;
+  }
+
+  markPendingPluginFiles(): void {
+    this.pendingPluginFiles = true;
+  }
+
+  hasPendingPluginFiles(): boolean {
+    return this.pendingPluginFiles;
+  }
+
+  observePluginToolResult(toolName: string, result: unknown): void {
+    if (toolName.startsWith("mcp_plugins_") && publishedFilesFromPluginResult(result).length) {
+      this.markPendingPluginFiles();
+    }
   }
 
   turnDeliveredMediaPaths(): string[] {
@@ -217,12 +233,27 @@ export class MessageTool extends Tool {
     if (!this.sendCallback) return "Error: Message sending not configured";
 
     let media = params.media ?? [];
+    if (sameTarget && this.pendingPluginFiles && media.length === 0) {
+      return "Error: Plugin files were generated in this turn, but this message has no media attachments. "
+        + "If you are delivering files, include the selected existing file paths in media in this same message call. "
+        + "If no file should be delivered, answer normally without calling message.";
+    }
     if (media.length) {
       try {
         media = this.resolveMedia(media);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         return `Error: media path is not allowed: ${reason}`;
+      }
+    }
+    if (sameTarget && this.pendingPluginFiles) {
+      for (const item of media) {
+        if (isUrl(item)) continue;
+        try {
+          if (!(await stat(item)).isFile()) return `Error: media path is not a file: ${item}`;
+        } catch {
+          return `Error: media file does not exist: ${item}`;
+        }
       }
     }
 
@@ -243,7 +274,10 @@ export class MessageTool extends Tool {
       await this.sendCallback(message);
       if (sameTarget) {
         this.sentInTurn = true;
-        if (media.length) this.turnMedia.push(...media.map((item) => (isUrl(item) ? item : path.resolve(item))));
+        if (media.length) {
+          this.turnMedia.push(...media.map((item) => (isUrl(item) ? item : path.resolve(item))));
+          this.pendingPluginFiles = false;
+        }
       }
       const mediaInfo = media.length ? ` with ${media.length} attachments` : "";
       const buttonCount = buttons?.reduce((sum, row) => sum + row.length, 0) ?? 0;

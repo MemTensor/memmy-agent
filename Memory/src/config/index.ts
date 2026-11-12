@@ -118,6 +118,8 @@ export interface AgentAccessConfig {
 export interface AlgorithmConfig {
   enableMemoryAdd: boolean;
   enableMemorySearch: boolean;
+  /** Controls agent-facing User Memory recall; capture and management remain available. */
+  enableUserMemoryRecall: boolean;
   enableQueryRewrite: boolean;
   capture: {
     maxTextChars: number;
@@ -239,6 +241,13 @@ export interface AlgorithmConfig {
   session: {
     followUpMode: "merge_follow_ups" | "episode_per_turn";
     mergeMaxGapMs: number;
+    // Test-period switch for the per-turn judgment (turn.judge.v1): one model call
+    // after each turn judges the task relation, feedback, L1 and User Memory. Off
+    // keeps the start-of-turn relation call and the capture-only decision.
+    turnJudge: boolean;
+    // Keep the full stored input of a judged turn (for checking what the model
+    // saw). Off: after a successful judgment only the small fields stay.
+    turnJudgeKeepInput: boolean;
   };
   retrieval: {
     tier1TopK: number;
@@ -377,6 +386,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   algorithm: {
     enableMemoryAdd: true,
     enableMemorySearch: true,
+    enableUserMemoryRecall: false,
     enableQueryRewrite: false,
     capture: {
       maxTextChars: 4_000,
@@ -497,7 +507,9 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     },
     session: {
       followUpMode: "merge_follow_ups",
-      mergeMaxGapMs: 2 * 60 * 60 * 1000
+      mergeMaxGapMs: 2 * 60 * 60 * 1000,
+      turnJudge: true,
+      turnJudgeKeepInput: false
     },
     retrieval: {
       tier1TopK: 3,
@@ -636,6 +648,7 @@ function configFromEnv(): Record<string, unknown> {
     algorithm: compactRecord({
       enableMemoryAdd: booleanEnv("MEMMY_ENABLE_MEMORY_ADD"),
       enableMemorySearch: booleanEnv("MEMMY_ENABLE_MEMORY_SEARCH"),
+      enableUserMemoryRecall: booleanEnv("MEMMY_ENABLE_USER_MEMORY_RECALL"),
       enableQueryRewrite: booleanEnv("MEMMY_ENABLE_QUERY_REWRITE"),
       retrieval: compactRecord({
         readOnlyInjectionProfile:
@@ -1152,6 +1165,7 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
   return {
     enableMemoryAdd: booleanValue(input.enableMemoryAdd, DEFAULT_MEMMY_CONFIG.algorithm.enableMemoryAdd),
     enableMemorySearch: booleanValue(input.enableMemorySearch, DEFAULT_MEMMY_CONFIG.algorithm.enableMemorySearch),
+    enableUserMemoryRecall: booleanValue(input.enableUserMemoryRecall, DEFAULT_MEMMY_CONFIG.algorithm.enableUserMemoryRecall),
     enableQueryRewrite: booleanValue(input.enableQueryRewrite, DEFAULT_MEMMY_CONFIG.algorithm.enableQueryRewrite),
     capture: {
       maxTextChars: numberValue(capture.maxTextChars, DEFAULT_MEMMY_CONFIG.algorithm.capture.maxTextChars),
@@ -1302,7 +1316,9 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
     },
     session: {
       followUpMode: "merge_follow_ups",
-      mergeMaxGapMs: numberValue(session.mergeMaxGapMs, DEFAULT_MEMMY_CONFIG.algorithm.session.mergeMaxGapMs)
+      mergeMaxGapMs: numberValue(session.mergeMaxGapMs, DEFAULT_MEMMY_CONFIG.algorithm.session.mergeMaxGapMs),
+      turnJudge: booleanValue(session.turnJudge, DEFAULT_MEMMY_CONFIG.algorithm.session.turnJudge),
+      turnJudgeKeepInput: booleanValue(session.turnJudgeKeepInput, DEFAULT_MEMMY_CONFIG.algorithm.session.turnJudgeKeepInput)
     },
     retrieval: {
       tier1TopK: numberValue(retrieval.tier1TopK, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.tier1TopK),

@@ -59,6 +59,22 @@ export type AgentGoalControlResult = {
   warning?: "turn_cancel_failed";
 };
 
+export type AgentTaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
+export type AgentTaskPlanStatus = "active" | "completed" | "blocked";
+
+export type AgentTaskPlanState = {
+  plan_id: string | null;
+  title: string;
+  status: AgentTaskPlanStatus | null;
+  items: Array<{
+    id: string;
+    content: string;
+    status: AgentTaskPlanItemStatus;
+  }>;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
 export type ComputerHistorySourceType = "captured" | "rollup" | "imported" | "demo_fixture";
 
 export type ComputerHistoryReplayPlan = {
@@ -148,6 +164,23 @@ const AgentGoalStateSchema = z.object({
   created_at: z.string().nullable(),
   updated_at: z.string().nullable()
 }).strict();
+
+const AgentTaskPlanStateSchema = z.object({
+  plan_id: z.string().nullable(),
+  title: z.string(),
+  status: z.enum(["active", "completed", "blocked"]).nullable(),
+  items: z.array(z.object({
+    id: z.string(),
+    content: z.string(),
+    status: z.enum(["pending", "in_progress", "completed", "blocked"])
+  }).strict()),
+  created_at: z.string().nullable(),
+  updated_at: z.string().nullable()
+}).strict();
+
+export function isAgentTaskPlanState(value: unknown): value is AgentTaskPlanState {
+  return AgentTaskPlanStateSchema.safeParse(value).success;
+}
 
 export function isAgentGoalStatus(value: unknown): value is AgentGoalStatus {
   return value === "active"
@@ -345,6 +378,28 @@ const WorkspaceEnvironmentDiffSchema = z.object({
   unavailable_reason: z.string().nullable()
 });
 
+const WorkspaceFileEntrySchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  kind: z.union([z.literal("directory"), z.literal("file")]),
+  size: z.number().int().nonnegative().nullable(),
+  modifiedAt: z.string().nullable()
+});
+
+const WorkspaceFilesListingSchema = z.object({
+  root: z.object({
+    kind: z.union([z.literal("project"), z.literal("task")]),
+    label: z.string()
+  }),
+  path: z.string(),
+  entries: z.array(WorkspaceFileEntrySchema),
+  truncated: z.boolean()
+});
+
+const WorkspaceFileActionResponseSchema = z.object({
+  ok: z.literal(true)
+});
+
 const ProjectMutationResponseSchema = z.object({
   project: ProjectSchema,
   snapshot: SessionSnapshotSchema
@@ -395,6 +450,7 @@ const WebuiThreadSchema = z.object({
   sessionKey: z.string(),
   last_turn_id: z.string().min(1).optional(),
   last_turn_closed: z.boolean().optional(),
+  last_turn_interrupted: z.boolean().optional(),
   last_turn_goal_id: z.string().uuid().optional(),
   last_turn_goal_outcome: z.union([
     z.literal("active"),
@@ -440,9 +496,12 @@ const ResolvedArtifactSchema = z.object({
   ok: z.literal(true),
   path: z.string(),
   name: z.string(),
-  kind: z.union([z.literal("image"), z.literal("video"), z.literal("file"), z.literal("directory")]),
-  media_url: z.string().optional()
+  kind: z.union([z.literal("image"), z.literal("video"), z.literal("audio"), z.literal("file"), z.literal("directory")]),
+  media_url: z.string().optional(),
+  relative_path: z.string().optional()
 });
+
+const ResolvedRecordingSchema = z.object({ media_url: z.string() });
 
 const RevealArtifactResponseSchema = z.object({
   ok: z.literal(true),
@@ -491,9 +550,30 @@ const UploadedAgentFileSchema = z.object({
   bytes: z.number()
 });
 
-const UploadedAgentMediaSchema = z.discriminatedUnion("kind", [
+const UploadedAgentAudioMimeSchema = z.union([
+  z.literal("audio/aac"),
+  z.literal("audio/flac"),
+  z.literal("audio/mp4"),
+  z.literal("audio/mpeg"),
+  z.literal("audio/ogg"),
+  z.literal("audio/opus"),
+  z.literal("audio/wav"),
+  z.literal("audio/webm")
+]);
+
+const UploadedAgentAudioSchema = z.object({
+  path: z.string(),
+  url: z.string(),
+  name: z.string(),
+  kind: z.literal("audio"),
+  mime: UploadedAgentAudioMimeSchema,
+  bytes: z.number()
+});
+
+export const UploadedAgentMediaSchema = z.discriminatedUnion("kind", [
   UploadedAgentImageSchema,
-  UploadedAgentFileSchema
+  UploadedAgentFileSchema,
+  UploadedAgentAudioSchema
 ]);
 
 const UploadedAgentMediaResponseSchema = z.object({
@@ -510,6 +590,9 @@ export type WorkspaceEnvironmentFile = z.infer<typeof WorkspaceEnvironmentFileSc
 export type WorkspaceEnvironmentState = z.infer<typeof WorkspaceEnvironmentStateSchema>;
 export type WorkspaceEnvironmentDiff = z.infer<typeof WorkspaceEnvironmentDiffSchema>;
 export type WorkspaceEnvironmentScope = { kind: "session" | "project"; key: string };
+export type WorkspaceFilesScope = WorkspaceEnvironmentScope;
+export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntrySchema>;
+export type WorkspaceFilesListing = z.infer<typeof WorkspaceFilesListingSchema>;
 export type MemmyAgentProject = z.infer<typeof ProjectSchema>;
 export type MemmyAgentSessionSnapshot = z.infer<typeof SessionSnapshotSchema>;
 export type MemmyAgentSidebarState = z.infer<typeof SidebarStateSchema>;
@@ -578,11 +661,13 @@ export type UploadAgentMediaInput = {
   name: string;
   kind: UploadedAgentMedia["kind"];
   mime: UploadedAgentMedia["mime"];
+  /** `recordings` keeps the file in the default workspace instead of the media cache. */
+  target?: "recordings";
 };
 
-export type MemmyAgentMediaInput = UploadedAgentMedia;
+export type MemmyAgentMediaInput = UploadedAgentMedia | (MemmyAgentMediaAttachment & { path: string; kind: MemmyAgentMediaKind; name: string });
 
-export type MemmyAgentMediaKind = "image" | "video" | "file";
+export type MemmyAgentMediaKind = "image" | "video" | "audio" | "file";
 export type MemmyAgentUiLanguage = "zh-CN" | "en-US";
 
 export type MemmyAgentMediaAttachment = {
@@ -617,6 +702,7 @@ export type WebuiQueuedMessage = {
   queue_surface?: "chat_composer" | null;
   turn_admission?: "steer";
   turn_id?: string;
+  user_event_on_consume?: boolean;
 };
 
 export type MemmyAgentMessageSubmissionResult = {
@@ -648,6 +734,17 @@ export type MemmyAgentSendMessageInput = {
   modelPreset?: string | null;
   thinkingEnabled?: boolean;
   thinkingLevel?: string | null;
+  interruptPendingTurnId?: string;
+};
+
+export type MemmyAgentQuestionResponseInput = {
+  requestId: string;
+  cancelled?: boolean;
+  answers: Array<{
+    questionId: string;
+    selectedOptionIds: string[];
+    otherText?: string;
+  }>;
 };
 
 export interface MemmyAgentNewChatResult {
@@ -670,6 +767,8 @@ export type MemmyAgentModelError = {
 
 export type MemmyAgentWsEvent = {
   event: string;
+  phase?: string;
+  tool_name?: string;
   replayed?: boolean;
   connection_generation?: number;
   chat_id?: string;
@@ -693,6 +792,7 @@ export type MemmyAgentWsEvent = {
   agent_ui?: unknown;
   edits?: unknown;
   goal_state?: AgentGoalState;
+  task_plan_state?: AgentTaskPlanState;
   goal_id?: string;
   goal_outcome?: AgentGoalStatus;
   compaction_id?: string;
@@ -793,6 +893,10 @@ export interface MemmyAgentClient {
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
   readWorkspaceEnvironment(scope: WorkspaceEnvironmentScope): Promise<WorkspaceEnvironmentState>;
   readWorkspaceEnvironmentDiff(scope: WorkspaceEnvironmentScope, path: string): Promise<WorkspaceEnvironmentDiff>;
+  listWorkspaceFiles(scope: WorkspaceFilesScope | string, path?: string): Promise<WorkspaceFilesListing>;
+  readWorkspaceFile(scope: WorkspaceFilesScope | string, path: string, signal?: AbortSignal): Promise<Blob>;
+  openWorkspaceFile(scope: WorkspaceFilesScope | string, path: string): Promise<void>;
+  revealWorkspaceFile(scope: WorkspaceFilesScope | string, path: string): Promise<void>;
   switchWorkspaceEnvironmentBranch(
     scope: WorkspaceEnvironmentScope,
     branch: string,
@@ -834,9 +938,11 @@ export interface MemmyAgentClient {
   renameSession(sessionKey: string, title: string): Promise<MemmyAgentSessionSummary>;
   deleteSession(sessionKey: string): Promise<boolean>;
   resolveArtifact(path: string, sessionKey: string): Promise<ResolvedAgentArtifact>;
+  resolveRecording(path: string): Promise<string>;
   revealArtifact(path: string, sessionKey: string): Promise<void>;
   openArtifact(path: string, sessionKey: string): Promise<void>;
   uploadAgentMedia(attachments: UploadAgentMediaInput[]): Promise<UploadedAgentMedia[]>;
+  deleteRecordingFiles(paths: string[]): Promise<void>;
   uploadAgentImages(images: UploadAgentImageInput[]): Promise<UploadedAgentImage[]>;
   connectWebSocket(onEvent?: (event: MemmyAgentWsEvent) => void): Promise<MemmyAgentWebSocketConnection>;
   sessionKeyToChatId(sessionKey: string): string;
@@ -859,12 +965,19 @@ export interface MemmyAgentWebSocketConnection {
     input: MemmyAgentSendMessageInput,
     expectedGeneration: number
   ): Promise<MemmyAgentMessageSubmissionResult>;
+  respondToQuestion(
+    chatId: string,
+    response: MemmyAgentQuestionResponseInput,
+    expectedGeneration: number,
+    timeoutMs?: number
+  ): Promise<void>;
   removeQueuedMessage(
     chatId: string,
     clientRequestId: string,
     expectedGeneration: number,
     timeoutMs?: number
   ): Promise<MemmyAgentQueueRemovalResult>;
+  reorderQueuedMessages(chatId: string, orderedIds: string[], expectedRevision: number, expectedGeneration: number): void;
   steerQueuedMessage(
     chatId: string,
     clientRequestId: string,
@@ -893,6 +1006,7 @@ export interface MemmyAgentWebSocketConnection {
   requestRunStatusSnapshot(chatId: string, expectedGeneration: number, timeoutMs?: number): Promise<MemmyAgentRunStatusSnapshot>;
   getRunStartedAt(chatId: string): number | null;
   getGoalState(chatId: string): AgentGoalState | undefined;
+  getTaskPlanState(chatId: string): AgentTaskPlanState | undefined;
   close(): void;
 }
 
@@ -941,13 +1055,13 @@ export interface WebSocketLike {
 export class MemmyAgentRequestError extends Error {
   readonly status: number;
   readonly code: string | null;
-  readonly data?: { sidebarState: MemmyAgentSidebarState };
+  readonly data?: { sidebarState?: MemmyAgentSidebarState; worktreePath?: string };
 
   constructor(
     message: string,
     status: number,
     code: string | null = null,
-    data?: { sidebarState: MemmyAgentSidebarState }
+    data?: { sidebarState?: MemmyAgentSidebarState; worktreePath?: string }
   ) {
     super(message);
     this.name = "MemmyAgentRequestError";
@@ -1317,6 +1431,38 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     );
   }
 
+  async listWorkspaceFiles(scope: WorkspaceFilesScope | string, path = ""): Promise<WorkspaceFilesListing> {
+    const normalizedScope = typeof scope === "string" ? { kind: "session" as const, key: scope } : scope;
+    const collection = normalizedScope.kind === "session" ? "sessions" : "projects";
+    const query = path ? `?${new URLSearchParams({ path }).toString()}` : "";
+    return this.request(
+      `/api/${collection}/${encodeURIComponent(normalizedScope.key)}/workspace/files${query}`,
+      WorkspaceFilesListingSchema
+    );
+  }
+
+  async readWorkspaceFile(
+    scope: WorkspaceFilesScope | string,
+    path: string,
+    signal?: AbortSignal
+  ): Promise<Blob> {
+    const normalizedScope = typeof scope === "string" ? { kind: "session" as const, key: scope } : scope;
+    const collection = normalizedScope.kind === "session" ? "sessions" : "projects";
+    const query = new URLSearchParams({ path });
+    return this.requestBlob(
+      `/api/${collection}/${encodeURIComponent(normalizedScope.key)}/workspace/file?${query.toString()}`,
+      signal
+    );
+  }
+
+  async openWorkspaceFile(scope: WorkspaceFilesScope | string, path: string): Promise<void> {
+    await this.workspaceFileAction(scope, path, "open");
+  }
+
+  async revealWorkspaceFile(scope: WorkspaceFilesScope | string, path: string): Promise<void> {
+    await this.workspaceFileAction(scope, path, "reveal");
+  }
+
   async switchWorkspaceEnvironmentBranch(
     scope: WorkspaceEnvironmentScope,
     branch: string,
@@ -1458,6 +1604,14 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     });
   }
 
+  async resolveRecording(path: string): Promise<string> {
+    const result = await this.request("/api/webui/recordings/resolve", ResolvedRecordingSchema, {
+      method: "POST",
+      body: { path }
+    });
+    return new URL(result.media_url, this.baseUrl).toString();
+  }
+
   async revealArtifact(path: string, sessionKey: string): Promise<void> {
     await this.request("/api/webui/artifacts/reveal", RevealArtifactResponseSchema, {
       method: "POST",
@@ -1481,6 +1635,7 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
       const form = new FormData();
       for (const attachment of attachments) {
         form.append("files", blobWithUploadMime(attachment.blob, attachment.mime), uploadFilenameForMedia(attachment.name, attachment.mime, attachment.kind));
+        form.append("targets", attachment.target ?? "");
       }
       return form;
     };
@@ -1508,6 +1663,13 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
 
     const parsed = UploadedAgentMediaResponseSchema.parse(await response.json());
     return normalizeGatewayMediaUrls(parsed.attachments ?? parsed.images ?? [], this.baseUrl);
+  }
+
+  async deleteRecordingFiles(paths: string[]): Promise<void> {
+    await this.request("/api/webui/recordings/delete", z.object({ ok: z.literal(true) }), {
+      method: "POST",
+      body: { paths }
+    });
   }
 
   async uploadAgentImages(images: UploadAgentImageInput[]): Promise<UploadedAgentImage[]> {
@@ -1590,6 +1752,41 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
       if (timeout) clearTimeout(timeout);
     }
   }
+
+  private async requestBlob(path: string, signal?: AbortSignal): Promise<Blob> {
+    const send = (boot: MemmyAgentBootstrap) => this.fetchFn(new URL(path, this.baseUrl), {
+      headers: { Authorization: `Bearer ${boot.token}` },
+      ...(signal ? { signal } : {})
+    });
+    let boot = await this.bootstrap();
+    let response = await send(boot);
+    if (response.status === 401) {
+      this.boot = null;
+      this.bootExpiresAtMs = 0;
+      boot = await this.bootstrap({ force: true });
+      response = await send(boot);
+    }
+    if (!response.ok) {
+      const parsed = await parseRequestError(response);
+      throw new MemmyAgentRequestError(parsed.message, response.status, parsed.code, parsed.data);
+    }
+    return response.blob();
+  }
+
+  private async workspaceFileAction(
+    scope: WorkspaceFilesScope | string,
+    path: string,
+    action: "open" | "reveal"
+  ): Promise<void> {
+    const normalizedScope = typeof scope === "string" ? { kind: "session" as const, key: scope } : scope;
+    const collection = normalizedScope.kind === "session" ? "sessions" : "projects";
+    const query = new URLSearchParams({ path });
+    await this.request(
+      `/api/${collection}/${encodeURIComponent(normalizedScope.key)}/workspace/file/${action}?${query.toString()}`,
+      WorkspaceFileActionResponseSchema,
+      { method: "POST" }
+    );
+  }
 }
 
 const WS_OPEN = 1;
@@ -1602,6 +1799,7 @@ const GOAL_CONTROL_TIMEOUT_MS = 15_000;
 const GOAL_CONTROL_HYDRATE_TIMEOUT_MS = 5_000;
 const QUEUE_REMOVE_TIMEOUT_MS = 15_000;
 const QUEUE_STEER_TIMEOUT_MS = 15_000;
+const QUESTION_RESPONSE_TIMEOUT_MS = 15_000;
 
 interface MemmyAgentWebSocketSessionInput {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
@@ -1633,6 +1831,13 @@ interface PendingGoalControl {
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout> | null;
   calibrating: boolean;
+}
+
+interface PendingQuestionResponse {
+  chatId: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface PendingMessageAttempt {
@@ -1686,6 +1891,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private readonly pendingQueueRemovals = new Map<string, PendingQueueRemoval>();
   private readonly pendingQueueSteers = new Map<string, PendingQueueSteer>();
   private readonly pendingGoalControls = new Map<string, PendingGoalControl>();
+  private readonly pendingQuestionResponses = new Map<string, PendingQuestionResponse>();
   private connectionGeneration = 0;
   private transportOpenGeneration: number | null = null;
   private readyGeneration: number | null = null;
@@ -1704,6 +1910,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private readonly runLifecycleHandlers = new Set<(chatId: string, event: MemmyAgentRunLifecycleEvent) => void>();
   private readonly runStartedAtByChatId = new Map<string, number>();
   private readonly goalStateByChatId = new Map<string, AgentGoalState>();
+  private readonly taskPlanStateByChatId = new Map<string, AgentTaskPlanState>();
 
   constructor(private readonly input: MemmyAgentWebSocketSessionInput) {}
 
@@ -1828,6 +2035,50 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     ).firstPromise;
   }
 
+  respondToQuestion(
+    chatId: string,
+    response: MemmyAgentQuestionResponseInput,
+    expectedGeneration: number,
+    timeoutMs = QUESTION_RESPONSE_TIMEOUT_MS
+  ): Promise<void> {
+    this.assertReadyGeneration(expectedGeneration);
+    const key = messageAttemptKey(chatId, response.requestId);
+    if (this.pendingQuestionResponses.has(key)) {
+      return Promise.reject(new Error("Question response is already pending"));
+    }
+    return new Promise<void>((resolve, reject) => {
+      const pending: PendingQuestionResponse = {
+        chatId,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          if (this.pendingQuestionResponses.get(key) === pending) {
+            this.pendingQuestionResponses.delete(key);
+          }
+          reject(new Error("Question response timed out"));
+        }, timeoutMs)
+      };
+      this.pendingQuestionResponses.set(key, pending);
+      try {
+        this.sendOrdinaryFrame({
+          type: "agent_question_response",
+          chat_id: chatId,
+          request_id: response.requestId,
+          ...(response.cancelled === true ? { cancelled: true } : {}),
+          answers: response.answers.map((answer) => ({
+            question_id: answer.questionId,
+            selected_option_ids: answer.selectedOptionIds,
+            ...(answer.otherText ? { other_text: answer.otherText } : {})
+          }))
+        }, expectedGeneration);
+      } catch (error) {
+        this.pendingQuestionResponses.delete(key);
+        clearTimeout(pending.timer);
+        reject(asError(error, "Unable to answer question"));
+      }
+    });
+  }
+
   removeQueuedMessage(
     chatId: string,
     clientRequestId: string,
@@ -1863,6 +2114,21 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
         reject(asError(error, "Unable to remove queued message"));
       }
     });
+  }
+
+  reorderQueuedMessages(
+    chatId: string,
+    orderedIds: string[],
+    expectedRevision: number,
+    expectedGeneration: number,
+  ): void {
+    this.sendOrdinaryFrame({
+      type: "queue_reorder",
+      chat_id: chatId,
+      request_id: crypto.randomUUID(),
+      ordered_ids: orderedIds,
+      expected_revision: expectedRevision,
+    }, expectedGeneration);
   }
 
   steerQueuedMessage(
@@ -2162,6 +2428,10 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return this.goalStateByChatId.get(chatId);
   }
 
+  getTaskPlanState(chatId: string): AgentTaskPlanState | undefined {
+    return this.taskPlanStateByChatId.get(chatId);
+  }
+
   requestRunStatusSnapshot(
     chatId: string,
     expectedGeneration: number,
@@ -2208,6 +2478,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rejectPendingQueueRemovals(new Error("queue removal cancelled"));
     this.rejectPendingQueueSteers(new Error("queue steer cancelled"));
     this.rejectPendingGoalControls(new Error("Goal control cancelled"));
+    this.rejectPendingQuestionResponses(new Error("Question response cancelled"));
     this.rejectInitialReady(new Error("Agent gateway connection cancelled"));
     this.clearReadyHandshakeTimer();
     if (this.reconnectTimer) {
@@ -2309,6 +2580,8 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       this.resolvePendingQueueRemoval(normalized);
     } else if (normalized.event === "queue_steer_result") {
       this.resolvePendingQueueSteer(normalized);
+    } else if (normalized.event === "agent_question_response_result") {
+      this.resolvePendingQuestionResponse(normalized);
     }
 
     if (normalized.event === "attached") {
@@ -2373,6 +2646,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
 
     this.recordRunStatus(chatId, normalized);
     this.recordGoalState(chatId, normalized);
+    this.recordTaskPlanState(chatId, normalized);
     this.resolveRunStatusSnapshot(chatId, normalized, generation);
     this.dispatchChat(chatId, normalized);
   }
@@ -2400,6 +2674,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rejectPendingRunStatusSnapshots(new Error("run status snapshot failed because websocket closed"), generation);
     this.rejectPendingQueueRemovals(new Error("queue removal failed because websocket closed"));
     this.rejectPendingQueueSteers(new Error("queue steer failed because websocket closed"));
+    this.rejectPendingQuestionResponses(new Error("question response failed because websocket closed"));
     if (this.intentionallyClosed) {
       return;
     }
@@ -2502,6 +2777,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       ...(input.modelPreset !== undefined ? { model_preset: input.modelPreset } : {}),
       ...(input.thinkingEnabled !== undefined ? { thinking_enabled: input.thinkingEnabled } : {}),
       ...(input.thinkingLevel ? { thinking_level: input.thinkingLevel } : {}),
+      ...(input.interruptPendingTurnId ? { interrupt_pending_turn_id: input.interruptPendingTurnId } : {}),
       ...(input.media?.length ? { media_paths: input.media.map((item) => item.path) } : {})
     }, expectedGeneration);
     this.knownChats.add(input.chatId);
@@ -2847,6 +3123,13 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     }
   }
 
+  private recordTaskPlanState(chatId: string, event: MemmyAgentWsEvent): void {
+    if (event.event !== "task_plan_state") return;
+    const parsed = AgentTaskPlanStateSchema.safeParse(event.task_plan_state);
+    if (!parsed.success) return;
+    this.taskPlanStateByChatId.set(chatId, parsed.data);
+  }
+
   private resolvePendingGoalControl(event: MemmyAgentWsEvent): void {
     const chatId = event.chat_id;
     const requestId = typeof event.request_id === "string" ? event.request_id : null;
@@ -2867,6 +3150,27 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     pending.reject(new MemmyAgentGoalControlError(
       typeof event.error === "string" ? event.error : "invalid_transition"
     ));
+  }
+
+  private resolvePendingQuestionResponse(event: MemmyAgentWsEvent): void {
+    const chatId = event.chat_id;
+    const requestId = typeof event.request_id === "string" ? event.request_id : null;
+    if (!chatId || !requestId) return;
+    const key = messageAttemptKey(chatId, requestId);
+    const pending = this.pendingQuestionResponses.get(key);
+    if (!pending) return;
+    this.pendingQuestionResponses.delete(key);
+    clearTimeout(pending.timer);
+    if (event.ok === true) pending.resolve();
+    else pending.reject(new Error(typeof event.error === "string" ? event.error : "Unable to answer question"));
+  }
+
+  private rejectPendingQuestionResponses(error: Error): void {
+    for (const [key, pending] of this.pendingQuestionResponses) {
+      this.pendingQuestionResponses.delete(key);
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
   }
 
   private beginGoalControlCalibration(key: string, pending: PendingGoalControl): void {
@@ -3156,7 +3460,7 @@ const AGENT_UPLOAD_UNSAFE_FILENAME_CHARS = new RegExp(
 function uploadFilenameForMedia(name: string, mime: UploadedAgentMedia["mime"], kind: UploadedAgentMedia["kind"]): string {
   const fallback = kind === "image" ? "image" : "attachment";
   const base = uploadFilenameBase(name, fallback);
-  if (kind === "file") {
+  if (kind === "file" || kind === "audio") {
     return base;
   }
 
@@ -3188,7 +3492,7 @@ async function errorMessage(response: Response): Promise<string> {
 async function parseRequestError(response: Response): Promise<{
   message: string;
   code: string | null;
-  data?: { sidebarState: MemmyAgentSidebarState };
+  data?: { sidebarState?: MemmyAgentSidebarState; worktreePath?: string };
 }> {
   try {
     const body = await response.json();
@@ -3205,6 +3509,9 @@ async function parseRequestError(response: Response): Promise<{
         if (sidebarState.success) {
           return { message, code, data: { sidebarState: sidebarState.data } };
         }
+      }
+      if (code === "workspace_branch_in_use" && typeof record.worktreePath === "string") {
+        return { message, code, data: { worktreePath: record.worktreePath } };
       }
       return { message, code };
     }

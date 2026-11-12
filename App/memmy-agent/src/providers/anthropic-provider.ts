@@ -31,6 +31,7 @@ export class AnthropicProvider extends LLMProvider {
   extraHeaders: Record<string, string> | null = null;
   extraBody: Record<string, any> | null = null;
   client: any = null;
+  private readonly inheritProviderDefaults: boolean;
 
   constructor(
     init:
@@ -42,6 +43,7 @@ export class AnthropicProvider extends LLMProvider {
           spec?: any;
           extraHeaders?: Record<string, string> | null;
           extraBody?: Record<string, any> | null;
+          inheritProviderDefaults?: boolean;
         }
       | null = null,
     apiBase: string | null = null,
@@ -53,9 +55,11 @@ export class AnthropicProvider extends LLMProvider {
       this.spec = init.spec ?? null;
       this.extraHeaders = init.extraHeaders ?? null;
       this.extraBody = init.extraBody ?? null;
+      this.inheritProviderDefaults = init.inheritProviderDefaults !== false;
     } else {
       super(init, apiBase);
       this.model = defaultModel;
+      this.inheritProviderDefaults = true;
     }
     this.defaultModel = this.model ?? "claude-sonnet-4-20250514";
     this.client = this.buildClient();
@@ -63,11 +67,14 @@ export class AnthropicProvider extends LLMProvider {
 
   buildClient(): any {
     const clientOptions: Record<string, any> = {
-      apiKey: this.apiKey ?? process.env.ANTHROPIC_API_KEY ?? null,
+      apiKey: this.inheritProviderDefaults ? this.apiKey ?? process.env.ANTHROPIC_API_KEY ?? null : this.apiKey,
+      ...(!this.inheritProviderDefaults ? { authToken: null } : {}),
       maxRetries: 0,
     };
     if (this.apiBase) clientOptions.baseURL = this.apiBase;
-    if (this.extraHeaders) clientOptions.defaultHeaders = this.extraHeaders;
+    if (!this.inheritProviderDefaults && !this.apiKey) {
+      clientOptions.defaultHeaders = { "x-api-key": null, authorization: null, ...(this.extraHeaders ?? {}) };
+    } else if (this.extraHeaders) clientOptions.defaultHeaders = this.extraHeaders;
     return new Anthropic(clientOptions);
   }
 
@@ -465,7 +472,7 @@ export class AnthropicProvider extends LLMProvider {
     signal?: AbortSignal | null;
   }): Promise<LLMResponse> {
     const apiKey = this.apiKey ?? process.env.ANTHROPIC_API_KEY ?? null;
-    if (!apiKey) return new LLMResponse({ content: "Error calling LLM: missing Anthropic API key", finishReason: "error" });
+    if (this.inheritProviderDefaults && !apiKey) return new LLMResponse({ content: "Error calling LLM: missing Anthropic API key", finishReason: "error" });
     const kwargs = this.buildKwargs(args);
     try {
       if (args.signal?.aborted) throw createProviderAbortError();
@@ -487,7 +494,7 @@ export class AnthropicProvider extends LLMProvider {
     onToolCallDelta?: (delta: Record<string, any>) => Promise<void> | void;
   }): Promise<LLMResponse> {
     const apiKey = this.apiKey ?? process.env.ANTHROPIC_API_KEY ?? null;
-    if (!apiKey) return new LLMResponse({ content: "Error calling LLM: missing Anthropic API key", finishReason: "error" });
+    if (this.inheritProviderDefaults && !apiKey) return new LLMResponse({ content: "Error calling LLM: missing Anthropic API key", finishReason: "error" });
     const kwargs = { ...this.buildKwargs(args), stream: true };
     const onContentDelta = args.onContentDelta;
     const onThinkingDelta = args.onThinkingDelta;

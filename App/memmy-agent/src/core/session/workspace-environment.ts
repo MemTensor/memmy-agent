@@ -139,8 +139,9 @@ function ownershipBlocked(stderr: string): boolean {
 
 export class WorkspaceEnvironmentError extends Error {
   constructor(
-    readonly code: "workspace_environment_stale" | "workspace_branch_invalid" | "workspace_branch_switch_failed",
+    readonly code: "workspace_environment_stale" | "workspace_branch_invalid" | "workspace_branch_switch_failed" | "workspace_branch_in_use",
     readonly status: number,
+    readonly worktreePath?: string,
   ) {
     super(code);
   }
@@ -490,6 +491,19 @@ export async function readWorkspaceEnvironment(context: WorkspaceEnvironmentCont
   };
 }
 
+async function worktreeUsingBranch(root: string, branch: string): Promise<string | null> {
+  const result = await runGit(root, ["worktree", "list", "--porcelain"]);
+  if (!result.ok) return null;
+  let worktreePath: string | null = null;
+  for (const line of result.stdout.split(/\r?\n/u)) {
+    if (line.startsWith("worktree ")) worktreePath = line.slice("worktree ".length);
+    else if (line === `branch refs/heads/${branch}` && worktreePath && path.resolve(worktreePath) !== path.resolve(root)) {
+      return worktreePath;
+    } else if (!line) worktreePath = null;
+  }
+  return null;
+}
+
 export async function switchWorkspaceBranch(
   context: WorkspaceEnvironmentContext,
   environment: Awaited<ReturnType<typeof readWorkspaceEnvironment>>,
@@ -503,8 +517,14 @@ export async function switchWorkspaceBranch(
     throw new WorkspaceEnvironmentError("workspace_branch_invalid", 400);
   }
   if (environment.snapshot.repository.branch === branch) return environment;
+  const worktreePath = await worktreeUsingBranch(environment.snapshot.repository.root, branch);
+  if (worktreePath) throw new WorkspaceEnvironmentError("workspace_branch_in_use", 409, worktreePath);
   const switched = await runGit(environment.snapshot.repository.root, ["switch", "--no-guess", branch]);
-  if (!switched.ok) throw new WorkspaceEnvironmentError("workspace_branch_switch_failed", 409);
+  if (!switched.ok) {
+    const occupiedPath = await worktreeUsingBranch(environment.snapshot.repository.root, branch);
+    if (occupiedPath) throw new WorkspaceEnvironmentError("workspace_branch_in_use", 409, occupiedPath);
+    throw new WorkspaceEnvironmentError("workspace_branch_switch_failed", 409);
+  }
   return readWorkspaceEnvironment(context);
 }
 

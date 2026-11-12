@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { get_encoding } from "tiktoken";
 import { DEFAULT_MEMMY_CONFIG, type LlmClient } from "../../../src/index.js";
 import type { LlmCompletionOptions, LlmMessage } from "../../../src/model/types.js";
@@ -7,7 +7,7 @@ import { observationMemoryState } from "../../../src/service/observation-memory-
 import { createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 const namespace = { source: "memmy", profileId: "default", userId: "validation-test-user" };
 const evidence = {
   action: "upsert" as const, source: "computer_history", namespace,
@@ -124,6 +124,7 @@ describe("observation validation correction", () => {
   });
 
   it("leaves two invalid responses to the existing bounded worker retry without writing invalid items", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const { llm, calls } = model(ungrounded);
     const { service, db } = createTestService({ llm });
     const row = service.syncExternalEvidence(evidence);
@@ -133,7 +134,13 @@ describe("observation validation correction", () => {
       state: "summary_pending", errorCode: "processing_failed", attemptCount: 1,
       errorMessage: "observation extraction item is not grounded in its source (quote_grounding) [item 1]"
     });
-    await runWorkerRounds(service, 2);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const retry = db.db.prepare(`SELECT available_at FROM evolution_jobs
+        WHERE target_memory_id = ? AND status = 'failed'`).get(row.id) as { available_at: string };
+      expect(Date.parse(retry.available_at)).toBeGreaterThan(Date.now());
+      vi.setSystemTime(Date.parse(retry.available_at));
+      await service.runWorkerOnce(1);
+    }
     expect(calls).toHaveLength(6);
     expect(service.memoryProcessingStatus([row.id]).items[0]).toMatchObject({ state: "failed", attemptCount: 3 });
     const repos = new Repositories(db.db);

@@ -17,6 +17,23 @@ afterEach(async () => {
 });
 
 describe("http memmy-agent admin client", () => {
+  it("reads authenticated task activity with a timeout and rejects malformed status", async () => {
+    const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/webui/bootstrap") return Response.json({ token: "boot-token" });
+      expect(path).toBe("/api/runtime/task-activity");
+      expect(init?.headers).toMatchObject({ authorization: "Bearer boot-token" });
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return Response.json({ busy: true });
+    });
+    const client = createHttpMemmyAgentAdminClient({ fetchFn: fetchFn as typeof fetch });
+    expect(await client.hasActiveTasks!()).toBe(true);
+    fetchFn.mockResolvedValueOnce(Response.json({ busy: false }));
+    expect(await client.hasActiveTasks!()).toBe(false);
+    fetchFn.mockResolvedValueOnce(Response.json({}));
+    await expect(client.hasActiveTasks!()).rejects.toThrow();
+  });
+
   it("applies one hard timeout to MCP reload bootstrap and admin requests", async () => {
     const signals: Array<AbortSignal | null | undefined> = [];
     const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -54,6 +71,14 @@ describe("http memmy-agent admin client", () => {
         });
         return;
       }
+      if (request.url === "/api/sessions/websocket%3Achat-1/environment") {
+        sendJson(response, { snapshot: { cwd: "/Users/test/workspace" } });
+        return;
+      }
+      if (request.url === "/api/sessions/websocket%3A127c0697-c224-47e0-a032-684c7c1c2abb/environment") {
+        sendJson(response, { snapshot: { cwd: "/Users/test/standalone" } });
+        return;
+      }
       if (request.url === "/api/channels/feishu/configure") {
         sendJson(response, { status: "connected", running: true });
         return;
@@ -78,6 +103,8 @@ describe("http memmy-agent admin client", () => {
     await expect(client.getChannelConnections()).resolves.toEqual({
       connections: [{ id: "channel-wechat-local", provider: "wechat", runtimeChannel: "weixin", status: "connected", running: true, displayName: "WeChat" }]
     });
+    await expect(client.getSessionWorkspace?.("websocket:chat-1")).resolves.toBe("/Users/test/workspace");
+    await expect(client.getSessionWorkspace?.("127c0697-c224-47e0-a032-684c7c1c2abb")).resolves.toBe("/Users/test/standalone");
     await expect(client.configureChannel("feishu")).resolves.toEqual({ status: "connected", running: true });
     await expect(client.startWeixinLogin()).resolves.toMatchObject({ status: "pendingQr", pollToken: "poll-1" });
     await expect(client.reloadMcpConfig()).resolves.toEqual({
@@ -88,6 +115,8 @@ describe("http memmy-agent admin client", () => {
     expect(requests).toEqual([
       { method: "GET", path: "/webui/bootstrap", authorization: undefined },
       { method: "GET", path: "/api/channels/status", authorization: "Bearer boot-token" },
+      { method: "GET", path: "/api/sessions/websocket%3Achat-1/environment", authorization: "Bearer boot-token" },
+      { method: "GET", path: "/api/sessions/websocket%3A127c0697-c224-47e0-a032-684c7c1c2abb/environment", authorization: "Bearer boot-token" },
       { method: "POST", path: "/api/channels/feishu/configure", authorization: "Bearer boot-token" },
       { method: "POST", path: "/api/channels/weixin/login/start", authorization: "Bearer boot-token" },
       { method: "POST", path: "/api/settings/mcp-presets/reload", authorization: "Bearer boot-token" }

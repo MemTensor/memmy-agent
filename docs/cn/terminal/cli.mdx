@@ -5,10 +5,18 @@ icon: Terminal
 
 | 命令 | 说明 |
 | --- | --- |
-| `memmy` | 进入交互式聊天 |
+| `memmy` | 进入全屏 TUI |
 | `memmy onboard` | 终端菜单式配置 |
-| `memmy onboard --defaults` | 非交互式初始化配置和 workspace |
+| `memmy onboard --defaults` | 创建或刷新配置和 workspace。已有配置且当前是交互终端时，会询问是否覆盖 |
 | `memmy status` | 查看配置、workspace、模型和 Provider 状态 |
 | `memmy agent --message "..."` | 发送单轮消息 |
+| `memmy goal --message "..."` | 运行持久目标，直到进入终态 |
+| `memmy sessions list` | 列出终端会话 |
 | `memmy serve` | 启动 OpenAI 兼容 API |
+| `memmy gateway` | 启动渠道 Gateway。`--port` 是健康检查端口，默认 `18970` |
+| `memmy config set <key> <value>` | 写入一项受支持的配置 |
+| `memmy channels status` | 查看渠道状态 |
+| `memmy channels login <channel>` | 登录渠道 |
+| `memmy plugins list` | 列出渠道插件 |
 | `memmy provider login <provider>` | Provider OAuth 登录 |
+| `memmy provider logout <provider>` | 退出 Provider OAuth |

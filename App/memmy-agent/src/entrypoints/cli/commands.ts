@@ -1213,6 +1213,9 @@ export async function gateway({
     removeQueuedWebuiMessage: (sessionKey, clientRequestId) => (
       loop.removeQueuedWebuiMessage(sessionKey, clientRequestId)
     ),
+    reorderQueuedWebuiMessages: (sessionKey, orderedIds, expectedRevision) => (
+      loop.reorderQueuedWebuiMessages(sessionKey, orderedIds, expectedRevision)
+    ),
     steerQueuedWebuiMessage: (sessionKey, clientRequestId, expectedTurnId) => (
       loop.steerQueuedWebuiMessage(sessionKey, clientRequestId, expectedTurnId)
     ),
@@ -1258,6 +1261,7 @@ export async function gateway({
         llmRuntime: (preset) => loop.llmRuntime(preset),
         scheduleBackground: (promise) => loop.scheduleBackground(promise),
         tokenUsageRecorder: createByokTokenUsageRecorder(loaded),
+        readMediaText: (filePath) => webuiChannel.readWebuiTitleText(filePath),
       }),
     );
     if (webuiChannel.guiSessionProjection && loop.sessions instanceof SessionManager) {

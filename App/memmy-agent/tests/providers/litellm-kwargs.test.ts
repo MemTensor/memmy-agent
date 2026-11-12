@@ -780,8 +780,19 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(kw.messages[1]).not.toHaveProperty("reasoning_content");
   });
 
-  it("applies memmy account reasoning none thinking controls by model family", () => {
-    const agentChat = buildKwargsFor("memmy_account", "agent_chat", "none");
+  it("keeps domestic agent_chat reasoning controls", () => {
+    const agentChat = providerFor("memmy_account", "agent_chat", {
+      extraHeaders: { "X-Agent-Region": "cn" },
+    }).buildKwargs({
+      messages: [{ role: "user", content: "hi" }],
+      tools: null,
+      model: "agent_chat",
+      maxTokens: 1024,
+      temperature: 0.7,
+      reasoningEffort: "none",
+      toolChoice: null,
+    });
+    expect(agentChat.temperature).toBe(0.7);
     expect(agentChat.extra_body).toEqual({ enable_thinking: false });
     expect(agentChat.max_tokens).toBe(1024);
     expect(agentChat).not.toHaveProperty("max_completion_tokens");

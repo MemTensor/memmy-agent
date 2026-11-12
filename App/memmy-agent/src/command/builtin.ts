@@ -1,3 +1,4 @@
+import { computerUseRequestContext } from "../core/agent-runtime/computer-use-request-context.js";
 import { spawn, type SpawnOptions } from "node:child_process";
 import { OutboundMessage } from "../core/runtime-messages/events.js";
 import {
@@ -20,6 +21,7 @@ import { buildStatusContent, type RuntimeStatusSnapshot } from "../utils/helpers
 import { fetchSearchUsage } from "../utils/searchusage.js";
 import { buildHistoryDagPayload, renderHistoryDagSummary, SessionDagStore } from "../session-dag/index.js";
 import { GoalRuntimeError } from "../core/agent-runtime/goal-runtime.js";
+import { clearOutputDelivery, hasOutputObligations } from "../core/agent-runtime/tools/output-location.js";
 import { publicGoalState, type GoalState } from "../core/session/goal-state.js";
 import {
   GOAL_COMMAND_SUBCOMMANDS,
@@ -47,7 +49,7 @@ export const BUILTIN_COMMAND_SPECS = [
   new BuiltinCommandSpec("/stop", "Stop current task", "Cancel the active agent turn for this chat.", "square"),
   new BuiltinCommandSpec("/restart", "Restart memmy", "Restart the bot process in place.", "rotate-cw"),
   new BuiltinCommandSpec("/status", "Show status", "Display runtime, provider, and channel status.", "activity"),
-  new BuiltinCommandSpec("/model", "Switch model preset", "Show, list, or switch the active model preset.", "brain", "[list|preset]"),
+  new BuiltinCommandSpec("/model", "Switch model preset", "Show, list, or switch the active model preset or model.", "brain", "[list|preset|model]"),
   new BuiltinCommandSpec("/history", "Show conversation history", "Print the last N persisted conversation messages.", "history", "[n]"),
   new BuiltinCommandSpec("/history-dag", "Show history DAG", "Show the task-state DAG for this chat.", "git-branch"),
   new BuiltinCommandSpec(
@@ -182,8 +184,11 @@ export async function cmdStop(ctx: CommandContext): Promise<OutboundMessage> {
       return reply(ctx, `Could not pause Goal: ${code}`);
     }
   }
+  // cancelActiveTasks also ends an unfinished file delivery; say so when nothing else was running.
+  const pendingDelivery = Boolean(ctx.loop?.cancelActiveTasks) && hasOutputObligations(ctx.loop?.sessions?.get?.(ctx.key)?.metadata);
   const total = ctx.loop?.cancelActiveTasks ? await ctx.loop.cancelActiveTasks(ctx.key) : 0;
-  return reply(ctx, total ? `Stopped ${total} task(s).` : "No active task to stop.");
+  if (total) return reply(ctx, `Stopped ${total} task(s).`);
+  return reply(ctx, pendingDelivery ? "Ended the unfinished file delivery." : "No active task to stop.");
 }
 
 export async function cmdRestart(ctx: CommandContext): Promise<OutboundMessage> {
@@ -257,6 +262,8 @@ export async function cmdNew(ctx: CommandContext): Promise<OutboundMessage> {
     const snapshot = (session.messages ?? []).slice(session.lastConsolidated ?? 0);
     await ctx.loop?.emitSessionEnd?.(session, session.key ?? ctx.key, "reset");
     session.clear?.();
+    // A new conversation starts with no pending files and the default output directory.
+    clearOutputDelivery(session.metadata, { keepDirectory: false });
     ctx.loop?.sessions?.save?.(session);
     ctx.loop?.sessions?.invalidate?.(session.key);
     if (snapshot.length) ctx.loop?.scheduleBackground?.(ctx.loop?.consolidator?.archive?.(snapshot));
@@ -323,8 +330,29 @@ function modelCommandStatus(ctx: CommandContext): string {
     "## Model",
     `- Current model: \`${selection ? `${selection.provider} / ${catalogModelName(selection)}` : "(none configured)"}\``,
     `- Current preset: \`${selection?.preset ?? "(none configured)"}\``,
+    `- Provider: \`${selection?.provider ?? "(none configured)"}\``,
+    `- Model: \`${selection ? catalogModelName(selection) : "(none configured)"}\``,
+    `- Endpoint: \`${modelCommandEndpoint(selection)}\``,
     `- Available presets: ${formatPresetNames(modelPresetNames())}`,
   ].join("\n");
+}
+
+function modelCommandEndpoint(selection: ResolvedModelSelection | null): string {
+  if (!selection) return "(none configured)";
+  // Account routing is managed by the platform. Only BYOK connections expose
+  // their configured address, with credentials and URL parameters removed.
+  if (selection.source === "account") return selection.endpointId;
+  try {
+    const url = new URL(selection.providerConfig.apiBase);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return selection.endpointId;
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return `${selection.endpointId} (${url.toString()})`;
+  } catch {
+    return selection.endpointId;
+  }
 }
 
 export async function cmdModel(ctx: CommandContext): Promise<OutboundMessage> {
@@ -333,7 +361,7 @@ export async function cmdModel(ctx: CommandContext): Promise<OutboundMessage> {
   const metadata = { renderAs: "text" };
   if (!args) return reply(ctx, modelCommandStatus(ctx), metadata);
   const parts = args.split(/\s+/);
-  if (parts.length !== 1) return reply(ctx, "Usage: `/model [list|preset]`", metadata);
+  if (parts.length !== 1) return reply(ctx, "Usage: `/model [list|preset|model]`", metadata);
   if (parts[0]?.toLowerCase() === "list") {
     return reply(ctx, modelCommandList(), metadata);
   }
@@ -341,9 +369,16 @@ export async function cmdModel(ctx: CommandContext): Promise<OutboundMessage> {
   try {
     const session = ctx.session ?? loop?.sessions?.get?.(ctx.key);
     if (!session) throw new Error("No active Session is available");
+    const available = readModelCatalog().items.filter((item) => item.available);
+    const preset = available.find((item) => item.preset === parts[0]);
+    const modelMatches = preset ? [] : available.filter((item) => item.model === parts[0]);
+    if (modelMatches.length > 1) {
+      return reply(ctx, `Could not switch model: model_selection_ambiguous\n\nUse a preset name: ${formatPresetNames(modelMatches.map((item) => item.preset))}`, metadata);
+    }
+    const requestedPreset = preset?.preset ?? modelMatches[0]?.preset ?? parts[0];
     const selection = typeof loop?.applySessionModelPresetLocked === "function"
-      ? loop.applySessionModelPresetLocked(session, parts[0])
-      : resolveAndPersistSessionModel(loop, session, parts[0]);
+      ? loop.applySessionModelPresetLocked(session, requestedPreset)
+      : resolveAndPersistSessionModel(loop, session, requestedPreset);
     await publishSessionModelUpdate(ctx, selection);
     const lines = [
       `Switched this Session to \`${selection.preset}\`.`,
@@ -476,10 +511,15 @@ export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage> {
     const objective = command === "create" ? argument : rawArgs;
     const turnId = String(ctx.turnId ?? ctx.msg.metadata?.turn_id ?? "").trim();
     if (!turnId) throw new GoalRuntimeError("goal_route_unavailable");
+    const request = computerUseRequestContext(ctx.msg);
     const goal = await runtime.create({
       sessionKey: ctx.key,
       objective,
-      route: { channel: ctx.msg.channel, chatId: ctx.msg.chatId },
+      route: { channel: ctx.msg.channel, chatId: ctx.msg.chatId,
+        ...(ctx.msg.turnSource ? { source: ctx.msg.turnSource } : {}),
+        ...(ctx.msg.turnSource && request.messageId && request.metadata.computerUseInteractive === true
+          ? { computerUseMessageId: request.messageId } : {}),
+      },
       turnId,
     });
     ctx.loop.scheduleGoalWork?.(ctx.key, goal);

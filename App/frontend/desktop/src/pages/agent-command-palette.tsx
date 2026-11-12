@@ -1,17 +1,22 @@
 import { useEffect, useRef } from "react";
 import {
   Activity,
+  AudioLines,
   BookOpen,
   Brain,
   CircleQuestionMark,
+  FileText,
   GitBranch,
   History,
+  Mic,
   RotateCw,
+  Scale,
   Shield,
   Sparkles,
   Square,
   SquarePen,
   Undo2,
+  Workflow,
   type LucideIcon
 } from "lucide-react";
 import type { MemmyAgentSlashCommand } from "../api/memmy-agent-client.js";
@@ -58,20 +63,44 @@ export interface SlashCommandStorageLike {
 
 const iconByName: Record<string, LucideIcon> = {
   activity: Activity,
+  "audio-lines": AudioLines,
   "book-open": BookOpen,
   brain: Brain,
   "circle-help": CircleQuestionMark,
+  "file-text": FileText,
   "git-branch": GitBranch,
   history: History,
+  mic: Mic,
   "rotate-cw": RotateCw,
+  scale: Scale,
   shield: Shield,
   sparkles: Sparkles,
   square: Square,
   "square-pen": SquarePen,
-  "undo-2": Undo2
+  "undo-2": Undo2,
+  workflow: Workflow
 };
 
-const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; description: MessageKey; hideArgHint?: boolean }> = {
+/**
+ * Resolves an icon name declared by a plugin to a renderable icon.
+ *
+ * Plugins name an icon rather than shipping one, so the set is whatever this
+ * map allows. An unknown name falls back rather than failing, since a manifest
+ * can outlive the build that knows its icon.
+ *
+ * @param name The icon name from a manifest, if any.
+ * @returns The icon component to render.
+ */
+export function resolveContributionIcon(name: string | undefined): LucideIcon {
+  return (name ? iconByName[name] : undefined) ?? Activity;
+}
+
+const localizedCommandKeys: Record<string, { title: MessageKey; description: MessageKey; argHint?: MessageKey; hideArgHint?: boolean }> = {
+  "/literature-review": {
+    title: "plugins.ui.literatureReview",
+    description: "plugins.command.literatureReviewDescription",
+    argHint: "plugins.command.literatureReviewTopicHint"
+  },
   "/new": {
     title: "home.command.newTitle",
     description: "home.command.newDescription"
@@ -90,7 +119,8 @@ const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; descripti
   },
   "/model": {
     title: "home.command.modelTitle",
-    description: "home.command.modelDescription"
+    description: "home.command.modelDescription",
+    hideArgHint: true
   },
   "/history": {
     title: "home.command.historyTitle",
@@ -133,7 +163,7 @@ export function localizeSlashCommands(
   t: SlashCommandTranslator
 ): MemmyAgentSlashCommand[] {
   return commands.map((command) => {
-    const keys = localizedBuiltinCommandKeys[command.command];
+    const keys = localizedCommandKeys[command.command];
     if (!keys) {
       return command;
     }
@@ -143,6 +173,7 @@ export function localizeSlashCommands(
     return {
       ...command,
       ...(language === "zh-CN" ? { title: t(keys.title), description: t(keys.description) } : {}),
+      ...(language === "zh-CN" && keys.argHint ? { argHint: t(keys.argHint) } : {}),
       ...(keys.hideArgHint ? { argHint: "" } : {})
     };
   });
@@ -172,7 +203,7 @@ export function AgentCommandPalette(props: AgentCommandPaletteProps) {
         style={{ maxHeight: `min(${DEFAULT_VISIBLE_COMMAND_ROWS * COMMAND_ROW_HEIGHT + COMMAND_LIST_BOTTOM_PADDING}px, calc(100vh - 260px))` }}
       >
         {props.commands.map((command, index) => {
-          const Icon = iconByName[command.icon] ?? Activity;
+          const Icon = resolveContributionIcon(command.icon);
           const selected = index === props.selectedIndex;
           return (
             <button
@@ -223,19 +254,11 @@ export function buildVisibleSlashCommands(
 export function filterSlashCommands(
   commands: SlashCommandPaletteItem[],
   query: string,
-  recentCommands: string[],
-  modelPresets: ReadonlyArray<{ name: string; available: boolean }> = []
+  recentCommands: string[]
 ): SlashCommandPaletteItem[] {
   const normalizedQuery = query.toLowerCase().replace(/[\t ]+/g, " ");
   const descendants = commands.flatMap((parent) => {
-    const suffixes = [...(SUBCOMMANDS[parent.command.toLowerCase()] ?? [])];
-    if (parent.command.toLowerCase() === "/model") {
-      for (const preset of modelPresets) {
-        if (preset.available && !/\s/.test(preset.name) && preset.name.toLowerCase() !== "list") {
-          suffixes.push([preset.name, ""]);
-        }
-      }
-    }
+    const suffixes = SUBCOMMANDS[parent.command.toLowerCase()] ?? [];
     return suffixes.map(([suffix, argHint]) => ({
       ...parent, command: `${parent.command} ${suffix}`, argHint
     }));

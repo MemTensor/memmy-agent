@@ -1,3 +1,4 @@
+import { followEmbeddingMaintenance, type EmbeddingMaintenanceRunResult } from "../api/embedding-maintenance";
 /**
  * Import / Export view.
  *
@@ -41,14 +42,6 @@ interface NativeImportBatchResult {
   imported: number;
   skipped: number;
   done: boolean;
-}
-
-interface EmbeddingRepairResult {
-  updated: number;
-  failed: number;
-  done: boolean;
-  statsAfter: { needsRepair: number };
-  error?: string;
 }
 
 const NATIVE_IMPORT_CONFIGS = {
@@ -593,43 +586,28 @@ function EmbeddingRepairButton() {
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<{ kind: "ok" | "error" | "muted"; text: string } | null>(null);
 
+  const controller = useRef<AbortController | null>(null);
+  useEffect(() => () => controller.current?.abort(), []);
   const run = async () => {
+    controller.current?.abort();
+    const next = new AbortController();
+    controller.current = next;
     setRunning(true);
     setStatus({ kind: "muted", text: t("import.embeddingRepair.running") });
-    let updated = 0;
-    let failed = 0;
     try {
-      for (;;) {
-        const r = await api.post<EmbeddingRepairResult>(
-          "/api/v1/embeddings/rebuild",
-          { mode: "repair", limit: 100 },
-        );
-        updated += r.updated;
-        failed += r.failed;
-        if (r.error) {
-          setStatus({ kind: "error", text: r.error });
-          break;
-        }
-        if (r.done) {
-          setStatus({
-            kind: failed > 0 ? "error" : "ok",
-            text: t("import.embeddingRepair.done", { updated, failed }),
-          });
-          break;
-        }
-        setStatus({
-          kind: "muted",
-          text: t("import.embeddingRepair.progress", {
-            updated,
-            failed,
-            remaining: r.statsAfter.needsRepair,
-          }),
-        });
-      }
+      const initial = await api.post<EmbeddingMaintenanceRunResult>(
+        "/api/v1/embeddings/rebuild", { mode: "repair" }, { signal: next.signal }
+      );
+      await followEmbeddingMaintenance(initial, (r) => setStatus({
+        kind: r.error || r.failed > 0 ? "error" : r.done ? "ok" : "muted",
+        text: r.error || t(r.done ? "import.embeddingRepair.done" : "settings.embedding.rebuild.progress", {
+          updated: r.updated, failed: r.failed, remaining: r.pending, retrying: r.retrying,
+        }),
+      }), next.signal);
     } catch (err) {
-      setStatus({ kind: "error", text: (err as Error).message });
+      if (!next.signal.aborted) setStatus({ kind: "error", text: (err as Error).message });
     } finally {
-      setRunning(false);
+      if (!next.signal.aborted) setRunning(false);
     }
   };
 

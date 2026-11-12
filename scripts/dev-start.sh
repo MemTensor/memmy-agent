@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MEMMY_AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
-ELECTRON_PACKAGE_DIR="$DESKTOP_DIR/node_modules/electron"
 MEMORY_CLI_ENTRY="$ROOT_DIR/Memory/dist/src/cli/index.js"
+NPM_DEPENDENCY_STAMP="${MEMMY_NPM_DEPENDENCY_STAMP:-$ROOT_DIR/node_modules/.memmy-dev-dependency-fingerprint}"
 MEMMY_CONFIG_PATH="${MEMMY_CONFIG:-$HOME/.memmy/config.yaml}"
 MEMMY_WORKSPACE_IS_EXPLICIT=0
 if [[ -n "${MEMMY_WORKSPACE:-}" ]]; then
@@ -28,6 +28,7 @@ WAIT_ON_BIN="$ROOT_DIR/node_modules/.bin/wait-on"
 LOG_DIR="$ROOT_DIR/.tmp/dev-stack"
 
 export MEMMY_CONFIG="$MEMMY_CONFIG_PATH"
+export MEMMY_BUNDLED_PLUGINS_DIR="${MEMMY_BUNDLED_PLUGINS_DIR:-$DESKTOP_DIR/dist/bundled-plugins}"
 export MEMMY_MEMORY_URL="${MEMMY_MEMORY_URL:-$MEMMY_MEMORY_ENDPOINT}"
 export MEMMY_MEMORY_LAYER_URL="${MEMMY_MEMORY_LAYER_URL:-$MEMMY_MEMORY_ENDPOINT}"
 if [[ -n "$MEMMY_MEMORY_TOKEN_VALUE" ]]; then
@@ -102,8 +103,14 @@ require_command() {
   fi
 }
 
+# Resolve the way the dev stack will actually load it. Resolving from the
+# caller's current directory reported every dependency missing when the script
+# was started from outside the repository.
 node_can_resolve() {
-  node --input-type=module --eval 'import.meta.resolve(process.argv[1])' "$1" >/dev/null 2>&1
+  (
+    cd "$ROOT_DIR"
+    node --input-type=module --eval 'import.meta.resolve(process.argv[1])' "$1" >/dev/null 2>&1
+  )
 }
 
 node_can_resolve_from_dir() {
@@ -115,12 +122,40 @@ node_can_resolve_from_dir() {
   )
 }
 
+root_dependency_fingerprint() {
+  node --input-type=module - "$ROOT_DIR/package.json" "$ROOT_DIR/package-lock.json" <<'NODE'
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+const hash = createHash("sha256");
+for (const file of process.argv.slice(2)) {
+  hash.update(file);
+  hash.update("\0");
+  hash.update(readFileSync(file));
+  hash.update("\0");
+}
+process.stdout.write(hash.digest("hex"));
+NODE
+}
+
+write_root_dependency_stamp() {
+  local fingerprint temporary
+  fingerprint="$(root_dependency_fingerprint)"
+  mkdir -p "$(dirname "$NPM_DEPENDENCY_STAMP")"
+  temporary="$NPM_DEPENDENCY_STAMP.$$"
+  printf '%s\n' "$fingerprint" >"$temporary"
+  mv "$temporary" "$NPM_DEPENDENCY_STAMP"
+}
+
 ensure_npm_dependencies() {
   local package
+  local expected_fingerprint installed_fingerprint
   local -a missing_packages=()
   local -a required_packages=(
     "concurrently"
     "wait-on"
+    "electron"
+    "jszip"
     "@types/proper-lockfile/index.d.ts"
     "electron-log/main"
     "electron-log/renderer"
@@ -133,11 +168,17 @@ ensure_npm_dependencies() {
     fi
   done
 
-  if [[ ${#missing_packages[@]} -eq 0 ]]; then
+  expected_fingerprint="$(root_dependency_fingerprint)"
+  installed_fingerprint="$(cat "$NPM_DEPENDENCY_STAMP" 2>/dev/null || true)"
+  if [[ ${#missing_packages[@]} -eq 0 && "$installed_fingerprint" == "$expected_fingerprint" ]]; then
     return
   fi
 
-  log "installing npm dependencies (missing: ${missing_packages[*]})"
+  if [[ ${#missing_packages[@]} -ne 0 ]]; then
+    log "installing npm dependencies (missing: ${missing_packages[*]})"
+  else
+    log "installing npm dependencies (package manifest or lockfile changed)"
+  fi
   cd "$ROOT_DIR"
   npm install
 
@@ -152,6 +193,14 @@ ensure_npm_dependencies() {
     printf '[dev-start] npm dependencies are still missing after install: %s\n' "${missing_packages[*]}" >&2
     exit 1
   fi
+  write_root_dependency_stamp
+}
+
+resolve_electron_package_dir() {
+  (
+    cd "$DESKTOP_DIR"
+    node --eval 'const path = require("node:path"); process.stdout.write(path.dirname(require.resolve("electron/package.json")));'
+  )
 }
 
 electron_runtime_available() {
@@ -162,16 +211,16 @@ electron_runtime_available() {
 }
 
 ensure_electron_runtime() {
-  local electron_platform electron_platform_path electron_zip_path
+  local electron_package_dir electron_platform electron_platform_path electron_zip_path
 
-  if [[ ! -f "$ELECTRON_PACKAGE_DIR/install.js" ]]; then
-    printf '[dev-start] missing Electron package at %s; run npm install first\n' "$ELECTRON_PACKAGE_DIR" >&2
+  if ! electron_package_dir="$(resolve_electron_package_dir)" || [[ ! -f "$electron_package_dir/install.js" ]]; then
+    printf '[dev-start] unable to resolve the Electron package from %s; run npm install first\n' "$DESKTOP_DIR" >&2
     exit 1
   fi
 
   log "ensuring Electron runtime is installed after native dependency rebuild"
   (
-    cd "$ELECTRON_PACKAGE_DIR"
+    cd "$electron_package_dir"
     node install.js
   )
 
@@ -179,7 +228,7 @@ ensure_electron_runtime() {
     require_command unzip
     log "Electron installer returned before extraction completed; extracting the verified artifact synchronously"
     electron_zip_path="$(
-      cd "$ELECTRON_PACKAGE_DIR"
+      cd "$electron_package_dir"
       node --input-type=module <<'NODE'
 import { createRequire } from "node:module";
 
@@ -212,9 +261,9 @@ NODE
         electron_platform_path="electron"
         ;;
     esac
-    mkdir -p "$ELECTRON_PACKAGE_DIR/dist"
-    unzip -q -o "$electron_zip_path" -d "$ELECTRON_PACKAGE_DIR/dist"
-    printf '%s' "$electron_platform_path" >"$ELECTRON_PACKAGE_DIR/path.txt"
+    mkdir -p "$electron_package_dir/dist"
+    unzip -q -o "$electron_zip_path" -d "$electron_package_dir/dist"
+    printf '%s' "$electron_platform_path" >"$electron_package_dir/path.txt"
   fi
 
   if ! electron_runtime_available; then
@@ -536,7 +585,9 @@ try {
 }
 
 const defaults = config.agents?.defaults ?? {};
-const presetName = defaults.modelPreset;
+const presetName = defaults.modelPreset
+  ?? config.modelAssignments?.account?.agent?.default
+  ?? config.modelAssignments?.byok?.agent?.default;
 const preset = presetName ? config.modelPresets?.[presetName] : null;
 const providerName = preset?.provider;
 const endpointName = preset?.endpoint;
@@ -637,6 +688,13 @@ run_main() {
   "$MEMMY_RUNTIME_NODE_PATH" --eval \
     'const Database = require("better-sqlite3"); const db = new Database(":memory:"); db.close();'
 
+  # The agent is installed separately from the root workspace and can resolve
+  # its own native addon. Rebuild and check it with the same runtime as serve.
+  cd "$MEMMY_AGENT_DIR"
+  npm rebuild better-sqlite3
+  "$MEMMY_RUNTIME_NODE_PATH" --eval \
+    'const Database = require("better-sqlite3"); const db = new Database(":memory:"); db.close();'
+
   unset MEMMY_MIGRATIONS_READY_CONFIG MEMMY_MIGRATIONS_READY_WORKSPACE MEMMY_MIGRATIONS_READY_SESSION_DAG MEMMY_MIGRATIONS_READY_APP_DATABASE
   log "running startup migrations"
   cd "$MEMMY_AGENT_DIR"
@@ -676,6 +734,30 @@ NODE
   export MEMMY_MIGRATIONS_READY_SESSION_DAG="${MEMMY_AGENT_SESSION_DAG_DIR:-$(dirname "$MEMMY_WORKSPACE_DIR")/session-dag}"
   export MEMMY_APP_DATABASE="$MEMMY_APP_DATABASE_FILE"
   export MEMMY_MIGRATIONS_READY_APP_DATABASE="$MEMMY_APP_DATABASE_FILE"
+  if [[ -z "${VITE_MEMMY_AGENT_WEBUI_URL:-}" ]]; then
+    VITE_MEMMY_AGENT_WEBUI_URL="$("$MEMMY_RUNTIME_NODE_PATH" - "$MEMMY_CONFIG_PATH" <<'NODE'
+const fs = require("node:fs");
+const YAML = require("yaml");
+// build_and_install_memory_cli is what creates config.yaml, and it runs after
+// this, so on a first run the file is simply not there yet.  The defaults
+// below already cover that case; only a malformed config is worth failing on.
+let config = {};
+try {
+  config = YAML.parse(fs.readFileSync(process.argv[2], "utf8")) || {};
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
+const websocket = config?.channels?.websocket || {};
+const configuredHost = typeof websocket.host === "string" && websocket.host.trim()
+  ? websocket.host.trim()
+  : "127.0.0.1";
+const host = configuredHost === "0.0.0.0" || configuredHost === "::" ? "127.0.0.1" : configuredHost;
+const port = Number.isInteger(websocket.port) && websocket.port > 0 ? websocket.port : 18980;
+process.stdout.write(`http://${host}:${port}`);
+NODE
+)"
+    export VITE_MEMMY_AGENT_WEBUI_URL
+  fi
 
   build_and_install_memory_cli
 
@@ -687,8 +769,12 @@ NODE
   "$(user_cli_path "memmy")" --version >/dev/null
   log "memmy command is ready in $MEMMY_BIN_DIR"
 
-  log "refreshing non-interactive memmy-agent onboard state"
-  node dist/main.js onboard --defaults </dev/null
+  if config_has_agent_model; then
+    log "preserving existing model catalog; non-interactive onboard refresh is not required"
+  else
+    log "refreshing non-interactive memmy-agent onboard state"
+    node dist/main.js onboard --defaults </dev/null
+  fi
 
   log "starting agent API, frontend, and desktop backend; Electron manages Memory and supervises gateway"
   cd "$ROOT_DIR"

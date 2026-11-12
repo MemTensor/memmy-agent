@@ -10,7 +10,7 @@ export const SKILL_FRONTMATTER_RE = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
 // Office skills remain available in the source tree, but are not part of the
 // default packaged/runtime skill surface. A workspace skill with the same name
 // is intentionally not filtered so users can opt in explicitly.
-export const DEFAULT_DISABLED_BUILTIN_SKILLS = new Set(["docx", "pptx", "xlsx"]);
+export const DEFAULT_DISABLED_BUILTIN_SKILLS = new Set(["docx", "pdf", "pptx", "xlsx"]);
 
 function isBuiltinComputerHistoryUnavailable(name: string): boolean {
   return name === "computer-history" && !isComputerHistorySupported();

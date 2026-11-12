@@ -191,6 +191,27 @@ describe("MCPToolWrapper execution", () => {
     await expect(new MCPToolWrapper(session, "test", toolDef("demo"), 0.1).execute({ value: 1 })).resolves.toBe("hello\n42");
   });
 
+  it("passes session metadata only to the local plugin bridge", async () => {
+    const callTool = vi.fn(async () => ({ content: [new FakeTextContent("ok")] }));
+    const context = {
+      sessionKey: "desktop:conversation-1",
+      callId: "tool-call-1",
+      modelPreset: "account-deepseek-v4.1-flash"
+    };
+
+    await new MCPToolWrapper({ callTool }, "plugins", toolDef("demo"), 0.1).execute({}, context);
+    expect(callTool).toHaveBeenCalledWith("demo", {}, 0.1, {
+      "memmy.dev/cloud-skills": "1",
+      "memmy.dev/session-key": "desktop:conversation-1",
+      "memmy.dev/tool-call-id": "tool-call-1",
+      "memmy.dev/model-preset": "account-deepseek-v4.1-flash"
+    }, undefined);
+
+    callTool.mockClear();
+    await new MCPToolWrapper({ callTool }, "external", toolDef("demo"), 0.1).execute({}, context);
+    expect(callTool).toHaveBeenCalledWith("demo", {}, 0.1, undefined, undefined);
+  });
+
   it("preserves images and structured content returned by MCP tools", async () => {
     const root = useConfig(new Config());
     process.env.MEMMY_AGENT_DATA_DIR = root;
@@ -479,6 +500,18 @@ describe("MCP names and capability registration", () => {
     expect(sanitizeName("my-tool_v2")).toBe("my-tool_v2");
   });
 
+  it("caps long names deterministically without collapsing distinct tools", () => {
+    const first = sanitizeName("mcp_plugins_plugin_literature-review_review_create_task_f83519c80f86");
+    const repeated = sanitizeName("mcp_plugins_plugin_literature-review_review_create_task_f83519c80f86");
+    const second = sanitizeName("mcp_plugins_plugin_literature-review_review_create_task_f83519c80f87");
+
+    expect(first).toHaveLength(64);
+    expect(first).toMatch(/^[a-zA-Z0-9_-]+$/);
+    expect(repeated).toBe(first);
+    expect(second).not.toBe(first);
+    expect(second).toHaveLength(64);
+  });
+
   it("sanitizes wrapper names and preserves original MCP names", () => {
     const wrapper = new MCPToolWrapper({ callTool: null }, "srv", toolDef("My Tool"));
 
@@ -488,6 +521,15 @@ describe("MCP names and capability registration", () => {
       .toBe("mcp_srv_resource_PostgreSQL_System_Information");
     expect(new MCPPromptWrapper(null, "my server", { name: "design-schema", description: "Design schema", arguments: null }).name)
       .toBe("mcp_my_server_prompt_design-schema");
+  });
+
+  it("keeps long plugin wrapper names within provider limits", () => {
+    const originalName = "plugin_literature-review_review_create_task_f83519c80f86";
+    const wrapper = new MCPToolWrapper({ callTool: null }, "plugins", toolDef(originalName));
+
+    expect(wrapper.name).toHaveLength(64);
+    expect(wrapper.name).toBe(sanitizeName(`mcp_plugins_${originalName}`));
+    expect(wrapper.originalName).toBe(originalName);
   });
 
   it("registers resources and prompts and matches sanitized enabled tool names", async () => {
