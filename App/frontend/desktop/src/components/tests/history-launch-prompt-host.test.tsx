@@ -2,6 +2,16 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  claimCollabLaunchPrompt,
+  resetCollabLaunchPromptRuntime,
+  setCollabLaunchPromptOpen,
+} from "../../app/collab-launch-prompt-state.js";
+import {
+  HISTORY_LAUNCH_PROMPT_STORAGE_KEY,
+  readHistoryLaunchPromptState,
+  setHistoryLaunchPromptOpen,
+} from "../../app/history-launch-prompt-state.js";
 import { HistoryLaunchPromptHost } from "../history-launch-prompt-host.js";
 
 const mocks = vi.hoisted(() => ({
@@ -32,6 +42,8 @@ describe("HistoryLaunchPromptHost", () => {
     vi.useFakeTimers();
     window.localStorage.clear();
     window.sessionStorage.clear();
+    resetCollabLaunchPromptRuntime();
+    setHistoryLaunchPromptOpen(false);
     Object.defineProperty(window, "memmy", { configurable: true, value: { platform: "darwin" } });
     mocks.dispatch.mockReset();
     mocks.state.navigation.currentPath = "/main";
@@ -43,6 +55,8 @@ describe("HistoryLaunchPromptHost", () => {
 
   afterEach(() => {
     act(() => root.unmount());
+    resetCollabLaunchPromptRuntime();
+    setHistoryLaunchPromptOpen(false);
     document.body.replaceChildren();
     Reflect.deleteProperty(window, "memmy");
     vi.useRealTimers();
@@ -70,5 +84,37 @@ describe("HistoryLaunchPromptHost", () => {
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     await act(async () => { vi.advanceTimersByTime(1); });
     expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
+  it("does not consume the History introduction when collaboration claims during the 900ms delay", async () => {
+    await act(async () => root.render(<HistoryLaunchPromptHost />));
+    mocks.state.navigation.currentPath = "/memory";
+    await act(async () => root.render(<HistoryLaunchPromptHost />));
+    await act(async () => { vi.advanceTimersByTime(450); });
+    claimCollabLaunchPrompt();
+    setCollabLaunchPromptOpen(true);
+    await act(async () => { vi.advanceTimersByTime(450); });
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(window.localStorage.getItem(HISTORY_LAUNCH_PROMPT_STORAGE_KEY)).toBeNull();
+    expect(readHistoryLaunchPromptState(window.localStorage)).toEqual({ shown: false, dismissed: false, actioned: false });
+
+    setCollabLaunchPromptOpen(false);
+    await act(async () => { vi.advanceTimersByTime(1200); });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(readHistoryLaunchPromptState(window.localStorage).shown).toBe(false);
+  });
+
+  it.each([true, false])("does not offer History on entering Memory after collaboration claims the run (carousel open: %s)", async (open) => {
+    await act(async () => root.render(<HistoryLaunchPromptHost />));
+    claimCollabLaunchPrompt();
+    setCollabLaunchPromptOpen(open);
+    mocks.state.navigation.currentPath = "/memory";
+    await act(async () => root.render(<HistoryLaunchPromptHost />));
+    await act(async () => { vi.advanceTimersByTime(1200); });
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(window.localStorage.getItem(HISTORY_LAUNCH_PROMPT_STORAGE_KEY)).toBeNull();
+    expect(readHistoryLaunchPromptState(window.localStorage)).toEqual({ shown: false, dismissed: false, actioned: false });
   });
 });

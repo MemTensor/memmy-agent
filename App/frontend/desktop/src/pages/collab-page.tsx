@@ -22,7 +22,7 @@ import {
 } from "../api/collab-client.js";
 import {
   addCollabProject,
-  consumeCollabTourRequest,
+  consumeCollabAccessPromptRequest,
   consumeTaskPickerRequest,
   dismissCollabNotice,
   getCollabProjectsSnapshot,
@@ -31,8 +31,8 @@ import {
   removeCollabProject,
   replaceCollabProject,
   requestCreateProject,
+  requestCollabAccessPrompt,
   requestTaskPicker,
-  requestCollabTour,
   selectCollabProject,
   sharedProjectFor,
   subscribeCollabProjects
@@ -74,14 +74,6 @@ import { writePendingFirstEncounterTaskLaunch } from "./first-encounter-task-lau
 import { AppFrame } from "./app-frame.js";
 import { memberColor } from "./collab-member-color.js";
 import { MEMBER_REQUESTS_POLL_MS, ProjectMembersDialog } from "./collab-members-dialog.js";
-import {
-  COLLAB_TOUR_ANCHORS,
-  COLLAB_TOUR_STEP_KEYS,
-  CollabTourOverlay,
-  CollabTourTaskList,
-  readCollabTourSeen,
-  writeCollabTourSeen
-} from "./collab-tour.js";
 import styles from "./collab-page.module.css";
 import { consumeAssistFocus, getAssistFocus, subscribeAssistFocus } from "../app/collab-assist-focus.js";
 import { CollabAssistConversation } from "./collab-assist-conversation.js";
@@ -530,16 +522,16 @@ const CollabBoard = memo(function CollabBoard(props: {
   const [pickOpen, setPickOpen] = useState(false);
   /**
    * 「在其他 Agent 中使用协作项目」的授权：未授权时「关联任务」弹窗只给授权说明，
-   * 引导结束后与加入他人项目时各询问一次。
+   * 开启共享后回到看板时与加入他人项目时各询问一次。
    */
   const [agentAccess, setAgentAccess] = useState<CollabAgentAccessView | null>(null);
   const [accessOpen, setAccessOpen] = useState(false);
-  /** 引导结束后手动触发一次状态重读。 */
+  /** 开启共享回到看板时手动触发一次状态重读。 */
   const [accessCheckKey, setAccessCheckKey] = useState(0);
   /** 同一次进入看板只主动问一次，弹窗关掉后靠设置或点「关联任务」再授权。 */
   const accessAskedRef = useRef(false);
-  /** 刚结束首次引导：引导之后问一次，普通打开看板不算。 */
-  const askAccessAfterTourRef = useRef(false);
+  /** 刚开启共享并回到看板：这时问一次，普通打开看板不算。 */
+  const askAccessAfterShareRef = useRef(false);
   /** Choosing which of the project's own Memmy sessions members may read. */
   const [taskPickerOpen, setTaskPickerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -573,12 +565,6 @@ const CollabBoard = memo(function CollabBoard(props: {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   /** 成员首次进入时的单行提示：按项目记录已读，同一个项目只出现一次。 */
   const [contextTipSeen, setContextTipSeen] = useState<string[]>(() => readContextTipSeen());
-  /**
-   * 首次创建协作项目时的引导（teach mode）。步骤放在看板里，示例任务行与「…」菜单的展开才跟得上高亮；
-   * 完成与跳过都记在本机，之后不再自动出现，需要时从项目设置里重看。
-   */
-  const [tourStep, setTourStep] = useState<number | null>(null);
-  const tourActive = tourStep !== null;
   /** Upload progress of a queued association; the list grows while it runs. */
   const [progress, setProgress] = useState<CollabSyncProgress | null>(null);
   /** Bumped when an association is queued, so polling starts without waiting for a filter or page change. */
@@ -657,31 +643,25 @@ const CollabBoard = memo(function CollabBoard(props: {
   const sharedId = shared?.id ?? null;
   const projectId = project?.id ?? null;
 
-  /** 结束引导：完成与跳过都记在本机，之后不再自动出现，需要时从项目设置里重看。 */
-  const finishTour = useCallback(() => {
-    writeCollabTourSeen();
-    setTourStep(null);
-    // 引导结束后问一次授权：还没授权时才真的弹出来，由下面的 effect 判断。
-    askAccessAfterTourRef.current = true;
-    setAccessCheckKey((key) => key + 1);
-  }, []);
+  /**
+   * 这次要不要把授权询问让一让：设置与选择任务的弹窗开着，或者选择任务的请求还没被看板处理完。
+   * 开启共享会同时发出「询问授权」与「选择任务」两个请求：后者的 effect 先消化请求、再打开弹窗，
+   * 同一批里读到的 `taskPickerOpen` 还是旧值，所以这里连请求本身一起看，免得两个弹窗一起弹出来。
+   */
+  const accessPromptHeld = settingsOpen || taskPickerOpen || snapshot.taskPickerFor === projectId;
 
   /**
-   * 刚创建并开启协作、或在项目设置里刚开启协作的项目走一遍引导。
-   * 只在这一个时机请求一次：打开其他协作项目、加入他人的项目都不会弹；本机已经看过则不再出现。
-   * 等云端记录读回来再开始：否则「邀请」与「关联任务」两个锚点还没渲染，高亮会落空。
+   * 刚开启共享并回到这个项目时询问一次授权。
+   * 等云端记录读回来再问：这是「已经是协作项目」的前提，和看板自己要读的那份列表一致。
+   * 上面两个弹窗开着时先不读走这个请求：请求留在 store 里，等弹窗关上再问。
    */
   useEffect(() => {
-    if (!projectId || snapshot.tourFor !== projectId || !sharedId) return;
-    consumeCollabTourRequest();
-    if (tourStep !== null || readCollabTourSeen()) return;
-    setTourStep(0);
-  }, [projectId, sharedId, snapshot.tourFor, tourStep]);
-
-  // 最后一步点「开始使用」后步骤越界，在这里收尾并把完成记录写下来。
-  useEffect(() => {
-    if (tourStep !== null && tourStep >= COLLAB_TOUR_STEP_KEYS.length) finishTour();
-  }, [tourStep, finishTour]);
+    if (!projectId || snapshot.accessPromptFor !== projectId || !sharedId) return;
+    if (accessPromptHeld) return;
+    consumeCollabAccessPromptRequest();
+    askAccessAfterShareRef.current = true;
+    setAccessCheckKey((key) => key + 1);
+  }, [projectId, sharedId, snapshot.accessPromptFor, accessPromptHeld]);
 
   /** 读一次授权状态：看板要据此决定「关联任务」是列任务还是给授权说明。 */
   const refreshAgentAccess = useCallback(async () => {
@@ -700,18 +680,20 @@ const CollabBoard = memo(function CollabBoard(props: {
   }, [refreshAgentAccess, sharedId, accessCheckKey]);
 
   /**
-   * 两个询问时机：刚结束首次引导（创建者），以及加入他人项目的人第一次打开这个项目的看板。
+   * 两个询问时机：刚开启共享后回到看板（创建者），以及加入他人项目的人第一次打开这个项目的看板。
    * 只要还没授权、也没在这里问过，就弹一次；选「暂不安装」之后不再弹。
+   * 设置与选择任务的弹窗开着时先不问：刚开启共享往往跟着这两个弹窗，叠在一起会让人看不清先后。
    */
   useEffect(() => {
     if (!agentAccess || agentAccess.granted || agentAccess.askedInProject) return;
     if (accessAskedRef.current) return;
+    if (accessPromptHeld) return;
     const joined = shared !== null && shared.role !== "owner";
-    if (!joined && !askAccessAfterTourRef.current) return;
+    if (!joined && !askAccessAfterShareRef.current) return;
     accessAskedRef.current = true;
-    askAccessAfterTourRef.current = false;
+    askAccessAfterShareRef.current = false;
     setAccessOpen(true);
-  }, [agentAccess, shared]);
+  }, [agentAccess, shared, accessPromptHeld]);
 
   /** 关掉授权弹窗：选了「暂不安装」也记下已询问，之后只从设置里授权。 */
   const closeAccessDialog = useCallback((granted: boolean) => {
@@ -1420,10 +1402,7 @@ const CollabBoard = memo(function CollabBoard(props: {
 
   /**
    * 看板的两个 tab：「协助」后面的数字只数等你处理的（执行中、已完成的不需要你做什么），没有就不带数字。
-   * 引导期间 tab 只是演示：当前步骤讲协助时把它当作选中，不改用户真正在看的 tab。
    */
-  const tourAssistStep = tourActive && COLLAB_TOUR_STEP_KEYS[tourStep ?? 0] === "assist";
-  const shownTab: BoardTab = tourActive ? (tourAssistStep ? "assists" : "tasks") : boardTab;
   const boardTabs: { value: BoardTab; label: string; count?: number }[] = [
     { value: "tasks", label: t("collab.tab.tasks") },
     { value: "assists", label: t("collab.tab.assists"), count: waitingAssists.length }
@@ -1481,7 +1460,7 @@ const CollabBoard = memo(function CollabBoard(props: {
           <>
             {/* 看板与右侧的项目配置并排：配置属于项目，不随任务列表滚动。 */}
             <div className={styles.scroller}>
-              <div className={styles.wrap} data-tour-anchor={COLLAB_TOUR_ANCHORS.board}>
+              <div className={styles.wrap}>
                 {notice !== null ? (
                   <div className={styles.cloudNotice} role="alert">
                     <span>{notice}</span>
@@ -1496,7 +1475,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                     </Button>
                   </div>
                 ) : null}
-                <header className={styles.boardHeader} data-tour-anchor={COLLAB_TOUR_ANCHORS.header}>
+                <header className={styles.boardHeader}>
                   <span className={styles.boardIcon} aria-hidden="true">
                     {shared ? <Cloud size={22} /> : <Folder size={22} />}
                   </span>
@@ -1511,7 +1490,6 @@ const CollabBoard = memo(function CollabBoard(props: {
                     <Button
                       size="sm"
                       variant="ghost"
-                      data-tour-anchor={COLLAB_TOUR_ANCHORS.invite}
                       onClick={() => setMembersOpen(true)}
                       // 有待审核的申请时把数量写进无障碍名称，按钮上也带一个角标。
                       aria-label={pendingRequests > 0 ? t("collab.members.pending", { count: String(pendingRequests) }) : undefined}
@@ -1557,16 +1535,14 @@ const CollabBoard = memo(function CollabBoard(props: {
                       className={styles.boardTabs}
                       role="tablist"
                       aria-label={t("collab.tab.label")}
-                      data-tour-anchor={COLLAB_TOUR_ANCHORS.tabs}
                     >
                       {boardTabs.map((tab) => (
                         <button
                           key={tab.value}
                           type="button"
                           role="tab"
-                          aria-selected={shownTab === tab.value}
-                          className={`${styles.boardTab} ${shownTab === tab.value ? styles.boardTabOn : ""}`}
-                          data-tour-anchor={tab.value === "assists" ? COLLAB_TOUR_ANCHORS.assistTab : undefined}
+                          aria-selected={boardTab === tab.value}
+                          className={`${styles.boardTab} ${boardTab === tab.value ? styles.boardTabOn : ""}`}
                           onClick={() => switchBoardTab(tab.value)}
                         >
                           {tab.label}
@@ -1578,13 +1554,12 @@ const CollabBoard = memo(function CollabBoard(props: {
                     {/* 两个 tab 各自的 panel：任务工具条与列表、协助工具条与列表都在里面 */}
                     <div
                       role="tabpanel"
-                      aria-label={t(shownTab === "tasks" ? "collab.tab.tasks" : "collab.tab.assists")}
+                      aria-label={t(boardTab === "tasks" ? "collab.tab.tasks" : "collab.tab.assists")}
                     >
                       <div
-                        className={`${styles.toolbar} ${shownTab === "assists" ? styles.assistToolbar : ""}`}
-                        data-tour-anchor={COLLAB_TOUR_ANCHORS.toolbar}
+                        className={`${styles.toolbar} ${boardTab === "assists" ? styles.assistToolbar : ""}`}
                       >
-                        {shownTab === "tasks" ? (
+                        {boardTab === "tasks" ? (
                           <>
                             {/* 搜索属于浏览，选择态收起来；已经带着查询时保留，否则列表被筛住却看不到原因 */}
                             {selecting && !query ? null : (
@@ -1714,8 +1689,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                               </Button>
                             ) : null}
                             {/* 「关联任务」只属于任务：协助由 Agent 对话发起，不在这里关联 */}
-                            {shownTab === "tasks" ? (
-                              <Button size="sm" variant="primary" data-tour-anchor={COLLAB_TOUR_ANCHORS.associate} onClick={() => setPickOpen(true)}>
+                            {boardTab === "tasks" ? (
+                              <Button size="sm" variant="primary" onClick={() => setPickOpen(true)}>
                                 <Link2 size={14} aria-hidden="true" />
                                 {t("collab.associate")}
                               </Button>
@@ -1724,14 +1699,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                         )}
                       </div>
 
-                      {/*
-                       * 引导期间整页都换成引导自己的示例页：真实任务、同步进度与成员提示都不出现。
-                       * 从项目设置里重看时项目里本就有任务，混在一起会分不清哪条是演示、哪条是自己的。
-                       */}
-                      {tourActive ? <CollabTourTaskList step={tourStep ?? 0} projectName={project.name} /> : null}
-
                       {/* 同步进度与成员提示都是关于任务的：只在「任务」里出现 */}
-                      {!tourActive && boardTab === "tasks" && progress?.running ? (() => {
+                      {boardTab === "tasks" && progress?.running ? (() => {
                         // 云端每人每项目只留最近 20 个，进度也按这个额度显示，不报会超出上限的条数。
                         const cappedTotal = Math.min(progress.total, SESSIONS_PER_MEMBER_LIMIT);
                         const cappedDone = Math.min(progress.completed, cappedTotal);
@@ -1751,7 +1720,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                           </div>
                         );
                       })() : null}
-                      {!tourActive && boardTab === "tasks" && showContextTip ? (
+                      {boardTab === "tasks" && showContextTip ? (
                         // 只有项目里确实有他人任务时才出现：空项目里这句话没有对象，提示也就没有意义。
                         <div className={styles.contextTip} role="status">
                           <span className={styles.contextTipIcon} aria-hidden="true"><AtSign size={13} /></span>
@@ -1773,7 +1742,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                         </div>
                       ) : null}
                       {/* 等你处理的协助提示留在「任务」里：看任务的时候也能直接接住请求；点了转到「协助」并展开那一条 */}
-                      {boardTab === "tasks" && waitingAssists.length && !tourActive ? (
+                      {boardTab === "tasks" && waitingAssists.length ? (
                         <div className={styles.assistWaiting} role="status" data-collab-assist-waiting="">
                           <span className={styles.assistWaitingIcon} aria-hidden="true"><LifeBuoy size={13} /></span>
                           <span className={styles.assistWaitingText}>
@@ -1794,44 +1763,41 @@ const CollabBoard = memo(function CollabBoard(props: {
                         </div>
                       ) : null}
                       {boardRows === null ? (
-                        tourActive ? null : <p className={styles.loading}>{t("collab.loading")}</p>
+                        <p className={styles.loading}>{t("collab.loading")}</p>
                       ) : boardRows.length === 0 && boardTab === "assists" ? (
-                        tourActive ? null : (
-                          <>
-                            {assistGroups.unrun.length ? null : (
-                              // 一条协助都没有时把两种发起方式说清楚：从 Agent 对话请人协助，或先让自己能接收请求。
-                              <section className={styles.guide} aria-label={t("collab.assist.empty.title")}>
-                                <b className={styles.guideTitle}>{t("collab.assist.empty.title")}</b>
-                                <p className={styles.guideLead}>{t("collab.assist.empty.lead")}</p>
-                                <ul className={styles.guideList}>
-                                  <li className={styles.guideItem}>
-                                    <span className={styles.guideIcon} aria-hidden="true"><LifeBuoy size={15} /></span>
-                                    <div className={styles.guideText}>
-                                      <b>{t("collab.assist.empty.ask.title")}</b>
-                                      <span>{t("collab.assist.empty.ask.body")}</span>
-                                    </div>
-                                  </li>
-                                  <li className={styles.guideItem}>
-                                    <span className={styles.guideIcon} aria-hidden="true"><Inbox size={15} /></span>
-                                    <div className={styles.guideText}>
-                                      <b>{t("collab.assist.empty.receive.title")}</b>
-                                      <span>
-                                        {t("collab.assist.empty.receive.body")}
-                                        {" "}
-                                        <button type="button" className={styles.guideAction} onClick={() => setSettingsOpen(true)}>
-                                          {t("collab.assist.empty.openSettings")}
-                                        </button>
-                                      </span>
-                                    </div>
-                                  </li>
-                                </ul>
-                              </section>
-                            )}
-                            {assistFooter}
-                          </>
-                        )
+                        <>
+                          {assistGroups.unrun.length ? null : (
+                            // 一条协助都没有时把两种发起方式说清楚：从 Agent 对话请人协助，或先让自己能接收请求。
+                            <section className={styles.guide} aria-label={t("collab.assist.empty.title")}>
+                              <b className={styles.guideTitle}>{t("collab.assist.empty.title")}</b>
+                              <p className={styles.guideLead}>{t("collab.assist.empty.lead")}</p>
+                              <ul className={styles.guideList}>
+                                <li className={styles.guideItem}>
+                                  <span className={styles.guideIcon} aria-hidden="true"><LifeBuoy size={15} /></span>
+                                  <div className={styles.guideText}>
+                                    <b>{t("collab.assist.empty.ask.title")}</b>
+                                    <span>{t("collab.assist.empty.ask.body")}</span>
+                                  </div>
+                                </li>
+                                <li className={styles.guideItem}>
+                                  <span className={styles.guideIcon} aria-hidden="true"><Inbox size={15} /></span>
+                                  <div className={styles.guideText}>
+                                    <b>{t("collab.assist.empty.receive.title")}</b>
+                                    <span>
+                                      {t("collab.assist.empty.receive.body")}
+                                      {" "}
+                                      <button type="button" className={styles.guideAction} onClick={() => setSettingsOpen(true)}>
+                                        {t("collab.assist.empty.openSettings")}
+                                      </button>
+                                    </span>
+                                  </div>
+                                </li>
+                              </ul>
+                            </section>
+                          )}
+                          {assistFooter}
+                        </>
                       ) : boardRows.length === 0 && filtering ? (
-                        tourActive ? null : (
                         <div className={styles.filterEmpty} data-collab-filter-empty={filterEmpty.kind}>
                           <span className={styles.guideIcon} aria-hidden="true">{filterEmpty.icon}</span>
                           <div className={styles.guideText}>
@@ -1839,11 +1805,9 @@ const CollabBoard = memo(function CollabBoard(props: {
                             <span>{filterEmpty.body}</span>
                           </div>
                         </div>
-                        )
                       ) : boardRows.length === 0 ? (
                         // An empty project is the one place to explain the board: what it collects and what a
                         // member can do with it. New projects start here, so it carries the first-run guidance.
-                        tourActive ? null : (
                         <section className={styles.guide} aria-label={t("collab.sessions.empty.title")}>
                           <b className={styles.guideTitle}>{t("collab.sessions.empty.title")}</b>
                           <p className={styles.guideLead}>{t("collab.sessions.empty.lead")}</p>
@@ -1862,9 +1826,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                             ))}
                           </ul>
                         </section>
-                        )
                       ) : (
-                        tourActive ? null : <>
+                        <>
                         <ul className={`${styles.list} ${styles.stream} ${styles.flatStream}`}>
                           {boardRows.map((row) => {
                             if (row.kind === "assist") {
@@ -2044,19 +2007,6 @@ const CollabBoard = memo(function CollabBoard(props: {
 
       {/* Overlays mount on the body, like the app's other menus and dialogs, so the sidebar never covers them. */}
       {typeof document === "undefined" ? null : createPortal(<>
-      {/*
-       * 引导层必须挂在 body 上：看板容器带 `container-type: inline-size`（隐含 contain: layout），
-       * 会成为 fixed 后代的包含块，遮罩坐标取的是视口矩形，放在看板里就会错位。
-       */}
-      {tourActive && project ? (
-        <CollabTourOverlay
-          step={tourStep ?? 0}
-          projectName={project.name}
-          onNext={() => setTourStep((step) => (step ?? -1) + 1)}
-          onBack={() => setTourStep((step) => Math.max(0, (step ?? 0) - 1))}
-          onSkip={finishTour}
-        />
-      ) : null}
       {collab && collabEnabled ? (
         <CollabAgentAccessDialog
           open={accessOpen}
@@ -2126,11 +2076,6 @@ const CollabBoard = memo(function CollabBoard(props: {
           onPickSessions={() => {
             setSettingsOpen(false);
             setTaskPickerOpen(true);
-          }}
-          onReplayTour={() => {
-            // 重看引导先关上设置：引导层的遮罩是整窗的，弹窗盖在上面会遮住目标。
-            setSettingsOpen(false);
-            setTourStep(0);
           }}
           onNotice={showToast}
           onFailed={showToast}
@@ -2830,8 +2775,6 @@ export function ProjectBoardSettingsDialog(props: {
   /** 已经退出这个项目：看板回到项目列表，本机项目与任务都还在。 */
   onLeft: () => void;
   onPickSessions: () => void;
-  /** 重新走一遍首次引导：新建协作项目时自动出现一次，之后只在这里重看。 */
-  onReplayTour?: () => void;
   /** How many of the project's own sessions could be shared, which decides whether choosing them is worth a dialog. */
   taskCount: number;
   onNotice: (message: string) => void;
@@ -2889,8 +2832,8 @@ export function ProjectBoardSettingsDialog(props: {
         console.warn(`Project binding failed: ${messageOf(cause)}`);
       }
       props.onShared();
-      // 刚开启协作：关掉设置后看板会走一遍首次引导（本机已看过则不再出现）。
-      requestCollabTour(props.project.id);
+      // 刚开启共享：关掉设置后回到看板，若还没授权「在其他 Agent 中使用协作项目」，询问一次。
+      requestCollabAccessPrompt(props.project.id);
       if (props.taskCount > 0) {
         // The project already has sessions: the person picks which of them members may read.
         requestTaskPicker(props.project.id);
@@ -3115,24 +3058,6 @@ export function ProjectBoardSettingsDialog(props: {
             </Button>
           </div>
         </div>
-        {sharedId && props.onReplayTour ? (
-          <div className={styles.settingsCardRow}>
-            <div className={styles.settingsCardText}>
-              <span className={styles.settingsCardRowTitle}>{t("collab.settings.tourLabel")}</span>
-              <span className={styles.settingsCardRowDesc}>{t("collab.settings.tourDesc")}</span>
-            </div>
-            <div className={styles.settingsCardControl}>
-              <Button
-                size="sm"
-                variant="secondary"
-                className={styles.settingsButton}
-                onClick={props.onReplayTour}
-              >
-                {t("collab.settings.tour.action")}
-              </Button>
-            </div>
-          </div>
-        ) : null}
       </section>
     </Modal>
   );

@@ -4,7 +4,7 @@ import { createHttpCollabClient, type CollabClient, type CollabProject } from ".
 import { ApiRequestError } from "../api/http.js";
 import {
   getCollabProjectsSnapshot,
-  requestCollabTour,
+  requestCollabAccessPrompt,
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
 import { prepareProjectDirectory } from "../api/projects-client.js";
@@ -26,6 +26,8 @@ export function CollabCreateProjectDialog(props: {
    * 也就不出现「加入项目」——两者都需要云端账号。
    */
   shareAvailable?: boolean;
+  /** 打开时「与成员共享」是否已经开启：新功能介绍的最后一页会要求默认共享。 */
+  defaultShare?: boolean;
   onClose: () => void;
   /** The project exists on this computer; the caller opens its board. */
   onCreated: (localProjectId: string) => void;
@@ -56,6 +58,7 @@ export function CollabCreateProjectDialog(props: {
 export function CreateProjectModal(props: {
   open: boolean;
   shareAvailable?: boolean;
+  defaultShare?: boolean;
   collab: CollabClient;
   onClose: () => void;
   onCreated: (localProjectId: string) => void;
@@ -71,7 +74,7 @@ export function CreateProjectModal(props: {
   const { clients } = useOptionalApiClients();
   const [name, setName] = useState("");
   const [directory, setDirectory] = useState<string | null>(null);
-  /** Off by default: a project stays on this computer unless the person asks for members to see it. */
+  /** Off unless the opener asked for it: a project otherwise stays on this computer. */
   const [share, setShare] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -88,11 +91,17 @@ export function CreateProjectModal(props: {
   const ownedCount = (projectsStore.projects ?? []).filter((project) => project.role === "owner").length;
   const ownedLimit = projectsStore.maxOwnedProjects;
 
+  /**
+   * 打开那一刻的默认勾选：用 ref 带上，effect 只在打开时读一次，弹窗开着时这个值变化不会重置人的选择。
+   */
+  const shareOnOpenRef = useRef(props.defaultShare === true && shareAvailable);
+  shareOnOpenRef.current = props.defaultShare === true && shareAvailable;
+
   useEffect(() => {
     if (props.open) {
       setName("");
       setDirectory(null);
-      setShare(false);
+      setShare(shareOnOpenRef.current);
       setError(null);
     }
   }, [props.open]);
@@ -166,8 +175,8 @@ export function CreateProjectModal(props: {
     } finally {
       setBusy(false);
     }
-    // 刚建立协作：看板打开后走一遍首次引导（本机已看过则不再出现）。
-    if (sharingStarted) requestCollabTour(createdLocalProjectId);
+    // 刚开启共享：看板打开后，若还没授权「在其他 Agent 中使用协作项目」，询问一次。
+    if (sharingStarted) requestCollabAccessPrompt(createdLocalProjectId);
     props.onCreated(createdLocalProjectId);
   }
 

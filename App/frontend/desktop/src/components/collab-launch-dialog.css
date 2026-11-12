@@ -1,0 +1,261 @@
+/*
+ * Shell for the 1.2.7 project-collaboration announcement carousel.
+ *
+ * Its own `collab-launch-*` names on purpose: the 1.2.5 history launch styles in this branch are the old ones and
+ * will be replaced when the release branch merges, so nothing here may depend on them.
+ */
+
+.collab-launch-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 4050;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: color-mix(in srgb, var(--color-text-ink) 30%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.collab-launch-dialog {
+  position: relative;
+  width: min(1000px, calc(100vw - 36px));
+  max-height: calc(100dvh - 36px);
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 34px 36px 26px;
+  border-radius: 26px;
+  background: var(--color-background-paper);
+  color: var(--color-text-ink);
+  box-shadow: 0 25px 100px color-mix(in srgb, var(--color-text-ink) 22%, transparent);
+  outline: none;
+  font-family: var(--font-sans);
+}
+
+.collab-launch-close {
+  position: absolute;
+  top: 24px;
+  right: 28px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-border-stone) 36%, var(--color-background-paper));
+  color: var(--color-text-ink);
+  cursor: pointer;
+}
+
+.collab-launch-close:hover {
+  background: color-mix(in srgb, var(--color-border-stone) 65%, var(--color-background-paper));
+}
+
+.collab-launch-eyebrow {
+  margin: 0 0 18px;
+  color: var(--color-icon-ember);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.collab-launch-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 480px);
+  height: 400px;
+  min-height: 400px;
+  overflow: hidden;
+}
+
+.collab-launch-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 42px 38px 42px 0;
+  background: color-mix(in srgb, var(--color-accent-peach) 6%, var(--color-background-paper));
+}
+
+.collab-launch-copy h3 {
+  margin: 0 0 16px;
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.collab-launch-copy p {
+  max-width: 360px;
+  margin: 0;
+  color: color-mix(in srgb, var(--color-text-ink) 72%, var(--color-background-paper));
+  font-size: 16px;
+  line-height: 1.8;
+}
+
+.collab-launch-visual {
+  display: block;
+  min-height: 0;
+  padding: 0;
+  border-radius: 20px;
+  overflow: hidden;
+  background: transparent;
+}
+
+.collab-launch-visual img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 20px;
+}
+
+.collab-launch-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 66px;
+  margin-top: 11px;
+}
+
+.collab-launch-count {
+  min-width: 42px;
+  color: color-mix(in srgb, var(--color-text-ink) 56%, transparent);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.collab-launch-dots {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.collab-launch-dots span {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-text-ink) 22%, transparent);
+  transition: width 0.18s;
+}
+
+.collab-launch-dots span.active {
+  width: 20px;
+  border-radius: 6px;
+  background: var(--color-action-sky);
+}
+
+.collab-launch-page-buttons {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-left: auto;
+}
+
+.collab-launch-prev {
+  display: grid;
+  place-items: center;
+  width: 39px;
+  height: 39px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 70%, transparent);
+  border-radius: 10px;
+  background: var(--color-background-paper);
+  color: var(--color-text-ink);
+  cursor: pointer;
+}
+
+.collab-launch-prev:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.collab-launch-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 100px;
+  min-height: 39px;
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--color-text-ink);
+  color: var(--color-background-paper);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.collab-launch-primary:hover {
+  background: var(--color-action-sky);
+  color: #fff;
+}
+
+.collab-launch-enter {
+  animation: collab-launch-enter 180ms ease-out both;
+}
+
+@keyframes collab-launch-enter {
+  from {
+    opacity: 0.45;
+    transform: translateX(7px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .collab-launch-enter {
+    animation: none;
+  }
+}
+
+.collab-launch-dialog button:focus-visible {
+  outline: 2px solid var(--color-action-sky);
+  outline-offset: 3px;
+}
+
+@media (max-width: 760px) {
+  .collab-launch-dialog {
+    padding: 26px 22px 18px;
+    border-radius: 20px;
+  }
+
+  .collab-launch-eyebrow {
+    margin-bottom: 14px;
+  }
+
+  .collab-launch-stage {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    min-height: 0;
+  }
+
+  .collab-launch-copy {
+    min-height: 200px;
+    padding: 25px 24px 25px 0;
+  }
+
+  .collab-launch-copy h3 {
+    font-size: 22px;
+  }
+
+  .collab-launch-copy p {
+    font-size: 14px;
+  }
+
+  .collab-launch-visual {
+    width: 100%;
+    height: auto;
+  }
+
+  .collab-launch-visual img {
+    height: auto;
+    aspect-ratio: 6 / 5;
+  }
+}

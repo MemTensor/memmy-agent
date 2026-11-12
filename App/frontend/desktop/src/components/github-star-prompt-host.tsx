@@ -1,6 +1,7 @@
 /** Hosts the GitHub star prompt across all routes after agent turn completion. */
 import { useEffect, useRef, useState } from "react";
 import { isTaskTokenGiftPromptOpen } from "./task-token-gift-prompt-host.js";
+import { hasCollabLaunchPromptClaimedThisRun, isCollabLaunchPromptOpen } from "../app/collab-launch-prompt-state.js";
 import {
   markGithubStarPromptActioned,
   markGithubStarPromptDismissed,
@@ -30,7 +31,7 @@ export function GithubStarPromptHost() {
     }
     lastHandledCompletionAt.current = completion.at;
 
-    if (open || isTaskTokenGiftPromptOpen()) {
+    if (open || isTaskTokenGiftPromptOpen() || isCollabLaunchPromptOpen() || hasCollabLaunchPromptClaimedThisRun()) {
       return;
     }
 

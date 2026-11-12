@@ -1,6 +1,7 @@
 import type { TaskTokenGiftNotice } from "@memmy/local-api-contracts";
 import { useEffect, useRef, useState } from "react";
 import { isWorkspacePromptSurfaceReady } from "../app/workspace-prompt-readiness.js";
+import { hasCollabLaunchPromptClaimedThisRun, isCollabLaunchPromptOpen } from "../app/collab-launch-prompt-state.js";
 import { featureAnnouncementSeenKey, resolveLaunchGiftPrompt } from "../app/task-token-gift-prompt.js";
 import { useGuidanceDone } from "../app/use-guidance-progress.js";
 import { useOptionalApiClients } from "../app/providers.js";
@@ -64,6 +65,12 @@ export function TaskTokenGiftPromptHost() {
           refreshBalance();
           void clients.account.ackTaskTokenGift({ grantId: notice.grantId })
             .catch((error: unknown) => console.warn("[task-gift] acknowledgement failed:", error));
+          return;
+        }
+        // A grant may finish after the announcement claims this run. Keep the
+        // credited balance current, but leave its unseen notice unacknowledged.
+        if (isCollabLaunchPromptOpen() || hasCollabLaunchPromptClaimedThisRun()) {
+          if (notice.hasGift) refreshBalance();
           return;
         }
         if (!plan.showGift && !plan.showFeatures) return;
