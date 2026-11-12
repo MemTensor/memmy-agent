@@ -6,12 +6,13 @@ import { fileURLToPath } from "node:url";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { I18nProvider } from "../../i18n/i18n-provider.js";
 import type { AgentQueuedMessage } from "../../state/agent-chat-slice.js";
-import { AgentQueuedMessageList, queuedComposerEditDecision } from "../agent-queued-message-list.js";
+import { AgentQueuedMessageList, queuedComposerEditDecision, reorderQueuedMessageIds } from "../agent-queued-message-list.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const stylesSourcePath = resolve(dirname(fileURLToPath(import.meta.url)), "../../styles.css");
+const stylesSourcePath = resolve(dirname(fileURLToPath(import.meta.url)), "../agent-queued-message-list.css");
 
 function queued(
   clientRequestId: string,
@@ -88,9 +89,9 @@ describe("AgentQueuedMessageList", () => {
     vi.restoreAllMocks();
   });
 
-  function render(items: AgentQueuedMessage[]): void {
+  function render(items: AgentQueuedMessage[], onReorder?: (orderedIds: string[]) => void): void {
     act(() => root.render(
-      <AgentQueuedMessageList
+      <I18nProvider language="zh-CN"><AgentQueuedMessageList
         items={items}
         label="Queued questions"
         removeLabel="Remove"
@@ -107,7 +108,8 @@ describe("AgentQueuedMessageList", () => {
         onRemove={onRemove}
         onEdit={onEdit}
         onSteer={onSteer}
-      />
+        onReorder={onReorder}
+      /></I18nProvider>
     ));
   }
 
@@ -192,12 +194,12 @@ describe("AgentQueuedMessageList", () => {
     const actionsRule = styles.match(/\.agent-queue-item__actions\s*\{[^}]*\}/)?.[0] ?? "";
 
     expect(sharedControlRule).toContain("display: inline-flex;");
-    expect(sharedControlRule).toContain("width: 24px;");
-    expect(sharedControlRule).toContain("height: 24px;");
+    expect(sharedControlRule).toContain("width: 26px;");
+    expect(sharedControlRule).toContain("height: 26px;");
     expect(sharedControlRule).toContain("padding: 0;");
     expect(sharedControlRule).not.toContain("color: var(--color-action-sky);");
     expect(actionsRule).toContain("justify-content: flex-end;");
-    expect(actionsRule).toContain("gap: 2px;");
+    expect(actionsRule).toContain("gap: 4px;");
     expect(actionsRule).toContain("margin-left: auto;");
   });
 
@@ -280,5 +282,38 @@ describe("AgentQueuedMessageList", () => {
     expect([...container.querySelectorAll(".agent-queue-item__text")].map((item) => item.textContent))
       .toEqual(["one", "two", "three"]);
     expect(list.scrollTop).toBe(400);
+  });
+
+  it("offers a drag grip and keyboard ordering only while all rows are queued", () => {
+    const onReorder = vi.fn();
+    render([queued("one", "first")], onReorder);
+    expect(container.querySelector(".agent-queue-item__handle svg")).not.toBeNull();
+    expect(container.querySelector("button.agent-queue-item__handle")).toBeNull();
+
+    render([queued("one", "first"), queued("two", "second")], onReorder);
+    const firstGrip = container.querySelector<HTMLButtonElement>("button.agent-queue-item__handle")!;
+    expect(firstGrip.getAttribute("aria-label")).toContain("first");
+    expect(firstGrip.closest("li")?.getAttribute("draggable")).toBe("true");
+    act(() => firstGrip.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+    expect(onReorder).toHaveBeenCalledWith(["two", "one"]);
+
+    render([queued("one", "first", "removing"), queued("two", "second")], onReorder);
+    expect(container.querySelector("button.agent-queue-item__handle")).toBeNull();
+    expect(container.querySelector(".agent-queue-item")?.getAttribute("draggable")).toBe("false");
+  });
+
+  it("moves an ID once and rejects no-op drops", () => {
+    expect(reorderQueuedMessageIds(["a", "b", "c"], "c", "a", false)).toEqual(["c", "a", "b"]);
+    expect(reorderQueuedMessageIds(["a", "b", "c"], "a", "c", true)).toEqual(["b", "c", "a"]);
+    expect(reorderQueuedMessageIds(["a", "b", "c"], "a", "b", false)).toBeNull();
+  });
+
+  it("allows editing a reusable file without appending its filename to the queue text", () => {
+    render([queued("file", "排队", "queued", [{
+      kind: "file", name: "notes.docx", path: "/media/websocket/notes.docx"
+    }])]);
+    expect(container.querySelector(".agent-queue-item__text")?.textContent).toBe("排队");
+    expect(container.querySelector(".agent-queue-item__edit")).not.toBeNull();
+    expect(container.querySelector(".agent-queue-item__media [data-file-kind]")).not.toBeNull();
   });
 });

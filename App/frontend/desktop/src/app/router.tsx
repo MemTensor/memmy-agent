@@ -36,7 +36,7 @@ import {
   type DeferredGuidanceStep
 } from "./routes.js";
 import { persistNickname } from "./nickname.js";
-import { isCampaignPromptSessionReady, isCampaignPromptSurfaceReady } from "./campaign-prompt-state.js";
+import { isWorkspacePromptSessionReady, isWorkspacePromptSurfaceReady } from "./workspace-prompt-readiness.js";
 import { useGuidanceProgress } from "./use-guidance-progress.js";
 import { useOptionalApiClients } from "./providers.js";
 import { useAppState } from "../state/app-state.js";
@@ -64,6 +64,7 @@ import { LoginPage } from "../pages/login-page.js";
 import { writeMemorySubPage } from "../pages/memory-sub-page-storage.js";
 import { OnboardingPage } from "../pages/onboarding-page.js";
 import { PetPage } from "../pages/pet-page.js";
+import { PluginSurfacePage } from "../pages/plugin-surface-page.js";
 import { PetStartupScreen } from "../pages/pet-startup-screen.js";
 import { StartupScreen } from "../pages/startup-screen.js";
 import { TokenDetailPage } from "../pages/token-detail-page.js";
@@ -87,10 +88,10 @@ export function AppRouter(props: { onRetry: () => void }) {
   const { language } = useTranslation();
   const prevPathRef = useRef<AppRoutePath | null>(null);
   const { deferredGuidanceStep } = useGuidanceProgress();
-  const guidanceWorkspaceReady = state.navigation.windowVisible !== false && isCampaignPromptSurfaceReady({
+  const guidanceWorkspaceReady = state.navigation.windowVisible !== false && isWorkspacePromptSurfaceReady({
     startupStatus: state.startup.status,
     currentPath: state.navigation.currentPath,
-  }) && isCampaignPromptSessionReady({
+  }) && isWorkspacePromptSessionReady({
     userMode: state.bootstrap?.app.userMode,
     accountUserId: state.account.userId,
     byokConfigured: Boolean(state.modelConfig?.catalog?.modelAssignments.byok.agent.candidates.length),
@@ -282,7 +283,8 @@ export function AppRouter(props: { onRetry: () => void }) {
 
   return (
     <>
-      {(currentPath === "/main" || (preserveHomeBrowser
+      {(currentPath === "/main" || ((preserveHomeBrowser || state.navigation.recordingRequestId > 0
+        || state.navigation.recordingStatus !== "idle")
         && resolveMainWindowActionRoute(currentPath) === "workspace")) && (
         <div style={currentPath === "/main" ? { display: "contents" } : {
           position: "fixed", left: -10_000, top: 0, width: 800, height: 600,
@@ -392,6 +394,8 @@ function renderRoute(path: AppRoutePath) {
       return <KnowledgePage />;
     case "/memory-sources":
       return <MemoryPage initialSubPage="sources" />;
+    case "/plugin":
+      return <PluginSurfacePage />;
     case "/settings":
       return <SettingsPage />;
     case "/pet":

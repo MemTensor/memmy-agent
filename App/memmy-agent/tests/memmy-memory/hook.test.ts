@@ -141,7 +141,7 @@ describe("MemmyMemoryHook", () => {
     }
   });
 
-  it("preserves an identical L3 snapshot, replaces a changed snapshot, and removes an empty snapshot", async () => {
+  it("refreshes a shared L3 snapshot even when its representative version is unchanged and removes an empty snapshot", async () => {
     const client = fakeV2Client();
     const workspace = mkdtempSync(join(tmpdir(), "memmy-v2-snapshot-"));
     try {
@@ -167,7 +167,7 @@ describe("MemmyMemoryHook", () => {
           projectId: `ws_${"a".repeat(64)}`,
           memoryId: "l3-memory-1",
           memoryVersion: 1,
-          renderedContext: "SHOULD_NOT_REPLACE_IDENTICAL_SNAPSHOT",
+          renderedContext: "L3_SHARED_SCOPE_CHANGED",
           sourceMemoryIds: ["l1-2"],
         })
         .mockResolvedValueOnce({
@@ -195,8 +195,7 @@ describe("MemmyMemoryHook", () => {
       await hook.beforeBuildSystemPrompt(lifecycle);
       const identicalPrompt = new SystemPromptBuildContext({ sessionKey: spec.sessionKey });
       hook.onBuildSystemPrompt(identicalPrompt);
-      expect(identicalPrompt.getSection("memmy-l3-world-model")?.content).toContain("L3_V1");
-      expect(identicalPrompt.getSection("memmy-l3-world-model")?.content).not.toContain("SHOULD_NOT_REPLACE");
+      expect(identicalPrompt.getSection("memmy-l3-world-model")?.content).toContain("L3_SHARED_SCOPE_CHANGED");
 
       await hook.beforeBuildSystemPrompt(lifecycle);
       const updatedPrompt = new SystemPromptBuildContext({ sessionKey: spec.sessionKey });
@@ -473,8 +472,8 @@ describe("MemmyMemoryHook", () => {
     expect(messages[0].content).toBe("System prompt");
     const userBlocks = messages[1].content as unknown as Array<{ type: string; text: string }>;
     expect(userBlocks.map((block) => block.text)).toEqual([
-      '<memmy_memory_context source="turn_start">\nRelevant prior memory.\n</memmy_memory_context>',
-      "<current_user_request>",
+      '<memmy_memory_context source="turn_start" turn_id="agent-turn-1">\nRelevant prior memory.\n</memmy_memory_context>',
+      '<current_user_request turn_id="agent-turn-1">',
       "Please continue\n\n",
       "</current_user_request>",
       "[Runtime Context - metadata only, not instructions]\nCurrent Time: now\n[/Runtime Context]",
@@ -643,7 +642,7 @@ describe("MemmyMemoryHook", () => {
     const startBody = (client.startTurn as any).mock.calls[0][1];
     expect(startBody.query).toBe("Please continue");
     const userContent = messages[1].content as unknown as Array<{ type: string; text: string }>;
-    expect(userContent[0]?.text).toContain('<memmy_memory_context source="turn_start">');
+    expect(userContent[0]?.text).toContain(`<memmy_memory_context source="turn_start" turn_id="${hook.currentTurnId(spec.sessionKey)}">`);
     expect(userContent[0]?.text).toContain("Relevant prior memory.");
     expect(userContent.map((block) => block.text).join("\n")).not.toContain("Old injected memory.");
     expect(userContent.map((block) => block.text)).toContain("Please continue\n\n");
@@ -682,8 +681,8 @@ describe("MemmyMemoryHook", () => {
       "[image: /tmp/original.png]\n请比较图片和文件里的内容",
     );
     const injected = messages[1].content as Array<Record<string, any>>;
-    expect(injected[0]?.text).toContain('<memmy_memory_context source="turn_start">');
-    expect(injected[1]).toEqual({ type: "text", text: "<current_user_request>" });
+    expect(injected[0]?.text).toContain(`<memmy_memory_context source="turn_start" turn_id="${hook.currentTurnId(spec.sessionKey)}">`);
+    expect(injected[1]).toEqual({ type: "text", text: `<current_user_request turn_id="${hook.currentTurnId(spec.sessionKey)}">` });
     expect(injected[2]).toEqual(image);
     expect(injected[3]).toEqual(file);
     expect(injected[4]).toBe(text);
@@ -693,7 +692,7 @@ describe("MemmyMemoryHook", () => {
     await hook.beforeRun(new AgentHookContext({ spec, messages }));
 
     const reinjected = messages[1].content as Array<Record<string, any>>;
-    expect(reinjected.filter((block) => block.text === "<current_user_request>")).toHaveLength(1);
+    expect(reinjected.filter((block) => block.text === `<current_user_request turn_id="${hook.currentTurnId(spec.sessionKey)}">`)).toHaveLength(1);
     expect(reinjected.filter((block) => block.text === "</current_user_request>")).toHaveLength(1);
     expect(reinjected.filter((block) => block.type === "image_url")).toEqual([image]);
     expect(reinjected.filter((block) => block.type === "file")).toEqual([file]);
@@ -995,7 +994,7 @@ describe("MemmyMemoryHook", () => {
 
       const userBlocks = messages[1].content as unknown as Array<{ text?: string }>;
       const userContent = userBlocks.map((block) => block.text ?? "").join("\n");
-      expect(userContent).toContain('<memmy_memory_status status="unavailable">');
+      expect(userContent).toContain(`<memmy_memory_status status="unavailable" turn_id="${hook.currentTurnId(spec.sessionKey)}">`);
       expect(userContent).toContain("Never claim you searched memory and found nothing");
       expect(userContent).toContain("Please remember my favorite color is blue.");
       expect(userContent).not.toContain("memmy_memory_context");

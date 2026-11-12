@@ -586,7 +586,8 @@ export function isAgentRuntimeBridgeRoute(path: AppRoutePath): boolean {
     || path === "/tools"
     || path === "/settings"
     || path === "/memory"
-    || path === "/memory-sources";
+    || path === "/memory-sources"
+    || path === "/plugin";
 }
 
 /** Confirm reducer consumption, independently of whether a notification is shown. */

@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { appActions } from "../../state/app-actions.js";
+import { createInitialAppState } from "../../state/app-reducer.js";
 import { MemoryPage } from "../memory-page.js";
 
 const mocks = vi.hoisted(() => ({
@@ -17,7 +18,7 @@ vi.mock("../../app/providers.js", () => ({
 }));
 
 vi.mock("../../state/app-state.js", () => ({
-  useAppState: () => ({ state: null, dispatch: mocks.dispatch })
+  useAppState: () => ({ state: createInitialAppState(), dispatch: mocks.dispatch })
 }));
 
 vi.mock("../../analytics/use-analytics.js", () => ({

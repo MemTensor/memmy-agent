@@ -1,100 +1,65 @@
 ---
-title: 入门指南
-description: 本页带你从零完成 Memmy 的安装、首次配置和第一轮对话。
+title: 安装并开始使用
+description: 安装 Memmy，找回一段过去的工作，再接着做下去。
 icon: Rocket
 ---
 
-## 你需要准备
+import welcomeScreen from "../../assets/welcome-desktop-full.png";
+import permissionScreen from "../../assets/first-permission-full.jpg";
 
-- macOS 或 Windows 桌面环境（桌面端路径）。
-- 或 Node.js `>=22` + npm（CLI / 源码路径）。
-- API Key 模式需要至少一个模型 Provider 的 API Key。
+## 1. 安装并完成设置
 
-<Callout type="idea">
-  不确定选哪种模式？账号模式开箱即用并附带平台体验 Token；API Key 模式的数据与额度完全由你掌控。两种模式的数据都以本地优先方式保存。
-</Callout>
+下载安装包并打开 Memmy。在欢迎页输入手机号，点击「获取验证码」，填入短信验证码后点击「登录 / 注册」。
 
-## 快速设置
+<MemmyDownload />
 
-Linux x64 或 arm64 的纯终端用户需先安装 Node.js 22.23.4+（22.x）、24.22.1+（24.x）或 26.12.1+（26.x），并确认 systemd 用户会话可用。安装器不接受其他主版本，然后执行：
+<ProductScreenshot src={welcomeScreen} alt="Memmy 完整欢迎界面" caption="账号登录在中间的卡片中；自定义 API Key 入口位于下方。点击图片可在本页放大查看。" />
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
-memmy
-```
+<details>
+<summary>使用自己的 API Key（无需注册）</summary>
 
-安装器会以 `memmy-memory.service` 启动本地 Memory Service。如果尚未配置可用模型，首次裸执行 `memmy` 会打开现有配置向导；保存后启用 `memmy-gateway.service`，等待就绪并进入 TUI。两个 `systemd --user` 服务都不会因退出 TUI 或关闭终端而停止，并会在以后登录时自动启动；安装器不启用 linger。安装器 launcher 还会刷新权限为 `0600` 的私有文件 `~/.memmy/systemd/gateway.env`，确保配置引用的凭据和终端 `PATH` 对常驻 Gateway 可用。
+在欢迎页选择「使用自定义大模型 API Key（无需注册）」：
 
-可用 `systemctl --user status memmy-memory.service` 和 `systemctl --user status memmy-gateway.service` 查看状态。安装器不会修改外部 Agent；只有用户明确执行 `memmy-memory init` 或 `memmy-memory init --agent <agent>` 时，才安装对应的 Memory 集成。
+1. 选择服务商，填写模型 ID、API 地址和 API Key。
+2. 选择用于记忆检索的 Embedding 方式，并为记忆摘要和技能进化选择模型。
+3. 语音识别和生图暂时不用可以跳过。
+4. 点击「测试连接」，成功后保存。
 
-下载并安装 Memmy 桌面应用。首次启动会自动完成：
+</details>
 
-1. 设置 `MEMMY_HOME` 和 `MEMMY_CONFIG`。
-2. 安装内置 CLI，并为已授权的 Agent 准备 Hook、插件和配套 Skill。
-3. 准备 `~/.memmy/config.yaml`、workspace 和 Memory SQLite。
-4. 启动 Memory 服务和 Agent gateway。
+## 2. 带入过去的对话
 
-```bash
-cd App/memmy-agent
-npm install
-npm run build
-node dist/main.js --help
-```
+首次设置会询问是否读取其他 AI 工具的历史对话。想先体验记忆，可以选「仅允许扫描」；希望同时为受支持的工具安装记忆接入组件，可以选「全部允许」。暂时不导入，选「不允许」。
 
-在欢迎页选择：
+<ProductScreenshot src={permissionScreen} alt="Memmy 首次导入历史对话的完整授权界面" caption="三个选项位于窗口底部；之后可在「记忆管理 → 跨 Agent 接入」调整。" />
 
-- **账号模式**：手机号或邮箱验证码登录，使用平台体验 Token。
-- **API Key 模式**：分三步配置主模型 + Embedding、记忆相关模型、可选的 ASR 与图像生成模型，每一步都提供真实连接测试。
+进入工作台后，打开「记忆管理 → 跨Agent接入」，找到你用过的工具。首次点击「首次扫描」，已经同步过则点击「同步新增」。等待摘要和索引处理完成，在「记忆」中搜索一个熟悉的项目名，打开一条记录。
 
-```bash
-memmy onboard            # 终端菜单式配置模型、Provider、工具
-memmy onboard --defaults # 非交互式初始化配置和 workspace
-memmy status             # 检查配置与运行状态
-```
+<details>
+<summary>没有历史对话，或暂时不想导入</summary>
 
-进入主工作台，在输入框发送第一条消息。`Enter` 发送，`Shift + Enter` 换行，输入 `/` 可打开 Slash command 面板。
+先在 Memmy 新建任务，发送一段信息。
 
-```bash
-memmy agent --message "你好，介绍一下当前工作区"
-# 或直接进入交互式聊天
-memmy
-```
+在「记忆管理 → 记忆」找到相关记忆后，另开一个新任务，继续对话。
 
-打开「记忆管理 → 跨Agent接入」，扫描 Cursor、Claude Code、Codex、OpenCode、OpenClaw、Hermes、WorkBuddy、Pi 和 qwenwork 的历史对话并入库。首次引导会让你选择是否只扫描，或同时为检测到的 Agent 安装对应的 Hook、插件或 Skill。
+</details>
 
-接入后，Hook 或插件会在新对话中自动采集完整回合并注入相关记忆；WorkBuddy、Pi 和 qwenwork 则通过 Skill 按需读写记忆。详见 [Agent 来源与扫描](/docs/memory/sources)。
+## 3. 让 Memmy 找回背景
 
-内置列表之外的 Agent 可以在 **高级操作 → 添加其他 Agent** 中接入。你可以选择 `kimi code`、`zcode`、`minimax code`、`coder`，或输入其他名称；Memmy 会自动发现历史位置与格式、安装 Skill 并完成首次导入。
+新建一个任务，参考下面这段话，找回记忆：
 
-打开「工具」页：
+<PromptExample composer={true} prompt="你还记得之前做的几场用户访谈吗？请帮我规划一场 30 分钟的团队会议，主题是用户反馈整改。" />
 
-- 消息渠道：Telegram、Discord、iMessage、WeChat、Feishu、DingTalk。
-- 托管集成：GitHub、Gmail、Notion、Slack、Linear、Jira 等，走 OAuth 授权。
+看看回答是否对应你记得的事情。若没找到，回到「记忆管理 → 记忆」确认该记录已处理完成，再用记录里的具体名称提问。
 
-## 高级：把 Memmy 当本地 API 用
+能在新任务中找回过去的内容，并用它继续工作，就完成了第一次记忆体验。
 
-```bash
-memmy serve
-```
+## 4. 工具与连接
 
-默认监听 `http://127.0.0.1:18990`，提供 `GET /health`、`GET /v1/models`、`POST /v1/chat/completions`，可被任何支持 OpenAI Chat Completions 协议的工具复用。
+Memmy 可以通过集成工具接入你工作时使用的服务和资料，例如 Notion、GitHub 等。你也可以连接钉钉、飞书、微信等聊天渠道，给 Memmy 布置任务，或安装插件，把一项完整能力加入当前任务。当一项任务依赖对话以外的信息、要在另一个系统里完成操作，或需要重复同一套流程时，就用它们。
 
-## 高级：环境变量
+在左侧打开「连接与工具」。接着看 [连接外部工具](/docs/tools/integrations)、[连接聊天渠道](/docs/channels) 或 [插件](/docs/plugins/overview)。
 
-| 变量 | 作用 |
-| --- | --- |
-| `MEMMY_HOME` | Memmy 数据主目录（默认 `~/.memmy`） |
-| `MEMMY_CONFIG` | 主配置文件路径（默认 `~/.memmy/config.yaml`） |
-| `MEMMY_MEMORY_TOKEN` / `MEMORY_SERVICE_TOKEN` | Memory HTTP 服务的 bearer token |
+## 相关说明
 
-配置文件中的 `${ENV_NAME}` 会被自动解析，避免把 API Key 写死在配置里。
-
-## 接下来做什么
-
-会话、附件、语音与 Slash command · Agent 扫描与 Hook/插件接入 · 三步配置详解 · 常驻桌面的轻量入口
-
-## 相关内容
-
-- [默认端口](/docs/reference/ports)
-- [安全与隐私](/docs/security/security)
-- [常见问题](/docs/help/faq)
+[遇到问题时排查](/docs/help/faq)

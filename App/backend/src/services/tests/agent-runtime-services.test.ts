@@ -70,7 +70,7 @@ describe("agent runtime services", () => {
       });
   });
 
-  it("adds the current account user to panel memory requests", async () => {
+  it("omits account UID for management reads while preserving it for deletion", async () => {
     const baseClient = createClient();
     const contexts: unknown[] = [];
     const memoryClient: MemoryClient = {
@@ -95,8 +95,8 @@ describe("agent runtime services", () => {
     await service.deleteTask("episode-1", runtimeCtx());
 
     expect(contexts).toEqual([
-      expect.objectContaining({ adapterId: "cursor/main", userId: "account-user-1" }),
-      expect.objectContaining({ adapterId: "cursor/main", userId: "account-user-1" }),
+      expect.objectContaining({ adapterId: "cursor/main", userId: undefined }),
+      expect.objectContaining({ adapterId: "cursor/main", userId: undefined }),
       expect.objectContaining({ adapterId: "cursor/main", userId: "account-user-1" })
     ]);
   });

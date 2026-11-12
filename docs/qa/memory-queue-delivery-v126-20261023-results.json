@@ -1,0 +1,382 @@
+{
+  "date": "2026-10-23",
+  "branch": "test-memory-queue-v1.2.6",
+  "targetBranch": "upstream/v1.2.6",
+  "codeRevision": "a960abe84e523aeb6865eead836e482b05758096",
+  "targetRevision": "843d9d8712e3969b362bf1bb17af7872f2f2e080",
+  "status": "PR preparation only; user acceptance needed for observed latency and exit cleanup limits. No push or PR.",
+  "package": {
+    "desktopVersion": "1.2.3",
+    "runtime": {
+      "version": "2.1.6",
+      "buildId": "f06ace64abaa318259c5f1263f575c249c756aca894910ed83fe116dbaaaa3ce",
+      "schemaVersion": 12,
+      "protocolVersion": 1,
+      "target": "darwin-arm64",
+      "entrypoint": "dist/src/server/index.js",
+      "viewer": "dist/viewer/index.html"
+    },
+    "dmgSha256": "eeeea9c25639d24cda7ab455c28e32b2824a833a6ca76c63548fc025925b76dd",
+    "diskImageVerified": true,
+    "memoryModules": [
+      {
+        "file": "src/service/session/session-turn-service.js",
+        "sourceBuild": "5d3d4de66d1f402e9fc2d2a2fcd26b4c5d0e59a4cb5dd7034167bc91d4ecd5e1",
+        "installed": "5d3d4de66d1f402e9fc2d2a2fcd26b4c5d0e59a4cb5dd7034167bc91d4ecd5e1"
+      },
+      {
+        "file": "src/service/worker/job-handlers.js",
+        "sourceBuild": "62c9a0b440c0f1f9519458d049723f2fe2132146f7b7b5a25aec60fe1471235c",
+        "installed": "62c9a0b440c0f1f9519458d049723f2fe2132146f7b7b5a25aec60fe1471235c"
+      },
+      {
+        "file": "src/service/worker/job-policy-registry.js",
+        "sourceBuild": "c622e38df1c596cf9094397186b53aad3a533dda7a3e8e08e07cd5c91ee6226c",
+        "installed": "c622e38df1c596cf9094397186b53aad3a533dda7a3e8e08e07cd5c91ee6226c"
+      },
+      {
+        "file": "src/service/worker/fair-worker-queue.js",
+        "sourceBuild": "c8bf14f1a995191df49d50f60771af156f512856fa90d4d4f8dddd1a7c6a01b9",
+        "installed": "c8bf14f1a995191df49d50f60771af156f512856fa90d4d4f8dddd1a7c6a01b9"
+      },
+      {
+        "file": "src/service/worker/admission-lane-queue-selector.js",
+        "sourceBuild": "6afa4f7bc31b1af2d7298c908d2c0ae57417623345ba07288e3b5ad427a9c4b2",
+        "installed": "6afa4f7bc31b1af2d7298c908d2c0ae57417623345ba07288e3b5ad427a9c4b2"
+      },
+      {
+        "file": "src/service/worker/worker-runner.js",
+        "sourceBuild": "a827b43938a960ef70f0183d53390c97a4550f9f0544dccc60580650f3b5ad6e",
+        "installed": "a827b43938a960ef70f0183d53390c97a4550f9f0544dccc60580650f3b5ad6e"
+      },
+      {
+        "file": "src/storage/queue-scheduling-store.js",
+        "sourceBuild": "febe2752b960f2b3225119d4e6b1ad46bb5490848c5629abaa05fc9b644ab006",
+        "installed": "febe2752b960f2b3225119d4e6b1ad46bb5490848c5629abaa05fc9b644ab006"
+      },
+      {
+        "file": "src/storage/repositories.js",
+        "sourceBuild": "11ceda0a9e06aad8d4ae12b340743c7fcb37cb3f1c692b97329e4d55099691fe",
+        "installed": "11ceda0a9e06aad8d4ae12b340743c7fcb37cb3f1c692b97329e4d55099691fe"
+      }
+    ],
+    "agentModules": [
+      {
+        "file": "core/agent-runtime/tools/parameter-aliases.js",
+        "sourceBuild": "e008f6715483eef7d3c327b33b647258cd5e28a4529fcb41513984fa2ff86724",
+        "installed": "e008f6715483eef7d3c327b33b647258cd5e28a4529fcb41513984fa2ff86724"
+      },
+      {
+        "file": "core/agent-runtime/tools/exec-session.js",
+        "sourceBuild": "7b5902ec206da677bc1af53dc11be717b47a815ba38632c7176c9cb6b810455e",
+        "installed": "7b5902ec206da677bc1af53dc11be717b47a815ba38632c7176c9cb6b810455e"
+      },
+      {
+        "file": "core/agent-runtime/tools/filesystem.js",
+        "sourceBuild": "b0da296ef3a68a201448d016609ac3b4372cd3ce233a006ece12954326c1ce86",
+        "installed": "b0da296ef3a68a201448d016609ac3b4372cd3ce233a006ece12954326c1ce86"
+      },
+      {
+        "file": "core/agent-runtime/tools/shell.js",
+        "sourceBuild": "45c765e05b60d04df86246d94566884391d236eddcf7d0db46e2c936ff746256",
+        "installed": "45c765e05b60d04df86246d94566884391d236eddcf7d0db46e2c936ff746256"
+      },
+      {
+        "file": "providers/factory.js",
+        "sourceBuild": "f9f1217601723e88b01f7db8729bd454f33ed23b64b0aaa42b2879c2b76c1f50",
+        "installed": "f9f1217601723e88b01f7db8729bd454f33ed23b64b0aaa42b2879c2b76c1f50"
+      },
+      {
+        "file": "providers/anthropic-provider.js",
+        "sourceBuild": "7944e520b695f52e4737edc948ea1defb2828786343bc4b43d9220dee2908a17",
+        "installed": "7944e520b695f52e4737edc948ea1defb2828786343bc4b43d9220dee2908a17"
+      },
+      {
+        "file": "providers/openai-compat-provider.js",
+        "sourceBuild": "bd51ae8133713cab12336a576278d7541aca219c97f3e4588c180235eb02da91",
+        "installed": "bd51ae8133713cab12336a576278d7541aca219c97f3e4588c180235eb02da91"
+      }
+    ]
+  },
+  "automated": {
+    "lint": "passed",
+    "typecheck": "passed",
+    "agentTypecheck": "passed",
+    "rootTest": "passed",
+    "agent": {
+      "passed": 7256,
+      "skipped": 80
+    },
+    "memory": {
+      "passed": 1812,
+      "skipped": 1
+    },
+    "migrations": {
+      "passed": 279,
+      "skipped": 1
+    },
+    "backend": 1109,
+    "frontend": 2452,
+    "electron": {
+      "passed": 1259,
+      "skipped": 126
+    }
+  },
+  "controlledCloudLoad": {
+    "initial": {
+      "main": 10193,
+      "retry": 64
+    },
+    "window": 36,
+    "bodyBytes": 32768,
+    "counts": {
+      "interactive": 12,
+      "repair_retry": 9,
+      "import": 6,
+      "evolution": 6,
+      "maintenance": 3
+    },
+    "elapsedMs": 743.46,
+    "timerMs": 158.72,
+    "peakJobs": 4,
+    "peakRequests": 2,
+    "peakEmbeddingRequests": 1,
+    "badQueued": 0
+  },
+  "controlledSharedProvider": {
+    "backlog": 200,
+    "delay": 10,
+    "done": {
+      "import": 50,
+      "evolution": 50
+    },
+    "maintenance": 48,
+    "completed": 100,
+    "milestones": [
+      {
+        "completed": 10,
+        "import": 6,
+        "evolution": 4,
+        "maintenance": 4
+      },
+      {
+        "completed": 20,
+        "import": 10,
+        "evolution": 10,
+        "maintenance": 7
+      },
+      {
+        "completed": 30,
+        "import": 16,
+        "evolution": 14,
+        "maintenance": 11
+      },
+      {
+        "completed": 40,
+        "import": 20,
+        "evolution": 20,
+        "maintenance": 16
+      },
+      {
+        "completed": 50,
+        "import": 26,
+        "evolution": 24,
+        "maintenance": 21
+      },
+      {
+        "completed": 60,
+        "import": 30,
+        "evolution": 30,
+        "maintenance": 26
+      },
+      {
+        "completed": 70,
+        "import": 36,
+        "evolution": 34,
+        "maintenance": 31
+      },
+      {
+        "completed": 80,
+        "import": 40,
+        "evolution": 40,
+        "maintenance": 36
+      },
+      {
+        "completed": 90,
+        "import": 46,
+        "evolution": 44,
+        "maintenance": 42
+      },
+      {
+        "completed": 100,
+        "import": 50,
+        "evolution": 50,
+        "maintenance": 48
+      }
+    ]
+  },
+  "actualLocalModel": {
+    "passed": true,
+    "imports": 2,
+    "summarySucceeded": 2,
+    "embeddingSucceeded": 2,
+    "embeddingDimensions": 768,
+    "requestPeak": 1,
+    "elapsedMs": 50563.34
+  },
+  "installedScanAndLive": {
+    "revision": "a960abe84e523aeb6865eead836e482b05758096",
+    "checkedAt": "2026-10-23T06:36:00.130Z",
+    "initialHistory": 13000,
+    "finalHistory": 13000,
+    "scan": {
+      "running": false,
+      "jobId": "agent-scan-mvkldsbj-02b8de52",
+      "sourceId": "claude_code",
+      "mode": "full",
+      "progress": {
+        "sourceId": "claude_code",
+        "phase": "done",
+        "current": 26000,
+        "total": 26000,
+        "message": "Imported 0 memories and 0 skills"
+      },
+      "startedAt": "2026-10-23T06:31:41.215Z",
+      "completedAt": "2026-10-23T06:34:07.986Z",
+      "error": null
+    },
+    "id": "trace_15326b81430eee449b1f",
+    "processing": {
+      "state": "ready",
+      "stage": null,
+      "error_code": null
+    },
+    "jobs": [
+      {
+        "job_type": "trace_summary",
+        "queue_lane": "interactive",
+        "status": "succeeded",
+        "attempts": 1
+      },
+      {
+        "job_type": "embedding",
+        "queue_lane": "interactive",
+        "status": "succeeded",
+        "attempts": 1
+      },
+      {
+        "job_type": "reflection",
+        "queue_lane": "evolution",
+        "status": "queued",
+        "attempts": 0
+      }
+    ],
+    "vectors": [
+      {
+        "vector_field": "vec_summary",
+        "embedding_dim": 384
+      }
+    ],
+    "readyObservedAfterMs": 125779.3,
+    "backlogAtReady": 11944,
+    "healthLatencyMs": {
+      "samples": 60,
+      "median": 29.14,
+      "p95": 1067.46,
+      "max": 1600.52
+    },
+    "originalDriverPassed": false,
+    "originalDriverError": "AssertionError [ERR_ASSERTION]: Full rescan did not finish",
+    "observation": "The original combined scan+live driver exhausted its 60 polling rounds before full rescan completion. The same run later completed without resetting data, reconfiguring delays or rerunning. Native ready was observed after125.779s; full rescan completed after146.771s. This is completion evidence, not an assertion of a126s latency target.",
+    "completionChecksPassed": true
+  },
+  "retention": {
+    "finalHistory": 13000,
+    "quickCheck": "ok",
+    "oldCompleteSeedHash": "df625239a98a67faf03de2cef9e84bdf3946913d11ddabddd117a35ef54e1f37",
+    "oldCompleteSeedIdentical": true,
+    "rawSourceSamples": [
+      {
+        "id": "trace_ddfc77f3fae39eb9c0d7",
+        "comparedToPrePackageBackup": true,
+        "rawTurns": 1,
+        "sourceTextHash": "1df2da248f3f491b7acde5afc3c45e6a4b6c06e8a37b9e165691f02ba6656a80",
+        "identical": true
+      },
+      {
+        "id": "trace_a4b69831d9e5850172f1",
+        "comparedToPrePackageBackup": true,
+        "rawTurns": 1,
+        "sourceTextHash": "b5840c0e704e5f248a4aea587ea321b93a4fdd27cd1d0c1a49564049cb1f8931",
+        "identical": true
+      },
+      {
+        "id": "trace_e783a65ec75de0309b5c",
+        "comparedToPrePackageBackup": true,
+        "rawTurns": 1,
+        "sourceTextHash": "92a69df8924592eae6b9f31f5a7e468add59506b61dc984ed5b0d4ebb80586a6",
+        "identical": true
+      },
+      {
+        "id": "trace_32b734a530bc0fe32a62",
+        "comparedToPrePackageBackup": true,
+        "rawTurns": 1,
+        "sourceTextHash": "3c25694e54b950d993faeb07a483e5d323baa1356dc75537edc88a2de96bca12",
+        "identical": true
+      },
+      {
+        "id": "trace_15326b81430eee449b1f",
+        "comparedToOriginalApiInput": true,
+        "rawTurns": 1,
+        "sourceTextHash": "aa099a844366aee5e976b9b15387bda194f1cd30fd54575856fc54f1ef098856",
+        "identical": true
+      }
+    ],
+    "rawSourcePassed": true,
+    "latestMemory": {
+      "id": "trace_15326b81430eee449b1f",
+      "state": {
+        "state": "ready",
+        "stage": null,
+        "error_code": null
+      },
+      "vectors": [
+        {
+          "vector_field": "vec_summary",
+          "embedding_dim": 384
+        }
+      ]
+    },
+    "independentModelAudit": "passed"
+  },
+  "postReflectionRebuild": {
+    "id": "trace_e783a65ec75de0309b5c",
+    "beforeState": "embedding_pending",
+    "after": {
+      "state": "ready",
+      "stage": null,
+      "error_code": null
+    },
+    "leased": 1,
+    "succeeded": 1,
+    "failed": 0,
+    "vectors": [
+      {
+        "vector_field": "vec_summary",
+        "embedding_dim": 384,
+        "embedding_model": "stage8-embedding-384"
+      }
+    ],
+    "passed": true,
+    "method": "Actual packaged desktop Memory HTTP worker/run target filter; no direct database write, no priority or delay changes"
+  },
+  "knownLimits": [
+    "WRR counts opportunities and is non-preemptive. One installed scenario reached ready after125.779s under multiple42s reflection jobs; no product latency SLO agreed.",
+    "Original combined monitoring exhausted its60-round budget before same-run rescan completion; recorded as failed, with subsequent completion observation separate.",
+    "Desktop quit5s cleanup fallback reproduced with Cmd-Q only, without window-reopen interference.",
+    "Derived memory_value/summary and vectors can legitimately change after reflection; original raw input checks and post-reflection rebuild checked separately from static seed preservation.",
+    "No Aging promotion or full queue metrics/ETA UI; no cancelled producer backpressure work restored.",
+    "Only macOSarm64 and actual local models tested; no Windows,x64 or real cloud Provider.",
+    "Existing FTS/long-conversation costs and cosmetic DMG background warning remain."
+  ]
+}

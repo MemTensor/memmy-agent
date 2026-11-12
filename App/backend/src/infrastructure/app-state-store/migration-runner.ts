@@ -10,7 +10,8 @@ export interface MigrationResult {
 }
 
 const MIGRATION_ALIASES: Record<string, readonly string[]> = {
-  "0015-asr-model-config.sql": ["0015-asr-config.sql"]
+  "0015-asr-model-config.sql": ["0015-asr-config.sql"],
+  "0029-plugin-uninstall-preferences.sql": ["0030-plugin-uninstall-preferences.sql"]
 };
 
 export function runMigrations(

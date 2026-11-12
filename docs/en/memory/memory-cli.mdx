@@ -16,4 +16,19 @@ memmy-memory delete <id>
 
 Connects to `http://127.0.0.1:18960` by default. Use `--url`, `--token`, `--config`, `--source`, and `--user-id` to specify the target service, authentication, calling source, and user namespace.
 
-Also supports reload-config, session open/close, turn start/complete, and raw calls.
+Also supports `reload-config`, `session open/close`, `turn start/complete`, and `raw`.
+
+Service management:
+
+```bash
+memmy-memory install
+memmy-memory upgrade
+memmy-memory stop
+memmy-memory service start
+memmy-memory service stop
+memmy-memory service status
+memmy-memory service repair-launcher
+memmy-memory serve
+```
+
+`install` installs and starts a standalone Memory service, `upgrade` updates the service and installed Agent adapters, and `stop` stops the background service. `service repair-launcher` repairs a legacy Windows launcher. `serve` only explains how to connect to an external Memory service; it does not listen on another local port.

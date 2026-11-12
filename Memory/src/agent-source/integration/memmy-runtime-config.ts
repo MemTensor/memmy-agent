@@ -19,7 +19,7 @@ export async function readMemmyMemoryServiceConfig(configPath: string): Promise<
   const memmyMemory = toMutableRecord(root.memmyMemory);
   const storage = toMutableRecord(memmyMemory.storage);
   const legacyStorage = toMutableRecord(root.storage);
-  const app = toMutableRecord(root.app);
+
   return {
     endpoint: normalizeString(storage.endpoint) ||
       normalizeString(memmyMemory.endpoint) ||
@@ -28,7 +28,7 @@ export async function readMemmyMemoryServiceConfig(configPath: string): Promise<
     token: normalizeString(storage.token) ||
       normalizeString(memmyMemory.token) ||
       normalizeString(legacyStorage.token),
-    userId: normalizeString(app.userId) || normalizeString(memmyMemory.userId) || "local-user",
+    userId: "__memmy_device_memory__",
     workspaceHostId: deriveWorkspaceHostId(getOrCreateInstallationId())
   };
 }

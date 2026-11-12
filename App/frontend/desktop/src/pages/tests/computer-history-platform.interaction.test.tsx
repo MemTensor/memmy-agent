@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createInitialAppState } from "../../state/app-reducer.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { MemoryPage, type MemorySubPageId } from "../memory-page.js";
 import { HISTORY_PERMISSION_SETUP_KEY } from "../memory/computer-history-permission-state.js";
@@ -9,7 +10,7 @@ import { WECHAT_PERMISSION_RETURN_KEY } from "../memory/computer-history-wechat-
 
 const mocks = vi.hoisted(() => ({ historyPage: vi.fn(), dispatch: vi.fn(), track: vi.fn() }));
 vi.mock("../../app/providers.js", () => ({ useApiClients: () => ({ clients: null }) }));
-vi.mock("../../state/app-state.js", () => ({ useAppState: () => ({ state: null, dispatch: mocks.dispatch }) }));
+vi.mock("../../state/app-state.js", () => ({ useAppState: () => ({ state: createInitialAppState(), dispatch: mocks.dispatch }) }));
 vi.mock("../../analytics/use-analytics.js", () => ({ useAnalytics: () => ({ track: mocks.track, ready: false }) }));
 vi.mock("../memory/overview-sub-page.js", () => ({ OverviewSubPage: () => "Overview content" }));
 vi.mock("../memory/computer-history-sub-page.js", () => ({

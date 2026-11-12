@@ -110,7 +110,6 @@ export const MANAGED_INTEGRATION_TOOLKITS: readonly IntegrationCatalogItem[] = O
   { slug: "splitwise", name: "Splitwise", authKind: "oauth", isChannel: false },
   { slug: "square", name: "Square", authKind: "oauth", isChannel: false },
   { slug: "stack_exchange", name: "Stack Exchange", authKind: "oauth", isChannel: false },
-  { slug: "strava", name: "Strava", authKind: "oauth", isChannel: false },
   { slug: "stripe", name: "Stripe", authKind: "oauth", isChannel: false },
   { slug: "supabase", name: "Supabase", authKind: "oauth", isChannel: false },
   { slug: "ticketmaster", name: "Ticketmaster", authKind: "oauth", isChannel: false },

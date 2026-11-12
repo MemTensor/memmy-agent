@@ -1,8 +1,12 @@
+import { installSourceChanges } from "./source-changes.js";
+import { installFtsMappings, writeFts } from "./fts-maintenance.js";
+import { installPanelSafetyTriggers } from "./panel-security.js";
 import type Database from "better-sqlite3";
+import { installQueueSchedulingSchema } from "./queue-scheduling-schema.js";
 import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 
-export const SCHEMA_VERSION = 9;
-export const SCHEMA_MIGRATION_ID = "009_token_usage_outbox";
+export const SCHEMA_VERSION = 15;
+export const SCHEMA_MIGRATION_ID = "015_isolated_panel_cache";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -61,6 +65,30 @@ const statements = [
     ON memories (content_hash, memory_layer)`,
   `CREATE INDEX IF NOT EXISTS idx_memories_key_layer
     ON memories (memory_key, memory_layer)`,
+  // Read-only recall grouping needs the original turn, never a historical row rewrite.
+  `CREATE INDEX IF NOT EXISTS idx_memories_recall_turn
+    ON memories (COALESCE(json_extract(info_json,'$.turn_id'),
+      json_extract(properties_json,'$.internal_info.trace.turn_id')), id)
+    WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_memories_panel_created
+    ON memories (memory_layer, created_at DESC, updated_at DESC, id DESC)
+    WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_memories_panel_status_created
+    ON memories (memory_layer, status, created_at DESC, updated_at DESC, id DESC)
+    WHERE deleted_at IS NULL`,
+
+  `CREATE INDEX IF NOT EXISTS idx_memories_panel_observation_pending
+    ON memories (json_extract(properties_json, '$.internal_info.memory_kind'), created_at DESC, id DESC)
+    WHERE deleted_at IS NULL AND status = 'activated' AND memory_layer = 'L1'
+      AND json_extract(properties_json, '$.internal_info.memory_kind') = 'observed_activity'
+      AND json_type(properties_json, '$.internal_info.external_evidence') = 'object'
+      AND COALESCE(json_extract(properties_json, '$.internal_info.observation_memory.schema_version'), 0) < 1`,
+
+  `CREATE INDEX IF NOT EXISTS idx_memories_observation_config_pending ON memories(id)
+    WHERE deleted_at IS NULL
+      AND json_extract(properties_json, '$.internal_info.memory_kind') = 'observed_activity'
+      AND json_type(properties_json, '$.internal_info.observation_memory') = 'object'
+      AND json_extract(properties_json, '$.internal_info.observation_memory.status') = 'pending'`,
 
   `CREATE TABLE IF NOT EXISTS l3_world_model_scopes (
     scope_key TEXT PRIMARY KEY,
@@ -103,6 +131,10 @@ const statements = [
     ON user_memories (user_id, status, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_user_memories_source_turn
     ON user_memories (source_turn_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_user_memories_panel_updated
+    ON user_memories (user_id, updated_at DESC, id DESC) WHERE deleted_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_user_memories_panel_status_updated
+    ON user_memories (user_id, status, updated_at DESC, id DESC) WHERE deleted_at IS NULL`,
   `CREATE INDEX IF NOT EXISTS idx_user_memories_exact_text
     ON user_memories (user_id, normalized_user_text_hash, status, updated_at DESC)`,
   `CREATE VIRTUAL TABLE IF NOT EXISTS user_memories_fts USING fts5 (
@@ -199,6 +231,10 @@ const statements = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_episodes_session_updated
     ON episodes (session_id, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_episodes_panel_opened
+    ON episodes (opened_at DESC, updated_at DESC, id DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_episodes_panel_user_opened
+    ON episodes (user_id, opened_at DESC, updated_at DESC, id DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_episodes_project_updated
     ON episodes (project_id, updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_episodes_pipeline
@@ -207,7 +243,7 @@ const statements = [
   `CREATE TABLE IF NOT EXISTS raw_turns (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    episode_id TEXT REFERENCES episodes(id) ON DELETE CASCADE,
     turn_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     conversation_id TEXT,
@@ -384,7 +420,7 @@ const statements = [
     project_id TEXT,
     skill_memory_id TEXT NOT NULL,
     session_id TEXT,
-    episode_id TEXT NOT NULL,
+    episode_id TEXT,
     l1_memory_id TEXT,
     raw_turn_id TEXT,
     turn_id TEXT,
@@ -531,6 +567,8 @@ const statements = [
     ON source_turn_captures (user_id, source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_native_turn
     ON source_turn_captures (source, profile_id, namespace_key, conversation_id, turn_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_recall_turn
+    ON source_turn_captures (turn_id)`,
   `CREATE INDEX IF NOT EXISTS idx_source_turn_captures_native_conversation
     ON source_turn_captures (source, profile_id, namespace_key, conversation_id, completed_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_source_sessions_native_conversation
@@ -583,6 +621,13 @@ const statements = [
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
     leased_until TEXT,
+    lease_owner TEXT,
+    lease_token TEXT,
+    available_at TEXT,
+    blocked_reason TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    lease_count INTEGER NOT NULL DEFAULT 0,
+    lease_recovery_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -591,6 +636,10 @@ const statements = [
     ON evolution_jobs (status, created_at ASC)`,
   `CREATE INDEX IF NOT EXISTS idx_evolution_jobs_target
     ON evolution_jobs (target_memory_id, job_type)`,
+  `CREATE INDEX IF NOT EXISTS idx_evolution_jobs_available
+    ON evolution_jobs (status, available_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_evolution_jobs_lease_expiry
+    ON evolution_jobs (status, leased_until)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_l3_immutable_dedupe
     ON evolution_jobs (dedupe_key)
     WHERE dedupe_key IS NOT NULL
@@ -613,6 +662,10 @@ const statements = [
     next_attempt_at INTEGER NOT NULL,
     claimed_by TEXT,
     lease_until INTEGER,
+    lease_token TEXT,
+    lease_count INTEGER NOT NULL DEFAULT 0 CHECK (lease_count >= 0),
+    lease_recovery_count INTEGER NOT NULL DEFAULT 0 CHECK (lease_recovery_count >= 0),
+    blocked_reason TEXT,
     last_error TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
@@ -695,7 +748,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10 && version !== 11 && version !== 12 && version !== 13 && version !== 14) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
@@ -717,9 +770,65 @@ export function migrate(db: Database.Database): void {
         addColumnIfMissing(db, "evolution_jobs", "scope_key", "TEXT");
         addColumnIfMissing(db, "evolution_jobs", "scope_seq", "INTEGER");
       }
+      if (tableExists(db, "evolution_jobs")) {
+        const needsFailureBackfill = !columnExists(db, "evolution_jobs", "failure_count");
+        addColumnIfMissing(db, "evolution_jobs", "lease_owner", "TEXT");
+        addColumnIfMissing(db, "evolution_jobs", "lease_token", "TEXT");
+        addColumnIfMissing(db, "evolution_jobs", "available_at", "TEXT");
+        addColumnIfMissing(db, "evolution_jobs", "blocked_reason", "TEXT");
+        addColumnIfMissing(db, "evolution_jobs", "failure_count", "INTEGER NOT NULL DEFAULT 0");
+        addColumnIfMissing(db, "evolution_jobs", "lease_count", "INTEGER NOT NULL DEFAULT 0");
+        addColumnIfMissing(db, "evolution_jobs", "lease_recovery_count", "INTEGER NOT NULL DEFAULT 0");
+        if (version > 0 && needsFailureBackfill) {
+          // Historic attempts counted claims. A leased/succeeded row includes
+          // the current or successful claim, which was not a business failure.
+          db.prepare(`UPDATE evolution_jobs SET
+            failure_count = MAX(0, attempts - CASE WHEN status IN ('leased', 'succeeded') THEN 1 ELSE 0 END),
+            lease_count = MAX(0, attempts)`).run();
+        }
+      }
+      if (tableExists(db, "embedding_retry_queue")) {
+        const needsLeaseCountBackfill = !columnExists(db, "embedding_retry_queue", "lease_count");
+        addColumnIfMissing(db, "embedding_retry_queue", "blocked_reason", "TEXT");
+        addColumnIfMissing(db, "embedding_retry_queue", "lease_token", "TEXT");
+        addColumnIfMissing(db, "embedding_retry_queue", "lease_count", "INTEGER NOT NULL DEFAULT 0 CHECK (lease_count >= 0)");
+        addColumnIfMissing(db, "embedding_retry_queue", "lease_recovery_count", "INTEGER NOT NULL DEFAULT 0 CHECK (lease_recovery_count >= 0)");
+        if (version > 0 && version < 13 && needsLeaseCountBackfill) {
+          // Historic attempts count failures, so they prove only a lower bound
+          // on claims. An active/succeeded row proves one more claim. Previous
+          // recoveries cannot be reconstructed and start at zero after upgrade.
+          db.prepare(`UPDATE embedding_retry_queue SET lease_count = MAX(0, attempts)
+            + CASE WHEN status IN ('in_progress', 'succeeded') THEN 1 ELSE 0 END`).run();
+        }
+      }
+      // Rebuild only the parent table, with foreign keys disabled outside this
+      // transaction. Preserve rowid: it is the tie-breaker for turn ordering.
+      if (tableExists(db, "raw_turns") && (db.prepare("PRAGMA table_info(raw_turns)").all() as Array<{ name: string; notnull: number }>).some(c => c.name === "episode_id" && c.notnull)) {
+        const create = statements.find(s => s.startsWith("CREATE TABLE IF NOT EXISTS raw_turns ("))!;
+        db.exec(create.replace("IF NOT EXISTS raw_turns", "raw_turns_pending"));
+        const columns = (db.prepare("PRAGMA table_info(raw_turns)").all() as Array<{ name: string }>).map(c => `"${c.name}"`).join(", ");
+        db.exec(`INSERT INTO raw_turns_pending(rowid, ${columns}) SELECT rowid, ${columns} FROM raw_turns`);
+        db.exec("DROP TABLE raw_turns");
+        db.exec("ALTER TABLE raw_turns_pending RENAME TO raw_turns");
+      }
+      if (tableExists(db, "skill_trials") && (db.prepare("PRAGMA table_info(skill_trials)").all() as Array<{ name: string; notnull: number }>).some(c => c.name === "episode_id" && c.notnull)) {
+        const create = statements.find(s => s.startsWith("CREATE TABLE IF NOT EXISTS skill_trials ("))!;
+        db.exec(create.replace("IF NOT EXISTS skill_trials", "skill_trials_pending"));
+        db.exec("INSERT INTO skill_trials_pending SELECT * FROM skill_trials ORDER BY rowid");
+        db.exec("DROP TABLE skill_trials");
+        db.exec("ALTER TABLE skill_trials_pending RENAME TO skill_trials");
+      }
       for (const statement of statements) {
         db.prepare(statement).run();
       }
+      installPanelSafetyTriggers(db);
+      // Remove derived data from the business file before installing the change journal.
+      for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name GLOB 'panel_cache_*'").all() as Array<{name:string}>)
+        db.exec(`DROP TRIGGER "${row.name.replaceAll('"', '""')}"`);
+      for (const table of ["panel_cache_meta","panel_memory_dirty","panel_log_dirty","panel_metric_dirty","panel_visibility_dirty","panel_memory_facts","panel_memory_visibility","panel_log_facts","panel_log_refs","panel_log_metrics"])
+        db.exec(`DROP TABLE IF EXISTS ${table}`);
+      installSourceChanges(db);
+      installFtsMappings(db);
       if (version > 0 && version < 5) {
         addColumnIfMissing(db, "recall_events", "query_id", "TEXT");
         addColumnIfMissing(db, "recall_events", "user_memory_candidate_ids_json", "TEXT NOT NULL DEFAULT '[]'");
@@ -727,11 +836,16 @@ export function migrate(db: Database.Database): void {
         addColumnIfMissing(db, "recall_events", "merged_source_turn_ids_json", "TEXT NOT NULL DEFAULT '[]'");
         addColumnIfMissing(db, "recall_events", "member_memory_ids_by_source_turn_id_json", "TEXT NOT NULL DEFAULT '{}'");
       }
+      // Also install on current-schema reopen, after legacy query_id columns exist.
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_recall_events_query_created
+        ON recall_events (query_id, created_at DESC)`).run();
       db.prepare(
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_active_dedupe
          ON evolution_jobs (dedupe_key)
          WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'leased', 'failed')`
       ).run();
+
+      installQueueSchedulingSchema(db);
 
       // This boundary belongs to the Memory database and is shared by Hook and scanners.
       db.prepare(`INSERT INTO runtime_kv (key, value_json, updated_at)
@@ -1034,12 +1148,8 @@ function removeLegacyProcessingMetadata(db: Database.Database): void {
     db.prepare(
       `UPDATE memories SET tags_json = ?, info_json = ?, properties_json = ? WHERE id = ?`
     ).run(JSON.stringify(tags), JSON.stringify(info), JSON.stringify(properties), row.id);
-    db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(row.id);
-    if (!row.deleted_at && row.status !== "deleted") {
-      db.prepare(
-        `INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`
-      ).run(row.id, row.id, row.memory_value, tags.join(" "));
-    }
+    writeFts(db,"memories",row.id,!row.deleted_at && row.status !== "deleted"
+      ? [row.id,row.memory_value,tags.join(" ")] : undefined);
   }
 }
 

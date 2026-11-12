@@ -1,19 +1,82 @@
 ---
-title: Messaging Channels
+title: Connect a chat channel
+description: Connect a chat channel and send Memmy a task from the app you already use.
 icon: MessagesSquare
 ---
 
-Memmy plugs into the IMs you already use, so you can command your Agent right from your chat apps. Currently supported:
+In the workbench sidebar, open **Connections & Tools** and choose **Chat channels** at the top. After a channel is connected, you can send Memmy a task from that messaging app.
 
-**Telegram · Discord · iMessage · WeChat · Feishu · DingTalk**
+import listScreen from "../../assets/channels-list-full-en.jpg";
+import feishuScanScreen from "../../assets/channels-feishu-scan-full.jpg";
+import feishuManualScreen from "../../assets/channels-feishu-manual-full-en.jpg";
+import dingtalkScreen from "../../assets/channels-dingtalk-full-en.jpg";
 
-## How to Connect
+## Connect a channel
 
-| Channel | Method |
+Choose the channel name or **+** on the right, then follow the window. WeChat, Feishu, and DingTalk are labeled WeChat, Feishu, and DingTalk.
+
+<div className="docs-actions-table">
+
+| Channel | How to connect |
 | --- | --- |
-| WeChat | QR code sign-in; the dialog polls for the scan result |
-| Feishu | `appId` + `appSecret` form; on insufficient permissions, missing scopes are parsed out with an application link |
-| DingTalk | `clientId` + `clientSecret` form |
-| Telegram / Discord / iMessage | Follow the dialog instructions on the Tools page |
+| **WeChat** | Scan the connection QR code with WeChat. |
+| **Feishu** | Scan to create and connect a bot. If you already have an app, enter the App ID and App Secret instead. |
+| **DingTalk** | Enter the Client ID and Client Secret of a custom app. |
+| **Telegram** | Enter the bot token from BotFather. |
+| **Discord** | Enter the bot token of a bot you created. |
+| **iMessage** | Connect the Messages app on this Mac, and turn on the system permissions it asks for. |
 
-Connection status refreshes every 5 seconds; connected channels can be disconnected anytime. Channel configuration is written into the runtime by the local backend via the memmy-agent admin client.
+</div>
+
+<ProductScreenshot src={listScreen} alt="Full Memmy window listing Telegram, Discord, iMessage, WeChat, Feishu, and DingTalk chat channels" caption="These channels receive tasks. A service with the same name under App tools is for a different job." />
+
+## Connect Feishu once
+
+1. Choose the **Feishu** card, then **Scan to create and connect**.
+2. Scan the QR code with the Feishu app, read the prompt, and confirm creating and connecting the app.
+3. Return to Memmy. If needed, choose **I've scanned** and wait until the status is **Connected**.
+4. In Feishu, open the chat with that bot, send a task, and confirm a reply comes back.
+
+<ProductScreenshot src={feishuScanScreen} alt="Full Memmy window with Scan to create and connect for Feishu, and the manual credential entry" caption="Choose Scan to create and connect, then scan with the Feishu app. If you already have an app, switch to the manual connection. The picture is a placeholder of the Chinese interface." />
+
+<details>
+<summary>Enter Feishu, DingTalk, or bot credentials yourself</summary>
+
+- **Feishu**: choose **Already have a Feishu app? Enter App ID / Secret**, enter the credentials, then choose **Connect Feishu**. Follow the window to grant messaging and card permissions, then create and publish an app version.
+- **DingTalk**: open the DingTalk card, enter the Client ID and Client Secret, and choose **Connect DingTalk**.
+- **Telegram / Discord**: open the card, enter the bot token, and choose the connect button.
+
+Each channel window includes a guide for getting the credentials. After it connects, return to the list, confirm **Connected**, and send a task to that bot.
+
+<ProductScreenSteps steps={[
+  { label: "Feishu credentials", src: feishuManualScreen, alt: "Full Memmy window showing Feishu App ID, App Secret, and the permission notes", caption: "Feishu needs an App ID and App Secret. Granting permissions without publishing a version can still leave the app short of permission." },
+  { label: "DingTalk credentials", src: dingtalkScreen, alt: "Full Memmy window showing the DingTalk Client ID and Client Secret form", caption: "DingTalk needs a Client ID and Client Secret. Both credential fields in the pictures are empty." }
+]} />
+
+</details>
+
+<details>
+<summary>Connect iMessage</summary>
+
+iMessage uses the Messages app on this Mac. The connection window has **Open Full Disk Access** and **Open Automation**. One is for receiving messages, and the other lets Memmy control Messages to send them. Finish the permissions as the window directs, then return to Memmy and connect.
+
+</details>
+
+## Send a task
+
+Keep the computer running Memmy online. In the connected messaging app, send Memmy a message and say what you want done. If no reply arrives, check the channel status, then read the error on the card.
+
+## Manage the connection
+
+In **Chat channels**, choose **Connected**, then **…** on the right of a channel to see its status. To stop using it, choose **Disconnect** in the window. That does not delete tasks or memory already on the workbench.
+
+<details>
+<summary>Feishu says connected, but some features do not work</summary>
+
+Open the Feishu channel’s manage window and see whether it says the bot does not have enough permission. Add the permissions it lists, create and publish an app version, then send the task again and check the result.
+
+</details>
+
+## Related
+
+[Connect an external tool](/docs/en/tools/integrations) · [Plugins](/docs/en/plugins/overview)

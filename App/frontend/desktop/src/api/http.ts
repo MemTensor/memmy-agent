@@ -66,6 +66,10 @@ async function toApiRequestError(response: Response, path: string): Promise<ApiR
     );
   }
 
+  if (response.status === 404 && typeof rawBody === "object" && rawBody !== null && "message" in rawBody
+    && typeof rawBody.message === "string" && /^Route (GET|POST):.* not found$/i.test(rawBody.message)) {
+    return new ApiRequestError(rawBody.message, 404, "not_found");
+  }
   return new ApiRequestError(`Request ${path} failed with status ${response.status}`, response.status);
 }
 

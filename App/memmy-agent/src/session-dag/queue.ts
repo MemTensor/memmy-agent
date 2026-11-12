@@ -184,7 +184,15 @@ class SessionDagQueue {
   private async process(): Promise<void> {
     while (!this.closed) {
       const turn = this.store.claimNextTurn();
-      if (!turn) return;
+      if (!turn) {
+        // An early wake must not strand retries whose persisted deadline is still ahead.
+        const nextRetryAt = this.store.listTurns(["retry"]).reduce((next, retry) => {
+          const at = Date.parse(retry.next_retry_at ?? "");
+          return Number.isFinite(at) ? Math.min(next, at) : next;
+        }, Number.POSITIVE_INFINITY);
+        if (Number.isFinite(nextRetryAt)) this.scheduleRetry(Math.max(0, nextRetryAt - Date.now()));
+        return;
+      }
       const builder = this.manager.createBuilder(
         this.sessionKey,
         this.store,
@@ -197,8 +205,9 @@ class SessionDagQueue {
         const message = error instanceof Error ? error.message : String(error);
         if (turn.attempt_count + 1 < this.maxUpdateAttempts()) {
           const delayMs = this.manager.retryDelayMs(turn.attempt_count);
-          this.store.markTurnRetry(turn.turn_id, message, new Date(Date.now() + delayMs).toISOString());
-          this.scheduleRetry(delayMs);
+          const dueAt = Date.now() + delayMs;
+          this.store.markTurnRetry(turn.turn_id, message, new Date(dueAt).toISOString());
+          this.scheduleRetry(delayMs, dueAt);
           return;
         }
         try {
@@ -214,13 +223,23 @@ class SessionDagQueue {
     }
   }
 
-  private scheduleRetry(delayMs: number): void {
+  private scheduleRetry(delayMs: number, dueAt = Date.now() + Math.max(0, delayMs)): void {
     if (this.closed) return;
     if (this.retryTimer) clearTimeout(this.retryTimer);
-    this.retryTimer = setTimeout(() => {
+    const wakeWhenDue = () => {
       this.retryTimer = null;
+      if (this.closed) return;
+      // Timers can fire before the wall-clock deadline used by the store.
+      // Retain a wake until the retry is eligible for claim.
+      const remaining = dueAt - Date.now();
+      if (remaining > 0) {
+        this.retryTimer = setTimeout(wakeWhenDue, Math.min(2_147_483_647, remaining));
+        this.retryTimer.unref?.();
+        return;
+      }
       this.wake();
-    }, delayMs);
+    };
+    this.retryTimer = setTimeout(wakeWhenDue, Math.min(2_147_483_647, Math.max(0, delayMs)));
     this.retryTimer.unref?.();
   }
 

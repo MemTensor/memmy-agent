@@ -39,7 +39,8 @@ function createSource(db: Database.Database): HermesSource | null {
   if (!hasTable(db, "sessions") || !hasTable(db, "messages")) return null;
   const columns = tableColumns(db, "messages");
   if (!["id", "session_id", "role", "content", "timestamp"].every((column) => columns.has(column))) return null;
-  const sessions = db.prepare("SELECT id, cwd FROM sessions ORDER BY id ASC");
+  const sessionColumns = tableColumns(db, "sessions");
+  const sessions = db.prepare(`SELECT id, ${optionalColumn(sessionColumns, "cwd")} AS cwd FROM sessions ORDER BY id ASC`);
   const messages = db.prepare(`SELECT id, role, content,
       ${optionalColumn(columns, "tool_call_id")} AS toolCallId,
       ${optionalColumn(columns, "tool_calls")} AS toolCalls,

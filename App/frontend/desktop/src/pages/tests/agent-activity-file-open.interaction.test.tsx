@@ -79,6 +79,29 @@ describe("activity file rows open in the side panel", () => {
     expect(onOpen).toHaveBeenCalledWith({ path: "tmp/analyze_tpl.py", name: "analyze_tpl.py" });
   });
 
+  it("shows raw short web output without JSON number rounding or formatting", () => {
+    const raw = ' {"n":9007199254740993,  "x":1}  ';
+    render({ id: "raw-web", role: "tool", kind: "trace", content: "", stoppedByUser: true,
+      toolEvents: [{ phase: "end", name: "web_fetch", result: raw, display_text: raw }] });
+    expect(container.querySelector('[data-detail="result"] pre')?.textContent).toBe(raw);
+    expect(container.querySelector('details.agent-activity-tool-details')?.hasAttribute('open')).toBe(false);
+    expect(container.querySelector('[data-activity-file-path]')).toBeNull();
+  });
+  it("opens a long web result from explicit metadata", () => {
+    const onOpen = render({ id: "long-web", role: "tool", kind: "trace", content: "", stoppedByUser: true,
+      toolEvents: [{ phase: "end", name: "web_fetch", result: "head and tail preview", arguments: { url: "https://example.com" },
+        output_file: { path: "/work/.memmy/tool-results/session/raw.json", name: "raw.json", sizeBytes: 3000000, contentType: "application/json", complete: true, untrusted: true } }] });
+    const button = container.querySelector<HTMLButtonElement>('[data-activity-file-path]');
+    expect(button?.textContent).toContain("raw.json"); expect(button?.textContent).toContain("3,000,000");
+    act(() => button?.click());
+    expect(onOpen).toHaveBeenCalledWith({path:"/work/.memmy/tool-results/session/raw.json",name:"raw.json"});
+  });
+  it("never creates a saved-file link from a failure message", () => {
+    render({ id: "failed-web", role: "tool", kind: "trace", content: "", stoppedByUser: true,
+      toolEvents: [{ phase: "end", name: "web_fetch", result: "Full content NOT saved. /some/fake/path.json" }] });
+    expect(container.querySelector('[data-activity-file-path]')).toBeNull();
+  });
+
   it("does not turn deletes, search text, commands, or legacy summaries into file buttons", () => {
     const cases: AgentChatMessage[] = [
       {

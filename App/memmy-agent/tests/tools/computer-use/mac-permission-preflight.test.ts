@@ -28,7 +28,7 @@ describe("permission preflight before opening the target app", () => {
     snapshot.setContext(turn("next-user-message"));
     await snapshot.execute({ app: "WeChat" });
     expect(read).toHaveBeenCalledTimes(2);
-    expect(callTool).toHaveBeenCalledExactlyOnceWith("get_app_state", { app: "WeChat" }, 30);
+    expect(callTool).toHaveBeenCalledExactlyOnceWith("get_app_state", { app: "WeChat" }, 30, undefined, undefined);
   });
   it("awaits one shared check for concurrent calls before sending either target", async () => {
     let finish!: (status: any) => void;

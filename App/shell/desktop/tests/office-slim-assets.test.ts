@@ -10,7 +10,7 @@ import { FileMatcher } from "app-builder-lib/out/fileMatcher.js";
 const checker = fileURLToPath(new URL("../../../../scripts/internal/shared/check-office-slim-assets.mjs", import.meta.url));
 const roots: string[] = [];
 const excluded = [
-  "dist/skills/docx", "dist/skills/pptx", "dist/skills/xlsx",
+  "dist/skills/docx", "dist/skills/pdf", "dist/skills/pptx", "dist/skills/xlsx",
   "dist/extra-dependencies/office-rendering", "dist/extra-dependencies/docx-rendering",
 ];
 
@@ -57,9 +57,12 @@ describe("Office slim runtime boundary", () => {
   ])("%s excludes Office assets while keeping Computer Use", (name) => {
     const root = fixture();
     const config = parse(readFileSync(new URL(`../${name}`, import.meta.url), "utf8"));
+    expect(config.asarUnpack).toContain("**/plugin-runtime/windows/**");
     const filter = new FileMatcher(root, join(root, "target"), (value: string) => value, config.files).createFilter();
     const excludedFiles = excluded.map((relative) => `dist/runtime/memmy-agent/${relative}/asset.bin`);
     const includedFiles = [
+      "dist/runtime/backend/dist/src/adapters/outbound/plugin-runtime/windows/launch.ps1",
+      "dist/runtime/backend/dist/src/adapters/outbound/plugin-runtime/windows/Sandbox.cs",
       "dist/runtime/memmy-agent/dist/skills/computer-history/SKILL.md",
       "dist/runtime/memmy-agent/dist/tools/computer-history/mac/human-recorder.swift",
       "dist/runtime/memmy-agent/dist/tools/computer-history/win/win11-observer.ps1",

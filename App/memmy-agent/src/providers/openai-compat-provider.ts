@@ -102,7 +102,9 @@ export class OpenAICompatProvider extends LLMProvider {
   apiType: OpenAICompatApiType = "auto";
   effectiveBase: string | null = null;
   defaultHeaders: Record<string, string>;
-  apiKeyForClient: string;
+  apiKeyForClient: string | null;
+  private readonly explicitNoAuth: boolean;
+  private readonly independent: boolean;
   isLocal: boolean;
   responsesFailures: Record<string, number> = {};
   responsesTrippedAt: Record<string, number> = {};
@@ -118,6 +120,7 @@ export class OpenAICompatProvider extends LLMProvider {
           extraHeaders?: Record<string, string> | null;
           extraBody?: Record<string, any> | null;
           apiType?: OpenAICompatApiType;
+          inheritProviderDefaults?: boolean;
         }
       | null = null,
     apiBase: string | null = null,
@@ -131,12 +134,16 @@ export class OpenAICompatProvider extends LLMProvider {
       this.extraHeaders = apiKeyOrInit.extraHeaders ?? {};
       this.extraBody = apiKeyOrInit.extraBody ?? {};
       this.apiType = normalizeApiType(apiKeyOrInit.apiType);
+      this.independent = apiKeyOrInit.inheritProviderDefaults === false;
+      this.explicitNoAuth = this.independent && !this.apiKey;
     } else {
       super(apiKeyOrInit, apiBase);
       this.model = defaultModel;
       this.spec = spec;
       this.extraHeaders = {};
       this.extraBody = {};
+      this.explicitNoAuth = false;
+      this.independent = false;
     }
 
     this.defaultModel = this.model ?? "gpt-4o";
@@ -144,7 +151,7 @@ export class OpenAICompatProvider extends LLMProvider {
     if (this.apiType !== "auto" && name !== "openai" && name !== "custom") {
       this.apiType = "auto";
     }
-    if (this.apiKey && this.spec?.envKey) this.setupEnv(this.apiKey, this.apiBase);
+    if (this.apiKey && this.spec?.envKey && !this.independent) this.setupEnv(this.apiKey, this.apiBase);
 
     const effectiveBase = this.apiBase || resolveDefaultApiBase(this.spec);
     this.effectiveBase = effectiveBase;
@@ -154,7 +161,7 @@ export class OpenAICompatProvider extends LLMProvider {
       Object.assign(this.defaultHeaders, OPENROUTER_ATTRIBUTION_HEADERS);
     }
     Object.assign(this.defaultHeaders, this.extraHeaders);
-    this.apiKeyForClient =
+    this.apiKeyForClient = this.explicitNoAuth ? null :
       this.apiKey ??
       (specName(this.spec) === "openai" ? process.env.OPENAI_API_KEY : null) ??
       "no-key";
@@ -178,15 +185,23 @@ export class OpenAICompatProvider extends LLMProvider {
   buildClient(): void {
     const timeoutS = openaiCompatTimeoutS();
     const fetchOptions = this.isLocal ? ({ keepalive: false } as any) : undefined;
+    const defaultHeaders = this.explicitNoAuth
+      ? { authorization: null, "api-key": null, ...this.defaultHeaders }
+      : this.defaultHeaders;
     this.client = new OpenAI({
-      apiKey: this.apiKeyForClient,
+      // The SDK requires a non-empty constructor credential. Keep its existing
+      // initialization placeholder internal; the public null headers below and
+      // cleared SDK key ensure it is never sent for an independent no-auth URL.
+      apiKey: this.apiKeyForClient ?? "no-key",
+      ...(this.independent ? { adminAPIKey: null, organization: null, project: null } : {}),
       baseURL: this.effectiveBase ?? undefined,
-      defaultHeaders: this.defaultHeaders,
+      defaultHeaders,
       maxRetries: 0,
       timeout: timeoutS * 1000,
       fetchOptions,
     });
-    this.client.defaultHeaders = this.defaultHeaders;
+    if (this.explicitNoAuth) this.client.apiKey = null;
+    this.client.defaultHeaders = defaultHeaders;
   }
 
   static extractProviderErrorFacts(
@@ -642,6 +657,7 @@ export class OpenAICompatProvider extends LLMProvider {
         specName(this.spec),
         modelName,
         semanticEffort,
+        this.defaultHeaders["X-Agent-Region"] ?? null,
       );
       if (memmyStyle && !styles.includes(memmyStyle)) styles.push(memmyStyle);
       for (const style of styles) {
@@ -1097,6 +1113,15 @@ export class OpenAICompatProvider extends LLMProvider {
     });
   }
 
+  private requestOptions(args: ChatArgs): Record<string, any> | undefined {
+    const abort = providerAbortOptions(args.signal);
+    if (specName(this.spec) === "memmy_account" && args.taskType === "literature-review"
+      && (args.model ?? this.getDefaultModel()) === "agent_chat") {
+      return { ...abort, headers: { "X-Agent-Task": "literature-review" } };
+    }
+    return abort;
+  }
+
   async chat(args: ChatArgs): Promise<LLMResponse> {
     const imageInputError = this.imageInputUnsupportedResponse(args);
     if (imageInputError) return imageInputError;
@@ -1108,7 +1133,7 @@ export class OpenAICompatProvider extends LLMProvider {
       if (this.shouldUseResponsesApi(model, reasoningEffort)) {
         try {
           const body = this.buildResponsesBody(args);
-          const options = providerAbortOptions(args.signal);
+          const options = this.requestOptions(args);
           const response = options
             ? await this.client.responses.create(body, options as any)
             : await this.client.responses.create(body);
@@ -1125,7 +1150,7 @@ export class OpenAICompatProvider extends LLMProvider {
       }
       const kwargs = flattenChatExtraBody(this.buildKwargs(args));
       if (args.signal?.aborted) throw createProviderAbortError();
-      const options = providerAbortOptions(args.signal);
+      const options = this.requestOptions(args);
       const response = options
         ? await this.client.chat.completions.create(kwargs as any, options as any)
         : await this.client.chat.completions.create(kwargs as any);
@@ -1151,7 +1176,7 @@ export class OpenAICompatProvider extends LLMProvider {
       if (this.shouldUseResponsesApi(model, reasoningEffort)) {
         try {
           const body = { ...this.buildResponsesBody(args), stream: true };
-          const options = providerAbortOptions(args.signal);
+          const options = this.requestOptions(args);
           const stream = options
             ? await this.client.responses.create(body as any, options as any)
             : await this.client.responses.create(body as any);
@@ -1188,7 +1213,7 @@ export class OpenAICompatProvider extends LLMProvider {
         kwargs.extra_body = { ...(kwargs.extra_body ?? {}), tool_stream: true };
       }
       if (args.signal?.aborted) throw createProviderAbortError();
-      const options = providerAbortOptions(args.signal);
+      const options = this.requestOptions(args);
       requestTiming("model.http_start");
       const stream = options
         ? await this.client.chat.completions.create(kwargs as any, options as any)

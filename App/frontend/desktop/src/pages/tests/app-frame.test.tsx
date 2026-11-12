@@ -12,9 +12,17 @@ import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
 import type { AgentTaskView } from "../../state/agent-chat-slice.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
-import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, deriveSidebarPlacement, deriveVisibleSidebarPlacement, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveSidebarUpdateAction, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
+import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, deriveSidebarPlacement, deriveVisibleSidebarPlacement, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveSidebarUpdateAction, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, shouldShowRecordingView, truncateAccountDisplayText } from "../app-frame.js";
 
 describe("AppFrame", () => {
+  it("hides the recording view shortcut while its tab is already open", () => {
+    expect(shouldShowRecordingView("ready", false)).toBe(true);
+    expect(shouldShowRecordingView("failed", false)).toBe(true);
+    expect(shouldShowRecordingView("ready", true)).toBe(false);
+    expect(shouldShowRecordingView("recording", false)).toBe(false);
+    expect(shouldShowRecordingView("ready", false, true)).toBe(false);
+    expect(shouldShowRecordingView("failed", false, true)).toBe(false);
+  });
   it("使用原型 MainLayout 的侧栏图标与导航文案", () => {
     const html = renderToString(
       <AppProviders>
@@ -25,6 +33,10 @@ describe("AppFrame", () => {
     );
 
     expect(html).toContain("新任务");
+    expect(html).toContain("录音");
+    expect(html).toContain('class="lucide lucide-mic"');
+    expect(html).toContain('class="app-frame-recording-nav__control app-frame-recording-nav__control--record"');
+    expect(html).toContain('aria-label="开始录音"');
     expect(html).toContain("连接与工具");
     expect(html).toContain("项目");
     expect(html).toContain("任务");
@@ -534,7 +546,7 @@ describe("AppFrame", () => {
   it("does not keep New Agent highlighted while a session is current", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
 
-    expect(source).toContain('&& (item.path !== "/main" || !state.agent.currentSessionKey)');
+    expect(source).toContain('(!state.agent.currentSessionKey && !props.recordingActive)');
   });
 
   it("makes the whole sidebar account footer open settings", () => {

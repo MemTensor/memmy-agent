@@ -1,0 +1,118 @@
+---
+title: Let Memmy use the computer
+description: Name the app and the task, confirm what it may access, and check the result in the original app.
+icon: MousePointer2
+---
+
+When a task has to be done in a desktop app, Memmy can look at the current window and carry out the actions. Confirm app permission first, then open the app and the file and say what to do and what the result should be.
+
+import taskScreen from "../../assets/computer-task-full-en.jpg";
+import excelTaskScreen from "../../assets/computer-excel-task-full-en.jpg";
+import settingsScreen from "../../assets/computer-settings-full-en.jpg";
+import excelPermissionScreen from "../../assets/computer-excel-permission-full-en.jpg";
+import excelConnectedScreen from "../../assets/computer-excel-connected-full-en.jpg";
+import revokeScreen from "../../assets/computer-revoke-full-en.jpg";
+
+## Set app permission
+
+The first time Memmy needs an app, it may show **App control approval**, with three choices:
+
+<div className="docs-actions-table">
+
+| Choice | What it covers |
+| --- | --- |
+| **Allow once** | Only the current message. |
+| **Always allow** | Remember this app and do not ask every time it is used. |
+| **Block** | Do not allow this access. |
+
+</div>
+
+System permissions are handled separately when they appear. macOS may ask you to turn on Accessibility. If a restart is required, grant access and reopen Memmy before you continue.
+
+Open **Settings → Computer use** from the lower left of the workbench to see connection status and **Always allowed apps**. **Always allow any app** at the top skips the per-app question. It also covers the built-in browser and connected Chrome and Edge. Leave it off if you want to answer the prompt in each task.
+
+<ProductScreenshot src={settingsScreen} alt="Full Memmy window showing Computer use, the any-app option, browsers, Excel, and always-allowed apps" caption="The picture only shows sample permission records. It does not read or change real app permissions on your computer." />
+
+## Connect a browser or Excel
+
+**Chrome / Edge**: on the same page, choose **Install** beside the browser and follow the expanded steps to add the Memmy extension. After you see **Connected. Memmy can use web pages in this browser.**, name the page to work on.
+
+**Microsoft Excel**: open the workbook you want to use, then turn on **Microsoft Excel** on the same page. Allow control of Excel when the system asks, then return to Memmy and confirm the status is **Connected**. This connection is granted for the app. In the task, still name the workbook, the sheet, and the range to change.
+
+<details>
+<summary>See the Excel connection prompts</summary>
+
+<ProductScreenSteps steps={[
+  { label: "System permission needed", src: excelPermissionScreen, alt: "Full Memmy window saying Excel needs a system permission, with Retry connection", caption: "When the permission prompt appears, choose Retry connection, then answer the system dialog." },
+  { label: "Confirm it is connected", src: excelConnectedScreen, alt: "Full Memmy window with Excel turned on and Connected", caption: "After the switch is on, also read the connection status. The picture is an isolated sample." }
+]} />
+
+If you previously denied the macOS Automation permission, open Automation in System Settings as the page directs, change it, and try again. If it asks you to open a workbook, open the file in Excel first.
+
+</details>
+
+## Start with a small task
+
+Use the same training notes for two small tasks. One only looks, and does not change the file. The other writes into Excel that is already open.
+
+### Look at the open text editor
+
+Download these <a href="/docs-examples/training-notes-en.md" download>fictional training notes</a>, open them in a text editor, and send:
+
+<PromptExample composer={true} prompt="Use Computer Use to look at the text editor I already opened, and list what is still undecided in training-notes-en.md." />
+
+<ProductScreenshot src={taskScreen} alt="Memmy looking at an open text editor and listing what is still undecided in the training notes" caption="The window and file are samples. The chat on the left is the task above; the text editor on the right is already open." />
+
+### Write into the open Excel workbook
+
+Use the same training notes. Confirm Microsoft Excel shows **Connected**, and open the workbook **training-plan.xlsx**. A new empty workbook is enough. Then send:
+
+<PromptExample composer={true} prompt="Use Computer Use to write the to-dos from training-notes-en.md into the open workbook training-plan.xlsx, sheet “Training plan”, cells A1:D6. Fill the owner and deadline when they are decided, and leave the rest as to be confirmed." />
+
+<ProductScreenshot src={excelTaskScreen} alt="Memmy writing the training to-dos into the open Excel sheet Training plan" caption="The workbook is a sample. The chat on the left is the task above; the Training plan sheet on the right already has A1:D6 filled in." />
+
+## While it runs, and after it finishes
+
+Keep the target app open and the computer unlocked. If the task asks for more information or a confirmation, answer that first. To change the request, say so in the original task. To stop the current run, choose **Stop**.
+
+When it finishes, go back to the original app and check that the result matches the request. If a file was created, open that file. The read-only text-editor example should only return a list, and the original file should stay unchanged. The Excel example should change only A1:D6 on the Training plan sheet, and anything still undecided should stay to be confirmed.
+
+## Remove ongoing permission for one app
+
+Under **Computer use → Always allowed apps**, choose **×** on the right of the app, read the prompt, and choose **Remove**. The next time that app is used, Memmy asks again.
+
+If **Always allow any app** is on, turn it off before you remove one app’s ongoing permission. Otherwise Memmy will not return to asking per app.
+
+<details>
+<summary>See the remove confirmation</summary>
+
+<ProductScreenshot src={revokeScreen} alt="Full Memmy window confirming removal of TextEdit from the always-allowed list" caption="This removes the ongoing permission. Cancel keeps the list entry." />
+
+</details>
+
+## When it cannot operate
+
+<details>
+<summary>The app or window cannot be found</summary>
+
+Open the app and the file, and keep the computer unlocked. In the task, add the app name, window title, or file name. Do not only say “change this”.
+
+</details>
+
+<details>
+<summary>It still fails after you allow it</summary>
+
+Check that the system permission is in effect, and whether Memmy asked you to restart. For a browser, check the extension connection. For Excel, check **Connected** or the specific error. If it says the helper is missing, check the installer and keep the error text for feedback.
+
+</details>
+
+<details>
+<summary>How is computer use different from Computer History?</summary>
+
+Computer use carries out the task you give Memmy now. Computer History reviews activity from the apps and websites you allowed it to record. They are set up separately. Turning on history does not allow Memmy to operate apps.
+
+</details>
+
+## Related
+
+[Search the web and use pages](/docs/en/desktop/browser) · [Use and preview files](/docs/en/desktop/files)

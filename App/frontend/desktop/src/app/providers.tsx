@@ -7,6 +7,7 @@ import { AppStateProvider, useAppState } from "../state/app-state.js";
 import { ThemeProvider } from "../theme/theme-provider.js";
 import { useWindowFullScreenSync } from "../utils/window-fullscreen.js";
 import { resolveDesktopDisplayLanguage } from "./account-channel.js";
+import { PluginUiProvider } from "./plugin-ui-context.js";
 
 /** Contract for api clients context value. */
 export interface ApiClientsContextValue {
@@ -21,9 +22,11 @@ export function AppProviders(props: { children: ReactNode }) {
   return (
     <AppStateProvider>
       <ApiClientsProvider>
-        <TaskBusProvider>
-          <VisualProviders>{props.children}</VisualProviders>
-        </TaskBusProvider>
+        <PluginUiProvider>
+          <TaskBusProvider>
+            <VisualProviders>{props.children}</VisualProviders>
+          </TaskBusProvider>
+        </PluginUiProvider>
       </ApiClientsProvider>
     </AppStateProvider>
   );
