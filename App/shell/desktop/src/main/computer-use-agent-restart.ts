@@ -70,8 +70,8 @@ function agentSocketExists(socketPath: string): boolean {
   }
 }
 
-function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
-  if (!agentSocketExists(agent.socketPath)) return Promise.resolve();
+async function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
+  if (!agentSocketExists(agent.socketPath)) return;
   const bundle = dirname(dirname(dirname(binary)));
   return new Promise((resolveStop, rejectStop) => {
     let connected = false;
@@ -120,6 +120,8 @@ function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
     socket.on('error', error => {
       if (!connected && ['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) {
         try {
+          // A helper may have exited, but an unrelated replacement file is not
+          // evidence of successful shutdown (and must never be removed).
           agentSocketExists(agent.socketPath);
           finish();
         } catch (reason) { finish(reason instanceof Error ? reason : new Error(String(reason))); }

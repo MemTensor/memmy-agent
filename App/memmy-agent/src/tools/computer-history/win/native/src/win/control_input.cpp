@@ -12,23 +12,25 @@ namespace memmy::win {
 
 struct ControlInput::State {
   UniqueHandle event = Own(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+  UniqueHandle interrupt = Own(CreateEventW(nullptr, TRUE, FALSE, nullptr));
   std::mutex mutex;
-  std::deque<ControlItem> items;
+  std::deque<ControlMessage> items;
   std::optional<ControlItem> terminal;
   std::atomic<bool> stopping{false};
 
-  void Push(ControlItem item) {
+  void Push(ControlItem item, std::string id = {}) {
     {
       std::lock_guard lock(mutex);
       if (item == ControlItem::Stop || item == ControlItem::Eof) {
         // Terminal commands never compete with the bounded ordinary-command queue.
         if (!terminal || *terminal == ControlItem::Overflow) terminal = item;
       } else if (!terminal && items.size() < 1024) {
-        items.push_back(item);
+        items.push_back({item, std::move(id)});
       } else if (!terminal && (item == ControlItem::Pause || item == ControlItem::Resume)) {
         // Never silently lose a privacy control. Exhaustion ends the session fail-closed.
         terminal = ControlItem::Overflow;
       }
+      if (item != ControlItem::Checkpoint || terminal) SetEvent(interrupt.get());
     }
     SetEvent(event.get());
   }
@@ -39,7 +41,7 @@ ControlInput::ControlInput() : state_(std::make_shared<State>()) {}
 ControlInput::~ControlInput() { Shutdown(500); }
 
 bool ControlInput::Start() {
-  if (!state_->event) return false;
+  if (!state_->event || !state_->interrupt) return false;
   const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
   thread_ = std::thread([state = state_, input] {
     if (input == nullptr || input == INVALID_HANDLE_VALUE) {
@@ -58,6 +60,10 @@ bool ControlInput::Start() {
       for (std::size_t i = overlongBefore; i < splitter.Overlong(); ++i) state->Push(ControlItem::Overlong);
       for (const auto& line : lines) {
         if (line.empty()) continue;
+        if (const auto id = cli::ParseCheckpointId(line)) {
+          state->Push(ControlItem::Checkpoint, *id);
+          continue;
+        }
         switch (cli::ParseControlCommand(line)) {
           case cli::ControlCommand::Pause: state->Push(ControlItem::Pause); break;
           case cli::ControlCommand::Resume: state->Push(ControlItem::Resume); break;
@@ -74,15 +80,17 @@ bool ControlInput::Start() {
 }
 
 HANDLE ControlInput::Event() const { return state_->event.get(); }
+HANDLE ControlInput::InterruptEvent() const { return state_->interrupt.get(); }
 
-std::vector<ControlItem> ControlInput::Drain() {
+std::vector<ControlMessage> ControlInput::Drain() {
   std::lock_guard lock(state_->mutex);
   ResetEvent(state_->event.get());
+  ResetEvent(state_->interrupt.get());
   if (state_->terminal) {
     state_->items.clear();
-    return {*state_->terminal};
+    return {{*state_->terminal, {}}};
   }
-  std::vector<ControlItem> out(state_->items.begin(), state_->items.end());
+  std::vector<ControlMessage> out(state_->items.begin(), state_->items.end());
   state_->items.clear();
   return out;
 }

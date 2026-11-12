@@ -23,8 +23,7 @@ export function resolveWorkspaceIdentity(
   effectiveUserId: string,
   input: WorkspaceIdentityFields
 ): ResolvedWorkspaceIdentity {
-  const userId = effectiveUserId.trim();
-  if (!userId) throw new TypeError("effectiveUserId must be non-empty");
+  void effectiveUserId; // Account identity never participates in workspace identity.
   const parsed = WorkspaceIdentityFieldsSchema.parse(input);
   if (!parsed.workspaceUri) {
     return {
@@ -38,7 +37,7 @@ export function resolveWorkspaceIdentity(
   const workspaceIdentity = isLocalWorkspaceUri(parsed.workspaceUri)
     ? `local\0${parsed.workspaceHostId}\0${parsed.workspaceUri}`
     : `remote\0${parsed.workspaceUri}`;
-  const workspaceId = sha256Hex(`${userId}\0${workspaceIdentity}`);
+  const workspaceId = sha256Hex(workspaceIdentity);
   return {
     workspaceUri: parsed.workspaceUri,
     workspaceHostId: parsed.workspaceHostId ?? null,

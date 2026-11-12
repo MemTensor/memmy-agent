@@ -246,6 +246,19 @@ ControlCommand ParseControlCommand(std::string_view line) {
   return ControlCommand::Unknown;
 }
 
+std::optional<std::string> ParseCheckpointId(std::string_view line) {
+  constexpr std::string_view prefix = "checkpoint ";
+  if (!line.starts_with(prefix)) return std::nullopt;
+  line.remove_prefix(prefix.size());
+  if (line.size() != 36) return std::nullopt;
+  for (std::size_t i = 0; i < line.size(); ++i) {
+    const bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+    const char c = line[i];
+    if (dash ? c != '-' : !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return std::nullopt;
+  }
+  return std::string(line);
+}
+
 void LineSplitter::Feed(const char* data, std::size_t size, std::vector<std::string>& lines) {
   for (std::size_t i = 0; i < size; ++i) {
     const char c = data[i];

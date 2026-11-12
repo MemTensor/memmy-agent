@@ -26,6 +26,8 @@ export interface CreateBootstrapServiceOptions {
   memoryClient: MemoryClient;
   cloudClient: CloudClient;
   bootstrapScenario?: BootstrapScenario;
+  getMemoryUserId?: () => string;
+  timeZone?: string;
   scanPreferencesStore?: Pick<ScanPreferencesStore, "getScanPreferences">;
 }
 
@@ -36,7 +38,7 @@ export function createBootstrapService(options: CreateBootstrapServiceOptions): 
       const appSettings = bootstrap.getAppSettings();
       const onboarding = await reconcileImprovementProgram(options, appSettings, bootstrap.getOnboardingState());
       const [memoryHealth, cloudHealth, tokenUsage, legal, promotions, lotteryStatus] = await Promise.all([
-        getMemoryHealth(options.memoryClient),
+        getMemoryHealth(options.memoryClient, options.getMemoryUserId?.(), options.timeZone),
         getCloudHealth(options.cloudClient),
         refreshTokenUsage(options),
         getLegalUrls(options.cloudClient),
@@ -177,9 +179,9 @@ async function getLotteryStatus(cloudClient: CloudClient): Promise<LotteryStatus
   }
 }
 
-async function getMemoryHealth(memoryClient: MemoryClient): Promise<HealthStatus> {
+async function getMemoryHealth(memoryClient: MemoryClient, userId?: string, timeZone?: string): Promise<HealthStatus> {
   try {
-    const health = await memoryClient.health();
+    const health = await memoryClient.health(userId ? { userId, ...(timeZone ? {timeZone} : {}) } : undefined);
     return health.ok ? "ok" : "unavailable";
   } catch (error) {
     return "unavailable";

@@ -1,8 +1,9 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import type { CapabilityEvent } from "@memmy/local-api-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -23,10 +24,11 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 function context(outputMode: "json" | "ndjson" = "json"): PluginRuntimeContext {
-  root = mkdtempSync(join(tmpdir(), "memmy-command-plugin-"));
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "memmy-command-plugin-")));
   mkdirSync(join(root, "runtime"));
   writeFileSync(join(root, "runtime/plugin"), "test");
   chmodSync(join(root, "runtime/plugin"), 0o755);
@@ -72,6 +74,8 @@ async function collect(iterable: AsyncIterable<CapabilityEvent>): Promise<Capabi
   return events;
 }
 
+// Protocol fixtures supply their own launcher and pin a supported sandbox platform.
+// Native Windows admission remains covered by the sandbox policy cases below.
 describe("CommandPluginAdapter", () => {
   it("stops a silent plugin independently of its blocked event loop", async () => {
     const adapter = createCommandPluginAdapter({ buildLaunch: async () => ({ command: process.execPath, args: ["-e", "while(true) {}"], cwd: root! }) });
@@ -275,6 +279,7 @@ describe("CommandPluginAdapter", () => {
   it("maps a sandboxed command JSON response", async () => {
     let childEnvironment: Record<string, string> | undefined;
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       spawnFn: ((command, args, options) => {
         childEnvironment = options?.env as Record<string, string>;
         return spawn(command, args, options as Parameters<typeof spawn>[2]) as ReturnType<typeof spawn>;
@@ -303,6 +308,7 @@ describe("CommandPluginAdapter", () => {
 
   it("streams NDJSON events", async () => {
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       buildLaunch: async (_context, config) => ({
         command: process.execPath,
         args: ["-e", `console.log(JSON.stringify({type:'progress',current:1,total:1})); console.log(JSON.stringify({type:'result',output:{ok:true}}))`, ...config.args],
@@ -325,6 +331,7 @@ describe("CommandPluginAdapter", () => {
 
   it("does not consume the command timeout while an interaction waits for the user", async () => {
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       buildLaunch: async (_context, config) => ({
         command: process.execPath,
         args: ["-e", `
@@ -371,6 +378,7 @@ describe("CommandPluginAdapter", () => {
 
   it("brokers approved Host-service requests over the private NDJSON channel", async () => {
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       hostServices: { invoke: async (call) => ({ content: `model:${call.conversationId}:${call.modelPreset}` }) },
       buildLaunch: async (_context, config) => ({
         command: process.execPath,
@@ -404,6 +412,7 @@ describe("CommandPluginAdapter", () => {
     let inFlight = 0;
     let peak = 0;
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       hostServices: {
         invoke: async () => {
           inFlight += 1;
@@ -446,10 +455,35 @@ describe("CommandPluginAdapter", () => {
     expect(peak).toBeGreaterThan(1);
   });
 
+  it("returns a broken stdin as a call error without an uncaught stream error", async () => {
+    let child: ChildProcessWithoutNullStreams | undefined;
+    const adapter = createCommandPluginAdapter({
+      platform: "linux",
+      spawnFn: ((command, args, options) => {
+        child = spawn(command, args, options) as ChildProcessWithoutNullStreams;
+        return child;
+      }) as typeof spawn,
+      buildLaunch: async () => ({ command: process.execPath, args: ["-e", "setInterval(()=>{},1000)"], cwd: root! })
+    });
+    const pluginContext = context("ndjson");
+    pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, interactive: true };
+    const session = await adapter.activate(pluginContext);
+    const pending = collect(adapter.invoke(session, { callId: "pipe-error", pluginId: pluginContext.plugin.id,
+      capabilityId: "run", conversationId: "conversation-1", input: {} }));
+    void pending.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(child).toBeDefined());
+      const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+      expect(() => child!.stdin.emit("error", error)).not.toThrow();
+      await expect(pending).rejects.toBe(error);
+    } finally { await adapter.deactivate(session); }
+  });
+
   it("aborts in-flight Host services when a command-plugin run is cancelled", async () => {
     const started = Promise.withResolvers<void>();
     let hostSignal: AbortSignal | undefined;
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       hostServices: {
         invoke: async (call) => {
           hostSignal = call.signal;
@@ -483,18 +517,29 @@ describe("CommandPluginAdapter", () => {
 
   it("reports a closed response pipe as a call failure without an uncaught stream error", async () => {
     const invoke = vi.fn(async () => ({ ok: true }));
+    let child: ChildProcessWithoutNullStreams | undefined;
     const adapter = createCommandPluginAdapter({
       hostServices: { invoke },
+      spawnFn: ((command, args, options) => {
+        child = spawn(command, args, options) as ChildProcessWithoutNullStreams;
+        const input = child.stdin;
+        // Keep the real child/protocol, but inject the broken response write at
+        // the stream boundary. Closing CRT fd 0 does not reliably close Node's
+        // inherited Windows pipe handle; callback + error-event behavior is
+        // what the Host must handle on every platform.
+        child.stdin = new Writable({ write(chunk, encoding, callback) {
+          if (JSON.parse(chunk.toString()).type === "host-service-response") {
+            callback(Object.assign(new Error("Response pipe closed"), { code: "EPIPE" }));
+          } else input.write(chunk, encoding, callback);
+        } });
+        return child;
+      }) as typeof spawn,
       buildLaunch: async () => ({
         command: process.execPath,
         args: ["-e", `
-          const fs=require('node:fs');
-          fs.readSync(0,Buffer.alloc(65536),0,65536,null);
-          fs.closeSync(0);
-          // Keep descriptor zero occupied so libuv cannot reuse it for an
-          // internal handle (some Node 24 builds assert when closing fd 0).
-          fs.openSync(process.platform==='win32'?'NUL':'/dev/null','r');
-          console.log(JSON.stringify({type:'host-service-request',requestId:'closed-pipe',service:'model-inference',input:{}}));
+          require('node:readline').createInterface({input:process.stdin}).once('line', () => {
+            console.log(JSON.stringify({type:'host-service-request',requestId:'closed-pipe',service:'model-inference',input:{}}));
+          });
           setInterval(() => {}, 1000);
         `], cwd: root!
       })
@@ -510,12 +555,15 @@ describe("CommandPluginAdapter", () => {
         callId: "call-closed-pipe", pluginId: pluginContext.plugin.id, capabilityId: "run", conversationId: "conversation-1", input: {}
       }))).rejects.toMatchObject({ code: "EPIPE" });
       expect(invoke).toHaveBeenCalledOnce();
+      expect(child).toBeDefined();
+      expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
     } finally { await adapter.deactivate(session); }
   });
 
   it("denies unapproved Host-service requests without invoking the service", async () => {
     const invoke = vi.fn();
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       hostServices: { invoke },
       buildLaunch: async () => ({
         command: process.execPath,
@@ -537,9 +585,10 @@ describe("CommandPluginAdapter", () => {
   it("allows only command-plugin network hosts approved by the host policy", async () => {
     const pluginContext = context();
     pluginContext.plugin.manifest.permissions = [{ type: "network", hosts: ["example.com"] }];
-    await expect(createCommandPluginAdapter().activate(pluginContext)).rejects.toThrow(/not in the host allowlist/);
+    await expect(createCommandPluginAdapter({ platform: "linux" }).activate(pluginContext)).rejects.toThrow(/not in the host allowlist/);
     let networkEnabled = false;
     const adapter = createCommandPluginAdapter({
+      platform: "linux",
       allowedNetworkHosts: ["example.com"],
       buildLaunch: async (_context, _config, enabled) => {
         networkEnabled = enabled;
@@ -554,7 +603,7 @@ describe("CommandPluginAdapter", () => {
     const pluginContext = context();
     pluginContext.plugin.manifest.permissions = [];
     pluginContext.plugin.manifest.runtime.config = { command: "../outside" };
-    await expect(createCommandPluginAdapter().activate(pluginContext)).rejects.toThrow(/relative/);
+    await expect(createCommandPluginAdapter({ platform: "linux" }).activate(pluginContext)).rejects.toThrow(/relative/);
   });
 
   it("runs non-executable JavaScript artifacts with the host Node interpreter", async () => {
@@ -567,13 +616,16 @@ describe("CommandPluginAdapter", () => {
       cwd: "."
     }, "darwin");
     const separator = launch.args.indexOf("--");
-    expect(launch.args[separator + 1]).toBe(realpathSync(process.execPath));
-    expect(launch.args.slice(separator + 2)).toEqual([realpathSync(join(root!, "runtime/plugin")), "--flag"]);
+    expect(launch.args[separator + 1]).toBe(realpathSync.native(process.execPath));
+    expect(launch.args.slice(separator + 2)).toEqual([realpathSync.native(join(root!, "runtime/plugin")), "--flag"]);
   });
 
   it("prepends only Host-resolved runtime paths to the plugin environment", () => {
+    vi.stubEnv("SystemRoot", "C:\\Windows");
     expect(resolvePluginEnvironment({ TEXMFHOME: "/plugin/path" }, {}, {}, ["/trusted/tex/bin"], { TEXMFHOME: "/trusted/texmf" })).toMatchObject({
-      PATH: "/trusted/tex/bin:/usr/bin:/bin",
+      PATH: process.platform === "win32"
+        ? "/trusted/tex/bin;C:\\Windows\\System32;C:\\Windows"
+        : "/trusted/tex/bin:/usr/bin:/bin",
       LANG: "C.UTF-8",
       TEXMFHOME: "/trusted/texmf"
     });
@@ -660,7 +712,8 @@ describe("CommandPluginAdapter", () => {
     );
     const profile = launch.args[1] ?? "";
     expect(dependency.pathEntries[0]).toMatch(/texlive/u);
-    expect(dependency.environment.TEXMFHOME).toMatch(/texmf/u);
+    // A TeX distribution can be installed without the optional user texmf tree.
+    if (dependency.environment.TEXMFHOME) expect(dependency.environment.TEXMFHOME).toMatch(/texmf/u);
     expect(profile).toContain(`(allow file-read*`);
     expect(profile).toContain(`(subpath ${JSON.stringify(dependency.readRoots[0])})`);
     expect(profile).toContain(`(subpath ${JSON.stringify(dependency.executableRoots[0])})`);
@@ -744,6 +797,7 @@ describe("CommandPluginAdapter", () => {
   });
 
   it.each(["cancel", "deactivate", "deadline"])("does not spawn a renderer after %s while TeX is downloading", async action => {
+    if (action === "deadline") vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const f = deferredTexContext();
     const spawnFn = vi.fn(spawn);
     const adapter = createCommandPluginAdapter({ spawnFn, buildLaunch: async () => ({ command: process.execPath, args: [], cwd: root! }) });
@@ -753,7 +807,11 @@ describe("CommandPluginAdapter", () => {
     expect((await iterator.next()).value).toMatchObject({ type: "progress" });
     if (action === "cancel") await adapter.cancel!(session, "waiting");
     if (action === "deactivate") await adapter.deactivate(session);
-    await expect(iterator.next()).rejects.toMatchObject({ code: action === "deadline" ? "plugin_timeout" : "plugin_cancelled" });
+    const termination = expect(iterator.next()).rejects.toMatchObject({
+      code: action === "deadline" ? "plugin_timeout" : "plugin_cancelled"
+    });
+    if (action === "deadline") await vi.advanceTimersByTimeAsync(50);
+    await termination;
     expect(spawnFn).not.toHaveBeenCalled();
     f.finish();
     await adapter.deactivate(session);
@@ -884,7 +942,7 @@ describe("CommandPluginAdapter", () => {
       });
 
       expect(command).not.toMatch(/sandbox-exec|bwrap/u);
-      expect(command).toContain("runtime/plugin");
+      expect(command).toContain(join("runtime", "plugin"));
     });
 
     it("keeps the sandbox on when the account does not hold the entitlement", async () => {

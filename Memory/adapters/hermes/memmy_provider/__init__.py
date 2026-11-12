@@ -5,7 +5,11 @@ import json
 import os
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 try:
     from agent.memory_provider import MemoryProvider
@@ -14,9 +18,46 @@ except Exception:
         pass
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _same_http_origin(target, configured):
+    def origin(value):
+        url = urlsplit(value)
+        if url.scheme not in ("http", "https") or not url.hostname:
+            return None
+        return (url.scheme, url.hostname.encode("idna").decode("ascii"), url.port if url.port is not None else (443 if url.scheme == "https" else 80))
+    try:
+        target_origin = origin(target)
+        return target_origin is not None and target_origin == origin(configured)
+    except (ValueError, UnicodeError):
+        return False
+
+
+def _connection():
+    metadata = Path(__file__).resolve().parents[1] / "memmy-memory-config.json"
+    config_path = os.environ.get("MEMMY_CONFIG", "").strip()
+    if not config_path and metadata.exists():
+        config_path = json.loads(metadata.read_text(encoding="utf-8")).get("memmy_config_path")
+    path = Path(config_path or Path.home() / ".memmy" / "config.yaml")
+    config = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+    storage = (config or {}).get("memmyMemory", {}).get("storage", {})
+    configured = (storage.get("endpoint") or "http://127.0.0.1:18960").rstrip("/")
+    aliases = (("MEMMY_MEMORY_URL", "MEMMY_MEMORY_TOKEN"), ("MEMORY_SERVICE_URL", "MEMORY_SERVICE_TOKEN"))
+    endpoint = next((os.environ[key].strip() for key, _ in aliases if os.environ.get(key, "").strip()), configured).rstrip("/")
+    for url_key, token_key in aliases:
+        token = os.environ.get(token_key, "").strip()
+        if token and _same_http_origin(endpoint, os.environ.get(url_key, "").strip() or configured):
+            return endpoint, token
+    token = (storage.get("token") or "").strip() if _same_http_origin(endpoint, configured) else ""
+    return endpoint, token
+
+
 class MemmyProvider(MemoryProvider):
     def __init__(self) -> None:
-        self._endpoint = os.environ.get("MEMMY_MEMORY_URL", "http://127.0.0.1:18960").rstrip("/")
+        self._http = urllib.request.build_opener(_NoRedirect)
         self._session_id = ""
         self._turn_id = ""
         self._query = ""
@@ -124,11 +165,11 @@ class MemmyProvider(MemoryProvider):
             method = "GET"
         payload = None if method == "GET" else json.dumps({**(body or {}), "source": "hermes"}).encode("utf-8")
         headers = {"Content-Type": "application/json", "x-memmy-profile-id": self._profile}
-        token = os.environ.get("MEMMY_MEMORY_TOKEN", "")
+        endpoint, token = _connection()
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        request = urllib.request.Request(f"{self._endpoint}/api/v1{path}", data=payload, headers=headers, method=method)
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        request = urllib.request.Request(f"{endpoint}/api/v1{path}", data=payload, headers=headers, method=method)
+        with self._http.open(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
 

@@ -29,6 +29,19 @@ function loopFixture(run: () => Promise<void>) {
 const message = () => new InboundMessage({ channel: "websocket", senderId: "user", chatId: "test", content: "review" });
 
 describe("whole Agent task activity", () => {
+  it("cancels a turn waiting for plugin activation without starting it later", async () => {
+    const release = agentTaskActivity.tryBlockTasks()!;
+    const controller = new AbortController(), run = vi.fn(async () => {});
+    const loop = loopFixture(run);
+    const turn = loop.processMessageInternal(message(), undefined, { abortSignal: controller.signal });
+    const rejected = expect(turn).rejects.toMatchObject({ name: "TaskCancelledError" });
+    controller.abort();
+    try { await rejected; }
+    finally { release(); }
+    await Promise.resolve();
+    expect(run).not.toHaveBeenCalled();
+    expect(agentTaskActivity.busy).toBe(false);
+  });
   it("stays busy while thinking, between plugin calls, and while waiting for user input", async () => {
     const thinking = deferred(), interaction = deferred(), finalStep = deferred();
     const phases: string[] = [];

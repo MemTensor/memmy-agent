@@ -39,3 +39,19 @@ export function isWordDocument(node: NativeNode, nodes: ReadonlyMap<string, Nati
   }
   return false;
 }
+
+export function isNotepadDocument(node: NativeNode, nodes: ReadonlyMap<string, NativeNode>, rule: NativeAppRule): boolean {
+  if (node.controlType !== "Document" || path.win32.basename(rule.executable).toLowerCase() !== "notepad.exe"
+      || !rule.documentRegions?.some((selector) => "scope" in selector && selector.scope === "notepad.document")) return false;
+  let current: NativeNode | undefined = node;
+  const chain = [["Document", "RichEditD2DPT"], ["Pane", "NotepadTextBox"], ["Window", "Notepad"]];
+  for (let index = 0; index < chain.length; ++index) {
+    const [type, className] = chain[index]!;
+    if (!current || current.controlType !== type || current.className !== className || current.automationId !== ""
+        || current.depth !== 2 - index || current.password !== false || (index > 0 && current.redaction)
+        || current.missing?.includes("automationId")) return false;
+    if (index === 2) return current.parentKey === null;
+    current = current.parentKey ? nodes.get(current.parentKey) : undefined;
+  }
+  return false;
+}

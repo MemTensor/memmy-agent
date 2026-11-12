@@ -65,6 +65,13 @@ jobs:
           $testExit = $LASTEXITCODE
           ./scripts/internal/win/history-validation-report.ps1 -Report .history-ci/native-results.xml -Output .history-ci/native-summary.json
           if ($testExit -ne 0) { exit $testExit }
+      - name: Repeat idle recording recovery without retrying failures
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vsRoot = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $ctest = Join-Path $vsRoot 'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/ctest.exe'
+          & $ctest --test-dir .history-ci/build/release --parallel 1 --output-on-failure -R '^integration.task_video_idle$' --repeat until-fail:3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run History contracts, UI, packaging and native lifecycle validation
         env:
           MEMMY_LEGAL_CN_BASE_URL: https://memmy.cn

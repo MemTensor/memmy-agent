@@ -600,6 +600,7 @@ export class ReadFileTool extends Tool {
       "Images return visual content for analysis. Supports PDF, DOCX, XLSX, PPTX documents. " +
       "Use find_files/list_dir first when the path is uncertain. " +
       "Read the relevant range before editing so replacements or patches are based on current content. " +
+      "At EOF, text reads report the final newline as CRLF, LF, CR or none; numbered lines alone do not establish a final newline. " +
       "Use offset and limit for text file lines, or char_offset/char_limit for oversized single lines. For documents use pages for PDF page ranges, " +
       "and char_offset/char_limit to read extracted text in chunks (also within a large PDF page). " +
       "Follow the returned char_offset with the same path/pages until the required content is read; " +
@@ -710,7 +711,7 @@ export class ReadFileTool extends Tool {
       const footer =
         nextOffset <= lines.length
           ? `\n\nUse offset=${nextOffset} to continue.`
-          : "\n\nEnd of file";
+          : `\n\nEnd of file\n[Final newline: ${content.endsWith("\r\n") ? "CRLF" : content.endsWith("\n") ? "LF" : content.endsWith("\r") ? "CR" : "none"}]`;
       this.fileStates().recordRead(target, offset, limit);
       if (provenance.length + body.length + footer.length > budget) {
         const hint = `${provenance}Long line: use read_file char_offset/char_limit for raw fragments. ${context?.availableTools?.includes("exec") ? "Use exec with an integer-safe parser for specific fields/records; narrow oversized queries." : "Fragments are not standalone JSON; do not infer missing fields."}\n`;

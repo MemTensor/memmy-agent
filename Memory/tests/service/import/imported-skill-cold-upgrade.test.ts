@@ -1,6 +1,7 @@
 import "../../fixtures/isolated-user-home.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Repositories } from "../../../src/storage/repositories.js";
+import { SqliteVecStore } from "../../../src/storage/sqlite-vec-store.js";
 import { agentSkillConnectionKey, agentSkillInstallationsKey, importedSkillContentHash } from "../../../src/storage/imported-skill.js";
 import type { MemoryAddRequest, MemoryRow } from "../../../src/types.js";
 import { withLegacyImportedSkillWriter } from "../../fixtures/legacy-imported-skill-writer.js";
@@ -306,7 +307,7 @@ describe("pure old-writer collision before startup or any directory scan", () =>
     expect(recalled.hits.map(hit => hit.id)).toEqual([reobserved ? id : foreignId]);
   });
 
-  it("redacts restricted and pending cold imported skills in getMemory, getSkill and panelItems while preserving eligible and user-archived reads", () => {
+  it("redacts restricted and pending cold imported skills in getMemory, getSkill and panelItems while preserving eligible and user-archived reads", async () => {
     const { db, service } = fixture.createTestService({ llm: createFailingLlm(), embedder: createCapturingEmbedder([]) });
     const repos = new Repositories(db.db);
     const secretMarker = "COLD-RESTRICTED-SECRET-BODY";
@@ -398,8 +399,23 @@ describe("pure old-writer collision before startup or any directory scan", () =>
       expect(repos.memories.getIncludingDeleted(restrictedId)!.memoryValue).toContain(secretMarker);
     }
 
-    const panel = service.panelItems({ namespace, layer: "Skill", page: 1, limit: 50 });
-    expect(JSON.stringify(panel)).not.toContain(secretMarker);
+    const vectorRead = vi.spyOn(SqliteVecStore.prototype, "getMany").mockImplementation(() => {
+      throw new Error("Cold Skill display must not hydrate vectors");
+    });
+    try {
+      const panel = service.panelItems({ namespace, layer: "Skill", page: 1, limit: 50 });
+      expect(JSON.stringify(panel)).not.toContain(secretMarker);
+      expect(panel.items.find(item => item.id === coldEligibleId)?.summary).toContain(eligibleMarker);
+      expect(panel.items.find(item => item.id === archivedId)?.status).toBe("archived");
+      const filtered = service.panelItems({ namespace, layer: "Skill", q: secretMarker, limit: 50 });
+      expect(JSON.stringify(filtered)).not.toContain(secretMarker);
+      const fixed = await service.browsePanel({ op: "create", filter: { section: "items", layer: "Skill" } }, { namespace });
+      expect(JSON.stringify(fixed)).not.toContain(secretMarker);
+      if (!("viewId" in fixed)) throw new Error("Expected a fixed Skill view");
+      expect(JSON.stringify(await service.browsePanel({ op: "page", viewId: fixed.viewId, page: 1 }, { namespace })))
+        .not.toContain(secretMarker);
+      expect(vectorRead).not.toHaveBeenCalled();
+    } finally { vectorRead.mockRestore(); }
 
     // Positive controls: eligible skill includes body + supporting source dir; user-archived skill keeps archived status without source dir
     const eligibleDetail = service.getMemory(coldEligibleId, { namespace: { ...namespace, source: "claude_code" } });

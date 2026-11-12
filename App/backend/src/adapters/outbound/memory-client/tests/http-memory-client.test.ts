@@ -1,6 +1,6 @@
 /** Http memory client tests. */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHttpMemoryClient } from "../http-memory-client.js";
 import { buildMemoryLayerUrl, MEMORY_LAYER_PATHS } from "../memory-layer-endpoints.js";
 import { MemoryLayerError, MemoryLayerNetworkError } from "../errors.js";
@@ -37,6 +37,38 @@ describe("HttpMemoryClient", () => {
     });
     await expect(client.taskExperienceProcessing("task")).rejects.toMatchObject({ name: "ZodError" });
     await expect(client.retryTaskExperienceProcessing("task")).rejects.toMatchObject({ name: "ZodError" });
+  });
+
+  it("refreshes credentials before requests and never falls back to a stale token", async () => {
+    const sent: (string | null)[] = [];
+    let token: string | undefined;
+    const client = createHttpMemoryClient({ baseUrl: "http://memory.test", token: "stale", timeoutMs: 500, maxRetries: 0 }, {
+      resolveToken: () => token,
+      fetchImpl: (async (_url, init) => {
+        sent.push(new Headers(init?.headers).get("authorization"));
+        return new Response(JSON.stringify({ status: "pending", reason: "source_episode_closed" }));
+      }) as typeof fetch
+    });
+    const input = { sourceTurn: { source: "codex", profileId: "default", conversationId: "session", turnId: "turn", startedAt: "2099-01-01T00:00:00.000Z", completedAt: "2099-01-01T00:01:00.000Z", completionEvidence: "final_answer:turn" }, channel: "agent_source_scan" as const, query: "Test", answer: "Done" };
+    for (token of [undefined, "initialized", "rotated", undefined]) await client.completeSourceTurn(input);
+    expect(sent).toEqual([null, "Bearer initialized", "Bearer rotated", null]);
+  });
+
+  it.each(["memory", "log"].flatMap(kind => ["timeout",503,401,403,404,409].map(failure => ({kind,failure}))))("leaves panel $kind retries to the frontend ($failure)", async ({kind,failure}) => {
+    let calls = 0;
+    const client = createHttpMemoryClient({baseUrl:"http://synthetic.invalid",timeoutMs:500,maxRetries:3}, {
+      fetchImpl: (async () => { calls++; if(failure === "timeout")throw new DOMException("timed out","TimeoutError"); return new Response("{}", {status:failure as number}); }) as typeof fetch
+    });
+    await expect(kind === "memory" ? client.panelMemory!("memory-1") : client.panelLogDetail!(1)).rejects.toMatchObject({status:failure === "timeout" ? 503 : failure});
+    expect(calls).toBe(1);
+  });
+
+  it("retains legacy getMemory backend retry for the compatibility path", async () => {
+    let calls=0;
+    const client=createHttpMemoryClient({baseUrl:"http://synthetic.invalid",timeoutMs:10,maxRetries:2}, {
+      fetchImpl:(async()=>{if(++calls===1)throw new DOMException("timed out","TimeoutError");return new Response(JSON.stringify(getMemoryOutput()));}) as typeof fetch
+    });
+    expect((await client.getMemory({memoryId:"memory-1"})).item.id).toBe("memory-1");expect(calls).toBe(2);
   });
 
   it("recognizes a healthy older service without desktop scan endpoints and does not retry its 404", async () => {
@@ -122,9 +154,19 @@ describe("HttpMemoryClient", () => {
       "/api/v1/memory/processing/status",
       "/api/v1/memory/:id/processing/retry",
       "/api/v1/memory/logs",
+      "/api/v1/panel/memory/:memoryId",
       "/api/v1/panel/overview",
       "/api/v1/panel/analysis",
       "/api/v1/panel/items",
+      "/api/v1/panel/logs",
+      "/api/v1/panel/logs/:id",
+      "/api/v1/panel/stats",
+      "/api/v1/panel/overview-stats",
+      "/api/v1/panel/browse",
+      "/api/v1/panel/task-summaries",
+      "/api/v1/panel/task-details/:id/check",
+      "/api/v1/panel/task-details/:id",
+      "/api/v1/panel/task-details/:id/turns/:turnId/field",
       "/api/v1/panel/tasks",
       "/api/v1/panel/tasks/:id/experience-processing",
       "/api/v1/panel/tasks/:id/experience-processing/retry",
@@ -229,6 +271,51 @@ describe("HttpMemoryClient", () => {
       skills: []
     })).resolves.toMatchObject({ sourceAgentId: "codex" });
     expect(calls).toHaveLength(4);
+  });
+
+  it.each(["caller", "deadline"] as const)("classifies %s cancellation while reading a response body", async cause => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started=resolve; });
+    let calls=0;
+    const client=createHttpMemoryClient({baseUrl:"http://synthetic.invalid",token:"synthetic",timeoutMs:cause === "deadline" ? 30 : 1000,maxRetries:3}, {
+      fetchImpl:(async (_url,init)=>{
+        calls++;
+        return {ok:true,json:()=>new Promise((_resolve,reject)=>{
+          const fail=()=>reject(new DOMException("body aborted", "AbortError"));
+          init!.signal!.addEventListener("abort",fail,{once:true});
+          started();
+          if(init!.signal!.aborted) fail();
+        })} as Response;
+      }) as typeof fetch
+    });
+    const pending=client.panelTaskCheck("synthetic",{signal:controller.signal}).catch(error=>error);
+    await ready;
+    if(cause === "caller") controller.abort();
+    expect(await pending).toMatchObject({code:"memory_layer_unavailable",message:cause === "caller" ? "memory layer request cancelled" : "memory layer timeout"});
+    expect(calls).toBe(1);
+  });
+
+  it("propagates a cancelled panel subscription to fetch without retrying", async () => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    let observed: AbortSignal | undefined;
+    let calls = 0;
+    const client = createHttpMemoryClient({baseUrl:"http://memory.test",token:"test",timeoutMs:1000,maxRetries:3}, {
+      fetchImpl: (async (_url, init) => {
+        calls++;
+        observed = init?.signal ?? undefined;
+        started();
+        return new Promise<Response>((_resolve, reject) => observed!.addEventListener("abort", () => reject(new DOMException("Cancelled", "AbortError")), {once:true}));
+      }) as typeof fetch
+    });
+    const result = client.panelTaskCheck("task", {signal:controller.signal}).catch(error => error);
+    await ready;
+    controller.abort();
+    expect(await result).toMatchObject({message:"memory layer request cancelled"});
+    expect(observed?.aborted).toBe(true);
+    expect(calls).toBe(1);
   });
 
   it("calls every final runtime path and parses schema-valid responses", async () => {

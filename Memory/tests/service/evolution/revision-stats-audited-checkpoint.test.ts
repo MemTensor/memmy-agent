@@ -27,7 +27,12 @@ function restoredFixture(withAudit = true) {
   const db = new MemoryDb({ path: ":memory:" }); databases.push(db);
   const repos = new Repositories(db.db), config = structuredClone(DEFAULT_MEMMY_CONFIG);
   config.algorithm.l2Induction.mode = "unified";
-  for (const memory of fixture.memories) repos.memories.insert(structuredClone(memory));
+  for (const memory of fixture.memories) {
+    repos.memories.insert(structuredClone(memory));
+    // This is a frozen pre-device-owner DB export, not a newly captured row.
+    // Preserve its recorded owner so audit before/after snapshots remain genuine.
+    db.db.prepare("UPDATE memories SET user_id=? WHERE id=?").run(memory.userId, memory.id);
+  }
   for (const link of fixture.links) repos.runtime.insertTracePolicyLink(structuredClone(link));
   if (withAudit) for (const change of fixture.changes) {
     const { seq: _oldSeq, ...record } = structuredClone(change);

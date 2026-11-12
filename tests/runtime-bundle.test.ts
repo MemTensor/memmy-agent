@@ -27,6 +27,7 @@ it("runs relocated Memory entries without staging, retaining resources and exact
     console.log(JSON.stringify([value, sqlite, readFileSync(new URL('./message%20%231.txt', import.meta.url), 'utf8')]));`);
   await put("package/dist/src/server/message #1.txt", "asset");
   await put("package/dist/src/server/storage-startup-worker.js", `console.log('startup-worker');`);
+  await put("package/dist/src/service/embedding/embedding-maintenance-reader-worker.js", `console.log('maintenance-reader-worker');`);
   await put("package/dist/src/cli/index.js", `import value from 'demo'; console.log(value);`);
   await put("package/node_modules/demo/package.json", JSON.stringify({ name: "demo", main: "index.cjs" }));
   await put("package/node_modules/demo/index.cjs", `module.exports = require('glob');`);
@@ -49,6 +50,7 @@ it("runs relocated Memory entries without staging, retaining resources and exact
   const run = (entry: string) => execFileSync(process.execPath, [path.join(relocated, "package/dist/src", entry)], { encoding: "utf8" }).trim();
   expect(JSON.parse(run("server/index.js"))).toEqual(["nested-version", "external-dependency", "asset"]);
   expect(run("server/storage-startup-worker.js")).toBe("startup-worker");
+  expect(run("service/embedding/embedding-maintenance-reader-worker.js")).toBe("maintenance-reader-worker");
   expect(run("cli/index.js")).toBe("nested-version");
   await expect(readFile(path.join(relocated, "package/node_modules/better-sqlite3/build/Release/better_sqlite3.node"), "utf8")).resolves.toBe("native-fixture");
   for (const file of ["src/server.ts", "node_modules/unused/index.js", "node_modules/demo/index.cjs", "dist/src/server/index.js.map"]) {
@@ -83,6 +85,29 @@ it("packages the Agent serve entry and its dynamic tools without the standalone 
   expect(execFileSync(process.execPath, [path.join(destination, pkg, "dist/main.js"), "--version"], { encoding: "utf8" }).trim()).toBe("1.2.1");
   await expect(readFile(path.join(destination, pkg, "node_modules/@playwright/mcp/index.js"), "utf8")).resolves.toContain("@playwright/mcp");
   await expect(readFile(path.join(destination, pkg, "node_modules/unused-gateway/index.js"))).rejects.toThrow();
+});
+
+it("runs the Memory panel worker and its dependencies after relocating without staging", async () => {
+  const { root, source, destination, put } = await fixture();
+  await put("package/package.json", JSON.stringify({ type: "module", dependencies: { ignore: "synthetic" } }));
+  await put("package/dist/src/server/index.js", `import { Worker } from 'node:worker_threads';
+    const worker = new Worker(new URL('../service/panel/reader-worker.js', import.meta.url), { workerData: 42 });
+    try { console.log(JSON.stringify(await new Promise((resolve, reject) => {
+      worker.once('message', resolve); worker.once('error', reject);
+    }))); } finally { await worker.terminate(); }`);
+  await put("package/dist/src/service/panel/reader-worker.js", `import { parentPort, workerData } from 'node:worker_threads';
+    import { readFileSync } from 'node:fs'; import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.url); const value = require('ignore');
+    parentPort.postMessage([value, workerData, readFileSync(new URL('./worker-note%20%23.txt', import.meta.url), 'utf8')]);`);
+  await put("package/dist/src/service/panel/worker-note #.txt", "worker asset");
+  await put("package/node_modules/ignore/package.json", JSON.stringify({ name: "ignore", main: "index.cjs" }));
+  await put("package/node_modules/ignore/index.cjs", "module.exports = 'worker dependency';");
+  await bundleRuntime({ source, destination, packageDirectory: "package", kind: "memory" });
+  const relocated = path.join(root, "relocated worker #");
+  await rename(destination, relocated);
+  await rm(source, { recursive: true });
+  const output = execFileSync(process.execPath, [path.join(relocated, "package/dist/src/server/index.js")], { encoding: "utf8" });
+  expect(JSON.parse(output)).toEqual(["worker dependency", 42, "worker asset"]);
 });
 
 it("fails packaging when an external package's required dependency is missing", async () => {

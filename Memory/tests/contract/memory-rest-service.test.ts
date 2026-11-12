@@ -120,7 +120,7 @@ describe("MemoryService / REST contract", () => {
     const seenTexts: string[] = [];
     const seenRoles: Array<"query" | "document" | undefined> = [];
     const { db, service } = createTestService({ embedder: createCapturingEmbedder(seenTexts, seenRoles) });
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -143,7 +143,7 @@ describe("MemoryService / REST contract", () => {
 
   it("deduplicates Agent source Skills by stable identity and content hash", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -261,7 +261,7 @@ describe("MemoryService / REST contract", () => {
 
   it("uses the caller timezone for offset-less memory times and rejects invalid zones", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -299,7 +299,7 @@ describe("MemoryService / REST contract", () => {
 
   it("prefers the configured timezone over the caller timezone", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service, timeZone: "UTC" });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, timeZone: "UTC" });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -322,16 +322,20 @@ describe("MemoryService / REST contract", () => {
 
   it("reconciles an Agent's skills over HTTP, including identity-only registrations and version rollback", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ service, auth: { localServiceToken: "reconcile-test-token" } });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const anonymous = await fetch(`http://127.0.0.1:${address.port}/api/v1/agent-skills/reconcile`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: "{}"
+      });
+      expect(anonymous.status).toBe(401);
       const namespace = { source: "claude_code", profileId: "default", userId: "reconcile-http-user" };
       const post = async (body: Record<string, unknown>) => {
         const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/agent-skills/reconcile`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", authorization: "Bearer reconcile-test-token" },
           body: JSON.stringify({ namespace, ...body })
         });
         expect(response.status).toBe(200);
@@ -369,7 +373,7 @@ describe("MemoryService / REST contract", () => {
 
   it("serves the REST health endpoint", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -427,7 +431,7 @@ describe("MemoryService / REST contract", () => {
 
   it("serves strict v2 L3 and project environment routes through MemoryRestClient", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -489,7 +493,7 @@ describe("MemoryService / REST contract", () => {
     await runWorkerRoundsWithDueRetries(service, db, [added.id], 3, 1);
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
 
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
@@ -529,7 +533,7 @@ describe("MemoryService / REST contract", () => {
     const opened = service.openSession({ namespace: { source: "memmy-agent", profileId: "default" } });
     const started = await service.startTurn({ sessionId: opened.sessionId, turnId: "late-recall", query: "Implement the memory timeout repair" });
     db.db.prepare("UPDATE recall_events SET injected_memory_ids_json = ? WHERE id = ?").run('["undelivered-memory"]', started.searchEventId);
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -554,7 +558,7 @@ describe("MemoryService / REST contract", () => {
       recalls: (db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get() as { count: number }).count,
       apiLogs: (db.db.prepare("SELECT COUNT(*) AS count FROM api_logs WHERE tool_name = 'memory_search'").get() as { count: number }).count
     });
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -585,6 +589,7 @@ describe("MemoryService / REST contract", () => {
     const { db, service } = createTestService();
     const analyticsEvents: string[] = [];
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       pluginRuntimeAnalytics: {
         track(eventName) {
@@ -763,7 +768,7 @@ describe("MemoryService / REST contract", () => {
       llm: createBatchReflectionLlm([], "remember auto worker embeddings"),
       embedder: createCapturingEmbedder(embeddingTexts)
     });
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -864,7 +869,7 @@ describe("MemoryService / REST contract", () => {
     expect(l3Jobs()).toEqual([]);
 
     // Keep the startup fallback out of the wait window so only session.close can wake the worker.
-    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 60_000 });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -921,7 +926,7 @@ describe("MemoryService / REST contract", () => {
       new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
     );
 
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -997,7 +1002,7 @@ describe("MemoryService / REST contract", () => {
       new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
     );
 
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -1081,7 +1086,7 @@ describe("MemoryService / REST contract", () => {
     expect(queuedRow).toBeUndefined();
     service.closeSession(session.sessionId);
 
-    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 0 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 0 });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -1121,7 +1126,7 @@ describe("MemoryService / REST contract", () => {
       now: Date.now() + 100
     });
 
-    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 0 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 0 });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -1208,7 +1213,7 @@ describe("MemoryService / REST contract", () => {
     expect(orphanMemoryJob).toBeDefined();
     repos.runtime.completeJob(orphanMemoryJob!.id);
 
-    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 0 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 0 });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -1492,7 +1497,7 @@ describe("MemoryService / REST contract", () => {
     }
     expect(memories.every((memory) => repos.memories.hasVector(memory.id, "vec_summary"))).toBe(true);
     expect(memories.map((memory) => repos.processing.get(memory.id)?.state)).toEqual(["ready", "ready", "ready"]);
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -1533,7 +1538,7 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
-  it("enforces scoped API permissions, idempotency, and shared resource access", async () => {
+  it("enforces scoped API permissions, idempotency, and device resource namespace boundaries", async () => {
     const { db, service } = createTestService();
     const server = createMemoryHttpServer({
       service,
@@ -1664,14 +1669,20 @@ describe("MemoryService / REST contract", () => {
     expect(writerItemsResponse.status).toBe(200);
     expect(writerItems.items.map((item) => item.id)).toContain(complete.l1MemoryId);
 
+    const writerGet = await fetch(baseUrl + "/memory/" + complete.l1MemoryId, {
+      headers: { authorization: "Bearer writer-a" }
+    });
+    expect(writerGet.status).toBe(200);
+    expect((await writerGet.json() as { id: string }).id).toBe(complete.l1MemoryId);
+
     const crossUserGet = await fetch(baseUrl + "/memory/" + complete.l1MemoryId, {
       headers: {
         authorization: "Bearer reader-b"
       }
     });
-    const crossUserBody = await crossUserGet.json() as { id: string };
-    expect(crossUserGet.status).toBe(200);
-    expect(crossUserBody.id).toBe(complete.l1MemoryId);
+    const crossUserBody = await crossUserGet.json() as { error: { code: string } };
+    expect(crossUserGet.status).toBe(404);
+    expect(crossUserBody.error.code).toBe("not_found");
     });
     db.close();
   });

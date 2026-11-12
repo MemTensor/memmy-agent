@@ -14,12 +14,14 @@ import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
 import { matchToolResultIndices } from "../utils/tool-call-pairing.js";
 import { formatZonedTime } from "../utils/time.js";
+import { isRecord } from "../utils/json.js";
 import { isObservationMemory, isObservationMemoryProcessed } from "../service/observation-memory-state.js";
 import { isL3FieldSnapshotMemory, l3FieldSnapshotLegacyFields } from "../service/l3-field/snapshot-memory.js";
 import {
   renderL3WorldModelFields,
   type L3WorldModelFields
 } from "../contracts/index.js";
+import { extractToolEvidenceNames, normalizeToolName } from "./skill-tool-names.js";
 
 export interface CapturedTraceStep {
   key: string;
@@ -139,8 +141,13 @@ export interface SkillVerificationResult {
   coverage: number;
   resonance: number;
   unmappedTokens: string[];
+  draftLanguage: "zh" | "en";
+  evidenceLanguage: "zh" | "en";
+  evidenceBindingCoverage: number;
   reason?: string;
 }
+
+export const SKILL_VERIFIER_VERSION = 2;
 
 export type TurnRelation = "revision" | "follow_up" | "new_task" | "end_topic" | "unknown";
 export type IntentKind = "task" | "memory_probe" | "chitchat" | "meta" | "unknown";
@@ -714,16 +721,24 @@ export async function classifyTurnRelationWithLlm(
 
   const llm = options.llm;
   if (!options.disableLlm && llm?.isConfigured()) {
+    // Classification and optional arbitration share one interactive deadline.
+    // Pass it to the transport too: racing only the Promise left 180s HTTP
+    // calls and retries running after the caller had already fallen back.
+    const deadline = Date.now() + (options.timeoutMs ?? 6000);
     try {
+      const budget = deadline - Date.now();
+      if (budget <= 0) throw new Error("relation classifier timeout");
       const result = await relationWithTimeout(
-        callRelationLlm(llm, input),
-        options.timeoutMs ?? 6000
+        callRelationLlm(llm, input, budget),
+        budget
       );
       if (result.relation === "new_task" && (result.confidence ?? 0) < RELATION_ARBITRATION_THRESHOLD) {
         try {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) throw new Error("relation classifier timeout");
           const arbitration = await relationWithTimeout(
-            callRelationArbitration(llm, input),
-            options.timeoutMs ?? 6000
+            callRelationArbitration(llm, input, remaining),
+            remaining
           );
           if (arbitration !== "new_task") {
             return {
@@ -876,7 +891,8 @@ Reply JSON ONLY: {"relation":"follow_up"|"new_task","reason":"..."}`;
 
 async function callRelationLlm(
   llm: LlmClient,
-  input: TurnRelationInput
+  input: TurnRelationInput,
+  timeoutMs: number
 ): Promise<TurnRelationDecision> {
   const value = await llm.completeJson<Record<string, unknown>>(
     [
@@ -885,6 +901,9 @@ async function callRelationLlm(
     ],
     {
       operation: "relation.classify.v1",
+      timeoutMs,
+      deadlineMs: Date.now() + timeoutMs,
+      maxRetries: 0,
       thinkingMode: "disabled",
       temperature: llm.config.temperature,
       maxTokens: MEMORY_SUMMARY_MAX_TOKENS
@@ -913,7 +932,8 @@ async function callRelationLlm(
 
 async function callRelationArbitration(
   llm: LlmClient,
-  input: TurnRelationInput
+  input: TurnRelationInput,
+  timeoutMs: number
 ): Promise<"follow_up" | "new_task"> {
   const value = await llm.completeJson<Record<string, unknown>>(
     [
@@ -922,6 +942,9 @@ async function callRelationArbitration(
     ],
     {
       operation: "relation.arbitration.v1",
+      timeoutMs,
+      deadlineMs: Date.now() + timeoutMs,
+      maxRetries: 0,
       thinkingMode: "disabled",
       temperature: llm.config.temperature,
       maxTokens: MEMORY_SUMMARY_MAX_TOKENS
@@ -1465,7 +1488,7 @@ Evidence ID rules:
 
 export const SKILL_CRYSTALLIZE_PROMPT = {
   id: "skill.crystallize",
-  version: 6,
+  version: 7,
   description:
     "Turn graduated L2 evidence into a callable SOP-style skill with retrieval-oriented metadata.",
   system: `You crystallize a reusable SOP (standard procedure) an agent should follow.
@@ -1494,7 +1517,7 @@ Return JSON:
   ],
   "preconditions": ["bullet", ...],
   "steps": [
-    { "title": "short", "body": "markdown-friendly paragraph" }
+    { "title": "short", "body": "markdown-friendly paragraph", "evidence_ids": ["exact evidence id", ...] }
   ],
   "examples": [
     { "input": "user query", "expected": "outcome" }
@@ -1514,6 +1537,7 @@ Rules:
 - Generalize from evidence — do not overfit to a single example query.
 - \`retrieval_blurb\` must quote or paraphrase realistic user queries from EVIDENCE.
 - Keep natural-language fields (\`retrieval_blurb\`, \`trigger_context\`, \`summary\`, \`steps\`, \`decision_guidance\`) in one language (OUTPUT_LANGUAGE).
+- Every step MUST include \`evidence_ids\` copied exactly from supplied EVIDENCE ids. Never invent or rewrite an evidence id.
 - \`name\` stays snake_case capability identifier (<domain>_<task>_<action>), not free-form prose.
 - For \`decision_guidance\`: fold REPAIR_HINTS when present; add at most 1-2 contrast lines from EVIDENCE vs COUNTER_EXAMPLES; never fabricate.
 - EVIDENCE only contains success/unknown episode traces; never list a COUNTER_EXAMPLES trace as a step.
@@ -1573,6 +1597,7 @@ Rules:
 - Do not discard working steps unless REBUILD_LEVEL is L2 and evidence requires it.
 - retrieval_blurb must incorporate fresh user queries from INCREMENTAL_EVIDENCE when present.
 - Keep natural-language fields (retrieval_blurb/trigger_context/summary/steps/decision_guidance) in one language (OUTPUT_LANGUAGE).
+- Every step MUST include evidence_ids copied exactly from supplied EVIDENCE ids. Never invent or rewrite an evidence id.
 - Name remains a snake_case capability identifier (<domain>_<task>_<action>), not natural-language prose.
 - tools ⊆ EVIDENCE_TOOLS; steps 2-6; generalize, no query laundry lists.
 - EVIDENCE excludes failure-episode traces; use COUNTER_EXAMPLES for anti_pattern only.
@@ -3800,8 +3825,49 @@ export function buildPolicyDraft(args: {
   };
 }
 
-export function detectDominantLanguage(samples: ReadonlyArray<string | null | undefined>): DetectedPromptLanguage {
-  return detectPromptLanguage(samples, 0.7, "en", false);
+export function detectDominantLanguage(samples: ReadonlyArray<string | null | undefined>): "zh" | "en" {
+  return detectPromptLanguage(samples, 0.7, "en", false) as "zh" | "en";
+}
+
+/**
+ * Skill verification compares languages at the same CJK share that steers
+ * generation, so technical Chinese mixed with English terms stays Chinese.
+ */
+export function detectSkillTextLanguage(samples: ReadonlyArray<string | null | undefined>): "zh" | "en" {
+  return detectPromptLanguage(samples, STEERED_CHINESE_LETTER_SHARE, "en") as "zh" | "en";
+}
+
+const GENERIC_ANCHOR_TOKENS = new Set(["e.g", "i.e", "etc", "vs"]);
+
+/** Identifiers that survive translation: tool names, commands, paths, files, snake_case symbols. */
+export function skillAnchorTokens(text: string, evidenceTools: ReadonlySet<string>): Set<string> {
+  const out = new Set<string>();
+  for (const raw of text.toLowerCase().match(/[a-z0-9_][a-z0-9_./+-]{1,63}/g) ?? []) {
+    const token = raw.replace(/[./+-]+$/u, "");
+    if (token.length < 3 || GENERIC_ANCHOR_TOKENS.has(token)) continue;
+    if (/[_./]/u.test(token) || evidenceTools.has(token)) out.add(token);
+  }
+  return out;
+}
+
+/**
+ * Cross-language drafts cannot be checked by wording, so they need shared
+ * identifiers. Declared tools and step evidence ids are only corroboration:
+ * the model can copy both without reading the evidence.
+ */
+export function crossLanguageSkillGrounding(input: {
+  draftText: string;
+  evidenceText: string;
+  evidenceTools: ReadonlySet<string>;
+  toolsGrounded: boolean;
+  stepsBound: boolean;
+}): { ok: boolean; anchors: string[] } {
+  const evidenceAnchors = skillAnchorTokens(input.evidenceText, input.evidenceTools);
+  const anchors = [...skillAnchorTokens(input.draftText, input.evidenceTools)]
+    .filter((token) => evidenceAnchors.has(token))
+    .sort();
+  const corroborated = input.toolsGrounded || input.stepsBound;
+  return { ok: anchors.length >= 2 || (anchors.length >= 1 && corroborated), anchors };
 }
 
 /** Share of CJK among letters that selects Chinese when no interface language is pinned. */
@@ -4191,43 +4257,89 @@ export function verifySkillDraft(input: {
   minResonance?: number;
 }): SkillVerificationResult {
   const minResonance = input.minResonance ?? 0.5;
+  const draftLanguage = detectSkillTextLanguage([skillDraftProcedureText(input.draft)]);
+  const evidenceLanguage = detectSkillTextLanguage(input.evidenceTraces.flatMap((trace) => [
+    trace.userText,
+    trace.agentText,
+    trace.reflection,
+    trace.summary
+  ]));
+  const evidenceBinding = skillEvidenceBinding(input.draft, input.evidenceTraces);
   if (input.evidenceTraces.length === 0) {
     return {
       ok: false,
       coverage: 0,
       resonance: 0,
       unmappedTokens: [],
+      draftLanguage,
+      evidenceLanguage,
+      evidenceBindingCoverage: 0,
       reason: "no-evidence"
     };
   }
 
   const evidenceTools = extractToolNamesFromTraces(input.evidenceTraces);
-  const draftTools = skillDraftTools(input.draft).map((tool) => tool.toLowerCase());
+  const draftTools = skillDraftTools(input.draft).map(normalizeToolName);
   const unmappedTokens = draftTools.filter((tool) => !evidenceTools.has(tool));
   const coverage = draftTools.length === 0
     ? 1
     : (draftTools.length - unmappedTokens.length) / draftTools.length;
   const resonance = skillEvidenceResonance(input.draft, input.evidenceTraces);
+  const verdict = {
+    coverage,
+    resonance,
+    unmappedTokens,
+    draftLanguage,
+    evidenceLanguage,
+    evidenceBindingCoverage: evidenceBinding.coverage
+  };
+
+  if (evidenceBinding.invalidIds.length > 0) {
+    return {
+      ok: false,
+      ...verdict,
+      reason: `invalid_evidence_ids:${evidenceBinding.invalidIds.join(",")}`
+    };
+  }
 
   if (coverage < 0.5 && draftTools.length > 0) {
     return {
       ok: false,
-      coverage,
-      resonance,
-      unmappedTokens,
+      ...verdict,
       reason: `coverage=${coverage.toFixed(2)}<0.5`
     };
+  }
+  if (draftLanguage !== evidenceLanguage) {
+    const grounding = crossLanguageSkillGrounding({
+      draftText: skillDraftProcedureText(input.draft),
+      evidenceText: input.evidenceTraces.map((trace) => [
+        trace.userText,
+        trace.agentText,
+        trace.reflection ?? "",
+        trace.summary,
+        ...extractToolEvidenceNames(trace.toolCalls)
+      ].join(" ")).join(" "),
+      evidenceTools,
+      toolsGrounded: draftTools.length > 0 && unmappedTokens.length === 0,
+      stepsBound: evidenceBinding.stepCount > 0 && evidenceBinding.coverage === 1
+    });
+    if (!grounding.ok) {
+      return {
+        ok: false,
+        ...verdict,
+        reason: "cross_language_unverifiable"
+      };
+    }
+    return { ok: true, ...verdict };
   }
   if (resonance < minResonance) {
     return {
       ok: false,
-      coverage,
-      resonance,
-      unmappedTokens,
+      ...verdict,
       reason: `resonance=${resonance.toFixed(2)}<${minResonance}`
     };
   }
-  return { ok: true, coverage, resonance, unmappedTokens };
+  return { ok: true, ...verdict };
 }
 
 export function hasPolicySuccessAnchor(policy: PolicyMemoryMeta): boolean {
@@ -5092,17 +5204,61 @@ function skillDraftTools(draft: NonNullable<ReturnType<typeof buildSkillDraft>>)
   return distinct(tools.map((tool) => String(tool).trim()).filter(Boolean));
 }
 
+/**
+ * Only fields the model writes. The rendered invocation guide carries English
+ * section headers and the declared tool list, which would skew language
+ * detection and let declared tools count as shared identifiers.
+ */
+function skillDraftProcedureText(
+  draft: NonNullable<ReturnType<typeof buildSkillDraft>>
+): string {
+  const procedure = draft.procedureJson;
+  const steps = Array.isArray(procedure.steps)
+    ? procedure.steps.map((step) => {
+        if (!isRecord(step)) return String(step ?? "");
+        return `${String(step.title ?? "")} ${String(step.body ?? "")}`;
+      })
+    : [];
+  return [
+    String(procedure.retrievalBlurb ?? ""),
+    String(procedure.triggerContext ?? ""),
+    String(procedure.summary ?? ""),
+    ...steps
+  ].join(" ");
+}
+
+function skillEvidenceBinding(
+  draft: NonNullable<ReturnType<typeof buildSkillDraft>>,
+  evidenceTraces: TraceMemoryMeta[]
+): { coverage: number; invalidIds: string[]; stepCount: number } {
+  const steps = Array.isArray(draft.procedureJson.steps)
+    ? draft.procedureJson.steps.filter(isRecord)
+    : [];
+  if (steps.length === 0) return { coverage: 0, invalidIds: [], stepCount: 0 };
+  const allowedIds = new Set(evidenceTraces.map((trace) => trace.id));
+  const invalidIds: string[] = [];
+  let boundSteps = 0;
+  for (const step of steps) {
+    const ids = distinct([
+      ...stringArrayField(step, "evidenceIds"),
+      ...stringArrayField(step, "evidence_ids")
+    ]);
+    if (ids.length > 0) boundSteps += 1;
+    for (const id of ids) {
+      if (!allowedIds.has(id)) invalidIds.push(id);
+    }
+  }
+  return {
+    coverage: boundSteps / steps.length,
+    invalidIds: distinct(invalidIds),
+    stepCount: steps.length
+  };
+}
+
 export function extractToolNamesFromTraces(traces: TraceMemoryMeta[]): Set<string> {
   const out = new Set<string>();
   for (const trace of traces) {
-    for (const call of trace.toolCalls) {
-      const name = call.name?.trim().toLowerCase();
-      if (name && name !== "unknown" && name !== "unknown_tool") out.add(name);
-      if (typeof call.input === "string") {
-        const first = call.input.trim().split(/\s+/)[0]?.toLowerCase();
-        if (first && first.length >= 2) out.add(first);
-      }
-    }
+    for (const name of extractToolEvidenceNames(trace.toolCalls)) out.add(normalizeToolName(name));
   }
   return out;
 }

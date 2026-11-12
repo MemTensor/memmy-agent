@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
@@ -9,6 +9,7 @@ import {
   type LlmMessage
 } from "../../../src/index.js";
 import { ModelHttpError } from "../../../src/model/http.js";
+import * as idModule from "../../../src/utils/id.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
   accountRuntimeConfig,
@@ -29,7 +30,7 @@ const {
   createTestService
 } = createMemoryServiceFixture();
 
-afterEach(cleanup);
+afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); await cleanup(); });
 
 describe("MemoryService / import / processing", () => {
   it("distinguishes new and interrupted work from failed automatic retries across all processing reads", async () => {
@@ -99,6 +100,15 @@ describe("MemoryService / import / processing", () => {
   });
 
   it("imports L1 memory with async summary, default score, and embedding only", async () => {
+    // Job IDs are opaque; equal timestamps must not define the queue's FIFO order.
+    const createdAt = "2026-11-09T00:00:00.000Z";
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(createdAt));
+    const actualNewId = idModule.newId;
+    const jobIds = ["job_" + "f".repeat(20), "job_" + "0".repeat(20)];
+    let nextJob = 0;
+    vi.spyOn(idModule, "newId").mockImplementation(prefix => prefix === "job" && nextJob < jobIds.length
+      ? jobIds[nextJob++]! : actualNewId(prefix));
     const root = createTestRoot("mindock-memory-import-add-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -171,6 +181,7 @@ describe("MemoryService / import / processing", () => {
     // continuous admission is allowed to complete the downstream embedding.
     const summaryRun = await service.runWorkerOnce(1);
     expect(summaryRun.jobs.map((job) => job.jobType)).toEqual(["import_summary"]);
+    expect(embeddingTexts).toHaveLength(0);
     expect(llmCalls.map((call) => call.options.operation)).toEqual(["capture.summarize"]);
     const summaryCall = llmCalls.find((call) => call.options.operation === "capture.summarize");
     expect(summaryCall?.options.thinkingMode).toBe("disabled");
@@ -244,12 +255,19 @@ describe("MemoryService / import / processing", () => {
     expect(summarizedProps.internal_info.trace.reflection_scored_at).toBeUndefined();
 
     const jobsAfterSummary = db.db.prepare(
-      `SELECT job_type, status
+      `SELECT id, job_type, status, target_memory_id, created_at, enqueue_seq
        FROM evolution_jobs
        WHERE target_memory_id = ?
-       ORDER BY created_at ASC, id ASC`
-    ).all(added.id) as Array<{ job_type: string; status: string }>;
+       ORDER BY enqueue_seq ASC`
+    ).all(added.id) as Array<{ id: string; job_type: string; status: string; target_memory_id: string; created_at: string; enqueue_seq: number }>;
     expect(jobsAfterSummary.map((job) => job.job_type)).toEqual(["import_summary", "embedding"]);
+    expect(jobsAfterSummary).toHaveLength(2);
+    expect(jobsAfterSummary).toEqual([
+      { id: jobIds[0], job_type: "import_summary", status: "succeeded", target_memory_id: added.id, created_at: createdAt, enqueue_seq: expect.any(Number) },
+      { id: jobIds[1], job_type: "embedding", status: "queued", target_memory_id: added.id, created_at: createdAt, enqueue_seq: expect.any(Number) }
+    ]);
+    expect(new Set(jobsAfterSummary.map(job => job.created_at)).size).toBe(1);
+    expect(jobsAfterSummary[0]!.enqueue_seq).toBeLessThan(jobsAfterSummary[1]!.enqueue_seq);
     expect(jobsAfterSummary.some((job) => job.job_type === "reflection")).toBe(false);
 
     const embeddingRun = await service.runWorkerOnce(100);

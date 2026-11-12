@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, MemoryDb } from "../../../src/index.js";
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { ModelHttpError } from "../../../src/model/http.js";
 import type { LlmClient } from "../../../src/model/types.js";
 import { L3UnitUpdatePipeline } from "../../../src/service/l3-field/unit-update-pipeline.js";
@@ -106,12 +107,52 @@ function projectUnitKey(repos: Repositories, name = "demo"): string {
 }
 
 describe("new L3 update pipeline", () => {
+  it.each([DEVICE_MEMORY_OWNER, "historical-owner"])("processes %s evidence on a retained historical Session and unit", async (evidenceOwner) => {
+    const { service, repos, pipeline, project } = setup();
+    await captureTurn(service, "historical-batch", project);
+    const job = queuedUnitJob(repos);
+    const batch = repos.l3Field.getBatch(job.payload.batchId as string)!;
+    const owner = "historical-owner";
+    repos.db.prepare(`UPDATE raw_turns SET user_id = ? WHERE id = ?`).run(evidenceOwner, batch.rawTurnIds[0]);
+    repos.db.prepare(`UPDATE memories SET user_id = ? WHERE id = ?`).run(evidenceOwner, batch.l1MemoryIds[0]);
+    repos.db.prepare(`UPDATE sessions SET user_id = ? WHERE id = ?`).run(owner, batch.sessionId);
+    const historicalMachine = repos.l3Field.ensureMachineUnit({ userId: owner, machineId: MACHINE_ID });
+    repos.db.prepare(`UPDATE l3_unit_batches SET user_id = ?, machine_unit_key = ? WHERE id = ?`).run(owner, historicalMachine.unitKey, batch.id);
+    repos.db.prepare(`UPDATE evolution_jobs SET user_id = ?, scope_key = ? WHERE id = ?`).run(owner, historicalMachine.unitKey, job.id);
+    await pipeline.process({ ...job, userId: owner, scopeKey: historicalMachine.unitKey });
+    expect(repos.l3Field.getBatch(batch.id)!.status).toBe("applied");
+    expect(repos.runtime.getSession(batch.sessionId)!.userId).toBe(owner);
+    expect(repos.l3Field.getUnit(historicalMachine.unitKey)!.userId).toBe(owner);
+    expect(repos.runtime.getRawTurn(batch.rawTurnIds[0]!)!.userId).toBe(evidenceOwner);
+    expect(repos.db.prepare(`SELECT COUNT(*) AS n FROM l3_items i JOIN l3_units u ON u.unit_key = i.unit_key WHERE u.user_id = ?`).get(owner)).toEqual({ n: 2 });
+  });
+
+  it.each(["foreign-owner", "l1-owner", "l1-session", "raw-session"])("rejects mismatched batch evidence: %s", async (mismatch) => {
+    const { service, repos, pipeline, project, complete } = setup();
+    await captureTurn(service, "invalid-evidence", project);
+    const job = queuedUnitJob(repos);
+    const batch = repos.l3Field.getBatch(job.payload.batchId as string)!;
+    if (mismatch === "foreign-owner") {
+      repos.db.prepare(`UPDATE raw_turns SET user_id = 'foreign-owner' WHERE id = ?`).run(batch.rawTurnIds[0]);
+      repos.db.prepare(`UPDATE memories SET user_id = 'foreign-owner' WHERE id = ?`).run(batch.l1MemoryIds[0]);
+    } else if (mismatch === "l1-owner") {
+      repos.db.prepare(`UPDATE memories SET user_id = 'foreign-owner' WHERE id = ?`).run(batch.l1MemoryIds[0]);
+    } else {
+      const other = service.openSession({ namespace: { source: "codex", profileId: "default", sessionKey: "other-session", userId: "u1" } });
+      repos.db.prepare(`UPDATE ${mismatch === "l1-session" ? "memories" : "raw_turns"} SET session_id = ? WHERE id = ?`)
+        .run(other.sessionId, mismatch === "l1-session" ? batch.l1MemoryIds[0] : batch.rawTurnIds[0]);
+    }
+    await expect(pipeline.process(job)).rejects.toThrow("raw turn scope mismatch");
+    expect(complete).not.toHaveBeenCalled();
+    expect(repos.l3Field.getBatch(batch.id)!.status).toBe("queued");
+  });
+
   it("freezes a session into a new-L3 batch whose job writes items the next session sees", async () => {
     const { service, repos, pipeline, project } = setup();
     await captureTurn(service, "e2e", project);
     expect(repos.runtime.listJobs("queued", 100).some((job) => job.jobType === "l3_world_model_update")).toBe(false);
     const job = queuedUnitJob(repos);
-    expect(job.scopeKey).toBe(repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID }).unitKey);
+    expect(job.scopeKey).toBe(repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID }).unitKey);
 
     await pipeline.process(job);
     const items = repos.l3Field.activeItems(projectUnitKey(repos));
@@ -365,7 +406,7 @@ describe("new L3 update pipeline", () => {
         : { reason: "b", ops: [{ op: "delete", id: machineItem.id, evidence: [tool.id] }] };
     };
     const { service, repos, pipeline, project, other } = setup({ reply });
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     const old = repos.l3Field.insertItem({
       unitKey: machine.unitKey, kind: "env_fact", content: "旧的本机事实",
       evidence: { fragmentIds: ["f"], l1MemoryIds: [] }, evidenceAt: "2026-01-01T00:00:00.000Z"
@@ -425,7 +466,7 @@ describe("new L3 update pipeline", () => {
       namespace: { source: "codex", profileId: "default", sessionKey: "probe-2", userId: "u1" }
     });
     await vi.waitFor(() => {
-      const machine = new Repositories(db.db).l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+      const machine = new Repositories(db.db).l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
       expect(machine.profileText).toContain("node 22.11.0，git 2.50.1");
     });
     expect(probe).toHaveBeenCalledTimes(1);
@@ -443,7 +484,7 @@ describe("new L3 update pipeline", () => {
     const { service, repos, pipeline, project, other, complete, inputs } = setup({ reply });
     await captureTurn(service, "dedupe", project, [{ query: "跑一下", workdir: project }, { query: "那边也跑", workdir: other }]);
     await pipeline.process(queuedUnitJob(repos));
-    const machine = repos.l3Field.ensureMachineUnit({ userId: "u1", machineId: MACHINE_ID });
+    const machine = repos.l3Field.ensureMachineUnit({ userId: DEVICE_MEMORY_OWNER, machineId: MACHINE_ID });
     expect(repos.l3Field.activeItems(machine.unitKey).map((entry) => entry.content)).toEqual(["本机 git 会打印 xcrun_db 警告 -> 结果仍正常"]);
     expect(complete).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(inputs[1]!.machine.items)).toContain("\"added_in_this_batch\":true");

@@ -82,24 +82,43 @@ export function PdfPreview(props: PdfPreviewProps): ReactNode {
   useEffect(() => {
     let active = true;
     const port = new PdfJsWorker();
-    const worker = PDFWorker.create({ port });
-    const loadingTask = getDocument({
-      ...getPdfPreviewResourceOptions(window.document.baseURI, import.meta.env.BASE_URL),
-      data: new Uint8Array(props.data.slice(0)),
-      worker
-    });
+    let worker: PDFWorker | undefined;
+    let loadingTask: ReturnType<typeof getDocument> | undefined;
+    let releaseStarted = false;
+    const release = async () => {
+      if (releaseStarted) return;
+      releaseStarted = true;
+      // Document shutdown still needs the external port. PDF.js only terminates
+      // Workers it constructs internally, so the caller releases this one last.
+      try { await loadingTask?.destroy(); }
+      catch { /* A rejected document shutdown must not retain the owned Worker. */ }
+      try { worker?.destroy(); }
+      catch { /* Port termination remains necessary if wrapper cleanup fails. */ }
+      try { port.terminate(); }
+      catch { /* Cleanup must not create an unhandled rejection during unmount. */ }
+    };
     setDocument(null);
     setFailed(false);
-    void loadingTask.promise.then((next) => {
-      if (active) setDocument(next);
-      else void next.loadingTask.destroy();
-    }).catch(() => {
-      if (active) setFailed(true);
-    });
+    try {
+      worker = PDFWorker.create({ port });
+      loadingTask = getDocument({
+        ...getPdfPreviewResourceOptions(window.document.baseURI, import.meta.env.BASE_URL),
+        data: new Uint8Array(props.data.slice(0)),
+        worker
+      });
+      void loadingTask.promise.then((next) => {
+        if (active) setDocument(next);
+      }).catch(() => {
+        if (active) setFailed(true);
+        void release();
+      });
+    } catch {
+      setFailed(true);
+      void release();
+    }
     return () => {
       active = false;
-      void loadingTask.destroy();
-      worker.destroy();
+      void release();
     };
   }, [props.data]);
 

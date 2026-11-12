@@ -8,6 +8,21 @@ afterEach(async () => {
 });
 
 describe("Memory startup HTTP server", () => {
+  it.each([undefined, "", "   "])("denies startup shutdown without a configured credential (%s)", async (token) => {
+    const shutdown = vi.fn();
+    const gateway = await listenMemoryStartupHttpServer({
+      host: "127.0.0.1", port: 0, mode: "local", storageBackend: "sqlite", localServiceToken: token,
+      state: () => ({ status: "starting", phase: "database.opening", startedAt: Date.now(), targetSchemaVersion: 13 }),
+      onShutdownRequested: shutdown
+    });
+    cleanups.push(() => gateway.close());
+    for (const authorization of [undefined, "Bearer wrong"]) {
+      const response = await fetch(`${gateway.url}/api/v1/admin/shutdown`, { method: "POST", headers: authorization ? { authorization } : {} });
+      expect(response.status).toBe(401);
+    }
+    expect(shutdown).not.toHaveBeenCalled();
+    expect((await fetch(`${gateway.url}/api/v1/health`)).status).toBe(200);
+  });
   it("owns the public port during migration and atomically hands requests to the ready service", async () => {
     const state: MemoryStartupState = {
       status: "upgrading",

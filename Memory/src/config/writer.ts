@@ -24,7 +24,8 @@ export async function mutateMemoryConfig(
     const root = await readConfigRoot(configPath);
     mutate(root);
     const temporaryPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(temporaryPath, stringify(root), { encoding: "utf8", mode: 0o600 });
+    const content = configPath.endsWith(".json") ? JSON.stringify(root, null, 2) + "\n" : stringify(root);
+    await writeFile(temporaryPath, content, { encoding: "utf8", mode: 0o600 });
     await chmod(temporaryPath, 0o600);
     await rename(temporaryPath, configPath);
   } finally {

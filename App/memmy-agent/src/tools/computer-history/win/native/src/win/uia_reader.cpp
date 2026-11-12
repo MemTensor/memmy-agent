@@ -50,7 +50,8 @@ class Traversal {
  public:
   Traversal(const policy::Policy& policy, const policy::AppRule& rule, std::uint32_t pid, double started,
             const protocol::BrowserContext* browser = nullptr)
-      : policy_(policy), rule_(rule), pid_(pid), started_(started), browser_(browser) {}
+      : policy_(policy), rule_(rule), pid_(pid), started_(started),
+        classDocumentScope_(policy::HasWordDocumentScope(rule) || policy::HasNotepadDocumentScope(rule)), browser_(browser) {}
 
   bool Init(IUIAutomation* automation, bool raw = false) {
     automation_ = automation;
@@ -61,9 +62,14 @@ class Traversal {
          {UIA_ControlTypePropertyId, UIA_IsPasswordPropertyId, UIA_AutomationIdPropertyId, UIA_ProcessIdPropertyId,
           UIA_HasKeyboardFocusPropertyId, UIA_IsOffscreenPropertyId, UIA_BoundingRectanglePropertyId,
           UIA_RuntimeIdPropertyId, UIA_IsTextPatternAvailablePropertyId, UIA_IsValuePatternAvailablePropertyId,
-          UIA_IsLegacyIAccessiblePatternAvailablePropertyId, UIA_ClassNamePropertyId}) {
+          UIA_IsLegacyIAccessiblePatternAvailablePropertyId, UIA_ClassNamePropertyId, UIA_NativeWindowHandlePropertyId}) {
       if (FAILED(cache_->AddProperty(property))) return false;
     }
+    // Cache metadata for one child collection per parent, with the selected view.
+    ComPtr<IUIAutomationCondition> view;
+    if (FAILED(raw ? automation->get_RawViewCondition(&view) : automation->get_ControlViewCondition(&view)) ||
+        FAILED(cache_->put_TreeFilter(view.Get())) || FAILED(cache_->Clone(&childrenCache_)) ||
+        FAILED(childrenCache_->put_TreeScope(TreeScope_Children))) return false;
     if (FAILED(raw ? automation->get_RawViewWalker(&walker_) : automation->get_ControlViewWalker(&walker_))) return false;
     // Reorder traversal toward the focused branch without moving focus or changing the UI.
     ComPtr<IUIAutomationElement> focused;
@@ -111,19 +117,23 @@ class Traversal {
 
       const int self = static_cast<int>(response.nodes.size()) - 1;
       std::vector<ComPtr<IUIAutomationElement>> children;
-      ComPtr<IUIAutomationElement> child;
-      if (FAILED(walker_->GetFirstChildElementBuildCache(frame.element.Get(), cache_.Get(), &child))) {
+      ComPtr<IUIAutomationElement> cachedParent;
+      ComPtr<IUIAutomationElementArray> cachedChildren;
+      int count = 0;
+      if (FAILED(frame.element->BuildUpdatedCache(childrenCache_.Get(), &cachedParent)) || !cachedParent ||
+          FAILED(cachedParent->GetCachedChildren(&cachedChildren)) ||
+          (cachedChildren && FAILED(cachedChildren->get_Length(&count)))) {
         Truncate("traversal_error");
         continue;
       }
-      if (child && frame.depth + 1 > policy_.limits.maxDepth) {
+      if (count > 0 && frame.depth + 1 > policy_.limits.maxDepth) {
         Truncate("max_depth");
         continue;
       }
       const std::size_t used = static_cast<std::size_t>(response.stats.visited) + stack.size();
       const std::size_t limit = static_cast<std::size_t>(policy_.limits.maxVisited);
       const std::size_t room = used >= limit ? 0 : limit - used;
-      while (child) {
+      for (int index = 0; index < count; ++index) {
         if (children.size() >= room) {
           Truncate("max_visited");
           break;
@@ -132,13 +142,12 @@ class Traversal {
           Truncate("budget_ms");
           break;
         }
-        children.push_back(child);
-        ComPtr<IUIAutomationElement> next;
-        if (FAILED(walker_->GetNextSiblingElementBuildCache(child.Get(), cache_.Get(), &next))) {
+        ComPtr<IUIAutomationElement> child;
+        if (FAILED(cachedChildren->GetElement(index, &child)) || !child) {
           Truncate("traversal_error");
           break;
         }
-        child = std::move(next);
+        children.push_back(std::move(child));
       }
       if (rule_.captureText) std::stable_sort(children.begin(), children.end(), [&](const auto& a, const auto& b) {
         return Priority(a.Get()) > Priority(b.Get());
@@ -147,6 +156,9 @@ class Traversal {
         stack.push_back({std::move(*it), frame.depth + 1, self});
       }
     }
+    // A provider call on the final leaf can consume the remaining budget even
+    // when there is no next frame to enter the loop's deadline check.
+    if (Expired()) Truncate("budget_ms");
     response.truncated = !truncation_.empty();
     response.truncation = truncation_;
   }
@@ -207,38 +219,45 @@ class Traversal {
     return Bounded(name.View());
   }
 
-  bool LiveScopedDocumentAuthorized(IUIAutomationElement* element, bool word) {
+  bool LiveScopedDocumentAuthorized(IUIAutomationElement* element, bool word, bool notepad) {
     ComPtr<IUIAutomationElement> current = element;
-    const std::array<long, 4> types = word
+    const std::array<long, 4> types = notepad
+      ? std::array<long, 4>{classify::kDocument, classify::kPane, classify::kWindow, 0}
+      : word
       ? std::array<long, 4>{classify::kDocument, classify::kPane, classify::kPane, classify::kWindow}
       : std::array<long, 4>{classify::kEdit, classify::kText, classify::kGroup, classify::kGroup};
-    const std::array<std::wstring_view, 4> classes = {L"_WwG", L"_WwB", L"_WwF", L"OpusApp"};
+    const std::array<std::wstring_view, 4> classes = notepad
+      ? std::array<std::wstring_view, 4>{L"RichEditD2DPT", L"NotepadTextBox", L"Notepad", L""}
+      : std::array<std::wstring_view, 4>{L"_WwG", L"_WwB", L"_WwF", L"OpusApp"};
+    const std::size_t count = notepad ? 3 : 4;
     HWND childHandle = nullptr;
-    for (std::size_t i = 0; i < types.size(); ++i) {
+    for (std::size_t i = 0; i < count; ++i) {
+      // A fresh metadata-only cache is one provider call, instead of separate live
+      // calls for every property. Refresh again after the body read to detect races.
+      ComPtr<IUIAutomationElement> fresh;
+      if (!current || FAILED(current->BuildUpdatedCache(cache_.Get(), &fresh)) || !fresh) return false;
       int pid = 0;
       CONTROLTYPEID type = 0;
       Bstr id;
-      Variant password;
-      if (!current || FAILED(current->get_CurrentProcessId(&pid)) || static_cast<std::uint32_t>(pid) != pid_ ||
-          FAILED(current->get_CurrentControlType(&type)) || type != types[i] ||
-          FAILED(current->get_CurrentAutomationId(id.Put())) || id.View() != (!word && i == 3 ? L"workbench.parts.editor" : L"") ||
+      if (FAILED(fresh->get_CachedProcessId(&pid)) || static_cast<std::uint32_t>(pid) != pid_ ||
+          FAILED(fresh->get_CachedControlType(&type)) || type != types[i] ||
+          FAILED(fresh->get_CachedAutomationId(id.Put())) || id.View() != (!word && !notepad && i == 3 ? L"workbench.parts.editor" : L"") ||
           policy::IsSensitiveAutomationId(policy_, rule_, id.View()) ||
-          FAILED(current->GetCurrentPropertyValueEx(UIA_IsPasswordPropertyId, TRUE, password.Put())) ||
-          password.Get().vt != VT_BOOL || password.Get().boolVal != VARIANT_FALSE) return false;
-      if (word) {
+          CachedBool(fresh.Get(), UIA_IsPasswordPropertyId, true) != false) return false;
+      if (word || notepad) {
         Bstr className;
         UIA_HWND handle = nullptr;
         wchar_t nativeClass[256]{};
-        if (FAILED(current->get_CurrentClassName(className.Put())) || className.View() != classes[i] ||
-            FAILED(current->get_CurrentNativeWindowHandle(&handle)) || !handle) return false;
+        if (FAILED(fresh->get_CachedClassName(className.Put())) || className.View() != classes[i] ||
+            FAILED(fresh->get_CachedNativeWindowHandle(&handle)) || !handle) return false;
         const HWND hwnd = reinterpret_cast<HWND>(handle);
         DWORD owner = 0;
         GetWindowThreadProcessId(hwnd, &owner);
         if (owner != pid_ || !GetClassNameW(hwnd, nativeClass, 256) || std::wstring_view(nativeClass) != classes[i] ||
-            (childHandle && GetParent(childHandle) != hwnd) || (i == 3 && hwnd != rootHwnd_)) return false;
+            (childHandle && GetParent(childHandle) != hwnd) || (i + 1 == count && hwnd != rootHwnd_)) return false;
         childHandle = hwnd;
       }
-      if (i + 1 < types.size()) {
+      if (i + 1 < count) {
         ComPtr<IUIAutomationElement> parent;
         if (FAILED(walker_->GetParentElement(current.Get(), &parent))) return false;
         current = std::move(parent);
@@ -494,10 +513,11 @@ class Traversal {
     if (FAILED(element->get_CachedAutomationId(automationId.Put()))) node.missing.push_back("automationId");
     const std::wstring fullId(automationId.View());
     node.automationId = text::ToUtf8(text::TruncateUtf16(fullId, kMaxAutomationIdChars));
-    if (policy::HasWordDocumentScope(rule_)) {
+    if (classDocumentScope_) {
       Bstr className;
       if (SUCCEEDED(element->get_CachedClassName(className.Put())) &&
-          (className.View() == L"_WwG" || className.View() == L"_WwB" || className.View() == L"_WwF" || className.View() == L"OpusApp"))
+          (className.View() == L"_WwG" || className.View() == L"_WwB" || className.View() == L"_WwF" || className.View() == L"OpusApp" ||
+           className.View() == L"RichEditD2DPT" || className.View() == L"NotepadTextBox" || className.View() == L"Notepad"))
         node.className = text::ToUtf8(className.View());
     }
 
@@ -545,7 +565,8 @@ class Traversal {
     facts.textPatternAvailable = CachedBool(element, UIA_IsTextPatternAvailablePropertyId, false).value_or(false);
     facts.valuePatternAvailable = CachedBool(element, UIA_IsValuePatternAvailablePropertyId, false).value_or(false);
     const bool wordDocument = protocol::IsWordDocument(node, response.nodes, rule_);
-    facts.scopedDocument = wordDocument || protocol::IsVsCodeEditorBody(node, response.nodes, rule_);
+    const bool notepadDocument = protocol::IsNotepadDocument(node, response.nodes, rule_);
+    facts.scopedDocument = wordDocument || notepadDocument || protocol::IsVsCodeEditorBody(node, response.nodes, rule_);
     // A long AutomationId that had to be truncated cannot match an exact selector.
     if (fullId.size() > kMaxAutomationIdChars) facts.automationId = {};
     const classify::NodeDecision decision = classify::Classify(facts, policy_, rule_);
@@ -554,14 +575,16 @@ class Traversal {
       node.redaction = classify::RedactionCode(decision.redaction);
       ++response.stats.redacted;
     }
-    const bool liveDocument = !facts.scopedDocument || LiveScopedDocumentAuthorized(element, wordDocument);
+    const bool liveDocument = !facts.scopedDocument || LiveScopedDocumentAuthorized(element, wordDocument, notepadDocument);
     const bool browserReadable = !browser_ || protocol::BrowserNodeContentAllowed(node, *browser_);
     if (decision.readName && (!decision.readSearchValue || decision.readDocumentText) && liveDocument && browserReadable) node.name = ReadName(element, node);
     const bool genericText = rule_.captureText && !browser_ &&
       (controlType == classify::kEdit || controlType == classify::kDocument);
     if (decision.readDocumentText && !Expired() && liveDocument && (!genericText || LiveGenericTextAuthorized(element, node))) ReadDocument(element, node);
     if (decision.readDocumentText && facts.scopedDocument) {
-      if (!liveDocument || !LiveScopedDocumentAuthorized(element, wordDocument)) { node.name.reset(); node.text.reset(); }
+      if (!liveDocument || !LiveScopedDocumentAuthorized(element, wordDocument, notepadDocument)) {
+        node.name.reset(); node.text.reset(); node.visibleText.reset();
+      }
       protocol::FinalizeScopedDocument(node);
       if (!node.redaction.empty()) ++response.stats.redacted;
     }
@@ -618,9 +641,11 @@ class Traversal {
   const policy::AppRule& rule_;
   const std::uint32_t pid_;
   const double started_;
+  const bool classDocumentScope_;
   ComPtr<IUIAutomation> automation_;
   std::set<std::string> focusPath_;
   ComPtr<IUIAutomationCacheRequest> cache_;
+  ComPtr<IUIAutomationCacheRequest> childrenCache_;
   ComPtr<IUIAutomationTreeWalker> walker_;
   std::size_t textUsed_ = 0;
   double budgetRatio_ = 1.0;

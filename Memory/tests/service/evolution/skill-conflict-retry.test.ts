@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, type LlmClient, type LlmMessage, type LlmCompletionOptions } from "../../../src/index.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { LEGACY_TEST_CONFIG, assignedEpisodeId, settleCaptureAssignments, createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
-import { insertActivePolicyMemory, queueSkillCrystallizationJobForTest } from "../../fixtures/evolution-fixture.js";
+import { insertActivePolicyMemory, insertTracePolicyLinkForTest, queueSkillCrystallizationJobForTest } from "../../fixtures/evolution-fixture.js";
 import { createNoToolSkillLlm } from "./evolution-llm-stubs.js";
 
 const fixture = createMemoryServiceFixture();
@@ -29,7 +29,7 @@ describe("MEMMY-647 skill conflict retry", () => {
     const { db, service } = fixture.createTestService({ skillLlm: llm, config });
     const repos = new Repositories(db.db);
     const userId = "647-conflict";
-    const session = service.openSession({ namespace: { source: "codex", profileId: "jiang", userId } });
+    const session = service.openSession({ namespace: { source: "codex", profileId: "jiang", userId }, workspaceId: "audit" });
     const capture = await service.completeTurn("647-conflict-source", {
       sessionId: session.sessionId,
       query: "python pytest inspect failure retry after fixing issue",
@@ -42,6 +42,10 @@ describe("MEMMY-647 skill conflict retry", () => {
       agentId: "codex", appId: "audit", profileId: "jiang",
       sourceTraceId: complete.l1MemoryId, sourceEpisodeId: complete.episodeId
     });
+    // Preserve the historical Policy owner while recording the actual
+    // device-owned source association accepted by this synthetic Policy.
+    insertTracePolicyLinkForTest(db, { userId: repos.memories.get(complete.l1MemoryId)!.userId,
+      l1MemoryId: complete.l1MemoryId, l2MemoryId: "647-conflict-policy" });
     db.db.prepare("UPDATE evolution_jobs SET status = 'succeeded'").run();
     mutate = () => {
       const memory = repos.memories.get(changedSource === "policy" ? "647-conflict-policy" : complete.l1MemoryId)!;

@@ -1,3 +1,9 @@
+import type { PanelTaskCheckOutput } from "@memmy/local-api-contracts";
+import type {PanelLogsInput,PanelLogsOutput,PanelLogDetailOutput} from "@memmy/local-api-contracts";
+import type {PanelStatsOutput} from "@memmy/local-api-contracts";
+import type {PanelOverviewStatsOutput} from "@memmy/local-api-contracts";
+import type { PanelBrowseInput, PanelBrowseOutput } from "@memmy/local-api-contracts";
+import type { PanelTaskSummariesOutput, PanelTaskDetailOutput, PanelTaskFieldInput, PanelTaskFieldOutput } from "@memmy/local-api-contracts";
 /** Types module. */
 import type {
   AddMemoryInput,
@@ -46,6 +52,7 @@ import type {
 
 /** Contract for memory client. */
 export interface MemoryRequestContext {
+  signal?: AbortSignal;
   timeZone?: string;
   userId?: string;
 }
@@ -77,7 +84,7 @@ export interface AgentSourceScanClient {
 
 export interface MemoryClient {
   agentSources?: AgentSourceScanClient;
-  health(): Promise<MemoryHealthSnapshot>;
+  health(context?: MemoryRequestContext): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
   getMemoryTokenBudget(): Promise<MemoryTokenBudgetDto>;
   exportBundle?(): Promise<Record<string, unknown>>;
@@ -116,9 +123,19 @@ export interface MemoryClient {
     timeoutMs?: number;
   }): Promise<WorkerRunOutput>;
 
+  panelMemory?(id:string,context?:MemoryRequestContext):Promise<GetMemoryOutput>;
   panelOverview(context?: MemoryRequestContext): Promise<PanelOverviewOutput>;
   panelAnalysis(context?: MemoryRequestContext): Promise<PanelAnalysisOutput>;
   panelItems(input: PanelItemsInput, context?: MemoryRequestContext): Promise<PanelItemsOutput>;
+  panelLogs(input:PanelLogsInput,context?:MemoryRequestContext):Promise<PanelLogsOutput>;
+  panelLogDetail(id:number,context?:MemoryRequestContext):Promise<PanelLogDetailOutput>;
+  panelStats(context?:MemoryRequestContext):Promise<PanelStatsOutput>;
+  panelOverviewStats(context?:MemoryRequestContext):Promise<PanelOverviewStatsOutput>;
+  panelBrowse(input:PanelBrowseInput,context?:MemoryRequestContext):Promise<PanelBrowseOutput>;
+  panelTaskSummaries(input: PanelTasksInput, context?: MemoryRequestContext): Promise<PanelTaskSummariesOutput>;
+  panelTaskCheck(id: string, context?: MemoryRequestContext): Promise<PanelTaskCheckOutput>;
+  panelTaskDetail(id: string, cursor?: string, context?: MemoryRequestContext): Promise<PanelTaskDetailOutput>;
+  panelTaskField(id: string, turnId: string, input: PanelTaskFieldInput, context?: MemoryRequestContext): Promise<PanelTaskFieldOutput>;
   panelTasks(input: PanelTasksInput, context?: MemoryRequestContext): Promise<PanelTasksOutput>;
   taskExperienceProcessing(taskId: string, context?: MemoryRequestContext): Promise<TaskExperienceProcessing>;
   retryTaskExperienceProcessing(taskId: string, context?: MemoryRequestContext): Promise<RetryTaskExperienceProcessing>;

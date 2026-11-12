@@ -234,7 +234,7 @@ bool IsVsCodeEditorBody(const NodeRecord& node, const std::vector<NodeRecord>& p
   const auto knownId = [](const NodeRecord& item) {
     return std::find(item.missing.begin(), item.missing.end(), "automationId") == item.missing.end();
   };
-  if (!policy::HasVsCodeEditorScope(rule) || node.controlType != classify::kEdit || !node.automationId.empty() ||
+  if (node.controlType != classify::kEdit || !policy::HasVsCodeEditorScope(rule) || !node.automationId.empty() ||
       node.password != false || !knownId(node)) return false;
   int parent = node.parent;
   int depth = node.depth;
@@ -265,7 +265,7 @@ void FinalizeScopedDocument(NodeRecord& node) {
 }
 
 bool IsWordDocument(const NodeRecord& node, const std::vector<NodeRecord>& preceding, const policy::AppRule& rule) {
-  if (!policy::HasWordDocumentScope(rule)) return false;
+  if (node.controlType != classify::kDocument || !policy::HasWordDocumentScope(rule)) return false;
   const std::array<long, 4> types = {classify::kDocument, classify::kPane, classify::kPane, classify::kWindow};
   const std::array<std::string_view, 4> classes = {"_WwG", "_WwB", "_WwF", "OpusApp"};
   const NodeRecord* current = &node;
@@ -274,6 +274,22 @@ bool IsWordDocument(const NodeRecord& node, const std::vector<NodeRecord>& prece
         current->depth != 3 - i || current->password != false || (i > 0 && !current->redaction.empty()) ||
         std::find(current->missing.begin(), current->missing.end(), "automationId") != current->missing.end()) return false;
     if (i == 3) return current->parent == -1;
+    if (current->parent < 0 || static_cast<std::size_t>(current->parent) >= preceding.size()) return false;
+    current = &preceding[static_cast<std::size_t>(current->parent)];
+  }
+  return false;
+}
+
+bool IsNotepadDocument(const NodeRecord& node, const std::vector<NodeRecord>& preceding, const policy::AppRule& rule) {
+  if (node.controlType != classify::kDocument || !policy::HasNotepadDocumentScope(rule)) return false;
+  const std::array<long, 3> types = {classify::kDocument, classify::kPane, classify::kWindow};
+  const std::array<std::string_view, 3> classes = {"RichEditD2DPT", "NotepadTextBox", "Notepad"};
+  const NodeRecord* current = &node;
+  for (int i = 0; i < 3; ++i) {
+    if (current->controlType != types[i] || current->className != classes[i] || !current->automationId.empty() ||
+        current->depth != 2 - i || current->password != false || (i > 0 && !current->redaction.empty()) ||
+        std::find(current->missing.begin(), current->missing.end(), "automationId") != current->missing.end()) return false;
+    if (i == 2) return current->parent == -1;
     if (current->parent < 0 || static_cast<std::size_t>(current->parent) >= preceding.size()) return false;
     current = &preceding[static_cast<std::size_t>(current->parent)];
   }
@@ -554,7 +570,8 @@ bool WorkerResponseFromJson(const Json& json, const policy::Policy& policy, cons
       error = "worker_privacy_violation";
       return false;
     }
-    const bool scoped = IsVsCodeEditorBody(node, out.nodes, rule) || IsWordDocument(node, out.nodes, rule);
+    const bool scoped = IsVsCodeEditorBody(node, out.nodes, rule) || IsWordDocument(node, out.nodes, rule) ||
+      IsNotepadDocument(node, out.nodes, rule);
     const bool generic = rule.captureText;
     if ((!generic && !node.documentStatus.empty() && !scoped) ||
         (!generic && scoped && hasContent && node.documentStatus != "available")) {

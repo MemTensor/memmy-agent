@@ -44,9 +44,11 @@ import { kindFromMemory, type EpisodeRecord, type EvolutionJobRecord, type Repos
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import { newId } from "../../utils/id.js";
+import { generatedSkillTitle } from "../../algorithm/skill-display.js";
 import { nowIso } from "../../utils/time.js";
 import { elapsedApiLogMs, recordApiLog } from "../model-audit/model-call-audit.js";
-import { profileIdFromMemory } from "../namespace/namespace-scope.js";
+import { profileIdFromMemory, projectIdFromMemory } from "../namespace/namespace-scope.js";
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 
@@ -214,7 +216,7 @@ export class SkillClusterPipeline {
     const reconciled = storedSkill ? this.reconcileSkillEvidence(storedSkill.memory, cluster, nowIso()) : null;
     const scoredMembers = members.flatMap((member) => {
       const episode = this.deps.repos.runtime.getEpisode(member.episodeId);
-      if (!episode || episode.userId !== cluster.userId || episode.status !== "closed" || typeof episode.rTask !== "number") return [];
+      if (!episode || !this.episodeSharesClusterScope(episode, cluster) || episode.status !== "closed" || typeof episode.rTask !== "number") return [];
       return [{
         episodeId: episode.id,
         outcome: classifySkillOutcome(episode.rTask, this.outcomeThresholds()),
@@ -341,6 +343,7 @@ export class SkillClusterPipeline {
           clusterId: cluster.id,
           reasons: gate.reasons
         });
+        this.recordDirectSkillFailure(startedAt, cluster, existingSkill?.id, "verification", rejectReason, gate);
         await this.updateMetaSkill(job, this.markProcessed(cluster, top6.map((item) => item.episodeId), at), {
           accepted: false,
           rejectReason,
@@ -354,7 +357,9 @@ export class SkillClusterPipeline {
 
       const { upserted, withSkill } = this.deps.repos.transaction(() => {
         const upserted = this.upsertSkill({ job, cluster,
-          episode: this.anchorEpisode(batch, job), name, procedure: merged,
+          episode: this.anchorEpisode(batch, job), name,
+          displayTitle: draft.displayTitle, draftName: draft.name, outputLanguage: draft.outputLanguage,
+          procedure: stripDirectSkillStepEvidenceIds(merged), verification: gate,
           existing: existingSkill?.memory,
           successEpisodeIds: batch.filter((item) => item.outcome === "success").map((item) => item.episode_id), at });
         const withSkill = { ...this.markProcessed(cluster, top6.map((item) => item.episodeId), at),
@@ -390,6 +395,7 @@ export class SkillClusterPipeline {
         clusterId: cluster.id,
         error: rejectReason
       });
+      this.recordDirectSkillFailure(startedAt, cluster, existingSkill?.id, "llm_transport", rejectReason);
       await this.updateMetaSkill(job, cluster, {
         accepted: false,
         rejectReason,
@@ -406,6 +412,34 @@ export class SkillClusterPipeline {
     return createHash("sha256").update(JSON.stringify(this.deps.repos.runtime.listSkillClusterMembers(clusterId)
       .map(member => ({ id: member.episodeId, revision: episodeInputRevision(this.deps.repos, member.episodeId, true) }))
       .sort((a,b) => a.id.localeCompare(b.id)))).digest("hex");
+  }
+
+  /** First-time failures have no Skill yet, so they key on the cluster; rebuilds also carry the real skillId. */
+  private recordDirectSkillFailure(
+    startedAt: number,
+    cluster: SkillClusterRecord,
+    skillId: string | undefined,
+    failureKind: "verification" | "llm_transport",
+    reason: string,
+    verification?: ReturnType<typeof verifyDirectSkillDraft>
+  ): void {
+    recordApiLog(
+      this.deps.repos.runtime,
+      skillId ? "skill_evolve" : "skill_generate",
+      { phase: "failed", clusterId: cluster.id, ...(skillId ? { skillId } : {}), failureKind, reason },
+      {
+        kind: "skill.direct.failed",
+        clusterId: cluster.id,
+        ...(skillId ? { skillId } : {}),
+        failureKind,
+        reason,
+        ...(verification ? { verification } : {}),
+        source: DIRECT_SKILL_SOURCE
+      },
+      elapsedApiLogMs(startedAt),
+      false,
+      nowIso()
+    );
   }
 
   private clusteringConfig(): DirectSkillClusteringConfig {
@@ -502,16 +536,31 @@ export class SkillClusterPipeline {
 
   private ownedClusterSkill(cluster: SkillClusterRecord) {
     const memory = cluster.skillMemoryId ? this.deps.repos.memories.get(cluster.skillMemoryId) : undefined;
-    if (!memory || memory.deletedAt || memory.userId !== cluster.userId || memory.memoryLayer !== "Skill"
+    // New local Skills use the device owner even when their durable cluster was
+    // created before the upgrade. The pointer and deterministic key bind this
+    // object to the cluster; a matching source label alone is not authorization.
+    if (!memory || memory.deletedAt || memory.memoryLayer !== "Skill"
+      || (memory.userId !== cluster.userId && memory.userId !== DEVICE_MEMORY_OWNER)
+      || memory.memoryKey !== `skill:direct:${cluster.id}`
       || memory.properties.internal_info.source !== DIRECT_SKILL_SOURCE
       || memory.properties.internal_info.read_only === true) return null;
+    const projectId = projectIdFromMemory(memory);
+    if (cluster.projectId && projectId && projectId !== cluster.projectId) return null;
     return skillMetaFromMemory(memory);
   }
 
+  private episodeSharesClusterScope(episode: EpisodeRecord, cluster: SkillClusterRecord): boolean {
+    // Assignment intentionally shares clusters across persisted owners/profiles.
+    // Retain its existing project compatibility rule when maintaining members.
+    return !episode.projectId || !cluster.projectId || episode.projectId === cluster.projectId;
+  }
+
   private currentSuccessAnchors(ids: string[], cluster: SkillClusterRecord): string[] {
+    const members = new Set(this.deps.repos.runtime.listSkillClusterMembers(cluster.id).map(member => member.episodeId));
     return uniqSorted(ids.filter(id => {
       const episode = this.deps.repos.runtime.getEpisode(id);
-      return episode?.userId === cluster.userId && episode.status === "closed" && episode.rewardDetail.skipped !== true
+      return members.has(id) && episode && this.episodeSharesClusterScope(episode, cluster)
+        && episode.status === "closed" && episode.rewardDetail.skipped !== true
         && typeof episode.rTask === "number" && classifySkillOutcome(episode.rTask, this.outcomeThresholds()) === "success";
     }));
   }
@@ -612,7 +661,7 @@ export class SkillClusterPipeline {
     batch: PackedEpisodeEvidence[];
     existing: DirectSkillProcedureJson | null;
     rebuildScope?: DirectSkillRebuildScope;
-  }): Promise<{ name: string; procedure: DirectSkillProcedureJson; changedSections: string[] }> {
+  }): Promise<{ name: string; outputLanguage: string; displayTitle?: string; procedure: DirectSkillProcedureJson; changedSections: string[] }> {
     const languageSamples = input.batch.flatMap((item) => item.turns.flatMap((turn) => [turn.user, turn.assistant]));
     const steeredLanguage = steeredPromptLanguage(this.deps.config.language, languageSamples);
     const outputLanguage = skillOutputLanguageFor(this.deps.config.algorithm.skill.outputLanguageMode, steeredLanguage);
@@ -628,6 +677,10 @@ export class SkillClusterPipeline {
       {
         role: "system",
         content: languageSteeringLine(outputLanguage)
+      },
+      {
+        role: "system",
+        content: "Return display_title as a separate readable localized title in the requested output language. Keep name as the stable snake_case invocation identifier."
       },
       {
         role: "user",
@@ -659,6 +712,9 @@ export class SkillClusterPipeline {
         : [];
     return {
       name: coerceDirectSkillName(result.name, "direct_skill"),
+      outputLanguage,
+      displayTitle: typeof result.display_title === "string" ? result.display_title.trim() || undefined
+        : typeof result.displayTitle === "string" ? result.displayTitle.trim() || undefined : undefined,
       procedure,
       changedSections
     };
@@ -669,13 +725,19 @@ export class SkillClusterPipeline {
     cluster: SkillClusterRecord;
     episode?: EpisodeRecord;
     name: string;
+    displayTitle?: string;
+    draftName: string;
+    outputLanguage: string;
     procedure: DirectSkillProcedureJson;
+    verification: ReturnType<typeof verifyDirectSkillDraft>;
     existing?: MemoryRow;
     successEpisodeIds: string[];
     at: string;
   }): { memory: MemoryRow; created: boolean; previous?: MemoryRow } {
     const previousSkill = input.existing ? skillMetaFromMemory(input.existing) : undefined;
-    const invocationGuide = renderDirectSkillGuide(input.name, input.procedure);
+    const title = generatedSkillTitle(input.outputLanguage, [input.name, input.draftName],
+      input.displayTitle, input.existing?.info.title, input.procedure.summary);
+    const invocationGuide = renderDirectSkillGuide(title, input.procedure);
     const historicalIds = uniqSorted([
       ...(Array.isArray(input.existing?.properties.internal_info.direct_historical_anchor_ids)
         ? input.existing.properties.internal_info.direct_historical_anchor_ids.filter((id): id is string => typeof id === "string") : []),
@@ -700,6 +762,7 @@ export class SkillClusterPipeline {
       tags: uniqSorted(["skill", "direct-trace", ...input.procedure.tags, ...input.procedure.tools]),
       info: {
         name: input.name,
+        title,
         eta: previousSkill?.eta ?? 0.6,
         status: "active",
         source_memory_ids: []
@@ -720,6 +783,7 @@ export class SkillClusterPipeline {
         name: input.name,
         invocation_guide: invocationGuide,
         procedure_json: input.procedure,
+        verification: input.verification,
         eta: previousSkill?.eta ?? 0.6,
         support: evidenceAnchorIds.length,
         gain: 0.4,
@@ -737,7 +801,8 @@ export class SkillClusterPipeline {
           direct_sources_suspended: false,
           direct_evidence_rebuild_required: false,
           invocation_guide: invocationGuide,
-          procedure_json: input.procedure
+          procedure_json: input.procedure,
+          verification: input.verification
         }
       },
       createdAt: input.at
@@ -857,6 +922,16 @@ function clusterFeatures(cluster: SkillClusterRecord): SkillClusterFeatures {
     artifacts: cluster.artifacts,
     toolBigrams: cluster.toolBigrams,
     centroid: cluster.centroid
+  };
+}
+
+function stripDirectSkillStepEvidenceIds(procedure: DirectSkillProcedureJson): DirectSkillProcedureJson {
+  return {
+    ...procedure,
+    steps: procedure.steps.map((step) => {
+      const { evidenceIds: _evidenceIds, ...rest } = step;
+      return rest;
+    })
   };
 }
 

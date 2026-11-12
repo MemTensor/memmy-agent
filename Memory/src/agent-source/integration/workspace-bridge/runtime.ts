@@ -45,6 +45,7 @@ import {
 const DEFAULT_ENDPOINT = "http://127.0.0.1:18960";
 
 export interface RuntimeConfig {
+  configUrl?: string;
   endpoint: string;
   token: string;
   userId: string;
@@ -87,13 +88,12 @@ export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Pr
   const memory = objectValue(yaml.memmyMemory);
   const storage = objectValue(memory.storage);
   const legacyStorage = objectValue(yaml.storage);
-  const app = objectValue(yaml.app);
+  void pinnedOwner; // Ownership is device-wide, including pinned runtime snapshots.
   return {
+    configUrl: configUrl.href,
     endpoint: text(storage.endpoint) || text(memory.endpoint) || text(legacyStorage.endpoint) || text(snapshot.endpoint) || DEFAULT_ENDPOINT,
     token: text(storage.token) || text(memory.token) || text(legacyStorage.token) || text(snapshot.token),
-    userId: pinnedOwner
-      ? text(snapshot.userId) || "local-user"
-      : text(app.userId) || text(memory.userId) || text(snapshot.userId) || "local-user",
+    userId: "__memmy_device_memory__",
     workspaceHostId: text(snapshot.workspaceHostId),
   };
 }
@@ -390,6 +390,7 @@ export async function readCursorHookSourceTurn(input: {
     const source: CursorVscdbSource = {
       mainComposerIds: () => [input.conversationId],
       composerData: (composerId) => parse(`composerData:${composerId}`),
+      conversationHeaderChunk: (composerId, index) => parse(`composerConvHeaders:${composerId}:${String(index).padStart(6, "0")}`),
       bubble: (composerId, bubbleId) => parse(`bubbleId:${composerId}:${bubbleId}`)
     };
     return await readCursorSourceTurn(source, input);
@@ -531,7 +532,13 @@ class RuntimeHttpClient {
   private async request(url: URL, init: RequestInit): Promise<unknown> {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
-    if (this.config.token) headers.set("authorization", `Bearer ${this.config.token}`);
+    // A long-lived plugin session may predate token initialization or rotation.
+    // Refresh only connection credentials; preserve its pinned session identity.
+    const current = this.config.configUrl ? await readRuntimeConfig(new URL(this.config.configUrl)) : this.config;
+    if (current.endpoint.replace(/\/+$/u, "") !== this.config.endpoint.replace(/\/+$/u, "")) {
+      throw new Error("Memory endpoint changed; reopen the session before sending credentials");
+    }
+    if (current.token) headers.set("authorization", `Bearer ${current.token}`);
     let response: Response;
     try {
       response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(45_000) });

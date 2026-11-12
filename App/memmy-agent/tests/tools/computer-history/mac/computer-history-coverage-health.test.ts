@@ -58,6 +58,8 @@ const narrative = (marker: string) => ({ content: JSON.stringify({ title: marker
 const checkpointPath = (segment: FixtureSegment) => `${segment.historyFile}.evidence.json`;
 
 beforeEach(() => {
+  vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+  vi.spyOn(os, "release").mockReturnValue("23.0.0");
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-10-09T10:01:00Z"));
   transport.children.length = 0;

@@ -1,6 +1,8 @@
 import type { Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createMemoryHttpServer, type LlmClient, type LlmMessage } from "../src/index.js";
+import { DEVICE_MEMORY_OWNER } from "../src/service/namespace/memory-owner.js";
+import type { AgentSourceExecutor } from "../src/agent-source/runtime.js";
 import { closeMemoryHttpServer } from "../src/server/http.js";
 import { Repositories } from "../src/storage/repositories.js";
 import { upsertL2Candidate } from "../src/service/evolution/l2-candidate-service.js";
@@ -21,27 +23,31 @@ function harness(count = 1, directFromTrace = true) {
     status: () => ({ provider: config.evolution.provider, model: config.evolution.model, configured: true, remote: true }) } as LlmClient;
   const { db, service } = fixture.createTestService({ config, llm, skillLlm: llm });
   const repos = new Repositories(db.db), at = new Date().toISOString();
-  repos.runtime.createSession({ id: "session", userId: "u", source: "codex", profileId: "default", status: "closed", meta: {}, openedAt: at, updatedAt: at });
-  repos.runtime.createEpisode({ id: "episode", sessionId: "session", userId: "u", status: "closed",
+  repos.runtime.createSession({ id: "session", userId: DEVICE_MEMORY_OWNER, source: "codex", profileId: "default", status: "closed", meta: {}, openedAt: at, updatedAt: at });
+  repos.runtime.createEpisode({ id: "episode", sessionId: "session", userId: DEVICE_MEMORY_OWNER, status: "closed",
     l1MemoryIds: Array.from({ length: count }, (_, i) => `source-${i}`), rawTurnIds: [], feedbackIds: [], decisionRepairIds: [],
     l2PolicyIds: [], l3WorldModelIds: [], skillMemoryIds: [], turnCount: count, rewardDetail: {}, pipelineStatus: "idle",
     meta: {}, openedAt: at, closedAt: at, updatedAt: at });
   for (let i = 0; i < count; i++) {
     const id = `source-${i}`;
-    repos.memories.insert({ id, userId: "u", sessionId: "session", timeline: at, memoryLayer: "L1", memoryType: "LongTermMemory",
+    repos.memories.insert({ id, userId: DEVICE_MEMORY_OWNER, sessionId: "session", timeline: at, memoryLayer: "L1", memoryType: "LongTermMemory",
       status: "activated", visibility: "private", memoryValue: "The parser failed a real input; verify it before reporting success.",
       tags: [], info: {}, version: 1, createdAt: at, updatedAt: at,
       properties: { internal_info: { memory_layer: "L1", memory_kind: "trace", trace: {
         episode_id: "episode", summary: "Verify parser before acceptance", userText: "Verify actual input", agentText: "Test failed", value: -1
       } } } });
-    upsertL2Candidate(repos, { sourceMemoryId: id, userId: "u", route: "negative", at });
+    upsertL2Candidate(repos, { sourceMemoryId: id, userId: DEVICE_MEMORY_OWNER, route: "negative", at });
   }
-  repos.runtime.enqueueJob({ id: "original", jobType: "l2_induction", userId: "u", episodeId: "episode", sessionId: "session",
+  repos.runtime.enqueueJob({ id: "original", jobType: "l2_induction", userId: DEVICE_MEMORY_OWNER, episodeId: "episode", sessionId: "session",
     targetMemoryId: "source-0", payload: { unified: true }, status: "queued", attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at });
   return { db, repos, service, calls, setOutput: (fn: typeof output) => { output = fn; } };
 }
 async function listen(service: ReturnType<typeof harness>["service"]) {
-  const server = createMemoryHttpServer({ service, apiKey: "fixture-key", workerStartupFallbackMs: 60_000 }); servers.push(server);
+  const server = createMemoryHttpServer({ service, startAgentSourceAutomation: false,
+    agentSourceExecutor: { dispose() {}, startAutomation() {} } as unknown as AgentSourceExecutor,
+    auth: { localServiceToken: "fixture-key", scopedApiKeys: {
+      "foreign-profile-key": { namespace: { userId: "other", source: "codex", profileId: "foreign" }, scopes: ["memory:read", "memory:write"] }
+    } }, workerStartupFallbackMs: 60_000 }); servers.push(server);
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); if (!address || typeof address === "string") throw Error("missing address");
   return `http://127.0.0.1:${address.port}/api/v1/panel/tasks/episode/experience-processing`;
@@ -163,15 +169,15 @@ describe("L2 recovery through HTTP and real worker", () => {
     expect(h.calls).toHaveLength(3);
   });
 
-  it("rejects another user's retry and does not retry an open episode", async () => {
+  it("rejects an out-of-scope retry and does not retry an open episode", async () => {
     const h = harness(); await h.service.runWorkerOnce(1, { targetMemoryIds: ["source-0"] });
     const base = await listen(h.service);
-    const other = await fetch(base + "/retry", { method: "POST", headers, body: JSON.stringify({ namespace: { userId: "other" } }) });
+    const other = await fetch(base + "/retry", { method: "POST", headers: { ...headers, authorization: "Bearer foreign-profile-key" }, body: JSON.stringify({ namespace: { userId: DEVICE_MEMORY_OWNER, profileId: "default" } }) });
     expect(other.status).toBe(403);
     h.db.db.prepare("UPDATE episodes SET status='open' WHERE id='episode'").run();
     expect(await (await fetch(base + "/retry", { method: "POST", headers, body: "{}" })).json()).toMatchObject({ accepted: false, state: "blocked" });
     expect(h.calls).toHaveLength(3);
-    expect(h.repos.runtime.listL2JobsForEpisode("u", "episode")).toHaveLength(1);
+    expect(h.repos.runtime.listL2JobsForEpisode(DEVICE_MEMORY_OWNER, "episode")).toHaveLength(1);
   });
 
   it("rejects a response if the task reopens during recovery", async () => {

@@ -34,7 +34,7 @@ describe("imported Skill embedding maintenance eligibility", () => {
     const run = await service.rebuildEmbeddings("repair");
     expect.soft(run).toMatchObject({ enqueued: 0, failed: 0, pending: 0, done: true });
     await service.runWorkerOnce(100);
-    expect.soft(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ failed: 0, pending: 0, done: true, statsAfter: { totalSlots: 0, needsRepair: 0 } });
+    expect.soft(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ failed: 0, pending: 0, done: true, statsAfter: { totalSlots: 0, needsRepair: 0 } });
     expect.soft(await service.rebuildEmbeddings("repair")).toMatchObject({ enqueued: 0, failed: 0, done: true });
   });
 

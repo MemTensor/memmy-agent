@@ -10,6 +10,28 @@ const runtimeConfig = {
 };
 
 describe("requestJson", () => {
+  it("preserves retry timing when recognizing an unsupported backend route", async () => {
+    const message = "Route GET:/api/v1/panel/browse not found";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message }), {
+      status: 404, headers: { "retry-after": "8" }
+    })));
+
+    await expect(requestJson({ config: runtimeConfig, path: "/api/v1/panel/browse", schema: z.object({ ok: z.literal(true) }) }))
+      .rejects.toMatchObject({ status: 404, code: "not_found", message, retryAfterSec: 8 });
+  });
+
+  it.each([
+    ["plugin_incompatible", 400, "Missing Host capabilities: memmy.event-checkpoints/v1"],
+    ["plugin_permission_denied", 403, "Plugin permissions need approval"],
+    ["plugin_activation_failed", 409, "Plugin runtime could not start"]
+  ] as const)("preserves %s details from the plugin API", async (code, status, message) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: { code, message, requestId: "plugin-install-test" }
+    }), { status, headers: { "content-type": "application/json" } })));
+    await expect(requestJson({ config: runtimeConfig, path: "/api/v1/plugins/install",
+      schema: z.object({ ok: z.literal(true) }), body: { pluginId: "teach-mode", version: "0.4.1" }
+    })).rejects.toMatchObject({ code, status, message, requestId: "plugin-install-test" });
+  });
   it.each([["17", 17], ["0", 0], ["-1", null], ["NaN", null], ["1.5", null], ["", null]] as const)("reads retry-after %s safely", async (header, expected) => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       error: { code: "rate_limited", message: "retry later", requestId: "req-1" }

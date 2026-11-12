@@ -34,7 +34,17 @@ describe("MemoryService / evolution / orchestration", () => {
   it("adds feedback and evolves L2/L3/Skill memories with the worker", async () => {
     const { db, service } = createTestService({
       skillLlm: createNoToolSkillLlm(),
-      embedder: createCapturingEmbedder([])
+      embedder: createCapturingEmbedder([]),
+      config: {
+        ...LEGACY_TEST_CONFIG,
+        algorithm: {
+          ...LEGACY_TEST_CONFIG.algorithm,
+          skill: {
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
+            directFromTrace: false
+          }
+        }
+      }
     });
     const session = service.openSession({
       namespace: {
@@ -109,7 +119,7 @@ describe("MemoryService / evolution / orchestration", () => {
     expect(promotedCandidates.count).toBeGreaterThanOrEqual(1);
     const l2Row = db.db.prepare(
       `SELECT properties_json FROM memories
-       WHERE user_id = 'user-2' AND memory_layer = 'L2'
+       WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'L2'
        LIMIT 1`
     ).get() as { properties_json: string };
     const l2Internal = (JSON.parse(l2Row.properties_json) as {
@@ -151,7 +161,7 @@ describe("MemoryService / evolution / orchestration", () => {
     ).all() as Array<{ namespace_id: string | null; kind: string | null; op: string | null; entity_id: string | null }>;
     expect(workerMemoryChanges.length).toBeGreaterThan(0);
     for (const change of workerMemoryChanges) {
-      expect(change.namespace_id).toContain("user-2");
+      expect(change.namespace_id).not.toContain("user-2");
       expect(change.kind).toMatch(/^(trace|policy|world_model|skill)$/);
       expect(change.op).toMatch(/^(created|updated)$/);
       expect(change.entity_id).toBeTruthy();
@@ -473,7 +483,7 @@ describe("MemoryService / evolution / orchestration", () => {
       `SELECT id
        FROM memories
        WHERE memory_layer = 'L2'
-         AND user_id = 'user-2'
+         AND user_id = '__memmy_device_memory__'
        LIMIT 1`
     ).get() as { id: string } | undefined;
     expect(policyForRepeat).toBeTruthy();
@@ -503,6 +513,10 @@ describe("MemoryService / evolution / orchestration", () => {
           l2Induction: {
             ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             minEpisodesForActivation: 2
+          },
+          skill: {
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
+            directFromTrace: false
           }
         }
       }
@@ -553,7 +567,8 @@ describe("MemoryService / evolution / orchestration", () => {
       confidence: 0.5
     });
     insertTracePolicyLinkForTest(db, {
-      userId: "user-l2-activation-downstream",
+      // Links are attributed to the captured L1, while this fixture's policy is historical.
+      userId: (db.db.prepare("SELECT user_id FROM memories WHERE id=?").get(first.l1MemoryId) as { user_id: string }).user_id,
       l1MemoryId: first.l1MemoryId,
       l2MemoryId: "policy_l2_activation_downstream"
     });
@@ -670,6 +685,15 @@ describe("MemoryService / evolution / orchestration", () => {
       sourceTraceId: completeB.l1MemoryId,
       sourceEpisodeId: assignedEpisodeId(service, completeB)
     });
+    // Captures are device-owned; retain these historical policies with an explicit
+    // support link attributed to each real source, rather than a cross-owner ID alone.
+    for (const [sourceId, policyId] of [[completeA.l1MemoryId, "policy_downstream_profile_a"],
+      [completeB.l1MemoryId, "policy_downstream_profile_b"]]) {
+      insertTracePolicyLinkForTest(db, {
+        userId: (db.db.prepare("SELECT user_id FROM memories WHERE id=?").get(sourceId) as { user_id: string }).user_id,
+        l1MemoryId: sourceId!, l2MemoryId: policyId!
+      });
+    }
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     db.db.prepare(
       `INSERT INTO evolution_jobs (
@@ -700,7 +724,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const worlds = db.db.prepare(
       `SELECT info_json, properties_json
        FROM memories
-       WHERE user_id = 'shared-downstream-user'
+       WHERE user_id = '__memmy_device_memory__'
          AND memory_layer = 'L3'`
     ).all() as Array<{ info_json: string; properties_json: string }>;
     expect(worlds).toHaveLength(0);
@@ -708,7 +732,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const skills = db.db.prepare(
       `SELECT info_json, properties_json
        FROM memories
-       WHERE user_id = 'shared-downstream-user'
+       WHERE user_id = '__memmy_device_memory__'
          AND memory_layer = 'Skill'`
     ).all() as Array<{ info_json: string; properties_json: string }>;
     expect(skills).toHaveLength(2);
@@ -843,7 +867,7 @@ describe("MemoryService / evolution / orchestration", () => {
       const l2Count = db.db.prepare(
         `SELECT COUNT(*) AS count
          FROM memories
-         WHERE user_id = 'user-l3-skill-prompt' AND memory_layer = 'L2'`
+         WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'L2'`
       ).get() as { count: number };
       if (l2Count.count > 0) {
         policyCreated = true;
@@ -868,7 +892,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const policyRow = db.db.prepare(
       `SELECT id, properties_json
        FROM memories
-       WHERE user_id = 'user-l3-skill-prompt' AND memory_layer = 'L2'
+       WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'L2'
        LIMIT 1`
     ).get() as { id: string; properties_json: string };
     const policyProperties = JSON.parse(policyRow.properties_json) as {
@@ -911,7 +935,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const l1Rows = db.db.prepare(
       `SELECT *
        FROM memories
-       WHERE user_id = 'user-l3-skill-prompt' AND memory_layer = 'L1'`
+       WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'L1'`
     ).all() as Array<Record<string, unknown> & { id: string; properties_json: string }>;
     const sourceL1Row = l1Rows.find((row) => {
       const properties = JSON.parse(row.properties_json) as {
@@ -1004,7 +1028,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const worldRow = db.db.prepare(
       `SELECT properties_json
        FROM memories
-       WHERE user_id = 'user-l3-skill-prompt' AND memory_layer = 'L3'
+       WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'L3'
        LIMIT 1`
     ).get() as { properties_json: string } | undefined;
     if (worldRow) {
@@ -1056,7 +1080,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const skillRow = db.db.prepare(
       `SELECT memory_key, properties_json
        FROM memories
-       WHERE user_id = 'user-l3-skill-prompt' AND memory_layer = 'Skill'
+       WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'Skill'
        LIMIT 1`
     ).get() as { memory_key: string; properties_json: string };
     const skillProperties = JSON.parse(skillRow.properties_json) as {

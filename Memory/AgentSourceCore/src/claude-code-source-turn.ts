@@ -40,6 +40,7 @@ interface ClaudeRow {
   toolResults: SourceToolResult[];
   toolNames: Map<string, string>;
   turnDuration: boolean;
+  endTurn: boolean;
 }
 
 /**
@@ -99,8 +100,8 @@ export async function* readClaudeCodeSession(
     if (!row || IGNORED_ROW_TYPES.has(row.type)) continue;
     // A sidechain row belongs to a subagent branch and never joins the main session.
     if (record.isSidechain === true) continue;
-    // Claude closes each turn with a turn_duration row. It carries no promptId, so it is
-    // attributed to the turn currently open.
+    // Some Claude histories close turns with a turn_duration row. It carries no
+    // promptId, so it is attributed to the turn currently open.
     if (row.type === "system") {
       if (row.turnDuration && promptId) {
         completedAt = row.timestamp || completedAt;
@@ -116,10 +117,19 @@ export async function* readClaudeCodeSession(
       query = row.userText;
     }
     if (!promptId) continue;
+    // A later assistant response or SDK input resumes the turn. A delayed result
+    // for an existing tool call only completes that exchange; it is not new work.
+    const completesKnownTools = row.type === "user" && !row.userText.trim() && row.toolCalls.length === 0
+      && row.toolResults.length > 0
+      && row.toolResults.every(result => result.id && toolCalls.some(call => call.id === result.id));
+    if (row.type === "assistant" || (row.type === "user" && !completesKnownTools)) {
+      evidence = row.endTurn && row.uuid ? `end_turn:${row.uuid}` : "";
+    }
     if (row.assistantText) {
       answer = answer ? `${answer}\n\n${row.assistantText}` : row.assistantText;
       completedAt = row.timestamp || completedAt;
     }
+    if (row.endTurn && row.uuid) completedAt = row.timestamp || completedAt;
     toolCalls.push(...row.toolCalls);
     toolResults.push(...row.toolResults);
     for (const message of toStagedMessages(row, conversationId, lineNumber)) current.push(message);
@@ -187,7 +197,8 @@ function toClaudeRow(record: Record<string, unknown>, toolNames: Map<string, str
     toolCalls,
     toolResults,
     toolNames,
-    turnDuration: type === "system" && text(record.subtype) === "turn_duration"
+    turnDuration: type === "system" && text(record.subtype) === "turn_duration",
+    endTurn: type === "assistant" && text(message?.stop_reason) === "end_turn"
   };
 }
 

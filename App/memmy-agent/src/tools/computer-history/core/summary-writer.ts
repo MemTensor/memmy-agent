@@ -4,6 +4,7 @@ import { normalizeOutputLanguage } from "@memmy/local-api-contracts";
 import { redactSensitive } from "./summarize-history.js";
 import { applicationId, type HistoryApplication, type CaptureNode } from "./recording.js";
 import { estimatePromptTokens } from "../../../utils/helpers.js";
+import { recordingCheckpointRecord, recordingGapRecord } from "./recorder-checkpoint.js";
 import { captureGapRecord, RECORDER_HEALTH_CODES, type CaptureGapRecord, type RecorderHealthSignal } from "../mac/recorder-health.js";
 import { previousControlsAtPoint as projectPreviousControls } from "../win/native-event-adapter.js";
 
@@ -602,7 +603,7 @@ function clockTime(timestamp: string | undefined): string {
 
 interface DocumentObservation {
   ref: string;
-  adapter: "vscode.editor" | "word.document" | "uia.text" | "uia.value" | "uia.legacy_value" | "msaa.value" | "msaa.name";
+  adapter: "vscode.editor" | "word.document" | "notepad.document" | "uia.text" | "uia.value" | "uia.legacy_value" | "msaa.value" | "msaa.name";
   label?: { kind: "editor_label" | "document_label"; source: "uia.name"; value: string };
   provider_focused?: boolean;
   pixel_visibility: "unverified";
@@ -624,7 +625,7 @@ function documentObservation(node: CaptureNode, ref: string, truncated: boolean)
       || source.textSource !== "uia.document_range" || typeof source.providerFocused !== "boolean") return null;
   const code = source.adapter === "vscode.editor" && source.labelKind === "editor_label" && node.controlType === "Edit"
     && node.documentContext === "vscode.editor";
-  const word = source.adapter === "word.document" && source.labelKind === "document_label" && node.controlType === "Document";
+  const word = (source.adapter === "word.document" || source.adapter === "notepad.document") && source.labelKind === "document_label" && node.controlType === "Document";
   const generic = source.adapter === "uia.text" && source.labelKind === "document_label"
     && node.documentContext === "uia.document";
   if (!code && !word && !generic) return null;
@@ -737,6 +738,14 @@ export function compactEventEvidence(
     try {
       const event = JSON.parse(line);
       if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error("invalid event");
+      if (event.recordType === "human_event" && event.eventType === "recording_checkpoint") {
+        if (retain) recordingCheckpointRecord.parse(event);
+        continue; // Durable transport evidence, not a user action or semantic memory.
+      }
+      if (event.recordType === "human_event" && event.eventType === "recording_gap") {
+        if (retain) recordingGapRecord.parse(event);
+        continue;
+      }
       if (event.recordType === "capture_health") {
         const signal = captureHealthSignal(event);
         if (!signal) throw new Error("invalid capture health");

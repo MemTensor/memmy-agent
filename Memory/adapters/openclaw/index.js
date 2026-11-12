@@ -1,13 +1,15 @@
-const ENDPOINT = (process.env.MEMMY_MEMORY_URL || "http://127.0.0.1:18960").replace(/\/$/, "");
+import { readAdapterConnection } from "../connection.js";
 const sessions = new Map();
 const turns = new Map();
 
 async function request(path, options = {}) {
   const headers = { "content-type": "application/json", "x-memmy-profile-id": options.profileId || "main" };
-  if (process.env.MEMMY_MEMORY_TOKEN) headers.authorization = `Bearer ${process.env.MEMMY_MEMORY_TOKEN}`;
-  const response = await fetch(`${ENDPOINT}/api/v1${path}`, {
+  const { endpoint, token } = await readAdapterConnection(import.meta.url);
+  if (token) headers.authorization = `Bearer ${token}`;
+  const response = await fetch(`${endpoint}/api/v1${path}`, {
     method: options.method || "GET",
     headers,
+    redirect: "error",
     body: options.body === undefined ? undefined : JSON.stringify({ ...options.body, source: "openclaw" }),
     signal: AbortSignal.timeout(options.timeout || 3000)
   });

@@ -1,5 +1,7 @@
+import {usePanelPrefetch} from "./memory/use-panel-prefetch.js";
+import {PanelVisibilityContext} from "./memory/panel-visibility.js";
 import type { TokenUsageDto } from "@memmy/local-api-contracts";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { buildMemorySubPageViewEvent } from "../analytics/page-view.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { useApiClients } from "../app/providers.js";
@@ -118,6 +120,9 @@ export function MemoryPage(props: MemoryPageProps) {
   const activePage = supportedMemorySubPage(selectedPage);
   const [referenceRequest, setReferenceRequest] = useState<(MemoryReferenceOpenRequest & { page: MemoryReferencePage }) | null>(null);
   const client = clients?.memoryRuntime ?? null;
+  usePanelPrefetch(client,activePage);
+  // Release the old scope before newly mounted children start passive loads.
+  useLayoutEffect(()=>()=>client?.resetPanelView?.(),[client]);
   const historyQuotaExhausted = isComputerHistoryQuotaExhausted(state?.bootstrap);
   const onHistoryQuotaUpdate = useCallback((usage: TokenUsageDto) => {
     dispatch(appActions.tokenUsageUpdated(usage));
@@ -284,6 +289,9 @@ export interface MemoryPageViewProps {
 export function MemoryPageView(props: MemoryPageViewProps) {
   const { t } = useTranslation();
   const activePage = supportedMemorySubPage(props.activePage);
+  const retainedPages=new Set<MemorySubPageId>(["memories","tasks","policies","world-model","skills","user-memories","overview","analytics"]);
+  const [visited,setVisited]=useState<MemorySubPageId[]>(retainedPages.has(activePage)?[activePage]:[]);
+  useEffect(()=>{if(retainedPages.has(activePage))setVisited(current=>current.includes(activePage)?current:[...current,activePage]);},[activePage]);
   const childByPage = props.childByPage ?? createPreviewChildByPage(t);
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const windowsChrome = isWindowsDesktopPlatform();
@@ -396,7 +404,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
             props.onOpenMemoryBudgetSettings?.();
           }}
         />
-        <div className="app-frame-page-content min-h-0 flex-1 overflow-y-auto py-6">{childByPage[activePage]}</div>
+        <div className="app-frame-page-content min-h-0 flex-1 overflow-y-auto py-6">{[...new Set([...visited,activePage])].map(page=><PanelVisibilityContext.Provider value={page===activePage} key={page}><div hidden={page!==activePage}>{childByPage[page]}</div></PanelVisibilityContext.Provider>)}</div>
       </div>
       </div>
     </div>

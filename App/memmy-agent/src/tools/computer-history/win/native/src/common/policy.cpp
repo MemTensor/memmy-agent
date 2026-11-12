@@ -105,6 +105,7 @@ class Parser {
         if (!allowScopes || item["automationId"] != "") return Fail("selector_scope_invalid", itemPath);
         if (item["scope"] == "vscode.editor" && *controlType == classify::kEdit) selector.vscodeEditor = true;
         else if (item["scope"] == "word.document" && *controlType == classify::kDocument) selector.wordDocument = true;
+        else if (item["scope"] == "notepad.document" && *controlType == classify::kDocument) selector.notepadDocument = true;
         else return Fail("selector_scope_invalid", itemPath);
       } else if (!String(item["automationId"], itemPath + "/automationId", kMaxIdChars, selector.automationId)) return false;
       out.push_back(std::move(selector));
@@ -153,6 +154,7 @@ class Parser {
     for (const auto& selector : rule.documentRegions) {
       if (!rule.captureText && selector.vscodeEditor && !HasVsCodeEditorScope(rule)) return Fail("selector_scope_invalid", path + "/documentRegions");
       if (!rule.captureText && selector.wordDocument && !HasWordDocumentScope(rule)) return Fail("selector_scope_invalid", path + "/documentRegions");
+      if (!rule.captureText && selector.notepadDocument && !HasNotepadDocumentScope(rule)) return Fail("selector_scope_invalid", path + "/documentRegions");
     }
     if (value.contains("sensitiveAutomationIds") &&
         !StringList(value["sensitiveAutomationIds"], path + "/sensitiveAutomationIds", kMaxIdChars,
@@ -348,7 +350,8 @@ bool IsSensitiveAutomationId(const Policy& policy, const AppRule& rule, std::wst
 bool MatchesSelector(const std::vector<ElementSelector>& selectors, long controlType, std::wstring_view automationId) {
   if (automationId.empty()) return false;
   return std::any_of(selectors.begin(), selectors.end(), [&](const ElementSelector& selector) {
-    return !selector.vscodeEditor && !selector.wordDocument && selector.controlType == controlType && selector.automationId == automationId;
+    return !selector.vscodeEditor && !selector.wordDocument && !selector.notepadDocument &&
+      selector.controlType == controlType && selector.automationId == automationId;
   });
 }
 
@@ -364,6 +367,13 @@ bool HasWordDocumentScope(const AppRule& rule) {
   const auto basename = std::wstring_view(rule.executable).substr(separator == std::wstring::npos ? 0 : separator + 1);
   return text::EqualsOrdinalIgnoreCase(basename, L"WINWORD.EXE") &&
     std::any_of(rule.documentRegions.begin(), rule.documentRegions.end(), [](const auto& selector) { return selector.wordDocument; });
+}
+
+bool HasNotepadDocumentScope(const AppRule& rule) {
+  const auto separator = rule.executable.find_last_of(L"/\\");
+  const auto basename = std::wstring_view(rule.executable).substr(separator == std::wstring::npos ? 0 : separator + 1);
+  return text::EqualsOrdinalIgnoreCase(basename, L"Notepad.exe") &&
+    std::any_of(rule.documentRegions.begin(), rule.documentRegions.end(), [](const auto& selector) { return selector.notepadDocument; });
 }
 
 }  // namespace memmy::policy

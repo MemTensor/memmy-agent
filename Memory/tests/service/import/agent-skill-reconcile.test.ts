@@ -139,7 +139,7 @@ describe("agent skill reconcile", () => {
     await runWorkerRounds(service, 2, 50);
     // A panel rebuild goes through the embedding retry queue, which logs its
     // changes under the retry id with this skill as targetId.
-    service.rebuildEmbeddings();
+    await service.rebuildEmbeddings();
     await runWorkerRounds(service, 2, 50);
     expect((db.db.prepare(`SELECT COUNT(*) AS n FROM memory_change_log WHERE json_extract(after_json, '$.targetId') = ?`).get(memoryId) as { n: number }).n)
       .toBeGreaterThan(0);

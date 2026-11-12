@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
-import { hasStagedSourceTurn } from "@memmy/agent-source-core";
+import { hasStagedSourceTurn, sourceTurnFromMessages } from "@memmy/agent-source-core";
 import type { ConversationCheckpoint, ConversationMessage, MessageCursor, PreparedConversation, PreparedTurn, ScanSourceState, ScanStore, ScanStoredResult } from "@memmy/agent-source-core";
 
 const MAX_RECORD_BYTES = 64 * 1024 * 1024;
@@ -84,6 +84,13 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
     WHERE job_id=? AND source_id=? AND conversation_id=? AND message_id=?`);
   // One scan owns staged writes. Initialize from durable rows on reopen, then
   // count successful inserts instead of repeatedly walking the staged index.
+  // Only the DSH reader emits complete snapshot membership. Keep this retry
+  // cleanup scoped to DSH; other source refresh contracts remain unchanged.
+  db.exec("CREATE INDEX IF NOT EXISTS staged_dsh_turn ON staged_messages(job_id,conversation_id,json_extract(raw_meta_json,'$.sourceTurnId')) WHERE source_id='deepseek_harness'");
+  const removeStaleDshRows = db.prepare(`DELETE FROM staged_messages
+    WHERE job_id=? AND source_id='deepseek_harness' AND conversation_id=?
+      AND json_extract(raw_meta_json,'$.sourceTurnId')=?
+      AND message_id NOT IN (SELECT value FROM json_each(?))`);
   let messageCounts: Map<string, number> | undefined;
   const counts = () => messageCounts ??= new Map(
     (db.prepare("SELECT source_id AS sourceId, COUNT(*) AS count FROM staged_messages WHERE job_id=? GROUP BY source_id").all(job.jobId) as Array<{ sourceId: string; count: number }>)
@@ -117,6 +124,14 @@ export async function openMemoryAgentSourceScanStore(path: string, job: MemorySc
         refreshStaged.run(message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, rawMetaJson, job.jobId, message.sourceId, message.conversationId, message.messageId);
       }
       if (inserted && messageCounts) messageCounts.set(message.sourceId, (messageCounts.get(message.sourceId) ?? 0) + 1);
+      const members = message.rawMeta.dshSnapshotMessageIds;
+      if (message.sourceId === "deepseek_harness" && sourceTurnFromMessages([message])
+        && Array.isArray(members) && members.length > 0
+        && members.every(id => typeof id === "string" && id.length > 0) && members.includes(message.messageId)) {
+        const removed = removeStaleDshRows.run(job.jobId, message.conversationId,
+          message.rawMeta.sourceTurnId, JSON.stringify(members)).changes;
+        if (removed) messageCounts = undefined;
+      }
       return inserted;
     },
     stageBatch(messages) {

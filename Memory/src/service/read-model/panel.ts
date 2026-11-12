@@ -1,3 +1,4 @@
+import { panelSourceForStatsRow } from "../../utils/panel-source.js";
 import type { MemoryListItem, MemoryProcessingRecord, MemoryRow, MemoryStatsRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import {
@@ -9,12 +10,14 @@ import {
 import { panelDateKey, panelRoundDecimal } from "./model-costs.js";
 import { observedActivitySummary } from "./display-fields.js";
 import { externalEvidenceSourceMatchesMemory } from "../external-evidence-source.js";
+import { processingWithRetryAction } from "../import/processing-retry-policy.js";
 
 export function panelListItemFromMemory(
   item: MemoryListItem,
   memory: MemoryRow,
   processing?: MemoryProcessingRecord
 ): MemoryListItem {
+  const processingView = processing ? processingWithRetryAction(memory, processing) : undefined;
   const spanGoal = panelSpanGoalForMemory(memory);
   const observationSummary = observedActivitySummary(memory);
   const observation = isRecord(memory.properties.internal_info.observation_memory)
@@ -22,7 +25,7 @@ export function panelListItemFromMemory(
   return {
     ...item,
     ...(observationSummary ? { summary: observationSummary } : {}),
-    processing,
+    processing: processingView,
     metadata: {
       ...(item.metadata ?? {}),
       source: panelSourceForMemory(memory),
@@ -31,7 +34,7 @@ export function panelListItemFromMemory(
         : {}),
       ...(spanGoal ? { spanGoal } : {})
     },
-    tags: panelTagsForMemory(memory, processing)
+    tags: panelTagsForMemory(memory, processingView)
   };
 }
 
@@ -100,72 +103,13 @@ export function panelSourceForMemory(memory: MemoryRow): string {
     external.source === "computer_history" || typeof provenance.historyId === "string"
   )) return "computer_history";
   return panelSourceForStatsRow({
-    id: memory.id,
     conversationId: memory.conversationId,
     sessionId: memory.sessionId,
     agentId: memory.agentId,
     appId: memory.appId,
-    status: memory.status,
-    memoryLayer: memory.memoryLayer,
-    createdAt: memory.createdAt,
-    updatedAt: memory.updatedAt,
     infoSource: memory.info.source,
     internalSource: internalInfo.source
   });
-}
-
-function panelSourceForStatsRow(memory: MemoryStatsRow): string {
-  const explicitSources = [memory.infoSource, memory.internalSource];
-  const explicitSource = firstString(...explicitSources.map(panelNormalizeExplicitSource));
-  if (explicitSource) return explicitSource;
-
-  const hostSource = firstString(
-    panelNormalizeKnownSource(memory.sessionId),
-    panelNormalizeKnownSource(memory.conversationId),
-    panelNormalizeSourceAgent(memory.agentId),
-    panelNormalizeSourceAgent(memory.appId)
-  );
-  if (hostSource) return hostSource;
-  return explicitSources.some(panelIsInternalSourceValue) ? "memmy" : "unknown";
-}
-
-function panelNormalizeExplicitSource(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  const normalized = value.trim().toLowerCase();
-  if (panelIsInternalSource(normalized)) return undefined;
-  return panelNormalizeKnownSource(normalized) ?? normalized;
-}
-
-function panelNormalizeKnownSource(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "claude" || normalized.startsWith("claude-")) return "claude-code";
-  if (normalized === "open-code" || normalized.startsWith("open-code-")) return "opencode";
-  for (const source of ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "manual", "memmy"]) {
-    if (normalized === source || normalized.startsWith(`${source}-`)) return source;
-  }
-  return undefined;
-}
-
-function panelNormalizeSourceAgent(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  const normalized = value.trim().toLowerCase();
-  return panelNormalizeKnownSource(normalized) ?? normalized;
-}
-
-function panelIsInternalSourceValue(value: unknown): boolean {
-  return typeof value === "string" && panelIsInternalSource(value.trim().toLowerCase());
-}
-
-function panelIsInternalSource(value: string): boolean {
-  return /^(?:turn|worker|panel|system|feedback|memory|session|episode|recall|skill_trial|l2_candidate)(?:[.:_-]|$)/.test(value);
-}
-
-function firstString(...values: unknown[]): string | undefined {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return undefined;
 }
 
 

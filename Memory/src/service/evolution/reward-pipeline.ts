@@ -1,5 +1,5 @@
 import { episodeInputRevision, jobRevisionIsCurrent } from "./episode-revision.js";
-import { isCurrentPolicySupport } from "./policy-evidence.js";
+import { policiesDependingOnTrace } from "./policy-evidence.js";
 import {
   REWARD_R_HUMAN_PROMPT,
   backpropagateTraces,
@@ -129,8 +129,9 @@ export class RewardPipeline {
           rationale: typeof payload.rationale === "string" ? payload.rationale : undefined
         }]
       : []);
-    const episodeTraces = this.deps.repos.memories
-      .list({ memoryLayer: "L1", status: "activated" }, 1000)
+    const episodeTraces = (trace.episodeId
+      ? this.deps.repos.memories.listRewardTracesForEpisode(trace.episodeId)
+      : source.status === "activated" && !source.deletedAt ? [source] : [])
       .map((memory) => this.deps.traceMeta(memory))
       .filter((item): item is TraceMeta => Boolean(item && (trace.episodeId
         ? item.episodeId === trace.episodeId
@@ -354,16 +355,7 @@ export class RewardPipeline {
         retireSourceSpans(this.deps.repos, saved.id, [], at, this.deps.namespaceIdFromMemory);
       }
       if (savedTrace) {
-        for (const policy of this.deps.repos.memories.listByDerivedSource(saved.userId, "L2", saved.id)) {
-          affectedPolicyIds.add(policy.id);
-        }
-        for (const policyId of new Set(this.deps.repos.runtime.listTracePolicyLinks({ l1MemoryId: saved.id, limit: -1 })
-          .filter((link) => {
-            const target = this.deps.repos.memories.get(link.l2MemoryId);
-            return target && target.userId === saved.userId && isCurrentPolicySupport(target, link.relation);
-          }).map((link) => link.l2MemoryId))) {
-          affectedPolicyIds.add(policyId);
-        }
+        for (const policy of policiesDependingOnTrace(this.deps.repos, saved)) affectedPolicyIds.add(policy.id);
       }
       if (payload.downstreamScheduled !== true && savedTrace && this.deps.isTraceEligibleForL2(savedTrace)) {
         this.deps.recordCandidatePoolTrace(savedTrace, signatureFromTrace(savedTrace), at);
@@ -528,7 +520,7 @@ export class RewardPipeline {
     if (evidence.highValueMemories.length === 0 || evidence.lowValueMemories.length === 0) return undefined;
     const valueDiff = this.deps.repairEvidenceValueDiff(evidence.highValueMemories, evidence.lowValueMemories);
     if (valueDiff < this.deps.config.algorithm.feedback.valueDelta) return undefined;
-    const contextHash = stableHash(`value-distribution:${triggerTrace.userId}:${triggerTrace.signature}`).slice(0, 16);
+    const contextHash = stableHash(`value-distribution:${triggerTrace.signature}`).slice(0, 16);
     const cooldownMs = this.deps.config.algorithm.feedback.cooldownMs;
     if (cooldownMs > 0) {
       const since = new Date(Date.parse(at) - cooldownMs).toISOString();

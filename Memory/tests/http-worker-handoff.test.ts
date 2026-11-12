@@ -60,7 +60,7 @@ describe("HTTP automatic worker handoff", () => {
       if (args[2]?.continuous) automaticResults.push(result.leased);
       return result;
     });
-    const base = await listen(createMemoryHttpServer({ service, configPath: join(root, "config.yaml"), workerStartupFallbackMs: 60_000 }));
+    const base = await listen(createMemoryHttpServer({ auth: { allowAnonymous: true }, service, configPath: join(root, "config.yaml"), workerStartupFallbackMs: 60_000 }));
     const automaticCalls = () => run.mock.calls.filter(([, , execution]) => execution?.continuous).length;
     const pending: Array<Promise<Response>> = [];
     const manual = async (id: string) => {

@@ -17,6 +17,7 @@ import { profileIdFromMemory, projectIdFromMemory } from "../namespace/namespace
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { listL2Candidates, markL2CandidatesProcessed, type L2Candidate } from "./l2-candidate-service.js";
 import { L2_EXTRACTION_SYSTEM_PROMPT, L2_LESSON_FIELDS, L2ExtractionValidationError, L2ExtractionExhaustedError, validateL2ExtractionResult, type L2ExtractionDiagnostic, type L2ExtractionOperation, type NewL2Lesson } from "./l2-extraction-contract.js";
+import { l2ComparisonScope, l2SharesComparisonScope } from "./l2-comparison-scope.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 
 export interface UnifiedL2ExtractionDeps {
@@ -133,13 +134,13 @@ export class UnifiedL2ExtractionPipeline {
   constructor(private readonly deps: UnifiedL2ExtractionDeps) {}
 
   async induce(job: EvolutionJobRecord): Promise<void> {
-    assertL2RecoveryCurrent(this.deps.repos, job);
+    const sourceMemoryIds = assertL2RecoveryCurrent(this.deps.repos, job);
     const sourceId = typeof job.payload.sourceMemoryId === "string" ? job.payload.sourceMemoryId
       : typeof job.payload.l1MemoryId === "string" ? job.payload.l1MemoryId : job.targetMemoryId;
     const source = sourceId ? this.deps.repos.memories.get(sourceId) : undefined;
     if (source && (source.userId !== job.userId || !validL1(source))) return;
     const episodeId = job.episodeId ?? (source ? traceMetaFromMemory(source)?.episodeId : undefined) ?? null;
-    const all = listL2Candidates(this.deps.repos, { userId: job.userId, episodeId });
+    const all = listL2Candidates(this.deps.repos, { userId: job.userId, episodeId, sourceMemoryIds });
     // An unbound L1 is a single-source batch, never a synthetic cross-Episode group.
     const pending = all.filter((candidate) => episodeId !== null || candidate.sourceMemoryId === sourceId);
     const scopes = new Map<string, L2Candidate[]>();
@@ -149,8 +150,12 @@ export class UnifiedL2ExtractionPipeline {
       group.push(candidate); scopes.set(scope, group);
     }
     for (const [scope, candidates] of scopes) await this.processScope(job, scope, candidates);
+    // Manual recovery is bounded to its approved sources. Do not enqueue an
+    // unrestricted continuation when later evidence changes even an approved source.
+    // Normal admission owns its automatic job; a later explicit retry can recover leftovers.
+    if (sourceMemoryIds) return;
     const originalVersions = new Set(pending.map((candidate) => `${candidate.id}:${candidate.sourceVersion}`));
-    const arrived = listL2Candidates(this.deps.repos, { userId: job.userId, episodeId })
+    const arrived = listL2Candidates(this.deps.repos, { userId: job.userId, episodeId, sourceMemoryIds })
       .filter((candidate) => (episodeId !== null || candidate.sourceMemoryId === sourceId)
         && !originalVersions.has(`${candidate.id}:${candidate.sourceVersion}`));
     if (arrived.length) {
@@ -165,7 +170,7 @@ export class UnifiedL2ExtractionPipeline {
   private now(): string { return this.deps.nowIso?.() ?? new Date().toISOString(); }
 
   private async processScope(job: EvolutionJobRecord, scope: string, candidates: L2Candidate[]): Promise<void> {
-    const leaseKey = `l2.extract.lease.v1:${digest(scope)}`;
+    const leaseKey = `l2.extract.lease.v1:${digest(l2ComparisonScope(candidates[0]!.memory))}`;
     const owner = `${job.id}:${randomUUID()}`;
     this.deps.repos.transaction(() => {
       const previous = this.deps.repos.runtime.getKv(leaseKey)?.value;
@@ -192,7 +197,7 @@ export class UnifiedL2ExtractionPipeline {
         renew();
         // Rebuild the index after every committed batch. New candidates are immediately visible
         // through full-text vectors; legacy retrieval vectors are never used for comparison.
-        const historical = this.listHistorical(remaining[0]!.memory, scope);
+        const historical = this.listHistorical(remaining[0]!.memory);
         const vectors = await this.vectors(historical.map(l2ComparisonText), "document", renew);
         renew();
         const batch = await this.nextBatch(remaining, historical, vectors, renew);
@@ -213,12 +218,12 @@ export class UnifiedL2ExtractionPipeline {
     }
   }
 
-  private listHistorical(source: MemoryRow, scope: string): MemoryRow[] {
+  private listHistorical(source: MemoryRow): MemoryRow[] {
     const result: MemoryRow[] = [];
     // Pagination avoids silently omitting older policies from the comparison corpus.
     for (let offset = 0; ; offset += 500) {
       const page = this.deps.repos.memories.list({ userId: source.userId, memoryLayer: "L2", status: ["activated", "resolving"] }, 500, offset);
-      result.push(...page.filter((memory) => validL2(memory) && scopeOf(memory) === scope));
+      result.push(...page.filter((memory) => validL2(memory) && l2SharesComparisonScope(memory, source)));
       if (page.length < 500) break;
     }
     return result;
@@ -397,7 +402,8 @@ export class UnifiedL2ExtractionPipeline {
       this.assertSourcesCurrent(batch.sources);
       for (const target of batch.targets) {
         const current = this.deps.repos.memories.get(target.id);
-        if (!current || !validL2(current) || scopeOf(current) !== scope || digest(l2ComparisonRecord(current)) !== digest(target)) {
+        if (!current || !validL2(current) || !l2SharesComparisonScope(current, batch.sources[0]!.memory)
+          || digest(l2ComparisonRecord(current)) !== digest(target)) {
           throw new Error(`l2 extraction: target changed during extraction: ${target.id}`);
         }
       }
@@ -435,7 +441,7 @@ export class UnifiedL2ExtractionPipeline {
     const saved = this.deps.repos.memories.updateIfVersion(updated, operation.target_l2.version);
     // appendChange retains before/after content and evidence under existing history retention.
     for (const source of sources.filter((source) => operation.l1_ids.includes(source.sourceMemoryId))) {
-      this.deps.repos.runtime.insertTracePolicyLink({ userId: saved.userId, l1MemoryId: source.sourceMemoryId,
+      this.deps.repos.runtime.insertTracePolicyLink({ userId: source.userId, l1MemoryId: source.sourceMemoryId,
         l2MemoryId: saved.id, relation: l2SupportRelation(saved), createdAt: at });
       if (source.episodeId) this.deps.repos.runtime.appendEpisodeDerivedMemory(source.episodeId, "L2", saved.id, at);
     }
@@ -581,7 +587,8 @@ export class UnifiedL2ExtractionPipeline {
     this.deps.repos.transaction(() => {
       renew();
       for (const candidate of candidates) {
-        const pending = listL2Candidates(this.deps.repos, { userId: candidate.userId, episodeId: candidate.episodeId })
+        const pending = listL2Candidates(this.deps.repos, { userId: candidate.userId, episodeId: candidate.episodeId,
+          sourceMemoryIds: new Set([candidate.sourceMemoryId]) })
           .find((item) => item.id === candidate.id && item.sourceVersion === candidate.sourceVersion);
         if (!pending) continue;
         const current = this.deps.repos.memories.get(candidate.sourceMemoryId);

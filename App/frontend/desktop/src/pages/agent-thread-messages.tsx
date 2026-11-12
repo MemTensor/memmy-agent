@@ -1272,6 +1272,7 @@ function ReasoningMarkdown(props: { text: string; isStreaming?: boolean }) {
     <AgentMessageContent
       content={trimmed}
       isStreaming={props.isStreaming}
+      displayOnlyFiles
       className="agent-message-content--reasoning agent-reasoning-panel__text"
     />
   );

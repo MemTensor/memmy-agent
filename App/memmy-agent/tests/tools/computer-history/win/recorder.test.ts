@@ -10,6 +10,7 @@ import { parseNativePolicy, readNativePolicy } from "../../../../src/tools/compu
 import { loadRecords, renderHumanSummary } from "../../../../src/tools/computer-history/core/summarize-history.js";
 import { applyNarrative, compactEventEvidence, isNarrated, writeSegmentNarrative } from "../../../../src/tools/computer-history/core/summary-writer.js";
 import { context, counters, envelope, full, policyInput, root, text } from "./fixtures.js";
+import { checkpointRequest } from "../../../../src/tools/computer-history/core/recorder-checkpoint.js";
 import { parseRecorderArgs, runWindowsRecorder } from "../../../../src/tools/computer-history/win/record-human-history.js";
 
 vi.mock("node:child_process", async (original) => ({ ...await original<typeof import("node:child_process")>(), spawn: vi.fn() }));
@@ -25,7 +26,7 @@ function setup(mode = "normal") {
     kill: vi.fn(() => { close(null); return true; }) });
   let sequence = 0;
   let ended = false;
-  const send = (event: Record<string, unknown>) => child.stdout.write(JSON.stringify({ ...event, ...envelope(++sequence) }) + "\n");
+  const send = (event: Record<string, unknown>, timestamp?: string) => child.stdout.write(JSON.stringify({ ...event, ...envelope(++sequence), ...(timestamp ? { timestamp } : {}) }) + "\n");
   const close = (code: number | null) => { if (!ended) { ended = true; child.stdout.end(); child.stderr.end(); child.emit("close", code); } };
   const stop = () => { send({ kind: "session.stopped", reason: "stop_command", hooksDetached: true, counters }); close(0); };
   child.stdin.on("data", (bytes: Buffer) => {
@@ -52,6 +53,130 @@ function setup(mode = "normal") {
     title: "Release review api_key=metadata-secret", commandTimeoutMs: 200 } };
 }
 describe("owned Windows collector lifecycle", () => {
+  const request = (id = "12345678-1234-1234-1234-123456789abc", range = {}) => checkpointRequest.parse({ kind: "checkpoint", id, ...range });
+  it("rotates files at the native marker while retaining the collector, coverage and later snapshots", async () => {
+    const test = setup(), recorder = await WindowsHistoryRecorder.start(test.options);
+    const nextFile = path.join(test.directory, "next", "events.jsonl");
+    const at = (ms: number) => `2026-10-02T01:00:00.${String(ms).padStart(3, "0")}Z`;
+    test.send(full([root, {...text, name: "BEFORE_ROTATION"}]), at(1));
+    test.send({kind: "capture.gap", code: "query_unavailable", from: at(2), through: at(3)}, at(3));
+    const id = "12345678-1234-1234-1234-123456789ab1";
+    const rotation = recorder.rotate({kind: "rotate", id, eventsFile: nextFile, title: "Next segment"});
+    expect(fs.existsSync(nextFile)).toBe(false);
+    test.send({kind: "session.checkpoint", id, captureSequence: 10, complete: true}, at(4));
+    const {nodes: _nodes, ...snapshot} = full().snapshot;
+    const delta = {...full(), snapshot: {...snapshot, mode: "delta", added: [{...text, name: "AFTER_ROTATION"}],
+      removed: [text.key], unchangedCount: 1}};
+    test.send(delta, at(5));
+    await rotation;
+    const original = fs.readFileSync(test.eventsFile, "utf8");
+    expect(original).toContain("BEFORE_ROTATION"); expect(original).not.toContain("AFTER_ROTATION");
+    const next = fs.readFileSync(nextFile, "utf8");
+    expect(next).toContain("AFTER_ROTATION"); expect(next).toContain('"collectorContinues":true');
+    const nativeId = JSON.parse(original.split("\n")[1]!).details.nativeSessionId;
+    expect(JSON.parse(next.split("\n")[1]!).details.nativeSessionId).toBe(nativeId);
+    expect(recorder.pid).toBe(test.child.pid); expect(spawn).toHaveBeenCalledOnce();
+    const command = request(undefined, {from: at(0), through: at(6)}), checkpoint = recorder.checkpoint(command);
+    test.send({kind: "session.checkpoint", id: command.id, captureSequence: 20, complete: true}, at(7));
+    expect(await checkpoint).toMatchObject({complete: false, issues: ["query_unavailable"]});
+    expect(fs.readFileSync(test.eventsFile, "utf8")).toBe(original);
+    await recorder.stop();
+    expect(fs.readFileSync(test.eventsFile, "utf8")).toBe(original);
+  });
+  it("rejects unsafe rotation paths without interrupting the active collector", async () => {
+    const test = setup(), recorder = await WindowsHistoryRecorder.start(test.options);
+    for (const eventsFile of [test.eventsFile, test.policyFile, "relative.jsonl"])
+      await expect(recorder.rotate({kind: "rotate", id: request().id, eventsFile, title: "Invalid"})).rejects.toThrow("path_invalid");
+    expect(recorder.state).toBe("running"); await recorder.stop();
+  });
+  it("waits for the ordered native marker, fsyncs it and freezes the exact byte position", async () => {
+    const test = setup(), recorder = await WindowsHistoryRecorder.start(test.options);
+    const flush = vi.spyOn(fs, "fsyncSync"), write = vi.spyOn(test.child.stdin, "write");
+    const command = request();
+    let acknowledged = false;
+    const checkpoint = recorder.checkpoint(command);
+    expect(recorder.checkpoint(command)).toBe(checkpoint);
+    void checkpoint.then(() => { acknowledged = true; });
+    test.send(full([root, { ...text, name: "BEFORE_MARKER" }]));
+    await Promise.resolve();
+    expect(acknowledged).toBe(false);
+    expect(flush).not.toHaveBeenCalled();
+    test.send({ kind: "session.checkpoint", id: command.id, captureSequence: 20, complete: true });
+    test.send(full([root, { ...text, name: "AFTER_MARKER" }]));
+    const result = await checkpoint;
+    expect(result).toMatchObject({ complete: true, rangeEvaluated: true, watermark: { captureSequence: 20, nativeSequence: 3, recordingSequence: 3 } });
+    expect(flush).toHaveBeenCalledOnce();
+    const bytes = fs.readFileSync(test.eventsFile);
+    expect(bytes.length).toBeGreaterThan(result.watermark.bytes);
+    const prefix = bytes.subarray(0, result.watermark.bytes).toString("utf8");
+    expect(prefix).toContain("BEFORE_MARKER"); expect(prefix).not.toContain("AFTER_MARKER");
+    expect(JSON.parse(prefix.trim().split("\n").at(-1)!)).toMatchObject({ eventType: "recording_checkpoint", details: { checkpointId: command.id, nativeSequence: 3, captureSequence: 20 } });
+    expect(write.mock.calls.filter(([line]) => String(line).startsWith("checkpoint "))).toHaveLength(1);
+    await recorder.stop();
+  });
+  it("keeps damaged intervals partial while later healthy fragments and starting fences recover", async () => {
+    const test = setup(), recorder = await WindowsHistoryRecorder.start(test.options);
+    const at = (ms: number) => `2026-10-02T01:00:00.${String(ms).padStart(3, "0")}Z`;
+    test.send({ kind: "capture.gap", code: "queue_overflow", from: at(1), through: at(2) }, at(2));
+    const damaged = request(undefined, { from: at(0), through: at(3) });
+    const first = recorder.checkpoint(damaged);
+    test.send({ kind: "session.checkpoint", id: damaged.id, captureSequence: 10, complete: true }, at(4));
+    expect(await first).toMatchObject({ complete: false, rangeEvaluated: true, issues: ["queue_overflow"] });
+    expect(fs.readFileSync(test.eventsFile, "utf8")).toContain('"eventType":"recording_gap"');
+    const gapRecord = fs.readFileSync(test.eventsFile, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(record => record.eventType === "recording_gap");
+    expect(gapRecord.details).toMatchObject({ nativeSequence: 2, code: "queue_overflow", from: at(1), through: at(2) });
+    const healthy = request("12345678-1234-1234-1234-123456789abd", { from: at(5), through: at(7) });
+    const next = recorder.checkpoint(healthy);
+    test.send(full(), at(6));
+    test.send({ kind: "session.checkpoint", id: healthy.id, captureSequence: 20, complete: true }, at(8));
+    expect(await next).toMatchObject({ complete: true, issues: [] });
+    const initial = request("12345678-1234-1234-1234-123456789abe");
+    const fence = recorder.checkpoint(initial);
+    test.send({ kind: "session.checkpoint", id: initial.id, captureSequence: 21, complete: true }, at(9));
+    expect(await fence).toMatchObject({ complete: true, rangeEvaluated: true });
+    const old = request("12345678-1234-1234-1234-123456789abf", { from: at(0), through: at(3) });
+    const previous = recorder.checkpoint(old);
+    test.send({ kind: "session.checkpoint", id: old.id, captureSequence: 22, complete: true }, at(10));
+    expect((await previous).complete).toBe(false);
+    await recorder.stop();
+  });
+  it("times out without a native marker, ignores its late reply and allows the next fence", async () => {
+    const test = setup(), recorder = await WindowsHistoryRecorder.start(test.options);
+    const command = request();
+    await expect(recorder.checkpoint(command)).rejects.toThrow("windows_checkpoint_timeout");
+    test.send({ kind: "session.checkpoint", id: command.id, captureSequence: 10, complete: true });
+    expect(fs.readFileSync(test.eventsFile, "utf8")).not.toContain("recording_checkpoint");
+    const next = request("12345678-1234-1234-1234-123456789abd");
+    const point = recorder.checkpoint(next);
+    test.send({ kind: "session.checkpoint", id: next.id, captureSequence: 11, complete: true });
+    expect((await point).complete).toBe(true);
+    await recorder.stop();
+  });
+  it("cancels pending fences on pause and shutdown", async () => {
+    const test = setup(), recorder = await WindowsHistoryRecorder.start(test.options);
+    const command = request(), point = recorder.checkpoint(command);
+    const paused = recorder.pause();
+    await expect(point).rejects.toThrow("pausing"); await paused;
+    test.send({ kind: "session.checkpoint", id: command.id, captureSequence: 10, complete: true });
+    await recorder.resume();
+    const final = recorder.checkpoint(request("12345678-1234-1234-1234-123456789abd"));
+    const stopped = recorder.stop();
+    await expect(final).rejects.toThrow("stopping"); await stopped;
+  });
+  it("never acknowledges a marker when durable persistence fails", async () => {
+    const test = setup(), recorder = await WindowsHistoryRecorder.start(test.options);
+    const command = request(), point = recorder.checkpoint(command);
+    const flush = vi.spyOn(fs, "fsyncSync").mockImplementation(() => { throw new Error("disk failure"); });
+    test.send({ kind: "session.checkpoint", id: command.id, captureSequence: 10, complete: true });
+    await expect(point).rejects.toThrow("flush_failed");
+    await expect(recorder.finished).rejects.toThrow("flush_failed"); flush.mockRestore();
+    expect(fs.readFileSync(test.eventsFile, "utf8")).not.toContain("recording_checkpoint");
+  });
+  it("rejects unsolicited native markers", async () => {
+    const test = setup(), recorder = await WindowsHistoryRecorder.start(test.options);
+    test.send({ kind: "session.checkpoint", id: request().id, captureSequence: 10, complete: true });
+    await expect(recorder.finished).rejects.toThrow("checkpoint_unrequested");
+  });
   it("reports a competing collector as an occupied session instead of an incomplete recording", async () => {
     const test = setup("already-running");
     await expect(WindowsHistoryRecorder.start(test.options)).rejects.toThrow("windows_collector_already_running");

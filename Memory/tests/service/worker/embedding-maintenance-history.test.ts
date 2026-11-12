@@ -38,7 +38,7 @@ describe("embedding maintenance current failures", () => {
     await service.runWorkerOnce(10, { targetMemoryIds: ["still-failed-user"] });
     expect(await service.embeddingMaintenanceStats()).toMatchObject({ ready: 2, needsRepair: 0, retryQueue: { failed: 0, pending: 0 } });
     expect(db.db.prepare("SELECT COUNT(*) AS n FROM evolution_jobs WHERE status='dead_letter'").get()).toEqual({ n: 2 });
-    const server = createMemoryHttpServer({ configPath: `${root}/config.yaml`, service, workerStartupFallbackMs: 3_600_000, startAgentSourceAutomation: false });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, configPath: `${root}/config.yaml`, service, workerStartupFallbackMs: 3_600_000, startAgentSourceAutomation: false });
     try {
       await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
       const address = server.address();

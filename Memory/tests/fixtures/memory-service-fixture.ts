@@ -6,7 +6,8 @@ import {
   MemoryDb,
   MemoryService,
   type Embedder,
-  type LlmClient
+  type LlmClient,
+  type LlmMessage
 } from "../../src/index.js";
 import type { ActualModelContext } from "../../src/contracts/index.js";
 
@@ -411,6 +412,15 @@ export function createFailingLlm(): LlmClient {
   };
 }
 
+/** Task text follows the requested locale, independently of the evidence language. */
+export function episodeTitleForPrompt(messages: readonly LlmMessage[]): { title: string; summary: string } {
+  const system = messages.filter(message => message.role === "system").map(message => message.content).join("\n");
+  const english = system.includes("MUST be in English") || /BCP 47 locale en(?:[-.\s]|$)/u.test(system);
+  return english
+    ? { title: "Test task title", summary: "Test task summary." }
+    : { title: "测试任务标题", summary: "测试任务摘要。" };
+}
+
 export function createBatchReflectionLlm(calls: Array<{
   messages: Array<{ role: string; content: string }>;
   options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" };
@@ -425,18 +435,18 @@ export function createBatchReflectionLlm(calls: Array<{
     isConfigured() {
       return true;
     },
-    async complete(_messages, options) {
+    async complete(messages, options) {
       // Episode titling runs for every captured turn, and a job that keeps failing
       // would hold the top priority cohort and starve the rest of the queue.
       return options.operation.startsWith("episode_title")
-        ? JSON.stringify({ title: "测试任务标题", summary: "测试任务摘要。" })
+        ? JSON.stringify(episodeTitleForPrompt(messages))
         : "unused";
     },
     async completeJson<T extends Record<string, unknown>>(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" }
     ): Promise<T> {
-      if (options.operation === "episode.select.v1") return { episodeId: null, title: "测试任务", summary: "测试任务摘要" } as unknown as T;
+      if (options.operation === "episode.select.v1") return { episodeId: null, ...episodeTitleForPrompt(messages) } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.reflection.batch.v13") {
         const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {

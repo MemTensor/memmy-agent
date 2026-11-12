@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MemmyConfig } from "../../../src/config/index.js";
 import {
@@ -13,7 +14,8 @@ import type { FeedbackRequest, MemoryRow } from "../../../src/types.js";
 import { createFailingLlm, createMemoryServiceFixture, LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 
 const AT = "2026-11-09T00:00:00.000Z";
-const USER = "feedback-boundary-test-user";
+// Ordinary new rows, recall feedback, trials and relations share the device owner.
+const USER = DEVICE_MEMORY_OWNER;
 const fixture = createMemoryServiceFixture();
 type Polarity = "positive" | "negative";
 

@@ -1,5 +1,10 @@
-import { SKILL_CRYSTALLIZE_PROMPT } from "./plugin-algorithms.js";
+import {
+  SKILL_CRYSTALLIZE_PROMPT,
+  crossLanguageSkillGrounding,
+  detectSkillTextLanguage
+} from "./plugin-algorithms.js";
 import { isRecord } from "../utils/json.js";
+import { extractToolEvidenceNames, toolCallName } from "./skill-tool-names.js";
 
 export type SkillEpisodeOutcome = "success" | "failure" | "unknown";
 export type DirectSkillRebuildScope = "retrieval" | "constraints" | "workflow";
@@ -48,6 +53,7 @@ EVIDENCE is RawTurn traces (user, assistant, full tool calls). Mine real command
 Failure turns inform preconditions and decision_guidance.anti_pattern only. Never copy a failure command sequence into steps.
 At most 12 preconditions and 5 anti_pattern. Write cluster-level constraints, not instance ids, paths, or one-off names.
 tools MUST be a subset of EVIDENCE_TOOLS. Empty tools is legal when evidence has no tools.
+Each step's evidence_ids are successful EVIDENCE episode_id values, copied exactly. Failure episode ids and turn or trace ids are invalid here.
 No fluff steps. Prefer 3-8 concrete steps that an agent can re-run.
 Write a cluster-level SOP for the next similar task, not a recap of one episode. Use this batch as concrete checks, not as the only task type.
 Do not hard-code a benchmark's scoring rule. If a verifier, grader, or test runner appears in EVIDENCE, keep the check it actually performs. Domain mechanics belong in the traces, not in this prompt.`;
@@ -60,6 +66,7 @@ REBUILD_SCOPE:
 - retrieval: only improve retrieval_blurb / trigger_context / summary.
 - constraints: rewrite preconditions and anti_pattern as the complete new lists. Do not rewrite working steps. The merger keeps your lists as-is and does not union them with the old Skill. At most 12 preconditions and 5 anti_pattern. Drop stale or instance-specific footnotes.
 - workflow: you may rewrite steps / tools / parameters when new successful traces change the procedure. Return the constraint lists you want kept, newest failures first. Do not drop a still-valid anti_pattern without a concrete reason.
+Each step's evidence_ids are successful EVIDENCE episode_id values, copied exactly. Failure episode ids and turn or trace ids are invalid here.
 Keep name locked unless REPAIR_RENAME_ALLOWED is true.
 Preconditions must be cluster-level invariants (how to inspect, what the checker actually reads, what not to destroy). Never put instance ids, paths, cell refs, commit hashes, or ticket numbers in preconditions — those go in parameters or examples.
 Return the crystallize JSON plus changed_sections.`;
@@ -146,7 +153,7 @@ export interface DirectSkillProcedureJson {
   summary: string;
   parameters: Array<Record<string, unknown>>;
   preconditions: string[];
-  steps: Array<{ title: string; body: string }>;
+  steps: Array<{ title: string; body: string; evidenceIds?: string[] }>;
   examples: Array<{ input: string; expected: string }>;
   decisionGuidance: { preference: string[]; antiPattern: string[] };
   tags: string[];
@@ -156,6 +163,9 @@ export interface DirectSkillProcedureJson {
 export interface DirectSkillHardGateResult {
   ok: boolean;
   reasons: string[];
+  draftLanguage: "zh" | "en";
+  evidenceLanguage: "zh" | "en";
+  evidenceBindingCoverage: number;
 }
 
 export interface AssignDecision {
@@ -252,6 +262,11 @@ export function extractArtifactTypes(...texts: Array<string | undefined | null>)
   return [...found].sort();
 }
 
+/**
+ * Cluster features use declared tool names only. Commands inferred from shell
+ * arguments belong to the evidence whitelist, not to clustering, so `bash`
+ * running `npm test` and `bash` running `git status` stay in one cluster.
+ */
 export function extractToolNames(calls: unknown[] | undefined): string[] {
   const names = new Set<string>();
   for (const call of calls ?? []) {
@@ -421,7 +436,6 @@ export function decideClusterAssignment(
     stage: "coarse" | "fine";
   } | undefined;
   for (const cluster of clusters) {
-    if (cluster.userId !== episode.userId) continue;
     if (episode.projectId && cluster.projectId && episode.projectId !== cluster.projectId) continue;
     const scored = scoreClusterJoin(episode, cluster, config);
     if (scored.score === null) continue;
@@ -503,7 +517,7 @@ export function evidenceToolNames(batch: PackedEpisodeEvidence[]): string[] {
   const names = new Set<string>();
   for (const episode of batch) {
     for (const turn of episode.turns) {
-      for (const tool of turn.tools) names.add(tool.name);
+      for (const name of extractToolEvidenceNames(turn.tools)) names.add(name);
     }
   }
   return [...names].sort();
@@ -685,23 +699,47 @@ export function verifyDirectSkillDraft(input: {
   batch: PackedEpisodeEvidence[];
 }): DirectSkillHardGateResult {
   const reasons: string[] = [];
+  const draftLanguage = detectSkillTextLanguage([directSkillNaturalLanguage(input.procedure)]);
+  const evidenceLanguage = detectSkillTextLanguage(input.batch.flatMap((episode) =>
+    episode.turns.flatMap(turnNaturalText)
+  ));
+  const binding = directSkillEvidenceBinding(input.procedure.steps, input.batch);
   if (!SNAKE_NAME_RE.test(input.name)) {
     reasons.push("name_not_snake_case");
   }
   const allowedTools = new Set(evidenceToolNames(input.batch).map(normalizeFeature));
+  const successBatch = input.batch.filter((item) => item.outcome === "success");
+  const successTools = new Set(evidenceToolNames(successBatch).map(normalizeFeature));
   const extraTools = input.procedure.tools.filter((tool) => !allowedTools.has(normalizeFeature(tool)));
   if (extraTools.length > 0) {
     reasons.push(`tools_outside_evidence:${extraTools.join(",")}`);
   }
-  const hasSuccess = input.batch.some((item) => item.outcome === "success");
+  const hasSuccess = successBatch.length > 0;
   if (hasSuccess && input.procedure.steps.length === 0) {
     reasons.push("empty_steps_with_success");
   }
   if (hasSuccess && input.procedure.steps.some((step) => isFluffStep(step))) {
     reasons.push("fluff_step");
   }
-  if (hasSuccess && !stepsPointAtSuccess(input.procedure.steps, input.batch)) {
-    reasons.push("steps_not_grounded_in_success");
+  if (hasSuccess) {
+    if (draftLanguage !== evidenceLanguage) {
+      const toolsGrounded = input.procedure.tools.length > 0 &&
+        input.procedure.tools.every((tool) => successTools.has(normalizeFeature(tool)));
+      if (!crossLanguageSkillGrounding({
+        draftText: directSkillNaturalLanguage(input.procedure),
+        evidenceText: successEvidenceText(successBatch),
+        evidenceTools: successTools,
+        toolsGrounded,
+        stepsBound: input.procedure.steps.length > 0 && binding.coverage === 1
+      }).ok) {
+        reasons.push("cross_language_unverifiable");
+      }
+    } else if (!stepsPointAtSuccess(input.procedure.steps, successBatch)) {
+      reasons.push("steps_not_grounded_in_success");
+    }
+  }
+  if (binding.invalidIds.length > 0) {
+    reasons.push(`invalid_evidence_ids:${binding.invalidIds.join(",")}`);
   }
   if (failureProcessInSteps(input.procedure.steps, input.batch)) {
     reasons.push("failure_process_in_steps");
@@ -709,7 +747,13 @@ export function verifyDirectSkillDraft(input: {
   if (!hasSuccess && input.procedure.steps.length > 0) {
     reasons.push("steps_without_success_anchor");
   }
-  return { ok: reasons.length === 0, reasons };
+  return {
+    ok: reasons.length === 0,
+    reasons,
+    draftLanguage,
+    evidenceLanguage,
+    evidenceBindingCoverage: binding.coverage
+  };
 }
 
 export const MEMORY_PACKET_SKILL_FULL_MAX_CHARS = 16_384;
@@ -773,8 +817,8 @@ function packSkillGuideSections(guide: string): string {
   return ordered.join("\n\n").trim();
 }
 
-export function renderDirectSkillGuide(name: string, procedure: DirectSkillProcedureJson): string {
-  const lines: string[] = [`# ${name}`, ""];
+export function renderDirectSkillGuide(displayTitle: string, procedure: DirectSkillProcedureJson): string {
+  const lines: string[] = [`# ${displayTitle}`, ""];
   if (procedure.retrievalBlurb) lines.push(procedure.retrievalBlurb, "");
   if (procedure.summary) lines.push(procedure.summary, "");
   lines.push("**When to use**", procedure.triggerContext || "(from successful RawTurns)", "");
@@ -878,7 +922,7 @@ function isFluffStep(step: { title: string; body: string }): boolean {
 }
 
 function stepsPointAtSuccess(
-  steps: Array<{ title: string; body: string }>,
+  steps: Array<{ title: string; body: string; evidenceIds?: string[] }>,
   batch: PackedEpisodeEvidence[]
 ): boolean {
   const successTokens = tokenizeSkillText(successEvidenceText(batch));
@@ -891,8 +935,43 @@ function stepsPointAtSuccess(
   });
 }
 
+function directSkillNaturalLanguage(procedure: DirectSkillProcedureJson): string {
+  return [
+    procedure.retrievalBlurb,
+    procedure.triggerContext,
+    procedure.summary,
+    ...procedure.steps.map((step) => `${step.title} ${step.body}`),
+    ...procedure.preconditions,
+    ...procedure.decisionGuidance.preference,
+    ...procedure.decisionGuidance.antiPattern
+  ].join(" ");
+}
+
+function directSkillEvidenceBinding(
+  steps: Array<{ title: string; body: string; evidenceIds?: string[] }>,
+  batch: PackedEpisodeEvidence[]
+): { coverage: number; invalidIds: string[] } {
+  if (steps.length === 0) return { coverage: 0, invalidIds: [] };
+  const allowedIds = new Set(
+    batch.filter((episode) => episode.outcome === "success").map((episode) => episode.episode_id)
+  );
+  const invalidIds: string[] = [];
+  let boundSteps = 0;
+  for (const step of steps) {
+    const ids = step.evidenceIds ?? [];
+    if (ids.some((id) => allowedIds.has(id))) boundSteps += 1;
+    for (const id of ids) {
+      if (!allowedIds.has(id)) invalidIds.push(id);
+    }
+  }
+  return {
+    coverage: boundSteps / steps.length,
+    invalidIds: uniqPreserve(invalidIds)
+  };
+}
+
 function failureProcessInSteps(
-  steps: Array<{ title: string; body: string }>,
+  steps: Array<{ title: string; body: string; evidenceIds?: string[] }>,
   batch: PackedEpisodeEvidence[]
 ): boolean {
   const successTokens = tokenizeSkillText(successEvidenceText(batch));
@@ -915,6 +994,11 @@ function failureProcessInSteps(
   });
 }
 
+/** Conversation text only; tool payloads are code and JSON, not the user's language. */
+function turnNaturalText(turn: PackedRawTurn): string[] {
+  return [turn.user, turn.assistant, turn.reasoning];
+}
+
 function turnText(turn: PackedRawTurn): string[] {
   return [
     turn.user,
@@ -924,20 +1008,22 @@ function turnText(turn: PackedRawTurn): string[] {
   ];
 }
 
-function toolCallName(call: unknown): string | undefined {
-  if (!isRecord(call)) return undefined;
-  const name = call.name ?? call.tool ?? call.toolName ?? call.tool_name;
-  return typeof name === "string" && name.trim() ? name.trim() : undefined;
-}
-
-function coerceSteps(value: unknown): Array<{ title: string; body: string }> {
+function coerceSteps(value: unknown): Array<{ title: string; body: string; evidenceIds?: string[] }> {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
     if (!isRecord(item)) return [];
     const title = skillText(item.title);
     const body = skillText(item.body);
     if (!title && !body) return [];
-    return [{ title: title || body.slice(0, 32), body }];
+    const evidenceIds = uniqPreserve([
+      ...stringList(item.evidence_ids),
+      ...stringList(item.evidenceIds)
+    ]);
+    return [{
+      title: title || body.slice(0, 32),
+      body,
+      ...(evidenceIds.length > 0 ? { evidenceIds } : {})
+    }];
   });
 }
 

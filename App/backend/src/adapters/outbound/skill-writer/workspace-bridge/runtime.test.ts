@@ -43,9 +43,10 @@ describe("Memory lifecycle runtime", () => {
     ].join("\n"));
 
     await expect(readRuntimeConfig(configUrl, true)).resolves.toEqual({
+      configUrl: configUrl.href,
       endpoint: "http://127.0.0.1:18888",
       token: "test-token",
-      userId: "installed-owner",
+      userId: "__memmy_device_memory__",
       workspaceHostId: "a".repeat(64),
     });
   });
@@ -77,7 +78,7 @@ describe("Memory lifecycle runtime", () => {
       for (const request of requests) {
         expect(request.path).toBe("/api/v1/source-turns/complete");
         expect(request.body.namespace).toEqual({
-          source: "codex", profileId: "work", userId: "installed-owner", sessionKey: "native-conversation",
+          source: "codex", profileId: "work", userId: "__memmy_device_memory__", sessionKey: "native-conversation",
         });
         expect(request.body).toMatchObject({
           sourceTurn: { source: "codex", profileId: "work", conversationId: "native-conversation" },

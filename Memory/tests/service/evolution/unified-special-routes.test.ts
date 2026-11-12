@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG } from "../../../src/config/index.js";
 import { traceMetaFromMemory } from "../../../src/algorithm/plugin-algorithms.js";
@@ -15,7 +16,7 @@ const at = "2026-10-28T00:00:00.000Z";
 function setup() {
   const { db } = fixture.createTestService();
   const repos = new Repositories(db.db);
-  repos.runtime.createSession({ id: "session", userId: "user", source: "codex", profileId: "default",
+  repos.runtime.createSession({ id: "session", userId: DEVICE_MEMORY_OWNER, source: "codex", profileId: "default",
     status: "closed", meta: {}, openedAt: at, closedAt: at, updatedAt: at });
   const config = {
     ...DEFAULT_MEMMY_CONFIG,
@@ -47,7 +48,7 @@ function setup() {
 
 function source(repos: Repositories, id: string, episodeId = "episode"): MemoryRow {
   const memory: MemoryRow = {
-    id, timeline: at, userId: "user", sessionId: "session", memoryType: "LongTermMemory",
+    id, timeline: at, userId: DEVICE_MEMORY_OWNER, sessionId: "session", memoryType: "LongTermMemory",
     memoryLayer: "L1", status: "activated", visibility: "private", memoryKey: id,
     memoryValue: "TLS configuration failed on the wrong port.", tags: [], info: {},
     properties: { internal_info: { memory_layer: "L1", memory_kind: "trace", trace: {
@@ -61,7 +62,7 @@ function source(repos: Repositories, id: string, episodeId = "episode"): MemoryR
 
 function episode(repos: Repositories, ids: string[]): EpisodeRecord {
   return repos.runtime.createEpisode({
-    id: "episode", sessionId: "session", userId: "user", status: "closed",
+    id: "episode", sessionId: "session", userId: DEVICE_MEMORY_OWNER, status: "closed",
     l1MemoryIds: ids, rawTurnIds: [], feedbackIds: [], decisionRepairIds: [],
     l2PolicyIds: [], l3WorldModelIds: [], skillMemoryIds: [], turnCount: ids.length,
     rTask: -0.8, rewardDetail: { reason: "The requested secure endpoint was not verified." },
@@ -71,14 +72,14 @@ function episode(repos: Repositories, ids: string[]): EpisodeRecord {
 
 function feedbackRecord(l1MemoryId?: string): FeedbackRecord {
   return {
-    id: "feedback", userId: "user", sessionId: "session", episodeId: "episode", l1MemoryId,
+    id: "feedback", userId: DEVICE_MEMORY_OWNER, sessionId: "session", episodeId: "episode", l1MemoryId,
     channel: "explicit", polarity: "neutral", magnitude: 1,
     rationale: "You should verify the HTTPS endpoint before reporting completion.", rawPayload: {}, createdAt: at
   };
 }
 
 function negativeJob(payload: Record<string, unknown>): EvolutionJobRecord {
-  return { id: "negative-job", jobType: "negative_experience", userId: "user", sessionId: "session",
+  return { id: "negative-job", jobType: "negative_experience", userId: DEVICE_MEMORY_OWNER, sessionId: "session",
     episodeId: "episode", status: "queued", payload, attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at };
 }
 
@@ -88,8 +89,8 @@ describe("unified special L2 admission", () => {
     const memory = source(test.repos, "low-value");
     episode(test.repos, [memory.id]);
     const feedback = feedbackRecord(memory.id);
-    await test.feedback.maybeCreateFeedbackExperience(feedback, feedback, { userId: "user", namespace: { source: "codex", profileId: "default" } });
-    const candidates = listL2Candidates(test.repos, { userId: "user", episodeId: "episode" });
+    await test.feedback.maybeCreateFeedbackExperience(feedback, feedback, { userId: DEVICE_MEMORY_OWNER, namespace: { source: "codex", profileId: "default" } });
+    const candidates = listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" });
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ sourceMemoryId: memory.id, routes: ["feedback"], signals: [
       { feedbackId: feedback.id, fallback: { type: "check" } }
@@ -103,10 +104,10 @@ describe("unified special L2 admission", () => {
     const test = setup();
     episode(test.repos, [source(test.repos, "other-turn").id]);
     const feedback = feedbackRecord();
-    await test.feedback.maybeCreateFeedbackExperience(feedback, feedback, { userId: "user", namespace: { source: "codex", profileId: "default" } });
+    await test.feedback.maybeCreateFeedbackExperience(feedback, feedback, { userId: DEVICE_MEMORY_OWNER, namespace: { source: "codex", profileId: "default" } });
     test.repos.runtime.insertFeedback({ ...feedback, polarity: "negative" });
     await test.negative.materialize(negativeJob({ source: "negative_feedback", feedbackId: feedback.id }));
-    expect(listL2Candidates(test.repos, { userId: "user", episodeId: "episode" })).toEqual([]);
+    expect(listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" })).toEqual([]);
     expect(test.jobs).toEqual([]);
     expect(test.forbidden).not.toHaveBeenCalled();
   });
@@ -117,7 +118,7 @@ describe("unified special L2 admission", () => {
     const foreign = source(test.repos, "foreign", "another-episode");
     episode(test.repos, [local.id, foreign.id]);
     await test.negative.materialize(negativeJob({ source: "episode_reward", sourceEventId: "reward-1" }));
-    const candidates = listL2Candidates(test.repos, { userId: "user", episodeId: "episode" });
+    const candidates = listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" });
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ sourceMemoryId: local.id, routes: ["negative"], signals: [
       { sourceBasis: "implicit_failure_analysis", confidenceCap: DEFAULT_MEMMY_CONFIG.algorithm.negativeExperience.implicitConfidenceCap }
@@ -133,7 +134,7 @@ describe("unified special L2 admission", () => {
     episode(test.repos, [failed.id, other.id]);
     const feedback = test.repos.runtime.insertFeedback({ ...feedbackRecord(failed.id), polarity: "negative" });
     await test.negative.materialize(negativeJob({ source: "negative_feedback", feedbackId: feedback.id }));
-    expect(listL2Candidates(test.repos, { userId: "user", episodeId: "episode" }).map((candidate) => candidate.sourceMemoryId))
+    expect(listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" }).map((candidate) => candidate.sourceMemoryId))
       .toEqual([failed.id]);
     expect(test.forbidden).not.toHaveBeenCalled();
   });

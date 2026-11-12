@@ -64,11 +64,11 @@ describe("document observation identity and provenance", () => {
     expect(result[0]).not.toHaveProperty("label");
     expect(JSON.stringify(result)).not.toContain("SYNTHETIC-SECRET");
   });
-  it("keeps Word label provenance without expanding its summary to non-visible document text", () => {
+  it.each(["word.document", "notepad.document"] as const)("keeps %s label provenance without expanding its summary to non-visible text", (adapter) => {
     const word: CaptureNode = { ...body, controlType: "Document", documentContext: undefined,
-      documentEvidence: { ...body.documentEvidence!, adapter: "word.document", labelKind: "document_label" } };
+      documentEvidence: { ...body.documentEvidence!, adapter, labelKind: "document_label" } };
     const result = observations(evidence(event([word])))[0];
-    expect(result).toMatchObject({ adapter: "word.document", label: { kind: "document_label" }, pixel_visibility: "unverified", provider_range_text: "misleading-filename.txt" });
+    expect(result).toMatchObject({ adapter, label: { kind: "document_label" }, pixel_visibility: "unverified", provider_range_text: "misleading-filename.txt" });
     expect(result).not.toHaveProperty("document_context");
   });
   it("does not accept unavailable, redacted or unverified observations", () => {

@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createMemoryHttpServer, MemoryDb, type MemoryService, type LlmClient, type LlmMessage } from "../../../../../Memory/src/index.js";
 import { closeMemoryHttpServer } from "../../../../../Memory/src/server/http.js";
 import { policyMetaFromMemory, skillMetaFromMemory } from "../../../../../Memory/src/algorithm/plugin-algorithms.js";
+import type { AgentSourceExecutor } from "../../../../../Memory/src/agent-source/runtime.js";
+import { DEVICE_MEMORY_OWNER } from "../../../../../Memory/src/service/namespace/memory-owner.js";
 import { Repositories } from "../../../../../Memory/src/storage/repositories.js";
 import { upsertL2Candidate } from "../../../../../Memory/src/service/evolution/l2-candidate-service.js";
 import type { MemoryRow } from "../../../../../Memory/src/types.js";
@@ -20,7 +22,7 @@ import { createProgressBus } from "../progress-bus.js";
 const fixture = createMemoryServiceFixture();
 const memoryServers: Server[] = [];
 const localServers: FastifyInstance[] = [];
-const OWNER = "desktop-support-test-owner";
+const OWNER = DEVICE_MEMORY_OWNER;
 
 afterEach(async () => {
   await Promise.all(localServers.splice(0).map(app => app.close()));
@@ -42,6 +44,7 @@ async function connectHttp(service: MemoryService) {
   // All HTTP traffic stays on ephemeral loopback ports. The model and embedding
   // dependencies are fixed offline implementations, and the DB is disposable.
   const memory = createMemoryHttpServer({ service, apiKey: "memory-token", startAgentSourceAutomation: false,
+    agentSourceExecutor: { dispose() {}, startAutomation() {} } as unknown as AgentSourceExecutor,
     workerStartupFallbackMs: 60_000 });
   memoryServers.push(memory);
   await new Promise<void>(resolve => memory.listen(0, "127.0.0.1", resolve));

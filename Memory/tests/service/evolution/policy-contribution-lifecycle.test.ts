@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG } from "../../../src/config/index.js";
 import { policyMetaFromMemory, skillMetaFromMemory, traceMetaFromMemory } from "../../../src/algorithm/plugin-algorithms.js";
@@ -8,7 +9,7 @@ import { Repositories } from "../../../src/storage/repositories.js";
 import type { MemoryRow } from "../../../src/types.js";
 const AT = "2026-11-09T00:00:00.000Z";
 function row(id: string, layer: "L1" | "L2" | "Skill", data: Record<string, unknown>): MemoryRow {
-  return { id, userId: "u", memoryLayer: layer, memoryType: "LongTermMemory", status: "activated", visibility: "private",
+  return { id, userId: DEVICE_MEMORY_OWNER, memoryLayer: layer, memoryType: "LongTermMemory", status: "activated", visibility: "private",
     timeline: AT, memoryValue: "check the certificate", tags: [], info: {}, version: 1, createdAt: AT, updatedAt: AT,
     properties: { internal_info: { memory_layer: layer, generated_by_memory_base: true, [layer === "L1" ? "trace" : layer === "L2" ? "policy" : "skill"]: data } } };
 }
@@ -30,7 +31,7 @@ describe("policy contribution lifecycle across record formats", () => {
       source_trace_ids: ["source"], source_episode_ids: ["e"], successful_source_trace_ids: ["source"], successful_episode_count: 1,
       generation_method: "model", experience_type: "success_pattern", skill_eligible: true }));
     repos.memories.insert(row("skill", "Skill", { eta: 0.8, status: "active", source_policy_ids: ["policy"], trials_attempted: 0, trials_passed: 0 }));
-    repos.runtime.insertTracePolicyLink({ userId: "u", l1MemoryId: "source", l2MemoryId: "policy", relation: "supports" });
+    repos.runtime.insertTracePolicyLink({ userId: DEVICE_MEMORY_OWNER, l1MemoryId: "source", l2MemoryId: "policy", relation: "supports" });
   }
   function score(value: number) {
     const source = repos.memories.get("source")!;
@@ -123,17 +124,17 @@ describe("policy contribution lifecycle across record formats", () => {
     seed(); config.algorithm.l2Induction.mode = mode;
     for (const [id, relation] of [["b", "matches_signature"], ["c", "similar_pattern"], ["refutation", "refutes_pending"]]) {
       repos.memories.insert(row(id!, "L1", { value: 1, alpha: 1, episode_id: id, vec_summary: [1, 0] }));
-      repos.runtime.insertTracePolicyLink({ userId: "u", l1MemoryId: id!, l2MemoryId: "policy", relation: relation! });
+      repos.runtime.insertTracePolicyLink({ userId: DEVICE_MEMORY_OWNER, l1MemoryId: id!, l2MemoryId: "policy", relation: relation! });
     }
     engine.recomputePolicyStats("policy", AT, "e");
     expect(policyMetaFromMemory(repos.memories.get("policy")!)!.support).toBe(3);
     expect(policyMetaFromMemory(repos.memories.get("policy")!)!.sourceTraceIds.sort()).toEqual(["b", "c", "source"]);
   });
 
-  it("updates every dependent Skill beyond the first page without modifying another owner or read-only Skills", () => {
+  it("updates every dependent Skill beyond the first page without modifying another project or read-only Skills", () => {
     seed(); score(1);
     const original = repos.memories.get("skill")!;
-    const foreign = { ...original, id: "foreign-skill", userId: "another-user" };
+    const foreign = { ...original, id: "foreign-skill", info: { ...original.info, project_id: "another-project" } };
     const readonly = { ...original, id: "readonly-skill", properties: { ...original.properties,
       internal_info: { ...original.properties.internal_info, read_only: true } } };
     repos.memories.insert(foreign); repos.memories.insert(readonly);

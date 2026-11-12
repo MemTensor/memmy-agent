@@ -1,3 +1,4 @@
+import { generatedSkillTitle } from "../../src/algorithm/skill-display.js";
 import { describe, expect, it } from "vitest";
 import {
   canJoinCluster,
@@ -17,6 +18,12 @@ import {
   verifyDirectSkillDraft,
   type DirectSkillProcedureJson
 } from "../../src/algorithm/trace-direct-skill.js";
+
+it("keeps the existing display title when a rebuild echoes its proposed invocation name", () => {
+  const names = ["check_cache", "verify"];
+  expect(generatedSkillTitle("zh", names, "verify", "缓存校验", "检查并修复配置")).toBe("缓存校验");
+  expect(() => generatedSkillTitle("zh", names, "check_cache", "verify", "Repair cache handling")).toThrow(/display title/);
+});
 
 const thresholds = { success: 0.5, failure: -0.15 };
 
@@ -106,6 +113,21 @@ describe("trace-direct-skill algorithm", () => {
     expect(features.tools).toEqual(["python"]);
     expect(features.artifacts).toEqual(["xlsx"]);
     expect(features.outcome).toBe("success");
+  });
+
+  it("clusters on declared tool names, not commands inferred from shell arguments", () => {
+    const features = (command: string) => extractEpisodeSkillFeatures({
+      episodeId: command,
+      userId: "u1",
+      rTask: 1,
+      thresholds,
+      turns: [{ userText: "run it", assistantText: "done", toolCalls: [{ name: "bash", input: { command } }] }]
+    });
+    const npm = features("npm test");
+    const git = features("git status");
+
+    expect(npm.tools).toEqual(["bash"]);
+    expect(canJoinCluster(npm, { tools: git.tools, artifacts: git.artifacts, centroid: null }).ok).toBe(true);
   });
 
   it("refuses to join a no-tool episode into a tool cluster", () => {
@@ -422,6 +444,97 @@ describe("trace-direct-skill algorithm", () => {
       batch
     });
     expect(result.reasons).toContain("failure_process_in_steps");
+  });
+
+  it("preserves and validates direct-skill step evidence ids", () => {
+    const procedureJson = coerceDirectSkillProcedure({
+      summary: "Execute the requested code and inspect its output.",
+      steps: [{
+        title: "Execute code",
+        body: "Run the requested code with execute_code and inspect the output.",
+        evidence_ids: ["invented-episode"]
+      }],
+      tools: ["execute_code"]
+    });
+    const batch = [{
+      episode_id: "real-episode",
+      r_task: 1,
+      outcome: "success" as const,
+      turns: packRawTurnEvidence([{
+        userText: "请执行代码并检查输出结果",
+        assistantText: "已执行代码并检查结果",
+        toolCalls: [{ name: "execute_code", input: '{"code":"print(1)"}' }]
+      }])
+    }];
+
+    expect(procedureJson.steps[0]?.evidenceIds).toEqual(["invented-episode"]);
+    expect(verifyDirectSkillDraft({
+      name: "code_output_inspect",
+      procedure: procedureJson,
+      batch
+    }).reasons).toContain("invalid_evidence_ids:invented-episode");
+  });
+
+  it("does not let a generic shared token bypass cross-language grounding", () => {
+    const result = verifyDirectSkillDraft({
+      name: "weather_output_publish",
+      procedure: procedure({
+        retrievalBlurb: "Use when publishing an unrelated weather output result",
+        triggerContext: "A weather forecast should be published",
+        summary: "Publish tomorrow's unrelated weather output result.",
+        steps: [{
+          title: "Publish forecast",
+          body: "Publish tomorrow's unrelated weather output result."
+        }],
+        tools: []
+      }),
+      batch: [{
+        episode_id: "code-episode",
+        r_task: 1,
+        outcome: "success",
+        turns: packRawTurnEvidence([{
+          userText: "请执行代码并检查 output",
+          assistantText: "已执行代码并检查输出结果"
+        }])
+      }]
+    });
+
+    expect(result.reasons).toContain("cross_language_unverifiable");
+  });
+
+  it("does not accept a failure episode id as successful step evidence", () => {
+    const result = verifyDirectSkillDraft({
+      name: "xlsx_python_transform",
+      procedure: procedure({
+        steps: [{
+          title: "Load workbook",
+          body: "Open report.xlsx with openpyxl and read headers.",
+          evidenceIds: ["failed-episode"]
+        }]
+      }),
+      batch: [{
+        episode_id: "successful-episode",
+        r_task: 1,
+        outcome: "success",
+        turns: packRawTurnEvidence([{
+          userText: "fill totals in report.xlsx",
+          assistantText: "opened report.xlsx with openpyxl",
+          toolCalls: [{ name: "python", input: "openpyxl.load_workbook('report.xlsx')" }]
+        }])
+      }, {
+        episode_id: "failed-episode",
+        r_task: -1,
+        outcome: "failure",
+        turns: packRawTurnEvidence([{
+          userText: "fill totals in report.xlsx",
+          assistantText: "the workbook update failed",
+          toolCalls: [{ name: "python", input: "openpyxl.load_workbook('report.xlsx')" }]
+        }])
+      }]
+    });
+
+    expect(result.reasons).toContain("invalid_evidence_ids:failed-episode");
+    expect(result.evidenceBindingCoverage).toBe(0);
   });
 
   it("treats only cluster.skill_memory_id as an existing skill, not an L2 crystallization", () => {

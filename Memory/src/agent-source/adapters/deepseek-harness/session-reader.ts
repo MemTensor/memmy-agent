@@ -1,4 +1,6 @@
-import { basename } from "node:path";
+import { dirname } from "node:path";
+import { realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import {
   loadDeepseekHarnessEvents,
   readDeepseekHarnessEvents,
@@ -26,7 +28,10 @@ export async function* streamDeepseekHarnessSession(
 ): AsyncIterable<RawDeepseekHarnessMessage> {
   const events = await loadDeepseekHarnessEvents(filePath, signal);
   if (!events.some((event) => event.type === "session")) {
-    const fallbackId = basename(filePath).replace(/\.jsonl(?:\.zstd)?$/u, "");
+    // A filename is a generation, not a session identity. Canonical directory
+    // keeps rotations/aliases together while separating different sessions.
+    const directory = await realpath(dirname(filePath));
+    const fallbackId = `dsh-directory:${createHash("sha256").update(directory).digest("hex")}`;
     for await (const message of readDeepseekHarnessEvents([{ type: "session", id: fallbackId }, ...events], signal)) {
       yield withWorkspace(message);
     }

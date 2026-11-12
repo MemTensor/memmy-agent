@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { episodeInputRevision } from "../../../src/service/evolution/episode-revision.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -114,7 +115,7 @@ function setup(archiveEta?: number, valueDistributionRepairEnabled = false) {
 type Context = ReturnType<typeof setup>;
 async function prepare(context: Context, label = "member A", tools = 1) {
   const { service, repos } = context;
-  const namespace = { source: "codex", profileId: "memmy647", userId: "memmy647-synthetic" };
+  const namespace = { source: "codex", profileId: "memmy647", projectId: "647-test", userId: DEVICE_MEMORY_OWNER };
   const session = service.openSession({ namespace: { ...namespace, sessionKey: `session-${++sequence}` } });
   const captured = await service.completeTurn(`turn-${++sequence}`, {
     sessionId: session.sessionId, query: `${label}: inspect nginx TLS certificate and fix port 443`,
@@ -166,7 +167,7 @@ describe("MEMMY-647 current baseline acceptance", () => {
       setTraceSignatureAndVectorForTest(c.db, item.first.l1MemoryId, "python|pytest|_|_", [1, 0, 0]);
     }
     const source = c.repos.memories.get(p.first.l1MemoryId)!;
-    const common = { userId: p.namespace.userId, sessionId: p.session.sessionId, agentId: source.agentId ?? "codex", profileId: p.namespace.profileId };
+    const common = { appId: "647-test", userId: p.namespace.userId, sessionId: p.session.sessionId, agentId: source.agentId ?? "codex", profileId: p.namespace.profileId };
     insertActivePolicyMemory(c.db, { ...common, id: "647-transition-policy", appId: "647-test", sourceTraceId: members[0]!.first.l1MemoryId, sourceEpisodeId: members[0]!.first.episodeId });
     insertActiveSkillMemoryForTest(c.db, { ...common, id: "647-transition-skill", sourcePolicyIds: ["647-transition-policy"] });
     for (const item of missingLink ? [] : association ? members.slice(0, -1) : members) insertTracePolicyLinkForTest(c.db, { userId: p.namespace.userId, l1MemoryId: item.first.l1MemoryId, l2MemoryId: "647-transition-policy" });
@@ -285,7 +286,7 @@ describe("MEMMY-647 current baseline acceptance", () => {
     const source = c.repos.memories.get(p.first.l1MemoryId)!;
     insertActivePolicyMemory(c.db, { id: "647-policy", userId: p.namespace.userId, sessionId: session.id, agentId: source.agentId ?? "codex", appId: source.appId ?? "647-test",
       profileId: p.namespace.profileId, sourceTraceId: p.first.l1MemoryId, sourceEpisodeId: p.first.episodeId });
-    insertActiveSkillMemoryForTest(c.db, { id: "647-skill", userId: p.namespace.userId, sessionId: session.id, agentId: source.agentId ?? "codex",
+    insertActiveSkillMemoryForTest(c.db, { id: "647-skill", appId: "647-test", userId: p.namespace.userId, sessionId: session.id, agentId: source.agentId ?? "codex",
       profileId: p.namespace.profileId, sourcePolicyIds: ["647-policy"] });
     for (const item of [p, b, d]) insertTracePolicyLinkForTest(c.db, { userId: p.namespace.userId, l1MemoryId: item.first.l1MemoryId, l2MemoryId: "647-policy" });
     const read = () => ({ policy: policyMetaFromMemory(c.repos.memories.get("647-policy")!), skill: skillMetaFromMemory(c.repos.memories.get("647-skill")!) });

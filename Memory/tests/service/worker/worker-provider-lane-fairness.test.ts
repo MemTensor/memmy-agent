@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MemoryDb } from "../../../src/storage/db.js";
 import { Repositories, type EvolutionJobRecord } from "../../../src/storage/repositories.js";
@@ -21,8 +18,8 @@ async function runSharedProvider(options: {
   blockedInteractive?: boolean;
   blockedInteractiveScope?: boolean;
 }) {
-  const root = mkdtempSync(join(tmpdir(), "memmy-provider-lane-fairness-"));
-  const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+  // Keep real SQLite claims and leases while measuring model fairness independently of file I/O.
+  const db = new MemoryDb({ path: ":memory:" });
   const repos = new Repositories(db.db);
   const concurrency = new WorkerConcurrencyController({ maxActiveJobs: 4 }, {});
   const abort = new AbortController();
@@ -135,7 +132,6 @@ async function runSharedProvider(options: {
     await concurrency.close();
     abort.signal.removeEventListener("abort", wakeMaintenance);
     db.close();
-    rmSync(root, { recursive: true, force: true });
   }
 }
 

@@ -330,7 +330,7 @@ export function threadTabForInAppPreview(file: { name: string; path?: string; ur
     .map((value) => (value ? threadFileName(value) : ""))
     .filter(Boolean);
   const name = candidates.find((candidate) => threadPreviewKind(candidate) !== "unsupported")
-    ;
+    ?? candidates[0];
   if (!name || (!file.path && !file.url)) return null;
   if (file.path) {
     return {

@@ -586,6 +586,47 @@ TEST(word_scope_requires_class_ancestry_and_correct_application) {
   CHECK(f.Validate(f.Response(descendants)) == "worker_privacy_violation");
 }
 
+TEST(notepad_scope_binds_application_and_exact_native_class_chain) {
+  const auto good = R"({"version":1,"applications":[{"pid":4242,"executable":"C:\\WindowsApps\\Notepad.exe","documentRegions":[{"controlType":"Document","automationId":"","scope":"notepad.document"}]}]})";
+  auto parsed = policy::Parse(good);
+  CHECK(parsed.policy && policy::HasNotepadDocumentScope(parsed.policy->applications[0]));
+  CHECK(!policy::MatchesSelector(parsed.policy->applications[0].documentRegions, classify::kDocument, L""));
+  Json input = *ParseJsonStrict(good, 32);
+  input["applications"][0]["captureText"] = false;
+  input["applications"][0]["executable"] = "C:\\Other.exe";
+  CHECK(!policy::Parse(DumpJson(input)).policy);
+  input = *ParseJsonStrict(good, 32);
+  input["applications"][0]["documentRegions"][0]["controlType"] = "Edit";
+  CHECK(!policy::Parse(DumpJson(input)).policy);
+
+  ResponseFixture f;
+  f.policy.applications[0].executable = L"C:\\WindowsApps\\Notepad.exe";
+  f.policy.applications[0].documentRegions = {{classify::kDocument, L"", false, false, true}};
+  const Json nodes = Json::array({f.Node("Window", 0, -1, {{"className", "Notepad"}}),
+    f.Node("Pane", 1, 0, {{"className", "NotepadTextBox"}}),
+    f.Node("Document", 2, 1, {{"className", "RichEditD2DPT"}, {"name", "Text editor"},
+      {"text", "NOTEPAD-BODY"}, {"documentStatus", "available"}})});
+  CHECK(f.Validate(f.Response(nodes)) == "ok");
+  for (const auto& mutate : std::vector<std::function<void(Json&)>>{
+      [](Json& n) { n[0]["className"] = "#32770"; },
+      [](Json& n) { n[1]["className"] = "SearchPane"; },
+      [](Json& n) { n[1]["password"] = nullptr; },
+      [](Json& n) { n[1]["missing"] = Json::array({"automationId"}); },
+      [](Json& n) { n[2]["className"] = "RichEdit50W"; },
+      [](Json& n) { n[2]["automationId"] = "search"; },
+      [](Json& n) { n[2]["password"] = true; },
+      [](Json& n) { n[2]["missing"] = Json::array({"automationId"}); },
+      [](Json& n) { n[2]["text"] = "Text editor\r\n"; },
+      [](Json& n) { n[2].erase("documentStatus"); },
+      [](Json& n) { n[2]["value"] = "private input"; }}) {
+    Json changed = nodes; mutate(changed);
+    CHECK(f.Validate(f.Response(changed)) == "worker_privacy_violation");
+  }
+  Json descendants = nodes;
+  descendants.push_back(f.Node("Text", 3, 2, {{"name", "private input"}}));
+  CHECK(f.Validate(f.Response(descendants)) == "worker_privacy_violation");
+}
+
 TEST(scoped_editor_rejects_sibling_input_echoes) {
   ResponseFixture f;
   auto& rule = f.policy.applications[0];
@@ -762,8 +803,10 @@ TEST(trigger_queue_is_bounded_and_coalesces) {
   CHECK(counters.accepted == 3 && counters.coalesced == 2 && counters.dropped == 1);
   bool overflowed = false;
   auto items = queue.Drain(overflowed);
-  CHECK(items.size() == 3 && overflowed);
+  CHECK(items.size() == 4 && overflowed);
   CHECK(items[2].tickMs == 15);
+  CHECK(items[0].firstTickMs == 10 && items[2].firstTickMs == 13);
+  CHECK(items[3].kind == TriggerKind::Gap && items[3].lostFromTickMs == 14 && items[3].lostThroughTickMs == 14);
   items = queue.Drain(overflowed);
   CHECK(items.empty() && !overflowed);
   queue.Push({TriggerKind::Input, 1, 1, 1});
@@ -797,7 +840,35 @@ TEST(action_queue_preserves_counts_and_context_boundaries) {
   CHECK(queue.Push({TriggerKind::Focus, 1, 2, 11}));
   CHECK(!queue.Push({TriggerKind::Focus, 1, 3, 12}));
   bool overflowed = false;
-  CHECK(queue.Drain(overflowed).size() == 3 && overflowed);
+  CHECK(queue.Drain(overflowed).size() == 4 && overflowed);
+}
+
+TEST(checkpoint_preserves_fifo_and_distinguishes_losses_on_each_side) {
+  TriggerQueue queue(1);
+  CHECK(queue.Push({TriggerKind::Input, 1, 1, 10}));
+  CHECK(!queue.Push({TriggerKind::Focus, 1, 1, 11}));
+  CHECK(queue.PushCheckpoint("first", 12));
+  CHECK(!queue.Push({TriggerKind::Focus, 1, 1, 13}));
+  CHECK(queue.PushCheckpoint("second", 14));
+  bool overflowed = false;
+  const auto items = queue.Drain(overflowed);
+  CHECK(items.size() == 3 && overflowed);
+  CHECK(items[1].checkpointId == "first" && items[1].captureSequence == 3 && items[1].lostFromTickMs == 11);
+  CHECK(items[2].checkpointId == "second" && items[2].captureSequence == 5 && items[2].lostFromTickMs == 13);
+  CHECK(queue.Push({TriggerKind::Focus, 1, 1, 15}));
+  CHECK(queue.PushCheckpoint("third", 16));
+  CHECK(!queue.Push({TriggerKind::Focus, 1, 1, 17}));  // Cannot coalesce across a marker.
+  const auto next = queue.Drain(overflowed);
+  CHECK(next.size() == 3 && next[1].lostFromTickMs == 0 && next[2].kind == TriggerKind::Gap);
+  for (int i = 0; i < 16; ++i) CHECK(queue.PushCheckpoint("bounded", 18));
+  CHECK(!queue.PushCheckpoint("overflow", 19));
+}
+
+TEST(checkpoint_control_accepts_only_a_bounded_identity) {
+  CHECK(cli::ParseCheckpointId("checkpoint 12345678-1234-1234-1234-123456789abc").has_value());
+  for (const auto* line : {"checkpoint abc", "checkpoint 12345678_1234-1234-1234-123456789abc",
+       "checkpoint 12345678-1234-1234-1234-123456789ABC", "checkpoint 12345678-1234-1234-1234-123456789abc extra"})
+    CHECK(!cli::ParseCheckpointId(line));
 }
 
 cli::ParseResult ParseArgs(std::initializer_list<const wchar_t*> args, bool test = false) {

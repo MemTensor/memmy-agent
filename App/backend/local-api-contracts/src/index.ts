@@ -4,6 +4,7 @@ import { ModelThinkingConfigSchema } from "./model-thinking-levels.js";
 import { ModelCapabilityCatalogSchema } from "./model-capability-catalog.js";
 import { PluginCapabilityEventPayloadSchema } from "./plugin.js";
 export * from "@memmy/agent-source-core/scan-state";
+export { resolveMemoryConnection, sameHttpOrigin } from "@memmy/agent-source-core/memory-connection";
 
 export const ScanVersionSchema = z.object({ generation: z.number().int().nonnegative(), sequence: z.number().int().nonnegative() });
 export const ScanLifecycleSchema = z.enum(["idle", "running", "paused", "completed", "failed", "cancelled"]);
@@ -1874,6 +1875,8 @@ export * from './desktop-screen-capture.js';
 export * from './computer-use-onboarding.js';
 
 export * from "./computer-recordings.js";
+
+export * from "./event-capture.js";
 /** Memory owns scan execution; desktop translates this state into its existing events. */
 export const MemoryAgentSourceScanStateSchema = z.object({
     version: ScanVersionSchema.optional(),

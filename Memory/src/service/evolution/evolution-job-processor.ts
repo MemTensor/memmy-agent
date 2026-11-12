@@ -1,5 +1,5 @@
 import { episodeInputRevision } from "./episode-revision.js";
-import { policyEvidenceSnapshot } from "./policy-evidence.js";
+import { policiesDependingOnTrace, policyEvidenceSnapshot } from "./policy-evidence.js";
 import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   policyMetaFromMemory,
@@ -324,7 +324,7 @@ export class EvolutionJobProcessor {
       for (const trace of validTraces) {
         if (linkedTraceIds.has(trace.id)) continue;
         this.deps.repos.runtime.insertTracePolicyLink({
-          userId: memory.userId,
+          userId: trace.userId,
           l1MemoryId: trace.id,
           l2MemoryId: policy.id,
           relation: l2SupportRelation(memory),
@@ -373,12 +373,7 @@ export class EvolutionJobProcessor {
   invalidateMemoryDependencies(memory: MemoryRow, at: string): void {
     if (memory.memoryLayer === "L1") {
       this.deps.repos.runtime.invalidateUnifiedL2Source(memory.id, memory.userId, at);
-      const policyIds = Array.from(new Set(
-        [...this.deps.repos.memories.listByDerivedSource(memory.userId, "L2", memory.id).map(policy => policy.id),
-          ...this.deps.repos.runtime.listTracePolicyLinks({ l1MemoryId: memory.id, limit: -1 })
-            .filter(link => link.userId === memory.userId && this.deps.repos.memories.get(link.l2MemoryId)?.userId === memory.userId)
-            .map(link => link.l2MemoryId)]
-      ));
+      const policyIds = policiesDependingOnTrace(this.deps.repos, memory).map(policy => policy.id);
       for (const policyId of policyIds) {
         const updated = this.policy.recomputePolicyStats(policyId, at);
         const updatedPolicy = updated ? policyMetaFromMemory(updated) : null;

@@ -15,8 +15,8 @@ icon: Server
 | Agent Source | `GET /api/agent-sources`、`POST /api/agent-sources/scan`、`POST /api/agent-sources/:sourceId/skill` |
 | 本地数据 | `POST /api/local-data/reveal`、`POST /api/local-data/export`、`DELETE /api/local-data` |
 | Memory 代理 | `/api/v1/memory/*`、`/api/v1/panel/*`（代理到 Memory Runtime） |
-| MCP bridge | `GET/POST/DELETE /mcp/composio`（独立 `x-memmy-mcp-token`） |
+| MCP bridge | `GET/POST/DELETE /mcp/composio`、`GET/POST/DELETE /mcp/plugins`（独立 `x-memmy-mcp-token`） |
 
 ## SSE 事件
 
-`/api/events` 推送：`app.connected`、`app.heartbeat`、`agent_source.scan_progress`、`agent_source.scan_completed`。
+`/api/events` 推送：`app.connected`、`app.heartbeat`、`agent_source.scan_progress`、`agent_source.scan_completed`、`plugin.capability_event`。

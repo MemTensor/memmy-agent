@@ -2,6 +2,7 @@ import "../../fixtures/isolated-user-home.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { retrievalDocumentForMemory, retrievalDocumentIsCurrent, retrievalDocumentSourceHash, skillMetaFromMemory } from "../../../src/algorithm/plugin-algorithms.js";
 import { embeddingTextForMemory, updateMemoryVectorField } from "../../../src/service/embedding/embedding-pipeline.js";
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { agentSkillConnectionKey, agentSkillInstallationsKey, importedSkillContentHash } from "../../../src/storage/imported-skill.js";
 import { MemoryDb } from "../../../src/storage/db.js";
 import { join } from "node:path";
@@ -307,19 +308,31 @@ describe("manual Skill and directory observation contracts", () => {
     expect(service.addMemory(manual()).id).toBe(id);
   });
 
-  it.each(["other source", "other profile", "other user"])("keeps an old manual alias isolated from %s", scope => {
+  it.each(["other source", "other profile"])("keeps an old manual alias isolated from %s", scope => {
     const { db, service } = setup();
     const oldKey = `manual:${stableHash(["Skill", "hermes", "release-check", importedSkillContentHash(content)]).slice(0, 20)}`;
     const id = withLegacyImportedSkillWriter(service, () => service.addMemory(manual()), { memoryKey: oldKey }).id;
     service.reconcileWorkerStartup(1);
     const original = service.addMemory(manual());
     const otherNamespace = scope === "other source" ? { ...namespace, source: "cursor" }
-      : scope === "other profile" ? { ...namespace, profileId: "another-profile" } : { ...namespace, userId: "another-user" };
+      : { ...namespace, profileId: "another-profile" };
     const other = service.addMemory(manual({ namespace: otherNamespace, source: otherNamespace.source }));
     expect(original.id).toBe(id);
     expect(other.id).not.toBe(id);
-    expect(row(db, id).userId).toBe(namespace.userId);
+    expect(row(db, id).userId).toBe(DEVICE_MEMORY_OWNER);
     expect(row(db, id).agentId).toBe("hermes");
+    expect(service.addMemory(manual()).id).toBe(id);
+  });
+
+  it("reuses an old manual alias across account names on the same device source/profile", () => {
+    const { db, service } = setup();
+    const oldKey = `manual:${stableHash(["Skill", "hermes", "release-check", importedSkillContentHash(content)]).slice(0, 20)}`;
+    const id = withLegacyImportedSkillWriter(service, () => service.addMemory(manual()), { memoryKey: oldKey }).id;
+    service.reconcileWorkerStartup(1);
+    expect(service.addMemory(manual()).id).toBe(id);
+    const alias = service.addMemory(manual({ namespace: { ...namespace, userId: "another-user" } }));
+    expect(alias.id).toBe(id);
+    expect(row(db, id)).toMatchObject({ userId: DEVICE_MEMORY_OWNER, agentId: "hermes", status: "activated", memoryValue: content });
     expect(service.addMemory(manual()).id).toBe(id);
   });
 

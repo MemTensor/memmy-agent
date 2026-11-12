@@ -3,6 +3,7 @@ import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryLayerError, MemoryLayerNetworkError } from "../../adapters/outbound/memory-client/index.js";
 import { API_ERROR_CODES, HTTP_STATUS_BY_CODE, withErrorEnvelope } from "../error-envelope.js";
+import { ApiErrorBodySchema } from "@memmy/local-api-contracts";
 import type { FastifyInstance } from "fastify";
 
 let app: FastifyInstance | undefined;
@@ -13,6 +14,24 @@ afterEach(async () => {
 });
 
 describe("withErrorEnvelope", () => {
+  it("uses the actual server request id when the caller provides no correlation id", async () => {
+    let serial = 0;
+    app = Fastify({ logger: false, genReqId: () => `server-request-${++serial}` });
+    app.get("/fail", withErrorEnvelope(async () => {
+      throw Object.assign(new Error("incompatible plugin"), { code: "plugin_incompatible" });
+    }));
+    const first = await app.inject({ method: "GET", url: "/fail" });
+    const second = await app.inject({ method: "GET", url: "/fail" });
+    expect(first.json().error.requestId).toBe("server-request-1");
+    expect(second.json().error.requestId).toBe("server-request-2");
+    expect(ApiErrorBodySchema.parse(first.json())).toEqual(first.json());
+  });
+  it("preserves an explicit caller request header", async () => {
+    app = Fastify({ logger: false });
+    app.get("/fail", withErrorEnvelope(async () => { throw new Error("failed"); }));
+    const response = await app.inject({ method: "GET", url: "/fail", headers: { "x-request-id": "caller-request" } });
+    expect(response.json().error.requestId).toBe("caller-request");
+  });
   it("reports a failed Memory connection as recoverable service unavailability", async () => {
     app = Fastify({ logger: false });
     app.get("/health", withErrorEnvelope(async () => {
@@ -41,6 +60,7 @@ describe("withErrorEnvelope", () => {
       });
 
       expect(response.statusCode).toBe(HTTP_STATUS_BY_CODE[code]);
+      expect(ApiErrorBodySchema.parse(response.json())).toEqual(response.json());
       expect(response.json()).toEqual({
         error: {
           code,

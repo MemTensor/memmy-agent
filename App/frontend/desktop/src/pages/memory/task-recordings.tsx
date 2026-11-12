@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Video } from "lucide-react";
-import type { RecordingEvent, RecordingExportResult, RecordingSession, RecordingStart, RecordingConfiguration, RecordingPermission } from "@memmy/local-api-contracts";
+import { recordingEventVideoTime, recordingSourceTime, type RecordingEvent, type RecordingExportResult, type RecordingSession, type RecordingStart, type RecordingConfiguration, type RecordingPermission } from "@memmy/local-api-contracts";
 import type { MemmyAgentClient, MemmyAgentWebSocketConnection } from "../../api/memmy-agent-client.js";
 import type { ComputerRecordingsClient } from "../../api/computer-recordings-client.js";
 import { useTranslation } from "../../i18n/use-translation.js";
@@ -37,6 +37,7 @@ export function RecordingConsentDialog(props: { client: MemmyAgentClient; open: 
   const [selected, setSelected] = useState<string[]>([]);
   const [consent, setConsent] = useState(false);
   const [title, setTitle] = useState("");
+  const [skipIdle, setSkipIdle] = useState(true);
   const [error, setError] = useState(false);
   const [macConfiguration, setMacConfiguration] = useState<RecordingConfiguration | null>(null);
   const [checking, setChecking] = useState(false);
@@ -50,7 +51,7 @@ export function RecordingConsentDialog(props: { client: MemmyAgentClient; open: 
   useEffect(() => {
     if (!props.open) return;
     let cancelled = false;
-    setSelected([]); setConsent(false); setError(false); setApplications([]); setMacConfiguration(null); setTitle(t(props.agent ? "recordings.agentTitle" : "recordings.title"));
+    setSelected([]); setConsent(false); setSkipIdle(true); setError(false); setApplications([]); setMacConfiguration(null); setTitle(t(props.agent ? "recordings.agentTitle" : "recordings.title"));
     const load = async () => {
       setChecking(true);
       try {
@@ -77,7 +78,7 @@ export function RecordingConsentDialog(props: { client: MemmyAgentClient; open: 
   };
   return <Modal open={props.open} title={t("recordings.consentTitle")} onClose={props.onCancel} closeLabel={t("common.close")}
     footer={<><Button variant="ghost" onClick={props.onCancel}>{t("dialog.cancel")}</Button>
-      <Button disabled={checking || !permissionsReady || !consent || !selected.length || !title.trim()} onClick={() => props.onConfirm({ title: title.trim(), applications: selected, consent: true })}>
+      <Button disabled={checking || !permissionsReady || !consent || !selected.length || !title.trim()} onClick={() => props.onConfirm({ title: title.trim(), applications: selected, consent: true, ...(!mac ? { skipIdle } : {}) })}>
         {t(props.agent ? "recordings.confirm" : "recordings.start")}</Button></>}>
     <div className="task-recordings__consent">
       <p>{t("recordings.privacy")}</p><p>{t("recordings.limits")}</p>
@@ -91,6 +92,7 @@ export function RecordingConsentDialog(props: { client: MemmyAgentClient; open: 
         </div>)}
       </fieldset>}
       <label>{t("recordings.titleLabel")}<input value={title} maxLength={200} onChange={(event) => setTitle(event.target.value)} /></label>
+      {!mac && <label><input type="checkbox" checked={skipIdle} onChange={(event) => setSkipIdle(event.target.checked)} />{t("recordings.skipIdle")}</label>}
       <fieldset><legend>{t("recordings.scope")}</legend><p className="task-recordings__hint">{t("recordings.scopeHint")}</p>
         {applications.map((app) => <label key={app.executable}><input type="checkbox" checked={selected.includes(app.executable)}
           onChange={(event) => setSelected((current) => event.target.checked ? [...current, app.executable] : current.filter((item) => item !== app.executable))} />{app.name}</label>)}
@@ -122,7 +124,7 @@ export function ActiveRecordingBar(props: { client: MemmyAgentClient | null }) {
     try { await api.control(session.id, action); } catch { setError(true); } finally { setBusy(false); void refresh(); }
   };
   return <aside className="task-recordings__active" role="status" aria-live="polite">
-    <span className="task-recordings__dot" /> <strong>{session.title}</strong><span>{t(`recordings.state.${session.state}`)} · {duration(session.durationMs)}</span>
+    <span className="task-recordings__dot" /> <strong>{session.title}</strong><span>{t(session.idlePaused && session.state === "recording" ? "recordings.state.idle" : `recordings.state.${session.state}`)} · {duration(session.recordedDurationMs ?? session.durationMs)}</span>
     {(session.state === "recording" || session.state === "paused") && <>
       <Button size="sm" variant="ghost" disabled={busy} onClick={() => void control(session.state === "paused" ? "resume" : "pause")}>{t(session.state === "paused" ? "recordings.resume" : "recordings.pause")}</Button>
       <Button size="sm" variant="ghost" disabled={busy} onClick={() => void control("stop")}>{t("recordings.stop")}</Button></>}
@@ -163,8 +165,9 @@ export function TaskRecordingsPanel(props: { client: MemmyAgentClient | null; ch
     {(error || fetchError) && <p role="alert">{t("recordings.error")}</p>}
     {agentFailed && <p role="alert">{t("recordings.agentFailed")}</p>}
     {sessions.map((session) => <article className="task-recordings__item" key={session.id}>
-      <div><strong>{session.title}</strong><span>{t(`recordings.state.${session.state}`)} · {duration(session.durationMs)}</span>
+      <div><strong>{session.title}</strong><span>{t(session.idlePaused && session.state === "recording" ? "recordings.state.idle" : `recordings.state.${session.state}`)} · {duration(session.recordedDurationMs ?? session.video?.durationMs ?? session.durationMs)}</span>
         <small>{new Date(session.createdAt).toLocaleString()}</small>
+        {!!session.idleSpans?.length && <small>{t("recordings.idleSkipped")} {duration(session.durationMs - (session.video?.durationMs ?? session.durationMs))}</small>}
         {session.videoIntegrity !== "complete" && !active(session) && <small>{t("recordings.incomplete")}</small>}
         {session.timelineCompleteness === "partial" && <small>{t("recordings.timelinePartial")}</small>}
       </div><div className="task-recordings__actions">
@@ -195,7 +198,8 @@ function RecordingPlayer(props: { api: ComputerRecordingsClient; session: Record
   const [mediaId, setMediaId] = useState(props.session.video ? "recording" : props.session.parts[0]?.mediaId ?? "recording");
   const [time, setTime] = useState(0);
   const partOffset = mediaId === "recording" ? 0 : props.session.parts.find((part) => part.mediaId === mediaId)?.startMs ?? 0;
-  const gap = props.session.gaps.find((item) => item.startMs <= time && item.endMs >= time);
+  const sourceTime = recordingSourceTime(time, props.session.idleSpans);
+  const gap = props.session.gaps.find((item) => item.startMs <= sourceTime && item.endMs >= sourceTime);
   const load = useCallback(async (after: number) => {
     try { const page = await props.api.events(props.session.id, after); setEvents((current) => after ? [...current, ...page.events] : page.events); setCursor(page.nextCursor); }
     catch { setError(true); }
@@ -211,12 +215,13 @@ function RecordingPlayer(props: { api: ComputerRecordingsClient; session: Record
   }, [props.api, props.session.id, exportResult?.id, exportResult?.state]);
   const jump = (event: RecordingEvent) => {
     if (!video.current) return;
+    const videoTime = recordingEventVideoTime(event.timeMs, props.session.idleSpans);
     if (mediaId !== "recording") {
-      const target = props.session.parts.find((part) => part.startMs <= event.timeMs && part.startMs + part.durationMs > event.timeMs);
+      const target = props.session.parts.find((part) => part.startMs <= videoTime && part.startMs + part.durationMs > videoTime);
       if (!target) { setError(true); return; }
-      if (target.mediaId !== mediaId) { pendingSeek.current = (event.timeMs - target.startMs) / 1000; setMediaId(target.mediaId); return; }
+      if (target.mediaId !== mediaId) { pendingSeek.current = (videoTime - target.startMs) / 1000; setMediaId(target.mediaId); return; }
     }
-    video.current.currentTime = Math.max(0, (event.timeMs - partOffset) / 1000);
+    video.current.currentTime = Math.max(0, (videoTime - partOffset) / 1000);
   };
   return <Modal open title={t("recordings.view")} closeLabel={t("common.close")} onClose={props.onClose} className="task-recordings__player-modal">
     <div className="task-recordings__player">
@@ -239,7 +244,7 @@ function RecordingPlayer(props: { api: ComputerRecordingsClient; session: Record
       {error && <p role="alert">{t("recordings.error")}</p>}
       <h4>{t("recordings.events")}</h4><ol className="task-recordings__timeline">
         {[...events].sort((a, b) => a.timeMs - b.timeMs || a.sequence - b.sequence).map((event) => <li key={event.id}><button type="button" onClick={() => jump(event)}>
-          <time>{duration(event.timeMs)}</time><span>{t(event.origin === "ocu" ? "recordings.ocu" : "recordings.native")}</span>
+          <time>{duration(recordingEventVideoTime(event.timeMs, props.session.idleSpans))}</time><span>{t(event.origin === "ocu" ? "recordings.ocu" : "recordings.native")}</span>
           <span>{event.origin === "ocu" ? event.action?.tool : event.type === "mouse_click" ? t("recordings.event.mouse_click") : event.type === "scroll" ? t("recordings.event.scroll")
             : event.type === "key_press" ? `${t("recordings.event.key_press")} ${event.action?.key ?? ""}` : event.type === "text_input" ? t("recordings.event.text_input") : t("recordings.event.input_overflow")}</span>
         </button></li>)}

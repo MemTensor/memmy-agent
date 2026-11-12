@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import "./fixtures/isolated-user-home.js";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { withUnrestrictedScanPermit } from "./fixtures/scan-admission-fixture.js";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -387,7 +389,8 @@ describe("standalone Agent source executor", () => {
       .mockReturnValue({ id: "memory-1", duplicate: true });
     const enqueuePendingImportSummaries = vi.fn();
     const scheduleWorker = vi.fn();
-    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries } as unknown as MemoryService;
+    const retryFailedMemoryProcessingOnScan = vi.fn(() => false);
+    const service = { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory, enqueuePendingImportSummaries, retryFailedMemoryProcessingOnScan } as unknown as MemoryService;
     const adapter: SourceAdapter = {
       descriptor: {
         sourceId: "fixture-agent",
@@ -438,6 +441,7 @@ describe("standalone Agent source executor", () => {
     await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
     await waitForScan(executor);
     expect(addMemory).toHaveBeenCalledTimes(1);
+    expect(retryFailedMemoryProcessingOnScan).not.toHaveBeenCalled();
     expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({
       adapterId: "agent-source:fixture-agent",
       source: "fixture-agent",
@@ -450,6 +454,11 @@ describe("standalone Agent source executor", () => {
     await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
     await waitForScan(executor);
     expect(addMemory).toHaveBeenCalledTimes(2);
+    expect(executor.scanStatus().error).toBeNull();
+    expect(retryFailedMemoryProcessingOnScan).toHaveBeenCalledOnce();
+    expect(retryFailedMemoryProcessingOnScan).toHaveBeenCalledWith("memory-1", {
+      source: "fixture-agent", namespace: { source: "fixture-agent", profileId: "default" }
+    });
     expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
       version: 2,
       sources: {
@@ -857,7 +866,9 @@ describe("standalone Agent source executor", () => {
       await pendingCompletion;
       pendingCompletion = undefined;
 
-expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
+
+
+      expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
 
       expect(addMemory).toHaveBeenCalledTimes(1);
       expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-1"]);
@@ -877,7 +888,9 @@ expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progr
       await pendingCompletion;
       pendingCompletion = undefined;
 
-expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
+
+
+      expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progress: { phase: "done" } });
 
       expect(addMemory).toHaveBeenCalledTimes(2);
       expect(enqueuePendingImportSummaries).toHaveBeenLastCalledWith(1_000, ["memory-2"]);
@@ -960,9 +973,11 @@ expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progr
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
     const root = tempRoot();
     const addMemory = vi.fn(() => ({ id: "memory-1", duplicate: true }));
+    const retryFailedMemoryProcessingOnScan = vi.fn(() => false);
     const executor = createAgentSourceExecutor({
       service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         addMemory,
+        retryFailedMemoryProcessingOnScan,
         enqueuePendingImportSummaries: vi.fn()
       } as unknown as MemoryService,
       configPath: join(root, "config.yaml"),
@@ -975,6 +990,10 @@ expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progr
     await waitForScan(executor);
 
     expect(addMemory).toHaveBeenCalledTimes(1);
+    expect(executor.scanStatus().error).toBeNull();
+    expect(retryFailedMemoryProcessingOnScan).toHaveBeenCalledWith("memory-1", {
+      source: "fixture-agent", namespace: { source: "fixture-agent", profileId: "default" }
+    });
     expect(events).toEqual([]);
     await executor.dispose();
   });
@@ -1657,6 +1676,41 @@ expect(executor.scanStatus()).toMatchObject({ running: false, error: null, progr
     expect((await executor.list()).sources[0]?.status).toBe("not_connected");
     expect(JSON.parse(readFileSync(statePath, "utf8")).sources.cursor.autoInjectSuppressed).toBe(true);
 
+    // Reverse acceptance in a fresh process: stored removal must suppress
+    // automatic installation and leave no command for a new native event.
+    const hookSettings = readFileSync(join(cursorRoot, "hooks.json"), "utf8");
+    const moduleUrl = (relative: string) => new URL(relative, import.meta.url).href;
+    const childScript = `
+      import { readFileSync } from "node:fs";
+      import { createAgentSourceExecutor } from ${JSON.stringify(moduleUrl("../src/agent-source/runtime.ts"))};
+      import { createSourceRegistry } from ${JSON.stringify(moduleUrl("../src/agent-source/adapters/source-registry.ts"))};
+      import { createCursorSkillTarget } from ${JSON.stringify(moduleUrl("../src/agent-source/integration/cursor/index.ts"))};
+      import { createSkillTargetRegistry } from ${JSON.stringify(moduleUrl("../src/agent-source/integration/target-registry.ts"))};
+      let writes = 0;
+      const executor = createAgentSourceExecutor({
+        service: { addMemory() { writes += 1; }, completeSourceTurn() { writes += 1; } },
+        configPath: ${JSON.stringify(configPath)}, statePath: ${JSON.stringify(statePath)},
+        initialScanDelayMs: 0, scheduledScanIntervalMs: 10,
+        sourceRegistry: createSourceRegistry([{ descriptor: { sourceId: "cursor", displayName: "Cursor", builtin: true, dataPath: ${JSON.stringify(cursorRoot)} }, detect: async () => true, async *scan() {} }]),
+        integrationRegistry: createSkillTargetRegistry([createCursorSkillTarget({ rootDirectory: ${JSON.stringify(cursorRoot)}, memmyConfigPath: ${JSON.stringify(configPath)} })])
+      });
+      executor.startAutomation();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const settings = JSON.parse(readFileSync(${JSON.stringify(join(cursorRoot, "hooks.json"))}, "utf8"));
+      const commands = Object.values(settings.hooks ?? {}).flat().filter(entry => String(entry.command ?? "").includes("memmy-resume-hook"));
+      const status = (await executor.list()).sources[0]?.status;
+      await executor.dispose();
+      console.log(JSON.stringify({ writes, hookCommands: commands.length, status }));
+    `;
+    const fresh = spawnSync(process.execPath, ["--import", fileURLToPath(new URL("../../node_modules/tsx/dist/loader.mjs", import.meta.url)),
+      "--input-type=module", "--eval", childScript], {
+      env: { ...process.env, MEMMY_HOME: root, MEMMY_MEMORY_HOME: join(root, "memory-service") },
+      encoding: "utf8", timeout: 10_000
+    });
+    expect(fresh.status, fresh.stderr).toBe(0);
+    expect(JSON.parse(fresh.stdout.trim().split("\n").at(-1)!)).toEqual({ writes: 0, hookCommands: 0, status: "not_connected" });
+    expect(readFileSync(join(cursorRoot, "hooks.json"), "utf8")).toBe(hookSettings);
+
     await expect(executor.mutateConnection("cursor", "plugin", "POST", "auto_inject")).rejects.toThrow("blocked by disconnection");
     expect(JSON.parse(readFileSync(statePath, "utf8")).sources.cursor.autoInjectSuppressed).toBe(true);
     await executor.mutateConnection("cursor", "plugin", "DELETE");
@@ -1822,12 +1876,17 @@ async function waitForAutomaticScanCompletion(
 ): Promise<void> {
   const deadline = performance.now() + 2_000;
   for (;;) {
+    if (performance.now() >= deadline) throw new Error("automatic scan did not complete before the I/O deadline");
     const status = executor.scanStatus();
     if (status.jobId !== previousJobId && status.completedAt !== null && !status.running) {
       expect(status.error).toBeNull();
       return;
     }
+
+
+
     if (performance.now() >= deadline) throw new Error("automatic scan did not complete before the I/O deadline");
+
     await yieldToIO();
   }
 }

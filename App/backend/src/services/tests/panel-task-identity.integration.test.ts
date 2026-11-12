@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const { service } = createTestService();
+  const { service,db } = createTestService();
   const namespace = (userId: string) => ({ source: "cursor", profileId: "default", userId });
   server = createMemoryHttpServer({
     service,
@@ -35,15 +35,21 @@ async function fixture() {
   if (!address || typeof address === "string") throw new Error("expected TCP address");
   const endpoint = `http://127.0.0.1:${address.port}`;
   return {
-    service,
+    service,db,
     endpoint,
     async addTask(userId: string, label: string) {
       const session = service.openSession({ namespace: namespace(userId) });
-      return (await service.completeTurn(`turn-${label}`, {
+      const turn = await service.completeTurn(`turn-${label}`, {
         sessionId: session.sessionId,
         query: `issue 409 ${label}`,
         answer: `Completed ${label}`
-      })).episodeId;
+      });
+      // Represent pre-decoupling rows; new writes intentionally use the device owner.
+      for (const [table, id] of [["sessions", turn.sessionId], ["episodes", turn.episodeId],
+        ["raw_turns", turn.rawTurnId], ["memories", turn.l1MemoryId]]) {
+        if (id) db.db.prepare(`UPDATE ${table} SET user_id=? WHERE id=?`).run(userId, id);
+      }
+      return turn.episodeId;
     },
     panel(token: string, getUserId: () => string) {
       return createPanelService({
@@ -97,7 +103,8 @@ describe("desktop task identity / issue 409", () => {
 
     // Displaying local data must not migrate the original task ownership.
     for (const [userId, total] of [["local-user", 21], ["account-user", 1], ["previous-account", 1]] as const) {
-      expect(f.service.panelTasks({ namespace: { userId } }).total).toBe(total);
+      expect(f.service.panelTasks({ namespace: { userId } }).total).toBe(23);
+      expect(f.db.db.prepare("SELECT count(*) FROM episodes WHERE user_id=?").pluck().get(userId)).toBe(total);
     }
   });
 

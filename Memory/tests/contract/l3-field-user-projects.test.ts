@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createMemoryHttpServer } from "../../src/index.js";
 import { Repositories } from "../../src/storage/repositories.js";
+import { DEVICE_MEMORY_OWNER } from "../../src/service/namespace/memory-owner.js";
 import { createMemoryServiceFixture } from "../fixtures/memory-service-fixture.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
@@ -31,25 +32,31 @@ async function withServer<T>(run: (post: (body: unknown) => Promise<Response>, r
   }
 }
 
-const envelope = () => ({
+const envelope = (userId = "desk-user") => ({
   requestId: randomUUID(),
   adapterId: "memmy-agent",
   source: "memmy-agent",
-  namespace: { source: "memmy-agent", profileId: "default", userId: "desk-user" }
+  namespace: { source: "memmy-agent", profileId: "default", userId }
 });
 
 describe("L3 user projects endpoint", () => {
-  it("replaces the whole list and the standalone roots for the user", async () => {
+  it("replaces the device list across accounts without rewriting historical project lists", async () => {
     await withServer(async (post, repos) => {
+      const historical = [{ rootPath: "/work/legacy", name: "Legacy" }];
+      repos.l3Field.replaceUserProjects("historical-user", historical);
       const first = await post({ ...envelope(), projects: [
         { rootPath: "/work/a", name: "A" }, { rootPath: "/work/b", name: "B" }
       ], standaloneRoots: ["/Users/me/Memmy"] });
       expect(first.status).toBe(200);
       expect(await first.json()).toMatchObject({ count: 2 });
-      const second = await post({ ...envelope(), projects: [{ rootPath: "/work/b", name: "B2" }] });
+      expect(repos.l3Field.getStandaloneRoots(DEVICE_MEMORY_OWNER)).toEqual(["/Users/me/Memmy"]);
+      const second = await post({ ...envelope("switched-user"), projects: [{ rootPath: "/work/b", name: "B2" }] });
       expect(second.status).toBe(200);
-      expect(repos.l3Field.listUserProjects("desk-user")).toEqual([{ rootPath: "/work/b", name: "B2" }]);
-      expect(repos.l3Field.getStandaloneRoots("desk-user")).toEqual([]);
+      expect(repos.l3Field.listUserProjects(DEVICE_MEMORY_OWNER)).toEqual([{ rootPath: "/work/b", name: "B2" }]);
+      expect(repos.l3Field.getStandaloneRoots(DEVICE_MEMORY_OWNER)).toEqual([]);
+      expect(repos.l3Field.listUserProjects("desk-user")).toEqual([]);
+      expect(repos.l3Field.listUserProjects("switched-user")).toEqual([]);
+      expect(repos.l3Field.listUserProjects("historical-user")).toEqual(historical);
     });
   });
 
@@ -57,7 +64,7 @@ describe("L3 user projects endpoint", () => {
     await withServer(async (post, repos) => {
       const response = await post({ ...envelope(), projects: [{ rootPath: "work/a", name: "A" }] });
       expect(response.status).toBe(400);
-      expect(repos.l3Field.listUserProjects("desk-user")).toEqual([]);
+      expect(repos.l3Field.listUserProjects(DEVICE_MEMORY_OWNER)).toEqual([]);
     });
   });
 });

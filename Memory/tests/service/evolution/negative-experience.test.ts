@@ -170,8 +170,8 @@ describe("MemoryService / evolution / negative experience", () => {
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
        WHERE job_type = 'negative_experience'
-         AND user_id = ?`
-    ).get(namespace.userId) as { count: number };
+         AND 1=1`
+    ).get() as { count: number };
     expect(negativeJobCount.count).toBe(1);
 
     const policies = service.panelItems({ namespace, layer: "L2" }).items;

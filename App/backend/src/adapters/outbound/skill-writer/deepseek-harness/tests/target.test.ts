@@ -13,6 +13,7 @@ let tempDir: string | undefined;
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   if (tempDir) {
     rmSync(tempDir, { recursive: true, force: true });
     tempDir = undefined;
@@ -79,6 +80,61 @@ describe("DeepSeek Harness skill target", () => {
     await expect(target.isInstalled("deepseek_harness")).resolves.toBe(false);
   });
 
+  it("distinguishes a damaged bridge, missing files, and a removed registration", async () => {
+    const rootDirectory = createRoot();
+    vi.stubEnv("MEMMY_HOME", join(rootDirectory, "memmy-home"));
+    const deps = { rootDirectory, memmyConfigPath: join(rootDirectory, "config.yaml") };
+    const target = createDeepseekHarnessSkillTarget(deps);
+    await target.installPlugin!("deepseek_harness");
+    const path = join(installedPluginDirectory(rootDirectory), "memmy-workspace-bridge.mjs");
+
+    writeFileSync(path, "// truncated bridge");
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+    writeFileSync(path, "");
+    await expect(target.isInstalled("deepseek_harness")).resolves.toBe(false);
+    rmSync(path);
+    await expect(target.isInstalled("deepseek_harness")).resolves.toBe(false);
+
+    await target.installPlugin!("deepseek_harness");
+    const patch = join(rootDirectory, "cordis.patch.yml");
+    writeFileSync(patch, "# name: '@memmy/memmy-memory'\n[]\n");
+    await expect(target.isInstalled("deepseek_harness")).resolves.toBe(false);
+    await target.installPlugin!("deepseek_harness");
+    const manifest = join(installedPluginDirectory(rootDirectory), "package.json");
+    writeFileSync(manifest, JSON.stringify({ name: "@another/plugin" }));
+    await expect(target.isInstalled("deepseek_harness")).resolves.toBe(false);
+  });
+
+  it("rejects malformed plugin config and accepts a structurally valid legacy config", async () => {
+    const rootDirectory = createRoot();
+    const target = createDeepseekHarnessSkillTarget({ rootDirectory, memmyConfigPath: join(rootDirectory, "config.yaml") });
+    await target.installPlugin!("deepseek_harness");
+    const configPath = join(installedPluginDirectory(rootDirectory), "memmy-memory-config.json");
+    const installed = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(true);
+
+    const legacy = {
+      memmy_config_path: installed.memmy_config_path,
+      endpoint: installed.endpoint,
+      token: installed.token
+    };
+    writeFileSync(configPath, JSON.stringify(legacy));
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(true);
+
+    for (const malformed of ["{}", "[]", "null", "not-json"]) {
+      writeFileSync(configPath, malformed);
+      await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+    }
+    writeFileSync(configPath, JSON.stringify({ ...legacy, endpoint: "" }));
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+    writeFileSync(configPath, JSON.stringify({ ...legacy, token: 7 }));
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+    writeFileSync(configPath, JSON.stringify({ ...legacy, userId: 7 }));
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+    writeFileSync(configPath, JSON.stringify({ ...legacy, bridge_integrity: "1:not-a-digest" }));
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
+  });
+
   it("restores an empty patch after uninstall", async () => {
     const rootDirectory = createRoot();
     const patchPath = join(rootDirectory, "cordis.patch.yml");
@@ -109,14 +165,16 @@ describe("DeepSeek Harness skill target", () => {
     const pluginPath = join(installedPluginDirectory(rootDirectory), "index.mjs");
     writeFileSync(pluginPath, `${readFileSync(pluginPath, "utf8")}\n// stale source\n`, "utf8");
 
-    await expect(target.isInstalled("deepseek_harness")).resolves.toBe(false);
+    await expect(target.isInstalled("deepseek_harness")).resolves.toBe(true);
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
 
     await target.installPlugin?.("deepseek_harness");
     const packagePath = join(installedPluginDirectory(rootDirectory), "package.json");
     const manifest = JSON.parse(readFileSync(packagePath, "utf8")) as Record<string, unknown>;
     writeFileSync(packagePath, JSON.stringify({ ...manifest, version: "0.2.0" }, null, 2) + "\n", "utf8");
 
-    await expect(target.isInstalled("deepseek_harness")).resolves.toBe(false);
+    await expect(target.isInstalled("deepseek_harness")).resolves.toBe(true);
+    await expect(target.isInstalledHookCurrent!()).resolves.toBe(false);
   });
 
   it("publishes an optimistic user bubble until the durable user message arrives", async () => {

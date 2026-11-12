@@ -19,6 +19,25 @@ afterEach(() => {
 });
 
 describe("memory summary input budget", () => {
+  it("does not start a JSON repair request after the interactive deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const deadlineMs = Date.now() + 100;
+      const responses = sequenceFetch([openAiResponse("malformed")]);
+      const fetchMock = vi.fn(async (...args: Parameters<typeof fetch>) => {
+        const result = await responses(...args);
+        vi.setSystemTime(deadlineMs);
+        return result;
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const client = createLlmClient(llmConfig({ malformedRetries: 3 }));
+      await expect(client.completeJson([{ role: "user", content: "Classify this turn." }],
+        { operation: "relation.classify.v1", timeoutMs: 100, deadlineMs, maxRetries: 0 }))
+        .rejects.toThrow("interactive deadline exceeded");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+  });
+
   it.each([
     ["capture.summarize", 512],
     ["capture.reflection.synth", 500],

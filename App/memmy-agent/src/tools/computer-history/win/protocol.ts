@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { checkpointId, checkpointTime } from "../core/recorder-checkpoint.js";
 
 const count = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const time = z.number().finite().nonnegative();
@@ -72,6 +73,8 @@ const schema = z.discriminatedUnion("kind", [
     trigger: z.object({ kinds: z.array(code).max(32), count }).strict() }).strict(),
   z.object({ ...envelope, kind: z.literal("session.paused"), alreadyPaused: z.boolean() }).strict(),
   z.object({ ...envelope, kind: z.literal("session.resumed"), alreadyRunning: z.boolean() }).strict(),
+  z.object({ ...envelope, kind: z.literal("session.checkpoint"), id: checkpointId, captureSequence: count, complete: z.boolean() }).strict(),
+  z.object({ ...envelope, kind: z.literal("capture.gap"), code, from: checkpointTime, through: checkpointTime }).strict(),
   z.object({ ...envelope, kind: z.literal("segment.started"), segment, counters }).strict(),
   z.object({ ...envelope, kind: z.literal("error"), code, fatal: z.boolean(), channel: z.enum(["stdout", "file"]).optional() }).strict(),
   z.object({ ...envelope, kind: z.literal("session.stopped"), reason: code, hooksDetached: z.boolean(), counters }).strict(),

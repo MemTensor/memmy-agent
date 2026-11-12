@@ -23,7 +23,6 @@ import {
   embeddingRetryTargetKindForMemory,
   embeddingRetryVectorFieldForMemory
 } from "../embedding/embedding-pipeline.js";
-import { episodeTitleIsCurrent } from "../episode-title/episode-title-service.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
 import { observationMemoryState } from "../observation-memory-state.js";
 import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
@@ -100,6 +99,7 @@ export interface WorkerJobProcessors {
 
 export interface WorkerJobHandlerDeps {
   repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime" | "l3WorldModels">;
+  episodeTitleIsCurrent(episode: EpisodeRecord): boolean;
   capture: { synthReflection: boolean };
   reward: { feedbackWindowSec: number };
   nowIso(): string;
@@ -220,7 +220,8 @@ export function enqueueJob(
   if (input.jobType === "episode_title") {
     // Title jobs have no target memory. Only a wholly historical episode can
     // inherit the historical lane; mixed or incomplete episodes stay interactive.
-    delete payload.captureOrigin;
+    // An explicit undefined also clears stale import provenance when a queued job is merged.
+    payload.captureOrigin = undefined;
     const episode = input.episodeId ? deps.repos.runtime.getEpisode(input.episodeId) : undefined;
     if (episode && deps.repos.memories.areAllHistoricalCaptureMemories(episode.l1MemoryIds)) {
       payload.captureOrigin = "agent_source_scan";
@@ -433,7 +434,7 @@ export function enqueueEpisodeTitle(
   at: string,
   stage: "provisional" | "final"
 ): EvolutionJobRecord[] {
-  if (episodeTitleIsCurrent(episode, deps.repos.runtime.countRawTurnsByEpisode(episode.id))) return [];
+  if (deps.episodeTitleIsCurrent(episode)) return [];
   return [enqueueJob(deps, {
     jobType: "episode_title",
     userId: episode.userId,
@@ -634,9 +635,9 @@ export function classifyProcessingError(error: unknown): {
   if (error instanceof EmbeddingInputLimitError) {
     return { code: "model_input_too_long", retryAction: "none" };
   }
+  const providerCode = error instanceof ModelHttpError ? error.errorCode?.toLowerCase().replace(/[\s_-]/g, "") : undefined;
+  const providerType = error instanceof ModelHttpError ? error.errorType?.toLowerCase().replace(/[\s_-]/g, "") : undefined;
   if (error instanceof ModelHttpError) {
-    const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
-    const providerType = error.errorType?.toLowerCase().replace(/[\s_-]/g, "");
     if (error.errorCategory === "quota_exhausted" || providerCode === "40308" || providerCode === "40309" ||
       providerCode === "insufficientquota" || providerType === "insufficientquota") {
       return { code: QUOTA_PROCESSING_ERROR_CODE, retryAction: "open_settings" };
@@ -673,7 +674,10 @@ export function classifyProcessingError(error: unknown): {
   // Shared HTTP 400 configuration/quota failures must not fan out into one
   // request per item when an embedding batch is rejected.
   if (error instanceof ModelHttpError) {
-    const providerCode = error.errorCode?.toLowerCase().replace(/[\s_-]/g, "");
+    if (providerCode === "missingsessionid" || providerType === "missingsessionid" ||
+      /(?:missing|required|absent).{0,100}x-opencode-session|x-opencode-session.{0,100}(?:missing|required|absent)/s.test(normalized)) {
+      return { code: "model_configuration", retryAction: "open_settings" };
+    }
     if (providerCode === "insufficientquota" || /insufficient[\s_-]+(?:quota|balance)/.test(normalized)) {
       return { code: QUOTA_PROCESSING_ERROR_CODE, retryAction: "open_settings" };
     }
@@ -898,7 +902,6 @@ function namespaceIdFromSession(session: SessionRecord): string {
 function namespaceIdFromContext(namespace: RuntimeNamespace): string {
   return [
     namespace.tenantId,
-    namespace.userId,
     namespace.projectId ?? namespace.workspaceId,
     namespace.source,
     namespace.profileId

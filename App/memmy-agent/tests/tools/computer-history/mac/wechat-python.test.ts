@@ -78,6 +78,13 @@ describe("WeChat macOS bundled interpreter", () => {
     const moduleFile = bundle({ executable: false });
     const binary = path.join(path.dirname(moduleFile), "wechat", "python", "bin", "python3");
     fs.writeFileSync(binary, "", { mode: 0o644 });
+    if (process.platform === "win32") {
+      const access = fs.accessSync;
+      vi.spyOn(fs, "accessSync").mockImplementation((file, mode) => {
+        if (file === binary && mode === fs.constants.X_OK) throw Object.assign(new Error("Not executable"), { code: "EACCES" });
+        return access(file, mode);
+      });
+    }
     expect(resolveMacWeChatPython({ moduleFile })).toBeNull();
   });
 });

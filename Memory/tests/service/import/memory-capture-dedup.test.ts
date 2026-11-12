@@ -47,8 +47,8 @@ describe("MemoryService / import / QA capture dedup", () => {
     expect(l1Count(db.db)).toBe(beforeCount);
     expect(db.db.prepare(
       `SELECT captured_by FROM memory_capture_claims
-       WHERE user_id = ? AND source = 'codex'`
-    ).get(namespace.userId)).toEqual({ captured_by: "turn_complete" });
+       WHERE 1=1 AND source = 'codex'`
+    ).get()).toEqual({ captured_by: "turn_complete" });
   });
 
   it("keeps the scan capture and still records the hook raw turn and episode link", async () => {
@@ -91,8 +91,8 @@ describe("MemoryService / import / QA capture dedup", () => {
     expect(JSON.parse(episode.raw_turn_ids_json)).toContain(completed.rawTurnId);
     expect(db.db.prepare(
       `SELECT captured_by FROM memory_capture_claims
-       WHERE user_id = ? AND source = 'codex'`
-    ).get(namespace.userId)).toEqual({ captured_by: "agent_source_scan" });
+       WHERE 1=1 AND source = 'codex'`
+    ).get()).toEqual({ captured_by: "agent_source_scan" });
   });
 
   it("stores a second memory when the final assistant answer differs", () => {

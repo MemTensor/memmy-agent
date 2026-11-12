@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
-import { normalizeOutputLanguage } from "@memmy/local-api-contracts";
+import { normalizeOutputLanguage, resolveMemoryConnection, sameHttpOrigin } from "@memmy/local-api-contracts";
 import type { MemmyMemoryConnection } from "./types.js";
 
 export const DEFAULT_MEMOS_MEMORY_URL = "http://127.0.0.1:18960";
@@ -79,22 +79,26 @@ export function discoverMemmyMemoryConnection(options: MemmyMemoryDiscoveryOptio
   const storage = memmyMemory.storage && typeof memmyMemory.storage === "object" ? memmyMemory.storage as Record<string, any> : {};
 
   const baseUrl =
-    env.MEMMY_MEMORY_URL ??
-    env.MEMORY_SERVICE_URL ??
-    runtime.url ??
-    runtime.baseUrl ??
-    storage.endpoint ??
+    env.MEMMY_MEMORY_URL?.trim() ||
+    env.MEMORY_SERVICE_URL?.trim() ||
+    runtime.url ||
+    runtime.baseUrl ||
+    storage.endpoint ||
     DEFAULT_MEMOS_MEMORY_URL;
-  const token =
-    env.MEMMY_MEMORY_TOKEN ??
-    env.MEMORY_SERVICE_TOKEN ??
-    runtime.token ??
-    readTokenFile(runtime.tokenFile, homeDir) ??
-    storage.token ??
-    null;
+  const endpoint = normalizeMemmyMemoryBaseUrl(String(baseUrl));
+  const configuredEndpoint = normalizeMemmyMemoryBaseUrl(storage.endpoint);
+  const runtimeEndpoint = normalizeMemmyMemoryBaseUrl(runtime.url ?? runtime.baseUrl ?? configuredEndpoint);
+  let { token } = resolveMemoryConnection(configuredEndpoint, undefined, env, endpoint);
+  if (!token && sameHttpOrigin(endpoint, runtimeEndpoint)) {
+    const inline = typeof runtime.token === "string" ? runtime.token.trim() : "";
+    token = inline || readTokenFile(runtime.tokenFile, homeDir) || undefined;
+  }
+  if (!token && sameHttpOrigin(endpoint, configuredEndpoint) && typeof storage.token === "string") {
+    token = storage.token.trim();
+  }
 
   return {
-    baseUrl: normalizeMemmyMemoryBaseUrl(String(baseUrl)),
+    baseUrl: endpoint,
     token: token ? String(token) : null,
     source: env.MEMMY_MEMORY_URL || env.MEMORY_SERVICE_URL
       ? "env"
@@ -106,11 +110,8 @@ export function discoverMemmyMemoryConnection(options: MemmyMemoryDiscoveryOptio
 
 /** Keep passive History evidence in the same Memory user scope as the agent hook. */
 export function discoverMemmyMemoryUserId(options: MemmyMemoryDiscoveryOptions = {}): string {
-  const env = options.env ?? process.env;
-  const homeDir = options.homeDir ?? os.homedir();
-  const configPath = memmyMemoryConfigPaths({ env, homeDir }).find((candidate) => fs.existsSync(candidate));
-  const value = configPath ? parseConfigFile(configPath).memmyMemory?.userId : undefined;
-  return typeof value === "string" && value.trim() ? value.trim() : "local-user";
+  void options;
+  return "__memmy_device_memory__";
 }
 
 /** The desktop writes its resolved display language here, including the system/account default. */

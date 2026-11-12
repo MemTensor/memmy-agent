@@ -11,13 +11,16 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import YAML from "yaml";
 import { formatOutput, runCommand } from "../src/cli/commands.js";
 import { renderSetupResult } from "../src/cli/render/index.js";
 
 const roots: string[] = [];
 const envBackup: Record<string, string | undefined> = {};
+
+// Each fixture chooses a temporary HOME; a host Codex override must not escape it.
+beforeEach(() => setEnv("CODEX_HOME", undefined));
 
 afterEach(() => {
   for (const [key, value] of Object.entries(envBackup)) {
@@ -76,7 +79,7 @@ describe("memmy-memory CLI setup commands", () => {
     expect(existsSync(dbPath)).toBe(false);
   });
 
-  it("generates an authentication token only when explicitly requested", async () => {
+  it("generates an authentication token by default", async () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     createAllAgentRoots(root);
@@ -88,8 +91,7 @@ describe("memmy-memory CLI setup commands", () => {
         "--home", root,
         "--config", configPath,
         "--db", join(root, "memory.sqlite"),
-        "--skip-agent-skills",
-        "--generate-token-if-missing"
+        "--skip-agent-skills"
       ]
     });
 
@@ -856,9 +858,10 @@ function createAllAgentRoots(root: string): void {
   mkdirSync(join(root, ".hermes"), { recursive: true });
 }
 
-function setEnv(key: string, value: string): void {
+function setEnv(key: string, value: string | undefined): void {
   if (!(key in envBackup)) {
     envBackup[key] = process.env[key];
   }
-  process.env[key] = value;
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
 }

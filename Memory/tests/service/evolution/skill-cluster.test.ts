@@ -2,6 +2,7 @@ import { assignedEpisodeId, settleCaptureAssignments } from "../../fixtures/memo
 import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type LlmClient } from "../../../src/index.js";
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { DIRECT_SKILL_SOURCE } from "../../../src/algorithm/trace-direct-skill.js";
 import { Repositories, RuntimeRepository } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture, runWorkerRounds } from "../../fixtures/memory-service-fixture.js";
@@ -44,7 +45,14 @@ interface DirectSkillCall {
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
 }
 
-function createDirectSkillLlm(calls: DirectSkillCall[], hooks: { beforeGeneration?: () => void | Promise<void> } = {}): LlmClient {
+interface DirectSkillHooks {
+  beforeGeneration?: () => void | Promise<void>;
+  bindStepEvidence?: boolean;
+}
+
+function createDirectSkillLlm(calls: DirectSkillCall[], skillJson: Record<string, unknown> = DIRECT_SKILL_JSON,
+  displayTitle?: string, summary = String(skillJson.summary ?? DIRECT_SKILL_JSON.summary),
+  hooks: DirectSkillHooks = {}): LlmClient {
   return {
     config: {
       ...LEGACY_TEST_CONFIG.evolution,
@@ -72,7 +80,13 @@ function createDirectSkillLlm(calls: DirectSkillCall[], hooks: { beforeGeneratio
       }
       if (options.operation.startsWith("skill.batch_evolve")) {
         await hooks.beforeGeneration?.();
-        return { ...DIRECT_SKILL_JSON } as unknown as T;
+        const payload = hooks.bindStepEvidence
+          ? JSON.parse(messages.find(message => message.role === "user")!.content) as { EVIDENCE: Array<{ episode_id: string }> }
+          : undefined;
+        const evidence = payload?.EVIDENCE.map(item => item.episode_id);
+        const boundSteps = evidence ? DIRECT_SKILL_JSON.steps.map(step => ({ ...step, evidence_ids: evidence })) : undefined;
+        return { ...skillJson, summary, ...(boundSteps ? { steps: boundSteps } : {}),
+          ...(displayTitle ? { display_title: displayTitle } : {}) } as unknown as T;
       }
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
@@ -106,12 +120,18 @@ async function runDirectSkillEpisode(input: {
   query?: string;
   answer?: string;
   config?: typeof LEGACY_TEST_CONFIG;
+  skillJson?: Record<string, unknown>;
+  displayTitle?: string;
+  summary?: string;
+  bindStepEvidence?: boolean;
+  legacyOwner?: string;
+  projectId?: string;
 }) {
   const calls: DirectSkillCall[] = [];
-  const hooks: { beforeGeneration?: () => void | Promise<void> } = {};
-  const { db, service } = createTestService({ skillLlm: createDirectSkillLlm(calls, hooks), config: input.config });
+  const hooks: DirectSkillHooks = { bindStepEvidence: input.bindStepEvidence };
+  const { db, service } = createTestService({ skillLlm: createDirectSkillLlm(calls, input.skillJson, input.displayTitle, input.summary, hooks), config: input.config });
   const session = service.openSession({
-    namespace: { source: "codex", profileId: "jiang", userId: input.userId }
+    namespace: { source: "codex", profileId: "jiang", userId: input.userId, projectId: input.projectId }
   });
   const complete = (await service.completeTurn(`${input.userId}-turn`, {
     sessionId: session.sessionId,
@@ -126,6 +146,15 @@ async function runDirectSkillEpisode(input: {
   }));
   const repos = new Repositories(db.db);
   const at = new Date().toISOString();
+  if (input.legacyOwner) {
+    // Frozen pre-device-owner fixture. Only existing source rows are converted;
+    // cluster/Skill writes below still use the real merged production pipeline.
+    const episodeId = assignedEpisodeId(service, complete);
+    db.db.prepare("UPDATE sessions SET user_id = ? WHERE id = ?").run(input.legacyOwner, session.sessionId);
+    db.db.prepare("UPDATE episodes SET user_id = ? WHERE id = ?").run(input.legacyOwner, episodeId);
+    db.db.prepare("UPDATE raw_turns SET user_id = ? WHERE episode_id = ?").run(input.legacyOwner, episodeId);
+    db.db.prepare("UPDATE memories SET user_id = ? WHERE id = ?").run(input.legacyOwner, complete.l1MemoryId);
+  }
   db.db.prepare(`UPDATE episodes SET status = 'closed', closed_at = ?, updated_at = ? WHERE id = ?`)
     .run(at, at, assignedEpisodeId(service, complete));
   repos.runtime.updateEpisodeReward(assignedEpisodeId(service, complete), {
@@ -160,6 +189,34 @@ async function reprocess(context: Awaited<ReturnType<typeof runDirectSkillEpisod
 }
 
 describe("MemoryService / evolution / skill cluster", () => {
+  it("stores a separate localized title without changing the invocation name or key", async () => {
+    const { db, repos } = await runDirectSkillEpisode({
+      userId: "localized-skill", rTask: 1, displayTitle: "使用 Python 填写表格汇总",
+      config: { ...LEGACY_TEST_CONFIG, language: "zh-CN" }
+    });
+    const row = db.db.prepare("SELECT id FROM memories WHERE memory_layer = 'Skill'").get() as { id: string };
+    const memory = repos.memories.get(row.id)!;
+    expect(memory.info.title).toBe("使用 Python 填写表格汇总");
+    expect(memory.info.name).toBe("xlsx_python_transform");
+    expect(memory.memoryKey).toMatch(/^skill:direct:/);
+    expect(memory.memoryValue.split("\n")[0]).toBe("# 使用 Python 填写表格汇总");
+  });
+
+  it.each(["Spreadsheet Transformation", "xlsx_python_transform", undefined])(
+    "uses the localized summary on the card and in the guide when the draft title is %s", async displayTitle => {
+      const summary = "用 openpyxl 写入合计并保存工作簿。";
+      const { service, repos } = await runDirectSkillEpisode({ userId: "skill-title-fallback", rTask: 1,
+        config: { ...LEGACY_TEST_CONFIG, language: "zh-CN" }, displayTitle, summary });
+      const [card] = service.panelItems({ layer: "Skill" }).items;
+      expect(card?.title).toBe(summary);
+      expect(service.getSkill(card!.id)).toMatchObject({ title: summary, name: "xlsx_python_transform" });
+      const stored = repos.memories.get(card!.id)!;
+      expect(stored.info.name).toBe("xlsx_python_transform");
+      expect(stored.memoryValue.split("\n")[0]).toBe(`# ${summary}`);
+      expect(stored.memoryValue).toContain("**When to use**");
+    }
+  );
+
   it.each([
     { language: "zh-CN", outputLanguageMode: "follow_policy", expected: "zh" },
     { language: "en-US", outputLanguageMode: "follow_policy", expected: "en" },
@@ -210,6 +267,7 @@ describe("MemoryService / evolution / skill cluster", () => {
     };
     expect(properties.internal_info?.source).toBe(DIRECT_SKILL_SOURCE);
     expect(properties.internal_info?.evidence_anchor_ids).toEqual([complete.episodeId]);
+    expect(skill!.memory_value.split("\n")[0]).toBe(`# ${DIRECT_SKILL_JSON.summary}`);
     expect(skill!.memory_value).toContain("openpyxl");
     expect(calls.map((item) => item.operation)).toContain("skill.batch_evolve.crystallize");
     expect(calls.map((item) => item.operation)).toContain("skill.batch_evolve.meta");
@@ -219,6 +277,28 @@ describe("MemoryService / evolution / skill cluster", () => {
     };
     expect(cluster.skill_memory_id).toBe(skill!.id);
     expect(cluster.meta_skill_md).toContain("anti_pattern");
+  });
+
+  it("records a failed api log when a direct Skill draft fails verification", async () => {
+    const { db } = await runDirectSkillEpisode({
+      userId: "direct-verification-failed",
+      rTask: 1,
+      skillJson: { ...DIRECT_SKILL_JSON, tools: ["python", "kubectl"] }
+    });
+    const skillCount = db.db.prepare(`SELECT COUNT(*) AS count FROM memories WHERE memory_layer = 'Skill'`).get() as { count: number };
+    expect(skillCount.count).toBe(0);
+    const failureLog = db.db.prepare(
+      `SELECT tool_name, success, input_json, output_json FROM api_logs
+       WHERE tool_name IN ('skill_generate', 'skill_evolve') ORDER BY id DESC LIMIT 1`
+    ).get() as { tool_name: string; success: number; input_json: string; output_json: string } | undefined;
+    expect(failureLog).toMatchObject({ tool_name: "skill_generate", success: 0 });
+    expect(JSON.parse(failureLog!.input_json)).toMatchObject({ phase: "failed", failureKind: "verification" });
+    expect(JSON.parse(failureLog!.input_json).skillId).toBeUndefined();
+    expect(JSON.parse(failureLog!.output_json)).toMatchObject({
+      kind: "skill.direct.failed",
+      reason: "tools_outside_evidence:kubectl",
+      source: DIRECT_SKILL_SOURCE
+    });
   });
 
   it("enqueues assign/evolve after episode reward without a manual skill job", async () => {
@@ -347,8 +427,8 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(context.repos.runtime.listSkillClusterMembers(cluster.id)).toHaveLength(1);
   });
 
-  it("does not rewrite a direct Skill or call the model again for identical processed episode inputs", async () => {
-    const context = await runDirectSkillEpisode({ userId: "direct-repeated", rTask: 1 });
+  it.each([undefined, "legacy-direct-owner"])("does not rewrite a direct Skill or call the model again for identical processed episode inputs (owner=%s)", async legacyOwner => {
+    const context = await runDirectSkillEpisode({ legacyOwner, userId: "direct-repeated", rTask: 1 });
     const episodeId = assignedEpisodeId(context.service, context.complete);
     const cluster = context.repos.runtime.getSkillClusterForEpisode(episodeId)!;
     const original = context.repos.memories.get(cluster.skillMemoryId!)!;
@@ -362,8 +442,8 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(context.calls.filter(call => call.operation.startsWith("skill.batch_evolve"))).toEqual(callsBefore);
   });
 
-  it("restores the same Skill after success -> failure -> success without duplicating support or eta", async () => {
-    const context = await runDirectSkillEpisode({ userId: "direct-restored", rTask: 1 });
+  it.each([undefined, "legacy-direct-owner"])("restores the same Skill after success -> failure -> success without duplicating support or eta (owner=%s)", async legacyOwner => {
+    const context = await runDirectSkillEpisode({ legacyOwner, userId: "direct-restored", rTask: 1 });
     const episodeId = assignedEpisodeId(context.service, context.complete);
     const cluster = context.repos.runtime.getSkillClusterForEpisode(episodeId)!;
     const original = context.repos.memories.get(cluster.skillMemoryId!)!;
@@ -371,6 +451,11 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(context.repos.memories.get(original.id)?.status).toBe("archived");
     await reprocess(context, episodeId, 1);
     const restored = context.repos.memories.get(original.id)!;
+    expect(context.repos.runtime.getEpisode(episodeId)?.userId).toBe(legacyOwner ?? DEVICE_MEMORY_OWNER);
+    expect(context.repos.runtime.getSkillCluster(cluster.id)?.userId).toBe(legacyOwner ?? DEVICE_MEMORY_OWNER);
+    expect(restored.userId).toBe(DEVICE_MEMORY_OWNER);
+    expect(restored.info.title).toBe(DIRECT_SKILL_JSON.summary);
+    expect(restored.properties.internal_info.verification).toMatchObject({ ok: true });
     expect(restored.status).toBe("activated");
     expect(restored.properties.internal_info.evidence_anchor_ids).toEqual([episodeId]);
     expect(restored.properties.internal_info.support).toBe(1);
@@ -380,6 +465,112 @@ describe("MemoryService / evolution / skill cluster", () => {
     const version = restored.version;
     await reprocess(context, episodeId, 1);
     expect(context.repos.memories.get(original.id)?.version).toBe(version);
+  });
+
+
+  it.each([undefined, "another-legacy-owner"])("maintains accepted mixed-owner members in a historical cluster (new owner=%s)", async secondLegacyOwner => {
+    const context = await runDirectSkillEpisode({ userId: "mixed-members", legacyOwner: "legacy-cluster-owner", rTask: 1 });
+    const firstId = assignedEpisodeId(context.service, context.complete);
+    const cluster = context.repos.runtime.getSkillClusterForEpisode(firstId)!;
+    const skillId = cluster.skillMemoryId!;
+    const session = context.service.openSession({ namespace: { source: "codex", profileId: "another-profile", userId: "new-login" } });
+    const second = await context.service.completeTurn("mixed-owner-second", { sessionId: session.sessionId,
+      query: "fill totals in report.xlsx with python openpyxl", answer: "Opened report.xlsx with openpyxl and wrote the totals.",
+      toolCalls: [{ name: "python", input: { command: "openpyxl.load_workbook('report.xlsx')" }, output: { ok: true }, success: true }] });
+    const secondId = assignedEpisodeId(context.service, second);
+    if (secondLegacyOwner) {
+      context.db.db.prepare("UPDATE sessions SET user_id = ? WHERE id = ?").run(secondLegacyOwner, session.sessionId);
+      context.db.db.prepare("UPDATE episodes SET user_id = ? WHERE id = ?").run(secondLegacyOwner, secondId);
+      context.db.db.prepare("UPDATE raw_turns SET user_id = ? WHERE episode_id = ?").run(secondLegacyOwner, secondId);
+    }
+    context.db.db.prepare("UPDATE episodes SET status = 'closed' WHERE id = ?").run(secondId);
+    await reprocess(context, secondId, 1);
+    expect(context.repos.runtime.getSkillClusterForEpisode(secondId)?.id).toBe(cluster.id);
+    expect(context.repos.runtime.getSkillCluster(cluster.id)?.userId).toBe("legacy-cluster-owner");
+    expect(context.repos.memories.get(skillId)?.properties.internal_info.evidence_anchor_ids).toEqual([firstId, secondId].sort());
+    expect(context.repos.memories.get(skillId)?.properties.internal_info.support).toBe(2);
+    await reprocess(context, firstId, -1);
+    expect(context.repos.memories.get(skillId)?.properties.internal_info.evidence_anchor_ids).toEqual([secondId]);
+    expect(context.repos.memories.get(skillId)?.status).toBe("activated");
+    await reprocess(context, firstId, 1);
+    expect(context.repos.memories.get(skillId)?.properties.internal_info.evidence_anchor_ids).toEqual([firstId, secondId].sort());
+    expect(context.repos.runtime.listSkillClusterMembers(cluster.id)).toHaveLength(2);
+    expect(context.db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE memory_layer = 'Skill'").get()).toEqual({ count: 1 });
+  });
+
+
+  it("validates successful step bindings then removes internal evidence IDs from the generated Skill", async () => {
+    const context = await runDirectSkillEpisode({ userId: "direct-step-binding", legacyOwner: "legacy-step-owner", rTask: 1,
+      bindStepEvidence: true, displayTitle: "Workbook transformation" });
+    const episodeId = assignedEpisodeId(context.service, context.complete);
+    const skillId = context.repos.runtime.getSkillClusterForEpisode(episodeId)!.skillMemoryId!;
+    const skill = context.repos.memories.get(skillId)!;
+    const internal = skill.properties.internal_info;
+    expect(internal.verification).toMatchObject({ ok: true, evidenceBindingCoverage: 1 });
+    expect(skill.memoryValue).not.toContain(episodeId);
+    const procedure = internal.procedure_json as { steps: Array<Record<string, unknown>> };
+    expect(procedure.steps).toHaveLength(DIRECT_SKILL_JSON.steps.length);
+    expect(procedure.steps.every(step => step.evidence_ids === undefined && step.evidenceIds === undefined)).toBe(true);
+    expect((internal.skill as Record<string, unknown>).procedure_json).toEqual(procedure);
+    expect(internal.evidence_anchor_ids).toEqual([episodeId]);
+  });
+
+  it("does not accept a successful nonmember merely because its ID appears in Skill evidence", async () => {
+    const context = await runDirectSkillEpisode({ userId: "direct-unbound-anchor", legacyOwner: "legacy-bound-owner", rTask: 1 });
+    const episodeId = assignedEpisodeId(context.service, context.complete);
+    const cluster = context.repos.runtime.getSkillClusterForEpisode(episodeId)!;
+    const session = context.service.openSession({ namespace: { source: "codex", profileId: "unrelated", userId: "other-login" } });
+    const foreign = await context.service.completeTurn("direct-unbound-source", { sessionId: session.sessionId,
+      query: "Review unrelated release notes", answer: "Reviewed the notes." });
+    const foreignId = assignedEpisodeId(context.service, foreign);
+    context.db.db.prepare("UPDATE episodes SET status = 'closed' WHERE id = ?").run(foreignId);
+    context.repos.runtime.updateEpisodeReward(foreignId, { rTask: 1, rewardDetail: { source: "fixture-success" } });
+    expect(context.repos.runtime.getSkillClusterForEpisode(foreignId)).toBeUndefined();
+    const before = context.repos.memories.get(cluster.skillMemoryId!)!;
+    const fields = { evidence_anchor_ids: [episodeId, foreignId], support: 2 };
+    context.repos.memories.update({ ...before, properties: { ...before.properties,
+      internal_info: { ...before.properties.internal_info, ...fields,
+        skill: { ...(before.properties.internal_info.skill as Record<string, unknown>), ...fields } } } });
+    await reprocess(context, episodeId, 1);
+    const current = context.repos.memories.get(before.id)!;
+    expect(current.properties.internal_info.evidence_anchor_ids).toEqual([episodeId]);
+    expect(current.properties.internal_info.support).toBe(1);
+    expect(context.repos.runtime.listSkillClusterMembers(cluster.id).map(member => member.episodeId)).toEqual([episodeId]);
+  });
+
+  it.each(["wrong-key", "other-project", "other-legacy-owner", "read-only", "other-source"] as const)(
+    "does not rewrite a Skill without the trusted cluster binding (%s)", async corruption => {
+      const context = await runDirectSkillEpisode({ userId: `binding-${corruption}`, legacyOwner: "legacy-binding", projectId: "binding-project", rTask: 1 });
+      const episodeId = assignedEpisodeId(context.service, context.complete);
+      const skillId = context.repos.runtime.getSkillClusterForEpisode(episodeId)!.skillMemoryId!;
+      const original = context.repos.memories.get(skillId)!;
+      if (corruption === "other-legacy-owner") {
+        context.db.db.prepare("UPDATE memories SET user_id = 'foreign-legacy-owner' WHERE id = ?").run(skillId);
+      } else {
+        const info = corruption === "other-project" ? { ...original.info, project_id: "foreign-project" } : original.info;
+        context.repos.memories.update({ ...original,
+          memoryKey: corruption === "wrong-key" ? "skill:direct:another-cluster" : original.memoryKey,
+          info, properties: { ...original.properties, info, internal_info: { ...original.properties.internal_info,
+            ...(corruption === "read-only" ? { read_only: true } : {}),
+            ...(corruption === "other-source" ? { source: "worker.skill_crystallization.v7" } : {}) } } });
+      }
+      const before = context.repos.memories.get(skillId)!;
+      const generations = context.calls.filter(call => call.operation.startsWith("skill.batch_evolve")).length;
+      await reprocess(context, episodeId, -1);
+      expect(context.repos.memories.get(skillId)).toEqual(before);
+      expect(context.calls.filter(call => call.operation.startsWith("skill.batch_evolve"))).toHaveLength(generations);
+    }
+  );
+
+  it("preserves the stored owner when rebuilding an existing historical Skill", async () => {
+    const context = await runDirectSkillEpisode({ userId: "legacy-existing-skill", legacyOwner: "legacy-existing-owner", rTask: 1 });
+    const episodeId = assignedEpisodeId(context.service, context.complete);
+    const skillId = context.repos.runtime.getSkillClusterForEpisode(episodeId)!.skillMemoryId!;
+    context.db.db.prepare("UPDATE memories SET user_id = 'legacy-existing-owner' WHERE id = ?").run(skillId);
+    await reprocess(context, episodeId, 0.9);
+    expect(context.repos.memories.get(skillId)?.userId).toBe("legacy-existing-owner");
+    expect(context.repos.memories.get(skillId)?.properties.internal_info.evidence_anchor_ids).toEqual([episodeId]);
+    expect(context.repos.memories.get(skillId)?.properties.internal_info.verification).toMatchObject({ ok: true });
   });
 
   it("keeps another task's success evidence when one of two supporting tasks fails", async () => {
@@ -406,8 +597,8 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(context.repos.runtime.getSkillCluster(cluster.id)?.memberCount).toBe(2);
   });
 
-  it("does not restore a manually archived Skill when its source becomes successful again", async () => {
-    const context = await runDirectSkillEpisode({ userId: "direct-manual-archive", rTask: 1 });
+  it.each([undefined, "legacy-direct-owner"])("does not restore a manually archived Skill when its source becomes successful again (owner=%s)", async legacyOwner => {
+    const context = await runDirectSkillEpisode({ legacyOwner, userId: "direct-manual-archive", rTask: 1 });
     const episodeId = assignedEpisodeId(context.service, context.complete);
     const cluster = context.repos.runtime.getSkillClusterForEpisode(episodeId)!;
     await reprocess(context, episodeId, -1);
@@ -417,8 +608,8 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(context.db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE memory_layer = 'Skill'").get()).toEqual({ count: 1 });
   });
 
-  it("preserves independent trials and edited eta when withdrawing task evidence", async () => {
-    const context = await runDirectSkillEpisode({ userId: "direct-trials", rTask: 1 });
+  it.each([undefined, "legacy-direct-owner"])("preserves independent trials and edited eta when withdrawing task evidence (owner=%s)", async legacyOwner => {
+    const context = await runDirectSkillEpisode({ legacyOwner, userId: "direct-trials", rTask: 1 });
     const episodeId = assignedEpisodeId(context.service, context.complete);
     const cluster = context.repos.runtime.getSkillClusterForEpisode(episodeId)!;
     const original = context.repos.memories.get(cluster.skillMemoryId!)!;
@@ -435,8 +626,8 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(context.repos.memories.get(original.id)?.properties.internal_info).toMatchObject(fields);
   });
 
-  it.each(["edit", "archive"] as const)("does not overwrite a concurrent manual %s while the model runs", async action => {
-    const context = await runDirectSkillEpisode({ userId: `direct-concurrent-${action}`, rTask: 1 });
+  it.each([["edit", undefined], ["archive", undefined], ["edit", "legacy-direct-owner"], ["archive", "legacy-direct-owner"]] as const)("does not overwrite a concurrent manual %s while the model runs (owner=%s)", async (action, legacyOwner) => {
+    const context = await runDirectSkillEpisode({ legacyOwner, userId: `direct-concurrent-${action}`, rTask: 1 });
     const episodeId = assignedEpisodeId(context.service, context.complete);
     const skillId = context.repos.runtime.getSkillClusterForEpisode(episodeId)!.skillMemoryId!;
     context.hooks.beforeGeneration = () => {
@@ -450,6 +641,28 @@ describe("MemoryService / evolution / skill cluster", () => {
     const current = context.repos.memories.get(skillId)!;
     if (action === "archive") expect(current.status).toBe("archived");
     else expect(current.memoryValue).toBe("My manually edited workflow");
+  });
+
+
+  it.each([undefined, "legacy-direct-owner"])("rejects a generated draft when the source verdict changes during the model call (owner=%s)", async legacyOwner => {
+    const context = await runDirectSkillEpisode({ legacyOwner, userId: "direct-obsolete-draft", rTask: 1 });
+    const episodeId = assignedEpisodeId(context.service, context.complete);
+    const cluster = context.repos.runtime.getSkillClusterForEpisode(episodeId)!;
+    const original = context.repos.memories.get(cluster.skillMemoryId!)!;
+    let sourceChanges = 0;
+    context.hooks.beforeGeneration = () => {
+      sourceChanges += 1;
+      context.repos.runtime.updateEpisodeReward(episodeId, { rTask: -1, rewardDetail: { source: "changed-during-model" } });
+    };
+    await reprocess(context, episodeId, 0.9);
+    expect(sourceChanges).toBeGreaterThan(0);
+    expect(context.repos.memories.get(original.id)?.version).toBe(original.version);
+    expect(context.repos.memories.get(original.id)?.memoryValue).toBe(original.memoryValue);
+    expect(context.repos.runtime.getSkillCluster(cluster.id)?.processedEpisodeIds).not.toContain(episodeId);
+    context.hooks.beforeGeneration = undefined;
+    await reprocess(context, episodeId, -1);
+    expect(context.repos.memories.get(original.id)?.status).toBe("archived");
+    expect(context.repos.memories.get(original.id)?.properties.internal_info.evidence_anchor_ids).toEqual([]);
   });
 
   it("replaces obsolete failure text instead of merging it back after a source is corrected", async () => {
@@ -470,11 +683,11 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(context.repos.memories.get(original.id)?.properties.internal_info.procedure_json).not.toEqual(oldProcedure);
   });
 
-  it("continues maintaining an existing direct Skill after direct generation is disabled", async () => {
+  it.each([undefined, "legacy-direct-owner"])("continues maintaining an existing direct Skill after direct generation is disabled (owner=%s)", async legacyOwner => {
     const config = structuredClone(LEGACY_TEST_CONFIG);
     config.algorithm.skill.directFromTrace = false;
     config.algorithm.reward.llmScoring = false;
-    const context = await runDirectSkillEpisode({ userId: "direct-mode-switch", rTask: 1, config });
+    const context = await runDirectSkillEpisode({ legacyOwner, userId: "direct-mode-switch", rTask: 1, config });
     const episodeId = assignedEpisodeId(context.service, context.complete);
     const skillId = context.repos.runtime.getSkillClusterForEpisode(episodeId)!.skillMemoryId!;
     const episode = context.repos.runtime.getEpisode(episodeId)!;
@@ -501,20 +714,25 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(context.repos.memories.get(skillId)?.status).toBe("archived");
   });
 
-  it("rolls back Skill content and processed markers together if saving the cluster fails", async () => {
-    const context = await runDirectSkillEpisode({ userId: "direct-atomic", rTask: 1 });
+  it.each([undefined, "legacy-direct-owner"])("rolls back Skill content and processed markers together if saving the cluster fails (owner=%s)", async legacyOwner => {
+    const context = await runDirectSkillEpisode({ legacyOwner, userId: "direct-atomic", rTask: 1 });
     const episodeId = assignedEpisodeId(context.service, context.complete);
     const cluster = context.repos.runtime.getSkillClusterForEpisode(episodeId)!;
     const original = context.repos.memories.get(cluster.skillMemoryId!)!;
     const processed = context.repos.runtime.getEpisode(episodeId)!.meta.clusterProcessedFeatures;
     const saveCluster = RuntimeRepository.prototype.updateSkillCluster;
+    let rejectedWrites = 0;
     context.hooks.beforeGeneration = () => {
       vi.spyOn(RuntimeRepository.prototype, "updateSkillCluster").mockImplementation(function (this: RuntimeRepository, next) {
-        if (next.id === cluster.id && next.processedEpisodeIds.includes(episodeId)) throw new Error("synthetic cluster write failure");
+        if (next.id === cluster.id && next.processedEpisodeIds.includes(episodeId)) {
+          rejectedWrites += 1;
+          throw new Error("synthetic cluster write failure");
+        }
         return saveCluster.call(this, next);
       });
     };
     await reprocess(context, episodeId, 0.9);
+    expect(rejectedWrites).toBeGreaterThan(0);
     expect(context.repos.memories.get(original.id)?.version).toBe(original.version);
     expect(context.repos.memories.get(original.id)?.memoryValue).toBe(original.memoryValue);
     expect(context.repos.runtime.getEpisode(episodeId)?.meta.clusterProcessedFeatures).toBe(processed);
@@ -539,8 +757,8 @@ describe("MemoryService / evolution / skill cluster", () => {
     expect(generations.at(-1)!.messages.find(message => message.role === "user")!.content).toContain("TAIL_CORRECTION");
   });
 
-  it("does not let an old-generation assignment update a reopened task", async () => {
-    const context = await runDirectSkillEpisode({ userId: "direct-old-generation", rTask: 1 });
+  it.each([undefined, "legacy-direct-owner"])("does not let an old-generation assignment update a reopened task (owner=%s)", async legacyOwner => {
+    const context = await runDirectSkillEpisode({ legacyOwner, userId: "direct-old-generation", rTask: 1 });
     const episodeId = assignedEpisodeId(context.service, context.complete);
     const episode = context.repos.runtime.getEpisode(episodeId)!;
     const cluster = context.repos.runtime.getSkillClusterForEpisode(episodeId)!;

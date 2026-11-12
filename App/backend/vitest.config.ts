@@ -32,6 +32,11 @@ const testEnv = {
 };
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "@memmy/local-api-contracts": fileURLToPath(new URL("./local-api-contracts/src/index.ts", import.meta.url)),
+    },
+  },
   test: {
     env: testEnv,
     coverage: {

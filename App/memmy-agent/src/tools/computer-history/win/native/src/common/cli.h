@@ -50,6 +50,7 @@ std::wstring QuoteArgument(std::wstring_view argument);
 
 enum class ControlCommand { Pause, Resume, Stop, Unknown };
 ControlCommand ParseControlCommand(std::string_view line);
+std::optional<std::string> ParseCheckpointId(std::string_view line);
 
 // Splits a byte stream into '\n'-terminated lines (optional trailing '\r' removed). Lines
 // longer than maxLine are discarded whole and counted, so control input stays bounded.

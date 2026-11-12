@@ -1,3 +1,4 @@
+import { ensureLocalMemoryToken } from "../config/local-token.js";
 import { syncMemoryModelCatalog } from "../config/model-catalog.js";
 import { mutateMemoryConfig } from "../config/writer.js";
 import {
@@ -12,8 +13,9 @@ import {
 import crypto from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { asRecord, expandHome, optionalString } from "./config.js";
+import { asRecord, configuredCliEndpoint, expandHome, optionalString, resolveCliConnection, sameHttpOrigin } from "./config.js";
 import {
+  currentInstalledRuntime,
   installMemoryRuntime,
   installedAgents,
   type MemoryRuntimeInstallOptions
@@ -34,7 +36,6 @@ export interface MemoryCliSetupOptions extends MemoryRuntimeInstallOptions {
   configPath?: string;
   dbPath?: string;
   endpoint?: string;
-  token?: string;
   force?: boolean;
   dryRun?: boolean;
   binPath?: string;
@@ -70,6 +71,8 @@ export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promis
     });
   }
 
+  if (!options.dryRun) await ensureLocalMemoryToken(configPath);
+
   let agentInstallations: AgentSkillInstallResult[] = [];
 
   const requestedAgents = options.skipAgentSkills
@@ -102,10 +105,12 @@ export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promis
 
 export async function installMemoryCli(options: MemoryCliSetupOptions = {}): Promise<Record<string, unknown>> {
   const sourceInstall = options.sourcePath !== undefined || options.binPath !== undefined;
-  const paths = setupPaths(options);
+  const previous = sourceInstall ? undefined : await currentInstalledRuntime(options.home);
+  const paths = setupPaths({ ...options, configPath: options.configPath ?? previous?.configPath });
   const memmyConfigExisted = options.memmyConfigPreexisting ?? existsSync(paths.configPath);
   const init = await initMemoryCli({
     ...options,
+    configPath: paths.configPath,
     skipAgentSkills: options.serviceOnly ? true : options.skipAgentSkills
   });
   const migration = options.skipLegacyMigration
@@ -172,18 +177,20 @@ export async function installMemoryCli(options: MemoryCliSetupOptions = {}): Pro
 }
 
 export async function upgradeMemoryCli(options: MemoryCliSetupOptions = {}): Promise<Record<string, unknown>> {
-  const paths = setupPaths(options);
+  const installed = await currentInstalledRuntime(options.home);
+  const paths = setupPaths({ ...options, configPath: options.configPath ?? installed?.configPath });
   const migration = options.skipLegacyMigration
     ? undefined
     : await migrateLegacyLocalPlugins({
         configPath: paths.configPath,
         dbPath: paths.dbPath,
-        memmyConfigExisted: existsSync(paths.configPath),
+        memmyConfigExisted: options.memmyConfigPreexisting ?? existsSync(paths.configPath),
         configSource: options.configSource,
         legacyRoot: options.legacyRoot,
         nonInteractive: options.nonInteractive,
         dryRun: options.dryRun
       });
+  if (!options.dryRun) await ensureLocalMemoryToken(paths.configPath, false, options);
   const agents = options.agents?.length
     ? options.agents
     : await installedAgents(options.home);
@@ -191,6 +198,7 @@ export async function upgradeMemoryCli(options: MemoryCliSetupOptions = {}): Pro
     ? await installMemmyMemorySkillForAgents(agents, {
         agentRoot: options.agentRoot,
         assetRoot: options.assetRoot,
+        memmyConfigPath: paths.configPath,
         dryRun: options.dryRun
       })
     : [];
@@ -237,7 +245,8 @@ function setupPaths(options: MemoryCliSetupOptions): {
 } {
   const home = resolve(expandHome(options.home ?? "~/.memmy"));
   const configPath = resolve(expandHome(options.configPath ?? join(home, "config.yaml")));
-  const storage = existingMemoryStorage(configPath);
+  const memory = existingMemoryConfig(configPath);
+  const storage = asRecord(memory.storage);
   return {
     home,
     configPath,
@@ -246,16 +255,14 @@ function setupPaths(options: MemoryCliSetupOptions): {
         ?? optionalString(storage.sqlitePath)
         ?? join(home, "memory-service", "memory.sqlite")
     )),
-    endpoint: options.endpoint
-      ?? optionalString(storage.endpoint)
-      ?? "http://127.0.0.1:18960"
+    endpoint: options.endpoint ?? configuredCliEndpoint(memory)
   };
 }
 
-function existingMemoryStorage(configPath: string): Record<string, unknown> {
+function existingMemoryConfig(configPath: string): Record<string, unknown> {
   if (!existsSync(configPath)) return {};
   const parsed = parseYaml(readFileSync(configPath, "utf8")) as unknown;
-  return asRecord(asRecord(asRecord(parsed).memmyMemory).storage);
+  return asRecord(asRecord(parsed).memmyMemory);
 }
 
 function installedAgentIds(result: Record<string, unknown>): string[] {
@@ -327,7 +334,15 @@ function setupMemmyMemoryConfig(
   const storage = asRecord(existing.storage);
   const algorithm = asRecord(existing.algorithm);
   const agentAccess = asRecord(existing.agentAccess);
-  const existingToken = optionalString(storage.token);
+  let existingToken = optionalString(storage.token) ?? optionalString(existing.token);
+  // Validate against the original config before install can persist a new endpoint or token.
+  if (!options.token) {
+    const targetToken = resolveCliConnection(existing, options.endpoint).token;
+    if (!targetToken && (existingToken || process.env.MEMMY_MEMORY_TOKEN?.trim() || process.env.MEMORY_SERVICE_TOKEN?.trim())) {
+      throw new Error("Changing the Memory service origin requires a token for the new endpoint");
+    }
+    if (!sameHttpOrigin(options.endpoint, configuredCliEndpoint(existing))) existingToken = targetToken;
+  }
   const token = options.token
     ?? existingToken
     ?? (options.generateTokenIfMissing ? crypto.randomBytes(32).toString("hex") : undefined);

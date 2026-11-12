@@ -294,6 +294,33 @@ describe("Memmy release workflow metadata", () => {
   });
 });
 
+describe("Draft sync ID workflow wiring", () => {
+  it("passes the completed Draft ID to the signal without changing its source binding", () => {
+    const producer = draftSteps.find((step) => step.name === "Create draft release and upload every asset")!;
+    const signal = draftSteps.find((step) => step.name === "Verify completed draft for synchronization")!;
+    expect(producer.id).toBe("draft");
+    expect(signal.env).toMatchObject({
+      SYNC_RELEASE_ID: "${{ steps.draft.outputs.release_id }}",
+      SYNC_TAG: "${{ steps.release.outputs.tag }}",
+      SYNC_SOURCE_SHA: "${{ steps.release.outputs.target_sha }}",
+      SYNC_CONTROLLER_SHA: "${{ github.workflow_sha }}",
+      SYNC_ASSET_DIR: "release-assets",
+    });
+    expect(signal.run).not.toContain("release delete");
+    expect(draftSteps.find((step) => step.name === "Publish CodingAgent synchronization request")?.if)
+      .toBe("${{ steps.sync-source.outputs.sync_ready == 'true' }}");
+  });
+
+  it("keeps read-only contract CI triggered by changes to the ID producer and consumer", () => {
+    const validation = YAML.parse(readFileSync(resolve(repoRoot, ".github/workflows/release-workflow-validation.yml"), "utf8"));
+    const required = ["scripts/main-sync/**", "tests/main-sync*", ".github/workflows/main-sync.yml", ".github/main-sync.json"];
+    expect(validation.on.pull_request.paths).toEqual(expect.arrayContaining(required));
+    expect(validation.on.push.paths).toEqual(expect.arrayContaining(required));
+    expect(validation.permissions).toEqual({ contents: "read" });
+    expect(validation.on.pull_request_target).toBeUndefined();
+  });
+});
+
 describe("GitHub Draft Release v2 workflow", () => {
   it("runs release contracts in read-only PR CI without release credentials or packaging", () => {
     const validation = YAML.parse(readFileSync(resolve(repoRoot, ".github/workflows/release-workflow-validation.yml"), "utf8"));

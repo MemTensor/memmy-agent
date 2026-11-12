@@ -1,5 +1,10 @@
+import {readMemoryPanelDetail} from "../../api/memory-runtime-client.js";
+import { usePanelReadGuard, usePanelVisibilityLifecycle } from "./panel-visibility.js";
+import { canPreservePanelResult } from "./panel-view-status.js";
+import { usePanelViewStatus } from "./panel-view-status.js";
+import { usePanelLoad } from "./use-panel-load.js";
 /** World model sub page module. */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   GetMemoryOutput,
   MemoryListItem,
@@ -88,8 +93,8 @@ export function loadWorldModelDataPage(client: MemoryRuntimeClient, query: strin
 }
 
 /** Reads load world model detail. */
-export function loadWorldModelDetail(client: MemoryRuntimeClient, worldModelId: string): Promise<GetMemoryOutput> {
-  return client.getMemory(worldModelId);
+export function loadWorldModelDetail(client: MemoryRuntimeClient, worldModelId: string, signal?: AbortSignal): Promise<GetMemoryOutput> {
+  return readMemoryPanelDetail(client,worldModelId,signal);
 }
 
 function worldModelCacheKeys(query: string, page: number): string[] {
@@ -101,16 +106,26 @@ function worldModelCacheKeys(query: string, page: number): string[] {
 
 /** Handles world model sub page. */
 export function WorldModelSubPage(props: WorldModelSubPageProps) {
+  const canRead = usePanelReadGuard(props.client);
   const { t } = useTranslation();
   const { track } = useAnalytics();
   const worldModelFilterLayer = "L3";
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const detailGeneration = useRef(0);
+  const detailAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => { detailGeneration.current++; detailAbort.current?.abort(); }, [props.client]);
+  const requestIdRef = useRef(0);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const submitSearch = usePanelLoad({ query, identity: [props.client, page, t], load: () => search(),
+    invalidate: () => { requestIdRef.current++; requestAbortRef.current?.abort(); } });
   const [state, setState] = useState<RemoteData<PanelItemsOutput>>({ status: "loading" });
   const [detail, setDetail] = useState<WorldModelDetailState>(null);
   const [selectedWorldModelId, setSelectedWorldModelId] = useState<string | null>(null);
 
-  function search(nextPage = page, options: { useCache?: boolean } = {}): Promise<PanelItemsOutput | undefined> {
+  const viewStatus=usePanelViewStatus(props.client,"L3",()=>{requestIdRef.current++; requestAbortRef.current?.abort(); closeWorldModel(); setState({status:"loading"});},()=>search());
+  function search(nextPage = page, options: { useCache?: boolean; preserve?:boolean } = {}): Promise<PanelItemsOutput | undefined> {
+    if (!canRead()) return Promise.resolve(undefined);
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -118,29 +133,45 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
     }
 
     const normalizedPage = normalizePage(nextPage);
+    requestAbortRef.current?.abort();
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
+    const requestId = ++requestIdRef.current;
     const cacheKeys = worldModelCacheKeys(query, normalizedPage);
-    const cached = (options.useCache ?? true) ? readMemoryPanelCacheFirst<PanelItemsOutput>(cacheKeys) : null;
+    const cached = (options.useCache ?? true) && !props.client.resetPanelView ? readMemoryPanelCacheFirst<PanelItemsOutput>(cacheKeys) : null;
     if (cached) {
       setState({ status: "ready", data: cached });
     } else {
       setState((current) => current.status === "ready" ? current : { status: "loading" });
     }
 
-    return loadWorldModelDataPage(props.client, query, normalizedPage)
+    return props.client.listPanelItems({ layer: "L3", q: query.trim() || undefined, page: normalizedPage }, controller.signal)
       .then((data) => {
-        writeMemoryPanelCaches(cacheKeys, data);
+        if (requestId !== requestIdRef.current) return undefined;
+        if (!props.client?.resetPanelView) writeMemoryPanelCaches(cacheKeys, data);
+        viewStatus.clear();
         setState({ status: "ready", data });
+        if (data.page !== normalizedPage) setPage(data.page);
         return data;
       })
       .catch((error) => {
-        setState({ status: "error", message: toErrorMessage(error) });
+        if (requestId !== requestIdRef.current) return undefined;
+        setState(current => options.preserve && canPreservePanelResult(error) && current.status === "ready" ? current : { status: "error", message: toErrorMessage(error) });
         throw error;
       });
   }
 
-  function openWorldModelById(id: string) {
+  usePanelVisibilityLifecycle(props.client, () => {
+    detailGeneration.current++; detailAbort.current?.abort(); setDetail(null);
+  }, () => { if (selectedWorldModelId) openWorldModelById(selectedWorldModelId, false); });
+
+  function openWorldModelById(id: string, trackOpen = true) {
+    if (!canRead()) return;
+    detailAbort.current?.abort();
+    const controller = new AbortController(); detailAbort.current = controller;
+    const generation = ++detailGeneration.current;
     setSelectedWorldModelId(id);
-    track(buildMemoryUiDetailOpenedEvent({
+    if (trackOpen) track(buildMemoryUiDetailOpenedEvent({
       subPage: "world-model",
       filterLayer: worldModelFilterLayer
     }));
@@ -150,9 +181,9 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
     }
 
     setDetail({ status: "loading" });
-    void loadWorldModelDetail(props.client, id)
-      .then((data) => setDetail({ status: "ready", data }))
-      .catch((error) => setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }));
+    void loadWorldModelDetail(props.client, id, controller.signal)
+      .then((data) => { if (generation === detailGeneration.current && !controller.signal.aborted && canRead()) setDetail({ status: "ready", data }); })
+      .catch((error) => { if (generation === detailGeneration.current && !controller.signal.aborted && canRead()) setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }); });
   }
 
   function openWorldModel(item: MemoryListItem) {
@@ -160,6 +191,8 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
   }
 
   function closeWorldModel() {
+    detailAbort.current?.abort();
+    detailGeneration.current++;
     setDetail(null);
     setSelectedWorldModelId(null);
   }
@@ -176,7 +209,7 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
     }));
     clearMemoryPanelCache();
     closeWorldModel();
-    void search(page, { useCache: false }).catch(() => undefined);
+    void viewStatus.reloadCurrent().catch(() => undefined);
   }
 
   function changeQuery(value: string) {
@@ -188,7 +221,7 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
   function runSearch() {
     closeWorldModel();
     setPage(1);
-    void search(1)
+    void submitSearch(() => search(1), [props.client, 1, t])
       .then((data) => {
         if (!data) {
           return;
@@ -210,12 +243,8 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
 
     closeWorldModel();
     setPage(normalizedPage);
-    void search(normalizedPage).catch(() => undefined);
   }
 
-  useEffect(() => {
-    void search().catch(() => undefined);
-  }, [props.client, t]);
 
   useEffect(() => {
     if (props.openRequest) {
@@ -233,7 +262,8 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
       onSearch={runSearch}
       onPageChange={changePage}
       onRefresh={async () => {
-        const data = await search(page, { useCache: false });
+        props.client?.refreshPanelView?.("L3");
+        const data = await search(page, { useCache: false, preserve:true });
         if (data) {
           track(buildMemoryUiPanelRefreshedEvent({
             subPage: "world-model",

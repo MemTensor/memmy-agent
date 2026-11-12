@@ -3,8 +3,12 @@ import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryDb, type LlmClient } from "../../../src/index.js";
+import { Repositories } from "../../../src/storage/repositories.js";
+import { l2ComparisonScope } from "../../../src/service/evolution/l2-comparison-scope.js";
+import { l2SupportRelation } from "../../../src/service/evolution/l2-content-revision.js";
 import {
   insertActivePolicyMemory,
+  insertTracePolicyLinkForTest,
   insertActiveSkillMemoryForTest,
   makeTraceEligibleForL2,
   queueSkillCrystallizationJobForTest,
@@ -40,7 +44,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       answer: "Run pytest, inspect the failure, apply the fix, and verify the result."
     }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_bc24",
       userId,
       sessionId: session.sessionId,
@@ -195,7 +199,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
-       WHERE user_id = 'user-skill-guard'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'`
     ).get() as { count: number };
     expect(skillCount.count).toBe(0);
@@ -218,7 +222,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_fresh_skill_skip",
       userId: "user-fresh-skill-skip",
       sessionId: session.sessionId,
@@ -249,7 +253,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const createdSkill = db.db.prepare(
       `SELECT id, updated_at
        FROM memories
-       WHERE user_id = 'user-fresh-skill-skip'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'
        LIMIT 1`
     ).get() as { id: string; updated_at: string } | undefined;
@@ -298,7 +302,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     ).get() as { after_json: string } | undefined;
     expect(JSON.parse(skipped!.after_json)).toMatchObject({
       policyId: "policy_fresh_skill_skip",
-      reason: "llm-failed: skill.crystallize.invalid: missing retrieval_blurb"
+      reason: "attempt_verified"
     });
 
     db.close();
@@ -322,7 +326,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy-compatible-skill-target",
       userId,
       sessionId: session.sessionId,
@@ -393,9 +397,9 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const rows = db.db.prepare(
       `SELECT id, status, properties_json
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'Skill'
+       WHERE 1=1 AND memory_layer = 'Skill'
        ORDER BY id`
-    ).all(userId) as Array<{ id: string; status: string; properties_json: string }>;
+    ).all() as Array<{ id: string; status: string; properties_json: string }>;
     expect(rows).toHaveLength(2);
     const active = rows.find((row) => row.status !== "archived");
     const archived = rows.find((row) => row.status === "archived");
@@ -443,7 +447,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     const policyId = "policy-shared-by-distinct-skills";
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: policyId,
       userId,
       sessionId: session.sessionId,
@@ -492,9 +496,9 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const rows = db.db.prepare(
       `SELECT id, status
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'Skill'
+       WHERE 1=1 AND memory_layer = 'Skill'
        ORDER BY id`
-    ).all(userId) as Array<{ id: string; status: string }>;
+    ).all() as Array<{ id: string; status: string }>;
     expect(rows).toHaveLength(2);
     expect(rows.map((row) => row.id)).toEqual([
       "skill-shared-policy-pytest",
@@ -503,15 +507,214 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const merges = db.db.prepare(
       `SELECT entity_id, after_json
        FROM memory_change_log
-       WHERE user_id = ? AND change_type = 'skill_merged_into_canonical'`
-    ).all(userId) as Array<{ entity_id: string; after_json: string }>;
+       WHERE 1=1 AND change_type = 'skill_merged_into_canonical'`
+    ).all() as Array<{ entity_id: string; after_json: string }>;
     expect(merges).toEqual([]);
     expect(rows.map((row) => row.status)).toEqual(["resolving", "resolving"]);
+
+    const attemptKeys = db.db.prepare(
+      `SELECT key
+       FROM runtime_kv
+       WHERE key LIKE 'skill_crystallization_attempt:${policyId}:%'
+       ORDER BY key`
+    ).all() as Array<{ key: string }>;
+    expect(attemptKeys.map((row) => row.key)).toEqual([
+      `skill_crystallization_attempt:${policyId}:skill-shared-policy-pytest`,
+      `skill_crystallization_attempt:${policyId}:skill-shared-policy-terraform`
+    ]);
+    const successfulRebuilds = () => (db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM api_logs
+       WHERE tool_name = 'skill_evolve' AND success = 1`
+    ).get() as { count: number }).count;
+    const rebuildsAfterFirstFanout = successfulRebuilds();
+
+    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    queueSkillCrystallizationJobForTest(db, {
+      id: "job-shared-policy-skill-fanout-repeat",
+      userId,
+      sessionId: session.sessionId,
+      episodeId: assignedEpisodeId(service, complete),
+      policyId
+    });
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    expect(successfulRebuilds()).toBe(rebuildsAfterFirstFanout);
 
     db.close();
   });
 
-  it("debounces repeated skill crystallization for the same policy during cooldown", async () => {
+  it("keeps the attempt ledger across trace row rewrites and records prompt upgrades without calling the model", async () => {
+    const calls: Array<{ messages: Array<{ role: string; content: string }>; options: { operation: string } }> = [];
+    const baseSkillLlm = createSkillRebuildLlm(calls);
+    let beforeSkillReply = () => {};
+    const skillLlm: LlmClient = {
+      ...baseSkillLlm,
+      async completeJson<T extends Record<string, unknown>>(messages: Parameters<LlmClient["completeJson"]>[0],
+        options: Parameters<LlmClient["completeJson"]>[1]): Promise<T> {
+        const result = await baseSkillLlm.completeJson<T>(messages, options);
+        if (options.operation.startsWith("skill.")) beforeSkillReply();
+        return result;
+      }
+    };
+    const { db, service } = createTestService({ skillLlm });
+    const userId = "user-skill-ledger";
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "jiang", userId },
+      workspaceId: "workspace-skill-ledger"
+    });
+    const complete = await service.completeTurn("turn-skill-ledger", {
+      sessionId: session.sessionId,
+      episodeId: "episode-skill-ledger",
+      query: "python pytest inspect failure retry after fixing issue",
+      answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
+    });
+    const episodeId = assignedEpisodeId(service, complete);
+    insertSupportedPolicyMemory(db, {
+      id: "policy_skill_ledger",
+      userId,
+      sessionId: session.sessionId,
+      agentId: "codex",
+      appId: "workspace-skill-ledger",
+      profileId: "jiang",
+      sourceTraceId: complete.l1MemoryId,
+      sourceEpisodeId: episodeId
+    });
+    const skillCalls = () => calls.filter((call) => call.options.operation.startsWith("skill.")).length;
+    const runJob = async (id: string) => {
+      db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+      queueSkillCrystallizationJobForTest(db, { id, userId, sessionId: session.sessionId, episodeId, policyId: "policy_skill_ledger" });
+      await service.runWorkerOnce(10);
+    };
+    const lastSkipReason = () => (JSON.parse((db.db.prepare(
+      `SELECT after_json FROM memory_change_log
+       WHERE memory_id = 'policy_skill_ledger' AND change_type = 'skill_crystallization_skipped'
+       ORDER BY seq DESC LIMIT 1`
+    ).get() as { after_json: string }).after_json) as { reason: string }).reason;
+    const ledgerRow = () => db.db.prepare(
+      `SELECT key, value_json
+       FROM runtime_kv
+       WHERE key LIKE 'skill_crystallization_attempt:policy_skill_ledger:%'
+       ORDER BY key
+       LIMIT 1`
+    ).get() as { key: string; value_json: string };
+    const ledger = () => JSON.parse(ledgerRow().value_json) as {
+      fingerprint: string;
+      promptKey: string;
+      status: string;
+      failureCount: number;
+    };
+
+    await runJob("job_skill_ledger_create");
+    expect(skillCalls()).toBe(1);
+    expect(ledger().status).toBe("verified");
+
+    // Reward and embedding jobs rewrite trace rows without changing the evidence text.
+    db.db.prepare(`UPDATE memories SET updated_at = ? WHERE id = ?`)
+      .run(new Date(Date.now() + 60_000).toISOString(), complete.l1MemoryId);
+    await runJob("job_skill_ledger_touch");
+    expect(skillCalls()).toBe(1);
+    expect(lastSkipReason()).toBe("attempt_verified");
+
+    // A semantic evidence change must earn a new model call even when the text is unchanged.
+    db.db.prepare(`UPDATE memories SET tags_json = ? WHERE id = ?`).run(
+      JSON.stringify(["python", "pytest", "focused-verification"]),
+      complete.l1MemoryId
+    );
+    await runJob("job_skill_ledger_tag_change");
+    expect(skillCalls()).toBe(2);
+    expect(ledger().status).toBe("verified");
+
+    // Simulate a ledger written by an older prompt version.
+    const stale = { ...ledger(), promptKey: "skill.rebuild.v3/verifier.v1" };
+    db.db.prepare(`UPDATE runtime_kv SET value_json = ? WHERE key = ?`)
+      .run(JSON.stringify(stale), ledgerRow().key);
+    await runJob("job_skill_ledger_upgrade");
+    expect(skillCalls()).toBe(2);
+    expect(lastSkipReason()).toBe("prompt_upgrade_baseline");
+    expect(ledger()).toMatchObject({ status: "verified", promptKey: "skill.rebuild.v6/verifier.v2" });
+
+    // Skills created before the ledger existed get a baseline, not a regeneration.
+    db.db.prepare(`DELETE FROM runtime_kv WHERE key = ?`).run(ledgerRow().key);
+    await runJob("job_skill_ledger_missing");
+    expect(skillCalls()).toBe(2);
+    expect(lastSkipReason()).toBe("prompt_upgrade_baseline");
+    expect(ledger().status).toBe("verified");
+
+    // A rejected draft from an older verifier must be retried under the fixed verifier.
+    const rejected = {
+      ...ledger(),
+      promptKey: "skill.rebuild.v3/verifier.v1",
+      status: "rejected",
+      failureCount: 3,
+      failureKind: "verification",
+      reason: "old verifier rejected it"
+    };
+    db.db.prepare(`UPDATE runtime_kv SET value_json = ? WHERE key = ?`)
+      .run(JSON.stringify(rejected), ledgerRow().key);
+    await runJob("job_skill_ledger_rejected_upgrade");
+    expect(skillCalls()).toBe(3);
+    expect(ledger()).toMatchObject({
+      status: "verified",
+      promptKey: "skill.rebuild.v6/verifier.v2",
+      failureCount: 0
+    });
+
+    // A new semantic L2 revision must not inherit an exhausted older-input
+    // ledger; the target branch's evidence CAS still fences the fresh model call.
+    const priorLedger = { ...ledger(), status: "rejected", failureCount: 3, failureKind: "verification" };
+    db.db.prepare(`UPDATE runtime_kv SET value_json = ? WHERE key = ?`)
+      .run(JSON.stringify(priorLedger), ledgerRow().key);
+    const revisedEvidence = await service.completeTurn("turn-skill-ledger-revision", {
+      sessionId: session.sessionId,
+      query: "Inspect the exact pytest failure before retrying the focused test.",
+      answer: "Read the failure, apply the targeted fix, and rerun that exact pytest test."
+    });
+    makeTraceEligibleForL2(db, revisedEvidence.l1MemoryId);
+    const policyRow = db.db.prepare(`SELECT properties_json FROM memories WHERE id = 'policy_skill_ledger'`)
+      .get() as { properties_json: string };
+    const properties = JSON.parse(policyRow.properties_json) as {
+      internal_info: { policy: Record<string, unknown> };
+    };
+    Object.assign(properties.internal_info.policy, {
+      content_revision: 2,
+      procedure: "Inspect the exact failure, apply the targeted fix, and rerun the focused pytest test.",
+      source_trace_ids: [revisedEvidence.l1MemoryId],
+      source_episode_ids: [assignedEpisodeId(service, revisedEvidence)]
+    });
+    db.db.prepare(`UPDATE memories SET properties_json = ?, version = version + 1 WHERE id = 'policy_skill_ledger'`)
+      .run(JSON.stringify(properties));
+    const revisionRepos = new Repositories(db.db);
+    revisionRepos.runtime.insertTracePolicyLink({
+      userId: revisionRepos.memories.get(revisedEvidence.l1MemoryId)!.userId,
+      l1MemoryId: revisedEvidence.l1MemoryId,
+      l2MemoryId: "policy_skill_ledger",
+      relation: l2SupportRelation(revisionRepos.memories.get("policy_skill_ledger")!),
+      strength: 1,
+      createdAt: new Date().toISOString()
+    });
+    const skillBeforeRevision = db.db.prepare(`SELECT id, version, memory_value, properties_json FROM memories WHERE memory_layer = 'Skill'`)
+      .all();
+    beforeSkillReply = () => db.db.prepare(`UPDATE memories SET version = version + 1 WHERE id = ?`)
+      .run(revisedEvidence.l1MemoryId);
+    await runJob("job_skill_ledger_revision_stale_evidence");
+    expect(skillCalls()).toBe(4);
+    expect(db.db.prepare(`SELECT id, version, memory_value, properties_json FROM memories WHERE memory_layer = 'Skill'`).all())
+      .toEqual(skillBeforeRevision);
+    expect(db.db.prepare(`SELECT status FROM evolution_jobs WHERE id = 'job_skill_ledger_revision_stale_evidence'`).get())
+      .toMatchObject({ status: "failed" });
+    expect(ledger()).toMatchObject(priorLedger);
+
+    beforeSkillReply = () => {};
+    await runJob("job_skill_ledger_revision_current_evidence");
+    expect(skillCalls()).toBe(5);
+    expect(ledger()).toMatchObject({ status: "verified", failureCount: 0 });
+    expect(ledger().fingerprint).not.toBe(priorLedger.fingerprint);
+
+    db.close();
+  });
+
+  it("debounces a verified skill crystallization with the persistent attempt ledger", async () => {
     const root = createTestRoot("mindock-memory-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -555,7 +758,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_skill_cooldown",
       userId: "user-skill-cooldown",
       sessionId: session.sessionId,
@@ -586,7 +789,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const createdSkill = db.db.prepare(
       `SELECT id, updated_at
        FROM memories
-       WHERE user_id = 'user-skill-cooldown'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'
        LIMIT 1`
     ).get() as { id: string; updated_at: string } | undefined;
@@ -619,7 +822,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skills = db.db.prepare(
       `SELECT id, updated_at
        FROM memories
-       WHERE user_id = 'user-skill-cooldown'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'`
     ).all() as Array<{ id: string; updated_at: string }>;
     expect(skills).toEqual([createdSkill]);
@@ -634,7 +837,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     expect(JSON.parse(skipped!.after_json)).toMatchObject({
       policyId: "policy_skill_cooldown",
       skillId: createdSkill!.id,
-      reason: "cooldown"
+      reason: "attempt_verified"
     });
 
     db.close();
@@ -656,7 +859,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_source_policy_skill_skip",
       userId: "user-source-policy-skill-skip",
       sessionId: session.sessionId,
@@ -762,7 +965,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillRows = db.db.prepare(
       `SELECT id, memory_key
        FROM memories
-       WHERE user_id = 'user-source-policy-skill-skip'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'`
     ).all() as Array<{ id: string; memory_key: string }>;
     expect(skillRows).toEqual([{
@@ -801,7 +1004,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_archived_skill_recreate",
       userId: "user-archived-skill-recreate",
       sessionId: session.sessionId,
@@ -900,7 +1103,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillRows = db.db.prepare(
       `SELECT id, status, updated_at, properties_json
        FROM memories
-       WHERE user_id = 'user-archived-skill-recreate'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'
        ORDER BY created_at ASC`
     ).all() as Array<{ id: string; status: string; updated_at: string; properties_json: string }>;
@@ -919,7 +1122,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const created = db.db.prepare(
       `SELECT memory_id, before_json, after_json
        FROM memory_change_log
-       WHERE user_id = 'user-archived-skill-recreate'
+       WHERE user_id IS NOT NULL
          AND kind = 'skill'
          AND change_type = 'create'
        ORDER BY seq DESC
@@ -948,7 +1151,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_skill_reward_drift",
       userId: "user-skill-reward-drift",
       sessionId: session.sessionId,
@@ -979,7 +1182,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillRow = db.db.prepare(
       `SELECT id
        FROM memories
-       WHERE user_id = 'user-skill-reward-drift'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'
        LIMIT 1`
     ).get() as { id: string } | undefined;
@@ -1161,7 +1364,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       makeTraceEligibleForL2(db, complete.l1MemoryId);
     }
     const policyId = "policy_default_skill_name";
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: policyId,
       userId,
       sessionId: session.sessionId,
@@ -1190,9 +1393,9 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillRow = db.db.prepare(
       `SELECT memory_key, properties_json
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'Skill'
+       WHERE 1=1 AND memory_layer = 'Skill'
        LIMIT 1`
-    ).get(userId) as { memory_key: string; properties_json: string };
+    ).get() as { memory_key: string; properties_json: string };
     const skillSourceProperties = JSON.parse(skillRow.properties_json) as {
       internal_info?: { source_policy_ids?: string[] };
     };
@@ -1201,9 +1404,9 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const policyRow = db.db.prepare(
       `SELECT id, properties_json
        FROM memories
-       WHERE id = ? AND user_id = ? AND memory_layer = 'L2'
+       WHERE id = ? AND 1=1 AND memory_layer = 'L2'
        LIMIT 1`
-    ).get(sourcePolicyId!, userId) as { id: string; properties_json: string };
+    ).get(sourcePolicyId!) as { id: string; properties_json: string };
     const policyProperties = JSON.parse(policyRow.properties_json) as {
       internal_info?: {
         title?: string;
@@ -1355,7 +1558,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       makeTraceEligibleForL2(db, complete.l1MemoryId);
     }
     const policyId = "policy_invalid_string_skill_steps";
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: policyId,
       userId,
       sessionId: session.sessionId,
@@ -1384,23 +1587,71 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'Skill'`
-    ).get(userId) as { count: number };
+       WHERE 1=1 AND memory_layer = 'Skill'`
+    ).get() as { count: number };
     expect(skillCount.count).toBe(0);
     const skippedRows = db.db.prepare(
       `SELECT after_json
        FROM memory_change_log
-       WHERE user_id = ?
+       WHERE 1=1
          AND kind = 'skill'
          AND op = 'skipped'
          AND change_type = 'skill_crystallization_skipped'
        ORDER BY seq DESC`
-    ).all(userId) as Array<{ after_json: string }>;
+    ).all() as Array<{ after_json: string }>;
     const skippedReasons = skippedRows.map((row) => {
       const after = JSON.parse(row.after_json) as { reason?: string };
       return after.reason;
     });
     expect(skippedReasons).toContain("llm-failed: skill.crystallize.invalid: missing steps");
+    const failureLog = db.db.prepare(
+      `SELECT success, input_json, output_json
+       FROM api_logs
+       WHERE tool_name = 'skill_generate'
+         AND json_extract(input_json, '$.policyId') = ?
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get(policyId) as { success: number; input_json: string; output_json: string } | undefined;
+    expect(failureLog?.success).toBe(0);
+    expect(JSON.parse(failureLog!.input_json)).toMatchObject({
+      phase: "failed",
+      policyId,
+      failureKind: "llm_invalid"
+    });
+    expect(JSON.parse(failureLog!.output_json)).toMatchObject({
+      kind: "skill.crystallize.failed",
+      policyId,
+      failureKind: "llm_invalid"
+    });
+    const attemptRow = db.db.prepare(
+      `SELECT value_json
+       FROM runtime_kv
+       WHERE key = ?`
+    ).get(`skill_crystallization_attempt:${policyId}:new`) as { value_json: string } | undefined;
+    expect(JSON.parse(attemptRow!.value_json)).toMatchObject({
+      status: "rejected",
+      failureKind: "llm_invalid",
+      failureCount: 1,
+      reason: "llm-failed: skill.crystallize.invalid: missing steps"
+    });
+    const skillCallsBeforeBackoff = calls.filter((call) => call.options.operation === "skill.crystallize").length;
+    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    queueSkillCrystallizationJobForTest(db, {
+      id: "job_invalid_string_skill_steps_backoff",
+      userId,
+      sessionId: session.sessionId,
+      episodeId: assignedEpisodeId(service, first),
+      policyId
+    });
+    await service.runWorkerOnce(20);
+    expect(calls.filter((call) => call.options.operation === "skill.crystallize")).toHaveLength(skillCallsBeforeBackoff);
+    const failureLogCount = db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM api_logs
+       WHERE tool_name = 'skill_generate'
+         AND json_extract(input_json, '$.policyId') = ?`
+    ).get(policyId) as { count: number };
+    expect(failureLogCount.count).toBe(1);
 
     db.close();
   });
@@ -1499,7 +1750,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       makeTraceEligibleForL2(db, complete.l1MemoryId);
     }
     const policyId = "policy_refusal_skill_draft";
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: policyId,
       userId,
       sessionId: session.sessionId,
@@ -1528,30 +1779,62 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'Skill'`
-    ).get(userId) as { count: number };
+       WHERE 1=1 AND memory_layer = 'Skill'`
+    ).get() as { count: number };
     expect(skillCount.count).toBe(0);
     const skippedRows = db.db.prepare(
       `SELECT after_json
        FROM memory_change_log
-       WHERE user_id = ?
+       WHERE 1=1
          AND kind = 'skill'
          AND op = 'skipped'
          AND change_type = 'skill_crystallization_skipped'
        ORDER BY seq DESC`
-    ).all(userId) as Array<{ after_json: string }>;
+    ).all() as Array<{ after_json: string }>;
     const skippedReasons = skippedRows.map((row) => {
       const after = JSON.parse(row.after_json) as { reason?: string };
       return after.reason;
     });
     expect(skippedReasons).toContain("llm-refusal");
+    const failureLog = db.db.prepare(
+      `SELECT success, input_json, output_json
+       FROM api_logs
+       WHERE tool_name = 'skill_generate'
+         AND json_extract(input_json, '$.policyId') = ?
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get(policyId) as { success: number; input_json: string; output_json: string } | undefined;
+    expect(failureLog?.success).toBe(0);
+    expect(JSON.parse(failureLog!.output_json)).toMatchObject({
+      kind: "skill.crystallize.failed",
+      policyId,
+      failureKind: "llm_refusal"
+    });
 
     db.close();
   });
 });
 
-function createSkillRebuildLlm(): LlmClient {
-  const base = createNoToolSkillLlm();
+// These lifecycle fixtures retain historical Policy owners. The public capture
+// API writes DEVICE-owned traces, so establish the accepted source association
+// explicitly instead of relying on an unverified cross-owner ID in JSON.
+function insertSupportedPolicyMemory(db: MemoryDb, input: Parameters<typeof insertActivePolicyMemory>[1]): void {
+  insertActivePolicyMemory(db, input);
+  // Absent appId is persisted as NULL by normal memory writes, not an empty
+  // project identifier from this older SQL helper's required string argument.
+  if (input.appId === "") db.db.prepare("UPDATE memories SET app_id = NULL WHERE id = ?").run(input.id);
+  const repos = new Repositories(db.db);
+  const source = repos.memories.get(input.sourceTraceId)!;
+  const policy = repos.memories.get(input.id)!;
+  expect(l2ComparisonScope(source), "synthetic Policy must share its real source scope").toBe(l2ComparisonScope(policy));
+  insertTracePolicyLinkForTest(db, { userId: source.userId, l1MemoryId: source.id, l2MemoryId: policy.id });
+}
+
+function createSkillRebuildLlm(calls: Array<{
+  messages: Array<{ role: string; content: string }>;
+  options: { operation: string };
+}> = []): LlmClient {
+  const base = createNoToolSkillLlm(calls);
   return {
     ...base,
     async completeJson<T extends Record<string, unknown>>(
@@ -1560,6 +1843,7 @@ function createSkillRebuildLlm(): LlmClient {
     ): Promise<T> {
       if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
       if (options.operation === "skill.rebuild.v6") {
+        calls.push({ messages, options });
         return {
           name: "pytest_retry_workflow",
           retrieval_blurb: "Use for pytest failures that require inspection, a focused retry, and verification.",

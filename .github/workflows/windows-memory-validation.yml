@@ -24,6 +24,8 @@ jobs:
   validate:
     runs-on: windows-2025
     timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
     defaults:
       run:
         shell: pwsh

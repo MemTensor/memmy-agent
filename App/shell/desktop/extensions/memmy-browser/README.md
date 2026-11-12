@@ -38,12 +38,61 @@ separate browser closes when Memmy exits normally.
 3. Leave Memmy open. The extension connects on its own. Ordinary web pages in
    that browser can then be operated, including pages opened later.
 
-The extension attaches the Chromium debugger to a page only while Memmy runs a
+For Computer Use, the extension attaches the Chromium debugger to a page while Memmy runs a
 command there and releases it 15 seconds after the last command. Chrome and Edge
 show their system "started debugging this browser" bar when attached; its wording
 and disappearance are controlled by the browser. Memmy cannot replace that text
 with a custom operation status. Closing the bar stops Memmy on the attached pages;
 **重新连接** in the extension popup is the explicit recovery path.
+
+## Teach a workflow in a new window
+
+Extension 1.2.0 advertises `teachingCapture/v2`. With explicit consent in the
+conversation, Teach Mode creates a new ordinary window using `chrome.windows.create`.
+It retains the selected existing profile's sign-in. The recording is bound to
+that exact extension connection and window; multiple profile connections require
+selection in the conversation. The original windows stay outside Teach capture.
+
+The manifest bootstraps a small isolated content script on ordinary HTTP(S)
+main documents. This changes the browser's website-access permission prompt;
+it does not authorize Teach recording in existing windows. The bootstrap does
+not inspect page targets, field values or text. The background checks the
+browser-provided Port sender, document, profile and authorized window before
+configuring and activating a collector. The Host independently validates scope.
+
+The authorized collector records scoped user clicks,
+inserted text, selections, submissions and navigation. Password/OTP/payment
+fields are excluded. Full field values are never copied: only inserted text from
+the current trusted input event is retained, so dragging a tab back in cannot
+import text entered outside recording. The page displays a recording badge.
+
+New tabs inside the teaching window are included. A new popup is included only
+when browser-owned navigation-target metadata proves its source and it is a new
+window whose first tab is that target. URL/time matching from Computer Use is
+not used for Teach authorization. Moving a tab out revokes its collector;
+moving it in installs a fresh collector. Private/unknown windows and excluded
+sites remain excluded before content collection. Raw page-provided IDs cannot
+authorize a window or document.
+
+Events and document-close markers use native extension Ports. Each document
+activation has an independent identity and contiguous event sequence, including
+the final watermark on pagehide/freeze. A new document cannot stand in for an
+old document's missing tail. A navigation that ends before collector readiness
+leaves a gap unless its already scoped bootstrap sends a zero-interaction close
+proof through the native Port. This proof reads no targets, values or page text;
+it covers short automatic redirect documents only when no supported trusted
+interaction occurred. Missing proof or early interactions retain a coverage gap.
+
+Ending recording fences each document, drains the extension event queue, and
+confirms the last sequence through the Host bridge before fsync and snapshot
+hashing. Stop, cancel, plugin shutdown, disconnect, debugger loss and lease
+expiry revoke recording. Windows and sign-in remain available after stop.
+The Host stores coverage, current boundary confirmation and snapshot persistence
+separately, with a hashed, content-free `capture-proof.jsonl`. Historical gaps
+remain partial even if the final stop is confirmed. The v2 Host requires this
+extension version; older extensions receive an update/reload message.
+Teaching grants observation only; Computer Use commands cannot operate the
+pages being demonstrated. The browser source does not acquire desktop History.
 
 The Chrome and Edge build uses the same extension ID, derived from the public
 manifest key. The private key used to generate that public key is not shipped.
@@ -56,13 +105,12 @@ unpacked** choice remains the user's confirmation step. The Memmy built-in
 Electron browser uses its own bridge and does not load this extension: Electron
 does not list the required `chrome.debugger` API among supported extension APIs.
 
-The managed profile uses the programmatic CDP `Extensions.loadUnpacked`
-method with `--remote-debugging-pipe` and
-`--enable-unsafe-extension-debugging`. The debugging pipe is retained inside
-Memmy's process. A browser left running after an abnormal Memmy crash may
-need to be closed before automatic setup can restart the same profile.
-Chrome-branded builds also removed
-the older `--load-extension` startup switch in Chrome 137.
+The live acceptance fixture uses an isolated test profile, a private debugging
+pipe and `Extensions.loadUnpacked` with `--enable-unsafe-extension-debugging` to
+test the same-profile everyday/teaching window boundary. This is test setup;
+production teaching uses the existing profile and user-installed extension.
+The Host's separate Agent Chromium launcher is not an automatic extension
+installer for the user's Chrome/Edge profile.
 
 References: [Chrome distribution](https://developer.chrome.com/docs/extensions/how-to/distribute/),
 [Chrome local loading](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world/#load-unpacked),

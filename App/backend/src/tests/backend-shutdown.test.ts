@@ -16,6 +16,12 @@ import { createAppConfigService } from "../services/app-config-service.js";
 import { createMemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 import { readModelCapabilityCatalog } from "../infrastructure/model-capability-catalog/index.js";
 
+// SSE shutdown should not depend on the automatic updater reaching a remote catalog.
+vi.mock("../adapters/outbound/plugin-registry/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../adapters/outbound/plugin-registry/index.js")>();
+  return { ...actual, createHttpPluginRegistry: () => actual.createInMemoryPluginRegistry([]) };
+});
+
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>(done => { resolve = done; });
@@ -48,7 +54,7 @@ function connections() {
   }
   return { open, body: (response: IncomingMessage) => bodies.get(response)!, destroy() { for (const response of responses) response.destroy(); for (const request of requests) request.destroy(); agent.destroy(); } };
 }
-function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, executeRouterTool: BackendServices["integrations"]["executeRouterTool"] = async () => ({ saved: true }), overrides: Partial<BackendServices> = {}) {
+function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, executeRouterTool: BackendServices["integrations"]["executeRouterTool"] = async () => ({ data: { saved: true } }), overrides: Partial<BackendServices> = {}) {
   const progressBus = createProgressBus();
   const unsubscribers: ReturnType<typeof vi.fn>[] = [];
   const subscribedEvents: string[] = [];
@@ -62,7 +68,7 @@ function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, exec
     }) }
   } as unknown as BackendServices;
   const app = createLocalApiServer({
-    permissionManager: { verifyRuntimeToken } as PermissionManager,
+    permissionManager: { verifyRuntimeToken } as unknown as PermissionManager,
     composioMcpToken: "shutdown-test-mcp", services, heartbeatIntervalMs: 60_000,
   });
   return { app, progressBus, unsubscribers, subscribedEvents };
@@ -120,7 +126,7 @@ describe("local backend graceful shutdown", () => {
       progressBus.emit("model_catalog.updated", { catalogVersion: 3 });
       await vi.waitFor(() => expect(body).toContain('"catalogVersion":3'));
       expect(body.match(/event: model_catalog.updated/g)).toHaveLength(3);
-      expect(await writer.readModelConfig()).toEqual(initial);
+      expect(await writer.readModelConfig!()).toEqual(initial);
     } finally {
       await sync.stop();
       clients.destroy();
@@ -225,7 +231,7 @@ describe("local backend graceful shutdown", () => {
 
   it("lets an active MCP tool POST finish its write and full response while ending an idle MCP GET", async () => {
     const entered = deferred(); const release = deferred(); let saved = false;
-    const { app } = api(undefined, async () => { entered.resolve(); await release.promise; saved = true; return { saved: true }; });
+    const { app } = api(undefined, async () => { entered.resolve(); await release.promise; saved = true; return { data: { saved: true } }; });
     const clients = connections(); const base = await listen(app); let shutdown: Promise<void> | undefined;
     try {
       await clients.open(`${base}/mcp/composio`, { accept: "text/event-stream", "x-memmy-mcp-token": "shutdown-test-mcp" });
@@ -240,9 +246,9 @@ describe("local backend graceful shutdown", () => {
       const response = await tool;
       expect(response.statusCode).toBe(200);
       const body = await clients.body(response);
-      const result = JSON.parse(body.split("data: ")[1].trim());
+      const result = JSON.parse(body.split("data: ")[1]!.trim());
       expect(result.id).toBe(7);
-      expect(JSON.parse(result.result.content[0].text)).toEqual({ saved: true });
+      expect(JSON.parse(result.result.content[0].text)).toEqual({ data: { saved: true } });
       expect(await settlesWithin(shutdown)).toBe(true);
       expect(saved).toBe(true);
     } finally { release.resolve(); clients.destroy(); await (shutdown ?? app.close()); }

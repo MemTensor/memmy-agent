@@ -34,6 +34,19 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
     }
   };
 
+  const overviewData = () => ({
+    counts: { memories: 0, userMemories: 0, skills: 0, experiences: 0, worldModels: 0 },
+    dailyActivity: emptyPanelDays(now()),
+    sourceDistribution: []
+  });
+  const analysisData = () => ({
+    metrics: { avgRecallScore: 0, recallEvents: 0, activeSkills: 0, recentlyUsedSkills: 0, avgToolLatencyMs: 0, p95ToolLatencyMs: 0 },
+    dailyMemoryWrites: emptyPanelDays(now()),
+    dailySkillEvolutions: emptyPanelDays(now()),
+    toolLatency: { tools: [], series: [] }
+  });
+  const panelInstanceId = randomUUID();
+
   return {
     async health() {
       failIfNeeded();
@@ -206,6 +219,12 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
+    async recallEvidence(queryId) {
+      failIfNeeded();
+      const serverTime = now();
+      return { recallEventId: randomUUID(), queryId, query: "", hits: [], createdAt: serverTime, serverTime };
+    },
+
     async reconcileAgentSkills(input) {
       failIfNeeded();
       return {
@@ -244,7 +263,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
           updatedAt: serverTime,
           version: 1,
           body: "",
-          createdAt: serverTime,
           sourceMemoryIds: [],
           metadata: {}
         },
@@ -325,28 +343,61 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
 
     async panelOverview() {
       failIfNeeded();
-      return {
-        counts: { memories: 0, userMemories: 0, skills: 0, experiences: 0, worldModels: 0 },
-        dailyActivity: emptyPanelDays(now()),
-        sourceDistribution: []
-      };
+      return overviewData();
     },
 
     async panelAnalysis() {
       failIfNeeded();
+      return analysisData();
+    },
+
+    async panelStats() {
+      failIfNeeded();
+      return { status: "ready", data: { overview: overviewData(), analysis: analysisData() }, generatedAt: now(), serverTime: now() };
+    },
+
+    async panelOverviewStats() {
+      failIfNeeded();
+      return { status: "ready", data: overviewData(), generatedAt: now(), serverTime: now() };
+    },
+
+    async panelBrowse(input) {
+      failIfNeeded();
+      if (input.op === "release") return { ok: true };
+      const identity = { viewId: input.viewId ?? randomUUID(), instanceId: panelInstanceId, safety: "mock-local", serverTime: now() };
+      if (input.op === "check") return { ...identity, updated: false };
       return {
-        metrics: {
-          avgRecallScore: 0,
-          recallEvents: 0,
-          activeSkills: 0,
-          recentlyUsedSkills: 0,
-          avgToolLatencyMs: 0,
-          p95ToolLatencyMs: 0
-        },
-        dailyMemoryWrites: emptyPanelDays(now()),
-        dailySkillEvolutions: emptyPanelDays(now()),
-        toolLatency: { tools: [], series: [] }
+        ...identity, createdAt: now(), page: 1, pageSize: 20, total: 0, totalPages: 1, hasNext: false, hasPrev: false,
+        ...(input.filter?.section === "tasks" ? { tasks: [] } : { items: [] })
       };
+    },
+
+    async panelLogs(input) {
+      return this.memoryApiLogs(input);
+    },
+
+    async panelLogDetail() {
+      failIfNeeded();
+      throw new MemoryLayerError("not_found", 404, "Mock panel log not found");
+    },
+
+    async panelTaskSummaries(input) {
+      return { ...await this.panelTasks(input), tasks: [] };
+    },
+
+    async panelTaskCheck() {
+      failIfNeeded();
+      return { serverTime: now() };
+    },
+
+    async panelTaskDetail() {
+      failIfNeeded();
+      throw new MemoryLayerError("not_found", 404, "Mock panel task not found");
+    },
+
+    async panelTaskField() {
+      failIfNeeded();
+      throw new MemoryLayerError("not_found", 404, "Mock panel task field not found");
     },
 
     async panelItems() {
@@ -374,6 +425,17 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         offset,
         serverTime: now()
       };
+    },
+
+    async panelTasks() {
+      failIfNeeded();
+      return { tasks: [], page: 1, pageSize: 20, total: 0, totalPages: 1,
+        hasNext: false, hasPrev: false, serverTime: now() };
+    },
+
+    async deletePanelTask(taskId) {
+      failIfNeeded();
+      return { ok: true, id: taskId, deletedMemoryIds: [], serverTime: now() };
     }
   };
 }

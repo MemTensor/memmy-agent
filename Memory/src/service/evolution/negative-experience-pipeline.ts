@@ -25,6 +25,8 @@ import { upsertL2Candidate, type L2CandidateSignal } from "./l2-candidate-servic
 
 const pipelineLogger = createMemoryLogger("pipeline");
 
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
+import { traceOriginIsCurrent } from "./policy-evidence.js";
 import { episodeInputRevision, jobRevisionIsCurrent } from "./episode-revision.js";
 
 
@@ -246,23 +248,27 @@ export class NegativeExperiencePipeline {
   private enqueueUnifiedCandidates(job: EvolutionJobRecord): void {
     const source = negativeExperienceSource(job.payload.source);
     const episode = job.episodeId ? this.deps.repos.runtime.getEpisode(job.episodeId) : undefined;
-    if (!source || !episode || episode.userId !== job.userId) return;
+    if (!source || !episode || !sharesLocalOwner(episode.userId, job.userId)
+      || (job.sessionId && job.sessionId !== episode.sessionId)) return;
     const feedbackId = text(job.payload.feedbackId);
     const repairId = text(job.payload.repairId);
     const feedback = feedbackId ? this.deps.repos.runtime.getFeedback(feedbackId) : undefined;
     const repair = repairId ? this.deps.repos.runtime.getDecisionRepair(repairId) : undefined;
-    if (feedbackId && (!feedback || feedback.userId !== job.userId || feedback.episodeId !== episode.id)) return;
-    if (repairId && (!repair || repair.userId !== job.userId || repair.episodeId !== episode.id)) return;
+    if (feedbackId && (!feedback || !sharesLocalOwner(feedback.userId, episode.userId) || feedback.episodeId !== episode.id)) return;
+    if (repairId && (!repair || !sharesLocalOwner(repair.userId, episode.userId) || repair.episodeId !== episode.id)) return;
 
     const sources = episode.l1MemoryIds.flatMap((id) => {
       const memory = this.deps.repos.memories.get(id);
       const trace = memory ? traceMetaFromMemory(memory) : null;
-      if (!memory || !trace || memory.userId !== job.userId || memory.deletedAt ||
-          memory.status === "deleted" || memory.status === "archived") return [];
-      const raw = trace.rawTurnId ? this.deps.repos.runtime.getRawTurn(trace.rawTurnId) : undefined;
-      if (raw && (raw.deletedAt || raw.redactedAt || raw.userId !== job.userId)) return [];
-      if ((trace.episodeId ?? raw?.episodeId) !== episode.id) return [];
-      return [{ memory, trace }];
+      if (!memory || !trace || !sharesLocalOwner(memory.userId, episode.userId) || memory.deletedAt ||
+          memory.status === "deleted" || memory.status === "archived" || !traceOriginIsCurrent(this.deps.repos, trace)) return [];
+      const origin = this.deps.repos.runtime.resolveL1Source(memory.id);
+      // New turns may be device-owned within retained historical tasks. A different
+      // owner is accepted only with real, current turn/session/task provenance.
+      if (memory.userId !== episode.userId && (!origin?.rawTurnId || origin.episodeId !== episode.id)) return [];
+      if ((trace.episodeId ?? origin?.episodeId) !== episode.id ||
+          (memory.sessionId && memory.sessionId !== episode.sessionId)) return [];
+      return [{ memory, trace, rawTurnId: origin?.rawTurnId ?? trace.rawTurnId }];
     }).filter(({ memory }) => source !== "negative_feedback" || memory.id === feedback?.l1MemoryId);
     // Explicit feedback without its own L1 must not borrow another turn's L1.
     if (sources.length === 0 || (feedback && !sources.some(({ memory }) => memory.id === feedback.l1MemoryId)) ||
@@ -273,9 +279,9 @@ export class NegativeExperiencePipeline {
       return;
     }
     const sourceIds = new Set(sources.map(({ memory }) => memory.id));
-    const rawIds = new Set(sources.map(({ trace }) => trace.rawTurnId).filter(Boolean));
-    const rawTurns = this.deps.repos.runtime.listRawTurnsByEpisode(episode.id)
-      .filter((turn) => turn.userId === job.userId && !turn.deletedAt && !turn.redactedAt &&
+    const rawIds = new Set(sources.map(({ rawTurnId }) => rawTurnId).filter(Boolean));
+    const rawTurns = this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, -1)
+      .filter((turn) => turn.sessionId === episode.sessionId && !turn.deletedAt && !turn.redactedAt &&
         (rawIds.has(turn.id) || turn.sourceMemoryIds.some((id) => sourceIds.has(id))));
     const sourceBasis = sourceBasisFor(source, feedback);
     const rewardReason = text(job.payload.rewardReason)
@@ -306,12 +312,11 @@ export class NegativeExperiencePipeline {
         ].filter(Boolean).join("\n") : ""
       ].filter(Boolean).join("\n\n")
     };
-    let targetMemory: MemoryRow | undefined;
-    const candidateVersions: string[] = [];
-    for (const { memory, trace } of sources) {
+    const batches = new Map<string, { target: MemoryRow; versions: string[] }>();
+    for (const { memory, rawTurnId } of sources) {
       // Keep each L1's vector input local to that L1. The Episode batch supplies the union.
       const rawEvidence = rawTurns
-        .filter((turn) => turn.id === trace.rawTurnId || turn.sourceMemoryIds.includes(memory.id))
+        .filter((turn) => turn.id === rawTurnId || turn.sourceMemoryIds.includes(memory.id))
         .map((turn) => [
           `Source turn ${turn.id}:`,
           turn.userText ? `User: ${clip(turn.userText, 700)}` : "",
@@ -321,24 +326,27 @@ export class NegativeExperiencePipeline {
         ].filter(Boolean).join("\n"));
       const candidate = upsertL2Candidate(this.deps.repos, {
         sourceMemoryId: memory.id,
-        userId: job.userId,
+        userId: memory.userId,
         episodeId: episode.id,
         route: "negative",
         signal: { ...signal, text: [signal.text, ...rawEvidence].join("\n\n") },
         at: job.createdAt
       });
       if (!candidate || candidate.status !== "pending") continue;
-      targetMemory ??= memory;
-      candidateVersions.push(`${candidate.sourceMemoryId}:${candidate.sourceVersion}`);
+      const batch = batches.get(memory.userId) ?? { target: memory, versions: [] };
+      batch.versions.push(`${candidate.sourceMemoryId}:${candidate.sourceVersion}`);
+      batches.set(memory.userId, batch);
     }
-    if (targetMemory) {
+    // Candidate snapshots are owned by their L1. Keep that owner on each queue
+    // batch, rather than relabelling history or silently dropping newer turns.
+    for (const [owner, batch] of batches) {
       this.deps.enqueueJob({
         jobType: "l2_induction",
-        userId: job.userId,
-        sessionId: targetMemory.sessionId ?? episode.sessionId,
+        userId: owner,
+        sessionId: batch.target.sessionId ?? episode.sessionId,
         episodeId: episode.id,
-        targetMemoryId: targetMemory.id,
-        dedupeKey: `l2.unified.negative:${createHash("sha256").update(candidateVersions.sort().join("\n")).digest("hex")}`,
+        targetMemoryId: batch.target.id,
+        dedupeKey: `l2.unified.negative:${createHash("sha256").update(batch.versions.sort().join("\n")).digest("hex")}`,
         payload: { unified: true, reason: "negative.experience", source, sourceEventId: signal.eventId },
         createdAt: job.createdAt
       });
@@ -352,7 +360,7 @@ export class NegativeExperiencePipeline {
     const episode = job.episodeId
       ? this.deps.repos.runtime.getEpisode(job.episodeId)
       : undefined;
-    if (!source || !episode || episode.userId !== job.userId) return undefined;
+    if (!source || !episode) return undefined;
 
     const feedbackId = text(job.payload.feedbackId);
     const repairId = text(job.payload.repairId);
@@ -392,7 +400,7 @@ export class NegativeExperiencePipeline {
       agentResponse: rawTurns.at(-1)?.assistantText?.trim() ?? "",
       episodeContext,
       allowedTraceIds: episodeTraceIds
-    }, { llm: this.deps.skillLlm });
+    }, { llm: this.deps.skillLlm, language: this.deps.config.language });
     if (!sink) return undefined;
     const antiPattern = sink.avoid.join("\n");
     const preference = sink.prefer.join("\n");
@@ -595,4 +603,8 @@ function contributionMap(memory?: MemoryRow): Record<string, NegativeContributio
     salience: number(policy.salience) ?? 0, evidenceStrength: number(policy.evidence_strength) ?? 0,
     signature: text(policy.signature) ?? "", inputHash: "legacy"
   } };
+}
+
+function sharesLocalOwner(left: string, right: string): boolean {
+  return left === right || left === DEVICE_MEMORY_OWNER || right === DEVICE_MEMORY_OWNER;
 }

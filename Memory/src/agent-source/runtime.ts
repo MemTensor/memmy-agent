@@ -1226,8 +1226,15 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       const discovered = await list();
       for (const source of discovered.sources) {
         if (!canInstall()) return;
-        if (!source.available || source.status !== "not_connected") continue;
+        if (!source.available || !await automaticConnectionAllowed(source.sourceId)) continue;
+        const checkDshUpdate = source.sourceId === "deepseek_harness" && source.status === "plugin_installed";
+        if (source.status !== "not_connected" && !checkDshUpdate) continue;
         try {
+          if (checkDshUpdate) {
+            const target = integrationRegistry.get(source.sourceId);
+            if (await target?.isInstalledHookCurrent?.() !== false) continue;
+            if (!canInstall() || !await automaticConnectionAllowed(source.sourceId)) continue;
+          }
           const kind = agentConnectionKind(source.sourceId);
           await mutateConnection(source.sourceId, kind, "POST", "auto_inject", canInstall);
         } catch (error) {
@@ -1762,6 +1769,11 @@ async function ingestStagedTurns(
         title: titleForTurn(sourceId, turn.messages), tags: ["agent-source", sourceId], source: sourceId,
         turnId: addAnalyticsBase.turnId, createdAt: turn.messages[0]!.createdAt, deferProcessing: true
       });
+      // Recovery belongs to an explicit history scan, not ordinary duplicate
+      // imports or incremental synchronization with unchanged configuration.
+      if (added.duplicate && (scanMode === "initial_subset" || scanMode === "full")) {
+        service.retryFailedMemoryProcessingOnScan(added.id, { source: sourceId, namespace: { source: sourceId, profileId: "default" } });
+      }
       if (!added.duplicate) {
         memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
         memoryAddAnalytics?.trackAddSucceeded({

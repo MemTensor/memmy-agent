@@ -1,3 +1,9 @@
+import { PanelTaskCheckOutputSchema } from "@memmy/local-api-contracts";
+import {PanelLogsOutputSchema,PanelLogDetailOutputSchema} from "@memmy/local-api-contracts";
+import {PanelStatsOutputSchema} from "@memmy/local-api-contracts";
+import {PanelOverviewStatsOutputSchema} from "@memmy/local-api-contracts";
+import { PanelBrowseOutputSchema } from "@memmy/local-api-contracts";
+import { PanelTaskSummariesOutputSchema, PanelTaskDetailOutputSchema, PanelTaskFieldOutputSchema } from "@memmy/local-api-contracts";
 /** Http memory client module. */
 import {
   MemoryAgentSourceScanStateSchema,
@@ -59,6 +65,8 @@ export interface MemoryLayerConfig {
 export interface CreateHttpMemoryClientOptions {
   /** Fetch impl. */
   fetchImpl?: typeof fetch;
+  /** Refresh credentials for the pinned service before sending each request. */
+  resolveToken?: () => string | undefined;
 }
 
 type PathKey = keyof typeof MEMORY_LAYER_PATHS;
@@ -99,20 +107,25 @@ export function createHttpMemoryClient(
       async () => {
         const timeoutSignal = AbortSignal.timeout(requestOptions.timeoutMs ?? config.timeoutMs);
         const hasBody = requestOptions.body !== undefined;
+        const token = options.resolveToken ? options.resolveToken() : config.token;
         const response = await fetchWithMappedNetworkErrors(fetchImpl, url, {
           method,
           headers: {
             ...(hasBody ? { "content-type": "application/json" } : {}),
             "x-memmy-time-zone": normalizeTimeZoneOffset(requestOptions.context?.timeZone),
             ...(requestOptions.context?.userId ? { "x-memmy-user-id": requestOptions.context.userId } : {}),
-            authorization: `Bearer ${config.token}`
+            ...(token ? { authorization: `Bearer ${token}` } : {})
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
-          signal: combineAbortSignals(timeoutSignal, requestOptions.signal)
-        });
+          signal: combineAbortSignals(timeoutSignal, requestOptions.signal ?? requestOptions.context?.signal)
+        }, requestOptions.signal ?? requestOptions.context?.signal);
 
         if (response.ok) {
-          return response.json();
+          try {
+            return await response.json();
+          } catch (error) {
+            throw mappedAbortError(error, requestOptions.signal ?? requestOptions.context?.signal) ?? error;
+          }
         }
 
         // Older protocol-1 services expose scanning only to Viewer. Their health
@@ -141,10 +154,11 @@ export function createHttpMemoryClient(
       },
       {
         maxRetries: requestOptions.maxRetries ?? config.maxRetries,
+        signal: requestOptions.signal ?? requestOptions.context?.signal,
         baseDelayMs: 100,
         factor: 3,
         jitter: 0.2,
-        shouldRetry: shouldRetryMemoryLayerError
+        shouldRetry: error => !requestOptions.signal?.aborted && !requestOptions.context?.signal?.aborted && shouldRetryMemoryLayerError(error)
       }
     );
 
@@ -161,8 +175,8 @@ export function createHttpMemoryClient(
       pause: (input) => request("POST", "agentSourcePause", MemoryScanControlResponseSchema, { body: input ?? {}, maxRetries: 0 }),
       cancel: (input) => request("POST", "agentSourceCancel", MemoryScanControlResponseSchema, { body: input ?? {}, maxRetries: 0 })
     },
-    async health() {
-      return request("GET", "health", MemoryHealthSnapshotSchema);
+    async health(context) {
+      return request("GET", "health", MemoryHealthSnapshotSchema, { context });
     },
 
     async reloadConfig(input = {}) {
@@ -320,6 +334,10 @@ export function createHttpMemoryClient(
       });
     },
 
+    async panelMemory(id,context){
+      return request("GET","panelMemory",GetMemoryOutputSchema,{params:{memoryId:id},context,maxRetries:0});
+    },
+
     async panelOverview(context) {
       return request("GET", "panelOverview", PanelOverviewOutputSchema, { context, maxRetries: 0 });
     },
@@ -329,11 +347,32 @@ export function createHttpMemoryClient(
     },
 
     async panelItems(input, context) {
-      return request("GET", "panelItems", PanelItemsOutputSchema, { query: input, context });
+      // Compatibility reads still run through the renderer's shared retry queue.
+      return request("GET", "panelItems", PanelItemsOutputSchema, { query: input, context, maxRetries: 0 });
     },
 
+    async panelLogs(input,context) {return request("POST","panelLogs",PanelLogsOutputSchema,{body:input,context,maxRetries:0});},
+    async panelLogDetail(id,context) {return request("GET","panelLogDetail",PanelLogDetailOutputSchema,{params:{id:String(id)},context,maxRetries:0});},
+    async panelStats(context) {return request("GET","panelStats",PanelStatsOutputSchema,{context,maxRetries:0});},
+    async panelOverviewStats(context) {return request("GET","panelOverviewStats",PanelOverviewStatsOutputSchema,{context,maxRetries:0});},
+    async panelBrowse(input,context) {
+      return request("POST","panelBrowse",PanelBrowseOutputSchema,{body:input,context,maxRetries:0});
+    },
+    async panelTaskSummaries(input, context) {
+      return request("GET", "panelTaskSummaries", PanelTaskSummariesOutputSchema, {query: input, context, maxRetries: 0});
+    },
+    async panelTaskCheck(id, context) {
+      return request("GET", "panelTaskCheck", PanelTaskCheckOutputSchema, {params: {id}, context, maxRetries: 0});
+    },
+    async panelTaskDetail(id, cursor, context) {
+      return request("GET", "panelTaskDetail", PanelTaskDetailOutputSchema, {params: {id}, query: {cursor}, context});
+    },
+    async panelTaskField(id, turnId, input, context) {
+      return request("GET", "panelTaskField", PanelTaskFieldOutputSchema, {params: {id, turnId}, query: input, context});
+    },
     async panelTasks(input, context) {
-      return request("GET", "panelTasks", PanelTasksOutputSchema, { query: input, context });
+      // Task details and legacy task lists share frontend-owned retries.
+      return request("GET", "panelTasks", PanelTasksOutputSchema, { query: input, context, maxRetries: 0 });
     },
 
     async taskExperienceProcessing(taskId, context) {
@@ -392,17 +431,22 @@ function combineAbortSignals(primary: AbortSignal, secondary: AbortSignal | unde
 async function fetchWithMappedNetworkErrors(
   fetchImpl: typeof fetch,
   url: string,
-  init: RequestInit
+  init: RequestInit,
+  callerSignal?: AbortSignal
 ): Promise<Response> {
   try {
     return await fetchImpl(url, init);
   } catch (error) {
-    if (isTimeoutError(error)) {
-      throw new MemoryLayerError("memory_layer_unavailable", 503, "memory layer timeout", error);
-    }
-
-    throw new MemoryLayerNetworkError(error);
+    throw mappedAbortError(error, callerSignal) ?? new MemoryLayerNetworkError(error);
   }
+}
+
+function mappedAbortError(error: unknown, callerSignal?: AbortSignal): MemoryLayerError | undefined {
+  if (callerSignal?.aborted)
+    return new MemoryLayerError("memory_layer_unavailable", 503, "memory layer request cancelled", error);
+  if (isTimeoutError(error))
+    return new MemoryLayerError("memory_layer_unavailable", 503, "memory layer timeout", error);
+  return undefined;
 }
 
 /**

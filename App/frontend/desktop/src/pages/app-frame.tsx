@@ -212,6 +212,7 @@ interface SidebarUpdateActionView {
 const navItems: NavItem[] = [
   { path: "/main", icon: <MessageSquarePlus size={16} /> },
   { action: "search", icon: <Search size={16} />, labelKey: "appFrame.search" },
+  { path: "/plugins", icon: <Link2 size={16} /> },
   { path: "/tools", icon: <Link2 size={16} /> },
   { path: "/memory", icon: <BrainCircuit size={16} /> },
   { path: "/knowledge", icon: <BookOpen size={16} /> },

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { DEFAULT_MEMMY_CONFIG } from "../../../src/config/index.js";
 import { policyMetaFromMemory, skillMetaFromMemory, traceMetaFromMemory } from "../../../src/algorithm/plugin-algorithms.js";
 import type { Embedder, LlmClient, LlmMessage } from "../../../src/model/types.js";
@@ -25,7 +26,7 @@ afterEach(() => {
 });
 
 function memory(id: string, layer: "L1" | "L2" | "Skill", fields: Record<string, unknown>): MemoryRow {
-  return { id, userId: "owner", memoryLayer: layer, memoryType: "LongTermMemory", status: "activated",
+  return { id, userId: DEVICE_MEMORY_OWNER, memoryLayer: layer, memoryType: "LongTermMemory", status: "activated",
     visibility: "private", timeline: AT, createdAt: AT, updatedAt: AT, version: 1, tags: [], info: {},
     memoryValue: "Verify the actual required input before accepting the result.",
     properties: { internal_info: { memory_layer: layer, generated_by_memory_base: true,
@@ -84,13 +85,13 @@ function harness(initialSources: Array<{ id: string; episode: string }> = [], op
   }
   for (const source of options.seed === false ? [] : initialSources) {
     addTrace(source.id, source.episode);
-    repos.runtime.insertTracePolicyLink({ userId: "owner", l1MemoryId: source.id, l2MemoryId: "policy", relation: "supports" });
+    repos.runtime.insertTracePolicyLink({ userId: DEVICE_MEMORY_OWNER, l1MemoryId: source.id, l2MemoryId: "policy", relation: "supports" });
   }
-  function admit(id: string) { upsertL2Candidate(repos, { userId: "owner", sourceMemoryId: id, route: "ordinary", at: AT }); }
+  function admit(id: string) { upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: id, route: "ordinary", at: AT }); }
   async function support(id: string) {
     admit(id);
     const episodeId = traceMetaFromMemory(repos.memories.get(id)!)!.episodeId!;
-    const job: EvolutionJobRecord = { id: `induce-${++sequence}`, userId: "owner", jobType: "l2_induction", episodeId,
+    const job: EvolutionJobRecord = { id: `induce-${++sequence}`, userId: DEVICE_MEMORY_OWNER, jobType: "l2_induction", episodeId,
       targetMemoryId: id, payload: {}, status: "leased", attempts: 1, maxAttempts: 3, createdAt: AT, updatedAt: AT };
     await engine.induceL2(job);
   }
@@ -163,7 +164,7 @@ describe("MEMMY-647 unified support with real statistical propagation", () => {
     expect(h.requests[0]!.ids.sort()).toEqual(["a1", "a2"]);
     expect(h.requests[0]!.episodes).toEqual(["A", "A"]);
     expect(h.state().policy.support).toBe(1);
-    expect(listL2Candidates(h.repos, { userId: "owner", episodeId: "B" }).map(row => row.sourceMemoryId)).toEqual(["b"]);
+    expect(listL2Candidates(h.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "B" }).map(row => row.sourceMemoryId)).toEqual(["b"]);
     await h.support("b");
     expect(h.requests[1]!.ids).toEqual(["b"]);
     expect(h.state().policy.sourceEpisodeIds.sort()).toEqual(["A", "B"]);
@@ -218,6 +219,8 @@ describe("MEMMY-647 unified support with real statistical propagation", () => {
     if (pollution === "foreign-owner") {
       h.repos.memories.insert({ ...memory("foreign-a", "L1", { episode_id: "A", value: -1,
         summary: "Another owner's evidence", alpha: 1 }), userId: "another-owner" });
+      // New writes normalize ownership; preserve a genuinely historical foreign row in this fixture.
+      h.db.db.prepare("UPDATE memories SET user_id=? WHERE id=?").run("another-owner", "foreign-a");
     } else {
       h.repos.transaction(() => {
         for (let index = 0; index < 2001; index++) h.repos.memories.insert({
@@ -273,7 +276,7 @@ describe("MEMMY-647 unified support with real statistical propagation", () => {
   it("rolls back unified support, links, contribution writes and commit markers when the Skill write fails, then retries once", async () => {
     const h = harness(); h.addTrace("a", "A"); h.admit("a");
     const beforePolicy = h.repos.memories.get("policy"), beforeSkill = h.repos.memories.get("skill");
-    const beforeCandidate = listL2Candidates(h.repos, { userId: "owner", episodeId: "A" })[0]!;
+    const beforeCandidate = listL2Candidates(h.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "A" })[0]!;
     const operationKeys = () => h.db.db.prepare("SELECT key FROM runtime_kv WHERE key LIKE ? ORDER BY key")
       .all(`${L2_EXTRACTION_OPERATION_PREFIX}%`);
     const snapshots = () => (h.db.db.prepare("SELECT value_json FROM runtime_kv WHERE key LIKE ? ORDER BY key")
@@ -291,7 +294,7 @@ describe("MEMMY-647 unified support with real statistical propagation", () => {
     expect(h.repos.runtime.listTracePolicyLinks({ l2MemoryId: "policy", limit: -1 })).toEqual([]);
     expect(operationKeys()).toEqual(beforeOperations);
     expect(snapshots()).not.toContainEqual(expect.objectContaining({ status: "committed" }));
-    expect(listL2Candidates(h.repos, { userId: "owner", episodeId: "A" })).toEqual([beforeCandidate]);
+    expect(listL2Candidates(h.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "A" })).toEqual([beforeCandidate]);
 
     // The validated model decision survives as retry input; none of its state
     // changes were committed. Reuse it without another paid model request.
@@ -300,7 +303,7 @@ describe("MEMMY-647 unified support with real statistical propagation", () => {
     expect(h.requests).toHaveLength(1);
     expect(operationKeys()).toHaveLength(1);
     expect(snapshots().filter(row => row.status === "committed")).toHaveLength(1);
-    expect(listL2Candidates(h.repos, { userId: "owner", episodeId: "A" })).toEqual([]);
+    expect(listL2Candidates(h.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "A" })).toEqual([]);
     expect(h.repos.runtime.listTracePolicyLinks({ l2MemoryId: "policy", limit: -1 })).toHaveLength(1);
     expect(committed.policyHistory.events).toHaveLength(1);
     expect(committed.skillHistory.events).toHaveLength(1);

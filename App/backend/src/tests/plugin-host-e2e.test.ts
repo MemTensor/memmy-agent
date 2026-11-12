@@ -150,6 +150,7 @@ describe("plugin host end to end", () => {
     store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
     const runtimeHost = createPluginRuntimeHost(new PluginAdapterRegistry([
       createCommandPluginAdapter({
+        platform: "linux", // The fixture supplies a Node launcher for protocol coverage on every host OS.
         allowedNetworkHosts: ["export.arxiv.org", "arxiv.org"],
         fileInputRoots: [mediaRoot],
         pluginDataRoot,

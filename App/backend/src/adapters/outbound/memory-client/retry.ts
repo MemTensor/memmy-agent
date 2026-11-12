@@ -18,6 +18,7 @@ export interface RetryOptions {
 /** Handles retry with backoff. */
 export async function retryWithBackoff<T>(operation: () => Promise<T>, opts: RetryOptions): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
+    opts.signal?.throwIfAborted();
     try {
       return await operation();
     } catch (error) {
@@ -44,7 +45,10 @@ async function delay(delayMs: number, signal: AbortSignal | undefined): Promise<
   }
 
   await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(resolve, delayMs);
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, delayMs);
     const abort = () => {
       clearTimeout(timeout);
       reject(signal?.reason);

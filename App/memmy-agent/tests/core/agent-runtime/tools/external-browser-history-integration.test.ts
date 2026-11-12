@@ -15,6 +15,13 @@ afterEach(async () => { for (const close of resources.splice(0).reverse()) await
 
 async function syntheticPage() {
   const { chromium } = await import("playwright");
+  // CI prepares the version pinned by Playwright in an isolated cache. Local
+  // runs can still use the browser already prepared by Memmy below.
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
+    const browser = await chromium.launch({ headless: true });
+    resources.push(() => browser.close());
+    return browser.newPage();
+  }
   const browserDirectory = getPlaywrightBrowsersPath();
   const shellFolder = fs.readdirSync(browserDirectory).find(name => name.startsWith("chromium_headless_shell-"));
   if (!shellFolder) throw new Error("Synthetic History fixture requires the prepared Chromium headless shell");
@@ -56,6 +63,28 @@ async function harness(browser: "chrome" | "edge" = "chrome") {
     generation: event.generation, actor: "human", payload: event, ...extra });
   const settle = () => new Promise<void>(resolve => setTimeout(resolve, 20));
   return { service, bridge, socket, connection, connectionId, messages, context, payload, emit, records, send, settle, settingsFile };
+}
+
+async function awaitObservedBrowserInput(bridge: ExternalBrowserBridge, targetName: string, interact: () => Promise<void>) {
+  let received!: () => void;
+  const input = new Promise<void>(resolve => { received = resolve; });
+  // The service subscribes first and appends synchronously before this completion signal.
+  const unsubscribe = bridge.subscribeBrowserHistory(payload => {
+    const event = payload as { action?: string; target?: { name?: string } };
+    if (event?.action === "input" && event.target?.name === targetName) received();
+  });
+  const cleanup = () => {
+    unsubscribe();
+    const index = resources.indexOf(cleanup);
+    if (index >= 0) resources.splice(index, 1);
+  };
+  resources.push(cleanup);
+  try {
+    await interact();
+    await input;
+  } finally {
+    cleanup();
+  }
 }
 
 describe("browser History bridge to canonical event stream", () => {
@@ -166,8 +195,8 @@ describe("browser History bridge to canonical event stream", () => {
     await vi.waitFor(() => expect(h.records().some(event => event.details.action === "click" && event.details.phase === "observed")).toBe(true));
     const article = h.records().find(event => event.details.action === "click" && event.details.phase === "observed");
     expect(article.details.target.name.length).toBeLessThanOrEqual(200);
-    await page.fill("input[name=cardNumber]", "4111 1111 1111 1111");
-    await vi.waitFor(() => expect(h.records().some(event => event.details.action === "input")).toBe(true));
+    await awaitObservedBrowserInput(h.bridge, "Card number", () => page.fill("input[name=cardNumber]", "4111 1111 1111 1111"));
+    expect(h.records().some(event => event.details.action === "input")).toBe(true);
     expect(JSON.stringify(h.records())).not.toContain("4111 1111 1111 1111");
   }, 20_000);
 
@@ -195,8 +224,8 @@ describe("browser History bridge to canonical event stream", () => {
     const checkboxAttempt = h.records().find(event => event.details.phase === "attempt" && event.details.target?.role === "checkbox");
     expect(checkboxAttempt.details.interactionId).toBe(checked.details.interactionId);
     expect(reusableHumanActions(h.records()).filter(step => step.includes("checkbox"))).toHaveLength(1);
-    await page.getByPlaceholder("Company").fill("Fixture Company");
-    await vi.waitFor(() => expect(h.records().some(event => event.details.action === "input")).toBe(true));
+    await awaitObservedBrowserInput(h.bridge, "Company", () => page.getByPlaceholder("Company").fill("Fixture Company"));
+    expect(h.records().some(event => event.details.action === "input")).toBe(true);
     expect(h.records().find(event => event.details.action === "input").details.after.target.value).toBe("Fixture Company");
     const evidence = JSON.stringify(h.records());
     for (const secret of ["hidden-business-secret", "script-only-secret", "style-only-secret", "never-raw-password", "123456"]) expect(evidence).not.toContain(secret);

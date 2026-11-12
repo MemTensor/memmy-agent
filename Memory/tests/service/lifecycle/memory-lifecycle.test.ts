@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../../../src/contracts/index.js";
 import { Repositories } from "../../../src/storage/repositories.js";
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { createMemoryServiceFixture, createBatchReflectionLlm } from "../../fixtures/memory-service-fixture.js";
 import {
   insertActivePolicyMemory,
@@ -37,9 +38,11 @@ describe("MemoryService / lifecycle / governance", () => {
       answer: "已修复失败并验证测试通过。"
     }));
     makeTraceEligibleForL2(db, trace.l1MemoryId);
+    // Match the owner of the new local L1; this case restores a missing link,
+    // rather than accepting an unproven cross-owner declaration.
     insertActivePolicyMemory(db, {
       id: "policy_restorable",
-      userId: namespace.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.sessionId,
       agentId: namespace.source,
       appId: "restorable-policy-workspace",
@@ -155,7 +158,7 @@ describe("MemoryService / lifecycle / governance", () => {
       answer: "已验证回滚流程可用。"
     }));
     const policyInput = {
-      userId: namespace.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.sessionId,
       agentId: namespace.source,
       appId: "dependency-workspace",
@@ -174,7 +177,7 @@ describe("MemoryService / lifecycle / governance", () => {
       sourceEpisodeId: assignedEpisodeId(service, p2Trace)
     });
     insertTracePolicyLinkForTest(db, {
-      userId: namespace.userId,
+      userId: DEVICE_MEMORY_OWNER,
       l1MemoryId: p1Trace.l1MemoryId,
       l2MemoryId: "policy_dependency_p1"
     });
@@ -198,6 +201,18 @@ describe("MemoryService / lifecycle / governance", () => {
       sourcePolicyIds: ["policy_dependency_p1", "policy_dependency_p2"],
       evidenceAnchorIds: [p1Trace.l1MemoryId, p2Trace.l1MemoryId]
     });
+    // The SQL helpers predate project-scoped comparison and omit project_id.
+    // Keep these derived fixtures in the same project as their real L1 evidence.
+    const sourceScope = db.db.prepare(`SELECT json_extract(info_json, '$.project_id') AS projectId
+      FROM memories WHERE id = ?`).get(p1Trace.l1MemoryId) as { projectId: string };
+    expect(sourceScope.projectId).toBe(namespace.projectId);
+    for (const id of ["policy_dependency_p1", "policy_dependency_p2", "world_dependency_p1",
+      "skill_dependency_p1", "skill_dependency_shared"]) {
+      db.db.prepare(`UPDATE memories SET
+        info_json = json_set(info_json, '$.project_id', ?),
+        properties_json = json_set(properties_json, '$.info.project_id', ?)
+        WHERE id = ?`).run(namespace.projectId, namespace.projectId, id);
+    }
     setSkillSteps(db, "skill_dependency_p1", [{
       id: "step-p1-only",
       title: "P1 only",
@@ -634,7 +649,7 @@ describe("L3 World Model scope deletion", () => {
     db.close();
   });
 
-  it("resets project profile state and prevents an old profile job from recreating the deleted L3", async () => {
+  it("preserves the independent profile request when deleting a contract-only L3", () => {
     const { db, service } = createTestService();
     const userId = "l3-project-delete-user";
     const workspaceUri = "file:///workspace/project-delete";
@@ -665,30 +680,20 @@ describe("L3 World Model scope deletion", () => {
       value: "Run project tests before commit."
     })!;
 
+    const profileBefore = db.db.prepare("SELECT * FROM l3_world_model_project_environment_state").get();
+    const jobsBefore = db.db.prepare("SELECT * FROM evolution_jobs WHERE job_type='project_environment_profile'").all();
     service.deleteMemory(existing.id, { namespace });
 
     expect(repos.l3WorldModels.getScope(userId, opened.projectId)).toMatchObject({
       workspaceUri,
       memoryId: undefined
     });
-    expect(db.db.prepare(
-      `SELECT status, current_scan_id, applied_scan_id, fingerprint, last_error
-       FROM l3_world_model_project_environment_state`
-    ).get()).toEqual({
-      status: "uninitialized",
-      current_scan_id: null,
-      applied_scan_id: null,
-      fingerprint: null,
-      last_error: null
-    });
+    expect(db.db.prepare("SELECT * FROM l3_world_model_project_environment_state").get()).toEqual(profileBefore);
+    expect(db.db.prepare("SELECT * FROM evolution_jobs WHERE job_type='project_environment_profile'").all()).toEqual(jobsBefore);
     expect(service.panelItems({ layer: "L3" }).items.some((item) => item.id === existing.id)).toBe(false);
 
-    await service.runWorkerOnce(10);
-    expect(db.db.prepare(
-      `SELECT status FROM evolution_jobs WHERE job_type = 'project_environment_profile'`
-    ).get()).toEqual({ status: "succeeded" });
-    expect(repos.l3WorldModels.getScope(userId, opened.projectId)?.memoryId).toBeUndefined();
-
+    // Directory execution and publication are covered with real temporary
+    // projects in project-environment-independent-deletion.test.ts.
     db.close();
   });
 });
