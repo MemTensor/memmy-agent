@@ -209,6 +209,25 @@ describe("agent source auto inject service", () => {
     expect(calls).toEqual(["plugin:codex:auto_inject"]);
   });
 
+  it.each([
+    { enabled: true, current: true, installs: 0 },
+    { enabled: true, current: false, installs: 1 },
+    { enabled: false, current: false, installs: 0 }
+  ])("updates installed DSH according to auto-inject and freshness: %o", async ({ enabled, current, installs }) => {
+    const calls: string[] = [];
+    const service = createAgentSourceAutoInjectService({
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() { return [source("deepseek_harness", "plugin_installed", true)]; },
+        async isInstalledHookCurrent() { return current; }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => ({ ...enabledPreferences, autoInjectSkill: enabled })
+    });
+    await service.runOnce();
+    expect(calls).toEqual(installs ? ["plugin:deepseek_harness:auto_inject"] : []);
+  });
+
   it("leaves a current hook in place and still installs a newly found agent", async () => {
     const calls: string[] = [];
     const service = createAgentSourceAutoInjectService({

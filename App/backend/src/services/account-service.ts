@@ -5,6 +5,7 @@ import {
   AccountProfileViewSchema,
   AccountSessionViewSchema,
   LotteryRewardSchema,
+  TaskTokenGiftNoticeSchema,
   SendCodeResponseSchema,
   SocialLoginStatusResponseSchema,
   StartSocialLoginResponseSchema,
@@ -15,6 +16,8 @@ import {
   type AccountSessionView,
   type LotteryReward,
   type LotteryRewardAckInput,
+  type TaskTokenGiftNotice,
+  type TaskTokenGiftAckInput,
   type SendCodeInput,
   type SendCodeResponse,
   type SocialLoginStatusInput,
@@ -44,6 +47,8 @@ export interface AccountService {
   getInvitation(): Promise<AccountInvitationView>;
   getLotteryReward(): Promise<LotteryReward>;
   ackLotteryReward(input: LotteryRewardAckInput): Promise<OkResponse>;
+  ensureTaskTokenGift(): Promise<TaskTokenGiftNotice>;
+  ackTaskTokenGift(input: TaskTokenGiftAckInput): Promise<OkResponse>;
   updateProfile(input: UpdateAccountProfileInput): Promise<AccountProfileView>;
   markGuideFinished(): Promise<OkResponse>;
   logout(): Promise<OkResponse>;
@@ -166,6 +171,24 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         uuid,
         ...(input.drawId ? { drawId: input.drawId } : {})
       });
+      return { ok: true };
+    },
+
+    async ensureTaskTokenGift() {
+      const uuid = options.accountSessionRepository.getCloudUuid();
+      if (!uuid) return { hasGift: false };
+      try {
+        return TaskTokenGiftNoticeSchema.parse(await options.cloudClient.ensureTaskTokenGift({ uuid }));
+      } catch {
+        // Older cloud deployments may not yet support this optional benefit.
+        return { hasGift: false };
+      }
+    },
+
+    async ackTaskTokenGift(input) {
+      const uuid = options.accountSessionRepository.getCloudUuid();
+      if (!uuid) throw Object.assign(new Error("Account session is not authenticated"), { code: "unauthorized" as const });
+      await options.cloudClient.ackTaskTokenGift({ uuid, grantId: input.grantId });
       return { ok: true };
     },
 

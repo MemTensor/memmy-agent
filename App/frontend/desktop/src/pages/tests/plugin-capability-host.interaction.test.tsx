@@ -146,7 +146,7 @@ describe("PluginCapabilityHost", () => {
     expect(container.textContent).toContain("已忽略文件夹中 1 个");
     expect(container.textContent).not.toContain("旧论文.doc");
     await act(async () => container.querySelector<HTMLButtonElement>(".review-card-footer .button-primary")!.click());
-    expect(upload.mock.calls[0]?.[0].map((file) => file.name)).toEqual(["研究.pdf", "笔记.md"]);
+    expect(upload.mock.calls.flatMap(([files]) => files.map((file) => file.name))).toEqual(["研究.pdf", "笔记.md"]);
     expect(respond).toHaveBeenCalledWith("review-sources", { files: expect.any(Array) });
   });
 
@@ -163,7 +163,7 @@ describe("PluginCapabilityHost", () => {
     expect(container.querySelector(".review-card-details")).toBeNull();
   });
 
-  it("waits for assistant media delivery instead of duplicating a review plugin artifact", async () => {
+  it("does not hang a plugin report before the assistant delivers it", async () => {
     const review = InstalledPluginSchema.parse({ ...plugin, id: "literature-review", manifest: { ...plugin.manifest, id: "literature-review" } });
     const artifact = { id: "review-docx", name: "文献综述.docx", role: "deliverable" as const,
       uri: "plugin-artifact://literature-review/document", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" };
@@ -174,9 +174,8 @@ describe("PluginCapabilityHost", () => {
     await act(async () => root.render(<PluginUiProvider><I18nProvider language="zh-CN"><PluginCapabilityHost
       region="flow" calls={[call]} plugins={[review]} client={null}
       onOpenArtifact={onOpenArtifact} onAddArtifact={onAddArtifact} /></I18nProvider></PluginUiProvider>));
-    expect(container.querySelector(".agent-delivered-files, .plugin-artifact-row, .review-interaction-shell")).toBeNull();
-    expect(onOpenArtifact).not.toHaveBeenCalled();
-    expect(onAddArtifact).not.toHaveBeenCalled();
+    expect(container.querySelector(".agent-delivered-files")).toBeNull();
+    expect(container.textContent).not.toContain("文献综述.docx");
   });
 
   it.each([
@@ -332,7 +331,7 @@ describe("PluginCapabilityHost", () => {
     expect(container.textContent).toContain("Guidance");
   });
 
-  it("moves a finished user-raised card into the transcript so its deliverables stay in history", async () => {
+  it("does not keep a finished file on a plugin card in the transcript", async () => {
     const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
     const call: PluginUiCall = { pluginId: plugin.id, capabilityId: "run", callId: "done", conversationId: "websocket:chat-1", origin: "user", events: [
       { type: "artifact", artifact: { id: "a1", name: "报告.docx", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", uri: "memmy-plugin://demo/a1" } },
@@ -343,7 +342,7 @@ describe("PluginCapabilityHost", () => {
     expect(container.textContent).not.toContain("报告.docx");
 
     await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><PluginCapabilityHost region="flow" calls={[call]} plugins={[plugin]} client={client} /></I18nProvider></PluginUiProvider>));
-    expect(container.textContent).toContain("报告.docx");
+    expect(container.textContent).not.toContain("报告.docx");
   });
 
   it("offers no close button on a card the Agent raised", async () => {
@@ -410,6 +409,30 @@ describe("PluginCapabilityHost", () => {
     expect(respond).toHaveBeenLastCalledWith(plugin.id, "files-2", "files-2", expect.objectContaining({ action: "chat-feedback", files: [], message: "Wait, check this file" }));
     await act(async () => mount("files-3"));
     expect(container.textContent).toContain("selected.pdf");
+  });
+
+  it("restores an upload card's selected documents after switching conversations", async () => {
+    const request = { interactionId: "materials", type: "file-input" as const,
+      payload: { title: "补充诊断材料", multiple: true, accept: [".docx"] } };
+    const render = (chat: string) => root.render(<PluginUiProvider><I18nProvider language="zh-CN">
+      <FileInputCard key={chat} conversationId={chat} pluginId="legal-labor" request={request}
+        diagnosticUpload title="补充诊断材料" description={null} disabled={false} status="idle"
+        onStatus={vi.fn()} onRespond={vi.fn(async () => undefined)} onUploadFiles={vi.fn()} />
+    </I18nProvider></PluginUiProvider>);
+    await act(async () => render("chat-1"));
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(picker, "files", { value: [new File(["doc"], "materials.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })] });
+    await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
+    expect(container.querySelector(".diagnostic-upload-card__file")?.textContent).toContain("materials.docx");
+    await act(async () => render("chat-2"));
+    expect(container.querySelector(".diagnostic-upload-card__file")).toBeNull();
+    await act(async () => render("chat-1"));
+    expect(container.querySelector(".diagnostic-upload-card__file")?.textContent).toContain("materials.docx");
+    await act(async () => container.querySelector<HTMLButtonElement>(".diagnostic-upload-card__remove")!.click());
+    await act(async () => render("chat-2"));
+    await act(async () => render("chat-1"));
+    expect(container.querySelector(".diagnostic-upload-card__file")).toBeNull();
   });
 
   it("keeps a single-file card to one file, so a second pick replaces the first", async () => {
@@ -561,11 +584,11 @@ describe("PluginCapabilityHost", () => {
 
     expect(container.textContent).toContain("Search papers");
     expect(container.textContent).toContain("Scope");
-    expect(container.textContent).toContain("report.md");
+    expect(container.textContent).not.toContain("report.md");
     await act(async () => container.querySelectorAll("button")[0]?.click());
     expect(respond).toHaveBeenCalledWith(plugin.id, "call-1", "q-1", "Broad");
     expect(container.textContent).not.toContain("Scope");
-    expect(container.textContent).toContain("report.md");
+    expect(container.textContent).not.toContain("report.md");
   });
 
   it("does not put review question descriptions on the card", async () => {
@@ -741,14 +764,10 @@ describe("PluginCapabilityHost", () => {
       </I18nProvider>
     ));
 
-    expect(container.textContent!.indexOf("Building tables")).toBeLessThan(container.textContent!.indexOf("4 delivery files"));
+    expect(container.textContent).toContain("Building tables");
+    expect(container.textContent).not.toContain("4 delivery files");
     expect(container.textContent).not.toContain("review.md");
-    const toggle = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("4 delivery files"))!;
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    await act(async () => toggle.click());
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(container.textContent).toContain("review.md");
-    expect(container.textContent).toContain("review.docx");
+    expect(container.textContent).not.toContain("review.docx");
   });
 
   it("loads a declared renderer into a script-only sandbox", async () => {
@@ -1051,9 +1070,40 @@ describe("PluginCapabilityHost", () => {
     expect(uploadFiles.mock.calls[0]?.[0]).toHaveLength(1);
     expect(uploadFiles.mock.calls[0]?.[0]?.[0]?.name).toBe("source.pdf");
     expect(respond).toHaveBeenCalledWith(plugin.id, "call-3", "files-1", { files: expect.any(Array) });
+  });
 
-    await act(async () => buttons().find((button) => button.textContent === "Add to chat")?.click());
-    expect(onAddArtifact).toHaveBeenCalledWith(call.events[3]!.type === "artifact" ? call.events[3]!.artifact : null);
+  it("keeps review upload failures on their file rows and retries only failed files", async () => {
+    const good = new File(["paper"], "good.txt", { type: "text/plain" });
+    const bad = new File([new Uint8Array([0, 0, 1, 154])], "ssoreport.txt", { type: "text/plain" });
+    const upload = vi.fn(async (inputs: UploadAgentMediaInput[]): Promise<UploadedAgentMedia[]> => {
+      if (inputs[0]!.name === "ssoreport.txt") throw new Error("invalid_text_content: binary");
+      return [{ path: "/media/good.txt", name: "good.txt", kind: "file", mime: "text/plain", bytes: 5, url: "http://agent.test/good.txt" }];
+    });
+    const respond = vi.fn(async () => undefined);
+    function Harness() {
+      const [status, setStatus] = useState<"idle" | "submitting" | "answered" | "error">("idle");
+      return <I18nProvider language="zh-CN"><FileInputCard pluginId="literature-review" title="Sources"
+        request={{ interactionId: "row-failure", type: "file-input", payload: { cardType: "source-import", multiple: true, accept: [".txt"] } }}
+        description={null} disabled={status === "submitting" || status === "answered"} status={status}
+        onStatus={setStatus} onRespond={respond} onUploadFiles={upload} /></I18nProvider>;
+    }
+    await act(async () => root.render(<Harness />));
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, "files", { value: [good, bad] });
+    await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+    const confirm = () => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "确认资料并继续")!;
+    await act(async () => confirm().click());
+    const failedRow = Array.from(container.querySelectorAll(".litrev-source-list__row")).find((row) => row.textContent?.includes("ssoreport.txt"))!;
+    expect(failedRow.querySelector('[role="alert"]')?.textContent).toContain("无法读取为文本");
+    expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    expect(respond).not.toHaveBeenCalled();
+    await act(async () => confirm().click());
+    expect(upload.mock.calls.map(([inputs]) => inputs[0]!.name)).toEqual(["good.txt", "ssoreport.txt", "ssoreport.txt"]);
+    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="移除 ssoreport.txt"]')!.click());
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => confirm().click());
+    expect(upload).toHaveBeenCalledTimes(3);
+    expect(respond).toHaveBeenCalledWith("row-failure", { files: [expect.objectContaining({ name: "good.txt" })] });
   });
 
   it("allows an optional file-input interaction to be skipped without uploading", async () => {
@@ -1442,9 +1492,9 @@ describe("plugin UI event reduction", () => {
       { ...base, callId: "failed", events: [{ type: "error", code: "failed", message: "failed", retryable: true }] }
     ];
 
-    expect(selectVisiblePluginCalls(calls).map((call) => call.callId)).toEqual(["artifact", "latest-active", "failed"]);
-    expect(selectVisiblePluginCalls(calls.slice(0, -1)).map((call) => call.callId)).toEqual(["artifact", "latest-active"]);
-    expect(selectVisiblePluginCalls(calls.slice(0, -1), new Set([`${plugin.id}:latest-active:outline`])).map((call) => call.callId)).toEqual(["artifact"]);
+    expect(selectVisiblePluginCalls(calls).map((call) => call.callId)).toEqual(["latest-active", "failed"]);
+    expect(selectVisiblePluginCalls(calls.slice(0, -1)).map((call) => call.callId)).toEqual(["latest-active"]);
+    expect(selectVisiblePluginCalls(calls.slice(0, -1), new Set([`${plugin.id}:latest-active:outline`])).map((call) => call.callId)).toEqual([]);
   });
 
   it("hides a card the user raised while the Agent waits on one of its own", () => {
@@ -1553,13 +1603,11 @@ describe("plugin UI event reduction", () => {
       </I18nProvider>
     ));
 
-    // Two blank templates are not this session's delivery files, and a card
-    // that hides the files it was opened to hand over wastes the click that
-    // opened it.
+    // The report is not a plugin card. Blank templates stay with the guide
+    // while that guide is still open; a finished file waits for the assistant.
     expect(guideContainer.textContent).not.toContain("2 个交付文件");
-    expect(guideContainer.textContent).toContain("调研前准备清单.xlsx");
-    expect(guideContainer.textContent).toContain("诊断表.xlsx");
-    expect(guideContainer.textContent).toContain("诊断报告.docx");
+    expect(guideContainer.textContent).not.toContain("诊断报告.docx");
+    expect(guideContainer.textContent).not.toContain("调研前准备清单.xlsx");
     await act(async () => guideRoot.unmount());
     guideContainer.remove();
   });

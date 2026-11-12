@@ -60,12 +60,14 @@ export function createPluginSkillContentService(options: {
       let request = pending.get(key);
       if (!request) {
         const epoch = generation;
-        request = (async () => {
+        const deadline = AbortSignal.timeout(15_000);
+        request = waitForConsumer((async () => {
           const url = new URL(`/api/v1/plugins/${encodeURIComponent(ref.pluginId)}/skills/${encodeURIComponent(ref.skillId)}/bundle`, base);
           url.searchParams.set("pluginVersion", ref.pluginVersion); url.searchParams.set("revision", ref.revision);
           // Shared request has its own deadline; one cancelled consumer must not cancel other consumers.
-          const response = await (options.fetch ?? fetch)(url, { headers: { ...headers, accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(15_000) });
-          if (!response.ok) throw failure(response.status === 401 || response.status === 403 ? "plugin_skill_access_denied" : "plugin_skill_unavailable");
+          const response = await (options.fetch ?? fetch)(url, { headers: { ...headers, accept: "application/json" }, redirect: "error", signal: deadline });
+          if (!response.ok) throw failure(response.status === 401 || response.status === 403 ? "plugin_skill_access_denied" :
+            [408, 429].includes(response.status) || response.status >= 500 ? "plugin_skill_unavailable" : "plugin_skill_bundle_missing");
           if (!response.body || Number(response.headers.get("content-length")) > MAX_BYTES) throw failure("plugin_skill_invalid");
           const chunks: Uint8Array[] = []; let size = 0;
           for await (const chunk of response.body) { size += chunk.byteLength; if (size > MAX_BYTES) throw failure("plugin_skill_invalid"); chunks.push(chunk); }
@@ -77,9 +79,11 @@ export function createPluginSkillContentService(options: {
             || !bundle.files["SKILL.md"] || Object.keys(bundle.files).length > 20
             || Object.keys(bundle.files).some(p => !/^(SKILL\.md|references\/[a-zA-Z0-9_-]+\.md)$/.test(p))) throw failure("plugin_skill_invalid");
           const text = Object.entries(bundle.files).sort(([a], [b]) => a.localeCompare(b)).map(([path, content]) => `### ${path}\n${content}`).join("\n\n");
+          deadline.throwIfAborted();
           // Recheck after network I/O: a logout, update or disable cannot repopulate stale data.
-          if (epoch !== generation || options.authHeaders().authorization !== headers.authorization
-            || JSON.stringify(service.reference(ref.pluginId, ref.skillId)) !== JSON.stringify(ref)) throw failure("plugin_skill_access_denied");
+          if (options.authHeaders().authorization !== headers.authorization) throw failure("plugin_skill_access_denied");
+          if (JSON.stringify(service.reference(ref.pluginId, ref.skillId)) !== JSON.stringify(ref)) throw failure("plugin_skill_version_changed");
+          if (epoch !== generation) throw failure("plugin_skill_unavailable");
           const ttl = options.ttlMs ?? 600_000;
           const timer = setTimeout(() => cache.delete(key), ttl); timer.unref?.();
           if (cache.size >= 64 && !cache.has(key)) {
@@ -89,16 +93,33 @@ export function createPluginSkillContentService(options: {
           const previous = cache.get(key); if (previous) clearTimeout(previous.timer);
           cache.set(key, { pluginId: ref.pluginId, text, expires: Date.now() + ttl, timer });
           return text;
-        })().catch(() => { throw failure("plugin_skill_unavailable"); }).finally(() => { if (pending.get(key) === request) pending.delete(key); });
+        })(), deadline).catch(error => {
+          // Only public, fixed codes cross the private channel. Preserve the
+          // distinction between transport failures and denied/invalid content.
+          if (typeof error?.code === "string" && error.code.startsWith("plugin_skill_")) throw error;
+          throw failure("plugin_skill_unavailable");
+        }).finally(() => { if (pending.get(key) === request) pending.delete(key); });
         pending.set(key, request);
       }
-      const text = await request;
+      const text = await waitForConsumer(request, signal);
       signal?.throwIfAborted();
       // Never hand the caller stale content after an account or plugin change.
-      if (options.authHeaders().authorization !== headers.authorization || JSON.stringify(service.reference(ref.pluginId, ref.skillId)) !== JSON.stringify(ref)) throw failure("plugin_skill_access_denied");
+      if (options.authHeaders().authorization !== headers.authorization) throw failure("plugin_skill_access_denied");
+      if (JSON.stringify(service.reference(ref.pluginId, ref.skillId)) !== JSON.stringify(ref)) throw failure("plugin_skill_version_changed");
       return text;
     }
   };
   return service;
 }
-function failure(code: string) { return Object.assign(new Error(code), { code }); }
+function failure(code: string) { return Object.assign(new Error(code), { code, retryable: code === "plugin_skill_unavailable" }); }
+
+/** Cancelling one consumer must neither block it nor abort a shared cloud read. */
+function waitForConsumer<T>(request: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return request;
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new Error("plugin_call_cancelled"));
+    if (signal.aborted) { void request.catch(() => undefined); abort(); return; }
+    signal.addEventListener("abort", abort, { once: true });
+    request.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}

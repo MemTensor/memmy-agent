@@ -20,12 +20,12 @@ import { usePluginUi } from "./app/plugin-ui-context.js";
 import { AgentSourceScanReconciler } from "./app/agent-source-scan-reconciler.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
-import { CampaignPromptHost } from "./components/campaign-prompt-host.js";
 import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
 import { HistoryLaunchPromptHost } from "./components/history-launch-prompt-host.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
 import { NotificationCenterProvider } from "./components/notification-center.js";
 import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
+import { TaskTokenGiftPromptHost } from "./components/task-token-gift-prompt-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -344,8 +344,8 @@ function RuntimeApp() {
         <NotificationCenterProvider>
         <AgentSourceScanReconciler />
           <AppRouter onRetry={retry} />
+          <TaskTokenGiftPromptHost />
           <HistoryLaunchPromptHost />
-          <CampaignPromptHost />
           <TokenCreditToastHost />
           <GithubStarPromptHost />
           {state.invitationToast ? (

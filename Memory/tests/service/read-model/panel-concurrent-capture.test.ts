@@ -12,6 +12,11 @@ it.each(["service","http","memmy-service","memmy-http"])("commits each capture e
  const memmy=transport.startsWith("memmy"),http=transport.endsWith("http");
  const session=service.openSession({namespace:{source:"memmy-agent",profileId:"test"}});
  const count=memmy?32:8;
+ // Prepare persisted fixture data before the HTTP server starts its real startup clock.
+ service.addMemory({content:"synthetic seed",source:"codex"});
+ const repos=new Repositories(db.db),seed=repos.memories.list({})[0]!;
+ db.db.transaction(()=>{for(let i=0;i<6000;i++)repos.memories.insert({...seed,id:`cold-${i}`,memoryKey:`cold-${i}`,properties:{...seed.properties,internal_info:{...seed.properties.internal_info,padding:"x".repeat(16384)}}});})();
+ repos.runtime.setKv("source_turn_capture_activated_at","2026-01-01T00:00:00Z");
  let base="";
  if(http) {
   server=createMemoryHttpServer({service,configPath:`${root}/fixture.json`,auth:{localServiceToken:"fixture"}});
@@ -34,10 +39,6 @@ it.each(["service","http","memmy-service","memmy-http"])("commits each capture e
   expect(response.status).toBe(200);
   return await response.json() as Awaited<ReturnType<typeof service.completeSourceTurn>>;
  };
- service.addMemory({content:"synthetic seed",source:"codex"});
- const repos=new Repositories(db.db),seed=repos.memories.list({})[0]!;
- db.db.transaction(()=>{for(let i=0;i<6000;i++)repos.memories.insert({...seed,id:`cold-${i}`,memoryKey:`cold-${i}`,properties:{...seed.properties,internal_info:{...seed.properties.internal_info,padding:"x".repeat(16384)}}});})();
- repos.runtime.setKv("source_turn_capture_activated_at","2026-01-01T00:00:00Z");
  for(const phase of ["cold","incremental"]) {
  if(phase==="incremental") db.db.transaction(()=>{for(let i=0;i<600;i++)repos.memories.insert({...seed,id:`incremental-${i}`,memoryKey:`incremental-${i}`});})();
  service.startPanelWarmup();

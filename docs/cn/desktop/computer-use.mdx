@@ -1,0 +1,118 @@
+---
+title: 让 Memmy 操作电脑
+description: 指定应用和任务，确认访问范围，在原应用中检查结果。
+icon: MousePointer2
+---
+
+当任务需要在桌面应用中完成时，可以让 Memmy 查看当前界面并执行操作。先确认应用权限，再打开目标应用和文件，告诉它要处理什么、希望得到什么结果。
+
+import taskScreen from "../../assets/computer-task-full.jpg";
+import excelTaskScreen from "../../assets/computer-excel-task-full.jpg";
+import settingsScreen from "../../assets/computer-settings-full.jpg";
+import excelPermissionScreen from "../../assets/computer-excel-permission-full.jpg";
+import excelConnectedScreen from "../../assets/computer-excel-connected-full.jpg";
+import revokeScreen from "../../assets/computer-revoke-full.jpg";
+
+## 设置应用权限
+
+首次访问应用时，Memmy 可能显示「应用操控审批」，其中有三个选择：
+
+<div className="docs-actions-table">
+
+| 选择 | 生效范围 |
+| --- | --- |
+| **允许一次** | 只对当前这条消息有效。 |
+| **始终允许** | 记住这个应用，之后使用它时不再逐次询问。 |
+| **阻止** | 不允许本次访问。 |
+
+</div>
+
+系统权限单独按提示处理。例如 macOS 可能要求开启辅助功能；需要重启时，完成授权后重启 Memmy 再继续。
+
+在工作台左下角打开「设置 → 电脑操控」，可以查看连接状态和「始终允许的应用」。顶部的「始终允许任意应用」用于省去逐应用询问，范围也包含内置浏览器和已连接的 Chrome、Edge。保持关闭时，按任务中的访问提示选择即可。
+
+<ProductScreenshot src={settingsScreen} alt="Memmy 完整窗口：电脑操控设置中的任意应用选项、浏览器、Excel 和始终允许的应用列表" caption="图中只展示示例授权记录，没有读取或改变电脑上的真实应用权限。" />
+
+## 连接浏览器或 Excel
+
+**Chrome / Edge**：在同页点击浏览器旁的「安装」，按展开指引添加 Memmy 扩展。确认出现「已连接，可操作此浏览器中的网页」后，再指定要处理的网页。
+
+**Microsoft Excel**：打开要处理的工作簿，再开启同页的「Microsoft Excel」选项。按系统提示允许控制 Excel，回到 Memmy 确认状态为「已连接」。这项连接按应用授权，任务中仍应写明目标工作簿、工作表和要处理的范围。
+
+<details>
+<summary>查看 Excel 连接提示</summary>
+
+<ProductScreenSteps steps={[
+  { label: "需要系统授权", src: excelPermissionScreen, alt: "Memmy 完整窗口：Excel 提示需要系统授权并提供重试连接按钮", caption: "看到权限提示时点击「重试连接」，再处理系统弹出的授权。" },
+  { label: "确认已连接", src: excelConnectedScreen, alt: "Memmy 完整窗口：Excel 选项开启且显示已连接", caption: "开关开启后，还要查看连接状态。图中为隔离的示例状态。" }
+]} />
+
+如果先前拒绝了 macOS 自动化权限，按界面提示打开系统自动化设置，调整后返回重试；提示需要打开工作簿时，先在 Excel 中打开文件。
+
+</details>
+
+## 先从小任务开始
+
+下面用同一份培训记录做两件小事。一件只查看，不改原文件；一件写入已打开的 Excel。
+
+### 查看已打开的文本编辑器
+
+可以下载这份 <a href="/docs-examples/training-notes.md" download>虚构培训筹备记录</a>，用文本编辑器打开，再向 Memmy 发送：
+
+<PromptExample composer={true} prompt="用电脑操控查看已打开的文本编辑器，列出 training-notes.md 里还没确定的安排。" />
+
+<ProductScreenshot src={taskScreen} alt="Memmy 查看已打开的文本编辑器，并列出培训记录里还没确定的安排" caption="图中窗口和文件为示例。左边是上面那条任务，右边是已打开的文本编辑器。" />
+
+### 写入已打开的 Excel
+
+用上面同一份培训记录。先确认 Microsoft Excel 为「已连接」，并打开工作簿「培训安排.xlsx」（新建的空工作簿即可），再发送：
+
+<PromptExample composer={true} prompt="用电脑操控，在已打开的 Excel 工作簿「培训安排.xlsx」里，把 training-notes.md 的待办写到工作表「培训安排」的 A1:D6。已经确定的填上负责人和时间，还没确定的保留为待确认。" />
+
+<ProductScreenshot src={excelTaskScreen} alt="Memmy 把培训待办写入已打开的 Excel 工作表「培训安排」" caption="图中工作簿为示例。左边是上面那条任务，右边是已写入 A1:D6 的工作表「培训安排」。" />
+
+## 执行时与完成后
+
+保持目标应用打开、电脑处于可交互状态。任务需要补充信息或确认时，先处理提示；要改变要求，在原任务中说明。要中止当前执行，点击「停止」。
+
+完成后回到原应用，检查目标内容是否符合要求；生成了文件时，打开实际文件核对。文本编辑器里的只读示例应只返回清单，原文件保持原样。写入 Excel 的示例只应改工作表「培训安排」的 A1:D6，未确定的内容保持为待确认。
+
+## 撤销某个应用的持续授权
+
+在「电脑操控 → 始终允许的应用」中，点击应用右侧的「×」，阅读提示后选择「移除」。下次使用这个应用时，Memmy 会重新询问。
+
+如果开启了「始终允许任意应用」，先关闭它，再移除单个应用的持续授权，才能恢复按应用询问。
+
+<details>
+<summary>查看移除确认</summary>
+
+<ProductScreenshot src={revokeScreen} alt="Memmy 完整窗口：从始终允许列表移除文本编辑的确认提示" caption="这里移除的是持续授权；点击「取消」会保留列表记录。" />
+
+</details>
+
+## 无法操作时
+
+<details>
+<summary>找不到应用或目标窗口</summary>
+
+先打开应用和文件，保持电脑已解锁。在任务中补充应用名称、窗口标题或文件名，避免只说“帮我改这个”。
+
+</details>
+
+<details>
+<summary>授权后仍然失败</summary>
+
+核对系统权限是否生效，以及是否提示重启。浏览器检查扩展连接，Excel 检查「已连接」或具体错误说明；提示辅助程序缺失时，检查安装包并保留错误信息用于反馈。
+
+</details>
+
+<details>
+<summary>电脑操控与电脑历史记录有什么区别？</summary>
+
+电脑操控执行当前交给 Memmy 的任务；电脑历史记录回顾允许采集的应用和网页活动。它们分别设置，开启历史记录不等于授权操作应用。
+
+</details>
+
+## 相关说明
+
+[搜索资料与使用网页](/docs/desktop/browser) · [使用与预览文件](/docs/desktop/files)

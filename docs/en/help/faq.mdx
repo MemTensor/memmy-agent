@@ -1,24 +1,117 @@
 ---
 title: FAQ
+description: Check model connections, memory sync, and file problems here.
 icon: MessageCircleQuestionMark
 ---
 
-**How is Memmy different from a regular chatbot?**
+Open a question, follow the checks, then go back to the original task.
 
-A regular chatbot only handles the current conversation. Memmy maintains local memory, scans external Agent history, installs Agent Skills, and puts the desktop app, CLI, Memory service, and tool connections in one runtime environment.
+## Getting started and models
 
-**Do I have to register an account?**
+<details>
+<summary>Do I need to install a command-line tool first?</summary>
 
-Not necessarily. The desktop app supports both account mode and API Key mode; API Key mode uses your own model quota, and data is still stored local-first.
+No. Download and install Memmy, finish the welcome screen, then type a task on the workbench and send it.
 
-**Can I use Memmy without configuring ASR or an image generation model?**
+</details>
 
-Yes. They only affect voice input and Agent image generation — both optional capabilities that never block normal chat or memory features.
+<details>
+<summary>Do I have to create an account?</summary>
 
-**How do external Agents use Memmy's memory?**
+No. The welcome screen includes **Use a custom LLM API Key (no sign-up needed)**. Have the API URL, model ID, and API key from a model provider, then follow the welcome screen through configuration and the connection test.
 
-First run the Memory service, then install the CLI, and finally install the corresponding Skill for Codex, Cursor, Claude Code, Opencode, OpenClaw, or Hermes.
+</details>
 
-**Where is my data stored? Does scanning upload it?**
+<details>
+<summary>Can I chat if speech or image generation is not configured?</summary>
 
-Everything defaults to `~/.memmy`, including config, workspace, the Memory SQLite database, and runtime files. Scanning and ingestion happen entirely locally, with memories written to local SQLite. Participation in the "memory improvement program" is explicitly controlled by a toggle in privacy settings.
+Yes. Speech recognition and image generation are optional. They do not affect ordinary text tasks. When you need them, add the model under **Settings → Model configuration** and select it under **Model assignments**.
+
+</details>
+
+<details>
+<summary>Why can I not send, or why does it say the current model is unavailable?</summary>
+
+1. Open **Settings → Model configuration** and confirm the model library has a usable connection.
+2. Under **Agent task models**, confirm a usable model is selected, then check **Conversation model** on the workbench.
+3. For a custom connection, check the protocol, API URL, model ID, API key, provider quota, and network. Test again after you correct them.
+
+If it still fails, write down the error. **Settings → About → Advanced / developer** can export a diagnostic report.
+
+</details>
+
+## Memory and material
+
+<details>
+<summary>Why are there fewer new memories than synced messages?</summary>
+
+Memmy organizes messages by complete conversation turns, and it removes duplicates and incomplete content. The number of synced messages and the number of memories are not one to one.
+
+</details>
+
+<details>
+<summary>Why can I not search a chat that just synced?</summary>
+
+In **Memory → Cross-Agent access**, check that source’s scan status and wait until sync, summary, and indexing finish. Then search **Memories** for a specific phrase from the original chat.
+
+If the source shows a failure, follow the error to check the history file location and the model configuration, then sync again.
+
+</details>
+
+<details>
+<summary>Does signing out delete memory?</summary>
+
+No. Signing out clears the account sign-in. Chats and memory already on this computer stay.
+
+Deleting memory is a separate action. Delete one item from its details. Clear many from **Data management** at the bottom of **Memory → Cross-Agent access**. Export anything you want to keep before a bulk clear.
+
+</details>
+
+<details>
+<summary>Where is memory stored?</summary>
+
+Configuration, the workspace, and the memory database are under `~/.memmy` on this computer by default. Export is under **Data management** at the bottom of **Memory → Cross-Agent access**.
+
+When you use a cloud model, the content needed for that request is sent to the model service you chose. Knowledge base files are uploaded for processing and search.
+
+</details>
+
+<details>
+<summary>The knowledge base has files, but the answer did not use them</summary>
+
+Open the knowledge base, confirm the file status is **Available**, and turn on **Recall** at the top right. In the question, name the knowledge base, the file, and what you want found, then check which material the answer cites.
+
+If the file still says **Processing**, wait. If it says **Failed**, read the error under the file name, fix it, and upload again.
+
+</details>
+
+<details>
+<summary>Another Agent did not pick up the earlier task</summary>
+
+In Memmy, search **Memories** for the original task and confirm the content has been organized. In **Cross-Agent access**, check that Agent’s connection and confirm the Hook, plugin, or Skill for that method is available.
+
+In the new chat, name the original topic and the work to continue. Shared memory does not transfer the working files. The other Agent also needs access to the material.
+
+</details>
+
+## Files and tasks
+
+<details>
+<summary>Why can a file in the project not be found?</summary>
+
+Check that the project shown under the input is the right one, and that the project folder was not moved or deleted and its disk is still connected. To choose it again, use **Add project → Open local folder**. You can also add the material from the attachment button beside the input.
+
+</details>
+
+<details>
+<summary>A result was generated. Where is the file?</summary>
+
+Choose the file card in the reply. It opens in the side panel. You can also open **Overview** in the side panel to see artifacts. To find the original material, switch the panel menu to **Workspace files**.
+
+**Show in folder** at the top of the preview reveals the file on this computer. If the reply has no file card or path, ask Memmy whether a file was created and where it was saved.
+
+</details>
+
+## Related
+
+[Account and settings](/docs/en/desktop/settings) · [View and manage memory](/docs/en/memory/overview) · [Use and preview files](/docs/en/desktop/files)

@@ -510,7 +510,10 @@ describe("memmy-project assist", () => {
     expect(output).toContain("已发送协助请求 A7F3K1");
   });
 
-  it("continues the same investigation by carrying the thread", async () => {
+  it.each([
+    { env: { MEMMY_TASK_ID: "requester-task" }, via: "Memmy" },
+    { env: { CODEX_THREAD_ID: "requester-codex" }, via: "Codex" }
+  ])("continues the same investigation by carrying the thread from $via", async ({ env, via }) => {
     let body: Record<string, unknown> = {};
     const fetcher = (async (_input: string | URL, init?: RequestInit) => {
       body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -519,11 +522,13 @@ describe("memmy-project assist", () => {
 
     await run([
       "assist", "ask", "--project", "Memmy 内测反馈", "--member", "王雨", "--file", requestFile(), "--continue", "t1"
-    ], { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }) });
+    ], { fetch: fetcher, runtimeConfigPath: runtimeFile({ baseUrl: "http://127.0.0.1:62315", localToken: "t" }), env });
 
     expect(body).toHaveProperty("thread", "t1");
-    // 在 Memmy 自己的任务里发起时，发起方就是 Memmy。
-    expect(body).toHaveProperty("via", "Memmy");
+    // Caller identity is fixture-owned, independent of the agent running the test.
+    expect(body).toHaveProperty("via", via);
+    if (via === "Memmy") expect(body).toHaveProperty("sourceTask", "requester-task");
+    else expect(body).not.toHaveProperty("sourceTask");
   });
 
   it("prints where the request stands, including the steps and the result", async () => {

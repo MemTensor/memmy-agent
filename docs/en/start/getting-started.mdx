@@ -1,99 +1,65 @@
 ---
-title: Getting Started
-description: This page walks you through installing Memmy, completing first-run setup, and having your first conversation — from zero.
+title: Install and get started
+description: Install Memmy, recover a piece of past work, and continue from it.
 icon: Rocket
 ---
 
-## What You Need
+import welcomeScreen from "../../assets/welcome-desktop-full-en.png";
+import permissionScreen from "../../assets/first-permission-full-en.jpg";
 
-- A macOS or Windows desktop environment (desktop path).
-- Or Node.js `>=22` + npm (CLI / source path).
-- API Key mode requires at least one model provider's API Key.
+## 1. Install and finish setup
 
-<Callout type="idea">
-  Not sure which mode to pick? Account mode works out of the box and comes with platform trial tokens; in API Key mode your data and quota stay fully under your control. Both modes store data local-first.
-</Callout>
+Download the installer and open Memmy. On the welcome screen, enter your phone number, choose **Get Code**, enter the SMS code, then choose **Log in / Sign up**.
 
-## Quick Setup
+<MemmyDownload />
 
-For a terminal-only installation on Linux x64 or arm64, use Node.js 22.23.4+ within 22.x, 24.22.1+ within 24.x, or 26.12.1+ within 26.x, and make sure a systemd user session is available. The installer rejects other major versions. Then run:
+<ProductScreenshot src={welcomeScreen} alt="Memmy welcome screen" caption="Sign in from the card in the middle. The custom API key entry is below it. Select the picture to enlarge it on this page." />
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
-memmy
-```
+<details>
+<summary>Use your own API key, without signing up</summary>
 
-The installer starts the local Memory Service as `memmy-memory.service`. If no usable model is configured, the first bare `memmy` command opens the existing wizard. After saving, it enables `memmy-gateway.service`, waits for readiness, and continues into the TUI. Both `systemd --user` services stay running when the TUI or terminal exits and start again on later logins; linger is not enabled. The installer launcher also refreshes a private `~/.memmy/systemd/gateway.env` file (mode `0600`) so configuration-referenced credentials and the terminal `PATH` remain available to the persistent Gateway.
+On the welcome screen, choose **Use a custom LLM API Key (no sign-up needed)**:
 
-Use `systemctl --user status memmy-memory.service` and `systemctl --user status memmy-gateway.service` to inspect them. The installer does not modify external agents. Run `memmy-memory init` or `memmy-memory init --agent <agent>` explicitly to install Memory integration for an agent.
+1. Choose the provider, then enter the model ID, API URL, and API key.
+2. Choose how embeddings are created for memory search, and choose models for memory summaries and skill evolution.
+3. Skip speech recognition and image generation if you do not need them yet.
+4. Choose **Test connection**, then save after it succeeds.
 
-Download and install the Memmy desktop app. On first launch it automatically:
+</details>
 
-1. Sets `MEMMY_HOME` and `MEMMY_CONFIG`.
-2. Installs the bundled CLI and prepares Hooks, plugins, and companion Skills for authorized Agents.
-3. Prepares `~/.memmy/config.yaml`, the workspace, and the Memory SQLite database.
-4. Starts the Memory service and the Agent gateway.
+## 2. Bring in past conversation
 
-```bash
-cd App/memmy-agent
-npm install
-npm run build
-node dist/main.js --help
-```
+The first-run setup asks whether Memmy may read history from other AI tools. To try memory first, choose **Scan only**. To also install the memory connector for supported tools, choose **Allow all**. To skip import for now, choose **Deny**.
 
-On the welcome page, choose:
+<ProductScreenshot src={permissionScreen} alt="Memmy asking permission to import chat history" caption="The three choices are at the bottom of the dialog. You can change this later in Memory, then Cross-Agent access." />
 
-- **Account mode**: sign in with a phone number or email verification code, using platform trial tokens.
-- **API Key mode**: a three-step setup — primary model + Embedding, memory-related models, and optional ASR and image generation models — each step with a real connection test.
+After you reach the workbench, open **Memory → Cross-Agent access** and find a tool you have used. The first time, choose **First scan**. If it has already synced, choose **Sync new**. Wait until summaries and indexing finish, then search **Memories** for a project name you recognize and open one record.
 
-```bash
-memmy onboard            # Terminal menu for configuring models, providers, and tools
-memmy onboard --defaults # Initialize config and workspace non-interactively
-memmy status             # Check configuration and runtime status
-```
+<details>
+<summary>There is no history, or you do not want to import it yet</summary>
 
-Enter the main workbench and send your first message from the input box. `Enter` to send, `Shift + Enter` for a new line, and type `/` to open the slash command panel.
+Create a task in Memmy and send a message.
 
-```bash
-memmy agent --message "Hi, introduce the current workspace"
-# Or start an interactive chat directly
-memmy
-```
+After you find the related memory in **Memory → Memories**, start another task and continue the conversation.
 
-Open "Memory → Cross-Agent access" and scan conversation history from Cursor, Claude Code, Codex, OpenCode, OpenClaw, Hermes, WorkBuddy, Pi, and qwenwork into the memory store. First-run onboarding lets you scan only or also install the matching Hook, plugin, or Skill for detected Agents.
+</details>
 
-After connection, Hooks and plugins capture completed turns and inject relevant memory automatically; WorkBuddy, Pi, and qwenwork use the Skill for on-demand memory access. See [Agent Sources & Scanning](/docs/memory/sources) for details.
+## 3. Ask Memmy to recover the background
 
-To connect an Agent outside the built-in list, open **Advanced actions → Add another Agent**. Select `kimi code`, `zcode`, `minimax code`, or `coder`, or enter another name; Memmy discovers its history location and format, installs the Skill, and completes the first import.
-Open the "Tools" page:
+Create a task, use the message below as a reference, and recover the memory:
 
-- Messaging channels: Telegram, Discord, iMessage, WeChat, Feishu, DingTalk.
-- Managed integrations: GitHub, Gmail, Notion, Slack, Linear, Jira, and more, via OAuth.
+<PromptExample composer={true} prompt="Do you remember the user interviews we did earlier? Please help me plan a 30-minute team meeting about following up on user feedback." />
 
-## Advanced: Use Memmy as a Local API
+Check whether the answer matches what you remember. If it does not, go back to **Memory → Memories**, confirm the record has finished processing, and ask again with the specific name in the record.
 
-```bash
-memmy serve
-```
+When a new task can find something from the past and continue the work, you have finished the first memory try.
 
-Listens on `http://127.0.0.1:18990` by default, exposing `GET /health`, `GET /v1/models`, and `POST /v1/chat/completions` — reusable by any tool that speaks the OpenAI Chat Completions protocol.
+## 4. Tools and connections
 
-## Advanced: Environment Variables
+Memmy can connect to the services and information you use for work through integrated tools, such as Notion and GitHub. You can also connect chat channels such as DingTalk, Feishu, and WeChat, and assign Memmy a task from there, or install a plugin and add that capability to the current task. Use them when a task depends on information outside the chat, actions in another system, or a repeatable workflow.
 
-| Variable | Purpose |
-| --- | --- |
-| `MEMMY_HOME` | Memmy data home directory (default `~/.memmy`) |
-| `MEMMY_CONFIG` | Main config file path (default `~/.memmy/config.yaml`) |
-| `MEMMY_MEMORY_TOKEN` / `MEMORY_SERVICE_TOKEN` | Bearer token for the Memory HTTP service |
-
-`${ENV_NAME}` references in the config file are resolved automatically, so you never hard-code API Keys in config.
-
-## What's Next
-
-Sessions, attachments, voice, and slash commands · Agent scanning and Hook/plugin integrations · The three-step setup in detail · The lightweight always-on-desktop entry point
+Open **Connections & Tools** on the left. Continue with [Connect an external tool](/docs/en/tools/integrations), [Connect a chat channel](/docs/en/channels), or [Plugins](/docs/en/plugins/overview).
 
 ## Related
 
-- [Default Ports](/docs/reference/ports)
-- [Security & Privacy](/docs/security/security)
-- [FAQ](/docs/help/faq)
+[Fix a problem](/docs/en/help/faq)

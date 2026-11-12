@@ -738,6 +738,7 @@ describe("local api", () => {
           version: "test-0.0.0",
           uptimeMs: 0,
           mode: "dev",
+          models: (await createMockMemoryClient().health()).models,
           storage: {
             backend: "sqlite",
             schemaVersion: "test",
@@ -1439,7 +1440,7 @@ function createRecordingCloudClient() {
       };
     },
 
-    async deleteIntegrationConnection(input: { machineComposioToken?: string; id: string }) {
+    async deleteIntegrationConnection(input: { machineComposioToken?: string; id: string }): Promise<{ ok: true }> {
       calls.push(`deleteIntegrationConnection:${input.machineComposioToken ?? "no-machine-token"}:${input.id}`);
       return { ok: true };
     }

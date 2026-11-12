@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
 
 const hashFile = async file => { const hash = createHash("sha256"); for await (const b of createReadStream(file)) hash.update(b); return hash.digest("hex"); };
-export async function packageRuntime({ root, destination, target, version, tools, setDefault = false }) {
+export async function packageRuntime({ root, destination, target, version, tools, setDefault = false, kind = "office" }) {
+  if (!["office", "texlive"].includes(kind)) throw new Error("Invalid runtime kind");
   if (!/^(darwin|linux|win32)-(x64|arm64)$/.test(target) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,80}$/.test(version)) throw new Error("Invalid target/version");
   root = await realpath(root); destination = resolve(destination);
   if (!relative(root, destination).startsWith("..")) throw new Error("Output must be outside the provisioned runtime");
@@ -31,23 +32,23 @@ export async function packageRuntime({ root, destination, target, version, tools
     }
   }
   await walk(root);
-  if (Object.keys(tools).sort().join(",") !== "pdfinfo,pdftoppm,pdftotext,soffice" || Object.values(tools).some(p => !files[p])) throw new Error("All four tools must be covered by the file manifest");
+  if (Object.keys(tools).sort().join(",") !== (kind === "office" ? "pdfinfo,pdftoppm,pdftotext,soffice" : "kpsewhich,xelatex") || Object.values(tools).some(p => !files[p])) throw new Error("All runtime tools must be covered by the file manifest");
   await mkdir(destination, { recursive: true });
   const temporary = join(destination, `.runtime-${process.pid}-${Date.now()}.tmp`);
   try {
     await pipeline(zip.generateNodeStream({ platform: "UNIX", streamFiles: true, compression: "DEFLATE", compressionOptions: { level: 6 } }), createWriteStream(temporary, { flags: "wx" }));
     const bytes = (await lstat(temporary)).size;
     if (bytes > 1024 ** 3) throw new Error("Runtime archive exceeds 1 GiB");
-    const sha256 = await hashFile(temporary), file = `office-runtime-${target}-${sha256}.zip`;
-    const manifest = { format: "memmy-office-runtime-v1", target, version, archive: { url: file, sha256, bytes }, tools, files };
-    const descriptor = `office-runtime-${target}-${version}.json`, encoded = JSON.stringify(manifest) + "\n";
+    const sha256 = await hashFile(temporary), file = `${kind}-runtime-${target}-${sha256}.zip`;
+    const manifest = { format: `memmy-${kind}-runtime-v1`, target, version, archive: { url: file, sha256, bytes }, tools, files };
+    const descriptor = `${kind}-runtime-${target}-${version}.json`, encoded = JSON.stringify(manifest) + "\n";
     const previous = await readFile(join(destination, descriptor), "utf8").catch(e => { if (e.code !== "ENOENT") throw e; return null; });
     if (previous && previous !== encoded) throw new Error("Runtime releases are immutable; bump the runtime version");
     const exists = await lstat(join(destination, file)).catch(() => null);
     if (exists) { if (await hashFile(join(destination, file)) !== sha256) throw new Error("Published runtime archive is corrupt"); await rm(temporary); }
     else await rename(temporary, join(destination, file));
     if (!previous) await writeFile(join(destination, descriptor), encoded, { flag: "wx" });
-    if (setDefault) { const pointer = `${temporary}.json`; await writeFile(pointer, encoded, { flag: "wx" }); await rename(pointer, join(destination, `office-runtime-${target}.json`)); }
+    if (setDefault) { const pointer = `${temporary}.json`; await writeFile(pointer, encoded, { flag: "wx" }); await rename(pointer, join(destination, `${kind}-runtime-${target}.json`)); }
     return manifest;
   } finally { await rm(temporary, { force: true }); }
 }

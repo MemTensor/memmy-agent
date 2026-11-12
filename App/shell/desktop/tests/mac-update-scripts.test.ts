@@ -30,7 +30,8 @@ function mockTool(name: string, script: string) {
 }
 
 function instrument(script: string) {
-  for (const [binary, replacement] of Object.entries(tools)) script = script.replaceAll(binary, `'${replacement}'`);
+  // Keep each mock's /bin/sh semantics without loading a new temporary executable.
+  for (const [binary, replacement] of Object.entries(tools)) script = script.replaceAll(binary, `/bin/sh '${replacement}'`);
   return script;
 }
 

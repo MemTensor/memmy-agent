@@ -1,5 +1,5 @@
 /** Adapter tests. */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -117,6 +117,55 @@ describe("hermes source adapter", () => {
     expect(progressPhases).toEqual(expect.arrayContaining(["discover", "read", "redact", "emit", "done"]));
   });
 
+  it("scans legacy Hermes databases without cwd and leaves their contents unchanged", async () => {
+    const fixture = createStateDbFixture({ includeCwd: false, includeActive: false, includePlatformMessageId: false });
+    const originalDatabase = readFileSync(fixture.stateDbPath);
+    const adapter = createHermesSourceAdapter({ rootDirectory: fixture.rootDirectory });
+
+    const messages = await collect(adapter.scan({}));
+    expect(messages).toHaveLength(3);
+    expect(messages.map((message) => message.messageId)).toEqual([
+      "hermes-db-session:1", "hermes-db-session:2", "hermes-db-session:3"
+    ]);
+    for (const message of messages) {
+      expect(message).toMatchObject({ sourceId: "hermes", workspacePath: null, gitRoot: null });
+    }
+    expect(messages[0]?.content).toBe("Please remember OPENAI_API_KEY=[REDACTED:openai_api_key]");
+    expect(messages[2]?.rawMeta.sourceTurn).toMatchObject({
+      conversationId: "hermes-db-session", turnId: "hermes-db-session:1", status: "succeeded"
+    });
+    expect(messages[2]?.rawMeta.sourceTurn).not.toHaveProperty("workspacePath");
+    expect(await collect(adapter.scan({}))).toEqual(messages);
+    expect(readFileSync(fixture.stateDbPath)).toEqual(originalDatabase);
+  });
+
+  it.each([null, ""])("preserves an existing cwd value of %j", async (cwd) => {
+    const fixture = createStateDbFixture({ cwd });
+    const messages = await collect(readHermesStateDb(fixture.stateDbPath));
+
+    expect(messages).toHaveLength(3);
+    expect(messages.every((message) => message.workspacePath === cwd && message.gitRoot === cwd)).toBe(true);
+    expect(messages[2]?.rawMeta.sourceTurn).not.toHaveProperty("workspacePath");
+  });
+
+  it("reads an empty legacy Hermes database without cwd", async () => {
+    const fixture = createStateDbFixture({ includeCwd: false, includeActive: false, includePlatformMessageId: false });
+    const db = new DatabaseSync(fixture.stateDbPath);
+    db.exec("DELETE FROM messages; DELETE FROM sessions;");
+    db.close();
+
+    await expect(collect(readHermesStateDb(fixture.stateDbPath))).resolves.toEqual([]);
+  });
+
+  it("still reports unrelated session schema errors", async () => {
+    const fixture = createStateDbFixture();
+    const db = new DatabaseSync(fixture.stateDbPath);
+    db.exec("DROP TABLE sessions; CREATE TABLE sessions (cwd TEXT);");
+    db.close();
+
+    await expect(collect(readHermesStateDb(fixture.stateDbPath))).rejects.toThrow("no such column: id");
+  });
+
   it("treats a missing Hermes home as an empty history", async () => {
     const rootDirectory = join(tmpdir(), `memmy-missing-hermes-${crypto.randomUUID()}`);
 
@@ -164,8 +213,15 @@ function createJsonlFixture(): { rootDirectory: string; sessionFilePath: string 
   return { rootDirectory, sessionFilePath };
 }
 
-function createStateDbFixture(options: { includePlatformMessageId?: boolean } = {}): { rootDirectory: string; workspacePath: string; stateDbPath: string } {
+function createStateDbFixture(options: {
+  includePlatformMessageId?: boolean;
+  includeCwd?: boolean;
+  includeActive?: boolean;
+  cwd?: string | null;
+} = {}): { rootDirectory: string; workspacePath: string; stateDbPath: string } {
   const includePlatformMessageId = options.includePlatformMessageId ?? true;
+  const includeCwd = options.includeCwd ?? true;
+  const includeActive = options.includeActive ?? true;
   tempDir = mkdtempSync(join(tmpdir(), "memmy-hermes-db-source-"));
   const rootDirectory = join(tempDir, ".hermes");
   const workspacePath = join(tempDir, "project");
@@ -178,7 +234,7 @@ function createStateDbFixture(options: { includePlatformMessageId?: boolean } = 
     db.exec(`
       CREATE TABLE sessions (
         id TEXT PRIMARY KEY,
-        cwd TEXT,
+        ${includeCwd ? "cwd TEXT," : ""}
         started_at REAL NOT NULL
       );
       CREATE TABLE messages (
@@ -187,12 +243,18 @@ function createStateDbFixture(options: { includePlatformMessageId?: boolean } = 
         role TEXT NOT NULL,
         content TEXT,
         timestamp REAL NOT NULL,
-        finish_reason TEXT,
-        ${includePlatformMessageId ? "platform_message_id TEXT," : ""}
-        active INTEGER NOT NULL DEFAULT 1
+        finish_reason TEXT
+        ${includePlatformMessageId ? ", platform_message_id TEXT" : ""}
+        ${includeActive ? ", active INTEGER NOT NULL DEFAULT 1" : ""}
       );
-      INSERT INTO sessions (id, cwd, started_at) VALUES ('hermes-db-session', '${workspacePath}', 1780404000.0);
     `);
+    if (includeCwd) {
+      db.prepare("INSERT INTO sessions (id, cwd, started_at) VALUES (?, ?, ?)").run(
+        "hermes-db-session", options.cwd === undefined ? workspacePath : options.cwd, 1780404000.0
+      );
+    } else {
+      db.prepare("INSERT INTO sessions (id, started_at) VALUES (?, ?)").run("hermes-db-session", 1780404000.0);
+    }
     if (includePlatformMessageId) {
       db.exec(`
         INSERT INTO messages (session_id, role, content, timestamp, finish_reason, platform_message_id)

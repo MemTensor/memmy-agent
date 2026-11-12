@@ -15,8 +15,8 @@ The desktop local API is built on Fastify and binds to a random port on `127.0.0
 | Agent Source | `GET /api/agent-sources`, `POST /api/agent-sources/scan`, `POST /api/agent-sources/:sourceId/skill` |
 | Local data | `POST /api/local-data/reveal`, `POST /api/local-data/export`, `DELETE /api/local-data` |
 | Memory proxy | `/api/v1/memory/*`, `/api/v1/panel/*` (proxied to the Memory Runtime) |
-| MCP bridge | `GET/POST/DELETE /mcp/composio` (separate `x-memmy-mcp-token`) |
+| MCP bridge | `GET/POST/DELETE /mcp/composio`, `GET/POST/DELETE /mcp/plugins` (separate `x-memmy-mcp-token`) |
 
 ## SSE Events
 
-`/api/events` pushes: `app.connected`, `app.heartbeat`, `agent_source.scan_progress`, `agent_source.scan_completed`.
+`/api/events` pushes: `app.connected`, `app.heartbeat`, `agent_source.scan_progress`, `agent_source.scan_completed`, `plugin.capability_event`.

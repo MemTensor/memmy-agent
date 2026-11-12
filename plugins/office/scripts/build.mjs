@@ -3,6 +3,7 @@ import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { formats, manifest } from "./manifest.mjs";
+import { collectThirdPartyNotices } from "./third-party-notices.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source = resolve(root, "../../App/memmy-agent/src/skills");
@@ -14,19 +15,7 @@ await build({ entryPoints: [resolve(root, "src/execute.mjs")], outfile: resolve(
   bundle: true, platform: "node", format: "cjs", target: "node22", logLevel: "warning" });
 await writeFile(resolve(root, "plugin.json"), JSON.stringify(manifest, null, 2) + "\n");
 await cp(resolve(root, "plugin.json"), resolve(root, "dist/plugin.json"));
-const lock = JSON.parse(await readFile(resolve(root, "package-lock.json"), "utf8"));
-const notices = ["Third-party libraries bundled in Memmy Office.\n"];
-for (const [directory, metadata] of Object.entries(lock.packages ?? {})) {
-  if (!directory.startsWith("node_modules/") || metadata.dev) continue;
-  const packageRoot = resolve(root, directory);
-  const info = JSON.parse(await readFile(resolve(packageRoot, "package.json"), "utf8"));
-  notices.push(`\n--- ${info.name}@${info.version} (${typeof info.license === "string" ? info.license : "see license"}) ---\n`);
-  for (const name of ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENSE-MIT.txt", "LICENCE", "license", "license.md"]) {
-    const content = await readFile(resolve(packageRoot, name), "utf8").catch(error => { if (error.code !== "ENOENT") throw error; return null; });
-    if (content) { notices.push(content); break; }
-  }
-}
-await writeFile(resolve(root, "dist/THIRD-PARTY-NOTICES.txt"), notices.join("\n"));
+await writeFile(resolve(root, "dist/THIRD-PARTY-NOTICES.txt"), await collectThirdPartyNotices(root));
 for (const format of formats) {
   const dest = resolve(root, `dist/skills/office-${format}`);
   await cp(resolve(source, format), dest, { recursive: true });

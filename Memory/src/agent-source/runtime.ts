@@ -754,8 +754,15 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       const discovered = await list();
       for (const source of discovered.sources) {
         if (disposed || clearing) return;
-        if (!source.available || source.status !== "not_connected" || state.sources[source.sourceId]?.autoInjectSuppressed === true) continue;
+        if (!source.available || state.sources[source.sourceId]?.autoInjectSuppressed === true) continue;
+        const checkDshUpdate = source.sourceId === "deepseek_harness" && source.status === "plugin_installed";
+        if (source.status !== "not_connected" && !checkDshUpdate) continue;
         try {
+          if (checkDshUpdate) {
+            const target = integrationRegistry.get(source.sourceId);
+            if (await target?.isInstalledHookCurrent?.() !== false) continue;
+            if (disposed || clearing || (await readState()).sources[source.sourceId]?.autoInjectSuppressed) continue;
+          }
           const kind = agentConnectionKind(source.sourceId);
           await mutateConnection(source.sourceId, kind, "POST", "auto_inject");
           const currentState = await readState();

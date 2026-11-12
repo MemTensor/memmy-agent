@@ -1555,7 +1555,8 @@ def _read_hermes_source_turn(session_id: str, user_content: str) -> Optional[Dic
             + "FROM messages WHERE session_id = ? ORDER BY id ASC",
             (session_id,),
         ).fetchall()]
-        cwd_row = conn.execute("SELECT cwd FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        session_columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        cwd_row = conn.execute("SELECT cwd FROM sessions WHERE id = ?", (session_id,)).fetchone() if "cwd" in session_columns else None
         cwd = _clean_text(cwd_row["cwd"]) if cwd_row else ""
     finally:
         conn.close()
