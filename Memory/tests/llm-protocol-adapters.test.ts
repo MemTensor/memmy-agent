@@ -38,9 +38,18 @@ describe("memory protocol adapters", () => {
       { role: "user", content: "Summarize this." }
     ];
 
-    const text = await createLlmClient(llmConfig({ provider: "openai_responses" }), {
+    const text = await createLlmClient(llmConfig({
+      provider: "openai_responses",
+      vendor: "qwen",
+      enableThinking: true
+    }), {
       modelRole: "memory_summary"
-    }).complete(messages, { operation: "capture.summarize", jsonMode: true, maxTokens: 512 });
+    }).complete(messages, {
+      operation: "capture.summarize",
+      jsonMode: true,
+      maxTokens: 512,
+      thinkingMode: "disabled"
+    });
 
     expect(text).toBe("{\"summary\":\"ok\"}");
     expect(fetchMock).toHaveBeenCalledWith(
@@ -55,6 +64,9 @@ describe("memory protocol adapters", () => {
       stream: false,
       text: { format: { type: "json_object" } }
     });
+    expect(requestBody(fetchMock)).not.toHaveProperty("enable_thinking");
+    expect(requestBody(fetchMock)).not.toHaveProperty("chat_template_kwargs");
+    expect(requestBody(fetchMock)).not.toHaveProperty("thinking_budget");
   });
 
   it("posts memory evolution turns to Bedrock Converse", async () => {
