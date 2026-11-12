@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { constants, accessSync, realpathSync } from 'node:fs';
+import { constants, accessSync, realpathSync, statSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -61,6 +61,18 @@ function listAgentProcesses(binary: string): AgentProcess[] {
 }
 
 function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
+  // A regular file at the socket path is not a removed agent; reject immediately
+  // so callers can distinguish a stale non-socket entry from a cleanly stopped agent.
+  try {
+    if (!statSync(agent.socketPath).isSocket()) {
+      return Promise.reject(new Error(`Agent socket path is not a Unix socket: ${agent.socketPath}`));
+    }
+  } catch (statError) {
+    if ((statError as NodeJS.ErrnoException).code === 'ENOENT') {
+      return Promise.resolve(); // Socket already removed – agent already stopped.
+    }
+    return Promise.reject(statError as Error);
+  }
   const bundle = dirname(dirname(dirname(binary)));
   return new Promise((resolveStop, rejectStop) => {
     let connected = false;
