@@ -981,57 +981,63 @@ Function MemmyInstallLaunchProxy
   StrCpy $0 "$LOCALAPPDATA\Memmy\launcher"
   CreateDirectory "$0"
   SetOutPath "$0"
+  ; Upgrades from builds that used the VBS launch proxy leave a script that newer
+  ; Windows releases cannot run; the PowerShell launcher replaces it.
+  Delete "$0\MemmyLauncher.vbs"
   File /oname=Memmy.ico "${BUILD_RESOURCES_DIR}\icon.ico"
   File /oname=MemmyUpdatePrompt.ps1 "${BUILD_RESOURCES_DIR}\MemmyUpdatePrompt.ps1"
   File /oname=MemmyWindowsUpgradeRecovery.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsUpgradeRecovery.ps1"
   File /oname=MemmyWindowsDataMigration.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsDataMigration.ps1"
   File /oname=MemmyWindowsRuntimeOwnership.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsRuntimeOwnership.ps1"
 
-  FileOpen $1 "$0\MemmyLauncher.vbs" w
-  FileWrite $1 "Set shell = CreateObject($\"WScript.Shell$\")$\r$\n"
-  FileWrite $1 "Set fso = CreateObject($\"Scripting.FileSystemObject$\")$\r$\n"
-  FileWrite $1 "appExe = $\"$INSTDIR\${PRODUCT_FILENAME}.exe$\"$\r$\n"
-  FileWrite $1 "userDataRoot = shell.ExpandEnvironmentStrings($\"%APPDATA%$\") & $\"\Memmy$\"$\r$\n"
-  FileWrite $1 "legacyUserDataRoot = $\"$INSTDIR\data\Memmy$\"$\r$\n"
-  FileWrite $1 "powerShellPath = shell.ExpandEnvironmentStrings($\"%SystemRoot%$\") & $\"\System32\WindowsPowerShell\v1.0\powershell.exe$\"$\r$\n"
-  FileWrite $1 "promptPath = $\"$0\MemmyUpdatePrompt.ps1$\"$\r$\n"
-  FileWrite $1 "recoveryPath = $\"$0\MemmyWindowsUpgradeRecovery.ps1$\"$\r$\n"
-  FileWrite $1 "migrationRecoveryPath = $\"$0\MemmyWindowsDataMigration.ps1$\"$\r$\n"
-  FileWrite $1 "migrationStatePath = shell.ExpandEnvironmentStrings($\"%LOCALAPPDATA%$\") & $\"\Memmy\data-migration\state.json$\"$\r$\n"
-  FileWrite $1 "migrationLogPath = shell.ExpandEnvironmentStrings($\"%LOCALAPPDATA%$\") & $\"\Memmy\upgrade-logs\data-migration.log$\"$\r$\n"
-  FileWrite $1 "upgradeLogPath = shell.ExpandEnvironmentStrings($\"%LOCALAPPDATA%$\") & $\"\Memmy\upgrade-logs\windows-upgrade.log$\"$\r$\n"
-  FileWrite $1 "languagePath = userDataRoot & $\"\update-prompt-language.txt$\"$\r$\n"
-  FileWrite $1 "markerPath = userDataRoot & $\"\prepared-required-update.json$\"$\r$\n"
-  FileWrite $1 "legacyMarkerPath = legacyUserDataRoot & $\"\prepared-required-update.json$\"$\r$\n"
-  FileWrite $1 "If (Not fso.FileExists(markerPath)) And (fso.FileExists(legacyMarkerPath) Or fso.FolderExists(legacyMarkerPath & $\".lock$\")) Then$\r$\n"
-  FileWrite $1 "  markerPath = legacyMarkerPath$\r$\n"
-  FileWrite $1 "  languagePath = legacyUserDataRoot & $\"\update-prompt-language.txt$\"$\r$\n"
-  FileWrite $1 "End If$\r$\n"
-  FileWrite $1 "lockPath = markerPath & $\".lock$\"$\r$\n"
-  FileWrite $1 "relayLockPath = shell.ExpandEnvironmentStrings($\"%LOCALAPPDATA%$\") & $\"\Memmy\upgrade-staging\active.lock$\"$\r$\n"
-  FileWrite $1 "If fso.FolderExists(relayLockPath) And fso.FileExists(recoveryPath) Then$\r$\n"
-  FileWrite $1 "  shell.Run Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & recoveryPath & Chr(34) & $\" -InstallDir $\" & Chr(34) & fso.GetParentFolderName(appExe) & Chr(34) & $\" -LockPath $\" & Chr(34) & relayLockPath & Chr(34) & $\" -LogPath $\" & Chr(34) & upgradeLogPath & Chr(34) & $\" -DirectMigrationStatePath $\" & Chr(34) & migrationStatePath & Chr(34) & $\" -DirectMigrationScriptPath $\" & Chr(34) & migrationRecoveryPath & Chr(34) & $\" -DirectMigrationLogPath $\" & Chr(34) & migrationLogPath & Chr(34), 0, True$\r$\n"
-  FileWrite $1 "End If$\r$\n"
-  FileWrite $1 "If fso.FolderExists(relayLockPath) Then$\r$\n"
-  FileWrite $1 "  lockPath = relayLockPath$\r$\n"
-  FileWrite $1 "End If$\r$\n"
+  ; Windows 11 24H2 can ship without the optional VBScript engine, so the launch proxy
+  ; must be a PowerShell script. It is written as UTF-16LE with a BOM because Windows
+  ; PowerShell 5 otherwise decodes a BOM-less script with the active system code page.
+  FileOpen $1 "$0\MemmyLauncher.ps1" w
+  FileWriteByte $1 "255"
+  FileWriteByte $1 "254"
+  FileWriteUTF16LE $1 "$$ErrorActionPreference = 'SilentlyContinue'$\r$\n"
+  FileWriteUTF16LE $1 "$$appExe = $\"$INSTDIR\${PRODUCT_FILENAME}.exe$\"$\r$\n"
+  FileWriteUTF16LE $1 "$$userDataRoot = Join-Path $$env:APPDATA 'Memmy'$\r$\n"
+  FileWriteUTF16LE $1 "$$legacyUserDataRoot = $\"$INSTDIR\data\Memmy$\"$\r$\n"
+  FileWriteUTF16LE $1 "$$powerShellPath = Join-Path $$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'$\r$\n"
+  FileWriteUTF16LE $1 "$$promptPath = $\"$0\MemmyUpdatePrompt.ps1$\"$\r$\n"
+  FileWriteUTF16LE $1 "$$recoveryPath = $\"$0\MemmyWindowsUpgradeRecovery.ps1$\"$\r$\n"
+  FileWriteUTF16LE $1 "$$migrationRecoveryPath = $\"$0\MemmyWindowsDataMigration.ps1$\"$\r$\n"
+  FileWriteUTF16LE $1 "$$migrationStatePath = Join-Path $$env:LOCALAPPDATA 'Memmy\data-migration\state.json'$\r$\n"
+  FileWriteUTF16LE $1 "$$migrationLogPath = Join-Path $$env:LOCALAPPDATA 'Memmy\upgrade-logs\data-migration.log'$\r$\n"
+  FileWriteUTF16LE $1 "$$upgradeLogPath = Join-Path $$env:LOCALAPPDATA 'Memmy\upgrade-logs\windows-upgrade.log'$\r$\n"
+  FileWriteUTF16LE $1 "$$languagePath = Join-Path $$userDataRoot 'update-prompt-language.txt'$\r$\n"
+  FileWriteUTF16LE $1 "$$markerPath = Join-Path $$userDataRoot 'prepared-required-update.json'$\r$\n"
+  FileWriteUTF16LE $1 "$$legacyMarkerPath = Join-Path $$legacyUserDataRoot 'prepared-required-update.json'$\r$\n"
+  FileWriteUTF16LE $1 "if (-not (Test-Path -LiteralPath $$markerPath -PathType Leaf) -and ((Test-Path -LiteralPath $$legacyMarkerPath -PathType Leaf) -or (Test-Path -LiteralPath ($$legacyMarkerPath + '.lock') -PathType Container))) {$\r$\n"
+  FileWriteUTF16LE $1 "  $$markerPath = $$legacyMarkerPath$\r$\n"
+  FileWriteUTF16LE $1 "  $$languagePath = Join-Path $$legacyUserDataRoot 'update-prompt-language.txt'$\r$\n"
+  FileWriteUTF16LE $1 "}$\r$\n"
+  FileWriteUTF16LE $1 "$$lockPath = $$markerPath + '.lock'$\r$\n"
+  FileWriteUTF16LE $1 "$$relayLockPath = Join-Path $$env:LOCALAPPDATA 'Memmy\upgrade-staging\active.lock'$\r$\n"
+  FileWriteUTF16LE $1 "if ((Test-Path -LiteralPath $$relayLockPath -PathType Container) -and (Test-Path -LiteralPath $$recoveryPath -PathType Leaf)) {$\r$\n"
+  FileWriteUTF16LE $1 "  & $$powerShellPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $$recoveryPath -InstallDir (Split-Path -Parent $$appExe) -LockPath $$relayLockPath -LogPath $$upgradeLogPath -DirectMigrationStatePath $$migrationStatePath -DirectMigrationScriptPath $$migrationRecoveryPath -DirectMigrationLogPath $$migrationLogPath | Out-Null$\r$\n"
+  FileWriteUTF16LE $1 "}$\r$\n"
+  FileWriteUTF16LE $1 "if (Test-Path -LiteralPath $$relayLockPath -PathType Container) {$\r$\n"
+  FileWriteUTF16LE $1 "  $$lockPath = $$relayLockPath$\r$\n"
+  FileWriteUTF16LE $1 "}$\r$\n"
   ; A cancelled direct upgrade can leave the install-local marker lock behind. Run the
   ; same age/process-aware recovery used for relay locks before treating it as an active lock.
-  FileWrite $1 "If fso.FolderExists(lockPath) And LCase(lockPath) <> LCase(relayLockPath) And fso.FileExists(recoveryPath) Then$\r$\n"
-  FileWrite $1 "  shell.Run Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & recoveryPath & Chr(34) & $\" -InstallDir $\" & Chr(34) & fso.GetParentFolderName(appExe) & Chr(34) & $\" -LockPath $\" & Chr(34) & lockPath & Chr(34) & $\" -LogPath $\" & Chr(34) & upgradeLogPath & Chr(34) & $\" -DirectMigrationStatePath $\" & Chr(34) & migrationStatePath & Chr(34) & $\" -DirectMigrationScriptPath $\" & Chr(34) & migrationRecoveryPath & Chr(34) & $\" -DirectMigrationLogPath $\" & Chr(34) & migrationLogPath & Chr(34), 0, True$\r$\n"
-  FileWrite $1 "End If$\r$\n"
-  FileWrite $1 "promptMarkerPath = markerPath & $\".prompt$\"$\r$\n"
-  FileWrite $1 "If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then$\r$\n"
-  FileWrite $1 "  If fso.FileExists(powerShellPath) And fso.FileExists(promptPath) Then$\r$\n"
-  FileWrite $1 "    shell.Run Chr(34) & powerShellPath & Chr(34) & $\" -STA -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & promptPath & Chr(34) & $\" -LockPath $\" & Chr(34) & lockPath & Chr(34) & $\" -AppExe $\" & Chr(34) & appExe & Chr(34) & $\" -LanguagePath $\" & Chr(34) & languagePath & Chr(34), 0, True$\r$\n"
-  FileWrite $1 "  End If$\r$\n"
-  FileWrite $1 "  WScript.Quit 0$\r$\n"
-  FileWrite $1 "End If$\r$\n"
-  FileWrite $1 "If fso.FolderExists(lockPath) Or Not fso.FileExists(appExe) Then$\r$\n"
-  FileWrite $1 "  WScript.Quit 0$\r$\n"
-  FileWrite $1 "End If$\r$\n"
-  FileWrite $1 "shell.CurrentDirectory = fso.GetParentFolderName(appExe)$\r$\n"
-  FileWrite $1 "shell.Run Chr(34) & appExe & Chr(34), 1, False$\r$\n"
+  FileWriteUTF16LE $1 "if ((Test-Path -LiteralPath $$lockPath -PathType Container) -and ($$lockPath.ToLowerInvariant() -ne $$relayLockPath.ToLowerInvariant()) -and (Test-Path -LiteralPath $$recoveryPath -PathType Leaf)) {$\r$\n"
+  FileWriteUTF16LE $1 "  & $$powerShellPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $$recoveryPath -InstallDir (Split-Path -Parent $$appExe) -LockPath $$lockPath -LogPath $$upgradeLogPath -DirectMigrationStatePath $$migrationStatePath -DirectMigrationScriptPath $$migrationRecoveryPath -DirectMigrationLogPath $$migrationLogPath | Out-Null$\r$\n"
+  FileWriteUTF16LE $1 "}$\r$\n"
+  FileWriteUTF16LE $1 "$$promptMarkerPath = $$markerPath + '.prompt'$\r$\n"
+  FileWriteUTF16LE $1 "if ((Test-Path -LiteralPath $$lockPath -PathType Container) -and (Test-Path -LiteralPath $$promptMarkerPath -PathType Leaf)) {$\r$\n"
+  FileWriteUTF16LE $1 "  if ((Test-Path -LiteralPath $$powerShellPath -PathType Leaf) -and (Test-Path -LiteralPath $$promptPath -PathType Leaf)) {$\r$\n"
+  FileWriteUTF16LE $1 "    & $$powerShellPath -STA -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $$promptPath -LockPath $$lockPath -AppExe $$appExe -LanguagePath $$languagePath | Out-Null$\r$\n"
+  FileWriteUTF16LE $1 "  }$\r$\n"
+  FileWriteUTF16LE $1 "  exit 0$\r$\n"
+  FileWriteUTF16LE $1 "}$\r$\n"
+  FileWriteUTF16LE $1 "if ((Test-Path -LiteralPath $$lockPath -PathType Container) -or -not (Test-Path -LiteralPath $$appExe -PathType Leaf)) {$\r$\n"
+  FileWriteUTF16LE $1 "  exit 0$\r$\n"
+  FileWriteUTF16LE $1 "}$\r$\n"
+  FileWriteUTF16LE $1 "Start-Process -FilePath $$appExe -WorkingDirectory (Split-Path -Parent $$appExe)$\r$\n"
   FileClose $1
 
   SetOutPath "$INSTDIR"
@@ -1039,14 +1045,14 @@ FunctionEnd
 
 !macro MemmyPointShortcutsToLaunchProxy
   StrCpy $0 "$LOCALAPPDATA\Memmy\launcher"
-  StrCpy $1 "$0\MemmyLauncher.vbs"
+  StrCpy $1 "$0\MemmyLauncher.ps1"
   StrCpy $2 "$0\Memmy.ico"
   StrCpy $4 "0"
   IfFileExists "$1" 0 memmy_point_shortcuts_done
 
   StrCpy $3 "$newStartMenuLink"
   IfFileExists "$3" 0 memmy_point_desktop_shortcut
-  CreateShortCut "$3" "$SYSDIR\wscript.exe" "$\"$1$\"" "$2" 0 "" "" "${APP_DESCRIPTION}"
+  CreateShortCut "$3" "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $\"$1$\"" "$2" 0 "" "" "${APP_DESCRIPTION}"
   ClearErrors
   StrCpy $4 "1"
 
@@ -1069,7 +1075,7 @@ FunctionEnd
 
   memmy_point_new_desktop_shortcut:
     StrCpy $3 "$newDesktopLink"
-    CreateShortCut "$3" "$SYSDIR\wscript.exe" "$\"$1$\"" "$2" 0 "" "" "${APP_DESCRIPTION}"
+    CreateShortCut "$3" "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $\"$1$\"" "$2" 0 "" "" "${APP_DESCRIPTION}"
     ClearErrors
     StrCpy $4 "1"
 

@@ -954,6 +954,9 @@ function bwrapArgs(
   if (runtimeRoot && !["/usr", "/bin", "/lib", "/lib64"].includes(runtimeRoot)) args.push("--ro-bind", runtimeRoot, runtimeRoot);
   for (const path of runtimeReadRoots) args.push("--ro-bind", path, path);
   for (const rule of filesystem) args.push(rule.writable ? "--bind" : "--ro-bind", rule.path, rule.path);
+  // Distribution LibreOffice keeps its configuration registry in /etc/libreoffice.
+  // Without it, headless conversions abort in SvtSysLocaleOptions before rendering.
+  args.push("--ro-bind-try", "/etc/libreoffice", "/etc/libreoffice");
   args.push("--chdir", cwd, "--", command, ...commandArgs);
   return args;
 }

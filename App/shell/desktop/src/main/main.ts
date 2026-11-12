@@ -3371,7 +3371,7 @@ async function installWindowsUpdateInBackground(
   const updatesDirectory = resolveUpdatesDirectory();
   await mkdir(updatesDirectory, { recursive: true });
   const helperPath = join(updatesDirectory, `install-win-update-${Date.now()}.ps1`);
-  const launcherPath = join(updatesDirectory, `launch-win-update-${Date.now()}.vbs`);
+  const launcherPath = join(updatesDirectory, `launch-win-update-${Date.now()}.ps1`);
   const logPath = join(updatesDirectory, "win-update-install.log");
   if (options.showUpdatePrompt) {
     await writeWindowsUpdatePromptLanguage(resolveWindowsUpdatePromptLanguageFromAppSettings());
@@ -3399,7 +3399,15 @@ async function installWindowsUpdateInBackground(
   ]));
   await appendFile(logPath, `[${new Date().toISOString()}] queued Memmy Windows update helper "${helperPath}"\n`).catch(() => undefined);
 
-  const helper = spawn("wscript.exe", [launcherPath], {
+  const helper = spawn(windowsUpdatePowerShellExecutable(), [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-WindowStyle",
+    "Hidden",
+    "-File",
+    launcherPath
+  ], {
     detached: true,
     stdio: "ignore",
     windowsHide: true

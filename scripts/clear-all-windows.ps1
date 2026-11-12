@@ -1164,7 +1164,7 @@ function Add-ShortcutTargets {
       }
       $shortcut = $shell.CreateShortcut($shortcutPath)
       $identity = "$($shortcut.TargetPath) $($shortcut.Arguments)"
-      if ($identity -match "(?i)(Memmy\.exe|MemmyLauncher\.vbs|\\Memmy\\launcher)") {
+      if ($identity -match "(?i)(Memmy\.exe|MemmyLauncher\.(?:vbs|ps1)|\\Memmy\\launcher)") {
         Add-Target $shortcutPath "File" "Verified Memmy shortcut" "Known"
       } else {
         Add-ListItem $script:Retained "skipped-shortcut: $shortcutPath [target is not Memmy]"
@@ -1348,7 +1348,7 @@ function Get-MemmyProcesses {
 
     if (-not $isMemmy -and
         $name -match "(?i)^(cmd|powershell|pwsh|wscript|cscript)\.exe$" -and
-        $commandLine -match "(?i)(MemmyLauncher\.vbs|MemmyUpdatePrompt\.ps1|(?:install|launch)-win-update-[A-Za-z0-9._-]+\.(?:cmd|ps1|vbs))") {
+        $commandLine -match "(?i)(MemmyLauncher\.ps1|MemmyUpdatePrompt\.ps1|(?:install|launch)-win-update-[A-Za-z0-9._-]+\.(?:cmd|ps1|vbs))") {
       foreach ($helperRoot in @(
         (Join-Path $env:LOCALAPPDATA "Memmy\launcher"),
         (Join-Path $env:APPDATA "Memmy\updates"),

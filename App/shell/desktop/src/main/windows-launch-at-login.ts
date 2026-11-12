@@ -37,9 +37,10 @@ export type WindowsPathExists = (path: string) => boolean;
 /**
  * Resolves the command Windows should run after the user signs in.
  *
- * Installed builds use the stable launcher created by the NSIS package so custom-drive
- * upgrades follow the same recovery-aware launch chain as Start menu shortcuts. A direct
- * executable fallback keeps older or partially repaired installations usable.
+ * Installed builds use the stable PowerShell launcher created by the NSIS package so
+ * custom-drive upgrades follow the same recovery-aware launch chain as Start menu
+ * shortcuts without depending on the optional VBScript host. A direct executable
+ * fallback keeps older or partially repaired installations usable.
  */
 export const resolveWindowsLoginItemCommand = (
   environment: WindowsLaunchAtLoginEnvironment,
@@ -51,14 +52,23 @@ export const resolveWindowsLoginItemCommand = (
     return { path: environment.executablePath, args: [] };
   }
 
-  const launcherPath = windowsPath.join(localAppDataPath, "Memmy", "launcher", "MemmyLauncher.vbs");
-  if (!pathExists(launcherPath)) {
+  const launcherPath = windowsPath.join(localAppDataPath, "Memmy", "launcher", "MemmyLauncher.ps1");
+  const powerShellPath = windowsPath.join(systemRootPath, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  if (!pathExists(launcherPath) || !pathExists(powerShellPath)) {
     return { path: environment.executablePath, args: [] };
   }
 
   return {
-    path: windowsPath.join(systemRootPath, "System32", "wscript.exe"),
-    args: [`"${launcherPath}"`]
+    path: powerShellPath,
+    args: [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-WindowStyle",
+      "Hidden",
+      "-File",
+      `"${launcherPath}"`
+    ]
   };
 };
 
