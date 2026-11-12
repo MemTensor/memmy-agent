@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { chatExceptions } from "../../src/providers/protocol-preference.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Config } from "../../src/config/schema.js";
 import { makeProvider } from "../../src/providers/factory.js";
 import { OpenAICompatProvider } from "../../src/providers/openai-compat-provider.js";
@@ -25,6 +26,7 @@ function toolCall(id: string): Record<string, any> {
 }
 
 describe("OpenAI-compatible request kwargs", () => {
+  beforeEach(() => chatExceptions.clear());
   it("keeps gateway and Gemini registry specs aligned with memmy", () => {
     expect(findByName("openrouter")).toMatchObject({
       isGateway: true,
@@ -105,6 +107,7 @@ describe("OpenAI-compatible request kwargs", () => {
       }),
     ) as OpenAICompatProvider;
 
+    provider.apiType = "chatCompletions";
     await provider.chat({
       messages: [{ role: "user", content: "hi" }],
       tools: [{ type: "function", function: { name: "noop", parameters: {} } }],
@@ -202,21 +205,21 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(chatCreate).not.toHaveBeenCalled();
   });
 
-  it("keeps direct OpenAI GPT-4o and OpenRouter GPT-5 on chat completions", async () => {
+  it("defaults direct OpenAI GPT-4o and OpenRouter GPT-5 to Responses", async () => {
     for (const [providerName, model] of [["openai", "gpt-4o"], ["openrouter", "openai/gpt-5"]] as const) {
       const provider = providerFor(providerName, model);
-      const responsesCreate = vi.fn(async () => ({ output: [] }));
+      const responsesCreate = vi.fn(async () => ({ status: "completed", output: [] }));
       const chatCreate = vi.fn(async () => ({ choices: [{ message: { content: "from chat" }, finish_reason: "stop" }] }));
       provider.client = { responses: { create: responsesCreate }, chat: { completions: { create: chatCreate } } };
 
       await provider.chat({ messages: [{ role: "user", content: "hello" }], model });
 
-      expect(chatCreate).toHaveBeenCalledOnce();
-      expect(responsesCreate).not.toHaveBeenCalled();
+      expect(chatCreate).not.toHaveBeenCalled();
+      expect(responsesCreate).toHaveBeenCalledOnce();
     }
   });
 
-  it("skips Responses API while the compatibility circuit is open", async () => {
+  it("uses Chat after a verified Responses incompatibility", async () => {
     const provider = new OpenAICompatProvider({ apiKey: "sk-test", defaultModel: "gpt-5-chat", spec: findByName("openai") });
     const responsesCreate = vi.fn(async () => ({
       output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "from responses" }] }],
@@ -224,13 +227,14 @@ describe("OpenAI-compatible request kwargs", () => {
     }));
     const chatCreate = vi.fn(async () => ({ choices: [{ message: { content: "from chat" }, finish_reason: "stop" }] }));
     provider.client = { responses: { create: responsesCreate }, chat: { completions: { create: chatCreate } } };
-    for (let i = 0; i < 3; i += 1) provider.recordResponsesFailure("gpt-5-chat", null);
+    responsesCreate.mockRejectedValueOnce(Object.assign(new Error("Responses API is not supported"), { status: 400 }));
+    await provider.chat({ messages: [{ role: "user", content: "hello" }], model: "gpt-5-chat" });
 
     const result = await provider.chat({ messages: [{ role: "user", content: "hello" }], model: "gpt-5-chat" });
 
     expect(result.content).toBe("from chat");
-    expect(responsesCreate).not.toHaveBeenCalled();
-    expect(chatCreate).toHaveBeenCalledOnce();
+    expect(responsesCreate).toHaveBeenCalledOnce();
+    expect(chatCreate).toHaveBeenCalledTimes(2);
   });
 
   it("does not fall back from Responses API rate limits", async () => {
@@ -356,28 +360,28 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(chatCreate).toHaveBeenCalledOnce();
   });
 
-  it("keeps direct OpenAI GPT-4o on chat completions", async () => {
+  it("defaults direct OpenAI GPT-4o to Responses", async () => {
     const provider = providerFor("openai", "gpt-4o");
-    const responsesCreate = vi.fn(async () => ({ output: [] }));
+    const responsesCreate = vi.fn(async () => ({ status: "completed", output: [] }));
     const chatCreate = vi.fn(async () => ({ choices: [{ message: { content: "from chat" }, finish_reason: "stop" }] }));
     provider.client = { responses: { create: responsesCreate }, chat: { completions: { create: chatCreate } } };
 
     await provider.chat({ messages: [{ role: "user", content: "hello" }], model: "gpt-4o" });
 
-    expect(chatCreate).toHaveBeenCalledOnce();
-    expect(responsesCreate).not.toHaveBeenCalled();
+    expect(chatCreate).not.toHaveBeenCalled();
+    expect(responsesCreate).toHaveBeenCalledOnce();
   });
 
-  it("keeps OpenRouter GPT-5 on chat completions", async () => {
+  it("defaults OpenRouter GPT-5 to Responses", async () => {
     const provider = providerFor("openrouter", "openai/gpt-5");
-    const responsesCreate = vi.fn(async () => ({ output: [] }));
+    const responsesCreate = vi.fn(async () => ({ status: "completed", output: [] }));
     const chatCreate = vi.fn(async () => ({ choices: [{ message: { content: "from chat" }, finish_reason: "stop" }] }));
     provider.client = { responses: { create: responsesCreate }, chat: { completions: { create: chatCreate } } };
 
     await provider.chat({ messages: [{ role: "user", content: "hello" }], model: "openai/gpt-5" });
 
-    expect(chatCreate).toHaveBeenCalledOnce();
-    expect(responsesCreate).not.toHaveBeenCalled();
+    expect(chatCreate).not.toHaveBeenCalled();
+    expect(responsesCreate).toHaveBeenCalledOnce();
   });
 
   it("builds provider-specific thinking kwargs and GPT-5 safe token parameters", () => {
@@ -477,6 +481,7 @@ describe("OpenAI-compatible request kwargs", () => {
   it("matches OpenAI temperature and token parameter rules", () => {
     expect(OpenAICompatProvider.supportsTemperature("gpt-4o")).toBe(true);
     expect(OpenAICompatProvider.supportsTemperature("gpt-5-chat")).toBe(false);
+    expect(OpenAICompatProvider.supportsTemperature("gpt-6.1-sol")).toBe(false);
     expect(OpenAICompatProvider.supportsTemperature("o3-mini")).toBe(false);
     expect(OpenAICompatProvider.supportsTemperature("gpt-4o", "medium")).toBe(false);
     expect(OpenAICompatProvider.supportsTemperature("kimi-k2.5")).toBe(false);
@@ -492,6 +497,19 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(kwargs.max_completion_tokens).toBe(4096);
     expect(kwargs).not.toHaveProperty("max_tokens");
     expect(kwargs).not.toHaveProperty("temperature");
+  });
+
+  it("omits unsupported GPT 6 temperature from explicit Responses requests", () => {
+    const provider = new OpenAICompatProvider({
+      spec: findByName("openai"), apiType: "responses", defaultModel: "gpt-6.1-sol",
+      extraBody: { reasoning: { effort: "low" } },
+    });
+    const body = provider.buildResponsesBody({
+      messages: [{ role: "user", content: "Open the test presentation." }],
+      temperature: 0.7, maxTokens: 512,
+    });
+    expect(body).toMatchObject({ model: "gpt-6.1-sol", max_output_tokens: 512, reasoning: { effort: "low" } });
+    expect(body).not.toHaveProperty("temperature");
   });
 
   it("sanitizes OpenAI-compatible tool history for strict providers", () => {
@@ -1104,6 +1122,7 @@ describe("OpenAI-compatible request kwargs", () => {
       yield { choices: [{ delta: { function_call: { arguments: 'line\\n"}' } }, finish_reason: "tool_calls" }] };
     }
     const provider = providerFor("deepseek", "deepseek-chat");
+    provider.apiType = "chatCompletions";
     provider.client = { chat: { completions: { create: vi.fn(async () => stream()) } }, responses: { create: vi.fn() } };
     const toolDeltas: any[] = [];
 
@@ -1139,7 +1158,7 @@ describe("OpenAI-compatible request kwargs", () => {
     expect(chatCreate).not.toHaveBeenCalled();
   });
 
-  it("falls back from unsupported streaming Responses API parameters", async () => {
+  it("does not switch protocols for unsupported Responses parameters", async () => {
     async function* fallbackStream() {
       yield { choices: [{ delta: { content: "fallback stream" }, finish_reason: "stop" }] };
     }
@@ -1155,9 +1174,9 @@ describe("OpenAI-compatible request kwargs", () => {
 
     const result = await provider.chatStream({ messages: [{ role: "user", content: "hello" }], model: "gpt-5-chat" });
 
-    expect(result.content).toBe("fallback stream");
+    expect(result.finishReason).toBe("error");
     expect(responsesCreate).toHaveBeenCalledOnce();
-    expect(chatCreate).toHaveBeenCalledOnce();
+    expect(chatCreate).not.toHaveBeenCalled();
   });
 
   it("returns an error when a chat stream stalls", async () => {
@@ -1171,6 +1190,7 @@ describe("OpenAI-compatible request kwargs", () => {
       },
     };
     const provider = providerFor("openai", "gpt-4o");
+    provider.apiType = "chatCompletions";
     provider.client = { chat: { completions: { create: vi.fn(async () => stalledStream) } }, responses: { create: vi.fn() } };
 
     try {
@@ -1200,6 +1220,7 @@ describe("OpenAI-compatible request kwargs", () => {
       yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'line\\n"}' } }] }, finish_reason: "tool_calls" }] };
     }
     const provider = new OpenAICompatProvider({ apiKey: "sk", defaultModel: "deepseek-chat", spec: findByName("deepseek") });
+    provider.apiType = "chatCompletions";
     provider.client = { chat: { completions: { create: vi.fn(async () => stream()) } }, responses: { create: vi.fn() } };
     const thinking: string[] = [];
     const content: string[] = [];

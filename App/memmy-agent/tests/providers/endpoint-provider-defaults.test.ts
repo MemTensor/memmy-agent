@@ -102,7 +102,9 @@ describe("endpoint inheritance and actual Agent provider requests", () => {
     vi.stubEnv("OPENAI_API_KEY", "environment-fixture-token"); const requests = mockHttp();
     const responses = data(false); responses.providers.openai.endpoints.independent.protocol = "openai-responses";
     expect((await makeProvider(new Config(responses)).chat({ messages: [{ role: "user", content: "synthetic" }] })).content).toBe("OK");
-    expect((await makeProvider(new Config(data(false))).chatStream({ messages: [{ role: "user", content: "synthetic" }] })).content).toBe("OK");
+    const chat = makeProvider(new Config(data(false))) as OpenAICompatProvider;
+    chat.apiType = "chatCompletions";
+    expect((await chat.chatStream({ messages: [{ role: "user", content: "synthetic" }] })).content).toBe("OK");
     expect(requests.map(request => request.url)).toEqual(["https://local-fixture.example/v1/responses", "https://local-fixture.example/v1/chat/completions"]);
     for (const request of requests) expect(request.headers.get("authorization")).toBeNull();
   });
