@@ -24,8 +24,10 @@ async function fixture() {
     if (String(input).endsWith("win32-x64")) { catalogs++; return Response.json(manifest); }
     downloads++; return new Response(corrupt ? new Uint8Array(bytes.length) : bytes);
   }) as typeof fetch;
-  const installer = createOfficeRuntimeInstaller({ cacheRoot, catalogUrl: "https://registry.example/runtimes/{target}", fetchFn });
-  return { cacheRoot, installer, manifest, counts: () => ({ downloads, catalogs }), setOffline: () => { offline = true; }, setCorrupt: () => { corrupt = true; } };
+  const progress: Array<{ stage: string; bytes?: number; total?: number }> = [];
+  const installer = createOfficeRuntimeInstaller({ cacheRoot, catalogUrl: "https://registry.example/runtimes/{target}", fetchFn,
+    onProgress: (stage, bytes, total) => progress.push({ stage, bytes, total }) });
+  return { cacheRoot, installer, manifest, bytes, progress, counts: () => ({ downloads, catalogs }), setOffline: () => { offline = true; }, setCorrupt: () => { corrupt = true; } };
 }
 describe("Host Office runtime installation", () => {
   it("installs once across concurrent callers, verifies every tool, and reuses its cache offline", async () => {
@@ -33,6 +35,9 @@ describe("Host Office runtime installation", () => {
     const [a, b] = await Promise.all([f.installer.ensure("win32", "x64"), f.installer.ensure("win32", "x64")]);
     expect(a).toEqual(b); expect(f.counts()).toEqual({ downloads: 1, catalogs: 1 });
     expect(await readFile(a.tools.soffice!, "utf8")).toBe("fixture-soffice");
+    const downloaded = f.progress.findIndex(event => event.stage === "downloading" && event.bytes === f.manifest.archive.bytes && event.total === event.bytes);
+    expect(downloaded).toBeGreaterThanOrEqual(0);
+    expect(f.progress.slice(downloaded).map(event => event.stage)).toEqual(["downloading", "extracting", "verifying", "installed"]);
     f.setOffline(); expect(await f.installer.ensure("win32", "x64")).toEqual(a);
   });
   it("repairs a corrupted file instead of trusting a completion marker", async () => {
@@ -53,6 +58,29 @@ describe("Host Office runtime installation", () => {
     expect(f.counts().downloads).toBe(3);
     await expect(readFile(join(f.cacheRoot, "win32-x64.json"))).rejects.toThrow();
   });
+  it.each(["headers", "body"])("bounds stalled download %s and releases the install lock for recovery", async (stage) => {
+    const f = await fixture();
+    let attempts = 0, cancellations = 0;
+    const fetchFn = (async (input: URL | string, init?: RequestInit) => {
+      if (String(input).endsWith("win32-x64")) return Response.json(f.manifest);
+      attempts++;
+      if (stage === "headers") return await new Promise<Response>((_resolve, reject) => {
+        init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+      });
+      return new Response(new ReadableStream({
+        start(controller) { controller.enqueue(f.bytes.subarray(0, 10)); },
+        cancel() { cancellations++; }
+      }));
+    }) as typeof fetch;
+    const installer = createOfficeRuntimeInstaller({ cacheRoot: f.cacheRoot,
+      catalogUrl: "https://registry.example/runtimes/{target}", fetchFn, downloadIdleTimeoutMs: 20 });
+    await expect(installer.ensure("win32", "x64")).rejects.toThrow(/stalled|abort/i);
+    expect(attempts).toBe(3);
+    if (stage === "body") expect(cancellations).toBe(3);
+    await expect(readFile(join(f.cacheRoot, "win32-x64.json"))).rejects.toThrow();
+    await expect(f.installer.ensure("win32", "x64")).resolves.toMatchObject({ version: "test-1" });
+  });
+
   it("rejects wrong targets, unmanifested ZIP entries, and missing tools", async () => {
     const a = await fixture(); a.manifest.target = "darwin-arm64";
     await expect(a.installer.ensure("win32", "x64")).rejects.toThrow(/mismatch/);

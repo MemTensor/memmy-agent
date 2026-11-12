@@ -1,5 +1,5 @@
 /** SQL projections for display reads. Algorithm/storage reads retain full rows. */
-const infoFields = ["title", "summary", "source", "tags", "source_memory_ids"];
+const infoFields = ["title", "summary", "source", "tags", "source_memory_ids", "r_human"];
 const internalFields = [
   "memory_layer",
   "memory_kind",
@@ -11,12 +11,14 @@ const internalFields = [
   "value",
   "alpha",
   "reflection",
+  "r_human",
   "source_memory_ids",
   "source_l1_memory_ids",
   "source_trace_ids"
 ];
 const nestedFields: Record<string, string[]> = {
-  trace: ["title", "summary", "userText", "user_text", "value", "alpha", "reflection"],
+  trace: ["title", "summary", "userText", "user_text", "value", "alpha", "reflection", "r_human", "reflection_scored_at"],
+  legacy_import: ["source", "source_id"],
   policy: ["title", "procedure", "source_trace_ids"],
   world_model: ["title", "summary", "body"],
   skill: ["title", "name", "invocation_guide", "invocationGuide"],
@@ -27,6 +29,16 @@ const nestedFields: Record<string, string[]> = {
 
 function objectFields(column: string, path: string, fields: string[]): string {
   return fields.map((field) => `'${field}', json_extract(${column}, '${path}.${field}')`).join(", ");
+}
+
+function nestedObject(key: string, fields: string[]): string {
+  const value = `json_object(${objectFields("properties_json", `$.internal_info.${key}`, fields)})`;
+  // Old imports omitted reward evidence; newer unscored imports explicitly store
+  // null. Preserve that distinction so a reflected historical zero stays scored.
+  return key === "trace"
+    ? `CASE WHEN json_type(properties_json, '$.internal_info.trace.r_human') IS NULL
+        THEN json_remove(${value}, '$.r_human') ELSE ${value} END`
+    : value;
 }
 
 // Body is retained for old title/summary/user-section and observed-activity
@@ -42,7 +54,7 @@ export const PANEL_MEMORY_COLUMNS = `${columns},
     'observation_memory', json_extract(properties_json, '$.internal_info.observation_memory'),
     ${Object.entries(nestedFields)
       .map(
-        ([key, fields]) => `'${key}', json_object(${objectFields("properties_json", `$.internal_info.${key}`, fields)})`
+        ([key, fields]) => `'${key}', ${nestedObject(key, fields)}`
       )
       .join(", ")}
   )) AS properties_json`;

@@ -1,6 +1,6 @@
-export type DesktopPromptPreviewKind = "campaign" | "tokenCredit" | "history" | "collabLaunch";
+export type DesktopPromptPreviewKind = "collabLaunch";
 
-/** Dev-only query `?previewPrompt=campaign|tokenCredit|history|collabLaunch|all` to force-show desktop prompts. */
+/** Dev-only query `?previewPrompt=collabLaunch|all` to preview the collaboration announcement. */
 export function isDesktopPromptPreview(kind: DesktopPromptPreviewKind): boolean {
   if (typeof window === "undefined" || !import.meta.env.DEV) {
     return false;

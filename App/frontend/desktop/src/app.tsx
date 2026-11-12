@@ -20,13 +20,13 @@ import { usePluginUi } from "./app/plugin-ui-context.js";
 import { AgentSourceScanReconciler } from "./app/agent-source-scan-reconciler.js";
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
-import { CampaignPromptHost } from "./components/campaign-prompt-host.js";
-import { CollabLaunchPromptHost } from "./components/collab-launch-prompt-host.js";
 import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
+import { CollabLaunchPromptHost } from "./components/collab-launch-prompt-host.js";
 import { HistoryLaunchPromptHost } from "./components/history-launch-prompt-host.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
 import { NotificationCenterProvider } from "./components/notification-center.js";
 import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
+import { TaskTokenGiftPromptHost } from "./components/task-token-gift-prompt-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
   readGuidanceCompleted,
@@ -345,10 +345,9 @@ function RuntimeApp() {
         <NotificationCenterProvider>
         <AgentSourceScanReconciler />
           <AppRouter onRetry={retry} />
-          {/* 同级组件的 effect 按顺序执行：项目协作大卡先认领本次运行的一次机会。 */}
           <CollabLaunchPromptHost />
+          <TaskTokenGiftPromptHost />
           <HistoryLaunchPromptHost />
-          <CampaignPromptHost />
           <TokenCreditToastHost />
           <GithubStarPromptHost />
           {state.invitationToast ? (

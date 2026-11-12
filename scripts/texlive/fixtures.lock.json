@@ -1,0 +1,25 @@
+{
+  "format": "memmy-texlive-brand-fixtures-v1",
+  "version": "2026.10.28-1",
+  "source": {
+    "repository": "Literature-Review-Plugin",
+    "pluginVersion": "0.5.59",
+    "generator": "evals/memmy-render.test.ts"
+  },
+  "archive": {
+    "url": "https://memos-file.oss-cn-shanghai.aliyuncs.com/memmy/literature-review/texlive-brand-fixtures-2026.10.28-1-d8315b9e941cab0a.zip",
+    "sha256": "d8315b9e941cab0a0a732396ffc66a09a0ec0688dc56b990f2831e760c311a27",
+    "bytes": 423001
+  },
+  "files": {
+    "en/assets/figures/lifecycle-source.png": "5298dfb9dfc868259de78fbe657ec0af9da16f700c5bb8b8391a9414d3facd9c",
+    "en/memmy-logo.png": "59d069b5105f9666d272a2fbc63822e6f600a0b7923bf4f6e48b8ff05d9cb3b1",
+    "en/memmy-review.sty": "1fa5f64d6c6ee2fe912cf574f847fb7cc28ecb2b9109f34408272995d6912e4a",
+    "en/review.tex": "18319a339018f752641116e8ec4311d56321b052d00293067fce051a342002de",
+    "provenance.json": "1858596626677ab1a1c8c30eb58d0aabcf3f0b7db1cbf6c5425c184b58638acc",
+    "zh-CN/assets/figures/lifecycle-source.png": "548d48b95a1a2d5f70ac9ed688d229b4c1514cb1053d600df245c1325292510e",
+    "zh-CN/memmy-logo.png": "59d069b5105f9666d272a2fbc63822e6f600a0b7923bf4f6e48b8ff05d9cb3b1",
+    "zh-CN/memmy-review.sty": "1fa5f64d6c6ee2fe912cf574f847fb7cc28ecb2b9109f34408272995d6912e4a",
+    "zh-CN/review.tex": "b2b8e047aa60c2aa8771c581442d44e401f61a14df3aa5422f44aa543bd8cc47"
+  }
+}

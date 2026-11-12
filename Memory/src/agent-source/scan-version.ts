@@ -11,7 +11,10 @@ export function nextScanGeneration(directory: string): number {
   const next = previous + 1;
   const temporary = `${path}.${process.pid}.tmp`;
   writeFileSync(temporary, JSON.stringify(next), { mode: 0o600 });
-  const fd = openSync(temporary, "r");
+  // Windows requires a writable handle for FlushFileBuffers/fsync. Opening
+  // the temporary file read-only makes the packaged Memory service fail with
+  // EPERM during startup before it can serve HTTP requests.
+  const fd = openSync(temporary, "r+");
   try { fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(temporary, path);
   // The service holds service.lock / the SQLite owner lock for this directory.

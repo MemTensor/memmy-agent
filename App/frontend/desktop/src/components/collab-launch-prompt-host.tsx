@@ -9,7 +9,7 @@ import {
   areOtherPromptsDeferredForHistoryLaunch,
   isHistoryLaunchPromptOpen,
 } from "../app/history-launch-prompt-state.js";
-import { isCampaignPromptOpen } from "../app/campaign-prompt-state.js";
+import { isTaskTokenGiftPromptOpen } from "./task-token-gift-prompt-host.js";
 import {
   claimCollabLaunchPrompt,
   isCollabLaunchSurfaceReady,
@@ -56,7 +56,7 @@ export function CollabLaunchPromptHost() {
 
     if (!surfaceReady) return;
 
-    const otherPromptOpen = isCampaignPromptOpen()
+    const otherPromptOpen = isTaskTokenGiftPromptOpen()
       || isHistoryLaunchPromptOpen()
       || areOtherPromptsDeferredForHistoryLaunch(typeof window === "undefined" ? undefined : window.sessionStorage);
     const storage = localStorage();

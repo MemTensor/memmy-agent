@@ -236,8 +236,18 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [currentMs, setCurrentMs] = useState(0);
-  const [durationMs, setDurationMs] = useState(props.durationMs ?? 0);
-  useEffect(() => { setPlaying(false); setCurrentMs(0); setDurationMs(props.durationMs ?? 0); }, [props.src, props.durationMs]);
+  const fallbackDurationMs = validDurationMs(props.durationMs);
+  const [durationMs, setDurationMs] = useState(fallbackDurationMs);
+  useEffect(() => { setPlaying(false); setCurrentMs(0); setDurationMs(fallbackDurationMs); }, [props.src, fallbackDurationMs]);
+
+  const updateMediaDuration = (audio: HTMLAudioElement) => {
+    const mediaDurationMs = validDurationMs(audio.duration * 1_000);
+    if (mediaDurationMs === 0) return;
+    // MediaRecorder WebM metadata is sometimes finite but implausibly short.
+    // Never let it shorten the independently measured capture duration; for
+    // uploaded files it can still extend the transcript-derived fallback.
+    setDurationMs(Math.max(fallbackDurationMs, mediaDurationMs));
+  };
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -248,23 +258,47 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
     void audio.play().catch(() => setPlaying(false));
   }, [props.seek]);
 
+  useEffect(() => {
+    if (!playing) return;
+    let frame = 0;
+    const followPlayback = () => {
+      const audio = audioRef.current;
+      if (audio) setCurrentMs(validCurrentTimeMs(audio.currentTime));
+      frame = window.requestAnimationFrame(followPlayback);
+    };
+    frame = window.requestAnimationFrame(followPlayback);
+    return () => window.cancelAnimationFrame(frame);
+  }, [playing, props.src]);
+
   return (
     <div className="recording-panel__player">
       <audio
         ref={audioRef}
         src={props.src}
         preload="metadata"
-        onTimeUpdate={(event) => setCurrentMs(event.currentTarget.currentTime * 1_000)}
-        // A MediaRecorder blob often reports an unknown duration until it has
-        // been read through once, so the metadata value is only trusted when
-        // it is finite.
+        onTimeUpdate={(event) => setCurrentMs(validCurrentTimeMs(event.currentTarget.currentTime))}
+        // A MediaRecorder blob can report an unknown or provisional duration,
+        // so metadata only extends the independently measured fallback.
         onLoadedMetadata={(event) => {
-          const seconds = event.currentTarget.duration;
-          if (Number.isFinite(seconds) && seconds > 0) setDurationMs(seconds * 1_000);
+          updateMediaDuration(event.currentTarget);
         }}
+        onDurationChange={(event) => updateMediaDuration(event.currentTarget)}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
-        onEnded={() => setPlaying(false)}
+        onEnded={(event) => {
+          // The independently measured capture duration can be slightly
+          // longer than the playable media clock. Once the media has ended,
+          // treat it as semantically complete instead of leaving the thumb a
+          // few percent short of the end.
+          const completedDurationMs = Math.max(
+            durationMs,
+            validDurationMs(event.currentTarget.duration * 1_000),
+            validCurrentTimeMs(event.currentTarget.currentTime),
+          );
+          setDurationMs(completedDurationMs);
+          setCurrentMs(completedDurationMs);
+          setPlaying(false);
+        }}
       />
       <button
         type="button"
@@ -285,9 +319,10 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
         className="recording-panel__player-scrubber"
         min={0}
         max={Math.max(durationMs, 1)}
-        value={Math.min(currentMs, durationMs)}
+        value={durationMs > 0 ? Math.min(Math.max(currentMs, 0), durationMs) : 0}
+        disabled={durationMs <= 0}
         aria-label={t("plugin.ui.audio.seek")}
-        style={{ background: `linear-gradient(to right, var(--color-action-sky) ${durationMs ? currentMs / durationMs * 100 : 0}%, var(--color-border-stone) 0%)` }}
+        style={{ background: `linear-gradient(to right, var(--color-action-sky) ${playbackProgress(currentMs, durationMs) * 100}%, var(--color-border-stone) 0%)` }}
         onChange={(event) => {
           const audio = audioRef.current;
           const nextMs = Number(event.target.value);
@@ -298,6 +333,22 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
       <span className="recording-panel__player-time">{formatClock(durationMs)}</span>
     </div>
   );
+}
+
+/** A duration is usable only when it is a positive finite millisecond count. */
+function validDurationMs(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** Invalid media clocks must never leak NaN or Infinity into a range input. */
+function validCurrentTimeMs(seconds: number): number {
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : 0;
+}
+
+/** Keeps the painted track inside the same 0..100% bounds as the thumb. */
+function playbackProgress(currentMs: number, durationMs: number): number {
+  if (!Number.isFinite(currentMs) || !Number.isFinite(durationMs) || durationMs <= 0) return 0;
+  return Math.min(1, Math.max(0, currentMs / durationMs));
 }
 
 /** One speaker's uninterrupted stretch of the transcript. */

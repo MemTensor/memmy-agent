@@ -44,7 +44,7 @@ function connections() {
   }
   return { open, body: (response: IncomingMessage) => bodies.get(response)!, destroy() { for (const response of responses) response.destroy(); for (const request of requests) request.destroy(); agent.destroy(); } };
 }
-function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, executeRouterTool: BackendServices["integrations"]["executeRouterTool"] = async () => ({ saved: true })) {
+function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, executeRouterTool: BackendServices["integrations"]["executeRouterTool"] = async () => ({ data: { saved: true } })) {
   const progressBus = createProgressBus();
   const unsubscribers: ReturnType<typeof vi.fn>[] = [];
   const subscribedEvents: string[] = [];
@@ -56,8 +56,22 @@ function api(verifyRuntimeToken: () => Promise<boolean> = async () => true, exec
       const unsubscribe = vi.fn(progressBus.on(...args)); unsubscribers.push(unsubscribe); return unsubscribe;
     }) }
   } as unknown as BackendServices;
+  const unexpectedPermission = (method: string): never => {
+    throw new Error(`Unexpected permission call: ${method}`);
+  };
+  const permissionManager: PermissionManager = {
+    verifyRuntimeToken,
+    async getRuntimeToken() { return unexpectedPermission("getRuntimeToken"); },
+    async getScanPermission() { return unexpectedPermission("getScanPermission"); },
+    async setScanPermission() { return unexpectedPermission("setScanPermission"); },
+    async canDetectAgentSources() { return unexpectedPermission("canDetectAgentSources"); },
+    async canScanAgentSource() { return unexpectedPermission("canScanAgentSource"); },
+    async canWriteAgentSkill() { return false; },
+    async canSearchMemory() { return unexpectedPermission("canSearchMemory"); },
+    async revokeAgentSource() { return unexpectedPermission("revokeAgentSource"); }
+  };
   const app = createLocalApiServer({
-    permissionManager: { verifyRuntimeToken } as PermissionManager,
+    permissionManager,
     composioMcpToken: "shutdown-test-mcp", services, heartbeatIntervalMs: 60_000,
   });
   return { app, unsubscribers, subscribedEvents };
@@ -143,7 +157,7 @@ describe("local backend graceful shutdown", () => {
 
   it("lets an active MCP tool POST finish its write and full response while ending an idle MCP GET", async () => {
     const entered = deferred(); const release = deferred(); let saved = false;
-    const { app } = api(undefined, async () => { entered.resolve(); await release.promise; saved = true; return { saved: true }; });
+    const { app } = api(undefined, async () => { entered.resolve(); await release.promise; saved = true; return { data: { saved: true } }; });
     const clients = connections(); const base = await listen(app); let shutdown: Promise<void> | undefined;
     try {
       await clients.open(`${base}/mcp/composio`, { accept: "text/event-stream", "x-memmy-mcp-token": "shutdown-test-mcp" });
@@ -158,9 +172,12 @@ describe("local backend graceful shutdown", () => {
       const response = await tool;
       expect(response.statusCode).toBe(200);
       const body = await clients.body(response);
-      const result = JSON.parse(body.split("data: ")[1].trim());
+      const data = body.split("data: ")[1];
+      expect(data).toBeDefined();
+      if (data === undefined) throw new Error("Missing MCP SSE data envelope");
+      const result = JSON.parse(data.trim());
       expect(result.id).toBe(7);
-      expect(JSON.parse(result.result.content[0].text)).toEqual({ saved: true });
+      expect(JSON.parse(result.result.content[0].text)).toEqual({ data: { saved: true } });
       expect(await settlesWithin(shutdown)).toBe(true);
       expect(saved).toBe(true);
     } finally { release.resolve(); clients.destroy(); await (shutdown ?? app.close()); }

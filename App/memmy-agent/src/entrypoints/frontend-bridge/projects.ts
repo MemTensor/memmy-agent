@@ -132,7 +132,9 @@ function fsyncDirectoryBestEffort(directory: string): void {
     if (fd !== null) {
       try {
         fs.closeSync(fd);
-      } catch {}
+      } catch {
+        // Closing a descriptor must not replace the payload's completed fsync result.
+      }
     }
   }
 }
@@ -275,7 +277,9 @@ export class ProjectStore {
       if (fd !== null) {
         try {
           fs.closeSync(fd);
-        } catch {}
+        } catch {
+          // Preserve the original write/rename result if descriptor cleanup also fails.
+        }
       }
       if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true });
     }

@@ -22,24 +22,27 @@ icon: Database
 
 ## 分析指标
 
-`GET /api/v1/panel/analysis` 返回 `metrics` 对象。其中 `metrics.recentlyUsedSkills` 统计当前状态为 `activated` 的技能的召回命中与调用记录。统计窗口按请求解析出的时区覆盖当天及之前六个日历日期，以各事件的创建时间判断是否计入。
+`GET /api/v1/panel/analysis` 返回 `metrics`。`metrics.recentlyUsedSkills` 统计当前状态为 `activated` 的技能的召回命中和调用记录。窗口按请求解析出的时区，覆盖当天和之前六个日历日，以每条事件的创建时间判断是否计入。
 
-同一次召回中，同一个技能 ID 即使出现多次也只计一次；不同召回和调用分别计数。该值是使用总次数，不是不同技能或最近编辑过的技能数量；仅编辑技能不会增加该值。
+同一次召回里，同一个技能 ID 只计一次。不同召回和调用分别计数。这个值是使用总次数，不是不同技能的数量，也不是最近编辑过的技能数量。只编辑技能不会增加该值。
 
 ## 本地存储配置
+
+`memmyMemory` 是一份扁平配置。`activeProfile` 和 `profiles` 属于旧结构，当前运行时会拒绝带这两个字段的配置。
 
 ```yaml
 memmyMemory:
   version: 1
-  activeProfile: byok
+  roleRouting:
+    summary: follow
+    evolution: follow
   storage:
     mode: local
     backend: sqlite
     sqlitePath: ~/.memmy/memory-service/memory.sqlite
     endpoint: http://127.0.0.1:18960
     token: local-token
-  profiles:
-    byok:
-      embedding:
-        provider: local
+  embedding:
+    provider: local
+    mode: local
 ```

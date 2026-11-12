@@ -89,6 +89,25 @@ describe("live marketplace controller", () => {
     return container.querySelector('article[aria-label="文献综述"] [aria-label="将文献综述加入对话"]');
   }
 
+  it.each(["catalog", "installed"])("localizes official names and descriptions from %s without changing host records", (source) => {
+    const review = { ...pending, manifest: { ...pending.manifest, name: "Literature Review" } };
+    const office = { ...pending, id: "office", manifest: { ...pending.manifest, id: "office", name: "Office" } };
+    const custom = { ...pending, id: "custom", manifest: { ...pending.manifest, id: "custom", name: "Custom plugin" } };
+    const records = [review, office, custom];
+    const catalog = source === "catalog" ? records.map(({ manifest }) => ({ manifest, eligibility: { visible: true, canInstall: true, canUse: true, reason: null } })) : null;
+    const installed = source === "installed" ? records : [];
+    const chinese = marketplacePlugins(catalog, installed, "zh-CN");
+    expect(chinese.map(({ name }) => name)).toEqual(["文献综述", "office", "Custom plugin"]);
+    expect(chinese[0].description).toBe("检索论文、整理证据，生成带参考文献的综述初稿。");
+    expect(chinese[1].description).toBe("创建和编辑 Word、Excel、PPT 文档，并处理 PDF 文件。");
+    expect(chinese[2].description).toBe("Review");
+    const english = marketplacePlugins(catalog, installed, "en-US");
+    expect(english.map(({ name }) => name)).toEqual(["Literature Review", "Office", "Custom plugin"]);
+    expect(english.map(({ description }) => description)).toEqual(["Review", "Review", "Review"]);
+    expect(records.map(({ manifest }) => manifest.name)).toEqual(["Literature Review", "Office", "Custom plugin"]);
+    if (source === "installed") expect(chinese[0].installed).toBe(review);
+  });
+
   it.each(["list", "details"])("updates from %s and reads back the host version before removing the update action", async (source) => {
     records = [{ ...pending, version: "0.5.17", manifest: { ...pending.manifest, version: "0.5.17" }, state: "active" }];
     await render();
@@ -171,6 +190,64 @@ describe("live marketplace controller", () => {
     await click("更新文献综述", dialog);
     expect(records[0].version).toBe("0.5.18");
     expect(document.querySelector("[role=alert]")).toBeNull();
+  });
+
+  it("finishes installation from Host state while the enable response remains pending", async () => {
+    vi.useFakeTimers();
+    let rejectResponse!: (error: Error) => void;
+    try {
+      clients.plugins.enable.mockImplementationOnce(() => {
+        records = [{ ...records[0], state: "enabling" }];
+        return new Promise((_resolve, reject) => { rejectResponse = reject; });
+      });
+      await render();
+      await click("安装文献综述");
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(addToChatButton()).toBeNull();
+      expect(button("刷新").disabled).toBe(true);
+      records = [{ ...records[0], state: "active" }];
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(addToChatButton()).not.toBeNull();
+      expect(button("刷新").disabled).toBe(false);
+      // A lost response must not overwrite the successful polled result later.
+      await act(async () => rejectResponse(new Error("connection closed")));
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(addToChatButton()).not.toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("shows a failed Host activation even when the enable response is lost", async () => {
+    vi.useFakeTimers();
+    try {
+      clients.plugins.enable.mockImplementationOnce(() => new Promise(() => {}));
+      await render();
+      await click("安装文献综述");
+      records = [{ ...records[0], state: "failed", lastError: "renderer preparation failed" }];
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(button("刷新").disabled).toBe(false);
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain("操作未完成，请重试");
+      expect(addToChatButton()).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("continues polling a Host activation after the marketplace is reopened", async () => {
+    vi.useFakeTimers();
+    try {
+      records = [{ ...pending, state: "enabling" }];
+      await render();
+      records = [{ ...pending, state: "active" }];
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(addToChatButton()).not.toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("refreshes immediately when another lifecycle operation publishes a plugin change", async () => {
+    records = [{ ...pending, state: "enabling" }];
+    await render();
+    records = [{ ...records[0], state: "active" }];
+    await act(async () => window.dispatchEvent(new Event("memmy:plugin-change")));
+    expect(addToChatButton()).not.toBeNull();
+    expect(container.textContent).not.toContain("正在处理");
   });
 
   it("shows installed plugins when the remote catalog is empty", async () => {

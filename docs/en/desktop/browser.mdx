@@ -1,0 +1,48 @@
+---
+title: Search the web and use pages
+description: Give a URL or a search goal, and let Memmy read pages and return results with sources.
+icon: Globe
+---
+
+import browserChat from "../../assets/browser-chat-full-en.jpg";
+import connectScreen from "../../assets/browser-connect-full-en.png";
+
+To look up a product, compare options, or organize a web page, give Memmy the question or the URL. When the page needs an existing sign-in, connect a supported browser first.
+
+## Connect Chrome or Edge
+
+1. In Memmy, open **Settings → Computer use** and find Google Chrome or Microsoft Edge.
+2. Choose **Install**. Follow the guide to turn on the browser’s developer mode, then drag the Memmy extension onto the extensions page.
+3. Back in Memmy, when you see **Connected. Memmy can use web pages in this browser.**, say in the chat which page to work on.
+
+<ProductScreenshot src={connectScreen} alt="Memmy Computer use settings showing Google Chrome and Microsoft Edge" caption="Find both browsers in Settings → Computer use. In the picture, Chrome’s extension is not installed, so choose Install. Edge cannot be read yet; choose Manage to check it in the browser." />
+
+Below, try **Install** and **Watch demo**, or switch to the connected state. This preview is a placeholder of the current interface.
+
+<ProductBrowserGuide />
+
+If it says **Installed. Open the browser to connect.**, open that browser. If the extension is disabled, enable it on the browser’s extensions page. A managed work computer may block extension installs. If you cannot finish, use the built-in browser for sites you are allowed to open.
+
+## Start with a specific question
+
+<PromptExample composer={true} prompt="Use the browser to open https://example.com/plans and compare the two plans by price, seats, and support." />
+
+If the page is already open, provide the URL, or use **Copy tab reference** in the browser panel to add the current page to the request. Saying which part to read cuts down unrelated browsing.
+
+## Use the built-in browser
+
+Memmy can open pages in the workbench browser panel. Use the address bar, tabs, and the back and forward buttons to see the current page. If a page needs a sign-in or a manual step, finish that prompt first, then tell Memmy to continue.
+
+<ProductScreenshot src={browserChat} alt="Memmy using the built-in browser to open a pricing page and compare two plans" caption="The page and URL are samples. The chat on the left is the task above; the built-in browser on the right has that page open." />
+
+Permissions for visiting pages, filling forms, and downloading are managed in the browser settings. Before you allow something, read the target site and the action it is asking for.
+
+## Check sources and downloads
+
+Ask for source links, and check the publish date, the original wording, and any conditions. A sign-in, a paywall, or a permission limit in the browser can block the page. Provide another source you can open, then continue.
+
+In the browser settings you can view or change **Download location**, or ask every time before a download is saved. After a download finishes, open the file and check the contents.
+
+## Related
+
+[Let Memmy use the computer](/docs/en/desktop/computer-use) · [Connect an external tool](/docs/en/tools/integrations)

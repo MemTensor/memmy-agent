@@ -9,7 +9,7 @@ import { createMemoryServiceFixture } from "./fixtures/memory-service-fixture.js
 import { adaptViewerResponse } from "../viewer/src/api/memmy-adapter.js";
 
 const fixture = createMemoryServiceFixture();
-afterEach(() => { vi.restoreAllMocks(); fixture.cleanup(); });
+afterEach(async () => { vi.restoreAllMocks(); await fixture.cleanup(); });
 const at = "2026-10-01T00:00:00.000Z";
 const identity = { provider: "openai_compatible", model: "current-model" } as const;
 const vector = (dimension = 3) => Array.from({ length: dimension }, (_, i) => i === 0 ? 1 : 0);
