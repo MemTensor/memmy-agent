@@ -70,6 +70,7 @@ export interface OpenRuntimeSessionInput {
   workspaceRoot?: string | null;
   transition: "allow_legacy_rollover" | "resume_only";
   pinnedOwner?: boolean;
+  signal?: AbortSignal;
   adapterId?: string;
   profileId?: string;
 }
@@ -98,8 +99,9 @@ export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Pr
 
 export async function openRuntimeSession(input: OpenRuntimeSessionInput): Promise<RuntimeSession | null> {
   const config = await readRuntimeConfig(input.configUrl, input.pinnedOwner === true);
-  const client = new RuntimeHttpClient(config);
+  const client = new RuntimeHttpClient(config, input.signal);
   const health = await client.get("/api/v1/health").catch(() => null);
+  input.signal?.throwIfAborted();
   if (!health && input.pinnedOwner === true) return null;
   const features = objectValue(objectValue(health).features);
   const supportsV2 = numberArray(features.l3WorldModelProtocolVersions).includes(2);
@@ -166,9 +168,9 @@ async function openLegacyRuntimeSession(
   };
 }
 
-export async function loadRuntimeL3(session: RuntimeSession): Promise<LoadedRuntimeSession> {
+export async function loadRuntimeL3(session: RuntimeSession, signal?: AbortSignal): Promise<LoadedRuntimeSession> {
   if (session.protocol !== "v2") return { ...session, additionalContext: "", renderedContext: "", memoryVersion: null };
-  const client = new RuntimeHttpClient(session.config);
+  const client = new RuntimeHttpClient(session.config, signal);
   const envelope = runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId);
   const result = objectValue(await client.get(
     `/api/v1/l3-world-model/sessions/${encodeURIComponent(session.sessionId)}/context`,
@@ -216,8 +218,9 @@ export async function startRuntimeTurn(
   session: RuntimeSession,
   turnId: string,
   query: string,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  const client = new RuntimeHttpClient(session.config);
+  const client = new RuntimeHttpClient(session.config, signal);
   const body = session.protocol === "v2"
     ? { ...runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId), sessionId: session.sessionId, turnId, query }
     : { source: session.source, adapterId: session.adapterId, requestId: `${session.source}-start:${turnId}`, sessionId: session.sessionId, turnId, query };
@@ -510,7 +513,7 @@ async function resolveDeepseekHarnessSessionFile(input: {
 }
 
 class RuntimeHttpClient {
-  constructor(private readonly config: RuntimeConfig) {}
+  constructor(private readonly config: RuntimeConfig, private readonly signal?: AbortSignal) {}
 
   async get(path: string, transport: { query?: Record<string, string>; headers?: Record<string, string> } = {}): Promise<unknown> {
     const url = new URL(path, `${this.config.endpoint.replace(/\/+$/u, "")}/`);
@@ -533,7 +536,10 @@ class RuntimeHttpClient {
     if (this.config.token) headers.set("authorization", `Bearer ${this.config.token}`);
     let response: Response;
     try {
-      response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(45_000) });
+      const timeout = AbortSignal.timeout(45_000);
+      const signal = this.signal ? AbortSignal.any([this.signal, timeout]) : timeout;
+      signal.throwIfAborted();
+      response = await fetch(url, { ...init, headers, signal });
     } catch (error) {
       throw new Error(`Memmy request to ${url} failed: ${formatErrorWithCause(error)}`, { cause: error });
     }
