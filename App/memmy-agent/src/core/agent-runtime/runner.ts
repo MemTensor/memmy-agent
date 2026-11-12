@@ -1091,6 +1091,7 @@ export class AgentRunner {
       toolCalls: response.toolCalls.map((call) => call.toOpenAIToolCall()),
       reasoningContent: response.reasoningContent,
       thinkingBlocks: response.thinkingBlocks,
+      protocolState: response.protocolState,
       finishReason: response.finishReason,
     });
   }
@@ -2026,6 +2027,7 @@ export class AgentRunner {
           messages.push(buildAssistantMessage(clean, {
             reasoningContent: response.reasoningContent,
             thinkingBlocks: response.thinkingBlocks,
+            protocolState: response.protocolState,
             finishReason: response.finishReason,
           }));
           messages.push(withMemmyMemoryPrompt(buildLengthRecoveryMessage(), spec.memoryTurnContext, "length_recovery"));
@@ -2038,6 +2040,7 @@ export class AgentRunner {
         ? buildAssistantMessage(clean, {
           reasoningContent: response.reasoningContent,
           thinkingBlocks: response.thinkingBlocks,
+          protocolState: response.protocolState,
           finishReason: response.finishReason,
         })
         : null;
@@ -2334,6 +2337,7 @@ function buildAssistantMessage(
     toolCalls?: Record<string, any>[];
     reasoningContent?: string | null;
     thinkingBlocks?: Record<string, any>[] | null;
+    protocolState?: Record<string, any> | null;
     finishReason?: string | null;
   } = {},
 ): Record<string, any> {
@@ -2341,6 +2345,7 @@ function buildAssistantMessage(
   if (opts.toolCalls?.length) message.tool_calls = opts.toolCalls;
   if (opts.reasoningContent) message.reasoning_content = opts.reasoningContent;
   if (opts.thinkingBlocks?.length) message.thinking_blocks = opts.thinkingBlocks;
+  if (opts.protocolState) message.memmy_protocol_state = opts.protocolState;
   if (typeof opts.finishReason === "string" && opts.finishReason.length > 0) message.finish_reason = opts.finishReason;
   return message;
 }
