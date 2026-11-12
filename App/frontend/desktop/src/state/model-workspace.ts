@@ -460,6 +460,17 @@ export function upsertModelConnection(
   const previousProvider = existingConnection
     ? next.providers.find((item) => item.provider === existingConnection.provider && !item.accountManaged)
     : undefined;
+  const previousPresets = previousProvider?.models.filter((item) => item.endpointId === previousEndpointId) ?? [];
+  const hasModelEntries = Boolean(input.modelEntries?.length);
+  // The editor supplies IDs for retained rows. For name-only callers, reserve exact
+  // matches before trying to preserve a renamed model's ID by its previous position.
+  const matchedPresets = entries.map((entry) => previousPresets.find((preset) => (
+    hasModelEntries
+      ? preset.presetId === entry.presetId
+      : preset.model === entry.model && fromCapabilities(preset.capabilities) === entry.capabilities[0]
+  )));
+  const reservedPresetIds = new Set(matchedPresets.flatMap((preset) => preset ? [preset.presetId] : []));
+  const reusedPresetIds = new Set<string>();
   if (previousProvider && previousEndpointId) {
     previousProvider.endpoints = previousProvider.endpoints.filter((item) => item.endpointId !== previousEndpointId);
     previousProvider.models = previousProvider.models.filter((item) => item.endpointId !== previousEndpointId);
@@ -498,11 +509,11 @@ export function upsertModelConnection(
   });
   provider.models.push(...entries.map((entry, index) => {
     const model = entry.model;
-    const previousPreset = existingConnection
-      ? (entry.presetId ? nextPresetById(workspace.catalog, entry.presetId) : null)
-        ?? nextPresetByModelAndCapability(workspace.catalog, existingConnection.endpointId, model, entry.capabilities[0]!)
-        ?? nextPresetByModel(workspace.catalog, existingConnection.endpointId, existingConnection.models[index] ?? "")
-      : null;
+    const matched = matchedPresets[index] ?? (hasModelEntries ? undefined : previousPresets.find((preset) => (
+      preset.model === existingConnection?.models[index] && !reservedPresetIds.has(preset.presetId)
+    )));
+    const previousPreset = matched && !reusedPresetIds.has(matched.presetId) ? matched : undefined;
+    if (previousPreset) reusedPresetIds.add(previousPreset.presetId);
     const selectedCapability = entry.capabilities[0]!;
     const capabilities = entry.capabilitiesExplicit
       ? unique(entry.capabilities.map(toCatalogCapability))
@@ -864,30 +875,6 @@ function assignmentCapability(kind: ModelAssignmentKind): ModelCapability {
   if (kind === "asr") return "asr";
   if (kind === "image") return "image";
   return "chat";
-}
-
-function nextPresetByModel(catalog: ModelConfigView, endpointId: string, model: string): TextModelItemView | null {
-  return catalog.providers.flatMap((provider) => provider.models)
-    .find((preset) => preset.endpointId === endpointId && preset.model === model) ?? null;
-}
-
-function nextPresetByModelAndCapability(
-  catalog: ModelConfigView,
-  endpointId: string,
-  model: string,
-  capability: ModelCapability
-): TextModelItemView | null {
-  return catalog.providers.flatMap((provider) => provider.models)
-    .find((preset) => (
-      preset.endpointId === endpointId
-      && preset.model === model
-      && fromCapabilities(preset.capabilities) === capability
-    )) ?? null;
-}
-
-function nextPresetById(catalog: ModelConfigView, presetId: string): TextModelItemView | null {
-  return catalog.providers.flatMap((provider) => provider.models)
-    .find((preset) => preset.presetId === presetId) ?? null;
 }
 
 function replaceIds(current: string[], oldIds: string[], nextIds: string[]): string[] {
