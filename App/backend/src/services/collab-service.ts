@@ -1786,32 +1786,38 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       const project = toProject(data.project);
       const localDirectory = await prepareWorkingDirectory(onlineWorkdirRoot, project.id, project.name, directory);
       const account = requireAccount();
-      const stored = await readLinks(project.id, account.accountId);
-      stored.workingDirectory = localDirectory;
-      await writeLinks(stored);
+      await exclusive(async () => {
+        const stored = await readLinks(project.id, account.accountId);
+        stored.workingDirectory = localDirectory;
+        await writeLinks(stored);
+      });
       return { project: { ...project, localProjectId: null }, localDirectory };
     },
 
     async ensureWorkingDirectory(projectId, name, directory) {
       const account = requireAccount();
-      const stored = await readLinks(projectId, account.accountId);
-      // A project created earlier keeps the folder it already had, so its tasks stay where they were.
-      const existing = directory ? undefined : stored.workingDirectory;
-      const localDirectory = existing
-        ?? await prepareWorkingDirectory(onlineWorkdirRoot, projectId, name ?? projectId, directory);
-      if (!stored.workingDirectory) {
-        stored.workingDirectory = localDirectory;
-        await writeLinks(stored);
-      }
-      return { localDirectory, chosen: Boolean(directory) || (Boolean(existing) && stored.directoryChosen) };
+      return exclusive(async () => {
+        const stored = await readLinks(projectId, account.accountId);
+        // A project created earlier keeps the folder it already had, so its tasks stay where they were.
+        const existing = directory ? undefined : stored.workingDirectory;
+        const localDirectory = existing
+          ?? await prepareWorkingDirectory(onlineWorkdirRoot, projectId, name ?? projectId, directory);
+        if (!stored.workingDirectory) {
+          stored.workingDirectory = localDirectory;
+          await writeLinks(stored);
+        }
+        return { localDirectory, chosen: Boolean(directory) || (Boolean(existing) && stored.directoryChosen) };
+      });
     },
 
     async bindLocalProject(projectId, localProjectId) {
       const account = requireAccount();
-      const stored = await readLinks(projectId, account.accountId);
-      stored.localProjectId = localProjectId;
-      await writeLinks(stored);
-      return { ok: true };
+      return exclusive(async () => {
+        const stored = await readLinks(projectId, account.accountId);
+        stored.localProjectId = localProjectId;
+        await writeLinks(stored);
+        return { ok: true as const };
+      });
     },
 
     async localProjectIdFor(projectId) {

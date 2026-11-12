@@ -1182,6 +1182,38 @@ describe("collab service", () => {
     await syncing;
   });
 
+  it("serializes local project binding with an upload links write", async () => {
+    const local = [localSession("claude_code", "a1", "/repo", "2026-10-22T01:00:00.000Z")];
+    let uploadStarted = false;
+    let releaseUpload: (() => void) | null = null;
+    const uploadGate = new Promise<void>((resolve) => { releaseUpload = resolve; });
+    const { fetcher } = fakeFetch({
+      "POST /api/v1/agent-sessions/available": () => ({ sessions: local, refreshing: false }),
+      "POST /api/v1/agent-sessions/read": () => ({ session: { title: "会话 a1", updatedAt: "2026-10-22T01:00:00.000Z", turns: [] } }),
+      "PUT /api/collab/projects/p-1/sessions": async () => {
+        uploadStarted = true;
+        await uploadGate;
+        return { code: 0, data: { sessions: [{ id: "id-a1" }] } };
+      }
+    });
+    const svc = service(fetcher);
+
+    await svc.saveLinks("p-1", { groups: [{ sourceId: "claude_code", groupId: "/repo", excluded: [] }], sessions: [] });
+    while (!uploadStarted) await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const bindings = Array.from({ length: 8 }, (_, index) => svc.bindLocalProject("p-1", `local-${index}`));
+    releaseUpload?.();
+    await expect(Promise.all(bindings)).resolves.toHaveLength(8);
+    await waitForUploads(svc, "p-1");
+
+    expect(await svc.getLinks("p-1")).toEqual({
+      groups: [{ sourceId: "claude_code", groupId: "/repo", excluded: [] }],
+      sessions: []
+    });
+    expect(["local-0", "local-1", "local-2", "local-3", "local-4", "local-5", "local-6", "local-7"])
+      .toContain(await svc.localProjectIdFor("p-1"));
+  });
+
   // The periodic sync runs inside the write queue and can spend up to a minute per session on a slow Memory service.
   // A delete must not sit behind it: the cloud already dropped the project, the links rewrite follows in queue order.
   it("answers a delete without waiting for a slow sync to release the write queue", async () => {
