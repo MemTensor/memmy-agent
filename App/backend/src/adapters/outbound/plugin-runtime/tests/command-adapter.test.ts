@@ -557,6 +557,28 @@ describe("CommandPluginAdapter", () => {
     expect(networkEnabled).toBe(true);
   });
 
+  it("does not fail activation when an optional Windows file-input root is missing", async () => {
+    const pluginContext = context();
+    const existingRoot = realpathSync(root!);
+    const missingRoot = join(root!, "media");
+    const permission = { type: "host-service" as const, services: ["file-input"] };
+    pluginContext.plugin.manifest.permissions = [permission];
+    pluginContext.plugin.approvedPermissions = [permission];
+    const adapter = createCommandPluginAdapter({
+      platform: "win32",
+      fileInputRoots: [missingRoot, existingRoot],
+      buildLaunch: async () => ({ command: process.execPath, args: [], cwd: root! })
+    });
+
+    const session = await adapter.activate(pluginContext);
+    try {
+      const env = (session as typeof session & { env: Record<string, string> }).env;
+      expect(JSON.parse(env.MEMMY_PLUGIN_INPUT_ROOTS)).toEqual([existingRoot]);
+    } finally {
+      await adapter.deactivate(session);
+    }
+  });
+
   it("rejects commands outside the artifact", async () => {
     const pluginContext = context();
     pluginContext.plugin.manifest.permissions = [];
