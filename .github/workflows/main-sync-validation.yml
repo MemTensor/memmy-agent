@@ -59,6 +59,7 @@ jobs:
     env:
       MEMMY_LEGAL_CN_BASE_URL: https://memmy.cn
       MEMMY_LEGAL_INTL_BASE_URL: https://memmy.bot
+      TZ: Asia/Shanghai
     steps:
       - uses: actions/checkout@v4
         with:

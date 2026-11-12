@@ -105,7 +105,7 @@ describe("one-time upgrade repair", () => {
     expect(run.targets).toHaveLength(6);
     expect(run.targets.every((target: any) => target.result === "updated")).toBe(true);
     expect(run.completedAt).toBeTruthy();
-    expect(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 6, failed: 0, done: true });
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 6, failed: 0, done: true });
     const after = repos.vectors.exportRows();
     for (const row of before.filter(row => row.vector_field === "vec_summary" || /healthy|other-policy/.test(row.memory_id))) {
       expect(after.find(item => item.memory_id === row.memory_id && item.vector_field === row.vector_field)).toEqual(row);
@@ -127,7 +127,7 @@ describe("one-time upgrade repair", () => {
     const run = await service.rebuildEmbeddings("repair");
     expect(run.enqueued).toBe(2);
     await service.runWorkerOnce(200);
-    expect(service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 2, failed: 0, done: true });
+    expect(await service.embeddingMaintenanceProgress(run.runId)).toMatchObject({ updated: 2, failed: 0, done: true });
     expect(repos.vectors.exportRows().map(row => row.vector_field).sort()).toEqual(["vec_action", "vec_summary"]);
   });
 
@@ -163,10 +163,10 @@ describe("one-time upgrade repair", () => {
     configured = true;
     repos.runtime.setKv(key, { ...run, nextAttemptAt: 1 });
     await service.runWorkerOnce(200);
-    expect(service.embeddingMaintenanceProgress()).toMatchObject({ updated: 0, retrying: 1, done: false });
+    expect(await service.embeddingMaintenanceProgress()).toMatchObject({ updated: 0, retrying: 1, done: false });
     db.db.prepare("UPDATE embedding_retry_queue SET max_attempts = 2, next_attempt_at = 0").run();
     await service.runWorkerOnce(200);
-    expect(service.embeddingMaintenanceProgress()).toMatchObject({ updated: 0, failed: 1, done: false });
+    expect(await service.embeddingMaintenanceProgress()).toMatchObject({ updated: 0, failed: 1, done: false });
     run = repos.runtime.getKv(key)!.value as any;
     expect(run.completedAt).toBeUndefined();
     expect(run.nextAttemptAt).toBeGreaterThan(Date.now());
@@ -174,7 +174,7 @@ describe("one-time upgrade repair", () => {
     repos.runtime.setKv(key, { ...run, nextAttemptAt: 1 });
     const restarted = fixture.createTestMemoryService({ db, embedder: model });
     await restarted.runWorkerOnce(200);
-    expect(restarted.embeddingMaintenanceProgress()).toMatchObject({ updated: 1, failed: 0, done: true });
+    expect(await restarted.embeddingMaintenanceProgress()).toMatchObject({ updated: 1, failed: 0, done: true });
   });
 
   it("checks actual dimensions when the model has no declared dimensions", async () => {
@@ -255,9 +255,9 @@ describe("one-time upgrade repair", () => {
     // Limit the first drain to the stale input so continuous refill cannot also
     // finish its replacement before the intermediate-state assertion.
     await service.runWorkerOnce(1);
-    expect(service.embeddingMaintenanceProgress()).toMatchObject({ done: false, updated: 0 });
+    expect(await service.embeddingMaintenanceProgress()).toMatchObject({ done: false, updated: 0 });
     await service.runWorkerOnce();
-    expect(service.embeddingMaintenanceProgress()).toMatchObject({ done: true, updated: 1 });
+    expect(await service.embeddingMaintenanceProgress()).toMatchObject({ done: true, updated: 1 });
   });
 
   it("finishes an empty upgrade without requiring a configured model or creating retries", async () => {
@@ -265,7 +265,7 @@ describe("one-time upgrade repair", () => {
     const { service, repos } = setup(model);
     await service.runWorkerOnce();
     expect((repos.runtime.getKv(key)!.value as any).completedAt).toBeTruthy();
-    expect(service.embeddingMaintenanceProgress()).toMatchObject({ enqueued: 0, done: true });
+    expect(await service.embeddingMaintenanceProgress()).toMatchObject({ enqueued: 0, done: true });
   });
 
 
@@ -287,7 +287,7 @@ describe("one-time upgrade repair", () => {
     repos.runtime.setKv(key, { ...run, nextAttemptAt: 1 });
     await service.runWorkerOnce();
     expect(repos.vectors.exportRows()[0]!.embedding_model).toBe("switched");
-    expect(service.embeddingMaintenanceProgress()).toMatchObject({ updated: 1, done: true });
+    expect(await service.embeddingMaintenanceProgress()).toMatchObject({ updated: 1, done: true });
   });
 
 });
@@ -319,7 +319,7 @@ describe("automatic provenance repair budget gates", () => {
     expect(service.isMemoryBudgetPaused()).toBe(true);
     await service.runWorkerOnce();
     expect(texts).toHaveLength(2);
-    expect(service.embeddingMaintenanceProgress()).toMatchObject({ updated: 2, done: true });
+    expect(await service.embeddingMaintenanceProgress()).toMatchObject({ updated: 2, done: true });
     const query = rememberEmbeddingIdentity(vector(), identity);
     expect(repos.memories.searchVectorIds(query, "vec_action").map(hit => hit.id)).toContain("budget-action");
     expect(repos.memories.searchVectorIds(query, "vec").map(hit => hit.id)).toContain("budget-feedback");
@@ -337,7 +337,7 @@ describe("automatic provenance repair budget gates", () => {
     });
     await service.runWorkerOnce();
     expect(texts).toHaveLength(2);
-    expect(service.embeddingMaintenanceProgress()).toMatchObject({ updated: 2, done: true });
+    expect(await service.embeddingMaintenanceProgress()).toMatchObject({ updated: 2, done: true });
   });
 
   it("keeps the local retry deadline after restart while the BYOK budget remains exhausted", async () => {

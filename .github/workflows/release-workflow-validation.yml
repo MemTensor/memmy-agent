@@ -6,12 +6,20 @@ on:
       - ".github/workflows/release-workflow-validation.yml"
       - ".github/workflows/github-draft-release-v2.yml"
       - "tests/release-workflow.test.ts"
+      - ".github/workflows/main-sync.yml"
+      - ".github/main-sync.json"
+      - "scripts/main-sync/**"
+      - "tests/main-sync*"
   push:
     branches: [main]
     paths:
       - ".github/workflows/release-workflow-validation.yml"
       - ".github/workflows/github-draft-release-v2.yml"
       - "tests/release-workflow.test.ts"
+      - ".github/workflows/main-sync.yml"
+      - ".github/main-sync.json"
+      - "scripts/main-sync/**"
+      - "tests/main-sync*"
 
 permissions:
   contents: read

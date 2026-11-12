@@ -53,7 +53,9 @@ export class SqliteVecStore {
   constructor(private readonly db: Database.Database) {}
 
   maintenanceEntries(): EmbeddingMaintenanceEntry[] {
-    return this.db.prepare(`
+    const pageSize = 500;
+    const entries: EmbeddingMaintenanceEntry[] = [];
+    const primary = this.db.prepare(`
       SELECT m.id AS id, 'memory' AS kind,
              CASE WHEN m.memory_layer = 'L1' THEN 'vec_summary' ELSE 'vec' END AS vectorField,
              COALESCE(v.embedding_dim, 0) AS dimension,
@@ -61,14 +63,107 @@ export class SqliteVecStore {
       FROM memories m LEFT JOIN memory_vector_entries v
         ON v.memory_id = m.id
         AND v.vector_field = CASE WHEN m.memory_layer = 'L1' THEN 'vec_summary' ELSE 'vec' END
-      WHERE m.deleted_at IS NULL AND m.status != 'deleted'
-      UNION ALL
+      WHERE m.deleted_at IS NULL AND m.status != 'deleted' AND m.id > ?
+      ORDER BY m.id LIMIT ?
+    `);
+    let afterId = "";
+    while (true) {
+      const page = primary.all(afterId, pageSize) as EmbeddingMaintenanceEntry[];
+      entries.push(...page);
+      if (page.length < pageSize) break;
+      afterId = page[page.length - 1]!.id;
+    }
+
+    const actions = this.db.prepare(`
       SELECT m.id AS id, 'memory' AS kind, 'vec_action' AS vectorField, v.embedding_dim AS dimension,
              v.embedding_model AS embeddingModel, v.embedding_provider AS embeddingProvider
       FROM memories m JOIN memory_vector_entries v ON v.memory_id = m.id AND v.vector_field = 'vec_action'
-      WHERE m.memory_layer = 'L1' AND m.deleted_at IS NULL AND m.status != 'deleted'
-      ORDER BY id, vectorField
-    `).all() as EmbeddingMaintenanceEntry[];
+      WHERE m.memory_layer = 'L1' AND m.deleted_at IS NULL AND m.status != 'deleted' AND m.id > ?
+      ORDER BY m.id LIMIT ?
+    `);
+    afterId = "";
+    while (true) {
+      const page = actions.all(afterId, pageSize) as EmbeddingMaintenanceEntry[];
+      entries.push(...page);
+      if (page.length < pageSize) break;
+      afterId = page[page.length - 1]!.id;
+    }
+    return entries.sort((left, right) => {
+      if (left.id !== right.id) return left.id < right.id ? -1 : 1;
+      const leftField = left.vectorField ?? "";
+      const rightField = right.vectorField ?? "";
+      return leftField === rightField ? 0 : leftField < rightField ? -1 : 1;
+    });
+  }
+
+  maintenanceEntriesForTargets(
+    targets: ReadonlyArray<{ id: string; vectorField?: MemoryVectorField }>
+  ): EmbeddingMaintenanceEntry[] {
+    if (targets.length === 0) return [];
+    const statement = this.db.prepare(`
+      WITH requested AS (
+        SELECT CAST(json_extract(value, '$.id') AS TEXT) AS id,
+               CAST(json_extract(value, '$.vectorField') AS TEXT) AS requested_field
+        FROM json_each(?)
+      ), selected AS (
+        SELECT requested.id AS id,
+               COALESCE(requested.requested_field,
+                 CASE WHEN memories.memory_layer = 'L1' THEN 'vec_summary' ELSE 'vec' END) AS vector_field
+        FROM requested JOIN memories ON memories.id = requested.id
+        WHERE memories.deleted_at IS NULL AND memories.status != 'deleted'
+      )
+      SELECT selected.id AS id, 'memory' AS kind, selected.vector_field AS vectorField,
+             COALESCE(v.embedding_dim, 0) AS dimension,
+             v.embedding_model AS embeddingModel, v.embedding_provider AS embeddingProvider
+      FROM selected LEFT JOIN memory_vector_entries v
+        ON v.memory_id = selected.id AND v.vector_field = selected.vector_field
+      ORDER BY selected.id, selected.vector_field
+    `);
+    const entries: EmbeddingMaintenanceEntry[] = [];
+    for (let offset = 0; offset < targets.length; offset += 500) {
+      entries.push(...statement.all(JSON.stringify(targets.slice(offset, offset + 500).map(target => ({
+        id: target.id,
+        vectorField: target.vectorField ?? null
+      })))) as EmbeddingMaintenanceEntry[]);
+    }
+    return entries.sort((left, right) => {
+      if (left.id !== right.id) return left.id < right.id ? -1 : 1;
+      const leftField = left.vectorField ?? "";
+      const rightField = right.vectorField ?? "";
+      return leftField === rightField ? 0 : leftField < rightField ? -1 : 1;
+    });
+  }
+
+  provenanceUpgradeEntries(): EmbeddingMaintenanceEntry[] {
+    const statement = this.db.prepare(`
+      SELECT m.id AS id, 'memory' AS kind, v.vector_field AS vectorField,
+             v.embedding_dim AS dimension,
+             v.embedding_model AS embeddingModel, v.embedding_provider AS embeddingProvider
+      FROM memories m JOIN memory_vector_entries v ON v.memory_id = m.id
+      WHERE m.deleted_at IS NULL AND m.status != 'deleted' AND v.embedding_dim > 0
+        AND (
+          (m.memory_layer = 'L1' AND v.vector_field = 'vec_action')
+          OR (
+            m.memory_layer = 'L2' AND v.vector_field = 'vec'
+            AND (
+              json_extract(m.properties_json, '$.internal_info.source') = 'feedback.experience.v1'
+              OR json_extract(m.properties_json, '$.internal_info.plugin_algorithm') = 'feedback.experience.v1'
+            )
+          )
+        )
+        AND m.id > ?
+      ORDER BY m.id, v.vector_field LIMIT ?
+    `);
+    const entries: EmbeddingMaintenanceEntry[] = [];
+    let afterId = "";
+    const pageSize = 500;
+    while (true) {
+      const page = statement.all(afterId, pageSize) as EmbeddingMaintenanceEntry[];
+      entries.push(...page);
+      if (page.length < pageSize) break;
+      afterId = page[page.length - 1]!.id;
+    }
+    return entries;
   }
 
   replace(memoryId: string, vectors: MemoryVectorValue[], updatedAt: string): void {

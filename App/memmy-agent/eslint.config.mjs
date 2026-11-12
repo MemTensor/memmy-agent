@@ -23,6 +23,32 @@ export default tseslint.config(
     },
   },
   {
+    // These fixtures execute in Node; only the two named Playwright callbacks
+    // below also reference another JavaScript realm. Keep no-undef enabled.
+    files: [
+      "src/tools/computer-history/win/native/tests/integration/browser-smoke.mjs",
+      "src/tools/computer-history/win/native/tests/integration/electron-text-smoke.mjs",
+      "tests/fixtures/external-browser-actions-live.mjs",
+      "tests/fixtures/teaching-browser-basics-live.mjs",
+      "tests/fixtures/teaching-browser-integrity-live.mjs",
+    ],
+    languageOptions: {
+      globals: {
+        process: "readonly", console: "readonly", URL: "readonly",
+        setTimeout: "readonly", clearTimeout: "readonly",
+        setInterval: "readonly", clearInterval: "readonly",
+      },
+    },
+  },
+  {
+    files: ["tests/fixtures/external-browser-actions-live.mjs"],
+    languageOptions: { globals: { window: "readonly" } },
+  },
+  {
+    files: ["tests/fixtures/teaching-browser-integrity-live.mjs"],
+    languageOptions: { globals: { chrome: "readonly" } },
+  },
+  {
     files: ["scripts/**/*.mjs"],
     languageOptions: {
       globals: {

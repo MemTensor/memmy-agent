@@ -276,6 +276,7 @@ export class SkillClusterPipeline {
           clusterId: cluster.id,
           reasons: gate.reasons
         });
+        this.recordDirectSkillFailure(startedAt, cluster, existingSkill?.id, "verification", rejectReason, gate);
         await this.updateMetaSkill(job, this.markProcessed(cluster, top6.map((item) => item.episodeId), at), {
           accepted: false,
           rejectReason,
@@ -295,7 +296,8 @@ export class SkillClusterPipeline {
         displayTitle: draft.displayTitle,
         draftName: draft.name,
         outputLanguage: draft.outputLanguage,
-        procedure: merged,
+        procedure: stripDirectSkillStepEvidenceIds(merged),
+        verification: gate,
         existing: existingSkill?.memory,
         successEpisodeIds: batch.filter((item) => item.outcome === "success").map((item) => item.episode_id),
         at
@@ -333,6 +335,7 @@ export class SkillClusterPipeline {
         clusterId: cluster.id,
         error: rejectReason
       });
+      this.recordDirectSkillFailure(startedAt, cluster, existingSkill?.id, "llm_transport", rejectReason);
       await this.updateMetaSkill(job, cluster, {
         accepted: false,
         rejectReason,
@@ -343,6 +346,34 @@ export class SkillClusterPipeline {
       });
       throw error;
     }
+  }
+
+  /** First-time failures have no Skill yet, so they key on the cluster; rebuilds also carry the real skillId. */
+  private recordDirectSkillFailure(
+    startedAt: number,
+    cluster: SkillClusterRecord,
+    skillId: string | undefined,
+    failureKind: "verification" | "llm_transport",
+    reason: string,
+    verification?: ReturnType<typeof verifyDirectSkillDraft>
+  ): void {
+    recordApiLog(
+      this.deps.repos.runtime,
+      skillId ? "skill_evolve" : "skill_generate",
+      { phase: "failed", clusterId: cluster.id, ...(skillId ? { skillId } : {}), failureKind, reason },
+      {
+        kind: "skill.direct.failed",
+        clusterId: cluster.id,
+        ...(skillId ? { skillId } : {}),
+        failureKind,
+        reason,
+        ...(verification ? { verification } : {}),
+        source: DIRECT_SKILL_SOURCE
+      },
+      elapsedApiLogMs(startedAt),
+      false,
+      nowIso()
+    );
   }
 
   private clusteringConfig(): DirectSkillClusteringConfig {
@@ -540,6 +571,7 @@ export class SkillClusterPipeline {
     draftName: string;
     outputLanguage: string;
     procedure: DirectSkillProcedureJson;
+    verification: ReturnType<typeof verifyDirectSkillDraft>;
     existing?: MemoryRow;
     successEpisodeIds: string[];
     at: string;
@@ -585,6 +617,7 @@ export class SkillClusterPipeline {
         name: input.name,
         invocation_guide: invocationGuide,
         procedure_json: input.procedure,
+        verification: input.verification,
         eta: 0.6,
         support: evidenceAnchorIds.length,
         gain: 0.4,
@@ -598,7 +631,8 @@ export class SkillClusterPipeline {
           source_world_model_ids: [],
           evidence_anchor_ids: evidenceAnchorIds,
           invocation_guide: invocationGuide,
-          procedure_json: input.procedure
+          procedure_json: input.procedure,
+          verification: input.verification
         }
       },
       createdAt: input.at
@@ -709,6 +743,16 @@ function clusterFeatures(cluster: SkillClusterRecord): SkillClusterFeatures {
     artifacts: cluster.artifacts,
     toolBigrams: cluster.toolBigrams,
     centroid: cluster.centroid
+  };
+}
+
+function stripDirectSkillStepEvidenceIds(procedure: DirectSkillProcedureJson): DirectSkillProcedureJson {
+  return {
+    ...procedure,
+    steps: procedure.steps.map((step) => {
+      const { evidenceIds: _evidenceIds, ...rest } = step;
+      return rest;
+    })
   };
 }
 

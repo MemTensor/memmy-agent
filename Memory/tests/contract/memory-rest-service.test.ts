@@ -1538,7 +1538,7 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
-  it("enforces scoped API permissions, idempotency, and shared resource access", async () => {
+  it("enforces scoped API permissions, idempotency, and device resource namespace boundaries", async () => {
     const { db, service } = createTestService();
     const server = createMemoryHttpServer({
       service,
@@ -1669,14 +1669,20 @@ describe("MemoryService / REST contract", () => {
     expect(writerItemsResponse.status).toBe(200);
     expect(writerItems.items.map((item) => item.id)).toContain(complete.l1MemoryId);
 
+    const writerGet = await fetch(baseUrl + "/memory/" + complete.l1MemoryId, {
+      headers: { authorization: "Bearer writer-a" }
+    });
+    expect(writerGet.status).toBe(200);
+    expect((await writerGet.json() as { id: string }).id).toBe(complete.l1MemoryId);
+
     const crossUserGet = await fetch(baseUrl + "/memory/" + complete.l1MemoryId, {
       headers: {
         authorization: "Bearer reader-b"
       }
     });
-    const crossUserBody = await crossUserGet.json() as { id: string };
-    expect(crossUserGet.status).toBe(200);
-    expect(crossUserBody.id).toBe(complete.l1MemoryId);
+    const crossUserBody = await crossUserGet.json() as { error: { code: string } };
+    expect(crossUserGet.status).toBe(404);
+    expect(crossUserBody.error.code).toBe("not_found");
     });
     db.close();
   });

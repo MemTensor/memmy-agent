@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { afterEach, describe, expect, it } from "vitest";
 import type { LlmClient } from "../../../src/model/types.js";
 import { Repositories, type EvolutionJobRecord } from "../../../src/storage/repositories.js";
@@ -31,8 +32,8 @@ describe("pending L2 revisions and compatible Skill merges", () => {
     };
     const { db, service } = createTestService({ skillLlm: llm });
     const repos = new Repositories(db.db), at = new Date().toISOString();
-    const common = { userId: "u", sessionId: "s", agentId: "codex", appId: "workspace", profileId: "default" };
-    repos.memories.insert({ id: "evidence", userId: "u", sessionId: "s", agentId: "codex", appId: "workspace",
+    const common = { userId: DEVICE_MEMORY_OWNER, sessionId: "s", agentId: "codex", appId: "workspace", profileId: "default" };
+    repos.memories.insert({ id: "evidence", userId: DEVICE_MEMORY_OWNER, sessionId: "s", agentId: "codex", appId: "workspace",
       timeline: at, memoryLayer: "L1", memoryType: "LongTermMemory", status: "activated", visibility: "private",
       memoryValue: `${newStep} Verify that pytest passes after the retry.`, tags: ["python", "pytest"], info: { profile_id: "default" },
       properties: { internal_info: { memory_layer: "L1", memory_kind: "trace", trace: {
@@ -61,7 +62,7 @@ describe("pending L2 revisions and compatible Skill merges", () => {
     let sequence = 0;
     async function run(policyId: string, payload: Record<string, unknown> = {}) {
       const id = `review-job-${++sequence}`;
-      repos.runtime.enqueueJob({ id, jobType: "skill_crystallization", userId: "u", targetMemoryId: policyId, payload,
+      repos.runtime.enqueueJob({ id, jobType: "skill_crystallization", userId: DEVICE_MEMORY_OWNER, targetMemoryId: policyId, payload,
         status: "queued", attempts: 0, maxAttempts: 1, createdAt: at, updatedAt: at });
       return service.runWorkerOnce(1, { targetMemoryIds: [policyId] });
     }

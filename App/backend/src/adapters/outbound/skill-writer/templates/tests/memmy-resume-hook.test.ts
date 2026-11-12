@@ -9,6 +9,7 @@ import { resolveCursorDataPaths } from "../../../agent-paths.js";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../../workspace-bridge/runtime-loader.js";
 import { renderMemmyResumeHookScript } from "../memmy-resume-hook.js";
 import { renderMemmyResumeHookScript as renderCliHook } from "../../../../../../../../Memory/src/agent-source/integration/templates/memmy-resume-hook.js";
+import { DEVICE_MEMORY_OWNER } from "../../../../../../../../Memory/src/service/namespace/memory-owner.js";
 
 describe("memmy resume hook stop capture", () => {
   let tempDir = "";
@@ -411,7 +412,7 @@ describe("memmy resume hook stop capture", () => {
         workspaceHostId: "a".repeat(64),
         namespace: {
           source,
-          userId: "installed-owner",
+          userId: DEVICE_MEMORY_OWNER,
           sessionKey: `${source}-memory-host-session`,
         },
       });

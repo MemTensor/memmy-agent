@@ -1,5 +1,6 @@
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { l2SupportRelation } from "./l2-content-revision.js";
+import { l2SharesComparisonScope } from "./l2-comparison-scope.js";
 import {
   L2_INDUCTION_PROMPT,
   buildPolicyDraft,
@@ -337,54 +338,66 @@ export class PolicyInductionEngine {
         createdAt: at
       });
 
-      const upsert = this.deps.upsertEvolutionMemory(l2);
-      for (const episodeId of draft.sourceEpisodeIds) {
-        this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "L2", upsert.memory.id, at);
-      }
-      for (const trace of bucket) {
-        this.deps.repos.runtime.insertTracePolicyLink({
-          userId: source.userId,
-          l1MemoryId: trace.id,
-          l2MemoryId: upsert.memory.id,
-          relation: "supports",
-          strength: Math.max(0, trace.value),
-          createdAt: at
-        });
-      }
-      this.markCandidatePoolPromoted(source.userId, signature, bucketTraceIds, upsert.memory.id, at);
+      this.deps.repos.transaction(() => {
+        const currentSources = this.deps.repos.memories.getMany(bucketTraceIds);
+        const sourceById = new Map(currentSources.map(memory => [memory.id, memory]));
+        if (bucket.some(trace => {
+          const memory = sourceById.get(trace.id);
+          const current = memory && this.deps.traceMeta(memory);
+          return !memory || memory.status !== "activated" || !current || !this.isTraceEligibleForL2(current)
+            || current.episodeId !== trace.episodeId || memory.version !== trace.memory.version || memory.updatedAt !== trace.memory.updatedAt;
+        })) throw new Error("Policy evidence changed during generation; retry with current sources");
+        const upsert = this.deps.upsertEvolutionMemory(l2);
+        for (const episodeId of draft.sourceEpisodeIds) {
+          this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "L2", upsert.memory.id, at);
+        }
+        for (const trace of bucket) {
+          this.deps.repos.runtime.insertTracePolicyLink({
+            userId: source.userId,
+            l1MemoryId: trace.id,
+            l2MemoryId: upsert.memory.id,
+            relation: "supports",
+            strength: Math.max(0, trace.value),
+            createdAt: at
+          });
+        }
+        this.markCandidatePoolPromoted(source.userId, signature, bucketTraceIds, upsert.memory.id, at);
 
-      this.deps.enqueueChange({
-        memoryId: upsert.memory.id,
-        namespaceId: this.deps.namespaceIdFromMemory(upsert.memory),
-        kind: kindFromMemory(upsert.memory),
-        op: upsert.created ? "created" : "updated",
-        entityId: upsert.memory.id,
-        userId: source.userId,
-        changeType: upsert.created ? "create" : "update",
-        before: upsert.previous,
-        after: upsert.memory,
-        source: "worker.l2_induction.v7",
-        createdAt: at
-      });
-      if (this.deps.config.algorithm.capture.embedAfterCapture) {
-        this.deps.enqueueJob({
-          jobType: "embedding",
+        this.deps.enqueueChange({
+          memoryId: upsert.memory.id,
+          namespaceId: this.deps.namespaceIdFromMemory(upsert.memory),
+          kind: kindFromMemory(upsert.memory),
+          op: upsert.created ? "created" : "updated",
+          entityId: upsert.memory.id,
           userId: source.userId,
-          sessionId: source.sessionId,
-          episodeId: sourceTrace.episodeId,
-          targetMemoryId: upsert.memory.id,
-          payload: { reason: "l2.upserted" },
+          changeType: upsert.created ? "create" : "update",
+          before: upsert.previous,
+          after: upsert.memory,
+          source: "worker.l2_induction.v7",
           createdAt: at
         });
-      }
-      this.deps.enqueueJob({
-        jobType: "skill_crystallization",
-        userId: source.userId,
-        sessionId: source.sessionId,
-        episodeId: sourceTrace.episodeId,
-        targetMemoryId: upsert.memory.id,
-        payload: { signature },
-        createdAt: at
+        if (this.deps.config.algorithm.capture.embedAfterCapture) {
+          this.deps.enqueueJob({
+            jobType: "embedding",
+            userId: source.userId,
+            sessionId: source.sessionId,
+            episodeId: sourceTrace.episodeId,
+            targetMemoryId: upsert.memory.id,
+            payload: { reason: "l2.upserted" },
+            createdAt: at
+          });
+        }
+        if (!this.deps.config.algorithm.skill.directFromTrace) {
+          this.deps.enqueueJob({
+            jobType: "skill_crystallization",
+            userId: source.userId,
+            sessionId: source.sessionId,
+            episodeId: sourceTrace.episodeId,
+            targetMemoryId: upsert.memory.id,
+            payload: { signature },
+            createdAt: at
+          });
+        }
       });
     }
   }
@@ -606,22 +619,24 @@ export class PolicyInductionEngine {
     if (!policy) return undefined;
     const unifiedEvidence = this.deps.config.algorithm.l2Induction.mode === "unified" || policy.schemaVersion === 2;
 
+    const links = this.deps.repos.runtime.listTracePolicyLinks({ l2MemoryId: policy.id, limit: 1000 });
+    const currentSupportLinks = links.filter((link) => link.relation === l2SupportRelation(memory));
     const linkedTraceIds = new Set([
       ...(unifiedEvidence ? policy.sourceTraceIds : []),
-      ...this.deps.repos.runtime
-        .listTracePolicyLinks({ l2MemoryId: policy.id, limit: 1000 })
-        .filter((link) => !unifiedEvidence || link.relation === l2SupportRelation(memory))
-        .map((link) => link.l1MemoryId)
+      ...(unifiedEvidence ? currentSupportLinks : links).map((link) => link.l1MemoryId)
     ]);
 
     const allTraces = this.deps.repos.memories
       .getMany([...linkedTraceIds])
       .map((memory) => this.deps.traceMeta(memory))
-      .filter((trace): trace is TraceMeta =>
-        Boolean(trace && (unifiedEvidence
-          ? trace.userId === memory.userId && this.isPolicyEvidenceValid(trace, policy)
-          : this.isTraceEligibleForL2(trace)))
-      );
+      .filter((trace): trace is TraceMeta => {
+        if (!trace) return false;
+        if (!unifiedEvidence) return this.isTraceEligibleForL2(trace);
+        // Source IDs alone retain same-owner evidence; an attributed current link is required to bridge owners.
+        const ownerMatches = trace.userId === memory.userId || (l2SharesComparisonScope(trace.memory, memory) &&
+          currentSupportLinks.some((link) => link.l1MemoryId === trace.id && link.l2MemoryId === memory.id && link.userId === trace.userId));
+        return ownerMatches && this.isPolicyEvidenceValid(trace, policy);
+      });
 
     const linkedTraces = allTraces.filter((trace) => linkedTraceIds.has(trace.id));
     const evidenceTraces = linkedTraces;
@@ -747,7 +762,7 @@ export class PolicyInductionEngine {
 
     const savedPolicy = policyMetaFromMemory(saved);
     if (savedPolicy) {
-      if (savedPolicy.status === "active") {
+      if (savedPolicy.status === "active" && !this.deps.config.algorithm.skill.directFromTrace) {
         this.deps.enqueueJob({
           jobType: "skill_crystallization",
           userId: saved.userId,
@@ -832,6 +847,14 @@ export class PolicyInductionEngine {
   }
 
   isTraceEligibleForL2(trace: TraceMeta): boolean {
+    const internal = trace.memory.properties.internal_info;
+    const metadata = isRecord(internal.trace) ? internal.trace : {};
+    const rawId = [internal.source_raw_turn_id, internal.raw_turn_id, metadata.raw_turn_id, trace.memory.info.raw_turn_id]
+      .find(value => value != null && value !== "");
+    if (rawId !== undefined) {
+      const source = this.deps.repos.runtime.resolveL1Source(trace.id);
+      if (!source || source.rawTurnId !== rawId || source.episodeId !== trace.episodeId) return false;
+    }
     return trace.memory.properties.internal_info.policy_eligible !== false &&
       trace.memory.properties.internal_info.evidence_status !== "provisional" &&
       trace.memory.properties.internal_info.evidence_status !== "disputed" &&

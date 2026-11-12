@@ -141,7 +141,7 @@ describe("MemmyMemoryHook", () => {
     }
   });
 
-  it("preserves an identical L3 snapshot, replaces a changed snapshot, and removes an empty snapshot", async () => {
+  it("refreshes a shared L3 snapshot even when its representative version is unchanged and removes an empty snapshot", async () => {
     const client = fakeV2Client();
     const workspace = mkdtempSync(join(tmpdir(), "memmy-v2-snapshot-"));
     try {
@@ -167,7 +167,7 @@ describe("MemmyMemoryHook", () => {
           projectId: `ws_${"a".repeat(64)}`,
           memoryId: "l3-memory-1",
           memoryVersion: 1,
-          renderedContext: "SHOULD_NOT_REPLACE_IDENTICAL_SNAPSHOT",
+          renderedContext: "L3_SHARED_SCOPE_CHANGED",
           sourceMemoryIds: ["l1-2"],
         })
         .mockResolvedValueOnce({
@@ -195,8 +195,7 @@ describe("MemmyMemoryHook", () => {
       await hook.beforeBuildSystemPrompt(lifecycle);
       const identicalPrompt = new SystemPromptBuildContext({ sessionKey: spec.sessionKey });
       hook.onBuildSystemPrompt(identicalPrompt);
-      expect(identicalPrompt.getSection("memmy-l3-world-model")?.content).toContain("L3_V1");
-      expect(identicalPrompt.getSection("memmy-l3-world-model")?.content).not.toContain("SHOULD_NOT_REPLACE");
+      expect(identicalPrompt.getSection("memmy-l3-world-model")?.content).toContain("L3_SHARED_SCOPE_CHANGED");
 
       await hook.beforeBuildSystemPrompt(lifecycle);
       const updatedPrompt = new SystemPromptBuildContext({ sessionKey: spec.sessionKey });

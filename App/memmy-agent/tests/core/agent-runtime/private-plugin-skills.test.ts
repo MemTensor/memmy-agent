@@ -28,6 +28,7 @@ function loader(instructions = secret) {
 }
 
 describe("private plugin instruction projection", () => {
+
   it("retains the owning request through private-skill trimming and appends one runtime scope", async () => {
     const { tools } = loader(secret.repeat(30));
     const context = { turnId: "MERGED-TURN" };
@@ -61,7 +62,10 @@ describe("private plugin instruction projection", () => {
     expect(JSON.stringify(requests[0].messages.filter((message: any) => message.role === "system"))).not.toContain("MERGED-TURN");
     expect(JSON.stringify(result)).not.toContain(secret);
   });
-it("recovers a transient private load before issuing exactly one model request", async () => {
+
+
+
+  it("recovers a transient private load before issuing exactly one model request", async () => {
     const { tools, callTool } = loader();
     callTool.mockRejectedValueOnce(new Error("temporary transport failure"));
     const provider = new Provider([new LLMResponse({ content: "done" })]);
@@ -101,6 +105,7 @@ it("recovers a transient private load before issuing exactly one model request",
       () => { controller.abort(new Error("cancelled")); })).rejects.toThrow("cancelled");
     expect(resolve).toHaveBeenCalledTimes(1);
   });
+
 
   it("keeps instructions out of transcript, checkpoints, tool events and saved metadata", async () => {
     const { tools, callTool } = loader();

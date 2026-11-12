@@ -1,18 +1,83 @@
 ---
-title: Desktop Pet Mode
-description: The desktop pet is a transparent, always-on-top mini window — perfect for firing off tasks without interrupting your current work.
+title: Use the desktop pet
+description: Start a task from the corner of the screen, read the reply, and open the full workbench when you need it.
 icon: Cat
 ---
 
-## Interactions
+The desktop pet is Memmy’s small window. Choose it to type a request, or to see task progress and unread replies.
 
-- Single-click to expand the input bubble; `Enter` to send; voice recording with transcription is supported.
-- Double-click to leave pet mode and open the full workbench.
-- Drag with the left mouse button to move the window; the right-click menu can open full mode.
-- When tasks are running or there are unread completions, a numeric badge appears; click it to expand a mini task list (up to 6).
+import idleScreen from "../../assets/pet-idle-full.jpg";
+import inputScreen from "../../assets/pet-input-full.jpg";
+import tasksScreen from "../../assets/pet-tasks-full.jpg";
+import answerScreen from "../../assets/pet-answer-full.jpg";
+import runningScreen from "../../assets/pet-running-full.jpg";
+import menuScreen from "../../assets/pet-menu-full.jpg";
+import preferencesScreen from "../../assets/settings-preferences-full-en.jpg";
 
-## Session Continuation
+## Open the pet
 
-- If a task is running, new messages continue the same session; tasks completed within the last 5 minutes also continue their session.
-- After clicking "New session", the next message creates a new session.
-- The pet and full mode share the WebUI thread, so context survives switching.
+Choose the Memmy icon in the system menu bar or tray, then **Pet mode**. After the pet appears, drag it to move it.
+
+## Start or continue a chat
+
+Choose the pet, type in **What do you wanna say?**, and choose the send arrow. After a reply, keep typing below it. When the reply is long, choose **Open full conversation**.
+
+<div className="docs-pet-window">
+
+<ProductScreenSteps steps={[
+  { label: "Type a request", src: inputScreen, alt: "Full desktop-pet window with the text field, voice button, and send arrow", caption: "Choose the pet to open the input. The sample text has not been sent. The picture is a placeholder of the Chinese interface." },
+  { label: "Read the reply", src: answerScreen, alt: "Full desktop-pet window with a sample course-feedback reply and Open full conversation", caption: "The reply appears above the pet, and you can ask a follow-up below. The task and reply in the picture are fictional." }
+]} />
+
+</div>
+
+<details>
+<summary>Use voice input</summary>
+
+After a speech-recognition model is configured and the microphone is allowed, choose the microphone, **Click to talk**, in the input. While recording you can pause and continue. **Finish and send** transcribes the audio, then sends the recognized text.
+
+</details>
+
+## See tasks and unread replies
+
+The number beside the pet is the unread session count. Choose the number to open recent tasks, then choose a task to read its reply. A running task also has a progress hint at the top.
+
+While a task is running, the bubble offers **New chat** and **Stop**. **New chat** starts another topic. **Stop** stops the current task.
+
+<div className="docs-pet-window">
+
+<ProductScreenSteps steps={[
+  { label: "Progress and unread count", src: idleScreen, alt: "Full desktop-pet window with a progress hint and an unread count", caption: "The hint at the top is the task in progress. The number is the unread session count." },
+  { label: "Choose a task", src: tasksScreen, alt: "Full desktop-pet window with recent tasks and the full-mode entry", caption: "Choose a task to switch to it. The list can also return to full mode." },
+  { label: "New chat or stop", src: runningScreen, alt: "Full desktop-pet window for a running task, with New chat and Stop", caption: "The two buttons start another topic or stop the current task." }
+]} />
+
+</div>
+
+## Switch to the full workbench
+
+Double-click the pet, or choose **Back to full mode** in the right-click menu. **Open full conversation** in a reply bubble also opens the workbench on that task.
+
+**Close pet** in the right-click menu hides the small window. Memmy keeps running in the background. Choose **Pet mode** again from the menu bar or tray icon when you want it back.
+
+<details>
+<summary>See the pet’s right-click menu</summary>
+
+<div className="docs-pet-window">
+
+<ProductScreenshot src={menuScreen} alt="Full desktop-pet window with Back to full mode and Close pet in the right-click menu" caption="Right-click the pet, then choose the action. The picture is a placeholder of the Chinese interface." />
+
+</div>
+
+</details>
+
+## Change how Memmy starts
+
+Open **Settings → Preferences**, then the startup and window section. Under **Default launch mode**, choose pet mode. Under **When closing the main window**, choose what should happen, such as shrinking to the pet.
+
+<details>
+<summary>See where those settings are</summary>
+
+<ProductScreenshot src={preferencesScreen} alt="Full Memmy settings window showing default launch mode and what happens when the main window closes" caption="Default launch mode decides how Memmy opens next time. The close-window setting decides what happens after you close the window." />
+
+</details>

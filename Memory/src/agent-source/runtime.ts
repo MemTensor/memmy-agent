@@ -1226,8 +1226,15 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       const discovered = await list();
       for (const source of discovered.sources) {
         if (!canInstall()) return;
-        if (!source.available || source.status !== "not_connected") continue;
+        if (!source.available || !await automaticConnectionAllowed(source.sourceId)) continue;
+        const checkDshUpdate = source.sourceId === "deepseek_harness" && source.status === "plugin_installed";
+        if (source.status !== "not_connected" && !checkDshUpdate) continue;
         try {
+          if (checkDshUpdate) {
+            const target = integrationRegistry.get(source.sourceId);
+            if (await target?.isInstalledHookCurrent?.() !== false) continue;
+            if (!canInstall() || !await automaticConnectionAllowed(source.sourceId)) continue;
+          }
           const kind = agentConnectionKind(source.sourceId);
           await mutateConnection(source.sourceId, kind, "POST", "auto_inject", canInstall);
         } catch (error) {

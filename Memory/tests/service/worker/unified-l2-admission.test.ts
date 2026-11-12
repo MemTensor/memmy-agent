@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Embedder, LlmClient } from "../../../src/model/types.js";
 import { Repositories } from "../../../src/storage/repositories.js";
@@ -50,8 +51,9 @@ describe("unified L2 worker admission", () => {
       tags: [], info: {}, properties: { internal_info: { memory_layer: "L1", memory_kind: "trace", trace: {
         summary: "PPT heading hierarchy needs correction", userText: "Make the heading stand out", agentText: "Increased its size", value: -1
       } } }, version: 1, createdAt: at, updatedAt: at });
-    upsertL2Candidate(repos, { sourceMemoryId: "source", userId: "u", route: "negative", at });
-    repos.runtime.enqueueJob({ id: "extract", jobType, userId: "u", targetMemoryId: "source", payload: {},
+    expect(repos.memories.get("source")!.userId).toBe(DEVICE_MEMORY_OWNER);
+    upsertL2Candidate(repos, { sourceMemoryId: "source", userId: DEVICE_MEMORY_OWNER, route: "negative", at });
+    repos.runtime.enqueueJob({ id: "extract", jobType, userId: DEVICE_MEMORY_OWNER, targetMemoryId: "source", payload: {},
       status: "queued", attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at });
     const run = await service.runWorkerOnce(1, { targetMemoryIds: ["source"] });
     expect(run).toMatchObject({ succeeded: 1, failed: 0 });

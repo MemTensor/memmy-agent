@@ -5,10 +5,18 @@ icon: Terminal
 
 | Command | Description |
 | --- | --- |
-| `memmy` | Start an interactive chat |
+| `memmy` | Open the full-screen TUI |
 | `memmy onboard` | Terminal menu-driven setup |
-| `memmy onboard --defaults` | Initialize config and workspace non-interactively |
+| `memmy onboard --defaults` | Create or refresh the config and workspace. If a config already exists in an interactive terminal, it asks before overwriting |
 | `memmy status` | Check config, workspace, model, and provider status |
 | `memmy agent --message "..."` | Send a single-turn message |
+| `memmy goal --message "..."` | Run a persistent Goal until it reaches a terminal state |
+| `memmy sessions list` | List terminal sessions |
 | `memmy serve` | Start the OpenAI-compatible API |
+| `memmy gateway` | Start the channel Gateway. `--port` is the health port, `18970` by default |
+| `memmy config set <key> <value>` | Write one supported config value |
+| `memmy channels status` | Show channel status |
+| `memmy channels login <channel>` | Sign in to a channel |
+| `memmy plugins list` | List channel plugins |
 | `memmy provider login <provider>` | Provider OAuth sign-in |
+| `memmy provider logout <provider>` | Provider OAuth sign-out |

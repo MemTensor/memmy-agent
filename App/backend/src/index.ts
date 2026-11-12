@@ -190,6 +190,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       modelCapabilityCatalogPath: options.modelCapabilityCatalogPath,
       permissionManager,
       bootstrapScenario: options.bootstrapScenario,
+      timeZone: configuredTimeZone,
       memmyConfigWriter,
       memmyConfigPath,
       scanPreferencesStore,

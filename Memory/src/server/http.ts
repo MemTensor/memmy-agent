@@ -1,6 +1,10 @@
 import { isImportedSkillObservation } from "../service/import/memory-import-pipeline.js";
 import type { AgentSkillReconcileRequest } from "../service/import/agent-skill-library.js";
+import {localPanelRequest} from "../service/panel/local-read.js";
 import { assertLocalAgentSourceRequest, isAgentSourceScanPath, routeAgentSourceScan } from "./agent-source-api.js";
+import {PanelLogsInputSchema} from "../contracts/memory-runtime.js";
+import { PanelBrowseInputSchema } from "../contracts/memory-runtime.js";
+import { PanelTaskDetailInputSchema, PanelTaskFieldInputSchema } from "../contracts/memory-runtime.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -105,10 +109,20 @@ export const API_ROUTES = [
   "POST /api/v1/worker/run",
   "POST /api/v1/worker/import-summaries/enqueue",
   "GET /api/v1/memory/logs",
+  "GET /api/v1/panel/memory/:id",
   "GET /api/v1/panel/overview",
+  "GET /api/v1/panel/overview-stats",
   "GET /api/v1/panel/analysis",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
+  "POST /api/v1/panel/logs",
+  "GET /api/v1/panel/logs/:id",
+  "GET /api/v1/panel/stats",
+  "POST /api/v1/panel/browse",
+  "GET /api/v1/panel/task-summaries",
+  "GET /api/v1/panel/task-details/:id",
+  "GET /api/v1/panel/task-details/:id/check",
+  "GET /api/v1/panel/task-details/:id/turns/:turnId/field",
   "DELETE /api/v1/panel/tasks/:id",
   ...VIEWER_API_ROUTES
 ] as const;
@@ -198,6 +212,8 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
   });
   async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const startedAt = Date.now();
+    const controller = new AbortController();
+    response.once("close",()=>controller.abort());
     const requestId = requestIdFromHeaders(request) ?? randomUUID();
     const requestPath = request.url?.split("?", 1)[0] ?? "<missing>";
     setSecurityHeaders(response);
@@ -293,7 +309,8 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         Boolean(options.onShutdownRequested),
         pluginRuntimeAnalytics,
         agentSources,
-        requestId
+        requestId,
+        controller.signal
       );
       if (request.method === "POST" && url.pathname === "/api/v1/admin/shutdown") {
         response.once("finish", () => options.onShutdownRequested?.());
@@ -604,11 +621,21 @@ async function routeRequest(
   canShutdown: boolean,
   pluginRuntimeAnalytics: PluginRuntimeAnalytics,
   agentSources: AgentSourceExecutor,
-  requestId: string
+  requestId: string,
+  signal?: AbortSignal
 ): Promise<unknown> {
+  const localPanel=principal.kind==="local"||principal.kind==="anonymous"||principal.kind==="viewer";
+  const panelEnvelope=localPanelRequest({namespace:principal.namespace,timeZone:principal.timeZone},localPanel);
+  const readPanel = (method:string,args:unknown[]) => service.readPanel(method,args,signal);
   const path = url.pathname;
 
   if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
+    // Local cache preparation starts with the ready service, without a login or
+    // health request. Cloud statistics still require an authenticated scope.
+    if (principal.kind === "cloud" && principal.timeZone && principal.namespace?.userId) {
+      const input = { namespace: principal.namespace, timeZone: principal.timeZone };
+      service.panelStatsSnapshot(input,localPanel);
+    }
     return service.health([...API_ROUTES]);
   }
   if (method === "GET" && path === "/api/v1/admin/memory-token-budget") {
@@ -829,7 +856,7 @@ async function routeRequest(
       toolCalls: request.toolCalls, toolResults: request.toolResults, artifacts: request.artifacts,
       sourceMemoryIds: request.sourceMemoryIds, usage: request.usage, status: request.status,
       tags: request.tags, userMemoryCorrection: request.userMemoryCorrection
-    }, autoWorker.schedule);
+    }, signal, autoWorker.schedule);
     const result = request.channel === "hook"
       ? await trackStoredExternalSourceTurnCapture(
         pluginRuntimeAnalytics,
@@ -882,7 +909,8 @@ async function routeRequest(
       () =>
         service.completeTurn(
           turnId,
-          publicRequest as TurnCompleteRequest & Record<string, unknown>
+          publicRequest as TurnCompleteRequest & Record<string, unknown>,
+          signal
         )
     );
     scheduleAutoWorkerForEvolution(result, autoWorker);
@@ -938,8 +966,8 @@ async function routeRequest(
   if (method === "GET" && recallEvidence) {
     requireMemoryRead(principal);
     const queryId = decodeMatchSegment(recallEvidence, 1);
-    const request = envelopeWithPrincipal({}, principal) as RequestEnvelope;
-    return service.recallEvidence(queryId, request);
+    const request = ownerBoundRequest(envelopeWithPrincipal({}, principal), principal) as RequestEnvelope;
+    return service.recallEvidence(queryId, request, localPanel);
   }
 
   if (method === "POST" && path === "/api/v1/memory/add") {
@@ -1068,10 +1096,10 @@ async function routeRequest(
 
   if (method === "GET" && path === "/api/v1/panel/overview") {
     requirePanelRead(principal);
-    return service.panelOverviewSummary({
-      namespace: principal.namespace,
+    return (await readPanel("overview", [{
+      namespace: panelEnvelope.namespace,
       timeZone: principal.timeZone
-    });
+    }])).data;
   }
 
   if (method === "GET" && path === "/api/v1/admin/export") {
@@ -1086,21 +1114,29 @@ async function routeRequest(
 
   if (method === "DELETE" && path === "/api/v1/admin/data") {
     requireMemoryWrite(principal);
+    if (!localPanel) throw new MemoryServiceError("forbidden", "Clearing device memory requires local access");
     return agentSources.clearAllData();
+  }
+
+  const panelMemory=path.match(/^\/api\/v1\/panel\/memory\/([^/]+)$/u);
+  if(method==="GET"&&panelMemory){
+    requirePanelRead(principal);
+    return service.getPanelMemory(decodeURIComponent(panelMemory[1]!),ownerBoundRequest({namespace:principal.namespace,timeZone:principal.timeZone},principal),localPanel);
   }
 
   if (method === "GET" && path === "/api/v1/panel/analysis") {
     requirePanelRead(principal);
-    return service.panelAnalysis({
-      namespace: principal.namespace,
+    return (await readPanel("analysis", [{
+      namespace: panelEnvelope.namespace,
       timeZone: principal.timeZone
-    });
+    }])).data;
   }
 
   if (method === "GET" && path === "/api/v1/panel/items") {
     requirePanelRead(principal);
-    return publicPanelItemsResponse(service.panelItems({
-      namespace: principal.namespace,
+    return publicPanelItemsResponse((await readPanel("items", [{
+      userSummary: url.searchParams.get("userSummary") === "true",
+      namespace: panelEnvelope.namespace,
       timeZone: principal.timeZone,
       layer: parseRecallLayer(url.searchParams.get("layer")),
       status: parseStatus(url.searchParams.get("status")),
@@ -1108,17 +1144,64 @@ async function routeRequest(
       sourceAgent: url.searchParams.get("sourceAgent") ?? undefined,
       excludedSourceAgents: url.searchParams.getAll("excludedSourceAgents"),
       page: parseNumber(url.searchParams.get("page"))
-    }));
+    }])).data);
+  }
+
+  if (method === "POST" && path === "/api/v1/panel/logs") {
+    requirePanelRead(principal);
+    const input=PanelLogsInputSchema.safeParse(body);
+    if(!input.success) throw new MemoryServiceError("invalid_argument","Invalid log query");
+    return (await readPanel("logs",[input.data,{namespace:panelEnvelope.namespace}])).data;
+  }
+  const logDetail=path.match(/^\/api\/v1\/panel\/logs\/(\d+)$/u);
+  if(method==="GET"&&logDetail) {requirePanelRead(principal);return (await readPanel("logDetail",[Number(logDetail[1]),{namespace:panelEnvelope.namespace}])).data;}
+  if (method === "GET" && path === "/api/v1/panel/stats") {
+    requirePanelRead(principal);
+    return service.panelStatsSnapshot(panelEnvelope,localPanel);
+  }
+  if (method === "GET" && path === "/api/v1/panel/overview-stats") {
+    requirePanelRead(principal);
+    return service.panelOverviewStatsSnapshot(panelEnvelope,localPanel);
+  }
+  if (method === "POST" && path === "/api/v1/panel/browse") {
+    requirePanelRead(principal);
+    const parsed = PanelBrowseInputSchema.safeParse(body);
+    if (!parsed.success) throw new MemoryServiceError("invalid_argument","Invalid panel browse request");
+    return service.browsePanel(parsed.data,{namespace:panelEnvelope.namespace,timeZone:principal.timeZone},signal,localPanel);
+  }
+
+  if (method === "GET" && path === "/api/v1/panel/task-summaries") {
+    requirePanelRead(principal);
+    return (await readPanel("tasks", [{ namespace: panelEnvelope.namespace, timeZone: principal.timeZone,
+      q: url.searchParams.get("q") ?? undefined, page: parseNumber(url.searchParams.get("page")) }])).data;
+  }
+  const taskCheckPath = path.match(/^\/api\/v1\/panel\/task-details\/([^/]+)\/check$/u);
+  if (method === "GET" && taskCheckPath) {
+    requirePanelRead(principal);
+    return (await readPanel("taskCheck", [decodeURIComponent(taskCheckPath[1]!), { namespace: panelEnvelope.namespace }])).data;
+  }
+  const taskDetailPath = path.match(/^\/api\/v1\/panel\/task-details\/([^/]+)$/u);
+  if (method === "GET" && taskDetailPath) {
+    requirePanelRead(principal);
+    return (await readPanel("detail", [decodeURIComponent(taskDetailPath[1]!), { namespace: panelEnvelope.namespace,
+      ...parsePanelInput(PanelTaskDetailInputSchema, url), timeZone: principal.timeZone }])).data;
+  }
+  const taskFieldPath = path.match(/^\/api\/v1\/panel\/task-details\/([^/]+)\/turns\/([^/]+)\/field$/u);
+  if (method === "GET" && taskFieldPath) {
+    requirePanelRead(principal);
+    const {field, ...input} = parsePanelInput(PanelTaskFieldInputSchema, url);
+    return (await readPanel("field", [decodeURIComponent(taskFieldPath[1]!), decodeURIComponent(taskFieldPath[2]!), field,
+      { ...input, namespace: panelEnvelope.namespace, timeZone: principal.timeZone }])).data;
   }
 
   if (method === "GET" && path === "/api/v1/panel/tasks") {
     requirePanelRead(principal);
-    return publicPanelTasksResponse(service.panelTasks({
-      namespace: principal.namespace,
+    return publicPanelTasksResponse((await readPanel("legacyTasks", [{
+      namespace: panelEnvelope.namespace,
       timeZone: principal.timeZone,
       q: url.searchParams.get("q") ?? undefined,
       page: parseNumber(url.searchParams.get("page"))
-    }));
+    }])).data);
   }
 
   if (method === "GET" && path === "/api/v1/memory/logs") {
@@ -1129,7 +1212,7 @@ async function routeRequest(
       excludedSourceAgents: url.searchParams.getAll("excludedSourceAgents"),
       limit: parseNumber(url.searchParams.get("limit")),
       offset: parseNumber(url.searchParams.get("offset"))
-    });
+    },localPanel);
   }
 
   if (method === "POST" && path === "/api/v1/memory/processing/status") {
@@ -1173,7 +1256,8 @@ async function routeRequest(
       () =>
         service.getMemory(
           decodeMatchSegment(memoryGet, 1),
-          { namespace: principal.namespace, timeZone: principal.timeZone }
+          ownerBoundRequest({ namespace: principal.namespace, timeZone: principal.timeZone }, principal),
+          localPanel
         ),
       (result) => ({ hit_count: hitCountFromGetResponse(result) }),
     );
@@ -1182,9 +1266,9 @@ async function routeRequest(
   const panelTaskDelete = match(path, /^\/api\/v1\/panel\/tasks\/([^/]+)$/);
   if (method === "DELETE" && panelTaskDelete) {
     requireMemoryWrite(principal);
-    const request = envelopeWithPrincipal(asObject(body, "panel.task.delete"), principal) as MemoryGovernanceRequest;
+    const request = ownerBoundRequest(envelopeWithPrincipal(asObject(body, "panel.task.delete"), principal), principal) as MemoryGovernanceRequest;
     const id = decodeMatchSegment(panelTaskDelete, 1);
-    return publicDeletePanelTaskResponse(service.deletePanelTask(id, request));
+    return publicDeletePanelTaskResponse(service.deletePanelTask(id, request, localPanel));
   }
 
   // The desktop App archives and reactivates skills with its service token,
@@ -1205,10 +1289,10 @@ async function routeRequest(
   const memoryDelete = match(path, /^\/api\/v1\/memory\/([^/]+)$/);
   if (method === "DELETE" && memoryDelete) {
     requireMemoryWrite(principal);
-    const request = envelopeWithPrincipal(asObject(body, "memory.delete"), principal) as MemoryGovernanceRequest;
+    const request = ownerBoundRequest(envelopeWithPrincipal(asObject(body, "memory.delete"), principal), principal) as MemoryGovernanceRequest;
     const id = decodeMatchSegment(memoryDelete, 1);
-    return publicDeleteMemoryResponse(await service.idempotent("memory.delete", request, { id, request }, () =>
-      service.deleteMemory(id, request)
+    return publicDeleteMemoryResponse(await service.idempotent("memory.delete", request, { id, request, local: localPanel }, () =>
+      service.deleteMemory(id, request, localPanel)
     ));
   }
 
@@ -1461,9 +1545,7 @@ function authenticate(
   url: URL,
   options: MemoryHttpServerOptions
 ): AuthPrincipal {
-  if (url.pathname === "/health" || url.pathname === "/api/v1/health") {
-    return { kind: "anonymous", scopes: ["health:read"] };
-  }
+  const healthRequest = url.pathname === "/health" || url.pathname === "/api/v1/health";
   const auth = options.auth;
   const localToken = auth?.localServiceToken ?? options.apiKey;
   const candidate = tokenFromRequest(request, url);
@@ -1480,17 +1562,20 @@ function authenticate(
     return {
       kind: "cloud",
       tokenId: stableTokenId(candidate!),
-      namespace: mergeNamespaces(cloudNamespace, namespaceFromRequest(request, url)),
+      namespace: mergeNamespaces(namespaceFromRequest(request, url), cloudNamespace),
       authenticatedNamespace: cloudNamespace,
       scopes: ["*"]
     };
   }
+  // Health remains public, but a verified local/cloud token can establish the
+  // real user scope for background warming. Invalid probes never start work.
+  if (healthRequest) return { kind: "anonymous", scopes: ["health:read"] };
   const scoped = candidate ? auth?.scopedApiKeys?.[candidate] : undefined;
   if (scoped) {
     return {
       kind: "scoped",
       tokenId: stableTokenId(candidate!),
-      namespace: mergeNamespaces(scoped.namespace, namespaceFromRequest(request, url)),
+      namespace: mergeNamespaces(namespaceFromRequest(request, url), scoped.namespace),
       authenticatedNamespace: scoped.namespace,
       scopes: scoped.scopes ?? ["memory:read", "memory:write"]
     };
@@ -1694,6 +1779,11 @@ function envelopeWithPrincipal<T extends Record<string, unknown>>(
   } as T & RequestEnvelope;
 }
 
+function ownerBoundRequest<T extends RequestEnvelope>(request: T, principal: AuthPrincipal): T {
+  if (principal.kind !== "cloud" && principal.kind !== "scoped") return request;
+  return { ...request, namespace: { ...request.namespace, userId: principal.authenticatedNamespace?.userId } };
+}
+
 function strictEnvelopeWithPrincipal(
   body: Record<string, unknown>,
   principal: AuthPrincipal
@@ -1703,7 +1793,6 @@ function strictEnvelopeWithPrincipal(
     : undefined;
   const principalNamespace = principal.namespace;
   const fields: Array<keyof RuntimeNamespace> = [
-    "userId",
     "tenantId",
     "projectId",
     "workspaceId",
@@ -1916,4 +2005,10 @@ function parseStatus(value: string | null): "activated" | "resolving" | "archive
     return value;
   }
   return undefined;
+}
+
+function parsePanelInput<T>(schema: {safeParse(value: unknown): {success: true; data: T} | {success: false}}, url: URL): T {
+  const result = schema.safeParse(Object.fromEntries(url.searchParams));
+  if (!result.success) throw new MemoryServiceError("invalid_argument", "Invalid panel query");
+  return result.data;
 }

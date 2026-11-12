@@ -893,6 +893,7 @@ jobs:
             release-assets/SHA256SUMS.txt
 
       - name: Create draft release and upload every asset
+        id: draft
         if: ${{ steps.release.outputs.create_draft == 'true' }}
         env:
           TAG: ${{ steps.release.outputs.tag }}
@@ -932,10 +933,42 @@ jobs:
             exit 1
           fi
           trap - EXIT
+
+          # Identity lookup failures must preserve the fully uploaded Draft.
+          # Existing tags are bound to source by the preceding and final tag checks.
+          if ! release_id="$(
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --json databaseId,tagName,isDraft,isPrerelease,targetCommitish \
+              | node -e '
+                const fs = require("node:fs");
+                let identity;
+                try {
+                  identity = JSON.parse(fs.readFileSync(0, "utf8"));
+                } catch {
+                  console.error("Draft Release identity JSON is invalid");
+                  process.exit(1);
+                }
+                if (identity === null || typeof identity !== "object" || Array.isArray(identity)
+                  || !Number.isSafeInteger(identity.databaseId) || identity.databaseId <= 0
+                  || identity.isDraft !== true || identity.isPrerelease !== false
+                  || identity.tagName !== process.env.TAG
+                  || (process.env.TAG_PREEXISTS !== "true"
+                    && identity.targetCommitish !== process.env.TARGET_SHA)) {
+                  console.error("Draft Release identity does not match the requested tag, state or source");
+                  process.exit(1);
+                }
+                process.stdout.write(String(identity.databaseId));
+              '
+          )"; then
+            echo "::error title=Draft Release identity lookup failed::The fully uploaded Release was preserved. Verify its numeric ID, Draft state, tag and source before recovering synchronization." >&2
+            exit 1
+          fi
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
       - name: Verify completed draft for synchronization
         id: sync-source
         if: ${{ steps.release.outputs.create_draft == 'true' }}
         env:
+          SYNC_RELEASE_ID: ${{ steps.draft.outputs.release_id }}
           SYNC_TAG: ${{ steps.release.outputs.tag }}
           SYNC_SOURCE_SHA: ${{ steps.release.outputs.target_sha }}
           SYNC_CONTROLLER_SHA: ${{ github.workflow_sha }}

@@ -10,6 +10,30 @@ const step = (id: string) => steps.find((entry) => entry.id === id);
 const sha = 'a'.repeat(40), eventSha = 'b'.repeat(40);
 const repo = 'MemTensor/memmy-agent';
 const direct = `${repo}/.github/workflows/windows-computer-history-validation.yml@refs/heads/main`;
+const memoryFixtureFiles = ['Memory/tests/storage/panel-cache-isolation.test.ts',
+  'Memory/tests/service/read-model/panel-stats-migration.test.ts'];
+
+function memoryFixtureReport() {
+  return { numTotalTests: 10, numPassedTests: 10, numPendingTests: 0,
+    testResults: memoryFixtureFiles.map((file, index) => ({
+      name: `C:\\runner\\repo\\${file.replaceAll('/', '\\')}`, status: 'passed',
+      assertionResults: Array.from({ length: index === 0 ? 7 : 3 }, () => ({ status: 'passed' })),
+    })) };
+}
+
+function validateMemoryFixtureReport(report: unknown, raw?: string) {
+  const script = String(step('history-contracts')?.run ?? '')
+    .match(/# Validate portable Memory fixture reports\.\r?\n@'\r?\n([\s\S]*?)\r?\n'@ \| node/);
+  if (!script) throw new Error('Missing portable Memory fixture report guard');
+  runInNewContext(script[1]!, { process: { env: { MEMMY_WINDOWS_MEMORY_PANEL_RESULTS: '/fixture-report.json' } },
+    require: (name: string) => {
+      if (name !== 'node:fs') throw new Error(`Unexpected guard module ${name}`);
+      return { readFileSync: (file: string) => {
+        if (file !== '/fixture-report.json') throw new Error('Unexpected fixture report path');
+        return raw ?? JSON.stringify(report);
+      } };
+    } });
+}
 
 function sourceOutput(overrides: Record<string, string> = {}) {
   let output = '';
@@ -32,7 +56,11 @@ describe('Windows provider receipt workflow', () => {
     expect(workflow.on.pull_request.paths).toContain('App/native-computer-use/**');
     expect(workflow.on.pull_request.paths).toContain('tests/windows-provider-receipt-workflow.test.ts');
 
-expect(workflow.on.pull_request.paths).toEqual(expect.arrayContaining([
+    expect(workflow.on.pull_request.paths).toContain('App/shell/desktop/src/main/windows-launch-at-login.ts');
+    expect(workflow.on.pull_request.paths).toContain('App/shell/desktop/tests/windows-launch-at-login*.test.ts');
+
+
+    expect(workflow.on.pull_request.paths).toEqual(expect.arrayContaining([
       'App/memmy-agent/src/core/session/webui-title.ts',
       'App/memmy-agent/src/integrations/channels/websocket.ts',
       'App/memmy-agent/src/entrypoints/cli/commands.ts',
@@ -78,7 +106,9 @@ expect(workflow.on.pull_request.paths).toEqual(expect.arrayContaining([
     expect(steps.indexOf(step('provider-receipt')!)).toBeGreaterThan(steps.indexOf(computerUse!));
   });
 
-it('runs saved-recording title and media regressions with all existing Windows History contracts', () => {
+
+
+  it('runs saved-recording title and media regressions with all existing Windows History contracts', () => {
     const contracts = step('history-contracts')!;
     const script = contracts.run as string;
     const testArray = script.match(/\$tests\s*=\s*@\(([\s\S]*?)\n\s*\)/);
@@ -120,6 +150,60 @@ it('runs saved-recording title and media regressions with all existing Windows H
       'workflowRef', 'workflowSha', 'nativeModules', 'liveCaptureValidated: false', 'signedInstallerValidated: false']) {
       expect(script).toContain(value);
     }
+  });
+
+  it('executes Windows Electron startup integration without accepting skipped tests before issuing a receipt', () => {
+    const contracts = step('history-contracts');
+    expect(contracts?.run).toContain('App/shell/desktop/tests/windows-launch-at-login.test.ts');
+    expect(contracts?.run).toContain('App/shell/desktop/tests/windows-launch-at-login-electron.test.ts');
+    expect(contracts?.run).toContain('$loginReport.numTotalTests -lt 1');
+    expect(contracts?.run).toContain('$loginReport.numPendingTests -ne 0');
+    expect(contracts?.run).toContain('$loginReport.numPassedTests -ne $loginReport.numTotalTests');
+    expect(contracts?.['continue-on-error']).not.toBe(true);
+    expect(step('provider-receipt')?.run).toContain("'history-contracts'");
+  });
+  it('builds shared contracts and executes both portable Memory fixture files in the required step', () => {
+    const contracts = step('history-contracts');
+    for (const file of memoryFixtureFiles) {
+      expect(contracts?.run).toContain(file);
+      expect(workflow.on.pull_request.paths).toContain(file);
+    }
+    expect(workflow.on.pull_request.paths).toContain('Memory/tests/fixtures/panel-cache-fixture.ts');
+    const build = String(contracts?.run).indexOf('npm run build -w @memmy/agent-source-core');
+    const execute = String(contracts?.run).indexOf('run @memoryPanelFiles --reporter=default --reporter=json');
+    expect(build).toBeGreaterThanOrEqual(0);
+    expect(execute).toBeGreaterThan(build);
+    expect(contracts?.run).toContain("if ($LASTEXITCODE -ne 0) { throw 'Windows Memory fixture regression failed' }");
+    expect(contracts?.run).toContain("if ($LASTEXITCODE -ne 0) { throw 'Windows Memory fixture report validation failed' }");
+    expect(contracts?.if).toBeUndefined();
+    expect(contracts?.['continue-on-error']).not.toBe(true);
+    expect(() => validateMemoryFixtureReport(memoryFixtureReport())).not.toThrow();
+    const relative = memoryFixtureReport();
+    relative.testResults.forEach((file, index) => { file.name = memoryFixtureFiles[index]!; });
+    expect(() => validateMemoryFixtureReport(relative)).not.toThrow();
+  });
+  it.each(['no-files', 'missing-file', 'duplicate-file', 'wrong-file', 'failed-file', 'empty-file',
+    'skipped-assertion', 'pending', 'failed-total', 'empty-total', 'mismatched-total'])(
+    'rejects incomplete or inconsistent Memory fixture reports: %s', kind => {
+      const report = memoryFixtureReport();
+      if (kind === 'no-files') report.testResults = [];
+      if (kind === 'missing-file') report.testResults.pop();
+      if (kind === 'duplicate-file') report.testResults[1]!.name = report.testResults[0]!.name;
+      if (kind === 'wrong-file') report.testResults[1]!.name = '/checkout/another.test.ts';
+      if (kind === 'failed-file') report.testResults[1]!.status = 'failed';
+      if (kind === 'empty-file') {
+        report.testResults[1]!.assertionResults = [];
+        report.testResults[0]!.assertionResults = Array.from({ length: 10 }, () => ({ status: 'passed' }));
+      }
+      if (kind === 'skipped-assertion') report.testResults[1]!.assertionResults[0]!.status = 'pending';
+      if (kind === 'pending') report.numPendingTests = 1;
+      if (kind === 'failed-total') report.numPassedTests = 9;
+      if (kind === 'empty-total') report.numTotalTests = report.numPassedTests = 0;
+      if (kind === 'mismatched-total') report.testResults[0]!.assertionResults.pop();
+      expect(() => validateMemoryFixtureReport(report)).toThrow();
+    });
+  it('rejects malformed Memory fixture JSON without echoing the report body', () => {
+    expect(() => validateMemoryFixtureReport(undefined, 'invalid-fixture-body')).toThrow('Cannot read valid Windows Memory fixture report');
   });
   it('uploads immutable canonical and explicitly named legacy artifacts only after the producer succeeds', () => {
     const uploads = steps.filter(entry => entry.uses === 'actions/upload-artifact@v4');

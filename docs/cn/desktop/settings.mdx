@@ -1,20 +1,92 @@
 ---
-title: 设置
+title: 账号、模型与设置
+description: 添加模型配置，选择任务模型，调整桌面应用偏好。
 icon: Settings
 ---
 
-| 区块 | 内容 |
-| --- | --- |
-| 账号 | 昵称编辑、完整联系方式、退出登录 / 退出本地模式 |
-| 模型 | 平台模式与自有模型模式切换，主模型 / 记忆摘要 / 技能进化 / Embedding / ASR / 生图配置 |
-| Token | 平台赠送 Token 或 BYOK 用量统计、低余量提示、申请更多 |
-| 通用 | 简体中文 / English |
-| 窗口 | 默认启动模式（桌宠 / 完整 / 上次）、关闭行为、状态栏图标 |
-| 通知 | 更新通知、任务完成通知、声音 |
-| 隐私 | 记忆改进计划开关、数据协议 |
-| 开发者 | 日志级别、打开日志目录、导出脱敏诊断报告 |
-| 关于 | 版本、检查更新、服务条款 |
+点击工作台左下角的设置图标。左侧的「模型配置」管理可用模型；当前任务用哪一个模型，在工作台输入框旁的「会话模型」中选择。
 
-<Callout>
-  诊断报告不包含 secrets、tokens、账号标识、提示词或任务消息。
-</Callout>
+import modelsScreen from "../../assets/settings-models-full.jpg";
+import addScreen from "../../assets/settings-add-full.jpg";
+import capabilitiesScreen from "../../assets/settings-capabilities-full.jpg";
+import taskModelsScreen from "../../assets/settings-task-models-full.jpg";
+import conversationScreen from "../../assets/settings-conversation-full.jpg";
+import accountScreen from "../../assets/settings-account-full.jpg";
+import preferencesScreen from "../../assets/settings-preferences-full.jpg";
+import usageScreen from "../../assets/settings-usage-full.jpg";
+import diagnosticsScreen from "../../assets/settings-diagnostics-full.jpg";
+
+## 选择模型来源
+
+登录 Memmy 账号后，可以使用账号下可用的平台模型，也可以添加自己的 API Key。若不想注册，可在首次欢迎页选择「使用自定义大模型 API Key（无需注册）」。账号与本地 API Key 模式分别管理模型配置。
+
+## 配置自己的 API Key
+
+1. 打开「设置 → 模型配置」，点击右上角的「添加配置」。
+2. 按模型服务商提供的信息，填写「协议类型」「API 地址」「API Key」。
+3. 在「模型列表」填写「模型 ID」，选择「模型能力」。普通对话选择「通用文本」；同一服务有多个模型时，可点击「添加模型」。
+4. 点击「测试」，根据提示修正连接问题。测试通过后点击「保存」，配置会出现在模型库中。
+
+<ProductScreenSteps steps={[
+  { label: "找到添加入口", src: modelsScreen, alt: "Memmy 完整窗口：模型配置中的模型库与添加配置按钮", caption: "模型库在上方，模型分配在下方。截图中的账号和配置均为示例。" },
+  { label: "填写连接信息", src: addScreen, alt: "Memmy 完整窗口：配置表单中的协议、地址、API Key 和模型 ID", caption: "图中为示例配置。按服务商提供的信息填写协议、地址、模型 ID 和能力；Key 以掩码显示。" },
+  { label: "选择模型能力", src: capabilitiesScreen, alt: "Memmy 完整窗口：模型能力菜单中的通用文本、Embedding、ASR 和生图", caption: "按模型实际能力选择类型，保存后再将它分配给相应功能。" }
+]} />
+
+## 让任务使用这个模型
+
+保存配置后，在同页下方的「模型分配 → Agent 任务模型」中，点击显示已选数量的按钮，勾选可用模型并设置默认模型。回到工作台，在「会话模型」中选择本次任务使用的模型。
+
+<ProductScreenSteps steps={[
+  { label: "在设置中选择", src: taskModelsScreen, alt: "Memmy 完整窗口：Agent 任务模型中已勾选 agent_chat 和 deepseek-v4.1-flash", caption: "在「模型分配 → Agent 任务模型」里勾选可供任务使用的模型。图中勾选了 agent_chat 和 deepseek-v4.1-flash，默认仍是 agent_chat。" },
+  { label: "在工作台选中", src: conversationScreen, alt: "Memmy 工作台：会话模型菜单已选中 deepseek-v4.1-flash", caption: "回到工作台，在输入框旁的「会话模型」中选择本次任务使用的模型。图中选中的是 deepseek-v4.1-flash。" }
+]} />
+
+<details>
+<summary>其他模型分配分别有什么用？</summary>
+
+- **记忆摘要**：把对话整理成记忆。
+- **技能进化**：整理和改进可复用的做法。
+- **Embedding 检索**：用于查找相关记忆，可按界面选项使用内嵌本地模型或配置其他服务。
+- **语音识别 ASR**：把语音转成文字。语音输入还需要麦克风权限。
+- **生图模型**：用于生成图片。
+
+暂时不用语音或生图，可以保留未配置，不影响文字任务。
+
+</details>
+
+## 账号和桌面偏好
+
+<div className="docs-actions-table">
+
+| 左侧入口 | 可以调整什么 |
+| --- | --- |
+| **账户** | 查看账号信息、退出登录；在「隐私与改进计划」管理「共享数据」。退出登录会保留本机对话和记忆。 |
+| **偏好** | 界面语言、启动模式、关闭窗口后的行为，以及通知和声音。 |
+| **Token 用量** | 查看模型使用情况。 |
+| **电脑操控** | 查看浏览器与桌面应用相关的连接、权限和设置。 |
+| **关于** | 查看版本、检查更新，以及打开日志目录或导出诊断报告。 |
+
+</div>
+
+<details>
+<summary>查看账户、偏好、用量和诊断报告的入口</summary>
+
+<ProductScreenSteps steps={[
+  { label: "账户与共享数据", src: accountScreen, alt: "Memmy 完整窗口：账户页的示例账号与共享数据开关", caption: "「共享数据」位于账户页的「隐私与改进计划」，开关旁会说明收集范围。" },
+  { label: "启动与窗口", src: preferencesScreen, alt: "Memmy 完整窗口：偏好页中的语言、启动、关闭窗口和记忆服务选项", caption: "关闭主窗口和退出应用是不同的操作，可分别核对对应设置。" },
+  { label: "Token 用量", src: usageScreen, alt: "Memmy 完整窗口：Token 用量页的自定义 API Key 消耗和记忆进化限额", caption: "在左侧打开「Token 用量」。图中还没有本地自定义 API Key 用量；下方是记忆进化的限额。" },
+  { label: "日志与诊断", src: diagnosticsScreen, alt: "Memmy 完整窗口：关于页底部高级开发者区域的日志和诊断按钮", caption: "需要排查问题时，在「关于 → 高级 / 开发者」找到日志和诊断入口。" }
+]} />
+
+</details>
+
+## 模型不可用时
+
+先检查「模型配置」里是否已保存连接，再确认「Agent 任务模型」已选中可用模型。自定义 API Key 连接失败时，核对协议、地址、模型 ID、Key、服务商额度和网络；修正后重新测试。
+
+仍然失败时，记下错误提示和操作步骤，到「关于 → 高级 / 开发者」导出诊断报告，用于反馈问题。
+
+## 相关说明
+
+[数据与隐私](/docs/security/security) · [常见问题](/docs/help/faq)

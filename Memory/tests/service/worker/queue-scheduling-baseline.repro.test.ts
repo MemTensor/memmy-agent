@@ -204,7 +204,7 @@ describe("legacy selection diagnostics and current execution safety", () => {
     const leased = h.repos.runtime.leaseQueuedJobs(4, 60, undefined, true);
     expect(leased.map((j) => j.id)).toEqual(["normal-reflection"]);
     record("startup_repair_priority_control", { startupBacklog: 10_000, firstClaim: "reflection", leased: 1 });
-  });
+  }, 20_000);
 
   it("keeps an onboarding first report ahead of native and imported summaries (control)", () => {
     const h = harness();

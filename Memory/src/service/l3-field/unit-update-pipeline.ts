@@ -6,6 +6,7 @@ import type { LlmClient } from "../../model/types.js";
 import { l3UnitKey } from "../../storage/l3-field-repository.js";
 import type { EvolutionJobRecord, Repositories } from "../../storage/repositories.js";
 import { nowIso } from "../../utils/time.js";
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
 import { evolutionJobLogFields, logEvolutionDecision } from "../evolution/evolution-logging.js";
 import { L3WorldModelTerminalEvidenceError } from "../evolution/l3-world-model-pipeline.js";
 import { storedGeneratedTitle } from "../read-model/display-fields.js";
@@ -135,7 +136,9 @@ export class L3UnitUpdatePipeline {
       const rawTurn = repos.runtime.getRawTurn(rawTurnId);
       const l1MemoryId = l1ByRawTurn.get(rawTurnId);
       if (!rawTurn || !l1MemoryId || rawTurn.deletedAt || rawTurn.redactedAt) continue;
-      if (rawTurn.userId !== batch.userId || rawTurn.sessionId !== batch.sessionId) {
+      const memory = repos.memories.get(l1MemoryId)!;
+      if ((rawTurn.userId !== batch.userId && rawTurn.userId !== DEVICE_MEMORY_OWNER) ||
+          rawTurn.sessionId !== batch.sessionId || memory.sessionId !== batch.sessionId || memory.userId !== rawTurn.userId) {
         throw new L3WorldModelTerminalEvidenceError(`raw turn scope mismatch: ${rawTurnId}`);
       }
       fragments.push(...buildEvidenceFragments({

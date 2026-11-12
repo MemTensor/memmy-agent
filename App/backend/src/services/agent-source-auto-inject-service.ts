@@ -126,7 +126,9 @@ export function createAgentSourceAutoInjectService(
 
         for (const source of sources) {
           if (!isCurrent()) break;
-          if (!AUTO_INJECT_AGENT_SOURCE_IDS.has(source.sourceId) || !source.builtin || !source.available || source.status !== "not_connected") {
+          const checkDshUpdate = source.sourceId === "deepseek_harness" && source.status === "plugin_installed";
+          if (!AUTO_INJECT_AGENT_SOURCE_IDS.has(source.sourceId) || !source.builtin || !source.available
+            || (source.status !== "not_connected" && !checkDshUpdate)) {
             continue;
           }
 
@@ -136,6 +138,8 @@ export function createAgentSourceAutoInjectService(
               continue;
             }
 
+            if (checkDshUpdate && (await options.agentSources.isInstalledHookCurrent(source.sourceId)
+              || options.isAutoInjectSuppressed?.(source.sourceId))) continue;
             assertInstallAllowed();
             if (!(await isSourceAllowed(source.sourceId))) continue;
             if (HOOK_OR_PLUGIN_AGENT_SOURCE_IDS.has(source.sourceId)) {

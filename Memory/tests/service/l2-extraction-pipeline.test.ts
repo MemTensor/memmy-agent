@@ -1,5 +1,9 @@
+import { DEVICE_MEMORY_OWNER } from "../../src/service/namespace/memory-owner.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG } from "../../src/config/index.js";
+import { policyMetaFromMemory, traceMetaFromMemory } from "../../src/algorithm/plugin-algorithms.js";
+import { PolicyInductionEngine, type PolicyInductionDeps } from "../../src/service/evolution/policy-induction.js";
+import { l2SupportRelation } from "../../src/service/evolution/l2-content-revision.js";
 import type { Embedder, LlmClient } from "../../src/model/types.js";
 import { MemoryDb } from "../../src/storage/db.js";
 import { Repositories, type EvolutionJobRecord } from "../../src/storage/repositories.js";
@@ -12,7 +16,7 @@ const AT = "2026-10-28T00:00:00.000Z";
 const lesson = { type: "check", title: "Check totals", applicability: "Before export", content: "Compare unrounded totals.", verification: "Recompute the sum.", exclusions: "" };
 
 function row(id: string, layer: "L1" | "L2" = "L1"): MemoryRow {
-  return { id, userId: "u", timeline: AT, memoryLayer: layer, memoryType: "LongTermMemory", status: "activated",
+  return { id, userId: DEVICE_MEMORY_OWNER, timeline: AT, memoryLayer: layer, memoryType: "LongTermMemory", status: "activated",
     visibility: "private", memoryValue: "Check unrounded totals before exporting.", tags: [], info: {}, version: 1, createdAt: AT, updatedAt: AT,
     properties: { internal_info: { memory_layer: layer, memory_kind: layer === "L1" ? "trace" : "policy",
       ...(layer === "L1" ? { trace: { episode_id: "e", userText: "Verify totals", agentText: "Found a mismatch",
@@ -48,11 +52,12 @@ describe("unified L2 extraction persistence", () => {
   let configured = true;
   let sequence = 0;
   let config = structuredClone(DEFAULT_MEMMY_CONFIG);
-  const job = (): EvolutionJobRecord => ({ id: "job", jobType: "l2_induction", userId: "u", episodeId: "e",
+  const job = (): EvolutionJobRecord => ({ id: "job", jobType: "l2_induction", userId: DEVICE_MEMORY_OWNER, episodeId: "e",
     targetMemoryId: "l1", payload: {}, status: "leased", attempts: 1, maxAttempts: 3, createdAt: AT, updatedAt: AT });
-  function pipeline(onPolicyRevised?: (policyId: string, at: string) => void) {
+  function pipeline(onPolicyRevised?: (policyId: string, at: string) => void,
+    recomputePolicyStats?: (policyId: string, at: string) => MemoryRow | undefined) {
     return new UnifiedL2ExtractionPipeline({ repos, config, nowIso: () => AT,
-      onPolicyRevised,
+      onPolicyRevised, recomputePolicyStats,
       skillLlm: { isConfigured: () => configured, completeJson: respond } as unknown as LlmClient,
       embedder: { config: { provider: "local", model: "fixture", batchSize: 16 }, embed } as unknown as Embedder,
       namespaceIdFromMemory: () => undefined,
@@ -63,12 +68,28 @@ describe("unified L2 extraction persistence", () => {
         properties: { internal_info: { memory_layer: "L2", memory_kind: "policy", ...(input.internal as object) } } })
     });
   }
+  function recomputePolicyStats(policyId: string, at: string) {
+    const engine = new PolicyInductionEngine({ repos, config, nowIso: () => AT,
+      skillLlm: { isConfigured: () => false }, traceMeta: (memory: MemoryRow | null | undefined) => memory ? traceMetaFromMemory(memory) : null,
+      namespaceIdFromMemory: () => undefined, enqueueChange: vi.fn(), enqueueJob: vi.fn(), onSkillRewardDrift: vi.fn()
+    } as unknown as PolicyInductionDeps);
+    return engine.recomputePolicyStats(policyId, at);
+  }
   function admit(feedback = false) {
     repos.memories.insert(row("l1"));
-    upsertL2Candidate(repos, { userId: "u", sourceMemoryId: "l1", route: feedback ? "feedback" : "negative", at: AT,
+    upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: "l1", route: feedback ? "feedback" : "negative", at: AT,
       ...(feedback ? { signal: { eventId: "feedback", route: "feedback" as const, text: "Check totals before export.",
         fallback: { ...lesson, type: "check" as const, applicability: [lesson.applicability], content: [lesson.content],
           verification: [lesson.verification], exclusions: [] } } } : {}) });
+  }
+  function insertHistorical(id: string, layer: "L1" | "L2", owner: string) {
+    const memory = row(id, layer);
+    db.db.prepare(`INSERT INTO memories(id,user_id,timeline,memory_value,memory_layer,properties_json,status,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(id, owner, AT, memory.memoryValue, layer, JSON.stringify(memory.properties), "activated", AT, AT);
+  }
+  function admitHistorical(id: string, owner = "historical-owner") {
+    insertHistorical(id, "L1", owner);
+    expect(upsertL2Candidate(repos, { userId: owner, sourceMemoryId: id, route: "negative", at: AT })).not.toBeNull();
   }
   beforeEach(() => {
     db = new MemoryDb({ path: ":memory:" }); repos = new Repositories(db.db);
@@ -130,7 +151,7 @@ describe("unified L2 extraction persistence", () => {
     expect(input.HISTORICAL_L2_CANDIDATES).toEqual([]);
     expect(input.L1_RECORDS[0].content).toBe("Export validation");
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(0);
     await pipeline().induce(job());
     expect(respond).toHaveBeenCalledTimes(1);
     expect(repos.memories.list({ memoryLayer: "L2" })[0]!.info.status).toBe("candidate");
@@ -152,7 +173,7 @@ describe("unified L2 extraction persistence", () => {
     trace.agentText = dialogue === "zh" ? "需要核对计量口径。".repeat(40) : "The total differs from the sum of its components.";
     trace.reflection = "RELATED";
     repos.memories.insert(memory);
-    upsertL2Candidate(repos, { userId: "u", sourceMemoryId: "l1", route: "negative", at: AT });
+    upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: "l1", route: "negative", at: AT });
     await pipeline().induce(job());
     const messages = respond.mock.calls[0]![0];
     expect(messages[1].content).toBe(expected);
@@ -183,7 +204,7 @@ describe("unified L2 extraction persistence", () => {
     });
     await expect(pipeline().induce(job())).rejects.toThrow("embedding unavailable");
     expect(repos.memories.get("old")!.version).toBe(1);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(1);
   });
 
   it("rejects a target changed while preparing revision vectors", async () => {
@@ -198,7 +219,7 @@ describe("unified L2 extraction persistence", () => {
     });
     await expect(pipeline().induce(job())).rejects.toThrow("target changed");
     expect(repos.memories.get("old")!.memoryValue).toBe("Concurrent edit");
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(1);
   });
 
   it("rejects unchanged revisions rather than consuming the evidence", async () => {
@@ -223,7 +244,7 @@ describe("unified L2 extraction persistence", () => {
       })) });
     memory.memoryValue = "DUPLICATED_RAW_BODY" + "x".repeat(100_000);
     repos.memories.insert(memory);
-    upsertL2Candidate(repos, { userId: "u", sourceMemoryId: "l1", route: "negative", at: AT,
+    upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: "l1", route: "negative", at: AT,
       signal: { eventId: "event", route: "negative", text: "f".repeat(8_000) } });
     await pipeline().induce(job());
     const input = JSON.parse(respond.mock.calls[0]![0][2].content);
@@ -250,7 +271,7 @@ describe("unified L2 extraction persistence", () => {
     await expect(pipeline().induce(job())).rejects.toThrow("model unavailable");
     const fallback = repos.memories.list({ memoryLayer: "L2" })[0]!;
     expect(fallback.info.extraction_status).toBe("pending_model");
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(1);
     // The fallback has the opposite vector, so only the explicit recovery path can include it.
     embed.mockImplementation(async (texts: string[], role: string) => texts.map(() => role === "document" ? [-1, 0] : [1, 0]));
     respond.mockImplementation(async (messages) => {
@@ -262,26 +283,26 @@ describe("unified L2 extraction persistence", () => {
     await pipeline().induce(job());
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
     expect(repos.memories.get(fallback.id)!.info.generation_method).toBe("model_confirmed");
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(0);
   });
 
   it.each(["transport", "invalid-contract", "embedding"])("recovers pending ordinary evidence after %s failure without fabricated fallback", async (failure) => {
     const source = row("l1");
     (source.properties.internal_info.trace as Record<string, unknown>).value = 1;
     repos.memories.insert(source);
-    upsertL2Candidate(repos, { userId: "u", sourceMemoryId: source.id, route: "ordinary", at: AT });
+    upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: source.id, route: "ordinary", at: AT });
     if (failure === "transport") respond.mockRejectedValue(new Error("provider unavailable"));
     if (failure === "invalid-contract") respond.mockResolvedValue({ operations: [{ operation: "ignore", l1_ids: ["unknown"] }] });
     if (failure === "embedding") embed.mockRejectedValue(new Error("embedding unavailable"));
     await expect(pipeline().induce(job())).rejects.toThrow();
     expect(respond).toHaveBeenCalledTimes(failure === "invalid-contract" ? 3 : failure === "embedding" ? 0 : 1);
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(0);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(1);
     respond.mockResolvedValue({ operations: [{ operation: "create", l1_ids: ["l1"], new_l2: lesson }] });
     embed.mockImplementation(async (texts: string[]) => texts.map(() => [1, 0]));
     await pipeline().induce(job());
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(0);
     await pipeline().induce(job());
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
   });
@@ -295,17 +316,17 @@ describe("unified L2 extraction persistence", () => {
       .rejects.toThrow("dependent job enqueue failed");
     expect(repos.memories.get("old")).toMatchObject({ version: 1, memoryValue: row("old", "L2").memoryValue });
     expect(repos.runtime.listTracePolicyLinks({ l2MemoryId: "old", limit: 100 })).toHaveLength(0);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(1);
     await pipeline().induce(job());
     expect(repos.memories.get("old")!.info.content_revision).toBe(2);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(0);
   });
 
   it("keeps complete oversized evidence pending without calling the model", async () => {
     admit(); config.algorithm.l2Induction.maxInputChars = 1_000;
     await expect(pipeline().induce(job())).rejects.toThrow("exceed input budget");
     expect(respond).not.toHaveBeenCalled();
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(1);
   });
 
   it("processes twelve candidates in batches of five, five and two with fresh L2 recall", async () => {
@@ -314,7 +335,7 @@ describe("unified L2 extraction persistence", () => {
       const memory = row(id);
       (memory.properties.internal_info.trace as Record<string, unknown>).summary = `Evidence from ${id}`;
       repos.memories.insert(memory);
-      upsertL2Candidate(repos, { userId: "u", sourceMemoryId: id, route: "negative", at: AT });
+      upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: id, route: "negative", at: AT });
     }
     const batches: string[][] = [];
     respond.mockImplementation(async (messages) => {
@@ -339,15 +360,111 @@ describe("unified L2 extraction persistence", () => {
     expect(batches.map((batch) => batch.length)).toEqual([5, 5, 2]);
     expect(batches.flat().sort()).toEqual(ids.sort());
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(0);
     expect(repos.runtime.listTracePolicyLinks({ limit: 100 })).toHaveLength(12);
+  });
+
+  it.each(["support", "revise"] as const)("compares a historical-owner 5+1 batch with DEVICE L2 using %s and retains source-owner withdrawal", async action => {
+    const ids = Array.from({ length: 6 }, (_, i) => i === 0 ? "l1" : `historical-${i}`);
+    for (const id of ids) admitHistorical(id);
+    for (const [id, scope] of [["foreign-project", { project_id: "another-project" }],
+      ["foreign-profile", { profile_id: "another-profile" }]] as const) {
+      const other = row(id, "L2"); other.info = scope; repos.memories.insert(other);
+    }
+    insertHistorical("foreign-owner", "L2", "another-historical-owner");
+    const batches: Array<{ sources: string[]; targets: string[] }> = [];
+    respond.mockImplementation(async messages => {
+      const input = JSON.parse(messages[2].content);
+      const sources = input.L1_RECORDS.map((r: { id: string }) => r.id);
+      const targets = input.HISTORICAL_L2_CANDIDATES;
+      batches.push({ sources, targets: targets.map((r: { id: string }) => r.id) });
+      expect(targets.some((r: { id: string }) => r.id.startsWith("foreign-"))).toBe(false);
+      if (batches.length === 1) return { operations: [{ operation: "create", l1_ids: sources, new_l2: lesson }] };
+      expect(targets).toHaveLength(1);
+      return { operations: [{ operation: action, l1_ids: sources, target_l2: { id: targets[0].id, version: targets[0].version },
+        ...(action === "revise" ? { revised_l2: { ...lesson, content: "Inspect revised totals before export." } } : {}) }] };
+    });
+    await pipeline().induce(job());
+    expect(respond).not.toHaveBeenCalled();
+    await pipeline(undefined, recomputePolicyStats).induce({ ...job(), userId: "historical-owner" });
+    expect(batches.map(b => b.sources.length)).toEqual([5, 1]);
+    const generated = repos.memories.list({ memoryLayer: "L2" }).filter(m => !m.id.startsWith("foreign-"));
+    expect(generated).toHaveLength(1);
+    expect(generated[0]!.userId).toBe(DEVICE_MEMORY_OWNER);
+    expect(batches[1]!.targets).toEqual([generated[0]!.id]);
+    const currentLinks = repos.runtime.listTracePolicyLinks({ l2MemoryId: generated[0]!.id })
+      .filter(link => link.relation === l2SupportRelation(generated[0]!));
+    expect(currentLinks.length).toBe(action === "support" ? 6 : 1);
+    expect(currentLinks.every(link => link.userId === "historical-owner")).toBe(true);
+    const recomputed = recomputePolicyStats(generated[0]!.id, AT)!;
+    const policy = policyMetaFromMemory(recomputed)!;
+    expect(policy.sourceTraceIds.slice().sort()).toEqual((action === "support" ? ids : batches[1]!.sources).slice().sort());
+    expect(policy.support).toBe(1);
+    expect(policy.status).not.toBe("quarantined");
+    for (const id of ids) expect(repos.memories.get(id)!.userId).toBe("historical-owner");
+    const sourceId = batches[0]!.sources[0]!;
+    expect(repos.runtime.invalidateUnifiedL2Source(sourceId, DEVICE_MEMORY_OWNER, AT)).toEqual({ candidates: 0, snapshots: 0, operations: 0 });
+    expect(repos.runtime.invalidateUnifiedL2Source(sourceId, "historical-owner", AT)).toEqual({ candidates: 1, snapshots: 1, operations: 1 });
+    const snapshots = db.db.prepare("SELECT value_json FROM runtime_kv WHERE key LIKE 'l2.extract.snapshot.%'").all() as Array<{ value_json: string }>;
+    expect(snapshots).toHaveLength(2);
+    const values = snapshots.map(x => JSON.parse(x.value_json));
+    expect(values.every(x => JSON.parse(x.scope)[0] === "historical-owner")).toBe(true);
+    expect(values.filter(x => x.sourceInvalidatedAt)).toHaveLength(1);
+    expect(values.find(x => x.sourceInvalidatedAt)).not.toHaveProperty("input");
+  });
+
+  it.each(["support", "revise"] as const)("retains DEVICE evidence when %s targets a preserved historical-owner L2", async action => {
+    admit();
+    insertHistorical("retained-policy", "L2", "historical-owner");
+    respond.mockImplementation(async messages => {
+      const input = JSON.parse(messages[2].content);
+      expect(input.HISTORICAL_L2_CANDIDATES.map((target: { id: string }) => target.id)).toEqual(["retained-policy"]);
+      const target = input.HISTORICAL_L2_CANDIDATES[0];
+      return { operations: [{ operation: action, l1_ids: ["l1"], target_l2: { id: target.id, version: target.version },
+        ...(action === "revise" ? { revised_l2: lesson } : {}) }] };
+    });
+    await pipeline(undefined, recomputePolicyStats).induce(job());
+    const saved = repos.memories.get("retained-policy")!;
+    expect(saved.userId).toBe("historical-owner");
+    const currentLinks = repos.runtime.listTracePolicyLinks({ l2MemoryId: saved.id })
+      .filter(link => link.relation === l2SupportRelation(saved));
+    expect(currentLinks).toHaveLength(1);
+    expect(currentLinks[0]!.userId).toBe(DEVICE_MEMORY_OWNER);
+    const recomputed = recomputePolicyStats(saved.id, AT)!;
+    expect(policyMetaFromMemory(recomputed)).toMatchObject({ sourceTraceIds: ["l1"], support: 1 });
+    expect(policyMetaFromMemory(recomputed)!.status).not.toBe("quarantined");
+  });
+
+  it("serializes historical and device-owner jobs sharing one comparison scope", async () => {
+    admitHistorical("historical");
+    repos.memories.insert(row("l1"));
+    upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: "l1", route: "negative", at: AT });
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    respond.mockImplementation(async messages => {
+      const input = JSON.parse(messages[2].content);
+      const id = input.L1_RECORDS[0].id;
+      if (id === "historical") { entered(); await gate; }
+      return { operations: [{ operation: "ignore", l1_ids: [id] }] };
+    });
+    const first = pipeline().induce({ ...job(), targetMemoryId: "historical", userId: "historical-owner" });
+    try {
+      await started;
+      await expect(pipeline().induce(job())).rejects.toThrow("scope already being processed");
+      expect(respond).toHaveBeenCalledTimes(1);
+      expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(1);
+    } finally { release(); await first; }
+    await pipeline().induce(job());
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toEqual([]);
   });
 
   it("resumes only the uncommitted batches after a later batch fails", async () => {
     for (let i = 0; i < 12; i++) {
       const id = i === 0 ? "l1" : `l1-${i}`;
       repos.memories.insert(row(id));
-      upsertL2Candidate(repos, { userId: "u", sourceMemoryId: id, route: "negative", at: AT });
+      upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: id, route: "negative", at: AT });
     }
     let committed: string[] = [];
     respond.mockImplementation(async (messages) => {
@@ -359,7 +476,7 @@ describe("unified L2 extraction persistence", () => {
     await expect(pipeline().induce(job())).rejects.toThrow("second batch unavailable");
     expect(committed).toHaveLength(5);
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(7);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(7);
     const resumed: string[][] = [];
     respond.mockImplementation(async (messages) => {
       const input = JSON.parse(messages[2].content);
@@ -374,7 +491,7 @@ describe("unified L2 extraction persistence", () => {
     expect(resumed.map((batch) => batch.length)).toEqual([5, 2]);
     expect(new Set([...committed, ...resumed.flat()]).size).toBe(12);
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(0);
     expect(repos.runtime.listTracePolicyLinks({ limit: 100 })).toHaveLength(12);
   });
 
@@ -386,7 +503,7 @@ describe("unified L2 extraction persistence", () => {
     const second = row("l1-b");
     (second.properties.internal_info.trace as Record<string, unknown>).summary = "b".repeat(22_000) + "SECOND_TAIL";
     repos.memories.insert(second);
-    upsertL2Candidate(repos, { userId: "u", sourceMemoryId: "l1-b", route: "negative", at: AT });
+    upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: "l1-b", route: "negative", at: AT });
     // Reserve a fixed evidence budget independently of the system prompt language.
     config.algorithm.l2Induction.maxInputChars = L2_EXTRACTION_SYSTEM_PROMPT.length + 25_000;
     let batches = 0;
@@ -405,7 +522,7 @@ describe("unified L2 extraction persistence", () => {
     await pipeline().induce(job());
     expect(respond).toHaveBeenCalledTimes(2);
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(1);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(0);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(0);
   });
 
   it("rolls back model output if the L1 changes while the model is running", async () => {
@@ -416,12 +533,12 @@ describe("unified L2 extraction persistence", () => {
     });
     await expect(pipeline().induce(job())).rejects.toThrow("source changed");
     expect(repos.memories.list({ memoryLayer: "L2" })).toHaveLength(0);
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(1);
   });
 
   it("keeps sources pending when no model is configured", async () => {
     admit(); configured = false; await expect(pipeline().induce(job())).rejects.toThrow("model unavailable");
     expect(respond).not.toHaveBeenCalled(); expect(embed).not.toHaveBeenCalled();
-    expect(listL2Candidates(repos, { userId: "u", episodeId: "e" })).toHaveLength(1);
+    expect(listL2Candidates(repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "e" })).toHaveLength(1);
   });
 });

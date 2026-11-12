@@ -11,6 +11,7 @@ import { createSkillTargetRegistry } from "../../src/agent-source/integration/ta
 import { MemoryRepository, Repositories } from "../../src/storage/repositories.js";
 import { agentSkillConnectionKey, currentImportedSkillVersion } from "../../src/storage/imported-skill.js";
 import { embeddingTextForMemory } from "../../src/service/embedding/embedding-pipeline.js";
+import { DEVICE_MEMORY_OWNER } from "../../src/service/namespace/memory-owner.js";
 import { stableHash } from "../../src/utils/id.js";
 import type { MemoryAddRequest, MemoryRow } from "../../src/types.js";
 import { withLegacyImportedSkillWriter } from "../fixtures/legacy-imported-skill-writer.js";
@@ -92,7 +93,9 @@ async function harness() {
       auth: { localServiceToken: "owner-token", allowAnonymous: false, scopedApiKeys: {
         "writer-token": { namespace, scopes: ["memory:read", "memory:write"] },
         "reader-token": { namespace, scopes: ["memory:read"] },
-        "foreign-token": { namespace: { ...namespace, userId: "another-user" }, scopes: ["memory:read"] }
+        "same-device-token": { namespace: { ...namespace, userId: "another-user" }, scopes: ["memory:read"] },
+        "foreign-profile-token": { namespace: { ...namespace, profileId: "another-profile" }, scopes: ["memory:read"] },
+        "foreign-source-token": { namespace: { ...namespace, source: "cursor" }, scopes: ["memory:read"] }
       } } });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
@@ -351,9 +354,11 @@ describe("HTTP imported observation classification and ordinary idempotency", ()
     const created = await h.request<AddResult>("POST", "/api/v1/memory/add", { ...request,
       namespace: { ...namespace, userId: "foreign-request-body" } }, "writer-token");
     expect(created.status).toBe(200);
-    expect(h.row(created.body.id).userId).toBe(namespace.userId);
-    // The personal local panel retains its existing shared read behavior.
-    expect((await h.request("GET", `/api/v1/memory/${created.body.id}`, undefined, "foreign-token")).status).toBe(200);
+    expect(h.row(created.body.id)).toMatchObject({ userId: DEVICE_MEMORY_OWNER, agentId: namespace.source });
+    // Account aliases share the device owner; source/profile authority still bounds nonlocal reads.
+    expect((await h.request("GET", `/api/v1/memory/${created.body.id}`, undefined, "same-device-token")).status).toBe(200);
+    expect((await h.request("GET", `/api/v1/memory/${created.body.id}`, undefined, "foreign-profile-token")).status).toBe(404);
+    expect((await h.request("GET", `/api/v1/memory/${created.body.id}`, undefined, "foreign-source-token")).status).toBe(404);
   });
 });
 
@@ -407,7 +412,7 @@ describe("HTTP and reconciliation share canonical Skill persistence", () => {
       namespace: { ...namespace, source: "cursor" }, source: "cursor"
     });
     expect(session.status).toBe(200);
-    expect(repositories.runtime.getSession(session.body.sessionId)).toMatchObject({ source: "cursor", userId: namespace.userId });
+    expect(repositories.runtime.getSession(session.body.sessionId)).toMatchObject({ source: "cursor", userId: DEVICE_MEMORY_OWNER });
     expect([...repositories.listInstalledSkillNamesForAgent("cursor")]).toEqual([]);
     const searchCall = vi.spyOn(h.service, "search");
     const ftsCalls = vi.spyOn(MemoryRepository.prototype, "searchFtsIds");
@@ -418,7 +423,11 @@ describe("HTTP and reconciliation share canonical Skill persistence", () => {
       query: "deploymentcanaryA", layers: ["Skill"], verbose: true
     });
     expect(searched.status).toBe(200);
-    expect(searchCall.mock.calls.at(-1)?.[0].namespace).toMatchObject({ source: "cursor", userId: namespace.userId });
+    const searchNamespace = searchCall.mock.calls.at(-1)?.[0].namespace;
+    // The HTTP boundary preserves the caller's claim; MemoryService normalizes its storage owner.
+    expect(searchNamespace).toMatchObject({ source: "cursor", userId: namespace.userId });
+    // The search entry may omit the canonical default profile, as normalizeNamespace permits.
+    expect(searchNamespace?.profileId ?? "default").toBe(namespace.profileId);
     const keywordRouteCalls = patternCalls.mock.calls.map(([terms, filter]) => ({ terms, filter }));
     const bodyRouteCalls = bodyCalls.mock.calls.map(([terms, filter]) => ({ terms, filter }));
     const actualFilter = ftsCalls.mock.calls.at(-1)?.[1];

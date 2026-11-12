@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, MemoryDb } from "../../../src/index.js";
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { createAgentSourceExecutor } from "../../../src/agent-source/runtime.js";
 import { createSourceRegistry } from "../../../src/agent-source/adapters/source-registry.js";
 import type { SourceTurnCompleteRequest } from "../../../src/types.js";
@@ -532,18 +533,20 @@ describe("scanned sessions enter L3", () => {
     expect(repos.l3WorldModels.listInputTracesInRange(session.id, 0, 100).map((trace) => trace.rawTurnId)).toEqual([captures[2]!.result!.rawTurnId]);
   });
 
-  it("preserves the capture owner when another account rescans old history", async () => {
+  it("preserves the device capture owner when another account rescans old history", async () => {
     const { service, repos, project, switchTo } = setup(false);
     const request = sourceTurn("agent_source_scan", "owner-old", 1, project);
     await service.completeSourceTurn(request);
     const session = sessionOf(repos, "owner-old");
+    const capture = repos.db.prepare(`SELECT * FROM source_turn_captures WHERE session_id = ?`).all(session.id);
     switchTo(true);
     const response = await service.completeSourceTurn({ ...request, namespace: { source: "codex", profileId: "default", userId: "switched-user" } });
     expect(response.status).toBe("existing");
-    expect(repos.runtime.getSession(session.id)!.userId).toBe("scan-user");
+    expect(repos.runtime.getSession(session.id)!.userId).toBe(DEVICE_MEMORY_OWNER);
+    expect(repos.db.prepare(`SELECT * FROM source_turn_captures WHERE session_id = ?`).all(session.id)).toEqual(capture);
     expect(repos.l3WorldModels.listInputTracesInRange(session.id, 0, 100)).toHaveLength(1);
     service.freezeScannedL3Sessions([session.id]);
-    expect(repos.db.prepare(`SELECT user_id FROM l3_unit_batches WHERE session_id = ?`).get(session.id)).toEqual({ user_id: "scan-user" });
+    expect(repos.db.prepare(`SELECT user_id FROM l3_unit_batches WHERE session_id = ?`).get(session.id)).toEqual({ user_id: DEVICE_MEMORY_OWNER });
   });
 
   it("does not upgrade or backfill old scans while memory writes are disabled", async () => {
@@ -623,16 +626,17 @@ describe("scanned sessions enter L3", () => {
       .toBe(hook.sessionId);
   });
 
-  it("lets a scan freeze the scanned sessions of its source, also after an account switch, but not another source's", async () => {
+  it("lets a scan freeze its source and profile after an account switch, but rejects another source or profile", async () => {
     const { service, repos, project } = setup();
     await service.completeSourceTurn(sourceTurn("agent_source_scan", "imported", 1, project));
     const session = sessionOf(repos, "imported");
-    const envelope = (userId: string, source: string) => ({
+    const envelope = (userId: string, source: string, profileId = "default") => ({
       requestId: "9353298b-4d3d-46f0-9178-27c27e81543e", adapterId: "memmy-desktop", source,
-      namespace: { source, profileId: "default", userId }, sessionIds: [session.id]
+      namespace: { source, profileId, userId }, sessionIds: [session.id]
     });
     expect(service.freezeScanSessions(envelope("someone-else", "claude_code")).batches).toBe(0);
-    // Capture kept the conversation's earlier owner after the switch; the hand-off follows it.
+    expect(service.freezeScanSessions(envelope("someone-else", "codex", "other-profile")).batches).toBe(0);
+    // Account switches retain the same device owner, without granting a different source/profile.
     expect(service.freezeScanSessions(envelope("switched-account", "codex")).batches).toBe(1);
   });
 

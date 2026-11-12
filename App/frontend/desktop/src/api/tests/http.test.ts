@@ -10,6 +10,16 @@ const runtimeConfig = {
 };
 
 describe("requestJson", () => {
+  it("preserves retry timing when recognizing an unsupported backend route", async () => {
+    const message = "Route GET:/api/v1/panel/browse not found";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message }), {
+      status: 404, headers: { "retry-after": "8" }
+    })));
+
+    await expect(requestJson({ config: runtimeConfig, path: "/api/v1/panel/browse", schema: z.object({ ok: z.literal(true) }) }))
+      .rejects.toMatchObject({ status: 404, code: "not_found", message, retryAfterSec: 8 });
+  });
+
   it.each([
     ["plugin_incompatible", 400, "Missing Host capabilities: memmy.event-checkpoints/v1"],
     ["plugin_permission_denied", 403, "Plugin permissions need approval"],

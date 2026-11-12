@@ -69,19 +69,19 @@ describe("LogsSubPage", () => {
       sourceAgent: "openclaw",
       limit: 20,
       offset: 20
-    });
+    }, undefined);
     expect(listMemoryLogs).toHaveBeenNthCalledWith(2, {
       tools: ["memory_add", "memory_search"],
       excludedSourceAgents: MEMORY_SOURCE_AGENT_EXCLUSIONS,
       limit: 20,
       offset: 0
-    });
+    }, undefined);
     expect(listMemoryLogs).toHaveBeenNthCalledWith(3, {
       tools: ["memory_search"],
       sourceAgent: "claude_code",
       limit: 20,
       offset: 40
-    });
+    }, undefined);
   });
 
   it("renders readable filter button states", () => {

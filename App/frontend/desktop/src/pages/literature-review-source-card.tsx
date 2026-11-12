@@ -6,6 +6,7 @@ import { FileTypeIcon } from "../components/file-type-icon.js";
 export interface ReviewSourceFileRow {
   file: File;
   blocked?: string | null;
+  uploadError?: string;
 }
 
 export function ReviewSourceCard(props: {
@@ -49,13 +50,13 @@ export function ReviewSourceCard(props: {
         : "支持 PDF、DOCX、TXT、MD；选择文件夹时只纳入其中符合格式的文件。"}</p>
       {hasFiles ? <div className="litrev-source-list" aria-label={en ? "Selected local papers" : "已选本地文献"}>
         {props.files.map((item, index) => {
-          const relativePath = item.file.webkitRelativePath;
+          const relativePath = item.file.webkitRelativePath || "";
           const directory = relativePath.includes("/") ? relativePath.slice(0, relativePath.lastIndexOf("/")) : "";
           return <div className="litrev-source-list__row" key={`${relativePath || item.file.name}:${item.file.size}:${index}`}>
             <FileTypeIcon name={item.file.name} surface="row" />
             <span className="litrev-source-list__name" title={relativePath || item.file.name}>{item.file.name}</span>
-            <small className={item.blocked ? "litrev-source-list__error" : ""}>
-              {item.blocked || [directory, formatSourceSize(item.file.size)].filter(Boolean).join(" · ")}
+            <small className={item.blocked || item.uploadError ? "litrev-source-list__error" : ""} role={item.uploadError ? "alert" : undefined}>
+              {item.blocked || item.uploadError || [directory, formatSourceSize(item.file.size)].filter(Boolean).join(" · ")}
             </small>
             <button type="button" disabled={props.disabled} aria-label={`${en ? "Remove" : "移除"} ${item.file.name}`}
               onClick={() => props.onRemove(index)}><X size={14} strokeWidth={1.8} /></button>
@@ -68,7 +69,7 @@ export function ReviewSourceCard(props: {
         ? `Ignored ${props.skippedFromFolder} unsupported or oversized files from the folder.`
         : `已忽略文件夹中 ${props.skippedFromFolder} 个不支持格式或超出限制的文件。`}</p> : null}
       {props.validationError && <p className="litrev-source-card__notice" role="alert">{props.validationError}</p>}
-      {props.status === "error" && <p className="litrev-source-card__notice" role="alert">{en ? "Upload failed. Try again." : "上传失败，请重试。"}</p>}
+      {props.status === "error" && <p className="litrev-source-card__notice" role="alert">{en ? "Submission failed. Try again." : "提交失败，请重试。"}</p>}
       <div className="litrev-source-card__actions">
         <Button type="button" variant="secondary" size="sm" disabled={props.disabled} onClick={() => fileInput.current?.click()}><Plus size={14} strokeWidth={1.8} />{en ? "Add files" : "添加文件"}</Button>
         <Button type="button" variant="secondary" size="sm" disabled={props.disabled} onClick={() => folderInput.current?.click()}><Folder size={14} strokeWidth={1.8} />{en ? "Add folder" : "添加文件夹"}</Button>
