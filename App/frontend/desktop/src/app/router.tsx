@@ -212,9 +212,10 @@ export function AppRouter(props: { onRetry: () => void }) {
   }, [currentPath]);
   useEffect(() => {
     if (workspaceGuidanceStep === "nickname") {
-      setDeferredNickname((current) => current || randomNickname(language));
+      // Keep a returning user's existing nickname; only brand-new accounts get a random one.
+      setDeferredNickname((current) => current || state.account.nickname || randomNickname(language));
     }
-  }, [workspaceGuidanceStep, language]);
+  }, [workspaceGuidanceStep, language, state.account.nickname]);
 
   useEffect(() => {
     if (!guidanceWorkspaceReady || deferredGuidanceStep !== "improvement") return;
@@ -264,7 +265,7 @@ export function AppRouter(props: { onRetry: () => void }) {
     // Persist nickname step before navigating so the path-change effect does not
     // re-read stale `product_tour` and remount the tour on /tools.
     writeDeferredGuidanceStep(storage, "nickname");
-    setDeferredNickname(randomNickname(language));
+    setDeferredNickname(state.account.nickname || randomNickname(language));
     dispatch(appActions.navigate("/main"));
   }
 

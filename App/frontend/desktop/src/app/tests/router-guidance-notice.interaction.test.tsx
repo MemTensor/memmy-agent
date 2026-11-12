@@ -75,8 +75,8 @@ vi.mock("../product-tour.js", async (importOriginal) => {
   };
 });
 vi.mock("../../components/nickname-modal.js", () => ({
-  NicknameModal: ({ open, onSubmit }: NicknameModalProps) => open
-    ? <button data-test-nickname-submit onClick={onSubmit}>开始使用</button>
+  NicknameModal: ({ open, nickname, onSubmit }: NicknameModalProps) => open
+    ? <button data-test-nickname-submit data-nickname={nickname} onClick={onSubmit}>开始使用</button>
     : null,
 }));
 
@@ -200,6 +200,18 @@ describe.each([
     expect(readDeferredGuidanceStep(window.sessionStorage)).toBeNull();
     expect(container.querySelector("[data-test-nickname-submit]")).toBeNull();
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain("电脑历史记录");
+  });
+
+  it("keeps a returning user's existing nickname instead of randomizing it", async () => {
+    context.state.account.nickname = "email测试账号";
+    writeDeferredGuidanceStep(window.sessionStorage, "product_tour");
+    await renderRouter();
+    await click("[data-test-tour-finish]");
+
+    const submit = container.querySelector("[data-test-nickname-submit]");
+    expect(submit?.getAttribute("data-nickname")).toBe("email测试账号");
+    await click("[data-test-nickname-submit]");
+    expect(context.updateProfile).toHaveBeenCalledWith({ nickname: "email测试账号" });
   });
 
   it("restores the product tour after restarting with empty session storage", async () => {
