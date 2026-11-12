@@ -54,6 +54,19 @@ async function regular(file) {
   if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_FILE) throw fail("unsafe_file", "Expected a regular file no larger than 40 MiB");
   return file;
 }
+// Authorize before touching the filesystem. OS sandboxes may hide denied paths
+// entirely; a missing path outside the grant is still a permission denial.
+function authorizeImport(file) {
+  const inputRoots = JSON.parse(process.env.MEMMY_PLUGIN_INPUT_ROOTS ?? "[]");
+  if (!Array.isArray(inputRoots)) throw fail("EPERM", "Host-approved input roots are unavailable");
+  const roots = [process.env.MEMMY_PLUGIN_DATA_DIR, ...inputRoots]
+    .filter(root => typeof root === "string" && path.isAbsolute(root));
+  const absolute = path.resolve(file);
+  if (!roots.some(root => {
+    const relative = path.relative(root, absolute);
+    return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`);
+  })) throw fail("EPERM", "Upload is outside Host-approved roots");
+}
 // AppContainer cannot query the Windows Mount Manager used by native realpath.
 // These roots are canonicalized by the Host before granting the OS sandbox.
 // Walk every component inside a granted root and reject all reparse points.
@@ -577,6 +590,7 @@ async function handle(call) {
     }
     case "office_import": {
       if (!path.isAbsolute(input.path)) throw fail("invalid_path", "Upload path must be absolute");
+      authorizeImport(input.path);
       await regular(input.path);
       if (await canonicalPath(input.path) !== input.path) throw fail("unsafe_file", "Upload cannot traverse symbolic links");
       const format = ext(input.path);
