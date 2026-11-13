@@ -375,7 +375,25 @@ it("dismissal is per account and never claims a live check-in", async () => {
   await act(async () => switchAccount("100002"));
   expect(host.querySelector(".home-checkin")).not.toBeNull();
 });
+it("home check-in reminder collapses after a successful claim and confirms with a toast", async () => {
+  const { NotificationCenterProvider } = await import("../../components/notification-center.js");
+  const client = fixture();
+  client.checkin.mockImplementationOnce(async () => {
+    client.summary.mockResolvedValue({ ...summary, account: { ...summary.account, version: 3 }, checkin: { ...summary.checkin, claimedToday: true } });
+    return { claimed: true, alreadyClaimed: false, businessDate: "2026-11-12", grant: { grantId: "3", amount: "100.00", expiresAt: "2026-12-12T00:00:00+08:00" }, balance: "1334.56", accountVersion: 3 };
+  });
+  window.localStorage.removeItem("memmy.home.checkinDismissedOn:100001");
+  await act(async () => root.render(<AppProviders><NotificationCenterProvider><Harness client={client} home /></NotificationCenterProvider></AppProviders>));
+  expect(host.querySelector(".home-checkin")).not.toBeNull();
+  await act(async () => host.querySelector<HTMLButtonElement>(".home-checkin__action")!.click());
+  // The reminder is gone for today and the confirmation moved into the notification center.
+  expect(host.querySelector(".home-checkin")).toBeNull();
+  expect(window.localStorage.getItem("memmy.home.checkinDismissedOn:100001")).not.toBeNull();
+  expect(document.body.textContent).toContain("今日已签到");
+  expect(document.body.textContent).toContain("+100 积分已到账");
+});
 it("check-in retries reuse the request ID and refresh the authoritative status", async () => {
+  window.localStorage.removeItem("memmy.home.checkinDismissedOn:100001");
   const client = fixture();
   client.checkin.mockRejectedValueOnce(new Error("timeout"));
   client.checkin.mockImplementationOnce(async () => {
@@ -387,5 +405,6 @@ it("check-in retries reuse the request ID and refresh the authoritative status",
   expect(host.querySelector('[role="alert"]')?.textContent).toBe("timeout");
   await act(async () => host.querySelector<HTMLButtonElement>(".home-checkin__action")!.click());
   expect(client.checkin.mock.calls[0]).toEqual(client.checkin.mock.calls[1]);
-  expect(host.querySelector(".home-checkin--claimed")).not.toBeNull();
+  // A successful claim collapses the dismissible home reminder instead of leaving a "done" row.
+  expect(host.querySelector(".home-checkin")).toBeNull();
 });

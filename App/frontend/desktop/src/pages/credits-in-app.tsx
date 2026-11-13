@@ -2,6 +2,7 @@
 import { useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Coins, Gift, RefreshCw, X } from "lucide-react";
 import { Button } from "../components/button.js";
+import { useOptionalNotificationCenter } from "../components/notification-center.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
@@ -345,6 +346,7 @@ function AccountCheckinCard(props: { compact?: boolean; dismissible?: boolean })
   const account = useCreditAccount();
   const { state } = useAppState();
   const { clients } = useOptionalApiClients();
+  const notifications = useOptionalNotificationCenter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestId = useRef<string | null>(null);
@@ -371,6 +373,11 @@ function AccountCheckinCard(props: { compact?: boolean; dismissible?: boolean })
       requestId.current = null;
       window.dispatchEvent(new CustomEvent("credits.changed", { detail: { userId: state.account.userId, accountVersion: result.accountVersion } }));
       account.reload();
+      // The home reminder has done its job once claimed: collapse it and confirm with a toast instead of a static "done" row.
+      if (props.dismissible) {
+        notifications?.notify({ variant: "success", title: t("credits.checkin.done"), emphasis: `+${CHECKIN_DAILY.toLocaleString(language)} ${t("credits.checkin.received")}`, autoDismissMs: 4000 });
+        dismiss();
+      }
     } catch (error) { setError(error instanceof Error ? error.message : t("credits.live.error")); }
     finally { setBusy(false); }
   }
