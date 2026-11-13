@@ -489,7 +489,7 @@ describe("recall source groups and quota refill", () => {
     const {service}=services.createTestService({config,llm:createFailingLlm()});
     const repo=(service as unknown as {repos:Repositories}).repos;
     repo.memories.insert(memory("first"));repo.memories.insert(memory("second"));repo.memories.insert(memory("third"));
-    const retrieval=(service as unknown as {retrieval:{filterRecallHits(query:string,hits:RecallHit[]):Promise<{hits:RecallHit[];status:string[]}>}}).retrieval;
+    const retrieval=(service as unknown as {retrieval:{filterRecallHits(query:{original:string;resolved:string},hits:RecallHit[]):Promise<{hits:RecallHit[];status:string[]}>}}).retrieval;
     let deleted="";
     const filter=vi.spyOn(retrieval,"filterRecallHits").mockImplementation(async (_query,hits)=>{
       deleted=hits[0]!.id;repo.memories.softDelete(deleted);

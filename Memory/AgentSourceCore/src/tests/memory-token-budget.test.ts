@@ -21,7 +21,7 @@ describe("memory token budget rules", () => {
     expect(isBudgetedMemoryUsage({ kind: "memory_evolution", operation: "l3_world_model.project_contract" })).toBe(true);
     expect(isBudgetedMemoryUsage({ kind: "embedding", operation: "embedding.document" })).toBe(true);
     expect(isBudgetedMemoryUsage({ kind: "embedding", operation: "embedding.query" })).toBe(false);
-    expect(isBudgetedMemoryUsage({ kind: "memory_summary", operation: "retrieval.retrieval.filter.v5" })).toBe(false);
+    expect(isBudgetedMemoryUsage({ kind: "memory_summary", operation: "retrieval.retrieval.filter.v6" })).toBe(false);
     expect(isBudgetedMemoryUsage({ kind: "memory_summary", operation: "retrieval.retrieval.query.extract.v2" })).toBe(false);
     expect(isBudgetedMemoryUsage({ kind: "agent_chat", operation: "agent.turn" })).toBe(false);
   });
