@@ -284,6 +284,8 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["MiniMax-M2.5", TEXT],
   ["MiniMax-M2.5-highspeed", TEXT],
   ["MiniMax-M3", TEXT_IMAGE_VIDEO],
+  // Source: https://platform.minimax.io/docs/guides/models-intro.md
+  ["MiniMax-M3.1-Flash", TEXT_IMAGE_VIDEO],
 
   // 豆包 / 火山方舟. Reviewed 2026-10-14.
   // Source: https://docs.volcengine.com/docs/ark/model-list
