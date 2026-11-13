@@ -843,6 +843,18 @@ describe("ComputerHistorySubPage", () => {
     expect(client.clearComputerHistories).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "history_summary_budget_unavailable",
+    "history_summary_budget_paused",
+  ] as const)("does not show BYOK-specific message for %s in account mode", async (narrationError) => {
+    const client = await renderWith(snapshot({ observation: { ...snapshot().observation, state: "running", narrationError } }));
+    expect(container.querySelector(".ch__notices [role=alert]")).toBeNull();
+    expect(container.textContent).not.toContain("API Key");
+    expect(container.textContent).toContain("My recording");
+    expect(client.stopComputerHistoryObservation).not.toHaveBeenCalled();
+    expect(client.clearComputerHistories).not.toHaveBeenCalled();
+  });
+
   it.each(["429 Too many requests", "Network unavailable", "Invalid API key"])("does not show quota exhaustion for %s", async (narrationError) => {
     await renderWith(snapshot({ observation: { ...snapshot().observation, state: "running", narrationError } }));
     expect(container.querySelector(".ch__recording-status")?.textContent).toBe("采集中");
