@@ -52,6 +52,7 @@ import type {
 const ADAPTER_ID = "memmy-agent";
 const SOURCE = "memmy-agent";
 const PROFILE_ID = "default";
+const RETRIEVAL_CACHE_TTL_MS = 30_000;
 
 const MEMMY_CONTEXT_PROTOCOL_PROMPT = `# Memmy Memory Protocol
 
@@ -109,6 +110,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
   private readonly entrypointBySessionKey = new Map<string, MemoryAnalyticsEntrypoint>();
   private readonly unavailableWarnedSessionKeys = new Set<string>();
   private readonly sessionStateBySessionKey = new Map<string, MemmyMemorySessionState>();
+  private readonly retrievalCache = new Map<string, { injectedContext: unknown; timestamp: number }>();
 
   constructor(client: MemmyMemoryClient, options: MemmyMemoryHookOptions = {}) {
     super(false);
@@ -290,6 +292,17 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
         const events = this.eventsFor(sessionKey, ctx);
         this.analytics.track(events.turnStarted, this.turnAnalyticsParams(turn));
 
+        const queryText = userText || "(conversation continued)";
+        const queryHash = createHash("sha256").update(queryText).digest("hex");
+        const cacheKey = `${sessionKey}:${queryHash}`;
+        const cached = this.retrievalCache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < RETRIEVAL_CACHE_TTL_MS) {
+          turn.recallApplied = this.injectMemoryContext(messages, cached.injectedContext);
+          turn.hasInjectedContext = turn.recallApplied;
+          turn.messageStartIndex = messages.length;
+          return;
+        }
+
         const retrievalLayerLabel = this.options.retrievalLayers === null
           ? "all"
           : this.options.retrievalLayers.length > 0
@@ -302,7 +315,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           const response = await this.client.startTurn(turnId, compact({
             ...this.requestEnvelope(sessionKey, ctx),
             sessionId,
-            query: userText || "(conversation continued)",
+            query: queryText,
             layers: this.options.retrievalLayers ?? undefined,
           }), { signal });
           signal.throwIfAborted();
@@ -313,6 +326,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           turn.hasInjectedContext = turn.recallApplied;
           turn.sourceMemoryCount = turn.recallApplied ? sourceMemoryCountFromResponse(response) : 0;
           turn.messageStartIndex = messages.length;
+          this.retrievalCache.set(cacheKey, { injectedContext: response?.injectedContext, timestamp: Date.now() });
           this.analytics.track(events.searchSucceeded, {
             ...this.memoryOpParams(turn, MEMORY_OP_MODES.turnStart, retrievalLayerLabel, sessionKey, ctx),
             duration_ms: elapsedMs(searchStartedAt),
