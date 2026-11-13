@@ -734,14 +734,48 @@ export class MemoryRepository {
     return this.db.transaction(() => this.updateRow(memory, false))();
   }
 
+  /** Restore only a Span retired by its generator; user-deleted memories stay deleted. */
+  restoreRetiredSpan(memory: MemoryRow): MemoryRow | undefined {
+    const previous = this.getIncludingDeleted(memory.id);
+    const oldSpan = previous?.properties.internal_info.span;
+    const nextSpan = memory.properties.internal_info.span;
+    if (!previous?.deletedAt || previous.status !== "deleted"
+      || previous.memoryLayer !== "L1" || memory.memoryLayer !== "L1"
+      || kindFromMemory(previous) !== "span" || kindFromMemory(memory) !== "span"
+      || !isRecordLike(oldSpan) || !isRecordLike(nextSpan)
+      || oldSpan.source_trace_id !== nextSpan.source_trace_id
+      || oldSpan.tool_call_start !== nextSpan.tool_call_start
+      || oldSpan.tool_call_end !== nextSpan.tool_call_end) return undefined;
+    const marked = oldSpan.retired_by === "worker.span_big_turn.v1"
+      && oldSpan.retired_at === previous.deletedAt;
+    if (!marked) {
+      // Older automatic retirements predate the durable marker. Require the matching
+      // deletion version; missing/pruned history is not permission to restore a row.
+      const lastChange = this.db.prepare(`SELECT change_type, source, version FROM memory_change_log
+        WHERE memory_id = ? ORDER BY seq DESC LIMIT 1`).get(memory.id) as
+        { change_type: string; source: string; version: number | null } | undefined;
+      if (lastChange?.change_type !== "span_retired" || lastChange.source !== "worker.span_big_turn.v1"
+        || lastChange.version !== previous.version) return undefined;
+    }
+    return this.updateRow({ ...memory, deletedAt: undefined, createdAt: previous.createdAt, version: previous.version }, true, undefined, true);
+  }
+
   updateIfVersion(memory: MemoryRow, expectedVersion: number): MemoryRow {
     return this.db.transaction(() => this.updateRow(memory, true, expectedVersion))();
   }
 
-  private updateRow(memory: MemoryRow, bumpVersion: boolean, expectedVersion?: number): MemoryRow {
-    const existing = this.get(memory.id);
+  private updateRow(memory: MemoryRow, bumpVersion: boolean, expectedVersion?: number, restoreDeleted = false): MemoryRow {
+    const existing = restoreDeleted ? this.getIncludingDeleted(memory.id) : this.get(memory.id);
     if (!existing) {
       throw new Error(`memory not found: ${memory.id}`);
+    }
+    if (memory.memoryLayer === "Skill" && memory.status !== "archived" && memory.properties.internal_info.skill_manually_archived === true) {
+      const internal = memory.properties.internal_info;
+      const history = internal.skill_revision_history;
+      memory = { ...memory, properties: { ...memory.properties, internal_info: { ...internal,
+        skill_manually_archived: false,
+        ...(isRecordLike(history) ? { skill_revision_history: { ...history, externallyArchived: false } } : {})
+      } } };
     }
     const prepared = prepareMemoryForStorage({ ...memory, userId: existing.userId });
     const updated = {
@@ -1451,6 +1485,52 @@ export class MemoryRepository {
     return this.hydrateMany(rows.map(memoryFromSql));
   }
 
+  /** Reward the complete task, preserving the original active-source ordering and
+   * local ownership semantics. Unrelated recent tasks must not truncate it. */
+  listRewardTracesForEpisode(episodeId: string): MemoryRow[] {
+    const built = this.memoryWhere({ memoryLayer: "L1", status: "activated" });
+    const rows = this.db.prepare(`SELECT * FROM memories WHERE ${built.where}
+      AND json_extract(properties_json, '$.internal_info.trace.episode_id') = ?
+      ORDER BY created_at DESC, updated_at DESC, id DESC`)
+      .all(...built.params, episodeId) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  /** Persisted Skill consumers can span retained historical owners after a
+   * legitimate local merge. Callers still validate scope and writability. */
+  listSkillsByPolicySource(policyId: string): MemoryRow[] {
+    const rows = this.db.prepare(`SELECT * FROM memories
+      WHERE memory_layer = 'Skill' AND deleted_at IS NULL
+      AND EXISTS (SELECT 1 FROM json_each(properties_json, '$.internal_info.skill.source_policy_ids') WHERE value = ?)
+      ORDER BY id`).all(policyId) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  /** Direct consumer candidates, including archived ones. Device bridges require caller scope/provenance checks. */
+  listByDerivedSource(userId: string, layer: "L2" | "Skill", sourceId: string, includeDeviceBridge = false): MemoryRow[] {
+    const path = layer === "L2" ? "$.internal_info.policy.source_trace_ids" : "$.internal_info.skill.source_policy_ids";
+    const rows = this.db.prepare(`SELECT * FROM memories
+      WHERE (user_id = @owner OR (@bridge = 1 AND (user_id = @device OR @owner = @device)))
+      AND memory_layer = @layer AND deleted_at IS NULL
+      AND EXISTS (SELECT 1 FROM json_each(properties_json, @path) WHERE value = @source)
+      ORDER BY id`).all({ owner: userId, bridge: Number(includeDeviceBridge), device: DEVICE_MEMORY_OWNER, layer, path, source: sourceId }) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  /** Complete, owner-scoped reference set; unrelated recent memories must not evict task evidence. */
+  listTracesForEpisodes(userId: string, episodeIds: string[], includeDeviceBridge = false): MemoryRow[] {
+    if (episodeIds.length === 0) return [];
+    // Bridged candidates still require scope and origin checks at the caller.
+    const rows = this.db.prepare(`SELECT * FROM memories
+      WHERE (user_id = @owner OR (@bridge = 1 AND (user_id = @device OR @owner = @device)))
+        AND memory_layer = 'L1' AND status = 'activated' AND deleted_at IS NULL
+        AND json_extract(properties_json, '$.internal_info.trace.episode_id')
+          IN (SELECT value FROM json_each(@episodes))
+      ORDER BY id`).all({ owner: userId, bridge: Number(includeDeviceBridge), device: DEVICE_MEMORY_OWNER,
+        episodes: toJson([...new Set(episodeIds)]) }) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
   listStats(): MemoryStatsRow[] {
     return Array.from(this.iterateStats());
   }
@@ -1916,6 +1996,13 @@ export class MemoryRepository {
     return this.searchLikeIds(fragments, filter, limit, false, "structural");
   }
 
+  listSpansForTrace(traceId: string): MemoryRow[] {
+    const rows = this.db.prepare(`SELECT id FROM memories
+      WHERE memory_layer = 'L1' AND deleted_at IS NULL AND status != 'deleted'
+        AND json_extract(properties_json, '$.internal_info.span.source_trace_id') = ?`).all(traceId) as Array<{ id: string }>;
+    return this.getMany(rows.map(row => row.id));
+  }
+
   archive(id: string, updatedAt = nowIso()): MemoryRow | undefined {
     const memory = this.get(id);
     if (!memory) {
@@ -1926,7 +2013,9 @@ export class MemoryRepository {
       status: "archived",
       properties: {
         ...memory.properties,
-        status: "archived"
+        status: "archived",
+        internal_info: { ...memory.properties.internal_info,
+          ...(memory.memoryLayer === "Skill" ? { skill_manually_archived: true } : {}) }
       },
       updatedAt
     });
@@ -3075,10 +3164,12 @@ export class RuntimeRepository {
   reopenEpisode(episodeId: string, metaPatch: Record<string, unknown> = {}, at = nowIso()): EpisodeRecord | undefined {
     const episode = this.getEpisode(episodeId);
     if (!episode) return undefined;
-    const { reward: _staleReward, ...baseMeta } = episode.meta;
+    const { reward: _staleReward, closeReason, abandonReason, rewardDirty: _rewardDirty, ...baseMeta } = episode.meta;
     const meta = {
       ...baseMeta,
-      ...metaPatch
+      ...metaPatch,
+      processingGeneration: Number(episode.meta.processingGeneration ?? 0) + 1,
+      previousClosure: { closedAt: episode.closedAt, closeReason, abandonReason }
     };
     this.db
       .prepare(
@@ -4490,11 +4581,15 @@ export class RuntimeRepository {
     return Number(row?.seq ?? 0);
   }
 
-  listChanges(userId?: string, limit = 50, cursor?: number, namespaceId?: string): ChangeLogRecord[] {
+  listChanges(userId?: string, limit = 50, cursor?: number, namespaceId?: string, memoryId?: string): ChangeLogRecord[] {
     void userId;
     void namespaceId;
     const clauses = ["1=1"];
     const params: SqlValue[] = [];
+    if (memoryId) {
+      clauses.push("memory_id = ?");
+      params.push(memoryId);
+    }
     if (cursor) {
       clauses.push("seq > ?");
       params.push(cursor);
@@ -4798,6 +4893,14 @@ export class RuntimeRepository {
          LIMIT ?`
       )
       .all(...params, limit) as SqlJobRow[];
+    return rows.map(jobFromSql);
+  }
+
+  /** Recovery must query the selected user/episode, not a globally limited job page. */
+  listL2JobsForEpisode(userId: string, episodeId: string): EvolutionJobRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM evolution_jobs
+      WHERE user_id = ? AND episode_id = ? AND job_type IN ('l2_induction', 'l2_association')
+      ORDER BY created_at DESC, rowid DESC`).all(userId, episodeId) as SqlJobRow[];
     return rows.map(jobFromSql);
   }
 

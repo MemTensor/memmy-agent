@@ -1,0 +1,2656 @@
+{
+  "version": 1,
+  "origin": {
+    "commit": "a4fc31baee412320d5978cd2e5781480e609443b",
+    "scenario": "real induceL2 support A followed by support B",
+    "database": "synthetic in-memory SQLite",
+    "model": "fixed offline support response"
+  },
+  "memories": [
+    {
+      "id": "a",
+      "timeline": "2026-11-10T06:00:00.000Z",
+      "userId": "owner",
+      "memoryType": "LongTermMemory",
+      "status": "activated",
+      "visibility": "private",
+      "memoryValue": "Verify the actual required input before accepting the result.",
+      "tags": [],
+      "info": {},
+      "properties": {
+        "internal_info": {
+          "memory_layer": "L1",
+          "generated_by_memory_base": true,
+          "trace": {
+            "episode_id": "A",
+            "value": 1,
+            "alpha": 1,
+            "priority": 1,
+            "summary": "Verify actual input",
+            "userText": "Check this input",
+            "agentText": "The assertion passes"
+          }
+        }
+      },
+      "memoryLayer": "L1",
+      "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+      "version": 1,
+      "createdAt": "2026-11-10T06:00:00.000Z",
+      "updatedAt": "2026-11-10T06:00:00.000Z",
+      "deletedAt": null
+    },
+    {
+      "id": "b",
+      "timeline": "2026-11-10T06:00:00.000Z",
+      "userId": "owner",
+      "memoryType": "LongTermMemory",
+      "status": "activated",
+      "visibility": "private",
+      "memoryValue": "Verify the actual required input before accepting the result.",
+      "tags": [],
+      "info": {},
+      "properties": {
+        "internal_info": {
+          "memory_layer": "L1",
+          "generated_by_memory_base": true,
+          "trace": {
+            "episode_id": "B",
+            "value": 1,
+            "alpha": 1,
+            "priority": 1,
+            "summary": "Verify actual input",
+            "userText": "Check this input",
+            "agentText": "The assertion passes"
+          }
+        }
+      },
+      "memoryLayer": "L1",
+      "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+      "version": 1,
+      "createdAt": "2026-11-10T06:00:00.000Z",
+      "updatedAt": "2026-11-10T06:00:00.000Z",
+      "deletedAt": null
+    },
+    {
+      "id": "policy",
+      "timeline": "2026-11-10T06:00:00.000Z",
+      "userId": "owner",
+      "memoryType": "LongTermMemory",
+      "status": "resolving",
+      "visibility": "private",
+      "memoryValue": "Verify the actual required input before accepting the result.",
+      "tags": [],
+      "info": {
+        "support": 2,
+        "source_memory_ids": [
+          "a",
+          "b"
+        ],
+        "source_l1_memory_ids": [
+          "a",
+          "b"
+        ],
+        "source_trace_ids": [
+          "a",
+          "b"
+        ],
+        "source_episode_ids": [
+          "A",
+          "B"
+        ],
+        "special_source_trace_ids": [],
+        "successful_source_trace_ids": [
+          "a",
+          "b"
+        ],
+        "gain": 0.5,
+        "raw_gain": 0.5,
+        "policy_confidence": 1,
+        "status": "candidate",
+        "skill_eligible": true,
+        "experience_type": "success_pattern",
+        "evidence_polarity": "positive",
+        "evidence_event_count": 2,
+        "successful_episode_count": 2,
+        "pending_conflict_count": 0,
+        "gain_status": "computed"
+      },
+      "properties": {
+        "internal_info": {
+          "memory_layer": "L2",
+          "generated_by_memory_base": true,
+          "policy": {
+            "schema_version": 2,
+            "content_revision": 1,
+            "lesson_type": "check",
+            "title": "Actual input verification",
+            "trigger": "Before accepting a result",
+            "procedure": "Run the actual input.",
+            "verification": "Check the assertion",
+            "boundary": "",
+            "status": "candidate",
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "support": 2,
+            "successful_episode_count": 2,
+            "source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "successful_source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "source_episode_ids": [
+              "A",
+              "B"
+            ],
+            "generation_method": "model",
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "skill_eligible": true,
+            "source_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_l1_memory_ids": [
+              "a",
+              "b"
+            ],
+            "special_source_trace_ids": [],
+            "evidence_event_count": 2,
+            "pending_conflict_count": 0,
+            "gain_status": "computed"
+          },
+          "support": 2,
+          "source_memory_ids": [
+            "a",
+            "b"
+          ],
+          "source_l1_memory_ids": [
+            "a",
+            "b"
+          ],
+          "source_trace_ids": [
+            "a",
+            "b"
+          ],
+          "source_episode_ids": [
+            "A",
+            "B"
+          ],
+          "special_source_trace_ids": [],
+          "successful_source_trace_ids": [
+            "a",
+            "b"
+          ],
+          "gain": 0.5,
+          "raw_gain": 0.5,
+          "policy_confidence": 1,
+          "status": "candidate",
+          "skill_eligible": true,
+          "experience_type": "success_pattern",
+          "evidence_polarity": "positive",
+          "evidence_event_count": 2,
+          "successful_episode_count": 2,
+          "pending_conflict_count": 0,
+          "gain_status": "computed",
+          "policy_revision_history": {
+            "version": 1,
+            "contentRevision": 1,
+            "base": {
+              "gain": 0,
+              "support": 1,
+              "status": "candidate",
+              "successfulSupport": 0
+            },
+            "events": [
+              {
+                "id": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                "sources": [
+                  "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "A"
+                ],
+                "input": {
+                  "evidence": [
+                    {
+                      "id": "a",
+                      "episodeId": "A",
+                      "value": 1
+                    }
+                  ],
+                  "reference": [
+                    {
+                      "id": "a",
+                      "episodeId": "A",
+                      "value": 1
+                    }
+                  ],
+                  "supportingEvidence": [
+                    {
+                      "id": "a",
+                      "episodeId": "A",
+                      "value": 1
+                    }
+                  ],
+                  "schemaVersion": 2,
+                  "ruleFallback": false,
+                  "parameters": {
+                    "minSupport": 3,
+                    "minGain": 0.02,
+                    "archiveGain": -0.05,
+                    "tauSoftmax": 0.5,
+                    "gainEmaAlpha": 0.4
+                  }
+                },
+                "gain": 0.5,
+                "support": 1,
+                "dependencies": [
+                  "A"
+                ]
+              },
+              {
+                "type": "checkpoint",
+                "id": "checkpoint:1",
+                "state": {
+                  "gain": 0.5,
+                  "support": 2,
+                  "status": "candidate",
+                  "successfulSupport": 1
+                },
+                "rawGain": 0.5,
+                "gain": 0.5,
+                "support": 2
+              },
+              {
+                "id": "governance:65c906e69326e57d5ed282d6693d35bf9c8b5429aa03ac2b12130bb5d086557b",
+                "sources": [
+                  "governance:65c906e69326e57d5ed282d6693d35bf9c8b5429aa03ac2b12130bb5d086557b",
+                  "B"
+                ],
+                "input": {
+                  "evidence": [
+                    {
+                      "id": "a",
+                      "episodeId": "A",
+                      "value": 1
+                    },
+                    {
+                      "id": "b",
+                      "episodeId": "B",
+                      "value": 1
+                    }
+                  ],
+                  "reference": [
+                    {
+                      "id": "a",
+                      "episodeId": "A",
+                      "value": 1
+                    },
+                    {
+                      "id": "b",
+                      "episodeId": "B",
+                      "value": 1
+                    }
+                  ],
+                  "supportingEvidence": [
+                    {
+                      "id": "a",
+                      "episodeId": "A",
+                      "value": 1
+                    },
+                    {
+                      "id": "b",
+                      "episodeId": "B",
+                      "value": 1
+                    }
+                  ],
+                  "schemaVersion": 2,
+                  "ruleFallback": false,
+                  "parameters": {
+                    "minSupport": 3,
+                    "minGain": 0.02,
+                    "archiveGain": -0.05,
+                    "tauSoftmax": 0.5,
+                    "gainEmaAlpha": 0.4
+                  }
+                },
+                "gain": 0.5,
+                "support": 2
+              }
+            ],
+            "inputHash": "26e8d1fe07d1136dac85988d05548daf41062909604d5f00bb970ff99754c377",
+            "lastEventId": "governance:65c906e69326e57d5ed282d6693d35bf9c8b5429aa03ac2b12130bb5d086557b",
+            "last": {
+              "gain": 0.5,
+              "support": 2,
+              "status": "candidate",
+              "successfulSupport": 2
+            },
+            "revising": false,
+            "latestInput": {
+              "evidence": [
+                {
+                  "id": "a",
+                  "episodeId": "A",
+                  "value": 1
+                },
+                {
+                  "id": "b",
+                  "episodeId": "B",
+                  "value": 1
+                }
+              ],
+              "reference": [
+                {
+                  "id": "a",
+                  "episodeId": "A",
+                  "value": 1
+                },
+                {
+                  "id": "b",
+                  "episodeId": "B",
+                  "value": 1
+                }
+              ],
+              "supportingEvidence": [
+                {
+                  "id": "a",
+                  "episodeId": "A",
+                  "value": 1
+                },
+                {
+                  "id": "b",
+                  "episodeId": "B",
+                  "value": 1
+                }
+              ],
+              "schemaVersion": 2,
+              "ruleFallback": false,
+              "parameters": {
+                "minSupport": 3,
+                "minGain": 0.02,
+                "archiveGain": -0.05,
+                "tauSoftmax": 0.5,
+                "gainEmaAlpha": 0.4
+              }
+            }
+          }
+        },
+        "info": {
+          "support": 2,
+          "source_memory_ids": [
+            "a",
+            "b"
+          ],
+          "source_l1_memory_ids": [
+            "a",
+            "b"
+          ],
+          "source_trace_ids": [
+            "a",
+            "b"
+          ],
+          "source_episode_ids": [
+            "A",
+            "B"
+          ],
+          "special_source_trace_ids": [],
+          "successful_source_trace_ids": [
+            "a",
+            "b"
+          ],
+          "gain": 0.5,
+          "raw_gain": 0.5,
+          "policy_confidence": 1,
+          "status": "candidate",
+          "skill_eligible": true,
+          "experience_type": "success_pattern",
+          "evidence_polarity": "positive",
+          "evidence_event_count": 2,
+          "successful_episode_count": 2,
+          "pending_conflict_count": 0,
+          "gain_status": "computed"
+        },
+        "status": "resolving"
+      },
+      "memoryLayer": "L2",
+      "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+      "version": 5,
+      "createdAt": "2026-11-10T06:00:00.000Z",
+      "updatedAt": "2026-11-10T06:00:00.000Z",
+      "deletedAt": null
+    },
+    {
+      "id": "skill",
+      "timeline": "2026-11-10T06:00:00.000Z",
+      "userId": "owner",
+      "memoryType": "LongTermMemory",
+      "status": "activated",
+      "visibility": "private",
+      "memoryValue": "Verify the actual required input before accepting the result.",
+      "tags": [],
+      "info": {
+        "eta": 0.6028999999999999,
+        "trials_attempted": 0,
+        "trials_passed": 0,
+        "skill_status": "active"
+      },
+      "properties": {
+        "internal_info": {
+          "memory_layer": "Skill",
+          "generated_by_memory_base": true,
+          "skill": {
+            "eta": 0.6028999999999999,
+            "status": "active",
+            "source_policy_ids": [
+              "policy"
+            ],
+            "trials_attempted": 0,
+            "trials_passed": 0,
+            "success_rate": 0,
+            "beta_posterior": {
+              "alpha": 1,
+              "beta": 1,
+              "mean": 0.5
+            },
+            "procedure_json": {
+              "reliability": {
+                "supportCount": 0,
+                "successRate": 0,
+                "betaPosterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              }
+            }
+          },
+          "status": "active",
+          "eta": 0.6028999999999999,
+          "trials_attempted": 0,
+          "trials_passed": 0,
+          "success_rate": 0,
+          "beta_posterior": {
+            "alpha": 1,
+            "beta": 1,
+            "mean": 0.5
+          },
+          "procedure_json": {
+            "reliability": {
+              "supportCount": 0,
+              "successRate": 0,
+              "betaPosterior": {
+                "alpha": 1,
+                "beta": 1,
+                "mean": 0.5
+              }
+            }
+          },
+          "skill_revision_history": {
+            "version": 1,
+            "base": {
+              "eta": 0.8,
+              "status": "active",
+              "trialsAttempted": 0,
+              "trialsPassed": 0
+            },
+            "events": [
+              {
+                "id": "policy:policy:governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                "type": "policy",
+                "policyId": "policy",
+                "policyEventId": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                "gain": 0.5,
+                "archiveEta": 0.1
+              },
+              {
+                "id": "policy:policy:checkpoint:1",
+                "type": "policy",
+                "policyId": "policy",
+                "policyEventId": "checkpoint:1",
+                "gain": 0.5,
+                "archiveEta": 0.1
+              },
+              {
+                "id": "policy:policy:governance:65c906e69326e57d5ed282d6693d35bf9c8b5429aa03ac2b12130bb5d086557b",
+                "type": "policy",
+                "policyId": "policy",
+                "policyEventId": "governance:65c906e69326e57d5ed282d6693d35bf9c8b5429aa03ac2b12130bb5d086557b",
+                "gain": 0.5,
+                "archiveEta": 0.1
+              }
+            ],
+            "last": {
+              "eta": 0.6028999999999999,
+              "status": "active",
+              "trialsAttempted": 0,
+              "trialsPassed": 0
+            }
+          }
+        },
+        "status": "activated"
+      },
+      "memoryLayer": "Skill",
+      "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+      "version": 3,
+      "createdAt": "2026-11-10T06:00:00.000Z",
+      "updatedAt": "2026-11-10T06:00:00.000Z",
+      "deletedAt": null
+    },
+    {
+      "id": "unrelated-skill",
+      "timeline": "2026-11-10T06:00:00.000Z",
+      "userId": "owner",
+      "memoryType": "LongTermMemory",
+      "status": "activated",
+      "visibility": "private",
+      "memoryValue": "Verify the actual required input before accepting the result.",
+      "tags": [],
+      "info": {},
+      "properties": {
+        "internal_info": {
+          "memory_layer": "Skill",
+          "generated_by_memory_base": true,
+          "skill": {
+            "eta": 0.73,
+            "status": "active",
+            "source_policy_ids": [
+              "unrelated-policy"
+            ],
+            "trials_attempted": 2,
+            "trials_passed": 1
+          }
+        }
+      },
+      "memoryLayer": "Skill",
+      "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+      "version": 1,
+      "createdAt": "2026-11-10T06:00:00.000Z",
+      "updatedAt": "2026-11-10T06:00:00.000Z",
+      "deletedAt": null
+    }
+  ],
+  "links": [
+    {
+      "id": "link_e8a617f87f25bfe4407f",
+      "userId": "owner",
+      "l1MemoryId": "a",
+      "l2MemoryId": "policy",
+      "relation": "supports",
+      "strength": 1,
+      "createdAt": "2026-11-10T06:00:00.000Z"
+    },
+    {
+      "id": "link_236c5b5c23c263f2ec03",
+      "userId": "owner",
+      "l1MemoryId": "b",
+      "l2MemoryId": "policy",
+      "relation": "supports",
+      "strength": 1,
+      "createdAt": "2026-11-10T06:00:00.000Z"
+    }
+  ],
+  "changes": [
+    {
+      "seq": 1,
+      "memoryId": "policy",
+      "namespaceId": "owner:unknown:default",
+      "kind": "policy",
+      "op": "updated",
+      "entityId": "policy",
+      "userId": "owner",
+      "changeType": "unified_l2_supported",
+      "version": 2,
+      "before": {
+        "id": "policy",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "activated",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {},
+        "properties": {
+          "internal_info": {
+            "memory_layer": "L2",
+            "generated_by_memory_base": true,
+            "policy": {
+              "schema_version": 2,
+              "content_revision": 1,
+              "lesson_type": "check",
+              "title": "Actual input verification",
+              "trigger": "Before accepting a result",
+              "procedure": "Run the actual input.",
+              "verification": "Check the assertion",
+              "boundary": "",
+              "status": "candidate",
+              "gain": 0,
+              "raw_gain": 0,
+              "support": 0,
+              "successful_episode_count": 0,
+              "source_trace_ids": [],
+              "successful_source_trace_ids": [],
+              "source_episode_ids": [],
+              "generation_method": "model",
+              "experience_type": "success_pattern",
+              "evidence_polarity": "positive",
+              "skill_eligible": true
+            }
+          }
+        },
+        "memoryLayer": "L2",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 1,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "after": {
+        "id": "policy",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "activated",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {
+          "support": 1,
+          "source_memory_ids": [
+            "a"
+          ],
+          "source_l1_memory_ids": [
+            "a"
+          ],
+          "source_trace_ids": [
+            "a"
+          ],
+          "source_episode_ids": [
+            "A"
+          ],
+          "special_source_trace_ids": [],
+          "successful_source_trace_ids": [
+            "a"
+          ]
+        },
+        "properties": {
+          "internal_info": {
+            "memory_layer": "L2",
+            "generated_by_memory_base": true,
+            "policy": {
+              "schema_version": 2,
+              "content_revision": 1,
+              "lesson_type": "check",
+              "title": "Actual input verification",
+              "trigger": "Before accepting a result",
+              "procedure": "Run the actual input.",
+              "verification": "Check the assertion",
+              "boundary": "",
+              "status": "candidate",
+              "gain": 0,
+              "raw_gain": 0,
+              "support": 1,
+              "successful_episode_count": 0,
+              "source_trace_ids": [
+                "a"
+              ],
+              "successful_source_trace_ids": [
+                "a"
+              ],
+              "source_episode_ids": [
+                "A"
+              ],
+              "generation_method": "model",
+              "experience_type": "success_pattern",
+              "evidence_polarity": "positive",
+              "skill_eligible": true,
+              "source_memory_ids": [
+                "a"
+              ],
+              "source_l1_memory_ids": [
+                "a"
+              ],
+              "special_source_trace_ids": []
+            },
+            "support": 1,
+            "source_memory_ids": [
+              "a"
+            ],
+            "source_l1_memory_ids": [
+              "a"
+            ],
+            "source_trace_ids": [
+              "a"
+            ],
+            "source_episode_ids": [
+              "A"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a"
+            ]
+          },
+          "info": {
+            "support": 1,
+            "source_memory_ids": [
+              "a"
+            ],
+            "source_l1_memory_ids": [
+              "a"
+            ],
+            "source_trace_ids": [
+              "a"
+            ],
+            "source_episode_ids": [
+              "A"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a"
+            ]
+          }
+        },
+        "memoryLayer": "L2",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 2,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "source": "worker.l2_extraction.v2",
+      "createdAt": "2026-11-10T06:00:00.000Z"
+    },
+    {
+      "seq": 2,
+      "memoryId": "policy",
+      "namespaceId": "owner:unknown:default",
+      "kind": "policy",
+      "op": "updated",
+      "entityId": "policy",
+      "userId": "owner",
+      "changeType": "policy_stats_update",
+      "version": 3,
+      "before": {
+        "id": "policy",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "activated",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {
+          "support": 1,
+          "source_memory_ids": [
+            "a"
+          ],
+          "source_l1_memory_ids": [
+            "a"
+          ],
+          "source_trace_ids": [
+            "a"
+          ],
+          "source_episode_ids": [
+            "A"
+          ],
+          "special_source_trace_ids": [],
+          "successful_source_trace_ids": [
+            "a"
+          ]
+        },
+        "properties": {
+          "internal_info": {
+            "memory_layer": "L2",
+            "generated_by_memory_base": true,
+            "policy": {
+              "schema_version": 2,
+              "content_revision": 1,
+              "lesson_type": "check",
+              "title": "Actual input verification",
+              "trigger": "Before accepting a result",
+              "procedure": "Run the actual input.",
+              "verification": "Check the assertion",
+              "boundary": "",
+              "status": "candidate",
+              "gain": 0,
+              "raw_gain": 0,
+              "support": 1,
+              "successful_episode_count": 0,
+              "source_trace_ids": [
+                "a"
+              ],
+              "successful_source_trace_ids": [
+                "a"
+              ],
+              "source_episode_ids": [
+                "A"
+              ],
+              "generation_method": "model",
+              "experience_type": "success_pattern",
+              "evidence_polarity": "positive",
+              "skill_eligible": true,
+              "source_memory_ids": [
+                "a"
+              ],
+              "source_l1_memory_ids": [
+                "a"
+              ],
+              "special_source_trace_ids": []
+            },
+            "support": 1,
+            "source_memory_ids": [
+              "a"
+            ],
+            "source_l1_memory_ids": [
+              "a"
+            ],
+            "source_trace_ids": [
+              "a"
+            ],
+            "source_episode_ids": [
+              "A"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a"
+            ]
+          },
+          "info": {
+            "support": 1,
+            "source_memory_ids": [
+              "a"
+            ],
+            "source_l1_memory_ids": [
+              "a"
+            ],
+            "source_trace_ids": [
+              "a"
+            ],
+            "source_episode_ids": [
+              "A"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a"
+            ]
+          }
+        },
+        "memoryLayer": "L2",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 2,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "after": {
+        "id": "policy",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "resolving",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {
+          "support": 1,
+          "source_memory_ids": [
+            "a"
+          ],
+          "source_l1_memory_ids": [
+            "a"
+          ],
+          "source_trace_ids": [
+            "a"
+          ],
+          "source_episode_ids": [
+            "A"
+          ],
+          "special_source_trace_ids": [],
+          "successful_source_trace_ids": [
+            "a"
+          ],
+          "gain": 0.5,
+          "raw_gain": 0.5,
+          "policy_confidence": 0.5,
+          "status": "candidate",
+          "skill_eligible": true,
+          "experience_type": "success_pattern",
+          "evidence_polarity": "positive",
+          "evidence_event_count": 1,
+          "successful_episode_count": 1,
+          "pending_conflict_count": 0,
+          "gain_status": "computed"
+        },
+        "properties": {
+          "internal_info": {
+            "memory_layer": "L2",
+            "generated_by_memory_base": true,
+            "policy": {
+              "schema_version": 2,
+              "content_revision": 1,
+              "lesson_type": "check",
+              "title": "Actual input verification",
+              "trigger": "Before accepting a result",
+              "procedure": "Run the actual input.",
+              "verification": "Check the assertion",
+              "boundary": "",
+              "status": "candidate",
+              "gain": 0.5,
+              "raw_gain": 0.5,
+              "support": 1,
+              "successful_episode_count": 1,
+              "source_trace_ids": [
+                "a"
+              ],
+              "successful_source_trace_ids": [
+                "a"
+              ],
+              "source_episode_ids": [
+                "A"
+              ],
+              "generation_method": "model",
+              "experience_type": "success_pattern",
+              "evidence_polarity": "positive",
+              "skill_eligible": true,
+              "source_memory_ids": [
+                "a"
+              ],
+              "source_l1_memory_ids": [
+                "a"
+              ],
+              "special_source_trace_ids": [],
+              "evidence_event_count": 1,
+              "pending_conflict_count": 0,
+              "gain_status": "computed"
+            },
+            "support": 1,
+            "source_memory_ids": [
+              "a"
+            ],
+            "source_l1_memory_ids": [
+              "a"
+            ],
+            "source_trace_ids": [
+              "a"
+            ],
+            "source_episode_ids": [
+              "A"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a"
+            ],
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "policy_confidence": 0.5,
+            "status": "candidate",
+            "skill_eligible": true,
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "evidence_event_count": 1,
+            "successful_episode_count": 1,
+            "pending_conflict_count": 0,
+            "gain_status": "computed",
+            "policy_revision_history": {
+              "version": 1,
+              "contentRevision": 1,
+              "base": {
+                "gain": 0,
+                "support": 1,
+                "status": "candidate",
+                "successfulSupport": 0
+              },
+              "events": [
+                {
+                  "id": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "sources": [
+                    "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                    "A"
+                  ],
+                  "input": {
+                    "evidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "reference": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "supportingEvidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "schemaVersion": 2,
+                    "ruleFallback": false,
+                    "parameters": {
+                      "minSupport": 3,
+                      "minGain": 0.02,
+                      "archiveGain": -0.05,
+                      "tauSoftmax": 0.5,
+                      "gainEmaAlpha": 0.4
+                    }
+                  },
+                  "gain": 0.5,
+                  "support": 1
+                }
+              ],
+              "inputHash": "45cd756537fa17b7481149507d08dd21e1dd40bc3140154a8ac2c3333d76de21",
+              "lastEventId": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+              "last": {
+                "gain": 0.5,
+                "support": 1,
+                "status": "candidate",
+                "successfulSupport": 1
+              },
+              "revising": false,
+              "latestInput": {
+                "evidence": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "reference": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "supportingEvidence": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "schemaVersion": 2,
+                "ruleFallback": false,
+                "parameters": {
+                  "minSupport": 3,
+                  "minGain": 0.02,
+                  "archiveGain": -0.05,
+                  "tauSoftmax": 0.5,
+                  "gainEmaAlpha": 0.4
+                }
+              }
+            }
+          },
+          "info": {
+            "support": 1,
+            "source_memory_ids": [
+              "a"
+            ],
+            "source_l1_memory_ids": [
+              "a"
+            ],
+            "source_trace_ids": [
+              "a"
+            ],
+            "source_episode_ids": [
+              "A"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a"
+            ],
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "policy_confidence": 0.5,
+            "status": "candidate",
+            "skill_eligible": true,
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "evidence_event_count": 1,
+            "successful_episode_count": 1,
+            "pending_conflict_count": 0,
+            "gain_status": "computed"
+          },
+          "status": "resolving"
+        },
+        "memoryLayer": "L2",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 3,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "source": "worker.l2_association.v7",
+      "createdAt": "2026-11-10T06:00:00.000Z"
+    },
+    {
+      "seq": 3,
+      "memoryId": "skill",
+      "namespaceId": "owner:unknown:default",
+      "kind": "skill",
+      "op": "updated",
+      "entityId": "skill",
+      "userId": "owner",
+      "changeType": "skill_reward_drift",
+      "version": 2,
+      "before": {
+        "id": "skill",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "activated",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {},
+        "properties": {
+          "internal_info": {
+            "memory_layer": "Skill",
+            "generated_by_memory_base": true,
+            "skill": {
+              "eta": 0.8,
+              "status": "active",
+              "source_policy_ids": [
+                "policy"
+              ],
+              "trials_attempted": 0,
+              "trials_passed": 0
+            }
+          }
+        },
+        "memoryLayer": "Skill",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 1,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "after": {
+        "id": "skill",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "activated",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {
+          "eta": 0.71,
+          "trials_attempted": 0,
+          "trials_passed": 0,
+          "skill_status": "active"
+        },
+        "properties": {
+          "internal_info": {
+            "memory_layer": "Skill",
+            "generated_by_memory_base": true,
+            "skill": {
+              "eta": 0.71,
+              "status": "active",
+              "source_policy_ids": [
+                "policy"
+              ],
+              "trials_attempted": 0,
+              "trials_passed": 0,
+              "success_rate": 0,
+              "beta_posterior": {
+                "alpha": 1,
+                "beta": 1,
+                "mean": 0.5
+              },
+              "procedure_json": {
+                "reliability": {
+                  "supportCount": 0,
+                  "successRate": 0,
+                  "betaPosterior": {
+                    "alpha": 1,
+                    "beta": 1,
+                    "mean": 0.5
+                  }
+                }
+              }
+            },
+            "status": "active",
+            "eta": 0.71,
+            "trials_attempted": 0,
+            "trials_passed": 0,
+            "success_rate": 0,
+            "beta_posterior": {
+              "alpha": 1,
+              "beta": 1,
+              "mean": 0.5
+            },
+            "procedure_json": {
+              "reliability": {
+                "supportCount": 0,
+                "successRate": 0,
+                "betaPosterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              }
+            },
+            "skill_revision_history": {
+              "version": 1,
+              "base": {
+                "eta": 0.8,
+                "status": "active",
+                "trialsAttempted": 0,
+                "trialsPassed": 0
+              },
+              "events": [
+                {
+                  "id": "policy:policy:governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "type": "policy",
+                  "policyId": "policy",
+                  "policyEventId": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "gain": 0.5,
+                  "archiveEta": 0.1
+                }
+              ],
+              "last": {
+                "eta": 0.71,
+                "status": "active",
+                "trialsAttempted": 0,
+                "trialsPassed": 0
+              }
+            }
+          },
+          "status": "activated"
+        },
+        "memoryLayer": "Skill",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 2,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "source": "worker.skill_lifecycle.v7",
+      "createdAt": "2026-11-10T06:00:00.000Z"
+    },
+    {
+      "seq": 4,
+      "memoryId": "policy",
+      "namespaceId": "owner:unknown:default",
+      "kind": "policy",
+      "op": "updated",
+      "entityId": "policy",
+      "userId": "owner",
+      "changeType": "unified_l2_supported",
+      "version": 4,
+      "before": {
+        "id": "policy",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "resolving",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {
+          "support": 1,
+          "source_memory_ids": [
+            "a"
+          ],
+          "source_l1_memory_ids": [
+            "a"
+          ],
+          "source_trace_ids": [
+            "a"
+          ],
+          "source_episode_ids": [
+            "A"
+          ],
+          "special_source_trace_ids": [],
+          "successful_source_trace_ids": [
+            "a"
+          ],
+          "gain": 0.5,
+          "raw_gain": 0.5,
+          "policy_confidence": 0.5,
+          "status": "candidate",
+          "skill_eligible": true,
+          "experience_type": "success_pattern",
+          "evidence_polarity": "positive",
+          "evidence_event_count": 1,
+          "successful_episode_count": 1,
+          "pending_conflict_count": 0,
+          "gain_status": "computed"
+        },
+        "properties": {
+          "internal_info": {
+            "memory_layer": "L2",
+            "generated_by_memory_base": true,
+            "policy": {
+              "schema_version": 2,
+              "content_revision": 1,
+              "lesson_type": "check",
+              "title": "Actual input verification",
+              "trigger": "Before accepting a result",
+              "procedure": "Run the actual input.",
+              "verification": "Check the assertion",
+              "boundary": "",
+              "status": "candidate",
+              "gain": 0.5,
+              "raw_gain": 0.5,
+              "support": 1,
+              "successful_episode_count": 1,
+              "source_trace_ids": [
+                "a"
+              ],
+              "successful_source_trace_ids": [
+                "a"
+              ],
+              "source_episode_ids": [
+                "A"
+              ],
+              "generation_method": "model",
+              "experience_type": "success_pattern",
+              "evidence_polarity": "positive",
+              "skill_eligible": true,
+              "source_memory_ids": [
+                "a"
+              ],
+              "source_l1_memory_ids": [
+                "a"
+              ],
+              "special_source_trace_ids": [],
+              "evidence_event_count": 1,
+              "pending_conflict_count": 0,
+              "gain_status": "computed"
+            },
+            "support": 1,
+            "source_memory_ids": [
+              "a"
+            ],
+            "source_l1_memory_ids": [
+              "a"
+            ],
+            "source_trace_ids": [
+              "a"
+            ],
+            "source_episode_ids": [
+              "A"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a"
+            ],
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "policy_confidence": 0.5,
+            "status": "candidate",
+            "skill_eligible": true,
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "evidence_event_count": 1,
+            "successful_episode_count": 1,
+            "pending_conflict_count": 0,
+            "gain_status": "computed",
+            "policy_revision_history": {
+              "version": 1,
+              "contentRevision": 1,
+              "base": {
+                "gain": 0,
+                "support": 1,
+                "status": "candidate",
+                "successfulSupport": 0
+              },
+              "events": [
+                {
+                  "id": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "sources": [
+                    "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                    "A"
+                  ],
+                  "input": {
+                    "evidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "reference": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "supportingEvidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "schemaVersion": 2,
+                    "ruleFallback": false,
+                    "parameters": {
+                      "minSupport": 3,
+                      "minGain": 0.02,
+                      "archiveGain": -0.05,
+                      "tauSoftmax": 0.5,
+                      "gainEmaAlpha": 0.4
+                    }
+                  },
+                  "gain": 0.5,
+                  "support": 1
+                }
+              ],
+              "inputHash": "45cd756537fa17b7481149507d08dd21e1dd40bc3140154a8ac2c3333d76de21",
+              "lastEventId": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+              "last": {
+                "gain": 0.5,
+                "support": 1,
+                "status": "candidate",
+                "successfulSupport": 1
+              },
+              "revising": false,
+              "latestInput": {
+                "evidence": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "reference": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "supportingEvidence": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "schemaVersion": 2,
+                "ruleFallback": false,
+                "parameters": {
+                  "minSupport": 3,
+                  "minGain": 0.02,
+                  "archiveGain": -0.05,
+                  "tauSoftmax": 0.5,
+                  "gainEmaAlpha": 0.4
+                }
+              }
+            }
+          },
+          "info": {
+            "support": 1,
+            "source_memory_ids": [
+              "a"
+            ],
+            "source_l1_memory_ids": [
+              "a"
+            ],
+            "source_trace_ids": [
+              "a"
+            ],
+            "source_episode_ids": [
+              "A"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a"
+            ],
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "policy_confidence": 0.5,
+            "status": "candidate",
+            "skill_eligible": true,
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "evidence_event_count": 1,
+            "successful_episode_count": 1,
+            "pending_conflict_count": 0,
+            "gain_status": "computed"
+          },
+          "status": "resolving"
+        },
+        "memoryLayer": "L2",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 3,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "after": {
+        "id": "policy",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "resolving",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {
+          "support": 2,
+          "source_memory_ids": [
+            "a",
+            "b"
+          ],
+          "source_l1_memory_ids": [
+            "a",
+            "b"
+          ],
+          "source_trace_ids": [
+            "a",
+            "b"
+          ],
+          "source_episode_ids": [
+            "A",
+            "B"
+          ],
+          "special_source_trace_ids": [],
+          "successful_source_trace_ids": [
+            "a",
+            "b"
+          ],
+          "gain": 0.5,
+          "raw_gain": 0.5,
+          "policy_confidence": 0.5,
+          "status": "candidate",
+          "skill_eligible": true,
+          "experience_type": "success_pattern",
+          "evidence_polarity": "positive",
+          "evidence_event_count": 1,
+          "successful_episode_count": 1,
+          "pending_conflict_count": 0,
+          "gain_status": "computed"
+        },
+        "properties": {
+          "internal_info": {
+            "memory_layer": "L2",
+            "generated_by_memory_base": true,
+            "policy": {
+              "schema_version": 2,
+              "content_revision": 1,
+              "lesson_type": "check",
+              "title": "Actual input verification",
+              "trigger": "Before accepting a result",
+              "procedure": "Run the actual input.",
+              "verification": "Check the assertion",
+              "boundary": "",
+              "status": "candidate",
+              "gain": 0.5,
+              "raw_gain": 0.5,
+              "support": 2,
+              "successful_episode_count": 1,
+              "source_trace_ids": [
+                "a",
+                "b"
+              ],
+              "successful_source_trace_ids": [
+                "a",
+                "b"
+              ],
+              "source_episode_ids": [
+                "A",
+                "B"
+              ],
+              "generation_method": "model",
+              "experience_type": "success_pattern",
+              "evidence_polarity": "positive",
+              "skill_eligible": true,
+              "source_memory_ids": [
+                "a",
+                "b"
+              ],
+              "source_l1_memory_ids": [
+                "a",
+                "b"
+              ],
+              "special_source_trace_ids": [],
+              "evidence_event_count": 1,
+              "pending_conflict_count": 0,
+              "gain_status": "computed"
+            },
+            "support": 2,
+            "source_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_l1_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "source_episode_ids": [
+              "A",
+              "B"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "policy_confidence": 0.5,
+            "status": "candidate",
+            "skill_eligible": true,
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "evidence_event_count": 1,
+            "successful_episode_count": 1,
+            "pending_conflict_count": 0,
+            "gain_status": "computed",
+            "policy_revision_history": {
+              "version": 1,
+              "contentRevision": 1,
+              "base": {
+                "gain": 0,
+                "support": 1,
+                "status": "candidate",
+                "successfulSupport": 0
+              },
+              "events": [
+                {
+                  "id": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "sources": [
+                    "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                    "A"
+                  ],
+                  "input": {
+                    "evidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "reference": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "supportingEvidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "schemaVersion": 2,
+                    "ruleFallback": false,
+                    "parameters": {
+                      "minSupport": 3,
+                      "minGain": 0.02,
+                      "archiveGain": -0.05,
+                      "tauSoftmax": 0.5,
+                      "gainEmaAlpha": 0.4
+                    }
+                  },
+                  "gain": 0.5,
+                  "support": 1
+                }
+              ],
+              "inputHash": "45cd756537fa17b7481149507d08dd21e1dd40bc3140154a8ac2c3333d76de21",
+              "lastEventId": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+              "last": {
+                "gain": 0.5,
+                "support": 1,
+                "status": "candidate",
+                "successfulSupport": 1
+              },
+              "revising": false,
+              "latestInput": {
+                "evidence": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "reference": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "supportingEvidence": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "schemaVersion": 2,
+                "ruleFallback": false,
+                "parameters": {
+                  "minSupport": 3,
+                  "minGain": 0.02,
+                  "archiveGain": -0.05,
+                  "tauSoftmax": 0.5,
+                  "gainEmaAlpha": 0.4
+                }
+              }
+            }
+          },
+          "info": {
+            "support": 2,
+            "source_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_l1_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "source_episode_ids": [
+              "A",
+              "B"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "policy_confidence": 0.5,
+            "status": "candidate",
+            "skill_eligible": true,
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "evidence_event_count": 1,
+            "successful_episode_count": 1,
+            "pending_conflict_count": 0,
+            "gain_status": "computed"
+          },
+          "status": "resolving"
+        },
+        "memoryLayer": "L2",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 4,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "source": "worker.l2_extraction.v2",
+      "createdAt": "2026-11-10T06:00:00.000Z"
+    },
+    {
+      "seq": 5,
+      "memoryId": "policy",
+      "namespaceId": "owner:unknown:default",
+      "kind": "policy",
+      "op": "updated",
+      "entityId": "policy",
+      "userId": "owner",
+      "changeType": "policy_stats_update",
+      "version": 5,
+      "before": {
+        "id": "policy",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "resolving",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {
+          "support": 2,
+          "source_memory_ids": [
+            "a",
+            "b"
+          ],
+          "source_l1_memory_ids": [
+            "a",
+            "b"
+          ],
+          "source_trace_ids": [
+            "a",
+            "b"
+          ],
+          "source_episode_ids": [
+            "A",
+            "B"
+          ],
+          "special_source_trace_ids": [],
+          "successful_source_trace_ids": [
+            "a",
+            "b"
+          ],
+          "gain": 0.5,
+          "raw_gain": 0.5,
+          "policy_confidence": 0.5,
+          "status": "candidate",
+          "skill_eligible": true,
+          "experience_type": "success_pattern",
+          "evidence_polarity": "positive",
+          "evidence_event_count": 1,
+          "successful_episode_count": 1,
+          "pending_conflict_count": 0,
+          "gain_status": "computed"
+        },
+        "properties": {
+          "internal_info": {
+            "memory_layer": "L2",
+            "generated_by_memory_base": true,
+            "policy": {
+              "schema_version": 2,
+              "content_revision": 1,
+              "lesson_type": "check",
+              "title": "Actual input verification",
+              "trigger": "Before accepting a result",
+              "procedure": "Run the actual input.",
+              "verification": "Check the assertion",
+              "boundary": "",
+              "status": "candidate",
+              "gain": 0.5,
+              "raw_gain": 0.5,
+              "support": 2,
+              "successful_episode_count": 1,
+              "source_trace_ids": [
+                "a",
+                "b"
+              ],
+              "successful_source_trace_ids": [
+                "a",
+                "b"
+              ],
+              "source_episode_ids": [
+                "A",
+                "B"
+              ],
+              "generation_method": "model",
+              "experience_type": "success_pattern",
+              "evidence_polarity": "positive",
+              "skill_eligible": true,
+              "source_memory_ids": [
+                "a",
+                "b"
+              ],
+              "source_l1_memory_ids": [
+                "a",
+                "b"
+              ],
+              "special_source_trace_ids": [],
+              "evidence_event_count": 1,
+              "pending_conflict_count": 0,
+              "gain_status": "computed"
+            },
+            "support": 2,
+            "source_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_l1_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "source_episode_ids": [
+              "A",
+              "B"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "policy_confidence": 0.5,
+            "status": "candidate",
+            "skill_eligible": true,
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "evidence_event_count": 1,
+            "successful_episode_count": 1,
+            "pending_conflict_count": 0,
+            "gain_status": "computed",
+            "policy_revision_history": {
+              "version": 1,
+              "contentRevision": 1,
+              "base": {
+                "gain": 0,
+                "support": 1,
+                "status": "candidate",
+                "successfulSupport": 0
+              },
+              "events": [
+                {
+                  "id": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "sources": [
+                    "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                    "A"
+                  ],
+                  "input": {
+                    "evidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "reference": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "supportingEvidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "schemaVersion": 2,
+                    "ruleFallback": false,
+                    "parameters": {
+                      "minSupport": 3,
+                      "minGain": 0.02,
+                      "archiveGain": -0.05,
+                      "tauSoftmax": 0.5,
+                      "gainEmaAlpha": 0.4
+                    }
+                  },
+                  "gain": 0.5,
+                  "support": 1
+                }
+              ],
+              "inputHash": "45cd756537fa17b7481149507d08dd21e1dd40bc3140154a8ac2c3333d76de21",
+              "lastEventId": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+              "last": {
+                "gain": 0.5,
+                "support": 1,
+                "status": "candidate",
+                "successfulSupport": 1
+              },
+              "revising": false,
+              "latestInput": {
+                "evidence": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "reference": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "supportingEvidence": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  }
+                ],
+                "schemaVersion": 2,
+                "ruleFallback": false,
+                "parameters": {
+                  "minSupport": 3,
+                  "minGain": 0.02,
+                  "archiveGain": -0.05,
+                  "tauSoftmax": 0.5,
+                  "gainEmaAlpha": 0.4
+                }
+              }
+            }
+          },
+          "info": {
+            "support": 2,
+            "source_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_l1_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "source_episode_ids": [
+              "A",
+              "B"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "policy_confidence": 0.5,
+            "status": "candidate",
+            "skill_eligible": true,
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "evidence_event_count": 1,
+            "successful_episode_count": 1,
+            "pending_conflict_count": 0,
+            "gain_status": "computed"
+          },
+          "status": "resolving"
+        },
+        "memoryLayer": "L2",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 4,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "after": {
+        "id": "policy",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "resolving",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {
+          "support": 2,
+          "source_memory_ids": [
+            "a",
+            "b"
+          ],
+          "source_l1_memory_ids": [
+            "a",
+            "b"
+          ],
+          "source_trace_ids": [
+            "a",
+            "b"
+          ],
+          "source_episode_ids": [
+            "A",
+            "B"
+          ],
+          "special_source_trace_ids": [],
+          "successful_source_trace_ids": [
+            "a",
+            "b"
+          ],
+          "gain": 0.5,
+          "raw_gain": 0.5,
+          "policy_confidence": 1,
+          "status": "candidate",
+          "skill_eligible": true,
+          "experience_type": "success_pattern",
+          "evidence_polarity": "positive",
+          "evidence_event_count": 2,
+          "successful_episode_count": 2,
+          "pending_conflict_count": 0,
+          "gain_status": "computed"
+        },
+        "properties": {
+          "internal_info": {
+            "memory_layer": "L2",
+            "generated_by_memory_base": true,
+            "policy": {
+              "schema_version": 2,
+              "content_revision": 1,
+              "lesson_type": "check",
+              "title": "Actual input verification",
+              "trigger": "Before accepting a result",
+              "procedure": "Run the actual input.",
+              "verification": "Check the assertion",
+              "boundary": "",
+              "status": "candidate",
+              "gain": 0.5,
+              "raw_gain": 0.5,
+              "support": 2,
+              "successful_episode_count": 2,
+              "source_trace_ids": [
+                "a",
+                "b"
+              ],
+              "successful_source_trace_ids": [
+                "a",
+                "b"
+              ],
+              "source_episode_ids": [
+                "A",
+                "B"
+              ],
+              "generation_method": "model",
+              "experience_type": "success_pattern",
+              "evidence_polarity": "positive",
+              "skill_eligible": true,
+              "source_memory_ids": [
+                "a",
+                "b"
+              ],
+              "source_l1_memory_ids": [
+                "a",
+                "b"
+              ],
+              "special_source_trace_ids": [],
+              "evidence_event_count": 2,
+              "pending_conflict_count": 0,
+              "gain_status": "computed"
+            },
+            "support": 2,
+            "source_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_l1_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "source_episode_ids": [
+              "A",
+              "B"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "policy_confidence": 1,
+            "status": "candidate",
+            "skill_eligible": true,
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "evidence_event_count": 2,
+            "successful_episode_count": 2,
+            "pending_conflict_count": 0,
+            "gain_status": "computed",
+            "policy_revision_history": {
+              "version": 1,
+              "contentRevision": 1,
+              "base": {
+                "gain": 0,
+                "support": 1,
+                "status": "candidate",
+                "successfulSupport": 0
+              },
+              "events": [
+                {
+                  "id": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "sources": [
+                    "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                    "A"
+                  ],
+                  "input": {
+                    "evidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "reference": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "supportingEvidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      }
+                    ],
+                    "schemaVersion": 2,
+                    "ruleFallback": false,
+                    "parameters": {
+                      "minSupport": 3,
+                      "minGain": 0.02,
+                      "archiveGain": -0.05,
+                      "tauSoftmax": 0.5,
+                      "gainEmaAlpha": 0.4
+                    }
+                  },
+                  "gain": 0.5,
+                  "support": 1,
+                  "dependencies": [
+                    "A"
+                  ]
+                },
+                {
+                  "type": "checkpoint",
+                  "id": "checkpoint:1",
+                  "state": {
+                    "gain": 0.5,
+                    "support": 2,
+                    "status": "candidate",
+                    "successfulSupport": 1
+                  },
+                  "rawGain": 0.5,
+                  "gain": 0.5,
+                  "support": 2
+                },
+                {
+                  "id": "governance:65c906e69326e57d5ed282d6693d35bf9c8b5429aa03ac2b12130bb5d086557b",
+                  "sources": [
+                    "governance:65c906e69326e57d5ed282d6693d35bf9c8b5429aa03ac2b12130bb5d086557b",
+                    "B"
+                  ],
+                  "input": {
+                    "evidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      },
+                      {
+                        "id": "b",
+                        "episodeId": "B",
+                        "value": 1
+                      }
+                    ],
+                    "reference": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      },
+                      {
+                        "id": "b",
+                        "episodeId": "B",
+                        "value": 1
+                      }
+                    ],
+                    "supportingEvidence": [
+                      {
+                        "id": "a",
+                        "episodeId": "A",
+                        "value": 1
+                      },
+                      {
+                        "id": "b",
+                        "episodeId": "B",
+                        "value": 1
+                      }
+                    ],
+                    "schemaVersion": 2,
+                    "ruleFallback": false,
+                    "parameters": {
+                      "minSupport": 3,
+                      "minGain": 0.02,
+                      "archiveGain": -0.05,
+                      "tauSoftmax": 0.5,
+                      "gainEmaAlpha": 0.4
+                    }
+                  },
+                  "gain": 0.5,
+                  "support": 2
+                }
+              ],
+              "inputHash": "26e8d1fe07d1136dac85988d05548daf41062909604d5f00bb970ff99754c377",
+              "lastEventId": "governance:65c906e69326e57d5ed282d6693d35bf9c8b5429aa03ac2b12130bb5d086557b",
+              "last": {
+                "gain": 0.5,
+                "support": 2,
+                "status": "candidate",
+                "successfulSupport": 2
+              },
+              "revising": false,
+              "latestInput": {
+                "evidence": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  },
+                  {
+                    "id": "b",
+                    "episodeId": "B",
+                    "value": 1
+                  }
+                ],
+                "reference": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  },
+                  {
+                    "id": "b",
+                    "episodeId": "B",
+                    "value": 1
+                  }
+                ],
+                "supportingEvidence": [
+                  {
+                    "id": "a",
+                    "episodeId": "A",
+                    "value": 1
+                  },
+                  {
+                    "id": "b",
+                    "episodeId": "B",
+                    "value": 1
+                  }
+                ],
+                "schemaVersion": 2,
+                "ruleFallback": false,
+                "parameters": {
+                  "minSupport": 3,
+                  "minGain": 0.02,
+                  "archiveGain": -0.05,
+                  "tauSoftmax": 0.5,
+                  "gainEmaAlpha": 0.4
+                }
+              }
+            }
+          },
+          "info": {
+            "support": 2,
+            "source_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_l1_memory_ids": [
+              "a",
+              "b"
+            ],
+            "source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "source_episode_ids": [
+              "A",
+              "B"
+            ],
+            "special_source_trace_ids": [],
+            "successful_source_trace_ids": [
+              "a",
+              "b"
+            ],
+            "gain": 0.5,
+            "raw_gain": 0.5,
+            "policy_confidence": 1,
+            "status": "candidate",
+            "skill_eligible": true,
+            "experience_type": "success_pattern",
+            "evidence_polarity": "positive",
+            "evidence_event_count": 2,
+            "successful_episode_count": 2,
+            "pending_conflict_count": 0,
+            "gain_status": "computed"
+          },
+          "status": "resolving"
+        },
+        "memoryLayer": "L2",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 5,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "source": "worker.l2_association.v7",
+      "createdAt": "2026-11-10T06:00:00.000Z"
+    },
+    {
+      "seq": 6,
+      "memoryId": "skill",
+      "namespaceId": "owner:unknown:default",
+      "kind": "skill",
+      "op": "updated",
+      "entityId": "skill",
+      "userId": "owner",
+      "changeType": "skill_reward_drift",
+      "version": 3,
+      "before": {
+        "id": "skill",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "activated",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {
+          "eta": 0.71,
+          "trials_attempted": 0,
+          "trials_passed": 0,
+          "skill_status": "active"
+        },
+        "properties": {
+          "internal_info": {
+            "memory_layer": "Skill",
+            "generated_by_memory_base": true,
+            "skill": {
+              "eta": 0.71,
+              "status": "active",
+              "source_policy_ids": [
+                "policy"
+              ],
+              "trials_attempted": 0,
+              "trials_passed": 0,
+              "success_rate": 0,
+              "beta_posterior": {
+                "alpha": 1,
+                "beta": 1,
+                "mean": 0.5
+              },
+              "procedure_json": {
+                "reliability": {
+                  "supportCount": 0,
+                  "successRate": 0,
+                  "betaPosterior": {
+                    "alpha": 1,
+                    "beta": 1,
+                    "mean": 0.5
+                  }
+                }
+              }
+            },
+            "status": "active",
+            "eta": 0.71,
+            "trials_attempted": 0,
+            "trials_passed": 0,
+            "success_rate": 0,
+            "beta_posterior": {
+              "alpha": 1,
+              "beta": 1,
+              "mean": 0.5
+            },
+            "procedure_json": {
+              "reliability": {
+                "supportCount": 0,
+                "successRate": 0,
+                "betaPosterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              }
+            },
+            "skill_revision_history": {
+              "version": 1,
+              "base": {
+                "eta": 0.8,
+                "status": "active",
+                "trialsAttempted": 0,
+                "trialsPassed": 0
+              },
+              "events": [
+                {
+                  "id": "policy:policy:governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "type": "policy",
+                  "policyId": "policy",
+                  "policyEventId": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "gain": 0.5,
+                  "archiveEta": 0.1
+                }
+              ],
+              "last": {
+                "eta": 0.71,
+                "status": "active",
+                "trialsAttempted": 0,
+                "trialsPassed": 0
+              }
+            }
+          },
+          "status": "activated"
+        },
+        "memoryLayer": "Skill",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 2,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "after": {
+        "id": "skill",
+        "timeline": "2026-11-10T06:00:00.000Z",
+        "userId": "owner",
+        "memoryType": "LongTermMemory",
+        "status": "activated",
+        "visibility": "private",
+        "memoryValue": "Verify the actual required input before accepting the result.",
+        "tags": [],
+        "info": {
+          "eta": 0.6028999999999999,
+          "trials_attempted": 0,
+          "trials_passed": 0,
+          "skill_status": "active"
+        },
+        "properties": {
+          "internal_info": {
+            "memory_layer": "Skill",
+            "generated_by_memory_base": true,
+            "skill": {
+              "eta": 0.6028999999999999,
+              "status": "active",
+              "source_policy_ids": [
+                "policy"
+              ],
+              "trials_attempted": 0,
+              "trials_passed": 0,
+              "success_rate": 0,
+              "beta_posterior": {
+                "alpha": 1,
+                "beta": 1,
+                "mean": 0.5
+              },
+              "procedure_json": {
+                "reliability": {
+                  "supportCount": 0,
+                  "successRate": 0,
+                  "betaPosterior": {
+                    "alpha": 1,
+                    "beta": 1,
+                    "mean": 0.5
+                  }
+                }
+              }
+            },
+            "status": "active",
+            "eta": 0.6028999999999999,
+            "trials_attempted": 0,
+            "trials_passed": 0,
+            "success_rate": 0,
+            "beta_posterior": {
+              "alpha": 1,
+              "beta": 1,
+              "mean": 0.5
+            },
+            "procedure_json": {
+              "reliability": {
+                "supportCount": 0,
+                "successRate": 0,
+                "betaPosterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              }
+            },
+            "skill_revision_history": {
+              "version": 1,
+              "base": {
+                "eta": 0.8,
+                "status": "active",
+                "trialsAttempted": 0,
+                "trialsPassed": 0
+              },
+              "events": [
+                {
+                  "id": "policy:policy:governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "type": "policy",
+                  "policyId": "policy",
+                  "policyEventId": "governance:6a6533dd233cab983c383dc8af0680220c9a7a4ddf40e7928a92add0157cb4e2",
+                  "gain": 0.5,
+                  "archiveEta": 0.1
+                },
+                {
+                  "id": "policy:policy:checkpoint:1",
+                  "type": "policy",
+                  "policyId": "policy",
+                  "policyEventId": "checkpoint:1",
+                  "gain": 0.5,
+                  "archiveEta": 0.1
+                },
+                {
+                  "id": "policy:policy:governance:65c906e69326e57d5ed282d6693d35bf9c8b5429aa03ac2b12130bb5d086557b",
+                  "type": "policy",
+                  "policyId": "policy",
+                  "policyEventId": "governance:65c906e69326e57d5ed282d6693d35bf9c8b5429aa03ac2b12130bb5d086557b",
+                  "gain": 0.5,
+                  "archiveEta": 0.1
+                }
+              ],
+              "last": {
+                "eta": 0.6028999999999999,
+                "status": "active",
+                "trialsAttempted": 0,
+                "trialsPassed": 0
+              }
+            }
+          },
+          "status": "activated"
+        },
+        "memoryLayer": "Skill",
+        "contentHash": "0e6a7d13a7dcc95ef2ce8b975cf8d2570d92618dcfc9e637d861320f3dc37951",
+        "version": 3,
+        "createdAt": "2026-11-10T06:00:00.000Z",
+        "updatedAt": "2026-11-10T06:00:00.000Z",
+        "deletedAt": null
+      },
+      "source": "worker.skill_lifecycle.v7",
+      "createdAt": "2026-11-10T06:00:00.000Z"
+    }
+  ]
+}

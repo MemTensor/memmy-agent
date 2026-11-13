@@ -124,6 +124,8 @@ export const API_ROUTES = [
   "GET /api/v1/panel/task-details/:id/check",
   "GET /api/v1/panel/task-details/:id/turns/:turnId/field",
   "DELETE /api/v1/panel/tasks/:id",
+  "GET /api/v1/panel/tasks/:id/experience-processing",
+  "POST /api/v1/panel/tasks/:id/experience-processing/retry",
   ...VIEWER_API_ROUTES
 ] as const;
 
@@ -1261,6 +1263,27 @@ async function routeRequest(
         ),
       (result) => ({ hit_count: hitCountFromGetResponse(result) }),
     );
+  }
+
+  const taskExperience = match(path, /^\/api\/v1\/panel\/tasks\/([^/]+)\/experience-processing(\/retry)?$/);
+  if (taskExperience && method === "GET" && !taskExperience[2]) {
+    requireMemoryRead(principal);
+    const namespace = principal.authenticatedNamespace ?? principal.namespace;
+    return service.taskExperienceProcessing(decodeMatchSegment(taskExperience, 1),
+      ownerBoundRequest({ namespace, timeZone: principal.timeZone }, principal), localPanel);
+  }
+  if (taskExperience && method === "POST" && taskExperience[2]) {
+    requireMemoryWrite(principal);
+    const input = asObject(body, "task.experience.retry");
+    const namespace = principal.authenticatedNamespace ?? principal.namespace;
+    // Mutation scope comes from the credential, never a renderer header/body.
+    const request = localPanel ? envelopeWithPrincipal(input, principal) : {
+      ...strictEnvelopeWithPrincipal(input, { ...principal, namespace }), namespace
+    } as RequestEnvelope;
+    const result = service.retryTaskExperienceProcessing(decodeMatchSegment(taskExperience, 1),
+      ownerBoundRequest(request, principal), localPanel);
+    if (result.accepted) autoWorker.schedule();
+    return result;
   }
 
   const panelTaskDelete = match(path, /^\/api\/v1\/panel\/tasks\/([^/]+)$/);

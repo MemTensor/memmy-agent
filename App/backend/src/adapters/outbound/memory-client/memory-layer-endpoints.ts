@@ -50,6 +50,8 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   panelTaskDetail: "/api/v1/panel/task-details/:id",
   panelTaskField: "/api/v1/panel/task-details/:id/turns/:turnId/field",
   panelTasks: "/api/v1/panel/tasks",
+  taskExperienceProcessing: "/api/v1/panel/tasks/:id/experience-processing",
+  retryTaskExperienceProcessing: "/api/v1/panel/tasks/:id/experience-processing/retry",
   deletePanelTask: "/api/v1/panel/tasks/:id"
 } as const);
 

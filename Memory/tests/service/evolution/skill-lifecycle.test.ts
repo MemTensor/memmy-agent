@@ -3,8 +3,12 @@ import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryDb, type LlmClient } from "../../../src/index.js";
+import { Repositories } from "../../../src/storage/repositories.js";
+import { l2ComparisonScope } from "../../../src/service/evolution/l2-comparison-scope.js";
+import { l2SupportRelation } from "../../../src/service/evolution/l2-content-revision.js";
 import {
   insertActivePolicyMemory,
+  insertTracePolicyLinkForTest,
   insertActiveSkillMemoryForTest,
   makeTraceEligibleForL2,
   queueSkillCrystallizationJobForTest,
@@ -40,7 +44,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       answer: "Run pytest, inspect the failure, apply the fix, and verify the result."
     }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_bc24",
       userId,
       sessionId: session.sessionId,
@@ -218,7 +222,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_fresh_skill_skip",
       userId: "user-fresh-skill-skip",
       sessionId: session.sessionId,
@@ -322,7 +326,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy-compatible-skill-target",
       userId,
       sessionId: session.sessionId,
@@ -443,7 +447,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     const policyId = "policy-shared-by-distinct-skills";
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: policyId,
       userId,
       sessionId: session.sessionId,
@@ -566,7 +570,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     });
     const episodeId = assignedEpisodeId(service, complete);
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_skill_ledger",
       userId,
       sessionId: session.sessionId,
@@ -680,6 +684,15 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     });
     db.db.prepare(`UPDATE memories SET properties_json = ?, version = version + 1 WHERE id = 'policy_skill_ledger'`)
       .run(JSON.stringify(properties));
+    const revisionRepos = new Repositories(db.db);
+    revisionRepos.runtime.insertTracePolicyLink({
+      userId: revisionRepos.memories.get(revisedEvidence.l1MemoryId)!.userId,
+      l1MemoryId: revisedEvidence.l1MemoryId,
+      l2MemoryId: "policy_skill_ledger",
+      relation: l2SupportRelation(revisionRepos.memories.get("policy_skill_ledger")!),
+      strength: 1,
+      createdAt: new Date().toISOString()
+    });
     const skillBeforeRevision = db.db.prepare(`SELECT id, version, memory_value, properties_json FROM memories WHERE memory_layer = 'Skill'`)
       .all();
     beforeSkillReply = () => db.db.prepare(`UPDATE memories SET version = version + 1 WHERE id = ?`)
@@ -745,7 +758,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_skill_cooldown",
       userId: "user-skill-cooldown",
       sessionId: session.sessionId,
@@ -846,7 +859,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_source_policy_skill_skip",
       userId: "user-source-policy-skill-skip",
       sessionId: session.sessionId,
@@ -991,7 +1004,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_archived_skill_recreate",
       userId: "user-archived-skill-recreate",
       sessionId: session.sessionId,
@@ -1138,7 +1151,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
     }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: "policy_skill_reward_drift",
       userId: "user-skill-reward-drift",
       sessionId: session.sessionId,
@@ -1351,7 +1364,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       makeTraceEligibleForL2(db, complete.l1MemoryId);
     }
     const policyId = "policy_default_skill_name";
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: policyId,
       userId,
       sessionId: session.sessionId,
@@ -1545,7 +1558,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       makeTraceEligibleForL2(db, complete.l1MemoryId);
     }
     const policyId = "policy_invalid_string_skill_steps";
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: policyId,
       userId,
       sessionId: session.sessionId,
@@ -1737,7 +1750,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       makeTraceEligibleForL2(db, complete.l1MemoryId);
     }
     const policyId = "policy_refusal_skill_draft";
-    insertActivePolicyMemory(db, {
+    insertSupportedPolicyMemory(db, {
       id: policyId,
       userId,
       sessionId: session.sessionId,
@@ -1801,6 +1814,21 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     db.close();
   });
 });
+
+// These lifecycle fixtures retain historical Policy owners. The public capture
+// API writes DEVICE-owned traces, so establish the accepted source association
+// explicitly instead of relying on an unverified cross-owner ID in JSON.
+function insertSupportedPolicyMemory(db: MemoryDb, input: Parameters<typeof insertActivePolicyMemory>[1]): void {
+  insertActivePolicyMemory(db, input);
+  // Absent appId is persisted as NULL by normal memory writes, not an empty
+  // project identifier from this older SQL helper's required string argument.
+  if (input.appId === "") db.db.prepare("UPDATE memories SET app_id = NULL WHERE id = ?").run(input.id);
+  const repos = new Repositories(db.db);
+  const source = repos.memories.get(input.sourceTraceId)!;
+  const policy = repos.memories.get(input.id)!;
+  expect(l2ComparisonScope(source), "synthetic Policy must share its real source scope").toBe(l2ComparisonScope(policy));
+  insertTracePolicyLinkForTest(db, { userId: source.userId, l1MemoryId: source.id, l2MemoryId: policy.id });
+}
 
 function createSkillRebuildLlm(calls: Array<{
   messages: Array<{ role: string; content: string }>;

@@ -3,6 +3,7 @@ import { traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import type { CandidatePoolRecord, Repositories } from "../../storage/repositories.js";
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
+import { traceOriginIsCurrent } from "./policy-evidence.js";
 import { nowIso } from "../../utils/time.js";
 
 export type L2CandidateRoute = "ordinary" | "feedback" | "negative";
@@ -115,9 +116,12 @@ export function listL2Candidates(repos: Repositories, input: {
   userId: string;
   episodeId: string | null;
   limit?: number;
+  /** Recovery processes only the task sources accepted in its explicit request. */
+  sourceMemoryIds?: ReadonlySet<string>;
 }): L2Candidate[] {
   const candidates: L2Candidate[] = [];
   for (const row of repos.runtime.listUnifiedL2Candidates(input)) {
+    if (input.sourceMemoryIds && !input.sourceMemoryIds.has(row.sourceMemoryId)) continue;
     const evidence = candidateEvidence(row.evidence);
     if (!evidence) continue;
     // Refresh textual source changes before taking a snapshot; a moved L1 leaves the old Episode.
@@ -174,10 +178,11 @@ function readSource(repos: Repositories, id: string, userId: string): {
   if (memory.properties.internal_info.evidence_status === "provisional" ||
       memory.properties.internal_info.evidence_status === "disputed") return null;
   const trace = traceMetaFromMemory(memory);
-  if (!trace) return null;
-  const raw = trace.rawTurnId ? repos.runtime.getRawTurn(trace.rawTurnId) : undefined;
-  if (raw && (raw.deletedAt || raw.redactedAt || raw.userId !== userId)) return null;
-  return { memory, episodeId: trace.episodeId ?? raw?.episodeId ?? null };
+  if (!trace || !traceOriginIsCurrent(repos, trace)) return null;
+  // Source-free legacy/manual L1s keep their previous admission path. Declared
+  // raw provenance has already been validated above, including deleted/missing turns.
+  const origin = repos.runtime.resolveL1Source(id);
+  return { memory, episodeId: trace.episodeId ?? origin?.episodeId ?? null };
 }
 
 function sourceVersionFor(memory: MemoryRow, episodeId: string | null, signals: L2CandidateSignal[]): string {

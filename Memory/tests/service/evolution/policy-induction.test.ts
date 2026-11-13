@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MemoryDb, type LlmClient } from "../../../src/index.js";
 import { l2CandidateIdFor } from "../../../src/algorithm/plugin-algorithms.js";
 import { Repositories } from "../../../src/storage/repositories.js";
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import {
   addPositiveFeedbackForTurn,
   insertActivePolicyMemory,
@@ -408,9 +409,11 @@ describe("MemoryService / evolution / policy induction", () => {
     for (const id of evidenceIds) {
       makeTraceEligibleForL2(db, id);
     }
+    // These are new local fixtures, so keep SQL-seeded consumers and links
+    // aligned with the device owner assigned by completeTurn.
     insertActivePolicyMemory(db, {
       id: "policy_l2_support_traces",
-      userId: "user-l2-support-traces",
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.sessionId,
       agentId: "codex",
       appId: "workspace-l2-support",
@@ -429,7 +432,7 @@ describe("MemoryService / evolution / policy induction", () => {
     });
     for (const id of evidenceIds) {
       insertTracePolicyLinkForTest(db, {
-        userId: "user-l2-support-traces",
+        userId: DEVICE_MEMORY_OWNER,
         l1MemoryId: id,
         l2MemoryId: "policy_l2_support_traces"
       });
@@ -443,7 +446,7 @@ describe("MemoryService / evolution / policy induction", () => {
        ) VALUES (?, 'l2_association', 'queued', ?, ?, ?, ?, '{}', 0, 3, ?, ?)`
     ).run(
       "job_l2_support_trace_count",
-      "user-l2-support-traces",
+      DEVICE_MEMORY_OWNER,
       session.sessionId,
       assignedEpisodeId(service, completeA),
       evidenceIds[0],

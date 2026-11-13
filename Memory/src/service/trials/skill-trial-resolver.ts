@@ -1,9 +1,9 @@
+// Trial contribution replay adapted from yxyi123, PR #740 (660b3b9c).
 import {
-  skillEtaAfterTrial,
   skillMetaFromMemory,
-  skillStatusAfterTrial,
   traceMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
+import { createMemoryLogger } from "../../logging/logger.js";
 import { isImportedSkill } from "../../storage/imported-skill.js";
 import { isRecord } from "../../utils/json.js";
 import {
@@ -37,6 +37,10 @@ import {
 } from "../read-model/skill.js";
 
 
+import { hasSkillTrialHistory, recoverLegacySkillTrialHistory, reviseSkillTrial, withRevisionHistory } from "../evolution/revision-stats.js";
+
+const trialLogger = createMemoryLogger("skill_trial");
+
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 
 export interface SkillTrialResolverDeps {
@@ -54,6 +58,10 @@ export class SkillTrialResolver {
   constructor(private readonly deps: SkillTrialResolverDeps) {}
 
 resolveSkillTrial(job: EvolutionJobRecord): void {
+    this.deps.repos.transaction(() => this.resolveSkillTrialInTransaction(job));
+  }
+
+private resolveSkillTrialInTransaction(job: EvolutionJobRecord): void {
     const trialId = typeof job.payload.trialId === "string" ? job.payload.trialId : undefined;
     const trial = trialId ? this.deps.repos.runtime.getSkillTrial(trialId) : undefined;
     if (!trial || trial.status !== "pending") {
@@ -141,9 +149,9 @@ pendingTrialsForFeedback(feedback: FeedbackRecord): SkillTrialRecord[] {
     return [];
   }
 
-updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
+updateSkillTrialStats(trial: SkillTrialRecord, at: string, recoveredMemory?: MemoryRow): void {
     const startedAt = performance.now();
-    const memory = this.deps.repos.memories.get(trial.skillMemoryId);
+    const memory = recoveredMemory ?? this.deps.repos.memories.get(trial.skillMemoryId);
     if (!memory || memory.memoryLayer !== "Skill" || isImportedSkill(memory)) {
       return;
     }
@@ -153,31 +161,14 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
     // Historical trials remain auditable, but cannot validate rewritten content.
     if (revisedAt && trial.createdAt <= revisedAt) return;
     const trials = this.deps.repos.runtime
-      .listSkillTrials({ skillMemoryId: trial.skillMemoryId, limit: 1000 })
+      .listSkillTrials({ skillMemoryId: trial.skillMemoryId, limit: -1 })
       .filter((item) => item.outcome !== "unknown" && (!revisedAt || item.createdAt > revisedAt));
     const attempted = trials.length;
     const passed = trials.filter((item) => item.outcome === "success").length;
     const currentSkill = skillMetaFromMemory(memory);
-    const eta = attempted > 0
-      ? skillEtaAfterTrial({
-          currentEta: currentSkill?.eta ?? 0,
-          previousAttempts: currentSkill?.trialsAttempted ?? 0,
-          previousPasses: currentSkill?.trialsPassed ?? 0,
-          nextAttempts: attempted,
-          nextPasses: passed
-        })
-      : currentSkill?.eta ?? 0;
-    const status = skillStatusAfterTrial({
-      currentStatus: currentSkill?.status ?? "candidate",
-      eta,
-      trialsAttempted: attempted,
-      candidateTrials: this.deps.config.algorithm.skill.candidateTrials,
-      minEtaForRetrieval: this.deps.config.algorithm.skill.minEtaForRetrieval,
-      repairCandidateMinEta: this.deps.config.algorithm.skill.repairCandidateMinEta,
-      repairOrigin: currentSkill?.repairOrigin ?? false,
-      archiveEta: this.deps.config.algorithm.skill.archiveEta
-    });
-    const previous = memory;
+    const revised = reviseSkillTrial(memory, trial.id, attempted, passed, this.deps.config.algorithm.skill);
+    const { eta, status } = revised;
+    const previous = recoveredMemory ? this.deps.repos.memories.get(trial.skillMemoryId)! : memory;
     const next = updateSkillStats(memory, {
       trialsAttempted: attempted,
       trialsPassed: passed,
@@ -185,7 +176,7 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
       status,
       updatedAt: at
     });
-    const saved = this.deps.repos.memories.update(next);
+    const saved = this.deps.repos.memories.update(withRevisionHistory(next, "skill_revision_history", revised.history));
     this.deps.repos.runtime.appendChange({
       memoryId: saved.id,
       namespaceId: namespaceIdFromMemory(saved),
@@ -223,13 +214,20 @@ resolvePendingSkillTrialsForReward(input: {
     feedbackId?: string;
     at: string;
   }): void {
+    // Resolved trials are re-derived too: a rescored Episode can flip its verdict, and keeping
+    // the old outcome would preserve the stale eta it produced. Trials settled by an explicit
+    // feedback are left alone unless this reward carries that same feedback.
     const trials = this.deps.repos.runtime.listSkillTrials({
       userId: input.userId,
       episodeId: input.episodeId,
-      status: "pending",
-      limit: 100
+      // Snapshot the entire target set before changing statuses; no paging skips.
+      limit: -1
     });
     for (const trial of trials) {
+      if (trial.status !== "pending" && trial.feedbackId && trial.feedbackId !== input.feedbackId
+        && this.deps.repos.runtime.getFeedback(trial.feedbackId)?.channel === "explicit") {
+        continue;
+      }
       const outcome = this.outcomeForSkillTrial(trial, {
         rHuman: input.rHuman,
         feedbackId: input.feedbackId
@@ -237,10 +235,29 @@ resolvePendingSkillTrialsForReward(input: {
       if (!outcome) {
         continue;
       }
+      const status = skillTrialStatusFromOutcome(outcome);
+      const verdictChanged = trial.outcome !== outcome || trial.status !== status;
+      if (!verdictChanged && trial.feedbackId === input.feedbackId) {
+        continue;
+      }
+      let recoveredMemory: MemoryRow | undefined;
+      if (verdictChanged && trial.outcome !== "unknown") {
+        const memory = this.deps.repos.memories.get(trial.skillMemoryId);
+        if (memory?.memoryLayer === "Skill" && !hasSkillTrialHistory(memory, trial.id)) {
+          recoveredMemory = recoverLegacySkillTrialHistory(memory, trial.id,
+            this.deps.repos.runtime.listChanges(undefined, -1, undefined, undefined, memory.id), this.deps.config.algorithm.skill);
+          if (!recoveredMemory) {
+            // Logs may have been pruned. Preserve the trial and its statistics together;
+            // do not commit a new verdict with an unrecoverable old contribution.
+            trialLogger.warn("skill_trial.legacy_history_unavailable", { trialId: trial.id, skillId: memory.id });
+            continue;
+          }
+        }
+      }
       const before = trial;
       const updatedTrial = this.deps.repos.runtime.updateSkillTrial({
         ...trial,
-        status: skillTrialStatusFromOutcome(outcome),
+        status,
         outcome,
         feedbackId: input.feedbackId,
         resolvedAt: input.at
@@ -261,8 +278,10 @@ resolvePendingSkillTrialsForReward(input: {
         source: "worker.reward.updated",
         createdAt: input.at
       });
-      if (outcome !== "unknown") {
-        this.updateSkillTrialStats(updatedTrial, input.at);
+      // A previously settled trial that is now unknown must still recompute eta,
+      // otherwise its old pass/fail keeps counting.
+      if (verdictChanged && (outcome !== "unknown" || before.status !== "pending")) {
+        this.updateSkillTrialStats(updatedTrial, input.at, recoveredMemory);
       }
     }
   }

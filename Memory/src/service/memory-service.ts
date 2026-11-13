@@ -1,3 +1,4 @@
+import { l2ProcessingState, retryL2Extraction } from "./evolution/l2-extraction-recovery.js";
 import { AgentSkillLibrary, type AgentSkillReconcileRequest, type AgentSkillReconcileResult } from "./import/agent-skill-library.js";
 import { isImportedSkill } from "../storage/imported-skill.js";
 import { PanelMemoryBudget } from "./panel/memory-budget.js";
@@ -3817,6 +3818,46 @@ export class MemoryService {
     serverTime: string;
   } {
     return this.importJobs.memoryProcessingStatus(memoryIds, request);
+  }
+
+  private experienceRecoveryEpisode(id: string, request: RequestEnvelope, local: boolean) {
+    const episode = this.requireEpisode(id);
+    const namespace = request.namespace;
+    if (local) {
+      // The desktop panel manages this device's history across account changes.
+      // Explicit tenant boundaries still apply; existing owners are never relabelled.
+      this.assertPanelEpisodeInScope(episode, namespace);
+    } else {
+      this.assertStoredOwnerInScope(episode.userId, namespace,
+        () => this.deviceEpisodeMatchesNamespace(episode, namespace!));
+      const session = this.requireSession(episode.sessionId);
+      if (namespace?.sessionKey && session.hostSessionKey !== namespace.sessionKey) {
+        throw new MemoryServiceError("forbidden", "task belongs to a different session");
+      }
+      if (episode.userId !== DEVICE_MEMORY_OWNER) {
+        this.assertPanelEpisodeInScope(episode, namespace);
+        const stored = { ...namespaceForSession(session), tenantId: namespace?.tenantId };
+        if (!this.sameDeviceNamespace(stored, namespace!)) {
+          throw new MemoryServiceError("forbidden", "task belongs to a different namespace");
+        }
+      }
+    }
+    return episode;
+  }
+
+  taskExperienceProcessing(id: string, request: RequestEnvelope = {}, local = this.mode !== "cloud") {
+    this.assertMemorySearchEnabled();
+    const episode = this.experienceRecoveryEpisode(id, request, local);
+    return { ...l2ProcessingState(this.repos, episode, this.config.algorithm.l2Induction.mode === "unified" && this.config.algorithm.l2Induction.useLlm), serverTime: nowIso() };
+  }
+
+  retryTaskExperienceProcessing(id: string, request: RequestEnvelope = {}, local = this.mode !== "cloud") {
+    this.assertMemoryAddEnabled();
+    const episode = this.experienceRecoveryEpisode(id, request, local);
+    const result = retryL2Extraction({ repos: this.repos, enabled: this.config.algorithm.l2Induction.mode === "unified" && this.config.algorithm.l2Induction.useLlm,
+      enqueueJob: input => this.enqueueJob(input) }, episode, nowIso());
+    if (result.accepted) this.capturePendingListener?.();
+    return { ...result, serverTime: nowIso() };
   }
 
   retryMemoryProcessing(memoryId: string, request: RequestEnvelope = {}): {

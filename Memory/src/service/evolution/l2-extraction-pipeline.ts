@@ -1,11 +1,13 @@
+import { assertL2RecoveryCurrent } from "./l2-extraction-recovery.js";
 import { l2SupportRelation, revisedL2Memory } from "./l2-content-revision.js";
+import { policyRevisionHistory } from "./revision-stats.js";
 import { embeddingTextForMemory, updateMemoryVectorField } from "../embedding/embedding-pipeline.js";
 import { l2EmbeddingSpace, l2VectorCacheKey, readL2VectorCache } from "../embedding/l2-vector-cache.js";
 import { createHash, randomUUID } from "node:crypto";
 import { languageSteeringLine, packL2TraceContext, policyMetaFromMemory, steeredPromptLanguage, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
 import { embeddingIdentity, vectorEmbeddingIdentity } from "../../model/embedding-identity.js";
-import type { Embedder, LlmClient } from "../../model/types.js";
+import type { Embedder, LlmClient, LlmMessage } from "../../model/types.js";
 import type { EvolutionJobRecord, Repositories } from "../../storage/repositories.js";
 import { L2_EXTRACTION_OPERATION_PREFIX, L2_EXTRACTION_SNAPSHOT_PREFIX } from "../../storage/l2-extraction-keys.js";
 import type { MemoryRow } from "../../types.js";
@@ -14,8 +16,8 @@ import { clip } from "../../utils/text.js";
 import { profileIdFromMemory, projectIdFromMemory } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { listL2Candidates, markL2CandidatesProcessed, type L2Candidate } from "./l2-candidate-service.js";
+import { L2_EXTRACTION_SYSTEM_PROMPT, L2_LESSON_FIELDS, L2ExtractionValidationError, L2ExtractionExhaustedError, validateL2ExtractionResult, type L2ExtractionDiagnostic, type L2ExtractionOperation, type NewL2Lesson } from "./l2-extraction-contract.js";
 import { l2ComparisonScope, l2SharesComparisonScope } from "./l2-comparison-scope.js";
-import { L2_EXTRACTION_SYSTEM_PROMPT, validateL2ExtractionResult, type L2ExtractionOperation, type NewL2Lesson } from "./l2-extraction-contract.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 
 export interface UnifiedL2ExtractionDeps {
@@ -132,12 +134,13 @@ export class UnifiedL2ExtractionPipeline {
   constructor(private readonly deps: UnifiedL2ExtractionDeps) {}
 
   async induce(job: EvolutionJobRecord): Promise<void> {
+    const sourceMemoryIds = assertL2RecoveryCurrent(this.deps.repos, job);
     const sourceId = typeof job.payload.sourceMemoryId === "string" ? job.payload.sourceMemoryId
       : typeof job.payload.l1MemoryId === "string" ? job.payload.l1MemoryId : job.targetMemoryId;
     const source = sourceId ? this.deps.repos.memories.get(sourceId) : undefined;
     if (source && (source.userId !== job.userId || !validL1(source))) return;
     const episodeId = job.episodeId ?? (source ? traceMetaFromMemory(source)?.episodeId : undefined) ?? null;
-    const all = listL2Candidates(this.deps.repos, { userId: job.userId, episodeId });
+    const all = listL2Candidates(this.deps.repos, { userId: job.userId, episodeId, sourceMemoryIds });
     // An unbound L1 is a single-source batch, never a synthetic cross-Episode group.
     const pending = all.filter((candidate) => episodeId !== null || candidate.sourceMemoryId === sourceId);
     const scopes = new Map<string, L2Candidate[]>();
@@ -147,8 +150,12 @@ export class UnifiedL2ExtractionPipeline {
       group.push(candidate); scopes.set(scope, group);
     }
     for (const [scope, candidates] of scopes) await this.processScope(job, scope, candidates);
+    // Manual recovery is bounded to its approved sources. Do not enqueue an
+    // unrestricted continuation when later evidence changes even an approved source.
+    // Normal admission owns its automatic job; a later explicit retry can recover leftovers.
+    if (sourceMemoryIds) return;
     const originalVersions = new Set(pending.map((candidate) => `${candidate.id}:${candidate.sourceVersion}`));
-    const arrived = listL2Candidates(this.deps.repos, { userId: job.userId, episodeId })
+    const arrived = listL2Candidates(this.deps.repos, { userId: job.userId, episodeId, sourceMemoryIds })
       .filter((candidate) => (episodeId !== null || candidate.sourceMemoryId === sourceId)
         && !originalVersions.has(`${candidate.id}:${candidate.sourceVersion}`));
     if (arrived.length) {
@@ -173,6 +180,7 @@ export class UnifiedL2ExtractionPipeline {
       this.deps.repos.runtime.setKv(leaseKey, { owner, until: Date.now() + LEASE_MS }, this.now());
     });
     const renew = () => this.deps.repos.transaction(() => {
+      assertL2RecoveryCurrent(this.deps.repos, job);
       const lease = this.deps.repos.runtime.getKv(leaseKey)?.value;
       if (!isRecord(lease) || lease.owner !== owner) throw new Error("l2 extraction: scope lease changed");
       this.deps.repos.runtime.setKv(leaseKey, { owner, until: Date.now() + LEASE_MS }, this.now());
@@ -307,26 +315,65 @@ export class UnifiedL2ExtractionPipeline {
     const snapshot = this.deps.repos.runtime.getKv(snapshotKey)?.value;
     if (isRecord(snapshot) && snapshot.status === "committed") return;
     const at = this.now();
-    this.deps.repos.runtime.setKv(snapshotKey, {
-      status: "pending", jobId: job.id, scope, input: JSON.parse(input), createdAt: at
-    }, at);
+    const round = typeof job.payload.l2RecoveryId === "string" ? job.payload.l2RecoveryId
+      : isRecord(snapshot) && typeof snapshot.round === "string" ? snapshot.round : "automatic";
+    type Attempt = { jobId: string; at: string; outcome: "started" | "invalid" | "valid" | "request_failed"; diagnostic?: L2ExtractionDiagnostic };
+    const previous = isRecord(snapshot) ? snapshot : {};
+    // This counter survives Worker restarts/retries. Only an explicit scoped recovery
+    // starts a new round; another automatic job for the same input gets no new budget.
+    const sameRound = previous.round === round;
+    const attempts: Attempt[] = sameRound && Array.isArray(previous.attempts) ? [...previous.attempts] as Attempt[] : [];
+    const history = sameRound ? (Array.isArray(previous.previousRounds) ? previous.previousRounds : [])
+      : [...(Array.isArray(previous.previousRounds) ? previous.previousRounds : []),
+        ...(Array.isArray(previous.attempts) ? [{ round: previous.round, attempts: previous.attempts }] : [])].slice(-5);
+    const save = (extra: Record<string, unknown> = {}) => this.deps.repos.runtime.setKv(snapshotKey, {
+      status: "pending", jobId: job.id, scope, input: JSON.parse(input), createdAt: at,
+      round, attempts, previousRounds: history, ...extra
+    }, this.now());
     const targetVersions = new Map(batch.targets.map((target) => [target.id, target.version]));
-    let operations: L2ExtractionOperation[] | undefined;
-    let invalid: unknown;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    // A valid decision may have failed later during embedding or a transient commit.
+    // Reuse only the validated decision for this exact, fully hashed input.
+    let operations = Array.isArray(previous.operations)
+      ? validateL2ExtractionResult({ operations: previous.operations }, batch.sources.map(source => source.sourceMemoryId), targetVersions)
+      : undefined;
+    let diagnostic = [...attempts].reverse().find(attempt => attempt.diagnostic)?.diagnostic;
+    let invalid = diagnostic?.code === "incomplete_coverage" ? "incomplete L1 coverage" : "model correction budget exhausted";
+    save(operations ? { operations } : {});
+    while (!operations && attempts.length < 3) {
       renew();
-      const response = await this.deps.skillLlm.completeJson<Record<string, unknown>>([
+      this.assertSourcesCurrent(batch.sources);
+      const messages: LlmMessage[] = [
         { role: "system", content: L2_EXTRACTION_SYSTEM_PROMPT },
         { role: "system", content: languageSteeringLine(steeredPromptLanguage(this.deps.config.language, batch.sources.flatMap((source) => {
           const trace = traceMetaFromMemory(source.memory);
           return [trace?.userText, trace?.agentText, trace?.reflection];
         }))) },
         { role: "user", content: input }
-      ], {
-        operation: "l2.extraction.v2", thinkingMode: "disabled", temperature: 0.1,
-        maxTokens: this.deps.config.algorithm.l2Induction.maxOutputTokens,
-        retryTokenCeiling: this.deps.config.algorithm.l2Induction.maxOutputTokens, requireCompleteJson: true
+      ];
+      // Retain the bounded diagnostic history for this exact input, including a prior
+      // explicit recovery round. Fixing one error must not hide earlier format errors.
+      // Never replay rejected lesson text or values as model instructions.
+      const diagnostics = [...history.flatMap(entry => isRecord(entry) && Array.isArray(entry.attempts) ? entry.attempts : []), ...attempts]
+        .flatMap(entry => isRecord(entry) && isRecord(entry.diagnostic) ? [entry.diagnostic] : []).slice(-3);
+      if (diagnostics.length) messages.push({ role: "user", content:
+        `Previous decisions for this same input were rejected: ${JSON.stringify(diagnostics)}. Regenerate the complete operations JSON for the original input, addressing all reported errors together. ` +
+        "Every L1 ID must have a decision; use ignore only when its evidence is not reusable. Do not drop IDs or invent lessons to pass validation. " +
+        "For conflictingSourceIds, choose ignore OR evidence-backed operations, never both. Do not discard a valid lesson merely to remove a conflict. " +
+        `Every create/revise lesson requires exactly ${L2_LESSON_FIELDS.join(",")}; the last two may be empty strings. Historical candidate metadata is input context, not extra output fields.`
       });
+      const attempt: Attempt = { jobId: job.id, at: this.now(), outcome: "started" };
+      attempts.push(attempt); save();
+      let response: Record<string, unknown>;
+      try {
+        response = await this.deps.skillLlm.completeJson<Record<string, unknown>>(messages, {
+          operation: "l2.extraction.v2", thinkingMode: "disabled", temperature: 0.1,
+          maxTokens: this.deps.config.algorithm.l2Induction.maxOutputTokens,
+          retryTokenCeiling: this.deps.config.algorithm.l2Induction.maxOutputTokens, requireCompleteJson: true
+        });
+      } catch (error) {
+        attempt.outcome = "request_failed"; save();
+        throw error;
+      }
       try {
         const result = validateL2ExtractionResult(response, batch.sources.map((source) => source.sourceMemoryId), targetVersions);
         for (const operation of result) {
@@ -334,14 +381,17 @@ export class UnifiedL2ExtractionPipeline {
           const target = batch.targets.find((target) => target.id === operation.target_l2.id)!;
           if (["type", "title", "applicability", "content", "verification", "exclusions"].every((key) =>
             String(target[key as keyof typeof target] ?? "").trim() === operation.revised_l2[key as keyof NewL2Lesson])) {
-            throw new Error("l2 revision: unchanged content");
+            throw new L2ExtractionValidationError("l2 revision: unchanged content", { code: "unchanged_revision", path: "operations" });
           }
         }
-        operations = result;
-        break;
-      } catch (error) { invalid = error; }
+        operations = result; attempt.outcome = "valid"; save({ operations });
+      } catch (error) {
+        if (!(error instanceof L2ExtractionValidationError)) throw error;
+        diagnostic = { ...error.diagnostic, message: error.message }; invalid = error.message.replace(/^l2 extraction: /, "");
+        attempt.outcome = "invalid"; attempt.diagnostic = diagnostic; save();
+      }
     }
-    if (!operations) throw invalid ?? new Error("l2 extraction: model output validation failed");
+    if (!operations) throw new L2ExtractionExhaustedError(diagnostic, invalid);
     const validated = operations;
     const revisions = new Map<string, MemoryRow>();
     for (const operation of validated) {
@@ -363,7 +413,7 @@ export class UnifiedL2ExtractionPipeline {
       this.reconcileFallbacks(batch, validated, at);
       markL2CandidatesProcessed(this.deps.repos, batch.sources, validated, at);
       this.deps.repos.runtime.setKv(snapshotKey, { status: "committed", jobId: job.id, scope,
-        input: JSON.parse(input), operations: validated, createdAt: at, committedAt: this.now() }, this.now());
+        input: JSON.parse(input), operations: validated, round, attempts, previousRounds: history, createdAt: at, committedAt: this.now() }, this.now());
     });
   }
 
@@ -442,7 +492,12 @@ export class UnifiedL2ExtractionPipeline {
     const policy = isRecord(memory.properties.internal_info.policy) ? memory.properties.internal_info.policy : {};
     const traceIds = [...new Set([...(meta?.sourceTraceIds ?? []), ...sources.map((source) => source.sourceMemoryId)])];
     const episodeIds = [...new Set([...(meta?.sourceEpisodeIds ?? []), ...sources.flatMap((source) => source.episodeId ? [source.episodeId] : [])])];
-    const support = Math.max(meta?.support ?? 0, episodeIds.length);
+    // Once statistics have a history, their writer owns support as well as gain.
+    // Prewriting support here would look like an independent intervention on replay.
+    // Keep the original first-write/fallback initialization for pre-history records.
+    const statisticsOwnSupport = this.deps.recomputePolicyStats && !this.isPendingFallback(memory)
+      && policyRevisionHistory(memory);
+    const support = statisticsOwnSupport ? meta?.support ?? 0 : Math.max(meta?.support ?? 0, episodeIds.length);
     const specialIds = [...new Set([...strings(policy.special_source_trace_ids),
       ...sources.filter((source) => source.routes.some((route) => route !== "ordinary")).map((source) => source.sourceMemoryId)])];
     const successfulIds = [...new Set([...strings(policy.successful_source_trace_ids),
@@ -532,7 +587,8 @@ export class UnifiedL2ExtractionPipeline {
     this.deps.repos.transaction(() => {
       renew();
       for (const candidate of candidates) {
-        const pending = listL2Candidates(this.deps.repos, { userId: candidate.userId, episodeId: candidate.episodeId })
+        const pending = listL2Candidates(this.deps.repos, { userId: candidate.userId, episodeId: candidate.episodeId,
+          sourceMemoryIds: new Set([candidate.sourceMemoryId]) })
           .find((item) => item.id === candidate.id && item.sourceVersion === candidate.sourceVersion);
         if (!pending) continue;
         const current = this.deps.repos.memories.get(candidate.sourceMemoryId);

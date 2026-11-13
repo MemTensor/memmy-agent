@@ -30,6 +30,8 @@ import {
   PanelOverviewOutputSchema,
   PanelTasksInputSchema,
   PanelTasksOutputSchema,
+  TaskExperienceProcessingSchema,
+  RetryTaskExperienceProcessingSchema,
   SearchInputSchema,
   SearchOutputSchema,
   StartTurnInputSchema,
@@ -59,6 +61,8 @@ import {
   type PanelOverviewOutput,
   type PanelTasksInput,
   type PanelTasksOutput,
+  type TaskExperienceProcessing,
+  type RetryTaskExperienceProcessing,
   type SearchInput,
   type SearchOutput,
   type StartTurnInput,
@@ -72,6 +76,8 @@ import { PanelRequestQueue } from "./panel-request-queue.js";
 
 const ApproveObservedSkillOutputSchema = z.object({ id: z.string(), status: z.literal("activated"), serverTime: z.string() });
 const UpdateObservedSkillOutputSchema = ApproveObservedSkillOutputSchema.extend({ version: z.number().int().positive() });
+
+export type { TaskExperienceProcessing } from "@memmy/local-api-contracts";
 
 export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/health",
@@ -100,6 +106,8 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/panel/analysis",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
+  "GET /api/v1/panel/tasks/:id/experience-processing",
+  "POST /api/v1/panel/tasks/:id/experience-processing/retry",
   "GET /api/v1/panel/task-summaries",
   "DELETE /api/v1/panel/tasks/:id"
 ] as const;
@@ -146,6 +154,8 @@ export interface MemoryRuntimeClient {
   listPanelTaskSummaries?(input: PanelTasksInput, signal?: AbortSignal): Promise<PanelTaskSummariesOutput | PanelTasksOutput>;
   listPanelTasks(input: PanelTasksInput, signal?: AbortSignal): Promise<PanelTasksOutput>;
   deletePanelTask(id: string): Promise<DeletePanelTaskOutput>;
+  taskExperienceProcessing?(id: string, signal?: AbortSignal): Promise<TaskExperienceProcessing>;
+  retryTaskExperienceProcessing?(id: string): Promise<RetryTaskExperienceProcessing>;
 }
 
 export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRuntimeClient {
@@ -344,6 +354,13 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
       return panelQueue.request(path, (sharedSignal) => requestJson({ config, path, schema: PanelTasksOutputSchema, init: { signal: sharedSignal } }), signal);
     },
 
+    async taskExperienceProcessing(id, signal) {
+      return requestJson({ config, path: `/api/v1/panel/tasks/${encodeURIComponent(id)}/experience-processing`, schema: TaskExperienceProcessingSchema, init: { signal } });
+    },
+    async retryTaskExperienceProcessing(id) {
+      return requestJson({ config, path: `/api/v1/panel/tasks/${encodeURIComponent(id)}/experience-processing/retry`,
+        schema: RetryTaskExperienceProcessingSchema, body: {} });
+    },
     async deletePanelTask(id) {
       const result = await requestJson({
         config,

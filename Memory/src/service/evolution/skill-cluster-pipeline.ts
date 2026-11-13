@@ -1,3 +1,5 @@
+// Unique membership aggregation and async guards adapted from yxyi123 PR #740 (660b3b9c).
+import { createHash } from "node:crypto";
 import {
   DEFAULT_DIRECT_SKILL_CLUSTERING,
   DIRECT_SKILL_META_PROMPT,
@@ -5,7 +7,6 @@ import {
   DIRECT_SKILL_SOURCE,
   SEED_META_SKILL_MD,
   classifySkillOutcome,
-  clusterHasUsableSkill,
   coerceDirectSkillName,
   coerceDirectSkillProcedure,
   decideClusterAssignment,
@@ -46,9 +47,12 @@ import { newId } from "../../utils/id.js";
 import { generatedSkillTitle } from "../../algorithm/skill-display.js";
 import { nowIso } from "../../utils/time.js";
 import { elapsedApiLogMs, recordApiLog } from "../model-audit/model-call-audit.js";
-import { profileIdFromMemory } from "../namespace/namespace-scope.js";
+import { profileIdFromMemory, projectIdFromMemory } from "../namespace/namespace-scope.js";
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
+
+import { episodeInputRevision, jobRevisionIsCurrent } from "./episode-revision.js";
 
 export interface SkillClusterPipelineDeps {
   repos: Repositories;
@@ -79,69 +83,109 @@ export class SkillClusterPipeline {
       logEvolutionDecision(job, "skill_cluster_assign", "test_episode_skipped", { episodeId });
       return;
     }
-    if (typeof episode.rTask !== "number") {
+    if (episode.status !== "closed" || typeof episode.rTask !== "number") {
       logEvolutionDecision(job, "skill_cluster_assign", "unscored_episode", { episodeId });
       return;
     }
 
+    if (!jobRevisionIsCurrent(this.deps.repos, job)) return;
+    const inputRevision = episodeInputRevision(this.deps.repos, episode.id, true);
     const at = nowIso();
-    const features = await this.featuresForEpisode(episode);
-    const existing = this.deps.repos.runtime.getSkillClusterForEpisode(episode.id);
-    let cluster: SkillClusterRecord;
-    if (existing) {
-      cluster = this.refreshClusterFeatures(existing, features, at);
-      this.deps.repos.runtime.upsertSkillClusterMember({
-        clusterId: cluster.id,
-        episodeId: episode.id,
-        outcome: features.outcome,
-        rTask: episode.rTask,
-        assignedAt: at
-      });
-    } else {
-      const candidates = this.deps.repos.runtime.listSkillClustersByScope({
-        userId: episode.userId,
-        projectId: episode.projectId
-      });
-      const decision = decideClusterAssignment(features, candidates.map(clusterFeatures), this.clusteringConfig());
-      logEvolutionDecision(job, "skill_cluster_assign", decision.reason, {
-        episodeId: episode.id,
-        clusterId: decision.clusterId,
-        score: decision.score,
-        stage: decision.stage,
-        tools: features.tools,
-        artifacts: features.artifacts,
-        hasQueryVec: Boolean(features.queryVec?.length)
-      });
-      if (decision.action === "join" && decision.clusterId) {
-        const joined = this.deps.repos.runtime.getSkillCluster(decision.clusterId);
-        if (!joined) {
-          cluster = this.createCluster(episode, features, at);
-        } else {
-          cluster = this.refreshClusterFeatures(joined, features, at);
-        }
-      } else {
-        cluster = this.createCluster(episode, features, at);
+    const cached = episode.meta.clusterFeatures as EpisodeSkillFeatures | undefined;
+    const features = episode.meta.clusterFeaturesInput === inputRevision && cached
+      ? cached : await this.featuresForEpisode(episode);
+    const featureCache = new Map<string, EpisodeSkillFeatures>();
+    const memberRevisions = new Map<string, string>();
+    const candidates = this.deps.repos.runtime.listSkillClustersByScope({ userId: episode.userId, projectId: episode.projectId });
+    const previousCluster = this.deps.repos.runtime.getSkillClusterForEpisode(episode.id);
+    const decision = previousCluster ? undefined : decideClusterAssignment(features, candidates.map(clusterFeatures), this.clusteringConfig());
+    const selected = previousCluster ?? candidates.find(candidate => candidate.id === decision?.clusterId);
+    const clusterBefore = selected ? JSON.stringify(selected) : undefined;
+    const selectedMembers = new Map((selected ? this.deps.repos.runtime.listSkillClusterMembers(selected.id) : [])
+      .map(member => [member.episodeId, member]));
+    if (selected) {
+      for (const member of selectedMembers.values()) {
+        const other = this.deps.repos.runtime.getEpisode(member.episodeId);
+        if (!other || other.id === episode.id) continue;
+        const revision = episodeInputRevision(this.deps.repos, other.id, true);
+        memberRevisions.set(other.id, revision);
+        const stored = other.meta.clusterFeatures as EpisodeSkillFeatures | undefined;
+        featureCache.set(other.id, stored && other.meta.clusterFeaturesInput === revision
+          ? stored : await this.featuresForEpisode(other));
       }
-      this.deps.repos.runtime.upsertSkillClusterMember({
-        clusterId: cluster.id,
-        episodeId: episode.id,
-        outcome: features.outcome,
-        rTask: episode.rTask,
-        assignedAt: at
-      });
     }
+    this.deps.repos.transaction(() => {
+      if (episodeInputRevision(this.deps.repos, episode.id, true) !== inputRevision) {
+        throw new Error("episode inputs changed during cluster assignment; retry assignment");
+      }
+      if (selected && JSON.stringify(this.deps.repos.runtime.getSkillCluster(selected.id)) !== clusterBefore) {
+        throw new Error("cluster changed while loading member features; retry assignment");
+      }
+      for (const [id, revision] of memberRevisions) {
+        if (episodeInputRevision(this.deps.repos, id, true) !== revision) throw new Error("cluster member changed; retry assignment");
+        this.deps.repos.runtime.updateEpisodeMeta(id, { clusterFeatures: featureCache.get(id), clusterFeaturesInput: revision }, at);
+        const member = selectedMembers.get(id);
+        const other = this.deps.repos.runtime.getEpisode(id)!;
+        if (member) this.deps.repos.runtime.upsertSkillClusterMember({ ...member,
+          outcome: featureCache.get(id)!.outcome, rTask: other.rTask });
+      }
+      this.deps.repos.runtime.updateEpisodeMeta(episode.id, { clusterFeatures: features, clusterFeaturesInput: inputRevision }, at);
+      featureCache.set(episode.id, features);
+      const existing = this.deps.repos.runtime.getSkillClusterForEpisode(episode.id);
+      let cluster: SkillClusterRecord;
+      if (existing) {
+        cluster = this.refreshClusterFeatures(existing, features, at, featureCache);
+        this.deps.repos.runtime.upsertSkillClusterMember({
+          clusterId: cluster.id,
+          episodeId: episode.id,
+          outcome: features.outcome,
+          rTask: episode.rTask,
+          assignedAt: this.deps.repos.runtime.listSkillClusterMembers(cluster.id).find(member => member.episodeId === episode.id)?.assignedAt ?? at
+        });
+      } else {
+        // Reuse the decision made before the transaction, together with the member features
+        // loaded for its target. Deciding again here could pick a cluster whose members were
+        // never loaded, and refreshing it would rebuild its features from this episode alone.
+        logEvolutionDecision(job, "skill_cluster_assign", decision?.reason ?? "no_decision", {
+          episodeId: episode.id,
+          clusterId: decision?.clusterId,
+          score: decision?.score,
+          stage: decision?.stage,
+          tools: features.tools,
+          artifacts: features.artifacts,
+          hasQueryVec: Boolean(features.queryVec?.length)
+        });
+        if (decision?.action === "join" && decision.clusterId) {
+          const joined = this.deps.repos.runtime.getSkillCluster(decision.clusterId);
+          if (!joined || joined.id !== selected?.id) {
+            throw new Error("target cluster changed while loading member features; retry assignment");
+          }
+          cluster = this.refreshClusterFeatures(joined, features, at, featureCache);
+        } else {
+          cluster = this.createCluster(episode, features, at);
+        }
+        this.deps.repos.runtime.upsertSkillClusterMember({
+          clusterId: cluster.id,
+          episodeId: episode.id,
+          outcome: features.outcome,
+          rTask: episode.rTask,
+          assignedAt: at
+        });
+      }
 
-    this.deps.repos.runtime.updateEpisodeMeta(episode.id, { skill_cluster_id: cluster.id }, at);
-    this.deps.enqueueJob({
-      jobType: "skill_batch_evolve",
-      userId: episode.userId,
-      sessionId: episode.sessionId,
-      episodeId: episode.id,
-      payload: {
-        reason: "skill_cluster_assign",
-        clusterId: cluster.id
-      },
-      createdAt: at
+      this.deps.repos.runtime.updateEpisodeMeta(episode.id, { skill_cluster_id: cluster.id }, at);
+      this.deps.enqueueJob({
+        jobType: "skill_batch_evolve",
+        userId: episode.userId,
+        sessionId: episode.sessionId,
+        episodeId: episode.id,
+        payload: {
+          reason: "skill_cluster_assign",
+          clusterRevision: this.clusterInputRevision(cluster.id),
+          clusterId: cluster.id
+        },
+        createdAt: at
+      });
     });
   }
 
@@ -159,10 +203,20 @@ export class SkillClusterPipeline {
       return;
     }
 
+    const batchRevision = this.clusterInputRevision(cluster.id);
+    if (typeof job.payload.clusterRevision === "string" && job.payload.clusterRevision !== batchRevision) return;
     const members = this.deps.repos.runtime.listSkillClusterMembers(cluster.id);
+    // Reconcile durable evidence before generation or any early return. A model
+    // rejecting a failure-only draft must not leave yesterday's success usable.
+    const storedSkill = this.ownedClusterSkill(cluster);
+    if (cluster.skillMemoryId && !storedSkill) return;
+    if (storedSkill?.memory.properties.internal_info.skill_manually_archived === true) return;
+    if (storedSkill?.memory.status === "archived"
+      && storedSkill.memory.properties.internal_info.direct_sources_suspended !== true) return;
+    const reconciled = storedSkill ? this.reconcileSkillEvidence(storedSkill.memory, cluster, nowIso()) : null;
     const scoredMembers = members.flatMap((member) => {
       const episode = this.deps.repos.runtime.getEpisode(member.episodeId);
-      if (!episode || typeof episode.rTask !== "number") return [];
+      if (!episode || !this.episodeSharesClusterScope(episode, cluster) || episode.status !== "closed" || typeof episode.rTask !== "number") return [];
       return [{
         episodeId: episode.id,
         outcome: classifySkillOutcome(episode.rTask, this.outcomeThresholds()),
@@ -177,12 +231,18 @@ export class SkillClusterPipeline {
     }
 
     const batch = top6.map((member) => this.packEpisode(member.episodeId, member.outcome, member.rTask));
-    const existingSkill = this.clusterSkill(cluster);
-    const hasSkill = Boolean(existingSkill);
+    const existingSkill = reconciled ? skillMetaFromMemory(reconciled) : null;
+    const hasSkill = Boolean(existingSkill && existingSkill.memory.status !== "archived");
     const processed = new Set(cluster.processedEpisodeIds);
     const newEpisodeIds = top6
       .map((item) => item.episodeId)
       .filter((id) => !processed.has(id));
+    if (newEpisodeIds.length === 0) return;
+    // Revisions replace the old task's text contribution. Scoped merges are
+    // appropriate for new tasks, but would retain obsolete steps/anti-patterns
+    // when an already processed task changes outcome or evidence.
+    const replaceEvidence = existingSkill && (existingSkill.memory.properties.internal_info.direct_evidence_rebuild_required === true
+      || newEpisodeIds.some(id => this.deps.repos.runtime.getEpisode(id)?.meta.clusterProcessedFeatures !== undefined));
     const newSuccessTools = batch
       .filter((item) => item.outcome === "success" && newEpisodeIds.includes(item.episode_id))
       .flatMap((item) => item.turns.flatMap((turn) => turn.tools.map((tool) => tool.name)));
@@ -217,7 +277,7 @@ export class SkillClusterPipeline {
 
     if (branch.action === "skip_unknown_only") {
       logEvolutionDecision(job, "skill_batch_evolve", branch.reason, { clusterId: cluster.id });
-      await this.updateMetaSkill(job, cluster, {
+      await this.updateMetaSkill(job, this.markProcessed(cluster, top6.map(item => item.episodeId), at), {
         accepted: false,
         rejectReason: branch.reason,
         skillBefore,
@@ -260,10 +320,17 @@ export class SkillClusterPipeline {
       const draft = await this.generateProcedure({
         cluster,
         batch,
-        existing: skillBefore,
-        rebuildScope: branch.action === "rebuild" ? branch.rebuildScope ?? "retrieval" : undefined
+        existing: replaceEvidence ? null : skillBefore,
+        rebuildScope: !replaceEvidence && branch.action === "rebuild" ? branch.rebuildScope ?? "retrieval" : undefined
       });
-      const merged = skillBefore && branch.rebuildScope
+      if (this.clusterInputRevision(cluster.id) !== batchRevision) return;
+      const currentCluster = this.deps.repos.runtime.getSkillCluster(cluster.id);
+      if (currentCluster?.skillMemoryId !== cluster.skillMemoryId
+        || JSON.stringify(currentCluster?.processedEpisodeIds) !== JSON.stringify(cluster.processedEpisodeIds)) return;
+      // An edit/archive while the model was running belongs to the user. Do not
+      // overwrite it with the old snapshot, even if the episode did not change.
+      if (existingSkill && this.deps.repos.memories.get(existingSkill.id)?.version !== existingSkill.memory.version) return;
+      const merged = !replaceEvidence && skillBefore && branch.rebuildScope
         ? mergeProcedureByScope(skillBefore, draft.procedure, branch.rebuildScope)
         : draft.procedure;
       const name = skillBefore && existingSkill
@@ -288,26 +355,19 @@ export class SkillClusterPipeline {
         return;
       }
 
-      const upserted = this.upsertSkill({
-        job,
-        cluster,
-        episode: this.anchorEpisode(batch, job),
-        name,
-        displayTitle: draft.displayTitle,
-        draftName: draft.name,
-        outputLanguage: draft.outputLanguage,
-        procedure: stripDirectSkillStepEvidenceIds(merged),
-        verification: gate,
-        existing: existingSkill?.memory,
-        successEpisodeIds: batch.filter((item) => item.outcome === "success").map((item) => item.episode_id),
-        at
+      const { upserted, withSkill } = this.deps.repos.transaction(() => {
+        const upserted = this.upsertSkill({ job, cluster,
+          episode: this.anchorEpisode(batch, job), name,
+          displayTitle: draft.displayTitle, draftName: draft.name, outputLanguage: draft.outputLanguage,
+          procedure: stripDirectSkillStepEvidenceIds(merged), verification: gate,
+          existing: existingSkill?.memory,
+          successEpisodeIds: batch.filter((item) => item.outcome === "success").map((item) => item.episode_id), at });
+        const withSkill = { ...this.markProcessed(cluster, top6.map((item) => item.episodeId), at),
+          skillMemoryId: upserted.memory.id };
+        this.deps.repos.runtime.updateSkillCluster(withSkill);
+        return { upserted, withSkill };
       });
       skillAfter = merged;
-      const withSkill = {
-        ...this.markProcessed(cluster, top6.map((item) => item.episodeId), at),
-        skillMemoryId: upserted.memory.id
-      };
-      this.deps.repos.runtime.updateSkillCluster(withSkill);
       await this.updateMetaSkill(job, withSkill, {
         accepted: true,
         skillBefore,
@@ -346,6 +406,12 @@ export class SkillClusterPipeline {
       });
       throw error;
     }
+  }
+
+  private clusterInputRevision(clusterId: string): string {
+    return createHash("sha256").update(JSON.stringify(this.deps.repos.runtime.listSkillClusterMembers(clusterId)
+      .map(member => ({ id: member.episodeId, revision: episodeInputRevision(this.deps.repos, member.episodeId, true) }))
+      .sort((a,b) => a.id.localeCompare(b.id)))).digest("hex");
   }
 
   /** First-time failures have no Skill yet, so they key on the cluster; rebuilds also carry the real skillId. */
@@ -397,10 +463,11 @@ export class SkillClusterPipeline {
   }
 
   private async featuresForEpisode(episode: EpisodeRecord): Promise<EpisodeSkillFeatures> {
-    const turns = this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, 1000);
+    const turns = this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, -1);
     const queryText = firstUserQuery(turns);
-    let queryVec: number[] | null = null;
-    if (queryText && this.deps.queryVector) {
+    const previous = episode.meta.clusterFeatures as EpisodeSkillFeatures | undefined;
+    let queryVec: number[] | null = previous?.queryText === queryText ? previous.queryVec : null;
+    if (!queryVec && queryText && this.deps.queryVector) {
       try {
         queryVec = (await this.deps.queryVector(queryText)) ?? null;
       } catch {
@@ -438,39 +505,110 @@ export class SkillClusterPipeline {
   private refreshClusterFeatures(
     cluster: SkillClusterRecord,
     features: EpisodeSkillFeatures,
-    at: string
+    at: string,
+    featureCache: Map<string, EpisodeSkillFeatures>
   ): SkillClusterRecord {
-    const alreadyMember = this.deps.repos.runtime
-      .listSkillClusterMembers(cluster.id)
-      .some((member) => member.episodeId === features.episodeId);
+    const members = this.deps.repos.runtime.listSkillClusterMembers(cluster.id).sort((a,b) => a.assignedAt.localeCompare(b.assignedAt) || a.episodeId.localeCompare(b.episodeId));
+    const alreadyMember = members.some(member => member.episodeId === features.episodeId);
+    // Members missing from the preloaded cache (an episode deleted between load and write) fall
+    // back to their stored features, so the aggregate never collapses to the current episode.
+    const rows = members.map(member => featureCache.get(member.episodeId)
+      ?? this.deps.repos.runtime.getEpisode(member.episodeId)?.meta.clusterFeatures as EpisodeSkillFeatures | undefined)
+      .filter((row): row is EpisodeSkillFeatures => Boolean(row));
+    if (!alreadyMember) rows.push(features);
+    let centroid: number[] | null = null;
+    rows.forEach((row, index) => { centroid = mergeCentroid(centroid, row.queryVec, index); });
+    const changedMembers = new Set(rows.filter(row =>
+      this.deps.repos.runtime.getEpisode(row.episodeId)?.meta.clusterProcessedFeatures !== this.processedFingerprint(row)
+    ).map(row => row.episodeId));
     const next: SkillClusterRecord = {
       ...cluster,
-      tools: uniqSorted([...cluster.tools, ...features.tools]),
-      artifacts: uniqSorted([...cluster.artifacts, ...features.artifacts]),
-      toolBigrams: uniqSorted([...cluster.toolBigrams, ...features.toolBigrams]),
-      centroid: mergeCentroid(cluster.centroid, features.queryVec, cluster.memberCount),
-      memberCount: alreadyMember ? cluster.memberCount : cluster.memberCount + 1,
+      tools: uniqSorted(rows.flatMap(row => row.tools)),
+      artifacts: uniqSorted(rows.flatMap(row => row.artifacts)),
+      toolBigrams: uniqSorted(rows.flatMap(row => row.toolBigrams)),
+      centroid,
+      memberCount: rows.length,
+      processedEpisodeIds: cluster.processedEpisodeIds.filter(id => !changedMembers.has(id)),
       updatedAt: at
     };
     return this.deps.repos.runtime.updateSkillCluster(next);
   }
 
-  private clusterSkill(cluster: SkillClusterRecord) {
-    if (!cluster.skillMemoryId) return null;
-    const memory = this.deps.repos.memories.get(cluster.skillMemoryId);
-    if (!memory) return null;
-    if (!clusterHasUsableSkill({
-      skillMemoryId: memory.id,
-      layer: memory.memoryLayer,
-      status: memory.status
-    })) {
-      return null;
-    }
+  private ownedClusterSkill(cluster: SkillClusterRecord) {
+    const memory = cluster.skillMemoryId ? this.deps.repos.memories.get(cluster.skillMemoryId) : undefined;
+    // New local Skills use the device owner even when their durable cluster was
+    // created before the upgrade. The pointer and deterministic key bind this
+    // object to the cluster; a matching source label alone is not authorization.
+    if (!memory || memory.deletedAt || memory.memoryLayer !== "Skill"
+      || (memory.userId !== cluster.userId && memory.userId !== DEVICE_MEMORY_OWNER)
+      || memory.memoryKey !== `skill:direct:${cluster.id}`
+      || memory.properties.internal_info.source !== DIRECT_SKILL_SOURCE
+      || memory.properties.internal_info.read_only === true) return null;
+    const projectId = projectIdFromMemory(memory);
+    if (cluster.projectId && projectId && projectId !== cluster.projectId) return null;
     return skillMetaFromMemory(memory);
   }
 
+  private episodeSharesClusterScope(episode: EpisodeRecord, cluster: SkillClusterRecord): boolean {
+    // Assignment intentionally shares clusters across persisted owners/profiles.
+    // Retain its existing project compatibility rule when maintaining members.
+    return !episode.projectId || !cluster.projectId || episode.projectId === cluster.projectId;
+  }
+
+  private currentSuccessAnchors(ids: string[], cluster: SkillClusterRecord): string[] {
+    const members = new Set(this.deps.repos.runtime.listSkillClusterMembers(cluster.id).map(member => member.episodeId));
+    return uniqSorted(ids.filter(id => {
+      const episode = this.deps.repos.runtime.getEpisode(id);
+      return members.has(id) && episode && this.episodeSharesClusterScope(episode, cluster)
+        && episode.status === "closed" && episode.rewardDetail.skipped !== true
+        && typeof episode.rTask === "number" && classifySkillOutcome(episode.rTask, this.outcomeThresholds()) === "success";
+    }));
+  }
+
+  /** Keep historical ownership for recovery, but expose only current success evidence. */
+  private reconcileSkillEvidence(memory: MemoryRow, cluster: SkillClusterRecord, at: string): MemoryRow {
+    const skill = skillMetaFromMemory(memory)!;
+    const internal = memory.properties.internal_info;
+    const historical = Array.isArray(internal.direct_historical_anchor_ids)
+      ? internal.direct_historical_anchor_ids.filter((id): id is string => typeof id === "string") : [];
+    const allIds = uniqSorted([...historical, ...skill.evidenceAnchorIds]);
+    const activeIds = this.currentSuccessAnchors(allIds, cluster);
+    // Trial outcomes and eta are independent evidence; withdrawing an episode
+    // must not erase them or a user's numerical edits.
+    const suspend = activeIds.length === 0 && skill.trialsPassed === 0;
+    const fields = {
+      evidence_anchor_ids: activeIds, support: activeIds.length,
+      direct_historical_anchor_ids: allIds,
+      direct_sources_suspended: suspend || internal.direct_sources_suspended === true,
+      direct_evidence_rebuild_required: internal.direct_evidence_rebuild_required === true
+        || skill.evidenceAnchorIds.some(id => !activeIds.includes(id)),
+      ...(suspend ? { status: "archived" } : {})
+    };
+    const data = isRecord(internal.skill) ? internal.skill : {};
+    if (JSON.stringify(skill.evidenceAnchorIds) === JSON.stringify(activeIds)
+      && skill.support === activeIds.length
+      && JSON.stringify(historical) === JSON.stringify(allIds)
+      && internal.direct_sources_suspended === fields.direct_sources_suspended
+      && internal.direct_evidence_rebuild_required === fields.direct_evidence_rebuild_required
+      && (!suspend || memory.status === "archived")) return memory;
+    return this.deps.repos.transaction(() => {
+      const saved = this.deps.repos.memories.updateIfVersion({ ...memory,
+        status: suspend ? "archived" : memory.status, updatedAt: at,
+        info: { ...memory.info, ...(suspend ? { status: "archived" } : {}) },
+        properties: { ...memory.properties, status: suspend ? "archived" : memory.status,
+          internal_info: { ...internal, ...fields, skill: { ...data, ...fields } } }
+      }, memory.version);
+      if (suspend) this.deps.repos.memories.deleteVector(saved.id, "vec");
+      this.deps.repos.runtime.appendChange({ memoryId: saved.id, namespaceId: this.deps.namespaceIdFromMemory(saved),
+        kind: "skill", op: "updated", entityId: saved.id, userId: saved.userId,
+        changeType: "skill_direct_evidence_reconciled", before: memory, after: saved,
+        source: "worker.skill_batch_evolve.evidence", createdAt: at });
+      return saved;
+    });
+  }
+
   private packEpisode(episodeId: string, outcome: PackedEpisodeEvidence["outcome"], rTask?: number): PackedEpisodeEvidence {
-    const turns = this.deps.repos.runtime.listRawTurnsByEpisode(episodeId, 1000);
+    const turns = this.deps.repos.runtime.listRawTurnsByEpisode(episodeId, -1);
     return {
       episode_id: episodeId,
       r_task: typeof rTask === "number" ? rTask : null,
@@ -493,9 +631,29 @@ export class SkillClusterPipeline {
   }
 
   private markProcessed(cluster: SkillClusterRecord, episodeIds: string[], at: string): SkillClusterRecord {
+    for (const id of episodeIds) {
+      const episode = this.deps.repos.runtime.getEpisode(id);
+      if (episode) this.deps.repos.runtime.updateEpisodeMeta(id, {
+        clusterProcessedFeatures: this.processedFingerprint(episode.meta.clusterFeatures as EpisodeSkillFeatures | undefined)
+      }, at);
+    }
     const processedEpisodeIds = uniqSorted([...cluster.processedEpisodeIds, ...episodeIds]);
     const next = { ...cluster, processedEpisodeIds, updatedAt: at };
     return this.deps.repos.runtime.updateSkillCluster(next);
+  }
+
+  /**
+   * Track the features and evidence actually sent to the model. Raw steps and scores can
+   * change without changing clustering features, while scoring timestamps and Episode
+   * lifecycle metadata must not turn identical evidence into a new contribution.
+   */
+  private processedFingerprint(features: EpisodeSkillFeatures | undefined): string | undefined {
+    if (!features) return undefined;
+    const episode = this.deps.repos.runtime.getEpisode(features.episodeId);
+    return createHash("sha256").update(JSON.stringify({
+      features,
+      evidence: this.packEpisode(features.episodeId, features.outcome, episode?.rTask)
+    })).digest("hex");
   }
 
   private async generateProcedure(input: {
@@ -576,13 +734,17 @@ export class SkillClusterPipeline {
     successEpisodeIds: string[];
     at: string;
   }): { memory: MemoryRow; created: boolean; previous?: MemoryRow } {
+    const previousSkill = input.existing ? skillMetaFromMemory(input.existing) : undefined;
     const title = generatedSkillTitle(input.outputLanguage, [input.name, input.draftName],
       input.displayTitle, input.existing?.info.title, input.procedure.summary);
     const invocationGuide = renderDirectSkillGuide(title, input.procedure);
-    const evidenceAnchorIds = uniqSorted([
+    const historicalIds = uniqSorted([
+      ...(Array.isArray(input.existing?.properties.internal_info.direct_historical_anchor_ids)
+        ? input.existing.properties.internal_info.direct_historical_anchor_ids.filter((id): id is string => typeof id === "string") : []),
       ...((input.existing ? skillMetaFromMemory(input.existing)?.evidenceAnchorIds : []) ?? []),
       ...input.successEpisodeIds
     ]);
+    const evidenceAnchorIds = this.currentSuccessAnchors(historicalIds, input.cluster);
     const seed = input.existing ?? input.episode;
     const memory = this.deps.buildMemory({
       id: input.existing?.id,
@@ -601,11 +763,12 @@ export class SkillClusterPipeline {
       info: {
         name: input.name,
         title,
-        eta: 0.6,
+        eta: previousSkill?.eta ?? 0.6,
         status: "active",
         source_memory_ids: []
       },
       internal: {
+        ...(input.existing?.properties.internal_info ?? {}),
         source: DIRECT_SKILL_SOURCE,
         plugin_algorithm: DIRECT_SKILL_PLUGIN,
         read_only: false,
@@ -614,22 +777,29 @@ export class SkillClusterPipeline {
         source_policy_ids: [],
         source_world_model_ids: [],
         evidence_anchor_ids: evidenceAnchorIds,
+        direct_historical_anchor_ids: historicalIds,
+        direct_sources_suspended: false,
+        direct_evidence_rebuild_required: false,
         name: input.name,
         invocation_guide: invocationGuide,
         procedure_json: input.procedure,
         verification: input.verification,
-        eta: 0.6,
+        eta: previousSkill?.eta ?? 0.6,
         support: evidenceAnchorIds.length,
         gain: 0.4,
         skill: {
+          ...(isRecord(input.existing?.properties.internal_info.skill) ? input.existing.properties.internal_info.skill : {}),
           name: input.name,
-          eta: 0.6,
+          eta: previousSkill?.eta ?? 0.6,
           status: "active",
           support: evidenceAnchorIds.length,
           gain: 0.4,
           source_policy_ids: [],
           source_world_model_ids: [],
           evidence_anchor_ids: evidenceAnchorIds,
+          direct_historical_anchor_ids: historicalIds,
+          direct_sources_suspended: false,
+          direct_evidence_rebuild_required: false,
           invocation_guide: invocationGuide,
           procedure_json: input.procedure,
           verification: input.verification
@@ -637,7 +807,12 @@ export class SkillClusterPipeline {
       },
       createdAt: input.at
     });
-    const upsert = this.deps.upsertEvolutionMemory(memory);
+    // The generic evolution upsert creates a new row for archived memories.
+    // An automatically suspended direct Skill is the same owned object.
+    const upsert = input.existing
+      ? { memory: this.deps.repos.memories.updateIfVersion({ ...memory, createdAt: input.existing.createdAt }, input.existing.version),
+        created: false, previous: input.existing }
+      : this.deps.upsertEvolutionMemory(memory);
     for (const episodeId of input.successEpisodeIds) {
       this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "Skill", upsert.memory.id, input.at);
     }
@@ -685,6 +860,7 @@ export class SkillClusterPipeline {
       rebuildScope: string;
     }
   ): Promise<void> {
+    const inputRevision = this.clusterInputRevision(cluster.id);
     let nextMd = cluster.metaSkillMd || SEED_META_SKILL_MD;
     if (this.deps.config.algorithm.skill.useLlm && this.deps.skillLlm.isConfigured()) {
       try {
@@ -726,8 +902,11 @@ export class SkillClusterPipeline {
     } else if (input.rejectReason) {
       nextMd = `${SEED_META_SKILL_MD}\n\nLast reject: ${input.rejectReason}`;
     }
+    if (this.clusterInputRevision(cluster.id) !== inputRevision) return;
+    const current = this.deps.repos.runtime.getSkillCluster(cluster.id);
+    if (!current || current.metaSkillMd !== cluster.metaSkillMd) return;
     this.deps.repos.runtime.updateSkillCluster({
-      ...cluster,
+      ...current,
       metaSkillMd: nextMd,
       updatedAt: nowIso()
     });

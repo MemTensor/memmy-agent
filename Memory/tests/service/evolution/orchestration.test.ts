@@ -567,7 +567,8 @@ describe("MemoryService / evolution / orchestration", () => {
       confidence: 0.5
     });
     insertTracePolicyLinkForTest(db, {
-      userId: "user-l2-activation-downstream",
+      // Links are attributed to the captured L1, while this fixture's policy is historical.
+      userId: (db.db.prepare("SELECT user_id FROM memories WHERE id=?").get(first.l1MemoryId) as { user_id: string }).user_id,
       l1MemoryId: first.l1MemoryId,
       l2MemoryId: "policy_l2_activation_downstream"
     });
@@ -625,7 +626,8 @@ describe("MemoryService / evolution / orchestration", () => {
     expect(skillJob?.target_memory_id).toBe("policy_l2_activation_downstream");
     expect(JSON.parse(skillJob!.payload_json)).toMatchObject({
       reason: "l2.policy.updated",
-      previousStatus: "active",
+      // The first candidate-to-active transition is retained; identical evidence no longer overwrites it.
+      previousStatus: "candidate",
       status: "active"
     });
 
@@ -683,6 +685,15 @@ describe("MemoryService / evolution / orchestration", () => {
       sourceTraceId: completeB.l1MemoryId,
       sourceEpisodeId: assignedEpisodeId(service, completeB)
     });
+    // Captures are device-owned; retain these historical policies with an explicit
+    // support link attributed to each real source, rather than a cross-owner ID alone.
+    for (const [sourceId, policyId] of [[completeA.l1MemoryId, "policy_downstream_profile_a"],
+      [completeB.l1MemoryId, "policy_downstream_profile_b"]]) {
+      insertTracePolicyLinkForTest(db, {
+        userId: (db.db.prepare("SELECT user_id FROM memories WHERE id=?").get(sourceId) as { user_id: string }).user_id,
+        l1MemoryId: sourceId!, l2MemoryId: policyId!
+      });
+    }
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     db.db.prepare(
       `INSERT INTO evolution_jobs (

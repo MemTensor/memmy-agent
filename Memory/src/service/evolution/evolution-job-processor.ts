@@ -1,3 +1,5 @@
+import { episodeInputRevision } from "./episode-revision.js";
+import { policiesDependingOnTrace, policyEvidenceSnapshot } from "./policy-evidence.js";
 import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   policyMetaFromMemory,
@@ -120,6 +122,7 @@ export class EvolutionJobProcessor {
     this.policy = new PolicyInductionEngine({
       get config() { return owner.deps.config; },
       repos: deps.repos,
+      episodeRevision: id => episodeInputRevision(deps.repos, id, true),
       nowIso,
       get skillLlm() { return owner.deps.skillLlm; },
       get embedder() { return owner.deps.embedder; },
@@ -321,7 +324,7 @@ export class EvolutionJobProcessor {
       for (const trace of validTraces) {
         if (linkedTraceIds.has(trace.id)) continue;
         this.deps.repos.runtime.insertTracePolicyLink({
-          userId: memory.userId,
+          userId: trace.userId,
           l1MemoryId: trace.id,
           l2MemoryId: policy.id,
           relation: l2SupportRelation(memory),
@@ -362,23 +365,7 @@ export class EvolutionJobProcessor {
         item.policy?.status === "active"
       )
       .map(({ memory, policy }) => {
-        const unifiedEvidence = this.deps.config.algorithm.l2Induction.mode === "unified" || policy.schemaVersion === 2;
-        const linkedTraceIds = new Set(this.deps.repos.runtime.listTracePolicyLinks({
-          l2MemoryId: policy.id,
-          limit: 1000
-        }).filter((link) => !unifiedEvidence || link.relation === l2SupportRelation(memory)).map((link) => link.l1MemoryId));
-        const candidateTraceIds = Array.from(new Set([
-          ...policy.sourceTraceIds,
-          ...linkedTraceIds
-        ]));
-        const validTraces = this.deps.repos.memories
-          .getMany(candidateTraceIds)
-          .map((candidate) => this.deps.traceMeta(candidate))
-          .filter((trace): trace is TraceMeta => Boolean(
-            trace && (unifiedEvidence
-              ? trace.userId === memory.userId && this.policy.isPolicyEvidenceValid(trace, policy)
-              : this.policy.isTraceEligibleForL2(trace))
-          ));
+        const { linkedTraceIds, validTraces } = policyEvidenceSnapshot(this.deps.repos, memory, this.policy.isAcceptedSuccessEvidence.bind(this.policy));
         return { memory, policy, linkedTraceIds, validTraces };
       });
   }
@@ -386,11 +373,7 @@ export class EvolutionJobProcessor {
   invalidateMemoryDependencies(memory: MemoryRow, at: string): void {
     if (memory.memoryLayer === "L1") {
       this.deps.repos.runtime.invalidateUnifiedL2Source(memory.id, memory.userId, at);
-      const policyIds = Array.from(new Set(
-        this.deps.repos.runtime
-          .listTracePolicyLinks({ l1MemoryId: memory.id, limit: 1000 })
-          .map((link) => link.l2MemoryId)
-      ));
+      const policyIds = policiesDependingOnTrace(this.deps.repos, memory).map(policy => policy.id);
       for (const policyId of policyIds) {
         const updated = this.policy.recomputePolicyStats(policyId, at);
         const updatedPolicy = updated ? policyMetaFromMemory(updated) : null;

@@ -1,3 +1,4 @@
+import { TaskExperienceProcessingCard } from "./task-experience-processing.js";
 import { usePanelReadGuard, usePanelVisibilityLifecycle } from "./panel-visibility.js";
 import { canPreservePanelResult } from "./panel-view-status.js";
 import { usePanelViewStatus } from "./panel-view-status.js";
@@ -297,6 +298,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
 
   return (
     <TasksSubPageView
+      client={props.client}
       state={state}
       query={query}
       selectedTask={selectedTask}
@@ -322,6 +324,7 @@ export function TasksSubPage(props: TasksSubPageProps) {
 }
 
 export interface TasksSubPageViewProps {
+  client?: MemoryRuntimeClient | null;
   state: TasksState;
   query: string;
   selectedTask?: MemoryTask | null;
@@ -418,12 +421,12 @@ export function TasksSubPageView(props: TasksSubPageViewProps) {
       )}
       {props.state.status === "ready" && <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />}
 
-      {props.selectedTask && <TaskDetailDrawer task={props.selectedTask} onClose={props.onCloseTask} onDelete={props.onDeleteTask} />}
+      {props.selectedTask && <TaskDetailDrawer client={props.client} task={props.selectedTask} onClose={props.onCloseTask} onDelete={props.onDeleteTask} />}
     </section>
   );
 }
 
-function TaskDetailDrawer(props: { task: MemoryTask; onClose: () => void; onDelete: (task: MemoryTask) => Promise<void> }) {
+function TaskDetailDrawer(props: { client?: MemoryRuntimeClient | null; task: MemoryTask; onClose: () => void; onDelete: (task: MemoryTask) => Promise<void> }) {
   const { t } = useTranslation();
   const task = props.task;
   const skillLabel = task.skillStatus ? skillStatusLabel(task.skillStatus, t) : t("memory.tasks.skill.queued");
@@ -466,6 +469,7 @@ function TaskDetailDrawer(props: { task: MemoryTask; onClose: () => void; onDele
             )}
           </section>
 
+          {props.client && <TaskExperienceProcessingCard key={task.id} client={props.client} episodeId={task.id} />}
           <section className="memory-detail-card">
             <h5 className="memory-detail-card__label">{t("memory.tasks.conversation")}</h5>
             {task.chat.length > 0 ? (

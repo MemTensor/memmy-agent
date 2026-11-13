@@ -12,6 +12,8 @@ import type {
   PanelItemsOutput,
   PanelTasksInput,
   PanelTasksOutput,
+  TaskExperienceProcessing,
+  RetryTaskExperienceProcessing,
   DeletePanelTaskOutput,
   MemoryApiLogsInput,
   MemoryApiLogsOutput,
@@ -37,6 +39,8 @@ export interface PanelService {
   taskDetail(id: string, cursor: string | undefined, ctx: RuntimeContext): Promise<PanelTaskDetailOutput>;
   taskField(id: string, turnId: string, input: PanelTaskFieldInput, ctx: RuntimeContext): Promise<PanelTaskFieldOutput>;
   tasks(input: PanelTasksInput, ctx: RuntimeContext): Promise<PanelTasksOutput>;
+  taskExperienceProcessing(id: string, ctx: RuntimeContext): Promise<TaskExperienceProcessing>;
+  retryTaskExperienceProcessing(id: string, ctx: RuntimeContext): Promise<RetryTaskExperienceProcessing>;
   deleteTask(id: string, ctx: RuntimeContext): Promise<DeletePanelTaskOutput>;
   memoryApiLogs(input: MemoryApiLogsInput, ctx: RuntimeContext): Promise<MemoryApiLogsOutput>;
 }
@@ -88,6 +92,14 @@ export function createPanelService(deps: { memoryClient: MemoryClient; getUserId
 
     async deleteTask(id, ctx) {
       return deps.memoryClient.deletePanelTask(id, writeContext(ctx));
+    },
+
+    async taskExperienceProcessing(id, ctx) {
+      return deps.memoryClient.taskExperienceProcessing(id, context(ctx));
+    },
+
+    async retryTaskExperienceProcessing(id, ctx) {
+      return deps.memoryClient.retryTaskExperienceProcessing(id, context(ctx));
     },
 
     async memoryApiLogs(input, ctx) {

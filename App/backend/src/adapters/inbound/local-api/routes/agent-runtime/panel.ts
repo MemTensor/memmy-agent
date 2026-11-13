@@ -6,7 +6,7 @@ import { PanelItemsInputSchema, PanelTasksInputSchema } from "@memmy/local-api-c
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { withErrorEnvelope } from "../../../../../services/error-envelope.js";
-import { cancellableRuntimeContextFromRequest as panelRequestContext } from "../../../../../services/runtime-context.js";
+import { runtimeContextFromRequest, cancellableRuntimeContextFromRequest as panelRequestContext } from "../../../../../services/runtime-context.js";
 import type { AgentRuntimeRouteDeps } from "./index.js";
 
 export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRouteDeps): void {
@@ -53,6 +53,23 @@ export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRout
     })
   );
 
+  app.get(
+    "/api/v1/panel/tasks/:id/experience-processing",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+      return reply.send(await deps.services.panel.taskExperienceProcessing(id, panelRequestContext(request, reply, deps.timeZone)));
+    })
+  );
+
+  app.post(
+    "/api/v1/panel/tasks/:id/experience-processing/retry",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+      return reply.send(await deps.services.panel.retryTaskExperienceProcessing(id, runtimeContextFromRequest(request, deps.timeZone)));
+    })
+  );
   app.post("/api/v1/panel/logs",{preHandler:deps.authenticateRuntimeToken},withErrorEnvelope(async(request,reply)=>reply.send(await deps.services.panel.logs(PanelLogsInputSchema.parse(request.body),panelRequestContext(request,reply,deps.timeZone)))));
   app.get("/api/v1/panel/logs/:id",{preHandler:deps.authenticateRuntimeToken},withErrorEnvelope(async(request,reply)=>{
     const {id}=z.object({id:z.coerce.number().int().positive()}).parse(request.params);

@@ -981,6 +981,19 @@ export const PanelTasksOutputSchema = z.object({
 });
 export type PanelTasksOutput = z.infer<typeof PanelTasksOutputSchema>;
 
+/** Shared response for task experience generation across desktop and Memory. */
+export const TaskExperienceProcessingSchema = z.object({
+  episodeId: z.string(),
+  state: z.enum(["complete", "pending", "queued", "running", "failed", "blocked"]),
+  pendingCount: z.number().int().nonnegative(),
+  canRetry: z.boolean(),
+  jobId: z.string().optional(),
+  errorCode: z.enum(["invalid_model_output", "model_or_processing_failed", "task_changed"]).optional(),
+  serverTime: z.string()
+});
+export type TaskExperienceProcessing = z.infer<typeof TaskExperienceProcessingSchema>;
+export const RetryTaskExperienceProcessingSchema = TaskExperienceProcessingSchema.extend({ accepted: z.boolean() });
+export type RetryTaskExperienceProcessing = z.infer<typeof RetryTaskExperienceProcessingSchema>;
 
 /** Explicit summary contract; legacy panel/tasks keeps its turns field. */
 export const PanelTaskSummarySchema = PanelTaskItemSchema.omit({ turns: true }).extend({

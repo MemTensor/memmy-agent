@@ -59,8 +59,22 @@ describe("memory runtime client", () => {
     vi.unstubAllGlobals();
   });
 
+  it("passes cancellation for experience reads and never retries an uncertain recovery POST", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
+      if (init.method === "POST") throw new TypeError("lost response");
+      expect(init.signal).toBe(controller.signal);
+      return new Response(JSON.stringify({episodeId:"e",state:"complete",pendingCount:0,canRetry:false,serverTime:"2026-11-10T00:00:00Z"}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpMemoryRuntimeClient(runtimeConfig);
+    await expect(client.taskExperienceProcessing!("e", controller.signal)).resolves.toMatchObject({state:"complete"});
+    await expect(client.retryTaskExperienceProcessing!("e")).rejects.toThrow("lost response");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("declares the memory runtime endpoints exposed under /api/v1", () => {
-    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(28);
+    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(30);
     expect(MEMORY_RUNTIME_ENDPOINTS).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
@@ -88,9 +102,23 @@ describe("memory runtime client", () => {
       "GET /api/v1/panel/analysis",
       "GET /api/v1/panel/items",
       "GET /api/v1/panel/tasks",
+      "GET /api/v1/panel/tasks/:id/experience-processing",
+      "POST /api/v1/panel/tasks/:id/experience-processing/retry",
       "GET /api/v1/panel/task-summaries",
       "DELETE /api/v1/panel/tasks/:id"
     ]);
+  });
+
+  it("reads and retries only the selected task's experience processing", async () => {
+    const result = { episodeId: "e/1", state: "queued", pendingCount: 2, canRetry: false, accepted: true, serverTime: "2026-11-10T00:00:00Z" };
+    const fetchMock = vi.fn(async (_url: URL, _init?: RequestInit) => new Response(JSON.stringify(result), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createHttpMemoryRuntimeClient(runtimeConfig);
+    await client.taskExperienceProcessing!("e/1");
+    await expect(client.retryTaskExperienceProcessing!("e/1")).resolves.toMatchObject({ accepted: true, pendingCount: 2 });
+    expect(fetchMock.mock.calls[0]![0].pathname).toBe("/api/v1/panel/tasks/e%2F1/experience-processing");
+    expect(fetchMock).toHaveBeenLastCalledWith(new URL("/api/v1/panel/tasks/e%2F1/experience-processing/retry", runtimeConfig.baseUrl),
+      expect.objectContaining({ method: "POST", body: "{}" }));
   });
 
   it("falls back only for an explicitly unsupported summary route", async () => {

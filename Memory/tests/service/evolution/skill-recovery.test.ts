@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LlmClient } from "../../../src/index.js";
+import { Repositories } from "../../../src/storage/repositories.js";
+import { l2ComparisonScope } from "../../../src/service/evolution/l2-comparison-scope.js";
 import { assignedEpisodeId, createMemoryServiceFixture, LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
-import { insertActivePolicyMemory, queueSkillCrystallizationJobForTest } from "../../fixtures/evolution-fixture.js";
+import { insertActivePolicyMemory, insertTracePolicyLinkForTest, queueSkillCrystallizationJobForTest } from "../../fixtures/evolution-fixture.js";
 import { createNoToolSkillLlm } from "./evolution-llm-stubs.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
@@ -45,6 +47,15 @@ describe("L2 to Skill durable recovery", () => {
           answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result." });
         insertActivePolicyMemory(db, { id: "policy", userId, sessionId: session.sessionId, agentId: "codex", appId: "",
           profileId: "jiang", sourceTraceId: complete.l1MemoryId, sourceEpisodeId: assignedEpisodeId(service, complete) });
+        // Public capture uses the device owner; the retained historical Policy
+        // requires an actual attributed support link to trust that source.
+        // The session has no project; normal memory writes store absent appId
+        // as NULL instead of this older SQL helper's empty-string placeholder.
+        db.db.prepare("UPDATE memories SET app_id = NULL WHERE id = 'policy'").run();
+        const repos = new Repositories(db.db);
+        const source = repos.memories.get(complete.l1MemoryId)!;
+        expect(l2ComparisonScope(source)).toBe(l2ComparisonScope(repos.memories.get("policy")!));
+        insertTracePolicyLinkForTest(db, { userId: source.userId, l1MemoryId: source.id, l2MemoryId: "policy" });
         db.db.prepare("UPDATE evolution_jobs SET status = 'succeeded'").run();
         mutateEvidence = () => db.db.prepare("UPDATE memories SET version = version + 1 WHERE id = ?").run(complete.l1MemoryId);
         queueSkillCrystallizationJobForTest(db, { id: "extract", userId, sessionId: session.sessionId,

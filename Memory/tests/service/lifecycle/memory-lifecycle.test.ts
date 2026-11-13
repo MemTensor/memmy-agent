@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../../../src/contracts/index.js";
 import { Repositories } from "../../../src/storage/repositories.js";
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { createMemoryServiceFixture, createBatchReflectionLlm } from "../../fixtures/memory-service-fixture.js";
 import {
   insertActivePolicyMemory,
@@ -37,9 +38,11 @@ describe("MemoryService / lifecycle / governance", () => {
       answer: "已修复失败并验证测试通过。"
     }));
     makeTraceEligibleForL2(db, trace.l1MemoryId);
+    // Match the owner of the new local L1; this case restores a missing link,
+    // rather than accepting an unproven cross-owner declaration.
     insertActivePolicyMemory(db, {
       id: "policy_restorable",
-      userId: namespace.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.sessionId,
       agentId: namespace.source,
       appId: "restorable-policy-workspace",
@@ -155,7 +158,7 @@ describe("MemoryService / lifecycle / governance", () => {
       answer: "已验证回滚流程可用。"
     }));
     const policyInput = {
-      userId: namespace.userId,
+      userId: DEVICE_MEMORY_OWNER,
       sessionId: session.sessionId,
       agentId: namespace.source,
       appId: "dependency-workspace",
@@ -174,7 +177,7 @@ describe("MemoryService / lifecycle / governance", () => {
       sourceEpisodeId: assignedEpisodeId(service, p2Trace)
     });
     insertTracePolicyLinkForTest(db, {
-      userId: namespace.userId,
+      userId: DEVICE_MEMORY_OWNER,
       l1MemoryId: p1Trace.l1MemoryId,
       l2MemoryId: "policy_dependency_p1"
     });
@@ -198,6 +201,18 @@ describe("MemoryService / lifecycle / governance", () => {
       sourcePolicyIds: ["policy_dependency_p1", "policy_dependency_p2"],
       evidenceAnchorIds: [p1Trace.l1MemoryId, p2Trace.l1MemoryId]
     });
+    // The SQL helpers predate project-scoped comparison and omit project_id.
+    // Keep these derived fixtures in the same project as their real L1 evidence.
+    const sourceScope = db.db.prepare(`SELECT json_extract(info_json, '$.project_id') AS projectId
+      FROM memories WHERE id = ?`).get(p1Trace.l1MemoryId) as { projectId: string };
+    expect(sourceScope.projectId).toBe(namespace.projectId);
+    for (const id of ["policy_dependency_p1", "policy_dependency_p2", "world_dependency_p1",
+      "skill_dependency_p1", "skill_dependency_shared"]) {
+      db.db.prepare(`UPDATE memories SET
+        info_json = json_set(info_json, '$.project_id', ?),
+        properties_json = json_set(properties_json, '$.info.project_id', ?)
+        WHERE id = ?`).run(namespace.projectId, namespace.projectId, id);
+    }
     setSkillSteps(db, "skill_dependency_p1", [{
       id: "step-p1-only",
       title: "P1 only",
