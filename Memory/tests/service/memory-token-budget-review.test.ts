@@ -329,6 +329,9 @@ describe("memory token budget review regressions", () => {
       }))
     }));
     await settleCaptureAssignments(service);
+    const episodeId = repos.runtime.getRawTurn(completed.rawTurnId)!.episodeId!;
+    repos.runtime.closeEpisode(episodeId);
+    repos.runtime.updateEpisodeReward(episodeId, { rTask: 1, rewardDetail: { reason: "verified" } });
     repos.runtime.setKv(MEMORY_BYOK_BUDGET_KV_KEY, {
       dailyUsed: 1_000_000,
       lifetimeUsed: 1_000_000,
@@ -394,6 +397,10 @@ describe("memory token budget review regressions", () => {
         output: { ok: true, index }
       }))
     }));
+    await settleCaptureAssignments(reverse.service);
+    const reverseEpisodeId = reverseRepos.runtime.getRawTurn(reverseCompleted.rawTurnId)!.episodeId!;
+    reverseRepos.runtime.closeEpisode(reverseEpisodeId);
+    reverseRepos.runtime.updateEpisodeReward(reverseEpisodeId, { rTask: 1, rewardDetail: { reason: "verified" } });
     reverseRepos.runtime.enqueueJob({
       id: "job-span-platform-summary",
       jobType: "span_big_turn",

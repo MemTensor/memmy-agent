@@ -3073,34 +3073,50 @@ export class RuntimeRepository {
   }
 
   reopenEpisode(episodeId: string, metaPatch: Record<string, unknown> = {}, at = nowIso()): EpisodeRecord | undefined {
-    const episode = this.getEpisode(episodeId);
-    if (!episode) return undefined;
-    const { reward: _staleReward, ...baseMeta } = episode.meta;
-    const meta = {
-      ...baseMeta,
-      ...metaPatch
-    };
-    this.db
-      .prepare(
-        `UPDATE episodes
-         SET status = 'open',
-             closed_at = NULL,
-             r_task = NULL,
-             reward_detail_json = '{}',
-             meta_json = ?,
-             updated_at = ?
-         WHERE id = ?`
-      )
-      .run(toJson(meta), at, episodeId);
-    return {
-      ...episode,
-      status: "open",
-      closedAt: null,
-      rTask: undefined,
-      rewardDetail: {},
-      meta,
-      updatedAt: at
-    };
+    return this.db.transaction((): EpisodeRecord | undefined => {
+      const episode = this.getEpisode(episodeId);
+      if (!episode) return undefined;
+      const { reward: _staleReward, closeReason: _closeReason, abandonReason: _abandonReason,
+        rewardInputVersion: _rewardInputVersion, ...baseMeta } = episode.meta;
+      const generation = typeof episode.meta.processingGeneration === "number"
+        && Number.isSafeInteger(episode.meta.processingGeneration) && episode.meta.processingGeneration >= 0
+        ? episode.meta.processingGeneration : 0;
+      const meta = {
+        ...baseMeta,
+        ...metaPatch,
+        processingGeneration: generation + 1,
+        rewardDirty: { reason: "episode_reopened", at }
+      };
+      this.db
+        .prepare(
+          `UPDATE episodes
+           SET status = 'open',
+               closed_at = NULL,
+               r_task = NULL,
+               reward_detail_json = '{}',
+               meta_json = ?,
+               updated_at = ?
+           WHERE id = ?`
+        )
+        .run(toJson(meta), at, episodeId);
+      const cluster = this.getSkillClusterForEpisode(episodeId);
+      if (cluster?.skillMemoryId) this.enqueueJobInTransaction({
+        id: newId("job"), jobType: "skill_batch_evolve", status: "queued",
+        dedupeKey: `skill-revalidate:${cluster.id}:${episodeId}:${generation + 1}`,
+        userId: episode.userId, sessionId: episode.sessionId, episodeId, targetMemoryId: cluster.skillMemoryId,
+        payload: { reason: "episode.reopened", clusterId: cluster.id, episodeGeneration: generation + 1 },
+        attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at
+      });
+      return {
+        ...episode,
+        status: "open",
+        closedAt: null,
+        rTask: undefined,
+        rewardDetail: {},
+        meta,
+        updatedAt: at
+      };
+    })();
   }
 
   countEpisodesByStatus(userId?: string): Record<"open" | "processing" | "closed", number> {
@@ -6391,6 +6407,12 @@ export class RuntimeRepository {
       input.createdAt, input.updatedAt);
   }
 
+  rejectUnifiedL2Candidate(id: string, userId: string, sourceVersion: string, at: string): void {
+    this.db.prepare(`UPDATE l2_candidate_pool SET status = 'rejected', updated_at = ?
+      WHERE id = ? AND user_id = ? AND json_extract(evidence_json, '$.sourceVersion') = ?`)
+      .run(at, id, userId, sourceVersion);
+  }
+
   listUnifiedL2Candidates(input: {
     userId: string;
     episodeId: string | null;
@@ -6512,6 +6534,23 @@ export class RuntimeRepository {
         input.createdAt ?? nowIso()
       );
     return id;
+  }
+
+  /** Current support links plus retained source metadata, without a per-trace global scan or LIMIT. */
+  listPolicyIdsForTraceSources(traceIds: readonly string[]): string[] {
+    if (!traceIds.length) return [];
+    return this.db.prepare(`WITH requested(id) AS (SELECT value FROM json_each(?))
+      SELECT p.id FROM memories p
+      WHERE p.memory_layer = 'L2' AND p.deleted_at IS NULL AND (
+        EXISTS (SELECT 1 FROM trace_policy_links l JOIN requested r ON r.id = l.l1_memory_id
+          WHERE l.l2_memory_id = p.id AND l.relation = CASE
+            WHEN COALESCE(json_extract(p.properties_json, '$.internal_info.policy.content_revision'), 1) <= 1
+            THEN 'supports' ELSE 'supports:r' || json_extract(p.properties_json, '$.internal_info.policy.content_revision') END)
+        OR EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(p.properties_json, '$.internal_info.policy.source_trace_ids'), '[]')) s
+          JOIN requested r ON r.id = s.value)
+        OR EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(p.properties_json, '$.internal_info.source_trace_ids'), '[]')) s
+          JOIN requested r ON r.id = s.value)
+      ) ORDER BY p.id`).pluck().all(toJson([...new Set(traceIds)])) as string[];
   }
 
   listTracePolicyLinks(input: {

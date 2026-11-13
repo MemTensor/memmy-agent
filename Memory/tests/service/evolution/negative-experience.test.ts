@@ -1,6 +1,9 @@
+import { revisionInputHash } from "../../../src/service/evolution/episode-revision.js";
+import { NegativeExperiencePipeline } from "../../../src/service/evolution/negative-experience-pipeline.js";
+import { Repositories } from "../../../src/storage/repositories.js";
 import { assignedEpisodeId, settleCaptureAssignments } from "../../fixtures/memory-service-fixture.js";
 import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type LlmClient } from "../../../src/index.js";
 import {
   createCapturingEmbedder,
@@ -92,11 +95,61 @@ function createCountingLlm(
 }
 
 describe("MemoryService / evolution / negative experience", () => {
+  it.each(["reopen", "reclose", "edit"] as const)("rejects stale negative drafts after %s", async scenario => {
+    const llm = createCountingLlm([]);
+    const { db, service } = createTestService({ llm, skillLlm: llm, config: LEGACY_TEST_CONFIG });
+    const session = service.openSession({ namespace: { source: "codex", profileId: "647", userId: "negative-race" } });
+    const turn = await service.completeTurn(`negative-race-${scenario}`, { sessionId: session.sessionId,
+      query: "Configure TLS and verify port 443", answer: "Port 80 configured, TLS verification skipped" });
+    await settleCaptureAssignments(service);
+    const repos = new Repositories(db.db);
+    const episodeId = assignedEpisodeId(service, turn);
+    repos.runtime.closeEpisode(episodeId);
+    let release!: () => void;
+    let enter!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const complete = llm.completeJson.bind(llm);
+    llm.completeJson = async (messages, options) => {
+      if (options.operation === "failure.experience.sink.v5") { enter(); await gate; }
+      return complete(messages, options);
+    };
+    const save = vi.fn((): never => { throw new Error("stale draft must not write"); });
+    const pipeline = new NegativeExperiencePipeline({ repos, config: LEGACY_TEST_CONFIG, skillLlm: llm,
+      buildMemory: save, upsertEvolutionMemory: save, enqueueJob: save, namespaceIdFromMemory: () => "fixture" });
+    const now = new Date().toISOString();
+    const pending = pipeline.materialize({ id: `negative-${scenario}`, jobType: "negative_experience",
+      userId: repos.runtime.getEpisode(episodeId)!.userId, episodeId, status: "queued", attempts: 0, maxAttempts: 3,
+      payload: { source: "episode_reward", issue: "Wrong TLS port and verification skipped" }, createdAt: now, updatedAt: now });
+    await Promise.race([entered, pending.then(() => { throw new Error("negative draft returned before model call"); })]);
+    if (scenario === "edit") {
+      const raw = repos.runtime.listRawTurnsByEpisode(episodeId)[0]!;
+      repos.runtime.updateRawTurn({ ...raw, assistantText: "Port 443 and TLS verification now complete" });
+    } else {
+      repos.runtime.reopenEpisode(episodeId);
+      if (scenario === "reclose") repos.runtime.closeEpisode(episodeId);
+    }
+    release();
+    await expect(pending).rejects.toThrow("inputs changed during generation");
+    expect(save).not.toHaveBeenCalled();
+    expect(repos.memories.list({ memoryLayer: "L2" }, 100)).toHaveLength(0);
+    db.close();
+  });
+
   it("materializes explicit negative feedback from a complete failure sink draft", async () => {
     const operations: string[] = [];
     const embeddedTexts: string[] = [];
     const embeddingRoles: Array<"query" | "document" | undefined> = [];
     const llm = createCountingLlm(operations);
+    let rephrase = false;
+    const completeJson = llm.completeJson.bind(llm);
+    llm.completeJson = async <T extends Record<string, unknown>>(messages: Parameters<LlmClient["completeJson"]>[0], options: Parameters<LlmClient["completeJson"]>[1]): Promise<T> => {
+      const result = await completeJson<T>(messages, options);
+      if (rephrase && options.operation === "failure.experience.sink.v5") {
+        (result as Record<string, unknown>).trigger = "Before declaring a TLS service ready, check its secure listener.";
+      }
+      return result;
+    };
     const { db, service } = createTestService({
       llm,
       skillLlm: llm,
@@ -228,10 +281,46 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(recall.injectedContext.sections.find(
       (section) => section.id === "decision-guidance"
     )?.memoryIds ?? []).not.toContain(policies[0]!.id);
+    rephrase = true;
+    const repos = new Repositories(db.db);
+    const originalId = (db.db.prepare("SELECT id FROM evolution_jobs WHERE job_type = 'negative_experience' LIMIT 1").get() as { id: string }).id;
+    const original = repos.runtime.getJob(originalId)!;
+    repos.runtime.enqueueJob({ ...original, id: "647-rephrased-negative", dedupeKey: undefined,
+      status: "queued", attempts: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    await service.runWorkerOnce(50);
+    expect(service.panelItems({ namespace, layer: "L2" }).items).toHaveLength(1);
+    expect(operations.filter(operation => operation === "failure.experience.sink.v5")).toHaveLength(1);
+    const raw = repos.runtime.listRawTurnsByEpisode(original.episodeId!)[0]!;
+    repos.runtime.updateRawTurn({ ...raw, assistantText: "Revised attempt: TLS port is still unverified." });
+    repos.runtime.enqueueJob({ ...original, id: "647-revised-negative", dedupeKey: undefined,
+      status: "queued", attempts: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    const revisedRun = await service.runWorkerOnce(50);
+    expect(revisedRun.jobs.find(item => item.jobId === "647-revised-negative")?.status).toBe("succeeded");
+    expect(repos.memories.list({ memoryLayer: "L2", status: ["activated", "resolving"] }, 100)).toHaveLength(1);
+    expect(repos.memories.get(policies[0]!.id)?.status).toBe("archived");
+    expect(operations.filter(operation => operation === "failure.experience.sink.v5")).toHaveLength(2);
+    rephrase = false;
+    repos.runtime.updateRawTurn({ ...raw, assistantText: "Return to the original TLS evidence after checking the transcript." });
+    repos.runtime.enqueueJob({ ...original, id: "647-returned-negative", dedupeKey: undefined,
+      status: "queued", attempts: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    const returned = await service.runWorkerOnce(50);
+    expect(returned.jobs.find(item => item.jobId === "647-returned-negative")?.status).toBe("succeeded");
+    expect(repos.memories.list({ memoryLayer: "L2", status: ["activated", "resolving"] }, 100).map(item => item.id)).toEqual([policies[0]!.id]);
+    expect(repos.memories.list({ memoryLayer: "L2" }, 100)).toHaveLength(2);
+    const edited = repos.memories.get(policies[0]!.id)!;
+    repos.memories.update({ ...edited, memoryValue: `${edited.memoryValue}\nUser note: preserve my deployment exception.` });
+    const protectedRows = repos.memories.list({ memoryLayer: "L2" }, 100);
+    rephrase = true;
+    repos.runtime.updateRawTurn({ ...raw, assistantText: "New source update after user editing the experience." });
+    repos.runtime.enqueueJob({ ...original, id: "647-user-edited-negative", dedupeKey: undefined,
+      status: "queued", attempts: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    const protectedRun = await service.runWorkerOnce(50);
+    expect(protectedRun.jobs.find(item => item.jobId === "647-user-edited-negative")?.status).toBe("failed");
+    expect(repos.memories.list({ memoryLayer: "L2" }, 100)).toEqual(protectedRows);
     db.close();
   });
 
-  it("lets a complete sink draft materialize at the negative reward boundary", async () => {
+  it.each([false, true])("lets a complete sink draft withdraw and restore; long body=%s", async longBody => {
     const operations: string[] = [];
     const llm = createCountingLlm(operations, {
       goal_achievement: -0.15,
@@ -306,13 +395,43 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(policies).toHaveLength(1);
     expect(operations[0]).toBe("capture.summarize");
     expect(operations.filter((operation) => operation === "reward.reward.r_human.v7")).toHaveLength(1);
+    const repos = new Repositories(db.db);
+    const negativeId = (db.db.prepare("SELECT id FROM evolution_jobs WHERE job_type = 'negative_experience' LIMIT 1").get() as { id: string }).id;
+    const original = repos.runtime.getJob(negativeId)!;
+    const runRevision = async (id: string, rTask: number) => {
+      const at = new Date().toISOString();
+      repos.runtime.updateEpisodeReward(original.episodeId!, { rTask, rewardDetail: { reason: rTask > 0 ? "TLS now verified" : "TLS verification missing" } }, at);
+      const current = repos.runtime.getEpisode(original.episodeId!)!;
+      repos.runtime.enqueueJob({ ...original, id, payload: { ...original.payload,
+        rewardVersion: revisionInputHash([current.rTask, current.rewardDetail]) },
+        dedupeKey: undefined, status: "queued", attempts: 0, createdAt: at, updatedAt: at });
+      await service.runWorkerOnce(50);
+      expect(repos.runtime.getJob(id)?.status).toBe("succeeded");
+    };
+    if (longBody) {
+      const row = repos.memories.get(policies[0]!.id)!;
+      const body = row.memoryValue + "\n" + "Detailed accepted workflow. ".repeat(1200);
+      repos.memories.update({ ...row, memoryValue: body, properties: { ...row.properties,
+        internal_info: { ...row.properties.internal_info, negative_generated_hash: revisionInputHash(body) } } });
+    }
+    const generated = operations.filter(operation => operation === "failure.experience.sink.v5").length;
+    await runRevision("647-negative-withdraw", 1);
+    expect(repos.memories.get(policies[0]!.id)?.status).toBe("archived");
+    expect(operations.filter(operation => operation === "failure.experience.sink.v5")).toHaveLength(generated);
+    const retired = repos.memories.get(policies[0]!.id)!;
+    await runRevision("647-negative-withdraw-repeat", 1);
+    expect(repos.memories.get(retired.id)).toEqual(retired);
+    await runRevision("647-negative-restore", -0.15);
+    expect(repos.memories.get(retired.id)?.status).not.toBe("archived");
+    expect(repos.memories.list({ memoryLayer: "L2" }, 100)).toHaveLength(1);
     db.close();
   });
 
   it("merges the same avoidance across episodes and user ids", async () => {
+    const sink = createCountingLlm([]);
     const { db, service } = createTestService({
       llm: createCountingLlm([]),
-      skillLlm: createCountingLlm([]),
+      skillLlm: sink,
       config: {
         ...LEGACY_TEST_CONFIG,
         algorithm: {
@@ -444,6 +563,33 @@ describe("MemoryService / evolution / negative experience", () => {
         }
       }
     });
+    const repos = new Repositories(db.db);
+    // Independent post-generation feedback must survive a source being revised.
+    const shared = repos.memories.get(otherPolicy!.id)!;
+    const sharedPolicy = shared.properties.internal_info.policy as Record<string, unknown>;
+    repos.memories.update({ ...shared, status: "activated", properties: { ...shared.properties,
+      status: "activated", internal_info: { ...shared.properties.internal_info,
+        policy: { ...sharedPolicy, gain: 0.12, raw_gain: 0.12, status: "active" } } } });
+    const complete = sink.completeJson.bind(sink);
+    sink.completeJson = async <T extends Record<string, unknown>>(messages: Parameters<LlmClient["completeJson"]>[0], options: Parameters<LlmClient["completeJson"]>[1]): Promise<T> => {
+      const result = await complete<T>(messages, options);
+      if (options.operation === "failure.experience.sink.v5") (result as Record<string, unknown>).trigger = "Revised scope: validate the TLS listener before migration.";
+      return result;
+    };
+    const raw = repos.runtime.listRawTurnsByEpisode("negative-support-episode-one")[0]!;
+    repos.runtime.updateRawTurn({ ...raw, assistantText: "The TLS listener remains unverified after migration." });
+    const row = db.db.prepare("SELECT id FROM evolution_jobs WHERE job_type = 'negative_experience' AND episode_id = ? LIMIT 1")
+      .get("negative-support-episode-one") as { id: string };
+    const original = repos.runtime.getJob(row.id)!;
+    repos.runtime.enqueueJob({ ...original, id: "647-shared-revision", dedupeKey: undefined,
+      status: "queued", attempts: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    const revision = await service.runWorkerOnce(50);
+    expect(revision.jobs.find(item => item.jobId === "647-shared-revision")?.status).toBe("succeeded");
+    expect(repos.memories.get(otherPolicy!.id)?.properties.internal_info.policy).toMatchObject({
+      support: 2, source_episode_ids: ["negative-support-episode-two", "negative-support-other-episode"],
+      gain: 0.12, raw_gain: 0.12, status: "active" });
+    expect(repos.memories.get(otherPolicy!.id)?.status).toBe("activated");
+    expect(repos.memories.list({ memoryLayer: "L2", status: ["activated", "resolving"] }, 100)).toHaveLength(2);
     db.close();
   });
 

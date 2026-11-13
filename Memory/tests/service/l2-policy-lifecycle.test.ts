@@ -1,3 +1,5 @@
+import { FeedbackExperienceService } from "../../src/service/feedback/feedback-experience.js";
+import { createBatchReflectionLlm, createCapturingEmbedder } from "../fixtures/memory-service-fixture.js";
 import { DEVICE_MEMORY_OWNER } from "../../src/service/namespace/memory-owner.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { policyMetaFromMemory, traceMetaFromMemory } from "../../src/algorithm/plugin-algorithms.js";
@@ -27,6 +29,30 @@ describe("unified L2 evidence lifecycle", () => {
     } as unknown as PolicyInductionDeps);
   });
   afterEach(() => { vi.restoreAllMocks(); db.close(); });
+
+  it("withdraws only inferred failed Episode support and restores it after a later failure", () => {
+    repos.runtime.createSession({ id: "negative-session", userId: DEVICE_MEMORY_OWNER, source: "codex", profileId: "default",
+      status: "closed", meta: {}, openedAt: AT, closedAt: AT, updatedAt: AT });
+    for (const id of ["A", "B"]) {
+      repos.runtime.createEpisode({ id, userId: DEVICE_MEMORY_OWNER, sessionId: "negative-session", status: "closed",
+        l1MemoryIds: [id], rawTurnIds: [], feedbackIds: [], decisionRepairIds: [], l2PolicyIds: [], l3WorldModelIds: [],
+        skillMemoryIds: [], turnCount: 1, rTask: -1, rewardDetail: {}, pipelineStatus: "idle", meta: {}, openedAt: AT, closedAt: AT, updatedAt: AT });
+      repos.memories.insert(memory(id, "L1", { episode_id: id, value: -1 }));
+    }
+    repos.memories.insert(memory("negative-policy", "L2", { schema_version: 2, content_revision: 1,
+      status: "candidate", support: 2, gain: 0, raw_gain: 0, source_trace_ids: ["A", "B"],
+      experience_type: "failure_avoidance", special_source_trace_ids: ["A", "B"],
+      source_admissions: Object.fromEntries(["A", "B"].map(id => [id, { routes: ["negative"],
+        signals: [{ eventId: id, sourceBasis: "implicit_failure_analysis" }] }])) }));
+    for (const id of ["A", "B"]) repos.runtime.insertTracePolicyLink({ userId: DEVICE_MEMORY_OWNER,
+      l1MemoryId: id, l2MemoryId: "negative-policy", relation: "supports", createdAt: AT });
+    repos.runtime.updateEpisodeReward("A", { rTask: 1, rewardDetail: {} }, AT);
+    expect(policyMetaFromMemory(engine.recomputePolicyStats("negative-policy", AT)!)).toMatchObject({ support: 1, sourceTraceIds: ["B"] });
+    repos.runtime.updateEpisodeReward("B", { rTask: 1, rewardDetail: {} }, AT);
+    expect(policyMetaFromMemory(engine.recomputePolicyStats("negative-policy", AT)!)).toMatchObject({ support: 0, status: "quarantined" });
+    repos.runtime.updateEpisodeReward("A", { rTask: -1, rewardDetail: {} }, AT);
+    expect(policyMetaFromMemory(engine.recomputePolicyStats("negative-policy", AT)!)).toMatchObject({ support: 1, sourceTraceIds: ["A"] });
+  });
 
   function linkedEvidence(options: {
     sourceOwner: string; policyOwner: string; link?: boolean; linkOwner?: string; relation?: string;
@@ -87,6 +113,77 @@ describe("unified L2 evidence lifecycle", () => {
     expect(repos.memories.get(policy.id)!.userId).toBe(options.policyOwner);
     expect(repos.runtime.getRawTurn("raw")!.userId).toBe(options.sourceOwner);
     expect(repos.runtime.listTracePolicyLinks({ l2MemoryId: policy.id })).toEqual(before);
+  });
+
+  it("MEMMY-647 does not smooth identical policy evidence twice", () => {
+    const { source, policy } = linkedEvidence({ sourceOwner: DEVICE_MEMORY_OWNER, policyOwner: DEVICE_MEMORY_OWNER });
+    repos.memories.update({ ...repos.memories.get(source.id)!, properties: { internal_info: { memory_layer: "L1", trace: {
+      value: 1, raw_turn_id: "raw", episode_id: "episode-647", reflection: "PIVOTAL", alpha: 1
+    } } } });
+    const saved = repos.memories.get(policy.id)!;
+    repos.memories.update({ ...saved, properties: { ...saved.properties, internal_info: { ...saved.properties.internal_info,
+      policy: { ...saved.properties.internal_info.policy as Record<string, unknown>, gain: 0.2,
+        successful_episode_count: 1, successful_source_trace_ids: [source.id] }
+    } } });
+    const once = policyMetaFromMemory(engine.recomputePolicyStats(policy.id, AT)!)!;
+    const twice = policyMetaFromMemory(engine.recomputePolicyStats(policy.id, AT)!)!;
+    expect(twice.support).toBe(once.support);
+    expect(twice.gain).toBe(once.gain);
+    const currentSource = repos.memories.get(source.id)!;
+    repos.memories.update({ ...currentSource, status: "archived" });
+    const withdrawn = policyMetaFromMemory(engine.recomputePolicyStats(policy.id, AT)!)!;
+    expect(withdrawn.support).toBe(0);
+    expect(withdrawn.gain).toBeCloseTo(0.2);
+  });
+
+  it.each(["none", "feedback", "manual"] as const)("MEMMY-647 revises A in its original position while retaining B and %s", kind => {
+    const { source, policy } = linkedEvidence({ sourceOwner: DEVICE_MEMORY_OWNER, policyOwner: DEVICE_MEMORY_OWNER });
+    function setA(value: number) {
+      const row = repos.memories.get(source.id)!;
+      repos.memories.update({ ...row, properties: { ...row.properties, internal_info: { ...row.properties.internal_info,
+        trace: { value, raw_turn_id: "raw", episode_id: "episode-A", reflection: "PIVOTAL", alpha: 1 } } } });
+    }
+    const row = repos.memories.get(policy.id)!;
+    repos.memories.update({ ...row, properties: { ...row.properties, internal_info: { ...row.properties.internal_info,
+      policy: { ...row.properties.internal_info.policy as Record<string, unknown>, gain: 0.2,
+        successful_episode_count: 1, successful_source_trace_ids: [source.id] } } } });
+    setA(1);
+    expect(policyMetaFromMemory(engine.recomputePolicyStats(policy.id, AT)!)!.gain).toBeCloseTo(0.32);
+    repos.memories.insert(memory("B", "L1", { value: 0.8, episode_id: "episode-B", reflection: "PIVOTAL", alpha: 1 }));
+    const withA = repos.memories.get(policy.id)!;
+    repos.memories.update({ ...withA, properties: { ...withA.properties, internal_info: { ...withA.properties.internal_info,
+      policy: { ...withA.properties.internal_info.policy as Record<string, unknown>,
+        source_trace_ids: [source.id, "B"], successful_source_trace_ids: [source.id, "B"] } } } });
+    expect(policyMetaFromMemory(engine.recomputePolicyStats(policy.id, AT)!)!.gain).toBeCloseTo(0.352);
+    if (kind === "feedback") {
+      const unexpected = (): never => { throw new Error("unexpected dependency in recall outcome"); };
+      const feedbackService = new FeedbackExperienceService({ repos, config: DEFAULT_MEMMY_CONFIG,
+        skillLlm: createBatchReflectionLlm([]), embedder: createCapturingEmbedder([], []),
+        memoryAddEnabled: () => true, resolveContext: unexpected, assertSessionInScope: unexpected,
+        assertEpisodeInScope: unexpected, assertRawTurnInScope: unexpected, assertMemoryInScope: unexpected,
+        requireEpisode: unexpected, requireRawTurn: unexpected, requireExistingMemory: unexpected,
+        traceMeta: traceMetaFromMemory, buildMemory: unexpected, enqueueJob: unexpected, encodeChangeCursor: unexpected,
+        readOnlyCursor: unexpected, findExistingSkillForPolicy: unexpected, upsertEvolutionMemory: unexpected,
+        pendingTrialsForFeedback: unexpected, shouldDeferBudgetedEvolutionLlm: () => false });
+      const event = { id: "recall-647", userId: DEVICE_MEMORY_OWNER, query: "check", layers: ["L2" as const],
+        hitMemoryIds: [policy.id], outcome: "positive" as const, request: {}, createdAt: AT };
+      const feedback = { id: "feedback-647", userId: DEVICE_MEMORY_OWNER, channel: "explicit" as const,
+        polarity: "positive" as const, magnitude: 1, rawPayload: {}, createdAt: AT };
+      feedbackService.applyRecallOutcome(event, feedback, AT);
+      feedbackService.applyRecallOutcome(event, feedback, AT);
+      expect(policyMetaFromMemory(repos.memories.get(policy.id)!)!.gain).toBeCloseTo(0.372);
+    }
+    if (kind === "manual") {
+      const saved = repos.memories.get(policy.id)!;
+      repos.memories.update({ ...saved, properties: { ...saved.properties, internal_info: { ...saved.properties.internal_info,
+        policy: { ...saved.properties.internal_info.policy as Record<string, unknown>, gain: 0.372 } } } });
+    }
+    setA(0.4);
+    const revised = policyMetaFromMemory(engine.recomputePolicyStats(policy.id, AT)!)!;
+    // Original baseline .2 -> revised A raw 0: .12 -> A+B raw .1: .112.
+    expect(revised.gain).toBeCloseTo(kind === "none" ? 0.112 : kind === "feedback" ? 0.132 : 0.372);
+    expect(revised.sourceTraceIds).toEqual([source.id, "B"]);
+    expect(revised.support).toBe(2);
   });
 
   const invalidBridgeCases = ["no-link", "wrong-link-owner", "wrong-revision", "wrong-relation", "wrong-source-id", "wrong-policy-id",

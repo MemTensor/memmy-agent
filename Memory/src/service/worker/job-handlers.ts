@@ -1,3 +1,4 @@
+import { episodeGeneration } from "../evolution/episode-revision.js";
 import { EmbeddingInputLimitError } from "../../model/openai-embedding-inputs.js";
 /**
  * Worker job routing and durable write-back helpers.
@@ -210,6 +211,11 @@ export function enqueueJob(
 ): EvolutionJobRecord {
   const at = input.createdAt ?? deps.nowIso();
   const payload = { ...input.payload };
+  const revisionScoped = ["reflection", "reward", "negative_experience", "span_big_turn", "skill_cluster_assign"].includes(input.jobType);
+  const currentEpisode = revisionScoped && input.episodeId ? deps.repos.runtime.getEpisode(input.episodeId) : undefined;
+  if (currentEpisode) payload.episodeGeneration = episodeGeneration(currentEpisode);
+  const baseDedupeKey = input.dedupeKey ?? evolutionJobDedupeKey(input);
+  const generation = currentEpisode ? episodeGeneration(currentEpisode) : 0;
   if (input.jobType === "episode_title") {
     // Title jobs have no target memory. Only a wholly historical episode can
     // inherit the historical lane; mixed or incomplete episodes stay interactive.
@@ -224,7 +230,7 @@ export function enqueueJob(
     id: newId("job"),
     jobType: input.jobType,
     status: "queued",
-    dedupeKey: input.dedupeKey ?? evolutionJobDedupeKey(input),
+    dedupeKey: baseDedupeKey && generation > 0 ? `${baseDedupeKey}:generation:${generation}` : baseDedupeKey,
     userId: input.userId,
     sessionId: input.sessionId,
     episodeId: input.episodeId,
@@ -500,7 +506,7 @@ export function enqueueEpisodeReflection(
     deps.repos.runtime.hasEpisodeJob(episode.id, "reflection", ["queued", "leased", "failed"])
   ) return [];
   const target = deps.repos.memories.getMany(episode.l1MemoryIds)
-    .filter((memory) => memory.memoryLayer === "L1" && memory.status === "activated" && !deps.traceReflectionWasScored(memory))
+    .filter((memory) => memory.memoryLayer === "L1" && memory.status === "activated" && isRecord(memory.properties.internal_info.trace) && !deps.traceReflectionWasScored(memory))
     .sort((a, b) => deps.traceSortKey(a) - deps.traceSortKey(b))[0];
   if (!target) return [];
   return [enqueueJob(deps, {
@@ -565,9 +571,12 @@ export function episodeHasRewardForReflection(deps: WorkerJobHandlerDeps, episod
   const traceIds = Array.isArray(episode.rewardDetail.traceIds)
     ? episode.rewardDetail.traceIds.filter((id): id is string => typeof id === "string")
     : [];
-  const activeL1MemoryIds = episode.l1MemoryIds.filter((id) =>
-    deps.repos.memories.get(id)?.status === "activated"
-  );
+  // Derived spans are also L1 memories, but reward only scores original traces.
+  const activeL1MemoryIds = deps.repos.memories.getMany(episode.l1MemoryIds)
+    .filter(memory => memory.memoryLayer === "L1" && memory.status === "activated"
+      && !memory.deletedAt && isRecord(memory.properties.internal_info.trace))
+    .sort((a, b) => deps.traceSortKey(a) - deps.traceSortKey(b))
+    .map(memory => memory.id);
   return traceIds.length === activeL1MemoryIds.length &&
     traceIds.every((id, index) => id === activeL1MemoryIds[index]);
 }

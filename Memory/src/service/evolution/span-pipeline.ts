@@ -1,3 +1,4 @@
+import { episodeGeneration, episodeRewardInputVersion, rewardInputIsCurrent } from "./episode-revision.js";
 import {
   BATCH_REFLECTION_PROMPT,
   languageSteeringLine,
@@ -104,6 +105,7 @@ export class SpanPipeline {
     if (episodeId && (!episode || episode.status !== "closed")) {
       return;
     }
+    if (episode && typeof job.payload.episodeGeneration === "number" && job.payload.episodeGeneration !== episodeGeneration(episode)) return;
     if (!this.deps.skillLlm.isConfigured()) {
       if (this.applyUnconfiguredEpisodeDefault(job)) {
         if (episode) {
@@ -277,7 +279,7 @@ private async reflectEpisodeBatch(job: EvolutionJobRecord): Promise<boolean> {
       return false;
     }
     const memories = this.deps.repos.memories.getMany(episode.l1MemoryIds)
-      .filter((memory) => memory.memoryLayer === "L1" && memory.status === "activated")
+      .filter((memory) => memory.memoryLayer === "L1" && memory.status === "activated" && this.deps.traceMeta(memory) !== null)
       .sort((a, b) => traceSortKey(a) - traceSortKey(b));
     if (memories.length === 0) {
       return false;
@@ -287,6 +289,27 @@ private async reflectEpisodeBatch(job: EvolutionJobRecord): Promise<boolean> {
       return true;
     }
 
+    const inputVersion = episodeRewardInputVersion(this.deps.repos, episode);
+    const commitScores = (scores: BatchReflectionScore[]): void => {
+      let stale = false;
+      try {
+        this.deps.repos.transaction(() => {
+          if (!rewardInputIsCurrent(this.deps.repos, episode.id, inputVersion)
+            || memories.some(memory => this.deps.repos.memories.get(memory.id)?.version !== memory.version)) {
+            stale = true;
+            throw new Error("reflection inputs changed during generation");
+          }
+          this.applyBatchReflectionScores(job, memories, scores);
+        });
+      } catch (error) {
+        const current = this.deps.repos.runtime.getEpisode(episode.id);
+        if (stale && current?.status === "closed") this.deps.enqueueJob({ jobType: "reflection", userId: current.userId,
+          sessionId: current.sessionId, episodeId: current.id, targetMemoryId: job.targetMemoryId,
+          dedupeKey: `reflection:${job.targetMemoryId}:input:${episodeRewardInputVersion(this.deps.repos, current)}`,
+          payload: { reason: "stale_reflection", episodeGeneration: episodeGeneration(current) }, createdAt: nowIso() });
+        throw error;
+      }
+    };
     const primary = await this.runBatchReflectionWindowPass(
       episode,
       memories,
@@ -295,7 +318,7 @@ private async reflectEpisodeBatch(job: EvolutionJobRecord): Promise<boolean> {
       cfg.reflectionBatchPrimaryMaxRetries
     );
     if (primary.success) {
-      await this.applyBatchReflectionScores(job, memories, mergeBatchWindowScores(memories.length, primary.results));
+      commitScores(mergeBatchWindowScores(memories.length, primary.results));
       return true;
     }
 
@@ -307,12 +330,12 @@ private async reflectEpisodeBatch(job: EvolutionJobRecord): Promise<boolean> {
       cfg.reflectionBatchDegradedMaxRetries
     );
     if (degraded.success) {
-      await this.applyBatchReflectionScores(job, memories, mergeBatchWindowScores(memories.length, degraded.results));
+      commitScores(mergeBatchWindowScores(memories.length, degraded.results));
       return true;
     }
 
     const payload = this.batchReflectionPayload(episode, memories);
-    await this.applyBatchReflectionScores(job, memories, batchRelatedDefaultScores(
+    commitScores(batchRelatedDefaultScores(
       memories.length,
       Array.isArray(payload.steps) ? payload.steps : undefined
     ));
@@ -430,11 +453,11 @@ private async scoreBatchReflectionWindow(
     });
   }
 
-private async applyBatchReflectionScores(
+private applyBatchReflectionScores(
     job: EvolutionJobRecord,
     memories: MemoryRow[],
     scores: BatchReflectionScore[]
-  ): Promise<void> {
+  ): void {
     const at = nowIso();
     for (const [index, score] of scores.entries()) {
       const snapshot = memories[index];
@@ -495,7 +518,7 @@ private applyUnconfiguredEpisodeDefault(job: EvolutionJobRecord): boolean {
     const episode = this.deps.repos.runtime.getEpisode(job.episodeId);
     if (!episode || episode.status !== "closed" || episode.l1MemoryIds.length === 0) return false;
     const memories = this.deps.repos.memories.getMany(episode.l1MemoryIds)
-      .filter((memory) => memory.memoryLayer === "L1" && memory.status === "activated")
+      .filter((memory) => memory.memoryLayer === "L1" && memory.status === "activated" && this.deps.traceMeta(memory) !== null)
       .sort((a, b) => traceSortKey(a) - traceSortKey(b));
     if (memories.length === 0) return false;
     const at = nowIso();
