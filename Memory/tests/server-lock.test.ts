@@ -13,12 +13,12 @@ afterEach(() => {
 });
 
 describe("Memory server sqlite lock", () => {
-  it("removes exit handlers when locks are released across repeated restarts", () => {
+  it("removes exit handlers when locks are released across repeated restarts", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-memory-server-restart-lock-"));
     roots.push(root);
     const listeners = process.listenerCount("exit");
     for (let attempt = 0; attempt < 12; attempt += 1) {
-      const lock = acquireSqliteServerLock({ sqlitePath: join(root, "memory.sqlite"), host: "127.0.0.1", port: 18960 });
+      const lock = await acquireSqliteServerLock({ sqlitePath: join(root, "memory.sqlite"), host: "127.0.0.1", port: 18960 });
       lock?.release();
     }
     expect(process.listenerCount("exit")).toBe(listeners);
@@ -31,24 +31,24 @@ describe("Memory server sqlite lock", () => {
     expect(() => assertLoopbackBindHost("0.0.0.0")).toThrow("loopback address");
   });
 
-  it("rejects a second live server for the same sqlite path", () => {
+  it("rejects a second live server for the same sqlite path", async () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-server-lock-"));
     roots.push(root);
     const sqlitePath = join(root, "memory.sqlite");
-    const first = acquireSqliteServerLock({
+    const first = await acquireSqliteServerLock({
       sqlitePath,
       host: "127.0.0.1",
       port: 18960
     });
 
-    expect(() => acquireSqliteServerLock({
+    await expect(acquireSqliteServerLock({
       sqlitePath,
       host: "127.0.0.1",
       port: 18991
-    })).toThrow(/already served by pid/);
+    })).rejects.toThrow(/already served by pid/);
 
     first?.release();
-    const second = acquireSqliteServerLock({
+    const second = await acquireSqliteServerLock({
       sqlitePath,
       host: "127.0.0.1",
       port: 18991
@@ -56,7 +56,7 @@ describe("Memory server sqlite lock", () => {
     second?.release();
   });
 
-  it("replaces stale sqlite lock files", () => {
+  it("replaces stale sqlite lock files", async () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-server-stale-lock-"));
     roots.push(root);
     const sqlitePath = join(root, "memory.sqlite");
@@ -67,7 +67,7 @@ describe("Memory server sqlite lock", () => {
       port: 18960
     }), "utf8");
 
-    const lock = acquireSqliteServerLock({
+    const lock = await acquireSqliteServerLock({
       sqlitePath,
       host: "127.0.0.1",
       port: 18991

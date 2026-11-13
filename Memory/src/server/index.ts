@@ -77,7 +77,7 @@ async function runMemoryService(argv: string[], lifecycle: {
         sqlitePath,
         configPath
     });
-    const serviceLock = acquireUserServiceLock({ serviceHome, host, port });
+    const serviceLock = await acquireUserServiceLock({ serviceHome, host, port });
     let sqliteLock: SqliteServerLock | undefined;
     let backend: StorageBackend | undefined;
     let service: MemoryService | undefined;
@@ -92,7 +92,7 @@ async function runMemoryService(argv: string[], lifecycle: {
     try {
         sqliteLock = config.storage.backend === "openmem-cloud-rest"
             ? undefined
-            : acquireSqliteServerLock({ sqlitePath, host, port });
+            : await acquireSqliteServerLock({ sqlitePath, host, port });
         backend = createStorageBackend({
             mode: config.storage.mode,
             backend: config.storage.backend,
@@ -182,11 +182,11 @@ export interface SqliteServerLock {
     release(): void;
 }
 
-export function acquireUserServiceLock(input: {
+export async function acquireUserServiceLock(input: {
     serviceHome: string;
     host: string;
     port: number;
-}): SqliteServerLock {
+}): Promise<SqliteServerLock> {
     const serviceHome = resolve(input.serviceHome);
     mkdirSync(serviceHome, { recursive: true });
     return acquireLockFile(join(serviceHome, "service.lock"), {
@@ -197,14 +197,14 @@ export function acquireUserServiceLock(input: {
         serviceVersion: MEMORY_SERVICE_VERSION,
         protocolVersion: MEMORY_PROTOCOL_VERSION,
         startedAt: new Date().toISOString()
-    });
+    }, MEMORY_PROTOCOL_VERSION);
 }
 
-export function acquireSqliteServerLock(input: {
+export async function acquireSqliteServerLock(input: {
     sqlitePath?: string;
     host: string;
     port: number;
-}): SqliteServerLock | undefined {
+}): Promise<SqliteServerLock | undefined> {
     if (!input.sqlitePath) return undefined;
     const sqlitePath = resolve(input.sqlitePath);
     const lockPath = `${sqlitePath}.server.lock`;
@@ -218,7 +218,7 @@ export function acquireSqliteServerLock(input: {
     });
 }
 
-function acquireLockFile(lockPath: string, payload: Record<string, unknown>): SqliteServerLock {
+async function acquireLockFile(lockPath: string, payload: Record<string, unknown>, expectedProtocolVersion?: unknown): Promise<SqliteServerLock> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
             const fd = openSync(lockPath, "wx");
@@ -255,6 +255,21 @@ function acquireLockFile(lockPath: string, payload: Record<string, unknown>): Sq
                 }
                 continue;
             }
+            // PID is alive but may belong to an unrelated process (PID reuse).
+            // Probe the health endpoint to confirm the lock owner is actually the memory service.
+            if (typeof existing.host === "string" && typeof existing.port === "number" && expectedProtocolVersion) {
+                const isMemoryService = await probeIsMemoryService(existing.host, existing.port, expectedProtocolVersion);
+                if (!isMemoryService) {
+                    try {
+                        unlinkSync(lockPath);
+                    } catch (unlinkError) {
+                        if (!isNodeError(unlinkError) || unlinkError.code !== "ENOENT") {
+                            throw unlinkError;
+                        }
+                    }
+                    continue;
+                }
+            }
             throw new Error(
                 `Memory service is already served by pid ${existing.pid}` +
                 `${existing.host && existing.port ? ` at ${existing.host}:${existing.port}` : ""}. ` +
@@ -285,11 +300,24 @@ function removeRuntimeState(serviceHome: string): void {
     }
 }
 
-function readServerLock(lockPath: string): { pid?: unknown; host?: unknown; port?: unknown } | undefined {
+function readServerLock(lockPath: string): { pid?: unknown; host?: unknown; port?: unknown; protocolVersion?: unknown } | undefined {
     try {
-        return JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown; host?: unknown; port?: unknown };
+        return JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown; host?: unknown; port?: unknown; protocolVersion?: unknown };
     } catch {
         return undefined;
+    }
+}
+
+async function probeIsMemoryService(host: string, port: number, expectedProtocolVersion: unknown): Promise<boolean> {
+    try {
+        const response = await fetch(`http://${host}:${port}/api/v1/health`, {
+            signal: AbortSignal.timeout(500)
+        });
+        if (!response.ok) return false;
+        const health = await response.json() as Record<string, unknown>;
+        return health.protocolVersion === expectedProtocolVersion;
+    } catch {
+        return false;
     }
 }
 
