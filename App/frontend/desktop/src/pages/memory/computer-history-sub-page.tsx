@@ -350,12 +350,13 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
   const recordingError = observationState === "failed" ? t("computerHistory.recordingFailedUnknown")
     : snapshot?.observation.error ? t("computerHistory.recordingProcessingError") : null;
   const narrationError = snapshot?.observation.narrationError;
+  const modelSource = snapshot?.observation.modelSource;
   const narrationErrorMessage = narrationError === "history_summary_accounting_unavailable"
     ? t("computerHistory.narrationAccountingUnavailable")
     : narrationError === "history_summary_budget_unavailable"
-      ? t("computerHistory.narrationBudgetUnavailable")
+      ? (modelSource === "byok" ? t("computerHistory.narrationBudgetUnavailable") : null)
       : narrationError === "history_summary_budget_paused"
-        ? t("computerHistory.narrationBudgetPaused")
+        ? (modelSource === "byok" ? t("computerHistory.narrationBudgetPaused") : null)
         : narrationError ? t("computerHistory.narrationFailed", { error: narrationError }) : null;
   const narrationQuotaExhausted = snapshot?.observation.narrationErrorCategory === "quota_exhausted";
   const quotaExhausted = (props.quotaExhausted && snapshot?.observation.modelSource !== "byok") || narrationQuotaExhausted;
@@ -504,12 +505,12 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
         </div>
       </header>
 
-      {error || refreshError || recordingError || (narrationError && !narrationQuotaExhausted) ? (
+      {error || refreshError || recordingError || (narrationErrorMessage && !narrationQuotaExhausted) ? (
         <div className="ch__notices">
           {error ? <div className="ch__error" role="alert">{error}</div> : null}
           {refreshError ? <div className="ch__error" role="alert">{refreshError}</div> : null}
           {recordingError ? <div className="ch__error" role="alert">{recordingError}</div> : null}
-          {narrationError && !narrationQuotaExhausted ? (
+          {narrationErrorMessage && !narrationQuotaExhausted ? (
             <div className="ch__error" role="alert">{narrationErrorMessage}</div>
           ) : null}
         </div>
