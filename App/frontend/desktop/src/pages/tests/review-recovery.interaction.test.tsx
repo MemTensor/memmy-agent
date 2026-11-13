@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import { ReviewRecovery, reviewRecovery } from "../review-recovery.js";
+import { ReviewRecovery, reviewContinuation, reviewRecovery } from "../review-recovery.js";
 import type { PluginUiCall } from "../../app/plugin-ui-context.js";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("../../app/providers.js", () => ({ useOptionalApiClients: () => ({ clients: { plugins: { invoke: mocks.invoke } } }) }));
@@ -12,9 +12,11 @@ const call: PluginUiCall = { pluginId: "literature-review", capabilityId: "revie
 ] };
 const status = (running = false) => ({ callId: "status", event: { type: "result", output: { ok: true, data: { runs: running ? [{ status: "running" }] : [], recoverableRuns: [{ runId: "failed" }], sectionGeneration: { completedOutlineNodeIds: ["s1"], pendingOutlineNodeIds: ["s2"], paragraphProgress: [{ savedModelParagraphs: 3 }] } } } } });
 
-it("preserves scoped continuation arguments and recognizes a resumed partial batch", () => {
+it("shows recovery only for failed runs and keeps successful partial batches resumable", () => {
   const partial: PluginUiCall = { ...call, events: [{ type: "result", output: { taskId: "review-fixture", data: { result: { generation: { safeToResume: true } } }, suggestedNextTools: [{ toolName: "review_generate_sections", args: { taskId: "review-fixture", outlineNodeIds: ["s2"], batchSize: 1 } }] } }] };
-  expect(reviewRecovery(partial)?.input).toEqual({ taskId: "review-fixture", outlineNodeIds: ["s2"], batchSize: 1 });
+  expect(reviewRecovery(partial)).toBeNull();
+  expect(reviewContinuation(partial)?.input).toEqual({ taskId: "review-fixture", outlineNodeIds: ["s2"], batchSize: 1 });
+  expect(reviewRecovery(call)?.capabilityId).toBe("review_resume");
   expect(reviewRecovery({ ...call, pluginId: "another-plugin" })).toBeNull();
 });
 

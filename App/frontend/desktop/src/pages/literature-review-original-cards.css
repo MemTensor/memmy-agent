@@ -789,6 +789,8 @@
 }
 
 .litrev-ref-table__select-all {
+  /* Keep the native checkbox inside the scrolling row when it receives focus. */
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
