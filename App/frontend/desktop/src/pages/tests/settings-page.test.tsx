@@ -19,6 +19,7 @@ import {
   hasConfiguredByokAgentModel,
   isPendingQuotaRequestError,
   resolveQuotaEligibilityMessage,
+  isQuotaApplicationBlocked,
   resolveSettingsTabFromHash,
   shouldFocusMemoryBudgetFromHash,
   readLogLevel,
@@ -1121,8 +1122,6 @@ describe("赠送活动开关 - Token 页申请更多按钮", () => {
     expect(source).toContain("tokenQuotaClient.getEligibility()");
     expect(source).toContain('t("settings.token.applyMore.pending")');
     expect(source).toContain('t("settings.token.applyMore.pendingDesc")');
-    expect(source).toContain("const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== \"available\"");
-    expect(source).toContain("if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting)");
     expect(source).toContain('window.addEventListener("focus"');
     expect(source).toContain("Pending requests refresh on window focus instead of fixed-interval polling.");
     expect(source).not.toContain("window.setInterval");
@@ -1165,6 +1164,7 @@ describe("赠送活动开关 - Token 页申请更多按钮", () => {
     expect(isPendingQuotaRequestError(Object.assign(new Error("已有待审批的额度申请，请勿重复提交"), { code: "conflict" }))).toBe(true);
     expect(isPendingQuotaRequestError(new Error("request already pending"))).toBe(true);
     expect(isPendingQuotaRequestError(new Error("network failed"))).toBe(false);
+    expect(isPendingQuotaRequestError(Object.assign(new Error("Business request reused"), { code: "conflict" }))).toBe(false);
   });
 });
 
@@ -1572,3 +1572,13 @@ function createCatalog(includeByok: boolean): ModelConfigView {
     updatedAt: "2026-08-11T00:00:00.000Z"
   };
 }
+
+
+it("shows questionnaire guidance instead of pending for the migrated quota endpoint", () => {
+  const eligibility = { eligible: true, deprecated: true, plansApi: "/api/credits/v1/plans",
+    latestApplicationApi: "/api/credits/v1/plan-applications/latest", compatibilityEndAt: null } as const;
+  expect(isQuotaApplicationBlocked(eligibility)).toBe(false);
+  expect(isQuotaApplicationBlocked({ ...eligibility, eligible: false })).toBe(true);
+  expect(resolveQuotaEligibilityMessage(eligibility, "zh-CN")).toEqual({ key: "settings.token.applyMore.upgradeQuestionnaire" });
+  expect(resolveQuotaEligibilityMessage({ ...eligibility, eligible: false }, "zh-CN")).toEqual({ key: "settings.token.applyMore.upgradeNotNeeded" });
+});

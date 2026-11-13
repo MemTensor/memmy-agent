@@ -320,6 +320,7 @@ export type MemoryModelsStatus = z.infer<typeof MemoryModelsStatusSchema>;
 /** Schema for memory health snapshot. */
 export const MemoryHealthSnapshotSchema = z.object({
   ok: z.boolean(),
+  creditPaused: z.boolean().optional(),
   version: NonEmptyStringSchema,
   uptimeMs: z.number().nonnegative(),
   mode: z.enum(["local", "cloud", "dev"]),
@@ -929,6 +930,8 @@ export type PanelJobsOutput = z.infer<typeof PanelJobsOutputSchema>;
 
 /** Schema for api error code. */
 export const ApiErrorCodeSchema = z.enum([
+  "CREDIT_INSUFFICIENT",
+  "CREDIT_BALANCE_RESERVED",
   "invalid_argument",
   "unauthorized",
   "forbidden",

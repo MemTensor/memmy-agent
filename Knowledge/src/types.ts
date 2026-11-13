@@ -14,6 +14,10 @@ export interface KnowledgeSettings {
   bases: KnowledgeBase[];
   serviceAvailable: boolean;
   maxBases?: number;
+  currentPlanCode?: "FREE" | "PRO";
+  limits?: { baseLimit: number; storageBytes: number; membersPerBase: number };
+  usage?: { baseCount: number; storageBytes: number; reservedUploadBytes: number; reconciled: boolean };
+  accountVersion?: number;
 }
 export interface KnowledgeFile {
   id: string;
@@ -55,6 +59,7 @@ export class KnowledgeError extends Error {
   constructor(
     message: string,
     public readonly statusCode = 400,
+    public readonly code?: string,
   ) {
     super(message);
   }

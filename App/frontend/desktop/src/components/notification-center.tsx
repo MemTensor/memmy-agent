@@ -21,6 +21,8 @@ export interface NotificationInput {
   onAction?: () => void;
   /** Side effect to run when this notification is dismissed (e.g. refresh balance). */
   onClose?: () => void;
+  /** Auto-dismiss after this many ms on screen (timer starts when the card becomes visible). */
+  autoDismissMs?: number;
 }
 
 interface NotificationItem extends NotificationInput {
@@ -88,6 +90,7 @@ export function NotificationCenterProvider(props: { children: ReactNode }) {
                 dismiss(item.id);
               } : undefined}
               onDismiss={() => dismiss(item.id)}
+              autoDismissMs={item.autoDismissMs}
             />
           ))}
         </div>,
@@ -103,6 +106,11 @@ export function NotificationCenterProvider(props: { children: ReactNode }) {
 }
 
 /** Access the notification center; throws outside the provider. */
+/** Like useNotificationCenter but returns null when no provider is mounted (e.g. isolated page tests). */
+export function useOptionalNotificationCenter(): NotificationCenterValue | null {
+  return useContext(NotificationCenterContext);
+}
+
 export function useNotificationCenter(): NotificationCenterValue {
   const value = useContext(NotificationCenterContext);
   if (!value) {

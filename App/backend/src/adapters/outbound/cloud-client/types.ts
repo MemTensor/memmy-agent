@@ -1,4 +1,8 @@
 import type {
+  CreditsApplicationRequest,
+  CreditAccountState,
+  DesktopContent,
+  DesktopContentQuery,
   AsrModelId,
   AsrProvider,
   AuthorizeIntegrationResponse,
@@ -14,7 +18,10 @@ import type {
   OkResponse,
   PromotionFlags,
   SocialLoginProvider,
-  TokenUsageDto
+  TokenUsageDto,
+  TokenQuotaApplyResult,
+  TokenQuotaEligibility,
+  RequestTokenQuotaInput as LocalRequestTokenQuotaInput
 } from "@memmy/local-api-contracts";
 
 export interface CloudHealth {
@@ -41,7 +48,7 @@ export interface CloudLoginInput {
   invitationCode?: string;
 }
 
-export interface CloudAccountProfile {
+export interface CloudAccountProfile extends CreditAccountState {
   userId: string;
   email: string | null;
   phoneNumber: string | null;
@@ -140,42 +147,12 @@ export interface AckLotteryRewardInput {
   drawId?: string;
 }
 
-/** Contract for request token quota input. */
-export interface RequestTokenQuotaInput {
-  /** Uuid. */
-  uuid: string;
-  /** Reason. */
-  reason: string;
-}
+/** Supports the old reason form and the credits upgrade questionnaire redirect. */
+export type RequestTokenQuotaInput = LocalRequestTokenQuotaInput & { uuid: string };
+export type { TokenQuotaApplyResult, TokenQuotaEligibility } from "@memmy/local-api-contracts";
 
-/** Contract for token quota apply result. */
-export interface TokenQuotaApplyResult {
-  /** Cloud quota request identifier. */
-  requestId: string;
-  /** Review status of the newly created request. */
-  status: "pending" | "approved" | "rejected";
-}
-
-/** Credentials required to query token quota eligibility. */
 export interface GetTokenQuotaEligibilityInput {
-  /** Cloud UUID of the signed-in account. */
   uuid: string;
-}
-
-/** Token quota eligibility returned by the cloud service. */
-export interface TokenQuotaEligibility {
-  /** Whether the account can apply and, if not, why. */
-  state: "available" | "pending" | "cooldown" | "limit_reached";
-  /** Number of successfully created requests. */
-  requestCount: number;
-  /** Maximum number of requests allowed for an account. */
-  maxRequestCount: 5;
-  /** Cooldown end time in Unix milliseconds; null outside cooldown. */
-  nextAllowedAtEpochMs: number | null;
-  /** Status of the latest request; null when no request exists. */
-  latestRequestStatus: "pending" | "approved" | "rejected" | null;
-  /** Rejection note for the latest request; null when unavailable or not rejected. */
-  latestReviewNote: string | null;
 }
 
 export interface SendTelemetryInput {
@@ -232,12 +209,15 @@ export interface CloudAsrTranscriptionInput {
 
 /** Contract for cloud asr transcription result. */
 export interface CloudAsrTranscriptionResult {
+  creditSettlement?: { userId: string; callId: string; accountVersion: number };
   text: string;
   modelId: AsrModelId;
   provider: AsrProvider;
 }
 
 export interface CloudClient {
+  postCredits(input: { uuid: string; resource: "check-ins" | "redemptions" | "plan-applications"; body: { requestId: string; code?: string } | CreditsApplicationRequest }): Promise<unknown>;
+  getCredits(input: { uuid: string; resource: "summary" | "grants" | "ledger" | "invitations/summary" | "invitations" | "plans" | "plan-applications/latest" | "usage" | `usage/${string}`; query?: Record<string, string | number> }): Promise<unknown>;
   health(): Promise<CloudHealth>;
   sendEmailCode(input: SendEmailCodeInput): Promise<void>;
   sendPhoneCode(input: SendPhoneCodeInput): Promise<void>;
@@ -265,6 +245,8 @@ export interface CloudClient {
   getLegalUrls(): Promise<LegalAgreementUrls | undefined>;
   /** Reads get promotions. */
   getPromotions(): Promise<PromotionFlags | undefined>;
+  /** Published legal pages and credit campaigns; absent on older cloud clients. */
+  getDesktopContent?(query: DesktopContentQuery): Promise<DesktopContent>;
   /** Reads the remotely controlled lottery campaign status. */
   getLotteryStatus(): Promise<LotteryStatus | undefined>;
   /** Reads the latest unacknowledged lottery reward for the account. */

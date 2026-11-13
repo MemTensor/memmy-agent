@@ -52,6 +52,7 @@ export function useSocialLogin(): UseSocialLoginResult {
       });
       if (!isCurrent(interactionVersion)) return null;
       await openExternalUrl(flow.authorizationUrl);
+      if (!isCurrent(interactionVersion)) return null;
       setFeedback({ text: t("login.social.waiting"), tone: "success" });
       const expiresAt = Date.now() + flow.expiresInSec * 1000;
 
@@ -62,6 +63,7 @@ export function useSocialLogin(): UseSocialLoginResult {
           flowId: flow.flowId,
           pollToken: flow.pollToken
         });
+        if (!isCurrent(interactionVersion)) return null;
         if (status.status === "pending") continue;
         if (status.status === "completed") {
           setFeedback(null);

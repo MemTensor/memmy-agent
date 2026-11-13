@@ -2,6 +2,7 @@
 import { z } from "zod";
 import { ModelThinkingConfigSchema } from "./model-thinking-levels.js";
 import { normalizeOutputLanguage } from "./output-language.js";
+import { DesktopContentSchema } from "./desktop-content.js";
 
 export { normalizeOutputLanguage } from "./output-language.js";
 
@@ -14,6 +15,8 @@ export * from "./memory-workspace-identity.js";
 export * from "./memory-l3-world-model.js";
 export * from "./endpoints.js";
 export * from "./cloud-service.js";
+export * from "./credits.js";
+export * from "./desktop-content.js";
 export * from "./desktop-runtime-manifest.js";
 export * from "./computer-use-surface.js";
 export * from "./browser-profile-control.js";
@@ -632,6 +635,8 @@ export const PromotionFlagsSchema = z.object({
     loginBanner: z.boolean(),
     improvementGift: z.boolean(),
     improvementGiftRewardTokens: z.number().int().nonnegative().default(0),
+    improvementGiftRewardCredits: z.string().regex(/^\d+\.\d{2}$/).nullable().optional(),
+    improvementGiftValidDays: z.number().int().positive().nullable().optional(),
     applyMore: z.boolean(),
     agentChatTokenTotal: z.number().int().nonnegative(),
     invitation: PromotionInvitationSchema.optional()
@@ -687,6 +692,7 @@ export const AppBootstrapResponseSchema = z.object({
     }),
     // Legal.
     legal: LegalAgreementUrlsSchema.optional(),
+    desktopContent: DesktopContentSchema.optional(),
     // Src module.
     // Promotions.
     promotions: PromotionFlagsSchema.optional(),
@@ -1192,6 +1198,7 @@ export type AsrTranscriptionInput = z.infer<typeof AsrTranscriptionInputSchema>;
 
 /** Schema for asr transcription response. */
 export const AsrTranscriptionResponseSchema = z.object({
+    creditSettlement: z.object({ userId: z.string(), callId: z.string(), accountVersion: z.number().int().nonnegative() }).optional(),
     text: z.string(),
     modelId: z.string().trim().min(1),
     provider: CatalogProviderIdSchema,
@@ -1270,8 +1277,17 @@ export const UpdateAccountProfileInputSchema = z.object({
 });
 export type UpdateAccountProfileInput = z.infer<typeof UpdateAccountProfileInputSchema>;
 
+/** Lightweight credit state; optional while older cloud login responses remain supported. */
+export const CreditAccountStateSchema = z.object({
+    currentPlan: z.enum(["FREE", "PRO"]).optional(),
+    creditAccountInitialized: z.boolean().optional(),
+    creditAccountVersion: z.number().int().nonnegative().optional()
+});
+export type CreditAccountState = z.infer<typeof CreditAccountStateSchema>;
+
 /** Schema for account profile view. */
 export const AccountProfileViewSchema = z.object({
+    ...CreditAccountStateSchema.shape,
     userId: z.string().min(1),
     email: z.string().email().nullable(),
     phoneNumber: z.string().min(3).nullable(),
@@ -1301,7 +1317,8 @@ export type AccountSessionView = z.infer<typeof AccountSessionViewSchema>;
 export const InvitationResultSchema = z.discriminatedUnion("status", [
     z.object({
         status: z.literal("success"),
-        inviteeRewardTokens: z.number().int().nonnegative()
+        inviteeRewardTokens: z.number().int().nonnegative(),
+        inviteeRewardCredits: z.string().regex(/^\d+\.\d{2}$/).optional()
     }),
     z.object({
         status: z.enum(["not_provided", "invalid", "not_new_user", "pending"])
@@ -1686,15 +1703,25 @@ export const SseEventSchema = z.discriminatedUnion("type", [
 export type SseEvent = z.infer<typeof SseEventSchema>;
 
 // Schema for request token quota input.
-export const RequestTokenQuotaInputSchema = z.object({
+export const RequestTokenQuotaInputSchema = z.union([z.object({
     reason: z.string().trim().min(20).max(1000)
-});
+}), z.object({
+    requestId: z.string().regex(/^[A-Za-z0-9_:-]{1,128}$/),
+    region: z.enum(["CN", "INTL"]).optional(),
+    language: z.enum(["zh-CN", "en-US"]).optional()
+})]);
 export type RequestTokenQuotaInput = z.infer<typeof RequestTokenQuotaInputSchema>;
 
-export const TokenQuotaApplyResultSchema = z.object({
+export const TokenQuotaApplyResultSchema = z.union([z.object({
+    accepted: z.literal(true),
+    deprecated: z.literal(true),
+    formType: z.enum(["CN_ZH", "CN_EN", "INTL_ZH", "INTL_EN"]),
+    formUrl: z.url().refine(value => new URL(value).protocol === "https:"),
+    latestApplicationApi: z.literal("/api/credits/v1/plan-applications/latest")
+}), z.object({
     requestId: z.string().min(1),
     status: z.enum(["pending", "approved", "rejected"])
-});
+})]);
 export type TokenQuotaApplyResult = z.infer<typeof TokenQuotaApplyResultSchema>;
 
 /** Token quota eligibility states exposed by the local API. */
@@ -1707,7 +1734,13 @@ export const TokenQuotaEligibilityStateSchema = z.enum([
 export type TokenQuotaEligibilityState = z.infer<typeof TokenQuotaEligibilityStateSchema>;
 
 /** Token quota eligibility for the current account. */
-export const TokenQuotaEligibilitySchema = z.object({
+export const TokenQuotaEligibilitySchema = z.union([z.object({
+    eligible: z.boolean(),
+    deprecated: z.literal(true),
+    plansApi: z.literal("/api/credits/v1/plans"),
+    latestApplicationApi: z.literal("/api/credits/v1/plan-applications/latest"),
+    compatibilityEndAt: z.iso.datetime({ offset: true }).nullable()
+}), z.object({
     /** Current eligibility state. */
     state: TokenQuotaEligibilityStateSchema,
     /** Number of successfully created requests, capped at five. */
@@ -1720,7 +1753,7 @@ export const TokenQuotaEligibilitySchema = z.object({
     latestRequestStatus: z.enum(["pending", "approved", "rejected"]).nullable(),
     /** Rejection note for the latest request; null when unavailable or not rejected. */
     latestReviewNote: z.string().nullable()
-});
+})]);
 export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;
 export * from './desktop-screen-capture.js';
 export * from './computer-use-onboarding.js';

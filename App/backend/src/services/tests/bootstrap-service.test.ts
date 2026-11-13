@@ -1,9 +1,19 @@
 /** Bootstrap service tests. */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AppStateStore } from "../../infrastructure/app-state-store/index.js";
 import { createBootstrapService } from "../bootstrap-service.js";
+import { MEMMY_VERSION } from "../../project-version.js";
 
 describe("BootstrapService", () => {
+  it("includes published content using the actual client version and tolerates an old cloud", async () => {
+    const getDesktopContent = vi.fn(async (query: { locale: string }) => ({ locale: query.locale, agreements: [], pages: [], promotions: [] }));
+    const options = createUnauthenticatedOptions({ getDesktopContent });
+    await expect(createBootstrapService(options).getBootstrap()).resolves.toHaveProperty("desktopContent.promotions", []);
+    expect(getDesktopContent).toHaveBeenCalledWith(expect.objectContaining({ clientVersion: MEMMY_VERSION,
+      locale: expect.stringMatching(/^(zh-CN|en-US)$/), region: expect.stringMatching(/^(CN|INTL)$/) }));
+    const legacy = await createBootstrapService(createUnauthenticatedOptions({})).getBootstrap();
+    expect(legacy.desktopContent).toBeUndefined();
+  });
   it("includes the remote lottery status in bootstrap for logged-out clients", async () => {
     const lotteryStatus = {
       shouldShow: true,

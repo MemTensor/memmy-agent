@@ -406,3 +406,21 @@ describe("account session repository", () => {
     expect(after.phone).toBe("13800138000");
   });
 });
+
+it("persists lightweight credit account state in the existing profile across restart", () => {
+  tempDir = mkdtempSync(join(tmpdir(), "memmy-credit-session-"));
+  const databasePath = join(tempDir, "app.sqlite");
+  const creditState = { currentPlan: "PRO" as const, creditAccountInitialized: true, creditAccountVersion: 20 };
+  let store = createAppStateStore({ databasePath });
+  try {
+    const session = store.repositories.accountSession.upsert({ uuid: "credit-account", cloudUuid: "cloud-token", profile: {
+      ...creditState, userId: "credit-user", email: "credit@example.com", phoneNumber: null,
+      nickname: "Credit User", avatarUrl: null, planType: "pro", hasFinishedGuide: true,
+      region: "CN", registeredAt: null, rawProfile: { ...creditState, id: "credit-user" }
+    } });
+    expect(session).toMatchObject({ authenticated: true, profile: creditState });
+  } finally { store.close(); }
+  store = createAppStateStore({ databasePath });
+  try { expect(store.repositories.accountSession.get()).toMatchObject({ authenticated: true, profile: creditState }); }
+  finally { store.close(); }
+});

@@ -3657,6 +3657,7 @@ export class RuntimeRepository {
            WHERE (status = 'queued'
               OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until <= ?))
              AND attempts < max_attempts
+             AND COALESCE(json_extract(payload_json, '$.creditState'), '') <> 'PAUSED_CREDIT'
              AND NOT (
                job_type = 'reward'
                AND json_extract(payload_json, '$.l1MemoryId') IS NOT NULL
@@ -3753,12 +3754,39 @@ export class RuntimeRepository {
       .prepare(
         `UPDATE evolution_jobs
          SET status = 'succeeded',
+             payload_json = json_remove(payload_json, '$.modelSteps'),
              leased_until = NULL,
              updated_at = ?
          WHERE id = ?`
       )
       .run(at, id);
     return this.getJob(id);
+  }
+
+  pauseForCredits(id: string, at = nowIso()): EvolutionJobRecord | undefined {
+    this.db.prepare(`UPDATE evolution_jobs SET status='queued', leased_until=NULL,
+      attempts=MAX(0, attempts-1), last_error='PAUSED_CREDIT', updated_at=?,
+      payload_json=json_set(payload_json, '$.creditState', 'PAUSED_CREDIT', '$.runAfter', '9999-12-31T00:00:00.000Z')
+      WHERE id=? AND status='leased'`).run(at,id);
+    return this.getJob(id);
+  }
+  creditPausedJobs(limit = 100, afterId = ""): EvolutionJobRecord[] {
+    return (this.db.prepare(`SELECT * FROM evolution_jobs WHERE status='queued'
+      AND json_extract(payload_json, '$.creditState')='PAUSED_CREDIT' AND id > ?
+      ORDER BY id LIMIT ?`).all(afterId, limit) as SqlJobRow[]).map(jobFromSql);
+  }
+  resumeCreditJob(id: string, at = nowIso()): EvolutionJobRecord | undefined {
+    this.db.prepare(`UPDATE evolution_jobs SET last_error=NULL, updated_at=?,
+      payload_json=json_remove(payload_json, '$.creditState', '$.runAfter')
+      WHERE id=? AND status='queued' AND json_extract(payload_json, '$.creditState')='PAUSED_CREDIT'`).run(at,id);
+    return this.getJob(id);
+  }
+  saveModelStep(id: string, key: string, value: unknown, at = nowIso()): void {
+    if (!/^[a-f0-9]{64}_[0-9]+$/.test(key)) throw new Error("Invalid model step key");
+    const result=this.db.prepare(`UPDATE evolution_jobs SET updated_at=?,
+      payload_json=json_set(payload_json, ?, json(?)) WHERE id=? AND status='leased'`)
+      .run(at, `$.modelSteps.${key}`, toJson(value), id);
+    if (result.changes !== 1) throw new Error("Model step lost its job lease");
   }
 
   /** Waiting for a dependency is not a model failure and does not consume an attempt. */
@@ -4010,6 +4038,11 @@ export class RuntimeRepository {
           NULL, @now, @now
         )
         ON CONFLICT(target_kind, target_id, vector_field) DO UPDATE SET
+          model_steps_json = CASE
+            WHEN embedding_retry_queue.source_text = excluded.source_text
+              AND embedding_retry_queue.embed_role = excluded.embed_role THEN embedding_retry_queue.model_steps_json
+            ELSE '{}'
+          END,
           source_text = excluded.source_text,
           embed_role = excluded.embed_role,
           status = CASE
@@ -4052,6 +4085,21 @@ export class RuntimeRepository {
       .prepare(`SELECT * FROM embedding_retry_queue WHERE id = ?`)
       .get(id) as SqlEmbeddingRetryRow | undefined;
     return row ? embeddingRetryFromSql(row) : undefined;
+  }
+
+  saveEmbeddingRetryModelStep(id: string, claim: { workerId: string; leaseUntil: number }, key: string, value: unknown, now: number): void {
+    if (!/^[a-f0-9]{64}_[0-9]+$/.test(key)) throw new Error("Invalid model step key");
+    const result = this.db.prepare(`UPDATE embedding_retry_queue SET updated_at=?,
+      model_steps_json=json_set(model_steps_json, ?, json(?))
+      WHERE id=? AND status='in_progress' AND claimed_by=? AND lease_until=?`)
+      .run(now, `$.${key}`, toJson(value), id, claim.workerId, claim.leaseUntil);
+    if (result.changes !== 1) throw new Error("Model step lost its embedding retry lease");
+  }
+
+  getEmbeddingRetryModelSteps(id: string): Record<string, unknown> | undefined {
+    const row = this.db.prepare("SELECT model_steps_json FROM embedding_retry_queue WHERE id=?")
+      .get(id) as { model_steps_json: string } | undefined;
+    return row && row.model_steps_json !== "{}" ? parseJson<Record<string, unknown>>(row.model_steps_json, {}) : undefined;
   }
 
   getEmbeddingRetryByTarget(
@@ -4152,6 +4200,19 @@ export class RuntimeRepository {
     return transaction();
   }
 
+  creditPausedEmbeddingRetries(limit = 100): EmbeddingRetryRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM embedding_retry_queue
+      WHERE status='pending' AND last_error='PAUSED_CREDIT' ORDER BY updated_at LIMIT ?`)
+      .all(limit) as SqlEmbeddingRetryRow[];
+    return rows.map(embeddingRetryFromSql);
+  }
+
+  resumeCreditEmbeddingRetry(id: string, now: number): EmbeddingRetryRecord | undefined {
+    const result = this.db.prepare(`UPDATE embedding_retry_queue SET last_error=NULL,next_attempt_at=?,updated_at=?
+      WHERE id=? AND status='pending' AND last_error='PAUSED_CREDIT'`).run(now, now, id);
+    return result.changes ? this.getEmbeddingRetry(id) : undefined;
+  }
+
   claimDueEmbeddingRetries(input: {
     now: number;
     workerId: string;
@@ -4177,6 +4238,7 @@ export class RuntimeRepository {
              OR (q.status = 'in_progress' AND q.lease_until IS NOT NULL AND q.lease_until <= ?)
            )
              AND q.next_attempt_at <= ?
+             AND COALESCE(q.last_error,'') <> 'PAUSED_CREDIT'
              ${targetFilter}
            ORDER BY ${embeddingRetryOrderSql()}
            LIMIT ?`
@@ -4300,6 +4362,7 @@ export class RuntimeRepository {
       .prepare(
         `UPDATE embedding_retry_queue
          SET status = 'succeeded',
+             model_steps_json = '{}',
              next_attempt_at = ?,
              claimed_by = NULL,
              lease_until = NULL,
@@ -7563,6 +7626,7 @@ interface SqlEmbeddingRetryRow {
   claimed_by: string | null;
   lease_until: number | null;
   last_error: string | null;
+  model_steps_json: string;
   created_at: number;
   updated_at: number;
 }

@@ -1,3 +1,4 @@
+import { isAgentCreditsError } from "../../app/credits-exhausted-prompt.js";
 import { describe, expect, it } from "vitest";
 import { formatAgentModelError, formatRetryWaitStatus, isAgentModelErrorContent, shouldSuppressRetryWaitStatus } from "../agent-model-error.js";
 
@@ -174,4 +175,36 @@ describe("agent-model-error", () => {
       ]
     )).toBe(true);
   });
+});
+
+describe("platform credit error identity", () => {
+  it("recognizes structured platform failures and persisted business codes", () => {
+    expect(isAgentCreditsError("Error calling LLM: 积分不足", {category:"quota_exhausted", source:"account"})).toBe(true);
+    expect(isAgentCreditsError("Error calling LLM: CREDIT_INSUFFICIENT")).toBe(true);
+    expect(isAgentCreditsError("localized", {category:"model_failed", detail:"CREDIT_INSUFFICIENT"})).toBe(true);
+  });
+  it("does not turn provider quota, auth or risk limits into credit exhaustion", () => {
+    expect(isAgentCreditsError("Error calling LLM: insufficient quota", {category:"quota_exhausted", source:"byok"})).toBe(false);
+    expect(isAgentCreditsError("Error calling LLM: CREDIT_INSUFFICIENT", {category:"quota_exhausted", source:"byok"})).toBe(false);
+    expect(isAgentCreditsError("Error calling LLM: 401")).toBe(false);
+    expect(isAgentCreditsError("Error calling LLM: 单次调用超过计量风险上限", {category:"model_failed", source:"account"})).toBe(false);
+  });
+});
+
+it("keeps reserved credits distinct from exhausted credits", () => {
+  const error = {category:"model_failed" as const, source:"account" as const, detail:"CREDIT_BALANCE_RESERVED"};
+  expect(isAgentCreditsError("Error calling LLM: CREDIT_BALANCE_RESERVED", error)).toBe(false);
+  expect(formatAgentModelError("Error calling LLM: CREDIT_BALANCE_RESERVED", t, {modelError:error})).toEqual({
+    title:"agent.error.creditsReserved", detail:null
+  });
+});
+
+it("asks users to confirm uncertain account calls rather than submitting another request", () => {
+  const error = {category:"model_failed" as const, source:"account" as const, detail:"CREDIT_CALL_UNCERTAIN"};
+  expect(isAgentCreditsError("Error calling LLM: CREDIT_CALL_UNCERTAIN", error)).toBe(false);
+  expect(formatAgentModelError("Error calling LLM: CREDIT_CALL_UNCERTAIN", t, {modelError:error})).toEqual({
+    title:"agent.error.creditsUncertain", detail:null
+  });
+  expect(formatAgentModelError("Error calling LLM: CREDIT_CALL_UNCERTAIN", t,
+    {modelError:{...error,source:"byok"}}).title).toBe("模型请求失败");
 });

@@ -535,6 +535,14 @@ describe("local app contracts", () => {
     expect(SetSkinInputSchema.parse({ skinId: "default" })).toEqual({ skinId: "default" });
   });
 
+  it("keeps configured improvement credits separate from legacy Token amounts", () => {
+    const legacy = { loginBanner: true, improvementGift: true, improvementGiftRewardTokens: 1_000_000, applyMore: true, agentChatTokenTotal: 2_000_000 };
+    expect(PromotionFlagsSchema.parse(legacy).improvementGiftRewardCredits).toBeUndefined();
+    expect(PromotionFlagsSchema.parse({ ...legacy, improvementGiftRewardCredits: "123.45", improvementGiftValidDays: 30 }))
+      .toMatchObject({ improvementGiftRewardCredits: "123.45", improvementGiftValidDays: 30 });
+    expect(PromotionFlagsSchema.parse({ ...legacy, improvementGiftRewardCredits: null, improvementGiftValidDays: null }).improvementGiftRewardCredits).toBeNull();
+  });
+
   it("parses local data management contracts", () => {
     expect(ExportLocalDataInputSchema.parse({ targetPath: "/tmp/memmy-export" })).toEqual({
       targetPath: "/tmp/memmy-export"

@@ -93,6 +93,43 @@ function visibleAssistantToolCallContent(content: unknown): string | null {
 }
 
 export class OpenAICompatProvider extends LLMProvider {
+  // Only transport retries share this args object; a user continuation gets a new call.
+  private readonly creditRetries = new WeakMap<object, { callId: string; resumeToken: string; seen: number; partial?: string }>();
+
+  private readCreditFrame(args: ChatArgs, value: any, seen: number): void {
+    if (specName(this.spec) !== "memmy_account") return;
+    if (typeof value?.callId === "string" && typeof value?.resumeToken === "string") {
+      const previous = this.creditRetries.get(args);
+      this.creditRetries.set(args, { callId: value.callId, resumeToken: value.resumeToken, seen,
+        partial: previous && previous.callId === value.callId ? previous.partial : undefined });
+    }
+  }
+
+  private creditRetryError(args: ChatArgs, error: LLMResponse): LLMResponse {
+    if (specName(this.spec) !== "memmy_account") return error;
+    const retry = this.creditRetries.get(args);
+    if (error.errorCode === "credit_balance_reserved") {
+      // Admission was denied before a paid call; wait for an explicit user continuation.
+      error.errorShouldRetry = false;
+      if (!/CREDIT_BALANCE_RESERVED/i.test(error.content ?? "")) {
+        error.content = `Error calling LLM: CREDIT_BALANCE_RESERVED: ${error.content ?? ""}`;
+      }
+    } else if (error.errorCode === "credit_call_in_progress" && retry) {
+      error.errorShouldRetry = true; error.errorRetryAfterS = null;
+    } else if (!retry) {
+      // The provider may have accepted a lost request; never silently issue a second paid call.
+      error.errorShouldRetry = false;
+    }
+    error.partialContent ??= retry?.partial;
+    return error;
+  }
+
+  private static settlement(value: any): LLMResponse["creditSettlement"] {
+    return typeof value?.userId === "string" && typeof value?.callId === "string"
+      && Number.isSafeInteger(value?.accountVersion)
+      ? { userId: value.userId, callId: value.callId, accountVersion: value.accountVersion } : undefined;
+  }
+
   model: string | null = null;
   defaultModel: string;
   spec: any = null;
@@ -611,6 +648,8 @@ export class OpenAICompatProvider extends LLMProvider {
       messages: this.sanitizeMessages(messages, modelName),
     };
 
+    if (specName(this.spec) === "memmy_account" && args.billingOperation) kwargs.billingOperation = args.billingOperation;
+
     if (OpenAICompatProvider.supportsTemperature(modelName, reasoningEffort))
       kwargs.temperature = temperature;
     const useMaxCompletionTokens = Boolean(this.spec?.supportsMaxCompletionTokens)
@@ -930,6 +969,14 @@ export class OpenAICompatProvider extends LLMProvider {
         );
     }
 
+    const creditFailure = specName(this.spec) === "memmy_account"
+      ? OpenAICompatProvider.parseStructuredError(response, this.spec) : null;
+    if (creditFailure?.errorCode === "credit_insufficient") {
+      creditFailure.partialContent = content ?? undefined;
+      creditFailure.reasoningContent = reasoningContent;
+      creditFailure.usage = OpenAICompatProvider.extractUsage(response);
+      return creditFailure;
+    }
     return new LLMResponse({
       content,
       toolCalls: parseToolCalls(rawToolCalls),
@@ -959,6 +1006,8 @@ export class OpenAICompatProvider extends LLMProvider {
     >();
     let finishReason = "stop";
     let usage: Record<string, any> = {};
+    let failure: LLMResponse | null = null;
+    let settlement: LLMResponse["creditSettlement"];
 
     const accumToolCall = (toolCall: any, idxHint: number) => {
       const index = Number(getValue(toolCall, "index") ?? idxHint);
@@ -993,11 +1042,16 @@ export class OpenAICompatProvider extends LLMProvider {
         continue;
       }
       const chunkMap = OpenAICompatProvider.maybeMapping(chunk);
+      if (chunkMap?.type === "usage.started") continue;
+      if (chunkMap?.type === "usage.settled") {
+        settlement = OpenAICompatProvider.settlement(chunkMap);
+        continue;
+      }
       const choices = chunkMap?.choices ?? chunk?.choices ?? [];
       if (!Array.isArray(choices) || choices.length === 0) {
         const structuredError = OpenAICompatProvider.parseStructuredError(chunk, spec);
-        if (structuredError) return structuredError;
-        usage = OpenAICompatProvider.extractUsage(chunk) || usage;
+        if (structuredError) { failure = structuredError; continue; }
+        if (chunkMap?.usage) usage = OpenAICompatProvider.extractUsage(chunk);
         const text = OpenAICompatProvider.extractTextContent(
           chunkMap?.content ?? chunkMap?.output_text,
         );
@@ -1016,10 +1070,16 @@ export class OpenAICompatProvider extends LLMProvider {
       for (const [idx, toolCall] of (delta.tool_calls ?? []).entries())
         accumToolCall(toolCall, idx);
       accumLegacyFunctionCall(delta.function_call);
-      usage = OpenAICompatProvider.extractUsage(chunk) || usage;
+      if (chunkMap?.usage) usage = OpenAICompatProvider.extractUsage(chunk);
     }
 
     const seen = new Set<string>();
+    if (failure) {
+      failure.partialContent = contentParts.join("") || undefined;
+      failure.reasoningContent = reasoningParts.join("") || null;
+      failure.usage = usage; failure.creditSettlement = settlement;
+      return failure;
+    }
     const toolCalls = [...toolBuffers.values()].map((buf) => {
       let id = buf.id || shortToolId();
       if (seen.has(id)) id = shortToolId();
@@ -1033,13 +1093,15 @@ export class OpenAICompatProvider extends LLMProvider {
         functionProviderSpecificFields: buf.functionProviderSpecific ?? null,
       });
     });
-    return new LLMResponse({
+    const result = new LLMResponse({
       content: contentParts.join("") || null,
       toolCalls,
       finishReason,
       usage,
       reasoningContent: reasoningParts.join("") || null,
     });
+    result.creditSettlement = settlement;
+    return result;
   }
 
   async ensureClient(): Promise<any> {
@@ -1124,15 +1186,20 @@ export class OpenAICompatProvider extends LLMProvider {
         }
       }
       const kwargs = flattenChatExtraBody(this.buildKwargs(args));
+      if (specName(this.spec) === "memmy_account") Object.assign(kwargs, this.creditRetries.get(args) ? { callId: this.creditRetries.get(args)!.callId, resumeToken: this.creditRetries.get(args)!.resumeToken } : {});
       if (args.signal?.aborted) throw createProviderAbortError();
       const options = providerAbortOptions(args.signal);
       const response = options
         ? await this.client.chat.completions.create(kwargs as any, options as any)
         : await this.client.chat.completions.create(kwargs as any);
-      return this.parseResponse(response);
+      this.readCreditFrame(args, response, 0);
+      const parsed = this.parseResponse(response);
+      if (specName(this.spec) === "memmy_account") parsed.creditSettlement = OpenAICompatProvider.settlement(response);
+      this.creditRetries.delete(args);
+      return parsed;
     } catch (error) {
       if (isProviderAbortError(error)) throw error;
-      return OpenAICompatProvider.handleError(error, this.spec, this.apiBase);
+      return this.creditRetryError(args, OpenAICompatProvider.handleError(error, this.spec, this.apiBase));
     }
   }
 
@@ -1146,6 +1213,10 @@ export class OpenAICompatProvider extends LLMProvider {
     const onContentDelta = args.onContentDelta;
     const onThinkingDelta = args.onThinkingDelta;
     const onToolCallDelta = args.onToolCallDelta;
+    const chunks: any[] = [];
+    const retry = this.creditRetries.get(args);
+    const skip = retry?.seen ?? 0;
+    let seen = 0;
     try {
       if (args.signal?.aborted) throw createProviderAbortError();
       if (this.shouldUseResponsesApi(model, reasoningEffort)) {
@@ -1184,6 +1255,7 @@ export class OpenAICompatProvider extends LLMProvider {
         stream: true,
         stream_options: { include_usage: true },
       });
+      if (retry) Object.assign(kwargs, { callId: retry.callId, resumeToken: retry.resumeToken });
       if (specName(this.spec) === "zhipu" && args.tools?.length && onToolCallDelta) {
         kwargs.extra_body = { ...(kwargs.extra_body ?? {}), tool_stream: true };
       }
@@ -1194,11 +1266,15 @@ export class OpenAICompatProvider extends LLMProvider {
         ? await this.client.chat.completions.create(kwargs as any, options as any)
         : await this.client.chat.completions.create(kwargs as any);
       requestTiming("model.http_headers");
-      const chunks: any[] = [];
       for await (const chunk of timedAsyncIterable(stream, idleTimeoutS)) {
         requestTiming("model.first_chunk", true);
         if (args.signal?.aborted) throw createProviderAbortError();
         chunks.push(chunk);
+        seen += 1;
+        this.readCreditFrame(args, chunk, Math.max(skip, seen));
+        const saved = this.creditRetries.get(args);
+        if (saved) saved.seen = Math.max(saved.seen, seen);
+        if (seen <= skip) continue;
         const choice =
           OpenAICompatProvider.maybeMapping(
             (OpenAICompatProvider.maybeMapping(chunk)?.choices ?? chunk?.choices ?? [])[0],
@@ -1234,17 +1310,26 @@ export class OpenAICompatProvider extends LLMProvider {
           }
         }
       }
-      return OpenAICompatProvider.parseChunks(chunks, this.spec);
+      const result = OpenAICompatProvider.parseChunks(chunks, this.spec);
+      this.creditRetries.delete(args);
+      return result;
     } catch (error) {
       if (isProviderAbortError(error)) throw error;
+      const partial = OpenAICompatProvider.parseChunks(chunks, this.spec);
+      const saved = this.creditRetries.get(args);
+      if (saved && (partial.partialContent || partial.content)) saved.partial = partial.partialContent ?? partial.content ?? undefined;
       if ((error as Error).message === "stream_idle_timeout") {
-        return new LLMResponse({
+        const failure = new LLMResponse({
           content: `Error calling LLM: stream stalled for more than ${idleTimeoutS} seconds`,
           finishReason: "error",
           errorKind: "timeout",
         });
+        failure.partialContent = partial.partialContent ?? partial.content ?? failure.partialContent;
+        return this.creditRetryError(args, failure);
       }
-      return OpenAICompatProvider.handleError(error, this.spec, this.apiBase);
+      const failure = this.creditRetryError(args, OpenAICompatProvider.handleError(error, this.spec, this.apiBase));
+      failure.partialContent = partial.partialContent ?? partial.content ?? failure.partialContent;
+      return failure;
     }
   }
 }

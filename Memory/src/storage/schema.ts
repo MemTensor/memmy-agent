@@ -1,8 +1,8 @@
 import type Database from "better-sqlite3";
 import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 
-export const SCHEMA_VERSION = 9;
-export const SCHEMA_MIGRATION_ID = "009_token_usage_outbox";
+export const SCHEMA_VERSION = 10;
+export const SCHEMA_MIGRATION_ID = "010_embedding_credit_checkpoints";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -606,6 +606,7 @@ const statements = [
     vector_field TEXT NOT NULL CHECK (vector_field IN ('vec_summary', 'vec_action', 'vec')),
     source_text TEXT NOT NULL,
     embed_role TEXT NOT NULL DEFAULT 'document' CHECK (embed_role IN ('document', 'query')),
+    model_steps_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(model_steps_json)),
     status TEXT NOT NULL DEFAULT 'pending'
       CHECK (status IN ('pending', 'in_progress', 'failed', 'succeeded')),
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -695,7 +696,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8 && version !== 9) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
@@ -719,6 +720,9 @@ export function migrate(db: Database.Database): void {
       }
       for (const statement of statements) {
         db.prepare(statement).run();
+      }
+      if (version > 0 && version < 10) {
+        addColumnIfMissing(db, "embedding_retry_queue", "model_steps_json", "TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(model_steps_json))");
       }
       if (version > 0 && version < 5) {
         addColumnIfMissing(db, "recall_events", "query_id", "TEXT");

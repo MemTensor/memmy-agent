@@ -122,3 +122,24 @@ describe("requestJson", () => {
     );
   });
 });
+
+it("broadcasts a structured credit failure but preserves the original API error", async () => {
+  const dispatchEvent = vi.fn();
+  vi.stubGlobal("window", {dispatchEvent});
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({error:{code:"CREDIT_INSUFFICIENT",message:"积分不足",requestId:"credit-test"}}, {status:422})));
+  try {
+    await expect(requestJson({config:runtimeConfig,path:"/api/asr",schema:z.unknown()})).rejects.toMatchObject({code:"CREDIT_INSUFFICIENT"});
+    expect(dispatchEvent).toHaveBeenCalledTimes(1);
+    expect(dispatchEvent.mock.calls[0]![0].type).toBe("memmy:credits-exhausted-prompt");
+  } finally { vi.unstubAllGlobals(); }
+});
+
+it("does not broadcast exhaustion when another call reserves the balance", async () => {
+  const dispatchEvent = vi.fn();
+  vi.stubGlobal("window", {dispatchEvent});
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({error:{code:"CREDIT_BALANCE_RESERVED",message:"积分暂被其他调用占用",requestId:"reserved-test"}}, {status:409})));
+  try {
+    await expect(requestJson({config:runtimeConfig,path:"/api/asr",schema:z.unknown()})).rejects.toMatchObject({code:"CREDIT_BALANCE_RESERVED"});
+    expect(dispatchEvent).not.toHaveBeenCalled();
+  } finally { vi.unstubAllGlobals(); }
+});

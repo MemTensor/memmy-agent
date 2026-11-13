@@ -1,4 +1,7 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useAppState } from "../../state/app-state.js";
+import { useCreditRefresh } from "../../app/use-credit-refresh.js";
+import { MemoryCreditsPausedNotice } from "../credits-status-notice.js";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { GetMemoryOutput, MemoryProcessingRecord, PanelItemsInput, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { formatUserDateTime } from "../../lib/user-time-zone.js";
@@ -112,6 +115,9 @@ function memoriesCacheKeys(query: string, sourceAgent: string, page: number): st
 export function MemoriesSubPage(props: MemoriesSubPageProps) {
   const { t } = useTranslation();
   const { track } = useAnalytics();
+  const { state: appState } = useAppState();
+  const readHealth = useCallback((signal: AbortSignal) => props.client!.health(signal), [props.client, appState.account.userId]);
+  const health = useCreditRefresh(readHealth, !!props.client, appState.account.userId);
   const memoriesFilterLayer = (sourceAgent = "") => buildMemoryUiFilterLayer("L1", sourceAgent || undefined);
   const [query, setQuery] = useState("");
   const [sourceAgent, setSourceAgent] = useState("");
@@ -417,6 +423,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
 
   return (
     <MemoriesSubPageView
+      notice={health.data?.creditPaused ? <MemoryCreditsPausedNotice /> : undefined}
       state={state.status === "ready" ? { ...state, detail } : state}
       detail={detail}
       query={query}
@@ -426,6 +433,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       onSearch={runSearch}
       onPageChange={changePage}
       onRefresh={async () => {
+        health.refresh();
         const data = await refresh(page, sourceAgent, { useCache: false });
         if (data) {
           track(buildMemoryUiPanelRefreshedEvent({
@@ -798,6 +806,7 @@ function MemoryProcessingFailureCard(props: {
   const feedback = props.retryFeedback?.memoryId === props.item.id ? props.retryFeedback : null;
   const retryError = feedback?.status === "error" ? feedback : null;
   const displayedErrorMessage = retryError?.message ?? processing?.errorMessage ?? null;
+  const callUncertain = processing?.errorCode === "CREDIT_CALL_UNCERTAIN";
   const settingsRequired = processing?.retryAction === "open_settings" && processing.state !== "ready" && processing.state !== "ready_text_only";
   // Older memory services also flag a first attempt that is merely queued.
   const autoRetryScheduled = Boolean(processing?.autoRetryScheduled && (processing.errorCode || processing.errorMessage));
@@ -823,6 +832,7 @@ function MemoryProcessingFailureCard(props: {
 
   const retryDisabled = retryInProgress || feedback?.status === "succeeded";
   const showRetryAction = Boolean(
+    !callUncertain &&
     props.onRetryProcessing &&
     ((processing?.state === "failed" && processing.retryAction !== "none") ||
       retryInProgress ||
@@ -831,6 +841,8 @@ function MemoryProcessingFailureCard(props: {
   );
   const title = feedback?.status === "succeeded"
     ? t("memory.memories.processing.retrySucceeded")
+    : callUncertain
+      ? t("memory.memories.processing.creditsUncertain")
     : retryInProgress
       ? t("memory.memories.processing.retrying")
       : processing?.errorCode === "40309"

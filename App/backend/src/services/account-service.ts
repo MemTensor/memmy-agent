@@ -3,6 +3,7 @@ import {
   AccountInvitationViewSchema,
   AccountLoginResultViewSchema,
   AccountProfileViewSchema,
+  CreditAccountStateSchema,
   AccountSessionViewSchema,
   LotteryRewardSchema,
   SendCodeResponseSchema,
@@ -200,6 +201,14 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
       const uuid = options.accountSessionRepository.getCloudUuid();
       if (uuid) {
         await options.cloudClient.updateAccountGuide({ uuid, hasFinishedGuide: true });
+        // Mirror the cloud flag locally; a later login reads hasFinishedGuide from this row and
+        // would otherwise restart onboarding (and re-randomize the nickname) for a returning user.
+        await refreshCloudGuideState({
+          cloudClient: options.cloudClient,
+          accountSessionRepository: options.accountSessionRepository,
+          session: AccountSessionViewSchema.parse(options.accountSessionRepository.get()),
+          cloudUuid: uuid
+        });
       }
 
       return { ok: true };
@@ -418,6 +427,7 @@ function getRemainingResendSeconds(sentAt: string | null, now: Date): number {
  */
 function toSessionProfileInput(profile: CloudAccountProfile): AccountSessionProfileInput {
   return {
+    ...CreditAccountStateSchema.parse(profile),
     userId: profile.userId,
     email: profile.email,
     phoneNumber: profile.phoneNumber,

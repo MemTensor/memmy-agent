@@ -317,6 +317,7 @@ export type MemoryModelsStatus = z.infer<typeof MemoryModelsStatusSchema>;
 /** Schema for memory health snapshot. */
 export const MemoryHealthSnapshotSchema = z.object({
   ok: z.boolean(),
+  creditPaused: z.boolean().optional(),
   serviceVersion: NonEmptyStringSchema.optional(),
   protocolVersion: z.number().int().positive().optional(),
   viewerVersion: NonEmptyStringSchema.optional(),
@@ -958,6 +959,8 @@ export type PanelJobsOutput = z.infer<typeof PanelJobsOutputSchema>;
 
 /** Schema for api error code. */
 export const ApiErrorCodeSchema = z.enum([
+  "CREDIT_INSUFFICIENT",
+  "CREDIT_BALANCE_RESERVED",
   "invalid_argument",
   "unauthorized",
   "forbidden",
@@ -976,7 +979,15 @@ export const ApiErrorCodeSchema = z.enum([
   "toolkit_unsupported",
   "model_config_changed",
   "config_write_busy",
-  "account_model_preset_conflict"
+  "account_model_preset_conflict",
+  "BUSINESS_REQUEST_REUSED",
+  "CHECKIN_ALREADY_CLAIMED",
+  "VOUCHER_INVALID",
+  "VOUCHER_ALREADY_REDEEMED",
+  "VOUCHER_EXPIRED",
+  "VOUCHER_EXHAUSTED",
+  "VOUCHER_INELIGIBLE",
+  "REWARD_RATE_LIMITED"
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 

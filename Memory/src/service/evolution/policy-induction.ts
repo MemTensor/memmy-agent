@@ -1,3 +1,4 @@
+import { isCreditModelError } from "../../model/http.js";
 import {
   L2_INDUCTION_PROMPT,
   buildPolicyDraft,
@@ -603,6 +604,7 @@ export class PolicyInductionEngine {
         reason: lastInvalidReason ?? "llm-failed: l2.induction.invalid: unknown"
       };
     } catch (error) {
+      if (isCreditModelError(error)) throw error;
       return {
         ok: false,
         reason: `llm-failed: ${errorMessageFromUnknown(error) ?? "unknown"}`

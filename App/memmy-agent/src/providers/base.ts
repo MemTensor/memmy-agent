@@ -60,7 +60,11 @@ export class ToolCallRequest {
   }
 }
 
+export type CreditSettlement = { userId: string; accountVersion: number; callId: string };
+
 export class LLMResponse {
+  partialContent?: string;
+  creditSettlement?: CreditSettlement;
   content: string | null;
   toolCalls: ToolCallRequest[];
   finishReason: string;
@@ -276,6 +280,7 @@ export abstract class LLMProvider {
   }
 
   abstract chat(args: {
+    billingOperation?: "GENERATE_TITLE" | "SESSION_DAG";
     messages: Record<string, any>[];
     tools?: Record<string, any>[] | null;
     model?: string | null;

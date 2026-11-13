@@ -1,3 +1,4 @@
+import { accountHasCredits } from "../model/credit-checkpoint.js";
 import {
   assertJsonValue,
   canonicalJson,
@@ -34,6 +35,7 @@ import {
 } from "../model/task-routing.js";
 import {
   jobTypeConsumesMemoryBudget,
+  jobTypeBudgetRoles,
   type MemoryBudgetModelSources
 } from "@memmy/agent-source-core";
 import {
@@ -558,6 +560,13 @@ export class MemoryService {
       memoryBudgetNextWakeAtMs: () => this.tokenBudgetLedger.nextWakeAtMs(),
       memoryBudgetNextReconcileAtMs: () => this.nextAppBudgetReconcileAtMs(),
       summaryModelConfigured: () => workerRunnerOwner.llm.isConfigured(),
+      canResumeCredits: async (jobType) => {
+        const configs = jobTypeBudgetRoles(jobType).map(role => role === "memory_summary" ? this.config.summary
+          : role === "memory_evolution" ? resolveEvolutionConfig(this.config) : this.config.embedding);
+        const platform = configs.filter(config => config.actualModelContext?.source === "account");
+        if (!platform.length) return true;
+        return accountHasCredits(platform[0]!);
+      },
       nowIso,
       encodeChangeCursor: this.encodeChangeCursor.bind(this),
       namespaceIdFromMemory,
@@ -957,6 +966,7 @@ export class MemoryService {
     };
     return {
       ok: schema.version > 0 && ![summary, evolution, embedding].some((model) => Boolean(model.lastError)),
+      creditPaused: this.repos.runtime.creditPausedJobs(1).length > 0 || this.repos.runtime.creditPausedEmbeddingRetries(1).length > 0,
       serviceVersion: PROJECT_VERSION,
       ...(MEMORY_RUNTIME_BUILD_ID ? { buildId: MEMORY_RUNTIME_BUILD_ID } : {}),
       protocolVersion: MEMORY_PROTOCOL_VERSION,

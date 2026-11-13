@@ -145,6 +145,9 @@ export class AgentProgressHook extends AgentHook {
   }
 
   override async afterIteration(context: AgentHookContext): Promise<void> {
+    if (this.onProgressCb && context.response?.creditSettlement) {
+      await this.onProgressCb("", { creditSettlement: context.response.creditSettlement });
+    }
     if (
       this.onProgressCb &&
       (context.toolCalls ?? []).length &&

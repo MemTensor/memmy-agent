@@ -9,6 +9,7 @@ import {
 import type { MemmyConfig } from "../../config/index.js";
 import { createMemoryLogger,memoryErrorFields } from "../../logging/logger.js";
 import type { LlmClient } from "../../model/types.js";
+import { isCreditModelError } from "../../model/http.js";
 import type {
   EpisodeRecord,
   EvolutionJobRecord,
@@ -410,6 +411,7 @@ export class RewardPipeline {
         source: "llm"
       };
     } catch (error) {
+      if (isCreditModelError(error)) throw error;
       pipelineLogger.warn("fallback.used", {
         operation: `reward.${REWARD_R_HUMAN_PROMPT.id}.v${REWARD_R_HUMAN_PROMPT.version}`,
         pipeline: "reward.scoring",

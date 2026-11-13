@@ -8,7 +8,7 @@ describe("ImprovementProgramModal", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <ImprovementProgramModal
-          giftTokens={300_000}
+          giftCredits="123.45"
           showGift
           onChoice={vi.fn()}
           onLearnMore={vi.fn()}
@@ -16,7 +16,7 @@ describe("ImprovementProgramModal", () => {
       </I18nProvider>
     );
 
-    expect(html).toContain("300,000 Token");
-    expect(html).not.toContain("5,000,000 Token");
+    expect(html).toContain("123.45 奖励积分");
+    expect(html).not.toContain("Token");
   });
 });

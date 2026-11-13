@@ -56,7 +56,8 @@ describe("2026-06-04 prototype modals", () => {
     expect(modalSource).toContain('"tokenExhausted.title"');
     expect(modalSource).toContain('"tokenExhausted.applyMore"');
     expect(modalSource).toContain('"tokenExhausted.switchApiKey"');
-    expect(routerSource).not.toContain("TokenExhaustedModal");
+    expect(routerSource).toContain("<CreditsExhaustedModal");
+    expect(routerSource).toContain("useCreditsExhaustedPrompt({");
     expect(routerSource).not.toContain("shouldShowTokenExhaustedModal");
     expect(routerSource).not.toContain("writeTokenExhaustedApplyMoreRequest");
     expect(routerSource).not.toContain("emitTokenExhaustedApplyMoreRequest");
@@ -80,12 +81,13 @@ describe("2026-06-04 prototype modals", () => {
     expect(routerSource).not.toContain("setHasDismissedTokenExhaustedModal");
   });
 
-  it("Router 在主窗口和桌宠窗口都不渲染启动期额度弹窗", () => {
+  it("Router 只在主窗口监听真实积分，保留桌宠隔离", () => {
     const routerSource = readSource(resolve(appDir, "app/router.tsx"));
 
     expect(routerSource).toContain("function isPetWindow(");
     expect(routerSource).not.toContain("shouldShowTokenExhaustedModal(state.bootstrap)");
-    expect(routerSource).not.toContain("TokenExhaustedModal");
+    expect(routerSource).toContain("<CreditsExhaustedModal");
+    expect(routerSource).toContain("useCreditsExhaustedPrompt({");
   });
 });
 

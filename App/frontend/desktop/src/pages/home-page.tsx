@@ -898,7 +898,7 @@ export function HomePage() {
   const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
   const creditsPreview = isCreditsPreviewMode();
-  const showHomeCheckin = creditsPreview && state.bootstrap?.app.userMode === "account";
+  const showHomeCheckin = state.bootstrap?.app.userMode === "account";
   const { track } = useAnalytics();
   const { syncAgentConversation } = useTaskBus();
   const { connection, ensureChatSubscription, taskStateCoordinator } = useAgentRuntimeBridge();
@@ -1838,19 +1838,9 @@ export function HomePage() {
       })));
       return;
     }
-    if (
-      resolvedConversationModel.candidate?.source === "platform"
-      && isAccountTokenQuotaExhausted(state.bootstrap)
-    ) {
-      if (creditsPreview) {
-        requestCreditsExhaustedPrompt();
-        return;
-      }
-      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
-        source: "send",
-        message: "agent.error.quotaExceeded",
-        ...(state.agent.currentChatId ? { chatId: state.agent.currentChatId } : { scopeKey: chatScopeKey })
-      })));
+    if (creditsPreview && resolvedConversationModel.candidate?.source === "platform"
+      && isAccountTokenQuotaExhausted(state.bootstrap)) {
+      requestCreditsExhaustedPrompt();
       return;
     }
     const sendScopeKey = chatScopeKey;

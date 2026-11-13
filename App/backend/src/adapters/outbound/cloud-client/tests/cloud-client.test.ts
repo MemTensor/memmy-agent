@@ -1,9 +1,10 @@
 /** Cloud client tests. */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHttpCloudClient } from "../index.js";
 
 let server: ReturnType<typeof createServer> | undefined;
+beforeEach(() => vi.stubEnv("MEMMY_APP_EDITION", "cn"));
 
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -523,7 +524,7 @@ describe("cloud client", () => {
         return;
       }
 
-      if (request.url === "/api/agentUser/quota/updateTokenTotal") {
+      if (request.url === "/api/agentUser/improvement-program/reward") {
         quotaUpdated = true;
       }
 
@@ -584,9 +585,9 @@ describe("cloud client", () => {
         region: "cn"
       },
       {
-        path: "/api/agentUser/quota/updateTokenTotal",
+        path: "/api/agentUser/improvement-program/reward",
         method: "POST",
-        body: { grantKey: "improvement_program" },
+        body: {},
         authorization: "Bearer cloud.login.uuid",
         region: "cn"
       },
@@ -707,7 +708,7 @@ describe("cloud client", () => {
     });
   });
 
-  it("forwards the per-user grantKey so the cloud can dedup the improvement-program grant", async () => {
+  it("uses the dedicated improvement reward action without supplying a grant amount or key", async () => {
     const requests: Array<{ path: string; body: unknown }> = [];
     server = createServer(async (request, response) => {
       requests.push({ path: request.url ?? "", body: await readJson(request) });
@@ -734,8 +735,8 @@ describe("cloud client", () => {
     });
 
     expect(requests).toContainEqual({
-      path: "/api/agentUser/quota/updateTokenTotal",
-      body: { grantKey: "improvement_program" }
+      path: "/api/agentUser/improvement-program/reward",
+      body: {}
     });
   });
 
@@ -775,7 +776,7 @@ describe("cloud client", () => {
     server = createServer(async (request, response) => {
       requests.push({
         path: request.url ?? "",
-        body: await readJson(request),
+        body: await readAudioForm(request),
         authorization: request.headers.authorization
       });
 
@@ -814,7 +815,8 @@ describe("cloud client", () => {
         body: {
           audioBase64: "UklGRg==",
           mimeType: "audio/wav",
-          durationMs: 1200
+          model: "asr",
+          responseFormat: "json"
         },
         authorization: "Bearer cloud.login.uuid"
       }
@@ -826,7 +828,7 @@ describe("cloud client", () => {
     server = createServer(async (request, response) => {
       requests.push({
         path: request.url ?? "",
-        body: await readJson(request),
+        body: await readAudioForm(request),
         authorization: request.headers.authorization
       });
 
@@ -865,7 +867,8 @@ describe("cloud client", () => {
         body: {
           audioBase64: "UklGRg==",
           mimeType: "audio/wav",
-          durationMs: 1200
+          model: "asr",
+          responseFormat: "json"
         },
         authorization: "Bearer cloud.login.uuid"
       }
@@ -1264,4 +1267,12 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 function sendJson(response: ServerResponse, body: unknown): void {
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify(body));
+}
+
+async function readAudioForm(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  const form = await new Response(new Uint8Array(Buffer.concat(chunks)), { headers: { "content-type": request.headers["content-type"]! } }).formData();
+  const file = form.get("file") as File;
+  return { audioBase64: Buffer.from(await file.arrayBuffer()).toString("base64"), mimeType: file.type, model: form.get("model"), responseFormat: form.get("responseFormat") };
 }
