@@ -2138,7 +2138,10 @@ export class RetrievalService {
       ? { hits: retrieval.hits, status: ["first_report_handoff:latest_only"] }
       : timeFilter
       ? { hits: retrieval.hits, status: ["time_filter:l1"] }
-      : await this.filterRecallHits(queryVectorText, merged.hits, context.namespace.source);
+      : await this.filterRecallHits({
+          original: request.injectedContextQuery?.trim() || request.query,
+          resolved: queryVectorText
+        }, merged.hits, context.namespace.source);
     memories = this.currentImportedMemories(memories, context.namespace.source);
     merged.hits = this.currentImportedHits(merged.hits, context.namespace.source);
     filteredHits.hits = this.currentImportedHits(filteredHits.hits, context.namespace.source);
@@ -2626,7 +2629,11 @@ export class RetrievalService {
     return run();
   }
 
-  private async filterRecallHits(query: string, hits: RecallHit[], currentAgentId?: string): Promise<{
+  private async filterRecallHits(
+    query: { original: string; resolved: string },
+    hits: RecallHit[],
+    currentAgentId?: string
+  ): Promise<{
     hits: RecallHit[];
     status: string[];
   }> {
@@ -2647,7 +2654,9 @@ export class RetrievalService {
     if (hits.length < config.llmFilterMinCandidates) {
       return { hits, status: [] };
     }
-    if (!query.trim()) {
+    const resolved = clip(query.resolved, 500);
+    const original = clip(query.original, 500) || resolved;
+    if (!original) {
       return { hits, status: [] };
     }
     if (!filterLlm?.isConfigured()) {
@@ -2659,6 +2668,9 @@ export class RetrievalService {
 
     try {
       const bodyChars = Math.max(120, config.llmFilterCandidateBodyChars);
+      const queryInput = resolved && resolved !== original
+        ? `QUERY: ${original}\n\nRESOLVED QUERY: ${resolved}`
+        : `QUERY: ${original}`;
       const completeFilter = (llm: LlmClient, isSummaryLlm: boolean): Promise<{ selected?: unknown; ranked?: unknown; sufficient?: unknown }> => {
         hits = this.currentImportedHits(hits, currentAgentId);
         if (hits.length === 0) return Promise.resolve({ selected: [] });
@@ -2677,7 +2689,7 @@ export class RetrievalService {
             },
             {
               role: "user",
-              content: `QUERY: ${clip(query, 500)}\n\nCANDIDATES:\n${candidates}`
+              content: `${queryInput}\n\nCANDIDATES:\n${candidates}`
             }
           ],
           {
