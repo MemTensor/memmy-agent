@@ -4034,10 +4034,7 @@ export function buildSkillDraft(args: {
   const existing = args.existing ?? null;
   const eta = existing && existing.trialsAttempted > 0
     ? clamp01(existing.eta)
-    : clamp01(Math.max(
-        minEta,
-        0.5 * clamp01(args.policy.gain) + 0.5 * Math.min(1, args.policy.support / Math.max(1, minSupport))
-      ));
+    : skillEtaFromPolicy({ gain: args.policy.gain, support: args.policy.support, minEta, minSupport });
   const name = skillNameFromPolicy(args.policy);
   const invocationGuide = renderInvocationGuide(args.policy, name);
   const procedureJson = {
@@ -4276,6 +4273,12 @@ export function skillStatusAfterTrial(input: {
     status = "archived";
   }
   return status;
+}
+
+/** Initial crystallization formula, also used when revising its recorded source inputs. */
+export function skillEtaFromPolicy(input: { gain: number; support: number; minEta: number; minSupport: number }): number {
+  return clamp01(Math.max(input.minEta,
+    0.5 * clamp01(input.gain) + 0.5 * Math.min(1, input.support / Math.max(1, input.minSupport))));
 }
 
 export function skillEtaAfterRewardDrift(input: {
@@ -4907,6 +4910,16 @@ function computeGain(input: {
   withTraces: TraceMemoryMeta[];
   withoutTraces: TraceMemoryMeta[];
   tauSoftmax: number;
+}) {
+  return computePolicyGainFromValues({ withValues: input.withTraces.map(trace => trace.value),
+    withoutValues: input.withoutTraces.map(trace => trace.value), tauSoftmax: input.tauSoftmax });
+}
+
+/** The existing gain formula, exposed without requiring a full memory snapshot. */
+export function computePolicyGainFromValues(input: {
+  withValues: number[];
+  withoutValues: number[];
+  tauSoftmax: number;
 }): {
   gain: number;
   withMean: number;
@@ -4914,14 +4927,14 @@ function computeGain(input: {
   weightedWith: number;
   baseline: number;
 } {
-  const weightedWith = valueWeightedMean(input.withTraces, input.tauSoftmax);
-  const withMean = average(input.withTraces.map((trace) => trace.value));
-  const withoutMean = average(input.withoutTraces.map((trace) => trace.value));
-  const effectiveWith = input.withTraces.length >= 3 ? weightedWith : withMean;
-  const poolMean = average([...input.withTraces, ...input.withoutTraces].map((trace) => trace.value));
+  const weightedWith = valueWeightedMean(input.withValues, input.tauSoftmax);
+  const withMean = average(input.withValues);
+  const withoutMean = average(input.withoutValues);
+  const effectiveWith = input.withValues.length >= 3 ? weightedWith : withMean;
+  const poolMean = average([...input.withValues, ...input.withoutValues]);
   const baseline = Math.max(0.2, Math.min(0.5, Number.isFinite(poolMean) ? poolMean : 0.5));
-  const blendedWithout = (withoutMean * input.withoutTraces.length + baseline * 5) /
-    (input.withoutTraces.length + 5);
+  const blendedWithout = (withoutMean * input.withoutValues.length + baseline * 5) /
+    (input.withoutValues.length + 5);
   return {
     gain: effectiveWith - blendedWithout,
     withMean,
@@ -4942,9 +4955,8 @@ export function smoothPolicyGain(args: {
   return alpha * args.newGain + (1 - alpha) * args.currentGain;
 }
 
-function valueWeightedMean(traces: TraceMemoryMeta[], tau: number): number {
-  if (traces.length === 0) return 0;
-  const values = traces.map((trace) => trace.value);
+function valueWeightedMean(values: number[], tau: number): number {
+  if (values.length === 0) return 0;
   const max = Math.max(...values);
   const exps = values.map((value) => Math.exp((value - max) / Math.max(tau, 1e-6)));
   const total = exps.reduce((sum, value) => sum + value, 0) || 1;

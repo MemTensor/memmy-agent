@@ -110,7 +110,8 @@ async function runDirectSkillEpisode(input: {
   summary?: string;
 }) {
   const calls: DirectSkillCall[] = [];
-  const { db, service } = createTestService({ skillLlm: createDirectSkillLlm(calls, input.skillJson, input.displayTitle, input.summary), config: input.config });
+  const skillLlm = createDirectSkillLlm(calls, input.skillJson, input.displayTitle, input.summary);
+  const { db, service } = createTestService({ skillLlm, config: input.config });
   const session = service.openSession({
     namespace: { source: "codex", profileId: "jiang", userId: input.userId }
   });
@@ -147,7 +148,7 @@ async function runDirectSkillEpisode(input: {
     updatedAt: at
   });
   await runWorkerRounds(service, 4, 20);
-  return { db, service, complete, calls, repos: new Repositories(db.db) };
+  return { db, service, complete, calls, skillLlm, repos: new Repositories(db.db) };
 }
 
 describe("MemoryService / evolution / skill cluster", () => {
@@ -261,6 +262,278 @@ describe("MemoryService / evolution / skill cluster", () => {
       reason: "tools_outside_evidence:kubectl",
       source: DIRECT_SKILL_SOURCE
     });
+  });
+
+  it("does not mark rejected direct-skill evidence as successfully processed", async () => {
+    const { db, repos, complete, service } = await runDirectSkillEpisode({
+      userId: "647-rejected-evidence", rTask: 1,
+      skillJson: { ...DIRECT_SKILL_JSON, tools: ["python", "kubectl"] }
+    });
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE memory_layer = 'Skill'").get())
+      .toEqual({ count: 0 });
+    const episodeId = assignedEpisodeId(service, complete);
+    const cluster = repos.runtime.getSkillClusterForEpisode(episodeId)!;
+    expect(cluster.processedEpisodeIds).not.toContain(episodeId);
+  });
+
+  it("includes the final raw turn beyond 1000 turns when rebuilding revised evidence", async () => {
+    const { repos, service, complete, calls } = await runDirectSkillEpisode({ userId: "647-long-task", rTask: 1 });
+    const episodeId = assignedEpisodeId(service, complete);
+    const template = repos.runtime.listRawTurnsByEpisode(episodeId)[0]!;
+    repos.transaction(() => {
+      for (let i = 0; i < 1001; i++) repos.runtime.insertRawTurn({ ...template, id: `647-extra-${i}`, turnId: `647-extra-${i}`,
+        userText: i === 1000 ? "FINAL_CORRECTION_647: preserve formulas" : "continue checking workbook", createdAt: new Date(Date.parse(template.createdAt) + i + 1).toISOString() });
+    });
+    const cluster = repos.runtime.getSkillClusterForEpisode(episodeId)!;
+    const at = new Date().toISOString();
+    repos.runtime.enqueueJob({ id: "647-long-rebuild", jobType: "skill_batch_evolve", userId: cluster.userId, episodeId,
+      payload: { clusterId: cluster.id }, status: "queued", attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at });
+    await service.runWorkerOnce(30);
+    expect(repos.runtime.getJob("647-long-rebuild")).toMatchObject({ status: "succeeded" });
+    const rebuild = calls.filter(call => call.operation.startsWith("skill.batch_evolve.") && call.operation !== "skill.batch_evolve.meta").at(-1)!;
+    expect(rebuild).toBeDefined();
+    expect(rebuild.messages.find(message => message.role === "user")!.content).toContain("FINAL_CORRECTION_647");
+  });
+  it("retries a rejected draft and does not regenerate successfully processed inputs", async () => {
+    const draft = { ...DIRECT_SKILL_JSON, tools: ["python", "kubectl"] };
+    const { repos, complete, service, calls } = await runDirectSkillEpisode({
+      userId: "647-retry-to-success", rTask: 1, skillJson: draft
+    });
+    const episodeId = assignedEpisodeId(service, complete);
+    const cluster = repos.runtime.getSkillClusterForEpisode(episodeId)!;
+    expect(cluster.processedEpisodeIds).not.toContain(episodeId);
+    draft.tools = ["python"];
+    async function retry(id: string) {
+      const at = new Date().toISOString();
+      repos.runtime.enqueueJob({ id, jobType: "skill_batch_evolve", userId: cluster.userId,
+        episodeId, payload: { clusterId: cluster.id }, status: "queued", attempts: 0, maxAttempts: 3,
+        createdAt: at, updatedAt: at });
+      await service.runWorkerOnce(50);
+      expect(repos.runtime.getJob(id)?.status).toBe("succeeded");
+    }
+    await retry("647-accepted-retry");
+    const savedCluster = repos.runtime.getSkillCluster(cluster.id)!;
+    expect(savedCluster.processedEpisodeIds).toContain(episodeId);
+    expect(savedCluster.skillMemoryId).toBeTruthy();
+    const savedSkill = repos.memories.get(savedCluster.skillMemoryId!)!;
+    const modelCalls = calls.filter(call => call.operation.startsWith("skill.batch_evolve")).length;
+    await retry("647-successful-input-repeat");
+    expect(calls.filter(call => call.operation.startsWith("skill.batch_evolve"))).toHaveLength(modelCalls);
+    expect(repos.memories.get(savedSkill.id)).toEqual(savedSkill);
+  });
+
+  it("suspends an outdated procedure on rejected rebuild and restores it only after a successful retry", async () => {
+    const draft = { ...DIRECT_SKILL_JSON };
+    const { repos, service, complete } = await runDirectSkillEpisode({ userId: "647-rebuild-suspension", rTask: 1, skillJson: draft });
+    const episodeId = assignedEpisodeId(service, complete);
+    const cluster = repos.runtime.getSkillClusterForEpisode(episodeId)!;
+    const before = repos.memories.get(cluster.skillMemoryId!)!;
+    const key = `skill-evolution:v1:${cluster.id}`;
+    const completed = repos.runtime.getKv(key);
+    const raw = repos.runtime.listRawTurnsByEpisode(episodeId)[0]!;
+    repos.runtime.updateRawTurn({ ...raw, assistantText: "Corrected workbook procedure with openpyxl." });
+    const run = async (id: string) => {
+      const at = new Date().toISOString();
+      repos.runtime.enqueueJob({ id, jobType: "skill_batch_evolve", userId: cluster.userId, episodeId,
+        payload: { clusterId: cluster.id }, status: "queued", attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at });
+      await service.runWorkerOnce(50);
+      return repos.runtime.getJob(id)?.status;
+    };
+    draft.steps = [];
+    expect(await run("647-suspended-rejected")).toBe("failed");
+    expect(repos.memories.get(before.id)?.status).toBe("archived");
+    expect(repos.memories.get(before.id)?.memoryValue).toBe(before.memoryValue);
+    expect(repos.runtime.getKv(key)).toEqual(completed);
+    draft.steps = DIRECT_SKILL_JSON.steps;
+    expect(await run("647-suspended-retry")).toBe("succeeded");
+    expect(repos.memories.get(before.id)?.status).toBe(before.status);
+    expect(repos.memories.list({ memoryLayer: "Skill" }, 100)).toHaveLength(1);
+  });
+
+  it.each(["edit", "reclose", "write_failure"] as const)("commits direct skill and completion atomically across %s", async scenario => {
+    const { db, repos, service, complete, skillLlm } = await runDirectSkillEpisode({ userId: `647-skill-${scenario}`, rTask: 1 });
+    const episodeId = assignedEpisodeId(service, complete);
+    const cluster = repos.runtime.getSkillClusterForEpisode(episodeId)!;
+    const skill = repos.memories.get(cluster.skillMemoryId!)!;
+    const completionKey = `skill-evolution:v1:${cluster.id}`;
+    const completedBefore = repos.runtime.getKv(completionKey);
+    const raw = repos.runtime.listRawTurnsByEpisode(episodeId)[0]!;
+    repos.runtime.updateRawTurn({ ...raw, assistantText: "Updated workbook totals and checked the saved report.xlsx." });
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const completeJson = skillLlm.completeJson.bind(skillLlm);
+    skillLlm.completeJson = async (messages, options) => {
+      if (options.operation.startsWith("skill.batch_evolve") && !options.operation.endsWith(".meta")) {
+        enter(); await gate;
+      }
+      return completeJson(messages, options);
+    };
+    const at = new Date().toISOString();
+    const id = `647-skill-commit-${scenario}`;
+    repos.runtime.enqueueJob({ id, jobType: "skill_batch_evolve", userId: cluster.userId,
+      episodeId, payload: { clusterId: cluster.id }, status: "queued", attempts: 0, maxAttempts: 3,
+      createdAt: at, updatedAt: at });
+    const pending = service.runWorkerOnce(50);
+    await Promise.race([entered, pending.then(() => { throw new Error("skill returned before model"); })]);
+    const suspended = repos.memories.get(skill.id)!;
+    expect(suspended.status).toBe("archived");
+    expect(suspended.memoryValue).toBe(skill.memoryValue);
+    if (scenario === "edit") repos.runtime.updateRawTurn({ ...raw, assistantText: "Evidence changed again during generation." });
+    if (scenario === "reclose") { repos.runtime.reopenEpisode(episodeId); repos.runtime.closeEpisode(episodeId); }
+    if (scenario === "write_failure") db.db.exec("CREATE TEMP TRIGGER reject_647_cluster BEFORE UPDATE ON skill_clusters BEGIN SELECT RAISE(ABORT, '647 injected cluster write failure'); END");
+    release();
+    await pending;
+    expect(repos.runtime.getJob(id)?.status).toBe("failed");
+    expect(repos.memories.get(skill.id)).toEqual(suspended);
+    const { source_retirement: marker, ...unchangedStats } = suspended.properties.internal_info.skill as Record<string, unknown>;
+    expect(marker).toMatchObject({ reason: "source_revision", clusterId: cluster.id });
+    expect(unchangedStats).toEqual(skill.properties.internal_info.skill);
+    expect(repos.runtime.getKv(completionKey)).toEqual(completedBefore);
+    expect(repos.runtime.getSkillCluster(cluster.id)?.processedEpisodeIds).toEqual(cluster.processedEpisodeIds);
+  });
+
+  it.each(["archive", "trial", "new_body", "workflow", "procedure_edit"] as const)("preserves independent skill %s state during source reprocessing", async scenario => {
+    const draft = { ...DIRECT_SKILL_JSON };
+    const { repos, service, complete, calls } = await runDirectSkillEpisode({ userId: `647-preserve-${scenario}`, rTask: 1, skillJson: draft });
+    const episodeId = assignedEpisodeId(service, complete);
+    const cluster = repos.runtime.getSkillClusterForEpisode(episodeId)!;
+    const skill = repos.memories.get(cluster.skillMemoryId!)!;
+    const rawSkill = skill.properties.internal_info.skill as Record<string, unknown>;
+    const status = scenario === "archive" ? "archived" : skill.status;
+    repos.memories.update({ ...skill, status, properties: { ...skill.properties, status,
+      internal_info: { ...skill.properties.internal_info,
+        skill: { ...rawSkill, eta: 0.83, trials_attempted: 7, trials_passed: 6,
+          ...(scenario === "procedure_edit" ? { procedure_json: { ...(rawSkill.procedure_json as Record<string, unknown>),
+            summary: "User edited structured procedure" } } : {}) } } } });
+    const saved = repos.memories.get(skill.id)!;
+    const raw = repos.runtime.listRawTurnsByEpisode(episodeId)[0]!;
+    repos.runtime.updateRawTurn({ ...raw, assistantText: "Rechecked workbook totals with openpyxl and saved report.xlsx." });
+    if (scenario === "new_body") draft.trigger_context = "When filling totals in report.xlsx, verify the final saved workbook.";
+    if (scenario === "workflow") draft.steps = [{ title: "Validate workbook", body: "Recheck workbook totals with openpyxl before saving report.xlsx." }];
+    const beforeCalls = calls.length;
+    const at = new Date().toISOString();
+    const id = `647-preserve-${scenario}-job`;
+    repos.runtime.enqueueJob({ id, jobType: "skill_batch_evolve", userId: cluster.userId, episodeId,
+      payload: { clusterId: cluster.id }, status: "queued", attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at });
+    await service.runWorkerOnce(50);
+    expect(repos.runtime.getJob(id)?.status).toBe(scenario === "procedure_edit" ? "failed" : "succeeded");
+    expect(repos.memories.list({ memoryLayer: "Skill" }, 100)).toHaveLength(1);
+    if (scenario === "archive" || scenario === "procedure_edit") {
+      expect(calls).toHaveLength(beforeCalls);
+      expect(repos.memories.get(skill.id)).toEqual(saved);
+    } else if (scenario === "new_body" || scenario === "workflow") {
+      const revised = repos.memories.get(skill.id)!;
+      expect(revised.memoryValue).not.toBe(saved.memoryValue);
+      if (scenario === "workflow") {
+        expect(revised.memoryValue).toContain("Recheck workbook totals");
+        expect(revised.memoryValue).not.toContain("Write the totals and save");
+      }
+      expect(revised.properties.internal_info.skill).toMatchObject({ eta: 0.6, trials_attempted: 0, trials_passed: 0 });
+      expect((revised.properties.internal_info.skill as Record<string, unknown>).content_revised_at).toBeTruthy();
+      expect((revised.properties.internal_info.skill as Record<string, unknown>).eta_contributions).toMatchObject({
+        bodyRevision: "direct:2", baseline: { eta: 0.6, attempts: 0, passes: 0 }, order: []
+      });
+    } else {
+      expect(repos.memories.get(skill.id)?.properties.internal_info.skill).toMatchObject({ eta: 0.83, trials_attempted: 7, trials_passed: 6 });
+    }
+  });
+
+  it("rebuilds from previously used sources beyond the selection window and removes failed anchors", async () => {
+    const { repos, service, complete, calls } = await runDirectSkillEpisode({ userId: "647-full-dependencies", rTask: 0.8 });
+    const episodeId = assignedEpisodeId(service, complete);
+    const episode = repos.runtime.getEpisode(episodeId)!;
+    const raw = repos.runtime.listRawTurnsByEpisode(episodeId)[0]!;
+    const cluster = repos.runtime.getSkillClusterForEpisode(episodeId)!;
+    const run = async (suffix: string) => {
+      const at = new Date().toISOString();
+      const id = `647-full-${suffix}`;
+      repos.runtime.enqueueJob({ id, jobType: "skill_batch_evolve", userId: cluster.userId, episodeId,
+        payload: { clusterId: cluster.id }, status: "queued", attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at });
+      await service.runWorkerOnce(50);
+      expect(repos.runtime.getJob(id)?.status).toBe("succeeded");
+    };
+    for (let index = 0; index < 6; index++) {
+      const id = `647-other-${index}`;
+      const turnId = `647-other-turn-${index}`;
+      const at = new Date(Date.now() + index + 1).toISOString();
+      repos.runtime.createEpisode({ ...episode, id, rTask: 1, rawTurnIds: [turnId], l1MemoryIds: [],
+        skillMemoryIds: [], updatedAt: at });
+      repos.runtime.insertRawTurn({ ...raw, id: turnId, turnId, episodeId: id });
+      repos.runtime.upsertSkillClusterMember({ clusterId: cluster.id, episodeId: id, outcome: "success", rTask: 1, assignedAt: at });
+      await run(`add-${index}`);
+    }
+    repos.runtime.updateRawTurn({ ...raw, assistantText: "Rechecked workbook totals with openpyxl before saving report.xlsx." });
+    await run("revision");
+    const generation = calls.filter(call => call.operation.startsWith("skill.batch_evolve") && !call.operation.includes("meta")).at(-1)!;
+    const payload = JSON.parse(generation.messages.find(message => message.role === "user")!.content);
+    expect(payload.EXISTING_SKILL_SNAPSHOT).toBeNull();
+    expect(payload.EVIDENCE).toHaveLength(7);
+    expect(payload.EVIDENCE.map((item: { episode_id: string }) => item.episode_id)).toContain(episodeId);
+    const beforeRepeat = calls.length;
+    await run("repeat");
+    expect(calls).toHaveLength(beforeRepeat);
+    repos.runtime.updateEpisodeReward(episodeId, { rTask: -1, rewardDetail: { source: "test" } }, new Date().toISOString());
+    await run("withdraw");
+    const skill = repos.memories.get(cluster.skillMemoryId!)!;
+    const anchors = (skill.properties.internal_info.skill as Record<string, unknown>).evidence_anchor_ids as string[];
+    expect(anchors).toHaveLength(6);
+    expect(anchors).not.toContain(episodeId);
+  });
+
+  it.each(["failure", "reopen", "manual_edit"] as const)("MEMMY-647 retires the last success anchor and restores only its own retirement: %s", async scenario => {
+    const { repos, service, complete, calls } = await runDirectSkillEpisode({ userId: `647-last-${scenario}`, rTask: 1 });
+    const episodeId = assignedEpisodeId(service, complete);
+    const cluster = repos.runtime.getSkillClusterForEpisode(episodeId)!;
+    const skill = repos.memories.get(cluster.skillMemoryId!)!;
+    repos.memories.update({ ...skill, properties: { ...skill.properties, internal_info: { ...skill.properties.internal_info,
+      skill: { ...(skill.properties.internal_info.skill as Record<string, unknown>), eta: 0.83, trials_attempted: 7, trials_passed: 6 } } } });
+    const enqueue = async (suffix: string) => {
+      const at = new Date().toISOString();
+      const id = `647-last-${scenario}-${suffix}`;
+      repos.runtime.enqueueJob({ id, jobType: "skill_batch_evolve", userId: cluster.userId, episodeId, payload: { clusterId: cluster.id },
+        status: "queued", attempts: 0, maxAttempts: 3, createdAt: at, updatedAt: at });
+      await service.runWorkerOnce(50);
+      expect(repos.runtime.getJob(id)?.status).toBe("succeeded");
+    };
+    const callCount = calls.length;
+    if (scenario === "reopen") {
+      const reopened = repos.runtime.reopenEpisode(episodeId)!;
+      const queued = repos.runtime.getJobByDedupeKey(`skill-revalidate:${cluster.id}:${episodeId}:${reopened.meta.processingGeneration}`);
+      expect(queued?.payload.reason).toBe("episode.reopened");
+      await service.runWorkerOnce(50);
+      expect(repos.memories.get(skill.id)?.status).toBe("archived");
+    } else repos.runtime.updateEpisodeReward(episodeId, { rTask: -1, rewardDetail: { source: "647 revision" } }, new Date().toISOString());
+    await enqueue("withdraw");
+    const retired = repos.memories.get(skill.id)!;
+    expect(retired.status).toBe("archived");
+    expect(retired.memoryValue).toBe(skill.memoryValue);
+    expect(retired.properties.internal_info.skill).toMatchObject({ eta: 0.83, trials_attempted: 7, trials_passed: 6 });
+    expect(calls).toHaveLength(callCount);
+    await enqueue("repeat-withdraw");
+    expect(repos.memories.get(skill.id)).toEqual(retired);
+    if (scenario === "manual_edit") repos.memories.update({ ...retired, memoryValue: "User edited the retired guide." });
+    const beforeRestore = repos.memories.get(skill.id)!;
+    if (scenario === "reopen") repos.runtime.closeEpisode(episodeId);
+    repos.runtime.updateEpisodeReward(episodeId, { rTask: 1, rewardDetail: { source: "647 restored" } }, new Date().toISOString());
+    await enqueue("restore");
+    expect(repos.memories.list({ memoryLayer: "Skill" }, 100)).toHaveLength(1);
+    if (scenario === "manual_edit") expect(repos.memories.get(skill.id)).toEqual(beforeRestore);
+    else {
+      expect(repos.memories.get(skill.id)?.status).toBe("activated");
+      expect(repos.memories.get(skill.id)?.id).toBe(skill.id);
+      expect(repos.memories.get(skill.id)?.properties.internal_info.skill).toMatchObject({ eta: 0.83, trials_attempted: 7, trials_passed: 6 });
+    }
+  });
+
+  it("MEMMY-647 rolls back reopening when its direct skill revalidation job cannot be queued", async () => {
+    const { db, repos, service, complete } = await runDirectSkillEpisode({ userId: "647-reopen-queue-failure", rTask: 1 });
+    const episodeId = assignedEpisodeId(service, complete);
+    const before = repos.runtime.getEpisode(episodeId);
+    db.db.exec("CREATE TEMP TRIGGER reject_647_reopen_job BEFORE INSERT ON evolution_jobs WHEN NEW.job_type = 'skill_batch_evolve' BEGIN SELECT RAISE(ABORT, '647 reopen queue failure'); END");
+    expect(() => repos.runtime.reopenEpisode(episodeId)).toThrow("647 reopen queue failure");
+    expect(repos.runtime.getEpisode(episodeId)).toEqual(before);
   });
 
   it("enqueues assign/evolve after episode reward without a manual skill job", async () => {
