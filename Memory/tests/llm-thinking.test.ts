@@ -449,6 +449,75 @@ describe("memory LLM thinking configuration", () => {
     });
   });
 
+  it.each([
+    ["minimax", "https://api.minimax.io/v1", "MiniMax-M3.1-Flash-Preview", { thinking: { type: "adaptive" }, reasoning_split: true }],
+    ["openai_compatible", "https://compatible.example/v1", "MiniMax-M3.1-Flash", { thinking: { type: "adaptive" }, reasoning_split: true }],
+    ["minimax", "https://dashscope.aliyuncs.com/compatible-mode/v1", "MiniMax-M3.1-Flash-Preview", { thinking: { type: "adaptive" } }],
+    ["openai_compatible", "https://openrouter.ai/api/v1", "minimax/minimax-m3.1-flash-preview", { reasoning: { effort: "low" } }],
+    ["openai_compatible", "https://openrouter.ai/api/v1", "minimax/minimax-m3.1-flash:free", { reasoning: { effort: "low" } }]
+  ] as const)("keeps M3.1 Flash thinking for %s at %s", async (vendor, endpoint, model, expected) => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    for (const enableThinking of [false, true]) {
+      for (const thinkingMode of ["disabled", "enabled"] as const) {
+        fetchMock.mockClear();
+        await createLlmClient(llmConfig({ vendor, endpoint, model, enableThinking }))
+          .completeJson([{ role: "user", content: "summarize" }], {
+            operation: "capture.summarize",
+            thinkingMode
+          });
+
+        const body = requestBody(fetchMock);
+        expect(body).toMatchObject({ model, ...expected });
+        expect(body).not.toHaveProperty("enable_thinking");
+        if (endpoint.includes("openrouter")) {
+          expect(body).not.toHaveProperty("reasoning_effort");
+        } else {
+          expect(body).toHaveProperty("reasoning_effort", "low");
+        }
+        if (endpoint.includes("dashscope")) {
+          expect(body).not.toHaveProperty("response_format");
+        }
+      }
+    }
+  });
+
+  it("uses low effort with default MiniMax thinking on Anthropic-compatible summaries", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({
+      content: [{ type: "thinking", thinking: "reasoning" }, { type: "text", text: '{"ok":true}' }]
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createLlmClient(llmConfig({
+      provider: "anthropic",
+      vendor: "minimax",
+      endpoint: "https://api.minimax.io/anthropic/v1/messages",
+      model: "MiniMax-M3.1-Flash-Preview",
+      enableThinking: true
+    })).completeJson([{ role: "user", content: "summarize" }], {
+      operation: "capture.summarize",
+      thinkingMode: "disabled"
+    });
+
+    expect(requestBody(fetchMock)).not.toHaveProperty("thinking");
+    expect(requestBody(fetchMock)).toHaveProperty("output_config", { effort: "low" });
+  });
+
+  it("keeps non-summary MiniMax requests and ordinary M3 free of summary effort overrides", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    for (const [model, operation] of [
+      ["minimax-m3.1-flash", "evolution.induction"],
+      ["MiniMax-M3", "capture.summarize"]
+    ] as const) {
+      fetchMock.mockClear();
+      await createLlmClient(llmConfig({ vendor: "minimax", model }))
+        .completeJson([{ role: "user", content: "summarize" }], { operation });
+      expect(requestBody(fetchMock)).not.toHaveProperty("reasoning_effort");
+    }
+  });
+
   it("maps OpenRouter and OpenAI reasoning controls without disabling mandatory reasoning", async () => {
     const fetchMock = openAiFetch();
     vi.stubGlobal("fetch", fetchMock);

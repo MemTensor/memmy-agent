@@ -371,6 +371,111 @@ describe("memory LLM JSON length retry", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not retry reasoning-only summaries from other models with a small budget", async () => {
+    const fetchMock = sequenceFetch([
+      openAiMessageResponse({ content: null, reasoning_content: "Still thinking." }, "length")
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({ model: "other-thinking-model", maxTokens: 512 }));
+    await expect(client.completeJson([{ role: "user", content: "Summarize." }], {
+      operation: "capture.summarize", maxTokens: 512
+    })).rejects.toThrow("Reasoning exhausted");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(client.status().lastError).toContain("Reasoning exhausted");
+  });
+
+  it.each([false, true])("handles Anthropic reasoning-only summary truncation (exhausted=%s)", async (exhausted) => {
+    const thinkingOnly = () => new Response(JSON.stringify({
+      content: [{ type: "thinking", thinking: "Still thinking." }], stop_reason: "max_tokens"
+    }), { headers: { "content-type": "application/json" } });
+    const fetchMock = sequenceFetch([
+      thinkingOnly(),
+      exhausted ? thinkingOnly() : new Response(JSON.stringify({
+        content: [{ type: "text", text: '{"ok":true}' }], stop_reason: "end_turn"
+      }), { headers: { "content-type": "application/json" } })
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({ provider: "anthropic", model: "MiniMax-M3.1-Flash-Preview" }));
+    const result = client.completeJson([{ role: "user", content: "Summarize." }], {
+      operation: "capture.summarize", maxTokens: 512
+    });
+    if (exhausted) {
+      await expect(result).rejects.toThrow("Reasoning exhausted");
+      expect(client.status().lastError).toContain("Reasoning exhausted");
+    } else {
+      await expect(result).resolves.toEqual({ ok: true });
+    }
+    expect(requestBodies(fetchMock).map(body => body.max_tokens)).toEqual([2048, 4096]);
+  });
+
+  it("reserves thinking space for MiniMax summaries and retries reasoning-only truncation once", async () => {
+    const fetchMock = sequenceFetch([
+      openAiMessageResponse({ content: null, reasoning_content: "Still thinking." }, "length"),
+      openAiResponse('{"title":"Database","summary":"Use PostgreSQL."}', "stop")
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({ model: "minimax-m3.1-flash", maxTokens: 512 }),
+      { modelRole: "memory_summary" });
+    await expect(client.completeJson([{ role: "user", content: "evidence ".repeat(6000) }], {
+      operation: "capture.summarize", thinkingMode: "disabled", maxTokens: 512
+    })).resolves.toMatchObject({ title: "Database", summary: "Use PostgreSQL." });
+
+    const bodies = requestBodies(fetchMock);
+    expect(bodies.map(body => body.max_tokens)).toEqual([2048, 4096]);
+    for (const body of bodies) {
+      expect(body).toMatchObject({ model: "minimax-m3.1-flash", thinking: { type: "adaptive" } });
+      expect(inputTokenCount(body) + Number(body.max_tokens) + 512).toBeLessThanOrEqual(8192);
+    }
+  });
+
+  it("honors an explicit retry ceiling for mandatory-thinking summaries", async () => {
+    const fetchMock = sequenceFetch([
+      openAiMessageResponse({ content: "", reasoning_content: "Still thinking." }, "length")
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({ model: "MiniMax-M3.1-Flash-Preview", malformedRetries: 3 }),
+      { modelRole: "memory_summary" });
+    await expect(client.completeJson([{ role: "user", content: "Summarize." }], {
+      operation: "capture.summarize", maxTokens: 512, retryTokenCeiling: 1024
+    })).rejects.toThrow("Reasoning exhausted");
+    expect(requestBodies(fetchMock).map(body => body.max_tokens)).toEqual([1024]);
+  });
+
+  it.each(["memory_summary", undefined] as const)("bounds reasoning-only retries with role %s", async (modelRole) => {
+    const fetchMock = sequenceFetch([2048, 4096].map(() =>
+      openAiMessageResponse({ content: null, reasoning_content: "Still thinking." }, "length")));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({ model: "minimax-m3.1-flash", malformedRetries: 3 }),
+      { modelRole });
+    await expect(client.completeJson([{ role: "user", content: "Summarize." }], {
+      operation: "capture.summarize", maxTokens: 512
+    })).rejects.toThrow("Reasoning exhausted");
+    expect(requestBodies(fetchMock).map(body => body.max_tokens)).toEqual([2048, 4096]);
+  });
+
+  it("does not treat reasoning-only responses without a length stop as truncation", async () => {
+    const fetchMock = sequenceFetch([
+      openAiMessageResponse({ content: null, reasoning_content: "No answer." }, "stop")
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createLlmClient(llmConfig()).completeJson([{ role: "user", content: "Summarize." }], {
+      operation: "capture.summarize", maxTokens: 512
+    })).rejects.toThrow("Reasoning exhausted");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects MiniMax summaries still marked truncated even when the JSON parses", async () => {
+    const fetchMock = sequenceFetch([2048, 4096].map(() =>
+      openAiResponse('{"title":"Title","summary":"Partial fact"}', "length")));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({ model: "minimax-m3.1-flash", malformedRetries: 3 }),
+      { modelRole: "memory_summary" });
+    await expect(client.completeJson([{ role: "user", content: "Summarize." }], {
+      operation: "capture.summarize", maxTokens: 512
+    })).rejects.toThrow("remained truncated");
+    expect(requestBodies(fetchMock).map(body => body.max_tokens)).toEqual([2048, 4096]);
+  });
+
   it("keeps the standard missing-content error when reasoning is also absent", async () => {
     const fetchMock = sequenceFetch([
       openAiMessageResponse({ content: null }, "length")
