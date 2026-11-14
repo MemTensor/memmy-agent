@@ -17,6 +17,7 @@ import {
   isDemoGuideActive,
   subscribeDemoGuide
 } from "../../app/collab-demo-guide-store.js";
+import { loadCollabProjects } from "../../app/collab-projects-store.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { CollabDemoGuideOverlay } from "./collab-demo-guide-overlay.js";
 import styles from "./collab-demo-guide.module.css";
@@ -58,6 +59,8 @@ export function CollabDemoGuideHost(props: {
   const helpSinceRef = useRef<number | null>(null);
   /** 第二步从「请求已发出」算起，等这么久没有那条请求就按失败处理。 */
   const askSinceRef = useRef<number | null>(null);
+  /** 演示是否带着一个云端项目：从有到无（完成 / 退出 / 离开 / 心跳超时）要立刻把看板数据重读一遍。 */
+  const demoOwnedProjectRef = useRef(false);
   /** 云端说演示已结束时已经提示过，避免每次重画都再提示一次。 */
   const cloudEndedNoticedRef = useRef(false);
   /** 引导自己的一句话提示（如「体验已结束」）：蒙版可能在任何页面，提示不依赖看板。 */
@@ -221,6 +224,19 @@ export function CollabDemoGuideHost(props: {
       clearInterval(timer);
     };
   }, [state.status, state.phase, state.projectId, state.memberUserId, state.localProjectId, state.memberName, props.collab, t]);
+
+  /**
+   * 演示带着一个云端项目、随后收场（完成 / 退出 / 离开 / 心跳超时）：立刻重读项目列表，
+   * 成员数与任务列表不必等下一次轮询，蒙版下面不会留着「2 位成员」。
+   */
+  useEffect(() => {
+    const owning = (state.status === "active" || state.status === "complete") && Boolean(state.projectId);
+    const ended = demoOwnedProjectRef.current && !owning;
+    demoOwnedProjectRef.current = owning;
+    if (!ended) return;
+    const client = collabRef.current;
+    if (client) void loadCollabProjects(client);
+  }, [state.status, state.projectId]);
 
   // 心跳或请求说演示已结束（云端返回 `demo: null`）：直接收场，并告诉用户体验已经结束。
   useEffect(() => {

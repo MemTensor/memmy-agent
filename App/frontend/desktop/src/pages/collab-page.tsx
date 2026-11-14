@@ -1139,6 +1139,19 @@ const CollabBoard = memo(function CollabBoard(props: {
     setAssistDetailId(assistFocus.threadId);
   }, [assistFocus, sharedId, assistThreads, refreshAssists, boardTab]);
 
+  /**
+   * 演示在这个项目上收场（完成 / 退出 / 离开 / 心跳超时）：立刻重读任务与协助，不等下一轮轮询。
+   * 小饭团离开后成员数变回 1、他的任务消失，而你们之间的那两次协助要留在列表里。
+   */
+  const demoOwnedProjectRef = useRef(false);
+  useEffect(() => {
+    const ended = demoOwnedProjectRef.current && !demoOwnsProject;
+    demoOwnedProjectRef.current = demoOwnsProject;
+    if (!ended || !sharedId) return;
+    void refreshSessions(sharedId);
+    void refreshAssists();
+  }, [demoOwnsProject, sharedId, refreshSessions, refreshAssists]);
+
   useEffect(() => () => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);

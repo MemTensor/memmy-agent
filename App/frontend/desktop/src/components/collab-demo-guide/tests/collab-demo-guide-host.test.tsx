@@ -13,12 +13,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollabClient } from "../../../api/collab-client.js";
 import type { DemoGuideState } from "../../../app/collab-demo-guide-store.js";
 import {
+  dispatchDemoGuide,
   getDemoGuideState,
   resetDemoGuideStore,
   setDemoGuideStateForTest
 } from "../../../app/collab-demo-guide-store.js";
 import { I18nProvider } from "../../../i18n/i18n-provider.js";
 import { CollabDemoGuideHost } from "../collab-demo-guide-host.js";
+
+const store = vi.hoisted(() => ({ loadCollabProjects: vi.fn() }));
+
+vi.mock("../../../app/collab-projects-store.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../app/collab-projects-store.js")>();
+  return { ...actual, loadCollabProjects: store.loadCollabProjects };
+});
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -179,5 +187,17 @@ describe("the demo guide host", () => {
     expect(getDemoGuideState().phase).toBe("help-running");
     expect(getDemoGuideState().error).toBe("Agent 没有完成这次执行");
     expect(getDemoGuideState().done.help).toBe(false);
+  });
+
+  it("rereads the project list the moment the demo ends", async () => {
+    const collab = client({});
+    await mount(collab, demoState("help-done"));
+    store.loadCollabProjects.mockClear();
+
+    await act(async () => {
+      dispatchDemoGuide({ type: "end", reason: "exited" });
+    });
+    // 成员数、任务列表不等下一轮轮询：蒙版一收就重读。
+    expect(store.loadCollabProjects).toHaveBeenCalledWith(collab);
   });
 });

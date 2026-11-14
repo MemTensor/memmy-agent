@@ -1476,6 +1476,28 @@ export function HomePage() {
   }, [demoGuide.prefill]);
 
   /**
+   * 演示一结束（完成 / 退出 / 离开 / 心跳超时），第二步预填的那句话不该留在任何草稿里：
+   * 之后的空白会话会把一句没发生过的请求带出来。只清与那句话完全相同的那一版，人自己写的照旧留着。
+   */
+  const demoAskSentenceRef = useRef("");
+  const demoEndedHandledRef = useRef(false);
+  useEffect(() => {
+    if (demoGuide.status === "active") {
+      demoAskSentenceRef.current = t("collab.demo.prefill.ask", { name: demoGuide.memberName });
+      demoEndedHandledRef.current = false;
+      return;
+    }
+    if (demoGuide.status !== "ended" || demoEndedHandledRef.current) return;
+    demoEndedHandledRef.current = true;
+    const sentence = demoAskSentenceRef.current.trim();
+    if (!sentence) return;
+    for (const [scope, draft] of Object.entries(composerDraftsRef.current)) {
+      if (draft.trim() !== sentence) continue;
+      dispatch(agentActions.composerDraftUpdated(scope, ""));
+    }
+  }, [demoGuide.status, demoGuide.memberName, dispatch, t]);
+
+  /**
    * 第二步那句话与它对应的执行提示：句子进输入框，提示只在发送时追加给 Agent。
    * 两者都按当前语言现取，句子与预填时是同一句，所以能据此判断用户改没改过。
    */
