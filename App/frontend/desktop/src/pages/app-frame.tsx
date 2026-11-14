@@ -2931,7 +2931,8 @@ function ProjectRow(props: {
           <SidebarMarqueeText text={props.project.name} className="app-frame-project-title" />
         )}
       </button>
-      <div className="app-frame-project-row__actions">
+      {/* 这一行的「＋」平时只在鼠标划过时出现；引导讲到它时要一直露着，否则亮区里空着一块。 */}
+      <div className="app-frame-project-row__actions" style={demoNewTaskAnchor ? { opacity: 1, pointerEvents: "auto" } : undefined}>
         <TaskIconButton
           label={t("appFrame.project.newTask")}
           tooltip={false}
