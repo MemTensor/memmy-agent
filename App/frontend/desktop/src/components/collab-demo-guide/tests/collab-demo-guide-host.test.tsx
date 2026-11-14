@@ -4,8 +4,8 @@
  * 引导宿主的两件硬要求：
  *
  * - 授权必须是人自己点的：请求到了、但还没处理时，卡片停在那儿等，不替人允许。
- * - 失败必须说出来：第二步发出去 20 秒还没有那一条请求、第三步执行失败，都切「这一步没有完成」，
- *   不能一直显示「请求已发出」或「完成」。
+ * - 失败必须说出来：第二步这一轮已经结束、又过了时限仍然没有那一条请求，或者那一条确实被拒/失败，
+ *   才切「这一步没有完成」；Agent 还在跑时绝不判失败，请求后来出现也不再卡在失败卡片上。
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -46,6 +46,7 @@ function demoState(phase: DemoGuideState["phase"], overrides: Partial<DemoGuideS
     done: { task: false, ask: false, help: false },
     skipped: { task: false, ask: false, help: false },
     askDelivered: false,
+    askTurnEnded: false,
     prefill: null,
     endReason: null,
     cloudEnded: false,
@@ -129,20 +130,55 @@ describe("the demo guide host", () => {
     vi.useRealTimers();
   });
 
-  it("stops waiting after twenty seconds without the assist request", async () => {
-    // 请求根本没发出去（CLI 连不上、Agent 没照做）：本项目里一条都没有。
+  it("never calls the request failed while the agent is still running", async () => {
+    // 请求根本没发出去（CLI 连不上、Agent 没照做），但这一轮 Agent 还在跑：超过多久都不能报警。
     await mount(client({}), demoState("ask-waiting"));
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(19_000);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+    });
+    expect(getDemoGuideState().error).toBeNull();
+    expect(getDemoGuideState().phase).toBe("ask-waiting");
+  });
+
+  it("stops waiting once the round ended and the request never showed up", async () => {
+    await mount(client({}), demoState("ask-waiting", { askTurnEnded: true }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(89_000);
     });
     // 还没到时限：卡片仍然说「请求已发出」，不提前报警。
     expect(getDemoGuideState().error).toBeNull();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(3_000);
     });
     expect(getDemoGuideState().phase).toBe("ask-waiting");
     expect(getDemoGuideState().error).toBe("协助请求没有发出去。");
+  });
+
+  it("clears the failure as soon as the request turns up after all", async () => {
+    const threads: { threads: ReturnType<typeof askThread>[] } = { threads: [] };
+    const collab = client({ assistThreads: vi.fn().mockImplementation(() => Promise.resolve(threads)) });
+    await mount(collab, demoState("ask-waiting", { askTurnEnded: true, error: "协助请求没有发出去。" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(getDemoGuideState().error).toBe("协助请求没有发出去。");
+
+    // 请求晚一步才写进去：错误自己收起来，人不用卡在失败卡片上。
+    threads.threads = [askThread("pending")];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(getDemoGuideState().error).toBeNull();
+    expect(getDemoGuideState().phase).toBe("ask-waiting");
+
+    // 结果回来了就接着往下走。
+    threads.threads = [askThread("done")];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(getDemoGuideState().askDelivered).toBe(true);
+    expect(getDemoGuideState().error).toBeNull();
   });
 
   it("counts a rejected request as a step that did not finish", async () => {

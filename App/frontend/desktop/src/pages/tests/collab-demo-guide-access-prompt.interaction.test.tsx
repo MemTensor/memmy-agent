@@ -125,6 +125,7 @@ function activeDemo(): DemoGuideState {
     done: { task: false, ask: false, help: false },
     skipped: { task: false, ask: false, help: false },
     askDelivered: false,
+    askTurnEnded: false,
     prefill: null,
     endReason: null,
     cloudEnded: false

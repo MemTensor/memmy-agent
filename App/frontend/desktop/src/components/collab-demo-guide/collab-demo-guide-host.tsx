@@ -31,10 +31,12 @@ export const DEMO_GUIDE_POLL_MS = 1_500;
 const HELP_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
- * 第二步等结果的时限：这么久本项目里还没有「我发起、执行人是演示成员」的请求，就说明这次没发出去。
- * 比等请求短：这一步是在自己电脑上发出去的，发成功了很快就会有一条。
+ * 第二步等结果的时限：这么久本项目里还没有「我发起、执行人是演示成员」的请求，才可能说明这次没发出去。
+ *
+ * 光有时限不够：Agent 还在跑（CLI 还没执行完）时请求本来就还没写进去，那时判失败就是误报。
+ * 所以两个条件都要满足：这一轮 Agent 已经结束、并且超过这项时限仍然没有请求。
  */
-const ASK_RESULT_TIMEOUT_MS = 20_000;
+const ASK_RESULT_TIMEOUT_MS = 90_000;
 
 export function CollabDemoGuideHost(props: {
   collab: CollabClient | null;
@@ -148,6 +150,8 @@ export function CollabDemoGuideHost(props: {
     const client = props.collab;
     const projectId = state.projectId;
     const memberUserId = state.memberUserId;
+    /** 这一轮 Agent 是否已经结束：没结束就不判「没发出去」。 */
+    const askTurnEnded = state.askTurnEnded;
     let cancelled = false;
 
     /** 第二步：本项目里由我发起、执行人是演示成员的那次协助有了结果。 */
@@ -158,20 +162,23 @@ export function CollabDemoGuideHost(props: {
       ));
       const latest = thread?.requests[0];
       if (!latest) {
-        // 一直没有那条请求：说明这次没发出去（CLI 连不上、Agent 没照做）。到点就说这一步没完成。
+        // 一直没有那条请求：Agent 还在跑时绝不判失败，只有这一轮已经结束、又过了时限，才说没发出去。
         const started = askSinceRef.current ?? Date.now();
         askSinceRef.current = started;
-        if (Date.now() - started > ASK_RESULT_TIMEOUT_MS) {
+        if (askTurnEnded && Date.now() - started > ASK_RESULT_TIMEOUT_MS) {
           dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.request") });
         }
         return;
       }
       askSinceRef.current = null;
+      // 请求后来才出现的（之前已经报过「没有发出去」）：先把那句错误收起来，不要卡在失败卡片上。
+      dispatchDemoGuide({ type: "assist-seen" });
       if (latest.status === "done") {
         dispatchDemoGuide({ type: "assist-delivered" });
         return;
       }
       if (latest.status === "rejected" || latest.status === "failed" || latest.status === "expired" || latest.status === "cancelled") {
+        // 真的被拒或执行失败：这才是这一步确实没完成。
         dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.request") });
       }
     };
@@ -248,7 +255,7 @@ export function CollabDemoGuideHost(props: {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [state.status, state.phase, state.projectId, state.memberUserId, state.localProjectId, state.memberName, props.collab, t]);
+  }, [state.status, state.phase, state.projectId, state.memberUserId, state.localProjectId, state.memberName, state.askTurnEnded, props.collab, t]);
 
   /**
    * 演示带着一个云端项目、随后收场（完成 / 退出 / 离开 / 心跳超时）：立刻重读项目列表，

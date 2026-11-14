@@ -67,6 +67,7 @@ function stateFor(step: DemoGuidePreviewStep): DemoGuideState {
     },
     skipped: { task: false, ask: false, help: false },
     askDelivered: step === "2-done",
+    askTurnEnded: false,
     prefill: null,
     endReason: step === "complete" ? "finished" : null,
     cloudEnded: false

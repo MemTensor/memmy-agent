@@ -98,6 +98,11 @@ export interface DemoGuideState {
   skipped: { task: boolean; ask: boolean; help: boolean };
   /** 第二步的请求是否已经有结果回到了对话。 */
   askDelivered: boolean;
+  /**
+   * 第二步这一轮 Agent 已经结束。没有结果回来时，只有它说明「这句话已经执行完了」，
+   * 才允许判「协助请求没有发出去」：Agent 还在跑就不判失败。
+   */
+  askTurnEnded: boolean;
   /** 输入框要预填的那句话；`nonce` 变一次填一次，填过的再读不会重复填。 */
   prefill: { text: string; nonce: number } | null;
   /** 结束引导时的原因，云端按它记。 */
@@ -127,6 +132,8 @@ export type DemoGuideEvent =
   | { type: "composer-sent" }
   | { type: "agent-settled" }
   | { type: "assist-delivered" }
+  /** 第二步那条请求出现了（可能晚于「没有发出去」那句）：把错误收起来。 */
+  | { type: "assist-seen" }
   | { type: "next"; prefill?: string }
   | { type: "skip"; prefill?: string }
   | { type: "settings-opened" }
@@ -151,6 +158,7 @@ const IDLE: DemoGuideState = {
   done: { task: false, ask: false, help: false },
   skipped: { task: false, ask: false, help: false },
   askDelivered: false,
+  askTurnEnded: false,
   prefill: null,
   endReason: null,
   cloudEnded: false
@@ -231,12 +239,17 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
     case "composer-sent":
       if (state.status !== "active") return state;
       if (state.phase === "compose") return { ...state, phase: "reply-waiting" };
-      if (state.phase === "ask-compose") return { ...state, phase: "ask-waiting", askDelivered: false };
+      if (state.phase === "ask-compose") return { ...state, phase: "ask-waiting", askDelivered: false, askTurnEnded: false };
       return state;
     case "assist-delivered":
       // 结果回来了就是这一步成了：之前那句「没有完成」随之收起。
       return state.status === "active" && state.phase === "ask-waiting"
         ? { ...state, askDelivered: true, error: null }
+        : state;
+    case "assist-seen":
+      // 请求后来出现了（CLI 慢一步、云端晚一拍）：把「没有发出去」那句收起，人不用卡在失败卡片上。
+      return state.status === "active" && state.phase === "ask-waiting" && state.error !== null
+        ? { ...state, error: null }
         : state;
     case "agent-settled":
       if (state.status !== "active") return state;
@@ -247,6 +260,10 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       if (state.phase === "ask-waiting" && state.askDelivered) {
         // 这一步完成就把那句话从状态里拿掉：之后即使任务页重新挂载，也不会再把旧的那句填回输入框。
         return { ...state, phase: "ask-done", done: { ...state.done, ask: true }, prefill: null };
+      }
+      // 结果还没回来但这一轮已经跑完：从这一刻起才有资格判「没发出去」。
+      if (state.phase === "ask-waiting" && !state.askTurnEnded) {
+        return { ...state, askTurnEnded: true };
       }
       return state;
     case "next":

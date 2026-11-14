@@ -1007,6 +1007,7 @@ describe("成员协助的宿主", () => {
       done: { task: true, ask: true, help: false },
       skipped: { task: false, ask: false, help: false },
       askDelivered: false,
+      askTurnEnded: false,
       prefill: null,
       endReason: null,
       cloudEnded: false
@@ -1057,6 +1058,7 @@ describe("成员协助的宿主", () => {
       done: { task: true, ask: true, help: false },
       skipped: { task: false, ask: false, help: false },
       askDelivered: false,
+      askTurnEnded: false,
       prefill: null,
       endReason: null,
       cloudEnded: false

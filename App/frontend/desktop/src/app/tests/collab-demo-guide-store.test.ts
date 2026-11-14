@@ -156,14 +156,43 @@ describe("demo guide state machine", () => {
     const waiting = demoGuideReducer(atAskCompose(), { type: "composer-sent" });
     expect(waiting.phase).toBe("ask-waiting");
     // Agent 先回的那一句不算：结果还没回来就不能给「下一步」。
-    expect(demoGuideReducer(waiting, { type: "agent-settled" }).phase).toBe("ask-waiting");
-    const delivered = demoGuideReducer(waiting, { type: "assist-delivered" });
+    const settled = demoGuideReducer(waiting, { type: "agent-settled" });
+    expect(settled.phase).toBe("ask-waiting");
+    // 但它是「这一轮跑完了」的分界点：过了这里才允许判「没发出去」。
+    expect(waiting.askTurnEnded).toBe(false);
+    expect(settled.askTurnEnded).toBe(true);
+    const delivered = demoGuideReducer(settled, { type: "assist-delivered" });
     expect(delivered.askDelivered).toBe(true);
     const done = demoGuideReducer(delivered, { type: "agent-settled" });
     expect(done.phase).toBe("ask-done");
     expect(done.done.ask).toBe(true);
     // 这一步完成就把那句话从状态里清掉：任务页之后再挂载也不会把它填回输入框。
     expect(done.prefill).toBeNull();
+  });
+
+  it("marks the round as ended only when the agent really finished it", () => {
+    // 刚发出去：这一轮还没开始跑完，不能以此为由判失败。
+    const waiting = demoGuideReducer(atAskCompose(), { type: "composer-sent" });
+    expect(waiting.askTurnEnded).toBe(false);
+    // 再发一次就重新算：上一轮的「已结束」不会带进新的一轮。
+    const resent = demoGuideReducer({ ...atAskCompose(), askTurnEnded: true }, { type: "composer-sent" });
+    expect(resent.askTurnEnded).toBe(false);
+    // 这一轮跑完但结果还没回来：这时才置上。
+    expect(demoGuideReducer(waiting, { type: "agent-settled" }).askTurnEnded).toBe(true);
+  });
+
+  it("drops the failure once the request turns up after all", () => {
+    const failed = demoGuideReducer(
+      demoGuideReducer(atAskCompose(), { type: "composer-sent" }),
+      { type: "fail", reason: "协助请求没有发出去。" }
+    );
+    expect(failed.error).toBe("协助请求没有发出去。");
+    // 请求后来才写进去：错误自己收起来，不需要人点「再试一次」。
+    const seen = demoGuideReducer(failed, { type: "assist-seen" });
+    expect(seen.error).toBeNull();
+    expect(seen.phase).toBe("ask-waiting");
+    // 没报过错时什么也不变：不白白换一个状态对象。
+    expect(demoGuideReducer(seen, { type: "assist-seen" })).toBe(seen);
   });
 
   it("walks the last step from settings to the finished assist", () => {
