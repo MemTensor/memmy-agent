@@ -4,13 +4,17 @@
  * 全程只留一块亮区：亮区里唯一可点的控件带一圈呼吸描边，点亮区以外（以及亮区内除了那个控件的部分）不触发任何操作，
  * 描边与卡片会轻晃一下。亮区按 `data-demo-guide` 锚点定位，业务组件里不写任何坐标；
  * 窗口缩放、滚动、弹窗出现与消失都靠 ResizeObserver 与 rAF 重算。
+ *
+ * 卡片本身只负责「说明」：顶部一行是序号徽章与步骤名，右上角探出吉祥物，底部左边是「退出引导」、右边是跳过与主按钮。
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Check } from "lucide-react";
-import memmyAppIconUrl from "../../assets/memmy-app-icon.png";
+import { Memmy, type MemmyPose } from "../mascot/memmy.js";
 import {
   demoGuideIsTourPhase,
+  demoGuideStartsExperience,
   demoGuideStepNumberOf,
+  demoGuideTourIndex,
   type DemoGuidePhase,
   type DemoGuideState
 } from "../../app/collab-demo-guide-store.js";
@@ -20,6 +24,7 @@ import {
   blockerRects,
   cardPlacement,
   DEMO_GUIDE_CARD_WIDTH,
+  DEMO_GUIDE_CARD_WIDTH_WIDE,
   DEMO_GUIDE_HOLE_PADDING,
   demoGuideTarget,
   maskRects,
@@ -33,28 +38,75 @@ import styles from "./collab-demo-guide.module.css";
 type Translate = (key: MessageKey, values?: Record<string, string | number>) => string;
 
 export interface DemoGuideCard {
-  /** 卡片头里的「第几步」；建项目之前还没有步骤，为 null 时不显示进度条。 */
-  step: 1 | 2 | 3 | 4 | null;
+  /** 体验段是第几步：进度写「1 / 3」。导览段与建项目之前没有进度，为 null。 */
+  step: 1 | 2 | 3 | null;
+  /** 头部那一行左边的徽章：「1 / 3」或「介绍」。没有徽章时这一行只剩步骤名。 */
+  badge: string | null;
+  /** 头部那一行右边的步骤名。 */
+  stepName: string | null;
+  /** 探在卡片右上角的吉祥物姿势。 */
+  pose: MemmyPose;
+  /** 带对话或任务示意的卡片加宽一档。 */
+  wide: boolean;
   title: string | null;
   body: string;
   status: string | null;
-  action: "next" | "done" | null;
+  action: "next" | "start" | "done" | null;
 }
 
-/** 一共几步：进度条与「1 / 4」都按它画。 */
-export const DEMO_GUIDE_STEPS = [1, 2, 3, 4] as const;
+/** 体验段一共几步：进度徽章与心跳都按它算。 */
+export const DEMO_GUIDE_STEPS = [1, 2, 3] as const;
+
+/**
+ * 每一步探出的姿势：动作与卡上说的是同一件事。
+ * 用部分映射而不是全集，导览段与以后新增的阶段没登记时就退回中性的那一张。
+ */
+const POSES: Partial<Record<DemoGuidePhase, MemmyPose>> = {
+  "create-project": "wave",
+  "task-row": "point",
+  reader: "read",
+  compose: "chat",
+  "reply-waiting": "think",
+  "reply-done": "celebrate",
+  "ask-compose": "chat",
+  "ask-waiting": "think",
+  "ask-done": "celebrate",
+  "settings-open": "wrench",
+  "settings-assist": "shield",
+  "help-waiting": "peek",
+  "help-dialog": "shield",
+  "help-running": "work",
+  "help-done": "celebrate",
+  "help-rejected": "sad"
+};
+
+/** 导览段的五步各用哪个姿势：按 {@link demoGuideTourIndex} 的顺序。 */
+const TOUR_POSES: MemmyPose[] = ["point", "peek", "chat", "connect", "work"];
 
 /** 每个子状态卡片上写什么：文案就是产品定稿的那几句，`{name}` 换成本次演示成员的昵称。 */
 export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCard {
   const name = state.memberName;
-  const base = (step: 1 | 2 | 3 | 4 | null, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
+  const base = (step: 1 | 2 | 3 | null, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
     step,
+    badge: step === null
+      ? null
+      : t("collab.demo.progress", { step: String(step), total: String(DEMO_GUIDE_STEPS.length) }),
+    stepName: step === null ? null : t(("collab.demo.stepName." + String(step)) as MessageKey),
+    pose: POSES[state.phase] ?? "hum",
+    wide: false,
     title: null,
     body,
     status: null,
     action: null,
     ...extra
   });
+  // 看板导览：纯介绍，头部是「介绍」徽章，最后一步的按钮是「开始体验」。
+  if (demoGuideIsTourPhase(state.phase)) {
+    return {
+      ...demoGuideTourCard(demoGuideTourIndex(state.phase), t),
+      action: demoGuideStartsExperience(state.phase) ? "start" : "next"
+    };
+  }
   switch (state.phase) {
     case "create-project":
       // 演示成员是谁要等云端建好项目才知道：这时先用中性的叫法，不写死任何账号或昵称。
@@ -72,36 +124,53 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
       return base(1, "", { status: t("collab.demo.reply.waiting", { name }) });
     case "reply-done":
       return base(1, t("collab.demo.reply.body", { name }), { title: t("collab.demo.reply.title", { name }), action: "next" });
-    case "associate":
-      return base(2, t("collab.demo.associate.body"));
     case "ask-compose":
-      return base(3, t("collab.demo.ask.compose"));
+      return base(2, t("collab.demo.ask.compose"));
     case "ask-waiting":
-      return base(3, "", {
+      return base(2, "", {
         status: state.askDelivered
           ? t("collab.demo.ask.returned", { name })
           : t("collab.demo.ask.sent", { name })
       });
     case "ask-done":
-      return base(3, t("collab.demo.ask.body", { name }), { title: t("collab.demo.ask.title"), action: "next" });
+      return base(2, t("collab.demo.ask.body", { name }), { title: t("collab.demo.ask.title"), action: "next" });
     case "settings-open":
-      return base(4, t("collab.demo.settings.body"));
+      return base(3, t("collab.demo.settings.body"));
     case "settings-assist":
-      return base(4, t("collab.demo.assist.body"));
+      return base(3, t("collab.demo.assist.body"));
     case "help-waiting":
-      return base(4, "", { status: t("collab.demo.help.incoming", { name }) });
+      return base(3, "", { status: t("collab.demo.help.incoming", { name }) });
     case "help-dialog":
-      return base(4, t("collab.demo.dialog.body"));
+      return base(3, t("collab.demo.dialog.body"));
     case "help-running":
-      return base(4, "", { status: t("collab.demo.running", { name }) });
+      return base(3, "", { status: t("collab.demo.running", { name }) });
     case "help-done":
-      return base(4, t("collab.demo.help.body", { name }), { title: t("collab.demo.help.title", { name }), action: "done" });
+      return base(3, t("collab.demo.help.body", { name }), { title: t("collab.demo.help.title", { name }), action: "done" });
     case "help-rejected":
-      return base(4, t("collab.demo.rejected.body", { name }), { title: t("collab.demo.rejected.title"), action: "done" });
+      return base(3, t("collab.demo.rejected.body", { name }), { title: t("collab.demo.rejected.title"), action: "done" });
     case "complete":
     default:
-      return base(4, "");
+      return base(3, "");
   }
+}
+
+/**
+ * 导览段的卡片：纯介绍，头部是「介绍」徽章 + 步骤名，没有「跳过这一步」，最后一步的按钮是「开始体验」。
+ * 形状由结构那边决定，这里只决定第几步说什么。
+ */
+export function demoGuideTourCard(index: number, t: Translate): DemoGuideCard {
+  const key = String(index + 1) as "1" | "2" | "3" | "4" | "5";
+  return {
+    step: null,
+    badge: t("collab.demo.tour.label"),
+    stepName: t(("collab.demo.tour.stepName." + key) as MessageKey),
+    pose: TOUR_POSES[index] ?? "hum",
+    wide: false,
+    title: null,
+    body: t(("collab.demo.tour.body." + key) as MessageKey),
+    status: null,
+    action: null
+  };
 }
 
 /** 哪几个子状态可以跳过这一步：出结果之后的「下一步」不是跳过的地方。 */
@@ -118,6 +187,9 @@ export function demoGuideSkippable(phase: DemoGuidePhase): boolean {
  * 只对引导要用的几个浮层生效。
  */
 export const DEMO_GUIDE_YIELD_BACKDROP = "data-demo-guide-yield-backdrop";
+
+/** 卡片右上角那个吉祥物的大小。 */
+const PET_SIZE = 52;
 
 export function CollabDemoGuideOverlay(props: {
   state: DemoGuideState;
@@ -246,12 +318,6 @@ export function CollabDemoGuideOverlay(props: {
                 <span>{t("collab.demo.complete.task", { name: state.memberName })}</span>
               </li>
             ) : null}
-            {state.done.associate ? (
-              <li className={styles.doneItem}>
-                <Check size={15} className={styles.doneMark} aria-hidden="true" />
-                <span>{t("collab.demo.complete.associate")}</span>
-              </li>
-            ) : null}
             {state.done.ask ? (
               <li className={styles.doneItem}>
                 <Check size={15} className={styles.doneMark} aria-hidden="true" />
@@ -282,15 +348,21 @@ export function CollabDemoGuideOverlay(props: {
 
   if (!visible) return null;
 
-  if (!visible) return null;
-
   // 演示开始：先一张居中的「{name}加入了项目」，点「开始体验」才出现第一步的蒙版。
   if (state.phase === "joined") {
     return (
-      <div className={styles.joinLayer} role="dialog" aria-modal="true" aria-label={t("collab.demo.joined.body", { name: state.memberName })}>
+      <div
+        className={styles.joinLayer}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("collab.demo.joined.title", { name: state.memberName })}
+      >
         <div className={styles.joinCard} data-demo-join="">
-          <img className={styles.joinLogo} src={memmyAppIconUrl} alt="" aria-hidden="true" />
-          <p className={styles.joinText}>{t("collab.demo.joined.body", { name: state.memberName })}</p>
+          <span className={styles.joinPet}>
+            <Memmy pose="celebrate" size={84} />
+          </span>
+          <p className={styles.joinTitle}>{t("collab.demo.joined.title", { name: state.memberName })}</p>
+          <p className={styles.joinText}>{t("collab.demo.joined.body")}</p>
           <button type="button" className={styles.joinAction} onClick={props.onJoined}>
             {t("collab.demo.joined.start")}
           </button>
@@ -305,13 +377,16 @@ export function CollabDemoGuideOverlay(props: {
   }
 
   const { hole, stroke, viewport } = layout;
+  // 窄窗口下卡片收窄到窗口以内，绝不横向溢出。
+  const cardWidth = Math.min(card.wide ? DEMO_GUIDE_CARD_WIDTH_WIDE : DEMO_GUIDE_CARD_WIDTH, viewport.width - 24);
   const placement = cardPlacement(hole, viewport, cardHeight, {
     hasStroke: stroke !== null,
-    reserveBottom: target.cardBottomReserve ?? 0
+    reserveBottom: target.cardBottomReserve ?? 0,
+    cardWidth
   });
   // 亮区几乎占满窗口时（对话区就是这种情况）卡片只能压在它上面：这里再夹一次，保证不出窗口。
   const cardTop = Math.max(8, Math.min(placement.top, viewport.height - cardHeight - 8));
-  const cardLeft = Math.max(8, Math.min(placement.left, viewport.width - DEMO_GUIDE_CARD_WIDTH - 8));
+  const cardLeft = Math.max(8, Math.min(placement.left, viewport.width - cardWidth - 8));
   const blockers = blockerRects(hole, stroke, target.blockRest);
   // 箭头贴住朝向亮区的那条边：左右两条边用 top 定位，上下两条边用 left 定位。
   const vertical = placement.arrow.side === "left" || placement.arrow.side === "right";
@@ -324,6 +399,15 @@ export function CollabDemoGuideOverlay(props: {
       left: `${placement.arrow.offset}px`,
       [placement.arrow.side]: "-6px"
     };
+  // 吉祥物探在卡片右上角；卡片在亮区左边（箭头在右侧）时翻到左上，不压住正在指的那个控件。
+  const petLeft = placement.arrow.side === "right" ? cardLeft + 2 : cardLeft + cardWidth - PET_SIZE + 4;
+  // 探出卡片上沿约一半（与记忆管理那套引导同一个比例），压住的部分落在卡片自己的白底上。
+  const petTop = Math.max(0, cardTop - 30);
+  const primaryLabel = card.action === "next"
+    ? t("collab.demo.next")
+    : card.action === "start"
+      ? t("collab.demo.tour.start")
+      : t("collab.demo.done");
 
   return (
     <div ref={rootRef} className={styles.root}>
@@ -358,12 +442,12 @@ export function CollabDemoGuideOverlay(props: {
       <div
         ref={cardRef}
         key={`card-${state.phase}`}
-        className={`${styles.card}${shake ? " " : ""}`}
+        className={styles.card}
         data-shake={shake ? "true" : "false"}
         style={{
           left: cardLeft,
           top: cardTop,
-          width: DEMO_GUIDE_CARD_WIDTH,
+          width: cardWidth,
           maxHeight: Math.max(120, viewport.height - 16),
           overflowY: "auto"
         }}
@@ -377,34 +461,29 @@ export function CollabDemoGuideOverlay(props: {
           aria-hidden="true"
         />
         <div className={styles.head}>
-          {card.step === null ? null : (
-            <>
-              <span className={styles.progress} aria-hidden="true">
-                {DEMO_GUIDE_STEPS.map((step) => (
-                  <span key={step} className={`${styles.progressBar}${step <= card.step! ? ` ${styles.progressBarOn}` : ""}`} />
-                ))}
-              </span>
-              <span className={styles.stepLabel}>
-                {t("collab.demo.progress", { step: String(card.step), name: t(("collab.demo.stepName." + String(card.step)) as MessageKey) })}
-              </span>
-            </>
-          )}
-          <span className={styles.grow} />
-          <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
-            {t("collab.demo.exit")}
-          </button>
+          {card.badge ? (
+            <span className={`${styles.badge}${card.step === null ? ` ${styles.badgeIntro}` : ""}`}>
+              {card.badge}
+            </span>
+          ) : null}
+          {card.stepName ? <span className={styles.stepName}>{card.stepName}</span> : null}
         </div>
         {state.error ? (
           <>
             <p className={styles.title}>{t("collab.demo.failed.title")}</p>
             <p className={styles.body}>{state.error}</p>
             <div className={styles.foot}>
-              <button type="button" className={styles.quiet} onClick={props.onSkip}>
-                {t("collab.demo.skip")}
+              <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
+                {t("collab.demo.exit")}
               </button>
-              <button type="button" className={styles.action} onClick={props.onRetry}>
-                {t("collab.demo.retry")}
-              </button>
+              <span className={styles.footRight}>
+                <button type="button" className={styles.quiet} onClick={props.onSkip}>
+                  {t("collab.demo.skip")}
+                </button>
+                <button type="button" className={styles.action} onClick={props.onRetry}>
+                  {t("collab.demo.retry")}
+                </button>
+              </span>
             </div>
           </>
         ) : (
@@ -420,6 +499,7 @@ export function CollabDemoGuideOverlay(props: {
                     : t("collab.demo.exit.body", { name: state.memberName })}
                 </p>
                 <div className={styles.foot}>
+                  <span className={styles.grow} />
                   <button type="button" className={styles.actionGhost} onClick={() => setConfirming(false)}>
                     {t("collab.demo.exit.continue")}
                   </button>
@@ -428,28 +508,31 @@ export function CollabDemoGuideOverlay(props: {
                   </button>
                 </div>
               </div>
-            ) : card.action ? (
+            ) : (
               <div className={styles.foot}>
-                <span />
-                <button
-                  type="button"
-                  className={styles.action}
-                  onClick={props.onNext}
-                >
-                  {card.action === "next" ? t("collab.demo.next") : t("collab.demo.done")}
+                <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
+                  {t("collab.demo.exit")}
                 </button>
+                <span className={styles.footRight}>
+                  {demoGuideSkippable(state.phase) ? (
+                    <button type="button" className={styles.quiet} onClick={props.onSkip}>
+                      {t("collab.demo.skip")}
+                    </button>
+                  ) : null}
+                  {card.action ? (
+                    <button type="button" className={styles.action} onClick={props.onNext}>
+                      {primaryLabel}
+                    </button>
+                  ) : null}
+                </span>
               </div>
-            ) : demoGuideSkippable(state.phase) ? (
-              <div className={styles.foot}>
-                <span />
-                <button type="button" className={styles.quiet} onClick={props.onSkip}>
-                  {t("collab.demo.skip")}
-                </button>
-              </div>
-            ) : null}
+            )}
           </>
         )}
       </div>
+      <span className={styles.pet} style={{ left: petLeft, top: petTop }} aria-hidden="true">
+        <Memmy pose={card.pose} size={PET_SIZE} />
+      </span>
     </div>
   );
 }

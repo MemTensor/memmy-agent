@@ -49,17 +49,27 @@
 
 .card {
   position: fixed;
-  width: 296px;
-  padding: 16px 16px 12px;
+  /* 宽度由组件按「常规 340 / 加宽 400」写进 style：这里不再写死。 */
+  padding: 13px 16px 12px;
   border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--color-text-ink, #1b2423) 9%, transparent);
   background: var(--color-background-paper, #fff);
-  box-shadow: 0 12px 32px rgba(16, 26, 25, 0.18), 0 2px 6px rgba(16, 26, 25, 0.08);
+  box-shadow: 0 14px 34px rgba(16, 26, 25, 0.16), 0 2px 6px rgba(16, 26, 25, 0.06);
   pointer-events: auto;
   color: var(--color-text-ink, #1b2423);
 }
 
 .card[data-shake="true"] {
   animation: shake 320ms ease-in-out;
+}
+
+/* 吉祥物压在卡片右上角外面一点：放在卡片之外，才不会被卡片的滚动裁掉。 */
+.pet {
+  position: fixed;
+  z-index: 1;
+  pointer-events: none;
+  /* 细描边那一层是给白底上的形象留个轮廓，卡片压上来时也看得清。 */
+  filter: drop-shadow(0 0 1px rgba(16, 26, 25, 0.3)) drop-shadow(0 6px 10px rgba(16, 26, 25, 0.16));
 }
 
 .arrow {
@@ -74,29 +84,37 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
+  /* 右边给吉祥物留位置，标题这一行不再被它压住。 */
+  padding-right: 52px;
+  margin-bottom: 5px;
+  min-width: 0;
 }
 
-.progress {
-  display: flex;
-  gap: 3px;
+.badge {
+  flex: none;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-action-sky) 14%, transparent);
+  color: color-mix(in srgb, var(--color-action-sky) 70%, var(--color-text-ink, #1b2423));
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 19px;
+  white-space: nowrap;
 }
 
-.progressBar {
-  width: 14px;
-  height: 3px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--color-text-ink, #1b2423) 14%, transparent);
+/* 导览段的「介绍」：不是进度，颜色比「1 / 3」淡一档，与体验段区分开。 */
+.badgeIntro {
+  background: color-mix(in srgb, var(--color-text-ink, #1b2423) 7%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink, #1b2423) 58%, transparent);
 }
 
-.progressBarOn {
-  background: var(--color-action-sky);
-}
-
-.stepLabel {
-  font-size: 12px;
+.stepName {
+  font-size: 13.5px;
   font-weight: 600;
-  color: var(--color-text-ink, #1b2423);
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .grow {
@@ -108,8 +126,10 @@
   background: none;
   padding: 0;
   font-size: 12px;
+  line-height: 18px;
   color: color-mix(in srgb, var(--color-text-ink, #1b2423) 45%, transparent);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .quiet:hover {
@@ -145,9 +165,16 @@
 .foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
-  margin-top: 14px;
+  margin-top: 12px;
+}
+
+/* 右侧按钮组：跳过与主按钮始终靠右，不因为左边多了「退出引导」而换行。 */
+.footRight {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
 }
 
 .action {
@@ -159,6 +186,7 @@
   color: #fff;
   background: var(--color-action-sky);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .action:disabled {
@@ -174,6 +202,7 @@
   background: transparent;
   color: var(--color-text-ink, #1b2423);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .confirm {
@@ -291,36 +320,43 @@
 .joinCard {
   width: 360px;
   max-width: calc(100vw - 40px);
-  padding: 24px 24px 20px;
+  padding: 26px 26px 22px;
   border-radius: 16px;
   background: var(--color-background-paper, #fff);
   box-shadow: 0 18px 44px rgba(16, 26, 25, 0.2);
   text-align: center;
 }
 
-.joinLogo {
-  display: block;
-  width: 52px;
-  height: 52px;
-  margin: 0 auto 14px;
-  border-radius: 14px;
+/* 加入提示窗里的形象：与气泡里的同一个吉祥物，这里给足尺寸当主视觉。 */
+.joinPet {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+
+.joinTitle {
+  margin: 0 0 6px;
+  font-size: 15.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--color-text-ink, #1b2423);
 }
 
 .joinText {
-  margin: 0 0 18px;
-  font-size: 14.5px;
-  font-weight: 600;
-  line-height: 1.5;
-  color: var(--color-text-ink, #1b2423);
+  margin: 0 0 20px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: color-mix(in srgb, var(--color-text-ink, #1b2423) 66%, transparent);
 }
 
 .joinAction {
   border: 0;
-  border-radius: 9px;
-  padding: 8px 20px;
+  border-radius: 10px;
+  padding: 9px 22px;
   font-size: 13px;
   font-weight: 600;
   color: #fff;
   background: var(--color-action-sky);
   cursor: pointer;
+  white-space: nowrap;
 }
