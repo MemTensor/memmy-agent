@@ -61,8 +61,20 @@ export function CollabDemoGuideHost(props: {
   }, [notice]);
 
   // 演示期间离开看板与对话页（去了设置、首页等），或者在看板里换到了别的项目：按「离开」结束，小饭团随之退出。
+  // 只在演示项目的看板真正打开过之后才判断：刚创建时本机项目还没绑好、页面还停在旧看板或别的页面，
+  // 那一小段时间不是「离开」，否则从别的项目看板上新建时演示会在一秒内被结束。
+  const demoBoardSeenRef = useRef(false);
   useEffect(() => {
-    if (state.status !== "active") return;
+    if (state.status !== "active") {
+      demoBoardSeenRef.current = false;
+      return;
+    }
+    if (!demoBoardSeenRef.current) {
+      if (props.route === "/collab" && state.localProjectId && props.boardProjectId === state.localProjectId) {
+        demoBoardSeenRef.current = true;
+      }
+      return;
+    }
     if (props.route !== "/collab" && props.route !== "/main") {
       void endDemoGuide("left");
       return;
