@@ -40,6 +40,7 @@ import {
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
 import { collabEnabledFor } from "../app/collab-mode.js";
+import { demoGuideBoundLocalProject, startDemoGuide } from "../app/collab-demo-guide-store.js";
 import { ApiRequestError } from "../api/http.js";
 import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
@@ -67,6 +68,7 @@ import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integ
 import { CollabCreateProjectDialog } from "./collab-create-project-dialog.js";
 import { CollabJoinProjectDialog } from "./collab-join-project-dialog.js";
 import { CollabAssistHost } from "./collab-assist-host.js";
+import { CollabDemoGuideHost } from "../components/collab-demo-guide/collab-demo-guide-host.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
 import { writeMemorySubPage } from "./memory-sub-page-storage.js";
 import { SearchPalette } from "../components/search-palette.js";
@@ -2083,6 +2085,14 @@ export function AppFrame(props: AppFrameProps) {
         }}
         onOpenBoard={openProjectBoard}
       />
+      {/* 项目协作的新手引导：蒙版、说明卡与结束演示都挂在应用根部，跨看板与对话页工作。 */}
+      <CollabDemoGuideHost
+        collab={collabClient}
+        route={state.navigation.currentPath}
+        boardProjectId={boardProjectId}
+        openBoard={openProjectBoard}
+        onNotice={showCollabNotice}
+      />
       <CollabJoinProjectDialog
         open={joinProjectOpen}
         onCreateProject={() => {
@@ -2126,7 +2136,19 @@ export function AppFrame(props: AppFrameProps) {
           expandProjectInSidebar(localProjectId);
           openNewAgent(destination.target);
         }}
-        onShared={(project) => addCollabProject(project)}
+        onShared={(project) => {
+          addCollabProject(project);
+          // 新手引导只认云端：项目视图里 `demo.active` 为真才开始，其余一律按普通项目处理。
+          if (project.demo?.active && collabClient) {
+            startDemoGuide({
+              client: collabClient,
+              projectId: project.id,
+              localProjectId: null,
+              memberUserId: project.demo.memberUserId,
+              memberName: project.demo.memberName
+            });
+          }
+        }}
         onJoinProject={() => {
           // 同一个弹窗的另一种模式：关掉新建、打开加入，位置与尺寸都不变。
           setCreateProjectOpen(false);
@@ -2151,7 +2173,10 @@ export function AppFrame(props: AppFrameProps) {
             message: "collab.create.shareQuotaExceeded"
           })));
         }}
-        onBound={(projectId, localProjectId) => markCollabProjectBound(projectId, localProjectId)}
+        onBound={(projectId, localProjectId) => {
+          markCollabProjectBound(projectId, localProjectId);
+          demoGuideBoundLocalProject(projectId, localProjectId);
+        }}
         onBindFailed={(reason) => {
           // The project exists; only its local record is missing, so the reason is logged rather than shown raw.
           console.warn(`Project created without its local record: ${reason}`);

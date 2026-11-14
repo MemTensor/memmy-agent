@@ -14,6 +14,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { AssistInboxItem, AssistOutcome, CollabClient } from "../api/collab-client.js";
 import { requestAssistFocus } from "../app/collab-assist-focus.js";
+import { registerAssistInboxRefresh } from "../app/collab-assist-refresh.js";
+import { getDemoGuideState, isDemoGuideActive, subscribeDemoGuide } from "../app/collab-demo-guide-store.js";
 import { getCollabProjectsSnapshot, subscribeCollabProjects } from "../app/collab-projects-store.js";
 import { useOptionalNotificationCenter } from "../components/notification-center.js";
 import type { MessageKey } from "../i18n/messages.js";
@@ -107,6 +109,8 @@ export function CollabAssistHost(props: {
 }) {
   const { t } = useTranslation();
   const notifications = useOptionalNotificationCenter();
+  /** 新手引导进行中：授权弹窗是亮区，遮罩让给引导。 */
+  const demoGuideActive = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState).status === "active";
   const { collab, enabled } = props;
   /** 上层每次渲染都会给新的函数：放在 ref 里，轮询不必因此重启。 */
   const openTaskRef = useRef(props.onOpenTask);
@@ -232,6 +236,12 @@ export function CollabAssistHost(props: {
     setDialogRequest(null);
   }, [collab, enabled]);
 
+  // 新手引导开启「接收协助请求」之后要立刻看到请求：把这次立即刷新交给引导调用，不等下一轮轮询。
+  useEffect(() => {
+    registerAssistInboxRefresh(() => void poll());
+    return () => registerAssistInboxRefresh(null);
+  }, [poll]);
+
   useEffect(() => {
     if (!collab || !enabled) return;
     void poll();
@@ -261,6 +271,7 @@ export function CollabAssistHost(props: {
         // 审查在弹窗打开之后才完成时，原因行靠这一份出现；request 对象不动，选择不会被重置。
         safety={inbox.find((item) => item.id === dialogRequest?.id)?.safety ?? dialogRequest?.safety ?? null}
         collab={collab}
+        demoAnchor={demoGuideActive}
         onDecided={async (decision) => {
           if (!dialogRequest) return;
           const request = dialogRequest;
@@ -268,6 +279,8 @@ export function CollabAssistHost(props: {
           setDialogRequest(null);
           void poll();
           if (decision.action !== "allow") return;
+          // 新手引导要让人在看板的「协助」里看到这次执行：不跳进任务页，由引导自己回看板并展开这一条。
+          if (isDemoGuideActive()) return;
           // 由 Memmy 执行：等它在项目里建好任务（通常一两秒），直接进入那条任务。
           if (decision.agent === "memmy" && openTaskRef.current) {
             const conversationId = await waitForMemmyTask(collab, decided.id);

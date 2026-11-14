@@ -41,6 +41,8 @@ export function CollabAssistDialog(props: {
   collab: CollabClient | null;
   /** 她做完选择：允许时带上 Agent 与授权方式（限时带时长），拒绝时只有 action。 */
   onDecided: (decision: { action: "allow" | "reject"; agent?: string; scope?: AssistScope; minutes?: AssistGrantMinutes }) => Promise<void> | void;
+  /** 新手引导的演示中：弹窗是亮区、「允许」是描边目标，弹窗自己的遮罩让给引导遮罩。 */
+  demoAnchor?: boolean;
   /** 关闭弹窗，等于这次先不做选择：请求仍在收件箱里等她。 */
   onClose: () => void;
 }) {
@@ -147,13 +149,19 @@ export function CollabAssistDialog(props: {
       className={styles.dialog}
       bodyClassName={styles.body}
       footerClassName={styles.footer}
-      backdropClassName={styles.backdrop}
+      backdropClassName={props.demoAnchor ? `${styles.backdrop} ${styles.backdropYield}` : styles.backdrop}
+      demoGuideAnchor={props.demoAnchor ? "assist-dialog" : undefined}
       footer={(
         <div className={styles.actions}>
           <Button variant="ghost" disabled={busy} onClick={() => void submit("reject")}>
             {t("collab.assist.reject")}
           </Button>
-          <Button variant="primary" disabled={busy || !agent} onClick={() => void submit("allow")}>
+          <Button
+            variant="primary"
+            disabled={busy || !agent}
+            data-demo-guide={props.demoAnchor ? "assist-allow" : undefined}
+            onClick={() => void submit("allow")}
+          >
             {t("collab.assist.allow")}
           </Button>
         </div>

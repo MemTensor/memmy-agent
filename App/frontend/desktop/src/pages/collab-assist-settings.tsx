@@ -21,7 +21,14 @@ import frame from "./collab-page.module.css";
 const REMAINING_TICK_MS = 30_000;
 
 /** 项目设置的「成员协助」：接收协助请求的开关，开启时列出限时授权。 */
-export function CollabAssistProjectSettings(props: { client: CollabClient | null; projectId: string }) {
+export function CollabAssistProjectSettings(props: {
+  client: CollabClient | null;
+  projectId: string;
+  /** 开关被打开或被关掉之后告诉上层：新手引导在开启后立即关掉设置、去等演示成员的请求。 */
+  onEnabledChange?: (enabled: boolean) => void;
+  /** 新手引导的演示中：给开关加一个锚点，蒙版的描边落在它上面。 */
+  demoAnchor?: boolean;
+}) {
   const { t } = useTranslation();
   const { client, projectId } = props;
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -55,7 +62,9 @@ export function CollabAssistProjectSettings(props: { client: CollabClient | null
     setBusy(true);
     setError(null);
     try {
-      setEnabled((await client.setAssistReceiving(projectId, next)).enabled);
+      const saved = await client.setAssistReceiving(projectId, next);
+      setEnabled(saved.enabled);
+      props.onEnabledChange?.(saved.enabled);
     } catch {
       setError(t("collab.settings.assist.saveFailed"));
     } finally {
@@ -90,6 +99,7 @@ export function CollabAssistProjectSettings(props: { client: CollabClient | null
             role="switch"
             aria-checked={on}
             aria-label={t("collab.settings.assist.title")}
+            data-demo-guide={props.demoAnchor ? "settings-assist-switch" : undefined}
             disabled={busy || !client || enabled === null}
             className={`${frame.settingsSwitch}${on ? ` ${frame.settingsSwitchOn}` : ""}`}
           />

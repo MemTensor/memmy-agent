@@ -13,6 +13,7 @@ import { getRuntimeConfig } from "../api/runtime-config.js";
 import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
 import { CollabAssistTaskBar, CollabAssistTaskDock, useAssistTask } from "./collab-assist-task.js";
 import { collabEnabledFor } from "../app/collab-mode.js";
+import { dispatchDemoGuide, getDemoGuideState, subscribeDemoGuide } from "../app/collab-demo-guide-store.js";
 import { mentionEmptyLabelKey } from "./collab-session-mention.js";
 import { CollabShareToggle } from "./collab-share-toggle.js";
 import { getCollabProjectsSnapshot, selectCollabProject, sharedProjectFor, subscribeCollabProjects } from "../app/collab-projects-store.js";
@@ -256,6 +257,8 @@ export interface ComposerSubmitButtonProps {
   variant?: "empty" | "compact";
   /** On click. */
   onClick: () => void;
+  /** 新手引导的描边目标：只有演示里点发送那一步会带上。 */
+  demoGuideAnchor?: string;
 }
 export type StatusPanelState =
   | { open: false }
@@ -534,6 +537,7 @@ export function ComposerSubmitButton(props: ComposerSubmitButtonProps) {
       aria-label={props.isSending ? props.stopLabel : props.sendLabel}
       title={props.isSending ? props.stopLabel : props.sendLabel}
       className={className}
+      data-demo-guide={props.demoGuideAnchor}
     >
       {props.isSending ? (
         <span className="inline-flex items-center justify-center">
@@ -1417,6 +1421,37 @@ export function HomePage() {
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
   );
+  /**
+   * 新手引导：输入框里的那句话由引导写好，用户只点发送。预填读一次就够（nonce 变一次填一次），
+   * 用户自己改过的内容不会被再次覆盖。
+   */
+  const demoGuide = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState);
+  const demoPrefillNonceRef = useRef(0);
+  useEffect(() => {
+    const prefill = demoGuide.prefill;
+    if (!prefill || prefill.nonce === demoPrefillNonceRef.current) return;
+    demoPrefillNonceRef.current = prefill.nonce;
+    setCurrentComposerDraft(prefill.text);
+    window.requestAnimationFrame(() => {
+      const element = inputRef.current;
+      if (!element) return;
+      resizeComposerInput(element);
+      element.focus();
+    });
+  }, [demoGuide.prefill]);
+
+  /** 一轮回复从「运行中」变回空闲：引导的等待状态据此推进，不靠定时器猜。 */
+  const demoWasRunningRef = useRef(false);
+  useEffect(() => {
+    if (isCurrentAgentRunning) {
+      demoWasRunningRef.current = true;
+      return;
+    }
+    if (!demoWasRunningRef.current) return;
+    demoWasRunningRef.current = false;
+    dispatchDemoGuide({ type: "agent-settled" });
+  }, [isCurrentAgentRunning]);
+
   useStalledOutputShimmer(
     conversationContentRef,
     (isCurrentAgentRunning || isCurrentGoalActive) && !pendingCardKey,
@@ -2266,6 +2301,9 @@ export function HomePage() {
       });
       if (!submitted) {
         dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
+      } else {
+        // 引导在等这一下：发出去了才进入「Agent 正在读取…」。
+        dispatchDemoGuide({ type: "composer-sent" });
       }
     } catch (error) {
       dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
@@ -3452,6 +3490,7 @@ export function HomePage() {
             <div className="home-empty-composer-stack">
               <div
                 className="relative home-empty-composer agent-composer-shell rounded-card-lg"
+                data-demo-guide="composer"
                 onDragOver={handleComposerDragOver}
                 onDrop={handleComposerDrop}
               >
@@ -3552,6 +3591,7 @@ export function HomePage() {
                     disabled={composerSubmitDisabled}
                     sendLabel={t("home.send")}
                     stopLabel={t("home.stop")}
+                    demoGuideAnchor="composer-send"
                     onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
                   />
                 </div>
@@ -3596,6 +3636,7 @@ export function HomePage() {
           <CollabAssistTaskBar view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
           <div
             ref={scrollRef}
+            data-demo-guide="conversation"
             className="app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto"
             onScroll={handleAgentConversationScroll}
             onWheel={markAgentConversationUserScrollIntent}
@@ -3750,6 +3791,7 @@ export function HomePage() {
                   ) : null}
                   <div
                     className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"
+                    data-demo-guide="composer"
                     onDragOver={handleComposerDragOver}
                     onDrop={handleComposerDrop}
                   >
@@ -3832,6 +3874,7 @@ export function HomePage() {
                           sendLabel={t("home.send")}
                           stopLabel={t("home.stop")}
                           variant="compact"
+                          demoGuideAnchor="composer-send"
                           onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
                         />
                       </div>

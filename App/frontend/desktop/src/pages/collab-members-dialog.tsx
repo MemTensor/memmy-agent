@@ -263,6 +263,8 @@ export function ProjectMembersDialog(props: {
                   <span className={styles.memberText}>
                     <span className={styles.memberName}>
                       {member.name}
+                      {/* 演示成员的身份由云端标记，界面只认这一个字段：名字旁一个「官方」，不提供重新体验。 */}
+                      {member.demo ? <span className={styles.officialTag}>{t("collab.demo.official")}</span> : null}
                       {member.mine ? t("collab.members.you") : ""}
                     </span>
                   </span>

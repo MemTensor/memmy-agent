@@ -1174,6 +1174,44 @@
   color: var(--collab-ink);
 }
 
+/* 演示成员名字旁的「官方」标记：浅底小字，不用高饱和色。 */
+.officialTag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-action-sky) 12%, transparent);
+  color: var(--color-action-sky-hover);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
+/* 新手引导期间：设置弹窗的遮罩让给引导的蒙版，避免两层暗色叠在一起。 */
+:global(.modal-backdrop).backdropYield {
+  background: transparent;
+}
+
+/* 只读面板头部的「继续任务」：与任务行菜单里的同一个动作，做成一个紧凑的按钮形状。 */
+.readerContinue {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--collab-ink, #1b2423) 14%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--collab-ink);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.readerContinue:hover {
+  background: var(--collab-surface);
+}
+
 .readerBody {
   display: flex;
   flex: 1;

@@ -31,6 +31,11 @@
   -webkit-backdrop-filter: none;
 }
 
+/* 新手引导期间：弹窗的遮罩让给引导的蒙版，避免两层暗色叠在一起。 */
+:global(.modal-backdrop).backdropYield {
+  background: transparent;
+}
+
 .top {
   padding: 16px 28px 4px;
   text-align: center;

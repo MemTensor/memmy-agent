@@ -23,6 +23,7 @@ import {
 import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
 import { useGuidanceDone } from "../app/use-guidance-progress.js";
 import { requestCreateProject } from "../app/collab-projects-store.js";
+import { isDemoGuideActive } from "../app/collab-demo-guide-store.js";
 import { useAppState } from "../state/app-state.js";
 import { CollabLaunchDialog } from "./collab-launch-dialog.js";
 
@@ -52,6 +53,8 @@ export function CollabLaunchPromptHost() {
 
   useEffect(() => {
     if (open || offeredRef.current) return;
+    // 项目协作的新手引导正在演示：大卡让开，等演示结束后的下一次启动再说。
+    if (isDemoGuideActive()) return;
 
     // Dev preview: any workspace is enough, no account, and the local record is neither read nor written.
     if (preview) {

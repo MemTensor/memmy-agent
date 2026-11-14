@@ -2,6 +2,7 @@ import type { TaskTokenGiftNotice } from "@memmy/local-api-contracts";
 import { useEffect, useRef, useState } from "react";
 import { isWorkspacePromptSurfaceReady } from "../app/workspace-prompt-readiness.js";
 import { hasCollabLaunchPromptClaimedThisRun, isCollabLaunchPromptOpen } from "../app/collab-launch-prompt-state.js";
+import { isDemoGuideActive } from "../app/collab-demo-guide-store.js";
 import { resolveLaunchGiftPrompt } from "../app/task-token-gift-prompt.js";
 import { useGuidanceDone } from "../app/use-guidance-progress.js";
 import { useOptionalApiClients } from "../app/providers.js";
@@ -17,6 +18,8 @@ export function isTaskTokenGiftPromptOpen(): boolean { return promptOpen; }
 /** Offers a notice only after the cloud has idempotently credited the signed-in account. */
 export function TaskTokenGiftPromptHost() {
   const { state, dispatch } = useAppState();
+  // 新手引导演示期间不弹任何赠送提示：蒙版下只走一条关键路径。
+  const demoGuideActive = isDemoGuideActive();
   const { clients } = useOptionalApiClients();
   const [offer, setOffer] = useState<Offer | null>(null);
   const requestRef = useRef<{ userId: string; request: Promise<void> } | null>(null);
@@ -25,7 +28,7 @@ export function TaskTokenGiftPromptHost() {
   const accountRef = useRef(state.account.userId);
   accountRef.current = state.account.userId;
   const guidanceDone = useGuidanceDone(state.bootstrap?.onboarding?.completed === true);
-  const ready = state.bootstrap?.app.userMode === "account" && Boolean(state.account.userId) && guidanceDone
+  const ready = !demoGuideActive && state.bootstrap?.app.userMode === "account" && Boolean(state.account.userId) && guidanceDone
     && state.navigation.windowVisible !== false && isWorkspacePromptSurfaceReady({
       startupStatus: state.startup.status, currentPath: state.navigation.currentPath
     });
