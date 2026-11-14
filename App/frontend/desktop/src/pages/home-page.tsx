@@ -351,6 +351,11 @@ export interface SubmitAgentComposerMessageInput {
   settleComposer?: () => void;
   onChatResolved?: (chatId: string) => void;
   onNewChatMessageSent?: (chatId: string) => void;
+  /**
+   * 这一条已经发出去了：用来把任务标题显式定下来。
+   * 新手引导第二步给 Agent 的内容里带着执行提示，标题不能取正文，只能在这里写死成用户看到的那句话。
+   */
+  onMessageSent?: (chatId: string) => void;
   chatSelectionEpoch?: number;
   getChatSelectionEpoch?: () => number;
   scopeKey?: string;
@@ -951,6 +956,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     return false;
   }
   input.settleComposer?.();
+  input.onMessageSent?.(chatId);
   input.track({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
   if (input.scopeKey) {
     input.dispatch(agentActions.pendingModelPresetCleared(input.scopeKey));
@@ -1480,17 +1486,29 @@ export function HomePage() {
     ? t("collab.demo.prefill.askHint", { name: demoGuide.memberName, member: demoGuide.memberUserId ?? "" })
     : "";
 
-  /** 一轮回复从「运行中」变回空闲：引导的等待状态据此推进，不靠定时器猜。 */
+  /**
+   * 一轮回复从「运行中」变回空闲：引导的等待状态据此推进，不靠定时器猜。
+   * 这一轮以错误结束时不能当成成功：卡片要说「这一步没有完成」，并给重试与跳过。
+   */
   const demoWasRunningRef = useRef(false);
+  /** 这一轮开始时已经存在的那条错误：只有它之后新出现的错误才算这一轮失败。 */
+  const demoTurnErrorIdRef = useRef<string | null>(null);
   useEffect(() => {
+    const notice = state.agent.operationErrorNotice;
     if (isCurrentAgentRunning) {
+      if (!demoWasRunningRef.current) demoTurnErrorIdRef.current = notice?.id ?? null;
       demoWasRunningRef.current = true;
       return;
     }
     if (!demoWasRunningRef.current) return;
     demoWasRunningRef.current = false;
+    const freshError = Boolean(notice) && notice!.id !== demoTurnErrorIdRef.current;
+    if (freshError && demoGuide.status === "active") {
+      dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.agent") });
+      return;
+    }
     dispatchDemoGuide({ type: "agent-settled" });
-  }, [isCurrentAgentRunning]);
+  }, [isCurrentAgentRunning, state.agent.operationErrorNotice, demoGuide.status, t]);
 
   useStalledOutputShimmer(
     conversationContentRef,
@@ -2346,6 +2364,14 @@ export function HomePage() {
               reason: "new-chat",
               state: state.agent
             });
+          }
+          : undefined,
+        // 新手引导第二步：任务标题只用用户看到的那一句话，不从正文（含执行提示）里取。
+        onMessageSent: demoAssistSend.displayContent !== null && clients?.memmyAgent
+          ? (chatId) => {
+            void clients.memmyAgent
+              .renameSession(clients.memmyAgent.chatIdToSessionKey(chatId), demoAssistSend.displayContent!)
+              .catch(() => undefined);
           }
           : undefined
       });

@@ -27,6 +27,12 @@ export const DEMO_GUIDE_POLL_MS = 1_500;
 /** 等小饭团的请求最多等这么久：超时就按「这一步没有完成」处理，不让人卡在蒙版里。 */
 const HELP_REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * 第二步等结果的时限：这么久本项目里还没有「我发起、执行人是演示成员」的请求，就说明这次没发出去。
+ * 比等请求短：这一步是在自己电脑上发出去的，发成功了很快就会有一条。
+ */
+const ASK_RESULT_TIMEOUT_MS = 20_000;
+
 export function CollabDemoGuideHost(props: {
   collab: CollabClient | null;
   /** 当前路由：只在看板与对话页之间时不算离开。 */
@@ -50,6 +56,8 @@ export function CollabDemoGuideHost(props: {
   /** 第三步那条请求的 id：允许之后回到看板时要展开的就是它。 */
   const helpThreadRef = useRef<string | null>(null);
   const helpSinceRef = useRef<number | null>(null);
+  /** 第二步从「请求已发出」算起，等这么久没有那条请求就按失败处理。 */
+  const askSinceRef = useRef<number | null>(null);
   /** 云端说演示已结束时已经提示过，避免每次重画都再提示一次。 */
   const cloudEndedNoticedRef = useRef(false);
   /** 引导自己的一句话提示（如「体验已结束」）：蒙版可能在任何页面，提示不依赖看板。 */
@@ -124,7 +132,16 @@ export function CollabDemoGuideHost(props: {
         item.requester.mine && item.executor.userId === memberUserId
       ));
       const latest = thread?.requests[0];
-      if (!latest) return;
+      if (!latest) {
+        // 一直没有那条请求：说明这次没发出去（CLI 连不上、Agent 没照做）。到点就说这一步没完成。
+        const started = askSinceRef.current ?? Date.now();
+        askSinceRef.current = started;
+        if (Date.now() - started > ASK_RESULT_TIMEOUT_MS) {
+          dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.request") });
+        }
+        return;
+      }
+      askSinceRef.current = null;
       if (latest.status === "done") {
         dispatchDemoGuide({ type: "assist-delivered" });
         return;
@@ -213,10 +230,12 @@ export function CollabDemoGuideHost(props: {
     noticeRef.current(t("collab.demo.ended"));
   }, [state.cloudEnded, t]);
 
-  // 换了一步就重新计时：第三步的 30 秒从「开启接收」之后算起。
+  // 换了一步就重新计时：第二步从请求发出算起，第三步从「开启接收」之后算起。
+  // 重试（清掉 error）同样重新计一次：不然刚点完重试就立刻又报同一句。
   useEffect(() => {
     helpSinceRef.current = null;
-  }, [state.phase]);
+    askSinceRef.current = null;
+  }, [state.phase, state.error]);
 
   // 第二步只预填用户看到的那一句话；执行提示在发送时单独追加给 Agent（见 home-page）。
   const askPrefill = () => t("collab.demo.prefill.ask", { name: state.memberName });

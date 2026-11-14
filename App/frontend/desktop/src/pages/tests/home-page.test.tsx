@@ -1783,6 +1783,32 @@ describe("HomePage", () => {
     expect(queued?.content).not.toContain("执行提示");
   });
 
+  it("names the task after the sentence the person saw", async () => {
+    // 第二步的内容里带着执行提示（含命令与 userId），任务标题不能从正文里取。
+    const sentence = "请小饭团看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么";
+    const onMessageSent = vi.fn();
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-demo",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        submitMessage: vi.fn(async () => ({ status: "accepted" as const }))
+      },
+      content: `${sentence}\n\n（执行提示：memmy-project assist ask --member 9001）`,
+      displayContent: sentence,
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch: vi.fn(),
+      track: vi.fn(),
+      clearComposer: vi.fn(),
+      onMessageSent
+    })).resolves.toBe(true);
+
+    // 发出之后才有 chatId：引导用它在拿到 id 之后把标题显式写成那一句话。
+    expect(onMessageSent).toHaveBeenCalledWith("chat-demo");
+  });
+
   it("leaves an edited second-step sentence alone, with no hint attached", () => {
     const sentence = "请小饭团看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么";
     const typed = "请小饭团看一下他电脑上的《项目协作常见问题》";
