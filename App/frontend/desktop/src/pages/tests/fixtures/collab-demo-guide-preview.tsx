@@ -5,32 +5,40 @@
  * 这样不连本机接口也能逐步检查亮区位置、说明卡会不会挡住目标、窄窗口下是否溢出。
  */
 import type { CSSProperties, ReactNode } from "react";
-import { Check, LifeBuoy, Link2, Search, Settings, Send, UserPlus } from "lucide-react";
+import { Check, LifeBuoy, Link2, MessageSquarePlus, Search, Settings, Send, UserPlus } from "lucide-react";
 import { I18nProvider } from "../../../i18n/i18n-provider.js";
 import { CollabDemoGuideOverlay } from "../../../components/collab-demo-guide/collab-demo-guide-overlay.js";
-import type { DemoGuidePhase, DemoGuideState } from "../../../app/collab-demo-guide-store.js";
+import { demoGuideIsTourPhase, type DemoGuidePhase, type DemoGuideState } from "../../../app/collab-demo-guide-store.js";
 import board from "../../collab-page.module.css";
 
-/** 预览里的步骤：卡片上的名字与 {@link DemoGuidePhase} 一一对应。 */
+/**
+ * 预览里的步骤：卡片上的名字与 {@link DemoGuidePhase} 一一对应。
+ *
+ * 前两个是建项目之前的弹窗与加入提示窗，`t-*` 是五步看板导览（纯介绍），`1-*`「2-*」`3-*` 是体验段三步。
+ */
 export const DEMO_GUIDE_PREVIEW_STEPS = {
   "0-create-project": "create-project",
   "0-joined": "joined",
+  "t-board": "tour-board",
+  "t-header": "tour-header",
+  "t-tabs": "tour-tabs",
+  "t-associate": "tour-associate",
+  "t-new-task": "tour-new-task",
   "1-task-row": "task-row",
   "1-reader": "reader",
   "1-compose": "compose",
   "1-waiting": "reply-waiting",
   "1-done": "reply-done",
-  "2-associate": "associate",
-  "3-compose": "ask-compose",
-  "3-waiting": "ask-waiting",
-  "3-done": "ask-done",
-  "4-gear": "settings-open",
-  "4-settings": "settings-assist",
-  "4-waiting": "help-waiting",
-  "4-dialog": "help-dialog",
-  "4-running": "help-running",
-  "4-done": "help-done",
-  "4-rejected": "help-rejected"
+  "2-compose": "ask-compose",
+  "2-waiting": "ask-waiting",
+  "2-done": "ask-done",
+  "3-gear": "settings-open",
+  "3-settings": "settings-assist",
+  "3-waiting": "help-waiting",
+  "3-dialog": "help-dialog",
+  "3-running": "help-running",
+  "3-done": "help-done",
+  "3-rejected": "help-rejected"
 } as const satisfies Record<string, DemoGuidePhase>;
 
 export type DemoGuidePreviewStep = keyof typeof DEMO_GUIDE_PREVIEW_STEPS | "complete" | "error";
@@ -43,8 +51,8 @@ function stateFor(step: DemoGuidePreviewStep): DemoGuideState {
     : DEMO_GUIDE_PREVIEW_STEPS[step];
   // 建项目之前还没有云端项目，也还不知道演示成员是谁：卡片这时用中性叫法。
   const beforeProject = phase === "create-project";
-  // 第四步的这几个阶段意味着前三步都走过了：完成弹窗与卡片都按它列条目。
-  const lateStep = step === "4-gear" || step === "4-settings" || step === "4-waiting" || step === "4-dialog" || step === "4-running" || step === "4-done";
+  // 第三步的这几个阶段意味着前两步都走过了：完成弹窗与卡片都按它列条目。
+  const lateStep = step === "3-gear" || step === "3-settings" || step === "3-waiting" || step === "3-dialog" || step === "3-running" || step === "3-done";
   return {
     status: step === "complete" ? "complete" : "active",
     phase,
@@ -55,12 +63,11 @@ function stateFor(step: DemoGuidePreviewStep): DemoGuideState {
     error: step === "error" ? "Agent 没有给出回复。" : null,
     done: {
       task: step === "complete" || lateStep,
-      associate: step === "complete" || lateStep,
       ask: step === "complete" || lateStep,
-      help: step === "complete" || step === "4-done"
+      help: step === "complete" || step === "3-done"
     },
-    skipped: { task: false, associate: false, ask: false, help: false },
-    askDelivered: step === "3-done",
+    skipped: { task: false, ask: false, help: false },
+    askDelivered: step === "2-done",
     prefill: null,
     endReason: step === "complete" ? "finished" : null,
     cloudEnded: false
@@ -73,17 +80,60 @@ const card: CSSProperties = {
   boxShadow: "0 1px 2px rgba(16,26,25,.06)"
 };
 
+/**
+ * 侧栏：真实客户端里它在看板左边，项目名一行右侧就是「＋新建任务」。
+ * 只有导览讲到「侧栏新建任务」时才摆出来，其他步骤的截图仍按原来的满宽看板。
+ */
+function PreviewSidebar() {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: 0,
+        top: 0,
+        bottom: 0,
+        width: 216,
+        padding: "18px 10px",
+        background: "color-mix(in srgb, #f4f7f6 70%, #fff)",
+        borderRight: "1px solid rgba(16,26,25,.06)"
+      }}
+    >
+      <div style={{ fontSize: 12, color: "rgba(16,26,25,.42)", padding: "0 8px 8px" }}>项目</div>
+      <div className="app-frame-project-row" style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", borderRadius: 8, background: "rgba(16,26,25,.05)" }}>
+        <span aria-hidden="true" style={{ fontSize: 12, color: "rgba(16,26,25,.5)" }}>▾</span>
+        <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          项目协作体验
+        </span>
+        <button
+          type="button"
+          aria-label="新建任务"
+          data-demo-guide="sidebar-new-task"
+          className="task-icon-button"
+          style={{ width: 24, height: 24, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 8, border: 0, background: "transparent", cursor: "pointer" }}
+        >
+          <MessageSquarePlus size={14} aria-hidden="true" />
+        </button>
+      </div>
+      <div style={{ marginTop: 10, fontSize: 12.5, color: "rgba(16,26,25,.5)", padding: "0 8px" }}>项目协作上手清单</div>
+    </div>
+  );
+}
+
 /** 看板的一列：标题、任务行、右侧项目配置，与真实看板同一套类名与外观。 */
-function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean }) {
+function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; withSidebar?: boolean }) {
   return (
     <div
       className={board.page}
       data-demo-guide="board-main"
-      style={{ position: "absolute", inset: 0, background: "var(--color-canvas-oat, #f4f7f6)" }}
+      style={{
+        position: "absolute",
+        inset: props.withSidebar ? "0 0 0 216px" : 0,
+        background: "var(--color-canvas-oat, #f4f7f6)"
+      }}
     >
       <div className={board.scroller}>
         <div className={board.wrap}>
-          <header className={board.boardHeader}>
+          <header className={board.boardHeader} data-demo-guide="board-header">
             <span className={board.boardIcon} aria-hidden="true">☁</span>
             <h1 className={board.boardName}>项目协作体验</h1>
             <span className={board.boardScope}>2 位成员</span>
@@ -95,7 +145,7 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean }) 
               <Settings size={15} aria-hidden="true" />
             </button>
           </header>
-          <div className={board.boardTabs} role="tablist">
+          <div className={board.boardTabs} role="tablist" data-demo-guide="board-tabs">
             <button type="button" role="tab" aria-selected className={`${board.boardTab} ${board.boardTabOn}`}>任务</button>
             <button type="button" role="tab" aria-selected={false} className={board.boardTab}>
               协助<span className={board.segCount}>{props.withAssistRow ? "1" : "0"}</span>
@@ -437,9 +487,19 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
 
   const phase = state.phase;
   const chat = phase === "compose" || phase === "reply-waiting" || phase === "reply-done" || phase === "ask-compose" || phase === "ask-waiting" || phase === "ask-done";
+  // 看板导览的五步：只摆看板（最后一步多一条侧栏，那个「＋」才是亮区），不换页。
+  const tour = demoGuideIsTourPhase(phase);
   let surface: ReactNode;
   if (phase === "create-project") surface = <CreateProjectSurface />;
   else if (chat) surface = <ChatSurface phase={phase} />;
+  else if (tour) {
+    surface = (
+      <>
+        <BoardSurface withSettings withAssistRow={false} withSidebar={phase === "tour-new-task"} />
+        {phase === "tour-new-task" ? <PreviewSidebar /> : null}
+      </>
+    );
+  }
   else if (phase === "reader") surface = (<><BoardSurface withSettings={false} withAssistRow={false} /><ReaderSurface /></>);
   else if (phase === "settings-assist") surface = <SettingsSurface />;
   else if (phase === "help-dialog") surface = <AssistDialogSurface />;

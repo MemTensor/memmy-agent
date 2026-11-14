@@ -43,8 +43,8 @@ function activeState(phase: DemoGuideState["phase"]): DemoGuideState {
     memberUserId: "9001",
     memberName: "小饭团",
     error: null,
-    done: { task: false, associate: false, ask: false, help: false },
-    skipped: { task: false, associate: false, ask: false, help: false },
+    done: { task: false, ask: false, help: false },
+    skipped: { task: false, ask: false, help: false },
     askDelivered: false,
     prefill: null,
     endReason: null,
@@ -197,32 +197,33 @@ describe("demo guide overlay tracking", () => {
 
     expect(strokeOf()).toEqual({ left: 897, top: 597, width: 102, height: 38 });
     const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
-    expect(card?.textContent).toContain("名字已经填好");
-    expect(card?.textContent).toContain("官方体验账号");
+    expect(card?.textContent).toContain("项目名已经填好了");
+    expect(card?.textContent).toContain("一位同事");
     expect(card?.textContent).toContain("退出引导");
     expect(card?.textContent).not.toContain("跳过这一步");
     expect(card?.textContent).not.toContain("下一步");
-    // 还没有「第几步」：进度条与步骤名都不出现。
+    // 还没有「第几步」：徽章与步骤名都不出现。
     expect(card?.textContent).not.toContain("接着成员的任务做");
   });
 
-  it("writes four steps and lights only the link-a-task button on the second one", async () => {
+  it("lights the link-a-task button during the tour without letting anyone use it", async () => {
     const associate = document.createElement("button");
     associate.setAttribute("data-demo-guide", "board-associate");
     stubRect(associate, () => rect({ left: 1060, top: 250, width: 92, height: 28 }));
     await act(async () => {
       document.body.append(associate);
     });
-    await mount("associate");
+    await mount("tour-associate");
 
-    // 描边正好包住这个按钮：它是这一步唯一可点的控件。
-    expect(strokeOf()).toEqual({ left: 1057, top: 247, width: 98, height: 34 });
+    // 亮区就是这个按钮，但不描边：描边意味着「这里可以点」，导览只讲给人听，不打开关联弹窗、不写数据。
+    expect(strokeOf()).toBeNull();
+    expect(holeOf()).toEqual({ left: 1054, top: 244, right: 1158, bottom: 284 });
     const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
-    expect(card?.textContent).toContain("2 / 4");
-    expect(card?.textContent).toContain("关联已有的任务");
-    expect(card?.textContent).toContain("也能关联进项目");
-    // 这一步不打开关联弹窗，所以卡片上只有一句说明与「跳过这一步」。
-    expect(card?.textContent).not.toContain("下一步");
+    // 导览段没有「1 / 3」这种进度，只有一个「介绍」徽章；也没有「跳过这一步」。
+    expect(card?.textContent).not.toContain("1 / 3");
+    expect(card?.textContent).toContain("介绍");
+    expect(card?.textContent).not.toContain("跳过这一步");
+    expect(card?.textContent).toContain("下一步");
   });
 
   it("stands in the task itself on the last step and names who gets the result", async () => {
@@ -234,10 +235,10 @@ describe("demo guide overlay tracking", () => {
     });
     await mount("help-running");
 
-    // 人在那条任务里，卡片说清结果会发给谁；第四步的亮区就是这个任务页。
+    // 人在那条任务里，卡片说清结果会发给谁；第三步的亮区就是这个任务页。
     expect(holeOf()).toEqual({ left: 94, top: 54, right: 1106, bottom: 686 });
-    expect(document.body.textContent).toContain("4 / 4");
-    expect(document.body.textContent).toContain("结果会发给小饭团");
+    expect(document.body.textContent).toContain("3 / 3");
+    expect(document.body.textContent).toContain("结果会直接发给小饭团");
   });
 
   it("waits for the target instead of drawing an overlay over nothing", async () => {

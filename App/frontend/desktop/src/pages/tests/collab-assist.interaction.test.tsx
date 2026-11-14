@@ -1004,8 +1004,8 @@ describe("成员协助的宿主", () => {
       memberUserId: REQUESTER.userId,
       memberName: "孙起",
       error: null,
-      done: { task: true, associate: true, ask: true, help: false },
-      skipped: { task: false, associate: false, ask: false, help: false },
+      done: { task: true, ask: true, help: false },
+      skipped: { task: false, ask: false, help: false },
       askDelivered: false,
       prefill: null,
       endReason: null,
@@ -1054,8 +1054,8 @@ describe("成员协助的宿主", () => {
       memberUserId: REQUESTER.userId,
       memberName: "孙起",
       error: null,
-      done: { task: true, associate: true, ask: true, help: false },
-      skipped: { task: false, associate: false, ask: false, help: false },
+      done: { task: true, ask: true, help: false },
+      skipped: { task: false, ask: false, help: false },
       askDelivered: false,
       prefill: null,
       endReason: null,
@@ -1090,7 +1090,7 @@ describe("成员协助的宿主", () => {
     });
 
     expect(onOpenTask).not.toHaveBeenCalled();
-    expect(getDemoGuideState().error).toBe("这次的协助没有执行成功。");
+    expect(getDemoGuideState().error).toBe("这次协助没有执行成功。");
   });
 
   it("does not count requests of the project that is open on the board", async () => {

@@ -57,28 +57,42 @@ describe("the demo guide preview", () => {
     expect(DEMO_GUIDE_PREVIEW_STEPS["0-joined"]).toBe("joined");
     await render("0-joined");
 
-    // 居中的提示窗带 Memmy 的 logo，只有「开始体验」，没有跳过，也没有蒙版。
+    // 居中的提示窗带 Memmy 的吉祥物（不是应用图标），只有「开始体验」，没有跳过，也没有蒙版。
     expect(document.querySelector("[data-demo-join]")).toBeTruthy();
-    expect(document.querySelector("[data-demo-join] img")?.getAttribute("src")).toContain("memmy-app-icon");
-    expect(document.body.textContent).toContain("小饭团加入了项目，开始一起协作吧");
+    expect(document.querySelector("[data-demo-join] img")?.getAttribute("src")).toContain("mascot/memmy-celebrate");
+    expect(document.body.textContent).toContain("小饭团加入了项目");
+    expect(document.body.textContent).toContain("把项目协作完整用一遍");
     expect(document.body.textContent).toContain("开始体验");
     expect(document.body.textContent).not.toContain("跳过这一步");
     expect(document.querySelector("[data-demo-mask]")).toBeNull();
   });
 
-  it("lights only the link-a-task button on the second step", async () => {
-    expect(DEMO_GUIDE_PREVIEW_STEPS["2-associate"]).toBe("associate");
-    await render("2-associate");
+  it("covers the five tour steps on the board, ending on the sidebar new-task button", async () => {
+    expect(DEMO_GUIDE_PREVIEW_STEPS["t-board"]).toBe("tour-board");
+    expect(DEMO_GUIDE_PREVIEW_STEPS["t-header"]).toBe("tour-header");
+    expect(DEMO_GUIDE_PREVIEW_STEPS["t-tabs"]).toBe("tour-tabs");
+    expect(DEMO_GUIDE_PREVIEW_STEPS["t-associate"]).toBe("tour-associate");
+    expect(DEMO_GUIDE_PREVIEW_STEPS["t-new-task"]).toBe("tour-new-task");
 
-    // 这一步的可点控件就是工具条上的「关联任务」（卡片文案与进度由 overlay 的单测断言）。
-    expect(document.querySelector("[data-demo-guide='board-associate']")).toBeTruthy();
-    expect(document.querySelector("[data-demo-guide='board-main']")).toBeTruthy();
+    // 每一步的锚点都在预览页上：整块看板、头部（项目名与成员）、tab 那一行、工具条右侧的关联任务、侧栏的「＋」。
+    for (const [step, anchor] of [
+      ["t-board", "board-main"],
+      ["t-header", "board-header"],
+      ["t-tabs", "board-tabs"],
+      ["t-associate", "board-associate"],
+      ["t-new-task", "sidebar-new-task"]
+    ] as const) {
+      await render(step);
+      expect(document.querySelector(`[data-demo-guide='${anchor}']`)).toBeTruthy();
+      // 导览段不描边：没有任何「这里可以点」的控件。
+      expect(document.querySelector("[data-demo-stroke]")).toBeNull();
+    }
   });
 
   it("shows the task page itself once the assist is allowed", async () => {
-    expect(DEMO_GUIDE_PREVIEW_STEPS["4-running"]).toBe("help-running");
-    expect(DEMO_GUIDE_PREVIEW_STEPS["4-done"]).toBe("help-done");
-    await render("4-running");
+    expect(DEMO_GUIDE_PREVIEW_STEPS["3-running"]).toBe("help-running");
+    expect(DEMO_GUIDE_PREVIEW_STEPS["3-done"]).toBe("help-done");
+    await render("3-running");
     // 站在那条任务里：协助条写明是谁的请求、仅这一次、执行中。
     expect(document.querySelector("[data-collab-assist-bar]")?.textContent).toContain("小饭团的 Memmy 请求 · 仅这一次");
     expect(document.body.textContent).toContain("执行中");
@@ -86,7 +100,7 @@ describe("the demo guide preview", () => {
     expect(document.querySelector("[data-demo-guide='assist-task']")).toBeTruthy();
     expect(document.querySelector("[data-demo-guide='assist-row']")).toBeNull();
 
-    await render("4-done");
+    await render("3-done");
     // 跑完之后：协助条到已完成，底部一行写明结果发给了谁，卡片给出「完成」。
     expect(document.querySelector("[data-collab-assist-bar]")?.textContent).toContain("已完成");
     expect(document.querySelector("[data-collab-assist-dock]")?.textContent).toContain("结果已发给小饭团");
