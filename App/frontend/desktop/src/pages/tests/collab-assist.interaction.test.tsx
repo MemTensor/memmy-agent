@@ -12,6 +12,11 @@ import type {
 } from "../../api/collab-client.js";
 import { ApiRequestError } from "../../api/http.js";
 import { consumeAssistFocus, getAssistFocus } from "../../app/collab-assist-focus.js";
+import {
+  getDemoGuideState,
+  resetDemoGuideStore,
+  setDemoGuideStateForTest
+} from "../../app/collab-demo-guide-store.js";
 import { loadCollabProjects, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { ASSIST_PANEL_WIDTH_STORAGE_KEY, CollabAssistConversation } from "../collab-assist-conversation.js";
@@ -109,6 +114,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  resetDemoGuideStore();
 });
 
 /** 等读取限时授权的两三个请求落地并重画。 */
@@ -986,6 +992,105 @@ describe("成员协助的宿主", () => {
     // 不再另开协助视图。
     expect(document.body.textContent).not.toContain("孙起请求你的电脑协助");
     expect(document.body.textContent).not.toContain("结束授权");
+  });
+
+  it("演出演示时允许之后也进那条 Memmy 任务，不在看板上停下", async () => {
+    // 引导正停在第四步的授权弹窗上。
+    setDemoGuideStateForTest({
+      status: "active",
+      phase: "help-dialog",
+      projectId: "p1",
+      localProjectId: "local-1",
+      memberUserId: REQUESTER.userId,
+      memberName: "孙起",
+      error: null,
+      done: { task: true, associate: true, ask: true, help: false },
+      skipped: { task: false, associate: false, ask: false, help: false },
+      askDelivered: false,
+      prefill: null,
+      endReason: null,
+      cloudEnded: false
+    });
+    const onOpenTask = vi.fn();
+    const onOpenBoard = vi.fn();
+    const collab = client({
+      assistInbox: vi.fn().mockResolvedValue({ requests: [inbox] }),
+      decideAssist: vi.fn().mockResolvedValue(request({ status: "running", agent: "memmy", scope: "once" })),
+      assistExecutions: vi.fn().mockResolvedValue([{
+        requestId: "r1",
+        threadId: "t1",
+        projectId: "p1",
+        agent: "memmy",
+        status: "running",
+        steps: [],
+        conversationId: "chat-1",
+        startedAt: "2026-11-04T08:42:00Z",
+        finishedAt: null,
+        failure: null
+      }])
+    });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistHost collab={collab} enabled onOpenTask={onOpenTask} onOpenBoard={onOpenBoard} />
+      </I18nProvider>
+    ));
+    await act(async () => button("允许")?.click());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+
+    // 与正式逻辑同一条路：进那条任务，让人看到协助条、执行过程与结果。
+    expect(onOpenTask).toHaveBeenCalledWith("chat-1");
+    expect(onOpenBoard).not.toHaveBeenCalled();
+    expect(getDemoGuideState().phase).toBe("help-running");
+  });
+
+  it("演示里拿不到那条 Memmy 任务时，这一步按没有完成处理", async () => {
+    setDemoGuideStateForTest({
+      status: "active",
+      phase: "help-dialog",
+      projectId: "p1",
+      localProjectId: "local-1",
+      memberUserId: REQUESTER.userId,
+      memberName: "孙起",
+      error: null,
+      done: { task: true, associate: true, ask: true, help: false },
+      skipped: { task: false, associate: false, ask: false, help: false },
+      askDelivered: false,
+      prefill: null,
+      endReason: null,
+      cloudEnded: false
+    });
+    const onOpenTask = vi.fn();
+    const collab = client({
+      assistInbox: vi.fn().mockResolvedValue({ requests: [inbox] }),
+      decideAssist: vi.fn().mockResolvedValue(request({ status: "running", agent: "memmy", scope: "once" })),
+      // 执行方那边失败了：不会再有任务可进，不等满 15 秒。
+      assistExecutions: vi.fn().mockResolvedValue([{
+        requestId: "r1",
+        threadId: "t1",
+        projectId: "p1",
+        agent: "memmy",
+        status: "failed",
+        steps: [],
+        conversationId: null,
+        startedAt: "2026-11-04T08:42:00Z",
+        finishedAt: null,
+        failure: "本机任务没有建起来"
+      }])
+    });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistHost collab={collab} enabled onOpenTask={onOpenTask} />
+      </I18nProvider>
+    ));
+    await act(async () => button("允许")?.click());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+
+    expect(onOpenTask).not.toHaveBeenCalled();
+    expect(getDemoGuideState().error).toBe("这次的协助没有执行成功。");
   });
 
   it("does not count requests of the project that is open on the board", async () => {

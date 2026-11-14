@@ -3730,7 +3730,7 @@ export function HomePage() {
           </div>
         </section>
         ) : (
-        <section ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full">
+        <section ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full" data-demo-guide="assist-task">
           <CollabAssistTaskBar view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
           <div
             ref={scrollRef}

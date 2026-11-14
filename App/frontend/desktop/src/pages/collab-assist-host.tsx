@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { AssistInboxItem, AssistOutcome, CollabClient } from "../api/collab-client.js";
 import { requestAssistFocus } from "../app/collab-assist-focus.js";
 import { registerAssistInboxRefresh } from "../app/collab-assist-refresh.js";
-import { getDemoGuideState, isDemoGuideActive, subscribeDemoGuide } from "../app/collab-demo-guide-store.js";
+import { dispatchDemoGuide, getDemoGuideState, isDemoGuideActive, subscribeDemoGuide } from "../app/collab-demo-guide-store.js";
 import { getCollabProjectsSnapshot, subscribeCollabProjects } from "../app/collab-projects-store.js";
 import { useOptionalNotificationCenter } from "../components/notification-center.js";
 import type { MessageKey } from "../i18n/messages.js";
@@ -279,8 +279,23 @@ export function CollabAssistHost(props: {
           setDialogRequest(null);
           void poll();
           if (decision.action !== "allow") return;
-          // 新手引导要让人在看板的「协助」里看到这次执行：不跳进任务页，由引导自己回看板并展开这一条。
-          if (isDemoGuideActive()) return;
+          // 新手引导里允许之后也要进那条任务：演示要让人看到协助条、执行过程与「结果已发给谁」，
+          // 与正式逻辑走同一条路，区别只在拿不到任务时按「这一步没有完成」处理，而不是退回看板。
+          if (isDemoGuideActive()) {
+            dispatchDemoGuide({ type: "help-decided", allow: true });
+            if (decision.agent === "memmy" && openTaskRef.current) {
+              const conversationId = await waitForMemmyTask(collab, decided.id);
+              if (conversationId) {
+                openTaskRef.current(conversationId);
+                return;
+              }
+              // 15 秒还没有那条任务：这一步算没有完成，引导给出重试与跳过。
+              dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.help") });
+            }
+            // 由外部 Agent 执行（或没有任务可进）：打开项目看板，在右侧展开这次协助。
+            openAssist({ projectId: request.projectId, threadId: request.threadId }, false);
+            return;
+          }
           // 由 Memmy 执行：等它在项目里建好任务（通常一两秒），直接进入那条任务。
           if (decision.agent === "memmy" && openTaskRef.current) {
             const conversationId = await waitForMemmyTask(collab, decided.id);
