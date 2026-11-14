@@ -83,7 +83,12 @@ const POSES: Partial<Record<DemoGuidePhase, MemmyPose>> = {
 /** 导览段的四步各用哪个姿势：按 {@link demoGuideTourIndex} 的顺序。 */
 const TOUR_POSES: MemmyPose[] = ["point", "peek", "connect", "chat"];
 
-/** 每个子状态卡片上写什么：文案就是产品定稿的那几句，`{name}` 换成本次演示成员的昵称。 */
+/**
+ * 每个子状态卡片上写什么：文案就是产品定稿的那几句，`{name}` 换成本次演示成员的昵称。
+ *
+ * 句子里带了 `{某样东西}` 就要把值传进去：`formatMessage` 不会替你清掉没传的占位符，
+ * 曾经就把「{name}的问题」原样印到了卡片上。这里每句都有测试逐个查（见 copy 测试）。
+ */
 export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCard {
   const name = state.memberName;
   const base = (step: 1 | 2 | 3 | null, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
@@ -119,7 +124,7 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
     case "reader":
       return base(1, t("collab.demo.reader.body"));
     case "compose":
-      return base(1, t("collab.demo.compose.body"));
+      return base(1, t("collab.demo.compose.body", { name }));
     case "reply-waiting":
       return base(1, "", { status: t("collab.demo.reply.waiting", { name }) });
     case "reply-done":
@@ -135,6 +140,7 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
     case "ask-done":
       return base(2, t("collab.demo.ask.body", { name }), { title: t("collab.demo.ask.title"), action: "next" });
     case "settings-open":
+      // 这句话里没有要替换的占位符：成员的名字不出现，所以不传值。
       return base(3, t("collab.demo.settings.body"));
     case "settings-assist":
       return base(3, t("collab.demo.assist.body"));

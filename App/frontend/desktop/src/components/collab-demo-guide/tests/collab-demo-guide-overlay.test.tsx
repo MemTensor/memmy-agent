@@ -227,6 +227,22 @@ describe("demo guide overlay tracking", () => {
     expect(card?.textContent).toContain("下一步");
   });
 
+  it("never prints a raw placeholder on the card", async () => {
+    // settings-open 这一句以前漏传了参数，卡片上直接写着「{name}的问题」：渲染出来不能有任何 { 。
+    const settings = document.createElement("button");
+    settings.setAttribute("data-demo-guide", "board-settings");
+    stubRect(settings, () => rect({ left: 1060, top: 60, width: 28, height: 28 }));
+    await act(async () => {
+      document.body.append(settings);
+    });
+    await mount("settings-open");
+
+    const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
+    expect(card?.textContent).toContain("另一个方向：成员的问题，交由你电脑上的 Agent 执行。");
+    expect(card?.textContent).not.toContain("{");
+    expect(document.body.textContent).not.toContain("{name}");
+  });
+
   it("stands in the task itself on the last step and names who gets the result", async () => {
     const task = document.createElement("div");
     task.setAttribute("data-demo-guide", "assist-task");
