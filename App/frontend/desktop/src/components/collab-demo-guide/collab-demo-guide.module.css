@@ -272,3 +272,55 @@
   font-size: 12.5px;
   pointer-events: none;
 }
+
+/*
+ * 「{name}加入了项目」：演示开始前的提示窗。自己带遮罩，与第一步的蒙版不同时出现，
+ * 上面只有一个「开始体验」，没有跳过。
+ */
+.joinLayer {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 26, 25, 0.32);
+  pointer-events: auto;
+}
+
+.joinCard {
+  width: 360px;
+  max-width: calc(100vw - 40px);
+  padding: 24px 24px 20px;
+  border-radius: 16px;
+  background: var(--color-background-paper, #fff);
+  box-shadow: 0 18px 44px rgba(16, 26, 25, 0.2);
+  text-align: center;
+}
+
+.joinLogo {
+  display: block;
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 14px;
+  border-radius: 14px;
+}
+
+.joinText {
+  margin: 0 0 18px;
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--color-text-ink, #1b2423);
+}
+
+.joinAction {
+  border: 0;
+  border-radius: 9px;
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--color-action-sky);
+  cursor: pointer;
+}

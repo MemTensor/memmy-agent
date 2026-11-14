@@ -7,6 +7,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Check } from "lucide-react";
+import memmyAppIconUrl from "../../assets/memmy-app-icon.png";
 import {
   demoGuideStepNumberOf,
   type DemoGuidePhase,
@@ -32,17 +33,20 @@ type Translate = (key: MessageKey, values?: Record<string, string | number>) => 
 
 export interface DemoGuideCard {
   /** 卡片头里的「第几步」；建项目之前还没有步骤，为 null 时不显示进度条。 */
-  step: 1 | 2 | 3 | null;
+  step: 1 | 2 | 3 | 4 | null;
   title: string | null;
   body: string;
   status: string | null;
   action: "next" | "done" | null;
 }
 
+/** 一共几步：进度条与「1 / 4」都按它画。 */
+export const DEMO_GUIDE_STEPS = [1, 2, 3, 4] as const;
+
 /** 每个子状态卡片上写什么：文案就是产品定稿的那几句，`{name}` 换成本次演示成员的昵称。 */
 export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCard {
   const name = state.memberName;
-  const base = (step: 1 | 2 | 3 | null, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
+  const base = (step: 1 | 2 | 3 | 4 | null, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
     step,
     title: null,
     body,
@@ -54,6 +58,9 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
     case "create-project":
       // 演示成员是谁要等云端建好项目才知道：这时先用中性的叫法，不写死任何账号或昵称。
       return base(null, t("collab.demo.createProject.body", { name: name || t("collab.demo.officialName") }));
+    case "joined":
+      // 加入提示窗自带遮罩与按钮，不用卡片。
+      return base(1, "");
     case "task-row":
       return base(1, t("collab.demo.taskRow.body", { name }));
     case "reader":
@@ -64,40 +71,42 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
       return base(1, "", { status: t("collab.demo.reply.waiting", { name }) });
     case "reply-done":
       return base(1, t("collab.demo.reply.body", { name }), { title: t("collab.demo.reply.title", { name }), action: "next" });
+    case "associate":
+      return base(2, t("collab.demo.associate.body"));
     case "ask-compose":
-      return base(2, t("collab.demo.ask.compose"));
+      return base(3, t("collab.demo.ask.compose"));
     case "ask-waiting":
-      return base(2, "", {
+      return base(3, "", {
         status: state.askDelivered
           ? t("collab.demo.ask.returned", { name })
           : t("collab.demo.ask.sent", { name })
       });
     case "ask-done":
-      return base(2, t("collab.demo.ask.body", { name }), { title: t("collab.demo.ask.title"), action: "next" });
+      return base(3, t("collab.demo.ask.body", { name }), { title: t("collab.demo.ask.title"), action: "next" });
     case "settings-open":
-      return base(3, t("collab.demo.settings.body"));
+      return base(4, t("collab.demo.settings.body"));
     case "settings-assist":
-      return base(3, t("collab.demo.assist.body"));
+      return base(4, t("collab.demo.assist.body"));
     case "help-waiting":
-      return base(3, "", { status: t("collab.demo.help.incoming", { name }) });
+      return base(4, "", { status: t("collab.demo.help.incoming", { name }) });
     case "help-dialog":
-      return base(3, t("collab.demo.dialog.body"));
+      return base(4, t("collab.demo.dialog.body"));
     case "help-running":
-      return base(3, "", { status: t("collab.demo.running") });
+      return base(4, "", { status: t("collab.demo.running", { name }) });
     case "help-done":
-      return base(3, t("collab.demo.help.body", { name }), { title: t("collab.demo.help.title", { name }), action: "done" });
+      return base(4, t("collab.demo.help.body", { name }), { title: t("collab.demo.help.title", { name }), action: "done" });
     case "help-rejected":
-      return base(3, t("collab.demo.rejected.body", { name }), { title: t("collab.demo.rejected.title"), action: "done" });
+      return base(4, t("collab.demo.rejected.body", { name }), { title: t("collab.demo.rejected.title"), action: "done" });
     case "complete":
     default:
-      return base(3, "");
+      return base(4, "");
   }
 }
 
 /** 哪几个子状态可以跳过这一步：出结果之后的「下一步」不是跳过的地方。 */
 export function demoGuideSkippable(phase: DemoGuidePhase): boolean {
-  // 建项目之前没有可跳过的内容：不建项目就没有后面的演示。
-  if (phase === "create-project") return false;
+  // 建项目之前没有可跳过的内容：不建项目就没有后面的演示；加入提示窗也不是一步。
+  if (phase === "create-project" || phase === "joined") return false;
   return phase !== "reply-done" && phase !== "ask-done" && phase !== "help-done" && phase !== "help-rejected" && phase !== "complete";
 }
 
@@ -115,6 +124,8 @@ export function CollabDemoGuideOverlay(props: {
   onRetry: () => void;
   onCloseComplete: () => void;
   onInvite: () => void;
+  /** 「{name}加入了项目」那个提示窗点了「开始体验」。 */
+  onJoined: () => void;
 }) {
   const { t } = useTranslation();
   const { state } = props;
@@ -129,6 +140,8 @@ export function CollabDemoGuideOverlay(props: {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const target = demoGuideTarget(state.phase);
   const visible = state.status === "active" && state.phase !== "complete";
+  /** 要画亮区与说明卡的阶段：加入提示窗自带遮罩，不是它。 */
+  const masking = visible && state.phase !== "joined";
 
   /** 量一次亮区与描边，`key` 用来判断位置有没有变。 */
   const measure = useCallback((): { layout: { hole: Rect; stroke: Rect | null; viewport: Viewport } | null; key: string } => {
@@ -139,7 +152,9 @@ export function CollabDemoGuideOverlay(props: {
     const viewport = rootRect && rootRect.width > 0 && rootRect.height > 0
       ? { width: rootRect.width, height: rootRect.height }
       : { width: window.innerWidth, height: window.innerHeight };
-    const region = document.querySelector<HTMLElement>(`[data-demo-guide="${target.region}"]`);
+    const region = document.querySelector<HTMLElement>(`[data-demo-guide="${target.region}"]`)
+      // 主锚点不在这一页（比如人在看板上，而执行中的协助条在任务页）时改用在的那一个。
+      ?? (target.fallback ? document.querySelector<HTMLElement>(`[data-demo-guide="${target.fallback}"]`) : null);
     if (!region) return { layout: null, key: "none" };
     const regionRect = region.getBoundingClientRect();
     if (!rectVisible(regionRect, viewport)) return { layout: null, key: "none" };
@@ -152,7 +167,7 @@ export function CollabDemoGuideOverlay(props: {
       : "-");
     const key = `${rectKey(hole)}|${rectKey(strokeRect)}|${viewport.width}x${viewport.height}`;
     return { layout: { hole, stroke: strokeRect, viewport }, key };
-  }, [target.region, target.stroke]);
+  }, [target.region, target.stroke, target.fallback]);
 
   /**
    * 跟着目标走：侧滑、缩放、居中补高这些入场过程里每帧位置都不一样，只量一次必然画偏。
@@ -160,7 +175,7 @@ export function CollabDemoGuideOverlay(props: {
    * 元素晚一步出现也一样，下一帧就画出来。
    */
   useEffect(() => {
-    if (!visible) {
+    if (!masking) {
       setLayout(null);
       return undefined;
     }
@@ -177,12 +192,12 @@ export function CollabDemoGuideOverlay(props: {
     };
     frame = window.requestAnimationFrame(step);
     return () => window.cancelAnimationFrame(frame);
-  }, [visible, measure, state.phase, measureTick]);
+  }, [masking, measure, state.phase, measureTick]);
 
   // 滚动与窗口缩放本身也被每帧的测量覆盖；留着这几个监听是让「该重新量了」这件事有个明确出处，
   // 将来若把测量改成按需触发，它们就是触发点。
   useEffect(() => {
-    if (!visible) return undefined;
+    if (!masking) return undefined;
     const bump = () => setMeasureTick((tick) => tick + 1);
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(bump);
     observer?.observe(document.documentElement);
@@ -197,7 +212,7 @@ export function CollabDemoGuideOverlay(props: {
       window.removeEventListener("resize", bump);
       window.removeEventListener("scroll", bump, true);
     };
-  }, [visible]);
+  }, [masking]);
 
   // 换步骤时卡片高度会变：量一次，避免它压到亮区或出窗口。
   useLayoutEffect(() => {
@@ -226,6 +241,12 @@ export function CollabDemoGuideOverlay(props: {
               <li className={styles.doneItem}>
                 <Check size={15} className={styles.doneMark} aria-hidden="true" />
                 <span>{t("collab.demo.complete.task", { name: state.memberName })}</span>
+              </li>
+            ) : null}
+            {state.done.associate ? (
+              <li className={styles.doneItem}>
+                <Check size={15} className={styles.doneMark} aria-hidden="true" />
+                <span>{t("collab.demo.complete.associate")}</span>
               </li>
             ) : null}
             {state.done.ask ? (
@@ -258,13 +279,33 @@ export function CollabDemoGuideOverlay(props: {
 
   if (!visible) return null;
 
+  if (!visible) return null;
+
+  // 演示开始：先一张居中的「{name}加入了项目」，点「开始体验」才出现第一步的蒙版。
+  if (state.phase === "joined") {
+    return (
+      <div className={styles.joinLayer} role="dialog" aria-modal="true" aria-label={t("collab.demo.joined.body", { name: state.memberName })}>
+        <div className={styles.joinCard} data-demo-join="">
+          <img className={styles.joinLogo} src={memmyAppIconUrl} alt="" aria-hidden="true" />
+          <p className={styles.joinText}>{t("collab.demo.joined.body", { name: state.memberName })}</p>
+          <button type="button" className={styles.joinAction} onClick={props.onJoined}>
+            {t("collab.demo.joined.start")}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!layout) {
     // 锚点还没到位或还没量出位置：先只摆一个空的容器，量尺寸用的就是它。
     return <div ref={rootRef} className={styles.root} />;
   }
 
   const { hole, stroke, viewport } = layout;
-  const placement = cardPlacement(hole, viewport, cardHeight, { hasStroke: stroke !== null });
+  const placement = cardPlacement(hole, viewport, cardHeight, {
+    hasStroke: stroke !== null,
+    reserveBottom: target.cardBottomReserve ?? 0
+  });
   // 亮区几乎占满窗口时（对话区就是这种情况）卡片只能压在它上面：这里再夹一次，保证不出窗口。
   const cardTop = Math.max(8, Math.min(placement.top, viewport.height - cardHeight - 8));
   const cardLeft = Math.max(8, Math.min(placement.left, viewport.width - DEMO_GUIDE_CARD_WIDTH - 8));
@@ -336,7 +377,7 @@ export function CollabDemoGuideOverlay(props: {
           {card.step === null ? null : (
             <>
               <span className={styles.progress} aria-hidden="true">
-                {[1, 2, 3].map((step) => (
+                {DEMO_GUIDE_STEPS.map((step) => (
                   <span key={step} className={`${styles.progressBar}${step <= card.step! ? ` ${styles.progressBarOn}` : ""}`} />
                 ))}
               </span>

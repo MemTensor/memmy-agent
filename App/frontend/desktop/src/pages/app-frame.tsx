@@ -2107,6 +2107,8 @@ export function AppFrame(props: AppFrameProps) {
         route={state.navigation.currentPath}
         boardProjectId={boardProjectId}
         openBoard={openProjectBoard}
+        // 引导从看板回到那条任务：关联任务之后要接着在任务里发消息，当前会话仍是它。
+        openTaskPage={() => dispatch(appActions.navigate("/main"))}
         onNotice={showCollabNotice}
       />
       <CollabJoinProjectDialog

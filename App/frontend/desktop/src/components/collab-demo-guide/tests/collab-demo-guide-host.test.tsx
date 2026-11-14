@@ -43,8 +43,8 @@ function demoState(phase: DemoGuideState["phase"], overrides: Partial<DemoGuideS
     memberUserId: "9001",
     memberName: "小饭团",
     error: null,
-    done: { task: false, ask: false, help: false },
-    skipped: { task: false, ask: false, help: false },
+    done: { task: false, associate: false, ask: false, help: false },
+    skipped: { task: false, associate: false, ask: false, help: false },
     askDelivered: false,
     prefill: null,
     endReason: null,
@@ -91,16 +91,21 @@ describe("the demo guide host", () => {
   let container: HTMLDivElement;
   let root: Root;
 
-  async function mount(collab: CollabClient, state: DemoGuideState): Promise<void> {
+  async function mount(
+    collab: CollabClient,
+    state: DemoGuideState,
+    options: { route?: string; openBoard?: (localProjectId: string) => void; openTaskPage?: () => void } = {}
+  ): Promise<void> {
     setDemoGuideStateForTest(state, collab);
     await act(async () => {
       root.render(
         <I18nProvider language="zh-CN">
           <CollabDemoGuideHost
             collab={collab}
-            route="/main"
+            route={options.route ?? "/main"}
             boardProjectId={null}
-            openBoard={vi.fn()}
+            openBoard={options.openBoard ?? vi.fn()}
+            openTaskPage={options.openTaskPage ?? vi.fn()}
             onNotice={vi.fn()}
           />
         </I18nProvider>
@@ -187,6 +192,43 @@ describe("the demo guide host", () => {
     expect(getDemoGuideState().phase).toBe("help-running");
     expect(getDemoGuideState().error).toBe("Agent 没有完成这次执行");
     expect(getDemoGuideState().done.help).toBe(false);
+  });
+
+  it("opens the walkthrough with the join notice and waits for the person", async () => {
+    await mount(client({}), demoState("joined"));
+    // 先出现的是那张居中的提示窗：有昵称、只有一个「开始体验」，没有跳过。
+    expect(document.body.textContent).toContain("小饭团加入了项目，开始一起协作吧");
+    expect(document.body.textContent).not.toContain("跳过这一步");
+    expect(getDemoGuideState().phase).toBe("joined");
+
+    const start = Array.from(document.querySelectorAll("button")).find((entry) => entry.textContent?.includes("开始体验"));
+    await act(async () => start?.click());
+    // 点完才进第一步；第一步的蒙版此时才出现。
+    expect(getDemoGuideState().phase).toBe("task-row");
+  });
+
+  it("goes back to the board for the link-a-task step", async () => {
+    const openBoard = vi.fn();
+    await mount(client({}), demoState("associate"), { openBoard });
+    // 关联任务按钮在看板上，人这时还在任务页：先回看板。
+    expect(openBoard).toHaveBeenCalledWith("local-1");
+  });
+
+  it("returns to the task once the person is done linking a task", async () => {
+    const openTaskPage = vi.fn();
+    await mount(client({}), demoState("ask-compose"), { route: "/collab", openTaskPage });
+    // 请成员协助要回到那条任务里发消息（看板没有输入框）。
+    expect(openTaskPage).toHaveBeenCalled();
+  });
+
+  it("drops back on the board once the completion dialog is closed", async () => {
+    const openBoard = vi.fn();
+    await mount(client({}), demoState("complete", { status: "complete", done: { task: true, associate: true, ask: true, help: true } }), { openBoard });
+    const finish = Array.from(document.querySelectorAll("button")).find((entry) => entry.textContent?.trim() === "完成");
+    await act(async () => finish?.click());
+    // 第四步是在任务页里做完的：关掉完成弹窗回到这个项目的看板，两条记录留在眼前。
+    expect(openBoard).toHaveBeenCalledWith("local-1");
+    expect(getDemoGuideState().status).toBe("ended");
   });
 
   it("rereads the project list the moment the demo ends", async () => {

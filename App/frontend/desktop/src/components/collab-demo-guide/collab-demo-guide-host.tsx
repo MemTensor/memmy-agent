@@ -1,10 +1,11 @@
 /**
  * 引导的宿主：挂在应用根部，负责推进引导与调用云端的协作接口。
  *
- * 蒙版与卡片在 {@link CollabDemoGuideOverlay}；这里做三件事：
- * 1. 按当前子状态轮询协助（第二步等结果、第三步等请求与执行结果），不靠定时器猜步骤；
- * 2. 该换页面时换页面（第二步结束后回看板、允许协助后回到看板的「协助」）；
- * 3. 演示一停就叫云端结束，并在离开看板或关窗时尽力发送。
+ * 蒙版与卡片在 {@link CollabDemoGuideOverlay}；这里做四件事：
+ * 1. 按当前子状态轮询协助（第三步等结果、第四步等请求与执行结果），不靠定时器猜步骤；
+ * 2. 该换页面时换页面（第一步做完回看板「关联任务」、关联之后回那条任务、请成员协助前回看板）；
+ * 3. 演示一停就叫云端结束，并在离开看板或关窗时尽力发送；
+ * 4. 完成弹窗关掉后把人放回这个项目的看板「协助」，两条记录都在眼前。
  */
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { CollabClient } from "../../api/collab-client.js";
@@ -40,6 +41,8 @@ export function CollabDemoGuideHost(props: {
   route: string;
   /** 打开某个本机项目的看板。 */
   openBoard: (localProjectId: string) => void;
+  /** 回对话页（当前那条任务）：关联任务之后要继续在任务里发消息。 */
+  openTaskPage: () => void;
   /** 当前开着的看板是哪个本机项目（不在看板时为空）：换到别的项目就算离开。 */
   boardProjectId: string | null;
   /** 一次性提示（如「体验已结束」）：引导跨页面，提示也由自己显示。 */
@@ -50,11 +53,13 @@ export function CollabDemoGuideHost(props: {
   /** 上层每次渲染都给新的函数：放进 ref，轮询不因此重启。 */
   const openBoardRef = useRef(props.openBoard);
   openBoardRef.current = props.openBoard;
+  const openTaskPageRef = useRef(props.openTaskPage);
+  openTaskPageRef.current = props.openTaskPage;
   const noticeRef = useRef(props.onNotice);
   noticeRef.current = props.onNotice;
   const collabRef = useRef(props.collab);
   collabRef.current = props.collab;
-  /** 第三步那条请求的 id：允许之后回到看板时要展开的就是它。 */
+  /** 第四步那条请求的 id：允许之后去那条任务，完成时回看板要展开的就是它。 */
   const helpThreadRef = useRef<string | null>(null);
   const helpSinceRef = useRef<number | null>(null);
   /** 第二步从「请求已发出」算起，等这么久没有那条请求就按失败处理。 */
@@ -109,7 +114,30 @@ export function CollabDemoGuideHost(props: {
     };
   }, [state.status]);
 
-  // 第二步结束后回到看板：下一步是从看板的项目设置开始。
+  // 换了页面才能继续：第一步做完回看板（关联任务在那里），关联之后回那条任务（发消息在那里）。
+  // 每个阶段只拉一次：人自己走开一下再回来，不至于被反复拽回去。
+  const navigatedPhaseRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (state.status !== "active") {
+      navigatedPhaseRef.current = null;
+      return;
+    }
+    if (state.phase === "associate") {
+      if (navigatedPhaseRef.current === "associate") return;
+      if (state.localProjectId && props.route !== "/collab") {
+        navigatedPhaseRef.current = "associate";
+        openBoardRef.current(state.localProjectId);
+      }
+      return;
+    }
+    // 第三步（请成员协助）要回到任务里发消息：从看板上过来时把对话页拉回来。
+    if (state.phase === "ask-compose" && props.route === "/collab" && navigatedPhaseRef.current !== "ask-compose") {
+      navigatedPhaseRef.current = "ask-compose";
+      openTaskPageRef.current();
+    }
+  }, [state.status, state.phase, state.localProjectId, props.route]);
+
+  // 第三步结束后回到看板：下一步是从看板的项目设置开始。
   useEffect(() => {
     if (state.status !== "active" || state.phase !== "settings-open") return;
     if (!state.localProjectId) return;
@@ -117,7 +145,7 @@ export function CollabDemoGuideHost(props: {
     openBoardRef.current(state.localProjectId);
   }, [state.phase, state.status, state.localProjectId, props.route]);
 
-  // 第二步等结果、第三步等请求：按固定间隔读一次，拿到结果就推进。
+  // 第三步等结果、第四步等请求：按固定间隔读一次，拿到结果就推进。
   useEffect(() => {
     if (state.status !== "active" || !props.collab) return undefined;
     const phase = state.phase;
@@ -128,7 +156,7 @@ export function CollabDemoGuideHost(props: {
     const memberUserId = state.memberUserId;
     let cancelled = false;
 
-    /** 第二步：本项目里由我发起、执行人是演示成员的那次协助有了结果。 */
+    /** 第三步：本项目里由我发起、执行人是演示成员的那次协助有了结果。 */
     const readAskOutcome = async () => {
       const listing = await client.assistThreads(projectId);
       const thread = listing.threads.find((item) => (
@@ -154,7 +182,7 @@ export function CollabDemoGuideHost(props: {
       }
     };
 
-    /** 第三步：演示成员发来的那条请求，以及它的执行结果。 */
+    /** 第四步：演示成员发来的那条请求，以及它的执行结果。 */
     const readHelp = async () => {
       const listing = await client.assistThreads(projectId);
       const thread = listing.threads.find((item) => item.executor.mine && item.requester.userId === memberUserId);
@@ -164,8 +192,11 @@ export function CollabDemoGuideHost(props: {
       if (!latest) return;
       if (phase === "help-dialog") {
         if (latest.status === "running" || latest.status === "confirm") {
-          // 「允许」之后就回到看板的「协助」，展开这一次。
           dispatchDemoGuide({ type: "help-decided", allow: true });
+          // 演示里允许之后要进那条 Memmy 任务（由协助宿主打开，它才知道任务 id）：
+          // 这里不再把人按在看板的「协助」上。
+          if (isDemoGuideActive()) return;
+          // 由外部 Agent 执行时没有 Memmy 任务：回看板展开这一次。
           requestAssistFocus({ projectId, threadId: thread.threadId });
           if (state.localProjectId) openBoardRef.current(state.localProjectId);
           return;
@@ -186,7 +217,7 @@ export function CollabDemoGuideHost(props: {
       }
     };
 
-    /** 第三步：等演示成员发来那个请求。 */
+    /** 第四步：等演示成员发来那个请求。 */
     const readHelpRequest = async () => {
       const inbox = await client.assistInbox();
       const found = inbox.requests.some((item) => item.requester.userId === memberUserId);
@@ -260,19 +291,29 @@ export function CollabDemoGuideHost(props: {
     <>
     <CollabDemoGuideOverlay
       state={state}
+      onJoined={() => dispatchDemoGuide({ type: "joined-confirmed" })}
       onNext={() => dispatchDemoGuide({
         type: "next",
-        prefill: state.phase === "reply-done" ? askPrefill() : undefined
+        // 第一步做完只是去关联任务，那句话等到关联完再填；关联完才轮到请成员协助。
+        prefill: state.phase === "reply-done" || state.phase === "associate" ? askPrefill() : undefined
       })}
       onSkip={() => dispatchDemoGuide({
         type: "skip",
-        prefill: state.phase === "task-row" || state.phase === "reader" || state.phase === "compose" || state.phase === "reply-waiting" || state.phase === "reply-done"
-          ? askPrefill()
-          : undefined
+        // 跳过关联任务就直接去请成员协助：那句话要跟着填上。
+        prefill: state.phase === "associate" ? askPrefill() : undefined
       })}
       onExit={() => void endDemoGuide("exited")}
       onRetry={() => dispatchDemoGuide({ type: "retry" })}
-      onCloseComplete={() => dispatchDemoGuide({ type: "close-complete" })}
+      onCloseComplete={() => {
+        // 完成弹窗关掉：回这个项目的看板「协助」，两条记录留在眼前（刚才是从任务页过来的）。
+        const localProjectId = state.localProjectId;
+        const projectId = state.projectId;
+        const threadId = helpThreadRef.current;
+        dispatchDemoGuide({ type: "close-complete" });
+        if (!localProjectId) return;
+        if (projectId && threadId) requestAssistFocus({ projectId, threadId });
+        openBoardRef.current(localProjectId);
+      }}
       onInvite={() => {
         requestDemoGuideInvite();
         if (state.localProjectId) openBoardRef.current(state.localProjectId);

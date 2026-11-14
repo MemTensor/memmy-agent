@@ -43,8 +43,8 @@ function activeState(phase: DemoGuideState["phase"]): DemoGuideState {
     memberUserId: "9001",
     memberName: "小饭团",
     error: null,
-    done: { task: false, ask: false, help: false },
-    skipped: { task: false, ask: false, help: false },
+    done: { task: false, associate: false, ask: false, help: false },
+    skipped: { task: false, associate: false, ask: false, help: false },
     askDelivered: false,
     prefill: null,
     endReason: null,
@@ -102,6 +102,7 @@ describe("demo guide overlay tracking", () => {
         <I18nProvider language="zh-CN">
           <CollabDemoGuideOverlay
             state={activeState(phase)}
+            onJoined={vi.fn()}
             onNext={vi.fn()}
             onSkip={vi.fn()}
             onExit={vi.fn()}
@@ -181,6 +182,7 @@ describe("demo guide overlay tracking", () => {
         <I18nProvider language="zh-CN">
           <CollabDemoGuideOverlay
             state={{ ...activeState("create-project"), projectId: null, localProjectId: null, memberUserId: null, memberName: "" }}
+            onJoined={vi.fn()}
             onNext={vi.fn()}
             onSkip={vi.fn()}
             onExit={vi.fn()}
@@ -202,6 +204,40 @@ describe("demo guide overlay tracking", () => {
     expect(card?.textContent).not.toContain("下一步");
     // 还没有「第几步」：进度条与步骤名都不出现。
     expect(card?.textContent).not.toContain("接着成员的任务做");
+  });
+
+  it("writes four steps and lights only the link-a-task button on the second one", async () => {
+    const associate = document.createElement("button");
+    associate.setAttribute("data-demo-guide", "board-associate");
+    stubRect(associate, () => rect({ left: 1060, top: 250, width: 92, height: 28 }));
+    await act(async () => {
+      document.body.append(associate);
+    });
+    await mount("associate");
+
+    // 描边正好包住这个按钮：它是这一步唯一可点的控件。
+    expect(strokeOf()).toEqual({ left: 1057, top: 247, width: 98, height: 34 });
+    const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
+    expect(card?.textContent).toContain("2 / 4");
+    expect(card?.textContent).toContain("关联已有的任务");
+    expect(card?.textContent).toContain("也能关联进项目");
+    // 这一步不打开关联弹窗，所以卡片上只有一句说明与「跳过这一步」。
+    expect(card?.textContent).not.toContain("下一步");
+  });
+
+  it("stands in the task itself on the last step and names who gets the result", async () => {
+    const task = document.createElement("div");
+    task.setAttribute("data-demo-guide", "assist-task");
+    stubRect(task, () => rect({ left: 100, top: 60, width: 1000, height: 620 }));
+    await act(async () => {
+      document.body.append(task);
+    });
+    await mount("help-running");
+
+    // 人在那条任务里，卡片说清结果会发给谁；第四步的亮区就是这个任务页。
+    expect(holeOf()).toEqual({ left: 94, top: 54, right: 1106, bottom: 686 });
+    expect(document.body.textContent).toContain("4 / 4");
+    expect(document.body.textContent).toContain("结果会发给小饭团");
   });
 
   it("waits for the target instead of drawing an overlay over nothing", async () => {
