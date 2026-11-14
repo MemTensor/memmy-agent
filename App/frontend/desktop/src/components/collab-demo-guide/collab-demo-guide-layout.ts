@@ -129,7 +129,10 @@ export interface CardPlacement {
   arrow: { side: "left" | "right" | "top" | "bottom"; offset: number };
 }
 
-export const DEMO_GUIDE_CARD_WIDTH = 296;
+/** 常规说明卡宽：单行放得下「1 / 3 · 接着成员的任务做」这类短标题，不被压成两行。 */
+export const DEMO_GUIDE_CARD_WIDTH = 340;
+/** 带对话或任务示意的说明卡宽一档：示意图不挤。 */
+export const DEMO_GUIDE_CARD_WIDTH_WIDE = 400;
 const CARD_GAP = 14;
 const CARD_MIN_HEIGHT = 150;
 
@@ -140,9 +143,11 @@ export function cardPlacement(
   hole: Rect,
   viewport: Viewport,
   cardHeight: number = CARD_MIN_HEIGHT,
-  options: { hasStroke?: boolean; reserveBottom?: number } = {}
+  options: { hasStroke?: boolean; reserveBottom?: number; cardWidth?: number } = {}
 ): CardPlacement {
   const height = Math.max(CARD_MIN_HEIGHT, cardHeight);
+  // 加宽那档自己把宽度交进来：贴边时按它的实际宽度算，卡片才不会出窗口。
+  const width = options.cardWidth ?? DEMO_GUIDE_CARD_WIDTH;
   const spaceRight = viewport.width - (hole.left + hole.width) - CARD_GAP - EDGE_MARGIN;
   const spaceLeft = hole.left - CARD_GAP - EDGE_MARGIN;
   const spaceBelow = viewport.height - (hole.top + hole.height) - CARD_GAP - EDGE_MARGIN;
@@ -151,7 +156,7 @@ export function cardPlacement(
 
   const centeredTop = (top: number) => Math.max(EDGE_MARGIN, Math.min(top, viewport.height - height - EDGE_MARGIN));
 
-  if (spaceRight >= DEMO_GUIDE_CARD_WIDTH) {
+  if (spaceRight >= width) {
     const top = centeredTop(hole.top + hole.height / 2 - height / 2);
     return {
       left: hole.left + hole.width + CARD_GAP,
@@ -159,22 +164,22 @@ export function cardPlacement(
       arrow: { side: "left", offset: Math.max(18, Math.min(hole.top + hole.height / 2 - top - 6, height - 30)) }
     };
   }
-  if (spaceLeft >= DEMO_GUIDE_CARD_WIDTH) {
+  if (spaceLeft >= width) {
     const top = centeredTop(hole.top + hole.height / 2 - height / 2);
     return {
-      left: hole.left - CARD_GAP - DEMO_GUIDE_CARD_WIDTH,
+      left: hole.left - CARD_GAP - width,
       top,
       arrow: { side: "right", offset: Math.max(18, Math.min(hole.top + hole.height / 2 - top - 6, height - 30)) }
     };
   }
-  const left = Math.max(EDGE_MARGIN, Math.min(hole.left + hole.width / 2 - DEMO_GUIDE_CARD_WIDTH / 2, viewport.width - DEMO_GUIDE_CARD_WIDTH - EDGE_MARGIN));
+  const left = Math.max(EDGE_MARGIN, Math.min(hole.left + hole.width / 2 - width / 2, viewport.width - width - EDGE_MARGIN));
   // 亮区本身就是一大片（对话区、看板）：说明卡没有要点着谁，放在这块区域的左下角最稳，
   // 也不会像贴在边上那样被窗口底部切掉。
   if (!options.hasStroke && hole.height >= EDGE_MARGIN * 2 + height + 32) {
     // 底部有要看的行（如任务页的「结果已发给谁」）时再往上让一让。
     const reserveBottom = options.reserveBottom ?? 0;
     return {
-      left: Math.max(EDGE_MARGIN, Math.min(hole.left + 20, viewport.width - DEMO_GUIDE_CARD_WIDTH - EDGE_MARGIN)),
+      left: Math.max(EDGE_MARGIN, Math.min(hole.left + 20, viewport.width - width - EDGE_MARGIN)),
       top: Math.max(EDGE_MARGIN, hole.top + hole.height - height - 20 - reserveBottom),
       arrow: { side: "bottom", offset: 22 }
     };

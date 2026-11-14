@@ -54,7 +54,7 @@ describe("demo guide layout", () => {
     // 右侧放不下就贴到左边，箭头反过来指向亮区。
     const beside = cardPlacement(rightEdge, viewport, 180);
     expect(beside.arrow.side).toBe("right");
-    expect(beside.left + 296).toBeLessThanOrEqual(rightEdge.left);
+    expect(beside.left + DEMO_GUIDE_CARD_WIDTH).toBeLessThanOrEqual(rightEdge.left);
     const wide = { left: 100, top: 300, width: 1000, height: 120 };
     const below = cardPlacement(wide, { width: 1200, height: 900 }, 180);
     expect(below.arrow.side).toBe("top");
