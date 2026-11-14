@@ -17,7 +17,17 @@ const ProjectSchema = z.object({
   /**
    * 项目指令全文，成员只读。早于该字段的后端不返回，按空指令处理，避免整份列表因此读不出来。
    */
-  instructions: z.string().nullish().transform((value) => value ?? "")
+  instructions: z.string().nullish().transform((value) => value ?? ""),
+  /**
+   * 新手引导的演示：只有演示进行中的项目带它。云端给 `null` / 不返回时按普通项目处理，
+   * 桌面端不自己判断「是不是演示项目」，也不认任何写死的账号或昵称。
+   */
+  demo: z.object({
+    active: z.boolean(),
+    memberUserId: z.string(),
+    memberName: z.string(),
+    step: z.string().nullish().transform((value) => value ?? null)
+  }).nullish().transform((value) => (value && value.active ? value : null))
 });
 
 /** 项目配置里的知识库：只有引用，名字与「是不是本人关联的」由云端给。 */
@@ -190,7 +200,9 @@ const MemberSchema = z.object({
   role: RoleSchema,
   /** The signed-in person, labelled「（你）」. */
   mine: z.boolean(),
-  joinedAt: z.string().nullable()
+  joinedAt: z.string().nullable(),
+  /** 演示成员那一行为 true：成员列表据此显示「官方」标记，不认 userId 或昵称。 */
+  demo: z.boolean().nullish().transform((value) => value ?? false)
 });
 const JoinRequestSchema = z.object({
   userId: z.string(),
@@ -226,6 +238,8 @@ const JoinResultSchema = z.object({
 });
 
 export type CollabProject = z.infer<typeof ProjectSchema>;
+/** 项目里的演示：跟随项目视图返回，`active` 为假时后端给 null。 */
+export type CollabDemo = z.infer<typeof ProjectSchema>["demo"];
 
 /**
  * 停止共享时背景与规范的落点：`saved` 已写成本机项目的背景与规范（以云端为准，覆盖本机旧内容），
@@ -591,8 +605,15 @@ export interface CollabClient {
     /** 本人还能创建多少个在线项目，由后端给出上限；旧后端不返回。 */
     maxOwnedProjects?: number;
   }>;
-  /** Creates the cloud project and returns the directory its tasks run in, absent on a backend without it. */
-  createProject(name: string, directory?: string): Promise<{ project: CollabProject; localDirectory?: string }>;
+  /**
+   * Creates the cloud project and returns the directory its tasks run in, absent on a backend without it.
+   * `demo` 只在「本人第一次创建共享项目」时带：是否真的开始演示由云端决定，传了也不代表一定演示。
+   */
+  createProject(name: string, directory?: string, options?: { demo?: boolean }): Promise<{ project: CollabProject; localDirectory?: string }>;
+  /** 演示进行中的心跳与步骤上报：云端按它判断演示还活着。旧后端没有这两个接口。 */
+  demoHeartbeat?(projectId: string, step: "1" | "2" | "3" | "finish"): Promise<{ demo: CollabDemo }>;
+  /** 结束演示：云端立即把演示成员移出项目；幂等，发不出去靠云端心跳超时兜底。 */
+  demoEnd?(projectId: string, reason: "finished" | "exited" | "skipped" | "left"): Promise<{ ok: boolean }>;
   /** Records which local Memmy project runs this online project's tasks. */
   bindLocalProject(projectId: string, localProjectId: string): Promise<void>;
   /**
@@ -778,12 +799,35 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
       };
     },
 
-    async createProject(name, directory) {
+    async createProject(name, directory, options) {
       return requestJson({
         config,
         path: "/api/collab/projects",
         schema: CreateProjectResponseSchema,
-        body: { name, ...(directory ? { directory } : {}) }
+        body: {
+          name,
+          ...(directory ? { directory } : {}),
+          ...(options?.demo ? { demo: true } : {})
+        }
+      });
+    },
+
+    async demoHeartbeat(projectId, step) {
+      const result = await requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/demo/heartbeat`,
+        schema: z.object({ demo: ProjectSchema.shape.demo }),
+        body: { step }
+      });
+      return { demo: result.demo };
+    },
+
+    async demoEnd(projectId, reason) {
+      return requestJson({
+        config,
+        path: `/api/collab/projects/${encodeURIComponent(projectId)}/demo/end`,
+        schema: z.object({ ok: z.boolean() }),
+        body: { reason }
       });
     },
 

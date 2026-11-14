@@ -175,6 +175,9 @@ export interface CollabServiceOptions {
  */
 export type CollabInstructionsHandover = "saved" | "none";
 
+/** 结束演示的原因：用户走完、退出引导、三步都跳过，或离开了演示所在的页面。 */
+export type DemoEndReason = "finished" | "exited" | "skipped" | "left";
+
 export interface CollabProject {
   id: string;
   name: string;
@@ -196,6 +199,19 @@ export interface CollabProject {
    * 发起方的 Agent 据此知道在哪个项目里请谁。
    */
   assistReceivers: Array<{ userId: string; name: string; mine: boolean }>;
+  /**
+   * 新手引导的演示：只有演示进行中的项目带它。云端给 null / 不返回时按普通项目处理，
+   * 桌面端不自己判断「是不是演示项目」，也不认任何写死的账号或昵称。
+   */
+  demo: CollabDemoView | null;
+}
+
+/** 项目里的演示成员与当前步骤。 */
+export interface CollabDemoView {
+  active: boolean;
+  memberUserId: string;
+  memberName: string;
+  step: string | null;
 }
 
 /** 项目关联的一个知识库：只是引用，名字随知识库改名而变。 */
@@ -339,6 +355,8 @@ export interface CollabMember {
   joinedAt: string | null;
   /** 这位成员是否在这个项目里接收协助请求；旧云端不返回时为 false。 */
   acceptAssist: boolean;
+  /** 演示成员那一行为 true：成员列表据此显示「官方」标记，不认 userId 或昵称。 */
+  demo: boolean;
 }
 
 export interface CollabJoinRequest {
@@ -500,7 +518,15 @@ export interface CollabService {
    * Creates the cloud project and prepares the directory its tasks run in: the person's chosen folder, or a
    * managed folder when none was chosen, so a task always has a working directory.
    */
-  createProject(name: string, directory?: string): Promise<{ project: CollabProject; localDirectory: string }>;
+  /**
+   * Creates the cloud project. `demo` 只在桌面端认为「本人第一次创建共享项目」时带：
+   * 是否真的开始演示由云端决定，传了也不代表一定演示。
+   */
+  createProject(name: string, directory?: string, options?: { demo?: boolean }): Promise<{ project: CollabProject; localDirectory: string }>;
+  /** 演示期间的心跳与步骤上报；返回的项目视图里演示已结束时 `demo` 为 null。 */
+  demoHeartbeat(projectId: string, step: "1" | "2" | "3" | "finish"): Promise<{ demo: CollabDemoView | null }>;
+  /** 结束演示：云端立即把演示成员移出项目；幂等。 */
+  demoEnd(projectId: string, reason: DemoEndReason): Promise<{ ok: true }>;
   /** Records which local Memmy project runs this online project's tasks. */
   bindLocalProject(projectId: string, localProjectId: string): Promise<{ ok: true }>;
   /** 云端项目在这台电脑上对应的 Memmy 项目；还没绑定时返回 null。成员协助由 Memmy 执行时把任务建在这里。 */
@@ -1803,8 +1829,11 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       };
     },
 
-    async createProject(name, directory) {
-      const data = await cloud("/projects", { method: "POST", body: { name } });
+    async createProject(name, directory, options) {
+      const data = await cloud("/projects", {
+        method: "POST",
+        body: { name, ...(options?.demo ? { demo: true } : {}) }
+      });
       const project = toProject(data.project);
       const localDirectory = await prepareWorkingDirectory(onlineWorkdirRoot, project.name, directory);
       const account = requireAccount();
@@ -2106,6 +2135,19 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         members: view.members.map((member) => member.name)
       });
       return view;
+    },
+
+    async demoHeartbeat(projectId, step) {
+      const data = await cloud(`/projects/${encodeURIComponent(projectId)}/demo/heartbeat`, {
+        method: "POST",
+        body: { step }
+      });
+      return { demo: toDemo(data.demo) };
+    },
+
+    async demoEnd(projectId, reason) {
+      await cloud(`/projects/${encodeURIComponent(projectId)}/demo/end`, { method: "POST", body: { reason } });
+      return { ok: true as const };
     },
 
     async createInvite(projectId) {
@@ -2915,10 +2957,28 @@ function toProject(raw: unknown): CollabProject {
     // A cloud from before instructions existed omits the field; the board then shows the empty state.
     instructions: text(project.instructions).trim(),
     acceptAssist: project.acceptAssist === true,
+    demo: toDemo(project.demo),
     assistReceivers: list(project.assistReceivers).map((raw) => {
       const member = record(raw);
       return { userId: text(member.userId), name: text(member.name), mine: member.mine === true };
     }).filter((member) => member.userId)
+  };
+}
+
+/**
+ * 演示状态：只有 `active` 为真的才算。旧云端没有这个字段、或演示已结束时给 null，
+ * 桌面端就按普通项目处理。
+ */
+function toDemo(raw: unknown): CollabDemoView | null {
+  const demo = record(raw);
+  if (demo.active !== true) return null;
+  const memberUserId = text(demo.memberUserId);
+  if (!memberUserId) return null;
+  return {
+    active: true,
+    memberUserId,
+    memberName: text(demo.memberName),
+    step: nullableText(demo.step)
   };
 }
 
@@ -2941,7 +3001,8 @@ function toMember(raw: unknown): CollabMember {
     role: toRole(member.role),
     mine: member.mine === true,
     joinedAt: nullableText(member.joinedAt),
-    acceptAssist: member.acceptAssist === true
+    acceptAssist: member.acceptAssist === true,
+    demo: member.demo === true
   };
 }
 

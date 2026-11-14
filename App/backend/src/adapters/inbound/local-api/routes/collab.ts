@@ -2,7 +2,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { MAX_COLLAB_INSTRUCTIONS_CHARS } from "@memmy/local-api-contracts";
-import { CollabError, sinceWindowMs, type CollabService } from "../../../../services/collab-service.js";
+import { CollabError, sinceWindowMs, type CollabService, type DemoEndReason } from "../../../../services/collab-service.js";
 import type { CollabAgentAccessService } from "../../../../services/collab-agent-access-service.js";
 import { connectCollabAgent, removeCollabAgent } from "../../../../services/collab-added-agents.js";
 import { withErrorEnvelope } from "../../../../services/error-envelope.js";
@@ -22,8 +22,16 @@ const KnowledgeLinkSchema = z.object({ baseId: BaseIdSchema }).strict();
 const CreateProjectSchema = z.object({
   name: z.string().trim().min(1, "请填写项目名称").max(20, "项目名称不超过 20 个字"),
   /** The folder the person picked for the project's tasks; a managed folder is used when absent. */
-  directory: z.string().trim().min(1).max(4_000).optional()
+  directory: z.string().trim().min(1).max(4_000).optional(),
+  /**
+   * 新手引导的演示：只在桌面端认为「本人第一次创建共享项目」时带。是否真的演示由云端判断，
+   * 不能演示时照常只建项目。
+   */
+  demo: z.boolean().optional()
 }).strict();
+/** 演示的心跳与结束：步骤只用于排查，结束原因按约定取值。 */
+const DemoHeartbeatSchema = z.object({ step: z.enum(["1", "2", "3", "finish"]) }).strict();
+const DemoEndSchema = z.object({ reason: z.enum(["finished", "exited", "skipped", "left"]) }).strict();
 const BindProjectSchema = z.object({ localProjectId: z.string().min(1).max(200) }).strict();
 const WorkingDirectorySchema = z.object({
   /** Names the managed folder after the project instead of its generated id. */
@@ -169,7 +177,24 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
 
   app.post("/api/collab/projects", guard, withErrorEnvelope(async (request, reply) => {
     const input = CreateProjectSchema.parse(request.body ?? {});
-    return reply.send(await options.collab.createProject(input.name, input.directory));
+    return reply.send(await options.collab.createProject(
+      input.name,
+      input.directory,
+      input.demo === undefined ? undefined : { demo: input.demo }
+    ));
+  }));
+
+  // 新手引导的演示：演示期间每 30 秒一次心跳，步骤变化时立即补一次；结束时叫云端把演示成员移出项目。
+  app.post<{ Params: { projectId: string } }>("/api/collab/projects/:projectId/demo/heartbeat", guard, withErrorEnvelope(async (request, reply) => {
+    const projectId = ProjectIdSchema.parse((request.params as { projectId: string }).projectId);
+    const input = DemoHeartbeatSchema.parse(request.body ?? {});
+    return reply.send(await options.collab.demoHeartbeat(projectId, input.step));
+  }));
+
+  app.post<{ Params: { projectId: string } }>("/api/collab/projects/:projectId/demo/end", guard, withErrorEnvelope(async (request, reply) => {
+    const projectId = ProjectIdSchema.parse((request.params as { projectId: string }).projectId);
+    const input = DemoEndSchema.parse(request.body ?? {});
+    return reply.send(await options.collab.demoEnd(projectId, input.reason as DemoEndReason));
   }));
 
   // Projects created before binding existed, and tasks that lost their local project, get one on demand.
