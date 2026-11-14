@@ -2866,6 +2866,11 @@ function ProjectRow(props: {
   onNewTask: () => void;
 }) {
   const { t } = useTranslation();
+  // 新手引导的看板导览讲到「侧栏新建任务」时，亮的就是这一行右侧的「＋」：只有演示项目才算。
+  const demoState = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState);
+  const demoNewTaskAnchor = demoState.status === "active"
+    && demoState.phase === "tour-new-task"
+    && demoState.localProjectId === props.project.id;
   return (
     <div
       className={`app-frame-project-row${props.selected ? " app-frame-project-row--selected" : ""}`}
@@ -2930,6 +2935,7 @@ function ProjectRow(props: {
         <TaskIconButton
           label={t("appFrame.project.newTask")}
           tooltip={false}
+          demoGuideAnchor={demoNewTaskAnchor ? "sidebar-new-task" : undefined}
           onClick={props.onNewTask}
         >
           <MessageSquarePlus size={14} />
@@ -3220,6 +3226,8 @@ function TaskIconButton(props: {
   danger?: boolean;
   /** Floating tooltip; keep false for self-evident icons revealed on row hover. */
   tooltip?: boolean;
+  /** 新手引导的亮区锚点：只有被讲到的那一个按钮带它。 */
+  demoGuideAnchor?: string;
   children: ReactNode;
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
@@ -3233,6 +3241,7 @@ function TaskIconButton(props: {
     <button
       type="button"
       aria-label={props.label}
+      {...(props.demoGuideAnchor ? { "data-demo-guide": props.demoGuideAnchor } : {})}
       onClick={(event) => {
         event.stopPropagation();
         props.onClick(event);

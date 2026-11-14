@@ -2,8 +2,8 @@
  * 引导的宿主：挂在应用根部，负责推进引导与调用云端的协作接口。
  *
  * 蒙版与卡片在 {@link CollabDemoGuideOverlay}；这里做四件事：
- * 1. 按当前子状态轮询协助（第三步等结果、第四步等请求与执行结果），不靠定时器猜步骤；
- * 2. 该换页面时换页面（第一步做完回看板「关联任务」、关联之后回那条任务、请成员协助前回看板）；
+ * 1. 按当前子状态轮询协助（第二步等结果、第三步等请求与执行结果），不靠定时器猜步骤；
+ * 2. 该换页面时换页面（请成员协助前回那条任务、请完回看板的项目设置）；看板导览全程不换页；
  * 3. 演示一停就叫云端结束，并在离开看板或关窗时尽力发送；
  * 4. 完成弹窗关掉后把人放回这个项目的看板「协助」，两条记录都在眼前。
  */
@@ -12,6 +12,7 @@ import type { CollabClient } from "../../api/collab-client.js";
 import { requestAssistFocus } from "../../app/collab-assist-focus.js";
 import { requestDemoGuideInvite } from "../../app/collab-demo-guide-invite.js";
 import {
+  demoGuideStepNumberOf,
   dispatchDemoGuide,
   endDemoGuide,
   getDemoGuideState,
@@ -59,7 +60,7 @@ export function CollabDemoGuideHost(props: {
   noticeRef.current = props.onNotice;
   const collabRef = useRef(props.collab);
   collabRef.current = props.collab;
-  /** 第四步那条请求的 id：允许之后去那条任务，完成时回看板要展开的就是它。 */
+  /** 第三步那条请求的 id：允许之后去那条任务，完成时回看板要展开的就是它。 */
   const helpThreadRef = useRef<string | null>(null);
   const helpSinceRef = useRef<number | null>(null);
   /** 第二步从「请求已发出」算起，等这么久没有那条请求就按失败处理。 */
@@ -114,7 +115,8 @@ export function CollabDemoGuideHost(props: {
     };
   }, [state.status]);
 
-  // 换了页面才能继续：第一步做完回看板（关联任务在那里），关联之后回那条任务（发消息在那里）。
+  // 体验段才需要换页面：第一步（接着成员的任务做）在任务页里，第二步（请成员协助）要回任务发消息，
+  // 第三步从看板的项目设置开始。看板导览全程停在同一个看板上，不在这里换任何页面。
   // 每个阶段只拉一次：人自己走开一下再回来，不至于被反复拽回去。
   const navigatedPhaseRef = useRef<string | null>(null);
   useEffect(() => {
@@ -122,22 +124,14 @@ export function CollabDemoGuideHost(props: {
       navigatedPhaseRef.current = null;
       return;
     }
-    if (state.phase === "associate") {
-      if (navigatedPhaseRef.current === "associate") return;
-      if (state.localProjectId && props.route !== "/collab") {
-        navigatedPhaseRef.current = "associate";
-        openBoardRef.current(state.localProjectId);
-      }
-      return;
-    }
-    // 第三步（请成员协助）要回到任务里发消息：从看板上过来时把对话页拉回来。
+    // 第二步（请成员协助）要回到任务里发消息：从看板上过来时把对话页拉回来。
     if (state.phase === "ask-compose" && props.route === "/collab" && navigatedPhaseRef.current !== "ask-compose") {
       navigatedPhaseRef.current = "ask-compose";
       openTaskPageRef.current();
     }
   }, [state.status, state.phase, state.localProjectId, props.route]);
 
-  // 第三步结束后回到看板：下一步是从看板的项目设置开始。
+  // 第二步（请成员协助）结束后回到看板：下一步是从看板的项目设置开始。
   useEffect(() => {
     if (state.status !== "active" || state.phase !== "settings-open") return;
     if (!state.localProjectId) return;
@@ -145,7 +139,7 @@ export function CollabDemoGuideHost(props: {
     openBoardRef.current(state.localProjectId);
   }, [state.phase, state.status, state.localProjectId, props.route]);
 
-  // 第三步等结果、第四步等请求：按固定间隔读一次，拿到结果就推进。
+  // 第二步等结果、第三步等请求：按固定间隔读一次，拿到结果就推进。
   useEffect(() => {
     if (state.status !== "active" || !props.collab) return undefined;
     const phase = state.phase;
@@ -156,7 +150,7 @@ export function CollabDemoGuideHost(props: {
     const memberUserId = state.memberUserId;
     let cancelled = false;
 
-    /** 第三步：本项目里由我发起、执行人是演示成员的那次协助有了结果。 */
+    /** 第二步：本项目里由我发起、执行人是演示成员的那次协助有了结果。 */
     const readAskOutcome = async () => {
       const listing = await client.assistThreads(projectId);
       const thread = listing.threads.find((item) => (
@@ -182,7 +176,7 @@ export function CollabDemoGuideHost(props: {
       }
     };
 
-    /** 第四步：演示成员发来的那条请求，以及它的执行结果。 */
+    /** 第三步：演示成员发来的那条请求，以及它的执行结果。 */
     const readHelp = async () => {
       const listing = await client.assistThreads(projectId);
       const thread = listing.threads.find((item) => item.executor.mine && item.requester.userId === memberUserId);
@@ -217,7 +211,7 @@ export function CollabDemoGuideHost(props: {
       }
     };
 
-    /** 第四步：等演示成员发来那个请求。 */
+    /** 第三步：等演示成员发来那个请求。 */
     const readHelpRequest = async () => {
       const inbox = await client.assistInbox();
       const found = inbox.requests.some((item) => item.requester.userId === memberUserId);
@@ -284,7 +278,7 @@ export function CollabDemoGuideHost(props: {
     askSinceRef.current = null;
   }, [state.phase, state.error]);
 
-  // 第二步只预填用户看到的那一句话；执行提示在发送时单独追加给 Agent（见 home-page）。
+  // 第二句只预填用户看到的那一句话；执行提示在发送时单独追加给 Agent（见 home-page）。
   const askPrefill = () => t("collab.demo.prefill.ask", { name: state.memberName });
 
   return (
@@ -294,13 +288,13 @@ export function CollabDemoGuideHost(props: {
       onJoined={() => dispatchDemoGuide({ type: "joined-confirmed" })}
       onNext={() => dispatchDemoGuide({
         type: "next",
-        // 第一步做完只是去关联任务，那句话等到关联完再填；关联完才轮到请成员协助。
-        prefill: state.phase === "reply-done" || state.phase === "associate" ? askPrefill() : undefined
+        // 第一步做完就直接请成员协助：那句话在进入这一步时才填；看板导览段不预填任何东西。
+        prefill: state.phase === "reply-done" ? askPrefill() : undefined
       })}
       onSkip={() => dispatchDemoGuide({
         type: "skip",
-        // 跳过关联任务就直接去请成员协助：那句话要跟着填上。
-        prefill: state.phase === "associate" ? askPrefill() : undefined
+        // 跳过第一步就直接去请成员协助：那句话要跟着填上。导览段与后两步都不预填。
+        prefill: demoGuideStepNumberOf(state.phase) === 1 ? askPrefill() : undefined
       })}
       onExit={() => void endDemoGuide("exited")}
       onRetry={() => dispatchDemoGuide({ type: "retry" })}

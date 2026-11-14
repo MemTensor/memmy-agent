@@ -37,14 +37,21 @@ const TARGETS: Record<DemoGuidePhase, DemoGuideTarget> = {
   "create-project": { region: "create-project-submit", stroke: "create-project-submit", blockRest: false },
   // 加入提示窗自带遮罩，不用亮区；这一项只是为了让每个阶段都有目标。
   joined: { region: "board-main", stroke: null, blockRest: false },
+  // 看板导览：纯介绍，只亮区域、不描边、不接点击（`blockRest` 让亮区里也点不动）。
+  // 第一站是整个看板：把头部、工具条与任务列表一起亮出来。
+  "tour-board": { region: "board-main", stroke: null, blockRest: true },
+  "tour-header": { region: "board-header", stroke: null, blockRest: true },
+  "tour-tabs": { region: "board-tabs", stroke: null, blockRest: true },
+  // 「关联任务」这一步只亮给人看：不描边、点了也不打开弹窗、不写任何数据。
+  "tour-associate": { region: "board-associate", stroke: null, blockRest: true },
+  // 侧栏当前项目右侧的「＋」：亮给它，同样点不动。
+  "tour-new-task": { region: "sidebar-new-task", stroke: null, blockRest: true },
   "task-row": { region: "board-task-row", stroke: "board-task-row", blockRest: false },
   // 只读面板可以滚动阅读，但只有头部那个「继续任务」能点。
   reader: { region: "reader-panel", stroke: "reader-continue", blockRest: true },
   compose: { region: "composer", stroke: "composer-send", blockRest: true },
   "reply-waiting": { region: "conversation", stroke: null, blockRest: true },
   "reply-done": { region: "conversation", stroke: null, blockRest: true },
-  // 看板工具条上的「关联任务」：只亮它，点它就走完这一步（不打开关联弹窗）。
-  associate: { region: "board-associate", stroke: "board-associate", blockRest: false },
   "ask-compose": { region: "composer", stroke: "composer-send", blockRest: true },
   "ask-waiting": { region: "conversation", stroke: null, blockRest: true },
   "ask-done": { region: "conversation", stroke: null, blockRest: true },

@@ -9,6 +9,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { Check } from "lucide-react";
 import memmyAppIconUrl from "../../assets/memmy-app-icon.png";
 import {
+  demoGuideIsTourPhase,
   demoGuideStepNumberOf,
   type DemoGuidePhase,
   type DemoGuideState
@@ -107,6 +108,8 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
 export function demoGuideSkippable(phase: DemoGuidePhase): boolean {
   // 建项目之前没有可跳过的内容：不建项目就没有后面的演示；加入提示窗也不是一步。
   if (phase === "create-project" || phase === "joined") return false;
+  // 看板导览是纯介绍，只留「下一步」与「跳过引导」：没有「跳过这一步」。
+  if (demoGuideIsTourPhase(phase)) return false;
   return phase !== "reply-done" && phase !== "ask-done" && phase !== "help-done" && phase !== "help-rejected" && phase !== "complete";
 }
 

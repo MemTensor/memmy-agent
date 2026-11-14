@@ -7,18 +7,24 @@
  */
 import type { CollabClient } from "../api/collab-client.js";
 
-/** 引导的每个子状态。四个大步骤各自有若干子状态，卡片上的「1 / 4」由 {@link demoGuideStepNumberOf} 给出。 */
+/** 引导的每个子状态。
+ *
+ * 分两段：先是「看板导览」（`tour-*`，纯介绍，不让人操作），再是「动手体验」（三步，各自有若干子状态）。
+ * 体验段的「1 / 3」由 {@link demoGuideStepNumberOf} 给出，导览段没有进度可讲。
+ */
 export type DemoGuidePhase =
   // 建项目之前：新建弹窗刚打开，还没有云端项目，蒙版只亮「创建项目」。
   | "create-project"
-  // 演示刚开始：先弹一个「{name}加入了项目」的提示窗，点「开始体验」才进第一步的蒙版。
+  // 演示刚开始：先弹一个「{name}加入了项目」的提示窗，点「开始体验」才进看板导览。
   | "joined"
+  // 看板导览的五步：整个看板、项目名与成员、任务与协助两个 tab、工具条上的关联任务、侧栏新建任务。
+  // 全程停在同一个看板上，只亮给人看，不点任何东西，只留「下一步」与「跳过引导」。
+  | DemoGuideTourPhase
   | "task-row"
   | "reader"
   | "compose"
   | "reply-waiting"
   | "reply-done"
-  | "associate"
   | "ask-compose"
   | "ask-waiting"
   | "ask-done"
@@ -30,6 +36,48 @@ export type DemoGuidePhase =
   | "help-done"
   | "help-rejected"
   | "complete";
+
+/**
+ * 看板导览的五个子状态，按讲的顺序排。
+ *
+ * 这一段是纯介绍：只亮区域，遮罩挡住所有操作，页面上什么都不改。
+ */
+export const DEMO_GUIDE_TOUR_PHASES = [
+  /** 整个看板是做什么的。 */
+  "tour-board",
+  /** 项目名与成员：谁能看到这里。 */
+  "tour-header",
+  /** 「任务」与「协助」两个 tab。 */
+  "tour-tabs",
+  /** 工具条右侧的「关联任务」：把别的 Agent 里做过的工作带进来。 */
+  "tour-associate",
+  /** 侧栏当前项目右侧的「＋」：新建任务。 */
+  "tour-new-task"
+] as const;
+
+export type DemoGuideTourPhase = (typeof DEMO_GUIDE_TOUR_PHASES)[number];
+
+/** 这个子状态属于看板导览（纯介绍），还是动手体验。 */
+export function demoGuideIsTourPhase(phase: DemoGuidePhase): phase is DemoGuideTourPhase {
+  return (DEMO_GUIDE_TOUR_PHASES as readonly string[]).includes(phase);
+}
+
+/** 导览的第几步（从 0 起）；不在导览段时为 -1。 */
+export function demoGuideTourIndex(phase: DemoGuidePhase): number {
+  return (DEMO_GUIDE_TOUR_PHASES as readonly string[]).indexOf(phase);
+}
+
+/** 导览的最后一步：气泡上的主按钮写「开始体验」，点了才进体验的第一步。 */
+export function demoGuideStartsExperience(phase: DemoGuidePhase): boolean {
+  return phase === DEMO_GUIDE_TOUR_PHASES[DEMO_GUIDE_TOUR_PHASES.length - 1];
+}
+
+/** 导览的下一步；最后一步之后是体验的第一步，不在导览段时为 null。 */
+export function demoGuideNextTourPhase(phase: DemoGuidePhase): DemoGuidePhase | null {
+  const index = demoGuideTourIndex(phase);
+  if (index < 0) return null;
+  return DEMO_GUIDE_TOUR_PHASES[index + 1] ?? "task-row";
+}
 
 /** 引导的对外状态：进行中、完成弹窗、已结束。 */
 export type DemoGuideStatus = "active" | "complete" | "ended";
@@ -47,9 +95,9 @@ export interface DemoGuideState {
   /** 某一步出错时的原因（已本地化），卡片据此显示「这一步没有完成」。 */
   error: string | null;
   /** 用户实际走过的步骤：完成弹窗只列这些。 */
-  done: { task: boolean; associate: boolean; ask: boolean; help: boolean };
-  /** 四步里跳过过哪几步，用来判断「都跳过」。 */
-  skipped: { task: boolean; associate: boolean; ask: boolean; help: boolean };
+  done: { task: boolean; ask: boolean; help: boolean };
+  /** 三步里跳过过哪几步，用来判断「都跳过」。 */
+  skipped: { task: boolean; ask: boolean; help: boolean };
   /** 第二步的请求是否已经有结果回到了对话。 */
   askDelivered: boolean;
   /** 输入框要预填的那句话；`nonce` 变一次填一次，填过的再读不会重复填。 */
@@ -102,38 +150,38 @@ const IDLE: DemoGuideState = {
   memberUserId: null,
   memberName: "",
   error: null,
-  done: { task: false, associate: false, ask: false, help: false },
-  skipped: { task: false, associate: false, ask: false, help: false },
+  done: { task: false, ask: false, help: false },
+  skipped: { task: false, ask: false, help: false },
   askDelivered: false,
   prefill: null,
   endReason: null,
   cloudEnded: false
 };
 
-/** 一个子状态属于第几步：进度条与「1 / 4」按它算。 */
-export function demoGuideStepNumberOf(phase: DemoGuidePhase): 1 | 2 | 3 | 4 {
-  // 建项目之前的阶段还没有进度可讲：卡片上不出现进度条与「第几步」。
-  if (phase === "create-project") return 1;
-  // 加入提示窗还不是一步：它上面没有卡片，点完才进第一步。
-  if (phase === "joined") return 1;
+/**
+ * 一个子状态属于体验段的第几步：卡片上的「1 / 3」按它算。
+ *
+ * 建项目之前、加入提示窗与看板导览都还没有进度可讲，返回 null：卡片上不出现进度条，改用一个「介绍」标签。
+ */
+export function demoGuideStepNumberOf(phase: DemoGuidePhase): 1 | 2 | 3 | null {
+  // 建项目之前的阶段还没有进度可讲。
+  if (phase === "create-project") return null;
+  // 加入提示窗与看板导览都还不是一步：前者没有卡片，后者讲完才进第一步。
+  if (phase === "joined" || demoGuideIsTourPhase(phase)) return null;
   if (phase === "task-row" || phase === "reader" || phase === "compose" || phase === "reply-waiting" || phase === "reply-done") {
     return 1;
   }
-  if (phase === "associate") return 2;
-  if (phase === "ask-compose" || phase === "ask-waiting" || phase === "ask-done") return 3;
-  return 4;
+  if (phase === "ask-compose" || phase === "ask-waiting" || phase === "ask-done") return 2;
+  return 3;
 }
 
-/**
- * 心跳上报的步骤：云端只接受 `1`、`2`、`3` 与 `finish`，四步要压到这三个值上——
- * 前两步算 1，第三步算 2，第四步算 3。
- */
+/** 心跳上报的步骤：云端只接受 `1`、`2`、`3` 与 `finish`，与体验段的三步一一对应。 */
 export function demoGuideHeartbeatStep(phase: DemoGuidePhase): "1" | "2" | "3" | "finish" {
   if (phase === "complete") return "finish";
   const step = demoGuideStepNumberOf(phase);
-  if (step >= 4) return "3";
-  if (step === 3) return "2";
-  return "1";
+  // 还没有进入体验段（建项目之前、加入提示窗、看板导览）：都算在第一步之前。
+  if (step === null) return "1";
+  return String(step) as "1" | "2" | "3";
 }
 
 /**
@@ -172,7 +220,10 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
         memberName: event.input.memberName
       };
     case "joined-confirmed":
-      return state.status === "active" && state.phase === "joined" ? { ...state, phase: "task-row" } : state;
+      // 点「开始体验」先进看板导览：先看一圈看板是干什么的，再动手。
+      return state.status === "active" && state.phase === "joined"
+        ? { ...state, phase: DEMO_GUIDE_TOUR_PHASES[0] }
+        : state;
     case "task-opened":
       return state.status === "active" && state.phase === "task-row" ? { ...state, phase: "reader" } : state;
     case "task-continued":
@@ -196,23 +247,20 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
         return { ...state, phase: "reply-done", done: { ...state.done, task: true } };
       }
       if (state.phase === "ask-waiting" && state.askDelivered) {
-        return { ...state, phase: "ask-done", done: { ...state.done, ask: true } };
+        // 这一步完成就把那句话从状态里拿掉：之后即使任务页重新挂载，也不会再把旧的那句填回输入框。
+        return { ...state, phase: "ask-done", done: { ...state.done, ask: true }, prefill: null };
       }
       return state;
     case "next":
       if (state.status !== "active") return state;
-      // 第一步做完：下一站是看板上的「关联任务」，它的按钮由人自己点（见 collab-page）。
-      // 预填留着不动：换一句时 nonce 要接着往上走，输入框才知道该重新填一次。
-      if (state.phase === "reply-done") return { ...state, phase: "associate", error: null };
-      if (state.phase === "associate") {
-        // 这一步的按钮由人自己点（看板上的「关联任务」），点过就算走过。
-        return {
-          ...state,
-          phase: "ask-compose",
-          prefill: nextPrefill(state, event.prefill),
-          error: null,
-          done: { ...state.done, associate: true }
-        };
+      // 看板导览：一步一步往下讲，最后一步之后就是体验的第一步；全程不换页面、不动数据。
+      if (demoGuideIsTourPhase(state.phase)) {
+        const next = demoGuideNextTourPhase(state.phase);
+        return next ? { ...state, phase: next, error: null } : state;
+      }
+      // 第一步做完直接请成员协助：那句话跟着填上；换一句时 nonce 要接着往上走，输入框才知道该重新填一次。
+      if (state.phase === "reply-done") {
+        return { ...state, phase: "ask-compose", prefill: nextPrefill(state, event.prefill), error: null };
       }
       if (state.phase === "ask-done") return { ...state, phase: "settings-open", error: null };
       if (state.phase === "help-done" || state.phase === "help-rejected") {
@@ -223,27 +271,20 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       if (state.status !== "active") return state;
       // 建项目之前没有可跳过的步骤：不建项目就没有后面的演示；加入提示窗也不是一步。
       if (state.phase === "create-project" || state.phase === "joined") return state;
+      // 看板导览是纯介绍，没有「跳过这一步」：点跳过引导就是整轮不看，直接收场（小饭团随之离开）。
+      if (demoGuideIsTourPhase(state.phase)) return finishOrSkip(state, { help: false, allSkipped: true });
       const step = demoGuideStepNumberOf(state.phase);
       if (step === 1) {
         return {
           ...state,
-          phase: "associate",
+          phase: "ask-compose",
+          prefill: nextPrefill(state, event.prefill),
           error: null,
           done: { ...state.done, task: false },
           skipped: { ...state.skipped, task: true }
         };
       }
       if (step === 2) {
-        return {
-          ...state,
-          phase: "ask-compose",
-          prefill: nextPrefill(state, event.prefill),
-          error: null,
-          done: { ...state.done, associate: false },
-          skipped: { ...state.skipped, associate: true }
-        };
-      }
-      if (step === 3) {
         return {
           ...state,
           phase: "settings-open",
@@ -253,7 +294,7 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
           skipped: { ...state.skipped, ask: true }
         };
       }
-      // 第四步跳过：授权弹窗那一步跳过等同于拒绝，其余直接收场。
+      // 第三步跳过：授权弹窗那一步跳过等同于拒绝，其余直接收场。
       return finishOrSkip(state, { help: false });
     }
     case "settings-opened":
@@ -289,14 +330,18 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
   }
 }
 
-/** 第四步之后：有点〔完成〕的就是收尾弹窗；四步全都跳过时直接结束，不出现完成弹窗。 */
-function finishOrSkip(state: DemoGuideState, done: { help: boolean }): DemoGuideState {
+/**
+ * 第三步之后：有点〔完成〕的就是收尾弹窗；三步全都跳过时直接结束，不出现完成弹窗。
+ * `allSkipped` 用在导览段点「跳过引导」：整轮都没看，直接收场。
+ */
+function finishOrSkip(state: DemoGuideState, done: { help: boolean; allSkipped?: boolean }): DemoGuideState {
   const next: DemoGuideState = {
     ...state,
     done: { ...state.done, help: done.help && state.done.help ? true : done.help },
     skipped: { ...state.skipped, help: state.skipped.help || !done.help }
   };
-  const allSkipped = next.skipped.task && next.skipped.associate && next.skipped.ask && next.skipped.help;
+  const allSkipped = done.allSkipped
+    || (next.skipped.task && next.skipped.ask && next.skipped.help);
   if (allSkipped) return { ...next, status: "ended", phase: "complete", endReason: "skipped", prefill: null };
   return { ...next, status: "complete", phase: "complete", endReason: "finished", prefill: null, error: null };
 }

@@ -43,8 +43,8 @@ function demoState(phase: DemoGuideState["phase"], overrides: Partial<DemoGuideS
     memberUserId: "9001",
     memberName: "小饭团",
     error: null,
-    done: { task: false, associate: false, ask: false, help: false },
-    skipped: { task: false, associate: false, ask: false, help: false },
+    done: { task: false, ask: false, help: false },
+    skipped: { task: false, ask: false, help: false },
     askDelivered: false,
     prefill: null,
     endReason: null,
@@ -197,21 +197,24 @@ describe("the demo guide host", () => {
   it("opens the walkthrough with the join notice and waits for the person", async () => {
     await mount(client({}), demoState("joined"));
     // 先出现的是那张居中的提示窗：有昵称、只有一个「开始体验」，没有跳过。
-    expect(document.body.textContent).toContain("小饭团加入了项目，开始一起协作吧");
+    expect(document.body.textContent).toContain("小饭团加入了项目");
+    expect(document.body.textContent).toContain("把项目协作完整用一遍");
     expect(document.body.textContent).not.toContain("跳过这一步");
     expect(getDemoGuideState().phase).toBe("joined");
 
     const start = Array.from(document.querySelectorAll("button")).find((entry) => entry.textContent?.includes("开始体验"));
     await act(async () => start?.click());
-    // 点完才进第一步；第一步的蒙版此时才出现。
-    expect(getDemoGuideState().phase).toBe("task-row");
+    // 点完先进看板导览：第一步的蒙版此时才出现。
+    expect(getDemoGuideState().phase).toBe("tour-board");
   });
 
-  it("goes back to the board for the link-a-task step", async () => {
+  it("stays on the board for the whole tour and never pulls the page around", async () => {
     const openBoard = vi.fn();
-    await mount(client({}), demoState("associate"), { openBoard });
-    // 关联任务按钮在看板上，人这时还在任务页：先回看板。
-    expect(openBoard).toHaveBeenCalledWith("local-1");
+    const openTaskPage = vi.fn();
+    await mount(client({}), demoState("tour-new-task"), { openBoard, openTaskPage, route: "/collab", boardProjectId: "local-1" });
+    // 导览全程停在同一个看板上：既不换页，也不把对话页拉回来。
+    expect(openBoard).not.toHaveBeenCalled();
+    expect(openTaskPage).not.toHaveBeenCalled();
   });
 
   it("returns to the task once the person is done linking a task", async () => {
@@ -223,10 +226,10 @@ describe("the demo guide host", () => {
 
   it("drops back on the board once the completion dialog is closed", async () => {
     const openBoard = vi.fn();
-    await mount(client({}), demoState("complete", { status: "complete", done: { task: true, associate: true, ask: true, help: true } }), { openBoard });
+    await mount(client({}), demoState("complete", { status: "complete", done: { task: true, ask: true, help: true } }), { openBoard });
     const finish = Array.from(document.querySelectorAll("button")).find((entry) => entry.textContent?.trim() === "完成");
     await act(async () => finish?.click());
-    // 第四步是在任务页里做完的：关掉完成弹窗回到这个项目的看板，两条记录留在眼前。
+    // 第三步是在任务页里做完的：关掉完成弹窗回到这个项目的看板，两条记录留在眼前。
     expect(openBoard).toHaveBeenCalledWith("local-1");
     expect(getDemoGuideState().status).toBe("ended");
   });

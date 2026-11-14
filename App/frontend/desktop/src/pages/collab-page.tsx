@@ -686,8 +686,6 @@ const CollabBoard = memo(function CollabBoard(props: {
    */
   const demoOwnsProject = demoGuide.status !== "ended" && projectId !== null && demoGuide.localProjectId === projectId;
   const demoMemberName = demoGuide.memberName;
-  /** 演示走到「关联已有任务」：工具条上的「关联任务」是唯一可点的控件，点它只推进引导，不真开关联弹窗。 */
-  const demoAssociate = demoActive && demoGuide.phase === "associate";
 
   /**
    * 这次要不要把授权询问让一让：设置与选择任务的弹窗开着，或者选择任务的请求还没被看板处理完。
@@ -1127,12 +1125,6 @@ const CollabBoard = memo(function CollabBoard(props: {
       document.removeEventListener("visibilitychange", refreshNow);
     };
   }, [collab, sharedId, refreshAssists]);
-
-  // 演示走到「关联已有任务」：那一步的按钮只在「任务」页签的工具条上，人若正停在「协助」就先切回来。
-  useEffect(() => {
-    if (!demoAssociate) return;
-    if (boardTab !== "tasks") switchBoardTab("tasks");
-  }, [demoAssociate, boardTab]);
 
   // 从授权弹窗或通知跳过来：在右侧展开那次协助。读到列表之后再展开，列表里还没有就先等下一轮。
   useEffect(() => {
@@ -1579,7 +1571,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                     </Button>
                   </div>
                 ) : null}
-                <header className={styles.boardHeader}>
+                <header className={styles.boardHeader} data-demo-guide="board-header">
                   <span className={styles.boardIcon} aria-hidden="true">
                     {shared ? <Cloud size={22} /> : <Folder size={22} />}
                   </span>
@@ -1643,6 +1635,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                       className={styles.boardTabs}
                       role="tablist"
                       aria-label={t("collab.tab.label")}
+                      data-demo-guide="board-tabs"
                     >
                       {boardTabs.map((tab) => (
                         <button
@@ -1802,18 +1795,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                                 size="sm"
                                 variant="primary"
                                 data-demo-guide="board-associate"
-                                onClick={() => {
-                                  // 新手引导只借这个按钮讲一句「已有的任务也能关联进来」：点它直接进下一步，
-                                  // 不打开关联弹窗，也就不要求这台电脑上真的有可关联的任务。
-                                  if (demoAssociate) {
-                                    dispatchDemoGuide({
-                                      type: "next",
-                                      prefill: t("collab.demo.prefill.ask", { name: demoMemberName })
-                                    });
-                                    return;
-                                  }
-                                  setPickOpen(true);
-                                }}
+                                onClick={() => setPickOpen(true)}
                               >
                                 <Link2 size={14} aria-hidden="true" />
                                 {t("collab.associate")}
