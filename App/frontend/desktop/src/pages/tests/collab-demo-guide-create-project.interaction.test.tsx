@@ -135,4 +135,20 @@ describe("new project dialog and the demo flag", () => {
     await createNamed("第二个项目");
     expect(mocks.createProject).toHaveBeenCalledWith("第二个项目", "/Users/me/.memmy/local-projects/demo", { demo: false });
   });
+
+  it("still asks for the demo when the person has only joined others' projects", async () => {
+    await act(async () => {
+      addCollabProject({
+        id: "p-joined",
+        name: "同事的项目",
+        role: "member",
+        memberCount: 3,
+        sessionCount: 4,
+        createdAt: null,
+        localProjectId: "local-8"
+      });
+    });
+    await createNamed("我的第一个项目");
+    expect(mocks.createProject).toHaveBeenCalledWith("我的第一个项目", "/Users/me/.memmy/local-projects/demo", { demo: true });
+  });
 });

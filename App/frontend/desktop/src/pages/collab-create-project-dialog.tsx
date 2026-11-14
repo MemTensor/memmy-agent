@@ -98,10 +98,11 @@ export function CreateProjectModal(props: {
   /** 额度用完只在准备共享时才值得提：不开共享的话，这一行与自己无关。 */
   const overQuota = share && ownedLimit !== null && ownedCount >= ownedLimit;
   /**
-   * 新手引导的演示只在这一个时机出现：本人还没有任何在线项目（本机的、云端的都算）时第一次开启共享。
+   * 新手引导的演示只在这一个时机出现：本人第一次创建共享项目，也就是还没有自己拥有的在线项目。
+   * 加入过别人的项目不影响：加入他人项目本身不演示，之后第一次自己创建时仍然演示。
    * 带了这个标记也不代表一定演示：云端会再判断开关、名单与是否已经体验过，返回 `demo.active` 才真的开始。
    */
-  const firstSharedProject = share && shareAvailable && ownedCount === 0 && (projectsStore.projects ?? []).length === 0;
+  const firstSharedProject = share && shareAvailable && ownedCount === 0;
 
   /**
    * 打开那一刻的默认勾选：用 ref 带上，effect 只在打开时读一次，弹窗开着时这个值变化不会重置人的选择。
