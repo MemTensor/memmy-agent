@@ -1048,6 +1048,19 @@ export function HomePage() {
   const lastNewChatRequestRef = useRef(state.agent.newChatRequestId);
   const initialFocusedChatLoadedRef = useRef(false);
   const composerDraftsRef = useRef<Record<string, string>>(composerDrafts);
+
+  /**
+   * 清掉与这一句完全相同的草稿：只动引导写进去的那一版，用户自己改过的留着。
+   * 演示用它处理第二步那句请求：那一步结束（或整轮演示结束）之后，它不该留在任何会话的输入框里。
+   */
+  function clearDraftIfUntouched(sentence: string) {
+    const trimmed = sentence.trim();
+    if (!trimmed) return;
+    for (const [scope, draft] of Object.entries(composerDraftsRef.current)) {
+      if (draft.trim() !== trimmed) continue;
+      dispatch(agentActions.composerDraftUpdated(scope, ""));
+    }
+  }
   const pendingAttachmentsRef = useRef<Record<string, PendingAttachment[]>>(pendingAttachmentsByScope);
   const stopRequestLocksRef = useRef<Set<string>>(new Set());
   const goalMutationLocksRef = useRef<Set<string>>(new Set());
@@ -1489,13 +1502,23 @@ export function HomePage() {
     }
     if (demoGuide.status !== "ended" || demoEndedHandledRef.current) return;
     demoEndedHandledRef.current = true;
-    const sentence = demoAskSentenceRef.current.trim();
-    if (!sentence) return;
-    for (const [scope, draft] of Object.entries(composerDraftsRef.current)) {
-      if (draft.trim() !== sentence) continue;
-      dispatch(agentActions.composerDraftUpdated(scope, ""));
-    }
+    clearDraftIfUntouched(demoAskSentenceRef.current);
   }, [demoGuide.status, demoGuide.memberName, dispatch, t]);
+
+  /**
+   * 第二步（请成员协助）一完成就把那句话清掉，不等到整轮结束：下一步是帮成员执行，
+   * 输入框里不该还留着上一句。用户自己改过的内容不动。
+   */
+  const demoAskClearedRef = useRef(false);
+  useEffect(() => {
+    if (demoGuide.status !== "active" || demoGuide.phase !== "ask-done") {
+      demoAskClearedRef.current = false;
+      return;
+    }
+    if (demoAskClearedRef.current) return;
+    demoAskClearedRef.current = true;
+    clearDraftIfUntouched(t("collab.demo.prefill.ask", { name: demoGuide.memberName }));
+  }, [demoGuide.status, demoGuide.phase, demoGuide.memberName, dispatch, t]);
 
   /**
    * 第二步那句话与它对应的执行提示：句子进输入框，提示只在发送时追加给 Agent。
