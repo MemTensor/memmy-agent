@@ -198,7 +198,7 @@ describe("the demo guide host", () => {
     await mount(client({}), demoState("joined"));
     // 先出现的是那张居中的提示窗：有昵称、只有一个「开始体验」，没有跳过。
     expect(document.body.textContent).toContain("小饭团加入了项目");
-    expect(document.body.textContent).toContain("把项目协作完整用一遍");
+    expect(document.body.textContent).toContain("一起开展一次协作");
     expect(document.body.textContent).not.toContain("跳过这一步");
     expect(getDemoGuideState().phase).toBe("joined");
 
