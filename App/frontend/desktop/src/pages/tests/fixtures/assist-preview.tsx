@@ -21,6 +21,7 @@ import { ApiClientsContext } from "../../../app/providers.js";
 import { Button } from "../../../components/button.js";
 import { Select } from "../../../components/Select.js";
 import board from "../../collab-page.module.css";
+import { DemoGuidePreview, type DemoGuidePreviewStep } from "./collab-demo-guide-preview.js";
 import "../../../styles.css";
 
 const REQUESTER = { userId: "2102247370314383361", name: "孙起", mine: false };
@@ -604,6 +605,11 @@ function AssistantText(props: { children: ReactNode }) {
 
 function Preview() {
   const view = new URLSearchParams(window.location.search).get("view") ?? "dialog";
+  // 项目协作的新手引导：`?view=demo-guide&step=1-task-row`，用假的项目与成员数据画出每一步的蒙版。
+  if (view === "demo-guide") {
+    const step = (new URLSearchParams(window.location.search).get("step") ?? "1-task-row") as DemoGuidePreviewStep;
+    return <DemoGuidePreview step={step} />;
+  }
   const client = fakeClient();
   const project = { id: "p1", name: "Memmy 内测反馈" };
 
