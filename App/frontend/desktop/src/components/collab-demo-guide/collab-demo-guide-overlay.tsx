@@ -80,8 +80,8 @@ const POSES: Partial<Record<DemoGuidePhase, MemmyPose>> = {
   "help-rejected": "sad"
 };
 
-/** 导览段的五步各用哪个姿势：按 {@link demoGuideTourIndex} 的顺序。 */
-const TOUR_POSES: MemmyPose[] = ["point", "peek", "chat", "connect", "work"];
+/** 导览段的四步各用哪个姿势：按 {@link demoGuideTourIndex} 的顺序。 */
+const TOUR_POSES: MemmyPose[] = ["point", "peek", "connect", "chat"];
 
 /** 每个子状态卡片上写什么：文案就是产品定稿的那几句，`{name}` 换成本次演示成员的昵称。 */
 export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCard {
@@ -159,7 +159,7 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
  * 形状由结构那边决定，这里只决定第几步说什么。
  */
 export function demoGuideTourCard(index: number, t: Translate): DemoGuideCard {
-  const key = String(index + 1) as "1" | "2" | "3" | "4" | "5";
+  const key = String(index + 1) as "1" | "2" | "3" | "4";
   return {
     step: null,
     badge: t("collab.demo.tour.label"),

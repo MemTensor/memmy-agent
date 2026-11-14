@@ -67,17 +67,16 @@ describe("the demo guide preview", () => {
     expect(document.querySelector("[data-demo-mask]")).toBeNull();
   });
 
-  it("covers the five tour steps on the board, ending on the sidebar new-task button", async () => {
+  it("covers the four tour steps on the board, ending on the sidebar new-task button", async () => {
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-board"]).toBe("tour-board");
-    expect(DEMO_GUIDE_PREVIEW_STEPS["t-header"]).toBe("tour-header");
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-tabs"]).toBe("tour-tabs");
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-associate"]).toBe("tour-associate");
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-new-task"]).toBe("tour-new-task");
 
-    // 每一步的锚点都在预览页上：整块看板、头部（项目名与成员）、tab 那一行、工具条右侧的关联任务、侧栏的「＋」。
+    // 每一步的锚点都在预览页上：任务列表那一片、tab 那一行、工具条右侧的关联任务、侧栏的「＋」。
+    // 「项目名与成员」那一步已经删掉，导览只剩四步，也没有 board-header 这个锚点。
     for (const [step, anchor] of [
-      ["t-board", "board-main"],
-      ["t-header", "board-header"],
+      ["t-board", "board-list"],
       ["t-tabs", "board-tabs"],
       ["t-associate", "board-associate"],
       ["t-new-task", "sidebar-new-task"]
@@ -87,6 +86,9 @@ describe("the demo guide preview", () => {
       // 导览段不描边：没有任何「这里可以点」的控件。
       expect(document.querySelector("[data-demo-stroke]")).toBeNull();
     }
+    expect(Object.values(DEMO_GUIDE_PREVIEW_STEPS).filter((phase) => phase.startsWith("tour-"))).toHaveLength(4);
+    await render("t-board");
+    expect(document.querySelector("[data-demo-guide='board-header']")).toBeNull();
   });
 
   it("shows the task page itself once the assist is allowed", async () => {

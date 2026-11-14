@@ -14,13 +14,12 @@ import board from "../../collab-page.module.css";
 /**
  * 预览里的步骤：卡片上的名字与 {@link DemoGuidePhase} 一一对应。
  *
- * 前两个是建项目之前的弹窗与加入提示窗，`t-*` 是五步看板导览（纯介绍），`1-*`「2-*」`3-*` 是体验段三步。
+ * 前两个是建项目之前的弹窗与加入提示窗，`t-*` 是四步看板导览（纯介绍），`1-*`「2-*」`3-*` 是体验段三步。
  */
 export const DEMO_GUIDE_PREVIEW_STEPS = {
   "0-create-project": "create-project",
   "0-joined": "joined",
   "t-board": "tour-board",
-  "t-header": "tour-header",
   "t-tabs": "tour-tabs",
   "t-associate": "tour-associate",
   "t-new-task": "tour-new-task",
@@ -133,7 +132,7 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; wi
     >
       <div className={board.scroller}>
         <div className={board.wrap}>
-          <header className={board.boardHeader} data-demo-guide="board-header">
+          <header className={board.boardHeader}>
             <span className={board.boardIcon} aria-hidden="true">☁</span>
             <h1 className={board.boardName}>项目协作体验</h1>
             <span className={board.boardScope}>2 位成员</span>
@@ -162,7 +161,8 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; wi
               <Link2 size={14} aria-hidden="true" />关联任务
             </button>
           </div>
-          <ul className={`${board.list} ${board.stream} ${board.flatStream}`}>
+          {/* 导览第一步只框任务列表那一片。 */}
+          <ul className={`${board.list} ${board.stream} ${board.flatStream}`} data-demo-guide="board-list">
             <li className={`${board.row} ${board.rowOpenable}`} data-demo-guide="board-task-row">
               <span className={`${board.avatar} ${board.avatarSoft}`} style={{ "--member": "#8fb6ae" } as CSSProperties} aria-hidden="true">
                 小
@@ -487,7 +487,7 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
 
   const phase = state.phase;
   const chat = phase === "compose" || phase === "reply-waiting" || phase === "reply-done" || phase === "ask-compose" || phase === "ask-waiting" || phase === "ask-done";
-  // 看板导览的五步：只摆看板（最后一步多一条侧栏，那个「＋」才是亮区），不换页。
+  // 看板导览的四步：只摆看板（最后一步多一条侧栏，那个「＋」才是亮区），不换页。
   const tour = demoGuideIsTourPhase(phase);
   let surface: ReactNode;
   if (phase === "create-project") surface = <CreateProjectSurface />;

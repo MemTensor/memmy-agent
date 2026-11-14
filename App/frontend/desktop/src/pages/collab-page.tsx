@@ -1571,7 +1571,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                     </Button>
                   </div>
                 ) : null}
-                <header className={styles.boardHeader} data-demo-guide="board-header">
+                <header className={styles.boardHeader}>
                   <span className={styles.boardIcon} aria-hidden="true">
                     {shared ? <Cloud size={22} /> : <Folder size={22} />}
                   </span>
@@ -1869,7 +1869,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                         </div>
                       ) : null}
                       {boardRows === null ? (
-                        <p className={styles.loading}>{t("collab.loading")}</p>
+                        <p className={styles.loading} data-demo-guide="board-list">{t("collab.loading")}</p>
                       ) : boardRows.length === 0 && boardTab === "assists" ? (
                         <>
                           {assistGroups.unrun.length ? null : (
@@ -1914,7 +1914,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                       ) : boardRows.length === 0 ? (
                         // An empty project is the one place to explain the board: what it collects and what a
                         // member can do with it. New projects start here, so it carries the first-run guidance.
-                        <section className={styles.guide} aria-label={t("collab.sessions.empty.title")}>
+                        <section className={styles.guide} aria-label={t("collab.sessions.empty.title")} data-demo-guide="board-list">
                           <b className={styles.guideTitle}>{t("collab.sessions.empty.title")}</b>
                           <p className={styles.guideLead}>{t("collab.sessions.empty.lead")}</p>
                           <ul className={styles.guideList}>
@@ -1934,7 +1934,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                         </section>
                       ) : (
                         <>
-                        <ul className={`${styles.list} ${styles.stream} ${styles.flatStream}`}>
+                        {/* 导览第一步框住的就是这一块：任务列表本身，不含上面的 tab 行与工具条。 */}
+                        <ul className={`${styles.list} ${styles.stream} ${styles.flatStream}`} data-demo-guide="board-list">
                           {boardRows.map((row) => {
                             if (row.kind === "assist") {
                               return (

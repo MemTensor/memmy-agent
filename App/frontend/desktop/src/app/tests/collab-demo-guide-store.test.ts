@@ -36,14 +36,14 @@ function joined(): DemoGuideState {
   return demoGuideReducer(raw(), { type: "start", input: START });
 }
 
-/** 看板导览的第一步：整个看板。 */
+/** 看板导览的第一步：任务列表。 */
 function touring(): DemoGuideState {
   return demoGuideReducer(joined(), { type: "joined-confirmed" });
 }
 
 /** 导览走完、点了〔开始体验〕：体验第一步的蒙版。 */
 function started(): DemoGuideState {
-  // 导览五步一路点「下一步」：最后一步的按钮是「开始体验」，点完就是体验第一步。
+  // 导览四步一路点「下一步」：最后一步的按钮是「开始体验」，点完就是体验第一步。
   return run(touring(), DEMO_GUIDE_TOUR_PHASES.map((): DemoGuideEvent => ({ type: "next" })));
 }
 
@@ -87,13 +87,16 @@ describe("demo guide state machine", () => {
     // 云端还没说演示开始时不会有这张提示窗：这里只认 `start`。
     expect(state.memberName).toBe("小饭团");
     const first = demoGuideReducer(state, { type: "joined-confirmed" });
-    // 先看一圈看板，再动手：导览段的第一步是整个看板。
+    // 先看一圈看板，再动手：导览段的第一步是任务列表。
     expect(first.phase).toBe(DEMO_GUIDE_TOUR_PHASES[0]);
     // 提示窗本身不是一步：跳不了，也不会被当成第一步跳过。
     expect(demoGuideReducer(state, { type: "skip" })).toBe(state);
   });
 
   it("walks the board tour one step at a time and hands over to the hands-on experience", () => {
+    // 导览四步：任务列表 → 协助 → 关联任务 → 新建任务。
+    // 「项目名与成员」那一步已删掉：它说的东西看板上本来就看得到。
+    expect([...DEMO_GUIDE_TOUR_PHASES]).toEqual(["tour-board", "tour-tabs", "tour-associate", "tour-new-task"]);
     let state = touring();
     expect(state.phase).toBe("tour-board");
     // 导览段没有进度、也不予跳过这一步。

@@ -38,9 +38,9 @@ const TARGETS: Record<DemoGuidePhase, DemoGuideTarget> = {
   // 加入提示窗自带遮罩，不用亮区；这一项只是为了让每个阶段都有目标。
   joined: { region: "board-main", stroke: null, blockRest: false },
   // 看板导览：纯介绍，只亮区域、不描边、不接点击（`blockRest` 让亮区里也点不动）。
-  // 第一站是整个看板：把头部、工具条与任务列表一起亮出来。
-  "tour-board": { region: "board-main", stroke: null, blockRest: true },
-  "tour-header": { region: "board-header", stroke: null, blockRest: true },
+  // 第一站只框任务列表那一片：看板头部与工具条不属于这一步要讲的东西。
+  "tour-board": { region: "board-list", stroke: null, blockRest: true },
+  // 第二站只讲「协助」：亮区落在 tab 那一行上。
   "tour-tabs": { region: "board-tabs", stroke: null, blockRest: true },
   // 「关联任务」这一步只亮给人看：不描边、点了也不打开弹窗、不写任何数据。
   "tour-associate": { region: "board-associate", stroke: null, blockRest: true },
