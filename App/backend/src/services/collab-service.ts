@@ -2156,7 +2156,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       if (!INVITE_CODE_PATTERN.test(code)) {
         throw new CollabError("internal", "邀请链接生成失败，请稍后重试");
       }
-      const link = `${linkBase}/i/${code}`;
+      const link = `${linkBase}/api/i/${code}`;
       const name = text(data.projectName);
       return { code, link, shareText: name ? `【Memmy】邀请你加入协作项目「${name}」 ${link}` : `【Memmy】邀请你加入协作项目 ${link}` };
     },

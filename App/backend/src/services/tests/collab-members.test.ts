@@ -60,8 +60,8 @@ async function until(check: () => boolean): Promise<void> {
 
 describe("collab members", () => {
   it("reads an invite from the link, the copied text, or the bare code", () => {
-    expect(parseInviteReference(`https://memmy.example/i/${CODE}`)).toBe(CODE);
-    expect(parseInviteReference(`【Memmy】邀请你加入协作项目「Memmy 开发」 https://memmy.example/i/${CODE}`)).toBe(CODE);
+    expect(parseInviteReference(`https://memmy.example/api/i/${CODE}`)).toBe(CODE);
+    expect(parseInviteReference(`【Memmy】邀请你加入协作项目「Memmy 开发」 https://memmy.example/api/i/${CODE}`)).toBe(CODE);
     expect(parseInviteReference(CODE)).toBe(CODE);
     // A session link is not an invite.
     expect(parseInviteReference("https://memmy.example/s/5c1b2d3e-0000-4000-8000-000000000409")).toBeNull();
@@ -89,8 +89,8 @@ describe("collab members", () => {
     const { svc, calls } = setup({ "POST /api/collab/projects/p-1/invite": () => ({ code: CODE, projectName: "Memmy 开发" }) });
     expect(await svc.createInvite("p-1")).toEqual({
       code: CODE,
-      link: `https://cloud.test.invalid/i/${CODE}`,
-      shareText: `【Memmy】邀请你加入协作项目「Memmy 开发」 https://cloud.test.invalid/i/${CODE}`
+      link: `https://cloud.test.invalid/api/i/${CODE}`,
+      shareText: `【Memmy】邀请你加入协作项目「Memmy 开发」 https://cloud.test.invalid/api/i/${CODE}`
     });
     expect(calls[0]).toMatchObject({ method: "POST", path: "/api/collab/projects/p-1/invite" });
   });
@@ -104,7 +104,7 @@ describe("collab members", () => {
     mkdirSync(chosen);
     writeFileSync(join(chosen, "README.md"), "already here");
 
-    expect(await svc.joinProject(`https://cloud.test.invalid/i/${CODE}`, chosen)).toEqual({ status: "pending", projectId: "p-1", project: null });
+    expect(await svc.joinProject(`https://cloud.test.invalid/api/i/${CODE}`, chosen)).toEqual({ status: "pending", projectId: "p-1", project: null });
     expect(links(projectsDir, "p-1")).toMatchObject({ workingDirectory: chosen, directoryChosen: true, localProjectId: null });
     // Approved later: the binding step reads the chosen folder back and knows not to treat it as empty.
     expect(await svc.ensureWorkingDirectory("p-1", "Memmy 开发")).toEqual({ localDirectory: chosen, chosen: true });
