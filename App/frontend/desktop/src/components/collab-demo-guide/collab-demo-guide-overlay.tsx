@@ -116,59 +116,82 @@ export function CollabDemoGuideOverlay(props: {
   const [shake, setShake] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [cardHeight, setCardHeight] = useState(150);
+  /** 窗口缩放、滚动、动画结束都会让它加一：测量随之一并重跑。 */
+  const [measureTick, setMeasureTick] = useState(0);
   const cardRef = useRef<HTMLDivElement | null>(null);
+  /** 蒙版自己铺满整个窗口：视口尺寸量它，而不是问 window——两处在截图与内嵌环境里可能不一致。 */
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const target = demoGuideTarget(state.phase);
   const visible = state.status === "active" && state.phase !== "complete";
 
-  const measure = useCallback(() => {
+  /** 量一次亮区与描边，`key` 用来判断位置有没有变。 */
+  const measure = useCallback((): { layout: { hole: Rect; stroke: Rect | null; viewport: Viewport } | null; key: string } => {
     if (typeof window === "undefined" || typeof document === "undefined") {
-      setLayout(null);
-      return;
+      return { layout: null, key: "none" };
     }
-    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    const rootRect = rootRef.current?.getBoundingClientRect() ?? null;
+    const viewport = rootRect && rootRect.width > 0 && rootRect.height > 0
+      ? { width: rootRect.width, height: rootRect.height }
+      : { width: window.innerWidth, height: window.innerHeight };
     const region = document.querySelector<HTMLElement>(`[data-demo-guide="${target.region}"]`);
-    if (!region) {
-      setLayout(null);
-      return;
-    }
+    if (!region) return { layout: null, key: "none" };
     const regionRect = region.getBoundingClientRect();
-    if (!rectVisible(regionRect, viewport)) {
-      setLayout(null);
-      return;
-    }
+    if (!rectVisible(regionRect, viewport)) return { layout: null, key: "none" };
     const hole = padRect(regionRect, DEMO_GUIDE_HOLE_PADDING, viewport);
     const strokeElement = target.stroke ? document.querySelector<HTMLElement>(`[data-demo-guide="${target.stroke}"]`) : null;
     const strokeRect = strokeElement ? padRect(strokeElement.getBoundingClientRect(), 3, viewport) : null;
-    setLayout({ hole, stroke: strokeRect, viewport });
+    // 侧滑、缩放这些入场动画期间每帧都在动：位置按 0.5px 取整后比较，浮动误差不算变化。
+    const rectKey = (rect: Rect | null) => (rect
+      ? [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * 2) / 2).join(",")
+      : "-");
+    const key = `${rectKey(hole)}|${rectKey(strokeRect)}|${viewport.width}x${viewport.height}`;
+    return { layout: { hole, stroke: strokeRect, viewport }, key };
   }, [target.region, target.stroke]);
 
-  // 亮区跟随窗口缩放、滚动、内容重排：都按帧合并成一次测量。
+  /**
+   * 跟着目标走：侧滑、缩放、居中补高这些入场过程里每帧位置都不一样，只量一次必然画偏。
+   * 所以只要引导在屏上就每帧量一次，位置变了才重画；窗口缩放、滚动、内容重排、动画结束都因此自动跟上，
+   * 元素晚一步出现也一样，下一帧就画出来。
+   */
   useEffect(() => {
     if (!visible) {
       setLayout(null);
       return undefined;
     }
+    if (typeof window === "undefined") return undefined;
     let frame = 0;
-    const schedule = () => {
-      if (typeof window === "undefined") return;
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(measure);
+    let appliedKey: string | null = null;
+    const step = () => {
+      const next = measure();
+      if (next.key !== appliedKey) {
+        appliedKey = next.key;
+        setLayout(next.layout);
+      }
+      frame = window.requestAnimationFrame(step);
     };
-    const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(schedule);
-    observer?.observe(document.body, { attributes: true, childList: true, subtree: true, attributeFilter: ["class", "style", "data-demo-guide"] });
-    const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
-    resize?.observe(document.body);
-    window.addEventListener("resize", schedule);
-    window.addEventListener("scroll", schedule, true);
-    schedule();
+    frame = window.requestAnimationFrame(step);
+    return () => window.cancelAnimationFrame(frame);
+  }, [visible, measure, state.phase, measureTick]);
+
+  // 滚动与窗口缩放本身也被每帧的测量覆盖；留着这几个监听是让「该重新量了」这件事有个明确出处，
+  // 将来若把测量改成按需触发，它们就是触发点。
+  useEffect(() => {
+    if (!visible) return undefined;
+    const bump = () => setMeasureTick((tick) => tick + 1);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(bump);
+    observer?.observe(document.documentElement);
+    document.addEventListener("animationend", bump, true);
+    document.addEventListener("transitionend", bump, true);
+    window.addEventListener("resize", bump);
+    window.addEventListener("scroll", bump, true);
     return () => {
       observer?.disconnect();
-      resize?.disconnect();
-      window.removeEventListener("resize", schedule);
-      window.removeEventListener("scroll", schedule, true);
-      window.cancelAnimationFrame(frame);
+      document.removeEventListener("animationend", bump, true);
+      document.removeEventListener("transitionend", bump, true);
+      window.removeEventListener("resize", bump);
+      window.removeEventListener("scroll", bump, true);
     };
-  }, [visible, measure, state.phase]);
+  }, [visible]);
 
   // 换步骤时卡片高度会变：量一次，避免它压到亮区或出窗口。
   useLayoutEffect(() => {
@@ -227,10 +250,15 @@ export function CollabDemoGuideOverlay(props: {
     );
   }
 
-  if (!visible || !layout) return null;
+  if (!visible) return null;
+
+  if (!layout) {
+    // 锚点还没到位或还没量出位置：先只摆一个空的容器，量尺寸用的就是它。
+    return <div ref={rootRef} className={styles.root} />;
+  }
 
   const { hole, stroke, viewport } = layout;
-  const placement = cardPlacement(hole, viewport, cardHeight);
+  const placement = cardPlacement(hole, viewport, cardHeight, { hasStroke: stroke !== null });
   // 亮区几乎占满窗口时（对话区就是这种情况）卡片只能压在它上面：这里再夹一次，保证不出窗口。
   const cardTop = Math.max(8, Math.min(placement.top, viewport.height - cardHeight - 8));
   const cardLeft = Math.max(8, Math.min(placement.left, viewport.width - DEMO_GUIDE_CARD_WIDTH - 8));
@@ -248,11 +276,12 @@ export function CollabDemoGuideOverlay(props: {
     };
 
   return (
-    <div className={styles.root}>
+    <div ref={rootRef} className={styles.root}>
       {maskRects(hole, viewport).map((rect, index) => (
         <div
           key={`mask-${index}`}
           className={styles.mask}
+          data-demo-mask=""
           style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
           onClick={bump}
           aria-hidden="true"
@@ -270,6 +299,7 @@ export function CollabDemoGuideOverlay(props: {
       {stroke ? (
         <div
           key={`stroke-${state.phase}-${shake}`}
+          data-demo-stroke=""
           className={`${styles.stroke}${shake ? ` ${styles.shake}` : ""}`}
           style={{ left: stroke.left, top: stroke.top, width: stroke.width, height: stroke.height }}
           aria-hidden="true"
@@ -280,7 +310,13 @@ export function CollabDemoGuideOverlay(props: {
         key={`card-${state.phase}`}
         className={`${styles.card}${shake ? " " : ""}`}
         data-shake={shake ? "true" : "false"}
-        style={{ left: cardLeft, top: cardTop, width: DEMO_GUIDE_CARD_WIDTH }}
+        style={{
+          left: cardLeft,
+          top: cardTop,
+          width: DEMO_GUIDE_CARD_WIDTH,
+          maxHeight: Math.max(120, viewport.height - 16),
+          overflowY: "auto"
+        }}
         role="dialog"
         aria-modal="false"
         aria-label={t("collab.demo.cardLabel")}

@@ -68,7 +68,11 @@ const card: CSSProperties = {
 /** 看板的一列：标题、任务行、右侧项目配置，与真实看板同一套类名与外观。 */
 function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean }) {
   return (
-    <div className={board.page} style={{ height: "100%", background: "var(--color-canvas-oat, #f4f7f6)" }}>
+    <div
+      className={board.page}
+      data-demo-guide="board-main"
+      style={{ position: "absolute", inset: 0, background: "var(--color-canvas-oat, #f4f7f6)" }}
+    >
       <div className={board.scroller}>
         <div className={board.wrap}>
           <header className={board.boardHeader}>
@@ -128,7 +132,12 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean }) 
 /** 右侧的只读任务面板：头部有「继续任务」，正文两轮对话。 */
 function ReaderSurface() {
   return (
-    <div className={board.readerPanel} data-demo-guide="reader-panel" style={{ position: "fixed", right: 28, top: 76, bottom: 28, width: 420 }}>
+    <div
+      className={board.readerPanel}
+      data-demo-guide="reader-panel"
+      // 舞台里绝对定位、写死高度：截图时窗口尺寸怎么变，量出来的位置都是同一个。
+      style={{ position: "absolute", right: 28, top: 76, bottom: 24, width: 420 }}
+    >
       <header className={board.readerHead}>
         <span className={`${board.avatar} ${board.avatarSoft} ${board.readerHeadAvatar}`} style={{ "--member": "#8fb6ae" } as CSSProperties} aria-hidden="true">
           小
@@ -175,7 +184,7 @@ function ReaderSurface() {
 function ChatSurface(props: { phase: DemoGuidePhase }) {
   const waiting = props.phase === "reply-waiting" || props.phase === "ask-waiting";
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--color-canvas-oat, #f4f7f6)" }}>
+    <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", background: "var(--color-canvas-oat, #f4f7f6)" }}>
       <div style={{ flex: 1, overflow: "auto", padding: "40px 56px" }} data-demo-guide="conversation">
         <div style={{ ...card, padding: 18, marginBottom: 14 }}>
           <b style={{ fontSize: 13 }}>你</b>
@@ -212,7 +221,7 @@ function ChatSurface(props: { phase: DemoGuidePhase }) {
 /** 项目设置里「协作」的一组：接收协助请求的开关。 */
 function SettingsSurface() {
   return (
-    <div style={{ height: "100%", background: "rgba(16,26,25,.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ position: "absolute", inset: 0, background: "rgba(16,26,25,.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div style={{ width: 520, background: "#fff", borderRadius: 16, padding: 22, boxShadow: "0 18px 44px rgba(16,26,25,.18)" }}>
         <b style={{ fontSize: 15 }}>项目设置</b>
         <div className={board.settingsSectionLabel}>文件夹</div>
@@ -242,7 +251,7 @@ function SettingsSurface() {
 /** 协助授权弹窗：谁请求、做什么、由谁执行与允许方式。 */
 function AssistDialogSurface() {
   return (
-    <div style={{ height: "100%", background: "rgba(16,26,25,.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ position: "absolute", inset: 0, background: "rgba(16,26,25,.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div
         data-demo-guide="assist-dialog"
         style={{ width: 520, background: "#fff", borderRadius: 16, padding: 22, boxShadow: "0 18px 44px rgba(16,26,25,.18)" }}
@@ -257,6 +266,12 @@ function AssistDialogSurface() {
             根据下面这段说明，用一句话介绍 Memmy 项目协作。
           </div>
         </div>
+        <div style={{ padding: 14, borderRadius: 10, border: "1px solid rgba(16,26,25,.08)", marginBottom: 14 }}>
+          <div style={{ fontSize: 12, color: "rgba(16,26,25,.55)", marginBottom: 8 }}>由谁执行</div>
+          {["Memmy", "Claude Code", "Codex"].map((agent) => (
+            <div key={agent} style={{ fontSize: 13, padding: "6px 0" }}>{agent}</div>
+          ))}
+        </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button type="button" className="button button-ghost">拒绝</button>
           <button type="button" className="button button-primary" data-demo-guide="assist-allow">允许</button>
@@ -266,8 +281,23 @@ function AssistDialogSurface() {
   );
 }
 
+/**
+ * 舞台尺寸：写死的盒子，锚点全在里面，量出来的位置不随截图窗口的缩放变。
+ * 默认按 1280 宽、713 高（这块 Chrome 的布局视口比窗口矮 87），窄窗口用 `?w=&h=` 指定。
+ */
+export function demoGuidePreviewStage(): { width: number; height: number } {
+  if (typeof window === "undefined") return { width: 1280, height: 713 };
+  const params = new URLSearchParams(window.location.search);
+  const read = (key: string, fallback: number) => {
+    const value = Number.parseInt(params.get(key) ?? "", 10);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  };
+  return { width: read("w", 1280), height: read("h", 713) };
+}
+
 export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
   const state = stateFor(props.step);
+  const stage = demoGuidePreviewStage();
 
   const phase = state.phase;
   const chat = phase === "compose" || phase === "reply-waiting" || phase === "reply-done" || phase === "ask-compose" || phase === "ask-waiting" || phase === "ask-done";
@@ -280,7 +310,8 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
 
   return (
     <I18nProvider language="zh-CN">
-      <div style={{ height: "100vh", overflow: "hidden" }}>
+      {/* 固定大小的盒子：位置可复现，蒙版按它里面的锚点来画。 */}
+      <div style={{ position: "fixed", left: 0, top: 0, width: stage.width, height: stage.height, overflow: "hidden" }}>
         {surface}
         <CollabDemoGuideOverlay
           state={state}

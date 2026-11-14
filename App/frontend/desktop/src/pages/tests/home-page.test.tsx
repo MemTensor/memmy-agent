@@ -10,6 +10,7 @@ import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
 import { agentReducer, initialAgentState } from "../../state/agent-chat-slice.js";
 import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
+import { zhCNMessages } from "../../i18n/messages.js";
 import type { SlashCommandPaletteItem, SlashCommandStorageLike } from "../agent-command-palette.js";
 import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
 import {
@@ -18,6 +19,7 @@ import {
   ComposerCommandChip,
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
+  composeDemoGuideAssistSend,
   HomePage,
   AgentOperationErrorSlot,
   agentComposerPrimaryAction,
@@ -1730,6 +1732,69 @@ describe("HomePage", () => {
     expect(unchanged).toBe(181);
     expect(grown).toBe(223);
     expect(panel.style.getPropertyValue("--agent-composer-overlay-height")).toBe("223px");
+  });
+
+  it("sends the guide's assist hint to the agent while the bubble keeps the sentence", async () => {
+    // 引导第二步：输入框里只有那一句话，执行提示随内容发给 Agent，气泡里不出现。
+    const sentence = "请小饭团看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么";
+    const hint = zhCNMessages["collab.demo.prefill.askHint"]
+      .replace("{name}", "小饭团")
+      .replace("{member}", "9001");
+    const composed = composeDemoGuideAssistSend({
+      status: "active",
+      phase: "ask-compose",
+      typed: sentence,
+      sentence,
+      hint,
+      content: sentence
+    });
+    expect(composed.displayContent).toBe(sentence);
+    expect(composed.content).toContain(sentence);
+    expect(composed.content).toContain("--member 9001");
+    expect(composed.displayContent).not.toContain("执行提示");
+
+    const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
+    const dispatch = vi.fn();
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-demo",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        submitMessage: sendMessage
+      },
+      content: composed.content,
+      displayContent: composed.displayContent ?? undefined,
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer: vi.fn()
+    })).resolves.toBe(true);
+
+    // 发给 Agent 的内容带着执行提示与 member。
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining("--member 9001")
+    }), 1);
+    // 气泡里只是那一句话，没有提示。
+    const queued = dispatch.mock.calls
+      .map(([action]) => action as { type?: string; content?: string })
+      .find((action) => action.type === "agent/userMessageQueued");
+    expect(queued?.content).toBe(sentence);
+    expect(queued?.content).not.toContain("执行提示");
+  });
+
+  it("leaves an edited second-step sentence alone, with no hint attached", () => {
+    const sentence = "请小饭团看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么";
+    const typed = "请小饭团看一下他电脑上的《项目协作常见问题》";
+    const composed = composeDemoGuideAssistSend({
+      status: "active",
+      phase: "ask-compose",
+      typed,
+      sentence,
+      hint: "（执行提示：不要先反问）",
+      content: typed
+    });
+    expect(composed).toEqual({ content: typed, displayContent: null });
   });
 
   it("keeps the Goal command on the wire but shows only its objective", async () => {

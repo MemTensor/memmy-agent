@@ -13,7 +13,14 @@ import { getRuntimeConfig } from "../api/runtime-config.js";
 import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
 import { CollabAssistTaskBar, CollabAssistTaskDock, useAssistTask } from "./collab-assist-task.js";
 import { collabEnabledFor } from "../app/collab-mode.js";
-import { dispatchDemoGuide, getDemoGuideState, subscribeDemoGuide } from "../app/collab-demo-guide-store.js";
+import {
+  demoGuideSendsAssistHint,
+  dispatchDemoGuide,
+  getDemoGuideState,
+  subscribeDemoGuide,
+  type DemoGuidePhase,
+  type DemoGuideStatus
+} from "../app/collab-demo-guide-store.js";
 import { mentionEmptyLabelKey } from "./collab-session-mention.js";
 import { CollabShareToggle } from "./collab-share-toggle.js";
 import { getCollabProjectsSnapshot, selectCollabProject, sharedProjectFor, subscribeCollabProjects } from "../app/collab-projects-store.js";
@@ -736,6 +743,28 @@ export function thinkingPayloadForSend(
   return { thinkingEnabled, thinkingLevel };
 }
 
+/**
+ * 新手引导第二步的发送内容：输入框里还是引导写好的那句话时，把执行提示追加到发给 Agent 的内容里，
+ * 同时交出气泡该显示的那一句。用户改过句子就不追加，原样发出去。
+ */
+export function composeDemoGuideAssistSend(input: {
+  status: DemoGuideStatus;
+  phase: DemoGuidePhase;
+  typed: string;
+  sentence: string;
+  hint: string;
+  content: string;
+}): { content: string; displayContent: string | null } {
+  const append = demoGuideSendsAssistHint({
+    status: input.status,
+    phase: input.phase,
+    typed: input.typed,
+    sentence: input.sentence
+  }) && input.hint.trim().length > 0;
+  if (!append) return { content: input.content, displayContent: null };
+  return { content: `${input.content}\n\n${input.hint}`, displayContent: input.typed.trim() };
+}
+
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
   const text = input.content.trim();
   const trimmedDisplayContent = input.displayContent?.trim();
@@ -1439,6 +1468,17 @@ export function HomePage() {
       element.focus();
     });
   }, [demoGuide.prefill]);
+
+  /**
+   * 第二步那句话与它对应的执行提示：句子进输入框，提示只在发送时追加给 Agent。
+   * 两者都按当前语言现取，句子与预填时是同一句，所以能据此判断用户改没改过。
+   */
+  const demoAssistSentence = demoGuide.status === "active"
+    ? t("collab.demo.prefill.ask", { name: demoGuide.memberName })
+    : "";
+  const demoAssistHint = demoGuide.status === "active"
+    ? t("collab.demo.prefill.askHint", { name: demoGuide.memberName, member: demoGuide.memberUserId ?? "" })
+    : "";
 
   /** 一轮回复从「运行中」变回空闲：引导的等待状态据此推进，不靠定时器猜。 */
   const demoWasRunningRef = useRef(false);
@@ -2227,6 +2267,15 @@ export function HomePage() {
     const contentWithReferences = submittedMentions.length
       ? `${submittedMentions.map((item) => item.reference).join("\n\n")}\n\n${promptedInput}`
       : promptedInput;
+    // 新手引导第二步：那句要求连同执行提示一起交给 Agent，气泡里仍然只有用户看到的那一句。
+    const demoAssistSend = composeDemoGuideAssistSend({
+      status: demoGuide.status,
+      phase: demoGuide.phase,
+      typed: composerInput,
+      sentence: demoAssistSentence,
+      hint: demoAssistHint,
+      content: contentWithReferences
+    });
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
     dispatch(agentActions.modelSelectionRequestStarted(
@@ -2243,9 +2292,10 @@ export function HomePage() {
         clientRequestId,
         connection,
         ensureChatSubscription,
-        content: contentWithReferences,
-        // With references, a command or a rewritten prompt the wire text differs from what was typed; show the typed part.
-        displayContent: (features.agentPrompt(input) || selectedComposerCommand || (submittedMentions.length && composerInput.trim())) ? composerInput : undefined,
+        content: demoAssistSend.content,
+        // With references, a command, a rewritten prompt or the guide's hint the wire text differs from what was typed;
+        // show the typed part.
+        displayContent: (features.agentPrompt(input) || selectedComposerCommand || (submittedMentions.length && composerInput.trim()) || demoAssistSend.displayContent !== null) ? composerInput : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),

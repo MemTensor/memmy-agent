@@ -116,6 +116,21 @@ export function demoGuideHeartbeatStep(phase: DemoGuidePhase): "1" | "2" | "3" |
   return String(demoGuideStepNumberOf(phase)) as "1" | "2" | "3";
 }
 
+/**
+ * 第二步发送时要不要把执行提示一起交给 Agent：只有引导正等这一步的发送、并且输入框里还是引导写好的那句话
+ * （用户没改过）时才算。改过就不追加，用户自己说的话原样发出去。
+ */
+export function demoGuideSendsAssistHint(input: {
+  status: DemoGuideStatus;
+  phase: DemoGuidePhase;
+  typed: string;
+  sentence: string;
+}): boolean {
+  if (input.status !== "active" || input.phase !== "ask-compose") return false;
+  const sentence = input.sentence.trim();
+  return sentence.length > 0 && input.typed.trim() === sentence;
+}
+
 /** 引导的纯状态机：所有推进条件都在这里，界面只负责发事件与画卡片。 */
 export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): DemoGuideState {
   switch (event.type) {

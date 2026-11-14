@@ -114,7 +114,12 @@ const CARD_MIN_HEIGHT = 150;
 /**
  * 说明卡贴在亮区旁边，优先右侧、其次左侧，都放不下就放下面或上面；四个方向都试过仍不合适时取空间最大的一边。
  */
-export function cardPlacement(hole: Rect, viewport: Viewport, cardHeight: number = CARD_MIN_HEIGHT): CardPlacement {
+export function cardPlacement(
+  hole: Rect,
+  viewport: Viewport,
+  cardHeight: number = CARD_MIN_HEIGHT,
+  options: { hasStroke?: boolean } = {}
+): CardPlacement {
   const height = Math.max(CARD_MIN_HEIGHT, cardHeight);
   const spaceRight = viewport.width - (hole.left + hole.width) - CARD_GAP - EDGE_MARGIN;
   const spaceLeft = hole.left - CARD_GAP - EDGE_MARGIN;
@@ -141,6 +146,15 @@ export function cardPlacement(hole: Rect, viewport: Viewport, cardHeight: number
     };
   }
   const left = Math.max(EDGE_MARGIN, Math.min(hole.left + hole.width / 2 - DEMO_GUIDE_CARD_WIDTH / 2, viewport.width - DEMO_GUIDE_CARD_WIDTH - EDGE_MARGIN));
+  // 亮区本身就是一大片（对话区、看板）：说明卡没有要点着谁，放在这块区域的左下角最稳，
+  // 也不会像贴在边上那样被窗口底部切掉。
+  if (!options.hasStroke && hole.height >= EDGE_MARGIN * 2 + height + 32) {
+    return {
+      left: Math.max(EDGE_MARGIN, Math.min(hole.left + 20, viewport.width - DEMO_GUIDE_CARD_WIDTH - EDGE_MARGIN)),
+      top: Math.max(EDGE_MARGIN, hole.top + hole.height - height - 20),
+      arrow: { side: "bottom", offset: 22 }
+    };
+  }
   if (spaceBelow >= height && fitsVertically(hole.top + hole.height + CARD_GAP)) {
     return {
       left,

@@ -206,11 +206,8 @@ export function CollabDemoGuideHost(props: {
     helpSinceRef.current = null;
   }, [state.phase]);
 
-  // 第二步那句话由界面按当前语言给出：句子里带着执行提示，句子本身也是用户看到的那一句。
-  const askPrefill = () => t("collab.demo.prefill.ask", {
-    name: state.memberName,
-    member: state.memberUserId ?? ""
-  });
+  // 第二步只预填用户看到的那一句话；执行提示在发送时单独追加给 Agent（见 home-page）。
+  const askPrefill = () => t("collab.demo.prefill.ask", { name: state.memberName });
 
   return (
     <>

@@ -924,7 +924,9 @@ export const zhCNMessages = {
   "collab.demo.reader.body": "清单还差最后一项。点「继续任务」，让你的 Agent 接着做。",
   "collab.demo.compose.body": "要求已经写好，点发送。",
   "collab.demo.prefill.task": "接着{name}的清单，写一段邀请同事加入项目的话",
-  "collab.demo.prefill.ask": "请{name}看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么\n\n执行提示：不要先反问。把上面这句话整理成标题与要做的事，写成请求文件，然后直接运行 memmy-project assist ask --project 当前项目 --member {member} --file 请求文件，向{name}发起这次请求。",
+  "collab.demo.prefill.ask": "请{name}看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么",
+  // 只追加在发给 Agent 的内容里，输入框与气泡里都不出现。
+  "collab.demo.prefill.askHint": "（执行提示：不要先反问。把上面这句话整理成标题与要做的事，写成请求文件，然后直接运行 memmy-project assist ask --project 当前项目 --member {member} --file 请求文件，向{name}发起这次请求。）",
   "collab.demo.reply.waiting": "Agent 正在读取{name}的任务…",
   "collab.demo.reply.title": "Agent 读到了{name}的任务",
   "collab.demo.reply.body": "清单里的内容来自{name}的任务，你没有告诉过它。新建的任务默认共享给成员，{name}也能接着你的进度做。",
@@ -4222,7 +4224,9 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "collab.demo.reader.body": "One item is left. Choose Continue task and your agent picks it up.",
   "collab.demo.compose.body": "The request is written. Send it.",
   "collab.demo.prefill.task": "Pick up {name}'s checklist and write a message inviting a colleague to join the project",
-  "collab.demo.prefill.ask": "Ask {name} to read the Project collab FAQ on his computer and tell me what happens on my side when a member asks me for help\n\nExecution note: do not ask back. Turn the sentence above into a title and the things to do, write them to a request file, then run memmy-project assist ask --project <current project> --member {member} --file <request file> to send it to {name}.",
+  "collab.demo.prefill.ask": "Ask {name} to read the Project collab FAQ on his computer and tell me what happens on my side when a member asks me for help",
+  // Appended to what the agent receives only; never shown in the composer or the bubble.
+  "collab.demo.prefill.askHint": "(Execution note: do not ask back. Turn the sentence above into a title and the things to do, write them to a request file, then run memmy-project assist ask --project <current project> --member {member} --file <request file> to send it to {name}.)",
   "collab.demo.reply.waiting": "Your agent is reading {name}'s task...",
   "collab.demo.reply.title": "Your agent read {name}'s task",
   "collab.demo.reply.body": "Everything in the checklist came from {name}'s task; you never told your agent about it. New tasks are shared with members by default, so {name} can continue yours.",

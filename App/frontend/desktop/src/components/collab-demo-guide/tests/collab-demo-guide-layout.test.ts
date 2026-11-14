@@ -61,6 +61,14 @@ describe("demo guide layout", () => {
     expect(below.top).toBe(300 + 120 + 14);
   });
 
+  it("puts the card inside a large lit area that has no control to point at", () => {
+    const conversation = { left: 0, top: 0, width: 1200, height: 620 };
+    const placement = cardPlacement(conversation, viewport, 180, { hasStroke: false });
+    expect(placement.top).toBe(620 - 180 - 20);
+    expect(placement.left).toBe(20);
+    expect(placement.top + 180).toBeLessThanOrEqual(conversation.top + conversation.height);
+  });
+
   it("keeps the card on screen in a narrow window", () => {
     const narrow = { width: 420, height: 720 };
     const hole = { left: 12, top: 200, width: 396, height: 160 };
