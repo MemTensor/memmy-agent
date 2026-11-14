@@ -260,12 +260,23 @@ export class ExecTool extends Tool {
     this.sessionKey = context.sessionKey ?? null;
   }
 
-  /** 子进程看到的环境变量：只有 Memmy 自己的任务才带会话 id，CLI 与其它 Agent 都一样。 */
+  /**
+   * 子进程看到的环境变量：只有 Memmy 自己的任务才带这两项，CLI 与其它 Agent 都一样。
+   *
+   * - `MEMMY_TASK_ID`：这条 exec 属于哪次任务。
+   * - `MEMMY_HOME`：当前 Memmy 的数据目录。命令行工具（例如 memmy-project）据此找到正在跑这条任务的
+   *   这个 Memmy；不带它就会去读 `~/.memmy/runtime.json`，那里可能是另一份早已停掉的安装。
+   *   逐个变量显式注入，不放宽其余的白名单。
+   */
   private contextEnv(): Record<string, string> {
     const key = this.sessionKey ?? "";
     if (!key.startsWith("websocket:")) return {};
+    const env: Record<string, string> = {};
     const taskId = key.slice("websocket:".length).trim();
-    return taskId ? { MEMMY_TASK_ID: taskId } : {};
+    if (taskId) env.MEMMY_TASK_ID = taskId;
+    const memmyHome = process.env.MEMMY_HOME?.trim();
+    if (memmyHome) env.MEMMY_HOME = memmyHome;
+    return env;
   }
 
   static enabled(ctx: any): boolean {
