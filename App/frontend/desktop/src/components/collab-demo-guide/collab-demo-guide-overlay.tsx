@@ -388,7 +388,9 @@ export function CollabDemoGuideOverlay(props: {
   const placement = cardPlacement(hole, viewport, cardHeight, {
     hasStroke: stroke !== null,
     reserveBottom: target.cardBottomReserve ?? 0,
-    cardWidth
+    cardWidth,
+    // 唯一可点的那个控件绝不能被说明卡盖住（授权弹窗里就是「允许」）。
+    avoid: stroke
   });
   // 亮区几乎占满窗口时（对话区就是这种情况）卡片只能压在它上面：这里再夹一次，保证不出窗口。
   const cardTop = Math.max(8, Math.min(placement.top, viewport.height - cardHeight - 8));

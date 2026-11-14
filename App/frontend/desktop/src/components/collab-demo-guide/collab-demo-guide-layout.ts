@@ -136,14 +136,46 @@ export const DEMO_GUIDE_CARD_WIDTH_WIDE = 400;
 const CARD_GAP = 14;
 const CARD_MIN_HEIGHT = 150;
 
+/** 说明卡与「必须别遮住」的那块之间至少留这么远，描边与阴影不会压上去。 */
+const AVOID_MARGIN = 6;
+
+/** 两块矩形是否相交（只算正面积的重叠：贴边不算）。 */
+export function rectsIntersect(a: Rect, b: Rect): boolean {
+  return a.left < b.left + b.width
+    && b.left < a.left + a.width
+    && a.top < b.top + b.height
+    && b.top < a.top + a.height;
+}
+
+/** 两块矩形重叠的面积：判断「哪个候选位置压得最少」用。 */
+function overlapArea(a: Rect, b: Rect): number {
+  const width = Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left);
+  const height = Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top);
+  return width > 0 && height > 0 ? width * height : 0;
+}
+
+/** 说明卡在某个位置时的矩形。 */
+function cardRect(placement: CardPlacement, width: number, height: number): Rect {
+  return { left: placement.left, top: placement.top, width, height };
+}
+
 /**
- * 说明卡贴在亮区旁边，优先右侧、其次左侧，都放不下就放下面或上面；四个方向都试过仍不合适时取空间最大的一边。
+ * 说明卡贴在亮区旁边，优先右侧、其次左侧，都放不下就放下面或上面；四个方向都试过仍不合适时压在亮区的角上。
+ *
+ * `options.avoid` 是绝不允许被遮住的那块（就是 `stroke`，也就是亮区里唯一可点的控件）：
+ * 按上面的顺序算出候选位置后，哪个候选不压它就用哪个；全都压上时再按「压得最少」挑一个，然后把它挤出去。
  */
 export function cardPlacement(
   hole: Rect,
   viewport: Viewport,
   cardHeight: number = CARD_MIN_HEIGHT,
-  options: { hasStroke?: boolean; reserveBottom?: number; cardWidth?: number } = {}
+  options: {
+    hasStroke?: boolean;
+    reserveBottom?: number;
+    cardWidth?: number;
+    /** 必须不被遮住的矩形：授权弹窗里「允许」那一块就是它。 */
+    avoid?: Rect | null;
+  } = {}
 ): CardPlacement {
   const height = Math.max(CARD_MIN_HEIGHT, cardHeight);
   // 加宽那档自己把宽度交进来：贴边时按它的实际宽度算，卡片才不会出窗口。
@@ -155,55 +187,133 @@ export function cardPlacement(
   const fitsVertically = (top: number) => top + height <= viewport.height - EDGE_MARGIN;
 
   const centeredTop = (top: number) => Math.max(EDGE_MARGIN, Math.min(top, viewport.height - height - EDGE_MARGIN));
+  const centeredLeft = (left: number) => Math.max(EDGE_MARGIN, Math.min(left, viewport.width - width - EDGE_MARGIN));
+  /** 贴左右两条边时箭头沿竖直方向挪：指向亮区的中心。 */
+  const arrowVertical = (top: number) => Math.max(18, Math.min(hole.top + hole.height / 2 - top - 6, height - 30));
+  /** 贴上下两条边时箭头沿水平方向挪。 */
+  const arrowHorizontal = (left: number) => Math.max(18, hole.left + hole.width / 2 - left - 6);
 
-  if (spaceRight >= width) {
-    const top = centeredTop(hole.top + hole.height / 2 - height / 2);
+  const besideRight = (top: number): CardPlacement => {
+    const aligned = centeredTop(top);
     return {
       left: hole.left + hole.width + CARD_GAP,
-      top,
-      arrow: { side: "left", offset: Math.max(18, Math.min(hole.top + hole.height / 2 - top - 6, height - 30)) }
+      top: aligned,
+      arrow: { side: "left", offset: arrowVertical(aligned) }
     };
-  }
-  if (spaceLeft >= width) {
-    const top = centeredTop(hole.top + hole.height / 2 - height / 2);
+  };
+  const besideLeft = (top: number): CardPlacement => {
+    const aligned = centeredTop(top);
     return {
       left: hole.left - CARD_GAP - width,
-      top,
-      arrow: { side: "right", offset: Math.max(18, Math.min(hole.top + hole.height / 2 - top - 6, height - 30)) }
+      top: aligned,
+      arrow: { side: "right", offset: arrowVertical(aligned) }
     };
+  };
+  const below = (left: number): CardPlacement => {
+    const aligned = centeredLeft(left);
+    return {
+      left: aligned,
+      top: hole.top + hole.height + CARD_GAP,
+      arrow: { side: "top", offset: arrowHorizontal(aligned) }
+    };
+  };
+  const above = (left: number): CardPlacement => {
+    const aligned = centeredLeft(left);
+    return {
+      left: aligned,
+      top: hole.top - CARD_GAP - height,
+      arrow: { side: "bottom", offset: arrowHorizontal(aligned) }
+    };
+  };
+  /** 压在亮区里的一个角上（窗口窄到四周都放不下时）：箭头贴着下沿，指回亮区里的内容。 */
+  const inside = (corner: "top" | "bottom", align: "left" | "right", reserveBottom = 0): CardPlacement => {
+    const left = align === "left"
+      ? Math.max(EDGE_MARGIN, Math.min(hole.left + 20, viewport.width - width - EDGE_MARGIN))
+      : Math.max(EDGE_MARGIN, Math.min(hole.left + hole.width - width - 20, viewport.width - width - EDGE_MARGIN));
+    const top = corner === "bottom"
+      ? Math.max(EDGE_MARGIN, hole.top + hole.height - height - 20 - reserveBottom)
+      : Math.max(EDGE_MARGIN, hole.top + 20);
+    return { left, top, arrow: { side: "bottom", offset: arrowHorizontal(left) } };
+  };
+
+  // 候选择序就是「先常规、后勉强」：右侧 → 左侧 → 压在亮区左下角 → 下面 → 上面 → 亮区里的其它三个角。
+  const candidates: CardPlacement[] = [];
+  if (spaceRight >= width) {
+    const top = hole.top + hole.height / 2 - height / 2;
+    candidates.push(besideRight(top), besideRight(0), besideRight(viewport.height - height));
   }
-  const left = Math.max(EDGE_MARGIN, Math.min(hole.left + hole.width / 2 - width / 2, viewport.width - width - EDGE_MARGIN));
+  if (spaceLeft >= width) {
+    const top = hole.top + hole.height / 2 - height / 2;
+    candidates.push(besideLeft(top), besideLeft(0), besideLeft(viewport.height - height));
+  }
   // 亮区本身就是一大片（对话区、看板）：说明卡没有要点着谁，放在这块区域的左下角最稳，
   // 也不会像贴在边上那样被窗口底部切掉。
-  if (!options.hasStroke && hole.height >= EDGE_MARGIN * 2 + height + 32) {
+  if (!options.hasStroke && hole.height >= EDGE_MARGIN * 2 + height + 32 && spaceRight < width && spaceLeft < width) {
     // 底部有要看的行（如任务页的「结果已发给谁」）时再往上让一让。
-    const reserveBottom = options.reserveBottom ?? 0;
-    return {
-      left: Math.max(EDGE_MARGIN, Math.min(hole.left + 20, viewport.width - width - EDGE_MARGIN)),
-      top: Math.max(EDGE_MARGIN, hole.top + hole.height - height - 20 - reserveBottom),
-      arrow: { side: "bottom", offset: 22 }
-    };
+    candidates.push(inside("bottom", "left", options.reserveBottom ?? 0));
   }
   if (spaceBelow >= height && fitsVertically(hole.top + hole.height + CARD_GAP)) {
-    return {
-      left,
-      top: hole.top + hole.height + CARD_GAP,
-      arrow: { side: "top", offset: Math.max(18, hole.left + hole.width / 2 - left - 6) }
-    };
+    candidates.push(below(hole.left + hole.width / 2 - width / 2));
   }
   if (spaceAbove >= height) {
-    return {
-      left,
-      top: hole.top - CARD_GAP - height,
-      arrow: { side: "bottom", offset: Math.max(18, hole.left + hole.width / 2 - left - 6) }
-    };
+    candidates.push(above(hole.left + hole.width / 2 - width / 2));
   }
-  // 都放不下（窗口很窄、亮区几乎占满）：压在上面，箭头仍指回亮区。
-  return {
-    left,
-    top: Math.max(EDGE_MARGIN, Math.min(hole.top + hole.height + CARD_GAP, viewport.height - height - EDGE_MARGIN)),
-    arrow: { side: "top", offset: Math.max(18, hole.left + hole.width / 2 - left - 6) }
-  };
+  candidates.push(
+    inside("bottom", "left", options.reserveBottom ?? 0),
+    inside("bottom", "right", options.reserveBottom ?? 0),
+    inside("top", "left"),
+    inside("top", "right")
+  );
+
+  const avoid = options.avoid ?? null;
+  if (!avoid) return candidates[0]!;
+  // 必须别遮住的那块外扩一点：贴边不算相交，但也别贴着。
+  const keep = padRect(avoid, AVOID_MARGIN);
+  let fallback: { placement: CardPlacement; overlap: number } | null = null;
+  for (const candidate of candidates) {
+    const overlap = overlapArea(cardRect(candidate, width, height), keep);
+    if (overlap === 0) return candidate;
+    if (!fallback || overlap < fallback.overlap) fallback = { placement: candidate, overlap };
+  }
+  // 每个候选都压在按钮上（窗口窄到几乎没有空地）：挨个挪一步找一个不与它相交的位置，
+  // 挪不出来（比窗口还大）时用压得最少的那个，箭头仍指回亮区。
+  return freePlacement(hole, viewport, width, height, keep) ?? fallback!.placement;
+}
+
+/**
+ * 在窗口里找一个既不与 `avoid` 相交、也留在窗口内的位置：从离亮区最近的几行开始，逐行逐列地试。
+ * 只在上面的候选全部压住控件时才会用到，所以不在乎多算几步。
+ */
+function freePlacement(hole: Rect, viewport: Viewport, width: number, height: number, avoid: Rect | null): CardPlacement | null {
+  if (!avoid) return null;
+  const step = 16;
+  const centerX = hole.left + hole.width / 2 - width / 2;
+  const centerY = hole.top + hole.height / 2 - height / 2;
+  const rows: number[] = [];
+  for (let top = EDGE_MARGIN; top + height <= viewport.height - EDGE_MARGIN; top += step) rows.push(top);
+  // 从上往下、从离亮区中心最近的开始试：先试弹窗的其余角落。
+  rows.sort((a, b) => Math.abs(a - centerY) - Math.abs(b - centerY));
+  for (const top of rows) {
+    const lefts: number[] = [];
+    for (let left = EDGE_MARGIN; left + width <= viewport.width - EDGE_MARGIN; left += step) lefts.push(left);
+    lefts.sort((a, b) => Math.abs(a - centerX) - Math.abs(b - centerX));
+    for (const left of lefts) {
+      const rect = { left, top, width, height };
+      if (rectsIntersect(rect, avoid)) continue;
+      return { left, top, arrow: { side: arrowSideFor(hole, rect), offset: 22 } };
+    }
+  }
+  return null;
+}
+
+/** 箭头从哪条边指回亮区：卡片在亮区哪一侧，箭头就在对面的那条边上。 */
+function arrowSideFor(hole: Rect, rect: Rect): CardPlacement["arrow"]["side"] {
+  if (rect.top >= hole.top + hole.height) return "top";
+  if (rect.top + rect.height <= hole.top) return "bottom";
+  if (rect.left >= hole.left + hole.width) return "left";
+  if (rect.left + rect.width <= hole.left) return "right";
+  // 压在亮区里：箭头贴着最近的那条边。
+  return rect.top + rect.height / 2 < hole.top + hole.height / 2 ? "top" : "bottom";
 }
 
 /** 锚点矩形与视口是否相交：切换页面时锚点可能已经不在屏上，这时先不画蒙版。 */

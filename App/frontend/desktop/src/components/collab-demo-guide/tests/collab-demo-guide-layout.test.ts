@@ -9,7 +9,9 @@ import {
   demoGuideTarget,
   maskRects,
   padRect,
-  rectVisible
+  rectVisible,
+  rectsIntersect,
+  type Rect
 } from "../collab-demo-guide-layout.js";
 
 const viewport = { width: 1200, height: 800 };
@@ -77,6 +79,46 @@ describe("demo guide layout", () => {
     expect(placement.left + DEMO_GUIDE_CARD_WIDTH).toBeLessThanOrEqual(narrow.width - 8);
     expect(placement.top).toBeGreaterThanOrEqual(8);
     expect(placement.top + 200).toBeLessThanOrEqual(narrow.height - 8);
+  });
+
+  it("keeps the card off the only clickable control", () => {
+    // 授权弹窗：窗口里几乎放不下弹窗（520 宽、够高），「允许」在弹窗底部偏右。
+    // 四周都没有空间时卡片只能压在弹窗上，那就必须落在与「允许」不相交的那一角。
+    const viewportNarrow = { width: 600, height: 520 };
+    const dialog = { left: 40, top: 40, width: 520, height: 440 };
+    const allow = { left: 330, top: 440, width: 220, height: 34 };
+    const cardHeight = 180;
+    const placement = cardPlacement(dialog, viewportNarrow, cardHeight, {
+      hasStroke: true,
+      avoid: allow
+    });
+    const cardRect: Rect = { left: placement.left, top: placement.top, width: DEMO_GUIDE_CARD_WIDTH, height: cardHeight };
+    expect(rectsIntersect(cardRect, allow)).toBe(false);
+    // 同时不能出窗口：被避让挤出去就没有意义。
+    expect(cardRect.left).toBeGreaterThanOrEqual(8);
+    expect(cardRect.top).toBeGreaterThanOrEqual(8);
+    expect(cardRect.left + cardRect.width).toBeLessThanOrEqual(viewportNarrow.width - 8);
+    expect(cardRect.top + cardRect.height).toBeLessThanOrEqual(viewportNarrow.height - 8);
+  });
+
+  it("goes to the side of the authorize dialog before sitting on top of it", () => {
+    // 窗口够宽：授权弹窗两侧有地方，卡片就贴到外侧，不会压在弹窗里的「允许」上。
+    const dialog = { left: 380, top: 70, width: 520, height: 570 };
+    const allow = { left: 640, top: 590, width: 232, height: 34 };
+    const beside = cardPlacement(dialog, viewport, 200, { hasStroke: true, avoid: allow });
+    const cardRect: Rect = { left: beside.left, top: beside.top, width: DEMO_GUIDE_CARD_WIDTH, height: 200 };
+    // 在弹窗的左边或右边外侧，不贴在弹窗身上。
+    expect(["left", "right"]).toContain(beside.arrow.side);
+    expect(rectsIntersect(cardRect, dialog)).toBe(false);
+    expect(rectsIntersect(cardRect, allow)).toBe(false);
+  });
+
+  it("returns to the previous placement when nothing has to be avoided", () => {
+    // 不传 avoid 时行为与以前一样：先右、再左、再下。
+    const hole = { left: 200, top: 300, width: 400, height: 120 };
+    expect(cardPlacement(hole, viewport, 180)).toEqual(cardPlacement(hole, viewport, 180, { avoid: null }));
+    expect(rectsIntersect(hole, { left: 10, top: 10, width: 4, height: 4 })).toBe(false);
+    expect(rectsIntersect(hole, { left: 300, top: 350, width: 4, height: 4 })).toBe(true);
   });
 
   it("names the anchor and the control for each phase", () => {
