@@ -107,6 +107,7 @@ export function CreateProjectModal(props: {
    * 新手引导的演示只在这一个时机出现：本人第一次创建共享项目，也就是还没有自己拥有的在线项目。
    * 加入过别人的项目不影响：加入他人项目本身不演示，之后第一次自己创建时仍然演示。
    * 带了这个标记也不代表一定演示：云端会再判断开关、名单与是否已经体验过，返回 `demo.active` 才真的开始。
+   * 从大卡「新建项目」进来的人不看这一条：那条路已经明确要体验，云端按名单与是否体验过决定。
    */
   const firstSharedProject = share && shareAvailable && ownedCount === 0;
 
@@ -178,7 +179,8 @@ export function CreateProjectModal(props: {
     try {
       // The cloud record points at the folder the project already runs in, so both keep the same directory.
       const created = await props.collab.createProject(trimmed, workingDirectory, {
-        demo: firstSharedProject
+        // 大卡入口已经明确要体验一次：这时不再要求「名下没有在线项目」，交云端按名单判断。
+        demo: firstSharedProject || demo
       });
       sharingStarted = true;
       props.onShared(created.project);

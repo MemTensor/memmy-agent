@@ -185,6 +185,23 @@ describe("new project dialog and the demo flag", () => {
     expect(mocks.createProject).toHaveBeenCalledWith("第二个项目", "/Users/me/.memmy/local-projects/demo", { demo: false });
   });
 
+  it("still asks for the demo from the launch card when the person already has one", async () => {
+    // 大卡入口已经明确要体验：名下已有协作项目也照旧带标记，由云端按名单与是否体验过决定。
+    await act(async () => {
+      addCollabProject({
+        id: "p-existing",
+        name: "旧的协作项目",
+        role: "owner",
+        memberCount: 2,
+        sessionCount: 1,
+        createdAt: null,
+        localProjectId: "local-9"
+      });
+    });
+    await renderDemoDialog();
+    await createNamed("项目协作体验");
+    expect(mocks.createProject).toHaveBeenCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: true });
+  });
   it("still asks for the demo when the person has only joined others' projects", async () => {
     await act(async () => {
       addCollabProject({
