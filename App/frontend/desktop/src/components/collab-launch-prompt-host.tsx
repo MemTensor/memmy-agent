@@ -101,7 +101,8 @@ export function CollabLaunchPromptHost() {
         setOpen(false);
         setCollabLaunchPromptOpen(false);
         // The new-project dialog is mounted by AppFrame, so it opens over the current page; the board follows.
-        requestCreateProject({ share: true });
+        // 从大卡进来就带着体验走：弹窗里有预填的名称与打开的协作开关，引导先只等人点「创建项目」。
+        requestCreateProject({ share: true, demo: true });
       }}
     />
   );

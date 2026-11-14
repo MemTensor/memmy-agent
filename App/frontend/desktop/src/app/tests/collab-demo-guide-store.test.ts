@@ -181,6 +181,39 @@ describe("demo guide state machine", () => {
     expect(demoGuideHeartbeatStep("complete")).toBe("finish");
   });
 
+  it("starts on the create-project step with nothing to skip", () => {
+    const before = demoGuideReducer(
+      { ...({} as DemoGuideState), status: "ended", phase: "complete" },
+      { type: "start-before-project" }
+    );
+    expect(before.status).toBe("active");
+    expect(before.phase).toBe("create-project");
+    // 还没有云端项目：心跳与结束演示都无处可发。
+    expect(before.projectId).toBeNull();
+    expect(before.memberUserId).toBeNull();
+    // 这一步跳不了：不建项目就没有后面的演示；取消这一步不是「退出」，直接回到空闲。
+    expect(demoGuideReducer(before, { type: "skip" }).phase).toBe("create-project");
+    expect(demoGuideReducer(before, { type: "end", reason: "exited" }).status).toBe("ended");
+  });
+
+  it("turns the create-project step into the first step once the cloud starts the demo", () => {
+    const before = demoGuideReducer(
+      { ...({} as DemoGuideState), status: "ended", phase: "complete" },
+      { type: "start-before-project" }
+    );
+    const started = demoGuideReducer(before, { type: "start", input: START });
+    expect(started.phase).toBe("task-row");
+    expect(started.projectId).toBe("cloud-1");
+    expect(started.memberName).toBe("小饭团");
+  });
+
+  it("says a failure once instead of on every poll", () => {
+    const failed = demoGuideReducer(started(), { type: "fail", reason: "协助请求没有发出去。" });
+    // 轮询每拍都会读到同一个失败结果：同一个原因不换新对象，界面不会跟着重画。
+    expect(demoGuideReducer(failed, { type: "fail", reason: "协助请求没有发出去。" })).toBe(failed);
+    expect(demoGuideReducer(failed, { type: "fail", reason: "另一个原因" }).error).toBe("另一个原因");
+  });
+
   it("gives each prefill a new nonce so the composer is filled once per step", () => {
     const first = run(started(), [{ type: "task-opened" }, { type: "task-continued", prefill: "第一句" }]);
     expect(first.prefill?.nonce).toBe(1);

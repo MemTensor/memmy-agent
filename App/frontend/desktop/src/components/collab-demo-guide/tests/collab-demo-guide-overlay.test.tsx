@@ -168,6 +168,42 @@ describe("demo guide overlay tracking", () => {
     });
   });
 
+  it("lights only Create project before the project exists", async () => {
+    const submit = document.createElement("button");
+    submit.setAttribute("data-demo-guide", "create-project-submit");
+    stubRect(submit, () => rect({ left: 900, top: 600, width: 96, height: 32 }));
+    await act(async () => {
+      document.body.append(submit);
+    });
+    // 建项目之前还不知道演示成员是谁：卡片用中性叫法，也不出现进度条与「跳过这一步」。
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <CollabDemoGuideOverlay
+            state={{ ...activeState("create-project"), projectId: null, localProjectId: null, memberUserId: null, memberName: "" }}
+            onNext={vi.fn()}
+            onSkip={vi.fn()}
+            onExit={vi.fn()}
+            onRetry={vi.fn()}
+            onCloseComplete={vi.fn()}
+            onInvite={vi.fn()}
+          />
+        </I18nProvider>
+      );
+    });
+    await frames(6);
+
+    expect(strokeOf()).toEqual({ left: 897, top: 597, width: 102, height: 38 });
+    const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
+    expect(card?.textContent).toContain("名字已经填好");
+    expect(card?.textContent).toContain("官方体验账号");
+    expect(card?.textContent).toContain("退出引导");
+    expect(card?.textContent).not.toContain("跳过这一步");
+    expect(card?.textContent).not.toContain("下一步");
+    // 还没有「第几步」：进度条与步骤名都不出现。
+    expect(card?.textContent).not.toContain("接着成员的任务做");
+  });
+
   it("waits for the target instead of drawing an overlay over nothing", async () => {
     for (const element of Array.from(document.querySelectorAll("[data-demo-guide]"))) element.remove();
     await mount("reader");

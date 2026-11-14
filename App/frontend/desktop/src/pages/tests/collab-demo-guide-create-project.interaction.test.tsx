@@ -60,6 +60,34 @@ describe("new project dialog and the demo flag", () => {
     return target!;
   }
 
+  /** 用体验入口的样子打开一次弹窗：名称与协作开关都由引导替人填好。 */
+  async function renderDemoDialog(): Promise<void> {
+    await act(async () => root.unmount());
+    container.remove();
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <CreateProjectModal
+            open
+            defaultShare
+            demo
+            collab={{ createProject: mocks.createProject, bindLocalProject: mocks.bindLocalProject } as never}
+            onClose={vi.fn()}
+            onCreated={vi.fn()}
+            onShared={vi.fn()}
+            onBound={vi.fn()}
+            onBindFailed={vi.fn()}
+            onShareFailed={vi.fn()}
+          />
+        </I18nProvider>
+      );
+    });
+    await flush();
+  }
+
   async function createNamed(name: string): Promise<void> {
     await act(async () => type(nameInput(), name));
     await act(async () => submitButton().click());
@@ -115,9 +143,30 @@ describe("new project dialog and the demo flag", () => {
     resetCollabProjectsStore();
   });
 
+  it("opens the walkthrough entrance with the name and sharing already set", async () => {
+    await renderDemoDialog();
+
+    // 名字替人填好，用户不用输任何东西。
+    expect(nameInput().value).toBe("项目协作体验");
+    const shareSwitch = document.querySelector<HTMLElement>("[role='switch']");
+    expect(shareSwitch?.getAttribute("aria-checked")).toBe("true");
+    // 「创建项目」是引导唯一的亮区：锚点就在这个按钮上。
+    expect(submitButton().getAttribute("data-demo-guide")).toBe("create-project-submit");
+    // 弹窗自己的暗底让给蒙版，否则会叠两层灰。
+    expect(document.querySelector(".modal-backdrop")?.className).toContain("backdropYield");
+    // 名称框不抢光标：这一步要点的是「创建项目」。
+    expect(document.activeElement).not.toBe(nameInput());
+  });
+
   it("asks the cloud for the demo on the first shared project", async () => {
     await createNamed("项目协作体验");
     expect(mocks.createProject).toHaveBeenCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: true });
+  });
+
+  it("leaves an ordinary new project empty and without the anchor", async () => {
+    // 侧栏的普通新建：名称留空等人输入，按钮上没有引导锚点。
+    expect(nameInput().value).toBe("");
+    expect(submitButton().getAttribute("data-demo-guide")).toBeNull();
   });
 
   it("never asks for the demo once an online project exists", async () => {

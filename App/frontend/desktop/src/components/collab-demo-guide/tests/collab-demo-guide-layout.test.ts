@@ -80,6 +80,8 @@ describe("demo guide layout", () => {
   });
 
   it("names the anchor and the control for each phase", () => {
+    // 建项目之前：新建弹窗里的「创建项目」是唯一亮起、也唯一可点的地方。
+    expect(demoGuideTarget("create-project")).toEqual({ region: "create-project-submit", stroke: "create-project-submit", blockRest: false });
     expect(demoGuideTarget("task-row")).toEqual({ region: "board-task-row", stroke: "board-task-row", blockRest: false });
     expect(demoGuideTarget("reader").stroke).toBe("reader-continue");
     expect(demoGuideTarget("compose").stroke).toBe("composer-send");

@@ -40,7 +40,14 @@ import {
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
 import { collabEnabledFor } from "../app/collab-mode.js";
-import { demoGuideBoundLocalProject, startDemoGuide } from "../app/collab-demo-guide-store.js";
+import {
+  demoGuideBoundLocalProject,
+  dismissDemoGuideBeforeProject,
+  getDemoGuideState,
+  startDemoGuide,
+  startDemoGuideBeforeProject,
+  subscribeDemoGuide
+} from "../app/collab-demo-guide-store.js";
 import { ApiRequestError } from "../api/http.js";
 import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
@@ -504,7 +511,11 @@ export function AppFrame(props: AppFrameProps) {
   const notifications = useOptionalNotificationCenter();
   const collabDecisions = collabSnapshot.decisions;
   const collabProjectIds = collabSnapshot.projects;
+  /** 新手引导进行中：演示自己就是主角，顶上「已加入「…」」这类一次性提示不抢镜。 */
+  const demoGuideActive = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState).status === "active";
   useEffect(() => {
+    // 演示一结束这一条会随依赖变化再跑一次：还没提示过的结果不会丢。
+    if (demoGuideActive) return;
     if (!notifications || collabDecisions.length === 0) return;
     const seen = readSeenDecisions();
     const announced = freshDecisionAnnouncements(collabDecisions, (collabProjectIds ?? []).map((project) => project.id), seen);
@@ -524,7 +535,7 @@ export function AppFrame(props: AppFrameProps) {
         });
       }
     }
-  }, [notifications, collabDecisions, collabProjectIds, t]);
+  }, [notifications, collabDecisions, collabProjectIds, demoGuideActive, t]);
 
   /**
    * A rename by the owner changes what every member reads. Their local project keeps the name on their own
@@ -548,6 +559,8 @@ export function AppFrame(props: AppFrameProps) {
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   /** 新建弹窗打开时「与成员共享」的初始状态：只有新功能介绍的最后一页会要求默认开启。 */
   const [createProjectShare, setCreateProjectShare] = useState(false);
+  /** 这次新建是从新功能大卡点进来的体验入口：引导先只亮「创建项目」。 */
+  const [createProjectDemo, setCreateProjectDemo] = useState(false);
   const [joinProjectOpen, setJoinProjectOpen] = useState(false);
   /** The online project the person is about to leave, while the confirmation is open. */
   const [leaveOnlineProjectId, setLeaveOnlineProjectId] = useState<string | null>(null);
@@ -557,9 +570,12 @@ export function AppFrame(props: AppFrameProps) {
   useEffect(() => {
     if (!createPending) return;
     setCreateProjectShare(collabSnapshot.createShareDefault);
+    setCreateProjectDemo(collabSnapshot.createDemo);
     setCreateProjectOpen(true);
+    // 体验入口：弹窗还没建出项目，引导先停在这里，蒙版只亮「创建项目」。
+    if (collabSnapshot.createDemo) startDemoGuideBeforeProject();
     consumeCreateProjectRequest();
-  }, [createPending, collabSnapshot.createShareDefault]);
+  }, [createPending, collabSnapshot.createShareDefault, collabSnapshot.createDemo]);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
@@ -2123,9 +2139,16 @@ export function AppFrame(props: AppFrameProps) {
         // API Key 模式不连接云端：新建弹窗里不出现「与成员共享」，项目就只建在本机。
         shareAvailable={collabEnabled}
         defaultShare={createProjectShare}
-        onClose={() => setCreateProjectOpen(false)}
+        demo={createProjectDemo}
+        onClose={() => {
+          // 人自己关掉弹窗：引导随之收起，什么都不发生；之后手建第一个协作项目走的是原来那套。
+          setCreateProjectOpen(false);
+          dismissDemoGuideBeforeProject();
+        }}
         onCreated={(localProjectId, outcome) => {
           setCreateProjectOpen(false);
+          // 没共享出去就没有演示：收起「建项目之前」的引导，项目照常建在本机。
+          if (!outcome.shareRequested) dismissDemoGuideBeforeProject();
           // Only now, once the project exists, does the window move on.
           const destination = resolveCreatedProjectDestination(localProjectId, outcome.shareRequested);
           if (destination.kind === "board") {
@@ -2147,16 +2170,22 @@ export function AppFrame(props: AppFrameProps) {
               memberUserId: project.demo.memberUserId,
               memberName: project.demo.memberName
             });
+          } else {
+            // 云端说这次不演示（开关关了、名单外、已经体验过）：静默收起，不报错也不提示。
+            dismissDemoGuideBeforeProject();
           }
         }}
         onJoinProject={() => {
           // 同一个弹窗的另一种模式：关掉新建、打开加入，位置与尺寸都不变。
           setCreateProjectOpen(false);
+          // 体验入口的另一条路：「加入项目」不是这次演示要走的，蒙版随之收起。
+          dismissDemoGuideBeforeProject();
           setJoinProjectOpen(true);
         }}
         onShareFailed={(reason) => {
           // The project is usable on this computer; only sharing needs another try from its settings.
           console.warn(`Project created without sharing: ${reason}`);
+          dismissDemoGuideBeforeProject();
           // 看板顶部提示：协作项目服务暂不可用，等它恢复后可在项目配置里重试。
           showCollabNotice(t("collab.notice.shareUnavailable"));
           dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
@@ -2167,6 +2196,7 @@ export function AppFrame(props: AppFrameProps) {
         onShareLimitReached={(limit) => {
           // 额度用完不是故障：项目照建在本机，提示要说清上限是多少、怎么腾出额度。
           console.warn(`Project created without sharing: owned project limit ${limit} reached`);
+          dismissDemoGuideBeforeProject();
           showCollabNotice(t("collab.notice.shareQuotaExceeded", { limit }));
           dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
             source: "sidebar",

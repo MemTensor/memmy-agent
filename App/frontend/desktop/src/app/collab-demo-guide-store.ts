@@ -9,6 +9,8 @@ import type { CollabClient } from "../api/collab-client.js";
 
 /** 引导的每个子状态。三个大步骤各自有若干子状态，卡片上的「1 / 3」由 {@link demoGuideStepNumberOf} 给出。 */
 export type DemoGuidePhase =
+  // 建项目之前：新建弹窗刚打开，还没有云端项目，蒙版只亮「创建项目」。
+  | "create-project"
   | "task-row"
   | "reader"
   | "compose"
@@ -67,6 +69,8 @@ export interface DemoGuideStart {
 
 export type DemoGuideEvent =
   | { type: "start"; input: Omit<DemoGuideStart, "client"> }
+  /** 从大卡点「新建项目」进来：先只在新建弹窗上亮「创建项目」，还没有云端项目。 */
+  | { type: "start-before-project" }
   | { type: "task-opened" }
   | { type: "task-continued"; prefill?: string }
   | { type: "composer-sent" }
@@ -103,6 +107,8 @@ const IDLE: DemoGuideState = {
 
 /** 一个子状态属于第几步：进度条与「1 / 3」按它算。 */
 export function demoGuideStepNumberOf(phase: DemoGuidePhase): 1 | 2 | 3 {
+  // 建项目之前的阶段还没有进度可讲：卡片上不出现进度条与「第几步」。
+  if (phase === "create-project") return 1;
   if (phase === "task-row" || phase === "reader" || phase === "compose" || phase === "reply-waiting" || phase === "reply-done") {
     return 1;
   }
@@ -134,6 +140,12 @@ export function demoGuideSendsAssistHint(input: {
 /** 引导的纯状态机：所有推进条件都在这里，界面只负责发事件与画卡片。 */
 export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): DemoGuideState {
   switch (event.type) {
+    case "start-before-project":
+      return {
+        ...IDLE,
+        status: "active",
+        phase: "create-project"
+      };
     case "start":
       return {
         ...IDLE,
@@ -156,7 +168,10 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       if (state.phase === "ask-compose") return { ...state, phase: "ask-waiting", askDelivered: false };
       return state;
     case "assist-delivered":
-      return state.status === "active" && state.phase === "ask-waiting" ? { ...state, askDelivered: true } : state;
+      // 结果回来了就是这一步成了：之前那句「没有完成」随之收起。
+      return state.status === "active" && state.phase === "ask-waiting"
+        ? { ...state, askDelivered: true, error: null }
+        : state;
     case "agent-settled":
       if (state.status !== "active") return state;
       // 第二步的结果回来之后 Agent 还要再回一句：那时才给「下一步」。
@@ -179,6 +194,8 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       return state;
     case "skip": {
       if (state.status !== "active") return state;
+      // 建项目之前没有可跳过的步骤：不建项目就没有后面的演示。
+      if (state.phase === "create-project") return state;
       const step = demoGuideStepNumberOf(state.phase);
       if (step === 1) {
         return {
@@ -217,10 +234,11 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
         : { ...state, phase: "help-rejected", error: null };
     case "help-finished":
       return state.status === "active" && state.phase === "help-running"
-        ? { ...state, phase: "help-done", done: { ...state.done, help: true } }
+        ? { ...state, phase: "help-done", error: null, done: { ...state.done, help: true } }
         : state;
     case "fail":
-      return state.status === "active" ? { ...state, error: event.reason } : state;
+      // 同一个原因已经说过就不再重复：轮询每拍都会读到同一个失败结果。
+      return state.status === "active" && state.error !== event.reason ? { ...state, error: event.reason } : state;
     case "retry":
       return state.status === "active" && state.error !== null ? { ...state, error: null } : state;
     case "cloud-ended":
@@ -286,6 +304,11 @@ export function isDemoGuideActiveFor(projectId: string | null | undefined): bool
   return state.localProjectId === projectId || state.projectId === projectId;
 }
 
+/** 引导停在新建弹窗上：还没有云端项目，只有「创建项目」可点。 */
+export function isDemoGuideBeforeProject(): boolean {
+  return state.status === "active" && state.phase === "create-project";
+}
+
 /** 全局是否在演示中：其他大卡与提示据此不出现。 */
 export function isDemoGuideActive(): boolean {
   return state.status === "active";
@@ -299,7 +322,7 @@ function emit(next: DemoGuideState): void {
 
 /** 发一个事件；与云端有关的收尾（心跳、结束演示）在这里一并处理。 */
 export function dispatchDemoGuide(event: DemoGuideEvent): void {
-  if (event.type === "start") {
+  if (event.type === "start" || event.type === "start-before-project") {
     stopHeartbeat();
     emit(state = demoGuideReducer({ ...state, ...IDLE }, event));
     return;
@@ -334,6 +357,21 @@ export function startDemoGuide(input: DemoGuideStart): void {
   });
   startHeartbeat();
   void sendHeartbeat();
+}
+
+/** 从大卡点「新建项目」进来：先只在新建弹窗上亮「创建项目」，云端还没有项目，也没有心跳。 */
+export function startDemoGuideBeforeProject(): void {
+  if (state.status === "active") return;
+  dispatchDemoGuide({ type: "start-before-project" });
+}
+
+/**
+ * 收起「建项目之前」的引导，什么都不发生：用户取消了弹窗、关掉了协作开关、或者云端说这次不演示。
+ * 这不是退出：本来就还没有项目，不必通知云端，只是收起蒙版不再带着人走。
+ */
+export function dismissDemoGuideBeforeProject(): void {
+  if (!isDemoGuideBeforeProject()) return;
+  emit(state = { ...IDLE });
 }
 
 /** 演示一停就在这里收场：云端把小饭团移出项目，之后这个项目就是普通项目。 */

@@ -31,7 +31,8 @@ import styles from "./collab-demo-guide.module.css";
 type Translate = (key: MessageKey, values?: Record<string, string | number>) => string;
 
 export interface DemoGuideCard {
-  step: 1 | 2 | 3;
+  /** 卡片头里的「第几步」；建项目之前还没有步骤，为 null 时不显示进度条。 */
+  step: 1 | 2 | 3 | null;
   title: string | null;
   body: string;
   status: string | null;
@@ -41,7 +42,7 @@ export interface DemoGuideCard {
 /** 每个子状态卡片上写什么：文案就是产品定稿的那几句，`{name}` 换成本次演示成员的昵称。 */
 export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCard {
   const name = state.memberName;
-  const base = (step: 1 | 2 | 3, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
+  const base = (step: 1 | 2 | 3 | null, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
     step,
     title: null,
     body,
@@ -50,6 +51,9 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
     ...extra
   });
   switch (state.phase) {
+    case "create-project":
+      // 演示成员是谁要等云端建好项目才知道：这时先用中性的叫法，不写死任何账号或昵称。
+      return base(null, t("collab.demo.createProject.body", { name: name || t("collab.demo.officialName") }));
     case "task-row":
       return base(1, t("collab.demo.taskRow.body", { name }));
     case "reader":
@@ -92,6 +96,8 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
 
 /** 哪几个子状态可以跳过这一步：出结果之后的「下一步」不是跳过的地方。 */
 export function demoGuideSkippable(phase: DemoGuidePhase): boolean {
+  // 建项目之前没有可跳过的内容：不建项目就没有后面的演示。
+  if (phase === "create-project") return false;
   return phase !== "reply-done" && phase !== "ask-done" && phase !== "help-done" && phase !== "help-rejected" && phase !== "complete";
 }
 
@@ -327,14 +333,18 @@ export function CollabDemoGuideOverlay(props: {
           aria-hidden="true"
         />
         <div className={styles.head}>
-          <span className={styles.progress} aria-hidden="true">
-            {[1, 2, 3].map((step) => (
-              <span key={step} className={`${styles.progressBar}${step <= card.step ? ` ${styles.progressBarOn}` : ""}`} />
-            ))}
-          </span>
-          <span className={styles.stepLabel}>
-            {t("collab.demo.progress", { step: String(card.step), name: t(("collab.demo.stepName." + String(card.step)) as MessageKey) })}
-          </span>
+          {card.step === null ? null : (
+            <>
+              <span className={styles.progress} aria-hidden="true">
+                {[1, 2, 3].map((step) => (
+                  <span key={step} className={`${styles.progressBar}${step <= card.step! ? ` ${styles.progressBarOn}` : ""}`} />
+                ))}
+              </span>
+              <span className={styles.stepLabel}>
+                {t("collab.demo.progress", { step: String(card.step), name: t(("collab.demo.stepName." + String(card.step)) as MessageKey) })}
+              </span>
+            </>
+          )}
           <span className={styles.grow} />
           <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
             {t("collab.demo.exit")}
@@ -360,7 +370,11 @@ export function CollabDemoGuideOverlay(props: {
             {card.status ? <p className={styles.status}>{card.status}</p> : null}
             {confirming ? (
               <div className={styles.confirm}>
-                <p className={styles.confirmText}>{t("collab.demo.exit.body", { name: state.memberName })}</p>
+                <p className={styles.confirmText}>
+                  {state.phase === "create-project"
+                    ? t("collab.demo.exit.bodyBeforeProject")
+                    : t("collab.demo.exit.body", { name: state.memberName })}
+                </p>
                 <div className={styles.foot}>
                   <button type="button" className={styles.actionGhost} onClick={() => setConfirming(false)}>
                     {t("collab.demo.exit.continue")}

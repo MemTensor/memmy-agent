@@ -29,6 +29,11 @@ export function CollabCreateProjectDialog(props: {
   shareAvailable?: boolean;
   /** 打开时「与成员共享」是否已经开启：新功能介绍的最后一页会要求默认共享。 */
   defaultShare?: boolean;
+  /**
+   * 新手引导的体验入口：名称预填好、协作开关已打开，用户只需点「创建项目」。
+   * 弹窗不加新控件，也不写额外说明；蒙版由引导画在上面，所以要交出自己的暗底。
+   */
+  demo?: boolean;
   onClose: () => void;
   /**
    * The project exists on this computer. `shareRequested` says whether the person tried to share it: a project that
@@ -63,6 +68,7 @@ export function CreateProjectModal(props: {
   open: boolean;
   shareAvailable?: boolean;
   defaultShare?: boolean;
+  demo?: boolean;
   collab: CollabClient;
   onClose: () => void;
   onCreated: (localProjectId: string, outcome: { shareRequested: boolean }) => void;
@@ -107,12 +113,15 @@ export function CreateProjectModal(props: {
   /**
    * 打开那一刻的默认勾选：用 ref 带上，effect 只在打开时读一次，弹窗开着时这个值变化不会重置人的选择。
    */
-  const shareOnOpenRef = useRef(props.defaultShare === true && shareAvailable);
-  shareOnOpenRef.current = props.defaultShare === true && shareAvailable;
+  const demo = props.demo === true && shareAvailable;
+  const defaultShareOnOpen = demo || props.defaultShare === true;
+  const shareOnOpenRef = useRef(defaultShareOnOpen && shareAvailable);
+  shareOnOpenRef.current = defaultShareOnOpen && shareAvailable;
 
   useEffect(() => {
     if (props.open) {
-      setName("");
+      // 体验入口的名字替人填好，用户也可以改；普通新建仍然留空等人输入。
+      setName(demo ? t("collab.demo.projectName") : "");
       setDirectory(null);
       setShare(shareOnOpenRef.current);
       setError(null);
@@ -204,9 +213,10 @@ export function CreateProjectModal(props: {
       onClose={props.onClose}
       closeLabel={t("common.close")}
       closeContent={<X size={16} aria-hidden="true" />}
-      initialFocusRef={inputRef}
+      // 演示里不把光标塞进名称框：要点的是「创建项目」，蒙版也只亮它。
+      initialFocusRef={demo ? undefined : inputRef}
       className={`${styles.createModal} ${styles.simpleCreateModal}`}
-      backdropClassName={styles.backdrop}
+      backdropClassName={demo ? `${styles.backdrop} ${styles.backdropYield}` : styles.backdrop}
       bodyClassName={styles.simpleCreateBody}
       footerClassName={styles.simpleCreateFooter}
       footer={(
@@ -218,7 +228,12 @@ export function CreateProjectModal(props: {
           ) : <span />}
           <span className={styles.footerButtons}>
             <Button variant="ghost" onClick={props.onClose}>{t("collab.cancel")}</Button>
-            <Button variant="primary" disabled={!valid || busy} onClick={() => void submit()}>
+            <Button
+              variant="primary"
+              disabled={!valid || busy}
+              data-demo-guide={demo ? "create-project-submit" : undefined}
+              onClick={() => void submit()}
+            >
               {t("collab.create.submit")}
             </Button>
           </span>

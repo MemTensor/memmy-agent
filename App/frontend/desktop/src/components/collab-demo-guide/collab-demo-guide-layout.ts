@@ -26,6 +26,8 @@ export interface DemoGuideTarget {
 }
 
 const TARGETS: Record<DemoGuidePhase, DemoGuideTarget> = {
+  // 建项目之前：只亮新建弹窗里的「创建项目」，名称与开关已经替人填好。
+  "create-project": { region: "create-project-submit", stroke: "create-project-submit", blockRest: false },
   "task-row": { region: "board-task-row", stroke: "board-task-row", blockRest: false },
   // 只读面板可以滚动阅读，但只有头部那个「继续任务」能点。
   reader: { region: "reader-panel", stroke: "reader-continue", blockRest: true },

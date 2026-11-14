@@ -13,6 +13,7 @@ import board from "../../collab-page.module.css";
 
 /** 预览里的步骤：卡片上的名字与 {@link DemoGuidePhase} 一一对应。 */
 export const DEMO_GUIDE_PREVIEW_STEPS = {
+  "0-create-project": "create-project",
   "1-task-row": "task-row",
   "1-reader": "reader",
   "1-compose": "compose",
@@ -38,13 +39,15 @@ function stateFor(step: DemoGuidePreviewStep): DemoGuideState {
   const phase = step === "complete" || step === "error"
     ? (step === "complete" ? "complete" : "reply-waiting")
     : DEMO_GUIDE_PREVIEW_STEPS[step];
+  // 建项目之前还没有云端项目，也还不知道演示成员是谁：卡片这时用中性叫法。
+  const beforeProject = phase === "create-project";
   return {
     status: step === "complete" ? "complete" : "active",
     phase,
-    projectId: "preview-cloud",
-    localProjectId: "preview-local",
-    memberUserId: "9001",
-    memberName: MEMBER,
+    projectId: beforeProject ? null : "preview-cloud",
+    localProjectId: beforeProject ? null : "preview-local",
+    memberUserId: beforeProject ? null : "9001",
+    memberName: beforeProject ? "" : MEMBER,
     error: step === "error" ? "Agent 没有给出回复。" : null,
     done: {
       task: step === "complete" || step === "3-gear" || step === "3-settings" || step === "3-waiting" || step === "3-dialog" || step === "3-running" || step === "3-done",
@@ -123,6 +126,53 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean }) 
               </li>
             ) : null}
           </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 新建项目弹窗：体验入口的样子——名称已填好、协作开关已打开，底部「创建项目」是蒙版唯一亮起的控件。
+ * 弹窗交出自己的暗底（见 DEMO_GUIDE_YIELD_BACKDROP），否则蒙版下面会叠两层灰。
+ */
+function CreateProjectSurface() {
+  const field: CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    height: 44,
+    padding: "0 12px",
+    border: "1px solid rgba(16,26,25,.14)",
+    borderRadius: 10,
+    background: "#fff",
+    fontSize: 13.5
+  };
+  return (
+    <div
+      data-demo-guide-yield-backdrop=""
+      style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}
+    >
+      <div className={board.simpleCreateModal} style={{ width: 520, background: "#fff", borderRadius: 16, padding: "20px 22px 16px" }}>
+        <b style={{ fontSize: 15 }}>新建项目</b>
+        <div style={{ marginTop: 16, ...field }}>
+          <span style={{ color: "rgba(16,26,25,.4)" }} aria-hidden="true">▣</span>
+          <span style={{ flex: 1 }}>项目协作体验</span>
+        </div>
+        <div className={board.simpleSectionLabel}>文件夹</div>
+        <div className={board.simpleFolderBox}>
+          <div className={board.simpleFolderEmpty}>
+            <span>还没有选文件夹，创建时会为你新建一个</span>
+          </div>
+        </div>
+        <div style={{ ...field, marginTop: 12, background: "color-mix(in srgb, #5cbfae 7%, #fff)", borderColor: "color-mix(in srgb, #5cbfae 55%, rgba(16,26,25,.14))" }}>
+          <span style={{ color: "#2f8f7f" }} aria-hidden="true">◉</span>
+          <span style={{ flex: 1 }}>与成员共享</span>
+          <button type="button" role="switch" aria-checked="true" aria-label="与成员共享" className={board.settingsSwitchOn} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
+          <button type="button" className="button button-ghost">取消</button>
+          <button type="button" className="button button-primary" data-demo-guide="create-project-submit">创建项目</button>
         </div>
       </div>
     </div>
@@ -302,7 +352,8 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
   const phase = state.phase;
   const chat = phase === "compose" || phase === "reply-waiting" || phase === "reply-done" || phase === "ask-compose" || phase === "ask-waiting" || phase === "ask-done";
   let surface: ReactNode;
-  if (chat) surface = <ChatSurface phase={phase} />;
+  if (phase === "create-project") surface = <CreateProjectSurface />;
+  else if (chat) surface = <ChatSurface phase={phase} />;
   else if (phase === "reader") surface = (<><BoardSurface withSettings={false} withAssistRow={false} /><ReaderSurface /></>);
   else if (phase === "settings-assist") surface = <SettingsSurface />;
   else if (phase === "help-dialog") surface = <AssistDialogSurface />;
