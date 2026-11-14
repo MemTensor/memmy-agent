@@ -23,17 +23,28 @@ export interface DemoGuideTarget {
   stroke: string | null;
   /** true：亮区里除描边控件外的位置都不接点击（读面板、弹窗这些自带多个按钮的地方）。 */
   blockRest: boolean;
+  /** 主锚点不在这一页时（比如执行中的协助条在任务页，人却在看板上）改用在的这一个。 */
+  fallback?: string;
+  /**
+   * 说明卡往下要留出来的高度：任务页底部那一行「结果已发给谁」与输入框是这一步要看的东西，
+   * 卡片不能盖住它们。
+   */
+  cardBottomReserve?: number;
 }
 
 const TARGETS: Record<DemoGuidePhase, DemoGuideTarget> = {
   // 建项目之前：只亮新建弹窗里的「创建项目」，名称与开关已经替人填好。
   "create-project": { region: "create-project-submit", stroke: "create-project-submit", blockRest: false },
+  // 加入提示窗自带遮罩，不用亮区；这一项只是为了让每个阶段都有目标。
+  joined: { region: "board-main", stroke: null, blockRest: false },
   "task-row": { region: "board-task-row", stroke: "board-task-row", blockRest: false },
   // 只读面板可以滚动阅读，但只有头部那个「继续任务」能点。
   reader: { region: "reader-panel", stroke: "reader-continue", blockRest: true },
   compose: { region: "composer", stroke: "composer-send", blockRest: true },
   "reply-waiting": { region: "conversation", stroke: null, blockRest: true },
   "reply-done": { region: "conversation", stroke: null, blockRest: true },
+  // 看板工具条上的「关联任务」：只亮它，点它就走完这一步（不打开关联弹窗）。
+  associate: { region: "board-associate", stroke: "board-associate", blockRest: false },
   "ask-compose": { region: "composer", stroke: "composer-send", blockRest: true },
   "ask-waiting": { region: "conversation", stroke: null, blockRest: true },
   "ask-done": { region: "conversation", stroke: null, blockRest: true },
@@ -41,8 +52,10 @@ const TARGETS: Record<DemoGuidePhase, DemoGuideTarget> = {
   "settings-assist": { region: "settings-assist", stroke: "settings-assist-switch", blockRest: true },
   "help-waiting": { region: "board-main", stroke: null, blockRest: true },
   "help-dialog": { region: "assist-dialog", stroke: "assist-allow", blockRest: true },
-  "help-running": { region: "assist-row", stroke: null, blockRest: true },
-  "help-done": { region: "assist-row", stroke: null, blockRest: true },
+  // 允许之后人站到那条 Memmy 任务里：亮整个任务页，协助条、执行过程与结果都在里面；人若是留在看板上，改亮那条协助。
+  // 底部要留出来：任务页最下面是「结果已发给谁」那一行，正是这一步要看的东西。
+  "help-running": { region: "assist-task", stroke: null, blockRest: false, fallback: "assist-row", cardBottomReserve: 150 },
+  "help-done": { region: "assist-task", stroke: null, blockRest: false, fallback: "assist-row", cardBottomReserve: 150 },
   "help-rejected": { region: "assist-row", stroke: null, blockRest: true },
   complete: { region: "board-main", stroke: null, blockRest: false }
 };
@@ -120,7 +133,7 @@ export function cardPlacement(
   hole: Rect,
   viewport: Viewport,
   cardHeight: number = CARD_MIN_HEIGHT,
-  options: { hasStroke?: boolean } = {}
+  options: { hasStroke?: boolean; reserveBottom?: number } = {}
 ): CardPlacement {
   const height = Math.max(CARD_MIN_HEIGHT, cardHeight);
   const spaceRight = viewport.width - (hole.left + hole.width) - CARD_GAP - EDGE_MARGIN;
@@ -151,9 +164,11 @@ export function cardPlacement(
   // 亮区本身就是一大片（对话区、看板）：说明卡没有要点着谁，放在这块区域的左下角最稳，
   // 也不会像贴在边上那样被窗口底部切掉。
   if (!options.hasStroke && hole.height >= EDGE_MARGIN * 2 + height + 32) {
+    // 底部有要看的行（如任务页的「结果已发给谁」）时再往上让一让。
+    const reserveBottom = options.reserveBottom ?? 0;
     return {
       left: Math.max(EDGE_MARGIN, Math.min(hole.left + 20, viewport.width - DEMO_GUIDE_CARD_WIDTH - EDGE_MARGIN)),
-      top: Math.max(EDGE_MARGIN, hole.top + hole.height - height - 20),
+      top: Math.max(EDGE_MARGIN, hole.top + hole.height - height - 20 - reserveBottom),
       arrow: { side: "bottom", offset: 22 }
     };
   }
