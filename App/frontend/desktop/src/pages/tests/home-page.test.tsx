@@ -1736,7 +1736,7 @@ describe("HomePage", () => {
 
   it("sends the guide's assist hint to the agent while the bubble keeps the sentence", async () => {
     // 引导第二步：输入框里只有那一句话，执行提示随内容发给 Agent，气泡里不出现。
-    const sentence = "请小饭团看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么";
+    const sentence = "请小饭团查一下上次分享会一共来了多少人";
     const hint = zhCNMessages["collab.demo.prefill.askHint"]
       .replace("{name}", "小饭团")
       .replace("{member}", "9001");
@@ -1785,7 +1785,7 @@ describe("HomePage", () => {
 
   it("names the task after the sentence the person saw", async () => {
     // 第二步的内容里带着执行提示（含命令与 userId），任务标题不能从正文里取。
-    const sentence = "请小饭团看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么";
+    const sentence = "请小饭团查一下上次分享会一共来了多少人";
     const onMessageSent = vi.fn();
 
     await expect(submitAgentComposerMessage({
@@ -1810,8 +1810,8 @@ describe("HomePage", () => {
   });
 
   it("leaves an edited second-step sentence alone, with no hint attached", () => {
-    const sentence = "请小饭团看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么";
-    const typed = "请小饭团看一下他电脑上的《项目协作常见问题》";
+    const sentence = "请小饭团查一下上次分享会一共来了多少人";
+    const typed = "请小饭团查一下上次分享会";
     const composed = composeDemoGuideAssistSend({
       status: "active",
       phase: "ask-compose",

@@ -198,13 +198,14 @@ describe("demo guide overlay tracking", () => {
 
     expect(strokeOf()).toEqual({ left: 897, top: 597, width: 102, height: 38 });
     const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
-    expect(card?.textContent).toContain("项目名已经填好了");
-    expect(card?.textContent).toContain("一位同事");
+    expect(card?.textContent).toContain("点击创建协作项目。");
+    // 这句话里没有成员的名字：建项目之前也还不知道演示成员是谁。
+    expect(card?.textContent).not.toContain("一位同事");
     expect(card?.textContent).toContain("退出引导");
     expect(card?.textContent).not.toContain("跳过这一步");
     expect(card?.textContent).not.toContain("下一步");
     // 还没有「第几步」：徽章与步骤名都不出现。
-    expect(card?.textContent).not.toContain("接着成员的任务做");
+    expect(card?.textContent).not.toContain("接续成员的任务");
   });
 
   it("lights the link-a-task button during the tour without letting anyone use it", async () => {
@@ -227,8 +228,76 @@ describe("demo guide overlay tracking", () => {
     expect(card?.textContent).toContain("下一步");
   });
 
+  it("asks before leaving with a title and the line naming who leaves", async () => {
+    await mount("reader");
+    const exit = Array.from(document.querySelectorAll("button")).find((entry) => entry.textContent?.trim() === "退出引导");
+    await act(async () => {
+      exit?.click();
+    });
+    await frames(4);
+
+    // 定稿把这一屏拆成标题与正文两句，正文里的名字是写死的演示成员。
+    const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
+    expect(card?.textContent).toContain("退出引导？");
+    expect(card?.textContent).toContain("小饭团会离开这个项目。");
+    expect(card?.textContent).not.toContain("{name}");
+    const buttons = Array.from(card?.querySelectorAll("button") ?? []).map((entry) => entry.textContent?.trim());
+    expect(buttons).toContain("接着看");
+    expect(buttons).toContain("退出");
+  });
+
+  it("closes the walkthrough with the approved words, invite before done", async () => {
+    const invite = vi.fn();
+    const close = vi.fn();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <CollabDemoGuideOverlay
+            state={{
+              ...activeState("complete"),
+              status: "complete",
+              done: { task: true, ask: true, help: true },
+              endReason: "finished"
+            }}
+            onJoined={vi.fn()}
+            onNext={vi.fn()}
+            onSkip={vi.fn()}
+            onExit={vi.fn()}
+            onRetry={vi.fn()}
+            onCloseComplete={close}
+            onInvite={invite}
+          />
+        </I18nProvider>
+      );
+    });
+
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog?.textContent).toContain("协作结束");
+    expect(dialog?.textContent).toContain("接着小饭团的安排，写好了分享会的通知");
+    expect(dialog?.textContent).toContain("请小饭团的电脑查明上次到场人数");
+    expect(dialog?.textContent).toContain("为小饭团确认了这台电脑的系统版本");
+    // 那段讲机制的话已经不显示了：完成弹窗只列做过的事，再加一句邀请。
+    expect(dialog?.textContent).not.toContain("项目协作以项目内的上下文为基础");
+    expect(dialog?.textContent).toContain("邀请同事，在项目中继续协作。");
+    expect(dialog?.textContent).not.toContain("就能在这里继续协作");
+    expect(dialog?.textContent).not.toContain("已经离开项目");
+    expect(dialog?.textContent).not.toContain("{name}");
+
+    // 按钮顺序与原型一致：左边是次要的「邀请同事」，右边才是主按钮「完成」。
+    const buttons = Array.from(dialog?.querySelectorAll("button") ?? []);
+    expect(buttons.map((entry) => entry.textContent?.trim())).toEqual(["邀请同事", "完成"]);
+    await act(async () => {
+      buttons[0]?.click();
+    });
+    expect(invite).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      buttons[1]?.click();
+    });
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it("never prints a raw placeholder on the card", async () => {
-    // settings-open 这一句以前漏传了参数，卡片上直接写着「{name}的问题」：渲染出来不能有任何 { 。
+    // settings-open 这一句里的名字按定稿写死，不再走占位符：渲染出来不能有任何 { 。
     const settings = document.createElement("button");
     settings.setAttribute("data-demo-guide", "board-settings");
     stubRect(settings, () => rect({ left: 1060, top: 60, width: 28, height: 28 }));
@@ -238,7 +307,7 @@ describe("demo guide overlay tracking", () => {
     await mount("settings-open");
 
     const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
-    expect(card?.textContent).toContain("另一个方向：成员的问题，交由你电脑上的 Agent 执行。");
+    expect(card?.textContent).toContain("小饭团那边也需要你帮个忙，先去项目设置里打开接收请求。");
     expect(card?.textContent).not.toContain("{");
     expect(document.body.textContent).not.toContain("{name}");
   });
@@ -255,7 +324,7 @@ describe("demo guide overlay tracking", () => {
     // 人在那条任务里，卡片说清结果会发给谁；第三步的亮区就是这个任务页。
     expect(holeOf()).toEqual({ left: 94, top: 54, right: 1106, bottom: 686 });
     expect(document.body.textContent).toContain("3 / 3");
-    expect(document.body.textContent).toContain("结果会直接发给小饭团");
+    expect(document.body.textContent).toContain("正在执行，完成后结果将回传给对方");
   });
 
   it("waits for the target instead of drawing an overlay over nothing", async () => {

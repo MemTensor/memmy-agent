@@ -25,7 +25,7 @@ const START = {
   memberName: "小饭团"
 };
 
-const ASK_SENTENCE = "请小饭团看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么";
+const ASK_SENTENCE = "请小饭团查一下上次分享会一共来了多少人";
 
 function raw(): DemoGuideState {
   return { ...({} as DemoGuideState), status: "ended", phase: "complete" };
@@ -41,9 +41,9 @@ function touring(): DemoGuideState {
   return demoGuideReducer(joined(), { type: "joined-confirmed" });
 }
 
-/** 导览走完、点了〔开始体验〕：体验第一步的蒙版。 */
+/** 导览走完、点了〔开始协作〕：体验第一步的蒙版。 */
 function started(): DemoGuideState {
-  // 导览四步一路点「下一步」：最后一步的按钮是「开始体验」，点完就是体验第一步。
+  // 导览四步一路点「下一步」：最后一步的按钮是「开始协作」，点完就是体验第一步。
   return run(touring(), DEMO_GUIDE_TOUR_PHASES.map((): DemoGuideEvent => ({ type: "next" })));
 }
 
@@ -51,10 +51,10 @@ function run(state: DemoGuideState, events: DemoGuideEvent[]): DemoGuideState {
   return events.reduce((current, event) => demoGuideReducer(current, event), state);
 }
 
-/** 走过第一步：在小饭团的任务里接着写完那句邀请的话。 */
+/** 走过第一步：在小饭团的任务里接着写完那封分享会的通知。 */
 const FIRST_STEP: DemoGuideEvent[] = [
   { type: "task-opened" },
-  { type: "task-continued", prefill: "接着小饭团的清单，写一段邀请同事加入项目的话" },
+  { type: "task-continued", prefill: "接着小饭团的安排，写一段分享会的通知" },
   { type: "composer-sent" },
   { type: "agent-settled" }
 ];
@@ -110,7 +110,7 @@ describe("demo guide state machine", () => {
         state = demoGuideReducer(state, { type: "next" });
       }
     }
-    // 最后一步的主按钮是「开始体验」：点了才进体验的第一步。
+    // 最后一步的主按钮是「开始协作」：点了才进体验的第一步。
     expect(demoGuideStartsExperience(state.phase)).toBe(true);
     expect(demoGuideNextTourPhase(state.phase)).toBe("task-row");
     const experience = demoGuideReducer(state, { type: "next" });
@@ -133,10 +133,10 @@ describe("demo guide state machine", () => {
   it("prefills the composer when continuing the member's task, then waits for the agent", () => {
     const state = run(started(), [
       { type: "task-opened" },
-      { type: "task-continued", prefill: "接着小饭团的清单，写一段邀请同事加入项目的话" }
+      { type: "task-continued", prefill: "接着小饭团的安排，写一段分享会的通知" }
     ]);
     expect(state.phase).toBe("compose");
-    expect(state.prefill?.text).toBe("接着小饭团的清单，写一段邀请同事加入项目的话");
+    expect(state.prefill?.text).toBe("接着小饭团的安排，写一段分享会的通知");
     const sent = demoGuideReducer(state, { type: "composer-sent" });
     expect(sent.phase).toBe("reply-waiting");
     expect(demoGuideReducer(sent, { type: "agent-settled" }).phase).toBe("reply-done");

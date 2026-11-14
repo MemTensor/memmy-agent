@@ -57,11 +57,11 @@ describe("the demo guide preview", () => {
     expect(DEMO_GUIDE_PREVIEW_STEPS["0-joined"]).toBe("joined");
     await render("0-joined");
 
-    // 居中的提示窗带 Memmy 的吉祥物（不是应用图标），只有「开始体验」，没有跳过，也没有蒙版。
+    // 居中的提示窗带 Memmy 的吉祥物（不是应用图标），只有标题与「开始体验」，没有正文，没有跳过，也没有蒙版。
     expect(document.querySelector("[data-demo-join]")).toBeTruthy();
     expect(document.querySelector("[data-demo-join] img")?.getAttribute("src")).toContain("mascot/memmy-celebrate");
     expect(document.body.textContent).toContain("小饭团加入了项目");
-    expect(document.body.textContent).toContain("一起开展一次协作");
+    expect(document.body.textContent).not.toContain("一起开展一次协作");
     expect(document.body.textContent).toContain("开始体验");
     expect(document.body.textContent).not.toContain("跳过这一步");
     expect(document.querySelector("[data-demo-mask]")).toBeNull();

@@ -117,7 +117,7 @@ export function CollabDemoGuideHost(props: {
     };
   }, [state.status]);
 
-  // 体验段才需要换页面：第一步（接着成员的任务做）在任务页里，第二步（请成员协助）要回任务发消息，
+  // 体验段才需要换页面：第一步（接续成员的任务）在任务页里，第二步（请成员协助）要回任务发消息，
   // 第三步从看板的项目设置开始。看板导览全程停在同一个看板上，不在这里换任何页面。
   // 每个阶段只拉一次：人自己走开一下再回来，不至于被反复拽回去。
   const navigatedPhaseRef = useRef<string | null>(null);

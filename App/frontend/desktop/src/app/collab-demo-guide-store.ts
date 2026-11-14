@@ -65,7 +65,7 @@ export function demoGuideTourIndex(phase: DemoGuidePhase): number {
   return (DEMO_GUIDE_TOUR_PHASES as readonly string[]).indexOf(phase);
 }
 
-/** 导览的最后一步：气泡上的主按钮写「开始体验」，点了才进体验的第一步。 */
+/** 导览的最后一步：气泡上的主按钮写「开始协作」，点了才进体验的第一步。 */
 export function demoGuideStartsExperience(phase: DemoGuidePhase): boolean {
   return phase === DEMO_GUIDE_TOUR_PHASES[DEMO_GUIDE_TOUR_PHASES.length - 1];
 }

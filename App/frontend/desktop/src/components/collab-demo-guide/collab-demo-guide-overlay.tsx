@@ -105,7 +105,7 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
     action: null,
     ...extra
   });
-  // 看板导览：纯介绍，头部是「介绍」徽章，最后一步的按钮是「开始体验」。
+  // 看板导览：纯介绍，头部是「介绍」徽章，最后一步的按钮是「开始协作」。
   if (demoGuideIsTourPhase(state.phase)) {
     return {
       ...demoGuideTourCard(demoGuideTourIndex(state.phase), t),
@@ -114,8 +114,8 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
   }
   switch (state.phase) {
     case "create-project":
-      // 演示成员是谁要等云端建好项目才知道：这时先用中性的叫法，不写死任何账号或昵称。
-      return base(null, t("collab.demo.createProject.body", { name: name || t("collab.demo.officialName") }));
+      // 这一句只让人点「创建项目」，不带成员的名字：演示成员是谁要等云端建好项目才知道。
+      return base(null, t("collab.demo.createProject.body"));
     case "joined":
       // 加入提示窗自带遮罩与按钮，不用卡片。
       return base(1, "");
@@ -130,7 +130,7 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
     case "reply-done":
       return base(1, t("collab.demo.reply.body", { name }), { title: t("collab.demo.reply.title", { name }), action: "next" });
     case "ask-compose":
-      return base(2, t("collab.demo.ask.compose"));
+      return base(2, t("collab.demo.ask.compose", { name }));
     case "ask-waiting":
       return base(2, "", {
         status: state.askDelivered
@@ -140,20 +140,22 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
     case "ask-done":
       return base(2, t("collab.demo.ask.body", { name }), { title: t("collab.demo.ask.title"), action: "next" });
     case "settings-open":
-      // 这句话里没有要替换的占位符：成员的名字不出现，所以不传值。
+      // 这句按定稿写死了演示成员的名字，不带占位符：传了值也不会被替换，测试里也钉住了原句。
       return base(3, t("collab.demo.settings.body"));
     case "settings-assist":
       return base(3, t("collab.demo.assist.body"));
     case "help-waiting":
       return base(3, "", { status: t("collab.demo.help.incoming", { name }) });
     case "help-dialog":
-      return base(3, t("collab.demo.dialog.body"));
+      // 授权弹窗这一步：标题写「谁发来的请求」，正文说他要这台电脑做什么。
+      return base(3, t("collab.demo.dialog.body"), { title: t("collab.demo.dialog.title") });
     case "help-running":
       return base(3, "", { status: t("collab.demo.running", { name }) });
     case "help-done":
       return base(3, t("collab.demo.help.body", { name }), { title: t("collab.demo.help.title", { name }), action: "done" });
     case "help-rejected":
-      return base(3, t("collab.demo.rejected.body", { name }), { title: t("collab.demo.rejected.title"), action: "done" });
+      // 拒绝之后没有标题：定稿这一屏只有一句「你拒绝了这次请求。」和「完成」。
+      return base(3, t("collab.demo.rejected.body"), { action: "done" });
     case "complete":
     default:
       return base(3, "");
@@ -161,7 +163,7 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
 }
 
 /**
- * 导览段的卡片：纯介绍，头部是「介绍」徽章 + 步骤名，没有「跳过这一步」，最后一步的按钮是「开始体验」。
+ * 导览段的卡片：纯介绍，头部是「介绍」徽章 + 步骤名，没有「跳过这一步」，最后一步的按钮是「开始协作」。
  * 形状由结构那边决定，这里只决定第几步说什么。
  */
 export function demoGuideTourCard(index: number, t: Translate): DemoGuideCard {
@@ -337,14 +339,13 @@ export function CollabDemoGuideOverlay(props: {
               </li>
             ) : null}
           </ul>
-          <p className={styles.principle}>{t("collab.demo.complete.principle")}</p>
-          <p className={styles.left}>{t("collab.demo.complete.left", { name: state.memberName })}</p>
+          <p className={styles.left}>{t("collab.demo.complete.left")}</p>
           <div className={styles.completeFoot}>
-            <button type="button" className={styles.actionGhost} onClick={props.onCloseComplete}>
-              {t("collab.demo.complete.finish")}
-            </button>
-            <button type="button" className={styles.action} onClick={props.onInvite}>
+            <button type="button" className={styles.actionGhost} onClick={props.onInvite}>
               {t("collab.demo.complete.invite")}
+            </button>
+            <button type="button" className={styles.action} onClick={props.onCloseComplete}>
+              {t("collab.demo.complete.finish")}
             </button>
           </div>
         </div>
@@ -355,6 +356,7 @@ export function CollabDemoGuideOverlay(props: {
   if (!visible) return null;
 
   // 演示开始：先一张居中的「{name}加入了项目」，点「开始体验」才出现第一步的蒙版。
+  // 这张提示窗按定稿只有标题、吉祥物与一个按钮，不画正文。
   if (state.phase === "joined") {
     return (
       <div
@@ -368,7 +370,6 @@ export function CollabDemoGuideOverlay(props: {
             <Memmy pose="celebrate" size={84} />
           </span>
           <p className={styles.joinTitle}>{t("collab.demo.joined.title", { name: state.memberName })}</p>
-          <p className={styles.joinText}>{t("collab.demo.joined.body")}</p>
           <button type="button" className={styles.joinAction} onClick={props.onJoined}>
             {t("collab.demo.joined.start")}
           </button>
@@ -501,11 +502,15 @@ export function CollabDemoGuideOverlay(props: {
             {card.status ? <p className={styles.status}>{card.status}</p> : null}
             {confirming ? (
               <div className={styles.confirm}>
-                <p className={styles.confirmText}>
-                  {state.phase === "create-project"
-                    ? t("collab.demo.exit.bodyBeforeProject")
-                    : t("collab.demo.exit.body", { name: state.memberName })}
-                </p>
+                {state.phase === "create-project" ? (
+                  // 建项目之前没有成员，也没有人离开；这一屏仍是完整的一句问话。
+                  <p className={styles.confirmText}>{t("collab.demo.exit.bodyBeforeProject")}</p>
+                ) : (
+                  <>
+                    <p className={styles.confirmTitle}>{t("collab.demo.exit.title")}</p>
+                    <p className={styles.confirmText}>{t("collab.demo.exit.body")}</p>
+                  </>
+                )}
                 <div className={styles.foot}>
                   <span className={styles.grow} />
                   <button type="button" className={styles.actionGhost} onClick={() => setConfirming(false)}>

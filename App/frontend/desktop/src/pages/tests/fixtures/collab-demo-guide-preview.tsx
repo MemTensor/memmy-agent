@@ -114,7 +114,7 @@ function PreviewSidebar() {
           <MessageSquarePlus size={14} aria-hidden="true" />
         </button>
       </div>
-      <div style={{ marginTop: 10, fontSize: 12.5, color: "rgba(16,26,25,.5)", padding: "0 8px" }}>项目协作上手清单</div>
+      <div style={{ marginTop: 10, fontSize: 12.5, color: "rgba(16,26,25,.5)", padding: "0 8px" }}>下周五的团队分享会</div>
     </div>
   );
 }
@@ -148,7 +148,7 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; wi
           <div className={board.boardTabs} role="tablist" data-demo-guide="board-tabs">
             <button type="button" role="tab" aria-selected className={`${board.boardTab} ${board.boardTabOn}`}>任务</button>
             <button type="button" role="tab" aria-selected={false} className={board.boardTab}>
-              协助<span className={board.segCount}>{props.withAssistRow ? "1" : "0"}</span>
+              协助<span className={board.segCount}>{props.withAssistRow ? "2" : "0"}</span>
             </button>
           </div>
           <div className={board.toolbar}>
@@ -169,22 +169,34 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; wi
                 小
               </span>
               <div className={board.rowText}>
-                <span className={board.rowTitle}>项目协作上手清单</span>
-                <span className={board.rowSummary}>整理一份 Memmy 项目协作的上手清单。</span>
+                <span className={board.rowTitle}>下周五的团队分享会</span>
+                <span className={board.rowSummary}>下周五下午想办一次团队分享会，主题是用 Agent 管好团队的上下文，大概 25 人。</span>
               </div>
               <span className={board.meta}>{MEMBER} · 10:24</span>
             </li>
             {props.withAssistRow ? (
-              <li className={`${board.row} ${board.rowOpenable}`} data-demo-guide="assist-row">
-                <span className={`${board.avatar} ${board.assistIcon}`} aria-hidden="true">
-                  <LifeBuoy size={15} />
-                </span>
-                <div className={board.rowText}>
-                  <span className={board.rowTitle}>请你的 Agent 介绍一下 Memmy 项目协作</span>
-                  <span className={board.rowSummary}>想确认你电脑上的 Agent 也能配合项目协作。</span>
-                </div>
-                <span className={`${board.meta} ${board.assistMetaOpen}`}>{MEMBER} → 你 · Memmy · 执行中</span>
-              </li>
+              <>
+                <li className={`${board.row} ${board.rowOpenable}`} data-demo-guide="assist-row">
+                  <span className={`${board.avatar} ${board.assistIcon}`} aria-hidden="true">
+                    <LifeBuoy size={15} />
+                  </span>
+                  <div className={board.rowText}>
+                    <span className={board.rowTitle}>确认这台电脑的系统版本</span>
+                    <span className={board.rowSummary}>分享会要现场演示，他想先确认这台电脑的系统版本。</span>
+                  </div>
+                  <span className={`${board.meta} ${board.assistMetaOpen}`}>{MEMBER} → 你 · Memmy · 执行中</span>
+                </li>
+                <li className={`${board.row} ${board.rowOpenable}`}>
+                  <span className={`${board.avatar} ${board.assistIcon}`} aria-hidden="true">
+                    <LifeBuoy size={15} />
+                  </span>
+                  <div className={board.rowText}>
+                    <span className={board.rowTitle}>查一下上次分享会来了多少人</span>
+                    <span className={board.rowSummary}>签到表在{MEMBER}的电脑上，他的 Agent 去查。</span>
+                  </div>
+                  <span className={`${board.meta} ${board.assistMetaOpen}`}>你 → {MEMBER} · Memmy · 已完成</span>
+                </li>
+              </>
             ) : null}
           </ul>
         </div>
@@ -254,7 +266,7 @@ function ReaderSurface() {
           小
         </span>
         <div className={board.readerHeadText}>
-          <h2 className={board.readerTitle}>项目协作上手清单</h2>
+          <h2 className={board.readerTitle}>下周五的团队分享会</h2>
           <div className={board.readerHeadMeta}>
             <span>{MEMBER} · 今天 10:24</span>
             <span className={board.readerBadge}>只读</span>
@@ -265,27 +277,23 @@ function ReaderSurface() {
         </div>
       </header>
       <div className={board.readerBody}>
-        {[1, 2].map((turn) => (
-          <article key={turn} className={board.readerTurn}>
-            <span className={board.readerTurnIndex}>第 {turn} 轮</span>
-            <div className={board.readerUser} data-collab-role="user">
-              <p className={board.readerUserBubble}>
-                {turn === 1 ? "整理一份 Memmy 项目协作的上手清单。" : "还差什么没做？"}
-              </p>
+        <article className={board.readerTurn}>
+          <span className={board.readerTurnIndex}>第 1 轮</span>
+          <div className={board.readerUser} data-collab-role="user">
+            <p className={board.readerUserBubble}>
+              下周五下午想办一次团队分享会，主题是用 Agent 管好团队的上下文，大概 25 人。三楼哪个会议室合适？议程也帮我排一下。
+            </p>
+          </div>
+          <div className={board.readerAgent} data-collab-role="agent">
+            <div className={board.readerAgentHead}>
+              <span className={board.readerAgentMark} aria-hidden="true">M</span>
+              <span>Memmy</span>
             </div>
-            <div className={board.readerAgent} data-collab-role="agent">
-              <div className={board.readerAgentHead}>
-                <span className={board.readerAgentMark} aria-hidden="true">M</span>
-                <span>Memmy</span>
-              </div>
-              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
-                {turn === 1
-                  ? "1. 共享任务：在项目里新建的任务默认共享给成员，成员的 Agent 可以读到。2. 继续任务：打开成员的任务点「继续任务」，你的 Agent 会接着他的进度做。"
-                  : "还差一项：写一段邀请同事加入项目的话。"}
-              </p>
-            </div>
-          </article>
-        ))}
+            <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-line" }}>
+              {"三楼大会议室能坐 30 人，有投屏，下周五 15:00–16:00 空闲；小会议室只能坐 12 人。\n\n议程建议：15:00 演示，15:10 主题分享，主讲小饭团，15:40 问答。还剩两件事：把通知发给团队，收集报名。"}
+            </p>
+          </div>
+        </article>
       </div>
     </div>
   );
@@ -299,14 +307,14 @@ function ChatSurface(props: { phase: DemoGuidePhase }) {
       <div style={{ flex: 1, overflow: "auto", padding: "40px 56px" }} data-demo-guide="conversation">
         <div style={{ ...card, padding: 18, marginBottom: 14 }}>
           <b style={{ fontSize: 13 }}>你</b>
-          <p style={{ margin: "8px 0 0", fontSize: 13, lineHeight: 1.6 }}>接着小饭团的清单，写一段邀请同事加入项目的话</p>
+          <p style={{ margin: "8px 0 0", fontSize: 13, lineHeight: 1.6 }}>接着小饭团的安排，写一段分享会的通知</p>
         </div>
         <div style={{ ...card, padding: 18 }}>
           <b style={{ fontSize: 13 }}>Memmy</b>
           <p style={{ margin: "8px 0 0", fontSize: 13, lineHeight: 1.6 }}>
             {waiting
               ? "正在读取小饭团的任务…"
-              : "邀请同事一起用 Memmy 项目协作：在项目里共享任务，成员之间不必再互相追问进度；需要对方电脑上的东西时，请对方的 Agent 去查，结果会回到这条任务里。"}
+              : "分享会通知已写好：\n\n下周五 15:00，三楼大会议室，有投屏。\n\n议程：15:00 演示，15:10 主题分享（主讲小饭团），15:40 问答。\n\n请回复是否参加，方便统计报名。"}
           </p>
         </div>
       </div>
@@ -317,8 +325,8 @@ function ChatSurface(props: { phase: DemoGuidePhase }) {
         >
           <p style={{ margin: 0, fontSize: 13, color: "rgba(16,26,25,.62)" }}>
             {props.phase === "ask-compose"
-              ? `请${MEMBER}看一下他电脑上的《项目协作常见问题》，告诉我成员请我协助时，我这边会发生什么`
-              : "接着小饭团的清单，写一段邀请同事加入项目的话"}
+              ? `请${MEMBER}查一下上次分享会一共来了多少人`
+              : "接着小饭团的安排，写一段分享会的通知"}
           </p>
           <button type="button" className="composer-action-submit" data-demo-guide="composer-send" style={{ position: "absolute", right: 14, bottom: 12 }}>
             发送
@@ -369,12 +377,12 @@ function AssistDialogSurface() {
       >
         <h2 style={{ margin: "0 0 10px", fontSize: 16 }}>{MEMBER}请求你的电脑协助</h2>
         <p style={{ margin: "0 0 14px", fontSize: 13, lineHeight: 1.6, color: "rgba(16,26,25,.62)" }}>
-          想确认你电脑上的 Agent 也能配合项目协作。
+          分享会要现场演示，他想先确认这台电脑的系统版本。
         </p>
         <div style={{ padding: 14, borderRadius: 10, background: "rgba(16,26,25,.03)", marginBottom: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>请你的 Agent 介绍一下 Memmy 项目协作</div>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>确认这台电脑的系统版本</div>
           <div style={{ fontSize: 12.5, lineHeight: 1.6, color: "rgba(16,26,25,.62)" }}>
-            根据下面这段说明，用一句话介绍 Memmy 项目协作。
+            查看这台电脑的系统版本，把结果回传。
           </div>
         </div>
         <div style={{ padding: 14, borderRadius: 10, border: "1px solid rgba(16,26,25,.08)", marginBottom: 14 }}>
@@ -431,17 +439,17 @@ function AssistTaskSurface(props: { done: boolean }) {
       <div style={{ flex: 1, overflow: "auto", padding: "28px 56px", display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={bubble(false)}>
           <b style={{ fontSize: 13 }}>{MEMBER} · 请求</b>
-          <p style={{ margin: "8px 0 0", fontSize: 13, lineHeight: 1.6 }}>请你的 Agent 介绍一下 Memmy 项目协作</p>
+          <p style={{ margin: "8px 0 0", fontSize: 13, lineHeight: 1.6 }}>确认这台电脑的系统版本</p>
           <p style={{ margin: "6px 0 0", fontSize: 12.5, lineHeight: 1.6, color: "rgba(16,26,25,.62)" }}>
-            根据下面这段说明，用一句话介绍 Memmy 项目协作。
+            分享会要现场演示，他想先确认这台电脑的系统版本。
           </p>
         </div>
         <div style={bubble(false)}>
           <b style={{ fontSize: 13 }}>Memmy</b>
           <p style={{ margin: "8px 0 0", fontSize: 13, lineHeight: 1.6 }}>
             {props.done
-              ? "Memmy 的项目协作是：项目里的任务默认共享给成员，Agent 读得到、接得着；需要对方电脑上的东西时，请对方的 Agent 去查，结果回到这条任务里。"
-              : "正在读取请求与项目里的说明…"}
+              ? "系统版本已确认：macOS 26.1（Darwin 25.1.0），芯片 Apple M3。"
+              : "正在确认这台电脑的系统版本…"}
           </p>
         </div>
         {props.done ? (

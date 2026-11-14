@@ -1506,7 +1506,7 @@ export function HomePage() {
   }, [demoGuide.status, demoGuide.memberName, dispatch, t]);
 
   /**
-   * 第二步（请成员协助）一完成就把那句话清掉，不等到整轮结束：下一步是帮成员执行，
+   * 第二步（请成员协助）一完成就把那句话清掉，不等到整轮结束：下一步是为成员执行任务，
    * 输入框里不该还留着上一句。用户自己改过的内容不动。
    */
   const demoAskClearedRef = useRef(false);

@@ -212,6 +212,13 @@
   background: color-mix(in srgb, var(--color-action-sky) 7%, transparent);
 }
 
+.confirmTitle {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
 .confirmText {
   margin: 0 0 10px;
   font-size: 13px;
@@ -268,13 +275,6 @@
   color: var(--color-action-sky);
 }
 
-.principle {
-  margin: 0 0 10px;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: color-mix(in srgb, var(--color-text-ink, #1b2423) 60%, transparent);
-}
-
 .left {
   margin: 0 0 16px;
   font-size: 12.5px;
@@ -283,7 +283,8 @@
 
 .completeFoot {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
 }
 
@@ -304,7 +305,7 @@
 
 /*
  * 「{name}加入了项目」：演示开始前的提示窗。自己带遮罩，与第一步的蒙版不同时出现，
- * 上面只有一个「开始体验」，没有跳过。
+ * 上面只有标题、吉祥物和一个「开始体验」，没有正文，也没有跳过。
  */
 .joinLayer {
   position: fixed;
@@ -340,13 +341,6 @@
   font-weight: 600;
   line-height: 1.45;
   color: var(--color-text-ink, #1b2423);
-}
-
-.joinText {
-  margin: 0 0 20px;
-  font-size: 13px;
-  line-height: 1.65;
-  color: color-mix(in srgb, var(--color-text-ink, #1b2423) 66%, transparent);
 }
 
 .joinAction {

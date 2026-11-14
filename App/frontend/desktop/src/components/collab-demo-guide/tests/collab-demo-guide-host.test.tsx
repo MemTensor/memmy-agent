@@ -61,9 +61,9 @@ function askThread(status: "pending" | "done" | "failed") {
     requester: ME,
     executor: MEMBER,
     projectId: "cloud-1",
-    title: "看一下《项目协作常见问题》",
+    title: "查一下上次分享会来了多少人",
     updatedAt: "2026-11-14T07:00:00.000Z",
-    requests: [{ id: "req-1", status, title: "看一下《项目协作常见问题》" }]
+    requests: [{ id: "req-1", status, title: "查一下上次分享会来了多少人" }]
   };
 }
 
@@ -74,9 +74,9 @@ function helpThread(status: "pending" | "running" | "done" | "failed", failure?:
     requester: MEMBER,
     executor: ME,
     projectId: "cloud-1",
-    title: "介绍一下项目协作",
+    title: "确认这台电脑的系统版本",
     updatedAt: "2026-11-14T07:00:00.000Z",
-    requests: [{ id: "req-2", status, title: "介绍一下项目协作", ...(failure ? { failure } : {}) }]
+    requests: [{ id: "req-2", status, title: "确认这台电脑的系统版本", ...(failure ? { failure } : {}) }]
   };
 }
 
@@ -232,9 +232,9 @@ describe("the demo guide host", () => {
 
   it("opens the walkthrough with the join notice and waits for the person", async () => {
     await mount(client({}), demoState("joined"));
-    // 先出现的是那张居中的提示窗：有昵称、只有一个「开始体验」，没有跳过。
+    // 先出现的是那张居中的提示窗：有昵称、只有一个「开始体验」，没有正文，也没有跳过。
     expect(document.body.textContent).toContain("小饭团加入了项目");
-    expect(document.body.textContent).toContain("一起开展一次协作");
+    expect(document.body.textContent).not.toContain("一起开展一次协作");
     expect(document.body.textContent).not.toContain("跳过这一步");
     expect(getDemoGuideState().phase).toBe("joined");
 

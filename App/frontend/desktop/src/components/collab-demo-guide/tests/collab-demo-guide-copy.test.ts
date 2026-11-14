@@ -86,33 +86,53 @@ describe("the demo guide copy", () => {
     }
   });
 
-  it("says what the member sees, without printing a member name where it is not needed", () => {
+  it("keeps the approved wording for the step whose name is written out", () => {
     const t = translate("zh-CN");
-    // 第三步的这句话不带人名：说的是「成员的问题」，不是「小饭团的问题」。
+    // 第三步的这句话按定稿写死了演示成员的名字，卡片上不出现字面的 {name}。
     expect(demoGuideCard(stateFor("settings-open"), t).body)
-      .toBe("另一个方向：成员的问题，交由你电脑上的 Agent 执行。");
+      .toBe("小饭团那边也需要你帮个忙，先去项目设置里打开接收请求。");
     expect(demoGuideCard(stateFor("settings-open"), translate("en-US")).body)
-      .toBe("The other direction: a member's question gets run by an agent on your computer.");
-    // 需要人名的句子仍然有人名：走占位符换出来。
-    expect(demoGuideCard(stateFor("help-running"), t).status).toBe("你的 Agent 正在执行，结果会直接发给小饭团。");
+      .toBe("Xiaofantuan needs a hand from you too; turn on accepting requests in project settings first.");
+    // 不带人名的句子照旧不写死叫法：执行中的状态只说结果回传给对方。
+    expect(demoGuideCard(stateFor("help-running"), t).status).toBe("正在执行，完成后结果将回传给对方。");
   });
 
   it("keeps the four tour steps in the approved words", () => {
     const zh = [0, 1, 2, 3].map((index) => demoGuideTourCard(index, translate("zh-CN")));
     expect(zh.map((card) => card.stepName)).toEqual(["任务列表", "协助", "关联任务", "新建任务"]);
     expect(zh.map((card) => card.body)).toEqual([
-      "你和成员的任务都在这里。",
-      "「协助」记录你和成员互相请对方做的事：请求、由谁执行、结果。",
+      "你和成员的任务都在这里，谁做到哪一步都看得到。",
+      "协助指把任务交给成员电脑上的 Agent 执行，结果回写到发起它的任务中。",
       "在其他本地 Agent 中执行的任务，也可以关联到这里。",
       "点击这里，可以新建一条与成员共享的任务。"
     ]);
     const en = [0, 1, 2, 3].map((index) => demoGuideTourCard(index, translate("en-US")));
-    expect(en.map((card) => card.stepName)).toEqual(["Task list", "Assists", "Link a task", "New task"]);
+    expect(en.map((card) => card.stepName)).toEqual(["Task list", "Assistance", "Linked tasks", "New task"]);
     expect(en.map((card) => card.body)).toEqual([
-      "Your tasks and your members' tasks are all here.",
-      "Assists record what you and a member ask each other to do: the request, who ran it, and the result.",
-      "Tasks that run in another local agent can be linked here too.",
-      "Create a task here that is shared with members."
+      "Your tasks and your members' tasks all live here, so you can see how far each has got.",
+      "Assistance hands a task to the Agent on a member's computer; the result is written back to the task that asked for it.",
+      "Tasks that ran in your other local Agents can be linked here too.",
+      "Click here to create a task shared with your members."
     ]);
+  });
+
+  it("names the three experience steps the way the prototype does", () => {
+    const names = (language: "zh-CN" | "en-US") => [1, 2, 3]
+      .map((step) => translate(language)(("collab.demo.stepName." + String(step)) as MessageKey));
+    expect(names("zh-CN")).toEqual(["接续成员的任务", "请成员协助", "为成员执行任务"]);
+    expect(names("en-US")).toEqual(["Continue a member's task", "Ask a member to assist", "Run a task for a member"]);
+  });
+
+  it("reads the authorization step with a title and the notice that follows", () => {
+    // 授权弹窗那一步：标题写谁发来的请求，正文说他为什么需要这台电脑，并顺带说明执行方可以换。
+    expect(demoGuideCard(stateFor("help-dialog"), translate("zh-CN"))).toMatchObject({
+      title: "小饭团发来了一条协助请求",
+      body: "分享会要现场演示，他想先确认这台电脑的系统版本。可以选择其他本地 Agent 执行，不过这次就先交给 Memmy 吧。"
+    });
+    // 拒绝之后只有一句「你拒绝了这次请求。」，没有额外的标题。
+    expect(demoGuideCard(stateFor("help-rejected"), translate("zh-CN"))).toMatchObject({
+      title: null,
+      body: "你拒绝了这次请求。"
+    });
   });
 });
