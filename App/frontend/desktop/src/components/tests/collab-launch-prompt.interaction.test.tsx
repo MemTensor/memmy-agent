@@ -178,7 +178,7 @@ describe("collab launch prompt", () => {
     expect(document.querySelector(".collab-launch-dots")).toBeNull();
     expect(document.querySelector(".collab-launch-prev")).toBeNull();
     expect(document.querySelector(".collab-launch-chat__user")?.textContent?.trim()).toBe("这个项目最近大家做到哪了？");
-    expect(document.querySelector(".collab-launch-chat__lead")?.textContent?.trim()).toBe("本周项目里新增 5 个任务：");
+    expect(document.querySelector(".collab-launch-chat__lead")?.textContent?.trim()).toBe("已读取项目中的最新进展：");
     expect(document.querySelectorAll(".collab-launch-chat__agent li")).toHaveLength(3);
     expect(document.querySelector(".collab-launch-visual__caption")?.textContent?.trim())
       .toBe("团队做了什么，你的 Agent 都知道");
