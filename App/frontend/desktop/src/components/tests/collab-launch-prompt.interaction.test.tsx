@@ -173,7 +173,7 @@ describe("collab launch prompt", () => {
     await renderHost();
 
     expect(title()).toBe("项目协作");
-    expect(subtitle()).toBe("让你的 Agent 跟上团队的进展");
+    expect(subtitle()).toBe("把团队工作放进同一个项目");
     expect(document.querySelector(".collab-launch-count")).toBeNull();
     expect(document.querySelector(".collab-launch-dots")).toBeNull();
     expect(document.querySelector(".collab-launch-prev")).toBeNull();
@@ -196,7 +196,7 @@ describe("collab launch prompt", () => {
     await renderHost(<CollabLaunchPromptHost />, "en-US");
 
     expect(title()).toBe("Shared projects");
-    expect(subtitle()).toBe("Keep your agents in step with the team");
+    expect(subtitle()).toBe("Put the team's work in one project");
     expect(primary()?.textContent?.trim()).toBe("New project");
     expect(document.querySelector(".collab-launch-visual__caption")?.textContent?.trim())
       .toBe("What the team has done, your agent already knows");
