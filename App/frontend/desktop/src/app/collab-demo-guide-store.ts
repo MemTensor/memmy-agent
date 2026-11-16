@@ -18,7 +18,7 @@ export type DemoGuidePhase =
   | DemoGuideBeforeProjectPhase
   // 演示刚开始：看板蒙版套住成员徽章，点「继续」才进看板导览。
   | "joined"
-  // 看板导览的四步：任务列表、协助这一个 tab、工具条上的关联任务、侧栏新建任务。
+  // 看板导览的五步：任务列表、协助这一个 tab、工具条上的关联任务、关联会话窗口、侧栏新建任务。
   // 全程停在同一个看板上，只亮给人看，不点任何东西，只留「下一步」与「跳过引导」。
   | DemoGuideTourPhase
   | "task-row"
@@ -86,6 +86,12 @@ export const DEMO_GUIDE_TOUR_PHASES = [
   "tour-tabs",
   /** 工具条右侧的「关联任务」：把别的 Agent 里做过的工作带进来。 */
   "tour-associate",
+  /**
+   * 「关联任务」打开的关联会话窗口：真的扫一遍这台电脑上的历史会话，只展示能关联什么。
+   *
+   * 扫描要几秒：拿到结果之前卡片不给「下一步」，人不会以为按了没反应。
+   */
+  "tour-associate-pick",
   /** 侧栏当前项目右侧的「＋」：新建任务。 */
   "tour-new-task"
 ] as const;
@@ -116,6 +122,13 @@ export function demoGuideNextTourPhase(phase: DemoGuidePhase): DemoGuidePhase | 
 
 /** 引导的对外状态：进行中、完成弹窗、已结束。 */
 export type DemoGuideStatus = "active" | "complete" | "ended";
+
+/**
+ * 「关联会话」这一步的扫描进度。
+ *
+ * 弹窗自己真实地扫本机历史会话，扫完把一个数交给这里：卡片据此才给「下一步」。
+ */
+export type DemoGuideScan = { status: "idle" | "scanning" | "done"; count: number };
 
 export interface DemoGuideState {
   status: DemoGuideStatus;
@@ -149,6 +162,8 @@ export interface DemoGuideState {
    * 才允许判「协助请求没有发出去」：Agent 还在跑就不判失败。
    */
   askTurnEnded: boolean;
+  /** 「关联会话」这一步的扫描进度：没扫出结果之前不给「下一步」。 */
+  scan: DemoGuideScan;
   /** 输入框要预填的那句话；`nonce` 变一次填一次，填过的再读不会重复填。 */
   prefill: { text: string; nonce: number } | null;
   /** 结束引导时的原因，云端按它记。 */
@@ -215,6 +230,10 @@ export type DemoGuideEvent =
   | { type: "assist-seen" }
   | { type: "next"; prefill?: string }
   | { type: "skip"; prefill?: string }
+  /** 关联会话窗口扫完了：`count` 是可以关联的会话数。 */
+  | { type: "scan-settled"; count: number }
+  /** 这一步没有可扫的东西（没授权读其他 Agent 的记录）：直接放过，不让人卡住。 */
+  | { type: "scan-unavailable" }
   | { type: "settings-opened" }
   | { type: "receiving-on" }
   | { type: "help-request-seen" }
@@ -240,6 +259,7 @@ const IDLE: DemoGuideState = {
   askSeen: false,
   askDelivered: false,
   askTurnEnded: false,
+  scan: { status: "idle", count: 0 },
   prefill: null,
   endReason: null,
   cloudEnded: false
@@ -368,7 +388,18 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       // 看板导览：一步一步往下讲，最后一步之后就是体验的第一步；全程不换页面、不动数据。
       if (demoGuideIsTourPhase(state.phase)) {
         const next = demoGuideNextTourPhase(state.phase);
-        return next ? { ...state, phase: next, error: null } : state;
+        if (!next) return state;
+        // 「关联会话」要等扫描出结果才给往下走：按钮在此之前是禁用的，这里再拦一次。
+        if (state.phase === "tour-associate-pick" && state.scan.status !== "done") return state;
+        return {
+          ...state,
+          phase: next,
+          error: null,
+          // 进这一步就开始扫：卡片先写「正在扫描」，弹窗一出现就真的去读本机记录。
+          scan: next === "tour-associate-pick" && state.scan.status !== "done"
+            ? { status: "scanning", count: 0 }
+            : state.scan
+        };
       }
       // 第一步做完直接请成员协助：那句话跟着填上；换一句时 nonce 要接着往上走，输入框才知道该重新填一次。
       if (state.phase === "reply-done") {
@@ -408,6 +439,17 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       }
       // 第三步跳过：授权弹窗那一步跳过等同于拒绝，其余直接收场。
       return finishOrSkip(state, { help: false });
+    }
+    case "scan-settled":
+      // 扫完了：卡片把计数换成结果，「下一步」也就可用了。失败时界面按 0 报，说明这里没有可关联的会话。
+      return state.status === "active" && state.phase === "tour-associate-pick"
+        ? { ...state, scan: { status: "done", count: Math.max(0, Math.round(event.count)) } }
+        : state;
+    case "scan-unavailable": {
+      // 没有授权读本机其他 Agent 的记录：这一步没什么可展示的，直接接到下一站。
+      if (state.status !== "active" || state.phase !== "tour-associate-pick") return state;
+      const next = demoGuideNextTourPhase(state.phase);
+      return next ? { ...state, phase: next, scan: { status: "done", count: 0 }, error: null } : state;
     }
     case "settings-opened":
       return state.status === "active" && state.phase === "settings-open" ? { ...state, phase: "settings-assist" } : state;

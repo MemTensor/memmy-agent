@@ -58,6 +58,12 @@ export interface DemoGuideCard {
   action: "next" | "start" | "done" | null;
   /** 主按钮上的字：默认按 `action` 取「下一步 / 开始协作 / 完成」，只有加入这一屏写「继续」。 */
   actionLabel?: string;
+  /**
+   * 主按钮暂时不让点（「关联会话」还在扫描）：按钮置灰，点击也不前进。
+   *
+   * 只禁用、不隐藏：人看得到下一步是什么，只是要等扫描跑完。
+   */
+  actionDisabled?: boolean;
 }
 
 /** 体验段一共几步：进度徽章与心跳都按它算。 */
@@ -92,8 +98,8 @@ const POSES: Partial<Record<DemoGuidePhase, MemmyPose>> = {
   "help-rejected": "sad"
 };
 
-/** 导览段的四步各用哪个姿势：按 {@link demoGuideTourIndex} 的顺序。 */
-const TOUR_POSES: MemmyPose[] = ["point", "peek", "connect", "chat"];
+/** 导览段的各步各用哪个姿势：按 {@link demoGuideTourIndex} 的顺序。 */
+const TOUR_POSES: MemmyPose[] = ["point", "peek", "connect", "read", "chat"];
 
 /**
  * 每个子状态卡片上写什么：文案就是产品定稿的那几句，`{name}` 换成本次演示成员的昵称。
@@ -123,9 +129,19 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
   });
   // 看板导览：纯介绍，头部是「介绍」徽章，最后一步的按钮是「开始协作」。
   if (demoGuideIsTourPhase(state.phase)) {
+    const tour = demoGuideTourCard(demoGuideTourIndex(state.phase), t);
+    const action: DemoGuideCard["action"] = demoGuideStartsExperience(state.phase) ? "start" : "next";
+    // 「关联会话」：弹窗真的在扫本机历史会话，扫完之前不给「下一步」，卡片上一直写清在做什么。
+    if (state.phase !== "tour-associate-pick") return { ...tour, action };
     return {
-      ...demoGuideTourCard(demoGuideTourIndex(state.phase), t),
-      action: demoGuideStartsExperience(state.phase) ? "start" : "next"
+      ...tour,
+      action,
+      actionDisabled: state.scan.status !== "done",
+      status: state.scan.status === "done"
+        ? (state.scan.count > 0
+          ? t("collab.demo.scan.done", { count: String(state.scan.count) })
+          : t("collab.demo.scan.empty"))
+        : t("collab.demo.scan.scanning")
     };
   }
   switch (state.phase) {
@@ -680,7 +696,12 @@ export function CollabDemoGuideOverlay(props: {
                     </button>
                   ) : null}
                   {card.action ? (
-                    <button type="button" className={styles.action} onClick={props.onNext}>
+                    <button
+                      type="button"
+                      className={styles.action}
+                      onClick={props.onNext}
+                      disabled={card.actionDisabled === true}
+                    >
                       {primaryLabel}
                     </button>
                   ) : null}

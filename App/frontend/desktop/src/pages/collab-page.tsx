@@ -1168,8 +1168,39 @@ const CollabBoard = memo(function CollabBoard(props: {
       switchBoardTab("assists");
       return;
     }
-    if (demoGuide.phase === "tour-board" || demoGuide.phase === "tour-associate") switchBoardTab("tasks");
+    if (demoGuide.phase === "tour-board" || demoGuide.phase === "tour-associate" || demoGuide.phase === "tour-associate-pick") {
+      switchBoardTab("tasks");
+    }
   }, [demoActive, demoGuide.phase, boardTab]);
+
+  /**
+   * 导览讲到「关联会话」时，真的把关联弹窗打开，让它扫一遍这台电脑上的历史会话。
+   *
+   * 演示期间人点不了这个弹窗（蒙版遮住整张弹窗）：这里只是把能力摆出来，不勾选、不保存。
+   * 没有授权读其他 Agent 的记录时弹窗里只有授权说明、扫不出东西，这一步就直接放过。
+   */
+  const demoPickUnavailable = demoActive && demoGuide.phase === "tour-associate-pick"
+    && agentAccess !== null && !agentAccess.granted;
+  useEffect(() => {
+    if (demoPickUnavailable) dispatchDemoGuide({ type: "scan-unavailable" });
+  }, [demoPickUnavailable]);
+  /**
+   * 弹窗是不是引导打开的那一次。
+   *
+   * 引导离开这一步（下一步、跳过、退出、心跳超时）就把它关掉；用户自己点的弹窗不受影响。
+   */
+  const demoPickShownRef = useRef(false);
+  useEffect(() => {
+    const wanted = demoActive && demoGuide.phase === "tour-associate-pick" && !demoPickUnavailable;
+    if (wanted) {
+      demoPickShownRef.current = true;
+      setPickOpen(true);
+      return;
+    }
+    if (!demoPickShownRef.current) return;
+    demoPickShownRef.current = false;
+    setPickOpen(false);
+  }, [demoActive, demoGuide.phase, demoPickUnavailable]);
 
   const sessions = page?.sessions ?? null;
   const filtering = Boolean(query) || member !== "all";
@@ -2254,6 +2285,9 @@ const CollabBoard = memo(function CollabBoard(props: {
           accessAgents={agentAccess?.agents}
           onGrantAccess={grantAccessInPlace}
           onClose={() => setPickOpen(false)}
+          // 引导讲解这一步时弹窗只做展示：真实扫描、不给勾选、不给保存，也没有关闭按钮。
+          demoGuide={demoActive && demoGuide.phase === "tour-associate-pick"}
+          onDemoScanSettled={(count) => dispatchDemoGuide({ type: "scan-settled", count })}
           onLinked={(result) => {
             // The selection is already saved; the upload continues in the background and the board shows it.
             setPickOpen(false);
@@ -3443,6 +3477,15 @@ export function AssociateSessionsModal(props: {
   accessAgents?: ReadonlyArray<{ sourceId: string; name: string; enabled: boolean; available: boolean }>;
   /** 在弹窗内就地授权：成功返回 true，列表随即在当前弹窗里出现。 */
   onGrantAccess?: () => Promise<boolean>;
+  /**
+   * 新手引导的展示模式：真实扫一遍本机历史会话，但一个也不能勾、也不保存。
+   *
+   * 引导要讲的是「之后可以在这里选」，所以弹窗照原样摊开给人看：蒙版会盖住整张弹窗，
+   * 里面的按钮与勾选框一律不接操作；关闭按钮与 Esc 也收起，避免把人从引导里带出去。
+   */
+  demoGuide?: boolean;
+  /** 展示模式的扫描结束（成功或失败都报）：引导据此才放行「下一步」。 */
+  onDemoScanSettled?: (count: number) => void;
 }) {
   const { t } = useTranslation();
   const appState = useOptionalAppState();
@@ -3462,6 +3505,34 @@ export function AssociateSessionsModal(props: {
   const { collab, open, project } = props;
   /** 「在其他 Agent 中使用协作项目」是否已授权：未传按已授权处理，只有涉及授权的页面会传它。 */
   const accessGranted = props.accessGranted ?? true;
+  /** 展示模式：只扫不选，互动全部收起。 */
+  const demoGuide = props.demoGuide === true;
+  /** 回调由看板每次渲染现给，放进 ref 只为了不让它重启扫描。 */
+  const demoSettledRef = useRef(props.onDemoScanSettled);
+  demoSettledRef.current = props.onDemoScanSettled;
+  useEffect(() => {
+    if (!open || !demoGuide) return undefined;
+    // 这次是真的扫描：不等上次缓存，直接把这台电脑上各个 Agent 的会话读一遍。
+    let cancelled = false;
+    setSessions(null);
+    setError(null);
+    collab.listLocalSessions({ limit: MAX_LOCAL_SESSIONS, fresh: true })
+      .then((listing) => {
+        if (cancelled) return;
+        setSessions(listing.sessions);
+        demoSettledRef.current?.(listing.sessions.length);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        // 扫不出来也算有了结果：卡片会说「暂时没有可以关联的会话」，人不会被卡在这儿。
+        setSessions([]);
+        setError(messageOf(cause));
+        demoSettledRef.current?.(0);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [collab, demoGuide, open]);
   /** 授权说明里列出的 Agent：只列可用的，关掉的单独用一句话说明。 */
   const gateAgents = (props.accessAgents ?? []).filter((agent) => agent.available && agent.enabled);
   const gateDisabledNames = (props.accessAgents ?? []).filter((agent) => agent.available && !agent.enabled).map((agent) => agent.name);
@@ -3487,6 +3558,8 @@ export function AssociateSessionsModal(props: {
     setQuery("");
     setExpanded(new Set());
     setError(null);
+    // 展示模式自己扫一遍（见上面的 demoGuide effect）：这里不再读缓存，否则两份结果会来回盖。
+    if (demoGuide) return;
     // 未授权时一个本机记录也不读：弹窗里只有授权说明，授权后这一段会重新跑。
     if (!accessGranted) return;
     // The last scan shows at once; when it is older, the newer list replaces it a few seconds later.
@@ -3509,7 +3582,7 @@ export function AssociateSessionsModal(props: {
     return () => {
       cancelled = true;
     };
-  }, [accessGranted, collab, open, project.id]);
+  }, [accessGranted, collab, demoGuide, open, project.id]);
 
   /** 就地授权：授权成功后同一个弹窗直接列出任务，不用先关掉再点一次。 */
   async function grantAccess() {
@@ -3661,12 +3734,17 @@ export function AssociateSessionsModal(props: {
       open={props.open}
       title={t("collab.pick.title")}
       subtitle={t("collab.pick.subtitle", { project: project.name })}
-      onClose={busy || confirmUnlinkGroup ? undefined : props.onClose}
+      onClose={busy || confirmUnlinkGroup || demoGuide ? undefined : props.onClose}
       closeLabel={t("common.close")}
       closeContent={<X size={16} aria-hidden="true" />}
-      className={styles.pickModal}
-      backdropClassName={styles.backdrop}
-      footer={(
+      // 展示模式把弹窗收窄一点：说明卡才贴得到它左边，不压住刚扫出来的会话列表。
+      className={demoGuide ? `${styles.pickModal} ${styles.pickModalDemo}` : styles.pickModal}
+      backdropClassName={demoGuide ? `${styles.backdrop} ${styles.backdropYield}` : styles.backdrop}
+      demoGuideAnchor={demoGuide ? "associate-pick" : undefined}
+      footer={demoGuide ? (
+        // 展示模式的底部没有按钮：只说清现在在做什么、什么也不会被改动。
+        <span>{sessions === null && !error ? t("collab.pick.demoScanning") : t("collab.pick.demoNote")}</span>
+      ) : (
         <>
           {error ? <span className={styles.error} role="alert">{error}</span> : selectedCount > SESSIONS_PER_MEMBER_LIMIT ? (
             <span className={styles.pickLimit} role="status">
@@ -3691,7 +3769,7 @@ export function AssociateSessionsModal(props: {
     >
       {!accessGranted ? (
         /* 未授权：同一个弹窗只给授权说明，不列出任何本机记录，也不给「保存」。 */
-        <div className={styles.pickBody}>
+        <div className={styles.pickBody} inert={demoGuide ? true : undefined}>
           <div className={styles.gate}>
             <Memmy pose="shield" size={72} className={styles.gateMascot} />
             <h3 className={styles.gateTitle}>{t("collab.pick.gate")}</h3>
@@ -3704,7 +3782,7 @@ export function AssociateSessionsModal(props: {
           </div>
         </div>
       ) : (
-      <div className={styles.pickBody}>
+      <div className={styles.pickBody} inert={demoGuide ? true : undefined}>
         <div className={styles.agentColumn}>
         <nav className={styles.agentList} aria-label="Agent">
           {agents.map((agent) => {

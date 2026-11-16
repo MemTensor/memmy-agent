@@ -30,6 +30,7 @@ const PHASES: DemoGuidePhase[] = [
   "tour-board",
   "tour-tabs",
   "tour-associate",
+  "tour-associate-pick",
   "tour-new-task",
   "task-row",
   "reader",
@@ -61,8 +62,10 @@ function stateFor(phase: DemoGuidePhase): DemoGuideState {
 error: null,
     done: { task: false, ask: false, help: false },
     skipped: { task: false, ask: false, help: false },
+    askSeen: false,
     askDelivered: false,
     askTurnEnded: false,
+    scan: { status: "done", count: 12 },
     prefill: null,
     endReason: null,
     cloudEnded: false
@@ -99,23 +102,42 @@ describe("the demo guide copy", () => {
       .toBe("正在本机执行，完成后结果会回传给小饭团。");
   });
 
-  it("keeps the four tour steps in the approved words", () => {
-    const zh = [0, 1, 2, 3].map((index) => demoGuideTourCard(index, translate("zh-CN")));
-    expect(zh.map((card) => card.stepName)).toEqual(["任务列表", "协助", "关联任务", "新建任务"]);
+  it("keeps the five tour steps in the approved words", () => {
+    const zh = [0, 1, 2, 3, 4].map((index) => demoGuideTourCard(index, translate("zh-CN")));
+    expect(zh.map((card) => card.stepName)).toEqual(["任务列表", "协助", "关联任务", "关联会话", "新建任务"]);
     expect(zh.map((card) => card.body)).toEqual([
       "成员共享的任务都在这里。每项任务的完整对话与进展都能读到，也可以接着往下推进，不用反复同步背景。",
       "有些信息和操作只在成员自己的电脑上，比如他的本地文件、本机环境。任务里需要这些时，向成员发起协助请求，他确认后由他电脑上的 Agent 执行，结果回写到你的任务中。双方的协助记录都在这里。",
       "你在 Claude Code、Cursor 等外部工具里做的工作，成员默认看不到。把那段会话关联进项目，成员就能读到完整上下文并接着处理，不用再讲一遍；关联整个分组后，该分组新增的会话也会自动进入项目。",
+      "之后可以在这里选择对应的会话内容，共享给其他成员，不过这次我们先进入下面的环节吧。",
       "需要开展新工作时，从这里新建任务。项目内新建的任务默认对成员可见，方便他们查看进展、接着推进或发起协助。"
     ]);
-    const en = [0, 1, 2, 3].map((index) => demoGuideTourCard(index, translate("en-US")));
-    expect(en.map((card) => card.stepName)).toEqual(["Task list", "Assistance", "Linked tasks", "New task"]);
+    const en = [0, 1, 2, 3, 4].map((index) => demoGuideTourCard(index, translate("en-US")));
+    expect(en.map((card) => card.stepName)).toEqual(["Task list", "Assistance", "Linked tasks", "Linked sessions", "New task"]);
     expect(en.map((card) => card.body)).toEqual([
       "Tasks shared by members live here. You can read each task's full conversation and progress, and carry on from where it stopped without briefing each other again.",
       "Some information and actions only exist on a member's own computer, such as their local files or their machine's environment. When a task needs them, send the member an assistance request; once they confirm, the Agent on their computer runs it and the result is written back to your task. Requests from both sides are listed here.",
       "Work you did in Claude Code, Cursor and other external tools is invisible to members by default. Link that session to the project and members can read the full context and carry on, without you retelling it. Link a whole group and its new sessions come in automatically.",
+      "Later you can pick which sessions to share with members here. For now, let's move on to the next part.",
       "Start new work here. New tasks in this project are visible to members by default, so they can follow progress, carry on, or ask for assistance."
     ]);
+  });
+
+  it("holds the next button on the link-session step until the scan has a result", () => {
+    const zh = translate("zh-CN");
+    // 扫描中：按钮置灰，卡片写着正在扫，主按钮的字仍是「下一步」。
+    const scanning = demoGuideCard({ ...stateFor("tour-associate-pick"), scan: { status: "scanning", count: 0 } }, zh);
+    expect(scanning.actionDisabled).toBe(true);
+    expect(scanning.status).toBe("正在扫描这台电脑上的历史会话…");
+    expect(scanning.action).toBe("next");
+    // 扫到会话：给出计数，按钮可用。
+    const done = demoGuideCard({ ...stateFor("tour-associate-pick"), scan: { status: "done", count: 7 } }, zh);
+    expect(done.actionDisabled).toBe(false);
+    expect(done.status).toBe("已扫描到 7 个会话，之后可以在这里选。");
+    // 一个也没扫到也算有了结果：不让按钮一直置灰。
+    const empty = demoGuideCard({ ...stateFor("tour-associate-pick"), scan: { status: "done", count: 0 } }, zh);
+    expect(empty.actionDisabled).toBe(false);
+    expect(empty.status).toBe("这台电脑上暂时没有可以关联的会话。");
   });
 
   it("names the three experience steps the way the prototype does", () => {

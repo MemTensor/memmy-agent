@@ -63,6 +63,9 @@ const TARGETS: Record<DemoGuidePhase, DemoGuideTarget> = {
   "tour-tabs": { region: "board-tabs", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" },
   // 「关联任务」这一步只亮给人看：不描边、点了也不打开弹窗、不写任何数据。
   "tour-associate": { region: "board-associate", stroke: null, blockRest: true, radius: 10, padding: 6, prefer: "bottom" },
+  // 「关联会话」：整张弹窗作为亮区，亮区里一个控件都不给点（blockRest 且不描边）；
+  // 卡片贴到弹窗左边，把扫描出来的列表完整留在右边。
+  "tour-associate-pick": { region: "associate-pick", stroke: null, blockRest: true, radius: 16, padding: 6, prefer: "left" },
   // 侧栏当前项目右侧的「＋」：亮给它，同样点不动。
   "tour-new-task": { region: "sidebar-new-task", stroke: null, blockRest: true, radius: 9, padding: 5, prefer: "bottom" },
   // 体验三步：圆角与内边距沿用默认值（12 / 6），与改造前一致。

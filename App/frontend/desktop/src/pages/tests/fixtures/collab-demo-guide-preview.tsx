@@ -14,7 +14,7 @@ import board from "../../collab-page.module.css";
 /**
  * 预览里的步骤：卡片上的名字与 {@link DemoGuidePhase} 一一对应。
  *
- * `0-*` 是建项目之前的那一段（新建弹窗上的六屏，加上加入项目之后看板上的成员亮区），`t-*` 是四步看板导览
+ * `0-*` 是建项目之前的那一段（新建弹窗上的六屏，加上加入项目之后看板上的成员亮区），`t-*` 是五步看板导览
  * （纯介绍），`1-*`「2-*」`3-*` 是体验段三步。
  */
 export const DEMO_GUIDE_PREVIEW_STEPS = {
@@ -28,6 +28,7 @@ export const DEMO_GUIDE_PREVIEW_STEPS = {
   "t-board": "tour-board",
   "t-tabs": "tour-tabs",
   "t-associate": "tour-associate",
+  "t-associate-pick": "tour-associate-pick",
   "t-new-task": "tour-new-task",
   "1-task-row": "task-row",
   "1-reader": "reader",
@@ -84,8 +85,11 @@ function stateFor(step: DemoGuidePreviewStep): DemoGuideState {
       help: step === "complete" || step === "3-done"
     },
     skipped: { task: false, ask: false, help: false },
+    askSeen: false,
     askDelivered: step === "2-done",
     askTurnEnded: false,
+    // 「关联会话」那一屏：预览里直接摆扫完的样子（列表 + 计数），主按钮可用。
+    scan: phase === "tour-associate-pick" ? { status: "done", count: 12 } : { status: "idle", count: 0 },
     prefill: null,
     endReason: step === "complete" ? "finished" : null,
     cloudEnded: false
@@ -399,9 +403,71 @@ function SettingsSurface() {
   );
 }
 
-/** 协助授权弹窗：谁请求、做什么、由谁执行与允许方式。 */
-function AssistDialogSurface() {
+/**
+ * 关联会话弹窗：标题、Agent 列与扫出来的会话列表，底部一行写明只做展示。
+ *
+ * 真实组件还连本机接口真扫；预览只摆布局与亮区锚点，名字与真实弹窗的 `data-demo-guide` 一致。
+ */
+function AssociatePickSurface() {
+  const rows = [
+    { title: "把分享会的议程拆成待办", meta: "10:24" },
+    { title: "核对上次分享会的签到表", meta: "昨天" },
+    { title: "给看板加上成员筛选", meta: "周一" }
+  ];
   return (
+    <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <section
+        data-demo-guide="associate-pick"
+        style={{ width: 560, background: "#fff", borderRadius: 16, boxShadow: "0 18px 44px rgba(16,26,25,.18)", overflow: "hidden" }}
+      >
+        <header style={{ padding: "16px 18px 10px" }}>
+          <h2 style={{ margin: 0, fontSize: 15 }}>管理其他 Agent 的任务</h2>
+          <p style={{ margin: "4px 0 0", fontSize: 12, lineHeight: 1.6, color: "rgba(16,26,25,.55)" }}>
+            所选任务将同步至「项目协作体验」，对项目成员可见；取消关联不会删除本地任务。
+          </p>
+        </header>
+        <div style={{ display: "flex", gap: 12, padding: "4px 18px 12px" }}>
+          <nav style={{ width: 148, display: "flex", flexDirection: "column", gap: 2 }} aria-label="Agent">
+            {["Claude Code", "Cursor"].map((agent, index) => (
+              <div
+                key={agent}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  padding: "7px 8px",
+                  borderRadius: 8,
+                  fontSize: 12.5,
+                  background: index === 0 ? "rgba(92,191,174,.12)" : "transparent"
+                }}
+              >
+                {agent}
+              </div>
+            ))}
+          </nav>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ height: 32, borderRadius: 8, border: "1px solid rgba(16,26,25,.1)", display: "flex", alignItems: "center", padding: "0 10px", fontSize: 12, color: "rgba(16,26,25,.45)", marginBottom: 8 }}>
+              搜索 Claude Code 的会话
+            </div>
+            {rows.map((row) => (
+              <div key={row.title} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", fontSize: 12.5 }}>
+                <span style={{ width: 14, height: 14, borderRadius: 4, border: "1px solid rgba(16,26,25,.22)" }} aria-hidden="true" />
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.title}</span>
+                <span style={{ fontSize: 11.5, color: "rgba(16,26,25,.45)" }}>{row.meta}</span>
+              </div>
+            ))}
+            <p style={{ margin: "8px 0 0", fontSize: 11.5, color: "rgba(16,26,25,.45)" }}>{`共 ${rows.length} 个会话`}</p>
+          </div>
+        </div>
+        <footer style={{ padding: "10px 18px 14px", fontSize: 11.5, color: "rgba(16,26,25,.45)", borderTop: "1px solid rgba(16,26,25,.06)" }}>
+          这里只做展示，不会改动任何任务。
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+/** 协助授权弹窗：谁请求、做什么、由谁执行与允许方式。 */
+function AssistDialogSurface() {  return (
     <div style={{ position: "absolute", inset: 0, background: "rgba(16,26,25,.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div
         data-demo-guide="assist-dialog"
@@ -528,7 +594,7 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
 
   const phase = state.phase;
   const chat = phase === "compose" || phase === "reply-waiting" || phase === "reply-done" || phase === "ask-compose" || phase === "ask-waiting" || phase === "ask-done";
-  // 看板导览的四步：只摆看板（最后一步多一条侧栏，那个「＋」才是亮区），不换页。
+  // 看板导览的五步：只摆看板（「关联会话」多一张弹窗，最后一步多一条侧栏），不换页。
   const tour = demoGuideIsTourPhase(phase);
   let surface: ReactNode;
   // 建项目之前的六个阶段全在新建弹窗上，只换亮区。
@@ -541,6 +607,7 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
       <>
         <BoardSurface withSettings withAssistRow={false} withSidebar={phase === "tour-new-task"} />
         {phase === "tour-new-task" ? <PreviewSidebar /> : null}
+        {phase === "tour-associate-pick" ? <AssociatePickSurface /> : null}
       </>
     );
   }
