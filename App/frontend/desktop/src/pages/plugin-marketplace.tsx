@@ -220,13 +220,19 @@ export function PluginMarketplace() {
     onUninstall={(plugin) => void mutate(plugin, () => clients!.plugins.uninstall(plugin.id),
       records => !records.some(record => record.id === plugin.id))}
     onAddToChat={(plugin) => {
-      const command = pluginComposerCommand(plugin);
-      if (command) {
-        const scopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+      const scopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+      if (plugin.id === "office") {
         dispatch(agentActions.composerDraftUpdated(
-          scopeKey,
-          addPluginCommandToDraft(command, state.agent.composerDraftsByScope[scopeKey] ?? "")
+          scopeKey, "使用 Office 插件帮我制作办公文档。先根据我的需求确定文件格式，再生成、检查并交付文件。"
         ));
+      } else {
+        const command = pluginComposerCommand(plugin);
+        if (command) {
+          dispatch(agentActions.composerDraftUpdated(
+            scopeKey,
+            addPluginCommandToDraft(command, state.agent.composerDraftsByScope[scopeKey] ?? "")
+          ));
+        }
       }
       dispatch(appActions.navigate("/main"));
     }}

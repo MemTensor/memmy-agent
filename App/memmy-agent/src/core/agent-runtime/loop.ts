@@ -3658,6 +3658,7 @@ export class AgentLoop {
       JSON.stringify(message.tool_calls ?? null),
       message.reasoning_content ?? null,
       JSON.stringify(message.thinking_blocks ?? null),
+      JSON.stringify(message.memmy_protocol_state ?? null),
     ];
   }
 
