@@ -118,8 +118,12 @@ describe("segment narrative", () => {
   it("does not send an oversized fixed prompt even after evidence is trimmed to its minimum", async () => {
     const { resolver, chatWithRetry } = runtime("{}");
     const onError = vi.fn();
+    // Separate tokens so this tests input rejection rather than worst-case BPE merging.
+    const oversizedApplication = "界\n".repeat(4_000);
+    expect(estimatePromptTokens([{ role: "user", content: oversizedApplication }]))
+      .toBeGreaterThan(MAX_NARRATIVE_INPUT_TOKENS);
     expect(await writeSegmentNarrative(resolver, {
-      applications: ["界".repeat(10_000)], evidence: "Observed work\n".repeat(100), window: "6h", onError,
+      applications: [oversizedApplication], evidence: "Observed work\n".repeat(100), window: "6h", onError,
     })).toBeNull();
     expect(chatWithRetry).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledExactlyOnceWith("summary input exceeds the text-summary token budget");
