@@ -36,6 +36,12 @@ const TIMELINE = { s1: 0, s2: 4.8, s2b: 9.0, s3: 12.2, s4: 18.8, s5: 25.4, done:
 const SCENE_STARTS = [TIMELINE.s1, TIMELINE.s2, TIMELINE.s3, TIMELINE.s4, TIMELINE.s5, TIMELINE.done];
 const CAPTION_STARTS = [TIMELINE.s1, TIMELINE.s2, TIMELINE.s2b, TIMELINE.s3, TIMELINE.s4, TIMELINE.s5];
 
+/**
+ * The five pieces of the progress indicator sit on the five acts of the timeline, not on the six captions: the shared
+ * agent follows the hand-relay act without a piece of its own, so act three starts at caption four.
+ */
+const ACT_CAPTIONS = [0, 1, 3, 4, 5];
+
 /** [time, centre x, centre y, zoom]; the camera eases between frames, a repeated frame is a hold. */
 const CAMERA: ReadonlyArray<readonly [number, number, number, number]> = [
   [0, 163, 232, 1.62],
@@ -227,8 +233,6 @@ function SessionPage(props: { tint?: string }) {
 }
 
 export interface CollabLaunchStageProps {
-  /** Bumped by the card to play the animation from the start again. */
-  replayToken: number;
   /** The scene on screen, reported only when it changes. */
   onSceneChange(index: number): void;
 }
@@ -240,8 +244,8 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
   const [scale, setScale] = useState(1);
   const onSceneChangeRef = useRef(props.onSceneChange);
   onSceneChangeRef.current = props.onSceneChange;
-  const replayRef = useRef<() => void>(() => undefined);
-  const lastReplayToken = useRef(props.replayToken);
+  /** Jumps the clock to one act: pressing its progress piece plays that act again from its first frame. */
+  const seekRef = useRef<(act: number) => void>(() => undefined);
 
   // The stage is designed at 928×420; the card is narrower than that in small windows and in the dev preview, so the
   // whole picture is scaled down as one piece. The frame takes the scaled height so no gap is left below it.
@@ -861,9 +865,9 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
       frameId = requestAnimationFrame(step);
     };
 
-    replayRef.current = () => play(0);
+    seekRef.current = (act: number) => play(SCENE_STARTS[act] ?? 0);
 
-    // A visitor who asked for less motion lands on the closing frame; replay is still theirs to press.
+    // A visitor who asked for less motion lands on the closing frame; pressing a piece is still theirs to do.
     const reduceMotion =
       typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     time = reduceMotion ? TIMELINE.done + 2 : 0;
@@ -885,15 +889,9 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
     return () => {
       stop();
       document.removeEventListener("visibilitychange", onVisible);
-      replayRef.current = () => undefined;
+      seekRef.current = () => undefined;
     };
   }, []);
-
-  useEffect(() => {
-    if (props.replayToken === lastReplayToken.current) return;
-    lastReplayToken.current = props.replayToken;
-    replayRef.current();
-  }, [props.replayToken]);
 
   const codexLogo = agentSourceLogoUrl("codex");
   const claudeLogo = agentSourceLogoUrl("claude_code");
@@ -909,12 +907,11 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
       <div
         className="collab-launch-stage"
         ref={stageRef}
-        aria-hidden="true"
         style={{ "--collab-launch-stage-scale": scale } as CSSProperties}
       >
-        <div className="collab-launch-heat" />
-        <div className="collab-launch-grid" />
-        <div className="collab-launch-world">
+        <div className="collab-launch-heat" aria-hidden="true" />
+        <div className="collab-launch-grid" aria-hidden="true" />
+        <div className="collab-launch-world" aria-hidden="true">
           <svg className="collab-launch-wires" viewBox="0 0 928 420" aria-hidden="true">
             {/* The two circles, drawn before anything inside them. */}
             <rect className="collab-launch-ring-fill collab-launch-ring-fill--a" x={34} y={144} width={258} height={132} rx={66} pathLength={1} />
@@ -1181,10 +1178,21 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
           </div>
         </div>
 
+        {/* 进度条可点：按一下就从那一幕的第一帧重新播，所以它不能藏在舞台的 aria-hidden 里。 */}
         <div className="collab-launch-progress" role="group" aria-label={t("collabLaunch.progress")}>
-          {[0, 1, 2, 3, 4].map((index) => (
-            <i className="collab-launch-progress__segment" key={index} />
-          ))}
+          {[0, 1, 2, 3, 4].map((index) => {
+            const caption = COLLAB_LAUNCH_CAPTIONS[ACT_CAPTIONS[index] ?? index];
+            const main = caption ? t(caption.main) : "";
+            return (
+              <button
+                className="collab-launch-progress__segment"
+                key={index}
+                type="button"
+                aria-label={t("collabLaunch.jumpToScene").replace("{scene}", String(index + 1)).replace("{caption}", main)}
+                onClick={() => seekRef.current(index)}
+              />
+            );
+          })}
         </div>
       </div>
     </div>

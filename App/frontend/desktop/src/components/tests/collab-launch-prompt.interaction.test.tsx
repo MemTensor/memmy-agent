@@ -178,9 +178,10 @@ describe("collab launch prompt", () => {
     // 标题只剩读屏用的一份，卡面上直接是画面。
     expect(title()).toBe("项目协作");
     expect(stage()).not.toBeNull();
-    expect(stage()?.getAttribute("aria-hidden")).toBe("true");
-    expect(caption()).toBe("完整的原始上下文，都留在各自的会话里");
-    expect(captionSub()).toBe("一个人加上惯用的 Agent，就是一个能独立把事做深的超级个体");
+    // 画面本身对辅助技术隐藏：舞台里只有画面，进度条是例外。
+    expect(stage()?.querySelector(".collab-launch-world")?.getAttribute("aria-hidden")).toBe("true");
+    expect(caption()).toBe("人与各自的 Agent，组成独当一面的超级个体");
+    expect(captionSub()).toBe("思考与执行的完整脉络，都沉淀在各自的原始会话里");
     // 只有一页：没有翻页、进度点，也没有旧版右侧示例。
     expect(document.querySelector(".collab-launch-count")).toBeNull();
     expect(document.querySelector(".collab-launch-dots")).toBeNull();
@@ -194,15 +195,15 @@ describe("collab launch prompt", () => {
     expect(document.querySelector(".collab-launch-status")).toBeNull();
   });
 
-  it("keeps the progress indicator out of reach and out of the accessibility tree", async () => {
+  it("keeps the picture hidden while the five progress pieces stay reachable", async () => {
     await renderHost();
 
     const progress = document.querySelector<HTMLElement>(".collab-launch-progress");
     expect(progress).not.toBeNull();
     expect(document.querySelectorAll(".collab-launch-progress__segment")).toHaveLength(5);
-    // 只是指示：整块挂在舞台里，舞台本身对辅助技术隐藏，里面也没有可操作的元素。
-    expect(progress?.closest("[aria-hidden='true']")).toBe(stage());
-    expect(progress?.querySelectorAll("button, a, input, select, textarea, [tabindex]")).toHaveLength(0);
+    // 五段可点，所以不在舞台的 aria-hidden 里；画面本身仍然不报给辅助技术。
+    expect(progress?.closest("[aria-hidden='true']")).toBeNull();
+    expect(progress?.querySelectorAll("button")).toHaveLength(5);
   });
 
   it("says which language the card is written in, for the browser's own text layout", async () => {
@@ -215,9 +216,9 @@ describe("collab launch prompt", () => {
 
     expect(title()).toBe("Shared projects");
     expect(primary()?.textContent?.trim()).toBe("New project");
-    expect(caption()).toBe("The full original context stays in each person's sessions");
+    expect(caption()).toBe("A person and their own agents make a super individual");
     expect(captionSub())
-      .toBe("A person plus the agent they rely on is a super individual, able to take work deep on their own");
+      .toBe("The full trail of thought and execution stays in each person's own sessions");
   });
 
   it("only offers the project when no client is available, and opens the new-project dialog with sharing on", async () => {
@@ -519,18 +520,24 @@ describe("collab launch card", () => {
     expect(getLaunchAuthorizationState().inFlight).toBe(false);
   });
 
-  it("replays the animation from its own button without closing the card or authorizing", async () => {
+  it("plays one act again from its progress piece, without closing the card or authorizing", async () => {
     const setAgentAccess = vi.fn();
     await render({ ...fakeCollab(), setAgentAccess } as unknown as CollabClient);
     await flush();
 
-    const replay = document.querySelector<HTMLButtonElement>(".collab-launch-replay");
-    expect(replay).not.toBeNull();
-    expect(replay?.getAttribute("aria-label")).toBe("重播");
-    expect(replay?.textContent?.trim()).toBe("重播");
+    // 卡面上不再有「重播」按钮，重看靠左下角的五段进度。
+    expect(document.querySelector(".collab-launch-replay")).toBeNull();
+    const pieces = Array.from(document.querySelectorAll<HTMLButtonElement>(".collab-launch-progress__segment"));
+    expect(pieces).toHaveLength(5);
+    expect(pieces[0]?.getAttribute("aria-label")).toBe("从第 1 段重新播放：人与各自的 Agent，组成独当一面的超级个体");
+    expect(pieces[4]?.getAttribute("aria-label")).toBe("从第 5 段重新播放：Agent 时代超级个体的协作方式");
 
-    await click(replay);
+    // 第四段是成员协助。
+    await click(pieces[3] ?? null);
 
+    // 跳到第四幕的第一帧，字幕跟着换。
+    expect(caption()).toBe("需要跨端配合时，直接请成员的 Agent 协助执行");
+    expect(captionSub()).toBe("本人只需确认授权，任务即可在对方本机完成并传回结果");
     expect(dialog()).not.toBeNull();
     expect(close).not.toHaveBeenCalled();
     expect(createProject).not.toHaveBeenCalled();
@@ -550,7 +557,7 @@ describe("collab launch card", () => {
     try {
       await render(null);
       await flush();
-      expect(caption()).toBe("完整的原始上下文，都留在各自的会话里");
+      expect(caption()).toBe("人与各自的 Agent，组成独当一面的超级个体");
 
       // 每帧最多推进 0.1 秒，走一百帧落在第三段。
       const start = performance.now();
@@ -561,7 +568,7 @@ describe("collab launch card", () => {
         });
       }
 
-      expect(caption()).toBe("围着共同的 Agent，原始上下文依然带不进去");
+      expect(caption()).toBe("即使换用公共 Agent，前序过程仍要靠人手动搬运");
       expect(captionSub()).toBeUndefined();
       expect(document.querySelector(".collab-launch-caption__sub")).toBeNull();
     } finally {

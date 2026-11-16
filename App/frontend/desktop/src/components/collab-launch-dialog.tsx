@@ -37,7 +37,6 @@ export function CollabLaunchDialog(props: CollabLaunchDialogProps) {
   const [granted, setGranted] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [sceneIndex, setSceneIndex] = useState(0);
-  const [replayToken, setReplayToken] = useState(0);
   const helpOpenRef = useRef(helpOpen);
   helpOpenRef.current = helpOpen;
 
@@ -130,29 +129,7 @@ export function CollabLaunchDialog(props: CollabLaunchDialogProps) {
           {t("collabLaunch.title")}
         </h2>
         <div className="collab-launch-stage-slot">
-          <CollabLaunchStage replayToken={replayToken} onSceneChange={setSceneIndex} />
-          <button
-            className="collab-launch-replay"
-            type="button"
-            aria-label={t("collabLaunch.replay")}
-            onClick={() => setReplayToken((token) => token + 1)}
-          >
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.7"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M2.5 8a5.5 5.5 0 1 0 1.7-4" />
-              <path d="M2.3 2.2v2.9h2.9" />
-            </svg>
-            {t("collabLaunch.replay")}
-          </button>
+          <CollabLaunchStage onSceneChange={setSceneIndex} />
         </div>
         <div className="collab-launch-caption-bar">
           {/* 换段时整块重新挂载：逐字浮出的动画跟着这段文案从头放。 */}
