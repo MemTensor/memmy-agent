@@ -6,9 +6,12 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  DEMO_GUIDE_BEFORE_PROJECT_PHASES,
   DEMO_GUIDE_TOUR_PHASES,
   demoGuideHeartbeatStep,
+  demoGuideIsBeforeProjectPhase,
   demoGuideIsTourPhase,
+  demoGuideNextBeforeProjectPhase,
   demoGuideNextTourPhase,
   demoGuideReducer,
   demoGuideStartsExperience,
@@ -286,7 +289,8 @@ describe("demo guide state machine", () => {
   });
 
   it("maps every phase to a step number and a heartbeat step the cloud accepts", () => {
-    // 加入提示窗与看板导览还没有进度可讲：卡片上不出现「1 / 3」。
+    // 建项目之前的六屏、加入那一屏与看板导览都没有进度可讲：卡片上不出现「1 / 3」。
+    for (const phase of DEMO_GUIDE_BEFORE_PROJECT_PHASES) expect(demoGuideStepNumberOf(phase)).toBeNull();
     expect(demoGuideStepNumberOf("joined")).toBeNull();
     for (const phase of DEMO_GUIDE_TOUR_PHASES) expect(demoGuideStepNumberOf(phase)).toBeNull();
     expect(demoGuideStepNumberOf("task-row")).toBe(1);
@@ -303,16 +307,80 @@ describe("demo guide state machine", () => {
     expect(demoGuideHeartbeatStep("complete")).toBe("finish");
   });
 
-  it("starts on the create-project step with nothing to skip", () => {
+  it("starts on the intro screen with nothing to skip", () => {
     const before = demoGuideReducer(raw(), { type: "start-before-project" });
     expect(before.status).toBe("active");
-    expect(before.phase).toBe("create-project");
+    expect(before.phase).toBe("intro");
     // 还没有云端项目：心跳与结束演示都无处可发。
     expect(before.projectId).toBeNull();
     expect(before.memberUserId).toBeNull();
     // 这一步跳不了：不建项目就没有后面的演示；取消这一步不是「退出」，直接回到空闲。
-    expect(demoGuideReducer(before, { type: "skip" }).phase).toBe("create-project");
+    expect(demoGuideReducer(before, { type: "skip" }).phase).toBe("intro");
     expect(demoGuideReducer(before, { type: "end", reason: "exited" }).status).toBe("ended");
+  });
+
+  it("walks the six screens of the create dialog in order", () => {
+    // 出场 → 名称 → 文件夹 → 协作 → 加入项目 → 创建项目；顺序不可调。
+    expect([...DEMO_GUIDE_BEFORE_PROJECT_PHASES]).toEqual([
+      "intro",
+      "name",
+      "folder",
+      "collab",
+      "join-entry",
+      "create-project"
+    ]);
+    let state = demoGuideReducer(raw(), { type: "start-before-project" });
+    for (const [index, phase] of DEMO_GUIDE_BEFORE_PROJECT_PHASES.entries()) {
+      expect(state.status).toBe("active");
+      expect(state.phase).toBe(phase);
+      expect(demoGuideIsBeforeProjectPhase(phase)).toBe(true);
+      // 这一段没有进度、没有心跳项目、也不预填任何东西。
+      expect(demoGuideStepNumberOf(phase)).toBeNull();
+      expect(demoGuideHeartbeatStep(phase)).toBe("1");
+      expect(state.projectId).toBeNull();
+      expect(state.prefill).toBeNull();
+      // 这六屏都没有「跳过这一步」：跳过无效。
+      expect(demoGuideReducer(state, { type: "skip" })).toBe(state);
+      const next = demoGuideNextBeforeProjectPhase(phase);
+      if (index < DEMO_GUIDE_BEFORE_PROJECT_PHASES.length - 1) {
+        expect(next).toBe(DEMO_GUIDE_BEFORE_PROJECT_PHASES[index + 1]);
+        state = demoGuideReducer(state, { type: "next" });
+      } else {
+        expect(next).toBeNull();
+      }
+    }
+    // 最后一屏靠人点真实的「创建项目」：收到「下一步」保持不动。
+    expect(demoGuideReducer(state, { type: "next" })).toBe(state);
+  });
+
+  it("only skips the join entry when that screen is current", () => {
+    const before = demoGuideReducer(raw(), { type: "start-before-project" });
+    expect(demoGuideReducer(before, { type: "skip-join-entry" })).toBe(before);
+    // 一路走到「加入项目」那一屏：这时候跳过它才有效。
+    const joinEntry = run(before, [
+      { type: "next" },
+      { type: "next" },
+      { type: "next" },
+      { type: "next" }
+    ]);
+    expect(joinEntry.phase).toBe("join-entry");
+    expect(demoGuideReducer(joinEntry, { type: "skip-join-entry" }).phase).toBe("create-project");
+    // 已经到「创建项目」之后就不再理会这个事件。
+    const submit = demoGuideReducer(joinEntry, { type: "skip-join-entry" });
+    expect(demoGuideReducer(submit, { type: "skip-join-entry" })).toBe(submit);
+  });
+
+  it("drops the before-project screens as soon as the cloud starts the demo", () => {
+    // 建项目之前这六屏都算是「还在弹窗上」：取消弹窗能把任意一屏收起来。
+    let state = demoGuideReducer(raw(), { type: "start-before-project" });
+    for (let index = 0; index < DEMO_GUIDE_BEFORE_PROJECT_PHASES.length - 1; index += 1) {
+      expect(demoGuideIsBeforeProjectPhase(state.phase)).toBe(true);
+      state = demoGuideReducer(state, { type: "next" });
+    }
+    expect(state.phase).toBe("create-project");
+    expect(demoGuideIsBeforeProjectPhase(state.phase)).toBe(true);
+    // 云端建好项目后直接进「加入」那一屏，不再回弹窗。
+    expect(demoGuideReducer(state, { type: "start", input: START }).phase).toBe("joined");
   });
 
   it("shows the join notice right after the project is created, before the first step", () => {

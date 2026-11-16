@@ -2,6 +2,7 @@
  * 引导蒙版的几何：遮罩的四块、亮区里除控件外要挡住的部分、说明卡贴哪一边，以及窄窗口下不溢出。
  */
 import { describe, expect, it } from "vitest";
+import type { DemoGuidePhase } from "../../../app/collab-demo-guide-store.js";
 import {
   blockerRects,
   cardPlacement,
@@ -11,6 +12,7 @@ import {
   padRect,
   rectVisible,
   rectsIntersect,
+  type DemoGuideTarget,
   type Rect
 } from "../collab-demo-guide-layout.js";
 
@@ -122,13 +124,47 @@ describe("demo guide layout", () => {
   });
 
   it("names the anchor and the control for each phase", () => {
-    // 建项目之前：新建弹窗里的「创建项目」是唯一亮起、也唯一可点的地方。
-    expect(demoGuideTarget("create-project")).toEqual({ region: "create-project-submit", stroke: "create-project-submit", blockRest: false });
+    // 建项目之前：新建弹窗里的「创建项目」是唯一可点的地方。
+    expect(demoGuideTarget("create-project")).toMatchObject({ region: "create-project-submit", stroke: "create-project-submit", blockRest: false });
     expect(demoGuideTarget("task-row")).toEqual({ region: "board-task-row", stroke: "board-task-row", blockRest: false });
     expect(demoGuideTarget("reader").stroke).toBe("reader-continue");
     expect(demoGuideTarget("compose").stroke).toBe("composer-send");
     expect(demoGuideTarget("help-dialog").stroke).toBe("assist-allow");
     expect(demoGuideTarget("settings-assist").stroke).toBe("settings-assist-switch");
+  });
+
+  it("gives each phase the radius, padding and card side the spec asks for", () => {
+    // 第六版第四节那张表，逐行照拄：锚点、圆角、内边距、说明卡优先贴哪边。
+    const table: Array<[DemoGuidePhase, { region: string; stroke: string | null; blockRest: boolean; radius: number; padding: number; prefer?: DemoGuideTarget["prefer"]; clean?: boolean }]> = [
+      ["intro", { region: "create-dialog", stroke: null, blockRest: false, radius: 18, padding: 8, prefer: "right", clean: true }],
+      ["name", { region: "create-name", stroke: "create-name", blockRest: false, radius: 13, padding: 6, prefer: "bottom" }],
+      ["folder", { region: "create-folder", stroke: "create-folder", blockRest: false, radius: 14, padding: 6, prefer: "bottom" }],
+      ["collab", { region: "create-collab", stroke: "create-collab", blockRest: false, radius: 13, padding: 6, prefer: "top" }],
+      ["join-entry", { region: "create-join", stroke: "create-join", blockRest: false, radius: 10, padding: 6, prefer: "top" }],
+      ["create-project", { region: "create-project-submit", stroke: "create-project-submit", blockRest: false, radius: 10, padding: 7, prefer: "right" }],
+      ["joined", { region: "board-members", stroke: null, blockRest: false, radius: 10, padding: 7, prefer: "right" }],
+      ["tour-board", { region: "board-list", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" }],
+      ["tour-tabs", { region: "board-tabs", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" }],
+      ["tour-associate", { region: "board-associate", stroke: null, blockRest: true, radius: 10, padding: 6, prefer: "bottom" }],
+      ["tour-new-task", { region: "sidebar-new-task", stroke: null, blockRest: true, radius: 9, padding: 5, prefer: "bottom" }]
+    ];
+    for (const [phase, expected] of table) {
+      expect(demoGuideTarget(phase), phase).toEqual(expected);
+    }
+    // 体验三步与改造前一样：不写圆角与内边距，走默认的 12 / 6，也不指定卡片贴哪边。
+    for (const phase of ["task-row", "reader", "compose", "reply-done", "ask-compose", "settings-open", "help-dialog", "complete"] as const) {
+      const target = demoGuideTarget(phase);
+      expect(target.radius).toBeUndefined();
+      expect(target.padding).toBeUndefined();
+      expect(target.prefer).toBeUndefined();
+      expect(target.clean).toBeUndefined();
+    }
+  });
+
+  it("does not blow up on a phase nobody registered", () => {
+    // 只保证不抛错：界面在阶段表有缺口时也只是不画蒙版。
+    expect(() => demoGuideTarget("not-a-phase" as DemoGuidePhase)).not.toThrow();
+    expect(demoGuideTarget("not-a-phase" as DemoGuidePhase)).toBeUndefined();
   });
 
   it("pads the hole without running past the window edge", () => {

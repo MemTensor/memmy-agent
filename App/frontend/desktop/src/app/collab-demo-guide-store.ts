@@ -9,13 +9,14 @@ import type { CollabClient } from "../api/collab-client.js";
 
 /** 引导的每个子状态。
  *
- * 分两段：先是「看板导览」（`tour-*`，纯介绍，不让人操作），再是「动手体验」（三步，各自有若干子状态）。
- * 体验段的「1 / 3」由 {@link demoGuideStepNumberOf} 给出，导览段没有进度可讲。
+ * 分三段：先是「建项目之前」的新建弹窗六屏，再是「看板导览」（`tour-*`，纯介绍，不让人操作），
+ * 最后是「动手体验」（三步，各自有若干子状态）。
+ * 体验段的「1 / 3」由 {@link demoGuideStepNumberOf} 给出，另外两段没有进度可讲。
  */
 export type DemoGuidePhase =
-  // 建项目之前：新建弹窗刚打开，还没有云端项目，蒙版只亮「创建项目」。
-  | "create-project"
-  // 演示刚开始：先弹一个「{name}加入了项目」的提示窗，点「开始体验」才进看板导览。
+  // 建项目之前的那一段：新建弹窗刚打开，一路在弹窗上走完六屏，还没有云端项目。
+  | DemoGuideBeforeProjectPhase
+  // 演示刚开始：看板蒙版套住成员徽章，点「继续」才进看板导览。
   | "joined"
   // 看板导览的四步：任务列表、协助这一个 tab、工具条上的关联任务、侧栏新建任务。
   // 全程停在同一个看板上，只亮给人看，不点任何东西，只留「下一步」与「跳过引导」。
@@ -36,6 +37,42 @@ export type DemoGuidePhase =
   | "help-done"
   | "help-rejected"
   | "complete";
+
+/**
+ * 建项目之前的六屏，按讲的顺序排：出场、项目名称、文件夹、协作开关、左下角的「加入项目」，最后是「创建项目」。
+ *
+ * 这一段还没有云端项目：没有心跳、也没有成员，界面只在新建弹窗里一屏一屏地换亮区。
+ */
+export const DEMO_GUIDE_BEFORE_PROJECT_PHASES = [
+  /** 小饭团出场：蒙版亮整个新建弹窗，不画描边。 */
+  "intro",
+  /** 项目名称：预填好的一项，成员看到的名称与这里一致。 */
+  "name",
+  /** 文件夹：Agent 工作的本地目录。 */
+  "folder",
+  /** 协作开关：开与关的差别。 */
+  "collab",
+  /** 左下角的「加入项目」：已有项目时从这里进，不必新建。 */
+  "join-entry",
+  /** 「创建项目」按钮：由人点这个真实的按钮推进，没有「下一步」。 */
+  "create-project"
+] as const;
+
+export type DemoGuideBeforeProjectPhase = (typeof DEMO_GUIDE_BEFORE_PROJECT_PHASES)[number];
+
+/** 这个子状态属于「建项目之前」（新建弹窗上的六屏）。 */
+export function demoGuideIsBeforeProjectPhase(phase: DemoGuidePhase): phase is DemoGuideBeforeProjectPhase {
+  return (DEMO_GUIDE_BEFORE_PROJECT_PHASES as readonly string[]).includes(phase);
+}
+
+/**
+ * 建项目之前这一段里的下一屏；最后一屏（`create-project`）之后没有「下一步」，返回 null。
+ * 「加入项目」要不要跳过由界面判断（锚点不存在时发 `skip-join-entry`），不在这里决定。
+ */
+export function demoGuideNextBeforeProjectPhase(phase: DemoGuideBeforeProjectPhase): DemoGuideBeforeProjectPhase | null {
+  const index = (DEMO_GUIDE_BEFORE_PROJECT_PHASES as readonly string[]).indexOf(phase);
+  return DEMO_GUIDE_BEFORE_PROJECT_PHASES[index + 1] ?? null;
+}
 
 /**
  * 看板导览的四个子状态，按讲的顺序排。
@@ -123,10 +160,12 @@ export interface DemoGuideStart {
 
 export type DemoGuideEvent =
   | { type: "start"; input: Omit<DemoGuideStart, "client"> }
-  /** 从大卡点「新建项目」进来：先只在新建弹窗上亮「创建项目」，还没有云端项目。 */
+  /** 从大卡或侧栏进来：先在新建弹窗上走完六屏，还没有云端项目。 */
   | { type: "start-before-project" }
-  /** 「{name}加入了项目」那个提示窗点了「开始体验」：才开始第一步。 */
+  /** 「{name}加入了项目」那一屏点了「继续」：才开始第一步。 */
   | { type: "joined-confirmed" }
+  /** 「加入项目」这一屏没有对应的按钮（API Key 模式）时由界面发它：直接进「创建项目」。 */
+  | { type: "skip-join-entry" }
   | { type: "task-opened" }
   | { type: "task-continued"; prefill?: string }
   | { type: "composer-sent" }
@@ -170,9 +209,9 @@ const IDLE: DemoGuideState = {
  * 建项目之前、加入提示窗与看板导览都还没有进度可讲，返回 null：卡片上不出现进度条，改用一个「介绍」标签。
  */
 export function demoGuideStepNumberOf(phase: DemoGuidePhase): 1 | 2 | 3 | null {
-  // 建项目之前的阶段还没有进度可讲。
-  if (phase === "create-project") return null;
-  // 加入提示窗与看板导览都还不是一步：前者没有卡片，后者讲完才进第一步。
+  // 建项目之前的六屏都还没有进度可讲。
+  if (demoGuideIsBeforeProjectPhase(phase)) return null;
+  // 加入那一屏与看板导览都还不是一步：前者讲完就得进导览，后者讲完才进第一步。
   if (phase === "joined" || demoGuideIsTourPhase(phase)) return null;
   if (phase === "task-row" || phase === "reader" || phase === "compose" || phase === "reply-waiting" || phase === "reply-done") {
     return 1;
@@ -212,7 +251,8 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       return {
         ...IDLE,
         status: "active",
-        phase: "create-project"
+        // 从出场那一屏开始：新建弹窗上一路走下去，最后才轮到人点「创建项目」。
+        phase: DEMO_GUIDE_BEFORE_PROJECT_PHASES[0]
       };
     case "start":
       return {
@@ -226,9 +266,14 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
         memberName: event.input.memberName
       };
     case "joined-confirmed":
-      // 点「开始体验」先进看板导览：先看一圈看板是干什么的，再动手。
+      // 点「继续」先进看板导览：先看一圈看板是干什么的，再动手。
       return state.status === "active" && state.phase === "joined"
         ? { ...state, phase: DEMO_GUIDE_TOUR_PHASES[0] }
+        : state;
+    case "skip-join-entry":
+      // 「加入项目」那一屏没有可亮的按钮时跳过去；别的阶段发这个事件不产生任何变化。
+      return state.status === "active" && state.phase === "join-entry"
+        ? { ...state, phase: "create-project" }
         : state;
     case "task-opened":
       return state.status === "active" && state.phase === "task-row" ? { ...state, phase: "reader" } : state;
@@ -268,6 +313,11 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       return state;
     case "next":
       if (state.status !== "active") return state;
+      // 建项目之前的六屏：一屏一屏往下走；最后一屏靠人点真实的「创建项目」，没有「下一步」。
+      if (demoGuideIsBeforeProjectPhase(state.phase)) {
+        const next = demoGuideNextBeforeProjectPhase(state.phase);
+        return next ? { ...state, phase: next } : state;
+      }
       // 看板导览：一步一步往下讲，最后一步之后就是体验的第一步；全程不换页面、不动数据。
       if (demoGuideIsTourPhase(state.phase)) {
         const next = demoGuideNextTourPhase(state.phase);
@@ -284,8 +334,8 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       return state;
     case "skip": {
       if (state.status !== "active") return state;
-      // 建项目之前没有可跳过的步骤：不建项目就没有后面的演示；加入提示窗也不是一步。
-      if (state.phase === "create-project" || state.phase === "joined") return state;
+      // 建项目之前没有可跳过的步骤：不建项目就没有后面的演示；加入那一屏也不是一步。
+      if (demoGuideIsBeforeProjectPhase(state.phase) || state.phase === "joined") return state;
       // 看板导览是纯介绍，没有「跳过这一步」：点跳过引导就是整轮不看，直接收场（小饭团随之离开）。
       if (demoGuideIsTourPhase(state.phase)) return finishOrSkip(state, { help: false, allSkipped: true });
       const step = demoGuideStepNumberOf(state.phase);
@@ -401,9 +451,9 @@ export function isDemoGuideActiveFor(projectId: string | null | undefined): bool
   return state.localProjectId === projectId || state.projectId === projectId;
 }
 
-/** 引导停在新建弹窗上：还没有云端项目，只有「创建项目」可点。 */
+/** 引导停在新建弹窗上（六屏里的任意一屏）：还没有云端项目，还没有心跳。 */
 export function isDemoGuideBeforeProject(): boolean {
-  return state.status === "active" && state.phase === "create-project";
+  return state.status === "active" && demoGuideIsBeforeProjectPhase(state.phase);
 }
 
 /** 全局是否在演示中：其他大卡与提示据此不出现。 */
@@ -456,7 +506,7 @@ export function startDemoGuide(input: DemoGuideStart): void {
   void sendHeartbeat();
 }
 
-/** 从大卡点「新建项目」进来：先只在新建弹窗上亮「创建项目」，云端还没有项目，也没有心跳。 */
+/** 从大卡或侧栏点「新建项目」进来：先在新建弹窗上走六屏，云端还没有项目，也没有心跳。 */
 export function startDemoGuideBeforeProject(): void {
   if (state.status === "active") return;
   dispatchDemoGuide({ type: "start-before-project" });
