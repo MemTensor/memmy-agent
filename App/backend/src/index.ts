@@ -72,6 +72,7 @@ export { trackAnalyticsEvent } from "./analytics/analytics-transport.js";
 export { createHttpMemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
+const MCP_BRIDGE_CONFIG_RETRY_DELAY_MS = 5_000;
 /** New sessions of associated groups reach the project within about a minute. */
 const COLLAB_SYNC_INTERVAL_MS = 60_000;
 
@@ -124,6 +125,18 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   /** 成员协助的轮询器：关闭后端时一并停掉。 */
   let collabAssistTimer: (() => void) | undefined;
   let pluginService: PluginService | null = null;
+  let mcpBridgeRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  let mcpBridgeClosed = false;
+  let committingMcpBridgeWrite: Promise<void> | undefined;
+
+  async function stopMcpBridgeWrites(): Promise<void> {
+    mcpBridgeClosed = true;
+    clearTimeout(mcpBridgeRetryTimer);
+    mcpBridgeRetryTimer = undefined;
+    // Only drain a mutation already inside its commit guard. A pending lock or
+    // Agent reload must not hold shutdown open; pre-commit writes reject below.
+    await committingMcpBridgeWrite?.catch(() => undefined);
+  }
 
   try {
     if (options.desktopInstallFingerprint) {
@@ -433,33 +446,67 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       throw new Error("Local API did not bind to a TCP port");
     }
 
-    // Write the Composio MCP bridge into the agent config (tools.mcpServers.composio), so the agent connects to the local MCP server based on it.
-    await memmyConfigWriter.patchMcpServerConfig("composio", {
-      type: "streamableHttp",
-      url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/composio`,
-      headers: { "x-memmy-mcp-token": composioMcpToken },
-      toolTimeout: 60
-    });
-    await memmyConfigWriter.patchMcpServerConfig("plugins", {
-      type: "streamableHttp",
-      url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
-      headers: { "x-memmy-mcp-token": composioMcpToken },
-      // Interaction capabilities can legitimately wait while the user reads a
-      // long card or leaves the app in the background. Non-interactive command
-      // work remains bounded by the plugin runtime's own timeout.
-      toolTimeout: 7 * 24 * 60 * 60
-    });
-    const memmyAgentAdminClient = options.memmyAgentAdminClient;
-    if (memmyAgentAdminClient && !options.skipAgentMcpReload) {
-      // The bridge config must be written first, but MCP connections must not delay the first window.
+    const writeMcpBridgeServer = async (name: string, config: Record<string, unknown>): Promise<boolean> => {
+      if (mcpBridgeClosed) return false;
+      const writing: Promise<void> = memmyConfigWriter.patchMcpServerConfig(name, config, {
+        beforeCommit() {
+          if (mcpBridgeClosed) throw new Error("Backend closed before MCP bridge configuration commit");
+          committingMcpBridgeWrite = writing;
+        }
+      });
+      try {
+        await writing;
+        return !mcpBridgeClosed;
+      } finally {
+        if (committingMcpBridgeWrite === writing) committingMcpBridgeWrite = undefined;
+      }
+    };
+    const writeMcpBridgeConfig = async (): Promise<boolean> => {
+      if (!await writeMcpBridgeServer("composio", {
+        type: "streamableHttp",
+        url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/composio`,
+        headers: { "x-memmy-mcp-token": composioMcpToken },
+        toolTimeout: 60
+      })) return false;
+      return writeMcpBridgeServer("plugins", {
+        type: "streamableHttp",
+        url: `http://127.0.0.1:${(address as AddressInfo).port}/mcp/plugins`,
+        headers: { "x-memmy-mcp-token": composioMcpToken },
+        // User interactions may outlive the command runtime's own timeout.
+        toolTimeout: 7 * 24 * 60 * 60
+      });
+    };
+    const requestMcpReload = () => {
+      const client = options.memmyAgentAdminClient;
+      if (!client || options.skipAgentMcpReload || mcpBridgeClosed) return;
+      // Both bridge entries must be current, while Agent connectivity must not
+      // delay the first window or shutdown.
       void Promise.resolve()
-        .then(() => memmyAgentAdminClient.reloadMcpConfig())
+        .then(() => mcpBridgeClosed ? undefined : client.reloadMcpConfig())
         .then((result) => {
-          if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
+          if (result && !mcpBridgeClosed && !result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
         })
         .catch((error: unknown) => {
-          console.warn(`Agent MCP reload unavailable during backend startup: ${error instanceof Error ? error.message : String(error)}`);
+          if (!mcpBridgeClosed) console.warn(`Agent MCP reload unavailable during backend startup: ${error instanceof Error ? error.message : String(error)}`);
         });
+    };
+    let initialBridgeConfigWritten = false;
+    try {
+      initialBridgeConfigWritten = await writeMcpBridgeConfig();
+    } catch (error) {
+      // This fallback covers only the launch-specific MCP entries. Earlier
+      // startup migrations and scan-preference writes retain their own errors.
+      console.warn(`MCP bridge config write skipped during backend startup: ${error instanceof Error ? error.message : String(error)}`);
+      mcpBridgeRetryTimer = setTimeout(() => {
+        mcpBridgeRetryTimer = undefined;
+        if (mcpBridgeClosed) return;
+        void writeMcpBridgeConfig()
+          .then((written) => { if (written) requestMcpReload(); })
+          .catch((retryError: unknown) => {
+            if (!mcpBridgeClosed) console.warn(`MCP bridge config retry failed after backend startup: ${retryError instanceof Error ? retryError.message : String(retryError)}`);
+          });
+      }, MCP_BRIDGE_CONFIG_RETRY_DELAY_MS);
+      mcpBridgeRetryTimer.unref?.();
     }
 
     const runtimeConfig = RuntimeConfigSchema.parse({
@@ -469,6 +516,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memory: options.memoryBaseUrl ? { baseUrl: options.memoryBaseUrl } : undefined
     });
     await writeRuntimeConfigFile(runtimeConfig, options.runtimeConfigPath ?? resolveDefaultRuntimeConfigPath());
+    if (initialBridgeConfigWritten) requestMcpReload();
     // Agents connected before this build keep their old skill unless it is rewritten; do it in the background
     // so the first window is not delayed.
     void Promise.resolve()
@@ -492,6 +540,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       async close() {
         clearInterval(collabSyncTimer);
         collabAssistTimer?.();
+        await stopMcpBridgeWrites();
         try {
           await boundServer.close();
         } finally {
@@ -503,6 +552,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   } catch (error) {
     clearInterval(collabSyncTimer);
     collabAssistTimer?.();
+    await stopMcpBridgeWrites();
     await server?.close().catch(() => undefined);
     await pluginService?.shutdown();
     appStateStore.close();

@@ -191,7 +191,9 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
           env.TEMP = temporary; env.TMP = temporary;
         }
       }
-      if (platform === "win32") env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
+      // Expose the same approved canonical roots on every platform. Optional
+      // directories may not exist until the first upload or recording.
+      env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
         ? await resolveExistingInputRoots(options.fileInputRoots ?? []) : []);
       const launch = await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies);
       const withPreparedRuntimes = async (runtimes: ResolvedCommandRuntimeDependencies[]) => {
