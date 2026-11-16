@@ -25,6 +25,7 @@ import {
 import { getCollabProjectsSnapshot, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { CollabLaunchDialog } from "../collab-launch-dialog.js";
+import { COLLAB_LAUNCH_CAPTIONS } from "../collab-launch-motion.js";
 import { CollabLaunchPromptHost } from "../collab-launch-prompt-host.js";
 import { GithubStarPromptHost } from "../github-star-prompt-host.js";
 
@@ -156,7 +157,9 @@ describe("collab launch prompt", () => {
 
   const dialog = () => document.querySelector<HTMLElement>(".collab-launch-dialog");
   const title = () => document.querySelector("#collab-launch-title")?.textContent?.trim();
-  const subtitle = () => document.querySelector(".collab-launch-copy h3")?.textContent?.trim();
+  const stage = () => document.querySelector<HTMLElement>(".collab-launch-stage");
+  const caption = () => document.querySelector(".collab-launch-caption__main")?.textContent?.trim();
+  const captionSub = () => document.querySelector(".collab-launch-caption__sub")?.textContent?.trim();
   const primary = () => document.querySelector<HTMLButtonElement>(".collab-launch-primary");
   const click = async (element: Element | null) => act(async () => {
     (element as HTMLElement).click();
@@ -169,22 +172,37 @@ describe("collab launch prompt", () => {
     expect(window.localStorage.getItem(COLLAB_LAUNCH_PROMPT_STORAGE_KEY)).toBe("1");
   });
 
-  it("shows one page with the example and no paging controls", async () => {
+  it("shows one page with the moving stage and the first caption", async () => {
     await renderHost();
 
+    // 标题只剩读屏用的一份，卡面上直接是画面。
     expect(title()).toBe("项目协作");
-    expect(subtitle()).toBe("把团队工作放进同一个项目");
+    expect(stage()).not.toBeNull();
+    expect(stage()?.getAttribute("aria-hidden")).toBe("true");
+    expect(caption()).toBe("完整的原始上下文，都留在各自的会话里");
+    expect(captionSub()).toBe("一个人加上惯用的 Agent，就是一个能独立把事做深的超级个体");
+    // 只有一页：没有翻页、进度点，也没有旧版右侧示例。
     expect(document.querySelector(".collab-launch-count")).toBeNull();
     expect(document.querySelector(".collab-launch-dots")).toBeNull();
     expect(document.querySelector(".collab-launch-prev")).toBeNull();
-    expect(document.querySelector(".collab-launch-chat__user")?.textContent?.trim()).toBe("这个项目最近大家做到哪了？");
-    expect(document.querySelector(".collab-launch-chat__lead")?.textContent?.trim()).toBe("已读取项目中的最新进展：");
-    expect(document.querySelectorAll(".collab-launch-chat__agent li")).toHaveLength(3);
-    expect(document.querySelector(".collab-launch-visual__caption")?.textContent?.trim())
-      .toBe("团队做了什么，你的 Agent 都知道");
+    expect(document.querySelector(".collab-launch-visual")).toBeNull();
+    // 原型里用来对照文案的切换条不进产品。
+    expect(document.querySelector(".copy-switch")).toBeNull();
+    expect(document.querySelector("[data-copy-switch]")).toBeNull();
     // 卡面不再有授权结果、重试、错误行与脚注。
     expect(document.querySelector("#collab-launch-footnote")).toBeNull();
     expect(document.querySelector(".collab-launch-status")).toBeNull();
+  });
+
+  it("keeps the progress indicator out of reach and out of the accessibility tree", async () => {
+    await renderHost();
+
+    const progress = document.querySelector<HTMLElement>(".collab-launch-progress");
+    expect(progress).not.toBeNull();
+    expect(document.querySelectorAll(".collab-launch-progress__segment")).toHaveLength(5);
+    // 只是指示：整块挂在舞台里，舞台本身对辅助技术隐藏，里面也没有可操作的元素。
+    expect(progress?.closest("[aria-hidden='true']")).toBe(stage());
+    expect(progress?.querySelectorAll("button, a, input, select, textarea, [tabindex]")).toHaveLength(0);
   });
 
   it("says which language the card is written in, for the browser's own text layout", async () => {
@@ -196,10 +214,10 @@ describe("collab launch prompt", () => {
     await renderHost(<CollabLaunchPromptHost />, "en-US");
 
     expect(title()).toBe("Shared projects");
-    expect(subtitle()).toBe("Put the team's work in one project");
     expect(primary()?.textContent?.trim()).toBe("New project");
-    expect(document.querySelector(".collab-launch-visual__caption")?.textContent?.trim())
-      .toBe("What the team has done, your agent already knows");
+    expect(caption()).toBe("The full original context stays in each person's sessions");
+    expect(captionSub())
+      .toBe("A person plus the agent they rely on is a super individual, able to take work deep on their own");
   });
 
   it("only offers the project when no client is available, and opens the new-project dialog with sharing on", async () => {
@@ -339,6 +357,8 @@ describe("collab launch card", () => {
   };
 
   const dialog = () => document.querySelector<HTMLElement>(".collab-launch-dialog");
+  const caption = () => document.querySelector(".collab-launch-caption__main")?.textContent?.trim();
+  const captionSub = () => document.querySelector(".collab-launch-caption__sub")?.textContent?.trim();
   const primary = () => document.querySelector<HTMLButtonElement>(".collab-launch-primary");
   const help = () => document.querySelector<HTMLButtonElement>(".collab-launch-help");
   const popover = () => document.querySelector<HTMLElement>(".collab-launch-popover");
@@ -497,5 +517,56 @@ describe("collab launch card", () => {
     expect(close).toHaveBeenCalledTimes(1);
     expect(setAgentAccess).not.toHaveBeenCalled();
     expect(getLaunchAuthorizationState().inFlight).toBe(false);
+  });
+
+  it("replays the animation from its own button without closing the card or authorizing", async () => {
+    const setAgentAccess = vi.fn();
+    await render({ ...fakeCollab(), setAgentAccess } as unknown as CollabClient);
+    await flush();
+
+    const replay = document.querySelector<HTMLButtonElement>(".collab-launch-replay");
+    expect(replay).not.toBeNull();
+    expect(replay?.getAttribute("aria-label")).toBe("重播");
+    expect(replay?.textContent?.trim()).toBe("重播");
+
+    await click(replay);
+
+    expect(dialog()).not.toBeNull();
+    expect(close).not.toHaveBeenCalled();
+    expect(createProject).not.toHaveBeenCalled();
+    expect(setAgentAccess).not.toHaveBeenCalled();
+  });
+
+  it("drops the second line on the scene that has no subcaption", async () => {
+    // 第三段只有主句。
+    expect(COLLAB_LAUNCH_CAPTIONS[2]).toEqual({ main: "collabLaunch.scene3Main", sub: null });
+
+    const frames: FrameRequestCallback[] = [];
+    const requestFrame = vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const cancelFrame = vi.spyOn(globalThis, "cancelAnimationFrame").mockImplementation(() => undefined);
+    try {
+      await render(null);
+      await flush();
+      expect(caption()).toBe("完整的原始上下文，都留在各自的会话里");
+
+      // 每帧最多推进 0.1 秒，走一百帧落在第三段。
+      const start = performance.now();
+      for (let index = 0; index < 100; index += 1) {
+        const callback = frames.shift();
+        await act(async () => {
+          callback?.(start + index * 1000);
+        });
+      }
+
+      expect(caption()).toBe("围着共同的 Agent，原始上下文依然带不进去");
+      expect(captionSub()).toBeUndefined();
+      expect(document.querySelector(".collab-launch-caption__sub")).toBeNull();
+    } finally {
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+    }
   });
 });
