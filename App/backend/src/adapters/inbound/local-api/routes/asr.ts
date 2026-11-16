@@ -1,6 +1,7 @@
 /** Asr module. */
 import {
   ASR_MAX_REQUEST_BYTES,
+  AsrSessionSchema,
   AsrTranscriptionInputSchema,
   AsrTranscriptionResponseSchema
 } from "@memmy/local-api-contracts";
@@ -16,6 +17,14 @@ export interface RegisterAsrRoutesOptions {
 
 /** Registers register asr routes. */
 export function registerAsrRoutes(app: FastifyInstance, options: RegisterAsrRoutesOptions): void {
+  app.post("/api/asr/sessions", { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (_request, reply) => reply.send(AsrSessionSchema.parse(await options.asr.prepare()))));
+  app.delete("/api/asr/sessions/:sessionId", { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const { sessionId } = AsrSessionSchema.parse(request.params);
+      options.asr.release(sessionId);
+      return reply.send({ sessionId });
+    }));
   app.post(
     "/api/asr/transcriptions",
     {

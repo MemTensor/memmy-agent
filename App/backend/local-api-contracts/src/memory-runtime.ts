@@ -1140,6 +1140,7 @@ export const ApiErrorCodeSchema = z.enum([
   "composio_not_configured",
   "toolkit_unsupported",
   "model_config_changed",
+  "model_selection_unavailable",
   "config_write_busy",
   "account_model_preset_conflict",
   "plugin_entitlement_required",

@@ -29,6 +29,7 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Objec
   composio_not_configured: 400,
   toolkit_unsupported: 400,
   model_config_changed: 409,
+  model_selection_unavailable: 422,
   config_write_busy: 409,
   account_model_preset_conflict: 409,
   plugin_invalid: 400,

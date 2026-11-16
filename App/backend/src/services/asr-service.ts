@@ -1,4 +1,5 @@
 /** Asr service module. */
+import { randomUUID } from "node:crypto";
 import {
   AsrTranscriptionResponseSchema,
   type ActualModelContext,
@@ -12,7 +13,16 @@ import type { AccountSessionRepository } from "../infrastructure/app-state-store
 import type { BootstrapRepository } from "../infrastructure/app-state-store/repositories/bootstrap-repo.js";
 import type { MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 
+export interface AsrSelectionSnapshot {
+  context: Readonly<ActualModelContext>;
+  provider: Readonly<ResolvedProviderSnapshot>;
+  cloudUuid: string | null;
+}
+
 export interface AsrService {
+  prepare(): Promise<{ sessionId: string; transport: "http" | "websocket" }>;
+  getSession(sessionId: string): AsrSelectionSnapshot;
+  release(sessionId: string): void;
   transcribe(input: AsrTranscriptionInput): Promise<AsrTranscriptionResponse>;
 }
 
@@ -38,16 +48,40 @@ const DEFAULT_ASR_TIMEOUT_MS = 30_000;
 /** Creates create asr service. */
 export function createAsrService(options: CreateAsrServiceOptions): AsrService {
   const fetchImpl = options.fetch ?? globalThis.fetch;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_ASR_TIMEOUT_MS;
   const now = options.now ?? (() => new Date().toISOString());
 
+  // Credentials stay in the backend. A recording carries only this opaque ID.
+  const sessions = new Map<string, { snapshot: AsrSelectionSnapshot; expiresAt: number }>();
+  const resolve = async (): Promise<AsrSelectionSnapshot> => {
+    const mode = options.bootstrapRepository.getAppSettings().userMode;
+    if (mode !== "account" && mode !== "byok") {
+      throw Object.assign(new Error("ASR requires account or BYOK mode"), { code: "invalid_argument" });
+    }
+    const resolved = await requireAsrSelection(options, mode);
+    return structuredClone({ context: resolved.context, provider: resolved.provider,
+      cloudUuid: options.accountSessionRepository?.getCloudUuid() ?? null });
+  };
+  const getSession = (id: string): AsrSelectionSnapshot => {
+    const session = sessions.get(id);
+    if (!session || session.expiresAt <= Date.now()) {
+      sessions.delete(id);
+      throw Object.assign(new Error("ASR recording session expired; its model configuration cannot be recovered"), { code: "model_config_changed" });
+    }
+    return session.snapshot;
+  };
   return {
+    async prepare() {
+      for (const [id, session] of sessions) if (session.expiresAt <= Date.now()) sessions.delete(id);
+      const snapshot = await resolve();
+      if (sessions.size >= 32) throw Object.assign(new Error("Too many active ASR recordings"), { code: "rate_limited" });
+      const sessionId = randomUUID();
+      sessions.set(sessionId, { snapshot, expiresAt: Date.now() + 3 * 60 * 60 * 1_000 });
+      return { sessionId, transport: snapshot.context.source === "account" ? "websocket" as const : "http" as const };
+    },
+    getSession,
+    release(id) { sessions.delete(id); },
     async transcribe(input) {
-      const userMode = options.bootstrapRepository.getAppSettings().userMode;
-      if (userMode !== "account" && userMode !== "byok") {
-        throw Object.assign(new Error("ASR requires account or BYOK mode"), { code: "invalid_argument" as const });
-      }
-      const resolved = await requireAsrSelection(options, userMode);
+      const resolved = input.sessionId ? getSession(input.sessionId) : await resolve();
       if (resolved.context.source === "account") {
         return transcribeWithAccount(input, options, resolved.context, now);
       }
@@ -59,7 +93,7 @@ export function createAsrService(options: CreateAsrServiceOptions): AsrService {
         resolved.context,
         resolved.provider,
         fetchImpl,
-        timeoutMs,
+        options.timeoutMs ?? DEFAULT_ASR_TIMEOUT_MS,
         now
       );
     }

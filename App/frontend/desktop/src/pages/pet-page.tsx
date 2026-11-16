@@ -1051,7 +1051,7 @@ export interface PetPageViewProps {
 export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowChange, onSubmitTask, onStopTask, asrClient, memmyAgentClient }: PetPageViewProps) {
   const { t } = useTranslation();
   const agentUnavailableMessage = t("pet.agentUnavailable");
-  const asrRecorder = useAsrRecorder(asrClient, { emptyAudioMessage: t("pet.asrEmptyAudio") });
+  const asrRecorder = useAsrRecorder(asrClient, { voiceInput: true, emptyAudioMessage: t("pet.asrEmptyAudio") });
   const cancelAsrRecording = asrRecorder.cancel;
   const [layoutOffset, setLayoutOffset] = useState<PetLayoutOffset>({ x: 0, y: 0 });
   const [isInHotzone, setIsInHotzone] = useState(false);

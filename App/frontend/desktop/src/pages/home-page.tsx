@@ -48,12 +48,14 @@ import {
   type AgentAttachmentClassification,
 } from "../lib/agent-attachment.js";
 import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode.js";
+import type { AsrLiveLine } from "../lib/asr-live-transcription.js";
+import { mergeVoiceInputLines } from "../lib/asr-stream-transcription.js";
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
-import { NEW_TASK_MODEL_SCOPE_KEY, type AgentChatMediaAttachment, type AgentChatMessage, type AgentState, type AgentThinkingState } from "../state/agent-chat-slice.js";
+import { NEW_TASK_MODEL_SCOPE_KEY, type AgentChatMediaAttachment, type AgentChatMessage, type AgentOperationErrorSource, type AgentState, type AgentThinkingState } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
@@ -92,8 +94,8 @@ import { AgentWorkspaceContext } from "./agent-workspace-context.js";
 import { AppFrame } from "./app-frame.js";
 import {
   MicrophonePermissionError,
-  mergeVoiceTranscript,
   microphonePermissionDeniedMessageKey,
+  mergeVoiceTranscript,
   useAsrRecorder
 } from "./asr-recorder.js";
 import { FirstEncounterRelayChallenge, FirstEncounterRelayOptIn, firstEncounterFollowUpMode, hasDetectedRelayAgents, relayAgentOptions } from "./first-encounter-relay-challenge.js";
@@ -983,7 +985,36 @@ export function HomePage() {
   const queueSteerLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
-  const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
+  const liveVoiceLinesRef = useRef<AsrLiveLine[]>([]);
+  const liveVoiceScopeRef = useRef<string | null>(null);
+  const liveVoiceRangeRef = useRef<VoiceTranscriptRange | null>(null);
+  const asrRecorder = useAsrRecorder(clients?.asr, {
+    voiceInput: true,
+    emptyAudioMessage: t("home.asrEmptyAudio"),
+    live: {
+      onError: (error) => {
+        const scopeKey = liveVoiceScopeRef.current;
+        if (scopeKey) setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr");
+      },
+      onLine: (line) => {
+        const scopeKey = liveVoiceScopeRef.current;
+        if (!scopeKey) return;
+        const lines = mergeVoiceInputLines(liveVoiceLinesRef.current, line);
+        const text = lines.map((item) => item.text.trim()).filter(Boolean).join(" ");
+        liveVoiceLinesRef.current = lines;
+        setComposerDraftForScope(scopeKey, (current) => {
+          const updated = replaceVoiceTranscript(current, liveVoiceRangeRef.current, text);
+          liveVoiceRangeRef.current = updated.range;
+          return updated.value;
+        }, true);
+        if (scopeKey === chatScopeKey) {
+          window.requestAnimationFrame(() => {
+            if (inputRef.current) resizeComposerInput(inputRef.current);
+          });
+        }
+      }
+    }
+  });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   useEffect(() => { setTaskRecording(null); }, [chatScopeKey]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
@@ -2409,9 +2440,12 @@ export function HomePage() {
    * @param scopeKey The session or new-draft scope.
    * @param value The latest input content, or an updater function based on the previous value.
    */
-  function setComposerDraftForScope(scopeKey: string, value: SetStateAction<string>) {
+  function setComposerDraftForScope(scopeKey: string, value: SetStateAction<string>, voiceUpdate = false) {
     const currentValue = composerDraftsRef.current[scopeKey] ?? "";
     const nextValue = typeof value === "function" ? value(currentValue) : value;
+    if (!voiceUpdate && scopeKey === liveVoiceScopeRef.current) {
+      liveVoiceRangeRef.current = trackVoiceTranscriptEdit(currentValue, nextValue, liveVoiceRangeRef.current);
+    }
     const nextDrafts = updateComposerDraftForScope(composerDraftsRef.current, scopeKey, nextValue);
     if (nextDrafts === composerDraftsRef.current) {
       return;
@@ -2464,12 +2498,12 @@ export function HomePage() {
     setPendingAttachmentsForScope(chatScopeKey, value);
   }
 
-  function setComposerMediaErrorForScope(scopeKey: string, message: string | null) {
+  function setComposerMediaErrorForScope(scopeKey: string, message: string | null, source: AgentOperationErrorSource = "send") {
     if (!message) {
       return;
     }
     dispatch(agentActions.operationFailed("chat", createAgentOperationError({
-      source: "send",
+      source,
       message,
       scopeKey
     })));
@@ -2811,8 +2845,13 @@ export function HomePage() {
    */
   function startVoiceInput() {
     inputRef.current?.focus();
+    const scopeKey = chatScopeKey;
+    liveVoiceLinesRef.current = [];
+    liveVoiceScopeRef.current = scopeKey;
+    liveVoiceRangeRef.current = null;
     void asrRecorder.start().catch((error: unknown) => {
-      setCurrentComposerMediaError(toReadableAsrError(error, t));
+      setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr");
+      if (liveVoiceScopeRef.current === scopeKey) liveVoiceScopeRef.current = null;
     });
   }
 
@@ -2820,19 +2859,31 @@ export function HomePage() {
    * Ends voice input on the main interface and merges in the transcribed text.
    */
   async function finishVoiceInput() {
+    const scopeKey = liveVoiceScopeRef.current ?? chatScopeKey;
     try {
       const transcript = await asrRecorder.finishAndTranscribe();
-      setCurrentComposerDraft((current) => mergeVoiceTranscript(current, transcript.text));
+      setComposerDraftForScope(scopeKey, (current) => replaceVoiceTranscript(
+        current,
+        liveVoiceRangeRef.current,
+        transcript.text
+      ).value, true);
+      liveVoiceLinesRef.current = [];
+      liveVoiceScopeRef.current = null;
+      liveVoiceRangeRef.current = null;
       setSlashMenuDismissed(false);
       setSelectedCommandIndex(0);
-      window.requestAnimationFrame(() => {
-        if (inputRef.current) {
-          resizeComposerInput(inputRef.current);
-          inputRef.current.focus();
-        }
-      });
+      if (scopeKey === chatScopeKey) {
+        window.requestAnimationFrame(() => {
+          if (inputRef.current) {
+            resizeComposerInput(inputRef.current);
+            inputRef.current.focus();
+          }
+        });
+      }
     } catch (error: unknown) {
-      setCurrentComposerMediaError(toReadableAsrError(error, t));
+      liveVoiceScopeRef.current = null;
+      liveVoiceRangeRef.current = null;
+      setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr");
     }
   }
 
@@ -3558,6 +3609,43 @@ export function HomePage() {
       </div>
     </AppFrame>
   );
+}
+
+export interface VoiceTranscriptRange {
+  start: number;
+  text: string;
+  detached?: boolean;
+}
+
+/** Tracks edits around the voice range; editing inside it gives ownership back to the user. */
+export function trackVoiceTranscriptEdit(before: string, after: string, range: VoiceTranscriptRange | null): VoiceTranscriptRange | null {
+  if (!range || range.detached || before === after) return range;
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let oldEnd = before.length;
+  let newEnd = after.length;
+  while (oldEnd > start && newEnd > start && before[oldEnd - 1] === after[newEnd - 1]) { oldEnd--; newEnd--; }
+  if (oldEnd <= range.start) return { ...range, start: range.start + after.length - before.length };
+  if (start >= range.start + range.text.length) return range;
+  return { ...range, detached: true };
+}
+
+/** Replaces only the exact provisional range previously inserted by voice input. */
+export function replaceVoiceTranscript(
+  current: string,
+  previous: VoiceTranscriptRange | null,
+  next: string
+): { value: string; range: VoiceTranscriptRange | null } {
+  const nextText = next.trim();
+  if (!nextText || previous?.detached) return { value: current, range: previous };
+  if (previous && current.slice(previous.start, previous.start + previous.text.length) === previous.text) {
+    return {
+      value: `${current.slice(0, previous.start)}${nextText}${current.slice(previous.start + previous.text.length)}`,
+      range: { start: previous.start, text: nextText }
+    };
+  }
+  const value = mergeVoiceTranscript(current, nextText);
+  return { value, range: { start: value.length - nextText.length, text: nextText } };
 }
 
 export function ChatModelSelector(props: {
