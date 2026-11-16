@@ -1,3 +1,8 @@
+import { SkillPipeline } from "../../src/service/evolution/skill-pipeline.js";
+import { policyGainSourceStages, readPolicyContributions } from "../../src/service/evolution/episode-contributions.js";
+import { skillMetaFromMemory } from "../../src/algorithm/plugin-algorithms.js";
+import { insertActiveSkillMemoryForTest } from "../fixtures/evolution-fixture.js";
+import { createNoToolSkillLlm } from "./evolution/evolution-llm-stubs.js";
 import { FeedbackExperienceService } from "../../src/service/feedback/feedback-experience.js";
 import { createBatchReflectionLlm, createCapturingEmbedder } from "../fixtures/memory-service-fixture.js";
 import { DEVICE_MEMORY_OWNER } from "../../src/service/namespace/memory-owner.js";
@@ -30,6 +35,51 @@ describe("unified L2 evidence lifecycle", () => {
   });
   afterEach(() => { vi.restoreAllMocks(); db.close(); });
 
+  it.each([[0.4, 0.272], [0.8, 0.352]])("projects a real unified role change %s through to Skill eta", (value, expected) => {
+    const unexpected = (): never => { throw new Error("unexpected dependency"); };
+    const config = structuredClone(DEFAULT_MEMMY_CONFIG);
+    const pipeline = new SkillPipeline({ repos, config, skillLlm: createNoToolSkillLlm(), traceMeta: traceMetaFromMemory,
+      buildMemory: unexpected, upsertEvolutionMemory: unexpected, isArchivedEvolutionMemory: () => false,
+      enqueueJob: unexpected, namespaceIdFromMemory: () => "test" });
+    const realEngine = new PolicyInductionEngine({ repos, config, nowIso: () => AT,
+      skillLlm: { isConfigured: () => false }, traceMeta: traceMetaFromMemory, namespaceIdFromMemory: () => undefined,
+      enqueueChange: vi.fn(), enqueueJob: vi.fn(), onSkillRewardDrift: pipeline.applySkillRewardDriftForPolicy.bind(pipeline)
+    } as unknown as PolicyInductionDeps);
+    function run(prefix: string, revise: boolean) {
+      const bid = `${prefix}-B`, aid = `${prefix}-A`, pid = `${prefix}-policy`, sid = `${prefix}-skill`;
+      repos.memories.insert(memory(bid, "L1", { value: 1, episode_id: bid, reflection: "PIVOTAL", alpha: 1 }));
+      repos.memories.insert(memory(pid, "L2", { schema_version: 2, content_revision: 1,
+        status: "candidate", support: 1, successful_episode_count: 1, gain: 0.2,
+        source_trace_ids: [bid], successful_source_trace_ids: [bid] }));
+      insertActiveSkillMemoryForTest(db, { id: sid, userId: DEVICE_MEMORY_OWNER, sessionId: "session", agentId: "codex",
+        profileId: "default", sourcePolicyIds: [pid] });
+      realEngine.recomputePolicyStats(pid, AT, bid);
+      repos.memories.insert(memory(aid, "L1", { value: revise ? -0.4 : value, episode_id: aid, reflection: "PIVOTAL", alpha: 1 }));
+      function includeA() {
+        const row = repos.memories.get(pid)!;
+        repos.memories.update({ ...row, properties: { ...row.properties, internal_info: { ...row.properties.internal_info,
+          policy: { ...row.properties.internal_info.policy as Record<string, unknown>,
+            source_trace_ids: [bid, aid], successful_source_trace_ids: [bid, aid] } } } });
+      }
+      if (revise) realEngine.recomputePolicyStats(pid, AT, aid);
+      const row = repos.memories.get(aid)!;
+      repos.memories.update({ ...row, properties: { ...row.properties, internal_info: { ...row.properties.internal_info,
+        trace: { value, episode_id: aid, reflection: "PIVOTAL", alpha: 1 } } } });
+      includeA();
+      realEngine.recomputePolicyStats(pid, AT, aid);
+      const firstEta = skillMetaFromMemory(repos.memories.get(sid)!)!.eta;
+      for (let i = 0; i < 3; i++) realEngine.recomputePolicyStats(pid, AT, aid);
+      const saved = policyMetaFromMemory(repos.memories.get(pid)!)!;
+      const ledger = readPolicyContributions((saved.memory.properties.internal_info.policy as Record<string, unknown>).gain_contributions)!;
+      expect(saved.gain).toBeCloseTo(expected, 12);
+      expect(saved.support).toBe(2);
+      expect(ledger.sources[aid]).toEqual({ id: aid, supportValues: [value], referenceValues: [] });
+      expect(policyGainSourceStages(ledger).at(-1)).toMatchObject({ active: true, support: 2 });
+      expect(skillMetaFromMemory(repos.memories.get(sid)!)!.eta).toBe(firstEta);
+      return { gain: saved.gain, stages: policyGainSourceStages(ledger), eta: firstEta };
+    }
+    expect(run("revised", true)).toEqual(run("direct", false));
+  });
   it("withdraws only inferred failed Episode support and restores it after a later failure", () => {
     repos.runtime.createSession({ id: "negative-session", userId: DEVICE_MEMORY_OWNER, source: "codex", profileId: "default",
       status: "closed", meta: {}, openedAt: AT, closedAt: AT, updatedAt: AT });

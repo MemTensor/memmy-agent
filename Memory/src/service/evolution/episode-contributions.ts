@@ -88,8 +88,9 @@ function evaluatePolicyContributions(state: PolicyGainContributions, stages?: Po
     for (const id of event.ids) introduced.add(id);
     const activeEvent = event.ids.some(id => {
       const source = state.sources[id];
-      return source && (event.supportingIds.includes(id)
-        ? source.supportValues.length > 0 : source.referenceValues.length > 0);
+      // Keep the original position, not the original role. A revised source may
+      // switch roles or provide both kinds of evidence; empty arrays withdraw it.
+      return source && (source.supportValues.length > 0 || source.referenceValues.length > 0);
     });
     if (!activeEvent) { stages?.push({ position, gain, support, active: false }); continue; }
     const eligible = [...introduced].map(id => state.sources[id]!).filter(source =>
