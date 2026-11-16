@@ -19,6 +19,7 @@ export interface MemoryDetailService {
 
 export function createMemoryDetailService(deps: {
   memoryClient: MemoryClient;
+  getUserId?: () => string;
 }): MemoryDetailService {
   return {
     async add(input, ctx) {
@@ -26,7 +27,7 @@ export function createMemoryDetailService(deps: {
     },
 
     async getById(id, ctx) {
-      return deps.memoryClient.getMemory({ memoryId: id }, ctx);
+      return deps.memoryClient.getMemory({ memoryId: id }, deps.getUserId ? {...ctx, userId: deps.getUserId()} : ctx);
     },
 
     async delete(id, input, ctx) {

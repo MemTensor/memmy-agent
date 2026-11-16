@@ -522,3 +522,11 @@ function memoryModels() {
     embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" as const }
   };
 }
+
+it("uses the current memory user on each bootstrap health warmup", async () => {
+  let userId="first";const calls:unknown[]=[];
+  const service=createBootstrapService({...createUnauthenticatedOptions({}),getMemoryUserId:()=>userId,timeZone:"+02:00",
+    memoryClient:{health:async(context:unknown)=>{calls.push(context);return{ok:true};}} as never});
+  await service.getBootstrap();userId="second";await service.getBootstrap();
+  expect(calls).toEqual([{userId:"first",timeZone:"+02:00"},{userId:"second",timeZone:"+02:00"}]);
+});

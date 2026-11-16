@@ -1,5 +1,5 @@
 /** Runtime context module. */
-import type { FastifyRequest } from "fastify";
+import type { FastifyReply, FastifyRequest } from "fastify";
 import { normalizeTimeZoneOffset } from "../utils/time-zone.js";
 
 /** Contract for runtime context. */
@@ -20,4 +20,19 @@ export function runtimeContextFromRequest(request: FastifyRequest, configuredTim
     adapterId: "runtime",
     timeZone
   };
+}
+
+/** A disconnected renderer must release its Memory reader subscription too. */
+export function cancellableRuntimeContextFromRequest(request: FastifyRequest, reply: FastifyReply, timeZone?: string) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const cleanup = () => {
+    request.raw.off("aborted", abort);
+    reply.raw.off("close", abort);
+  };
+  request.raw.once("aborted", abort);
+  reply.raw.once("close", abort);
+  reply.raw.once("finish", cleanup);
+  if (request.raw.aborted || reply.raw.destroyed) abort();
+  return { ...runtimeContextFromRequest(request, timeZone), signal: controller.signal };
 }

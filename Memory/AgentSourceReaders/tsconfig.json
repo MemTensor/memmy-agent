@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "../src/agent-source",
+    "outDir": "dist",
+    "declaration": true,
+    "types": ["node"]
+  },
+  "include": ["../src/agent-source/adapters/**/*.ts", "../src/agent-source/agent-paths.ts"]
+}

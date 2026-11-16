@@ -247,6 +247,7 @@ describe("buildResponsesBody extra body integration", () => {
         name: "read_file",
         description: "Read a file",
         parameters: { type: "object" },
+        strict: false,
       },
       { type: "web_search" },
     ]);

@@ -5,8 +5,27 @@ import { basename, dirname, join } from "node:path";
 import { createNodeHookCommand } from "../hook-command.js";
 import { isInstalledMemmyHookCurrent, memmyHookRevisionField } from "../hook-revision.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
-import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import {
+  PROJECT_HOOK_SCRIPT_FILE_NAME,
+  installProjectHookBundle,
+  isInstalledProjectHookCurrent,
+  isProjectHookBundleInstalled,
+  removeProjectHookBundle,
+  renderMemmyProjectHookConfig
+} from "../project-hook/install.js";
+import {
+  removeMemmyProjectSkillDirectory,
+  removeMemmySkillDirectory,
+  replaceMemmyProjectSkillDirectory,
+  replaceMemmySkillDirectory
+} from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
+import {
+  MEMMY_PROJECT_BOOTSTRAP_START_MARKER,
+  removeMemmyProjectBootstrapBlock,
+  renderMemmyProjectBootstrapBlock,
+  upsertMemmyProjectBootstrapBlock
+} from "../templates/memmy-project-skill.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
@@ -22,6 +41,8 @@ const HOOK_SCRIPT_FILE_NAME = "memmy-resume-hook.mjs";
 const LEGACY_HOOK_SCRIPT_FILE_NAME = "memmy-memory-resume-hook.mjs";
 const HOOK_CONFIG_FILE_NAME = "memmy-memory-config.json";
 const WORKSPACE_BRIDGE_FILE_NAME = "memmy-workspace-bridge.mjs";
+// 项目钩子只登记自己会用到的事件：项目指令与知识库都发生在会话开始、压缩后与提交提示词时。
+const PROJECT_HOOK_EVENTS = ["UserPromptSubmit", "SessionStart", "PostCompact"] as const;
 const HOOK_TIMEOUT_SECONDS = 60;
 const COMMAND_DIRECTORY_NAME = "commands";
 const RESUME_COMMAND_FILE_NAME = "memmy-resume.md";
@@ -62,6 +83,7 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       const existing = removeLegacyMarkerBlock(await readTextFile(filePath));
       await writeFileAtomically(filePath, upsertMarkerBlock(existing, renderMemmySkillBootstrapManifest(manifest)));
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
     },
 
     async uninstall(_targetId) {
@@ -75,6 +97,7 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       await writeFileAtomically(filePath, removeMarkerBlock(removeLegacyMarkerBlock(existing)));
       await removeLegacyAgentInstructions(root);
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
     },
 
     async isInstalled(_targetId) {
@@ -97,6 +120,95 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
         bridgePath: join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
         configPath: join(hookDirectory, HOOK_CONFIG_FILE_NAME)
       });
+    },
+
+    async writeProjectSkillBootstrap() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        throw new Error("Claude Code is not installed or its directory is unavailable");
+      }
+
+      const filePath = join(root, TARGET_FILE_NAME);
+      await writeFileAtomically(filePath, upsertMemmyProjectBootstrapBlock(await readTextFile(filePath)));
+    },
+
+    async removeProjectSkillBootstrap() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        return;
+      }
+
+      const filePath = join(root, TARGET_FILE_NAME);
+      const existing = await readTextFile(filePath);
+      if (!existing.includes(MEMMY_PROJECT_BOOTSTRAP_START_MARKER)) {
+        return;
+      }
+      await writeFileAtomically(filePath, removeMemmyProjectBootstrapBlock(existing));
+    },
+
+    async isProjectSkillBootstrapCurrent() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(renderMemmyProjectBootstrapBlock());
+    },
+
+    async isMemoryHookInstalled() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      const hookDirectory = join(root, HOOK_DIRECTORY_NAME);
+      const [script, bridge] = await Promise.all([
+        readTextFile(join(hookDirectory, HOOK_SCRIPT_FILE_NAME)),
+        readTextFile(join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME))
+      ]);
+      return Boolean(script.trim() && bridge.trim());
+    },
+
+    async installProjectHook() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        throw new Error("Claude Code is not installed or its directory is unavailable");
+      }
+
+      const hookDirectory = join(root, HOOK_DIRECTORY_NAME);
+      await installProjectHookBundle(hookDirectory, {
+        source: CLAUDE_CODE_TARGET_ID,
+        mode: "claude-code",
+        config: renderMemmyProjectHookConfig({ memmyConfigPath })
+      });
+      await upsertClaudeCodeProjectHookSettings(
+        join(root, SETTINGS_FILE_NAME),
+        join(hookDirectory, PROJECT_HOOK_SCRIPT_FILE_NAME)
+      );
+    },
+
+    async uninstallProjectHook() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        return;
+      }
+
+      await removeClaudeCodeProjectHookSettings(join(root, SETTINGS_FILE_NAME));
+      await removeProjectHookBundle(join(root, HOOK_DIRECTORY_NAME));
+    },
+
+    async isProjectHookInstalled() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      return await isProjectHookBundleInstalled(join(root, HOOK_DIRECTORY_NAME));
+    },
+
+    async isProjectHookCurrent() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      const hookDirectory = join(root, HOOK_DIRECTORY_NAME);
+      const current = await isInstalledProjectHookCurrent(hookDirectory, {
+        source: CLAUDE_CODE_TARGET_ID,
+        mode: "claude-code",
+        config: renderMemmyProjectHookConfig({ memmyConfigPath })
+      });
+      if (!current) return false;
+      // 文件是对的，但设置里的条目可能被别的操作删掉了：那也算没装好。
+      return await hasClaudeCodeProjectHookSettings(join(root, SETTINGS_FILE_NAME));
     },
 
     async installPlugin(_targetId) {
@@ -134,6 +246,7 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
         upsertMarkerBlock(await readTextFile(filePath), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
       await writeFileAtomically(
         hookConfigPath,
         `${JSON.stringify({ ...hookConfig, ...(await memmyHookRevisionField(CLAUDE_CODE_TARGET_ID, "claude-code")) }, null, 2)}\n`
@@ -156,6 +269,7 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
       await writeFileAtomically(filePath, removeMarkerBlock(removeLegacyMarkerBlock(await readTextFile(filePath))));
       await removeLegacyAgentInstructions(root);
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
     }
   };
 }
@@ -273,7 +387,28 @@ async function upsertClaudeCodeHookSettings(filePath: string, hookScriptPath: st
   hooks.PostCompact = claudeHookEntries(hooks.PostCompact, hookScriptPath);
   hooks.SessionEnd = claudeHookEntries(hooks.SessionEnd, hookScriptPath);
   config.hooks = hooks;
+  const permissions = toMutableRecord(config.permissions);
+  permissions.allow = [...withoutProjectCliRules(permissions.allow), ...PROJECT_CLI_PERMISSION_RULES];
+  config.permissions = permissions;
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+/** Scope permissions to the operations the CLI currently supports. */
+const PROJECT_CLI_PATHS = [
+  "memmy-project",
+  "~/.local/bin/memmy-project",
+  "/Applications/Memmy.app/Contents/Resources/cli/memmy-project",
+  "~/Applications/Memmy.app/Contents/Resources/cli/memmy-project",
+  "%LOCALAPPDATA%\\Programs\\Memmy\\resources\\cli\\memmy-project.cmd",
+  "%ProgramFiles%\\Memmy\\resources\\cli\\memmy-project.cmd"
+];
+const PROJECT_CLI_PERMISSION_RULES = PROJECT_CLI_PATHS.flatMap((path) =>
+  ["list", "knowledge search", "session read", "session search", "session add"].map((action) => `Bash(${path} ${action}:*)`)
+);
+const MANAGED_PROJECT_CLI_RULES = new Set(PROJECT_CLI_PERMISSION_RULES);
+
+function withoutProjectCliRules(value: unknown): unknown[] {
+  return Array.isArray(value) ? value.filter((rule) => !MANAGED_PROJECT_CLI_RULES.has(rule as string)) : [];
 }
 
 async function removeClaudeCodeHookSettings(filePath: string): Promise<void> {
@@ -308,6 +443,15 @@ async function removeClaudeCodeHookSettings(filePath: string): Promise<void> {
     delete config.hooks;
   }
 
+  if (config.permissions !== undefined) {
+    const permissions = toMutableRecord(config.permissions);
+    const allow = withoutProjectCliRules(permissions.allow);
+    if (allow.length > 0) permissions.allow = allow;
+    else delete permissions.allow;
+    if (Object.keys(permissions).length > 0) config.permissions = permissions;
+    else delete config.permissions;
+  }
+
   await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
 }
 
@@ -322,6 +466,17 @@ function claudeHookEntries(value: unknown, hookScriptPath: string): Record<strin
 }
 
 function removeClaudeCodeResumeHookEntries(value: unknown): Record<string, unknown>[] {
+  return removeClaudeCodeHookEntries(value, isMemmyResumeHook);
+}
+
+/**
+ * 两个钩子共用同一个设置文件，各自只删自己的条目：记忆钩子按 `memmy-resume-hook.mjs` 认，
+ * 项目钩子按 `memmy-project-hook.mjs` 认，两边的文件名不同，互不误删。
+ */
+function removeClaudeCodeHookEntries(
+  value: unknown,
+  isOwn: (value: unknown) => boolean
+): Record<string, unknown>[] {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -332,7 +487,7 @@ function removeClaudeCodeResumeHookEntries(value: unknown): Record<string, unkno
       continue;
     }
     const hookItems = Array.isArray(item.hooks) ? item.hooks : [];
-    const filteredHooks = hookItems.filter((hook) => !isMemmyResumeHook(hook));
+    const filteredHooks = hookItems.filter((hook) => !isOwn(hook));
     if (filteredHooks.length > 0 || hookItems.length === 0) {
       entries.push(hookItems.length === 0 ? { ...item } : { ...item, hooks: filteredHooks });
     }
@@ -346,6 +501,69 @@ function isMemmyResumeHook(value: unknown): boolean {
   }
   return typeof value.command === "string" &&
     (value.command.includes(HOOK_SCRIPT_FILE_NAME) || value.command.includes(LEGACY_HOOK_SCRIPT_FILE_NAME));
+}
+
+function isMemmyProjectHook(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.command === "string" &&
+    value.command.includes(PROJECT_HOOK_SCRIPT_FILE_NAME);
+}
+
+async function upsertClaudeCodeProjectHookSettings(filePath: string, hookScriptPath: string): Promise<void> {
+  const config = await readJsonConfig(filePath);
+  const hooks = toMutableRecord(config.hooks);
+  const entry = {
+    matcher: "",
+    hooks: [{
+      type: "command",
+      command: createNodeHookCommand(hookScriptPath),
+      timeout: HOOK_TIMEOUT_SECONDS
+    }]
+  };
+  for (const event of PROJECT_HOOK_EVENTS) {
+    hooks[event] = [...removeClaudeCodeProjectHookEntries(hooks[event]), entry];
+  }
+  config.hooks = hooks;
+  await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+async function removeClaudeCodeProjectHookSettings(filePath: string): Promise<void> {
+  const existing = await readTextFile(filePath);
+  if (!existing.trim()) {
+    return;
+  }
+
+  const config = await readJsonConfig(filePath);
+  const hooks = toMutableRecord(config.hooks);
+  for (const event of PROJECT_HOOK_EVENTS) {
+    const entries = removeClaudeCodeProjectHookEntries(hooks[event]);
+    if (entries.length > 0) hooks[event] = entries;
+    else delete hooks[event];
+  }
+
+  if (Object.keys(hooks).length > 0) {
+    config.hooks = hooks;
+  } else {
+    delete config.hooks;
+  }
+  await writeFileAtomically(filePath, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+/** 设置文件里是否还写着项目钩子的条目：文件对得上但条目被删掉了也算没装好。 */
+async function hasClaudeCodeProjectHookSettings(filePath: string): Promise<boolean> {
+  const config = await readJsonConfig(filePath);
+  const hooks = toMutableRecord(config.hooks);
+  return PROJECT_HOOK_EVENTS.every((event) => {
+    const entries = Array.isArray(hooks[event]) ? hooks[event] as unknown[] : [];
+    return entries.some((item) => {
+      const hookItems = isRecord(item) && Array.isArray(item.hooks) ? item.hooks : [];
+      return hookItems.some(isMemmyProjectHook);
+    });
+  });
+}
+
+function removeClaudeCodeProjectHookEntries(value: unknown): Record<string, unknown>[] {
+  return removeClaudeCodeHookEntries(value, isMemmyProjectHook);
 }
 
 function renderMarkerBlock(manifest: SkillManifest): string {

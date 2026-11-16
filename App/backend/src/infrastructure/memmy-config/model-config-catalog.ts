@@ -350,9 +350,7 @@ function memoryConnection(config: ConfigRecord, presetId: string): ConfigRecord 
   const endpoint = record(record(provider.endpoints)[endpointId]);
   const apiBase = stringValue(endpoint.apiBase);
   if (!apiBase) return null;
-  const apiKey = stringValue(endpoint.apiKey) ?? stringValue(provider.apiKey);
-  const extraHeaders = { ...record(provider.extraHeaders), ...record(endpoint.extraHeaders) };
-  const extraBody = { ...record(provider.extraBody), ...record(endpoint.extraBody) };
+  const { apiKey, extraHeaders, extraBody } = effectiveEndpoint(provider, endpoint);
   return {
     provider: memoryProvider(providerId, stringValue(endpoint.protocol)),
     sourceProvider: providerId,
@@ -361,6 +359,15 @@ function memoryConnection(config: ConfigRecord, presetId: string): ConfigRecord 
     ...(apiKey ? { apiKey } : {}),
     ...(Object.keys(extraHeaders).length ? { extraHeaders } : {}),
     ...(Object.keys(extraBody).length ? { extraBody } : {})
+  };
+}
+
+function effectiveEndpoint(provider: ConfigRecord, endpoint: ConfigRecord) {
+  const inherited = endpoint.inheritProviderDefaults === false ? {} : provider;
+  return {
+    apiKey: stringValue(endpoint.apiKey) ?? stringValue(inherited.apiKey),
+    extraHeaders: { ...record(inherited.extraHeaders), ...record(endpoint.extraHeaders) },
+    extraBody: { ...record(inherited.extraBody), ...record(endpoint.extraBody) }
   };
 }
 
@@ -426,11 +433,9 @@ function relocateCustomPresets(config: ConfigRecord): boolean {
 
 function movedEndpoint(provider: ConfigRecord, endpoint: ConfigRecord): ConfigRecord {
   const next: ConfigRecord = { ...endpoint };
-  const apiKey = stringValue(endpoint.apiKey) ?? stringValue(provider.apiKey);
+  const { apiKey, extraHeaders, extraBody } = effectiveEndpoint(provider, endpoint);
   if (apiKey) next.apiKey = apiKey;
-  const extraHeaders = { ...record(provider.extraHeaders), ...record(endpoint.extraHeaders) };
   if (Object.keys(extraHeaders).length) next.extraHeaders = extraHeaders;
-  const extraBody = { ...record(provider.extraBody), ...record(endpoint.extraBody) };
   if (Object.keys(extraBody).length) next.extraBody = extraBody;
   const region = stringValue(endpoint.region) ?? stringValue(provider.region);
   if (region) next.region = region;
@@ -459,6 +464,7 @@ function placeCustomEndpoint(endpoints: ConfigRecord, preferredId: string, endpo
 function sameStoredEndpoint(left: ConfigRecord, right: ConfigRecord): boolean {
   return stableJson({
     protocol: left.protocol ?? null,
+    inheritProviderDefaults: left.inheritProviderDefaults !== false,
     apiBase: normalizeApiBase(stringValue(left.apiBase) ?? ""),
     apiKey: stringValue(left.apiKey) ?? null,
     region: stringValue(left.region) ?? null,
@@ -467,6 +473,7 @@ function sameStoredEndpoint(left: ConfigRecord, right: ConfigRecord): boolean {
     extraBody: left.extraBody ?? null
   }) === stableJson({
     protocol: right.protocol ?? null,
+    inheritProviderDefaults: right.inheritProviderDefaults !== false,
     apiBase: normalizeApiBase(stringValue(right.apiBase) ?? ""),
     apiKey: stringValue(right.apiKey) ?? null,
     region: stringValue(right.region) ?? null,
@@ -598,6 +605,7 @@ function mergeEndpoint(previous: ConfigRecord, input: CatalogEndpointInput): Con
     apiBase: input.apiBase,
     protocol: input.protocol
   };
+  if (input.inheritProviderDefaults !== undefined) next.inheritProviderDefaults = input.inheritProviderDefaults;
   setOptionalSecret(next, "apiKey", input.apiKey, previous.apiKey);
   setOptionalRecord(next, "extraHeaders", input.extraHeaders, previous.extraHeaders);
   setOptionalRecord(next, "extraBody", input.extraBody, previous.extraBody);
@@ -619,13 +627,15 @@ function canonicalizeEndpointDefinitions(
     Number(right.endpointId in previousEndpoints) - Number(left.endpointId in previousEndpoints));
   for (const endpoint of ordered) {
     const merged = record(endpoints[endpoint.endpointId]);
+    const effective = effectiveEndpoint(provider, merged);
     const signature = stableJson({
       provider: input.provider,
       protocol: merged.protocol,
+      inheritProviderDefaults: merged.inheritProviderDefaults !== false,
       apiBase: normalizeApiBase(stringValue(merged.apiBase) ?? ""),
-      apiKey: stringValue(merged.apiKey) ?? stringValue(provider.apiKey) ?? null,
-      extraHeaders: merged.extraHeaders ?? provider.extraHeaders ?? null,
-      extraBody: merged.extraBody ?? provider.extraBody ?? null
+      apiKey: effective.apiKey ?? null,
+      extraHeaders: effective.extraHeaders,
+      extraBody: effective.extraBody
     });
     const canonicalId = canonicalIds.get(signature);
     if (canonicalId) {
@@ -839,6 +849,7 @@ function providerView(
       endpointId,
       apiBase,
       protocol,
+      ...(typeof endpoint.inheritProviderDefaults === "boolean" ? { inheritProviderDefaults: endpoint.inheritProviderDefaults } : {}),
       hasApiKey: Boolean(endpointApiKey),
       apiKeyMasked: maskSecret(endpointApiKey),
       apiKey: "",
@@ -869,7 +880,7 @@ function presetView(
   const protocol = endpoint.protocol as ModelEndpointProtocol;
   const source = preset.source as "account" | "byok";
   const providerId = preset.provider as CatalogProviderId;
-  const hasCredential = Boolean(stringValue(endpoint.apiKey) ?? stringValue(provider.apiKey));
+  const hasCredential = Boolean(effectiveEndpoint(provider, endpoint).apiKey);
   const ownerMatches = source === "byok" || (
     stringValue(preset.ownerAccountId)
     && stringValue(preset.ownerAccountId) === stringValue(provider.ownerAccountId)
@@ -883,7 +894,7 @@ function presetView(
     source,
     ...(stringValue(preset.ownerAccountId) ? { ownerAccountId: stringValue(preset.ownerAccountId)! } : {}),
     capabilities: arrayValue(preset.capabilities).filter(isModelCapability),
-    available: Boolean((hasCredential || API_KEY_OPTIONAL_PROVIDERS.has(providerId)) && ownerMatches),
+    available: Boolean((hasCredential || (source === "byok" && endpoint.inheritProviderDefaults === false) || API_KEY_OPTIONAL_PROVIDERS.has(providerId)) && ownerMatches),
     ...(preset.thinking && typeof preset.thinking === "object" ? { thinking: preset.thinking as TextModelItemView["thinking"] } : {}),
     ...(preset.custom === true ? { custom: true } : {}),
     ...(Array.isArray(preset.inputModalities) ? { inputModalities: preset.inputModalities as TextModelItemView["inputModalities"] } : {})

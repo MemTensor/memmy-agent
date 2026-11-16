@@ -72,6 +72,16 @@ describe("ToolLoader expanded registry", () => {
 });
 
 describe("Goal model tools", () => {
+  it.each([true, false])('persists native authorization only for an accepted interactive request: %s', async interactive => {
+    const { goalRuntime, create } = makeGoalTools();
+    create.setContext(new RequestContext({ channel: 'websocket', chatId: 'c1', sessionKey: 'websocket:c1',
+      messageId: 'accepted-request', metadata: { turn_id: 'create-turn',
+        turn_source: { kind: 'gui', channel: 'websocket' }, computerUseInteractive: interactive,
+        computerUseInteractiveReason: interactive ? 'interactive-user-message' : 'internal-message' } }));
+    expect(await create.execute({ objective: 'Read a window' })).toContain('Goal created.');
+    expect(goalRuntime.route('websocket:c1')?.computerUseMessageId).toBe(interactive ? 'accepted-request' : undefined);
+  });
+
   it("creates, queries, and completes a strict Goal", async () => {
     const { sessions, bus, create, get, update } = makeGoalTools();
     expect(await create.execute({ objective: "Implement Goal mode", token_budget: 2_000 })).toContain("Goal created.");

@@ -12,14 +12,16 @@ function tool({
   apiKey = "",
   baseUrl = "",
   userAgent,
+  fallbackProviders = [],
 }: {
   provider?: string;
   apiKey?: string;
   baseUrl?: string;
   userAgent?: string;
+  fallbackProviders?: string[];
 } = {}): WebSearchTool {
   return new WebSearchTool({
-    config: new WebSearchConfig({ provider, apiKey, baseUrl }),
+    config: new WebSearchConfig({ provider, apiKey, baseUrl, fallbackProviders }),
     userAgent,
   });
 }
@@ -159,11 +161,11 @@ describe("web_search providers", () => {
     expect(search.concurrencySafe).toBe(true);
   });
 
-  it("treats Brave without API key as DuckDuckGo for concurrency", () => {
+  it("does not implicitly select DuckDuckGo when Brave has no key", () => {
     const search = tool({ provider: "brave", apiKey: "" });
 
-    expect(search.exclusive).toBe(true);
-    expect(search.concurrencySafe).toBe(false);
+    expect(search.exclusive).toBe(false);
+    expect(search.concurrencySafe).toBe(true);
   });
 
   it("formats Brave search results", async () => {
@@ -196,7 +198,7 @@ describe("web_search providers", () => {
     expect(result).toContain("https://example.com");
   });
 
-  it("retries Brave rate limits once", async () => {
+  it("returns Brave rate limits without an immediate retry", async () => {
     let calls = 0;
     vi.stubGlobal(
       "fetch",
@@ -214,11 +216,11 @@ describe("web_search providers", () => {
       count: 1,
     });
 
-    expect(calls).toBe(2);
-    expect(result).toContain("Recovered");
+    expect(calls).toBe(1);
+    expect(result).toContain("rate_limited");
   });
 
-  it("returns a clear Brave rate-limit error after retries", async () => {
+  it("returns a clear Brave rate-limit error", async () => {
     let calls = 0;
     vi.stubGlobal(
       "fetch",
@@ -233,9 +235,9 @@ describe("web_search providers", () => {
       count: 1,
     });
 
-    expect(calls).toBe(2);
-    expect(result).toContain("Brave search rate limited");
-    expect(result).toContain("consecutive web_search");
+    expect(calls).toBe(1);
+    expect(result).toContain("rate_limited");
+    expect(result).toContain("Retry after");
   });
 
   it("formats Tavily search results", async () => {
@@ -323,18 +325,18 @@ describe("web_search providers", () => {
   it("returns an error when DuckDuckGo search times out", async () => {
     const search = tool({ provider: "duckduckgo" });
     search.config.timeout = 0.01;
-    search.duckduckgoText = vi.fn(async () => new Promise<Array<Record<string, string>>>(() => {}));
+    vi.stubGlobal("fetch", vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true }))));
 
     const result = await search.execute({ query: "test" });
 
     expect(result).toContain("Error");
-    expect(result).toContain("DuckDuckGo search failed");
+    expect(result).toContain("timeout");
   });
 
-  it("falls back to DuckDuckGo when Brave has no key", async () => {
+  it("uses explicitly configured DuckDuckGo fallback when Brave has no key", async () => {
     stubDuckDuckGo();
 
-    const result = await tool({ provider: "brave", apiKey: "" }).execute({ query: "test" });
+    const result = await tool({ provider: "brave", apiKey: "", fallbackProviders: ["duckduckgo"] }).execute({ query: "test" });
 
     expect(result).toContain("Duck Result");
   });
@@ -381,7 +383,7 @@ describe("web_search providers", () => {
     expect(calls[0]).toBe("https://s.jina.ai/hello%20world");
   });
 
-  it("falls back to DuckDuckGo when Jina search fails", async () => {
+  it("uses explicitly configured DuckDuckGo fallback when Jina search fails", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
@@ -390,7 +392,7 @@ describe("web_search providers", () => {
       }),
     );
 
-    const result = await tool({ provider: "jina", apiKey: "jina-key" }).execute({ query: "test" });
+    const result = await tool({ provider: "jina", apiKey: "jina-key", fallbackProviders: ["duckduckgo"] }).execute({ query: "test" });
 
     expect(result).toContain("Duck Result");
   });
@@ -427,10 +429,10 @@ describe("web_search providers", () => {
     expect(result).not.toContain("ignored related search");
   });
 
-  it("falls back to DuckDuckGo when Kagi has no key", async () => {
+  it("uses explicitly configured DuckDuckGo fallback when Kagi has no key", async () => {
     stubDuckDuckGo();
 
-    const result = await tool({ provider: "kagi", apiKey: "" }).execute({ query: "test" });
+    const result = await tool({ provider: "kagi", apiKey: "", fallbackProviders: ["duckduckgo"] }).execute({ query: "test" });
 
     expect(result).toContain("Duck Result");
   });
@@ -470,14 +472,14 @@ describe("web_search providers", () => {
       query: "test query",
     });
 
-    expect(result).toContain("Olostep search error");
-    expect(result).toContain("olostep package not installed");
+    expect(result).toContain("olostep network");
+    expect(result).toContain("phase=request");
   });
 
-  it("falls back to DuckDuckGo when Olostep has no key", async () => {
+  it("uses explicitly configured DuckDuckGo fallback when Olostep has no key", async () => {
     stubDuckDuckGo();
 
-    const result = await tool({ provider: "olostep", apiKey: "" }).execute({ query: "test" });
+    const result = await tool({ provider: "olostep", apiKey: "", fallbackProviders: ["duckduckgo"] }).execute({ query: "test" });
 
     expect(result).toContain("Duck Result");
   });
@@ -503,10 +505,10 @@ describe("web_search providers", () => {
     expect(result).toContain("No results");
   });
 
-  it("falls back to DuckDuckGo when SearXNG has no base URL", async () => {
+  it("uses explicitly configured DuckDuckGo fallback when SearXNG has no base URL", async () => {
     stubDuckDuckGo();
 
-    const result = await tool({ provider: "searxng", baseUrl: "" }).execute({ query: "test" });
+    const result = await tool({ provider: "searxng", baseUrl: "", fallbackProviders: ["duckduckgo"] }).execute({ query: "test" });
 
     expect(result).toContain("Duck Result");
   });

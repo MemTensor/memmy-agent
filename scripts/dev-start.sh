@@ -5,8 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MEMMY_AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
-ELECTRON_PACKAGE_DIR="$DESKTOP_DIR/node_modules/electron"
 MEMORY_CLI_ENTRY="$ROOT_DIR/Memory/dist/src/cli/index.js"
+PROJECT_CLI_ENTRY="$ROOT_DIR/App/backend/dist/src/cli/memmy-project.js"
+NPM_DEPENDENCY_STAMP="${MEMMY_NPM_DEPENDENCY_STAMP:-$ROOT_DIR/node_modules/.memmy-dev-dependency-fingerprint}"
 MEMMY_CONFIG_PATH="${MEMMY_CONFIG:-$HOME/.memmy/config.yaml}"
 MEMMY_WORKSPACE_IS_EXPLICIT=0
 if [[ -n "${MEMMY_WORKSPACE:-}" ]]; then
@@ -103,8 +104,14 @@ require_command() {
   fi
 }
 
+# Resolve the way the dev stack will actually load it. Resolving from the
+# caller's current directory reported every dependency missing when the script
+# was started from outside the repository.
 node_can_resolve() {
-  node --input-type=module --eval 'import.meta.resolve(process.argv[1])' "$1" >/dev/null 2>&1
+  (
+    cd "$ROOT_DIR"
+    node --input-type=module --eval 'import.meta.resolve(process.argv[1])' "$1" >/dev/null 2>&1
+  )
 }
 
 node_can_resolve_from_dir() {
@@ -116,12 +123,40 @@ node_can_resolve_from_dir() {
   )
 }
 
+root_dependency_fingerprint() {
+  node --input-type=module - "$ROOT_DIR/package.json" "$ROOT_DIR/package-lock.json" <<'NODE'
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+const hash = createHash("sha256");
+for (const file of process.argv.slice(2)) {
+  hash.update(file);
+  hash.update("\0");
+  hash.update(readFileSync(file));
+  hash.update("\0");
+}
+process.stdout.write(hash.digest("hex"));
+NODE
+}
+
+write_root_dependency_stamp() {
+  local fingerprint temporary
+  fingerprint="$(root_dependency_fingerprint)"
+  mkdir -p "$(dirname "$NPM_DEPENDENCY_STAMP")"
+  temporary="$NPM_DEPENDENCY_STAMP.$$"
+  printf '%s\n' "$fingerprint" >"$temporary"
+  mv "$temporary" "$NPM_DEPENDENCY_STAMP"
+}
+
 ensure_npm_dependencies() {
   local package
+  local expected_fingerprint installed_fingerprint
   local -a missing_packages=()
   local -a required_packages=(
     "concurrently"
     "wait-on"
+    "electron"
+    "jszip"
     "@types/proper-lockfile/index.d.ts"
     "electron-log/main"
     "electron-log/renderer"
@@ -134,11 +169,17 @@ ensure_npm_dependencies() {
     fi
   done
 
-  if [[ ${#missing_packages[@]} -eq 0 ]]; then
+  expected_fingerprint="$(root_dependency_fingerprint)"
+  installed_fingerprint="$(cat "$NPM_DEPENDENCY_STAMP" 2>/dev/null || true)"
+  if [[ ${#missing_packages[@]} -eq 0 && "$installed_fingerprint" == "$expected_fingerprint" ]]; then
     return
   fi
 
-  log "installing npm dependencies (missing: ${missing_packages[*]})"
+  if [[ ${#missing_packages[@]} -ne 0 ]]; then
+    log "installing npm dependencies (missing: ${missing_packages[*]})"
+  else
+    log "installing npm dependencies (package manifest or lockfile changed)"
+  fi
   cd "$ROOT_DIR"
   npm install
 
@@ -153,6 +194,14 @@ ensure_npm_dependencies() {
     printf '[dev-start] npm dependencies are still missing after install: %s\n' "${missing_packages[*]}" >&2
     exit 1
   fi
+  write_root_dependency_stamp
+}
+
+resolve_electron_package_dir() {
+  (
+    cd "$DESKTOP_DIR"
+    node --eval 'const path = require("node:path"); process.stdout.write(path.dirname(require.resolve("electron/package.json")));'
+  )
 }
 
 electron_runtime_available() {
@@ -163,16 +212,16 @@ electron_runtime_available() {
 }
 
 ensure_electron_runtime() {
-  local electron_platform electron_platform_path electron_zip_path
+  local electron_package_dir electron_platform electron_platform_path electron_zip_path
 
-  if [[ ! -f "$ELECTRON_PACKAGE_DIR/install.js" ]]; then
-    printf '[dev-start] missing Electron package at %s; run npm install first\n' "$ELECTRON_PACKAGE_DIR" >&2
+  if ! electron_package_dir="$(resolve_electron_package_dir)" || [[ ! -f "$electron_package_dir/install.js" ]]; then
+    printf '[dev-start] unable to resolve the Electron package from %s; run npm install first\n' "$DESKTOP_DIR" >&2
     exit 1
   fi
 
   log "ensuring Electron runtime is installed after native dependency rebuild"
   (
-    cd "$ELECTRON_PACKAGE_DIR"
+    cd "$electron_package_dir"
     node install.js
   )
 
@@ -180,7 +229,7 @@ ensure_electron_runtime() {
     require_command unzip
     log "Electron installer returned before extraction completed; extracting the verified artifact synchronously"
     electron_zip_path="$(
-      cd "$ELECTRON_PACKAGE_DIR"
+      cd "$electron_package_dir"
       node --input-type=module <<'NODE'
 import { createRequire } from "node:module";
 
@@ -213,9 +262,9 @@ NODE
         electron_platform_path="electron"
         ;;
     esac
-    mkdir -p "$ELECTRON_PACKAGE_DIR/dist"
-    unzip -q -o "$electron_zip_path" -d "$ELECTRON_PACKAGE_DIR/dist"
-    printf '%s' "$electron_platform_path" >"$ELECTRON_PACKAGE_DIR/path.txt"
+    mkdir -p "$electron_package_dir/dist"
+    unzip -q -o "$electron_zip_path" -d "$electron_package_dir/dist"
+    printf '%s' "$electron_platform_path" >"$electron_package_dir/path.txt"
   fi
 
   if ! electron_runtime_available; then
@@ -339,6 +388,7 @@ is_managed_user_cli_target() {
   case "$name" in
     memmy-memory) expected_suffix="Memory/dist/src/cli/index.js" ;;
     memmy) expected_suffix="App/memmy-agent/dist/main.js" ;;
+    memmy-project) expected_suffix="App/backend/dist/src/cli/memmy-project.js" ;;
     *) return 1 ;;
   esac
 
@@ -720,6 +770,13 @@ NODE
   install_user_cli_link "memmy" "$MEMMY_AGENT_DIR/dist/main.js"
   "$(user_cli_path "memmy")" --version >/dev/null
   log "memmy command is ready in $MEMMY_BIN_DIR"
+
+  # The project CLI is built with the desktop backend.
+  if [[ -f "$PROJECT_CLI_ENTRY" ]]; then
+    install_user_cli_link "memmy-project" "$PROJECT_CLI_ENTRY"
+  else
+    log "memmy-project is not built yet; the next dev-start links it"
+  fi
 
   if config_has_agent_model; then
     log "preserving existing model catalog; non-interactive onboard refresh is not required"

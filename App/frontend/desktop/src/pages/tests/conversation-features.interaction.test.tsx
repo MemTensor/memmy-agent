@@ -364,6 +364,28 @@ describe("conversation feature integration", () => {
     expect(features.processInteraction).toBeNull();
   });
 
+  it.each(["zh-CN", "en-US"])("shows localized Office runtime preparation in the Agent conversation (%s)", async (language) => {
+    mocks.chatId = "office-chat";
+    await act(async () => render(language));
+    const call = { pluginId: "office", capabilityId: "office_render", callId: "office-render",
+      conversationId: "office-chat", origin: "agent" as const, turnId: "office-turn" };
+    for (const [runtimeStage, message, chinese, current, total] of [
+      ["preparing", "Preparing Office runtime…", "正在准备 Office 运行时…", 0, undefined],
+      ["downloading", "Downloading Office runtime…", "正在下载 Office 运行时…", 25, 100],
+      ["extracting", "Extracting Office runtime…", "正在解压 Office 运行时…", 0, undefined],
+      ["verifying", "Verifying Office runtime…", "正在校验 Office 运行时…", 0, undefined]
+    ] as const) {
+      await act(async () => ui.receive({ ...call, event: {
+        type: "progress", phase: "runtime-preparation", runtimeStage, message, current, total
+      } }));
+      expect(container.querySelector('[role="status"]')?.textContent).toContain(language === "zh-CN" ? chinese : message);
+      expect(container.textContent?.includes("25%")).toBe(total !== undefined);
+    }
+    await act(async () => ui.receive({ ...call, event: { type: "progress", current: 0, message: "Office processing" } }));
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.textContent).not.toContain("Office processing");
+  });
+
   it("keeps Agent Office progress and files off the composer", async () => {
     mocks.chatId = "office-chat";
     await act(async () => render());

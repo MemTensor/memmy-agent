@@ -10,13 +10,19 @@ import {
 } from "../../src/index.js";
 import type { ActualModelContext } from "../../src/contracts/index.js";
 
+// Suites for legacy capture/retrieval behavior keep that mode explicit as the
+// production default changes. Enabled/default-on suites use production config.
+export const LEGACY_TEST_CONFIG = { ...DEFAULT_MEMMY_CONFIG, algorithm: { ...DEFAULT_MEMMY_CONFIG.algorithm,
+  session: { ...DEFAULT_MEMMY_CONFIG.algorithm.session, turnJudge: false } } };
+
 export function createMemoryServiceFixture(): {
-  cleanup: () => void;
+  cleanup: () => Promise<void>;
   createTestMemoryService: (
     options: ConstructorParameters<typeof MemoryService>[0]
   ) => MemoryService;
   createTestRoot: (prefix?: string) => string;
   createTestService: (options?: {
+    concurrency?: ConstructorParameters<typeof MemoryService>[0]["concurrency"];
     mode?: "local" | "cloud" | "dev";
     config?: typeof DEFAULT_MEMMY_CONFIG;
     llm?: LlmClient;
@@ -48,6 +54,9 @@ export function createMemoryServiceFixture(): {
     }
     const service = new MemoryService({
       ...options,
+      // Legacy fixture suites opt out explicitly; turn-judge suites pass their
+      // enabled configuration, and default-on coverage passes DEFAULT_MEMMY_CONFIG.
+      config: options.config ?? LEGACY_TEST_CONFIG,
       fetchAppMemoryBudget: options.fetchAppMemoryBudget ?? (async () => null),
       skillLlm: options.skillLlm ?? options.llm,
       embedder: options.embedder ?? createCapturingEmbedder([])
@@ -57,6 +66,7 @@ export function createMemoryServiceFixture(): {
   }
 
   function createTestService(options: {
+    concurrency?: ConstructorParameters<typeof MemoryService>[0]["concurrency"];
     mode?: "local" | "cloud" | "dev";
     config?: typeof DEFAULT_MEMMY_CONFIG;
     llm?: LlmClient;
@@ -77,6 +87,7 @@ export function createMemoryServiceFixture(): {
       root,
       db,
       service: createTestMemoryService({
+        concurrency: options.concurrency,
         db,
         mode: options.mode ?? "dev",
         config: options.config,
@@ -89,18 +100,23 @@ export function createMemoryServiceFixture(): {
     };
   }
 
-  function cleanup(): void {
-    for (const service of services.splice(0)) {
-      void service.stop();
-    }
-    for (const database of databases.splice(0)) {
+  async function cleanup(): Promise<void> {
+    // Snapshot before awaiting: even callers which forget to await cleanup
+    // must never close the databases belonging to the next test's services.
+    const stoppingServices = services.splice(0);
+    const closingDatabases = databases.splice(0);
+    const removingRoots = roots.splice(0);
+    const stopped = await Promise.allSettled(stoppingServices.map(async service => { await service.stop(); }));
+    for (const database of closingDatabases) {
       if (database.db.open) {
         database.close();
       }
     }
-    for (const root of roots.splice(0)) {
+    for (const root of removingRoots) {
       rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
+    const failed = stopped.find(result => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
   }
 
   return {
@@ -119,6 +135,25 @@ export async function runWorkerRounds(
   for (let index = 0; index < rounds; index += 1) {
     await service.runWorkerOnce(limit);
   }
+}
+
+/** Lifecycle tests can explicitly make selected retries due without real sleeps.
+ * Backoff timing itself is covered by worker-lease-safety using a fake clock.
+ * Configuration blocks are never bypassed by this helper.
+ */
+export async function runWorkerRoundsWithDueRetries(
+  service: MemoryService, db: MemoryDb, memoryIds: readonly string[], rounds: number, limit = 100
+) {
+  if (memoryIds.length === 0) throw new Error("retry test requires explicit memory ids");
+  const placeholders = memoryIds.map(() => "?").join(", ");
+  const results = [];
+  for (let index = 0; index < rounds; index += 1) {
+    db.db.prepare(`UPDATE evolution_jobs SET available_at = ?
+      WHERE status = 'failed' AND blocked_reason IS NULL AND target_memory_id IN (${placeholders})`)
+      .run(new Date().toISOString(), ...memoryIds);
+    results.push(await service.runWorkerOnce(limit));
+  }
+  return results;
 }
 
 export function addAgentSourceImport(
@@ -148,12 +183,13 @@ export function addAgentSourceImport(
 export function configWithMemoryGates(gates: {
   enableMemoryAdd?: boolean;
   enableMemorySearch?: boolean;
+  enableUserMemoryRecall?: boolean;
   enableQueryRewrite?: boolean;
 }): typeof DEFAULT_MEMMY_CONFIG {
   return {
-    ...DEFAULT_MEMMY_CONFIG,
+    ...LEGACY_TEST_CONFIG,
     algorithm: {
-      ...DEFAULT_MEMMY_CONFIG.algorithm,
+      ...LEGACY_TEST_CONFIG.algorithm,
       ...gates
     }
   };
@@ -180,7 +216,7 @@ export function accountRuntimeConfig(): typeof DEFAULT_MEMMY_CONFIG {
   const endpoint = "https://apigw-pre.memtensor.cn/api/agentExternal/v1";
   const apiKey = "cloud-uuid";
   return {
-    ...DEFAULT_MEMMY_CONFIG,
+    ...LEGACY_TEST_CONFIG,
     roleRouting: {
       summary: "follow",
       evolution: "follow"
@@ -350,7 +386,8 @@ export function createFailingLlm(): LlmClient {
     async complete() {
       throw new Error("llm filter unavailable");
     },
-    async completeJson() {
+    async completeJson(_selectionMessages: unknown, selectionOptions: { operation: string }) {
+      if (selectionOptions.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as any;
       throw new Error("llm filter unavailable");
     },
     status() {
@@ -390,6 +427,7 @@ export function createBatchReflectionLlm(calls: Array<{
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" }
     ): Promise<T> {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "测试任务", summary: "测试任务摘要" } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.reflection.batch.v13") {
         const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
@@ -408,14 +446,14 @@ export function createBatchReflectionLlm(calls: Array<{
         if (!decisionCall) return { title: "测试捕获标题", summary: captureSummary } as unknown as T;
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
         const userQuote = payload.match(/USER:\s*([^\n]+)/)?.[1]?.trim() ?? "";
-        return {
+        return withTurnJudgeKeys(messages, {
           l1: {
             title: "测试捕获标题",
             summary: captureSummary,
             evidence: [{ quote: evidenceQuote || userQuote, role: "user", kind: "task_outcome" }]
           },
           user: null
-        } as unknown as T;
+        }) as unknown as T;
       }
       return {
         summary: "fallback single reflection",
@@ -438,4 +476,74 @@ export function createBatchReflectionLlm(calls: Array<{
 
 export function stableTestVector(text: string): number[] {
   return [text.length % 7, text.length % 11, text.length % 13];
+}
+
+export function isTurnJudgeCall(messages: ReadonlyArray<{ role: string; content: string }>): boolean {
+  return messages[0]?.content.includes("Judge L1 and User Memory") === true &&
+    messages.some((message) => message.role === "user" && message.content.startsWith("TASK SO FAR"));
+}
+
+// USER as the per-turn judgment shows it: one line, followed by the next section label.
+export function turnJudgeUserText(messages: ReadonlyArray<{ role: string; content: string }>): string {
+  const payload = messages.find((message) => message.role === "user")?.content ?? "";
+  return payload.match(/\bUSER:\s*(.*?)\s+(?:ASSISTANT:|TOOLS:|ATTACHMENT METADATA|EXISTING_USER_MEMORY_CANDIDATES:)/)?.[1]?.trim() ?? "";
+}
+
+// Turns a capture-only answer into the per-turn judgment's five keys when the
+// call uses the turn.judge.v1 prompt; other calls get the answer unchanged.
+export function withTurnJudgeKeys(
+  messages: ReadonlyArray<{ role: string; content: string }>,
+  answer: { l1: Record<string, unknown> | null; user: Record<string, unknown> | null },
+  judgment: { relation?: string; feedback?: string; unverifiedAnswer?: boolean } = {}
+): Record<string, unknown> {
+  if (!isTurnJudgeCall(messages)) return answer;
+  const payload = messages.find((message) => message.role === "user")?.content ?? "";
+  const taskEmpty = payload.includes("<first_user_message></first_user_message>");
+  const userText = turnJudgeUserText(messages);
+  const l1 = answer.l1
+    ? {
+        ...answer.l1,
+        evidence: Array.isArray(answer.l1.evidence)
+          ? answer.l1.evidence.map((item) =>
+              typeof item === "object" && item && (item as { role?: unknown }).role === "user" &&
+              !userText.includes(String((item as { quote?: unknown }).quote))
+                ? { ...item, quote: userText }
+                : item)
+          : answer.l1.evidence,
+        unverified_answer: judgment.unverifiedAnswer ?? false
+      }
+    : null;
+  return {
+    relation: taskEmpty ? null : judgment.relation ?? "follow_up",
+    feedback: taskEmpty ? null : judgment.feedback ?? "neutral",
+    reason: "test judgment",
+    l1,
+    user: answer.user
+  };
+}
+
+/** Read the completed background assignment, never the acceptance response's pending ID. */
+export function assignedEpisodeId(service: MemoryService, turn: { sessionId: string; rawTurnId: string }): string {
+  const raw = service.timeline({ sessionId: turn.sessionId, limit: 1000 }).rawTurns?.find(row => row.rawTurnId === turn.rawTurnId);
+  if (!raw?.episodeId) throw new Error(`turn ${turn.rawTurnId} is still awaiting Episode assignment; run its background jobs first`);
+  return raw.episodeId;
+}
+
+export async function settleCaptureWork(service: MemoryService, maxRounds = 50): Promise<void> {
+  for (let round = 0; round < maxRounds; round++) {
+    const run = await service.runWorkerOnce(100);
+    if (!run.leased) return;
+  }
+  throw new Error("capture work did not settle");
+}
+
+/** Wait only for capture assignments, leaving downstream reward/reflection assertions observable. */
+export async function settleCaptureAssignments(service: MemoryService): Promise<void> {
+  for (let round = 0; round < 50; round++) {
+    const pending = service.panelJobs({ limit: 1000 }).items.filter(j => j.jobType === "episode_finalize" && (j.status === "queued" || j.status === "leased"));
+    if (!pending.length) return;
+    const run = await service.runWorkerOnce(100, { priorityCohortOnly: true });
+    if (!run.leased) throw new Error("capture assignment is blocked");
+  }
+  throw new Error("capture assignments did not finish");
 }

@@ -61,6 +61,7 @@ describe("AgentRunner expanded behavior", () => {
         toolCalls: [new ToolCallRequest({ id: "call_1", name: "list_dir", arguments: {} })],
         reasoningContent: "hidden reasoning",
         thinkingBlocks: [{ type: "thinking", thinking: "step" }],
+        protocolState: { version: 1, protocol: "responses", scope: "scope", items: [{ type: "reasoning", id: "rs_1", encrypted_content: "opaque" }] },
         usage: { prompt_tokens: 5, completion_tokens: 3 },
         finishReason: "tool_calls",
       }),
@@ -113,6 +114,7 @@ describe("AgentRunner expanded behavior", () => {
           role: "assistant",
           reasoning_content: "hidden reasoning",
           thinking_blocks: [{ type: "thinking", thinking: "step" }],
+          memmy_protocol_state: { version: 1, protocol: "responses", scope: "scope", items: [{ type: "reasoning", id: "rs_1", encrypted_content: "opaque" }] },
         }),
         expect.objectContaining({ role: "tool", content: "tool result" }),
       ]),
@@ -187,7 +189,7 @@ describe("AgentRunner expanded behavior", () => {
     tools.register(new StaticTool("large_tool", "x".repeat(100)));
 
     await new AgentRunner(provider).run(
-      new AgentRunSpec({ messages: [], tools, maxIterations: 2, maxToolResultChars: 10, model: "test-model" }),
+      new AgentRunSpec({ messages: [], tools, maxIterations: 2, maxToolResultChars: 10, toolResultCompressionEnabled: true, model: "test-model" }),
     );
 
     const secondMessages = provider.calls[1].messages;

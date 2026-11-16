@@ -10,47 +10,24 @@ export class L3WorldModelContextReadModel {
 
   load(session: SessionRecord): SessionL3WorldModelContextResponse {
     const projectId = session.projectId ?? null;
-    const memory = this.repos.l3WorldModels.getMemory(session.userId, projectId);
-    if (!memory || memory.status !== "activated" || memory.deletedAt) {
-      return emptyResponse(projectId);
-    }
-    const fields = this.repos.l3WorldModels.fields(session.userId, projectId);
-    if (projectId && fields.projectEnvironmentProfile !== null && !this.environmentProfileIsApplied(
-      session.userId,
-      projectId,
-      memory.info.project_environment_applied_scan_id
-    )) {
-      fields.projectEnvironmentProfile = null;
-    }
-    const sourceMemoryIds = sourceMemoryIdsFromL3(memory.properties.internal_info.source_memory_ids);
+    const { fields, memories } = this.repos.l3WorldModels.effectiveFields(projectId);
+    if (!memories.length) return emptyResponse(projectId);
+    const representative = memories[0]!;
     return {
       schemaVersion: 2,
       projectId,
-      memoryId: memory.id,
-      memoryVersion: memory.version,
+      // Preserve the strict v2 wire shape and a real representative record ID.
+      // Shared-context caches must also compare rendered content and evidence.
+      memoryId: representative.id,
+      memoryVersion: representative.version,
       renderedContext: renderL3WorldModelFields(fields),
-      sourceMemoryIds,
-      generalRulesAndSafetyConstraints: fields.generalRulesAndSafetyConstraints,
-      projectEnvironmentProfile: fields.projectEnvironmentProfile,
-      projectContract: fields.projectContract,
-      domainKnowledge: fields.domainKnowledge,
+      sourceMemoryIds: [...new Set(memories.flatMap(memory =>
+        sourceMemoryIdsFromL3(memory.properties.internal_info.source_memory_ids)))],
+      ...fields,
       serverTime: nowIso()
     };
   }
 
-  private environmentProfileIsApplied(
-    userId: string,
-    projectId: string,
-    memoryScanId: unknown
-  ): boolean {
-    if (typeof memoryScanId !== "string" || !memoryScanId) return false;
-    const row = this.repos.db.prepare(
-      `SELECT applied_scan_id
-       FROM l3_world_model_project_environment_state
-       WHERE user_id = ? AND project_id = ?`
-    ).get(userId, projectId) as { applied_scan_id: string | null } | undefined;
-    return row?.applied_scan_id === memoryScanId;
-  }
 }
 
 function emptyResponse(projectId: string | null): SessionL3WorldModelContextResponse {

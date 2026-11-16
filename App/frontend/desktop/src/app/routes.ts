@@ -18,6 +18,7 @@ export type AppRoutePath =
   | "/tools"
   | "/memory"
   | "/knowledge"
+  | "/collab"
   | "/memory-sources"
   | "/plugin"
   | "/settings";
@@ -56,6 +57,7 @@ export const routeTable: Record<AppRoutePath, AppRouteDefinition> = {
   "/tools": { path: "/tools", navKey: "nav.tools", requiresBootstrap: true },
   "/memory": { path: "/memory", navKey: "nav.memory", requiresBootstrap: true },
   "/knowledge": { path: "/knowledge", navKey: "nav.knowledge", requiresBootstrap: true },
+  "/collab": { path: "/collab", navKey: "nav.collab", requiresBootstrap: true },
   "/memory-sources": { path: "/memory-sources", navKey: "nav.memory", requiresBootstrap: true },
   "/plugin": { path: "/plugin", navKey: "plugin.surface.title", requiresBootstrap: true },
   "/settings": { path: "/settings", navKey: "nav.settings", requiresBootstrap: true }

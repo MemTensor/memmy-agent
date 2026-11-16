@@ -1,5 +1,12 @@
+import type { PanelTaskCheckOutput } from "@memmy/local-api-contracts";
+import type {PanelLogsInput,PanelLogsOutput,PanelLogDetailOutput} from "@memmy/local-api-contracts";
+import type {PanelStatsOutput} from "@memmy/local-api-contracts";
+import type {PanelOverviewStatsOutput} from "@memmy/local-api-contracts";
+import type { PanelBrowseInput, PanelBrowseOutput } from "@memmy/local-api-contracts";
+import type { PanelTaskSummariesOutput, PanelTaskDetailOutput, PanelTaskFieldInput, PanelTaskFieldOutput } from "@memmy/local-api-contracts";
 /** Panel service module. */
 import type {
+  GetMemoryOutput,
   PanelAnalysisOutput,
   PanelItemsInput,
   PanelItemsOutput,
@@ -16,9 +23,19 @@ import type { RuntimeContext } from "./runtime-context.js";
 
 /** Contract for panel service. */
 export interface PanelService {
+  memory(id:string,ctx:RuntimeContext):Promise<GetMemoryOutput>;
   overview(ctx: RuntimeContext): Promise<PanelOverviewOutput>;
   analysis(ctx: RuntimeContext): Promise<PanelAnalysisOutput>;
   items(input: PanelItemsInput, ctx: RuntimeContext): Promise<PanelItemsOutput>;
+  logs(input:PanelLogsInput,ctx:RuntimeContext):Promise<PanelLogsOutput>;
+  logDetail(id:number,ctx:RuntimeContext):Promise<PanelLogDetailOutput>;
+  stats(ctx:RuntimeContext):Promise<PanelStatsOutput>;
+  overviewStats(ctx:RuntimeContext):Promise<PanelOverviewStatsOutput>;
+  browse(input:PanelBrowseInput,ctx:RuntimeContext):Promise<PanelBrowseOutput>;
+  taskSummaries(input: PanelTasksInput, ctx: RuntimeContext): Promise<PanelTaskSummariesOutput>;
+  taskCheck(id: string, ctx: RuntimeContext): Promise<PanelTaskCheckOutput>;
+  taskDetail(id: string, cursor: string | undefined, ctx: RuntimeContext): Promise<PanelTaskDetailOutput>;
+  taskField(id: string, turnId: string, input: PanelTaskFieldInput, ctx: RuntimeContext): Promise<PanelTaskFieldOutput>;
   tasks(input: PanelTasksInput, ctx: RuntimeContext): Promise<PanelTasksOutput>;
   deleteTask(id: string, ctx: RuntimeContext): Promise<DeletePanelTaskOutput>;
   memoryApiLogs(input: MemoryApiLogsInput, ctx: RuntimeContext): Promise<MemoryApiLogsOutput>;
@@ -26,8 +43,12 @@ export interface PanelService {
 
 /** Creates create panel service. */
 export function createPanelService(deps: { memoryClient: MemoryClient; getUserId: () => string }): PanelService {
-  const context = (ctx: RuntimeContext): RuntimeContext => ({ ...ctx, userId: deps.getUserId() });
+  const context = (ctx: RuntimeContext): RuntimeContext => ({ ...ctx, userId: undefined });
+  const writeContext=(ctx:RuntimeContext):RuntimeContext=>({...ctx,userId:deps.getUserId()});
   return {
+    async memory(id,ctx){
+      return deps.memoryClient.panelMemory ? deps.memoryClient.panelMemory(id,context(ctx)) : deps.memoryClient.getMemory({memoryId:id},context(ctx));
+    },
     async overview(ctx) {
       return deps.memoryClient.panelOverview(context(ctx));
     },
@@ -40,6 +61,24 @@ export function createPanelService(deps: { memoryClient: MemoryClient; getUserId
       return deps.memoryClient.panelItems(input, context(ctx));
     },
 
+    async logs(input,ctx) {return deps.memoryClient.panelLogs(input,context(ctx));},
+    async logDetail(id,ctx) {return deps.memoryClient.panelLogDetail(id,context(ctx));},
+    async stats(ctx) {return deps.memoryClient.panelStats(context(ctx));},
+    async overviewStats(ctx) {return deps.memoryClient.panelOverviewStats(context(ctx));},
+    async browse(input,ctx) {
+      // Every management read uses the device library; write identity stays account-scoped.
+      return deps.memoryClient.panelBrowse(input,context(ctx));
+    },
+    async taskSummaries(input, ctx) {
+      return deps.memoryClient.panelTaskSummaries(input, {...ctx, userId: undefined});
+    },
+    async taskCheck(id, ctx) { return deps.memoryClient.panelTaskCheck(id, {...ctx, userId: undefined}); },
+    async taskDetail(id, cursor, ctx) {
+      return deps.memoryClient.panelTaskDetail(id, cursor, {...ctx, userId: undefined});
+    },
+    async taskField(id, turnId, input, ctx) {
+      return deps.memoryClient.panelTaskField(id, turnId, input, {...ctx, userId: undefined});
+    },
     async tasks(input, ctx) {
       // The desktop task list shows the local library, like the Web viewer.
       // Login must not hide tasks captured by hooks under a different userId.
@@ -48,7 +87,7 @@ export function createPanelService(deps: { memoryClient: MemoryClient; getUserId
     },
 
     async deleteTask(id, ctx) {
-      return deps.memoryClient.deletePanelTask(id, context(ctx));
+      return deps.memoryClient.deletePanelTask(id, writeContext(ctx));
     },
 
     async memoryApiLogs(input, ctx) {

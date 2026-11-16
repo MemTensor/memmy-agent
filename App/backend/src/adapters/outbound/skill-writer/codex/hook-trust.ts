@@ -7,18 +7,25 @@ import { basename, join, normalize } from "node:path";
 const APP_SERVER_REQUEST_TIMEOUT_MS = 10_000;
 const APP_SERVER_CLOSE_TIMEOUT_MS = 1_000;
 const MAX_STDERR_LENGTH = 8_192;
-const MEMMY_HOOK_EVENTS = new Set([
+// 记忆钩子登记的事件：默认值，保持原有行为不变。
+const MEMMY_HOOK_EVENTS = [
   "userPromptSubmit",
   "stop",
   "sessionStart",
   "postCompact",
   "sessionEnd",
-]);
+] as const;
+const MEMORY_HOOK_EVENTS = new Set<string>(MEMMY_HOOK_EVENTS);
 
 export interface TrustMemmyCodexHooksOptions {
   codexHomeDirectory: string;
   hooksFilePath: string;
   hookCommand: string;
+  /**
+   * 要写信任的 Codex 事件名。不传按记忆钩子的五个事件处理；
+   * 项目钩子用自己的事件集单独写一次信任，两者互不影响。
+   */
+  events?: readonly string[];
   codexExecutable?: string;
   appServerArguments?: string[];
 }
@@ -50,7 +57,7 @@ interface CodexAppServerClient {
   close(): Promise<void>;
 }
 
-/** Trusts only the five user-level Memmy hooks that Codex discovered from hooks.json. */
+/** Trusts only the user-level Memmy hooks that Codex discovered from hooks.json. */
 export async function trustMemmyCodexHooks(options: TrustMemmyCodexHooksOptions): Promise<void> {
   const client = createCodexAppServerClient(options);
   try {
@@ -63,10 +70,12 @@ export async function trustMemmyCodexHooks(options: TrustMemmyCodexHooksOptions)
     });
     client.notify("initialized", {});
 
+    const events = new Set<string>(options.events ?? MEMORY_HOOK_EVENTS);
     const hooks = selectMemmyHooks(
       await listHooks(client, options.codexHomeDirectory),
       options.hooksFilePath,
-      options.hookCommand
+      options.hookCommand,
+      events
     );
     const trustState = Object.fromEntries(hooks.map((hook) => [
       hook.key,
@@ -118,7 +127,8 @@ async function listHooks(client: CodexAppServerClient, cwd: string): Promise<Cod
 function selectMemmyHooks(
   hooks: CodexHookMetadata[],
   hooksFilePath: string,
-  hookCommand: string
+  hookCommand: string,
+  events: ReadonlySet<string>
 ): CodexHookMetadata[] {
   const sourcePath = normalize(hooksFilePath);
   const selected = hooks.filter((hook) =>
@@ -127,10 +137,10 @@ function selectMemmyHooks(
     hook.handlerType === "command" &&
     normalize(hook.sourcePath) === sourcePath &&
     hook.command === hookCommand &&
-    MEMMY_HOOK_EVENTS.has(hook.eventName)
+    events.has(hook.eventName)
   );
   const selectedEvents = new Set(selected.map((hook) => hook.eventName));
-  if (selected.length !== MEMMY_HOOK_EVENTS.size || selectedEvents.size !== MEMMY_HOOK_EVENTS.size) {
+  if (selected.length !== events.size || selectedEvents.size !== events.size) {
     throw new Error("Codex did not discover every installed Memmy hook");
   }
   return selected;

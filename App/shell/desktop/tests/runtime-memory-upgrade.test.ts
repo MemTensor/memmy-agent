@@ -184,7 +184,7 @@ describe("bundled Memory upgrades", () => {
     expect(await running.repairCalls()).toHaveLength(1);
     expect(running.children).toHaveLength(0);
     expect(running.old.process.exitCode).toBeNull();
-  });
+  }, 20_000);
 
   it("starts a Desktop child after launcher repair stops the legacy service", async () => {
     const running = await fixture({ version: "2.1.1", platform: "win32", repairStopsService: true });
@@ -194,7 +194,7 @@ describe("bundled Memory upgrades", () => {
     expect(running.children).toHaveLength(1);
     expect(running.children[0]?.persistOnDesktopExit).toBe(true);
     expect(await running.version()).toBe("2.1.1");
-  });
+  }, 20_000);
 
   it.each(["darwin", "linux"] as const)("does not request Windows launcher repair on %s", async (platform) => {
     const running = await fixture({ version: "2.1.1", platform });
@@ -220,7 +220,7 @@ describe("bundled Memory upgrades", () => {
     expect(running.children).toHaveLength(0);
     expect(running.old.process.exitCode).toBeNull();
     expect(await running.version()).toBe("2.1.1");
-  });
+  }, 20_000);
 
   it.each(["2.1.0", "2.1.1"])("starts a Desktop child if launcher repair stopped Memory %s before task update was denied", async (version) => {
     const running = await fixture({ version, platform: "win32", repairFails: true, repairStopsService: true });

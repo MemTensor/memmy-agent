@@ -52,6 +52,30 @@ describe("memory summary input budget", () => {
     expect(messages).toEqual(original);
   });
 
+  it("uses a per-call input budget instead of the 8K default when one is passed", async () => {
+    const fetchMock = sequenceFetch([openAiResponse("ok"), openAiResponse("ok")]);
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig(), { modelRole: "memory_summary" });
+    const messages: LlmMessage[] = [
+      { role: "system", content: "Keep the system instructions." },
+      { role: "user", content: "BEGIN " + "tool output ".repeat(4_000) + "END" }
+    ];
+    const inputTokens = messages.reduce((sum, message) => sum + encoding.encode(message.content).length, 0);
+    expect(inputTokens).toBeGreaterThan(7_000);
+    expect(inputTokens).toBeLessThan(12_800);
+
+    await client.complete(messages, { operation: "capture.summarize", maxTokens: 1_024, inputTokenBudget: 12_800 });
+    const [wide] = requestBodies(fetchMock);
+    expect(wide!.max_tokens).toBe(1_024);
+    expect(wide!.messages).toEqual(messages);
+
+    // Other summary calls keep the default budget.
+    await client.complete(messages, { operation: "capture.summarize", maxTokens: 1_024 });
+    const narrow = requestBodies(fetchMock)[1]!;
+    expect((narrow.messages as LlmMessage[])[1]?.content).toContain("[... input truncated ...]");
+    expect(inputTokenCount(narrow)).toBeLessThanOrEqual(Math.min(7_000, 8_192 - 1_024 - 512));
+  });
+
   it("keeps short input unchanged and sends the default output reservation", async () => {
     const fetchMock = sequenceFetch([openAiResponse("ok")]);
     vi.stubGlobal("fetch", fetchMock);

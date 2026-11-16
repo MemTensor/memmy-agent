@@ -185,6 +185,13 @@ export type AgentGoalRunClock = {
   baseSeconds: number;
 };
 
+/** A session referenced into the message: the chip's label and the reference text the agent reads. */
+export interface ComposerMention {
+  id: string;
+  title: string;
+  reference: string;
+}
+
 export interface AgentState {
   connectionStatus: AgentConnectionStatus;
   connectionError: string | null;
@@ -267,6 +274,8 @@ export interface AgentState {
   }>;
   composerDraftsByScope: Record<string, string>;
   composerPendingAttachmentsByScope: Record<string, PendingAttachment[]>;
+  /** Sessions referenced into the message; the reference text is sent, the chips are what the person sees. */
+  composerMentionsByScope: Record<string, ComposerMention[]>;
   draftTargetsByScope: Record<string, WebuiSessionTarget>;
   draftTargetRevisionByScope: Record<string, number>;
   messageSendInFlightByScope: Record<string, string>;
@@ -333,6 +342,7 @@ export type AgentAction =
   | { type: "agent/queueItemSteerFailed"; chatId: string; clientRequestId: string; error: AgentOperationError }
   | { type: "agent/composerDraftUpdated"; scopeKey: string; value: string }
   | { type: "agent/composerPendingAttachmentsUpdated"; scopeKey: string; attachments: PendingAttachment[] }
+  | { type: "agent/composerMentionsUpdated"; scopeKey: string; mentions: ComposerMention[] }
   | { type: "agent/draftTargetUpdated"; scopeKey: string; target: WebuiSessionTarget }
   | { type: "agent/messageSendLockUpdated"; scopeKey: string; clientRequestId: string | null }
   | { type: "agent/tasksMarkedRead"; chatIds: string[] }
@@ -439,6 +449,7 @@ export const initialAgentState: AgentState = {
   goalMutationPendingByChatId: {},
   composerDraftsByScope: {},
   composerPendingAttachmentsByScope: {},
+  composerMentionsByScope: {},
   draftTargetsByScope: {},
   draftTargetRevisionByScope: {},
   messageSendInFlightByScope: {},
@@ -690,6 +701,8 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       );
     case "agent/composerDraftUpdated":
       return updateComposerDraft(state, action.scopeKey, action.value);
+    case "agent/composerMentionsUpdated":
+      return updateComposerMentions(state, action.scopeKey, action.mentions);
     case "agent/composerPendingAttachmentsUpdated":
       return updateComposerPendingAttachments(state, action.scopeKey, action.attachments);
     case "agent/draftTargetUpdated":
@@ -975,7 +988,10 @@ function promoteQueuedMessage(
   turnId: string | null = null,
   queueSteerPending = false
 ): AgentState {
-  const removed = removeQueuedMessageFromChat(state, chatId, item.clientRequestId).state;
+  const dequeued = removeQueuedMessageFromChat(state, chatId, item.clientRequestId).state;
+  const removed = queueSteerPending && turnId
+    ? promoteInterruptedNarrationForChat(dequeued, chatId, turnId)
+    : dequeued;
   if (chatMessagesForId(removed, chatId).some(
     (message) => message.clientRequestId === item.clientRequestId
   )) return removed;
@@ -1451,23 +1467,38 @@ function updateComposerPendingAttachments(state: AgentState, scopeKey: string, a
   };
 }
 
+function updateComposerMentions(state: AgentState, scopeKey: string, mentions: ComposerMention[]): AgentState {
+  if (!mentions.length) {
+    if (!(scopeKey in state.composerMentionsByScope)) {
+      return state;
+    }
+    const composerMentionsByScope = { ...state.composerMentionsByScope };
+    delete composerMentionsByScope[scopeKey];
+    return { ...state, composerMentionsByScope };
+  }
+  return { ...state, composerMentionsByScope: { ...state.composerMentionsByScope, [scopeKey]: mentions } };
+}
+
 function clearComposerScope(state: AgentState, scopeKey: string): AgentState {
   const hasDraft = scopeKey in state.composerDraftsByScope;
   const hasPendingAttachments = scopeKey in state.composerPendingAttachmentsByScope;
+  const hasMentions = scopeKey in state.composerMentionsByScope;
   const hasTarget = scopeKey in state.draftTargetsByScope;
   const hasTargetRevision = scopeKey in state.draftTargetRevisionByScope;
   const hasSendLock = scopeKey in state.messageSendInFlightByScope;
-  if (!hasDraft && !hasPendingAttachments && !hasTarget && !hasTargetRevision && !hasSendLock) {
+  if (!hasDraft && !hasPendingAttachments && !hasMentions && !hasTarget && !hasTargetRevision && !hasSendLock) {
     return state;
   }
 
   const composerDraftsByScope = { ...state.composerDraftsByScope };
   const composerPendingAttachmentsByScope = { ...state.composerPendingAttachmentsByScope };
+  const composerMentionsByScope = { ...state.composerMentionsByScope };
   const draftTargetsByScope = { ...state.draftTargetsByScope };
   const draftTargetRevisionByScope = { ...state.draftTargetRevisionByScope };
   const messageSendInFlightByScope = { ...state.messageSendInFlightByScope };
   delete composerDraftsByScope[scopeKey];
   delete composerPendingAttachmentsByScope[scopeKey];
+  delete composerMentionsByScope[scopeKey];
   delete draftTargetsByScope[scopeKey];
   delete draftTargetRevisionByScope[scopeKey];
   delete messageSendInFlightByScope[scopeKey];
@@ -1475,6 +1506,7 @@ function clearComposerScope(state: AgentState, scopeKey: string): AgentState {
     ...state,
     composerDraftsByScope,
     composerPendingAttachmentsByScope,
+    composerMentionsByScope,
     draftTargetsByScope,
     draftTargetRevisionByScope,
     messageSendInFlightByScope
@@ -2114,6 +2146,31 @@ function isChatBusy(state: AgentState, chatId: string): boolean {
 
 function chatMessagesForId(state: AgentState, chatId: string): AgentChatMessage[] {
   return chatId === state.currentChatId ? state.messages : state.messagesByChatId[chatId] ?? [];
+}
+
+function promoteInterruptedNarration(messages: AgentChatMessage[], turnId: string): AgentChatMessage[] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.turnId !== turnId || message.kind !== "narration" || !message.content.trim()) continue;
+    const promoted = [...messages];
+    const next = { ...message };
+    delete next.kind;
+    delete next.activitySegmentId;
+    promoted[index] = next;
+    return promoted;
+  }
+  return messages;
+}
+
+function promoteInterruptedNarrationForChat(state: AgentState, chatId: string, turnId: string): AgentState {
+  const current = chatMessagesForId(state, chatId);
+  const messages = promoteInterruptedNarration(current, turnId);
+  if (messages === current) return state;
+  return {
+    ...state,
+    messagesByChatId: { ...state.messagesByChatId, [chatId]: messages },
+    ...(chatId === state.currentChatId ? { messages } : {})
+  };
 }
 
 /**

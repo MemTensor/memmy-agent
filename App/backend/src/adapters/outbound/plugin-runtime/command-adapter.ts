@@ -21,6 +21,7 @@ import type { PluginAdapter, PluginHostServiceInvoker, PluginRuntimeContext, Plu
 import { createOfficeRuntimeInstaller, type OfficeRuntimeInstaller } from "./office-installer.js";
 import { createTexliveRuntimeInstaller, resolveTexliveRuntime, type TexliveRuntimeInstaller } from "./texlive-installer.js";
 import { resolvePluginRegistryBaseUrl } from "../../../config/service-urls.js";
+import { BackgroundRuntime, type RuntimePreparationProgress } from "./background-runtime.js";
 import { BackgroundTexlive } from "./background-texlive.js";
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
@@ -69,8 +70,9 @@ interface CommandPluginSession extends PluginSession {
   children: Map<string, ChildProcessWithoutNullStreams>;
   hostServiceControllers: Map<string, Set<AbortController>>;
   approvedHostServices: Set<string>;
+  office?: BackgroundRuntime<ResolvedCommandRuntimeDependencies>;
   texlive?: BackgroundTexlive;
-  withTexlive: (runtime: ResolvedCommandRuntimeDependencies) => Promise<{ launch: SandboxLaunch; env: Record<string, string> }>;
+  withPreparedRuntimes: (runtimes: ResolvedCommandRuntimeDependencies[]) => Promise<{ launch: SandboxLaunch; env: Record<string, string> }>;
   preparations: Map<string, AbortController>;
   closed: boolean;
 }
@@ -156,8 +158,17 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
       if (deniedHost) throw Object.assign(new Error(`Command plugin network host is not in the host allowlist: ${deniedHost}`), {
         code: "plugin_permission_denied"
       });
-      const runtimeDependencies = await resolveCommandRuntimeDependencies(config.runtimeDependencies.filter(dependency => dependency !== "texlive"), platform,
-        options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller ?? defaultOfficeInstaller(options.pluginDataRoot));
+      const preparesOfficeInBackground = context.plugin.id === "office" && config.runtimeDependencies.includes("office");
+      let officeProgress: RuntimePreparationProgress = officeRuntimeProgress("waiting");
+      const createOfficeInstaller = () => options.officeRuntimeInstaller === null ? undefined : options.officeRuntimeInstaller
+        ?? defaultOfficeInstaller(options.pluginDataRoot, (stage, bytes, total) => {
+          officeProgress = officeRuntimeProgress(stage, bytes, total);
+        });
+      const eagerDependencies = config.runtimeDependencies.filter(dependency => dependency !== "texlive" && (dependency !== "office" || !preparesOfficeInBackground));
+      const runtimeDependencies = await resolveCommandRuntimeDependencies(
+        eagerDependencies, platform, eagerDependencies.includes("office") ? createOfficeInstaller() : undefined
+      );
+
       const env = resolvePluginEnvironment(
         config.env,
         config.secretEnv,
@@ -180,31 +191,41 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
           env.TEMP = temporary; env.TMP = temporary;
         }
       }
-      // Expose the same Host-approved roots on every platform, so command
-      // plugins can reject unauthorized paths before filesystem lookups.
+      // Expose the same approved canonical roots on every platform. Optional
+      // directories may not exist until the first upload or recording.
       env.MEMMY_PLUGIN_INPUT_ROOTS = JSON.stringify(approvedHostService(context, "file-input")
-        ? await Promise.all((options.fileInputRoots ?? []).map(root => realpath(root))) : []);
+        ? await resolveExistingInputRoots(options.fileInputRoots ?? []) : []);
       const launch = await buildLaunch(context, config, requestedNetworkHosts.length > 0, runtimeDependencies);
-      const withTexlive = async (tex: ResolvedCommandRuntimeDependencies) => {
-        const combined = {
-          pathEntries: [...runtimeDependencies.pathEntries, ...tex.pathEntries],
-          readRoots: [...runtimeDependencies.readRoots, ...tex.readRoots],
-          executableRoots: [...runtimeDependencies.executableRoots, ...tex.executableRoots],
-          environment: { ...runtimeDependencies.environment, ...tex.environment }
+      const withPreparedRuntimes = async (runtimes: ResolvedCommandRuntimeDependencies[]) => {
+        const all = [runtimeDependencies, ...runtimes];
+        const combined: ResolvedCommandRuntimeDependencies = {
+          pathEntries: all.flatMap(runtime => runtime.pathEntries),
+          readRoots: all.flatMap(runtime => runtime.readRoots),
+          executableRoots: all.flatMap(runtime => runtime.executableRoots),
+          environment: Object.assign({}, ...all.map(runtime => runtime.environment)),
+          officeRendererResolved: all.some(runtime => runtime.officeRendererResolved === true)
         };
         return {
           launch: await buildLaunch(context, config, requestedNetworkHosts.length > 0, combined),
-          env: { ...env, ...tex.environment,
-            PATH: resolvePluginEnvironment(config.env, config.secretEnv, context.secrets, combined.pathEntries, combined.environment).PATH! }
+          env: { ...env, ...combined.environment, PATH: resolvePluginEnvironment(config.env, config.secretEnv,
+            context.secrets, combined.pathEntries, combined.environment).PATH! }
         };
       };
+      const office = preparesOfficeInBackground ? new BackgroundRuntime(
+        () => {
+          officeProgress = officeRuntimeProgress("waiting");
+          return resolveOfficeRuntime(platform, createOfficeInstaller());
+        },
+        () => officeProgress
+      ) : undefined;
       const texlive = config.runtimeDependencies.includes("texlive") ? new BackgroundTexlive(() => resolveTexliveRuntime(platform,
         options.texliveRuntimeInstaller === null ? undefined : options.texliveRuntimeInstaller ?? defaultTexliveInstaller(options.pluginDataRoot))) : undefined;
       return {
         pluginId: context.plugin.id,
         launch,
+        office,
         texlive,
-        withTexlive,
+        withPreparedRuntimes,
         preparations: new Map(),
         closed: false,
         config,
@@ -407,6 +428,7 @@ export function createCommandPluginAdapter(options: CreateCommandPluginAdapterOp
     async deactivate(rawSession) {
       const session = asCommandSession(rawSession);
       session.closed = true;
+      session.office?.stopScheduling();
       session.texlive?.stopScheduling();
       for (const controller of session.preparations.values()) controller.abort();
       const children = [...session.children.values()];
@@ -425,6 +447,12 @@ async function* prepareCommandInvocation(
   session.preparations.set(call.callId, controller);
   try {
     if (session.closed) controller.abort();
+    let office = session.office?.ready;
+    if (session.office && needsOfficeRuntime(call) && !controller.signal.aborted) {
+      office = yield* session.office.wait(controller.signal, expiresAt);
+      if (!office) throw Object.assign(new Error("Could not prepare the Office runtime. Retry the Office operation to try again."),
+        { code: "plugin_runtime_error" });
+    }
     let tex = session.texlive?.ready;
     // Existing literature releases declare the dependency for the entire plugin.
     // Only preflight/render need to wait; searching and writing remain available.
@@ -433,13 +461,38 @@ async function* prepareCommandInvocation(
     if (session.texlive && needsTex && !controller.signal.aborted) {
       tex = yield* session.texlive.wait(controller.signal, expiresAt);
     }
-    // Build a per-call launch: never mutate another running call's environment or sandbox.
-    const prepared = tex ? await session.withTexlive(tex) : { launch: session.launch, env: session.env };
+    // Preserve both prepared runtimes in one per-call environment and sandbox.
+    const runtimes = [office, tex].filter((runtime): runtime is ResolvedCommandRuntimeDependencies => runtime !== undefined);
+    const prepared = runtimes.length ? await session.withPreparedRuntimes(runtimes) : { launch: session.launch, env: session.env };
     if (controller.signal.aborted) throw Object.assign(new Error("Plugin call was cancelled"), { code: "plugin_cancelled" });
     if (Date.now() >= expiresAt) throw Object.assign(new Error("Plugin call timed out"), { code: "plugin_timeout" });
     return prepared;
   } finally {
     session.preparations.delete(call.callId);
+  }
+}
+
+/** Match the official Office capability inputs that require the native tools or CJK fonts. */
+function needsOfficeRuntime(call: CapabilityCall): boolean {
+  const input = call.input as Record<string, unknown> | undefined;
+  switch (call.capabilityId) {
+    case "office_edit":
+    case "office_review_page":
+      return false;
+    case "office_import":
+      return typeof input?.path === "string" && /\.pdf$/iu.test(input.path);
+    case "office_inspect":
+    case "office_deliver":
+      return typeof input?.file === "string" && /\.pdf$/iu.test(input.file);
+    case "office_create":
+      if (input?.format === "pdf") return true;
+      return input?.format === "docx" && [input.title, ...(Array.isArray(input.paragraphs) ? input.paragraphs : [])]
+        .some(value => typeof value === "string" && /\p{Script=Han}/u.test(value));
+    case "office_convert":
+      return !(input?.format === "xlsx" && typeof input.file === "string" && /\.(csv|tsv)$/iu.test(input.file));
+    default:
+      // Status, render, and arbitrary Office scripts may require native tools.
+      return true;
   }
 }
 
@@ -790,7 +843,26 @@ async function verifiedOfficeRenderer(root: string, renderer: string): Promise<b
   }
 }
 
-function defaultOfficeInstaller(pluginDataRoot?: string): OfficeRuntimeInstaller | undefined {
+function officeRuntimeProgress(stage: string, bytes = 0, total?: number): RuntimePreparationProgress {
+  const phase = "runtime-preparation";
+  switch (stage) {
+    case "downloading":
+    case "retrying":
+      return { current: bytes, total, phase, runtimeStage: "downloading", message: "Downloading Office runtime…" };
+    case "extracting":
+      return { current: 0, phase, runtimeStage: "extracting", message: "Extracting Office runtime…" };
+    case "verifying":
+      return { current: 0, phase, runtimeStage: "verifying", message: "Verifying Office runtime…" };
+    default:
+      return { current: 0, phase, runtimeStage: "preparing", message: "Preparing Office runtime…" };
+  }
+}
+
+function defaultOfficeInstaller(
+  pluginDataRoot?: string,
+  onProgress?: (stage: string, bytes?: number, total?: number) => void
+): OfficeRuntimeInstaller | undefined {
+
   if (!pluginDataRoot) return undefined;
   const registry = resolvePluginRegistryBaseUrl(process.env);
   const catalogUrl = process.env.MEMMY_OFFICE_RUNTIME_CATALOG_URL
@@ -800,6 +872,7 @@ function defaultOfficeInstaller(pluginDataRoot?: string): OfficeRuntimeInstaller
   return createOfficeRuntimeInstaller({
     cacheRoot: process.env.MEMMY_OFFICE_RUNTIME_CACHE ?? resolve(dirname(pluginDataRoot), "plugin-runtimes", "office"), catalogUrl,
     onProgress(stage, bytes, total) {
+      onProgress?.(stage, bytes, total);
       const now = Date.now();
       if (stage === lastStage && now - lastProgressAt < 10000) return;
       lastStage = stage; lastProgressAt = now;
@@ -853,6 +926,24 @@ async function filesystemRules(
     rules.push({ path: pluginDataPath, writable: true });
   }
   return rules;
+}
+
+/**
+ * Resolve Host-owned file-input roots without making an optional root a
+ * prerequisite for plugin activation. A fresh installation may not have
+ * created the media directory until the first upload or recording. Missing
+ * roots are omitted; other filesystem errors remain fatal.
+ */
+async function resolveExistingInputRoots(roots: readonly string[]): Promise<string[]> {
+  const resolved = await Promise.all(roots.map(async root => {
+    try {
+      return await realpath(root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }));
+  return resolved.filter((root): root is string => root !== null);
 }
 
 function approvedHostService(context: PluginRuntimeContext, service: string): boolean {

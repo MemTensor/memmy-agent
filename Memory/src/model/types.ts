@@ -15,6 +15,9 @@ export interface LlmCompletionOptions {
   timeoutMs?: number;
   maxRetries?: number;
   jsonMode?: boolean;
+  // Replaces the summary role's default input budget for this call only. The
+  // caller is expected to have fitted its messages to this budget already.
+  inputTokenBudget?: number;
 }
 
 export interface LlmClient {

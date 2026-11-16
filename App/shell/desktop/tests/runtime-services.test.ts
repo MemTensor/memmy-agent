@@ -425,6 +425,7 @@ describe("packaged desktop runtime config", () => {
       agentWorkspace: join(memmyHome, "workspace"),
       memoryDatabasePath: join(memmyHome, "memory-service", "memory.sqlite"),
       memoryBaseUrl: "http://127.0.0.1:18960",
+      memoryToken: "stable-secret",
       memoryListenHost: "127.0.0.1",
       memoryListenPort: 18960,
       agentGatewayBaseUrl: "http://127.0.0.1:18980",
@@ -466,7 +467,8 @@ describe("packaged desktop runtime config", () => {
           mode: "local",
           backend: "sqlite",
           sqlitePath: join(memmyHome, "memory-service", "memory.sqlite"),
-          endpoint: "http://127.0.0.1:18960"
+          endpoint: "http://127.0.0.1:18960",
+          token: "stable-secret"
         }
       }
     });
@@ -474,6 +476,65 @@ describe("packaged desktop runtime config", () => {
     await expect(stat(join(memmyHome, "memory-service"))).resolves.toBeTruthy();
     expect(recordValue(recordValue(config, "agents"), "defaults")).not.toHaveProperty("model");
     expect(recordValue(recordValue(config, "agents"), "defaults")).not.toHaveProperty("provider");
+  });
+
+  it.each(["127.0.0.1", "localhost", "[::1]"])("upgrades tokenless local config once and shares the persisted token: %s", async (host) => {
+    const memmyHome = await makeTempRoot();
+    const configPath = join(memmyHome, "config.yaml");
+    await writeFile(configPath, YAML.stringify({
+      channels: { websocket: { tokenIssueSecret: "existing-agent-secret" } },
+      memmyMemory: {
+        storage: { endpoint: `http://${host}:18960`, token: "" },
+        agentAccess: { autoScanKnownAgents: false }
+      }
+    }));
+    const first = await preparePackagedRuntimeConfig({ env: { MEMMY_HOME: memmyHome } });
+    expect(first.memoryToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(first.memoryToken).not.toBe(first.agentGatewayBootstrapSecret);
+    const second = await preparePackagedRuntimeConfig({
+      env: { MEMMY_HOME: memmyHome },
+      secretFactory: () => { throw new Error("must reuse persisted credential"); }
+    });
+    expect(second.memoryToken).toBe(first.memoryToken);
+    const config = await readYaml(configPath);
+    expect(recordValue(config, "memmyMemory")).toMatchObject({
+      storage: { token: first.memoryToken },
+      agentAccess: { autoScanKnownAgents: false }
+    });
+    if (process.platform !== "win32") expect((await stat(configPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it.each([
+    { MEMMY_MEMORY_TOKEN: "current-env-token" },
+    { MEMORY_SERVICE_TOKEN: "legacy-env-token" }
+  ])("uses explicit environment credentials without persisting a replacement: %j", async (tokenEnv) => {
+    const memmyHome = await makeTempRoot();
+    const runtime = await preparePackagedRuntimeConfig({ env: { MEMMY_HOME: memmyHome, ...tokenEnv } });
+    expect(runtime.memoryToken).toBe(Object.values(tokenEnv)[0]);
+    const config = await readYaml(join(memmyHome, "config.yaml"));
+    expect(recordValue(recordValue(config, "memmyMemory"), "storage")).not.toHaveProperty("token");
+  });
+
+  it.each([
+    { endpoint: "https://memory.example.com" },
+    { endpoint: "http://192.0.2.1:18960" },
+    { endpoint: "http://127.0.0.1:18960", mode: "cloud" }
+  ])("does not invent a credential for an externally configured Memory service: %j", async (storage) => {
+    const memmyHome = await makeTempRoot();
+    const configPath = join(memmyHome, "config.yaml");
+    await writeFile(configPath, YAML.stringify({ memmyMemory: { storage } }));
+    const runtime = await preparePackagedRuntimeConfig({ env: { MEMMY_HOME: memmyHome } });
+    expect(runtime.memoryToken).toBe("");
+    expect(recordValue(recordValue(await readYaml(configPath), "memmyMemory"), "storage")).not.toHaveProperty("token");
+  });
+
+  it("does not provision a local token when the endpoint is overridden to a remote service", async () => {
+    const memmyHome = await makeTempRoot();
+    const runtime = await preparePackagedRuntimeConfig({
+      env: { MEMMY_HOME: memmyHome, MEMMY_MEMORY_URL: "https://memory.example.com" }
+    });
+    expect(runtime.memoryToken).toBe("");
+    expect(runtime.memoryBaseUrl).toBe("https://memory.example.com");
   });
 
   it("recognizes a live Memory server lock for the configured sqlite database", async () => {
@@ -845,7 +906,8 @@ describe("packaged desktop runtime config", () => {
     expect(runtime).toMatchObject({
       configPath,
       agentGatewayBaseUrl: "http://127.0.0.1:18980",
-      agentGatewayBootstrapSecret: ""
+      agentGatewayBootstrapSecret: "",
+      memoryToken: ""
     });
     await expect(stat(configPath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(stat(join(memmyHome, "workspace"))).rejects.toMatchObject({ code: "ENOENT" });
