@@ -600,6 +600,11 @@ export type MemmyAgentWebuiThread = z.infer<typeof WebuiThreadSchema>;
 export type MemmyAgentSeededChat = z.infer<typeof SeedWebuiChatResponseSchema>;
 export type MemmyAgentLastCompaction = z.infer<typeof LastCompactionSchema>;
 export type ResolvedAgentArtifact = z.infer<typeof ResolvedArtifactSchema>;
+/**
+ * Which workspace an artifact request is authorized against: the session it came from, or the project
+ * whose files a task without a session yet is showing in its side panel.
+ */
+export type ArtifactScope = { sessionKey: string } | { projectId: string };
 export type UploadedAgentImage = z.infer<typeof UploadedAgentImageSchema>;
 export type UploadedAgentMedia = z.infer<typeof UploadedAgentMediaSchema>;
 
@@ -950,10 +955,10 @@ export interface MemmyAgentClient {
   readLastCompaction(sessionKey: string): Promise<MemmyAgentLastCompaction>;
   renameSession(sessionKey: string, title: string): Promise<MemmyAgentSessionSummary>;
   deleteSession(sessionKey: string): Promise<boolean>;
-  resolveArtifact(path: string, sessionKey: string): Promise<ResolvedAgentArtifact>;
+  resolveArtifact(path: string, scope: ArtifactScope): Promise<ResolvedAgentArtifact>;
   resolveRecording(path: string): Promise<string>;
-  revealArtifact(path: string, sessionKey: string): Promise<void>;
-  openArtifact(path: string, sessionKey: string): Promise<void>;
+  revealArtifact(path: string, scope: ArtifactScope): Promise<void>;
+  openArtifact(path: string, scope: ArtifactScope): Promise<void>;
   uploadAgentMedia(attachments: UploadAgentMediaInput[]): Promise<UploadedAgentMedia[]>;
   deleteRecordingFiles(paths: string[]): Promise<void>;
   uploadAgentImages(images: UploadAgentImageInput[]): Promise<UploadedAgentImage[]>;
@@ -1622,10 +1627,10 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return response.deleted;
   }
 
-  async resolveArtifact(path: string, sessionKey: string): Promise<ResolvedAgentArtifact> {
+  async resolveArtifact(path: string, scope: ArtifactScope): Promise<ResolvedAgentArtifact> {
     return this.request("/api/webui/artifacts/resolve", ResolvedArtifactSchema, {
       method: "POST",
-      body: { path, sessionKey }
+      body: { path, ...scope }
     });
   }
 
@@ -1637,17 +1642,17 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return new URL(result.media_url, this.baseUrl).toString();
   }
 
-  async revealArtifact(path: string, sessionKey: string): Promise<void> {
+  async revealArtifact(path: string, scope: ArtifactScope): Promise<void> {
     await this.request("/api/webui/artifacts/reveal", RevealArtifactResponseSchema, {
       method: "POST",
-      body: { path, sessionKey }
+      body: { path, ...scope }
     });
   }
 
-  async openArtifact(path: string, sessionKey: string): Promise<void> {
+  async openArtifact(path: string, scope: ArtifactScope): Promise<void> {
     await this.request("/api/webui/artifacts/open", RevealArtifactResponseSchema, {
       method: "POST",
-      body: { path, sessionKey }
+      body: { path, ...scope }
     });
   }
 

@@ -1474,6 +1474,115 @@ describe("WebSocket HTTP route helpers", () => {
     });
   });
 
+  it("resolves artifacts for a draft task through its project instead of a session", async () => {
+    const root = tmpRoot();
+    const workspace = path.join(root, "draft-project");
+    fs.mkdirSync(workspace, { recursive: true });
+    const note = path.join(workspace, "notes.md");
+    const image = path.join(workspace, "photo.png");
+    const outside = path.join(root, "outside-draft.md");
+    const missing = path.join(root, "missing-draft.md");
+    fs.writeFileSync(note, "# draft", "utf8");
+    fs.writeFileSync(image, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    fs.writeFileSync(outside, "outside", "utf8");
+    const resolvedNotePath = fs.realpathSync(note);
+    const projectStore = new ProjectStore({ filePath: path.join(root, "projects.json") });
+    const project = projectStore.add(workspace, "existing", "Draft project");
+    const sessionKey = "websocket:draft-session";
+    const channel = makeChannel({
+      projectStore,
+      sessionManager: seedSession(path.join(root, "sessions"), sessionKey, workspace),
+      workspacePath: root,
+    });
+    const port = await startChannel(channel);
+    const headers = { ...(await authHeaders(port)), "content-type": "application/json" };
+    const post = (route: string, body: Record<string, unknown>): Promise<Response> => fetch(
+      `http://127.0.0.1:${port}/api/webui/artifacts/${route}`,
+      { method: "POST", headers, body: JSON.stringify(body) },
+    );
+
+    const resolvedNote = await post("resolve", { path: note, projectId: project.id });
+    expect(resolvedNote.status).toBe(200);
+    const resolvedNoteBody = await resolvedNote.json() as Record<string, any>;
+    expect(resolvedNoteBody).toMatchObject({
+      ok: true,
+      path: resolvedNotePath,
+      name: "notes.md",
+      kind: "file",
+      relative_path: "notes.md",
+    });
+
+    const resolvedRelativeNote = await post("resolve", { path: "notes.md", projectId: project.id });
+    expect(resolvedRelativeNote.status).toBe(200);
+    expect(await resolvedRelativeNote.json()).toMatchObject({
+      ok: true,
+      path: resolvedNotePath,
+      kind: "file",
+      relative_path: "notes.md",
+    });
+
+    const resolvedImage = await post("resolve", { path: "photo.png", projectId: project.id });
+    expect(resolvedImage.status).toBe(200);
+    expect(await resolvedImage.json()).toMatchObject({
+      ok: true,
+      kind: "image",
+      relative_path: "photo.png",
+      media_url: expect.stringMatching(/^\/api\/media\//),
+    });
+
+    // A path outside the project root behaves exactly like the session scope: it is served from the
+    // staging cache and carries no `relative_path`. The project scope only changes where the root comes from.
+    const outsideViaProject = await post("resolve", { path: outside, projectId: project.id });
+    const outsideViaSession = await post("resolve", { path: outside, sessionKey });
+    expect(outsideViaProject.status).toBe(200);
+    expect(outsideViaSession.status).toBe(200);
+    const outsideViaProjectBody = await outsideViaProject.json() as Record<string, any>;
+    const outsideViaSessionBody = await outsideViaSession.json() as Record<string, any>;
+    expect(outsideViaProjectBody).toMatchObject({ ok: true, name: "outside-draft.md", kind: "file" });
+    expect(outsideViaProjectBody).not.toHaveProperty("relative_path");
+    expect(outsideViaProjectBody).toEqual(outsideViaSessionBody);
+
+    const rejected = await post("resolve", { path: missing, projectId: project.id });
+    expect(rejected.status).toBe(404);
+
+    const unknownProject = await post("resolve", { path: note, projectId: "00000000-0000-4000-8000-000000000000" });
+    expect(unknownProject.status).toBe(404);
+    expect(await unknownProject.json()).toMatchObject({ code: "project_not_found" });
+
+    // The root is never taken from the body: a bare path plus a client-supplied root authorizes nothing.
+    const bodyRoot = await post("resolve", { path: outside, cwd: workspace });
+    expect(bodyRoot.status).toBe(400);
+
+    const bothScopes = await post("resolve", { path: note, sessionKey, projectId: project.id });
+    expect(bothScopes.status).toBe(400);
+
+    const noScope = await post("resolve", { path: note });
+    expect(noScope.status).toBe(400);
+
+    const noPath = await post("resolve", { projectId: project.id });
+    expect(noPath.status).toBe(400);
+
+    const revealed = await post("reveal", { path: note, projectId: project.id });
+    expect(revealed.status).toBe(200);
+    expect(await revealed.json()).toEqual({ ok: true, path: resolvedNotePath });
+    const [revealCommand, revealArgs] = expectedRevealInvocation(resolvedNotePath);
+    expect(childProcessMocks.spawn).toHaveBeenLastCalledWith(revealCommand, revealArgs, {
+      detached: true,
+      stdio: "ignore",
+    });
+
+    const opened = await post("open", { path: note, projectId: project.id });
+    expect(opened.status).toBe(200);
+    expect(await opened.json()).toEqual({ ok: true, path: resolvedNotePath });
+
+    const rejectedOpen = await post("open", { path: missing, projectId: project.id });
+    expect(rejectedOpen.status).toBe(404);
+
+    const rejectedReveal = await post("reveal", { path: outside, projectId: "00000000-0000-4000-8000-000000000000" });
+    expect(rejectedReveal.status).toBe(404);
+    expect(await rejectedReveal.json()).toMatchObject({ code: "project_not_found" });
+  });
+
   it("accepts percent-encoded websocket session keys for messages and delete", async () => {
     const manager = seedSession(tmpRoot(), "websocket:encoded-key");
     const channel = makeChannel({ sessionManager: manager });

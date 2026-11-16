@@ -24,13 +24,14 @@ import {
 } from "./infrastructure/memmy-config/agent-access.js";
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
-import { createBackendServices, type BootstrapScenario } from "./services/index.js";
+import { createBackendServices, createCatalogAgentTaskModelResolver, type BootstrapScenario } from "./services/index.js";
 import { migrateLegacyCollabInstructions } from "./services/collab-instructions-service.js";
 import { createCollabCloudRequest, createCollabService } from "./services/collab-service.js";
 import { createCollabAssistService } from "./services/collab-assist-service.js";
 import { createAcpAssistRunner, createAssistRunner } from "./services/assist/runner.js";
 import { createMemmyAssistRunner } from "./services/assist/memmy-runner.js";
-import { MEMMY_SOURCE_ID, assistRunnable } from "./services/assist/recipes.js";
+import { MEMMY_SOURCE_ID, assistAsksForApproval, assistRunnable } from "./services/assist/recipes.js";
+import { createAssistReviewer } from "./services/assist/review.js";
 import { assistEnv } from "./services/assist/shell-env.js";
 import { createLocalSessionReader } from "./adapters/outbound/agent-source/session-reference/local-session-reader.js";
 import { createBuiltinAgentSourceRegistry } from "./services/builtin-agent-source-registry.js";
@@ -362,8 +363,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     const collabAssist = createCollabAssistService({
       cloud: createCollabCloudRequest({ cloudBaseUrl: cloudConfig.baseUrl, getAccount: getCollabAccount, userMode }),
       userMode,
-      projectDirectory: async (projectId: string) =>
-        (await collab.ensureWorkingDirectory(projectId)).localDirectory ?? null,
+      projectDirectory: async (projectId: string, projectName?: string) =>
+        (await collab.ensureWorkingDirectory(projectId, projectName)).localDirectory ?? null,
       agents: async () => {
         const view = await collabAgentAccess.view();
         // 判断用的是补上登录 shell PATH 的环境：打包后的 Memmy 进程 PATH 里没有 Homebrew / nvm 的目录，
@@ -379,6 +380,13 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       },
       // 本机关联记录里各 Agent 的使用情况：这个项目里关联过的放在第一层。
       agentUsage: (projectId: string) => collab.agentUsage(projectId),
+      // 只剩执行方那次审查：用她本机账号的「Agent 任务模型」，也就是她自己的额度。发起方只按规则查密钥，不调模型。
+      reviewer: createAssistReviewer({
+        resolveModel: async () =>
+          (await createCatalogAgentTaskModelResolver(appStateStore, memmyConfigWriter).getAgentTaskModel()) ?? null
+      }),
+      // 执行时会不会发批准请求：决定限时授权下能不能直接自动执行（不会请求批准的 Agent 必须她看过再决定）。
+      agentAsksForApproval: assistAsksForApproval,
       runner: createAssistRunner({
         acp: createAcpAssistRunner(),
         memmy: createMemmyAssistRunner({

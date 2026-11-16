@@ -25,6 +25,11 @@ export interface AssistPromptInput {
   attachments?: readonly AssistPromptAttachment[];
   /** 附件所在的目录（绝对路径）：提示词里给出它，执行方 Agent 才知道文件在哪。 */
   attachmentsDirectory?: string;
+  /**
+   * 执行边界：这次允许哪些敏感操作、除此之外不要做什么（见 `./safety` 的 assistBoundaryPrompt）。
+   * 放在请求正文之后、结果写法之前；请求正文本身不改写。空字符串时整段不出现。
+   */
+  boundary?: string;
 }
 
 /** 一个已落盘的附件：路径是执行方 Agent 实际能读到的那个。 */
@@ -59,15 +64,17 @@ export interface AssistEnvelope {
  */
 export function assistPrompt(input: AssistPromptInput, options: { envelope?: AssistEnvelope } = {}): string {
   const body = requestBody(input);
+  const boundary = input.boundary ? ["", ...input.boundary.split("\n")] : [];
   const envelope = options.envelope;
-  if (!envelope) return [...body, "", ASSIST_RESULT_FORMAT].join("\n");
+  if (!envelope) return [...body, ...boundary, "", ASSIST_RESULT_FORMAT].join("\n");
   const attrs = [
     `request="${attr(envelope.requestId)}"`,
     `from="${attr(input.requesterName)}"`,
     `via="${attr(envelope.via)}"`,
     `attempt="${envelope.attempt}"`
   ].join(" ");
-  return [`<memmy_assist_request ${attrs}>`, ...body, "</memmy_assist_request>"].join("\n");
+  // 执行边界也包在标签里：任务页把它显示成请求卡片的一部分之外的一小段，不出现在用户消息之外的地方。
+  return [`<memmy_assist_request ${attrs}>`, ...body, ...boundary, "</memmy_assist_request>"].join("\n");
 }
 
 /** 标签属性里的值：去掉引号与尖括号，避免把标签写坏。 */

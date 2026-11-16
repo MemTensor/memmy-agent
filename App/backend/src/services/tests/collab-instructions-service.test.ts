@@ -103,12 +103,13 @@ describe("CollabInstructionsService", () => {
       .resolves.toEqual({ projectId: "outer", text: "外层" });
   });
 
-  it("removes the entry when the cloud clears the text, and rejects text over the limit", async () => {
+  it("keeps the entry and empties the text when the cloud clears it, and rejects text over the limit", async () => {
     const scopes = [{ sourceId: "claude_code", groupId: "/Users/me/code/memmy" }];
     await service.remember({ projectId: "p-1", scopes, text: "先写指令" });
     await service.remember({ projectId: "p-1", scopes, text: "   " });
-    await expect(service.read("p-1")).resolves.toBeNull();
-    expect((await service.snapshot()).projects).toEqual({});
+    // 条目还在：这个目录仍然属于这个协作项目，只是没约定。
+    await expect(service.read("p-1")).resolves.toMatchObject({ text: "" });
+    expect(Object.keys((await service.snapshot()).projects)).toEqual(["p-1"]);
 
     await expect(service.remember({
       projectId: "p-1",
@@ -117,7 +118,7 @@ describe("CollabInstructionsService", () => {
     })).rejects.toThrow(`不超过 ${MAX_COLLAB_INSTRUCTIONS_CHARS} 字`);
   });
 
-  it("keeps the known scopes when a later save carries none", async () => {
+  it("keeps the known scopes when a later save carries none, and never invents one", async () => {
     await service.remember({
       projectId: "p-1",
       scopes: [{ sourceId: "claude_code", groupId: "/Users/me/code/memmy" }],
@@ -126,8 +127,61 @@ describe("CollabInstructionsService", () => {
     await service.remember({ projectId: "p-1", scopes: [], text: "新指令" });
     await expect(service.read("p-1")).resolves.toMatchObject({ text: "新指令" });
     // 从来没有范围就没有可生效的地方：这时不能凭空造一个。
-    await expect(service.remember({ projectId: "p-2", scopes: [], text: "没有范围" }))
-      .rejects.toThrow("没有可生效的会话范围");
+    await service.remember({ projectId: "p-2", scopes: [], text: "没有范围" });
+    await expect(service.read("p-2")).resolves.toBeNull();
+  });
+
+  it("creates an entry from scopes alone, then fills in the project name and members", async () => {
+    const scopes = [{ sourceId: "memmy", groupId: "/Users/me/.memmy/local-projects/MemOS" }];
+    // 关联发生了但还没同步到项目名：条目也要先建出来。
+    await service.updateScopes("p-1", scopes);
+    await expect(service.read("p-1")).resolves.toMatchObject({ text: "" });
+    expect((await service.read("p-1"))?.name).toBeUndefined();
+    await expect(service.forQuery({ sourceId: "memmy", directory: "/Users/me/.memmy/local-projects/MemOS/sub" }))
+      .resolves.toBeNull();
+
+    await service.remember({
+      projectId: "p-1",
+      scopes,
+      text: "",
+      name: "  MemOS\n 实验室 ",
+      members: ["孙起", " 张三 ", "孙起"]
+    });
+    await expect(service.read("p-1")).resolves.toMatchObject({
+      name: "MemOS 实验室",
+      members: ["孙起", "张三"],
+      text: ""
+    });
+  });
+
+  it("refreshes the project name and members without touching the rules", async () => {
+    await service.remember({
+      projectId: "p-1",
+      scopes: [{ sourceId: "claude_code", groupId: "/a" }],
+      text: "团队约定",
+      name: "旧名字"
+    });
+    await service.updateProjectInfo("p-1", { name: "新名字", members: ["孙起"] });
+    await expect(service.read("p-1")).resolves.toMatchObject({ name: "新名字", members: ["孙起"], text: "团队约定" });
+    // 没传的字段保留上一次的值。
+    await service.updateProjectInfo("p-1", { name: "更新的名字" });
+    await expect(service.read("p-1")).resolves.toMatchObject({ name: "更新的名字", members: ["孙起"] });
+    // 没有条目就不建：条目代表本机关联了这个项目。
+    await service.updateProjectInfo("p-2", { name: "不认识的项目" });
+    await expect(service.read("p-2")).resolves.toBeNull();
+  });
+
+  it("does not rewrite the file when nothing changed", async () => {
+    const scopes = [{ sourceId: "claude_code", groupId: "/Users/me/code/memmy" }];
+    const save = () => service.remember({ projectId: "p-1", scopes, text: "团队约定", name: "MemOS", members: ["孙起"] });
+    await save();
+    const first = (await service.read("p-1"))?.updatedAt;
+    // 时间推进后再写一次同样的内容：内容没变就不落盘，updatedAt 也不动。
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await save();
+    await service.updateScopes("p-1", scopes);
+    await service.updateProjectInfo("p-1", { name: "MemOS", members: ["孙起"] });
+    await expect(service.read("p-1")).resolves.toMatchObject({ updatedAt: first, name: "MemOS", members: ["孙起"] });
   });
 
   it("updates the scopes when associations change, without touching the text", async () => {
@@ -148,9 +202,13 @@ describe("CollabInstructionsService", () => {
   it("forgets a project entirely", async () => {
     await service.remember({ projectId: "p-1", scopes: [{ sourceId: "claude_code", groupId: "/a" }], text: "要走人的项目" });
     await service.remember({ projectId: "p-2", scopes: [{ sourceId: "claude_code", groupId: "/b" }], text: "还在的项目" });
+    // 没有背景与规范的条目也一并清掉。
+    await service.updateScopes("p-3", [{ sourceId: "claude_code", groupId: "/c" }]);
     await service.forget("p-1");
     await expect(service.read("p-1")).resolves.toBeNull();
     await expect(service.read("p-2")).resolves.toMatchObject({ text: "还在的项目" });
+    await service.forget("p-3");
+    await expect(service.read("p-3")).resolves.toBeNull();
   });
 
   it("serializes concurrent writes instead of merging halves", async () => {

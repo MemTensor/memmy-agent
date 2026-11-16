@@ -12,8 +12,11 @@ export type AssistTranscriptItem =
   | { kind: "thinking"; text: string; truncated?: boolean }
   /** 发起方记录里用户说的话；{@code delivery} 表示它是送进 Memmy 任务的结果消息，不是用户说的。 */
   | { kind: "user"; text: string; truncated?: boolean; delivery?: boolean }
-  /** {@code delivery} 只出现在发起方记录里：这一步第一次拿到了终态结果。 */
-  | { kind: "tool"; name: string; input: string; output: string; status: "running" | "done" | "failed"; truncated?: boolean; delivery?: boolean }
+  /**
+   * {@code delivery} 只出现在发起方记录里：这一步第一次拿到了终态结果。
+   * {@code skipped} 表示按协助规则没有执行（见 `./safety`）：执行过程里保留这一步，让双方看到它被跳过了。
+   */
+  | { kind: "tool"; name: string; input: string; output: string; status: "running" | "done" | "failed" | "skipped"; truncated?: boolean; delivery?: boolean }
   | { kind: "omitted"; count: number };
 
 /** 单段文字的上限：说明、命令或参数、输出各自不超过 16KB。 */
@@ -118,7 +121,11 @@ export function stepsFromTranscript(items: readonly AssistTranscriptItem[]): Arr
   for (const item of items) {
     if (item.kind !== "tool") continue;
     const output = item.output.replace(/\s+/gu, " ").trim().slice(0, 1_500);
-    steps.push({ text: item.name || "执行了一步", ...(output ? { output: item.status === "failed" ? `${output}（失败）` : output } : {}) });
+    const status = item.status === "skipped" ? "未执行（按协助规则跳过）" : "";
+    steps.push({
+      text: item.name || "执行了一步",
+      ...(output ? { output: item.status === "failed" ? `${output}（失败）` : item.status === "skipped" ? `${status}：${output}` : output } : status ? { output: status } : {})
+    });
   }
   return steps.slice(-60);
 }
@@ -136,7 +143,8 @@ export function toTranscript(value: unknown): AssistTranscriptItem[] {
     else if (item.kind === "thinking" && typeof item.text === "string") items.push({ kind: "thinking", text: item.text, ...truncated });
     else if (item.kind === "user" && typeof item.text === "string") items.push({ kind: "user", text: item.text, ...truncated, ...delivery });
     else if (item.kind === "tool") {
-      const status = item.status === "running" || item.status === "failed" ? item.status : "done";
+      const status = item.status === "running" || item.status === "failed" || item.status === "skipped"
+        ? item.status : "done";
       items.push({
         kind: "tool",
         name: typeof item.name === "string" ? item.name : "",

@@ -1174,6 +1174,44 @@
   color: var(--collab-ink);
 }
 
+/* 演示成员名字旁的「官方」标记：浅底小字，不用高饱和色。 */
+.officialTag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-action-sky) 12%, transparent);
+  color: var(--color-action-sky-hover);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
+/* 新手引导期间：设置弹窗的遮罩让给引导的蒙版，避免两层暗色叠在一起。 */
+:global(.modal-backdrop).backdropYield {
+  background: transparent;
+}
+
+/* 只读面板头部的「继续任务」：与任务行菜单里的同一个动作，做成一个紧凑的按钮形状。 */
+.readerContinue {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--collab-ink, #1b2423) 14%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--collab-ink);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.readerContinue:hover {
+  background: var(--collab-surface);
+}
+
 .readerBody {
   display: flex;
   flex: 1;
@@ -1345,20 +1383,15 @@
   width: min(540px, calc(100vw - 32px));
 }
 
-/* 项目设置：三张主题卡片，比别的弹窗宽一档，留出「标题 + 一行说明｜控件」一行的位置。 */
+/* 项目设置：与创建项目同宽、同一套标题（见 simpleCreateModal），正文是一列字段 */
 :global(.modal).createModal.settingsModal {
-  width: min(560px, calc(100vw - 32px));
+  width: min(520px, calc(100vw - 32px));
 }
 
-:global(.modal).settingsModal :global(.modal-header) {
-  padding: 18px 20px 6px 24px;
-}
-
-/* 标题比默认轻一档，卡片头才是这一屏的分组标题 */
-:global(.modal).settingsModal :global(.modal-header) h2 {
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+/* 打开时焦点落在弹窗本身（没有首个输入框），整框不画焦点环；里面的控件各有自己的焦点样式 */
+:global(.modal).settingsModal:focus,
+:global(.modal).settingsModal:focus-visible {
+  outline: none;
 }
 
 :global(.modal).pickModal {
@@ -1831,129 +1864,293 @@
   color: var(--collab-muted);
 }
 
-/* 新建 / 加入项目：同一个弹窗的两种模式，顶部用一组分段标签切换 */
-.projectTabs {
-  display: flex;
-  gap: 4px;
-  margin-bottom: 14px;
-  padding: 3px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--collab-ter) 14%, transparent);
+/* 新建项目：一屏只放必须做的三件事，说明收进小问号，正文不做逐行解释 */
+:global(.modal).simpleCreateModal {
+  width: min(520px, calc(100vw - 32px));
 }
 
-.projectTab {
+:global(.modal).simpleCreateModal :global(.modal-header) {
+  padding: 22px 24px 16px;
+}
+
+:global(.modal).simpleCreateModal :global(.modal-header) h2 {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+:global(.modal-body).simpleCreateBody {
+  padding: 0 24px 4px;
+  gap: 0;
+}
+
+/* 页脚：左侧「加入项目」，右侧「取消 / 创建项目」 */
+:global(.modal-footer).simpleCreateFooter {
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px 20px;
+}
+
+/* 名称：整行输入框，图标与竖线在框内左侧，聚焦时整框描主题色 */
+.simpleNameField {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--collab-line);
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  transition: border-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
+}
+
+.simpleNameField:focus-within {
+  border-color: var(--collab-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--collab-accent) 18%, transparent);
+}
+
+.simpleNameIcon {
+  display: inline-flex;
+  flex: none;
+  color: var(--collab-ter);
+}
+
+.simpleNameDivider {
+  flex: none;
+  width: 1px;
+  height: 18px;
+  background: var(--collab-line);
+}
+
+.simpleNameInput {
   flex: 1;
-  padding: 7px 10px;
+  min-width: 0;
+  height: 100%;
   border: 0;
-  border-radius: 8px;
   background: transparent;
-  color: var(--collab-muted);
+  color: inherit;
   font: inherit;
+  font-size: 13.5px;
+}
+
+.simpleNameInput:focus {
+  outline: none;
+}
+
+.simpleNameInput::placeholder {
+  color: var(--collab-ter);
+}
+
+.simpleNameHint {
+  margin: 6px 0 0;
+  color: var(--color-status-error, #c4413b);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 小节标题：字号比正文小一档，靠上方留白分组 */
+.simpleSectionLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 20px 0 8px;
+  color: var(--collab-muted);
   font-size: 12.5px;
   font-weight: 700;
+}
+
+/* 文件夹：没选时是一个居中的大框，选了以后变成一行 */
+.simpleFolderBox {
+  border: 1px solid var(--collab-line);
+  border-radius: 12px;
+  background: var(--color-background-paper, #fff);
+}
+
+.simpleFolderEmpty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 16px 18px;
+  color: var(--collab-muted);
+  font-size: 12.5px;
+}
+
+/* 「添加」是小按钮，图标与文字之间留 6px，默认按钮没有间距 */
+:global(.button).simpleFolderAdd {
+  gap: 6px;
+}
+
+.simpleFolderRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px 9px 12px;
+}
+
+.simpleFolderIcon {
+  flex: none;
+  color: var(--collab-ter);
+}
+
+/* 名称本身就是按钮：再点一次换目录，完整路径放在悬停提示里 */
+.simpleFolderName {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--collab-ink-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.simpleFolderName:hover {
+  color: var(--collab-accent-deep);
+}
+
+.simpleFolderName:focus-visible {
+  border-radius: 6px;
+  outline: 2px solid color-mix(in srgb, var(--collab-accent) 60%, transparent);
+  outline-offset: 2px;
+}
+
+.simpleFolderRemove {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--collab-ter);
   cursor: pointer;
   transition: background-color var(--duration-fast) ease, color var(--duration-fast) ease;
 }
 
-.projectTabOn {
-  background: var(--color-background-paper, #fff);
+.simpleFolderRemove:hover {
+  background: color-mix(in srgb, var(--collab-ink) 6%, transparent);
   color: var(--collab-ink-2);
-  box-shadow: 0 1px 2px rgba(17, 29, 28, 0.08);
 }
 
-/* 标签下面紧跟字段时，字段自己那 18px 上边距会显得空，收掉 */
-.projectTabs + .field {
-  margin-top: 0;
-}
-
-/* 项目配置：行式列表，左侧标题与说明、右侧控件，行间细线（与设置页同一套排布） */
-.settingsRows {
-  margin-top: 2px;
-}
-
-.settingsRow {
+/* 共享：与名称框同高、同边框的一个字段，图标与文字和名称框对齐；开启后整框铺一层浅薄荷色 */
+.simpleShareField {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 15px 2px;
-  border-bottom: 1px solid var(--collab-line-soft);
+  gap: 10px;
+  height: 44px;
+  margin-top: 12px;
+  padding: 0 12px;
+  border: 1px solid var(--collab-line);
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) ease, background-color var(--duration-fast) ease;
 }
 
-.settingsRow:first-child {
-  border-top: 1px solid var(--collab-line);
+.simpleShareField:hover {
+  border-color: color-mix(in srgb, var(--collab-accent) 45%, var(--collab-line));
 }
 
-/* 末行不再画线，避免页脚上方出现一条像空行的分隔 */
-.settingsRow:last-child {
-  border-bottom: 0;
+.simpleShareFieldOn {
+  border-color: color-mix(in srgb, var(--collab-accent) 55%, var(--collab-line));
+  background: color-mix(in srgb, var(--collab-accent) 7%, var(--color-background-paper, #fff));
 }
 
-.settingsRowText {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 4px;
+.simpleShareIcon {
+  flex: none;
+  color: var(--collab-ter);
+  transition: color var(--duration-fast) ease;
 }
 
-.settingsRowTitle {
+.simpleShareFieldOn .simpleShareIcon {
+  color: var(--collab-accent-deep);
+}
+
+.simpleShareLabel {
   color: var(--collab-ink-2);
   font-size: 13.5px;
-  font-weight: 700;
-  line-height: 1.4;
+  user-select: none;
 }
 
-.settingsRowDesc {
-  color: var(--collab-ter);
-  font-size: 12px;
-  line-height: 1.6;
+/* 问号紧跟文字（与「文件夹 ?」同为 6px），开关推到最右 */
+.simpleShareHint {
+  display: inline-flex;
+  margin-left: -4px;
+  margin-right: auto;
+  cursor: default;
 }
 
-/* 额度提示：这次仍会建成本机项目，只是共享不会开始，用次级文字色，不当成错误 */
-.settingsRowQuota {
+.simpleQuotaHint {
+  margin: 8px 0 0;
   color: var(--collab-muted);
   font-size: 12px;
   line-height: 1.6;
 }
 
-/* 本机目录这类路径用等宽字，长短一眼可比 */
-.settingsRowPath {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11.5px;
+/* 小问号与它的浮层：浮层贴着图标出现，点击外部或 Escape 收起 */
+.simpleHintRoot {
+  position: relative;
+  display: inline-flex;
 }
 
-.settingsRowControl {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 8px;
-}
-
-/* 行内的输入框：与右侧按钮同高，不把行撑开 */
-.settingsRowInput {
-  width: 220px;
-  height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--collab-line);
-  border-radius: 9px;
-  background: var(--color-background-paper, #fff);
-  color: inherit;
-  font: inherit;
-  font-size: 13px;
-}
-
-.settingsRowInput::placeholder {
+.simpleHintButton {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
   color: var(--collab-ter);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) ease, color var(--duration-fast) ease;
 }
 
-.settingsRowInput:focus {
-  outline: none;
-  border-color: var(--collab-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--collab-accent) 18%, transparent);
+.simpleHintButton:hover,
+.simpleHintButton[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--collab-accent) 14%, transparent);
+  color: var(--collab-accent-deep);
+}
+
+.simpleHintButton:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--collab-accent) 60%, transparent);
+  outline-offset: 2px;
+}
+
+.simpleHintPopover {
+  position: absolute;
+  z-index: 2;
+  top: calc(100% + 8px);
+  left: -8px;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 96px));
+  padding: 9px 11px;
+  border: 1px solid var(--collab-line);
+  border-radius: 10px;
+  background: var(--color-background-paper, #fff);
+  /* 小浮层用比弹窗更紧的投影：52px 的大光圈压在白色卡片上会显脏 */
+  box-shadow: 0 6px 20px rgba(17, 29, 28, 0.12);
+  color: var(--collab-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.65;
+  text-align: left;
+}
+
+/* 共享那一行贴着页脚：说明向上展开，不盖住下面的按钮 */
+.simpleHintPopoverAbove {
+  top: auto;
+  bottom: calc(100% + 8px);
 }
 
 /* 开关：36×20 的圆角滑块，和设置页一致 */
@@ -2000,103 +2197,151 @@
   outline-offset: 2px;
 }
 
-/* 项目设置：三张主题卡片（共享 / 协助 / 项目）纵向排列，卡片内每行是「标题 + 一行说明｜右侧控件」 */
+/* 项目设置：参照 Codex 的编辑项目——小标题下一组圆角框，组内一行一项；说明都收进问号 */
 :global(.modal-body).settingsBody {
-  padding: 12px 24px 4px;
-  gap: 12px;
+  padding: 0 24px 4px;
+  gap: 0;
 }
 
-/* 没有页脚的弹窗（未共享的本机项目、API Key 模式）由正文自己收尾 */
-:global(.modal-body).settingsBodyLast {
-  padding-bottom: 20px;
+/* 小标题与创建项目的「文件夹」同一个样子；第一组紧贴标题栏 */
+.settingsSectionLabel {
+  margin: 18px 0 8px;
+  color: var(--collab-muted);
+  font-size: 12.5px;
+  font-weight: 700;
 }
 
-.settingsCard {
+.settingsSectionLabel:first-child {
+  margin-top: 2px;
+}
+
+/* 一组：一个圆角框，里面的行不画框也不画分隔线，悬停时整行铺一层浅底 */
+.settingsGroup {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
   border: 1px solid var(--collab-line);
   border-radius: 12px;
   background: var(--color-background-paper, #fff);
 }
 
-.settingsCardHead {
+.settingsRow {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 12px 16px 10px;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  transition: background-color var(--duration-fast) ease;
 }
 
-.settingsCardChip {
-  display: grid;
+/* 整行可点（打开文件夹、选择任务、切换开关） */
+.settingsRowAction {
+  cursor: pointer;
+}
+
+.settingsRowAction:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--collab-ink) 4%, transparent);
+}
+
+.settingsRowAction:hover:not(:disabled) .settingsRowTrail {
+  color: var(--collab-ink-2);
+}
+
+.settingsRowAction:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--collab-accent) 60%, transparent);
+  outline-offset: -2px;
+}
+
+.settingsRowAction:disabled {
+  cursor: default;
+}
+
+.settingsRowIcon {
   flex: none;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  background: var(--collab-active);
-  color: var(--collab-accent-deep);
+  color: var(--collab-ter);
 }
 
-.settingsCardTitle {
-  margin: 0;
+.settingsRowLabel {
+  min-width: 0;
+  overflow: hidden;
   color: var(--collab-ink-2);
   font-size: 13.5px;
-  font-weight: 650;
-  line-height: 1.4;
-}
-
-/* 卡片内一行：左侧标题与说明，右侧开关或按钮；行间细线，第一行也画（贴着卡片头） */
-.settingsCardRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin: 0 16px;
-  padding: 12px 0;
-  border-top: 1px solid var(--collab-line-soft);
-}
-
-/* 限时授权这一行：标题在上，授权列表在下面，控件跟着每条授权走 */
-.settingsCardRowStack {
-  align-items: flex-start;
-}
-
-.settingsCardText {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.settingsCardRowTitle {
-  color: var(--collab-ink-2);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.45;
-}
-
-.settingsCardRowDesc {
-  color: var(--collab-ter);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-/* 路径这类不该换行的说明：一行省略，完整值放在 title 上 */
-.settingsCardPath {
-  overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* 文件夹名就是这一行的内容本身，字重高一档（Codex 里的「测试」） */
+.settingsRowStrong {
+  flex: 1;
+  font-weight: 600;
+}
+
+/* API Key 模式：这一行在，但做不了，名称降一档 */
+.settingsRowMuted .settingsRowLabel {
+  color: var(--collab-muted);
+}
+
+/* 问号紧跟名称（与创建项目的 6px 一致），后面的值或开关推到最右 */
+.settingsRowHint {
+  display: inline-flex;
+  margin-left: -4px;
+  margin-right: auto;
+  cursor: default;
+}
+
+.settingsRowValue {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  margin-left: auto;
+  color: var(--collab-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.settingsCardControl {
-  display: flex;
+.settingsRowHint + .settingsRowValue {
+  margin-left: 0;
+}
+
+.settingsRowTrail {
+  flex: none;
+  margin-left: auto;
+  color: var(--collab-ter);
+  transition: color var(--duration-fast) ease;
+}
+
+.settingsRowValue + .settingsRowTrail {
+  margin-left: -4px;
+}
+
+.settingsRowControl {
+  display: inline-flex;
   flex: none;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
 }
 
-/* 卡片内某一行出错：贴着那一行下面，不把整张卡片推开 */
-.settingsCardError {
-  margin: 0 16px 10px;
+.settingsRowHint + .settingsRowControl {
+  margin-left: 0;
+}
+
+/* 接收协助请求：开关一行，下面跟着限时授权；左缘与名称对齐（行内边距 10 + 图标 16 + 间距 10） */
+.settingsAssist .grantList {
+  padding: 4px 10px 10px 36px;
+}
+
+.settingsRowError {
+  padding: 0 10px 8px 36px;
   color: var(--color-status-error, #b44c42);
   font-size: 12px;
   line-height: 1.55;
@@ -2114,36 +2359,61 @@
   color: var(--collab-accent-deep);
 }
 
-/* 危险按钮同一个形状，只换边框与文字色：错误色本身偏浅，向正文色混一点才读得清 */
-:global(.button).settingsDangerButton {
-  border-color: color-mix(in srgb, var(--color-status-error, #b44c42) 55%, transparent);
-  color: color-mix(in srgb, var(--color-status-error, #b44c42) 72%, var(--color-text-ink, #111d1c));
-}
-
-:global(.button).settingsDangerButton:hover:not(:disabled) {
-  border-color: var(--color-status-error, #b44c42);
-  background: color-mix(in srgb, var(--color-status-error, #b44c42) 7%, var(--color-background-paper, #fff));
-  color: color-mix(in srgb, var(--color-status-error, #b44c42) 72%, var(--color-text-ink, #111d1c));
-}
-
-/* 授权行里的「结束授权」跟着内容宽度走，不与卡片右缘对齐 */
-:global(.button).settingsDangerButton.settingsButtonCompact {
-  min-width: 0;
-  padding: 0 10px;
-}
-
-/* 页脚：平时只有右下角一个危险按钮；有动作文字时文字在左、按钮在右 */
+/* 页脚：左侧是停止共享 / 退出项目（或进行中的动作），右侧「完成」 */
 :global(.modal-footer).settingsFooter {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 12px;
-  padding: 16px 24px 20px;
+  padding: 20px 24px 20px;
+}
+
+/* 危险操作照 Codex 的「移除本地项目」：浅红底、红字，不描边，和「完成」同高。错误色本身偏浅，向正文色混一点才读得清 */
+.settingsDangerSoft {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-btn, 8px);
+  background: var(--color-status-error-soft, #fde4e7);
+  color: color-mix(in srgb, var(--color-status-error, #f87b8e) 62%, var(--color-text-ink, #111d1c));
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) ease;
+}
+
+/* 「完成」与左侧危险按钮同一字号，主按钮默认的 16px 在这一屏里过重 */
+:global(.button).settingsDoneButton {
+  padding: 0 18px;
+  font-size: 14px;
+}
+
+/* 限时授权行里的「结束授权」：同一个样子，矮一档 */
+.settingsDangerSoft.settingsDangerSoftCompact {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.settingsDangerSoft:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-status-error-soft, #fde4e7) 78%, var(--color-status-error, #b44c42) 22%);
+}
+
+.settingsDangerSoft:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-status-error, #b44c42) 50%, transparent);
+  outline-offset: 2px;
+}
+
+.settingsDangerSoft:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* A slow cloud should look like work happening, not a dead button. */
 .settingsFooterStatus {
-  margin: 0 auto 0 0;
+  margin: 0;
   color: var(--collab-muted);
   font-size: 12px;
   line-height: 1.5;
@@ -2723,10 +2993,11 @@
   text-align: center;
 }
 
-/* 限时授权：标题下每位成员一行，左侧首字头像、名字与执行它的 Agent，右侧换用与结束 */
+/* 限时授权：接收协助请求下面每位成员一行，左侧首字头像、名字与「哪个 Agent · 还剩多久」，右侧结束 */
 .grantList {
   display: flex;
   flex-direction: column;
+  gap: 10px;
 }
 
 .grantRow {
@@ -2734,11 +3005,6 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-top: 8px;
-}
-
-.grantRow + .grantRow {
-  padding-top: 10px;
 }
 
 .grantWho {
@@ -2767,7 +3033,7 @@
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .grantName {
@@ -2783,6 +3049,7 @@
   color: var(--collab-ter);
   font-size: 12px;
   line-height: 1.45;
+  white-space: nowrap;
 }
 
 .grantLogo {
@@ -2792,25 +3059,32 @@
   border-radius: 3px;
 }
 
-.grantActions {
-  display: flex;
-  flex: none;
+/* 换用 Agent：下拉本身就是 Agent 名，像正文里的一个词，只多一个小箭头 */
+.grantSelectWrap {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
 }
 
-/* 换用 Agent：与按钮同高的小号下拉，细边框，不抢视线 */
 .grantSelect {
-  height: 30px;
-  min-width: 120px;
-  padding: 0 10px;
-  border: 1px solid var(--color-border-stone, #d6dfdc);
-  border-radius: 8px;
-  background: var(--color-background-paper, #fff);
-  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 75%, transparent);
+  field-sizing: content;
+  height: 20px;
+  margin: 0;
+  padding: 0 16px 0 4px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--collab-muted);
   font: inherit;
   font-size: 12px;
+  appearance: none;
   cursor: pointer;
+  transition: background-color var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.grantSelect:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--collab-accent) 14%, transparent);
+  color: var(--collab-accent-deep);
 }
 
 .grantSelect:focus-visible {
@@ -2821,4 +3095,11 @@
 .grantSelect:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.grantSelectChevron {
+  position: absolute;
+  right: 3px;
+  color: var(--collab-ter);
+  pointer-events: none;
 }

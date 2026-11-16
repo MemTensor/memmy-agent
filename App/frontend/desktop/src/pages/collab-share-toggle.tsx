@@ -1,13 +1,19 @@
 /**
- * 任务级的共享开关：协作项目里一条 Memmy 任务是否对成员可见。默认关闭，打开才上传。
+ * 任务级的共享开关：协作项目里一条 Memmy 任务是否对成员可见。只在已共享的项目里出现。
  *
- * <p>草稿（还没有会话 id）先记在本机，发送第一条消息后由 home-page 交给新会话；已有任务直接读写本机接口，
- * 状态以本项目自己的 links 文件为准，所以换一台设备或换个成员看到的都是各自的选择。</p>
+ * <p>新建任务（草稿）默认开启，用户可在发送前关掉；选择先记在本机，发送第一条消息后由 home-page 交给新会话。
+ * 已有任务直接读写本机接口，没有记录时按未共享显示，状态以本项目自己的 links 文件为准，所以换一台设备
+ * 或换个成员看到的都是各自的选择。</p>
  */
 import { Cloud, CloudOff } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { CollabClient } from "../api/collab-client.js";
-import { shareIntentFor, setShareIntent } from "../app/collab-share-intent.js";
+import {
+  clearSharePending,
+  draftShareIntent,
+  isSharePending,
+  setDraftShareIntent
+} from "../app/collab-share-intent.js";
 import { useTranslation } from "../i18n/use-translation.js";
 
 export type CollabShareToggleProps = {
@@ -25,23 +31,23 @@ export type CollabShareToggleProps = {
 export function CollabShareToggle(props: CollabShareToggleProps) {
   const { t } = useTranslation();
   const { collab, projectId, conversationId, draftScopeKey, onError } = props;
-  /** 会话存在后，会话 id 本身就是这张草稿的 scope key。 */
-  const scopeKey = conversationId ?? draftScopeKey;
-  const [shared, setShared] = useState(() => shareIntentFor(scopeKey));
+  const [shared, setShared] = useState(() => (conversationId ? isSharePending(conversationId) : draftShareIntent(draftScopeKey)));
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // 已有任务读一次本机记录；刚发完第一条消息时，草稿里的选择还在 store 里，先按它显示。
+  // 草稿显示自己的选择（默认开启）；已有任务读一次本机记录。刚发完第一条消息时，草稿交过来的「共享」
+  // 可能还没写进本机记录，先按它显示。
   useEffect(() => {
-    setShared(shareIntentFor(scopeKey));
     if (!conversationId) {
+      setShared(draftShareIntent(draftScopeKey));
       setLoaded(true);
       return;
     }
+    const pending = isSharePending(conversationId);
+    setShared(pending);
     if (!collab) return;
     let cancelled = false;
     setLoaded(false);
-    const pending = shareIntentFor(scopeKey);
     collab.taskSharing(projectId, conversationId)
       .then((state) => {
         if (cancelled) return;
@@ -57,38 +63,38 @@ export function CollabShareToggle(props: CollabShareToggleProps) {
     return () => {
       cancelled = true;
     };
-  }, [collab, conversationId, projectId, scopeKey]);
+  }, [collab, conversationId, draftScopeKey, projectId]);
 
   const toggle = useCallback(async () => {
     if (saving) return;
     const next = !shared;
     if (!conversationId) {
-      setShareIntent(scopeKey, next);
+      setDraftShareIntent(draftScopeKey, next);
       setShared(next);
       return;
     }
     if (!collab) return;
     setSaving(true);
     setShared(next);
+    // 用户在会话里动了开关，草稿交过来的临时状态不再需要。
+    clearSharePending(conversationId);
     try {
       const state = await collab.setTaskSharing(projectId, conversationId, next);
-      // 云端（本机 links）已经记下了，草稿期的临时选择不再需要。
-      setShareIntent(scopeKey, false);
       setShared(state.shared);
     } catch {
-      setShareIntent(scopeKey, false);
       setShared(!next);
       onError();
     } finally {
       setSaving(false);
     }
-  }, [collab, conversationId, onError, projectId, saving, scopeKey, shared]);
+  }, [collab, conversationId, draftScopeKey, onError, projectId, saving, shared]);
 
-  const label = shared ? t("collab.share.shared") : t("collab.share.label");
-  const hint = shared
-    ? t("collab.share.hintOn")
+  // 草稿还没有共享任何内容，所以不写「已共享」，开关的开合由样式表示。
+  const label = shared && conversationId ? t("collab.share.shared") : t("collab.share.label");
+  const hint = !shared
+    ? t("collab.share.hintOff")
     : conversationId
-      ? t("collab.share.hintOff")
+      ? t("collab.share.hintOn")
       : t("collab.share.hintDraft");
 
   return (

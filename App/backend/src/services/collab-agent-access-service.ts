@@ -120,6 +120,18 @@ export function createCollabAgentAccessService(
     await options.skillDistributionService.removeProjectSkill(agent.sourceId).catch(() => undefined);
   }
 
+  /**
+   * 授权、撤销或开关单个 Agent 之后，项目钩子跟着装或卸。
+   * 钩子自己每次运行会读授权，这里只是不让组件留着或缺失；失败等下一次启动再同步。
+   */
+  async function syncProjectHooks(sourceIds?: readonly string[]): Promise<void> {
+    try {
+      await options.skillDistributionService.syncProjectHooks?.(sourceIds);
+    } catch {
+      // 项目钩子不是授权本身的结果，不能因为同步失败而让授权报错。
+    }
+  }
+
   /** 装全部启用且可用的 Agent；`only` 限定时只装这几个。装失败的不抛出，逐个记下原因。 */
   async function installAll(only?: readonly string[]): Promise<CollabAgentInstallResult[]> {
     const wanted = only ? new Set(only) : null;
@@ -156,10 +168,13 @@ export function createCollabAgentAccessService(
         // 只撤内置 Agent 的组件：用户通过「添加 Agent 支持」加进来的那些，
         // 添加它们本身就是那一下授权，不随这一项授权一起移除。
         await options.skillDistributionService.removeProjectSkills().catch(() => []);
+        // 项目钩子不能一律移除：已接入记忆钩子的 Agent 还要继续拿到本机项目指令。
+        await syncProjectHooks();
         return { view: await view(), results: [] };
       }
       // 先装完再读状态：view 里的「已安装」是查磁盘得来的，反了就会一直显示未安装。
       const results = await installAll();
+      await syncProjectHooks();
       return { view: await view(), results };
     },
 
@@ -172,11 +187,17 @@ export function createCollabAgentAccessService(
       if (!agent) return { view: await view(), results: [] };
       if (!enabled) {
         await removeOne(agent);
+        await syncProjectHooks([sourceId]);
         return { view: await view(), results: [] };
       }
-      if (!state.granted) return { view: await view(), results: [] };
+      if (!state.granted) {
+        // 没授权协作时打开这个 Agent 只是把它从关闭名单里拿出来，项目钩子按记忆钩子重新算一次。
+        await syncProjectHooks([sourceId]);
+        return { view: await view(), results: [] };
+      }
       try {
         const installed = await installOne(agent);
+        await syncProjectHooks([sourceId]);
         return { view: await view(), results: [installed] };
       } catch (error) {
         return {
@@ -196,6 +217,7 @@ export function createCollabAgentAccessService(
       const state = await readState();
       if (!state.granted) return { view: await view(), results: [] };
       const results = await installAll(sourceIds);
+      await syncProjectHooks(sourceIds);
       return { view: await view(), results };
     },
 

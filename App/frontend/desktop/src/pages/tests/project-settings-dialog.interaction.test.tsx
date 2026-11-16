@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 
 /**
- * 项目设置弹窗：三张卡片各司其职。
- * 已共享的项目只报同步了几个任务、给出「选择任务」，右下角一个危险按钮；未共享的本机项目只有一个开关；
- * API Key 模式只有一句说明。两种情况下都没有页脚。停止共享与退出项目都要先确认，
+ * 项目设置弹窗：参照 Codex 的编辑项目，「文件夹」「协作」两个小标题下各一组，组内一行一项，说明收进问号。
+ * 已共享的项目在「协作」组里是「共享给成员的任务 / 接收协助请求」，左下角一个浅红的危险按钮；未共享的本机项目是
+ * 「开启项目协作」一行；API Key 模式只写需要登录。右下角始终是「完成」。停止共享与退出项目都要先确认，
  * 因为一个会删掉云端项目、一个会离开项目。
  */
 import { act } from "react";
@@ -88,6 +88,12 @@ function button(text: string): HTMLButtonElement | undefined {
     .find((item) => item.textContent?.trim() === text);
 }
 
+/** 整行就是一个按钮的字段：按行里的名称找。 */
+function fieldButton(label: string): HTMLButtonElement | undefined {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+    .find((item) => item.textContent?.includes(label));
+}
+
 function switchNamed(label: string): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>(`button[role='switch'][aria-label='${label}']`);
 }
@@ -143,34 +149,47 @@ describe("项目设置弹窗", () => {
     await flush();
   }
 
-  it("未共享的本机项目没有页脚，关闭只在右上角", async () => {
+  it("页脚右侧是「完成」，点它关闭弹窗；未共享的本机项目页脚只有它", async () => {
     await render({ shared: null });
 
-    expect(document.querySelector(".modal-footer")).toBeNull();
-    expect(button("关闭")).toBeUndefined();
+    const footer = document.querySelector(".modal-footer")!;
+    expect(Array.from(footer.querySelectorAll("button")).map((node) => node.textContent)).toEqual(["完成"]);
     expect(document.querySelector("button[aria-label='关闭']")).toBeTruthy();
+    await act(async () => button("完成")!.click());
+    expect(handlers.onClose).toHaveBeenCalled();
   });
 
-  it("所有者：同步行说明已同步几个任务，选择任务是按钮，右下角是停止共享", async () => {
+  it("文件夹与协作各是一组，前面有小标题", async () => {
+    await render();
+
+    const labels = Array.from(document.querySelectorAll(".modal-body > div"))
+      .filter((node) => node.children.length === 0)
+      .map((node) => node.textContent);
+    expect(labels).toEqual(["文件夹", "协作"]);
+  });
+
+  it("所有者：共享给成员的任务一行报 x / y，点整行去选择，左下角是停止共享", async () => {
     mocks.listProjectTasks.mockResolvedValue([{ synced: true }, { synced: false }]);
     await render();
 
-    // 成员数在看板头部，设置里不再重复一行「已共享 · N 位成员」。
+    // 成员数在看板头部，设置里不再重复一行「已共享 · N 位成员」，也没有分组卡片的标题。
     expect(document.body.textContent).not.toContain("已共享");
-    expect(document.body.textContent).toContain("同步的任务");
-    expect(document.body.textContent).toContain("已同步 1 / 2 个任务");
+    expect(document.querySelector("h3")).toBeNull();
+    const pick = fieldButton("共享给成员的任务")!;
+    expect(pick.textContent).toContain("1 / 2");
     // 已共享之后没有共享开关，也不再解释成员为什么不能停。
-    expect(switchNamed("与成员共享")).toBeNull();
+    expect(switchNamed("开启项目协作")).toBeNull();
     expect(document.body.textContent).not.toContain("只有项目所有者可以停止共享");
 
-    const pick = button("选择任务")!;
-    expect(pick.tagName).toBe("BUTTON");
     await act(async () => pick.click());
     expect(handlers.onPickSessions).toHaveBeenCalled();
 
     const stop = button("停止共享")!;
     expect(stop.tagName).toBe("BUTTON");
     expect(stop.closest(".modal-footer")).toBeTruthy();
+    // 危险按钮在左、「完成」在右。
+    expect(Array.from(stop.closest(".modal-footer")!.querySelectorAll("button")).map((node) => node.textContent))
+      .toEqual(["停止共享", "完成"]);
   });
 
   it("所有者停止共享：先确认，确认后删除云端项目", async () => {
@@ -197,7 +216,7 @@ describe("项目设置弹窗", () => {
     mocks.leaveProject.mockResolvedValue(undefined);
     await render({ shared: { ...SHARED, role: "member" } });
 
-    expect(switchNamed("与成员共享")).toBeNull();
+    expect(switchNamed("开启项目协作")).toBeNull();
     expect(button("停止共享")).toBeUndefined();
 
     const leave = button("退出项目")!;
@@ -237,89 +256,105 @@ describe("项目设置弹窗", () => {
     expect(handlers.onFailed).toHaveBeenCalledWith("network down");
   });
 
-  it("未共享的本机项目：只有一个开关，没有协助卡片、引导行与右下角危险按钮", async () => {
+  it("未共享的本机项目：只有开启项目协作一个开关，没有协助、引导行与右下角危险按钮", async () => {
     mocks.createProject.mockResolvedValue({ project: SHARED });
     mocks.bindLocalProject.mockResolvedValue(undefined);
     await render({ shared: null });
 
-    expect(switchNamed("与成员共享")).toBeTruthy();
-    expect(document.body.textContent).toContain("开启后可把任务共享给成员，本地文件不会上传。");
+    expect(switchNamed("开启项目协作")).toBeTruthy();
+    // 说明收在问号里，点问号只看说明、不开启共享。
+    expect(document.body.textContent).not.toContain("开启后可把任务共享给成员");
+    await act(async () => document.querySelector<HTMLButtonElement>("button[aria-label='协作说明']")!.click());
+    expect(document.querySelector("[role='note']")?.textContent).toBe("开启后可把任务共享给成员，本地文件不会上传。");
+    expect(mocks.createProject).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain("接收协助请求");
     expect(document.body.textContent).not.toContain("限时授权");
     expect(document.body.textContent).not.toContain("引导");
     expect(button("停止共享")).toBeUndefined();
     expect(button("退出项目")).toBeUndefined();
-    // 没有右下角按钮时页脚整个不出现。
-    expect(document.querySelector(".modal-footer")).toBeNull();
-    // 未共享时没有同步行。
-    expect(document.body.textContent).not.toContain("同步的任务");
+    // 没有危险按钮，页脚只有「完成」。
+    expect(Array.from(document.querySelectorAll(".modal-footer button")).map((node) => node.textContent)).toEqual(["完成"]);
+    // 未共享时没有共享任务那一行。
+    expect(document.body.textContent).not.toContain("共享给成员的任务");
 
-    await act(async () => switchNamed("与成员共享")!.click());
+    await act(async () => switchNamed("开启项目协作")!.click());
     await flush();
+    expect(mocks.createProject).toHaveBeenCalledTimes(1);
     expect(mocks.createProject).toHaveBeenCalledWith(PROJECT.name, PROJECT.rootPath);
     expect(handlers.onShared).toHaveBeenCalled();
   });
 
-  it("API Key 模式：只有一句说明与项目卡片", async () => {
+  it("未共享的本机项目：点整行任意位置也能开启协作", async () => {
+    mocks.createProject.mockResolvedValue({ project: SHARED });
+    mocks.bindLocalProject.mockResolvedValue(undefined);
+    await render({ shared: null });
+
+    const label = Array.from(document.querySelectorAll("span")).find((node) => node.textContent === "开启项目协作")!;
+    await act(async () => (label as HTMLElement).click());
+    await flush();
+    expect(mocks.createProject).toHaveBeenCalledTimes(1);
+  });
+
+  it("API Key 模式：协作一行只写需要登录，原因在问号里，没有开关", async () => {
     await render({ shareAvailable: false, shared: null });
 
-    expect(document.body.textContent).toContain("协作项目需要登录 Memmy 账号。当前是 API Key 模式，项目与任务只保存本机。");
+    expect(document.body.textContent).toContain("需登录账号");
+    await act(async () => document.querySelector<HTMLButtonElement>("button[aria-label='协作说明']")!.click());
+    expect(document.querySelector("[role='note']")?.textContent)
+      .toBe("协作项目需要登录 Memmy 账号。当前是 API Key 模式，项目与任务只保存本机。");
     expect(document.querySelector("[role='switch']")).toBeNull();
     expect(document.body.textContent).toContain("文件夹");
     expect(button("停止共享")).toBeUndefined();
     expect(button("退出项目")).toBeUndefined();
-    expect(document.querySelector(".modal-footer")).toBeNull();
+    expect(Array.from(document.querySelectorAll(".modal-footer button")).map((node) => node.textContent)).toEqual(["完成"]);
   });
 
-  it("同步的任务按读取结果给值：暂无任务、已同步 x / y、读取中写加载中", async () => {
+  it("共享给成员的任务按读取结果给值：暂无、x / y，读取中只转圈", async () => {
     mocks.listProjectTasks.mockResolvedValue([]);
     await render();
-    expect(document.body.textContent).toContain("暂无任务");
+    expect(fieldButton("共享给成员的任务")?.textContent).toContain("暂无");
 
     await act(async () => root.unmount());
     root = createRoot(container);
     mocks.listProjectTasks.mockResolvedValue([{ synced: true }, { synced: false }, { synced: true }]);
     await render();
-    expect(document.body.textContent).toContain("已同步 2 / 3 个任务");
+    expect(fieldButton("共享给成员的任务")?.textContent).toContain("2 / 3");
 
     await act(async () => root.unmount());
     root = createRoot(container);
     mocks.listProjectTasks.mockReturnValue(new Promise(() => undefined));
     await render();
-    expect(document.body.textContent).toContain("加载中");
-    expect(document.body.textContent).not.toContain("暂无任务");
-    expect(document.body.textContent).not.toContain("已同步");
+    expect(fieldButton("共享给成员的任务")?.querySelector("[role='status'][aria-label='加载中…']")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("暂无");
+    expect(document.body.textContent).not.toContain(" / ");
   });
 
-  it("文件夹按 ~ 缩写显示，项目卡片里不再有重看引导的一行", async () => {
+  it("文件夹只显示末级目录名，完整路径在悬停提示里，整行是「在文件夹中显示」", async () => {
     await render();
 
-    expect(document.body.textContent).toContain("文件夹");
-    expect(document.body.textContent).toContain("~/.memmy/online-projects/Memmy");
-    expect(document.body.textContent).not.toContain("/Users/sunq/.memmy/online-projects/Memmy");
+    const reveal = document.querySelector<HTMLButtonElement>("button[aria-label^='在文件夹中显示']")!;
+    expect(reveal.textContent).toBe("Memmy");
+    expect(document.body.textContent).not.toContain("~/.memmy/online-projects/Memmy");
     expect(document.body.textContent).not.toContain(PROJECT.name);
-    // 路径说明一行省略，完整路径放在 title 上。
-    const path = document.querySelector("[title='/Users/sunq/.memmy/online-projects/Memmy']");
-    expect(path?.textContent).toBe("~/.memmy/online-projects/Memmy");
+    expect(reveal.getAttribute("title")).toBe("/Users/sunq/.memmy/online-projects/Memmy");
+    expect(reveal.getAttribute("aria-label")).toBe("在文件夹中显示：~/.memmy/online-projects/Memmy");
     // 协作项目的首次引导已删除，设置里不再有重看那一行。
     expect(document.body.textContent).not.toContain("再看一遍协作项目的首次引导");
     expect(button("重新查看")).toBeUndefined();
-
-    const reveal = button("在文件夹中显示")!;
-    expect(reveal.tagName).toBe("BUTTON");
   });
 
-  it("限时授权：没有授权写「暂无」，有授权列出成员与换用、结束", async () => {
+  it("限时授权：没有授权时不占位置，有授权时在接收协助请求下面列出成员与换用、结束", async () => {
     await render();
     expect(document.body.textContent).toContain("接收协助请求");
     expect(document.body.textContent).not.toContain("限时授权");
     expect(document.body.textContent).not.toContain("单次最长 15 分钟");
 
-    // 打开开关后读一次授权：先是空的。
+    // 打开开关后读一次授权：空的时候什么都不多写。
     await act(async () => switchNamed("接收协助请求")!.click());
     await flush();
-    expect(document.body.textContent).toContain("限时授权");
-    expect(document.body.textContent).toContain("暂无");
+    expect(mocks.setAssistReceiving).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("[aria-label='限时授权']")).toBeNull();
+    expect(button("结束授权")).toBeUndefined();
 
     mocks.assistReceiving.mockResolvedValue({ projectId: "cloud-1", enabled: true });
     mocks.assistGrants.mockResolvedValue({
@@ -344,17 +379,17 @@ describe("项目设置弹窗", () => {
     root = createRoot(container);
     await render();
 
-    expect(document.body.textContent).toContain("限时授权");
+    expect(document.querySelector("[aria-label='限时授权']")).toBeTruthy();
     expect(document.body.textContent).toContain("孙起");
     // 首字头像与成员名分两行：头像上是「孙」。
     expect(document.body.textContent).toContain("孙");
-    expect(document.body.textContent).toContain("由 Claude Code 执行 · 还剩 42 分钟");
+    expect(document.body.textContent).toContain("· 还剩 42 分钟");
     const revoke = button("结束授权")!;
     expect(revoke.tagName).toBe("BUTTON");
     expect(revoke.closest(".modal-footer")).toBeNull();
     const select = document.querySelector("select[aria-label='孙起的请求由哪个 Agent 执行']");
     expect(select).toBeTruthy();
-    // 只剩同步任务那一处「暂无任务」，限时授权本身已有内容。
+    // 只剩共享任务那一处「暂无」，限时授权本身已有内容。
     expect(document.body.textContent?.split("暂无").length).toBe(2);
   });
 });

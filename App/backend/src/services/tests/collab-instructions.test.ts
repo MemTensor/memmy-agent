@@ -100,7 +100,62 @@ describe("collab project instructions", () => {
     expect(readFileSync(join(root, "collab-project-instructions.json"), "utf8")).toContain("Memmy 桌面端的研发");
   });
 
-  it("saves through the cloud and keeps the cache in step, clearing it when the text is emptied", async () => {
+  it("caches a project that has no rules at all, so its folder still knows which project it belongs to", async () => {
+    const bare = { ...project, name: "演示项目", instructions: "" };
+    const { svc, collabInstructions } = setup({
+      "POST /api/collab/projects": () => ({ project: bare }),
+      "PUT /api/collab/projects/p-1/binding": () => ({ ok: true }),
+      "GET /api/collab/projects": () => ({ projects: [bare] })
+    });
+    const directory = await boundProject(svc, "p-1");
+    await svc.listProjects();
+    const entry = await collabInstructions.read("p-1");
+    // 没写背景与规范也有条目：项目名与范围就位，正文为空。
+    expect(entry).toMatchObject({ name: "演示项目", text: "" });
+    expect(entry?.scopes).toContainEqual({ sourceId: "memmy", groupId: directory, roots: [directory] });
+  });
+
+  it("fills in the member names when the member list is read, without asking the cloud for it again", async () => {
+    const { svc, collabInstructions, calls } = setup({
+      "POST /api/collab/projects": () => ({ project }),
+      "PUT /api/collab/projects/p-1/binding": () => ({ ok: true }),
+      "GET /api/collab/projects": () => ({ projects: [project] }),
+      "GET /api/collab/projects/p-1/members": () => ({
+        project,
+        joinMode: "approval",
+        canManage: false,
+        members: [
+          { userId: "7", name: "孙起", role: "OWNER", mine: false, joinedAt: null },
+          { userId: "8", name: "张三", role: "MEMBER", mine: true, joinedAt: null }
+        ],
+        requests: []
+      })
+    });
+    await boundProject(svc, "p-1");
+    // 项目列表只带人数，成员显示名要另外读一次成员列表；读到就顺手进缓存。
+    await svc.listProjects();
+    await expect(collabInstructions.read("p-1")).resolves.toMatchObject({ name: "Memmy 开发" });
+    expect((await collabInstructions.read("p-1"))?.members).toBeUndefined();
+
+    await svc.listMembers("p-1");
+    await expect(collabInstructions.read("p-1")).resolves.toMatchObject({ members: ["孙起", "张三"] });
+    expect(calls.filter((call) => call.path.endsWith("/members"))).toHaveLength(1);
+  });
+
+  it("follows a rename into the cache, so the injected paragraph names the project as it is now", async () => {
+    const { svc, collabInstructions } = setup({
+      "POST /api/collab/projects": () => ({ project }),
+      "PUT /api/collab/projects/p-1/binding": () => ({ ok: true }),
+      "GET /api/collab/projects": () => ({ projects: [project] }),
+      "PATCH /api/collab/projects/p-1": () => ({ project: { ...project, name: "新名字" } })
+    });
+    await boundProject(svc, "p-1");
+    await svc.listProjects();
+    await svc.renameProject("p-1", "新名字");
+    await expect(collabInstructions.read("p-1")).resolves.toMatchObject({ name: "新名字" });
+  });
+
+  it("saves through the cloud and keeps the cache in step, emptying the text but keeping the project entry", async () => {
     const next = { ...project, instructions: "前端代码遵循《前端代码规范》。" };
     const { svc, calls, collabInstructions } = setup({
       "POST /api/collab/projects": () => ({ project: { ...project, instructions: "" } }),
@@ -114,7 +169,7 @@ describe("collab project instructions", () => {
     expect(saved.project.instructions).toBe("前端代码遵循《前端代码规范》。");
     await expect(collabInstructions.read("p-1")).resolves.toMatchObject({ text: "前端代码遵循《前端代码规范》。" });
 
-    // 清空指令：云端与缓存都清掉，任务不再带上已经删掉的内容。
+    // 清空指令：文字置空，但条目留着：这个目录仍然属于这个协作项目，只是没约定。
     const cleared = setup({
       "POST /api/collab/projects": () => ({ project }),
       "PUT /api/collab/projects/p-1/binding": () => ({ ok: true }),
@@ -127,7 +182,7 @@ describe("collab project instructions", () => {
       text: "旧指令"
     });
     await cleared.svc.updateInstructions("p-1", " ");
-    await expect(cleared.collabInstructions.read("p-1")).resolves.toBeNull();
+    await expect(cleared.collabInstructions.read("p-1")).resolves.toMatchObject({ text: "", name: "Memmy 开发" });
   });
 
   it("rejects instructions over the limit before calling the cloud", async () => {

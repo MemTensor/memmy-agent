@@ -151,6 +151,80 @@ describe("codex skill target", () => {
     await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
   });
 
+  it("installs the project hook beside the memory hook and trusts its own events", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const trustCalls: Array<{ hookCommand: string; events?: readonly string[] }> = [];
+    const target = createCodexSkillTarget({
+      rootDirectory,
+      memmyConfigPath,
+      trustHooks: async (options) => {
+        trustCalls.push({ hookCommand: options.hookCommand, events: options.events });
+      }
+    });
+
+    await target.installPlugin?.("codex");
+    await target.installProjectHook?.();
+    await target.installProjectHook?.();
+
+    const config = readHooksFile(rootDirectory);
+    const projectCommands = commandsFor(config, "SessionStart").filter((command) => command.includes("memmy-project-hook.mjs"));
+    const memoryCommands = commandsFor(config, "SessionStart").filter((command) => command.includes("memmy-resume-hook.mjs"));
+    expect(projectCommands).toHaveLength(1);
+    expect(memoryCommands).toHaveLength(1);
+    // 项目钩子只登记自己的三个事件，Codex 也只给这三个事件写信任。
+    for (const event of ["UserPromptSubmit", "SessionStart", "PostCompact"]) {
+      expect(commandsFor(config, event).filter((command) => command.includes("memmy-project-hook.mjs"))).toHaveLength(1);
+    }
+    expect(commandsFor(config, "Stop").filter((command) => command.includes("memmy-project-hook.mjs"))).toHaveLength(0);
+    const projectTrust = trustCalls.filter((call) => call.hookCommand.includes("memmy-project-hook.mjs"));
+    expect(projectTrust).toHaveLength(2);
+    expect(projectTrust[0]?.events).toEqual(["userPromptSubmit", "sessionStart", "postCompact"]);
+    // 记忆钩子的信任调用不传事件，保持原来的五个。
+    expect(trustCalls.find((call) => call.hookCommand.includes("memmy-resume-hook.mjs"))?.events).toBeUndefined();
+    await expect(target.isProjectHookCurrent?.()).resolves.toBe(true);
+  });
+
+  it("rolls back the project hook files when Codex cannot persist trust for them", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const hookDirectory = join(rootDirectory, "hooks");
+    const target = createCodexSkillTarget({
+      rootDirectory,
+      memmyConfigPath,
+      trustHooks: async (options) => {
+        if (options.hookCommand.includes("memmy-project-hook.mjs")) throw new Error("project trust failed");
+      }
+    });
+    writeFileSync(join(rootDirectory, "hooks.json"), JSON.stringify({
+      hooks: { SessionStart: [{ hooks: [{ type: "command", command: "existing" }] }] }
+    }));
+    const before = readFileSync(join(rootDirectory, "hooks.json"), "utf8");
+
+    await expect(target.installProjectHook?.()).rejects.toThrow("project trust failed");
+
+    expect(existsSync(join(hookDirectory, "memmy-project-hook.mjs"))).toBe(false);
+    expect(existsSync(join(hookDirectory, "memmy-project-runtime.mjs"))).toBe(false);
+    expect(existsSync(join(hookDirectory, "memmy-project-config.json"))).toBe(false);
+    expect(readFileSync(join(rootDirectory, "hooks.json"), "utf8")).toBe(before);
+    await expect(target.isProjectHookInstalled?.()).resolves.toBe(false);
+  });
+
+  it("removes only the project hook entries from hooks.json", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const target = createCodexSkillTarget({ rootDirectory, memmyConfigPath, trustHooks: noOpTrustHooks });
+    await target.installPlugin?.("codex");
+    await target.installProjectHook?.();
+
+    await target.uninstallProjectHook?.();
+
+    const config = readHooksFile(rootDirectory);
+    for (const event of ["UserPromptSubmit", "SessionStart", "PostCompact"]) {
+      expect(commandsFor(config, event).filter((command) => command.includes("memmy-project-hook.mjs"))).toHaveLength(0);
+      expect(commandsFor(config, event).filter((command) => command.includes("memmy-resume-hook.mjs"))).toHaveLength(1);
+    }
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-project-hook.mjs"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-resume-hook.mjs"))).toBe(true);
+  });
+
   it("persists trust for the installed user-level hooks before installation completes", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     let trustOptions: TrustMemmyCodexHooksOptions | undefined;
@@ -463,6 +537,68 @@ describe("codex skill target", () => {
   });
 });
 
+describe("codex project skill bootstrap", () => {
+  it("writes the project block next to the memory block and keeps user content", async () => {
+    const { rootDirectory, manifest } = createFixture();
+    const target = createCodexSkillTarget({ rootDirectory });
+    writeFileSync(join(rootDirectory, "AGENTS.md"), "自己写的一段说明\n", "utf8");
+
+    await target.install(manifest);
+    await target.writeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content).toContain("自己写的一段说明");
+    expect(content).toContain("<!-- memmy:start v=1 -->");
+    expect(content).toContain("<!-- memmy-project:start v=1 -->");
+    expect(content.indexOf("<!-- memmy:start v=1 -->")).toBeLessThan(content.indexOf("<!-- memmy-project:start v=1 -->"));
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(true);
+  });
+
+  it("replaces the project block instead of adding a second one", async () => {
+    const { rootDirectory } = createFixture();
+    const target = createCodexSkillTarget({ rootDirectory });
+    const filePath = join(rootDirectory, "AGENTS.md");
+    writeFileSync(
+      filePath,
+      ["说明", "<!-- memmy-project:start v=1 -->", "旧内容", "<!-- memmy-project:end v=1 -->", "结尾", ""].join("\n"),
+      "utf8"
+    );
+
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(false);
+    await target.writeProjectSkillBootstrap!();
+    await target.writeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content.match(/memmy-project:start/gu)).toHaveLength(1);
+    expect(content).not.toContain("旧内容");
+    expect(content).toContain("说明");
+    expect(content).toContain("结尾");
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(true);
+  });
+
+  it("removes only the project block and creates the file when it is missing", async () => {
+    const { rootDirectory } = createFixture();
+    const target = createCodexSkillTarget({ rootDirectory });
+    rmSync(join(rootDirectory, "AGENTS.md"), { force: true });
+
+    await target.writeProjectSkillBootstrap!();
+    expect(readTargetFile(rootDirectory)).toContain("<!-- memmy-project:start v=1 -->");
+
+    writeFileSync(
+      join(rootDirectory, "AGENTS.md"),
+      ["说明", "<!-- memmy:start v=1 -->", "# Memmy Memory", "<!-- memmy:end v=1 -->", "", "<!-- memmy-project:start v=1 -->", "块", "<!-- memmy-project:end v=1 -->", "结尾", ""].join("\n"),
+      "utf8"
+    );
+    await target.removeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content).not.toContain("memmy-project:");
+    expect(content).toContain("# Memmy Memory");
+    expect(content).toContain("说明");
+    expect(content).toContain("结尾");
+  });
+});
+
 function createFixture(): { rootDirectory: string; memmyConfigPath: string; manifest: SkillManifest } {
   tempDir = mkdtempSync(join(tmpdir(), "memmy-codex-skill-"));
   const memmyConfigPath = join(tempDir, "memmy-config.yaml");
@@ -609,4 +745,19 @@ async function runNodeHook(scriptPath: string, input: string): Promise<{ status:
     stdout: Buffer.concat(stdout).toString("utf8"),
     stderr: Buffer.concat(stderr).toString("utf8")
   };
+}
+
+function readHooksFile(rootDirectory: string): {
+  hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+} {
+  return JSON.parse(readFileSync(join(rootDirectory, "hooks.json"), "utf8")) as {
+    hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+  };
+}
+
+function commandsFor(
+  config: { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> },
+  event: string
+): string[] {
+  return config.hooks[event]?.flatMap((entry) => entry.hooks.map((hook) => hook.command)) ?? [];
 }

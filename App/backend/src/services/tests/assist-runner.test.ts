@@ -63,6 +63,9 @@ process.stdin.on("data", (data) => {
     } else if (message.method === "authenticate") {
       // 适配器自己的登录方法在没登录时也拿不到身份：仍然失败，让它走到登录页那一步。
       send({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "Authentication required" } });
+    } else if (message.method === "session/set_config_option") {
+      // 适配器支持 mode 选项：设完按当前值回一份选项列表。
+      reply(message.id, { configOptions: [{ id: "mode", currentValue: message.params.value }] });
     } else if (message.method === "session/prompt") {
       send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s-1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } } } });
       reply(message.id, { stopReason: "end_turn" });

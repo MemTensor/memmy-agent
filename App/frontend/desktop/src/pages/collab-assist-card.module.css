@@ -155,6 +155,20 @@
   color: color-mix(in srgb, var(--color-text-ink, #111d1c) 80%, transparent);
 }
 
+/* 没有执行的操作：与「要做的事」同一套有序列表，条目下带一行命令。 */
+.skipped {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+
+.skippedDetail {
+  display: block;
+  font-size: 11.5px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 48%, transparent);
+  word-break: break-all;
+}
+
 .files {
   display: flex;
   flex-wrap: wrap;

@@ -1,6 +1,6 @@
 /**
- * Eligibility for the 1.2.7 project-collaboration announcement: account mode with a signed-in user, guidance done,
- * not seen on this computer, and no other large prompt on screen.
+ * Eligibility for the one-time project-collaboration announcement: account mode with a signed-in user, guidance
+ * done, not seen on this computer, and no other large prompt on screen.
  */
 import { describe, expect, it } from "vitest";
 import {

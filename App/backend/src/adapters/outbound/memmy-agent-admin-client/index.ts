@@ -61,13 +61,21 @@ export interface AssistRunStartInput {
     title: string;
     /** 交给模型、不在界面上显示的要求（如结果的写法）：运行时把它放进系统提示词。 */
     context?: string;
+    /**
+     * 这次执行对工具调用的策略：`deny` 是限时授权自动开始的，敏感操作一律不执行；
+     * `allow` 是她在授权弹窗里点过允许的。运行时按它决定要不要在工具执行前拦下这一步。
+     */
+    approval?: AssistApproval;
   };
 }
+
+/** 协助执行的批准策略：与 acp-client 里对 Agent 批准请求的回答同一套含义。 */
+export type AssistApproval = "deny" | "allow";
 
 export interface AssistRunSnapshot {
   chatId: string;
   status: "starting" | "queued" | "running" | "done" | "failed" | "stopped";
-  steps: Array<{ text: string; output?: string; status: "running" | "done" | "failed" }>;
+  steps: Array<{ text: string; output?: string; status: "running" | "done" | "failed" | "skipped" }>;
   /** 完整执行过程：说明文字与工具调用按发生顺序排列；旧运行时为空数组。 */
   transcript: AssistTranscriptItem[];
   reply: string;
@@ -80,5 +88,12 @@ export interface AssistRunSnapshot {
 export type AssistTranscriptItem =
   | { kind: "text"; text: string; truncated?: boolean }
   | { kind: "thinking"; text: string; truncated?: boolean }
-  | { kind: "tool"; name: string; input: string; output: string; status: "running" | "done" | "failed"; truncated?: boolean }
+  | {
+      kind: "tool";
+      name: string;
+      input: string;
+      output: string;
+      status: "running" | "done" | "failed" | "skipped";
+      truncated?: boolean;
+    }
   | { kind: "omitted"; count: number };

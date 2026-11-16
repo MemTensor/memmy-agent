@@ -1,8 +1,8 @@
 /*
- * Shell for the 1.2.7 project-collaboration announcement carousel.
+ * The one-time project-collaboration announcement.
  *
- * Its own `collab-launch-*` names on purpose: the 1.2.5 history launch styles in this branch are the old ones and
- * will be replaced when the release branch merges, so nothing here may depend on them.
+ * Same shell as the History announcement (width, padding, radius, eyebrow, card grid, focus ring, Enter animation), kept
+ * under its own `collab-launch-*` names so the two cards can change independently.
  */
 
 .collab-launch-backdrop {
@@ -21,15 +21,17 @@
   position: relative;
   width: min(1000px, calc(100vw - 36px));
   max-height: calc(100dvh - 36px);
-  overflow-y: auto;
+  /* 授权说明浮层从按钮右侧弹出，需要越过卡片边界：这里不能裁切。 */
+  overflow: visible;
   box-sizing: border-box;
-  padding: 34px 36px 26px;
+  padding: 34px 36px 34px;
   border-radius: 26px;
   background: var(--color-background-paper);
   color: var(--color-text-ink);
   box-shadow: 0 25px 100px color-mix(in srgb, var(--color-text-ink) 22%, transparent);
   outline: none;
   font-family: var(--font-sans);
+  animation: collab-launch-dialog-enter 180ms ease-out both;
 }
 
 .collab-launch-close {
@@ -60,12 +62,18 @@
   letter-spacing: 0.06em;
 }
 
-.collab-launch-stage {
+.collab-launch-dialog h2 {
+  margin: 0 0 18px;
+  font-size: clamp(25px, 3vw, 32px);
+  font-weight: 760;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+}
+
+.collab-launch-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 480px);
-  height: 400px;
   min-height: 400px;
-  overflow: hidden;
 }
 
 .collab-launch-copy {
@@ -73,7 +81,7 @@
   flex-direction: column;
   align-items: flex-start;
   justify-content: center;
-  padding: 42px 38px 42px 0;
+  padding: 38px 38px 38px 0;
   background: color-mix(in srgb, var(--color-accent-peach) 6%, var(--color-background-paper));
 }
 
@@ -84,100 +92,35 @@
   line-height: 1.35;
 }
 
-.collab-launch-copy p {
-  max-width: 360px;
+.collab-launch-text {
+  max-width: 404px;
   margin: 0;
   color: color-mix(in srgb, var(--color-text-ink) 72%, var(--color-background-paper));
   font-size: 16px;
   line-height: 1.8;
 }
 
-.collab-launch-visual {
-  display: block;
-  min-height: 0;
-  padding: 0;
-  border-radius: 20px;
-  overflow: hidden;
-  background: transparent;
+/*
+ * 中文两端对齐：中英混排时每行宽度不同，左对齐会让右边缘参差；最后一行仍靠左。
+ * 英文保持左对齐，避免词间距被拉大。界面上方是应用自己的 `lang="en"`，所以看这一节自己的语言。
+ */
+.collab-launch-dialog[lang="zh-CN"] .collab-launch-text {
+  text-align: justify;
+  text-justify: inter-character;
 }
 
-.collab-launch-visual img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  border-radius: 20px;
-}
-
-.collab-launch-nav {
+.collab-launch-actions {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 66px;
-  margin-top: 11px;
-}
-
-.collab-launch-count {
-  min-width: 42px;
-  color: color-mix(in srgb, var(--color-text-ink) 56%, transparent);
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-}
-
-.collab-launch-dots {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.collab-launch-dots span {
-  display: block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--color-text-ink) 22%, transparent);
-  transition: width 0.18s;
-}
-
-.collab-launch-dots span.active {
-  width: 20px;
-  border-radius: 6px;
-  background: var(--color-action-sky);
-}
-
-.collab-launch-page-buttons {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-left: auto;
-}
-
-.collab-launch-prev {
-  display: grid;
-  place-items: center;
-  width: 39px;
-  height: 39px;
-  padding: 0;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 70%, transparent);
-  border-radius: 10px;
-  background: var(--color-background-paper);
-  color: var(--color-text-ink);
-  cursor: pointer;
-}
-
-.collab-launch-prev:disabled {
-  opacity: 0.35;
-  cursor: default;
+  gap: 8px;
+  margin-top: 22px;
 }
 
 .collab-launch-primary {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
   min-width: 100px;
   min-height: 39px;
-  padding: 8px 16px;
+  padding: 8px 18px;
   border: 0;
   border-radius: 10px;
   background: var(--color-text-ink);
@@ -193,25 +136,164 @@
   color: #fff;
 }
 
-.collab-launch-enter {
-  animation: collab-launch-enter 180ms ease-out both;
+/* 按钮右侧的小问号与它的授权说明浮层 */
+.collab-launch-help-wrap {
+  position: relative;
+  display: inline-flex;
 }
 
-@keyframes collab-launch-enter {
-  from {
-    opacity: 0.45;
-    transform: translateX(7px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+.collab-launch-help {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 42%, var(--color-background-paper));
+  cursor: pointer;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .collab-launch-enter {
-    animation: none;
-  }
+.collab-launch-help:hover,
+.collab-launch-help[aria-expanded="true"] {
+  color: var(--color-action-sky-hover);
+  background: color-mix(in srgb, var(--color-accent-mint) 55%, var(--color-background-paper));
+}
+
+.collab-launch-popover {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: -20px;
+  z-index: 2;
+  width: 350px;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 80%, var(--color-background-paper));
+  border-radius: 12px;
+  background: var(--color-background-paper);
+  box-shadow: 0 12px 30px rgba(17, 29, 28, .13);
+  color: color-mix(in srgb, var(--color-text-ink) 70%, var(--color-background-paper));
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.collab-launch-popover b {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--color-text-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.collab-launch-popover ul {
+  margin: 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+
+.collab-launch-popover li {
+  margin: 1px 0;
+}
+
+.collab-launch-popover__note {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid #eef3f2;
+  color: color-mix(in srgb, var(--color-text-ink) 55%, var(--color-background-paper));
+}
+
+.collab-launch-visual {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+  padding: 26px 0;
+  border-radius: 20px;
+  overflow: hidden;
+  isolation: isolate;
+  background: linear-gradient(145deg, #7fe3cf 0%, #4fc0ae 44%, #3f93a8 100%);
+}
+
+.collab-launch-visual__glow {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  background: radial-gradient(circle at 86% 10%, rgba(255, 255, 255, .44), transparent 32%),
+    radial-gradient(circle at 6% 92%, rgba(200, 240, 224, .62), transparent 44%);
+}
+
+.collab-launch-example {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  width: min(100%, 360px);
+  box-sizing: border-box;
+  padding: 20px;
+  border: 1px solid rgba(255, 255, 255, .72);
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--color-background-paper) 95%, transparent);
+  box-shadow: 0 20px 38px rgba(19, 74, 78, .18);
+  color: var(--color-text-ink);
+}
+
+.collab-launch-example__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: color-mix(in srgb, var(--color-text-ink) 58%, var(--color-background-paper));
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.collab-launch-example__logo {
+  width: 15px;
+  height: 15px;
+  object-fit: contain;
+}
+
+.collab-launch-chat__user {
+  align-self: flex-end;
+  max-width: 88%;
+  margin: 0;
+  padding: 9px 13px;
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--color-accent-mint) 62%, white);
+  color: var(--color-text-ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.collab-launch-chat__agent {
+  margin: 0;
+  color: var(--color-text-ink);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.collab-launch-chat__lead {
+  margin: 0;
+}
+
+.collab-launch-chat__agent ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+
+.collab-launch-chat__agent li {
+  margin: 2px 0;
+}
+
+.collab-launch-visual__caption {
+  color: #fff;
+  font-size: 12px;
+  font-weight: 650;
+  text-shadow: 0 1px 3px rgba(16, 62, 66, .32);
 }
 
 .collab-launch-dialog button:focus-visible {
@@ -219,20 +301,45 @@
   outline-offset: 3px;
 }
 
-@media (max-width: 760px) {
+@keyframes collab-launch-dialog-enter {
+  from {
+    opacity: 0.6;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .collab-launch-dialog {
+    animation: none;
+  }
+}
+
+@media (max-width: 700px) {
   .collab-launch-dialog {
     padding: 26px 22px 18px;
     border-radius: 20px;
   }
 
-  .collab-launch-eyebrow {
+  .collab-launch-dialog .collab-launch-eyebrow {
     margin-bottom: 14px;
   }
 
-  .collab-launch-stage {
+  .collab-launch-dialog h2 {
+    margin-bottom: 14px;
+  }
+
+  .collab-launch-close {
+    top: 18px;
+    right: 18px;
+  }
+
+  .collab-launch-card {
     display: flex;
     flex-direction: column;
-    height: auto;
     min-height: 0;
   }
 
@@ -245,17 +352,23 @@
     font-size: 22px;
   }
 
-  .collab-launch-copy p {
+  .collab-launch-text {
     font-size: 14px;
   }
 
-  .collab-launch-visual {
-    width: 100%;
-    height: auto;
+  /* 窄窗口里浮层不能比窗口还宽，否则右侧被推出屏幕。 */
+  .collab-launch-popover {
+    width: min(350px, calc(100vw - 96px));
   }
 
-  .collab-launch-visual img {
-    height: auto;
-    aspect-ratio: 6 / 5;
+  .collab-launch-visual {
+    min-height: 225px;
+    padding: 22px 0;
+  }
+
+  .collab-launch-example {
+    width: min(100%, 310px);
+    padding: 16px;
+    gap: 12px;
   }
 }

@@ -31,6 +31,11 @@
   -webkit-backdrop-filter: none;
 }
 
+/* 新手引导期间：弹窗的遮罩让给引导的蒙版，避免两层暗色叠在一起。 */
+:global(.modal-backdrop).backdropYield {
+  background: transparent;
+}
+
 .top {
   padding: 16px 28px 4px;
   text-align: center;
@@ -47,6 +52,24 @@
   font-weight: 700;
   color: var(--color-text-ink, #111d1c);
   line-height: 1.4;
+}
+
+/* 执行方检查结论：标题下的一行，左对齐，不加底色与边框，只有一枚提示图标。 */
+.review {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-ink, #111d1c);
+  text-align: left;
+}
+
+.reviewIcon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--color-warning);
 }
 
 /* 背景：单独成块，左侧一道竖线，紧接标题（标题居中，背景左对齐）。

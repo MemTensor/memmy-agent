@@ -40,6 +40,14 @@ import {
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
 import { collabEnabledFor } from "../app/collab-mode.js";
+import {
+  demoGuideBoundLocalProject,
+  dismissDemoGuideBeforeProject,
+  getDemoGuideState,
+  startDemoGuide,
+  startDemoGuideBeforeProject,
+  subscribeDemoGuide
+} from "../app/collab-demo-guide-store.js";
 import { ApiRequestError } from "../api/http.js";
 import { MemmyAgentRequestError } from "../api/memmy-agent-client.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
@@ -59,7 +67,6 @@ import { agentChatScopeKey, shouldCreateNewAgentDraft } from "../state/agent-com
 import type { AgentTaskView } from "../state/agent-chat-slice.js";
 import { decideTaskDoneNotification } from "../state/task-done-notification.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
-import { formatWorkspacePath } from "../app/workspace-path.js";
 import { WindowsTitlebar } from "../components/windows-titlebar.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { isWindowsDesktopPlatform } from "../utils/window-fullscreen.js";
@@ -68,6 +75,7 @@ import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integ
 import { CollabCreateProjectDialog } from "./collab-create-project-dialog.js";
 import { CollabJoinProjectDialog } from "./collab-join-project-dialog.js";
 import { CollabAssistHost } from "./collab-assist-host.js";
+import { CollabDemoGuideHost } from "../components/collab-demo-guide/collab-demo-guide-host.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
 import { writeMemorySubPage } from "./memory-sub-page-storage.js";
 import { SearchPalette } from "../components/search-palette.js";
@@ -277,12 +285,6 @@ const projectContextMenuSize: SidebarMenuSize = {
   margin: 8,
   gap: 4
 };
-const projectCreateMenuSize: SidebarMenuSize = {
-  width: 260,
-  height: 280,
-  margin: 8,
-  gap: 2
-};
 const sidebarMenuOverlayZIndex = 9999;
 const SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH = 10;
 /** Project names are shown in a narrow row, so they follow what the create dialog accepts. */
@@ -368,6 +370,19 @@ export function resolveSelectedSidebarProjectId(
   if (agent.currentSessionKey) return null;
   const draft = agent.draftTargetsByScope[agentChatScopeKey(null, agent.newChatRequestId)];
   return draft?.kind === "project" ? draft.projectId : null;
+}
+
+/**
+ * 项目建好后落在哪儿。没打算共享的项目直接进入它的新会话面板（与 Codex 一致：落地就能开始写第一句话）；
+ * 试过共享的那条路径回看板——共享成功后的授权询问、共享失败与数量上限的提示都挂在看板上。
+ */
+export function resolveCreatedProjectDestination(
+  localProjectId: string,
+  shareRequested: boolean
+): { kind: "board" } | { kind: "newSession"; target: WebuiSessionTarget } {
+  return shareRequested
+    ? { kind: "board" }
+    : { kind: "newSession", target: { kind: "project", projectId: localProjectId } };
 }
 
 export function AppFrame(props: AppFrameProps) {
@@ -496,7 +511,11 @@ export function AppFrame(props: AppFrameProps) {
   const notifications = useOptionalNotificationCenter();
   const collabDecisions = collabSnapshot.decisions;
   const collabProjectIds = collabSnapshot.projects;
+  /** 新手引导进行中：演示自己就是主角，顶上「已加入「…」」这类一次性提示不抢镜。 */
+  const demoGuideActive = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState).status === "active";
   useEffect(() => {
+    // 演示一结束这一条会随依赖变化再跑一次：还没提示过的结果不会丢。
+    if (demoGuideActive) return;
     if (!notifications || collabDecisions.length === 0) return;
     const seen = readSeenDecisions();
     const announced = freshDecisionAnnouncements(collabDecisions, (collabProjectIds ?? []).map((project) => project.id), seen);
@@ -516,7 +535,7 @@ export function AppFrame(props: AppFrameProps) {
         });
       }
     }
-  }, [notifications, collabDecisions, collabProjectIds, t]);
+  }, [notifications, collabDecisions, collabProjectIds, demoGuideActive, t]);
 
   /**
    * A rename by the owner changes what every member reads. Their local project keeps the name on their own
@@ -540,6 +559,8 @@ export function AppFrame(props: AppFrameProps) {
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   /** 新建弹窗打开时「与成员共享」的初始状态：只有新功能介绍的最后一页会要求默认开启。 */
   const [createProjectShare, setCreateProjectShare] = useState(false);
+  /** 这次新建是从新功能大卡点进来的体验入口：引导先只亮「创建项目」。 */
+  const [createProjectDemo, setCreateProjectDemo] = useState(false);
   const [joinProjectOpen, setJoinProjectOpen] = useState(false);
   /** The online project the person is about to leave, while the confirmation is open. */
   const [leaveOnlineProjectId, setLeaveOnlineProjectId] = useState<string | null>(null);
@@ -549,14 +570,16 @@ export function AppFrame(props: AppFrameProps) {
   useEffect(() => {
     if (!createPending) return;
     setCreateProjectShare(collabSnapshot.createShareDefault);
+    setCreateProjectDemo(collabSnapshot.createDemo);
     setCreateProjectOpen(true);
+    // 体验入口：弹窗还没建出项目，引导先停在这里，蒙版只亮「创建项目」。
+    if (collabSnapshot.createDemo) startDemoGuideBeforeProject();
     consumeCreateProjectRequest();
-  }, [createPending, collabSnapshot.createShareDefault]);
+  }, [createPending, collabSnapshot.createShareDefault, collabSnapshot.createDemo]);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState | null>(null);
-  const [projectCreateMenuAnchor, setProjectCreateMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [inlineRename, setInlineRename] = useState<SidebarInlineRename | null>(null);
   const [inlineRenameDraft, setInlineRenameDraft] = useState("");
   const [removeProjectId, setRemoveProjectId] = useState<string | null>(null);
@@ -735,7 +758,7 @@ export function AppFrame(props: AppFrameProps) {
   useEffect(() => {
     if (
       typeof document === "undefined"
-      || (!taskListMenuAnchor && !taskContextMenu && !projectContextMenu && !projectCreateMenuAnchor && !archiveConfirmSessionKey)
+      || (!taskListMenuAnchor && !taskContextMenu && !projectContextMenu && !archiveConfirmSessionKey)
     ) {
       return;
     }
@@ -745,7 +768,6 @@ export function AppFrame(props: AppFrameProps) {
       setSortMenuOpen(false);
       setTaskContextMenu(null);
       setProjectContextMenu(null);
-      setProjectCreateMenuAnchor(null);
       setArchiveConfirmSessionKey(null);
     };
     const closeOnOutsidePointerDown = (event: PointerEvent) => {
@@ -760,7 +782,6 @@ export function AppFrame(props: AppFrameProps) {
       // must not clear archiveConfirmSessionKey before its click handler runs.
       if (
         target.closest(".app-frame-sidebar-menu")
-        || target.closest(".app-frame-workspace-picker-menu")
         || target.closest(".app-frame-task-row--confirming")
       ) {
         return;
@@ -779,7 +800,7 @@ export function AppFrame(props: AppFrameProps) {
       document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [archiveConfirmSessionKey, projectContextMenu, projectCreateMenuAnchor, taskContextMenu, taskListMenuAnchor]);
+  }, [archiveConfirmSessionKey, projectContextMenu, taskContextMenu, taskListMenuAnchor]);
 
   function refreshAgentTasks(): void {
     taskStateCoordinator.refreshTaskState({ reason: "manual" });
@@ -949,8 +970,8 @@ export function AppFrame(props: AppFrameProps) {
     });
   }
 
-  function expandTaskAncestors(task: AgentTaskView) {
-    for (const key of resolveTaskAncestorGroupKeys(task, state.agent.projects, showingArchived)) {
+  function expandSidebarGroups(keys: string[]) {
+    for (const key of keys) {
       if (!state.agent.sidebarState.collapsed_groups[key]) continue;
       void enqueueSidebarIntent({
         id: nextAgentSidebarMutationId(),
@@ -961,14 +982,18 @@ export function AppFrame(props: AppFrameProps) {
     }
   }
 
-  function selectSidebarWorkspace(projectId: string) {
-    setProjectCreateMenuAnchor(null);
-    openNewAgent({ kind: "project", projectId });
+  function expandTaskAncestors(task: AgentTaskView) {
+    expandSidebarGroups(resolveTaskAncestorGroupKeys(task, state.agent.projects, showingArchived));
+  }
+
+  /** 空白草稿落在某个项目时，侧栏要能看见它：折叠着的分组与项目节点一并展开。 */
+  function expandProjectInSidebar(projectId: string) {
+    const project = state.agent.projects.find((candidate) => candidate.id === projectId);
+    expandSidebarGroups([project?.pinned && !showingArchived ? "pinned" : "projects", `project:${projectId}`]);
   }
 
   /** Opens a project's board. The board is the project, so this is one click on the row's name. */
   function openProjectBoard(projectId: string) {
-    setProjectCreateMenuAnchor(null);
     setProjectContextMenu(null);
     handleFirstSidebarInteraction();
     selectCollabProject(projectId);
@@ -1027,7 +1052,6 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function joinProject() {
-    setProjectCreateMenuAnchor(null);
     handleFirstSidebarInteraction();
     setJoinProjectOpen(true);
   }
@@ -1037,7 +1061,6 @@ export function AppFrame(props: AppFrameProps) {
    * the background the person sees would change before they have decided anything.
    */
   function newProject() {
-    setProjectCreateMenuAnchor(null);
     handleFirstSidebarInteraction();
     requestCreateProject();
   }
@@ -1176,7 +1199,6 @@ export function AppFrame(props: AppFrameProps) {
     event.stopPropagation();
     setTaskListMenuAnchor(null);
     setSortMenuOpen(false);
-    setProjectCreateMenuAnchor(null);
     setTaskContextMenu(null);
     cancelInlineRename();
     const target = event.currentTarget;
@@ -1331,7 +1353,6 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function toggleTaskListMenu(anchor: SidebarMenuAnchor) {
-    setProjectCreateMenuAnchor(null);
     setTaskContextMenu(null);
     setProjectContextMenu(null);
     setArchiveConfirmSessionKey(null);
@@ -1704,32 +1725,22 @@ export function AppFrame(props: AppFrameProps) {
               onProjectContextMenu={openProjectMenu}
               onNewProjectTask={(projectId) => openNewAgent({ kind: "project", projectId })}
               headerLeadingAction={(
-                <div className="relative flex items-center">
+                <div className="flex items-center">
                   <button
                     type="button"
-                    className={`app-frame-workspace-add${projectCreateMenuAnchor ? " is-open" : ""}`}
-                    aria-label={t("appFrame.project.add")}
-                    title={t("appFrame.project.add")}
+                    className="app-frame-workspace-add"
+                    aria-label={t("appFrame.project.new")}
+                    title={t("appFrame.project.new")}
                     disabled={state.agent.projectRegistryState === "corrupt" || projectMutationId != null}
                     onClick={(event) => {
                       event.stopPropagation();
                       setTaskListMenuAnchor(null);
                       setSortMenuOpen(false);
-                      const anchor = sidebarMenuAnchorFromRect(event.currentTarget.getBoundingClientRect());
-                      setProjectCreateMenuAnchor((current) => (current ? null : anchor));
+                      newProject();
                     }}
                   >
                     <FolderPlus size={14} strokeWidth={1.75} aria-hidden="true" />
                   </button>
-                  {projectCreateMenuAnchor ? (
-                    <SidebarWorkspacePickerMenu
-                      anchor={projectCreateMenuAnchor}
-                      projects={state.agent.projects}
-                      registryState={state.agent.projectRegistryState}
-                      onSelectProject={selectSidebarWorkspace}
-                      onNewProject={newProject}
-                    />
-                  ) : null}
                 </div>
               )}
             />
@@ -2090,6 +2101,16 @@ export function AppFrame(props: AppFrameProps) {
         }}
         onOpenBoard={openProjectBoard}
       />
+      {/* 项目协作的新手引导：蒙版、说明卡与结束演示都挂在应用根部，跨看板与对话页工作。 */}
+      <CollabDemoGuideHost
+        collab={collabClient}
+        route={state.navigation.currentPath}
+        boardProjectId={boardProjectId}
+        openBoard={openProjectBoard}
+        // 引导从看板回到那条任务：关联任务之后要接着在任务里发消息，当前会话仍是它。
+        openTaskPage={() => dispatch(appActions.navigate("/main"))}
+        onNotice={showCollabNotice}
+      />
       <CollabJoinProjectDialog
         open={joinProjectOpen}
         onCreateProject={() => {
@@ -2120,21 +2141,53 @@ export function AppFrame(props: AppFrameProps) {
         // API Key 模式不连接云端：新建弹窗里不出现「与成员共享」，项目就只建在本机。
         shareAvailable={collabEnabled}
         defaultShare={createProjectShare}
-        onClose={() => setCreateProjectOpen(false)}
-        onCreated={(localProjectId) => {
+        demo={createProjectDemo}
+        onClose={() => {
+          // 人自己关掉弹窗：引导随之收起，什么都不发生；之后手建第一个协作项目走的是原来那套。
           setCreateProjectOpen(false);
-          // Only now, once the project exists, does the window move to its board.
-          openProjectBoard(localProjectId);
+          dismissDemoGuideBeforeProject();
         }}
-        onShared={(project) => addCollabProject(project)}
+        onCreated={(localProjectId, outcome) => {
+          setCreateProjectOpen(false);
+          // 没共享出去就没有演示：收起「建项目之前」的引导，项目照常建在本机。
+          if (!outcome.shareRequested) dismissDemoGuideBeforeProject();
+          // Only now, once the project exists, does the window move on.
+          const destination = resolveCreatedProjectDestination(localProjectId, outcome.shareRequested);
+          if (destination.kind === "board") {
+            openProjectBoard(localProjectId);
+            return;
+          }
+          // 本机项目直接进入它的新会话：先把侧栏里的这一行露出来，再打开空白草稿。
+          expandProjectInSidebar(localProjectId);
+          openNewAgent(destination.target);
+        }}
+        onShared={(project) => {
+          addCollabProject(project);
+          // 新手引导只认云端：项目视图里 `demo.active` 为真才开始，其余一律按普通项目处理。
+          if (project.demo?.active && collabClient) {
+            startDemoGuide({
+              client: collabClient,
+              projectId: project.id,
+              localProjectId: null,
+              memberUserId: project.demo.memberUserId,
+              memberName: project.demo.memberName
+            });
+          } else {
+            // 云端说这次不演示（开关关了、名单外、已经体验过）：静默收起，不报错也不提示。
+            dismissDemoGuideBeforeProject();
+          }
+        }}
         onJoinProject={() => {
           // 同一个弹窗的另一种模式：关掉新建、打开加入，位置与尺寸都不变。
           setCreateProjectOpen(false);
+          // 体验入口的另一条路：「加入项目」不是这次演示要走的，蒙版随之收起。
+          dismissDemoGuideBeforeProject();
           setJoinProjectOpen(true);
         }}
         onShareFailed={(reason) => {
           // The project is usable on this computer; only sharing needs another try from its settings.
           console.warn(`Project created without sharing: ${reason}`);
+          dismissDemoGuideBeforeProject();
           // 看板顶部提示：协作项目服务暂不可用，等它恢复后可在项目配置里重试。
           showCollabNotice(t("collab.notice.shareUnavailable"));
           dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
@@ -2145,13 +2198,17 @@ export function AppFrame(props: AppFrameProps) {
         onShareLimitReached={(limit) => {
           // 额度用完不是故障：项目照建在本机，提示要说清上限是多少、怎么腾出额度。
           console.warn(`Project created without sharing: owned project limit ${limit} reached`);
+          dismissDemoGuideBeforeProject();
           showCollabNotice(t("collab.notice.shareQuotaExceeded", { limit }));
           dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
             source: "sidebar",
             message: "collab.create.shareQuotaExceeded"
           })));
         }}
-        onBound={(projectId, localProjectId) => markCollabProjectBound(projectId, localProjectId)}
+        onBound={(projectId, localProjectId) => {
+          markCollabProjectBound(projectId, localProjectId);
+          demoGuideBoundLocalProject(projectId, localProjectId);
+        }}
         onBindFailed={(reason) => {
           // The project exists; only its local record is missing, so the reason is logged rather than shown raw.
           console.warn(`Project created without its local record: ${reason}`);
@@ -2809,6 +2866,11 @@ function ProjectRow(props: {
   onNewTask: () => void;
 }) {
   const { t } = useTranslation();
+  // 新手引导的看板导览讲到「侧栏新建任务」时，亮的就是这一行右侧的「＋」：只有演示项目才算。
+  const demoState = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState);
+  const demoNewTaskAnchor = demoState.status === "active"
+    && demoState.phase === "tour-new-task"
+    && demoState.localProjectId === props.project.id;
   return (
     <div
       className={`app-frame-project-row${props.selected ? " app-frame-project-row--selected" : ""}`}
@@ -2869,10 +2931,12 @@ function ProjectRow(props: {
           <SidebarMarqueeText text={props.project.name} className="app-frame-project-title" />
         )}
       </button>
-      <div className="app-frame-project-row__actions">
+      {/* 这一行的「＋」平时只在鼠标划过时出现；引导讲到它时要一直露着，否则亮区里空着一块。 */}
+      <div className="app-frame-project-row__actions" style={demoNewTaskAnchor ? { opacity: 1, pointerEvents: "auto" } : undefined}>
         <TaskIconButton
           label={t("appFrame.project.newTask")}
           tooltip={false}
+          demoGuideAnchor={demoNewTaskAnchor ? "sidebar-new-task" : undefined}
           onClick={props.onNewTask}
         >
           <MessageSquarePlus size={14} />
@@ -3163,6 +3227,8 @@ function TaskIconButton(props: {
   danger?: boolean;
   /** Floating tooltip; keep false for self-evident icons revealed on row hover. */
   tooltip?: boolean;
+  /** 新手引导的亮区锚点：只有被讲到的那一个按钮带它。 */
+  demoGuideAnchor?: string;
   children: ReactNode;
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
@@ -3176,6 +3242,7 @@ function TaskIconButton(props: {
     <button
       type="button"
       aria-label={props.label}
+      {...(props.demoGuideAnchor ? { "data-demo-guide": props.demoGuideAnchor } : {})}
       onClick={(event) => {
         event.stopPropagation();
         props.onClick(event);
@@ -3217,124 +3284,6 @@ function InlineConfirmButton(props: {
 export function sameWorkspacePath(left: string, right: string): boolean {
   const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/u, "");
   return normalize(left) === normalize(right);
-}
-
-function formatSidebarCompactWorkspacePath(rootPath: string, maxWidth = 28): string {
-  const displayPath = formatWorkspacePath(rootPath).replace(/\/+$/, "");
-  if (displayPath.length <= maxWidth) return displayPath;
-  const folder = displayPath.split("/").filter(Boolean).pop() ?? displayPath;
-  const prefix = displayPath.slice(0, Math.max(4, maxWidth - folder.length - 4));
-  return `${prefix}.../${folder}`;
-}
-
-function filterSidebarWorkspaceProjects(projects: MemmyAgentProject[], query: string): MemmyAgentProject[] {
-  const normalized = query.trim().toLocaleLowerCase();
-  const sorted = [...projects].sort((left, right) =>
-    right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
-  );
-  if (!normalized) return sorted;
-  return sorted.filter((project) => {
-    const displayPath = formatWorkspacePath(project.rootPath).toLocaleLowerCase();
-    return project.name.toLocaleLowerCase().includes(normalized)
-      || project.rootPath.toLocaleLowerCase().includes(normalized)
-      || displayPath.includes(normalized);
-  });
-}
-
-function SidebarWorkspacePickerMenu(props: {
-  anchor: SidebarMenuAnchor;
-  projects: MemmyAgentProject[];
-  registryState: "ready" | "corrupt";
-  onSelectProject: (projectId: string) => void;
-  /** Opens the one project dialog, which also switches to joining a shared project inside itself. */
-  onNewProject: () => void;
-}) {
-  const { t } = useTranslation();
-  const [query, setQuery] = useState("");
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const visibleProjects = props.registryState === "ready"
-    ? filterSidebarWorkspaceProjects(props.projects, query)
-    : [];
-
-  useEffect(() => {
-    searchInputRef.current?.focus();
-  }, []);
-
-  if (typeof document === "undefined" || typeof window === "undefined") {
-    return null;
-  }
-
-  const overlayStyle = resolveSidebarContextMenuOverlayStyle(
-    { kind: "anchor", anchor: props.anchor },
-    { width: window.innerWidth, height: window.innerHeight },
-    projectCreateMenuSize
-  );
-  const menu = (
-    <div
-      className="home-project-picker__menu app-frame-workspace-picker-menu"
-      style={overlayStyle}
-      onClick={(event) => event.stopPropagation()}
-    >
-      <label className="home-project-picker__search">
-        <input
-          ref={searchInputRef}
-          value={query}
-          placeholder={t("home.project.search")}
-          aria-label={t("home.project.search")}
-          onChange={(event) => setQuery(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              event.preventDefault();
-              event.stopPropagation();
-            }
-          }}
-        />
-      </label>
-      <div className="home-project-picker__list" role="listbox">
-        <div className="home-project-picker__projects" role="presentation">
-          {props.registryState === "corrupt" ? (
-            <p className="home-project-picker__empty">{t("home.project.registryUnavailable")}</p>
-          ) : visibleProjects.length === 0 ? (
-            <p className="home-project-picker__empty" role="status">{t("home.project.empty")}</p>
-          ) : visibleProjects.map((project) => (
-            <button
-              key={project.id}
-              type="button"
-              role="option"
-              aria-selected="false"
-              className="home-project-picker__option"
-              title={formatWorkspacePath(project.rootPath)}
-              onClick={() => props.onSelectProject(project.id)}
-            >
-              <Folder size={13} className="shrink-0" aria-hidden="true" />
-              <span className="home-project-picker__path truncate">
-                {formatSidebarCompactWorkspacePath(project.rootPath)}
-              </span>
-            </button>
-          ))}
-        </div>
-        {props.registryState === "ready" ? (
-          <>
-            <div className="home-project-picker__divider" role="separator" />
-            <div className="home-project-picker__actions" role="presentation">
-              <button
-                type="button"
-                role="option"
-                aria-selected="false"
-                className="home-project-picker__option home-project-picker__option--action"
-                onClick={props.onNewProject}
-              >
-                <Plus size={13} strokeWidth={1.75} className="shrink-0 home-project-picker__action-icon" aria-hidden="true" />
-                <span>{t("appFrame.project.new")}</span>
-              </button>
-            </div>
-          </>
-        ) : null}
-      </div>
-    </div>
-  );
-
-  return createPortal(menu, document.body);
 }
 
 function TaskListActionsMenu(props: {

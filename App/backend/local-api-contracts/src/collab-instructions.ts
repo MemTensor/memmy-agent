@@ -20,12 +20,17 @@
  *         { "sourceId": "cursor", "groupId": "/Users/me/work/MemOS.code-workspace" },
  *         { "sourceId": "codex", "groupId": "01a17657-0cd5-7be0-a611-3fdcd387e8ae" }
  *       ],
+ *       "name": "MemOS",
+ *       "members": ["孙起", "张三"],
  *       "text": "本项目负责 Memmy 桌面端的研发。",
  *       "updatedAt": "2026-10-28T13:02:11.000Z"
  *     }
  *   }
  * }
  * ```
+ *
+ * <p>条目代表的是「这个目录属于一个协作项目」，不只是「这个项目有背景与规范」：项目没写背景与规范时
+ * `text` 是空串，条目照样存在，{@link renderCollabProjectContext} 会省掉这一段、只说明项目与成员。</p>
  */
 import { z } from "zod";
 
@@ -42,6 +47,23 @@ export const MAX_COLLAB_INSTRUCTIONS_ENTRIES = 200;
 
 /** 一个项目最多记多少个会话单位：关联的 Agent 分组数量级，再多也不该无限增长。 */
 export const MAX_COLLAB_INSTRUCTION_SCOPES = 200;
+
+/**
+ * 项目名的长度上限。名字进注入文本的第一句与标签属性，不参与决策，所以只按「够写一个项目名」定。
+ * 写入时按它截断，读取侧的上限放宽：名字过长不该让整份文件解析失败、连带别的项目也拿不到指令。
+ */
+export const MAX_COLLAB_PROJECT_NAME_CHARS = 120;
+
+/** 一个项目最多记多少个成员名：与云端成员上限同量级，再多也不该无限增长。 */
+export const MAX_COLLAB_PROJECT_MEMBERS = 200;
+
+/** 单个成员显示名的长度上限。 */
+export const MAX_COLLAB_PROJECT_MEMBER_NAME_CHARS = 64;
+
+/** 读取侧对这两个字段的上限：宽松到不会被历史或云端数据撑破，写入时再按上面的常量收紧。 */
+const READ_NAME_MAX = 4_096;
+const READ_MEMBER_NAME_MAX = 4_096;
+const READ_MEMBERS_MAX = 1_000;
 
 /** 代表这台机器上 Memmy 自己的会话：它们的单位就是项目的工作目录。 */
 export const MEMMY_SCOPE_SOURCE = "memmy";
@@ -70,18 +92,32 @@ export const CollabInstructionsEntrySchema = z.object({
   /** 老版本的单个目录与目录列表；只用于读取历史文件，写入一律用 scopes。 */
   directories: z.array(z.string().max(4_096)).max(64).optional(),
   directory: z.string().max(4_096).optional(),
+  /**
+   * 项目名。没有背景与规范的项目也有条目，靠它告诉 Agent「这个目录属于哪个协作项目」，
+   * 所以老条目没有这个字段是正常的，读到 undefined 时按「不知道名字」处理。
+   */
+  name: z.string().max(READ_NAME_MAX).optional(),
+  /** 成员显示名；同样可能缺省，缺省时注入文本里不提成员。 */
+  members: z.array(z.string().max(READ_MEMBER_NAME_MAX)).max(READ_MEMBERS_MAX).optional(),
+  /** 背景与规范全文；项目没设定时是空串——条目仍然代表「这个目录属于一个协作项目」。 */
   text: z.string().max(MAX_COLLAB_INSTRUCTIONS_CHARS * 4),
   updatedAt: z.string().max(40)
-}).strict().transform((entry) => ({
-  scopes: normalizeScopes([
-    ...(entry.scopes ?? []),
-    // 老数据只有目录：当作「任何来源、按目录覆盖」，迁移后方向仍然正确。
-    ...(entry.directories ?? []).map((directory) => ({ sourceId: ANY_SOURCE, groupId: directory })),
-    ...(entry.directory ? [{ sourceId: ANY_SOURCE, groupId: entry.directory }] : [])
-  ]),
-  text: entry.text,
-  updatedAt: entry.updatedAt
-}));
+}).strict().transform((entry) => {
+  const name = collabProjectName(entry.name);
+  const members = collabProjectMembers(entry.members);
+  return {
+    scopes: normalizeScopes([
+      ...(entry.scopes ?? []),
+      // 老数据只有目录：当作「任何来源、按目录覆盖」，迁移后方向仍然正确。
+      ...(entry.directories ?? []).map((directory) => ({ sourceId: ANY_SOURCE, groupId: directory })),
+      ...(entry.directory ? [{ sourceId: ANY_SOURCE, groupId: entry.directory }] : [])
+    ]),
+    ...(name ? { name } : {}),
+    ...(members.length ? { members } : {}),
+    text: entry.text,
+    updatedAt: entry.updatedAt
+  };
+});
 export type CollabInstructionsEntry = z.infer<typeof CollabInstructionsEntrySchema>;
 
 export const CollabInstructionsFileSchema = z.object({
@@ -242,4 +278,73 @@ export function collabInstructionsText(value: string | null | undefined): string
   if (!text) return "";
   const chars = [...text];
   return chars.length <= MAX_COLLAB_INSTRUCTIONS_CHARS ? text : chars.slice(0, MAX_COLLAB_INSTRUCTIONS_CHARS).join("");
+}
+
+/**
+ * 项目名：换行与连续空白换成单个空格，按上限截断；没有名字时返回空串。
+ *
+ * <p>名字只是提示词里的一句话与一个标签属性，不是键：写与读都按同一套规则归一，
+ * 存进去的和渲染出来的一致，也方便写入侧判断「内容没变就不重写文件」。</p>
+ */
+export function collabProjectName(value: string | null | undefined): string {
+  if (typeof value !== "string") return "";
+  return truncateChars(value.replace(/\s+/gu, " ").trim(), MAX_COLLAB_PROJECT_NAME_CHARS);
+}
+
+/** 成员显示名：去换行、去空项、按名字去重；超过人数上限的部分不再记。 */
+export function collabProjectMembers(value: readonly (string | null | undefined)[] | null | undefined): string[] {
+  if (!value?.length) return [];
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const raw of value) {
+    const name = typeof raw === "string" ? truncateChars(raw.replace(/\s+/gu, " ").trim(), MAX_COLLAB_PROJECT_MEMBER_NAME_CHARS) : "";
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    kept.push(name);
+    if (kept.length >= MAX_COLLAB_PROJECT_MEMBERS) break;
+  }
+  return kept;
+}
+
+function truncateChars(value: string, limit: number): string {
+  const chars = [...value];
+  return chars.length <= limit ? value : chars.slice(0, limit).join("").trim();
+}
+
+/**
+ * 注入用的协作项目段：这个目录属于哪个项目、成员有谁、背景与规范是什么。
+ *
+ * <p>它是「项目背景」而不是「指令全文」，所以三种缺省都要能出文：没有背景与规范时只留项目与成员，
+ * 没有成员时只提项目，两者都没有时也要能说清「这个目录属于一个协作项目」——不然 Agent 在已关联的
+ * 目录里仍然不知道要先查项目任务。</p>
+ */
+export interface CollabProjectContextInput {
+  /** 项目名；不知道时留空。 */
+  name?: string | null;
+  /** 成员显示名；为空时不提成员。 */
+  members?: readonly string[] | null;
+  /** 背景与规范全文；为空时省去这一段。 */
+  text?: string | null;
+}
+
+export function renderCollabProjectContext(input: CollabProjectContextInput): string {
+  const name = collabProjectName(input.name);
+  const members = collabProjectMembers(input.members);
+  const text = collabInstructionsText(input.text);
+  const lines = [
+    name ? `<collab_project name="${collabProjectAttribute(name)}">` : "<collab_project>",
+    `当前工作目录属于${name ? ` Memmy 协作项目「${name}」` : "一个 Memmy 协作项目"}`
+      + `${members.length ? `，成员有${members.join("、")}` : ""}`
+      + "，成员在各自 Agent 里做过的任务都共享在这个项目中。",
+    "用户问到这个项目里以前做过什么、怎么定的、为什么这样做、谁在做、进展到哪时，"
+      + "即使没提成员和项目，也先用 memmy-project 在本项目的任务里查；问代码现在是什么样，以代码为准。"
+  ];
+  if (text) lines.push("", "所有者设定了以下背景与规范，在本项目中的任务里遵循：", "", text);
+  lines.push("</collab_project>");
+  return lines.join("\n");
+}
+
+/** 项目名进属性前收拾一下：引号换成单引号、尖括号去掉，免得把标签拆坏。 */
+function collabProjectAttribute(name: string): string {
+  return name.replace(/"/gu, "'").replace(/[<>]/gu, "");
 }

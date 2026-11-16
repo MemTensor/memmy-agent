@@ -2,9 +2,21 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AssistInboxItem, AssistRequest, AssistTaskView, AssistThread, CollabClient } from "../../api/collab-client.js";
+import type {
+  AssistInboxItem,
+  AssistRequest,
+  AssistSafety,
+  AssistTaskView,
+  AssistThread,
+  CollabClient
+} from "../../api/collab-client.js";
 import { ApiRequestError } from "../../api/http.js";
 import { consumeAssistFocus, getAssistFocus } from "../../app/collab-assist-focus.js";
+import {
+  getDemoGuideState,
+  resetDemoGuideStore,
+  setDemoGuideStateForTest
+} from "../../app/collab-demo-guide-store.js";
 import { loadCollabProjects, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { ASSIST_PANEL_WIDTH_STORAGE_KEY, CollabAssistConversation } from "../collab-assist-conversation.js";
@@ -102,6 +114,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  resetDemoGuideStore();
 });
 
 /** 等读取限时授权的两三个请求落地并重画。 */
@@ -207,6 +220,41 @@ describe("成员协助的授权弹窗", () => {
     expect(button("Cursor")?.getAttribute("aria-pressed")).toBe("true");
     await act(async () => button("允许")?.click());
     expect(onDecided).toHaveBeenCalledWith({ action: "allow", agent: "cursor", scope: "once" });
+  });
+
+  it("审查结论晚一步回来时补上原因行，已经选好的 Agent 不变", async () => {
+    const onDecided = vi.fn();
+    const collab = client();
+    const page = (safety: AssistSafety | null) => (
+      <I18nProvider language="zh-CN">
+        <CollabAssistDialog
+          open
+          request={inbox}
+          safety={safety}
+          collab={collab}
+          onDecided={onDecided}
+          onClose={() => undefined}
+        />
+      </I18nProvider>
+    );
+
+    await act(async () => root.render(page(null)));
+    await flush();
+    expect(document.body.textContent).not.toContain("需要你确认：");
+    await act(async () => button("Claude Code")?.click());
+    expect(button("Claude Code")?.getAttribute("aria-pressed")).toBe("true");
+
+    // 宿主下一次轮询把审查结论传进来：原因行出现，她选好的 Agent 与展开状态都不动。
+    await act(async () => root.render(page({
+      executor: { status: "confirm", reason: "附带的脚本会删除下载目录里的文件" }
+    })));
+
+    expect(document.body.textContent).toContain("需要你确认：附带的脚本会删除下载目录里的文件");
+    expect(button("Claude Code")?.getAttribute("aria-pressed")).toBe("true");
+    // 没有因为换了一份数据就重新拉一次 Agent 候选、把选择清掉。
+    expect(collab.assistAgents).toHaveBeenCalledTimes(1);
+    await act(async () => button("允许")?.click());
+    expect(onDecided).toHaveBeenCalledWith({ action: "allow", agent: "claude_code", scope: "once" });
   });
 
   it("拒绝时不带执行方", async () => {
@@ -946,6 +994,107 @@ describe("成员协助的宿主", () => {
     expect(document.body.textContent).not.toContain("结束授权");
   });
 
+  it("演出演示时允许之后也进那条 Memmy 任务，不在看板上停下", async () => {
+    // 引导正停在第四步的授权弹窗上。
+    setDemoGuideStateForTest({
+      status: "active",
+      phase: "help-dialog",
+      projectId: "p1",
+      localProjectId: "local-1",
+      memberUserId: REQUESTER.userId,
+      memberName: "孙起",
+      error: null,
+      done: { task: true, ask: true, help: false },
+      skipped: { task: false, ask: false, help: false },
+      askDelivered: false,
+      askTurnEnded: false,
+      prefill: null,
+      endReason: null,
+      cloudEnded: false
+    });
+    const onOpenTask = vi.fn();
+    const onOpenBoard = vi.fn();
+    const collab = client({
+      assistInbox: vi.fn().mockResolvedValue({ requests: [inbox] }),
+      decideAssist: vi.fn().mockResolvedValue(request({ status: "running", agent: "memmy", scope: "once" })),
+      assistExecutions: vi.fn().mockResolvedValue([{
+        requestId: "r1",
+        threadId: "t1",
+        projectId: "p1",
+        agent: "memmy",
+        status: "running",
+        steps: [],
+        conversationId: "chat-1",
+        startedAt: "2026-11-04T08:42:00Z",
+        finishedAt: null,
+        failure: null
+      }])
+    });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistHost collab={collab} enabled onOpenTask={onOpenTask} onOpenBoard={onOpenBoard} />
+      </I18nProvider>
+    ));
+    await act(async () => button("允许")?.click());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+
+    // 与正式逻辑同一条路：进那条任务，让人看到协助条、执行过程与结果。
+    expect(onOpenTask).toHaveBeenCalledWith("chat-1");
+    expect(onOpenBoard).not.toHaveBeenCalled();
+    expect(getDemoGuideState().phase).toBe("help-running");
+  });
+
+  it("演示里拿不到那条 Memmy 任务时，这一步按没有完成处理", async () => {
+    setDemoGuideStateForTest({
+      status: "active",
+      phase: "help-dialog",
+      projectId: "p1",
+      localProjectId: "local-1",
+      memberUserId: REQUESTER.userId,
+      memberName: "孙起",
+      error: null,
+      done: { task: true, ask: true, help: false },
+      skipped: { task: false, ask: false, help: false },
+      askDelivered: false,
+      askTurnEnded: false,
+      prefill: null,
+      endReason: null,
+      cloudEnded: false
+    });
+    const onOpenTask = vi.fn();
+    const collab = client({
+      assistInbox: vi.fn().mockResolvedValue({ requests: [inbox] }),
+      decideAssist: vi.fn().mockResolvedValue(request({ status: "running", agent: "memmy", scope: "once" })),
+      // 执行方那边失败了：不会再有任务可进，不等满 15 秒。
+      assistExecutions: vi.fn().mockResolvedValue([{
+        requestId: "r1",
+        threadId: "t1",
+        projectId: "p1",
+        agent: "memmy",
+        status: "failed",
+        steps: [],
+        conversationId: null,
+        startedAt: "2026-11-04T08:42:00Z",
+        finishedAt: null,
+        failure: "本机任务没有建起来"
+      }])
+    });
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistHost collab={collab} enabled onOpenTask={onOpenTask} />
+      </I18nProvider>
+    ));
+    await act(async () => button("允许")?.click());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+
+    expect(onOpenTask).not.toHaveBeenCalled();
+    expect(getDemoGuideState().error).toBe("这次协助没有执行成功。");
+  });
+
   it("does not count requests of the project that is open on the board", async () => {
     resetCollabProjectsStore();
     await loadCollabProjects({
@@ -970,6 +1119,38 @@ describe("成员协助的宿主", () => {
     ));
     expect(document.body.textContent).toContain("有 1 条协助请求待处理");
     resetCollabProjectsStore();
+  });
+
+  it("限时授权的请求在审查结论要求确认后弹出授权弹窗", async () => {
+    vi.useFakeTimers();
+    try {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+      const granted = { ...inbox, granted: true, grantAgent: "claude_code", grantExpiresAt: null };
+      const assistInbox = vi.fn()
+        .mockResolvedValueOnce({ requests: [granted] })
+        .mockResolvedValue({
+          requests: [{
+            ...granted,
+            safety: { executor: { status: "confirm", reason: "附带的脚本会删除下载目录里的文件" } }
+          }]
+        });
+      await act(async () => root.render(
+        <I18nProvider language="zh-CN">
+          <CollabAssistHost collab={client({ assistInbox })} enabled />
+        </I18nProvider>
+      ));
+      // 结论还没落地：限时授权有效，先不打扰她。
+      expect(document.body.textContent).not.toContain("孙起请求你的电脑协助");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      // 结论要求她看过：和没有授权的请求一样弹出授权弹窗，原因行一起出来。
+      expect(document.body.textContent).toContain("孙起请求你的电脑协助");
+      expect(document.body.textContent).toContain("需要你确认：附带的脚本会删除下载目录里的文件");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("请求在别处处理掉之后，开着的授权弹窗自己关上", async () => {
@@ -1048,7 +1229,7 @@ describe("成员协助的宿主", () => {
 });
 
 describe("项目设置的成员协助", () => {
-  it("接收协助请求默认关闭，关闭时不列限时授权；打开后列出剩余时间", async () => {
+  it("接收协助请求默认关闭，说明收在问号里；打开后在同一个字段里列出剩余时间", async () => {
     const expiresAt = new Date(Date.now() + 42 * 60_000 + 20_000).toISOString();
     const collab = client({
       assistReceiving: vi.fn().mockResolvedValue({ projectId: "p1", enabled: false }),
@@ -1076,14 +1257,21 @@ describe("项目设置的成员协助", () => {
 
     const toggle = document.querySelector<HTMLButtonElement>("[role=switch]");
     expect(document.body.textContent).toContain("接收协助请求");
-    expect(document.body.textContent).toContain("成员可以请你电脑上的 Agent 执行任务，每次都会先问你");
+    // 说明不常驻：点问号才出现。
+    expect(document.body.textContent).not.toContain("成员可以请你电脑上的 Agent 执行任务");
+    const help = document.querySelector<HTMLButtonElement>("button[aria-label='协助说明']")!;
+    await act(async () => help.click());
+    expect(document.querySelector("[role='note']")?.textContent).toContain("成员可以请你电脑上的 Agent 执行任务，每次都会先问你");
+    // 点问号只看说明，不切换开关。
+    expect(collab.setAssistReceiving).not.toHaveBeenCalled();
     expect(toggle?.getAttribute("aria-checked")).toBe("false");
-    expect(document.body.textContent).not.toContain("限时授权");
+    expect(document.querySelector("[aria-label='限时授权']")).toBeNull();
 
     await act(async () => toggle?.click());
+    expect(collab.setAssistReceiving).toHaveBeenCalledTimes(1);
     expect(collab.setAssistReceiving).toHaveBeenCalledWith("p1", true);
-    expect(document.body.textContent).toContain("限时授权");
-    expect(document.body.textContent).toContain("由 Claude Code 执行 · 还剩 43 分钟");
+    expect(document.querySelector("[aria-label='限时授权']")).toBeTruthy();
+    expect(document.body.textContent).toContain("· 还剩 43 分钟");
     // 每日次数上限已经取消：不再说「今天已执行」与「每天最多 20 次」。
     expect(document.body.textContent).not.toContain("今天已执行");
     expect(document.body.textContent).not.toContain("20 次");
@@ -1121,18 +1309,21 @@ describe("项目设置的成员协助", () => {
     ));
     await flush();
 
-    // 整张卡片自带「协助」标题，不依赖外面的弹窗。
-    expect(document.body.textContent).toContain("协助");
+    // 字段自带「接收协助请求」，不依赖外面的弹窗。
+    expect(document.body.textContent).toContain("接收协助请求");
     expect(document.body.textContent).toContain("孙起");
     // 头像上只有首字，名字单独一行。
     expect(document.body.textContent).toContain("孙");
-    expect(document.querySelector("select[aria-label='孙起的请求由哪个 Agent 执行']")).toBeTruthy();
+    // 由哪个 Agent 执行就是下拉本身，文字里不再重复「由 … 执行」。
+    const select = document.querySelector<HTMLSelectElement>("select[aria-label='孙起的请求由哪个 Agent 执行']");
+    expect(select?.value).toBe("claude_code");
+    expect(document.body.textContent).not.toContain("由 Claude Code 执行");
     const revoke = button("结束授权")!;
     expect(revoke.tagName).toBe("BUTTON");
-    expect(revoke.className).toContain("settingsDangerButton");
+    expect(revoke.className).toContain("settingsDangerSoft");
   });
 
-  it("读取协助设置失败时，错误贴在卡片内那一行下面", async () => {
+  it("读取协助设置失败时，错误贴在字段里那一行下面", async () => {
     const collab = client({
       assistReceiving: vi.fn().mockRejectedValue(new Error("boom")),
       assistGrants: vi.fn().mockResolvedValue({ grants: [], dailyLimit: 20 }),
@@ -1147,10 +1338,10 @@ describe("项目设置的成员协助", () => {
 
     const alert = document.querySelector("[role='alert']");
     expect(alert?.textContent).toContain("读取成员协助的设置没有完成");
-    expect(alert?.className).toContain("settingsCardError");
+    expect(alert?.className).toContain("settingsRowError");
   });
 
-  it("没有限时授权时只写「暂无」，不列任何授权行", async () => {
+  it("开启但没有限时授权时什么都不多写", async () => {
     const collab = client({
       assistReceiving: vi.fn().mockResolvedValue({ projectId: "p1", enabled: true }),
       assistGrants: vi.fn().mockResolvedValue({ grants: [], dailyLimit: 20 }),
@@ -1163,11 +1354,12 @@ describe("项目设置的成员协助", () => {
     ));
     await flush();
 
-    expect(document.body.textContent).toContain("限时授权");
-    expect(document.body.textContent).toContain("暂无");
+    expect(document.querySelector("[role=switch]")?.getAttribute("aria-checked")).toBe("true");
+    // 没有授权就不占位置：不写「限时授权 / 暂无」，也没有授权行。
+    expect(document.body.textContent).not.toContain("限时授权");
+    expect(document.body.textContent).not.toContain("暂无");
+    expect(document.querySelector("[aria-label='限时授权']")).toBeNull();
     expect(button("结束授权")).toBeUndefined();
-    expect(document.body.textContent).not.toContain("暂无限时授权。");
-    // 无授权时行内只给说明，右侧没有控件。
     expect(document.querySelector("select")).toBeNull();
   });
 });

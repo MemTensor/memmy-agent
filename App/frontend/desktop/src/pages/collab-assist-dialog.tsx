@@ -9,8 +9,16 @@
  * 到时自动结束，也可以在项目设置里提前结束。
  */
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Folder } from "lucide-react";
-import type { AssistAgent, AssistGrantMinutes, AssistInboxItem, AssistRequest, AssistScope, CollabClient } from "../api/collab-client.js";
+import { AlertTriangle, ChevronDown, ChevronRight, Folder } from "lucide-react";
+import type {
+  AssistAgent,
+  AssistGrantMinutes,
+  AssistInboxItem,
+  AssistRequest,
+  AssistSafety,
+  AssistScope,
+  CollabClient
+} from "../api/collab-client.js";
 import { Button } from "../components/button.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { Modal } from "../components/modal.js";
@@ -18,16 +26,23 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { agentSourceLogoUrl } from "./agent-source-logos.js";
 import { AssistAttachments } from "./collab-assist-attachments.js";
 import { AssistItems } from "./collab-assist-items.js";
-import { DEFAULT_GRANT_MINUTES, GrantDurationPicker, assistWaitedText } from "./collab-assist-view.js";
+import { DEFAULT_GRANT_MINUTES, GrantDurationPicker, assistReviewLine, assistWaitedText } from "./collab-assist-view.js";
 import styles from "./collab-assist-dialog.module.css";
 
 export function CollabAssistDialog(props: {
   open: boolean;
   /** 收到的那条请求：谁发的、要做的事、来自哪个项目。 */
   request: AssistInboxItem | null;
+  /**
+   * 这条请求最新的安全检查：宿主每次轮询收件箱都传进来。审查在弹窗打开之后才完成时，
+   * 原因行靠它出现；`request` 对象保持不变，她在这里做的选择不会被重置。
+   */
+  safety?: AssistSafety | null;
   collab: CollabClient | null;
   /** 她做完选择：允许时带上 Agent 与授权方式（限时带时长），拒绝时只有 action。 */
   onDecided: (decision: { action: "allow" | "reject"; agent?: string; scope?: AssistScope; minutes?: AssistGrantMinutes }) => Promise<void> | void;
+  /** 新手引导的演示中：弹窗是亮区、「允许」是描边目标，弹窗自己的遮罩让给引导遮罩。 */
+  demoAnchor?: boolean;
   /** 关闭弹窗，等于这次先不做选择：请求仍在收件箱里等她。 */
   onClose: () => void;
 }) {
@@ -101,6 +116,10 @@ export function CollabAssistDialog(props: {
   const chosen = agents?.find((item) => item.sourceId === agent) ?? null;
   const agentName = chosen?.name ?? t("collab.assist.executorFallback");
   const waited = assistWaitedText(request.waitingSeconds, t);
+  // 她的 Memmy 检查过之后认为需要她确认：标题下用一行说明为什么，不加块、不加边框。
+  // 宿主传进来的是最新的一份，详情是为附件拉的、可能比收件箱晚一步：哪份有结论就用哪份。
+  const safety = props.safety?.executor ? props.safety : shown.safety;
+  const reviewLine = assistReviewLine({ safety }, t);
   const others = agents?.filter((item) => item.group === "other") ?? [];
 
   async function submit(action: "allow" | "reject") {
@@ -130,13 +149,19 @@ export function CollabAssistDialog(props: {
       className={styles.dialog}
       bodyClassName={styles.body}
       footerClassName={styles.footer}
-      backdropClassName={styles.backdrop}
+      backdropClassName={props.demoAnchor ? `${styles.backdrop} ${styles.backdropYield}` : styles.backdrop}
+      demoGuideAnchor={props.demoAnchor ? "assist-dialog" : undefined}
       footer={(
         <div className={styles.actions}>
           <Button variant="ghost" disabled={busy} onClick={() => void submit("reject")}>
             {t("collab.assist.reject")}
           </Button>
-          <Button variant="primary" disabled={busy || !agent} onClick={() => void submit("allow")}>
+          <Button
+            variant="primary"
+            disabled={busy || !agent}
+            data-demo-guide={props.demoAnchor ? "assist-allow" : undefined}
+            onClick={() => void submit("allow")}
+          >
             {t("collab.assist.allow")}
           </Button>
         </div>
@@ -145,6 +170,12 @@ export function CollabAssistDialog(props: {
       <div className={styles.top}>
         <Memmy pose="shield" size={56} className={styles.mascot} />
         <h2 className={styles.title}>{t("collab.assist.title", { name: requester })}</h2>
+        {reviewLine ? (
+          <p className={styles.review}>
+            <AlertTriangle size={14} className={styles.reviewIcon} aria-hidden="true" />
+            <span>{reviewLine}</span>
+          </p>
+        ) : null}
         {/* 标题下面直接是背景：谁在请求已在标题里，为什么请求由背景说明，不再加一句复述的引导语。 */}
         {shown.reason ? (
           <p className={styles.reason}>

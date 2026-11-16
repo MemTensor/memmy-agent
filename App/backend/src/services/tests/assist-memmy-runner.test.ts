@@ -75,7 +75,14 @@ describe("createMemmyAssistRunner", () => {
     const runner = createMemmyAssistRunner({ client, localProjectId: async (id) => (id === "cloud-p1" ? "local-p1" : null), pollIntervalMs: 1 });
 
     const { result, steps, sessions } = run(runner, { sessionId: "chat-0" });
-    await expect(result).resolves.toEqual({ reply: "macOS 15.6", steps: [{ text: "运行命令 sw_vers", output: "15.6" }], transcript: [], sessionId: "chat-1" });
+    // skipped：按协助规则跳过、没有执行的操作，随结果一起回传（这次没有）。
+    await expect(result).resolves.toEqual({
+      reply: "macOS 15.6",
+      steps: [{ text: "运行命令 sw_vers", output: "15.6" }],
+      transcript: [],
+      skipped: [],
+      sessionId: "chat-1"
+    });
 
     expect(started[0]).toMatchObject({
       projectId: "local-p1",

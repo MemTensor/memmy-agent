@@ -10,6 +10,7 @@ import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
 import { agentReducer, initialAgentState } from "../../state/agent-chat-slice.js";
 import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
+import { zhCNMessages } from "../../i18n/messages.js";
 import type { SlashCommandPaletteItem, SlashCommandStorageLike } from "../agent-command-palette.js";
 import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
 import {
@@ -18,6 +19,7 @@ import {
   ComposerCommandChip,
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
+  composeDemoGuideAssistSend,
   HomePage,
   AgentOperationErrorSlot,
   agentComposerPrimaryAction,
@@ -1730,6 +1732,95 @@ describe("HomePage", () => {
     expect(unchanged).toBe(181);
     expect(grown).toBe(223);
     expect(panel.style.getPropertyValue("--agent-composer-overlay-height")).toBe("223px");
+  });
+
+  it("sends the guide's assist hint to the agent while the bubble keeps the sentence", async () => {
+    // 引导第二步：输入框里只有那一句话，执行提示随内容发给 Agent，气泡里不出现。
+    const sentence = "请小饭团查一下上次分享会一共来了多少人";
+    const hint = zhCNMessages["collab.demo.prefill.askHint"]
+      .replace("{name}", "小饭团")
+      .replace("{member}", "9001");
+    const composed = composeDemoGuideAssistSend({
+      status: "active",
+      phase: "ask-compose",
+      typed: sentence,
+      sentence,
+      hint,
+      content: sentence
+    });
+    expect(composed.displayContent).toBe(sentence);
+    expect(composed.content).toContain(sentence);
+    expect(composed.content).toContain("--member 9001");
+    expect(composed.displayContent).not.toContain("执行提示");
+
+    const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
+    const dispatch = vi.fn();
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-demo",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        submitMessage: sendMessage
+      },
+      content: composed.content,
+      displayContent: composed.displayContent ?? undefined,
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer: vi.fn()
+    })).resolves.toBe(true);
+
+    // 发给 Agent 的内容带着执行提示与 member。
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining("--member 9001")
+    }), 1);
+    // 气泡里只是那一句话，没有提示。
+    const queued = dispatch.mock.calls
+      .map(([action]) => action as { type?: string; content?: string })
+      .find((action) => action.type === "agent/userMessageQueued");
+    expect(queued?.content).toBe(sentence);
+    expect(queued?.content).not.toContain("执行提示");
+  });
+
+  it("names the task after the sentence the person saw", async () => {
+    // 第二步的内容里带着执行提示（含命令与 userId），任务标题不能从正文里取。
+    const sentence = "请小饭团查一下上次分享会一共来了多少人";
+    const onMessageSent = vi.fn();
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-demo",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        submitMessage: vi.fn(async () => ({ status: "accepted" as const }))
+      },
+      content: `${sentence}\n\n（执行提示：memmy-project assist ask --member 9001）`,
+      displayContent: sentence,
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch: vi.fn(),
+      track: vi.fn(),
+      clearComposer: vi.fn(),
+      onMessageSent
+    })).resolves.toBe(true);
+
+    // 发出之后才有 chatId：引导用它在拿到 id 之后把标题显式写成那一句话。
+    expect(onMessageSent).toHaveBeenCalledWith("chat-demo");
+  });
+
+  it("leaves an edited second-step sentence alone, with no hint attached", () => {
+    const sentence = "请小饭团查一下上次分享会一共来了多少人";
+    const typed = "请小饭团查一下上次分享会";
+    const composed = composeDemoGuideAssistSend({
+      status: "active",
+      phase: "ask-compose",
+      typed,
+      sentence,
+      hint: "（执行提示：不要先反问）",
+      content: typed
+    });
+    expect(composed).toEqual({ content: typed, displayContent: null });
   });
 
   it("keeps the Goal command on the wire but shows only its objective", async () => {

@@ -133,11 +133,16 @@ export function JoinProjectModal(props: {
         closeLabel={t("common.close")}
         closeContent={<X size={16} aria-hidden="true" />}
         initialFocusRef={inputRef}
-        className={styles.createModal}
+        className={`${styles.createModal} ${styles.simpleCreateModal}`}
         backdropClassName={styles.backdrop}
+        footerClassName={styles.simpleCreateFooter}
         footer={(
           <>
-            <span />
+            {props.onCreateProject ? (
+              <Button variant="secondary" size="sm" onClick={props.onCreateProject}>
+                {t("collab.join.createEntry")}
+              </Button>
+            ) : <span />}
             <span className={styles.footerButtons}>
               <Button variant="ghost" onClick={props.onClose}>{preview ? t("collab.join.later") : t("collab.cancel")}</Button>
               <Button
@@ -151,20 +156,6 @@ export function JoinProjectModal(props: {
           </>
         )}
       >
-        <div className={styles.projectTabs} role="tablist">
-          <button
-            type="button"
-            role="tab"
-            aria-selected="false"
-            className={styles.projectTab}
-            onClick={props.onCreateProject}
-          >
-            {t("collab.create.title")}
-          </button>
-          <button type="button" role="tab" aria-selected="true" className={`${styles.projectTab} ${styles.projectTabOn}`}>
-            {t("collab.join.pasteTitle")}
-          </button>
-        </div>
         {preview ? (
           <>
             <div className={styles.joinCard}>

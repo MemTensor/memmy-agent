@@ -1,11 +1,14 @@
 /**
- * 协作项目指令的本机缓存：一份文件，按云端项目 id 存。
+ * 协作项目信息的本机缓存：一份文件，按云端项目 id 存。
  *
  * <p>它和本机项目的指令是两个独立的东西：本机指令属于这台电脑上的文件夹（{@code project-instructions-service}），
  * 协作指令属于云端项目，本机只保存一份缓存，供 Memmy 任务与其他 Agent 的钩子只读。因此这里没有
  * 「本机 / 云端」两种来源，也没有降级逻辑：项目停止共享或被删除时，缓存跟着删掉。</p>
  *
- * <p>一条指令的生效范围是「这个项目关联了哪些 Agent 的哪些单位」（见 {@code @memmy/local-api-contracts} 的
+ * <p>条目不只装背景与规范，还记项目名与成员：没有写背景与规范的项目也要有条目，
+ * 否则它关联的目录里的 Agent 不知道「当前目录属于哪个协作项目」，也就不会先去查项目任务。</p>
+ *
+ * <p>一条条目的生效范围是「这个项目关联了哪些 Agent 的哪些单位」（见 {@code @memmy/local-api-contracts} 的
  * collab-instructions）：Claude Code 的目录、Cursor 的 workspace、Codex 的项目，以及 Memmy 自己的项目目录。
  * 写入只发生在这里，读方是只读的另外两个进程。</p>
  */
@@ -16,6 +19,8 @@ import {
   MAX_COLLAB_INSTRUCTIONS_CHARS,
   MAX_COLLAB_INSTRUCTIONS_ENTRIES,
   collabInstructionsFor,
+  collabProjectMembers,
+  collabProjectName,
   emptyCollabInstructionsFile,
   normalizeScopes,
   parseCollabInstructionsFile,
@@ -26,28 +31,48 @@ import {
 } from "@memmy/local-api-contracts";
 
 export interface CollabInstructionsService {
-  /** 某个协作项目当前缓存的指令；没有则返回 null。 */
+  /** 某个协作项目当前缓存的条目（项目名、成员、背景与规范）；没有则返回 null。 */
   read(projectId: string): Promise<CollabInstructionsEntry | null>;
-  /** 某个会话命中的协作项目指令；注入侧只读文件，这里给排障与测试用。 */
+  /**
+   * 某个会话命中的协作项目背景与规范；注入侧只读文件，这里给排障与测试用。
+   * 命中的项目没写背景与规范时返回 null（生产读方改为直接用条目渲染整段）。
+   */
   forQuery(query: CollabInstructionQuery): Promise<{ projectId: string; text: string } | null>;
   /**
-   * 把云端指令与它覆盖的会话单位记进本机缓存：项目所有者保存时与成员读取项目列表时都会走这里。
-   * 文本为空表示云端删除了指令，本机条目一并清掉。
+   * 把项目名、背景与规范连同它覆盖的会话单位记进本机缓存：启动时同步项目列表、成员保存时、
+   * 关联变化时都会走这里。背景与规范为空表示这个项目没设定，条目仍要保留：没设定的项目，
+   * 它关联的目录里也要说明「当前目录属于哪个协作项目」。
    */
   remember(input: CollabInstructionsRememberInput): Promise<void>;
   /** 项目离开或被删除：缓存不再代表任何云端项目，直接丢弃。 */
   forget(projectId: string): Promise<void>;
-  /** 关联的会话单位变了（新增或取消关联）时更新范围，指令内容不动。 */
+  /** 关联的会话单位变了（新增或取消关联）时更新范围；没有条目时建一个。文本与项目名不动。 */
   updateScopes(projectId: string, scopes: readonly CollabInstructionScope[]): Promise<void>;
+  /**
+   * 只刷新项目名与成员，不碰背景与规范与范围；拿到成员列表这类「已有数据」的时机用它。
+   * 没有条目时不建：条目代表「本机关联了这个项目」，只能由范围或 remember 建出来。
+   */
+  updateProjectInfo(projectId: string, info: CollabProjectInfoInput): Promise<void>;
   /** 测试与排障用：文件里的全部条目。 */
   snapshot(): Promise<CollabInstructionsFile>;
 }
 
 export interface CollabInstructionsRememberInput {
   projectId: string;
-  /** 该项目覆盖的会话单位；为空时保留已有范围，不覆盖成空。 */
+  /** 该项目覆盖的会话单位；为空时沿用已有范围，一项都没有就不建条目。 */
   scopes: readonly CollabInstructionScope[];
   text: string;
+  /** 项目名；不传表示这次拿不到名字，保留已有的。 */
+  name?: string | null;
+  /** 成员显示名；不传表示这次拿不到成员，保留已有的。 */
+  members?: readonly string[] | null;
+}
+
+export interface CollabProjectInfoInput {
+  /** 项目名；不传保留已有的。 */
+  name?: string | null;
+  /** 成员显示名；不传保留已有的，传空数组表示这个项目没有别的成员。 */
+  members?: readonly string[] | null;
 }
 
 export interface CollabInstructionsServiceOptions {
@@ -107,6 +132,32 @@ export function createCollabInstructionsService(
     return next;
   }
 
+  /**
+   * 拼一个新条目：名字与成员不传（undefined / null）时沿用已有的，传空串或空数组则是明确清掉。
+   * 背景与规范与范围由调用方决定。
+   */
+  function entryWith(
+    input: {
+      scopes: readonly CollabInstructionScope[];
+      text: string;
+      name?: string | null;
+      members?: readonly string[] | null;
+    },
+    existing: CollabInstructionsEntry | null
+  ): CollabInstructionsEntry {
+    const name = collabProjectName(input.name === undefined || input.name === null ? existing?.name : input.name);
+    const members = input.members === undefined || input.members === null
+      ? (existing?.members ?? [])
+      : collabProjectMembers(input.members);
+    return {
+      scopes: [...input.scopes],
+      ...(name ? { name } : {}),
+      ...(members.length ? { members } : {}),
+      text: input.text,
+      updatedAt: now().toISOString()
+    };
+  }
+
   return {
     async read(projectId) {
       const key = projectId.trim();
@@ -121,7 +172,7 @@ export function createCollabInstructionsService(
       return text ? { projectId: hit.projectId, text } : null;
     },
 
-    /** 写一个项目的条目；文本为空时删除条目，文件里不留空指令。 */
+    /** 写一个项目的条目；文本为空时保留条目、只把文字置空。 */
     async remember(input) {
       const projectId = input.projectId.trim();
       if (!projectId) return;
@@ -133,17 +184,13 @@ export function createCollabInstructionsService(
       await enqueue(async () => {
         const file = await load();
         const existing = file.projects[projectId] ?? null;
-        if (!value) {
-          if (!existing) return;
-          delete file.projects[projectId];
-          await store(file);
-          return;
-        }
         // 同步时可能还没算全范围（例如项目刚建、目录未定），沿用已有范围，不要因为一次缺参把范围冲掉。
         const target = scopes.length ? scopes : (existing?.scopes ?? []);
-        if (!target.length) throw new Error("协作项目没有可生效的会话范围");
-        if (existing && existing.text === value && sameScopes(existing.scopes, target)) return;
-        file.projects[projectId] = { scopes: target, text: value, updatedAt: now().toISOString() };
+        // 本机没有关联这个项目：没有可生效的地方，不凭空造一个条目。
+        if (!target.length) return;
+        const next = entryWith({ scopes: target, text: value, name: input.name, members: input.members }, existing);
+        if (existing && sameEntry(existing, next)) return;
+        file.projects[projectId] = next;
         await store(file);
       });
     },
@@ -162,12 +209,37 @@ export function createCollabInstructionsService(
     async updateScopes(projectId, scopes) {
       const key = projectId.trim();
       const next = normalizeScopes(scopes);
-      if (!key) return;
+      if (!key || !next.length) return;
       await enqueue(async () => {
         const file = await load();
         const existing = file.projects[key];
-        if (!existing || !next.length || sameScopes(existing.scopes, next)) return;
-        file.projects[key] = { ...existing, scopes: next, updatedAt: now().toISOString() };
+        if (existing && sameScopes(existing.scopes, next)) return;
+        // 条目代表「本机关联了这个项目」：范围算出来就建一个，项目名与背景与规范等下一次同步再填。
+        file.projects[key] = {
+          ...(existing ?? { text: "" }),
+          scopes: next,
+          updatedAt: now().toISOString()
+        };
+        await store(file);
+      });
+    },
+
+    async updateProjectInfo(projectId, info) {
+      const key = projectId.trim();
+      if (!key || (info.name === undefined && info.members === undefined)) return;
+      await enqueue(async () => {
+        const file = await load();
+        const existing = file.projects[key];
+        // 没有条目说明本机没关联这个项目：不在这里凭空建一个没有范围的条目。
+        if (!existing) return;
+        const next = entryWith({
+          scopes: existing.scopes,
+          text: existing.text,
+          name: info.name,
+          members: info.members
+        }, existing);
+        if (sameEntry(existing, next)) return;
+        file.projects[key] = next;
         await store(file);
       });
     },
@@ -182,6 +254,18 @@ function sameScopes(left: readonly CollabInstructionScope[], right: readonly Col
   if (left.length !== right.length) return false;
   const keys = new Set(left.map((scope) => `${scope.sourceId}\u0000${scope.groupId}`));
   return right.every((scope) => keys.has(`${scope.sourceId}\u0000${scope.groupId}`));
+}
+
+function sameMembers(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((name, index) => name === right[index]);
+}
+
+/** 内容没变就不重写文件：同步与刷新的时机很密，没必要每次落盘。updatedAt 不参与比较。 */
+function sameEntry(left: CollabInstructionsEntry, right: CollabInstructionsEntry): boolean {
+  return left.text === right.text
+    && (left.name ?? "") === (right.name ?? "")
+    && sameMembers(left.members ?? [], right.members ?? [])
+    && sameScopes(left.scopes, right.scopes);
 }
 
 /**

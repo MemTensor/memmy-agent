@@ -398,6 +398,21 @@ function AssistRound(props: {
     ?? request.steps.map((step) => ({ kind: "tool" as const, name: step.text, input: "", output: step.output ?? "", status: "done" as const }));
   // 发起方的记录（Memmy 与 DeepSeek Harness 发起时有）：有就按链展示，没有就是原来的「收到的内容」。
   const chain = props.withConversation && (request.origin != null || request.followup != null);
+  // 检查的结论：只有执行方那次（发现了什么、为什么需要她看过）。旧请求没有 safety，不显示。
+  // 发起方的模型审查已经取消；旧数据里即使还留着 `safety.requester` 也不再显示。
+  const checkLines: Array<{ key: string; text: string }> = [];
+  if (request.safety?.executor) {
+    const check = request.safety.executor;
+    checkLines.push({
+      key: "executor",
+      text: check.status === "unavailable"
+        ? t("collab.assist.checkExecutorMissing")
+        : check.status === "auto"
+          ? t("collab.assist.checkExecutorClean")
+          : t("collab.assist.checkExecutor", { reason: check.reason ?? t("collab.assist.checkExecutorMissing") })
+    });
+  }
+  const redactedCount = request.safety?.redacted ?? 0;
   const requesterSide = (
     <SideHead
       label={t("collab.assist.conv.side.requester", { requester, via: request.via })}
@@ -454,6 +469,13 @@ function AssistRound(props: {
           agent={request.agent ?? request.grant?.agent ?? null}
           name={agent}
         />
+      ) : null}
+
+      {/* 2.1 两次检查的结论：发起方是否写清楚了、执行方判断出什么。没有 safety 的旧请求不显示。 */}
+      {checkLines.length ? (
+        <div className={styles.checks} data-assist-part="checks">
+          {checkLines.map((line) => <p key={line.key} className={styles.checkLine}>{line.text}</p>)}
+        </div>
       ) : null}
 
       {/* 3. 执行方 Agent 收到的提示词 */}
@@ -520,6 +542,10 @@ function AssistRound(props: {
                 </span>
               ))}
             </div>
+          ) : null}
+          {/* 回传前隐藏了几处密钥：只在她确实隐藏过时说明。 */}
+          {redactedCount > 0 ? (
+            <p className={styles.redacted}>{t("collab.assist.redacted", { count: String(redactedCount) })}</p>
           ) : null}
         </div>
       ) : null}
@@ -747,6 +773,8 @@ function TranscriptLine(props: { item: AssistTranscriptItem; t: Translate }) {
     );
   }
   const failed = item.status === "failed";
+  // 按协助规则跳过的那一步：状态文字换成「未执行（按协助规则跳过）」，样式沿用工具步骤。
+  const skipped = item.status === "skipped";
   const summary = (
     <>
       {item.status === "running"
@@ -754,7 +782,13 @@ function TranscriptLine(props: { item: AssistTranscriptItem; t: Translate }) {
         : <Terminal size={13} aria-hidden="true" className="agent-activity-timeline-item__icon" />}
       <div className="agent-activity-timeline-item__body">
         <p className="agent-activity-timeline-item__line">
-          <span className="agent-activity-timeline-item__verb">{failed ? `${item.name} · ${t("collab.assist.state.failed")}` : item.name}</span>
+          <span
+            className={skipped ? `${styles.skippedStep} agent-activity-timeline-item__verb` : "agent-activity-timeline-item__verb"}
+          >
+            {skipped
+              ? `${item.name} · ${t("collab.assist.skippedStep")}`
+              : failed ? `${item.name} · ${t("collab.assist.state.failed")}` : item.name}
+          </span>
         </p>
       </div>
     </>

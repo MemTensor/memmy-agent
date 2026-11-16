@@ -13,10 +13,18 @@ import { getRuntimeConfig } from "../api/runtime-config.js";
 import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
 import { CollabAssistTaskBar, CollabAssistTaskDock, useAssistTask } from "./collab-assist-task.js";
 import { collabEnabledFor } from "../app/collab-mode.js";
+import {
+  demoGuideSendsAssistHint,
+  dispatchDemoGuide,
+  getDemoGuideState,
+  subscribeDemoGuide,
+  type DemoGuidePhase,
+  type DemoGuideStatus
+} from "../app/collab-demo-guide-store.js";
 import { mentionEmptyLabelKey } from "./collab-session-mention.js";
 import { CollabShareToggle } from "./collab-share-toggle.js";
-import { getCollabProjectsSnapshot, selectCollabProject, subscribeCollabProjects } from "../app/collab-projects-store.js";
-import { setShareIntent, takeShareIntent } from "../app/collab-share-intent.js";
+import { getCollabProjectsSnapshot, selectCollabProject, sharedProjectFor, subscribeCollabProjects } from "../app/collab-projects-store.js";
+import { handOffDraftShare } from "../app/collab-share-intent.js";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
@@ -34,7 +42,8 @@ import {
   type MemmyAgentMediaInput,
   type UploadAgentMediaInput,
   type UploadedAgentMedia,
-  type WebuiSessionTarget
+  type WebuiSessionTarget,
+  type ArtifactScope
 } from "../api/memmy-agent-client.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
 import { setAnalyticsModelSource } from "../analytics/analytics-context.js";
@@ -255,6 +264,8 @@ export interface ComposerSubmitButtonProps {
   variant?: "empty" | "compact";
   /** On click. */
   onClick: () => void;
+  /** 新手引导的描边目标：只有演示里点发送那一步会带上。 */
+  demoGuideAnchor?: string;
 }
 export type StatusPanelState =
   | { open: false }
@@ -340,6 +351,11 @@ export interface SubmitAgentComposerMessageInput {
   settleComposer?: () => void;
   onChatResolved?: (chatId: string) => void;
   onNewChatMessageSent?: (chatId: string) => void;
+  /**
+   * 这一条已经发出去了：用来把任务标题显式定下来。
+   * 新手引导第二步给 Agent 的内容里带着执行提示，标题不能取正文，只能在这里写死成用户看到的那句话。
+   */
+  onMessageSent?: (chatId: string) => void;
   chatSelectionEpoch?: number;
   getChatSelectionEpoch?: () => number;
   scopeKey?: string;
@@ -533,6 +549,7 @@ export function ComposerSubmitButton(props: ComposerSubmitButtonProps) {
       aria-label={props.isSending ? props.stopLabel : props.sendLabel}
       title={props.isSending ? props.stopLabel : props.sendLabel}
       className={className}
+      data-demo-guide={props.demoGuideAnchor}
     >
       {props.isSending ? (
         <span className="inline-flex items-center justify-center">
@@ -731,6 +748,28 @@ export function thinkingPayloadForSend(
   return { thinkingEnabled, thinkingLevel };
 }
 
+/**
+ * 新手引导第二步的发送内容：输入框里还是引导写好的那句话时，把执行提示追加到发给 Agent 的内容里，
+ * 同时交出气泡该显示的那一句。用户改过句子就不追加，原样发出去。
+ */
+export function composeDemoGuideAssistSend(input: {
+  status: DemoGuideStatus;
+  phase: DemoGuidePhase;
+  typed: string;
+  sentence: string;
+  hint: string;
+  content: string;
+}): { content: string; displayContent: string | null } {
+  const append = demoGuideSendsAssistHint({
+    status: input.status,
+    phase: input.phase,
+    typed: input.typed,
+    sentence: input.sentence
+  }) && input.hint.trim().length > 0;
+  if (!append) return { content: input.content, displayContent: null };
+  return { content: `${input.content}\n\n${input.hint}`, displayContent: input.typed.trim() };
+}
+
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
   const text = input.content.trim();
   const trimmedDisplayContent = input.displayContent?.trim();
@@ -917,6 +956,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     return false;
   }
   input.settleComposer?.();
+  input.onMessageSent?.(chatId);
   input.track({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
   if (input.scopeKey) {
     input.dispatch(agentActions.pendingModelPresetCleared(input.scopeKey));
@@ -1008,6 +1048,19 @@ export function HomePage() {
   const lastNewChatRequestRef = useRef(state.agent.newChatRequestId);
   const initialFocusedChatLoadedRef = useRef(false);
   const composerDraftsRef = useRef<Record<string, string>>(composerDrafts);
+
+  /**
+   * 清掉与这一句完全相同的草稿：只动引导写进去的那一版，用户自己改过的留着。
+   * 演示用它处理第二步那句请求：那一步结束（或整轮演示结束）之后，它不该留在任何会话的输入框里。
+   */
+  function clearDraftIfUntouched(sentence: string) {
+    const trimmed = sentence.trim();
+    if (!trimmed) return;
+    for (const [scope, draft] of Object.entries(composerDraftsRef.current)) {
+      if (draft.trim() !== trimmed) continue;
+      dispatch(agentActions.composerDraftUpdated(scope, ""));
+    }
+  }
   const pendingAttachmentsRef = useRef<Record<string, PendingAttachment[]>>(pendingAttachmentsByScope);
   const stopRequestLocksRef = useRef<Set<string>>(new Set());
   const goalMutationLocksRef = useRef<Set<string>>(new Set());
@@ -1117,7 +1170,7 @@ export function HomePage() {
     : t("home.mention.noProject");
   /**
    * 输入框旁的共享开关：只在这条任务（或草稿）所属的项目已经开启协作共享时出现。
-   * 新建任务时它先记在草稿上，发出第一条消息后由新会话接手（见 `onChatResolved`）。
+   * 新建任务默认开启，选择先记在草稿上，发出第一条消息后由新会话接手（见 `onChatResolved`）。
    */
   const sharedOnlineProject = useMemo(() => {
     if (!composerLocalProjectId) return null;
@@ -1223,6 +1276,13 @@ export function HomePage() {
         if (chatSelectionEpochRef.current !== selectionEpoch) return null;
         ensureChatSubscription(created.chatId);
         threadPanel.promoteScope(draftScope, created.chatId);
+        // 插件从草稿建立的会话同样是用户新建的任务：按输入框旁开关的选择决定是否共享，与发送第一条消息一致。
+        void handOffDraftShare({
+          collab: collabClient,
+          onlineProjectId: sharedProjectFor(getCollabProjectsSnapshot().projects, composerLocalProjectId)?.id ?? null,
+          draftScopeKey: draftScope,
+          chatId: created.chatId
+        });
         // A plugin-only chat has no Agent message yet, so it is absent from the
         // canonical session snapshot. Keep an optimistic task row for it; without
         // one the next sidebar refresh reopens the blank draft and hides the card.
@@ -1257,8 +1317,9 @@ export function HomePage() {
       if (pluginConversationCreationRef.current === flight) pluginConversationCreationRef.current = null;
     });
     return flight;
-  }, [chatScopeKey, connection, dispatch, ensureChatSubscription, resolvedConversationModel.candidateId,
-    resolvedConversationModel.unavailable, state.agent, taskStateCoordinator, threadPanel.promoteScope, draftTarget]);
+  }, [chatScopeKey, collabClient, composerLocalProjectId, connection, dispatch, ensureChatSubscription,
+    resolvedConversationModel.candidateId, resolvedConversationModel.unavailable, state.agent, taskStateCoordinator,
+    threadPanel.promoteScope, draftTarget]);
   const features = useConversationFeatures({
     scopeKey: chatScopeKey, sharedRowWidth: workspaceRowWidth,
     agentMessages: state.agent.messages,
@@ -1387,13 +1448,18 @@ export function HomePage() {
   const sessionArtifactClient = useMemo(() => {
     const client = clients?.memmyAgent;
     const sessionKey = state.agent.currentSessionKey;
-    if (!client || !sessionKey) return null;
+    // A task that has not sent its first message has no session yet, but its side panel already shows the
+    // draft project's files, so previews are authorized against that project instead.
+    const scope: ArtifactScope | null = sessionKey
+      ? { sessionKey }
+      : selectedDraftProject?.id ? { projectId: selectedDraftProject.id } : null;
+    if (!client || !scope) return null;
     return {
-      resolveArtifact: (path: string) => client.resolveArtifact(path, sessionKey),
-      revealArtifact: (path: string) => client.revealArtifact(path, sessionKey),
-      openArtifact: (path: string) => client.openArtifact(path, sessionKey)
+      resolveArtifact: (path: string) => client.resolveArtifact(path, scope),
+      revealArtifact: (path: string) => client.revealArtifact(path, scope),
+      openArtifact: (path: string) => client.openArtifact(path, scope)
     };
-  }, [clients?.memmyAgent, state.agent.currentSessionKey]);
+  }, [clients?.memmyAgent, state.agent.currentSessionKey, selectedDraftProject?.id]);
   const isCurrentAgentRunning = Boolean(
     state.agent.currentChatId &&
     (
@@ -1403,6 +1469,92 @@ export function HomePage() {
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
   );
+  /**
+   * 新手引导：输入框里的那句话由引导写好，用户只点发送。预填读一次就够（nonce 变一次填一次），
+   * 用户自己改过的内容不会被再次覆盖。
+   */
+  const demoGuide = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState);
+  const demoPrefillNonceRef = useRef(0);
+  useEffect(() => {
+    const prefill = demoGuide.prefill;
+    if (!prefill || prefill.nonce === demoPrefillNonceRef.current) return;
+    demoPrefillNonceRef.current = prefill.nonce;
+    setCurrentComposerDraft(prefill.text);
+    window.requestAnimationFrame(() => {
+      const element = inputRef.current;
+      if (!element) return;
+      resizeComposerInput(element);
+      element.focus();
+    });
+  }, [demoGuide.prefill]);
+
+  /**
+   * 演示一结束（完成 / 退出 / 离开 / 心跳超时），第二步预填的那句话不该留在任何草稿里：
+   * 之后的空白会话会把一句没发生过的请求带出来。只清与那句话完全相同的那一版，人自己写的照旧留着。
+   */
+  const demoAskSentenceRef = useRef("");
+  const demoEndedHandledRef = useRef(false);
+  useEffect(() => {
+    if (demoGuide.status === "active") {
+      demoAskSentenceRef.current = t("collab.demo.prefill.ask", { name: demoGuide.memberName });
+      demoEndedHandledRef.current = false;
+      return;
+    }
+    if (demoGuide.status !== "ended" || demoEndedHandledRef.current) return;
+    demoEndedHandledRef.current = true;
+    clearDraftIfUntouched(demoAskSentenceRef.current);
+  }, [demoGuide.status, demoGuide.memberName, dispatch, t]);
+
+  /**
+   * 第二步（请成员协助）一完成就把那句话清掉，不等到整轮结束：下一步是为成员执行任务，
+   * 输入框里不该还留着上一句。用户自己改过的内容不动。
+   */
+  const demoAskClearedRef = useRef(false);
+  useEffect(() => {
+    if (demoGuide.status !== "active" || demoGuide.phase !== "ask-done") {
+      demoAskClearedRef.current = false;
+      return;
+    }
+    if (demoAskClearedRef.current) return;
+    demoAskClearedRef.current = true;
+    clearDraftIfUntouched(t("collab.demo.prefill.ask", { name: demoGuide.memberName }));
+  }, [demoGuide.status, demoGuide.phase, demoGuide.memberName, dispatch, t]);
+
+  /**
+   * 第二步那句话与它对应的执行提示：句子进输入框，提示只在发送时追加给 Agent。
+   * 两者都按当前语言现取，句子与预填时是同一句，所以能据此判断用户改没改过。
+   */
+  const demoAssistSentence = demoGuide.status === "active"
+    ? t("collab.demo.prefill.ask", { name: demoGuide.memberName })
+    : "";
+  const demoAssistHint = demoGuide.status === "active"
+    ? t("collab.demo.prefill.askHint", { name: demoGuide.memberName, member: demoGuide.memberUserId ?? "" })
+    : "";
+
+  /**
+   * 一轮回复从「运行中」变回空闲：引导的等待状态据此推进，不靠定时器猜。
+   * 这一轮以错误结束时不能当成成功：卡片要说「这一步没有完成」，并给重试与跳过。
+   */
+  const demoWasRunningRef = useRef(false);
+  /** 这一轮开始时已经存在的那条错误：只有它之后新出现的错误才算这一轮失败。 */
+  const demoTurnErrorIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const notice = state.agent.operationErrorNotice;
+    if (isCurrentAgentRunning) {
+      if (!demoWasRunningRef.current) demoTurnErrorIdRef.current = notice?.id ?? null;
+      demoWasRunningRef.current = true;
+      return;
+    }
+    if (!demoWasRunningRef.current) return;
+    demoWasRunningRef.current = false;
+    const freshError = Boolean(notice) && notice!.id !== demoTurnErrorIdRef.current;
+    if (freshError && demoGuide.status === "active") {
+      dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.agent") });
+      return;
+    }
+    dispatchDemoGuide({ type: "agent-settled" });
+  }, [isCurrentAgentRunning, state.agent.operationErrorNotice, demoGuide.status, t]);
+
   useStalledOutputShimmer(
     conversationContentRef,
     (isCurrentAgentRunning || isCurrentGoalActive) && !pendingCardKey,
@@ -1792,6 +1944,7 @@ export function HomePage() {
       chatSelectionEpoch: state.agent.chatSelectionEpoch,
       getChatSelectionEpoch: () => chatSelectionEpochRef.current,
       scopeKey: agentChatScopeKey(null, state.agent.newChatRequestId),
+      // 系统代用户新建的任务（如「添加 Agent 支持」）不接手草稿的共享选择，始终只在本机。
       onChatResolved: (chatId) => threadPanel.promoteScope(agentChatScopeKey(null, state.agent.newChatRequestId), chatId),
       onNewChatMessageSent: (chatId) => {
         rememberFirstEncounterRelayChatIfArmed(chatId);
@@ -2177,6 +2330,15 @@ export function HomePage() {
     const contentWithReferences = submittedMentions.length
       ? `${submittedMentions.map((item) => item.reference).join("\n\n")}\n\n${promptedInput}`
       : promptedInput;
+    // 新手引导第二步：那句要求连同执行提示一起交给 Agent，气泡里仍然只有用户看到的那一句。
+    const demoAssistSend = composeDemoGuideAssistSend({
+      status: demoGuide.status,
+      phase: demoGuide.phase,
+      typed: composerInput,
+      sentence: demoAssistSentence,
+      hint: demoAssistHint,
+      content: contentWithReferences
+    });
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
     dispatch(agentActions.modelSelectionRequestStarted(
@@ -2193,9 +2355,10 @@ export function HomePage() {
         clientRequestId,
         connection,
         ensureChatSubscription,
-        content: contentWithReferences,
-        // With references, a command or a rewritten prompt the wire text differs from what was typed; show the typed part.
-        displayContent: (features.agentPrompt(input) || selectedComposerCommand || (submittedMentions.length && composerInput.trim())) ? composerInput : undefined,
+        content: demoAssistSend.content,
+        // With references, a command, a rewritten prompt or the guide's hint the wire text differs from what was typed;
+        // show the typed part.
+        displayContent: (features.agentPrompt(input) || selectedComposerCommand || (submittedMentions.length && composerInput.trim()) || demoAssistSend.displayContent !== null) ? composerInput : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
@@ -2229,16 +2392,14 @@ export function HomePage() {
             clientRequestId,
             resolvedConversationModel.candidateId
           ));
-          // 新建任务时打开了「共享给成员」：会话一建立就共享，之后以本机记录为准。
+          // 在已共享的项目里新建任务默认共享给成员，草稿里关掉的不共享：会话一建立就写入本机记录，之后以它为准。
           // 即使随后的发送失败，也只是共享了一条空任务，不影响别的任务。
-          if (takeShareIntent(sendScopeKey)) {
-            const online = (getCollabProjectsSnapshot().projects ?? [])
-              .find((project) => project.localProjectId === composerLocalProjectId) ?? null;
-            if (online && collabClient) {
-              setShareIntent(chatId, true);
-              void collabClient.setTaskSharing(online.id, chatId, true).catch(() => setShareIntent(chatId, false));
-            }
-          }
+          void handOffDraftShare({
+            collab: collabClient,
+            onlineProjectId: sharedProjectFor(getCollabProjectsSnapshot().projects, composerLocalProjectId)?.id ?? null,
+            draftScopeKey: sendScopeKey,
+            chatId
+          });
         },
         onNewChatMessageSent: clients?.memmyAgent
           ? (chatId) => {
@@ -2249,10 +2410,21 @@ export function HomePage() {
               state: state.agent
             });
           }
+          : undefined,
+        // 新手引导第二步：任务标题只用用户看到的那一句话，不从正文（含执行提示）里取。
+        onMessageSent: demoAssistSend.displayContent !== null && clients?.memmyAgent
+          ? (chatId) => {
+            void clients.memmyAgent
+              .renameSession(clients.memmyAgent.chatIdToSessionKey(chatId), demoAssistSend.displayContent!)
+              .catch(() => undefined);
+          }
           : undefined
       });
       if (!submitted) {
         dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
+      } else {
+        // 引导在等这一下：发出去了才进入「Agent 正在读取…」。
+        dispatchDemoGuide({ type: "composer-sent" });
       }
     } catch (error) {
       dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
@@ -2681,6 +2853,17 @@ export function HomePage() {
     }
     resizeComposerInput(inputRef.current);
   }, [input, hasActiveConversation]);
+
+  /**
+   * 带着项目进入空白草稿时把光标放进输入框：落地面板就能直接写第一句话。
+   * 只在项目草稿上生效，其他进入 /main 的场景保持原样——焦点仍然只跟着人的操作走。
+   */
+  const draftProjectId = draftTarget.kind === "project" ? draftTarget.projectId : null;
+  useEffect(() => {
+    if (hasActiveConversation || !draftProjectId) return undefined;
+    const frame = window.requestAnimationFrame(() => inputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [draftProjectId, hasActiveConversation]);
 
   /**
    * Resets the input box height after sending, so the next empty input does not inherit the previous height.
@@ -3410,13 +3593,25 @@ export function HomePage() {
             <div className="home-empty-brand-mascot flex justify-center">
               <Memmy pose="think" size={165} className="memmy-bob" />
             </div>
-            <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
+            {/* 草稿落在某个项目上时，标题带出项目名：悬停显示完整路径，长名字换行不撑破版面 */}
+            <h1 className="home-empty-title text-2xl font-bold text-text-ink">
+              {selectedDraftProject ? (
+                <>
+                  {t("home.subtitle.projectPrefix")}
+                  <span className="home-empty-title__project" title={selectedDraftProject.rootPath}>
+                    {selectedDraftProject.name}
+                  </span>
+                  {t("home.subtitle.projectSuffix")}
+                </>
+              ) : t("home.subtitle")}
+            </h1>
           </div>
           <div className="home-empty-column home-empty-input">
             <AgentOperationErrorSlot message={agentError} />
             <div className="home-empty-composer-stack">
               <div
                 className="relative home-empty-composer agent-composer-shell rounded-card-lg"
+                data-demo-guide="composer"
                 onDragOver={handleComposerDragOver}
                 onDrop={handleComposerDrop}
               >
@@ -3517,6 +3712,7 @@ export function HomePage() {
                     disabled={composerSubmitDisabled}
                     sendLabel={t("home.send")}
                     stopLabel={t("home.stop")}
+                    demoGuideAnchor="composer-send"
                     onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
                   />
                 </div>
@@ -3557,10 +3753,11 @@ export function HomePage() {
           </div>
         </section>
         ) : (
-        <section ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full">
+        <section ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full" data-demo-guide="assist-task">
           <CollabAssistTaskBar view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
           <div
             ref={scrollRef}
+            data-demo-guide="conversation"
             className="app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto"
             onScroll={handleAgentConversationScroll}
             onWheel={markAgentConversationUserScrollIntent}
@@ -3715,6 +3912,7 @@ export function HomePage() {
                   ) : null}
                   <div
                     className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"
+                    data-demo-guide="composer"
                     onDragOver={handleComposerDragOver}
                     onDrop={handleComposerDrop}
                   >
@@ -3797,6 +3995,7 @@ export function HomePage() {
                           sendLabel={t("home.send")}
                           stopLabel={t("home.stop")}
                           variant="compact"
+                          demoGuideAnchor="composer-send"
                           onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
                         />
                       </div>

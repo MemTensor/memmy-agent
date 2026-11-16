@@ -252,6 +252,7 @@ describe("Memmy 发起方记录", () => {
       "<memmy_memory_context>喜欢简洁</memmy_memory_context>",
       "<memmy_knowledge_context>知识库片段</memmy_knowledge_context>",
       "<collab_project_instructions project=\"p1\">背景与规范</collab_project_instructions>",
+      "<collab_project name=\"MemOS\">当前工作目录属于 Memmy 协作项目</collab_project>",
       "<system-reminder>提醒</system-reminder>",
       "请王雨看日志"
     ].join("\n"))).toBe("请王雨看日志");

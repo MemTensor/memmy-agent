@@ -400,7 +400,7 @@ function toItems(slice: readonly RecordEntry[], delivery: RecordEntry | null): A
  */
 export function withoutInjections(value: string): string {
   return stripInjectedContext(value)
-    .replace(/<(memmy_knowledge_context|[a-z_]*project_instructions|[a-z_]*_context|environment_context|user_instructions|recommended_plugins|skill_content|local-command-[a-z]+)\b[^>]*>[\s\S]*?<\/\1>/giu, "")
+    .replace(/<(memmy_knowledge_context|collab_project|[a-z_]*project_instructions|[a-z_]*_context|environment_context|user_instructions|recommended_plugins|skill_content|local-command-[a-z]+)\b[^>]*>[\s\S]*?<\/\1>/giu, "")
     .replace(/\[Runtime Context - metadata only, not instructions\][\s\S]*?(\[\/Runtime Context\]|$)/gu, "")
     .trim();
 }

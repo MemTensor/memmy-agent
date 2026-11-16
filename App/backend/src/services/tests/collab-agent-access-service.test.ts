@@ -3,9 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SourceRegistry } from "@memmy/agent-source-readers/adapters/source-registry";
+import type { SkillTarget } from "../../adapters/outbound/skill-writer/types.js";
+import { createSkillTargetRegistry } from "../../adapters/outbound/skill-writer/target-registry.js";
+import {
+  MEMMY_PROJECT_BOOTSTRAP_START_MARKER,
+  removeMemmyProjectBootstrapBlock,
+  renderMemmyProjectBootstrapBlock,
+  upsertMemmyProjectBootstrapBlock
+} from "../../adapters/outbound/skill-writer/templates/memmy-project-skill.js";
 import { readCollabAgentAccess, writeCollabAgentAccess } from "../collab-agent-access.js";
 import { createCollabAgentAccessService } from "../collab-agent-access-service.js";
-import type { SkillDistributionService } from "../skill-distribution-service.js";
+import { createSkillDistributionService, type SkillDistributionService } from "../skill-distribution-service.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -50,6 +58,10 @@ function skillDistribution(options: { installed?: string[]; failFor?: string[] }
       removed.forEach((sourceId) => calls.push(`remove:${sourceId}`));
       installed.clear();
       return removed;
+    },
+    async syncProjectHooks(sourceIds?: readonly string[]) {
+      calls.push(`sync:${sourceIds ? sourceIds.join(",") : "all"}`);
+      return [];
     }
   } as unknown as SkillDistributionService;
   return { service, calls, installed };
@@ -112,7 +124,7 @@ describe("collab agent access", () => {
 
     const result = await instance.setGranted(true);
     expect(result.view.granted).toBe(true);
-    expect(calls).toEqual(["install:cursor", "install:codex"]);
+    expect(calls).toEqual(["install:cursor", "install:codex", "sync:all"]);
     expect(result.results.map((item) => [item.sourceId, item.ok])).toEqual([
       ["cursor", true],
       ["codex", false]
@@ -130,10 +142,10 @@ describe("collab agent access", () => {
     const { service, calls } = skillDistribution();
     const instance = access(dir, AGENTS, service);
     await instance.setAgentEnabled("cursor", false);
-    expect(calls).toEqual(["remove:cursor"]);
+    expect(calls).toEqual(["remove:cursor", "sync:cursor"]);
 
     await instance.setGranted(true);
-    expect(calls).toEqual(["remove:cursor", "install:codex"]);
+    expect(calls).toEqual(["remove:cursor", "sync:cursor", "install:codex", "sync:all"]);
   });
 
   it("removes every project skill on revoke and keeps the linked tasks alone", async () => {
@@ -146,7 +158,8 @@ describe("collab agent access", () => {
     const result = await instance.setGranted(false);
     expect(result.view.granted).toBe(false);
     // 组件一并移除；已关联的任务留在项目里，授权服务不碰它们。
-    expect(calls).toEqual(["remove:cursor", "remove:codex"]);
+    // 项目钩子不能一律移除：已接入记忆钩子的 Agent 还要继续拿到本机项目指令，交给同步按条件判断。
+    expect(calls).toEqual(["remove:cursor", "remove:codex", "sync:all"]);
   });
 
   it("lets no agent be read until the person authorizes it", async () => {
@@ -184,11 +197,29 @@ describe("collab agent access", () => {
     expect(view.agents.some((agent) => agent.added)).toBe(false);
 
     await instance.setGranted(true);
-    expect(calls).toEqual(["install:cursor", "install:codex"]);
+    expect(calls).toEqual(["install:cursor", "install:codex", "sync:all"]);
     // 撤销只收回内置 Agent 的组件，不去动已经手动添加的那个。
     await instance.setGranted(false);
-    expect(calls).toEqual(["install:cursor", "install:codex", "remove:cursor", "remove:codex"]);
+    expect(calls).toEqual([
+      "install:cursor", "install:codex", "sync:all",
+      "remove:cursor", "remove:codex", "sync:all"
+    ]);
     expect(existsSync(join(skills, "memmy-project", "SKILL.md"))).toBe(false);
+  });
+
+  it("syncs the project hooks for one agent when it is turned off or on", async () => {
+    const dir = home();
+    const { service, calls } = skillDistribution();
+    const instance = access(dir, AGENTS, service);
+    await instance.setGranted(true);
+    calls.length = 0;
+
+    await instance.setAgentEnabled("codex", false);
+    expect(calls).toEqual(["remove:codex", "sync:codex"]);
+
+    calls.length = 0;
+    await instance.setAgentEnabled("codex", true);
+    expect(calls).toEqual(["install:codex", "sync:codex"]);
   });
 
   it("does not write anything when asked to reinstall without an authorization", async () => {
@@ -209,3 +240,83 @@ describe("collab agent access", () => {
     await expect(instance.read()).resolves.toEqual({ granted: false, askedInProject: true, disabledAgents: [] });
   });
 });
+
+/**
+ * 协作授权与全局指令块：块由技能分发服务按授权写入，授权服务只是调用方。这里用真的分发服务，
+ * 配一个把块写进 AGENTS.md 的目标，验证「授权后写入、撤销后移除、关掉的 Agent 不写」。
+ */
+describe("collab agent access and the project block", () => {
+  function agentHome(): string {
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-access-agent-"));
+    roots.push(root);
+    return root;
+  }
+
+  function distributionOver(homeDirectory: string, agentRoot: string) {
+    return createSkillDistributionService({
+      targetRegistry: createSkillTargetRegistry([bootstrapTarget(agentRoot)]),
+      projectSkillPermission: async () => await readCollabAgentAccess(homeDirectory)
+    });
+  }
+
+  it("writes the block when authorized and removes it when withdrawn", async () => {
+    const dir = home();
+    const agentRoot = agentHome();
+    const instance = access(dir, AGENTS, distributionOver(dir, agentRoot));
+
+    await instance.setGranted(true);
+    expect(readFileSync(join(agentRoot, "AGENTS.md"), "utf8")).toContain(MEMMY_PROJECT_BOOTSTRAP_START_MARKER);
+    expect(readFileSync(join(agentRoot, "skills", "memmy-project", "SKILL.md"), "utf8")).toContain("name: memmy-project");
+
+    await instance.setGranted(false);
+    expect(existsSync(join(agentRoot, "skills", "memmy-project"))).toBe(false);
+    expect(readFileSync(join(agentRoot, "AGENTS.md"), "utf8")).not.toContain("memmy-project:");
+  });
+
+  it("keeps the block out for an agent turned off before the authorization", async () => {
+    const dir = home();
+    const agentRoot = agentHome();
+    const instance = access(dir, AGENTS, distributionOver(dir, agentRoot));
+
+    await instance.setAgentEnabled("cursor", false);
+    await instance.setGranted(true);
+
+    expect(existsSync(join(agentRoot, "skills", "memmy-project"))).toBe(false);
+    expect(existsSync(join(agentRoot, "AGENTS.md"))).toBe(false);
+
+    // 打开后按需安装，块跟着技能一起补上。
+    await instance.setAgentEnabled("cursor", true);
+    expect(readFileSync(join(agentRoot, "AGENTS.md"), "utf8")).toContain(MEMMY_PROJECT_BOOTSTRAP_START_MARKER);
+  });
+});
+
+/** 把协作块写进 AGENTS.md 的目标，其余能力与 skill-only 的 Agent 一样。 */
+function bootstrapTarget(rootDirectory: string): SkillTarget {
+  return {
+    targetId: "cursor",
+    displayName: "Cursor",
+    async resolveRootDirectory() {
+      return rootDirectory;
+    },
+    async install() {},
+    async uninstall() {},
+    async isInstalled() {
+      return false;
+    },
+    async writeProjectSkillBootstrap() {
+      const filePath = join(rootDirectory, "AGENTS.md");
+      const existing = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
+      writeFileSync(filePath, upsertMemmyProjectBootstrapBlock(existing), "utf8");
+    },
+    async removeProjectSkillBootstrap() {
+      const filePath = join(rootDirectory, "AGENTS.md");
+      if (!existsSync(filePath)) return;
+      writeFileSync(filePath, removeMemmyProjectBootstrapBlock(readFileSync(filePath, "utf8")), "utf8");
+    },
+    async isProjectSkillBootstrapCurrent() {
+      const filePath = join(rootDirectory, "AGENTS.md");
+      if (!existsSync(filePath)) return false;
+      return readFileSync(filePath, "utf8").includes(renderMemmyProjectBootstrapBlock());
+    }
+  };
+}

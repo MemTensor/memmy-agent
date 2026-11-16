@@ -320,6 +320,8 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       try {
         await ensureSourceAvailable(options, sourceId);
         await options.skillDistributionService.installPlugin(sourceId);
+        // 记忆钩子刚换成当前版本，项目钩子这时才允许安装；失败也只等下一次启动。
+        await syncProjectHooksAfterHookChange(options, sourceId);
         ensureSourceExists(options, sourceId);
         if (installType === "auto_inject") {
           options.agentSourceRepository.setStatus(sourceId, "plugin_installed");
@@ -361,6 +363,8 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
       const permission = await readScanPermission(options);
       try {
         await options.skillDistributionService.uninstallPlugin(sourceId);
+        // 卸掉记忆钩子之后项目钩子按条件重算：授权过协作的 Agent 还要继续拿到协作内容。
+        await syncProjectHooksAfterHookChange(options, sourceId);
         ensureSourceExists(options, sourceId);
         options.agentSourceRepository.setConnectionState(sourceId, "not_connected", true);
         agentSourceAnalytics.trackPluginUninstalled({
@@ -421,6 +425,16 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
         }
       } catch {
         // The project skill is retried on the next launch.
+      }
+      // 项目钩子必须排在记忆钩子刷新之后：升级后的第一次启动要靠上面这轮刷新把记忆钩子换成
+      // 不含项目指令的版本，项目钩子这时才装得上；顺序反了，这次启动期间本机项目指令会缺一段。
+      try {
+        const projectHooks = await options.skillDistributionService.syncProjectHooks?.() ?? [];
+        for (const sourceId of projectHooks) {
+          if (!refreshed.includes(sourceId)) refreshed.push(sourceId);
+        }
+      } catch {
+        // 项目钩子下一次启动再同步。
       }
       return refreshed;
     }
@@ -723,4 +737,20 @@ async function readScanPermission(
 ): Promise<ScanPermission | undefined> {
   if (!options.getScanPermission) return undefined;
   return await options.getScanPermission();
+}
+
+/**
+ * 记忆钩子装上或卸掉之后顺手同步一次项目钩子。
+ *
+ * <p>这一步不属于记忆侧的结果：失败只影响项目钩子，下一次启动或下一次切换授权时还会再同步。</p>
+ */
+async function syncProjectHooksAfterHookChange(
+  options: CreateAgentSourceServiceOptions,
+  sourceId: string
+): Promise<void> {
+  try {
+    await options.skillDistributionService.syncProjectHooks?.([sourceId]);
+  } catch {
+    // 项目钩子下一次启动再同步。
+  }
 }

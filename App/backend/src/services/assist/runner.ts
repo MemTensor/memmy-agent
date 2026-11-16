@@ -45,6 +45,7 @@ interface AssistLaunch {
   args: readonly string[];
   env?: Readonly<Record<string, string>>;
   sessionConfig?: Readonly<Record<string, string>>;
+  sessionMode?: Readonly<{ configId: string; value: string; fallback?: string }>;
 }
 
 export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): AssistRunner {
@@ -104,7 +105,8 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
           command,
           args: recipe.args,
           ...(recipe.env ? { env: recipe.env } : {}),
-          ...(recipe.sessionConfig ? { sessionConfig: recipe.sessionConfig } : {})
+          ...(recipe.sessionConfig ? { sessionConfig: recipe.sessionConfig } : {}),
+          ...(recipe.sessionMode ? { sessionMode: recipe.sessionMode } : {})
         };
       };
 
@@ -119,6 +121,10 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
           prompt: input.prompt,
           agentName: name,
           ...(current.sessionConfig ? { sessionConfig: current.sessionConfig } : {}),
+          ...(current.sessionMode ? { sessionMode: { ...current.sessionMode } } : {}),
+          // 这次执行是自动开始的（deny）还是她点过允许的（allow）：取不到时按拒绝处理。
+          approval: input.approval ?? "deny",
+          ...(input.onSkipped ? { onSkipped: input.onSkipped } : {}),
           ...(input.sessionId ? { sessionId: input.sessionId } : {}),
           onStep: input.onStep,
           ...(input.onTranscript ? { onTranscript: input.onTranscript } : {}),

@@ -122,6 +122,24 @@ describe("collab projects store", () => {
 
     consumeCreateProjectRequest();
     expect(getCollabProjectsSnapshot().createPending).toBe(false);
+    expect(getCollabProjectsSnapshot().createDemo).toBe(false);
+  });
+
+  it("carries the walkthrough entry through the create request", () => {
+    // 从新功能大卡点「新建项目」：弹窗要预填名称、提前打开共享，并让引导停在「创建项目」。
+    requestCreateProject({ share: true, demo: true });
+    expect(getCollabProjectsSnapshot()).toMatchObject({ createPending: true, createShareDefault: true, createDemo: true });
+
+    // 看完一次就清掉：之后从侧栏新建不会又带着体验。
+    consumeCreateProjectRequest();
+    expect(getCollabProjectsSnapshot()).toMatchObject({ createPending: false, createShareDefault: false, createDemo: false });
+
+    // 侧栏、看板空态的普通新建不带这个标记。
+    requestCreateProject();
+    expect(getCollabProjectsSnapshot().createDemo).toBe(false);
+    requestCreateProject({ share: true });
+    expect(getCollabProjectsSnapshot().createDemo).toBe(false);
+    consumeCreateProjectRequest();
   });
 
   it("keeps a just-submitted application until the cloud lists it, then replaces the list", async () => {

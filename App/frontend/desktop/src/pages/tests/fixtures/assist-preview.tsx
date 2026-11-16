@@ -1,6 +1,6 @@
 /**
  * 临时预览页：把成员协助的各处界面用真实组件与样式渲出来，便于对照方案自查。
- * 地址参数 `?view=dialog|dialog-other|dialog-attachments|board|board-tasks|detail|conversation|conversation-attachments|chain|chain-memmy|task|task-ask|task-long|card|card-running|card-stopped-by-me|conversation-stop|task-stopped|requester|settings|settings-off|project-settings-owner|project-settings-member|project-settings-local`，不连接本机接口。
+ * 地址参数 `?view=dialog|dialog-other|dialog-attachments|dialog-review|dialog-skipped|conversation-review|board|board-tasks|detail|conversation|conversation-attachments|chain|chain-memmy|task|task-ask|task-long|card|card-running|card-stopped-by-me|conversation-stop|task-stopped|requester|settings|settings-off|project-settings-owner|project-settings-member|project-settings-local`，不连接本机接口。
  * `detail` 与 `conversation` 是同一份协助会话（两轮请求：发起方由 Memmy 发起、执行方由 Memmy 执行，第二轮按限时授权直接执行），
  * 没有发起方记录，就是旧记录的显示。`chain` 是完整链条：DeepSeek Harness 发起、Memmy 执行，两轮（第二轮 --continue）；
  * `chain-memmy` 是 Memmy 发起的完整链条，第二轮收到后的记录还在同步。
@@ -21,6 +21,7 @@ import { ApiClientsContext } from "../../../app/providers.js";
 import { Button } from "../../../components/button.js";
 import { Select } from "../../../components/Select.js";
 import board from "../../collab-page.module.css";
+import { DemoGuidePreview, type DemoGuidePreviewStep } from "./collab-demo-guide-preview.js";
 import "../../../styles.css";
 
 const REQUESTER = { userId: "2102247370314383361", name: "孙起", mine: false };
@@ -63,6 +64,8 @@ function request(overrides: Partial<AssistRequest> = {}): AssistRequest {
     deliveredAt: null,
     executorOffline: false,
     waitingSeconds: null,
+    // 旧请求没有安全检查：预览里默认不带，单独在 dialog-review / conversation-review 里给。
+    safety: null,
     ...overrides
   };
 }
@@ -602,11 +605,16 @@ function AssistantText(props: { children: ReactNode }) {
 
 function Preview() {
   const view = new URLSearchParams(window.location.search).get("view") ?? "dialog";
+  // 项目协作的新手引导：`?view=demo-guide&step=1-task-row`，用假的项目与成员数据画出每一步的蒙版。
+  if (view === "demo-guide") {
+    const step = (new URLSearchParams(window.location.search).get("step") ?? "1-task-row") as DemoGuidePreviewStep;
+    return <DemoGuidePreview step={step} />;
+  }
   const client = fakeClient();
   const project = { id: "p1", name: "Memmy 内测反馈" };
 
   if (view === "settings" || view === "settings-off") {
-    // 成员协助这一节单独看：它自己带「协助」的组标题，与项目设置弹窗里的是同一套排布。
+    // 接收协助请求这个字段单独看：与项目设置弹窗里的是同一个组件。
     const settingsClient = fakeClient({
       receiving: view === "settings",
       grants: view === "settings"
@@ -657,7 +665,7 @@ function Preview() {
     };
     const owner = view === "project-settings-owner";
     const member = view === "project-settings-member";
-    // 所有者开了接收协助并给出两条限时授权；成员关着接收协助，所以没有限时授权那一行。
+    // 所有者开了接收协助并给出两条限时授权；成员关着接收协助，所以没有授权列表。
     const settingsClient = fakeClient({
       receiving: owner,
       grants: owner
@@ -808,7 +816,7 @@ function Preview() {
               <div className={board.guideText}>
                 <b>你还没有任务</b>
                 <span>
-                  {"在侧栏新建任务并打开「共享给成员」，或"}
+                  {"在侧栏新建任务，发出第一条消息后即进入项目；或"}
                   <button type="button" className={board.guideAction}>关联任务</button>
                   {"，把其他 Agent 中的任务纳入。"}
                 </span>
@@ -1075,6 +1083,77 @@ function Preview() {
           request={{ ...inboxItem, items: LONG_ITEMS, reason: LONG_REASON, attachments: null }}
           collab={fakeClient({ detail: detailed })}
           onDecided={() => undefined}
+          onClose={() => undefined}
+        />
+      </div>
+    );
+  }
+
+  // dialog-review / dialog-skipped：她的 Memmy 检查后要求她确认，标题下多一行原因；上次有跳过时直接写跳过了什么。
+  if (view === "dialog-review" || view === "dialog-skipped") {
+    const reviewSafety = view === "dialog-skipped"
+      ? { executor: { status: "confirm" as const, reason: "上次跳过了：删除缓存目录" } }
+      : { executor: { status: "confirm" as const, reason: "附带的脚本会删除下载目录里的文件" } };
+    return (
+      <div style={{ minHeight: "100vh", background: "var(--color-canvas-oat, #f4f7f6)" }}>
+        <CollabAssistDialog
+          open
+          request={{ ...inboxItem, safety: reviewSafety }}
+          collab={client}
+          onDecided={() => undefined}
+          onClose={() => undefined}
+        />
+      </div>
+    );
+  }
+
+  // conversation-review：协助会话里的一轮带检查结论、被跳过的工具步骤与「隐藏了几处密钥」。
+  if (view === "conversation-review") {
+    const reviewed = request({
+      ...CONV_FIRST,
+      id: "rev-1",
+      threadId: "th-rev",
+      attempt: 1,
+      status: "done",
+      agent: "claude_code",
+      scope: "timed",
+      decidedMinutes: 60,
+      createdAt: minutesAgo(24),
+      decidedAt: minutesAgo(23),
+      finishedAt: minutesAgo(20),
+      deliveredAt: minutesAgo(19.9),
+      safety: {
+        executor: { status: "confirm", reason: "附带的脚本会删除下载目录里的文件" },
+        skipped: [{ title: "删除缓存目录", detail: "rm -rf ~/Library/Caches/foo" }],
+        redacted: 2
+      },
+      transcript: [
+        { kind: "text", text: "先确认版本，再按请求删掉缓存重新复现。" },
+        { kind: "tool", name: "运行命令 sw_vers", input: "sw_vers", output: "ProductVersion:		15.6", status: "done" },
+        { kind: "tool", name: "删除缓存目录", input: "rm -rf ~/Library/Caches/foo", output: "按协助规则没有执行", status: "skipped" },
+        { kind: "tool", name: "运行命令 grep -i share ~/.memmy/logs/backend.log", input: "grep -i share ~/.memmy/logs/backend.log", output: "ERROR share link 409 conflict", status: "done" }
+      ],
+      reply: "缓存目录按协助规则没有删除，其余照常复现：日志里有一条 409 conflict。",
+      resultItems: [{ key: "报错", value: "share link 409 conflict" }]
+    });
+    const reviewedThread = thread({
+      threadId: "th-rev",
+      title: reviewed.title,
+      via: "Memmy",
+      agent: "claude_code",
+      status: "done",
+      attempt: 1,
+      mine: true,
+      requester: { ...REQUESTER, mine: true },
+      executor: { ...EXECUTOR, mine: false }
+    }, [reviewed]);
+    return (
+      <div style={{ minHeight: "100vh", background: "#fff" }}>
+        <CollabAssistConversation
+          thread={reviewedThread}
+          collab={fakeClient({ thread: reviewedThread })}
+          sourceTaskAvailable={() => true}
+          onOpenTask={() => undefined}
           onClose={() => undefined}
         />
       </div>

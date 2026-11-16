@@ -52,6 +52,31 @@ export interface AcpRunOptions {
    * 值先按选项的 value 精确匹配，再按显示名（不分大小写）匹配；Agent 不支持或设置失败时照常执行。
    */
   sessionConfig?: Readonly<Record<string, string>>;
+  /**
+   * 这一次执行对 Agent 的批准请求怎么回答：`deny` 一律不允许（限时授权自动开始的那次），
+   * `allow` 允许一次（她在授权弹窗里点过允许的那次）。默认 `deny`：取不到她怎么开始的，就不放行。
+   */
+  approval?: AssistApproval;
+  /**
+   * 会话建好后的模式：要设为哪个会话选项、设不上时退回哪个（见 `./recipes` 的 `sessionMode`）。
+   * 用来让 Agent 自己的「帮我批准」生效，不沿用她平时的设置。
+   */
+  sessionMode?: AssistSessionMode;
+  /** 按规则跳过的操作：标题一句话、详情是命令或路径。随结果一起回传。 */
+  onSkipped?: (skipped: { title: string; detail?: string }) => void;
+}
+
+/** 执行时对 Agent 批准请求的策略：拒绝并记下跳过的操作，或允许一次。 */
+export type AssistApproval = "deny" | "allow";
+
+/**
+ * 会话模式：建好会话后把 {@code configId} 设成 {@code value}，设不上（模型不支持时适配器会给相近的档）时
+ * 读回当前值，不是 {@code value} 就改设 {@code fallback}。两者都没有时保持原样。
+ */
+export interface AssistSessionMode {
+  configId: string;
+  value: string;
+  fallback?: string;
 }
 
 export interface AcpRunResult {
@@ -59,6 +84,8 @@ export interface AcpRunResult {
   steps: AssistStep[];
   /** 完整执行过程：Agent 的说明文字（agent_message_chunk）、思考（agent_thought_chunk）与工具调用（tool_call / tool_call_update）。 */
   transcript: AssistTranscriptItem[];
+  /** 按协助规则跳过、没有执行的操作（agent 请求批准时被拒绝的那些）。 */
+  skipped: Array<{ title: string; detail?: string }>;
   sessionId: string | null;
 }
 
@@ -166,6 +193,8 @@ function readFullToolOutput(content: unknown): string {
 export class AcpError extends Error {
   /** 中途失败时已经记下的执行过程：失败的轮次也要让双方看到做到了哪一步。 */
   transcript?: AssistTranscriptItem[];
+  /** 中途失败前按规则跳过的操作。 */
+  skipped?: Array<{ title: string; detail?: string }>;
   /** JSON-RPC 错误码：只有在判断「是不是要登录」时用得着（有的 Agent 用 -32000 表示需要认证）。 */
   code?: number;
   constructor(
@@ -391,6 +420,8 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
   const { spawn } = await import("node:child_process");
   const steps: AssistStep[] = [];
   const transcript = new AcpTranscriptCollector();
+  /** 按规则跳过、没有执行的操作：结束或失败时随结果回传。 */
+  const skippedSteps: Array<{ title: string; detail?: string }> = [];
   let reply = "";
   let sessionId: string | null = options.sessionId ?? null;
   let settled = false;
@@ -415,8 +446,8 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
     settled = true;
     cleanup();
     transcript.settle(!error);
-    if (error) rejectRun(Object.assign(error, { transcript: transcript.snapshot() }));
-    else resolveRun(result ?? { reply, steps, transcript: transcript.snapshot(), sessionId });
+    if (error) rejectRun(Object.assign(error, { transcript: transcript.snapshot(), skipped: [...skippedSteps] }));
+    else resolveRun(result ?? { reply, steps, transcript: transcript.snapshot(), skipped: [...skippedSteps], sessionId });
   };
 
   let resolveRun: (value: AcpRunResult) => void = () => undefined;
@@ -448,13 +479,26 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
     },
     (id, method, params) => {
       if (method === "session/request_permission") {
-        // 执行方授权了这次协助，就代表允许它用它平时的能力做事：选第一个「允许一次」即可。
-        const payload = params as { options?: Array<{ optionId?: string; kind?: string }> };
-        const allowOnce = payload.options?.find((option) => option.kind === "allow_once");
-        const anyAllow = payload.options?.find((option) => (option.kind ?? "").startsWith("allow"));
-        const option = allowOnce ?? anyAllow;
-        if (option?.optionId) {
-          connection.reply(id, { outcome: { outcome: "selected", optionId: option.optionId } });
+        // Agent 在为某一步请求批准。这次执行是限时授权自动开始的，或者 Agent 判断有风险：一律不允许，
+        // 并把它记成「跳过的操作」，让发起方看到哪一步没有做。她点过允许的那次才放行，而且只放行一次。
+        const payload = params as {
+          toolCall?: { title?: string; rawInput?: unknown };
+          options?: Array<{ optionId?: string; kind?: string }>;
+        };
+        const approve = options.approval === "allow";
+        const choice = approve ? pickAllowOption(payload.options) : pickRejectOption(payload.options);
+        if (approve && choice) {
+          connection.reply(id, { outcome: { outcome: "selected", optionId: choice } });
+          return;
+        }
+        if (!approve) {
+          recordSkippedStep(payload.toolCall);
+          if (choice) {
+            connection.reply(id, { outcome: { outcome: "selected", optionId: choice } });
+            return;
+          }
+          // 它没有给出任何「不允许」的选项：直接取消这一步，绝不放行。
+          connection.reply(id, { outcome: { outcome: "cancelled" } });
           return;
         }
         connection.reply(id, { outcome: { outcome: "cancelled" } });
@@ -464,6 +508,28 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
       connection.fail(id, `${method} 不在支持范围内`);
     }
   );
+
+  /**
+   * 把 Agent 请求批准的那一步记成「跳过的操作」：执行过程里对应的 tool 条目标成 skipped（按标题找最近一条还在跑的），
+   * 没有对应条目就新增一条。标题取 {@code toolCall.title}，详情取 {@code rawInput} 里的命令或路径，裁到 300 字。
+   */
+  const recordSkippedStep = (toolCall: { title?: string; rawInput?: unknown } | undefined): void => {
+    const title = typeof toolCall?.title === "string" && toolCall.title.trim() ? toolCall.title.trim() : "一项操作";
+    const detail = skippedDetail(toolCall?.rawInput);
+    const skipped = { ...(detail ? { title, detail } : { title }) };
+    skippedSteps.push(skipped);
+    const items = transcript.items;
+    const existing = [...items].reverse().find((item) =>
+      item.kind === "tool" && item.status === "running" && (item.name === title || !detail));
+    if (existing && existing.kind === "tool") {
+      existing.status = "skipped";
+      if (detail && !existing.input) existing.input = detail;
+    } else {
+      items.push({ kind: "tool", name: title, input: detail, output: "按协助规则没有执行", status: "skipped" });
+    }
+    options.onTranscript?.(transcript.snapshot());
+    options.onSkipped?.(skipped);
+  };
 
   let stderrTail = "";
   child.stdout.setEncoding("utf8");
@@ -597,6 +663,8 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
         if (value === null) continue;
         await connection.request("session/set_config_option", { sessionId, configId, value }).catch(() => undefined);
       }
+      // 协助执行用的模式：让 Agent 自己的「帮我批准」生效，不沿用她平时的设置。
+      if (options.sessionMode) await applySessionMode(connection, sessionId, options.sessionMode, configOptions);
 
       prompting = true;
       try {
@@ -619,7 +687,13 @@ export async function runAcpAgent(options: AcpRunOptions): Promise<AcpRunResult>
       // 只剩那行流关闭报错时也一样：Agent 什么都没做成。这种回复不能当答案。
       const replyError = assistReplyError(reply.trim() ? reply : rawReply, toolCalls, options.agentName ?? "Agent");
       if (replyError) throw new AcpError(replyError, "failed");
-      finish(undefined, { reply: reply.trim(), steps, transcript: transcript.settle(true), sessionId });
+      finish(undefined, {
+        reply: reply.trim(),
+        steps,
+        transcript: transcript.settle(true),
+        skipped: [...skippedSteps],
+        sessionId
+      });
     } catch (error) {
       finish(error instanceof AcpError ? error : new AcpError(
         error instanceof Error ? error.message : "Agent 执行失败", "failed"));
@@ -641,6 +715,106 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
       (error: unknown) => {
         clearTimeout(timer);
         reject(error instanceof Error ? error : new AcpError(String(error), "failed"));
+      }
+    );
+  });
+}
+
+/** 允许用哪一项回：只选「允许一次」，没有它就选其他 allow；`allow_always` 一律不用（不能给她留下长期放行）。 */
+export function pickAllowOption(options: Array<{ optionId?: string; kind?: string }> | undefined): string | null {
+  const usable = (options ?? []).filter((option) => option.optionId && option.kind !== "allow_always");
+  return usable.find((option) => option.kind === "allow_once")?.optionId
+    ?? usable.find((option) => (option.kind ?? "").startsWith("allow"))?.optionId
+    ?? null;
+}
+
+/**
+ * 不允许用哪一项回：优先「拒绝一次」，其次除 `allow*` 外的任一拒绝；绝不放行，也不用 `*_always`。
+ * 返回 null 表示它没有给出拒绝的选项，调用方回 `cancelled`。
+ */
+export function pickRejectOption(options: Array<{ optionId?: string; kind?: string }> | undefined): string | null {
+  const rejects = (options ?? []).filter((option) =>
+    option.optionId && (option.kind ?? "").startsWith("reject") && !(option.kind ?? "").endsWith("_always"));
+  return rejects.find((option) => option.kind === "reject_once")?.optionId ?? rejects[0]?.optionId ?? null;
+}
+
+/** 被跳过那一步的详情：`rawInput` 里的命令或路径，裁到 300 字。 */
+export function skippedDetail(rawInput: unknown): string {
+  if (rawInput === undefined || rawInput === null) return "";
+  let value = "";
+  if (typeof rawInput === "string") value = rawInput;
+  else if (rawInput && typeof rawInput === "object") {
+    const record = rawInput as Record<string, unknown>;
+    for (const key of ["command", "cmd", "path", "file_path", "target", "url"]) {
+      const candidate = record[key];
+      if (typeof candidate === "string" && candidate.trim()) {
+        value = candidate;
+        break;
+      }
+      if (Array.isArray(candidate) && candidate.every((part) => typeof part === "string")) {
+        value = candidate.join(" ");
+        break;
+      }
+    }
+    if (!value) {
+      try {
+        value = JSON.stringify(rawInput);
+      } catch {
+        value = "";
+      }
+    }
+  }
+  return value.replace(/\s+/gu, " ").trim().slice(0, 300);
+}
+
+/**
+ * 把会话设成协助执行要用的模式，并确认它真的生效：Agent（或它背后的模型）不支持那一档时会退到相近的档，
+ * 这时改设 {@code fallback}（更严的那一档）。读不到当前值、或它已经是我们想要的那一档，就不再动。
+ */
+export async function applySessionMode(
+  connection: { request(method: string, params: unknown): Promise<unknown> },
+  sessionId: string,
+  mode: AssistSessionMode,
+  configOptions: readonly AcpConfigOption[]
+): Promise<void> {
+  const value = resolveConfigValue(configOptions, mode.configId, mode.value) ?? mode.value;
+  const applied = await withDeadline(connection.request("session/set_config_option", {
+    sessionId,
+    configId: mode.configId,
+    value
+  }), SESSION_MODE_TIMEOUT_MS, () => null) as { configOptions?: AcpConfigOption[] } | null | undefined;
+  if (!mode.fallback) return;
+  const updated = applied?.configOptions ?? configOptions;
+  const current = updated.find((option) => option.id === mode.configId)?.currentValue;
+  // 读不到当前值（多数适配器不回带选项列表）就当它已经生效；读到了但不是刚才设的，退到更严的一档。
+  if (current === undefined || current === value) return;
+  const fallback = resolveConfigValue(updated, mode.configId, mode.fallback) ?? mode.fallback;
+  await withDeadline(connection.request("session/set_config_option", {
+    sessionId,
+    configId: mode.configId,
+    value: fallback
+  }), SESSION_MODE_TIMEOUT_MS, () => null).catch(() => undefined);
+}
+
+/**
+ * 设模式的上限：有的适配器不回带会话选项、甚至不回应这个请求。设不上就按 Agent 自己的设置执行，
+ * 不让这一步把整次执行挂住。
+ */
+export const SESSION_MODE_TIMEOUT_MS = 10_000;
+
+/** 给一个请求加一个期限：到期时返回 fallback，原请求之后才失败不会变成未处理的拒绝。 */
+function withDeadline<T, F>(promise: Promise<T>, timeoutMs: number, fallback: () => F): Promise<T | F> {
+  return new Promise<T | F>((resolve) => {
+    const timer = setTimeout(() => resolve(fallback()), timeoutMs);
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback());
       }
     );
   });

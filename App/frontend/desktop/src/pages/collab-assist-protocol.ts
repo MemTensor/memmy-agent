@@ -23,6 +23,12 @@ export function parseAssistEnvelope(content: string): AssistEnvelope | null {
   return { kind: match[1] as "request" | "result", attrs, lines: match[3]!.split(/\r?\n/u) };
 }
 
+/**
+ * 执行方检查结论里「上次跳过了：{标题}」的开头，与本机后端 `assist/safety.ts` 写出的原因逐字对应。
+ * 界面认出它就原样显示，不再套一层「需要你确认：」。
+ */
+export const SKIPPED_PREFIX = "上次跳过了：";
+
 /** 续行按协议缩进两个空格：去掉这两个空格，其余缩进原样保留。 */
 const CONTINUATION = /^ {2}/u;
 /** 逐条事项以后的内容（前面几次的结论、附件说明）不算进这次要做的事。 */

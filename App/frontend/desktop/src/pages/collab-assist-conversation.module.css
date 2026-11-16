@@ -10,6 +10,34 @@
   line-height: 1.6;
 }
 
+/* 两次检查的结论：次要文字，跟在请求与决定之后、提示词之前，不加图标、不加块。 */
+.checks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 28px;
+}
+
+.checkLine {
+  margin: 0;
+  color: var(--collab-ter, #8a9a96);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* 回传前隐藏了几处密钥：与上面两行同一套次要文字。 */
+.redacted {
+  margin: 6px 0 0;
+  color: var(--collab-ter, #8a9a96);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* 按协助规则跳过的那一步：状态文字换成「未执行（按协助规则跳过）」，颜色也回到次要色。 */
+.skippedStep {
+  color: var(--collab-ter, #8a9a96);
+}
+
 /* 发起方的请求：与对话里人说的话同一侧、同一种底色 */
 .requestSide {
   display: flex;

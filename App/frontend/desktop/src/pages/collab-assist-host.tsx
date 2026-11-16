@@ -14,6 +14,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { AssistInboxItem, AssistOutcome, CollabClient } from "../api/collab-client.js";
 import { requestAssistFocus } from "../app/collab-assist-focus.js";
+import { registerAssistInboxRefresh } from "../app/collab-assist-refresh.js";
+import { dispatchDemoGuide, getDemoGuideState, isDemoGuideActive, subscribeDemoGuide } from "../app/collab-demo-guide-store.js";
 import { getCollabProjectsSnapshot, subscribeCollabProjects } from "../app/collab-projects-store.js";
 import { useOptionalNotificationCenter } from "../components/notification-center.js";
 import type { MessageKey } from "../i18n/messages.js";
@@ -27,6 +29,18 @@ export const ASSIST_POLL_MS = 5_000;
 /** 等她处理的请求：等待授权或等待确认。 */
 function waitingForHer(item: AssistInboxItem): boolean {
   return item.status === "pending" || item.status === "confirm";
+}
+
+/**
+ * 限时授权还在、审查结论却要她看过：她的 Memmy 不会自动执行，得她自己选 Agent 并授权。
+ *
+ * <p>要等审查结论落地才算：请求刚到时结论还没出来，这时弹窗只会让她等一次空跑，原因行也没有。
+ * 审查没能完成（unavailable）同样要她决定，一起算在这里。</p>
+ */
+function needsHerDecision(item: AssistInboxItem): boolean {
+  if (item.status !== "pending" || !item.granted || item.autoRun) return false;
+  const check = item.safety?.executor;
+  return check != null && check.status !== "auto";
 }
 
 /** 发起方收到的结果通知：按结局写标题与正文。 */
@@ -95,6 +109,8 @@ export function CollabAssistHost(props: {
 }) {
   const { t } = useTranslation();
   const notifications = useOptionalNotificationCenter();
+  /** 新手引导进行中：授权弹窗是亮区，遮罩让给引导。 */
+  const demoGuideActive = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState).status === "active";
   const { collab, enabled } = props;
   /** 上层每次渲染都会给新的函数：放在 ref 里，轮询不必因此重启。 */
   const openTaskRef = useRef(props.onOpenTask);
@@ -107,6 +123,11 @@ export function CollabAssistHost(props: {
   const projects = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot).projects ?? [];
   /** 已经提示过的请求 → 那条通知的 id：同一条请求只弹一次，请求处理掉后收起。 */
   const announced = useRef(new Map<string, string | null>());
+  /**
+   * 已经自动弹过授权弹窗的请求。和 {@link announced} 分开算：限时授权的请求第一次出现时已经发过通知，
+   * 审查结论落地之后仍要弹一次窗。
+   */
+  const prompted = useRef(new Set<string>());
   /** 已经通知过的发起方结果：本机删除失败时也不重复弹。 */
   const announcedOutcomes = useRef(new Set<string>());
 
@@ -175,6 +196,13 @@ export function CollabAssistHost(props: {
       if (notificationId) notifications?.dismiss(notificationId);
       announced.current.set(id, null);
     }
+    // 限时授权还在、审查结论却要她确认：和没有授权的请求一样弹授权弹窗，同一条只自动弹一次。
+    const asking = next.find((item) => needsHerDecision(item) && !prompted.current.has(item.id));
+    if (asking) {
+      prompted.current.add(asking.id);
+      // 已经开着一个弹窗时不换人：她正在做的那次选择不能被打断。
+      setDialogRequest((current) => current ?? asking);
+    }
     for (const item of next) {
       if (announced.current.has(item.id)) continue;
       if (!waitingForHer(item)) continue;
@@ -193,16 +221,26 @@ export function CollabAssistHost(props: {
         onAction: () => actOn(item)
       }) ?? null;
       announced.current.set(item.id, notificationId);
-      // 有生效中的限时授权的请求不打扰她：她的 Memmy 会直接开始执行。
-      if (item.status === "pending" && !item.granted) setDialogRequest(item);
+      // 有生效中的限时授权的请求不打扰她：她的 Memmy 会直接开始执行。审查结论要求她确认时由上面那一段弹窗。
+      if (item.status === "pending" && !item.granted && !prompted.current.has(item.id)) {
+        prompted.current.add(item.id);
+        setDialogRequest((current) => current ?? item);
+      }
     }
   }, [collab, enabled, notifications, t, actOn, announceOutcomes]);
 
   useEffect(() => {
     announced.current.clear();
+    prompted.current.clear();
     setInbox([]);
     setDialogRequest(null);
   }, [collab, enabled]);
+
+  // 新手引导开启「接收协助请求」之后要立刻看到请求：把这次立即刷新交给引导调用，不等下一轮轮询。
+  useEffect(() => {
+    registerAssistInboxRefresh(() => void poll());
+    return () => registerAssistInboxRefresh(null);
+  }, [poll]);
 
   useEffect(() => {
     if (!collab || !enabled) return;
@@ -230,7 +268,10 @@ export function CollabAssistHost(props: {
       <CollabAssistDialog
         open={dialogRequest !== null}
         request={dialogRequest}
+        // 审查在弹窗打开之后才完成时，原因行靠这一份出现；request 对象不动，选择不会被重置。
+        safety={inbox.find((item) => item.id === dialogRequest?.id)?.safety ?? dialogRequest?.safety ?? null}
         collab={collab}
+        demoAnchor={demoGuideActive}
         onDecided={async (decision) => {
           if (!dialogRequest) return;
           const request = dialogRequest;
@@ -238,6 +279,23 @@ export function CollabAssistHost(props: {
           setDialogRequest(null);
           void poll();
           if (decision.action !== "allow") return;
+          // 新手引导里允许之后也要进那条任务：演示要让人看到协助条、执行过程与「结果已发给谁」，
+          // 与正式逻辑走同一条路，区别只在拿不到任务时按「这一步没有完成」处理，而不是退回看板。
+          if (isDemoGuideActive()) {
+            dispatchDemoGuide({ type: "help-decided", allow: true });
+            if (decision.agent === "memmy" && openTaskRef.current) {
+              const conversationId = await waitForMemmyTask(collab, decided.id);
+              if (conversationId) {
+                openTaskRef.current(conversationId);
+                return;
+              }
+              // 15 秒还没有那条任务：这一步算没有完成，引导给出重试与跳过。
+              dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.help") });
+            }
+            // 由外部 Agent 执行（或没有任务可进）：打开项目看板，在右侧展开这次协助。
+            openAssist({ projectId: request.projectId, threadId: request.threadId }, false);
+            return;
+          }
           // 由 Memmy 执行：等它在项目里建好任务（通常一两秒），直接进入那条任务。
           if (decision.agent === "memmy" && openTaskRef.current) {
             const conversationId = await waitForMemmyTask(collab, decided.id);

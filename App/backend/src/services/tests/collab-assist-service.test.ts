@@ -132,10 +132,14 @@ describe("createCollabAssistService", () => {
       }
       return { request: request() };
     });
+    const directories: unknown[][] = [];
     const service = createCollabAssistService({
       cloud,
       homeDirectory: home(),
-      projectDirectory: async () => "/tmp",
+      projectDirectory: async (...args) => {
+        directories.push(args);
+        return "/tmp";
+      },
       agents: async () => [{ sourceId: "claude_code", name: "Claude Code", available: true }],
       runner: runner()
     });
@@ -144,6 +148,8 @@ describe("createCollabAssistService", () => {
     // 执行是后台跑的：等它把结果写回去。
     await new Promise((resolve) => setTimeout(resolve, 50));
 
+    // 本机还没有这个项目的目录时要按项目名新建，所以项目名跟着请求一起传过去。
+    expect(directories).toEqual([["p1", "Memmy 内测反馈"]]);
     // 限时授权还在：不必再问她，直接按她选定的 Agent 执行；不带时长，授权不会因此顺延。
     const decision = calls.find((call) => call.path.endsWith("/decision"));
     expect(decision?.body).toEqual({ action: "allow", agent: "claude_code", scope: "timed" });

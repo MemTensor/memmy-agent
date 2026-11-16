@@ -33,6 +33,16 @@ export interface AssistRecipe {
   cwdHint?: string;
   /** 会话建好后要设的 ACP 会话选项（configId → 值或显示名），见 {@link ./acp-client} 的 sessionConfig。 */
   sessionConfig?: Readonly<Record<string, string>>;
+  /**
+   * 协助执行时把它设成哪个模式（见 {@link ./acp-client} 的 sessionMode）：为的是让 Agent 自己的「帮我批准」生效，
+   * 而不是沿用她平时可能关掉了批准的设置。
+   */
+  sessionMode?: Readonly<{ configId: string; value: string; fallback?: string }>;
+  /**
+   * 协助执行时它会不会对危险操作发批准请求（ACP 的 {@code session/request_permission}）。
+   * 值为 false 的 Agent 执行时没有「帮我批准」这一层，请求只能由她看过再决定要不要自动执行。
+   */
+  asksForApproval: boolean;
 }
 
 /**
@@ -42,27 +52,61 @@ export interface AssistRecipe {
  */
 const RECIPES: readonly AssistRecipe[] = [
   // 这三个要适配器把 ACP 翻成它们自己的接口；适配器由 Memmy 在授权后自己装（见 ./adapters）。
-  { sourceId: "claude_code", name: "Claude Code", command: "claude-agent-acp", args: [] },
-  { sourceId: "codex", name: "Codex", command: "codex-acp", args: [] },
+  // Claude Code 的适配器有 mode 选项：协助执行时设为 auto（Auto review，有风险的操作请求批准），
+  // 模型不支持 auto 时适配器会退到 acceptEdits（改动不再询问），因此设完读回当前值，不是 auto 就改设 default。
+  {
+    sourceId: "claude_code",
+    name: "Claude Code",
+    command: "claude-agent-acp",
+    args: [],
+    sessionMode: { configId: "mode", value: "auto", fallback: "default" },
+    asksForApproval: true
+  },
+  // Codex 的模式由环境变量给出：agent = Auto review（只对判为有风险的操作请求批准，工作区可写、断网沙箱）。
+  // 续跑时同样设一次：session/load 接回的是她原来那个会话，模式要跟着协助走。
+  {
+    sourceId: "codex",
+    name: "Codex",
+    command: "codex-acp",
+    args: [],
+    // 新会话靠 INITIAL_AGENT_MODE 进 Auto review；续跑是接回她原来那个会话，模式不跟着来，这里再设一次。
+    env: { INITIAL_AGENT_MODE: "agent" },
+    sessionMode: { configId: "mode", value: "agent", fallback: "read-only" },
+    asksForApproval: true
+  },
   // Cursor 的 ACP 入口是隐藏参数：帮助里看不到，但可以直接用。
   // 模型统一用 Auto（ACP 里的值是 `default[]`）：CLI 的模型选择存在 ~/.cursor/cli-config.json，与 IDE 里选的不是一份，
   // 而 Cursor 自家模型与其他模型分开计额度，CLI 里选的模型可能恰好没有额度（2026-11-05 实测：Other Models 用尽时
   // kimi-k3 只回「Upgrade your plan to continue」，Auto 正常）。
-  { sourceId: "cursor", name: "Cursor", command: "cursor-agent", args: ["acp"], sessionConfig: { model: "default[]" } },
-  { sourceId: "opencode", name: "OpenCode", command: "opencode", args: ["acp"] },
+  {
+    sourceId: "cursor",
+    name: "Cursor",
+    command: "cursor-agent",
+    args: ["acp"],
+    sessionConfig: { model: "default[]" },
+    asksForApproval: false
+  },
+  { sourceId: "opencode", name: "OpenCode", command: "opencode", args: ["acp"], asksForApproval: false },
   // OpenClaw 的 CLI 工作目录固定，改由 ACP 的 cwd 指定。
-  { sourceId: "openclaw", name: "OpenClaw", command: "openclaw", args: ["acp"], cwdHint: "acp" },
-  { sourceId: "hermes", name: "Hermes", command: "hermes", args: ["acp"] },
+  { sourceId: "openclaw", name: "OpenClaw", command: "openclaw", args: ["acp"], cwdHint: "acp", asksForApproval: false },
+  { sourceId: "hermes", name: "Hermes", command: "hermes", args: ["acp"], asksForApproval: false },
   // WorkBuddy 暂不支持执行协助（2026-11-05 下线）：原配方 `codebuddy --acp` 拉起的是另外安装的 CodeBuddy 命令行，
   // 账号、额度都不是 WorkBuddy 的；WorkBuddy 自带的引擎由桌面端带着内部参数与账号拉起，单独走 ACP 没有响应。
   // 等有稳定的调用方式再加回来。
   // QwenWork 用桌面端包内的 Qoder 引擎，ACP 同样是隐藏参数。
   // 引擎不在 PATH 上，装在应用包里（见 {@link qwenWorkEngine}），找不到时由它补上绝对路径。
-  { sourceId: "qwenwork", name: "QwenWork", command: "qoderclicn", args: ["--acp"] },
+  { sourceId: "qwenwork", name: "QwenWork", command: "qoderclicn", args: ["--acp"], asksForApproval: false },
   // DeepSeek Harness 的一次性模式不能续跑，协助统一走 ACP。真正的入口与参数由 ./deepseek-harness 解析：
   // 桌面版自带的引擎优先，其次是版本够新的 dsh 命令行，并且要叠上桌面版的模型补丁。
-  { sourceId: DEEPSEEK_HARNESS_SOURCE_ID, name: "DeepSeek Harness", command: "dsh", args: ["--profile", "acp"] },
-  { sourceId: "pi", name: "Pi", command: "pi-acp", args: [] }
+  {
+    sourceId: DEEPSEEK_HARNESS_SOURCE_ID,
+    name: "DeepSeek Harness",
+    command: "dsh",
+    args: ["--profile", "acp"],
+    asksForApproval: false
+  },
+  // Pi 的适配器只在扩展弹窗时请求批准，工具执行不请求：协助执行时要她看过再决定（2026-11-13 核实 pi-acp 0.0.34）。
+  { sourceId: "pi", name: "Pi", command: "pi-acp", args: [], asksForApproval: false }
 ];
 
 /** 执行方标识里 Memmy 自己不用 ACP：它在项目下新建一条 Memmy 任务执行（见 {@link ./memmy-runner}）。 */
@@ -187,6 +231,15 @@ export function assistRunnable(
 
 /** 已知的 Agent 名：失败原因要说清是哪个 Agent 起不来。下线的也留着名字，旧记录里仍然按名字显示。 */
 const RETIRED_NAMES: Readonly<Record<string, string>> = Object.freeze({ workbuddy: "WorkBuddy" });
+
+/**
+ * 这个执行方在协助执行时会不会对危险操作发批准请求。Memmy 自己走第五节的那条检查，等同于是；
+ * 没有配方或已下线的（用户自己添加的 Agent）一律按不会。
+ */
+export function assistAsksForApproval(sourceId: string): boolean {
+  if (sourceId === MEMMY_SOURCE_ID) return true;
+  return RECIPES.find((recipe) => recipe.sourceId === sourceId)?.asksForApproval === true;
+}
 
 export function assistAgentName(sourceId: string): string {
   if (sourceId === MEMMY_SOURCE_ID) return "Memmy";

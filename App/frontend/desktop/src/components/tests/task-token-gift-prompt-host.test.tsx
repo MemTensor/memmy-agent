@@ -9,7 +9,6 @@ import {
   resetCollabLaunchPromptRuntime,
   setCollabLaunchPromptOpen,
 } from "../../app/collab-launch-prompt-state.js";
-import { featureAnnouncementSeenKey } from "../../app/task-token-gift-prompt.js";
 import { TaskTokenGiftPromptHost } from "../task-token-gift-prompt-host.js";
 
 const mocks = vi.hoisted(() => ({
@@ -39,6 +38,7 @@ describe("TaskTokenGiftPromptHost", () => {
   let container: HTMLDivElement;
   beforeEach(() => {
     vi.useFakeTimers();
+    // A date inside the retired feature window: the plan no longer depends on it.
     vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-28T20:00:00+08:00"));
     window.localStorage.clear();
     resetCollabLaunchPromptRuntime();
@@ -60,7 +60,7 @@ describe("TaskTokenGiftPromptHost", () => {
     vi.useRealTimers(); vi.restoreAllMocks();
   });
 
-  it("automatically ensures the grant and only acknowledges after the notice closes", async () => {
+  it("shows existing users the gift page alone, even on a date that used to open the feature pages", async () => {
     await act(async () => { root.render(<TaskTokenGiftPromptHost />); });
     await act(async () => { vi.advanceTimersByTime(450); await Promise.resolve(); });
     expect(mocks.ensureTaskTokenGift).toHaveBeenCalledOnce();
@@ -69,30 +69,17 @@ describe("TaskTokenGiftPromptHost", () => {
     expect(button?.textContent).toBe("Dismiss gift notice");
     await act(async () => { button!.click(); await Promise.resolve(); });
     expect(mocks.ackTaskTokenGift).toHaveBeenCalledWith({ grantId: "v125_task_token_gift_20m" });
-    expect(window.localStorage.getItem(featureAnnouncementSeenKey("user-1"))).toBe("1");
+    expect(window.localStorage.length).toBe(0);
   });
 
-  it("shows new users the feature pages without a gift page, and acknowledges on close", async () => {
-    mocks.ensureTaskTokenGift.mockResolvedValue({ hasGift: true, grantId: "v125_task_token_gift_20m",
-      audience: "new", tokenAmount: 20_000_000, totalTokens: 20_000_000 });
-    await act(async () => { root.render(<TaskTokenGiftPromptHost />); });
-    await act(async () => { vi.advanceTimersByTime(450); await Promise.resolve(); });
-    expect(mocks.ackTaskTokenGift).not.toHaveBeenCalled();
-    const button = container.querySelector<HTMLButtonElement>("button");
-    expect(button?.textContent).toBe("Dismiss gift notice");
-    await act(async () => { button!.click(); await Promise.resolve(); });
-    expect(mocks.ackTaskTokenGift).toHaveBeenCalledWith({ grantId: "v125_task_token_gift_20m" });
-    expect(window.localStorage.getItem(featureAnnouncementSeenKey("user-1"))).toBe("1");
-  });
-
-  it("acknowledges a new user's grant after the feature window without opening a dialog", async () => {
-    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-21T00:00:00+08:00"));
+  it("acknowledges a new user's grant without any dialog, even on a date that used to open the feature pages", async () => {
     mocks.ensureTaskTokenGift.mockResolvedValue({ hasGift: true, grantId: "v125_task_token_gift_20m",
       audience: "new", tokenAmount: 20_000_000, totalTokens: 20_000_000 });
     await act(async () => { root.render(<TaskTokenGiftPromptHost />); });
     await act(async () => { vi.advanceTimersByTime(450); await Promise.resolve(); await Promise.resolve(); });
     expect(container.querySelector("button")).toBeNull();
     expect(mocks.ackTaskTokenGift).toHaveBeenCalledWith({ grantId: "v125_task_token_gift_20m" });
+    expect(window.localStorage.length).toBe(0);
   });
 
   it("does not request or offer a gift while signed out", async () => {
@@ -119,12 +106,10 @@ describe("TaskTokenGiftPromptHost", () => {
     }));
     expect(container.querySelector("button")).toBeNull();
     expect(mocks.ackTaskTokenGift).not.toHaveBeenCalled();
-    expect(window.localStorage.getItem(featureAnnouncementSeenKey("user-1"))).toBeNull();
     expect(readCollabLaunchPromptSeen(window.localStorage)).toBe(true);
   });
 
-  it("still credits and acknowledges a new user's grant with no visible pages after the feature window when collaboration claimed", async () => {
-    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-21T00:00:00+08:00"));
+  it("still credits and acknowledges a new user's grant with no visible pages when collaboration claimed", async () => {
     mocks.ensureTaskTokenGift.mockResolvedValue({ hasGift: true, grantId: "v125_task_token_gift_20m",
       audience: "new", tokenAmount: 20_000_000, totalTokens: 20_000_000 });
     claimCollabLaunchPrompt();
@@ -141,7 +126,6 @@ describe("TaskTokenGiftPromptHost", () => {
     }));
     expect(mocks.ackTaskTokenGift).toHaveBeenCalledWith({ grantId: "v125_task_token_gift_20m" });
     expect(container.querySelector("button")).toBeNull();
-    expect(window.localStorage.getItem(featureAnnouncementSeenKey("user-1"))).toBeNull();
   });
 
   it("refreshes a credited balance but defers the notice when collaboration claims during the gift request", async () => {
@@ -161,7 +145,6 @@ describe("TaskTokenGiftPromptHost", () => {
 
     expect(container.querySelector("button")).toBeNull();
     expect(mocks.ackTaskTokenGift).not.toHaveBeenCalled();
-    expect(window.localStorage.getItem(featureAnnouncementSeenKey("user-1"))).toBeNull();
     expect(mocks.getBootstrap).toHaveBeenCalled();
     expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({
       tokenUsage: { totalTokens: 22_000_000 },
@@ -173,7 +156,6 @@ describe("TaskTokenGiftPromptHost", () => {
     expect(mocks.getBootstrap).toHaveBeenCalled();
     expect(container.querySelector("button")).toBeNull();
     expect(mocks.ackTaskTokenGift).not.toHaveBeenCalled();
-    expect(window.localStorage.getItem(featureAnnouncementSeenKey("user-1"))).toBeNull();
   });
 
   it("offers the deferred gift on the next run even though the collaboration announcement is already seen", async () => {
@@ -188,9 +170,7 @@ describe("TaskTokenGiftPromptHost", () => {
     const button = container.querySelector<HTMLButtonElement>("button");
     expect(button?.textContent).toBe("Dismiss gift notice");
     expect(mocks.ackTaskTokenGift).not.toHaveBeenCalled();
-    expect(window.localStorage.getItem(featureAnnouncementSeenKey("user-1"))).toBeNull();
     await act(async () => { button!.click(); await Promise.resolve(); });
     expect(mocks.ackTaskTokenGift).toHaveBeenCalledWith({ grantId: "v125_task_token_gift_20m" });
-    expect(window.localStorage.getItem(featureAnnouncementSeenKey("user-1"))).toBe("1");
   });
 });

@@ -13,7 +13,7 @@ import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
 import type { AgentTaskView } from "../../state/agent-chat-slice.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
-import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, deriveSidebarPlacement, deriveVisibleSidebarPlacement, freshDecisionAnnouncements, sameWorkspacePath, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveSidebarUpdateAction, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, shouldShowRecordingView, truncateAccountDisplayText } from "../app-frame.js";
+import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, deriveSidebarPlacement, deriveVisibleSidebarPlacement, freshDecisionAnnouncements, sameWorkspacePath, groupAgentTasks, groupTasksByTime, resolveCreatedProjectDestination, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveSidebarUpdateAction, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, shouldShowRecordingView, truncateAccountDisplayText } from "../app-frame.js";
 
 describe("AppFrame", () => {
   it("hides the recording view shortcut while its tab is already open", () => {
@@ -45,7 +45,7 @@ describe("AppFrame", () => {
     expect(html).not.toContain("置顶");
     expect(html).not.toContain("归档");
     expect(html).toContain('aria-label="任务列表操作"');
-    expect(html).toContain('aria-label="添加项目"');
+    expect(html).toContain('aria-label="新建项目"');
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-label="调整主侧边栏宽度"');
     expect(html).toContain("sidebar-resize-handle");
@@ -432,9 +432,38 @@ describe("AppFrame", () => {
       source.indexOf("function SidebarMoreMenu")
     );
 
-    expect(projectHeaderBlock).toContain('aria-label={t("appFrame.project.add")}');
+    expect(projectHeaderBlock).toContain('aria-label={t("appFrame.project.new")}');
     expect(source).toContain('label={t("appFrame.project.showArchived")}');
     expect(projectMenuBlock).toBe("");
+  });
+
+  it("opens the new-project dialog from the sidebar button without a picker in between", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const projectHeaderBlock = source.slice(
+      source.indexOf('title={t("appFrame.projects")}'),
+      source.indexOf('title={t("appFrame.tasks")}')
+    );
+
+    // 一次点击就走新建项目：按钮直接调用 newProject()，弹窗由 createPending 打开。
+    expect(projectHeaderBlock).toContain("newProject();");
+    expect(projectHeaderBlock).not.toContain("setProjectCreateMenuAnchor");
+    expect(projectHeaderBlock).not.toContain("SidebarWorkspacePickerMenu");
+    expect(source).not.toContain("SidebarWorkspacePickerMenu");
+    expect(source).not.toContain("projectCreateMenuAnchor");
+    expect(source).not.toContain("projectCreateMenuSize");
+    expect(source).not.toContain("app-frame-workspace-picker-menu");
+    expect(source).toContain("function newProject()");
+    expect(source.match(/requestCreateProject\(\)/gu)).toHaveLength(1);
+  });
+
+  it("lands a new project in its own session unless sharing was attempted", () => {
+    // 本机项目：直接进入它的新会话面板，标题与项目选择器都是这个项目。
+    expect(resolveCreatedProjectDestination("local-1", false)).toEqual({
+      kind: "newSession",
+      target: { kind: "project", projectId: "local-1" }
+    });
+    // 试过共享（成功、失败、达到上限）：回看板，授权询问与提示都挂在那里。
+    expect(resolveCreatedProjectDestination("local-1", true)).toEqual({ kind: "board" });
   });
 
   it("keeps top-level sidebar task menus mutually exclusive", () => {

@@ -7,7 +7,11 @@
  *
  * <p>同一次排查的后续请求续在同一条任务里（会话 id 就是任务 id），Memmy 记得前面查到的内容。</p>
  */
-import type { AssistRunSnapshot, MemmyAgentAdminClient } from "../../adapters/outbound/memmy-agent-admin-client/index.js";
+import type {
+  AssistRunSnapshot,
+  AssistTranscriptItem,
+  MemmyAgentAdminClient
+} from "../../adapters/outbound/memmy-agent-admin-client/index.js";
 import type { AssistRunner } from "../collab-assist-service.js";
 import { ACP_TIMEOUT_MS, AcpError, type AssistStep } from "./acp-client.js";
 import { ASSIST_RESULT_FORMAT } from "./prompt.js";
@@ -53,8 +57,10 @@ export function createMemmyAssistRunner(options: MemmyAssistRunnerOptions): Assi
             via: request.via,
             attempt: request.attempt,
             title: request.title,
-            // 结果的写法交给模型、不出现在任务里：任务页只显示请求卡片。
-            context: ASSIST_RESULT_FORMAT
+            // 结果的写法与执行边界交给模型、不出现在任务里：任务页只显示请求卡片。
+            context: [ASSIST_RESULT_FORMAT, input.boundary].filter(Boolean).join("\n\n"),
+            // 这次执行对工具调用的策略：Memory 没有「帮我批准」，由运行时的规则检查代替（见 memmy-agent 的 assist-request）。
+            approval: input.approval ?? "deny"
           }
         });
       } catch (error) {
@@ -123,7 +129,13 @@ export function createMemmyAssistRunner(options: MemmyAssistRunnerOptions): Assi
         throw failWith(new AcpError(stopRequested ? "已停止当前执行" : "执行方在任务里停止了这次执行", "cancelled"));
       }
       if (current.status === "failed") throw failWith(new AcpError(failureText(current.error), "failed"));
-      return { reply: current.reply, steps: toSteps(current), transcript: current.transcript ?? [], sessionId: chatId };
+      return {
+        reply: current.reply,
+        steps: toSteps(current),
+        transcript: current.transcript ?? [],
+        skipped: skippedFromTranscript(current.transcript ?? []),
+        sessionId: chatId
+      };
     }
   };
 }
@@ -132,11 +144,30 @@ function isFinished(status: AssistRunSnapshot["status"]): boolean {
   return status === "done" || status === "failed" || status === "stopped";
 }
 
+/**
+ * 执行过程里按协助规则跳过的工具调用：运行时的钩子把它标成 skipped（见 memmy-agent 的 assist-request）。
+ * 标题取这一步的说明，详情取命令或参数，与外部 Agent 那边同一格式。
+ */
+export function skippedFromTranscript(items: readonly AssistTranscriptItem[]): Array<{ title: string; detail?: string }> {
+  return items
+    .filter((item): item is Extract<AssistTranscriptItem, { kind: "tool" }> => item.kind === "tool" && item.status === "skipped")
+    .map((item) => ({
+      title: item.name || "一项操作",
+      ...(item.input ? { detail: item.input.replace(/\s+/gu, " ").trim().slice(0, 300) } : {})
+    }));
+}
+
 /** 发给发起方的步骤只有「做了什么」和产出；还在进行中的那一步不带产出。 */
 function toSteps(snapshot: AssistRunSnapshot): AssistStep[] {
   return snapshot.steps.map((step) => ({
     text: step.text,
-    ...(step.output ? { output: step.status === "failed" ? `${step.output}（失败）` : step.output } : {})
+    ...(step.output
+      ? {
+          output: step.status === "failed" ? `${step.output}（失败）`
+            : step.status === "skipped" ? `未执行（按协助规则跳过）：${step.output}`
+              : step.output
+        }
+      : step.status === "skipped" ? { output: "未执行（按协助规则跳过）" } : {})
   }));
 }
 

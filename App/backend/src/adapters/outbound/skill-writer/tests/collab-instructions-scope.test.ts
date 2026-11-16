@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readCollabProjectInstructions } from "../workspace-bridge/runtime.js";
+import { readCollabProjectInstructions } from "../project-hook/runtime.js";
 
 const PRODUCT_PROJECT = "01a17657-0cd5-7be0-a611-3fdcd387e8ae";
 const SCENE_PROJECT = "01a17c05-fa6c-7aa0-9225-3612b2a6f6a6";
@@ -65,7 +65,9 @@ describe("collab project instructions for Codex", () => {
       directory: join(root, "ws", "packages", "app"),
       conversationId: "session-1"
     });
-    expect(hit).toEqual({ projectId: "p-1", text: "团队约定：先看 PRD。" });
+    expect(hit?.projectId).toBe("p-1");
+    expect(hit?.context).toContain("<collab_project>");
+    expect(hit?.context).toContain("团队约定：先看 PRD。");
   });
 
   it("keeps a nested Codex project out, even though its folder is inside the associated project's root", async () => {
@@ -88,7 +90,9 @@ describe("collab project instructions for Codex", () => {
       directory: join(root, "ws", "scene", "packages", "app"),
       conversationId: "session-3"
     });
-    expect(hit).toEqual({ projectId: "p-1", text: "团队约定：先看 PRD。" });
+    expect(hit?.projectId).toBe("p-1");
+    expect(hit?.context).toContain("<collab_project>");
+    expect(hit?.context).toContain("团队约定：先看 PRD。");
   });
 
   it("does not use a Codex project's root for another agent's session", async () => {

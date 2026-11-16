@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import type { AgentArtifactClient } from "../agent-message-content.js";
-import { readPreviewResponse, THREAD_PDF_PREVIEW_MAX_BYTES, THREAD_OFFICE_PREVIEW_MAX_BYTES, ThreadTabPreview } from "../agent-thread-panel-preview.js";
+import { readPreviewResponse, THREAD_PDF_PREVIEW_MAX_BYTES, THREAD_OFFICE_PREVIEW_MAX_BYTES, ThreadTabPreview, type ThreadPreviewContext } from "../agent-thread-panel-preview.js";
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let cleanup: (() => void) | undefined;
 afterEach(() => { cleanup?.(); vi.useRealTimers(); document.body.replaceChildren(); Reflect.deleteProperty(window, "memmy"); });
@@ -253,5 +253,81 @@ describe("side panel attachment downloads", () => {
     await act(async () => { container.querySelector<HTMLButtonElement>('[aria-label="下载文件"]')!.click(); await Promise.resolve(); });
     expect(resolveArtifact).toHaveBeenCalledWith("/work/old.pptx");
     expect(saveFile).toHaveBeenCalledWith({ url: "http://127.0.0.1:18980/api/media/fresh", name: "fresh.pptx" });
+  });
+});
+
+describe("draft project file previews", () => {
+  type PreviewTab = Parameters<typeof ThreadTabPreview>[0]["tab"];
+
+  function artifactClientFor(resolveArtifact: AgentArtifactClient["resolveArtifact"]): AgentArtifactClient {
+    return {
+      resolveArtifact,
+      openArtifact: vi.fn(async () => undefined),
+      revealArtifact: vi.fn(async () => undefined),
+    };
+  }
+
+  async function renderPreview(tab: PreviewTab, context: ThreadPreviewContext) {
+    const container = document.createElement("div"); document.body.append(container);
+    const root = createRoot(container); cleanup = () => act(() => root.unmount());
+    const render = async (nextContext: ThreadPreviewContext) => {
+      await act(async () => {
+        root.render(<I18nProvider language="zh-CN"><ThreadTabPreview tab={tab} context={nextContext} /></I18nProvider>);
+        await new Promise(resolve => setTimeout(resolve, 10));
+      });
+    };
+    await render(context);
+    return { container, render };
+  }
+
+  it("previews a draft project file through a project-scoped client", async () => {
+    const resolveArtifact = vi.fn(async (path: string) => ({
+      ok: true as const, path, name: "notes.md", kind: "file" as const,
+      media_url: "http://127.0.0.1:18980/api/media/draft-notes",
+    }));
+    const fetchFn = vi.fn(async () => new Response("draft project notes"));
+    const { container } = await renderPreview(
+      { id: "draft-notes", type: "file", name: "notes.md", path: "/draft-project/notes.md" },
+      {
+        artifactClient: artifactClientFor(resolveArtifact),
+        agentClient: null, sessionScope: null, environment: null,
+        workspaceRoot: "/draft-project", fetchFn: fetchFn as typeof fetch,
+      },
+    );
+    expect(resolveArtifact).toHaveBeenCalledWith("/draft-project/notes.md");
+    expect(fetchFn).toHaveBeenCalledWith("http://127.0.0.1:18980/api/media/draft-notes", expect.anything());
+    expect(container.textContent).toContain("draft project notes");
+    expect(container.textContent).not.toContain("当前会话无法读取这个文件");
+  });
+
+  it("re-resolves an open tab when the task gets a session and the client changes scope", async () => {
+    const draftResolve = vi.fn(async (path: string) => ({
+      ok: true as const, path, name: "notes.md", kind: "file" as const,
+      media_url: "http://127.0.0.1:18980/api/media/draft-notes",
+    }));
+    const sessionResolve = vi.fn(async (path: string) => ({
+      ok: true as const, path, name: "notes.md", kind: "file" as const,
+      media_url: "http://127.0.0.1:18980/api/media/session-notes",
+    }));
+    const fetchFn = vi.fn(async (url: RequestInfo | URL) => new Response(
+      String(url).includes("session-notes") ? "content after the first message" : "content while still a draft",
+    ));
+    const base = {
+      agentClient: null, sessionScope: null, environment: null,
+      workspaceRoot: "/draft-project", fetchFn: fetchFn as typeof fetch,
+    };
+    const { container, render } = await renderPreview(
+      { id: "draft-notes", type: "file", name: "notes.md", path: "/draft-project/notes.md" },
+      { ...base, artifactClient: artifactClientFor(draftResolve) },
+    );
+    expect(container.textContent).toContain("content while still a draft");
+
+    await render({ ...base, artifactClient: artifactClientFor(sessionResolve) });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+
+    expect(sessionResolve).toHaveBeenCalledWith("/draft-project/notes.md");
+    expect(sessionResolve).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("content after the first message");
+    expect(container.textContent).not.toContain("当前会话无法读取这个文件");
   });
 });

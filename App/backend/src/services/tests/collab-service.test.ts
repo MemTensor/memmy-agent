@@ -580,9 +580,9 @@ describe("collab service", () => {
     });
     const svc = service(fetcher, { projectsDir: join(root, "projects") });
 
-    // Another project already owns the plain name, so this one gets a short id suffix instead of an id-only name.
+    // Another project already owns the plain name, so this one is numbered the way a file manager would.
     const created = await svc.createProject("Memmy 开发");
-    expect(created.localDirectory).toBe(join(root, "online-projects", "Memmy 开发-p-9abcde"));
+    expect(created.localDirectory).toBe(join(root, "online-projects", "Memmy 开发 2"));
   });
 
   it("uses the folder the person picked and registers it as the local project", async () => {
@@ -1853,3 +1853,95 @@ function projectSession(
     shareText: `【Memmy】会话 ${index} https://cloud.test.invalid/s/${id}`
   };
 }
+
+describe("the demo walkthrough passed through to the cloud", () => {
+  const demoProject = {
+    id: "p-9",
+    name: "项目协作体验",
+    role: "owner",
+    memberCount: 2,
+    sessionCount: 1,
+    createdAt: null,
+    demo: { active: true, memberUserId: "9001", memberName: "小饭团", step: "1" }
+  };
+
+  it("forwards demo on the create request and reads the demo back", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(root);
+    const { fetcher, calls } = fakeFetch({
+      "POST /api/collab/projects": () => ({ code: 0, data: { project: demoProject } })
+    });
+    const svc = service(fetcher, { projectsDir: join(root, "projects") });
+
+    const created = await svc.createProject("项目协作体验", undefined, { demo: true });
+
+    expect(calls[0]?.body).toMatchObject({ name: "项目协作体验", demo: true });
+    expect(created.project.demo).toMatchObject({ active: true, memberUserId: "9001", memberName: "小饭团" });
+  });
+
+  it("leaves demo out for an ordinary project, and reads a missing demo as null", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(root);
+    const {
+      fetcher, calls
+    } = fakeFetch({
+      "POST /api/collab/projects": () => ({ code: 0, data: { project: { ...demoProject, demo: null } } })
+    });
+    const svc = service(fetcher, { projectsDir: join(root, "projects") });
+
+    const created = await svc.createProject("普通项目");
+
+    expect(calls[0]?.body).not.toHaveProperty("demo");
+    expect(created.project.demo).toBeNull();
+  });
+
+  it("sends heartbeats with the step and reports an ended demo as null", async () => {
+    const { fetcher, calls } = fakeFetch({
+      "POST /api/collab/projects/p-9/demo/heartbeat": () => ({ code: 0, data: { demo: null } })
+    });
+    const svc = service(fetcher);
+
+    const result = await svc.demoHeartbeat("p-9", "2");
+
+    expect(calls.map((call) => `${call.method} ${new URL(call.url).pathname}`)).toEqual([
+      "POST /api/collab/projects/p-9/demo/heartbeat"
+    ]);
+    expect(calls[0]?.body).toEqual({ step: "2" });
+    // 云端说演示已结束：桌面端据此收起引导。
+    expect(result.demo).toBeNull();
+  });
+
+  it("ends the demo with the reason it stopped", async () => {
+    const { fetcher, calls } = fakeFetch({
+      "POST /api/collab/projects/p-9/demo/end": () => ({ code: 0, data: { ok: true } })
+    });
+    const svc = service(fetcher);
+
+    await svc.demoEnd("p-9", "exited");
+
+    expect(calls[0]?.body).toEqual({ reason: "exited" });
+  });
+
+  it("marks the demo member in the member list", async () => {
+    const { fetcher } = fakeFetch({
+      "GET /api/collab/projects/p-9/members": () => ({
+        code: 0,
+        data: {
+          project: { ...demoProject, demo: undefined },
+          joinMode: "approval",
+          canManage: true,
+          members: [
+            { userId: "u-b", name: "我", role: "owner", mine: true, joinedAt: null },
+            { userId: "9001", name: "小饭团", role: "member", mine: false, joinedAt: null, demo: true }
+          ],
+          requests: []
+        }
+      })
+    });
+    const svc = service(fetcher);
+
+    const view = await svc.listMembers("p-9");
+
+    expect(view.members.map((member) => member.demo)).toEqual([false, true]);
+  });
+});

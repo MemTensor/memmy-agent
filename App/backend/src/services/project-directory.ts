@@ -1,12 +1,35 @@
 /** Folder names and directories a project's tasks run in, shared by the cloud and local project paths. */
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-/** `‹root›/<name>`, suffixed with a short id only when another project already uses that name. */
-export async function uniqueProjectDirectory(root: string, name: string, projectId: string): Promise<string> {
-  const base = join(root, safeProjectDirectoryName(name));
-  if (!(await pathExists(base))) return base;
-  return join(root, `${safeProjectDirectoryName(name)}-${projectId.replace(/[^A-Za-z0-9._-]+/gu, "_").slice(0, 8)}`);
+/**
+ * Creates `‹root›/<name>` for a project that did not choose a folder. When that name is taken it numbers the
+ * folder the way a file manager names a new folder: `<name> 2`, `<name> 3`, and so on.
+ *
+ * <p>A name counts as taken when anything (a folder or a file) already uses it, compared without regard to case
+ * or Unicode normalization: macOS volumes treat `MemOS` and `memos` as one name, and numbering the same way on
+ * every platform keeps folder names predictable. The folder itself is created here, one level at a time, and a
+ * name another caller created first moves on to the next number, so two projects created at once never share a
+ * folder. Folders made before this rule (`<name>-<id>`) are left as they are; projects keep the path they stored.</p>
+ */
+export async function createProjectDirectory(root: string, name: string): Promise<string> {
+  await mkdir(root, { recursive: true });
+  const taken = new Set((await readdir(root)).map(folded));
+  // The cleaned name can end in a space where it was cut to length; the number goes after the visible name.
+  const base = safeProjectDirectoryName(name);
+  const stem = base.trimEnd();
+  for (let number = 1; ; number += 1) {
+    const candidate = number === 1 ? base : `${stem} ${number}`;
+    if (taken.has(folded(candidate))) continue;
+    const target = join(root, candidate);
+    try {
+      await mkdir(target);
+      return target;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      taken.add(folded(candidate));
+    }
+  }
 }
 
 /**
@@ -33,11 +56,7 @@ export async function ensureDirectory(target: string): Promise<string> {
   return target;
 }
 
-async function pathExists(target: string): Promise<boolean> {
-  try {
-    await stat(target);
-    return true;
-  } catch {
-    return false;
-  }
+/** The form two folder names share when a case- and normalization-insensitive volume sees them as one. */
+function folded(name: string): string {
+  return name.normalize("NFC").toLowerCase();
 }

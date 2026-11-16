@@ -1,5 +1,5 @@
 /**
- * 协作项目指令：云端项目自己设定的背景与规范，注入到该项目里的任务。
+ * 协作项目背景：云端项目自己的项目名、成员与背景规范，注入到该项目里的任务。
  *
  * <p>它与本机项目的项目指令是两条独立的路线：本机的按文件夹归属，读
  * {@code project-instructions.json}；这里的按云端项目归属，读 {@code collab-project-instructions.json}。
@@ -7,6 +7,10 @@
  *
  * <p>桌面端后端是这份缓存的唯一写方；这里只读。匹配按工作目录的覆盖关系判断（项目根目录与其子目录都算），
  * 因为协作项目的任务不一定都在根目录下运行。</p>
+ *
+ * <p>注入了两个信息：这个目录属于哪个协作项目、成员有谁（没写背景与规范的项目也有条目），
+ * 以及项目所有者设定的背景与规范（没写时省掉这一段）。前者让模型知道「这里的问题先去查项目任务」，
+ * 后者是任务要遵循的约定。</p>
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -16,6 +20,8 @@ import {
   collabInstructionsFor,
   emptyCollabInstructionsFile,
   parseCollabInstructionsFile,
+  renderCollabProjectContext,
+  type CollabInstructionsEntry,
   type CollabInstructionsFile
 } from "@memmy/local-api-contracts";
 import { getConfigPath } from "../config/paths.js";
@@ -26,10 +32,10 @@ const SECTION_ID = "collab-project-instructions";
 
 export interface CollabInstructionsSource {
   /**
-   * 某个 Memmy 任务命中的协作项目指令；没有则返回 null。
+   * 某个 Memmy 任务命中的协作项目条目；没有则返回 null。
    * Memmy 自己的任务是项目内会话，单位就是项目的工作目录。
    */
-  forDirectory(workspace: string | null | undefined): { projectId: string; text: string } | null;
+  forDirectory(workspace: string | null | undefined): CollabInstructionsEntry | null;
 }
 
 export interface CollabInstructionsSourceOptions {
@@ -58,7 +64,7 @@ export function createCollabInstructionsSource(
       const info = fs.statSync(filePath);
       key = `${info.mtimeMs}:${info.size}`;
     } catch {
-      // 没有文件就是还没有缓存过任何协作项目的指令。
+      // 没有文件就是还没有缓存过任何协作项目。
       return emptyCollabInstructionsFile();
     }
     if (cached?.key === key) return cached.file;
@@ -67,7 +73,7 @@ export function createCollabInstructionsSource(
       cached = { key, file };
       return file;
     } catch {
-      // 文件正被替换或内容坏了：当作没有指令，不让一次任务因此起不来。
+      // 文件正被替换或内容坏了：当作没有条目，不让一次任务因此起不来。
       return emptyCollabInstructionsFile();
     }
   }
@@ -80,28 +86,19 @@ export function createCollabInstructionsSource(
         groupId: workspace,
         directory: workspace
       });
-      if (!hit) return null;
-      const text = hit.entry.text.trim();
-      return text ? { projectId: hit.projectId, text } : null;
+      // 没写背景与规范的项目也有条目：这里不按文字过滤，是否有正文交给渲染决定。
+      return hit?.entry ?? null;
     }
   };
 }
 
-/** 注入用的段落；带上项目 id，排障时能看出这段指令来自哪个协作项目。 */
-export function renderCollabInstructionsSection(input: { projectId: string; text: string }): string {
-  return [
-    "# 协作项目指令",
-    "",
-    "本项目是一个协作项目，所有者设定了以下项目指令，在本项目中的任务里遵循：",
-    "",
-    `<collab_project_instructions project="${input.projectId}">`,
-    input.text,
-    "</collab_project_instructions>"
-  ].join("\n");
+/** 注入用的段落；正文由契约的渲染函数生成，与其他读方（后端、外部 Agent 的钩子）是同一段文字。 */
+export function renderCollabInstructionsSection(entry: CollabInstructionsEntry): string {
+  return ["# 协作项目", "", renderCollabProjectContext(entry)].join("\n");
 }
 
 /**
- * 把协作项目指令作为系统提示词的一段加进去。放在本机项目指令之后：两者都是项目级规则，
+ * 把协作项目的背景作为系统提示词的一段加进去。放在本机项目指令之后：两者都是项目级规则，
  * 一个属于这台电脑上的文件夹，一个属于云端项目，一起读时先看本机约定再看团队约定。
  */
 export function createCollabInstructionsHook(
@@ -109,10 +106,10 @@ export function createCollabInstructionsHook(
 ): AgentHook {
   return new (class extends AgentHook {
     override onBuildSystemPrompt(ctx: SystemPromptBuildContext): void {
-      const hit = source.forDirectory(ctx.workspace);
-      if (!hit) return;
+      const entry = source.forDirectory(ctx.workspace);
+      if (!entry) return;
       ctx.upsertSection(
-        { id: SECTION_ID, content: renderCollabInstructionsSection(hit), source: "collab_project" },
+        { id: SECTION_ID, content: renderCollabInstructionsSection(entry), source: "collab_project" },
         { after: "project-instructions" }
       );
     }

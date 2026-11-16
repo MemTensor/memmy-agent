@@ -435,7 +435,9 @@ function assistRunMetadata(value: unknown): Record<string, string | number> | nu
     if (typeof item === "string" && item.trim()) out[key] = item.trim().slice(0, 200);
   }
   // 交给模型、不在任务里显示的要求（结果的写法）：由协助钩子放进系统提示词。
-  if (typeof raw.context === "string" && raw.context.trim()) out.context = raw.context.trim().slice(0, 2_000);
+  if (typeof raw.context === "string" && raw.context.trim()) out.context = raw.context.trim().slice(0, 4_000);
+  // 这次执行对敏感操作的策略：deny 是限时授权自动开始的（工具执行前按规则拦下），allow 是她点过允许的。
+  if (raw.approval === "deny" || raw.approval === "allow") out.approval = raw.approval;
   if (typeof raw.attempt === "number" && Number.isSafeInteger(raw.attempt) && raw.attempt > 0) out.attempt = raw.attempt;
   return out.requestId ? out : null;
 }
@@ -2710,16 +2712,39 @@ export class WebSocketChannel extends BaseChannel {
     return httpJsonResponse(this.lastCompactionPayload(resolved.guiSessionKey, data.metadata?.lastSummary));
   }
 
+  /**
+   * The authorization root of an artifact request always comes from the server, never from the request
+   * body: a session key resolves to that session's bound workspace, a project id to the project's
+   * registered root. A draft task has no session yet, so the side panel previews its project files by id.
+   */
+  artifactRequestWorkspace(
+    request: HttpRequestLike,
+  ): { path: string; workspace: string } | HttpLikeResponse {
+    const artifactRequest = artifactRequestFromRequest(request);
+    if (!artifactRequest) return httpError(400, "missing path or one of sessionKey/projectId");
+    if ("sessionKey" in artifactRequest) {
+      const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
+      if (!workspace) return httpError(404, "session not found");
+      return { path: artifactRequest.path, workspace };
+    }
+    try {
+      const project = this.activeProject(artifactRequest.projectId);
+      const workspace = assertWebuiWorkspaceAvailable(project.rootPath);
+      if (workspace !== project.rootPath) throw new WebuiProjectError("project_directory_unavailable", 422);
+      return { path: artifactRequest.path, workspace };
+    } catch (error) {
+      return this.projectErrorResponse(error);
+    }
+  }
+
   handleArtifactResolve(request: HttpRequestLike): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
-    const artifactRequest = artifactRequestFromRequest(request);
-    if (!artifactRequest) return httpError(400, "missing path or sessionKey");
-    const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
-    if (!workspace) return httpError(404, "session not found");
-    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
+    const artifactRequest = this.artifactRequestWorkspace(request);
+    if ("status" in artifactRequest) return artifactRequest;
+    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, artifactRequest.workspace);
     if (!resolved) return httpError(404, "artifact not found");
-    const workspaceRoot = realpathIfExists(workspace);
+    const workspaceRoot = realpathIfExists(artifactRequest.workspace);
     const relativePath = resolved.kind !== "directory" && isPathInside(resolved.path, workspaceRoot)
       ? path.relative(workspaceRoot, resolved.path).split(path.sep).join("/")
       : null;
@@ -2752,11 +2777,9 @@ export class WebSocketChannel extends BaseChannel {
   handleArtifactReveal(request: HttpRequestLike): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
-    const artifactRequest = artifactRequestFromRequest(request);
-    if (!artifactRequest) return httpError(400, "missing path or sessionKey");
-    const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
-    if (!workspace) return httpError(404, "session not found");
-    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
+    const artifactRequest = this.artifactRequestWorkspace(request);
+    if ("status" in artifactRequest) return artifactRequest;
+    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, artifactRequest.workspace);
     if (!resolved) return httpError(404, "artifact not found");
     try {
       revealFileInSystemManager(resolved.path);
@@ -2769,11 +2792,9 @@ export class WebSocketChannel extends BaseChannel {
   handleArtifactOpen(request: HttpRequestLike): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
-    const artifactRequest = artifactRequestFromRequest(request);
-    if (!artifactRequest) return httpError(400, "missing path or sessionKey");
-    const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
-    if (!workspace) return httpError(404, "session not found");
-    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
+    const artifactRequest = this.artifactRequestWorkspace(request);
+    if ("status" in artifactRequest) return artifactRequest;
+    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, artifactRequest.workspace);
     if (!resolved) return httpError(404, "artifact not found");
     const result = openPathWithSystemDefault(resolved.path);
     if (!result.ok) return httpError(500, result.message);
@@ -6048,9 +6069,14 @@ function requestBodyText(request: HttpRequestLike): string {
   return typeof request.body === "string" ? request.body : "";
 }
 
+/**
+ * An artifact request names exactly one authorization scope: the session it belongs to, or (for a task
+ * that has no session yet) the project whose files its side panel shows. Anything else is rejected, so
+ * the root used for the path check is never taken from the request body.
+ */
 function artifactRequestFromRequest(
   request: HttpRequestLike,
-): { path: string; sessionKey: string } | null {
+): ({ path: string } & ({ sessionKey: string } | { projectId: string })) | null {
   const body = requestBodyText(request).trim();
   if (!body) return null;
   let parsed: unknown;
@@ -6063,15 +6089,17 @@ function artifactRequestFromRequest(
   const raw = parsed as Record<string, unknown>;
   const rawPath = raw.path;
   const sessionKey = raw.sessionKey;
-  if (
-    typeof rawPath !== "string"
-    || !rawPath.trim()
-    || typeof sessionKey !== "string"
-    || decodeGuiSessionApiKey(sessionKey) == null
-  ) {
-    return null;
+  const projectId = raw.projectId;
+  if (typeof rawPath !== "string" || !rawPath.trim()) return null;
+  const hasSessionKey = sessionKey != null;
+  const hasProjectId = projectId != null;
+  if (hasSessionKey === hasProjectId) return null;
+  if (hasSessionKey) {
+    if (typeof sessionKey !== "string" || decodeGuiSessionApiKey(sessionKey) == null) return null;
+    return { path: rawPath.trim(), sessionKey };
   }
-  return { path: rawPath.trim(), sessionKey };
+  if (typeof projectId !== "string" || !projectId.trim()) return null;
+  return { path: rawPath.trim(), projectId: projectId.trim() };
 }
 
 function expandHomePath(value: string): string {

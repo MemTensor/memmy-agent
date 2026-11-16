@@ -484,7 +484,7 @@ describe("assists on the project board", () => {
 
     clickText("打开项目设置");
     await flush();
-    expect(document.body.textContent).toContain("同步的任务");
+    expect(document.body.textContent).toContain("共享给成员的任务");
   });
 
   it("keeps the task filter when you leave the tasks tab and come back", async () => {

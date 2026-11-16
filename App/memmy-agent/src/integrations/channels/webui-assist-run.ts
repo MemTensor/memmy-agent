@@ -8,12 +8,14 @@
  *
  * <p>记录器只认自己那条消息之后的事件：续跑同一条任务时，订阅瞬间推过来的目标状态、计时等与这一轮无关。</p>
  */
+import { ASSIST_SKIPPED_MARKER } from "../../assist-request/safety.js";
+
 
 /** 给发起方看的一步：做了什么，以及（结束后）产出的一行摘要。 */
 export interface AssistRunStep {
   text: string;
   output?: string;
-  status: "running" | "done" | "failed";
+  status: "running" | "done" | "failed" | "skipped";
 }
 
 /**
@@ -24,7 +26,15 @@ export type AssistTranscriptItem =
   | { kind: "text"; text: string; truncated?: boolean }
   /** 模型的思考：由 reasoning_delta 逐段拼成，reasoning_end 结束一段。 */
   | { kind: "thinking"; text: string; truncated?: boolean }
-  | { kind: "tool"; name: string; input: string; output: string; status: "running" | "done" | "failed"; truncated?: boolean }
+  | {
+      kind: "tool";
+      name: string;
+      input: string;
+      output: string;
+      /** skipped：按协助规则没有执行（见 assist-request 的敏感操作检查），双方在会话里能看到它被跳过了。 */
+      status: "running" | "done" | "failed" | "skipped";
+      truncated?: boolean;
+    }
   | { kind: "omitted"; count: number };
 
 export type AssistRunStatus = "starting" | "queued" | "running" | "done" | "failed" | "stopped";
@@ -218,7 +228,9 @@ export class AssistRunRecorder {
       // 摘要只留前 60 步，完整过程照常记。
       this.recordTool(key, event, phase, text);
       if (step && (phase === "end" || phase === "error")) {
-        step.status = phase === "end" ? "done" : "failed";
+        // 被协助规则拦下的那一步：工具返回的是「按协助规则没有执行：…」，它没有失败，只是没有执行。
+        const denied = phase === "error" && isAssistSkipped(event.error);
+        step.status = phase === "end" ? "done" : denied ? "skipped" : "failed";
         const output = phase === "end" ? oneLine(event.result) : oneLine(event.error);
         if (output) step.output = output;
         // 结束事件带着更完整的说明（比如命令的实际显示文字）时以它为准。
@@ -271,7 +283,7 @@ export class AssistRunRecorder {
       this.pushItem(item);
     }
     if (phase === "end" || phase === "error") {
-      item.status = phase === "end" ? "done" : "failed";
+      item.status = phase === "end" ? "done" : isAssistSkipped(event.error) ? "skipped" : "failed";
       const raw = fullText(phase === "end" ? event.result : event.error);
       const output = clipBytes(raw, TRANSCRIPT_PART_BYTES);
       item.output = output;
@@ -312,6 +324,14 @@ export class AssistRunRecorder {
       }
     }
   }
+}
+
+/**
+ * 这一步是不是被协助规则拦下的：工具返回的那句话以约定的开头出现（见 assist-request 的敏感操作检查）。
+ * 运行时的错误消息外面还会包一层 `Error: …`，所以按包含判断。
+ */
+export function isAssistSkipped(value: unknown): boolean {
+  return fullText(value).includes(ASSIST_SKIPPED_MARKER);
 }
 
 /** 一次工具调用写成给人看的一句话：做了什么、对着什么做。 */

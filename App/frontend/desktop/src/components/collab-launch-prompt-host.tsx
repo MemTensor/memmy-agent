@@ -1,10 +1,12 @@
 /**
- * Offers the 1.2.7 project-collaboration announcement once, when the person first reaches a workspace.
+ * Offers the one-time project-collaboration announcement, when the person first reaches a workspace.
  *
  * One run shows at most one large prompt and this one goes first: it claims the slot in the same effect that opens
  * it, before the other hosts read their own conditions, so they wait for the next launch instead of queueing behind.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createHttpCollabClient } from "../api/collab-client.js";
+import { useOptionalApiClients } from "../app/providers.js";
 import {
   areOtherPromptsDeferredForHistoryLaunch,
   isHistoryLaunchPromptOpen,
@@ -21,6 +23,7 @@ import {
 import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
 import { useGuidanceDone } from "../app/use-guidance-progress.js";
 import { requestCreateProject } from "../app/collab-projects-store.js";
+import { isDemoGuideActive } from "../app/collab-demo-guide-store.js";
 import { useAppState } from "../state/app-state.js";
 import { CollabLaunchDialog } from "./collab-launch-dialog.js";
 
@@ -30,6 +33,13 @@ function localStorage(): Storage | undefined {
 
 export function CollabLaunchPromptHost() {
   const { state } = useAppState();
+  // Rendered inside the app shell, but also in tests and previews without providers: the card then has no client
+  // and only offers the new-project button.
+  const { clients } = useOptionalApiClients();
+  const collab = useMemo(
+    () => (clients ? createHttpCollabClient(clients.runtimeConfig) : null),
+    [clients]
+  );
   const [open, setOpen] = useState(false);
   const offeredRef = useRef(false);
   const preview = isDesktopPromptPreview("collabLaunch");
@@ -43,6 +53,8 @@ export function CollabLaunchPromptHost() {
 
   useEffect(() => {
     if (open || offeredRef.current) return;
+    // 项目协作的新手引导正在演示：大卡让开，等演示结束后的下一次启动再说。
+    if (isDemoGuideActive()) return;
 
     // Dev preview: any workspace is enough, no account, and the local record is neither read nor written.
     if (preview) {
@@ -80,6 +92,7 @@ export function CollabLaunchPromptHost() {
 
   return (
     <CollabLaunchDialog
+      collab={collab}
       onClose={() => {
         setOpen(false);
         setCollabLaunchPromptOpen(false);
@@ -88,7 +101,8 @@ export function CollabLaunchPromptHost() {
         setOpen(false);
         setCollabLaunchPromptOpen(false);
         // The new-project dialog is mounted by AppFrame, so it opens over the current page; the board follows.
-        requestCreateProject({ share: true });
+        // 从大卡进来就带着体验走：弹窗里有预填的名称与打开的协作开关，引导先只等人点「创建项目」。
+        requestCreateProject({ share: true, demo: true });
       }}
     />
   );

@@ -12,7 +12,11 @@ import { act } from "react";
 import type { ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CollabAgentAccessView } from "../../api/collab-client.js";
+import type { CollabAgentAccessView, CollabClient } from "../../api/collab-client.js";
+import {
+  resetLaunchAuthorizationRuntime,
+  startLaunchAuthorization
+} from "../../app/collab-launch-authorization.js";
 import {
   requestCollabAccessPrompt,
   requestTaskPicker,
@@ -36,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   saveProjectTasks: vi.fn(),
   getAgentAccess: vi.fn(),
   setAgentAccess: vi.fn(),
+  installAgentAccess: vi.fn(),
   markAgentAccessAsked: vi.fn(),
   dispatch: vi.fn()
 }));
@@ -164,6 +169,7 @@ describe("collab board agent access prompt after sharing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetCollabProjectsStore();
+    resetLaunchAuthorizationRuntime();
     window.localStorage.clear();
     currentAccess = accessView();
     listedProject = ownerProject;
@@ -183,6 +189,10 @@ describe("collab board agent access prompt after sharing", () => {
       view: { ...currentAccess, granted: true },
       results: []
     }));
+    mocks.installAgentAccess.mockImplementation(() => Promise.resolve({
+      view: { ...currentAccess, granted: true },
+      results: []
+    }));
 
     container = document.createElement("div");
     document.body.append(container);
@@ -193,6 +203,7 @@ describe("collab board agent access prompt after sharing", () => {
     await act(async () => root.unmount());
     container.remove();
     resetCollabProjectsStore();
+    resetLaunchAuthorizationRuntime();
     window.localStorage.clear();
   });
 
@@ -292,6 +303,74 @@ describe("collab board agent access prompt after sharing", () => {
     await mount();
 
     expect(accessDialog()).toBeTruthy();
+  });
+
+  it("大卡在后台授权时，看板不再弹授权询问", async () => {
+    // 授权还没回来：这段窗口里视为已授权，否则刚关掉大卡又弹一个询问。
+    mocks.setAgentAccess.mockImplementation(() => new Promise(() => undefined));
+    requestCollabAccessPrompt("local-1");
+    startLaunchAuthorization(mocks as unknown as CollabClient);
+    await mount();
+
+    expect(mocks.setAgentAccess).toHaveBeenCalledWith(true);
+    expect(accessDialog()).toBeNull();
+  });
+
+  it("大卡后台授权有 Agent 没装上：看板留下一条可重试的提示，重试只装缺的那个", async () => {
+    mocks.setAgentAccess.mockImplementation(() => Promise.resolve({
+      view: { ...currentAccess, granted: true },
+      results: [
+        { sourceId: "cursor", name: "Cursor", ok: true },
+        { sourceId: "codex", name: "Codex", ok: false }
+      ]
+    }));
+    mocks.installAgentAccess.mockImplementation((ids: readonly string[]) => Promise.resolve({
+      view: { ...currentAccess, granted: true },
+      results: (ids ?? []).map((sourceId) => ({ sourceId, name: "Codex", ok: true }))
+    }));
+
+    requestCollabAccessPrompt("local-1");
+    startLaunchAuthorization(mocks as unknown as CollabClient);
+    await mount();
+
+    // 已经下发授权：不再询问，失败的那一个用提示 + 重试收尾。
+    expect(accessDialog()).toBeNull();
+    expect(document.body.textContent).toContain("1 个 Agent 未完成接入");
+
+    await click("重试");
+
+    expect(mocks.installAgentAccess).toHaveBeenCalledWith(["codex"]);
+    expect(document.body.textContent).not.toContain("未完成接入");
+  });
+
+  it("大卡后台授权整体失败：提示带本机待接入的 Agent 数，重试再发一次授权", async () => {
+    mocks.setAgentAccess
+      .mockImplementationOnce(() => Promise.reject(new Error("offline")))
+      .mockImplementation(() => Promise.resolve({ view: { ...currentAccess, granted: true }, results: [] }));
+
+    requestCollabAccessPrompt("local-1");
+    startLaunchAuthorization(mocks as unknown as CollabClient);
+    await mount();
+
+    expect(accessDialog()).toBeNull();
+    // 本机两个可用且已开启的 Agent 都还没装上。
+    expect(document.body.textContent).toContain("2 个 Agent 未完成接入");
+
+    await click("重试");
+
+    expect(mocks.setAgentAccess).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain("未完成接入");
+  });
+
+  it("接入失败的提示在下次打开看板时还在，重试成功后消失", async () => {
+    mocks.setAgentAccess.mockImplementationOnce(() => Promise.reject(new Error("offline")));
+    startLaunchAuthorization(mocks as unknown as CollabClient);
+    // 授权失败时人不在看板：状态留在模块里，等看板打开再出现。
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+    expect(document.body.textContent).not.toContain("未完成接入");
+
+    await mount();
+    expect(document.body.textContent).toContain("2 个 Agent 未完成接入");
   });
 
   it("看板与项目设置里都不再有引导", async () => {

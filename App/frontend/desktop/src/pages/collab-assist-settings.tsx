@@ -1,18 +1,18 @@
 /**
- * 项目设置里的「成员协助」一节。
+ * 项目设置「协作」一组里的「接收协助请求」一行。
  *
- * 第一行是本人在这个项目里的「接收协助请求」开关，默认关闭：开启后，项目里的其他成员才能请她电脑上的 Agent
- * 执行任务。开启时下面列出她给出的、仍然有效的限时授权：剩余时间、由哪个 Agent 执行，可以换用或提前结束。
- * 关闭时云端结束她在这个项目里的限时授权，还在等待的请求以「某某已关闭接收协助请求」结束。
+ * 本人在这个项目里的「接收协助请求」开关，默认关闭：开启后，项目里的其他成员才能请她电脑上的 Agent
+ * 执行任务。说明收在问号里。开启且有仍然有效的限时授权时，在这一行下面列出它们：剩余时间、由哪个 Agent 执行，
+ * 可以换用或提前结束；没有授权时什么都不多写。关闭时云端结束她在这个项目里的限时授权，
+ * 还在等待的请求以「某某已关闭接收协助请求」结束。
  *
- * 次数限制不做成设置项：同一时间一个、单次最长 15 分钟、每位成员每天最多 20 次，由产品内置。
- * 这一节自己带「协助」这张卡片（卡片头 + 卡片内的行），项目设置弹窗与预览页看到的是同一套排布。
+ * 次数限制不做成设置项：同一时间一个、单次最长 15 分钟，由产品内置，在协助请求弹窗里说明。
  */
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, LifeBuoy } from "lucide-react";
+import { ChevronDown, Loader2, LifeBuoy } from "lucide-react";
+import { InfoHint } from "./collab-info-hint.js";
 import type { AssistAgent, AssistGrant, CollabClient } from "../api/collab-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
-import { Button } from "../components/button.js";
 import { agentSourceLogoUrl } from "./agent-source-logos.js";
 import { assistAgentName, grantRemaining } from "./collab-assist-view.js";
 import frame from "./collab-page.module.css";
@@ -21,7 +21,14 @@ import frame from "./collab-page.module.css";
 const REMAINING_TICK_MS = 30_000;
 
 /** 项目设置的「成员协助」：接收协助请求的开关，开启时列出限时授权。 */
-export function CollabAssistProjectSettings(props: { client: CollabClient | null; projectId: string }) {
+export function CollabAssistProjectSettings(props: {
+  client: CollabClient | null;
+  projectId: string;
+  /** 开关被打开或被关掉之后告诉上层：新手引导在开启后立即关掉设置、去等演示成员的请求。 */
+  onEnabledChange?: (enabled: boolean) => void;
+  /** 新手引导的演示中：给开关加一个锚点，蒙版的描边落在它上面。 */
+  demoAnchor?: boolean;
+}) {
   const { t } = useTranslation();
   const { client, projectId } = props;
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -55,7 +62,9 @@ export function CollabAssistProjectSettings(props: { client: CollabClient | null
     setBusy(true);
     setError(null);
     try {
-      setEnabled((await client.setAssistReceiving(projectId, next)).enabled);
+      const saved = await client.setAssistReceiving(projectId, next);
+      setEnabled(saved.enabled);
+      props.onEnabledChange?.(saved.enabled);
     } catch {
       setError(t("collab.settings.assist.saveFailed"));
     } finally {
@@ -64,33 +73,41 @@ export function CollabAssistProjectSettings(props: { client: CollabClient | null
   }
 
   const on = enabled === true;
+  // 这一行放在项目设置「协作」那一组里，外框由那一组提供。
   return (
-    <section className={frame.settingsCard} data-collab-assist-settings="">
-      <div className={frame.settingsCardHead}>
-        <span className={frame.settingsCardChip}><LifeBuoy size={14} aria-hidden="true" /></span>
-        <h3 className={frame.settingsCardTitle}>{t("collab.settings.groupAssist")}</h3>
-      </div>
-      <div className={frame.settingsCardRow}>
-        <div className={frame.settingsCardText}>
-          <span className={frame.settingsCardRowTitle}>{t("collab.settings.assist.title")}</span>
-          <span className={frame.settingsCardRowDesc}>{t("collab.settings.assist.desc")}</span>
-        </div>
-        <div className={frame.settingsCardControl}>
+    <div className={frame.settingsAssist} data-collab-assist-settings="">
+      {/* 点整行任意位置都能切换（问号除外），开关自己不处理点击，避免切换两次 */}
+      <div
+        className={`${frame.settingsRow} ${frame.settingsRowAction}`}
+        onClick={() => {
+          if (!busy && client && enabled !== null) void toggle(!on);
+        }}
+      >
+        <LifeBuoy size={16} aria-hidden="true" className={frame.settingsRowIcon} />
+        <span className={frame.settingsRowLabel}>{t("collab.settings.assist.title")}</span>
+        <span className={frame.settingsRowHint} onClick={(event) => event.stopPropagation()}>
+          <InfoHint
+            placement="above"
+            label={t("collab.settings.assist.helpLabel")}
+            text={t("collab.settings.assist.desc")}
+          />
+        </span>
+        <span className={frame.settingsRowControl}>
           {busy ? <Loader2 size={13} className={frame.settingsSpinner} aria-hidden="true" /> : null}
           <button
             type="button"
             role="switch"
             aria-checked={on}
             aria-label={t("collab.settings.assist.title")}
+            data-demo-guide={props.demoAnchor ? "settings-assist-switch" : undefined}
             disabled={busy || !client || enabled === null}
-            onClick={() => void toggle(!on)}
             className={`${frame.settingsSwitch}${on ? ` ${frame.settingsSwitchOn}` : ""}`}
           />
-        </div>
+        </span>
       </div>
-      {error ? <div className={frame.settingsCardError} role="alert">{error}</div> : null}
       {on ? <CollabAssistGrants client={client} projectId={projectId} /> : null}
-    </section>
+      {error ? <div className={frame.settingsRowError} role="alert">{error}</div> : null}
+    </div>
   );
 }
 
@@ -143,81 +160,64 @@ export function CollabAssistGrants(props: { client: CollabClient | null; project
   }
 
   const live = grants?.filter((grant) => !grant.expiresAt || new Date(grant.expiresAt).getTime() > now.getTime()) ?? null;
-  // 读中、有授权、没有授权这三种：读中与无授权是「标题 + 一行说明」，有授权时标题在上、列表在下。
-  const title = t("collab.settings.assist.grantsTitle");
+  // 读中与没有授权时不占位置；有授权时贴在开关那一行下面，每位成员一行。
   return (
     <>
-      {live === null ? (
-        <div className={frame.settingsCardRow}>
-          <div className={frame.settingsCardText}>
-            <span className={frame.settingsCardRowTitle}>{title}</span>
-            <span className={frame.settingsCardRowDesc}>{t("collab.loading")}</span>
-          </div>
-        </div>
-      ) : live.length ? (
-        <div className={`${frame.settingsCardRow} ${frame.settingsCardRowStack}`}>
-          <div className={frame.settingsCardText}>
-            <span className={frame.settingsCardRowTitle}>{title}</span>
-            <div className={frame.grantList}>
-              {live.map((grant) => (
-                <div key={grant.grantee.userId} className={frame.grantRow}>
-                  <div className={frame.grantWho}>
-                    <span className={frame.grantAvatar} aria-hidden="true">{initialOf(grant.grantee.name)}</span>
-                    <div className={frame.grantText}>
-                      <span className={frame.grantName}>{grant.grantee.name}</span>
-                      <span className={frame.grantDetail}>
-                        <AgentMark sourceId={grant.agent} />
-                        {t("settings.assist.grantDetail", {
-                          agent: agentNameOf(agents, grant.agent),
-                          left: grantRemaining(grant.expiresAt, t, now)
-                        })}
+      {live?.length ? (
+        <div className={frame.grantList} aria-label={t("collab.settings.assist.grantsTitle")}>
+          {live.map((grant) => {
+            const left = grantRemaining(grant.expiresAt, t, now);
+            const changeLabel = t("settings.assist.changeAgentLabel", { name: grant.grantee.name });
+            return (
+              <div key={grant.grantee.userId} className={frame.grantRow}>
+                <div className={frame.grantWho}>
+                  <span className={frame.grantAvatar} aria-hidden="true">{initialOf(grant.grantee.name)}</span>
+                  <div className={frame.grantText}>
+                    <span className={frame.grantName}>{grant.grantee.name}</span>
+                    {/* 由哪个 Agent 执行就是这一行里的下拉本身，不再在文字里重复一遍 */}
+                    <span className={frame.grantDetail}>
+                      <AgentMark sourceId={grant.agent} />
+                      <span className={frame.grantSelectWrap}>
+                        <select
+                          className={frame.grantSelect}
+                          value={grant.agent}
+                          aria-label={changeLabel}
+                          title={changeLabel}
+                          disabled={busy || !client}
+                          onChange={(event) => {
+                            const agent = event.target.value;
+                            if (client) void update(() => client.setAssistGrantAgent(projectId, grant.grantee.userId, agent));
+                          }}
+                        >
+                          {agents.some((agent) => agent.sourceId === grant.agent) ? null : (
+                            <option value={grant.agent}>{assistAgentName(grant.agent, grant.agent)}</option>
+                          )}
+                          {agents.map((agent) => (
+                            <option key={agent.sourceId} value={agent.sourceId}>{agent.name}</option>
+                          ))}
+                        </select>
+                        <ChevronDown size={12} aria-hidden="true" className={frame.grantSelectChevron} />
                       </span>
-                    </div>
-                  </div>
-                  <div className={frame.grantActions}>
-                    <select
-                      className={frame.grantSelect}
-                      value={grant.agent}
-                      aria-label={t("settings.assist.changeAgentLabel", { name: grant.grantee.name })}
-                      disabled={busy || !client}
-                      onChange={(event) => {
-                        const agent = event.target.value;
-                        if (client) void update(() => client.setAssistGrantAgent(projectId, grant.grantee.userId, agent));
-                      }}
-                    >
-                      {agents.some((agent) => agent.sourceId === grant.agent) ? null : (
-                        <option value={grant.agent}>{assistAgentName(grant.agent, grant.agent)}</option>
-                      )}
-                      {agents.map((agent) => (
-                        <option key={agent.sourceId} value={agent.sourceId}>{agent.name}</option>
-                      ))}
-                    </select>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      className={`${frame.settingsButton} ${frame.settingsDangerButton} ${frame.settingsButtonCompact}`}
-                      disabled={busy || !client}
-                      onClick={() => {
-                        if (client) void update(() => client.revokeAssistGrant(projectId, grant.grantee.userId));
-                      }}
-                    >
-                      {t("settings.assist.revoke")}
-                    </Button>
+                      {left ? <span>· {left}</span> : null}
+                    </span>
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
+                <button
+                  type="button"
+                  className={`${frame.settingsDangerSoft} ${frame.settingsDangerSoftCompact}`}
+                  disabled={busy || !client}
+                  onClick={() => {
+                    if (client) void update(() => client.revokeAssistGrant(projectId, grant.grantee.userId));
+                  }}
+                >
+                  {t("settings.assist.revoke")}
+                </button>
+              </div>
+            );
+          })}
         </div>
-      ) : (
-        <div className={frame.settingsCardRow}>
-          <div className={frame.settingsCardText}>
-            <span className={frame.settingsCardRowTitle}>{title}</span>
-            <span className={frame.settingsCardRowDesc}>{t("settings.assist.noGrants")}</span>
-          </div>
-        </div>
-      )}
-      {error ? <div className={frame.settingsCardError} role="alert">{error}</div> : null}
+      ) : null}
+      {error ? <div className={frame.settingsRowError} role="alert">{error}</div> : null}
     </>
   );
 }

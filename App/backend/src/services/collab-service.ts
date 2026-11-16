@@ -25,7 +25,7 @@ import {
   pickAddCandidates,
   type SessionPick
 } from "./collab-add-session.js";
-import { ensureDirectory, uniqueProjectDirectory } from "./project-directory.js";
+import { createProjectDirectory, ensureDirectory } from "./project-directory.js";
 import { MAX_COLLAB_INSTRUCTIONS_CHARS, collabInstructionsDirectoryKey, type CollabInstructionScope } from "@memmy/local-api-contracts";
 import { instructionScopesFrom } from "./collab-instruction-scopes.js";
 import type { CollabInstructionsService } from "./collab-instructions-service.js";
@@ -175,6 +175,9 @@ export interface CollabServiceOptions {
  */
 export type CollabInstructionsHandover = "saved" | "none";
 
+/** 结束演示的原因：用户走完、退出引导、三步都跳过，或离开了演示所在的页面。 */
+export type DemoEndReason = "finished" | "exited" | "skipped" | "left";
+
 export interface CollabProject {
   id: string;
   name: string;
@@ -196,6 +199,19 @@ export interface CollabProject {
    * 发起方的 Agent 据此知道在哪个项目里请谁。
    */
   assistReceivers: Array<{ userId: string; name: string; mine: boolean }>;
+  /**
+   * 新手引导的演示：只有演示进行中的项目带它。云端给 null / 不返回时按普通项目处理，
+   * 桌面端不自己判断「是不是演示项目」，也不认任何写死的账号或昵称。
+   */
+  demo: CollabDemoView | null;
+}
+
+/** 项目里的演示成员与当前步骤。 */
+export interface CollabDemoView {
+  active: boolean;
+  memberUserId: string;
+  memberName: string;
+  step: string | null;
 }
 
 /** 项目关联的一个知识库：只是引用，名字随知识库改名而变。 */
@@ -339,6 +355,8 @@ export interface CollabMember {
   joinedAt: string | null;
   /** 这位成员是否在这个项目里接收协助请求；旧云端不返回时为 false。 */
   acceptAssist: boolean;
+  /** 演示成员那一行为 true：成员列表据此显示「官方」标记，不认 userId 或昵称。 */
+  demo: boolean;
 }
 
 export interface CollabJoinRequest {
@@ -500,7 +518,15 @@ export interface CollabService {
    * Creates the cloud project and prepares the directory its tasks run in: the person's chosen folder, or a
    * managed folder when none was chosen, so a task always has a working directory.
    */
-  createProject(name: string, directory?: string): Promise<{ project: CollabProject; localDirectory: string }>;
+  /**
+   * Creates the cloud project. `demo` 只在桌面端认为「本人第一次创建共享项目」时带：
+   * 是否真的开始演示由云端决定，传了也不代表一定演示。
+   */
+  createProject(name: string, directory?: string, options?: { demo?: boolean }): Promise<{ project: CollabProject; localDirectory: string }>;
+  /** 演示期间的心跳与步骤上报；返回的项目视图里演示已结束时 `demo` 为 null。 */
+  demoHeartbeat(projectId: string, step: "1" | "2" | "3" | "finish"): Promise<{ demo: CollabDemoView | null }>;
+  /** 结束演示：云端立即把演示成员移出项目；幂等。 */
+  demoEnd(projectId: string, reason: DemoEndReason): Promise<{ ok: true }>;
   /** Records which local Memmy project runs this online project's tasks. */
   bindLocalProject(projectId: string, localProjectId: string): Promise<{ ok: true }>;
   /** 云端项目在这台电脑上对应的 Memmy 项目；还没绑定时返回 null。成员协助由 Memmy 执行时把任务建在这里。 */
@@ -1323,22 +1349,43 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
    * of the project list tries again.
    */
   /**
-   * Keeps a copy of a project's cloud instructions with the scopes they cover.
-   * A failed copy must not fail the cloud call that carried the text: the board still shows it, and the next read
-   * of the project list tries again.
+   * 缓存一个协作项目的项目名、成员、背景与规范，以及它们覆盖的会话单位。
+   *
+   * <p>没写背景与规范的项目也要缓存：它关联的目录里的 Agent 靠这条目知道「当前目录属于哪个协作项目」。
+   * 写失败不能拖垮带着这份数据的云端调用：看板上照样显示，下一次读项目列表再试。</p>
    */
-  async function rememberInstructions(
+  async function rememberInstructions(input: {
+    project: Pick<CollabProject, "id" | "name" | "instructions">;
+    scopes: readonly CollabInstructionScope[];
+    /** 手头已经有成员列表时才传；没传时保留上一次记下的成员。 */
+    members?: readonly string[] | null;
+  }): Promise<void> {
+    if (!options.collabInstructions) return;
+    // 本机没有任何关联（没有工作目录、也没选过 Agent 单位）：这个目录里本就不该注入，不必建条目。
+    if (!input.scopes.length) return;
+    try {
+      await options.collabInstructions.remember({
+        projectId: input.project.id,
+        scopes: input.scopes,
+        text: input.project.instructions,
+        name: input.project.name,
+        ...(input.members ? { members: input.members } : {})
+      });
+    } catch (error) {
+      console.warn(`Project instructions not cached for ${input.project.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** 只刷新项目名与成员：拿到成员列表这类「已经有数据」的时机用它，不重写背景与规范。 */
+  async function rememberProjectInfo(
     projectId: string,
-    instructions: string,
-    scopes: readonly CollabInstructionScope[]
+    info: { name?: string | null; members?: readonly string[] | null }
   ): Promise<void> {
     if (!options.collabInstructions) return;
-    // 还没有可生效的范围时等下一次同步；云端删除指令（空文本）不需要范围，照旧清掉。
-    if (!scopes.length && instructions.trim()) return;
     try {
-      await options.collabInstructions.remember({ projectId, scopes, text: instructions });
+      await options.collabInstructions.updateProjectInfo(projectId, info);
     } catch (error) {
-      console.warn(`Project instructions not cached for ${projectId}: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(`Project name or members not cached for ${projectId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -1350,7 +1397,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     return instructionScopesFrom(stored, options.codexHome ? { codexHome: options.codexHome } : {});
   }
 
-  /** 关联变了就换范围：新关联的 Agent 分组立即带上已有指令，取消关联的不再带。 */
+  /** 关联变了就换范围：新关联的 Agent 分组立即带上已有指令，取消关联的不再带；还没有条目时就建一个。 */
   async function updateInstructionScopes(projectId: string, stored: StoredLinks): Promise<void> {
     if (!options.collabInstructions) return;
     const scopes = instructionScopes(stored);
@@ -1765,7 +1812,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       const bound = await Promise.all(projects.map(async (project) => {
         const stored = await readLinks(project.id, account.accountId);
         // The list is read at every launch, so this is where members pick up instructions the owner changed.
-        await rememberInstructions(project.id, project.instructions, instructionScopes(stored));
+        // 项目名跟着一起缓存：名单里没有成员明细，成员只在能拿到列表时补（见 listMembers）。
+        await rememberInstructions({ project, scopes: instructionScopes(stored) });
         return { ...project, localProjectId: stored.localProjectId };
       }));
       // 旧云端没有这份列表时不填字段，桌面端就保留本机刚记下的申请，避免一次刷新把「申请中」冲掉。
@@ -1781,10 +1829,13 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       };
     },
 
-    async createProject(name, directory) {
-      const data = await cloud("/projects", { method: "POST", body: { name } });
+    async createProject(name, directory, options) {
+      const data = await cloud("/projects", {
+        method: "POST",
+        body: { name, ...(options?.demo ? { demo: true } : {}) }
+      });
       const project = toProject(data.project);
-      const localDirectory = await prepareWorkingDirectory(onlineWorkdirRoot, project.id, project.name, directory);
+      const localDirectory = await prepareWorkingDirectory(onlineWorkdirRoot, project.name, directory);
       const account = requireAccount();
       await exclusive(async () => {
         const stored = await readLinks(project.id, account.accountId);
@@ -1800,11 +1851,15 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         const stored = await readLinks(projectId, account.accountId);
         // A project created earlier keeps the folder it already had, so its tasks stay where they were.
         const existing = directory ? undefined : stored.workingDirectory;
+        // Without a name (an old cloud that sent none) the id is the only label left for the folder.
         const localDirectory = existing
-          ?? await prepareWorkingDirectory(onlineWorkdirRoot, projectId, name ?? projectId, directory);
+          ?? await prepareWorkingDirectory(onlineWorkdirRoot, name?.trim() || projectId, directory);
         if (!stored.workingDirectory) {
           stored.workingDirectory = localDirectory;
           await writeLinks(stored);
+          // 工作目录一就位，这个项目在本机就有了可生效的范围：立即建/更新条目，
+          // 在它下面的任务第一轮就知道自己属于哪个协作项目，不必等下次同步列表。
+          await updateInstructionScopes(projectId, stored);
         }
         return { localDirectory, chosen: Boolean(directory) || (Boolean(existing) && stored.directoryChosen) };
       });
@@ -1980,7 +2035,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
             lastQuestion: task.lastQuestion,
             updatedAt: task.updatedAt,
             turnCount: task.turnCount,
-            // 本人开启过共享、或这一版之前已上传过的任务才算在内；新任务默认不共享。
+            // 本人开启过共享（含新建时默认开启）、或这一版之前已上传过的任务才算在内；没有记录的不算。
             included: isTaskShared(stored, task.conversationId),
             synced: Boolean(stored.synced[sessionKey(task)])
           }))
@@ -2067,13 +2122,32 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       const account = requireAccount();
       const data = await cloud(`/projects/${encodeURIComponent(projectId)}/members`);
       const stored = await readLinks(projectId, account.accountId);
-      return {
+      const view = {
         project: { ...toProject(data.project), localProjectId: stored.localProjectId },
         joinMode: toJoinMode(data.joinMode),
         canManage: data.canManage === true,
         members: list(data.members).map(toMember),
         requests: list(data.requests).map(toJoinRequest)
       };
+      // 成员的显示名只有这次调用能拿到（项目列表里只有人数）：顺手刷进缓存，注入时不必再问云端。
+      await rememberProjectInfo(projectId, {
+        name: view.project.name,
+        members: view.members.map((member) => member.name)
+      });
+      return view;
+    },
+
+    async demoHeartbeat(projectId, step) {
+      const data = await cloud(`/projects/${encodeURIComponent(projectId)}/demo/heartbeat`, {
+        method: "POST",
+        body: { step }
+      });
+      return { demo: toDemo(data.demo) };
+    },
+
+    async demoEnd(projectId, reason) {
+      await cloud(`/projects/${encodeURIComponent(projectId)}/demo/end`, { method: "POST", body: { reason } });
+      return { ok: true as const };
     },
 
     async createInvite(projectId) {
@@ -2082,7 +2156,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       if (!INVITE_CODE_PATTERN.test(code)) {
         throw new CollabError("internal", "邀请链接生成失败，请稍后重试");
       }
-      const link = `${linkBase}/i/${code}`;
+      const link = `${linkBase}/api/i/${code}`;
       const name = text(data.projectName);
       return { code, link, shareText: name ? `【Memmy】邀请你加入协作项目「${name}」 ${link}` : `【Memmy】邀请你加入协作项目 ${link}` };
     },
@@ -2099,7 +2173,10 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       const account = requireAccount();
       // The binding stays as it is; only the name the board and the sidebar read comes back.
       const stored = await readLinks(projectId, account.accountId);
-      return { project: { ...toProject(record(data.project)), localProjectId: stored.localProjectId } };
+      const project = { ...toProject(record(data.project)), localProjectId: stored.localProjectId };
+      // 项目名会进注入文本：改名后同步缓存，Agent 看到的就是新名字。
+      await rememberProjectInfo(projectId, { name: project.name });
+      return { project };
     },
 
     async updateInstructions(projectId, text, directory) {
@@ -2111,7 +2188,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       const account = requireAccount();
       const stored = await readLinks(projectId, account.accountId);
       const project = { ...toProject(record(data.project)), localProjectId: stored.localProjectId };
-      await rememberInstructions(projectId, project.instructions, instructionScopes(stored));
+      await rememberInstructions({ project, scopes: instructionScopes(stored) });
       return { project };
     },
 
@@ -2171,7 +2248,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       if (!status || !projectId) {
         throw new CollabError("internal", "加入项目的结果无法识别，请稍后重试");
       }
-      const chosen = directory?.trim() ? await prepareWorkingDirectory(onlineWorkdirRoot, projectId, projectId, directory) : null;
+      const chosen = directory?.trim() ? await ensureDirectory(directory.trim()) : null;
       const stored = await exclusive(async () => {
         const latest = await readLinks(projectId, account.accountId);
         // A project this computer already runs keeps its folder; otherwise the latest choice wins, so a person who
@@ -2819,18 +2896,10 @@ function isNewer(updatedAt: string, uploadedAt: string): boolean {
  * The directory an online project's tasks run in: the folder the person picked, or a managed empty folder so a
  * task always has a working directory. Either way it is created before the local project is registered.
  */
-async function prepareWorkingDirectory(
-  root: string,
-  projectId: string,
-  name: string,
-  directory: string | undefined
-): Promise<string> {
-  // The folder name is what a task page and the project picker show, so it carries the project name and only
-  // falls back to the id when the name is already taken by another project.
-  const target = directory?.trim()
-    ? directory.trim()
-    : await uniqueProjectDirectory(root, name, projectId);
-  return ensureDirectory(target);
+async function prepareWorkingDirectory(root: string, name: string, directory: string | undefined): Promise<string> {
+  // The folder name is what a task page and the project picker show, so it carries the project name, numbered
+  // (`<name> 2`) when another project already took it.
+  return directory?.trim() ? ensureDirectory(directory.trim()) : createProjectDirectory(root, name);
 }
 
 function toApplication(raw: unknown): CollabApplication {
@@ -2888,10 +2957,28 @@ function toProject(raw: unknown): CollabProject {
     // A cloud from before instructions existed omits the field; the board then shows the empty state.
     instructions: text(project.instructions).trim(),
     acceptAssist: project.acceptAssist === true,
+    demo: toDemo(project.demo),
     assistReceivers: list(project.assistReceivers).map((raw) => {
       const member = record(raw);
       return { userId: text(member.userId), name: text(member.name), mine: member.mine === true };
     }).filter((member) => member.userId)
+  };
+}
+
+/**
+ * 演示状态：只有 `active` 为真的才算。旧云端没有这个字段、或演示已结束时给 null，
+ * 桌面端就按普通项目处理。
+ */
+function toDemo(raw: unknown): CollabDemoView | null {
+  const demo = record(raw);
+  if (demo.active !== true) return null;
+  const memberUserId = text(demo.memberUserId);
+  if (!memberUserId) return null;
+  return {
+    active: true,
+    memberUserId,
+    memberName: text(demo.memberName),
+    step: nullableText(demo.step)
   };
 }
 
@@ -2914,7 +3001,8 @@ function toMember(raw: unknown): CollabMember {
     role: toRole(member.role),
     mine: member.mine === true,
     joinedAt: nullableText(member.joinedAt),
-    acceptAssist: member.acceptAssist === true
+    acceptAssist: member.acceptAssist === true,
+    demo: member.demo === true
   };
 }
 

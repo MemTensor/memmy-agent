@@ -21,6 +21,11 @@ export interface CollabProjectsSnapshot {
   /** 新建弹窗打开时「与成员共享」是否默认开启；目前只有新功能介绍的最后一页会要求开启。 */
   createShareDefault: boolean;
   /**
+   * 这次新建是新手引导的体验入口（从新功能大卡点进来的）：弹窗预填名称、预先打开共享，
+   * 蒙版停在「创建项目」上等人点一下。云端返回 `demo.active` 才真的开始演示。
+   */
+  createDemo: boolean;
+  /**
    * A local project whose Memmy sessions should be chosen right after sharing started. The board opens that picker
    * once and clears the flag, so a project that was just shared asks which of its own sessions go to the cloud.
    */
@@ -50,6 +55,7 @@ let snapshot: CollabProjectsSnapshot = {
   error: null,
   createPending: false,
   createShareDefault: false,
+  createDemo: false,
   taskPickerFor: null,
   accessPromptFor: null,
   notice: null,
@@ -201,14 +207,22 @@ export function markCollabProjectBound(projectId: string, localProjectId: string
   });
 }
 
-/** Opens the new-project dialog; `share` also turns sharing on when the dialog appears. */
-export function requestCreateProject(options?: { share?: boolean }): void {
-  update({ createPending: true, createShareDefault: options?.share === true });
+/**
+ * Opens the new-project dialog; `share` also turns sharing on when the dialog appears.
+ *
+ * @param options.demo 这次是新手引导的体验入口：弹窗预填名称并提前打开共享，引导先只亮「创建项目」。
+ */
+export function requestCreateProject(options?: { share?: boolean; demo?: boolean }): void {
+  update({
+    createPending: true,
+    createShareDefault: options?.share === true,
+    createDemo: options?.demo === true
+  });
 }
 
 /** Clears the request the frame just acted on, so navigating back does not reopen the dialog. */
 export function consumeCreateProjectRequest(): void {
-  if (snapshot.createPending) update({ createPending: false, createShareDefault: false });
+  if (snapshot.createPending) update({ createPending: false, createShareDefault: false, createDemo: false });
 }
 
 /** Asks the board to open the project-session picker for a project whose sharing just started. */
@@ -250,6 +264,7 @@ export function clearCollabProjects(): void {
     error: null,
     createPending: false,
     createShareDefault: false,
+    createDemo: false,
     taskPickerFor: null,
     accessPromptFor: null,
     notice: null,
@@ -268,6 +283,7 @@ export function resetCollabProjectsStore(): void {
     error: null,
     createPending: false,
     createShareDefault: false,
+    createDemo: false,
     taskPickerFor: null,
     accessPromptFor: null,
     notice: null,

@@ -308,7 +308,7 @@ describe("collab task list", () => {
     expect(card.kind).toBe("me");
     expect(card.iconKind).toBe("user");
     expect(card.title).toBe("你还没有任务");
-    expect(card.body).toBe("在侧栏新建任务并打开「共享给成员」，或关联任务，把其他 Agent 中的任务纳入。");
+    expect(card.body).toBe("在侧栏新建任务，发出第一条消息后即进入项目；或关联任务，把其他 Agent 中的任务纳入。");
 
     // 说明里的「关联任务」与工具条上的主按钮打开同一个弹窗。
     await act(async () => document.querySelector<HTMLElement>("[data-collab-filter-empty] button")!.click());

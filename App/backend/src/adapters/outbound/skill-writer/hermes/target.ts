@@ -10,6 +10,12 @@ import {
   replaceMemmySkillDirectory
 } from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
+import {
+  MEMMY_PROJECT_BOOTSTRAP_START_MARKER,
+  removeMemmyProjectBootstrapBlock,
+  renderMemmyProjectBootstrapBlock,
+  upsertMemmyProjectBootstrapBlock
+} from "../templates/memmy-project-skill.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
@@ -85,6 +91,36 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       }
 
       return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(START_MARKER);
+    },
+
+    async writeProjectSkillBootstrap() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        throw new Error("Hermes is not installed or its directory is unavailable");
+      }
+
+      const filePath = join(root, TARGET_FILE_NAME);
+      await writeFileAtomically(filePath, upsertMemmyProjectBootstrapBlock(await readTextFile(filePath)));
+    },
+
+    async removeProjectSkillBootstrap() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        return;
+      }
+
+      const filePath = join(root, TARGET_FILE_NAME);
+      const existing = await readTextFile(filePath);
+      if (!existing.includes(MEMMY_PROJECT_BOOTSTRAP_START_MARKER)) {
+        return;
+      }
+      await writeFileAtomically(filePath, removeMemmyProjectBootstrapBlock(existing));
+    },
+
+    async isProjectSkillBootstrapCurrent() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(renderMemmyProjectBootstrapBlock());
     },
 
     async installPlugin(_targetId) {

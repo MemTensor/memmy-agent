@@ -58,6 +58,69 @@ process.stdin.on("data", (chunk) => {
 process.stdin.resume();
 `;
 
+/** 会请求批准、并且给得出拒绝选项的假 Agent：记下我们回了哪一个。 */
+const DENYING_AGENT = String.raw`
+let buffer = "";
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk.toString("utf8");
+  let at;
+  while ((at = buffer.indexOf("\n")) >= 0) {
+    const line = buffer.slice(0, at).trim();
+    buffer = buffer.slice(at + 1);
+    if (!line) continue;
+    const message = JSON.parse(line);
+    if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1 } });
+    else if (message.method === "session/new") send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "s-3" } });
+    else if (message.method === "session/prompt") {
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s-3", update: { sessionUpdate: "tool_call", toolCallId: "t-1", title: "删除缓存目录" } } });
+      send({
+        jsonrpc: "2.0", id: 88, method: "session/request_permission",
+        params: {
+          sessionId: "s-3",
+          toolCall: { title: "删除缓存目录", rawInput: { command: "rm -rf ~/Library/Caches/foo" } },
+          options: [
+            { optionId: "allow", name: "Allow once", kind: "allow_once" },
+            { optionId: "always", name: "Always allow", kind: "allow_always" },
+            { optionId: "never", name: "Reject once", kind: "reject_once" },
+            { optionId: "never-always", name: "Always reject", kind: "reject_always" }
+          ]
+        }
+      });
+      setTimeout(() => send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } }), 40);
+    } else if (message.id === 88) {
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s-3", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(message.result) } } } });
+    }
+  }
+});
+process.stdin.resume();
+`;
+
+/** 只给「允许」的假 Agent：没有拒绝的选项时，我们回 cancelled。 */
+const ALLOW_ONLY_AGENT = String.raw`
+let buffer = "";
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk.toString("utf8");
+  let at;
+  while ((at = buffer.indexOf("\n")) >= 0) {
+    const line = buffer.slice(0, at).trim();
+    buffer = buffer.slice(at + 1);
+    if (!line) continue;
+    const message = JSON.parse(line);
+    if (message.method === "initialize") send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1 } });
+    else if (message.method === "session/new") send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "s-4" } });
+    else if (message.method === "session/prompt") {
+      send({ jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { sessionId: "s-4", toolCall: { title: "删除缓存目录", rawInput: { command: "rm -rf ~/Library/Caches" } }, options: [ { optionId: "allow", name: "Allow", kind: "allow_once" } ] } });
+      setTimeout(() => send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } }), 40);
+    } else if (message.id === 99) {
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s-4", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(message.result) } } } });
+    }
+  }
+});
+process.stdin.resume();
+`;
+
 function scriptPath(source: string): string {
   return fileURLToPath(new URL(`data:text/javascript,${encodeURIComponent(source)}`, "file:"));
 }
@@ -81,18 +144,58 @@ describe("runAcpAgent", () => {
     expect(steps.at(-1)).toBe("运行 sw_vers → macOS 15.6");
   });
 
-  it("allows the Agent's permission requests without asking the person again", async () => {
+  it("allows one permission request when she allowed this run", async () => {
     const result = await runAcpAgent({
       command: process.execPath,
       args: ["-e", RECORDING_AGENT],
       cwd: process.cwd(),
       prompt: "看一下版本",
+      // 她在授权弹窗里点过允许：这次可以放行，但只放行一次（不选 allow_always）。
+      approval: "allow",
       timeoutMs: 5_000
     });
 
-    // 执行方授权了这次协助，就代表允许它平时能做的事：这里回的是「允许一次」，不是继续问她。
     expect(result.reply).toContain('"outcome":"selected"');
     expect(result.reply).toContain('"optionId":"allow"');
+    expect(result.skipped).toEqual([]);
+  });
+
+  it("never allows a permission request when the run started on its own", async () => {
+    const skipped: Array<{ title: string; detail?: string }> = [];
+    const result = await runAcpAgent({
+      command: process.execPath,
+      args: ["-e", DENYING_AGENT],
+      cwd: process.cwd(),
+      prompt: "清理缓存后重新复现",
+      // 限时授权自动开始的那次：Agent 请求批准时一律不允许。
+      approval: "deny",
+      onSkipped: (item) => skipped.push(item),
+      timeoutMs: 5_000
+    });
+
+    // 回给 Agent 的是拒绝，而不是 allow。
+    expect(result.reply).toContain('"optionId":"never"');
+    expect(result.reply).not.toContain('"optionId":"allow"');
+    // 这一步记成「跳过的操作」：标题与命令都要留下，随结果一起回传。
+    expect(skipped).toEqual([{ title: "删除缓存目录", detail: "rm -rf ~/Library/Caches/foo" }]);
+    expect(result.skipped).toEqual([{ title: "删除缓存目录", detail: "rm -rf ~/Library/Caches/foo" }]);
+    const tool = result.transcript.find((item) => item.kind === "tool");
+    expect(tool?.kind === "tool" ? tool.status : null).toBe("skipped");
+  });
+
+  it("answers with cancelled when the Agent offers no way to refuse", async () => {
+    const result = await runAcpAgent({
+      command: process.execPath,
+      args: ["-e", ALLOW_ONLY_AGENT],
+      cwd: process.cwd(),
+      prompt: "清理缓存",
+      approval: "deny",
+      timeoutMs: 5_000
+    });
+
+    // 它只给了「允许」：绝不顺着选，直接取消这一步。
+    expect(result.reply).toContain('"outcome":"cancelled"');
+    expect(result.skipped).toHaveLength(1);
   });
 
   it("does not count the history a resumed session replays as part of this run", async () => {

@@ -1,4 +1,4 @@
-import { AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Inbox, Layers, LifeBuoy, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plug, RefreshCw, Search, Settings, Trash2, User, UserPlus, Users, X } from "lucide-react";
+import { ArrowUpRight, AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Inbox, Layers, LifeBuoy, Loader2, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plug, RefreshCw, Search, Settings, Trash2, User, UserPlus, Users, X } from "lucide-react";
 import { memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -37,6 +37,22 @@ import {
   sharedProjectFor,
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
+import {
+  dispatchDemoGuide,
+  getDemoGuideState,
+  subscribeDemoGuide
+} from "../app/collab-demo-guide-store.js";
+import {
+  consumeDemoGuideInvite,
+  demoGuideInvitePending,
+  subscribeDemoGuideInvite
+} from "../app/collab-demo-guide-invite.js";
+import { requestAssistInboxRefresh } from "../app/collab-assist-refresh.js";
+import {
+  getLaunchAuthorizationState,
+  retryLaunchAuthorization,
+  subscribeLaunchAuthorization
+} from "../app/collab-launch-authorization.js";
 import type { MemmyAgentProject } from "../api/memmy-agent-client.js";
 import { openAgentTaskInChat } from "../app/open-agent-task.js";
 import { Memmy } from "../components/mascot/memmy.js";
@@ -79,6 +95,7 @@ import { consumeAssistFocus, getAssistFocus, subscribeAssistFocus } from "../app
 import { CollabAssistConversation } from "./collab-assist-conversation.js";
 import { READER_PANEL_WIDTH_STORAGE_KEY, useReaderPanelWidth } from "./collab-reader-resize.js";
 import { CollabAssistProjectSettings } from "./collab-assist-settings.js";
+import { InfoHint } from "./collab-info-hint.js";
 import { assistAgentName, assistIsOpen, assistStatusKey } from "./collab-assist-view.js";
 
 export { memberColor };
@@ -496,6 +513,9 @@ const CollabBoard = memo(function CollabBoard(props: {
   const { t, language } = useTranslation();
   const collab = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
   const snapshot = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
+  /** 新手引导：演示正压在这个项目上，项目名、读面板与项目设置都要为它让路。 */
+  const demoGuide = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState);
+  const demoInvitePending = useSyncExternalStore(subscribeDemoGuideInvite, demoGuideInvitePending, demoGuideInvitePending);
   const [page, setPage] = useState<CollabSessionPage | null>(null);
   const [member, setMember] = useState<MemberFilter>("all");
   /**
@@ -526,6 +546,15 @@ const CollabBoard = memo(function CollabBoard(props: {
    */
   const [agentAccess, setAgentAccess] = useState<CollabAgentAccessView | null>(null);
   const [accessOpen, setAccessOpen] = useState(false);
+  /**
+   * 大卡上的「新建项目」会在后台发起授权：进行中、或已经下发过（哪怕个别 Agent 没装上），看板都不再问一次。
+   * 这里订阅的是模块里的状态，大卡卸载之后它还在继续。
+   */
+  const launchAuthorization = useSyncExternalStore(
+    subscribeLaunchAuthorization,
+    getLaunchAuthorizationState,
+    getLaunchAuthorizationState
+  );
   /** 开启共享回到看板时手动触发一次状态重读。 */
   const [accessCheckKey, setAccessCheckKey] = useState(0);
   /** 同一次进入看板只主动问一次，弹窗关掉后靠设置或点「关联任务」再授权。 */
@@ -622,6 +651,13 @@ const CollabBoard = memo(function CollabBoard(props: {
     if (collab && collabEnabled) void loadCollabProjects(collab);
   }, [collab, collabEnabled]);
 
+  // 收尾弹窗里点了「邀请同事」：打开成员弹窗，那是项目里现有的邀请入口。
+  useEffect(() => {
+    if (!demoInvitePending) return;
+    consumeDemoGuideInvite();
+    setMembersOpen(true);
+  }, [demoInvitePending]);
+
   // 一次性提示（如新建时云端不可用）停留几秒后自动消失，不需要用户手动关闭。
   const notice = snapshot.notice;
   useEffect(() => {
@@ -642,13 +678,21 @@ const CollabBoard = memo(function CollabBoard(props: {
   const shared = collabEnabled ? sharedProjectFor(snapshot.projects, project?.id) : null;
   const sharedId = shared?.id ?? null;
   const projectId = project?.id ?? null;
+  /** 演示是否正压在这个项目上：是的话授权询问、就地面片提示与离开引导都要另走一套。 */
+  const demoActive = demoGuide.status === "active" && projectId !== null && demoGuide.localProjectId === projectId;
+  /**
+   * 演示还占着这个项目的界面：进行中，或者刚走完、完成弹窗还开着。
+   * 授权询问要等它彻底收场——点「完成」之后，或「邀请同事」的弹窗关掉之后。
+   */
+  const demoOwnsProject = demoGuide.status !== "ended" && projectId !== null && demoGuide.localProjectId === projectId;
+  const demoMemberName = demoGuide.memberName;
 
   /**
    * 这次要不要把授权询问让一让：设置与选择任务的弹窗开着，或者选择任务的请求还没被看板处理完。
    * 开启共享会同时发出「询问授权」与「选择任务」两个请求：后者的 effect 先消化请求、再打开弹窗，
    * 同一批里读到的 `taskPickerOpen` 还是旧值，所以这里连请求本身一起看，免得两个弹窗一起弹出来。
    */
-  const accessPromptHeld = settingsOpen || taskPickerOpen || snapshot.taskPickerFor === projectId;
+  const accessPromptHeld = settingsOpen || taskPickerOpen || membersOpen || snapshot.taskPickerFor === projectId;
 
   /**
    * 刚开启共享并回到这个项目时询问一次授权。
@@ -656,12 +700,14 @@ const CollabBoard = memo(function CollabBoard(props: {
    * 上面两个弹窗开着时先不读走这个请求：请求留在 store 里，等弹窗关上再问。
    */
   useEffect(() => {
+    // 演示期间（含完成弹窗）压住授权询问：请求留在 store 里，演示结束后再问。
+    if (demoOwnsProject) return;
     if (!projectId || snapshot.accessPromptFor !== projectId || !sharedId) return;
     if (accessPromptHeld) return;
     consumeCollabAccessPromptRequest();
     askAccessAfterShareRef.current = true;
     setAccessCheckKey((key) => key + 1);
-  }, [projectId, sharedId, snapshot.accessPromptFor, accessPromptHeld]);
+  }, [projectId, sharedId, snapshot.accessPromptFor, accessPromptHeld, demoOwnsProject]);
 
   /** 读一次授权状态：看板要据此决定「关联任务」是列任务还是给授权说明。 */
   const refreshAgentAccess = useCallback(async () => {
@@ -679,13 +725,31 @@ const CollabBoard = memo(function CollabBoard(props: {
     void refreshAgentAccess();
   }, [refreshAgentAccess, sharedId, accessCheckKey]);
 
+  /** 后台授权有结果时重读一次：它决定「关联任务」是列任务还是给授权说明。 */
+  useEffect(() => {
+    if (launchAuthorization.inFlight) return;
+    if (!launchAuthorization.granted && launchAuthorization.failure === null) return;
+    void refreshAgentAccess();
+  }, [launchAuthorization, refreshAgentAccess]);
+
+  /**
+   * 后台授权已经发起：进行中视为已授权，下发之后（无论个别成败）也不再问，装失败的由下面的提示条负责重试。
+   * 大卡自己已经拿到过一次授权，再弹这个询问只会让人以为刚才那一下没生效。
+   */
+  const launchAuthorizationSettled = launchAuthorization.inFlight
+    || launchAuthorization.granted
+    || launchAuthorization.failure !== null;
+
   /**
    * 两个询问时机：刚开启共享后回到看板（创建者），以及加入他人项目的人第一次打开这个项目的看板。
    * 只要还没授权、也没在这里问过，就弹一次；选「暂不安装」之后不再弹。
    * 设置与选择任务的弹窗开着时先不问：刚开启共享往往跟着这两个弹窗，叠在一起会让人看不清先后。
    */
   useEffect(() => {
+    // 演示期间一律不问：演示结束后按「完成 / 邀请弹窗关闭 / 退出引导」的时机再弹。
+    if (demoOwnsProject) return;
     if (!agentAccess || agentAccess.granted || agentAccess.askedInProject) return;
+    if (launchAuthorizationSettled) return;
     if (accessAskedRef.current) return;
     if (accessPromptHeld) return;
     const joined = shared !== null && shared.role !== "owner";
@@ -693,7 +757,7 @@ const CollabBoard = memo(function CollabBoard(props: {
     accessAskedRef.current = true;
     askAccessAfterShareRef.current = false;
     setAccessOpen(true);
-  }, [agentAccess, shared, accessPromptHeld]);
+  }, [agentAccess, launchAuthorizationSettled, shared, accessPromptHeld, demoOwnsProject]);
 
   /** 关掉授权弹窗：选了「暂不安装」也记下已询问，之后只从设置里授权。 */
   const closeAccessDialog = useCallback((granted: boolean) => {
@@ -1075,6 +1139,19 @@ const CollabBoard = memo(function CollabBoard(props: {
     setAssistDetailId(assistFocus.threadId);
   }, [assistFocus, sharedId, assistThreads, refreshAssists, boardTab]);
 
+  /**
+   * 演示在这个项目上收场（完成 / 退出 / 离开 / 心跳超时）：立刻重读任务与协助，不等下一轮轮询。
+   * 小饭团离开后成员数变回 1、他的任务消失，而你们之间的那两次协助要留在列表里。
+   */
+  const demoOwnedProjectRef = useRef(false);
+  useEffect(() => {
+    const ended = demoOwnedProjectRef.current && !demoOwnsProject;
+    demoOwnedProjectRef.current = demoOwnsProject;
+    if (!ended || !sharedId) return;
+    void refreshSessions(sharedId);
+    void refreshAssists();
+  }, [demoOwnsProject, sharedId, refreshSessions, refreshAssists]);
+
   useEffect(() => () => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
@@ -1413,8 +1490,10 @@ const CollabBoard = memo(function CollabBoard(props: {
   const otherSessionCount = otherSessions.length;
   const otherMemberNames = otherSessions.map((session) => session.memberName);
   const memberLabel = memberNamesLabel(otherMemberNames, language);
+  // 演示期间不出现就地面片提示：蒙版下只留一条关键路径。
   const showContextTip = project !== null
     && otherSessionCount > 0
+    && !demoActive
     && !contextTipSeen.includes(project.id);
 
   /** 「协助」列表底部：没有执行过的请求默认收起；最近因超过项目上限清理过较早的协助时注明。 */
@@ -1445,7 +1524,7 @@ const CollabBoard = memo(function CollabBoard(props: {
 
   return (
     <AppFrame title={project?.name ?? t("nav.collab")}>
-      <div className={styles.page} ref={pageRef}>
+      <div className={styles.page} ref={pageRef} data-demo-guide="board-main">
         {!project ? (
           snapshot.projects === null ? (
             <p className={styles.loading}>{t("collab.loading")}</p>
@@ -1464,6 +1543,23 @@ const CollabBoard = memo(function CollabBoard(props: {
                 {notice !== null ? (
                   <div className={styles.cloudNotice} role="alert">
                     <span>{notice}</span>
+                  </div>
+                ) : null}
+                {/* 大卡打开项目时在后台做的授权有 Agent 没装上：留一条可重试的提示，成功后自己消失。 */}
+                {launchAuthorization.failure !== null ? (
+                  <div className={styles.cloudNotice} role="alert">
+                    <span>
+                      {launchAuthorization.failure.count === null
+                        ? t("collab.notice.agentAccessSome")
+                        : t("collab.notice.agentAccessPartial", { count: String(launchAuthorization.failure.count) })}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => collab && retryLaunchAuthorization(collab)}
+                    >
+                      {t("collab.retry")}
+                    </Button>
                   </div>
                 ) : null}
                 {/* 只有已共享的项目才依赖云端；本地项目不提示云端异常，等开启共享时再报错。 */}
@@ -1519,7 +1615,11 @@ const CollabBoard = memo(function CollabBoard(props: {
                     variant="ghost"
                     aria-label={t("collab.settings.open")}
                     title={t("collab.settings.open")}
-                    onClick={() => setSettingsOpen(true)}
+                    data-demo-guide="board-settings"
+                    onClick={() => {
+                      setSettingsOpen(true);
+                      if (demoActive) dispatchDemoGuide({ type: "settings-opened" });
+                    }}
                   >
                     <Settings size={15} aria-hidden="true" />
                   </Button>
@@ -1535,6 +1635,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                       className={styles.boardTabs}
                       role="tablist"
                       aria-label={t("collab.tab.label")}
+                      data-demo-guide="board-tabs"
                     >
                       {boardTabs.map((tab) => (
                         <button
@@ -1690,7 +1791,12 @@ const CollabBoard = memo(function CollabBoard(props: {
                             ) : null}
                             {/* 「关联任务」只属于任务：协助由 Agent 对话发起，不在这里关联 */}
                             {boardTab === "tasks" ? (
-                              <Button size="sm" variant="primary" onClick={() => setPickOpen(true)}>
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                data-demo-guide="board-associate"
+                                onClick={() => setPickOpen(true)}
+                              >
                                 <Link2 size={14} aria-hidden="true" />
                                 {t("collab.associate")}
                               </Button>
@@ -1763,7 +1869,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                         </div>
                       ) : null}
                       {boardRows === null ? (
-                        <p className={styles.loading}>{t("collab.loading")}</p>
+                        <p className={styles.loading} data-demo-guide="board-list">{t("collab.loading")}</p>
                       ) : boardRows.length === 0 && boardTab === "assists" ? (
                         <>
                           {assistGroups.unrun.length ? null : (
@@ -1808,7 +1914,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                       ) : boardRows.length === 0 ? (
                         // An empty project is the one place to explain the board: what it collects and what a
                         // member can do with it. New projects start here, so it carries the first-run guidance.
-                        <section className={styles.guide} aria-label={t("collab.sessions.empty.title")}>
+                        <section className={styles.guide} aria-label={t("collab.sessions.empty.title")} data-demo-guide="board-list">
                           <b className={styles.guideTitle}>{t("collab.sessions.empty.title")}</b>
                           <p className={styles.guideLead}>{t("collab.sessions.empty.lead")}</p>
                           <ul className={styles.guideList}>
@@ -1828,7 +1934,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                         </section>
                       ) : (
                         <>
-                        <ul className={`${styles.list} ${styles.stream} ${styles.flatStream}`}>
+                        {/* 导览第一步框住的就是这一块：任务列表本身，不含上面的 tab 行与工具条。 */}
+                        <ul className={`${styles.list} ${styles.stream} ${styles.flatStream}`} data-demo-guide="board-list">
                           {boardRows.map((row) => {
                             if (row.kind === "assist") {
                               return (
@@ -1842,6 +1949,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                                   menuOpen={openMenuId === `assist:${row.thread.threadId}`}
                                   onMenu={(open) => setOpenMenuId(open ? `assist:${row.thread.threadId}` : null)}
                                   onDelete={() => setDeletingAssist(row.thread)}
+                                  demoAnchor={demoActive && row.thread.requester.userId === demoGuide.memberUserId}
                                 />
                               );
                             }
@@ -1852,13 +1960,17 @@ const CollabBoard = memo(function CollabBoard(props: {
                             const summary = readableSummary(session.lastQuestion);
                             // 本人的任务也写昵称：自己看到的与成员看到的一致，只有昵称缺失时才退回「你」。
                             const menuOpen = openMenuId === session.id;
+                            // 演示里亮起来的就是演示成员那一行：按云端给的昵称认，不认任何写死的账号。
+                            const demoRow = demoActive && !session.mine && name === demoMemberName;
                             return (
                               <li
                                 key={session.id}
+                                data-demo-guide={demoRow ? "board-task-row" : undefined}
                                 className={`${styles.row} ${selecting ? styles.rowSelecting : styles.rowOpenable} ${menuOpen ? styles.rowMenuOpen : ""} ${selected.has(session.id) ? styles.rowSelected : ""}`}
                                 onClick={() => {
                                   if (!selecting) {
                                     openRow(session);
+                                    if (demoRow) dispatchDemoGuide({ type: "task-opened" });
                                     return;
                                   }
                                   // 选择模式下点击整行就是勾选；他人的任务不可选。
@@ -2073,6 +2185,14 @@ const CollabBoard = memo(function CollabBoard(props: {
             showToast(t("collab.leave.done"));
           }}
           taskCount={localTasks.length}
+          demoActive={demoActive}
+          onDemoReceivingOn={() => {
+            if (!demoActive) return;
+            // 演示第三步：设置收起，卡片先说「正在发来一个请求」，并立即取一次收件箱，不等下一轮轮询。
+            setSettingsOpen(false);
+            dispatchDemoGuide({ type: "receiving-on" });
+            requestAssistInboxRefresh();
+          }}
           onPickSessions={() => {
             setSettingsOpen(false);
             setTaskPickerOpen(true);
@@ -2163,6 +2283,15 @@ const CollabBoard = memo(function CollabBoard(props: {
         resolveAgentName={resolveAgentName}
         onClose={() => setReading(null)}
         onCopy={(session) => void copyLink(session)}
+        onContinue={(session) => {
+          if (demoActive) {
+            dispatchDemoGuide({
+              type: "task-continued",
+              prefill: t("collab.demo.prefill.task", { name: demoMemberName })
+            });
+          }
+          void continueSession(session);
+        }}
       />
       <ConfirmDialog
         open={confirmBulkDelete}
@@ -2236,6 +2365,8 @@ export function AssistBoardRow(props: {
   menuOpen?: boolean;
   onMenu?: (open: boolean) => void;
   onDelete?: () => void;
+  /** 新手引导的演示中，这一行就是第三步的亮区。 */
+  demoAnchor?: boolean;
 }) {
   const { t } = useTranslation();
   const { thread } = props;
@@ -2258,6 +2389,7 @@ export function AssistBoardRow(props: {
     <li
       className={`${styles.row} ${props.selecting ? styles.rowSelecting : styles.rowOpenable} ${menuOpen ? styles.rowMenuOpen : ""} ${props.selected ? styles.rowSelected : ""}`}
       data-collab-assist-row=""
+      data-demo-guide={props.demoAnchor ? "assist-row" : undefined}
       onClick={() => {
         if (!props.selecting) {
           props.onOpen();
@@ -2757,10 +2889,11 @@ function ProjectInstructionsDialog(props: {
 }
 
 /**
- * The board's settings: three cards read top to bottom — who the project is shared with, whether this computer
- * answers assist requests, and where the folder lives. Every row is a title, one line of description and a
- * switch or a button on the right. Stopping sharing (or leaving, for a member) is one danger button at the
- * bottom rather than a switch: it removes the cloud project, which cannot be undone.
+ * The board's settings, laid out like Codex's project editor: a small label over one rounded group per topic —
+ * the folder, then collaboration (shared sessions or "Turn on collaboration", and assist requests). Each row is an
+ * icon and a name with its value, switch or arrow on the right; explanations sit behind a question mark. Stopping
+ * sharing (or leaving, for a member) is a soft danger button at the bottom left rather than a switch: it removes
+ * the cloud project, which cannot be undone. "Done" on the right closes the dialog; every change applies at once.
  */
 export function ProjectBoardSettingsDialog(props: {
   open: boolean;
@@ -2779,6 +2912,9 @@ export function ProjectBoardSettingsDialog(props: {
   taskCount: number;
   onNotice: (message: string) => void;
   onFailed: (message: string) => void;
+  /** 新手引导的演示中：「协作」这一组是亮区，开关是描边目标，打开后关掉设置去等演示成员的请求。 */
+  demoActive?: boolean;
+  onDemoReceivingOn?: () => void;
 }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
@@ -2896,21 +3032,22 @@ export function ProjectBoardSettingsDialog(props: {
     }
   }
 
-  // 加载中不显示值，读完后是「暂无任务」或「已同步 x / y」。
+  // 加载中只转圈，读完后是「暂无」或「x / y」。
   const sessionsValue = taskStats === null
     ? null
     : taskStats.total === 0
       ? t("collab.settings.sessionsNone")
-      : t("collab.settings.sessionsSynced", { synced: String(taskStats.synced), total: String(taskStats.total) });
+      : t("collab.settings.sessionsRatio", { synced: String(taskStats.synced), total: String(taskStats.total) });
+  const revealProject = clients?.memmyAgent
+    ? () => void clients.memmyAgent?.revealProject(props.project.id, { timeoutMs: 15_000 })
+    : null;
   const canLeave = Boolean(sharedId) && props.shareAvailable;
   const dangerLabel = isOwner ? t("appFrame.project.stopSharing") : t("appFrame.project.leave");
   const confirmTitle = confirm === "leave" ? t("collab.leave.title") : t("collab.settings.stopTitle");
   const confirmBody = confirm === "leave"
     ? t("collab.leave.message", { name: props.project.name })
     : t("appFrame.project.stopSharingMessage", { name: props.project.name });
-  // 页脚只在需要右下角按钮或有进行中的动作时出现：没有它时正文自己收尾。
-  const showFooter = Boolean(confirm) || canLeave || action !== null;
-  // 确认块占满页脚；平时是右下角一个危险按钮，进行中的动作文字在左。
+  // 确认块占满页脚；平时左侧是危险操作（或进行中的动作），右侧「完成」。
   const footer = confirm ? (
     <section className={styles.settingsConfirm} role="alertdialog" aria-label={confirmTitle}>
       <b>{confirmTitle}</b>
@@ -2944,18 +3081,19 @@ export function ProjectBoardSettingsDialog(props: {
             ? t("collab.settings.sharing")
             : action === "stopping" ? t("collab.settings.stopping") : t("collab.settings.leaving")}
         </p>
-      ) : null}
-      {canLeave ? (
-        <Button
-          size="sm"
-          variant="secondary"
-          className={`${styles.settingsButton} ${styles.settingsDangerButton}`}
+      ) : canLeave ? (
+        <button
+          type="button"
+          className={styles.settingsDangerSoft}
           disabled={busy}
           onClick={() => setConfirm(isOwner ? "stop" : "leave")}
         >
           {dangerLabel}
-        </Button>
-      ) : null}
+        </button>
+      ) : <span />}
+      <Button variant="primary" className={styles.settingsDoneButton} disabled={busy} onClick={props.onClose}>
+        {t("collab.settings.done")}
+      </Button>
     </>
   );
 
@@ -2966,101 +3104,108 @@ export function ProjectBoardSettingsDialog(props: {
       onClose={props.onClose}
       closeLabel={t("common.close")}
       closeContent={<X size={16} aria-hidden="true" />}
-      className={`${styles.createModal} ${styles.settingsModal}`}
-      backdropClassName={styles.backdrop}
-      // 正文与页脚按这一屏自己的排布：卡片之间 12px，页脚只在需要右下角按钮时出现。
-      bodyClassName={`${styles.settingsBody}${showFooter ? "" : ` ${styles.settingsBodyLast}`}`}
-      footer={showFooter ? footer : undefined}
+      className={`${styles.createModal} ${styles.simpleCreateModal} ${styles.settingsModal}`}
+      backdropClassName={props.demoActive ? `${styles.backdrop} ${styles.backdropYield}` : styles.backdrop}
+      bodyClassName={styles.settingsBody}
+      footer={footer}
       footerClassName={styles.settingsFooter}
     >
-      <section className={styles.settingsCard}>
-        <div className={styles.settingsCardHead}>
-          <span className={styles.settingsCardChip}><Users size={14} aria-hidden="true" /></span>
-          <h3 className={styles.settingsCardTitle}>{t("collab.settings.groupSharing")}</h3>
-        </div>
+      {/* 文件夹：一组里只有一行，显示末级目录名，完整路径在悬停提示里；点整行在系统文件管理器中打开 */}
+      <div className={styles.settingsSectionLabel}>{t("collab.settings.folder")}</div>
+      <div className={styles.settingsGroup}>
+        <button
+          type="button"
+          className={`${styles.settingsRow} ${styles.settingsRowAction}`}
+          title={props.project.rootPath}
+          aria-label={`${t("collab.settings.reveal")}：${formatWorkspacePath(props.project.rootPath)}`}
+          disabled={!revealProject}
+          onClick={() => revealProject?.()}
+        >
+          <Folder size={16} aria-hidden="true" className={styles.settingsRowIcon} />
+          <span className={`${styles.settingsRowLabel} ${styles.settingsRowStrong}`}>{folderNameOf(props.project.rootPath)}</span>
+          <ArrowUpRight size={15} aria-hidden="true" className={styles.settingsRowTrail} />
+        </button>
+      </div>
+
+      {/* 协作：与成员有关的设置放在同一组里，一行一项 */}
+      <div className={styles.settingsSectionLabel}>{t("collab.settings.sectionCollab")}</div>
+      <div className={styles.settingsGroup} data-demo-guide={props.demoActive ? "settings-assist" : undefined}>
         {!props.shareAvailable ? (
-          // API Key 模式没有云端账号：这一行只说清原因，右侧没有控件。
-          <div className={styles.settingsCardRow}>
-            <div className={styles.settingsCardText}>
-              <span className={styles.settingsCardRowTitle}>{t("collab.create.share")}</span>
-              <span className={styles.settingsCardRowDesc}>{t("collab.settings.shareByokHint")}</span>
-            </div>
+          // API Key 模式没有云端账号：只写明需要登录，原因收进问号，不给开关。
+          <div className={`${styles.settingsRow} ${styles.settingsRowMuted}`}>
+            <Users size={16} aria-hidden="true" className={styles.settingsRowIcon} />
+            <span className={styles.settingsRowLabel}>{t("collab.create.shareToggle")}</span>
+            <span className={styles.settingsRowHint}>
+              <InfoHint
+                placement="above"
+                label={t("collab.create.shareHelpLabel")}
+                text={t("collab.settings.shareByokHint")}
+              />
+            </span>
+            <span className={styles.settingsRowValue}>{t("collab.settings.shareNeedsAccount")}</span>
           </div>
         ) : sharedId ? (
-          // 已共享之后开关会让整个云端项目消失，不适合放在这里：只报同步了多少任务。
-          <div className={styles.settingsCardRow}>
-            <div className={styles.settingsCardText}>
-              <span className={styles.settingsCardRowTitle}>{t("collab.settings.sessionsRow")}</span>
-              <span className={styles.settingsCardRowDesc}>{sessionsValue ?? t("collab.loading")}</span>
-            </div>
-            <div className={styles.settingsCardControl}>
-              <Button
-                size="sm"
-                variant="secondary"
-                className={styles.settingsButton}
-                onClick={props.onPickSessions}
-              >
-                {t("collab.settings.pickSessions")}
-              </Button>
-            </div>
-          </div>
+          // 已共享：报共享了几个任务，点整行去选择。停止共享不是开关，在左下角。
+          <button
+            type="button"
+            className={`${styles.settingsRow} ${styles.settingsRowAction}`}
+            onClick={props.onPickSessions}
+          >
+            <Users size={16} aria-hidden="true" className={styles.settingsRowIcon} />
+            <span className={styles.settingsRowLabel}>{t("collab.settings.sessionsRow")}</span>
+            {sessionsValue === null ? (
+              <span className={styles.settingsRowValue} role="status" aria-label={t("collab.loading")}>
+                <Loader2 size={13} aria-hidden="true" className={styles.settingsSpinner} />
+              </span>
+            ) : (
+              <span className={styles.settingsRowValue}>{sessionsValue}</span>
+            )}
+            <ChevronRight size={15} aria-hidden="true" className={styles.settingsRowTrail} />
+          </button>
         ) : (
-          <div className={styles.settingsCardRow}>
-            <div className={styles.settingsCardText}>
-              <span className={styles.settingsCardRowTitle}>{t("collab.create.share")}</span>
-              <span className={styles.settingsCardRowDesc}>{t("collab.settings.shareOffHint")}</span>
-            </div>
-            <div className={styles.settingsCardControl}>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={false}
-                aria-label={t("collab.create.share")}
-                disabled={busy || !props.collab}
-                onClick={() => void startSharing()}
-                className={styles.settingsSwitch}
-              />
-            </div>
+          // 未共享：与创建项目里的「开启项目协作」同一句话，点整行任意位置都能开启（问号除外）。
+          <div
+            className={`${styles.settingsRow} ${styles.settingsRowAction}`}
+            onClick={() => void startSharing()}
+          >
+            <Users size={16} aria-hidden="true" className={styles.settingsRowIcon} />
+            <span className={styles.settingsRowLabel}>{t("collab.create.shareToggle")}</span>
+            <span className={styles.settingsRowHint} onClick={(event) => event.stopPropagation()}>
+              <InfoHint placement="above" label={t("collab.create.shareHelpLabel")} text={t("collab.settings.shareOffHint")} />
+            </span>
+            {/* 开关自己不处理点击：点击冒泡到整行只触发一次，键盘的空格 / 回车同样产生点击 */}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={false}
+              aria-label={t("collab.create.shareToggle")}
+              disabled={busy || !props.collab}
+              className={`${styles.settingsSwitch} ${styles.settingsRowControl}`}
+            />
           </div>
         )}
-      </section>
 
-      {/* 成员协助：本人在这个项目里是否接收协助请求（默认关闭），开启时列出她给出的限时授权。
-          只在账号模式、已共享的项目里出现；组件自己带「协助」这张卡片。 */}
-      {sharedId && props.shareAvailable ? (
-        <CollabAssistProjectSettings client={props.collab} projectId={sharedId} />
-      ) : null}
-
-      <section className={styles.settingsCard}>
-        <div className={styles.settingsCardHead}>
-          <span className={styles.settingsCardChip}><Folder size={14} aria-hidden="true" /></span>
-          <h3 className={styles.settingsCardTitle}>{t("collab.settings.groupProject")}</h3>
-        </div>
-        <div className={styles.settingsCardRow}>
-          <div className={styles.settingsCardText}>
-            <span className={styles.settingsCardRowTitle}>{t("collab.settings.folder")}</span>
-            <span
-              className={`${styles.settingsCardRowDesc} ${styles.settingsCardPath}`}
-              title={props.project.rootPath}
-            >
-              {formatWorkspacePath(props.project.rootPath)}
-            </span>
-          </div>
-          <div className={styles.settingsCardControl}>
-            <Button
-              size="sm"
-              variant="secondary"
-              className={styles.settingsButton}
-              disabled={!clients?.memmyAgent}
-              onClick={() => void clients?.memmyAgent?.revealProject(props.project.id, { timeoutMs: 15_000 })}
-            >
-              {t("collab.settings.reveal")}
-            </Button>
-          </div>
-        </div>
-      </section>
+        {/* 成员协助：本人在这个项目里是否接收协助请求（默认关闭），开启且有限时授权时列在这一行下面。
+            只在账号模式、已共享的项目里出现。 */}
+        {sharedId && props.shareAvailable ? (
+          <CollabAssistProjectSettings
+            client={props.collab}
+            projectId={sharedId}
+            demoAnchor={props.demoActive === true}
+            onEnabledChange={(enabled) => {
+              if (enabled) props.onDemoReceivingOn?.();
+            }}
+          />
+        ) : null}
+      </div>
     </Modal>
   );
+}
+
+/** 只显示末级目录名，完整路径留到悬停提示里。 */
+function folderNameOf(path: string): string {
+  const parts = path.split(/[\\/]/u).filter(Boolean);
+  return parts[parts.length - 1] ?? path;
 }
 
 /**
@@ -3078,6 +3223,8 @@ function SessionReaderPanel(props: {
   resolveAgentName: (sourceId: string) => string;
   onClose: () => void;
   onCopy: (session: CollabProjectSession) => void;
+  /** 在项目下开一条新任务接着这条做：与任务行「…」菜单里的「继续任务」同一个动作。 */
+  onContinue: (session: CollabProjectSession) => void;
 }) {
   const { t } = useTranslation();
   const titleId = useId();
@@ -3127,6 +3274,7 @@ function SessionReaderPanel(props: {
       />
       <aside
         ref={panelRef}
+        data-demo-guide="reader-panel"
         className={styles.readerPanel}
         role="dialog"
         aria-modal="false"
@@ -3152,6 +3300,15 @@ function SessionReaderPanel(props: {
             </div>
           </div>
           <div className={styles.readerActions}>
+            {/* 只读面板的头部也能接着做：入口原来只在任务行的「…」菜单里，读到最后一项时不该先退出去找它。 */}
+            <button
+              type="button"
+              className={styles.readerContinue}
+              data-demo-guide="reader-continue"
+              onClick={() => props.onContinue(data.session)}
+            >
+              {t("collab.session.continue")}
+            </button>
             <button
               type="button"
               className={styles.readerAction}

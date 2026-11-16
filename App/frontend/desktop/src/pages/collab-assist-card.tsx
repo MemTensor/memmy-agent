@@ -90,6 +90,20 @@ export function CollabAssistRequestCard(props: {
                 </div>
               )}
             </div>
+            {/* 执行时按协助规则跳过的操作：与逐项结果同一套列表样式，写在结果下面。 */}
+            {request.safety?.skipped?.length ? (
+              <>
+                <div className={styles.key}>{t("collab.assist.skippedTitle")}</div>
+                <ul className={styles.skipped}>
+                  {request.safety.skipped.map((item) => (
+                    <li key={`${item.title}-${item.detail ?? ""}`}>
+                      {item.title}
+                      {item.detail ? <span className={styles.skippedDetail}>{item.detail}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
             {request.files.length ? (
               <div className={styles.files}>
                 {request.files.map((file) => (
@@ -109,8 +123,14 @@ export function CollabAssistRequestCard(props: {
         {status === "pending" ? (
           <>
             <span className={styles.spin} />
-            {/* 她不在线时不写「已通知」：她打开 Memmy 之前看不到，按限时授权也要等她上线后才执行。 */}
-            {request.autoRun && request.grant
+            {/* 她不在线时不写「已通知」：她打开 Memmy 之前看不到，按限时授权也要等她上线后才执行。
+                她的 Memmy 检查后要求她确认时，说明为什么——不要写成「会直接执行」。 */}
+            {!request.autoRun && request.safety?.executor && request.safety.executor.status !== "auto" ? (
+              t("collab.assist.footerReviewConfirm", {
+                name: executor,
+                reason: request.safety.executor.reason ?? t("collab.assist.reviewUnavailable")
+              })
+            ) : request.autoRun && request.grant
               ? t(request.executorOffline ? "collab.assist.footerAutoRunOffline" : "collab.assist.footerAutoRun",
                 { name: executor, agent: plannedAgent, time: assistClock(request.grant.expiresAt, true) })
               : t(request.executorOffline ? "collab.assist.footerOffline" : "collab.assist.footerWaiting", { name: executor })}

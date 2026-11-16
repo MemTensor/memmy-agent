@@ -6,6 +6,7 @@ import { adaptersDirectory } from "../assist/adapters.js";
 import {
   ASSIST_COMMAND_ENV,
   assistAgentName,
+  assistAsksForApproval,
   assistRecipe,
   assistRunnable,
   defaultQwenWorkAppDirs,
@@ -158,5 +159,41 @@ describe("assistRunnable", () => {
 
     const env = { PATH: binWith() } as NodeJS.ProcessEnv;
     expect(assistRunnable("deepseek_harness", env, { appDirs: [bundle] })).toBe(true);
+  });
+});
+
+/**
+ * 协助执行时会不会请求批准、要用哪个模式：决定限时授权下能不能直接自动执行（见 collab-assist-service）。
+ * 值是按适配器源码与官方文档确认的，改配方时这里要一起改。
+ */
+describe("assistAsksForApproval", () => {
+  it("says yes for the two Agents that ask the client before risky steps", () => {
+    expect(assistAsksForApproval("codex")).toBe(true);
+    expect(assistAsksForApproval("claude_code")).toBe(true);
+  });
+
+  it("says yes for Memmy itself, which checks the same four kinds of operations", () => {
+    expect(assistAsksForApproval("memmy")).toBe(true);
+  });
+
+  it("says no for the Agents that never ask, and for unknown ones", () => {
+    // pi-acp 0.0.34 只在扩展弹窗时请求批准，工具执行不请求。
+    expect(assistAsksForApproval("pi")).toBe(false);
+    expect(assistAsksForApproval("cursor")).toBe(false);
+    expect(assistAsksForApproval("someone-elses-agent")).toBe(false);
+  });
+});
+
+describe("the mode each recipe asks for", () => {
+  it("starts Codex in Auto review and keeps it there when resuming", () => {
+    const recipe = assistRecipe("codex", {} as NodeJS.ProcessEnv);
+    // 新会话靠环境变量进 agent（Auto review）；续跑接回的是旧会话，模式要再设一次。
+    expect(recipe?.env).toEqual({ INITIAL_AGENT_MODE: "agent" });
+    expect(recipe?.sessionMode).toEqual({ configId: "mode", value: "agent", fallback: "read-only" });
+  });
+
+  it("sets Claude Code to auto and falls back to default when the model cannot", () => {
+    const recipe = assistRecipe("claude_code", {} as NodeJS.ProcessEnv);
+    expect(recipe?.sessionMode).toEqual({ configId: "mode", value: "auto", fallback: "default" });
   });
 });

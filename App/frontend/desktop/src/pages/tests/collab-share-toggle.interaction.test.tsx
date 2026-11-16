@@ -1,13 +1,20 @@
 // @vitest-environment happy-dom
 
 /**
- * 输入框旁的共享开关：已有任务读写本机接口；草稿先记下选择，发送第一条消息后由新会话接手。
+ * 输入框旁的共享开关：已有任务读写本机接口，没有记录时按未共享显示；草稿默认开启，
+ * 先记下选择，发送第一条消息后由新会话接手。
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollabClient } from "../../api/collab-client.js";
-import { resetShareIntents, shareIntentFor, takeShareIntent } from "../../app/collab-share-intent.js";
+import {
+  draftShareIntent,
+  handOffDraftShare,
+  isSharePending,
+  resetShareIntents,
+  takeDraftShareIntent
+} from "../../app/collab-share-intent.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { CollabShareToggle } from "../collab-share-toggle.js";
 
@@ -78,7 +85,7 @@ describe("CollabShareToggle", () => {
     expect(container.textContent).toContain("已共享给成员");
   });
 
-  it("remembers the choice made before the first message and hands it to the new session", async () => {
+  it("starts a new task as shared without touching the local record", async () => {
     const collab = client();
     const button = await render({
       collab,
@@ -87,14 +94,67 @@ describe("CollabShareToggle", () => {
       draftScopeKey: "draft-7",
       onError: vi.fn()
     });
-    // 还没有会话，不能直接写云端。
+    // 还没有会话，不能直接写本机记录；草稿默认开启，但还没有共享任何内容，所以不写「已共享」。
     expect(collab.taskSharing).not.toHaveBeenCalled();
+    expect(button.getAttribute("aria-checked")).toBe("true");
+    expect(button.textContent).toBe("共享给成员");
+    expect(button.getAttribute("title")).toBe("发送第一条消息后，这条任务会共享给项目成员");
+    expect(takeDraftShareIntent("draft-7", true)).toBe(true);
+  });
+
+  it("keeps a new task unshared when the person turns it off before sending", async () => {
+    const collab = client();
+    const button = await render({
+      collab,
+      projectId: "cloud-1",
+      conversationId: null,
+      draftScopeKey: "draft-8",
+      onError: vi.fn()
+    });
     await act(async () => button.click());
     await flush();
     expect(collab.setTaskSharing).not.toHaveBeenCalled();
-    expect(shareIntentFor("draft-7")).toBe(true);
-    expect(takeShareIntent("draft-7")).toBe(true);
-    expect(shareIntentFor("draft-7")).toBe(false);
+    expect(container.querySelector("button")!.getAttribute("aria-checked")).toBe("false");
+    expect(draftShareIntent("draft-8")).toBe(false);
+    // 发送时交给新会话：关掉的草稿不共享。
+    expect(handOffDraftShare({ collab, onlineProjectId: "cloud-1", draftScopeKey: "draft-8", chatId: "chat-8" })).toBeNull();
+    expect(collab.setTaskSharing).not.toHaveBeenCalled();
+  });
+
+  it("does not turn an existing task with no record into a shared one", async () => {
+    const collab = client();
+    const button = await render({
+      collab,
+      projectId: "cloud-1",
+      conversationId: "chat-old",
+      draftScopeKey: "chat-old",
+      onError: vi.fn()
+    });
+    expect(collab.taskSharing).toHaveBeenCalledWith("cloud-1", "chat-old");
+    expect(button.getAttribute("aria-checked")).toBe("false");
+    expect(collab.setTaskSharing).not.toHaveBeenCalled();
+  });
+
+  it("shows a just-created task as shared while the draft's choice is being saved", async () => {
+    let finish: (value: { shared: boolean; synced: boolean; started: number }) => void = () => undefined;
+    const collab = client({
+      setTaskSharing: vi.fn().mockImplementation(() => new Promise((resolve) => { finish = resolve; }))
+    });
+    const handed = handOffDraftShare({ collab, onlineProjectId: "cloud-1", draftScopeKey: "draft-9", chatId: "chat-9" });
+    expect(collab.setTaskSharing).toHaveBeenCalledWith("cloud-1", "chat-9", true);
+    // 本机记录还没写好：读到的是未共享，开关仍按草稿交过来的选择显示。
+    const button = await render({
+      collab,
+      projectId: "cloud-1",
+      conversationId: "chat-9",
+      draftScopeKey: "chat-9",
+      onError: vi.fn()
+    });
+    expect(button.getAttribute("aria-checked")).toBe("true");
+    expect(button.textContent).toBe("已共享给成员");
+    await act(async () => finish({ shared: true, synced: false, started: 0 }));
+    await handed;
+    expect(isSharePending("chat-9")).toBe(false);
   });
 
   it("keeps the switch off and reports the failure when saving does not work", async () => {
@@ -114,6 +174,6 @@ describe("CollabShareToggle", () => {
     await flush();
     expect(onError).toHaveBeenCalled();
     expect(container.querySelector("button")!.getAttribute("aria-checked")).toBe("false");
-    expect(shareIntentFor("chat-1")).toBe(false);
+    expect(isSharePending("chat-1")).toBe(false);
   });
 });

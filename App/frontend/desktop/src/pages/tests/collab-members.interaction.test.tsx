@@ -214,6 +214,7 @@ describe("join project dialog", () => {
   const onJoined = vi.fn();
   const onApplied = vi.fn();
   const onClose = vi.fn();
+  const onCreateProject = vi.fn();
   const invite = {
     code: "AbCdEfGhIjKlMnOpQrStUv",
     projectId: "cloud-1",
@@ -233,7 +234,14 @@ describe("join project dialog", () => {
     await act(async () => {
       root.render(
         <I18nProvider language="zh-CN">
-          <JoinProjectModal open collab={collab as never} onClose={onClose} onJoined={onJoined} onApplied={onApplied} />
+          <JoinProjectModal
+            open
+            collab={collab as never}
+            onClose={onClose}
+            onJoined={onJoined}
+            onApplied={onApplied}
+            onCreateProject={onCreateProject}
+          />
         </I18nProvider>
       );
     });
@@ -283,5 +291,12 @@ describe("join project dialog", () => {
   it("does not send a second request while the first waits", async () => {
     await paste({ ...invite, status: "pending" });
     expect(button("已申请，等待审核").disabled).toBe(true);
+  });
+
+  it("switches back to creating a project from the footer button instead of the old tabs", async () => {
+    // 顶部那块「新建项目 | 加入协作项目」标签已经去掉，两个弹窗靠页脚左侧的按钮互切。
+    expect(document.querySelector("[role='tablist']")).toBeNull();
+    await act(async () => button("新建项目").click());
+    expect(onCreateProject).toHaveBeenCalledTimes(1);
   });
 });
