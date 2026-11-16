@@ -384,7 +384,7 @@ function sessionSignature(session: CollabProjectSession): string {
 
 /**
  * 云端每次返回都是新对象，直接写回会让看板白重画一次。内容一致时返回值告诉调用方「不用写」。
- * 只比较画面上与复制链接真正读到的字段，够用且比整串 JSON 便宜。
+ * 只比较画面上真正用到的字段，够用且比整串 JSON 便宜。
  */
 function sameSessionPage(current: CollabSessionPage | null, next: CollabSessionPage): boolean {
   if (!current || current.total !== next.total) return false;
@@ -1320,15 +1320,6 @@ const CollabBoard = memo(function CollabBoard(props: {
     void openSession(session);
   }
 
-  async function copyLink(session: CollabProjectSession) {
-    try {
-      await navigator.clipboard.writeText(session.shareText);
-      showToast(t("collab.session.linkCopied"));
-    } catch {
-      showToast(t("collab.session.copyFailed"));
-    }
-  }
-
   /**
    * 继续一条协作任务：把它的全文作为引用带到项目下的新任务里。
    * 引用文本取不到（网络或权限）时退回任务链接，Agent 仍可凭链接自行读取，不阻断新建。
@@ -2020,8 +2011,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                                 {menuOpen ? (
                                   <>
                                     {/*
-                                     * The row itself opens the session reader. Every click that belongs to the menu has to
-                                     * stop here, or copying a link also opens the session behind the toast.
+                                     * The row itself opens the session reader, so every click that belongs to the menu
+                                     * has to stop here, or a menu choice also opens the session behind it.
                                      */}
                                     <button
                                       type="button"
@@ -2036,9 +2027,6 @@ const CollabBoard = memo(function CollabBoard(props: {
                                       {/* 任一行都可用，包括他人的只读任务：只读限制作用于正文，不影响在自己这边开新任务 */}
                                       <button type="button" role="menuitem" className={styles.menuItem} onClick={() => { setOpenMenuId(null); void continueSession(session); }}>
                                         {t("collab.session.continue")}
-                                      </button>
-                                      <button type="button" role="menuitem" className={styles.menuItem} onClick={() => { setOpenMenuId(null); void copyLink(session); }}>
-                                        {t("collab.session.copyLink")}
                                       </button>
                                       {session.mine ? (
                                         <>
@@ -2282,7 +2270,6 @@ const CollabBoard = memo(function CollabBoard(props: {
         loading={readingId !== null}
         resolveAgentName={resolveAgentName}
         onClose={() => setReading(null)}
-        onCopy={(session) => void copyLink(session)}
         onContinue={(session) => {
           if (demoActive) {
             dispatchDemoGuide({
@@ -3222,7 +3209,6 @@ function SessionReaderPanel(props: {
   /** 已关联的 Agent 用本机的名字；内置 Agent 用产品名。 */
   resolveAgentName: (sourceId: string) => string;
   onClose: () => void;
-  onCopy: (session: CollabProjectSession) => void;
   /** 在项目下开一条新任务接着这条做：与任务行「…」菜单里的「继续任务」同一个动作。 */
   onContinue: (session: CollabProjectSession) => void;
 }) {
@@ -3308,15 +3294,6 @@ function SessionReaderPanel(props: {
               onClick={() => props.onContinue(data.session)}
             >
               {t("collab.session.continue")}
-            </button>
-            <button
-              type="button"
-              className={styles.readerAction}
-              aria-label={t("collab.session.copyLink")}
-              title={t("collab.session.copyLink")}
-              onClick={() => props.onCopy(data.session)}
-            >
-              <Link2 size={15} aria-hidden="true" />
             </button>
             <button
               type="button"
