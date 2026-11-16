@@ -23,6 +23,14 @@ export interface DemoGuideTarget {
   stroke: string | null;
   /** true：亮区里除描边控件外的位置都不接点击（读面板、弹窗这些自带多个按钮的地方）。 */
   blockRest: boolean;
+  /**
+   * true：连描边那个控件自己也不接点击。
+   *
+   * 给「只介绍、不让人动手」的屏用：建项目之前那几屏讲的是新建弹窗上的设置项，
+   * 描边只是标出「正在讲这一项」，开关不该被顺手拨过去、按钮也不该被顺手点下去，
+   * 想往下走只能按卡片上的「下一步」（最后一屏的「创建项目」除外，那一屏要点真实按钮）。
+   */
+  blockStroke?: boolean;
   /** 主锚点不在这一页时（比如执行中的协助条在任务页，人却在看板上）改用在的这一个。 */
   fallback?: string;
   /**
@@ -42,17 +50,18 @@ export interface DemoGuideTarget {
 
 const TARGETS: Record<DemoGuidePhase, DemoGuideTarget> = {
   // 建项目之前的六屏：都在新建弹窗上，一屏一个亮区；按控件自己的形状给圆角。
+  // 这一段只介绍、不让人动手：整张弹窗（`intro`）与每一项设置都不接点击，只能按卡片上的「下一步」。
   // 出场那一步只压暗、不描边，让人先看整张弹窗。
-  intro: { region: "create-dialog", stroke: null, blockRest: false, radius: 18, padding: 8, clean: true, prefer: "right" },
-  // 项目名称那一行：与输入框自己的圆角对齐，不挡点击（人可以直接改）。
-  name: { region: "create-name", stroke: "create-name", blockRest: false, radius: 13, padding: 6, prefer: "bottom" },
-  // 文件夹区块。
-  folder: { region: "create-folder", stroke: "create-folder", blockRest: false, radius: 14, padding: 6, prefer: "bottom" },
-  // 协作开关整行：说明卡贴在上边，不压住下面的按钮。
-  collab: { region: "create-collab", stroke: "create-collab", blockRest: false, radius: 13, padding: 6, prefer: "top" },
-  // 左下角的「加入项目」：按钮在弹窗左下，卡片贴在上边。
-  "join-entry": { region: "create-join", stroke: "create-join", blockRest: false, radius: 10, padding: 6, prefer: "top" },
-  // 「创建项目」：唯一可点的控件。
+  intro: { region: "create-dialog", stroke: null, blockRest: true, radius: 18, padding: 8, clean: true, prefer: "right" },
+  // 项目名称那一行：描边标出正在讲的是这一项，但输入框里点不进去（想改名得等引导结束）。
+  name: { region: "create-name", stroke: "create-name", blockRest: true, blockStroke: true, radius: 13, padding: 6, prefer: "bottom" },
+  // 文件夹区块：同样只展示，「添加」按不动。
+  folder: { region: "create-folder", stroke: "create-folder", blockRest: true, blockStroke: true, radius: 14, padding: 6, prefer: "bottom" },
+  // 协作开关整行：讲的是开与关的差别，开关本身不给拨；说明卡贴在上边，不压住下面的按钮。
+  collab: { region: "create-collab", stroke: "create-collab", blockRest: true, blockStroke: true, radius: 13, padding: 6, prefer: "top" },
+  // 左下角的「加入项目」：只讲它的用途，点不动；卡片贴在上边。
+  "join-entry": { region: "create-join", stroke: "create-join", blockRest: true, blockStroke: true, radius: 10, padding: 6, prefer: "top" },
+  // 「创建项目」：唯一可点的控件——这一屏没有「下一步」，建项目这件事由人自己点。
   "create-project": { region: "create-project-submit", stroke: "create-project-submit", blockRest: false, radius: 10, padding: 7, prefer: "right" },
   // 加入那一屏：亮区套住看板上的成员徐章，不描边也不挡点击。
   joined: { region: "board-members", stroke: null, blockRest: false, radius: 10, padding: 7, prefer: "right" },

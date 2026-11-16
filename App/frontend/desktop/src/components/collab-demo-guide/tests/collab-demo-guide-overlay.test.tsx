@@ -105,6 +105,11 @@ function litRingOf(): (FakeRect & { radius: number; quiet: boolean }) | null {
   };
 }
 
+/** 亮区里负责挡点击的那几块：尺寸由它们反推「哪些位置点不到」。 */
+function blockersOf(): Array<FakeRect> {
+  return Array.from(document.querySelectorAll<HTMLElement>(`.${styles.blocker}`)).map(boxOf);
+}
+
 /** 亮区里再点一个控件的第二圈描边：不压暗，只是把那个控件圈出来。 */
 function innerRingOf(): (FakeRect & { radius: number }) | null {
   const element = document.querySelector<HTMLElement>("[data-demo-stroke2]");
@@ -246,6 +251,27 @@ describe("demo guide overlay tracking", () => {
     // 还没有「第几步」：徽章与步骤名都不出现。
     expect(text).not.toContain("接续成员的任务");
     expect(document.querySelector(`.${styles.head}`)).toBeNull();
+  });
+
+  it("does not let the settings screens be clicked inside the dialog", async () => {
+    // 建项目之前的每一屏只介绍设置项：亮区里一个控件都不给点，包括描边圈住的那一项。
+    for (const phase of ["intro", "name", "folder", "collab", "join-entry"] as const) {
+      document.querySelectorAll("[data-demo-guide]").forEach((element) => element.remove());
+      anchor("create-dialog", () => rect({ left: 336, top: 70, width: 528, height: 620 }));
+      anchor("create-name", () => rect({ left: 360, top: 130, width: 480, height: 44 }), "input");
+      anchor("create-folder", () => rect({ left: 360, top: 200, width: 480, height: 120 }));
+      anchor("create-collab", () => rect({ left: 360, top: 340, width: 480, height: 40 }));
+      anchor("create-join", () => rect({ left: 360, top: 620, width: 90, height: 32 }), "button");
+      await mount(phase);
+
+      const hole = holeOf()!;
+      const blockers = blockersOf();
+      const area = blockers.reduce((sum, entry) => sum + entry.width * entry.height, 0);
+      // 整块亮区都被挡住：描边那一项没留出可点的缺口。
+      expect(area, phase).toBeCloseTo((hole.right - hole.left) * (hole.bottom - hole.top));
+      // 不描边、不呼吸：描边的意思就是「这里可以点」，这几屏并不给人点。
+      expect(litRingOf(), phase).toMatchObject({ quiet: true });
+    }
   });
 
   it("narrows the card to the space beside the dialog instead of covering it", async () => {

@@ -554,12 +554,14 @@ export function CollabDemoGuideOverlay(props: {
   // 亮区的圆角按阶段配，没配时用默认那一档。
   const holeRadius = target.radius ?? DEMO_GUIDE_HOLE_RADIUS;
   const innerRadius = INNER_RING_RADIUS[state.phase] ?? INNER_RING_RADIUS_DEFAULT;
-  // 描边那一圈的意思是「这里可以点」：出场那屏（`clean`）与没有可点控件的阶段（看板导览、加入、等结果）只压暗。
-  const quietRing = target.clean === true || target.stroke === null;
+  // 描边那一圈的意思是「这里可以点」：出场那屏（`clean`）、没有可点控件的阶段（看板导览、加入、等结果），
+  // 以及建项目之前那几屏「只介绍、不让人动手」（`blockStroke`）都只压暗。
+  const quietRing = target.clean === true || target.stroke === null || target.blockStroke === true;
   // 亮区几乎占满窗口时（对话区就是这种情况）卡片只能压在它上面：这里再夹一次，保证不出窗口。
   const cardTop = Math.max(8, Math.min(placement.top, viewport.height - cardHeight - 8));
   const cardLeft = Math.max(8, Math.min(placement.left, viewport.width - cardWidth - 8));
-  const blockers = blockerRects(hole, stroke, target.blockRest);
+  // 只介绍、不让人动手的屏（`blockStroke`）连描边那一块也要挡住，这里把 stroke 传空，等于整块亮区都不接点击。
+  const blockers = blockerRects(hole, target.blockStroke ? null : stroke, target.blockRest);
   // 箭头贴住朝向亮区的那条边：左右两条边用 top 定位，上下两条边用 left 定位。
   const vertical = placement.arrow.side === "left" || placement.arrow.side === "right";
   const arrowStyle: CSSProperties = vertical
