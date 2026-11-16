@@ -445,6 +445,10 @@ interface StoredLinks extends CollabLinks {
   directoryChosen: boolean;
   /** Last upload of each session, by session key. */
   synced: Record<string, SyncedSession>;
+  /**
+   * 上一次上传没跑完的原因与时间。成功一次就清掉。它只回答「为什么共享了还看不到」，不参与同步判断。
+   */
+  lastUploadError?: { message: string; at: string };
 }
 
 /** What one upload pass did: the counts, and the sessions it stored for the links file. */
@@ -574,8 +578,14 @@ export interface CollabService {
   /**
    * Saves what this computer associates and queues the new sessions. It returns before the upload finishes so the
    * person can keep working; `getSyncProgress` reports the rest.
+   *
+   * {@code knownSessions} 是调用方已经读出的会话（命令行刚刚按 id 读到的那一条）：上传时不依赖列表快照再认识它一次。
    */
-  saveLinks(projectId: string, links: CollabLinks): Promise<CollabSyncResult>;
+  saveLinks(
+    projectId: string,
+    links: CollabLinks,
+    options?: { knownSessions?: readonly LocalAgentSession[] }
+  ): Promise<CollabSyncResult>;
   /** How far the queued upload for this project has come. */
   getSyncProgress(projectId: string): Promise<CollabSyncProgress>;
   /**
@@ -1088,12 +1098,27 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
    * Uploads whatever this project still owes the cloud. It reads the links again, so a selection saved while an
    * earlier upload was running is picked up too, and its own list is what the progress counts against.
    */
-  async function runUpload(projectId: string, accountId: string): Promise<void> {
+  /**
+   * The listed sessions plus any the caller already holds, with the held one winning. A session added by name is
+   * known before it reaches the list (that snapshot may be up to fifteen seconds old), so counting only the list
+   * would leave the one just added waiting for the next scan before it uploads.
+   */
+  function withKnownSessions(listed: readonly LocalAgentSession[], known: readonly LocalAgentSession[]): LocalAgentSession[] {
+    if (!known.length) return [...listed];
+    const byKey = new Map(known.map((session) => [sessionKey(session), session]));
+    const merged = listed.map((session) => byKey.get(sessionKey(session)) ?? session);
+    for (const session of known) {
+      if (!merged.some((item) => sessionKey(item) === sessionKey(session))) merged.push(session);
+    }
+    return merged;
+  }
+
+  async function runUpload(projectId: string, accountId: string, known: readonly LocalAgentSession[] = []): Promise<void> {
     const stored = await readLinks(projectId, accountId);
     const { sessions: local } = await listLocalSessions({ limit: MAX_LOCAL_SESSIONS })
       .then((listing) => listing)
       .catch(() => ({ sessions: [] as LocalAgentSession[] }));
-    const candidates = [...local, ...await projectTaskSessions(stored)];
+    const candidates = [...withKnownSessions(local, known), ...await projectTaskSessions(stored)];
     const pending = sessionsToUpload(stored, candidates);
     syncProgress.set(projectId, { running: true, total: pending.length, completed: 0, failed: 0 });
 
@@ -1104,6 +1129,15 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       // Merge only what was uploaded: another save may have changed groups or exclusions in the meantime.
       await recordUploaded(projectId, accountId, synced);
       const latest = await readLinks(projectId, accountId);
+      // 这一轮跑完了：上一条错误不再成立，否则它会在界面上一直挂着。
+      if (latest.lastUploadError) {
+        await exclusive(async () => {
+          const cleared = await readLinks(projectId, accountId);
+          if (!cleared.lastUploadError) return;
+          delete cleared.lastUploadError;
+          await writeLinks(cleared);
+        }).catch(() => undefined);
+      }
       // Still running only for sessions selected meanwhile; one that failed here waits for the next sync, and
       // counting it would leave the board showing an upload that is not happening.
       const attempted = new Set(pending.map(sessionKey));
@@ -1114,7 +1148,17 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         completed: result.uploaded + result.failed,
         failed: result.failed
       });
-    } catch {
+    } catch (error) {
+      // 上传失败以前只把 running 摆回 false：登录失效或被移出项目这类不会自愈的失败，表现为「已共享成功但永远
+      // 看不到」，日志里也没有一句。现在留一条痕迹，并把原因写进 links，让 list 与 share 可以说出「上次同步失败」。
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Project ${projectId} upload did not complete: ${message}`);
+      // 先落盘再摆回状态：看板或命令行看到「不在传了」时，原因已经可读，不会出现一段空窗。
+      await exclusive(async () => {
+        const latest = await readLinks(projectId, accountId);
+        latest.lastUploadError = { message, at: new Date().toISOString() };
+        await writeLinks(latest);
+      }).catch(() => undefined);
       reportProgress(projectId, { running: false });
     }
   }
@@ -1569,16 +1613,27 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
   }
 
   /** The named conversation, from the fresh list or a direct read. Null when Memmy has not seen it. */
-  async function sessionByIdentity(sourceId: string, conversationId: string): Promise<LocalAgentSession | null> {
-    const listed = await readLocal((reader) => reader.available({ sourceIds: [sourceId], limit: ADD_CANDIDATE_LIMIT, fresh: true }));
-    const found = listed.sessions.map(toLocalSession).find((session) => session.sourceId === sourceId && session.conversationId === conversationId);
-    if (found) return found;
+  /**
+   * The named conversation, read directly, with the list as the fallback. The agent already says which session it
+   * is, so reading that one file (a second or two) beats listing every store's most recent thirty (several seconds)
+   * for an answer only one of them is needed for.
+   *
+   * 列表只在直接读不到时用：某个 Agent 换了存储、或这条会话已不在它的记录里，那时才需要按工作目录列出候选。
+   * 需要分组信息的调用方（按整组关联判断）再加一道：读回来的记录没有组时也回列表取一次。
+   */
+  async function sessionByIdentity(
+    sourceId: string,
+    conversationId: string,
+    options: { needGroup?: boolean } = {}
+  ): Promise<LocalAgentSession | null> {
     try {
       const full = await readLocal((reader) => reader.read({ sourceId, conversationId }));
-      return {
-        sourceId: full.sourceId,
-        agentName: full.agentName,
-        conversationId: full.conversationId,
+      // 身份以调用方给的为准：读回来的记录只在它有值时才覆盖，否则会话 key 会拼成 undefined:xxx，
+      // 这个名字既进不了 links，也就永远不会上传。
+      const session: LocalAgentSession = {
+        sourceId: full.sourceId || sourceId,
+        agentName: full.agentName || sourceId,
+        conversationId: full.conversationId || conversationId,
         title: full.title,
         lastQuestion: full.lastQuestion,
         workspacePath: full.workspacePath,
@@ -1586,10 +1641,13 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         updatedAt: full.updatedAt,
         turnCount: full.turns.length
       };
+      if (!options.needGroup || session.group) return session;
     } catch (error) {
-      if (error instanceof CollabError && error.code === "not_found") return null;
-      throw error;
+      if (!(error instanceof CollabError && error.code === "not_found")) throw error;
     }
+    const listed = await readLocal((reader) => reader.available({ sourceIds: [sourceId], limit: ADD_CANDIDATE_LIMIT, fresh: true }));
+    return listed.sessions.map(toLocalSession)
+      .find((session) => session.sourceId === sourceId && session.conversationId === conversationId) ?? null;
   }
 
   /**
@@ -1921,7 +1979,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       const key = sessionKey({ sourceId, conversationId });
       // Prefer the current group for group links; uploaded records can resolve a session not in the local scan.
       const needsGroup = records.some(({ links }) => links.groups.some((group) => group.sourceId === sourceId));
-      const session = needsGroup ? await sessionByIdentity(sourceId, conversationId) : null;
+      const session = needsGroup ? await sessionByIdentity(sourceId, conversationId, { needGroup: true }) : null;
       return records.filter(({ links }) => {
         const groupId = session?.group?.id ?? links.synced[key]?.groupId ?? null;
         return linkedSessionKeys(links, [{ sourceId, conversationId, groupId }]).has(key);
@@ -1958,13 +2016,16 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       return { groups: stored.groups, sessions: stored.sessions };
     },
 
-    saveLinks(projectId, links) {
+    saveLinks(projectId, links, options) {
       const account = requireAccount();
       return exclusive(async () => {
         const stored = await readLinks(projectId, account.accountId);
         // 连过的任务要按本机任务重新对一遍，这也是一次读其他 Agent 的操作。
         await requireAgentAccess();
-        const { sessions: local } = await listLocalSessions({ limit: MAX_LOCAL_SESSIONS });
+        const { sessions: listed } = await listLocalSessions({ limit: MAX_LOCAL_SESSIONS });
+        // 命令行已经读出那条会话时一并带上：快照最长 15 秒才刷新一次，只靠它会把刚加的这一条挡在下一次同步之后。
+        const known = options?.knownSessions ?? [];
+        const local = withKnownSessions(listed, known);
         const tasks = await projectTaskSessions(stored);
         const candidates = linkCandidates(stored, [...local, ...tasks]);
         // Both sides are judged on the same candidates, so only what the person changed is removed.
@@ -2002,7 +2063,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         }
 
         syncProgress.set(projectId, { running: true, total: pending.length, completed: 0, failed: 0 });
-        enqueueUpload(projectId, () => runUpload(projectId, account.accountId));
+        enqueueUpload(projectId, () => runUpload(projectId, account.accountId, known));
         return { uploaded: 0, removed, failed: 0, started: pending.length };
       });
     },
@@ -2428,7 +2489,7 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       const saved = await this.saveLinks(matched.project.id, {
         groups: stored.groups,
         sessions: [...stored.sessions, { sourceId: session.sourceId, conversationId: session.conversationId }]
-      });
+      }, { knownSessions: [session] });
       return { text: formatAdded(session, matched.project.name, (saved.started ?? 0) > 0 || saved.uploaded > 0) };
     },
 
@@ -2841,6 +2902,10 @@ function parseStoredLinks(content: string): StoredLinks | null {
   const accountId = text(raw.accountId);
   if (!projectId || !accountId) return null;
   const synced: StoredLinks["synced"] = {};
+  const lastError = record(raw.lastUploadError);
+  const lastUploadError = text(lastError.message)
+    ? { message: text(lastError.message), at: text(lastError.at) }
+    : undefined;
   for (const [key, value] of Object.entries(record(raw.synced))) {
     const entry = record(value);
     if (text(entry.cloudSessionId)) {
@@ -2881,7 +2946,8 @@ function parseStoredLinks(content: string): StoredLinks | null {
       sourceId: text(session.sourceId),
       conversationId: text(session.conversationId)
     })).filter((session) => session.sourceId && session.conversationId),
-    synced
+    synced,
+    ...(lastUploadError ? { lastUploadError } : {})
   };
 }
 
