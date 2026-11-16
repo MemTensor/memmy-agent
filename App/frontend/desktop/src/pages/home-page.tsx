@@ -15,6 +15,7 @@ import { CollabAssistTaskBar, CollabAssistTaskDock, useAssistTask } from "./coll
 import { collabEnabledFor } from "../app/collab-mode.js";
 import {
   demoGuideSendsAssistHint,
+  demoGuideWentBack,
   dispatchDemoGuide,
   getDemoGuideState,
   subscribeDemoGuide,
@@ -1559,16 +1560,24 @@ export function HomePage() {
   }, [isCurrentAgentRunning, state.agent.operationErrorNotice, demoGuide.status, t]);
 
   /**
-   * 第二步被跳过：那一轮 Agent 还在替这句话干活，必须停下。
+   * 第二步被跳过，或者人点了「上一步」：那一轮 Agent 还在替这句话干活，必须停下。
    *
-   * 跳过只把引导推到下一步，不会动 Agent：不停的话请求照样会发出去，人会觉得没听他的。
-   * 这里只看「从 ask-compose / ask-waiting 走到 settings-open」这一个转移，别的跳过不管。
+   * 跳过与退回都只把引导挪到另一屏，不会动 Agent：不停的话请求照样会发出去、内容照样会写进对话，
+   * 人会觉得没听他的。
+   *
+   * 顺序很要紧：先让界面把这一屏换掉（这一步在上一层已经 dispatch 完了），再停那一轮。
+   * 反过来就会先收到「这一轮结束」，那时候引导还停在原来那一屏上，会被当成「这一步做完了」或者「这一步失败了」。
    */
   const demoPhaseRef = useRef(demoGuide.phase);
   useEffect(() => {
     const previous = demoPhaseRef.current;
     demoPhaseRef.current = demoGuide.phase;
     if (demoGuide.status !== "active") return;
+    // 退回上一屏：这一屏可能是「等 Agent 写/等 Agent 发」的那两屏，先停住。
+    if (demoGuideWentBack(previous, demoGuide.phase)) {
+      stopTurnForDemoRef.current?.();
+      return;
+    }
     const askSkipped = (previous === "ask-compose" || previous === "ask-waiting") && demoGuide.phase === "settings-open";
     if (!askSkipped) return;
     stopTurnForDemoRef.current?.();

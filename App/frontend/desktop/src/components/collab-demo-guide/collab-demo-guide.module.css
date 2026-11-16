@@ -193,10 +193,19 @@
   margin-top: 12px;
 }
 
-/* 右侧按钮组：跳过与主按钮始终靠右，不因为左边多了「退出引导」而换行。 */
+/* 「跳过这一步」那一行：正文下面一行小字，靠右与底部按钮对齐。 */
+.aside {
+  display: flex;
+  justify-content: flex-end;
+  margin: 8px 0 0;
+}
+
+/* 最窄的卡片上「上一步」与主按钮可能并排放不下：允许收成两行，但始终靠右且不出色。 */
 .footRight {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 10px;
   margin-left: auto;
 }

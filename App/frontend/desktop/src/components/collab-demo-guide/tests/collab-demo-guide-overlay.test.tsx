@@ -129,13 +129,14 @@ describe("demo guide overlay tracking", () => {
   let panelRect: FakeRect;
   let continueRect: FakeRect;
 
-  async function mount(phase: DemoGuidePhase, extra: { onSkipJoinEntry?: () => void } = {}): Promise<void> {
+  async function mount(phase: DemoGuidePhase, extra: { onSkipJoinEntry?: () => void; onBack?: () => void } = {}): Promise<void> {
     await act(async () => {
       root.render(
         <I18nProvider language="zh-CN">
           <CollabDemoGuideOverlay
             state={activeState(phase)}
             onNext={vi.fn()}
+            onBack={vi.fn()}
             onSkip={vi.fn()}
             onExit={vi.fn()}
             onRetry={vi.fn()}
@@ -207,6 +208,7 @@ describe("demo guide overlay tracking", () => {
           <CollabDemoGuideOverlay
             state={{ ...activeState("create-project"), projectId: null, localProjectId: null, memberUserId: null, memberName: "" }}
             onNext={vi.fn()}
+            onBack={vi.fn()}
             onSkip={vi.fn()}
             onExit={vi.fn()}
             onRetry={vi.fn()}
@@ -424,6 +426,49 @@ describe("demo guide overlay tracking", () => {
       buttons[1]?.click();
     });
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers Back on every screen that has one, and keeps it off the ones that already happened", async () => {
+    // 第一步的只读面板：上一屏是任务行，能退。
+    await mount("reader");
+    expect(cardText()).toContain("上一步");
+
+    // 第一步已经拿到回复：退不回去了，按钮不出现。
+    anchor("conversation", () => rect({ left: 100, top: 60, width: 1000, height: 620 }));
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <CollabDemoGuideOverlay
+            state={activeState("reply-done")}
+            onNext={vi.fn()}
+            onBack={vi.fn()}
+            onSkip={vi.fn()}
+            onExit={vi.fn()}
+            onRetry={vi.fn()}
+            onCloseComplete={vi.fn()}
+            onInvite={vi.fn()}
+          />
+        </I18nProvider>
+      );
+    });
+    await frames(6);
+    expect(cardText()).toContain("任务已接续");
+    expect(cardText()).not.toContain("上一步");
+  });
+
+  it("keeps Skip out of the bottom row and hands the click to onBack", async () => {
+    const back = vi.fn();
+    await mount("reader", { onBack: back });
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'));
+    const labels = buttons.map((button) => button.textContent?.trim());
+    // 底部只剩「退出引导」与「上一步」；「跳过这一步」在正文下面那一行。
+    expect(labels).toContain("退出引导");
+    expect(labels).toContain("上一步");
+    expect(labels).toContain("跳过这一步");
+    await act(async () => {
+      buttons.find((button) => button.textContent?.trim() === "上一步")?.click();
+    });
+    expect(back).toHaveBeenCalledTimes(1);
   });
 
   it("never prints a raw placeholder on the card", async () => {

@@ -115,6 +115,109 @@ export function demoGuideNextTourPhase(phase: DemoGuidePhase): DemoGuidePhase | 
   return DEMO_GUIDE_TOUR_PHASES[index + 1] ?? "task-row";
 }
 
+/**
+ * 每一屏的「上一步」退到哪一屏。
+ *
+ * 回退按屏走，不按步走：卡片上的「上一步」与「下一步」一一对应，退回去的就是刚才那一屏，
+ * 不会一下从「等小饭团回结果」跳回「第一步已完成」。
+ *
+ * 不在这张表里的屏没有上一步：第一屏（`intro`）、项目已经建好的提示窗（`joined`）、
+ * 导览的第一屏（`tour-board`），以及所有「事情已经办成」的屏——第一步拿到回复、第二步拿到结果、
+ * 第三步已经在本机跑起来或已经跑完。这些位置能做的只有等待或跳过，
+ * 给一个返回按钮会让人以为能撤回已经发生的事。
+ */
+const DEMO_GUIDE_BACK_TARGET: Partial<Record<DemoGuidePhase, DemoGuidePhase>> = {
+  name: "intro",
+  folder: "name",
+  collab: "folder",
+  "join-entry": "collab",
+  "create-project": "join-entry",
+  "tour-tabs": "tour-board",
+  "tour-associate": "tour-tabs",
+  "tour-new-task": "tour-associate",
+  "task-row": "tour-new-task",
+  reader: "task-row",
+  compose: "reader",
+  "reply-waiting": "compose",
+  "ask-compose": "reply-done",
+  "ask-waiting": "ask-compose",
+  "settings-open": "ask-done",
+  "settings-assist": "settings-open",
+  // 第三步退回去一律落在 `settings-open`（「去项目设置」那一屏），不落在 `settings-assist`：
+  // 退回 `settings-assist` 意味着设置弹窗得重新打开、开关保持原样，一个刚退回来的人看到弹窗还开着会更迷。
+  // 退到 `settings-open` 时弹窗关掉、开关关回去，他重点一下齿轮就是干净地重来一遍。
+  "help-waiting": "settings-open",
+  "help-dialog": "settings-open"
+};
+
+/**
+ * 这一屏点「上一步」退到哪一屏；没有上一步时返回 null（卡片上不出现那个按钮）。
+ *
+ * 前一屏如果标着「这一步已经做完」，而实际是跳过的，就继续往前退到这一步真正的入口：
+ * 跳过第二步的人停在 `settings-open`，退回去该看见「请小饭团协助」的输入框，而不是一张
+ * 「第二步已完成」的卡片——他根本没做过。
+ */
+export function demoGuideBackTarget(state: Pick<DemoGuideState, "phase" | "skipped">): DemoGuidePhase | null {
+  if (state.phase === "settings-open" && state.skipped.ask) return "ask-compose";
+  if (state.phase === "ask-compose" && state.skipped.task) return "task-row";
+  return DEMO_GUIDE_BACK_TARGET[state.phase] ?? null;
+}
+
+/**
+ * 引导按顺序排开的全部子状态。
+ *
+ * 只用来比较「这一次是往前走还是往后退」：界面靠它认出人点了「上一步」，
+ * 从而先把正在跑的那一轮叫停，而不是等它跑完再被当成「这一步做完了」。
+ */
+const DEMO_GUIDE_PHASE_ORDER: DemoGuidePhase[] = [
+  ...DEMO_GUIDE_BEFORE_PROJECT_PHASES,
+  "joined",
+  ...DEMO_GUIDE_TOUR_PHASES,
+  "task-row",
+  "reader",
+  "compose",
+  "reply-waiting",
+  "reply-done",
+  "ask-compose",
+  "ask-waiting",
+  "ask-done",
+  "settings-open",
+  "settings-assist",
+  "help-waiting",
+  "help-dialog",
+  "help-running",
+  "help-done",
+  "help-rejected",
+  "complete"
+];
+
+/** 这一屏在引导顺序里的位置；不在表里时 -1。 */
+export function demoGuidePhaseOrder(phase: DemoGuidePhase): number {
+  return DEMO_GUIDE_PHASE_ORDER.indexOf(phase);
+}
+
+/**
+ * 这一次变化是往后退的（人点了「上一步」）。
+ *
+ * 只有 `back` 会让位置变小：`next`、`skip`、各种外部事件都是往前走。
+ */
+export function demoGuideWentBack(previous: DemoGuidePhase, next: DemoGuidePhase): boolean {
+  return demoGuidePhaseOrder(next) < demoGuidePhaseOrder(previous);
+}
+
+/**
+ * 这一屏会不会出「这一步没有完成」。
+ *
+ * 错误只在真正等着某个结果的屏上成立。退回去之后迟到的错误（被停下的那一轮报的、
+ * 被撤回的请求回的）不能落在新的一屏上，否则人刚退回来就看到一句「这一步没有完成」。
+ */
+export function demoGuideAcceptsFailure(phase: DemoGuidePhase): boolean {
+  return phase === "reply-waiting"
+    || phase === "ask-waiting"
+    || phase === "help-waiting"
+    || phase === "help-running";
+}
+
 /** 引导的对外状态：进行中、完成弹窗、已结束。 */
 export type DemoGuideStatus = "active" | "complete" | "ended";
 
@@ -215,6 +318,13 @@ export type DemoGuideEvent =
   /** 第二步那条请求出现了（可能晚于「没有发出去」那句）：把错误收起来。 */
   | { type: "assist-seen" }
   | { type: "next"; prefill?: string }
+  /**
+   * 退回上一屏。
+   *
+   * 与 `next` 对称，退的是「刚才那一屏」，不是「上一步」。退回去要重新发的那句话由界面传进来
+   * （第一步、第二步各自的预填），其余屏不带。
+   */
+  | { type: "back"; prefill?: string }
   | { type: "skip"; prefill?: string }
   | { type: "settings-opened" }
   | { type: "receiving-on" }
@@ -347,12 +457,24 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
     case "agent-settled":
       if (state.status !== "active") return state;
       // 第二步的结果回来之后 Agent 还要再回一句：那时才给「下一步」。
+      // 走过一次就抹掉「这一步是跳过的」：跳过之后又从上一屏退回来重做的，完成弹窗该算他做过。
       if (state.phase === "reply-waiting") {
-        return { ...state, phase: "reply-done", done: { ...state.done, task: true } };
+        return {
+          ...state,
+          phase: "reply-done",
+          done: { ...state.done, task: true },
+          skipped: { ...state.skipped, task: false }
+        };
       }
       if (state.phase === "ask-waiting" && state.askDelivered) {
         // 这一步完成就把那句话从状态里拿掉：之后即使任务页重新挂载，也不会再把旧的那句填回输入框。
-        return { ...state, phase: "ask-done", done: { ...state.done, ask: true }, prefill: null };
+        return {
+          ...state,
+          phase: "ask-done",
+          done: { ...state.done, ask: true },
+          skipped: { ...state.skipped, ask: false },
+          prefill: null
+        };
       }
       // 结果还没回来但这一轮已经跑完：从这一刻起才有资格判「没发出去」。
       if (state.phase === "ask-waiting" && !state.askTurnEnded) {
@@ -380,6 +502,16 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
         return finishOrSkip(state, { help: state.phase === "help-done" });
       }
       return state;
+    case "back": {
+      if (state.status !== "active") return state;
+      const target = demoGuideBackTarget(state);
+      // 这一屏没有上一步（事情已经办成，或已经是第一屏）：卡片的按钮不会出现，这里也不动。
+      if (!target) return state;
+      // 退回去的那一屏要人再发一次那句话的，把预填带上（nonce 接着往上走，输入框才会重新填）；
+      // 其余屏不带，退回去就只展示。
+      const refill = target === "compose" || target === "ask-compose" ? event.prefill : undefined;
+      return { ...state, phase: target, error: null, prefill: nextPrefill(state, refill) };
+    }
     case "skip": {
       if (state.status !== "active") return state;
       // 建项目之前没有可跳过的步骤：不建项目就没有后面的演示；加入那一屏也不是一步。
@@ -425,10 +557,18 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
         : { ...state, phase: "help-rejected", error: null };
     case "help-finished":
       return state.status === "active" && state.phase === "help-running"
-        ? { ...state, phase: "help-done", error: null, done: { ...state.done, help: true } }
+        ? {
+          ...state,
+          phase: "help-done",
+          error: null,
+          done: { ...state.done, help: true },
+          skipped: { ...state.skipped, help: false }
+        }
         : state;
     case "fail":
       // 同一个原因已经说过就不再重复：轮询每拍都会读到同一个失败结果。
+      // 不在等结果的屏（刚退回上一屏）一律不接：那时报错的是已经作废的那一轮。
+      if (!demoGuideAcceptsFailure(state.phase)) return state;
       return state.status === "active" && state.error !== event.reason ? { ...state, error: event.reason } : state;
     case "retry":
       return state.status === "active" && state.error !== null ? { ...state, error: null } : state;

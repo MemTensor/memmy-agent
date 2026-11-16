@@ -1171,6 +1171,16 @@ const CollabBoard = memo(function CollabBoard(props: {
     if (demoGuide.phase === "tour-board" || demoGuide.phase === "tour-associate") switchBoardTab("tasks");
   }, [demoActive, demoGuide.phase, boardTab]);
 
+  /**
+   * 引导退回上一屏：设置弹窗要跟着关。
+   *
+   * `settings-open` 那一屏讲的是「去项目设置开一下」——那一屏本来就不该有弹窗。
+   * 从第三步退回来时弹窗是演示自己打开的，不关的话人看见蒙版说「点齿轮」，齿轮却在弹窗后面。
+   */
+  useEffect(() => {
+    if (demoActive && demoGuide.phase === "settings-open" && settingsOpen) setSettingsOpen(false);
+  }, [demoActive, demoGuide.phase, settingsOpen]);
+
   const sessions = page?.sessions ?? null;
   const filtering = Boolean(query) || member !== "all";
 

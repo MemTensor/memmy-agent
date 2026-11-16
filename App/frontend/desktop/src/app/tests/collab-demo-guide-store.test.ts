@@ -290,10 +290,23 @@ describe("demo guide state machine", () => {
   });
 
   it("gives every step a way out of a failure", () => {
-    const failed = demoGuideReducer(run(started(), [{ type: "task-opened" }]), { type: "fail", reason: "Agent 没有给出回复。" });
+    // 失败只在「等结果」的那几屏上成立：这里停在第一步正在写的那一屏。
+    const failed = demoGuideReducer(
+      run(started(), [{ type: "task-opened" }, { type: "task-continued", prefill: "接着写" }, { type: "composer-sent" }]),
+      { type: "fail", reason: "Agent 没有给出回复。" }
+    );
     expect(failed.error).toBe("Agent 没有给出回复。");
     expect(demoGuideReducer(failed, { type: "retry" }).error).toBeNull();
     expect(demoGuideReducer(failed, { type: "skip" }).phase).toBe("ask-compose");
+  });
+
+  it("ignores a failure that arrives after the person went back", () => {
+    // 人点了「上一步」，被停下的那一轮随后报错：这一句不该落在新的一屏上。
+    const waiting = run(started(), [{ type: "task-opened" }, { type: "task-continued", prefill: "接着写" }, { type: "composer-sent" }]);
+    expect(waiting.phase).toBe("reply-waiting");
+    const back = demoGuideReducer(waiting, { type: "back", prefill: "接着写" });
+    expect(back.phase).toBe("compose");
+    expect(demoGuideReducer(back, { type: "fail", reason: "Agent 这一轮没有给出结果。" }).error).toBeNull();
   });
 
   it("stops at once when the cloud says the demo has ended", () => {
@@ -414,7 +427,10 @@ describe("demo guide state machine", () => {
   });
 
   it("says a failure once instead of on every poll", () => {
-    const failed = demoGuideReducer(started(), { type: "fail", reason: "协助请求没有发出去。" });
+    const failed = demoGuideReducer(
+      run(started(), [{ type: "task-opened" }, { type: "task-continued", prefill: "接着写" }, { type: "composer-sent" }]),
+      { type: "fail", reason: "协助请求没有发出去。" }
+    );
     // 轮询每拍都会读到同一个失败结果：同一个原因不换新对象，界面不会跟着重画。
     expect(demoGuideReducer(failed, { type: "fail", reason: "协助请求没有发出去。" })).toBe(failed);
     expect(demoGuideReducer(failed, { type: "fail", reason: "另一个原因" }).error).toBe("另一个原因");
@@ -426,6 +442,83 @@ describe("demo guide state machine", () => {
     // 做完第一步才换下一句：请成员协助时那句是新的一句。
     const asked = demoGuideReducer({ ...first, phase: "reply-done" }, { type: "next", prefill: "第二句" });
     expect(asked.prefill).toMatchObject({ text: "第二句", nonce: 2 });
+  });
+
+  it("goes back one screen at a time, not one step at a time", () => {
+    // 建项目之前：六屏一屏一屏退回去，最后退到出场那一屏就不再退。
+    let before = demoGuideReducer(raw(), { type: "start-before-project" });
+    before = run(before, [{ type: "next" }, { type: "next" }, { type: "next" }]);
+    expect(before.phase).toBe("collab");
+    expect(demoGuideReducer(before, { type: "back" }).phase).toBe("folder");
+    const intro = run(before, [{ type: "back" }, { type: "back" }, { type: "back" }]);
+    expect(intro.phase).toBe("intro");
+    // 已经是第一屏：再点也不动。
+    expect(demoGuideReducer(intro, { type: "back" })).toBe(intro);
+  });
+
+  it("refuses to go back once a step has actually happened", () => {
+    // 第一步拿到回复、第二步拿到结果、第三步已经开始在本机跑：这些屏都没有上一步。
+    const replied = run(started(), FIRST_STEP);
+    expect(replied.phase).toBe("reply-done");
+    expect(demoGuideReducer(replied, { type: "back" })).toBe(replied);
+    const askDone = atAskDone();
+    expect(askDone.phase).toBe("ask-done");
+    expect(demoGuideReducer(askDone, { type: "back" })).toBe(askDone);
+    const running = run(atHelpDialog(), [{ type: "help-decided", allow: true }]);
+    expect(running.phase).toBe("help-running");
+    expect(demoGuideReducer(running, { type: "back" })).toBe(running);
+  });
+
+  it("backs the third step all the way to the settings screen and not into the waiting one", () => {
+    // 授权弹窗已经在收件箱里了：退回「等请求」会立刻又被轮询发现、再弹一次，来回跳。
+    expect(demoGuideReducer(atHelpDialog(), { type: "back" }).phase).toBe("settings-open");
+    const waiting = run(atSettings(), [{ type: "settings-opened" }, { type: "receiving-on" }]);
+    expect(waiting.phase).toBe("help-waiting");
+    expect(demoGuideReducer(waiting, { type: "back" }).phase).toBe("settings-open");
+    // 设置里开开关那一屏退回看板（齿轮那一屏），弹窗随之关掉。
+    const settings = run(atSettings(), [{ type: "settings-opened" }]);
+    expect(settings.phase).toBe("settings-assist");
+    expect(demoGuideReducer(settings, { type: "back" }).phase).toBe("settings-open");
+  });
+
+  it("refills the sentence when going back to a screen that asks for one", () => {
+    // 退回第一步的输入框：那句话重新填上，nonce 接着往上走。
+    const waiting = run(started(), [{ type: "task-opened" }, { type: "task-continued", prefill: "第一句" }, { type: "composer-sent" }]);
+    const back = demoGuideReducer(waiting, { type: "back", prefill: "第一句" });
+    expect(back.phase).toBe("compose");
+    expect(back.prefill?.text).toBe("第一句");
+    expect(back.prefill?.nonce).toBe(2);
+    // 退回只读面板这种不需要输入的屏：预填清掉，不把旧句子留在状态里。
+    const reader = demoGuideReducer(back, { type: "back" });
+    expect(reader.phase).toBe("reader");
+    expect(reader.prefill).toBeNull();
+  });
+
+  it("lands on the real entry of a step that was skipped instead of its done screen", () => {
+    // 跳过第二步 → 停在「去项目设置」。那一屏的上一屏本来是「第二步完成」，但他没做过，该退回输入框。
+    const skipped = run(atAskCompose(), [{ type: "skip", prefill: ASK_SENTENCE }]);
+    expect(skipped.phase).toBe("settings-open");
+    expect(skipped.skipped.ask).toBe(true);
+    expect(demoGuideReducer(skipped, { type: "back" }).phase).toBe("ask-compose");
+    // 连第一步也跳过时，从第二步输入框再退就要退到任务行，而不是一张「第一步完成」的卡片。
+    const bothSkipped = run(started(), [{ type: "skip", prefill: ASK_SENTENCE }]);
+    expect(bothSkipped.phase).toBe("ask-compose");
+    expect(bothSkipped.skipped.task).toBe(true);
+    expect(demoGuideReducer(bothSkipped, { type: "back" }).phase).toBe("task-row");
+  });
+
+  it("stops treating a step as skipped once it is really done again", () => {
+    // 跳过第二步、又退回去重做并做成了：完成弹窗该算他做过。
+    const skipped = run(atAskCompose(), [{ type: "skip", prefill: ASK_SENTENCE }]);
+    const redone = run(skipped, [
+      { type: "back" },
+      { type: "composer-sent" },
+      { type: "assist-delivered" },
+      { type: "agent-settled" }
+    ]);
+    expect(redone.phase).toBe("ask-done");
+    expect(redone.done.ask).toBe(true);
+    expect(redone.skipped.ask).toBe(false);
   });
 });
 

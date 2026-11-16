@@ -315,4 +315,68 @@ describe("the demo guide host", () => {
     // 成员数、任务列表不等下一轮轮询：蒙版一收就重读。
     expect(store.loadCollabProjects).toHaveBeenCalledWith(collab);
   });
+
+  it("cancels the request it already sent when the person goes back", async () => {
+    // 第二步已经发出去了：不退回来的话小饭团照样去执行，人重发一次就执行两遍。
+    const cancelAssist = vi.fn().mockResolvedValue({ id: "req-1", status: "cancelled" });
+    const collab = client({
+      assistThreads: vi.fn().mockResolvedValue({ threads: [askThread("pending")] }),
+      cancelAssist
+    });
+    stubAnchor("conversation", { left: 100, top: 60, width: 1000, height: 620 });
+    await mount(collab, demoState("ask-waiting"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    const back = Array.from(document.querySelectorAll("button"))
+      .find((entry) => entry.textContent?.trim() === "上一步");
+    expect(back).toBeTruthy();
+    await act(async () => {
+      back?.click();
+      await Promise.resolve();
+    });
+
+    expect(getDemoGuideState().phase).toBe("ask-compose");
+    expect(cancelAssist).toHaveBeenCalledWith("req-1");
+  });
+
+  it("turns receiving back off when the person goes back out of the third step", async () => {
+    // 「接收协助请求」是这一步自己打开的：退回去要关回原样，不能留在开着。
+    const setAssistReceiving = vi.fn().mockResolvedValue({ enabled: false, grants: [] });
+    const collab = client({ setAssistReceiving });
+    stubAnchor("board-main", { left: 100, top: 60, width: 1000, height: 620 });
+    await mount(collab, demoState("help-waiting"));
+    // 等蒙版量到锚点、把卡片画出来（真机上靠每帧重算）。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    const back = Array.from(document.querySelectorAll("button"))
+      .find((entry) => entry.textContent?.trim() === "上一步");
+    await act(async () => {
+      back?.click();
+      await Promise.resolve();
+    });
+
+    expect(getDemoGuideState().phase).toBe("settings-open");
+    expect(setAssistReceiving).toHaveBeenCalledWith("cloud-1", false);
+  });
+
+  it("refills the sentence when the person backs into the first step's composer", async () => {
+    await mount(client({}), demoState("reply-waiting"));
+    stubAnchor("conversation", { left: 100, top: 60, width: 1000, height: 620 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    const back = Array.from(document.querySelectorAll("button"))
+      .find((entry) => entry.textContent?.trim() === "上一步");
+    await act(async () => {
+      back?.click();
+    });
+    // 回到输入框，那句话重新填上（nonce 换一个，输入框才知道要再填一次）。
+    expect(getDemoGuideState().phase).toBe("compose");
+    expect(getDemoGuideState().prefill?.text).toContain("接着");
+    expect(getDemoGuideState().prefill?.nonce).toBeGreaterThan(0);
+  });
 });

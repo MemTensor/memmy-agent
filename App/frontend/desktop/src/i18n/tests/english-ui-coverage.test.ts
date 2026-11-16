@@ -20,6 +20,8 @@ const allowedSourceFiles = new Set([
   "pages/memory/app-search-aliases.ts",
   // 提示条里怎么称呼成员：一个人说名字、两人并列、更多人加人数，靠 language 参数而非 t() 拼。
   "pages/collab-board-text.ts",
+  // 旧云端不带 copy 时的兵底剧本：内容是按云端剧本写的数据，卡片用 i18n 占位符包住它。
+  "app/collab-demo-guide-store.ts",
   // 交给 Agent 执行的任务说明（不是界面文案）：让它在另一个 Agent 里确认记录位置并写读取规则。
   "pages/collab-agent-connect-prompt.ts",
   // 成员协助消息的协议标记（起因：、结果：等），与本机后端写进任务的文本逐字对应，不是界面文案。

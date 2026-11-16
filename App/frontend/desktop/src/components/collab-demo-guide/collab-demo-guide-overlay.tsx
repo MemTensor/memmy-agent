@@ -5,13 +5,15 @@
  * 点亮区以外（以及亮区内除了那个控件的部分）不触发任何操作，描边与卡片会轻晃一下。
  * 亮区按 `data-demo-guide` 锚点定位，业务组件里不写任何坐标；窗口缩放、滚动、弹窗出现与消失都靠 ResizeObserver 与 rAF 重算。
  *
- * 卡片本身只负责「说明」：顶部一行是徽章与步骤名（没有就不占这一行），右上角探出吉祥物，底部左边是「退出引导」、右边是跳过与主按钮。
+ * 卡片本身只负责「说明」：顶部一行是徽章与步骤名（没有就不占这一行），右上角探出吉祥物，
+ * 底部左边是「退出引导」、右边是「上一步」与主按钮；「跳过这一步」是次要动作，放在正文下面一行。
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Check } from "lucide-react";
 import { Memmy, type MemmyPose } from "../mascot/memmy.js";
 import {
   DEMO_GUIDE_COPY_FALLBACK,
+  demoGuideBackTarget,
   demoGuideIsBeforeProjectPhase,
   demoGuideIsTourPhase,
   demoGuideStartsExperience,
@@ -56,6 +58,8 @@ export interface DemoGuideCard {
   body: string;
   status: string | null;
   action: "next" | "start" | "done" | null;
+  /** 这一屏有没有「上一步」：事情已经办成的屏没有，卡片上就不出现那个按钮。 */
+  canGoBack: boolean;
   /** 主按钮上的字：默认按 `action` 取「下一步 / 开始协作 / 完成」，只有加入这一屏写「继续」。 */
   actionLabel?: string;
 }
@@ -119,12 +123,15 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
     body,
     status: null,
     action: null,
+    // 每一屏自己判断能不能退：事情已经办成的屏（拿到回复、拿到结果、已经开始执行）不给返回。
+    canGoBack: demoGuideBackTarget(state) !== null,
     ...extra
   });
   // 看板导览：纯介绍，头部是「介绍」徽章，最后一步的按钮是「开始协作」。
   if (demoGuideIsTourPhase(state.phase)) {
     return {
       ...demoGuideTourCard(demoGuideTourIndex(state.phase), t),
+      canGoBack: demoGuideBackTarget(state) !== null,
       action: demoGuideStartsExperience(state.phase) ? "start" : "next"
     };
   }
@@ -214,7 +221,9 @@ export function demoGuideTourCard(index: number, t: Translate): DemoGuideCard {
     title: null,
     body: t(("collab.demo.tour.body." + key) as MessageKey),
     status: null,
-    action: null
+    action: null,
+    // 导览第一屏前面只有「已加入」提示窗，没有可退的一屏；由调用方按阶段再算一次。
+    canGoBack: false
   };
 }
 
@@ -311,6 +320,8 @@ function preferredPlacement(
 export function CollabDemoGuideOverlay(props: {
   state: DemoGuideState;
   onNext: () => void;
+  /** 退回上一屏：与「下一步」一一对应，退的是刚才那一屏。 */
+  onBack: () => void;
   onSkip: () => void;
   onExit: () => void;
   onRetry: () => void;
@@ -628,14 +639,24 @@ export function CollabDemoGuideOverlay(props: {
           <>
             <p className={styles.title}>{t("collab.demo.failed.title")}</p>
             <p className={styles.body}>{state.error}</p>
+            {demoGuideSkippable(state.phase) ? (
+              <p className={styles.aside}>
+                <button type="button" className={styles.quiet} onClick={props.onSkip}>
+                  {t("collab.demo.skip")}
+                </button>
+              </p>
+            ) : null}
             <div className={styles.foot}>
               <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
                 {t("collab.demo.exit")}
               </button>
               <span className={styles.footRight}>
-                <button type="button" className={styles.quiet} onClick={props.onSkip}>
-                  {t("collab.demo.skip")}
-                </button>
+                {/* 出错时也给一条退路：退回上一屏改一下，比只在原地重试更顶用。 */}
+                {card.canGoBack ? (
+                  <button type="button" className={styles.actionGhost} onClick={props.onBack}>
+                    {t("collab.demo.back")}
+                  </button>
+                ) : null}
                 <button type="button" className={styles.action} onClick={props.onRetry}>
                   {t("collab.demo.retry")}
                 </button>
@@ -669,23 +690,34 @@ export function CollabDemoGuideOverlay(props: {
                 </div>
               </div>
             ) : (
-              <div className={styles.foot}>
-                <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
-                  {t("collab.demo.exit")}
-                </button>
-                <span className={styles.footRight}>
-                  {demoGuideSkippable(state.phase) ? (
+              <>
+                {/* 「跳过这一步」是次要动作：放在正文下面一行小字，底部那一行只留「退出 / 上一步 / 下一步」。
+                    三个按钮在 268px 的最窄卡片上放不下，跳过又本来不是主操作，就不占底部的位置。 */}
+                {demoGuideSkippable(state.phase) ? (
+                  <p className={styles.aside}>
                     <button type="button" className={styles.quiet} onClick={props.onSkip}>
                       {t("collab.demo.skip")}
                     </button>
-                  ) : null}
-                  {card.action ? (
-                    <button type="button" className={styles.action} onClick={props.onNext}>
-                      {primaryLabel}
-                    </button>
-                  ) : null}
-                </span>
-              </div>
+                  </p>
+                ) : null}
+                <div className={styles.foot}>
+                  <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
+                    {t("collab.demo.exit")}
+                  </button>
+                  <span className={styles.footRight}>
+                    {card.canGoBack ? (
+                      <button type="button" className={styles.actionGhost} onClick={props.onBack}>
+                        {t("collab.demo.back")}
+                      </button>
+                    ) : null}
+                    {card.action ? (
+                      <button type="button" className={styles.action} onClick={props.onNext}>
+                        {primaryLabel}
+                      </button>
+                    ) : null}
+                  </span>
+                </div>
+              </>
             )}
           </>
         )}

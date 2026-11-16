@@ -969,6 +969,7 @@ export const zhCNMessages = {
   "collab.demo.help.title": "协助已完成",
   "collab.demo.help.body": "{help}的结果已回传到小饭团的任务中，双方都可以在「协助」里查看这次执行记录。",
   "collab.demo.rejected.body": "已拒绝本次协助请求，这台电脑未执行任何操作。",
+  "collab.demo.back": "上一步",
   "collab.demo.next": "下一步",
   "collab.demo.done": "完成",
   "collab.demo.skip": "跳过这一步",
@@ -984,6 +985,7 @@ export const zhCNMessages = {
   "collab.demo.failed.help": "这次协助没有执行成功。",
   "collab.demo.failed.agent": "Agent 这一轮没有给出结果。",
   "collab.demo.failed.noRequest": "没有收到{name}的请求。",
+  "collab.demo.recallFailed": "这次请求已经发出去了，对方可能已经开始执行。",
   "collab.demo.retry": "再试一次",
   "collab.demo.ended": "引导已结束",
   // 完成弹窗：只留一段说明与两个按钮。
@@ -4297,6 +4299,7 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "collab.demo.help.title": "The assist is complete",
   "collab.demo.help.body": "The result of \"{help}\" went back to Xiaofantuan's task, and both sides can read the run under Assistance.",
   "collab.demo.rejected.body": "The request was declined; nothing ran on this computer.",
+  "collab.demo.back": "Back",
   "collab.demo.next": "Next",
   "collab.demo.done": "Done",
   "collab.demo.skip": "Skip step",
@@ -4312,6 +4315,7 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "collab.demo.failed.help": "This assist did not run successfully.",
   "collab.demo.failed.agent": "The agent ended this turn without a result.",
   "collab.demo.failed.noRequest": "No request arrived from {name}.",
+  "collab.demo.recallFailed": "This request has already been sent and the other person may have started on it.",
   "collab.demo.retry": "Try again",
   "collab.demo.ended": "The guide has ended",
   // Completion: one paragraph of explanation and two buttons.
