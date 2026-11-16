@@ -16,6 +16,7 @@ import {
   resetCollabProjectsStore
 } from "../../app/collab-projects-store.js";
 import {
+  DEMO_GUIDE_COPY_FALLBACK,
   dispatchDemoGuide,
   resetDemoGuideStore,
   setDemoGuideStateForTest,
@@ -121,7 +122,8 @@ function activeDemo(): DemoGuideState {
     localProjectId: "local-1",
     memberUserId: "9001",
     memberName: "小饭团",
-    error: null,
+    copy: DEMO_GUIDE_COPY_FALLBACK,
+error: null,
     done: { task: false, ask: false, help: false },
     skipped: { task: false, ask: false, help: false },
     askDelivered: false,

@@ -11,6 +11,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { Check } from "lucide-react";
 import { Memmy, type MemmyPose } from "../mascot/memmy.js";
 import {
+  DEMO_GUIDE_COPY_FALLBACK,
   demoGuideIsBeforeProjectPhase,
   demoGuideIsTourPhase,
   demoGuideStartsExperience,
@@ -102,6 +103,10 @@ const TOUR_POSES: MemmyPose[] = ["point", "peek", "connect", "chat"];
  */
 export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCard {
   const name = state.memberName;
+  // 剧本内容（任务叫什么、要接着做什么、请对方做什么）一律用云端下发的那几句：
+  // 卡片只说「这件事」是项目协作里的哪一步，不自己另讲一套内容。
+  // 取不到时退回缺省剧本：卡片宁可说旧内容，也不该整片崩掉。
+  const copy = state.copy ?? DEMO_GUIDE_COPY_FALLBACK;
   const base = (step: 1 | 2 | 3 | null, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
     step,
     badge: step === null
@@ -149,22 +154,25 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
         actionLabel: t("collab.demo.joined.continue")
       });
     case "task-row":
-      return base(1, t("collab.demo.taskRow.body", { name }));
+      return base(1, t("collab.demo.taskRow.body", { name, task: copy.taskTitle }));
     case "reader":
-      return base(1, t("collab.demo.reader.body"));
+      return base(1, t("collab.demo.reader.body", { next: copy.taskNext }));
     case "compose":
       return base(1, t("collab.demo.compose.body", { name }));
     case "reply-waiting":
       return base(1, "", { status: t("collab.demo.reply.waiting", { name }) });
     case "reply-done":
-      return base(1, t("collab.demo.reply.body", { name }), { title: t("collab.demo.reply.title", { name }), action: "next" });
+      return base(1, t("collab.demo.reply.body", { name, next: copy.taskNext }), { title: t("collab.demo.reply.title"), action: "next" });
     case "ask-compose":
-      return base(2, t("collab.demo.ask.compose", { name }));
+      return base(2, t("collab.demo.ask.compose", { name, ask: copy.askSentence }));
     case "ask-waiting":
+      // 请求在云端出现之前不说「已发出」：Agent 还在准备那次调用时，人看到「已发出」会以为对方在跑。
       return base(2, "", {
         status: state.askDelivered
           ? t("collab.demo.ask.returned", { name })
-          : t("collab.demo.ask.sent", { name })
+          : state.askSeen
+            ? t("collab.demo.ask.sent", { name })
+            : t("collab.demo.ask.sending", { name })
       });
     case "ask-done":
       return base(2, t("collab.demo.ask.body", { name }), { title: t("collab.demo.ask.title"), action: "next" });
@@ -177,11 +185,11 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
       return base(3, "", { status: t("collab.demo.help.incoming", { name }) });
     case "help-dialog":
       // 授权弹窗这一步：标题写「谁发来的请求」，正文说他要这台电脑做什么。
-      return base(3, t("collab.demo.dialog.body"), { title: t("collab.demo.dialog.title") });
+      return base(3, t("collab.demo.dialog.body", { help: copy.helpSentence }), { title: t("collab.demo.dialog.title") });
     case "help-running":
       return base(3, "", { status: t("collab.demo.running", { name }) });
     case "help-done":
-      return base(3, t("collab.demo.help.body", { name }), { title: t("collab.demo.help.title", { name }), action: "done" });
+      return base(3, t("collab.demo.help.body", { name, help: copy.helpSentence }), { title: t("collab.demo.help.title"), action: "done" });
     case "help-rejected":
       // 拒绝之后没有标题：定稿这一屏只有一句「你拒绝了这次请求。」和「完成」。
       return base(3, t("collab.demo.rejected.body"), { action: "done" });
@@ -235,19 +243,28 @@ const DEMO_GUIDE_HOLE_RADIUS = 12;
  * 亮区里再点一个控件时，第二圈描边的圆角。
  *
  * `layout` 的 `stroke` 只描述锚点名、不描述圆角，而这两个控件的形状又和它所在的区块不一样：
- * 发送按钮是 10px 的圆角矩形，协助开关是胶囊。所以在这里按阶段直写；其余控件用 {@link INNER_RING_RADIUS_DEFAULT}。
+ * 圆角跟着控件自己的形状走：输入框里的发送按钮是胶囊（`.composer-action-submit` 的 `border-radius: 999px`），
+ * 协助开关也是胶囊。所以在这里按阶段直写；其余控件用 {@link INNER_RING_RADIUS_DEFAULT}。
  */
 const INNER_RING_RADIUS: Partial<Record<DemoGuidePhase, number>> = {
-  compose: 10,
-  "ask-compose": 10,
+  compose: 999,
+  "ask-compose": 999,
   "settings-assist": 999
 };
-const INNER_RING_RADIUS_DEFAULT = 10;
+const INNER_RING_RADIUS_DEFAULT = 999;
 
 /** `prefer` 算位置时用的间距：与 `collab-demo-guide-layout` 候选位置里的同名常量一致。 */
 const PREFER_CARD_GAP = 14;
 const PREFER_EDGE_MARGIN = 8;
 const PREFER_AVOID_MARGIN = 6;
+
+/**
+ * 卡片可以收窄到的最小宽度。
+ *
+ * 340px 的卡片在 1200px 窗口里放不进弹窗左右两侧（各约 314px），于是退到「压在亮区里」，
+ * 把正在讲的控件盖住。收窄二十几像素就能贴到旁边，比换位置稳当。
+ */
+const CARD_MIN_WIDTH = 268;
 
 /**
  * `prefer` 指定的那一边先试。
@@ -421,6 +438,8 @@ export function CollabDemoGuideOverlay(props: {
   const bump = useCallback(() => setShake((value) => value + 1), []);
 
   const card = useMemo(() => demoGuideCard(state, t), [state, t]);
+  // 完成弹窗也讲剧本里做过的那件事：与卡片用同一份文案，取不到时同样退回缺省。
+  const copy = state.copy ?? DEMO_GUIDE_COPY_FALLBACK;
 
   if (state.status === "complete") {
     return (
@@ -431,7 +450,7 @@ export function CollabDemoGuideOverlay(props: {
             {state.done.task ? (
               <li className={styles.doneItem}>
                 <Check size={15} className={styles.doneMark} aria-hidden="true" />
-                <span>{t("collab.demo.complete.task", { name: state.memberName })}</span>
+                <span>{t("collab.demo.complete.task", { name: state.memberName, next: copy.taskNext })}</span>
               </li>
             ) : null}
             {state.done.ask ? (
@@ -470,7 +489,16 @@ export function CollabDemoGuideOverlay(props: {
 
   const { hole, stroke, viewport } = layout;
   // 窄窗口下卡片收窄到窗口以内，绝不横向溢出。
-  const cardWidth = Math.min(card.wide ? DEMO_GUIDE_CARD_WIDTH_WIDE : DEMO_GUIDE_CARD_WIDTH, viewport.width - 24);
+  const fullCardWidth = Math.min(card.wide ? DEMO_GUIDE_CARD_WIDTH_WIDE : DEMO_GUIDE_CARD_WIDTH, viewport.width - 24);
+  // 亮区左右两侧各剩多少：放得下整张卡片时按原宽度，放不下但收窄后能放下就用收窄的宽度。
+  // 只在「两侧都放不下整张卡片」时才收窄：本来就能贴上边的阶段保持原宽度，画面不抖。
+  const spaceBeside = Math.max(
+    viewport.width - (hole.left + hole.width) - PREFER_CARD_GAP - PREFER_EDGE_MARGIN,
+    hole.left - PREFER_CARD_GAP - PREFER_EDGE_MARGIN
+  );
+  const cardWidth = fullCardWidth > spaceBeside && spaceBeside >= CARD_MIN_WIDTH
+    ? Math.floor(spaceBeside)
+    : fullCardWidth;
   // 第二圈描边只在「控件比亮区小、它在亮区里」时才画：亮区与控件是同一个锚点的阶段（体验第一步、建项目前的六屏）
   // 外面已经有一圈，再套一圈就成了两条并排的圆角线。
   const innerRing = stroke && target.stroke !== target.region ? stroke : null;

@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { formatMessage, messageCatalogs, type MessageKey } from "../../../i18n/messages.js";
-import type { DemoGuidePhase, DemoGuideState } from "../../../app/collab-demo-guide-store.js";
+import { DEMO_GUIDE_COPY_FALLBACK, type DemoGuidePhase, type DemoGuideState } from "../../../app/collab-demo-guide-store.js";
 import { demoGuideCard, demoGuideTourCard } from "../collab-demo-guide-overlay.js";
 
 type Translate = (key: MessageKey, values?: Record<string, string | number>) => string;
@@ -57,7 +57,8 @@ function stateFor(phase: DemoGuidePhase): DemoGuideState {
     localProjectId: "local-1",
     memberUserId: "9001",
     memberName: "小饭团",
-    error: null,
+    copy: DEMO_GUIDE_COPY_FALLBACK,
+error: null,
     done: { task: false, ask: false, help: false },
     skipped: { task: false, ask: false, help: false },
     askDelivered: false,
@@ -95,7 +96,7 @@ describe("the demo guide copy", () => {
       .toBe("Now Xiaofantuan needs something from your computer. Open project settings and turn on Accept assistance requests.");
     // 不带人名的句子照旧不写死叫法：执行中的状态只说结果回传给发起的人。
     expect(demoGuideCard(stateFor("help-running"), t).status)
-      .toBe("正在本机查询，完成后结果会回传给小饭团。");
+      .toBe("正在本机执行，完成后结果会回传给小饭团。");
   });
 
   it("keeps the four tour steps in the approved words", () => {
@@ -128,13 +129,42 @@ describe("the demo guide copy", () => {
     // 授权弹窗那一步：标题写谁发来的请求，正文说他为什么需要这台电脑，并顺带说明执行方可以换。
     expect(demoGuideCard(stateFor("help-dialog"), translate("zh-CN"))).toMatchObject({
       title: "小饭团发来了一条协助请求",
-      body: "分享会需要现场演示，他请求确认这台电脑的系统版本。可以选择其他本地 Agent 执行，不过这次就先交给 Memmy 吧。"
+      body: "他请你电脑上的 Agent 介绍一下 Memmy 项目协作。可以选择其他本地 Agent 执行，不过这次就先交给 Memmy 吧。"
     });
     // 拒绝之后只有一句「已拒绝本次协助请求，这台电脑未执行任何操作。」，没有额外的标题。
     expect(demoGuideCard(stateFor("help-rejected"), translate("zh-CN"))).toMatchObject({
       title: null,
       body: "已拒绝本次协助请求，这台电脑未执行任何操作。"
     });
+  });
+
+  it("reads the scenario content from the cloud instead of writing its own", () => {
+    // 剧本一句都不该在客户端写死：云端换了任务名与要接着做的事，卡片上的字跟着换。
+    // 从前两边各写一份，云端改剧本后同一屏里会同时出现「项目协作上手清单」和「分享会通知」。
+    const custom = {
+      taskTitle: "下周五的团队分享会",
+      taskNext: "写一段分享会的通知",
+      askSentence: "查一下上次分享会一共来了多少人",
+      helpSentence: "确认这台电脑的系统版本"
+    };
+    const t = translate("zh-CN");
+    const state = (phase: DemoGuidePhase): DemoGuideState => ({ ...stateFor(phase), copy: custom });
+
+    expect(demoGuideCard(state("task-row"), t).body).toContain("下周五的团队分享会");
+    expect(demoGuideCard(state("reader"), t).body).toContain("写一段分享会的通知");
+    // 授权弹窗这一屏必须说清对方要这台电脑做什么，内容同样来自云端。
+    expect(demoGuideCard(state("help-dialog"), t).body).toContain("确认这台电脑的系统版本");
+    expect(demoGuideCard(state("help-done"), t).body).toContain("确认这台电脑的系统版本");
+    // 换了剧本，客户端原来那套内容不得再出现。
+    const bodies = PHASES
+      .map((phase) => demoGuideCard(state(phase), t))
+      .flatMap((card) => [card.title, card.body, card.status])
+      .filter((text): text is string => Boolean(text))
+      .join(" ");
+    // 自指的旧剧本（清单 / FAQ / 介绍产品）不得再出现在任何一屏上。
+    for (const stale of ["上手清单", "项目协作常见问题", "介绍一下 Memmy"]) {
+      expect(bodies, stale).not.toContain(stale);
+    }
   });
 
   it("keeps the six screens before the project exists and the joining screen", () => {
@@ -147,7 +177,7 @@ describe("the demo guide copy", () => {
       ["collab.demo.name.body", "项目建好后会按这个名字显示在左侧栏，成员看到的名称和你一致。本次已预填，可以直接使用。", "The project appears under this name in the sidebar, and members see the same name. It is already filled in for this walkthrough."],
       ["collab.demo.folder.body", "在这里指定 Agent 工作的本地文件夹。读写都在你的电脑上完成，文件夹内容不会上传。", "This is the local folder the Agent works in. Reading and writing happen on your computer, and the folder is not uploaded."],
       ["collab.demo.collab.body", "开启后成员可以加入这个项目、共享任务并互相请求协助；关闭后只作为你个人的本地项目。", "While it is on, members can join the project, share tasks and ask each other for assistance; turned off, it is only your own local project."],
-      ["collab.demo.joinEntry.body", "如果其他成员已经建好项目并邀请了你，从这里直接加入，不必新建。", "If a member has already created a project and invited you, join it here instead of creating a new one."],
+      ["collab.demo.joinEntry.body", "如果其他成员已经建好项目并邀请了你，可以从这里直接加入。", "If a member has already created a project and invited you, you can join it right here."],
       ["collab.demo.submit.body", "各项已就绪，点击「创建项目」，接下来进入项目看板。", "Everything is ready. Choose Create and we move on to the project board."],
       ["collab.demo.joined.body", "项目里还没有其他成员。这次先由我加入项目，带你完成一次协作。", "There are no other members in this project yet. Let me join for this walkthrough and run one collaboration with you."],
       ["collab.demo.joined.continue", "继续", "Continue"]

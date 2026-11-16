@@ -26,7 +26,17 @@ const ProjectSchema = z.object({
     active: z.boolean(),
     memberUserId: z.string(),
     memberName: z.string(),
-    step: z.string().nullish().transform((value) => value ?? null)
+    step: z.string().nullish().transform((value) => value ?? null),
+    /**
+     * 剧本里要出现在界面上的几句。三步实际做什么只有云端知道，界面上的话得跟着剧本走。
+     * 早于该字段的后端不返回，由桌面端用本地缺省（与云端缺省剧本同一套）兵底。
+     */
+    copy: z.object({
+      taskTitle: z.string(),
+      taskNext: z.string(),
+      askSentence: z.string(),
+      helpSentence: z.string()
+    }).nullish().transform((value) => value ?? null)
   }).nullish().transform((value) => (value && value.active ? value : null))
 });
 

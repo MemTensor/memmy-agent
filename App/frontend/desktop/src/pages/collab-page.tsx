@@ -1156,6 +1156,21 @@ const CollabBoard = memo(function CollabBoard(props: {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
 
+  /**
+   * 看板导览讲到「协助」时把 tab 切过去，讲到其他几站再切回「任务」。
+   *
+   * 亮区亮的是 tab 那一行，下面的内容必须跟着一同：讲协助却还停在任务列表，那排 tab 就只是装饰。
+   * 那一步还没有任何协助记录，切过去是空态——空态自己会说明这块是干什么的。
+   */
+  useEffect(() => {
+    if (!demoActive) return;
+    if (demoGuide.phase === "tour-tabs") {
+      switchBoardTab("assists");
+      return;
+    }
+    if (demoGuide.phase === "tour-board" || demoGuide.phase === "tour-associate") switchBoardTab("tasks");
+  }, [demoActive, demoGuide.phase, boardTab]);
+
   const sessions = page?.sessions ?? null;
   const filtering = Boolean(query) || member !== "all";
 
@@ -1567,7 +1582,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                     {shared ? <Cloud size={22} /> : <Folder size={22} />}
                   </span>
                   <h1 className={styles.boardName}>{project.name}</h1>
-                  <span className={styles.boardScope}>
+                  {/* 新手引导「成员已加入」那一屏的亮区：套住成员数量（含项目名与图标），告诉人小饭团已经在里面。 */}
+                  <span className={styles.boardScope} data-demo-guide="board-members">
                     {shared
                       ? t("collab.members", { count: String(shared.memberCount) })
                       : t("collab.board.localOnly")}
@@ -2280,7 +2296,7 @@ const CollabBoard = memo(function CollabBoard(props: {
           if (demoActive) {
             dispatchDemoGuide({
               type: "task-continued",
-              prefill: t("collab.demo.prefill.task", { name: demoMemberName })
+              prefill: t("collab.demo.prefill.task", { name: demoMemberName, next: demoGuide.copy.taskNext })
             });
           }
           void continueSession(session);

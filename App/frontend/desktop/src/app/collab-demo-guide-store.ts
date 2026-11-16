@@ -127,12 +127,21 @@ export interface DemoGuideState {
   /** 演示成员，全部来自云端的 `demo` 字段，不写死任何账号或昵称。 */
   memberUserId: string | null;
   memberName: string;
+  /** 剧本里会出现在界面上的几句：与云端下发的内容保持一致。 */
+  copy: DemoGuideCopy;
   /** 某一步出错时的原因（已本地化），卡片据此显示「这一步没有完成」。 */
   error: string | null;
   /** 用户实际走过的步骤：完成弹窗只列这些。 */
   done: { task: boolean; ask: boolean; help: boolean };
   /** 三步里跳过过哪几步，用来判断「都跳过」。 */
   skipped: { task: boolean; ask: boolean; help: boolean };
+  /**
+   * 第二步那条协助请求是否已经在云端出现了。
+   *
+   * 发送之后不代表请求就建出来了：Agent 要先调接口。请求出现之前不能说「已发出」，
+   * 否则人会觉得对方正在执行，其实连请求都还没建。
+   */
+  askSeen: boolean;
   /** 第二步的请求是否已经有结果回到了对话。 */
   askDelivered: boolean;
   /**
@@ -150,11 +159,42 @@ export interface DemoGuideState {
 
 export type DemoGuideEndReason = "finished" | "exited" | "skipped" | "left";
 
+/**
+ * 剧本里会出现在界面上的几句，由云端随 `demo` 一并下发。
+ *
+ * 三步实际做什么只有云端知道；从前客户端各写一份，云端改剧本时这边不知道，同一屏里就会同时出现
+ * 「项目协作上手清单」和「分享会通知」两套内容。
+ */
+export interface DemoGuideCopy {
+  /** 演示成员那条任务的标题。 */
+  taskTitle: string;
+  /** 第一步要接着做的那件事。 */
+  taskNext: string;
+  /** 第二步请演示成员做的事，接在「请某某」后面。 */
+  askSentence: string;
+  /** 第三步演示成员请你电脑上的 Agent 做的事，接在「他请你电脑上的 Agent」后面。 */
+  helpSentence: string;
+}
+
+/**
+ * 云端还没带 `copy` 时的兵底（与云端缺省剧本同一套）。
+ *
+ * 旧云端只给成员与步骤，界面上的话就按这份说：内容可能落后于剧本，但总比空白或报错好。
+ */
+export const DEMO_GUIDE_COPY_FALLBACK: DemoGuideCopy = {
+  taskTitle: "项目协作上手清单",
+  taskNext: "写一段邀请同事加入项目的话",
+  askSentence: "看一下他电脑上的《项目协作常见问题》，说明成员请我协助时会发生什么",
+  helpSentence: "介绍一下 Memmy 项目协作"
+};
+
 export interface DemoGuideStart {
   projectId: string;
   localProjectId: string | null;
   memberUserId: string;
   memberName: string;
+  /** 云端下发的剧本文案；旧云端不带时为 {@link DEMO_GUIDE_COPY_FALLBACK}。 */
+  copy?: DemoGuideCopy | null;
   client: CollabClient;
 }
 
@@ -193,9 +233,11 @@ const IDLE: DemoGuideState = {
   localProjectId: null,
   memberUserId: null,
   memberName: "",
+  copy: DEMO_GUIDE_COPY_FALLBACK,
   error: null,
   done: { task: false, ask: false, help: false },
   skipped: { task: false, ask: false, help: false },
+  askSeen: false,
   askDelivered: false,
   askTurnEnded: false,
   prefill: null,
@@ -263,7 +305,8 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
         projectId: event.input.projectId,
         localProjectId: event.input.localProjectId,
         memberUserId: event.input.memberUserId,
-        memberName: event.input.memberName
+        memberName: event.input.memberName,
+        copy: event.input.copy ?? DEMO_GUIDE_COPY_FALLBACK
       };
     case "joined-confirmed":
       // 点「继续」先进看板导览：先看一圈看板是干什么的，再动手。
@@ -284,7 +327,9 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
     case "composer-sent":
       if (state.status !== "active") return state;
       if (state.phase === "compose") return { ...state, phase: "reply-waiting" };
-      if (state.phase === "ask-compose") return { ...state, phase: "ask-waiting", askDelivered: false, askTurnEnded: false };
+      if (state.phase === "ask-compose") {
+        return { ...state, phase: "ask-waiting", askSeen: false, askDelivered: false, askTurnEnded: false };
+      }
       return state;
     case "assist-delivered":
       // 结果回来了就是这一步成了：之前那句「没有完成」随之收起。
@@ -292,10 +337,12 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
         ? { ...state, askDelivered: true, error: null }
         : state;
     case "assist-seen":
-      // 请求后来出现了（CLI 慢一步、云端晚一拍）：把「没有发出去」那句收起，人不用卡在失败卡片上。
-      return state.status === "active" && state.phase === "ask-waiting" && state.error !== null
-        ? { ...state, error: null }
-        : state;
+      // 请求出现了（先一步出现、或 CLI 慢一步晚到）：记下它已经在云端，卡片才能说「已发出」；
+      // 之前若报过「没有发出去」，那句也一并收起，人不用卡在失败卡片上。
+      // 轮询每拍都会读到同一条请求：已经记过又没有错误时不换状态对象，订阅方不必跟着重画。
+      if (state.status !== "active" || state.phase !== "ask-waiting") return state;
+      if (state.askSeen && state.error === null) return state;
+      return { ...state, askSeen: true, error: null };
     case "agent-settled":
       if (state.status !== "active") return state;
       // 第二步的结果回来之后 Agent 还要再回一句：那时才给「下一步」。

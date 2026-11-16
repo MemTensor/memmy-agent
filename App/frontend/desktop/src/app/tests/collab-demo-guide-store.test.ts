@@ -184,6 +184,16 @@ describe("demo guide state machine", () => {
     expect(demoGuideReducer(waiting, { type: "agent-settled" }).askTurnEnded).toBe(true);
   });
 
+  it("only says the request was sent once the cloud has it", () => {
+    const waiting = demoGuideReducer(atAskCompose(), { type: "composer-sent" });
+    // 刚发出去：Agent 还在准备那次调用，请求还没建出来，这时不能说「已发出」。
+    expect(waiting.askSeen).toBe(false);
+    const seen = demoGuideReducer(waiting, { type: "assist-seen" });
+    expect(seen.askSeen).toBe(true);
+    // 再发一次重新算：上一轮遗留的「已发出」不会带进新的一轮。
+    expect(demoGuideReducer({ ...atAskCompose(), askSeen: true }, { type: "composer-sent" }).askSeen).toBe(false);
+  });
+
   it("drops the failure once the request turns up after all", () => {
     const failed = demoGuideReducer(
       demoGuideReducer(atAskCompose(), { type: "composer-sent" }),

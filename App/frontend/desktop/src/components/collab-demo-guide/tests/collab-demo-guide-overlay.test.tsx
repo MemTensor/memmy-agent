@@ -12,7 +12,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../../i18n/i18n-provider.js";
 import { zhCNMessages, type MessageKey } from "../../../i18n/messages.js";
-import type { DemoGuidePhase, DemoGuideState } from "../../../app/collab-demo-guide-store.js";
+import { DEMO_GUIDE_COPY_FALLBACK, type DemoGuidePhase, type DemoGuideState } from "../../../app/collab-demo-guide-store.js";
 import { CollabDemoGuideOverlay } from "../collab-demo-guide-overlay.js";
 import styles from "../collab-demo-guide.module.css";
 
@@ -56,9 +56,11 @@ function activeState(phase: DemoGuideState["phase"]): DemoGuideState {
     localProjectId: "local-1",
     memberUserId: "9001",
     memberName: "小饭团",
-    error: null,
+    copy: DEMO_GUIDE_COPY_FALLBACK,
+error: null,
     done: { task: false, ask: false, help: false },
     skipped: { task: false, ask: false, help: false },
+    askSeen: false,
     askDelivered: false,
     askTurnEnded: false,
     prefill: null,
@@ -231,6 +233,50 @@ describe("demo guide overlay tracking", () => {
     expect(document.querySelector(`.${styles.head}`)).toBeNull();
   });
 
+  it("narrows the card to the space beside the dialog instead of covering it", async () => {
+    // 1200 宽的窗口里，528 宽的弹窗居中后两侧各约 314px：340px 的卡片放不进去。
+    // 以前会退到「压在亮区里」，把弹窗左下角（「添加」「取消」）盖住；现在收窄到恰好的宽度贴在旁边。
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1200 });
+    anchor("create-dialog", () => rect({ left: 336, top: 70, width: 528, height: 620 }));
+    await mount("intro");
+
+    const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
+    expect(card).not.toBeNull();
+    const left = Number.parseFloat(card!.style.left);
+    const width = Number.parseFloat(card!.style.width);
+    // 收窄了，但没有窄到挤不下文字。
+    expect(width).toBeLessThan(340);
+    expect(width).toBeGreaterThanOrEqual(268);
+    // 整张卡片都在弹窗右侧之外：不压住弹窗里的任何控件。
+    expect(left).toBeGreaterThanOrEqual(336 + 528);
+  });
+
+  it("only says the request was sent after the cloud has it", async () => {
+    anchor("conversation", () => rect({ left: 794, top: 74, width: 432, height: 400 }), "section");
+    await mount("ask-waiting");
+    // 还没确认请求建出来：只能说正在发，不能说对方正在执行。
+    expect(cardText()).toContain("正在向小饭团发出协助请求…");
+    expect(cardText()).not.toContain("协助请求已发出");
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <CollabDemoGuideOverlay
+            state={{ ...activeState("ask-waiting"), askSeen: true }}
+            onNext={vi.fn()}
+            onSkip={vi.fn()}
+            onExit={vi.fn()}
+            onRetry={vi.fn()}
+            onCloseComplete={vi.fn()}
+            onInvite={vi.fn()}
+          />
+        </I18nProvider>
+      );
+    });
+    await frames(6);
+    expect(cardText()).toContain("协助请求已发出，小饭团电脑上的 Agent 正在执行…");
+  });
+
   it("lights the link-a-task button during the tour without ringing it", async () => {
     anchor("board-associate", () => rect({ left: 1060, top: 250, width: 92, height: 28 }), "button");
     await mount("tour-associate");
@@ -358,9 +404,10 @@ describe("demo guide overlay tracking", () => {
 
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
     expect(dialog?.textContent).toContain("体验完成");
-    expect(dialog?.textContent).toContain("接续成员任务，生成了分享会通知");
-    expect(dialog?.textContent).toContain("发起协助请求，查到上次到场人数");
-    expect(dialog?.textContent).toContain("响应协助请求，为小饭团确认了系统版本");
+    // 三步的回顾只说做了什么，不再复述剧本内容（内容随云端剧本走，见 copy 测试）。
+    expect(dialog?.textContent).toContain("接续了成员的任务，写一段邀请同事加入项目的话");
+    expect(dialog?.textContent).toContain("请成员协助，结果回写到任务里");
+    expect(dialog?.textContent).toContain("响应了成员的协助请求");
     // 那段讲机制的话已经不显示了：完成弹窗只列做过的事，再加一句说明与两个按钮。
     expect(dialog?.textContent).not.toContain("项目协作以项目内的上下文为基础");
     expect(dialog?.textContent).toContain("成员之间可以直接接着推进");
@@ -396,7 +443,7 @@ describe("demo guide overlay tracking", () => {
     // 人在那条任务里，卡片说清结果会发给谁；第三步的亮区就是这个任务页。
     expect(holeOf()).toEqual({ left: 94, top: 54, right: 1106, bottom: 686 });
     expect(document.body.textContent).toContain("3 / 3");
-    expect(document.body.textContent).toContain("正在本机查询，完成后结果会回传给小饭团");
+    expect(document.body.textContent).toContain("正在本机执行，完成后结果会回传给小饭团");
   });
 
   it("waits for the target instead of drawing an overlay over nothing", async () => {

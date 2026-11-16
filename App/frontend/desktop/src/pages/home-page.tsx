@@ -1496,7 +1496,7 @@ export function HomePage() {
   const demoEndedHandledRef = useRef(false);
   useEffect(() => {
     if (demoGuide.status === "active") {
-      demoAskSentenceRef.current = t("collab.demo.prefill.ask", { name: demoGuide.memberName });
+      demoAskSentenceRef.current = t("collab.demo.prefill.ask", { name: demoGuide.memberName, ask: demoGuide.copy.askSentence });
       demoEndedHandledRef.current = false;
       return;
     }
@@ -1504,6 +1504,9 @@ export function HomePage() {
     demoEndedHandledRef.current = true;
     clearDraftIfUntouched(demoAskSentenceRef.current);
   }, [demoGuide.status, demoGuide.memberName, dispatch, t]);
+
+  /** 第二步被跳过时要停住的那一轮 Agent：指向下面的 `stopCurrentTurn`，避免 effect 重建时反复变化。 */
+  const stopTurnForDemoRef = useRef<(() => void) | null>(null);
 
   /**
    * 第二步（请成员协助）一完成就把那句话清掉，不等到整轮结束：下一步是为成员执行任务，
@@ -1517,7 +1520,7 @@ export function HomePage() {
     }
     if (demoAskClearedRef.current) return;
     demoAskClearedRef.current = true;
-    clearDraftIfUntouched(t("collab.demo.prefill.ask", { name: demoGuide.memberName }));
+    clearDraftIfUntouched(t("collab.demo.prefill.ask", { name: demoGuide.memberName, ask: demoGuide.copy.askSentence }));
   }, [demoGuide.status, demoGuide.phase, demoGuide.memberName, dispatch, t]);
 
   /**
@@ -1525,7 +1528,7 @@ export function HomePage() {
    * 两者都按当前语言现取，句子与预填时是同一句，所以能据此判断用户改没改过。
    */
   const demoAssistSentence = demoGuide.status === "active"
-    ? t("collab.demo.prefill.ask", { name: demoGuide.memberName })
+    ? t("collab.demo.prefill.ask", { name: demoGuide.memberName, ask: demoGuide.copy.askSentence })
     : "";
   const demoAssistHint = demoGuide.status === "active"
     ? t("collab.demo.prefill.askHint", { name: demoGuide.memberName, member: demoGuide.memberUserId ?? "" })
@@ -1554,6 +1557,22 @@ export function HomePage() {
     }
     dispatchDemoGuide({ type: "agent-settled" });
   }, [isCurrentAgentRunning, state.agent.operationErrorNotice, demoGuide.status, t]);
+
+  /**
+   * 第二步被跳过：那一轮 Agent 还在替这句话干活，必须停下。
+   *
+   * 跳过只把引导推到下一步，不会动 Agent：不停的话请求照样会发出去，人会觉得没听他的。
+   * 这里只看「从 ask-compose / ask-waiting 走到 settings-open」这一个转移，别的跳过不管。
+   */
+  const demoPhaseRef = useRef(demoGuide.phase);
+  useEffect(() => {
+    const previous = demoPhaseRef.current;
+    demoPhaseRef.current = demoGuide.phase;
+    if (demoGuide.status !== "active") return;
+    const askSkipped = (previous === "ask-compose" || previous === "ask-waiting") && demoGuide.phase === "settings-open";
+    if (!askSkipped) return;
+    stopTurnForDemoRef.current?.();
+  }, [demoGuide.phase, demoGuide.status]);
 
   useStalledOutputShimmer(
     conversationContentRef,
@@ -2665,6 +2684,8 @@ export function HomePage() {
       track
     });
   }
+  // 新手引导在别处（跨组件）判到「这一步被跳过」时要停这一轮：颜色与复位都走上面这一条路，不另写一套。
+  stopTurnForDemoRef.current = stopCurrentTurn;
 
   async function controlGoal(request: AgentGoalControlRequest): Promise<void> {
     if (goalMutationLocksRef.current.has(request.chatId)) return;

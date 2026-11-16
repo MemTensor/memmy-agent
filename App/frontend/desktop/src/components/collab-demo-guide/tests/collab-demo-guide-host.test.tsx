@@ -11,7 +11,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollabClient } from "../../../api/collab-client.js";
-import type { DemoGuideState } from "../../../app/collab-demo-guide-store.js";
+import { DEMO_GUIDE_COPY_FALLBACK, type DemoGuideState } from "../../../app/collab-demo-guide-store.js";
 import {
   dispatchDemoGuide,
   getDemoGuideState,
@@ -42,7 +42,8 @@ function demoState(phase: DemoGuideState["phase"], overrides: Partial<DemoGuideS
     localProjectId: "local-1",
     memberUserId: "9001",
     memberName: "小饭团",
-    error: null,
+    copy: DEMO_GUIDE_COPY_FALLBACK,
+error: null,
     done: { task: false, ask: false, help: false },
     skipped: { task: false, ask: false, help: false },
     askDelivered: false,

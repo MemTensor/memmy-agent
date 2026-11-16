@@ -2180,7 +2180,9 @@ export function AppFrame(props: AppFrameProps) {
               projectId: project.id,
               localProjectId: null,
               memberUserId: project.demo.memberUserId,
-              memberName: project.demo.memberName
+              memberName: project.demo.memberName,
+              // 剧本内容随项目的 demo 字段下来：界面上的话跟着云端剧本走，不在这边另写一份。
+              copy: project.demo.copy
             });
           } else {
             // 云端说这次不演示（开关关了、名单外、已经体验过）：静默收起，不报错也不提示。

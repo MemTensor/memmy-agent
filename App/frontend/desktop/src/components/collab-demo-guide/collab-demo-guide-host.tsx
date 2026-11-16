@@ -286,7 +286,8 @@ export function CollabDemoGuideHost(props: {
   }, [state.phase, state.error]);
 
   // 第二句只预填用户看到的那一句话；执行提示在发送时单独追加给 Agent（见 home-page）。
-  const askPrefill = () => t("collab.demo.prefill.ask", { name: state.memberName });
+  // 那句话里「请某某做什么」由云端剧本给，不在这边另写一份。
+  const askPrefill = () => t("collab.demo.prefill.ask", { name: state.memberName, ask: state.copy.askSentence });
 
   return (
     <>

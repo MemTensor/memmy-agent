@@ -517,6 +517,8 @@ export interface CollabService {
     decisions?: CollabApplicationDecision[];
     /** 每个账号可创建的在线项目数上限，旧云端不返回；桌面端据此在新建时先说明「只能建成本机项目」。 */
     maxOwnedProjects?: number;
+    /** 云端判定这个账号还能再体验一次新手引导；旧云端不返回该字段时按不能体验处理。 */
+    demoEligible?: boolean;
   }>;
   /**
    * Creates the cloud project and prepares the directory its tasks run in: the person's chosen folder, or a
@@ -1875,7 +1877,9 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         return { ...project, localProjectId: stored.localProjectId };
       }));
       // 旧云端没有这份列表时不填字段，桌面端就保留本机刚记下的申请，避免一次刷新把「申请中」冲掉。
-      if (!Array.isArray(data.applications)) return { projects: bound };
+      // 演示资格同样随列表透传：云端判定能不能体验新手引导，桌面端两条入口都靠它。
+      const demoEligible = typeof data.demoEligible === "boolean" ? { demoEligible: data.demoEligible } : {};
+      if (!Array.isArray(data.applications)) return { projects: bound, ...demoEligible };
       const decisions = Array.isArray(data.decisions)
         ? list(data.decisions).map(toDecision).filter((decision): decision is CollabApplicationDecision => decision !== null)
         : undefined;
@@ -1883,7 +1887,8 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         projects: bound,
         applications: list(data.applications).map(toApplication),
         ...(decisions ? { decisions } : {}),
-        ...(typeof data.maxOwnedProjects === "number" ? { maxOwnedProjects: data.maxOwnedProjects } : {})
+        ...(typeof data.maxOwnedProjects === "number" ? { maxOwnedProjects: data.maxOwnedProjects } : {}),
+        ...demoEligible
       };
     },
 
