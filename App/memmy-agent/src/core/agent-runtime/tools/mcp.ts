@@ -530,7 +530,8 @@ export class MCPToolWrapper extends Tool {
     this.originalName = toolDef.name;
     this.toolName = sanitizeName(`mcp_${serverName}_${toolDef.name}`);
     this.toolDescription = toolDef.description || toolDef.name;
-    this.toolParameters = normalizeSchemaForOpenAI(toolDef.inputSchema ?? { type: "object", properties: {} });
+    const parameters = normalizeSchemaForOpenAI(toolDef.inputSchema ?? { type: "object", properties: {} });
+    this.toolParameters = parameters.type ? parameters : { ...parameters, type: "object" };
     this.toolTimeout = toolTimeout;
     this.sendMemmyContext = serverName === "plugins";
   }

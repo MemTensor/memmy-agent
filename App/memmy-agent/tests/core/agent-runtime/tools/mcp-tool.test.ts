@@ -111,6 +111,19 @@ afterEach(() => {
 });
 
 describe("MCPToolWrapper schema normalization", () => {
+  it("adds the required object type to an untyped root schema", () => {
+    const wrapper = new MCPToolWrapper({ callTool: null }, "test", toolDef("demo", {
+      properties: { path: { type: "string" } },
+      required: ["path"],
+    }));
+
+    expect(wrapper.parameters).toEqual({
+      properties: { path: { type: "string" } },
+      required: ["path"],
+      type: "object",
+    });
+  });
+
   it("preserves non-nullable unions", () => {
     const wrapper = new MCPToolWrapper({ callTool: null }, "test", toolDef("demo", {
       type: "object",
