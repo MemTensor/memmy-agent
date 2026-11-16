@@ -97,6 +97,7 @@ import { READER_PANEL_WIDTH_STORAGE_KEY, useReaderPanelWidth } from "./collab-re
 import { CollabAssistProjectSettings } from "./collab-assist-settings.js";
 import { InfoHint } from "./collab-info-hint.js";
 import { assistAgentName, assistIsOpen, assistStatusKey } from "./collab-assist-view.js";
+import { withoutDemoGuideHint } from "../lib/demo-guide-hint.js";
 
 export { memberColor };
 
@@ -3459,9 +3460,10 @@ export function visibleQuestion(text: string): string {
   const queries = [...text.matchAll(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/giu)]
     .map((match) => match[1]?.trim() ?? "")
     .filter((query) => query.length > 0);
-  return withoutInterruptionMarkers(
+  // 新手引导第二步那句话后面跟着给 Agent 的执行提示（命令行与参数）：成员看到的副本里不该有它。
+  return withoutDemoGuideHint(withoutInterruptionMarkers(
     withoutSkillDump(withoutCursorTaskFollowup(stripHostEnvelope(queries.length > 0 ? queries.join("\n\n") : text)))
-  );
+  ));
 }
 
 /**
