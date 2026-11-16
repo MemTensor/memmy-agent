@@ -182,10 +182,10 @@ export interface DemoGuideCopy {
  * 旧云端只给成员与步骤，界面上的话就按这份说：内容可能落后于剧本，但总比空白或报错好。
  */
 export const DEMO_GUIDE_COPY_FALLBACK: DemoGuideCopy = {
-  taskTitle: "项目协作上手清单",
-  taskNext: "写一段邀请同事加入项目的话",
-  askSentence: "看一下他电脑上的《项目协作常见问题》，说明成员请我协助时会发生什么",
-  helpSentence: "介绍一下 Memmy 项目协作"
+  taskTitle: "下周五的团队分享会",
+  taskNext: "写一段分享会的通知",
+  askSentence: "查一下上次分享会一共来了多少人",
+  helpSentence: "确认这台电脑的系统版本"
 };
 
 export interface DemoGuideStart {

@@ -129,7 +129,7 @@ describe("the demo guide copy", () => {
     // 授权弹窗那一步：标题写谁发来的请求，正文说他为什么需要这台电脑，并顺带说明执行方可以换。
     expect(demoGuideCard(stateFor("help-dialog"), translate("zh-CN"))).toMatchObject({
       title: "小饭团发来了一条协助请求",
-      body: "他请你电脑上的 Agent 介绍一下 Memmy 项目协作。可以选择其他本地 Agent 执行，不过这次就先交给 Memmy 吧。"
+      body: "他请你电脑上的 Agent 确认这台电脑的系统版本。可以选择其他本地 Agent 执行，不过这次就先交给 Memmy 吧。"
     });
     // 拒绝之后只有一句「已拒绝本次协助请求，这台电脑未执行任何操作。」，没有额外的标题。
     expect(demoGuideCard(stateFor("help-rejected"), translate("zh-CN"))).toMatchObject({

@@ -405,7 +405,7 @@ describe("demo guide overlay tracking", () => {
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
     expect(dialog?.textContent).toContain("体验完成");
     // 三步的回顾只说做了什么，不再复述剧本内容（内容随云端剧本走，见 copy 测试）。
-    expect(dialog?.textContent).toContain("接续了成员的任务，写一段邀请同事加入项目的话");
+    expect(dialog?.textContent).toContain("接续了成员的任务，写一段分享会的通知");
     expect(dialog?.textContent).toContain("请成员协助，结果回写到任务里");
     expect(dialog?.textContent).toContain("响应了成员的协助请求");
     // 那段讲机制的话已经不显示了：完成弹窗只列做过的事，再加一句说明与两个按钮。
