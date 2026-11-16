@@ -33,6 +33,20 @@ describe("MEMMY-647 direct skill trial contribution integration", () => {
       status: outcome === "success" ? "pass" : outcome === "unknown" ? "unknown" : "fail", outcome, createdAt: at, resolvedAt: at });
   }
 
+  it.each([true, false])("reports an opaque baseline rejudgment without mutating the skill; known boundary=%s", known => {
+    const row = repos.memories.get("skill")!;
+    const ledger = initialSkillEtaContributions("direct:1", { eta: 0.9, attempts: 1, passes: 1 }, known ? [{ id: "old", outcome: "success" }] : undefined);
+    repos.memories.update({ ...row, properties: { ...row.properties, internal_info: { ...row.properties.internal_info,
+      skill: { ...(row.properties.internal_info.skill as Record<string, unknown>), eta: 0.9, trials_attempted: 1,
+        trials_passed: 1, eta_contributions: ledger } } } });
+    const changed = trial("old", "failure");
+    const before = repos.memories.get("skill");
+    expect(resolver.updateSkillTrialStats(changed, AT)).toBe("cannot_recompute");
+    expect(repos.memories.get("skill")).toEqual(before);
+    expect(repos.runtime.getSkillTrial("old")?.outcome).toBe("failure");
+    const audit = repos.runtime.listApiLogs({ toolNames: ["skill_evolve"] });
+    expect(JSON.stringify(audit.logs)).toContain(known ? "baseline_result_changed" : "unknown_boundary");
+  });
   it("updates real stored trials once, then replaces a changed result at its original position", () => {
     const a = trial("A", "success");
     resolver.updateSkillTrialStats(a, AT);

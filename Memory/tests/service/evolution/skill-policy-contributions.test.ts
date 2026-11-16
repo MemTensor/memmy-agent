@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { readSkillEtaContributions } from "../../../src/service/evolution/skill-eta-contributions.js";
 import { createNoToolSkillLlm } from "./evolution-llm-stubs.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -16,9 +19,11 @@ const unexpected = (): never => { throw new Error("unexpected dependency"); };
 const source = (id: string, value: number) => ({ id, supportValues: [value], referenceValues: [] });
 
 describe("MEMMY-647 recorded Policy crystallization eta", () => {
+  let root: string;
   let db: MemoryDb, repos: Repositories, pipeline: SkillPipeline, resolver: SkillTrialResolver, a: PolicyGainContributions;
   beforeEach(() => {
-    db = new MemoryDb({ path: ":memory:" }); repos = new Repositories(db.db);
+    root = mkdtempSync(join(tmpdir(), "pr908-trials-"));
+    db = new MemoryDb({ path: join(root, "memory.sqlite") }); repos = new Repositories(db.db);
     const config = structuredClone(DEFAULT_MEMMY_CONFIG);
     config.algorithm.skill.minSupport = 1;
     pipeline = new SkillPipeline({ repos, config, skillLlm: createNoToolSkillLlm(),
@@ -39,7 +44,7 @@ describe("MEMMY-647 recorded Policy crystallization eta", () => {
       internal_info: { ...row.properties.internal_info, eta: 0.66, skill: { ...(row.properties.internal_info.skill as Record<string, unknown>),
         eta: 0.66, trials_attempted: 0, trials_passed: 0, eta_contributions: seeded.contributions, eta_policy_baseline: seeded.baseline } } } });
   });
-  afterEach(() => db.close());
+  afterEach(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
   function savePolicy(state: PolicyGainContributions) {
     const row = repos.memories.get("policy")!;
     repos.memories.update({ ...row, properties: { ...row.properties, internal_info: { ...row.properties.internal_info,
@@ -50,6 +55,58 @@ describe("MEMMY-647 recorded Policy crystallization eta", () => {
     savePolicy(state);
     pipeline.applySkillRewardDriftForPolicy(policyMetaFromMemory(repos.memories.get("policy")!)!, AT);
   }
+  it.each([true, false])("does not recount a legacy trial after reward drift; old success=%s", oldSuccess => {
+    const row = repos.memories.get("skill")!;
+    const { eta_contributions, eta_policy_baseline, eta_policy_observations, ...old } = row.properties.internal_info.skill as Record<string, unknown>;
+    repos.memories.update({ ...row, properties: { ...row.properties, internal_info: { ...row.properties.internal_info,
+      skill: { ...old, eta: 0.9, trials_attempted: 1, trials_passed: oldSuccess ? 1 : 0 } } } });
+    repos.runtime.insertSkillTrial({ id: "old-success", userId: row.userId, skillMemoryId: row.id,
+      status: oldSuccess ? "pass" : "fail", outcome: oldSuccess ? "success" : "failure", createdAt: AT, resolvedAt: AT });
+    const pending = repos.runtime.insertSkillTrial({ id: "pending-before-boundary", userId: row.userId, skillMemoryId: row.id,
+      status: "pending", outcome: "unknown", createdAt: AT });
+    const policy = repos.memories.get("policy")!;
+    const { gain_contributions, ...raw } = policy.properties.internal_info.policy as Record<string, unknown>;
+    repos.memories.update({ ...policy, properties: { ...policy.properties, internal_info: { ...policy.properties.internal_info,
+      policy: { ...raw, gain: 0.8 } } } });
+    pipeline.applySkillRewardDriftForPolicy(policyMetaFromMemory(repos.memories.get("policy")!)!, AT);
+    expect(skillMetaFromMemory(repos.memories.get("skill")!)?.eta).toBeCloseTo(0.87);
+    const failure = repos.runtime.updateSkillTrial({ ...pending, status: oldSuccess ? "fail" : "pass",
+      outcome: oldSuccess ? "failure" : "success", resolvedAt: "2026-11-13T00:01:00.000Z" });
+    resolver.updateSkillTrialStats(failure, failure.resolvedAt!);
+    const stats = skillMetaFromMemory(repos.memories.get("skill")!)!;
+    expect({ attempts: stats.trialsAttempted, passes: stats.trialsPassed }).toEqual({ attempts: 2, passes: 1 });
+    expect(stats.eta).toBeCloseTo(oldSuccess ? 0.58 : 2 / 3);
+    const once = repos.memories.get("skill");
+    db.close();
+    db = new MemoryDb({ path: join(root, "memory.sqlite") }); repos = new Repositories(db.db);
+    resolver = new SkillTrialResolver({ repos, config: structuredClone(DEFAULT_MEMMY_CONFIG),
+      requireRawTurn: unexpected, assertRawTurnInScope: unexpected, requireExistingMemory: unexpected,
+      assertMemoryInScope: unexpected, traceMeta: () => null, feedbackTargetFromRawTurn: () => undefined });
+    resolver.updateSkillTrialStats(failure, failure.resolvedAt!);
+    expect(repos.memories.get("skill")).toEqual(once);
+  });
+  it("binds a rebuilt Policy skill baseline to the new body and ignores a late old trial", () => {
+    const row = repos.memories.get("skill")!;
+    const oldTrial = repos.runtime.insertSkillTrial({ id: "old-body", userId: row.userId, skillMemoryId: row.id,
+      status: "pass", outcome: "success", createdAt: AT, resolvedAt: AT });
+    resolver.updateSkillTrialStats(oldTrial, AT);
+    const revisedAt = "2026-11-13T00:01:00.000Z", body = "Rebuilt procedure with a new body.";
+    const seeded = seedPolicySkillEta({ bodyRevision: `policy:${stableHash(body)}`, policyId: "policy", policyRevision: 1,
+      policy: a, gain: a.lastGain, support: 1, eta: 0.66, minEta: 0.1, minSupport: 1 })!;
+    const current = repos.memories.get("skill")!;
+    repos.memories.update({ ...current, memoryValue: body, properties: { ...current.properties,
+      internal_info: { ...current.properties.internal_info, skill: { ...current.properties.internal_info.skill as Record<string, unknown>,
+        eta: 0.66, trials_attempted: 0, trials_passed: 0, content_revised_at: revisedAt,
+        eta_contributions: seeded.contributions, eta_policy_baseline: seeded.baseline } } } });
+    const before = repos.memories.get("skill");
+    resolver.updateSkillTrialStats(oldTrial, revisedAt);
+    expect(repos.memories.get("skill")).toEqual(before);
+    const next = repos.runtime.insertSkillTrial({ id: "new-body", userId: row.userId, skillMemoryId: row.id,
+      status: "fail", outcome: "failure", createdAt: "2026-11-13T00:02:00.000Z", resolvedAt: "2026-11-13T00:02:00.000Z" });
+    resolver.updateSkillTrialStats(next, next.resolvedAt!);
+    expect(skillMetaFromMemory(repos.memories.get("skill")!)).toMatchObject({ eta: 0.33, trialsAttempted: 1, trialsPassed: 0 });
+    expect(repos.runtime.getSkillTrial("old-body")?.outcome).toBe("success");
+  });
   it("starts a conservative future boundary for an old skill without replaying unknown history", () => {
     const row = repos.memories.get("skill")!;
     const { eta_contributions, eta_policy_baseline, eta_policy_observations, ...old } = row.properties.internal_info.skill as Record<string, unknown>;

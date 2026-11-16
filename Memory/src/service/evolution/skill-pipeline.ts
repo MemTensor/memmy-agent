@@ -1264,6 +1264,10 @@ export class SkillPipeline {
   }
 
   applySkillRewardDriftForPolicy(policy: PolicyMeta, at: string): void {
+    this.deps.repos.transaction(() => this.applySkillRewardDriftForPolicyInTransaction(policy, at));
+  }
+
+  private applySkillRewardDriftForPolicyInTransaction(policy: PolicyMeta, at: string): void {
     const skills = this.deps.repos.memories
       .list({ memoryLayer: "Skill" }, 1000)
       .map(skillMetaFromMemory)
@@ -1282,7 +1286,13 @@ export class SkillPipeline {
       let observations = readSkillPolicyObservations(isRecord(raw) ? raw.eta_policy_observations : undefined);
       if (baseline && !contributions) throw new Error("Recorded skill baseline has no contributions; preserve for review");
       const currentStats = { eta: skill.eta, attempts: skill.trialsAttempted, passes: skill.trialsPassed };
-      contributions ??= initialSkillEtaContributions(skillEtaBodyRevision(skill.memory), currentStats);
+      if (!contributions) {
+        const revisedAt = isRecord(raw) && typeof raw.content_revised_at === "string" ? raw.content_revised_at : undefined;
+        const settled = this.deps.repos.runtime.listSkillTrials({ skillMemoryId: skill.id, limit: Number.MAX_SAFE_INTEGER })
+          .filter(trial => (!revisedAt || trial.createdAt > revisedAt) && trial.outcome !== "unknown")
+          .map(trial => ({ id: trial.id, outcome: trial.outcome === "success" ? "success" as const : "failure" as const }));
+        contributions = initialSkillEtaContributions(skillEtaBodyRevision(skill.memory), currentStats, settled);
+      }
       const rawPolicy = policy.memory.properties.internal_info.policy;
       const policySource = readPolicyContributions(isRecord(rawPolicy) ? rawPolicy.gain_contributions : undefined);
       let eta: number;

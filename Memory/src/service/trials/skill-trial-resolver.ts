@@ -1,4 +1,4 @@
-import { readSkillEtaContributions, reviseSkillEtaTrial, skillEtaBodyRevision } from "../evolution/skill-eta-contributions.js";
+import { SkillTrialBoundaryError, readSkillEtaContributions, reviseSkillEtaTrial, skillEtaBodyRevision } from "../evolution/skill-eta-contributions.js";
 import {
   skillEtaAfterTrial,
   skillMetaFromMemory,
@@ -142,7 +142,19 @@ pendingTrialsForFeedback(feedback: FeedbackRecord): SkillTrialRecord[] {
     return [];
   }
 
-updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
+updateSkillTrialStats(trial: SkillTrialRecord, at: string): "updated" | "cannot_recompute" | undefined {
+    try {
+      return this.deps.repos.transaction(() => this.updateSkillTrialStatsInTransaction(trial, at));
+    } catch (error) {
+      if (!(error instanceof SkillTrialBoundaryError)) throw error;
+      recordApiLog(this.deps.repos.runtime, "skill_evolve",
+        { skillId: trial.skillMemoryId, trialId: error.trialId, phase: "blocked", reason: error.reason },
+        { kind: "skill.trial.recompute_blocked", reason: error.message }, 0, false, at);
+      return "cannot_recompute";
+    }
+  }
+
+  private updateSkillTrialStatsInTransaction(trial: SkillTrialRecord, at: string): "updated" | undefined {
     const startedAt = performance.now();
     const memory = this.deps.repos.memories.get(trial.skillMemoryId);
     if (!memory || memory.memoryLayer !== "Skill" || isImportedSkill(memory)) {
@@ -179,7 +191,8 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
       const recorded = new Set(contributions.order.filter(event => event.kind === "trial").map(event => event.id));
       let first = true;
       for (const record of records) {
-        if (record.outcome === "unknown" && !recorded.has(record.id)) continue;
+        if (record.outcome === "unknown" && !recorded.has(record.id) &&
+          !Object.hasOwn(contributions.baselineTrials ?? {}, record.id)) continue;
         contributions = reviseSkillEtaTrial(contributions, bodyRevision, record.id,
           record.outcome === "unknown" ? null : record.outcome === "success" ? "success" : "failure",
           first ? current : contributions.last);
@@ -240,6 +253,7 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
       true,
       nowIso()
     );
+    return "updated";
   }
 
 resolvePendingSkillTrialsForReward(input: {

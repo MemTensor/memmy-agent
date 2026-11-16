@@ -11,6 +11,27 @@ function sequence() {
 }
 
 describe("MEMMY-647 ordered skill eta contract", () => {
+  it("records absorbed trial membership and preserves a later manual checkpoint", () => {
+    const state = initialSkillEtaContributions("body:1", { eta: 0.9, attempts: 1, passes: 1 }, [{ id: "old", outcome: "success" }]);
+    expect(reviseSkillEtaTrial(state, "body:1", "old", "success")).toEqual(state);
+    const manual = reviseSkillEtaTrial(state, "body:1", "old", "success", { eta: 0.91, attempts: 1, passes: 1 });
+    expect(reviseSkillEtaTrial(manual, "body:1", "new", "failure").last.eta).toBeCloseTo(0.91 * 2 / 3);
+    expect(readSkillEtaContributions(JSON.parse(JSON.stringify(state)))).toEqual(state);
+    expect(() => reviseSkillEtaTrial(state, "body:1", "old", "failure")).toThrow("baseline_result_changed");
+    expect(() => reviseSkillEtaTrial(state, "body:1", "old", null)).toThrow("baseline_result_changed");
+  });
+  it("does not interpret missing membership or inconsistent histories as empty", () => {
+    const unknown = initialSkillEtaContributions("body:1", { eta: 0.9, attempts: 1, passes: 1 });
+    expect(unknown.baselineTrials).toBeUndefined();
+    expect(readSkillEtaContributions(unknown)).toEqual(unknown);
+    expect(() => reviseSkillEtaTrial(unknown, "body:1", "old", "success")).toThrow("unknown_boundary");
+    const mismatch = initialSkillEtaContributions("body:1", unknown.baseline, [{ id: "old", outcome: "failure" }]);
+    expect(mismatch.baselineTrials).toBeUndefined();
+    expect(() => readSkillEtaContributions({ ...unknown, baselineTrials: {} })).toThrow("preserve for review");
+    expect(() => readSkillEtaContributions({ ...unknown, baselineTrials: { old: "unknown" } })).toThrow("preserve for review");
+    expect(() => readSkillEtaContributions({ ...unknown, baselineTrials: { old: "success" },
+      order: [{ kind: "trial", id: "old", outcome: null }] })).toThrow("preserve for review");
+  });
   it("matches a single final-source update after replacing the earlier source result", () => {
     const once = reviseSkillEtaSource(initial(), "body:1", "policy:A", 0.4);
     const old = reviseSkillEtaSource(initial(), "body:1", "policy:A", 0.9);
