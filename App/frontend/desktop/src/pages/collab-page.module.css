@@ -64,6 +64,42 @@
   padding-top: 6px;
 }
 
+/*
+ * 头部操作（邀请 / 收起配置 / 项目设置）：按钮自己要够大才点得中。
+ * 逐个按钮给 36px 高的热区，图标按钮做成 36×36 的正方形；彼此只隔 6px，鼠标在两个按钮之间移动时始终落在其中一个上。
+ * ghost 的默认悬停底色几乎看不出来，这里换成薄荷浅底 + 强调色文字，扫过就能看出是可点的。
+ */
+.boardActions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+:global(.button).boardAction {
+  min-height: 36px;
+  gap: 6px;
+  padding: 0 14px;
+  color: var(--collab-ink-2);
+  font-weight: 650;
+}
+
+:global(.button).boardIconAction {
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+  color: var(--collab-muted);
+}
+
+:global(.button-ghost).boardAction:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--collab-accent) 14%, transparent);
+  color: var(--collab-accent-deep);
+}
+
+:global(.button).boardAction:active:not(:disabled) {
+  background: color-mix(in srgb, var(--collab-accent) 20%, transparent);
+}
+
 .boardIcon {
   display: grid;
   flex: 0 0 46px;

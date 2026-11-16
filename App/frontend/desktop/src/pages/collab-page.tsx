@@ -1573,47 +1573,53 @@ const CollabBoard = memo(function CollabBoard(props: {
                       : t("collab.board.localOnly")}
                   </span>
                   <span className={styles.grow} />
-                  {shared ? (
+                  {/* 头部操作整块给足热区：按钮彼此只隔 6px，鼠标从「邀请」移到设置不会落到空处 */}
+                  <span className={styles.boardActions}>
+                    {shared ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className={styles.boardAction}
+                        onClick={() => setMembersOpen(true)}
+                        // 有待审核的申请时把数量写进无障碍名称，按钮上也带一个角标。
+                        aria-label={pendingRequests > 0 ? t("collab.members.pending", { count: String(pendingRequests) }) : undefined}
+                        title={pendingRequests > 0 ? t("collab.members.pending", { count: String(pendingRequests) }) : undefined}
+                      >
+                        <UserPlus size={15} aria-hidden="true" />
+                        {t("collab.members.invite")}
+                        {pendingRequests > 0 ? (
+                          <span className={styles.requestBadge} aria-hidden="true">{pendingRequests}</span>
+                        ) : null}
+                      </Button>
+                    ) : null}
+                    {/* 收起与展开不同时出现：展开时入口在面板标题栏，收起后才回到这里，与 WorkBuddy 一致 */}
+                    {configOpen ? null : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className={`${styles.boardAction} ${styles.boardIconAction}`}
+                        aria-label={t("collab.config.expand")}
+                        title={t("collab.config.expand")}
+                        onClick={() => chooseConfig(true)}
+                      >
+                        <PanelRight size={15} aria-hidden="true" />
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() => setMembersOpen(true)}
-                      // 有待审核的申请时把数量写进无障碍名称，按钮上也带一个角标。
-                      aria-label={pendingRequests > 0 ? t("collab.members.pending", { count: String(pendingRequests) }) : undefined}
-                      title={pendingRequests > 0 ? t("collab.members.pending", { count: String(pendingRequests) }) : undefined}
+                      className={`${styles.boardAction} ${styles.boardIconAction}`}
+                      aria-label={t("collab.settings.open")}
+                      title={t("collab.settings.open")}
+                      data-demo-guide="board-settings"
+                      onClick={() => {
+                        setSettingsOpen(true);
+                        if (demoActive) dispatchDemoGuide({ type: "settings-opened" });
+                      }}
                     >
-                      <UserPlus size={15} aria-hidden="true" />
-                      {t("collab.members.invite")}
-                      {pendingRequests > 0 ? (
-                        <span className={styles.requestBadge} aria-hidden="true">{pendingRequests}</span>
-                      ) : null}
+                      <Settings size={15} aria-hidden="true" />
                     </Button>
-                  ) : null}
-                  {/* 收起与展开不同时出现：展开时入口在面板标题栏，收起后才回到这里，与 WorkBuddy 一致 */}
-                  {configOpen ? null : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      aria-label={t("collab.config.expand")}
-                      title={t("collab.config.expand")}
-                      onClick={() => chooseConfig(true)}
-                    >
-                      <PanelRight size={15} aria-hidden="true" />
-                    </Button>
-                  )}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    aria-label={t("collab.settings.open")}
-                    title={t("collab.settings.open")}
-                    data-demo-guide="board-settings"
-                    onClick={() => {
-                      setSettingsOpen(true);
-                      if (demoActive) dispatchDemoGuide({ type: "settings-opened" });
-                    }}
-                  >
-                    <Settings size={15} aria-hidden="true" />
-                  </Button>
+                  </span>
                 </header>
 
                 {shared ? (
