@@ -1216,6 +1216,32 @@ const CollabBoard = memo(function CollabBoard(props: {
   const filtering = Boolean(query) || member !== "all";
 
   /**
+   * 引导第一步的只读面板要跟着屏开与关。
+   *
+   * 点开成员的任务才进 `reader`；退到 `task-row` 时面板必须关掉，否则它盖住那一行，
+   * 蒙版亮的却是被盖住的位置。从输入框（`compose`）退回 `reader` 时面板要重新打开：
+   * 它不在，`reader-panel` 锚点就没有，蒙版什么也亮不出来（看起来就是引导没了）。
+   */
+  const demoMemberSession = demoActive && demoMemberName && sessions
+    ? sessions.find((session) => !session.mine && (session.memberName || "") === demoMemberName) ?? null
+    : null;
+  /** 已经为哪一条开过一次读面板：读失败时不至于每次重画都再请求一次。 */
+  const demoReaderAttemptRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!demoActive) return;
+    if (demoGuide.phase === "reader") {
+      if (!demoMemberSession || reading !== null || readingId !== null) return;
+      if (demoReaderAttemptRef.current === demoMemberSession.id) return;
+      demoReaderAttemptRef.current = demoMemberSession.id;
+      void openSession(demoMemberSession);
+      return;
+    }
+    // 离开这一屏：下次回来重新读一次，面板开着就关掉。
+    demoReaderAttemptRef.current = null;
+    if (reading !== null) setReading(null);
+  }, [demoActive, demoGuide.phase, demoMemberSession, reading, readingId]);
+
+  /**
    * 筛过之后一条也没有：用一张说明卡片讲清当前为什么是空的。
    * 搜索优先：有查询词时一律按搜索没匹配来讲，不管成员筛选是什么。
    * 「我的」那一条里带一个「关联任务」文字按钮，与工具条上的主按钮打开同一个弹窗。

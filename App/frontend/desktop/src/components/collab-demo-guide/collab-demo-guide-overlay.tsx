@@ -292,8 +292,18 @@ const PREFER_AVOID_MARGIN = 6;
  *
  * 340px 的卡片在 1200px 窗口里放不进弹窗左右两侧（各约 314px），于是退到「压在亮区里」，
  * 把正在讲的控件盖住。收窄二十几像素就能贴到旁边，比换位置稳当。
+ *
+ * 底部那一行（退出引导 / 跳过这一步 / 上一步）实测约 190px，268 的最窄卡片内宽约 234，
+ * 放得下，所以这一档不必为了按钮再放高。
  */
 const CARD_MIN_WIDTH = 268;
+
+/**
+ * 点在不接点击的地方时抖一下的时长：与 CSS 里 `shake` 动画的 320ms 对齐。
+ *
+ * 抖动是一次性的提示：过这段时间就收回去，下一屏不会继承上一屏的抖动。
+ */
+const SHAKE_MS = 320;
 
 /**
  * `prefer` 指定的那一边先试。
@@ -353,7 +363,14 @@ export function CollabDemoGuideOverlay(props: {
   const { t } = useTranslation();
   const { state } = props;
   const [layout, setLayout] = useState<{ hole: Rect; stroke: Rect | null; viewport: Viewport } | null>(null);
+  /**
+   * 点在不接点击的地方时抖一下：0 表示不抖，大于 0 是一次抖动的编号。
+   *
+   * 必须只抖一次：`SHAKE_MS` 之后回到 0，换屏也立即清掉。之前它一直留着编号，
+   * 描边与卡片每次都因编号变化重新挂载、并带着 `shake` 类，于是每点一次「下一步」都莫名其妙地抖一下。
+   */
   const [shake, setShake] = useState(0);
+  const shakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [cardHeight, setCardHeight] = useState(150);
   /** 窗口缩放、滚动、动画结束都会让它加一：测量随之一并重跑。 */
@@ -466,7 +483,25 @@ export function CollabDemoGuideOverlay(props: {
     if (!document.querySelector('[data-demo-guide="create-join"]')) props.onSkipJoinEntry?.();
   }, [state.status, state.phase, props.onSkipJoinEntry]);
 
-  const bump = useCallback(() => setShake((value) => value + 1), []);
+  const bump = useCallback(() => {
+    setShake((value) => value + 1);
+    if (shakeTimerRef.current) clearTimeout(shakeTimerRef.current);
+    shakeTimerRef.current = setTimeout(() => {
+      shakeTimerRef.current = null;
+      setShake(0);
+    }, SHAKE_MS);
+  }, []);
+  useEffect(() => () => {
+    if (shakeTimerRef.current) clearTimeout(shakeTimerRef.current);
+  }, []);
+  // 换屏就不抖：抖动的意思是「这里点不了」，与下一屏无关，不能带过去。
+  useEffect(() => {
+    if (shakeTimerRef.current) {
+      clearTimeout(shakeTimerRef.current);
+      shakeTimerRef.current = null;
+    }
+    setShake(0);
+  }, [state.phase, state.status]);
 
   const card = useMemo(() => demoGuideCard(state, t), [state, t]);
   // 完成弹窗也讲剧本里做过的那件事：与卡片用同一份文案，取不到时同样退回缺省。
@@ -661,17 +696,17 @@ export function CollabDemoGuideOverlay(props: {
           <>
             <p className={styles.title}>{t("collab.demo.failed.title")}</p>
             <p className={styles.body}>{state.error}</p>
-            {demoGuideSkippable(state.phase) ? (
-              <p className={styles.aside}>
-                <button type="button" className={styles.quiet} onClick={props.onSkip}>
-                  {t("collab.demo.skip")}
-                </button>
-              </p>
-            ) : null}
             <div className={styles.foot}>
-              <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
-                {t("collab.demo.exit")}
-              </button>
+              <span className={styles.footLeft}>
+                <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
+                  {t("collab.demo.exit")}
+                </button>
+                {demoGuideSkippable(state.phase) ? (
+                  <button type="button" className={styles.quiet} onClick={props.onSkip}>
+                    {t("collab.demo.skip")}
+                  </button>
+                ) : null}
+              </span>
               <span className={styles.footRight}>
                 {/* 出错时也给一条退路：退回上一屏改一下，比只在原地重试更顶用。 */}
                 {card.canGoBack ? (
@@ -713,19 +748,20 @@ export function CollabDemoGuideOverlay(props: {
               </div>
             ) : (
               <>
-                {/* 「跳过这一步」是次要动作：放在正文下面一行小字，底部那一行只留「退出 / 上一步 / 下一步」。
-                    三个按钮在 268px 的最窄卡片上放不下，跳过又本来不是主操作，就不占底部的位置。 */}
-                {demoGuideSkippable(state.phase) ? (
-                  <p className={styles.aside}>
-                    <button type="button" className={styles.quiet} onClick={props.onSkip}>
-                      {t("collab.demo.skip")}
-                    </button>
-                  </p>
-                ) : null}
+                {/* 底部就一行：左边是两个小字动作（退出引导管整轮、跳过这一步只管这一屏），
+                    右边是上一步与主按钮。跳过曾经单独占正文下面一行，在窄卡片上会与右上对齐的
+                    上一步叠成上下两行，看着像挤在一块儿，现在都归到同一行里。 */}
                 <div className={styles.foot}>
-                  <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
-                    {t("collab.demo.exit")}
-                  </button>
+                  <span className={styles.footLeft}>
+                    <button type="button" className={styles.quiet} onClick={() => setConfirming(true)}>
+                      {t("collab.demo.exit")}
+                    </button>
+                    {demoGuideSkippable(state.phase) ? (
+                      <button type="button" className={styles.quiet} onClick={props.onSkip}>
+                        {t("collab.demo.skip")}
+                      </button>
+                    ) : null}
+                  </span>
                   <span className={styles.footRight}>
                     {card.canGoBack ? (
                       <button type="button" className={styles.actionGhost} onClick={props.onBack}>

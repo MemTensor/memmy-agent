@@ -13,6 +13,7 @@ import { requestAssistFocus } from "../../app/collab-assist-focus.js";
 import { requestDemoGuideInvite } from "../../app/collab-demo-guide-invite.js";
 import {
   demoGuideBackTarget,
+  demoGuideLivesOnTaskPage,
   demoGuideStepNumberOf,
   dispatchDemoGuide,
   endDemoGuide,
@@ -300,7 +301,7 @@ export function CollabDemoGuideHost(props: {
   };
 
   /**
-   * 退回上一屏时把这一步已经做出去的事收回来。
+   * 退回上一屏时把这一步已经做出去的事收回来，并把页面/弹窗恢复到那一屏该有的样子。
    *
    * 先换屏再收回：收回都是异步的，屏幕上不该先闪一句「正在停止」。
    * 换完屏再停那一轮 Agent（在 home-page），它结束时就对不上任何一屏了，不会被当成「做完」或「没完成」。
@@ -310,7 +311,17 @@ export function CollabDemoGuideHost(props: {
     const projectId = state.projectId;
     const memberUserId = state.memberUserId;
     const client = props.collab;
+    const target = demoGuideBackTarget(state);
     dispatchDemoGuide({ type: "back", prefill: backPrefill() });
+    // 退回去的那一屏在哪个页面，就先把人放回那个页面：任务里的屏留在看板上、看板上的屏留在任务页，
+    // 蒙版都会因为找不到锚点而一片空白（看起来就是「引导消失了」）。
+    if (target) {
+      if (demoGuideLivesOnTaskPage(target)) {
+        if (props.route !== "/main") openTaskPageRef.current();
+      } else if (props.route !== "/collab" && state.localProjectId) {
+        openBoardRef.current(state.localProjectId);
+      }
+    }
     if (!client || !projectId) return;
     // 第二步的请求已经建出来了：撤回来。不撤的话小饭团照样去执行，人重发一次就执行两遍。
     if (phase === "ask-waiting" && memberUserId) {

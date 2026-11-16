@@ -512,19 +512,48 @@ describe("demo guide overlay tracking", () => {
     expect(cardText()).not.toContain("上一步");
   });
 
-  it("keeps Skip out of the bottom row and hands the click to onBack", async () => {
+  it("keeps Skip and Back in the same bottom row", async () => {
     const back = vi.fn();
-    await mount("reader", { onBack: back });
-    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'));
-    const labels = buttons.map((button) => button.textContent?.trim());
-    // 底部只剩「退出引导」与「上一步」；「跳过这一步」在正文下面那一行。
+    const skip = vi.fn();
+    await mount("reader", { onBack: back, onSkip: skip });
+    const labels = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'))
+      .map((button) => button.textContent?.trim());
     expect(labels).toContain("退出引导");
     expect(labels).toContain("上一步");
     expect(labels).toContain("跳过这一步");
+
+    // 三个小字与按钮都归在底部那一行里：曾经「跳过这一步」单独占正文下面一行，与右上对齐的
+    // 「上一步」叠成上下两行，看着像挤在一起。
+    const foot = document.querySelector<HTMLElement>(`.${styles.foot}`);
+    expect(foot).not.toBeNull();
+    const inFoot = Array.from(foot!.querySelectorAll<HTMLButtonElement>("button"))
+      .map((button) => button.textContent?.trim());
+    expect(inFoot).toEqual(["退出引导", "跳过这一步", "上一步"]);
+    // 正文下面不再有单独的「跳过这一步」那一行。
+    expect(document.querySelector(`.${styles.aside}`)).toBeNull();
+
     await act(async () => {
-      buttons.find((button) => button.textContent?.trim() === "上一步")?.click();
+      foot!.querySelectorAll<HTMLButtonElement>("button")[2]?.click();
     });
     expect(back).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      foot!.querySelectorAll<HTMLButtonElement>("button")[1]?.click();
+    });
+    expect(skip).toHaveBeenCalledTimes(1);
+  });
+
+  it("shakes once for a blocked click and never carries it into the next screen", async () => {
+    await mount("reader");
+    const shakeOf = () => document.querySelector<HTMLElement>("[data-demo-stroke]")?.classList.contains(styles.shake);
+    // 点在不接点击的地方：抖一下，这是提示。
+    document.querySelector<HTMLElement>("[data-demo-mask]")?.click();
+    await frames(2);
+    expect(shakeOf()).toBe(true);
+
+    // 换屏：新的一屏不再带着上一屏的抖动（以前会，于是每点一次「下一步」都莫名抖一下）。
+    anchor("board-task-row", () => rect({ left: 300, top: 300, width: 700, height: 60 }));
+    await mount("task-row");
+    expect(shakeOf()).toBe(false);
   });
 
   it("never prints a raw placeholder on the card", async () => {

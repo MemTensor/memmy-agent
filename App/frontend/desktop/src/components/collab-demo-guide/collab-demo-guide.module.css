@@ -191,22 +191,24 @@
   align-items: center;
   gap: 8px;
   margin-top: 12px;
+  /* 一行放不下时宁可两行，也不横向溢出卡片（只会在极窄的窗口里发生）。 */
+  flex-wrap: wrap;
 }
 
-/* 「跳过这一步」那一行：正文下面一行小字，靠右与底部按钮对齐。 */
-.aside {
+/* 底部左边那两个小字动作：「退出引导」与「跳过这一步」，两个都在同一行。 */
+.footLeft {
   display: flex;
-  justify-content: flex-end;
-  margin: 8px 0 0;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
-/* 最窄的卡片上「上一步」与主按钮可能并排放不下：允许收成两行，但始终靠右且不出色。 */
+/* 底部右边：「上一步」与主按钮，始终在同一行、靠右。 */
 .footRight {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
   margin-left: auto;
 }
 

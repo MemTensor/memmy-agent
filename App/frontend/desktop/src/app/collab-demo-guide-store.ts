@@ -171,6 +171,29 @@ export function demoGuideBackTarget(state: Pick<DemoGuideState, "phase" | "skipp
 }
 
 /**
+ * 哪些屏是在那条任务里（对话页）走的；其余的都在项目看板上。
+ *
+ * 第一、二步的输入与结果都在任务里：从看板过来时要先把对话页拉回来，
+ * 退回去时也一样——停在看板上而亮区锚点（输入框、对话）根本不在页面上，蒙版就什么也亮不出来。
+ */
+const DEMO_GUIDE_TASK_PAGE_PHASES: DemoGuidePhase[] = [
+  "compose",
+  "reply-waiting",
+  "reply-done",
+  "ask-compose",
+  "ask-waiting",
+  "ask-done",
+  // 第三步的执行过程与结果都在那条 Memmy 任务里；人若是留在看板上，亮区会退回协助条（布局里的 fallback）。
+  "help-running",
+  "help-done"
+];
+
+/** 这一屏是在那条任务里，还是在项目看板上。 */
+export function demoGuideLivesOnTaskPage(phase: DemoGuidePhase): boolean {
+  return DEMO_GUIDE_TASK_PAGE_PHASES.includes(phase);
+}
+
+/**
  * 引导按顺序排开的全部子状态。
  *
  * 只用来比较「这一次是往前走还是往后退」：界面靠它认出人点了「上一步」，

@@ -379,4 +379,46 @@ describe("the demo guide host", () => {
     expect(getDemoGuideState().prefill?.text).toContain("接着");
     expect(getDemoGuideState().prefill?.nonce).toBeGreaterThan(0);
   });
+
+  it("goes back to the page the previous screen lives on", async () => {
+    // 项目设置那一屏在看板上，上一屏是第二步的结果（「协助请求已返回」）：它在任务里。
+    // 不跳回去的话，`conversation` 锚点在看板上根本不存在，蒙版就一片空白（看起来就是引导没了）。
+    const openTaskPage = vi.fn();
+    const openBoard = vi.fn();
+    stubAnchor("board-settings", { left: 900, top: 60, width: 28, height: 28 });
+    await mount(client({}), demoState("settings-open"), { route: "/collab", openTaskPage, openBoard });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    const back = Array.from(document.querySelectorAll("button"))
+      .find((entry) => entry.textContent?.trim() === "上一步");
+    await act(async () => {
+      back?.click();
+    });
+    expect(getDemoGuideState().phase).toBe("ask-done");
+    expect(openTaskPage).toHaveBeenCalledTimes(1);
+    expect(openBoard).not.toHaveBeenCalled();
+  });
+
+  it("goes back to the board when the previous screen is the read panel", async () => {
+    // 输入框那一屏在任务里，上一屏是项目看板上成员任务的只读面板：退回去要先把看板拉回来。
+    const openBoard = vi.fn();
+    const openTaskPage = vi.fn();
+    stubAnchor("composer", { left: 300, top: 600, width: 800, height: 120 });
+    stubAnchor("composer-send", { left: 1040, top: 660, width: 36, height: 36 });
+    await mount(client({}), demoState("compose"), { route: "/main", openBoard, openTaskPage });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    const back = Array.from(document.querySelectorAll("button"))
+      .find((entry) => entry.textContent?.trim() === "上一步");
+    await act(async () => {
+      back?.click();
+    });
+    expect(getDemoGuideState().phase).toBe("reader");
+    expect(openBoard).toHaveBeenCalledWith("local-1");
+    expect(openTaskPage).not.toHaveBeenCalled();
+  });
 });
