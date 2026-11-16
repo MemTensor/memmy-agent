@@ -15,6 +15,7 @@ import {
   resetCollabProjectsStore,
   selectCollabProject,
   sharedProjectFor,
+  shouldDemoOnNewProject,
   subscribeCollabProjects
 } from "../collab-projects-store.js";
 
@@ -196,5 +197,70 @@ describe("collab projects store", () => {
     expect(notifications).toBe(1);
     expect(getCollabProjectsSnapshot().projects?.[0]?.name).toBe("更名为 A");
     unsubscribe();
+  });
+});
+
+/** 只带项目列表与 `demoEligible` 的客户端：这两个字段正是路径 B 判断要用的。 */
+function clientWithEligibility(projects: CollabProject[], demoEligible?: boolean): CollabClient {
+  return {
+    listProjects: async () => (demoEligible === undefined ? { projects } : { projects, demoEligible })
+  } as CollabClient;
+}
+
+/** 只有本人名下的在线项目才算数：成员身份的项目不影响「第一次新建」。 */
+function memberProject(id: string): CollabProject {
+  return { id, name: id, role: "member", memberCount: 3, sessionCount: 2, createdAt: null, localProjectId: null };
+}
+
+describe("cloud walkthrough eligibility", () => {
+  it("starts from false and stays false when the cloud has no such field", async () => {
+    // 旧云端不返回这个字段：默认 false，不会因此进演示。
+    expect(getCollabProjectsSnapshot().demoEligible).toBe(false);
+    await loadCollabProjects(clientWithEligibility([]));
+    expect(getCollabProjectsSnapshot().demoEligible).toBe(false);
+  });
+
+  it("stores the flag the cloud grants, and drops it when a later list omits it", async () => {
+    await loadCollabProjects(clientWithEligibility([], true));
+    expect(getCollabProjectsSnapshot().demoEligible).toBe(true);
+
+    // 换回旧后端或云端改了口径：没有这个字段就是 false，不沿用上一次的 true。
+    await loadCollabProjects(clientWithEligibility([]));
+    expect(getCollabProjectsSnapshot().demoEligible).toBe(false);
+  });
+});
+
+describe("whether the sidebar's new project opens the walkthrough", () => {
+  it("takes it when the collaboration is on, nothing is owned and the cloud allows it", async () => {
+    await loadCollabProjects(clientWithEligibility([], true));
+    expect(shouldDemoOnNewProject({ collabEnabled: true, demoGuideActive: false })).toBe(true);
+  });
+
+  it("skips it in API Key mode", async () => {
+    await loadCollabProjects(clientWithEligibility([], true));
+    expect(shouldDemoOnNewProject({ collabEnabled: false, demoGuideActive: false })).toBe(false);
+  });
+
+  it("skips it while another walkthrough is running", async () => {
+    await loadCollabProjects(clientWithEligibility([], true));
+    expect(shouldDemoOnNewProject({ collabEnabled: true, demoGuideActive: true })).toBe(false);
+  });
+
+  it("skips it once the person owns an online project", async () => {
+    await loadCollabProjects(clientWithEligibility([project("mine")], true));
+    expect(shouldDemoOnNewProject({ collabEnabled: true, demoGuideActive: false })).toBe(false);
+
+    // 只加入过别人的项目不算：之后第一次自己创建仍然可以体验。
+    await loadCollabProjects(clientWithEligibility([memberProject("theirs")], true));
+    expect(shouldDemoOnNewProject({ collabEnabled: true, demoGuideActive: false })).toBe(true);
+  });
+
+  it("skips it when the cloud does not allow another walkthrough", async () => {
+    await loadCollabProjects(clientWithEligibility([], false));
+    expect(shouldDemoOnNewProject({ collabEnabled: true, demoGuideActive: false })).toBe(false);
+
+    // 旧云端完全不带这个字段时也是 false。
+    await loadCollabProjects(clientWithEligibility([]));
+    expect(shouldDemoOnNewProject({ collabEnabled: true, demoGuideActive: false })).toBe(false);
   });
 });

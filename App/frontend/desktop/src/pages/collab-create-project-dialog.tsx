@@ -221,10 +221,17 @@ export function CreateProjectModal(props: {
       backdropClassName={demo ? `${styles.backdrop} ${styles.backdropYield}` : styles.backdrop}
       bodyClassName={styles.simpleCreateBody}
       footerClassName={styles.simpleCreateFooter}
+      // 引导第一步亮的是整个弹窗：锚点挂在 Modal 根元素上，它与弹窗自身的尺寸、间距无关。
+      demoGuideAnchor={demo ? "create-dialog" : undefined}
       footer={(
         <>
           {shareAvailable && props.onJoinProject ? (
-            <Button variant="secondary" size="sm" onClick={props.onJoinProject}>
+            <Button
+              variant="secondary"
+              size="sm"
+              data-demo-guide={demo ? "create-join" : undefined}
+              onClick={props.onJoinProject}
+            >
               {t("collab.create.joinEntry")}
             </Button>
           ) : <span />}
@@ -243,7 +250,7 @@ export function CreateProjectModal(props: {
       )}
     >
       {/* 名称占满一行：图标与竖线在框内左侧，其余都交给输入本身，不放常驻说明 */}
-      <div className={styles.simpleNameField}>
+      <div className={styles.simpleNameField} data-demo-guide={demo ? "create-name" : undefined}>
         <span className={styles.simpleNameIcon} aria-hidden="true"><Folder size={16} /></span>
         <span className={styles.simpleNameDivider} aria-hidden="true" />
         <input
@@ -273,7 +280,7 @@ export function CreateProjectModal(props: {
         <InfoHint label={t("collab.create.folderHelpLabel")} text={t("collab.create.dirHint")} />
       </div>
       {/* 只支持一个目录：选了就把那一行显示出来，没选时给一个大框放「添加」 */}
-      <div className={styles.simpleFolderBox}>
+      <div className={styles.simpleFolderBox} data-demo-guide={demo ? "create-folder" : undefined}>
         {directory ? (
           <div className={styles.simpleFolderRow}>
             <Folder size={15} aria-hidden="true" className={styles.simpleFolderIcon} />
@@ -311,6 +318,7 @@ export function CreateProjectModal(props: {
           {/* 共享和名称、文件夹一样是一个字段框：不用分隔线另起一段，点整框任意位置都能切换（问号除外） */}
           <div
             className={`${styles.simpleShareField}${share ? ` ${styles.simpleShareFieldOn}` : ""}`}
+            data-demo-guide={demo ? "create-collab" : undefined}
             onClick={() => setShare((current) => !current)}
           >
             <Users size={16} aria-hidden="true" className={styles.simpleShareIcon} />

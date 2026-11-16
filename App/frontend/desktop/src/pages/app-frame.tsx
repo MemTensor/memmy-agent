@@ -36,6 +36,7 @@ import {
   requestCreateProject,
   selectCollabProject,
   sharedProjectFor,
+  shouldDemoOnNewProject,
   showCollabNotice,
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
@@ -44,6 +45,7 @@ import {
   demoGuideBoundLocalProject,
   dismissDemoGuideBeforeProject,
   getDemoGuideState,
+  isDemoGuideActive,
   startDemoGuide,
   startDemoGuideBeforeProject,
   subscribeDemoGuide
@@ -1059,9 +1061,17 @@ export function AppFrame(props: AppFrameProps) {
   /**
    * Opens the new-project dialog over the current page. Creating must not first switch the window to a board:
    * the background the person sees would change before they have decided anything.
+   *
+   * 侧栏第一次新建也走新手引导：四条规则都在 store 里判（协作可用、名下没有在线项目、云端给出
+   * `demoEligible`、没有别的演示在进行）。这是演示时才默认开共享，普通新建仍然默认关。
    */
   function newProject() {
     handleFirstSidebarInteraction();
+    // 第一次新建就走引导时，弹窗要默认开共享（与路径 A 一致）；普通新建仍然默认关。
+    if (shouldDemoOnNewProject({ collabEnabled, demoGuideActive: isDemoGuideActive() })) {
+      requestCreateProject({ share: true, demo: true });
+      return;
+    }
     requestCreateProject();
   }
 

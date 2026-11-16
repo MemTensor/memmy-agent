@@ -44,6 +44,11 @@ export interface CollabProjectsSnapshot {
    * 新建弹窗就不提前提示额度。
    */
   maxOwnedProjects: number | null;
+  /**
+   * 云端在项目列表里表明「这个人可以再体验一次新手引导」。旧后端不带这个字段，按 false 处理，
+   * 因此侧栏第一次新建也不会意外进演示。
+   */
+  demoEligible: boolean;
 }
 
 let snapshot: CollabProjectsSnapshot = {
@@ -59,7 +64,8 @@ let snapshot: CollabProjectsSnapshot = {
   taskPickerFor: null,
   accessPromptFor: null,
   notice: null,
-  maxOwnedProjects: null
+  maxOwnedProjects: null,
+  demoEligible: false
 };
 const listeners = new Set<() => void>();
 
@@ -129,15 +135,26 @@ export async function loadCollabProjects(client: CollabClient): Promise<void> {
       const decisions = listed.decisions ?? snapshot.decisions;
       // 额度随列表一起回来；这一次没拿到时保留上一次的值，免得弹窗上一会提示一会不提示。
       const maxOwnedProjects = listed.maxOwnedProjects ?? snapshot.maxOwnedProjects;
+      // 演示资格同样随列表回来：旧云端没有这个字段，就按「不能体验」处理，不保留上一次的 true。
+      const demoEligible = listed.demoEligible === true;
       // 一个字段都没变（切回窗口、轮询带来的重读）就不写：侧栏与看板不必跟着重画一遍。
       const unchanged = snapshot.projects !== null
         && snapshot.error === null
         && sameRecords(snapshot.projects, listed.projects)
         && sameRecords(snapshot.applications, applications)
         && sameRecords(snapshot.decisions, decisions)
-        && snapshot.maxOwnedProjects === maxOwnedProjects;
+        && snapshot.maxOwnedProjects === maxOwnedProjects
+        && snapshot.demoEligible === demoEligible;
       if (unchanged) return;
-      update({ projects: listed.projects, applications, decisions, loading: false, error: null, maxOwnedProjects });
+      update({
+        projects: listed.projects,
+        applications,
+        decisions,
+        loading: false,
+        error: null,
+        maxOwnedProjects,
+        demoEligible
+      });
     } catch (cause) {
       // 云端不可用时保留已有列表：项目就在本机，云端只决定能不能看共享内容。
       update({ loading: false, error: messageOf(cause) });
@@ -225,6 +242,25 @@ export function consumeCreateProjectRequest(): void {
   if (snapshot.createPending) update({ createPending: false, createShareDefault: false, createDemo: false });
 }
 
+/**
+ * 侧栏「新建项目」要不要以新手引导的演示模式打开弹窗（两条链路的第二条）。
+ *
+ * 四条规则全部为真才进演示，任一条为假都按普通新建打开：
+ * 1. `collabEnabled`：协作功能可用——与新建弹窗的 `shareAvailable` 同源，API Key 模式下没有云端账号可共享；
+ * 2. 本人名下的在线协作项目数为 0——与看板侧栏同一份 `projects`，只算 `role === "owner"`，加入过别人的项目不影响；
+ * 3. 云端在项目列表响应里给出 `demoEligible === true`——旧云端没有这个字段时视为 false，不能因此进演示；
+ * 4. 当前没有别的演示在进行，否则第二个演示会把正在走的那一个顶掉。
+ */
+export function shouldDemoOnNewProject(options: {
+  collabEnabled: boolean;
+  demoGuideActive: boolean;
+}): boolean {
+  if (!options.collabEnabled || options.demoGuideActive) return false;
+  if (snapshot.demoEligible !== true) return false;
+  const owned = (snapshot.projects ?? []).filter((project) => project.role === "owner").length;
+  return owned === 0;
+}
+
 /** Asks the board to open the project-session picker for a project whose sharing just started. */
 export function requestTaskPicker(localProjectId: string): void {
   update({ taskPickerFor: localProjectId });
@@ -268,7 +304,8 @@ export function clearCollabProjects(): void {
     taskPickerFor: null,
     accessPromptFor: null,
     notice: null,
-    maxOwnedProjects: null
+    maxOwnedProjects: null,
+    demoEligible: false
   });
 }
 
@@ -287,7 +324,8 @@ export function resetCollabProjectsStore(): void {
     taskPickerFor: null,
     accessPromptFor: null,
     notice: null,
-    maxOwnedProjects: null
+    maxOwnedProjects: null,
+    demoEligible: false
   };
   listeners.clear();
 }
@@ -302,8 +340,15 @@ function normalizeProjectList(
     applications?: CollabApplication[];
     decisions?: CollabApplicationDecision[];
     maxOwnedProjects?: number;
+    demoEligible?: boolean;
   } | CollabProject[]
-): { projects: CollabProject[]; applications?: CollabApplication[]; decisions?: CollabApplicationDecision[]; maxOwnedProjects?: number } {
+): {
+  projects: CollabProject[];
+  applications?: CollabApplication[];
+  decisions?: CollabApplicationDecision[];
+  maxOwnedProjects?: number;
+  demoEligible?: boolean;
+} {
   if (Array.isArray(listed)) return { projects: listed };
   return listed;
 }
