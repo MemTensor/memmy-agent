@@ -88,6 +88,21 @@ function client(overrides: Partial<CollabClient>): CollabClient {
   } as unknown as CollabClient;
 }
 
+/** 在页面上挂一个 `data-demo-guide` 锚点，位置固定：happy-dom 里量不出布局，只能自己给。 */
+function stubAnchor(name: string, box: { left: number; top: number; width: number; height: number }): void {
+  const element = document.createElement("button");
+  element.setAttribute("data-demo-guide", name);
+  element.getBoundingClientRect = (() => ({
+    ...box,
+    x: box.left,
+    y: box.top,
+    right: box.left + box.width,
+    bottom: box.top + box.height,
+    toJSON: () => box
+  })) as unknown as typeof element.getBoundingClientRect;
+  document.body.append(element);
+}
+
 describe("the demo guide host", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -126,6 +141,7 @@ describe("the demo guide host", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    for (const element of Array.from(document.querySelectorAll("[data-demo-guide]"))) element.remove();
     resetDemoGuideStore();
     vi.useRealTimers();
   });
@@ -230,18 +246,35 @@ describe("the demo guide host", () => {
     expect(getDemoGuideState().done.help).toBe(false);
   });
 
-  it("opens the walkthrough with the join notice and waits for the person", async () => {
+  it("opens the walkthrough on the board with the join card and waits for the person", async () => {
+    // 加入那一屏走看板蒙版：亮区套住成员徐章，卡片在旁边说这次由小饭团加入。
+    stubAnchor("board-members", { left: 640, top: 48, width: 72, height: 26 });
     await mount(client({}), demoState("joined"));
-    // 先出现的是那张居中的提示窗：有昵称、只有一个「开始体验」，没有正文，也没有跳过。
-    expect(document.body.textContent).toContain("小饭团加入了项目");
-    expect(document.body.textContent).not.toContain("一起开展一次协作");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120);
+    });
+    expect(document.querySelector("[data-demo-join]")).toBeNull();
+    expect(document.querySelector("[data-demo-mask]")).not.toBeNull();
+    expect(document.body.textContent).toContain("项目里还没有其他成员。这次先由我加入项目，带你完成一次协作。");
     expect(document.body.textContent).not.toContain("跳过这一步");
     expect(getDemoGuideState().phase).toBe("joined");
 
-    const start = Array.from(document.querySelectorAll("button")).find((entry) => entry.textContent?.includes("开始体验"));
+    const start = Array.from(document.querySelectorAll("button")).find((entry) => entry.textContent?.trim() === "继续");
     await act(async () => start?.click());
     // 点完先进看板导览：第一步的蒙版此时才出现。
     expect(getDemoGuideState().phase).toBe("tour-board");
+  });
+
+  it("skips the join entry when the dialog does not show the join button", async () => {
+    // API Key 模式下没有「加入项目」：不能把气泡指向空处，直接进「创建项目」。
+    await mount(client({}), demoState("join-entry"));
+    expect(getDemoGuideState().phase).toBe("create-project");
+  });
+
+  it("stays on the join entry while the join button is on screen", async () => {
+    stubAnchor("create-join", { left: 320, top: 620, width: 88, height: 30 });
+    await mount(client({}), demoState("join-entry"));
+    expect(getDemoGuideState().phase).toBe("join-entry");
   });
 
   it("stays on the board for the whole tour and never pulls the page around", async () => {

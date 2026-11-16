@@ -2,14 +2,19 @@
 
 /**
  * 蒙版的亮区必须跟住目标：侧滑、缩放、居中补高这些入场过程里量到的位置不能画出来，
- * 元素停下之后亮区要正好盖住它，描边正好包住要点的那一个控件。
+ * 元素停下之后亮区要正好盖住它，第二圈描边正好包住要点的那一个控件。
+ *
+ * 第六版起暗色由亮区自己投出来（一层 9999px 的投影），四块遮罩只剩挡点击：
+ * 亮区的圆角、每屏说什么、加入那一屏是不是看板蒙版，都在这里钉住。
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../../i18n/i18n-provider.js";
-import type { DemoGuideState } from "../../../app/collab-demo-guide-store.js";
+import { zhCNMessages, type MessageKey } from "../../../i18n/messages.js";
+import type { DemoGuidePhase, DemoGuideState } from "../../../app/collab-demo-guide-store.js";
 import { CollabDemoGuideOverlay } from "../collab-demo-guide-overlay.js";
+import styles from "../collab-demo-guide.module.css";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -32,6 +37,15 @@ function stubRect(element: HTMLElement, read: () => FakeRect): void {
       toJSON: () => value
     } as DOMRect;
   }) as typeof element.getBoundingClientRect;
+}
+
+/** 在页面上挂一个锚点，位置由 `read` 决定：与业务组件里那行 `data-demo-guide` 等价。 */
+function anchor(name: string, read: () => FakeRect, tag = "div"): HTMLElement {
+  const element = document.createElement(tag);
+  element.setAttribute("data-demo-guide", name);
+  stubRect(element, read);
+  document.body.append(element);
+  return element;
 }
 
 function activeState(phase: DemoGuideState["phase"]): DemoGuideState {
@@ -77,10 +91,26 @@ function holeOf(): { left: number; top: number; right: number; bottom: number } 
   };
 }
 
-function strokeOf(): { left: number; top: number; width: number; height: number } | null {
-  const stroke = document.querySelector<HTMLElement>("[data-demo-stroke]");
-  if (!stroke) return null;
-  return boxOf(stroke);
+/** 亮区那一圈：负责压暗，圆角按阶段配置。 */
+function litRingOf(): (FakeRect & { radius: number; quiet: boolean }) | null {
+  const element = document.querySelector<HTMLElement>("[data-demo-stroke]");
+  if (!element) return null;
+  return {
+    ...boxOf(element),
+    radius: Number.parseFloat(element.style.borderRadius),
+    quiet: element.classList.contains(styles.quiet)
+  };
+}
+
+/** 亮区里再点一个控件的第二圈描边：不压暗，只是把那个控件圈出来。 */
+function innerRingOf(): (FakeRect & { radius: number }) | null {
+  const element = document.querySelector<HTMLElement>("[data-demo-stroke2]");
+  if (!element) return null;
+  return { ...boxOf(element), radius: Number.parseFloat(element.style.borderRadius) };
+}
+
+function cardText(): string {
+  return document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]')?.textContent ?? "";
 }
 
 async function frames(count: number): Promise<void> {
@@ -97,19 +127,19 @@ describe("demo guide overlay tracking", () => {
   let panelRect: FakeRect;
   let continueRect: FakeRect;
 
-  async function mount(phase: DemoGuideState["phase"]): Promise<void> {
+  async function mount(phase: DemoGuidePhase, extra: { onSkipJoinEntry?: () => void } = {}): Promise<void> {
     await act(async () => {
       root.render(
         <I18nProvider language="zh-CN">
           <CollabDemoGuideOverlay
             state={activeState(phase)}
-            onJoined={vi.fn()}
             onNext={vi.fn()}
             onSkip={vi.fn()}
             onExit={vi.fn()}
             onRetry={vi.fn()}
             onCloseComplete={vi.fn()}
             onInvite={vi.fn()}
+            {...extra}
           />
         </I18nProvider>
       );
@@ -120,13 +150,8 @@ describe("demo guide overlay tracking", () => {
   beforeEach(() => {
     panelRect = rect();
     continueRect = rect({ left: 1130, top: 96, width: 74, height: 28 });
-    const panel = document.createElement("aside");
-    panel.setAttribute("data-demo-guide", "reader-panel");
-    stubRect(panel, () => panelRect);
-    const continueButton = document.createElement("button");
-    continueButton.setAttribute("data-demo-guide", "reader-continue");
-    stubRect(continueButton, () => continueRect);
-    document.body.append(panel, continueButton);
+    anchor("reader-panel", () => panelRect, "aside");
+    anchor("reader-continue", () => continueRect, "button");
 
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
@@ -144,9 +169,10 @@ describe("demo guide overlay tracking", () => {
   it("covers the settled target and keeps tracking while it is still moving", async () => {
     await mount("reader");
 
-    // 停稳之后：亮区正好是面板外扩 6px，描边正好包住「继续任务」外扩 3px。
+    // 停稳之后：亮区正好是面板外扩 6px，第二圈描边正好包住「继续任务」外扩 3px。
     expect(holeOf()).toEqual({ left: 794, top: 74, right: 1226, bottom: 766 });
-    expect(strokeOf()).toEqual({ left: 1127, top: 93, width: 80, height: 34 });
+    expect(innerRingOf()).toMatchObject({ left: 1127, top: 93, width: 80, height: 34 });
+    expect(litRingOf()).toMatchObject({ left: 794, top: 74, width: 432, height: 692 });
 
     // 入场动画还在走：位置变了，亮区要跟着变，不能停在第一次量到的位置。
     panelRect = rect({ left: 814, width: 399 });
@@ -162,7 +188,7 @@ describe("demo guide overlay tracking", () => {
       right: panelRect.left + panelRect.width + 6,
       bottom: panelRect.top + panelRect.height + 6
     });
-    expect(strokeOf()).toEqual({
+    expect(innerRingOf()).toMatchObject({
       left: continueRect.left - 3,
       top: continueRect.top - 3,
       width: continueRect.width + 6,
@@ -171,19 +197,13 @@ describe("demo guide overlay tracking", () => {
   });
 
   it("lights only Create project before the project exists", async () => {
-    const submit = document.createElement("button");
-    submit.setAttribute("data-demo-guide", "create-project-submit");
-    stubRect(submit, () => rect({ left: 900, top: 600, width: 96, height: 32 }));
-    await act(async () => {
-      document.body.append(submit);
-    });
-    // 建项目之前还不知道演示成员是谁：卡片用中性叫法，也不出现进度条与「跳过这一步」。
+    anchor("create-project-submit", () => rect({ left: 900, top: 600, width: 96, height: 32 }), "button");
+    // 建项目之前还不知道演示成员是谁：卡片里没有进度徽章，也没有「跳过这一步」与「下一步」。
     await act(async () => {
       root.render(
         <I18nProvider language="zh-CN">
           <CollabDemoGuideOverlay
             state={{ ...activeState("create-project"), projectId: null, localProjectId: null, memberUserId: null, memberName: "" }}
-            onJoined={vi.fn()}
             onNext={vi.fn()}
             onSkip={vi.fn()}
             onExit={vi.fn()}
@@ -196,36 +216,36 @@ describe("demo guide overlay tracking", () => {
     });
     await frames(6);
 
-    expect(strokeOf()).toEqual({ left: 897, top: 597, width: 102, height: 38 });
-    const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
-    expect(card?.textContent).toContain("点击创建协作项目。");
-    // 这句话里没有成员的名字：建项目之前也还不知道演示成员是谁。
-    expect(card?.textContent).not.toContain("一位同事");
-    expect(card?.textContent).toContain("退出引导");
-    expect(card?.textContent).not.toContain("跳过这一步");
-    expect(card?.textContent).not.toContain("下一步");
+    // 亮区是按钮外扩 7px（规格里这一屏的 pad），圆角 10；没有第二圈描边。
+    expect(holeOf()).toEqual({ left: 893, top: 593, right: 1003, bottom: 639 });
+    expect(litRingOf()).toMatchObject({ left: 893, top: 593, width: 110, height: 46, radius: 10, quiet: false });
+    expect(innerRingOf()).toBeNull();
+
+    const text = cardText();
+    expect(text).toContain(zhCNMessages["collab.demo.submit.body"]);
+    expect(text).toContain("退出引导");
+    expect(text).not.toContain("跳过这一步");
+    expect(text).not.toContain("下一步");
     // 还没有「第几步」：徽章与步骤名都不出现。
-    expect(card?.textContent).not.toContain("接续成员的任务");
+    expect(text).not.toContain("接续成员的任务");
+    expect(document.querySelector(`.${styles.head}`)).toBeNull();
   });
 
-  it("lights the link-a-task button during the tour without letting anyone use it", async () => {
-    const associate = document.createElement("button");
-    associate.setAttribute("data-demo-guide", "board-associate");
-    stubRect(associate, () => rect({ left: 1060, top: 250, width: 92, height: 28 }));
-    await act(async () => {
-      document.body.append(associate);
-    });
+  it("lights the link-a-task button during the tour without ringing it", async () => {
+    anchor("board-associate", () => rect({ left: 1060, top: 250, width: 92, height: 28 }), "button");
     await mount("tour-associate");
 
     // 亮区就是这个按钮，但不描边：描边意味着「这里可以点」，导览只讲给人听，不打开关联弹窗、不写数据。
-    expect(strokeOf()).toBeNull();
     expect(holeOf()).toEqual({ left: 1054, top: 244, right: 1158, bottom: 284 });
-    const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
+    expect(litRingOf()).toMatchObject({ radius: 10, quiet: true });
+    expect(innerRingOf()).toBeNull();
+
+    const text = cardText();
     // 导览段没有「1 / 3」这种进度，只有一个「介绍」徽章；也没有「跳过这一步」。
-    expect(card?.textContent).not.toContain("1 / 3");
-    expect(card?.textContent).toContain("介绍");
-    expect(card?.textContent).not.toContain("跳过这一步");
-    expect(card?.textContent).toContain("下一步");
+    expect(text).not.toContain("1 / 3");
+    expect(text).toContain("介绍");
+    expect(text).not.toContain("跳过这一步");
+    expect(text).toContain("下一步");
   });
 
   it("asks before leaving with a title and the line naming who leaves", async () => {
@@ -237,13 +257,79 @@ describe("demo guide overlay tracking", () => {
     await frames(4);
 
     // 定稿把这一屏拆成标题与正文两句，正文里的名字是写死的演示成员。
-    const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
-    expect(card?.textContent).toContain("退出引导？");
-    expect(card?.textContent).toContain("小饭团会离开这个项目。");
-    expect(card?.textContent).not.toContain("{name}");
-    const buttons = Array.from(card?.querySelectorAll("button") ?? []).map((entry) => entry.textContent?.trim());
-    expect(buttons).toContain("接着看");
-    expect(buttons).toContain("退出");
+    const text = cardText();
+    expect(text).toContain(zhCNMessages["collab.demo.exit.title"]);
+    expect(text).toContain(zhCNMessages["collab.demo.exit.body"]);
+    expect(text).not.toContain("{name}");
+    const buttons = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"] button')).map((entry) => entry.textContent?.trim());
+    expect(buttons).toContain(zhCNMessages["collab.demo.exit.continue"]);
+    expect(buttons).toContain(zhCNMessages["collab.demo.exit.confirm"]);
+  });
+
+  it("asks the host to skip the join entry when the dialog has no join button", async () => {
+    const skip = vi.fn();
+    // 眼下的锚点都没有 create-join（API Key 模式下这个按钮根本不渲染）：不能把气泡指向空处。
+    await mount("join-entry", { onSkipJoinEntry: skip });
+    expect(skip).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the join entry when the dialog really shows the join button", async () => {
+    const skip = vi.fn();
+    anchor("create-join", () => rect({ left: 320, top: 620, width: 88, height: 30 }), "button");
+    await mount("join-entry", { onSkipJoinEntry: skip });
+    expect(skip).not.toHaveBeenCalled();
+    expect(litRingOf()).not.toBeNull();
+  });
+
+  it("draws the board mask on the join screen instead of a separate notice", async () => {
+    anchor("board-members", () => rect({ left: 640, top: 48, width: 72, height: 26 }), "button");
+    await mount("joined");
+
+    // 加入那一屏不再是一张居中的提示窗：亮区套住看板上的成员徽章，卡片照常出现在旁边。
+    expect(document.querySelector("[data-demo-join]")).toBeNull();
+    expect(document.querySelector("[data-demo-mask]")).not.toBeNull();
+    expect(litRingOf()).toMatchObject({ left: 633, top: 41, width: 86, height: 40, radius: 10, quiet: true });
+    const text = cardText();
+    expect(text).toContain(zhCNMessages["collab.demo.joined.body"]);
+    expect(Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"] button')).map((entry) => entry.textContent?.trim()))
+      .toContain(zhCNMessages["collab.demo.joined.continue"]);
+    // 没有徽章、没有步骤名：头部那一行整个不出现。
+    expect(document.querySelector(`.${styles.head}`)).toBeNull();
+    expect(text).not.toContain("跳过这一步");
+  });
+
+  it("writes each of the six screens before the project with its own words and radius", async () => {
+    const screens: Array<[DemoGuidePhase, string, number, MessageKey]> = [
+      ["intro", "create-dialog", 18, "collab.demo.intro.body"],
+      ["name", "create-name", 13, "collab.demo.name.body"],
+      ["folder", "create-folder", 14, "collab.demo.folder.body"],
+      ["collab", "create-collab", 13, "collab.demo.collab.body"],
+      ["join-entry", "create-join", 10, "collab.demo.joinEntry.body"]
+    ];
+    for (const [phase, name, radius, key] of screens) {
+      for (const element of Array.from(document.querySelectorAll("[data-demo-guide]"))) element.remove();
+      anchor(name, () => rect({ left: 480, top: 300, width: 300, height: 60 }));
+      await mount(phase);
+
+      // 圆角按规格的表格给：一屏一个数，不出现在 CSS 里。
+      expect(litRingOf(), phase).toMatchObject({ radius });
+      // 正文就是规格里那一句，逐屏对过一遍。
+      expect(cardText(), phase).toContain(zhCNMessages[key]);
+    }
+  });
+
+  it("keeps the intro screen's ring hidden and shows who is talking", async () => {
+    anchor("create-dialog", () => rect({ left: 400, top: 120, width: 480, height: 560 }));
+    await mount("intro");
+
+    // 出场那一屏只压暗、不画描边：证件上没有人要点的东西。
+    expect(litRingOf()).toMatchObject({ radius: 18, quiet: true });
+    const text = cardText();
+    // 唯一带徽章的建项目前屏：徽章写「官方」，步骤名是小饭团。
+    expect(text).toContain(zhCNMessages["collab.demo.intro.badge"]);
+    expect(text).toContain(zhCNMessages["collab.demo.intro.name"]);
+    expect(text).toContain(zhCNMessages["collab.demo.intro.body"]);
+    expect(document.querySelector(`.${styles.head}`)).not.toBeNull();
   });
 
   it("closes the walkthrough with the approved words, invite before done", async () => {
@@ -259,7 +345,6 @@ describe("demo guide overlay tracking", () => {
               done: { task: true, ask: true, help: true },
               endReason: "finished"
             }}
-            onJoined={vi.fn()}
             onNext={vi.fn()}
             onSkip={vi.fn()}
             onExit={vi.fn()}
@@ -272,15 +357,13 @@ describe("demo guide overlay tracking", () => {
     });
 
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
-    expect(dialog?.textContent).toContain("协作结束");
-    expect(dialog?.textContent).toContain("接着小饭团的安排，写好了分享会的通知");
-    expect(dialog?.textContent).toContain("请小饭团的电脑查明上次到场人数");
-    expect(dialog?.textContent).toContain("为小饭团确认了这台电脑的系统版本");
-    // 那段讲机制的话已经不显示了：完成弹窗只列做过的事，再加一句邀请。
+    expect(dialog?.textContent).toContain("体验完成");
+    expect(dialog?.textContent).toContain("接续成员任务，生成了分享会通知");
+    expect(dialog?.textContent).toContain("发起协助请求，查到上次到场人数");
+    expect(dialog?.textContent).toContain("响应协助请求，为小饭团确认了系统版本");
+    // 那段讲机制的话已经不显示了：完成弹窗只列做过的事，再加一句说明与两个按钮。
     expect(dialog?.textContent).not.toContain("项目协作以项目内的上下文为基础");
-    expect(dialog?.textContent).toContain("邀请同事，在项目中继续协作。");
-    expect(dialog?.textContent).not.toContain("就能在这里继续协作");
-    expect(dialog?.textContent).not.toContain("已经离开项目");
+    expect(dialog?.textContent).toContain("成员之间可以直接接着推进");
     expect(dialog?.textContent).not.toContain("{name}");
 
     // 按钮顺序与原型一致：左边是次要的「邀请同事」，右边才是主按钮「完成」。
@@ -298,33 +381,22 @@ describe("demo guide overlay tracking", () => {
 
   it("never prints a raw placeholder on the card", async () => {
     // settings-open 这一句里的名字按定稿写死，不再走占位符：渲染出来不能有任何 { 。
-    const settings = document.createElement("button");
-    settings.setAttribute("data-demo-guide", "board-settings");
-    stubRect(settings, () => rect({ left: 1060, top: 60, width: 28, height: 28 }));
-    await act(async () => {
-      document.body.append(settings);
-    });
+    anchor("board-settings", () => rect({ left: 1060, top: 60, width: 28, height: 28 }), "button");
     await mount("settings-open");
 
-    const card = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]');
-    expect(card?.textContent).toContain("小饭团那边也需要你帮个忙，先去项目设置里打开接收请求。");
-    expect(card?.textContent).not.toContain("{");
+    expect(cardText()).toContain(zhCNMessages["collab.demo.settings.body"]);
+    expect(cardText()).not.toContain("{");
     expect(document.body.textContent).not.toContain("{name}");
   });
 
   it("stands in the task itself on the last step and names who gets the result", async () => {
-    const task = document.createElement("div");
-    task.setAttribute("data-demo-guide", "assist-task");
-    stubRect(task, () => rect({ left: 100, top: 60, width: 1000, height: 620 }));
-    await act(async () => {
-      document.body.append(task);
-    });
+    anchor("assist-task", () => rect({ left: 100, top: 60, width: 1000, height: 620 }));
     await mount("help-running");
 
     // 人在那条任务里，卡片说清结果会发给谁；第三步的亮区就是这个任务页。
     expect(holeOf()).toEqual({ left: 94, top: 54, right: 1106, bottom: 686 });
     expect(document.body.textContent).toContain("3 / 3");
-    expect(document.body.textContent).toContain("正在执行，完成后结果将回传给对方");
+    expect(document.body.textContent).toContain("正在本机查询，完成后结果会回传给小饭团");
   });
 
   it("waits for the target instead of drawing an overlay over nothing", async () => {
@@ -333,15 +405,8 @@ describe("demo guide overlay tracking", () => {
     expect(document.querySelector("[data-demo-mask]")).toBeNull();
 
     // 目标晚一步出现（弹窗、面板挂载得比引导晚）：出现之后仍要画出来。
-    const panel = document.createElement("aside");
-    panel.setAttribute("data-demo-guide", "reader-panel");
-    stubRect(panel, () => panelRect);
-    const continueButton = document.createElement("button");
-    continueButton.setAttribute("data-demo-guide", "reader-continue");
-    stubRect(continueButton, () => continueRect);
-    await act(async () => {
-      document.body.append(panel, continueButton);
-    });
+    anchor("reader-panel", () => panelRect, "aside");
+    anchor("reader-continue", () => continueRect, "button");
     await frames(6);
 
     expect(holeOf()).toEqual({ left: 794, top: 74, right: 1226, bottom: 766 });

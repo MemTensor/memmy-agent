@@ -292,12 +292,15 @@ export function CollabDemoGuideHost(props: {
     <>
     <CollabDemoGuideOverlay
       state={state}
-      onJoined={() => dispatchDemoGuide({ type: "joined-confirmed" })}
-      onNext={() => dispatchDemoGuide({
-        type: "next",
-        // 第一步做完就直接请成员协助：那句话在进入这一步时才填；看板导览段不预填任何东西。
-        prefill: state.phase === "reply-done" ? askPrefill() : undefined
-      })}
+      onSkipJoinEntry={() => dispatchDemoGuide({ type: "skip-join-entry" })}
+      onNext={() => dispatchDemoGuide(state.phase === "joined"
+        // 加入那一屏的主按钮是「继续」：与旧的「开始体验」同一个事件，进看板导览。
+        ? { type: "joined-confirmed" }
+        : {
+          type: "next",
+          // 第一步做完就直接请成员协助：那句话在进入这一步时才填；看板导览段与建项目之前不预填任何东西。
+          prefill: state.phase === "reply-done" ? askPrefill() : undefined
+        })}
       onSkip={() => dispatchDemoGuide({
         type: "skip",
         // 跳过第一步就直接去请成员协助：那句话要跟着填上。导览段与后两步都不预填。
