@@ -223,7 +223,7 @@ export function PluginMarketplace() {
       const scopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
       if (plugin.id === "office") {
         dispatch(agentActions.composerDraftUpdated(
-          scopeKey, "使用 Office 插件帮我制作办公文档。先根据我的需求确定文件格式，再生成、检查并交付文件。"
+          scopeKey, t("plugins.ui.officeTryItPrompt")
         ));
       } else {
         const command = pluginComposerCommand(plugin);

@@ -149,7 +149,6 @@ export class OpenAICompatProvider extends LLMProvider {
     }
 
     this.defaultModel = this.model ?? "gpt-4o";
-    const name = specName(this.spec);
     if (this.apiKey && this.spec?.envKey && !this.independent) this.setupEnv(this.apiKey, this.apiBase);
 
     const effectiveBase = this.apiBase || resolveDefaultApiBase(this.spec);

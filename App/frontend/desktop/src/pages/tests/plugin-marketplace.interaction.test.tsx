@@ -75,8 +75,8 @@ describe("live marketplace controller", () => {
     container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   });
   afterEach(() => { act(() => root.unmount()); document.body.replaceChildren(); });
-  async function render() {
-    await act(async () => root.render(<I18nProvider language="zh-CN"><PluginMarketplace /></I18nProvider>));
+  async function render(language: "zh-CN" | "en-US" = "zh-CN") {
+    await act(async () => root.render(<I18nProvider language={language}><PluginMarketplace /></I18nProvider>));
   }
   function button(label: string, scope: ParentNode = container) {
     const found = [...scope.querySelectorAll("button")].find((item) => item.textContent === label || item.getAttribute("aria-label") === label);
@@ -486,6 +486,23 @@ describe("live marketplace controller", () => {
       type: "agent/composerDraftUpdated",
       scopeKey: "chat-1",
       value: "/literature-review  比较两篇论文"
+    });
+    expect(context.dispatch).toHaveBeenCalledWith({ type: "navigation/changed", path: "/main" });
+  });
+
+  it.each([
+    ["zh-CN", "将office加入对话", "使用 Office 插件帮我制作办公文档。先根据我的需求确定文件格式，再生成、检查并交付文件。"],
+    ["en-US", "Add Office to chat", "Use the Office plugin to help me create office documents. First determine the file format from my requirements, then generate, check, and deliver the files."]
+  ] as const)("adds the localized Office prompt to the current chat in %s", async (language, label, draft) => {
+    records = [{ ...pending, id: "office", state: "active", manifest: { ...pending.manifest, id: "office", name: "Office" } }];
+    context.state.agent = { currentChatId: "chat-office", newChatRequestId: 3, composerDraftsByScope: {} };
+    await render(language);
+    await click(label);
+
+    expect(context.dispatch).toHaveBeenCalledWith({
+      type: "agent/composerDraftUpdated",
+      scopeKey: "chat-office",
+      value: draft
     });
     expect(context.dispatch).toHaveBeenCalledWith({ type: "navigation/changed", path: "/main" });
   });
