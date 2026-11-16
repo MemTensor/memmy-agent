@@ -7,6 +7,7 @@ import {
   requestCollabAccessPrompt,
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
+import { readDemoGuideDone } from "../app/collab-demo-guide-store.js";
 import { prepareProjectDirectory } from "../api/projects-client.js";
 import { useOptionalAgentRuntimeBridge } from "../app/agent-runtime-bridge.js";
 import { useOptionalApiClients } from "../app/providers.js";
@@ -108,7 +109,9 @@ export function CreateProjectModal(props: {
    * 加入过别人的项目不影响：加入他人项目本身不演示，之后第一次自己创建时仍然演示。
    * 带了这个标记也不代表一定演示：云端会再判断开关、名单与是否已经体验过，返回 `demo.active` 才真的开始。
    * 从大卡「新建项目」进来的人不看这一条：那条路已经明确要体验，云端按名单与是否体验过决定。
+   * 本机退出过引导就不再请求演示：在建项目之前退出时云端还没有项目可记，只能靠本机这个标记。
    */
+  const demoRequested = !readDemoGuideDone();
   const firstSharedProject = share && shareAvailable && ownedCount === 0;
 
   /**
@@ -180,7 +183,8 @@ export function CreateProjectModal(props: {
       // The cloud record points at the folder the project already runs in, so both keep the same directory.
       const created = await props.collab.createProject(trimmed, workingDirectory, {
         // 大卡入口已经明确要体验一次：这时不再要求「名下没有在线项目」，交云端按名单判断。
-        demo: firstSharedProject || demo
+        // 本机已经退出过引导就不再请求演示：云端不会开始，项目照常建为普通协作项目。
+        demo: demoRequested && (firstSharedProject || demo)
       });
       sharingStarted = true;
       props.onShared(created.project);

@@ -975,8 +975,8 @@ export const zhCNMessages = {
   "collab.demo.exit": "退出引导",
   // 退出确认：建项目之前的正文与之后不同，说明项目会不会留下。
   "collab.demo.exit.title": "退出新手引导？",
-  "collab.demo.exit.body": "退出后引导结束，小饭团会离开项目；已经创建的项目会保留。",
-  "collab.demo.exit.bodyBeforeProject": "退出后引导结束，项目不会被创建。",
+  "collab.demo.exit.body": "退出后引导结束，小饭团会离开项目；已经创建的项目会保留，之后新建项目不再自动带引导。",
+  "collab.demo.exit.bodyBeforeProject": "退出后引导结束，项目不会被创建；之后新建项目不再自动带引导。",
   "collab.demo.exit.confirm": "退出",
   "collab.demo.exit.continue": "继续引导",
   "collab.demo.failed.title": "这一步没有完成",
@@ -4303,8 +4303,8 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "collab.demo.exit": "Exit guide",
   // Exit confirmation: the body differs before and after the project exists.
   "collab.demo.exit.title": "Exit the walkthrough?",
-  "collab.demo.exit.body": "The guide ends and Xiaofantuan leaves the project. The project itself stays.",
-  "collab.demo.exit.bodyBeforeProject": "The walkthrough ends and nothing is created.",
+  "collab.demo.exit.body": "The guide ends and Xiaofantuan leaves the project. The project itself stays, and new projects no longer open the walkthrough.",
+  "collab.demo.exit.bodyBeforeProject": "The walkthrough ends and nothing is created. New projects no longer open it either.",
   "collab.demo.exit.confirm": "Exit",
   "collab.demo.exit.continue": "Continue",
   "collab.demo.failed.title": "This step didn't finish",

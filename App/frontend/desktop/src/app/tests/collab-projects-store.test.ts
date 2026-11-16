@@ -255,6 +255,14 @@ describe("whether the sidebar's new project opens the walkthrough", () => {
     expect(shouldDemoOnNewProject({ collabEnabled: true, demoGuideActive: false })).toBe(true);
   });
 
+  it("skips it once this machine has already left the walkthrough", async () => {
+    await loadCollabProjects(clientWithEligibility([], true));
+    // 建项目之前就退出过：云端还没有项目可记、只能说「可以体验」，本机标记必须更早生效。
+    expect(shouldDemoOnNewProject({ collabEnabled: true, demoGuideActive: false, demoGuideDone: true })).toBe(false);
+    // 标记还没写时照旧进演示。
+    expect(shouldDemoOnNewProject({ collabEnabled: true, demoGuideActive: false, demoGuideDone: false })).toBe(true);
+  });
+
   it("skips it when the cloud does not allow another walkthrough", async () => {
     await loadCollabProjects(clientWithEligibility([], false));
     expect(shouldDemoOnNewProject({ collabEnabled: true, demoGuideActive: false })).toBe(false);

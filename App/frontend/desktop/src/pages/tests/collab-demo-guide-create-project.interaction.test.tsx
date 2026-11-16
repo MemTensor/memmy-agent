@@ -8,6 +8,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { addCollabProject, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
+import { clearDemoGuideDone, markDemoGuideDone } from "../../app/collab-demo-guide-store.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { CreateProjectModal } from "../collab-create-project-dialog.js";
 
@@ -105,6 +106,8 @@ describe("new project dialog and the demo flag", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     resetCollabProjectsStore();
+    // 本机「已退出过引导」的标记与用例无关，每个用例从干净状态开始。
+    clearDemoGuideDone();
     mocks.prepareDirectory.mockResolvedValue("/Users/me/.memmy/local-projects/demo");
     mocks.mutateProject.mockResolvedValue({ status: "committed", project: { id: "local-1" } });
     mocks.createProject.mockResolvedValue({
@@ -149,6 +152,7 @@ describe("new project dialog and the demo flag", () => {
     await act(async () => root.unmount());
     container.remove();
     resetCollabProjectsStore();
+    clearDemoGuideDone();
   });
 
   it("opens the walkthrough entrance with the name and sharing already set", async () => {
@@ -243,6 +247,18 @@ describe("new project dialog and the demo flag", () => {
     await createNamed("项目协作体验");
     expect(mocks.createProject).toHaveBeenCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: true });
   });
+  it("never asks for the demo once this machine has left the walkthrough", async () => {
+    // 用户点过「退出引导」：本机标记已写，之后第一次创建共享项目也不再请求演示。
+    markDemoGuideDone();
+    await createNamed("我的第一个项目");
+    expect(mocks.createProject).toHaveBeenCalledWith("我的第一个项目", "/Users/me/.memmy/local-projects/demo", { demo: false });
+
+    // 大卡入口同样不带：本机已经退出过，就不再带人走一遍。
+    await renderDemoDialog();
+    await createNamed("项目协作体验");
+    expect(mocks.createProject).toHaveBeenLastCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: false });
+  });
+
   it("still asks for the demo when the person has only joined others' projects", async () => {
     await act(async () => {
       addCollabProject({

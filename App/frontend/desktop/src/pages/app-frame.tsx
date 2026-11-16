@@ -46,6 +46,7 @@ import {
   dismissDemoGuideBeforeProject,
   getDemoGuideState,
   isDemoGuideActive,
+  readDemoGuideDone,
   startDemoGuide,
   startDemoGuideBeforeProject,
   subscribeDemoGuide
@@ -578,6 +579,12 @@ export function AppFrame(props: AppFrameProps) {
     if (collabSnapshot.createDemo) startDemoGuideBeforeProject();
     consumeCreateProjectRequest();
   }, [createPending, collabSnapshot.createShareDefault, collabSnapshot.createDemo]);
+  // 引导在新建弹窗上被退出（本机从此不再自动演示）：弹窗回到普通新建，
+  // 免得同一次弹窗里再点「创建项目」时还带着 `demo`，让云端又重新开一场演示。
+  useEffect(() => {
+    if (demoGuideActive || !readDemoGuideDone()) return;
+    setCreateProjectDemo(false);
+  }, [demoGuideActive]);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);

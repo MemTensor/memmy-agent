@@ -4,6 +4,7 @@
  * store keeps a single open project — named by the local project id — and a single fetch of the cloud list.
  */
 import type { CollabApplication, CollabApplicationDecision, CollabClient, CollabProject } from "../api/collab-client.js";
+import { readDemoGuideDone } from "./collab-demo-guide-store.js";
 
 export interface CollabProjectsSnapshot {
   /** Null until the first load finishes, so the sidebar can tell "none" from "not loaded yet". */
@@ -245,17 +246,23 @@ export function consumeCreateProjectRequest(): void {
 /**
  * 侧栏「新建项目」要不要以新手引导的演示模式打开弹窗（两条链路的第二条）。
  *
- * 四条规则全部为真才进演示，任一条为假都按普通新建打开：
+ * 五条规则全部为真才进演示，任一条为假都按普通新建打开：
  * 1. `collabEnabled`：协作功能可用——与新建弹窗的 `shareAvailable` 同源，API Key 模式下没有云端账号可共享；
- * 2. 本人名下的在线协作项目数为 0——与看板侧栏同一份 `projects`，只算 `role === "owner"`，加入过别人的项目不影响；
- * 3. 云端在项目列表响应里给出 `demoEligible === true`——旧云端没有这个字段时视为 false，不能因此进演示；
- * 4. 当前没有别的演示在进行，否则第二个演示会把正在走的那一个顶掉。
+ * 2. 本机没有退出过引导——退出过就不再自动带人走（`collab-demo-guide-store` 里的机器级标记），
+ *    这一条同时兼顾「建项目之前就退出」那种云端还来不及记录的情况；
+ * 3. 本人名下的在线协作项目数为 0——与看板侧栏同一份 `projects`，只算 `role === "owner"`，加入过别人的项目不影响；
+ * 4. 云端在项目列表响应里给出 `demoEligible === true`——旧云端没有这个字段时视为 false，不能因此进演示；
+ * 5. 当前没有别的演示在进行，否则第二个演示会把正在走的那一个顶掉。
+ *
+ * @param options.demoGuideDone 本机是否已经退出过引导；不传时现读本机标记。
  */
 export function shouldDemoOnNewProject(options: {
   collabEnabled: boolean;
   demoGuideActive: boolean;
+  demoGuideDone?: boolean;
 }): boolean {
   if (!options.collabEnabled || options.demoGuideActive) return false;
+  if (options.demoGuideDone ?? readDemoGuideDone()) return false;
   if (snapshot.demoEligible !== true) return false;
   const owned = (snapshot.projects ?? []).filter((project) => project.role === "owner").length;
   return owned === 0;

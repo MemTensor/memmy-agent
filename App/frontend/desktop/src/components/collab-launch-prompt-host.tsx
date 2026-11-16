@@ -23,7 +23,7 @@ import {
 import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
 import { useGuidanceDone } from "../app/use-guidance-progress.js";
 import { requestCreateProject } from "../app/collab-projects-store.js";
-import { isDemoGuideActive } from "../app/collab-demo-guide-store.js";
+import { isDemoGuideActive, readDemoGuideDone } from "../app/collab-demo-guide-store.js";
 import { useAppState } from "../state/app-state.js";
 import { CollabLaunchDialog } from "./collab-launch-dialog.js";
 
@@ -102,7 +102,8 @@ export function CollabLaunchPromptHost() {
         setCollabLaunchPromptOpen(false);
         // The new-project dialog is mounted by AppFrame, so it opens over the current page; the board follows.
         // 从大卡进来就带着体验走：弹窗里有预填的名称与打开的协作开关，引导先只等人点「创建项目」。
-        requestCreateProject({ share: true, demo: true });
+        // 本机已经退出过引导就不再演示：弹窗照开、共享照默认开，只是不带人走。
+        requestCreateProject({ share: true, demo: !readDemoGuideDone() });
       }}
     />
   );

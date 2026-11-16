@@ -4,10 +4,11 @@
  *
  * 这些规则都不依赖界面，所以按 reducer 直接断言；界面只负责发事件与画卡片。
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEMO_GUIDE_BEFORE_PROJECT_PHASES,
   DEMO_GUIDE_TOUR_PHASES,
+  clearDemoGuideDone,
   demoGuideHeartbeatStep,
   demoGuideIsBeforeProjectPhase,
   demoGuideIsTourPhase,
@@ -17,6 +18,15 @@ import {
   demoGuideStartsExperience,
   demoGuideStepNumberOf,
   demoGuideTourIndex,
+  dismissDemoGuideBeforeProject,
+  dispatchDemoGuide,
+  endDemoGuide,
+  getDemoGuideState,
+  markDemoGuideDone,
+  readDemoGuideDone,
+  resetDemoGuideStore,
+  setDemoGuideStorageForTest,
+  startDemoGuideBeforeProject,
   type DemoGuideEvent,
   type DemoGuideState
 } from "../collab-demo-guide-store.js";
@@ -416,5 +426,102 @@ describe("demo guide state machine", () => {
     // 做完第一步才换下一句：请成员协助时那句是新的一句。
     const asked = demoGuideReducer({ ...first, phase: "reply-done" }, { type: "next", prefill: "第二句" });
     expect(asked.prefill).toMatchObject({ text: "第二句", nonce: 2 });
+  });
+});
+
+/** 一个最小的内存存储：退出标记跨重启保留这件事只跟存储有关，不必真用 localStorage。 */
+function memoryStorage(): Storage {
+  const items = new Map<string, string>();
+  return {
+    get length() {
+      return items.size;
+    },
+    clear: () => items.clear(),
+    getItem: (key: string) => items.get(key) ?? null,
+    key: (index: number) => Array.from(items.keys())[index] ?? null,
+    removeItem: (key: string) => {
+      items.delete(key);
+    },
+    setItem: (key: string, value: string) => {
+      items.set(key, String(value));
+    }
+  } as Storage;
+}
+
+describe("leaving the walkthrough once is enough", () => {
+  it("records the exit on this machine and never clears it by itself", () => {
+    const storage = memoryStorage();
+    expect(readDemoGuideDone(storage)).toBe(false);
+    markDemoGuideDone(storage);
+    // 换一个「进程」读同一份存储：退出过后就不再引导，重启不算重新开始。
+    expect(readDemoGuideDone(storage)).toBe(true);
+    markDemoGuideDone(storage);
+    expect(readDemoGuideDone(storage)).toBe(true);
+    // 只有测试与自助重置会把它清掉。
+    clearDemoGuideDone(storage);
+    expect(readDemoGuideDone(storage)).toBe(false);
+  });
+
+  it("treats an unreadable storage as not yet exited instead of blocking new projects", () => {
+    const broken = {
+      getItem: () => {
+        throw new Error("quota");
+      },
+      setItem: () => {
+        throw new Error("quota");
+      },
+      removeItem: () => {
+        throw new Error("quota");
+      }
+    } as unknown as Storage;
+    expect(readDemoGuideDone(broken)).toBe(false);
+    // 写不进去也不抛错：这一次照常走完，下次最多再引导一次。
+    expect(() => markDemoGuideDone(broken)).not.toThrow();
+    expect(() => clearDemoGuideDone(broken)).not.toThrow();
+  });
+});
+
+describe("a walkthrough that ended stays ended on this machine", () => {
+  let storage: Storage;
+
+  beforeEach(() => {
+    storage = memoryStorage();
+    resetDemoGuideStore();
+    setDemoGuideStorageForTest(storage);
+  });
+
+  afterEach(() => {
+    resetDemoGuideStore();
+  });
+
+  it("records the exit at any moment, even before the project exists", async () => {
+    dispatchDemoGuide({ type: "start-before-project" });
+    expect(getDemoGuideState().status).toBe("active");
+    // 建项目之前退出：云端还没有项目可记，标记只能由本机写。
+    expect(readDemoGuideDone(storage)).toBe(false);
+    await endDemoGuide("exited");
+    expect(getDemoGuideState().status).toBe("ended");
+    expect(readDemoGuideDone(storage)).toBe(true);
+  });
+
+  it("records skipping and finishing the same way as exiting", async () => {
+    dispatchDemoGuide({ type: "start-before-project" });
+    dispatchDemoGuide({ type: "next" });
+    await endDemoGuide("skipped");
+    expect(readDemoGuideDone(storage)).toBe(true);
+  });
+
+  it("treats closing the new-project dialog as nothing to remember", () => {
+    dispatchDemoGuide({ type: "start-before-project" });
+    // 关掉弹窗只是收起蒙版：没建项目，也没说不想看，以后还能引导。
+    dismissDemoGuideBeforeProject();
+    expect(getDemoGuideState().status).toBe("ended");
+    expect(readDemoGuideDone(storage)).toBe(false);
+  });
+
+  it("refuses to start another walkthrough once this machine left one", () => {
+    markDemoGuideDone(storage);
+    startDemoGuideBeforeProject();
+    expect(getDemoGuideState().status).toBe("ended");
   });
 });

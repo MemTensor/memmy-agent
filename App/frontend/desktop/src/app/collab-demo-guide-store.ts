@@ -2,6 +2,7 @@
  * 项目协作新手引导（小饭团演示）的内存状态。
  *
  * 只在「刚创建完一个演示项目」时开始，进度不落盘：重新打开 Memmy 后项目就是普通项目。
+ * 唯一落盘的是「这台机器已经退出过引导」这个标记：退出、跳过、完成、中途中断都算退出，之后新建项目不再自动带引导。
  * 引导的一切都认云端：项目视图里的 `demo.active` 为真才开始，心跳或请求说演示已结束就立即收场。
  * 这里也负责两件云端的事：演示期间每 30 秒一次心跳（步骤变化时立即补一次），以及结束时叫云端把小饭团移出项目。
  */
@@ -474,6 +475,75 @@ function nextPrefill(state: DemoGuideState, text: string | undefined): DemoGuide
 /** 演示期间心跳的间隔：云端按 120 秒没心跳算结束，30 秒一次留足余量。 */
 export const DEMO_GUIDE_HEARTBEAT_MS = 30_000;
 
+/**
+ * 机器级标记：这台机器上已经退出过引导，之后新建项目不再自动带引导。
+ *
+ * 退出、跳过、完成、离开看板、云端判定结束都算一次收场，收场就记下。与首次引导的完成标记同一套做法：
+ * 一次性的初见体验，换账号再演一遍反而突兀，所以按机器记、不按账号记。
+ *
+ * 云端也按账号判断有没有体验过（`agent_collab_demo` 有过一行就不再演示），但「建项目之前就退出」这种情况
+ * 云端还没有项目可记，只能靠本机这个标记；本机标记因此要比云端更早生效，也覆盖云端名单内的重复体验账号。
+ */
+const DEMO_GUIDE_DONE_STORAGE_KEY = "memmy.collabDemoGuide.v1";
+
+/** 默认用 localStorage；测试与预览可以换成一个内存存储。 */
+let injectedStorage: Storage | null = null;
+
+function demoGuideStorage(storage?: Storage): Storage | undefined {
+  if (storage) return storage;
+  if (injectedStorage) return injectedStorage;
+  return typeof window === "undefined" ? undefined : window.localStorage;
+}
+
+/**
+ * 预览与测试用：把存储换成一个给定对象。
+ *
+ * @param storage 要用的存储；传 null 恢复默认的 localStorage。
+ */
+export function setDemoGuideStorageForTest(storage: Storage | null): void {
+  injectedStorage = storage;
+}
+
+/**
+ * 这台机器上是否已经退出过引导：为真时不再自动进演示，新建项目就是普通新建。
+ *
+ * @param storage 存储；不传时用 localStorage（测试可以直接给一个假存储）。
+ */
+export function readDemoGuideDone(storage?: Storage): boolean {
+  try {
+    return demoGuideStorage(storage)?.getItem(DEMO_GUIDE_DONE_STORAGE_KEY) === "1";
+  } catch {
+    // 读不到存储时按「没退出过」处理：大不了再引导一次，不能让读存储失败挡住新建项目。
+    return false;
+  }
+}
+
+/**
+ * 记下「这台机器已经退出过引导」：写过一次就不再自动引导。
+ *
+ * @param storage 存储；不传时用 localStorage。
+ */
+export function markDemoGuideDone(storage?: Storage): void {
+  try {
+    demoGuideStorage(storage)?.setItem(DEMO_GUIDE_DONE_STORAGE_KEY, "1");
+  } catch {
+    // 写不进去就算了：最多下次再引导一次，不影响当前这一轮。
+  }
+}
+
+/**
+ * 清掉退出标记。只给测试、预览页与自助重置用；正式流程不会再把它清回去。
+ *
+ * @param storage 存储；不传时用 localStorage。
+ */
+export function clearDemoGuideDone(storage?: Storage): void {
+  try {
+    demoGuideStorage(storage)?.removeItem(DEMO_GUIDE_DONE_STORAGE_KEY);
+  } catch {
+    // 清不掉也不影响这一轮：下一次读到的仍是旧的标记。
+  }
+}
+
 let state: DemoGuideState = IDLE;
 const listeners = new Set<() => void>();
 let client: CollabClient | null = null;
@@ -523,7 +593,11 @@ export function dispatchDemoGuide(event: DemoGuideEvent): void {
   }
   const before = state;
   const next = demoGuideReducer(before, event);
-  if (next !== before) emit(next);
+  if (next !== before) {
+    emit(next);
+    // 引导真的收场了（完成、退出、跳过、离开看板、云端判定结束）：本机记一笔，之后不再自动带引导。
+    if (before.status === "active" && next.status !== "active") markDemoGuideDone();
+  }
   if (next !== before && next.status === "active" && next.phase !== before.phase) {
     // 步骤一变立即补一次心跳，并把「云端说已结束」这条兜底接上。
     void sendHeartbeat();
@@ -555,6 +629,8 @@ export function startDemoGuide(input: DemoGuideStart): void {
 
 /** 从大卡或侧栏点「新建项目」进来：先在新建弹窗上走六屏，云端还没有项目，也没有心跳。 */
 export function startDemoGuideBeforeProject(): void {
+  // 本机已经退出过引导：不再带着人走一遍，弹窗按普通新建处理。
+  if (readDemoGuideDone()) return;
   if (state.status === "active") return;
   dispatchDemoGuide({ type: "start-before-project" });
 }
@@ -600,6 +676,9 @@ export function resetDemoGuideStore(): void {
   endedProjects.clear();
   state = IDLE;
   listeners.clear();
+  // 测试与预览共用这一份状态：退出标记与临时存储也一并清掉，免得上一个用例影响下一个。
+  clearDemoGuideDone();
+  injectedStorage = null;
 }
 
 function startHeartbeat(): void {
