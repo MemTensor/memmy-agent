@@ -4,6 +4,7 @@ import { normalizeOutputLanguage } from "@memmy/local-api-contracts";
 import { redactSensitive } from "./summarize-history.js";
 import { applicationId, type HistoryApplication, type CaptureNode } from "./recording.js";
 import { estimatePromptTokens } from "../../../utils/helpers.js";
+import type { SummaryFailureKind } from "./summary-retry.js";
 import { recordingCheckpointRecord, recordingGapRecord } from "./recorder-checkpoint.js";
 import { captureGapRecord, RECORDER_HEALTH_CODES, type CaptureGapRecord, type RecorderHealthSignal } from "../mac/recorder-health.js";
 import { previousControlsAtPoint as projectPreviousControls } from "../win/native-event-adapter.js";
@@ -140,7 +141,7 @@ export interface NarrativeRequest {
   priorSummaries?: string[];
   modelPreset?: string | null;
   /** Reports why narration produced nothing, so it cannot fail invisibly. */
-  onError?: (reason: string, category?: "quota_exhausted") => void;
+  onError?: (reason: string, category?: "quota_exhausted", kind?: SummaryFailureKind) => void;
 }
 
 /**
@@ -166,7 +167,7 @@ export async function writeSegmentNarrative(
     const captured = request.modelPreset ? llmRuntime(request.modelPreset) : llmRuntime();
     runtime = captured.prepare ? await captured.prepare({ maxTokens: MAX_TOKENS, thinkingEnabled: false }) : captured;
   } catch (error) {
-    request.onError?.(error instanceof Error ? error.message : String(error));
+    request.onError?.(error instanceof Error ? error.message : String(error), undefined, "transient");
     return null;
   }
   const capabilities = runtime.modelCapabilities;
@@ -216,7 +217,17 @@ export async function writeSegmentNarrative(
     { role: "system", content: systemPrompt },
     { role: "user", content: prompt },
   ];
-  const fitsInputBudget = () => estimatePromptTokens(messages()) <= MAX_NARRATIVE_INPUT_TOKENS;
+  // The estimator sums messages independently; only the user prompt changes while trimming.
+  const systemTokens = estimatePromptTokens([{ role: "system", content: systemPrompt }]);
+  let countedPrompt: string | undefined;
+  let inputTokens = 0;
+  const fitsInputBudget = () => {
+    if (countedPrompt !== prompt) {
+      inputTokens = systemTokens + estimatePromptTokens([{ role: "user", content: prompt }]);
+      countedPrompt = prompt;
+    }
+    return inputTokens <= MAX_NARRATIVE_INPUT_TOKENS;
+  };
   // Current evidence takes priority over optional earlier context, including
   // when a longer system contract leaves less room than its character cap.
   while (!fitsInputBudget() && prior.length && priorChars > 128) {
@@ -231,10 +242,6 @@ export async function writeSegmentNarrative(
   }
   // Character limits alone do not bound multilingual tokens. Keep both ends
   // and middle evidence using the existing sampler, without changing retention.
-  while (!fitsInputBudget() && prior.length) {
-    prior.shift();
-    prompt = buildPrompt();
-  }
   let evidenceBudget = evidence.length;
   while (!fitsInputBudget() && evidenceBudget > 600) {
     evidenceBudget = Math.max(600, evidenceBudget - 600);
@@ -271,18 +278,22 @@ export async function writeSegmentNarrative(
       return null;
     }
     if (response?.finishReason === "error") {
-      request.onError?.(text || "model request failed");
+      const shared = response.errorStatusCode === 429 || response.errorStatusCode === 401
+        || response.errorStatusCode === 403 || (response.errorStatusCode ?? 0) >= 500
+        || response.errorKind === "history_summary_budget";
+      request.onError?.(text || "model request failed", undefined, shared ? "service"
+        : response.errorStatusCode === 400 || response.errorStatusCode === 413 ? "input" : "transient");
       return null;
     }
     if (!text.trim()) {
-      request.onError?.("the model returned no content");
+      request.onError?.("the model returned no content", undefined, "empty");
       return null;
     }
     const narrative = parseNarrative(text);
-    if (!narrative) request.onError?.(`the model response was not usable: ${text.slice(0, 200)}`);
+    if (!narrative) request.onError?.(`the model response was not usable: ${text.slice(0, 200)}`, undefined, "invalid_response");
     return narrative;
   } catch (error) {
-    request.onError?.(error instanceof Error ? error.message : String(error));
+    request.onError?.(error instanceof Error ? error.message : String(error), undefined, "transient");
     return null;
   }
 }
