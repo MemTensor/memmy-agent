@@ -90,49 +90,73 @@ describe("the demo guide copy", () => {
     const t = translate("zh-CN");
     // 第三步的这句话按定稿写死了演示成员的名字，卡片上不出现字面的 {name}。
     expect(demoGuideCard(stateFor("settings-open"), t).body)
-      .toBe("小饭团那边也需要你帮个忙，先去项目设置里打开接收请求。");
+      .toBe("现在小饭团也需要你电脑上的信息。先去项目设置，打开「接收协助请求」。");
     expect(demoGuideCard(stateFor("settings-open"), translate("en-US")).body)
-      .toBe("Xiaofantuan needs a hand from you too; turn on accepting requests in project settings first.");
-    // 不带人名的句子照旧不写死叫法：执行中的状态只说结果回传给对方。
-    expect(demoGuideCard(stateFor("help-running"), t).status).toBe("正在执行，完成后结果将回传给对方。");
+      .toBe("Now Xiaofantuan needs something from your computer. Open project settings and turn on Accept assistance requests.");
+    // 不带人名的句子照旧不写死叫法：执行中的状态只说结果回传给发起的人。
+    expect(demoGuideCard(stateFor("help-running"), t).status)
+      .toBe("正在本机查询，完成后结果会回传给小饭团。");
   });
 
   it("keeps the four tour steps in the approved words", () => {
     const zh = [0, 1, 2, 3].map((index) => demoGuideTourCard(index, translate("zh-CN")));
     expect(zh.map((card) => card.stepName)).toEqual(["任务列表", "协助", "关联任务", "新建任务"]);
     expect(zh.map((card) => card.body)).toEqual([
-      "你和成员的任务都在这里，谁做到哪一步都看得到。",
-      "协助指把任务交给成员电脑上的 Agent 执行，结果回写到发起它的任务中。",
-      "在其他本地 Agent 中执行的任务，也可以关联到这里。",
-      "点击这里，可以新建一条与成员共享的任务。"
+      "成员共享的任务都在这里。每项任务的完整对话与进展都能读到，也可以接着往下推进，不用反复同步背景。",
+      "有些信息和操作只在成员自己的电脑上，比如他的本地文件、本机环境。任务里需要这些时，向成员发起协助请求，他确认后由他电脑上的 Agent 执行，结果回写到你的任务中。双方的协助记录都在这里。",
+      "你在 Claude Code、Cursor 等外部工具里做的工作，成员默认看不到。把那段会话关联进项目，成员就能读到完整上下文并接着处理，不用再讲一遍；关联整个分组后，该分组新增的会话也会自动进入项目。",
+      "需要开展新工作时，从这里新建任务。项目内新建的任务默认对成员可见，方便他们查看进展、接着推进或发起协助。"
     ]);
     const en = [0, 1, 2, 3].map((index) => demoGuideTourCard(index, translate("en-US")));
     expect(en.map((card) => card.stepName)).toEqual(["Task list", "Assistance", "Linked tasks", "New task"]);
     expect(en.map((card) => card.body)).toEqual([
-      "Your tasks and your members' tasks all live here, so you can see how far each has got.",
-      "Assistance hands a task to the Agent on a member's computer; the result is written back to the task that asked for it.",
-      "Tasks that ran in your other local Agents can be linked here too.",
-      "Click here to create a task shared with your members."
+      "Tasks shared by members live here. You can read each task's full conversation and progress, and carry on from where it stopped without briefing each other again.",
+      "Some information and actions only exist on a member's own computer, such as their local files or their machine's environment. When a task needs them, send the member an assistance request; once they confirm, the Agent on their computer runs it and the result is written back to your task. Requests from both sides are listed here.",
+      "Work you did in Claude Code, Cursor and other external tools is invisible to members by default. Link that session to the project and members can read the full context and carry on, without you retelling it. Link a whole group and its new sessions come in automatically.",
+      "Start new work here. New tasks in this project are visible to members by default, so they can follow progress, carry on, or ask for assistance."
     ]);
   });
 
   it("names the three experience steps the way the prototype does", () => {
     const names = (language: "zh-CN" | "en-US") => [1, 2, 3]
       .map((step) => translate(language)(("collab.demo.stepName." + String(step)) as MessageKey));
-    expect(names("zh-CN")).toEqual(["接续成员的任务", "请成员协助", "为成员执行任务"]);
-    expect(names("en-US")).toEqual(["Continue a member's task", "Ask a member to assist", "Run a task for a member"]);
+    expect(names("zh-CN")).toEqual(["接续成员的任务", "请求成员协助", "处理成员的协助请求"]);
+    expect(names("en-US")).toEqual(["Continue a member's task", "Request a member's assistance", "Handle a member's assistance request"]);
   });
 
   it("reads the authorization step with a title and the notice that follows", () => {
     // 授权弹窗那一步：标题写谁发来的请求，正文说他为什么需要这台电脑，并顺带说明执行方可以换。
     expect(demoGuideCard(stateFor("help-dialog"), translate("zh-CN"))).toMatchObject({
       title: "小饭团发来了一条协助请求",
-      body: "分享会要现场演示，他想先确认这台电脑的系统版本。可以选择其他本地 Agent 执行，不过这次就先交给 Memmy 吧。"
+      body: "分享会需要现场演示，他请求确认这台电脑的系统版本。可以选择其他本地 Agent 执行，不过这次就先交给 Memmy 吧。"
     });
-    // 拒绝之后只有一句「你拒绝了这次请求。」，没有额外的标题。
+    // 拒绝之后只有一句「已拒绝本次协助请求，这台电脑未执行任何操作。」，没有额外的标题。
     expect(demoGuideCard(stateFor("help-rejected"), translate("zh-CN"))).toMatchObject({
       title: null,
-      body: "你拒绝了这次请求。"
+      body: "已拒绝本次协助请求，这台电脑未执行任何操作。"
     });
+  });
+
+  it("keeps the six screens before the project exists and the joining screen", () => {
+    // 建项目之前的六屏与加入项目这一屏：这两段的挂载由结构那边决定，这里先把字钉住，
+    // 改一个字、少一个键都会失败（`translate` 缺键时直接报错）。
+    const expected: Array<[MessageKey, string, string]> = [
+      ["collab.demo.intro.badge", "官方", "Official"],
+      ["collab.demo.intro.name", "小饭团", "Xiaofantuan"],
+      ["collab.demo.intro.body", "你好，我是小饭团，接下来由我带你体验项目协作。开始前，先看创建项目时的几项设置。", "Hi, I am Xiaofantuan. I will take you through project collaboration. Before we start, a look at the settings when creating a project."],
+      ["collab.demo.name.body", "项目建好后会按这个名字显示在左侧栏，成员看到的名称和你一致。本次已预填，可以直接使用。", "The project appears under this name in the sidebar, and members see the same name. It is already filled in for this walkthrough."],
+      ["collab.demo.folder.body", "在这里指定 Agent 工作的本地文件夹。读写都在你的电脑上完成，文件夹内容不会上传。", "This is the local folder the Agent works in. Reading and writing happen on your computer, and the folder is not uploaded."],
+      ["collab.demo.collab.body", "开启后成员可以加入这个项目、共享任务并互相请求协助；关闭后只作为你个人的本地项目。", "While it is on, members can join the project, share tasks and ask each other for assistance; turned off, it is only your own local project."],
+      ["collab.demo.joinEntry.body", "如果其他成员已经建好项目并邀请了你，从这里直接加入，不必新建。", "If a member has already created a project and invited you, join it here instead of creating a new one."],
+      ["collab.demo.submit.body", "各项已就绪，点击「创建项目」，接下来进入项目看板。", "Everything is ready. Choose Create and we move on to the project board."],
+      ["collab.demo.joined.body", "项目里还没有其他成员。这次先由我加入项目，带你完成一次协作。", "There are no other members in this project yet. Let me join for this walkthrough and run one collaboration with you."],
+      ["collab.demo.joined.continue", "继续", "Continue"]
+    ];
+    const zh = translate("zh-CN");
+    const en = translate("en-US");
+    for (const [key, zhText, enText] of expected) {
+      expect(zh(key), `zh-CN ${String(key)}`).toBe(zhText);
+      expect(en(key), `en-US ${String(key)}`).toBe(enText);
+    }
   });
 });
