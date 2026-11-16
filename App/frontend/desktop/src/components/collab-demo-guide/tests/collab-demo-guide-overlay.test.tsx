@@ -63,6 +63,7 @@ error: null,
     askSeen: false,
     askDelivered: false,
     askTurnEnded: false,
+    scan: { status: "idle", count: 0 },
     prefill: null,
     endReason: null,
     cloudEnded: false
@@ -115,6 +116,14 @@ function cardText(): string {
   return document.querySelector<HTMLElement>('[role="dialog"][aria-label="新手引导"]')?.textContent ?? "";
 }
 
+/** 卡片底部那个主按钮：「下一步 / 开始协作 / 完成」。 */
+function nextButton(): HTMLButtonElement {
+  const found = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+    .find((entry) => entry.textContent?.trim() === "下一步");
+  if (!found) throw new Error("no next button on the card");
+  return found;
+}
+
 async function frames(count: number): Promise<void> {
   for (let index = 0; index < count; index += 1) {
     await act(async () => {
@@ -129,12 +138,16 @@ describe("demo guide overlay tracking", () => {
   let panelRect: FakeRect;
   let continueRect: FakeRect;
 
-  async function mount(phase: DemoGuidePhase, extra: { onSkipJoinEntry?: () => void; onBack?: () => void } = {}): Promise<void> {
+  async function mount(
+    phase: DemoGuidePhase,
+    extra: { onSkipJoinEntry?: () => void; onBack?: () => void; state?: Partial<DemoGuideState> } = {}
+  ): Promise<void> {
+    const { state: overrides, ...rest } = extra;
     await act(async () => {
       root.render(
         <I18nProvider language="zh-CN">
           <CollabDemoGuideOverlay
-            state={activeState(phase)}
+            state={{ ...activeState(phase), ...overrides }}
             onNext={vi.fn()}
             onBack={vi.fn()}
             onSkip={vi.fn()}
@@ -142,7 +155,7 @@ describe("demo guide overlay tracking", () => {
             onRetry={vi.fn()}
             onCloseComplete={vi.fn()}
             onInvite={vi.fn()}
-            {...extra}
+            {...rest}
           />
         </I18nProvider>
       );
@@ -279,8 +292,7 @@ describe("demo guide overlay tracking", () => {
     expect(cardText()).toContain("协助请求已发出，小饭团电脑上的 Agent 正在执行…");
   });
 
-  it("lights the link-a-task button during the tour without ringing it", async () => {
-    anchor("board-associate", () => rect({ left: 1060, top: 250, width: 92, height: 28 }), "button");
+  it("lights the link-a-task button during the tour without ringing it", async () => {    anchor("board-associate", () => rect({ left: 1060, top: 250, width: 92, height: 28 }), "button");
     await mount("tour-associate");
 
     // 亮区就是这个按钮，但不描边：描边意味着「这里可以点」，导览只讲给人听，不打开关联弹窗、不写数据。
@@ -294,6 +306,24 @@ describe("demo guide overlay tracking", () => {
     expect(text).toContain("介绍");
     expect(text).not.toContain("跳过这一步");
     expect(text).toContain("下一步");
+  });
+
+  it("holds the next button on the link-session step until the scan has a result", async () => {
+    // 「关联会话」：整张弹窗是亮区，里面一个控件也不给点。
+    anchor("associate-pick", () => rect({ left: 360, top: 90, width: 560, height: 560 }), "section");
+    await mount("tour-associate-pick", { state: { scan: { status: "scanning", count: 0 } } });
+    expect(cardText()).toContain("关联会话");
+    expect(cardText()).toContain("正在扫描这台电脑上的历史会话…");
+    const scanning = nextButton();
+    expect(scanning.disabled).toBe(true);
+    // 亮区里不接点击：弹窗这些控件一个都不亮描边。
+    expect(innerRingOf()).toBeNull();
+    expect(litRingOf()).toMatchObject({ quiet: true });
+
+    // 扫描出结果之后按钮才能点，卡片写出计数。
+    await mount("tour-associate-pick", { state: { scan: { status: "done", count: 7 } } });
+    expect(cardText()).toContain("已扫描到 7 个会话");
+    expect(nextButton().disabled).toBe(false);
   });
 
   it("asks before leaving with a title and the line naming who leaves", async () => {

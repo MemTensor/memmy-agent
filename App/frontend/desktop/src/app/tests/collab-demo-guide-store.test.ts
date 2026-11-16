@@ -56,8 +56,19 @@ function touring(): DemoGuideState {
 
 /** 导览走完、点了〔开始协作〕：体验第一步的蒙版。 */
 function started(): DemoGuideState {
-  // 导览四步一路点「下一步」：最后一步的按钮是「开始协作」，点完就是体验第一步。
-  return run(touring(), DEMO_GUIDE_TOUR_PHASES.map((): DemoGuideEvent => ({ type: "next" })));
+  // 导览五步一路点「下一步」：最后一步的按钮是「开始协作」，点完就是体验第一步。
+  // 「关联会话」那一站要等扫描出结果才放行：这里替弹窗报一个数。
+  return throughTour(touring());
+}
+
+/** 一路点过看板导览：进到体验段的第一站就停。 */
+function throughTour(state: DemoGuideState): DemoGuideState {
+  let current = state;
+  while (demoGuideIsTourPhase(current.phase)) {
+    if (current.phase === "tour-associate-pick") current = demoGuideReducer(current, { type: "scan-settled", count: 12 });
+    current = demoGuideReducer(current, { type: "next" });
+  }
+  return current;
 }
 
 function run(state: DemoGuideState, events: DemoGuideEvent[]): DemoGuideState {
@@ -107,9 +118,15 @@ describe("demo guide state machine", () => {
   });
 
   it("walks the board tour one step at a time and hands over to the hands-on experience", () => {
-    // 导览四步：任务列表 → 协助 → 关联任务 → 新建任务。
+    // 导览五步：任务列表 → 协助 → 关联任务 → 关联会话 → 新建任务。
     // 「项目名与成员」那一步已删掉：它说的东西看板上本来就看得到。
-    expect([...DEMO_GUIDE_TOUR_PHASES]).toEqual(["tour-board", "tour-tabs", "tour-associate", "tour-new-task"]);
+    expect([...DEMO_GUIDE_TOUR_PHASES]).toEqual([
+      "tour-board",
+      "tour-tabs",
+      "tour-associate",
+      "tour-associate-pick",
+      "tour-new-task"
+    ]);
     let state = touring();
     expect(state.phase).toBe("tour-board");
     // 导览段没有进度、也不予跳过这一步。
@@ -120,6 +137,10 @@ describe("demo guide state machine", () => {
       expect(demoGuideStepNumberOf(phase)).toBeNull();
       if (index < DEMO_GUIDE_TOUR_PHASES.length - 1) {
         expect(demoGuideStartsExperience(phase)).toBe(false);
+        // 「关联会话」要等扫描出结果：先替弹窗报个数，再点下一步。
+        if (phase === "tour-associate-pick") {
+          state = demoGuideReducer(state, { type: "scan-settled", count: 12 });
+        }
         state = demoGuideReducer(state, { type: "next" });
       }
     }
@@ -134,6 +155,33 @@ describe("demo guide state machine", () => {
     expect(experience.prefill).toBeNull();
     expect(experience.done).toEqual({ task: false, ask: false, help: false });
     expect(experience.skipped).toEqual({ task: false, ask: false, help: false });
+  });
+
+  it("waits for the session scan before leaving the link-session step", () => {
+    // 先走到「关联任务」那一站，再进「关联会话」：弹窗一出现就开始扫。
+    const atPick = run(touring(), [{ type: "next" }, { type: "next" }, { type: "next" }]);
+    expect(atPick.phase).toBe("tour-associate-pick");
+    expect(atPick.scan).toEqual({ status: "scanning", count: 0 });
+    // 扫描没结果：「下一步」不前进，人不会以为自己按了没反应。
+    expect(demoGuideReducer(atPick, { type: "next" })).toBe(atPick);
+    // 扫完了：给出计数，下一步才放行。
+    const scanned = demoGuideReducer(atPick, { type: "scan-settled", count: 7 });
+    expect(scanned.scan).toEqual({ status: "done", count: 7 });
+    const after = demoGuideReducer(scanned, { type: "next" });
+    expect(after.phase).toBe("tour-new-task");
+  });
+
+  it("moves past the link-session step when this computer has nothing to scan", () => {
+    // 没授权读其他 Agent 的记录：这一步没有可展示的东西，直接接到下一站。
+    const atPick = run(touring(), [{ type: "next" }, { type: "next" }, { type: "next" }]);
+    const skipped = demoGuideReducer(atPick, { type: "scan-unavailable" });
+    expect(skipped.phase).toBe("tour-new-task");
+    expect(skipped.scan).toEqual({ status: "done", count: 0 });
+    // 别的阶段发这两个事件不改变任何东西（同一个状态对象原样返回）。
+    const board = touring();
+    expect(demoGuideReducer(board, { type: "scan-settled", count: 3 })).toBe(board);
+    const experience = started();
+    expect(demoGuideReducer(experience, { type: "scan-unavailable" })).toBe(experience);
   });
 
   it("skips the whole walkthrough when the tour is skipped", () => {
@@ -505,6 +553,23 @@ describe("demo guide state machine", () => {
     expect(bothSkipped.phase).toBe("ask-compose");
     expect(bothSkipped.skipped.task).toBe(true);
     expect(demoGuideReducer(bothSkipped, { type: "back" }).phase).toBe("task-row");
+  });
+
+  it("scans again when the person goes back to the link-session step", () => {
+    // 「关联会话」扫完、已经去了下一站，人点了「上一步」：弹窗会重新打开、重新扫一遍，
+    // 所以扫描进度要回到「正在扫」，不能留着上一次的计数让按钮一进去就可点。
+    const scanned = run(touring(), [
+      { type: "next" },
+      { type: "next" },
+      { type: "next" },
+      { type: "scan-settled", count: 7 },
+      { type: "next" }
+    ]);
+    expect(scanned.phase).toBe("tour-new-task");
+    const back = demoGuideReducer(scanned, { type: "back" });
+    expect(back.phase).toBe("tour-associate-pick");
+    expect(back.scan).toEqual({ status: "scanning", count: 0 });
+    expect(demoGuideReducer(back, { type: "next" })).toBe(back);
   });
 
   it("stops treating a step as skipped once it is really done again", () => {

@@ -146,6 +146,7 @@ describe("demo guide layout", () => {
       ["tour-board", { region: "board-list", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" }],
       ["tour-tabs", { region: "board-tabs", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" }],
       ["tour-associate", { region: "board-associate", stroke: null, blockRest: true, radius: 10, padding: 6, prefer: "bottom" }],
+      ["tour-associate-pick", { region: "associate-pick", stroke: null, blockRest: true, radius: 16, padding: 6, prefer: "left" }],
       ["tour-new-task", { region: "sidebar-new-task", stroke: null, blockRest: true, radius: 9, padding: 5, prefer: "bottom" }]
     ];
     for (const [phase, expected] of table) {
