@@ -53,18 +53,31 @@ describe("the demo guide preview", () => {
     expect(document.body.textContent).toContain("项目协作体验");
   });
 
-  it("opens with the join notice before the first step", async () => {
+  it("lights the members on the board when the demo member joins", async () => {
     expect(DEMO_GUIDE_PREVIEW_STEPS["0-joined"]).toBe("joined");
     await render("0-joined");
 
-    // 居中的提示窗带 Memmy 的吉祥物（不是应用图标），只有标题与「开始体验」，没有正文，没有跳过，也没有蒙版。
-    expect(document.querySelector("[data-demo-join]")).toBeTruthy();
-    expect(document.querySelector("[data-demo-join] img")?.getAttribute("src")).toContain("mascot/memmy-celebrate");
-    expect(document.body.textContent).toContain("小饭团加入了项目");
-    expect(document.body.textContent).not.toContain("一起开展一次协作");
-    expect(document.body.textContent).toContain("开始体验");
-    expect(document.body.textContent).not.toContain("跳过这一步");
-    expect(document.querySelector("[data-demo-mask]")).toBeNull();
+    // 加入不再是一张居中的提示窗：亮区锚点是看板头部的成员徽章，旧的 [data-demo-join] 没有了。
+    expect(document.querySelector("[data-demo-guide='board-members']")).toBeTruthy();
+    expect(document.querySelector("[data-demo-join]")).toBeNull();
+    expect(document.body.textContent).not.toContain("小饭团加入了项目");
+    expect(document.body.textContent).not.toContain("开始体验");
+  });
+
+  it("draws all six screens before the project exists, each on its own anchor", async () => {
+    for (const [step, anchor] of [
+      ["0-intro", "create-dialog"],
+      ["0-name", "create-name"],
+      ["0-folder", "create-folder"],
+      ["0-collab", "create-collab"],
+      ["0-join-entry", "create-join"],
+      ["0-create-project", "create-project-submit"]
+    ] as const) {
+      await render(step);
+      expect(document.querySelector(`[data-demo-guide='${anchor}']`)).toBeTruthy();
+      // 六屏都在新建弹窗上：名称已填、协作开关已开。
+      expect(document.body.textContent).toContain("项目协作体验");
+    }
   });
 
   it("covers the four tour steps on the board, ending on the sidebar new-task button", async () => {
