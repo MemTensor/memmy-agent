@@ -1,9 +1,11 @@
 /* global console */
-import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { npmInvocation } from "../../../scripts/internal/shared/npm-invocation.mjs";
-import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { vendoredManifest } from "./vendor-manifest.mjs";
 
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
 const agentRoot = resolve(scriptRoot, "..");
@@ -14,6 +16,8 @@ const sourceManifest = JSON.parse(await readFile(join(agentRoot, "package.json")
 const packageName = "@memtensor/memmy-agent";
 
 const localDependencies = new Map([
+  // local-api-contracts re-exports the scan ordering from this workspace-only package.
+  ["@memmy/agent-source-core", "Memory/AgentSourceCore"],
   ["@memmy/local-api-contracts", "App/backend/local-api-contracts"],
   ["@memmy/migrations", "Migrations"],
   ["@memmy/knowledge", "Knowledge"],
@@ -23,11 +27,22 @@ await rm(outputRoot, { recursive: true, force: true });
 await rm(join(agentRoot, "dist", "memmy-agent-npm"), { recursive: true, force: true });
 await mkdir(vendorRoot, { recursive: true });
 
-const vendorPackages = {};
+const localVersions = new Map();
 for (const [dependencyName, packagePath] of localDependencies) {
-  const packageRoot = join(repoRoot, packagePath);
-  const tarball = await pack(packageRoot, vendorRoot);
-  vendorPackages[dependencyName] = `file:vendor/${tarball}`;
+  localVersions.set(dependencyName, (await readManifest(join(repoRoot, packagePath))).version);
+}
+
+const vendorPackages = {};
+const stagingRoot = await mkdtemp(join(tmpdir(), "memmy-agent-vendor-"));
+try {
+  for (const [dependencyName, packagePath] of localDependencies) {
+    const packageRoot = await vendorSource(join(repoRoot, packagePath));
+    const tarball = await pack(packageRoot, vendorRoot);
+    vendorPackages[dependencyName] = `file:vendor/${tarball}`;
+  }
+} finally {
+  // Windows may briefly lock freshly written files (antivirus/indexer), so retry on EBUSY/EPERM.
+  await rm(stagingRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
 }
 
 const packageManifest = {
@@ -68,6 +83,21 @@ if (Object.values(packageManifest.dependencies).some((value) => value.startsWith
 }
 
 console.log(`Prepared ${packageName}@${sourceManifest.version} at ${outputRoot}`);
+
+async function readManifest(packageRoot) {
+  return JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
+}
+
+// Packs the checkout as is, or a copy whose manifest no longer points outside the tarball.
+async function vendorSource(packageRoot) {
+  const manifest = await readManifest(packageRoot);
+  const vendored = vendoredManifest(manifest, localVersions);
+  if (vendored === manifest) return packageRoot;
+  const staged = await mkdtemp(join(stagingRoot, "package-"));
+  await cp(packageRoot, staged, { recursive: true, filter: (file) => basename(file) !== "node_modules" });
+  await writeFile(join(staged, "package.json"), `${JSON.stringify(vendored, null, 2)}\n`);
+  return staged;
+}
 
 async function pack(packageRoot, destination) {
   const result = await run("npm", ["pack", packageRoot, "--pack-destination", destination, "--ignore-scripts", "--json"], repoRoot);
