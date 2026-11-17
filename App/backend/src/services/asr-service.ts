@@ -57,9 +57,10 @@ export function createAsrService(options: CreateAsrServiceOptions): AsrService {
     if (mode !== "account" && mode !== "byok") {
       throw Object.assign(new Error("ASR requires account or BYOK mode"), { code: "invalid_argument" });
     }
+    const cloudUuid = options.accountSessionRepository?.getCloudUuid() ?? null;
     const resolved = await requireAsrSelection(options, mode);
     return structuredClone({ context: resolved.context, provider: resolved.provider,
-      cloudUuid: options.accountSessionRepository?.getCloudUuid() ?? null });
+      cloudUuid });
   };
   const getSession = (id: string): AsrSelectionSnapshot => {
     const session = sessions.get(id);
@@ -83,7 +84,7 @@ export function createAsrService(options: CreateAsrServiceOptions): AsrService {
     async transcribe(input) {
       const resolved = input.sessionId ? getSession(input.sessionId) : await resolve();
       if (resolved.context.source === "account") {
-        return transcribeWithAccount(input, options, resolved.context, now);
+        return transcribeWithAccount(input, options, resolved.context, now, resolved.cloudUuid);
       }
       if (resolved.context.protocol !== "dashscope-input-audio-chat") {
         throw modelSelectionUnavailable(resolved.context);
@@ -105,9 +106,9 @@ async function transcribeWithAccount(
   input: AsrTranscriptionInput,
   options: CreateAsrServiceOptions,
   context: Readonly<ActualModelContext>,
-  now: () => string
+  now: () => string,
+  uuid: string | null
 ): Promise<AsrTranscriptionResponse> {
-  const uuid = options.accountSessionRepository?.getCloudUuid();
   if (!uuid) {
     throw Object.assign(new Error("Cloud account is not authenticated"), { code: "unauthorized" as const });
   }

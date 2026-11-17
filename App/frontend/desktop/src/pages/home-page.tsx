@@ -985,6 +985,7 @@ export function HomePage() {
   const queueSteerLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
+  const voiceInputGenerationRef = useRef(0);
   const liveVoiceLinesRef = useRef<AsrLiveLine[]>([]);
   const liveVoiceScopeRef = useRef<string | null>(null);
   const liveVoiceRangeRef = useRef<VoiceTranscriptRange | null>(null);
@@ -1017,6 +1018,16 @@ export function HomePage() {
   });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   useEffect(() => { setTaskRecording(null); }, [chatScopeKey]);
+  const cancelVoiceInput = asrRecorder.cancel;
+  useLayoutEffect(() => {
+    if (liveVoiceScopeRef.current && liveVoiceScopeRef.current !== chatScopeKey) {
+      voiceInputGenerationRef.current++;
+      liveVoiceScopeRef.current = null;
+      liveVoiceLinesRef.current = [];
+      liveVoiceRangeRef.current = null;
+      cancelVoiceInput();
+    }
+  }, [chatScopeKey, cancelVoiceInput]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const pendingModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey];
@@ -2844,12 +2855,14 @@ export function HomePage() {
    * Starts voice input on the main interface.
    */
   function startVoiceInput() {
+    const generation = ++voiceInputGenerationRef.current;
     inputRef.current?.focus();
     const scopeKey = chatScopeKey;
     liveVoiceLinesRef.current = [];
     liveVoiceScopeRef.current = scopeKey;
     liveVoiceRangeRef.current = null;
     void asrRecorder.start().catch((error: unknown) => {
+      if (generation !== voiceInputGenerationRef.current) return;
       setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr");
       if (liveVoiceScopeRef.current === scopeKey) liveVoiceScopeRef.current = null;
     });
@@ -2859,9 +2872,11 @@ export function HomePage() {
    * Ends voice input on the main interface and merges in the transcribed text.
    */
   async function finishVoiceInput() {
+    const generation = voiceInputGenerationRef.current;
     const scopeKey = liveVoiceScopeRef.current ?? chatScopeKey;
     try {
       const transcript = await asrRecorder.finishAndTranscribe();
+      if (generation !== voiceInputGenerationRef.current) return;
       setComposerDraftForScope(scopeKey, (current) => replaceVoiceTranscript(
         current,
         liveVoiceRangeRef.current,
@@ -2881,6 +2896,7 @@ export function HomePage() {
         });
       }
     } catch (error: unknown) {
+      if (generation !== voiceInputGenerationRef.current) return;
       liveVoiceScopeRef.current = null;
       liveVoiceRangeRef.current = null;
       setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr");
@@ -3614,12 +3630,12 @@ export function HomePage() {
 export interface VoiceTranscriptRange {
   start: number;
   text: string;
-  detached?: boolean;
+  corrections?: Array<{ base: string; changes: VoiceTextChange[] }>;
 }
 
-/** Tracks edits around the voice range; editing inside it gives ownership back to the user. */
+/** Keeps manual corrections in the voice range while later recognition continues. */
 export function trackVoiceTranscriptEdit(before: string, after: string, range: VoiceTranscriptRange | null): VoiceTranscriptRange | null {
-  if (!range || range.detached || before === after) return range;
+  if (!range || before === after) return range;
   let start = 0;
   while (start < before.length && start < after.length && before[start] === after[start]) start++;
   let oldEnd = before.length;
@@ -3627,7 +3643,11 @@ export function trackVoiceTranscriptEdit(before: string, after: string, range: V
   while (oldEnd > start && newEnd > start && before[oldEnd - 1] === after[newEnd - 1]) { oldEnd--; newEnd--; }
   if (oldEnd <= range.start) return { ...range, start: range.start + after.length - before.length };
   if (start >= range.start + range.text.length) return range;
-  return { ...range, detached: true };
+  const newStart = Math.min(range.start, start);
+  const rangeEnd = Math.max(range.start + range.text.length + after.length - before.length, newEnd);
+  const text = after.slice(newStart, rangeEnd);
+  return { start: newStart, text, corrections: [...(range.corrections ?? []),
+    { base: range.text, changes: voiceTextChanges(range.text, text) }] };
 }
 
 /** Replaces only the exact provisional range previously inserted by voice input. */
@@ -3637,15 +3657,69 @@ export function replaceVoiceTranscript(
   next: string
 ): { value: string; range: VoiceTranscriptRange | null } {
   const nextText = next.trim();
-  if (!nextText || previous?.detached) return { value: current, range: previous };
+  if (!nextText) return { value: current, range: previous };
   if (previous && current.slice(previous.start, previous.start + previous.text.length) === previous.text) {
+    const text = previous.corrections?.reduce((recognized, correction) =>
+      mergeVoiceCorrection(correction.base, correction.changes, recognized), nextText) ?? nextText;
     return {
-      value: `${current.slice(0, previous.start)}${nextText}${current.slice(previous.start + previous.text.length)}`,
-      range: { start: previous.start, text: nextText }
+      value: `${current.slice(0, previous.start)}${text}${current.slice(previous.start + previous.text.length)}`,
+      range: { ...previous, text }
     };
   }
   const value = mergeVoiceTranscript(current, nextText);
   return { value, range: { start: value.length - nextText.length, text: nextText } };
+}
+
+interface VoiceTextChange { start: number; end: number; text: string }
+
+function mergeVoiceCorrection(base: string, corrections: VoiceTextChange[], recognized: string): string {
+  const updates = voiceTextChanges(base, recognized).filter(update => !corrections.some(edit =>
+    update.start < edit.end && update.end > edit.start
+    || update.start === edit.start && (update.start === update.end || edit.start === edit.end)
+    || edit.start > update.start && edit.start < update.end));
+  return [...corrections, ...updates].sort((a, b) => b.start - a.start || b.end - a.end)
+    .reduce((text, edit) => text.slice(0, edit.start) + edit.text + text.slice(edit.end), base);
+}
+
+/** Character changes, with common edges removed before alignment to keep live updates small. */
+function voiceTextChanges(before: string, after: string, offset = 0): VoiceTextChange[] {
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let end = before.length; let nextEnd = after.length;
+  while (end > start && nextEnd > start && before[end - 1] === after[nextEnd - 1]) { end--; nextEnd--; }
+  if (start === end && start === nextEnd) return [];
+  const a = before.slice(start, end); const b = after.slice(start, nextEnd);
+  const at = offset + start;
+  if (!a || !b || a.length === 1) {
+    const found = a ? b.indexOf(a) : -1;
+    if (found >= 0) return [
+      ...(found ? [{ start: at, end: at, text: b.slice(0, found) }] : []),
+      ...(found + 1 < b.length ? [{ start: at + 1, end: at + 1, text: b.slice(found + 1) }] : [])
+    ];
+    return [{ start: at, end: at + a.length, text: b }];
+  }
+  // Split the alignment using two linear-space LCS rows rather than a quadratic matrix.
+  const row = (left: string, right: string): Uint32Array => {
+    const result = new Uint32Array(right.length + 1);
+    for (let i = 0; i < left.length; i++) {
+      let diagonal = 0;
+      for (let j = 0; j < right.length; j++) {
+        const above = result[j + 1]!;
+        result[j + 1] = left[i] === right[j] ? diagonal + 1 : Math.max(above, result[j]!);
+        diagonal = above;
+      }
+    }
+    return result;
+  };
+  const middle = Math.floor(a.length / 2);
+  const left = row(a.slice(0, middle), b);
+  const right = row(a.slice(middle).split('').reverse().join(''), b.split('').reverse().join(''));
+  let split = 0;
+  for (let j = 1; j <= b.length; j++) {
+    if (left[j]! + right[b.length - j]! > left[split]! + right[b.length - split]!) split = j;
+  }
+  return [...voiceTextChanges(a.slice(0, middle), b.slice(0, split), at),
+    ...voiceTextChanges(a.slice(middle), b.slice(split), at + middle)];
 }
 
 export function ChatModelSelector(props: {

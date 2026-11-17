@@ -28,6 +28,48 @@ describe("asr service", () => {
     } finally { fixture.dispose(); }
   });
 
+  it.each(["account-b", null])("keeps the original account credential after switching to %s", async next => {
+    const fixture = catalogFixture("account");
+    let token: string | null = "account-a";
+    const uploads: string[] = [];
+    try {
+      const service = createAsrService({
+        bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
+        accountSessionRepository: {
+          get: () => ({ authenticated: true, profile: { userId: "owner-a" } }) as any,
+          getCloudUuid: () => token
+        },
+        memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+        cloudClient: { transcribeAudio: async input => { uploads.push(input.uuid); return { text: "done", modelId: "account-asr", provider: "memmy_account" }; } }
+      });
+      const session = await service.prepare();
+      token = next;
+      await service.transcribe({ sessionId: session.sessionId, audioBase64: "AQ==", mimeType: "audio/wav" });
+      expect(uploads).toEqual(["account-a"]);
+    } finally { fixture.dispose(); }
+  });
+
+  it("does not borrow a later login when the prepared session had no account credential", async () => {
+    const fixture = catalogFixture("account");
+    let token: string | null = null;
+    let uploaded = false;
+    try {
+      const service = createAsrService({
+        bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
+        accountSessionRepository: {
+          get: () => ({ authenticated: true, profile: { userId: "owner-a" } }) as any,
+          getCloudUuid: () => token
+        },
+        memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+        cloudClient: { transcribeAudio: async () => { uploaded = true; return { text: "wrong account", modelId: "account-asr", provider: "memmy_account" }; } }
+      });
+      const session = await service.prepare(); token = "account-b";
+      await expect(service.transcribe({ sessionId: session.sessionId, audioBase64: "AQ==", mimeType: "audio/wav" }))
+        .rejects.toMatchObject({ code: "unauthorized" });
+      expect(uploaded).toBe(false);
+    } finally { fixture.dispose(); }
+  });
+
   it("keeps BYOK on HTTP when it is selected in account mode", async () => {
     const fixture = catalogFixture("account");
     try {

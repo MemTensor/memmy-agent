@@ -2271,11 +2271,49 @@ describe("voice transcript editing", () => {
     const range = trackVoiceTranscriptEdit("new " + initial.value, edited, moved);
     expect(replaceVoiceTranscript(edited, range, "hello world").value).toBe("new note\nhello world tail");
   });
-  it("does not reinsert deleted voice text or overwrite a user correction", () => {
-    const initial = replaceVoiceTranscript("note", null, "hello");
-    for (const edit of ["note\n", "note\ncorrected"]) {
-      const range = trackVoiceTranscriptEdit(initial.value, edit, initial.range);
-      expect(replaceVoiceTranscript(edit, range, "new transcript").value).toBe(edit);
-    }
+  it("keeps a user correction and appends subsequent speech without duplicating the final result", () => {
+    const initial = replaceVoiceTranscript("笔记", null, "今天去北京");
+    const edited = "笔记\n今天去南京";
+    const range = trackVoiceTranscriptEdit(initial.value, edited, initial.range);
+    const live = replaceVoiceTranscript(edited, range, "今天去北京，明天去上海");
+    expect(live.value).toBe("笔记\n今天去南京，明天去上海");
+    expect(replaceVoiceTranscript(live.value, live.range, "今天去北京，明天去上海。").value)
+      .toBe("笔记\n今天去南京，明天去上海。");
   });
+  it("preserves corrections when the recognizer also revises words before them", () => {
+    const initial = replaceVoiceTranscript("", null, "今天去北京");
+    const range = trackVoiceTranscriptEdit(initial.value, "今天去南京", initial.range);
+    expect(replaceVoiceTranscript("今天去南京", range, "今天要去北京，明天去上海").value)
+      .toBe("今天要去南京，明天去上海");
+  });
+  it("does not reinsert deleted voice text, but still accepts later speech", () => {
+    const initial = replaceVoiceTranscript("note", null, "hello");
+    const range = trackVoiceTranscriptEdit(initial.value, "note\n", initial.range);
+    expect(replaceVoiceTranscript("note\n", range, "hello").value).toBe("note\n");
+    expect(replaceVoiceTranscript("note\n", range, "hello world").value).toBe("note\n world");
+  });
+  it("keeps independent corrections and recognizer extensions", () => {
+    const initial = replaceVoiceTranscript("", null, "red cat, blue dog");
+    const corrected = "green cat, blue bird";
+    const range = trackVoiceTranscriptEdit(initial.value, corrected, initial.range);
+    expect(replaceVoiceTranscript(corrected, range, "red cat, blue dog, white horse").value)
+      .toBe("green cat, blue bird, white horse");
+  });
+});
+
+it("retains a manual correction even if one intermediate recognition happens to agree with it", () => {
+  const initial = replaceVoiceTranscript("", null, "今天去北京");
+  const range = trackVoiceTranscriptEdit(initial.value, "今天去南京", initial.range);
+  const agreed = replaceVoiceTranscript("今天去南京", range, "今天去南京");
+  expect(replaceVoiceTranscript(agreed.value, agreed.range, "今天去北京，明天去上海").value)
+    .toBe("今天去南京，明天去上海");
+});
+it("supports a second manual correction after recognition has extended the first one", () => {
+  const initial = replaceVoiceTranscript("", null, "今天去北京");
+  const range = trackVoiceTranscriptEdit(initial.value, "今天去南京", initial.range);
+  const extended = replaceVoiceTranscript("今天去南京", range, "今天去北京，明天去上海");
+  const edited = "今天去南京，明天去杭州";
+  const again = trackVoiceTranscriptEdit(extended.value, edited, extended.range);
+  expect(replaceVoiceTranscript(edited, again, "今天去北京，明天去上海，后天回家").value)
+    .toBe("今天去南京，明天去杭州，后天回家");
 });
