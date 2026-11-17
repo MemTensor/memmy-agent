@@ -1,0 +1,43 @@
+/*
+ * 授权说明里列出的 Agent 胶囊：图标 + 名字。
+ * 「关联会话」未授权时的那一屏用它，范围与样式只在这里定义。
+ */
+
+.chips {
+  margin: 0 28px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone, #d6dfdc) 60%, transparent);
+  background: var(--color-background-paper, #fff);
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 70%, transparent);
+}
+
+.chipLogo {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+
+.chipMark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-action-sky, #7cc3b4) 22%, transparent);
+  color: var(--color-action-sky-hover, #3f9a8a);
+  font-size: 10px;
+  font-weight: 600;
+}

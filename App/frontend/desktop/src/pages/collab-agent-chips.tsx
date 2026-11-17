@@ -1,10 +1,10 @@
 /**
  * 授权说明里列出的 Agent：图标 + 名字的小胶囊。
  *
- * 授权弹窗与「关联任务」的授权说明共用它，保证两处看到的范围、样式一致。
+ * 「关联会话」未授权时的那一屏用它，说明这一屏在讲哪些 Agent。
  */
 import { agentSourceLogoUrl } from "./agent-source-logos.js";
-import styles from "./collab-agent-access.module.css";
+import styles from "./collab-agent-chips.module.css";
 
 export interface CollabAgentChipItem {
   sourceId: string;
@@ -27,14 +27,3 @@ export function CollabAgentChips(props: { agents: readonly CollabAgentChipItem[]
     </div>
   );
 }
-
-/**
- * 这个 Agent 会装上什么：协作项目的技能总是会装，钩子里的项目部分只在
- * 记忆接入也有钩子的那几个 Agent 上存在。
- */
-export function collabAgentParts(sourceId: string): "hook" | "skill" {
-  return HOOK_AGENTS.has(sourceId) ? "hook" : "skill";
-}
-
-/** 记忆接入里带 memmy-resume-hook 的来源；协作的背景与规范注入放在这个钩子里。 */
-const HOOK_AGENTS = new Set(["claude_code", "codex", "cursor"]);

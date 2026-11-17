@@ -32,11 +32,6 @@ export interface CollabProjectsSnapshot {
    */
   taskPickerFor: string | null;
   /**
-   * 刚开启共享的项目：看板回到这个项目、项目设置与选择任务的弹窗都关上之后，若还没有授权
-   * 「在其他 Agent 中使用协作项目」，就询问一次；读完即清掉。
-   */
-  accessPromptFor: string | null;
-  /**
    * 看板顶部的一次性提示文案（已本地化）：例如新建项目时勾了共享但云端不可用。看板显示几秒后自行清除。
    */
   notice: string | null;
@@ -63,7 +58,6 @@ let snapshot: CollabProjectsSnapshot = {
   createShareDefault: false,
   createDemo: false,
   taskPickerFor: null,
-  accessPromptFor: null,
   notice: null,
   maxOwnedProjects: null,
   demoEligible: false
@@ -279,20 +273,6 @@ export function consumeTaskPickerRequest(): void {
 }
 
 /**
- * 让看板在刚开启共享的项目上，询问一次「在其他 Agent 中使用协作项目」的授权。
- *
- * @param localProjectId 本机项目 id：协作项目只是本机项目加上云端记录，看板按本机 id 找项目。
- */
-export function requestCollabAccessPrompt(localProjectId: string): void {
-  update({ accessPromptFor: localProjectId });
-}
-
-/** Clears the access-prompt request the board just acted on. */
-export function consumeCollabAccessPromptRequest(): void {
-  if (snapshot.accessPromptFor) update({ accessPromptFor: null });
-}
-
-/**
  * 切换到 API Key 模式（或遇到未登录状态）时把共享列表清空：云端项目不再属于当前环境，
  * 侧栏的「已共享」标记与看板的任务都该随之消失，本机项目与任务不受影响。
  */
@@ -309,7 +289,6 @@ export function clearCollabProjects(): void {
     createShareDefault: false,
     createDemo: false,
     taskPickerFor: null,
-    accessPromptFor: null,
     notice: null,
     maxOwnedProjects: null,
     demoEligible: false
@@ -329,7 +308,6 @@ export function resetCollabProjectsStore(): void {
     createShareDefault: false,
     createDemo: false,
     taskPickerFor: null,
-    accessPromptFor: null,
     notice: null,
     maxOwnedProjects: null,
     demoEligible: false

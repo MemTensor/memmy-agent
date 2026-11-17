@@ -22,7 +22,6 @@ import {
 } from "../api/collab-client.js";
 import {
   addCollabProject,
-  consumeCollabAccessPromptRequest,
   consumeTaskPickerRequest,
   dismissCollabNotice,
   getCollabProjectsSnapshot,
@@ -31,7 +30,6 @@ import {
   removeCollabProject,
   replaceCollabProject,
   requestCreateProject,
-  requestCollabAccessPrompt,
   requestTaskPicker,
   selectCollabProject,
   sharedProjectFor,
@@ -51,7 +49,6 @@ import { requestAssistInboxRefresh } from "../app/collab-assist-refresh.js";
 import type { MemmyAgentProject } from "../api/memmy-agent-client.js";
 import { openAgentTaskInChat } from "../app/open-agent-task.js";
 import { Memmy } from "../components/mascot/memmy.js";
-import { CollabAgentAccessDialog } from "./collab-agent-access-dialog.js";
 import { CollabAgentChips } from "./collab-agent-chips.js";
 import { sessionKeyToChatId } from "../api/memmy-agent-client.js";
 import { agentActions, appActions } from "../state/app-actions.js";
@@ -537,17 +534,9 @@ const CollabBoard = memo(function CollabBoard(props: {
   const [readingId, setReadingId] = useState<string | null>(null);
   const [pickOpen, setPickOpen] = useState(false);
   /**
-   * 「在其他 Agent 中使用协作项目」的授权：未授权时「关联任务」弹窗只给授权说明，
-   * 开启共享后回到看板时与加入他人项目时各询问一次。
+   * 「在其他 Agent 中使用协作项目」的授权：只在「关联会话」里就地发生，未授权时那个弹窗先给授权说明。
    */
   const [agentAccess, setAgentAccess] = useState<CollabAgentAccessView | null>(null);
-  const [accessOpen, setAccessOpen] = useState(false);
-  /** 开启共享回到看板时手动触发一次状态重读。 */
-  const [accessCheckKey, setAccessCheckKey] = useState(0);
-  /** 同一次进入看板只主动问一次，弹窗关掉后靠设置或点「关联任务」再授权。 */
-  const accessAskedRef = useRef(false);
-  /** 刚开启共享并回到看板：这时问一次，普通打开看板不算。 */
-  const askAccessAfterShareRef = useRef(false);
   /** Choosing which of the project's own Memmy sessions members may read. */
   const [taskPickerOpen, setTaskPickerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -676,28 +665,6 @@ const CollabBoard = memo(function CollabBoard(props: {
   /** 现在是导览「关联会话」那一站：弹窗要打开，未授权时先展示授权说明。 */
   const demoPickPhase = demoActive && demoGuide.phase === "tour-associate-pick";
 
-  /**
-   * 这次要不要把授权询问让一让：设置与选择任务的弹窗开着，或者选择任务的请求还没被看板处理完。
-   * 开启共享会同时发出「询问授权」与「选择任务」两个请求：后者的 effect 先消化请求、再打开弹窗，
-   * 同一批里读到的 `taskPickerOpen` 还是旧值，所以这里连请求本身一起看，免得两个弹窗一起弹出来。
-   */
-  const accessPromptHeld = settingsOpen || taskPickerOpen || membersOpen || snapshot.taskPickerFor === projectId;
-
-  /**
-   * 刚开启共享并回到这个项目时询问一次授权。
-   * 等云端记录读回来再问：这是「已经是协作项目」的前提，和看板自己要读的那份列表一致。
-   * 上面两个弹窗开着时先不读走这个请求：请求留在 store 里，等弹窗关上再问。
-   */
-  useEffect(() => {
-    // 演示期间（含完成弹窗）压住授权询问：请求留在 store 里，演示结束后再问。
-    if (demoOwnsProject) return;
-    if (!projectId || snapshot.accessPromptFor !== projectId || !sharedId) return;
-    if (accessPromptHeld) return;
-    consumeCollabAccessPromptRequest();
-    askAccessAfterShareRef.current = true;
-    setAccessCheckKey((key) => key + 1);
-  }, [projectId, sharedId, snapshot.accessPromptFor, accessPromptHeld, demoOwnsProject]);
-
   /** 读一次授权状态：看板要据此决定「关联任务」是列任务还是给授权说明。 */
   const refreshAgentAccess = useCallback(async () => {
     if (!collab || !collabEnabled) return;
@@ -712,54 +679,36 @@ const CollabBoard = memo(function CollabBoard(props: {
 
   useEffect(() => {
     void refreshAgentAccess();
-  }, [refreshAgentAccess, sharedId, accessCheckKey]);
+  }, [refreshAgentAccess, sharedId]);
 
   /**
-   * 两个询问时机：刚开启共享后回到看板（创建者），以及加入他人项目的人第一次打开这个项目的看板。
-   * 只要还没授权、也没在这里问过，就弹一次；选「暂不安装」之后不再弹。
-   * 设置与选择任务的弹窗开着时先不问：刚开启共享往往跟着这两个弹窗，叠在一起会让人看不清先后。
-   *
-   * 授权本身只在两处发生：看板这一下，以及引导「关联会话」那一站的就地授权（先在那里授权过的，这里就不会再问）。
+   * 打开「关联会话」前再读一次授权状态：授权是唯一入口之后，在设置里授权完回来的人
+   * 不该再被那张授权说明挡一次。
    */
   useEffect(() => {
-    // 演示期间一律不问：演示结束后按「完成 / 邀请弹窗关闭 / 退出引导」的时机再弹。
-    if (demoOwnsProject) return;
-    if (!agentAccess || agentAccess.granted || agentAccess.askedInProject) return;
-    if (accessAskedRef.current) return;
-    if (accessPromptHeld) return;
-    const joined = shared !== null && shared.role !== "owner";
-    if (!joined && !askAccessAfterShareRef.current) return;
-    accessAskedRef.current = true;
-    askAccessAfterShareRef.current = false;
-    setAccessOpen(true);
-  }, [agentAccess, shared, accessPromptHeld, demoOwnsProject]);
+    if (pickOpen) void refreshAgentAccess();
+  }, [pickOpen, refreshAgentAccess]);
 
-  /** 关掉授权弹窗：选了「暂不安装」也记下已询问，之后只从设置里授权。 */
-  const closeAccessDialog = useCallback((granted: boolean) => {
-    setAccessOpen(false);
-    if (!collab) return;
-    if (granted) {
-      void refreshAgentAccess();
-      return;
-    }
-    // 只说一句去哪授权：之后不再主动问，但设置里随时可以装。
-    showToast(t("collab.access.declined"));
-    void collab.markAgentAccessAsked()
-      .then((view) => setAgentAccess(view))
-      .catch(() => undefined);
-  }, [collab, refreshAgentAccess, showToast, t]);
-
-  /** 「关联任务」里就地授权：装完立刻刷新状态，弹窗自己会重新读列表。 */
+  /**
+   * 「关联会话」里就地授权：装完立刻刷新状态，弹窗自己会重新读列表。
+   *
+   * 个别 Agent 装不上只出一句提醒（原来那张「已在 N 个 Agent 中安装」的结果页已经去掉），
+   * 详情与重试仍在「设置 → 偏好 → 协作项目」里。
+   */
   const grantAccessInPlace = useCallback(async (): Promise<boolean> => {
     if (!collab) return false;
     try {
       const result = await collab.setAgentAccess(true);
       setAgentAccess(result.view);
+      const failed = result.results.filter((item) => !item.ok);
+      if (failed.length) {
+        showToast(t("collab.pick.gatePartial", { names: failed.map((item) => item.name).join("、") }));
+      }
       return result.view.granted;
     } catch {
       return false;
     }
-  }, [collab]);
+  }, [collab, showToast, t]);
 
   /**
    * 引导「关联会话」那一站的授权：由看板就地发起，与弹窗里那个「授权并查看」是同一套。
@@ -2178,16 +2127,6 @@ const CollabBoard = memo(function CollabBoard(props: {
 
       {/* Overlays mount on the body, like the app's other menus and dialogs, so the sidebar never covers them. */}
       {typeof document === "undefined" ? null : createPortal(<>
-      {collab && collabEnabled ? (
-        <CollabAgentAccessDialog
-          open={accessOpen}
-          collab={collab}
-          // 示例句里带上项目名，让人知道那句话该怎么说。
-          projectName={project?.name}
-          onDecided={(granted) => closeAccessDialog(granted)}
-          onClose={() => closeAccessDialog(false)}
-        />
-      ) : null}
       {project ? (
         <ProjectInstructionsDialog
           open={instructionsOpen}
@@ -3029,8 +2968,6 @@ export function ProjectBoardSettingsDialog(props: {
         console.warn(`Project binding failed: ${messageOf(cause)}`);
       }
       props.onShared();
-      // 刚开启共享：关掉设置后回到看板，若还没授权「在其他 Agent 中使用协作项目」，询问一次。
-      requestCollabAccessPrompt(props.project.id);
       if (props.taskCount > 0) {
         // The project already has sessions: the person picks which of them members may read.
         requestTaskPicker(props.project.id);

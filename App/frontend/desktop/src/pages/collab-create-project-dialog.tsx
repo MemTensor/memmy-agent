@@ -4,7 +4,6 @@ import { createHttpCollabClient, type CollabClient, type CollabProject } from ".
 import { ApiRequestError } from "../api/http.js";
 import {
   getCollabProjectsSnapshot,
-  requestCollabAccessPrompt,
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
 import { readDemoGuideDone } from "../app/collab-demo-guide-store.js";
@@ -177,8 +176,6 @@ export function CreateProjectModal(props: {
     }
 
     const createdLocalProjectId = localProjectId;
-    /** 只有云端记录真的建成了才开始引导：建失败时项目只是本机项目，那些与成员相关的步骤没有对象。 */
-    let sharingStarted = false;
     try {
       // The cloud record points at the folder the project already runs in, so both keep the same directory.
       const created = await props.collab.createProject(trimmed, workingDirectory, {
@@ -186,7 +183,6 @@ export function CreateProjectModal(props: {
         // 本机已经退出过引导就不再请求演示：云端不会开始，项目照常建为普通协作项目。
         demo: demoRequested && (firstSharedProject || demo)
       });
-      sharingStarted = true;
       props.onShared(created.project);
       try {
         await props.collab.bindLocalProject(created.project.id, createdLocalProjectId);
@@ -206,9 +202,7 @@ export function CreateProjectModal(props: {
     } finally {
       setBusy(false);
     }
-    // 刚开启共享：看板打开后，若还没授权「在其他 Agent 中使用协作项目」，询问一次。
-    if (sharingStarted) requestCollabAccessPrompt(createdLocalProjectId);
-    // 共享成功、共享失败与达到上限都回看板：授权询问与顶部提示都挂在看板上。
+    // 共享成功、共享失败与达到上限都回看板：顶部提示挂在看板上。
     props.onCreated(createdLocalProjectId, { shareRequested: true });
   }
 

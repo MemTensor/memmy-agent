@@ -680,13 +680,13 @@ export interface CollabClient {
   listAddedAgents(): Promise<AddedAgent[]>;
   /** Removes the agent's memmy-project skill and forgets it; tasks it already joined stay in the project. */
   removeAddedAgent(name: string): Promise<{ text: string }>;
-  /** 在其他 Agent 中使用协作项目的授权状态：看板、授权弹窗与设置页都读它。 */
+  /** 在其他 Agent 中使用协作项目的授权状态：「关联会话」与设置页都读它。 */
   getAgentAccess(): Promise<CollabAgentAccessView>;
   /** 授权并安装（`true`）或撤销并移除组件（`false`）。 */
   setAgentAccess(granted: boolean): Promise<{ view: CollabAgentAccessView; results: CollabAgentInstallResult[] }>;
   /** 已授权但没装上的重新装一次；不传 `sourceIds` 时只补没装的。 */
   installAgentAccess(sourceIds?: readonly string[]): Promise<{ view: CollabAgentAccessView; results: CollabAgentInstallResult[] }>;
-  /** 记下已经在项目里询问过一次：选「暂不安装」也算，之后不再主动询问。 */
+  /** 记下已经在项目里询问过一次。看板不再主动询问，保留它是为了兼容已有云端记录。 */
   markAgentAccessAsked(): Promise<CollabAgentAccessView>;
   /** 设置里逐个开关某个 Agent：关掉不再读取并卸载组件，打开时若已授权就装回去。 */
   setAgentEnabled(sourceId: string, enabled: boolean): Promise<{ view: CollabAgentAccessView; results: CollabAgentInstallResult[] }>;
