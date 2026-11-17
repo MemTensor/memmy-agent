@@ -66,29 +66,30 @@ export function useAssistTask(collab: CollabClient | null, chatId: string | null
   return { view, refresh };
 }
 
-/** 输入框上方的协助 chip：谁的哪个 Agent 请求、授权到什么程度，以及停止与结束授权（限时授权仍有效时）。 */
+/**
+ * 输入框上方的协助 chip：只写是谁的哪个 Agent 发来的请求，状态只用两种样子表达——进行中薄荷绿并轻轻呼吸，
+ * 停下或结束后变红、不再动。授权方式、第几次、结局这些细节收进悬停提示，不摊在 chip 上。
+ */
 export function CollabAssistTaskChip(props: { view: AssistTaskView; collab: CollabClient | null; onChanged: () => void }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const thread = props.view.executing?.thread;
   if (!thread) return null;
   const latest = thread.requests[0];
-  const requester = thread.requester.name;
-  const scope = thread.scope === "timed" && thread.grant
-    ? grantSummary(thread.grant, t)
-    : t("collab.assist.scopeOnce");
+  const runningRequest = latest?.status === "running" ? latest : null;
+  const running = runningRequest !== null;
   const grantLive = thread.scope === "timed" && Boolean(thread.grant?.active);
-  // 「张三的 Claude Code 请求 · 1 小时内直接执行（到 08:45）」；执行中以外再带上这一次的状态，结束后仍看得出结局。
-  const parts = [
-    t("collab.assist.requestFrom", { name: requester, via: thread.via }),
-    thread.attempt > 1 ? t("collab.assist.attemptLabel", { attempt: String(thread.attempt) }) : "",
-    // 等待确认或授权时这一次还没有授权方式，上一次的「仅这一次」不再适用。
-    thread.scope && latest?.status !== "confirm" && latest?.status !== "pending" ? scope : "",
-    // 停下的写明是谁停的：被发起方停下时，执行方在任务页里就知道不用再管了。
-    latest && latest.status !== "running"
+  const label = t("collab.assist.requestFrom", { name: thread.requester.name, via: thread.via });
+  // 悬停时才看的细节：第几次、授权到什么程度、这一次的结局。
+  const detail = [
+    latest && thread.attempt > 1 ? t("collab.assist.attemptLabel", { attempt: String(thread.attempt) }) : "",
+    thread.scope === "timed" && thread.grant
+      ? grantSummary(thread.grant, t)
+      : thread.scope && latest?.status !== "confirm" && latest?.status !== "pending" ? t("collab.assist.scopeOnce") : "",
+    latest && !running
       ? latest.status === "stopped" ? assistStopText(latest, t) : t(ASSIST_STATUS_KEYS[latest.status])
       : ""
-  ].filter(Boolean);
+  ].filter(Boolean).join(" · ");
 
   async function act(run: () => Promise<unknown>) {
     if (busy) return;
@@ -106,22 +107,28 @@ export function CollabAssistTaskChip(props: { view: AssistTaskView; collab: Coll
   const collab = props.collab;
   return (
     <div className={styles.chipRow}>
-      <div className={styles.chip} role="status" data-collab-assist-chip="" title={parts.join(" · ")}>
+      <div
+        className={`${styles.chip} ${running ? styles.chipRunning : styles.chipStopped}`}
+        role="status"
+        data-collab-assist-chip=""
+        data-state={running ? "running" : "stopped"}
+        title={detail ? `${label} · ${detail}` : label}
+      >
         <span className={styles.pulse} aria-hidden="true">
           <i />
           <i />
           <i />
         </span>
-        <span className={styles.chipText}>{parts.join(" · ")}</span>
-        {latest?.status === "running" && collab ? (
-          <button type="button" className={styles.chipAction} disabled={busy} onClick={() => void act(() => collab.stopAssist(latest.id))}>
+        <span className={styles.chipText}>{label}</span>
+        {runningRequest && collab ? (
+          <button type="button" className={styles.chipAction} disabled={busy} onClick={() => void act(() => collab.stopAssist(runningRequest.id))}>
             {t("collab.assist.stop")}
           </button>
         ) : null}
         {grantLive && collab ? (
           <button
             type="button"
-            className={`${styles.chipAction} ${styles.chipActionDanger}`}
+            className={styles.chipAction}
             disabled={busy}
             onClick={() => void act(() => collab.revokeAssistGrant(thread.projectId, thread.requester.userId))}
           >

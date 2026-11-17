@@ -1072,6 +1072,29 @@ function Preview() {
     );
   }
 
+  if (view === "task-running") {
+    // 执行中：chip 是薄荷绿那一态，带脉动，右侧可以停止。
+    const runningRequest = {
+      ...VERSION_DONE,
+      status: "running" as const,
+      scope: "once" as const,
+      grant: null,
+      reply: "",
+      resultItems: [],
+      files: []
+    };
+    const runningView = {
+      executing: { thread: thread({ agent: "memmy", scope: "once", status: "running" }, [runningRequest, VERSION_FIRST]), confirm: null },
+      requested: []
+    };
+    return (
+      <TaskFrame bar={<CollabAssistTaskChip view={runningView} collab={client} onChanged={() => undefined} />}>
+        <AssistMessageCard envelope={parseAssistEnvelope(REQUEST_MESSAGE)!} />
+        <AssistantText>正在确认这台电脑的系统版本…</AssistantText>
+      </TaskFrame>
+    );
+  }
+
   if (view === "task" || view === "task-ask") {
     const ask = view === "task-ask";
     const confirmRequest = request({ id: "r-3", attempt: 3, via: "Claude Code", title: "查看系统与 Memmy 版本", status: "confirm", agent: null, scope: null });

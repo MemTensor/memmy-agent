@@ -535,8 +535,8 @@ function AssistTaskSurface(props: { done: boolean }) {
     maxWidth: "100%",
     padding: "5px 12px 5px 10px",
     borderRadius: 999,
-    background: "color-mix(in srgb, #5cbfae 11%, #fff)",
-    color: "#3aa893",
+    background: props.done ? "color-mix(in srgb, #f87b8e 10%, #fff)" : "color-mix(in srgb, #5cbfae 11%, #fff)",
+    color: props.done ? "#c4485c" : "#3aa893",
     fontSize: 12.5
   } as const;
   const pulseBar = (height: number, opacity: number): CSSProperties => ({
@@ -594,14 +594,14 @@ function AssistTaskSurface(props: { done: boolean }) {
           <Send size={13} aria-hidden="true" />
           <span>{props.done ? `结果已发给${MEMBER}` : `执行中，结果会发给${MEMBER}`}</span>
         </div>
-        {/* 执行方的协助 chip：谁发来的、授权到什么程度、这一次的状态，贴着输入框上方。 */}
-        <div style={chip} data-collab-assist-chip="">
+        {/* 执行方的协助 chip：只写是谁的请求，进行中与停下是两种颜色，贴着输入框上方。 */}
+        <div style={chip} data-collab-assist-chip="" data-state={props.done ? "stopped" : "running"}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 2, height: 12 }} aria-hidden="true">
             <i style={pulseBar(4, 0.55)} />
             <i style={pulseBar(11, 1)} />
             <i style={pulseBar(6, 0.75)} />
           </span>
-          <span>{`${MEMBER}的 Memmy 请求 · 仅这一次 · ${props.done ? "已完成" : "执行中"}`}</span>
+          <span>{`${MEMBER}的 Memmy 请求`}</span>
         </div>
         <div style={{ ...card, padding: "14px 16px", fontSize: 13, color: "rgba(16,26,25,.4)" }}>
           继续问点什么…

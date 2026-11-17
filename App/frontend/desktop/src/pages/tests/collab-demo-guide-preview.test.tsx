@@ -121,7 +121,8 @@ describe("the demo guide preview", () => {
     expect(DEMO_GUIDE_PREVIEW_STEPS["3-done"]).toBe("help-done");
     await render("3-running");
     // 站在那条任务里：协助 chip 写明是谁的请求、仅这一次、执行中。
-    expect(document.querySelector("[data-collab-assist-chip]")?.textContent).toContain("小饭团的 Memmy 请求 · 仅这一次");
+    expect(document.querySelector("[data-collab-assist-chip]")?.textContent).toBe("小饭团的 Memmy 请求");
+    expect(document.querySelector("[data-collab-assist-chip]")?.getAttribute("data-state")).toBe("running");
     expect(document.body.textContent).toContain("执行中");
     // 亮区锚点在这个任务页上（看板的「协助」行不是目标）。
     expect(document.querySelector("[data-demo-guide='assist-task']")).toBeTruthy();
@@ -129,7 +130,7 @@ describe("the demo guide preview", () => {
 
     await render("3-done");
     // 跑完之后：协助 chip 到已完成，底部一行写明结果发给了谁，卡片给出「完成」。
-    expect(document.querySelector("[data-collab-assist-chip]")?.textContent).toContain("已完成");
+    expect(document.querySelector("[data-collab-assist-chip]")?.getAttribute("data-state")).toBe("stopped");
     expect(document.querySelector("[data-collab-assist-dock]")?.textContent).toContain("结果已发给小饭团");
     expect(document.body.textContent).toContain("完成");
   });

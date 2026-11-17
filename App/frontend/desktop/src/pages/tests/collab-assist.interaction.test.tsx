@@ -325,7 +325,11 @@ describe("执行方的协助任务", () => {
 
     const until = new Date(expiresAt);
     const clock = `${String(until.getHours()).padStart(2, "0")}:${String(until.getMinutes()).padStart(2, "0")}`;
-    expect(document.body.textContent).toContain(`孙起的 Codex 请求 · 1 小时内直接执行（到 ${clock}）`);
+    // chip 只写是谁的请求；授权方式与到期时间收在悬停提示里。
+    const chip = document.querySelector("[data-collab-assist-chip]");
+    expect(chip?.textContent?.startsWith("孙起的 Codex 请求")).toBe(true);
+    expect(chip?.getAttribute("data-state")).toBe("running");
+    expect(chip?.getAttribute("title")).toContain(`1 小时内直接执行（到 ${clock}）`);
     await act(async () => button("停止")?.click());
     expect(collab.stopAssist).toHaveBeenCalledWith("r1");
     await act(async () => button("结束授权")?.click());

@@ -11,6 +11,7 @@
   min-width: 0;
 }
 
+/* 两种状态只有两个样子：进行中薄荷绿并轻轻呼吸，停下或结束后变红、静止。 */
 .chip {
   display: inline-flex;
   align-items: center;
@@ -18,25 +19,34 @@
   max-width: 100%;
   padding: 5px 11px 5px 10px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 10%, white);
-  color: var(--color-action-sky-hover, #3aa893);
   font-size: 12.5px;
   line-height: 1.4;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+.chipRunning {
+  background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 10%, white);
+  color: var(--color-action-sky-hover, #3aa893);
   animation: chipBreath 3.2s ease-in-out infinite;
 }
 
 @keyframes chipBreath {
   0%,
   100% {
-    background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 8%, white);
+    background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 9%, white);
   }
 
   50% {
-    background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 14%, white);
+    background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 15%, white);
   }
 }
 
-/* 脉动的三条竖线：与「N 个子 Agent 工作中」同一套语汇。 */
+.chipStopped {
+  background: color-mix(in srgb, var(--color-status-error, #f87b8e) 10%, white);
+  color: #c4485c;
+}
+
+/* 脉动的三条竖线：与「N 个子 Agent 工作中」同一套语汇；停下之后停止跳动。 */
 .pulse {
   display: inline-flex;
   align-items: center;
@@ -74,6 +84,12 @@
   }
 }
 
+.chipStopped .pulse > i {
+  animation: none;
+  height: 4px;
+  opacity: 0.75;
+}
+
 .chipText {
   min-width: 0;
   overflow: hidden;
@@ -86,17 +102,17 @@
   padding: 1px 8px;
   border: 0;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 16%, white);
+  background: color-mix(in srgb, currentColor 14%, white);
   font-size: 12px;
   line-height: 1.5;
-  color: var(--color-action-sky-hover, #3aa893);
+  color: inherit;
   white-space: nowrap;
   cursor: pointer;
   transition: background-color 0.15s ease;
 }
 
 .chipAction:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 26%, white);
+  background: color-mix(in srgb, currentColor 24%, white);
 }
 
 .chipAction:disabled {
@@ -104,17 +120,8 @@
   cursor: default;
 }
 
-.chipActionDanger {
-  color: #c4485c;
-  background: color-mix(in srgb, var(--color-status-error, #f87b8e) 12%, white);
-}
-
-.chipActionDanger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-status-error, #f87b8e) 22%, white);
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .chip,
+  .chipRunning,
   .pulse > i {
     animation: none;
   }
