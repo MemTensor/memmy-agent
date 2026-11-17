@@ -11,7 +11,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
-import { CollabAssistTaskBar, CollabAssistTaskDock, useAssistTask } from "./collab-assist-task.js";
+import { CollabAssistTaskChip, CollabAssistTaskDock, useAssistTask } from "./collab-assist-task.js";
 import { collabEnabledFor } from "../app/collab-mode.js";
 import {
   demoGuideSendsAssistHint,
@@ -1128,7 +1128,7 @@ export function HomePage() {
   const collabClient = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
   const collabProjects = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
   /**
-   * 成员协助：这条任务是执行方的一次协助（顶部协助条、底部确认卡片与「已发给谁」），或者在它里面请成员协助过
+   * 成员协助：这条任务是执行方的一次协助（输入框上方的协助 chip、底部确认卡片与「已发给谁」），或者在它里面请成员协助过
    * （底部请求卡片）。只在账号模式读；普通任务拿到空视图，页面上不多出任何东西。
    */
   const assistTask = useAssistTask(
@@ -3784,7 +3784,6 @@ export function HomePage() {
         </section>
         ) : (
         <section ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full" data-demo-guide="assist-task">
-          <CollabAssistTaskBar view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
           <div
             ref={scrollRef}
             data-demo-guide="conversation"
@@ -3940,6 +3939,8 @@ export function HomePage() {
                       onControl={(request) => void controlGoal(request)}
                     />
                   ) : null}
+                  {/* 成员协助的 chip 贴着输入框上方：自己的请求跑在哪个任务里，就跟着那条任务走。 */}
+                  <CollabAssistTaskChip view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
                   <div
                     className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"
                     data-demo-guide="composer"

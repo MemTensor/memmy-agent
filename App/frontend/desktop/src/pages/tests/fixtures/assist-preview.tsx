@@ -14,7 +14,7 @@ import { CollabAssistDialog } from "../../collab-assist-dialog.js";
 import { CollabAssistRequestCard } from "../../collab-assist-card.js";
 import { CollabAssistConversation } from "../../collab-assist-conversation.js";
 import { AssistMessageCard, parseAssistEnvelope } from "../../collab-assist-message.js";
-import { CollabAssistTaskBar, CollabAssistTaskDock } from "../../collab-assist-task.js";
+import { CollabAssistTaskChip, CollabAssistTaskDock } from "../../collab-assist-task.js";
 import { CollabAssistProjectSettings } from "../../collab-assist-settings.js";
 import { AssistBoardRow, ProjectBoardSettingsDialog } from "../../collab-page.js";
 import { ApiClientsContext } from "../../../app/providers.js";
@@ -580,19 +580,19 @@ const RESULT_MESSAGE = [
   "</memmy_assist_result>"
 ].join("\n");
 
-/** 预览里的任务页：一列宽度与真实会话一致，顶上协助条，中间消息，底部是输入框之上的那一块。 */
+/** 预览里的任务页：一列宽度与真实会话一致，中间消息，底部是输入框之上的那一块（协助 chip 贴着输入框）。 */
 function TaskFrame(props: { bar?: ReactNode; children: ReactNode; dock?: ReactNode }) {
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: "#fff" }}>
       <div style={{ height: 44, display: "flex", alignItems: "center", gap: 8, padding: "0 18px", borderBottom: "1px solid rgba(214,223,220,.6)", fontSize: 13, color: "rgba(17,29,28,.5)" }}>
         📁 项目 / Memmy 内测反馈 / <strong style={{ color: "#111d1c" }}>查看系统与 Memmy 版本</strong>
       </div>
-      {props.bar}
       <div style={{ flex: 1, overflow: "auto", padding: "18px 0" }}>
         <div style={{ width: "min(760px, calc(100% - 48px))", margin: "0 auto", display: "grid", gap: 14 }}>{props.children}</div>
       </div>
-      <div style={{ width: "min(760px, calc(100% - 48px))", margin: "0 auto 16px" }}>
+      <div style={{ width: "min(760px, calc(100% - 48px))", margin: "0 auto 16px", display: "flex", flexDirection: "column", gap: 8 }}>
         {props.dock}
+        {props.bar}
         <div style={{ border: "1px solid rgba(204,224,219,.8)", borderRadius: 16, height: 84, color: "rgba(17,29,28,.4)", fontSize: 13.5, padding: "12px 16px" }}>输入框</div>
       </div>
     </div>
@@ -1050,7 +1050,7 @@ function Preview() {
   }
 
   if (view === "task-stopped") {
-    // 执行方：被发起方停下之后，协助条写「孙起停止了这次执行」，停止按钮不再出现。
+    // 执行方：被发起方停下之后，协助 chip 写「孙起停止了这次执行」，停止按钮不再出现。
     const stoppedRequest = {
       ...VERSION_DONE,
       status: "stopped" as const,
@@ -1064,7 +1064,7 @@ function Preview() {
     const stoppedView = { executing: { thread: stoppedThread, confirm: null }, requested: [] };
     return (
       <TaskFrame
-        bar={<CollabAssistTaskBar view={stoppedView} collab={client} onChanged={() => undefined} />}
+        bar={<CollabAssistTaskChip view={stoppedView} collab={client} onChanged={() => undefined} />}
         dock={<CollabAssistTaskDock view={stoppedView} collab={client} onChanged={() => undefined} />}
       >
         <AssistMessageCard envelope={parseAssistEnvelope(REQUEST_MESSAGE)!} />
@@ -1084,7 +1084,7 @@ function Preview() {
     };
     return (
       <TaskFrame
-        bar={<CollabAssistTaskBar view={taskView} collab={client} onChanged={() => undefined} />}
+        bar={<CollabAssistTaskChip view={taskView} collab={client} onChanged={() => undefined} />}
         dock={<CollabAssistTaskDock view={taskView} collab={client} onChanged={() => undefined} />}
       >
         <AssistMessageCard envelope={parseAssistEnvelope(REQUEST_MESSAGE)!} />

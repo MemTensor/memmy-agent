@@ -201,6 +201,8 @@
 .agentLogo img {
   width: 15px;
   height: 15px;
+  /* 标志按比例缩进方块：个别 Agent 的图不是方的，写死宽高会被压扁。 */
+  object-fit: contain;
 }
 
 .agentMark {

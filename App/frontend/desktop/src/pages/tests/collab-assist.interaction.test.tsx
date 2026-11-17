@@ -26,7 +26,7 @@ import { CollabAssistDialog } from "../collab-assist-dialog.js";
 import { CollabAssistHost } from "../collab-assist-host.js";
 import { AssistMessageCard, parseAssistEnvelope } from "../collab-assist-message.js";
 import { CollabAssistProjectSettings } from "../collab-assist-settings.js";
-import { CollabAssistTaskBar, CollabAssistTaskDock } from "../collab-assist-task.js";
+import { CollabAssistTaskChip, CollabAssistTaskDock } from "../collab-assist-task.js";
 import { NotificationCenterProvider } from "../../components/notification-center.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -199,6 +199,19 @@ describe("成员协助的授权弹窗", () => {
     expect(onDecided).toHaveBeenCalledWith({ action: "allow", agent: "memmy", scope: "timed", minutes: 120 });
   });
 
+  it("Agent 列表里每个 Agent 都是一枚方块标志，Memmy 用应用图标而不是水彩插画", async () => {
+    await act(async () => root.render(
+      <I18nProvider language="zh-CN">
+        <CollabAssistDialog open request={inbox} collab={client()} onDecided={vi.fn()} onClose={() => undefined} />
+      </I18nProvider>
+    ));
+
+    const logos = [...document.querySelectorAll<HTMLImageElement>("button img")].map((item) => item.getAttribute("src") ?? "");
+    // 水彩插画是 512×308 的横图，塞进 15px 方块会被压成一条；Memmy 在这类槽位用应用图标。
+    expect(logos.some((src) => src.includes("memmy-app-icon"))).toBe(true);
+    expect(logos.some((src) => src.includes("memmy-rice"))).toBe(false);
+  });
+
   it("默认选中的 Agent 在第二层时自动展开", async () => {
     const onDecided = vi.fn();
     const collab = client({
@@ -298,7 +311,7 @@ describe("成员协助的授权弹窗", () => {
 });
 
 describe("执行方的协助任务", () => {
-  it("面包屑下方的协助条写明是谁的请求与限时授权的到期时间，执行中可以停止，授权可以结束", async () => {
+  it("输入框上方的协助 chip 写明是谁的请求与限时授权的到期时间，执行中可以停止，授权可以结束", async () => {
     const collab = client();
     const expiresAt = new Date(Date.now() + 42 * 60_000).toISOString();
     const grant = { minutes: 60, expiresAt, active: true, agent: null };
@@ -306,7 +319,7 @@ describe("执行方的协助任务", () => {
     const view: AssistTaskView = { executing: { thread: thread({ scope: "timed", agent: "memmy", grant }, [running]), confirm: null }, requested: [] };
     await act(async () => root.render(
       <I18nProvider language="zh-CN">
-        <CollabAssistTaskBar view={view} collab={collab} onChanged={() => undefined} />
+        <CollabAssistTaskChip view={view} collab={collab} onChanged={() => undefined} />
       </I18nProvider>
     ));
 
@@ -1040,7 +1053,7 @@ describe("成员协助的宿主", () => {
       await new Promise((resolve) => setTimeout(resolve, 700));
     });
 
-    // 与正式逻辑同一条路：进那条任务，让人看到协助条、执行过程与结果。
+    // 与正式逻辑同一条路：进那条任务，让人看到协助 chip、执行过程与结果。
     expect(onOpenTask).toHaveBeenCalledWith("chat-1");
     expect(onOpenBoard).not.toHaveBeenCalled();
     expect(getDemoGuideState().phase).toBe("help-running");

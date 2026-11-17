@@ -1,7 +1,7 @@
 /**
  * 成员协助在各处共用的小部件与说法：执行 Agent 的名字与图标、状态的界面用语、时间与用时。
  *
- * 看板条目、协助详情、任务页的协助条与卡片都用同一套说法，状态与请求卡片一致：
+ * 看板条目、协助详情、任务页的协助 chip 与卡片都用同一套说法，状态与请求卡片一致：
  * 等待授权、执行中、等待确认、已完成、未允许、已撤回、已过期、没有完成。
  */
 import { useEffect, useState } from "react";
@@ -50,7 +50,7 @@ export function grantDurationLabel(minutes: number | null, t: Translate): string
 
 /**
  * 限时授权的一句说明：「1 小时内直接执行（到 08:45）」；已经结束时写「限时授权已结束」。
- * 执行方任务页的协助条、看板右侧详情、发起方卡片共用这一句。
+ * 执行方任务页的协助 chip、看板右侧详情、发起方卡片共用这一句。
  */
 export function grantSummary(grant: AssistGrantInfo, t: Translate, now: Date = new Date()): string {
   const ended = !grant.active || new Date(grant.expiresAt).getTime() <= now.getTime();

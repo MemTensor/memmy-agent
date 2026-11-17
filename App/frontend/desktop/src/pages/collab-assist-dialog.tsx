@@ -23,7 +23,7 @@ import { Button } from "../components/button.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { Modal } from "../components/modal.js";
 import { useTranslation } from "../i18n/use-translation.js";
-import { agentSourceLogoUrl } from "./agent-source-logos.js";
+import { agentSourceSquareLogoUrl } from "./agent-source-logos.js";
 import { AssistAttachments } from "./collab-assist-attachments.js";
 import { AssistItems } from "./collab-assist-items.js";
 import { DEFAULT_GRANT_MINUTES, GrantDurationPicker, assistReviewLine, assistWaitedText } from "./collab-assist-view.js";
@@ -290,8 +290,8 @@ function AgentGrid(props: { agents: AssistAgent[]; selected: string | null; onSe
         >
           <span className={styles.radio} aria-hidden="true" />
           <span className={styles.agentLogo}>
-            {agentSourceLogoUrl(item.sourceId)
-              ? <img src={agentSourceLogoUrl(item.sourceId)} alt="" />
+            {agentSourceSquareLogoUrl(item.sourceId)
+              ? <img src={agentSourceSquareLogoUrl(item.sourceId)} alt="" />
               : <span className={styles.agentMark}>{Array.from(item.name)[0] ?? "A"}</span>}
           </span>
           <span className={styles.agentName}>{item.name}</span>

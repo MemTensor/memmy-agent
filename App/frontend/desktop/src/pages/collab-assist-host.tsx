@@ -300,7 +300,7 @@ export function CollabAssistHost(props: {
           setDialogRequest(null);
           void poll();
           if (decision.action !== "allow") return;
-          // 新手引导里允许之后也要进那条任务：演示要让人看到协助条、执行过程与「结果已发给谁」，
+          // 新手引导里允许之后也要进那条任务：演示要让人看到协助 chip、执行过程与「结果已发给谁」，
           // 与正式逻辑走同一条路，区别只在拿不到任务时按「这一步没有完成」处理，而不是退回看板。
           if (isDemoGuideActive()) {
             dispatchDemoGuide({ type: "help-decided", allow: true });

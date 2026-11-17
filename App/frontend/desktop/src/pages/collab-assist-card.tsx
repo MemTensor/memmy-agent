@@ -8,7 +8,7 @@ import { AlertCircle, CheckCircle2, FileText, X, WifiOff } from "lucide-react";
 import { useState } from "react";
 import type { AssistRequest, CollabClient } from "../api/collab-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
-import { agentSourceLogoUrl } from "./agent-source-logos.js";
+import { agentSourceSquareLogoUrl } from "./agent-source-logos.js";
 import styles from "./collab-assist-card.module.css";
 import { assistClock, assistDuration, assistStopText, grantSummary } from "./collab-assist-view.js";
 
@@ -213,7 +213,7 @@ export function agentLabel(sourceId: string | null, fallback: string): string {
 }
 
 function AgentLogo(props: { agent: string | null; name: string }) {
-  const url = props.agent ? agentSourceLogoUrl(props.agent) : null;
+  const url = props.agent ? agentSourceSquareLogoUrl(props.agent) : null;
   return (
     <span className={styles.agentLogo}>
       {url ? <img src={url} alt="" /> : <span className={styles.agentMark}>{Array.from(props.name)[0] ?? "A"}</span>}

@@ -1,8 +1,8 @@
 /**
  * 成员协助在 Memmy 任务页上的部分。
  *
- * 执行方：协助由 Memmy 执行时，协助本身就是项目里的一条 Memmy 任务。面包屑下方一条协助条说明是谁的请求、
- * 授权到什么程度（仅这一次，或「1 小时内直接执行（到 08:45）」），右侧是「停止」与「结束授权」；
+ * 执行方：协助由 Memmy 执行时，协助本身就是项目里的一条 Memmy 任务。输入框上方一个可呼吸的小 chip 说明是谁的请求、
+ * 授权到什么程度（仅这一次，或「1 小时内直接执行（到 08:45）」），执行中可以在 chip 里停止、限时授权可以结束；
  * 同一次排查的后续请求需要她确认时，确认卡片出现在任务底部，
  * 确认后就在这条任务里继续；结果发出后，底部一行说明「结果已发给谁」，可展开查看发出去的内容。
  *
@@ -66,8 +66,8 @@ export function useAssistTask(collab: CollabClient | null, chatId: string | null
   return { view, refresh };
 }
 
-/** 面包屑下方的协助条：谁的哪个 Agent 请求、授权到什么程度，以及停止与结束授权（限时授权仍有效时）。 */
-export function CollabAssistTaskBar(props: { view: AssistTaskView; collab: CollabClient | null; onChanged: () => void }) {
+/** 输入框上方的协助 chip：谁的哪个 Agent 请求、授权到什么程度，以及停止与结束授权（限时授权仍有效时）。 */
+export function CollabAssistTaskChip(props: { view: AssistTaskView; collab: CollabClient | null; onChanged: () => void }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const thread = props.view.executing?.thread;
@@ -96,7 +96,7 @@ export function CollabAssistTaskBar(props: { view: AssistTaskView; collab: Colla
     try {
       await run();
     } catch {
-      // 失败时协助条保持原样，下一轮读取会给出真实状态。
+      // 失败时 chip 保持原样，下一轮读取会给出真实状态。
     } finally {
       setBusy(false);
       props.onChanged();
@@ -105,28 +105,30 @@ export function CollabAssistTaskBar(props: { view: AssistTaskView; collab: Colla
 
   const collab = props.collab;
   return (
-    <div className={styles.grantbar} role="status" data-collab-assist-bar="">
-      <span className={styles.grantText}>
-        <span className={styles.avatar} style={{ background: memberColor(thread.requester.userId) }}>
-          {Array.from(requester)[0] ?? ""}
+    <div className={styles.chipRow}>
+      <div className={styles.chip} role="status" data-collab-assist-chip="" title={parts.join(" · ")}>
+        <span className={styles.pulse} aria-hidden="true">
+          <i />
+          <i />
+          <i />
         </span>
-        <span>{parts.join(" · ")}</span>
-      </span>
-      {latest?.status === "running" && collab ? (
-        <button type="button" className={styles.grantButton} disabled={busy} onClick={() => void act(() => collab.stopAssist(latest.id))}>
-          {t("collab.assist.stop")}
-        </button>
-      ) : null}
-      {grantLive && collab ? (
-        <button
-          type="button"
-          className={`${styles.grantButton} ${styles.grantButtonDanger}`}
-          disabled={busy}
-          onClick={() => void act(() => collab.revokeAssistGrant(thread.projectId, thread.requester.userId))}
-        >
-          {t("collab.assist.endGrant")}
-        </button>
-      ) : null}
+        <span className={styles.chipText}>{parts.join(" · ")}</span>
+        {latest?.status === "running" && collab ? (
+          <button type="button" className={styles.chipAction} disabled={busy} onClick={() => void act(() => collab.stopAssist(latest.id))}>
+            {t("collab.assist.stop")}
+          </button>
+        ) : null}
+        {grantLive && collab ? (
+          <button
+            type="button"
+            className={`${styles.chipAction} ${styles.chipActionDanger}`}
+            disabled={busy}
+            onClick={() => void act(() => collab.revokeAssistGrant(thread.projectId, thread.requester.userId))}
+          >
+            {t("collab.assist.endGrant")}
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }
