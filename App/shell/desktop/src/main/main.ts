@@ -1,3 +1,4 @@
+import { bundledCliInstallDecision, HOMEBREW_CLI_BIN_DIRECTORY, MEMMY_CLI_LAUNCHER_MARKER, PACKAGED_MAC_CLI_COMMANDS, SYSTEM_CLI_BIN_DIRECTORY, USER_CLI_SHELL_PROFILES, memmyCliAppCandidates, renderMemmyCliLauncher } from './cli-auto-install.js';
 import { createMacDmgUpdateInstallScript, createMacDmgUpdateStageScript, type MacUpdateValidationOptions } from './mac-update-scripts.js';
 import { createDesktopScreenCapture } from './desktop-screen-capture.js';
 import { compareVersionSegments, parseUpdatePackageVersion } from './version-compare.js';
@@ -167,6 +168,7 @@ import {
 } from "./windows-cli-path.js";
 import {
   getWindowsLaunchAtLogin,
+  repairWindowsLaunchAtLogin,
   setWindowsLaunchAtLogin,
   type WindowsLaunchAtLoginEnvironment
 } from "./windows-launch-at-login.js";
@@ -974,12 +976,25 @@ function configureAppIdentity(): void {
       throw error;
     }
   }
-  const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
+  // 开发态并排跑两个实例（例如一个账号当发起方、另一个当执行方）时，各自的 userData 必须分开：
+  // Electron 的单实例锁挂在 userData 上，共用一个目录的话第二个进程只会把第一个窗口拉到前台。
+  // 只认开发态的这个开关，打包后的应用仍然用固定的数据目录。
+  const devProfile = app.isPackaged ? null : process.env.MEMMY_DEV_PROFILE_DIR?.trim() || null;
+  const userDataPath = devProfile
+    ? join(devProfile, "userData")
+    : windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
   const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
   app.setPath("userData", userDataPath);
+  if (devProfile) {
+    // 会话、日志、临时目录一并放进这个 profile：两个实例互不干扰。
+    app.setPath("sessionData", join(devProfile, "sessionData"));
+    app.setPath("logs", join(devProfile, "logs"));
+    app.setPath("temp", join(devProfile, "temp"));
+    app.setPath("crashDumps", join(devProfile, "crashDumps"));
+  }
   if (localTestProfile) {
     if (resolve(userDataPath) !== localTestProfile.userData || resolve(memmyHome) !== localTestProfile.runtimeHome) {
       throw new Error('Isolated test profile path validation failed');
@@ -1045,31 +1060,169 @@ function readCurrentDesktopEditionManifest(): string | null {
 /**
  * Installs the bundled CLI into the user's PATH.
  *
- * A drag-and-drop DMG cannot run scripts automatically when dragged into
- * Applications, so we create user-level symlinks the first time the app launches
- * from /Applications. Failures are only logged and do not affect GUI startup.
+ * On macOS the command is a small script, not a symlink to the running bundle. Opening Memmy from
+ * the disk image still installs it: the script uses that copy while the image is mounted, then
+ * `/Applications` after the person drags Memmy there. A symlink would become "command not found"
+ * as soon as the image is ejected.
  *
  * @returns Resolves once installation completes.
  */
 async function installBundledCliIfNeeded(): Promise<void> {
-  if (!app.isPackaged || localTestProfile || !isInstalledApplicationsApp()) {
+  if (!app.isPackaged || localTestProfile) {
+    return;
+  }
+  if (process.platform === "darwin") {
+    await installPackagedMacCliLaunchers();
+    return;
+  }
+  if (resolveCliInstallStrategy(
+    process.platform,
+    app.isPackaged,
+    Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)
+  ) === "packaged-windows") {
+    await installPackagedWindowsCliOnBoot();
     return;
   }
 
-  try {
-    const cliDirectory = join(process.resourcesPath, "cli");
-    const memoryCli = join(cliDirectory, "memmy-memory");
-    const memmyCli = join(cliDirectory, "memmy");
-    await Promise.all([access(memoryCli), access(memmyCli)]);
+  const bundlePath = resolveCurrentAppBundlePath();
+  const decision = bundledCliInstallDecision(bundlePath);
+  if (decision !== "install") {
+    await writePackagedStartupLog(`boot:cli-skipped:${decision}:${bundlePath}`);
+    return;
+  }
 
+  const cliDirectory = join(process.resourcesPath, "cli");
+  const commands = [
+    ["memmy-memory", join(cliDirectory, "memmy-memory")],
+    ["memmy", join(cliDirectory, "memmy")],
+    ["memmy-project", join(cliDirectory, "memmy-project")]
+  ] as const;
+  const installed: string[] = [];
+  const skipped: string[] = [];
+
+  try {
     const binDirectory = await resolveCliInstallDirectory();
     await mkdir(binDirectory, { recursive: true });
-    await installSymlink(memoryCli, join(binDirectory, "memmy-memory"));
-    await installSymlink(memmyCli, join(binDirectory, "memmy"));
+    for (const [name, source] of commands) {
+      try {
+        await access(source);
+        const userLink = await installSymlink(source, join(binDirectory, name));
+        const systemLink = await installSystemBinSymlink(source, name);
+        installed.push(`${name}:${userLink}${systemLink === "skipped" ? "" : `+${systemLink}`}`);
+      } catch (error) {
+        skipped.push(`${name}:${formatStartupError(error)}`);
+      }
+    }
     await ensureUserPathIncludes(binDirectory);
+    await writePackagedStartupLog(`boot:cli-installed:${installed.join(",") || "none"};skipped:${skipped.join("|") || "none"}`);
   } catch (error) {
     console.warn("Memmy CLI auto-install skipped:", error);
+    await writePackagedStartupLog(`boot:cli-failed\n${formatStartupError(error)}`);
   }
+}
+
+async function installPackagedWindowsCliOnBoot(): Promise<void> {
+  try {
+    const result = await installPackagedWindowsCliTools(process.resourcesPath);
+    await writePackagedStartupLog(`boot:cli-installed:windows:${result.binDirectory};pathUpdated:${result.pathUpdated}`);
+  } catch (error) {
+    console.warn("Memmy CLI auto-install skipped:", error);
+    await writePackagedStartupLog(`boot:cli-failed:windows\n${formatStartupError(error)}`);
+  }
+}
+
+async function installPackagedMacCliLaunchers(): Promise<void> {
+  const bundlePath = resolveCurrentAppBundlePath();
+  const decision = bundledCliInstallDecision(bundlePath);
+  try {
+    const outcome = await installPackagedMacCliCommands([...PACKAGED_MAC_CLI_COMMANDS], bundlePath);
+    let profiles = "unchanged";
+    try {
+      const profilePaths = await ensureDirectoryOnUserPath(
+        outcome.binDirectory,
+        "# Memmy CLI PATH",
+        'export PATH="$HOME/.local/bin:$PATH"'
+      );
+      profiles = profilePaths.join(",") || "unchanged";
+    } catch (error) {
+      profiles = `failed:${formatStartupError(error)}`;
+    }
+    const installed = outcome.installed.map((entry) => entry.name).join(",") || "none";
+    await writePackagedStartupLog(`boot:cli-installed:${decision}:${bundlePath}:${installed};skipped:${outcome.skipped.join("|") || "none"};profiles:${profiles}`);
+  } catch (error) {
+    console.warn("Memmy CLI auto-install skipped:", error);
+    await writePackagedStartupLog(`boot:cli-failed:${decision}:${bundlePath}\n${formatStartupError(error)}`);
+  }
+}
+
+/**
+ * Installs Mac CLI commands as scripts under ~/.local/bin.
+ *
+ * The script looks up Memmy.app when it runs. A symlink to the copy that is open now would break
+ * after the person ejects the disk image, or after macOS deletes a translocated copy, and zsh then
+ * reports "command not found".
+ */
+async function installPackagedMacCliCommands(
+  names: readonly string[],
+  bundlePath = resolveCurrentAppBundlePath()
+): Promise<CliInstallResult & { skipped: string[] }> {
+  const appPaths = memmyCliAppCandidates(bundlePath, homedir());
+  const binDirectory = join(homedir(), ".local", "bin");
+  await mkdir(binDirectory, { recursive: true });
+  const installed: CliInstallResult["installed"] = [];
+  const skipped: string[] = [];
+
+  for (const name of names) {
+    try {
+      const target = join(binDirectory, name);
+      const wrote = await writeUserCliLauncher(target, renderMemmyCliLauncher(name, appPaths));
+      if (wrote === "installed") {
+        const source = target;
+        await installSystemBinSymlink(source, name);
+        await installBinDirectorySymlink(HOMEBREW_CLI_BIN_DIRECTORY, source, name);
+      }
+      installed.push({ name, source: target, target });
+    } catch (error) {
+      skipped.push(`${name}:${formatStartupError(error)}`);
+    }
+  }
+
+  if (installed.length === 0 && skipped.length > 0) {
+    throw new Error(skipped.join("\n"));
+  }
+
+  return {
+    ok: true,
+    binDirectory,
+    installed,
+    pathUpdated: false,
+    profilePaths: [],
+    skipped
+  };
+}
+
+async function writeUserCliLauncher(target: string, contents: string): Promise<"installed" | "kept-file"> {
+  try {
+    const current = await lstat(target);
+    if (!current.isSymbolicLink()) {
+      if (!current.isFile()) return "kept-file";
+      const text = await readFile(target, "utf8");
+      if (!text.includes(MEMMY_CLI_LAUNCHER_MARKER)) return "kept-file";
+    }
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+  }
+
+  const temporary = join(dirname(target), `.${basename(target)}.${process.pid}.tmp`);
+  try {
+    await writeFile(temporary, contents, { mode: 0o755 });
+    await chmod(temporary, 0o755);
+    await rename(temporary, target);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+  return "installed";
 }
 
 async function installCliTools(): Promise<CliInstallResult> {
@@ -1079,6 +1232,24 @@ async function installCliTools(): Promise<CliInstallResult> {
     Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)
   ) === "packaged-windows") {
     return installPackagedWindowsCliTools(process.resourcesPath);
+  }
+
+  if (app.isPackaged && process.platform === "darwin") {
+    const outcome = await installPackagedMacCliCommands([...PACKAGED_MAC_CLI_COMMANDS]);
+    const { skipped, ...result } = outcome;
+    if (skipped.length > 0) {
+      throw new Error(skipped.join("\n"));
+    }
+    const profilePaths = await ensureDirectoryOnUserPath(
+      result.binDirectory,
+      "# Memmy CLI PATH",
+      'export PATH="$HOME/.local/bin:$PATH"'
+    );
+    return {
+      ...result,
+      pathUpdated: profilePaths.length > 0,
+      profilePaths
+    };
   }
 
   const binDirectory = join(homedir(), ".local", "bin");
@@ -1109,14 +1280,17 @@ function resolveCliToolEntries(): Array<{ name: string; source: string }> {
   if (app.isPackaged) {
     const cliDirectory = join(process.resourcesPath, "cli");
     return [
-      { name: "memmy-memory", source: join(cliDirectory, "memmy-memory") }
+      { name: "memmy-memory", source: join(cliDirectory, "memmy-memory") },
+      { name: "memmy-project", source: join(cliDirectory, "memmy-project") }
     ];
   }
 
   const rootDirectory = resolveDevelopmentRoot();
   const memoryCli = join(rootDirectory, "Memory", "dist", "src", "cli", "index.js");
+  const projectCli = join(rootDirectory, "App", "backend", "dist", "src", "cli", "memmy-project.js");
   return [
-    { name: "memmy-memory", source: memoryCli }
+    { name: "memmy-memory", source: memoryCli },
+    { name: "memmy-project", source: projectCli }
   ];
 }
 
@@ -1191,11 +1365,11 @@ async function resolveCliInstallDirectory(): Promise<string> {
  * @param target The command path under the user's PATH.
  * @returns Resolves once done.
  */
-async function installSymlink(source: string, target: string): Promise<void> {
+async function installSymlink(source: string, target: string): Promise<"installed" | "kept-file"> {
   try {
     const stat = await lstat(target);
     if (!stat.isSymbolicLink()) {
-      return;
+      return "kept-file";
     }
     await unlink(target);
   } catch (error) {
@@ -1205,6 +1379,7 @@ async function installSymlink(source: string, target: string): Promise<void> {
   }
 
   await symlink(source, target);
+  return "installed";
 }
 
 async function ensureUserPathIncludes(binDirectory: string): Promise<void> {
@@ -1214,10 +1389,31 @@ async function ensureUserPathIncludes(binDirectory: string): Promise<void> {
 
   const marker = "# Memmy CLI PATH";
   const line = 'export PATH="$HOME/.local/bin:$PATH"';
-  await Promise.all([
-    ensureShellProfileIncludesPath(join(homedir(), ".zshrc"), marker, line),
-    ensureShellProfileIncludesPath(join(homedir(), ".bash_profile"), marker, line)
-  ]);
+  await Promise.all(USER_CLI_SHELL_PROFILES.map((name) => (
+    ensureShellProfileIncludesPath(join(homedir(), name), marker, line)
+  )));
+}
+
+/**
+ * Links one command into /usr/local/bin when that directory is writable. It is already on the
+ * PATH of a Dock-launched app, which never reads ~/.zshrc.
+ */
+async function installSystemBinSymlink(source: string, name: string): Promise<"installed" | "kept-file" | "skipped"> {
+  return installBinDirectorySymlink(SYSTEM_CLI_BIN_DIRECTORY, source, name);
+}
+
+/** Links one command into a directory that is already on PATH, when that directory is writable. */
+async function installBinDirectorySymlink(
+  directory: string,
+  source: string,
+  name: string
+): Promise<"installed" | "kept-file" | "skipped"> {
+  try {
+    await access(directory, fsConstants.W_OK);
+  } catch {
+    return "skipped";
+  }
+  return installSymlink(source, join(directory, name));
 }
 
 async function ensureDirectoryOnUserPath(binDirectory: string, marker: string, line: string): Promise<string[]> {
@@ -1225,10 +1421,7 @@ async function ensureDirectoryOnUserPath(binDirectory: string, marker: string, l
     return [];
   }
 
-  const profilePaths = [
-    join(homedir(), ".zshrc"),
-    join(homedir(), ".bash_profile")
-  ];
+  const profilePaths = USER_CLI_SHELL_PROFILES.map((name) => join(homedir(), name));
   const results = await Promise.all(profilePaths.map(async (profilePath) => ({
     profilePath,
     changed: await ensureShellProfileIncludesPath(profilePath, marker, line)
@@ -5868,6 +6061,12 @@ app.whenReady().then(async () => {
     return;
   }
 
+  try {
+    repairWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment());
+  } catch (error) {
+    void writePackagedStartupLog(`windows-login-item-repair-failed:${formatStartupError(error)}`);
+  }
+
   installMacQuitEventObserver();
   await boot();
 }).catch(handleStartupFailure);
@@ -6149,6 +6348,13 @@ function clearQuitCleanupForceExitTimer(): void {
   quitCleanupForceExitTimer = null;
 }
 
+async function traceQuitCleanup<T>(stage: string, operation: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  console.info(`[quit] ${stage}:start`);
+  try { return await operation(); }
+  finally { console.info(`[quit] ${stage}:finished elapsedMs=${Date.now() - startedAt}`); }
+}
+
 async function cleanupBeforeQuit(): Promise<void> {
   if (requiredUpdateBackgroundFirstCheckTimer) {
     clearTimeout(requiredUpdateBackgroundFirstCheckTimer);
@@ -6163,7 +6369,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   }
   clearPetWindowCloseActivateSuppression();
   closePetWindow();
-  await installPreparedRequiredUpdateOnQuit();
+  await traceQuitCleanup("prepared-update", async () => { await installPreparedRequiredUpdateOnQuit(); });
   ipcMain.removeHandler("memmy:get-runtime-config");
   ipcMain.removeHandler("memmy:get-app-info");
   ipcMain.removeHandler("memmy:get-installation-id");
@@ -6241,15 +6447,17 @@ async function cleanupBeforeQuit(): Promise<void> {
   disposeBrowserWebviewPermissions?.();
   disposeBrowserWebviewPermissions = null;
   // Native app agents belong to LaunchServices, outside the gateway process tree.
-  // Start their shutdown before awaiting services, which may fail or hit the quit deadline.
+  // Start their bounded shutdown before awaiting services, which may fail or hit the quit deadline.
   const nativeAgentShutdown = process.platform === 'darwin'
-    ? stopComputerUseAgentForPermissionRestart(app.isPackaged, process.resourcesPath,
-      process.env.MEMMY_DEV_COMPUTER_USE_BINARY).catch(error => {
+    ? traceQuitCleanup("native-history-agent", () => stopComputerUseAgentForPermissionRestart(app.isPackaged, process.resourcesPath,
+      process.env.MEMMY_DEV_COMPUTER_USE_BINARY)).catch(error => {
         console.warn("Failed to stop the native Computer Use agent during quit cleanup:", error);
       })
     : Promise.resolve();
   try {
-    await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+    await traceQuitCleanup("runtime-services", async () => {
+      await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+    });
   } finally {
     await nativeAgentShutdown;
   }
@@ -6260,9 +6468,9 @@ async function cleanupBeforeQuit(): Promise<void> {
   pipScreenPermissionGuide = null;
   computerUseSurfaceWindows?.dispose();
   computerUseSurfaceWindows = null;
-  await backend?.close();
-  await stopPackagedRendererServer();
-  await sendAppExitEventBeforeQuit();
+  await traceQuitCleanup("backend", async () => backend?.close());
+  await traceQuitCleanup("renderer", stopPackagedRendererServer);
+  await traceQuitCleanup("analytics", sendAppExitEventBeforeQuit);
 }
 
 function readStopMemoryServiceOnExitSetting(): boolean {

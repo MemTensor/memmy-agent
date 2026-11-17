@@ -110,3 +110,8 @@ export function useNotificationCenter(): NotificationCenterValue {
   }
   return value;
 }
+
+/** 可选版本：不在 Provider 里时返回 null，测试或独立渲染的页面不必为此包一层。 */
+export function useOptionalNotificationCenter(): NotificationCenterValue | null {
+  return useContext(NotificationCenterContext);
+}

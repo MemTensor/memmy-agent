@@ -1,6 +1,5 @@
-import { ArrowRight, BookOpenText, CalendarCheck2, History } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { useTranslation } from "../i18n/use-translation.js";
-import { resolveContributionIcon } from "./agent-command-palette.js";
 import type { PluginScenarioTarget } from "./plugin-conversation-controls.js";
 import "./home-starter-actions.css";
 
@@ -15,7 +14,6 @@ export function HomeStarterActions(props: {
     return (
       <div className="home-scenario-cards" aria-label={t("home.empty")}>
         {props.scenarios.map((scenario) => {
-          const Icon = resolveContributionIcon(scenario.icon);
           return (
             <button
               key={`${scenario.pluginId}:${scenario.id}`}
@@ -23,7 +21,6 @@ export function HomeStarterActions(props: {
               className="home-scenario-card"
               onClick={() => props.onSelect(scenario.prompt)}
             >
-              <span className={`home-scenario-card__icon${scenario.icon === "scale" ? " home-scenario-card__icon--scale" : ""}`} aria-hidden="true"><Icon size={16} /></span>
               <span className="home-scenario-card__body">
                 <span className="home-scenario-card__title">{scenario.name}</span>
                 <span className="home-scenario-card__description">{scenario.description}</span>
@@ -40,16 +37,16 @@ export function HomeStarterActions(props: {
 
   return (
     <div className="home-prompt-suggestions" aria-label={t("home.empty")}>
-      <button type="button" onClick={() => props.onSelect(t("home.suggestionPrompt.one"))}>
-        <span className="home-prompt-suggestions__icon" aria-hidden="true"><BookOpenText size={15} /></span>
-        <span>{t("home.suggestion.one")}</span>
+      <button type="button" onClick={() => props.onSelect(t("home.suggestionPrompt.four"))}>
+        <span>{t("home.suggestion.four")}</span>
       </button>
       <button type="button" onClick={() => props.onSelect(t("home.suggestionPrompt.two"))}>
-        <span className="home-prompt-suggestions__icon" aria-hidden="true"><CalendarCheck2 size={15} /></span>
         <span>{t("home.suggestion.two")}</span>
       </button>
+      <button type="button" onClick={() => props.onSelect(t("home.suggestionPrompt.one"))}>
+        <span>{t("home.suggestion.one")}</span>
+      </button>
       <button type="button" onClick={() => props.onSelect(t("home.suggestionPrompt.three"))}>
-        <span className="home-prompt-suggestions__icon" aria-hidden="true"><History size={15} /></span>
         <span>{t("home.suggestion.three")}</span>
       </button>
     </div>

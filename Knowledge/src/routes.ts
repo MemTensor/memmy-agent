@@ -20,6 +20,11 @@ export function registerKnowledgeRoutes(
       request: FastifyRequest,
       reply: FastifyReply,
     ) => Promise<unknown>;
+    /**
+     * 会话工作目录 → 所属协作项目 id。项目关联的知识库跟着这一条参与检索；
+     * 不是项目目录、未关联知识库、读不到本机绑定都返回 null。
+     */
+    projectForWorkspace?: (workspace: string) => Promise<string | null>;
   },
 ): void {
   const client = new ManagedKnowledgeClient(options);
@@ -285,12 +290,18 @@ export function registerKnowledgeRoutes(
       scoped.post("/recall", async (request) => {
         const body = record(request.body);
         if (
-          Object.keys(body).some((key) => key !== "query") ||
+          Object.keys(body).some((key) => !["query", "workspace"].includes(key)) ||
           !text(body.query).trim() ||
-          text(body.query).length > 8000
+          text(body.query).length > 8000 ||
+          text(body.workspace).length > 4096
         )
           throw new KnowledgeError("检索问题无效");
-        return client.recall(text(body.query));
+        // 目录解析失败不影响本轮：只按个人范围检索，和没有项目关联时一样。
+        const workspace = text(body.workspace).trim();
+        const projectId = workspace && options.projectForWorkspace
+          ? await options.projectForWorkspace(workspace).catch(() => null)
+          : null;
+        return client.recall(text(body.query), projectId);
       });
     },
     { prefix: "/api/knowledge" },

@@ -1,6 +1,8 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
+import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_MEMMY_CONFIG, MemoryDb, type LlmClient } from "../../../src/index.js";
+import { MemoryDb, type LlmClient } from "../../../src/index.js";
 import {
   insertActivePolicyMemory,
   insertActiveSkillMemoryForTest,
@@ -31,12 +33,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       namespace: { source: "codex", profileId: "jiang", userId },
       workspaceId: "bc-24-workspace"
     });
-    const complete = service.completeTurn("bc-24-evidence", {
+    const complete = (await service.completeTurn("bc-24-evidence", {
       sessionId: session.sessionId,
       episodeId: "bc-24-episode",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, apply the fix, and verify the result."
-    });
+    }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     insertActivePolicyMemory(db, {
       id: "policy_bc24",
@@ -46,7 +48,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "bc-24-workspace",
       profileId: "jiang",
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     });
     insertActiveSkillMemoryForTest(db, {
       id: "skill_bc24_generated",
@@ -101,7 +103,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       id: "job_bc24_update",
       userId,
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       policyId: "policy_bc24"
     });
     await service.runWorkerOnce(20);
@@ -193,7 +195,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
-       WHERE user_id = 'user-skill-guard'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'`
     ).get() as { count: number };
     expect(skillCount.count).toBe(0);
@@ -210,12 +212,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-fresh-skill"
     });
-    const complete = service.completeTurn("turn-fresh-skill-skip", {
+    const complete = (await service.completeTurn("turn-fresh-skill-skip", {
       sessionId: session.sessionId,
       episodeId: "episode-fresh-skill-skip",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     insertActivePolicyMemory(db, {
       id: "policy_fresh_skill_skip",
       userId: "user-fresh-skill-skip",
@@ -224,7 +226,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "workspace-fresh-skill",
       profileId: "jiang",
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     });
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     const firstAt = new Date().toISOString();
@@ -237,7 +239,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       "job_fresh_skill_create",
       "user-fresh-skill-skip",
       session.sessionId,
-      complete.episodeId,
+      assignedEpisodeId(service, complete),
       "policy_fresh_skill_skip",
       firstAt,
       firstAt
@@ -247,7 +249,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const createdSkill = db.db.prepare(
       `SELECT id, updated_at
        FROM memories
-       WHERE user_id = 'user-fresh-skill-skip'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'
        LIMIT 1`
     ).get() as { id: string; updated_at: string } | undefined;
@@ -273,7 +275,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       "job_fresh_skill_skip",
       "user-fresh-skill-skip",
       session.sessionId,
-      complete.episodeId,
+      assignedEpisodeId(service, complete),
       "policy_fresh_skill_skip",
       secondAt,
       secondAt
@@ -296,7 +298,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     ).get() as { after_json: string } | undefined;
     expect(JSON.parse(skipped!.after_json)).toMatchObject({
       policyId: "policy_fresh_skill_skip",
-      reason: "llm-failed: skill.crystallize.invalid: missing retrieval_blurb"
+      reason: "attempt_verified"
     });
 
     db.close();
@@ -313,12 +315,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-compatible-skill-merge"
     });
-    const complete = service.completeTurn("turn-compatible-skill-merge", {
+    const complete = (await service.completeTurn("turn-compatible-skill-merge", {
       sessionId: session.sessionId,
       episodeId: "episode-compatible-skill-merge",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     insertActivePolicyMemory(db, {
       id: "policy-compatible-skill-target",
@@ -328,7 +330,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "workspace-compatible-skill-merge",
       profileId: "jiang",
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     });
     insertActiveSkillMemoryForTest(db, {
       id: "skill-compatible-a",
@@ -382,7 +384,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       id: "job-compatible-skill-merge",
       userId,
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       policyId: "policy-compatible-skill-target"
     });
 
@@ -391,9 +393,9 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const rows = db.db.prepare(
       `SELECT id, status, properties_json
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'Skill'
+       WHERE 1=1 AND memory_layer = 'Skill'
        ORDER BY id`
-    ).all(userId) as Array<{ id: string; status: string; properties_json: string }>;
+    ).all() as Array<{ id: string; status: string; properties_json: string }>;
     expect(rows).toHaveLength(2);
     const active = rows.find((row) => row.status !== "archived");
     const archived = rows.find((row) => row.status === "archived");
@@ -433,12 +435,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       namespace: { source: "codex", profileId: "jiang", userId },
       workspaceId: "workspace-shared-policy-skill-fanout"
     });
-    const complete = service.completeTurn("turn-shared-policy-skill-fanout", {
+    const complete = (await service.completeTurn("turn-shared-policy-skill-fanout", {
       sessionId: session.sessionId,
       episodeId: "episode-shared-policy-skill-fanout",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     const policyId = "policy-shared-by-distinct-skills";
     insertActivePolicyMemory(db, {
@@ -449,7 +451,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "workspace-shared-policy-skill-fanout",
       profileId: "jiang",
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     });
     insertActiveSkillMemoryForTest(db, {
       id: "skill-shared-policy-pytest",
@@ -480,7 +482,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       id: "job-shared-policy-skill-fanout",
       userId,
       sessionId: session.sessionId,
-      episodeId: complete.episodeId,
+      episodeId: assignedEpisodeId(service, complete),
       policyId
     });
 
@@ -490,9 +492,9 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const rows = db.db.prepare(
       `SELECT id, status
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'Skill'
+       WHERE 1=1 AND memory_layer = 'Skill'
        ORDER BY id`
-    ).all(userId) as Array<{ id: string; status: string }>;
+    ).all() as Array<{ id: string; status: string }>;
     expect(rows).toHaveLength(2);
     expect(rows.map((row) => row.id)).toEqual([
       "skill-shared-policy-pytest",
@@ -501,15 +503,152 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const merges = db.db.prepare(
       `SELECT entity_id, after_json
        FROM memory_change_log
-       WHERE user_id = ? AND change_type = 'skill_merged_into_canonical'`
-    ).all(userId) as Array<{ entity_id: string; after_json: string }>;
+       WHERE 1=1 AND change_type = 'skill_merged_into_canonical'`
+    ).all() as Array<{ entity_id: string; after_json: string }>;
     expect(merges).toEqual([]);
     expect(rows.map((row) => row.status)).toEqual(["resolving", "resolving"]);
+
+    const attemptKeys = db.db.prepare(
+      `SELECT key
+       FROM runtime_kv
+       WHERE key LIKE 'skill_crystallization_attempt:${policyId}:%'
+       ORDER BY key`
+    ).all() as Array<{ key: string }>;
+    expect(attemptKeys.map((row) => row.key)).toEqual([
+      `skill_crystallization_attempt:${policyId}:skill-shared-policy-pytest`,
+      `skill_crystallization_attempt:${policyId}:skill-shared-policy-terraform`
+    ]);
+    const successfulRebuilds = () => (db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM api_logs
+       WHERE tool_name = 'skill_evolve' AND success = 1`
+    ).get() as { count: number }).count;
+    const rebuildsAfterFirstFanout = successfulRebuilds();
+
+    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    queueSkillCrystallizationJobForTest(db, {
+      id: "job-shared-policy-skill-fanout-repeat",
+      userId,
+      sessionId: session.sessionId,
+      episodeId: assignedEpisodeId(service, complete),
+      policyId
+    });
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    expect(successfulRebuilds()).toBe(rebuildsAfterFirstFanout);
 
     db.close();
   });
 
-  it("debounces repeated skill crystallization for the same policy during cooldown", async () => {
+  it("keeps the attempt ledger across trace row rewrites and records prompt upgrades without calling the model", async () => {
+    const calls: Array<{ messages: Array<{ role: string; content: string }>; options: { operation: string } }> = [];
+    const { db, service } = createTestService({ skillLlm: createSkillRebuildLlm(calls) });
+    const userId = "user-skill-ledger";
+    const session = service.openSession({
+      namespace: { source: "codex", profileId: "jiang", userId },
+      workspaceId: "workspace-skill-ledger"
+    });
+    const complete = await service.completeTurn("turn-skill-ledger", {
+      sessionId: session.sessionId,
+      episodeId: "episode-skill-ledger",
+      query: "python pytest inspect failure retry after fixing issue",
+      answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
+    });
+    const episodeId = assignedEpisodeId(service, complete);
+    insertActivePolicyMemory(db, {
+      id: "policy_skill_ledger",
+      userId,
+      sessionId: session.sessionId,
+      agentId: "codex",
+      appId: "workspace-skill-ledger",
+      profileId: "jiang",
+      sourceTraceId: complete.l1MemoryId,
+      sourceEpisodeId: episodeId
+    });
+    const skillCalls = () => calls.filter((call) => call.options.operation.startsWith("skill.")).length;
+    const runJob = async (id: string) => {
+      db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+      queueSkillCrystallizationJobForTest(db, { id, userId, sessionId: session.sessionId, episodeId, policyId: "policy_skill_ledger" });
+      await service.runWorkerOnce(10);
+    };
+    const lastSkipReason = () => (JSON.parse((db.db.prepare(
+      `SELECT after_json FROM memory_change_log
+       WHERE memory_id = 'policy_skill_ledger' AND change_type = 'skill_crystallization_skipped'
+       ORDER BY seq DESC LIMIT 1`
+    ).get() as { after_json: string }).after_json) as { reason: string }).reason;
+    const ledgerRow = () => db.db.prepare(
+      `SELECT key, value_json
+       FROM runtime_kv
+       WHERE key LIKE 'skill_crystallization_attempt:policy_skill_ledger:%'
+       ORDER BY key
+       LIMIT 1`
+    ).get() as { key: string; value_json: string };
+    const ledger = () => JSON.parse(ledgerRow().value_json) as {
+      fingerprint: string;
+      promptKey: string;
+      status: string;
+      failureCount: number;
+    };
+
+    await runJob("job_skill_ledger_create");
+    expect(skillCalls()).toBe(1);
+    expect(ledger().status).toBe("verified");
+
+    // Reward and embedding jobs rewrite trace rows without changing the evidence text.
+    db.db.prepare(`UPDATE memories SET updated_at = ? WHERE id = ?`)
+      .run(new Date(Date.now() + 60_000).toISOString(), complete.l1MemoryId);
+    await runJob("job_skill_ledger_touch");
+    expect(skillCalls()).toBe(1);
+    expect(lastSkipReason()).toBe("attempt_verified");
+
+    // A semantic evidence change must earn a new model call even when the text is unchanged.
+    db.db.prepare(`UPDATE memories SET tags_json = ? WHERE id = ?`).run(
+      JSON.stringify(["python", "pytest", "focused-verification"]),
+      complete.l1MemoryId
+    );
+    await runJob("job_skill_ledger_tag_change");
+    expect(skillCalls()).toBe(2);
+    expect(ledger().status).toBe("verified");
+
+    // Simulate a ledger written by an older prompt version.
+    const stale = { ...ledger(), promptKey: "skill.rebuild.v3/verifier.v1" };
+    db.db.prepare(`UPDATE runtime_kv SET value_json = ? WHERE key = ?`)
+      .run(JSON.stringify(stale), ledgerRow().key);
+    await runJob("job_skill_ledger_upgrade");
+    expect(skillCalls()).toBe(2);
+    expect(lastSkipReason()).toBe("prompt_upgrade_baseline");
+    expect(ledger()).toMatchObject({ status: "verified", promptKey: "skill.rebuild.v4/verifier.v2" });
+
+    // Skills created before the ledger existed get a baseline, not a regeneration.
+    db.db.prepare(`DELETE FROM runtime_kv WHERE key = ?`).run(ledgerRow().key);
+    await runJob("job_skill_ledger_missing");
+    expect(skillCalls()).toBe(2);
+    expect(lastSkipReason()).toBe("prompt_upgrade_baseline");
+    expect(ledger().status).toBe("verified");
+
+    // A rejected draft from an older verifier must be retried under the fixed verifier.
+    const rejected = {
+      ...ledger(),
+      promptKey: "skill.rebuild.v3/verifier.v1",
+      status: "rejected",
+      failureCount: 3,
+      failureKind: "verification",
+      reason: "old verifier rejected it"
+    };
+    db.db.prepare(`UPDATE runtime_kv SET value_json = ? WHERE key = ?`)
+      .run(JSON.stringify(rejected), ledgerRow().key);
+    await runJob("job_skill_ledger_rejected_upgrade");
+    expect(skillCalls()).toBe(3);
+    expect(ledger()).toMatchObject({
+      status: "verified",
+      promptKey: "skill.rebuild.v4/verifier.v2",
+      failureCount: 0
+    });
+
+    db.close();
+  });
+
+  it("debounces a verified skill crystallization with the persistent attempt ledger", async () => {
     const root = createTestRoot("mindock-memory-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -519,20 +658,20 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       mode: "dev",
       skillLlm: createNoToolSkillLlm(),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           capture: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            ...LEGACY_TEST_CONFIG.algorithm.capture,
             synthReflection: false,
             embedAfterCapture: false
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: false
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: true,
             cooldownMs: 60_000
           }
@@ -547,12 +686,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-skill-cooldown"
     });
-    const complete = service.completeTurn("turn-skill-cooldown", {
+    const complete = (await service.completeTurn("turn-skill-cooldown", {
       sessionId: session.sessionId,
       episodeId: "episode-skill-cooldown",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     insertActivePolicyMemory(db, {
       id: "policy_skill_cooldown",
       userId: "user-skill-cooldown",
@@ -561,7 +700,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "workspace-skill-cooldown",
       profileId: "jiang",
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     });
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     const firstAt = new Date().toISOString();
@@ -574,7 +713,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       "job_skill_cooldown_create",
       "user-skill-cooldown",
       session.sessionId,
-      complete.episodeId,
+      assignedEpisodeId(service, complete),
       "policy_skill_cooldown",
       firstAt,
       firstAt
@@ -584,7 +723,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const createdSkill = db.db.prepare(
       `SELECT id, updated_at
        FROM memories
-       WHERE user_id = 'user-skill-cooldown'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'
        LIMIT 1`
     ).get() as { id: string; updated_at: string } | undefined;
@@ -607,7 +746,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       "job_skill_cooldown_skip",
       "user-skill-cooldown",
       session.sessionId,
-      complete.episodeId,
+      assignedEpisodeId(service, complete),
       "policy_skill_cooldown",
       secondAt,
       secondAt
@@ -617,7 +756,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skills = db.db.prepare(
       `SELECT id, updated_at
        FROM memories
-       WHERE user_id = 'user-skill-cooldown'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'`
     ).all() as Array<{ id: string; updated_at: string }>;
     expect(skills).toEqual([createdSkill]);
@@ -632,7 +771,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     expect(JSON.parse(skipped!.after_json)).toMatchObject({
       policyId: "policy_skill_cooldown",
       skillId: createdSkill!.id,
-      reason: "cooldown"
+      reason: "attempt_verified"
     });
 
     db.close();
@@ -648,12 +787,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-source-policy-skill"
     });
-    const complete = service.completeTurn("turn-source-policy-skill-skip", {
+    const complete = (await service.completeTurn("turn-source-policy-skill-skip", {
       sessionId: session.sessionId,
       episodeId: "episode-source-policy-skill-skip",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     insertActivePolicyMemory(db, {
       id: "policy_source_policy_skill_skip",
       userId: "user-source-policy-skill-skip",
@@ -662,7 +801,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "workspace-source-policy-skill",
       profileId: "jiang",
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     });
     const policyRow = db.db.prepare(
       `SELECT updated_at
@@ -750,7 +889,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       "job_source_policy_skill_skip",
       "user-source-policy-skill-skip",
       session.sessionId,
-      complete.episodeId,
+      assignedEpisodeId(service, complete),
       "policy_source_policy_skill_skip",
       jobAt,
       jobAt
@@ -760,7 +899,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillRows = db.db.prepare(
       `SELECT id, memory_key
        FROM memories
-       WHERE user_id = 'user-source-policy-skill-skip'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'`
     ).all() as Array<{ id: string; memory_key: string }>;
     expect(skillRows).toEqual([{
@@ -793,12 +932,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-archived-skill-recreate"
     });
-    const complete = service.completeTurn("turn-archived-skill-recreate", {
+    const complete = (await service.completeTurn("turn-archived-skill-recreate", {
       sessionId: session.sessionId,
       episodeId: "episode-archived-skill-recreate",
       query: "python pytest inspect failure retry after fixing issue",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     insertActivePolicyMemory(db, {
       id: "policy_archived_skill_recreate",
       userId: "user-archived-skill-recreate",
@@ -807,7 +946,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "workspace-archived-skill-recreate",
       profileId: "jiang",
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     });
     db.db.prepare(
       `UPDATE memories
@@ -888,7 +1027,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       "job_archived_skill_recreate",
       "user-archived-skill-recreate",
       session.sessionId,
-      complete.episodeId,
+      assignedEpisodeId(service, complete),
       "policy_archived_skill_recreate",
       jobAt,
       jobAt
@@ -898,7 +1037,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillRows = db.db.prepare(
       `SELECT id, status, updated_at, properties_json
        FROM memories
-       WHERE user_id = 'user-archived-skill-recreate'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'
        ORDER BY created_at ASC`
     ).all() as Array<{ id: string; status: string; updated_at: string; properties_json: string }>;
@@ -917,7 +1056,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const created = db.db.prepare(
       `SELECT memory_id, before_json, after_json
        FROM memory_change_log
-       WHERE user_id = 'user-archived-skill-recreate'
+       WHERE user_id IS NOT NULL
          AND kind = 'skill'
          AND change_type = 'create'
        ORDER BY seq DESC
@@ -939,12 +1078,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       },
       workspaceId: "workspace-skill-drift"
     });
-    const complete = service.completeTurn("turn-skill-reward-drift", {
+    const complete = (await service.completeTurn("turn-skill-reward-drift", {
       sessionId: session.sessionId,
       episodeId: "episode-skill-reward-drift",
       query: "python pytest inspect failure retry after fixing issue for reward drift",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     insertActivePolicyMemory(db, {
       id: "policy_skill_reward_drift",
@@ -954,7 +1093,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "workspace-skill-drift",
       profileId: "jiang",
       sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, complete)
     });
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     const at = new Date().toISOString();
@@ -967,7 +1106,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       "job_skill_reward_drift_crystallize",
       "user-skill-reward-drift",
       session.sessionId,
-      complete.episodeId,
+      assignedEpisodeId(service, complete),
       "policy_skill_reward_drift",
       at,
       at
@@ -977,7 +1116,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillRow = db.db.prepare(
       `SELECT id
        FROM memories
-       WHERE user_id = 'user-skill-reward-drift'
+       WHERE user_id IS NOT NULL
          AND memory_layer = 'Skill'
        LIMIT 1`
     ).get() as { id: string } | undefined;
@@ -1000,7 +1139,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       "job_skill_reward_drift_association",
       "user-skill-reward-drift",
       session.sessionId,
-      complete.episodeId,
+      assignedEpisodeId(service, complete),
       complete.l1MemoryId,
       associationAt,
       associationAt
@@ -1087,27 +1226,27 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         }]
       }),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           capture: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            ...LEGACY_TEST_CONFIG.algorithm.capture,
             synthReflection: false,
             embedAfterCapture: false
           },
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             traceCharCap: 700
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: true,
             minPolicies: 1,
             minPolicySupport: 1,
             minPolicyGain: 0.01
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: true,
             minSupport: 1,
             minGain: 0.01,
@@ -1123,7 +1262,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         userId
       }
     });
-    const first = service.completeTurn("turn-invalid-skill-draft-a", {
+    const first = (await service.completeTurn("turn-invalid-skill-draft-a", {
       sessionId: session.sessionId,
       episodeId: "episode-invalid-skill-draft-a",
       query: "pytest sqlite migration workflow needs focused diagnostics",
@@ -1134,8 +1273,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
-    const second = service.completeTurn("turn-invalid-skill-draft-b", {
+    }));
+    const second = (await service.completeTurn("turn-invalid-skill-draft-b", {
       sessionId: session.sessionId,
       episodeId: "episode-invalid-skill-draft-b",
       query: "pytest sqlite schema migration workflow needs focused diagnostics",
@@ -1146,7 +1285,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     for (const complete of [first, second]) {
       await service.feedback({
         sessionId: session.sessionId,
@@ -1167,14 +1306,14 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "",
       profileId: "jiang",
       sourceTraceId: first.l1MemoryId,
-      sourceEpisodeId: first.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, first)
     });
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     queueSkillCrystallizationJobForTest(db, {
       id: "job_default_skill_name",
       userId,
       sessionId: session.sessionId,
-      episodeId: first.episodeId,
+      episodeId: assignedEpisodeId(service, first),
       policyId
     });
     for (let i = 0; i < 40; i += 1) {
@@ -1188,9 +1327,9 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillRow = db.db.prepare(
       `SELECT memory_key, properties_json
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'Skill'
+       WHERE 1=1 AND memory_layer = 'Skill'
        LIMIT 1`
-    ).get(userId) as { memory_key: string; properties_json: string };
+    ).get() as { memory_key: string; properties_json: string };
     const skillSourceProperties = JSON.parse(skillRow.properties_json) as {
       internal_info?: { source_policy_ids?: string[] };
     };
@@ -1199,9 +1338,9 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const policyRow = db.db.prepare(
       `SELECT id, properties_json
        FROM memories
-       WHERE id = ? AND user_id = ? AND memory_layer = 'L2'
+       WHERE id = ? AND 1=1 AND memory_layer = 'L2'
        LIMIT 1`
-    ).get(sourcePolicyId!, userId) as { id: string; properties_json: string };
+    ).get(sourcePolicyId!) as { id: string; properties_json: string };
     const policyProperties = JSON.parse(policyRow.properties_json) as {
       internal_info?: {
         title?: string;
@@ -1281,27 +1420,27 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         steps: ["Run the focused pytest workflow and inspect migration output before retrying."]
       }),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           capture: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            ...LEGACY_TEST_CONFIG.algorithm.capture,
             synthReflection: false,
             embedAfterCapture: false
           },
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             traceCharCap: 700
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: true,
             minPolicies: 1,
             minPolicySupport: 1,
             minPolicyGain: 0.01
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: true,
             minSupport: 1,
             minGain: 0.01,
@@ -1317,7 +1456,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         userId
       }
     });
-    const first = service.completeTurn("turn-invalid-string-skill-steps-a", {
+    const first = (await service.completeTurn("turn-invalid-string-skill-steps-a", {
       sessionId: session.sessionId,
       episodeId: "episode-invalid-string-skill-steps-a",
       query: "pytest sqlite migration workflow needs focused diagnostics",
@@ -1328,8 +1467,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
-    const second = service.completeTurn("turn-invalid-string-skill-steps-b", {
+    }));
+    const second = (await service.completeTurn("turn-invalid-string-skill-steps-b", {
       sessionId: session.sessionId,
       episodeId: "episode-invalid-string-skill-steps-b",
       query: "pytest sqlite schema migration workflow needs focused diagnostics",
@@ -1340,7 +1479,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     for (const complete of [first, second]) {
       await service.feedback({
         sessionId: session.sessionId,
@@ -1361,14 +1500,14 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "",
       profileId: "jiang",
       sourceTraceId: first.l1MemoryId,
-      sourceEpisodeId: first.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, first)
     });
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     queueSkillCrystallizationJobForTest(db, {
       id: "job_invalid_string_skill_steps",
       userId,
       sessionId: session.sessionId,
-      episodeId: first.episodeId,
+      episodeId: assignedEpisodeId(service, first),
       policyId
     });
     for (let i = 0; i < 40; i += 1) {
@@ -1382,23 +1521,71 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'Skill'`
-    ).get(userId) as { count: number };
+       WHERE 1=1 AND memory_layer = 'Skill'`
+    ).get() as { count: number };
     expect(skillCount.count).toBe(0);
     const skippedRows = db.db.prepare(
       `SELECT after_json
        FROM memory_change_log
-       WHERE user_id = ?
+       WHERE 1=1
          AND kind = 'skill'
          AND op = 'skipped'
          AND change_type = 'skill_crystallization_skipped'
        ORDER BY seq DESC`
-    ).all(userId) as Array<{ after_json: string }>;
+    ).all() as Array<{ after_json: string }>;
     const skippedReasons = skippedRows.map((row) => {
       const after = JSON.parse(row.after_json) as { reason?: string };
       return after.reason;
     });
     expect(skippedReasons).toContain("llm-failed: skill.crystallize.invalid: missing steps");
+    const failureLog = db.db.prepare(
+      `SELECT success, input_json, output_json
+       FROM api_logs
+       WHERE tool_name = 'skill_generate'
+         AND json_extract(input_json, '$.policyId') = ?
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get(policyId) as { success: number; input_json: string; output_json: string } | undefined;
+    expect(failureLog?.success).toBe(0);
+    expect(JSON.parse(failureLog!.input_json)).toMatchObject({
+      phase: "failed",
+      policyId,
+      failureKind: "llm_invalid"
+    });
+    expect(JSON.parse(failureLog!.output_json)).toMatchObject({
+      kind: "skill.crystallize.failed",
+      policyId,
+      failureKind: "llm_invalid"
+    });
+    const attemptRow = db.db.prepare(
+      `SELECT value_json
+       FROM runtime_kv
+       WHERE key = ?`
+    ).get(`skill_crystallization_attempt:${policyId}:new`) as { value_json: string } | undefined;
+    expect(JSON.parse(attemptRow!.value_json)).toMatchObject({
+      status: "rejected",
+      failureKind: "llm_invalid",
+      failureCount: 1,
+      reason: "llm-failed: skill.crystallize.invalid: missing steps"
+    });
+    const skillCallsBeforeBackoff = calls.filter((call) => call.options.operation === "skill.crystallize").length;
+    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    queueSkillCrystallizationJobForTest(db, {
+      id: "job_invalid_string_skill_steps_backoff",
+      userId,
+      sessionId: session.sessionId,
+      episodeId: assignedEpisodeId(service, first),
+      policyId
+    });
+    await service.runWorkerOnce(20);
+    expect(calls.filter((call) => call.options.operation === "skill.crystallize")).toHaveLength(skillCallsBeforeBackoff);
+    const failureLogCount = db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM api_logs
+       WHERE tool_name = 'skill_generate'
+         AND json_extract(input_json, '$.policyId') = ?`
+    ).get(policyId) as { count: number };
+    expect(failureLogCount.count).toBe(1);
 
     db.close();
   });
@@ -1425,27 +1612,27 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         }]
       }),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           capture: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            ...LEGACY_TEST_CONFIG.algorithm.capture,
             synthReflection: false,
             embedAfterCapture: false
           },
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             traceCharCap: 700
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: true,
             minPolicies: 1,
             minPolicySupport: 1,
             minPolicyGain: 0.01
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: true,
             minSupport: 1,
             minGain: 0.01,
@@ -1461,7 +1648,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         userId
       }
     });
-    const first = service.completeTurn("turn-refusal-skill-draft-a", {
+    const first = (await service.completeTurn("turn-refusal-skill-draft-a", {
       sessionId: session.sessionId,
       episodeId: "episode-refusal-skill-draft-a",
       query: "pytest sqlite migration workflow needs focused diagnostics",
@@ -1472,8 +1659,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
-    const second = service.completeTurn("turn-refusal-skill-draft-b", {
+    }));
+    const second = (await service.completeTurn("turn-refusal-skill-draft-b", {
       sessionId: session.sessionId,
       episodeId: "episode-refusal-skill-draft-b",
       query: "pytest sqlite schema migration workflow needs focused diagnostics",
@@ -1484,7 +1671,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     for (const complete of [first, second]) {
       await service.feedback({
         sessionId: session.sessionId,
@@ -1505,14 +1692,14 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       appId: "",
       profileId: "jiang",
       sourceTraceId: first.l1MemoryId,
-      sourceEpisodeId: first.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, first)
     });
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     queueSkillCrystallizationJobForTest(db, {
       id: "job_refusal_skill_draft",
       userId,
       sessionId: session.sessionId,
-      episodeId: first.episodeId,
+      episodeId: assignedEpisodeId(service, first),
       policyId
     });
     for (let i = 0; i < 40; i += 1) {
@@ -1526,37 +1713,56 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     const skillCount = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
-       WHERE user_id = ? AND memory_layer = 'Skill'`
-    ).get(userId) as { count: number };
+       WHERE 1=1 AND memory_layer = 'Skill'`
+    ).get() as { count: number };
     expect(skillCount.count).toBe(0);
     const skippedRows = db.db.prepare(
       `SELECT after_json
        FROM memory_change_log
-       WHERE user_id = ?
+       WHERE 1=1
          AND kind = 'skill'
          AND op = 'skipped'
          AND change_type = 'skill_crystallization_skipped'
        ORDER BY seq DESC`
-    ).all(userId) as Array<{ after_json: string }>;
+    ).all() as Array<{ after_json: string }>;
     const skippedReasons = skippedRows.map((row) => {
       const after = JSON.parse(row.after_json) as { reason?: string };
       return after.reason;
     });
     expect(skippedReasons).toContain("llm-refusal");
+    const failureLog = db.db.prepare(
+      `SELECT success, input_json, output_json
+       FROM api_logs
+       WHERE tool_name = 'skill_generate'
+         AND json_extract(input_json, '$.policyId') = ?
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get(policyId) as { success: number; input_json: string; output_json: string } | undefined;
+    expect(failureLog?.success).toBe(0);
+    expect(JSON.parse(failureLog!.output_json)).toMatchObject({
+      kind: "skill.crystallize.failed",
+      policyId,
+      failureKind: "llm_refusal"
+    });
 
     db.close();
   });
 });
 
-function createSkillRebuildLlm(): LlmClient {
-  const base = createNoToolSkillLlm();
+function createSkillRebuildLlm(calls: Array<{
+  messages: Array<{ role: string; content: string }>;
+  options: { operation: string };
+}> = []): LlmClient {
+  const base = createNoToolSkillLlm(calls);
   return {
     ...base,
     async completeJson<T extends Record<string, unknown>>(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
-      if (options.operation === "skill.rebuild.v3") {
+      if (options.operation === "episode.select.v1") return { episodeId: null, title: "Test task", summary: "Test task summary" } as unknown as T;
+      if (options.operation === "skill.rebuild.v4") {
+        calls.push({ messages, options });
         return {
           name: "pytest_retry_workflow",
           retrieval_blurb: "Use for pytest failures that require inspection, a focused retry, and verification.",

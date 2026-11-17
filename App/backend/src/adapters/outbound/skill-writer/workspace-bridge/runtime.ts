@@ -87,20 +87,21 @@ export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Pr
   const memory = objectValue(yaml.memmyMemory);
   const storage = objectValue(memory.storage);
   const legacyStorage = objectValue(yaml.storage);
-  const app = objectValue(yaml.app);
+  void pinnedOwner; // Ownership is device-wide, including pinned runtime snapshots.
   return {
     endpoint: text(storage.endpoint) || text(memory.endpoint) || text(legacyStorage.endpoint) || text(snapshot.endpoint) || DEFAULT_ENDPOINT,
     token: text(storage.token) || text(memory.token) || text(legacyStorage.token) || text(snapshot.token),
-    userId: pinnedOwner
-      ? text(snapshot.userId) || "local-user"
-      : text(app.userId) || text(memory.userId) || text(snapshot.userId) || "local-user",
+    userId: "__memmy_device_memory__",
     workspaceHostId: text(snapshot.workspaceHostId),
   };
 }
 
-export async function openRuntimeSession(input: OpenRuntimeSessionInput): Promise<RuntimeSession | null> {
+export async function openRuntimeSession(
+  input: OpenRuntimeSessionInput,
+  options: { timeoutMs?: number } = {},
+): Promise<RuntimeSession | null> {
   const config = await readRuntimeConfig(input.configUrl, input.pinnedOwner === true);
-  const client = new RuntimeHttpClient(config);
+  const client = new RuntimeHttpClient(config, options.timeoutMs);
   const health = await client.get("/api/v1/health").catch(() => null);
   if (!health && input.pinnedOwner === true) return null;
   const features = objectValue(objectValue(health).features);
@@ -168,9 +169,12 @@ async function openLegacyRuntimeSession(
   };
 }
 
-export async function loadRuntimeL3(session: RuntimeSession): Promise<LoadedRuntimeSession> {
+export async function loadRuntimeL3(
+  session: RuntimeSession,
+  options: { timeoutMs?: number } = {},
+): Promise<LoadedRuntimeSession> {
   if (session.protocol !== "v2") return { ...session, additionalContext: "", renderedContext: "", memoryVersion: null };
-  const client = new RuntimeHttpClient(session.config);
+  const client = new RuntimeHttpClient(session.config, options.timeoutMs);
   const envelope = runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId);
   const result = objectValue(await client.get(
     `/api/v1/l3-world-model/sessions/${encodeURIComponent(session.sessionId)}/context`,
@@ -378,6 +382,7 @@ export async function readCursorHookSourceTurn(input: {
   }
   try {
     const diskValue = db.prepare("SELECT value FROM cursorDiskKV WHERE key = ?");
+    const diskChunks = db.prepare("SELECT value FROM cursorDiskKV WHERE key >= ? AND key < ? ORDER BY key");
     const parse = (key: string): unknown => {
       const row = diskValue.get(key) as { value?: unknown } | undefined;
       if (typeof row?.value !== "string") return undefined;
@@ -387,9 +392,27 @@ export async function readCursorHookSourceTurn(input: {
         return undefined;
       }
     };
+    /** Chunked rows of one key prefix, in order: Cursor 3.x splits a chat's header list this way. */
+    const parseChunks = (prefix: string): readonly unknown[] | undefined => {
+      const chunks = diskChunks.all(prefix, `${prefix.slice(0, -1)};`) as Array<{ value?: unknown }>;
+      const values: unknown[] = [];
+      for (const chunk of chunks) {
+        if (typeof chunk.value !== "string") continue;
+        try {
+          const parsed: unknown = JSON.parse(chunk.value);
+          if (Array.isArray(parsed)) values.push(...parsed);
+        } catch {
+          // A chunk this version cannot read is skipped; the rest still order the chat.
+        }
+      }
+      return values.length > 0 ? values : undefined;
+    };
     const source: CursorVscdbSource = {
       mainComposerIds: () => [input.conversationId],
       composerData: (composerId) => parse(`composerData:${composerId}`),
+      // Newer Cursor versions keep the header list in its own rows and leave `composerData` empty.
+      conversationHeaders: (composerId) => parseChunks(`composerConvHeaders:${composerId}:`),
+      conversationHeaderChunk: (composerId, index) => parse(`composerConvHeaders:${composerId}:${String(index).padStart(6, "0")}`),
       bubble: (composerId, bubbleId) => parse(`bubbleId:${composerId}:${bubbleId}`)
     };
     return await readCursorSourceTurn(source, input);
@@ -511,7 +534,8 @@ async function resolveDeepseekHarnessSessionFile(input: {
 }
 
 class RuntimeHttpClient {
-  constructor(private readonly config: RuntimeConfig) {}
+  /** timeoutMs 决定这次请求最多等多久：会话启动路径给短预算，后台上报仍用默认值。 */
+  constructor(private readonly config: RuntimeConfig, private readonly timeoutMs = 45_000) {}
 
   async get(path: string, transport: { query?: Record<string, string>; headers?: Record<string, string> } = {}): Promise<unknown> {
     const url = new URL(path, `${this.config.endpoint.replace(/\/+$/u, "")}/`);
@@ -534,7 +558,7 @@ class RuntimeHttpClient {
     if (this.config.token) headers.set("authorization", `Bearer ${this.config.token}`);
     let response: Response;
     try {
-      response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(45_000) });
+      response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(this.timeoutMs) });
     } catch (error) {
       throw new Error(`Memmy request to ${url} failed: ${formatErrorWithCause(error)}`, { cause: error });
     }

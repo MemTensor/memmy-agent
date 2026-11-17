@@ -90,7 +90,9 @@ export function createAgentSourceAutoInjectService(
         }
 
         for (const source of sources) {
-          if (!AUTO_INJECT_AGENT_SOURCE_IDS.has(source.sourceId) || !source.builtin || !source.available || source.status !== "not_connected") {
+          const checkDshUpdate = source.sourceId === "deepseek_harness" && source.status === "plugin_installed";
+          if (!AUTO_INJECT_AGENT_SOURCE_IDS.has(source.sourceId) || !source.builtin || !source.available
+            || (source.status !== "not_connected" && !checkDshUpdate)) {
             continue;
           }
           if (options.isAutoInjectSuppressed?.(source.sourceId)) continue;
@@ -100,6 +102,8 @@ export function createAgentSourceAutoInjectService(
           }
 
           try {
+            if (checkDshUpdate && (await options.agentSources.isInstalledHookCurrent(source.sourceId)
+              || options.isAutoInjectSuppressed?.(source.sourceId))) continue;
             if (HOOK_OR_PLUGIN_AGENT_SOURCE_IDS.has(source.sourceId)) {
               await options.agentSources.installPlugin(source.sourceId, { installType: "auto_inject" });
             } else {
@@ -141,5 +145,7 @@ function isUpdatableInstalledHook(source: AgentSourceView): boolean {
   return UPDATABLE_HOOK_AGENT_SOURCE_IDS.has(source.sourceId)
     && source.builtin
     && source.available
-    && source.status === "plugin_installed";
+    // skill_installed 表示只装了技能、没装钩子（Codex 曾长期停在这个状态）：也要补装，
+    // 否则它既不算「已装可更新」，也不算「未连接可新装」，永远拿不到注入。
+    && (source.status === "plugin_installed" || source.status === "skill_installed");
 }

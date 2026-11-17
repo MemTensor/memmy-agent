@@ -1,0 +1,272 @@
+{
+  "date": "2026-10-23",
+  "revision": "299a4a14144b26995db4709c808167d58b861f1b",
+  "targetBranch": "upstream/v1.2.6",
+  "platform": "darwin-arm64",
+  "status": "Queue checks passed; existing Desktop quit-cleanup timeout unresolved; no PR/push",
+  "package": {
+    "desktopVersion": "1.2.3",
+    "memoryRuntime": {
+      "version": "2.1.6",
+      "buildId": "f06ace64abaa318259c5f1263f575c249c756aca894910ed83fe116dbaaaa3ce",
+      "schemaVersion": 12,
+      "protocolVersion": 1,
+      "target": "darwin-arm64",
+      "entrypoint": "dist/src/server/index.js",
+      "viewer": "dist/viewer/index.html"
+    },
+    "dmgSha256": "2260abf6ad2640cf5b52a4d243d2f4ce1256f2e9af07a87da4e61ced13ad9646",
+    "diskImageVerified": true,
+    "matchedCompiledModules": [
+      {
+        "file": "src/service/session/session-turn-service.js",
+        "sourceBuild": "5d3d4de66d1f402e9fc2d2a2fcd26b4c5d0e59a4cb5dd7034167bc91d4ecd5e1",
+        "installed": "5d3d4de66d1f402e9fc2d2a2fcd26b4c5d0e59a4cb5dd7034167bc91d4ecd5e1"
+      },
+      {
+        "file": "src/service/worker/job-handlers.js",
+        "sourceBuild": "62c9a0b440c0f1f9519458d049723f2fe2132146f7b7b5a25aec60fe1471235c",
+        "installed": "62c9a0b440c0f1f9519458d049723f2fe2132146f7b7b5a25aec60fe1471235c"
+      },
+      {
+        "file": "src/service/worker/job-policy-registry.js",
+        "sourceBuild": "c622e38df1c596cf9094397186b53aad3a533dda7a3e8e08e07cd5c91ee6226c",
+        "installed": "c622e38df1c596cf9094397186b53aad3a533dda7a3e8e08e07cd5c91ee6226c"
+      },
+      {
+        "file": "src/service/worker/fair-worker-queue.js",
+        "sourceBuild": "c8bf14f1a995191df49d50f60771af156f512856fa90d4d4f8dddd1a7c6a01b9",
+        "installed": "c8bf14f1a995191df49d50f60771af156f512856fa90d4d4f8dddd1a7c6a01b9"
+      },
+      {
+        "file": "src/service/worker/admission-lane-queue-selector.js",
+        "sourceBuild": "6afa4f7bc31b1af2d7298c908d2c0ae57417623345ba07288e3b5ad427a9c4b2",
+        "installed": "6afa4f7bc31b1af2d7298c908d2c0ae57417623345ba07288e3b5ad427a9c4b2"
+      },
+      {
+        "file": "src/service/worker/worker-runner.js",
+        "sourceBuild": "a827b43938a960ef70f0183d53390c97a4550f9f0544dccc60580650f3b5ad6e",
+        "installed": "a827b43938a960ef70f0183d53390c97a4550f9f0544dccc60580650f3b5ad6e"
+      },
+      {
+        "file": "src/storage/queue-scheduling-store.js",
+        "sourceBuild": "febe2752b960f2b3225119d4e6b1ad46bb5490848c5629abaa05fc9b644ab006",
+        "installed": "febe2752b960f2b3225119d4e6b1ad46bb5490848c5629abaa05fc9b644ab006"
+      },
+      {
+        "file": "src/storage/repositories.js",
+        "sourceBuild": "11ceda0a9e06aad8d4ae12b340743c7fcb37cb3f1c692b97329e4d55099691fe",
+        "installed": "11ceda0a9e06aad8d4ae12b340743c7fcb37cb3f1c692b97329e4d55099691fe"
+      }
+    ]
+  },
+  "automated": {
+    "lint": "passed",
+    "typecheck": "passed",
+    "rootTest": "passed",
+    "memory": {
+      "passed": 1812,
+      "skipped": 1
+    },
+    "migrations": {
+      "passed": 279,
+      "skipped": 1
+    },
+    "backend": 1109,
+    "frontend": 2452,
+    "electron": {
+      "passed": 1259,
+      "skipped": 126
+    },
+    "agentNote": "Prior unaffected Agent full suite 7142 passed/80 skipped; not repeated for Memory-only follow-up"
+  },
+  "packagedControlledLoad": {
+    "initial": {
+      "main": 10193,
+      "retry": 64
+    },
+    "bodyBytes": 32768,
+    "window": 36,
+    "elapsedMs": 572.97,
+    "timerMs": 24.99,
+    "counts": {
+      "interactive": 12,
+      "repair_retry": 9,
+      "import": 6,
+      "evolution": 6,
+      "maintenance": 3
+    },
+    "peakJobs": 4,
+    "peakRequests": 2,
+    "peakEmbeddingRequests": 1,
+    "maxEmbeddingBatch": 3,
+    "prepareCalls": 4173,
+    "badQueued": 0
+  },
+  "packagedSharedProviderFairness": {
+    "backlog": 200,
+    "delay": 10,
+    "withMaintenance": true,
+    "elapsedMs": 1495,
+    "done": {
+      "import": 50,
+      "evolution": 50
+    },
+    "maintenance": 79,
+    "completed": 100,
+    "milestones": [
+      {
+        "completed": 10,
+        "import": 6,
+        "evolution": 4,
+        "maintenance": 5
+      },
+      {
+        "completed": 20,
+        "import": 10,
+        "evolution": 10,
+        "maintenance": 10
+      },
+      {
+        "completed": 30,
+        "import": 16,
+        "evolution": 14,
+        "maintenance": 15
+      },
+      {
+        "completed": 40,
+        "import": 20,
+        "evolution": 20,
+        "maintenance": 24
+      },
+      {
+        "completed": 50,
+        "import": 26,
+        "evolution": 24,
+        "maintenance": 34
+      },
+      {
+        "completed": 60,
+        "import": 30,
+        "evolution": 30,
+        "maintenance": 40
+      },
+      {
+        "completed": 70,
+        "import": 36,
+        "evolution": 34,
+        "maintenance": 49
+      },
+      {
+        "completed": 80,
+        "import": 40,
+        "evolution": 40,
+        "maintenance": 59
+      },
+      {
+        "completed": 90,
+        "import": 46,
+        "evolution": 44,
+        "maintenance": 69
+      },
+      {
+        "completed": 100,
+        "import": 50,
+        "evolution": 50,
+        "maintenance": 79
+      }
+    ],
+    "queued": [
+      {
+        "queue_lane": "evolution",
+        "n": 150,
+        "maxAttempts": 0
+      },
+      {
+        "queue_lane": "import",
+        "n": 150,
+        "maxAttempts": 0
+      },
+      {
+        "queue_lane": "maintenance",
+        "n": 1,
+        "maxAttempts": 0
+      }
+    ]
+  },
+  "packagedActualLocalModel": {
+    "passed": true,
+    "syntheticImports": 2,
+    "summarySucceeded": 2,
+    "embeddingSucceeded": 2,
+    "embeddingDimensions": 768,
+    "actualRequestPeak": 1,
+    "elapsedMs": 38064.19,
+    "note": "Actual LM Studio Gemma/Nomic; existing json_object-to-text fallback used"
+  },
+  "installedFullScan": {
+    "initialRetained": 12000,
+    "newlyCaptured": 1000,
+    "historyTotal": 13000,
+    "source": "claude_code",
+    "mode": "full",
+    "complete": true,
+    "startedAt": "2026-10-23T05:53:06.593Z",
+    "completedAt": "2026-10-23T05:54:56.201Z",
+    "liveMemory": {
+      "createdAt": "2026-10-23T05:53:51.923Z",
+      "id": "trace_32b734a530bc0fe32a62",
+      "initialHistoryCount": 12220,
+      "readyAt": "2026-10-23T05:54:26.549Z",
+      "remainingHistoricalSummaries": 11590,
+      "jobs": [
+        {
+          "job_type": "trace_summary",
+          "queue_lane": "interactive",
+          "status": "succeeded",
+          "attempts": 1
+        },
+        {
+          "job_type": "embedding",
+          "queue_lane": "interactive",
+          "status": "succeeded",
+          "attempts": 1
+        },
+        {
+          "job_type": "reflection",
+          "queue_lane": "evolution",
+          "status": "queued",
+          "attempts": 0
+        }
+      ]
+    },
+    "healthLatencyMs": {
+      "samples": 48,
+      "min": 5.61,
+      "median": 45.99,
+      "p95": 308.49,
+      "max": 673.75
+    },
+    "guiPage51Loaded": true,
+    "guiTotalPages": 651,
+    "guiLiveSearchAndDetail": true,
+    "note": "Same-profile upgrade rereads existing 12000 plus 1000 new complete turns. Controlled local HTTP Provider, 5s model and100ms embedding. Not all history summaries completed; not real cloud."
+  },
+  "restart": {
+    "count": 13000,
+    "quickCheck": "ok",
+    "identicalBodyAndVectorFingerprints": true,
+    "verifiedMemories": 4,
+    "oldCompleteMemoryFingerprint": "df625239a98a67faf03de2cef9e84bdf3946913d11ddabddd117a35ef54e1f37",
+    "independentModelConnectionsPreserved": true,
+    "guiLiveSearch": true,
+    "runtimeOnlyPauseReapplied": true
+  },
+  "limitations": [
+    "Cmd-Q still triggers existing 5s Desktop cleanup fallback; attribution to queue not established; Desktop lifecycle not changed.",
+    "DMG background cosmetic warning remains.",
+    "Existing FTS write amplification and very long single-conversation capture costs not fixed.",
+    "No Windows, macOS x64 or real cloud Provider test; sampled times are not latency guarantees.",
+    "Temporary QA driver errors corrected without product changes: inactive fixture directory, SQLite result prototype comparison, runtime-only pause persistence assumption. Original failure evidence retained."
+  ]
+}

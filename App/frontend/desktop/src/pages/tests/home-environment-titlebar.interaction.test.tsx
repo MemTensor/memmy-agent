@@ -311,7 +311,7 @@ describe("Windows chrome spacing and the HomePage thread side panel", () => {
         // Happy DOM discards variable-based calc styles. Check the rendered
         // page and its explicit lifted-tab inset instead of a false 0px.
         expect(pageContent.classList.contains("tools-page-content")).toBe(true);
-        expect(toolsPageSource).toContain("topBarInsetOffsetPx={-8}");
+        expect(toolsPageSource).toContain("topBarInsetOffsetPx={-20}");
       } else {
         expect(readTopPadding(pageContent)).toBe(expected);
       }

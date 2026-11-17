@@ -33,8 +33,8 @@ describe("OpenCode StructuredOutput source captures", () => {
         };
         const first = order === "hook-first" ? hookRequest : scanRequest;
         const second = order === "hook-first" ? scanRequest : hookRequest;
-        expect(service.completeSourceTurn(first).status).toBe("stored");
-        expect(service.completeSourceTurn(second).status).toBe("existing");
+        expect((await service.completeSourceTurn(first)).status).toBe("stored");
+        expect((await service.completeSourceTurn(second)).status).toBe("existing");
         expect(db.db.prepare("SELECT COUNT(*) AS count FROM source_turn_captures").get()).toEqual({ count: 1 });
       } finally {
         fixture.cleanup();

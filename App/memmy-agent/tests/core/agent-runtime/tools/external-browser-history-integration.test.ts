@@ -7,6 +7,7 @@ import { ExternalBrowserBridge, MEMMY_BROWSER_EXTENSION_ID } from "../../../../s
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
 import { connectBrowserHistoryBridge } from "../../../../src/tools/computer-history/browser-history-bridge.js";
 import { browserHistorySensorScript } from "../../../../src/tools/computer-history/browser-history-sensor.js";
+import type { BrowserSemanticHistoryEvent } from "../../../../src/tools/computer-history/browser-semantic-history.js";
 import { getPlaywrightBrowsersPath } from "../../../../src/core/agent-runtime/tools/browser-setup.js";
 import { reusableHumanActions } from "../../../../src/tools/computer-history/mac/summarize-history.js";
 
@@ -56,6 +57,33 @@ async function harness(browser: "chrome" | "edge" = "chrome") {
     generation: event.generation, actor: "human", payload: event, ...extra });
   const settle = () => new Promise<void>(resolve => setTimeout(resolve, 20));
   return { service, bridge, socket, connection, connectionId, messages, context, payload, emit, records, send, settle, settingsFile };
+}
+
+async function awaitObservedBrowserEvent(bridge: ExternalBrowserBridge,
+  matches: (event: BrowserSemanticHistoryEvent) => boolean, interact: () => Promise<void>) {
+  let received!: (event: BrowserSemanticHistoryEvent) => void;
+  const observed = new Promise<BrowserSemanticHistoryEvent>(resolve => { received = resolve; });
+  // The service subscribes first and appends synchronously before this completion signal.
+  const unsubscribe = bridge.subscribeBrowserHistory(payload => {
+    const event = payload as BrowserSemanticHistoryEvent;
+    if (event?.phase === "observed" && matches(event)) received(event);
+  });
+  const cleanup = () => {
+    unsubscribe();
+    const index = resources.indexOf(cleanup);
+    if (index >= 0) resources.splice(index, 1);
+  };
+  resources.push(cleanup);
+  try {
+    await interact();
+    return await observed;
+  } finally {
+    cleanup();
+  }
+}
+
+async function awaitObservedBrowserInput(bridge: ExternalBrowserBridge, targetName: string, interact: () => Promise<void>) {
+  return awaitObservedBrowserEvent(bridge, event => event.action === "input" && event.target?.name === targetName, interact);
 }
 
 describe("browser History bridge to canonical event stream", () => {
@@ -150,7 +178,20 @@ describe("browser History bridge to canonical event stream", () => {
       <input id="note" aria-label="Note"><label>Card number<input name="cardNumber"></label>
       <p role="status">Paid with 4111 1111 1111 1111</p>` }));
     await page.goto(h.context.topUrl);
-    await page.exposeFunction("__memmyFixturePublish", (encoded: string) => h.emit(JSON.parse(encoded)));
+    let completeArticleClick!: () => void;
+    const articleClickCompleted = new Promise<void>(resolve => { completeArticleClick = resolve; });
+    let publicationActive = true;
+    resources.push(() => { publicationActive = false; completeArticleClick(); });
+    await page.exposeFunction("__memmyFixturePublish", async (encoded: string) => {
+      const event = JSON.parse(encoded);
+      if (event.action === "click" && event.phase === "observed") {
+        // Start the transport delay after click completion, so late click resolution
+        // cannot let the old one-second polling wait accidentally pass.
+        await articleClickCompleted;
+        await new Promise(resolve => setTimeout(resolve, 1_100));
+      }
+      if (publicationActive) h.emit(event);
+    });
     await page.evaluate(browserHistorySensorScript({ generation: h.service.getBrowserCaptureIntent().generation!,
       documentId: h.context.documentId, captureText: true, bindingName: "__memmyFixturePublish" }));
     await page.evaluate("document.querySelector('#feed').scrollTop = 600");
@@ -162,12 +203,15 @@ describe("browser History bridge to canonical event stream", () => {
     await vi.waitFor(() => expect(h.records().some(event => event.details.key === "ArrowDown")).toBe(true));
     await new Promise(resolve => setTimeout(resolve, 400));
     expect(h.records().filter(event => event.details.key === "ArrowDown")).toHaveLength(1);
-    await page.click("#article", { position: { x: 4, y: 4 } });
-    await vi.waitFor(() => expect(h.records().some(event => event.details.action === "click" && event.details.phase === "observed")).toBe(true));
-    const article = h.records().find(event => event.details.action === "click" && event.details.phase === "observed");
+    const observedArticle = await awaitObservedBrowserEvent(h.bridge, event => event.action === "click"
+      && event.target?.tag === "section" && event.documentId === h.context.documentId,
+      () => page.click("#article", { position: { x: 4, y: 4 } }).finally(completeArticleClick));
+    const article = h.records().find(event => event.details.eventId === observedArticle.eventId);
+    expect(article?.details).toMatchObject({ action: "click", phase: "observed", documentId: h.context.documentId,
+      target: { tag: "section" } });
     expect(article.details.target.name.length).toBeLessThanOrEqual(200);
-    await page.fill("input[name=cardNumber]", "4111 1111 1111 1111");
-    await vi.waitFor(() => expect(h.records().some(event => event.details.action === "input")).toBe(true));
+    await awaitObservedBrowserInput(h.bridge, "Card number", () => page.fill("input[name=cardNumber]", "4111 1111 1111 1111"));
+    expect(h.records().some(event => event.details.action === "input")).toBe(true);
     expect(JSON.stringify(h.records())).not.toContain("4111 1111 1111 1111");
   }, 20_000);
 
@@ -195,8 +239,8 @@ describe("browser History bridge to canonical event stream", () => {
     const checkboxAttempt = h.records().find(event => event.details.phase === "attempt" && event.details.target?.role === "checkbox");
     expect(checkboxAttempt.details.interactionId).toBe(checked.details.interactionId);
     expect(reusableHumanActions(h.records()).filter(step => step.includes("checkbox"))).toHaveLength(1);
-    await page.getByPlaceholder("Company").fill("Fixture Company");
-    await vi.waitFor(() => expect(h.records().some(event => event.details.action === "input")).toBe(true));
+    await awaitObservedBrowserInput(h.bridge, "Company", () => page.getByPlaceholder("Company").fill("Fixture Company"));
+    expect(h.records().some(event => event.details.action === "input")).toBe(true);
     expect(h.records().find(event => event.details.action === "input").details.after.target.value).toBe("Fixture Company");
     const evidence = JSON.stringify(h.records());
     for (const secret of ["hidden-business-secret", "script-only-secret", "style-only-secret", "never-raw-password", "123456"]) expect(evidence).not.toContain(secret);

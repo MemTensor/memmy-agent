@@ -1,6 +1,7 @@
 /** Hosts the GitHub star prompt across all routes after agent turn completion. */
 import { useEffect, useRef, useState } from "react";
 import { isTaskTokenGiftPromptOpen } from "./task-token-gift-prompt-host.js";
+import { hasCollabLaunchPromptClaimedThisRun, isCollabLaunchPromptOpen } from "../app/collab-launch-prompt-state.js";
 import {
   markGithubStarPromptActioned,
   markGithubStarPromptDismissed,
@@ -8,6 +9,7 @@ import {
   readGithubStarPromptState,
   shouldOfferGithubStarPrompt
 } from "../app/github-star-prompt-state.js";
+import { isDemoGuideActive } from "../app/collab-demo-guide-store.js";
 import { communityLinks } from "../community/community-links.js";
 import { useAppState } from "../state/app-state.js";
 import { openExternalUrl } from "../utils/open-url.js";
@@ -24,13 +26,15 @@ export function GithubStarPromptHost() {
   const lastHandledCompletionAt = useRef<number | null>(null);
 
   useEffect(() => {
+    // 新手引导演示期间不打断：星标提示留到下次。
+    if (isDemoGuideActive()) return;
     const completion = state.agent.lastTaskCompletion;
     if (!completion || lastHandledCompletionAt.current === completion.at) {
       return;
     }
     lastHandledCompletionAt.current = completion.at;
 
-    if (open || isTaskTokenGiftPromptOpen()) {
+    if (open || isTaskTokenGiftPromptOpen() || isCollabLaunchPromptOpen() || hasCollabLaunchPromptClaimedThisRun()) {
       return;
     }
 

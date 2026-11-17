@@ -1,6 +1,8 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
+import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_MEMMY_CONFIG, MemoryDb } from "../../../src/index.js";
+import { MemoryDb } from "../../../src/index.js";
 import {
   addPositiveFeedbackForTurn,
   insertActivePolicyMemory,
@@ -32,7 +34,17 @@ describe("MemoryService / evolution / orchestration", () => {
   it("adds feedback and evolves L2/L3/Skill memories with the worker", async () => {
     const { db, service } = createTestService({
       skillLlm: createNoToolSkillLlm(),
-      embedder: createCapturingEmbedder([])
+      embedder: createCapturingEmbedder([]),
+      config: {
+        ...LEGACY_TEST_CONFIG,
+        algorithm: {
+          ...LEGACY_TEST_CONFIG.algorithm,
+          skill: {
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
+            directFromTrace: false
+          }
+        }
+      }
     });
     const session = service.openSession({
       namespace: {
@@ -42,30 +54,30 @@ describe("MemoryService / evolution / orchestration", () => {
       }
     });
     const completes = [
-      service.completeTurn("turn-python-test-a", {
+      (await service.completeTurn("turn-python-test-a", {
       sessionId: session.sessionId,
       episodeId: "episode-python-test-a",
       query: "python vitest test workflow should keep REST agent loop decoupled",
       answer: "Use prepare, complete, recall, then worker run for memory evolution."
-    }),
-      service.completeTurn("turn-python-test-b", {
+    })),
+      (await service.completeTurn("turn-python-test-b", {
         sessionId: session.sessionId,
         episodeId: "episode-python-test-b",
         query: "python unit test workflow should keep REST agent loop decoupled",
         answer: "Use prepare, complete, recall, then worker run for memory evolution."
-      }),
-      service.completeTurn("turn-python-error-a", {
+      })),
+      (await service.completeTurn("turn-python-error-a", {
         sessionId: session.sessionId,
         episodeId: "episode-python-error-a",
         query: "python error handling workflow should keep REST agent loop decoupled",
         answer: "Capture the error signature and reuse the successful recovery policy."
-      }),
-      service.completeTurn("turn-python-error-b", {
+      })),
+      (await service.completeTurn("turn-python-error-b", {
         sessionId: session.sessionId,
         episodeId: "episode-python-error-b",
         query: "python exception handling workflow should keep REST agent loop decoupled",
         answer: "Capture the error signature and reuse the successful recovery policy."
-      })
+      }))
     ];
 
     for (const complete of completes) {
@@ -107,7 +119,7 @@ describe("MemoryService / evolution / orchestration", () => {
     expect(promotedCandidates.count).toBeGreaterThanOrEqual(1);
     const l2Row = db.db.prepare(
       `SELECT properties_json FROM memories
-       WHERE user_id = 'user-2' AND memory_layer = 'L2'
+       WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'L2'
        LIMIT 1`
     ).get() as { properties_json: string };
     const l2Internal = (JSON.parse(l2Row.properties_json) as {
@@ -149,7 +161,7 @@ describe("MemoryService / evolution / orchestration", () => {
     ).all() as Array<{ namespace_id: string | null; kind: string | null; op: string | null; entity_id: string | null }>;
     expect(workerMemoryChanges.length).toBeGreaterThan(0);
     for (const change of workerMemoryChanges) {
-      expect(change.namespace_id).toContain("user-2");
+      expect(change.namespace_id).not.toContain("user-2");
       expect(change.kind).toMatch(/^(trace|policy|world_model|skill)$/);
       expect(change.op).toMatch(/^(created|updated)$/);
       expect(change.entity_id).toBeTruthy();
@@ -184,38 +196,38 @@ describe("MemoryService / evolution / orchestration", () => {
         sessionKey: "skill-trial"
       }
     });
-    const trialTurn = service.completeTurn("turn-skill-trial", {
+    const trialTurn = (await service.completeTurn("turn-skill-trial", {
       sessionId: trialSession.sessionId,
       episodeId: "episode-skill-trial",
       query: "apply the recalled python REST memory workflow skill",
       answer: "applied the recalled workflow"
-    });
-    const trial = service.useSkill(skillId, {
+    }));
+    const trial = (await service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-use-1",
       sessionId: trialSession.sessionId,
-      episodeId: trialTurn.episodeId,
+      episodeId: assignedEpisodeId(service, trialTurn),
       rawTurnId: trialTurn.rawTurnId,
       turnId: trialTurn.turnId
-    });
-    const duplicateTrial = service.useSkill(skillId, {
+    }));
+    const duplicateTrial = (await service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-use-1",
       sessionId: trialSession.sessionId,
-      episodeId: trialTurn.episodeId,
+      episodeId: assignedEpisodeId(service, trialTurn),
       rawTurnId: trialTurn.rawTurnId,
       turnId: trialTurn.turnId
-    });
+    }));
     expect(duplicateTrial.trialId).toBe(trial.trialId);
     expect(duplicateTrial.duplicate).toBe(true);
-    const duplicateEpisodeTrial = service.useSkill(skillId, {
+    const duplicateEpisodeTrial = (await service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-use-2",
       sessionId: trialSession.sessionId,
-      episodeId: trialTurn.episodeId,
+      episodeId: assignedEpisodeId(service, trialTurn),
       rawTurnId: trialTurn.rawTurnId,
       turnId: trialTurn.turnId
-    });
+    }));
     expect(duplicateEpisodeTrial.trialId).toBe(trial.trialId);
     expect(duplicateEpisodeTrial.duplicate).toBe(true);
     const pendingTrialCount = db.db.prepare(
@@ -224,7 +236,7 @@ describe("MemoryService / evolution / orchestration", () => {
        WHERE skill_memory_id = ?
          AND episode_id = ?
          AND outcome = 'unknown'`
-    ).get(skillId, trialTurn.episodeId) as { count: number };
+    ).get(skillId, assignedEpisodeId(service, trialTurn)) as { count: number };
     expect(pendingTrialCount.count).toBe(1);
     const pendingTrial = db.db.prepare(
       `SELECT status, outcome, l1_memory_id
@@ -279,7 +291,7 @@ describe("MemoryService / evolution / orchestration", () => {
     });
     const skillFeedback = await service.feedback({
       sessionId: trialSession.sessionId,
-      episodeId: trialTurn.episodeId,
+      episodeId: assignedEpisodeId(service, trialTurn),
       rawTurnId: trialTurn.rawTurnId,
       channel: "explicit",
       polarity: "positive",
@@ -297,7 +309,7 @@ describe("MemoryService / evolution / orchestration", () => {
       target_memory_id: string | null;
       payload_json: string;
     };
-    expect(trialResolveJobRow.episode_id).toBe(trialTurn.episodeId);
+    expect(trialResolveJobRow.episode_id).toBe(assignedEpisodeId(service, trialTurn));
     expect(trialResolveJobRow.target_memory_id).toBeNull();
     expect(JSON.parse(trialResolveJobRow.payload_json)).toMatchObject({
       trialId: trial.trialId,
@@ -403,7 +415,7 @@ describe("MemoryService / evolution / orchestration", () => {
       {
         trialId: trial.trialId,
         status: "pass",
-        episodeId: trialTurn.episodeId,
+        episodeId: assignedEpisodeId(service, trialTurn),
         reward: undefined
       }
     ]));
@@ -471,7 +483,7 @@ describe("MemoryService / evolution / orchestration", () => {
       `SELECT id
        FROM memories
        WHERE memory_layer = 'L2'
-         AND user_id = 'user-2'
+         AND user_id = '__memmy_device_memory__'
        LIMIT 1`
     ).get() as { id: string } | undefined;
     expect(policyForRepeat).toBeTruthy();
@@ -495,12 +507,16 @@ describe("MemoryService / evolution / orchestration", () => {
   it("queues L3 abstraction and skill crystallization when L2 association activates a candidate policy", async () => {
     const { db, service } = createTestService({
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             minEpisodesForActivation: 2
+          },
+          skill: {
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
+            directFromTrace: false
           }
         }
       }
@@ -513,12 +529,12 @@ describe("MemoryService / evolution / orchestration", () => {
       },
       workspaceId: "workspace-l2-activation"
     });
-    const first = service.completeTurn("turn-l2-activation-1", {
+    const first = (await service.completeTurn("turn-l2-activation-1", {
       sessionId: session.sessionId,
       episodeId: "episode-l2-activation-1",
       query: "python pytest retry activation evidence one",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     await addPositiveFeedbackForTurn(service, session.sessionId, first);
     makeTraceEligibleForL2(db, first.l1MemoryId);
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
@@ -530,14 +546,14 @@ describe("MemoryService / evolution / orchestration", () => {
       appId: "workspace-l2-activation",
       profileId: "jiang",
       sourceTraceId: first.l1MemoryId,
-      sourceEpisodeId: first.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, first)
     });
-    const second = service.completeTurn("turn-l2-activation-2", {
+    const second = (await service.completeTurn("turn-l2-activation-2", {
       sessionId: session.sessionId,
       episodeId: "episode-l2-activation-2",
       query: "python pytest retry activation evidence two",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     await addPositiveFeedbackForTurn(service, session.sessionId, second);
     makeTraceEligibleForL2(db, second.l1MemoryId);
     const signature = traceSignatureForTest(db, second.l1MemoryId);
@@ -559,7 +575,7 @@ describe("MemoryService / evolution / orchestration", () => {
     service.closeSession(session.sessionId);
     db.db.prepare(
       `UPDATE evolution_jobs SET status = 'succeeded' WHERE episode_id = ?`
-    ).run(first.episodeId);
+    ).run(assignedEpisodeId(service, first));
     await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
@@ -634,18 +650,18 @@ describe("MemoryService / evolution / orchestration", () => {
       },
       workspaceId: "workspace-shared"
     });
-    const completeA = service.completeTurn("turn-downstream-a", {
+    const completeA = (await service.completeTurn("turn-downstream-a", {
       sessionId: profileA.sessionId,
       episodeId: "episode-downstream-a",
       query: "python pytest inspect failure retry after fixing issue for profile a",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
-    const completeB = service.completeTurn("turn-downstream-b", {
+    }));
+    const completeB = (await service.completeTurn("turn-downstream-b", {
       sessionId: profileB.sessionId,
       episodeId: "episode-downstream-b",
       query: "python pytest inspect failure retry after fixing issue for profile b",
       answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+    }));
     const at = new Date().toISOString();
     insertActivePolicyMemory(db, {
       id: "policy_downstream_profile_a",
@@ -655,7 +671,7 @@ describe("MemoryService / evolution / orchestration", () => {
       appId: "workspace-shared",
       profileId: "profile-a",
       sourceTraceId: completeA.l1MemoryId,
-      sourceEpisodeId: completeA.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, completeA)
     });
     insertActivePolicyMemory(db, {
       id: "policy_downstream_profile_b",
@@ -665,7 +681,7 @@ describe("MemoryService / evolution / orchestration", () => {
       appId: "workspace-shared",
       profileId: "profile-b",
       sourceTraceId: completeB.l1MemoryId,
-      sourceEpisodeId: completeB.episodeId
+      sourceEpisodeId: assignedEpisodeId(service, completeB)
     });
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     db.db.prepare(
@@ -679,14 +695,14 @@ describe("MemoryService / evolution / orchestration", () => {
       "job_l3_downstream_profile_a",
       "shared-downstream-user",
       profileA.sessionId,
-      completeA.episodeId,
+      assignedEpisodeId(service, completeA),
       "policy_downstream_profile_a",
       at,
       at,
       "job_skill_downstream_profile_a",
       "shared-downstream-user",
       profileA.sessionId,
-      completeA.episodeId,
+      assignedEpisodeId(service, completeA),
       completeA.l1MemoryId,
       at,
       at
@@ -697,7 +713,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const worlds = db.db.prepare(
       `SELECT info_json, properties_json
        FROM memories
-       WHERE user_id = 'shared-downstream-user'
+       WHERE user_id = '__memmy_device_memory__'
          AND memory_layer = 'L3'`
     ).all() as Array<{ info_json: string; properties_json: string }>;
     expect(worlds).toHaveLength(0);
@@ -705,7 +721,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const skills = db.db.prepare(
       `SELECT info_json, properties_json
        FROM memories
-       WHERE user_id = 'shared-downstream-user'
+       WHERE user_id = '__memmy_device_memory__'
          AND memory_layer = 'Skill'`
     ).all() as Array<{ info_json: string; properties_json: string }>;
     expect(skills).toHaveLength(2);
@@ -761,27 +777,27 @@ describe("MemoryService / evolution / orchestration", () => {
         confidence: 0.82
       }),
       config: {
-        ...DEFAULT_MEMMY_CONFIG,
+        ...LEGACY_TEST_CONFIG,
         algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          ...LEGACY_TEST_CONFIG.algorithm,
           capture: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            ...LEGACY_TEST_CONFIG.algorithm.capture,
             synthReflection: false,
             embedAfterCapture: false
           },
           l2Induction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            ...LEGACY_TEST_CONFIG.algorithm.l2Induction,
             traceCharCap: 700
           },
           l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            ...LEGACY_TEST_CONFIG.algorithm.l3Abstraction,
             useLlm: true,
             minPolicies: 1,
             minPolicySupport: 1,
             minPolicyGain: 0.01
           },
           skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            ...LEGACY_TEST_CONFIG.algorithm.skill,
             useLlm: true,
             minSupport: 1,
             minGain: -1,
@@ -798,7 +814,7 @@ describe("MemoryService / evolution / orchestration", () => {
         userId: "user-l3-skill-prompt"
       }
     });
-    const first = service.completeTurn("turn-l3-skill-prompt-a", {
+    const first = (await service.completeTurn("turn-l3-skill-prompt-a", {
       sessionId: session.sessionId,
       episodeId: "episode-l3-skill-prompt-a",
       query: `pytest sqlite migration workflow needs focused diagnostics ${"u".repeat(200)}`,
@@ -809,8 +825,8 @@ describe("MemoryService / evolution / orchestration", () => {
         output: "ok",
         success: true
       }]
-    });
-    const second = service.completeTurn("turn-l3-skill-prompt-b", {
+    }));
+    const second = (await service.completeTurn("turn-l3-skill-prompt-b", {
       sessionId: session.sessionId,
       episodeId: "episode-l3-skill-prompt-b",
       query: `pytest sqlite schema migration workflow needs focused diagnostics ${"v".repeat(200)}`,
@@ -821,7 +837,7 @@ describe("MemoryService / evolution / orchestration", () => {
         output: "ok",
         success: true
       }]
-    });
+    }));
     for (const complete of [first, second]) {
       await service.feedback({
         sessionId: session.sessionId,
@@ -840,7 +856,7 @@ describe("MemoryService / evolution / orchestration", () => {
       const l2Count = db.db.prepare(
         `SELECT COUNT(*) AS count
          FROM memories
-         WHERE user_id = 'user-l3-skill-prompt' AND memory_layer = 'L2'`
+         WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'L2'`
       ).get() as { count: number };
       if (l2Count.count > 0) {
         policyCreated = true;
@@ -849,10 +865,23 @@ describe("MemoryService / evolution / orchestration", () => {
     }
     expect(policyCreated).toBe(true);
 
+    // Finish upstream L2 work before promoting its output for the downstream
+    // prompt contract. WRR can expose a policy before other older L2 updates
+    // finish; those updates legitimately revise its eligibility metadata.
+    const upstreamPending = () => (db.db.prepare(
+      `SELECT COUNT(*) AS count FROM evolution_jobs
+       WHERE job_type IN ('l2_association', 'l2_induction')
+         AND target_memory_id IN (?, ?) AND status IN ('queued', 'leased', 'failed')`
+    ).get(first.l1MemoryId, second.l1MemoryId) as { count: number }).count;
+    for (let round = 0; round < 8 && upstreamPending() > 0; round++) {
+      await service.runWorkerOnce(100, { targetMemoryIds: [first.l1MemoryId, second.l1MemoryId] });
+    }
+    expect(upstreamPending()).toBe(0);
+
     const policyRow = db.db.prepare(
       `SELECT id, properties_json
        FROM memories
-       WHERE user_id = 'user-l3-skill-prompt' AND memory_layer = 'L2'
+       WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'L2'
        LIMIT 1`
     ).get() as { id: string; properties_json: string };
     const policyProperties = JSON.parse(policyRow.properties_json) as {
@@ -895,7 +924,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const l1Rows = db.db.prepare(
       `SELECT *
        FROM memories
-       WHERE user_id = 'user-l3-skill-prompt' AND memory_layer = 'L1'`
+       WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'L1'`
     ).all() as Array<Record<string, unknown> & { id: string; properties_json: string }>;
     const sourceL1Row = l1Rows.find((row) => {
       const properties = JSON.parse(row.properties_json) as {
@@ -988,7 +1017,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const worldRow = db.db.prepare(
       `SELECT properties_json
        FROM memories
-       WHERE user_id = 'user-l3-skill-prompt' AND memory_layer = 'L3'
+       WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'L3'
        LIMIT 1`
     ).get() as { properties_json: string } | undefined;
     if (worldRow) {
@@ -1040,7 +1069,7 @@ describe("MemoryService / evolution / orchestration", () => {
     const skillRow = db.db.prepare(
       `SELECT memory_key, properties_json
        FROM memories
-       WHERE user_id = 'user-l3-skill-prompt' AND memory_layer = 'Skill'
+       WHERE user_id = '__memmy_device_memory__' AND memory_layer = 'Skill'
        LIMIT 1`
     ).get() as { memory_key: string; properties_json: string };
     const skillProperties = JSON.parse(skillRow.properties_json) as {

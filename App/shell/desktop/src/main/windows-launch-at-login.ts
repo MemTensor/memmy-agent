@@ -16,6 +16,8 @@ export interface WindowsLoginItemApplication {
     openAtLogin: boolean;
     executableWillLaunchAtLogin: boolean;
     launchItems: Array<{
+      name?: string;
+      scope?: string;
       path: string;
       args: string[];
       enabled: boolean;
@@ -58,11 +60,47 @@ export const resolveWindowsLoginItemCommand = (
 
   return {
     path: windowsPath.join(systemRootPath, "System32", "wscript.exe"),
-    args: [`"${launcherPath}"`]
+    // Electron formats each argv element for the Run value; literal quotes would be escaped again.
+    args: [launcherPath]
   };
 };
 
-/** Reads whether the packaged Windows launch command will effectively run at login. */
+/** Repairs the old double-quoted launcher entry without enabling disabled startup. */
+export const repairWindowsLaunchAtLogin = (
+  application: WindowsLoginItemApplication,
+  environment: WindowsLaunchAtLoginEnvironment,
+  pathExists: WindowsPathExists = existsSync
+): boolean => {
+  if (environment.platform !== "win32" || !environment.isPackaged) {
+    return false;
+  }
+  const command = resolveWindowsLoginItemCommand(environment, pathExists);
+  if (command.args.length !== 1) {
+    return false;
+  }
+
+  const legacyCommand = { ...command, args: [`"${command.args[0]}"`] };
+  const settings = application.getLoginItemSettings(legacyCommand);
+  // openAtLogin compares the exact current app ID's HKCU Run value. The aggregate
+  // executableWillLaunchAtLogin also includes unrelated entries using wscript.exe.
+  if (!settings.openAtLogin) {
+    return false;
+  }
+  const legacyItem = settings.launchItems.find((item) => (
+    item.name === "cn.memtensor.memmy"
+    && item.scope === "user"
+    && normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(legacyCommand.path)
+    && item.args.length === 1
+    && item.args[0] === legacyCommand.args[0]
+  ));
+  if (!legacyItem) {
+    return false;
+  }
+  application.setLoginItemSettings({ ...command, openAtLogin: true, enabled: legacyItem.enabled });
+  return true;
+};
+
+/** Reads effective matching entries while retaining the app's own registration as the setting gate. */
 export const getWindowsLaunchAtLogin = (
   application: WindowsLoginItemApplication,
   environment: WindowsLaunchAtLoginEnvironment,
@@ -78,12 +116,14 @@ export const getWindowsLaunchAtLogin = (
     return false;
   }
 
-  const matchingItem = settings.launchItems.find((item) => (
+  const matchingItems = settings.launchItems.filter((item) => (
     normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(command.path)
     && item.args.length === command.args.length
     && item.args.every((argument, index) => argument === command.args[index])
   ));
-  return matchingItem?.enabled ?? settings.executableWillLaunchAtLogin;
+  // Aliases can have their own StartupApproved state. Entry ordering must not
+  // hide an enabled command, and wscript's aggregate includes unrelated scripts.
+  return matchingItems.some((item) => item.enabled);
 };
 
 /** Writes the packaged Windows login item and returns the effective system state. */

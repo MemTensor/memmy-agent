@@ -41,7 +41,7 @@ describe("startAgentSourceScan", () => {
     fallback();
     await Promise.resolve();
 
-    expect(actions).toEqual([
+    expect(actions.filter((action) => action.type !== "agentSources/scanControl")).toEqual([
       appActions.agentSourceScanStarted(),
       appActions.agentSourceScanProgressReceived({
         jobId: "job-1",
@@ -101,7 +101,7 @@ describe("startAgentSourceScan", () => {
     });
 
     expect(clients.agentSources.startScan).toHaveBeenCalledWith({ sourceId: "openclaw" });
-    expect(actions[0]).toEqual(appActions.agentSourceScanStarted("openclaw"));
+    expect(actions[1]).toEqual(appActions.agentSourceScanStarted("openclaw"));
     expect(actions).toContainEqual(appActions.agentSourceScanProgressReceived({
       jobId: "job-source",
       sourceId: "openclaw",
@@ -166,7 +166,7 @@ describe("startAgentSourceScan", () => {
     });
 
     expect(formatError).toHaveBeenCalledTimes(1);
-    expect(actions).toEqual([
+    expect(actions.filter((action) => action.type !== "agentSources/scanControl")).toEqual([
       appActions.agentSourceScanStarted(),
       appActions.agentSourcesFailed("找不到路径：C:\\Users\\10970\\.claude\\projects")
     ]);
@@ -236,7 +236,7 @@ describe("startAgentSourceScan", () => {
       }
     });
 
-    expect(actions[0]).toEqual(appActions.agentSourceScanStarted());
+    expect(actions[1]).toEqual(appActions.agentSourceScanStarted());
     expect(calls).toEqual(["ensureScanPermission", "startScan"]);
   });
 });

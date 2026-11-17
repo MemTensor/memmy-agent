@@ -5,6 +5,7 @@ import { modelSelectionWire } from "../../providers/model-catalog.js";
 import { scrubSubagentAnnounceBody } from "../../utils/subagent-channel-display.js";
 import { findLegalMessageStart, imagePlaceholderText, stripThink } from "../../utils/helpers.js";
 import { visibleWebuiUserContent } from "./webui-user-content.js";
+import { projectMemmyMemoryPrompt } from "../../memmy-memory/protocol.js";
 
 export const FILE_MAX_MESSAGES = 2_000;
 const WEBUI_SESSION_METADATA_KEY = "webui";
@@ -136,15 +137,21 @@ const REPLAY_EXTRA_KEYS = [
   "name",
   "reasoning_content",
   "thinking_blocks",
+  "memmy_protocol_state",
   "extra_content",
 ] as const;
 
 function hasAssistantReplayState(message: Record<string, any>): boolean {
-  return "tool_calls" in message || "reasoning_content" in message || "thinking_blocks" in message;
+  return "tool_calls" in message || "reasoning_content" in message || "thinking_blocks" in message || "memmy_protocol_state" in message;
 }
 
 function synthesizeContent(message: Record<string, any>, includeTimestamps: boolean): Record<string, any> | null {
   const role = message.role;
+  const memory = message.memmy_memory;
+  if (role === "user" && memory?.turnId === message.turn_id
+    && typeof memory?.turnId === "string" && Array.isArray(memory.content)) {
+    return { role, content: structuredClone(memory.content) };
+  }
   let content = Object.prototype.hasOwnProperty.call(message, "content") ? message.content : "";
   if (role === "assistant" && typeof content === "string") {
     content = sanitizeAssistantReplayText(content);
@@ -168,7 +175,8 @@ function synthesizeContent(message: Record<string, any>, includeTimestamps: bool
   for (const key of REPLAY_EXTRA_KEYS) {
     if (key in message) entry[key] = message[key];
   }
-  return entry;
+  // Replay the original runtime identity without changing the stored user text.
+  return message.memmy_prompt ? projectMemmyMemoryPrompt({ ...entry, memmy_prompt: message.memmy_prompt }) : entry;
 }
 
 function sanitizeCrossProviderReplay(
@@ -185,6 +193,7 @@ function sanitizeCrossProviderReplay(
   const sanitized = { ...message };
   delete sanitized.reasoning_content;
   delete sanitized.thinking_blocks;
+  delete sanitized.memmy_protocol_state;
   delete sanitized.extra_content;
   if (Array.isArray(sanitized.tool_calls)) {
     sanitized.tool_calls = sanitized.tool_calls.map((call: Record<string, any>) => {
@@ -247,13 +256,13 @@ export class Session {
       ? { maxMessages: maxMessagesOrOptions, ...options }
       : maxMessagesOrOptions;
     const {
-      maxMessages = 120,
+      maxMessages = 80,
       maxTokens,
       includeTimestamps = false,
       targetProvider = null,
     } = historyOptions ?? {};
     const visibleMessages = this.messages.slice(this.lastConsolidated);
-    const effectiveMsgLimit = maxMessages > 0 ? maxMessages : 120;
+    const effectiveMsgLimit = maxMessages > 0 ? maxMessages : 80;
     let window = visibleMessages.slice(-effectiveMsgLimit);
     window = alignWindowToUserTurn(window);
     const legalStart = findLegalMessageStart(window);

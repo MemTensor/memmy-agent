@@ -7,10 +7,26 @@ import { useConversationFeatures } from "./conversation-features.js";
 import { applySidebarRecordingAction, sidebarRecordingStatus } from "./recording-entry.js";
 import { pendingAgentQuestion, AgentQuestionCard, AgentQuestionActiveRequestContext } from "./agent-question-card.js";
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type SetStateAction, type UIEvent } from "react";
 import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
-import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
+import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
+import { CollabAssistTaskBar, CollabAssistTaskDock, useAssistTask } from "./collab-assist-task.js";
+import { collabEnabledFor } from "../app/collab-mode.js";
+import {
+  demoGuideSendsAssistHint,
+  demoGuideWentBack,
+  dispatchDemoGuide,
+  getDemoGuideState,
+  subscribeDemoGuide,
+  type DemoGuidePhase,
+  type DemoGuideStatus
+} from "../app/collab-demo-guide-store.js";
+import { mentionEmptyLabelKey } from "./collab-session-mention.js";
+import { CollabShareToggle } from "./collab-share-toggle.js";
+import { getCollabProjectsSnapshot, requestCreateProject, selectCollabProject, sharedProjectFor, subscribeCollabProjects } from "../app/collab-projects-store.js";
+import { handOffDraftShare } from "../app/collab-share-intent.js";
+import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
@@ -27,7 +43,8 @@ import {
   type MemmyAgentMediaInput,
   type UploadAgentMediaInput,
   type UploadedAgentMedia,
-  type WebuiSessionTarget
+  type WebuiSessionTarget,
+  type ArtifactScope
 } from "../api/memmy-agent-client.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
 import { setAnalyticsModelSource } from "../analytics/analytics-context.js";
@@ -50,7 +67,7 @@ import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integ
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
-import { NEW_TASK_MODEL_SCOPE_KEY, type AgentChatMediaAttachment, type AgentChatMessage, type AgentState, type AgentThinkingState } from "../state/agent-chat-slice.js";
+import { NEW_TASK_MODEL_SCOPE_KEY, type AgentChatMediaAttachment, type AgentChatMessage, type AgentState, type AgentThinkingState, type ComposerMention } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
@@ -62,6 +79,12 @@ import {
   type PendingImage
 } from "../state/agent-composer-state.js";
 import { createModelWorkspace, defaultModelSelectionInput, resolveModelSelection, resolveThinkingConfigForModel, type ModelCandidate, type ModelWorkspace } from "../state/model-workspace.js";
+import {
+  CollabSessionMentionMenu,
+  applyMention,
+  mentionQueryFromInput,
+  useCollabSessionCandidates
+} from "./collab-session-mention.js";
 import {
   AgentCommandPalette,
   buildVisibleSlashCommands,
@@ -78,7 +101,6 @@ import {
 import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList, queuedComposerEditDecision } from "./agent-queued-message-list.js";
-import { agentOutputSignature, useStalledOutputShimmer } from "./agent-stall-shimmer.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import { AgentThreadPanel, PLUGIN_RECORDING_TAB_ID, useAgentThreadPanel } from "./agent-thread-panel.js";
 import { hasPendingBrowserOpen, MEMMY_BROWSER_OPEN_EVENT } from "./browser-panel.js";
@@ -109,7 +131,7 @@ import { HomeStarterActions } from "./home-starter-actions.js";
 import { LlmProviderLogo } from "./llm-provider-logo.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
-import { ArrowDown, Check, ChevronDown, Folder, PanelRight, Plus as LucidePlus, RotateCw, Target, X } from "lucide-react";
+import { ArrowDown, Check, Folder, MessageSquare, PanelRight, Plus as LucidePlus, RotateCw, Search, Target, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -209,7 +231,8 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.composer.emptyMessage",
   "home.goal.controlUnknown",
   "home.modelSelector.unavailable",
-  "home.project.desktopRequired",
+  "collab.share.failed",
+  "collab.create.shareQuotaExceeded",
   "home.queue.removeFailed",
   "home.queue.editBlocked",
   "home.queue.steerFailed",
@@ -240,6 +263,8 @@ export interface ComposerSubmitButtonProps {
   variant?: "empty" | "compact";
   /** On click. */
   onClick: () => void;
+  /** 新手引导的描边目标：只有演示里点发送那一步会带上。 */
+  demoGuideAnchor?: string;
 }
 export type StatusPanelState =
   | { open: false }
@@ -325,6 +350,11 @@ export interface SubmitAgentComposerMessageInput {
   settleComposer?: () => void;
   onChatResolved?: (chatId: string) => void;
   onNewChatMessageSent?: (chatId: string) => void;
+  /**
+   * 这一条已经发出去了：用来把任务标题显式定下来。
+   * 新手引导第二步给 Agent 的内容里带着执行提示，标题不能取正文，只能在这里写死成用户看到的那句话。
+   */
+  onMessageSent?: (chatId: string) => void;
   chatSelectionEpoch?: number;
   getChatSelectionEpoch?: () => number;
   scopeKey?: string;
@@ -518,6 +548,7 @@ export function ComposerSubmitButton(props: ComposerSubmitButtonProps) {
       aria-label={props.isSending ? props.stopLabel : props.sendLabel}
       title={props.isSending ? props.stopLabel : props.sendLabel}
       className={className}
+      data-demo-guide={props.demoGuideAnchor}
     >
       {props.isSending ? (
         <span className="inline-flex items-center justify-center">
@@ -567,6 +598,32 @@ export function ComposerCommandChip(props: {
         <X size={13} strokeWidth={2.25} aria-hidden="true" className="composer-command-chip__icon composer-command-chip__icon--remove" />
       </button>
       <span className="composer-command-chip__label">{label}</span>
+    </div>
+  );
+}
+
+/**
+ * A referenced project task in the composer. It reads like the Goal token but carries its own icon,
+ * so the person can tell a reference from a command; the text it stands for travels with the message.
+ */
+export function ComposerMentionChip(props: {
+  label: string;
+  removeLabel: string;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="composer-command-chip composer-mention-chip">
+      <button
+        type="button"
+        className="composer-command-chip__leading"
+        aria-label={`${props.removeLabel} ${props.label}`}
+        title={`${props.removeLabel} ${props.label}`}
+        onClick={props.onRemove}
+      >
+        <MessageSquare size={13} strokeWidth={2} aria-hidden="true" className="composer-command-chip__icon composer-mention-chip__icon" />
+        <X size={13} strokeWidth={2.25} aria-hidden="true" className="composer-command-chip__icon composer-command-chip__icon--remove" />
+      </button>
+      <span className="composer-command-chip__label">{props.label}</span>
     </div>
   );
 }
@@ -688,6 +745,28 @@ export function thinkingPayloadForSend(
     ? resolveThinkingLevel(config, sessionThinking?.level)
     : null;
   return { thinkingEnabled, thinkingLevel };
+}
+
+/**
+ * 新手引导第二步的发送内容：输入框里还是引导写好的那句话时，把执行提示追加到发给 Agent 的内容里，
+ * 同时交出气泡该显示的那一句。用户改过句子就不追加，原样发出去。
+ */
+export function composeDemoGuideAssistSend(input: {
+  status: DemoGuideStatus;
+  phase: DemoGuidePhase;
+  typed: string;
+  sentence: string;
+  hint: string;
+  content: string;
+}): { content: string; displayContent: string | null } {
+  const append = demoGuideSendsAssistHint({
+    status: input.status,
+    phase: input.phase,
+    typed: input.typed,
+    sentence: input.sentence
+  }) && input.hint.trim().length > 0;
+  if (!append) return { content: input.content, displayContent: null };
+  return { content: `${input.content}\n\n${input.hint}`, displayContent: input.typed.trim() };
 }
 
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
@@ -876,6 +955,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     return false;
   }
   input.settleComposer?.();
+  input.onMessageSent?.(chatId);
   input.track({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
   if (input.scopeKey) {
     input.dispatch(agentActions.pendingModelPresetCleared(input.scopeKey));
@@ -937,7 +1017,6 @@ export function HomePage() {
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
-  const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
   const [firstEncounterRelayChatId, setFirstEncounterRelayChatId] = useState<string | null>(() => (
     readFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage)
   ));
@@ -967,6 +1046,19 @@ export function HomePage() {
   const lastNewChatRequestRef = useRef(state.agent.newChatRequestId);
   const initialFocusedChatLoadedRef = useRef(false);
   const composerDraftsRef = useRef<Record<string, string>>(composerDrafts);
+
+  /**
+   * 清掉与这一句完全相同的草稿：只动引导写进去的那一版，用户自己改过的留着。
+   * 演示用它处理第二步那句请求：那一步结束（或整轮演示结束）之后，它不该留在任何会话的输入框里。
+   */
+  function clearDraftIfUntouched(sentence: string) {
+    const trimmed = sentence.trim();
+    if (!trimmed) return;
+    for (const [scope, draft] of Object.entries(composerDraftsRef.current)) {
+      if (draft.trim() !== trimmed) continue;
+      dispatch(agentActions.composerDraftUpdated(scope, ""));
+    }
+  }
   const pendingAttachmentsRef = useRef<Record<string, PendingAttachment[]>>(pendingAttachmentsByScope);
   const stopRequestLocksRef = useRef<Set<string>>(new Set());
   const goalMutationLocksRef = useRef<Set<string>>(new Set());
@@ -974,8 +1066,6 @@ export function HomePage() {
   const pluginConversationCreationRef = useRef<Promise<string | null> | null>(null);
   const queueRemoveLocksRef = useRef<Set<string>>(new Set());
   const queueSteerLocksRef = useRef<Set<string>>(new Set());
-  const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
-  draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
@@ -1025,11 +1115,94 @@ export function HomePage() {
   );
   const selectedComposerCommand = composerCommandDraft.command;
   const composerInput = composerCommandDraft.text;
+  // The @ menu: the caret decides which mention is being typed, so it is tracked with the text.
+  const [composerCaret, setComposerCaret] = useState(0);
+
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionDismissed, setMentionDismissed] = useState(false);
+  const collabClient = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
+  const collabProjects = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
+  /**
+   * 成员协助：这条任务是执行方的一次协助（顶部协助条、底部确认卡片与「已发给谁」），或者在它里面请成员协助过
+   * （底部请求卡片）。只在账号模式读；普通任务拿到空视图，页面上不多出任何东西。
+   */
+  const assistTask = useAssistTask(
+    collabClient,
+    state.agent.currentChatId,
+    collabEnabledFor(state.bootstrap?.app.userMode) && Boolean(state.account.userId)
+  );
+  const mentionQuery = useMemo(
+    () => (mentionDismissed ? null : mentionQueryFromInput(composerInput, composerCaret)),
+    [composerInput, composerCaret, mentionDismissed]
+  );
+  const pendingMentions = state.agent.composerMentionsByScope[chatScopeKey] ?? [];
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
   const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
     : null;
+  // A reference stays inside the project the task belongs to, so the @ menu needs that project first: the
+  // draft's target for a new task, the session's project for an existing one.
+  const composerLocalProjectId = selectedDraftProject?.id
+    ?? (state.agent.currentSessionKey
+      ? state.agent.sessions.find((session) => session.key === state.agent.currentSessionKey)?.projectId
+      : undefined)
+    ?? null;
+  const composerOnlineProjectId = useMemo(() => {
+    if (!composerLocalProjectId) return null;
+    return getCollabProjectsSnapshot().projects?.find((project) => project.localProjectId === composerLocalProjectId)?.id ?? null;
+  }, [composerLocalProjectId, collabProjects]);
+  const mentionCandidates = useCollabSessionCandidates({
+    client: collabClient,
+    mention: mentionQuery,
+    projectId: composerOnlineProjectId
+  });
+  // Any @ opens the menu, so it always answers: the candidates, an empty project, or a task outside one.
+  const mentionOpen = mentionQuery !== null;
+  const mentionProjectName = collabProjects.projects?.find((project) => project.id === composerOnlineProjectId)?.name ?? null;
+  const mentionEmpty = mentionEmptyLabelKey({ projectName: composerOnlineProjectId ? mentionProjectName : null });
+  const mentionEmptyLabel = mentionEmpty.key === "home.mention.empty"
+    ? t("home.mention.empty", mentionEmpty.values)
+    : t("home.mention.noProject");
+  /**
+   * 输入框旁的共享开关：只在这条任务（或草稿）所属的项目已经开启协作共享时出现。
+   * 新建任务默认开启，选择先记在草稿上，发出第一条消息后由新会话接手（见 `onChatResolved`）。
+   */
+  const sharedOnlineProject = useMemo(() => {
+    if (!composerLocalProjectId) return null;
+    return (collabProjects.projects ?? []).find((project) => project.localProjectId === composerLocalProjectId) ?? null;
+  }, [composerLocalProjectId, collabProjects]);
+  const shareToggle = sharedOnlineProject && collabClient ? (
+    <CollabShareToggle
+      collab={collabClient}
+      projectId={sharedOnlineProject.id}
+      conversationId={state.agent.currentChatId}
+      draftScopeKey={chatScopeKey}
+      onError={() => dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "send",
+        message: "collab.share.failed",
+        ...(state.agent.currentChatId ? { chatId: state.agent.currentChatId } : { scopeKey: chatScopeKey })
+      })))}
+    />
+  ) : null;
+  /**
+   * 标题栏的面包屑只在项目任务上出现：项目 / 项目名 / 任务标题。
+   * 普通任务（不属于任何项目）保持原来的单行标题；是否共享由输入框旁的开关自己说，这里不再重复。
+   */
+  const activeSessionProject = useMemo(() => {
+    const projectId = state.agent.currentSessionKey
+      ? state.agent.sessions.find((session) => session.key === state.agent.currentSessionKey)?.projectId
+      : null;
+    if (!projectId) return null;
+    return state.agent.projects.find((project) => project.id === projectId) ?? null;
+  }, [state.agent.currentSessionKey, state.agent.projects, state.agent.sessions]);
+  const projectCrumb = activeSessionProject ? {
+    name: activeSessionProject.name,
+    onOpen: () => {
+      selectCollabProject(activeSessionProject.id);
+      dispatch(appActions.navigate("/collab"));
+    }
+  } : null;
   const environmentScope = resolveWorkspaceEnvironmentScope(
     state.agent.currentSessionKey,
     selectedDraftProject?.id ?? null,
@@ -1099,6 +1272,13 @@ export function HomePage() {
         if (chatSelectionEpochRef.current !== selectionEpoch) return null;
         ensureChatSubscription(created.chatId);
         threadPanel.promoteScope(draftScope, created.chatId);
+        // 插件从草稿建立的会话同样是用户新建的任务：按输入框旁开关的选择决定是否共享，与发送第一条消息一致。
+        void handOffDraftShare({
+          collab: collabClient,
+          onlineProjectId: sharedProjectFor(getCollabProjectsSnapshot().projects, composerLocalProjectId)?.id ?? null,
+          draftScopeKey: draftScope,
+          chatId: created.chatId
+        });
         // A plugin-only chat has no Agent message yet, so it is absent from the
         // canonical session snapshot. Keep an optimistic task row for it; without
         // one the next sidebar refresh reopens the blank draft and hides the card.
@@ -1133,8 +1313,9 @@ export function HomePage() {
       if (pluginConversationCreationRef.current === flight) pluginConversationCreationRef.current = null;
     });
     return flight;
-  }, [chatScopeKey, connection, dispatch, ensureChatSubscription, resolvedConversationModel.candidateId,
-    resolvedConversationModel.unavailable, state.agent, taskStateCoordinator, threadPanel.promoteScope, draftTarget]);
+  }, [chatScopeKey, collabClient, composerLocalProjectId, connection, dispatch, ensureChatSubscription,
+    resolvedConversationModel.candidateId, resolvedConversationModel.unavailable, state.agent, taskStateCoordinator,
+    threadPanel.promoteScope, draftTarget]);
   const features = useConversationFeatures({
     scopeKey: chatScopeKey, sharedRowWidth: workspaceRowWidth,
     agentMessages: state.agent.messages,
@@ -1263,13 +1444,18 @@ export function HomePage() {
   const sessionArtifactClient = useMemo(() => {
     const client = clients?.memmyAgent;
     const sessionKey = state.agent.currentSessionKey;
-    if (!client || !sessionKey) return null;
+    // A task that has not sent its first message has no session yet, but its side panel already shows the
+    // draft project's files, so previews are authorized against that project instead.
+    const scope: ArtifactScope | null = sessionKey
+      ? { sessionKey }
+      : selectedDraftProject?.id ? { projectId: selectedDraftProject.id } : null;
+    if (!client || !scope) return null;
     return {
-      resolveArtifact: (path: string) => client.resolveArtifact(path, sessionKey),
-      revealArtifact: (path: string) => client.revealArtifact(path, sessionKey),
-      openArtifact: (path: string) => client.openArtifact(path, sessionKey)
+      resolveArtifact: (path: string) => client.resolveArtifact(path, scope),
+      revealArtifact: (path: string) => client.revealArtifact(path, scope),
+      openArtifact: (path: string) => client.openArtifact(path, scope)
     };
-  }, [clients?.memmyAgent, state.agent.currentSessionKey]);
+  }, [clients?.memmyAgent, state.agent.currentSessionKey, selectedDraftProject?.id]);
   const isCurrentAgentRunning = Boolean(
     state.agent.currentChatId &&
     (
@@ -1279,11 +1465,119 @@ export function HomePage() {
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
   );
-  useStalledOutputShimmer(
-    conversationContentRef,
-    (isCurrentAgentRunning || isCurrentGoalActive) && !pendingCardKey,
-    agentOutputSignature(state.agent.messages)
-  );
+  /**
+   * 新手引导：输入框里的那句话由引导写好，用户只点发送。预填读一次就够（nonce 变一次填一次），
+   * 用户自己改过的内容不会被再次覆盖。
+   */
+  const demoGuide = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState);
+  const demoPrefillNonceRef = useRef(0);
+  useEffect(() => {
+    const prefill = demoGuide.prefill;
+    if (!prefill || prefill.nonce === demoPrefillNonceRef.current) return;
+    demoPrefillNonceRef.current = prefill.nonce;
+    setCurrentComposerDraft(prefill.text);
+    window.requestAnimationFrame(() => {
+      const element = inputRef.current;
+      if (!element) return;
+      resizeComposerInput(element);
+      element.focus();
+    });
+  }, [demoGuide.prefill]);
+
+  /**
+   * 演示一结束（完成 / 退出 / 离开 / 心跳超时），第二步预填的那句话不该留在任何草稿里：
+   * 之后的空白会话会把一句没发生过的请求带出来。只清与那句话完全相同的那一版，人自己写的照旧留着。
+   */
+  const demoAskSentenceRef = useRef("");
+  const demoEndedHandledRef = useRef(false);
+  useEffect(() => {
+    if (demoGuide.status === "active") {
+      demoAskSentenceRef.current = t("collab.demo.prefill.ask", { name: demoGuide.memberName, ask: demoGuide.copy.askSentence });
+      demoEndedHandledRef.current = false;
+      return;
+    }
+    if (demoGuide.status !== "ended" || demoEndedHandledRef.current) return;
+    demoEndedHandledRef.current = true;
+    clearDraftIfUntouched(demoAskSentenceRef.current);
+  }, [demoGuide.status, demoGuide.memberName, dispatch, t]);
+
+  /** 第二步被跳过时要停住的那一轮 Agent：指向下面的 `stopCurrentTurn`，避免 effect 重建时反复变化。 */
+  const stopTurnForDemoRef = useRef<(() => void) | null>(null);
+
+  /**
+   * 第二步（请成员协助）一完成就把那句话清掉，不等到整轮结束：下一步是为成员执行任务，
+   * 输入框里不该还留着上一句。用户自己改过的内容不动。
+   */
+  const demoAskClearedRef = useRef(false);
+  useEffect(() => {
+    if (demoGuide.status !== "active" || demoGuide.phase !== "ask-done") {
+      demoAskClearedRef.current = false;
+      return;
+    }
+    if (demoAskClearedRef.current) return;
+    demoAskClearedRef.current = true;
+    clearDraftIfUntouched(t("collab.demo.prefill.ask", { name: demoGuide.memberName, ask: demoGuide.copy.askSentence }));
+  }, [demoGuide.status, demoGuide.phase, demoGuide.memberName, dispatch, t]);
+
+  /**
+   * 第二步那句话与它对应的执行提示：句子进输入框，提示只在发送时追加给 Agent。
+   * 两者都按当前语言现取，句子与预填时是同一句，所以能据此判断用户改没改过。
+   */
+  const demoAssistSentence = demoGuide.status === "active"
+    ? t("collab.demo.prefill.ask", { name: demoGuide.memberName, ask: demoGuide.copy.askSentence })
+    : "";
+  const demoAssistHint = demoGuide.status === "active"
+    ? t("collab.demo.prefill.askHint", { name: demoGuide.memberName, member: demoGuide.memberUserId ?? "" })
+    : "";
+
+  /**
+   * 一轮回复从「运行中」变回空闲：引导的等待状态据此推进，不靠定时器猜。
+   * 这一轮以错误结束时不能当成成功：卡片要说「这一步没有完成」，并给重试与跳过。
+   */
+  const demoWasRunningRef = useRef(false);
+  /** 这一轮开始时已经存在的那条错误：只有它之后新出现的错误才算这一轮失败。 */
+  const demoTurnErrorIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const notice = state.agent.operationErrorNotice;
+    if (isCurrentAgentRunning) {
+      if (!demoWasRunningRef.current) demoTurnErrorIdRef.current = notice?.id ?? null;
+      demoWasRunningRef.current = true;
+      return;
+    }
+    if (!demoWasRunningRef.current) return;
+    demoWasRunningRef.current = false;
+    const freshError = Boolean(notice) && notice!.id !== demoTurnErrorIdRef.current;
+    if (freshError && demoGuide.status === "active") {
+      dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.agent") });
+      return;
+    }
+    dispatchDemoGuide({ type: "agent-settled" });
+  }, [isCurrentAgentRunning, state.agent.operationErrorNotice, demoGuide.status, t]);
+
+  /**
+   * 第二步被跳过，或者人点了「上一步」：那一轮 Agent 还在替这句话干活，必须停下。
+   *
+   * 跳过与退回都只把引导挪到另一屏，不会动 Agent：不停的话请求照样会发出去、内容照样会写进对话，
+   * 人会觉得没听他的。
+   *
+   * 顺序很要紧：先让界面把这一屏换掉（这一步在上一层已经 dispatch 完了），再停那一轮。
+   * 反过来就会先收到「这一轮结束」，那时候引导还停在原来那一屏上，会被当成「这一步做完了」或者「这一步失败了」。
+   */
+  const demoPhaseRef = useRef(demoGuide.phase);
+  useEffect(() => {
+    const previous = demoPhaseRef.current;
+    demoPhaseRef.current = demoGuide.phase;
+    if (demoGuide.status !== "active") return;
+    // 退回上一屏：这一屏可能是「等 Agent 写/等 Agent 发」的那两屏，先停住。
+    if (demoGuideWentBack(previous, demoGuide.phase)) {
+      stopTurnForDemoRef.current?.();
+      return;
+    }
+    const askSkipped = (previous === "ask-compose" || previous === "ask-waiting") && demoGuide.phase === "settings-open";
+    if (!askSkipped) return;
+    stopTurnForDemoRef.current?.();
+  }, [demoGuide.phase, demoGuide.status]);
+
   const currentTaskCompletedUnseen = state.agent.chatWindowFocused && state.agent.chatViewVisible && !state.agent.blankDraftActive
     ? false
     : state.agent.tasks.find((task) => task.chatId === state.agent.currentChatId)?.completedUnseen;
@@ -1652,7 +1946,9 @@ export function HomePage() {
 
     void submitAgentComposerMessage({
       chatId: null,
-      target: { kind: "standalone" },
+      target: pendingLaunch.projectId
+        ? { kind: "project", projectId: pendingLaunch.projectId }
+        : { kind: "standalone" },
       connection,
       ensureChatSubscription,
       content: pendingLaunch.prompt,
@@ -1666,6 +1962,7 @@ export function HomePage() {
       chatSelectionEpoch: state.agent.chatSelectionEpoch,
       getChatSelectionEpoch: () => chatSelectionEpochRef.current,
       scopeKey: agentChatScopeKey(null, state.agent.newChatRequestId),
+      // 系统代用户新建的任务（如「添加 Agent 支持」）不接手草稿的共享选择，始终只在本机。
       onChatResolved: (chatId) => threadPanel.promoteScope(agentChatScopeKey(null, state.agent.newChatRequestId), chatId),
       onNewChatMessageSent: (chatId) => {
         rememberFirstEncounterRelayChatIfArmed(chatId);
@@ -2044,6 +2341,22 @@ export function HomePage() {
     const submittedDraft = input;
     const submittedAttachments = [...pendingAttachments];
     const submittedCommand = selectedComposerCommand;
+    const submittedMentions = [...pendingMentions];
+    // A conversation feature may rewrite what the agent receives; references are added on top of that.
+    const promptedInput = features.agentPrompt(input) ?? input;
+    // The agent needs the file paths; the bubble shows only what the person wrote.
+    const contentWithReferences = submittedMentions.length
+      ? `${submittedMentions.map((item) => item.reference).join("\n\n")}\n\n${promptedInput}`
+      : promptedInput;
+    // 新手引导第二步：那句要求连同执行提示一起交给 Agent，气泡里仍然只有用户看到的那一句。
+    const demoAssistSend = composeDemoGuideAssistSend({
+      status: demoGuide.status,
+      phase: demoGuide.phase,
+      typed: composerInput,
+      sentence: demoAssistSentence,
+      hint: demoAssistHint,
+      content: contentWithReferences
+    });
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
     dispatch(agentActions.modelSelectionRequestStarted(
@@ -2060,8 +2373,10 @@ export function HomePage() {
         clientRequestId,
         connection,
         ensureChatSubscription,
-        content: features.agentPrompt(input) ?? input,
-        displayContent: features.agentPrompt(input) ? input : selectedComposerCommand ? composerInput : undefined,
+        content: demoAssistSend.content,
+        // With references, a command, a rewritten prompt or the guide's hint the wire text differs from what was typed;
+        // show the typed part.
+        displayContent: (features.agentPrompt(input) || selectedComposerCommand || (submittedMentions.length && composerInput.trim()) || demoAssistSend.displayContent !== null) ? composerInput : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
@@ -2074,7 +2389,8 @@ export function HomePage() {
           sendScopeKey,
           submittedDraft,
           submittedAttachments,
-          submittedCommand
+          submittedCommand,
+          submittedMentions
         ),
         settleComposer: () => settleComposerAfterSend(sendScopeKey, submittedAttachments),
         chatSelectionEpoch: state.agent.chatSelectionEpoch,
@@ -2094,6 +2410,14 @@ export function HomePage() {
             clientRequestId,
             resolvedConversationModel.candidateId
           ));
+          // 在已共享的项目里新建任务默认共享给成员，草稿里关掉的不共享：会话一建立就写入本机记录，之后以它为准。
+          // 即使随后的发送失败，也只是共享了一条空任务，不影响别的任务。
+          void handOffDraftShare({
+            collab: collabClient,
+            onlineProjectId: sharedProjectFor(getCollabProjectsSnapshot().projects, composerLocalProjectId)?.id ?? null,
+            draftScopeKey: sendScopeKey,
+            chatId
+          });
         },
         onNewChatMessageSent: clients?.memmyAgent
           ? (chatId) => {
@@ -2104,10 +2428,21 @@ export function HomePage() {
               state: state.agent
             });
           }
+          : undefined,
+        // 新手引导第二步：任务标题只用用户看到的那一句话，不从正文（含执行提示）里取。
+        onMessageSent: demoAssistSend.displayContent !== null && clients?.memmyAgent
+          ? (chatId) => {
+            void clients.memmyAgent
+              .renameSession(clients.memmyAgent.chatIdToSessionKey(chatId), demoAssistSend.displayContent!)
+              .catch(() => undefined);
+          }
           : undefined
       });
       if (!submitted) {
         dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
+      } else {
+        // 引导在等这一下：发出去了才进入「Agent 正在读取…」。
+        dispatchDemoGuide({ type: "composer-sent" });
       }
     } catch (error) {
       dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
@@ -2257,50 +2592,6 @@ export function HomePage() {
     setProjectPickerOpen(false);
   }
 
-  async function selectOtherProjectFolder() {
-    if (state.agent.currentChatId || messageSendInFlight || projectPickerOperationId || !clients?.memmyAgent) {
-      return;
-    }
-    if (!window.memmy?.selectProjectDirectory) {
-      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
-        source: "new-chat",
-        message: "home.project.desktopRequired",
-        scopeKey: chatScopeKey
-      })));
-      return;
-    }
-    const operationId = `draft-project-picker-${crypto.randomUUID()}`;
-    const scopeKey = chatScopeKey;
-    const revision = state.agent.draftTargetRevisionByScope[scopeKey] ?? 0;
-    setProjectPickerOperationId(operationId);
-    try {
-      await runProjectTargetFolderSelection({
-        selectDirectory: () => window.memmy!.selectProjectDirectory(),
-        mutateProject: (operation) => taskStateCoordinator.mutateProject(operation),
-        onCommitted: (project) => {
-          const currentRevision = draftTargetRevisionRef.current[scopeKey] ?? 0;
-          if (scopeKey === chatScopeKey && currentRevision === revision) {
-            dispatch(agentActions.draftTargetUpdated(scopeKey, {
-              kind: "project",
-              projectId: project.id
-            }));
-          }
-          setProjectPickerOpen(false);
-        },
-        onError: (error) => dispatch(agentActions.operationFailed("chat", createAgentOperationError({
-          source: "new-chat",
-          message: error instanceof MemmyAgentRequestError
-            ? error.code ?? "project_operation_failed"
-            : "network_unavailable",
-          scopeKey
-        }))),
-        onRefresh: () => taskStateCoordinator.refreshTaskState({ reason: "manual", state: state.agent })
-      });
-    } finally {
-      setProjectPickerOperationId((current) => current === operationId ? null : current);
-    }
-  }
-
   function runExactLocalSlashCommand(command: string): boolean {
     if (!pendingAttachments.length && features.runCommand(command)) { setCurrentComposerDraft(""); return true; }
     const normalized = command.trim().toLowerCase();
@@ -2348,6 +2639,8 @@ export function HomePage() {
       track
     });
   }
+  // 新手引导在别处（跨组件）判到「这一步被跳过」时要停这一轮：颜色与复位都走上面这一条路，不另写一套。
+  stopTurnForDemoRef.current = stopCurrentTurn;
 
   async function controlGoal(request: AgentGoalControlRequest): Promise<void> {
     if (goalMutationLocksRef.current.has(request.chatId)) return;
@@ -2477,6 +2770,9 @@ export function HomePage() {
    */
   function updateComposerInput(value: string) {
     setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));
+    // Typing again reopens the @ menu after an escape.
+    setMentionDismissed(false);
+    setMentionIndex(0);
     setSlashMenuDismissed(false);
     if (
       slashQueryFromInput(value) != null &&
@@ -2535,6 +2831,17 @@ export function HomePage() {
   }, [input, hasActiveConversation]);
 
   /**
+   * 带着项目进入空白草稿时把光标放进输入框：落地面板就能直接写第一句话。
+   * 只在项目草稿上生效，其他进入 /main 的场景保持原样——焦点仍然只跟着人的操作走。
+   */
+  const draftProjectId = draftTarget.kind === "project" ? draftTarget.projectId : null;
+  useEffect(() => {
+    if (hasActiveConversation || !draftProjectId) return undefined;
+    const frame = window.requestAnimationFrame(() => inputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [draftProjectId, hasActiveConversation]);
+
+  /**
    * Resets the input box height after sending, so the next empty input does not inherit the previous height.
    */
   function resetComposerHeight() {
@@ -2547,6 +2854,7 @@ export function HomePage() {
   function stageComposerForSend(scopeKey: string) {
     setSelectedComposerCommandForScope(scopeKey, null);
     setComposerDraftForScope(scopeKey, "");
+    dispatch(agentActions.composerMentionsUpdated(scopeKey, []));
     setPendingAttachmentsForScope(scopeKey, []);
     resetTransientConversationUi();
     resetComposerHeight();
@@ -2556,7 +2864,8 @@ export function HomePage() {
     scopeKey: string,
     draft: string,
     attachments: PendingAttachment[],
-    command: typeof COMPOSER_GOAL_COMMAND | null
+    command: typeof COMPOSER_GOAL_COMMAND | null,
+    mentions: ComposerMention[] = []
   ) {
     const currentDraft = composerDraftsRef.current[scopeKey] ?? "";
     const currentAttachments = pendingAttachmentsRef.current[scopeKey] ?? [];
@@ -2570,6 +2879,7 @@ export function HomePage() {
     }
     setComposerDraftForScope(scopeKey, currentDraft ? `${draft}\n\n${currentDraft}` : draft);
     setPendingAttachmentsForScope(scopeKey, restoredAttachments);
+    if (mentions.length) dispatch(agentActions.composerMentionsUpdated(scopeKey, mentions));
     window.requestAnimationFrame(() => {
       if (scopeKey === chatScopeKey && inputRef.current) {
         resizeComposerInput(inputRef.current);
@@ -2844,9 +3154,70 @@ export function HomePage() {
    *
    * @param event The textarea keyboard event.
    */
+  /**
+   * Downloads the session so its file is current, then writes the reference into the message. An agent that reads
+   * the message therefore gets the file path without asking the person for anything else.
+   */
+  async function selectMentionSession(session: CollabProjectSession) {
+    if (!mentionQuery) return;
+    const mention = mentionQuery;
+    let reference = session.shareText;
+    try {
+      const downloaded = await collabClient?.readReference(session.shareText || session.link);
+      if (downloaded?.text) reference = downloaded.text;
+    } catch {
+      // A failed download still leaves the link, which the agent can read with the skill.
+    }
+    const scopeKey = chatScopeKey;
+    const existing = state.agent.composerMentionsByScope[scopeKey] ?? [];
+    if (!existing.some((item) => item.id === session.id)) {
+      dispatch(agentActions.composerMentionsUpdated(scopeKey, [
+        ...existing,
+        { id: session.id, title: session.title, reference }
+      ]));
+    }
+    // The chip carries the reference, so the typed token only disappears.
+    const next = applyMention(composerInput, mention, "");
+    updateComposerInput(next);
+    setMentionDismissed(true);
+    setComposerCaret(Math.max(0, mention.start));
+  }
+
+  function removeMention(scopeKey: string, id: string) {
+    const existing = state.agent.composerMentionsByScope[scopeKey] ?? [];
+    dispatch(agentActions.composerMentionsUpdated(scopeKey, existing.filter((item) => item.id !== id)));
+  }
+
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (isComposingKeyboardEvent(event) && (event.key === "Enter" || event.key === "Tab")) {
       return;
+    }
+
+    if (mentionOpen) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMentionDismissed(true);
+        return;
+      }
+      // With no candidates the menu only explains why; arrows and Enter must fall through to the message.
+      if (mentionCandidates.length > 0) {
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          setMentionIndex((index) => (index + 1) % mentionCandidates.length);
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          setMentionIndex((index) => (index - 1 + mentionCandidates.length) % mentionCandidates.length);
+          return;
+        }
+        if (event.key === "Enter" || event.key === "Tab") {
+          event.preventDefault();
+          const picked = mentionCandidates[mentionIndex] ?? mentionCandidates[0];
+          if (picked) void selectMentionSession(picked);
+          return;
+        }
+      }
     }
 
     if (slashMenuOpen) {
@@ -2880,6 +3251,16 @@ export function HomePage() {
       if (event.key === "Escape") {
         event.preventDefault();
         setSlashMenuDismissed(true);
+        return;
+      }
+    }
+
+    // Backspace at the very start of the text removes the last mention chip, like a chat mention.
+    if (event.key === "Backspace" && pendingMentions.length) {
+      const element = inputRef.current;
+      if (element && element.selectionStart === 0 && element.selectionEnd === 0) {
+        event.preventDefault();
+        removeMention(chatScopeKey, pendingMentions[pendingMentions.length - 1]!.id);
         return;
       }
     }
@@ -3118,6 +3499,7 @@ export function HomePage() {
           key={chatScopeKey}
           title={activeConversationTitleDisplay}
           titleTrailing={activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
+          projectCrumb={projectCrumb}
           messages={state.agent.messages}
           panelOpen={threadPanel.phase === "open"}
           onOpenPanel={threadPanel.open}
@@ -3185,18 +3567,44 @@ export function HomePage() {
           <div className="home-empty-brand text-center">
             <div className="conversation-feature-cards agent-confirmation-dock">{features.cards}</div>
             <div className="home-empty-brand-mascot flex justify-center">
-              <Memmy pose="think" size={165} className="memmy-bob" />
+              <Memmy pose="think" size={216} className="memmy-bob" />
             </div>
-            <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
+            {/* 草稿落在某个项目上时，标题带出项目名：悬停显示完整路径，长名字换行不撑破版面 */}
+            <h1 className="home-empty-title text-2xl font-bold text-text-ink">
+              {selectedDraftProject ? (
+                <>
+                  {t("home.subtitle.projectPrefix")}
+                  <span className="home-empty-title__project" title={selectedDraftProject.rootPath}>
+                    {selectedDraftProject.name}
+                  </span>
+                  {t("home.subtitle.projectSuffix")}
+                </>
+              ) : t("home.subtitle")}
+            </h1>
+          </div>
+          <div className="home-empty-column home-empty-suggestions">
+            <HomeStarterActions scenarios={features.scenarios} onSelect={selectHomeStarter} />
           </div>
           <div className="home-empty-column home-empty-input">
             <AgentOperationErrorSlot message={agentError} />
             <div className="home-empty-composer-stack">
               <div
                 className="relative home-empty-composer agent-composer-shell rounded-card-lg"
+                data-demo-guide="composer"
                 onDragOver={handleComposerDragOver}
                 onDrop={handleComposerDrop}
               >
+                {mentionOpen && (
+                  <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
+                    <CollabSessionMentionMenu
+                      sessions={mentionCandidates}
+                      selectedIndex={mentionIndex}
+                      heading={t("home.mention.sessions")}
+                      emptyLabel={mentionEmptyLabel}
+                      onSelect={(session) => void selectMentionSession(session)}
+                    />
+                  </div>
+                )}
                 {slashMenuOpen && (
                   <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
                     <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
@@ -3224,21 +3632,43 @@ export function HomePage() {
                     />
                   </div>
                 ) : null}
+                {pendingMentions.length ? (
+                  <div className="composer-command-chip-slot composer-command-chip-slot--home">
+                    {pendingMentions.map((item) => (
+                      <ComposerMentionChip
+                        key={item.id}
+                        label={item.title}
+                        removeLabel={t("common.remove")}
+                        onRemove={() => removeMention(chatScopeKey, item.id)}
+                      />
+                    ))}
+                  </div>
+                ) : null}
                 <ComposerHighlightedTextarea
                   textareaRef={inputRef}
                   highlightedCommands={slashCommandsWithLocal.map((command) => command.command)}
                   value={composerInput}
                   placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
                   rows={3}
+                  className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
                   onChange={(event) => {
+                    setComposerCaret(event.target.selectionStart ?? 0);
                     updateComposerInput(event.target.value);
                     resizeComposerInput(event.target);
                   }}
                   onKeyDown={handleComposerKeyDown}
                   onPaste={handleComposerPaste}
-                  className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
                 />
                 <div className="composer-actions absolute bottom-3 right-4 z-50">
+                  <button
+                    type="button"
+                    aria-label={t("home.media.menu")}
+                    title={t("home.media.menu")}
+                    onClick={openMediaFilePicker}
+                    className="composer-action-btn home-composer-add-button"
+                  >
+                    <Plus size={15} strokeWidth={2} />
+                  </button>
                   <AgentModelSelector
                     mode={modelWorkspaceMode}
                     scopeKey={modelSelectionScopeKey}
@@ -3246,15 +3676,6 @@ export function HomePage() {
                     seedConfig={state.modelConfig}
                     onDefaultModelSelected={persistDefaultModel}
                   />
-                  <button
-                    type="button"
-                    aria-label={t("home.media.menu")}
-                    title={t("home.media.menu")}
-                    onClick={openMediaFilePicker}
-                    className="composer-action-btn"
-                  >
-                    <Plus size={15} strokeWidth={2} />
-                  </button>
                   <button
                     type="button"
                     aria-label={t("home.voiceInput")}
@@ -3270,6 +3691,7 @@ export function HomePage() {
                     disabled={composerSubmitDisabled}
                     sendLabel={t("home.send")}
                     stopLabel={t("home.stop")}
+                    demoGuideAnchor="composer-send"
                     onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
                   />
                 </div>
@@ -3282,12 +3704,16 @@ export function HomePage() {
                   projects={state.agent.projects}
                   sessions={state.agent.sessions}
                   registryState={state.agent.projectRegistryState}
-                  disabled={messageSendInFlight || projectPickerOperationId != null}
+                  disabled={messageSendInFlight}
                   onToggle={() => setProjectPickerOpen((open) => !open)}
                   onClose={() => setProjectPickerOpen(false)}
                   onSelect={selectDraftTarget}
-                  onChooseOther={() => void selectOtherProjectFolder()}
+                  onCreateProject={() => {
+                    setProjectPickerOpen(false);
+                    requestCreateProject();
+                  }}
                 />
+                {shareToggle}
                 <AgentWorkspaceContext
                   snapshot={workspaceEnvironment.data?.snapshot ?? null}
                   branches={workspaceEnvironment.data?.branches ?? []}
@@ -3300,18 +3726,16 @@ export function HomePage() {
             </div>
           </div>
           <div className="home-empty-column home-empty-footer">
-            <HomeStarterActions scenarios={features.scenarios} onSelect={selectHomeStarter} />
-            <div className="home-empty-status-area">
-              {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
-              <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
-            </div>
+            {statusText && <p className="home-empty-connection-status" role="status">{statusText}</p>}
             <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
           </div>
         </section>
         ) : (
-        <section ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full">
+        <section ref={conversationPanelRef} data-waiting-card={pendingCardKey ? "true" : undefined} className="agent-conversation-panel flex flex-col h-full" data-demo-guide="assist-task">
+          <CollabAssistTaskBar view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
           <div
             ref={scrollRef}
+            data-demo-guide="conversation"
             className="app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto"
             onScroll={handleAgentConversationScroll}
             onWheel={markAgentConversationUserScrollIntent}
@@ -3365,6 +3789,17 @@ export function HomePage() {
           <div ref={composerOverlayRef} className="agent-conversation-composer">
             <div className="agent-conversation-content agent-conversation-content--composer agent-conversation-column">
               <div className="agent-composer-flow">
+                {mentionOpen && (
+                  <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
+                    <CollabSessionMentionMenu
+                      sessions={mentionCandidates}
+                      selectedIndex={mentionIndex}
+                      heading={t("home.mention.sessions")}
+                      emptyLabel={mentionEmptyLabel}
+                      onSelect={(session) => void selectMentionSession(session)}
+                    />
+                  </div>
+                )}
                 <AgentQueuedMessageList
                   items={currentQueuedMessages}
                   label={t("home.queue.label")}
@@ -3443,6 +3878,7 @@ export function HomePage() {
                     {pendingNativeCard ? <AgentQuestionCard key={pendingNativeCard.requestId} card={pendingNativeCard}
                       onSubmit={(response) => answerQuestion(pendingNativeCard, response)} /> : null}
                   </div>
+                  <CollabAssistTaskDock view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
                   {state.agent.currentChatId && currentGoal ? (
                     <AgentGoalBar
                       chatId={state.agent.currentChatId}
@@ -3454,6 +3890,7 @@ export function HomePage() {
                   ) : null}
                   <div
                     className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"
+                    data-demo-guide="composer"
                     onDragOver={handleComposerDragOver}
                     onDrop={handleComposerDrop}
                   >
@@ -3464,39 +3901,35 @@ export function HomePage() {
                       selectedLabel={t("home.media.addPhotoFile")}
                       t={t}
                     />
+                    {pendingMentions.length ? (
+                      <div className="composer-command-chip-slot">
+                        {pendingMentions.map((item) => (
+                          <ComposerMentionChip
+                            key={item.id}
+                            label={item.title}
+                            removeLabel={t("common.remove")}
+                            onRemove={() => removeMention(chatScopeKey, item.id)}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
                     <ComposerHighlightedTextarea
                       textareaRef={inputRef}
                       highlightedCommands={slashCommandsWithLocal.map((command) => command.command)}
                       value={composerInput}
                       placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}
-                      rows={1}
+                      rows={isComposerSingleLine ? 1 : 3}
+                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm rounded-card-lg bg-background-paper`}
                       onChange={(event) => {
+                        setComposerCaret(event.target.selectionStart ?? 0);
                         updateComposerInput(event.target.value);
                         resizeComposerInput(event.target);
                       }}
                       onKeyDown={handleComposerKeyDown}
                       onPaste={handleComposerPaste}
-                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                     />
                     <div className="agent-composer-toolbar">
                       <div className="agent-composer-toolbar__leading">
-                        {selectedComposerCommand ? (
-                          <ComposerCommandChip
-                            command={selectedComposerCommand}
-                            label={t("home.command.goalChip")}
-                            removeLabel={t("common.remove")}
-                            onRemove={clearSelectedComposerCommand}
-                          />
-                        ) : null}
-                      </div>
-                      <div className="composer-actions">
-                        <AgentModelSelector
-                          mode={modelWorkspaceMode}
-                          scopeKey={modelSelectionScopeKey}
-                          disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
-                          seedConfig={state.modelConfig}
-                          onDefaultModelSelected={persistDefaultModel}
-                        />
                         <button
                           type="button"
                           aria-label={t("home.media.menu")}
@@ -3506,6 +3939,24 @@ export function HomePage() {
                         >
                           <Plus size={15} strokeWidth={2} />
                         </button>
+                        {selectedComposerCommand ? (
+                          <ComposerCommandChip
+                            command={selectedComposerCommand}
+                            label={t("home.command.goalChip")}
+                            removeLabel={t("common.remove")}
+                            onRemove={clearSelectedComposerCommand}
+                          />
+                        ) : null}
+                        {shareToggle}
+                      </div>
+                      <div className="composer-actions">
+                        <AgentModelSelector
+                          mode={modelWorkspaceMode}
+                          scopeKey={modelSelectionScopeKey}
+                          disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
+                          seedConfig={state.modelConfig}
+                          onDefaultModelSelected={persistDefaultModel}
+                        />
                         <button
                           type="button"
                           aria-label={t("home.voiceInput")}
@@ -3522,6 +3973,7 @@ export function HomePage() {
                           sendLabel={t("home.send")}
                           stopLabel={t("home.stop")}
                           variant="compact"
+                          demoGuideAnchor="composer-send"
                           onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
                         />
                       </div>
@@ -3529,7 +3981,6 @@ export function HomePage() {
                   </div>
                 </div>
               </div>
-              <p className="agent-conversation-disclaimer">{t("home.notice")}</p>
               <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
             </div>
           </div>
@@ -3597,53 +4048,6 @@ export function workspaceFolderName(rootPath: string): string {
   return displayPath.slice(displayPath.lastIndexOf("/") + 1) || displayPath;
 }
 
-/** Approximate UI width: CJK glyphs count double so paths collapse before the leaf is clipped. */
-function workspacePathDisplayWidth(value: string): number {
-  let width = 0;
-  for (const char of value) {
-    width += (char.codePointAt(0) ?? 0) > 0xff ? 2 : 1;
-  }
-  return width;
-}
-
-function truncateWorkspacePathToWidth(value: string, maxWidth: number): string {
-  if (workspacePathDisplayWidth(value) <= maxWidth) return value;
-  let width = 0;
-  let cut = 0;
-  for (const char of value) {
-    const next = width + ((char.codePointAt(0) ?? 0) > 0xff ? 2 : 1);
-    if (next > Math.max(1, maxWidth - 1)) break;
-    width = next;
-    cut += char.length;
-  }
-  return `${value.slice(0, Math.max(1, cut))}…`;
-}
-
-/**
- * Single-line path label that always keeps the leaf folder name intact.
- * Collapse the middle/prefix first (`~/…/leaf`), never CSS-truncate the leaf.
- */
-export function formatCompactWorkspacePath(rootPath: string, maxWidth = 28): string {
-  const displayPath = formatWorkspaceDisplayPath(rootPath).replace(/\/+$/, "");
-  const folder = workspaceFolderName(rootPath);
-  if (workspacePathDisplayWidth(folder) >= maxWidth) {
-    return truncateWorkspacePathToWidth(folder, maxWidth);
-  }
-  if (workspacePathDisplayWidth(displayPath) <= maxWidth) {
-    return displayPath;
-  }
-
-  const homePrefixed = displayPath.startsWith("~/");
-  const drivePrefixed = /^[A-Za-z]:\//.test(displayPath);
-  const compact = homePrefixed
-    ? `~/…/${folder}`
-    : drivePrefixed
-      ? `${displayPath.slice(0, 2)}/…/${folder}`
-      : `…/${folder}`;
-  if (workspacePathDisplayWidth(compact) <= maxWidth) return compact;
-  return folder;
-}
-
 export const PROJECT_TARGET_PICKER_MAX_RECENT = 10;
 
 type ProjectPickerSessionActivity = Pick<MemmyAgentSessionSummary, "projectId" | "updatedAt" | "run_started_at">;
@@ -3697,43 +4101,8 @@ export const resolveProjectTargetPickerActiveIndex = (
   selectedKey: string | null
 ): number => Math.max(0, selectedKey ? itemKeys.indexOf(selectedKey) : 0);
 
-export interface RunProjectTargetFolderSelectionInput {
-  selectDirectory: NonNullable<Window["memmy"]>["selectProjectDirectory"];
-  mutateProject: AgentTaskStateCoordinator["mutateProject"];
-  onCommitted: (project: MemmyAgentProject) => void;
-  onError: (error: unknown) => void;
-  onRefresh: () => void;
-}
-
-export const runProjectTargetFolderSelection = async (
-  input: RunProjectTargetFolderSelectionInput
-): Promise<"canceled" | "committed" | "failed"> => {
-  try {
-    const selected = await input.selectDirectory();
-    if (selected.canceled) return "canceled";
-    const result = await input.mutateProject({
-      kind: "create",
-      input: { mode: "existing", path: selected.path }
-    });
-    if (result.status !== "committed" || !result.project) {
-      throw new MemmyAgentRequestError(
-        "project registration failed",
-        result.status === "rejected" ? 409 : 503,
-        result.status === "rejected" ? result.code : "network_unavailable"
-      );
-    }
-    input.onCommitted(result.project);
-    return "committed";
-  } catch (error) {
-    input.onError(error);
-    input.onRefresh();
-    return "failed";
-  }
-};
-
-const preserveProjectTargetPickerSearchFocus = (event: ReactPointerEvent<HTMLButtonElement>) => {
-  event.preventDefault();
-};
+const projectTargetPickerName = (project: MemmyAgentProject): string =>
+  project.name.trim() || workspaceFolderName(project.rootPath);
 
 export function ProjectTargetPicker(props: {
   open: boolean;
@@ -3746,7 +4115,7 @@ export function ProjectTargetPicker(props: {
   onToggle: () => void;
   onClose: () => void;
   onSelect: (target: WebuiSessionTarget) => void;
-  onChooseOther: () => void;
+  onCreateProject: () => void;
 }) {
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
@@ -3761,14 +4130,14 @@ export function ProjectTargetPicker(props: {
   const selectedLabel = props.registryState === "corrupt"
     ? t("home.project.registryUnavailable")
     : props.selectedProject
-      ? workspaceFolderName(props.selectedProject.rootPath)
+      ? projectTargetPickerName(props.selectedProject)
       : t("home.project.optional");
   const visibleProjects = props.registryState === "ready"
     ? filterProjectTargetPickerProjects(props.projects, query, props.sessions)
     : [];
   const itemKeys = [
     ...visibleProjects.map((project) => `project:${project.id}`),
-    ...(props.registryState === "ready" ? ["new"] : []),
+    ...(props.registryState === "ready" ? ["create"] : []),
     ...(props.target.kind === "project" ? ["standalone"] : [])
   ];
   const selectedKey = props.target.kind === "project" ? `project:${props.target.projectId}` : null;
@@ -3806,8 +4175,8 @@ export function ProjectTargetPicker(props: {
   const activateItem = (key: string | undefined) => {
     if (key?.startsWith("project:")) {
       props.onSelect({ kind: "project", projectId: key.slice("project:".length) });
-    } else if (key === "new") {
-      props.onChooseOther();
+    } else if (key === "create") {
+      props.onCreateProject();
     } else if (key === "standalone") {
       props.onSelect({ kind: "standalone" });
     }
@@ -3837,15 +4206,13 @@ export function ProjectTargetPicker(props: {
     }
   };
 
-  const triggerActive = Boolean(props.selectedProject) || props.open;
-
   return (
     <div ref={rootRef} className="home-project-picker">
       <div className={`home-project-picker__control${props.selectedProject ? " home-project-picker__control--selected" : ""}${props.open ? " home-project-picker__control--open" : ""}`}>
         <button
           ref={triggerRef}
           type="button"
-          className={`home-project-picker__trigger${triggerActive ? " home-project-picker__trigger--selected" : ""}`}
+          className={`home-project-picker__trigger${props.selectedProject ? " home-project-picker__trigger--selected" : ""}`}
           disabled={props.disabled}
           aria-expanded={props.open}
           aria-haspopup="listbox"
@@ -3857,11 +4224,6 @@ export function ProjectTargetPicker(props: {
             {props.selectedProject ? <X size={13} className="home-project-picker__clear-icon" /> : null}
           </span>
           <span className="home-project-picker__label truncate">{selectedLabel}</span>
-          <ChevronDown
-            size={13}
-            className={`home-project-picker__chevron${props.open ? " home-project-picker__chevron--open" : ""}`}
-            aria-hidden="true"
-          />
         </button>
         {props.selectedProject ? (
           <button
@@ -3870,7 +4232,6 @@ export function ProjectTargetPicker(props: {
             disabled={props.disabled}
             aria-label={t("home.project.clear")}
             title={t("home.project.clear")}
-            onPointerDown={preserveProjectTargetPickerSearchFocus}
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -3883,6 +4244,7 @@ export function ProjectTargetPicker(props: {
       {props.open ? (
         <div className="home-project-picker__menu">
           <label className="home-project-picker__search">
+            <Search size={14} strokeWidth={1.8} className="home-project-picker__search-icon" aria-hidden="true" />
             <input
               ref={searchInputRef}
               value={query}
@@ -3908,7 +4270,7 @@ export function ProjectTargetPicker(props: {
                 <p className="home-project-picker__empty" role="status">{t("home.project.empty")}</p>
               ) : visibleProjects.map((project, index) => {
                 const selected = props.target.kind === "project" && props.target.projectId === project.id;
-                const displayPath = formatCompactWorkspacePath(project.rootPath);
+                const displayName = projectTargetPickerName(project);
                 return (
                   <button
                     id={`home-project-picker-option-${index}`}
@@ -3920,17 +4282,16 @@ export function ProjectTargetPicker(props: {
                     data-project-id={project.id}
                     className={`home-project-picker__option${selected ? " home-project-picker__option--selected" : ""}${hasKeyboardNavigated && activeIndex === index ? " home-project-picker__option--keyboard-active" : ""}`}
                     title={formatWorkspaceDisplayPath(project.rootPath)}
-                    onPointerDown={preserveProjectTargetPickerSearchFocus}
                     onClick={() => props.onSelect({ kind: "project", projectId: project.id })}
                   >
                     <Folder size={13} className="shrink-0" aria-hidden="true" />
-                    <span className="home-project-picker__path truncate">{displayPath}</span>
+                    <span className="home-project-picker__name truncate">{displayName}</span>
                     {selected ? <Check size={13} className="shrink-0" aria-hidden="true" /> : null}
                   </button>
                 );
               })}
             </div>
-            {itemKeys.some((key) => key === "new" || key === "standalone") ? (
+            {itemKeys.some((key) => key === "create" || key === "standalone") ? (
               <div className="home-project-picker__divider" role="separator" />
             ) : null}
             <div className="home-project-picker__actions" role="presentation">
@@ -3942,8 +4303,7 @@ export function ProjectTargetPicker(props: {
                   tabIndex={-1}
                   aria-selected="false"
                   className={`home-project-picker__option home-project-picker__option--action${hasKeyboardNavigated && activeIndex === visibleProjects.length ? " home-project-picker__option--keyboard-active" : ""}`}
-                  onPointerDown={preserveProjectTargetPickerSearchFocus}
-                  onClick={props.onChooseOther}
+                  onClick={props.onCreateProject}
                 >
                   <LucidePlus size={13} strokeWidth={1.75} className="shrink-0 home-project-picker__action-icon" aria-hidden="true" />
                   <span>{t("home.project.new")}</span>
@@ -3957,7 +4317,6 @@ export function ProjectTargetPicker(props: {
                   tabIndex={-1}
                   aria-selected="false"
                   className={`home-project-picker__option home-project-picker__option--action${hasKeyboardNavigated && activeIndex === itemKeys.length - 1 ? " home-project-picker__option--keyboard-active" : ""}`}
-                  onPointerDown={preserveProjectTargetPickerSearchFocus}
                   onClick={() => props.onSelect({ kind: "standalone" })}
                 >
                   <X size={13} className="shrink-0" aria-hidden="true" />

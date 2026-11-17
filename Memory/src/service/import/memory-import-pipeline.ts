@@ -3,7 +3,7 @@ import { captureTurnSteps, signatureFromTraceParts } from "../../algorithm/plugi
 import { MemoryServiceError } from "../../utils/error.js";
 import { isoTimeToUtc } from "../../utils/time.js";
 import { stableHash } from "../../utils/id.js";
-import { clip, firstLine, firstSemanticUserLine } from "../../utils/text.js";
+import { clip, firstLine, firstSemanticUserLine, sourceEnvelopePrefixLength } from "../../utils/text.js";
 
 export const IMPORT_SUMMARY_QUEUED_TAG = "摘要排队中";
 export const IMPORT_SUMMARY_PROCESSING_TAG = "摘要总结中";
@@ -142,8 +142,16 @@ function captureImportTraceTags(input: {
 }
 
 function parseMemoryAddSections(content: string): Array<{ role: "user" | "assistant" | "tool" | "system"; text: string }> {
-  const headingPattern = /^## (user|assistant|tool|system)\s*$/gm;
-  const headings = [...content.matchAll(headingPattern)];
+  const headingPattern = /^## (user|assistant|tool|system)[ \t]*\r?$/gm;
+  let protectedUntil = sourceEnvelopePrefixLength(content);
+  const headings = [...content.matchAll(headingPattern)].filter((heading) => {
+    const start = heading.index! + heading[0].length;
+    if (heading.index! < protectedUntil) return false;
+    // Source payload can contain role headings; retain it in its original
+    // user section so all preview consumers see the complete envelope.
+    protectedUntil = start + sourceEnvelopePrefixLength(content.slice(start));
+    return true;
+  });
   return headings
     .map((heading, index) => {
       const nextHeading = headings[index + 1];

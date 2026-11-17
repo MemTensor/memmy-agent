@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../namespace/memory-owner.js";
 import type { UserMemoryRecord, UserMemoryType } from "../../types.js";
 import { stableHash } from "../../utils/id.js";
 
@@ -61,7 +62,7 @@ export function buildUserMemory(input: {
   return {
     id: input.id,
     sourceTurnId: input.sourceTurnId,
-    userId: input.userId,
+    userId: DEVICE_MEMORY_OWNER,
     memoryTypes: input.memoryTypes,
     content: input.content.trim(),
     normalizedUserTextHash: userMemoryTextHash(input.content),

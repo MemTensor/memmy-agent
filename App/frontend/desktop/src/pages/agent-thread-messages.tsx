@@ -1,4 +1,5 @@
 import { PluginToolActivity, isPluginToolFailure, useHasCompletedPluginInteraction, usePluginCapabilityLabel } from "./plugin-tool-activity.js";
+import { AssistMessageCard, parseAssistEnvelope } from "./collab-assist-message.js";
 import { AgentTaskPlanBar } from "./agent-task-plan-bar.js";
 /**
  * Agent chat message rendering.
@@ -46,6 +47,7 @@ import {
 } from "./agent-message-content.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { Tooltip } from "../components/tooltip.js";
+import { withoutDemoGuideHint } from "../lib/demo-guide-hint.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { userTimeZone } from "../lib/user-time-zone.js";
 import type { MessageKey, MessageValues, ResolvedLanguage } from "../i18n/messages.js";
@@ -508,16 +510,23 @@ function isVisibleAssistantAnswer(message: AgentChatMessage): boolean {
  * While the current turn is still sending, assistant text after the
  * latest user message is treated as continuation text, because the agent may
  * still alternate body -> tool -> reasoning -> tool before the actual final answer.
+ * Later activity also keeps an interrupted draft from becoming a final answer.
  */
 function findFinalAssistantAnswerUnitIndices(units: AgentDisplayUnit[], options: { isSending?: boolean } = {}): Set<number> {
   const indices = new Set<number>();
   const lastUserUnitIndex = findLastUserUnitIndex(units);
   let foundAnswerInTurn = false;
+  let laterActivityInTurn = false;
   for (let index = units.length - 1; index >= 0; index -= 1) {
     const unit = units[index];
+    if (unit?.type === "activity") {
+      laterActivityInTurn = true;
+      continue;
+    }
     if (unit?.type !== "single") continue;
     if (unit.message.role === "user") {
       foundAnswerInTurn = false;
+      laterActivityInTurn = false;
       continue;
     }
     if (foundAnswerInTurn) continue;
@@ -527,6 +536,7 @@ function findFinalAssistantAnswerUnitIndices(units: AgentDisplayUnit[], options:
       && message.kind !== "trace"
       && message.kind !== "narration"
       && message.kind !== "context_compaction"
+      && !laterActivityInTurn
       && message.content.trim().length > 0) {
       indices.add(index);
       foundAnswerInTurn = true;
@@ -633,22 +643,35 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
 
   if (message.role === "user") {
     if (readAgentQuestionResponse(message.content)) return null;
+    // 成员协助的请求与结果：Memmy 写进任务的消息，显示成卡片而不是一大段原文。
+    const assistEnvelope = parseAssistEnvelope(message.content);
+    if (assistEnvelope) {
+      return (
+        <div className="agent-user-turn flex min-w-0" data-agent-message-id={message.id || undefined}>
+          <AssistMessageCard envelope={assistEnvelope} />
+        </div>
+      );
+    }
     const hasContent = message.content.trim().length > 0;
+    // 新手引导第二步发出去的那句话后面跟着一段给 Agent 的执行提示：发送时必须带着，显示时去掉。
+    // 去掉之后再判断一次有没有内容：只剩提示的那条消息不画气泡。
+    const visibleContent = withoutDemoGuideHint(message.content);
+    const hasVisibleContent = visibleContent.trim().length > 0;
     const timestamp = messageTimestamp(message.createdAt);
-    const copyAction = <MessageBubbleCopyButton text={message.content} align="right" timestamp={timestamp} />;
+    const copyAction = <MessageBubbleCopyButton text={visibleContent} align="right" timestamp={timestamp} />;
     return (
       <div className="agent-user-turn flex min-w-0 justify-end" data-agent-message-id={message.id || undefined}>
         <div className="agent-user-turn__stack flex min-w-0 flex-col items-end gap-2 w-full">
           {message.media?.length ? (
             <UserMediaPreviewGrid media={message.media} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
           ) : null}
-          {hasContent ? (
+          {hasContent && hasVisibleContent ? (
             <div className="agent-chat-bubble-frame agent-chat-bubble-frame--user w-full max-w-full min-w-0">
               <div
                 className="agent-chat-bubble agent-chat-bubble--user max-w-full min-w-0 overflow-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
                 data-agent-search-root=""
               >
-                {message.content}
+                {visibleContent}
               </div>
               {props.recallEvidenceTurnId && props.memoryRuntimeClient ? (
                 <TurnRecallEvidence
@@ -1264,6 +1287,7 @@ function ReasoningMarkdown(props: { text: string; isStreaming?: boolean }) {
     <AgentMessageContent
       content={trimmed}
       isStreaming={props.isStreaming}
+      displayOnlyFiles
       className="agent-message-content--reasoning agent-reasoning-panel__text"
     />
   );
@@ -2680,7 +2704,7 @@ function ToolGroupSegmentLabel(props: { segment: ActivityToolGroupSegment }) {
  * dimmed, result normal — with no form labels. This single
  * generic shape works for any tool, however exotic its payload.
  */
-function ToolDetailRows(props: { item: ActivityToolStepItem }) {
+function ToolDetailRows(props: { item: ActivityToolStepItem; t: Translate; onOpenActivityFile?: (file: ActivityPreviewFile) => void }) {
   const sections = props.item.details.filter((detail) => detail.value.trim().length > 0);
   if (!sections.length) {
     return null;
@@ -2693,7 +2717,17 @@ function ToolDetailRows(props: { item: ActivityToolStepItem }) {
           data-detail={detail.label.toLowerCase()}
           className="agent-activity-tool-card__section"
         >
-          <pre className="agent-activity-tool-card__value">{detail.value}</pre>
+          {detail.label === "Result" && props.item.event.output_file && props.item.event.display_text === undefined ? (
+            <div>
+              <button type="button" className="agent-activity-file-link agent-activity-output-file" data-activity-file-path={props.item.event.output_file.path}
+                onClick={() => props.onOpenActivityFile?.({ path: props.item.event.output_file!.path, name: props.item.event.output_file!.name })}>
+                <FileText size={14} aria-hidden="true" />
+                <span>{props.item.event.output_file.name}</span>
+                <span>({props.item.event.output_file.sizeBytes.toLocaleString()} B)</span>
+              </button>
+              <p className="agent-activity-output-file__notice">{props.t("agent.activity.savedOutput")}</p>
+            </div>
+          ) : <pre className="agent-activity-tool-card__value">{detail.value}</pre>}
         </div>
       ))}
     </div>
@@ -2851,7 +2885,7 @@ function BaselineTraceLine(props: { item: ActivityToolStepItem; t: Translate; on
           {summary}
           <ChevronRight size={12} aria-hidden="true" className="agent-activity-tool-details__chevron" />
         </summary>
-        <ToolDetailRows item={props.item} />
+        <ToolDetailRows item={props.item} t={props.t} onOpenActivityFile={props.onOpenActivityFile} />
       </details>
     );
   }
@@ -3371,7 +3405,7 @@ function toolDetailRows(event: AgentToolProgressEvent, legacyLine: string | unde
   const rows: ActivityToolDetail[] = [];
   const rawArguments = isRecord(event.function) && "arguments" in event.function ? event.function.arguments : event.arguments;
   appendToolDetailRow(rows, "Arguments", rawArguments);
-  appendToolDetailRow(rows, "Result", event.result);
+  appendToolDetailRow(rows, "Result", event.display_text ?? event.result);
   appendToolDetailRow(rows, "Files", event.files);
   appendToolDetailRow(rows, "Embeds", event.embeds);
   appendToolDetailRow(rows, "Error", event.error);
@@ -3503,13 +3537,7 @@ function sanitizeDomId(value: string): string {
 
 function formatToolDetailValue(value: unknown): string {
   if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return "";
-    try {
-      return truncateToolDetailValue(formatStructuredToolDetail(JSON.parse(trimmed)));
-    } catch {
-      return truncateToolDetailValue(trimmed.replace(/\n{3,}/gu, "\n\n"));
-    }
+    return truncateToolDetailValue(value);
   }
   try {
     return truncateToolDetailValue(formatStructuredToolDetail(value));

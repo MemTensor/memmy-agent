@@ -133,18 +133,6 @@ describe("BYOK displayed, tested and saved credentials", () => {
   function navigationCount() {
     return mocks.dispatch.mock.calls.filter(([action]) => action?.type === "navigation/changed").length;
   }
-  async function saveAndWaitForCatalog(button: HTMLButtonElement) {
-    const previousSaves = server.saveCatalog.mock.calls.length;
-    const previousWrites = server.write.mock.calls.length;
-    await click(button);
-    await vi.waitFor(() => expect(server.saveCatalog.mock.calls.length).toBeGreaterThan(previousSaves));
-    // A new preset is created before its assignment is published. A server write
-    // starting is not proof that the complete client save has finished.
-    await act(async () => {
-      await Promise.all(server.saveCatalog.mock.results.slice(previousSaves).map((result) => result.value));
-    });
-    expect(server.write.mock.calls.length).toBeGreaterThan(previousWrites);
-  }
   function next() { return [...container.querySelectorAll("button")].find((button) => button.textContent === "apiKey.next")!; }
   function test(index: number) { return [...container.querySelectorAll("button")].filter((button) => button.textContent?.startsWith("apiKey.test"))[index]!; }
   function field(label: string, index = 0) {
@@ -157,8 +145,17 @@ describe("BYOK displayed, tested and saved credentials", () => {
     });
   }
   async function saveAndWait(button: HTMLButtonElement, navigates = false) {
+    const saveIndex = server.saveCatalog.mock.results.length;
+    const writes = server.write.mock.calls.length;
     const dispatchIndex = mocks.dispatch.mock.calls.length;
-    await saveAndWaitForCatalog(button);
+
+    await click(button);
+    await vi.waitFor(() => expect(server.saveCatalog.mock.results.length).toBeGreaterThan(saveIndex));
+    // A new preset is created before its assignment is saved. Wait for this
+    // complete catalog mutation, rather than the first backend write or an old navigation.
+    await act(async () => { await Promise.all(server.saveCatalog.mock.results.slice(saveIndex).map((result) => result.value)); });
+    expect(server.write.mock.calls.length).toBeGreaterThan(writes);
+
     if (navigates) {
       await vi.waitFor(() => expect(mocks.dispatch.mock.calls.slice(dispatchIndex).map(([action]) => action))
         .toContainEqual(expect.objectContaining({ type: "navigation/changed" })));

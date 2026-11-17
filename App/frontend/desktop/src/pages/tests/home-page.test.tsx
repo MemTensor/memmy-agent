@@ -10,6 +10,7 @@ import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
 import { agentReducer, initialAgentState } from "../../state/agent-chat-slice.js";
 import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
+import { zhCNMessages } from "../../i18n/messages.js";
 import type { SlashCommandPaletteItem, SlashCommandStorageLike } from "../agent-command-palette.js";
 import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
 import {
@@ -18,6 +19,7 @@ import {
   ComposerCommandChip,
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
+  composeDemoGuideAssistSend,
   HomePage,
   AgentOperationErrorSlot,
   agentComposerPrimaryAction,
@@ -111,8 +113,7 @@ describe("HomePage", () => {
     expect(html).not.toContain("停止");
     expect(html).not.toContain('data-icon="image-plus"');
     expect(html).not.toContain('data-icon="pause"');
-    expect(html).toContain("内容由 AI 生成，请仔细甄别");
-    expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-4");
+    expect(html).not.toContain("内容由 AI 生成，请仔细甄别");
     expect(html).not.toContain("未选择任何文件");
   });
 
@@ -515,8 +516,8 @@ describe("HomePage", () => {
     expect(source).toContain('className="home-project-picker__projects"');
     expect(source).toContain('className="home-project-picker__actions"');
     expect(optionStyles).toContain("min-height: 32px;");
-    expect(styles).toContain(".home-project-picker__option--action {\n  min-height: 30px;");
-    expect(source).toContain("<ChevronDown");
+    expect(styles).toContain(".home-project-picker__option--action {\n  min-height: 40px;");
+    expect(source).not.toContain("<ChevronDown");
     expect(source).not.toContain("<FolderPlus");
     expect(source).toContain("<LucidePlus");
   });
@@ -643,7 +644,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm rounded-card-lg bg-background-paper');
     expect(source).not.toContain("agent-composer-input--command-selected");
     expect(styles).not.toContain("padding-left: 86px;");
     expect(source).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
@@ -672,7 +673,7 @@ describe("HomePage", () => {
     expect(source).toContain('className="agent-conversation-content agent-conversation-column space-y-3"');
     expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer agent-conversation-column"');
     const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(composerRule).toContain("padding: 40px var(--codex-content-padding-x) 0;");
+    expect(composerRule).toContain("padding: 40px var(--codex-content-padding-x) 36px;");
     expect(styles).toContain("container-name: agent-workspace;");
     expect(source).toContain("const threadPanel = useAgentThreadPanel({");
     expect(source).toContain("className={`agent-workspace-layout ${threadPanelMotionClass}`}");
@@ -712,12 +713,12 @@ describe("HomePage", () => {
 
     const shell = window.document.createElement("div");
     shell.className = "agent-composer-shell agent-composer-shell--expanded";
-    const textarea = window.document.createElement("textarea");
-    textarea.className = "agent-composer-input--conversation";
-    shell.append(textarea);
+    const editor = window.document.createElement("textarea");
+    editor.className = "agent-composer-input--conversation";
+    shell.append(editor);
     window.document.body.append(shell);
 
-    expect(window.getComputedStyle(textarea).paddingRight).toBe("16px");
+    expect(window.getComputedStyle(editor).paddingRight).toBe("16px");
   });
 
   it("keeps the single-line conversation composer on a 76px field with the first line 12px from the top", () => {
@@ -730,13 +731,13 @@ describe("HomePage", () => {
     composer.className = "agent-conversation-composer";
     const shell = window.document.createElement("div");
     shell.className = "agent-composer-shell agent-composer-shell--expanded";
-    const textarea = window.document.createElement("textarea");
-    textarea.className = "agent-composer-input--single agent-composer-input--conversation py-3 text-sm";
-    shell.append(textarea);
+    const editor = window.document.createElement("textarea");
+    editor.className = "agent-composer-input--single agent-composer-input--conversation py-3 text-sm";
+    shell.append(editor);
     composer.append(shell);
     window.document.body.append(composer);
 
-    const computed = window.getComputedStyle(textarea);
+    const computed = window.getComputedStyle(editor);
     expect(computed.height).toBe("76px");
     expect(computed.fontSize).toBe("15px");
     expect(computed.lineHeight).toBe("26.25px");
@@ -751,7 +752,7 @@ describe("HomePage", () => {
     expect(source).toContain("useLayoutEffect(() => {\n    if (!inputRef.current) {\n      return;\n    }\n    resizeComposerInput(inputRef.current);\n  }, [input, hasActiveConversation]);");
   });
 
-  it("applies the composer single-line treatment only while the textarea is one line", () => {
+  it("applies the composer single-line treatment only while the input is one line", () => {
     vi.stubGlobal("window", {
       getComputedStyle: () => ({
         lineHeight: "24px",
@@ -760,7 +761,7 @@ describe("HomePage", () => {
       })
     });
 
-    const element = { clientHeight: 48, scrollHeight: 48 } as HTMLTextAreaElement;
+    const element = { clientHeight: 48, scrollHeight: 48 } as HTMLElement;
     expect(isSingleLineComposerInput(element)).toBe(true);
 
     Object.defineProperty(element, "scrollHeight", { value: 76 });
@@ -878,7 +879,7 @@ describe("HomePage", () => {
     );
     const conversationComposer = source.slice(
       source.indexOf("{state.agent.currentChatId && currentGoal ? ("),
-      source.indexOf('<p className="agent-conversation-disclaimer">')
+      source.indexOf('<input ref={fileInputRef}', source.indexOf("{state.agent.currentChatId && currentGoal ? ("))
     );
     expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: false })).toBe("stop");
     expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: true })).toBe("send");
@@ -1732,6 +1733,95 @@ describe("HomePage", () => {
     expect(panel.style.getPropertyValue("--agent-composer-overlay-height")).toBe("223px");
   });
 
+  it("sends the guide's assist hint to the agent while the bubble keeps the sentence", async () => {
+    // 引导第二步：输入框里只有那一句话，执行提示随内容发给 Agent，气泡里不出现。
+    const sentence = "请小饭团查一下上次分享会一共来了多少人";
+    const hint = zhCNMessages["collab.demo.prefill.askHint"]
+      .replace("{name}", "小饭团")
+      .replace("{member}", "9001");
+    const composed = composeDemoGuideAssistSend({
+      status: "active",
+      phase: "ask-compose",
+      typed: sentence,
+      sentence,
+      hint,
+      content: sentence
+    });
+    expect(composed.displayContent).toBe(sentence);
+    expect(composed.content).toContain(sentence);
+    expect(composed.content).toContain("--member 9001");
+    expect(composed.displayContent).not.toContain("执行提示");
+
+    const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
+    const dispatch = vi.fn();
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-demo",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        submitMessage: sendMessage
+      },
+      content: composed.content,
+      displayContent: composed.displayContent ?? undefined,
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer: vi.fn()
+    })).resolves.toBe(true);
+
+    // 发给 Agent 的内容带着执行提示与 member。
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining("--member 9001")
+    }), 1);
+    // 气泡里只是那一句话，没有提示。
+    const queued = dispatch.mock.calls
+      .map(([action]) => action as { type?: string; content?: string })
+      .find((action) => action.type === "agent/userMessageQueued");
+    expect(queued?.content).toBe(sentence);
+    expect(queued?.content).not.toContain("执行提示");
+  });
+
+  it("names the task after the sentence the person saw", async () => {
+    // 第二步的内容里带着执行提示（含命令与 userId），任务标题不能从正文里取。
+    const sentence = "请小饭团查一下上次分享会一共来了多少人";
+    const onMessageSent = vi.fn();
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-demo",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        submitMessage: vi.fn(async () => ({ status: "accepted" as const }))
+      },
+      content: `${sentence}\n\n（执行提示：memmy-project assist ask --member 9001）`,
+      displayContent: sentence,
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch: vi.fn(),
+      track: vi.fn(),
+      clearComposer: vi.fn(),
+      onMessageSent
+    })).resolves.toBe(true);
+
+    // 发出之后才有 chatId：引导用它在拿到 id 之后把标题显式写成那一句话。
+    expect(onMessageSent).toHaveBeenCalledWith("chat-demo");
+  });
+
+  it("leaves an edited second-step sentence alone, with no hint attached", () => {
+    const sentence = "请小饭团查一下上次分享会一共来了多少人";
+    const typed = "请小饭团查一下上次分享会";
+    const composed = composeDemoGuideAssistSend({
+      status: "active",
+      phase: "ask-compose",
+      typed,
+      sentence,
+      hint: "（执行提示：不要先反问）",
+      content: typed
+    });
+    expect(composed).toEqual({ content: typed, displayContent: null });
+  });
+
   it("keeps the Goal command on the wire but shows only its objective", async () => {
     const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
     const dispatch = vi.fn();
@@ -2028,7 +2118,7 @@ describe("HomePage", () => {
     expect(dataTransferHasAttachmentFiles(null)).toBe(false);
   });
 
-  it("wires pasted attachments into both composer textareas", () => {
+  it("wires pasted attachments into both composer inputs", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
     expect(source).toContain("function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>)");

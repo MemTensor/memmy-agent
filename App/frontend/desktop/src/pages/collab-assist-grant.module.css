@@ -1,0 +1,41 @@
+/*
+ * 限时授权的时长选择：30 分钟 / 1 小时 / 2 小时 / 4 小时，一排分段按钮。
+ * 授权弹窗与任务内确认卡片共用，沿用薄荷绿主题变量。
+ */
+
+.picker {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone, #cce0db) 60%, transparent);
+  background: color-mix(in srgb, var(--color-canvas-oat, #f3f8f7) 70%, white);
+}
+
+.option {
+  padding: 4px 11px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  font-size: 12px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--color-text-ink, #111d1c) 62%, transparent);
+  cursor: pointer;
+}
+
+.option:hover:not(:disabled) {
+  color: var(--color-text-ink, #111d1c);
+}
+
+.optionOn {
+  background: #fff;
+  color: var(--color-action-sky-hover, #3aa893);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(17, 29, 28, 0.08), inset 0 0 0 1px color-mix(in srgb, var(--color-action-sky, #5cbfae) 55%, transparent);
+}
+
+.option:disabled {
+  cursor: default;
+  opacity: 0.6;
+}

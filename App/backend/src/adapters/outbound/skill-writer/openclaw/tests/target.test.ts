@@ -721,6 +721,85 @@ function resumeEpisodeTimestamp(index: number): string {
   return `2026-07-${String(8 - Math.min(index, 7)).padStart(2, "0")}T10:00:00.000Z`;
 }
 
+describe("openclaw project skill bootstrap", () => {
+  it("writes the project block next to the memory block and keeps user content", async () => {
+    const { rootDirectory, manifest } = createFixture();
+    mkdirSync(join(rootDirectory, "workspace"), { recursive: true });
+    const target = createOpenclawSkillTarget({ rootDirectory });
+    writeFileSync(join(rootDirectory, "workspace", "AGENTS.md"), "自己写的一段说明\n", "utf8");
+
+    await target.install(manifest);
+    await target.writeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content).toContain("自己写的一段说明");
+    expect(content).toContain("<!-- memmy:start v=1 -->");
+    expect(content).toContain("<!-- memmy-project:start v=1 -->");
+    expect(content.indexOf("<!-- memmy:start v=1 -->")).toBeLessThan(content.indexOf("<!-- memmy-project:start v=1 -->"));
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(true);
+  });
+
+  it("names the skill by absolute path, since its instructions file lives in another directory", async () => {
+    const { rootDirectory } = createFixture();
+    mkdirSync(join(rootDirectory, "workspace"), { recursive: true });
+    const target = createOpenclawSkillTarget({ rootDirectory });
+
+    await target.writeProjectSkillBootstrap!();
+
+    // 指令文件在 workspace 下、技能在 state 目录下，相对路径会指到 workspace 里不存在的技能。
+    expect(readTargetFile(rootDirectory)).toContain(
+      `技能安装在 \`${join(rootDirectory, "skills", "memmy-project", "SKILL.md")}\``
+    );
+  });
+
+  it("replaces the project block instead of adding a second one", async () => {
+    const { rootDirectory } = createFixture();
+    mkdirSync(join(rootDirectory, "workspace"), { recursive: true });
+    const target = createOpenclawSkillTarget({ rootDirectory });
+    const filePath = join(rootDirectory, "workspace", "AGENTS.md");
+    writeFileSync(
+      filePath,
+      ["说明", "<!-- memmy-project:start v=1 -->", "旧内容", "<!-- memmy-project:end v=1 -->", "结尾", ""].join("\n"),
+      "utf8"
+    );
+
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(false);
+    await target.writeProjectSkillBootstrap!();
+    await target.writeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content.match(/memmy-project:start/gu)).toHaveLength(1);
+    expect(content).not.toContain("旧内容");
+    expect(content).toContain("说明");
+    expect(content).toContain("结尾");
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(true);
+  });
+
+  it("removes only the project block and creates the file when it is missing", async () => {
+    const { rootDirectory } = createFixture();
+    mkdirSync(join(rootDirectory, "workspace"), { recursive: true });
+    const target = createOpenclawSkillTarget({ rootDirectory });
+    const filePath = join(rootDirectory, "workspace", "AGENTS.md");
+    rmSync(filePath, { force: true });
+
+    await target.writeProjectSkillBootstrap!();
+    expect(readTargetFile(rootDirectory)).toContain("<!-- memmy-project:start v=1 -->");
+
+    writeFileSync(
+      filePath,
+      ["说明", "<!-- memmy:start v=1 -->", "# Memmy Memory", "<!-- memmy:end v=1 -->", "", "<!-- memmy-project:start v=1 -->", "块", "<!-- memmy-project:end v=1 -->", "结尾", ""].join("\n"),
+      "utf8"
+    );
+    await target.removeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content).not.toContain("memmy-project:");
+    expect(content).toContain("# Memmy Memory");
+    expect(content).toContain("说明");
+    expect(content).toContain("结尾");
+  });
+});
+
 function createFixture(): { rootDirectory: string; manifest: SkillManifest } {
   tempDir = mkdtempSync(join(tmpdir(), "memmy-openclaw-skill-"));
   return {
