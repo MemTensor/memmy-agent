@@ -195,10 +195,8 @@ export function JoinProjectModal(props: {
             <p className={styles.joinNote}>{t("collab.join.noteSessions")}</p>
             {preview.status === "member" ? null : (
               <div className={styles.field}>
-                <span className={styles.nicknameLabel}>
-                  {t("collab.join.nicknameLabel")}
-                  <em className={styles.nicknameOptional}>{t("collab.join.nicknameOptional")}</em>
-                </span>
+                {/* 与本机目录同一种写法：可选写在标签里，不做成单独的徽标 */}
+                <span>{t("collab.join.nicknameLabel")}</span>
                 <input
                   className={`${styles.joinNicknameInput} ${joinError ? styles.joinNicknameInvalid : ""}`}
                   value={nickname}
@@ -214,6 +212,7 @@ export function JoinProjectModal(props: {
                   }}
                 />
                 {joinError ? <p className={styles.joinNicknameError} role="alert">{joinError}</p> : null}
+                <small className={styles.fieldHint}>{t("collab.join.nicknameHint")}</small>
               </div>
             )}
             {preview.status === "member" ? null : (
