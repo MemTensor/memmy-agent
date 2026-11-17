@@ -716,9 +716,10 @@ export function startDemoGuide(input: DemoGuideStart): void {
 }
 
 /** 从大卡或侧栏点「新建项目」进来：先在新建弹窗上走六屏，云端还没有项目，也没有心跳。 */
-export function startDemoGuideBeforeProject(): void {
+export function startDemoGuideBeforeProject(options?: { force?: boolean }): void {
   // 本机已经退出过引导：不再带着人走一遍，弹窗按普通新建处理。
-  if (readDemoGuideDone()) return;
+  // force=true 时跳过此守卫（仅供开发预览使用）。
+  if (!options?.force && readDemoGuideDone()) return;
   if (state.status === "active") return;
   dispatchDemoGuide({ type: "start-before-project" });
 }

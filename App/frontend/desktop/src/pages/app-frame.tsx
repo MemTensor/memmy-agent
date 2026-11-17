@@ -12,6 +12,7 @@ import type { AppRoutePath } from "../app/routes.js";
 import { clearFocusedAgentTarget, clearProductTourStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
 import { useGuidanceProgress } from "../app/use-guidance-progress.js";
 import { isWorkspacePromptSessionReady, isWorkspacePromptSurfaceReady } from "../app/workspace-prompt-readiness.js";
+import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { buildOnboardingStepCompletedEvent } from "../analytics/onboarding-analytics.js";
 import {
@@ -607,7 +608,7 @@ export function AppFrame(props: AppFrameProps) {
     setCreateProjectDemo(collabSnapshot.createDemo);
     setCreateProjectOpen(true);
     // 体验入口：弹窗还没建出项目，引导先停在这里，蒙版只亮「创建项目」。
-    if (collabSnapshot.createDemo) startDemoGuideBeforeProject();
+    if (collabSnapshot.createDemo) startDemoGuideBeforeProject({ force: isDesktopPromptPreview("collabLaunch") });
     consumeCreateProjectRequest();
   }, [createPending, collabSnapshot.createShareDefault, collabSnapshot.createDemo]);
   // 引导在新建弹窗上被退出（本机从此不再自动演示）：弹窗回到普通新建，
