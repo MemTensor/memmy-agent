@@ -91,3 +91,12 @@ it('cancels capture when the entire draft is cleared and drops late revisions', 
   act(() => capture.options!.live!.onLine({ sentenceId: 1, text: 'late result', startMs: 0, endMs: 1000 }));
   expect(app.state.agent.composerDraftsByScope[scope()] ?? '').toBe('');
 });
+
+it('keeps a voice failure in the existing composer error flow without changing connection state', async () => {
+  await startWithText();
+  const connectionStatus = app.state.agent.connectionStatus;
+  capture.finish.mockRejectedValueOnce(new Error('转写失败'));
+  await act(async () => mic().click());
+  expect(app.state.agent.operationErrorNotice).toMatchObject({ source: 'send', scopeKey: scope() });
+  expect(app.state.agent.connectionStatus).toBe(connectionStatus);
+});

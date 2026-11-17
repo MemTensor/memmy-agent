@@ -594,14 +594,14 @@ describe("HomePage", () => {
     const startVoiceInput = source.slice(startVoiceInputStart, finishVoiceInputStart);
     const finishVoiceInput = source.slice(finishVoiceInputStart, toggleVoiceInputStart);
 
-    expect(startVoiceInput).toContain('setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr")');
-    expect(finishVoiceInput).toContain('setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr")');
+    expect(startVoiceInput).toContain('setComposerMediaErrorForScope(capture.scopeKey, toReadableAsrError(error, t))');
+    expect(finishVoiceInput).toContain('setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t))');
     expect(startVoiceInput).not.toContain("agentActions.failed");
     expect(finishVoiceInput).not.toContain("agentActions.failed");
-    expect(source).toContain("mergeVoiceInputLines(liveVoiceLinesRef.current, line)");
+    expect(source).toContain("mergeVoiceInputLines(capture.lines, line)");
     expect(source).toContain("setComposerDraftForScope(scopeKey");
-    expect(source).toContain("replaceVoiceTranscript(current, liveVoiceRangeRef.current, text)");
-    expect(finishVoiceInput).toContain("liveVoiceScopeRef.current ?? chatScopeKey");
+    expect(source).toContain("replaceVoiceTranscript(current, capture.range, text)");
+    expect(finishVoiceInput).toContain("const { scopeKey } = capture;");
     expect(source).toContain("asr.error.microphonePermissionDenied.mac");
     expect(source).toContain("asr.error.microphonePermissionDenied.windows");
   });

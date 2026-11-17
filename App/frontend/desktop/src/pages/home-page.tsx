@@ -55,7 +55,7 @@ import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integ
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
-import { NEW_TASK_MODEL_SCOPE_KEY, type AgentChatMediaAttachment, type AgentChatMessage, type AgentOperationErrorSource, type AgentState, type AgentThinkingState } from "../state/agent-chat-slice.js";
+import { NEW_TASK_MODEL_SCOPE_KEY, type AgentChatMediaAttachment, type AgentChatMessage, type AgentState, type AgentThinkingState } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
@@ -986,42 +986,35 @@ export function HomePage() {
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
-  const voiceInputGenerationRef = useRef(0);
-  const voiceFinishInFlightRef = useRef<number | null>(null);
-  const liveVoiceLinesRef = useRef<AsrLiveLine[]>([]);
-  const liveVoiceScopeRef = useRef<string | null>(null);
-  const liveVoiceRangeRef = useRef<VoiceTranscriptRange | null>(null);
+  const voiceInputRef = useRef<{
+    scopeKey: string;
+    lines: AsrLiveLine[];
+    range: VoiceTranscriptRange | null;
+    finishing?: boolean;
+  } | null>(null);
   const asrRecorder = useAsrRecorder(clients?.asr, {
     voiceInput: true,
     emptyAudioMessage: t("home.asrEmptyAudio"),
     live: {
       onLine: (line) => {
-        const scopeKey = liveVoiceScopeRef.current;
-        if (!scopeKey) return;
-        const lines = mergeVoiceInputLines(liveVoiceLinesRef.current, line);
-        const text = lines.map((item) => item.text.trim()).filter(Boolean).join(" ");
-        liveVoiceLinesRef.current = lines;
+        const capture = voiceInputRef.current;
+        if (!capture) return;
+        const { scopeKey } = capture;
+        capture.lines = mergeVoiceInputLines(capture.lines, line);
+        const text = capture.lines.map((item) => item.text.trim()).filter(Boolean).join(" ");
         setComposerDraftForScope(scopeKey, (current) => {
-          const updated = replaceVoiceTranscript(current, liveVoiceRangeRef.current, text);
-          liveVoiceRangeRef.current = updated.range;
+          const updated = replaceVoiceTranscript(current, capture.range, text);
+          capture.range = updated.range;
           return updated.value;
         }, "voice");
-        if (scopeKey === chatScopeKey) {
-          window.requestAnimationFrame(() => {
-            if (inputRef.current) resizeComposerInput(inputRef.current);
-          });
-        }
       }
     }
   });
   useEffect(() => { setTaskRecording(null); }, [chatScopeKey]);
   const cancelVoiceInput = asrRecorder.cancel;
   useLayoutEffect(() => {
-    if (liveVoiceScopeRef.current && liveVoiceScopeRef.current !== chatScopeKey) {
-      voiceInputGenerationRef.current++;
-      liveVoiceScopeRef.current = null;
-      liveVoiceLinesRef.current = [];
-      liveVoiceRangeRef.current = null;
+    if (voiceInputRef.current && voiceInputRef.current.scopeKey !== chatScopeKey) {
+      voiceInputRef.current = null;
       cancelVoiceInput();
     }
   }, [chatScopeKey, cancelVoiceInput]);
@@ -2451,16 +2444,14 @@ export function HomePage() {
   function setComposerDraftForScope(scopeKey: string, value: SetStateAction<string>, source: "voice" | "manual" | "replace" = "replace") {
     const currentValue = composerDraftsRef.current[scopeKey] ?? "";
     const nextValue = typeof value === "function" ? value(currentValue) : value;
-    if (source !== "voice" && nextValue !== currentValue && scopeKey === liveVoiceScopeRef.current && (source === "replace" || !nextValue)) {
-      // Sending or clearing a draft ends capture so late revisions cannot repopulate it.
-      voiceInputGenerationRef.current++;
-      liveVoiceScopeRef.current = null;
-      liveVoiceLinesRef.current = [];
-      liveVoiceRangeRef.current = null;
-      cancelVoiceInput();
-    }
-    if (source === "manual" && scopeKey === liveVoiceScopeRef.current) {
-      liveVoiceRangeRef.current = trackVoiceTranscriptEdit(currentValue, nextValue, liveVoiceRangeRef.current);
+    const capture = voiceInputRef.current;
+    if (capture?.scopeKey === scopeKey && source !== "voice") {
+      if (nextValue !== currentValue && (source === "replace" || !nextValue)) {
+        voiceInputRef.current = null;
+        cancelVoiceInput();
+      } else if (source === "manual") {
+        capture.range = trackVoiceTranscriptEdit(currentValue, nextValue, capture.range);
+      }
     }
     const nextDrafts = updateComposerDraftForScope(composerDraftsRef.current, scopeKey, nextValue);
     if (nextDrafts === composerDraftsRef.current) {
@@ -2514,19 +2505,15 @@ export function HomePage() {
     setPendingAttachmentsForScope(chatScopeKey, value);
   }
 
-  function setComposerMediaErrorForScope(scopeKey: string, message: string | null, source: AgentOperationErrorSource = "send") {
+  function setComposerMediaErrorForScope(scopeKey: string, message: string | null) {
     if (!message) {
       return;
     }
     dispatch(agentActions.operationFailed("chat", createAgentOperationError({
-      source,
+      source: "send",
       message,
       scopeKey
     })));
-  }
-
-  function setCurrentComposerMediaError(message: string | null) {
-    setComposerMediaErrorForScope(chatScopeKey, message);
   }
 
   /**
@@ -2860,16 +2847,12 @@ export function HomePage() {
    * Starts voice input on the main interface.
    */
   function startVoiceInput() {
-    const generation = ++voiceInputGenerationRef.current;
     inputRef.current?.focus();
-    const scopeKey = chatScopeKey;
-    liveVoiceLinesRef.current = [];
-    liveVoiceScopeRef.current = scopeKey;
-    liveVoiceRangeRef.current = null;
+    const capture = voiceInputRef.current = { scopeKey: chatScopeKey, lines: [], range: null };
     void asrRecorder.start().catch((error: unknown) => {
-      if (generation !== voiceInputGenerationRef.current) return;
-      setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr");
-      if (liveVoiceScopeRef.current === scopeKey) liveVoiceScopeRef.current = null;
+      if (voiceInputRef.current !== capture) return;
+      voiceInputRef.current = null;
+      setComposerMediaErrorForScope(capture.scopeKey, toReadableAsrError(error, t));
     });
   }
 
@@ -2877,38 +2860,26 @@ export function HomePage() {
    * Ends voice input on the main interface and merges in the transcribed text.
    */
   async function finishVoiceInput() {
-    const generation = voiceInputGenerationRef.current;
-    if (voiceFinishInFlightRef.current === generation) return;
-    voiceFinishInFlightRef.current = generation;
-    const scopeKey = liveVoiceScopeRef.current ?? chatScopeKey;
+    const capture = voiceInputRef.current;
+    if (!capture || capture.finishing) return;
+    capture.finishing = true;
+    const { scopeKey } = capture;
     try {
       const transcript = await asrRecorder.finishAndTranscribe();
-      if (generation !== voiceInputGenerationRef.current) return;
+      if (voiceInputRef.current !== capture) return;
       setComposerDraftForScope(scopeKey, (current) => replaceVoiceTranscript(
         current,
-        liveVoiceRangeRef.current,
+        capture.range,
         transcript.text
       ).value, "voice");
-      liveVoiceLinesRef.current = [];
-      liveVoiceScopeRef.current = null;
-      liveVoiceRangeRef.current = null;
+      voiceInputRef.current = null;
       setSlashMenuDismissed(false);
       setSelectedCommandIndex(0);
-      if (scopeKey === chatScopeKey) {
-        window.requestAnimationFrame(() => {
-          if (inputRef.current) {
-            resizeComposerInput(inputRef.current);
-            inputRef.current.focus();
-          }
-        });
-      }
+      if (scopeKey === chatScopeKey) window.requestAnimationFrame(() => inputRef.current?.focus());
     } catch (error: unknown) {
-      if (generation !== voiceInputGenerationRef.current) return;
-      liveVoiceScopeRef.current = null;
-      liveVoiceRangeRef.current = null;
-      setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr");
-    } finally {
-      if (voiceFinishInFlightRef.current === generation) voiceFinishInFlightRef.current = null;
+      if (voiceInputRef.current !== capture) return;
+      voiceInputRef.current = null;
+      setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t));
     }
   }
 
@@ -3146,7 +3117,6 @@ export function HomePage() {
       }
       return current.filter((item) => item.id !== id);
     });
-    setCurrentComposerMediaError(null);
     inputRef.current?.focus();
   }
 
